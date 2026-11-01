@@ -22,7 +22,11 @@ export function loadSave(): SaveData | null {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const data = JSON.parse(raw) as SaveData;
-    return data.version === SAVE_VERSION ? data : null;
+    if (data.version === SAVE_VERSION) return data;
+    // Сохранение другой версии не грузим, но и не затираем: откладываем в отдельный ключ.
+    const backup = `${KEY}:v${data.version}`;
+    if (!localStorage.getItem(backup)) localStorage.setItem(backup, raw);
+    return null;
   } catch {
     return null;
   }
