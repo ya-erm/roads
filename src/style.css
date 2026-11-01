@@ -1,0 +1,2072 @@
+:root {
+  --panel: rgba(255, 255, 255, 0.92);
+  --ink: #1f2933;
+  --muted: #6b7785;
+  --accent: #2f80ed;
+  --danger: #e8483f;
+  --shadow: 0 6px 24px rgba(30, 40, 30, 0.18);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #b8c79a;
+  user-select: none;
+}
+
+canvas {
+  display: block;
+  cursor: crosshair;
+}
+
+#hud {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+#hud > * {
+  pointer-events: auto;
+}
+
+.panel {
+  position: absolute;
+  background: var(--panel);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+}
+
+.stats {
+  top: 14px;
+  left: 14px;
+  display: flex;
+  gap: 18px;
+  padding: 10px 16px;
+  align-items: center;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat .label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.stat .value {
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat .value.negative {
+  color: var(--danger);
+}
+
+.stat.day {
+  min-width: 90px;
+}
+
+.stat.day .label {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  text-transform: none;
+}
+
+.bar {
+  height: 6px;
+  background: #e3e8ee;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.bar > div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+
+.speed {
+  top: 14px;
+  right: 14px;
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+}
+
+button {
+  font: inherit;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.speed button {
+  min-width: 40px;
+  height: 34px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.1em;
+}
+
+.speed button:last-child {
+  letter-spacing: normal;
+  margin-left: 6px;
+}
+
+.speed button:hover,
+.tool:hover {
+  background: #eef2f6;
+}
+
+.speed button.active,
+.tool.active {
+  background: var(--ink);
+  color: #fff;
+}
+
+.toolbar {
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+}
+
+.tool {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  /* Ширина по подписи, но не уже 70px: «Перекрёсток» не должен обрезаться. */
+  min-width: 70px;
+  padding: 8px 6px 6px;
+  white-space: nowrap;
+}
+
+.tool svg {
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool .name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tool .cost {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.tool kbd {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  font-size: 10px;
+  font-family: inherit;
+  opacity: 0.45;
+}
+
+.notices {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  pointer-events: none !important;
+}
+
+.notice {
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  border-radius: 10px;
+  border-left: 5px solid var(--accent);
+  padding: 8px 14px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(40, 52, 40, 0.35);
+  backdrop-filter: blur(2px);
+}
+
+.screen.hidden {
+  display: none;
+}
+
+.modal {
+  background: #fff;
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  padding: 32px 36px;
+  max-width: 520px;
+}
+
+.modal h1 {
+  margin: 0 0 6px;
+  font-size: 40px;
+  letter-spacing: -0.02em;
+}
+
+.modal .sub {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.modal ul {
+  margin: 0 0 22px;
+  padding-left: 20px;
+  line-height: 1.55;
+}
+
+.primary {
+  background: var(--accent);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  padding: 12px 26px;
+  border-radius: 12px;
+}
+
+.primary:hover {
+  filter: brightness(1.08);
+}
+
+.modal .actions {
+  gap: 10px;
+}
+
+.modal h2 {
+  margin: 0 0 6px;
+  font-size: 26px;
+}
+
+.modal.menu {
+  min-width: 340px;
+  position: relative;
+  text-align: center;
+}
+
+.modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+}
+
+.menu-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.menu-buttons .primary {
+  margin-top: 8px;
+}
+
+/* Подтверждение сноса рамкой: карта видна целиком — с красной подсветкой того, что снесётся. */
+.screen[data-confirm] {
+  background: rgba(40, 52, 40, 0.12);
+  backdrop-filter: none;
+  align-items: flex-start;
+  padding-top: 90px;
+}
+
+/* Что снесётся — значками с числами. */
+.confirm-chips {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin: 10px 0 6px;
+}
+
+.confirm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: #fde7e5;
+  border-radius: 12px;
+  font-size: 18px;
+}
+
+.modal.confirm .menu-buttons {
+  flex-direction: row;
+  justify-content: center;
+}
+
+.modal.confirm .menu-buttons .primary {
+  margin-top: 0;
+}
+
+.modal.newgame {
+  max-width: 640px;
+}
+
+.ng-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.ng-label {
+  width: 110px;
+  flex: none;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.ng-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ng-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  background: #f4f6f8;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ng-chip small {
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ng-chip:hover {
+  background: #e8edf2;
+}
+
+.ng-chip.active {
+  border-color: var(--accent);
+  background: #e7f0fd;
+}
+
+.map-mini {
+  display: block;
+}
+
+.stepper.big b {
+  min-width: 60px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 15px;
+}
+
+.stepper.big button {
+  width: 34px;
+  height: 34px;
+}
+
+.ng-seed {
+  font: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid #d5dce3;
+  border-radius: 10px;
+  width: 160px;
+}
+
+.ng-seed:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.danger-fill {
+  background: var(--danger);
+}
+
+.secondary {
+  background: #eef2f6;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 12px 20px;
+  border-radius: 12px;
+}
+
+.secondary:hover {
+  background: #e2e8ee;
+}
+
+.danger-btn {
+  background: #fde7e5;
+  color: var(--danger);
+}
+
+.save-note {
+  margin-top: 12px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.stat .value.small {
+  font-size: 15px;
+  padding-top: 3px;
+}
+
+/* Параметры дороги */
+.options {
+  bottom: 86px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: max-content;
+  max-width: calc(100vw - 40px);
+}
+
+.opt-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  align-items: stretch;
+}
+
+.opt-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.opt-group.narrow {
+  max-width: 260px;
+}
+
+.opt-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 600;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.opt-title kbd,
+.tool kbd {
+  font-family: inherit;
+}
+
+.opt-title kbd {
+  font-size: 10px;
+  background: #eef2f6;
+  border-radius: 4px;
+  padding: 1px 5px;
+  letter-spacing: 0;
+}
+
+.cards {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 6px 5px;
+  background: #f4f6f8;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  min-width: 92px;
+}
+
+.card:hover,
+.icon-btn:hover,
+.sign:hover {
+  background: #e8edf2;
+}
+
+.card.active,
+.icon-btn.active,
+.sign.active {
+  border-color: var(--accent);
+  background: #e7f0fd;
+}
+
+.card .name {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.card small {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.custom {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.lane-editor {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Компактный переключатель: две колонки, значок слева от названия. */
+.cards.grid2 {
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 4px;
+}
+
+.card.row {
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 3px 10px 3px 6px;
+  min-width: 0;
+}
+
+.card.row svg {
+  height: 26px;
+  width: auto;
+}
+
+/* Горячая клавиша режима — значком справа. */
+.card kbd {
+  margin-left: auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #e3e8ee;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.card.active kbd {
+  background: #d3e3fa;
+  color: var(--accent);
+}
+
+.price-tag {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+.lane-preview {
+  line-height: 0;
+}
+
+/* Замена устаревшего транспорта. */
+.veh .replace {
+  flex: none;
+  padding: 2px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.veh small .neg {
+  color: #d64541;
+}
+
+/* Отзывы жителей в карточке города. */
+.review {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  margin-bottom: 3px;
+}
+
+.review .face {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.review.good {
+  background: #eaf6ee;
+}
+
+.review.ok {
+  background: #f6f4e6;
+}
+
+.review.bad {
+  background: #fdeceb;
+}
+
+.line-chart {
+  margin: 6px 0 2px;
+}
+
+/* Перекрёсток: фазы светофора и повороты. */
+.phase {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 8px;
+  background: #f6f8fa;
+  font-size: 12px;
+  margin-bottom: 3px;
+}
+
+.phase.active {
+  background: #e3f5e9;
+}
+
+.phase .ph-dirs b {
+  font-size: 15px;
+  margin-right: 2px;
+}
+
+.phase .muted {
+  flex: 1;
+}
+
+.turn-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 3px;
+}
+
+.turn-row .from {
+  width: 52px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.turn {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 34px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  border: 1.5px solid #cfe0f7;
+  background: #eef5fe;
+  font-size: 16px;
+  line-height: 1.1;
+  cursor: pointer;
+}
+
+.turn small {
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.turn.banned {
+  border-color: #f2c4c1;
+  background: #fdeceb;
+  color: #d64541;
+  text-decoration: line-through;
+}
+
+/* Связи полос: шаги значками — как метки на карте. */
+.lane-steps {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.lane-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1.5px solid transparent;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.lane-step.now {
+  border-color: #27ae60;
+  background: #e3f5e9;
+  color: #1e8c4e;
+}
+
+.lane-arrow {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.lane-steps .small:last-child {
+  margin-left: auto;
+}
+
+.lane-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+
+.lane-dot.in {
+  background: #fff;
+  border: 2px solid #1f2933;
+}
+
+.lane-dot.out {
+  background: #f2994a;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px #d9822b;
+}
+
+/* Маршрут линии: станции по порядку с условиями. */
+.route {
+  margin: 6px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.route-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.stop {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 6px;
+  background: #f6f8fa;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.stop.open {
+  background: #e7f0fd;
+}
+
+.stop .num {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #4f5965;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+.stop .st-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.rule-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid #d5dce3;
+  background: #fff;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rule-chip .rl {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.stop .icon:disabled {
+  opacity: 0.3;
+}
+
+.stop-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 6px 8px;
+  margin: -2px 0 3px;
+  background: #f2f6fc;
+  border-radius: 0 0 8px 8px;
+}
+
+.rule-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.opt {
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1.5px solid transparent;
+  background: #fff;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.opt.active,
+.cargo-chip.active {
+  border-color: var(--accent);
+  background: #e7f0fd;
+}
+
+.cargo-chip {
+  padding: 2px;
+  border-radius: 6px;
+  border: 1.5px solid transparent;
+  background: #fff;
+  line-height: 0;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.cargo-chip.active {
+  opacity: 1;
+}
+
+.small-note {
+  font-size: 11px;
+  margin: 2px 0 0;
+}
+
+.icon-row .load {
+  margin-left: auto;
+}
+
+/* «Работает с»: пассажиры / груз — компактные карточки-переключатели. */
+.serves .card {
+  flex-direction: row;
+  gap: 6px;
+  padding: 4px 10px 4px 6px;
+}
+
+.serves-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 6px;
+}
+
+/* Знаки ограничения скорости: сетка 3×2, только круги. */
+.limits {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 4px;
+}
+
+.limit {
+  padding: 3px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  line-height: 0;
+  cursor: pointer;
+}
+
+.limit:hover {
+  background: #e8edf2;
+}
+
+.limit.active {
+  border-color: var(--accent);
+  background: #e7f0fd;
+}
+
+.price {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.icons {
+  display: flex;
+  gap: 6px;
+}
+
+.icon-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 6px 4px;
+  min-width: 64px;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  background: #f4f6f8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.icon-btn svg {
+  display: block;
+  border-radius: 6px;
+}
+
+/* Панель стройки — пониже: значки формы и высоты меньше. */
+.options .icon-btn {
+  padding: 3px 6px 2px;
+  gap: 1px;
+}
+
+.options .icon-btn svg {
+  height: 28px;
+  width: auto;
+}
+
+.options .card {
+  padding: 4px 6px 3px;
+  gap: 1px;
+  min-width: 76px;
+}
+
+.options .card .name {
+  font-size: 12px;
+}
+
+.options .opt-row {
+  gap: 8px 14px;
+}
+
+.options .limit {
+  padding: 2px;
+}
+
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  background: #eef2f6;
+  border-radius: 9px;
+  margin-right: 4px;
+}
+
+.stepper button {
+  width: 26px;
+  height: 28px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.stepper b {
+  min-width: 34px;
+  text-align: center;
+  font-size: 13px;
+}
+
+/* Посты погрузки станции: картинка с постами и их число. */
+.stepper.bays b {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 4px;
+}
+
+.stepper button.off,
+.stepper button:disabled {
+  opacity: 0.35;
+}
+
+/* Боковая панель */
+.side {
+  top: 84px;
+  right: 14px;
+  width: 340px;
+  max-height: calc(100vh - 290px);
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.side section {
+  padding: 10px 14px;
+  border-bottom: 1px solid #e8ecf0;
+}
+
+.side section:last-child {
+  border-bottom: none;
+}
+
+.side h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+
+.side header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.side header h3 {
+  margin: 0;
+  flex: 1;
+}
+
+.swatches {
+  display: flex;
+  gap: 5px;
+  margin: 4px 0 6px;
+  align-items: center;
+}
+
+.swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px #d5dce3;
+  padding: 0;
+}
+
+.swatch.active {
+  box-shadow: 0 0 0 2px var(--ink);
+}
+
+.swatch.custom {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  background: conic-gradient(#e5534b, #e9b52f, #3fae6a, #2fb8b3, #4a8fe7, #9a6be0, #e5534b);
+}
+
+.swatch.custom input {
+  position: absolute;
+  inset: -6px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.line-name {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 6px;
+  background: transparent;
+}
+
+.line-name:hover {
+  border-color: #d5dce3;
+}
+
+.line-name:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: #fff;
+}
+
+.side header > i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+/* Кружок цвета линии — кнопка, открывающая палитру. */
+.line-dot {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px #c9d1da;
+  cursor: pointer;
+}
+
+.line-dot:hover {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 4px 0;
+  line-height: 1.45;
+}
+
+.tip {
+  font-size: 12px;
+  line-height: 1.4;
+  background: #eef5ff;
+  border-radius: 8px;
+  padding: 6px 8px;
+  color: #2a4f80;
+}
+
+.warn {
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pos {
+  color: #2e9d57;
+}
+
+.neg {
+  color: var(--danger);
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 10px;
+  font-size: 13px;
+  margin: 6px 0;
+}
+
+.kv span {
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Заголовок списка линий: свернуть/развернуть и кнопки — в одну строку. */
+.side .lines-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.lines-toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 0;
+  min-width: 0;
+  text-align: left;
+}
+
+.side .lines-toggle h3 {
+  margin: 0;
+  flex: none;
+}
+
+.lines-toggle .caret {
+  width: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.lines-head .small {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* Строка с выключателем: подпись слева, переключатель справа. */
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  margin: 4px 0;
+  background: #f4f6f8;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.switch-row:hover {
+  background: #e8edf2;
+}
+
+.switch {
+  flex: none;
+  width: 34px;
+  height: 20px;
+  border-radius: 10px;
+  background: #c9d1d9;
+  position: relative;
+  transition: background 0.15s;
+}
+
+.switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: left 0.15s;
+}
+
+.switch.on {
+  background: var(--accent);
+}
+
+.switch.on i {
+  left: 16px;
+}
+
+/* Название места, по клику камера показывает его на карте. */
+.place-link {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.place-link:hover {
+  text-decoration-style: solid;
+}
+
+/* Пассажиры на станции по направлениям. */
+.pax-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  padding: 3px 0;
+}
+
+.pax-row .arrow {
+  color: var(--muted);
+}
+
+.pax-row .place-link {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.pax-row b {
+  min-width: 26px;
+  text-align: right;
+}
+
+.line-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+  padding: 0;
+  cursor: pointer;
+  flex: none;
+}
+
+.pax-bar {
+  flex: 1;
+  height: 6px;
+  min-width: 30px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.07);
+  overflow: hidden;
+}
+
+.pax-bar i {
+  display: block;
+  height: 100%;
+  background: #4a7fd6;
+  border-radius: 3px;
+}
+
+.kv span i,
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 4px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+button.small {
+  background: #eef2f6;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+button.small:hover {
+  background: #e2e8ee;
+}
+
+button.primary.small {
+  background: var(--accent);
+  color: #fff;
+}
+
+button.danger {
+  color: var(--danger);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button.icon {
+  width: 26px;
+  height: 26px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+button.icon:hover {
+  background: #eef2f6;
+  color: var(--ink);
+}
+
+.line-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px;
+  text-align: left;
+  font-size: 13px;
+}
+
+.line-row:hover,
+.line-row.active {
+  background: #eef2f6;
+}
+
+.line-row i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.line-row span {
+  flex: 1;
+  font-weight: 600;
+}
+
+.line-row small {
+  color: var(--muted);
+}
+
+.line-row small.pos {
+  color: #2e9d57;
+}
+
+.line-row small.neg {
+  color: var(--danger);
+}
+
+/* Строка общего списка — div, чтобы её можно было перетащить на папку или в другое место. */
+div.line-row {
+  position: relative;
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+div.line-row:active {
+  cursor: grabbing;
+}
+
+/* Значок линии: автобус, грузовик или поезд цвета линии. */
+.line-kind {
+  flex: none;
+  display: block;
+}
+
+.line-kind-btn {
+  flex: none;
+  padding: 1px;
+  border-radius: 4px;
+  line-height: 0;
+}
+
+.line-kind-btn:hover {
+  background: #e7f0fd;
+}
+
+/* Перетаскиваемая строка бледнеет, место вставки — синяя черта между строками. */
+.line-row.dragged {
+  opacity: 0.45;
+}
+
+.line-row.drop-before::before,
+.line-row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px #fff;
+  pointer-events: none;
+}
+
+.line-row.drop-before::before {
+  top: -2px;
+}
+
+.line-row.drop-after::after {
+  bottom: -2px;
+}
+
+/* Папки линий */
+.folder {
+  border-radius: 9px;
+  margin: 1px 0;
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 4px 5px 2px;
+  border-radius: 9px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.folder-row:hover {
+  background: #eef2f6;
+}
+
+.folder-row .caret {
+  flex: none;
+  width: 10px;
+  font-size: 10px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.folder-ic {
+  flex: none;
+  display: block;
+}
+
+.folder-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-row .folder-name {
+  font-size: 13px;
+  padding: 1px 5px;
+}
+
+.folder-row small {
+  flex: none;
+  color: var(--muted);
+}
+
+.folder-row small.pos {
+  color: #2e9d57;
+}
+
+.folder-row small.neg {
+  color: var(--danger);
+}
+
+/* ✎ и ✕ проявляются при наведении на папку. */
+.folder-row button.icon {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  opacity: 0.25;
+}
+
+.folder-row:hover button.icon {
+  opacity: 1;
+}
+
+/* Карандаш — сразу за названием, отражённый: смотрит на название. */
+.folder-row button.pencil {
+  margin-left: -4px;
+  transform: scaleX(-1);
+}
+
+/* Распорка: сводка папки и ✕ прижаты к правому краю. */
+.folder-fill {
+  flex: 1;
+}
+
+.folder-dots {
+  flex: none;
+  display: flex;
+}
+
+.folder-dots i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid #fff;
+  margin-left: -3px;
+}
+
+.folder-lines {
+  margin: 0 0 3px 10px;
+  padding-left: 6px;
+  border-left: 2px solid #f0d58a;
+}
+
+.folder-lines .small-note {
+  padding: 4px 6px;
+}
+
+/* Перетаскивание линии: папки подсвечиваются как места, куда её можно бросить. */
+.dragging-line .folder {
+  box-shadow: inset 0 0 0 1.5px #d9e3ef;
+}
+
+.dragging-line .folder.drop-over {
+  background: #e7f0fd;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.dragging-line .lines-list.drop-over {
+  background: #f4f8fd;
+}
+
+button.small.with-ic {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Выбор папки в карточке линии. */
+.folder-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 4px;
+}
+
+.folder-pick .opt {
+  background: #f4f6f8;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-pick .opt.active {
+  background: #e7f0fd;
+}
+
+.vehicles {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Покупка транспорта: карточки с силуэтом и ценой. */
+.buy {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.buy-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 4px 5px;
+  background: #f4f6f8;
+  border: 1.5px solid transparent;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.buy-card:hover {
+  background: #e7f0fd;
+  border-color: var(--accent);
+}
+
+.buy-card small {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+/* Правила для путей: значок и короткое пояснение. */
+.rules {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.rules > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rules svg {
+  flex: none;
+}
+
+.opt-title svg {
+  vertical-align: middle;
+}
+
+.veh {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  background: #f6f8fa;
+  border-radius: 8px;
+  padding: 5px 6px 5px 10px;
+}
+
+.veh > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.veh small {
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cargo-icon {
+  display: inline-block;
+  vertical-align: middle;
+  flex: none;
+}
+
+.side h4 {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.icon-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+}
+
+.lbl2 {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 96px;
+}
+
+.chip-ic {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #f4f6f8;
+  border-radius: 12px;
+  padding: 2px 8px 2px 2px;
+  font-size: 13px;
+}
+
+.recipe {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  background: #f4f6f8;
+  border-radius: 12px;
+  width: max-content;
+}
+
+.recipe .plus,
+.recipe .arrow {
+  font-weight: 800;
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.need {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+
+.need > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.need small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.need .bar {
+  margin: 0;
+}
+
+.partner {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  font-size: 13px;
+  text-align: left;
+}
+
+.partner:hover {
+  background: #eef2f6;
+}
+
+.partner span {
+  flex: 1;
+  font-weight: 600;
+}
+
+.partner small {
+  color: var(--muted);
+}
+
+/* Цепочки производства */
+/* Уровень производства предприятия: ×1 … ×4. */
+.level-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #e3e8ee;
+  margin: 4px 0 2px;
+  overflow: hidden;
+}
+
+.level-bar div {
+  height: 100%;
+  background: #3fae6a;
+}
+
+.kv .pos {
+  color: #2e9d57;
+}
+
+.kv .neg {
+  color: #d64541;
+}
+
+/* Окно «Финансы» под панелью денег. */
+.stats {
+  cursor: pointer;
+}
+
+.finance {
+  top: 84px;
+  left: 14px;
+  width: 340px;
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+
+.finance header {
+  display: flex;
+  align-items: center;
+}
+
+.finance header h3 {
+  flex: 1;
+  margin: 0;
+}
+
+.finance h4 {
+  margin: 12px 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ledger {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.ledger th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: right;
+}
+
+.ledger td {
+  padding: 2px 3px;
+}
+
+.ledger td:nth-child(3),
+.ledger td:nth-child(4) {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.ledger .ic {
+  width: 22px;
+  line-height: 0;
+}
+
+.ledger .sum td {
+  border-top: 1px solid #e3e8ee;
+  padding-top: 5px;
+}
+
+.ledger .pos,
+.finance small.pos {
+  color: #2e9d57;
+}
+
+.ledger .neg,
+.finance small.neg {
+  color: #d64541;
+}
+
+.loan {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+}
+
+.loan .actions {
+  margin-top: 0;
+}
+
+.fin-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.legend {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.chains {
+  top: 84px;
+  left: 14px;
+  width: 600px;
+  max-width: calc(100vw - 400px);
+  max-height: calc(100vh - 300px);
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+
+.chains header {
+  display: flex;
+  align-items: center;
+}
+
+.chains header h3 {
+  flex: 1;
+  margin: 0;
+}
+
+.chain-head,
+.chain-row {
+  display: grid;
+  grid-template-columns: 1fr 120px 1.3fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.chain-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+
+.chain-head span:nth-child(2) {
+  text-align: center;
+}
+
+.chain-row {
+  padding: 6px 0;
+  border-top: 1px solid #edf0f3;
+}
+
+.chain-row .cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chain-row .cell:first-child {
+  justify-content: flex-end;
+}
+
+.cargo-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.cargo-cell::before {
+  content: '→';
+  position: absolute;
+  margin-left: -78px;
+  margin-top: 6px;
+  color: #b0b8c1;
+  font-weight: 800;
+}
+
+.cargo-cell::after {
+  content: '→';
+  position: absolute;
+  margin-left: 78px;
+  margin-top: 6px;
+  color: #b0b8c1;
+  font-weight: 800;
+}
+
+.ind-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #f4f6f8;
+  border-radius: 14px;
+  padding: 3px 9px 3px 3px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ind-chip:hover {
+  background: #e7f0fd;
+}
+
+.ind-chip.town {
+  background: #eef0f3;
+}
+
+/* Миникарта */
+.minimap-wrap {
+  right: 14px;
+  bottom: 14px;
+  padding: 6px;
+  line-height: 0;
+}
+
+.minimap {
+  border-radius: 8px;
+  cursor: pointer;
+}

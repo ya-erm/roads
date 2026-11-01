@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Трава -->
+  <rect width="64" height="64" rx="14" fill="#cfdcb2"/>
+  <!-- Четыре петли «клевера» -->
+  <g fill="none" stroke="#7a828e" stroke-width="4">
+    <circle cx="20" cy="20" r="8.5"/>
+    <circle cx="44" cy="20" r="8.5"/>
+    <circle cx="20" cy="44" r="8.5"/>
+    <circle cx="44" cy="44" r="8.5"/>
+  </g>
+  <!-- Магистраль -->
+  <path d="M0 32H64" stroke="#4b525c" stroke-width="12"/>
+  <path d="M0 32H64" stroke="#646b76" stroke-width="9.5"/>
+  <path d="M0 32H64" stroke="#e3c46a" stroke-width="1.6"/>
+  <!-- Поперечная дорога по мосту -->
+  <path d="M32 0V64" stroke="#d3d8de" stroke-width="14"/>
+  <path d="M32 0V64" stroke="#7a828e" stroke-width="10"/>
+  <path d="M32 2V62" stroke="#eef1f4" stroke-width="1.6" stroke-dasharray="4 4"/>
+</svg>

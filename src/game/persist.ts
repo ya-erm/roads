@@ -1,0 +1,37 @@
+import type { Camera } from '../render/camera';
+import { Game, SAVE_VERSION, SaveData } from './game';
+
+/** Слот сохранения: `?slot=имя` позволяет держать несколько независимых партий. */
+const slot = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('slot') : null;
+const KEY = slot ? `razvyazka-save:${slot}` : 'razvyazka-save';
+
+/** Сохраняет игру в localStorage. Возвращает false, если места не хватило. */
+export function saveGame(game: Game, camera?: Camera): boolean {
+  try {
+    const data = game.toSave();
+    if (camera) data.view = { x: camera.x, y: camera.y, zoom: camera.zoom };
+    localStorage.setItem(KEY, JSON.stringify(data));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function loadSave(): SaveData | null {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as SaveData;
+    return data.version === SAVE_VERSION ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+export function hasSave(): boolean {
+  return loadSave() !== null;
+}
+
+export function clearSave(): void {
+  localStorage.removeItem(KEY);
+}
