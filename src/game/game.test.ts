@@ -3,8 +3,9 @@ import { MONTH_LENGTH } from '../config';
 import { dist, Vec } from '../core/vec';
 import { INDUSTRY_LIST, TOWN_CARGO } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
-import { halfWidth } from '../world/roadTypes';
+import { corridorHalf } from '../world/worldgen';
 import { Game } from './game';
+import { road, roadPlan, stationExit, townStreets } from './testkit';
 
 function runSeconds(game: Game, seconds: number) {
   game.speed = 1;
@@ -27,15 +28,13 @@ function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Station | nu
 function placeStations(game: Game, count: number, minDistance: number) {
   const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
   const placed: Station[] = [];
-  for (const sid of town.streets) {
-    const seg = game.net.segments.get(sid);
-    if (!seg) continue;
+  for (const seg of townStreets(game, town.id)) {
     for (const frac of [0.5, 0.3, 0.7]) {
       for (const side of [-1, 1]) {
         const s = seg.length * frac;
         const p = seg.lut.pointAt(s);
         const t = seg.lut.tangentAt(s);
-        const q = { x: p.x - t.y * side * (halfWidth(seg.spec) + 40), y: p.y + t.x * side * (halfWidth(seg.spec) + 40) };
+        const q = { x: p.x - t.y * side * (corridorHalf(seg) + 40), y: p.y + t.x * side * (corridorHalf(seg) + 40) };
         if (placed.some((st) => dist(st.fp.center, q) < minDistance)) continue;
         const st = game.placeStation(q, 14);
         if (st) placed.push(st);
@@ -131,28 +130,17 @@ describe('Игра', { timeout: 30_000 }, () => {
     const sA = stationAtIndustry(game, farm, plant.fp.center)!;
     const sB = stationAtIndustry(game, plant, farm.fp.center)!;
     expect(sB.accepts.has('grain')).toBe(true);
-    const exitOf = (nodeId: number) => {
-      const seg = game.net.segment(game.net.node(nodeId).segments[0]);
-      const other = seg.a === nodeId ? seg.b : seg.a;
-      return game.net.node(other);
-    };
-    const A = exitOf(sA.nodeId);
-    const B = exitOf(sB.nodeId);
+    const A = stationExit(game, sA.nodeId);
+    const B = stationExit(game, sB.nodeId);
     const d = { x: B.pos.x - A.pos.x, y: B.pos.y - A.pos.y };
     const n = { x: -d.y / Math.hypot(d.x, d.y), y: d.x / Math.hypot(d.x, d.y) };
-    const STREET = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
-    // Дорога из двух прямых через промежуточную точку, которую можно построить.
+    // Дорога из двух кусков через промежуточную точку, которую можно построить.
     let built = false;
     for (const off of [0, 150, -150, 300, -300, 450, -450, 600, -600]) {
       const M = { x: (A.pos.x + B.pos.x) / 2 + n.x * off, y: (A.pos.y + B.pos.y) / 2 + n.y * off };
-      const start = { kind: 'node' as const, nodeId: A.id, pos: A.pos, level: 0 };
-      const end = { kind: 'node' as const, nodeId: B.id, pos: B.pos, level: 0 };
-      const leg1 = { start, end: { kind: 'free' as const, pos: M, level: 0 }, spec: STREET, mode: 'straight' as const };
-      const leg2 = { start: { kind: 'free' as const, pos: M, level: 0 }, end, spec: STREET, mode: 'straight' as const };
-      if (!game.builder.plan(leg1).ok || !game.builder.plan(leg2).ok) continue;
-      const first = game.builder.build(leg1)!;
-      const mid = game.net.node(first.endNode);
-      built = !!game.builder.build({ ...leg2, start: { kind: 'node', nodeId: mid.id, pos: mid.pos, level: 0 } });
+      if (!roadPlan(game, A.id, { free: M }).ok) continue;
+      road(game, A.id, { free: M });
+      built = road(game, M, B.id);
       if (built) break;
     }
     expect(built).toBe(true);
@@ -200,14 +188,13 @@ describe('Игра', { timeout: 30_000 }, () => {
       const t = { x: Math.cos(h.fp.angle + Math.PI / 2), y: Math.sin(h.fp.angle + Math.PI / 2) };
       const a = { x: h.fp.center.x - t.x * 40, y: h.fp.center.y - t.y * 40 };
       const b = { x: h.fp.center.x + t.x * 40, y: h.fp.center.y + t.y * 40 };
-      const spec = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
-      return { start: { kind: 'free' as const, pos: a, level: 0 }, end: { kind: 'free' as const, pos: b, level: 0 }, spec, mode: 'straight' as const };
+      return roadPlan(game, { free: a }, { free: b });
     };
-    const target = houses.find((h) => game.buildingById(h.id) && game.builder.plan(through(h)).ok);
+    const target = houses.find((h) => game.buildingById(h.id) && through(h).ok);
     expect(target).toBeDefined();
-    const roadPlan = game.builder.plan(through(target!));
-    expect(roadPlan.demolish).toContain(target!.id);
-    game.builder.build(through(target!));
+    const plan = through(target!);
+    expect(plan.demolish).toContain(target!.id);
+    game.roadBuilder.apply(plan);
     expect(game.buildingById(target!.id)).toBeUndefined();
   });
 
@@ -223,25 +210,15 @@ describe('Игра', { timeout: 30_000 }, () => {
     const loaded = new Game(save.settings, save);
     expect(loaded.money).toBe(game.money);
     expect(loaded.dateLabel).toBe(game.dateLabel);
-    expect(loaded.net.segments.size).toBe(game.net.segments.size);
-    expect(loaded.net.nodes.size).toBe(game.net.nodes.size);
+    expect(loaded.roads.net.corridors.size).toBe(game.roads.net.corridors.size);
+    expect(loaded.roads.net.nodes.size).toBe(game.roads.net.nodes.size);
     expect(loaded.towns.map((t) => t.population)).toEqual(game.towns.map((t) => t.population));
     expect(loaded.stations.size).toBe(game.stations.size);
     expect(loaded.lines.get(line.id)!.name).toBe('Кольцевая');
     expect(loaded.fleet.size).toBe(2);
-    // Машины в пути остались на своих местах: та же полоса, та же позиция.
-    expect(loaded.traffic.vehicles.size).toBe(game.traffic.vehicles.size);
-    expect(loaded.citizenCars).toBe(game.citizenCars);
-    for (const v of game.fleet.values()) {
-      const lv = loaded.fleet.get(v.id)!;
-      expect(lv.state).toBe(v.state);
-      if (v.simId === null) continue;
-      const a = game.traffic.vehicles.get(v.simId)!;
-      const b = loaded.traffic.vehicles.get(lv.simId!)!;
-      expect(b.lane).toBe(a.lane);
-      expect(b.s).toBeCloseTo(a.s, 5);
-      expect(b.onMovement).toBe(a.onMovement);
-    }
+    // Машины в пути не сохраняются: автобусы, что были в дороге, снова отправляются со станции.
+    expect(loaded.traffic.vehicles.size).toBe(0);
+    for (const v of loaded.fleet.values()) expect(v.state === 'departing' || v.state === 'loading').toBe(true);
     // Загруженная партия продолжает работать и зарабатывать.
     const before = loaded.lines.get(line.id)!.revenueTotal;
     runSeconds(loaded, MONTH_LENGTH * 4);
@@ -252,7 +229,7 @@ describe('Игра', { timeout: 30_000 }, () => {
     const game = new Game(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const grow = (game as unknown as { growTown(t: typeof town): void }).growTown.bind(game);
-    const segs = game.net.segments.size;
+    const before = new Set(game.roads.net.corridors.keys());
     const houses = town.buildings.length;
     const money = game.money;
     const radius = town.radius;
@@ -260,16 +237,14 @@ describe('Игра', { timeout: 30_000 }, () => {
       town.growthAcc = 3000;
       grow(town);
     }
-    expect(game.net.segments.size).toBeGreaterThan(segs);
+    const added = [...game.roads.net.corridors.values()].filter((c) => !before.has(c.id));
+    expect(added.length).toBeGreaterThan(0);
     expect(town.buildings.length).toBeGreaterThan(houses);
     // Город строит за свой счёт.
     expect(game.money).toBe(money);
     expect(town.radius).toBeGreaterThanOrEqual(radius);
-    // Новые улицы — обычные улицы на земле, без мостов.
-    for (const s of game.net.segments.values()) {
-      if (s.id <= segs) continue;
-      expect(s.spec.cls === 'street' || s.spec.cls === 'avenue').toBe(true);
-    }
+    // Новые улицы — обычные улицы (и куски разрезанных улиц и проспектов).
+    for (const s of added) expect(s.cls === 'street' || s.cls === 'avenue').toBe(true);
     // Машины по-прежнему ездят.
     runSeconds(game, 20);
     expect(game.citizenCars).toBe([...game.traffic.vehicles.values()].length);

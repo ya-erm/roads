@@ -15,7 +15,8 @@ export function anchorAt(net: LaneNet, p: Vec, radius: number): Anchor {
   let best: LaneNode | null = null;
   let bestD = radius;
   for (const n of net.nodesNear(p, radius)) {
-    if (n.kind === 'seam' && !net.isDeadEnd(n)) continue;
+    // Стык посреди дороги притягивает, только если из него выйдет перекрёсток (не съезд, не сужение).
+    if (n.kind === 'seam' && !net.isDeadEnd(n) && !net.ends(n).every((e) => Math.abs(e.port) < LAT_EPS)) continue;
     const d = dist(n.pos, p);
     if (d < bestD) {
       bestD = d;
@@ -132,7 +133,7 @@ export function buildRoad(net: LaneNet, A: Anchor, B: Anchor, o: RoadOptions): C
   const seamDir = (x: Anchor, start: boolean): Vec | null => {
     if (x.kind !== 'node') return null;
     const n = net.node(x.node);
-    if (n.kind !== 'seam') return null;
+    if (n.kind !== 'seam' || !net.isDeadEnd(n)) return null;
     const free = -net.ends(n)[0].side as 1 | -1;
     return scale(n.dir, start ? free : -free);
   };
@@ -162,6 +163,11 @@ function resolveEnd(net: LaneNet, x: Anchor, dir: Vec, start: boolean, lanes: La
   if (x.kind === 'node') {
     const n = net.node(x.node);
     if (n.kind === 'junction') return { node: n };
+    // Стык, занятый с обеих сторон, — ответвление из него делает перекрёсток.
+    if (!net.isDeadEnd(n)) {
+      if (net.ends(n).every((e) => Math.abs(e.port) < LAT_EPS)) n.kind = 'junction';
+      return { node: n };
+    }
     const side = -net.ends(n)[0].side as 1 | -1;
     // Полосы новой дороги в стыке — те же, что у тупика? Тогда это продолжение, иначе — перекрёсток.
     const along = start ? side : -side;
@@ -372,6 +378,20 @@ function resolveBranchEnd(net: LaneNet, x: Anchor, dir: Vec, start: boolean, lan
 }
 
 // ---------- Правка ----------
+
+/** Узел двух дорог, который тянут к прямой между их дальними концами, встаёт на неё — изгиб выпрямляется. */
+export function alignNode(net: LaneNet, id: number, p: Vec, radius: number): Vec {
+  const n = net.nodes.get(id);
+  if (!n || n.corridors.length !== 2) return p;
+  const [a, b] = net.ends(n).map((e) => net.node(e.end === 'a' ? e.corridor.b : e.corridor.a).pos);
+  const ab = sub(b, a);
+  const l2 = dot(ab, ab);
+  if (l2 < 1) return p;
+  const t = dot(sub(p, a), ab) / l2;
+  if (t <= 0 || t >= 1) return p;
+  const q = add(a, scale(ab, t));
+  return dist(q, p) < radius ? q : p;
+}
 
 /** Сносит полотно; перекрёсток, у которого осталась одна дорога, становится её тупиком. */
 export function bulldoze(net: LaneNet, id: number): void {

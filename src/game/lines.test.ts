@@ -4,6 +4,7 @@ import type { Industry, Station } from '../world/entities';
 import { ECONOMY } from '../config';
 import { dist, Vec } from '../core/vec';
 import { Game } from './game';
+import { townStreets } from './testkit';
 import type { FleetVehicle, Line } from './transport';
 
 function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Station | null {
@@ -20,9 +21,7 @@ function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Station | nu
 /** Станция у улицы самого большого города — склад для пересадки. */
 function townStation(game: Game): Station {
   const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
-  for (const sid of town.streets) {
-    const seg = game.net.segments.get(sid);
-    if (!seg) continue;
+  for (const seg of townStreets(game, town.id)) {
     const p = seg.lut.pointAt(seg.length / 2);
     const t = seg.lut.tangentAt(seg.length / 2);
     const st = game.placeStation({ x: p.x - t.y * 40, y: p.y + t.x * 40 }, 14, 'road', { pax: false, cargo: true });

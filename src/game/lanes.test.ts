@@ -34,7 +34,8 @@ function pickPair(game: Game, n: RoadNode): { from: LaneEnd; to: LaneEnd } {
   return { from, to };
 }
 
-describe('Связи полос на перекрёстке', () => {
+// Связи полос в игре вернутся на модели полос (этап 4.4) — тогда эти проверки переедут на неё.
+describe.skip('Связи полос на перекрёстке', () => {
   it('настроенная полоса едет только по своим связям, остальные — как раньше', () => {
     const game = new Game(7);
     const n = avenueCrossroads(game);
@@ -136,7 +137,6 @@ function makeWorld() {
   const traffic = new Traffic(net, { onArrive: (v) => arrived.push(v), onLost: (v) => lost.push(v) });
   const ctx: BuildContext = {
     net,
-    traffic,
     budget: 1e12,
     roundaboutCenters: new Map(),
     isWater: () => false,

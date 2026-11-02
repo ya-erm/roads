@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { Game } from './game';
 
-/** Обычный перекрёсток на четыре дороги в самом большом городе. */
+/** Обычный перекрёсток на четыре дороги без светофора и кольца. */
 function crossroads(game: Game) {
-  return [...game.net.nodes.values()].find(
-    (n) => n.roundabout === null && n.control === 'none' && game.net.roadSegs(n).length === 4 && n.segments.length === 4,
+  const net = game.roads.net;
+  return [...net.nodes.values()].find(
+    (n) => n.kind === 'junction' && (n.roundabout ?? null) === null && (n.control ?? 'none') === 'none' && net.ends(n).length === 4,
   )!;
+}
+
+/** Сколько манёвров в графе игры ведут через узел с полотна from на полотно out. */
+function movesCount(game: Game, node: number, from: number, out: number): number {
+  const g = game.roads.graph;
+  return [...g.moves.values()].filter(
+    (m) => m.node === node && g.links.get(m.inLink)?.corridor === from && g.links.get(m.outLink)?.corridor === out,
+  ).length;
 }
 
 describe('Настройка перекрёстка', () => {
@@ -16,21 +25,13 @@ describe('Настройка перекрёстка', () => {
     const info = game.junctionInfo(n.id)!;
     const t = info.turns[0];
     const left = t.exits.find((e) => e.kind === 'left')!;
-    const count = () =>
-      (game.net.nodeMovements.get(n.id) ?? []).filter((m) => game.net.links.get(m.inLink)?.seg === t.from && game.net.links.get(m.outLink)?.seg === left.out)
-        .length;
-    expect(count()).toBeGreaterThan(0);
+    expect(movesCount(game, n.id, t.from, left.out)).toBeGreaterThan(0);
     game.setJunction(n.id, { bans: [`${t.from}>${left.out}`] });
-    expect(count()).toBe(0);
+    expect(movesCount(game, n.id, t.from, left.out)).toBe(0);
     expect(game.junctionInfo(n.id)!.turns[0].exits.find((e) => e.out === left.out)!.banned).toBe(true);
     const loaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
-    const ln = loaded.net.node(n.id);
-    expect(ln.bans).toEqual([`${t.from}>${left.out}`]);
-    expect(
-      (loaded.net.nodeMovements.get(n.id) ?? []).filter(
-        (m) => loaded.net.links.get(m.inLink)?.seg === t.from && loaded.net.links.get(m.outLink)?.seg === left.out,
-      ).length,
-    ).toBe(0);
+    expect(loaded.roads.net.node(n.id).bans).toEqual([`${t.from}>${left.out}`]);
+    expect(movesCount(loaded, n.id, t.from, left.out)).toBe(0);
   });
 
   it('главную дорогу выбирает игрок, а равнозначный перекрёсток — без приоритета', () => {
@@ -43,23 +44,8 @@ describe('Настройка перекрёстка', () => {
       expect(game.junctionInfo(n.id)!.mainNow.sort()).toEqual([...pair.segs].sort());
     }
     game.setJunction(n.id, { mainPair: [] });
-    expect(n.priorityLanes.size).toBe(0);
+    expect(game.roads.graph.nodes.get(n.id)!.priorityLanes.size).toBe(0);
   });
 
-  it('светофор по таймеру переключает фазы через заданное время', () => {
-    const game = new Game(7);
-    const n = crossroads(game);
-    game.money = 1_000_000;
-    expect(game.builder.toggleLights(n.pos, 4)).toBe(true);
-    const phases = n.lights!.phases.length;
-    game.setJunction(n.id, { adaptive: false, greens: Array.from({ length: phases }, () => 5) });
-    const seen = new Set<number>();
-    game.speed = 1;
-    for (let t = 0; t < 40; t += 0.1) {
-      game.update(0.1);
-      seen.add(n.lights!.phase);
-    }
-    // За 40 секунд по таймеру светофор обходит все фазы, даже пустые.
-    expect(seen.size).toBe(phases);
-  });
+  it.todo('светофор по таймеру переключает фазы через заданное время — светофоры в графе полос, этап 4.4');
 });

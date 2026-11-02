@@ -20,7 +20,6 @@ function makeWorld() {
   const traffic = new Traffic(net, { onArrive: (v) => arrived.push(v), onLost: (v) => lost.push(v) });
   const ctx: BuildContext = {
     net,
-    traffic,
     budget: 1e12,
     roundaboutCenters: new Map(),
     isWater: () => false,

@@ -1,12 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { add, dist, dot, scale, Vec } from '../core/vec';
-import { routeFromNode } from '../sim/routing';
-import type { RoadRequest, Snap } from './build';
+import { alignNode } from '../lanes/edit';
 import { Game } from './game';
+import { roadPlan, STREET } from './testkit';
 
-const STREET = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
-
-const free = (pos: Vec): Snap => ({ kind: 'free', pos, level: 0 });
+/** Цепочка прямых улиц: на поворотах — излом (перекрёсток из двух дорог), а не плавная дуга. */
+const KINKED = { ...STREET, kink: true };
 
 function runSeconds(game: Game, seconds: number) {
   game.speed = 1;
@@ -17,20 +16,15 @@ function dryGame(): Game {
   return new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
 }
 
-/** Строит цепочку прямых дорог через точки, если всё помещается. Возвращает узлы по порядку. */
+/** Строит цепочку прямых улиц через точки, если всё помещается. Возвращает узлы по порядку. */
 function buildChain(game: Game, pts: Vec[]): number[] | null {
-  const reqs: RoadRequest[] = [];
-  for (let i = 1; i < pts.length; i++) reqs.push({ start: free(pts[i - 1]), end: free(pts[i]), spec: STREET, mode: 'straight' });
-  if (!reqs.every((r) => game.builder.plan(r).ok)) return null;
+  for (let i = 1; i < pts.length; i++) if (!roadPlan(game, { free: pts[i - 1] }, { free: pts[i] }).ok) return null;
   const nodes: number[] = [];
-  let start: Snap = free(pts[0]);
   for (let i = 1; i < pts.length; i++) {
-    const res = game.builder.build({ start, end: free(pts[i]), spec: STREET, mode: 'straight' });
-    if (!res) return null;
-    if (!nodes.length) nodes.push(game.net.segment(game.net.node(res.endNode).segments[0]).a);
-    nodes.push(res.endNode);
-    const n = game.net.node(res.endNode);
-    start = { kind: 'node', nodeId: n.id, pos: n.pos, level: n.level };
+    const plan = roadPlan(game, i === 1 ? { free: pts[0] } : nodes[i - 1], { free: pts[i] }, KINKED);
+    if (!plan.ok || !game.roadBuilder.apply(plan)) return null;
+    if (i === 1) nodes.push(game.roads.net.nodesNear(pts[0], 1)[0].id);
+    nodes.push(game.roads.net.nodesNear(pts[i], 1)[0].id);
   }
   return nodes;
 }
@@ -40,8 +34,7 @@ function buildBend(game: Game): { a: number; b: number; c: number; origin: Vec }
   for (let y = 400; y < game.terrain.height - 500; y += 120) {
     for (let x = 300; x < game.terrain.width - 500; x += 160) {
       // Запас вокруг: изгиб потом выпрямляют и тянут в стороны.
-      const probe: RoadRequest = { start: free({ x: x - 60, y: y + 260 }), end: free({ x: x + 260, y: y - 60 }), spec: STREET, mode: 'straight' };
-      if (!game.builder.plan(probe).ok) continue;
+      if (!roadPlan(game, { free: { x: x - 60, y: y + 260 } }, { free: { x: x + 260, y: y - 60 } }).ok) continue;
       const nodes = buildChain(game, [
         { x, y },
         { x: x + 200, y },
@@ -53,108 +46,133 @@ function buildBend(game: Game): { a: number; b: number; c: number; origin: Vec }
   throw new Error('Нет места для изгиба');
 }
 
-/** Снимок формы сети: узлы и кривые участков. */
+/** Снимок формы сети: узлы и кривые полотен. */
 function shape(game: Game): string {
-  const nodes = [...game.net.nodes.values()].map((n) => [n.id, n.pos.x.toFixed(3), n.pos.y.toFixed(3), [...n.segments].sort()]);
-  const segs = [...game.net.segments.values()].map((s) => [s.id, s.a, s.b, s.curve]);
-  return JSON.stringify({ nodes, segs });
+  const net = game.roads.net;
+  const nodes = [...net.nodes.values()].map((n) => [n.id, n.kind, n.pos.x.toFixed(3), n.pos.y.toFixed(3), [...n.corridors].sort()]);
+  const corridors = [...net.corridors.values()].map((c) => [c.id, c.a, c.b, c.curve]);
+  return JSON.stringify({ nodes, corridors });
+}
+
+/** Переносит узел, если можно; true — перенесён. */
+function move(game: Game, id: number, pos: Vec): boolean {
+  const plan = game.roadBuilder.moveNode(id, pos);
+  return plan.ok && game.roadBuilder.apply(plan);
 }
 
 describe('Перенос узла', () => {
-  it('изгиб из двух участков двигается и остаётся связанным', () => {
+  it('изгиб из двух полотен двигается и остаётся связанным', () => {
     const game = dryGame();
     const { a, b, c, origin } = buildBend(game);
-    const segs = [...game.net.node(b).segments].sort();
+    const net = () => game.roads.net;
+    expect(net().node(b).kind).toBe('junction');
+    const arms = [...net().node(b).corridors].sort();
     const money = game.money;
-    // Узел прямо на линию A–C: дорога выпрямляется.
+    // Узел прямо на линию A–C: дорога выпрямляется и становится короче.
     const target = { x: origin.x + 100, y: origin.y + 100 };
-    const plan = game.builder.moveNodePlan(b, target);
+    const plan = game.roadBuilder.moveNode(b, target);
     expect(plan.ok).toBe(true);
-    expect(game.builder.moveNode(b, target)).toBe(true);
-    const node = game.net.node(b);
+    expect(move(game, b, target)).toBe(true);
+    const node = net().node(b);
     expect(dist(node.pos, target)).toBeLessThan(1e-6);
-    // Те же участки, те же концы, кривые начинаются и кончаются в узлах.
-    expect([...node.segments].sort()).toEqual(segs);
-    for (const id of segs) {
-      const s = game.net.segment(id);
-      expect(dist(s.curve.p0, game.net.node(s.a).pos)).toBeLessThan(1e-6);
-      expect(dist(s.curve.p3, game.net.node(s.b).pos)).toBeLessThan(1e-6);
+    // Те же полотна, кривые начинаются и кончаются в узлах, прямые остались прямыми.
+    expect([...node.corridors].sort()).toEqual(arms);
+    for (const id of arms) {
+      const s = net().corridor(id);
+      expect(dist(s.curve.p0, net().node(s.a).pos)).toBeLessThan(1e-6);
+      expect(dist(s.curve.p3, net().node(s.b).pos)).toBeLessThan(1e-6);
+      expect(s.length).toBeCloseTo(dist(net().node(s.a).pos, net().node(s.b).pos), 3);
     }
-    expect(game.net.segmentBetween(a, b)).not.toBeNull();
-    expect(game.net.segmentBetween(b, c)).not.toBeNull();
-    expect(routeFromNode(game.net, a, c)).not.toBeNull();
-    expect(routeFromNode(game.net, c, a)).not.toBeNull();
-    // Платим за новую дорогу, за старую возвращается половина — как при сносе.
+    // Тупики A и C повернулись вслед за дорогами — проехать можно в обе стороны.
+    expect(net().problems()).toEqual([]);
+    expect(game.roads.route(a, c)).not.toBeNull();
+    expect(game.roads.route(c, a)).not.toBeNull();
+    // Дорога стала короче — часть денег возвращается, как при сносе.
     expect(plan.refund).toBeGreaterThan(0);
-    expect(plan.cost).toBe(Math.round(plan.spend - plan.refund * 0.5));
-    expect(game.money).toBe(money - Math.round(plan.spend) + Math.round(plan.refund * 0.5));
+    expect(plan.spend).toBe(0);
+    expect(game.money).toBe(money - plan.cost);
+  });
+
+  it('тупик продлевается вдоль дороги и уводится в сторону — дорога остаётся прямой', () => {
+    const game = dryGame();
+    const { c, origin } = buildBend(game);
+    const net = () => game.roads.net;
+    const end = { x: origin.x + 200, y: origin.y + 300 };
+    expect(move(game, c, end)).toBe(true);
+    expect(move(game, c, { x: origin.x + 260, y: origin.y + 280 })).toBe(true);
+    const corridor = net().corridor(net().node(c).corridors[0]);
+    expect(corridor.length).toBeCloseTo(dist(net().node(corridor.a).pos, net().node(corridor.b).pos), 3);
+    expect(net().isDeadEnd(net().node(c))).toBe(true);
+    expect(net().problems()).toEqual([]);
   });
 
   it('кривая, гладко продолжавшая прямую, остаётся гладкой', () => {
     const game = dryGame();
     const { origin } = buildBend(game);
-    // Отдельная дорога: прямая, затем дуга по касательной к ней.
+    // Отдельная дорога: прямая, затем дуга по касательной к ней (продолжение тупика — стык).
     const o = { x: origin.x, y: origin.y + 120 };
     const nodes = buildChain(game, [o, { x: o.x + 120, y: o.y }])!;
-    const mid = game.net.node(nodes[1]);
-    const arc: RoadRequest = {
-      start: { kind: 'node', nodeId: mid.id, pos: mid.pos, level: 0 },
-      end: free({ x: o.x + 220, y: o.y + 70 }),
-      spec: STREET,
-      mode: 'arc',
-      tangent: { x: 1, y: 0 },
-    };
-    expect(game.builder.plan(arc).ok).toBe(true);
-    game.builder.build(arc);
-    const [s1, s2] = game.net.node(mid.id).segments;
-    expect(game.builder.moveNode(mid.id, { x: o.x + 130, y: o.y + 12 })).toBe(true);
-    expect(dot(game.net.dirFrom(mid.id, s1), game.net.dirFrom(mid.id, s2))).toBeLessThan(-0.999);
+    const plan = roadPlan(game, nodes[1], { free: { x: o.x + 220, y: o.y + 70 } });
+    expect(plan.ok).toBe(true);
+    game.roadBuilder.apply(plan);
+    const net = () => game.roads.net;
+    expect(net().node(nodes[1]).kind).toBe('seam');
+    expect(move(game, nodes[1], { x: o.x + 130, y: o.y + 12 })).toBe(true);
+    const [e1, e2] = net().ends(net().node(nodes[1]));
+    expect(dot(e1.away, e2.away)).toBeLessThan(-0.999);
   });
 
   it('прямая через изгиб подтягивается, если курсор рядом', () => {
     const game = dryGame();
     const { b, origin } = buildBend(game);
-    const p = game.builder.alignNode(b, { x: origin.x + 104, y: origin.y + 98 }, 12);
+    const p = alignNode(game.roads.net, b, { x: origin.x + 104, y: origin.y + 98 }, 12);
     expect(Math.abs(p.x - p.y - (origin.x - origin.y))).toBeLessThan(1e-6);
     // Далеко от прямой — точка как есть.
     const far = { x: origin.x + 150, y: origin.y + 40 };
-    expect(game.builder.alignNode(b, far, 12)).toEqual(far);
+    expect(alignNode(game.roads.net, b, far, 12)).toEqual(far);
   });
 
   it('перекрёсток тянет за собой все три дороги, запрет поворота остаётся', () => {
     const game = dryGame();
     const { a, b, origin } = buildBend(game);
+    const net = () => game.roads.net;
     // Ответвление от середины A–B: получается Т-образный перекрёсток.
     const mid = { x: origin.x + 100, y: origin.y };
-    const branch: RoadRequest = { start: game.builder.snap(mid, 0, 10), end: free({ x: origin.x + 100, y: origin.y - 160 }), spec: STREET, mode: 'straight' };
-    expect(game.builder.plan(branch).ok).toBe(true);
-    const res = game.builder.build(branch)!;
-    const end = res.endNode;
-    const j = [...game.net.nodes.values()].find((n) => dist(n.pos, mid) < 1)!;
-    expect(j.segments.length).toBe(3);
-    const arms = [...j.segments];
-    const toA = arms.find((id) => game.net.segment(id).a === a || game.net.segment(id).b === a)!;
-    const toEnd = arms.find((id) => game.net.segment(id).a === end || game.net.segment(id).b === end)!;
+    const plan = roadPlan(game, mid, { free: { x: origin.x + 100, y: origin.y - 160 } });
+    expect(plan.ok).toBe(true);
+    game.roadBuilder.apply(plan);
+    const j = net().nodesNear(mid, 1)[0];
+    expect(j.kind).toBe('junction');
+    expect(j.corridors.length).toBe(3);
+    const arms = [...j.corridors];
+    const other = (id: number) => {
+      const s = net().corridor(id);
+      return s.a === j.id ? s.b : s.a;
+    };
+    const toA = arms.find((id) => other(id) === a)!;
+    const toEnd = arms.find((id) => net().isDeadEnd(net().node(other(id))) && other(id) !== a)!;
+    const end = other(toEnd);
     // С ответвления нельзя повернуть к A.
     game.setJunction(j.id, { bans: [`${toEnd}>${toA}`], mainPair: arms.filter((id) => id !== toEnd) });
 
     const target = add(mid, { x: 25, y: -20 });
-    expect(game.builder.moveNode(j.id, target)).toBe(true);
-    const node = game.net.node(j.id);
+    expect(move(game, j.id, target)).toBe(true);
+    const node = net().node(j.id);
     expect(dist(node.pos, target)).toBeLessThan(1e-6);
-    expect([...node.segments].sort()).toEqual([...arms].sort());
+    expect([...node.corridors].sort()).toEqual([...arms].sort());
     expect(node.bans).toEqual([`${toEnd}>${toA}`]);
     // Запрет действует: манёвра с ответвления к A нет, а остальные есть.
-    const segOf = (lane: number) => game.net.lanes.get(lane)!.seg;
-    const moves = game.net.nodeMovements.get(j.id)!;
-    expect(moves.some((m) => segOf(m.inLane) === toEnd && segOf(m.outLane) === toA)).toBe(false);
-    expect(moves.some((m) => segOf(m.inLane) === toEnd && segOf(m.outLane) !== toA)).toBe(true);
+    const g = game.roads.graph;
+    const corridorOf = (link: number) => g.links.get(link)!.corridor;
+    const moves = [...g.moves.values()].filter((m) => m.node === j.id);
+    expect(moves.some((m) => corridorOf(m.inLink) === toEnd && corridorOf(m.outLink) === toA)).toBe(false);
+    expect(moves.some((m) => corridorOf(m.inLink) === toEnd && corridorOf(m.outLink) !== toA)).toBe(true);
     // Главная дорога — по-прежнему A–B.
-    const ins = game.net.inLinks.get(j.id)!;
-    const main = ins.filter((l) => l.lanes.some((lane) => node.priorityLanes.has(lane.id))).map((l) => l.seg);
-    expect(main.sort()).toEqual(arms.filter((id) => id !== toEnd).sort());
-    expect(routeFromNode(game.net, end, b)).not.toBeNull();
-    expect(routeFromNode(game.net, a, end)).not.toBeNull();
+    const prio = g.nodes.get(j.id)!.priorityLanes;
+    const main = (g.inLinks.get(j.id) ?? []).filter((l) => l.lanes.some((lane) => prio.has(lane.id))).map((l) => l.corridor);
+    expect([...new Set(main)].sort()).toEqual(arms.filter((id) => id !== toEnd).sort());
+    expect(game.roads.route(end, b)).not.toBeNull();
+    expect(game.roads.route(a, end)).not.toBeNull();
   });
 
   it('недопустимый перенос отклоняется, сеть не меняется', () => {
@@ -164,11 +182,10 @@ describe('Перенос узла', () => {
     const money = game.money;
     // За конец C, на продолжение A–C: дорога A–B прошла бы через узел C, дороги сошлись бы в одну.
     const bad = { x: origin.x + 300, y: origin.y + 300 };
-    const plan = game.builder.moveNodePlan(b, bad);
+    const plan = game.roadBuilder.moveNode(b, bad);
     expect(plan.ok).toBe(false);
     expect(plan.reason).toBeTruthy();
-    expect(plan.plans.some((p) => !p.ok)).toBe(true);
-    expect(game.builder.moveNode(b, bad)).toBe(false);
+    expect(move(game, b, bad)).toBe(false);
     expect(shape(game)).toBe(before);
     expect(game.money).toBe(money);
   });
@@ -190,10 +207,10 @@ describe('Перенос узла', () => {
           if (!nodes) continue;
           tried = true;
           const before = shape(game);
-          const plan = game.builder.moveNodePlan(nodes[1], w);
+          const plan = game.roadBuilder.moveNode(nodes[1], w);
           expect(plan.ok).toBe(false);
-          expect(plan.reason).toBe('Опора в воде — нужен мост');
-          expect(game.builder.moveNode(nodes[1], w)).toBe(false);
+          expect(plan.reason).toMatch(/вод/i);
+          expect(move(game, nodes[1], w)).toBe(false);
           expect(shape(game)).toBe(before);
         }
       }
@@ -207,7 +224,7 @@ describe('Перенос узла', () => {
     const before = shape(game);
     const money = game.money;
     game.checkpoint('перенос дороги');
-    expect(game.builder.moveNode(b, { x: origin.x + 230, y: origin.y - 40 })).toBe(true);
+    expect(move(game, b, { x: origin.x + 230, y: origin.y - 40 })).toBe(true);
     game.commit();
     expect(shape(game)).not.toBe(before);
     expect(game.money).not.toBe(money);
@@ -219,12 +236,18 @@ describe('Перенос узла', () => {
   it('в городе: перекрёсток двигается, машины продолжают ездить', () => {
     const game = new Game(7);
     runSeconds(game, 10);
-    let moved = false;
+    const net = game.roads.net;
     // Сначала перекрёстки, у которых на дорогах больше всего машин.
-    const busy = (id: number) =>
-      [...game.net.lanes.values()].filter((l) => game.net.node(id).segments.includes(l.seg)).reduce((k, l) => k + l.vehicles.length, 0);
-    const nodes = [...game.net.nodes.values()].filter((n) => n.segments.length >= 3 && game.builder.canMoveNode(n));
+    const cars = new Map<number, number>();
+    for (const v of game.traffic.vehicles.values()) {
+      const lane = game.roads.graph.lanes.get(v.lane);
+      const c = lane && game.roads.graph.links.get(lane.link)?.corridor;
+      if (c !== undefined) cars.set(c, (cars.get(c) ?? 0) + 1);
+    }
+    const busy = (id: number) => net.node(id).corridors.reduce((k, c) => k + (cars.get(c) ?? 0), 0);
+    const nodes = [...net.nodes.values()].filter((n) => n.kind === 'junction' && n.corridors.length >= 3);
     nodes.sort((x, y) => busy(y.id) - busy(x.id));
+    let moved = false;
     for (const n of nodes) {
       for (const off of [
         { x: 6, y: 0 },
@@ -232,11 +255,9 @@ describe('Перенос узла', () => {
         { x: -6, y: 0 },
         { x: 0, y: -6 },
       ]) {
-        const target = add(n.pos, off);
-        if (!game.builder.moveNodePlan(n.id, target).ok) continue;
-        const segs = [...n.segments].sort();
-        expect(game.builder.moveNode(n.id, target)).toBe(true);
-        expect([...game.net.node(n.id).segments].sort()).toEqual(segs);
+        const corridors = [...n.corridors].sort();
+        if (!move(game, n.id, add(n.pos, off))) continue;
+        expect([...game.roads.net.node(n.id).corridors].sort()).toEqual(corridors);
         moved = true;
         break;
       }
@@ -244,7 +265,7 @@ describe('Перенос узла', () => {
     }
     expect(moved).toBe(true);
     runSeconds(game, 20);
-    expect(game.citizenCars).toBe([...game.traffic.vehicles.values()].length);
+    expect(game.citizenCars).toBe(game.traffic.vehicles.size);
     expect(game.citizenCars).toBeGreaterThan(0);
   });
 });

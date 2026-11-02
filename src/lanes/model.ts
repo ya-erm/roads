@@ -2,6 +2,19 @@ import { Cubic, CurveLUT } from '../core/bezier';
 import { add, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { LANE_W, RoadClass } from '../world/roadTypes';
 
+/** Кривая — прямой отрезок: управляющие точки на хорде, между концами. */
+function isStraight(cv: Cubic): boolean {
+  const chord = sub(cv.p3, cv.p0);
+  const l = len(chord);
+  if (l < 1e-6) return false;
+  const u = scale(chord, 1 / l);
+  return [cv.p1, cv.p2].every((p) => {
+    const d = sub(p, cv.p0);
+    const along = dot(d, u);
+    return Math.abs(d.x * u.y - d.y * u.x) < 0.5 && along > 0 && along < l;
+  });
+}
+
 /** Направление движения по полосе: 1 — по ходу оси полотна (a→b), −1 — против. */
 export type Flow = 1 | -1;
 export type End = 'a' | 'b';
@@ -337,24 +350,64 @@ export class LaneNet {
     this.touch(c);
   }
 
-  /** Двигает узел: концы его полотен — следом, их управляющие точки сдвигаются так же (форма сохраняется). */
+  /**
+   * Двигает узел, концы его полотен — следом. У стыка с дорогами по обе стороны касательная общая —
+   * управляющие точки сдвигаются вместе с ним. Прямые полотна у перекрёстков и тупиков остаются прямыми
+   * (от стыка на дальнем конце — плавно выгибаются к узлу), изогнутые держат форму; тупики поворачиваются вслед за дорогой.
+   */
   moveNode(id: number, pos: Vec): void {
     const n = this.node(id);
     const delta = sub(pos, n.pos);
+    const pinned = (m: LaneNode) => m.kind === 'seam' && !this.isDeadEnd(m);
+    const ends = this.ends(n);
+    const straight = new Set(ends.filter((e) => isStraight(e.corridor.curve)).map((e) => e.corridor.id));
+    // Тупики одной дороги (этот узел и дальние концы) и с какой стороны у них дорога — до переноса.
+    const deadSide = new Map<LaneNode, 1 | -1>();
+    for (const m of [n, ...ends.map((e) => this.node(e.end === 'a' ? e.corridor.b : e.corridor.a))]) {
+      if (!this.isDeadEnd(m) || m.corridors.length !== 1) continue;
+      const [me] = this.ends(m);
+      if (!me.port) deadSide.set(m, me.side);
+    }
     this.indexNode(n, false);
     n.pos = { ...pos };
     this.indexNode(n, true);
-    for (const e of this.ends(n)) {
-      const cv = { ...e.corridor.curve };
-      if (e.end === 'a') {
-        cv.p0 = add(cv.p0, delta);
-        cv.p1 = add(cv.p1, delta);
-      } else {
-        cv.p3 = add(cv.p3, delta);
-        cv.p2 = add(cv.p2, delta);
+    const done = new Set<number>();
+    for (const e of ends) {
+      const c = e.corridor;
+      if (done.has(c.id)) continue;
+      done.add(c.id);
+      const cv = { ...c.curve };
+      // Петля из узла в него же — сдвигается целиком.
+      if (c.a === c.b) {
+        this.setCurve(c, { p0: add(cv.p0, delta), p1: add(cv.p1, delta), p2: add(cv.p2, delta), p3: add(cv.p3, delta) });
+        continue;
       }
-      this.setCurve(e.corridor, cv);
+      const atA = e.end === 'a';
+      const far = this.node(atA ? c.b : c.a);
+      const near = add(atA ? cv.p0 : cv.p3, delta);
+      const farPt = atA ? cv.p3 : cv.p0;
+      const farCtl = atA ? cv.p2 : cv.p1;
+      let nearCtl: Vec;
+      if (pinned(n) || e.port) nearCtl = add(atA ? cv.p1 : cv.p2, delta);
+      else if (straight.has(c.id) && !pinned(far) && !(atA ? c.portB : c.portA)) {
+        // Прямая так и остаётся прямой: управляющие точки — на трети хорды.
+        const third = scale(sub(farPt, near), 1 / 3);
+        nearCtl = add(near, third);
+        if (atA) cv.p2 = sub(farPt, third);
+        else cv.p1 = sub(farPt, third);
+      } else if (straight.has(c.id)) nearCtl = add(near, scale(sub(farCtl, near), 0.5));
+      else nearCtl = add(atA ? cv.p1 : cv.p2, delta);
+      if (atA) {
+        cv.p0 = near;
+        cv.p1 = nearCtl;
+      } else {
+        cv.p3 = near;
+        cv.p2 = nearCtl;
+      }
+      this.setCurve(c, cv);
     }
+    // Тупик смотрит туда же, куда его дорога.
+    for (const [m, side] of deadSide) m.dir = scale(this.ends(m)[0].away, side);
     this.version++;
   }
 

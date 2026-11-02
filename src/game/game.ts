@@ -267,6 +267,8 @@ export interface StationPlan {
   rail?: RailStationGeom;
   /** Выезд автостанции: план дороги (сеть с выездом — для предпросмотра, даже если поставить нельзя). */
   driveway?: RoadPlan;
+  /** Откуда идёт выезд: узел (перекрёсток, тупик) или место на полотне. */
+  from?: Anchor;
   /** Тупик выезда — узел станции. */
   nodePos?: Vec;
   /** Дома под самой станцией: снесём за доплату (их цена уже в cost). Дома под выездом — в driveway.demolish. */
@@ -2663,7 +2665,7 @@ export class Game implements BuildContext {
     // Посты погрузки смотрят на выезд.
     const fp: Footprint = { center, w: STATION.size.w, h: STATION.size.h, angle: Math.atan2(dir.x, -dir.y) };
     const plan = this.roadBuilder.road(from, { kind: 'free', pos: nodePos }, DRIVEWAY);
-    const fail = (reason: string, cost = plan.cost + COST.station): StationPlan => ({ ok: false, reason, cost, fp, driveway: plan });
+    const fail = (reason: string, cost = plan.cost + COST.station): StationPlan => ({ ok: false, reason, cost, fp, driveway: plan, from });
     if (!this.inBounds(center, 30)) return fail('За краем карты');
     if (this.isWater(center, footprintRadius(fp)) || this.isWater(nodePos, 8)) return fail('Мешает вода');
     const under = this.structuresUnder(fp, 3);
@@ -2675,7 +2677,7 @@ export class Game implements BuildContext {
     const cost = plan.cost + COST.station + this.demolishTotal(demolish);
     if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', cost);
     if (cost > this.budget) return fail('Не хватает денег', cost);
-    return { ok: true, cost, fp, driveway: plan, nodePos, demolish };
+    return { ok: true, cost, fp, driveway: plan, from, nodePos, demolish };
   }
 
   placeStation(

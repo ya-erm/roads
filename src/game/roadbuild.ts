@@ -62,8 +62,11 @@ export class RoadBuilder {
     return this.ctx.roads.net;
   }
 
-  /** Правка на копии сети и её проверка. */
-  plan(edit: (net: LaneNet) => boolean | void, opts: { free?: boolean } = {}): RoadPlan {
+  /**
+   * Правка на копии сети и её проверка. free — за счёт города; shove — дома под дорогой не сносим:
+   * после стройки их отодвинут (расширение улицы).
+   */
+  plan(edit: (net: LaneNet) => boolean | void, opts: { free?: boolean; shove?: boolean } = {}): RoadPlan {
     const before = this.net;
     const next = before.clone();
     try {
@@ -86,7 +89,7 @@ export class RoadBuilder {
     const demolish = new Set<number>();
     let reason: string | undefined;
     for (const c of changed) {
-      reason = this.check(next, c, demolish);
+      reason = this.check(next, c, demolish, !!opts.shove);
       if (reason) break;
     }
     // Новые беды сети (оборванные полосы и т. п.) — только те, что появились от этой правки.
@@ -136,15 +139,18 @@ export class RoadBuilder {
     });
   }
 
-  /** Другие полосы, класс и ограничение скорости у полотна. */
+  /** Другие полосы, класс и ограничение скорости у полотна; дома, на которые налезет шире дорога, отодвигаются после стройки. */
   rebuild(id: number, p: { cls: RoadClass; lanes: LaneSlot[]; limit?: number }): RoadPlan {
-    return this.plan((n) => {
-      const c = n.corridors.get(id);
-      if (!c) return false;
-      c.cls = p.cls;
-      c.limit = p.limit;
-      n.setLanes(c, p.lanes);
-    });
+    return this.plan(
+      (n) => {
+        const c = n.corridors.get(id);
+        if (!c) return false;
+        c.cls = p.cls;
+        c.limit = p.limit;
+        n.setLanes(c, p.lanes);
+      },
+      { shove: true },
+    );
   }
 
   /** Новая форма полотна (концы на месте). */
@@ -167,7 +173,7 @@ export class RoadBuilder {
   // ---------- Проверки ----------
 
   /** Что не так с полотном c в сети net; дома, которые придётся снести, — в demolish. */
-  private check(net: LaneNet, c: Corridor, demolish: Set<number>): string | undefined {
+  private check(net: LaneNet, c: Corridor, demolish: Set<number>, shove: boolean): string | undefined {
     if (c.length < 8) return 'Слишком коротко';
     const limit = ROAD_CLASSES[c.cls].minRadius;
     if (minRadius(c.curve) < limit * 0.7) return 'Слишком крутой поворот';
@@ -180,7 +186,7 @@ export class RoadBuilder {
       if (this.ctx.isWater(p, -half * 0.3)) return 'Через воду — мосты будут позже';
       for (const o of this.ctx.obstaclesAt(p, half + 1)) {
         if (!o.demolishable) return 'Мешает здание';
-        demolish.add(o.id);
+        if (!shove) demolish.add(o.id);
       }
       // Чужие дороги рядом: у общих узлов — можно (там перекрёсток или стык), в остальном — не ближе краёв.
       const nearEnd = ends.some((e) => dist(e, p) < 45);

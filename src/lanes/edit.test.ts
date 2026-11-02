@@ -52,6 +52,18 @@ describe('Полосы: инструменты', () => {
     expect(net.node(west.id).kind).toBe('junction');
   });
 
+  it('ответвление из стыка с дорогами по обе стороны — перекрёсток, дорога идёт прямо к цели', () => {
+    const net = road();
+    const east = deadEnds(net).find((n) => n.pos.x > 400)!;
+    buildRoad(net, anchorAt(net, east.pos, 14), free(1400, 0), AVENUE);
+    expect(net.node(east.id).kind).toBe('seam');
+    buildRoad(net, anchorAt(net, east.pos, 14), free(800, 400), AVENUE);
+    const n = net.node(east.id);
+    expect(n.kind).toBe('junction');
+    const branch = net.ends(n).find((e) => Math.abs(e.away.y) > 0.5)!;
+    expect(branch.away.y).toBeCloseTo(1, 3);
+  });
+
   it('дорога поперёк другой — перекрёсток посередине; конец на полотне — Т-образный', () => {
     const net = road();
     buildRoad(net, free(400, -300), free(400, 300), { cls: 'street', lanes: twoWay(1, 1) });

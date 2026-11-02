@@ -3,7 +3,7 @@ import { add, angleOf, dist, dot, len, norm, scale, sub, Vec } from '../core/vec
 import type { DrawMode } from '../game/build';
 import type { Game } from '../game/game';
 import type { RoadPlan } from '../game/roadbuild';
-import { Anchor, anchorAt, corridorUnder, dragLane, LaneDraft, startLane } from '../lanes/edit';
+import { alignNode, Anchor, anchorAt, corridorUnder, dragLane, LaneDraft, startLane } from '../lanes/edit';
 import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, oneWay, twoWay } from '../lanes/model';
 import { isDivided, MEDIAN, RoadClass, RoadSpec } from '../world/roadTypes';
 
@@ -37,6 +37,8 @@ export class RoadTools {
   dragNode: number | null = null;
   /** Полотно, которое выгибают за середину. */
   bend: number | null = null;
+  /** Насколько близко к прямой между соседями узел к ней прилипает. */
+  private moveSnap = 12;
   /** Прямая прилипла к направлению — подпись у курсора. */
   hint: string | null = null;
 
@@ -237,6 +239,7 @@ export class RoadTools {
 
   /** Взять узел или середину дороги. false — ничего не взяли. */
   moveDown(p: Vec, r: number): boolean {
+    this.moveSnap = r;
     const n = this.nodeAt(p, r);
     if (n) {
       this.dragNode = n.id;
@@ -252,7 +255,7 @@ export class RoadTools {
 
   movePlan(p: Vec): RoadPlan | null {
     const b = this.game().roadBuilder;
-    if (this.dragNode !== null) return b.moveNode(this.dragNode, p);
+    if (this.dragNode !== null) return b.moveNode(this.dragNode, alignNode(this.net, this.dragNode, p, this.moveSnap));
     if (this.bend !== null) return b.reshape(this.bend, (n, c) => bendCurve(n, c, p));
     return null;
   }

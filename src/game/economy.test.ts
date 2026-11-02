@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { dist, Vec } from '../core/vec';
 import type { IndustryKind } from '../world/cargo';
+import type { RoadOptions } from '../lanes/edit';
+import { twoWay } from '../lanes/model';
 import type { Industry, Station } from '../world/entities';
-import { RoadSpec } from '../world/roadTypes';
 import { Game } from './game';
+import { road, roadPlan, stationExit, townStreets } from './testkit';
 import { MODELS, modelsFor } from './transport';
 
 /**
@@ -31,26 +33,17 @@ function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Station | nu
   return null;
 }
 
-/** Соединяет выезды двух станций дорогой из двух прямых. */
-function connect(game: Game, sA: Station, sB: Station, spec: RoadSpec): boolean {
-  const exitOf = (nodeId: number) => {
-    const seg = game.net.segment(game.net.node(nodeId).segments[0]);
-    return game.net.node(seg.a === nodeId ? seg.b : seg.a);
-  };
-  const A = exitOf(sA.nodeId);
-  const B = exitOf(sB.nodeId);
+/** Соединяет выезды двух станций дорогой из двух кусков. */
+function connect(game: Game, sA: Station, sB: Station, profile: RoadOptions): boolean {
+  const A = stationExit(game, sA.nodeId);
+  const B = stationExit(game, sB.nodeId);
   const d = { x: B.pos.x - A.pos.x, y: B.pos.y - A.pos.y };
   const n = { x: -d.y / Math.hypot(d.x, d.y), y: d.x / Math.hypot(d.x, d.y) };
   for (const off of [0, 150, -150, 300, -300, 450, -450, 600, -600]) {
     const M = { x: (A.pos.x + B.pos.x) / 2 + n.x * off, y: (A.pos.y + B.pos.y) / 2 + n.y * off };
-    const start = { kind: 'node' as const, nodeId: A.id, pos: A.pos, level: 0 };
-    const end = { kind: 'node' as const, nodeId: B.id, pos: B.pos, level: 0 };
-    const leg1 = { start, end: { kind: 'free' as const, pos: M, level: 0 }, spec, mode: 'straight' as const };
-    const leg2 = { start: { kind: 'free' as const, pos: M, level: 0 }, end, spec, mode: 'straight' as const };
-    if (!game.builder.plan(leg1).ok || !game.builder.plan(leg2).ok) continue;
-    const first = game.builder.build(leg1)!;
-    const mid = game.net.node(first.endNode);
-    if (game.builder.build({ ...leg2, start: { kind: 'node', nodeId: mid.id, pos: mid.pos, level: 0 } })) return true;
+    if (!roadPlan(game, A.id, { free: M }, profile).ok) continue;
+    road(game, A.id, { free: M }, profile);
+    if (road(game, M, B.id, profile)) return true;
   }
   return false;
 }
@@ -66,7 +59,7 @@ function freightLine(seed: number, from: IndustryKind, to: IndustryKind, trucks:
   const { f, p } = pairs[0];
   const sA = stationAtIndustry(game, f, p.fp.center)!;
   const sB = stationAtIndustry(game, p, f.fp.center)!;
-  expect(connect(game, sA, sB, { cls: 'highway', lanesF: 1, lanesB: 1 })).toBe(true);
+  expect(connect(game, sA, sB, { cls: 'highway', lanes: twoWay(1, 1) })).toBe(true);
   const line = game.createLine([sA.id, sB.id])!;
   for (let i = 0; i < trucks; i++) game.buyVehicle(line.id, 'truck');
   runMonths(game, 1);
@@ -94,9 +87,8 @@ describe('Экономика', { timeout: 60_000 }, () => {
     game.money = 5_000_000;
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const placed: Station[] = [];
-    for (const sid of town.streets) {
-      const seg = game.net.segments.get(sid);
-      if (!seg || placed.length >= 2) continue;
+    for (const seg of townStreets(game, town.id)) {
+      if (placed.length >= 2) continue;
       const p = seg.lut.pointAt(seg.length / 2);
       const t = seg.lut.tangentAt(seg.length / 2);
       const q = { x: p.x - t.y * 40, y: p.y + t.x * 40 };

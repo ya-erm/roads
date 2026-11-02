@@ -29,7 +29,7 @@ const camera = new Camera();
 const renderer = new Renderer(canvas, camera);
 const controller = new Controller(canvas, camera, () => game);
 const hud = new Hud(hudRoot, controller, () => game, {
-  hasProgress: () => game.time > 0 || game.lines.size > 0 || game.net.version > 1,
+  hasProgress: () => game.time > 0 || game.lines.size > 0 || game.net.version > 1 || game.canUndo,
   save: () => persist(true),
   newGame: (settings) => newGame(settings),
 });

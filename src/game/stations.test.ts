@@ -1,22 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { STATION } from '../config';
 import { add, dist, scale, Vec } from '../core/vec';
+import type { LaneNode } from '../lanes/model';
 import type { TownBuilding } from '../world/entities';
-import type { RoadNode } from '../world/network';
 import type { Footprint } from '../world/spatial';
-import type { RoadRequest } from './build';
 import { DEFAULT_RULE } from './transport';
 import { Game } from './game';
-
-const STREET = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
+import { End, roadPlan, stationExit } from './testkit';
 
 function runSeconds(game: Game, seconds: number) {
   game.speed = 1;
   for (let t = 0; t < seconds; t += 0.1) game.update(0.1);
 }
-
-const free = (pos: Vec) => ({ kind: 'free' as const, pos, level: 0 });
-const at = (n: RoadNode) => ({ kind: 'node' as const, nodeId: n.id, pos: n.pos, level: 0 });
 
 /** Ищет чистое поле: ни домов, ни предприятий, ни дорог, ни воды на margin вокруг отрезка длиной length. */
 function fieldSpot(game: Game, length: number, margin = 180): Vec {
@@ -26,7 +21,7 @@ function fieldSpot(game: Game, length: number, margin = 180): Vec {
       const mid = { x: x + length / 2, y };
       const reach = length / 2 + margin;
       if (game.index.near(mid, reach).some((s) => dist(s.fp.center, mid) < reach + 40)) continue;
-      if (game.net.segmentsNear(mid, reach).length) continue;
+      if (game.roads.net.corridorsNear(mid, reach).length || game.net.segmentsNear(mid, reach).length) continue;
       let wet = false;
       for (let s = -margin; s <= length + margin && !wet; s += 20) {
         for (const dy of [-margin, -margin / 2, 0, margin / 2, margin]) if (game.isWater({ x: x + s, y: y + dy }, 10)) wet = true;
@@ -37,26 +32,27 @@ function fieldSpot(game: Game, length: number, margin = 180): Vec {
   throw new Error('Нет чистого поля');
 }
 
-function build(game: Game, req: RoadRequest): RoadNode {
-  const built = game.builder.build(req);
-  if (!built) throw new Error(`Не построить: ${game.builder.plan(req).reason}`);
-  return game.net.node(built.endNode);
+/** Строит улицу и возвращает узел на её конце. */
+function build(game: Game, a: End, b: Vec): LaneNode {
+  const plan = roadPlan(game, a, { free: b });
+  if (!plan.ok || !game.roadBuilder.apply(plan)) throw new Error(`Не построить: ${plan.reason}`);
+  return game.roads.net.nodesNear(b, 2)[0];
 }
 
 /** Прямая улица с запада на восток в чистом поле. */
 function fieldRoad(game: Game, length = 400) {
   const a = fieldSpot(game, length);
-  const end = build(game, { start: free(a), end: free({ x: a.x + length, y: a.y }), spec: STREET, mode: 'straight' });
+  const end = build(game, { free: a }, { x: a.x + length, y: a.y });
   return { a, b: end.pos, y: a.y };
 }
 
 /** Т-образный перекрёсток: улица запад — восток и ответвление на юг из середины. */
 function fieldTee(game: Game) {
   const a = fieldSpot(game, 400, 220);
-  const mid = build(game, { start: free(a), end: free({ x: a.x + 200, y: a.y }), spec: STREET, mode: 'straight' });
-  build(game, { start: at(mid), end: free({ x: a.x + 400, y: a.y }), spec: STREET, mode: 'straight' });
-  build(game, { start: at(mid), end: free({ x: a.x + 200, y: a.y + 160 }), spec: STREET, mode: 'straight' });
-  return game.net.node(mid.id);
+  const mid = build(game, { free: a }, { x: a.x + 200, y: a.y });
+  build(game, mid.id, { x: a.x + 400, y: a.y });
+  build(game, mid.id, { x: a.x + 200, y: a.y + 160 });
+  return game.roads.net.node(mid.id);
 }
 
 /** Дом (или ратуша), поставленный прямо в указанное место. */
@@ -158,17 +154,18 @@ describe('Станции', () => {
   it('у перекрёстка выезд станции примыкает прямо к узлу', () => {
     const game = new Game(42);
     const tee = fieldTee(game);
-    expect(tee.segments).toHaveLength(3);
+    expect(tee.kind).toBe('junction');
+    expect(tee.corridors).toHaveLength(3);
     // Курсор над перекрёстком с северной стороны: выезд напротив ответвления на юг.
     const p = { x: tee.pos.x, y: tee.pos.y - 20 };
     const plan = game.stationPlan(p, 14);
     expect(plan.ok).toBe(true);
-    expect(plan.request?.start).toMatchObject({ kind: 'node', nodeId: tee.id });
-    expect(plan.driveway?.plan.lut).toBeTruthy();
+    expect(plan.from).toMatchObject({ kind: 'node', node: tee.id });
+    expect(plan.driveway?.changed.length).toBeGreaterThan(0);
     const st = game.placeStation(p, 14)!;
     expect(st).not.toBeNull();
-    expect(game.net.segmentBetween(tee.id, st.nodeId)).not.toBeNull();
-    expect(game.net.node(tee.id).segments).toHaveLength(4);
+    expect(stationExit(game, st.nodeId).id).toBe(tee.id);
+    expect(game.roads.net.node(tee.id).corridors).toHaveLength(4);
     // Станция к северу от перекрёстка, ровно напротив ответвления.
     expect(st.fp.center.y).toBeLessThan(tee.pos.y - 30);
     expect(Math.abs(st.fp.center.x - tee.pos.x)).toBeLessThan(1);
@@ -180,17 +177,17 @@ describe('Станции', () => {
     // Вдоль дороги на восток, но в 20 м от перекрёстка: раньше здесь было «Слишком близко к перекрёстку».
     const north = game.stationPlan({ x: tee.pos.x + 20, y: tee.pos.y - 30 }, 14);
     expect(north.ok).toBe(true);
-    expect(north.request?.start).toMatchObject({ kind: 'node', nodeId: tee.id });
+    expect(north.from).toMatchObject({ kind: 'node', node: tee.id });
     expect(Math.abs(north.fp!.center.x - tee.pos.x)).toBeLessThan(1);
     // Курсор между дорогой на восток и ответвлением на юг — выезд по диагонали в этот промежуток.
     const p = { x: tee.pos.x + 15, y: tee.pos.y + 15 };
     const plan = game.stationPlan(p, 14);
     expect(plan.ok).toBe(true);
-    expect(plan.request?.start).toMatchObject({ kind: 'node', nodeId: tee.id });
+    expect(plan.from).toMatchObject({ kind: 'node', node: tee.id });
     expect(plan.fp!.center.x).toBeGreaterThan(tee.pos.x + 20);
     expect(plan.fp!.center.y).toBeGreaterThan(tee.pos.y + 20);
     const st = game.placeStation(p, 14)!;
-    expect(game.net.segmentBetween(tee.id, st.nodeId)).not.toBeNull();
+    expect(stationExit(game, st.nodeId).id).toBe(tee.id);
   });
 
   it('дом на месте станции сносится за доплату, а Ctrl+Z его возвращает', () => {
