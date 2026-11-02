@@ -55,6 +55,7 @@ const SEAM_OVERLAP = 0.8;
 
 /** Отрисовка сети из полос: асфальт и бордюры, островки, перекрёстки, тупики, разметка, стрелки. */
 export class LaneRenderer {
+  private net: LaneNet | null = null;
   private version = -1;
   private cuts = new Map<number, [number, number]>();
   private corridors: CorridorGeo[] = [];
@@ -98,7 +99,8 @@ export class LaneRenderer {
   // ---------- Кэш геометрии ----------
 
   private refresh(net: LaneNet): void {
-    if (this.version === net.version) return;
+    if (this.net === net && this.version === net.version) return;
+    this.net = net;
     this.version = net.version;
     this.cuts = junctionCuts(net);
     this.corridors = [...net.corridors.values()].map((c) => this.corridorGeo(net, c));
@@ -189,7 +191,8 @@ export class LaneRenderer {
         runs(mid, (s) => {
           if (!both(s)) return null;
           if (!same) return c.lanes.length > 2 ? 'yellow' : 'dash';
-          return (splitA && s <= SPLIT_SOLID) || (splitB && s >= c.length - SPLIT_SOLID) ? 'solid' : 'dash';
+          // Сплошная — если так задано, и перед развилкой полос в разные полотна.
+          return A.solid || (splitA && s <= SPLIT_SOLID) || (splitB && s >= c.length - SPLIT_SOLID) ? 'solid' : 'dash';
         });
       } else if (gap > LANE_W + 0.3) {
         // Разделительная полоса: барьер посередине, сплошные у полос.

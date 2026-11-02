@@ -57,9 +57,62 @@ export class LaneTraffic {
   totalTripTime = 0;
 
   constructor(
-    readonly graph: LaneGraph,
+    public graph: LaneGraph,
     private readonly events: LaneTrafficEvents,
   ) {}
+
+  /**
+   * Сеть перестроили: машины встают на полосу нового графа там же, где ехали (ближайшая попутная
+   * полоса у их положения), и прокладывают маршрут заново. Кому некуда — теряются.
+   */
+  rebind(graph: LaneGraph): void {
+    this.graph = graph;
+    for (const veh of [...this.vehicles.values()]) {
+      veh.onMovement = null;
+      veh.granted = null;
+      veh.planned = null;
+      veh.waitingAt = null;
+      veh.ready = false;
+      const spot = this.laneAt(veh.pos, veh.dir);
+      const route = spot && findLaneRoute(graph, [graph.links.get(spot.lane.link)!], veh.targetNode);
+      if (!spot || !route) {
+        this.vehicles.delete(veh.id);
+        this.events.onLost(veh);
+        continue;
+      }
+      veh.lane = spot.lane.id;
+      veh.s = spot.u;
+      veh.route = route;
+      veh.routeIndex = 0;
+      veh.lateral = 0;
+      insertSorted(spot.lane.vehicles, veh);
+      this.updatePose(veh);
+    }
+  }
+
+  /** Попутная полоса у точки: ближайшая по смещению среди связей, идущих примерно по dir. */
+  private laneAt(p: Vec, dir: Vec): { lane: GLane; u: number } | null {
+    let best: { lane: GLane; u: number } | null = null;
+    let bestD = 6;
+    for (const c of this.graph.net.corridors.values()) {
+      const hit = c.lut.closest(p);
+      if (hit.d > 40) continue;
+      const t = c.lut.tangentAt(hit.s);
+      const lat = (p.x - hit.point.x) * -t.y + (p.y - hit.point.y) * t.x;
+      for (const link of this.graph.corridorLinks(c.id)) {
+        if (hit.s < link.s0 - 0.5 || hit.s > link.s1 + 0.5 || (t.x * dir.x + t.y * dir.y) * link.flow < 0.3) continue;
+        for (const lane of link.lanes) {
+          const d = Math.abs(lane.offset - lat);
+          if (d < bestD) {
+            bestD = d;
+            const u = link.flow > 0 ? hit.s - link.s0 : link.s1 - hit.s;
+            best = { lane, u: Math.max(0, Math.min(lane.length, u)) };
+          }
+        }
+      }
+    }
+    return best;
+  }
 
   currentLane(v: Vehicle): GLane | undefined {
     return this.graph.lanes.get(v.lane);
@@ -203,6 +256,9 @@ export class LaneTraffic {
       }
     }
     if (!target) return;
+    // Через сплошную не перестраиваются.
+    const leftOne = target.index < lane.index ? target : lane;
+    if (leftOne.solidRight) return;
     const urgency = mandatory ? Math.max(0, Math.min(1, 1 - remaining / 140)) : 0;
     if (this.safeToEnter(target, veh, urgency)) {
       this.moveToLane(veh, lane, target);

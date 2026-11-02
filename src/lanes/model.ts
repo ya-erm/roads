@@ -14,6 +14,8 @@ export interface LaneSlot {
   /** Где полоса на полную ширину, м вдоль оси; за пределами — отгон (см. `taperLen`) или ничего. */
   from: number;
   to: number;
+  /** Линия к соседней полосе с бо́льшим смещением — сплошная: через неё не перестраиваются. */
+  solid?: boolean;
 }
 
 /** Полотно: ось между двумя узлами и полосы вдоль неё. */
@@ -97,6 +99,16 @@ export interface CorridorOptions {
   /** Направление выхода из перекрёстка a / входа в перекрёсток b; по умолчанию — по хорде. */
   dirA?: Vec;
   dirB?: Vec;
+  /** С какой стороны стыка лежит полотно (1 — спереди по `dir`); по умолчанию — со стороны другого конца. */
+  sideA?: 1 | -1;
+  sideB?: 1 | -1;
+}
+
+/** Сеть полос для сохранения и отмены. */
+export interface LaneNetSave {
+  nextId: number;
+  nodes: Omit<LaneNode, 'corridors'>[];
+  corridors: Omit<Corridor, 'lut' | 'length'>[];
 }
 
 export class LaneNet {
@@ -153,8 +165,10 @@ export class LaneNet {
     if (!curve) {
       const chord = sub(p3, p0);
       const h = len(chord) / 3;
-      const t0 = A.kind === 'seam' ? (dot(A.dir, chord) >= 0 ? A.dir : scale(A.dir, -1)) : norm(o.dirA ?? chord);
-      const t3 = B.kind === 'seam' ? (dot(B.dir, chord) >= 0 ? B.dir : scale(B.dir, -1)) : norm(o.dirB ?? chord);
+      // Тело полотна со стороны sideA от стыка a; у b — со стороны sideB, значит въезжает в b против неё.
+      const side = (n: LaneNode, given: 1 | -1 | undefined, toward: Vec) => given ?? (dot(n.dir, toward) >= 0 ? 1 : -1);
+      const t0 = A.kind === 'seam' ? scale(A.dir, side(A, o.sideA, chord)) : norm(o.dirA ?? chord);
+      const t3 = B.kind === 'seam' ? scale(B.dir, -side(B, o.sideB, scale(chord, -1))) : norm(o.dirB ?? chord);
       curve = { p0, p1: add(p0, scale(t0, h)), p2: sub(p3, scale(t3, h)), p3 };
     }
     const lut = new CurveLUT(curve);
@@ -172,9 +186,84 @@ export class LaneNet {
     };
     this.corridors.set(c.id, c);
     A.corridors.push(c.id);
-    B.corridors.push(c.id);
+    if (b !== a) B.corridors.push(c.id);
     this.version++;
     return c;
+  }
+
+  /** Убирает полотно; узлы, у которых не осталось полотен, — тоже (если не keepNodes). */
+  removeCorridor(id: number, keepNodes = false): void {
+    const c = this.corridors.get(id);
+    if (!c) return;
+    this.corridors.delete(id);
+    for (const nid of [c.a, c.b]) {
+      const n = this.nodes.get(nid);
+      if (!n) continue;
+      n.corridors = n.corridors.filter((x) => x !== id);
+      if (!n.corridors.length && !keepNodes) this.nodes.delete(nid);
+    }
+    this.version++;
+  }
+
+  /** Новая форма полотна: отрезки полос растягиваются вместе с ним. */
+  setCurve(c: Corridor, curve: Cubic): void {
+    const old = c.length;
+    c.curve = curve;
+    c.lut = new CurveLUT(curve);
+    c.length = c.lut.length;
+    const k = c.length / old;
+    c.lanes = c.lanes.map((l) => ({ ...l, from: l.from <= 0.01 ? 0 : l.from * k, to: l.to >= old - 0.01 ? c.length : l.to * k }));
+    this.version++;
+  }
+
+  setLanes(c: Corridor, lanes: LaneSlot[]): void {
+    c.lanes = lanes.map((l) => ({ ...l, from: Math.max(0, l.from), to: Math.min(c.length, l.to) }));
+    this.version++;
+  }
+
+  /** Двигает узел: концы его полотен — следом, их управляющие точки сдвигаются так же (форма сохраняется). */
+  moveNode(id: number, pos: Vec): void {
+    const n = this.node(id);
+    const delta = sub(pos, n.pos);
+    n.pos = { ...pos };
+    for (const e of this.ends(n)) {
+      const cv = { ...e.corridor.curve };
+      if (e.end === 'a') {
+        cv.p0 = add(cv.p0, delta);
+        cv.p1 = add(cv.p1, delta);
+      } else {
+        cv.p3 = add(cv.p3, delta);
+        cv.p2 = add(cv.p2, delta);
+      }
+      this.setCurve(e.corridor, cv);
+    }
+    this.version++;
+  }
+
+  toJSON(): LaneNetSave {
+    return {
+      nextId: this.nextId,
+      nodes: [...this.nodes.values()].map(({ corridors: _, ...n }) => ({ ...n, pos: { ...n.pos }, dir: { ...n.dir } })),
+      corridors: [...this.corridors.values()].map(({ lut: _l, length: _n, ...c }) => ({ ...c, curve: { ...c.curve }, lanes: c.lanes.map((l) => ({ ...l })) })),
+    };
+  }
+
+  static fromJSON(data: LaneNetSave): LaneNet {
+    const net = new LaneNet();
+    net.nextId = data.nextId;
+    for (const n of data.nodes) net.nodes.set(n.id, { ...n, pos: { ...n.pos }, dir: { ...n.dir }, corridors: [] });
+    for (const c of data.corridors) {
+      const lut = new CurveLUT(c.curve);
+      net.corridors.set(c.id, { ...c, curve: { ...c.curve }, lut, length: lut.length, lanes: c.lanes.map((l) => ({ ...l })) });
+      net.node(c.a).corridors.push(c.id);
+      if (c.b !== c.a) net.node(c.b).corridors.push(c.id);
+    }
+    net.version = 1;
+    return net;
+  }
+
+  clone(): LaneNet {
+    return LaneNet.fromJSON(this.toJSON());
   }
 
   /** Конец полотна: где, куда смотрит, с какой стороны стыка. */

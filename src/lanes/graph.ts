@@ -37,6 +37,8 @@ export interface GLane {
   offset: number;
   /** Смещение вправо по ходу движения. */
   side: number;
+  /** Линия к соседу справа (index + 1) сплошная — через неё не перестраиваются. */
+  solidRight: boolean;
   length: number;
   speed: number;
   /** От головной машины к хвосту. */
@@ -123,6 +125,11 @@ export class LaneGraph {
     return link.flow > 0 ? link.s0 + u : link.s1 - u;
   }
 
+  /** Связи полотна (обоих направлений). */
+  corridorLinks(id: number): GLink[] {
+    return (this.byCorridor.get(id) ?? []).flatMap((g) => g.links);
+  }
+
   /** Полоса связи по полосе полотна. */
   laneOf(link: GLink, laneIdx: number): GLane | undefined {
     return link.lanes.find((l) => l.laneIdx === laneIdx);
@@ -175,17 +182,12 @@ export class LaneGraph {
         };
         // Слева направо по ходу: по a→b левее — меньшее смещение, против — большее.
         present.sort((x, y) => (x.l.offset - y.l.offset) * flow);
-        link.lanes = present.map(({ l, i }, index) => ({
-          id: this.nextId++,
-          link: link.id,
-          index,
-          laneIdx: i,
-          offset: l.offset,
-          side: l.offset * flow,
-          length: link.length,
-          speed,
-          vehicles: [],
-        }));
+        link.lanes = present.map(({ l, i }, index) => {
+          // Сплошную задаёт полоса с меньшим смещением из пары соседей.
+          const next = present[index + 1]?.l;
+          const solidRight = !!next && (l.offset < next.offset ? !!l.solid : !!next.solid);
+          return { id: this.nextId++, link: link.id, index, laneIdx: i, offset: l.offset, side: l.offset * flow, solidRight, length: link.length, speed, vehicles: [] };
+        });
         links.push(link);
       }
       // Пустые связи (нет полос этого направления) не нужны, но порядок по оси сохраняем.

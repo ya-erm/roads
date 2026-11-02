@@ -13,45 +13,117 @@
         overflow: hidden;
         background: #d6e2bd;
         font-family: system-ui, sans-serif;
+        color: #3b4652;
       }
       canvas {
         display: block;
-        cursor: grab;
       }
-      .legend {
+      .card {
         position: fixed;
-        left: 16px;
-        top: 14px;
-        padding: 8px 12px;
+        padding: 8px 10px;
         border-radius: 12px;
-        background: rgba(255, 255, 255, 0.92);
+        background: rgba(255, 255, 255, 0.94);
         box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
         font-size: 13px;
-        color: #3b4652;
+      }
+      .legend {
+        left: 16px;
+        top: 14px;
       }
       .legend b {
         display: block;
         margin-bottom: 2px;
       }
-      .legend kbd {
+      kbd {
         font-family: inherit;
-        font-size: 11px;
+        font-size: 10px;
         background: #eef2f6;
+        color: #6b7684;
         border-radius: 4px;
-        padding: 1px 5px;
+        padding: 1px 4px;
+        margin-left: 5px;
       }
-      .legend a {
+      a {
         color: #2f80ed;
+      }
+      #tools {
+        left: 50%;
+        bottom: 34px;
+        transform: translateX(-50%);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        align-items: center;
+        max-width: calc(100vw - 40px);
+      }
+      #tools .row {
+        display: flex;
+        gap: 4px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      #tools .hint {
+        font-size: 12px;
+        color: #6b7684;
+        max-width: 640px;
+        text-align: center;
+      }
+      button {
+        font: inherit;
+        border: 2px solid transparent;
+        background: #f4f6f8;
+        border-radius: 9px;
+        padding: 5px 10px;
+        cursor: pointer;
+        color: inherit;
+      }
+      button:hover {
+        background: #e8edf2;
+      }
+      button.active {
+        border-color: #2f80ed;
+        background: #e7f0fd;
+      }
+      button.tool {
+        font-weight: 600;
+      }
+      button.chip {
+        font-size: 12px;
+        padding: 3px 8px;
+      }
+      #panel {
+        right: 16px;
+        top: 86px;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        min-width: 200px;
+      }
+      #panel .muted {
+        color: #6b7684;
+        font-size: 12px;
+        margin-bottom: 2px;
+      }
+      #panel button {
+        text-align: left;
+      }
+      #panel .danger {
+        color: #c0392b;
+      }
+      .hidden {
+        display: none !important;
       }
     </style>
   </head>
   <body>
     <canvas id="lab"></canvas>
-    <div class="legend">
+    <div class="card legend">
       <b>Лаборатория полос</b>
-      Тянуть — двигать, колесо — масштаб, <kbd>D</kbd> — оси и стыки, <kbd>F</kbd> — всё в кадр,
-      <kbd>Пробел</kbd> — пауза, <kbd>+</kbd> <kbd>−</kbd> — машин больше / меньше · <a href="/">к игре</a>
+      Правая кнопка или «Обзор» — двигать, колесо — масштаб, <kbd>D</kbd> оси и стыки, <kbd>F</kbd> всё в кадр,
+      <kbd>Пробел</kbd> пауза, <kbd>+</kbd><kbd>−</kbd> машин больше / меньше · <a href="/">к игре</a>
     </div>
+    <div id="tools" class="card"></div>
+    <div id="panel" class="card hidden"></div>
     <script type="module" src="/src/lanes/lab.ts"></script>
   </body>
 </html>
