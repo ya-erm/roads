@@ -3,7 +3,7 @@ import { dist } from '../core/vec';
 import { GLane, GLink, GMove, LaneGraph } from '../lanes/graph';
 import { LaneNet, LaneNode } from '../lanes/model';
 import { findLaneRoute, linkCost, transitionCost } from '../lanes/routing';
-import { changePenalty, LaneTraffic, LaneTrafficEvents } from '../lanes/traffic';
+import { changePenalty, CURB_PULL, keepRightCost, LaneTraffic, LaneTrafficEvents } from '../lanes/traffic';
 
 /** Размер кольца: радиус оси (если примыкающие дороги шире, кольцо будет больше). */
 export type RingSize = 'small' | 'medium' | 'large';
@@ -110,12 +110,12 @@ export class Roads {
     return route.reduce((sum, id) => sum + (this.graph.links.get(id)?.length ?? 0), 0);
   }
 
-  /** Линия маршрута на карте: по первой полосе каждой связи. */
   /**
    * Линия маршрута для карты — по полосам, которыми поедут машины: с наименьшей трудностью перестроений
-   * (как их выбирают сами машины), перестроение — плавно посередине связи, повороты — по кривым манёвров.
+   * (как их выбирают сами машины; автобусы — keepRight — держатся правее), перестроение — плавно в начале
+   * связи (там, где его и делают машины), повороты — по кривым манёвров.
    */
-  routePolyline(route: number[]): Vec[] {
+  routePolyline(route: number[], keepRight = false): Vec[] {
     const g = this.graph;
     const links = route.map((id) => g.links.get(id)).filter((l): l is GLink => !!l);
     if (!links.length) return [];
@@ -125,11 +125,18 @@ export class Roads {
     const enter: Map<number, number>[] = new Array(links.length);
     for (let k = links.length - 1; k >= 0; k--) {
       const link = links[k];
-      out[k] = new Map(link.lanes.map((o) => [o.id, k === links.length - 1 ? 0 : Math.min(Infinity, ...exits(k, o).map((m) => enter[k + 1].get(m.outLane) ?? Infinity))]));
+      // К цели — к бордюру, как едут сами машины (в «кармашек» у остановки).
+      const last = (o: GLane) => (link.lanes.length - 1 - o.index) * CURB_PULL;
+      const ahead = (o: GLane) => Math.min(Infinity, ...exits(k, o).map((m) => enter[k + 1].get(m.outLane) ?? Infinity));
+      out[k] = new Map(
+        link.lanes.map((o) => [o.id, (k === links.length - 1 ? last(o) : ahead(o)) + keepRightCost(link.lanes.length, o.index, keepRight)]),
+      );
       enter[k] = new Map(link.lanes.map((l) => [l.id, Math.min(...link.lanes.map((o) => changePenalty(Math.abs(o.index - l.index), link.length) + out[k].get(o.id)!))]));
     }
     const pts: Vec[] = [];
-    let lane = links[0].lanes.reduce((a, b) => ((enter[0].get(b.id) ?? Infinity) < (enter[0].get(a.id) ?? Infinity) ? b : a));
+    // Отправляются от бордюра (из «кармашка» у остановки): крайняя правая полоса, с которой можно доехать.
+    const ok = links[0].lanes.filter((l) => Number.isFinite(enter[0].get(l.id) ?? Infinity));
+    let lane = (ok.length ? ok : links[0].lanes).reduce((a, b) => (b.index > a.index ? b : a));
     for (let k = 0; k < links.length; k++) {
       const link = links[k];
       // Куда перестроиться на этой связи (сама полоса — при равенстве).
@@ -143,6 +150,9 @@ export class Roads {
         }
       }
       const steps = Math.max(2, Math.ceil(link.length / 8));
+      // Перестраиваются сразу, как только можно (в «кармашек» — в самом его начале): плавно на первых метрах связи.
+      const from = Math.min(6, link.length * 0.1);
+      const span = Math.min(35, link.length * 0.6);
       for (let i = 0; i <= steps; i++) {
         const s = (link.length * i) / steps;
         const a = g.lanePose(lane, s).pos;
@@ -151,7 +161,7 @@ export class Roads {
           continue;
         }
         const b = g.lanePose(to, s).pos;
-        const t = Math.max(0, Math.min(1, (i / steps - 0.3) / 0.4));
+        const t = Math.max(0, Math.min(1, (s - from) / span));
         const w = t * t * (3 - 2 * t);
         pts.push({ x: a.x + (b.x - a.x) * w, y: a.y + (b.y - a.y) * w });
       }

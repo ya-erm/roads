@@ -60,6 +60,37 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
     expect(game.roads.net.corridors.size).toBe(corridors);
   });
 
+  it('автобус на остановке стоит на дороге — его видно и можно выбрать — и едет дальше оттуда же, не появляясь заново', () => {
+    const game = new Game(7);
+    game.money = 5_000_000;
+    const stops = placeStops(game, 2);
+    const line = game.createLine(stops.map((s) => s.id))!;
+    expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
+    const bus = game.fleet.get(line.vehicles[0])!;
+    let dwellSim: number | null = null;
+    let continued = false;
+    // Новый автобус ждёт первого рейса «в депо» у первой остановки — смотрим с первой поездки.
+    let drove = false;
+    game.speed = 1;
+    for (let t = 0; t < 2 * MONTH_LENGTH && !continued; t += 0.1) {
+      game.update(0.1);
+      drove ||= bus.state === 'driving';
+      const st = game.stations.get(line.stops[bus.stop])!;
+      if (drove && bus.state === 'loading' && st.kind === 'stop') {
+        const sim = game.fleetSim(bus);
+        expect(sim).toBeDefined();
+        expect(dist(sim!.pos, game.roads.net.node(st.nodeId).pos)).toBeLessThan(20);
+        expect(game.vehicleAt(sim!.pos)?.fleet?.id).toBe(bus.id);
+        dwellSim = sim!.id;
+      } else if (dwellSim !== null && bus.state === 'driving') {
+        expect(bus.simId).toBe(dwellSim);
+        continued = true;
+      }
+    }
+    expect(continued).toBe(true);
+    expect(line.problem).toBeNull();
+  });
+
   it('остановки и автостанции — в одном маршруте; рядом с остановкой вторую не поставить', () => {
     const game = new Game(7);
     game.money = 5_000_000;

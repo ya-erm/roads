@@ -7,6 +7,11 @@ import { Corridor, layerOf } from './model';
 import { findLaneRoute } from './routing';
 
 export interface LaneTrafficEvents {
+  /**
+   * Машина у цели остаётся на дороге (автобус на остановке — просто остановка в маршруте): true — стоит у конца
+   * полосы, пока её не отправят дальше (continueTo). Спрашивается, пока стоит.
+   */
+  dwell?(v: Vehicle): boolean;
   /** Можно ли машине завершить поездку сейчас. */
   canArrive?(v: Vehicle): boolean;
   onArrive(v: Vehicle): void;
@@ -29,7 +34,11 @@ const CHANGE_ROOM = 120;
  * Трудность остановиться у цели не у бордюра — за каждую полосу от крайней правой. Больше, чем перестроение
  * даже на коротком «кармашке» у остановки (там места на него мало — см. changePenalty).
  */
-const CURB_PULL = 4.5;
+export const CURB_PULL = 4.5;
+/** Автобус держится крайней правой полосы: трудность за каждую полосу левее — на каждой связи пути. */
+export const BUS_RIGHT = 1.2;
+/** Трудность ехать по полосе l связи: автобусу — левее крайней правой. */
+export const keepRightCost = (lanes: number, index: number, keepRight: boolean) => (keepRight ? (lanes - 1 - index) * BUS_RIGHT : 0);
 
 /**
  * Трудность n перестроений на отрезке длиной room: само число перестроений и штраф, если места
@@ -240,6 +249,29 @@ export class LaneTraffic {
     return { pos: { ...pose.pos }, dir: { ...pose.dir } };
   }
 
+  /**
+   * Машина, что стоит у цели (dwell), едет дальше — к targetNode, оттуда же, где стоит: маршрут от её связи.
+   * Не доехать — false (стоит дальше).
+   */
+  continueTo(veh: Vehicle, targetNode: number): boolean {
+    const lane = this.currentLane(veh);
+    const link = lane && this.graph.links.get(lane.link);
+    if (!link || veh.onMovement) return false;
+    const route = findLaneRoute(this.graph, [link], targetNode);
+    if (!route) return false;
+    veh.targetNode = targetNode;
+    this.setRoute(veh, route);
+    veh.tripTime = 0;
+    veh.stoppedTime = 0;
+    return true;
+  }
+
+  /** Машина стоит так, что её можно объехать: слева от её полосы есть попутная (она в «кармашке» или крайней правой). */
+  standsAside(veh: Vehicle): boolean {
+    const lane = this.currentLane(veh);
+    return !!lane && lane.index > 0;
+  }
+
   /** Новая машина на полосе lane в s (в очередь полосы её ставит вызывающий). */
   private create(spec: VehicleSpec, targetNode: number, route: number[], lane: GLane, s: number, v: number): Vehicle {
     const pose = this.graph.lanePose(lane, Math.min(s, lane.length));
@@ -385,6 +417,8 @@ export class LaneTraffic {
         if (next === undefined) v = (link.lanes.length - 1 - l.index) * CURB_PULL;
         else if (k === links.length - 1) v = this.hasTransition(l, next) ? 0 : Infinity;
         else for (const m of this.graph.movesFrom.get(l.id) ?? []) if (m.outLink === next) v = Math.min(v, plan[k + 1].cost.get(m.outLane) ?? Infinity);
+        // Автобус держится правее (как и линия маршрута на карте).
+        v += keepRightCost(link.lanes.length, l.index, veh.kind === 'bus');
         stay.set(l.id, v);
       }
       const cost = new Map<number, number>();
@@ -429,8 +463,9 @@ export class LaneTraffic {
       target = link.lanes[lane.index + Math.sign(goal.index - lane.index)];
       urgency = Math.max(0, Math.min(1, 1 - end.dist / (end.changes * CHANGE_ROOM + 20)));
       strategic = true;
-    } else if (goal !== lane && veh.routeIndex === veh.route.length - 1) {
-      // Последняя связь до цели — к бордюру (в «кармашек» у остановки), без спешки: не пустят — остановится и в своей.
+    } else if (goal !== lane && (veh.routeIndex === veh.route.length - 1 || veh.kind === 'bus')) {
+      // Последняя связь до цели — к бордюру (в «кармашек» у остановки, сразу в его начале); автобус и в пути
+      // держится правее. Без спешки: не пустят — поедет и в своей.
       target = link.lanes[lane.index + Math.sign(goal.index - lane.index)];
     } else if (remaining > 50) {
       const idx = lane.vehicles.indexOf(veh);
@@ -711,6 +746,11 @@ export class LaneTraffic {
       const lane = this.currentLane(veh)!;
       const isLast = veh.routeIndex === veh.route.length - 1;
       if (isLast && veh.s >= lane.length - 0.5) {
+        if (this.events.dwell?.(veh)) {
+          veh.s = lane.length - 0.5;
+          veh.v = 0;
+          break;
+        }
         if (this.events.canArrive && !this.events.canArrive(veh)) {
           veh.s = lane.length - 0.5;
           veh.v = 0;

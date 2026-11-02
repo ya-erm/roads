@@ -415,6 +415,7 @@ export class Game implements BuildContext {
     this.terrain = new Terrain(this.rng, this.settings);
     this.money = this.settings.money;
     this.roads = new Roads({
+      dwell: (v) => this.dwellAt(v),
       canArrive: (v) => this.canArrive(v),
       onArrive: (v) => this.onArrive(v),
       onLost: (v) => this.onLost(v),
@@ -478,7 +479,8 @@ export class Game implements BuildContext {
 
   /** Машина компании для сохранения; в пути — с местом на дороге, чтобы после загрузки ехать дальше оттуда же. */
   private fleetToSave(v: FleetVehicle): SaveData['fleet'][number] {
-    const sim = v.state === 'driving' ? this.fleetSim(v) : undefined;
+    // В пути или на остановке (автобус стоит на дороге) — с местом на дороге.
+    const sim = v.state === 'driving' || v.state === 'loading' ? this.fleetSim(v) : undefined;
     if (!sim) return v;
     const spot = this.traffic.spotOf(sim);
     return { ...v, onRoad: { ...spot, v: sim.v, trip: sim.tripTime, stopped: sim.stoppedTime } };
@@ -489,7 +491,9 @@ export class Game implements BuildContext {
     const m = MODELS[v.model];
     const line = this.lines.get(v.lineId);
     const to = line && this.stations.get(line.stops[v.stop]);
-    if (m.mode !== 'road' || v.state !== 'driving' || !line || !to) return null;
+    // На остановке автобус тоже на дороге: его цель — та же остановка, у неё он и встанет снова.
+    const onStop = v.state === 'loading' && to?.kind === 'stop';
+    if (m.mode !== 'road' || (v.state !== 'driving' && !onStop) || !line || !to) return null;
     const load = v.cargo ? CARGO[v.cargo].color : undefined;
     const sim = this.traffic.place({ ...m.spec, color: line.color, load, targetNode: to.nodeId }, spot.pos, spot.dir, spot.v);
     if (!sim) return null;
@@ -532,7 +536,7 @@ export class Game implements BuildContext {
         if (v.trainId == null || !trains.has(v.trainId)) v.trainId = null;
         continue;
       }
-      if (v.state === 'driving' && v.simId !== null && sims.has(v.simId)) continue;
+      if ((v.state === 'driving' || v.state === 'loading') && v.simId !== null && sims.has(v.simId)) continue;
       if (v.state === 'driving') {
         v.state = 'departing';
         v.stop = (v.stop - 1 + line.stops.length) % line.stops.length;
@@ -2600,6 +2604,9 @@ export class Game implements BuildContext {
       const train = this.fleetTrain(v);
       return st.platforms.some((p) => p !== train?.platform && !this.rail.isReserved(p));
     }
+    // Автобус у остановки стоит на дороге: ждать интервала — только в «кармашке» (его объезжают), не загораживая полосу.
+    const standing = this.fleetSim(v);
+    if (st.kind === 'stop' && standing) return this.traffic.standsAside(standing);
     // Новая машина ещё не на посту — никому не мешает.
     return !v.inBay || st.occupied.length < st.bays;
   }
@@ -2702,6 +2709,20 @@ export class Game implements BuildContext {
       const to = this.stations.get(line.stops[nextIdx]);
       if (!from || !to) {
         v.timer = 2;
+        continue;
+      }
+      // Автобус стоит у остановки на дороге — едет дальше оттуда же, а не появляется заново.
+      const standing = this.fleetSim(v);
+      if (standing) {
+        if (!this.traffic.continueTo(standing, to.nodeId)) {
+          line.problem = `Нет дороги: ${from.name} → ${to.name}`;
+          v.timer = 2;
+          continue;
+        }
+        line.problem = null;
+        this.recordDeparture(line, v);
+        v.state = 'driving';
+        v.stop = nextIdx;
         continue;
       }
       const route = this.roads.route(from.nodeId, to.nodeId);
@@ -2879,6 +2900,22 @@ export class Game implements BuildContext {
   private fleetOf(sim: Vehicle): FleetVehicle | undefined {
     const owner = this.owners.get(sim.id);
     return owner?.type === 'fleet' ? this.fleet.get(owner.id) : undefined;
+  }
+
+  /**
+   * Автобус у остановки — это просто остановка в маршруте: он стоит на дороге (в «кармашке», если есть), его
+   * видно и можно выбрать; высадка и посадка — пока стоит, потом едет дальше оттуда же.
+   */
+  private dwellAt(sim: Vehicle): boolean {
+    const v = this.fleetOf(sim);
+    const line = v && this.lines.get(v.lineId);
+    const st = line && this.stations.get(line.stops[v.stop]);
+    if (!v || !line || st?.kind !== 'stop' || st.nodeId !== sim.targetNode) return false;
+    if (v.state === 'driving') {
+      v.state = 'loading';
+      this.handleStop(v, st, line);
+    }
+    return true;
   }
 
   private canArrive(sim: Vehicle): boolean {
@@ -3119,7 +3156,8 @@ export class Game implements BuildContext {
   /** Путь линии от остановки i до следующей — для отрисовки: по выбранным платформам, если они заданы. */
   linePolyline(line: Line, i: number): Vec[] | null {
     const j = (i + 1) % line.stops.length;
-    return this.routePolyline(line.stops[i], line.stops[j], this.stopPlatform(line, i), this.stopPlatform(line, j));
+    // Автобусы держатся правее — и линия на карте тоже.
+    return this.routePolyline(line.stops[i], line.stops[j], this.stopPlatform(line, i), this.stopPlatform(line, j), this.lineKind(line) === 'passengers');
   }
 
   /** Что делать с грузом на остановке: доставить получателю, оставить на складе или везти дальше. */
@@ -4377,13 +4415,13 @@ export class Game implements BuildContext {
    * Путь машины между станциями по полосам (с учётом стороны движения) — для отрисовки линий.
    * null — дороги между станциями нет.
    */
-  routePolyline(fromId: number, toId: number, fromPlatform: number | null = null, toPlatform: number | null = null): Vec[] | null {
+  routePolyline(fromId: number, toId: number, fromPlatform: number | null = null, toPlatform: number | null = null, keepRight = false): Vec[] | null {
     const version = this.net.version * 100003 + this.roads.net.version;
     if (this.routeCacheVersion !== version) {
       this.routeCache.clear();
       this.routeCacheVersion = version;
     }
-    const key = `${fromId}>${toId}:${fromPlatform ?? ''}>${toPlatform ?? ''}`;
+    const key = `${fromId}>${toId}:${fromPlatform ?? ''}>${toPlatform ?? ''}${keepRight ? ':R' : ''}`;
     if (this.routeCache.has(key)) return this.routeCache.get(key)!;
     const from = this.stations.get(fromId);
     const to = this.stations.get(toId);
@@ -4396,7 +4434,7 @@ export class Game implements BuildContext {
       return rail;
     }
     const route = from && to ? this.roads.route(from.nodeId, to.nodeId) : null;
-    const pts = route ? this.roads.routePolyline(route) : null;
+    const pts = route ? this.roads.routePolyline(route, keepRight) : null;
     this.routeCache.set(key, pts);
     return pts;
   }
