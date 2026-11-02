@@ -56,6 +56,8 @@ export class RoadTools {
   editCorridor: number | null = null;
   /** Куда примкнёт тянущийся тупик. */
   joinPos: Vec | null = null;
+  /** Высота, на которой строим: −1 тоннель, 0 земля, 1 мост, 2 эстакада. */
+  level = 0;
   /** Насколько близко к прямой между соседями узел к ней прилипает. */
   private moveSnap = 12;
   /** Прямая прилипла к направлению — подпись у курсора. */
@@ -113,7 +115,7 @@ export class RoadTools {
   /** Начать дорогу, если ещё не начата. true — только что начали (ждём второй клик или отпускание). */
   begin(p: Vec, r: number): boolean {
     if (this.start) return false;
-    this.start = anchorAt(this.net, p, r);
+    this.start = anchorAt(this.net, p, r, this.level);
     this.control = null;
     return true;
   }
@@ -129,10 +131,10 @@ export class RoadTools {
       const a = base + Math.round((angleOf(d) - base) / step) * step;
       const l = Math.max(10, Math.round(len(d) / 10) * 10);
       const q = add(s.pos, scale({ x: Math.cos(a), y: Math.sin(a) }, l));
-      const near = anchorAt(this.net, q, r * 0.5);
-      return near.kind === 'node' ? near : { kind: 'free', pos: q };
+      const near = anchorAt(this.net, q, r * 0.5, this.level);
+      return near.kind === 'node' ? near : { kind: 'free', pos: q, level: this.level };
     }
-    const a = anchorAt(this.net, p, r);
+    const a = anchorAt(this.net, p, r, this.level);
     // Прямая от дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°).
     if (a.kind === 'free' && s) {
       const d = sub(p, s.pos);
@@ -152,7 +154,7 @@ export class RoadTools {
         }
         if (best) {
           this.hint = best.hint;
-          return { kind: 'free', pos: add(s.pos, scale(best.v, l * best.cos)) };
+          return { kind: 'free', pos: add(s.pos, scale(best.v, l * best.cos)), level: this.level };
         }
       }
     }
@@ -178,7 +180,12 @@ export class RoadTools {
       return null;
     }
     const end = this.endAnchor(p, r, shift);
-    return this.game().roadBuilder.road(this.start, end, { ...profileOf(spec), control: this.control ?? undefined, kink: mode === 'straight' });
+    return this.game().roadBuilder.road(this.start, end, {
+      ...profileOf(spec),
+      control: this.control ?? undefined,
+      kink: mode === 'straight',
+      arc: mode === 'arc',
+    });
   }
 
   /** Клик концом: точка изгиба кривой или постройка. Возвращает причину, если не построилось. */
@@ -193,7 +200,7 @@ export class RoadTools {
     const end = this.endAnchor(p, r, shift);
     this.game().roadBuilder.apply(plan);
     // Следующая дорога — от конца этой.
-    this.start = anchorAt(this.net, end.pos, 3);
+    this.start = anchorAt(this.net, end.pos, 3, end.kind === 'free' ? end.level : undefined);
     this.control = null;
     return null;
   }

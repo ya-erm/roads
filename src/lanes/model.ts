@@ -518,6 +518,18 @@ export class LaneNet {
     return null;
   }
 
+  /** Высота полотна в точке оси s: от уровня узла a к уровню узла b (пандус) — равномерно. */
+  heightAt(c: Corridor, s: number): number {
+    const la = this.node(c.a).level;
+    const lb = this.node(c.b).level;
+    return la + (lb - la) * Math.max(0, Math.min(1, s / c.length));
+  }
+
+  /** Полотно без подъёма: оба конца на одном уровне. */
+  isFlat(c: Corridor): boolean {
+    return this.node(c.a).level === this.node(c.b).level;
+  }
+
   /** Тупик: у стыка занята только одна сторона. */
   isDeadEnd(n: LaneNode): boolean {
     if (n.kind !== 'seam') return false;

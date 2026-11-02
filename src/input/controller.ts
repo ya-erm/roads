@@ -316,6 +316,7 @@ export class Controller {
 
   setLevel(level: number): void {
     this.level = Math.max(-1, Math.min(2, level));
+    this.roadTools.level = this.level;
     this.onChange();
   }
 

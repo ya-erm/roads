@@ -52,6 +52,19 @@ describe('Полосы: инструменты', () => {
     expect(net.node(west.id).kind).toBe('junction');
   });
 
+  it('дуга из тупика — окружность: конец смотрит по дуге, а не вдоль хорды', () => {
+    const net = road();
+    const east = deadEnds(net).find((n) => n.pos.x > 400)!;
+    buildRoad(net, anchorAt(net, east.pos, 14), free(1200, 300), { ...AVENUE, arc: true });
+    expect(net.node(east.id).kind).toBe('seam');
+    const tip = deadEnds(net).find((n) => n.pos.x > 1100)!;
+    // Касательная в конце дуги — отражение начальной (1, 0) относительно хорды (0.8, 0.6).
+    const [e] = net.ends(tip);
+    expect(e.away.x).toBeCloseTo(-0.28, 2);
+    expect(e.away.y).toBeCloseTo(-0.96, 2);
+    expect(net.problems()).toEqual([]);
+  });
+
   it('ответвление из стыка с дорогами по обе стороны — перекрёсток, дорога идёт прямо к цели', () => {
     const net = road();
     const east = deadEnds(net).find((n) => n.pos.x > 400)!;

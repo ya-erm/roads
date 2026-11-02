@@ -1,9 +1,9 @@
 import { COST } from '../config';
 import { Cubic, minRadius } from '../core/bezier';
 import { dist, Vec } from '../core/vec';
-import { Anchor, applyLane, buildRoad, bulldoze, LaneDraft, RoadOptions } from '../lanes/edit';
+import { Anchor, applyLane, buildRoad, bulldoze, EditError, LaneDraft, RoadOptions } from '../lanes/edit';
 import { Corridor, LaneNet, LaneSlot } from '../lanes/model';
-import { RoadClass, ROAD_CLASSES } from '../world/roadTypes';
+import { LEVEL_RUN, RoadClass, ROAD_CLASSES } from '../world/roadTypes';
 import { halfAtS } from '../world/worldgen';
 import type { Roads } from './roads';
 
@@ -20,6 +20,8 @@ export interface RoadContext {
   spend(amount: number): void;
   refund(amount: number): void;
   networkChanged(): void;
+  /** Что не так у полотна с путями: переезд под острым углом, мало места по высоте, слишком близко. */
+  railConflict?(net: LaneNet, c: Corridor): string | undefined;
 }
 
 /** План правки дорог: сеть с правкой (для предпросмотра и стройки), цена, дома под снос, что не так. */
@@ -39,13 +41,22 @@ export interface RoadPlan {
 
 const fail = (reason: string): RoadPlan => ({ ok: false, reason, cost: 0, spend: 0, refund: 0, demolish: [], net: null, changed: [] });
 
-/** Стоимость полотна: длина × полосы × цена класса; над водой — мост, вчетверо дороже. */
-export function corridorCost(c: Corridor, isWater: (p: Vec, margin?: number) => boolean): number {
+/** Множитель цены в точке: мосты, эстакады и тоннели дороже земли. */
+function structureFactor(h: number, water: boolean): number {
+  if (water && h > -0.5) return 4;
+  if (h > 0.25) return 1 + 1.5 * Math.min(h, 1) + 0.6 * Math.max(0, h - 1);
+  if (h < -0.25) return 1 + 3 * Math.min(-h, 1) + (water ? 1 : 0);
+  return 1;
+}
+
+/** Стоимость полотна: длина × полосы × цена класса × мост, эстакада или тоннель (над водой — вчетверо). */
+export function corridorCost(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean): number {
   const n = Math.max(2, Math.ceil(c.length / 12));
   let cost = 0;
   for (let i = 0; i < n; i++) {
-    const p = c.lut.pointAt((c.length * (i + 0.5)) / n);
-    cost += (c.length / n) * ROAD_CLASSES[c.cls].cost * c.lanes.length * (isWater(p, 2) ? 4 : 1);
+    const s = (c.length * (i + 0.5)) / n;
+    const p = c.lut.pointAt(s);
+    cost += (c.length / n) * ROAD_CLASSES[c.cls].cost * c.lanes.length * structureFactor(net.heightAt(c, s), isWater(p, 2));
   }
   return Math.round(cost);
 }
@@ -71,20 +82,21 @@ export class RoadBuilder {
     const next = before.clone();
     try {
       if (edit(next) === false) return fail('Так не построить');
-    } catch {
-      return fail('Так не построить');
+    } catch (e) {
+      return fail(e instanceof EditError ? e.message : 'Так не построить');
     }
     // Что изменилось: новые полотна, полотна с новой ревизией и исчезнувшие.
     const changed: Corridor[] = [];
     let after = 0;
     let was = 0;
+    const water = (p: Vec, m?: number) => this.ctx.isWater(p, m);
     for (const c of next.corridors.values()) {
       if (before.corridors.get(c.id)?.rev === c.rev) continue;
       changed.push(c);
-      after += corridorCost(c, (p, m) => this.ctx.isWater(p, m));
+      after += corridorCost(next, c, water);
     }
     for (const c of before.corridors.values()) {
-      if (next.corridors.get(c.id)?.rev !== c.rev) was += corridorCost(c, (p, m) => this.ctx.isWater(p, m));
+      if (next.corridors.get(c.id)?.rev !== c.rev) was += corridorCost(before, c, water);
     }
     const demolish = new Set<number>();
     let reason: string | undefined;
@@ -177,18 +189,29 @@ export class RoadBuilder {
     if (c.length < 8) return 'Слишком коротко';
     const limit = ROAD_CLASSES[c.cls].minRadius;
     if (minRadius(c.curve) < limit * 0.7) return 'Слишком крутой поворот';
-    const ends = [net.node(c.a).pos, net.node(c.b).pos];
+    const A = net.node(c.a);
+    const B = net.node(c.b);
+    const rise = Math.abs(A.level - B.level);
+    if (rise > 2) return 'Слишком большой перепад';
+    if (rise * LEVEL_RUN > c.length) return 'Слишком крутой подъём';
+    // Опора на земле в воде: мост через реку — полотно над ней, узлы — на берегах.
+    for (const n of [A, B]) if (Math.abs(n.level) < 0.25 && this.ctx.isWater(n.pos, 2)) return 'Опора в воде — нужен мост';
+    const ends = [A.pos, B.pos];
     const step = 6;
     for (let s = 0; s <= c.length; s += step) {
       const p = c.lut.pointAt(s);
       const half = halfAtS(c, s);
+      const h = net.heightAt(c, s);
       if (!this.ctx.inBounds(p, 20)) return 'За краем карты';
-      if (this.ctx.isWater(p, -half * 0.3)) return 'Через воду — мосты будут позже';
-      for (const o of this.ctx.obstaclesAt(p, half + 1)) {
-        if (!o.demolishable) return 'Мешает здание';
-        if (!shove) demolish.add(o.id);
+      if (h < -0.25 && h > -0.75 && this.ctx.isWater(p, 2)) return 'Въезд в тоннель в воде';
+      // Тоннель проходит под домами; мосты и эстакады стоят на опорах — дома под ними сносим.
+      if (h > -0.75) {
+        for (const o of this.ctx.obstaclesAt(p, half + 1)) {
+          if (!o.demolishable) return 'Мешает здание';
+          if (!shove) demolish.add(o.id);
+        }
       }
-      // Чужие дороги рядом: у общих узлов — можно (там перекрёсток или стык), в остальном — не ближе краёв.
+      // Чужие дороги рядом на той же высоте: у общих узлов — можно (там перекрёсток или стык), в остальном — не ближе краёв.
       const nearEnd = ends.some((e) => dist(e, p) < 45);
       for (const o of net.corridorsNear(p, half + 40)) {
         if (o.id === c.id) continue;
@@ -196,12 +219,13 @@ export class RoadBuilder {
         if (shares && nearEnd) continue;
         const hit = o.lut.closest(p);
         if (hit.d < half + halfAtS(o, hit.s) - 1 && !(nearEnd && shares)) {
+          if (Math.abs(h - net.heightAt(o, hit.s)) >= 0.75) continue;
           // Касание у самого чужого узла (дорога к нему подходит) — проверит узел.
           if (dist(hit.point, net.node(o.a).pos) < 2 || dist(hit.point, net.node(o.b).pos) < 2) continue;
           return 'Слишком близко к другой дороге';
         }
       }
     }
-    return undefined;
+    return this.ctx.railConflict?.(net, c);
   }
 }

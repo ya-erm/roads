@@ -684,7 +684,7 @@ export class Game implements BuildContext {
       const pts = c.lut.points;
       if (pts.filter(inside).length * 2 < pts.length) continue;
       corridors.push(c.id);
-      refund += corridorCost(c, (q, m) => this.isWater(q, m)) * COST.refundRatio;
+      refund += corridorCost(this.roads.net, c, (q, m) => this.isWater(q, m)) * COST.refundRatio;
     }
     const buildings: TownBuilding[] = [];
     let cost = 0;
@@ -2250,7 +2250,7 @@ export class Game implements BuildContext {
     if (this.roadValue.version !== version) {
       let total = 0;
       for (const s of this.net.segments.values()) total += this.builder.segmentCost(s);
-      for (const c of this.roads.net.corridors.values()) total += corridorCost(c, (p, m) => this.isWater(p, m));
+      for (const c of this.roads.net.corridors.values()) total += corridorCost(this.roads.net, c, (p, m) => this.isWater(p, m));
       this.roadValue = { version, value: total };
     }
     return this.roadValue.value;

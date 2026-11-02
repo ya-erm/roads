@@ -1,4 +1,4 @@
-import { Cubic, CurveLUT, intersectCurves, splitBezier } from '../core/bezier';
+import { arcCubic, Cubic, CurveLUT, intersectCurves, splitBezier } from '../core/bezier';
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { LANE_W, RoadClass } from '../world/roadTypes';
 import { edgesAt, laneBand } from './geometry';
@@ -8,23 +8,31 @@ import { Corridor, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, sl
 export type Anchor =
   | { kind: 'node'; node: number; pos: Vec }
   | { kind: 'corridor'; corridor: number; s: number; pos: Vec }
-  | { kind: 'free'; pos: Vec };
+  /** level — высота нового узла: −1 тоннель, 0 земля, 1 мост, 2 эстакада. */
+  | { kind: 'free'; pos: Vec; level?: number };
 
-/** Что под курсором: тупик или перекрёсток рядом, иначе полотно, иначе чистое поле. */
-export function anchorAt(net: LaneNet, p: Vec, radius: number): Anchor {
+/** Правка невозможна — причина для игрока. */
+export class EditError extends Error {}
+
+/**
+ * Что под курсором: тупик или перекрёсток рядом, иначе полотно, иначе чистое поле.
+ * level — высота, на которой строим: где узлы и полотна друг над другом, берём на ней; новый узел — на ней.
+ */
+export function anchorAt(net: LaneNet, p: Vec, radius: number, level?: number): Anchor {
   let best: LaneNode | null = null;
-  let bestD = radius;
+  let bestD = Infinity;
   for (const n of net.nodesNear(p, radius)) {
     // Стык посреди дороги притягивает, только если из него выйдет перекрёсток (не съезд, не сужение).
     if (n.kind === 'seam' && !net.isDeadEnd(n) && !net.ends(n).every((e) => Math.abs(e.port) < LAT_EPS)) continue;
     const d = dist(n.pos, p);
-    if (d < bestD) {
-      bestD = d;
+    const score = d + (level === undefined ? 0 : Math.abs(n.level - level) * radius);
+    if (d < radius && score < bestD) {
+      bestD = score;
       best = n;
     }
   }
   if (best) return { kind: 'node', node: best.id, pos: best.pos };
-  const c = corridorUnder(net, p, radius * 0.5);
+  const c = corridorUnder(net, p, radius * 0.5, level);
   if (c) {
     const hit = c.lut.closest(p);
     // У самого конца полотна — его узел, если к нему можно примкнуть.
@@ -38,21 +46,26 @@ export function anchorAt(net: LaneNet, p: Vec, radius: number): Anchor {
     const s = Math.max(12, Math.min(c.length - 12, hit.s));
     return { kind: 'corridor', corridor: c.id, s, pos: c.lut.pointAt(s) };
   }
-  return { kind: 'free', pos: { ...p } };
+  return { kind: 'free', pos: { ...p }, level: level ?? 0 };
 }
 
-/** Полотно, на асфальте которого точка (с запасом margin). */
-export function corridorUnder(net: LaneNet, p: Vec, margin = 0): Corridor | null {
+/**
+ * Полотно, на асфальте которого точка (с запасом margin). Где полотна друг над другом — на высоте
+ * level, без неё — верхнее (его и видно).
+ */
+export function corridorUnder(net: LaneNet, p: Vec, margin = 0, level?: number): Corridor | null {
   let best: Corridor | null = null;
   let bestD = Infinity;
   for (const c of net.corridorsNear(p, margin + 40)) {
     const hit = c.lut.closest(p);
+    const h = net.heightAt(c, hit.s);
     const e = edgesAt(c, hit.s);
     if (!e) continue;
     const d = dot(sub(p, hit.point), rightNormal(c.lut.tangentAt(hit.s)));
     const out = Math.max(e[0] - 1.5 - d, d - e[1] - 1.5, 0);
-    if (out <= margin && out + hit.d * 0.01 < bestD) {
-      bestD = out + hit.d * 0.01;
+    const score = out + hit.d * 0.01 + (level === undefined ? -h * 0.5 : Math.abs(h - level) * 5);
+    if (out <= margin && score < bestD) {
+      bestD = score;
       best = c;
     }
   }
@@ -86,7 +99,8 @@ export function laneUnder(net: LaneNet, p: Vec): { corridor: Corridor; lane: num
 export function splitCorridor(net: LaneNet, c: Corridor, s: number, kind: NodeKind): { node: LaneNode; first: Corridor; second: Corridor } {
   const t = c.lut.tAt(s);
   const [c1, c2] = splitBezier(c.curve, t);
-  const node = kind === 'seam' ? net.addSeam(c1.p3, c.lut.tangentAt(s), net.node(c.a).level) : net.addJunction(c1.p3, net.node(c.a).level);
+  const level = net.heightAt(c, s);
+  const node = kind === 'seam' ? net.addSeam(c1.p3, c.lut.tangentAt(s), level) : net.addJunction(c1.p3, level);
   const L = c.length;
   const lanes1 = c.lanes.filter((l) => l.from < s - 0.5).map((l) => ({ ...l, to: l.to >= s - 0.01 ? Infinity : l.to }));
   const lanes2 = c.lanes
@@ -111,6 +125,8 @@ export interface RoadOptions {
    * перекрёстком). Нет — тупик продолжается плавно.
    */
   kink?: boolean;
+  /** Дуга окружности по касательной к тупику: конец дороги смотрит по дуге, а не вдоль хорды. */
+  arc?: boolean;
 }
 
 interface RoadEnd {
@@ -143,14 +159,40 @@ export function buildRoad(net: LaneNet, A: Anchor, B: Anchor, o: RoadOptions): C
   };
   const tangentAt = (x: Anchor, toward: Vec, start: boolean): Vec =>
     kinked(x, toward, start) ? chordDir(x, toward, start) : (seamDir(x, start) ?? chordDir(x, toward, start));
-  const t0 = tangentAt(A, o.control ?? B.pos, true);
-  const t3 = tangentAt(B, o.control ?? A.pos, false);
-  const start = resolveEnd(net, A, t0, true, o.lanes, kinked(A, o.control ?? B.pos, true));
-  const end = resolveEnd(net, B, t3, false, o.lanes, kinked(B, o.control ?? A.pos, false));
+  let t0 = tangentAt(A, o.control ?? B.pos, true);
+  let t3 = tangentAt(B, o.control ?? A.pos, false);
+  const kinkA = kinked(A, o.control ?? B.pos, true);
+  let kinkB = kinked(B, o.control ?? A.pos, false);
+  // Дуга: окружность по касательной к тупику в начале (или в конце) — конец смотрит по дуге;
+  // тупики с обеих сторон — плавно в оба. Тупик в конце, смотрящий не туда, — излом (перекрёсток).
+  let arc: Cubic | null = null;
+  if (o.arc && !o.control) {
+    const chord = dist(A.pos, B.pos);
+    const tA = seamDir(A, true);
+    const back = seamDir(B, false);
+    const tB = back && dot(back, sub(B.pos, A.pos)) > chord * 0.2 ? back : null;
+    if (back && !tB) {
+      kinkB = true;
+      t3 = chordDir(B, A.pos, false);
+    }
+    if (tA && tB) arc = { p0: A.pos, p1: add(A.pos, scale(tA, chord * 0.4)), p2: sub(B.pos, scale(tB, chord * 0.4)), p3: B.pos };
+    else if (tA) arc = arcCubic(A.pos, tA, B.pos);
+    else if (tB) {
+      const r = arcCubic(B.pos, scale(tB, -1), A.pos);
+      arc = r && { p0: r.p3, p1: r.p2, p2: r.p1, p3: r.p0 };
+    }
+    if (!arc && (tA || tB)) throw new EditError('Слишком крутой поворот');
+    if (arc) {
+      t0 = norm(sub(arc.p1, arc.p0));
+      t3 = norm(sub(arc.p3, arc.p2));
+    }
+  }
+  const start = resolveEnd(net, A, t0, true, o.lanes, kinkA);
+  const end = resolveEnd(net, B, t3, false, o.lanes, kinkB);
   const p0 = start.node.pos;
   const p3 = end.node.pos;
-  const h0 = o.control ? (dist(p0, o.control) * 2) / 3 : dist(p0, p3) / 3;
-  const h3 = o.control ? (dist(p3, o.control) * 2) / 3 : dist(p0, p3) / 3;
+  const h0 = arc ? dist(arc.p0, arc.p1) : o.control ? (dist(p0, o.control) * 2) / 3 : dist(p0, p3) / 3;
+  const h3 = arc ? dist(arc.p3, arc.p2) : o.control ? (dist(p3, o.control) * 2) / 3 : dist(p0, p3) / 3;
   const curve: Cubic = { p0, p1: add(p0, scale(t0, h0)), p2: sub(p3, scale(t3, h3)), p3 };
   return chain(net, start, end, curve, o);
 }
@@ -183,28 +225,44 @@ function resolveEnd(net: LaneNet, x: Anchor, dir: Vec, start: boolean, lanes: La
   }
   if (x.kind === 'corridor') return { node: splitCorridor(net, net.corridor(x.corridor), x.s, 'junction').node };
   // Чистое поле — тупик: стык по направлению дороги, полотно у начала спереди, у конца — сзади.
-  return { node: net.addSeam(x.pos, dir), side: start ? 1 : -1 };
+  return { node: net.addSeam(x.pos, dir, x.level ?? 0), side: start ? 1 : -1 };
 }
 
-/** Кладёт кривую от start до end; где она пересекает другие полотна, ставит перекрёстки. */
+/**
+ * Кладёт кривую от start до end; где она пересекает другие полотна на той же высоте, ставит перекрёстки,
+ * где выше или ниже — проходит мостом или тоннелем.
+ */
 function chain(net: LaneNet, start: RoadEnd, end: RoadEnd, curve: Cubic, o: RoadOptions): Corridor[] {
   const made: Corridor[] = [];
   let from = start;
   let rest = curve;
   const touches = (c: Corridor, n: LaneNode) => c.a === n.id || c.b === n.id;
+  const h0 = start.node.level;
+  const h1 = end.node.level;
+  const total = new CurveLUT(curve).length;
+  let passed = 0;
   for (let guard = 0; guard < 24; guard++) {
     const lut = new CurveLUT(rest);
-    let hit: { t: number; c: Corridor; s: number } | null = null;
+    let hit: { t: number; c: Corridor; s: number; s1: number } | null = null;
     const xs = lut.points.map((p) => p.x);
     const ys = lut.points.map((p) => p.y);
     for (const c of net.corridorsInBox(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys))) {
       if (touches(c, from.node) || touches(c, end.node) || made.includes(c)) continue;
       for (const h of intersectCurves(lut, c.lut)) {
         if (h.s1 < 10 || h.s1 > lut.length - 10) continue;
-        if (!hit || h.t1 < hit.t) hit = { t: h.t1, c, s: h.s2 };
+        // Разные высоты — мост или тоннель, перекрёстка нет.
+        const mine = h0 + ((h1 - h0) * (passed + h.s1)) / total;
+        const dh = Math.abs(mine - net.heightAt(c, h.s2));
+        if (dh >= 0.75) continue;
+        if (dh >= 0.3) throw new EditError('Мало места по высоте');
+        if (h0 !== h1 || !net.isFlat(c)) throw new EditError('Перекрёсток на подъёме');
+        if (c.cls === 'motorway' || o.cls === 'motorway') throw new EditError('Автомагистраль пересекается только мостом или тоннелем');
+        if (c.ring) throw new EditError('Нельзя пересекать кольцо');
+        if (!hit || h.t1 < hit.t) hit = { t: h.t1, c, s: h.s2, s1: h.s1 };
       }
     }
     if (!hit) break;
+    passed += hit.s1;
     // У самого конца другого полотна — его перекрёсток, иначе режем полотно новым перекрёстком.
     const nearA = hit.s < 10 && net.node(hit.c.a).kind === 'junction';
     const nearB = hit.s > hit.c.length - 10 && net.node(hit.c.b).kind === 'junction';
