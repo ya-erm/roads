@@ -10,7 +10,7 @@ import {
   STATION,
   TOWN_TRAFFIC,
 } from '../config';
-import { Cubic, CurveLUT, straightCubic } from '../core/bezier';
+import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt } from '../lanes/edit';
@@ -37,6 +37,7 @@ import {
   recountPopulation,
   WorldContext,
 } from '../world/worldgen';
+import { findCrossings, LevelCrossing } from './crossings';
 import { corridorCost, RoadBuilder, RoadPlan } from './roadbuild';
 import { Roads } from './roads';
 import { BuildContext, Builder, RoadRequest } from './build';
@@ -309,6 +310,8 @@ export class Game implements BuildContext {
   readonly builder: Builder;
   /** Строитель дорог — на сети полос. */
   readonly roadBuilder: RoadBuilder;
+  /** Переезды: где дороги пересекают пути на земле. */
+  levelCrossings: LevelCrossing[] = [];
   towns: Town[] = [];
   industries: Industry[] = [];
   readonly stations = new Map<number, Station>();
@@ -485,6 +488,7 @@ export class Game implements BuildContext {
     // В старых сохранениях могли остаться следы снесённых колец.
     this.pruneRoundabouts();
     this.net.rebuild();
+    this.refreshCrossings();
     this.history.push(...save.history);
     this.time = save.time;
     this.month = save.month;
@@ -851,6 +855,81 @@ export class Game implements BuildContext {
     const splits = [...this.net.pendingSplits];
     this.net.pendingSplits = [];
     this.rail.validate(splits);
+    this.refreshCrossings();
+  }
+
+  /** Переезды заново (дороги или пути поменялись): машины ждут у закрытых, поезда их закрывают. */
+  private refreshCrossings(): void {
+    this.levelCrossings = findCrossings(this.roads.net, this.net);
+    const byCorridor = new Map<number, LevelCrossing[]>();
+    const byRail = new Map<number, LevelCrossing[]>();
+    for (const x of this.levelCrossings) {
+      byCorridor.set(x.corridor, [...(byCorridor.get(x.corridor) ?? []), x]);
+      byRail.set(x.rail, [...(byRail.get(x.rail) ?? []), x]);
+    }
+    this.traffic.barriers = byCorridor;
+    this.rail.crossings = byRail;
+  }
+
+  /** Что не так у нового пути с дорогами: те же правила переезда, что и у дороги через путь. */
+  roadConflict(lut: CurveLUT, levelAt: (s: number) => number, hw: number): string | undefined {
+    const net = this.roads.net;
+    const xs = lut.points.map((p) => p.x);
+    const ys = lut.points.map((p) => p.y);
+    const pad = 40;
+    const flat = Math.abs(levelAt(0) - levelAt(lut.length)) < 0.01;
+    for (const c of net.corridorsInBox(Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad)) {
+      const hits = intersectCurves(lut, c.lut);
+      for (const h of hits) {
+        const dh = Math.abs(levelAt(h.s1) - net.heightAt(c, h.s2));
+        if (dh >= 0.75) continue;
+        if (dh >= 0.3) return 'Мало места по высоте';
+        if (!flat || !net.isFlat(c)) return 'Переезд на подъёме';
+        if (Math.abs(cross(lut.tangentAt(h.s1), c.lut.tangentAt(h.s2))) < 0.5) return 'Переезд только под углом от 30°';
+        if (h.s2 < 15 || c.length - h.s2 < 15) return 'Переезд слишком близко к перекрёстку';
+        if (h.s1 < 20 || lut.length - h.s1 < 20) return 'Переезд слишком близко к стрелке';
+      }
+      if (hits.length) continue;
+      const half = corridorHalf(c);
+      for (let s = 0; s <= lut.length; s += 8) {
+        const near = c.lut.closest(lut.pointAt(s));
+        if (near.d < half + hw + 2 && Math.abs(levelAt(s) - net.heightAt(c, near.s)) < 0.75) return 'Слишком близко к дороге';
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Что не так у полотна с путями. Пересечь путь можно мостом, тоннелем или переездом — на земле,
+   * под углом от 30°, не у стрелок и не на платформе; вдоль путей — не вплотную.
+   */
+  railConflict(net: LaneNet, c: Corridor): string | undefined {
+    const xs = c.lut.points.map((p) => p.x);
+    const ys = c.lut.points.map((p) => p.y);
+    const pad = 40;
+    for (const seg of this.net.segmentsInBox(Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad)) {
+      if (!isRail(seg.spec)) continue;
+      const hits = intersectCurves(c.lut, seg.lut);
+      for (const h of hits) {
+        const dh = Math.abs(net.heightAt(c, h.s1) - this.net.levelAt(seg, h.s2));
+        if (dh >= 0.75) continue;
+        if (dh >= 0.3) return 'Мало места по высоте';
+        if (seg.platform !== undefined) return 'Нельзя пересекать платформу';
+        if (!net.isFlat(c) || !this.net.isFlat(seg)) return 'Переезд на подъёме';
+        if (Math.abs(cross(c.lut.tangentAt(h.s1), seg.lut.tangentAt(h.s2))) < 0.5) return 'Переезд только под углом от 30°';
+        if (h.s2 < 20 || seg.length - h.s2 < 20) return 'Переезд слишком близко к стрелке';
+        if (h.s1 < 15 || c.length - h.s1 < 15) return 'Переезд слишком близко к перекрёстку';
+      }
+      if (hits.length) continue;
+      // Вдоль путей на той же высоте — не вплотную.
+      const half = corridorHalf(c);
+      for (let s = 0; s <= c.length; s += 8) {
+        const p = c.lut.pointAt(s);
+        const near = seg.lut.closest(p);
+        if (near.d < half + RAIL_HALF + 2 && Math.abs(net.heightAt(c, s) - this.net.levelAt(seg, near.s)) < 0.75) return 'Слишком близко к путям';
+      }
+    }
+    return undefined;
   }
 
   // ---------- Шаблоны развязок ----------
@@ -1143,6 +1222,7 @@ export class Game implements BuildContext {
     const trains = this.rail.restore(railSave);
     this.reattachFleet(sims, trains);
     this.net.rebuild();
+    this.refreshCrossings();
     for (const st of this.stations.values()) this.computeCatchment(st);
 
     // Деньги за стройку — назад.

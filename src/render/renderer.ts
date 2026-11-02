@@ -237,7 +237,10 @@ export class Renderer {
 
     this.drawTerrain(game, view);
     this.drawTunnels(segs);
+    // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты.
+    const roadNet = o.roads?.net ?? game.roads.net;
     ctx.globalAlpha = 0.35;
+    this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, -1);
     this.drawVehicles(vehicles.filter((v) => band(v) === -1));
     this.drawTrains(trains.filter((t) => trainBand(t.level) === -1));
     ctx.globalAlpha = 1;
@@ -251,8 +254,7 @@ export class Renderer {
     });
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
-    // Дороги — сеть полос (или её копия с тем, что сейчас строим).
-    this.lanes.draw(ctx, o.roads?.net ?? game.roads.net, this.camera.zoom, false, view);
+    this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
     if (o.roads) this.drawRoadPreview(o.roads);
     this.drawSurfaces([...groundRoads, ...feet], false);
     this.drawTapers(game, 0, view);
@@ -278,8 +280,10 @@ export class Renderer {
         const c = this.cache.get(s.id)!;
         return c.maxLevel > level - 0.99 && c.maxLevel <= level + 0.01;
       });
-      if (!layer.length) continue;
+      const roads = this.lanes.hasLayer(roadNet, level);
+      if (!layer.length && !roads) continue;
       const rails = layer.filter((s) => isRail(s.spec));
+      if (roads) this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, level);
       this.drawElevated(layer);
       this.drawTapers(game, level, view);
       this.drawJunctions(game, level);
@@ -1351,24 +1355,23 @@ export class Renderer {
   private drawCrossings(game: Game, view: ReturnType<Renderer['view']>): void {
     if (this.camera.zoom < 0.4) return;
     const ctx = this.ctx;
-    const net = game.net;
+    const net = game.roads.net;
     const blink = Math.floor(performance.now() / 400) % 2 === 0;
-    for (const n of net.nodes.values()) {
-      if (!net.isCrossing(n)) continue;
-      if (n.pos.x < view.x0 || n.pos.x > view.x1 || n.pos.y < view.y0 || n.pos.y > view.y1) continue;
-      for (const sid of net.roadSegs(n)) {
-        const s = net.segment(sid);
-        const e = roadEdges(s.spec);
-        const at = Math.min(s.length / 2, n.radius + 3);
-        const cs = s.a === n.id ? at : s.length - at;
-        const p = s.lut.pointAt(cs);
-        // Направление въезда на переезд и правая сторона от него — там полосы, идущие к путям.
-        let t = s.lut.tangentAt(cs);
-        if (s.a === n.id) t = scale(t, -1);
+    for (const x of game.levelCrossings) {
+      if (x.pos.x < view.x0 || x.pos.x > view.x1 || x.pos.y < view.y0 || x.pos.y > view.y1) continue;
+      const c = net.corridors.get(x.corridor);
+      if (!c) continue;
+      // Два въезда на переезд — с каждой стороны пути; у каждого справа столбик, при поезде — шлагбаум.
+      for (const side of [-1, 1]) {
+        const cs = Math.max(0, Math.min(c.length, x.s + side * (RAIL_HALF + 4)));
+        const p = c.lut.pointAt(cs);
+        const along = c.lut.tangentAt(cs);
+        const t = scale(along, -side);
         const N = { x: -t.y, y: t.x };
-        const half = s.a === n.id ? e.left : e.right;
+        const e = edgesAt(c, cs) ?? [-LANE_W, LANE_W];
+        const half = side < 0 ? e[1] : -e[0];
         const post = add(p, scale(N, half + 2));
-        if (n.crossingClosed) {
+        if (x.closed) {
           // Шлагбаум перекрывает въезд на переезд: красно-белая планка.
           const tip = add(p, scale(N, -1));
           ctx.lineCap = 'round';
@@ -1390,7 +1393,7 @@ export class Renderer {
         ctx.beginPath();
         ctx.arc(post.x, post.y, 2.6, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = n.crossingClosed && blink ? '#ff4a3d' : '#5a2a28';
+        ctx.fillStyle = x.closed && blink ? '#ff4a3d' : '#5a2a28';
         ctx.beginPath();
         ctx.arc(post.x, post.y, 1.7, 0, Math.PI * 2);
         ctx.fill();

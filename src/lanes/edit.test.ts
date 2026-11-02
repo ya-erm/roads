@@ -121,6 +121,29 @@ describe('Полосы: инструменты', () => {
     expect(reachable(net, start.id, east.id)).toBe(true);
   });
 
+  it('уровни: мост над дорогой — без перекрёстка, пандус пониже — мало места, автомагистраль — только мостом', () => {
+    const net = road();
+    const STREET = { cls: 'street' as const, lanes: twoWay(1, 1) };
+    const at = (x: number, y: number, level: number) => ({ kind: 'free' as const, pos: { x, y }, level });
+    // Мост на уровне 1 поперёк проспекта — перекрёстка нет, по мосту можно проехать.
+    buildRoad(net, at(400, -200, 1), at(400, 200, 1), STREET);
+    expect([...net.nodes.values()].filter((n) => n.kind === 'junction')).toHaveLength(0);
+    expect(net.corridors.size).toBe(2);
+    // Пандус с земли на мост, над проспектом ещё низко.
+    expect(() => buildRoad(net, at(600, -150, 0), at(600, 300, 1), STREET)).toThrow('Мало места по высоте');
+    // Пандус, который пересекает проспект на подъёме, — нельзя перекрёстком.
+    expect(() => buildRoad(net, at(200, -40, 0), at(200, 400, 1), STREET)).toThrow();
+    // Автомагистраль пересекает дорогу только мостом.
+    const mw = new LaneNet();
+    buildRoad(mw, free(0, 0), free(800, 0), { cls: 'motorway', lanes: twoWay(2, 2, 4) });
+    expect(() => buildRoad(mw, free(400, -200), free(400, 200), STREET)).toThrow('Автомагистраль пересекается только мостом или тоннелем');
+    // Высота вдоль пандуса — равномерно от уровня к уровню.
+    const ramp = new LaneNet();
+    const [c] = buildRoad(ramp, at(0, 0, 0), at(300, 0, 1), STREET);
+    expect(ramp.heightAt(c, c.length / 2)).toBeCloseTo(0.5, 5);
+    expect(ramp.isFlat(c)).toBe(false);
+  });
+
   it('перо в стыке поворачивает стык: перо соседа на той же прямой; с изломом — перекрёсток', () => {
     const net = road();
     const east = deadEnds(net).find((n) => n.pos.x > 400)!;

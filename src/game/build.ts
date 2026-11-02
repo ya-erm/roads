@@ -58,6 +58,8 @@ export interface BuildContext {
   networkChanged(): void;
   /** Дорогу перестроили (могла стать шире): дома, на которые она налезла, отодвинуть. */
   roadWidened?(segId: number): void;
+  /** Что не так у нового пути (кривая lut, высота levelAt, полуширина hw) с дорогами. */
+  roadConflict?(lut: CurveLUT, levelAt: (s: number) => number, hw: number): string | undefined;
 }
 
 export interface RoadRequest {
@@ -396,6 +398,9 @@ export class Builder {
     for (let i = 1; i < marks.length; i++) {
       if (marks[i] - marks[i - 1] < MIN_SEGMENT_LEN) return fail('Слишком близко к перекрёстку');
     }
+    // Дороги — в своей сети: путь пересекает их переездом, мостом или тоннелем.
+    const road = rail ? this.ctx.roadConflict?.(lut, levelAt, hw) : undefined;
+    if (road) return fail(road);
     if (withGeom.cost > this.ctx.budget) return { ...fail('Не хватает денег'), crossings };
     return { ...withGeom, ok: true, crossings };
   }

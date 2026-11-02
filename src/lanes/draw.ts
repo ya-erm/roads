@@ -9,7 +9,17 @@ const C = {
   dash: 'rgba(245, 243, 230, 0.85)',
   divider: 'rgba(240, 205, 96, 0.9)',
   axis: 'rgba(47, 128, 237, 0.8)',
+  /** Мосты и эстакады: тень на земле, бетонное ограждение по краям. */
+  shadow: 'rgba(20, 30, 20, 0.28)',
+  rail: '#d6d1c4',
 };
+
+/** Слой отрисовки по высоте: −1 тоннель, 0 земля, 1 мост, 2 эстакада. */
+export function layerOf(min: number, max: number): number {
+  if (min < -0.25) return -1;
+  if (max <= 0.25) return 0;
+  return Math.min(2, Math.max(1, Math.round(max)));
+}
 
 type LineStyle = 'dash' | 'solid' | 'yellow' | 'barrier';
 interface Mark {
@@ -71,6 +81,8 @@ interface Cached<T> {
   key: string;
   geo: T;
   bbox: BBox;
+  /** Слой по высоте (layerOf). */
+  layer: number;
 }
 
 function bboxOf(lists: Vec[][]): BBox {
@@ -100,15 +112,31 @@ export class LaneRenderer {
   private corridors: Cached<CorridorGeo>[] = [];
   private nodes: Cached<NodeGeo>[] = [];
 
-  draw(ctx: CanvasRenderingContext2D, net: LaneNet, zoom: number, debug = false, view?: BBox): void {
+  /** Есть ли что рисовать в слое высоты layer. */
+  hasLayer(net: LaneNet, layer: number): boolean {
+    this.refresh(net);
+    return this.corridors.some((x) => x.layer === layer) || this.nodes.some((x) => x.layer === layer);
+  }
+
+  /** Рисует сеть; layer — только этот слой высоты (тоннели, земля, мосты, эстакады), без него — всё. */
+  draw(ctx: CanvasRenderingContext2D, net: LaneNet, zoom: number, debug = false, view?: BBox, layer?: number): void {
     this.refresh(net);
     const seen = (b: BBox) => !view || !(b.x1 < view.x0 || b.x0 > view.x1 || b.y1 < view.y0 || b.y0 > view.y1);
-    const corridors = this.corridors.filter((x) => seen(x.bbox)).map((x) => x.geo);
-    const nodes = this.nodes.filter((x) => seen(x.bbox)).map((x) => x.geo);
+    const mine = (x: Cached<unknown>) => layer === undefined || x.layer === layer;
+    const corridors = this.corridors.filter((x) => mine(x) && seen(x.bbox)).map((x) => x.geo);
+    const nodes = this.nodes.filter((x) => mine(x) && seen(x.bbox)).map((x) => x.geo);
     const plates = nodes.flatMap((n) => (n.plate ? [n.plate] : []));
     const caps = nodes.flatMap((n) => n.caps);
     const gores = nodes.flatMap((n) => n.gores);
     ctx.lineJoin = 'round';
+    const elevated = layer !== undefined && layer > 0;
+    if (elevated) {
+      // Мост или эстакада: тень на земле со сдвигом по высоте.
+      const off = { x: 5 + 4 * layer, y: 8 + 6 * layer };
+      ctx.fillStyle = C.shadow;
+      for (const g of corridors) this.fill(ctx, g.poly.map((p) => add(p, off)));
+      for (const p of plates) this.fill(ctx, p.poly.map((q) => add(q, off)));
+    }
     // Бордюры под асфальтом: заливка соседнего полотна закрывает их там, где полотна сходятся.
     ctx.strokeStyle = C.roadEdge;
     ctx.lineWidth = 2.5;
@@ -130,6 +158,21 @@ export class LaneRenderer {
       ctx.strokeStyle = C.roadEdge;
       ctx.lineWidth = 1.6;
       this.stroke(ctx, g.nose);
+    }
+    if (elevated) {
+      // Бетонный парапет по краям моста — поверх кромки асфальта.
+      ctx.lineCap = 'butt';
+      for (const [color, width] of [
+        ['#8c877c', 3.2],
+        [C.rail, 2],
+      ] as const) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        for (const g of corridors) {
+          this.stroke(ctx, g.left);
+          this.stroke(ctx, g.right);
+        }
+      }
     }
     if (zoom >= 0.35) {
       this.drawMarks(ctx, corridors);
@@ -156,7 +199,7 @@ export class LaneRenderer {
     const sigs = new Map<number, string>();
     for (const n of net.nodes.values()) {
       const arms = n.corridors.map((id) => `${id}.${net.corridor(id).rev}.${this.cuts.get(id)?.join('/')}`).join(',');
-      sigs.set(n.id, `${n.kind}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}`);
+      sigs.set(n.id, `${n.kind}:${n.level}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}`);
     }
     const corridors: Cached<CorridorGeo>[] = [];
     for (const c of net.corridors.values()) {
@@ -164,7 +207,9 @@ export class LaneRenderer {
       let item = this.corridorCache.get(c.id);
       if (!item || item.key !== key) {
         const geo = this.corridorGeo(net, c);
-        item = { key, geo, bbox: bboxOf([geo.poly]) };
+        const la = net.node(c.a).level;
+        const lb = net.node(c.b).level;
+        item = { key, geo, bbox: bboxOf([geo.poly]), layer: layerOf(Math.min(la, lb), Math.max(la, lb)) };
         this.corridorCache.set(c.id, item);
       }
       corridors.push(item);
@@ -179,7 +224,8 @@ export class LaneRenderer {
         if (n.kind === 'junction') geo.plate = this.plateGeo(net, n);
         else if (net.isDeadEnd(n)) geo.caps = net.ends(n).map((e) => this.capGeo(e));
         else geo.gores = this.seamGores(net, n);
-        item = { key, geo, bbox: bboxOf([geo.plate?.poly ?? [], ...geo.caps.map((c) => c.poly), ...geo.gores.map((g) => g.asphalt), [n.pos]]) };
+        const bbox = bboxOf([geo.plate?.poly ?? [], ...geo.caps.map((c) => c.poly), ...geo.gores.map((g) => g.asphalt), [n.pos]]);
+        item = { key, geo, bbox, layer: layerOf(n.level, n.level) };
         this.nodeCache.set(n.id, item);
       }
       nodes.push(item);

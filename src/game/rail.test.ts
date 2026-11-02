@@ -5,9 +5,9 @@ import type { Station } from '../world/entities';
 import { RAIL_SPEC, RoadSpec } from '../world/roadTypes';
 import type { RoadRequest } from './build';
 import { Game } from './game';
+import { road, roadPlan, STREET as STREET_LANES } from './testkit';
 import { carsOf, vehicleCapacity } from './transport';
 
-const STREET: RoadSpec = { cls: 'street', lanesF: 1, lanesB: 1 };
 
 function runSeconds(game: Game, seconds: number, each?: () => void) {
   game.speed = 1;
@@ -206,22 +206,48 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
     const { game, a, b, from, dir } = railWorld();
     const n = { x: -dir.y, y: dir.x };
     const mid = add(from, scale(dir, 1200));
-    const road = game.builder.build(straight(add(mid, scale(n, -200)), add(mid, scale(n, 200)), STREET));
-    expect(road).not.toBeNull();
-    const crossing = [...game.net.nodes.values()].find((x) => game.net.isCrossing(x));
-    expect(crossing).toBeDefined();
+    // Под острым углом переезд не построить.
+    const acute = roadPlan(game, { free: add(mid, scale(dir, -200)) }, { free: add(add(mid, scale(dir, 200)), scale(n, 60)) });
+    expect(acute.ok).toBe(false);
+    expect(acute.reason).toBe('Переезд только под углом от 30°');
+    expect(road(game, { free: add(mid, scale(n, -200)) }, { free: add(mid, scale(n, 200)) })).toBe(true);
+    expect(game.levelCrossings).toHaveLength(1);
+    const crossing = game.levelCrossings[0];
+    // Путь не режется: дороги и пути — разные сети.
+    expect([...game.net.segments.values()].filter((s) => s.platform === undefined).length).toBeGreaterThan(0);
     const line = game.createLine([a.id, b.id])!;
     game.buyVehicle(line.id, 'passengerTrain');
     let closed = 0;
+    let onRails = 0;
     runSeconds(game, 150, () => {
-      if (crossing!.crossingClosed) closed++;
+      if (crossing.closed) closed++;
+      if (crossing.closed && crossing.busy) onRails++;
     });
     expect(closed).toBeGreaterThan(0);
     // Поезд не стоит на переезде вечно: переезд открывается.
-    expect(crossing!.crossingClosed).toBe(false);
+    expect(crossing.closed).toBe(false);
+    expect(onRails).toBe(0);
   });
 
-  it('поезд переживает разрезание пути переездом и сохранение', () => {
+  it('дорога над путями — мост без переезда, на той же высоте вплотную вдоль путей — нельзя', () => {
+    const { game, from, dir } = railWorld();
+    const n = { x: -dir.y, y: dir.x };
+    const mid = add(from, scale(dir, 1000));
+    const at = (k: number, level: number) => ({ kind: 'free' as const, pos: add(mid, scale(n, k)), level });
+    // Пандус, который над путём ещё низко, — мало места по высоте.
+    const low = game.roadBuilder.road(at(-100, 0), at(200, 1), STREET_LANES);
+    expect(low.reason).toBe('Мало места по высоте');
+    // Мост над путём: переезда нет, путь цел.
+    const bridge = game.roadBuilder.road(at(-60, 1), at(60, 1), STREET_LANES);
+    expect(bridge.ok).toBe(true);
+    game.roadBuilder.apply(bridge);
+    expect(game.levelCrossings).toHaveLength(0);
+    // Вдоль путей вплотную — нельзя.
+    const along = roadPlan(game, { free: add(add(from, scale(dir, 1500)), scale(n, 8)) }, { free: add(add(from, scale(dir, 1800)), scale(n, 8)) });
+    expect(along.reason).toBe('Слишком близко к путям');
+  });
+
+  it('поезд переживает переезд, построенный прямо перед ним, и сохранение', () => {
     const { game, a, b, from, dir } = railWorld();
     const line = game.createLine([a.id, b.id])!;
     game.buyVehicle(line.id, 'freightTrain');
@@ -231,7 +257,8 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
     expect(v.state).toBe('driving');
     const n = { x: -dir.y, y: dir.x };
     const mid = add(from, scale(dir, 1200));
-    expect(game.builder.build(straight(add(mid, scale(n, -150)), add(mid, scale(n, 150)), STREET))).not.toBeNull();
+    expect(road(game, { free: add(mid, scale(n, -150)) }, { free: add(mid, scale(n, 150)) })).toBe(true);
+    expect(game.levelCrossings).toHaveLength(1);
     expect(game.fleetTrain(v)).toBeDefined();
     expect(game.fleetTrain(v)!.moving).toBe(true);
     const loaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));

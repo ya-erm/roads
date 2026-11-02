@@ -116,7 +116,8 @@ export class RailSim {
   private nextId = 1;
   private speedVersion = -1;
   private readonly speedCache = new Map<number, number>();
-  private closed: number[] = [];
+  /** Переезды по участкам пути: где на пути, закрыт ли (подходит поезд), занят ли машиной. */
+  crossings = new Map<number, { railS: number; closed: boolean; busy: boolean }[]>();
 
   constructor(
     private readonly net: Network,
@@ -409,11 +410,7 @@ export class RailSim {
   // ---------- Движение ----------
 
   step(dt: number): void {
-    for (const id of this.closed) {
-      const n = this.net.nodes.get(id);
-      if (n) n.crossingClosed = false;
-    }
-    this.closed = [];
+    for (const list of this.crossings.values()) for (const x of list) x.closed = false;
     for (const train of [...this.trains.values()]) {
       if (!train.moving) continue;
       this.move(train, dt);
@@ -449,17 +446,15 @@ export class RailSim {
     target = Math.min(target, Math.sqrt(2 * train.brake * Math.max(0, limit - train.head)));
     // Переезды: закрываем заранее; если машина застряла на переезде — тормозим перед ним.
     const tail = train.head - train.length;
-    for (let i = 0; i < path.length - 1; i++) {
-      const pos = path[i].start + path[i].len;
-      const nodeId = this.endNode(this.net.segment(path[i].seg), path[i].dir);
-      const node = this.net.nodes.get(nodeId);
-      if (!node || !this.net.isCrossing(node)) continue;
-      if (pos - train.head < 260 && pos > tail - 12) {
-        node.crossingClosed = true;
-        this.closed.push(nodeId);
-        const busy = node.reserved.some((v) => v.onMovement);
+    for (const e of path) {
+      if (e.start > train.head + 260) break;
+      if (e.start + e.len < tail - 12) continue;
+      for (const x of this.crossings.get(e.seg) ?? []) {
+        const pos = e.start + (e.dir === 0 ? x.railS : e.len - x.railS);
+        if (pos - train.head >= 260 || pos <= tail - 12) continue;
+        x.closed = true;
         const gap = pos - train.head;
-        if (busy && gap > 0 && gap < 120) target = Math.min(target, Math.sqrt(2 * train.brake * Math.max(0, gap - 10)));
+        if (x.busy && gap > 0 && gap < 120) target = Math.min(target, Math.sqrt(2 * train.brake * Math.max(0, gap - 10)));
       }
     }
     const dv = target - train.v;
@@ -605,7 +600,6 @@ export class RailSim {
     this.trains.clear();
     this.segOwner.clear();
     this.nodeOwner.clear();
-    this.closed = [];
   }
 
   restore(data: { nextId: number; trains: Train[] }): Set<number> {

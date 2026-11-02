@@ -38,6 +38,17 @@ function jitter(x: number): number {
   return s - Math.floor(s);
 }
 
+/** Шлагбаум посреди полотна (переезд): закрыт — машины ждут перед ним; занят — на нём машина. */
+export interface Barrier {
+  /** Где на оси полотна. */
+  s: number;
+  closed: boolean;
+  busy: boolean;
+}
+
+/** Стоп-линия — на столько раньше шлагбаума (полпути и запас). */
+const BARRIER_STOP = 12;
+
 function insertSorted(list: Vehicle[], veh: Vehicle): void {
   let i = list.length;
   while (i > 0 && list[i - 1].s < veh.s) i--;
@@ -55,6 +66,8 @@ export class LaneTraffic {
   time = 0;
   arrivals = 0;
   totalTripTime = 0;
+  /** Шлагбаумы по полотнам. */
+  barriers = new Map<number, Barrier[]>();
 
   constructor(
     public graph: LaneGraph,
@@ -217,6 +230,42 @@ export class LaneTraffic {
         this.dynamicReroute(veh);
       }
     }
+    this.markBarriers();
+  }
+
+  /** Какие шлагбаумы заняты: машина между стоп-линией и дальним краем переезда. */
+  private markBarriers(): void {
+    if (!this.barriers.size) return;
+    for (const list of this.barriers.values()) for (const b of list) b.busy = false;
+    for (const veh of this.vehicles.values()) {
+      if (veh.onMovement) continue;
+      const lane = this.currentLane(veh);
+      const link = lane && this.graph.links.get(lane.link);
+      const list = link && this.barriers.get(link.corridor);
+      if (!list) continue;
+      for (const b of list) {
+        const d = link.flow * (veh.centerS - b.s);
+        if (d > -BARRIER_STOP && d < BARRIER_STOP + veh.length) b.busy = true;
+      }
+    }
+  }
+
+  /** До ближайшего закрытого шлагбаума впереди на связи: от оси from (нет — от начала связи); нет — Infinity. */
+  private barrierAhead(linkId: number, from: number | null): number {
+    const link = this.graph.links.get(linkId);
+    const list = link && this.barriers.get(link.corridor);
+    if (!list) return Infinity;
+    const start = from ?? (link.flow > 0 ? link.s0 : link.s1);
+    let best = Infinity;
+    for (const b of list) {
+      if (!b.closed) continue;
+      const stop = b.s - link.flow * BARRIER_STOP;
+      if (stop < link.s0 - 0.01 || stop > link.s1 + 0.01) continue;
+      // Проехавшая стоп-линию машина освобождает переезд, а не встаёт на рельсах.
+      const d = link.flow * (stop - start);
+      if (d > -0.5) best = Math.min(best, Math.max(0, d));
+    }
+    return best;
   }
 
   // ---------- Перестроения ----------
@@ -363,16 +412,20 @@ export class LaneTraffic {
     const lane = this.currentLane(veh)!;
     const idx = lane.vehicles.indexOf(veh);
     let desired = Math.min(lane.speed, veh.maxSpeed);
+    // Закрытый переезд впереди на этой связи — как стоп-линия.
+    const barrier = this.barrierAhead(lane.link, veh.centerS);
+    const atBarrier = barrier < Infinity ? idmAccel(veh.v, desired, barrier + IDM.minGap - 0.5, veh.v, aMax) : Infinity;
     if (idx > 0) {
       // Впереди оказалась другая машина (въехала в полосу) — разрешение и место в очереди отдаём.
       if (veh.granted) this.revokeGrant(veh);
       if (veh.waitingAt !== null) this.releaseNode(veh);
       const leader = lane.vehicles[idx - 1];
-      return idmAccel(veh.v, desired, leader.s - leader.length - veh.s, veh.v - leader.v, aMax);
+      return Math.min(atBarrier, idmAccel(veh.v, desired, leader.s - leader.length - veh.s, veh.v - leader.v, aMax));
     }
+    if (atBarrier < Infinity) return atBarrier;
 
     // Первая в полосе: смотрим вперёд по маршруту через продолжения полос — до лидера,
-    // до перекрёстка или до конца пути.
+    // до перекрёстка, закрытого переезда или до конца пути.
     let ahead = lane.length - veh.s;
     let cur = lane;
     let ri = veh.routeIndex;
@@ -390,6 +443,8 @@ export class LaneTraffic {
       if (m.cont) {
         const out = this.graph.lanes.get(m.outLane)!;
         const last = out.vehicles[out.vehicles.length - 1];
+        const bar = this.barrierAhead(out.link, null);
+        if (bar < (last ? last.s - last.length : Infinity)) return idmAccel(veh.v, desired, ahead + bar + IDM.minGap - 0.5, veh.v, aMax);
         if (last) return idmAccel(veh.v, desired, ahead + last.s - last.length, veh.v - last.v, aMax);
         if (ahead > LOOKAHEAD || hop > 8) return idmAccel(veh.v, desired, Infinity, 0, aMax);
         ahead += out.length;
@@ -534,6 +589,7 @@ export class LaneTraffic {
       const p = LaneGraph.pointOnMove(m, veh.s);
       veh.pos = p.pos;
       this.steer(veh, p.dir);
+      if (m.node !== null) veh.level = this.graph.net.nodes.get(m.node)?.level ?? veh.level;
       return;
     }
     const lane = this.currentLane(veh);
@@ -542,6 +598,8 @@ export class LaneTraffic {
     veh.pos = add(pose.pos, scale(rightNormal(pose.dir), veh.lateral));
     this.steer(veh, pose.dir);
     veh.centerS = this.graph.axisS(lane, veh.s);
+    const c = this.graph.net.corridors.get(this.graph.links.get(lane.link)!.corridor);
+    if (c) veh.level = this.graph.net.heightAt(c, veh.centerS);
   }
 
   // ---------- Проезд узлов ----------

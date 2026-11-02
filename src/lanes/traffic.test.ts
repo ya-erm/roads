@@ -77,6 +77,37 @@ describe('Полосы: движение', { timeout: 30_000 }, () => {
     expect(arrived.map((x) => x.id)).toEqual([placed.id]);
   });
 
+  it('перед закрытым шлагбаумом машины ждут, не заезжая на переезд, и едут, когда он открыт', () => {
+    const net = new LaneNet();
+    const w = net.addSeam({ x: 0, y: 0 }, EAST);
+    const mid = net.addSeam({ x: 300, y: 0 }, EAST);
+    const e = net.addSeam({ x: 700, y: 0 }, EAST);
+    net.addCorridor(w.id, mid.id, { cls: 'street', lanes: twoWay(1, 1) });
+    const c = net.addCorridor(mid.id, e.id, { cls: 'street', lanes: twoWay(1, 1) });
+    const graph = new LaneGraph(net);
+    const traffic = new LaneTraffic(graph, { onArrive: () => {}, onLost: () => {} });
+    // Переезд на втором полотне, в 200 от его начала.
+    const barrier = { s: 200, closed: true, busy: false };
+    traffic.barriers.set(c.id, [barrier]);
+    const route = findLaneRoute(graph, graph.outLinks.get(w.id)!, e.id)!;
+    let spawned = 0;
+    let crossed = 0;
+    run(traffic, 40, () => {
+      if (traffic.time > spawned * 2 && spawned < 5 && traffic.spawn({ ...CAR, targetNode: e.id, route })) spawned++;
+      if (barrier.busy) crossed++;
+    });
+    expect(spawned).toBe(5);
+    expect(crossed).toBe(0);
+    expect(traffic.arrivals).toBe(0);
+    // Первая стоит у стоп-линии — перед переездом, а не на нём.
+    const first = [...traffic.vehicles.values()].sort((x, y) => y.pos.x - x.pos.x)[0];
+    expect(first.pos.x).toBeLessThan(300 + 200 - 10);
+    expect(first.pos.x).toBeGreaterThan(300 + 200 - 25);
+    barrier.closed = false;
+    run(traffic, 40);
+    expect(traffic.arrivals).toBe(5);
+  });
+
   it('с полосы разгона машины перестраиваются до её конца, а не стоят', () => {
     const net = new LaneNet();
     const s = net.addSeam({ x: 0, y: 0 }, EAST);
