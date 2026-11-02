@@ -270,7 +270,19 @@ export function crossingSvg(w = 40, h = 20): string {
 }
 
 /** Вокзал: здание с платформой у двух путей. */
-export function stationSvg(kind: 'road' | 'rail', size = 40): string {
+export function stationSvg(kind: 'road' | 'rail' | 'stop', size = 40): string {
+  if (kind === 'stop') {
+    // Навес у края улицы и знак с буквой «А»; у бордюра — автобус.
+    return `<svg viewBox="0 0 40 40" width="${size}" height="${size}">
+      <rect x="2" y="24" width="36" height="14" rx="2" fill="#646b76"/>
+      <path d="M4 31H36" stroke="#f5f3e6" stroke-width="1" stroke-dasharray="4 3"/>
+      <rect x="9" y="25.5" width="20" height="5.5" rx="2" fill="#e07b39"/>
+      <rect x="6" y="13" width="18" height="7" rx="1.5" fill="#f2efe8" stroke="#4f5965" stroke-width="1.4"/>
+      <path d="M31 21V8" stroke="#4f5965" stroke-width="1.6"/>
+      <circle cx="31" cy="7" r="5" fill="#2f80ed"/>
+      <text x="31" y="9.6" font-size="7.5" font-weight="700" text-anchor="middle" fill="#fff" font-family="system-ui, sans-serif">А</text>
+    </svg>`;
+  }
   if (kind === 'rail') {
     return `<svg viewBox="0 0 40 40" width="${size}" height="${size}">
       <rect x="6" y="5" width="28" height="11" rx="1.5" fill="#f2efe8" stroke="#4f5965" stroke-width="1.4"/>

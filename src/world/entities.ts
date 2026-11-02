@@ -81,8 +81,8 @@ export interface StationServes {
 export interface Station {
   type: 'station';
   id: number;
-  /** Автостанция у дороги или вокзал на путях. */
-  kind: 'road' | 'rail';
+  /** Автостанция у дороги, автобусная остановка прямо на улице или вокзал на путях. */
+  kind: 'road' | 'stop' | 'rail';
   name: string;
   fp: Footprint;
   /** Узел подъезда; у вокзала его нет (−1). */

@@ -80,6 +80,7 @@ export class Controller {
   tool: Tool = 'select';
   roadMode: RoadMode = 'build';
   junctionMode: JunctionMode = 'ring';
+  stationMode: 'road' | 'stop' = 'road';
   railMode: RailMode = 'track';
   /** Параметры нового кольца. */
   ring: RingOptions = { ...DEFAULT_RING };
@@ -206,7 +207,14 @@ export class Controller {
 
   /** Что ставим: автостанцию или вокзал. */
   get stationKind(): StationKind {
-    return this.tool === 'rail' ? 'rail' : 'road';
+    return this.tool === 'rail' ? 'rail' : this.stationMode;
+  }
+
+  /** Инструмент «Станция»: автостанция с заездом или остановка прямо на улице. */
+  setStationMode(mode: 'road' | 'stop'): void {
+    if (this.tool !== 'station') this.setTool('station');
+    this.stationMode = mode;
+    this.onChange();
   }
 
   setRoadMode(mode: RoadMode): void {
@@ -1282,7 +1290,7 @@ export class Controller {
         }
         const free = plan.rail?.main ? ' · R — повернуть' : '';
         const raze = razed.length ? ` · снос ${razed.length} зд.` : '';
-        const what = this.stationKind === 'rail' ? 'Ж/д станция' : 'Станция';
+        const what = this.stationKind === 'rail' ? 'Ж/д станция' : this.stationKind === 'stop' ? 'Остановка' : 'Станция';
         o.label = plan.ok ? { text: `${what} · ${money(plan.cost)}${raze}${free}`, ok: true } : { text: plan.reason ?? '', ok: false };
         break;
       }

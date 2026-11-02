@@ -20,7 +20,7 @@ import { Controller, DRAW_MODES, Tool, TOOLS } from '../input/controller';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
 import { StationServes, TOWN_NEED, TownStyle } from '../world/entities';
 import { footprintRadius } from '../world/spatial';
-import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION } from '../config';
+import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP } from '../config';
 import { isOneWay, KMH_PER_UNIT, LEVELS, RAIL_SPEC, ROAD_PRESETS, RoadSpec, SPEED_LIMITS, specCost, specKmh } from '../world/roadTypes';
 import {
   DEFAULT_SETTINGS,
@@ -670,6 +670,9 @@ export class Hud {
       case 'new-serves':
         c.toggleStationServe(d.what === 'pax' ? 'pax' : 'cargo');
         break;
+      case 'station-mode':
+        c.setStationMode(d.id === 'stop' ? 'stop' : 'road');
+        break;
       case 'st-serves': {
         const st = g.stations.get(Number(d.id));
         if (st) g.setStationServes(st.id, { ...st.serves, [d.what === 'pax' ? 'pax' : 'cargo']: !st.serves[d.what === 'pax' ? 'pax' : 'cargo'] });
@@ -1054,8 +1057,18 @@ export class Hud {
   }
 
   private stationOptionsHtml(): string {
+    const c = this.controller;
+    const sw = this.kindSwitch('Что ставим', 'station-mode', c.stationMode, [
+      { id: 'road', name: 'Автостанция', svg: stationSvg('road', 34), hint: 'Грузовики и автобусы, с заездом и постами погрузки' },
+      { id: 'stop', name: 'Остановка', svg: stationSvg('stop', 34), hint: 'Автобусная остановка прямо на улице — для маршрутов по городу' },
+    ]);
+    if (c.stationMode === 'stop') {
+      const tip = `Остановка встаёт у края улицы со стороны курсора: автобусы останавливаются прямо в полосе. Только пассажиры, охват ${STOP.catchment} м, ${STOP.bays} места для автобусов. Не ближе ${STOP.gap} м к перекрёстку. В маршруте её можно смешивать с автостанциями.`;
+      return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
+        <div class="price">${money(STOP.cost)}</div></div></div>`;
+    }
     const tip = `Автостанция для грузовиков и автобусов: у дороги, прямо у перекрёстка или вплотную к предприятию — с той стороны, где курсор. Дома на месте станции снесём (красные). Охват ${STATION.catchment} м. Посты погрузки добавляются в карточке станции. Ж/д станции — в инструменте «Ж/д».`;
-    return `<div class="opt-row"><div class="opt-group"><div class="opt-title">Работает с</div>${this.servesHtml(this.controller.stationServes, 'new-serves')}</div>
+    return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Работает с</div>${this.servesHtml(c.stationServes, 'new-serves')}</div>
       <div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
       <div class="price">${money(COST.station)}</div></div></div>`;
   }
@@ -1378,11 +1391,14 @@ export class Hud {
       ];
       const suppliesAll = [...new Set(g.industries.filter((i) => st.industryIds.includes(i.id)).map((i) => i.info.produces))];
       const towns = st.townIds.map((id) => g.towns.find((t) => t.id === id)?.name).filter(Boolean).join(', ');
-      const kind = st.industryId !== null ? 'Станция предприятия · ' : st.kind === 'rail' ? 'Ж/д станция · ' : '';
+      const kind =
+        st.industryId !== null ? 'Станция предприятия · ' : st.kind === 'rail' ? 'Ж/д станция · ' : st.kind === 'stop' ? 'Автобусная остановка · ' : '';
       const busy =
         st.kind === 'rail'
           ? `платформ занято ${st.platforms.filter((p) => g.rail.isReserved(p)).length} из ${st.platforms.length}`
-          : `постов занято ${st.occupied.length} из ${st.bays}`;
+          : st.kind === 'stop'
+            ? `автобусов ${st.occupied.length} из ${st.bays}`
+            : `постов занято ${st.occupied.length} из ${st.bays}`;
       const supplies = st.serves.cargo ? suppliesAll : [];
       // Куда едут пассажиры: станция назначения (клик — показать), сколько ждут и какие линии туда ходят.
       const routes = g.paxRoutes(st);
@@ -1411,7 +1427,7 @@ export class Hud {
       const freightWaiting = waiting.filter(([c]) => c !== 'passengers');
       // Посты погрузки автостанции: картинка станции с постами, «−» и «+» (с ценой или причиной, почему нельзя).
       let baysRow = '';
-      if (st.kind !== 'rail') {
+      if (st.kind === 'road') {
         const more = g.stationBaysPlan(st.id, st.bays + 1);
         const plusTitle = more.ok ? `Добавить пост погрузки · ${money(STATION.bayCost)}` : (more.reason ?? '');
         baysRow = `<div class="icon-row"><span class="lbl2">Посты погрузки</span>
@@ -1420,8 +1436,10 @@ export class Hud {
             data-action="st-bays" data-id="${st.id}" data-d="1" class="${more.ok ? '' : 'off'}" title="${esc(plusTitle)}">+</button></span>
           ${more.ok ? `<span class="muted">+${money(STATION.bayCost)}</span>` : ''}</div>`;
       }
+      // Остановка — только для пассажиров: переключать нечего.
+      const servesRow = st.kind === 'stop' ? '' : `<div class="serves-row"><span class="lbl2">Работает с</span>${this.servesHtml(st.serves, 'st-serves', String(st.id))}</div>`;
       return `<section class="detail">${head(st.name, `${kind}${busy}`)}
-        <div class="serves-row"><span class="lbl2">Работает с</span>${this.servesHtml(st.serves, 'st-serves', String(st.id))}</div>
+        ${servesRow}
         ${baysRow}
         ${
           st.serves.cargo || freightWaiting.length

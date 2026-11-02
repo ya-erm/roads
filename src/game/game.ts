@@ -9,12 +9,13 @@ import {
   SIM_DT,
   START_YEAR,
   STATION,
+  STOP,
   TOWN_TRAFFIC,
 } from '../config';
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../core/vec';
-import { Anchor, anchorAt, buildRing, insideRuns } from '../lanes/edit';
+import { Anchor, anchorAt, buildRing, insideRuns, splitCorridor } from '../lanes/edit';
 import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, parseLaneKey, twoWay } from '../lanes/model';
 import type { LaneTraffic } from '../lanes/traffic';
 import { RailSim, Train } from '../sim/rail';
@@ -138,6 +139,11 @@ export interface LaneEnd {
 
 /** Сколько последних строек можно отменить. */
 const UNDO_DEPTH = 30;
+
+/** Чем ездят к станции: к вокзалу — поезда, к автостанции и остановке — машины. */
+export function stationMode(st: Pick<Station, 'kind'>): LineMode {
+  return st.kind === 'rail' ? 'rail' : 'road';
+}
 
 /** Центр окружности через три точки; на одной прямой — null. */
 function circleCenter(a: Vec, b: Vec, c: Vec): Vec | null {
@@ -1574,10 +1580,10 @@ export class Game implements BuildContext {
     return freight ? 'truck' : 'bus';
   }
 
-  /** Почему из этих станций нельзя собрать линию; null — можно. */
+  /** Почему из этих станций нельзя собрать линию; null — можно. Остановки ездят вместе с автостанциями. */
   lineProblem(stops: number[]): string | null {
-    const kinds = new Set(stops.map((id) => this.stations.get(id)?.kind).filter((k) => k));
-    if (kinds.size > 1) return 'В одном маршруте — либо автостанции, либо ж/д станции';
+    const sts = stops.map((id) => this.stations.get(id)).filter((s): s is Station => !!s);
+    if (new Set(sts.map(stationMode)).size > 1) return 'В одном маршруте — либо автостанции и остановки, либо ж/д станции';
     return null;
   }
 
@@ -1594,7 +1600,7 @@ export class Game implements BuildContext {
       id: n,
       name: this.defaultLineName(clean),
       color,
-      mode: this.stations.get(clean[0])!.kind,
+      mode: stationMode(this.stations.get(clean[0])!),
       stops: clean,
       vehicles: [],
       revenueMonth: 0,
@@ -1749,7 +1755,10 @@ export class Game implements BuildContext {
     if (clean.length < 2) return 'В маршруте нужно минимум две станции';
     const problem = this.lineProblem(clean);
     if (problem) return problem;
-    if (this.stations.get(clean[0])!.kind !== this.lineMode(line)) return 'Поезда и машины не смешиваются в одном маршруте';
+    if (stationMode(this.stations.get(clean[0])!) !== this.lineMode(line)) return 'Поезда и машины не смешиваются в одном маршруте';
+    if (line.vehicles.some((id) => MODELS[this.fleet.get(id)!.model].carries !== 'passengers') && clean.some((id) => this.stations.get(id)!.kind === 'stop')) {
+      return 'Грузовики к остановкам не ездят';
+    }
     this.forgetUndo();
     const before = line.stops;
     line.stops = clean;
@@ -1838,6 +1847,8 @@ export class Game implements BuildContext {
     const line = this.lines.get(lineId);
     const m = MODELS[model];
     if (!line || m.price > this.budget || m.mode !== this.lineMode(line) || m.year > this.year) return null;
+    // На остановке только пассажиры: грузовику там делать нечего.
+    if (m.carries !== 'passengers' && line.stops.some((id) => this.stations.get(id)?.kind === 'stop')) return null;
     const first = this.stations.get(line.stops[0]);
     const id = this.nextEntityId++;
     const v: FleetVehicle = {
@@ -2845,6 +2856,7 @@ export class Game implements BuildContext {
   /** angle — поворот ж/д станции в чистом поле, tracks — сколько у неё путей с платформами (2–4). */
   stationPlan(p: Vec, snapRadius: number, kind: StationKind = 'road', angle = 0, tracks = 2): StationPlan {
     if (kind === 'rail') return this.railStationPlan(p, snapRadius, angle, Math.max(2, Math.min(4, tracks)));
+    if (kind === 'stop') return this.stopPlan(p, snapRadius);
     const fail = (reason: string): StationPlan => ({ ok: false, reason, cost: COST.station, fp: null });
     // Курсор у предприятия — пристраиваем станцию к нему с этой стороны.
     const ind = this.industries.find((i) => pointInFootprint(p, i.fp, 80));
@@ -2869,6 +2881,51 @@ export class Game implements BuildContext {
     const seg = hit.seg;
     const from: Anchor = { kind: 'corridor', corridor: seg.id, s: hit.s, pos: seg.lut.pointAt(hit.s) };
     return this.drivewayStationPlan(from, normalTowards(seg, hit.s, p), halfAtS(seg, hit.s));
+  }
+
+  /**
+   * Автобусная остановка: навес у края улицы со стороны курсора, улица в этом месте режется стыком —
+   * это узел остановки: автобусы встают у неё прямо в полосе. Не у перекрёстка и не рядом с другой остановкой.
+   */
+  private stopPlan(p: Vec, snapRadius: number): StationPlan {
+    const fail = (reason: string, fp: Footprint | null = null): StationPlan => ({ ok: false, reason, cost: STOP.cost, fp });
+    const hit = this.streetNear(p, Math.max(30, snapRadius));
+    if (!hit) return fail('Поставьте у городской улицы');
+    const c = hit.seg;
+    const net = this.roads.net;
+    // Конец улицы, где перекрёсток или тупик, — далеко; стык (продолжение улицы) не мешает.
+    const near = (end: 'a' | 'b') => {
+      const n = net.node(end === 'a' ? c.a : c.b);
+      return n.kind === 'junction' || net.isDeadEnd(n);
+    };
+    const s = hit.s;
+    const t = c.lut.tangentAt(s);
+    const point = c.lut.pointAt(s);
+    const side = normalTowards(c, s, p);
+    const fp: Footprint = {
+      center: add(point, scale(side, halfAtS(c, s) + 2 + STOP.size.h / 2)),
+      w: STOP.size.w,
+      h: STOP.size.h,
+      angle: Math.atan2(t.y, t.x),
+    };
+    if ((s < STOP.gap && near('a')) || (c.length - s < STOP.gap && near('b'))) return fail('Слишком близко к перекрёстку', fp);
+    if (s < 10 || c.length - s < 10) return fail('Слишком близко к узлу', fp);
+    // Другие остановки и станции рядом на этой же улице.
+    for (const st of this.stations.values()) {
+      if (st.kind !== 'stop' && dist(st.fp.center, fp.center) > STOP.gap) continue;
+      if (dist(st.fp.center, fp.center) < (st.kind === 'stop' ? STOP.gap * 2 : STOP.gap)) return fail('Рядом уже есть остановка', fp);
+    }
+    if (this.isWater(fp.center, 4)) return fail('Мешает вода', fp);
+    const under = this.structuresUnder(fp, 1);
+    if (under.blocker) return fail(under.blocker, fp);
+    const id = c.id;
+    const plan = this.roadBuilder.plan((n) => {
+      splitCorridor(n, n.corridor(id), s, 'seam');
+    });
+    const cost = STOP.cost + this.demolishTotal(under.houses);
+    if (!plan.ok) return { ...fail(plan.reason ?? 'Нельзя поставить', fp), cost };
+    if (cost > this.budget) return { ...fail('Не хватает денег', fp), cost };
+    return { ok: true, cost, fp, driveway: plan, nodePos: point, demolish: under.houses };
   }
 
   /** К узлу можно примкнуть выезд станции: перекрёсток или тупик обычных дорог на земле (не выезд другой станции). */
@@ -2968,11 +3025,11 @@ export class Game implements BuildContext {
       this.spend(plan.cost - (before - this.money));
     } else {
       if (!plan.driveway || !plan.nodePos || !this.roadBuilder.apply(plan.driveway)) return null;
-      // Узел станции — тупик выезда.
+      // Узел станции — тупик выезда (у остановки — стык посреди улицы).
       const node = this.roads.net.nodesNear(plan.nodePos, 2)[0];
       if (!node) return null;
       nodeId = node.id;
-      this.spend(COST.station);
+      this.spend(kind === 'stop' ? STOP.cost : COST.station);
       // Дома на месте станции (под выездом их уже снёс строитель).
       if (plan.demolish?.length) {
         const cost = this.demolishTotal(plan.demolish);
@@ -2989,12 +3046,13 @@ export class Game implements BuildContext {
       fp: plan.fp,
       nodeId,
       platforms,
-      serves: { ...serves },
+      // Остановка — только для пассажиров.
+      serves: kind === 'stop' ? { pax: true, cargo: false } : { ...serves },
       industryId: ind?.id ?? null,
       cargo: {},
       passengers: new Map(),
       occupied: [],
-      bays: plan.rail ? platforms.length : STATION.bays,
+      bays: plan.rail ? platforms.length : kind === 'stop' ? STOP.bays : STATION.bays,
       townIds: [],
       industryIds: [],
       accepts: new Set(),
@@ -3013,6 +3071,14 @@ export class Game implements BuildContext {
     const at = st.fp.center;
     const nearest = this.towns.reduce<Town | null>((best, t) => (!best || dist(t.center, at) < dist(best.center, at) ? t : best), null);
     const inTown = !!nearest && dist(nearest.center, at) < nearest.radius + 400;
+    // Остановки нумеруются по городу: «Медведково, ост. 3».
+    if (st.kind === 'stop') {
+      const base = `${inTown ? `${nearest!.name}, ` : ''}ост. `;
+      const used = new Set([...this.stations.values()].filter((s) => s.name.startsWith(base)).map((s) => s.name));
+      let n = 1;
+      while (used.has(`${base}${n}`)) n++;
+      return `${base}${n}`;
+    }
     // Вокзал вне города называется по предприятию в охвате.
     const served = !inTown && st.kind === 'rail' ? this.stationIndustries(st)[0] : undefined;
     const named = ind ?? served;
@@ -3076,6 +3142,11 @@ export class Game implements BuildContext {
       this.networkChanged();
       return true;
     }
+    // Остановка стоит прямо на улице — улица остаётся.
+    if (st.kind === 'stop') {
+      this.refund(STOP.cost);
+      return true;
+    }
     // Выезд станции сносится вместе с ней.
     const node = this.roads.net.nodes.get(st.nodeId);
     if (node?.corridors.length) {
@@ -3096,6 +3167,7 @@ export class Game implements BuildContext {
     const st = this.stations.get(id);
     if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null };
     if (st.kind === 'rail') return { ok: false, reason: 'У ж/д станции столько постов, сколько платформ', cost: 0, fp: st.fp };
+    if (st.kind === 'stop') return { ok: false, reason: `У остановки ${STOP.bays} места для автобусов`, cost: 0, fp: st.fp };
     const n = Math.round(bays);
     const extra = n - st.bays;
     const fp: Footprint = { ...st.fp, w: st.fp.w + extra * STATION.bayWidth };
@@ -3164,7 +3236,7 @@ export class Game implements BuildContext {
 
   /** Радиус охвата: у вокзала больше, чем у автостанции. */
   catchmentRadius(st: Pick<Station, 'kind'>): number {
-    return st.kind === 'rail' ? RAIL_STATION.catchment : STATION.catchment;
+    return st.kind === 'rail' ? RAIL_STATION.catchment : st.kind === 'stop' ? STOP.catchment : STATION.catchment;
   }
 
   computeCatchment(st: Station): void {

@@ -1652,6 +1652,7 @@ export class Renderer {
       if (!inView(st.fp)) continue;
       const selected = (sel?.type === 'station' && sel.id === st.id) || o.lineStops.includes(st.id);
       if (st.kind === 'rail') this.drawRailStation(game, st, selected);
+      else if (st.kind === 'stop') this.drawStop(game, st, selected);
       else this.drawStation(st, selected);
     }
     ctx.globalAlpha = 1;
@@ -1937,6 +1938,44 @@ export class Renderer {
   private icon(img: HTMLImageElement, p: Vec, size: number): void {
     if (!img.complete || !img.naturalWidth) return;
     this.ctx.drawImage(img, p.x - size / 2, p.y - size / 2, size, size);
+  }
+
+  /** Остановка: навес у края улицы, знак «А», у бордюра — автобусы на посадке. */
+  private drawStop(game: Game, st: Station, selected: boolean): void {
+    const ctx = this.ctx;
+    const fp = st.fp;
+    const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+    // Улица — в сторону узла остановки (он на оси улицы).
+    const node = game.roads.net.nodes.get(st.nodeId);
+    const toRoad = node ? sub(node.pos, fp.center) : { x: -u.y, y: u.x };
+    const l = Math.hypot(toRoad.x, toRoad.y) || 1;
+    const n = { x: toRoad.x / l, y: toRoad.y / l };
+    // Автобусы на посадке — вдоль бордюра, в крайней полосе.
+    for (let i = 0; i < st.occupied.length; i++) {
+      const along = (i - (st.occupied.length - 1) / 2) * 14;
+      const c = add(add(fp.center, scale(u, along)), scale(n, fp.h / 2 + 2 + LANE_W / 2));
+      this.drawFootprint({ center: c, w: 12, h: 4.6, angle: fp.angle }, '#e07b39', '#8a4a22', 0.8);
+    }
+    this.drawFootprint({ ...fp, center: { x: fp.center.x + 1.5, y: fp.center.y + 2 } }, 'rgba(30,40,25,0.2)');
+    this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 2.4 : 1.2);
+    // Крыша навеса — тёмная полоса со стороны тротуара.
+    ctx.save();
+    ctx.translate(fp.center.x, fp.center.y);
+    ctx.rotate(fp.angle);
+    ctx.fillStyle = '#5c6470';
+    const back = dot(n, { x: -u.y, y: u.x }) > 0 ? -1 : 1;
+    ctx.fillRect(-fp.w / 2 + 1.5, back > 0 ? fp.h / 2 - 2.6 : -fp.h / 2 + 1, fp.w - 3, 1.6);
+    ctx.restore();
+    // Знак остановки на краю навеса.
+    const sign = add(fp.center, scale(u, fp.w / 2 + 2.5));
+    ctx.fillStyle = '#2f80ed';
+    ctx.beginPath();
+    ctx.arc(sign.x, sign.y, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(sign.x, sign.y, 1, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   private drawStation(st: Station, selected: boolean): void {
