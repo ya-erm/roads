@@ -162,6 +162,8 @@ export class Controller {
   ping: { pos: Vec; r: number; until: number } | null = null;
   /** Здание, которое игрок переносит (следует за курсором). */
   moving: TownBuilding | null = null;
+  /** Станция, которую игрок переносит: силуэт прилипает к дорогам, как при постройке. */
+  movingStation: number | null = null;
   /** Настройка полос выбранного перекрёстка: полоса въезда, которую сейчас соединяем. */
   laneFrom: { seg: number; i: number } | null = null;
   /** Курсор на варианте главной дороги в карточке перекрёстка — карта показывает этот вариант. */
@@ -246,6 +248,7 @@ export class Controller {
     this.chain = null;
     this.control = null;
     this.moving = null;
+    this.movingStation = null;
     this.roadTools.clear();
     this.railTools.clear();
     this.laneFrom = null;
@@ -256,6 +259,13 @@ export class Controller {
   startMove(b: TownBuilding): void {
     this.setTool('select');
     this.moving = b;
+    this.onChange();
+  }
+
+  /** Начать перенос станции: её силуэт следует за курсором и прилипает к дорогам до клика. */
+  startStationMove(id: number): void {
+    this.setTool('select');
+    this.movingStation = id;
     this.onChange();
   }
 
@@ -602,6 +612,7 @@ export class Controller {
     else if (this.areaStart) this.areaStart = null;
     else if (this.spanStart) this.spanStart = null;
     else if (this.moving) this.moving = null;
+    else if (this.movingStation !== null) this.movingStation = null;
     else if (this.copyStart) this.copyStart = null;
     else if (this.pasteDrag) this.pasteDrag = null;
     else if (this.cancelPaste()) {
@@ -914,7 +925,7 @@ export class Controller {
     const g = this.game();
     this.left = { sx: e.clientX, sy: e.clientY, createdChain: false };
     // Всё, что строит или сносит, можно отменить (Ctrl+Z): снимок до действия, итог — при отпускании кнопки.
-    const label = this.moving ? 'перенос здания' : UNDO_LABELS[this.action];
+    const label = this.moving ? 'перенос здания' : this.movingStation !== null ? 'перенос станции' : UNDO_LABELS[this.action];
     if (label) g.checkpoint(this.action === 'road' && this.netKind === 'rail' ? 'путь' : label);
     switch (this.action) {
       case 'road':
@@ -1050,6 +1061,17 @@ export class Controller {
         break;
       }
       case 'select': {
+        if (this.movingStation !== null) {
+          // Перенос станции: на новое место, с выездом; маршруты идут через неё же.
+          const id = this.movingStation;
+          const problem = g.moveStation(id, p, this.snapRadius);
+          if (problem) this.showError(problem);
+          else {
+            this.movingStation = null;
+            this.select({ type: 'station', id });
+          }
+          break;
+        }
         if (this.moving) {
           // Перенос здания: ставим на новое место.
           const plan = g.movePlan(this.moving, p);
@@ -1412,6 +1434,8 @@ export class Controller {
       const b = g.buildingById(id);
       if (b) o.marks.push({ fp: b.fp, ok: false });
     }
+    // Новое место навеса остановки, которую отодвинет расширение улицы.
+    if (plan.ok) for (const fp of plan.moved ?? []) o.marks.push({ fp, ok: true });
     const razed = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
     o.label = plan.ok ? { text: `${okText}${razed}`, ok: true } : { text: plan.reason ?? 'Нельзя', ok: false };
   }
@@ -2028,6 +2052,26 @@ export class Controller {
         break;
       }
       case 'select': {
+        const moving = this.movingStation !== null ? g.stations.get(this.movingStation) : undefined;
+        if (moving) {
+          // Перенос станции: старое место — красным, новое — силуэтом (красным, если нельзя), с выездом и охватом.
+          const plan = g.stationMovePlan(moving.id, p, this.snapRadius);
+          o.marks.push({ fp: moving.fp, ok: false });
+          if (plan.fp) {
+            o.station = { fp: plan.fp, ok: plan.ok };
+            o.catchmentAt = plan.fp.center;
+            o.catchmentR = g.catchmentRadius(moving);
+          }
+          const drive = plan.driveway;
+          if (drive?.net) o.roads = { net: drive.net, ok: plan.ok, changed: drive.changed };
+          for (const id of [...(drive?.demolish ?? []), ...(plan.demolish ?? [])]) {
+            const b = g.buildingById(id);
+            if (b) o.marks.push({ fp: b.fp, ok: false });
+          }
+          const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
+          o.label = plan.ok ? { text: `Перенести сюда · ${price} · Esc — отмена`, ok: true } : { text: plan.reason ?? '', ok: false };
+          break;
+        }
         if (this.moving) {
           const plan = g.movePlan(this.moving, p);
           o.marks.push({ fp: this.moving.fp, ok: false });

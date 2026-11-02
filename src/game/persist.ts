@@ -1,8 +1,16 @@
 import type { Camera } from '../render/camera';
+import { testPageName } from '../testpages/route';
 import { Game, SAVE_VERSION, SaveData } from './game';
 
-/** Слот сохранения: `?slot=имя` позволяет держать несколько независимых партий. */
-const slot = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('slot') : null;
+/**
+ * Слот сохранения: `?slot=имя` позволяет держать несколько независимых партий. У тестовой страницы
+ * (/test/bus) свой слот «test-bus»: что бы там ни сохраняли, обычную партию это не трогает.
+ */
+const slot = typeof location !== 'undefined' ? (new URLSearchParams(location.search).get('slot') ?? testSlot(location.pathname)) : null;
+function testSlot(pathname: string): string | null {
+  const page = testPageName(pathname);
+  return page ? `test-${page}` : null;
+}
 const KEY = slot ? `razvyazka-save:${slot}` : 'razvyazka-save';
 
 /** Сохраняет игру в localStorage. Возвращает false, если места не хватило. */

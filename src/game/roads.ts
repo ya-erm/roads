@@ -3,7 +3,7 @@ import { dist } from '../core/vec';
 import { GLane, GLink, GMove, LaneGraph } from '../lanes/graph';
 import { LaneNet, LaneNode } from '../lanes/model';
 import { findLaneRoute, linkCost, transitionCost } from '../lanes/routing';
-import { changePenalty, CURB_PULL, keepRightCost, LaneTraffic, LaneTrafficEvents } from '../lanes/traffic';
+import { changePenalty, CURB_PULL, keepRightCost, LaneTraffic, LaneTrafficEvents, LATE_CHANGE } from '../lanes/traffic';
 
 /** Размер кольца: радиус оси (если примыкающие дороги шире, кольцо будет больше). */
 export type RingSize = 'small' | 'medium' | 'large';
@@ -66,6 +66,20 @@ export class Roads {
   route(from: number, to: number): number[] | null {
     if (from === to) return null;
     return findLaneRoute(this.graph, this.graph.outLinks.get(from) ?? [], to);
+  }
+
+  /**
+   * Маршрут дальше, как едет автобус от остановки: приехал по связи arrived в её узел (стык на улице) —
+   * едет за узел в ту же сторону, а не разворачивается в нём. Продолжения нет — null.
+   */
+  continueRoute(arrived: number, to: number): number[] | null {
+    const g = this.graph;
+    const link = g.links.get(arrived);
+    if (!link) return null;
+    const outs = new Set<number>();
+    for (const lane of link.lanes) for (const m of g.movesFrom.get(lane.id) ?? []) if (m.cont) outs.add(m.outLink);
+    const starts = [...outs].map((id) => g.links.get(id)).filter((l): l is GLink => !!l);
+    return starts.length ? findLaneRoute(g, starts, to) : null;
   }
 
   /** Обратная Дейкстра от цели: ближайший узел из candidates и маршрут от него до цели. */
@@ -131,7 +145,11 @@ export class Roads {
       out[k] = new Map(
         link.lanes.map((o) => [o.id, (k === links.length - 1 ? last(o) : ahead(o)) + keepRightCost(link.lanes.length, o.index, keepRight)]),
       );
-      enter[k] = new Map(link.lanes.map((l) => [l.id, Math.min(...link.lanes.map((o) => changePenalty(Math.abs(o.index - l.index), link.length) + out[k].get(o.id)!))]));
+      // Как у машин: то же перестроение дальше по пути чуть труднее — при равенстве перестраиваются раньше.
+      const late = 1 + LATE_CHANGE * k;
+      enter[k] = new Map(
+        link.lanes.map((l) => [l.id, Math.min(...link.lanes.map((o) => changePenalty(Math.abs(o.index - l.index), link.length) * late + out[k].get(o.id)!))]),
+      );
     }
     const pts: Vec[] = [];
     // Отправляются от бордюра (из «кармашка» у остановки): крайняя правая полоса, с которой можно доехать.
@@ -143,7 +161,7 @@ export class Roads {
       let to = lane;
       let cost = out[k].get(lane.id) ?? Infinity;
       for (const o of link.lanes) {
-        const c = changePenalty(Math.abs(o.index - lane.index), link.length) + (out[k].get(o.id) ?? Infinity);
+        const c = changePenalty(Math.abs(o.index - lane.index), link.length) * (1 + LATE_CHANGE * k) + (out[k].get(o.id) ?? Infinity);
         if (c < cost - 1e-6) {
           to = o;
           cost = c;
@@ -151,9 +169,11 @@ export class Roads {
       }
       const steps = Math.max(2, Math.ceil(link.length / 8));
       // Перестраиваются сразу, как только можно (в «кармашек» — в самом его начале): плавно на первых метрах связи.
-      // Как и у машины: перестроение — за 15–20 м (её боковой сдвиг), сразу в начале связи.
-      const from = Math.min(2, link.length * 0.05);
+      // Как и у машины: перестроение — за 15–20 м (её боковой сдвиг), сразу в начале связи. Автобус из крайней
+      // правой («кармашка») выезжает в её конце.
       const span = Math.min(18, link.length * 0.5);
+      const late = keepRight && to.index < lane.index && lane.index === link.lanes.length - 1;
+      const from = late ? Math.max(0, link.length - span - Math.min(2, link.length * 0.05)) : Math.min(2, link.length * 0.05);
       for (let i = 0; i <= steps; i++) {
         const s = (link.length * i) / steps;
         const a = g.lanePose(lane, s).pos;

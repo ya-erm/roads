@@ -1,7 +1,7 @@
 import { IDM, LIGHTS } from '../config';
 import { lerp as lerpNum } from '../core/math';
-import { rightNormal, scale, add, type Vec } from '../core/vec';
-import type { Vehicle, VehicleSpec } from '../sim/vehicle';
+import { rightNormal, scale, add, angleDiff, angleOf, dot, type Vec } from '../core/vec';
+import type { Blinker, Vehicle, VehicleSpec } from '../sim/vehicle';
 import { GLane, GLink, GMove, GNode, LaneGraph } from './graph';
 import { Corridor, layerOf } from './model';
 import { findLaneRoute } from './routing';
@@ -36,9 +36,11 @@ const CHANGE_ROOM = 120;
  */
 export const CURB_PULL = 4.5;
 /** Насколько труднее перестроение на каждой следующей связи впереди (доля). */
-const LATE_CHANGE = 0.3;
+export const LATE_CHANGE = 0.3;
 /** Автобус держится крайней правой полосы: трудность за каждую полосу левее — на каждой связи пути. */
 export const BUS_RIGHT = 1.2;
+/** Из «кармашка» (крайней правой) автобус выезжает не дальше стольких метров до его конца. */
+export const BUS_MERGE = 30;
 /** Трудность ехать по полосе l связи: автобусу — левее крайней правой. */
 export const keepRightCost = (lanes: number, index: number, keepRight: boolean) => (keepRight ? (lanes - 1 - index) * BUS_RIGHT : 0);
 
@@ -61,6 +63,30 @@ interface LanePlan {
 const COURTESY = 40;
 /** Бронь узла машиной, которой ехать до него дольше, — «мягкая»: её можно перехватить. */
 const SOFT_GRANT = 3.5;
+
+/** Поворотник перед узлом включают не ближе стольких метров до него… */
+const SIGNAL_AHEAD = 50;
+/** …и не меньше чем за столько секунд (на быстрой дороге — раньше). */
+const SIGNAL_AHEAD_TIME = 2.5;
+/** Поворот в узле — когда курс меняется больше чем на 25°. */
+const TURN_ANGLE = (25 * Math.PI) / 180;
+/** Съезд на ответвление в стыке: на сколько метров вперёд смотреть, куда уходит полоса… */
+const FORK_LOOK = 80;
+/** …и насколько её курс там расходится с главной ветвью (8°), чтобы мигать. */
+const FORK_BEND = (8 * Math.PI) / 180;
+/** Свернувшая на ответвление мигает ещё столько метров после стыка. */
+const FORK_AFTER = 30;
+/** К перестроению по плану полос поворотник включают за столько секунд до него (само оно не ждёт). */
+const SIGNAL_LEAD = 1;
+/** Перестроившись, мигают, пока смещаются вбок, и не меньше стольких секунд от включения поворотника. */
+const SIGNAL_MIN = 1;
+
+/** Поворотник манёвра в узле по курсу въезда и выезда: разворот — левый, почти прямо — выключен (экран: y вниз). */
+export function turnSide(dirIn: Vec, dirOut: Vec): Blinker {
+  if (dot(dirIn, dirOut) < -0.95) return -1;
+  const a = angleDiff(angleOf(dirIn), angleOf(dirOut));
+  return Math.abs(a) > TURN_ANGLE ? (a > 0 ? 1 : -1) : 0;
+}
 
 function idmAccel(v: number, v0: number, gap: number, dv: number, aMax: number): number {
   const sStar = IDM.minGap + Math.max(0, v * IDM.headway + (v * dv) / (2 * Math.sqrt(aMax * IDM.brake)));
@@ -107,6 +133,8 @@ export class LaneTraffic {
   barriers = new Map<number, Barrier[]>();
   /** План полос машины (см. lanePlan) — пока те же граф, маршрут и связь маршрута. */
   private plans = new WeakMap<Vehicle, { graph: LaneGraph; route: number[]; from: number; plan: LanePlan[] }>();
+  /** Поворотник манёвра (см. turnSignal): у нового графа — новые манёвры. */
+  private turns = new WeakMap<GMove, Blinker>();
 
   constructor(
     public graph: LaneGraph,
@@ -149,8 +177,11 @@ export class LaneTraffic {
       veh.route = route;
       veh.routeIndex = 0;
       veh.lateral = 0;
+      veh.laneSignal = 0;
+      veh.laneSignalUntil = undefined;
       insertSorted(spot.lane.vehicles, veh);
       this.updatePose(veh);
+      veh.blinker = this.blinkerOf(veh);
     }
   }
 
@@ -268,6 +299,20 @@ export class LaneTraffic {
     return true;
   }
 
+  /** Остановиться, проехав ещё d метров по маршруту, и стоять, пока не отпустят (release). */
+  holdAfter(veh: Vehicle, d: number): void {
+    veh.holdDist = Math.max(0, d);
+  }
+
+  /** Доехала до места остановки (holdAfter) и стоит. */
+  held(veh: Vehicle): boolean {
+    return veh.holdDist !== undefined && veh.holdDist < 0.5 && veh.v < 0.3;
+  }
+
+  release(veh: Vehicle): void {
+    delete veh.holdDist;
+  }
+
   /** Машина стоит так, что её можно объехать: слева от её полосы есть попутная (она в «кармашке» или крайней правой). */
   standsAside(veh: Vehicle): boolean {
     const lane = this.currentLane(veh);
@@ -302,6 +347,7 @@ export class LaneTraffic {
       stuckTimer: 0,
       rerouteTimer: 3 + jitter(this.nextId) * 3,
       lcCooldown: 0.5,
+      blinker: 0,
     };
     this.vehicles.set(veh.id, veh);
     this.updatePose(veh);
@@ -351,8 +397,97 @@ export class LaneTraffic {
         veh.rerouteTimer = 4 + jitter(veh.id + this.time) * 2;
         this.dynamicReroute(veh);
       }
+      veh.blinker = this.blinkerOf(veh);
     }
     this.markBarriers();
+  }
+
+  // ---------- Поворотники ----------
+
+  /**
+   * Поворотник машины: перестраивается (собирается или уже смещается вбок) — в ту сторону; иначе —
+   * поворот или разворот в узле впереди по маршруту (ближе SIGNAL_AHEAD) и пока его проезжает,
+   * съезд на ответвление в стыке.
+   */
+  blinkerOf(veh: Vehicle): Blinker {
+    // Останавливается у остановки или стоит на ней (посадка) — не мигает.
+    if (veh.holdDist !== undefined) return 0;
+    if (veh.onMovement) {
+      const m = this.graph.moves.get(veh.onMovement);
+      return m ? this.turnSignal(m) : 0;
+    }
+    if (veh.lateral !== 0) return veh.lateral < 0 ? 1 : -1;
+    // Собирается перестроиться (ждёт окна или вот-вот начнёт) — или только что перестроилась.
+    if (veh.laneSignal && (veh.laneSignalUntil === undefined ? !veh.granted : this.time < veh.laneSignalUntil)) return veh.laneSignal;
+    const lane = this.currentLane(veh);
+    if (!lane) return 0;
+    // Только что ушла на ответвление — мигает, пока не отъедет от стыка.
+    const prev = veh.route[veh.routeIndex - 1];
+    if (prev !== undefined && veh.s < FORK_AFTER) {
+      for (const m of this.graph.movesInto.get(lane.id) ?? []) if (m.cont && m.inLink === prev && this.turnSignal(m)) return this.turnSignal(m);
+    }
+    const reach = Math.max(SIGNAL_AHEAD, veh.v * SIGNAL_AHEAD_TIME);
+    let ahead = lane.length - veh.s;
+    let cur = lane;
+    for (let ri = veh.routeIndex; ri < veh.route.length - 1 && ahead <= reach && ri < veh.routeIndex + 8; ri++) {
+      const m = this.signalMove(veh, cur, ri);
+      if (!m) return 0;
+      const s = this.turnSignal(m);
+      if (s || !m.cont) return s;
+      const out = this.graph.lanes.get(m.outLane);
+      if (!out) return 0;
+      cur = out;
+      ahead += out.length;
+    }
+    return 0;
+  }
+
+  /** Манёвр с полосы lane (на связи маршрута ri) на следующую связь: намеченный, любой с этой полосы или с этой связи. */
+  private signalMove(veh: Vehicle, lane: GLane, ri: number): GMove | undefined {
+    const next = veh.route[ri + 1];
+    if (ri === veh.routeIndex && lane.id === veh.lane) {
+      const key = veh.granted ?? veh.planned;
+      const m = key ? this.graph.moves.get(key) : undefined;
+      if (m && m.outLink === next) return m;
+    }
+    for (const m of this.graph.movesFrom.get(lane.id) ?? []) if (m.outLink === next) return m;
+    // Не с той полосы (ещё перестроится) — поворот тот же, куда бы ни вела полоса связи.
+    return this.graph.transitions.get(`${veh.route[ri]}>${next}`)?.[0];
+  }
+
+  /** Поворотник манёвра (считается раз на граф): в узле — по курсу въезда и выезда, в стыке — съезд на ответвление. */
+  private turnSignal(m: GMove): Blinker {
+    let s = this.turns.get(m);
+    if (s === undefined) {
+      s = m.cont ? this.forkSignal(m) : turnSide(m.dirIn, m.dirOut);
+      this.turns.set(m, s);
+    }
+    return s;
+  }
+
+  /**
+   * Продолжение полосы через стык, где связь расходится на несколько ветвей (съезд, развилка). Главная ветвь —
+   * куда уходит больше всего полос: по ней едут не мигая. Съезжающий мигает в ту сторону, куда его полоса за
+   * FORK_LOOK м уходит от главной (нет главной — от самой прямой из других ветвей), если заметно (FORK_BEND).
+   * Не развилка — выключен.
+   */
+  private forkSignal(m: GMove): Blinker {
+    const next = this.graph.linkNext.get(m.inLink);
+    if (!next || next.size < 2) return 0;
+    const branches = [...next].map((id) => {
+      const moves = this.graph.transitions.get(`${m.inLink}>${id}`) ?? [];
+      const lane = moves[0] && this.graph.lanes.get(moves[0].outLane);
+      const dir = lane ? this.graph.lanePose(lane, Math.min(FORK_LOOK, lane.length)).dir : m.dirIn;
+      return { id, lanes: moves.length, bend: angleDiff(angleOf(m.dirIn), angleOf(dir)) };
+    });
+    const mine = branches.find((b) => b.id === m.outLink);
+    const most = Math.max(...branches.map((b) => b.lanes));
+    const mains = branches.filter((b) => b.lanes === most);
+    if (!mine || (mains.length === 1 && mains[0] === mine)) return 0;
+    const others = mains.length === 1 ? mains : branches.filter((b) => b !== mine);
+    const ref = others.reduce((a, b) => (Math.abs(b.bend) < Math.abs(a.bend) ? b : a));
+    const d = mine.bend - ref.bend;
+    return Math.abs(d) < FORK_BEND ? 0 : d > 0 ? 1 : -1;
   }
 
   /** Какие шлагбаумы заняты: машина между стоп-линией и дальним краем переезда. */
@@ -445,7 +580,13 @@ export class LaneTraffic {
 
   private laneChange(veh: Vehicle, dt: number): void {
     veh.lcCooldown -= dt;
-    if (veh.lcCooldown > 0 || veh.granted) return;
+    if (veh.lcCooldown > 0) return;
+    // Поворотник перестроения решается заново при каждой проверке: горит, пока машина собирается перестроиться.
+    const signal = veh.laneSignal ?? 0;
+    veh.laneSignal = 0;
+    veh.laneSignalUntil = undefined;
+    // Останавливается или стоит у остановки (holdDist) — не перестраивается: встаёт ровно в своей полосе.
+    if (veh.granted || veh.holdDist !== undefined) return;
     const lane = this.currentLane(veh);
     if (!lane) return;
     const link = this.graph.links.get(lane.link)!;
@@ -461,6 +602,9 @@ export class LaneTraffic {
     const goal = this.bestLane(link, lane, remaining, stay).lane;
     const end = goal === lane ? null : this.laneEnd(veh, lane, plan);
     veh.mergeWait = 0;
+    // Автобус держится «кармашка» (крайней правой полосы) до её конца: выезжает из неё в последние метры, а не сразу.
+    const holdRight = veh.kind === 'bus' && goal.index < lane.index && lane.index === link.lanes.length - 1 && !!end && end.changes <= 1;
+    if (holdRight && end.dist > Math.max(BUS_MERGE, veh.v * 2.5)) return;
     if (end && end.dist < PLAN_AHEAD) {
       // Дальше по маршруту с другой полосы проще (съезд, поворот, полоса кончается) — перестраиваемся заранее;
       // чем ближе место, где своя полоса уже не ведёт, и чем больше там перестроений, тем настойчивее.
@@ -488,12 +632,21 @@ export class LaneTraffic {
         }
       }
     }
-    if (!target) return;
+    // Перестроение по плану полос начнётся через SIGNAL_LEAD с — поворотник уже сейчас (само оно — как обычно).
+    const soon = !target && end && end.dist < PLAN_AHEAD + veh.v * SIGNAL_LEAD ? link.lanes[lane.index + Math.sign(goal.index - lane.index)] : undefined;
+    const toward = target ?? soon;
+    if (!toward) return;
     // Через сплошную не перестраиваются.
-    const leftOne = target.index < lane.index ? target : lane;
+    const leftOne = toward.index < lane.index ? toward : lane;
     if (leftOne.solidRight) return;
+    const side: Blinker = toward.index > lane.index ? 1 : -1;
+    if (signal !== side) veh.laneSignalSince = this.time;
+    veh.laneSignal = side;
+    if (!target) return;
     if (this.safeToEnter(target, veh, urgency)) {
       this.moveToLane(veh, lane, target);
+      // Поворотник горит, пока машина смещается вбок, и не меньше SIGNAL_MIN с от включения.
+      veh.laneSignalUntil = (veh.laneSignalSince ?? this.time) + SIGNAL_MIN;
       veh.lcCooldown = strategic ? 0.8 : 3;
     } else {
       // Не пускают — чуть отстаём от соседнего потока, чтобы подошло окно.
@@ -724,7 +877,13 @@ export class LaneTraffic {
 
   private integrate(veh: Vehicle, a: number, dt: number): void {
     veh.tripTime += dt;
+    // Остановка через holdDist метров — как стоящая впереди машина.
+    if (veh.holdDist !== undefined) a = Math.min(a, idmAccel(veh.v, veh.maxSpeed, veh.holdDist + IDM.minGap, veh.v, veh.accel));
     veh.v = Math.max(0, Math.min(veh.maxSpeed * 1.05, veh.v + a * dt));
+    if (veh.holdDist !== undefined) {
+      veh.v = Math.min(veh.v, veh.holdDist / dt);
+      veh.holdDist = Math.max(0, veh.holdDist - veh.v * dt);
+    }
     if (veh.v < 0.5) veh.stoppedTime += dt;
     veh.s += veh.v * dt;
     if (veh.lateral !== 0) {
@@ -751,8 +910,11 @@ export class LaneTraffic {
       const isLast = veh.routeIndex === veh.route.length - 1;
       if (isLast && veh.s >= lane.length - 0.5) {
         if (this.events.dwell?.(veh)) {
-          veh.s = lane.length - 0.5;
-          veh.v = 0;
+          // Её отправили дальше (маршрут уже не кончается здесь) — едет без остановки; иначе стоит у конца полосы.
+          if (veh.routeIndex === veh.route.length - 1) {
+            veh.s = lane.length - 0.5;
+            veh.v = 0;
+          }
           break;
         }
         if (this.events.canArrive && !this.events.canArrive(veh)) {

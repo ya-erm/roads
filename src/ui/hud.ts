@@ -297,6 +297,8 @@ export class Hud {
   private readonly needsOpen = new Set<string>();
   /** Папка, у которой сейчас открыто поле названия. */
   private renamingFolder: number | null = null;
+  /** Станция, у которой в карточке открыто поле названия. */
+  private renamingStation: number | null = null;
   /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
   private dragLine: number | null = null;
   /** Черновик параметров нового мира. */
@@ -495,8 +497,30 @@ export class Hud {
       if (input.dataset?.templateName !== undefined && e.key === 'Enter') this.saveUserTemplate();
     });
     this.bindFolders(root, this.q('[data-side]'));
+    this.bindStationName(root);
     controller.onChange = () => this.sync(true);
     this.sync(true);
+  }
+
+  /**
+   * Название станции в её карточке: клик по нему или по ✎ открывает поле (selectionHtml),
+   * Enter или уход фокуса — сохранить, Esc — отменить. Клавиш из поля карта не видит (Controller.onKey).
+   */
+  private bindStationName(root: HTMLElement): void {
+    root.addEventListener('keydown', (e) => {
+      const input = e.target as HTMLInputElement;
+      if (!input.dataset?.stationName) return;
+      if (e.key === 'Escape') input.value = this.game().stations.get(Number(input.dataset.stationName))?.name ?? input.value;
+      if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+    });
+    root.addEventListener('focusout', (e) => {
+      const input = e.target as HTMLInputElement;
+      if (!input.dataset?.stationName) return;
+      this.game().renameStation(Number(input.dataset.stationName), input.value);
+      this.renamingStation = null;
+      // Пока идёт focusout, поле ещё считается активным — перерисуем панель следом.
+      setTimeout(() => this.sync(true));
+    });
   }
 
   /**
@@ -911,6 +935,11 @@ export class Hud {
       case 'rename-folder':
         this.renamingFolder = Number(d.id);
         break;
+      case 'rename-station':
+        this.renamingStation = Number(d.id);
+        // Кнопку уже отпустили: поле — сразу (sync ниже), иначе первые нажатия успели бы уйти карте.
+        this.pressing = false;
+        break;
       case 'delete-folder':
         g.deleteFolder(Number(d.id));
         if (this.renamingFolder === Number(d.id)) this.renamingFolder = null;
@@ -971,6 +1000,9 @@ export class Hud {
         if (b) c.startMove(b);
         break;
       }
+      case 'move-station':
+        c.startStationMove(Number(d.id));
+        break;
       case 'show-fleet':
         // Выбираем машину или поезд компании и переносим к нему камеру.
         c.select({ type: 'fleet', id: Number(d.id) });
@@ -1513,12 +1545,14 @@ export class Hud {
     if (document.activeElement instanceof HTMLInputElement && this.q('[data-side]').contains(document.activeElement)) return;
     if (this.pressing || this.dragLine !== null) return;
     const html = this.sideHtml();
+    // Карточку станции закрыли раньше, чем открылось поле, — при следующем выборе станции оно не нужно.
+    if (this.renamingStation !== null && !html.includes('data-station-name')) this.renamingStation = null;
     if (html !== this.lastPanel) {
       const side = this.q('[data-side]');
       side.innerHTML = html;
       this.lastPanel = html;
-      // Новую или переименовываемую папку сразу открываем для ввода названия.
-      const input = side.querySelector<HTMLInputElement>('[data-folder-name]');
+      // Новую или переименовываемую папку (и название станции) сразу открываем для ввода.
+      const input = side.querySelector<HTMLInputElement>('[data-folder-name], [data-station-name]');
       input?.focus();
       input?.select();
     }
@@ -1908,7 +1942,14 @@ export class Hud {
       }
       // Остановка — только для пассажиров: переключать нечего.
       const servesRow = st.kind === 'stop' ? '' : `<div class="serves-row"><span class="lbl2">Работает с</span>${this.servesHtml(st.serves, 'st-serves', String(st.id))}</div>`;
-      return `<section class="detail">${head(st.name, `${kind}${busy}`)}
+      // Название — переименовать: клик по нему или по ✎ за ним открывает поле ввода.
+      const title =
+        this.renamingStation === st.id
+          ? `<input class="line-name station-name" data-station-name="${st.id}" value="${esc(st.name)}" maxlength="40" />`
+          : `<h3 class="station-title" data-action="rename-station" data-id="${st.id}" title="Нажмите, чтобы переименовать">${esc(st.name)}</h3>
+            <button class="icon pencil" data-action="rename-station" data-id="${st.id}" title="Переименовать">✎</button>`;
+      return `<section class="detail"><header class="station-head">${title}<button class="icon" data-action="close-sel">✕</button></header>
+        <p class="muted">${kind}${busy}</p>
         ${servesRow}
         ${baysRow}
         ${
@@ -1927,7 +1968,12 @@ export class Hud {
         <div class="icon-row"><span class="lbl2">Принимает</span>${
           st.accepts.size ? [...st.accepts].map((c) => cargoIcon(c, 20)).join('') : '<span class="muted">—</span>'
         }</div>
-        <p class="muted">${towns ? `Город: ${esc(towns)} · ` : ''}жителей в охвате ${st.catchPop}</p></section>`;
+        <p class="muted">${towns ? `Город: ${esc(towns)} · ` : ''}жителей в охвате ${st.catchPop}</p>
+        <div class="actions">${
+          st.kind === 'rail'
+            ? '<button class="small" disabled title="Ж/д станцию пока не перенести: платформы и стрелки остаются на путях">Переместить</button>'
+            : `<button class="small" data-action="move-station" data-id="${st.id}" title="Станция встанет у другой дороги; маршруты через неё сохранятся">Переместить</button>`
+        }</div></section>`;
     }
     if (sel.type === 'industry') {
       const ind = g.industries.find((i) => i.id === sel.id);

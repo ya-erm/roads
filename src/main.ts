@@ -4,6 +4,7 @@ import { clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readS
 import { Controller } from './input/controller';
 import { Camera } from './render/camera';
 import { Renderer } from './render/renderer';
+import { testScene } from './testpages';
 import { Hud } from './ui/hud';
 import { DEFAULT_SETTINGS, WorldSettings } from './world/settings';
 
@@ -13,17 +14,22 @@ const hudRoot = document.getElementById('hud') as HTMLElement;
 const params = new URLSearchParams(location.search);
 const randomSeed = () => Math.floor(Math.random() * 1e9);
 
+// Тестовая страница (/test/bus): вместо сохранения — заранее собранная сцена, перезагрузка собирает её заново.
+// Автосохранения там нет, а сохранить вручную можно только в её собственный слот (см. persist).
+const scene = testScene(location.pathname);
 // Есть сохранение — продолжаем его. Новая игра начинается только по кнопке.
-const saved = loadSave();
-let game = saved
-  ? new Game(saved.settings, saved)
-  : new Game({ ...DEFAULT_SETTINGS, seed: Number(params.get('seed')) || randomSeed() });
+const saved = scene ? null : loadSave();
+let game = scene
+  ? scene.game
+  : saved
+    ? new Game(saved.settings, saved)
+    : new Game({ ...DEFAULT_SETTINGS, seed: Number(params.get('seed')) || randomSeed() });
 if (saved && params.has('seed')) {
   params.delete('seed');
   history.replaceState(null, '', `${location.pathname}${params.size ? `?${params}` : ''}`);
 }
-// Сохранённая партия продолжается сразу, новая ждёт кнопку «Начать» в окне правил.
-game.speed = saved ? 1 : 0;
+// Сохранённая партия (и сцена) продолжается сразу, новая ждёт кнопку «Начать» в окне правил.
+game.speed = saved || scene ? 1 : 0;
 
 const camera = new Camera();
 const renderer = new Renderer(canvas, camera);
@@ -42,6 +48,7 @@ const hud = new Hud(hudRoot, controller, () => game, {
 });
 
 function persist(manual = false): void {
+  if (scene && !manual) return;
   const ok = saveGame(game, camera);
   if (manual) game.notify(ok ? 'Игра сохранена' : 'Не удалось сохранить: мало места в браузере', ok ? undefined : '#e5534b');
 }
@@ -130,11 +137,19 @@ function hookAutosave(): void {
   game.onMonthEnd = () => persist();
 }
 
-/** Начальный вид — крупнейший город. */
+/** Начальный вид — крупнейший город (у тестовой сцены — вся сцена). */
 function initialView(): void {
   renderer.resize();
   const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
-  if (town) {
+  if (scene && game === scene.game) {
+    // Сверху — панель с деньгами и датой (и подписи участков над улицами), снизу — инструменты: кадр между ними.
+    const { x0, y0, x1, y1 } = scene.view;
+    const top = 100;
+    const bottom = 130;
+    camera.x = (x0 + x1) / 2;
+    camera.zoom = Math.max(camera.minZoom, Math.min(1.2, (camera.width - 60) / (x1 - x0), (camera.height - top - bottom) / (y1 - y0)));
+    camera.y = (y0 + y1) / 2 + (bottom - top) / 2 / camera.zoom;
+  } else if (town) {
     camera.x = town.center.x;
     camera.y = town.center.y;
     camera.zoom = Math.min(0.9, Math.max(0.35, (Math.min(camera.width, camera.height) * 0.45) / town.radius / 2));
@@ -165,7 +180,7 @@ if (saved?.view) {
   camera.touched = true;
 }
 hookAutosave();
-if (!saved) {
+if (!saved && !scene) {
   persist();
   hud.showWelcome();
 }
@@ -190,3 +205,9 @@ requestAnimationFrame(frame);
 // Для отладки из консоли.
 Object.assign(window, { camera, controller });
 Object.defineProperty(window, 'game', { get: () => game, configurable: true });
+if (scene) {
+  // id линий сцены по названиям участков: game.lines.get(scene.lines.bay) и т. п.
+  Object.assign(window, { scene: { lines: scene.lines } });
+  console.info('window.scene =', { lines: scene.lines });
+  for (const e of scene.errors) console.error(`Сцена: ${e}`);
+}

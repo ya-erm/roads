@@ -5,6 +5,7 @@ import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDra
 import { edgesAt, laneShare } from '../lanes/geometry';
 import { Corridor, Flow, LaneNet, LaneSlot } from '../lanes/model';
 import { LEVEL_RUN, RoadClass, ROAD_CLASSES, ROAD_MARGIN } from '../world/roadTypes';
+import type { Footprint } from '../world/spatial';
 import { halfAtS } from '../world/worldgen';
 import type { Roads } from './roads';
 
@@ -14,8 +15,16 @@ export interface RoadContext {
   readonly budget: number;
   isWater(p: Vec, margin?: number): boolean;
   inBounds(p: Vec, margin?: number): boolean;
-  /** Строения в точке: id, можно ли снести их ради дороги и узел въезда (у автостанции — торец её выезда). */
-  obstaclesAt(p: Vec, radius: number): { id: number; demolishable: boolean; gate?: number }[];
+  /**
+   * Строения в точке: id, можно ли снести их ради дороги, узел въезда (у автостанции — торец её выезда)
+   * и movable — навес остановки: при расширении улицы (shove) не мешает, его отодвинут (shoveStops).
+   */
+  obstaclesAt(p: Vec, radius: number): { id: number; demolishable: boolean; gate?: number; movable?: boolean }[];
+  /**
+   * Расширение улицы (shove): остановки у изменённых полотен отодвигаются к новому бордюру сети net.
+   * Дома на новых местах навесов — в demolish; ответ — новые места навесов или чем мешает.
+   */
+  shoveStops?(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[] | string;
   demolishCost(id: number): number;
   demolish(ids: number[]): void;
   spend(amount: number): void;
@@ -38,6 +47,8 @@ export interface RoadPlan {
   net: LaneNet | null;
   /** Новые и изменённые полотна (в net). */
   changed: number[];
+  /** Куда отодвинутся навесы остановок (расширение улицы у остановки). */
+  moved?: Footprint[];
 }
 
 const fail = (reason: string): RoadPlan => ({ ok: false, reason, cost: 0, spend: 0, refund: 0, demolish: [], net: null, changed: [] });
@@ -116,9 +127,17 @@ export class RoadBuilder {
     // Развязка (trusted) проложена заранее: её куски вплотную друг к другу — так задумано, сверяем только с прочими дорогами.
     // only — что проверять (вставка: её полотна; разрезанные ею старые дороги — нет, у них дома не сносим).
     const own = opts.trusted ? new Set(changed.map((c) => c.id)) : null;
-    for (const c of opts.raze ? [] : opts.only ? changed.filter(opts.only) : changed) {
+    const checked = opts.raze ? [] : opts.only ? changed.filter(opts.only) : changed;
+    for (const c of checked) {
       reason = this.check(next, c, demolish, !!opts.shove, own);
       if (reason) break;
+    }
+    // Расширение у остановки: её навес отодвигается к новому бордюру, дома на его новом месте — под снос.
+    let moved: Footprint[] | undefined;
+    if (!reason && opts.shove && checked.length && this.ctx.shoveStops) {
+      const res = this.ctx.shoveStops(next, checked, demolish);
+      if (typeof res === 'string') reason = res;
+      else if (res.length) moved = res;
     }
     // Новые беды сети (оборванные полосы и т. п.) — только те, что появились от этой правки.
     if (!reason && !opts.raze) {
@@ -133,6 +152,7 @@ export class RoadBuilder {
     const cost = Math.round(spend - refund * COST.refundRatio);
     if (!reason && cost > this.ctx.budget) reason = 'Не хватает денег';
     const plan: RoadPlan = { ok: !reason, reason, cost, spend, refund, demolish: razed, net: next, changed: changed.map((c) => c.id) };
+    if (moved) plan.moved = moved;
     return plan;
   }
 
@@ -313,6 +333,8 @@ export class RoadBuilder {
         for (const o of this.ctx.obstaclesAt(deck, deckHalf + 1)) {
           // Своя станция в торце выезда: широкое полотно у ворот слегка заходит в её контур — так и задумано.
           if (o.gate !== undefined && (o.gate === c.a || o.gate === c.b)) continue;
+          // Навес остановки при расширении улицы отодвинется к новому бордюру (shoveStops).
+          if (shove && o.movable) continue;
           if (!o.demolishable) return 'Мешает здание';
           if (!shove) demolish.add(o.id);
         }
@@ -337,4 +359,39 @@ export class RoadBuilder {
     }
     return this.ctx.railConflict?.(net, c);
   }
+}
+
+/** Улица, на оси которой точка q (в пределах 4): полотно и где на нём. */
+function streetAt(net: LaneNet, q: Vec): { c: Corridor; s: number } | null {
+  let best: { c: Corridor; s: number; d: number } | null = null;
+  for (const c of net.corridorsNear(q, 20)) {
+    const hit = c.lut.closest(q);
+    if (hit.d < 4 && (!best || hit.d < best.d)) best = { c, s: hit.s, d: hit.d };
+  }
+  return best;
+}
+
+/**
+ * Навес остановки fp у бордюра улицы в сети net: улица идёт через узел node вдоль навеса,
+ * навес — с той же стороны, в gap от кромки асфальта (как при постройке). Кромку берём самую дальнюю
+ * по длине навеса — «кармашек» мог начаться у самой остановки. Ближе к улице, чем сейчас, навес не встаёт.
+ */
+export function curbFootprint(net: LaneNet, node: Vec, fp: Footprint, gap = 2): Footprint {
+  const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+  const d = sub(fp.center, node);
+  const n = dot(d, { x: -u.y, y: u.x }) >= 0 ? { x: -u.y, y: u.x } : { x: u.y, y: -u.x };
+  let need = 0;
+  for (let i = 0; i <= 6; i++) {
+    const hit = streetAt(net, add(node, scale(u, (i / 6 - 0.5) * fp.w)));
+    if (hit) need = Math.max(need, sideHalf(hit.c, hit.s, dot(n, rightNormal(hit.c.lut.tangentAt(hit.s)))));
+  }
+  const off = Math.max(dot(d, n), need + gap + fp.h / 2);
+  return { ...fp, center: add(node, add(scale(u, dot(d, u)), scale(n, off))) };
+}
+
+/** Своя ли улица остановки полотно c: проходит по оси через её узел вдоль навеса (не чужая дорога поперёк). */
+export function isStopStreet(c: Corridor, node: Vec, fp: Footprint): boolean {
+  const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+  for (let i = 0; i <= 6; i++) if (c.lut.closest(add(node, scale(u, (i / 6 - 0.5) * (fp.w + 4)))).d < 4) return true;
+  return false;
 }

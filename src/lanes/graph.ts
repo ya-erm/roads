@@ -248,12 +248,12 @@ export class LaneGraph {
   private buildCorridor(c: Corridor, cutA: number, cutB: number): void {
     const s0 = cutA;
     const s1 = c.length - cutB;
-    // Полоса, что начинается по ходу движения отгоном («кармашек» у остановки, полоса торможения), — в неё
-    // перестраиваются уже с середины отгона, как в жизни, а не только там, где она на полную ширину.
+    // Полоса, что начинается или кончается отгоном («кармашек» у остановки, полосы торможения и разгона), есть и
+    // на половине отгона: в неё перестраиваются с середины отгона, а из неё — до середины, как в жизни.
     const half = taperLen(c.cls) / 2;
     const spans = c.lanes.map((l) => ({
-      from: l.flow > 0 && l.from > 0.5 ? Math.max(0, l.from - half) : l.from,
-      to: l.flow < 0 && l.to < c.length - 0.5 ? Math.min(c.length, l.to + half) : l.to,
+      from: l.from > 0.5 ? Math.max(0, l.from - half) : l.from,
+      to: l.to < c.length - 0.5 ? Math.min(c.length, l.to + half) : l.to,
     }));
     const marks = [s0, s1];
     for (const l of spans) for (const x of [l.from, l.to]) if (x > s0 + 0.5 && x < s1 - 0.5) marks.push(x);

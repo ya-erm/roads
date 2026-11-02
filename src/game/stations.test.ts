@@ -8,7 +8,7 @@ import type { RoadSpec } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
 import { DEFAULT_RULE } from './transport';
 import { Game } from './game';
-import { AVENUE, End, roadPlan, stationExit } from './testkit';
+import { AVENUE, End, roadPlan, stationExit, STREET } from './testkit';
 
 const AVENUE_SPEC: RoadSpec = { cls: 'avenue', lanesF: 2, lanesB: 2 };
 
@@ -410,4 +410,125 @@ describe('Машины в пути и сохранение', () => {
     expect(loaded.fleet.get(v.id)!.state).toBe('departing');
     expect(loaded.traffic.vehicles.size).toBe(0);
   }, 30_000);
+});
+
+describe('Перенос станции', { timeout: 60_000 }, () => {
+  /** Бежит, пока машина v не встанет на посадку на станции st после того, как поездила; true — встала. */
+  function untilLoadingAt(game: Game, vid: number, stId: number, seconds = 400): boolean {
+    const v = game.fleet.get(vid)!;
+    let drove = false;
+    game.speed = 1;
+    for (let t = 0; t < seconds; t += 0.1) {
+      game.update(0.1);
+      drove ||= v.state === 'driving';
+      const line = game.lines.get(v.lineId)!;
+      if (drove && v.state === 'loading' && line.stops[v.stop] === stId) return true;
+    }
+    return false;
+  }
+
+  it('остановка переезжает на другую улицу: имя, пассажиры и маршрут те же, автобус доезжает до нового места; Ctrl+Z возвращает', () => {
+    const game = new Game(42);
+    game.money = 5_000_000;
+    const road = fieldRoad(game, 600);
+    // Улица на юг из середины — туда перенесём остановку.
+    build(game, { x: road.a.x + 300, y: road.y }, { x: road.a.x + 300, y: road.y + 300 });
+    const s1 = game.placeStation({ x: road.a.x + 120, y: road.y - 14 }, 14, 'stop')!;
+    const s2 = game.placeStation({ x: road.a.x + 500, y: road.y - 14 }, 14, 'stop')!;
+    expect(s1).not.toBeNull();
+    expect(s2).not.toBeNull();
+    const line = game.createLine([s1.id, s2.id])!;
+    expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
+    s1.passengers.set(s2.id, 7);
+    const name = s1.name;
+    const fp0 = { ...s1.fp, center: { ...s1.fp.center } };
+    const node0 = s1.nodeId;
+    const to = { x: road.a.x + 314, y: road.y + 150 };
+    const plan = game.stationMovePlan(s1.id, to, 14);
+    expect(plan.ok).toBe(true);
+    const money = game.money;
+    game.checkpoint('перенос станции');
+    expect(game.moveStation(s1.id, to, 14)).toBeNull();
+    game.commit();
+    expect(game.money).toBe(money - plan.cost);
+    // Та же станция: id, имя, ожидающие, маршрут; навес — у южной улицы.
+    expect(game.stations.get(s1.id)).toBe(s1);
+    expect(s1.name).toBe(name);
+    expect(s1.passengers.get(s2.id)).toBe(7);
+    expect(line.stops).toEqual([s1.id, s2.id]);
+    expect(dist(s1.fp.center, to)).toBeLessThan(10);
+    expect(s1.nodeId).not.toBe(node0);
+    expect(game.structureAt(fp0.center)).toBeNull();
+    expect(game.structureAt(s1.fp.center)?.id).toBe(s1.id);
+    // Автобус доезжает до нового места и стоит у него.
+    expect(untilLoadingAt(game, line.vehicles[0], s1.id)).toBe(true);
+    const sim = game.fleetSim(game.fleet.get(line.vehicles[0])!);
+    expect(sim).toBeDefined();
+    expect(dist(sim!.pos, game.roads.net.node(s1.nodeId).pos)).toBeLessThan(15);
+    expect(line.problem).toBeNull();
+    // Отмена — на старом месте, с прежним узлом.
+    expect(game.undo()).toBe('перенос станции');
+    expect(s1.fp.center).toEqual(fp0.center);
+    expect(s1.nodeId).toBe(node0);
+    expect(game.structureAt(fp0.center)?.id).toBe(s1.id);
+  });
+
+  it('станция у предприятия переезжает на другую его сторону: груз и посты те же, грузовики ездят; Ctrl+Z возвращает', () => {
+    const game = new Game(42);
+    game.money = 5_000_000;
+    const net = () => game.roads.net;
+    let done = false;
+    for (const ind of game.industries) {
+      const u = { x: Math.cos(ind.fp.angle), y: Math.sin(ind.fp.angle) };
+      const v = { x: -u.y, y: u.x };
+      const side = (n: Vec, half: number, k: number) => add(ind.fp.center, scale(n, half + k));
+      const east = side(u, ind.fp.w / 2, 30);
+      const south = side(v, ind.fp.h / 2, 30);
+      if (!game.stationPlan(east, 14).ok || game.stationPlan(east, 14).industryId !== ind.id) continue;
+      const dock = game.placeStation(east, 14)!;
+      const exit = stationExit(game, dock.nodeId);
+      // Дорога от выезда на восток (там вторая станция) и в обход угла с юга — тупиком к месту выезда с южной стороны,
+      // чтобы новый выезд продолжал её прямо.
+      const far = add(exit.pos, scale(u, 260));
+      const corner = { ...STREET, kink: true };
+      const low = ind.fp.h / 2 + 110;
+      const path = [add(exit.pos, scale(v, low)), add(ind.fp.center, scale(v, low)), side(v, ind.fp.h / 2, 64)];
+      let from: End = exit.id;
+      let ok = roadPlan(game, exit.id, { free: far }).ok;
+      if (ok) build(game, exit.id, far);
+      for (const q of path) {
+        const plan = ok ? roadPlan(game, from, { free: q }, corner) : null;
+        ok = !!plan?.ok && game.roadBuilder.apply(plan);
+        if (ok) from = net().nodesNear(q, 2)[0].id;
+      }
+      const other = ok ? game.placeStation(add(add(exit.pos, scale(u, 180)), scale(v, -30)), 14) : null;
+      if (!other || !game.stationMovePlan(dock.id, south, 14).ok) continue;
+      const line = game.createLine([dock.id, other.id])!;
+      expect(line).not.toBeNull();
+      expect(game.buyVehicle(line.id, 'truck')).not.toBeNull();
+      expect(game.setStationBays(dock.id, 4)).toBeNull();
+      dock.cargo = { ...dock.cargo, wood: 5 } as typeof dock.cargo;
+      const fp0 = { ...dock.fp, center: { ...dock.fp.center } };
+      const node0 = dock.nodeId;
+      game.checkpoint('перенос станции');
+      expect(game.moveStation(dock.id, south, 14)).toBeNull();
+      game.commit();
+      // На южной стороне того же предприятия, посты и груз — при ней.
+      expect(dock.industryId).toBe(ind.id);
+      expect(dock.bays).toBe(4);
+      expect(dock.cargo).toMatchObject({ wood: 5 });
+      expect(dist(dock.fp.center, ind.fp.center)).toBeLessThan(ind.fp.h / 2 + 30);
+      expect(net().nodes.has(node0)).toBe(false);
+      // Грузовик заезжает на новый двор.
+      expect(untilLoadingAt(game, line.vehicles[0], dock.id)).toBe(true);
+      expect(line.problem).toBeNull();
+      expect(game.undo()).toBe('перенос станции');
+      expect(dock.fp.center).toEqual(fp0.center);
+      expect(dock.nodeId).toBe(node0);
+      expect(net().nodes.has(node0)).toBe(true);
+      done = true;
+      break;
+    }
+    expect(done).toBe(true);
+  });
 });

@@ -281,6 +281,8 @@ export interface FleetVehicle {
   stop: number;
   state: FleetState;
   simId: number | null;
+  /** Автобус миновал узел остановки и доезжает до места — центром напротив неё; там начнёт посадку. */
+  boarding?: boolean;
   /** Поезд в симуляции железной дороги. */
   trainId?: number | null;
   cargo: CargoType | null;

@@ -1478,6 +1478,42 @@ button.icon.menu-back {
   background: #fff;
 }
 
+/* Название станции в карточке: клик по нему или по ✎ — поле ввода на том же месте (текст не сдвигается). */
+.side header h3.station-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: -7px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+}
+
+.side header h3.station-title:hover {
+  background: #eef2f6;
+}
+
+.station-head .station-name {
+  margin-left: -7px;
+}
+
+/* ✎ — сразу за названием, отражённый: смотрит на название; ✕ — у правого края. */
+.station-head button.pencil {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-left: -8px;
+  margin-right: auto;
+  transform: scaleX(-1);
+  opacity: 0.35;
+}
+
+.station-head:hover button.pencil {
+  opacity: 1;
+}
+
 .side header > i {
   width: 12px;
   height: 12px;

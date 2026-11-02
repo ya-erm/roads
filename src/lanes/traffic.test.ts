@@ -255,3 +255,105 @@ describe('Полосы: движение', { timeout: 30_000 }, () => {
     expect(enteredAt!).toBeLessThan(-40);
   });
 });
+
+describe('Поворотники', { timeout: 30_000 }, () => {
+  /** Перекрёсток улиц 1+1 в (0, 0): плечи на запад, восток, север и юг (y вниз — юг справа от едущего на восток). */
+  function crossroads() {
+    const net = new LaneNet();
+    const j = net.addJunction({ x: 0, y: 0 });
+    const arm = (x: number, y: number) => {
+      const end = net.addSeam({ x, y }, { x: Math.sign(x), y: Math.sign(y) });
+      net.addCorridor(j.id, end.id, { cls: 'street', lanes: twoWay(1, 1) });
+      return end;
+    };
+    const ends = { w: arm(-400, 0), e: arm(400, 0), n: arm(0, -400), s: arm(0, 400) };
+    return { graph: new LaneGraph(net), ends };
+  }
+
+  /** Машина с запада к цели: поворотник вдали от перекрёстка, перед ним (ближе 40 м) и в нём, за ним. */
+  function drive(to: 'e' | 'n' | 's') {
+    const { graph, ends } = crossroads();
+    const traffic = new LaneTraffic(graph, { onArrive: () => {}, onLost: () => {} });
+    const route = findLaneRoute(graph, graph.outLinks.get(ends.w.id)!, ends[to].id)!;
+    const veh = traffic.spawn({ ...CAR, targetNode: ends[to].id, route })!;
+    const far = new Set<number>();
+    const near = new Set<number>();
+    const after = new Set<number>();
+    run(traffic, 60, () => {
+      if (!traffic.vehicles.has(veh.id)) return;
+      const left = traffic.currentLane(veh)!.length - veh.s;
+      const b = veh.blinker ?? 0;
+      if (veh.onMovement) near.add(b);
+      else if (veh.routeIndex === 0 && left < 40) near.add(b);
+      else if (veh.routeIndex === 0 && left > 100) far.add(b);
+      else if (veh.routeIndex > 0 && veh.s > 40) after.add(b);
+    });
+    expect(traffic.arrivals).toBe(1);
+    return { far: [...far], near: [...near], after: [...after] };
+  }
+
+  it('перед правым поворотом — правый, перед левым — левый, прямо — выключен; после поворота гаснет', () => {
+    expect(drive('s')).toEqual({ far: [0], near: [1], after: [0] });
+    expect(drive('n')).toEqual({ far: [0], near: [-1], after: [0] });
+    expect(drive('e')).toEqual({ far: [0], near: [0], after: [0] });
+  });
+
+  it('при перестроении в правую полосу — правый, пока машина смещается вбок', () => {
+    const net = new LaneNet();
+    const a = net.addSeam({ x: -400, y: 0 }, EAST);
+    const b = net.addSeam({ x: 400, y: 0 }, EAST);
+    net.addCorridor(a.id, b.id, { cls: 'street', lanes: oneWay(2) });
+    const graph = new LaneGraph(net);
+    const traffic = new LaneTraffic(graph, { onArrive: () => {}, onLost: () => {} });
+    const route = findLaneRoute(graph, graph.outLinks.get(a.id)!, b.id)!;
+    // Выезжает в левой полосе, к цели у бордюра — в правую.
+    const veh = traffic.spawn({ ...CAR, targetNode: b.id, route })!;
+    const from = traffic.currentLane(veh)!;
+    const left = graph.links.get(from.link)!.lanes[0];
+    from.vehicles.splice(from.vehicles.indexOf(veh), 1);
+    veh.lane = left.id;
+    left.vehicles.push(veh);
+    const seen = new Set<number>();
+    let atChange: number | undefined;
+    const shifting = new Set<number>();
+    run(traffic, 10, () => {
+      seen.add(veh.blinker ?? 0);
+      if (atChange === undefined && traffic.currentLane(veh)!.index === 1) atChange = veh.blinker;
+      if (veh.lateral !== 0) shifting.add(veh.blinker ?? 0);
+    });
+    expect(traffic.currentLane(veh)!.index).toBe(1);
+    expect(atChange).toBe(1);
+    expect([...shifting]).toEqual([1]);
+    expect([...seen].sort()).toEqual([0, 1]);
+    // Перестроилась и проехала дальше — поворотник погас.
+    expect(veh.blinker).toBe(0);
+  });
+
+  it('на съезд (ответвление в стыке) — правый, прямо по магистрали мимо съезда — выключен', () => {
+    const net = new LaneNet();
+    const a = net.addSeam({ x: -600, y: 0 }, EAST);
+    const s = net.addSeam({ x: 0, y: 0 }, EAST);
+    const e = net.addSeam({ x: 600, y: 0 }, EAST);
+    net.addCorridor(a.id, s.id, { cls: 'highway', lanes: [...twoWay(2, 2), slot(17.5, 1, 330)] });
+    net.addCorridor(s.id, e.id, { cls: 'highway', lanes: twoWay(2, 2) });
+    const exit = net.addSeam({ x: 560, y: 230 }, { x: 1, y: 0.25 });
+    net.addCorridor(s.id, exit.id, { cls: 'highway', portA: 17.5, lanes: oneWay(1) });
+    const graph = new LaneGraph(net);
+    const traffic = new LaneTraffic(graph, { onArrive: () => {}, onLost: () => {} });
+    const drive = (target: number) => {
+      const route = findLaneRoute(graph, graph.outLinks.get(a.id)!, target)!;
+      const veh = traffic.spawn({ ...CAR, targetNode: target, route })!;
+      const seen = new Set<number>();
+      let atFork: number | undefined;
+      run(traffic, 40, () => {
+        if (!traffic.vehicles.has(veh.id)) return;
+        seen.add(veh.blinker ?? 0);
+        if (atFork === undefined && veh.pos.x > -3) atFork = veh.blinker;
+      });
+      return { seen: [...seen].sort(), atFork };
+    };
+    expect(drive(exit.id)).toEqual({ seen: [0, 1], atFork: 1 });
+    expect(drive(e.id)).toEqual({ seen: [0], atFork: 0 });
+    expect(traffic.arrivals).toBe(2);
+  });
+});

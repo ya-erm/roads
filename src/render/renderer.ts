@@ -117,6 +117,19 @@ const STOP_LINE_BACK = STOP_LINE_W / 2;
 const STOP_LINE_INSET = 0.8;
 /** Названия остановок — начиная с этого приближения; дальше — только значок. */
 const STOP_NAMES_ZOOM = 0.75;
+/** Плашки ожидающих у автостанций и вокзалов — начиная с этого приближения (у остановок — всегда). */
+const STATION_BADGES_ZOOM = 0.3;
+/**
+ * Над станцией — столбик: внизу плашка ожидающих (её центр — на BADGE_RISE экранных пикселей выше здания),
+ * над ней название (плашка 18 пикселей, название — 16,5, между ними зазор ≈ 3).
+ */
+const BADGE_RISE = 14;
+const NAME_RISE = BADGE_RISE + 20;
+
+/** Верхний край здания на карте — по углам повёрнутого прямоугольника, а не по его высоте. */
+function topOf(fp: Footprint): number {
+  return fp.center.y - (Math.abs(Math.sin(fp.angle)) * fp.w + Math.abs(Math.cos(fp.angle)) * fp.h) / 2;
+}
 
 /** Метка транспорта выбранной линии: кружок и значок. */
 interface LineMark {
@@ -160,11 +173,20 @@ interface SegCache {
   rev: number;
 }
 
+/** Поворотники мигают с такой частотой (раз в секунду игрового времени). */
+const BLINK_HZ = 1.5;
+/** Поворотники рисуются, только если машина на экране не уже стольких пикселей. */
+const BLINKER_MIN_PX = 3;
+/** Мигают ли и задние огоньки поворотника (пока — только передние). */
+const BLINK_REAR = false;
+
 export class Renderer {
   private readonly ctx: CanvasRenderingContext2D;
   private cache = new Map<number, SegCache>();
   private cacheVersion = -1;
   private treeVersion = '';
+  /** Горят ли поворотники в этом кадре: мигают по игровому времени, на паузе — горят ровно. */
+  private blinkOn = false;
   /** По чьей воде отрисовка дорог считает мосты над рекой. */
   private waterOf: unknown = null;
   /** Дороги из полос. */
@@ -213,6 +235,7 @@ export class Renderer {
   draw(game: Game, o: ToolOverlay): void {
     const ctx = this.ctx;
     this.refreshCache(game);
+    this.blinkOn = game.speed === 0 || (game.time * BLINK_HZ) % 1 < 0.5;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = C.outside;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
@@ -820,7 +843,25 @@ export class Renderer {
           ctx.fillRect(-L + 1, -W / 2 + 0.7, 1.4, W - 1.4);
         }
       }
+      if (v.blinker && this.blinkOn && W * this.camera.zoom >= BLINKER_MIN_PX) this.drawBlinker(L, W, v.blinker);
       ctx.restore();
+    }
+  }
+
+  /** Огоньки поворотника на углах кузова со стороны поворота: спереди, а с BLINK_REAR и сзади (в системе машины: нос в 0, справа +y). */
+  private drawBlinker(L: number, W: number, side: number): void {
+    const ctx = this.ctx;
+    const r = Math.min(W * 0.2, Math.max(0.6, 1.1 / this.camera.zoom));
+    const y = side * (W / 2 - r * 0.6);
+    for (const x of BLINK_REAR ? [-r * 0.9, -L + r * 0.9] : [-r * 0.9]) {
+      ctx.fillStyle = 'rgba(255, 166, 0, 0.38)';
+      ctx.beginPath();
+      ctx.arc(x, y, r * 2.1, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffc21a';
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
@@ -1252,7 +1293,7 @@ export class Renderer {
       const fp = st.fp;
       if (fp.center.x < view.x0 || fp.center.x > view.x1 || fp.center.y < view.y0 || fp.center.y > view.y1) continue;
       const stop = st.kind === 'stop';
-      if (!stop && z < 0.3) continue;
+      if (!stop && z < STATION_BADGES_ZOOM) continue;
       const waiting: [CargoType, number][] = FREIGHT.map((c) => [c, Math.floor(st.cargo[c] ?? 0)] as [CargoType, number]).filter(([, n]) => n > 0);
       let pax = 0;
       for (const n of st.passengers.values()) pax += n;
@@ -1266,7 +1307,8 @@ export class Renderer {
       const widths = waiting.length ? waiting.map(([, n], i) => (i ? 0 : lead) + 22 / z + ctx.measureText(String(n)).width + 6 / z) : [18 / z];
       const total = widths.reduce((a, b) => a + b, 0) + (widths.length - 1) * (4 / z);
       let x = fp.center.x - total / 2;
-      const y = fp.center.y - fp.h / 2 - 14 / z;
+      // Над зданием; название станции — ещё выше (drawLabels).
+      const y = topOf(fp) - BADGE_RISE / z;
       widths.forEach((w, i) => {
         ctx.fillStyle = 'rgba(255,255,255,0.95)';
         ctx.strokeStyle = 'rgba(60,70,80,0.25)';
@@ -1350,7 +1392,10 @@ export class Renderer {
         if (st.industryId !== null) continue;
         // Остановок в городе много: издалека — только значок автобуса на плашке ожидающих, название — вблизи.
         if (st.kind === 'stop' && z < STOP_NAMES_ZOOM) continue;
-        text({ x: st.fp.center.x, y: st.fp.center.y + st.fp.h / 2 + 11 / z }, st.name, 11, '#ffffff', 'rgba(35,45,60,0.82)');
+        // Сверху вниз: название, плашка ожидающих, станция. Место плашки держим и пустым,
+        // чтобы название не прыгало, когда груз забрали; плашек ещё не видно — название на её месте.
+        const rise = st.kind === 'stop' || z >= STATION_BADGES_ZOOM ? NAME_RISE : BADGE_RISE;
+        text({ x: st.fp.center.x, y: topOf(st.fp) - rise / z }, st.name, 11, '#ffffff', 'rgba(35,45,60,0.82)');
       }
     }
   }
