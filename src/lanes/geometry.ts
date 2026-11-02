@@ -1,6 +1,6 @@
 import { add, rightNormal, scale, Vec } from '../core/vec';
 import { isTrunk, LANE_W, ROAD_MARGIN } from '../world/roadTypes';
-import { Corridor, End, LaneNet, LaneNode, LaneSlot, taperLen } from './model';
+import { Corridor, End, LaneNet, LaneSlot, taperLen } from './model';
 
 export const smooth = (u: number) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
 
@@ -72,22 +72,34 @@ export function halfAt(c: Corridor, end: End): number {
   return e ? Math.max(-e[0], e[1]) + ROAD_MARGIN : 0;
 }
 
-/** Запас радиуса перекрёстка сверх ширины дорог — на скругление углов. */
-const CORNER = 8;
+/** Запас сверх ширины поперечной дороги — на скругление углов перекрёстка. */
+const CORNER = 6;
 
-/** Радиус перекрёстка: полотна подходят к нему не ближе, чтобы их края не налезали и углы были скруглены. */
-export function junctionRadius(net: LaneNet, n: LaneNode): number {
-  const ends = net.ends(n);
-  if (n.kind !== 'junction' || ends.length < 2) return 0;
-  const half = ends.map((e) => halfAt(e.corridor, e.end));
-  let r = Math.max(...half) + CORNER;
-  for (let i = 0; i < ends.length; i++) {
-    for (let j = i + 1; j < ends.length; j++) {
-      const cos = Math.max(-1, Math.min(1, ends[i].away.x * ends[j].away.x + ends[i].away.y * ends[j].away.y));
-      const theta = Math.acos(cos);
-      if (theta < Math.PI - 0.05) r = Math.max(r, (half[i] + half[j]) / 2 / Math.tan(theta / 2) + CORNER);
-    }
+/**
+ * Где полотна обрываются у перекрёстков: [у конца a, у конца b] по каждому полотну. У каждого подъезда
+ * своё место — сразу за краем поперечной дороги и скруглением угла, как стоп-линия; у стыков — 0.
+ */
+export function junctionCuts(net: LaneNet): Map<number, [number, number]> {
+  const res = new Map<number, [number, number]>();
+  for (const c of net.corridors.values()) res.set(c.id, [0, 0]);
+  for (const n of net.nodes.values()) {
+    const ends = net.ends(n);
+    if (n.kind !== 'junction' || ends.length < 2) continue;
+    const half = ends.map((e) => halfAt(e.corridor, e.end));
+    ends.forEach((e, i) => {
+      let d = 0;
+      ends.forEach((o, j) => {
+        if (i === j) return;
+        const cos = Math.max(-1, Math.min(1, e.away.x * o.away.x + e.away.y * o.away.y));
+        const theta = Math.acos(cos);
+        // Почти напротив — продолжение, а не поперечная дорога.
+        if (theta > Math.PI - 0.15) return;
+        // Обращённые друг к другу края подъездов i и j пересекаются на таком расстоянии вдоль i.
+        d = Math.max(d, (half[j] + half[i] * cos) / Math.max(0.1, Math.sin(theta)));
+      });
+      const cut = Math.min(Math.max(d, 0) + CORNER, 80, e.corridor.length * 0.45);
+      res.get(e.corridor.id)![e.end === 'a' ? 0 : 1] = cut;
+    });
   }
-  const shortest = Math.min(...ends.map((e) => e.corridor.length));
-  return Math.min(r, 80, shortest * 0.45);
+  return res;
 }

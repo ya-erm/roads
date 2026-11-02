@@ -4,6 +4,8 @@ import { LaneNet, oneWay, slot, twoWay } from './model';
 export interface Lab {
   net: LaneNet;
   titles: { pos: Vec; text: string }[];
+  /** Тупики, из которых машины выезжают реже (во столько раз). */
+  sparse: Map<number, number>;
 }
 
 const EAST = { x: 1, y: 0 };
@@ -12,6 +14,7 @@ const EAST = { x: 1, y: 0 };
 export function buildLab(): Lab {
   const net = new LaneNet();
   const titles: Lab['titles'] = [];
+  const sparse = new Map<number, number>();
   const title = (x: number, y: number, text: string) => titles.push({ pos: { x, y }, text });
   const seam = (x: number, y: number, dir: Vec = EAST) => net.addSeam({ x, y }, dir);
 
@@ -51,10 +54,13 @@ export function buildLab(): Lab {
   title(-650, y - 380, 'Перекрёсток проспекта и улицы');
   {
     const j = net.addJunction({ x: 0, y });
-    net.addCorridor(seam(-600, y).id, j.id, { cls: 'avenue', lanes: twoWay(2, 2) });
-    net.addCorridor(j.id, seam(600, y).id, { cls: 'avenue', lanes: twoWay(2, 2) });
-    net.addCorridor(seam(0, y - 330, { x: 0, y: 1 }).id, j.id, { cls: 'street', lanes: twoWay(1, 1) });
-    net.addCorridor(j.id, seam(0, y + 330, { x: 0, y: 1 }).id, { cls: 'street', lanes: twoWay(1, 1) });
+    const ends = [seam(-600, y), seam(600, y), seam(0, y - 330, { x: 0, y: 1 }), seam(0, y + 330, { x: 0, y: 1 })];
+    net.addCorridor(ends[0].id, j.id, { cls: 'avenue', lanes: twoWay(2, 2) });
+    net.addCorridor(j.id, ends[1].id, { cls: 'avenue', lanes: twoWay(2, 2) });
+    net.addCorridor(ends[2].id, j.id, { cls: 'street', lanes: twoWay(1, 1) });
+    net.addCorridor(j.id, ends[3].id, { cls: 'street', lanes: twoWay(1, 1) });
+    // Перекрёсток без светофора пропускает меньше, чем магистраль: машин сюда — поменьше.
+    for (const e of ends) sparse.set(e.id, 2.5);
   }
 
   // Односторонняя на две полосы делится на две по одной.
@@ -85,5 +91,5 @@ export function buildLab(): Lab {
     net.addCorridor(seam(-600, y, dir).id, seam(600, y, dir).id, { cls: 'avenue', lanes: [...twoWay(1, 1), slot(10.5, 1, 300, 700)] });
   }
 
-  return { net, titles };
+  return { net, titles, sparse };
 }

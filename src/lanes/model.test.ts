@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { LANE_W } from '../world/roadTypes';
-import { edgesAt, junctionRadius, laneShare } from './geometry';
+import { edgesAt, junctionCuts, laneShare } from './geometry';
 import { LaneNet, oneWay, slot, taperLen, twoWay } from './model';
 import { buildLab } from './scenes';
 
@@ -70,11 +70,17 @@ describe('Полосы: модель', () => {
     expect(span(1)).toEqual(span(-1));
   });
 
-  it('радиус перекрёстка больше полуширины подъездов', () => {
+  it('подъезды к перекрёстку обрываются сразу за краем поперечной дороги', () => {
     const net = new LaneNet();
     const j = net.addJunction({ x: 0, y: 0 });
-    net.addCorridor(net.addSeam({ x: -300, y: 0 }, EAST).id, j.id, { cls: 'avenue', lanes: twoWay(2, 2) });
-    net.addCorridor(j.id, net.addSeam({ x: 0, y: 300 }, { x: 0, y: 1 }).id, { cls: 'street', lanes: twoWay(1, 1) });
-    expect(junctionRadius(net, j)).toBeGreaterThan(2 * LANE_W + 1.5);
+    const avenue = net.addCorridor(net.addSeam({ x: -300, y: 0 }, EAST).id, j.id, { cls: 'avenue', lanes: twoWay(2, 2) });
+    const street = net.addCorridor(j.id, net.addSeam({ x: 0, y: 300 }, { x: 0, y: 1 }).id, { cls: 'street', lanes: twoWay(1, 1) });
+    const cuts = junctionCuts(net);
+    const half = (n: number) => n * LANE_W + 1.5;
+    // Проспект — за краем улицы, улица — за краем проспекта, плюс скругление угла.
+    expect(cuts.get(avenue.id)![1]).toBeGreaterThan(half(1));
+    expect(cuts.get(avenue.id)![1]).toBeLessThan(half(1) + 10);
+    expect(cuts.get(street.id)![0]).toBeGreaterThan(half(2));
+    expect(cuts.get(street.id)![0]).toBeLessThan(half(2) + 10);
   });
 });

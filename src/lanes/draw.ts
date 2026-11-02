@@ -1,6 +1,6 @@
 import { add, cubicBezier, dist, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
-import { awayAt, awaySign, edgesAt, junctionRadius, laneShare, paintedEdges, pointOff, sFrom, stations } from './geometry';
+import { awayAt, awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, pointOff, sFrom, stations } from './geometry';
 import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS } from './model';
 
 const C = {
@@ -100,17 +100,14 @@ export class LaneRenderer {
   private refresh(net: LaneNet): void {
     if (this.version === net.version) return;
     this.version = net.version;
-    const radius = new Map<number, number>();
-    for (const n of net.nodes.values()) if (n.kind === 'junction') radius.set(n.id, junctionRadius(net, n));
-    this.cuts.clear();
-    for (const c of net.corridors.values()) this.cuts.set(c.id, [radius.get(c.a) ?? 0, radius.get(c.b) ?? 0]);
+    this.cuts = junctionCuts(net);
     this.corridors = [...net.corridors.values()].map((c) => this.corridorGeo(net, c));
     this.gores = [];
     this.plates = [];
     this.caps = [];
     for (const n of net.nodes.values()) {
       if (n.kind === 'junction') {
-        const plate = this.plateGeo(net, n, radius.get(n.id) ?? 0);
+        const plate = this.plateGeo(net, n);
         if (plate) this.plates.push(plate);
       } else if (net.isDeadEnd(n)) {
         for (const e of net.ends(n)) this.caps.push(this.capGeo(e));
@@ -310,11 +307,12 @@ export class LaneRenderer {
   }
 
   /** Площадка перекрёстка: края подъездов, между соседними — плавный угол. */
-  private plateGeo(net: LaneNet, n: LaneNode, r: number): PlateGeo | null {
+  private plateGeo(net: LaneNet, n: LaneNode): PlateGeo | null {
     const arms = net
       .ends(n)
       .map((e) => {
         const c = e.corridor;
+        const r = this.cuts.get(c.id)![e.end === 'a' ? 0 : 1];
         const s = sFrom(c, e.end, r);
         const ed = edgesAt(c, s) ?? [0, 0];
         const sign = awaySign(e.end);
