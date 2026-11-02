@@ -3,6 +3,7 @@ import type { RingSize } from '../game/build';
 import { SAVE_VERSION, type Game, type Ledger, type Partner, type TurnKind } from '../game/game';
 import { TEMPLATES } from '../game/interchange';
 import type { SaveEntry } from '../game/persist';
+import { listTemplates } from '../game/templates';
 import {
   carsOf,
   FleetVehicle,
@@ -37,8 +38,10 @@ import { cargoIcon, townIcon } from './cargoIcons';
 import {
   bulldozeAreaSvg,
   bulldozePointSvg,
+  copySvg,
   crossingSvg,
   folderSvg,
+  fragmentSvg,
   levelSvg,
   lineKindSvg,
   modelSvg,
@@ -362,6 +365,7 @@ export class Hud {
       }
       // Enter в поле имени сохранения — сохранить как новое.
       if (input.dataset?.saveName !== undefined && e.key === 'Enter') void this.session.saveAs(this.saveName()).then(() => this.renderSaves(true));
+      if (input.dataset?.templateName !== undefined && e.key === 'Enter') this.saveUserTemplate();
     });
     this.bindFolders(root, this.q('[data-side]'));
     controller.onChange = () => this.sync(true);
@@ -625,7 +629,24 @@ export class Hud {
         c.setRoadMode(d.id === 'upgrade' || d.id === 'move' || d.id === 'lane' ? d.id : 'build');
         break;
       case 'junction-mode':
-        c.setJunctionMode(d.id === 'template' ? 'template' : 'ring');
+        c.setJunctionMode(d.id === 'template' || d.id === 'copy' ? d.id : 'ring');
+        break;
+      case 'user-template':
+        c.setUserTemplate(d.id ?? null);
+        break;
+      case 'user-template-del': {
+        const t = listTemplates().find((x) => x.id === d.id);
+        if (t && confirm(`Удалить шаблон «${t.name}»?`)) c.removeUserTemplate(t.id);
+        break;
+      }
+      case 'paste-rotate':
+        c.rotatePaste(Number(d.v));
+        break;
+      case 'clipboard-clear':
+        c.clearClipboard();
+        break;
+      case 'template-save':
+        this.saveUserTemplate();
         break;
       case 'rail-mode':
         c.setRailMode(d.id === 'station' || d.id === 'signal' || d.id === 'parallel' ? d.id : 'track');
@@ -962,23 +983,69 @@ export class Hud {
     ).join('')}</div></div>`;
   }
 
-  /** Развязки: кольцо на перекрёстке или готовый шаблон. */
+  /** Развязки: кольцо на перекрёстке, готовый или свой шаблон, копия куска дорог. */
   private junctionOptionsHtml(): string {
     const c = this.controller;
     const sw = this.kindSwitch('Что ставим', 'junction-mode', c.junctionMode, [
       { id: 'ring', name: 'Кольцо', svg: ringSvg(0.5, 1), hint: 'Кольцо на месте перекрёстка' },
-      { id: 'template', name: 'Шаблон', svg: diamondSvg(48, 36), hint: 'Готовая развязка на магистрали в один клик' },
+      { id: 'template', name: 'Шаблон', svg: diamondSvg(48, 36), hint: 'Готовая или своя развязка в один клик' },
+      { id: 'copy', name: 'Копия', svg: copySvg(48, 36), hint: 'Скопировать дороги рамкой и вставить с поворотом' },
     ]);
     if (c.junctionMode === 'template') {
+      const own = !!c.userTemplate;
       const cards = TEMPLATES.map(
-        (t) => `<button class="card ${c.templateKind === t.id ? 'active' : ''}" data-action="template-kind" data-id="${t.id}" title="${t.hint}">
+        (t) => `<button class="card ${!own && c.templateKind === t.id ? 'active' : ''}" data-action="template-kind" data-id="${t.id}" title="${t.hint}">
           ${templateSvg(t.id, 64, 48)}<span class="name">${t.name}</span><small>${t.short}</small></button>`,
       ).join('');
-      return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Шаблон</div><div class="cards">${cards}</div></div>
-        <div class="opt-group narrow"><div class="opt-title">Как ставить <kbd>R</kbd></div>
-          <p class="muted">Наведите на прямой участок магистрали — или в чистое поле: тогда магистраль построится вместе с развязкой (R — повернуть). Для магистрали берётся выбранный тип дороги, если это магистраль. Концы дорог подключите к своей сети. Не понравилось — Ctrl+Z.</p></div></div>`;
+      const mine = listTemplates()
+        .map(
+          (t) => `<div class="card user-tpl ${c.userTemplate === t.id ? 'active' : ''}" data-action="user-template" data-id="${t.id}" title="Свой шаблон «${esc(t.name)}»">
+            ${fragmentSvg(t.fragment, 64, 48)}<span class="name">${esc(t.name)}</span>
+            <button class="icon tpl-del" data-action="user-template-del" data-id="${t.id}" title="Удалить шаблон">✕</button></div>`,
+        )
+        .join('');
+      const ownGroup = mine
+        ? `<div class="opt-group"><div class="opt-title">Свои</div><div class="cards">${mine}</div></div>`
+        : `<div class="opt-group narrow"><div class="opt-title">Свои</div><p class="muted">Скопируйте удачную развязку (режим «Копия») и сохраните её шаблоном — она появится здесь.</p></div>`;
+      const tip = own
+        ? 'Клик — поставить, протяжка или R — повернуть. На дороге того же класса ложится вдоль неё (Alt — нет), дороги под рамкой заменяются.'
+        : 'Наведите на прямой участок магистрали — или в чистое поле: тогда магистраль построится вместе с развязкой (R — повернуть). Для магистрали берётся выбранный тип дороги, если это магистраль. Концы дорог подключите к своей сети. Не понравилось — Ctrl+Z.';
+      return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Шаблон</div><div class="cards">${cards}</div></div>${ownGroup}
+        <div class="opt-group narrow"><div class="opt-title">Как ставить <kbd>R</kbd></div><p class="muted">${tip}</p></div></div>`;
     }
+    if (c.junctionMode === 'copy') return this.copyOptionsHtml(sw);
     return this.ringOptionsHtml(sw);
+  }
+
+  /** Копия: рамкой — что скопировать; скопированное — схемой, поворотом и кнопкой «в шаблоны». */
+  private copyOptionsHtml(sw: string): string {
+    const frag = this.controller.clipboard;
+    if (!frag) {
+      return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как копировать</div>
+        <p class="muted">Зажмите и растяните рамку: синим подсветится, что попадёт в копию. Дороги режутся по рамке, кольца берутся целиком, настройки перекрёстков — вместе с ними.</p></div></div>`;
+    }
+    return `<div class="opt-row">${sw}
+      <div class="opt-group"><div class="opt-title">Скопировано</div><div class="cards"><div class="card active">${fragmentSvg(frag, 64, 48)}<span class="name">${frag.corridors.length} уч.</span></div></div></div>
+      <div class="opt-group"><div class="opt-title">Поворот <kbd>R</kbd></div><div class="icons">
+        <button class="icon-btn" data-action="paste-rotate" data-v="-1" title="На 15° против часовой (Shift+R)">↺<span>−15°</span></button>
+        <button class="icon-btn" data-action="paste-rotate" data-v="1" title="На 15° по часовой (R)">↻<span>+15°</span></button>
+        <button class="icon-btn" data-action="clipboard-clear" title="Скопировать другое (Esc)">${copySvg(30, 22)}<span>Новая рамка</span></button>
+      </div></div>
+      <div class="opt-group"><div class="opt-title">В свои шаблоны</div><div class="save-new"><input class="line-name" data-template-name maxlength="30" placeholder="Моя развязка" />
+        <button class="small" data-action="template-save">Сохранить</button></div></div>
+      <div class="opt-group narrow"><div class="opt-title">Как вставлять</div><p class="muted">Клик — вставить (хоть много раз), протяжка — повернуть на любой угол. На дороге того же класса ложится вдоль неё (Alt — нет), дороги под рамкой заменяются.</p></div></div>`;
+  }
+
+  /** Скопированное — в свои шаблоны под именем из поля. */
+  private saveUserTemplate(): void {
+    const input = this.q<HTMLInputElement>('[data-template-name]');
+    const name = input?.value.trim() || 'Моя развязка';
+    if (!this.controller.saveClipboard(name)) {
+      this.game().notify('Не хватило места для шаблона');
+      return;
+    }
+    if (input) input.value = '';
+    this.game().notify(`Шаблон «${name}» сохранён — он в разделе «Шаблон»`);
   }
 
   /** Кольцо: число полос и размер — картинками. */

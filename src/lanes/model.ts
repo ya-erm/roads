@@ -209,6 +209,11 @@ export class LaneNet {
   private cellsOf = new Map<number, number[]>();
   private nodeGrid = new Map<number, Set<number>>();
 
+  /** Свободный номер из общего счёта узлов и полотен (например, для нового кольца). */
+  reserveId(): number {
+    return this.nextId++;
+  }
+
   addSeam(pos: Vec, dir: Vec, level = 0): LaneNode {
     return this.addNode('seam', pos, norm(dir), level);
   }

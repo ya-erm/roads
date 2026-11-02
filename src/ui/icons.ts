@@ -1,4 +1,6 @@
+import type { Vec } from '../core/vec';
 import type { DrawMode } from '../game/build';
+import type { Fragment } from '../lanes/fragment';
 import { isDivided, isOneWay, isTrunk, RoadSpec } from '../world/roadTypes';
 
 
@@ -201,6 +203,33 @@ export function diamondSvg(w = 48, h = 36): string {
     <path d="M24 1V35" stroke="#d3d8de" stroke-width="6"/>
     <path d="M24 1V35" stroke="#7a828e" stroke-width="4"/>
   </svg>`;
+}
+
+/** Копия: перекрёсток в синей рамке и его повёрнутая копия. */
+export function copySvg(w = 48, h = 36): string {
+  const cross = `<path d="M-9 0H9M0 -9V9" stroke="#646b76" stroke-width="4"/><rect x="-11" y="-11" width="22" height="22" rx="1.5" fill="rgba(47,128,237,0.12)" stroke="#2f80ed" stroke-width="1.5" stroke-dasharray="3 2"/>`;
+  return `<svg viewBox="0 0 48 36" width="${w}" height="${h}">
+    <g transform="translate(14 14)">${cross}</g>
+    <g transform="translate(33 22) rotate(30)">${cross}</g>
+    <path d="M24 6A12 12 0 0 1 36 10" stroke="#2f80ed" stroke-width="1.6" fill="none"/><path d="M36 10l-4 0.5M36 10l-1-4" stroke="#2f80ed" stroke-width="1.6"/>
+  </svg>`;
+}
+
+/** Схема куска дорог (свой шаблон, скопированное): оси полотен, магистрали толще. */
+export function fragmentSvg(frag: Fragment, w = 64, h = 48): string {
+  const pad = 3;
+  const k = Math.min((w - pad * 2) / (frag.half.x * 2), (h - pad * 2) / (frag.half.y * 2));
+  const at = (p: Vec) => `${(w / 2 + p.x * k).toFixed(1)} ${(h / 2 + p.y * k).toFixed(1)}`;
+  const width: Record<string, number> = { motorway: 3.4, highway: 3, avenue: 2.4, street: 1.6 };
+  const paths = [...frag.corridors]
+    .sort((a, b) => (width[a.cls] ?? 2) - (width[b.cls] ?? 2))
+    .map((c) => {
+      const { p0, p1, p2, p3 } = c.curve;
+      const color = c.cls === 'motorway' || c.cls === 'highway' ? '#646b76' : '#7a828e';
+      return `<path d="M${at(p0)}C${at(p1)} ${at(p2)} ${at(p3)}" stroke="${color}" stroke-width="${width[c.cls] ?? 2}" fill="none" stroke-linecap="round"/>`;
+    })
+    .join('');
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${paths}</svg>`;
 }
 
 /** Снос по одному: дорога и дом, крестик над одним объектом. */

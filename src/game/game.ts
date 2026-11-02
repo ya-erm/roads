@@ -16,6 +16,7 @@ import { Cubic, CurveLUT, intersectCurves, offsetCubic, reverseCubic, splitBezie
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, insideRuns, splitCorridor } from '../lanes/edit';
+import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, parseLaneKey, twoWay } from '../lanes/model';
 import type { LaneTraffic } from '../lanes/traffic';
 import { RailSim, Train } from '../sim/rail';
@@ -987,6 +988,40 @@ export class Game implements BuildContext {
     const ok = this.roadBuilder.apply(plan.plan);
     this.commit();
     return ok ? null : 'Не удалось построить развязку';
+  }
+
+  // ---------- Копирование и вставка ----------
+
+  /** Копия дорог в рамке между углами a и b; null — копировать нечего. */
+  copyArea(a: Vec, b: Vec): Fragment | null {
+    return copyBox(this.roads.net, Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y));
+  }
+
+  /** Вставка куска (центр — в at, поворот angle): дороги под рамкой заменяются; станцию под ней не трогаем — мешает. */
+  pastePlan(frag: Fragment, at: Vec, angle: number): RoadPlan {
+    let mine = new Set<number>();
+    const plan = this.roadBuilder.plan(
+      (n) => {
+        mine = pasteFragment(n, frag, at, angle);
+      },
+      { trusted: true, only: (c) => mine.has(c.id) },
+    );
+    const next = plan.net;
+    if (plan.ok && next) {
+      const lost = [...this.stations.values()].some((st) => st.kind !== 'rail' && this.roads.net.nodes.has(st.nodeId) && !next.nodes.has(st.nodeId));
+      if (lost) return { ...plan, ok: false, reason: 'Мешает станция' };
+    }
+    return plan;
+  }
+
+  /** Вставляет кусок одним шагом для Ctrl+Z. null — вставился. */
+  paste(frag: Fragment, at: Vec, angle: number): string | null {
+    const plan = this.pastePlan(frag, at, angle);
+    if (!plan.ok) return plan.reason ?? 'Нельзя вставить';
+    this.checkpoint('вставка');
+    const ok = this.roadBuilder.apply(plan);
+    this.commit();
+    return ok ? null : 'Не удалось вставить';
   }
 
   // ---------- Пути рядом ----------

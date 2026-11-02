@@ -5,7 +5,9 @@ import { DEFAULT_RING, type DrawMode, type NetKind, type RingOptions, type RingS
 import type { AreaContents, Game, LaneEnd, StationKind } from '../game/game';
 import type { RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
+import { deleteTemplate, getTemplate, saveTemplate } from '../game/templates';
 import { anchorAt, corridorUnder, edgeAt } from '../lanes/edit';
+import { type Fragment, fragmentCurves, frameOf, snapPaste } from '../lanes/fragment';
 import type { Camera } from '../render/camera';
 import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
 import type { StationServes, TownBuilding } from '../world/entities';
@@ -27,11 +29,11 @@ export const TOOLS: { id: Tool; key: string; alt?: string; name: string }[] = [
 ];
 
 /** Что делает клик: инструмент вместе с его режимом. */
-export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane' | 'parallel';
+export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane' | 'parallel' | 'copy' | 'paste';
 /** Дорога: строить, вести полосу вдоль края, перестроить под выбранный тип, двигать узел или выгнуть. */
 export type RoadMode = 'build' | 'lane' | 'upgrade' | 'move';
-/** Развязки: кольцо на перекрёстке или шаблон развязки. */
-export type JunctionMode = 'ring' | 'template';
+/** Развязки: кольцо на перекрёстке, шаблон развязки (готовый или свой) или копия куска дорог. */
+export type JunctionMode = 'ring' | 'template' | 'copy';
 /** Ж/д: класть путь, пристроить путь рядом с существующим, ставить вокзал или сигнал. */
 export type RailMode = 'track' | 'parallel' | 'station' | 'signal';
 
@@ -107,6 +109,18 @@ export class Controller {
   /** Шаблон развязки и поворот магистрали, если она строится вместе с развязкой (R). */
   templateKind: TemplateKind = 'diamond';
   templateAngle = 0;
+  /** Свой шаблон, выбранный вместо готового (id). */
+  userTemplate: string | null = null;
+  /** Скопированный кусок дорог: есть — клик его вставляет. */
+  clipboard: Fragment | null = null;
+  /** Угол рамки копирования, пока тянем. */
+  copyStart: Vec | null = null;
+  /** Поворот вставки (R, протяжка). */
+  pasteAngle = 0;
+  /** Вставка, которую поворачивают протяжкой: центр — где зажали. */
+  private pasteDrag: { at: Vec } | null = null;
+  private copyCache: { key: string; frag: Fragment | null } | null = null;
+  private pasteCache: { frag: Fragment; key: string; plan: RoadPlan } | null = null;
   /** Снос: по одному объекту (можно вести мышью) или рамкой. */
   bulldozeMode: 'point' | 'area' = 'point';
   /** Угол рамки сноса, пока тянем. */
@@ -201,7 +215,11 @@ export class Controller {
   /** Что делает клик с учётом режима инструмента. */
   get action(): Action {
     if (this.tool === 'road') return this.roadMode === 'build' ? 'road' : this.roadMode;
-    if (this.tool === 'roundabout') return this.junctionMode === 'template' ? 'template' : 'roundabout';
+    if (this.tool === 'roundabout') {
+      if (this.junctionMode === 'copy') return this.clipboard ? 'paste' : 'copy';
+      if (this.junctionMode === 'template') return this.userTemplate && getTemplate(this.userTemplate) ? 'paste' : 'template';
+      return 'roundabout';
+    }
     if (this.tool === 'rail') {
       return this.railMode === 'station' ? 'station' : this.railMode === 'signal' ? 'signal' : this.railMode === 'parallel' ? 'parallel' : 'road';
     }
@@ -237,7 +255,101 @@ export class Controller {
   setJunctionMode(mode: JunctionMode): void {
     if (this.tool !== 'roundabout') this.setTool('roundabout');
     this.junctionMode = mode;
+    this.copyStart = null;
+    this.pasteDrag = null;
     this.onChange();
+  }
+
+  // ---------- Копия и свои шаблоны ----------
+
+  /** Что вставит клик: скопированный кусок или свой шаблон. */
+  pasteSource(): Fragment | null {
+    if (this.tool !== 'roundabout') return null;
+    if (this.junctionMode === 'copy') return this.clipboard;
+    if (this.junctionMode === 'template' && this.userTemplate) return getTemplate(this.userTemplate)?.fragment ?? null;
+    return null;
+  }
+
+  /** Забыть скопированное — следующая рамка копирует заново. */
+  clearClipboard(): void {
+    this.clipboard = null;
+    this.pasteCache = null;
+    this.onChange();
+  }
+
+  /** Шаг назад во вставке: забыть скопированное или снять свой шаблон. false — нечего отменять. */
+  private cancelPaste(): boolean {
+    if (this.action !== 'paste') return false;
+    if (this.junctionMode === 'copy') this.clipboard = null;
+    else this.userTemplate = null;
+    this.pasteCache = null;
+    return true;
+  }
+
+  rotatePaste(step: number): void {
+    this.pasteAngle += step * (Math.PI / 12);
+    this.onChange();
+  }
+
+  setUserTemplate(id: string | null): void {
+    if (this.tool !== 'roundabout') this.setTool('roundabout');
+    this.junctionMode = 'template';
+    this.userTemplate = id;
+    this.pasteAngle = 0;
+    this.onChange();
+  }
+
+  /** Скопированное — своим шаблоном. false — не хватило места. */
+  saveClipboard(name: string): boolean {
+    if (!this.clipboard) return false;
+    const t = saveTemplate(name, this.clipboard);
+    this.onChange();
+    return !!t;
+  }
+
+  removeUserTemplate(id: string): void {
+    deleteTemplate(id);
+    if (this.userTemplate === id) this.userTemplate = null;
+    this.onChange();
+  }
+
+  /** Копия дорог в рамке a–b (повтор при неподвижной мыши — из кэша). */
+  private copyPreview(a: Vec, b: Vec): Fragment | null {
+    const g = this.game();
+    const key = `${a.x},${a.y},${b.x},${b.y},${g.roads.net.version}`;
+    if (this.copyCache?.key !== key) this.copyCache = { key, frag: g.copyArea(a, b) };
+    return this.copyCache.frag;
+  }
+
+  private copy(a: Vec, b: Vec): void {
+    const frag = this.copyPreview(a, b);
+    if (!frag) {
+      this.showError('В рамке нет дорог');
+      return;
+    }
+    this.clipboard = frag;
+    this.pasteAngle = 0;
+  }
+
+  /** Центр и поворот вставки без прилипания: протяжка от места, где зажали, задаёт поворот. */
+  private pasteRaw(p: Vec): { at: Vec; angle: number } {
+    const d = this.pasteDrag;
+    if (d && dist(p, d.at) * this.camera.zoom > 8) return { at: d.at, angle: angleOf(sub(p, d.at)) };
+    return { at: d?.at ?? p, angle: this.pasteAngle };
+  }
+
+  /** Где встанет вставка: на дороге того же класса, что главная дорога куска, — вдоль неё (Alt — без прилипания). */
+  private pastePose(frag: Fragment, p: Vec): { at: Vec; angle: number; snapped: boolean } {
+    const raw = this.pasteRaw(p);
+    if (this.alt) return { ...raw, snapped: false };
+    return snapPaste(this.game().roads.net, frag, raw.at, raw.angle, Math.max(20, this.snapRadius * 1.5));
+  }
+
+  private pastePlan(frag: Fragment, at: Vec, angle: number): RoadPlan {
+    const g = this.game();
+    const key = `${at.x},${at.y},${angle},${g.roads.net.version},${g.budget}`;
+    if (this.pasteCache?.frag !== frag || this.pasteCache.key !== key) this.pasteCache = { frag, key, plan: g.pastePlan(frag, at, angle) };
+    return this.pasteCache.plan;
   }
 
   /** Переключает пассажиров или груз у новой станции; хотя бы одно остаётся включённым. */
@@ -254,6 +366,7 @@ export class Controller {
 
   setTemplate(kind: TemplateKind): void {
     this.templateKind = kind;
+    this.userTemplate = null;
     this.onChange();
   }
 
@@ -670,6 +783,14 @@ export class Controller {
         if (error) this.showError(error);
         break;
       }
+      case 'copy':
+        // Рамка копирования: копируем при отпускании.
+        this.copyStart = p;
+        break;
+      case 'paste':
+        // Вставка при отпускании; протяжка от этой точки поворачивает кусок.
+        this.pasteDrag = { at: p };
+        break;
       case 'lights': {
         // У выбранного перекрёстка клики по меткам полос соединяют въезды с выездами.
         if (this.laneClick(p)) break;
@@ -856,7 +977,11 @@ export class Controller {
     if ((e.button === 1 || e.button === 2) && this.pan) {
       if (!this.pan.moved && e.button === 2) {
         if (this.moving) this.moving = null;
-        else if (this.roadTools.cancel()) {
+        else if (this.copyStart) this.copyStart = null;
+        else if (this.pasteDrag) this.pasteDrag = null;
+        else if (this.cancelPaste()) {
+          // Вставка отменена: снова рамка или готовые шаблоны.
+        } else if (this.roadTools.cancel()) {
           // Шаг назад в постройке дороги.
         } else if (this.control) this.control = null;
         else if (this.chain) this.chain = null;
@@ -891,6 +1016,27 @@ export class Controller {
       return;
     }
     const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > 8;
+    if (this.action === 'copy' && this.copyStart) {
+      const a = this.copyStart;
+      this.copyStart = null;
+      if (moved) this.copy(a, this.worldAt(e));
+      else this.showError('Обведите дороги рамкой');
+      this.onChange();
+      return;
+    }
+    if (this.action === 'paste' && this.pasteDrag) {
+      const frag = this.pasteSource();
+      const p = this.worldAt(e);
+      if (frag) {
+        const pose = this.pastePose(frag, p);
+        this.pasteAngle = this.pasteRaw(p).angle;
+        const error = this.game().paste(frag, pose.at, pose.angle);
+        if (error) this.showError(error);
+      }
+      this.pasteDrag = null;
+      this.onChange();
+      return;
+    }
     if (this.action === 'move') {
       const problem = this.roadTools.moveUp(this.worldAt(e), moved, e.shiftKey);
       if (problem) this.showError(problem);
@@ -1048,6 +1194,9 @@ export class Controller {
       case 'Escape':
         if (this.pendingArea) this.cancelArea();
         else if (this.areaStart) this.areaStart = null;
+        else if (this.copyStart) this.copyStart = null;
+        else if (this.pasteDrag) this.pasteDrag = null;
+        else if (this.cancelPaste()) this.onChange();
         else if (this.roadTools.cancel()) this.onChange();
         else if (this.addStopTo !== null) this.stopAddStop();
         else if (this.moving) this.moving = null;
@@ -1085,6 +1234,7 @@ export class Controller {
           this.templateAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
           this.onChange();
         }
+        if (this.action === 'paste') this.rotatePaste(e.shiftKey ? -1 : 1);
         break;
       // Режимы дороги: N — строить, U — перестроить, M — двигать (включают инструмент «Дорога»).
       case 'KeyN':
@@ -1371,6 +1521,34 @@ export class Controller {
         } else {
           if (plan.preview.length) o.template = { curves: plan.preview, ok: false };
           o.label = { text: plan.reason ?? '', ok: false };
+        }
+        break;
+      }
+      case 'copy': {
+        // Рамка копирования: синим — что попадёт в копию (дороги, обрезанные по рамке, кольца целиком).
+        const a = this.copyStart;
+        if (!a) {
+          o.label = { text: 'Обведите рамкой дороги, которые нужно скопировать', ok: true };
+          break;
+        }
+        const frag = this.copyPreview(a, p);
+        o.frame = { pts: [a, { x: p.x, y: a.y }, p, { x: a.x, y: p.y }], ok: !!frag };
+        if (frag) o.template = { curves: fragmentCurves(frag, { x: (a.x + p.x) / 2, y: (a.y + p.y) / 2 }, 0), ok: true };
+        o.label = frag ? { text: `Копировать ${frag.corridors.length} уч. дорог`, ok: true } : { text: 'В рамке нет дорог', ok: false };
+        break;
+      }
+      case 'paste': {
+        // Вставка: как построенная (дороги под рамкой заменятся); нельзя — контуры красным и причина.
+        const frag = this.pasteSource();
+        if (!frag) break;
+        const pose = this.pastePose(frag, p);
+        const plan = this.pastePlan(frag, pose.at, pose.angle);
+        o.frame = { pts: frameOf(frag, pose.at, pose.angle), ok: plan.ok };
+        if (plan.ok) {
+          this.showRoadPlan(o, plan, `Вставить · ${money(plan.cost)}${pose.snapped ? ' · вдоль дороги' : ''}`);
+        } else {
+          o.template = { curves: fragmentCurves(frag, pose.at, pose.angle), ok: false };
+          o.label = { text: plan.reason ?? 'Нельзя вставить', ok: false };
         }
         break;
       }

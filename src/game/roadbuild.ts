@@ -77,7 +77,10 @@ export class RoadBuilder {
    * Правка на копии сети и её проверка. free — за счёт города; shove — дома под дорогой не сносим:
    * после стройки их отодвинут (расширение улицы).
    */
-  plan(edit: (net: LaneNet) => boolean | void, opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean } = {}): RoadPlan {
+  plan(
+    edit: (net: LaneNet) => boolean | void,
+    opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean; only?: (c: Corridor) => boolean } = {},
+  ): RoadPlan {
     const before = this.net;
     const next = before.clone();
     try {
@@ -102,8 +105,9 @@ export class RoadBuilder {
     let reason: string | undefined;
     // Снос ничего не строит: оставшиеся куски дорог не проверяем и дома у них не сносим.
     // Развязка (trusted) проложена заранее: её куски вплотную друг к другу — так задумано, сверяем только с прочими дорогами.
+    // only — что проверять (вставка: её полотна; разрезанные ею старые дороги — нет, у них дома не сносим).
     const own = opts.trusted ? new Set(changed.map((c) => c.id)) : null;
-    for (const c of opts.raze ? [] : changed) {
+    for (const c of opts.raze ? [] : opts.only ? changed.filter(opts.only) : changed) {
       reason = this.check(next, c, demolish, !!opts.shove, own);
       if (reason) break;
     }

@@ -55,10 +55,11 @@ export function anchorAt(net: LaneNet, p: Vec, radius: number, level?: number): 
  * Полотно, на асфальте которого точка (с запасом margin). Где полотна друг над другом — на высоте
  * level, без неё — верхнее (его и видно).
  */
-export function corridorUnder(net: LaneNet, p: Vec, margin = 0, level?: number): Corridor | null {
+export function corridorUnder(net: LaneNet, p: Vec, margin = 0, level?: number, skip?: (c: Corridor) => boolean): Corridor | null {
   let best: Corridor | null = null;
   let bestD = Infinity;
   for (const c of net.corridorsNear(p, margin + 40)) {
+    if (skip?.(c)) continue;
     const hit = c.lut.closest(p);
     const h = net.heightAt(c, hit.s);
     const e = edgesAt(c, hit.s);
@@ -819,7 +820,11 @@ export function insideRuns(c: Corridor, inside: (p: Vec) => boolean): [number, n
  * то, что внутри (снаружи остаются тупики). Возвращает, сколько кусков снесено.
  */
 export function bulldozeBox(net: LaneNet, x0: number, y0: number, x1: number, y1: number): number {
-  const inside = (p: Vec) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+  return bulldozeInside(net, (p) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1, x0, y0, x1, y1);
+}
+
+/** Снос того, что внутри области inside (она — в рамке x0…y1); как bulldozeBox. */
+export function bulldozeInside(net: LaneNet, inside: (p: Vec) => boolean, x0: number, y0: number, x1: number, y1: number): number {
   const MIN = 10;
   let removed = 0;
   for (const c0 of net.corridorsInBox(x0, y0, x1, y1)) {

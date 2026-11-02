@@ -54,6 +54,8 @@ export interface ToolOverlay {
   signal: { pos: Vec; dir: Vec; remove: boolean } | null;
   /** Будущая развязка по шаблону. */
   template: { curves: Cubic[]; ok: boolean } | null;
+  /** Рамка копирования или вставки (углы по порядку): синяя, красная — если вставить нельзя. */
+  frame?: { pts: Vec[]; ok: boolean } | null;
   lineStops: number[];
   selectedLine: number | null;
   selection: Selection | null;
@@ -2261,6 +2263,19 @@ export class Renderer {
         this.polyline(new CurveLUT(c).points);
         ctx.stroke();
       }
+    }
+    if (o.frame) {
+      const z = this.camera.zoom;
+      ctx.fillStyle = o.frame.ok ? 'rgba(47, 128, 237, 0.06)' : 'rgba(232, 72, 63, 0.06)';
+      ctx.strokeStyle = o.frame.ok ? '#2f80ed' : '#e8483f';
+      ctx.lineWidth = 2 / z;
+      ctx.setLineDash([8 / z, 6 / z]);
+      ctx.beginPath();
+      o.frame.pts.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
     if (o.signal) {
       // Будущий сигнал и стрелка — для поездов какого направления он будет.

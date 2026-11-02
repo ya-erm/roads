@@ -608,6 +608,35 @@ button {
   color: var(--muted);
 }
 
+/* Свой шаблон развязки: карточка со схемой и крестиком удаления в углу. */
+.card.user-tpl {
+  position: relative;
+  cursor: pointer;
+  max-width: 120px;
+}
+
+.card.user-tpl .name {
+  max-width: 108px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card.user-tpl .tpl-del {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 11px;
+  opacity: 0;
+}
+
+.card.user-tpl:hover .tpl-del {
+  opacity: 0.8;
+}
+
 .custom {
   display: flex;
   gap: 12px;
