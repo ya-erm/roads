@@ -3,7 +3,7 @@ import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub
 import type { Vehicle } from '../sim/vehicle';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
 import { junctionCuts, pointOff } from './geometry';
-import { Corridor, CorridorEnd, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey } from './model';
+import { Corridor, CorridorEnd, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey, taperLen } from './model';
 
 /**
  * Связь — отрезок полотна, на котором набор полос одного направления не меняется.
@@ -248,8 +248,15 @@ export class LaneGraph {
   private buildCorridor(c: Corridor, cutA: number, cutB: number): void {
     const s0 = cutA;
     const s1 = c.length - cutB;
+    // Полоса, что начинается по ходу движения отгоном («кармашек» у остановки, полоса торможения), — в неё
+    // перестраиваются уже с середины отгона, как в жизни, а не только там, где она на полную ширину.
+    const half = taperLen(c.cls) / 2;
+    const spans = c.lanes.map((l) => ({
+      from: l.flow > 0 && l.from > 0.5 ? Math.max(0, l.from - half) : l.from,
+      to: l.flow < 0 && l.to < c.length - 0.5 ? Math.min(c.length, l.to + half) : l.to,
+    }));
     const marks = [s0, s1];
-    for (const l of c.lanes) for (const x of [l.from, l.to]) if (x > s0 + 0.5 && x < s1 - 0.5) marks.push(x);
+    for (const l of spans) for (const x of [l.from, l.to]) if (x > s0 + 0.5 && x < s1 - 0.5) marks.push(x);
     marks.sort((x, y) => x - y);
     const cuts = marks.filter((x, i) => i === 0 || x - marks[i - 1] > 0.5);
     const speed = laneSpeed(c);
@@ -258,7 +265,7 @@ export class LaneGraph {
       const links: GLink[] = [];
       for (let k = 0; k + 1 < cuts.length; k++) {
         const [a, b] = [cuts[k], cuts[k + 1]];
-        const present = c.lanes.map((l, i) => ({ l, i })).filter(({ l }) => l.flow === flow && l.from <= a + 0.5 && l.to >= b - 0.5);
+        const present = c.lanes.map((l, i) => ({ l, i })).filter(({ l, i }) => l.flow === flow && spans[i].from <= a + 0.5 && spans[i].to >= b - 0.5);
         const first = k === 0;
         const last = k + 2 === cuts.length;
         const link: GLink = {

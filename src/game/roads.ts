@@ -151,8 +151,9 @@ export class Roads {
       }
       const steps = Math.max(2, Math.ceil(link.length / 8));
       // Перестраиваются сразу, как только можно (в «кармашек» — в самом его начале): плавно на первых метрах связи.
-      const from = Math.min(6, link.length * 0.1);
-      const span = Math.min(35, link.length * 0.6);
+      // Как и у машины: перестроение — за 15–20 м (её боковой сдвиг), сразу в начале связи.
+      const from = Math.min(2, link.length * 0.05);
+      const span = Math.min(18, link.length * 0.5);
       for (let i = 0; i <= steps; i++) {
         const s = (link.length * i) / steps;
         const a = g.lanePose(lane, s).pos;

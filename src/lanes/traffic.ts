@@ -35,6 +35,8 @@ const CHANGE_ROOM = 120;
  * даже на коротком «кармашке» у остановки (там места на него мало — см. changePenalty).
  */
 export const CURB_PULL = 4.5;
+/** Насколько труднее перестроение на каждой следующей связи впереди (доля). */
+const LATE_CHANGE = 0.3;
 /** Автобус держится крайней правой полосы: трудность за каждую полосу левее — на каждой связи пути. */
 export const BUS_RIGHT = 1.2;
 /** Трудность ехать по полосе l связи: автобусу — левее крайней правой. */
@@ -422,7 +424,8 @@ export class LaneTraffic {
         stay.set(l.id, v);
       }
       const cost = new Map<number, number>();
-      for (const l of link.lanes) cost.set(l.id, this.bestLane(link, l, link.length, stay).cost);
+      // Чем дальше связь, тем чуть труднее перестроиться на ней: «заранее» лучше, чем «в последний момент».
+      for (const l of link.lanes) cost.set(l.id, this.bestLane(link, l, link.length, stay, 1 + LATE_CHANGE * k).cost);
       plan[k] = { link, stay, cost };
     }
     this.plans.set(veh, { graph: this.graph, route, from, plan });
@@ -430,10 +433,11 @@ export class LaneTraffic {
   }
 
   /** Куда с полосы l перестроиться на связи (места — room), чтобы дальше было легче всего; сама l — при равенстве. */
-  private bestLane(link: GLink, l: GLane, room: number, stay: Map<number, number>): { lane: GLane; cost: number } {
+  /** late — во сколько раз труднее то же перестроение на связях впереди: при равенстве перестраиваются раньше. */
+  private bestLane(link: GLink, l: GLane, room: number, stay: Map<number, number>, late = 1): { lane: GLane; cost: number } {
     let best = { lane: l, cost: stay.get(l.id) ?? Infinity };
     for (const o of link.lanes) {
-      const c = changePenalty(Math.abs(o.index - l.index), room) + (stay.get(o.id) ?? Infinity);
+      const c = changePenalty(Math.abs(o.index - l.index), room) * late + (stay.get(o.id) ?? Infinity);
       if (c < best.cost - 1e-6) best = { lane: o, cost: c };
     }
     return best;

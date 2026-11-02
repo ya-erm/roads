@@ -242,8 +242,16 @@ describe('Полосы: движение', { timeout: 30_000 }, () => {
     let lane: number | null = null;
     const traffic = new LaneTraffic(graph, { onArrive: (v) => (lane = graph.lanes.get(v.lane)!.index), onLost: () => {} });
     const route = findLaneRoute(graph, graph.outLinks.get(a.id)!, b.id)!;
-    expect(traffic.spawn({ ...CAR, kind: 'bus', length: 12, targetNode: b.id, route })).not.toBeNull();
-    run(traffic, 60);
+    const bus = traffic.spawn({ ...CAR, kind: 'bus', length: 12, targetNode: b.id, route })!;
+    expect(bus).not.toBeNull();
+    // Где перестроился: уже на отгоне, до места, где «кармашек» на полную ширину (x = −37).
+    let enteredAt: number | null = null;
+    run(traffic, 60, () => {
+      const cur = traffic.currentLane(bus);
+      if (enteredAt === null && cur && cur.index === 1) enteredAt = bus.pos.x;
+    });
     expect(lane).toBe(1);
+    expect(enteredAt).not.toBeNull();
+    expect(enteredAt!).toBeLessThan(-40);
   });
 });
