@@ -193,6 +193,26 @@ export class Network {
     return node;
   }
 
+  /** Переносит узел; формы его участков меняют отдельно (setCurve), концы — в новом месте. */
+  moveNode(id: number, pos: Vec): void {
+    const n = this.node(id);
+    this.indexNode(n, false);
+    n.pos = { ...pos };
+    this.indexNode(n, true);
+    this.dirty.add(id);
+  }
+
+  /** Новая форма участка (концы — в его узлах): длина и индекс заново, поезда подстроятся (RailSim.validate). */
+  setCurve(segId: number, curve: Cubic): void {
+    const s = this.segment(segId);
+    s.curve = curve;
+    s.lut = new CurveLUT(curve);
+    s.length = s.lut.length;
+    this.indexSegment(s);
+    this.dirty.add(s.a);
+    this.dirty.add(s.b);
+  }
+
   deleteNode(id: number): void {
     const n = this.nodes.get(id);
     if (!n) return;

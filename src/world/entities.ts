@@ -22,7 +22,10 @@ export interface Town {
   id: number;
   name: string;
   center: Vec;
+  /** Радиус плотной застройки. */
   radius: number;
+  /** До самого дальнего дома (с запасом): для отрисовки и охвата станций. Нет — как radius. */
+  extent?: number;
   /** Верхний край улиц — над ним рисуется подпись. */
   top: number;
   style: TownStyle;

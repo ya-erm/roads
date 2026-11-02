@@ -82,6 +82,52 @@ describe('Экономика', { timeout: 60_000 }, () => {
     expect(r.farm.level ?? 1).toBeGreaterThan(1);
   });
 
+  it('грузовик не исчезает у станции: заезжает на свой пост, и только там выгружается и получает оплату', () => {
+    const { game } = freightLine(7, 'farm', 'foodplant', 1, 0);
+    const line = [...game.lines.values()][0];
+    const v = game.fleet.get(line.vehicles[0])!;
+    const plant = game.stations.get(line.stops[1])!;
+    game.speed = 1;
+    // Ждём, когда грузовик с зерном сойдёт с дороги у комбината.
+    let arrived = false;
+    for (let t = 0; t < MONTH_LENGTH * 3 && !arrived; t += 0.1) {
+      const driving = v.simId !== null && v.stop === 1 && v.amount > 0;
+      game.update(0.1);
+      arrived = driving && v.simId === null;
+    }
+    expect(arrived).toBe(true);
+    // Пост уже за ним и окрашен в цвет линии, но грузовик ещё у края площадки, с зерном, денег пока нет.
+    expect(v.state).toBe('loading');
+    expect(v.enter).toBeDefined();
+    expect(plant.occupied).toContain(v.id);
+    expect(game.stationBays(plant)[v.bay!]).toBe(line.color);
+    expect(v.cargo).toBe('grain');
+    const look = game.fleetLook(v)!;
+    expect(look).toBeDefined();
+    expect(game.inFootprint(look.pos, plant.fp)).toBe(false);
+    const r0 = line.revenueTotal;
+    let entering = 0;
+    let inside = false;
+    while (v.enter && entering < 10) {
+      inside = game.inFootprint(game.fleetLook(v)!.pos, plant.fp);
+      expect(line.revenueTotal).toBe(r0);
+      game.update(0.1);
+      entering += 0.1;
+    }
+    // Заезд — не мгновенно, но и не долго; доехал до поста под навесом.
+    expect(entering).toBeGreaterThan(1);
+    expect(entering).toBeLessThan(5);
+    expect(inside).toBe(true);
+    // На посту: зерно сдано и оплачено, дальше обычная погрузка и отправление.
+    expect(line.revenueTotal).toBeGreaterThan(r0);
+    expect(v.cargo).not.toBe('grain');
+    expect(plant.occupied).toContain(v.id);
+    for (let t = 0; t < 60 && v.state !== 'driving'; t += 0.1) game.update(0.1);
+    expect(v.state).toBe('driving');
+    expect(plant.occupied).not.toContain(v.id);
+    expect(v.bay).toBeUndefined();
+  });
+
   it('автобусы в городе окупаются', () => {
     const game = new Game(7);
     game.money = 5_000_000;

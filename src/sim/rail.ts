@@ -528,7 +528,10 @@ export class RailSim {
     for (const train of [...this.trains.values()]) {
       if (bySeg.size) this.applySplits(train, bySeg);
       const broken = train.path.some((e) => !this.net.segments.has(e.seg)) || train.segs.some((s) => !this.net.segments.has(s));
-      if (!broken && train.path.length) continue;
+      if (!broken && train.path.length) {
+        this.applyLengths(train);
+        continue;
+      }
       this.remove(train);
       this.events.onLost(train);
     }
@@ -578,6 +581,27 @@ export class RailSim {
     if (train.platform !== null && !this.net.segments.has(train.platform)) train.platform = last.seg;
   }
 
+  /**
+   * Участки маршрута поменяли форму (перенос узла, перо, изгиб): длины — заново, голова остаётся
+   * на той же доле своего участка, остановка — посередине конечной платформы, как и была.
+   */
+  private applyLengths(train: Train): void {
+    const stale = train.path.some((e) => Math.abs((this.net.segments.get(e.seg)?.length ?? e.len) - e.len) > 1e-6);
+    if (!stale) return;
+    const at = train.path[this.edgeIndex(train, Math.max(0, train.head))];
+    const k = (train.head - at.start) / (at.len || 1);
+    let acc = 0;
+    for (const e of train.path) {
+      e.start = acc;
+      e.len = this.net.segments.get(e.seg)?.length ?? e.len;
+      acc += e.len;
+    }
+    train.head = at.start + k * at.len;
+    const last = train.path[train.path.length - 1];
+    if (train.moving) train.stopAt = last.start + (last.len + train.length) / 2;
+    else train.stopAt = train.head = Math.min(train.head, acc);
+  }
+
   /** Есть ли на станции свободная платформа нужной длины. */
   canPark(platforms: number[], length: number): boolean {
     return platforms.some((pid) => {
@@ -610,6 +634,8 @@ export class RailSim {
       const train: Train = { ...t, segs: [], nodes: [] };
       this.trains.set(train.id, train);
       this.own(train, t.segs, t.nodes);
+      // Отмена правки формы путей: участки снова прежней длины.
+      if (train.path.length) this.applyLengths(train);
       ok.add(train.id);
     }
     return ok;

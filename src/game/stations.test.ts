@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { STATION } from '../config';
 import { add, dist, scale, Vec } from '../core/vec';
-import type { LaneNode } from '../lanes/model';
+import { twoWay, type LaneNode } from '../lanes/model';
+import { RoadTools } from '../input/roadtools';
 import type { TownBuilding } from '../world/entities';
+import type { RoadSpec } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
 import { DEFAULT_RULE } from './transport';
 import { Game } from './game';
-import { End, roadPlan, stationExit } from './testkit';
+import { AVENUE, End, roadPlan, stationExit } from './testkit';
+
+const AVENUE_SPEC: RoadSpec = { cls: 'avenue', lanesF: 2, lanesB: 2 };
 
 function runSeconds(game: Game, seconds: number) {
   game.speed = 1;
@@ -146,9 +150,17 @@ describe('Станции', () => {
     for (let i = 0; i < 6; i++) expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
     runSeconds(game, 60);
     expect(b.occupied.length).toBe(STATION.bays);
+    // Каждый автобус — на своём посту, посты окрашены в цвет линии.
+    const bays = () => new Set(b.occupied.map((id) => game.fleet.get(id)!.bay));
+    expect(bays().size).toBe(STATION.bays);
+    expect(game.stationBays(b)).toEqual(Array(STATION.bays).fill(line.color));
     expect(game.setStationBays(b.id, 5)).toBeNull();
     runSeconds(game, 20);
     expect(b.occupied.length).toBe(5);
+    expect(bays()).toEqual(new Set([0, 1, 2, 3, 4]));
+    // Посты сохраняются: после загрузки автобусы на тех же местах.
+    const loaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
+    expect(loaded.stationBays(loaded.stations.get(b.id)!)).toEqual(game.stationBays(b));
   }, 20_000);
 
   it('у перекрёстка выезд станции примыкает прямо к узлу', () => {
@@ -274,4 +286,128 @@ describe('Станции', () => {
     }
     expect(checked).toBe(1);
   });
+
+  it('выезд станции перестраивается в проспект: своя станция не мешает, чужое здание — мешает', () => {
+    const game = new Game(42);
+    game.money = 5_000_000;
+    const tools = new RoadTools(() => game);
+    const net = () => game.roads.net;
+    const driveway = (st: { nodeId: number }) => net().corridor(net().node(st.nodeId).corridors[0]);
+    // Станция у дороги: расширенный выезд у ворот заходит в контур станции.
+    const road = fieldRoad(game);
+    const st = game.placeStation({ x: road.a.x + 200, y: road.y - 30 }, 14)!;
+    const c = driveway(st);
+    expect(stationExit(game, st.nodeId).id).not.toBe(st.nodeId);
+    expect(tools.upgradePlan(c.lut.pointAt(c.length / 2), AVENUE_SPEC, 4)?.plan.reason).toBeUndefined();
+    expect(tools.upgrade(c.lut.pointAt(c.length / 2), AVENUE_SPEC, 4)).toBeNull();
+    expect(driveway(st).cls).toBe('avenue');
+    expect(driveway(st).lanes).toHaveLength(4);
+    expect(game.stations.has(st.id)).toBe(true);
+    // Станция у предприятия (как у лесопилки): выезд от ворот грузового двора.
+    let checked = 0;
+    for (const ind of game.industries) {
+      for (const k of [0, 1, 2, 3]) {
+        const a = ind.fp.angle + (k * Math.PI) / 2;
+        const reach = (k % 2 ? ind.fp.h : ind.fp.w) / 2 + 30;
+        const p = { x: ind.fp.center.x + Math.cos(a) * reach, y: ind.fp.center.y + Math.sin(a) * reach };
+        const plan = game.stationPlan(p, 14);
+        if (!plan.ok || plan.industryId !== ind.id) continue;
+        const dock = game.placeStation(p, 14)!;
+        const d = driveway(dock);
+        expect(tools.upgrade(d.lut.pointAt(d.length / 2), AVENUE_SPEC, 4)).toBeNull();
+        expect(driveway(dock).cls).toBe('avenue');
+        checked++;
+        break;
+      }
+      if (checked) break;
+    }
+    expect(checked).toBe(1);
+    // Ратуша у выезда другой станции по-прежнему мешает расширению.
+    const other = fieldRoad(game);
+    const st2 = game.placeStation({ x: other.a.x + 200, y: other.y - 30 }, 14)!;
+    const c2 = driveway(st2);
+    const mid = c2.lut.pointAt(c2.length / 2);
+    const t = c2.lut.tangentAt(c2.length / 2);
+    addHouse(game, { center: add(mid, scale({ x: -t.y, y: t.x }, 13)), w: 6, h: 6, angle: 0 }, 'landmark');
+    expect(tools.upgrade(mid, AVENUE_SPEC, 4)).toBe('Мешает здание');
+    expect(driveway(st2).cls).toBe('street');
+  });
+
+  it('у широкой дороги станция прилипает: у проспекта ставится, у магистрали — силуэт с понятной причиной', () => {
+    const game = new Game(42);
+    game.money = 5_000_000;
+    // Проспект 2+2: курсор в 45 от оси (≈30 от края) — раньше «Поставьте рядом с дорогой».
+    const a = fieldSpot(game, 400);
+    const avenue = roadPlan(game, { free: a }, { free: { x: a.x + 400, y: a.y } }, AVENUE);
+    expect(avenue.ok).toBe(true);
+    game.roadBuilder.apply(avenue);
+    const p = { x: a.x + 200, y: a.y - 45 };
+    expect(game.stationPlan(p, 14).reason).toBeUndefined();
+    const st = game.placeStation(p, 14)!;
+    expect(st).not.toBeNull();
+    expect(st.fp.center.y).toBeLessThan(a.y - 40);
+    const net = game.roads.net;
+    expect(stationExit(game, st.nodeId).corridors.map((id) => net.corridor(id).cls)).toContain('avenue');
+    // Магистраль: выезд к ней не пристроить (вдоль быстрых дорог станций нет), но силуэт — у дороги, причина — про магистраль.
+    const b = fieldSpot(game, 400);
+    const highway = roadPlan(game, { free: b }, { free: { x: b.x + 400, y: b.y } }, { cls: 'highway', lanes: twoWay(2, 2) });
+    expect(highway.ok).toBe(true);
+    game.roadBuilder.apply(highway);
+    const q = { x: b.x + 200, y: b.y - 45 };
+    const plan = game.stationPlan(q, 14);
+    expect(plan.ok).toBe(false);
+    expect(plan.reason).toBe('К магистрали станцию не пристроить');
+    expect(Math.abs(plan.fp!.center.x - q.x)).toBeLessThan(2);
+    expect(plan.fp!.center.y).toBeLessThan(b.y - 40);
+    expect(game.placeStation(q, 14)).toBeNull();
+  });
+});
+
+describe('Машины в пути и сохранение', () => {
+  it('после загрузки машина в пути едет дальше с того же места, а не со станции', () => {
+    const game = new Game(42);
+    const road = fieldRoad(game, 500);
+    const a = game.placeStation({ x: road.a.x + 120, y: road.y - 30 }, 14)!;
+    const b = game.placeStation({ x: road.a.x + 380, y: road.y - 30 }, 14)!;
+    const line = game.createLine([a.id, b.id])!;
+    for (const i of [0, 1]) game.setStopRule(line.id, i, { ...DEFAULT_RULE, wait: 'none' });
+    const v = game.buyVehicle(line.id, 'bus')!;
+    const reload = () => new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
+    game.speed = 1;
+    let checks = 0;
+    let midway: Game | null = null;
+    for (let step = 1; step < 1200 && checks < 8; step++) {
+      game.update(0.1);
+      const sim = game.fleetSim(v);
+      // Раз в полторы секунды пути — сохраняем и загружаем.
+      if (!sim || step % 15) continue;
+      const loaded = reload();
+      const lv = loaded.fleet.get(v.id)!;
+      const ls = loaded.fleetSim(lv);
+      expect(lv.state).toBe('driving');
+      expect(lv.stop).toBe(v.stop);
+      expect(ls).toBeDefined();
+      // На манёвре в узле машина встаёт в начало полосы выезда из него — чуть впереди.
+      expect(dist(ls!.pos, sim.pos)).toBeLessThan(sim.onMovement ? 25 : 3);
+      expect(ls!.v).toBeCloseTo(sim.v);
+      if (!midway && !sim.onMovement && dist(sim.pos, a.fp.center) > 100 && dist(sim.pos, b.fp.center) > 100) midway = loaded;
+      checks++;
+    }
+    expect(checks).toBe(8);
+    expect(midway).not.toBeNull();
+    // Загруженная с полпути — доезжает до своей станции и заезжает на пост.
+    const lv = midway!.fleet.get(v.id)!;
+    const target = midway!.stations.get(midway!.lines.get(line.id)!.stops[lv.stop])!;
+    for (let t = 0; t < 60 && lv.state === 'driving'; t += 0.1) midway!.update(0.1);
+    expect(lv.state).toBe('loading');
+    expect(target.occupied).toContain(lv.id);
+
+    // Старое сохранение без места на дороге — как раньше: машина снова отправляется со станции.
+    for (let t = 0; t < 30 && !game.fleetSim(v); t += 0.1) game.update(0.1);
+    const old = JSON.parse(JSON.stringify(game.toSave()));
+    for (const f of old.fleet) delete f.onRoad;
+    const loaded = new Game(game.settings, old);
+    expect(loaded.fleet.get(v.id)!.state).toBe('departing');
+    expect(loaded.traffic.vehicles.size).toBe(0);
+  }, 30_000);
 });

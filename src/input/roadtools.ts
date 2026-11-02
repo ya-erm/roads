@@ -2,7 +2,7 @@ import type { Cubic } from '../core/bezier';
 import { add, angleOf, dist, dot, len, norm, scale, sub, Vec } from '../core/vec';
 import type { DrawMode } from '../game/build';
 import type { Game } from '../game/game';
-import type { RoadPlan } from '../game/roadbuild';
+import type { RoadBuilder, RoadPlan } from '../game/roadbuild';
 import {
   alignNode,
   Anchor,
@@ -16,6 +16,10 @@ import {
   handlesOf,
   joinDeadEnd,
   LaneDraft,
+  LaneTip,
+  laneTipAt,
+  laneTipPos,
+  laneAlong,
   laneUnder,
   removeEdgeLane,
   removeLaneSpan,
@@ -38,6 +42,13 @@ export class RoadTools {
   control: Vec | null = null;
   /** Полоса, которую ведут мышью. */
   lane: LaneDraft | null = null;
+  /** Конец полосы, которую ведут по точкам (кликами, как путь). */
+  laneTip: LaneTip | null = null;
+  /**
+   * Полосу тянут мышью от tip: entry — где из поля дошли до края дороги (въезд), along — докуда вдоль дороги,
+   * away — куда ушли в сторону (съезд или однополосная); r — радиус прилипания.
+   */
+  laneDrag: { tip: LaneTip; entry: Vec | null; along: Vec | null; away: Vec | null; r: number } | null = null;
   /** Узел, который тянут. */
   dragNode: number | null = null;
   /** Полотно, которое выгибают за середину. */
@@ -62,7 +73,7 @@ export class RoadTools {
   }
 
   get busy(): boolean {
-    return !!(this.start || this.control || this.lane || this.dragging);
+    return !!(this.start || this.control || this.lane || this.laneDrag || this.laneTip || this.dragging);
   }
 
   /** Тянут узел, перо или середину дороги. */
@@ -75,6 +86,8 @@ export class RoadTools {
     this.start = null;
     this.control = null;
     this.lane = null;
+    this.laneDrag = null;
+    this.laneTip = null;
     this.dragNode = null;
     this.bend = null;
     this.handle = null;
@@ -84,11 +97,16 @@ export class RoadTools {
 
   /** Esc или правая кнопка: шаг назад. true — было что отменять. */
   cancel(): boolean {
-    if (this.lane || this.dragging) {
+    if (this.lane || this.laneDrag || this.dragging) {
       this.lane = null;
+      this.laneDrag = null;
       this.dragNode = null;
       this.bend = null;
       this.handle = null;
+      return true;
+    }
+    if (this.laneTip) {
+      this.laneTip = null;
       return true;
     }
     if (this.control) {
@@ -209,33 +227,124 @@ export class RoadTools {
 
   // ---------- Полоса ----------
 
+  /** Нажали: по точкам уже ведём — ждём отпускания; иначе — начало протяжки (у конца пристроенной полосы — и её конец). */
   laneDown(p: Vec, r: number): void {
-    this.lane = startLane(this.net, p, r);
+    if (this.laneTip && !this.validTip(this.laneTip)) this.laneTip = null;
+    this.lane = null;
+    this.laneDrag = null;
+    if (this.laneTip) return;
+    const d = startLane(this.net, p, r);
+    if (d.grab) this.lane = d;
+    this.laneDrag = { tip: laneTipAt(this.net, p, r), entry: null, along: null, away: null, r };
   }
 
+  /**
+   * Тянут: у края дороги — полоса вдоль (и дальше через стыки), ушли в сторону — съезд оттуда, где ушли;
+   * вернулись к линии полосы — она тянется дальше. Из поля — до края дороги (въезд), потом вдоль неё.
+   */
   laneMove(p: Vec, r: number): void {
     if (this.lane) this.lane = dragLane(this.net, this.lane, p, r);
+    const d = this.laneDrag;
+    if (!d) return;
+    if (d.tip.kind === 'edge') {
+      if (laneAlong(this.net, d.tip, p)) {
+        d.along = p;
+        d.away = null;
+      } else d.away = p;
+    } else if (laneTipAt(this.net, p, r).kind === 'edge') {
+      if (d.entry) d.along = p;
+      else d.entry = p;
+    } else if (!d.entry) d.away = p;
   }
 
-  lanePlan(spec: RoadSpec): RoadPlan | null {
-    const d = this.lane;
+  /** Что построится по протяжке: план и подпись. */
+  lanePlan(spec: RoadSpec): { plan: RoadPlan; what: string } | null {
+    const d = this.laneDrag;
     if (!d) return null;
-    const cls = (d.host && this.net.corridors.get(d.host.corridor)?.cls) || spec.cls;
-    return this.game().roadBuilder.lane(d, cls);
+    const tipCls = d.tip.kind === 'edge' ? this.net.corridors.get(d.tip.corridor)?.cls : undefined;
+    // Конец пристроенной полосы ведут назад — короче (вперёд полоса тянется как от края, через стыки тоже).
+    const g = this.lane;
+    if (g?.grab && g.host && !this.extends(g)) {
+      const plan = this.game().roadBuilder.lane(g, tipCls ?? spec.cls);
+      return { plan, what: plan.cost < 0 ? 'Полоса короче' : 'Полоса' };
+    }
+    const start = laneTipPos(this.net, d.tip);
+    const pts =
+      d.tip.kind === 'edge'
+        ? [d.along && start && dist(d.along, start) > 8 ? d.along : null, d.away]
+        : d.entry
+          ? [d.entry, d.along]
+          : [d.away];
+    const qs = pts.filter((q): q is Vec => !!q);
+    if (!qs.length) return null;
+    const res = this.game().roadBuilder.laneStep(d.tip, qs, tipCls ?? spec.cls, d.r);
+    return { plan: res.plan, what: res.step?.what ?? '' };
   }
 
-  laneUp(p: Vec, r: number, spec: RoadSpec): string | null {
-    if (!this.lane) return null;
+  /** Конец пристроенной полосы тянут дальше её конца, а не внутрь. */
+  private extends(g: LaneDraft): boolean {
+    const c = g.host && g.grab ? this.net.corridors.get(g.host.corridor) : undefined;
+    const l = c && g.grab ? c.lanes[g.grab.lane] : undefined;
+    if (!c || !l || !g.host || !g.grab) return false;
+    return g.grab.end === 'to' ? g.host.s1 > Math.min(l.to, c.length) + 1 : g.host.s1 < l.from - 1;
+  }
+
+  /**
+   * Отпустили: протянули — строится черновик (как раньше); просто клик — точка полосы по точкам:
+   * первая — начало, следующие — куски до них (вдоль, съезд, въезд, однополосная).
+   */
+  laneUp(p: Vec, r: number, spec: RoadSpec, moved = true): string | null {
+    if (this.laneTip) {
+      const res = this.laneStepPlan(p, spec, r);
+      if (!res) return null;
+      if (!res.step) return res.plan.reason ?? 'Нельзя построить';
+      this.applyLanePlan(res.plan);
+      this.laneTip = res.step.tip;
+      return null;
+    }
+    if (!this.laneDrag) return null;
+    if (!moved) {
+      this.lane = null;
+      this.laneDrag = null;
+      this.laneTip = laneTipAt(this.net, p, r);
+      return null;
+    }
     this.laneMove(p, r);
-    const plan = this.lanePlan(spec);
+    const res = this.lanePlan(spec);
     this.lane = null;
-    if (!plan) return null;
-    if (!plan.ok) return plan.reason ?? 'Нельзя построить';
+    this.laneDrag = null;
+    if (!res) return null;
+    if (!res.plan.ok) return res.plan.reason ?? 'Нельзя построить';
+    this.applyLanePlan(res.plan);
+    return null;
+  }
+
+  /** Следующий кусок полосы по точкам до p; null — по точкам не ведём. */
+  laneStepPlan(p: Vec, spec: RoadSpec, r: number): ReturnType<RoadBuilder['laneStep']> | null {
+    const tip = this.laneTip;
+    if (!tip) return null;
+    if (!this.validTip(tip)) {
+      this.laneTip = null;
+      return null;
+    }
+    const cls = (tip.kind === 'edge' && this.net.corridors.get(tip.corridor)?.cls) || spec.cls;
+    return this.game().roadBuilder.laneStep(tip, [p], cls, r);
+  }
+
+  /** Где сейчас конец полосы по точкам. */
+  laneTipPos(): Vec | null {
+    return this.laneTip && this.validTip(this.laneTip) ? laneTipPos(this.net, this.laneTip) : null;
+  }
+
+  private validTip(tip: LaneTip): boolean {
+    return tip.kind === 'edge' ? this.net.corridors.has(tip.corridor) : this.valid(tip.anchor);
+  }
+
+  private applyLanePlan(plan: RoadPlan): void {
     const g = this.game();
     g.roadBuilder.apply(plan);
     // Дома, на которые налезла новая полоса или съезд, отодвигаются.
     for (const id of plan.changed) g.roadWidened(id);
-    return null;
   }
 
   // ---------- Перестроить ----------
@@ -245,9 +354,15 @@ export class RoadTools {
     const c = corridorUnder(this.net, p, r);
     if (!c) return null;
     const profile = profileOf(spec);
-    const sig = (lanes: LaneSlot[]) => lanes.map((l) => `${l.offset}:${l.flow}`).sort().join();
-    if (sig(profile.lanes) === sig(c.lanes) && c.cls === profile.cls && profile.lanes.every((l) => l.flow === profile.lanes[0].flow)) {
-      profile.lanes = profile.lanes.map((l) => ({ ...l, flow: -l.flow as Flow }));
+    // Односторонняя остаётся в свою сторону (полосы задом наперёд — «перекрученная» дорога),
+    // а повторный клик тем же профилем разворачивает её.
+    const oneWay = (lanes: LaneSlot[]) => (lanes.length > 0 && lanes.every((l) => l.flow === lanes[0].flow) ? lanes[0].flow : null);
+    const now = oneWay(c.lanes);
+    if (now !== null && oneWay(profile.lanes) !== null) {
+      const offsets = (lanes: LaneSlot[]) => lanes.map((l) => l.offset).sort().join();
+      const same = offsets(profile.lanes) === offsets(c.lanes) && c.cls === profile.cls;
+      const flow = (same ? -now : now) as Flow;
+      profile.lanes = profile.lanes.map((l) => ({ ...l, flow }));
     }
     return { corridor: c, plan: this.game().roadBuilder.rebuild(c.id, profile) };
   }

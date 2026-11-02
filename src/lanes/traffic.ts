@@ -3,6 +3,7 @@ import { lerp as lerpNum } from '../core/math';
 import { rightNormal, scale, add, type Vec } from '../core/vec';
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
 import { GLane, GLink, GMove, GNode, LaneGraph } from './graph';
+import { Corridor, layerOf } from './model';
 import { findLaneRoute } from './routing';
 
 export interface LaneTrafficEvents {
@@ -29,7 +30,7 @@ const CHANGE_ROOM = 120;
  * Трудность n перестроений на отрезке длиной room: само число перестроений и штраф, если места
  * на них меньше, чем надо, — тогда лучше перестроиться раньше, на связи подлиннее.
  */
-const changePenalty = (n: number, room: number) => (n ? n + (Math.max(0, n * CHANGE_ROOM - room) / CHANGE_ROOM) * 3 : 0);
+export const changePenalty = (n: number, room: number) => (n ? n + (Math.max(0, n * CHANGE_ROOM - room) / CHANGE_ROOM) * 3 : 0);
 
 /**
  * План полос на связи маршрута: stay — трудность дальнейшего пути, если проехать связь по этой полосе
@@ -185,7 +186,36 @@ export class LaneTraffic {
     const lane = (good.length ? good : rightFirst).find((l) => this.spaceAtStart(l, opts.length + IDM.minGap + 1));
     if (!lane) return null;
     const { targetNode, route, ...spec } = opts;
-    const pose = this.graph.lanePose(lane, 0);
+    const veh = this.create(spec, targetNode, route, lane, 0, 3);
+    lane.vehicles.push(veh);
+    return veh;
+  }
+
+  /**
+   * Ставит машину на попутную полосу у точки pos с курсом dir (как при перестройке сети) и прокладывает
+   * маршрут к targetNode — так машины из сохранения едут дальше. Некуда поставить или не доехать — null.
+   */
+  place(opts: VehicleSpec & { targetNode: number }, pos: Vec, dir: Vec, v = 0): Vehicle | null {
+    const spot = this.laneAt(pos, dir);
+    const route = spot && findLaneRoute(this.graph, [this.graph.links.get(spot.lane.link)!], opts.targetNode);
+    if (!spot || !route) return null;
+    const { targetNode, ...spec } = opts;
+    const veh = this.create(spec, targetNode, route, spot.lane, spot.u, v);
+    insertSorted(spot.lane.vehicles, veh);
+    return veh;
+  }
+
+  /** Где машина для сохранения: на манёвре в узле — уже в начале полосы выезда из него (туда её и поставят). */
+  spotOf(veh: Vehicle): { pos: Vec; dir: Vec } {
+    const m = veh.onMovement ? this.graph.moves.get(veh.onMovement) : undefined;
+    const lane = m && this.graph.lanes.get(m.outLane);
+    const pose = lane ? this.graph.lanePose(lane, 0) : veh;
+    return { pos: { ...pose.pos }, dir: { ...pose.dir } };
+  }
+
+  /** Новая машина на полосе lane в s (в очередь полосы её ставит вызывающий). */
+  private create(spec: VehicleSpec, targetNode: number, route: number[], lane: GLane, s: number, v: number): Vehicle {
+    const pose = this.graph.lanePose(lane, Math.min(s, lane.length));
     const veh: Vehicle = {
       ...spec,
       id: this.nextId++,
@@ -199,8 +229,8 @@ export class LaneTraffic {
       waitingAt: null,
       requestTime: 0,
       ready: false,
-      s: 0,
-      v: 3,
+      s,
+      v,
       pos: pose.pos,
       dir: pose.dir,
       level: 0,
@@ -212,7 +242,6 @@ export class LaneTraffic {
       rerouteTimer: 3 + jitter(this.nextId) * 3,
       lcCooldown: 0.5,
     };
-    lane.vehicles.push(veh);
     this.vehicles.set(veh.id, veh);
     this.updatePose(veh);
     return veh;
@@ -712,6 +741,12 @@ export class LaneTraffic {
       veh.pos = p.pos;
       this.steer(veh, p.dir);
       if (m.node !== null) veh.level = this.graph.net.nodes.get(m.node)?.level ?? veh.level;
+      // Корпус ещё (или уже) на полотне въезда или выезда — слой и его: у моста машина не ныряет под край.
+      const half = veh.length / 2 + 1;
+      let layer = layerOf(veh.level, veh.level);
+      if (m.node === null || veh.s < half) layer = Math.max(layer, this.linkLayer(m.inLink));
+      if (m.node === null || veh.s > m.length - half) layer = Math.max(layer, this.linkLayer(m.outLink));
+      veh.layer = layer;
       return;
     }
     const lane = this.currentLane(veh);
@@ -720,8 +755,36 @@ export class LaneTraffic {
     veh.pos = add(pose.pos, scale(rightNormal(pose.dir), veh.lateral));
     this.steer(veh, pose.dir);
     veh.centerS = this.graph.axisS(lane, veh.s);
-    const c = this.graph.net.corridors.get(this.graph.links.get(lane.link)!.corridor);
-    if (c) veh.level = this.graph.net.heightAt(c, veh.centerS);
+    const net = this.graph.net;
+    const c = net.corridors.get(this.graph.links.get(lane.link)!.corridor);
+    if (c) {
+      veh.level = net.heightAt(c, veh.centerS);
+      // На пандусе — в слое всего полотна (как его рисуют), иначе у начала моста машина ныряет под него.
+      let layer = this.corridorLayer(c);
+      // Корпус у стыка с мостом заходит на него — рисуем со слоем моста, а не под его краем.
+      const half = veh.length / 2 + 1;
+      for (const [id, near] of [
+        [c.a, veh.centerS < half],
+        [c.b, veh.centerS > c.length - half],
+      ] as const) {
+        const n = near ? net.nodes.get(id) : undefined;
+        if (n?.kind === 'seam') for (const id2 of n.corridors) layer = Math.max(layer, this.corridorLayer(net.corridor(id2)));
+      }
+      veh.layer = layer;
+    }
+  }
+
+  /** Слой отрисовки полотна (как у LaneRenderer): по высотам его концов. */
+  private corridorLayer(c: Corridor): number {
+    const la = this.graph.net.node(c.a).level;
+    const lb = this.graph.net.node(c.b).level;
+    return layerOf(Math.min(la, lb), Math.max(la, lb));
+  }
+
+  private linkLayer(linkId: number): number {
+    const link = this.graph.links.get(linkId);
+    const c = link && this.graph.net.corridors.get(link.corridor);
+    return c ? this.corridorLayer(c) : -1;
   }
 
   // ---------- Проезд узлов ----------

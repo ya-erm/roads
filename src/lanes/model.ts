@@ -138,6 +138,13 @@ export const taperLen = (cls: RoadClass) => TAPER[cls];
 /** Поперечные координаты в стыке совпадают с такой точностью. */
 export const LAT_EPS = 0.5;
 
+/** Слой отрисовки по высоте: −1 тоннель, 0 земля, 1 мост, 2 эстакада. */
+export function layerOf(min: number, max: number): number {
+  if (min < -0.25) return -1;
+  if (max <= 0.25) return 0;
+  return Math.min(2, Math.max(1, Math.round(max)));
+}
+
 export const slot = (offset: number, flow: Flow, from = 0, to = Infinity): LaneSlot => ({ offset, flow, from, to });
 
 /** Полосы как у прежней дороги: f по ходу (справа), b против; median — ширина разделительной полосы. */

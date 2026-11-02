@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { add, scale, Vec } from '../core/vec';
+import { add, angleDiff, angleOf, dist, scale, Vec } from '../core/vec';
+import { placer } from '../lanes/fragment';
 import type { Train } from '../sim/rail';
 import type { Station } from '../world/entities';
 import { RAIL_SPEC, RoadSpec } from '../world/roadTypes';
-import type { RoadRequest } from './build';
+import type { RoadRequest, Snap } from './build';
 import { Game } from './game';
+import { snapRails } from './railFragment';
 import { road, roadPlan, STREET as STREET_LANES } from './testkit';
 import { carsOf, vehicleCapacity } from './transport';
 
@@ -55,6 +57,47 @@ function body(train: Train): Map<number, [number, number]> {
     result.set(e.seg, local as [number, number]);
   }
   return result;
+}
+
+/** Пути, кроме платформ вокзалов. */
+const tracks = (game: Game) => [...game.net.segments.values()].filter((s) => s.platform === undefined);
+
+/** Первое место сетки, где получилось (неудачная попытка ничего не строит). */
+function somewhere(game: Game, tryAt: (p: Vec) => boolean): Vec {
+  for (let y = 400; y < game.terrain.height - 400; y += 200) {
+    for (let x = 400; x < game.terrain.width - 400; x += 200) if (tryAt({ x, y })) return { x, y };
+  }
+  throw new Error('Нет места');
+}
+
+/** Стройка целиком или никак: не вышло — построенное откатывается. */
+function tryBuild(game: Game, build: () => boolean): boolean {
+  const state = () => [game.net.version, game.roads.net.version, game.money].join();
+  const was = state();
+  game.checkpoint('стройка');
+  const ok = build();
+  game.commit();
+  if (!ok && state() !== was) game.undo();
+  return ok;
+}
+
+/**
+ * Стрелка в чистом поле, подальше от far: прямой путь на 500 м вдоль x, ответвление от 150 м (на 40 м вбок
+ * к 400 м) и сигнал у 300 м; withRoad — ещё улица поперёк пути у 420 м (переезд). Возвращает начало пути.
+ */
+function junctionYard(game: Game, far: Vec[], withRoad = false): Vec {
+  return somewhere(game, (o) => {
+    if (o.x > game.terrain.width - 900 || far.some((f) => dist(f, add(o, { x: 250, y: 0 })) < 700)) return false;
+    const main = straight(o, add(o, { x: 500, y: 0 }), RAIL_SPEC);
+    if (!game.builder.plan(main).ok) return false;
+    return tryBuild(game, () => {
+      if (!game.builder.build(main)) return false;
+      const start = game.builder.snap(add(o, { x: 150, y: 0 }), 0, 14);
+      const branch: RoadRequest = { start, end: { kind: 'free', pos: add(o, { x: 400, y: 40 }), level: 0 }, spec: RAIL_SPEC, mode: 'arc' };
+      if (!game.builder.build(branch) || !game.toggleSignal(add(o, { x: 300, y: -6 }), 14)) return false;
+      return !withRoad || road(game, { free: add(o, { x: 420, y: -80 }) }, { free: add(o, { x: 420, y: 25 }) });
+    });
+  });
 }
 
 function railWorld(): { game: Game; a: Station; b: Station; from: Vec; dir: Vec } {
@@ -317,5 +360,129 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
     });
     expect(loaded.lines.get(line.id)!.problem).toBeNull();
     expect(arrivals).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('Копирование и вставка путей', { timeout: 60_000 }, () => {
+  /** Рамка вокруг стрелки «мастерской» от o: путь режется у 50 и 450 м; центр рамки — 250 м от начала пути. */
+  const yardBox = (o: Vec): [Vec, Vec] => [add(o, { x: 50, y: -70 }), add(o, { x: 450, y: 70 })];
+
+  it('стрелка с сигналом копируется рамкой и встаёт в чистом поле повёрнутой: по ней можно проехать', () => {
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    const o = junctionYard(game, []);
+    const frag = game.copyArea(...yardBox(o))!;
+    expect(frag.corridors).toHaveLength(0);
+    // Прямой путь режется по рамке: три куска (у стрелки и сигнала — узлы) и ответвление.
+    expect(frag.rail!.segs).toHaveLength(4);
+    expect(frag.rail!.nodes.filter((n) => n.signals?.length)).toHaveLength(1);
+    const before = tracks(game).length;
+    const angle = Math.PI / 3;
+    const at = somewhere(game, (q) => dist(q, o) > 900 && game.pastePlan(frag, q, angle).ok);
+    const plan = game.pastePlan(frag, at, angle);
+    expect(plan.rails).toHaveLength(4);
+    expect(plan.cost).toBeGreaterThan(0);
+    const money = game.money;
+    expect(game.paste(frag, at, angle)).toBeNull();
+    expect(money - game.money).toBe(plan.cost);
+    expect(tracks(game).length).toBe(before + 4);
+    const { place } = placer(at, angle);
+    const nodeAt = (p: Vec) => game.net.nodesNear(place(p), 1.5)[0];
+    // Стрелка на три участка; сигнал — на своём узле и смотрит на свой участок.
+    expect(nodeAt({ x: -100, y: 0 }).segments).toHaveLength(3);
+    const sig = nodeAt({ x: 50, y: 0 });
+    expect(sig.signals).toHaveLength(1);
+    expect(sig.segments).toContain(sig.signals![0]);
+    // Проезд: с западного конца — на восточный и на ответвление, с ответвления — обратно.
+    const west = nodeAt({ x: -200, y: 0 }).segments;
+    const east = nodeAt({ x: 200, y: 0 }).segments;
+    const branch = nodeAt({ x: 150, y: 40 }).segments;
+    expect(game.rail.previewRoute(west, east)).not.toBeNull();
+    expect(game.rail.previewRoute(west, branch)).not.toBeNull();
+    expect(game.rail.previewRoute(branch, west)).not.toBeNull();
+    // Отмена — одним шагом.
+    expect(game.undo()).toBe('вставка');
+    expect(tracks(game).length).toBe(before);
+  });
+
+  it('стрелка встаёт на путь между вокзалами: кусок под рамкой заменяется, срезы примыкают, поезд проезжает', () => {
+    const { game, a, b, from, dir } = railWorld();
+    const along = [0, 600, 1200, 1800, 2400].map((k) => add(from, scale(dir, k)));
+    const o = junctionYard(game, along);
+    const frag = game.copyArea(...yardBox(o))!;
+    // Ставим у середины пути, чуть мимо и под углом — прилипание выправит.
+    const mid = add(from, scale(dir, 1200));
+    const snap = snapRails(game.net, frag, add(mid, { x: 4, y: -6 }), angleOf(dir) + 0.2, 30);
+    expect(snap.snapped).toBe(true);
+    expect(Math.abs(angleDiff(snap.angle, angleOf(dir)))).toBeLessThan(1e-6);
+    const top = Math.max(...game.net.segments.keys());
+    const plan = game.pastePlan(frag, snap.at, snap.angle);
+    expect(plan.reason ?? 'ok').toBe('ok');
+    // За снесённый под рамкой кусок пути — возврат.
+    expect(plan.railRefund).toBeGreaterThan(0);
+    expect(game.paste(frag, snap.at, snap.angle)).toBeNull();
+    // Тупиков у рамки нет, кроме конца ответвления: концы куска примкнули к срезам пути.
+    const ends = [...game.net.nodes.values()].filter((n) => n.segments.length === 1 && dist(n.pos, snap.at) < 400);
+    expect(ends).toHaveLength(1);
+    expect(dist(ends[0].pos, placer(snap.at, snap.angle).place({ x: 150, y: 40 }))).toBeLessThan(1);
+    // Поезд ходит от вокзала до вокзала — через вставленные участки.
+    const line = game.createLine([a.id, b.id])!;
+    game.setStopRule(line.id, 0, { wait: 'none', maxWait: null, load: 'auto', unload: 'auto' });
+    game.buyVehicle(line.id, 'passengerTrain');
+    const v = [...game.fleet.values()][0];
+    const used = new Set<number>();
+    let arrivals = 0;
+    let last = v.state;
+    runSeconds(game, 200, () => {
+      for (const t of game.rail.trains.values()) for (const s of t.segs) used.add(s);
+      if (v.state === 'loading' && last !== 'loading') arrivals++;
+      last = v.state;
+    });
+    expect(game.lines.get(line.id)!.problem).toBeNull();
+    expect(arrivals).toBeGreaterThanOrEqual(2);
+    expect([...used].some((id) => id > top)).toBe(true);
+  });
+
+  it('путь с переездом копируется вместе с улицей и встаёт целиком: и дорога, и путь, и переезд', () => {
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    const o = junctionYard(game, [], true);
+    expect(game.levelCrossings).toHaveLength(1);
+    const frag = game.copyArea(...yardBox(o))!;
+    expect(frag.corridors).toHaveLength(1);
+    expect(frag.rail!.segs).toHaveLength(4);
+    const roads = game.roads.net.corridors.size;
+    const at = somewhere(game, (q) => dist(q, o) > 900 && game.pastePlan(frag, q, -0.4).ok);
+    expect(game.paste(frag, at, -0.4)).toBeNull();
+    expect(game.roads.net.corridors.size).toBe(roads + 1);
+    expect(game.roads.net.problems()).toEqual([]);
+    expect(game.levelCrossings).toHaveLength(2);
+  });
+
+  it('мост копируется с высотой: пандусы и пролёт встают так же', () => {
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    // Пандус 200 м на мост, пролёт 120 м, пандус вниз.
+    const xs = [0, 200, 320, 520];
+    const levels = [0, 1, 1, 0];
+    const o = somewhere(game, (p) =>
+      tryBuild(game, () => {
+        let prev: Snap = { kind: 'free', pos: p, level: 0 };
+        for (let i = 1; i < xs.length; i++) {
+          const res = game.builder.build({ start: prev, end: { kind: 'free', pos: add(p, { x: xs[i], y: 0 }), level: levels[i] }, spec: RAIL_SPEC, mode: 'straight' });
+          if (!res) return false;
+          prev = { kind: 'node', nodeId: res.endNode, pos: game.net.node(res.endNode).pos, level: levels[i] };
+        }
+        return true;
+      }),
+    );
+    const frag = game.copyArea(add(o, { x: -20, y: -40 }), add(o, { x: 540, y: 40 }))!;
+    expect(frag.rail!.segs).toHaveLength(3);
+    expect(frag.rail!.nodes.map((n) => n.level).sort()).toEqual([0, 0, 1, 1]);
+    const top = Math.max(...game.net.nodes.keys());
+    const at = somewhere(game, (q) => dist(q, add(o, { x: 260, y: 0 })) > 900 && game.pastePlan(frag, q, 0.5).ok);
+    expect(game.paste(frag, at, 0.5)).toBeNull();
+    const fresh = [...game.net.nodes.values()].filter((n) => n.id > top);
+    expect(fresh.map((n) => n.level).sort()).toEqual([0, 0, 1, 1]);
+    const ends = fresh.filter((n) => n.segments.length === 1);
+    expect(ends).toHaveLength(2);
+    expect(game.rail.previewRoute(ends[0].segments, ends[1].segments)).not.toBeNull();
   });
 });

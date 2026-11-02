@@ -1,8 +1,9 @@
-import { MIN_SEGMENT_LEN } from '../config';
+import { COST, MIN_SEGMENT_LEN } from '../config';
 import { arcCubic, Cubic, CurveLUT, intersectCurves, minRadius, polylineMinDistance, quadToCubic, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, scale, sub, Vec } from '../core/vec';
 import type { Network, RoadNode, Segment } from '../world/network';
 import { halfWidth, RAIL_LEVEL_RUN, RAIL_SWITCH_ANGLE, ROAD_CLASSES, RoadSpec, sameSpec, specCost } from '../world/roadTypes';
+import { stationsNear } from './railEdit';
 
 /**
  * Строитель железной дороги: пути на сети `Network` (автодороги строит `RoadBuilder` на сети полос).
@@ -71,6 +72,26 @@ export interface Plan {
   crossings: Crossing[];
   /** Здания, которые придётся снести (их цена уже в cost). */
   demolish: number[];
+}
+
+/** Правка формы путей: новые кривые участков (концы — в их узлах) и, если узел переносят, — куда. */
+export interface TrackEdit {
+  curves: Map<number, Cubic>;
+  node?: { id: number; pos: Vec };
+}
+
+/** Что получится из правки формы путей и сколько она стоит. */
+export interface ReshapePlan extends TrackEdit {
+  ok: boolean;
+  reason?: string;
+  /** Плюс — заплатим, минус — вернём. */
+  cost: number;
+  /** Пути стали дороже на столько — платим; дешевле — возврат части. */
+  spend: number;
+  refund: number;
+  demolish: number[];
+  /** Участки в новой форме — для предпросмотра (нельзя — все красные). */
+  plans: Plan[];
 }
 
 /** Множитель цены в точке: мосты, эстакады и тоннели дороже земли. */
@@ -379,14 +400,123 @@ export class Builder {
   }
 
   segmentCost(seg: Segment): number {
+    return this.trackCost(seg.lut, seg.spec, (s) => this.net.levelAt(seg, s));
+  }
+
+  /** Стоимость пути по кривой lut с высотой levelAt (мосты, тоннели и вода дороже). */
+  private trackCost(lut: CurveLUT, spec: RoadSpec, levelAt: (s: number) => number): number {
     let cost = 0;
-    const n = Math.max(2, Math.ceil(seg.length / 6));
+    const length = lut.length;
+    const n = Math.max(2, Math.ceil(length / 6));
     for (let i = 1; i <= n; i++) {
-      const s = (seg.length * (i - 0.5)) / n;
-      const p = seg.lut.pointAt(s);
-      cost += (seg.length / n) * specCost(seg.spec) * structureFactor(this.net.levelAt(seg, s), this.ctx.isWater(p, 2));
+      const s = (length * (i - 0.5)) / n;
+      const p = lut.pointAt(s);
+      cost += (length / n) * specCost(spec) * structureFactor(levelAt(s), this.ctx.isWater(p, 2));
     }
     return Math.round(cost);
+  }
+
+  // ---------- Двигать: узлы, перья, изгиб ----------
+
+  /**
+   * Новая форма участков (перенос узла, перо, изгиб): каждый проверяется как путь на своём месте —
+   * радиусы, подъёмы, вода, дома, соседние пути и дороги; новых пересечений с путями нет. В узлах —
+   * примыкание по новой форме: у каждого пути есть продолжение (стык, стрелка). Цена — разница стоимости
+   * путей до и после и снос домов.
+   */
+  reshape(edit: TrackEdit): ReshapePlan {
+    const net = this.net;
+    const ctx = this.ctx;
+    const ids = [...edit.curves.keys()].filter((id) => net.segments.has(id));
+    const fail = (reason: string): ReshapePlan => ({ ...edit, ok: false, reason, cost: 0, spend: 0, refund: 0, demolish: [], plans: [] });
+    if (!ids.length || (edit.node && !net.nodes.has(edit.node.id))) return fail('Так не построить');
+    // Своя станция у горловины путям не мешает: съезды к ней и так заходят в её контур.
+    const own = stationsNear(net, ids);
+    const check = new Builder({
+      net,
+      budget: Infinity,
+      isWater: (p, m) => ctx.isWater(p, m),
+      inBounds: (p, m) => ctx.inBounds(p, m),
+      obstaclesAt: (p, r) => ctx.obstaclesAt(p, r).filter((o) => !own.has(o.id)),
+      demolishCost: (id) => ctx.demolishCost(id),
+      demolish: () => {},
+      spend: () => {},
+      refund: () => {},
+      networkChanged: () => {},
+      roadConflict: ctx.roadConflict && ((lut, levelAt, hw) => ctx.roadConflict!(lut, levelAt, hw)),
+    });
+    const plans: Plan[] = [];
+    const luts = new Map<number, CurveLUT>();
+    const demolish = new Set<number>();
+    let reason: string | undefined;
+    let was = 0;
+    let after = 0;
+    let razeCost = 0;
+    for (const id of ids) {
+      const seg = net.segment(id);
+      const curve = edit.curves.get(id)!;
+      const levelA = net.node(seg.a).level;
+      const levelB = net.node(seg.b).level;
+      // Концы — «свободные»: примыкания в узлах проверяются ниже по новой форме всех путей узла.
+      const p = check.plan({
+        start: { kind: 'free', pos: curve.p0, level: levelA },
+        end: { kind: 'free', pos: curve.p3, level: levelB },
+        spec: seg.spec,
+        mode: 'straight',
+        curve,
+        exclude: { segs: ids, nodes: [seg.a, seg.b] },
+      });
+      const lut = p.lut ?? new CurveLUT(curve);
+      luts.set(id, lut);
+      const bad = p.reason ?? (p.crossings.length ? 'Пересекает другой путь' : undefined);
+      plans.push(bad ? { ...p, ok: false, reason: bad } : p);
+      reason ??= bad;
+      was += this.segmentCost(seg);
+      after += this.trackCost(lut, seg.spec, (s) => levelA + (levelB - levelA) * Math.max(0, Math.min(1, s / lut.length)));
+      for (const d of p.demolish) {
+        if (demolish.has(d)) continue;
+        demolish.add(d);
+        razeCost += ctx.demolishCost(d);
+      }
+    }
+    reason ??= this.jointProblem(new Set(ids.flatMap((id) => [net.segment(id).a, net.segment(id).b])), luts);
+    const diff = after - was;
+    const spend = Math.max(0, diff) + razeCost;
+    const refund = Math.max(0, -diff);
+    const cost = Math.round(spend - refund * COST.refundRatio);
+    if (!reason && cost > ctx.budget) reason = 'Не хватает денег';
+    const ok = !reason;
+    return { ...edit, ok, reason, cost, spend, refund, demolish: [...demolish], plans: ok ? plans : plans.map((p) => ({ ...p, ok: false })) };
+  }
+
+  /** Примыкание в узлах по новой форме путей (luts): у каждого пути в узле — продолжение, поезд не повернёт круто. */
+  private jointProblem(nodes: Set<number>, luts: Map<number, CurveLUT>): string | undefined {
+    const net = this.net;
+    const lim = -Math.cos(RAIL_SWITCH_ANGLE);
+    for (const id of nodes) {
+      const dirs: Vec[] = [];
+      for (const sid of new Set(net.node(id).segments)) {
+        const s = net.segment(sid);
+        const lut = luts.get(sid) ?? s.lut;
+        if (s.a === id) dirs.push(lut.tangentAt(0));
+        if (s.b === id) dirs.push(scale(lut.tangentAt(lut.length), -1));
+      }
+      if (dirs.length < 2) continue;
+      if (dirs.some((d, i) => !dirs.some((e, j) => j !== i && dot(d, e) < lim))) return 'Путь примыкает только плавно, как стрелка';
+    }
+    return undefined;
+  }
+
+  /** Строит по плану правки: дома под снос, узел — на новое место, участки — в новой форме, деньги. */
+  applyReshape(plan: ReshapePlan): boolean {
+    if (!plan.ok || [...plan.curves.keys()].some((id) => !this.net.segments.has(id))) return false;
+    if (plan.demolish.length) this.ctx.demolish(plan.demolish);
+    if (plan.node) this.net.moveNode(plan.node.id, plan.node.pos);
+    for (const [id, curve] of plan.curves) this.net.setCurve(id, curve);
+    if (plan.spend) this.ctx.spend(plan.spend);
+    if (plan.refund) this.ctx.refund(plan.refund);
+    this.ctx.networkChanged();
+    return true;
   }
 
   pickSegment(p: Vec, radius = 4): Segment | null {

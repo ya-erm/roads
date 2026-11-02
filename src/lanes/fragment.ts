@@ -1,8 +1,14 @@
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, angleDiff, angleOf, dist, rightNormal, scale, sub, Vec } from '../core/vec';
-import { ROAD_CLASS_IDS, RoadClass } from '../world/roadTypes';
+import { ROAD_CLASS_IDS, RoadClass, RoadSpec } from '../world/roadTypes';
 import { Anchor, bulldozeInside, corridorUnder, insideRuns, joinDeadEnd, splitCorridor } from './edit';
 import { Corridor, LaneNet, LaneNode, LAT_EPS, laneKey, parseLaneKey } from './model';
+
+/** Ж/д пути куска: узлы (стрелки, концы, высота, сигналы — на выезд к каким участкам) и участки с формой. */
+export interface RailFragment {
+  nodes: { id: number; pos: Vec; level: number; signals?: number[] }[];
+  segs: { id: number; a: number; b: number; curve: Cubic; spec: RoadSpec }[];
+}
 
 /**
  * Кусок сети дорог — для копирования и своих шаблонов: узлы и полотна с настройками перекрёстков,
@@ -13,6 +19,8 @@ export interface Fragment {
   corridors: Omit<Corridor, 'lut' | 'rev'>[];
   /** Половины сторон рамки (всё содержимое — внутри). */
   half: Vec;
+  /** Ж/д пути в рамке (у шаблонов, сохранённых раньше, их нет). */
+  rail?: RailFragment;
 }
 
 /** Куски дорог короче этого у края рамки не берём. */
@@ -183,10 +191,11 @@ export function frameOf(frag: Fragment, at: Vec, angle: number): Vec[] {
   return [place({ x: -x, y: -y }), place({ x, y: -y }), place({ x, y }), place({ x: -x, y })];
 }
 
-/** Оси полотен куска на карте — для предпросмотра и значков. */
+/** Оси полотен и путей куска на карте — для предпросмотра и значков. */
 export function fragmentCurves(frag: Fragment, at: Vec, angle: number): Cubic[] {
   const { place } = placer(at, angle);
-  return frag.corridors.map((c) => ({ p0: place(c.curve.p0), p1: place(c.curve.p1), p2: place(c.curve.p2), p3: place(c.curve.p3) }));
+  const curves = [...frag.corridors.map((c) => c.curve), ...(frag.rail?.segs.map((s) => s.curve) ?? [])];
+  return curves.map((c) => ({ p0: place(c.p0), p1: place(c.p1), p2: place(c.p2), p3: place(c.p3) }));
 }
 
 /**

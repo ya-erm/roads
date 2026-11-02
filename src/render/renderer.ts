@@ -2,11 +2,12 @@ import { Cubic, CurveLUT } from '../core/bezier';
 import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import type { Game, LaneEnd } from '../game/game';
+import { bayFront } from '../game/transport';
 import { LaneRenderer } from '../lanes/draw';
 import { insideRuns } from '../lanes/edit';
 import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
 import type { LaneNet } from '../lanes/model';
-import type { Vehicle } from '../sim/vehicle';
+import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { cargoImage } from '../ui/cargoIcons';
 import { CARGO, CargoType, FREIGHT } from '../world/cargo';
 import { Industry, Station, TOWN_NEED, TownBuilding } from '../world/entities';
@@ -214,7 +215,7 @@ export class Renderer {
     const vehicles = [...game.traffic.vehicles.values()].filter(
       (v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1,
     );
-    const band = (v: Vehicle) => (v.level < -0.5 ? -1 : v.level < 0.5 ? 0 : v.level < 1.5 ? 1 : 2);
+    const band = (v: Vehicle) => v.layer ?? (v.level < -0.5 ? -1 : v.level < 0.5 ? 0 : v.level < 1.5 ? 1 : 2);
 
     const trains = this.trainCars(game, view);
     const trainBand = (lvl: number) => (lvl < -0.5 ? -1 : lvl < 0.5 ? 0 : lvl < 1.5 ? 1 : 2);
@@ -240,6 +241,7 @@ export class Renderer {
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
+    this.drawStationAprons(game, roadNet, view);
     if (o.roads) this.drawRoadPreview(o.roads);
     this.drawStopLines(game, view);
     drawTurnArrows(ctx, game, view, this.camera.zoom);
@@ -248,6 +250,8 @@ export class Renderer {
     this.drawSignals(game, view);
     if (o.heatmap) this.drawHeatmap(game);
     this.drawVehicles(vehicles.filter((v) => band(v) === 0));
+    // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
+    this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
     this.drawLights(game);
     this.drawStructures(game, view, o);
     this.drawTrains(trains.filter((t) => trainBand(t.level) === 0));
@@ -751,7 +755,7 @@ export class Renderer {
   // ---------- Машины ----------
 
   /** halo — белая обводка, чтобы машины линии читались поверх её маршрута. */
-  private drawVehicles(list: Vehicle[], halo = false): void {
+  private drawVehicles(list: VehicleLook[], halo = false): void {
     const ctx = this.ctx;
     const detailed = this.camera.zoom > 0.5;
     for (const v of list) {
@@ -803,7 +807,7 @@ export class Renderer {
     const inView = (fp: Footprint) =>
       fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
     for (const town of game.towns) {
-      if (dist(town.center, { x: (view.x0 + view.x1) / 2, y: (view.y0 + view.y1) / 2 }) > town.radius + (view.x1 - view.x0) * 1.2) continue;
+      if (dist(town.center, { x: (view.x0 + view.x1) / 2, y: (view.y0 + view.y1) / 2 }) > (town.extent ?? town.radius) + (view.x1 - view.x0) * 1.2) continue;
       for (const b of town.buildings) if (inView(b.fp)) this.drawBuilding(b);
     }
     for (const ind of game.industries) if (inView(ind.fp)) this.drawIndustry(ind);
@@ -813,7 +817,7 @@ export class Renderer {
       const selected = (sel?.type === 'station' && sel.id === st.id) || o.lineStops.includes(st.id);
       if (st.kind === 'rail') this.drawRailStation(game, st, selected);
       else if (st.kind === 'stop') this.drawStop(game, st, selected);
-      else this.drawStation(st, selected);
+      else this.drawStation(game, st, selected);
     }
     ctx.globalAlpha = 1;
   }
@@ -1048,21 +1052,145 @@ export class Renderer {
     ctx.fill();
   }
 
-  private drawStation(st: Station, selected: boolean): void {
+  /**
+   * Автостанция — боксы-посты под одной крышей: задняя стена, у каждого бокса открытые ворота к выезду
+   * (площадку перед ними рисует drawStationAprons). Занятый бокс — цвета линии машины, что в нём стоит.
+   */
+  private drawStation(game: Game, st: Station, selected: boolean): void {
     const ctx = this.ctx;
     const fp = st.fp;
+    const gate = game.roads.net.nodes.get(st.nodeId);
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.22)');
     this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 3 : 1.4);
     ctx.save();
     ctx.translate(fp.center.x, fp.center.y);
     ctx.rotate(fp.angle);
+    // Локальная +y — к воротам (у грузового двора предприятия площадка повёрнута наоборот).
+    ctx.scale(1, gate ? bayFront(fp, gate.pos) : 1);
+    const hh = fp.h / 2;
     ctx.fillStyle = '#5c6470';
-    ctx.fillRect(-fp.w / 2 + 3, -fp.h / 2 + 3, fp.w - 6, 4);
-    for (let i = 0; i < st.bays; i++) {
-      ctx.fillStyle = i < st.occupied.length ? '#e07b39' : '#d5d2c8';
-      ctx.fillRect(-fp.w / 2 + 5 + i * ((fp.w - 10) / st.bays), -1, (fp.w - 10) / st.bays - 2, fp.h / 2 - 2);
-    }
+    ctx.fillRect(-fp.w / 2 + 3, -hh + 3, fp.w - 6, 4);
+    const bw = (fp.w - 10) / st.bays;
+    const doors = this.camera.zoom > 0.35;
+    game.stationBays(st).forEach((color, i) => {
+      const x = -fp.w / 2 + 5 + i * bw;
+      ctx.fillStyle = color ?? '#d5d2c8';
+      ctx.fillRect(x, -1, bw - 2, hh + 1);
+      // Открытые ворота — тёмный проём во всю ширину бокса: контур площадки здесь прерывается.
+      if (doors) {
+        ctx.fillStyle = '#3d434b';
+        ctx.fillRect(x, hh - 2, bw - 2, 2.8);
+      }
+    });
     ctx.restore();
+  }
+
+  /**
+   * Площадка перед воротами автостанций — раструбом: кромки выезда, пока он ещё обычной ширины,
+   * плавно (кривыми) расходятся к углам здания; без ступенек и без бордюра поперёк. На площадке —
+   * «зубцы» между местами и стрелки к воротам. Рисуется под машинами: по ней они и заезжают в боксы.
+   */
+  private drawStationAprons(game: Game, net: LaneNet, view: ReturnType<Renderer['view']>): void {
+    const ctx = this.ctx;
+    for (const st of game.stations.values()) {
+      if (st.kind !== 'road') continue;
+      const fp = st.fp;
+      if (fp.center.x < view.x0 - 100 || fp.center.x > view.x1 + 100 || fp.center.y < view.y0 - 100 || fp.center.y > view.y1 + 100) continue;
+      const node = net.nodes.get(st.nodeId);
+      const end = node && net.ends(node)[0];
+      if (!node || !end) continue;
+      const front = bayFront(fp, node.pos);
+      const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+      const v = { x: -u.y * front, y: u.x * front };
+      // Координаты площадки: x вдоль боксов, y к выезду (здание — до hh).
+      const local = (p: Vec) => ({ x: dot(sub(p, fp.center), u), y: dot(sub(p, fp.center), v) });
+      const hh = fp.h / 2;
+      // Раструб начинается на выезде, где тот ещё обычной ширины: до 18 от узла ворот,
+      // но не ближе 14 к другому концу выезда — там перекрёсток или дорога, к которой он примкнул.
+      const c = end.corridor;
+      const along = Math.max(2, Math.min(18, c.length - 14));
+      const s = end.end === 'a' ? along : c.length - along;
+      const ed = edgesAt(c, s) ?? [-LANE_W / 2, LANE_W / 2];
+      const [L, R] = [ed[0] - ROAD_MARGIN, ed[1] + ROAD_MARGIN].map((o) => local(pointOff(c, s, o))).sort((a, b) => a.x - b.x);
+      // Куда идёт выезд к воротам — с этого направления кромка начинает расходиться без излома.
+      const t = c.lut.tangentAt(s);
+      const toward = end.end === 'a' ? scale(t, -1) : t;
+      const td = { x: dot(toward, u), y: dot(toward, v) };
+      // Углы площадки у здания: на всю его ширину (и не уже самого выезда), чуть заходя под здание.
+      const A = { x: Math.min(-fp.w / 2 + 1, L.x - 2), y: hh };
+      const B = { x: Math.max(fp.w / 2 - 1, R.x + 2), y: hh };
+      const y0 = hh - 1.5;
+      // Кромка: плавно отходит от выезда, быстро уходит наружу и у здания скругляется —
+      // к углу подходит вдоль улицы, перпендикулярно фасаду, без острого клина.
+      const edge = (p: Vec, corner: Vec) => {
+        const dy = Math.max(2, p.y - corner.y);
+        return { c1: add(p, scale(td, dy * 0.15)), c2: { x: corner.x, y: corner.y + dy * 0.6 } };
+      };
+      const el = edge(L, A);
+      const er = edge(R, B);
+      // Асфальт заходит чуть назад по выезду: закрывает и скруглённый конец бордюра раструба.
+      const back = (p: Vec) => sub(p, scale(td, 1.5));
+      ctx.save();
+      ctx.translate(fp.center.x, fp.center.y);
+      ctx.rotate(fp.angle);
+      ctx.scale(1, front);
+      // Бордюр — под асфальтом, как у дорог: от кромки выезда по кривой к углу здания.
+      ctx.strokeStyle = C.roadEdge;
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      for (const [p, e, corner] of [
+        [L, el, A],
+        [R, er, B],
+      ] as const) {
+        ctx.moveTo(p.x, p.y);
+        ctx.bezierCurveTo(e.c1.x, e.c1.y, e.c2.x, e.c2.y, corner.x, corner.y);
+        ctx.lineTo(corner.x, y0);
+      }
+      ctx.stroke();
+      // Асфальт: от угла под зданием по левой кромке к выезду, поперёк него (там уже асфальт) и по правой — обратно.
+      const bl = back(L);
+      const br = back(R);
+      ctx.fillStyle = C.road;
+      ctx.beginPath();
+      ctx.moveTo(A.x, y0);
+      ctx.lineTo(A.x, A.y);
+      ctx.bezierCurveTo(el.c2.x, el.c2.y, el.c1.x, el.c1.y, L.x, L.y);
+      ctx.lineTo(bl.x, bl.y);
+      ctx.lineTo(br.x, br.y);
+      ctx.lineTo(R.x, R.y);
+      ctx.bezierCurveTo(er.c1.x, er.c1.y, er.c2.x, er.c2.y, B.x, B.y);
+      ctx.lineTo(B.x, y0);
+      ctx.closePath();
+      ctx.fill();
+      if (this.camera.zoom >= 0.35) {
+        const bw = (fp.w - 10) / st.bays;
+        // «Зубцы» между местами — продолжают стенки между боксами.
+        ctx.strokeStyle = C.dash;
+        ctx.lineWidth = 0.8;
+        ctx.lineCap = 'butt';
+        ctx.beginPath();
+        for (let i = 0; i <= st.bays; i++) {
+          const x = -fp.w / 2 + 4 + i * bw;
+          ctx.moveTo(x, hh);
+          ctx.lineTo(x, hh + 3.5);
+        }
+        ctx.stroke();
+        // Стрелка к воротам каждого бокса.
+        ctx.fillStyle = C.dash;
+        for (let i = 0; i < st.bays; i++) {
+          const cx = -fp.w / 2 + 5 + i * bw + (bw - 2) / 2;
+          ctx.beginPath();
+          ctx.moveTo(cx, hh + 1.2);
+          ctx.lineTo(cx + 1.8, hh + 3.6);
+          ctx.lineTo(cx - 1.8, hh + 3.6);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
   }
 
   /**
@@ -1519,7 +1647,7 @@ export class Renderer {
     if (sel?.type === 'junction') this.drawJunctionPaths(game, sel.id, o.laneEdit?.node === sel.id ? o.laneEdit : null);
     let ring: { x: number; y: number; r: number } | null = null;
     const fleet = sel?.type === 'fleet' ? game.fleet.get(sel.id) : undefined;
-    const sim = sel?.type === 'vehicle' ? game.traffic.vehicles.get(sel.simId) : fleet && game.fleetSim(fleet);
+    const sim = sel?.type === 'vehicle' ? game.traffic.vehicles.get(sel.simId) : fleet && game.fleetLook(fleet);
     const train = fleet && game.fleetTrain(fleet);
     if (sim) ring = { x: sim.pos.x - (sim.dir.x * sim.length) / 2, y: sim.pos.y - (sim.dir.y * sim.length) / 2, r: sim.length * 0.9 + 3 };
     else if (train) {
@@ -1784,14 +1912,15 @@ export class Renderer {
     // Машины и поезда линии — поверх маршрута, иначе их не видно под цветной полосой.
     // Под каждой — кружок цвета линии постоянного экранного размера: видно и издалека.
     const z = this.camera.zoom;
-    const own: Vehicle[] = [];
+    const own: VehicleLook[] = [];
     const trains = new Set<number>();
     const marks: LineMark[] = [];
     for (const vid of line.vehicles) {
       const fv = game.fleet.get(vid);
       if (!fv) continue;
       const cargo = fv.cargo && fv.amount > 0 ? fv.cargo : fv.passengers.some((p) => p.count > 0) ? 'passengers' : null;
-      const sim = game.fleetSim(fv);
+      // На дороге или на заезде к посту.
+      const sim = game.fleetLook(fv);
       if (sim) {
         own.push(sim);
         const pos = { x: sim.pos.x - (sim.dir.x * sim.length) / 2, y: sim.pos.y - (sim.dir.y * sim.length) / 2 };

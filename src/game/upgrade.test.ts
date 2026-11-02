@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RoadTools } from '../input/roadtools';
+import { oneWay } from '../lanes/model';
 import type { RoadSpec } from '../world/roadTypes';
 import { footprintCorners } from '../world/spatial';
 import { corridorHalf } from '../world/worldgen';
@@ -37,5 +38,22 @@ describe('Перестройка дороги', () => {
     const kept = near.filter((b) => town.buildings.includes(b)).length;
     expect(kept).toBeGreaterThan(near.length / 2);
     expect(town.buildings.length).toBeGreaterThan(houses - near.length);
+  });
+
+  it('односторонняя «против оси» при расширении едет в ту же сторону, повторный клик — разворачивает', () => {
+    const game = new Game(7);
+    game.money = 5_000_000;
+    const net = game.roads.net;
+    const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
+    const seg = townStreets(game, town.id).find((s) => s.cls === 'street' && s.length > 120)!;
+    net.setLanes(seg, oneWay(1, -1));
+    game.networkChanged();
+    const tools = new RoadTools(() => game);
+    const mid = seg.lut.pointAt(seg.length / 2);
+    const flows = () => game.roads.net.corridor(seg.id).lanes.map((l) => l.flow);
+    expect(tools.upgrade(mid, { cls: 'street', lanesF: 2, lanesB: 0 }, 4)).toBeNull();
+    expect(flows()).toEqual([-1, -1]);
+    expect(tools.upgrade(mid, { cls: 'street', lanesF: 2, lanesB: 0 }, 4)).toBeNull();
+    expect(flows()).toEqual([1, 1]);
   });
 });

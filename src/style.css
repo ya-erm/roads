@@ -680,6 +680,56 @@ button {
   opacity: 0.8;
 }
 
+/* Скачать шаблон файлом — в другом углу, тоже при наведении. */
+.card.user-tpl .tpl-dl {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+}
+
+.card.user-tpl:hover .tpl-dl {
+  opacity: 0.8;
+}
+
+/* Шаблон с ж/д путями: значок пути поверх схемы. */
+.card.user-tpl .tpl-rail {
+  position: absolute;
+  top: 38px;
+  right: 6px;
+  line-height: 0;
+  pointer-events: none;
+}
+
+/* Свои шаблоны файлом: все — одним файлом и открыть из файла (значки у заголовка). */
+.tpl-files {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 4px;
+  text-transform: none;
+}
+
+.tpl-files .icon {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--muted);
+  background: #eef2f6;
+}
+
+.tpl-files .icon:hover {
+  color: var(--ink);
+  background: #e2e8ee;
+}
+
 .custom {
   display: flex;
   gap: 12px;
@@ -750,6 +800,76 @@ button {
 
 .veh small .neg {
   color: #d64541;
+}
+
+/* Машина ждёт интервала на первой станции. */
+.hold {
+  color: #b7791f;
+  font-weight: 600;
+}
+
+/* Авто-парк в карточке маршрута: выключатель, «от … до …» и ряд машин. */
+.auto-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.auto-range {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0 2px;
+  padding: 0 4px;
+}
+
+.auto-range .lbl3 {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 4px;
+}
+
+.auto-flag {
+  font-size: 15px;
+  margin-left: 4px;
+  cursor: help;
+}
+
+/* Ряд машин в одну строку: не помещаются — шаг между значками уменьшается, и они ложатся внахлёст. */
+.auto-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  margin: 2px 0 6px;
+  padding: 0 22px 0 4px;
+}
+
+.auto-bar .slot {
+  flex: 0 1 20px;
+  min-width: 4px;
+  display: flex;
+}
+
+.auto-bar .slot svg {
+  flex: none;
+}
+
+/* Черта после минимума: столько машин авто-парк держит всегда. */
+.auto-bar .min-mark {
+  flex: none;
+  width: 2px;
+  height: 16px;
+  margin: 0 4px 0 2px;
+  border-radius: 1px;
+  background: #8a96a3;
+}
+
+.auto-bar small {
+  flex: none;
+  margin-left: 18px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* Отзывы жителей в карточке города. */
@@ -1333,6 +1453,12 @@ button {
   gap: 3px 10px;
   font-size: 13px;
   margin: 6px 0;
+}
+
+/* Значения — сразу за подписями (карточки машин), а не у правого края. */
+.kv.near {
+  grid-template-columns: max-content 1fr;
+  gap: 3px 14px;
 }
 
 .kv span {

@@ -1,8 +1,11 @@
+import { clamp } from '../core/math';
+import { add, cubicBezier, dist, dot, norm, scale, sub, type Vec } from '../core/vec';
 import type { TrainSpec } from '../sim/rail';
 import { KMH_PER_UNIT } from '../world/roadTypes';
 import type { VehicleSpec } from '../sim/vehicle';
 import type { CargoType } from '../world/cargo';
 import type { PassengerGroup } from '../world/entities';
+import type { Footprint } from '../world/spatial';
 
 export type ModelId =
   | 'truck'
@@ -216,7 +219,43 @@ export interface Line {
   history?: { label: string; revenue: number; cost: number }[];
   /** Папка в списке линий; нет — линия в корне списка. */
   folder?: number;
+  /** Авто-парк: игра сама докупает и продаёт машины в пределах min…max. Нет (старые сохранения) — выключен. */
+  auto?: LineAuto;
+  /** Время круга (от отправления с первой станции до следующего), секунд, — среднее по рейсам; нет — ещё не измерено. */
+  lap?: number;
+  /** Когда машина линии последний раз отправилась с первой станции (игровое время). */
+  departedAt?: number;
+  /**
+   * Загрузка с начала окна statsFrom (игровое время; окно — не короче месяца и круга линии), по станциям (id):
+   * сумма загрузки при отправлении, сумма оставшегося ждать (в вместимостях машины), число рейсов.
+   */
+  stopLoads?: Record<number, [number, number, number]>;
+  statsFrom?: number;
+  /**
+   * Итог прошлого окна для авто-парка: загрузка при отправлении с самой загруженной станции, сколько груза
+   * остаётся ждать (в машинах) и прибыль за окно; null — рейсов не было.
+   */
+  demandLast?: { load: number; left: number; profit: number } | null;
 }
+
+/** Авто-парк линии. */
+export interface LineAuto {
+  on: boolean;
+  min: number;
+  max: number;
+  /** Окон подряд машины ездят полупустыми. */
+  low?: number;
+  /** Решено продать лишнюю (игровое время решения): продаётся первая опустевшая. */
+  sell?: number;
+  /** Последняя покупка не удалась — не хватило денег. */
+  noMoney?: boolean;
+}
+
+/**
+ * Пороги авто-парка: докупаем, если с самой загруженной станции машины уходят почти полными, а груза
+ * остаётся ждать хотя бы на полмашины; продаём, если несколько окон подряд уходят полупустыми.
+ */
+export const AUTO_FLEET = { maxVehicles: 50, full: 0.8, leftBehind: 0.5, low: 0.4, lowWindows: 2 };
 
 /** Папка для группировки линий в списке. */
 export interface LineFolder {
@@ -258,8 +297,108 @@ export interface FleetVehicle {
   dropped?: CargoType | null;
   /** Занимает ли пост на станции. */
   inBay: boolean;
+  /** Номер поста на автостанции, который заняла машина. */
+  bay?: number;
+  /** Заезд с выезда на пост автостанции: пока он идёт, погрузка не начинается. */
+  enter?: BayEntry;
   profitMonth: number;
   profitLast: number;
+  /** Новая, ещё не уезжала с первой станции: выжидает интервал целиком. */
+  fresh?: boolean;
+  /** Когда последний раз уехала с первой станции — для времени круга. */
+  lapAt?: number;
+  /** Сколько секунд этого круга простояла ради интервала — во время круга не входят. */
+  lapHeld?: number;
+  /** Ждёт интервала на первой станции: с какого и до какого игрового времени. */
+  holdFrom?: number;
+  holdUntil?: number;
+}
+
+/** Откуда машина заезжает на пост: нос и курс там, где она сошла с дороги, её скорость и сколько секунд уже едет. */
+export interface BayEntry {
+  pos: Vec;
+  dir: Vec;
+  v0: number;
+  t: number;
+}
+
+/** Нос и курс машины. */
+export interface Pose {
+  pos: Vec;
+  dir: Vec;
+}
+
+/** Середина поста bay по ширине площадки, от её центра (как на рисунке станции). */
+function bayX(fp: Footprint, bays: number, bay: number): number {
+  const bw = (fp.w - 10) / bays;
+  return -fp.w / 2 + 5 + bay * bw + (bw - 2) / 2;
+}
+
+/**
+ * С какой стороны площадки ворота постов — там, где узел выезда gate: +1 — локальная +y
+ * (автостанция у дороги), −1 — локальная −y (грузовой двор у предприятия повёрнут наоборот).
+ */
+export function bayFront(fp: Footprint, gate: Vec): 1 | -1 {
+  const d = sub(gate, fp.center);
+  return dot(d, { x: -Math.sin(fp.angle), y: Math.cos(fp.angle) }) >= 0 ? 1 : -1;
+}
+
+/**
+ * Пост погрузки автостанции: куда встаёт нос машины длиной length и куда она смотрит.
+ * Выезд — со стороны front площадки (см. bayFront), машина заезжает вглубь, целиком под навес.
+ */
+export function bayPose(fp: Footprint, bays: number, bay: number, length: number, front: 1 | -1 = 1): Pose {
+  const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+  const n = { x: -u.y * front, y: u.x * front };
+  const y = clamp(fp.h / 2 - length - 0.5, -fp.h / 2 + 1, -1);
+  return { pos: add(fp.center, add(scale(u, bayX(fp, bays, bay)), scale(n, y))), dir: scale(n, -1) };
+}
+
+/** Свободный пост, ближайший к точке p: машина сворачивает к ближнему. Свободных нет — следующий номер за последним. */
+export function nearestBay(fp: Footprint, bays: number, taken: Set<number>, p: Vec): number {
+  const x = dot(sub(p, fp.center), { x: Math.cos(fp.angle), y: Math.sin(fp.angle) });
+  let best = -1;
+  for (let i = 0; i < bays; i++) {
+    if (!taken.has(i) && (best < 0 || Math.abs(bayX(fp, bays, i) - x) < Math.abs(bayX(fp, bays, best) - x))) best = i;
+  }
+  if (best >= 0) return best;
+  let i = bays;
+  while (taken.has(i)) i++;
+  return i;
+}
+
+/**
+ * Где машина длиной length на заезде к посту to: плавная кривая от точки съезда с дороги,
+ * скорость — от той, с какой съехала, до остановки на посту; кузов тянется за носом по кривой.
+ * done — машина уже на посту.
+ */
+export function entryPose(e: BayEntry, to: Pose, length: number): Pose & { done: boolean } {
+  const k = Math.max(dist(e.pos, to.pos) * 0.4, 2);
+  const c1 = add(e.pos, scale(e.dir, k));
+  const c2 = sub(to.pos, scale(to.dir, k));
+  const pts: Vec[] = [];
+  const cum = [0];
+  for (let i = 0; i <= 16; i++) {
+    pts.push(cubicBezier(e.pos, c1, c2, to.pos, i / 16));
+    if (i) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
+  }
+  const total = Math.max(0.1, cum[16]);
+  /** Точка кривой на расстоянии s от съезда; до него — позади, на прямой съезда. */
+  const at = (s: number): Vec => {
+    if (s <= 0) return add(e.pos, scale(e.dir, s));
+    let i = 1;
+    while (i < 16 && cum[i] < s) i++;
+    const f = clamp((s - cum[i - 1]) / Math.max(1e-6, cum[i] - cum[i - 1]), 0, 1);
+    return add(pts[i - 1], scale(sub(pts[i], pts[i - 1]), f));
+  };
+  const T = clamp(total / 7, 1.2, 4);
+  const u = clamp(e.t / T, 0, 1);
+  // Кубический сплайн пути: в начале — скорость съезда, на посту — ноль.
+  const m0 = clamp((e.v0 * T) / total, 0, 2);
+  const s = total * ((u * u * u - 2 * u * u + u) * m0 + (3 * u * u - 2 * u * u * u));
+  const pos = at(s);
+  const dir = norm(sub(pos, at(s - length * 0.7)));
+  return { pos, dir: dir.x || dir.y ? dir : e.dir, done: e.t >= T };
 }
 
 /** Вагонов в составе: своё число или по умолчанию для модели (у машин — 1). */

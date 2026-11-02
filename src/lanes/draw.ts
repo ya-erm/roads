@@ -2,7 +2,9 @@ import { add, cubicBezier, dist, norm, rightNormal, scale, sub, Vec } from '../c
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 import { arrowAt, arrowShape } from './arrowShape';
 import { awayAt, awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, pointOff, sFrom, stations } from './geometry';
-import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS } from './model';
+import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS, layerOf } from './model';
+
+export { layerOf };
 
 const C = {
   road: '#646b76',
@@ -14,13 +16,6 @@ const C = {
   shadow: 'rgba(20, 30, 20, 0.28)',
   rail: '#d6d1c4',
 };
-
-/** Слой отрисовки по высоте: −1 тоннель, 0 земля, 1 мост, 2 эстакада. */
-export function layerOf(min: number, max: number): number {
-  if (min < -0.25) return -1;
-  if (max <= 0.25) return 0;
-  return Math.min(2, Math.max(1, Math.round(max)));
-}
 
 type LineStyle = 'dash' | 'solid' | 'yellow' | 'barrier';
 interface Mark {
@@ -73,8 +68,11 @@ interface PlateGeo {
   curbs: Vec[][];
 }
 
-/** Перед развилкой полос в разные полотна пунктир между ними становится сплошным. */
-const SPLIT_SOLID = 60;
+/**
+ * Перед развилкой полос в разные полотна (и после вливания) пунктир между ними становится сплошным —
+ * только у самого стыка, чтобы до него оставалось где перестроиться.
+ */
+const SPLIT_SOLID = 20;
 /** И на последних метрах перед перекрёстком (до обреза у стоп-линии) — между попутными полосами подъезда. */
 const APPROACH_SOLID = 20;
 /** Нос островка — там, где нарисованные кромки разошлись на столько (или не дальше NOSE_MAX от стыка). */

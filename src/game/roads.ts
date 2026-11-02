@@ -1,9 +1,9 @@
 import type { Vec } from '../core/vec';
 import { dist } from '../core/vec';
-import { GLink, LaneGraph } from '../lanes/graph';
+import { GLane, GLink, GMove, LaneGraph } from '../lanes/graph';
 import { LaneNet, LaneNode } from '../lanes/model';
 import { findLaneRoute, linkCost, transitionCost } from '../lanes/routing';
-import { LaneTraffic, LaneTrafficEvents } from '../lanes/traffic';
+import { changePenalty, LaneTraffic, LaneTrafficEvents } from '../lanes/traffic';
 
 /** Размер кольца: радиус оси (если примыкающие дороги шире, кольцо будет больше). */
 export type RingSize = 'small' | 'medium' | 'large';
@@ -111,14 +111,59 @@ export class Roads {
   }
 
   /** Линия маршрута на карте: по первой полосе каждой связи. */
+  /**
+   * Линия маршрута для карты — по полосам, которыми поедут машины: с наименьшей трудностью перестроений
+   * (как их выбирают сами машины), перестроение — плавно посередине связи, повороты — по кривым манёвров.
+   */
   routePolyline(route: number[]): Vec[] {
+    const g = this.graph;
+    const links = route.map((id) => g.links.get(id)).filter((l): l is GLink => !!l);
+    if (!links.length) return [];
+    const exits = (k: number, o: GLane) => (k + 1 < links.length ? (g.movesFrom.get(o.id) ?? []).filter((m) => m.outLink === links[k + 1].id) : []);
+    // С конца: out — трудность дальше, если покинуть связь k по полосе; enter — если въехать на неё по полосе.
+    const out: Map<number, number>[] = new Array(links.length);
+    const enter: Map<number, number>[] = new Array(links.length);
+    for (let k = links.length - 1; k >= 0; k--) {
+      const link = links[k];
+      out[k] = new Map(link.lanes.map((o) => [o.id, k === links.length - 1 ? 0 : Math.min(Infinity, ...exits(k, o).map((m) => enter[k + 1].get(m.outLane) ?? Infinity))]));
+      enter[k] = new Map(link.lanes.map((l) => [l.id, Math.min(...link.lanes.map((o) => changePenalty(Math.abs(o.index - l.index), link.length) + out[k].get(o.id)!))]));
+    }
     const pts: Vec[] = [];
-    for (const id of route) {
-      const link = this.graph.links.get(id);
-      if (!link) continue;
-      const lane = link.lanes[Math.floor(link.lanes.length / 2)];
-      const steps = Math.max(1, Math.ceil(link.length / 12));
-      for (let k = 0; k <= steps; k++) pts.push(this.graph.lanePose(lane, (link.length * k) / steps).pos);
+    let lane = links[0].lanes.reduce((a, b) => ((enter[0].get(b.id) ?? Infinity) < (enter[0].get(a.id) ?? Infinity) ? b : a));
+    for (let k = 0; k < links.length; k++) {
+      const link = links[k];
+      // Куда перестроиться на этой связи (сама полоса — при равенстве).
+      let to = lane;
+      let cost = out[k].get(lane.id) ?? Infinity;
+      for (const o of link.lanes) {
+        const c = changePenalty(Math.abs(o.index - lane.index), link.length) + (out[k].get(o.id) ?? Infinity);
+        if (c < cost - 1e-6) {
+          to = o;
+          cost = c;
+        }
+      }
+      const steps = Math.max(2, Math.ceil(link.length / 8));
+      for (let i = 0; i <= steps; i++) {
+        const s = (link.length * i) / steps;
+        const a = g.lanePose(lane, s).pos;
+        if (to === lane) {
+          pts.push(a);
+          continue;
+        }
+        const b = g.lanePose(to, s).pos;
+        const t = Math.max(0, Math.min(1, (i / steps - 0.3) / 0.4));
+        const w = t * t * (3 - 2 * t);
+        pts.push({ x: a.x + (b.x - a.x) * w, y: a.y + (b.y - a.y) * w });
+      }
+      if (k + 1 === links.length) break;
+      const move = exits(k, to).reduce<GMove | null>((m, x) => (!m || (enter[k + 1].get(x.outLane) ?? Infinity) < (enter[k + 1].get(m.outLane) ?? Infinity) ? x : m), null);
+      const next = move && g.lanes.get(move.outLane);
+      if (!move || !next) {
+        lane = links[k + 1].lanes[Math.floor(links[k + 1].lanes.length / 2)];
+        continue;
+      }
+      pts.push(...move.points);
+      lane = next;
     }
     return pts;
   }

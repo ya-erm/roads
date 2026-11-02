@@ -216,9 +216,10 @@ describe('Игра', { timeout: 30_000 }, () => {
     expect(loaded.stations.size).toBe(game.stations.size);
     expect(loaded.lines.get(line.id)!.name).toBe('Кольцевая');
     expect(loaded.fleet.size).toBe(2);
-    // Машины в пути не сохраняются: автобусы, что были в дороге, снова отправляются со станции.
-    expect(loaded.traffic.vehicles.size).toBe(0);
-    for (const v of loaded.fleet.values()) expect(v.state === 'departing' || v.state === 'loading').toBe(true);
+    // Автобусы в пути едут дальше (машины жителей не сохраняются), стоявшие на станции — там же.
+    const driving = [...game.fleet.values()].filter((v) => v.state === 'driving').length;
+    expect(loaded.traffic.vehicles.size).toBe(driving);
+    for (const v of loaded.fleet.values()) expect(v.state).toBe(game.fleet.get(v.id)!.state);
     // Загруженная партия продолжает работать и зарабатывать.
     const before = loaded.lines.get(line.id)!.revenueTotal;
     runSeconds(loaded, MONTH_LENGTH * 4);

@@ -5,9 +5,10 @@ import { edgesAt } from '../lanes/geometry';
 import { Corridor, LaneNet, LaneNode, LaneSlot, twoWay } from '../lanes/model';
 import { CargoType, INDUSTRY_LIST, TOWN_CARGO } from './cargo';
 import type { Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
-import { isTrunk, RoadClass, ROAD_MARGIN } from './roadTypes';
+import type { Network } from './network';
+import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
 import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, townSizes, WorldSettings } from './settings';
-import { Footprint, footprintRadius, FootprintIndex } from './spatial';
+import { Footprint, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import type { Terrain } from './terrain';
 
 const TOWN_NAMES = [
@@ -66,6 +67,8 @@ export interface WorldContext {
   index: FootprintIndex<Structure>;
   rng: Rng;
   nextId: () => number;
+  /** Ж/д пути: на них (кроме тоннелей) город не строит. */
+  rail?: Network;
 }
 
 /** Полуширина асфальта полотна в точке s (по большей стороне). */
@@ -112,6 +115,8 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   }
   assignDemands(towns, ctx.rng);
   const industries = placeIndustries(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings));
+  // Места для городов и предприятий выбраны по всем улицам; дальше радиус города — по плотной застройке.
+  for (const t of towns) measureTown(t);
   return { towns, industries };
 }
 
@@ -489,8 +494,11 @@ function addLandmark(ctx: WorldContext, town: Town, fp: Footprint): void {
   town.buildings.push(b);
 }
 
-/** Застраивает улицу домами по обеим сторонам. density — доля занятых мест. */
-export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density: number, limit = Infinity): number {
+/**
+ * Застраивает улицу домами по обеим сторонам. density — доля занятых мест;
+ * reach — дальше этого от центра города домов не ставим.
+ */
+export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density: number, limit = Infinity, reach = Infinity): number {
   const { rng } = ctx;
   const hw = corridorHalf(seg);
   let added = 0;
@@ -505,7 +513,7 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
       const at = s + width / 2;
       if (at + width / 2 > seg.length - 22) break;
       s += width + rng.range(3, 7);
-      if (rng.next() > density) continue;
+      if (rng.next() > density || dist(p0, town.center) > reach) continue;
       const p = seg.lut.pointAt(at);
       const t = seg.lut.tangentAt(at);
       const normal = { x: -t.y * side, y: t.x * side };
@@ -562,11 +570,42 @@ export function nearHighway(roads: LaneNet, seg: Corridor): boolean {
   return [seg.a, seg.b].some((id) => roads.node(id).corridors.some((sid) => isHighway(roads.corridor(sid))));
 }
 
-/** Можно ли поставить здание: не в воде, не на дороге и не на другом здании. */
+/** Сколько свободного места оставляют дома до насыпи путей. */
+const RAIL_BUFFER = 4;
+
+/** Насыпь путей (кроме тоннелей) с запасом margin задевает здание. */
+export function onRail(rail: Network | undefined, fp: Footprint, margin: number): boolean {
+  if (!rail) return false;
+  const r = footprintRadius(fp) + RAIL_HALF + margin;
+  for (const seg of rail.segmentsNear(fp.center, r)) {
+    if (!isRail(seg.spec)) continue;
+    const hit = seg.lut.closest(fp.center);
+    if (hit.d > r) continue;
+    for (let s = Math.max(0, hit.s - r); s <= Math.min(seg.length, hit.s + r); s += 3) {
+      if (rail.levelAt(seg, s) < -0.75) continue;
+      if (pointInFootprint(seg.lut.pointAt(s), fp, RAIL_HALF + margin)) return true;
+    }
+  }
+  return false;
+}
+
+/** Ось путей (кроме тоннелей) ближе d к точке. */
+export function railNear(rail: Network | undefined, p: Vec, d: number): boolean {
+  if (!rail) return false;
+  for (const seg of rail.segmentsNear(p, d)) {
+    if (!isRail(seg.spec)) continue;
+    const hit = seg.lut.closest(p);
+    if (hit.d < d && rail.levelAt(seg, hit.s) >= -0.75) return true;
+  }
+  return false;
+}
+
+/** Можно ли поставить здание: не в воде, не на дороге, не на путях и не на другом здании. */
 export function placeable(ctx: WorldContext, fp: Footprint, ownSeg: number): boolean {
   const { roads, terrain, index } = ctx;
   if (!terrain.inBounds(fp.center, 30) || terrain.isWater(fp.center, footprintRadius(fp) + 4)) return false;
   if (index.overlaps(fp, 2)) return false;
+  if (onRail(ctx.rail, fp, RAIL_BUFFER)) return false;
   const r = footprintRadius(fp);
   for (const seg of roads.corridorsNear(fp.center, r + 30 + HIGHWAY_BUFFER)) {
     if (seg.id === ownSeg) continue;
@@ -581,6 +620,40 @@ export function placeable(ctx: WorldContext, fp: Footprint, ownSeg: number): boo
 
 export function recountPopulation(town: Town): void {
   town.population = town.buildings.reduce((sum, b) => sum + (b.kind === 'res' ? b.floors * 14 : b.kind === 'com' ? b.floors * 4 : 0), 0);
+}
+
+/**
+ * Край плотной застройки — расстояние от центра: идём от середины застройки наружу, пока кольцо
+ * шириной 80 м застроено хотя бы впятеро реже ядра. Длинные улицы с редкими домами в поле за ним не в счёт.
+ */
+export function coreRadius(town: Town): number {
+  const ds = town.buildings.map((b) => dist(b.fp.center, town.center)).sort((a, b) => a - b);
+  if (!ds.length) return 0;
+  const W = 80;
+  let r = Math.max(60, ds[Math.floor(ds.length / 2)]);
+  let i = 0;
+  while (i < ds.length && ds[i] <= r) i++;
+  const core = i / (Math.PI * r * r);
+  let j = i;
+  for (;;) {
+    while (j < ds.length && ds[j] <= r + W) j++;
+    if (j - i < core * 0.2 * Math.PI * ((r + W) ** 2 - r ** 2)) break;
+    r += 20;
+    while (i < ds.length && ds[i] <= r) i++;
+  }
+  return Math.min(ds[ds.length - 1], r + W / 2);
+}
+
+/**
+ * Радиус города — по плотной застройке (круг на миникарте, подписи, охват);
+ * extent — до самого дальнего дома (отрисовка, охват станций).
+ */
+export function measureTown(town: Town): void {
+  if (!town.buildings.length) return;
+  let far = 0;
+  for (const b of town.buildings) far = Math.max(far, dist(b.fp.center, town.center) + footprintRadius(b.fp));
+  town.radius = Math.max(100, coreRadius(town) + 30);
+  town.extent = Math.max(town.radius, far + 10);
 }
 
 function placeIndustries(ctx: WorldContext, towns: Town[], density: number): Industry[] {

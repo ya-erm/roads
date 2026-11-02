@@ -142,6 +142,37 @@ export function handleSvg(): string {
   </svg>`;
 }
 
+/** Путь в значке: рельсы по краям, щебень и шпалы (пунктиром поперёк). */
+function trackPath(d: string): string {
+  return `<path d="${d}" stroke="#4f5965" stroke-width="7" stroke-linecap="butt" fill="none"/>
+    <path d="${d}" stroke="#b9b1a6" stroke-width="4.6" fill="none"/>
+    <path d="${d}" stroke="#7a5a3c" stroke-width="4.6" stroke-dasharray="1.4 2.8" fill="none" opacity="0.75"/>`;
+}
+
+/**
+ * Ж/д «Двигать» — что можно тянуть: узел (пути следом, направление в узле прежнее), тупик, середину
+ * участка (выгнуть) и перо (угол пути в узле). Пунктир — как было.
+ */
+export function trackMoveSvg(what: 'node' | 'end' | 'bend' | 'handle'): string {
+  const was = (d: string) => `<path d="${d}" stroke="#2f80ed" stroke-width="1.6" stroke-dasharray="3 3" fill="none"/>`;
+  const dot = (x: number, y: number, active: boolean) =>
+    `<circle cx="${x}" cy="${y}" r="3.4" fill="#fff" stroke="${active ? '#2f80ed' : '#9aa3ad'}" stroke-width="${active ? 1.8 : 1.6}"/>`;
+  const arrow = (x0: number, y0: number, x1: number, y1: number) => {
+    const l = Math.hypot(x1 - x0, y1 - y0) || 1;
+    const [ux, uy] = [(x1 - x0) / l, (y1 - y0) / l];
+    const tip = `${x1 + ux * 3},${y1 + uy * 3} ${x1 - uy * 2.6},${y1 + ux * 2.6} ${x1 + uy * 2.6},${y1 - ux * 2.6}`;
+    return `<path d="M${x0} ${y0}L${x1} ${y1}" stroke="#2f80ed" stroke-width="1.8" stroke-linecap="round"/><polygon points="${tip}" fill="#2f80ed"/>`;
+  };
+  const body = {
+    node: `${was('M3 9H45')}${trackPath('M3 9C15 9 15 27 24 27C33 27 33 9 45 9')}${arrow(24, 12, 24, 20)}${dot(24, 9, false)}${dot(24, 27, true)}`,
+    end: `${was('M4 27H30')}${trackPath('M4 27C18 27 28 17 40 9')}${arrow(31, 24, 36, 15)}${dot(30, 27, false)}${dot(40, 9, true)}`,
+    bend: `${was('M4 29H44')}${trackPath('M4 29Q24 1 44 29')}${arrow(24, 27, 24, 20)}${dot(24, 15, true)}`,
+    handle: `${trackPath('M6 29C18 29 26 8 44 8')}<path d="M6 29L22 29" stroke="#2f80ed" stroke-width="1.6"/>
+      <circle cx="6" cy="29" r="2.6" fill="#2f80ed"/><circle cx="22" cy="29" r="3.6" fill="#2f80ed" stroke="#fff" stroke-width="1.4"/>`,
+  }[what];
+  return `<svg viewBox="0 0 48 36" width="48" height="36">${body}</svg>`;
+}
+
 /** Кольцо сверху: размер (0…1) и число полос. */
 export function ringSvg(size: number, lanes: number): string {
   const r = 7 + size * 7;
@@ -181,13 +212,13 @@ export function platformsSvg(n: number): string {
   return `<svg viewBox="0 0 48 36" width="48" height="36">${rows.join('')}</svg>`;
 }
 
-/** Автостанция сверху: навес и n постов погрузки, занятые — оранжевые (как на карте). */
-export function baysSvg(n: number, busy = 0, h = 22): string {
+/** Автостанция сверху: навес и n постов погрузки; занятый — цвета машины, что на нём стоит (как на карте). */
+export function baysSvg(n: number, busy: (string | null)[] = [], h = 22): string {
   const bw = 7;
   const w = 6 + n * bw;
   const slots = Array.from(
     { length: n },
-    (_, i) => `<rect x="${3.5 + i * bw}" y="9" width="${bw - 1.5}" height="${h - 12}" rx="1" fill="${i < busy ? '#e07b39' : '#d5d2c8'}"/>`,
+    (_, i) => `<rect x="${3.5 + i * bw}" y="9" width="${bw - 1.5}" height="${h - 12}" rx="1" fill="${busy[i] ?? '#d5d2c8'}"/>`,
   ).join('');
   return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
     <rect x="0.7" y="0.7" width="${w - 1.4}" height="${h - 1.4}" rx="2" fill="#f3f1ea" stroke="#5c6470" stroke-width="1.4"/>
@@ -220,12 +251,18 @@ export function copySvg(w = 48, h = 36): string {
   </svg>`;
 }
 
-/** Схема куска дорог (свой шаблон, скопированное): оси полотен, магистрали толще. */
+/** Схема куска дорог (свой шаблон, скопированное): оси полотен, магистрали толще; ж/д пути — «шпалами», как на карте. */
 export function fragmentSvg(frag: Fragment, w = 64, h = 48): string {
   const pad = 3;
   const k = Math.min((w - pad * 2) / (frag.half.x * 2), (h - pad * 2) / (frag.half.y * 2));
   const at = (p: Vec) => `${(w / 2 + p.x * k).toFixed(1)} ${(h / 2 + p.y * k).toFixed(1)}`;
   const width: Record<string, number> = { motorway: 3.4, highway: 3, avenue: 2.4, street: 1.6 };
+  const rails = (frag.rail?.segs ?? [])
+    .map(({ curve: { p0, p1, p2, p3 } }) => {
+      const d = `M${at(p0)}C${at(p1)} ${at(p2)} ${at(p3)}`;
+      return `<path d="${d}" stroke="#5c6670" stroke-width="2.6" fill="none" stroke-linecap="round"/><path d="${d}" stroke="#f4f1ea" stroke-width="1.2" stroke-dasharray="2.2 2.2" fill="none"/>`;
+    })
+    .join('');
   const paths = [...frag.corridors]
     .sort((a, b) => (width[a.cls] ?? 2) - (width[b.cls] ?? 2))
     .map((c) => {
@@ -234,7 +271,33 @@ export function fragmentSvg(frag: Fragment, w = 64, h = 48): string {
       return `<path d="M${at(p0)}C${at(p1)} ${at(p2)} ${at(p3)}" stroke="${color}" stroke-width="${width[c.cls] ?? 2}" fill="none" stroke-linecap="round"/>`;
     })
     .join('');
-  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${paths}</svg>`;
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${rails}${paths}</svg>`;
+}
+
+/** Метка «с ж/д путями» на карточке шаблона: отрезок пути со шпалами. */
+export function railBadgeSvg(w = 22, h = 14): string {
+  const ties = [4, 8, 12, 16].map((x) => `<path d="M${x} 3.5V10.5" stroke="#7a5a3c" stroke-width="1.6"/>`).join('');
+  return `<svg viewBox="0 0 20 14" width="${w}" height="${h}"><rect x="0.6" y="0.6" width="18.8" height="12.8" rx="3.5" fill="#fff" stroke="#b9b1a6" stroke-width="1.2"/>${ties}<path d="M2.5 5.2H17.5M2.5 8.8H17.5" stroke="#4f5965" stroke-width="1.3"/></svg>`;
+}
+
+/** Скачать файлом: стрелка вниз в лоток. */
+export function downloadSvg(size = 16): string {
+  return `<svg viewBox="0 0 16 16" width="${size}" height="${size}"><path d="M8 2V10M4.6 6.8L8 10.2L11.4 6.8" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 11V13.5H13.5V11" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+/** Скачать все шаблоны одним файлом: стопка карточек и стрелка вниз. */
+export function downloadAllSvg(size = 18): string {
+  return `<svg viewBox="0 0 18 16" width="${size * 1.125}" height="${size}">
+    <rect x="1" y="1" width="9" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3" opacity="0.55"/>
+    <rect x="3.5" y="3.5" width="9" height="7" rx="1.5" fill="#fff" stroke="currentColor" stroke-width="1.3"/>
+    <path d="M14 5V12.5M11.6 10.2L14 12.6L16.4 10.2" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M1.5 12.5V15H16.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+/** Открыть из файла: стрелка вверх из лотка. */
+export function uploadSvg(size = 16): string {
+  return `<svg viewBox="0 0 16 16" width="${size}" height="${size}"><path d="M8 10.5V2.5M4.6 5.8L8 2.4L11.4 5.8" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 11V13.5H13.5V11" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
 /** Снос по одному: дорога и дом, крестик над одним объектом. */
@@ -505,4 +568,16 @@ export function folderSvg(size = 16, open = false): string {
   return `<svg class="folder-ic" viewBox="0 0 24 24" width="${size}" height="${size}">
     <path d="M2 6.5A1.5 1.5 0 0 1 3.5 5h5l2 2h10A1.5 1.5 0 0 1 22 8.5V18.5a1.5 1.5 0 0 1-1.5 1.5h-17A1.5 1.5 0 0 1 2 18.5z" fill="#e9b52f" stroke="#c99a2e" stroke-width="1.2" stroke-linejoin="round"/>
     ${lid}</svg>`;
+}
+
+/** Авто-парк: шестерёнка, в ней «+» и «−» — игра сама докупает и продаёт транспорт. */
+export function autoSvg(size = 18): string {
+  const teeth = Array.from({ length: 8 }, (_, i) => {
+    const a = (i * Math.PI) / 4;
+    const x = (10 + Math.cos(a) * 7.4).toFixed(2);
+    const y = (10 + Math.sin(a) * 7.4).toFixed(2);
+    return `<rect x="${Number(x) - 1.7}" y="${Number(y) - 1.7}" width="3.4" height="3.4" rx="0.7" transform="rotate(${i * 45} ${x} ${y})"/>`;
+  }).join('');
+  return `<svg class="auto-ic" viewBox="0 0 20 20" width="${size}" height="${size}"><g fill="#2f80ed">${teeth}<circle cx="10" cy="10" r="6.6"/></g>
+    <path d="M7 8.2h3M8.5 6.7v3M10 12.2h3" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg>`;
 }

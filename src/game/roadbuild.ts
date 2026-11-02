@@ -1,9 +1,10 @@
 import { COST } from '../config';
 import { Cubic, minRadius } from '../core/bezier';
-import { dist, Vec } from '../core/vec';
-import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDraft, RoadOptions, taperDeadLanes } from '../lanes/edit';
+import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
+import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDraft, laneStep, LaneTip, RoadOptions, taperDeadLanes } from '../lanes/edit';
+import { edgesAt, laneShare } from '../lanes/geometry';
 import { Corridor, LaneNet, LaneSlot } from '../lanes/model';
-import { LEVEL_RUN, RoadClass, ROAD_CLASSES } from '../world/roadTypes';
+import { LEVEL_RUN, RoadClass, ROAD_CLASSES, ROAD_MARGIN } from '../world/roadTypes';
 import { halfAtS } from '../world/worldgen';
 import type { Roads } from './roads';
 
@@ -13,8 +14,8 @@ export interface RoadContext {
   readonly budget: number;
   isWater(p: Vec, margin?: number): boolean;
   inBounds(p: Vec, margin?: number): boolean;
-  /** Строения в точке: id и можно ли снести их ради дороги. */
-  obstaclesAt(p: Vec, radius: number): { id: number; demolishable: boolean }[];
+  /** Строения в точке: id, можно ли снести их ради дороги и узел въезда (у автостанции — торец её выезда). */
+  obstaclesAt(p: Vec, radius: number): { id: number; demolishable: boolean; gate?: number }[];
   demolishCost(id: number): number;
   demolish(ids: number[]): void;
   spend(amount: number): void;
@@ -41,6 +42,12 @@ export interface RoadPlan {
 
 const fail = (reason: string): RoadPlan => ({ ok: false, reason, cost: 0, spend: 0, refund: 0, demolish: [], net: null, changed: [] });
 
+/** Полуширина полотна с одной стороны оси (side ≥ 0 — справа по ходу a→b) вместе с обочиной. */
+function sideHalf(c: Corridor, s: number, side: number): number {
+  const e = edgesAt(c, s);
+  return (e ? Math.max(0, side >= 0 ? e[1] : -e[0]) : 0) + ROAD_MARGIN;
+}
+
 /** Множитель цены в точке: мосты, эстакады и тоннели дороже земли. */
 function structureFactor(h: number, water: boolean): number {
   if (water && h > -0.5) return 4;
@@ -56,7 +63,9 @@ export function corridorCost(net: LaneNet, c: Corridor, isWater: (p: Vec, margin
   for (let i = 0; i < n; i++) {
     const s = (c.length * (i + 0.5)) / n;
     const p = c.lut.pointAt(s);
-    cost += (c.length / n) * ROAD_CLASSES[c.cls].cost * c.lanes.length * structureFactor(net.heightAt(c, s), isWater(p, 2));
+    // Полосы — сколько их здесь на самом деле: пристроенная на кусок дороги стоит по своей длине (отгон — по ширине).
+    const lanes = c.lanes.reduce((k, l) => k + laneShare(c, l, s), 0);
+    cost += (c.length / n) * ROAD_CLASSES[c.cls].cost * lanes * structureFactor(net.heightAt(c, s), isWater(p, 2));
   }
   return Math.round(cost);
 }
@@ -151,6 +160,29 @@ export class RoadBuilder {
     return this.plan((n) => applyLane(n, d, cls), { shove: true });
   }
 
+  /**
+   * Куски полосы по точкам от конца tip через qs (каждая точка — как следующий клик); step — новый конец
+   * (в сети плана) и что построено.
+   */
+  laneStep(tip: LaneTip, qs: Vec[], cls: RoadClass, radius: number): { plan: RoadPlan; step: { tip: LaneTip; what: string } | null } {
+    const out: { step: { tip: LaneTip; what: string } | null } = { step: null };
+    const plan = this.plan(
+      (n) => {
+        let at = tip;
+        const what: string[] = [];
+        for (const q of qs) {
+          const s = laneStep(n, at, q, cls, radius);
+          at = s.tip;
+          what.push(s.what);
+        }
+        out.step = { tip: at, what: what.join(' → ') };
+        return qs.length > 0;
+      },
+      { shove: true },
+    );
+    return { plan, step: plan.ok ? out.step : null };
+  }
+
   /** Снос полотен. */
   bulldoze(ids: number[]): RoadPlan {
     return this.plan(
@@ -223,9 +255,16 @@ export class RoadBuilder {
       const h = net.heightAt(c, s);
       if (!this.ctx.inBounds(p, 20)) return 'За краем карты';
       if (h < -0.25 && h > -0.75 && this.ctx.isWater(p, 2)) return 'Въезд в тоннель в воде';
+      // Полотно бывает шире с одной стороны (пристроенная полоса): дома и дороги проверяем по кромке своей стороны.
+      const n = rightNormal(c.lut.tangentAt(s));
+      const e = edgesAt(c, s);
+      const deck = e ? add(p, scale(n, (e[0] + e[1]) / 2)) : p;
+      const deckHalf = (e ? (e[1] - e[0]) / 2 : 0) + ROAD_MARGIN;
       // Тоннель проходит под домами; мосты и эстакады стоят на опорах — дома под ними сносим.
       if (h > -0.75) {
-        for (const o of this.ctx.obstaclesAt(p, half + 1)) {
+        for (const o of this.ctx.obstaclesAt(deck, deckHalf + 1)) {
+          // Своя станция в торце выезда: широкое полотно у ворот слегка заходит в её контур — так и задумано.
+          if (o.gate !== undefined && (o.gate === c.a || o.gate === c.b)) continue;
           if (!o.demolishable) return 'Мешает здание';
           if (!shove) demolish.add(o.id);
         }
@@ -237,7 +276,10 @@ export class RoadBuilder {
         const shares = o.a === c.a || o.a === c.b || o.b === c.a || o.b === c.b;
         if (shares && nearEnd) continue;
         const hit = o.lut.closest(p);
-        if (hit.d < half + halfAtS(o, hit.s) - 1 && !(nearEnd && shares)) {
+        const to = sub(hit.point, p);
+        const mine = sideHalf(c, s, dot(to, n));
+        const theirs = sideHalf(o, hit.s, -dot(to, rightNormal(o.lut.tangentAt(hit.s))));
+        if (hit.d < mine + theirs - 1 && !(nearEnd && shares)) {
           if (Math.abs(h - net.heightAt(o, hit.s)) >= 0.75) continue;
           // Касание у самого чужого узла (дорога к нему подходит) — проверит узел.
           if (dist(hit.point, net.node(o.a).pos) < 2 || dist(hit.point, net.node(o.b).pos) < 2) continue;
