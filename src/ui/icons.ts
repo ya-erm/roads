@@ -270,6 +270,17 @@ export function crossingSvg(w = 40, h = 20): string {
 }
 
 /** Вокзал: здание с платформой у двух путей. */
+/** n путей рядом (сверху): рельсы со шпалами; dashed — пристроенный путь пунктиром. */
+export function tracksSvg(n: number, dashed = false): string {
+  const rows = Array.from({ length: n }, (_, i) => {
+    const y = 18 + (i - (n - 1) / 2) * 12;
+    const ties = Array.from({ length: 9 }, (_, k) => `<path d="M${6 + k * 5} ${y - 4}V${y + 4}" stroke="#7a5a3c" stroke-width="1.6" opacity="0.7"/>`).join('');
+    const extra = dashed && i === n - 1 ? 'stroke-dasharray="3 2"' : '';
+    return `${ties}<path d="M3 ${y - 2.5}H49M3 ${y + 2.5}H49" stroke="#4f5965" stroke-width="1.4" ${extra}/>`;
+  }).join('');
+  return `<svg viewBox="0 0 52 36" width="52" height="36">${rows}</svg>`;
+}
+
 export function stationSvg(kind: 'road' | 'rail' | 'stop', size = 40): string {
   if (kind === 'stop') {
     // Навес у края улицы и знак с буквой «А»; у бордюра — автобус.

@@ -60,6 +60,26 @@ export function straightCubic(a: Vec, b: Vec): Cubic {
   return { p0: a, p1: lerp(a, b, 1 / 3), p2: lerp(a, b, 2 / 3), p3: b };
 }
 
+/**
+ * Кривая, параллельная c на расстоянии d вбок (по нормали (−t.y, t.x)): концы сдвигаются по нормали,
+ * ручки — укорачиваются со стороны поворота и удлиняются с внешней (по кривизне на концах),
+ * так дуга остаётся дугой.
+ */
+export function offsetCubic(c: Cubic, d: number): Cubic {
+  const end = (t: number) => {
+    const p = bezPoint(c, t);
+    const d1 = bezDeriv(c, t);
+    const d2 = bezSecond(c, t);
+    const l = len(d1) || 1;
+    const n = { x: -d1.y / l, y: d1.x / l };
+    const k = cross(d1, d2) / (l * l * l);
+    return { p: add(p, scale(n, d)), s: 1 - d * k };
+  };
+  const a = end(0);
+  const b = end(1);
+  return { p0: a.p, p1: add(a.p, scale(sub(c.p1, c.p0), a.s)), p2: add(b.p, scale(sub(c.p2, c.p3), b.s)), p3: b.p };
+}
+
 export function quadToCubic(a: Vec, ctrl: Vec, b: Vec): Cubic {
   return { p0: a, p1: lerp(a, ctrl, 2 / 3), p2: lerp(b, ctrl, 2 / 3), p3: b };
 }

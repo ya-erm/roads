@@ -202,6 +202,30 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
     expect(game.fleetTrain(v)!.length).toBe(carsOf(v) * 17);
   });
 
+  it('путь рядом: вдоль прямой и дуги, на расстоянии между путями, со стороны курсора', () => {
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    const { from, dir } = layTrack(game, 1200);
+    const n = { x: -dir.y, y: dir.x };
+    const before = game.net.segments.size;
+    // Тянем от начала до конца — курсор чуть в стороне +n.
+    const a = add(from, scale(dir, 100));
+    const b = add(add(from, scale(dir, 1100)), scale(n, 20));
+    const plan = game.parallelTrackPlan(a, b, 14);
+    expect(plan.reason ?? 'ok').toBe('ok');
+    expect(game.buildParallelTrack(a, b, 14)).toBeNull();
+    const added = [...game.net.segments.values()].filter((s) => s.id > 0 && !s.platform).length - before;
+    expect(added).toBeGreaterThan(0);
+    // Новый путь — на TRACK_GAP от старого, со стороны +n.
+    const probe = add(add(from, scale(dir, 600)), scale(n, 13));
+    const hit = game.net.findSegmentNear(probe, 4, (s) => s.spec.cls === 'rail');
+    expect(hit).not.toBeNull();
+    expect(hit!.d).toBeLessThan(1);
+    expect(game.net.findSegmentNear(add(add(from, scale(dir, 600)), scale(n, -13)), 4, (s) => s.spec.cls === 'rail')).toBeNull();
+    // Отмена — одним шагом.
+    expect(game.undo()).toBe('путь рядом');
+    expect(game.net.findSegmentNear(probe, 4, (s) => s.spec.cls === 'rail')).toBeNull();
+  });
+
   it('переезд закрывается перед поездом, машины ждут', () => {
     const { game, a, b, from, dir } = railWorld();
     const n = { x: -dir.y, y: dir.x };

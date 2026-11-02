@@ -57,6 +57,7 @@ import {
   speedSign,
   ledgerIcon,
   stationSvg,
+  tracksSvg,
   signalSvg,
   switchSvg,
   upgradeSvg,
@@ -627,7 +628,10 @@ export class Hud {
         c.setJunctionMode(d.id === 'template' ? 'template' : 'ring');
         break;
       case 'rail-mode':
-        c.setRailMode(d.id === 'station' || d.id === 'signal' ? d.id : 'track');
+        c.setRailMode(d.id === 'station' || d.id === 'signal' || d.id === 'parallel' ? d.id : 'track');
+        break;
+      case 'rail-tracks':
+        c.setRailTracks(Number(d.v));
         break;
       case 'limit':
         c.setLimit(Number(d.v));
@@ -1007,6 +1011,7 @@ export class Hud {
     const c = this.controller;
     const sw = this.kindSwitch('Что строим', 'rail-mode', c.railMode, [
       { id: 'track', name: 'Путь', svg: railSvg(76, 34), hint: 'Ж/д путь: прямые, дуги, мосты и тоннели' },
+      { id: 'parallel', name: 'Пристроить', svg: tracksSvg(2, true), hint: 'Зажмите на пути и тяните вдоль: рядом ляжет второй путь' },
       { id: 'station', name: 'Станция', svg: stationSvg('rail', 34), hint: 'Ж/д станция с двумя платформами: на пути или в чистом поле' },
       { id: 'signal', name: 'Сигнал', svg: signalSvg(), hint: 'Делит путь на блоки: несколько поездов едут друг за другом' },
     ]);
@@ -1040,7 +1045,21 @@ export class Hud {
         <div>${crossingSvg()}<span>Переезд с дорогой — под углом от 30°, шлагбаум закрывается перед поездом</span></div>
       </div>
       <div class="price">≈ ${money(specCost(RAIL_SPEC) * 100)} за 100 м на земле</div></div>`;
-    return `<div class="opt-row">${sw}${rules}${this.shapeHtml()}</div>`;
+    if (c.railMode === 'parallel') {
+      return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Пристроить путь</div>
+        <div class="rules">
+          <div>${tracksSvg(2, true)}<span>Зажмите на пути и тяните вдоль него — рядом, со стороны курсора, ляжет второй путь до точки, где отпустите</span></div>
+          <div>${switchSvg()}<span>Путь идёт по участкам до ближайшей стрелки. Соединить пути — стрелкой, инструментом «Путь»</span></div>
+        </div></div></div>`;
+    }
+    // Сколько путей класть сразу: один или два рядом (ось — по курсору).
+    const count = [1, 2]
+      .map(
+        (n) => `<button class="icon-btn ${c.railTracks === n ? 'active' : ''}" data-action="rail-tracks" data-v="${n}" title="${n === 1 ? 'Один путь' : 'Два пути рядом: курсор — ось между ними'}">
+          ${tracksSvg(n)}<span>${n === 1 ? '1 путь' : '2 пути'}</span></button>`,
+      )
+      .join('');
+    return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Путей</div><div class="icons">${count}</div></div>${rules}${this.shapeHtml()}</div>`;
   }
 
   /** «Работает с»: пассажиры и/или груз — две карточки-переключателя. */

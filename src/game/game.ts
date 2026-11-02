@@ -12,7 +12,7 @@ import {
   STOP,
   TOWN_TRAFFIC,
 } from '../config';
-import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
+import { Cubic, CurveLUT, intersectCurves, offsetCubic, reverseCubic, splitBezier, straightCubic } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, insideRuns, splitCorridor } from '../lanes/edit';
@@ -22,8 +22,8 @@ import { RailSim, Train } from '../sim/rail';
 import type { Vehicle } from '../sim/vehicle';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
 import { Industry, Station, StationServes, Structure, Town, TOWN_NEED, TownBuilding } from '../world/entities';
-import { Network, NetworkSave } from '../world/network';
-import { halfWidth, isRail, isTrunk, LANE_W, RAIL_HALF, RAIL_SPEC, specCost } from '../world/roadTypes';
+import { Network, NetworkSave, Segment } from '../world/network';
+import { halfWidth, isRail, isTrunk, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
 import { DEFAULT_SETTINGS, WorldSettings } from '../world/settings';
 import { Terrain } from '../world/terrain';
@@ -42,7 +42,7 @@ import {
 import { findCrossings, LevelCrossing } from './crossings';
 import { corridorCost, RoadBuilder, RoadPlan } from './roadbuild';
 import { Roads } from './roads';
-import { BuildContext, Builder, RING_SIZES, RingOptions, RoadRequest } from './build';
+import { BuildContext, Builder, RING_SIZES, RingOptions, RoadRequest, Snap } from './build';
 import { diamondPlan, TemplateOptions, templatePlan, TemplatePlan } from './interchange';
 import {
   DEFAULT_RULE,
@@ -987,6 +987,109 @@ export class Game implements BuildContext {
     const ok = this.roadBuilder.apply(plan.plan);
     this.commit();
     return ok ? null : 'Не удалось построить развязку';
+  }
+
+  // ---------- Пути рядом ----------
+
+  /**
+   * Пристроить путь: вдоль цепочки путей (через узлы без стрелок) от точки a до точки b — новый путь
+   * рядом, на расстоянии TRACK_GAP, с той стороны, где курсор b. Куски — сдвинутые копии участков.
+   */
+  parallelTrackPlan(a: Vec, b: Vec, radius: number): { ok: boolean; reason?: string; cost: number; reqs: RoadRequest[] } {
+    const net = this.net;
+    const fail = (reason: string, cost = 0, reqs: RoadRequest[] = []) => ({ ok: false, reason, cost, reqs });
+    const onTrack = (s: Segment) => isRail(s.spec) && s.platform === undefined;
+    const hit = net.findSegmentNear(a, Math.max(30, radius), onTrack);
+    if (!hit) return fail('Зажмите на пути и протяните вдоль него');
+    // Цепочка участков по порядку: от участка под курсором в обе стороны, пока узел — не стрелка.
+    const chain: { seg: Segment; forward: boolean }[] = [{ seg: hit.seg, forward: true }];
+    const walk = (from: number, ahead: boolean) => {
+      let node = from;
+      for (let guard = 0; guard < 60; guard++) {
+        const segs = net.railSegs(net.node(node)).filter((id) => onTrack(net.segment(id)));
+        if (segs.length !== 2) return;
+        const known = ahead ? chain[chain.length - 1].seg.id : chain[0].seg.id;
+        const next = net.segment(segs.find((id) => id !== known)!);
+        if (chain.some((x) => x.seg.id === next.id)) return;
+        if (ahead) {
+          chain.push({ seg: next, forward: next.a === node });
+          node = next.a === node ? next.b : next.a;
+        } else {
+          chain.unshift({ seg: next, forward: next.b === node });
+          node = next.b === node ? next.a : next.b;
+        }
+      }
+    };
+    walk(hit.seg.b, true);
+    walk(hit.seg.a, false);
+    if (chain.some((x) => !net.isFlat(x.seg) || net.node(x.seg.a).level !== 0)) return fail('Пристроить путь — только на земле');
+    // Координата вдоль цепочки: u у начала каждого участка.
+    const starts: number[] = [];
+    let u = 0;
+    for (const x of chain) {
+      starts.push(u);
+      u += x.seg.length;
+    }
+    const along = (i: number, s: number) => starts[i] + (chain[i].forward ? s : chain[i].seg.length - s);
+    const uA = along(chain.findIndex((x) => x.seg.id === hit.seg.id), hit.s);
+    let best = { i: 0, s: 0, d: Infinity, point: b };
+    chain.forEach((x, i) => {
+      const h = x.seg.lut.closest(b);
+      if (h.d < best.d) best = { i, s: h.s, d: h.d, point: h.point };
+    });
+    const uB = along(best.i, best.s);
+    if (Math.abs(uB - uA) < 30) return fail('Протяните вдоль пути');
+    // Сторона — где курсор при отпускании, относительно хода цепочки.
+    const segB = chain[best.i];
+    const tB = scale(segB.seg.lut.tangentAt(best.s), segB.forward ? 1 : -1);
+    const side = dot(sub(b, best.point), { x: -tB.y, y: tB.x }) >= 0 ? 1 : -1;
+    const [u0, u1] = uA < uB ? [uA, uB] : [uB, uA];
+    const reqs: RoadRequest[] = [];
+    chain.forEach((x, i) => {
+      const lo = Math.max(u0, starts[i]);
+      const hi = Math.min(u1, starts[i] + x.seg.length);
+      if (hi - lo < 1) return;
+      // Кусок участка между lo и hi, по ходу цепочки, и его копия сбоку.
+      const sOf = (uu: number) => (x.forward ? uu - starts[i] : x.seg.length - (uu - starts[i]));
+      const [ta, tb] = [x.seg.lut.tAt(sOf(lo)), x.seg.lut.tAt(sOf(hi))];
+      let piece = x.seg.curve;
+      const t0 = Math.min(ta, tb);
+      const t1 = Math.max(ta, tb);
+      if (t1 < 1) piece = splitBezier(piece, t1)[0];
+      if (t0 > 0) piece = splitBezier(piece, t0 / t1)[1];
+      if (!x.forward) piece = reverseCubic(piece);
+      const curve = offsetCubic(piece, side * TRACK_GAP);
+      reqs.push({ start: { kind: 'free', pos: curve.p0, level: 0 }, end: { kind: 'free', pos: curve.p3, level: 0 }, spec: RAIL_SPEC, mode: 'straight', curve });
+    });
+    // Каждый кусок — против нынешней сети; соседние куски стыкуются концами.
+    let cost = 0;
+    for (const req of reqs) {
+      const plan = this.builder.plan(req);
+      cost += plan.cost;
+      if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', cost, reqs);
+    }
+    if (cost > this.budget) return fail('Не хватает денег', cost, reqs);
+    return { ok: true, cost, reqs };
+  }
+
+  /** Строит путь рядом; null — построен, иначе причина. Не встал кусок — всё построенное откатывается. */
+  buildParallelTrack(a: Vec, b: Vec, radius: number): string | null {
+    const plan = this.parallelTrackPlan(a, b, radius);
+    if (!plan.ok) return plan.reason ?? 'Нельзя построить';
+    this.checkpoint('путь рядом');
+    let prev: number | null = null;
+    for (const req of plan.reqs) {
+      const start: Snap = prev === null ? req.start : { kind: 'node', nodeId: prev, pos: this.net.node(prev).pos, level: 0 };
+      const res = this.builder.build({ ...req, start, curve: req.curve && { ...req.curve, p0: start.pos } });
+      if (!res) {
+        this.commit();
+        this.undo();
+        return 'Не удалось построить путь';
+      }
+      prev = res.endNode;
+    }
+    this.commit();
+    return null;
   }
 
   // ---------- Ж/д сигналы ----------

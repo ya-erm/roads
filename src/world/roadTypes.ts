@@ -45,6 +45,8 @@ export const MEDIAN = 4;
 /** Один железнодорожный путь (движение в обе стороны по очереди). */
 export const RAIL_SPEC: RoadSpec = { cls: 'rail', lanesF: 1, lanesB: 1 };
 export const RAIL_HALF = 5.5;
+/** Между осями соседних путей (двухпутка, путь рядом). */
+export const TRACK_GAP = 13;
 /** Горизонтальная длина подъёма на один уровень для рельсов — поезда любят пологие уклоны. */
 export const RAIL_LEVEL_RUN = 130;
 
