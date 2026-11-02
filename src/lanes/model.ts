@@ -1,6 +1,6 @@
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { LANE_W, RoadClass } from '../world/roadTypes';
+import { isDivided, LANE_W, MEDIAN, RoadClass, RoadSpec } from '../world/roadTypes';
 
 /** Кривая — прямой отрезок: управляющие точки на хорде, между концами. */
 function isStraight(cv: Cubic): boolean {
@@ -152,6 +152,21 @@ export function twoWay(f: number, b: number, median = 0): LaneSlot[] {
 /** n полос в одну сторону, ось полотна посередине. */
 export function oneWay(n: number, flow: Flow = 1): LaneSlot[] {
   return Array.from({ length: n }, (_, i) => slot((i - (n - 1) / 2) * LANE_W, flow));
+}
+
+/** Класс, полосы и ограничение скорости дороги. */
+export interface RoadProfile {
+  cls: RoadClass;
+  lanes: LaneSlot[];
+  limit?: number;
+}
+
+/** Профиль дороги из настроек панели: полосы по ходу — справа, у автомагистрали — разделитель. */
+export function profileOf(spec: RoadSpec): RoadProfile {
+  const f = spec.lanesF;
+  const b = spec.lanesB;
+  const lanes = b === 0 ? oneWay(f) : f === 0 ? oneWay(b) : twoWay(f, b, isDivided(spec) ? MEDIAN : 0);
+  return { cls: spec.cls, lanes, limit: spec.limit };
 }
 
 export interface CorridorOptions {
@@ -586,9 +601,14 @@ export class LaneNet {
           if (this.reaches(c, l, end) && !this.across(c, i, end)) res.push(`Полоса ${i} полотна ${c.id} обрывается в стыке ${e.node.id}`);
         });
       }
-      const offs = c.lanes.map((l) => l.offset).sort((x, y) => x - y);
-      for (let i = 1; i < offs.length; i++) {
-        if (offs[i] - offs[i - 1] < LANE_W - 0.01) res.push(`Полосы полотна ${c.id} налезают друг на друга`);
+      // Полосы ближе ширины полосы друг к другу — только если их отрезки не пересекаются
+      // (на одном месте — разгон после въезда и торможение перед дальним съездом).
+      for (let i = 0; i < c.lanes.length; i++) {
+        for (let j = i + 1; j < c.lanes.length; j++) {
+          const a = c.lanes[i];
+          const b = c.lanes[j];
+          if (Math.abs(a.offset - b.offset) < LANE_W - 0.01 && a.from < b.to && b.from < a.to) res.push(`Полосы полотна ${c.id} налезают друг на друга`);
+        }
       }
     }
     return res;

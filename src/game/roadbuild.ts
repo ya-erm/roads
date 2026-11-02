@@ -77,7 +77,7 @@ export class RoadBuilder {
    * Правка на копии сети и её проверка. free — за счёт города; shove — дома под дорогой не сносим:
    * после стройки их отодвинут (расширение улицы).
    */
-  plan(edit: (net: LaneNet) => boolean | void, opts: { free?: boolean; shove?: boolean; raze?: boolean } = {}): RoadPlan {
+  plan(edit: (net: LaneNet) => boolean | void, opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean } = {}): RoadPlan {
     const before = this.net;
     const next = before.clone();
     try {
@@ -101,8 +101,10 @@ export class RoadBuilder {
     const demolish = new Set<number>();
     let reason: string | undefined;
     // Снос ничего не строит: оставшиеся куски дорог не проверяем и дома у них не сносим.
+    // Развязка (trusted) проложена заранее: её куски вплотную друг к другу — так задумано, сверяем только с прочими дорогами.
+    const own = opts.trusted ? new Set(changed.map((c) => c.id)) : null;
     for (const c of opts.raze ? [] : changed) {
-      reason = this.check(next, c, demolish, !!opts.shove);
+      reason = this.check(next, c, demolish, !!opts.shove, own);
       if (reason) break;
     }
     // Новые беды сети (оборванные полосы и т. п.) — только те, что появились от этой правки.
@@ -195,7 +197,7 @@ export class RoadBuilder {
   // ---------- Проверки ----------
 
   /** Что не так с полотном c в сети net; дома, которые придётся снести, — в demolish. */
-  private check(net: LaneNet, c: Corridor, demolish: Set<number>, shove: boolean): string | undefined {
+  private check(net: LaneNet, c: Corridor, demolish: Set<number>, shove: boolean, own: Set<number> | null = null): string | undefined {
     if (c.length < 8) return 'Слишком коротко';
     const limit = ROAD_CLASSES[c.cls].minRadius;
     if (minRadius(c.curve) < limit * 0.7) return 'Слишком крутой поворот';
@@ -224,7 +226,7 @@ export class RoadBuilder {
       // Чужие дороги рядом на той же высоте: у общих узлов — можно (там перекрёсток или стык), в остальном — не ближе краёв.
       const nearEnd = ends.some((e) => dist(e, p) < 45);
       for (const o of net.corridorsNear(p, half + 40)) {
-        if (o.id === c.id) continue;
+        if (o.id === c.id || own?.has(o.id)) continue;
         const shares = o.a === c.a || o.a === c.b || o.b === c.a || o.b === c.b;
         if (shares && nearEnd) continue;
         const hit = o.lut.closest(p);

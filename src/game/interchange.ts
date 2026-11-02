@@ -1,16 +1,18 @@
 import { Cubic, CurveLUT, straightCubic } from '../core/bezier';
 import { add, dot, scale, sub, Vec } from '../core/vec';
+import { buildPiece } from '../lanes/edit';
+import { Corridor, LaneNet, profileOf } from '../lanes/model';
 import { halfWidth, isTrunk, LEVEL_RUN, RoadSpec } from '../world/roadTypes';
-import type { Builder, RoadRequest } from './build';
-import type { Network } from '../world/network';
+import type { RoadBuilder, RoadPlan } from './roadbuild';
 
 /**
  * Шаблоны развязок на магистрали. Поперечная дорога проходит над магистралью по мосту,
  * съезды — односторонние, справа по ходу движения. Если под курсором нет магистрали,
  * она строится вместе с развязкой (прямой участок, поворот — R).
  *
- * Все шаблоны собираются из кусков: каждый кусок — обычная дорога, концы которой
- * при постройке привязываются к уже построенным кускам.
+ * Все шаблоны собираются из кусков. Концы съездов на магистрали — съезды и въезды по полосам
+ * (полоса торможения, стык с боковым портом, полоса разгона), на других дорогах — перекрёстки,
+ * свободные концы продолжаются следующими кусками.
  */
 
 export type TemplateKind = 'diamond' | 'tee' | 'clover';
@@ -40,6 +42,8 @@ export interface TemplatePlan {
   preview: Cubic[];
   /** Магистраль строится вместе с развязкой (в чистом поле). */
   withTrunk: boolean;
+  /** План строителя: сеть с развязкой (для предпросмотра и стройки). */
+  plan?: RoadPlan;
 }
 
 export interface TemplateOptions {
@@ -84,27 +88,50 @@ interface Layout {
 
 const right = (v: Vec): Vec => ({ x: -v.y, y: v.x });
 
+/** Магистраль под курсором: прямое полотно на земле. */
+function trunkNear(net: LaneNet, p: Vec, r: number): { c: Corridor; s: number; point: Vec } | null {
+  let best: { c: Corridor; s: number; point: Vec; d: number } | null = null;
+  for (const c of net.corridorsNear(p, r)) {
+    if (!isTrunk(c.cls) || c.ring || !net.isFlat(c) || net.node(c.a).level !== 0) continue;
+    const hit = c.lut.closest(p);
+    if (hit.d < r && (!best || hit.d < best.d)) best = { c, s: hit.s, point: hit.point, d: hit.d };
+  }
+  return best;
+}
+
+/** Профиль магистрали как настройки дороги (для раскладки шаблона): полос в каждую сторону — по полотну. */
+function specOf(c: Corridor): RoadSpec {
+  const f = c.lanes.filter((l) => l.flow > 0 && l.from <= 0.01 && l.to >= c.length - 0.01).length;
+  const b = c.lanes.filter((l) => l.flow < 0 && l.from <= 0.01 && l.to >= c.length - 0.01).length;
+  return { cls: c.cls, lanesF: f, lanesB: b };
+}
+
+/** Съезды крепятся полосами к магистралям; к остальным дорогам — перекрёстками. */
+const isHost = (c: Corridor) => isTrunk(c.cls) && !c.ring;
+
 /** Раскладка развязки у точки p: на магистрали под курсором или в чистом поле вместе с магистралью. */
-export function templatePlan(net: Network, builder: Builder, p: Vec, radius: number, budget: number, opts: TemplateOptions): TemplatePlan {
-  const fail = (reason: string, pieces: TemplatePiece[] = [], withTrunk = false, cost = 0): TemplatePlan => ({
+export function templatePlan(net: LaneNet, builder: RoadBuilder, p: Vec, radius: number, budget: number, opts: TemplateOptions): TemplatePlan {
+  const fail = (reason: string, pieces: TemplatePiece[] = [], withTrunk = false, cost = 0, plan?: RoadPlan): TemplatePlan => ({
     ok: false,
     reason,
     cost,
     pieces,
     preview: pieces.map(curveOf),
     withTrunk,
+    plan,
   });
-  const hit = net.findSegmentNear(p, Math.max(40, radius), (s) => isTrunk(s.spec.cls) && net.isFlat(s) && net.node(s.a).level === 0 && !s.ring);
+  const hit = trunkNear(net, p, Math.max(40, radius));
   let site: Site;
   let layout: Layout;
   const trunkPieces: TemplatePiece[] = [];
   if (hit) {
-    const seg = hit.seg;
+    const seg = hit.c;
     let u = seg.lut.tangentAt(hit.s);
     // Т-образная: ответвление — в сторону курсора.
     if (opts.kind === 'tee' && dot(sub(p, hit.point), right(u)) < -3) u = scale(u, -1);
-    const H = halfWidth(seg.spec) + 12;
-    site = { C: hit.point, u, r: right(u), H, G: H + UP, trunk: seg.spec };
+    const spec = specOf(seg);
+    const H = halfWidth(spec) + 12;
+    site = { C: hit.point, u, r: right(u), H, G: H + UP, trunk: spec };
     layout = layoutFor(opts.kind, site);
     const reach = layout.reach;
     if (hit.s < reach + 40 || seg.length - hit.s < reach + 40) return fail('Нужен длинный прямой участок магистрали без узлов рядом — или поставьте развязку в чистом поле');
@@ -123,21 +150,22 @@ export function templatePlan(net: Network, builder: Builder, p: Vec, radius: num
   }
   const pieces = [...trunkPieces, ...layout.pieces];
   const withTrunk = trunkPieces.length > 0;
-  // Оценка: каждый кусок отдельно против нынешней сети. Магистраль под курсором не мешает —
-  // к ней съезды и примыкают; куски между собой согласованы заранее.
-  const exclude = hit ? { segs: [hit.seg.id], nodes: [hit.seg.a, hit.seg.b] } : undefined;
-  let cost = 0;
-  for (const piece of pieces) {
-    const plan = builder.plan({ ...pieceRequest(builder, piece), exclude });
-    cost += plan.cost;
-    if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', pieces, withTrunk, cost);
-  }
-  if (cost > budget) return fail('Не хватает денег', pieces, withTrunk, cost);
-  return { ok: true, cost, pieces, preview: pieces.map(curveOf), withTrunk };
+  // Вся развязка — одна правка сети: куски по порядку (магистраль, поперечная дорога, съезды).
+  const plan = builder.plan(
+    (n) => {
+      for (const piece of pieces) {
+        buildPiece(n, { from: piece.from, fromLevel: piece.fromLevel, to: piece.to, toLevel: piece.toLevel, o: profileOf(piece.spec), curve: piece.curve }, isHost);
+      }
+    },
+    { trusted: true },
+  );
+  if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', pieces, withTrunk, plan.cost, plan);
+  if (plan.cost > budget) return fail('Не хватает денег', pieces, withTrunk, plan.cost, plan);
+  return { ok: true, cost: plan.cost, pieces, preview: pieces.map(curveOf), withTrunk, plan };
 }
 
-/** Старое имя: «ромб» на магистрали под курсором. */
-export function diamondPlan(net: Network, builder: Builder, p: Vec, radius: number, budget: number): TemplatePlan {
+/** «Ромб» на магистрали под курсором. */
+export function diamondPlan(net: LaneNet, builder: RoadBuilder, p: Vec, radius: number, budget: number): TemplatePlan {
   return templatePlan(net, builder, p, radius, budget, { kind: 'diamond', angle: 0, trunk: DEFAULT_TRUNK });
 }
 
@@ -380,19 +408,6 @@ function outerArc(q: Quad, U: number): TemplatePiece {
 
 function curveOf(p: TemplatePiece): Cubic {
   return p.curve ?? straightCubic(p.from, p.to);
-}
-
-/** Запрос на постройку куска: концы привязываются к уже построенным кускам и к магистрали. */
-export function pieceRequest(builder: Builder, piece: TemplatePiece): RoadRequest {
-  const start = builder.snap(piece.from, piece.fromLevel, 6);
-  const end = builder.snap(piece.to, piece.toLevel, 6);
-  return {
-    start: start.level === piece.fromLevel ? start : { kind: 'free', pos: piece.from, level: piece.fromLevel },
-    end: end.level === piece.toLevel ? end : { kind: 'free', pos: piece.to, level: piece.toLevel },
-    spec: piece.spec,
-    mode: 'straight',
-    curve: piece.curve ? { ...piece.curve, p0: start.pos, p3: end.pos } : undefined,
-  };
 }
 
 /** Длина шаблона для подсказки. */

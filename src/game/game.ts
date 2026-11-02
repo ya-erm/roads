@@ -42,7 +42,7 @@ import { findCrossings, LevelCrossing } from './crossings';
 import { corridorCost, RoadBuilder, RoadPlan } from './roadbuild';
 import { Roads } from './roads';
 import { BuildContext, Builder, RING_SIZES, RingOptions, RoadRequest } from './build';
-import { pieceRequest, TemplateOptions, TemplatePlan } from './interchange';
+import { diamondPlan, TemplateOptions, templatePlan, TemplatePlan } from './interchange';
 import {
   DEFAULT_RULE,
   FleetVehicle,
@@ -965,33 +965,22 @@ export class Game implements BuildContext {
 
   // ---------- Шаблоны развязок ----------
 
-  diamondPlan(_p: Vec, _radius: number): TemplatePlan {
-    return { ok: false, reason: 'Шаблоны развязок переезжают на полосы — скоро вернутся', pieces: [], cost: 0, preview: [], withTrunk: false };
+  diamondPlan(p: Vec, radius: number): TemplatePlan {
+    return diamondPlan(this.roads.net, this.roadBuilder, p, radius, this.budget);
   }
 
   /** Развязка по шаблону: на магистрали под курсором или в чистом поле вместе с магистралью. */
-  templatePlan(_p: Vec, _radius: number, _opts: TemplateOptions): TemplatePlan {
-    return { ok: false, reason: 'Шаблоны развязок переезжают на полосы — скоро вернутся', pieces: [], cost: 0, preview: [], withTrunk: false };
+  templatePlan(p: Vec, radius: number, opts: TemplateOptions): TemplatePlan {
+    return templatePlan(this.roads.net, this.roadBuilder, p, radius, this.budget, opts);
   }
 
-  /**
-   * Строит развязку по кускам. Если какой-то кусок не встал — всё, что успели построить,
-   * откатывается (как Ctrl+Z), чтобы не осталось полуразвязки.
-   */
+  /** Строит развязку целиком — одной правкой сети и одним шагом для Ctrl+Z. null — построилась. */
   buildTemplate(plan: TemplatePlan, label: string): string | null {
-    if (!plan.ok) return plan.reason ?? 'Нельзя построить';
+    if (!plan.ok || !plan.plan) return plan.reason ?? 'Нельзя построить';
     this.checkpoint(label);
-    for (const piece of plan.pieces) {
-      const req = pieceRequest(this.builder, piece);
-      const check = this.builder.plan(req);
-      if (!check.ok || !this.builder.build(req)) {
-        this.commit();
-        this.undo();
-        return check.reason ?? 'Не удалось построить развязку';
-      }
-    }
+    const ok = this.roadBuilder.apply(plan.plan);
     this.commit();
-    return null;
+    return ok ? null : 'Не удалось построить развязку';
   }
 
   // ---------- Ж/д сигналы ----------
@@ -2683,24 +2672,26 @@ export class Game implements BuildContext {
     if (town.population > before && satisfaction >= 1) this.notify(`${town.name} растёт: ${town.population} жителей`);
   }
 
-  /**
-   * Город прокладывает новую улицу: продлевает тупик наружу или отводит переулок от улицы
-   * на окраине. Без сноса, без мостов и без пересечений с чужими дорогами; бесплатно для игрока.
-   * Конец новой улицы цепляется к соседней дороге, если она рядом, — так появляются кварталы.
-   */
   /** Городская улица: на земле, не кольцо и не часть магистрали или развязки. */
   private streetLike(c: Corridor): boolean {
     const net = this.roads.net;
     return !c.ring && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c);
   }
 
+  /**
+   * Город прокладывает новую улицу: продлевает тупик наружу или отводит переулок от улицы
+   * на окраине. Без сноса, без мостов и без пересечений с чужими дорогами; бесплатно для игрока.
+   * Конец новой улицы цепляется к соседней дороге, если она рядом, — так появляются кварталы.
+   */
   private growStreet(town: Town): Corridor | null {
     const net = this.roads.net;
     const rng = this.rng;
     const candidates: { start: Anchor; dir: Vec }[] = [];
+    // Выезды станций — не тупики улиц: их город не продлевает.
+    const stationNodes = new Set([...this.stations.values()].map((st) => st.nodeId));
     // Тупики городских улиц — продолжаем их наружу (дорога сама выйдет по касательной).
     for (const n of net.nodesNear(town.center, town.radius + 150)) {
-      if (!net.isDeadEnd(n) || n.level !== 0 || n.corridors.length !== 1) continue;
+      if (!net.isDeadEnd(n) || n.level !== 0 || n.corridors.length !== 1 || stationNodes.has(n.id)) continue;
       const e = net.ends(n)[0];
       if (!this.streetLike(e.corridor)) continue;
       candidates.push({ start: { kind: 'node', node: n.id, pos: n.pos }, dir: scale(e.away, -1) });

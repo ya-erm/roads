@@ -1222,12 +1222,15 @@ export class Controller {
         break;
       }
       case 'template': {
+        // Можно построить — развязка как построенная; нельзя — контуры кусков красным и причина.
         const plan = g.templatePlan(p, this.snapRadius, this.templateOptions());
         const name = TEMPLATES.find((t) => t.id === this.templateKind)!.name;
-        if (plan.preview.length) o.template = { curves: plan.preview, ok: plan.ok };
-        o.label = plan.ok
-          ? { text: `${name}${plan.withTrunk ? ' вместе с магистралью (R — повернуть)' : ''} · ${money(plan.cost)}`, ok: true }
-          : { text: plan.reason ?? '', ok: false };
+        if (plan.ok && plan.plan) {
+          this.showRoadPlan(o, plan.plan, `${name}${plan.withTrunk ? ' вместе с магистралью (R — повернуть)' : ''} · ${money(plan.cost)}`);
+        } else {
+          if (plan.preview.length) o.template = { curves: plan.preview, ok: false };
+          o.label = { text: plan.reason ?? '', ok: false };
+        }
         break;
       }
       case 'signal': {

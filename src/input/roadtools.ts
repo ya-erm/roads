@@ -17,22 +17,10 @@ import {
   LaneDraft,
   startLane,
 } from '../lanes/edit';
-import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, oneWay, twoWay } from '../lanes/model';
-import { isDivided, MEDIAN, RoadClass, RoadSpec } from '../world/roadTypes';
+import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, profileOf } from '../lanes/model';
+import type { RoadSpec } from '../world/roadTypes';
 
-export interface RoadProfile {
-  cls: RoadClass;
-  lanes: LaneSlot[];
-  limit?: number;
-}
-
-/** Профиль дороги из настроек панели: класс, полосы (по ходу — справа), ограничение скорости. */
-export function profileOf(spec: RoadSpec): RoadProfile {
-  const f = spec.lanesF;
-  const b = spec.lanesB;
-  const lanes = b === 0 ? oneWay(f) : f === 0 ? oneWay(b) : twoWay(f, b, isDivided(spec) ? MEDIAN : 0);
-  return { cls: spec.cls, lanes, limit: spec.limit };
-}
+export { profileOf, type RoadProfile } from '../lanes/model';
 
 /**
  * Инструменты дороги на сети полос: строить (прямая, плавно, кривой), «Полоса» вдоль края,

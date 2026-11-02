@@ -70,7 +70,29 @@ describe('Снос рамкой', () => {
 });
 
 describe('Отмена развязки', () => {
-  it.todo('Ctrl+Z отменяет развязку, даже если город успел сам проложить улицу — шаблоны развязок на полосах, этап 4.5');
+  it('Ctrl+Z отменяет развязку, даже если город успел сам проложить улицу', () => {
+    const game = new Game(7);
+    const before = game.roads.net.corridors.size;
+    let built = false;
+    for (let y = 800; y < game.terrain.height - 800 && !built; y += 200) {
+      for (let x = 800; x < game.terrain.width - 800 && !built; x += 200) {
+        const plan = game.templatePlan({ x, y }, 14, { kind: 'diamond', angle: 0, trunk: { cls: 'motorway', lanesF: 2, lanesB: 2 } });
+        if (plan.ok) built = game.buildTemplate(plan, 'развязка «ромб»') === null;
+      }
+    }
+    expect(built).toBe(true);
+    const withTemplate = game.roads.net.corridors.size;
+    expect(withTemplate).toBeGreaterThan(before);
+    // Город растёт сам и прокладывает улицу.
+    const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
+    town.growthAcc = 400;
+    (game as unknown as { growTown(t: unknown): void }).growTown(town);
+    expect(game.roads.net.corridors.size).toBeGreaterThan(withTemplate);
+    expect(game.undo()).toBe('развязка «ромб»');
+    expect(game.roads.net.corridors.size).toBe(before);
+    // Ни один дом не остался без своей дороги.
+    for (const t of game.towns) for (const b of t.buildings) expect(game.roads.net.nodes.has(b.anchor)).toBe(true);
+  });
 
   it('выключатель в городе запрещает прокладывать улицы', () => {
     const game = new Game(7);

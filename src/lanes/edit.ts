@@ -1,4 +1,4 @@
-import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, splitBezier } from '../core/bezier';
+import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { LANE_W, RoadClass } from '../world/roadTypes';
 import { edgesAt, laneBand } from './geometry';
@@ -64,7 +64,9 @@ export function corridorUnder(net: LaneNet, p: Vec, margin = 0, level?: number):
     const e = edgesAt(c, hit.s);
     if (!e) continue;
     const d = dot(sub(p, hit.point), rightNormal(c.lut.tangentAt(hit.s)));
-    const out = Math.max(e[0] - 1.5 - d, d - e[1] - 1.5, 0);
+    // За концом полотна (на продолжении оси) — уже не на нём: сбоку там 0, а вдоль — сколько угодно.
+    const beyond = Math.sqrt(Math.max(0, hit.d * hit.d - d * d));
+    const out = Math.max(e[0] - 1.5 - d, d - e[1] - 1.5, beyond, 0);
     const score = out + hit.d * 0.01 + (level === undefined ? -h * 0.5 : Math.abs(h - level) * 5);
     if (out <= margin && score < bestD) {
       bestD = score;
@@ -638,6 +640,132 @@ export function buildRing(net: LaneNet, id: number, R: number, lanes: number): v
       prev = next;
     }
   }
+}
+
+// ---------- Куски развязок ----------
+
+/** Кусок шаблона развязки: откуда и куда (с высотами), профиль и форма (нет — прямая). */
+export interface Piece {
+  from: Vec;
+  fromLevel: number;
+  to: Vec;
+  toLevel: number;
+  o: RoadOptions;
+  curve?: Cubic;
+}
+
+/** Длина полосы торможения перед съездом и разгона после въезда. */
+const AUX = 110;
+
+/** Где на полотне-хозяине (магистрали) лежит точка p на высоте level; null — не на нём или у самого узла. */
+function hostAt(net: LaneNet, p: Vec, level: number, isHost: (c: Corridor) => boolean): { c: Corridor; s: number } | null {
+  let best: { c: Corridor; s: number } | null = null;
+  let bestD = 2;
+  for (const c of net.corridorsNear(p, 10)) {
+    if (!isHost(c)) continue;
+    const hit = c.lut.closest(p);
+    if (hit.d >= bestD || hit.s < 15 || c.length - hit.s < 15) continue;
+    if (Math.abs(net.heightAt(c, hit.s) - level) >= 0.5) continue;
+    best = { c, s: hit.s };
+    bestD = hit.d;
+  }
+  return best;
+}
+
+/** Где встаёт вспомогательная полоса направления flow: сразу за крайней сквозной полосой справа по ходу. */
+function auxOffset(c: Corridor, flow: Flow): number {
+  const through = c.lanes.filter((l) => l.flow === flow && l.from <= 0.01 && l.to >= c.length - 0.01);
+  if (!through.length) throw new EditError('Съезд против движения');
+  return flow > 0 ? Math.max(...through.map((l) => l.offset)) + LANE_W : Math.min(...through.map((l) => l.offset)) - LANE_W;
+}
+
+/** Вспомогательная полоса; рядом с такой же — сливается с ней (полоса переплетения между въездом и съездом). */
+function addAux(net: LaneNet, c: Corridor, lane: LaneSlot): void {
+  const lanes = [...c.lanes];
+  const i = lanes.findIndex((l) => Math.abs(l.offset - lane.offset) < 0.5 && l.flow === lane.flow && l.from <= lane.to + 40 && lane.from <= l.to + 40);
+  if (i >= 0) lanes[i] = { ...lanes[i], from: Math.min(lanes[i].from, lane.from), to: Math.max(lanes[i].to, lane.to) };
+  else lanes.push(lane);
+  net.setLanes(c, lanes);
+}
+
+/** Стык магистрали в точке p (там уже крепится другой съезд) — к нему же крепимся и мы. */
+function hostSeamAt(net: LaneNet, p: Vec, level: number, isHost: (c: Corridor) => boolean): LaneNode | null {
+  for (const n of net.nodesNear(p, 2)) {
+    if (n.kind !== 'seam' || Math.abs(n.level - level) >= 0.5 || dist(n.pos, p) >= 2) continue;
+    if (net.ends(n).some((e) => !e.port && isHost(e.corridor))) return n;
+  }
+  return null;
+}
+
+/**
+ * Съезд с полотна (out) или въезд на него в стыке seam по ходу flow: перед съездом — полоса торможения,
+ * после въезда — разгона; ответвление крепится к стыку боковым портом этой полосы.
+ */
+function attachAtSeam(net: LaneNet, seam: LaneNode, flow: Flow, out: boolean, isHost: (c: Corridor) => boolean): { node: LaneNode; port: number } {
+  // До стыка по ходу движения — полотно, чьё тело позади (side = −flow), после — впереди.
+  const hostEnds = net.ends(seam).filter((e) => !e.port && isHost(e.corridor));
+  const before = hostEnds.find((e) => e.side === -flow);
+  const after = hostEnds.find((e) => e.side === flow);
+  const mine = out ? before : after;
+  if (!mine) throw new EditError('Съезд не на магистрали');
+  const piece = mine.corridor;
+  const offset = auxOffset(piece, flow);
+  // Полоса примыкает к стыку на полную ширину, другим концом — отгоном.
+  const L = piece.length;
+  addAux(net, piece, mine.end === 'b' ? { offset, flow, from: Math.max(1, L - AUX), to: Infinity } : { offset, flow, from: 0, to: Math.min(L - 1, AUX) });
+  // По ту сторону стыка полоса не продолжается: съезд уводит её, въезд её начинает.
+  const other = out ? after : before;
+  if (other) {
+    const c = other.corridor;
+    const touches = (l: LaneSlot) => (other.end === 'b' ? l.to >= c.length - 0.01 : l.from <= 0.01);
+    const drop = (l: LaneSlot) => Math.abs(l.offset - offset) < 0.5 && l.flow === flow && touches(l);
+    if (c.lanes.some(drop)) net.setLanes(c, c.lanes.filter((l) => !drop(l)));
+  }
+  return { node: seam, port: offset };
+}
+
+/**
+ * Кусок развязки. Конец односторонней ветки на магистрали (isHost) — съезд или въезд по полосе;
+ * на другой дороге — перекрёсток; у тупика того же профиля — продолжение; иначе — новый тупик.
+ * Форма — заданная, касательные у стыков — по стыку.
+ */
+export function buildPiece(net: LaneNet, piece: Piece, isHost: (c: Corridor) => boolean): void {
+  const curve = piece.curve ?? straightCubic(piece.from, piece.to);
+  const ramp = piece.o.lanes.every((l) => l.flow > 0);
+  const t0 = norm(sub(curve.p1, curve.p0));
+  const t3 = norm(sub(curve.p3, curve.p2));
+  const end = (p: Vec, level: number, dir: Vec, start: boolean): { node: LaneNode; port: number; tangent: Vec } => {
+    // На магистрали: в её стыке (там уже крепится другой съезд) или посреди полотна — новым стыком.
+    let seam = ramp ? hostSeamAt(net, p, level, isHost) : null;
+    if (!seam && ramp) {
+      const host = hostAt(net, p, level, isHost);
+      if (host) seam = splitCorridor(net, host.c, host.s, 'seam').node;
+    }
+    if (seam) {
+      const flow: Flow = dot(dir, seam.dir) >= 0 ? 1 : -1;
+      const a = attachAtSeam(net, seam, flow, start, isHost);
+      return { ...a, tangent: scale(seam.dir, flow) };
+    }
+    const anchor = anchorAt(net, p, 6, level);
+    const r = resolveEnd(net, anchor.kind === 'free' ? { ...anchor, level } : anchor, dir, start, piece.o.lanes);
+    const tangent = r.side ? scale(r.node.dir, start ? r.side : -r.side) : dir;
+    return { node: r.node, port: 0, tangent };
+  };
+  const a = end(piece.from, piece.fromLevel, t0, true);
+  const b = end(piece.to, piece.toLevel, t3, false);
+  if (a.node.id === b.node.id) throw new EditError('Так не построить');
+  const p0 = net.portPos(a.node, a.port);
+  const p3 = net.portPos(b.node, b.port);
+  const h0 = piece.curve ? dist(curve.p0, curve.p1) : dist(p0, p3) / 3;
+  const h3 = piece.curve ? dist(curve.p3, curve.p2) : dist(p0, p3) / 3;
+  net.addCorridor(a.node.id, b.node.id, {
+    cls: piece.o.cls,
+    lanes: piece.o.lanes,
+    limit: piece.o.limit,
+    portA: a.port,
+    portB: b.port,
+    curve: { p0, p1: add(p0, scale(a.tangent, h0)), p2: sub(p3, scale(b.tangent, h3)), p3 },
+  });
 }
 
 /** Сносит полотно; перекрёсток, у которого осталась одна дорога, становится её тупиком. */
