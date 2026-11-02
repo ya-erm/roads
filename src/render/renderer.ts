@@ -266,7 +266,7 @@ export class Renderer {
     this.drawMarkings(groundRoads);
     this.drawGores(game, 0, view, 'paint');
     this.drawCrosswalks(game, view);
-    this.drawStopLines(game);
+    this.drawStopLines(game, view);
     this.drawRailSteel(groundRails);
     this.drawCrossings(game, view);
     this.drawSignals(game, view);
@@ -1504,12 +1504,15 @@ export class Renderer {
     ctx.stroke();
   }
 
-  private drawStopLines(game: Game): void {
+  /** Стоп-линии на въездах перекрёстков: пунктир — «уступи дорогу», сплошная — у светофора. */
+  private drawStopLines(game: Game, view: ReturnType<Renderer['view']>): void {
     if (this.camera.zoom < 0.6) return;
     const ctx = this.ctx;
-    for (const n of game.net.nodes.values()) {
-      if (n.segments.length < 3 || !(n.priorityLanes.size || n.lights)) continue;
-      for (const link of game.net.inLinks.get(n.id) ?? []) {
+    const g = game.roads.graph;
+    for (const n of g.nodes.values()) {
+      if (!(n.priorityLanes.size || n.lights)) continue;
+      if (n.pos.x < view.x0 || n.pos.x > view.x1 || n.pos.y < view.y0 || n.pos.y > view.y1) continue;
+      for (const link of g.inLinks.get(n.id) ?? []) {
         const yieldHere = !n.lights && !n.priorityLanes.has(link.lanes[0].id);
         if (!yieldHere && !n.lights) continue;
         ctx.strokeStyle = C.dash;
@@ -1517,9 +1520,10 @@ export class Renderer {
         ctx.setLineDash(yieldHere ? [2, 2] : []);
         ctx.beginPath();
         for (const lane of link.lanes) {
-          const N = { x: -lane.endDir.y, y: lane.endDir.x };
-          const a = add(lane.end, scale(N, LANE_W / 2 - 0.5));
-          const b = add(lane.end, scale(N, -LANE_W / 2 + 0.5));
+          const end = g.lanePose(lane, lane.length);
+          const N = { x: -end.dir.y, y: end.dir.x };
+          const a = add(end.pos, scale(N, LANE_W / 2 - 0.5));
+          const b = add(end.pos, scale(N, -LANE_W / 2 + 0.5));
           ctx.moveTo(a.x, a.y);
           ctx.lineTo(b.x, b.y);
         }
@@ -1531,13 +1535,14 @@ export class Renderer {
 
   private drawRoundabouts(game: Game): void {
     const ctx = this.ctx;
-    // Радиус и число полос кольца — по его живым участкам.
+    // Радиус и число полос кольца — по его живым полотнам.
+    const net = game.roads.net;
     const alive = new Map<number, { r: number; lanes: number }>();
-    for (const n of game.net.nodes.values()) {
-      if (n.roundabout === null) continue;
+    for (const n of net.nodes.values()) {
+      if (n.roundabout === null || n.roundabout === undefined) continue;
       const c = game.roundaboutCenters.get(n.roundabout);
-      const ring = n.segments.map((id) => game.net.segments.get(id)).find((s) => s?.ring);
-      if (c && ring) alive.set(n.roundabout, { r: dist(n.pos, c), lanes: ring.spec.lanesF });
+      const ring = n.corridors.map((id) => net.corridors.get(id)).find((s) => s?.ring);
+      if (c && ring) alive.set(n.roundabout, { r: dist(n.pos, c), lanes: ring.lanes.length });
     }
     for (const [id, { r, lanes }] of alive) {
       const c = game.roundaboutCenters.get(id)!;
@@ -1585,18 +1590,21 @@ export class Renderer {
     }
   }
 
+  /** Светофоры: столбик справа от крайней правой полосы каждого въезда, свет — по фазе. */
   private drawLights(game: Game): void {
     if (this.camera.zoom < 0.4) return;
     const ctx = this.ctx;
-    for (const n of game.net.nodes.values()) {
+    const g = game.roads.graph;
+    for (const n of g.nodes.values()) {
       const L = n.lights;
       if (!L) continue;
-      for (const link of game.net.inLinks.get(n.id) ?? []) {
+      for (const link of g.inLinks.get(n.id) ?? []) {
         const lane = link.lanes[link.lanes.length - 1];
         const inPhase = L.phases[L.phase].includes(lane.id);
         const color = !inPhase ? '#e8483f' : L.clearing ? '#f2c230' : '#3ad16b';
-        const N = { x: -lane.endDir.y, y: lane.endDir.x };
-        const p = add(lane.end, scale(N, LANE_W / 2 + 3));
+        const end = g.lanePose(lane, lane.length);
+        const N = { x: -end.dir.y, y: end.dir.x };
+        const p = add(end.pos, scale(N, LANE_W / 2 + 3));
         ctx.fillStyle = '#2a2e33';
         ctx.beginPath();
         ctx.arc(p.x, p.y, 2.8, 0, Math.PI * 2);
@@ -2465,19 +2473,21 @@ export class Renderer {
    */
   private drawJunctionPaths(game: Game, nodeId: number, edit: ToolOverlay['laneEdit']): void {
     const ctx = this.ctx;
-    const net = game.net;
+    const net = game.roads.net;
+    const g = game.roads.graph;
     const n = net.nodes.get(nodeId);
     if (!n) return;
     const z = this.camera.zoom;
+    const all = (g.inLinks.get(nodeId) ?? []).flatMap((l) => l.lanes.flatMap((lane) => g.movesFrom.get(lane.id) ?? [])).filter((m) => m.node === nodeId);
+    const radius = Math.max(12, ...all.map((m) => dist(n.pos, m.points[0])));
     ctx.strokeStyle = 'rgba(47,128,237,0.55)';
     ctx.lineWidth = 3 / z;
     ctx.beginPath();
-    ctx.arc(n.pos.x, n.pos.y, n.radius + 10, 0, Math.PI * 2);
+    ctx.arc(n.pos.x, n.pos.y, radius + 10, 0, Math.PI * 2);
     ctx.stroke();
     ctx.lineCap = 'round';
     const from = edit?.from ?? null;
     const active = from ? edit?.ends.find((e) => e.kind === 'in' && e.seg === from.seg && e.i === from.i) : undefined;
-    const all = net.nodeMovements.get(nodeId) ?? [];
     const mine = all.filter((m) => m.inLane === active?.lane);
     for (const m of [...all.filter((x) => !mine.includes(x)), ...mine]) {
       const bright = mine.includes(m);
@@ -2506,11 +2516,14 @@ export class Renderer {
     ctx.strokeStyle = 'rgba(232,72,63,0.85)';
     ctx.lineWidth = 2 / z;
     ctx.setLineDash([4 / z, 4 / z]);
+    const ends = net.ends(n);
     for (const key of n.bans ?? []) {
       const [from, to] = key.split('>').map(Number);
-      if (!net.segments.has(from) || !net.segments.has(to)) continue;
-      const a = add(n.pos, scale(net.dirFrom(nodeId, from), n.radius + 8));
-      const b = add(n.pos, scale(net.dirFrom(nodeId, to), n.radius + 8));
+      const ef = ends.find((e) => e.corridor.id === from);
+      const et = ends.find((e) => e.corridor.id === to);
+      if (!ef || !et) continue;
+      const a = add(n.pos, scale(ef.away, radius + 8));
+      const b = add(n.pos, scale(et.away, radius + 8));
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.quadraticCurveTo(n.pos.x, n.pos.y, b.x, b.y);
@@ -2528,7 +2541,7 @@ export class Renderer {
     const ctx = this.ctx;
     const z = this.camera.zoom;
     const r = laneMarkRadius(z);
-    const linked = new Set(active ? (game.net.movesFrom.get(active.lane) ?? []).map((m) => m.outLane) : []);
+    const linked = new Set(active ? (game.roads.graph.movesFrom.get(active.lane) ?? []).map((m) => m.outLane) : []);
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 200);
     for (const e of edit.ends) {
       const isActive = e.lane === active?.lane;

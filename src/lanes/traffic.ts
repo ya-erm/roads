@@ -1,4 +1,4 @@
-import { IDM } from '../config';
+import { IDM, LIGHTS } from '../config';
 import { lerp as lerpNum } from '../core/math';
 import { rightNormal, scale, add, type Vec } from '../core/vec';
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
@@ -79,6 +79,15 @@ export class LaneTraffic {
    * полоса у их положения), и прокладывают маршрут заново. Кому некуда — теряются.
    */
   rebind(graph: LaneGraph): void {
+    // Светофоры не сбрасываются: та же фаза и тот же отсчёт, если фаз столько же.
+    for (const [id, g] of graph.nodes) {
+      const was = this.graph.nodes.get(id)?.lights;
+      if (g.lights && was && was.phases.length === g.lights.phases.length) {
+        g.lights.phase = was.phase;
+        g.lights.timer = was.timer;
+        g.lights.clearing = was.clearing;
+      }
+    }
     this.graph = graph;
     for (const veh of [...this.vehicles.values()]) {
       veh.onMovement = null;
@@ -217,6 +226,7 @@ export class LaneTraffic {
 
   step(dt: number): void {
     this.time += dt;
+    this.updateLights(dt);
     const list = [...this.vehicles.values()];
     for (const veh of list) if (!veh.onMovement) this.laneChange(veh, dt);
     const accel = new Map<Vehicle, number>();
@@ -484,7 +494,7 @@ export class LaneTraffic {
   private grantLookahead(veh: Vehicle, m: GMove): number {
     const stop = (veh.v * veh.v) / (2 * IDM.brake * 0.6) + 6;
     const node = this.graph.nodes.get(m.node!)!;
-    const through = m.conflicts.size === 0 || node.priorityLanes.has(m.inLane);
+    const through = !node.lights && (m.conflicts.size === 0 || node.priorityLanes.has(m.inLane));
     if (!through) return Math.max(stop, 8);
     const sStar = IDM.minGap + veh.v * IDM.headway + (veh.v * veh.v) / (2 * Math.sqrt(veh.accel * IDM.brake));
     return Math.max(stop, sStar * 3, 8);
@@ -604,6 +614,52 @@ export class LaneTraffic {
 
   // ---------- Проезд узлов ----------
 
+  /** Зелёный ли этой полосе въезда (без светофора — всегда). */
+  private lightAllows(node: GNode, m: GMove): boolean {
+    const L = node.lights;
+    if (!L) return true;
+    return !L.clearing && L.phases[L.phase].includes(m.inLane);
+  }
+
+  /** Сколько машин подъезжает к узлу по полосам фазы. */
+  private phaseDemand(phase: number[]): number {
+    let demand = 0;
+    for (const id of phase) {
+      const lane = this.graph.lanes.get(id);
+      if (!lane) continue;
+      for (const veh of lane.vehicles) if (lane.length - veh.s < 70) demand++;
+    }
+    return demand;
+  }
+
+  /** Светофоры: зелёный по фазам по кругу, между ними — жёлтый; «умный» пропускает пустые фазы и держит зелёный, пока никто не ждёт. */
+  private updateLights(dt: number): void {
+    for (const node of this.graph.nodes.values()) {
+      const L = node.lights;
+      if (!L) continue;
+      L.timer -= dt;
+      if (L.timer > 0) continue;
+      const settings = this.graph.net.nodes.get(node.id);
+      const adaptive = settings?.adaptive !== false;
+      if (L.clearing) {
+        L.clearing = false;
+        for (let i = 1; i <= L.phases.length; i++) {
+          const p = (L.phase + i) % L.phases.length;
+          if (!adaptive || this.phaseDemand(L.phases[p]) > 0 || i === L.phases.length) {
+            L.phase = p;
+            break;
+          }
+        }
+        L.timer = settings?.greens?.[L.phase] ?? LIGHTS.green;
+      } else if (adaptive && !L.phases.some((p, i) => i !== L.phase && this.phaseDemand(p) > 0)) {
+        L.timer = 2;
+      } else {
+        L.clearing = true;
+        L.timer = LIGHTS.clearance;
+      }
+    }
+  }
+
   private tryGrant(veh: Vehicle, m: GMove): boolean {
     const node = this.graph.nodes.get(m.node!)!;
     if (veh.waitingAt !== node.id) {
@@ -612,7 +668,7 @@ export class LaneTraffic {
       veh.requestTime = this.time;
       node.waiting.push(veh);
     }
-    veh.ready = this.hasSpace(node, m, veh);
+    veh.ready = this.lightAllows(node, m) && this.hasSpace(node, m, veh);
     if (!veh.ready) return false;
     // Подстраховка от зависших броней: держать узел может только машина на манёвре
     // или первая в своей полосе с действующим разрешением.

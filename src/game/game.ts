@@ -2,6 +2,7 @@ import {
   CAR_COLORS,
   COST,
   ECONOMY,
+  LIGHTS,
   MIN_SEGMENT_LEN,
   MONTH_LENGTH,
   RAIL_STATION,
@@ -13,15 +14,15 @@ import {
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../core/vec';
-import { Anchor, anchorAt } from '../lanes/edit';
-import { Corridor, LaneNet, LaneNetSave, LaneNode, twoWay } from '../lanes/model';
+import { Anchor, anchorAt, buildRing } from '../lanes/edit';
+import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, parseLaneKey, twoWay } from '../lanes/model';
 import type { LaneTraffic } from '../lanes/traffic';
 import { RailSim, Train } from '../sim/rail';
 import type { Vehicle } from '../sim/vehicle';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
 import { Industry, Station, StationServes, Structure, Town, TOWN_NEED, TownBuilding } from '../world/entities';
 import { Network, NetworkSave } from '../world/network';
-import { halfWidth, isRail, isTrunk, RAIL_HALF, RAIL_SPEC, specCost } from '../world/roadTypes';
+import { halfWidth, isRail, isTrunk, LANE_W, RAIL_HALF, RAIL_SPEC, specCost } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
 import { DEFAULT_SETTINGS, WorldSettings } from '../world/settings';
 import { Terrain } from '../world/terrain';
@@ -40,7 +41,7 @@ import {
 import { findCrossings, LevelCrossing } from './crossings';
 import { corridorCost, RoadBuilder, RoadPlan } from './roadbuild';
 import { Roads } from './roads';
-import { BuildContext, Builder, RoadRequest } from './build';
+import { BuildContext, Builder, RING_SIZES, RingOptions, RoadRequest } from './build';
 import { pieceRequest, TemplateOptions, TemplatePlan } from './interchange';
 import {
   DEFAULT_RULE,
@@ -137,6 +138,11 @@ export interface LaneEnd {
 
 /** Сколько последних строек можно отменить. */
 const UNDO_DEPTH = 30;
+
+/** Плата за кольцо: растёт с радиусом и числом полос. */
+function roundaboutFee(R: number, lanes: number): number {
+  return Math.round((COST.roundabout * (R / 40) * (0.6 + 0.4 * lanes)) / 100) * 100;
+}
 
 /** Снимок построек до действия игрока — для Ctrl+Z. */
 interface UndoSnapshot {
@@ -1038,27 +1044,177 @@ export class Game implements BuildContext {
 
   // ---------- Настройка перекрёстка ----------
 
-  /** Меняет главную дорогу, запреты поворотов или режим светофора на перекрёстке. */
+  /**
+   * Меняет главную дорогу, запреты поворотов или режим светофора на перекрёстке.
+   * Новый запрет поворота снимает связи полос в ту сторону.
+   */
   setJunction(nodeId: number, patch: Partial<Pick<LaneNode, 'mainPair' | 'bans' | 'greens' | 'adaptive'>>): void {
     const n = this.roads.net.nodes.get(nodeId);
     if (!n) return;
     Object.assign(n, patch);
+    if (patch.bans && n.lanes) {
+      n.lanes = n.lanes.filter((k) => {
+        const l = parseLaneKey(k);
+        return !l || !patch.bans!.includes(`${l.from}>${l.to}`);
+      });
+      if (!n.lanes.length) delete n.lanes;
+    }
     this.roads.net.version++;
     this.networkChanged();
   }
 
-  /** Метки полос перекрёстка для настройки связей на карте. Связи полос на новой модели — позже. */
-  laneEnds(_nodeId: number): LaneEnd[] {
-    return [];
+  /**
+   * Кольцо на месте перекрёстка у курсора: радиус по выбранному размеру (но чтобы влезли примыкающие дороги
+   * и полосы кольца), проверки места и цена — как у любой стройки дорог.
+   */
+  roundaboutPlan(p: Vec, radius: number, opts: RingOptions): { ok: boolean; reason?: string; cost: number; r: number; center?: Vec; plan?: RoadPlan } {
+    const net = this.roads.net;
+    const n = net
+      .nodesNear(p, radius + 20)
+      .filter((x) => x.kind === 'junction')
+      .sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0];
+    if (!n) return { ok: false, reason: 'Выберите перекрёсток', cost: 0, r: RING_SIZES[opts.size] };
+    const ends = net.ends(n);
+    const ringHalf = (opts.lanes * LANE_W) / 2 + 2;
+    const R = Math.max(RING_SIZES[opts.size], Math.max(...ends.map((e) => corridorHalf(e.corridor))) * 2 + 14, ringHalf + 14);
+    const res = { cost: 0, r: R, center: n.pos };
+    const fail = (reason: string) => ({ ok: false, reason, ...res });
+    if ((n.roundabout ?? null) !== null) return fail('Уже кольцо');
+    if (n.level !== 0) return fail('Кольцо только на земле');
+    if (ends.length < 2) return fail('Нужен перекрёсток');
+    if ([...this.stations.values()].some((st) => st.nodeId === n.id)) return fail('Это выезд станции');
+    for (const e of ends) if (e.corridor.ring || !net.isFlat(e.corridor)) return fail('Рядом пандус');
+    const angles = ends.map((e) => angleOf(e.away)).sort((a, b) => a - b);
+    for (let i = 0; i < angles.length; i++) {
+      const next = i + 1 < angles.length ? angles[i + 1] : angles[0] + Math.PI * 2;
+      if (next - angles[i] < 0.6) return fail('Дороги сходятся слишком остро');
+    }
+    if (net.nodesNear(n.pos, R + 8).some((o) => o.id !== n.id && Math.abs(o.level - n.level) < 1)) return fail('Мало места');
+    for (let i = 0; i < 36; i++) {
+      const a = (i / 36) * Math.PI * 2;
+      if (this.isWater(add(n.pos, { x: Math.cos(a) * R, y: Math.sin(a) * R }), ringHalf)) return fail('Мешает вода');
+    }
+    const id = n.id;
+    const plan = this.roadBuilder.plan((x) => buildRing(x, id, R, opts.lanes));
+    // Кольцо — стройка: платим за него сверх разницы в стоимости дорог.
+    const cost = plan.cost + roundaboutFee(R, opts.lanes);
+    if (plan.ok && cost > this.budget) return { ok: false, reason: 'Не хватает денег', cost, r: R, center: n.pos, plan };
+    return { ok: plan.ok, reason: plan.reason, cost, r: R, center: n.pos, plan };
   }
 
-  /** Соединяет полосу въезда с полосой выезда или разъединяет их (на новой модели — позже). */
-  toggleLaneConnection(_nodeId: number, _inSeg: number, _i: number, _outSeg: number, _j: number): string | null {
-    return 'Связи полос скоро вернутся';
+  /** Строит кольцо на месте перекрёстка у курсора. false — нельзя. */
+  buildRoundabout(p: Vec, radius: number, opts: RingOptions): boolean {
+    const check = this.roundaboutPlan(p, radius, opts);
+    if (!check.ok || !check.plan || !check.center) return false;
+    const center = { ...check.center };
+    const ringId = [...check.plan.net!.nodes.values()].find((x) => x.roundabout !== undefined && x.roundabout !== null)?.roundabout;
+    if (ringId === undefined || ringId === null) return false;
+    this.roundaboutCenters.set(ringId, center);
+    if (!this.roadBuilder.apply(check.plan)) {
+      this.roundaboutCenters.delete(ringId);
+      return false;
+    }
+    this.spend(roundaboutFee(check.r, opts.lanes));
+    return true;
+  }
+
+  /** Можно ли поставить (или снять) светофор на перекрёстке и во что это обойдётся (минус — возврат). */
+  lightsPlan(nodeId: number): { ok: boolean; reason?: string; cost: number } {
+    const n = this.roads.net.nodes.get(nodeId);
+    const cost = COST.trafficLight;
+    if (!n || n.kind !== 'junction') return { ok: false, reason: 'Кликните по перекрёстку', cost };
+    if (n.control === 'lights') return { ok: true, cost: -Math.round(cost * COST.refundRatio) };
+    if ((n.roundabout ?? null) !== null) return { ok: false, reason: 'Это кольцо', cost };
+    if (this.roads.net.ends(n).length < 3) return { ok: false, reason: 'Светофор — на перекрёстке от трёх дорог', cost };
+    if (cost > this.budget) return { ok: false, reason: 'Не хватает денег', cost };
+    return { ok: true, cost };
+  }
+
+  /** Ставит или снимает светофор. */
+  toggleLights(nodeId: number): boolean {
+    const plan = this.lightsPlan(nodeId);
+    const n = this.roads.net.nodes.get(nodeId);
+    if (!plan.ok || !n) return false;
+    if (n.control === 'lights') {
+      delete n.control;
+      this.refund(COST.trafficLight);
+    } else {
+      n.control = 'lights';
+      this.spend(COST.trafficLight);
+    }
+    this.roads.net.version++;
+    this.networkChanged();
+    return true;
+  }
+
+  /** Метки полос перекрёстка для настройки связей на карте: въезды (у стоп-линии) и выезды. */
+  laneEnds(nodeId: number): LaneEnd[] {
+    const n = this.roads.net.nodes.get(nodeId);
+    if (!n || n.kind !== 'junction') return [];
+    const g = this.roads.graph;
+    const custom = new Set((n.lanes ?? []).map((k) => k.split('>')[0]));
+    const outs = g.outLinks.get(nodeId) ?? [];
+    const res: LaneEnd[] = [];
+    for (const l of g.inLinks.get(nodeId) ?? []) {
+      const exits = outs.filter((o) => o.corridor !== l.corridor && !n.bans?.includes(`${l.corridor}>${o.corridor}`)).map((o) => o.corridor);
+      l.lanes.forEach((lane, idx) => {
+        const i = l.lanes.length - 1 - idx;
+        const pose = g.lanePose(lane, Math.max(0, lane.length - 6));
+        res.push({ kind: 'in', seg: l.corridor, i, lane: lane.id, pos: pose.pos, dir: pose.dir, custom: custom.has(`${l.corridor}.${i}`), exits });
+      });
+    }
+    for (const l of outs) {
+      l.lanes.forEach((lane, idx) => {
+        const pose = g.lanePose(lane, Math.min(lane.length, 6));
+        res.push({ kind: 'out', seg: l.corridor, i: l.lanes.length - 1 - idx, lane: lane.id, pos: pose.pos, dir: pose.dir, custom: false, exits: [] });
+      });
+    }
+    return res;
+  }
+
+  /**
+   * Соединяет полосу въезда (полотно inSeg, полоса i справа) с полосой выезда или разъединяет их.
+   * Первый клик по ненастроенной полосе переносит её автоматические связи в настройку. null — получилось.
+   */
+  toggleLaneConnection(nodeId: number, inSeg: number, i: number, outSeg: number, j: number): string | null {
+    const n = this.roads.net.nodes.get(nodeId);
+    if (!n || n.kind !== 'junction') return 'Нет перекрёстка';
+    if (inSeg === outSeg) return 'Разворот на ту же дорогу нельзя';
+    const ends = this.laneEnds(nodeId);
+    const from = ends.find((e) => e.kind === 'in' && e.seg === inSeg && e.i === i);
+    const to = ends.find((e) => e.kind === 'out' && e.seg === outSeg && e.i === j);
+    if (!from || !to) return 'Нет такой полосы';
+    if (!from.exits.includes(outSeg)) return 'С этой полосы сюда не проехать';
+    const prefix = `${inSeg}.${i}>`;
+    let lanes = [...(n.lanes ?? [])];
+    if (!lanes.some((k) => k.startsWith(prefix))) {
+      const g = this.roads.graph;
+      for (const m of g.movesFrom.get(from.lane) ?? []) {
+        if (m.node !== nodeId) continue;
+        const out = g.lanes.get(m.outLane)!;
+        const link = g.links.get(out.link)!;
+        lanes.push(laneKey({ from: inSeg, i, to: link.corridor, j: link.lanes.length - 1 - out.index }));
+      }
+    }
+    const key = laneKey({ from: inSeg, i, to: outSeg, j });
+    if (lanes.includes(key)) {
+      if (lanes.filter((k) => k.startsWith(prefix)).length <= 1) return 'Полоса без выезда — тупик';
+      lanes = lanes.filter((k) => k !== key);
+    } else lanes.push(key);
+    n.lanes = lanes;
+    this.roads.net.version++;
+    this.networkChanged();
+    return null;
   }
 
   /** Возвращает всем полосам перекрёстка автоматические связи. */
-  resetLanes(_nodeId: number): void {}
+  resetLanes(nodeId: number): void {
+    const n = this.roads.net.nodes.get(nodeId);
+    if (!n?.lanes) return;
+    delete n.lanes;
+    this.roads.net.version++;
+    this.networkChanged();
+  }
 
   /**
    * Что показать в карточке перекрёстка: подъезды по сторонам света, главная дорога,
@@ -1094,15 +1250,26 @@ export class Game implements BuildContext {
     }
     const priority = g.nodes.get(nodeId)?.priorityLanes ?? new Set<number>();
     const mainNow = [...new Set(ins.filter((l) => l.lanes.some((lane) => priority.has(lane.id))).map((l) => l.corridor))];
+    // Фазы светофора: чьи подъезды едут вместе, сколько горит зелёный, какая сейчас.
+    const L = g.nodes.get(nodeId)?.lights;
+    const corridorOfLane = (id: number) => g.links.get(g.lanes.get(id)?.link ?? -1)?.corridor;
+    const phases = (L?.phases ?? []).map((ph, i) => ({
+      approaches: [...new Set(ph.map(corridorOfLane).filter((x): x is number => x !== undefined))].map(label),
+      green: n.greens?.[i] ?? LIGHTS.green,
+      active: !!L && i === L.phase && !L.clearing,
+    }));
+    const here = new Set(approaches.map((a) => a.seg));
+    const links = (n.lanes ?? []).map(parseLaneKey).filter((l): l is LaneLink => !!l && here.has(l.from) && here.has(l.to));
+    const customLanes = new Set(links.map((l) => `${l.from}.${l.i}`)).size;
     return {
       node: n,
       approaches,
       turns,
       pairs: pairs.map((p) => ({ segs: p, name: `${label(p[0]).name}–${label(p[1]).name}` })),
       mainNow,
-      phases: [],
+      phases,
       label,
-      customLanes: 0,
+      customLanes,
     };
   }
 

@@ -157,6 +157,7 @@ export class RoadBuilder {
       (n) => {
         const c = n.corridors.get(id);
         if (!c) return false;
+        if (c.ring) throw new EditError('Кольцо не перестраивается');
         c.cls = p.cls;
         c.limit = p.limit;
         n.setLanes(c, p.lanes);

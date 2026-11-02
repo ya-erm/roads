@@ -80,6 +80,39 @@ export interface LaneNode {
   adaptive?: boolean;
   /** Узел кольца с этим центром (id из списка колец игры). */
   roundabout?: number | null;
+  /**
+   * Связи полос, заданные игроком (laneKey). Полоса въезда, у которой есть хоть одна связь, едет
+   * только по своим связям; остальные распределяются сами.
+   */
+  lanes?: string[];
+}
+
+/** Связь полос на перекрёстке: полоса i (справа) полотна from → полоса j (справа) полотна to. */
+export interface LaneLink {
+  from: number;
+  i: number;
+  to: number;
+  j: number;
+}
+
+export const laneKey = (l: LaneLink) => `${l.from}.${l.i}>${l.to}.${l.j}`;
+
+export function parseLaneKey(key: string): LaneLink | null {
+  const m = /^(\d+)\.(\d+)>(\d+)\.(\d+)$/.exec(key);
+  return m ? { from: Number(m[1]), i: Number(m[2]), to: Number(m[3]), j: Number(m[4]) } : null;
+}
+
+/** Полотно from у узла теперь называется to (его разрезали): настройки перекрёстка — на новое имя. */
+export function renameArm(n: LaneNode, from: number, to: number): void {
+  const swap = (x: number) => (x === from ? to : x);
+  if (n.bans) n.bans = n.bans.map((k) => k.split('>').map((x) => swap(Number(x))).join('>'));
+  if (n.mainPair) n.mainPair = n.mainPair.map(swap);
+  if (n.lanes) {
+    n.lanes = n.lanes.map((k) => {
+      const l = parseLaneKey(k);
+      return l ? laneKey({ ...l, from: swap(l.from), to: swap(l.to) }) : k;
+    });
+  }
 }
 
 /** Конец полотна в узле. */

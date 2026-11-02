@@ -269,7 +269,12 @@ export class RoadTools {
   /** Узел у курсора (перекрёсток, стык, тупик), кроме узлов станций — их двигают вместе со станцией. */
   nodeAt(p: Vec, r: number): LaneNode | null {
     const stations = this.stationNodes();
-    return this.net.nodesNear(p, r).filter((n) => !stations.has(n.id)).sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0] ?? null;
+    return (
+      this.net
+        .nodesNear(p, r)
+        .filter((n) => !stations.has(n.id) && (n.roundabout ?? null) === null)
+        .sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0] ?? null
+    );
   }
 
   private stationNodes(): Set<number> {
@@ -317,7 +322,7 @@ export class RoadTools {
       return true;
     }
     const c = corridorUnder(this.net, p, r * 0.3);
-    if (c) {
+    if (c && !c.ring) {
       this.bend = c.id;
       this.editCorridor = c.id;
       return true;

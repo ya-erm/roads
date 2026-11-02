@@ -713,14 +713,14 @@ export class Hud {
       case 'jn-ban': {
         // Настройки перекрёстка — тоже стройка: их можно отменить Ctrl+Z.
         const id = Number(d.id);
-        const n = g.net.nodes.get(id);
+        const n = g.roads.net.nodes.get(id);
         if (!n) break;
         g.checkpoint('настройка перекрёстка');
-        if (d.action === 'jn-lights') g.builder.toggleLights(n.pos, 4);
+        if (d.action === 'jn-lights') g.toggleLights(id);
         else if (d.action === 'jn-lanes-reset') g.resetLanes(id);
         else if (d.action === 'jn-adaptive') g.setJunction(id, { adaptive: d.v === '1' });
         else if (d.action === 'jn-green') {
-          const count = n.lights?.phases.length ?? 0;
+          const count = g.junctionInfo(id)?.phases.length ?? 0;
           const greens = Array.from({ length: count }, (_, i) => n.greens?.[i] ?? LIGHTS.green);
           const i = Number(d.i);
           greens[i] = Math.max(4, Math.min(40, greens[i] + Number(d.d)));
@@ -1481,7 +1481,7 @@ export class Hud {
     if (!info) return `<section class="detail">${head}<p class="muted">Перекрёстка больше нет.</p></section>`;
     const n = info.node;
     const lights = n.control === 'lights';
-    const check = g.builder.canToggleLights(n.pos, 4);
+    const check = g.lightsPlan(id);
     const toggle = `<button class="small ${lights ? 'primary' : ''}" data-action="jn-lights" data-id="${id}" ${check.ok ? '' : 'disabled'} title="${esc(check.reason ?? '')}">
       🚦 ${lights ? `Светофор включён · убрать +${money(-check.cost)}` : `Поставить светофор · ${money(check.cost)}`}</button>`;
     const attrs = `data-id="${id}"`;
@@ -1499,7 +1499,7 @@ export class Hud {
           <button class="opt ${adaptive ? 'active' : ''}" data-action="jn-adaptive" ${attrs} data-v="1" title="Пропускает пустые фазы и держит зелёный, пока никто не ждёт">Умный</button>
           <button class="opt ${!adaptive ? 'active' : ''}" data-action="jn-adaptive" ${attrs} data-v="0" title="Строго по кругу с заданным временем">По таймеру</button></div></div>
         <div class="rule-row"><span class="lbl2">Фазы: кому зелёный</span>${phases}</div>`;
-    } else if (n.roundabout === null && info.approaches.length >= 3) {
+    } else if ((n.roundabout ?? null) === null && info.approaches.length >= 3) {
       const manual = n.mainPair;
       const isAuto = manual === undefined || manual === null;
       const isNone = !!manual && manual.length === 0;

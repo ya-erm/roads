@@ -1,10 +1,10 @@
-import { CAR_WIDTH } from '../config';
+import { CAR_WIDTH, LIGHTS } from '../config';
 import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub, Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
 import { assignLanes, type ConflictKind } from '../world/network';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
 import { junctionCuts, pointOff } from './geometry';
-import { Corridor, End, Flow, LaneNet, LaneNode } from './model';
+import { Corridor, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey } from './model';
 
 /**
  * Связь — отрезок полотна, на котором набор полос одного направления не меняется.
@@ -70,13 +70,22 @@ export interface GMove {
   vehicles: Vehicle[];
 }
 
-/** Перекрёсток или тупик во время движения: кто проезжает, кто ждёт, кто главный. */
+/** Светофор: фазы — полосы въезда, которым зелёный одновременно; между фазами — жёлтый (clearing). */
+export interface LightState {
+  phases: number[][];
+  phase: number;
+  timer: number;
+  clearing: boolean;
+}
+
+/** Перекрёсток или тупик во время движения: кто проезжает, кто ждёт, кто главный, светофор. */
 export interface GNode {
   id: number;
   pos: Vec;
   priorityLanes: Set<number>;
   reserved: Vehicle[];
   waiting: Vehicle[];
+  lights: LightState | null;
 }
 
 export const laneSpeed = (c: Corridor) => (c.limit ?? ROAD_CLASSES[c.cls].limit) / KMH_PER_UNIT;
@@ -271,7 +280,7 @@ export class LaneGraph {
   private nodeState(n: LaneNode): GNode {
     let g = this.nodes.get(n.id);
     if (!g) {
-      g = { id: n.id, pos: n.pos, priorityLanes: new Set(), reserved: [], waiting: [] };
+      g = { id: n.id, pos: n.pos, priorityLanes: new Set(), reserved: [], waiting: [], lights: null };
       this.nodes.set(n.id, g);
     }
     return g;
@@ -283,7 +292,21 @@ export class LaneGraph {
     const ins = [...this.links.values()].filter((l) => l.toNode === n.id);
     const outs = [...this.links.values()].filter((l) => l.fromNode === n.id);
     const list: GMove[] = [];
+    // Связи полос, заданные игроком: полоса въезда (полотно.номер справа) → куда.
+    const custom = new Map<string, LaneLink[]>();
+    for (const key of n.lanes ?? []) {
+      const l = parseLaneKey(key);
+      if (l) push(custom, `${l.from}.${l.i}`, l);
+    }
     for (const inL of ins) {
+      // Настроенные полосы — только по своим связям.
+      inL.lanes.forEach((lane, idx) => {
+        for (const l of custom.get(`${inL.corridor}.${inL.lanes.length - 1 - idx}`) ?? []) {
+          const out = outs.find((o) => o.corridor === l.to && o.corridor !== inL.corridor);
+          const outLane = out?.lanes[out.lanes.length - 1 - l.j];
+          if (out && outLane) list.push(this.turn(n.id, inL, lane, out, outLane));
+        }
+      });
       const inDir = this.lanePose(inL.lanes[0], inL.length).dir;
       const exits = outs
         // Разворот на то же полотно и повороты, запрещённые игроком, — нельзя.
@@ -298,6 +321,7 @@ export class LaneGraph {
       );
       exits.forEach((e, k) => {
         for (const [fromRight, outFromRight] of pairs[k]) {
+          if (custom.has(`${inL.corridor}.${fromRight}`)) continue;
           list.push(this.turn(n.id, inL, inL.lanes[inL.lanes.length - 1 - fromRight], e.link, e.link.lanes[e.link.lanes.length - 1 - outFromRight]));
         }
       });
@@ -312,6 +336,11 @@ export class LaneGraph {
         list[i].zones.set(list[j].key, conflictZone(list[i], list[j]));
         list[j].zones.set(list[i].key, conflictZone(list[j], list[i]));
       }
+    }
+    // Светофор: встречные подъезды едут в одну фазу; главной дороги нет — решает свет.
+    if (n.control === 'lights' && ins.length >= 2 && this.net.ends(n).length >= 3) {
+      state.lights = { phases: this.groupPhases(ins), phase: 0, timer: LIGHTS.green, clearing: false };
+      return;
     }
     // Кольцо главнее въездов в него.
     const ring = ins.filter((l) => this.net.corridor(l.corridor).ring);
@@ -328,6 +357,30 @@ export class LaneGraph {
       for (const l of ins) if (main.includes(l.corridor)) for (const lane of l.lanes) state.priorityLanes.add(lane.id);
       if (ins.every((l) => main.includes(l.corridor))) state.priorityLanes.clear();
     }
+  }
+
+  /** Фазы светофора: каждый подъезд — со встречным (если есть), остальные — по одному. */
+  private groupPhases(ins: GLink[]): number[][] {
+    const dirOf = (l: GLink) => this.lanePose(l.lanes[0], l.length).dir;
+    const left = [...ins];
+    const phases: number[][] = [];
+    while (left.length) {
+      const first = left.shift()!;
+      const d1 = dirOf(first);
+      let bestIdx = -1;
+      let bestDot = -0.7;
+      left.forEach((l, i) => {
+        const d = dot(d1, dirOf(l));
+        if (d < bestDot) {
+          bestDot = d;
+          bestIdx = i;
+        }
+      });
+      const group = [first];
+      if (bestIdx >= 0) group.push(left.splice(bestIdx, 1)[0]);
+      phases.push(group.flatMap((l) => l.lanes.map((lane) => lane.id)));
+    }
+    return phases;
   }
 
   private mainPair(n: LaneNode): [number, number] | null {

@@ -1,8 +1,8 @@
-import { arcCubic, Cubic, CurveLUT, intersectCurves, splitBezier } from '../core/bezier';
+import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, splitBezier } from '../core/bezier';
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { LANE_W, RoadClass } from '../world/roadTypes';
 import { edgesAt, laneBand } from './geometry';
-import { Corridor, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, slot } from './model';
+import { Corridor, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot } from './model';
 
 /** Начало или конец новой дороги: узел (тупик или перекрёсток), место на полотне или чистое поле. */
 export type Anchor =
@@ -110,6 +110,13 @@ export function splitCorridor(net: LaneNet, c: Corridor, s: number, kind: NodeKi
   net.removeCorridor(c.id, true);
   const first = net.addCorridor(a, node.id, { cls, lanes: lanes1, portA, curve: c1, limit, ring });
   const second = net.addCorridor(node.id, b, { cls, lanes: lanes2, portB, curve: c2, limit, ring });
+  // Настройки перекрёстков на концах (запреты, главная, связи полос) — на новые куски.
+  if (a !== b) {
+    renameArm(net.node(a), c.id, first.id);
+    renameArm(net.node(b), c.id, second.id);
+  }
+  // Новый въезд на кольцо — тоже узел кольца.
+  if (ring) node.roundabout = net.node(a).roundabout ?? null;
   return { node, first, second };
 }
 
@@ -573,6 +580,62 @@ export function dragHandle(net: LaneNet, h: Handle, p: Vec, kink = false): boole
     net.setCurve(e.corridor, cv);
   }
   return true;
+}
+
+// ---------- Кольцо ----------
+
+/** Где полотно от конца end отходит от точки center на R (по прямой); длина от конца. null — не отходит. */
+export function distanceAlong(c: Corridor, end: End, center: Vec, R: number): number | null {
+  for (let s = 0; s <= c.length; s += 1) {
+    if (dist(c.lut.pointAt(end === 'a' ? s : c.length - s), center) >= R) return s;
+  }
+  return null;
+}
+
+/**
+ * Кольцо вместо перекрёстка id: дороги режутся на радиусе R, их куски внутри убираются, въезды
+ * соединяются дугами против часовой стрелки на экране (полосы lanes, полотна ring). Узлы кольца
+ * помечаются id перекрёстка — по нему игра находит центр.
+ */
+export function buildRing(net: LaneNet, id: number, R: number, lanes: number): void {
+  const n = net.node(id);
+  const center = { ...n.pos };
+  const entries: { node: LaneNode; angle: number }[] = [];
+  for (const e of net.ends(n)) {
+    const c = net.corridor(e.corridor.id);
+    const along = distanceAlong(c, e.end, center, R);
+    if (along === null || c.length - along < 12) throw new EditError('Мало места');
+    const res = splitCorridor(net, c, e.end === 'a' ? along : c.length - along, 'junction');
+    net.removeCorridor((e.end === 'a' ? res.first : res.second).id, true);
+    entries.push({ node: res.node, angle: Math.atan2(res.node.pos.y - center.y, res.node.pos.x - center.x) });
+  }
+  if (entries.length < 2) throw new EditError('Нужен перекрёсток');
+  net.removeNode(id);
+  entries.sort((a, b) => b.angle - a.angle);
+  for (const e of entries) e.node.roundabout = id;
+  const at = (a: number) => ({ x: center.x + Math.cos(a) * R, y: center.y + Math.sin(a) * R });
+  for (let i = 0; i < entries.length; i++) {
+    const from = entries[i];
+    const to = entries[(i + 1) % entries.length];
+    let arc = from.angle - to.angle;
+    if (arc <= 0) arc += Math.PI * 2;
+    const steps = Math.max(1, Math.ceil(arc / (Math.PI / 2)));
+    let prev = from.node;
+    for (let k = 1; k <= steps; k++) {
+      const a0 = from.angle - (arc * (k - 1)) / steps;
+      const a1 = from.angle - (arc * k) / steps;
+      let next: LaneNode;
+      if (k === steps) next = to.node;
+      else {
+        // Угол убывает — по ходу движения касательная (sin a, −cos a).
+        next = net.addSeam(at(a1), { x: Math.sin(a1), y: -Math.cos(a1) });
+        next.roundabout = id;
+      }
+      const curve = { ...circleArc(center, R, a0, a1), p0: prev.pos, p3: next.pos };
+      net.addCorridor(prev.id, next.id, { cls: 'street', lanes: oneWay(lanes), curve, ring: true });
+      prev = next;
+    }
+  }
 }
 
 /** Сносит полотно; перекрёсток, у которого осталась одна дорога, становится её тупиком. */

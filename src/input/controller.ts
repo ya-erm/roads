@@ -616,7 +616,8 @@ export class Controller {
         break;
       }
       case 'roundabout': {
-        this.showError('Кольца переезжают на полосы — скоро вернутся');
+        const check = g.roundaboutPlan(p, this.snapRadius, this.ring);
+        if (!g.buildRoundabout(p, this.snapRadius, this.ring)) this.showError(check.reason ?? 'Нельзя построить');
         break;
       }
       case 'station': {
@@ -1196,7 +1197,7 @@ export class Controller {
           else if (!active) o.label = { text: 'Сначала белый кружок — полоса въезда', ok: false };
           else if (!active.exits.includes(end.seg)) o.label = { text: 'С этой полосы сюда не проехать', ok: false };
           else {
-            const linked = (g.net.movesFrom.get(active.lane) ?? []).some((m) => m.outLane === end.lane);
+            const linked = (g.roads.graph.movesFrom.get(active.lane) ?? []).some((m) => m.outLane === end.lane);
             o.label = { text: linked ? 'Убрать связь' : 'Соединить', ok: true };
           }
           break;
@@ -1228,7 +1229,11 @@ export class Controller {
         break;
       }
       case 'roundabout': {
-        o.label = { text: 'Кольца переезжают на полосы — скоро вернутся', ok: false };
+        // Кольцо — как построенное (сеть плана), круг — его размер.
+        const check = g.roundaboutPlan(p, this.snapRadius, this.ring);
+        if (check.center) o.highlightNode = { pos: check.center, ok: check.ok, radius: check.r };
+        if (check.ok && check.plan) this.showRoadPlan(o, check.plan, `Кольцо · ${money(check.cost)}`);
+        else o.label = { text: check.reason ?? '', ok: false };
         break;
       }
       case 'station': {
