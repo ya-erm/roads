@@ -212,4 +212,24 @@ describe('Полосы: движение', { timeout: 30_000 }, () => {
     });
     expect(traffic.arrivals).toBe(spawned);
   });
+
+  it('к цели (остановка у бордюра) машина перестраивается в крайнюю правую полосу — в «кармашек»', () => {
+    const net = new LaneNet();
+    const a = net.addSeam({ x: -400, y: 0 }, EAST);
+    const b = net.addSeam({ x: 400, y: 0 }, EAST);
+    net.addCorridor(a.id, b.id, { cls: 'street', lanes: oneWay(2) });
+    const graph = new LaneGraph(net);
+    let lane: number | null = null;
+    const traffic = new LaneTraffic(graph, { onArrive: (v) => (lane = graph.lanes.get(v.lane)!.index), onLost: () => {} });
+    const route = findLaneRoute(graph, graph.outLinks.get(a.id)!, b.id)!;
+    // Выезжает в левой полосе.
+    const veh = traffic.spawn({ ...CAR, targetNode: b.id, route })!;
+    const from = traffic.currentLane(veh)!;
+    const left = graph.links.get(from.link)!.lanes[0];
+    from.vehicles.splice(from.vehicles.indexOf(veh), 1);
+    veh.lane = left.id;
+    left.vehicles.push(veh);
+    run(traffic, 60);
+    expect(lane).toBe(1);
+  });
 });

@@ -73,7 +73,8 @@ export interface RoadPreset {
 
 /** От самой простой к самой быстрой; больше полос — в редакторе полос. */
 export const ROAD_PRESETS: RoadPreset[] = [
-  { id: 'oneway', name: 'Односторонняя', short: '1→', spec: { cls: 'street', lanesF: 1, lanesB: 0 } },
+  // Одна полоса в одну сторону — это «Полоса»; односторонняя дорога — две.
+  { id: 'oneway', name: 'Односторонняя', short: '2→', spec: { cls: 'street', lanesF: 2, lanesB: 0 } },
   { id: 'street', name: 'Улица', short: '1+1', spec: { cls: 'street', lanesF: 1, lanesB: 1 } },
   { id: 'avenue', name: 'Проспект', short: '2+2', spec: { cls: 'avenue', lanesF: 2, lanesB: 2 } },
   { id: 'road', name: 'Шоссе', short: '1+1', spec: { cls: 'highway', lanesF: 1, lanesB: 1 } },

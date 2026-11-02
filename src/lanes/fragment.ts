@@ -4,9 +4,12 @@ import { ROAD_CLASS_IDS, RoadClass, RoadSpec } from '../world/roadTypes';
 import { Anchor, bulldozeInside, corridorUnder, insideRuns, joinDeadEnd, splitCorridor } from './edit';
 import { Corridor, LaneNet, LaneNode, LAT_EPS, laneKey, parseLaneKey } from './model';
 
-/** Ж/д пути куска: узлы (стрелки, концы, высота, сигналы — на выезд к каким участкам) и участки с формой. */
+/**
+ * Ж/д пути куска: узлы (стрелки, концы, высота, сигналы — на выезд к каким участкам, oneWay — какие из них
+ * запрещают встречное движение) и участки с формой.
+ */
 export interface RailFragment {
-  nodes: { id: number; pos: Vec; level: number; signals?: number[] }[];
+  nodes: { id: number; pos: Vec; level: number; signals?: number[]; oneWay?: number[] }[];
   segs: { id: number; a: number; b: number; curve: Cubic; spec: RoadSpec }[];
 }
 

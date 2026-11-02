@@ -189,6 +189,11 @@ export interface StopRule {
   load: 'auto' | CargoType[];
   /** all и список — выгрузить на склад станции, даже если здесь груз не принимают. */
   unload: 'auto' | 'all' | CargoType[];
+  /**
+   * Ж/д станция: на какой путь вставать — номер платформы по порядку (с 0, как в station.platforms).
+   * Нет или null (старые сохранения) — авто: любая свободная платформа.
+   */
+  platform?: number | null;
 }
 
 export const DEFAULT_RULE: StopRule = { wait: 'auto', maxWait: null, load: 'auto', unload: 'auto' };

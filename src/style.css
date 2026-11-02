@@ -279,7 +279,8 @@ button {
 }
 
 .modal.menu {
-  min-width: 340px;
+  width: 440px;
+  max-width: 90vw;
   position: relative;
   text-align: center;
 }
@@ -290,24 +291,98 @@ button {
   right: 14px;
 }
 
+/* Назад из раздела меню — в левом углу, напротив крестика. */
+button.icon.menu-back {
+  position: absolute;
+  top: 12px;
+  left: 14px;
+  width: 32px;
+  height: 32px;
+  font-size: 28px;
+  line-height: 1;
+  padding-bottom: 3px;
+  border-radius: 8px;
+  background: #f1f4f7;
+  color: var(--ink);
+}
+
 .menu-buttons {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .menu-buttons .primary {
-  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 6px;
 }
 
-/* Сохранения со своими именами — под кнопками меню. */
-/* Партия файлом: скачать и открыть. */
+/* Пункт меню: значок, название с подписью, стрелка в раздел. */
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: #f1f4f7;
+  text-align: left;
+}
+
+.menu-item:hover {
+  background: #e6ebf0;
+}
+
+.menu-item svg {
+  flex: none;
+}
+
+.menu-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.menu-text b {
+  font-size: 15px;
+}
+
+.menu-text small {
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-text small.done {
+  color: #27ae60;
+}
+
+.menu-go {
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+}
+
+/* Партия файлом: скачать и открыть — внизу раздела сохранений. */
 .file-row {
   display: flex;
   gap: 8px;
   justify-content: center;
-  margin-top: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #edf0f3;
+}
+
+.file-row .with-ic {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* Выбор файла — с видом маленькой кнопки. */
@@ -333,10 +408,8 @@ button {
 }
 
 .saves {
-  margin-top: 18px;
+  margin-top: 14px;
   text-align: left;
-  width: 420px;
-  max-width: 80vw;
 }
 
 .saves h3 {
@@ -1129,6 +1202,16 @@ button {
 .cargo-chip.active {
   border-color: var(--accent);
   background: #e7f0fd;
+}
+
+/* Путь ж/д станции для остановки: схема путей с номером под ней. */
+.opt.plat {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 3px 4px 2px;
+  line-height: 1.1;
 }
 
 .cargo-chip {
@@ -2105,6 +2188,42 @@ button.small.with-ic {
 
 .need .bar {
   margin: 0;
+}
+
+/* Строка потребности по клику раскрывается в диаграмму по месяцам. */
+.need[data-action] {
+  margin: 2px -6px;
+  padding: 4px 6px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.need[data-action]:hover {
+  background: #f4f6f8;
+}
+
+.need .caret {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 7px;
+  background: #eef1f4;
+  color: #4b525c;
+  transition: transform 0.15s, background 0.15s;
+}
+
+.need:hover .caret {
+  background: #e1e7ee;
+}
+
+.need .caret.closed {
+  transform: rotate(-90deg);
+}
+
+.need-chart {
+  margin: 0 0 8px;
 }
 
 .partner {

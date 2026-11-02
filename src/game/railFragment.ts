@@ -104,7 +104,7 @@ export function copyRails(net: Network, x0: number, y0: number, x1: number, y1: 
       nextSegId: Math.max(...segIds) + 1,
       nodes: nodeIds.map((id) => {
         const n = net.node(id);
-        return { id, pos: n.pos, level: n.level, buildingId: null, signals: n.signals?.filter((x) => segIds.has(x)) };
+        return { id, pos: n.pos, level: n.level, buildingId: null, signals: n.signals?.filter((x) => segIds.has(x)), oneWay: n.oneWay?.filter((x) => segIds.has(x)) };
       }),
       segments: segs.map((s) => ({ id: s.id, a: s.a, b: s.b, curve: s.curve, spec: s.spec })),
     }),
@@ -119,7 +119,8 @@ export function copyRails(net: Network, x0: number, y0: number, x1: number, y1: 
   return {
     nodes: [...work.nodes.values()].map((n) => {
       const signals = n.signals?.filter((x) => work.segments.get(x) && (work.segment(x).a === n.id || work.segment(x).b === n.id));
-      return { id: n.id, pos: rel(n.pos), level: n.level, ...(signals?.length ? { signals } : {}) };
+      const oneWay = n.oneWay?.filter((x) => signals?.includes(x));
+      return { id: n.id, pos: rel(n.pos), level: n.level, ...(signals?.length ? { signals } : {}), ...(oneWay?.length ? { oneWay } : {}) };
     }),
     segs: [...work.segments.values()].map((s) => ({
       id: s.id,
@@ -248,6 +249,9 @@ export class RailPaste {
       if (!more.length) continue;
       const node = this.net.node(nodeOf.get(n.id)!);
       node.signals = [...(node.signals ?? []), ...more];
+      // Сигналы «без встречного» остаются такими же.
+      const ways = (n.oneWay ?? []).map((id) => segOf.get(id)).filter((id): id is number => id !== undefined);
+      if (ways.length) node.oneWay = [...(node.oneWay ?? []), ...ways];
       this.net.touch(node.id);
     }
     return [...segOf.values()];

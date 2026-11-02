@@ -1,13 +1,14 @@
 import { Cubic, CurveLUT } from '../core/bezier';
-import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
+import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import type { Game, LaneEnd } from '../game/game';
-import { bayFront } from '../game/transport';
+import { bayFront, type Line } from '../game/transport';
 import { LaneRenderer } from '../lanes/draw';
 import { insideRuns } from '../lanes/edit';
 import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
-import type { LaneNet } from '../lanes/model';
+import type { CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
+import { wagonFills } from '../sim/wagons';
 import { cargoImage } from '../ui/cargoIcons';
 import { CARGO, CargoType, FREIGHT } from '../world/cargo';
 import { Industry, Station, TOWN_NEED, TownBuilding } from '../world/entities';
@@ -52,7 +53,7 @@ export interface ToolOverlay {
   /** Обгонный путь будущего вокзала. */
   railPreview: Cubic[] | null;
   /** Будущий ж/д сигнал: где и для какого направления (или какой снимем). */
-  signal: { pos: Vec; dir: Vec; remove: boolean } | null;
+  signal: { pos: Vec; dir: Vec; remove: boolean; oneWay?: boolean } | null;
   /** Будущая развязка по шаблону. */
   template: { curves: Cubic[]; ok: boolean } | null;
   /** Рамка копирования или вставки (углы по порядку): синяя, красная — если вставить нельзя. */
@@ -80,6 +81,8 @@ export interface ToolOverlay {
   points?: { pos: Vec; color: string; r?: number }[];
   /** Настройка полос выбранного перекрёстка: метки концов полос, выбранный въезд, метка под курсором. */
   laneEdit: { node: number; ends: LaneEnd[]; from: { seg: number; i: number } | null; hover: LaneEnd | null } | null;
+  /** Курсор на варианте главной дороги в карточке перекрёстка: его и показываем (mainPair: null — «Авто», [] — равнозначный). */
+  mainHover?: { node: number; mainPair: number[] | null } | null;
 }
 
 /** Радиус метки полосы: по ширине полосы, но не меньше нескольких пикселей — чтобы попасть и издалека. */
@@ -104,6 +107,9 @@ const C = {
 
 /** Радиус кружка пера на экране, пикселей (и за сколько его можно схватить). */
 export const HANDLE_PX = 6;
+/** Докуда от перекрёстка подсвечена главная дорога (≈ 45 м: полоса — LANE_W ≈ 3,5 м). */
+const MAIN_REACH = 90;
+
 /** Стоп-линия шириной STOP_LINE_W — у самого края перекрёстка: линии полос кончаются ровно на ней. */
 const STOP_LINE_W = 1.8;
 const STOP_LINE_BACK = STOP_LINE_W / 2;
@@ -131,6 +137,8 @@ interface TrainCar {
   loco: boolean;
   color: string;
   load?: string;
+  /** Насколько заполнен этот вагон, 0..1: груз занимает вагоны по порядку от головы. */
+  fill: number;
   kind: 'freight' | 'passenger';
   length: number;
   trainId: number;
@@ -588,13 +596,29 @@ export class Renderer {
       for (const out of n.signals) {
         if (!net.segments.has(out)) continue;
         const d = net.dirFrom(n.id, out);
-        this.signalPost(add(n.pos, scale({ x: -d.y, y: d.x }, RAIL_HALF + 4)), d, game.rail.isReserved(out) ? '#e8483f' : '#3ad16b');
+        this.signalPost(add(n.pos, scale({ x: -d.y, y: d.x }, RAIL_HALF + 4)), d, game.rail.isReserved(out) ? '#e8483f' : '#3ad16b', !!n.oneWay?.includes(out));
       }
     }
   }
 
-  private signalPost(p: Vec, d: Vec, light: string): void {
+  /** oneWay — сигнал без встречного: с обратной стороны знак «въезд запрещён» (красный круг с белой чертой). */
+  private signalPost(p: Vec, d: Vec, light: string, oneWay = false): void {
     const ctx = this.ctx;
+    if (oneWay) {
+      const q = add(p, scale(d, 4.4));
+      ctx.fillStyle = '#d93a32';
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 0.6;
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(q.x - d.y * 1.6, q.y + d.x * 1.6);
+      ctx.lineTo(q.x + d.y * 1.6, q.y - d.x * 1.6);
+      ctx.stroke();
+    }
     // Стойка поперёк пути и голова сигнала, смотрящая навстречу поезду.
     ctx.strokeStyle = '#2a2e33';
     ctx.lineWidth = 1.2;
@@ -891,9 +915,12 @@ export class Renderer {
   private trainCars(game: Game, view: ReturnType<Renderer['view']>): TrainCar[] {
     const out: TrainCar[] = [];
     for (const train of game.rail.trains.values()) {
+      // Первый — локомотив, груз — в остальных, по порядку от головы.
+      const fills = wagonFills(train.fill ?? (train.load ? 1 : 0), 1, train.cars - 1);
       game.rail.cars(train).forEach((c, k) => {
         if (c.pos.x < view.x0 || c.pos.x > view.x1 || c.pos.y < view.y0 || c.pos.y > view.y1) return;
-        out.push({ ...c, loco: k === 0, color: train.color, load: train.load, kind: train.kind, length: train.carLength, trainId: train.id });
+        const fill = k ? (fills[k - 1] ?? 0) : 0;
+        out.push({ ...c, loco: k === 0, color: train.color, load: train.load, fill, kind: train.kind, length: train.carLength, trainId: train.id });
       });
     }
     return out;
@@ -935,17 +962,34 @@ export class Renderer {
         rr(ctx, -L / 2, -W / 2, L, W, 1.6);
         ctx.fill();
         if (detailed) {
-          ctx.fillStyle = 'rgba(255,255,255,0.75)';
-          for (let x = -L / 2 + 2; x < L / 2 - 2; x += 3) ctx.fillRect(x, -W / 2 + 0.7, 1.8, 1);
-          for (let x = -L / 2 + 2; x < L / 2 - 2; x += 3) ctx.fillRect(x, W / 2 - 1.7, 1.8, 1);
+          // Окна с пассажирами светятся, пустые — тёмные; занимаются от головы поезда (справа).
+          const n = Math.ceil((L - 4) / 3);
+          const busy = c.fill > 0 ? Math.ceil(c.fill * n - 1e-6) : 0;
+          for (const lit of [false, true]) {
+            ctx.fillStyle = lit ? 'rgba(255, 246, 210, 0.95)' : 'rgba(22, 34, 48, 0.5)';
+            for (let i = lit ? n - busy : 0; i < (lit ? n : n - busy); i++) {
+              const x = -L / 2 + 2 + i * 3;
+              ctx.fillRect(x, -W / 2 + 0.7, 1.8, 1);
+              ctx.fillRect(x, W / 2 - 1.7, 1.8, 1);
+            }
+          }
         }
       } else {
-        // Грузовой вагон: рама цвета линии, внутри — груз его цветом.
+        // Грузовой вагон: рама цвета линии, внутри — груз его цветом от передней стенки, остальное — пустой светлый пол.
+        // Издалека вагон либо полный, либо пустой: доли в пару пикселей только рябили бы.
         ctx.fillStyle = c.color;
         rr(ctx, -L / 2, -W / 2, L, W, 1.2);
         ctx.fill();
-        ctx.fillStyle = c.load ?? '#5b636d';
-        ctx.fillRect(-L / 2 + 1.2, -W / 2 + 1.2, L - 2.4, W - 2.4);
+        const f = detailed ? c.fill : c.fill >= 0.5 ? 1 : 0;
+        const w = L - 2.4;
+        if (f < 1 || !c.load) {
+          ctx.fillStyle = '#e6e0d4';
+          ctx.fillRect(-L / 2 + 1.2, -W / 2 + 1.2, w, W - 2.4);
+        }
+        if (f > 0 && c.load) {
+          ctx.fillStyle = c.load;
+          ctx.fillRect(L / 2 - 1.2 - w * f, -W / 2 + 1.2, w * f, W - 2.4);
+        }
       }
       ctx.restore();
     }
@@ -1091,9 +1135,10 @@ export class Renderer {
   }
 
   /**
-   * Площадка перед воротами автостанций — раструбом: кромки выезда, пока он ещё обычной ширины,
-   * плавно (кривыми) расходятся к углам здания; без ступенек и без бордюра поперёк. На площадке —
-   * «зубцы» между местами и стрелки к воротам. Рисуется под машинами: по ней они и заезжают в боксы.
+   * Площадка перед воротами автостанций: прямоугольник во всю ширину здания, состыкованный с выездом
+   * двумя скруглениями с каждой стороны — вогнутым у кромки улицы и выпуклым на углу площадки;
+   * без бордюра поперёк. На площадке — «зубцы» между местами и стрелки к воротам.
+   * Рисуется под машинами: по ней они и заезжают в боксы.
    */
   private drawStationAprons(game: Game, net: LaneNet, view: ReturnType<Renderer['view']>): void {
     const ctx = this.ctx;
@@ -1110,63 +1155,60 @@ export class Renderer {
       // Координаты площадки: x вдоль боксов, y к выезду (здание — до hh).
       const local = (p: Vec) => ({ x: dot(sub(p, fp.center), u), y: dot(sub(p, fp.center), v) });
       const hh = fp.h / 2;
-      // Раструб начинается на выезде, где тот ещё обычной ширины: до 18 от узла ворот,
-      // но не ближе 14 к другому концу выезда — там перекрёсток или дорога, к которой он примкнул.
+      // Кромки выезда у ворот — x слева и справа (выезд подходит к площадке поперёк фасада).
       const c = end.corridor;
-      const along = Math.max(2, Math.min(18, c.length - 14));
-      const s = end.end === 'a' ? along : c.length - along;
+      const s = end.end === 'a' ? 0 : c.length;
       const ed = edgesAt(c, s) ?? [-LANE_W / 2, LANE_W / 2];
-      const [L, R] = [ed[0] - ROAD_MARGIN, ed[1] + ROAD_MARGIN].map((o) => local(pointOff(c, s, o))).sort((a, b) => a.x - b.x);
-      // Куда идёт выезд к воротам — с этого направления кромка начинает расходиться без излома.
-      const t = c.lut.tangentAt(s);
-      const toward = end.end === 'a' ? scale(t, -1) : t;
-      const td = { x: dot(toward, u), y: dot(toward, v) };
-      // Углы площадки у здания: на всю его ширину (и не уже самого выезда), чуть заходя под здание.
-      const A = { x: Math.min(-fp.w / 2 + 1, L.x - 2), y: hh };
-      const B = { x: Math.max(fp.w / 2 - 1, R.x + 2), y: hh };
+      const [l, r] = [ed[0] - ROAD_MARGIN, ed[1] + ROAD_MARGIN].map((o) => local(pointOff(c, s, o)).x).sort((a, b) => a - b);
+      /** Радиус скруглений, если хватает места. */
+      const R0 = 6;
+      // Глубина площадки — 16 от фасада, но скругление у улицы не ближе 14 к другому концу выезда (там перекрёсток).
+      const gy = local(node.pos).y;
+      const Y = Math.max(gy + 1.5, Math.min(hh + 16, gy + c.length - 14 - R0 - 1.5));
+      // Бока площадки — по углам здания (и не уже выезда), чуть заходя под здание.
+      const X0 = Math.min(-fp.w / 2 + 1, l);
+      const X1 = Math.max(fp.w / 2 - 1, r);
       const y0 = hh - 1.5;
-      // Кромка: плавно отходит от выезда, быстро уходит наружу и у здания скругляется —
-      // к углу подходит вдоль улицы, перпендикулярно фасаду, без острого клина.
-      const edge = (p: Vec, corner: Vec) => {
-        const dy = Math.max(2, p.y - corner.y);
-        return { c1: add(p, scale(td, dy * 0.15)), c2: { x: corner.x, y: corner.y + dy * 0.6 } };
-      };
-      const el = edge(L, A);
-      const er = edge(R, B);
-      // Асфальт заходит чуть назад по выезду: закрывает и скруглённый конец бордюра раструба.
-      const back = (p: Vec) => sub(p, scale(td, 1.5));
+      // Два скругления поровну; места мало — оба меньше, прямого участка между ними нет.
+      const rl = Math.min(R0, (l - X0) / 2);
+      const rr = Math.min(R0, (X1 - r) / 2);
       ctx.save();
       ctx.translate(fp.center.x, fp.center.y);
       ctx.rotate(fp.angle);
       ctx.scale(1, front);
-      // Бордюр — под асфальтом, как у дорог: от кромки выезда по кривой к углу здания.
+      // Бордюр — под асфальтом, как у дорог: от кромки улицы вогнутым скруглением наружу,
+      // вдоль площадки, выпуклым скруглением на её углу — и вдоль улицы к углу здания.
       ctx.strokeStyle = C.roadEdge;
       ctx.lineWidth = 2.5;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
-      for (const [p, e, corner] of [
-        [L, el, A],
-        [R, er, B],
-      ] as const) {
-        ctx.moveTo(p.x, p.y);
-        ctx.bezierCurveTo(e.c1.x, e.c1.y, e.c2.x, e.c2.y, corner.x, corner.y);
-        ctx.lineTo(corner.x, y0);
-      }
+      ctx.moveTo(l, Y + rl);
+      ctx.arc(l - rl, Y + rl, rl, 0, -Math.PI / 2, true);
+      ctx.lineTo(X0 + rl, Y);
+      ctx.arc(X0 + rl, Y - rl, rl, Math.PI / 2, Math.PI);
+      ctx.lineTo(X0, y0);
+      ctx.moveTo(r, Y + rr);
+      ctx.arc(r + rr, Y + rr, rr, Math.PI, Math.PI * 1.5);
+      ctx.lineTo(X1 - rr, Y);
+      ctx.arc(X1 - rr, Y - rr, rr, Math.PI / 2, 0, true);
+      ctx.lineTo(X1, y0);
       ctx.stroke();
-      // Асфальт: от угла под зданием по левой кромке к выезду, поперёк него (там уже асфальт) и по правой — обратно.
-      const bl = back(L);
-      const br = back(R);
+      // Асфальт: тот же контур; поперёк выезда (там уже асфальт) — чуть дальше, чтобы закрыть концы бордюра.
       ctx.fillStyle = C.road;
       ctx.beginPath();
-      ctx.moveTo(A.x, y0);
-      ctx.lineTo(A.x, A.y);
-      ctx.bezierCurveTo(el.c2.x, el.c2.y, el.c1.x, el.c1.y, L.x, L.y);
-      ctx.lineTo(bl.x, bl.y);
-      ctx.lineTo(br.x, br.y);
-      ctx.lineTo(R.x, R.y);
-      ctx.bezierCurveTo(er.c1.x, er.c1.y, er.c2.x, er.c2.y, B.x, B.y);
-      ctx.lineTo(B.x, y0);
+      ctx.moveTo(X0, y0);
+      ctx.lineTo(X0, Y - rl);
+      ctx.arc(X0 + rl, Y - rl, rl, Math.PI, Math.PI / 2, true);
+      ctx.lineTo(l - rl, Y);
+      ctx.arc(l - rl, Y + rl, rl, -Math.PI / 2, 0);
+      ctx.lineTo(l, Y + rl + 1.5);
+      ctx.lineTo(r, Y + rr + 1.5);
+      ctx.lineTo(r, Y + rr);
+      ctx.arc(r + rr, Y + rr, rr, Math.PI, Math.PI * 1.5);
+      ctx.lineTo(X1 - rr, Y);
+      ctx.arc(X1 - rr, Y - rr, rr, Math.PI / 2, 0, true);
+      ctx.lineTo(X1, y0);
       ctx.closePath();
       ctx.fill();
       if (this.camera.zoom >= 0.35) {
@@ -1544,7 +1586,7 @@ export class Renderer {
       ctx.lineTo(b.x - dir.y * 3.5, b.y + dir.x * 3.5);
       ctx.lineTo(b.x + dir.y * 3.5, b.y - dir.x * 3.5);
       ctx.fill();
-      this.signalPost(add(pos, scale({ x: -dir.y, y: dir.x }, RAIL_HALF + 4)), dir, remove ? '#e8483f' : '#3ad16b');
+      this.signalPost(add(pos, scale({ x: -dir.y, y: dir.x }, RAIL_HALF + 4)), dir, remove ? '#e8483f' : '#3ad16b', !!o.signal.oneWay && !remove);
     }
     if (o.station) {
       ctx.globalAlpha = 0.75;
@@ -1649,7 +1691,10 @@ export class Renderer {
     }
     // Обводка выбранной машины или поезда (поезд — по середине состава).
     const sel = o.selection;
-    if (sel?.type === 'junction') this.drawJunctionPaths(game, sel.id, o.laneEdit?.node === sel.id ? o.laneEdit : null);
+    if (sel?.type === 'junction') {
+      const hover = o.mainHover?.node === sel.id ? o.mainHover : null;
+      this.drawJunctionPaths(game, sel.id, o.laneEdit?.node === sel.id ? o.laneEdit : null, game.junctionMain(sel.id, hover ? hover.mainPair : undefined));
+    }
     let ring: { x: number; y: number; r: number } | null = null;
     const fleet = sel?.type === 'fleet' ? game.fleet.get(sel.id) : undefined;
     const sim = sel?.type === 'vehicle' ? game.traffic.vehicles.get(sel.simId) : fleet && game.fleetLook(fleet);
@@ -1720,8 +1765,9 @@ export class Renderer {
   /**
    * Выбранный перекрёсток: разрешённые проезды — синие линии со стрелками, запрещённые — красный пунктир.
    * При настройке полос выбранная полоса въезда и её связи — зелёные, остальные проезды бледнее.
+   * main — главная дорога (или та, на которую навели в карточке): жёлтая полоса и знаки у въездов.
    */
-  private drawJunctionPaths(game: Game, nodeId: number, edit: ToolOverlay['laneEdit']): void {
+  private drawJunctionPaths(game: Game, nodeId: number, edit: ToolOverlay['laneEdit'], main: [number, number] | null): void {
     const ctx = this.ctx;
     const net = game.roads.net;
     const g = game.roads.graph;
@@ -1730,6 +1776,7 @@ export class Renderer {
     const z = this.camera.zoom;
     const all = (g.inLinks.get(nodeId) ?? []).flatMap((l) => l.lanes.flatMap((lane) => g.movesFrom.get(lane.id) ?? [])).filter((m) => m.node === nodeId);
     const radius = Math.max(12, ...all.map((m) => dist(n.pos, m.points[0])));
+    if (main) this.drawMainBand(net, n, main);
     ctx.strokeStyle = 'rgba(47,128,237,0.55)';
     ctx.lineWidth = 3 / z;
     ctx.beginPath();
@@ -1780,6 +1827,132 @@ export class Renderer {
       ctx.stroke();
     }
     ctx.setLineDash([]);
+    if (main) this.drawPrioritySigns(net, n, main, new Set((g.inLinks.get(nodeId) ?? []).map((l) => l.corridor)), radius);
+  }
+
+  /**
+   * Главная дорога через перекрёсток — одна полупрозрачная жёлтая лента по середине полотна:
+   * плечо A от дальнего конца к краю узла, через узел — кривая с касательными по плечам, плечо B наружу.
+   * Ширина — ровно по полотну (в узле плавно переходит от плеча к плечу), к концам лента тает.
+   */
+  private drawMainBand(net: LaneNet, n: LaneNode, main: [number, number]): void {
+    const ctx = this.ctx;
+    const ends = net.ends(n);
+    const arms = main.map((id) => ends.find((e) => e.corridor.id === id));
+    if (!arms[0] || !arms[1]) return;
+    const cuts = this.lanes.cutsOf(net);
+    // Плечо от края узла наружу (до MAIN_REACH и не заходя в узел на том конце): середина и полуширина полотна.
+    const arm = (e: CorridorEnd) => {
+      const c = e.corridor;
+      const [ca, cb] = cuts.get(c.id) ?? [0, 0];
+      const [near, other] = e.end === 'a' ? [ca, cb] : [cb, ca];
+      const far = Math.max(near, Math.min(MAIN_REACH, c.length - other));
+      const ss = e.end === 'a' ? axisStations(c, near, far, 4) : axisStations(c, c.length - far, c.length - near, 4).reverse();
+      const pts: { p: Vec; h: number }[] = [];
+      for (const s of ss) {
+        const ed = edgesAt(c, s);
+        if (ed) pts.push({ p: pointOff(c, s, (ed[0] + ed[1]) / 2), h: (ed[1] - ed[0]) / 2 });
+      }
+      // Направление от узла на краю узла.
+      const away = scale(c.lut.tangentAt(e.end === 'a' ? near : c.length - near), e.end === 'a' ? 1 : -1);
+      return { pts, away };
+    };
+    const A = arm(arms[0]);
+    const B = arm(arms[1]);
+    if (A.pts.length < 2 || B.pts.length < 2) return;
+    // Через узел — кривая Безье между краями плеч, касательные — по плечам; ширина меняется плавно.
+    const a0 = A.pts[0];
+    const b0 = B.pts[0];
+    const k = dist(a0.p, b0.p) * 0.45;
+    const c1 = sub(a0.p, scale(A.away, k));
+    const c2 = sub(b0.p, scale(B.away, k));
+    const through: { p: Vec; h: number }[] = [];
+    for (let i = 1; i < 12; i++) {
+      const t = i / 12;
+      through.push({ p: cubicBezier(a0.p, c1, c2, b0.p, t), h: a0.h + (b0.h - a0.h) * t * t * (3 - 2 * t) });
+    }
+    const line = [...[...A.pts].reverse(), ...through, ...B.pts].filter((q, i, all) => i === 0 || dist(q.p, all[i - 1].p) > 0.05);
+    if (line.length < 2) return;
+    // Края ленты — на полуширину вправо и влево от середины по ходу ленты.
+    const right: Vec[] = [];
+    const left: Vec[] = [];
+    line.forEach((q, i) => {
+      const d = sub(line[Math.min(line.length - 1, i + 1)].p, line[Math.max(0, i - 1)].p);
+      const nrm = rightNormal(scale(d, 1 / (Math.hypot(d.x, d.y) || 1)));
+      right.push(add(q.p, scale(nrm, q.h)));
+      left.push(sub(q.p, scale(nrm, q.h)));
+    });
+    // Тает от узла: до середины — ровно, к ближнему из дальних концов — до нуля.
+    const reach = Math.max(40, Math.min(MAIN_REACH, dist(n.pos, line[0].p), dist(n.pos, line[line.length - 1].p)));
+    const grad = ctx.createRadialGradient(n.pos.x, n.pos.y, 0, n.pos.x, n.pos.y, reach);
+    grad.addColorStop(0, 'rgba(255,196,0,0.42)');
+    grad.addColorStop(0.5, 'rgba(255,196,0,0.42)');
+    grad.addColorStop(1, 'rgba(255,196,0,0)');
+    ctx.fillStyle = grad;
+    this.polyline([...right, ...left.reverse()]);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  /**
+   * Знаки у въездов в перекрёсток, справа по ходу: жёлтый ромб «Главная дорога» — у главных плеч,
+   * треугольник «Уступи дорогу» — у второстепенных. Только там, где в перекрёсток въезжают (inArms).
+   */
+  private drawPrioritySigns(net: LaneNet, n: LaneNode, main: [number, number], inArms: Set<number>, radius: number): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    // Издалека — 8 пикселей, вблизи растёт вместе с дорогой.
+    const k = Math.max(8 / z, LANE_W * 0.3);
+    ctx.lineJoin = 'round';
+    for (const e of net.ends(n)) {
+      const c = e.corridor;
+      if (!inArms.has(c.id)) continue;
+      const d = Math.min(c.length, radius + k * 1.5);
+      const s = e.end === 'a' ? d : c.length - d;
+      const ed = edgesAt(c, s) ?? [-LANE_W, LANE_W];
+      // Справа по ходу въезда: у конца a едут против оси (левая кромка), у конца b — по оси (правая).
+      const p = pointOff(c, s, e.end === 'a' ? ed[0] - ROAD_MARGIN - k * 1.3 : ed[1] + ROAD_MARGIN + k * 1.3);
+      if (main.includes(c.id)) {
+        // 2.1 «Главная дорога»: белый ромб, в нём жёлтый.
+        const diamond = (r: number) => {
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y - r);
+          ctx.lineTo(p.x + r, p.y);
+          ctx.lineTo(p.x, p.y + r);
+          ctx.lineTo(p.x - r, p.y);
+          ctx.closePath();
+        };
+        diamond(k);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.strokeStyle = '#1f2933';
+        ctx.lineWidth = 1.2 / z;
+        ctx.stroke();
+        diamond(k * 0.6);
+        ctx.fillStyle = '#f5b800';
+        ctx.fill();
+        ctx.lineWidth = 0.8 / z;
+        ctx.stroke();
+      } else {
+        // 2.4 «Уступи дорогу»: белый треугольник вершиной вниз в красной кайме.
+        const tri = (r: number) => {
+          ctx.beginPath();
+          ctx.moveTo(p.x - r, p.y - r * 0.6);
+          ctx.lineTo(p.x + r, p.y - r * 0.6);
+          ctx.lineTo(p.x, p.y + r * 1.05);
+          ctx.closePath();
+        };
+        tri(k * 1.05);
+        ctx.fillStyle = '#e8483f';
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.2 / z;
+        ctx.stroke();
+        tri(k * 0.55);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      }
+    }
   }
 
   /**
@@ -1913,7 +2086,7 @@ export class Renderer {
   private drawLinePath(game: Game, lineId: number): void {
     const line = game.lines.get(lineId);
     if (!line) return;
-    this.drawStopsRoute(game, line.stops, line.color, true);
+    this.drawStopsRoute(game, line.stops, line.color, true, line);
     // Машины и поезда линии — поверх маршрута, иначе их не видно под цветной полосой.
     // Под каждой — кружок цвета линии постоянного экранного размера: видно и издалека.
     const z = this.camera.zoom;
@@ -2007,14 +2180,15 @@ export class Renderer {
    * Маршрут по станциям: по реальным полосам, со стрелками направления.
    * Если между станциями нет дороги — красный пунктир напрямую.
    */
-  private drawStopsRoute(game: Game, stops: number[], color: string, loop: boolean): void {
+  private drawStopsRoute(game: Game, stops: number[], color: string, loop: boolean, line?: Line): void {
     const ctx = this.ctx;
     const z = this.camera.zoom;
     const legs = loop ? stops.length : stops.length - 1;
     for (let i = 0; i < legs; i++) {
       const fromId = stops[i];
       const toId = stops[(i + 1) % stops.length];
-      const pts = game.routePolyline(fromId, toId);
+      // У линии — до выбранных путей ж/д станций.
+      const pts = line ? game.linePolyline(line, i) : game.routePolyline(fromId, toId);
       if (!pts || pts.length < 2) {
         const a = game.stations.get(fromId);
         const b = game.stations.get(toId);

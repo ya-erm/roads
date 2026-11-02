@@ -137,7 +137,7 @@ export function isFragment(x: unknown): x is Fragment {
     if (!isObj(r) || !Array.isArray(r.nodes) || !Array.isArray(r.segs)) return false;
     const ids = new Set<number>();
     for (const n of r.nodes) {
-      if (!isObj(n) || !isNum(n.id) || ids.has(n.id) || !isVec(n.pos) || !isNum(n.level) || !optional(n.signals, isNums)) return false;
+      if (!isObj(n) || !isNum(n.id) || ids.has(n.id) || !isVec(n.pos) || !isNum(n.level) || !optional(n.signals, isNums) || !optional(n.oneWay, isNums)) return false;
       ids.add(n.id);
     }
     const segs = new Set<number>();

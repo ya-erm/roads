@@ -9,6 +9,8 @@ import { Game } from './game';
 import { snapRails } from './railFragment';
 import { road, roadPlan, STREET as STREET_LANES } from './testkit';
 import { carsOf, vehicleCapacity } from './transport';
+import { wagonFills } from '../sim/wagons';
+import { CARGO } from '../world/cargo';
 
 
 function runSeconds(game: Game, seconds: number, each?: () => void) {
@@ -360,6 +362,43 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
     });
     expect(loaded.lines.get(line.id)!.problem).toBeNull();
     expect(arrivals).toBeGreaterThanOrEqual(2);
+  });
+
+  it('вагоны на стоянке наполняются и пустеют по очереди, в темпе погрузки', () => {
+    const { game, a, b } = railWorld();
+    const line = game.createLine([a.id, b.id])!;
+    // Ждать полной загрузки, но ничего не брать со станции: груз кладём сами.
+    game.setStopRule(line.id, 0, { wait: 'full', maxWait: null, load: [], unload: 'auto' });
+    const v = game.buyVehicle(line.id, 'freightTrain')!;
+    runSeconds(game, 1);
+    const train = game.fleetTrain(v)!;
+    expect(train.moving).toBe(false);
+    expect(train.fill).toBe(0);
+    const cap = vehicleCapacity(v);
+    const wagons = carsOf(v) - 1;
+    // Полпоезда угля: вид догоняет не скачком, а по 10 единиц в секунду.
+    v.cargo = 'coal';
+    v.amount = cap / 2;
+    runSeconds(game, 1);
+    expect(train.fill!).toBeGreaterThan(0);
+    expect(train.fill!).toBeLessThan(0.15);
+    expect(train.load).toBe(CARGO.coal.color);
+    runSeconds(game, cap / 2 / 10);
+    expect(train.fill).toBeCloseTo(0.5, 6);
+    const fills = wagonFills(train.fill!, 1, wagons);
+    // 5 вагонов: два полных, третий наполовину, хвостовые пустые.
+    expect(fills.filter((f) => f > 0.999)).toHaveLength(Math.floor(wagons / 2));
+    expect(fills[wagons - 1]).toBe(0);
+    // Выгрузили — пустеют тоже постепенно, потом без цвета груза.
+    v.cargo = null;
+    v.amount = 0;
+    runSeconds(game, 1);
+    expect(train.fill!).toBeGreaterThan(0.35);
+    expect(train.load).toBe(CARGO.coal.color);
+    runSeconds(game, cap / 2 / 10);
+    expect(train.fill).toBe(0);
+    expect(train.load).toBeUndefined();
+    expect(v.state).toBe('loading');
   });
 });
 

@@ -35,6 +35,9 @@ export interface Train extends TrainSpec {
   platform: number | null;
   /** Цвет груза в вагонах. */
   load?: string;
+  /** Заполненность состава на вид (доля вместимости) и до какой он сперва пустеет — см. stepWagons. */
+  fill?: number;
+  dip?: number;
   segs: number[];
   nodes: number[];
   /**
@@ -139,13 +142,18 @@ export class RailSim {
     return dir === 0 ? s.lut.tangentAt(0) : scale(s.lut.tangentAt(s.length), -1);
   }
 
-  /** Куда можно проехать из прохода: только плавно, без резких поворотов и разворотов. */
-  private nextStates(state: State): State[] {
+  /**
+   * Куда можно проехать из прохода: только плавно, без резких поворотов и разворотов; мимо сигнала,
+   * запрещающего встречное движение, — только по его направлению (anyWay — не глядя на такие сигналы).
+   */
+  private nextStates(state: State, anyWay = false): State[] {
     const s = this.net.segments.get(state.seg);
     if (!s) return [];
     const nodeId = this.endNode(s, state.dir);
     const node = this.net.nodes.get(nodeId);
     if (!node) return [];
+    // Сигнал стоит на выезде из узла на этот участок, а поезд едет по участку к узлу — навстречу ему.
+    if (!anyWay && node.oneWay?.includes(s.id)) return [];
     const arrive = this.arrivalDir(s, state.dir);
     const result: State[] = [];
     for (const sid of node.segments) {
@@ -293,6 +301,13 @@ export class RailSim {
     return !!this.net.nodes.get(nodeId)?.signals?.includes(outSeg);
   }
 
+  /** Пути нет только из-за сигналов, запрещающих встречное движение: без них поезд бы проехал. */
+  blockedByOneWay(from: number[], to: number[], through?: number): boolean {
+    const starts = from.filter((id) => this.net.segments.has(id));
+    const goal = new Set(to.filter((id) => this.net.segments.has(id) && !from.includes(id)));
+    return !this.findRoute(starts, goal, null, 0, through) && !!this.findRoute(starts, goal, null, 0, through, true);
+  }
+
   /**
    * Последний участок блока, начиная с from: до узла с сигналом по ходу поезда
    * или до конца маршрута.
@@ -352,6 +367,7 @@ export class RailSim {
     self: number | null,
     minLen: number,
     through?: number,
+    anyWay = false,
   ): { states: State[]; nodes: number[] } | null {
     if (!goal.size || !starts.length) return null;
     const key = (s: State) => s.seg * 2 + s.dir;
@@ -384,7 +400,7 @@ export class RailSim {
         return { states, nodes };
       }
       const base = g.get(k)!;
-      for (const next of this.nextStates(cur)) {
+      for (const next of this.nextStates(cur, anyWay)) {
         const nk = key(next);
         if (closed.has(nk)) continue;
         const ns = this.net.segment(next.seg);

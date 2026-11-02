@@ -162,19 +162,28 @@ export class RoadBuilder {
 
   /**
    * Куски полосы по точкам от конца tip через qs (каждая точка — как следующий клик); step — новый конец
-   * (в сети плана) и что построено.
+   * (в сети плана) и что построено. limit — скорость новых однополосных дорог (съездов, въездов).
    */
-  laneStep(tip: LaneTip, qs: Vec[], cls: RoadClass, radius: number): { plan: RoadPlan; step: { tip: LaneTip; what: string } | null } {
+  laneStep(
+    tip: LaneTip,
+    qs: Vec[],
+    cls: RoadClass,
+    radius: number,
+    limit?: number,
+    reverse = false,
+  ): { plan: RoadPlan; step: { tip: LaneTip; what: string } | null } {
     const out: { step: { tip: LaneTip; what: string } | null } = { step: null };
+    const before = new Set(this.net.corridors.keys());
     const plan = this.plan(
       (n) => {
         let at = tip;
         const what: string[] = [];
         for (const q of qs) {
-          const s = laneStep(n, at, q, cls, radius);
+          const s = laneStep(n, at, q, cls, radius, reverse);
           at = s.tip;
           what.push(s.what);
         }
+        if (limit !== undefined) for (const c of n.corridors.values()) if (!before.has(c.id) && c.lanes.length === 1 && c.lanes[0].offset === 0) c.limit = limit;
         out.step = { tip: at, what: what.join(' → ') };
         return qs.length > 0;
       },
@@ -213,6 +222,25 @@ export class RoadBuilder {
         taperDeadLanes(n, [c.a, c.b]);
       },
       { shove: true },
+    );
+  }
+
+  /**
+   * Ограничение скорости на полотнах ids без перестройки: форма, полосы и цена те же, проверять нечего.
+   * limit не задан — по классу дороги.
+   */
+  setLimit(ids: number[], limit: number | undefined): RoadPlan {
+    return this.plan(
+      (n) => {
+        for (const id of ids) {
+          const c = n.corridors.get(id);
+          if (!c) return false;
+          c.limit = limit;
+          // Новая ревизия полотна — граф движения возьмёт новую скорость.
+          n.setLanes(c, c.lanes);
+        }
+      },
+      { raze: true },
     );
   }
 

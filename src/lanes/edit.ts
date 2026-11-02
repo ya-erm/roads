@@ -762,18 +762,19 @@ export function laneTipPos(net: LaneNet, tip: LaneTip): Vec | null {
  * - q в стороне — съезд отсюда (если полосы сюда ещё нет — с полосой торможения);
  * - конец в узле или в поле, q у края дороги — въезд с полосой разгона; иначе — однополосная дорога.
  * Возвращает новый конец и что построено (для подписи). Нельзя — EditError.
+ * reverse — ехать навстречу ходу постройки (у однополосной и у новой полосы вдоль дороги, где направления ещё нет).
  */
-export function laneStep(net: LaneNet, tip: LaneTip, q: Vec, cls: RoadClass, radius: number): { tip: LaneTip; what: string } {
+export function laneStep(net: LaneNet, tip: LaneTip, q: Vec, cls: RoadClass, radius: number, reverse = false): { tip: LaneTip; what: string } {
   if (tip.kind === 'edge') {
     const c = net.corridor(tip.corridor);
-    if (laneAlong(net, tip, q)) return { tip: alongLane(net, c, tip, q), what: 'Полоса' };
+    if (laneAlong(net, tip, q)) return { tip: alongLane(net, c, tip, q, reverse), what: 'Полоса' };
     return { tip: exitFrom(net, c, tip, q, cls, radius), what: 'Съезд' };
   }
   if (tip.kind === 'port') return { tip: fromPort(net, tip, q, cls, radius), what: 'Однополосная' };
   const e = edgeAt(net, q);
   if (e) return { tip: entryTo(net, tip, e, cls), what: 'Въезд' };
   const to = anchorAt(net, q, radius);
-  const built = buildRoad(net, tip.anchor, to, { cls, lanes: [slot(0, 1)], arc: true });
+  const built = buildRoad(net, tip.anchor, to, { cls, lanes: [slot(0, reverse ? -1 : 1)], arc: true });
   if (!built.length) throw new EditError('Так не построить');
   return { tip: { kind: 'point', anchor: nodeNear(net, built, to.pos) }, what: 'Однополосная' };
 }
@@ -803,9 +804,9 @@ function nodeNear(net: LaneNet, built: Corridor[], p: Vec): Anchor {
 
 /**
  * Полоса вдоль дороги от конца tip к проекции q; за конец полотна — через стык в продолжающее дорогу полотно
- * (место поперёк то же). Направление — tip.flow или по ходу к q. Возвращает новый конец.
+ * (место поперёк то же). Направление — tip.flow или по ходу к q (reverse — навстречу). Возвращает новый конец.
  */
-function alongLane(net: LaneNet, c0: Corridor, tip: Extract<LaneTip, { kind: 'edge' }>, q: Vec): Extract<LaneTip, { kind: 'edge' }> {
+function alongLane(net: LaneNet, c0: Corridor, tip: Extract<LaneTip, { kind: 'edge' }>, q: Vec, reverse = false): Extract<LaneTip, { kind: 'edge' }> {
   let c = c0;
   let offset = tip.offset;
   let s0 = tip.s;
@@ -813,7 +814,7 @@ function alongLane(net: LaneNet, c0: Corridor, tip: Extract<LaneTip, { kind: 'ed
   for (let guard = 0; guard < 12; guard++) {
     const s1 = c.lut.closest(q).s;
     const dir = Math.sign(s1 - s0) || 1;
-    const f: Flow = flow ?? (dir as Flow);
+    const f: Flow = flow ?? ((reverse ? -dir : dir) as Flow);
     const end: End = dir > 0 ? 'b' : 'a';
     // Дальше конца полотна — в продолжение дороги за стыком, если q ближе к нему.
     const next = s1 >= c.length - 0.5 || s1 <= 0.5 ? continuation(net, c, end, q) : null;

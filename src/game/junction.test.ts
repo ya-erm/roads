@@ -49,6 +49,35 @@ describe('Настройка перекрёстка', { timeout: 20_000 }, () =>
     expect(game.roads.graph.nodes.get(n.id)!.priorityLanes.size).toBe(0);
   });
 
+  it('главная дорога на карте — та, которой уступают машины; вариант под курсором перекрёсток не меняет', () => {
+    const game = new Game(7);
+    game.money = 1_000_000;
+    const n = crossroads(game);
+    const sorted = (p: number[] | null) => [...(p ?? [])].sort((a, b) => a - b);
+    const mainNow = () => sorted(game.junctionInfo(n.id)!.mainNow);
+    // «Авто»: подсвечено то же, что выбрал граф движения.
+    const auto = game.junctionMain(n.id);
+    expect(sorted(auto)).toEqual(mainNow());
+    for (const pair of game.junctionInfo(n.id)!.pairs) {
+      // Предпросмотр варианта — без изменений узла и приоритета.
+      expect(game.junctionMain(n.id, pair.segs)).toEqual(pair.segs);
+      expect(game.roads.net.node(n.id).mainPair ?? null).toBeNull();
+      expect(sorted(game.junctionMain(n.id))).toEqual(sorted(auto));
+      game.setJunction(n.id, { mainPair: pair.segs });
+      expect(sorted(game.junctionMain(n.id))).toEqual(mainNow());
+      // Наведённое «Авто» при ручной паре — снова автоматическая пара.
+      expect(sorted(game.junctionMain(n.id, null))).toEqual(sorted(auto));
+      game.setJunction(n.id, { mainPair: null });
+    }
+    expect(game.junctionMain(n.id, [])).toBeNull();
+    game.setJunction(n.id, { mainPair: [] });
+    expect(game.junctionMain(n.id)).toBeNull();
+    // Под светофором главной дороги нет.
+    game.setJunction(n.id, { mainPair: null });
+    expect(game.toggleLights(n.id)).toBe(true);
+    expect(game.junctionMain(n.id)).toBeNull();
+  });
+
   it('светофор по таймеру переключает фазы через заданное время, на красный никто не въезжает', () => {
     const game = new Game(7);
     const n = crossroads(game);

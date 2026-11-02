@@ -37,14 +37,28 @@ export interface Town {
   demands: CargoType[];
   supplied: Partial<Record<CargoType, number>>;
   lastSupplied: Partial<Record<CargoType, number>>;
+  /** Снабжение по закрытым месяцам, старые — первыми (не больше TOWN_HISTORY). В старых сохранениях нет. */
+  supplyHistory?: TownSupplyMonth[];
   tripAcc: number;
   growthAcc: number;
   /** Город сам прокладывает новые улицы, когда вдоль старых тесно. По умолчанию да. */
   autoStreets?: boolean;
 }
 
+/** Итоги месяца по снабжению города. */
+export interface TownSupplyMonth {
+  /** «Май 1962» — как у истории линий. */
+  label: string;
+  /** Сколько привезли за месяц — по каждому грузу, который нужен городу. */
+  got: Partial<Record<CargoType, number>>;
+  /** Норма месяца: столько нужно, чтобы потребность считалась закрытой. */
+  need: number;
+}
+
 /** Сколько единиц груза в месяц нужно, чтобы потребность города считалась закрытой. */
 export const TOWN_NEED = 10;
+/** Сколько последних месяцев снабжения помнит город. */
+export const TOWN_HISTORY = 12;
 
 export interface Industry {
   type: 'industry';

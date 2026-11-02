@@ -20,6 +20,11 @@ export interface RoadNode {
    * его видят только поезда, едущие из узла на этот участок.
    */
   signals?: number[];
+  /**
+   * Какие из сигналов узла запрещают встречное движение (как в Transport Fever): поезд не проедет
+   * в узел по этому участку — против сигнала. Остальные сигналы делят путь на блоки в обе стороны.
+   */
+  oneWay?: number[];
 }
 
 export interface Segment {
@@ -48,7 +53,7 @@ export interface SplitRecord {
 export interface NetworkSave {
   nextNodeId: number;
   nextSegId: number;
-  nodes: Pick<RoadNode, 'id' | 'pos' | 'level' | 'buildingId' | 'signals'>[];
+  nodes: Pick<RoadNode, 'id' | 'pos' | 'level' | 'buildingId' | 'signals' | 'oneWay'>[];
   segments: Pick<Segment, 'id' | 'a' | 'b' | 'curve' | 'spec' | 'platform'>[];
 }
 
@@ -75,7 +80,14 @@ export class Network {
     return {
       nextNodeId: this.nextNodeId,
       nextSegId: this.nextSegId,
-      nodes: [...this.nodes.values()].map((n) => ({ id: n.id, pos: n.pos, level: n.level, buildingId: n.buildingId, signals: n.signals })),
+      nodes: [...this.nodes.values()].map((n) => ({
+        id: n.id,
+        pos: n.pos,
+        level: n.level,
+        buildingId: n.buildingId,
+        signals: n.signals,
+        ...(n.oneWay?.length ? { oneWay: n.oneWay } : {}),
+      })),
       segments: [...this.segments.values()].map((s) => ({ id: s.id, a: s.a, b: s.b, curve: s.curve, spec: s.spec, platform: s.platform })),
     };
   }
@@ -100,6 +112,8 @@ export class Network {
     for (const nd of data.nodes) {
       const node: RoadNode = { id: nd.id, pos: nd.pos, level: nd.level, buildingId: nd.buildingId, segments: [] };
       if (nd.signals) node.signals = nd.signals;
+      // Старые сохранения — без поля: все сигналы обычные.
+      if (nd.oneWay?.length) node.oneWay = nd.oneWay;
       this.nodes.set(node.id, node);
       this.indexNode(node, true);
       this.dirty.add(node.id);
@@ -320,6 +334,7 @@ export class Network {
   private renameSegAt(nodeId: number, from: number, to: number): void {
     const n = this.nodes.get(nodeId);
     if (n?.signals) n.signals = n.signals.map((id) => (id === from ? to : id));
+    if (n?.oneWay) n.oneWay = n.oneWay.map((id) => (id === from ? to : id));
   }
 
   removeSegment(segId: number, cleanupNodes = true): void {

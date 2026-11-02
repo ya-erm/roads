@@ -20,7 +20,7 @@ import {
 } from '../game/transport';
 import { Controller, DRAW_MODES, Tool, TOOLS } from '../input/controller';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
-import { StationServes, stationTitle, TOWN_NEED, TownStyle } from '../world/entities';
+import { StationServes, stationTitle, TOWN_HISTORY, TOWN_NEED, TownStyle } from '../world/entities';
 import { footprintRadius } from '../world/spatial';
 import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP } from '../config';
 import { isOneWay, KMH_PER_UNIT, LEVELS, RAIL_SPEC, ROAD_PRESETS, RoadSpec, SPEED_LIMITS, specCost, specKmh } from '../world/roadTypes';
@@ -58,6 +58,7 @@ import {
   moveNodeSvg,
   bendSvg,
   handleSvg,
+  platformPickSvg,
   trackMoveSvg,
   railSvg,
   ringSvg,
@@ -67,6 +68,7 @@ import {
   stationSvg,
   tracksSvg,
   signalSvg,
+  oneWaySignalSvg,
   switchSvg,
   upgradeSvg,
   laneSvg,
@@ -74,6 +76,10 @@ import {
   downloadAllSvg,
   uploadSvg,
   railBadgeSvg,
+  playSvg,
+  saveSvg,
+  savesSvg,
+  newGameSvg,
 } from './icons';
 import { Minimap } from './minimap';
 
@@ -96,6 +102,15 @@ export interface HudSession {
   importFile(file: File): Promise<boolean>;
 }
 
+/** Форма слова для числа n: 1 партия, 2 партии, 5 партий. */
+function plural(n: number, one: string, few: string, many: string): string {
+  const d = n % 10;
+  const dd = n % 100;
+  if (d === 1 && dd !== 11) return one;
+  if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return few;
+  return many;
+}
+
 /** Силуэт карты с пропорциями сторон. */
 function mapSvg(w: number, h: number): string {
   const k = 26 / Math.max(w, h);
@@ -115,8 +130,9 @@ const ICONS: Record<Tool, string> = {
   rail: '<svg viewBox="0 0 24 24"><path d="M8 2L5 22M16 2l3 20" /><path d="M6 6h12M5.5 11h13M5 16h14M4.5 20.5h15" /></svg>',
   lights:
     '<svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="16" rx="3" /><circle cx="12" cy="6" r="1.4" /><circle cx="12" cy="10" r="1.4" /><circle cx="12" cy="14" r="1.4" /><path d="M12 18v4" /></svg>',
+  // Развязка «ромб»: магистраль, дорога над ней и четыре съезда-въезда ромбом — не путать с перекрёстком.
   roundabout:
-    '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5" /><path d="M12 2v5M12 17v5M2 12h5M17 12h5" /></svg>',
+    '<svg viewBox="0 0 24 24"><path d="M9.6 2v20M14.4 2v20" /><path d="M2 12h20" /><path d="M9.6 4.5L4.6 12L9.6 19.5M14.4 4.5L19.4 12L14.4 19.5" /></svg>',
   station: '<svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="10" rx="2" /><path d="M3 12h18M7 18v3M17 18v3M8 8V5h8v3" /></svg>',
   line: '<svg viewBox="0 0 24 24"><circle cx="5" cy="18" r="2.5" /><circle cx="19" cy="6" r="2.5" /><circle cx="12" cy="13" r="2" /><path d="M7 16.5l3.5-2.5M13.5 11.5l3.8-4" /></svg>',
   bulldoze:
@@ -133,7 +149,7 @@ const SPEEDS = [
 const PRESET_HINTS: Record<string, string> = {
   street: 'Обычная двусторонняя улица: по полосе в каждую сторону',
   avenue: 'Широкий проспект: по две полосы в каждую сторону, быстрее улицы',
-  oneway: 'Односторонняя: для колец, съездов и развязок. Скорость — знаком',
+  oneway: 'Односторонняя: две полосы в одну сторону. Одна полоса — инструментом «Полоса»',
   road: 'Шоссе: загородная дорога по полосе в каждую сторону, быстрая, нужны плавные повороты',
   hw2: 'Магистраль: по две быстрые полосы в каждую сторону, нужны плавные повороты',
   mw2: 'Автомагистраль: по две полосы в каждую сторону, посередине барьер. Без левых поворотов и перекрёстков — подключайте развязками. Больше полос — в редакторе полос',
@@ -175,6 +191,9 @@ const WAIT_HINTS: Record<WaitId, string> = {
 
 const ruleWaitId = (r: StopRule): WaitId => (r.wait === 'full' ? (r.maxWait === null ? 'full' : 'fullm') : r.wait);
 
+/** Вариант главной дороги с кнопки карточки перекрёстка (data-v) — как `mainPair` узла: null — «Авто», [] — равнозначный. */
+const mainChoice = (v: string | undefined): number[] | null => (v === 'auto' || !v ? null : v === 'none' ? [] : v.split(',').map(Number));
+
 const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
 
 /** Столбики «доход / расход» по месяцам — для компании и для линии. */
@@ -190,10 +209,53 @@ function incomeChart(months: { label: string; income: number; expense: number }[
       const he = (m.expense / max) * (H - 14);
       return `<rect x="${x + 2}" y="${H - 12 - hi}" width="${bw / 2 - 2}" height="${hi}" rx="1.5" fill="#3fae6a"><title>${m.label}: доход ${money(m.income)}</title></rect>
         <rect x="${x + bw / 2}" y="${H - 12 - he}" width="${bw / 2 - 2}" height="${he}" rx="1.5" fill="#e5534b"><title>${m.label}: расход ${money(m.expense)}</title></rect>
-        <text x="${x + bw / 2}" y="${H - 2}" text-anchor="middle" font-size="8" fill="#7b8794">${m.label.split(' ')[0]}</text>`;
+        ${monthTick(x + bw / 2, H, m.label)}`;
     })
     .join('');
   return `<svg class="fin-chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${bars}</svg>`;
+}
+
+/** Подпись месяца под столбиком графика: «Май» из «Май 1962». */
+const monthTick = (x: number, H: number, label: string) =>
+  `<text x="${x}" y="${H - 2}" text-anchor="middle" font-size="8" fill="#7b8794">${label.split(' ')[0]}</text>`;
+
+/**
+ * Снабжение города одним грузом по месяцам: столбик цветом груза — сколько привезли,
+ * пунктир — норма месяца, ✓ — норма закрыта. Текущий (ещё идущий) месяц бледнее.
+ */
+function supplyChart(months: { label: string; got: number; need: number; current?: boolean }[], color: string, H = 72): string {
+  const W = 300;
+  // Слева — число нормы у пунктира, сверху — место для галочки.
+  const L = 16;
+  const top = 11;
+  const base = H - 12;
+  const max = Math.max(1, ...months.map((m) => Math.max(m.got, m.need * 1.15)));
+  const y = (v: number) => base - (v / max) * (base - top);
+  const bw = (W - L) / Math.max(12, months.length);
+  const bars = months
+    .map((m, i) => {
+      const x = L + i * bw;
+      const h = base - y(m.got);
+      const ok = m.got >= m.need;
+      const tip = `${m.current ? 'Этот месяц' : m.label}: привезли ${Math.round(m.got)} из ${m.need}${ok ? ' ✓' : ''}`;
+      return `<g${m.current ? ' opacity="0.4"' : ''}><title>${tip}</title><rect x="${x}" y="0" width="${bw}" height="${H}" fill="transparent"/>
+        ${h > 0 ? `<rect x="${x + bw * 0.18}" y="${base - h}" width="${bw * 0.64}" height="${h}" rx="1.5" fill="${color}"/>` : ''}
+        ${ok ? `<text x="${x + bw / 2}" y="${base - h - 2}" text-anchor="middle" font-size="9" font-weight="700" fill="#2e9d57">✓</text>` : ''}
+        ${monthTick(x + bw / 2, H, m.label)}</g>`;
+    })
+    .join('');
+  // Пунктир нормы — отрезками с одинаковой нормой; последний тянется до края.
+  let norm = '';
+  for (let i = 0, start = 0; i < months.length; i++) {
+    const last = i === months.length - 1;
+    if (!last && months[i + 1].need === months[start].need) continue;
+    const ny = y(months[start].need);
+    norm += `<line x1="${L + start * bw}" x2="${last ? W : L + (i + 1) * bw}" y1="${ny}" y2="${ny}" stroke="#7b8794" stroke-dasharray="3 2"><title>Норма месяца: ${months[start].need}</title></line>`;
+    start = i + 1;
+  }
+  const label = months.length ? `<text x="${L - 3}" y="${y(months[0].need) + 3}" text-anchor="end" font-size="8" fill="#7b8794">${months[0].need}</text>` : '';
+  return `<svg class="fin-chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
+    <line x1="${L}" x2="${W}" y1="${base}" y2="${base}" stroke="#dfe4ea"/>${bars}${norm}${label}</svg>`;
 }
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
@@ -231,6 +293,8 @@ export class Hud {
   private colorsOpen: number | null = null;
   /** Остановка, у которой раскрыты условия. */
   private stopOpen: { line: number; i: number } | null = null;
+  /** Потребности городов, раскрытые в диаграмму по месяцам: `город:груз`. */
+  private readonly needsOpen = new Set<string>();
   /** Папка, у которой сейчас открыто поле названия. */
   private renamingFolder: number | null = null;
   /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
@@ -277,19 +341,27 @@ export class Hud {
       </div>
       <div class="screen hidden" data-menu>
         <div class="modal menu">
-          <button class="icon modal-close" data-action="resume" title="Закрыть (Esc)">✕</button>
-          <h2>Меню</h2>
-          <p class="muted" data-menu-info></p>
-          <div class="menu-buttons">
-            <button class="secondary" data-action="save-game">Сохранить</button>
-            <button class="secondary" data-action="new-game">Новая игра…</button>
-            <button class="primary" data-action="resume">Продолжить</button>
+          <div data-menu-main>
+            <button class="icon modal-close" data-action="resume" title="Закрыть (Esc)">✕</button>
+            <h2>Меню</h2>
+            <p class="muted" data-menu-info></p>
+            <div class="menu-buttons">
+              <button class="primary" data-action="resume">${playSvg(18)}Продолжить</button>
+              <button class="menu-item" data-action="save-game">${saveSvg(22)}<span class="menu-text"><b>Сохранить</b><small data-save-target></small></span></button>
+              <button class="menu-item" data-action="menu-saves">${savesSvg(22)}<span class="menu-text"><b>Сохранения</b><small data-saves-count></small></span><span class="menu-go">›</span></button>
+              <button class="menu-item" data-action="new-game">${newGameSvg(22)}<span class="menu-text"><b>Новая игра</b><small>Другая карта, города, деньги</small></span><span class="menu-go">›</span></button>
+            </div>
           </div>
-          <div class="file-row">
-            <button class="small" data-action="export-save" title="Скачать партию файлом — например, чтобы отправить его">⬇ Сохранить в файл</button>
-            <label class="small file-pick" title="Открыть партию из файла">⬆ Загрузить из файла<input type="file" accept=".json,application/json" data-import-save /></label>
+          <div class="hidden" data-menu-saves>
+            <button class="icon menu-back" data-action="menu-back" title="Назад в меню (Esc)">‹</button>
+            <button class="icon modal-close" data-action="resume" title="Закрыть">✕</button>
+            <h2>Сохранения</h2>
+            <div class="saves" data-saves></div>
+            <div class="file-row">
+              <button class="small with-ic" data-action="export-save" title="Скачать партию файлом — например, чтобы отправить его">${downloadSvg(15)}Сохранить в файл</button>
+              <label class="small file-pick with-ic" title="Открыть партию из файла">${uploadSvg(15)}Открыть из файла<input type="file" accept=".json,application/json" data-import-save /></label>
+            </div>
           </div>
-          <div class="saves" data-saves></div>
         </div>
       </div>
       <div class="screen hidden" data-newgame><div class="modal newgame" data-newgame-body></div></div>
@@ -384,6 +456,16 @@ export class Hud {
       else this.controller.cancelArea();
     });
     root.addEventListener('click', (e) => this.onClick(e));
+    // Курсор на варианте главной дороги — карта показывает его, пока курсор на кнопке.
+    const mainChip = (t: EventTarget | null) => (t instanceof Element ? t.closest<HTMLElement>('[data-action="jn-main"]') : null);
+    root.addEventListener('pointerover', (e) => {
+      const el = mainChip(e.target);
+      if (el) controller.mainHover = { node: Number(el.dataset.id), mainPair: mainChoice(el.dataset.v) };
+    });
+    root.addEventListener('pointerout', (e) => {
+      const el = mainChip(e.target);
+      if (el && el !== mainChip(e.relatedTarget)) controller.mainHover = null;
+    });
     // Карточка транспорта меняется каждый кадр (скорость): держим её, пока кнопка мыши зажата.
     this.q('[data-side]').addEventListener('pointerdown', () => (this.pressing = true));
     window.addEventListener('pointerup', () => setTimeout(() => (this.pressing = false)));
@@ -500,6 +582,21 @@ export class Hud {
       clearOver();
       this.sync(true);
     });
+    // Знак скорости из панели можно перетащить на дорогу — ограничение без перестройки.
+    const options = this.q('[data-options]');
+    options.addEventListener('dragstart', (e) => {
+      const sign = (e.target as HTMLElement).closest<HTMLElement>('[data-drag-limit]');
+      if (!sign || !e.dataTransfer) return;
+      this.controller.dragLimit = Number(sign.dataset.dragLimit);
+      e.dataTransfer.effectAllowed = 'copy';
+      e.dataTransfer.setData('text/plain', `speed:${sign.dataset.dragLimit}`);
+      const img = sign.querySelector('svg');
+      if (img) e.dataTransfer.setDragImage(img, 13, 13);
+    });
+    options.addEventListener('dragend', () => {
+      this.pressing = false;
+      this.controller.endLimitDrag();
+    });
   }
 
   private onClick(e: MouseEvent): void {
@@ -524,12 +621,23 @@ export class Hud {
         c.setSpeed(this.speedBeforeMenu);
         break;
       case 'save-game': {
-        // Партия из сохранения — перезаписываем его; иначе — новое сохранение с именем из поля.
+        // Партия из сохранения — перезаписываем его; иначе — новое сохранение с именем по умолчанию.
         const id = this.session.linked();
         const entry = id ? this.saves.find((s) => s.id === id) : undefined;
-        void this.session.saveAs(entry?.name ?? this.saveName(), entry?.id).then(() => this.renderSaves());
+        const name = entry?.name ?? this.defaultSaveName();
+        void this.session.saveAs(name, entry?.id).then((ok) => this.refreshMenuMain(ok ? name : undefined));
         break;
       }
+      case 'menu-saves':
+        this.confirmSave = null;
+        this.menuView('saves');
+        void this.renderSaves(true);
+        break;
+      case 'menu-back':
+        this.confirmSave = null;
+        this.menuView('main');
+        void this.refreshMenuMain();
+        break;
       case 'export-save':
         this.session.exportFile();
         break;
@@ -626,6 +734,12 @@ export class Hud {
         this.sync(true);
         break;
       }
+      case 'town-need': {
+        // Строка потребности города раскрывается в диаграмму по месяцам и сворачивается обратно.
+        const key = `${d.id}:${d.c}`;
+        if (!this.needsOpen.delete(key)) this.needsOpen.add(key);
+        break;
+      }
       case 'chain-kind': {
         // Подсвечиваем все предприятия типа и показываем ближайшее к центру экрана.
         const list = g.industries.filter((i) => i.info.kind === d.kind);
@@ -717,6 +831,9 @@ export class Hud {
         break;
       case 'rail-tracks':
         c.setRailTracks(Number(d.v));
+        break;
+      case 'signal-oneway':
+        c.setSignalOneWay(d.v === '1');
         break;
       case 'limit':
         c.setLimit(Number(d.v));
@@ -887,7 +1004,7 @@ export class Hud {
           greens[i] = Math.max(4, Math.min(40, greens[i] + Number(d.d)));
           g.setJunction(id, { greens });
         } else if (d.action === 'jn-main') {
-          g.setJunction(id, { mainPair: d.v === 'auto' ? null : d.v === 'none' ? [] : d.v!.split(',').map(Number) });
+          g.setJunction(id, { mainPair: mainChoice(d.v) });
         } else {
           const key = `${d.from}>${d.out}`;
           const bans = n.bans ?? [];
@@ -924,12 +1041,17 @@ export class Hud {
         break;
       case 'rule-wait':
       case 'rule-load':
-      case 'rule-unload': {
+      case 'rule-unload':
+      case 'rule-platform': {
         const line = g.lines.get(Number(d.line));
         if (!line) break;
         const i = Number(d.i);
         const rule: StopRule = { ...g.stopRule(line, i) };
-        if (d.action === 'rule-wait') {
+        if (d.action === 'rule-platform') {
+          // Путь ж/д станции для этой остановки: номер или авто.
+          if (d.v === 'auto') delete rule.platform;
+          else rule.platform = Number(d.v);
+        } else if (d.action === 'rule-wait') {
           const w = d.v as WaitId;
           rule.wait = w === 'fullm' ? 'full' : w;
           rule.maxWait = w === 'fullm' ? MONTH_LENGTH : null;
@@ -1242,12 +1364,23 @@ export class Hud {
         </div></div></div>`;
     }
     if (c.railMode === 'signal') {
-      return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить сигналы</div>
+      // Тип сигнала картинкой: обычный (блок в обе стороны) или без встречного — со знаком «въезд запрещён».
+      const kind = [
+        { on: false, svg: signalSvg(), name: 'Обычный', hint: 'Делит путь на блоки; поезда ездят мимо в обе стороны' },
+        { on: true, svg: oneWaySignalSvg(), name: 'Без встречного', hint: 'Поезда едут мимо только по стрелке, навстречу маршрут не проложат (как в Transport Fever)' },
+      ]
+        .map(
+          (k) => `<button class="icon-btn ${c.signalOneWay === k.on ? 'active' : ''}" data-action="signal-oneway" data-v="${k.on ? 1 : 0}" title="${k.hint}">
+          ${k.svg}<span>${k.name}</span></button>`,
+        )
+        .join('');
+      return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Сигнал</div><div class="icons">${kind}</div></div>
+        <div class="opt-group narrow"><div class="opt-title">Как ставить сигналы</div>
         <div class="rules">
           <div>${signalSvg()}<span>Клик рядом с путём: сигнал встанет для поездов, у которых курсор справа по ходу. Повторный клик — снять</span></div>
           <div>${railSvg(40, 20)}<span>Без сигналов поезд занимает весь путь до станции. С сигналами — только участок до следующего сигнала</span></div>
-          <div>${switchSvg()}<span>Двухпутка: на каждом пути сигналы в его направлении — поезда пойдут друг за другом</span></div>
-          <div>⚠️<span>На однопутке ставьте сигналы только в одну сторону — иначе встречные поезда могут упереться друг в друга</span></div>
+          <div>${oneWaySignalSvg()}<span>Двухпутка: на каждом пути сигналы без встречного в его сторону — поезда сами выберут свой путь</span></div>
+          <div>⚠️<span>На однопутке обычные сигналы ставьте только в одну сторону — иначе встречные поезда могут упереться друг в друга</span></div>
         </div>
         <div class="price">${money(COST.signal)} за сигнал</div></div></div>`;
     }
@@ -1339,6 +1472,18 @@ export class Hud {
         <div class="opt-group narrow"><div class="opt-title">Двигать</div>
         <p class="muted">Изгиб у прямой между соседями встаёт ровно на неё. Тупик на другой дороге — примыкает. Перья видны у дороги под курсором; в стыке соседняя дорога поворачивает следом, <kbd>Shift</kbd> — излом.</p></div></div>`;
     }
+    // Только знаки: ограничение скорости не зависит от типа дороги.
+    const limits = SPEED_LIMITS.map(
+      (v) =>
+        `<button class="limit ${specKmh(s) === v ? 'active' : ''}" data-action="limit" data-v="${v}" draggable="true" data-drag-limit="${v}"
+          title="Ограничение ${v} км/ч · перетащите знак на дорогу — сменить скорость без перестройки">${speedSign(v, 26)}</button>`,
+    ).join('');
+    if (c.roadMode === 'lane') {
+      // Полоса — всегда одна, ширина и класс — как у дороги, от которой её ведут: выбирать нечего, кроме скорости.
+      return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Скорость</div><div class="limits">${limits}</div></div>
+        <div class="opt-group narrow"><div class="opt-title">Полоса</div>
+        <p class="muted">Кликайте по точкам, как путь: от края вдоль дороги — полоса, в сторону — съезд, из поля к краю — въезд. С точки на конце дороги — однополосная из этой полосы.</p></div></div>`;
+    }
     const presets = ROAD_PRESETS.map(
       (p) => `<button class="card ${c.presetId === p.id ? 'active' : ''}" data-action="preset" data-id="${p.id}"
         title="${PRESET_HINTS[p.id] ?? p.name}">${roadSvg(p.spec, 64, 26)}<span class="name">${p.name}</span>
@@ -1347,10 +1492,6 @@ export class Hud {
     const stepper = (key: 'f' | 'b', value: number, arrow: string, title: string) =>
       `<span class="stepper" title="${title}"><button data-action="lanes" data-${key}="-1">−</button>
         <b>${arrow} ${value}</b><button data-action="lanes" data-${key}="1">+</button></span>`;
-    // Только знаки: ограничение скорости не зависит от типа дороги.
-    const limits = SPEED_LIMITS.map(
-      (v) => `<button class="limit ${specKmh(s) === v ? 'active' : ''}" data-action="limit" data-v="${v}" title="Ограничение ${v} км/ч">${speedSign(v, 26)}</button>`,
-    ).join('');
     // Полосы в одну строку: встречные — схема — попутные; цена — в заголовке.
     const lanes = `<div class="lane-editor">
         ${stepper('b', s.lanesB, '←', 'Полосы во встречном направлении (0 — односторонняя)')}
@@ -1515,12 +1656,15 @@ export class Hud {
         const loadIcons = rule.load === 'auto' ? '' : `<span class="rl">⬆${rule.load.length ? rule.load.map((c) => cargoIcon(c, 14)).join('') : '✕'}</span>`;
         const unloadIcons =
           rule.unload === 'auto' ? '' : rule.unload === 'all' ? '<span class="rl">⬇ склад</span>' : `<span class="rl">⬇${rule.unload.map((c) => cargoIcon(c, 14)).join('')}</span>`;
+        // Выбранный путь ж/д станции — номером на значке.
+        const plat = g.stopPlatform(line, i);
+        const platIcon = plat !== null && st ? `<span class="rl" title="Путь станции">🛤${st.platforms.indexOf(plat) + 1}</span>` : '';
         const btn = (action: string, label: string, title: string, disabled = false) =>
           `<button class="icon" data-action="${action}" data-line="${line.id}" data-i="${i}" title="${title}" ${disabled ? 'disabled' : ''}>${label}</button>`;
         return `<div class="stop ${open ? 'open' : ''}">
           <span class="num">${i + 1}</span>
           <span class="st-name">${st ? (st.kind === 'rail' ? '🚉 ' : '') + esc(st.name) : '?'}</span>
-          <button class="rule-chip" data-action="stop-open" data-line="${line.id}" data-i="${i}" title="Условия на этой остановке">${WAIT_LABELS[ruleWaitId(rule)]}${loadIcons}${unloadIcons}</button>
+          <button class="rule-chip" data-action="stop-open" data-line="${line.id}" data-i="${i}" title="Условия на этой остановке">${WAIT_LABELS[ruleWaitId(rule)]}${platIcon}${loadIcons}${unloadIcons}</button>
           ${btn('stop-up', '↑', 'Раньше', i === 0)}${btn('stop-down', '↓', 'Позже', i === n - 1)}${btn('stop-del', '✕', 'Убрать из маршрута', n <= 2)}
         </div>${open ? this.stopRuleHtml(line, i, rule) : ''}`;
       })
@@ -1544,8 +1688,22 @@ export class Hud {
       ).join('');
     const loadList = rule.load === 'auto' ? null : rule.load;
     const unloadList = Array.isArray(rule.unload) ? rule.unload : null;
+    // Ж/д станция: на какой путь вставать — схемой путей с номерами; «Авто» — на свободный.
+    const st = this.game().stations.get(line.stops[i]);
+    const count = st?.kind === 'rail' ? st.platforms.length : 0;
+    const pick = rule.platform !== undefined && rule.platform !== null && rule.platform < count ? rule.platform : null;
+    const platforms =
+      count > 1
+        ? `<div class="rule-row"><span class="lbl2">Путь</span><div class="opts">${[null, ...Array.from({ length: count }, (_, k) => k)]
+            .map(
+              (k) => `<button class="opt plat ${pick === k ? 'active' : ''}" data-action="rule-platform" ${attrs} data-v="${k ?? 'auto'}" title="${
+                k === null ? 'Авто: на любой свободный путь' : `Путь ${k + 1}${k === 0 ? ' — сквозной' : ''}`
+              }">${platformPickSvg(count, k)}${k === null ? 'Авто' : k + 1}</button>`,
+            )
+            .join('')}</div></div>`
+        : '';
     return `<div class="stop-rule">
-      <div class="rule-row"><span class="lbl2">Отправление</span><div class="opts">${waits}</div></div>
+      <div class="rule-row"><span class="lbl2">Отправление</span><div class="opts">${waits}</div></div>${platforms}
       <div class="rule-row"><span class="lbl2">Грузить</span><div class="opts">
         <button class="opt ${rule.load === 'auto' ? 'active' : ''}" data-action="rule-load" ${attrs} data-c="auto" title="То, что примут дальше по маршруту">Авто</button>
         ${cargoChips('rule-load', loadList)}</div></div>
@@ -1824,9 +1982,17 @@ export class Hud {
           const now = t.supplied[c] ?? 0;
           const last = t.lastSupplied[c] ?? 0;
           const pct = Math.min(100, (now / TOWN_NEED) * 100);
-          return `<div class="need">${cargoIcon(c, 24)}<div><b>${CARGO[c].name}</b>
+          const open = this.needsOpen.has(`${t.id}:${c}`);
+          // Закрытые месяцы и текущий — последним, всего не больше 12 столбиков.
+          const months = [
+            ...(t.supplyHistory ?? []).slice(-(TOWN_HISTORY - 1)).map((m) => ({ label: m.label, got: m.got[c] ?? 0, need: m.need })),
+            { label: g.dateLabel, got: now, need: TOWN_NEED, current: true },
+          ];
+          const chart = open ? `<div class="need-chart">${supplyChart(months, CARGO[c].color)}</div>` : '';
+          return `<div class="need" data-action="town-need" data-id="${t.id}" data-c="${c}" title="${open ? 'Свернуть' : 'По месяцам'}">${cargoIcon(c, 24)}<div><b>${CARGO[c].name}</b>
             <div class="bar"><div style="width:${pct}%;background:${CARGO[c].color}"></div></div>
-            <small>в этом месяце ${now} из ${TOWN_NEED} · в прошлом ${last}${last >= TOWN_NEED ? ' ✓' : ''}</small></div></div>`;
+            <small>в этом месяце ${now} из ${TOWN_NEED} · в прошлом ${last}${last >= TOWN_NEED ? ' ✓' : ''}</small></div>
+            <span class="caret ${open ? '' : 'closed'}">${chevronSvg(10)}</span></div>${chart}`;
         })
         .join('');
       const faces = { good: '😊', ok: '😐', bad: '😠' };
@@ -1900,7 +2066,9 @@ export class Hud {
       const isNone = !!manual && manual.length === 0;
       const same = (p: [number, number]) => !!manual && manual.length === 2 && manual.includes(p[0]) && manual.includes(p[1]);
       const now = info.mainNow.map((s) => info.label(s).name).join('–');
-      control = `<div class="rule-row"><span class="lbl2">Главная дорога ${isAuto && now ? `(сейчас ${now})` : ''}</span><div class="opts">
+      // Значок «Главная дорога» — как жёлтая подсветка и ромбы у въездов на карте.
+      const sign = `<svg width="13" height="13" viewBox="0 0 14 14" style="vertical-align:-2px" aria-hidden="true"><path d="M7 .8 13.2 7 7 13.2.8 7Z" fill="#fff" stroke="#1f2933"/><path d="M7 3.6 10.4 7 7 10.4 3.6 7Z" fill="#f5b800"/></svg>`;
+      control = `<div class="rule-row"><span class="lbl2">${sign} Главная дорога ${isAuto && now ? `(сейчас ${now})` : ''}</span><div class="opts">
         <button class="opt ${isAuto ? 'active' : ''}" data-action="jn-main" ${attrs} data-v="auto" title="Самая прямая и широкая дорога">Авто</button>
         ${info.pairs
           .map((p) => `<button class="opt ${same(p.segs) ? 'active' : ''}" data-action="jn-main" ${attrs} data-v="${p.segs.join(',')}">${p.name}</button>`)
@@ -1989,6 +2157,11 @@ export class Hud {
       this.showMenu();
       return true;
     }
+    if (!this.q('[data-menu-saves]').classList.contains('hidden') && !this.q('[data-menu]').classList.contains('hidden')) {
+      this.menuView('main');
+      void this.refreshMenuMain();
+      return true;
+    }
     if (!this.q('[data-menu]').classList.contains('hidden')) {
       this.hideScreens();
       this.controller.setSpeed(this.speedBeforeMenu);
@@ -2008,8 +2181,26 @@ export class Hud {
     const s = g.settings;
     this.q('[data-menu-info]').textContent = `${g.dateLabel} · карта «${MAP_SIZES[s.size].name.toLowerCase()}», ${g.towns.length} городов · seed ${s.seed}`;
     this.confirmSave = null;
+    this.menuView('main');
     this.showScreen('menu');
-    void this.renderSaves(true);
+    void this.refreshMenuMain();
+  }
+
+  /** Меню: главное (продолжить, сохранить, разделы) или раздел сохранений. */
+  private menuView(view: 'main' | 'saves'): void {
+    this.q('[data-menu-main]').classList.toggle('hidden', view !== 'main');
+    this.q('[data-menu-saves]').classList.toggle('hidden', view !== 'saves');
+  }
+
+  /** Подписи в главном меню: куда запишет «Сохранить» и сколько сохранений в разделе. */
+  private async refreshMenuMain(saved?: string): Promise<void> {
+    this.saves = await this.session.list().catch(() => []);
+    const linked = this.session.linked();
+    const entry = linked ? this.saves.find((x) => x.id === linked) : undefined;
+    this.q('[data-save-target]').textContent = saved ? `✓ Сохранено: «${saved}»` : entry ? `Поверх «${entry.name}»` : 'Новым сохранением';
+    this.q('[data-save-target]').classList.toggle('done', !!saved);
+    const n = this.saves.length;
+    this.q('[data-saves-count]').textContent = n ? `${n} ${plural(n, 'партия', 'партии', 'партий')} · файлы` : 'Пока нет · открыть из файла';
   }
 
   /** Имя для нового сохранения: из поля, иначе — крупнейший город и дата. */
@@ -2046,10 +2237,9 @@ export class Hud {
           ${load}${del}</div>`;
       })
       .join('');
-    el.innerHTML = `<h3>Сохранения</h3>
-      <div class="save-new"><input class="line-name" data-save-name maxlength="40" placeholder="${esc(this.defaultSaveName())}" value="${esc(typed)}" />
+    el.innerHTML = `<div class="save-new"><input class="line-name" data-save-name maxlength="40" placeholder="${esc(this.defaultSaveName())}" value="${esc(typed)}" />
         <button class="small" data-action="save-new">Сохранить как новое</button></div>
-      <div class="save-list">${rows || '<p class="muted">Своих сохранений пока нет: «Сохранить» запишет партию сюда.</p>'}</div>`;
+      <div class="save-list">${rows || '<p class="muted">Своих сохранений пока нет: «Сохранить» в меню запишет партию сюда.</p>'}</div>`;
   }
 
   /** Форма параметров нового мира. */

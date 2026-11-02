@@ -25,6 +25,8 @@ const LOOKAHEAD = 250;
 const PLAN_AHEAD = 600;
 /** Сколько дороги нужно на одно перестроение: на связи короче — перестраиваться тяжело. */
 const CHANGE_ROOM = 120;
+/** Трудность остановиться у цели не у бордюра — за каждую полосу от крайней правой (больше одного перестроения). */
+const CURB_PULL = 1.5;
 
 /**
  * Трудность n перестроений на отрезке длиной room: само число перестроений и штраф, если места
@@ -111,14 +113,17 @@ export class LaneTraffic {
         g.lights.clearing = was.clearing;
       }
     }
+    const old = this.graph;
     this.graph = graph;
     for (const veh of [...this.vehicles.values()]) {
+      // Посреди перекрёстка полосы под машиной нет — ставим её в начало полосы, куда она выезжала.
+      const exit = veh.onMovement ? this.exitSpot(old, veh.onMovement) : null;
       veh.onMovement = null;
       veh.granted = null;
       veh.planned = null;
       veh.waitingAt = null;
       veh.ready = false;
-      const spot = this.laneAt(veh.pos, veh.dir);
+      const spot = this.laneAt(veh.pos, veh.dir) ?? exit;
       const route = spot && findLaneRoute(graph, [graph.links.get(spot.lane.link)!], veh.targetNode);
       if (!spot || !route) {
         this.vehicles.delete(veh.id);
@@ -136,6 +141,25 @@ export class LaneTraffic {
   }
 
   /** Попутная полоса у точки: ближайшая по смещению среди связей, идущих примерно по dir. */
+  /**
+   * Начало полосы выезда манёвра moveKey старого графа — в новом графе (this.graph): то же полотно, тот же
+   * ход и та же полоса полотна у того же конца. Полотна при перестройке сохраняют номера. Нет — null.
+   */
+  private exitSpot(old: LaneGraph, moveKey: string): { lane: GLane; u: number } | null {
+    const m = old.moves.get(moveKey);
+    const outLane = m && old.lanes.get(m.outLane);
+    const outLink = outLane && old.links.get(outLane.link);
+    if (!outLane || !outLink) return null;
+    // Выезд — с того конца связи, откуда по ней едут.
+    const start = outLink.flow > 0 ? outLink.s0 : outLink.s1;
+    for (const link of this.graph.corridorLinks(outLink.corridor)) {
+      if (link.flow !== outLink.flow || Math.abs((link.flow > 0 ? link.s0 : link.s1) - start) > 1) continue;
+      const lane = link.lanes.find((l) => l.laneIdx === outLane.laneIdx) ?? link.lanes.find((l) => Math.abs(l.offset - outLane.offset) < 1);
+      if (lane) return { lane, u: 0 };
+    }
+    return null;
+  }
+
   private laneAt(p: Vec, dir: Vec): { lane: GLane; u: number } | null {
     let best: { lane: GLane; u: number } | null = null;
     let bestD = 6;
@@ -354,7 +378,8 @@ export class LaneTraffic {
       const stay = new Map<number, number>();
       for (const l of link.lanes) {
         let v = Infinity;
-        if (next === undefined) v = 0;
+        // К цели (остановка, пост, дом) — к бордюру: в крайнюю правую полосу, в «кармашек» у остановки, если он есть.
+        if (next === undefined) v = (link.lanes.length - 1 - l.index) * CURB_PULL;
         else if (k === links.length - 1) v = this.hasTransition(l, next) ? 0 : Infinity;
         else for (const m of this.graph.movesFrom.get(l.id) ?? []) if (m.outLink === next) v = Math.min(v, plan[k + 1].cost.get(m.outLane) ?? Infinity);
         stay.set(l.id, v);
@@ -401,6 +426,9 @@ export class LaneTraffic {
       target = link.lanes[lane.index + Math.sign(goal.index - lane.index)];
       urgency = Math.max(0, Math.min(1, 1 - end.dist / (end.changes * CHANGE_ROOM + 20)));
       strategic = true;
+    } else if (goal !== lane && veh.routeIndex === veh.route.length - 1) {
+      // Последняя связь до цели — к бордюру (в «кармашек» у остановки), без спешки: не пустят — остановится и в своей.
+      target = link.lanes[lane.index + Math.sign(goal.index - lane.index)];
     } else if (remaining > 50) {
       const idx = lane.vehicles.indexOf(veh);
       const leader = idx > 0 ? lane.vehicles[idx - 1] : undefined;

@@ -17,7 +17,7 @@ import type { Camera } from '../render/camera';
 import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
-import { MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
+import { isOneWay, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
 import { RailTools } from './railtools';
 import { RoadTools } from './roadtools';
 
@@ -96,6 +96,8 @@ export class Controller {
   railMode: RailMode = 'track';
   /** Сколько путей класть сразу: один или два рядом. */
   railTracks: 1 | 2 = 1;
+  /** Сигнал запрещает встречное движение (как в Transport Fever): навстречу поезд по этому пути не поедет. */
+  signalOneWay = false;
   /** Пристроить путь: где зажали на существующем пути. */
   parallelFrom: Vec | null = null;
   /** Двухпутка продолжается: концы обоих путей у точки at (оси). */
@@ -162,8 +164,12 @@ export class Controller {
   moving: TownBuilding | null = null;
   /** Настройка полос выбранного перекрёстка: полоса въезда, которую сейчас соединяем. */
   laneFrom: { seg: number; i: number } | null = null;
+  /** Курсор на варианте главной дороги в карточке перекрёстка — карта показывает этот вариант. */
+  mainHover: { node: number; mainPair: number[] | null } | null = null;
   heatmap = false;
   hover: Vec | null = null;
+  /** Знак скорости (км/ч), который тянут из панели на дорогу. */
+  dragLimit: number | null = null;
   onChange: () => void = () => {};
   private mouse = { x: 0, y: 0 };
   private shift = false;
@@ -188,6 +194,27 @@ export class Controller {
     window.addEventListener('mouseup', (e) => this.onUp(e));
     canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     canvas.addEventListener('mouseleave', () => (this.hover = null));
+    // Знак скорости, который тянут из панели: над дорогой — предпросмотр, отпустили — ограничение на ней.
+    canvas.addEventListener('dragover', (e) => {
+      if (this.dragLimit === null) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      this.hover = this.worldAt(e);
+      this.onChange();
+    });
+    canvas.addEventListener('dragleave', () => {
+      if (this.dragLimit !== null) this.hover = null;
+    });
+    canvas.addEventListener('drop', (e) => {
+      if (this.dragLimit === null) return;
+      e.preventDefault();
+      const g = this.game();
+      g.checkpoint('скорость дороги');
+      const problem = this.roadTools.setLimitAt(this.worldAt(e), this.dragLimit, this.snapRadius * 0.3);
+      g.commit();
+      if (problem) this.showError(problem);
+      this.endLimitDrag();
+    });
     window.addEventListener('keydown', (e) => this.onKey(e));
     window.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
@@ -460,6 +487,12 @@ export class Controller {
     this.onChange();
   }
 
+  /** Тип нового сигнала: обычный (блок в обе стороны) или запрещающий встречное движение. */
+  setSignalOneWay(on: boolean): void {
+    this.signalOneWay = on;
+    this.onChange();
+  }
+
   setRailTracks(n: number): void {
     this.railTracks = n >= 2 ? 2 : 1;
     this.chain = null;
@@ -544,12 +577,19 @@ export class Controller {
     this.onChange();
   }
 
+  /** Знак скорости отпустили (на дороге или мимо) — предпросмотр убираем. */
+  endLimitDrag(): void {
+    this.dragLimit = null;
+    this.onChange();
+  }
+
   select(sel: Selection | null): void {
     this.selection = sel;
     // Выбрали станцию, предприятие, машину — панель переключается на них, открытый маршрут закрывается.
     if (sel) this.selectedLine = null;
     this.following = false;
     this.laneFrom = null;
+    this.mainHover = null;
     this.onChange();
   }
 
@@ -942,8 +982,8 @@ export class Controller {
         break;
       }
       case 'signal': {
-        const plan = g.signalPlan(p, this.snapRadius);
-        if (!g.toggleSignal(p, this.snapRadius)) this.showError(plan.reason ?? 'Не хватает денег');
+        const plan = g.signalPlan(p, this.snapRadius, this.signalOneWay);
+        if (!g.toggleSignal(p, this.snapRadius, this.signalOneWay)) this.showError(plan.reason ?? 'Не хватает денег');
         break;
       }
       case 'template': {
@@ -1402,6 +1442,12 @@ export class Controller {
     if (e.key === 'Alt') {
       this.alt = true;
       e.preventDefault();
+      // У односторонней и у полосы нажатие Alt разворачивает направление.
+      const oneWay = this.tool === 'road' && this.netKind === 'road' && (this.roadMode === 'lane' || (this.roadMode === 'build' && isOneWay(this.spec)));
+      if (oneWay && !e.repeat) {
+        this.roadTools.reverse = !this.roadTools.reverse;
+        this.onChange();
+      }
     }
     if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
       e.preventDefault();
@@ -1514,6 +1560,7 @@ export class Controller {
       label: null,
       heatmap: this.heatmap,
       laneEdit: null,
+      mainHover: this.mainHover,
     };
     // Инструмент «Перекрёсток» у выбранного перекрёстка: метки полос для настройки связей.
     const laneEnds = this.laneEnds();
@@ -1542,6 +1589,13 @@ export class Controller {
       }
     }
     if (!p) return o;
+    // Тянут знак скорости: дорога под ним (до перекрёстков) — как будет, подпись — новая скорость.
+    if (this.dragLimit !== null) {
+      const res = this.roadTools.limitPlan(p, this.dragLimit, this.snapRadius * 0.3);
+      if (res) this.showRoadPlan(o, res.plan, `${res.was} → ${this.dragLimit} км/ч`);
+      else o.label = { text: `${this.dragLimit} км/ч — отпустите на дороге`, ok: true };
+      return o;
+    }
 
     switch (this.action) {
       case 'road': {
@@ -1563,7 +1617,8 @@ export class Controller {
           if (plan) {
             const length = plan.net ? plan.changed.reduce((s, id) => s + (plan.net!.corridors.get(id)?.length ?? 0), 0) : 0;
             const aligned = rt.hint ? ` · ${rt.hint}` : '';
-            this.showRoadPlan(o, plan, `${money(plan.cost)} · ${Math.round(length)} м${aligned}`);
+            const back = rt.reverse && isOneWay(this.spec) ? ' · ⇄ навстречу' : '';
+            this.showRoadPlan(o, plan, `${money(plan.cost)} · ${Math.round(length)} м${aligned}${back}`);
           }
           break;
         }
@@ -1640,7 +1695,7 @@ export class Controller {
           // По точкам: следующий кусок до курсора — как построенный; кружок — где сейчас конец полосы.
           const res = rt.laneStepPlan(p, this.spec, this.snapRadius);
           if (res) {
-            this.showRoadPlan(o, res.plan, `${res.step?.what ?? ''} · ${money(res.plan.cost)}`);
+            this.showRoadPlan(o, res.plan, `${res.step?.what ?? ''} · ${money(res.plan.cost)}${rt.reverse ? ' · ⇄' : ''}`);
             const next = res.step && res.plan.net ? laneTipPos(res.plan.net, res.step.tip) : null;
             o.points = [{ pos: tipAt, color: '#27ae60', r: 6 }, ...(next ? [{ pos: next, color: '#27ae60', r: 4 }] : [])];
           }
@@ -1677,7 +1732,7 @@ export class Controller {
         }
         // Тянут: что построится (вдоль, съезд, въезд — и через стыки), возврат — если полоса короче.
         const res = rt.lanePlan(this.spec);
-        if (res) this.showRoadPlan(o, res.plan, `${res.what} · ${res.plan.cost < 0 ? `+${money(-res.plan.cost)}` : money(res.plan.cost)}`);
+        if (res) this.showRoadPlan(o, res.plan, `${res.what} · ${res.plan.cost < 0 ? `+${money(-res.plan.cost)}` : money(res.plan.cost)}${rt.reverse ? ' · ⇄' : ''}`);
         break;
       }
       case 'upgrade': {
@@ -1913,10 +1968,14 @@ export class Controller {
         break;
       }
       case 'signal': {
-        const plan = g.signalPlan(p, this.snapRadius);
-        if (plan.ok && plan.pos && plan.dir) o.signal = { pos: plan.pos, dir: plan.dir, remove: !!plan.remove };
+        const plan = g.signalPlan(p, this.snapRadius, this.signalOneWay);
+        if (plan.ok && plan.pos && plan.dir) o.signal = { pos: plan.pos, dir: plan.dir, remove: !!plan.remove, oneWay: this.signalOneWay };
+        const what = this.signalOneWay ? 'Сигнал без встречного' : 'Сигнал для поездов в эту сторону';
         o.label = plan.ok
-          ? { text: plan.remove ? 'Снять сигнал' : `Сигнал для поездов в эту сторону · ${money(plan.cost ?? 0)}`, ok: true }
+          ? {
+              text: plan.remove ? 'Снять сигнал' : plan.retype ? (this.signalOneWay ? 'Запретить встречное' : 'Разрешить встречное') : `${what} · ${money(plan.cost ?? 0)}`,
+              ok: true,
+            }
           : { text: plan.reason ?? '', ok: false };
         break;
       }

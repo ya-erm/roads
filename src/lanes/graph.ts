@@ -3,7 +3,7 @@ import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub
 import type { Vehicle } from '../sim/vehicle';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
 import { junctionCuts, pointOff } from './geometry';
-import { Corridor, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey } from './model';
+import { Corridor, CorridorEnd, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey } from './model';
 
 /**
  * Связь — отрезок полотна, на котором набор полос одного направления не меняется.
@@ -133,6 +133,40 @@ export interface GNode {
 
 export const laneSpeed = (c: Corridor) => (c.limit ?? ROAD_CLASSES[c.cls].limit) / KMH_PER_UNIT;
 export const moveKey = (inLane: number, outLane: number) => `${inLane}>${outLane}`;
+
+/**
+ * «Авто» — главная дорога перекрёстка сама: из почти прямых проездов через узел (излом до 0,6 рад)
+ * самый вместительный (полосы × скорость), при равенстве — самый прямой. Дорог меньше трёх — главной нет.
+ */
+export function autoMainPair(ends: CorridorEnd[]): [number, number] | null {
+  if (ends.length < 3) return null;
+  let best: [number, number] | null = null;
+  let bestScore = -Infinity;
+  for (let i = 0; i < ends.length; i++) {
+    for (let j = i + 1; j < ends.length; j++) {
+      const deviation = Math.PI - Math.acos(Math.max(-1, Math.min(1, dot(ends[i].away, ends[j].away))));
+      if (deviation > 0.6) continue;
+      const cap = (c: Corridor) => c.lanes.length * laneSpeed(c);
+      const score = cap(ends[i].corridor) + cap(ends[j].corridor) - deviation * 40;
+      if (score > bestScore) {
+        bestScore = score;
+        best = [ends[i].corridor.id, ends[j].corridor.id];
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Главная дорога перекрёстка по настройке узла (как `mainPair`): пара полотен — она,
+ * [] — равнозначный (null), не задано — «Авто». Пара не из этого узла (перестроили) — тоже «Авто».
+ */
+export function mainPairOf(ends: CorridorEnd[], choice: number[] | null | undefined): [number, number] | null {
+  if (choice && choice.length === 0) return null;
+  const here = new Set(ends.map((e) => e.corridor.id));
+  if (choice && choice.length === 2 && choice.every((id) => here.has(id))) return [choice[0], choice[1]];
+  return autoMainPair(ends);
+}
 
 /** Граф движения по сети полос: связи, полосы, переходы, состояние перекрёстков. */
 export class LaneGraph {
@@ -400,9 +434,7 @@ export class LaneGraph {
     }
     // Главная: выбранная игроком пара ([] — равнозначный) или самая прямая и вместительная.
     // Если главные все входы — приоритета нет.
-    const here = new Set(this.net.ends(n).map((e) => e.corridor.id));
-    const manual = n.mainPair;
-    const main = manual && manual.length === 0 ? null : manual && manual.length === 2 && manual.every((id) => here.has(id)) ? manual : this.mainPair(n);
+    const main = mainPairOf(this.net.ends(n), n.mainPair);
     if (main) {
       for (const l of ins) if (main.includes(l.corridor)) for (const lane of l.lanes) state.priorityLanes.add(lane.id);
       if (ins.every((l) => main.includes(l.corridor))) state.priorityLanes.clear();
@@ -431,26 +463,6 @@ export class LaneGraph {
       phases.push(group.flatMap((l) => l.lanes.map((lane) => lane.id)));
     }
     return phases;
-  }
-
-  private mainPair(n: LaneNode): [number, number] | null {
-    const ends = this.net.ends(n);
-    if (ends.length < 3) return null;
-    let best: [number, number] | null = null;
-    let bestScore = -Infinity;
-    for (let i = 0; i < ends.length; i++) {
-      for (let j = i + 1; j < ends.length; j++) {
-        const deviation = Math.PI - Math.acos(Math.max(-1, Math.min(1, dot(ends[i].away, ends[j].away))));
-        if (deviation > 0.6) continue;
-        const cap = (c: Corridor) => c.lanes.length * laneSpeed(c);
-        const score = cap(ends[i].corridor) + cap(ends[j].corridor) - deviation * 40;
-        if (score > bestScore) {
-          bestScore = score;
-          best = [ends[i].corridor.id, ends[j].corridor.id];
-        }
-      }
-    }
-    return best;
   }
 
   /** Тупик: разворот с левой полосы въезда на левую полосу выезда того же полотна. */

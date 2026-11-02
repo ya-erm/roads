@@ -26,16 +26,15 @@ import {
   startLane,
 } from '../lanes/edit';
 import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, profileOf } from '../lanes/model';
-import type { RoadClass, RoadSpec } from '../world/roadTypes';
+import { isOneWay, ROAD_CLASSES, type RoadClass, type RoadSpec } from '../world/roadTypes';
 
 export { profileOf, type RoadProfile } from '../lanes/model';
 
 /**
- * Односторонняя дорога, частью которой служит полотно c: оно и куски, что продолжают его через стыки
- * (только дорога, без ответвлений), пока они тоже односторонние, — до перекрёстков, тупиков и развилок.
+ * Дорога, частью которой служит полотно c: оно и куски, что продолжают его через стыки (только дорога,
+ * без ответвлений) и подходят под keep, — до перекрёстков, тупиков и развилок.
  */
-function oneWayChain(net: LaneNet, c0: Corridor): Corridor[] {
-  const isOneWay = (c: Corridor) => c.lanes.length > 0 && c.lanes.every((l) => l.flow === c.lanes[0].flow);
+export function roadChain(net: LaneNet, c0: Corridor, keep: (c: Corridor) => boolean = () => true): Corridor[] {
   const seen = new Set([c0.id]);
   const res = [c0];
   for (let i = 0; i < res.length; i++) {
@@ -46,12 +45,17 @@ function oneWayChain(net: LaneNet, c0: Corridor): Corridor[] {
       const ends = net.ends(e.node);
       if (ends.length !== 2 || ends.some((x) => Math.abs(x.port) >= LAT_EPS)) continue;
       const o = ends.find((x) => x.corridor.id !== c.id)?.corridor;
-      if (!o || seen.has(o.id) || !isOneWay(o)) continue;
+      if (!o || seen.has(o.id) || !keep(o)) continue;
       seen.add(o.id);
       res.push(o);
     }
   }
   return res;
+}
+
+/** Односторонняя дорога целиком: куски через стыки, пока они тоже односторонние. */
+function oneWayChain(net: LaneNet, c0: Corridor): Corridor[] {
+  return roadChain(net, c0, (c) => c.lanes.length > 0 && c.lanes.every((l) => l.flow === c.lanes[0].flow));
 }
 
 /**
@@ -73,6 +77,8 @@ export class RoadTools {
    * away — куда ушли в сторону (съезд или однополосная); r — радиус прилипания.
    */
   laneDrag: { tip: LaneTip; entry: Vec | null; along: Vec | null; away: Vec | null; r: number } | null = null;
+  /** Односторонняя и полоса — навстречу ходу постройки (Alt переключает). */
+  reverse = false;
   /** Узел, который тянут. */
   dragNode: number | null = null;
   /** Полотно, которое выгибают за середину. */
@@ -217,8 +223,11 @@ export class RoadTools {
       return null;
     }
     const end = this.endAnchor(p, r, shift, free);
+    const profile = profileOf(spec);
+    // Односторонняя навстречу ходу постройки (Alt): полосы — от конца к началу.
+    if (this.reverse && isOneWay(spec)) profile.lanes = profile.lanes.map((l) => ({ ...l, flow: -l.flow as Flow }));
     return this.game().roadBuilder.road(this.start, end, {
-      ...profileOf(spec),
+      ...profile,
       control: this.control ?? undefined,
       kink: mode === 'straight',
       arc: mode === 'arc',
@@ -282,14 +291,17 @@ export class RoadTools {
     } else if (!d.entry) d.away = p;
   }
 
-  /** Класс дороги, от которой ведут полосу: у края или у конца дороги — её, иначе — выбранный. */
-  private tipClass(tip: LaneTip): RoadClass | undefined {
-    if (tip.kind === 'edge') return this.net.corridors.get(tip.corridor)?.cls;
-    if (tip.kind === 'port') {
-      const n = this.net.nodes.get(tip.node);
-      return n?.corridors.map((id) => this.net.corridor(id)).find((c) => c.lanes.length > 1)?.cls;
+  /** Класс полосы — как у дороги, от которой её ведут (у края, у конца, в узле); в чистом поле — улица. */
+  private tipClass(tip: LaneTip): RoadClass {
+    const net = this.net;
+    if (tip.kind === 'edge') return net.corridors.get(tip.corridor)?.cls ?? 'street';
+    const node = tip.kind === 'port' ? tip.node : tip.anchor.kind === 'node' ? tip.anchor.node : null;
+    if (node !== null) {
+      const cs = (net.nodes.get(node)?.corridors ?? []).map((id) => net.corridor(id));
+      return (cs.find((c) => c.lanes.length > 1) ?? cs[0])?.cls ?? 'street';
     }
-    return undefined;
+    if (tip.kind === 'point' && tip.anchor.kind === 'corridor') return net.corridors.get(tip.anchor.corridor)?.cls ?? 'street';
+    return 'street';
   }
 
   /** Что построится по протяжке: план и подпись. */
@@ -300,7 +312,7 @@ export class RoadTools {
     // Конец пристроенной полосы ведут назад — короче (вперёд полоса тянется как от края, через стыки тоже).
     const g = this.lane;
     if (g?.grab && g.host && !this.extends(g)) {
-      const plan = this.game().roadBuilder.lane(g, tipCls ?? spec.cls);
+      const plan = this.game().roadBuilder.lane(g, tipCls);
       return { plan, what: plan.cost < 0 ? 'Полоса короче' : 'Полоса' };
     }
     const start = laneTipPos(this.net, d.tip);
@@ -312,7 +324,7 @@ export class RoadTools {
           : [d.away];
     const qs = pts.filter((q): q is Vec => !!q);
     if (!qs.length) return null;
-    const res = this.game().roadBuilder.laneStep(d.tip, qs, tipCls ?? spec.cls, d.r);
+    const res = this.game().roadBuilder.laneStep(d.tip, qs, tipCls, d.r, spec.limit, this.reverse);
     return { plan: res.plan, what: res.step?.what ?? '' };
   }
 
@@ -362,8 +374,7 @@ export class RoadTools {
       this.laneTip = null;
       return null;
     }
-    const cls = this.tipClass(tip) ?? spec.cls;
-    return this.game().roadBuilder.laneStep(tip, [p], cls, r);
+    return this.game().roadBuilder.laneStep(tip, [p], this.tipClass(tip), r, spec.limit, this.reverse);
   }
 
   /** Где сейчас конец полосы по точкам. */
@@ -404,6 +415,25 @@ export class RoadTools {
       profile.lanes = profile.lanes.map((l) => ({ ...l, flow: now as Flow }));
     }
     return { corridor: c, plan: this.game().roadBuilder.rebuild(c.id, profile) };
+  }
+
+  /** Знак скорости над дорогой: ограничение на всей улице до перекрёстков, без перестройки. was — какая скорость там сейчас. */
+  limitPlan(p: Vec, kmh: number, r: number): { plan: RoadPlan; was: number } | null {
+    const c = corridorUnder(this.net, p, r);
+    if (!c || c.ring) return null;
+    const chain = roadChain(this.net, c, (o) => o.cls === c.cls && o.lanes.length === c.lanes.length);
+    const was = c.limit ?? ROAD_CLASSES[c.cls].limit;
+    // Скорость класса — без своего ограничения: улица снова «по умолчанию».
+    const limit = kmh === ROAD_CLASSES[c.cls].limit ? undefined : kmh;
+    return { plan: this.game().roadBuilder.setLimit(chain.map((x) => x.id), limit), was };
+  }
+
+  setLimitAt(p: Vec, kmh: number, r: number): string | null {
+    const res = this.limitPlan(p, kmh, r);
+    if (!res) return 'Отпустите знак на дороге';
+    if (!res.plan.ok) return res.plan.reason ?? 'Нельзя';
+    this.game().roadBuilder.apply(res.plan);
+    return null;
   }
 
   upgrade(p: Vec, spec: RoadSpec, r: number): string | null {

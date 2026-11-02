@@ -295,6 +295,26 @@ export function downloadAllSvg(size = 18): string {
   </svg>`;
 }
 
+/** Продолжить игру: треугольник «играть». */
+export function playSvg(size = 18): string {
+  return `<svg viewBox="0 0 16 16" width="${size}" height="${size}"><path d="M5 3.2L12.6 8L5 12.8Z" fill="currentColor"/></svg>`;
+}
+
+/** Сохранить: дискета. */
+export function saveSvg(size = 22): string {
+  return `<svg viewBox="0 0 22 22" width="${size}" height="${size}"><rect x="2.5" y="2.5" width="17" height="17" rx="3" fill="#2f80ed"/><rect x="6" y="2.5" width="9" height="6" rx="1" fill="#dbe8fb"/><rect x="12" y="3.6" width="2" height="3.6" rx="0.6" fill="#2f80ed"/><rect x="5.5" y="11.5" width="11" height="6" rx="1" fill="#fff"/></svg>`;
+}
+
+/** Сохранения: стопка карточек партий. */
+export function savesSvg(size = 22): string {
+  return `<svg viewBox="0 0 22 22" width="${size}" height="${size}"><rect x="6" y="2.5" width="13.5" height="10" rx="2.2" fill="#c9d6e6"/><rect x="4.2" y="5.5" width="13.5" height="10" rx="2.2" fill="#9fb4cc"/><rect x="2.5" y="8.5" width="13.5" height="11" rx="2.2" fill="#fff" stroke="#5f7a8f" stroke-width="1.4"/><path d="M5.5 16L8.5 12.5L10.5 14.5L13 11.5" stroke="#6aa84f" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+/** Новая игра: карта с плюсом. */
+export function newGameSvg(size = 22): string {
+  return `<svg viewBox="0 0 22 22" width="${size}" height="${size}"><rect x="2.5" y="4" width="14" height="14" rx="2.5" fill="#d6e2bd" stroke="#8aa070" stroke-width="1.2"/><path d="M4.5 13c3-4 6 1 10-3" stroke="#8cc3e6" stroke-width="1.8" fill="none" stroke-linecap="round"/><circle cx="16.5" cy="5.5" r="4.6" fill="#27ae60"/><path d="M16.5 3.3V7.7M14.3 5.5H18.7" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+}
+
 /** Открыть из файла: стрелка вверх из лотка. */
 export function uploadSvg(size = 16): string {
   return `<svg viewBox="0 0 16 16" width="${size}" height="${size}"><path d="M8 10.5V2.5M4.6 5.8L8 2.4L11.4 5.8" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 11V13.5H13.5V11" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -362,6 +382,41 @@ export function signalSvg(w = 48, h = 36): string {
     <circle cx="30" cy="13.5" r="2.6" fill="#3ad16b"/>
     <path d="M8 20H20M16 16.5L20 20L16 23.5" stroke="#2f80ed" stroke-width="1.6" fill="none"/>
   </svg>`;
+}
+
+/**
+ * Сигнал без встречного (как в Transport Fever): поезда едут мимо только по стрелке; навстречу — знак
+ * «въезд запрещён», поезд туда не поедет.
+ */
+export function oneWaySignalSvg(w = 48, h = 36): string {
+  return `<svg viewBox="0 0 48 36" width="${w}" height="${h}">
+    <path d="M2 28H46" stroke="#b9b1a6" stroke-width="6"/>
+    <path d="M2 26.4H46M2 29.6H46" stroke="#4f5965" stroke-width="1"/>
+    <path d="M22 22V10" stroke="#2a2e33" stroke-width="2"/>
+    <rect x="17" y="2" width="10" height="16" rx="3" fill="#2a2e33"/>
+    <circle cx="22" cy="6.5" r="2.6" fill="#e8483f"/>
+    <circle cx="22" cy="13.5" r="2.6" fill="#3ad16b"/>
+    <path d="M3 20H13M10 16.5L13.5 20L10 23.5" stroke="#2f80ed" stroke-width="1.6" fill="none"/>
+    <path d="M37 22V15" stroke="#2a2e33" stroke-width="1.6"/>
+    <circle cx="37" cy="9" r="7" fill="#d93a32" stroke="#fff" stroke-width="1.2"/>
+    <path d="M32.8 9H41.2" stroke="#fff" stroke-width="2.4"/>
+  </svg>`;
+}
+
+/**
+ * Выбор пути ж/д станции: схема из n путей с номерами, выбранный (pick, с 0) — синий и толще;
+ * pick = null — «авто»: все пути одинаковые, поезд встанет на свободный.
+ */
+export function platformPickSvg(n: number, pick: number | null): string {
+  const h = 6 + n * 7;
+  const rows = Array.from({ length: n }, (_, i) => {
+    const y = 6 + i * 7;
+    const on = pick === i;
+    const color = pick === null ? '#7d8791' : on ? '#2f80ed' : '#c3c9cf';
+    return `<text x="1" y="${y + 3}" font-size="7" font-weight="${on ? 700 : 400}" fill="${on ? '#2f80ed' : '#7d8791'}">${i + 1}</text>
+      <path d="M9 ${y}H45" stroke="${color}" stroke-width="${on ? 3.2 : 1.8}" ${pick === null ? 'stroke-dasharray="4 2"' : ''}/>`;
+  }).join('');
+  return `<svg viewBox="0 0 46 ${h}" width="46" height="${h}">${rows}</svg>`;
 }
 
 /** Переезд: дорога поперёк пути со шлагбаумом. */
