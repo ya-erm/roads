@@ -1,7 +1,8 @@
 import { dist } from '../core/vec';
 import type { RingSize } from '../game/build';
-import type { Game, Ledger, Partner, TurnKind } from '../game/game';
+import { SAVE_VERSION, type Game, type Ledger, type Partner, type TurnKind } from '../game/game';
 import { TEMPLATES } from '../game/interchange';
+import type { SaveEntry } from '../game/persist';
 import {
   carsOf,
   FleetVehicle,
@@ -66,8 +67,16 @@ import { Minimap } from './minimap';
 /** Управление партией: сохранение и новая игра. */
 export interface HudSession {
   hasProgress(): boolean;
+  /** Автосохранение текущей партии. */
   save(): void;
   newGame(settings: WorldSettings): void;
+  /** Сохранение со своим именем, которому принадлежит текущая партия. */
+  linked(): string | null;
+  list(): Promise<SaveEntry[]>;
+  /** Сохранить под именем; id — перезаписать это сохранение. */
+  saveAs(name: string, id?: string): Promise<boolean>;
+  load(id: string): Promise<boolean>;
+  remove(id: string): Promise<void>;
 }
 
 /** Силуэт карты с пропорциями сторон. */
@@ -186,6 +195,10 @@ export class Hud {
   private panelTimer = 0;
 
   private confirmNew = false;
+  /** Сохранения со своими именами (последний прочитанный список). */
+  private saves: SaveEntry[] = [];
+  /** Ждём второго нажатия: `load:id` — загрузить без сохранения текущей, `del:id` — удалить. */
+  private confirmSave: string | null = null;
   /** Линия, у которой открыта палитра цвета. */
   private colorsOpen: number | null = null;
   /** Остановка, у которой раскрыты условия. */
@@ -244,6 +257,7 @@ export class Hud {
             <button class="secondary" data-action="new-game">Новая игра…</button>
             <button class="primary" data-action="resume">Продолжить</button>
           </div>
+          <div class="saves" data-saves></div>
         </div>
       </div>
       <div class="screen hidden" data-newgame><div class="modal newgame" data-newgame-body></div></div>
@@ -345,6 +359,8 @@ export class Hud {
         input.value = this.game().lines.get(Number(input.dataset.lineName))?.name ?? input.value;
         input.blur();
       }
+      // Enter в поле имени сохранения — сохранить как новое.
+      if (input.dataset?.saveName !== undefined && e.key === 'Enter') void this.session.saveAs(this.saveName()).then(() => this.renderSaves(true));
     });
     this.bindFolders(root, this.q('[data-side]'));
     controller.onChange = () => this.sync(true);
@@ -457,8 +473,45 @@ export class Hud {
         this.hideScreens();
         c.setSpeed(this.speedBeforeMenu);
         break;
-      case 'save-game':
-        this.session.save();
+      case 'save-game': {
+        // Партия из сохранения — перезаписываем его; иначе — новое сохранение с именем из поля.
+        const id = this.session.linked();
+        const entry = id ? this.saves.find((s) => s.id === id) : undefined;
+        void this.session.saveAs(entry?.name ?? this.saveName(), entry?.id).then(() => this.renderSaves());
+        break;
+      }
+      case 'save-new':
+        void this.session.saveAs(this.saveName()).then(() => this.renderSaves());
+        break;
+      case 'save-load': {
+        const id = d.id!;
+        const linked = this.session.linked();
+        // Текущая партия не в списке — загрузка её потеряет: просим нажать ещё раз.
+        if (!linked && this.session.hasProgress() && this.confirmSave !== `load:${id}`) {
+          this.confirmSave = `load:${id}`;
+          void this.renderSaves();
+          break;
+        }
+        this.confirmSave = null;
+        const current = linked ? this.saves.find((s) => s.id === linked) : undefined;
+        const before = current ? this.session.saveAs(current.name, current.id) : Promise.resolve(true);
+        void before
+          .then(() => this.session.load(id))
+          .then((ok) => {
+            if (!ok) return;
+            this.hideScreens();
+            c.setSpeed(this.speedBeforeMenu);
+          });
+        break;
+      }
+      case 'save-del':
+        if (this.confirmSave !== `del:${d.id}`) {
+          this.confirmSave = `del:${d.id}`;
+          void this.renderSaves();
+          break;
+        }
+        this.confirmSave = null;
+        void this.session.remove(d.id!).then(() => this.renderSaves());
         break;
       case 'new-game':
         this.draft = { ...g.settings, seed: Math.floor(Math.random() * 1e9) };
@@ -568,7 +621,10 @@ export class Hud {
         c.setPreset(d.id!);
         break;
       case 'road-mode':
-        c.setRoadMode(d.id === 'upgrade' || d.id === 'move' || d.id === 'template' || d.id === 'lane' ? d.id : 'build');
+        c.setRoadMode(d.id === 'upgrade' || d.id === 'move' || d.id === 'lane' ? d.id : 'build');
+        break;
+      case 'junction-mode':
+        c.setJunctionMode(d.id === 'template' ? 'template' : 'ring');
         break;
       case 'rail-mode':
         c.setRailMode(d.id === 'station' || d.id === 'signal' ? d.id : 'track');
@@ -830,7 +886,7 @@ export class Hud {
         : c.tool === 'rail'
           ? this.railOptionsHtml()
           : c.tool === 'roundabout'
-            ? this.ringOptionsHtml()
+            ? this.junctionOptionsHtml()
             : c.tool === 'bulldoze'
               ? this.bulldozeOptionsHtml()
               : this.roadOptionsHtml();
@@ -899,8 +955,27 @@ export class Hud {
     ).join('')}</div></div>`;
   }
 
+  /** Развязки: кольцо на перекрёстке или готовый шаблон. */
+  private junctionOptionsHtml(): string {
+    const c = this.controller;
+    const sw = this.kindSwitch('Что ставим', 'junction-mode', c.junctionMode, [
+      { id: 'ring', name: 'Кольцо', svg: ringSvg(0.5, 1), hint: 'Кольцо на месте перекрёстка' },
+      { id: 'template', name: 'Шаблон', svg: diamondSvg(48, 36), hint: 'Готовая развязка на магистрали в один клик' },
+    ]);
+    if (c.junctionMode === 'template') {
+      const cards = TEMPLATES.map(
+        (t) => `<button class="card ${c.templateKind === t.id ? 'active' : ''}" data-action="template-kind" data-id="${t.id}" title="${t.hint}">
+          ${templateSvg(t.id, 64, 48)}<span class="name">${t.name}</span><small>${t.short}</small></button>`,
+      ).join('');
+      return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Шаблон</div><div class="cards">${cards}</div></div>
+        <div class="opt-group narrow"><div class="opt-title">Как ставить <kbd>R</kbd></div>
+          <p class="muted">Наведите на прямой участок магистрали — или в чистое поле: тогда магистраль построится вместе с развязкой (R — повернуть). Для магистрали берётся выбранный тип дороги, если это магистраль. Концы дорог подключите к своей сети. Не понравилось — Ctrl+Z.</p></div></div>`;
+    }
+    return this.ringOptionsHtml(sw);
+  }
+
   /** Кольцо: число полос и размер — картинками. */
-  private ringOptionsHtml(): string {
+  private ringOptionsHtml(sw: string): string {
     const c = this.controller;
     const sizes: { id: RingSize; name: string; k: number }[] = [
       { id: 'small', name: 'Малое', k: 0 },
@@ -919,7 +994,7 @@ export class Hud {
           ${ringSvg(s.k, c.ring.lanes)}<span>${s.name}</span></button>`,
       )
       .join('');
-    return `<div class="opt-row"><div class="opt-group"><div class="opt-title">Полосы кольца</div><div class="icons">${lanes}</div></div>
+    return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Полосы кольца</div><div class="icons">${lanes}</div></div>
       <div class="opt-group"><div class="opt-title">Размер</div><div class="icons">${size}</div></div>
       <div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">Кликните по перекрёстку — он станет кольцом с выбранным числом полос. Если примыкают широкие дороги, кольцо будет больше.</p></div></div>`;
   }
@@ -993,17 +1068,7 @@ export class Hud {
       { id: 'lane', name: 'Полоса', svg: laneSvg(), hint: 'Тяните от края дороги вдоль неё — новая полоса; уведите в сторону — съезд; из поля к краю и вдоль — въезд с полосой разгона', key: 'L' },
       { id: 'upgrade', name: 'Перестроить', svg: upgradeSvg(), hint: 'Клик по дороге — заменить её выбранным типом, полосами и скоростью', key: 'U' },
       { id: 'move', name: 'Двигать', svg: moveNodeSvg(), hint: 'Тяните узел — дороги следом; середину дороги — выгнуть', key: 'M' },
-      { id: 'template', name: 'Развязка', svg: diamondSvg(48, 36), hint: 'Готовая развязка на магистрали в один клик' },
     ], true);
-    if (c.roadMode === 'template') {
-      const cards = TEMPLATES.map(
-        (t) => `<button class="card ${c.templateKind === t.id ? 'active' : ''}" data-action="template-kind" data-id="${t.id}" title="${t.hint}">
-          ${templateSvg(t.id, 64, 48)}<span class="name">${t.name}</span><small>${t.short}</small></button>`,
-      ).join('');
-      return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Шаблон</div><div class="cards">${cards}</div></div>
-        <div class="opt-group narrow"><div class="opt-title">Как ставить <kbd>R</kbd></div>
-          <p class="muted">Наведите на прямой участок магистрали — или в чистое поле: тогда магистраль построится вместе с развязкой (R — повернуть). Для магистрали берётся выбранный тип дороги, если это магистраль. Концы дорог подключите к своей сети. Не понравилось — Ctrl+Z.</p></div></div>`;
-    }
     if (c.roadMode === 'move') {
       // Что можно тянуть — картинками: узел (дороги следом), тупик (продлить, примкнуть), середину и перо.
       const what = [
@@ -1599,7 +1664,49 @@ export class Hud {
     const g = this.game();
     const s = g.settings;
     this.q('[data-menu-info]').textContent = `${g.dateLabel} · карта «${MAP_SIZES[s.size].name.toLowerCase()}», ${g.towns.length} городов · seed ${s.seed}`;
+    this.confirmSave = null;
     this.showScreen('menu');
+    void this.renderSaves(true);
+  }
+
+  /** Имя для нового сохранения: из поля, иначе — крупнейший город и дата. */
+  private saveName(): string {
+    return this.q<HTMLInputElement>('[data-save-name]')?.value.trim() || this.defaultSaveName();
+  }
+
+  private defaultSaveName(): string {
+    const g = this.game();
+    const town = [...g.towns].sort((a, b) => b.population - a.population)[0];
+    return `${town?.name ?? 'Партия'} · ${g.dateLabel}`;
+  }
+
+  /** Список сохранений со своими именами: загрузить, удалить; текущее отмечено. fresh — новое имя в поле. */
+  private async renderSaves(fresh = false): Promise<void> {
+    const el = this.q('[data-saves]');
+    const typed = fresh ? '' : (this.q<HTMLInputElement>('[data-save-name]')?.value ?? '');
+    this.saves = await this.session.list().catch(() => []);
+    const linked = this.session.linked();
+    const when = (t: number) => new Date(t).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const rows = this.saves
+      .map((s) => {
+        const old = s.version !== SAVE_VERSION;
+        const load =
+          this.confirmSave === `load:${s.id}`
+            ? `<button class="small danger-fill" data-action="save-load" data-id="${s.id}" title="Текущая партия не сохранена в список и пропадёт">Точно загрузить?</button>`
+            : `<button class="small" data-action="save-load" data-id="${s.id}" ${old ? 'disabled title="Сохранение от другой версии игры"' : ''}>Загрузить</button>`;
+        const del =
+          this.confirmSave === `del:${s.id}`
+            ? `<button class="small danger-fill" data-action="save-del" data-id="${s.id}">Удалить?</button>`
+            : `<button class="icon" data-action="save-del" data-id="${s.id}" title="Удалить сохранение">✕</button>`;
+        return `<div class="save-row ${s.id === linked ? 'current' : ''}">
+          <div class="save-info"><b>${esc(s.name)}</b><small>${esc(s.summary)} · ${when(s.savedAt)}${s.id === linked ? ' · текущая партия' : ''}</small></div>
+          ${load}${del}</div>`;
+      })
+      .join('');
+    el.innerHTML = `<h3>Сохранения</h3>
+      <div class="save-new"><input class="line-name" data-save-name maxlength="40" placeholder="${esc(this.defaultSaveName())}" value="${esc(typed)}" />
+        <button class="small" data-action="save-new">Сохранить как новое</button></div>
+      <div class="save-list">${rows || '<p class="muted">Своих сохранений пока нет: «Сохранить» запишет партию сюда.</p>'}</div>`;
   }
 
   /** Форма параметров нового мира. */

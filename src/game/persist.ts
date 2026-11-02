@@ -39,3 +39,109 @@ export function hasSave(): boolean {
 export function clearSave(): void {
   localStorage.removeItem(KEY);
 }
+
+// ---------- Сохранения со своими именами ----------
+//
+// Текущая партия автоматически пишется в localStorage (выше). Сохранения со своими именами — в IndexedDB:
+// там места много больше. Карточки (имя, дата, сводка) и сами данные — в разных хранилищах,
+// чтобы список открывался сразу, даже если партии большие.
+
+export interface SaveEntry {
+  id: string;
+  name: string;
+  /** Когда сохранили (Date.now()). */
+  savedAt: number;
+  /** «Мар 1963 · $1 200 000 · 6 городов». */
+  summary: string;
+  version: number;
+}
+
+const DB_NAME = slot ? `razvyazka:${slot}` : 'razvyazka';
+const META = 'meta';
+const DATA = 'data';
+/** Какому сохранению со своим именем принадлежит текущая партия: «Сохранить» перезапишет его. */
+const LINK_KEY = `${KEY}:linked`;
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(META)) db.createObjectStore(META, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(DATA)) db.createObjectStore(DATA);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function done(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+function result<T>(req: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** Сохранения со своими именами — сначала свежие. */
+export async function listSaves(): Promise<SaveEntry[]> {
+  const db = await openDb();
+  const all = await result(db.transaction(META).objectStore(META).getAll() as IDBRequest<SaveEntry[]>);
+  db.close();
+  return all.sort((a, b) => b.savedAt - a.savedAt);
+}
+
+/** Пишет партию под именем name (id — перезаписать это сохранение). */
+export async function writeSave(game: Game, name: string, camera?: Camera, id?: string): Promise<SaveEntry> {
+  const data = game.toSave();
+  if (camera) data.view = { x: camera.x, y: camera.y, zoom: camera.zoom };
+  const money = `$${Math.round(game.money).toLocaleString('ru-RU')}`;
+  const entry: SaveEntry = {
+    id: id ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    name: name.trim() || 'Без имени',
+    savedAt: Date.now(),
+    summary: `${game.dateLabel} · ${money} · ${game.towns.length} городов`,
+    version: SAVE_VERSION,
+  };
+  const db = await openDb();
+  const tx = db.transaction([META, DATA], 'readwrite');
+  tx.objectStore(META).put(entry);
+  tx.objectStore(DATA).put(data, entry.id);
+  await done(tx);
+  db.close();
+  return entry;
+}
+
+export async function readSave(id: string): Promise<SaveData | null> {
+  const db = await openDb();
+  const data = await result(db.transaction(DATA).objectStore(DATA).get(id) as IDBRequest<SaveData | undefined>);
+  db.close();
+  return data && data.version === SAVE_VERSION ? data : null;
+}
+
+export async function deleteSave(id: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction([META, DATA], 'readwrite');
+  tx.objectStore(META).delete(id);
+  tx.objectStore(DATA).delete(id);
+  await done(tx);
+  db.close();
+  if (linkedSave() === id) linkSave(null);
+}
+
+/** Сохранение, которому принадлежит текущая партия. */
+export function linkedSave(): string | null {
+  return localStorage.getItem(LINK_KEY);
+}
+
+export function linkSave(id: string | null): void {
+  if (id) localStorage.setItem(LINK_KEY, id);
+  else localStorage.removeItem(LINK_KEY);
+}

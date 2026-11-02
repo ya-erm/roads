@@ -20,7 +20,7 @@ export const TOOLS: { id: Tool; key: string; alt?: string; name: string }[] = [
   { id: 'road', key: '2', name: 'Дорога' },
   { id: 'rail', key: '3', name: 'Ж/д' },
   { id: 'lights', key: '4', name: 'Перекрёсток' },
-  { id: 'roundabout', key: '5', name: 'Кольцо' },
+  { id: 'roundabout', key: '5', name: 'Развязки' },
   { id: 'station', key: '6', name: 'Станция' },
   { id: 'line', key: '7', name: 'Маршрут' },
   { id: 'bulldoze', key: '8', alt: 'B', name: 'Снос' },
@@ -28,8 +28,10 @@ export const TOOLS: { id: Tool; key: string; alt?: string; name: string }[] = [
 
 /** Что делает клик: инструмент вместе с его режимом. */
 export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane';
-/** Дорога: строить, вести полосу вдоль края, перестроить под выбранный тип, двигать узел или выгнуть, поставить развязку. */
-export type RoadMode = 'build' | 'lane' | 'upgrade' | 'move' | 'template';
+/** Дорога: строить, вести полосу вдоль края, перестроить под выбранный тип, двигать узел или выгнуть. */
+export type RoadMode = 'build' | 'lane' | 'upgrade' | 'move';
+/** Развязки: кольцо на перекрёстке или шаблон развязки. */
+export type JunctionMode = 'ring' | 'template';
 /** Ж/д: класть путь или ставить вокзал. */
 export type RailMode = 'track' | 'station' | 'signal';
 
@@ -77,6 +79,7 @@ function corridorAt(g: Game, p: Vec, r: number) {
 export class Controller {
   tool: Tool = 'select';
   roadMode: RoadMode = 'build';
+  junctionMode: JunctionMode = 'ring';
   railMode: RailMode = 'track';
   /** Параметры нового кольца. */
   ring: RingOptions = { ...DEFAULT_RING };
@@ -191,6 +194,7 @@ export class Controller {
   /** Что делает клик с учётом режима инструмента. */
   get action(): Action {
     if (this.tool === 'road') return this.roadMode === 'build' ? 'road' : this.roadMode;
+    if (this.tool === 'roundabout') return this.junctionMode === 'template' ? 'template' : 'roundabout';
     if (this.tool === 'rail') return this.railMode === 'station' ? 'station' : this.railMode === 'signal' ? 'signal' : 'road';
     return this.tool;
   }
@@ -211,6 +215,12 @@ export class Controller {
     this.chain = null;
     this.control = null;
     this.roadTools.clear();
+    this.onChange();
+  }
+
+  setJunctionMode(mode: JunctionMode): void {
+    if (this.tool !== 'roundabout') this.setTool('roundabout');
+    this.junctionMode = mode;
     this.onChange();
   }
 

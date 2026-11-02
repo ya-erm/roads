@@ -1,6 +1,6 @@
 import './style.css';
 import { Game } from './game/game';
-import { clearSave, loadSave, saveGame } from './game/persist';
+import { clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readSave, saveGame, writeSave } from './game/persist';
 import { Controller } from './input/controller';
 import { Camera } from './render/camera';
 import { Renderer } from './render/renderer';
@@ -32,11 +32,59 @@ const hud = new Hud(hudRoot, controller, () => game, {
   hasProgress: () => game.time > 0 || game.lines.size > 0 || game.net.version > 1 || game.canUndo,
   save: () => persist(true),
   newGame: (settings) => newGame(settings),
+  linked: () => linkedSave(),
+  list: () => listSaves(),
+  saveAs: (name, id) => saveNamed(name, id),
+  load: (id) => loadNamed(id),
+  remove: (id) => deleteSave(id),
 });
 
 function persist(manual = false): void {
   const ok = saveGame(game, camera);
   if (manual) game.notify(ok ? 'Игра сохранена' : 'Не удалось сохранить: мало места в браузере', ok ? undefined : '#e5534b');
+}
+
+/** Сохраняет партию под именем (id — перезаписать это сохранение); партия теперь принадлежит ему. */
+async function saveNamed(name: string, id?: string): Promise<boolean> {
+  try {
+    const entry = await writeSave(game, name, camera, id);
+    linkSave(entry.id);
+    persist();
+    game.notify(`Сохранено: «${entry.name}»`);
+    return true;
+  } catch {
+    game.notify('Не удалось сохранить: мало места в браузере', '#e5534b');
+    return false;
+  }
+}
+
+/** Загружает сохранение со своим именем вместо текущей партии. */
+async function loadNamed(id: string): Promise<boolean> {
+  const data = await readSave(id).catch(() => null);
+  if (!data) {
+    game.notify('Это сохранение не открыть: оно от другой версии игры', '#e5534b');
+    return false;
+  }
+  game = new Game(data.settings, data);
+  linkSave(id);
+  restart();
+  if (data.view) {
+    camera.x = data.view.x;
+    camera.y = data.view.y;
+    camera.zoom = data.view.zoom;
+    camera.touched = true;
+  }
+  persist();
+  return true;
+}
+
+/** Новая или загруженная партия: сбросить управление, отрисовку и панели. */
+function restart(): void {
+  controller.reset();
+  renderer.reset();
+  hud.reset();
+  initialView();
+  hookAutosave();
 }
 
 function hookAutosave(): void {
@@ -59,13 +107,10 @@ function initialView(): void {
 
 function newGame(settings: WorldSettings): void {
   clearSave();
+  linkSave(null);
   game = new Game(settings);
   game.speed = 0;
-  controller.reset();
-  renderer.reset();
-  hud.reset();
-  initialView();
-  hookAutosave();
+  restart();
   persist();
 }
 
