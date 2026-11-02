@@ -7,6 +7,7 @@ import {
   alignNode,
   Anchor,
   anchorAt,
+  bulldozeSpan,
   corridorUnder,
   dragHandle,
   dragLane,
@@ -15,6 +16,9 @@ import {
   handlesOf,
   joinDeadEnd,
   LaneDraft,
+  laneUnder,
+  removeEdgeLane,
+  removeLaneSpan,
   startLane,
 } from '../lanes/edit';
 import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, profileOf } from '../lanes/model';
@@ -227,7 +231,10 @@ export class RoadTools {
     this.lane = null;
     if (!plan) return null;
     if (!plan.ok) return plan.reason ?? 'Нельзя построить';
-    this.game().roadBuilder.apply(plan);
+    const g = this.game();
+    g.roadBuilder.apply(plan);
+    // Дома, на которые налезла новая полоса или съезд, отодвигаются.
+    for (const id of plan.changed) g.roadWidened(id);
     return null;
   }
 
@@ -385,6 +392,34 @@ export class RoadTools {
     // Снести можно всегда; оборванные полосы у стыков — не повод отказать.
     this.game().roadBuilder.apply({ ...res.plan, ok: true });
     return true;
+  }
+
+  /**
+   * Снос полосы под курсором: крайняя полоса уходит (с продолжениями через стыки, съезд — целиком).
+   * Оставшиеся дороги не проверяются (дома у них не сносим), но полосы должны сходиться в стыках.
+   */
+  laneBulldozePlan(p: Vec): { corridor: number; lane: number; plan: RoadPlan } | null {
+    const hit = laneUnder(this.net, p);
+    if (!hit) return null;
+    const id = hit.corridor.id;
+    const plan = this.game().roadBuilder.plan((n) => removeEdgeLane(n, n.corridor(id), hit.lane) > 0, { only: () => false });
+    return { corridor: id, lane: hit.lane, plan };
+  }
+
+  /** Снос куска: полотна (lane — null) или полосы lane полотна corridor между s0 и s1. */
+  spanPlan(corridor: number, lane: number | null, s0: number, s1: number): RoadPlan {
+    const b = this.game().roadBuilder;
+    if (lane === null) return b.plan((n) => bulldozeSpan(n, n.corridor(corridor), s0, s1), { raze: true });
+    return b.plan((n) => removeLaneSpan(n, n.corridor(corridor), lane, s0, s1), { only: () => false });
+  }
+
+  /** Сносит полосу под курсором; null — снесли, иначе причина. */
+  bulldozeLane(p: Vec): string | null {
+    const res = this.laneBulldozePlan(p);
+    if (!res) return 'Наведите на полосу';
+    if (!res.plan.ok) return res.plan.reason ?? 'Нельзя снести';
+    this.game().roadBuilder.apply(res.plan);
+    return null;
   }
 }
 

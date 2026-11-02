@@ -202,6 +202,24 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
     expect(game.fleetTrain(v)!.length).toBe(carsOf(v) * 17);
   });
 
+  it('путь, пересекающий другой под пологим углом, пристыковывается к нему стрелкой', () => {
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const { from, dir } = layTrack(game, 1600);
+    const n = { x: -dir.y, y: dir.x };
+    // Под углом ~11°: раньше — «пересекаются слишком остро».
+    const a = add(add(from, scale(dir, 300)), scale(n, 60));
+    const b = add(add(from, scale(dir, 900)), scale(n, -60));
+    const req = straight(a, b, RAIL_SPEC);
+    expect(game.builder.plan(req).reason).toBeUndefined();
+    expect(game.builder.build(req)).not.toBeNull();
+    // В точке пересечения — узел на четыре участка; с нового пути можно уехать по старому дальше.
+    const cross = [...game.net.nodes.values()].find((x) => x.segments.length === 4)!;
+    expect(cross).toBeDefined();
+    const startSeg = game.net.nodesNear(a, 1)[0].segments[0];
+    const far = game.net.findSegmentNear(add(from, scale(dir, 1500)), 5)!.seg.id;
+    expect(game.rail.previewRoute([startSeg], [far])).not.toBeNull();
+  });
+
   it('путь рядом: вдоль прямой и дуги, на расстоянии между путями, со стороны курсора', () => {
     const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
     const { from, dir } = layTrack(game, 1200);

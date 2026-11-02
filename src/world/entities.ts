@@ -78,6 +78,9 @@ export interface StationServes {
   cargo: boolean;
 }
 
+/** Как зовётся станция у дороги по тому, с чем работает: грузы — автостанция, пассажиры — автовокзал. */
+export const stationTitle = (s: StationServes) => (s.cargo && s.pax ? 'Автостанция и автовокзал' : s.pax ? 'Автовокзал' : 'Автостанция');
+
 export interface Station {
   type: 'station';
   id: number;

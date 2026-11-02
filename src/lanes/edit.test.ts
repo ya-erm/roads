@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { dot, Vec } from '../core/vec';
-import { anchorAt, applyLane, buildRoad, bulldoze, dragHandle, dragLane, flipLane, joinDeadEnd, startLane } from './edit';
+import {
+  anchorAt,
+  applyLane,
+  buildRoad,
+  bulldoze,
+  bulldozeSpan,
+  dragHandle,
+  dragLane,
+  flipLane,
+  joinDeadEnd,
+  removeEdgeLane,
+  removeLaneSpan,
+  startLane,
+  taperDeadLanes,
+} from './edit';
 import { LaneGraph } from './graph';
 import { LaneNet, twoWay } from './model';
 import { findLaneRoute } from './routing';
@@ -110,6 +124,94 @@ describe('Полосы: инструменты', () => {
     // По главной дороге тоже можно проехать дальше.
     const east = deadEnds(net).find((n) => n.pos.x > 700 && n.pos.y < 50)!;
     expect(reachable(net, west.id, east.id)).toBe(true);
+  });
+
+  it('длинная полоса торможения: курсор отошёл от края и вернулся — полоса идёт дальше, съезд — там, где ушли окончательно', () => {
+    const net = road();
+    const west = deadEnds(net).find((n) => n.pos.x < 100)!;
+    expect(drawLane(net, [{ x: 200, y: 17.5 }, { x: 300, y: 29 }, { x: 350, y: 45 }, { x: 520, y: 20 }, { x: 600, y: 50 }, { x: 750, y: 220 }])).toBe(true);
+    expect(net.problems()).toEqual([]);
+    const ramp = [...net.corridors.values()].find((c) => c.portA)!;
+    expect(net.node(ramp.a).pos.x).toBeCloseTo(520, -1);
+    expect(reachable(net, west.id, ramp.b)).toBe(true);
+
+    // Снос полосы торможения убирает и съезд; по дороге ехать по-прежнему можно.
+    const host = [...net.corridors.values()].find((c) => c.b === ramp.a && c.lanes.length === 5)!;
+    const aux = host.lanes.findIndex((l) => l.offset > 15);
+    const before = net.corridors.size;
+    expect(removeEdgeLane(net, host, aux)).toBe(2);
+    expect(net.corridors.size).toBe(before - 1);
+    expect([...net.corridors.values()].some((c) => c.portA || c.portB)).toBe(false);
+    expect(net.problems()).toEqual([]);
+    const east = deadEnds(net).find((n) => n.pos.x > 700)!;
+    expect(reachable(net, west.id, east.id)).toBe(true);
+    // Не крайнюю полосу снести нельзя.
+    const c = [...net.corridors.values()][0];
+    const inner = c.lanes.findIndex((l) => Math.abs(l.offset) < 5);
+    expect(() => removeEdgeLane(net, c, inner)).toThrow('крайнюю');
+  });
+
+  it('перестройка куска улицы в проспект: лишние полосы у стыка с улицей сходят отгоном', () => {
+    const net = new LaneNet();
+    const a = net.addSeam({ x: 0, y: 0 }, { x: 1, y: 0 });
+    const s = net.addSeam({ x: 400, y: 0 }, { x: 1, y: 0 });
+    const b = net.addSeam({ x: 800, y: 0 }, { x: 1, y: 0 });
+    const left = net.addCorridor(a.id, s.id, { cls: 'street', lanes: twoWay(1, 1) });
+    net.addCorridor(s.id, b.id, { cls: 'street', lanes: twoWay(1, 1) });
+    left.cls = 'avenue';
+    net.setLanes(left, twoWay(2, 2));
+    expect(net.problems().length).toBeGreaterThan(0);
+    taperDeadLanes(net, [left.a, left.b]);
+    expect(net.problems()).toEqual([]);
+    // Внутренние полосы продолжаются улицей, крайние кончаются отгоном перед стыком.
+    const outer = left.lanes.filter((l) => Math.abs(l.offset) > 7);
+    expect(outer).toHaveLength(2);
+    for (const l of outer) expect(l.from === 0 ? l.to : l.from).toBeLessThan(left.length);
+    expect(reachable(net, a.id, b.id)).toBe(true);
+    expect(reachable(net, b.id, a.id)).toBe(true);
+  });
+
+  it('полосу продолжают: за стыком — стыкуется без отгона, внахлёст с такой же — сливается в одну', () => {
+    const net = new LaneNet();
+    const a = net.addSeam({ x: 0, y: 0 }, { x: 1, y: 0 });
+    const s = net.addSeam({ x: 400, y: 0 }, { x: 1, y: 0 });
+    const b = net.addSeam({ x: 800, y: 0 }, { x: 1, y: 0 });
+    // Слева у улицы — третья полоса, доходящая до стыка; справа — просто улица.
+    const left = net.addCorridor(a.id, s.id, { cls: 'street', lanes: [...twoWay(1, 1), { offset: 10.5, flow: 1, from: 100, to: Infinity }] });
+    const right = net.addCorridor(s.id, b.id, { cls: 'street', lanes: twoWay(1, 1) });
+    expect(net.problems().length).toBeGreaterThan(0);
+    // Дорисовываем полосу от самого стыка вперёд — она продолжает левую, а не начинается отгоном.
+    expect(drawLane(net, [{ x: 406, y: 10.5 }, { x: 600, y: 10.5 }])).toBe(true);
+    expect(net.problems()).toEqual([]);
+    const cont = right.lanes.find((l) => l.offset > 7)!;
+    expect(cont.from).toBe(0);
+    expect(net.across(left, left.lanes.findIndex((l) => l.offset > 7), 'b')).not.toBeNull();
+    // Ещё кусок внахлёст с концом — та же полоса становится длиннее, новой не появляется.
+    expect(drawLane(net, [{ x: 580, y: 10.5 }, { x: 720, y: 10.5 }])).toBe(true);
+    expect(right.lanes.filter((l) => l.offset > 7)).toHaveLength(1);
+    expect(right.lanes.find((l) => l.offset > 7)!.to).toBeGreaterThan(300);
+    expect(net.problems()).toEqual([]);
+  });
+
+  it('снос куска: дороги — тупики по краям, полосы — она остаётся по обе стороны с отгонами', () => {
+    const net = road();
+    const c = [...net.corridors.values()][0];
+    // Пристроенная полоса вдоль почти всей дороги — кусок из середины.
+    expect(drawLane(net, [{ x: 100, y: 17.5 }, { x: 700, y: 17.5 }])).toBe(true);
+    const i = c.lanes.findIndex((l) => l.offset > 15);
+    removeLaneSpan(net, c, i, 300, 450);
+    const extra = c.lanes.filter((l) => l.offset > 15).sort((x, y) => x.from - y.from);
+    expect(extra).toHaveLength(2);
+    expect(extra[0].to).toBeLessThan(300);
+    expect(extra[1].from).toBeGreaterThan(450);
+    expect(net.problems()).toEqual([]);
+    // Кусок самой дороги — два тупика посередине, по дороге не проехать.
+    const [west, east] = deadEnds(net).sort((x, y) => x.pos.x - y.pos.x);
+    bulldozeSpan(net, c, 350, 500);
+    expect(net.corridors.size).toBe(2);
+    expect(deadEnds(net)).toHaveLength(4);
+    expect(net.problems()).toEqual([]);
+    expect(reachable(net, west.id, east.id)).toBe(false);
   });
 
   it('полоса из поля к краю и вдоль — въезд с полосой разгона', () => {

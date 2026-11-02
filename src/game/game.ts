@@ -2915,6 +2915,8 @@ export class Game implements BuildContext {
     let sc: number;
     let main: RoadRequest | undefined;
     let mainCost = 0;
+    // Что мешает главному пути в чистом поле — скажем после того, как посчитаем силуэт станции (он красным).
+    let mainProblem: string | undefined;
     if (hit) {
       seg = hit.seg;
       if (seg.length < 2 * (half + margin)) return fail('Нужен длинный прямой участок пути');
@@ -2926,8 +2928,8 @@ export class Game implements BuildContext {
       const b = add(p, scale(dir, total / 2));
       main = { start: { kind: 'free', pos: a, level: 0 }, end: { kind: 'free', pos: b, level: 0 }, spec: RAIL_SPEC, mode: 'straight' };
       const mp = this.builder.plan(main);
-      if (!mp.ok) return fail(mp.reason ?? 'Нельзя построить путь');
-      if (mp.crossings.length || mp.demolish.length) return fail('Мешает дорога или здание');
+      if (!mp.ok) mainProblem = mp.reason ?? 'Нельзя построить путь';
+      else if (mp.crossings.length || mp.demolish.length) mainProblem = 'Мешает дорога или здание';
       mainCost = mp.cost;
       const lut = new CurveLUT(straightCubic(a, b));
       seg = { id: -1, lut, length: lut.length };
@@ -2936,9 +2938,7 @@ export class Game implements BuildContext {
     const t = seg.lut.tangentAt(sc);
     const center = seg.lut.pointAt(sc);
     const cuts: [number, number, number, number] = [sc - half, sc - R.platform / 2, sc + R.platform / 2, sc + half];
-    for (const s of cuts) {
-      if (dot(seg.lut.tangentAt(s), t) < Math.cos(0.06)) return fail('Ж/д станция — только на прямом участке пути');
-    }
+    const curved = cuts.some((s) => dot(seg.lut.tangentAt(s), t) < Math.cos(0.06));
     // Дополнительные пути и здание — со стороны курсора (в чистом поле — слева от направления, R поворачивает).
     const n = hit && cross(t, sub(p, center)) < 0 ? { x: t.y, y: -t.x } : { x: -t.y, y: t.x };
     const j0 = seg.lut.pointAt(cuts[0]);
@@ -2969,9 +2969,14 @@ export class Game implements BuildContext {
     }
     // Каждая дополнительная платформа — ещё одна стоимость станции.
     const cost = Math.round(length * specCost(RAIL_SPEC)) + R.cost * (tracks - 1) + mainCost;
-    if (!this.inBounds(fp.center, 30) || samples.some((q) => !this.inBounds(q, 20))) return fail('За краем карты', fp, cost);
-    if (this.isWater(fp.center, footprintRadius(fp) * 0.6) || samples.some((q) => this.isWater(q, RAIL_HALF))) return fail('Мешает вода', fp, cost);
-    if (this.index.overlaps(fp, 3) || samples.some((q) => this.blocked(q, RAIL_HALF + 2))) return fail('Мешает здание', fp, cost);
+    // Нельзя — силуэт (здание, пути с платформами и главный путь) всё равно показываем, красным.
+    const rail = { segId: seg.id, cuts, tracks: extra, main };
+    const blocked = (reason: string): StationPlan => ({ ...fail(reason, fp, cost), rail });
+    if (curved) return blocked('Ж/д станция — только на прямом участке пути');
+    if (mainProblem) return blocked(mainProblem);
+    if (!this.inBounds(fp.center, 30) || samples.some((q) => !this.inBounds(q, 20))) return blocked('За краем карты');
+    if (this.isWater(fp.center, footprintRadius(fp) * 0.6) || samples.some((q) => this.isWater(q, RAIL_HALF))) return blocked('Мешает вода');
+    if (this.index.overlaps(fp, 3) || samples.some((q) => this.blocked(q, RAIL_HALF + 2))) return blocked('Мешает здание');
     // Другие дороги и пути не должны задевать второй путь и здание.
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = { x: -u.y, y: u.x };
@@ -2980,22 +2985,23 @@ export class Game implements BuildContext {
     for (const q of probes) {
       for (const s of this.net.segmentsNear(q, 40)) {
         if (s.id === seg.id) continue;
-        if (s.lut.closest(q).d < halfWidth(s.spec) + RAIL_HALF + 2) return fail(isRail(s.spec) ? 'Мешает другой путь' : 'Мешает дорога', fp, cost);
+        if (s.lut.closest(q).d < halfWidth(s.spec) + RAIL_HALF + 2) return blocked(isRail(s.spec) ? 'Мешает другой путь' : 'Мешает дорога');
       }
       for (const c of this.roads.net.corridorsNear(q, 60)) {
         const hit = c.lut.closest(q);
-        if (hit.d < halfAtS(c, hit.s) + RAIL_HALF + 2) return fail('Мешает дорога', fp, cost);
+        if (hit.d < halfAtS(c, hit.s) + RAIL_HALF + 2) return blocked('Мешает дорога');
       }
     }
-    if (cost > this.budget) return fail('Не хватает денег', fp, cost);
-    return { ok: true, cost, fp, rail: { segId: seg.id, cuts, tracks: extra, main } };
+    if (cost > this.budget) return blocked('Не хватает денег');
+    return { ok: true, cost, fp, rail };
   }
 
   /** angle — поворот ж/д станции в чистом поле, tracks — сколько у неё путей с платформами (2–4). */
   stationPlan(p: Vec, snapRadius: number, kind: StationKind = 'road', angle = 0, tracks = 2): StationPlan {
     if (kind === 'rail') return this.railStationPlan(p, snapRadius, angle, Math.max(2, Math.min(4, tracks)));
     if (kind === 'stop') return this.stopPlan(p, snapRadius);
-    const fail = (reason: string): StationPlan => ({ ok: false, reason, cost: COST.station, fp: null });
+    // Нельзя — силуэт станции всё равно показываем, красным.
+    const fail = (reason: string, fp: Footprint): StationPlan => ({ ok: false, reason, cost: COST.station, fp });
     // Курсор у предприятия — пристраиваем станцию к нему с этой стороны.
     const ind = this.industries.find((i) => pointInFootprint(p, i.fp, 80));
     if (ind) return this.industryStationPlan(ind, p);
@@ -3006,7 +3012,8 @@ export class Game implements BuildContext {
     if (hit && endId !== null) {
       const end = this.roads.net.node(endId);
       if (this.stationJoinable(end)) return this.junctionStationPlan(end, p);
-      return fail('Слишком близко к перекрёстку');
+      const fp = this.drivewayFootprint(hit.seg.lut.pointAt(hit.s), normalTowards(hit.seg, hit.s, p), halfAtS(hit.seg, hit.s));
+      return fail('Слишком близко к перекрёстку', fp);
     }
     // Рядом с дорогой магнит небольшой (иначе в городе всё липло бы к перекрёсткам), в стороне от дорог — побольше.
     const magnet = hit ? Math.max(30, Math.min(50, snapRadius * 2)) : 80;
@@ -3015,7 +3022,7 @@ export class Game implements BuildContext {
       .filter((n) => this.stationJoinable(n))
       .sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0];
     if (junction) return this.junctionStationPlan(junction, p);
-    if (!hit) return fail('Поставьте рядом с дорогой');
+    if (!hit) return fail('Поставьте рядом с дорогой', this.looseFootprint(p, STATION.size));
     const seg = hit.seg;
     const from: Anchor = { kind: 'corridor', corridor: seg.id, s: hit.s, pos: seg.lut.pointAt(hit.s) };
     return this.drivewayStationPlan(from, normalTowards(seg, hit.s, p), halfAtS(seg, hit.s));
@@ -3028,7 +3035,7 @@ export class Game implements BuildContext {
   private stopPlan(p: Vec, snapRadius: number): StationPlan {
     const fail = (reason: string, fp: Footprint | null = null): StationPlan => ({ ok: false, reason, cost: STOP.cost, fp });
     const hit = this.streetNear(p, Math.max(30, snapRadius));
-    if (!hit) return fail('Поставьте у городской улицы');
+    if (!hit) return fail('Поставьте у городской улицы', this.looseFootprint(p, STOP.size));
     const c = hit.seg;
     const net = this.roads.net;
     // Конец улицы, где перекрёсток или тупик, — далеко; стык (продолжение улицы) не мешает.
@@ -3113,7 +3120,31 @@ export class Game implements BuildContext {
       if (plan.ok) return plan;
       first ??= plan;
     }
-    return first ?? { ok: false, reason: 'У перекрёстка нет места для выезда', cost: COST.station, fp: null };
+    if (first) return first;
+    // Места нет — силуэт к курсору (курсор над узлом — в самый широкий промежуток).
+    const a = aim ?? options.reduce((x, y) => (gapTo(y.a) > gapTo(x.a) ? y : x), { a: 0 }).a;
+    const fp = this.drivewayFootprint(node.pos, { x: Math.cos(a), y: Math.sin(a) }, clearance);
+    return { ok: false, reason: 'У перекрёстка нет места для выезда', cost: COST.station, fp };
+  }
+
+  /** Площадка автостанции в конце выезда от from по dir (clearance — отступ от оси дороги): длинной стороной к выезду. */
+  private drivewayFootprint(from: Vec, dir: Vec, clearance: number): Footprint {
+    const center = add(from, scale(dir, clearance + STATION.driveway + STATION.size.h / 2 + 4));
+    // Посты погрузки смотрят на выезд.
+    return { center, w: STATION.size.w, h: STATION.size.h, angle: Math.atan2(dir.x, -dir.y) };
+  }
+
+  /** Силуэт станции, которую не к чему пристроить: под курсором, вдоль ближайшей дороги (если она недалеко). */
+  private looseFootprint(p: Vec, size: { w: number; h: number }): Footprint {
+    let angle = 0;
+    let best = 150;
+    for (const c of this.roads.net.corridorsNear(p, best)) {
+      const hit = c.lut.closest(p);
+      if (hit.d >= best) continue;
+      best = hit.d;
+      angle = angleOf(c.lut.tangentAt(hit.s));
+    }
+    return { center: p, w: size.w, h: size.h, angle };
   }
 
   /**
@@ -3121,15 +3152,12 @@ export class Game implements BuildContext {
    * станция стоит к нему длинной стороной. Дома под станцией сносятся за доплату.
    */
   private drivewayStationPlan(from: Anchor, dir: Vec, clearance: number): StationPlan {
-    const reach = clearance + STATION.driveway;
-    const nodePos = add(from.pos, scale(dir, reach));
-    const center = add(from.pos, scale(dir, reach + STATION.size.h / 2 + 4));
-    // Посты погрузки смотрят на выезд.
-    const fp: Footprint = { center, w: STATION.size.w, h: STATION.size.h, angle: Math.atan2(dir.x, -dir.y) };
+    const nodePos = add(from.pos, scale(dir, clearance + STATION.driveway));
+    const fp = this.drivewayFootprint(from.pos, dir, clearance);
     const plan = this.roadBuilder.road(from, { kind: 'free', pos: nodePos }, DRIVEWAY);
     const fail = (reason: string, cost = plan.cost + COST.station): StationPlan => ({ ok: false, reason, cost, fp, driveway: plan, from });
-    if (!this.inBounds(center, 30)) return fail('За краем карты');
-    if (this.isWater(center, footprintRadius(fp)) || this.isWater(nodePos, 8)) return fail('Мешает вода');
+    if (!this.inBounds(fp.center, 30)) return fail('За краем карты');
+    if (this.isWater(fp.center, footprintRadius(fp)) || this.isWater(nodePos, 8)) return fail('Мешает вода');
     const under = this.structuresUnder(fp, 3);
     if (under.blocker) return fail(under.blocker);
     const road = this.roadUnder(fp, 3);

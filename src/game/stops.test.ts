@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MONTH_LENGTH } from '../config';
+import { MONTH_LENGTH, STOP } from '../config';
 import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
 import { Game } from './game';
@@ -78,5 +78,35 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
     expect(station).not.toBeNull();
     expect(game.lineProblem([stop.id, station!.id])).toBeNull();
     expect(game.createLine([stop.id, station!.id])).not.toBeNull();
+  });
+
+  it('где остановку не поставить, её силуэт всё равно есть — для красного предпросмотра', () => {
+    const game = new Game(7);
+    const net = game.roads.net;
+    const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
+    // У самого перекрёстка — навес у края улицы.
+    const seg = townStreets(game, town.id).find((c) => c.length > 80 && net.node(c.a).kind === 'junction')!;
+    expect(seg).toBeDefined();
+    const q = seg.lut.pointAt(10);
+    const t = seg.lut.tangentAt(10);
+    const near = game.stationPlan({ x: q.x - t.y * 14, y: q.y + t.x * 14 }, 14, 'stop');
+    expect(near.ok).toBe(false);
+    expect(near.reason).toBe('Слишком близко к перекрёстку');
+    expect(near.fp).toMatchObject({ w: STOP.size.w, h: STOP.size.h });
+    expect(dist(near.fp!.center, q)).toBeLessThan(30);
+    // Вдали от улиц — под курсором.
+    let p: { x: number; y: number } | null = null;
+    for (let x = 300; x < game.terrain.width - 300 && !p; x += 97) {
+      for (let y = 300; y < game.terrain.height - 300 && !p; y += 83) {
+        const c = { x, y };
+        if (!net.corridorsNear(c, 200).length && !game.isWater(c, 20) && !game.index.near(c, 120).length) p = c;
+      }
+    }
+    expect(p).not.toBeNull();
+    const far = game.stationPlan(p!, 14, 'stop');
+    expect(far.ok).toBe(false);
+    expect(far.reason).toBe('Поставьте у городской улицы');
+    expect(far.fp).toMatchObject({ center: p, w: STOP.size.w, h: STOP.size.h });
+    expect(game.placeStation(p!, 14, 'stop')).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import { add, cubicBezier, dist, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
+import { arrowAt, arrowShape } from './arrowShape';
 import { awayAt, awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, pointOff, sFrom, stations } from './geometry';
 import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS } from './model';
 
@@ -31,9 +32,26 @@ interface CorridorGeo {
   poly: Vec[];
   left: Vec[];
   right: Vec[];
+  /** Высота у каждой точки left/right — тень моста сдвинута на столько, сколько под ней высоты. */
+  heights: number[];
+  /** Куски над водой на земле [i0, i1] (индексы точек left/right): рисуются мостом. */
+  wet: [number, number][];
   marks: Mark[];
-  arrows: { pos: Vec; dir: Vec }[];
+  /** Контуры стрелок «прямо» на односторонней дороге (в мире). */
+  arrows: Vec[][];
 }
+
+/** Стрелка «прямо» — как перед перекрёстками. */
+const STRAIGHT = arrowShape(['straight']);
+
+/** Сдвиг тени моста на высоте h: на земле — ноль, у моста (1) и эстакады (2) — всё дальше. */
+const shadowOff = (h: number): Vec => (h <= 1 ? { x: 9 * h, y: 14 * h } : { x: 9 + 4 * (h - 1), y: 14 + 6 * (h - 1) });
+/** Мост на земле над рекой — низкий: тень на воде совсем рядом. */
+const LOW_BRIDGE = 0.3;
+/** Мост над рекой начинается и кончается на берегу — на столько от воды. */
+const BRIDGE_LAND = 10;
+/** «Крылья» у концов моста: ограждение расходится в стороны — вдоль дороги и вбок. */
+const WING = { along: 6, out: 4 };
 
 /** Островок между соседними полотнами одной стороны стыка. */
 interface GoreGeo {
@@ -57,6 +75,8 @@ interface PlateGeo {
 
 /** Перед развилкой полос в разные полотна пунктир между ними становится сплошным. */
 const SPLIT_SOLID = 60;
+/** И на последних метрах перед перекрёстком (до обреза у стоп-линии) — между попутными полосами подъезда. */
+const APPROACH_SOLID = 20;
 /** Нос островка — там, где нарисованные кромки разошлись на столько (или не дальше NOSE_MAX от стыка). */
 const NOSE_GAP = 9;
 const NOSE_MAX = 110;
@@ -111,6 +131,17 @@ export class LaneRenderer {
   private nodeCache = new Map<number, Cached<NodeGeo>>();
   private corridors: Cached<CorridorGeo>[] = [];
   private nodes: Cached<NodeGeo>[] = [];
+  /** Вода на карте: дорога над ней на земле рисуется мостом. Нет — воды нет (лаборатория). */
+  water: ((p: Vec) => boolean) | null = null;
+
+  /** Новая карта: кэш геометрии (в нём и куски над водой) — заново, и вода — уже другой карты. */
+  reset(): void {
+    this.water = null;
+    this.net = null;
+    this.version = -1;
+    this.corridorCache.clear();
+    this.nodeCache.clear();
+  }
 
   /** Есть ли что рисовать в слое высоты layer. */
   hasLayer(net: LaneNet, layer: number): boolean {
@@ -130,13 +161,17 @@ export class LaneRenderer {
     const gores = nodes.flatMap((n) => n.gores);
     ctx.lineJoin = 'round';
     const elevated = layer !== undefined && layer > 0;
+    // Низкие мосты над рекой — в слое земли (и всё сразу, если слой не задан).
+    const ground = layer === undefined || layer === 0;
+    ctx.fillStyle = C.shadow;
     if (elevated) {
-      // Мост или эстакада: тень на земле со сдвигом по высоте.
-      const off = { x: 5 + 4 * layer, y: 8 + 6 * layer };
-      ctx.fillStyle = C.shadow;
-      for (const g of corridors) this.fill(ctx, g.poly.map((p) => add(p, off)));
+      // Мост или эстакада: тень со сдвигом по высоте в каждой точке — у конца пандуса на земле она под самой дорогой.
+      for (const g of corridors) this.fill(ctx, this.shadowPoly(g, 0, g.left.length - 1));
+      const off = shadowOff(layer);
       for (const p of plates) this.fill(ctx, p.poly.map((q) => add(q, off)));
+      for (const cap of caps) this.fill(ctx, cap.poly.map((q) => add(q, off)));
     }
+    if (ground) for (const g of corridors) for (const [i0, i1] of g.wet) this.fill(ctx, this.shadowPoly(g, i0, i1, LOW_BRIDGE));
     // Бордюры под асфальтом: заливка соседнего полотна закрывает их там, где полотна сходятся.
     ctx.strokeStyle = C.roadEdge;
     ctx.lineWidth = 2.5;
@@ -159,8 +194,13 @@ export class LaneRenderer {
       ctx.lineWidth = 1.6;
       this.stroke(ctx, g.nose);
     }
-    if (elevated) {
-      // Бетонный парапет по краям моста — поверх кромки асфальта.
+    // Бетонный парапет по краям моста — поверх кромки асфальта; на земле — только над водой.
+    const parapets: Vec[][] = [];
+    for (const g of corridors) {
+      if (elevated) parapets.push(g.left, g.right);
+      else if (ground) for (const [i0, i1] of g.wet) parapets.push(...this.wings(g, i0, i1));
+    }
+    if (parapets.length) {
       ctx.lineCap = 'butt';
       for (const [color, width] of [
         ['#8c877c', 3.2],
@@ -168,10 +208,7 @@ export class LaneRenderer {
       ] as const) {
         ctx.strokeStyle = color;
         ctx.lineWidth = width;
-        for (const g of corridors) {
-          this.stroke(ctx, g.left);
-          this.stroke(ctx, g.right);
-        }
+        for (const pts of parapets) this.stroke(ctx, pts);
       }
     }
     if (zoom >= 0.35) {
@@ -180,6 +217,27 @@ export class LaneRenderer {
       this.drawArrows(ctx, corridors);
     }
     if (debug) this.drawDebug(ctx, net, zoom);
+  }
+
+  /** Ограждение моста над рекой [i0, i1] по обоим краям: на концах — «крылья», расходящиеся в стороны от дороги. */
+  private wings(g: CorridorGeo, i0: number, i1: number): Vec[][] {
+    if (i1 <= i0) return [];
+    return [g.left, g.right].map((edge, k) => {
+      const other = k === 0 ? g.right : g.left;
+      const out = (i: number) => norm(sub(edge[i], other[i]));
+      const back = norm(sub(edge[i0], edge[i0 + 1]));
+      const fwd = norm(sub(edge[i1], edge[i1 - 1]));
+      const wing = (i: number, dir: Vec) => add(edge[i], add(scale(dir, WING.along), scale(out(i), WING.out)));
+      return [wing(i0, back), ...edge.slice(i0, i1 + 1), wing(i1, fwd)];
+    });
+  }
+
+  /** Тень куска полотна [i0, i1]: каждая точка сдвинута по своей высоте (or — одна высота на всё). */
+  private shadowPoly(g: CorridorGeo, i0: number, i1: number, or?: number): Vec[] {
+    const at = (p: Vec, i: number) => add(p, shadowOff(or ?? Math.max(0, g.heights[i])));
+    const l = g.left.slice(i0, i1 + 1).map((p, k) => at(p, i0 + k));
+    const r = g.right.slice(i0, i1 + 1).map((p, k) => at(p, i0 + k));
+    return [...l, ...r.reverse()];
   }
 
   /** Обрыв полотен у перекрёстков — для движения и подсказок. */
@@ -240,15 +298,37 @@ export class LaneRenderer {
     const s0 = ca;
     const s1 = c.length - cb;
     const ss = stations(c, s0, s1, 3);
-    for (const x of [SPLIT_SOLID, c.length - SPLIT_SOLID]) if (x > s0 && x < s1) ss.push(x);
+    for (const x of [SPLIT_SOLID, c.length - SPLIT_SOLID, s0 + APPROACH_SOLID, s1 - APPROACH_SOLID]) if (x > s0 && x < s1) ss.push(x);
     ss.sort((x, y) => x - y);
     const left: Vec[] = [];
     const right: Vec[] = [];
+    const heights: number[] = [];
+    const at: number[] = [];
+    const over: boolean[] = [];
     for (const s of ss) {
       const e = edgesAt(c, s);
       if (!e) continue;
       left.push(pointOff(c, s, e[0] - ROAD_MARGIN));
       right.push(pointOff(c, s, e[1] + ROAD_MARGIN));
+      const h = net.heightAt(c, s);
+      heights.push(h);
+      at.push(s);
+      over.push(Math.abs(h) < 0.25 && !!this.water?.(pointOff(c, s, (e[0] + e[1]) / 2)));
+    }
+    // Над водой на земле — мост: куски подряд, начинается и кончается на берегу, на BRIDGE_LAND от воды.
+    const wet: [number, number][] = [];
+    for (let i = 0; i < over.length; i++) {
+      if (!over[i]) continue;
+      let j = i;
+      while (j + 1 < over.length && over[j + 1]) j++;
+      let i0 = i;
+      while (i0 > 0 && at[i] - at[i0 - 1] <= BRIDGE_LAND) i0--;
+      let i1 = j;
+      while (i1 < over.length - 1 && at[i1 + 1] - at[j] <= BRIDGE_LAND) i1++;
+      const last = wet[wet.length - 1];
+      if (last && i0 <= last[1]) last[1] = i1;
+      else wet.push([i0, i1]);
+      i = j;
     }
     // В стыке заливка чуть заходит за край — к соседнему полотну без шва.
     const l = [...left];
@@ -263,11 +343,11 @@ export class LaneRenderer {
       l.push(add(l[l.length - 1], t));
       r.push(add(r[r.length - 1], t));
     }
-    return { poly: [...l, ...r.reverse()], left, right, marks: this.corridorMarks(net, c, ss), arrows: this.corridorArrows(c, s0, s1) };
+    return { poly: [...l, ...r.reverse()], left, right, heights, wet, marks: this.corridorMarks(net, c, ss, s0, s1), arrows: this.corridorArrows(c, s0, s1) };
   }
 
-  /** Разметка полотна: границы соседних полос, барьер на разделительной, кромки. */
-  private corridorMarks(net: LaneNet, c: Corridor, ss: number[]): Mark[] {
+  /** Разметка полотна: границы соседних полос, барьер на разделительной, кромки. [s0, s1] — асфальт между обрезами у перекрёстков. */
+  private corridorMarks(net: LaneNet, c: Corridor, ss: number[], s0: number, s1: number): Mark[] {
     const marks: Mark[] = [];
     /** Куски линии со смещением off там, где style(s) не null; стиль внутри куска один. */
     const runs = (off: number, style: (s: number) => LineStyle | null) => {
@@ -293,6 +373,8 @@ export class LaneRenderer {
       if (!net.reaches(c, c.lanes[i], end) || !net.reaches(c, c.lanes[j], end)) return false;
       return net.across(c, i, end)?.corridor.id !== net.across(c, j, end)?.corridor.id;
     };
+    // Едут ли полосы с направлением flow к перекрёстку на конце end (на кольце — нет: там перестраиваются).
+    const toJunction = (flow: number, end: End) => !c.ring && flow === (end === 'b' ? 1 : -1) && net.node(end === 'a' ? c.a : c.b).kind === 'junction';
     const order = c.lanes.map((_, i) => i).sort((x, y) => c.lanes[x].offset - c.lanes[y].offset);
     for (let k = 0; k + 1 < order.length; k++) {
       const i = order[k];
@@ -306,11 +388,20 @@ export class LaneRenderer {
         const same = A.flow === B.flow;
         const splitA = same && splits(i, j, 'a');
         const splitB = same && splits(i, j, 'b');
+        const nearA = same && toJunction(A.flow, 'a');
+        const nearB = same && toJunction(A.flow, 'b');
+        // Осевая между встречными: у проспекта — жёлтая сплошная; у улицы 1+1 — пунктир, но у перекрёстка — сплошная.
+        const jA = !c.ring && net.node(c.a).kind === 'junction';
+        const jB = !c.ring && net.node(c.b).kind === 'junction';
         runs(mid, (s) => {
           if (!both(s)) return null;
-          if (!same) return c.lanes.length > 2 ? 'yellow' : 'dash';
-          // Сплошная — если так задано, и перед развилкой полос в разные полотна.
-          return A.solid || (splitA && s <= SPLIT_SOLID) || (splitB && s >= c.length - SPLIT_SOLID) ? 'solid' : 'dash';
+          if (!same) {
+            if (c.lanes.length > 2) return 'yellow';
+            return (jA && s <= s0 + APPROACH_SOLID) || (jB && s > s1 - APPROACH_SOLID) ? 'solid' : 'dash';
+          }
+          // Сплошная — если так задано, перед развилкой полос в разные полотна и у самого перекрёстка.
+          if (A.solid || (splitA && s <= SPLIT_SOLID) || (splitB && s >= c.length - SPLIT_SOLID)) return 'solid';
+          return (nearA && s <= s0 + APPROACH_SOLID) || (nearB && s > s1 - APPROACH_SOLID) ? 'solid' : 'dash';
         });
       } else if (gap > LANE_W + 0.3) {
         // Разделительная полоса: барьер посередине, сплошные у полос.
@@ -333,15 +424,17 @@ export class LaneRenderer {
     return marks.flatMap((m) => (m.style === 'dash' ? cutDashes(m.pts).map((pts) => ({ pts, style: m.style })) : [m]));
   }
 
-  private corridorArrows(c: Corridor, s0: number, s1: number): { pos: Vec; dir: Vec }[] {
-    const res: { pos: Vec; dir: Vec }[] = [];
+  /** Стрелки направления — только на односторонней дороге: посередине полосы, на длинной — две. */
+  private corridorArrows(c: Corridor, s0: number, s1: number): Vec[][] {
+    if (!c.lanes.length || !c.lanes.every((l) => l.flow === c.lanes[0].flow)) return [];
+    const res: Vec[][] = [];
     for (const l of c.lanes) {
       const a = Math.max(l.from, s0 + 8);
       const b = Math.min(l.to, s1 - 8);
       if (b - a < 40) continue;
       for (const f of b - a > 260 ? [0.25, 0.75] : [0.5]) {
         const s = a + (b - a) * f;
-        res.push({ pos: pointOff(c, s, l.offset), dir: scale(c.lut.tangentAt(s), l.flow) });
+        res.push(...arrowAt(STRAIGHT, pointOff(c, s, l.offset), scale(c.lut.tangentAt(s), l.flow)));
       }
     }
     return res;
@@ -542,18 +635,17 @@ export class LaneRenderer {
     ctx.stroke();
   }
 
+  /** Стрелки одной заливкой: контуры обходятся в одну сторону — без двойной прозрачности. */
   private drawArrows(ctx: CanvasRenderingContext2D, corridors: CorridorGeo[]): void {
     ctx.fillStyle = C.dash;
+    ctx.beginPath();
     for (const g of corridors) {
-      for (const { pos: c, dir: d } of g.arrows) {
-        const n = rightNormal(d);
-        ctx.beginPath();
-        ctx.moveTo(c.x + d.x * 3.5, c.y + d.y * 3.5);
-        ctx.lineTo(c.x - d.x * 2 + n.x * 2, c.y - d.y * 2 + n.y * 2);
-        ctx.lineTo(c.x - d.x * 2 - n.x * 2, c.y - d.y * 2 - n.y * 2);
-        ctx.fill();
+      for (const poly of g.arrows) {
+        this.path(ctx, poly);
+        ctx.closePath();
       }
     }
+    ctx.fill();
   }
 
   /** Оси полотен, стыки (направление и сдвиги) и перекрёстки. */

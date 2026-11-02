@@ -272,8 +272,10 @@ export class Builder {
         if (dh >= 0.3) return fail('Мало места по высоте');
         if (levelA !== levelB || !this.net.isFlat(seg)) return fail('Пересечение на подъёме');
         if (seg.platform !== undefined) return fail('Нельзя пересекать платформу');
+        // Пересечение — узел на обоих путях: под пологим углом (меньше угла стрелки) поезда переходят с пути
+        // на путь, как по стрелке (так пристыковывают путь к соседнему); круче — просто «крестовина».
         const sin = Math.abs(cross(seg.lut.tangentAt(hit.s2), lut.tangentAt(hit.s1)));
-        if (sin < 0.5) return fail('Пути пересекаются слишком остро');
+        if (sin < Math.sin(0.12)) return fail('Пути пересекаются слишком остро');
         if (hit.s2 < MIN_SEGMENT_LEN || seg.length - hit.s2 < MIN_SEGMENT_LEN) return fail('Слишком близко к стрелке');
         crossings.push({ segId: seg.id, t: hit.t2, s: hit.s1, point: hit.point });
       }

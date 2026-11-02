@@ -1,5 +1,5 @@
 import './style.css';
-import { Game } from './game/game';
+import { Game, SAVE_VERSION, type SaveData } from './game/game';
 import { clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readSave, saveGame, writeSave } from './game/persist';
 import { Controller } from './input/controller';
 import { Camera } from './render/camera';
@@ -37,6 +37,8 @@ const hud = new Hud(hudRoot, controller, () => game, {
   saveAs: (name, id) => saveNamed(name, id),
   load: (id) => loadNamed(id),
   remove: (id) => deleteSave(id),
+  exportFile: () => exportFile(),
+  importFile: (file) => importFile(file),
 });
 
 function persist(manual = false): void {
@@ -65,8 +67,47 @@ async function loadNamed(id: string): Promise<boolean> {
     game.notify('Это сохранение не открыть: оно от другой версии игры', '#e5534b');
     return false;
   }
-  game = new Game(data.settings, data);
+  open(data);
   linkSave(id);
+  persist();
+  return true;
+}
+
+/** Скачивает текущую партию файлом: «razvyazka-Мар-1963.json». */
+function exportFile(): void {
+  const data = game.toSave();
+  data.view = { x: camera.x, y: camera.y, zoom: camera.zoom };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `razvyazka-${game.dateLabel.replace(/\s+/g, '-')}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+/** Открывает партию из файла вместо текущей (своё имя у неё — только если сохранить её под именем). */
+async function importFile(file: File): Promise<boolean> {
+  let data: SaveData;
+  try {
+    data = JSON.parse(await file.text()) as SaveData;
+  } catch {
+    game.notify('Это не файл сохранения игры', '#e5534b');
+    return false;
+  }
+  if (data.version !== SAVE_VERSION) {
+    game.notify('Это сохранение не открыть: оно от другой версии игры', '#e5534b');
+    return false;
+  }
+  open(data);
+  linkSave(null);
+  persist();
+  game.notify('Партия открыта из файла');
+  return true;
+}
+
+/** Партия из сохранения вместо текущей: игра, панели и вид камеры. */
+function open(data: SaveData): void {
+  game = new Game(data.settings, data);
   restart();
   if (data.view) {
     camera.x = data.view.x;
@@ -74,8 +115,6 @@ async function loadNamed(id: string): Promise<boolean> {
     camera.zoom = data.view.zoom;
     camera.touched = true;
   }
-  persist();
-  return true;
 }
 
 /** Новая или загруженная партия: сбросить управление, отрисовку и панели. */

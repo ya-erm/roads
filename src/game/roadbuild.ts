@@ -1,7 +1,7 @@
 import { COST } from '../config';
 import { Cubic, minRadius } from '../core/bezier';
 import { dist, Vec } from '../core/vec';
-import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDraft, RoadOptions } from '../lanes/edit';
+import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDraft, RoadOptions, taperDeadLanes } from '../lanes/edit';
 import { Corridor, LaneNet, LaneSlot } from '../lanes/model';
 import { LEVEL_RUN, RoadClass, ROAD_CLASSES } from '../world/roadTypes';
 import { halfAtS } from '../world/worldgen';
@@ -147,7 +147,8 @@ export class RoadBuilder {
 
   /** Полоса по черновику инструмента «Полоса». */
   lane(d: LaneDraft, cls: RoadClass): RoadPlan {
-    return this.plan((n) => applyLane(n, d, cls));
+    // Дома у дороги не сносим: после стройки их отодвинут от неё (roadWidened), сносят — только если места нет.
+    return this.plan((n) => applyLane(n, d, cls), { shove: true });
   }
 
   /** Снос полотен. */
@@ -176,6 +177,8 @@ export class RoadBuilder {
         c.cls = p.cls;
         c.limit = p.limit;
         n.setLanes(c, p.lanes);
+        // В стыке с дорогой другого профиля лишние полосы (у неё или у соседа) сходят на нет отгоном.
+        taperDeadLanes(n, [c.a, c.b]);
       },
       { shove: true },
     );

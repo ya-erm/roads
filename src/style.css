@@ -302,6 +302,36 @@ button {
 }
 
 /* Сохранения со своими именами — под кнопками меню. */
+/* Партия файлом: скачать и открыть. */
+.file-row {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+/* Выбор файла — с видом маленькой кнопки. */
+.file-pick {
+  position: relative;
+  cursor: pointer;
+  background: #eef2f6;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+}
+
+.file-pick:hover {
+  background: #e2e8ee;
+}
+
+.file-pick input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
 .saves {
   margin-top: 18px;
   text-align: left;
@@ -375,6 +405,19 @@ button {
   justify-content: center;
   gap: 10px;
   margin: 10px 0 6px;
+}
+
+/* Удаление своего шаблона: его схема и имя. */
+.confirm-tpl {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin: 10px auto 6px;
+  padding: 8px 14px 10px;
+  background: #f4f6f8;
+  border-radius: 12px;
+  width: fit-content;
 }
 
 .confirm-chip {
@@ -1178,6 +1221,23 @@ button {
   box-shadow: 0 0 0 2px var(--ink);
 }
 
+/* Цвета грузов: кружок — сам значок груза. */
+.cargo-swatches {
+  flex-wrap: wrap;
+  margin-top: -2px;
+}
+
+.swatch.cargo {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: none;
+}
+
+.swatch.cargo svg {
+  display: block;
+}
+
 .swatch.custom {
   position: relative;
   overflow: hidden;
@@ -1305,10 +1365,25 @@ button {
   flex: none;
 }
 
+/* Свернуть/развернуть: галочка на светлой плашке, у свёрнутого — повёрнута вправо. */
 .lines-toggle .caret {
-  width: 10px;
-  color: var(--muted);
-  font-size: 12px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: #eef1f4;
+  color: #39404a;
+  transition: transform 0.15s, background 0.15s;
+}
+
+.lines-toggle:hover .caret {
+  background: #e1e7ee;
+}
+
+.lines-toggle .caret.closed {
+  transform: rotate(-90deg);
 }
 
 .lines-head .small {
@@ -1603,10 +1678,16 @@ div.line-row:active {
 
 .folder-row .caret {
   flex: none;
-  width: 10px;
-  font-size: 10px;
-  color: var(--muted);
-  text-align: center;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: #4b525c;
+  transition: transform 0.15s;
+}
+
+.folder-row .caret.closed {
+  transform: rotate(-90deg);
 }
 
 .folder-ic {
@@ -1805,11 +1886,19 @@ button.small.with-ic {
   flex-direction: column;
 }
 
+/* Строка состояния — обычным текстом: значок груза стоит сразу за загрузкой «16/16», а не у края. */
 .veh small {
   color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 4px;
+  display: block;
+  line-height: 1.4;
+}
+
+.veh small .cargo-icon {
+  margin: -2px 0 0 3px;
+}
+
+.veh small .nowrap {
+  white-space: nowrap;
 }
 
 .cargo-icon {

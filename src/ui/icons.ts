@@ -205,6 +205,11 @@ export function diamondSvg(w = 48, h = 36): string {
   </svg>`;
 }
 
+/** Свернуть/развернуть: жирная галочка вниз (свёрнутое повёрнуто стилем). */
+export function chevronSvg(size = 12): string {
+  return `<svg viewBox="0 0 12 12" width="${size}" height="${size}"><path d="M2.5 4.5L6 8L9.5 4.5" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
 /** Копия: перекрёсток в синей рамке и его повёрнутая копия. */
 export function copySvg(w = 48, h = 36): string {
   const cross = `<path d="M-9 0H9M0 -9V9" stroke="#646b76" stroke-width="4"/><rect x="-11" y="-11" width="22" height="22" rx="1.5" fill="rgba(47,128,237,0.12)" stroke="#2f80ed" stroke-width="1.5" stroke-dasharray="3 2"/>`;
@@ -239,6 +244,16 @@ export function bulldozePointSvg(w = 48, h = 36): string {
     <rect x="8" y="6" width="11" height="11" rx="1.5" fill="#a65a4a"/>
     <rect x="27" y="5" width="12" height="12" rx="1.5" fill="#7d8fa3"/>
     <path d="M27 5L39 17M39 5L27 17" stroke="#e8483f" stroke-width="2.6"/>
+  </svg>`;
+}
+
+/** Снос полосы: дорога с пристроенной полосой (с отгоном), полоса — красным с крестиком. */
+export function bulldozeLaneSvg(w = 48, h = 36): string {
+  return `<svg viewBox="0 0 48 36" width="${w}" height="${h}">
+    <path d="M2 12H46" stroke="#646b76" stroke-width="12"/>
+    <path d="M2 12H46" stroke="#e8ebee" stroke-width="1" stroke-dasharray="4 3"/>
+    <path d="M8 24L16 19H40V25H8Z" fill="rgba(232,72,63,0.55)"/>
+    <path d="M24 19.5L32 28.5M32 19.5L24 28.5" stroke="#e8483f" stroke-width="2.4"/>
   </svg>`;
 }
 
@@ -310,7 +325,32 @@ export function tracksSvg(n: number, dashed = false): string {
   return `<svg viewBox="0 0 52 36" width="52" height="36">${rows}</svg>`;
 }
 
-export function stationSvg(kind: 'road' | 'rail' | 'stop', size = 40): string {
+export function stationSvg(kind: 'road' | 'rail' | 'stop' | 'cargo' | 'pax', size = 40): string {
+  if (kind === 'cargo') {
+    // Автостанция для грузов: склад с воротами, ящики и грузовик у рампы.
+    return `<svg viewBox="0 0 40 40" width="${size}" height="${size}">
+      <rect x="2" y="27" width="36" height="11" rx="2" fill="#646b76"/>
+      <rect x="5" y="5" width="22" height="16" rx="1.5" fill="#e9e2d2" stroke="#4f5965" stroke-width="1.4"/>
+      <path d="M5 9H27" stroke="#8d6a43" stroke-width="2.4"/>
+      <rect x="10" y="13" width="7" height="8" fill="#9aa1aa" stroke="#4f5965" stroke-width="1"/>
+      <rect x="29" y="14" width="6" height="6" fill="#c99a5b" stroke="#7a5a3c" stroke-width="0.9"/>
+      <rect x="31" y="8" width="5" height="5" fill="#d9a92b" stroke="#7a5a3c" stroke-width="0.9"/>
+      <rect x="7" y="28.5" width="17" height="7" rx="1.2" fill="#c99a5b"/>
+      <rect x="24" y="29.5" width="6" height="5" rx="1.2" fill="#e07b39"/>
+    </svg>`;
+  }
+  if (kind === 'pax') {
+    // Автовокзал: здание с навесом над платформами и автобус.
+    return `<svg viewBox="0 0 40 40" width="${size}" height="${size}">
+      <rect x="2" y="27" width="36" height="11" rx="2" fill="#646b76"/>
+      <rect x="6" y="4" width="28" height="12" rx="1.5" fill="#f2efe8" stroke="#4f5965" stroke-width="1.4"/>
+      <path d="M6 8H34" stroke="#2f80ed" stroke-width="2.4"/>
+      <path d="M9 16V24M20 16V24M31 16V24" stroke="#4f5965" stroke-width="1.3"/>
+      <rect x="6" y="22" width="28" height="3" fill="#cfd5dc"/>
+      <rect x="7" y="28.5" width="22" height="7" rx="1.6" fill="#4a8fe7"/>
+      <path d="M10 30.5H26" stroke="#e8f1fd" stroke-width="1.6" stroke-dasharray="3 1.5"/>
+    </svg>`;
+  }
   if (kind === 'stop') {
     // Навес у края улицы и знак с буквой «А»; у бордюра — автобус.
     return `<svg viewBox="0 0 40 40" width="${size}" height="${size}">

@@ -1,8 +1,8 @@
 import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { LANE_W, RoadClass } from '../world/roadTypes';
-import { edgesAt, laneBand } from './geometry';
-import { Corridor, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot } from './model';
+import { edgesAt, laneBand, pointOff } from './geometry';
+import { Corridor, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot, taperLen } from './model';
 
 /** Начало или конец новой дороги: узел (тупик или перекрёсток), место на полотне или чистое поле. */
 export type Anchor =
@@ -338,8 +338,20 @@ export interface LaneDraft {
   end: Anchor;
 }
 
-/** Черновик полосы от точки p. */
+/** Черновик полосы от точки p. С конца уже пристроенной полосы — тянется она сама (продолжить, удлинить). */
 export function startLane(net: LaneNet, p: Vec, radius: number): LaneDraft {
+  const on = laneUnder(net, p);
+  if (on) {
+    const c = on.corridor;
+    const l = c.lanes[on.lane];
+    const T = taperLen(c.cls) + 12;
+    const nearEnd = (l.to < c.length - 0.01 && Math.abs(on.s - l.to) < T) || (l.from > 0.01 && Math.abs(on.s - l.from) < T);
+    if (nearEnd && l.offset !== 0) {
+      const pos = pointOff(c, on.s, l.offset);
+      const host = { corridor: c.id, side: (l.offset > 0 ? 1 : -1) as 1 | -1, offset: l.offset, s0: on.s, s1: on.s };
+      return { start: { kind: 'free', pos }, host, merge: false, depart: null, end: { kind: 'free', pos } };
+    }
+  }
   const edge = edgeAt(net, p);
   if (edge) {
     return { start: { kind: 'free', pos: edge.pos }, host: { ...edge, s0: edge.s, s1: edge.s }, merge: false, depart: null, end: { kind: 'free', pos: edge.pos } };
@@ -348,16 +360,32 @@ export function startLane(net: LaneNet, p: Vec, radius: number): LaneDraft {
   return { start: a, host: null, merge: false, depart: null, end: a };
 }
 
-/** Курсор сдвинулся: полоса идёт вдоль края, отрывается от него или прилипает. */
+/** Курсор от линии полосы дальше этого — полоса отходит от края (съезд). */
+const DEPART_LAT = 14;
+
+/**
+ * Курсор сдвинулся: полоса идёт вдоль края, отрывается от него или прилипает. Отошла и вернулась
+ * к линии полосы дальше по дороге — снова тянется вдоль края (длинная полоса торможения на изгибе).
+ */
 export function dragLane(net: LaneNet, d: LaneDraft, p: Vec, radius: number): LaneDraft {
+  if (d.host && !d.merge) {
+    const c = net.corridors.get(d.host.corridor);
+    if (!c) return d;
+    const hit = c.lut.closest(p);
+    const lat = dot(sub(p, hit.point), rightNormal(c.lut.tangentAt(hit.s)));
+    const along = hit.s > 1 && hit.s < c.length - 1;
+    // Курсор у линии полосы — она тянется вдоль края; ушёл в сторону — дальше съезд от того места, где была.
+    if (Math.abs(lat - d.host.offset) < DEPART_LAT && along) return { ...d, host: { ...d.host, s1: hit.s }, depart: null };
+    return { ...d, depart: anchorAt(net, p, radius) };
+  }
   if (d.depart) return { ...d, depart: anchorAt(net, p, radius) };
   if (d.host) {
     const c = net.corridors.get(d.host.corridor);
     if (!c) return d;
     const hit = c.lut.closest(p);
     const lat = dot(sub(p, hit.point), rightNormal(c.lut.tangentAt(hit.s)));
-    // Курсор у линии полосы — она тянется вдоль края; ушёл в сторону — дальше съезд.
-    if (Math.abs(lat - d.host.offset) < 10 && hit.s > 1 && hit.s < c.length - 1) return { ...d, host: { ...d.host, s1: hit.s } };
+    // Въезд: полоса разгона тянется вдоль края, пока курсор у её линии; ушёл в сторону — дальше съезд.
+    if (Math.abs(lat - d.host.offset) < DEPART_LAT && hit.s > 1 && hit.s < c.length - 1) return { ...d, host: { ...d.host, s1: hit.s } };
     return { ...d, depart: anchorAt(net, p, radius) };
   }
   const edge = edgeAt(net, p);
@@ -389,7 +417,7 @@ export function applyLane(net: LaneNet, d: LaneDraft, cls: RoadClass): boolean {
   const hi = Math.max(d.host.s0, d.host.s1);
   if (!d.merge && !d.depart) {
     if (hi - lo < 5) return false;
-    net.setLanes(c, [...c.lanes, { offset, flow, from: lo, to: hi }]);
+    placeLane(net, c, { offset, flow, from: lo, to: hi });
     return true;
   }
   // Въезд — в начале пути вдоль края, съезд — в конце (по ходу движения); на оси это lo или hi.
@@ -420,27 +448,78 @@ export function applyLane(net: LaneNet, d: LaneDraft, cls: RoadClass): boolean {
   const branch = (seam: LaneNode, out: boolean, other: Anchor) => {
     const side: 1 | -1 = (out ? flow : -flow) as 1 | -1;
     const lanes = [slot(0, 1)];
+    // Свободный конец — дугой окружности от стыка: при заданном направлении у стыка это самый большой радиус
+    // (съезд на поворот не заворачивает круто сразу у дороги). Конец в тупике со своим направлением — кривой по обоим.
     if (out) {
       const end = resolveBranchEnd(net, other, sub(other.pos, net.portPos(seam, offset)), false, lanes);
       const t0 = scale(seam.dir, side);
       const p0 = net.portPos(seam, offset);
       const p3 = end.node.pos;
       const h = dist(p0, p3) / 3;
+      const arc = end.side ? null : arcCubic(p0, t0, p3);
       const t3 = end.side ? scale(end.node.dir, -end.side) : norm(sub(p3, add(p0, scale(t0, h))));
-      net.addCorridor(seam.id, end.node.id, { cls, lanes, portA: offset, curve: { p0, p1: add(p0, scale(t0, h)), p2: sub(p3, scale(t3, h)), p3 } });
+      const curve = arc ?? { p0, p1: add(p0, scale(t0, h)), p2: sub(p3, scale(t3, h)), p3 };
+      net.addCorridor(seam.id, end.node.id, { cls, lanes, portA: offset, curve: { ...curve, p0, p3 } });
     } else {
       const begin = resolveBranchEnd(net, other, sub(net.portPos(seam, offset), other.pos), true, lanes);
       const p3 = net.portPos(seam, offset);
       const t3 = scale(seam.dir, -side);
       const p0 = begin.node.pos;
       const h = dist(p0, p3) / 3;
+      // Въезд — та же дуга, построенная от стыка назад.
+      const back = begin.side ? null : arcCubic(p3, scale(t3, -1), p0);
       const t0 = begin.side ? scale(begin.node.dir, begin.side) : norm(sub(sub(p3, scale(t3, h)), p0));
-      net.addCorridor(begin.node.id, seam.id, { cls, lanes, portB: offset, curve: { p0, p1: add(p0, scale(t0, h)), p2: sub(p3, scale(t3, h)), p3 } });
+      const curve = back ? { p0: back.p3, p1: back.p2, p2: back.p1, p3: back.p0 } : { p0, p1: add(p0, scale(t0, h)), p2: sub(p3, scale(t3, h)), p3 };
+      net.addCorridor(begin.node.id, seam.id, { cls, lanes, portB: offset, curve: { ...curve, p0, p3 } });
     }
   };
   if (seamOut && d.depart) branch(seamOut, true, d.depart);
   if (seamIn) branch(seamIn, false, d.start);
   return true;
+}
+
+/**
+ * Новая полоса вдоль края: рядом с такой же (то же смещение и направление) — сливается с ней в одну (так полосу
+ * продолжают); у стыка, за которым такая же полоса продолжается или кончается рядом, — доходит до стыка
+ * без отгона и стыкуется с ней.
+ */
+function placeLane(net: LaneNet, c: Corridor, lane: LaneSlot): void {
+  const T = taperLen(c.cls);
+  let l = { ...lane };
+  if (l.from > 0.01 && l.from < T + 15 && joinAcross(net, c, l, 'a')) l = { ...l, from: 0 };
+  if (l.to < c.length - 0.01 && l.to > c.length - T - 15 && joinAcross(net, c, l, 'b')) l = { ...l, to: Infinity };
+  const lanes = [...c.lanes];
+  const i = lanes.findIndex((o) => Math.abs(o.offset - l.offset) < 0.5 && o.flow === l.flow && o.from <= l.to + 2 * T && l.from <= o.to + 2 * T);
+  if (i >= 0) lanes[i] = { ...lanes[i], from: Math.min(lanes[i].from, l.from), to: Math.max(lanes[i].to, l.to) };
+  else lanes.push(l);
+  net.setLanes(c, lanes);
+}
+
+/**
+ * Есть ли за стыком на конце end полосы l такая же полоса (поперёк там же, едет туда же). Если та кончается
+ * отгоном у самого стыка — дотягивает её до стыка. true — полосе l есть с чем состыковаться.
+ */
+function joinAcross(net: LaneNet, c: Corridor, l: LaneSlot, end: End): boolean {
+  const e = net.end(c, end);
+  if (e.node.kind !== 'seam' || net.isDeadEnd(e.node)) return false;
+  const mine = net.laneAtSeam(e, l);
+  for (const o of net.ends(e.node)) {
+    if (o.side === e.side) continue;
+    const oc = o.corridor;
+    const k = oc.lanes.findIndex((ol) => {
+      const it = net.laneAtSeam(o, ol);
+      return it.forward === mine.forward && Math.abs(it.lat - mine.lat) < LAT_EPS;
+    });
+    if (k < 0) continue;
+    const ol = oc.lanes[k];
+    if (!net.reaches(oc, ol, o.end)) {
+      const gap = o.end === 'a' ? ol.from : oc.length - ol.to;
+      if (gap > taperLen(oc.cls) + 15) continue;
+      net.setLanes(oc, oc.lanes.map((x, j) => (j !== k ? x : o.end === 'a' ? { ...x, from: 0 } : { ...x, to: Infinity })));
+    }
+    return true;
+  }
+  return false;
 }
 
 function resolveBranchEnd(net: LaneNet, x: Anchor, dir: Vec, start: boolean, lanes: LaneSlot[]): RoadEnd {
@@ -861,6 +940,120 @@ export function flipLane(net: LaneNet, c: Corridor, i: number): void {
 export function removeLane(net: LaneNet, c: Corridor, i: number): void {
   if (c.lanes.length <= 1) bulldoze(net, c.id);
   else net.setLanes(c, c.lanes.filter((_, k) => k !== i));
+}
+
+/**
+ * Снос пристроенной полосы i полотна c (только крайней — посередине дороги дыры не будет): она убирается
+ * и там, куда продолжается через стыки вдоль той же дороги; однополосный съезд или въезд, куда она уходит,
+ * сносится целиком. Возвращает, сколько полос и полотен убрано.
+ */
+export function removeEdgeLane(net: LaneNet, c0: Corridor, i0: number): number {
+  const lane0 = c0.lanes[i0];
+  if (!lane0) throw new EditError('Нет полосы');
+  const edge = (c: Corridor, l: LaneSlot) =>
+    c.lanes.every((o) => o === l || o.to <= l.from || o.from >= l.to || (l.offset > 0 ? o.offset < l.offset : o.offset > l.offset));
+  if (c0.lanes.length > 1 && !edge(c0, lane0)) throw new EditError('Снести можно только крайнюю полосу');
+  // Обход по продолжениям через стыки: где полоса одна — полотно целиком (и дальше не идём, кроме начального).
+  const lanes = new Map<number, Set<LaneSlot>>();
+  const razed = new Set<number>();
+  const todo: [Corridor, LaneSlot][] = [[c0, lane0]];
+  while (todo.length) {
+    const [c, l] = todo.pop()!;
+    if (razed.has(c.id) || lanes.get(c.id)?.has(l)) continue;
+    const single = c.lanes.length === 1;
+    if (single) razed.add(c.id);
+    else {
+      if (!lanes.has(c.id)) lanes.set(c.id, new Set());
+      lanes.get(c.id)!.add(l);
+    }
+    // Однополосная дорога, куда ушла полоса, сносится одна — её продолжения не трогаем.
+    if (single && c !== c0) continue;
+    const i = c.lanes.indexOf(l);
+    for (const end of ['a', 'b'] as const) {
+      const x = net.across(c, i, end);
+      if (!x) continue;
+      const other = x.corridor;
+      const ol = other.lanes[x.lane];
+      // Продолжение посреди чужого профиля (не крайнее) — это уже не пристроенная полоса.
+      if (other.lanes.length > 1 && !edge(other, ol)) continue;
+      todo.push([other, ol]);
+    }
+  }
+  for (const [id, set] of lanes) {
+    const c = net.corridors.get(id);
+    if (c) net.setLanes(c, c.lanes.filter((l) => !set.has(l)));
+  }
+  for (const id of razed) bulldoze(net, id);
+  return [...lanes.values()].reduce((n, s) => n + s.size, 0) + razed.size;
+}
+
+/** Куски короче этого при сносе куска не оставляем: снос доходит до конца полотна или полосы. */
+const SPAN_MIN = 10;
+
+/** Снос куска полотна между s0 и s1: по краям — стыки (снаружи остаются тупики), кусок между ними сносится. */
+export function bulldozeSpan(net: LaneNet, c: Corridor, s0: number, s1: number): void {
+  let lo = Math.min(s0, s1);
+  let hi = Math.max(s0, s1);
+  if (lo < SPAN_MIN) lo = 0;
+  if (hi > c.length - SPAN_MIN) hi = c.length;
+  if (hi - lo < SPAN_MIN) throw new EditError('Протяните вдоль дороги подальше');
+  let piece = c;
+  if (hi < c.length) piece = splitCorridor(net, piece, hi, 'seam').first;
+  if (lo > 0) piece = splitCorridor(net, piece, lo, 'seam').second;
+  bulldoze(net, piece.id);
+}
+
+/**
+ * Снос куска полосы между s0 и s1 (крайней — посередине дороги дыры не будет): до и после него полоса остаётся
+ * и сходит на нет отгонами. Вся полоса — как removeEdgeLane (со съездом, если он от неё).
+ */
+export function removeLaneSpan(net: LaneNet, c: Corridor, i: number, s0: number, s1: number): void {
+  const l = c.lanes[i];
+  if (!l) throw new EditError('Нет полосы');
+  const T = taperLen(c.cls);
+  const lo = Math.min(s0, s1);
+  const hi = Math.max(s0, s1);
+  if (hi - lo < SPAN_MIN) throw new EditError('Протяните вдоль полосы подальше');
+  const pieces: LaneSlot[] = [];
+  if (lo - T - l.from > SPAN_MIN) pieces.push({ ...l, to: lo - T });
+  if (Math.min(l.to, c.length) - (hi + T) > SPAN_MIN) pieces.push({ ...l, from: hi + T });
+  if (!pieces.length) {
+    removeEdgeLane(net, c, i);
+    return;
+  }
+  const edge = c.lanes.every((o) => o === l || o.to <= l.from || o.from >= l.to || (l.offset > 0 ? o.offset < l.offset : o.offset > l.offset));
+  if (c.lanes.length > 1 && !edge) throw new EditError('Снести можно только крайнюю полосу');
+  net.setLanes(c, [...c.lanes.filter((_, k) => k !== i), ...pieces]);
+  // Полоса больше не доходит до стыка — соседняя, что её продолжала, тоже сходит на нет.
+  taperDeadLanes(net, [c.a, c.b]);
+}
+
+/**
+ * Полосы, которые упираются в стык и не продолжаются за ним (дорогу перестроили, у соседа другой профиль), —
+ * кончаются отгоном перед стыком, как на настоящей дороге при смене числа полос. Полосу, которой на отгон
+ * не хватает места, не трогаем (тогда проверка правки скажет, что полосы не сходятся).
+ */
+export function taperDeadLanes(net: LaneNet, nodeIds: number[]): void {
+  // Сужение полосы у одного полотна может оборвать продолжавшую её полосу соседа — повторяем, пока меняется.
+  for (let pass = 0; pass < 3; pass++) {
+    let changed = false;
+    for (const id of nodeIds) {
+      const n = net.nodes.get(id);
+      if (!n || n.kind !== 'seam' || net.isDeadEnd(n)) continue;
+      for (const e of net.ends(n)) {
+        const c = e.corridor;
+        const T = taperLen(c.cls);
+        const lanes = c.lanes.map((l, i) => {
+          if (!net.reaches(c, l, e.end) || net.across(c, i, e.end)) return l;
+          return e.end === 'a' ? { ...l, from: Math.max(l.from, T) } : { ...l, to: Math.min(l.to, c.length - T) };
+        });
+        if (lanes.every((l, i) => l === c.lanes[i]) || lanes.some((l) => l.to - l.from < 5)) continue;
+        net.setLanes(c, lanes);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+  }
 }
 
 /** Сплошная или пунктир между полосой и её соседом справа (по оси полотна — с бо́льшим смещением). */

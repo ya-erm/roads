@@ -19,7 +19,7 @@ import {
 } from '../game/transport';
 import { Controller, DRAW_MODES, Tool, TOOLS } from '../input/controller';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
-import { StationServes, TOWN_NEED, TownStyle } from '../world/entities';
+import { StationServes, stationTitle, TOWN_NEED, TownStyle } from '../world/entities';
 import { footprintRadius } from '../world/spatial';
 import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP } from '../config';
 import { isOneWay, KMH_PER_UNIT, LEVELS, RAIL_SPEC, ROAD_PRESETS, RoadSpec, SPEED_LIMITS, specCost, specKmh } from '../world/roadTypes';
@@ -37,7 +37,9 @@ import {
 import { cargoIcon, townIcon } from './cargoIcons';
 import {
   bulldozeAreaSvg,
+  bulldozeLaneSvg,
   bulldozePointSvg,
+  chevronSvg,
   copySvg,
   crossingSvg,
   folderSvg,
@@ -81,6 +83,10 @@ export interface HudSession {
   saveAs(name: string, id?: string): Promise<boolean>;
   load(id: string): Promise<boolean>;
   remove(id: string): Promise<void>;
+  /** Скачать текущую партию файлом (например, чтобы отправить для отладки). */
+  exportFile(): void;
+  /** Открыть партию из файла. */
+  importFile(file: File): Promise<boolean>;
 }
 
 /** Силуэт карты с пропорциями сторон. */
@@ -192,6 +198,8 @@ export class Hud {
   /** Скорость игры до открытия меню — к ней вернёмся по «Продолжить». */
   private speedBeforeMenu = 1;
   private lastConfirm = '';
+  /** Свой шаблон, который игрок собрался удалить: ждёт подтверждения в окне. */
+  private deletingTemplate: string | null = null;
   /** Список линий свёрнут до заголовка (запоминается в браузере). */
   private linesCollapsed = localStorage.getItem('roads.linesCollapsed') === '1';
   private readonly minimap: Minimap;
@@ -261,6 +269,10 @@ export class Hud {
             <button class="secondary" data-action="new-game">Новая игра…</button>
             <button class="primary" data-action="resume">Продолжить</button>
           </div>
+          <div class="file-row">
+            <button class="small" data-action="export-save" title="Скачать партию файлом — например, чтобы отправить его">⬇ Сохранить в файл</button>
+            <label class="small file-pick" title="Открыть партию из файла">⬆ Загрузить из файла<input type="file" accept=".json,application/json" data-import-save /></label>
+          </div>
           <div class="saves" data-saves></div>
         </div>
       </div>
@@ -310,6 +322,14 @@ export class Hud {
     this.minimap = new Minimap(this.q('[data-minimap]'), game, controller.camera);
     root.addEventListener('change', (e) => {
       const input = e.target as HTMLInputElement;
+      // Партия из файла: открываем и закрываем меню.
+      if (input.dataset.importSave !== undefined && input.files?.[0]) {
+        void this.session.importFile(input.files[0]).then((ok) => {
+          input.value = '';
+          if (ok) this.hideScreens();
+        });
+        return;
+      }
       if (input.dataset.ngSeed === undefined) return;
       const v = Math.abs(Math.floor(Number(input.value.replace(/\D/g, '')))) || 1;
       this.draft = { ...this.draft, seed: v };
@@ -336,7 +356,9 @@ export class Hud {
       });
     }
     this.q('[data-confirm]').addEventListener('click', (e) => {
-      if (e.target === e.currentTarget) this.controller.cancelArea();
+      if (e.target !== e.currentTarget) return;
+      if (this.deletingTemplate) this.closeModal();
+      else this.controller.cancelArea();
     });
     root.addEventListener('click', (e) => this.onClick(e));
     // Карточка транспорта меняется каждый кадр (скорость): держим её, пока кнопка мыши зажата.
@@ -485,6 +507,9 @@ export class Hud {
         void this.session.saveAs(entry?.name ?? this.saveName(), entry?.id).then(() => this.renderSaves());
         break;
       }
+      case 'export-save':
+        this.session.exportFile();
+        break;
       case 'save-new':
         void this.session.saveAs(this.saveName()).then(() => this.renderSaves());
         break;
@@ -606,7 +631,7 @@ export class Hud {
         localStorage.setItem('roads.linesCollapsed', this.linesCollapsed ? '1' : '0');
         break;
       case 'bulldoze-mode':
-        c.setBulldozeMode(d.id === 'area' ? 'area' : 'point');
+        c.setBulldozeMode(d.id === 'area' || d.id === 'lane' ? d.id : 'point');
         break;
       case 'area-confirm':
         c.confirmArea();
@@ -634,11 +659,17 @@ export class Hud {
       case 'user-template':
         c.setUserTemplate(d.id ?? null);
         break;
-      case 'user-template-del': {
-        const t = listTemplates().find((x) => x.id === d.id);
-        if (t && confirm(`Удалить шаблон «${t.name}»?`)) c.removeUserTemplate(t.id);
+      case 'user-template-del':
+        // Спрашиваем своим окном: схема шаблона, имя, «Отмена» и «Удалить».
+        this.deletingTemplate = d.id ?? null;
         break;
-      }
+      case 'tpl-del-yes':
+        if (this.deletingTemplate) c.removeUserTemplate(this.deletingTemplate);
+        this.deletingTemplate = null;
+        break;
+      case 'tpl-del-no':
+        this.deletingTemplate = null;
+        break;
       case 'paste-rotate':
         c.rotatePaste(Number(d.v));
         break;
@@ -696,7 +727,7 @@ export class Hud {
         c.toggleStationServe(d.what === 'pax' ? 'pax' : 'cargo');
         break;
       case 'station-mode':
-        c.setStationMode(d.id === 'stop' ? 'stop' : 'road');
+        c.setStationMode(d.id === 'stop' || d.id === 'pax' || d.id === 'rail' ? d.id : 'cargo');
         break;
       case 'st-serves': {
         const st = g.stations.get(Number(d.id));
@@ -930,17 +961,40 @@ export class Hud {
     const sw = this.kindSwitch('Как сносим', 'bulldoze-mode', c.bulldozeMode, [
       { id: 'point', name: 'По одному', svg: bulldozePointSvg(), hint: 'Клик по дороге, дому или станции; можно вести мышью' },
       { id: 'area', name: 'Рамкой', svg: bulldozeAreaSvg(), hint: 'Растяните рамку — снесётся всё внутри' },
+      { id: 'lane', name: 'Полосу', svg: bulldozeLaneSvg(), hint: 'Клик по крайней полосе — она уберётся, съезд от неё — тоже' },
     ]);
     const tip =
       c.bulldozeMode === 'area'
         ? 'Зажмите и растяните рамку: красным подсветится всё, что снесётся. Если объектов много или есть станция — спросим. Ратуша и станции с маршрутами не сносятся. Ctrl+Z — вернуть.'
-        : 'Клик — снести дорогу, дом или станцию. Зажмите и ведите — сносится всё под курсором. Ctrl+Z — вернуть.';
+        : c.bulldozeMode === 'lane'
+          ? 'Клик по крайней полосе дороги — она уберётся (вместе с продолжениями через стыки); съезд или въезд, куда она уходит, снесётся целиком. Shift и протяжка вдоль — только кусок полосы. Ctrl+Z — вернуть.'
+          : 'Клик — снести дорогу, дом или станцию. Зажмите и ведите — сносится всё под курсором. Shift и протяжка вдоль дороги — только кусок между точками. Ctrl+Z — вернуть.';
     return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как сносить</div><p class="muted">${tip}</p></div></div>`;
   }
 
-  /** Окно «точно снести?» для большой рамки. */
+  /** Окно «точно снести?» для большой рамки или «удалить шаблон?». */
   private renderConfirm(): void {
     const el = this.q('[data-confirm]');
+    const tpl = this.deletingTemplate ? listTemplates().find((t) => t.id === this.deletingTemplate) : undefined;
+    if (this.deletingTemplate && !tpl) this.deletingTemplate = null;
+    if (tpl) {
+      el.classList.remove('hidden');
+      const html = `<div class="modal menu confirm">
+          <button class="icon modal-close" data-action="tpl-del-no" title="Отмена (Esc)">✕</button>
+          <h2>Удалить шаблон?</h2>
+          <div class="confirm-tpl">${fragmentSvg(tpl.fragment, 120, 90)}<b>${esc(tpl.name)}</b></div>
+          <p class="muted">Построенные по нему развязки останутся на карте — пропадёт только сам шаблон.</p>
+          <div class="menu-buttons">
+            <button class="secondary" data-action="tpl-del-no">Отмена</button>
+            <button class="primary danger-fill" data-action="tpl-del-yes">Удалить</button>
+          </div>
+        </div>`;
+      if (html !== this.lastConfirm) {
+        el.innerHTML = html;
+        this.lastConfirm = html;
+      }
+      return;
+    }
     const p = this.controller.pendingArea;
     el.classList.toggle('hidden', !p);
     if (!p) {
@@ -1008,7 +1062,7 @@ export class Hud {
         ? `<div class="opt-group"><div class="opt-title">Свои</div><div class="cards">${mine}</div></div>`
         : `<div class="opt-group narrow"><div class="opt-title">Свои</div><p class="muted">Скопируйте удачную развязку (режим «Копия») и сохраните её шаблоном — она появится здесь.</p></div>`;
       const tip = own
-        ? 'Клик — поставить, протяжка или R — повернуть. На дороге того же класса ложится вдоль неё (Alt — нет), дороги под рамкой заменяются.'
+        ? 'Клик — поставить. Повернуть: R — на 15°, Shift+колесо или протяжка — на любой угол. На дороге того же класса ложится вдоль неё (Alt — нет), дороги под рамкой заменяются.'
         : 'Наведите на прямой участок магистрали — или в чистое поле: тогда магистраль построится вместе с развязкой (R — повернуть). Для магистрали берётся выбранный тип дороги, если это магистраль. Концы дорог подключите к своей сети. Не понравилось — Ctrl+Z.';
       return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Шаблон</div><div class="cards">${cards}</div></div>${ownGroup}
         <div class="opt-group narrow"><div class="opt-title">Как ставить <kbd>R</kbd></div><p class="muted">${tip}</p></div></div>`;
@@ -1033,7 +1087,7 @@ export class Hud {
       </div></div>
       <div class="opt-group"><div class="opt-title">В свои шаблоны</div><div class="save-new"><input class="line-name" data-template-name maxlength="30" placeholder="Моя развязка" />
         <button class="small" data-action="template-save">Сохранить</button></div></div>
-      <div class="opt-group narrow"><div class="opt-title">Как вставлять</div><p class="muted">Клик — вставить (хоть много раз), протяжка — повернуть на любой угол. На дороге того же класса ложится вдоль неё (Alt — нет), дороги под рамкой заменяются.</p></div></div>`;
+      <div class="opt-group narrow"><div class="opt-title">Как вставлять</div><p class="muted">Клик — вставить (хоть много раз). Повернуть на любой угол — Shift+колесо или протяжка от точки вставки. На дороге того же класса ложится вдоль неё (Alt — нет), дороги под рамкой заменяются.</p></div></div>`;
   }
 
   /** Скопированное — в свои шаблоны под именем из поля. */
@@ -1073,6 +1127,22 @@ export class Hud {
       <div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">Кликните по перекрёстку — он станет кольцом с выбранным числом полос. Если примыкают широкие дороги, кольцо будет больше.</p></div></div>`;
   }
 
+  /** Ж/д станция — одинаково в инструментах «Ж/д» и «Станция»: платформы, с чем работает, как ставить. */
+  private railStationOptionsHtml(sw: string): string {
+    const c = this.controller;
+    const tip = `Ставьте на прямой участок пути или в чистом поле — тогда путь построится вместе со станцией (R — повернуть). Рядом будут пути с платформами, чтобы поезда разъезжались. Охват ${RAIL_STATION.catchment} м.`;
+    const tracks = [2, 3, 4]
+      .map(
+        (n) => `<button class="icon-btn ${c.stationTracks === n ? 'active' : ''}" data-action="st-tracks" data-v="${n}" title="${n} пути с платформами">
+          ${platformsSvg(n)}<span>${n} пути</span></button>`,
+      )
+      .join('');
+    return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Платформы</div><div class="icons">${tracks}</div></div>
+      <div class="opt-group"><div class="opt-title">Работает с</div>${this.servesHtml(c.stationServes, 'new-serves')}</div>
+      <div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
+      <div class="price">от ${money(RAIL_STATION.cost * (c.stationTracks - 1))}</div></div></div>`;
+  }
+
   /** Отдельный инструмент «Ж/д»: путь или вокзал. */
   private railOptionsHtml(): string {
     const c = this.controller;
@@ -1092,19 +1162,7 @@ export class Hud {
         </div>
         <div class="price">${money(COST.signal)} за сигнал</div></div></div>`;
     }
-    if (c.railMode === 'station') {
-      const tip = `Ставьте на прямой участок пути или в чистом поле — тогда путь построится вместе со станцией (R — повернуть). Рядом будут пути с платформами, чтобы поезда разъезжались. Охват ${RAIL_STATION.catchment} м.`;
-      const tracks = [2, 3, 4]
-        .map(
-          (n) => `<button class="icon-btn ${c.stationTracks === n ? 'active' : ''}" data-action="st-tracks" data-v="${n}" title="${n} пути с платформами">
-            ${platformsSvg(n)}<span>${n} пути</span></button>`,
-        )
-        .join('');
-      return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Платформы</div><div class="icons">${tracks}</div></div>
-        <div class="opt-group"><div class="opt-title">Работает с</div>${this.servesHtml(c.stationServes, 'new-serves')}</div>
-        <div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
-        <div class="price">от ${money(RAIL_STATION.cost * (c.stationTracks - 1))}</div></div></div>`;
-    }
+    if (c.railMode === 'station') return this.railStationOptionsHtml(sw);
     const rules = `<div class="opt-group narrow"><div class="opt-title">Ж/д путь · ${speedSign(specKmh(RAIL_SPEC), 22)}</div>
       <div class="rules">
         <div>${railSvg(40, 20)}<span>Один путь — поезда ходят по очереди, автоблокировка не пустит встречный</span></div>
@@ -1144,18 +1202,27 @@ export class Hud {
 
   private stationOptionsHtml(): string {
     const c = this.controller;
-    const sw = this.kindSwitch('Что ставим', 'station-mode', c.stationMode, [
-      { id: 'road', name: 'Автостанция', svg: stationSvg('road', 34), hint: 'Грузовики и автобусы, с заездом и постами погрузки' },
-      { id: 'stop', name: 'Остановка', svg: stationSvg('stop', 34), hint: 'Автобусная остановка прямо на улице — для маршрутов по городу' },
-    ]);
+    const sw = this.kindSwitch(
+      'Что ставим',
+      'station-mode',
+      c.stationMode,
+      [
+        { id: 'cargo', name: 'Автостанция', svg: stationSvg('cargo', 34), hint: 'Для грузов: грузовики, заезд и посты погрузки' },
+        { id: 'pax', name: 'Автовокзал', svg: stationSvg('pax', 34), hint: 'Для пассажиров: междугородние и городские автобусы' },
+        { id: 'stop', name: 'Остановка', svg: stationSvg('stop', 34), hint: 'Автобусная остановка прямо на улице — для маршрутов по городу' },
+        { id: 'rail', name: 'Ж/д станция', svg: stationSvg('rail', 34), hint: 'Вокзал с платформами: на пути или в чистом поле (как в инструменте «Ж/д»)' },
+      ],
+      true,
+    );
     if (c.stationMode === 'stop') {
-      const tip = `Остановка встаёт у края улицы со стороны курсора: автобусы останавливаются прямо в полосе. Только пассажиры, охват ${STOP.catchment} м, ${STOP.bays} места для автобусов. Не ближе ${STOP.gap} м к перекрёстку. В маршруте её можно смешивать с автостанциями.`;
+      const tip = `Остановка встаёт у края улицы со стороны курсора: автобусы останавливаются прямо в полосе. Только пассажиры, охват ${STOP.catchment} м, ${STOP.bays} места для автобусов. Не ближе ${STOP.gap} м к перекрёстку. В маршруте её можно смешивать с автовокзалами.`;
       return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
         <div class="price">${money(STOP.cost)}</div></div></div>`;
     }
-    const tip = `Автостанция для грузовиков и автобусов: у дороги, прямо у перекрёстка или вплотную к предприятию — с той стороны, где курсор. Дома на месте станции снесём (красные). Охват ${STATION.catchment} м. Посты погрузки добавляются в карточке станции. Ж/д станции — в инструменте «Ж/д».`;
-    return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Работает с</div>${this.servesHtml(c.stationServes, 'new-serves')}</div>
-      <div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
+    if (c.stationMode === 'rail') return this.railStationOptionsHtml(sw);
+    const pax = c.stationMode === 'pax';
+    const tip = `${pax ? 'Автовокзал — для пассажиров: автобусы между городами и по городу' : 'Автостанция — для грузов: грузовики везут сюда и отсюда груз предприятий'}. Ставится у дороги, прямо у перекрёстка или вплотную к ${pax ? 'городу' : 'предприятию'} — с той стороны, где курсор. Дома на месте станции снесём (красные). Охват ${STATION.catchment} м. Посты ${pax ? 'посадки' : 'погрузки'} добавляются в карточке станции.`;
+    return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
       <div class="price">${money(COST.station)}</div></div></div>`;
   }
 
@@ -1277,7 +1344,7 @@ export class Hud {
     const collapsed = this.linesCollapsed;
     const head = `<header class="lines-head">
         <button class="lines-toggle" data-action="toggle-lines" title="${collapsed ? 'Развернуть' : 'Свернуть'} список">
-          <span class="caret">${collapsed ? '▸' : '▾'}</span><h3>${title}</h3>${list.length ? `<span class="muted">${list.length}</span>` : ''}</button>
+          <span class="caret ${collapsed ? 'closed' : ''}">${chevronSvg()}</span><h3>${title}</h3>${list.length ? `<span class="muted">${list.length}</span>` : ''}</button>
         <button class="small" data-action="new-line" title="Новый маршрут">+ Маршрут</button>${folderBtn}</header>`;
     return `<section class="lines-list" ${station ? '' : 'data-folder-drop="root"'}>${head}${
       collapsed ? '' : rows || `<p class="muted">${empty}</p>`
@@ -1303,7 +1370,7 @@ export class Hud {
       : `<button class="icon pencil" data-action="rename-folder" data-id="${f.id}" title="Переименовать">✎</button><span class="folder-fill"></span>`;
     return `<div class="folder ${f.collapsed ? 'collapsed' : ''}" data-folder-drop="${f.id}">
       <div class="folder-row" ${renaming ? '' : `data-action="toggle-folder" data-id="${f.id}"`} title="${f.collapsed ? 'Развернуть' : 'Свернуть'}">
-        <span class="caret">${f.collapsed ? '▸' : '▾'}</span>${folderSvg(16, !f.collapsed)}${name}${pencil}${dots}
+        <span class="caret ${f.collapsed ? 'closed' : ''}">${chevronSvg(10)}</span>${folderSvg(16, !f.collapsed)}${name}${pencil}${dots}
         <small>${lines.length} мрш.</small><small class="${profit >= 0 ? 'pos' : 'neg'}">${money(profit)}</small>${lines.some((l) => l.problem) ? '<b class="warn">!</b>' : ''}
         <button class="icon" data-action="delete-folder" data-id="${f.id}" title="Удалить папку — маршруты останутся в списке">✕</button>
       </div>${body}</div>`;
@@ -1405,7 +1472,7 @@ export class Hud {
         const state =
           v.state === 'driving' ? `едет на ${esc(st?.name ?? '?')}` : v.state === 'loading' ? `погрузка: ${esc(st?.name ?? '?')}` : `ждёт: ${esc(st?.name ?? '?')}`;
         const load = vehicleLoad(v);
-        const what = v.cargo ? cargoIcon(v.cargo, 14) : load ? cargoIcon('passengers', 14) : 'пусто';
+        const what = v.cargo ? cargoIcon(v.cargo, 14) : load ? cargoIcon('passengers', 14) : ' пусто';
         // Замена на модель новее, когда она вышла.
         const next = g.replacementFor(v);
         const replace = next
@@ -1420,18 +1487,25 @@ export class Hud {
                 v,
               )}</b><button data-action="cars" data-id="${v.id}" data-d="1">+</button></span>`
             : '';
-        return `<div class="veh"><div><b>${esc(v.name)}</b><small>${state} · ${load}/${vehicleCapacity(v)} ${what}</small></div>
+        return `<div class="veh"><div><b>${esc(v.name)}</b><small>${state} · <span class="nowrap">${load}/${vehicleCapacity(v)}${what}</span></small></div>
           ${cars}${replace}
           <button class="icon" title="Показать" data-action="show-fleet" data-id="${v.id}">◎</button>
           <button class="icon" title="Продать за ${money(g.saleValue(v))}" data-action="sell" data-id="${v.id}">✕</button></div>`;
       })
       .join('');
     // Палитра открывается по клику на кружок цвета линии.
+    // Второй ряд — цвета грузов (со значком груза): маршрут легко покрасить под то, что он возит.
+    const cargoSwatches = (Object.keys(CARGO) as CargoType[])
+      .map(
+        (t) => `<button class="swatch cargo ${CARGO[t].color === line.color ? 'active' : ''}" title="${CARGO[t].name}" data-action="line-color" data-id="${line.id}" data-color="${CARGO[t].color}">${cargoIcon(t, 20, false)}</button>`,
+      )
+      .join('');
     const palette =
       this.colorsOpen === line.id
         ? `<div class="swatches" title="Цвет маршрута">${LINE_COLORS.map(
             (c) => `<button class="swatch ${c === line.color ? 'active' : ''}" style="background:${c}" data-action="line-color" data-id="${line.id}" data-color="${c}"></button>`,
-          ).join('')}<label class="swatch custom" title="Свой цвет"><input type="color" data-line-color="${line.id}" value="${line.color}" /></label></div>`
+          ).join('')}<label class="swatch custom" title="Свой цвет"><input type="color" data-line-color="${line.id}" value="${line.color}" /></label></div>
+          <div class="swatches cargo-swatches" title="Цвета грузов">${cargoSwatches}</div>`
         : '';
     return `<section class="detail"><header><button class="line-dot" style="background:${line.color}" data-action="toggle-colors" data-id="${line.id}" title="Сменить цвет"></button>
         <input class="line-name" data-line-name="${line.id}" value="${esc(line.name)}" title="Нажмите, чтобы переименовать" maxlength="60" />
@@ -1478,7 +1552,13 @@ export class Hud {
       const suppliesAll = [...new Set(g.industries.filter((i) => st.industryIds.includes(i.id)).map((i) => i.info.produces))];
       const towns = st.townIds.map((id) => g.towns.find((t) => t.id === id)?.name).filter(Boolean).join(', ');
       const kind =
-        st.industryId !== null ? 'Станция предприятия · ' : st.kind === 'rail' ? 'Ж/д станция · ' : st.kind === 'stop' ? 'Автобусная остановка · ' : '';
+        st.industryId !== null
+          ? 'Станция предприятия · '
+          : st.kind === 'rail'
+            ? 'Ж/д станция · '
+            : st.kind === 'stop'
+              ? 'Автобусная остановка · '
+              : `${stationTitle(st.serves)} · `;
       const busy =
         st.kind === 'rail'
           ? `платформ занято ${st.platforms.filter((p) => g.rail.isReserved(p)).length} из ${st.platforms.length}`
@@ -1745,6 +1825,11 @@ export class Hud {
 
   /** Закрывает открытое окно: меню — продолжить игру, «Новая игра» — назад в меню. */
   private closeModal(): boolean {
+    if (this.deletingTemplate) {
+      this.deletingTemplate = null;
+      this.renderConfirm();
+      return true;
+    }
     if (!this.q('[data-newgame]').classList.contains('hidden')) {
       this.confirmNew = false;
       this.showMenu();

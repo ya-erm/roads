@@ -1,10 +1,10 @@
 import { Cubic, CurveLUT } from '../core/bezier';
-import { add, dist, dot, scale, sub, Vec } from '../core/vec';
+import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import type { Game, LaneEnd } from '../game/game';
 import { LaneRenderer } from '../lanes/draw';
 import { insideRuns } from '../lanes/edit';
-import { edgesAt, pointOff, stations as axisStations } from '../lanes/geometry';
+import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
 import type { LaneNet } from '../lanes/model';
 import type { Vehicle } from '../sim/vehicle';
 import { cargoImage } from '../ui/cargoIcons';
@@ -14,6 +14,8 @@ import type { Segment } from '../world/network';
 import { halfWidth, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
 import { Camera } from './camera';
+import { drawIndustryArt } from './industryArt';
+import { drawTurnArrows } from './turnArrows';
 
 export type Selection =
   | { type: 'station'; id: number }
@@ -71,6 +73,8 @@ export interface ToolOverlay {
   roads?: { net: LaneNet; ok: boolean; changed: number[] } | null;
   /** Полотно под курсором: снос — красным, правка — синим, перестройка — зелёным. */
   corridor?: { id: number; color: 'red' | 'blue' | 'green' } | null;
+  /** Полоса под курсором, которую снесут, — красным. */
+  lane?: { corridor: number; lane: number } | null;
   /** Кружки: начало дороги, куда примкнёт, узел под курсором. */
   points?: { pos: Vec; color: string; r?: number }[];
   /** Настройка полос выбранного перекрёстка: метки концов полос, выбранный въезд, метка под курсором. */
@@ -99,6 +103,13 @@ const C = {
 
 /** Радиус кружка пера на экране, пикселей (и за сколько его можно схватить). */
 export const HANDLE_PX = 6;
+/** Стоп-линия шириной STOP_LINE_W — у самого края перекрёстка: линии полос кончаются ровно на ней. */
+const STOP_LINE_W = 1.8;
+const STOP_LINE_BACK = STOP_LINE_W / 2;
+/** Слева стоп-линия не заходит на осевую (жёлтая — 1.4 шириной по оси). */
+const STOP_LINE_INSET = 0.8;
+/** Названия остановок — начиная с этого приближения; дальше — только значок. */
+const STOP_NAMES_ZOOM = 0.75;
 
 /** Метка транспорта выбранной линии: кружок и значок. */
 interface LineMark {
@@ -145,6 +156,8 @@ export class Renderer {
   private cache = new Map<number, SegCache>();
   private cacheVersion = -1;
   private treeVersion = '';
+  /** По чьей воде отрисовка дорог считает мосты над рекой. */
+  private waterOf: unknown = null;
   /** Дороги из полос. */
   private readonly lanes = new LaneRenderer();
 
@@ -162,6 +175,7 @@ export class Renderer {
     this.cache.clear();
     this.cacheVersion = -1;
     this.treeVersion = '';
+    this.lanes.reset();
   }
 
   resize(): void {
@@ -207,8 +221,16 @@ export class Renderer {
 
     this.drawTerrain(game, view);
     this.drawTunnels(segs);
-    // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты.
+    // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты; над рекой на земле — мостом.
     const roadNet = o.roads?.net ?? game.roads.net;
+    // Вода — вместе со светлой полосой берега (её рисуют на 7 шире).
+    // Карта сменилась (новая партия, загрузка) — мосты над рекой считаем по её воде заново.
+    if (this.waterOf !== game.terrain) {
+      const terrain = game.terrain;
+      this.waterOf = terrain;
+      this.lanes.reset();
+      this.lanes.water = (p) => terrain.isWater(p, 7);
+    }
     ctx.globalAlpha = 0.35;
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, -1);
     this.drawVehicles(vehicles.filter((v) => band(v) === -1));
@@ -220,6 +242,7 @@ export class Renderer {
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
     if (o.roads) this.drawRoadPreview(o.roads);
     this.drawStopLines(game, view);
+    drawTurnArrows(ctx, game, view, this.camera.zoom);
     this.drawRailSteel(groundRails);
     this.drawCrossings(game, view);
     this.drawSignals(game, view);
@@ -635,29 +658,36 @@ export class Renderer {
     }
   }
 
-  /** Стоп-линии на въездах перекрёстков: пунктир — «уступи дорогу», сплошная — у светофора. */
+  /** Стоп-линии — сплошные, поперёк всех полос подъезда к перекрёстку. */
   private drawStopLines(game: Game, view: ReturnType<Renderer['view']>): void {
     if (this.camera.zoom < 0.6) return;
     const ctx = this.ctx;
     const g = game.roads.graph;
+    const net = game.roads.net;
     for (const n of g.nodes.values()) {
-      if (!(n.priorityLanes.size || n.lights)) continue;
+      // Стоп-линии — на всех подъездах перекрёстка (и на главной дороге); на кольце — только на въездах.
+      const node = net.nodes.get(n.id);
+      if (!node || node.kind !== 'junction' || node.corridors.length < 3) continue;
       if (n.pos.x < view.x0 || n.pos.x > view.x1 || n.pos.y < view.y0 || n.pos.y > view.y1) continue;
+      const ring = (node.roundabout ?? null) !== null;
       for (const link of g.inLinks.get(n.id) ?? []) {
-        const yieldHere = !n.lights && !n.priorityLanes.has(link.lanes[0].id);
-        if (!yieldHere && !n.lights) continue;
-        ctx.strokeStyle = C.dash;
-        ctx.lineWidth = yieldHere ? 1.2 : 1.6;
-        ctx.setLineDash(yieldHere ? [2, 2] : []);
+        if (ring && net.corridors.get(link.corridor)?.ring) continue;
+        // Одной чертой поперёк всех полос подъезда (без щелей между полосами), чуть отступив от перекрёстка.
+        const first = link.lanes[0];
+        const last = link.lanes[link.lanes.length - 1];
+        if (!first || !last) continue;
+        const l = g.lanePose(first, Math.max(0, first.length - STOP_LINE_BACK));
+        const r = g.lanePose(last, Math.max(0, last.length - STOP_LINE_BACK));
+        const a = add(l.pos, scale(rightNormal(l.dir), -LANE_W / 2 + STOP_LINE_INSET));
+        const b = add(r.pos, scale(rightNormal(r.dir), LANE_W / 2));
+        // Белая без прозрачности: стоп-линия заметнее разметки полос.
+        ctx.strokeStyle = '#f2f1ea';
+        ctx.lineWidth = STOP_LINE_W;
+        ctx.lineCap = 'butt';
+        ctx.setLineDash([]);
         ctx.beginPath();
-        for (const lane of link.lanes) {
-          const end = g.lanePose(lane, lane.length);
-          const N = { x: -end.dir.y, y: end.dir.x };
-          const a = add(end.pos, scale(N, LANE_W / 2 - 0.5));
-          const b = add(end.pos, scale(N, -LANE_W / 2 + 0.5));
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
-        }
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
         ctx.stroke();
       }
     }
@@ -967,101 +997,11 @@ export class Renderer {
     ctx.fill();
   }
 
+  /** Предприятие: участок с лёгкой тенью, постройки — в industryArt (мелочи только вблизи). */
   private drawIndustry(ind: Industry): void {
-    const ctx = this.ctx;
     const fp = ind.fp;
-    this.drawFootprint({ ...fp, center: { x: fp.center.x + 5, y: fp.center.y + 7 } }, 'rgba(30,40,25,0.2)');
-    this.drawFootprint(fp, ind.info.color, 'rgba(60,50,40,0.45)', 1.2);
-    ctx.save();
-    ctx.translate(fp.center.x, fp.center.y);
-    ctx.rotate(fp.angle);
-    const W = fp.w;
-    const H = fp.h;
-    const rect = (x: number, y: number, w: number, h: number, color: string) => {
-      ctx.fillStyle = color;
-      ctx.fillRect(x * W, y * H, w * W, h * H);
-    };
-    const circle = (x: number, y: number, r: number, color: string) => {
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(x * W, y * H, r, 0, Math.PI * 2);
-      ctx.fill();
-    };
-    const roof = ind.info.roof;
-    switch (ind.info.kind) {
-      case 'farm':
-        for (let i = 0; i < 5; i++) rect(-0.45, -0.42 + i * 0.12, 0.5, 0.06, '#c9a94a');
-        rect(0.1, -0.3, 0.32, 0.42, roof);
-        circle(0.3, 0.3, 7, '#e8e2d6');
-        break;
-      case 'forest':
-        for (let i = 0; i < 9; i++) circle(-0.32 + (i % 3) * 0.14, -0.28 + Math.floor(i / 3) * 0.16, 6, '#6e9a52');
-        for (let i = 0; i < 4; i++) rect(0.08, -0.2 + i * 0.08, 0.34, 0.045, '#9b7550');
-        break;
-      case 'coalmine':
-      case 'ironmine': {
-        const heap = ind.info.kind === 'coalmine' ? '#3d4148' : '#a0603c';
-        circle(-0.25, 0.15, 14, heap);
-        circle(-0.05, 0.25, 10, heap);
-        rect(0.15, -0.35, 0.25, 0.5, roof);
-        // Копёр шахты.
-        ctx.strokeStyle = '#5c5f66';
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        ctx.moveTo(-0.35 * W, -0.35 * H);
-        ctx.lineTo(-0.2 * W, -0.05 * H);
-        ctx.lineTo(-0.05 * W, -0.35 * H);
-        ctx.stroke();
-        circle(-0.2, -0.35, 4, '#5c5f66');
-        break;
-      }
-      case 'oilwell':
-        circle(0.25, -0.2, 11, '#c9c4ba');
-        circle(0.25, 0.22, 11, '#c9c4ba');
-        circle(0.25, -0.2, 5, roof);
-        circle(0.25, 0.22, 5, roof);
-        for (const y of [-0.25, 0.15]) {
-          rect(-0.4, y, 0.32, 0.06, '#3d4148');
-          circle(-0.38, y + 0.03, 4, '#3d4148');
-        }
-        break;
-      case 'quarry':
-        for (let i = 0; i < 4; i++) {
-          ctx.fillStyle = ['#b9b4ad', '#a7a29b', '#959089', '#837e78'][i];
-          ctx.beginPath();
-          ctx.roundRect((-0.42 + i * 0.07) * W, (-0.38 + i * 0.07) * H, (0.84 - i * 0.14) * W, (0.76 - i * 0.14) * H, 8);
-          ctx.fill();
-        }
-        break;
-      case 'foodplant':
-        rect(-0.42, -0.35, 0.5, 0.7, roof);
-        for (let i = 0; i < 3; i++) circle(0.2 + (i % 2) * 0.14, -0.2 + i * 0.2, 6, '#d6d1c4');
-        break;
-      case 'sawmill':
-        rect(-0.42, -0.35, 0.45, 0.7, roof);
-        for (let i = 0; i < 5; i++) rect(0.1, -0.35 + i * 0.13, 0.3, 0.07, '#c99a5b');
-        break;
-      case 'steelmill':
-        rect(-0.45, -0.35, 0.55, 0.7, roof);
-        for (let i = 0; i < 3; i++) circle(0.22 + i * 0.08, -0.22 + i * 0.18, 5.5, '#3d4148');
-        circle(0.3, 0.25, 9, '#b5543c');
-        break;
-      case 'refinery':
-        for (let i = 0; i < 4; i++) circle(-0.3 + (i % 2) * 0.22, -0.18 + Math.floor(i / 2) * 0.38, 10, '#e6e1d8');
-        rect(0.18, -0.38, 0.08, 0.76, roof);
-        circle(0.36, -0.2, 5, '#6a4f9e');
-        break;
-      case 'buildmat':
-        rect(-0.42, -0.35, 0.45, 0.7, roof);
-        for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) rect(0.1 + j * 0.16, -0.3 + i * 0.22, 0.13, 0.15, '#c96a4f');
-        break;
-      case 'factory':
-        for (let i = 0; i < 5; i++) rect(-0.45 + i * 0.12, -0.35, 0.1, 0.7, i % 2 ? roof : '#3fa8a8');
-        circle(0.32, 0.22, 7, '#5c5f66');
-        rect(0.2, -0.35, 0.22, 0.3, '#b9c2c9');
-        break;
-    }
-    ctx.restore();
+    this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.16)');
+    drawIndustryArt(this.ctx, ind, this.camera.zoom, performance.now() / 1000);
   }
 
   /** Рисует картинку значка размером size в мировых единицах. */
@@ -1125,38 +1065,50 @@ export class Renderer {
     ctx.restore();
   }
 
-  /** Ожидающие на станциях грузы — поверх линий маршрутов, на белых плашках. */
+  /**
+   * Ожидающие на станциях грузы — поверх линий маршрутов, на белых плашках. У остановки в первой плашке
+   * впереди — значок автобуса; никто не ждёт — плашка из одного значка (им остановка видна и издалека).
+   */
   private drawStationBadges(game: Game, view: ReturnType<Renderer['view']>): void {
     const z = this.camera.zoom;
-    if (z < 0.3) return;
+    if (z <= 0.22) return;
     const ctx = this.ctx;
     for (const st of game.stations.values()) {
       const fp = st.fp;
       if (fp.center.x < view.x0 || fp.center.x > view.x1 || fp.center.y < view.y0 || fp.center.y > view.y1) continue;
+      const stop = st.kind === 'stop';
+      if (!stop && z < 0.3) continue;
       const waiting: [CargoType, number][] = FREIGHT.map((c) => [c, Math.floor(st.cargo[c] ?? 0)] as [CargoType, number]).filter(([, n]) => n > 0);
       let pax = 0;
       for (const n of st.passengers.values()) pax += n;
       if (pax > 0) waiting.push(['passengers', pax]);
-      if (!waiting.length) continue;
+      if (!waiting.length && !stop) continue;
       ctx.font = `700 ${11 / z}px system-ui, sans-serif`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      const widths = waiting.map(([, n]) => 22 / z + ctx.measureText(String(n)).width + 6 / z);
-      const total = widths.reduce((a, b) => a + b, 0) + (waiting.length - 1) * (4 / z);
+      /** Место под значок автобуса в начале плашки. */
+      const lead = stop ? 18 / z : 0;
+      const widths = waiting.length ? waiting.map(([, n], i) => (i ? 0 : lead) + 22 / z + ctx.measureText(String(n)).width + 6 / z) : [18 / z];
+      const total = widths.reduce((a, b) => a + b, 0) + (widths.length - 1) * (4 / z);
       let x = fp.center.x - total / 2;
       const y = fp.center.y - fp.h / 2 - 14 / z;
-      waiting.forEach(([c, n], i) => {
+      widths.forEach((w, i) => {
         ctx.fillStyle = 'rgba(255,255,255,0.95)';
         ctx.strokeStyle = 'rgba(60,70,80,0.25)';
         ctx.lineWidth = 1 / z;
         ctx.beginPath();
-        ctx.roundRect(x, y - 9 / z, widths[i], 18 / z, 9 / z);
+        ctx.roundRect(x, y - 9 / z, w, 18 / z, 9 / z);
         ctx.fill();
         ctx.stroke();
-        this.icon(cargoImage(c), { x: x + 9 / z, y }, 15 / z);
-        ctx.fillStyle = '#1f2933';
-        ctx.fillText(String(n), x + 19 / z, y + 0.5 / z);
-        x += widths[i] + 4 / z;
+        if (stop && !i) this.busIcon({ x: x + 9 / z, y }, 17 / z);
+        const item = waiting[i];
+        if (item) {
+          const x0 = x + (i ? 0 : lead);
+          this.icon(cargoImage(item[0]), { x: x0 + 9 / z, y }, 15 / z);
+          ctx.fillStyle = '#1f2933';
+          ctx.fillText(String(item[1]), x0 + 19 / z, y + 0.5 / z);
+        }
+        x += w + 4 / z;
       });
     }
   }
@@ -1221,9 +1173,43 @@ export class Renderer {
     if (z > 0.22) {
       for (const st of game.stations.values()) {
         if (st.industryId !== null) continue;
+        // Остановок в городе много: издалека — только значок автобуса на плашке ожидающих, название — вблизи.
+        if (st.kind === 'stop' && z < STOP_NAMES_ZOOM) continue;
         text({ x: st.fp.center.x, y: st.fp.center.y + st.fp.h / 2 + 11 / z }, st.name, 11, '#ffffff', 'rgba(35,45,60,0.82)');
       }
     }
+  }
+
+  /** Значок остановки: синий силуэт автобуса (вид сбоку, нос вправо) для белой плашки; size — квадрат 24×24 значка. */
+  private busIcon(at: Vec, size: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(at.x, at.y);
+    ctx.scale(size / 24, size / 24);
+    ctx.translate(-12, -12);
+    ctx.fillStyle = '#2f80ed';
+    ctx.beginPath();
+    ctx.roundRect(3, 6.3, 18, 9.6, [2, 3.2, 1.2, 1.2]);
+    ctx.fill();
+    // Два окна и лобовое стекло; колёса — с белым зазором от кузова, как арки.
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.roundRect(4.6, 7.9, 4.2, 3.4, 0.5);
+    ctx.roundRect(10, 7.9, 4.2, 3.4, 0.5);
+    ctx.roundRect(15.4, 7.9, 4, 4.4, [0.5, 1.6, 0.5, 0.5]);
+    for (const x of [7.6, 16.4]) {
+      ctx.moveTo(x + 2.7, 15.9);
+      ctx.arc(x, 15.9, 2.7, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.fillStyle = '#1f2933';
+    ctx.beginPath();
+    for (const x of [7.6, 16.4]) {
+      ctx.moveTo(x + 1.9, 15.9);
+      ctx.arc(x, 15.9, 1.9, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.restore();
   }
 
   /** Плашка-рецепт под предприятием: [сырьё] + [сырьё] → [продукт]. */
@@ -1271,6 +1257,7 @@ export class Renderer {
       const color = { red: 'rgba(232,72,63,0.5)', blue: 'rgba(47,128,237,0.35)', green: 'rgba(46,157,87,0.4)' }[o.corridor.color];
       this.tintCorridor(o.roads?.net ?? game.roads.net, o.corridor.id, color);
     }
+    if (o.lane) this.tintLane(game.roads.net, o.lane.corridor, o.lane.lane, 'rgba(232,72,63,0.55)');
     for (const pt of o.points ?? []) {
       const z = this.camera.zoom;
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
@@ -1558,6 +1545,26 @@ export class Renderer {
   }
 
   /** Полупрозрачная заливка асфальта полотна. */
+  /** Одна полоса полотна — заливкой по её ширине (с отгонами). */
+  private tintLane(net: LaneNet, id: number, i: number, color: string): void {
+    const c = net.corridors.get(id);
+    const lane = c?.lanes[i];
+    if (!c || !lane) return;
+    const left: Vec[] = [];
+    const right: Vec[] = [];
+    for (const s of axisStations(c, 0, c.length, 4)) {
+      const b = laneBand(c, lane, s);
+      if (!b) continue;
+      left.push(pointOff(c, s, b[0]));
+      right.push(pointOff(c, s, b[1]));
+    }
+    if (left.length < 2) return;
+    this.ctx.fillStyle = color;
+    this.polyline([...left, ...right.reverse()]);
+    this.ctx.closePath();
+    this.ctx.fill();
+  }
+
   private tintCorridor(net: LaneNet, id: number, color: string): void {
     const c = net.corridors.get(id);
     if (!c) return;

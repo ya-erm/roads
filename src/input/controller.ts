@@ -1,17 +1,18 @@
 import { SNAP_PIXELS } from '../config';
 import { offsetCubic, straightCubic } from '../core/bezier';
-import { add, angleOf, dist, len, scale, sub, Vec } from '../core/vec';
+import { add, angleOf, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { DrawMode, NetKind, RoadRequest, Snap } from '../game/build';
 import { DEFAULT_RING, type RingOptions, type RingSize } from '../game/roads';
 import type { AreaContents, Game, LaneEnd, StationKind } from '../game/game';
 import type { RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
 import { deleteTemplate, getTemplate, saveTemplate } from '../game/templates';
-import { anchorAt, corridorUnder, edgeAt } from '../lanes/edit';
+import { anchorAt, corridorUnder, edgeAt, laneUnder } from '../lanes/edit';
 import { type Fragment, fragmentCurves, frameOf, snapPaste } from '../lanes/fragment';
 import type { Camera } from '../render/camera';
 import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
-import type { StationServes, TownBuilding } from '../world/entities';
+import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
+import type { RoadNode } from '../world/network';
 import { MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
 import { RoadTools } from './roadtools';
 
@@ -37,6 +38,8 @@ export type RoadMode = 'build' | 'lane' | 'upgrade' | 'move';
 export type JunctionMode = 'ring' | 'template' | 'copy';
 /** Ж/д: класть путь, пристроить путь рядом с существующим, ставить вокзал или сигнал. */
 export type RailMode = 'track' | 'parallel' | 'station' | 'signal';
+/** Станции: автостанция для грузов, автовокзал для пассажиров, остановка на улице, ж/д станция. */
+export type StationMode = 'cargo' | 'pax' | 'stop' | 'rail';
 
 export const DRAW_MODES: { id: DrawMode; name: string }[] = [
   { id: 'straight', name: 'Прямая' },
@@ -83,7 +86,7 @@ export class Controller {
   tool: Tool = 'select';
   roadMode: RoadMode = 'build';
   junctionMode: JunctionMode = 'ring';
-  stationMode: 'road' | 'stop' = 'road';
+  stationMode: StationMode = 'cargo';
   railMode: RailMode = 'track';
   /** Сколько путей класть сразу: один или два рядом. */
   railTracks: 1 | 2 = 1;
@@ -99,6 +102,8 @@ export class Controller {
   readonly roadTools: RoadTools;
   /** Прямая пути прилипла к продолжению или перпендикуляру — подпись у курсора. */
   private angleHint: string | null = null;
+  /** Конец пути прилип рядом с другим путём: дуга приходит по этому направлению (параллельно ему). */
+  private parallelEnd: Vec | null = null;
   /** Камера следует за выбранной машиной или поездом (переключается F). */
   following = false;
   /** Линия, в маршрут которой добавляем станции кликами по карте. */
@@ -122,10 +127,12 @@ export class Controller {
   private pasteDrag: { at: Vec } | null = null;
   private copyCache: { key: string; frag: Fragment | null } | null = null;
   private pasteCache: { frag: Fragment; key: string; plan: RoadPlan } | null = null;
-  /** Снос: по одному объекту (можно вести мышью) или рамкой. */
-  bulldozeMode: 'point' | 'area' = 'point';
+  /** Снос: по одному объекту (можно вести мышью), рамкой или пристроенную полосу. */
+  bulldozeMode: 'point' | 'area' | 'lane' = 'point';
   /** Угол рамки сноса, пока тянем. */
   areaStart: Vec | null = null;
+  /** Снос куска (Shift): с какого полотна и полосы (null — всё полотно) и с какого места оси. */
+  private spanStart: { corridor: number; lane: number | null; s: number } | null = null;
   /** Рамка, которая ждёт подтверждения игрока (сносится много). */
   pendingArea: { a: Vec; b: Vec; contents: AreaContents } | null = null;
   presetId = 'street';
@@ -232,13 +239,21 @@ export class Controller {
     return this.tool === 'rail' ? 'rail' : 'road';
   }
 
-  /** Что ставим: автостанцию или вокзал. */
+  /** Что ставим: автостанцию (грузовую или автовокзал), остановку или ж/д станцию. */
   get stationKind(): StationKind {
-    return this.tool === 'rail' ? 'rail' : this.stationMode;
+    if (this.tool === 'rail' || this.stationMode === 'rail') return 'rail';
+    return this.stationMode === 'stop' ? 'stop' : 'road';
   }
 
-  /** Инструмент «Станция»: автостанция с заездом или остановка прямо на улице. */
-  setStationMode(mode: 'road' | 'stop'): void {
+  /** С чем будет работать новая станция: автостанция — грузы, автовокзал — пассажиры, ж/д — как выбрано. */
+  get newStationServes(): StationServes {
+    if (this.tool === 'station' && this.stationMode === 'cargo') return { pax: false, cargo: true };
+    if (this.tool === 'station' && this.stationMode === 'pax') return { pax: true, cargo: false };
+    return this.stationServes;
+  }
+
+  /** Инструмент «Станция»: автостанция для грузов, автовокзал, остановка на улице или ж/д станция. */
+  setStationMode(mode: StationMode): void {
     if (this.tool !== 'station') this.setTool('station');
     this.stationMode = mode;
     this.onChange();
@@ -371,7 +386,7 @@ export class Controller {
     this.onChange();
   }
 
-  setBulldozeMode(mode: 'point' | 'area'): void {
+  setBulldozeMode(mode: 'point' | 'area' | 'lane'): void {
     this.bulldozeMode = mode;
     this.areaStart = null;
     this.onChange();
@@ -672,6 +687,16 @@ export class Controller {
     }
     const s = g.builder.snap(p, this.level, this.snapRadius);
     this.angleHint = null;
+    this.parallelEnd = null;
+    // Рядом с другим путём на межпутье — конец прилипает к линии рядом с ним (с Alt — нет).
+    if (s.kind === 'free' && this.chain && !this.alt && this.netKind === 'rail' && this.railTracks === 1) {
+      const par = this.parallelSnap(p);
+      if (par) {
+        this.angleHint = 'рядом с путём';
+        if (this.drawMode === 'arc') this.parallelEnd = par.dir;
+        return { kind: 'free', pos: par.pos, level: this.level };
+      }
+    }
     // Прямая от существующей дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°); с Alt — нет.
     if (s.kind === 'free' && this.chain && this.drawMode === 'straight' && !this.alt) {
       const d = sub(p, this.chain.pos);
@@ -696,6 +721,59 @@ export class Controller {
       }
     }
     return s;
+  }
+
+  /**
+   * Двухпутка от пары тупиков у курсора (на межпутье друг от друга, смотрят в одну сторону): ось —
+   * посередине, новые пути продолжают оба. Нет такой пары — null.
+   */
+  private pairFromEnds(p: Vec): { at: Vec; snaps: [Snap, Snap]; tangent: Vec } | null {
+    const net = this.game().net;
+    const ends = net.nodesNear(p, this.snapRadius + TRACK_GAP).filter((n) => n.segments.length === 1 && n.buildingId === null);
+    let best: { a: RoadNode; b: RoadNode; mid: Vec; t: Vec } | null = null;
+    let bestD = this.snapRadius + TRACK_GAP / 2;
+    for (const a of ends) {
+      for (const b of ends) {
+        if (a.id >= b.id || Math.abs(dist(a.pos, b.pos) - TRACK_GAP) > 2.5 || a.level !== b.level) continue;
+        const ta = scale(net.dirFrom(a.id, a.segments[0]), -1);
+        const tb = scale(net.dirFrom(b.id, b.segments[0]), -1);
+        if (dot(ta, tb) < 0.97) continue;
+        const mid = scale(add(a.pos, b.pos), 0.5);
+        if (dist(mid, p) < bestD) {
+          bestD = dist(mid, p);
+          best = { a, b, mid, t: norm(add(ta, tb)) };
+        }
+      }
+    }
+    if (!best) return null;
+    // Путь слева от оси (по ходу) — первый: так их кладёт pairRequests.
+    const leftFirst = dot(sub(best.a.pos, best.mid), rightNormal(best.t)) < 0;
+    const [l, r] = leftFirst ? [best.a, best.b] : [best.b, best.a];
+    const snap = (n: RoadNode): Snap => ({ kind: 'node', nodeId: n.id, pos: n.pos, level: n.level });
+    return { at: best.mid, snaps: [snap(l), snap(r)], tangent: best.t };
+  }
+
+  /** Конец пути у соседнего пути на межпутье — ложится на линию рядом с ним и приходит параллельно (путь рядом). */
+  private parallelSnap(p: Vec): { pos: Vec; dir: Vec } | null {
+    const net = this.game().net;
+    if (!this.chain) return null;
+    const tol = Math.max(3, this.snapRadius * 0.6);
+    let best: { pos: Vec; t: Vec } | null = null;
+    let bestErr = tol;
+    for (const seg of net.segmentsNear(p, TRACK_GAP + tol + 10)) {
+      if (seg.platform !== undefined) continue;
+      const hit = seg.lut.closest(p);
+      if (hit.s < 1 || hit.s > seg.length - 1 || Math.abs(net.levelAt(seg, hit.s) - this.level) > 0.25) continue;
+      const t = seg.lut.tangentAt(hit.s);
+      const d = dot(sub(p, hit.point), rightNormal(t));
+      const err = Math.abs(Math.abs(d) - TRACK_GAP);
+      if (err < bestErr) {
+        bestErr = err;
+        best = { pos: add(hit.point, scale(rightNormal(t), Math.sign(d) * TRACK_GAP)), t };
+      }
+    }
+    if (!best) return null;
+    return { pos: best.pos, dir: dot(best.t, sub(best.pos, this.chain.pos)) >= 0 ? best.t : scale(best.t, -1) };
   }
 
   /** Направления «прямо» от начала нового пути: продолжения путей в узле или вдоль разрезаемого пути. */
@@ -736,11 +814,12 @@ export class Controller {
           break;
         }
         if (!this.chain) {
-          // Двухпутка: ось — свободная точка (пути встанут по бокам); у конца прошлой двухпутки — продолжаем её.
-          const pair = this.railTracks === 2 && this.pairStart && dist(this.pairStart.at, p) < this.snapRadius ? this.pairStart : null;
-          if (this.railTracks === 2) this.chain = { kind: 'free', pos: pair?.at ?? p, level: this.level };
+          // Двухпутка: ось — свободная точка (пути встанут по бокам); у концов двухпутки — посередине, продолжаем оба пути.
+          const pair = this.railTracks === 2 ? this.pairFromEnds(p) : null;
+          if (pair) this.pairStart = { at: pair.at, snaps: pair.snaps };
+          if (this.railTracks === 2) this.chain = { kind: 'free', pos: pair?.at ?? p, level: pair?.snaps[0].level ?? this.level };
           else this.chain = g.builder.snap(p, this.level, this.snapRadius);
-          this.chainTangent = g.builder.continuationTangent(this.chain);
+          this.chainTangent = pair?.tangent ?? g.builder.continuationTangent(this.chain);
           this.control = null;
           this.left.createdChain = true;
         }
@@ -757,6 +836,16 @@ export class Controller {
         // Рамкой — сносим при отпускании кнопки.
         if (this.bulldozeMode === 'area') {
           this.areaStart = p;
+          break;
+        }
+        // Shift — снести только кусок дороги или полосы: от этой точки до той, где отпустят.
+        if (e.shiftKey) {
+          this.spanStart = this.spanTarget(p);
+          if (this.spanStart) break;
+        }
+        if (this.bulldozeMode === 'lane') {
+          const problem = this.roadTools.bulldozeLane(p);
+          if (problem) this.showError(problem);
           break;
         }
         this.bulldozeAt(p);
@@ -809,7 +898,7 @@ export class Controller {
       }
       case 'station': {
         const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.stationAngle, this.stationTracks);
-        const st = g.placeStation(p, this.snapRadius, this.stationKind, this.stationServes, this.stationAngle, this.stationTracks);
+        const st = g.placeStation(p, this.snapRadius, this.stationKind, this.newStationServes, this.stationAngle, this.stationTracks);
         if (!st) this.showError(plan.reason);
         else this.select({ type: 'station', id: st.id });
         break;
@@ -856,6 +945,25 @@ export class Controller {
         break;
       }
     }
+  }
+
+  /** С чего начинается снос куска: полотно под курсором (в режиме «Полосу» — полоса) и место на его оси. */
+  private spanTarget(p: Vec): { corridor: number; lane: number | null; s: number } | null {
+    const net = this.game().roads.net;
+    if (this.bulldozeMode === 'lane') {
+      const hit = laneUnder(net, p);
+      return hit ? { corridor: hit.corridor.id, lane: hit.lane, s: hit.s } : null;
+    }
+    const c = corridorUnder(net, p, this.snapRadius * 0.3);
+    return c ? { corridor: c.id, lane: null, s: c.lut.closest(p).s } : null;
+  }
+
+  /** План сноса куска от spanStart до точки p (её проекции на то же полотно). */
+  private spanPlan(p: Vec): RoadPlan | null {
+    const st = this.spanStart;
+    const c = st && this.game().roads.net.corridors.get(st.corridor);
+    if (!st || !c) return null;
+    return this.roadTools.spanPlan(st.corridor, st.lane, st.s, c.lut.closest(p).s);
   }
 
   /** Снос того, что под курсором: станция, дом, путь или дорога. */
@@ -967,7 +1075,7 @@ export class Controller {
       this.camera.clamp(t.width, t.height);
     }
     if (e.target === this.canvas || this.pan || this.left) this.hover = this.worldAt(e);
-    if (this.left && this.tool === 'bulldoze' && this.bulldozeMode === 'point' && this.hover) {
+    if (this.left && this.tool === 'bulldoze' && this.bulldozeMode === 'point' && this.hover && !this.spanStart) {
       // Снос, который ведут мышью: дома и станции — только по клику.
       if (!this.game().builder.bulldoze(this.hover, this.snapRadius * 0.3)) this.roadTools.bulldoze(this.hover, this.snapRadius * 0.3);
     }
@@ -1006,6 +1114,14 @@ export class Controller {
   }
 
   private finishLeft(e: MouseEvent, left: { sx: number; sy: number; createdChain: boolean }): void {
+    if (this.spanStart) {
+      const plan = this.spanPlan(this.worldAt(e));
+      this.spanStart = null;
+      if (plan?.ok) this.game().roadBuilder.apply(plan);
+      else if (plan) this.showError(plan.reason);
+      this.onChange();
+      return;
+    }
     if (this.action === 'bulldoze' && this.areaStart) {
       const a = this.areaStart;
       this.areaStart = null;
@@ -1075,8 +1191,8 @@ export class Controller {
     this.tryBuild(p);
   }
 
-  private request(end: Snap) {
-    return {
+  private request(end: Snap): RoadRequest {
+    const req: RoadRequest = {
       start: this.chain!,
       end,
       spec: this.buildSpec,
@@ -1084,6 +1200,23 @@ export class Controller {
       tangent: this.chainTangent,
       control: this.control,
     };
+    // Конец прилип рядом с другим путём — дуга приходит параллельно ему.
+    const t3 = this.parallelEnd;
+    if (t3 && end.kind === 'free') {
+      const p0 = req.start.pos;
+      const p3 = end.pos;
+      const g = this.game();
+      let t0 = this.chainTangent ?? null;
+      if (!t0 && req.start.kind === 'split' && g.net.segments.has(req.start.segId)) {
+        const seg = g.net.segment(req.start.segId);
+        t0 = seg.lut.tangentAt(seg.lut.sAtT(req.start.t));
+      }
+      if (!t0) t0 = norm(sub(p3, p0));
+      if (dot(t0, sub(p3, p0)) < 0) t0 = scale(t0, -1);
+      const h = dist(p0, p3) * 0.4;
+      req.curve = { p0, p1: add(p0, scale(t0, h)), p2: sub(p3, scale(t3, h)), p3 };
+    }
+    return req;
   }
 
   private tryBuild(p: Vec): void {
@@ -1164,6 +1297,12 @@ export class Controller {
 
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
+    // Shift+колесо при вставке — плавный поворот на любой угол (на тачпаде Shift превращает прокрутку в боковую).
+    if (e.shiftKey && this.action === 'paste') {
+      this.pasteAngle += (e.deltaY || e.deltaX) * 0.0015;
+      this.onChange();
+      return;
+    }
     const factor = Math.exp(-e.deltaY * 0.0015);
     this.camera.zoomAt(e.clientX, e.clientY, factor);
     this.camera.touched = true;
@@ -1195,6 +1334,7 @@ export class Controller {
       case 'Escape':
         if (this.pendingArea) this.cancelArea();
         else if (this.areaStart) this.areaStart = null;
+        else if (this.spanStart) this.spanStart = null;
         else if (this.copyStart) this.copyStart = null;
         else if (this.pasteDrag) this.pasteDrag = null;
         else if (this.cancelPaste()) this.onChange();
@@ -1351,7 +1491,11 @@ export class Controller {
           break;
         }
         o.chainStart = this.chain;
-        o.snap = this.chain ? this.endSnap(p) : g.builder.snap(p, this.level, this.snapRadius);
+        // Двухпутку начинают от пары концов — кружок посередине между ними.
+        const pairHere = !this.chain && this.railTracks === 2 ? this.pairFromEnds(p) : null;
+        if (this.chain) o.snap = this.endSnap(p);
+        else if (pairHere) o.snap = { ...pairHere.snaps[0], pos: pairHere.at };
+        else o.snap = g.builder.snap(p, this.level, this.snapRadius);
         if (this.chain) {
           if (this.drawMode === 'curve' && !this.control) {
             o.label = { text: 'Укажите изгиб кривой', ok: true };
@@ -1462,6 +1606,36 @@ export class Controller {
         break;
       }
       case 'bulldoze': {
+        // Снос куска: как будет после — сеть без него, края куска — красными точками, подпись — возврат или причина.
+        if (this.spanStart) {
+          const plan = this.spanPlan(p);
+          const c = g.roads.net.corridors.get(this.spanStart.corridor);
+          if (plan) this.showRoadPlan(o, plan, `Снести кусок · +${money(-plan.cost)}`);
+          if (c) o.points = [this.spanStart.s, c.lut.closest(p).s].map((s) => ({ pos: c.lut.pointAt(s), color: '#e8483f', r: 5 }));
+          break;
+        }
+        // Зажат Shift — видно, что сейчас снесётся только кусок: точка начала на дороге (полосе) и подсказка.
+        if (this.shift && this.bulldozeMode !== 'area') {
+          const t = this.spanTarget(p);
+          const c = t && g.roads.net.corridors.get(t.corridor);
+          if (c && t) {
+            o.points = [{ pos: c.lut.pointAt(t.s), color: '#e8483f', r: 5 }];
+            if (t.lane !== null) o.lane = { corridor: t.corridor, lane: t.lane };
+            o.label = { text: `Кусок ${t.lane === null ? 'дороги' : 'полосы'}: зажмите и тяните вдоль`, ok: true };
+          } else o.label = { text: 'Shift — снести кусок: наведите на дорогу', ok: true };
+          break;
+        }
+        if (this.bulldozeMode === 'lane') {
+          // Полоса под курсором — красным (и где она продолжается: предпросмотр — как снесённое).
+          const res = this.roadTools.laneBulldozePlan(p);
+          if (!res) {
+            o.label = { text: 'Наведите на полосу', ok: true };
+            break;
+          }
+          o.lane = { corridor: res.corridor, lane: res.lane };
+          o.label = res.plan.ok ? { text: `Снести полосу · +${money(-res.plan.cost)}`, ok: true } : { text: res.plan.reason ?? 'Нельзя', ok: false };
+          break;
+        }
         const st = g.structureAt(p);
         if (st?.type === 'station') {
           o.label = { text: `Снести станцию ${st.name}`, ok: true };
@@ -1546,7 +1720,8 @@ export class Controller {
         const plan = this.pastePlan(frag, pose.at, pose.angle);
         o.frame = { pts: frameOf(frag, pose.at, pose.angle), ok: plan.ok };
         if (plan.ok) {
-          this.showRoadPlan(o, plan, `Вставить · ${money(plan.cost)}${pose.snapped ? ' · вдоль дороги' : ''}`);
+          const deg = (((Math.round((pose.angle * 180) / Math.PI) % 360) + 360) % 360);
+          this.showRoadPlan(o, plan, `Вставить · ${money(plan.cost)} · ${deg}°${pose.snapped ? ' вдоль дороги' : ''}`);
         } else {
           o.template = { curves: fragmentCurves(frag, pose.at, pose.angle), ok: false };
           o.label = { text: plan.reason ?? 'Нельзя вставить', ok: false };
@@ -1592,7 +1767,7 @@ export class Controller {
         }
         const free = plan.rail?.main ? ' · R — повернуть' : '';
         const raze = razed.length ? ` · снос ${razed.length} зд.` : '';
-        const what = this.stationKind === 'rail' ? 'Ж/д станция' : this.stationKind === 'stop' ? 'Остановка' : 'Станция';
+        const what = this.stationKind === 'rail' ? 'Ж/д станция' : this.stationKind === 'stop' ? 'Остановка' : stationTitle(this.newStationServes);
         o.label = plan.ok ? { text: `${what} · ${money(plan.cost)}${raze}${free}`, ok: true } : { text: plan.reason ?? '', ok: false };
         break;
       }

@@ -190,6 +190,29 @@ describe('Станции', () => {
     expect(stationExit(game, st.nodeId).id).toBe(tee.id);
   });
 
+  it('где станцию не поставить, её силуэт всё равно есть — для красного предпросмотра', () => {
+    const game = new Game(42);
+    // В чистом поле — под курсором.
+    const spot = fieldSpot(game, 200, 300);
+    const p = { x: spot.x + 100, y: spot.y };
+    const far = game.stationPlan(p, 14);
+    expect(far.ok).toBe(false);
+    expect(far.reason).toBe('Поставьте рядом с дорогой');
+    expect(far.fp).toMatchObject({ center: p, w: STATION.size.w, h: STATION.size.h });
+    expect(game.placeStation(p, 14)).toBeNull();
+    // У стыка остановки посреди улицы — у дороги со стороны курсора (к югу).
+    const road = fieldRoad(game);
+    const stop = game.placeStation({ x: road.a.x + 200, y: road.y - 14 }, 14, 'stop')!;
+    expect(stop).not.toBeNull();
+    const q = { x: road.a.x + 205, y: road.y + 30 };
+    const seam = game.stationPlan(q, 14);
+    expect(seam.ok).toBe(false);
+    expect(seam.reason).toBe('Слишком близко к перекрёстку');
+    expect(seam.fp!.center.y).toBeGreaterThan(road.y + 20);
+    expect(Math.abs(seam.fp!.center.x - q.x)).toBeLessThan(10);
+    expect(game.placeStation(q, 14)).toBeNull();
+  });
+
   it('дом на месте станции сносится за доплату, а Ctrl+Z его возвращает', () => {
     const game = new Game(42);
     const road = fieldRoad(game);
