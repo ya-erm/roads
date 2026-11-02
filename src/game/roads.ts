@@ -5,6 +5,17 @@ import { LaneNet, LaneNode } from '../lanes/model';
 import { findLaneRoute, linkCost, transitionCost } from '../lanes/routing';
 import { LaneTraffic, LaneTrafficEvents } from '../lanes/traffic';
 
+/** Размер кольца: радиус оси (если примыкающие дороги шире, кольцо будет больше). */
+export type RingSize = 'small' | 'medium' | 'large';
+export const RING_SIZES: Record<RingSize, number> = { small: 30, medium: 46, large: 66 };
+
+export interface RingOptions {
+  lanes: number;
+  size: RingSize;
+}
+
+export const DEFAULT_RING: RingOptions = { lanes: 1, size: 'small' };
+
 /**
  * Дороги игры: сеть полос (что построено), граф движения по ней (пересобирается после правок)
  * и машины. Маршруты — списки связей графа между узлами, где можно начать и кончить поездку.

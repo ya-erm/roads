@@ -16,7 +16,7 @@ export interface VehicleSpec {
 export interface Vehicle extends VehicleSpec {
   id: number;
   targetNode: number;
-  /** Маршрут — список id связей (направленных половин сегментов). */
+  /** Маршрут — список id связей графа полос. */
   route: number[];
   routeIndex: number;
   /** Текущая полоса (на манёвре — полоса, с которой въехали). */
@@ -35,7 +35,7 @@ export interface Vehicle extends VehicleSpec {
   /** Середина задней оси — кузов тянется за передней точкой по ней. */
   rear?: Vec;
   level: number;
-  /** Положение вдоль оси сегмента — нужно, чтобы перенести машину при разрезании дороги. */
+  /** Положение вдоль оси полотна — нужно, чтобы перенести машину при перестройке сети. */
   centerS: number;
   /** Визуальное боковое смещение при перестроении. */
   lateral: number;
@@ -44,4 +44,6 @@ export interface Vehicle extends VehicleSpec {
   stuckTimer: number;
   rerouteTimer: number;
   lcCooldown: number;
+  /** Ждёт окна для нужного перестроения (0…1 — насколько срочно): тогда чуть отстаёт от соседей. */
+  mergeWait?: number;
 }

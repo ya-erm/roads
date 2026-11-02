@@ -1,7 +1,8 @@
 import { SNAP_PIXELS } from '../config';
 import { offsetCubic, straightCubic } from '../core/bezier';
 import { add, angleOf, dist, len, scale, sub, Vec } from '../core/vec';
-import { DEFAULT_RING, type DrawMode, type NetKind, type RingOptions, type RingSize, type RoadRequest, type Snap } from '../game/build';
+import type { DrawMode, NetKind, RoadRequest, Snap } from '../game/build';
+import { DEFAULT_RING, type RingOptions, type RingSize } from '../game/roads';
 import type { AreaContents, Game, LaneEnd, StationKind } from '../game/game';
 import type { RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
@@ -436,7 +437,7 @@ export class Controller {
     const center = g.builder.buildCurve(this.request(end));
     if (!center) return null;
     const node = (p: Vec, level: number): Snap => {
-      const s = g.builder.snap(p, level, 4, 'rail');
+      const s = g.builder.snap(p, level, 4);
       return s.kind === 'node' ? s : { kind: 'free', pos: p, level };
     };
     // Продолжение двухпутки — от концов её путей; иначе — от узлов, если они ровно там.
@@ -666,10 +667,10 @@ export class Controller {
       const a = base + Math.round((angleOf(d) - base) / step) * step;
       const l = Math.max(10, Math.round(len(d) / 10) * 10);
       const snapped = add(this.chain.pos, scale({ x: Math.cos(a), y: Math.sin(a) }, l));
-      const s = g.builder.snap(snapped, this.level, this.snapRadius * 0.5, this.netKind);
+      const s = g.builder.snap(snapped, this.level, this.snapRadius * 0.5);
       return s.kind === 'node' ? s : { kind: 'free', pos: snapped, level: this.level };
     }
-    const s = g.builder.snap(p, this.level, this.snapRadius, this.netKind);
+    const s = g.builder.snap(p, this.level, this.snapRadius);
     this.angleHint = null;
     // Прямая от существующей дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°); с Alt — нет.
     if (s.kind === 'free' && this.chain && this.drawMode === 'straight' && !this.alt) {
@@ -738,7 +739,7 @@ export class Controller {
           // Двухпутка: ось — свободная точка (пути встанут по бокам); у конца прошлой двухпутки — продолжаем её.
           const pair = this.railTracks === 2 && this.pairStart && dist(this.pairStart.at, p) < this.snapRadius ? this.pairStart : null;
           if (this.railTracks === 2) this.chain = { kind: 'free', pos: pair?.at ?? p, level: this.level };
-          else this.chain = g.builder.snap(p, this.level, this.snapRadius, this.netKind);
+          else this.chain = g.builder.snap(p, this.level, this.snapRadius);
           this.chainTangent = g.builder.continuationTangent(this.chain);
           this.control = null;
           this.left.createdChain = true;
@@ -1350,7 +1351,7 @@ export class Controller {
           break;
         }
         o.chainStart = this.chain;
-        o.snap = this.chain ? this.endSnap(p) : g.builder.snap(p, this.level, this.snapRadius, this.netKind);
+        o.snap = this.chain ? this.endSnap(p) : g.builder.snap(p, this.level, this.snapRadius);
         if (this.chain) {
           if (this.drawMode === 'curve' && !this.control) {
             o.label = { text: 'Укажите изгиб кривой', ok: true };

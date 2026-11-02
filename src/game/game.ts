@@ -42,8 +42,8 @@ import {
 } from '../world/worldgen';
 import { findCrossings, LevelCrossing } from './crossings';
 import { corridorCost, RoadBuilder, RoadPlan } from './roadbuild';
-import { Roads } from './roads';
-import { BuildContext, Builder, RING_SIZES, RingOptions, RoadRequest, Snap } from './build';
+import { RING_SIZES, RingOptions, Roads } from './roads';
+import { BuildContext, Builder, RoadRequest, Snap } from './build';
 import { diamondPlan, TemplateOptions, templatePlan, TemplatePlan } from './interchange';
 import {
   DEFAULT_RULE,
@@ -2904,7 +2904,7 @@ export class Game implements BuildContext {
     const hit = this.net.findSegmentNear(
       p,
       Math.max(70, snapRadius * 2),
-      (s) => isRail(s.spec) && s.platform === undefined && !s.ring && this.net.isFlat(s) && this.net.node(s.a).level === 0,
+      (s) => isRail(s.spec) && s.platform === undefined && this.net.isFlat(s) && this.net.node(s.a).level === 0,
     );
     // Чем дальше крайний путь, тем длиннее съезды — чтобы стрелки оставались пологими.
     const switchLen = R.switchLen + 45 * (tracks - 2);

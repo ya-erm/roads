@@ -1,5 +1,5 @@
 import { Cubic, CurveLUT } from '../core/bezier';
-import { add, cross, cubicBezier, dist, dot, scale, sub, Vec } from '../core/vec';
+import { add, dist, dot, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import type { Game, LaneEnd } from '../game/game';
 import { LaneRenderer } from '../lanes/draw';
@@ -11,7 +11,7 @@ import { cargoImage } from '../ui/cargoIcons';
 import { CARGO, CargoType, FREIGHT } from '../world/cargo';
 import { Industry, Station, TOWN_NEED, TownBuilding } from '../world/entities';
 import type { Segment } from '../world/network';
-import { halfWidth, isOneWay, isRail, isTrunk, LANE_W, medianHalf, RAIL_HALF, ROAD_MARGIN, roadEdges, RoadSpec } from '../world/roadTypes';
+import { halfWidth, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
 import { Camera } from './camera';
 
@@ -35,8 +35,6 @@ export interface ToolOverlay {
   plan: Plan | null;
   /** Ещё дороги в предпросмотре — например, все дороги переносимого узла. */
   plans?: Plan[];
-  /** Перестройка: будущая дорога на месте участка — ширина, полосы, направление. */
-  upgrade?: { curve: Cubic; spec: RoadSpec } | null;
   /** Подсвеченный участок не сносим, а правим — синим. */
   highlightEdit?: boolean;
   /** Перья участка в режиме «Двигать»: концы, управляющие точки и какая из них в руке. */
@@ -99,30 +97,8 @@ const C = {
   trees: ['#8fb46a', '#7aa55a', '#9cc177', '#6e9a52'],
 };
 
-/** С какой стороны (в системе a→b сегмента) к нему в узле примыкают другие дороги. */
-interface Sides {
-  r: boolean;
-  l: boolean;
-}
-const NO_SIDES: Sides = { r: false, l: false };
-
-/** Отгон у стыка: длина зоны и полуширина более широкой дороги с этой стороны. */
-interface Taper {
-  T: number;
-  wide: number;
-}
-const NO_TAPERS: { r: Taper | null; l: Taper | null } = { r: null, l: null };
-
 /** Радиус кружка пера на экране, пикселей (и за сколько его можно схватить). */
 export const HANDLE_PX = 6;
-
-/**
- * Съезд: любая односторонняя дорога — у неё свои сплошные кромки, а у развилки с ней —
- * островок со штриховкой (съезд часто строят и «Односторонней» улицей).
- */
-const isRamp = (spec: RoadSpec) => isOneWay(spec);
-/** Съезд отходит от дороги под углом меньше этого — между ними островок со штриховкой. */
-const GORE_ANGLE = 0.75;
 
 /** Метка транспорта выбранной линии: кружок и значок. */
 interface LineMark {
@@ -148,33 +124,26 @@ interface TrainCar {
   trainId: number;
 }
 
+/** Участок пути, готовый к рисованию. */
 interface SegCache {
+  /** Ось и ширина насыпи. */
   surface: Vec[];
   width: number;
   /** Высота вдоль поверхности для теней и тоннелей. */
   heights: number[];
-  /** divdash — осевая жёлтым пунктиром: через неё в перекрёстке разрешён поворот. */
-  markings: { pts: Vec[]; style: 'dash' | 'divider' | 'divdash' | 'edge' | 'barrier' }[];
-  /** Для путей: два рельса и концы шпал парами. */
-  rail: { rails: Vec[][]; sleepers: Vec[] } | null;
+  /** Два рельса и концы шпал парами. */
+  rail: { rails: Vec[][]; sleepers: Vec[] };
   bbox: { x0: number; y0: number; x1: number; y1: number };
   maxLevel: number;
   minLevel: number;
   wet: boolean;
   rev: number;
-  /** Пересекают ли повороты осевую в узлах a и b — при смене запретов разметку надо пересобрать. */
-  crossA: boolean;
-  crossB: boolean;
 }
 
 export class Renderer {
   private readonly ctx: CanvasRenderingContext2D;
   private cache = new Map<number, SegCache>();
   private cacheVersion = -1;
-  /** Узлы, через которые главная дорога проходит насквозь (кэш на версию сети). */
-  private readonly through = new Map<number, [number, number] | null>();
-  /** Узлы, где разрешённые повороты пересекают осевую главной дороги (кэш на версию сети). */
-  private readonly crossing = new Map<number, boolean>();
   private treeVersion = '';
   /** Дороги из полос. */
   private readonly lanes = new LaneRenderer();
@@ -192,8 +161,6 @@ export class Renderer {
   reset(): void {
     this.cache.clear();
     this.cacheVersion = -1;
-    this.through.clear();
-    this.crossing.clear();
     this.treeVersion = '';
   }
 
@@ -247,55 +214,31 @@ export class Renderer {
     this.drawVehicles(vehicles.filter((v) => band(v) === -1));
     this.drawTrains(trains.filter((t) => trainBand(t.level) === -1));
     ctx.globalAlpha = 1;
-    const ground = segs.filter((s) => this.cache.get(s.id)!.maxLevel <= 0.01);
-    const groundRoads = ground.filter((s) => !isRail(s.spec));
-    const groundRails = ground.filter((s) => isRail(s.spec));
-    // Пандусы с земли: нижняя половина — обычная дорога, вместе с землёй (и под машинами на ней).
-    const feet = segs.filter((s) => {
-      const c = this.cache.get(s.id)!;
-      return !isRail(s.spec) && c.maxLevel > 0.01 && c.minLevel > -0.01 && c.minLevel <= 0.01;
-    });
+    const groundRails = segs.filter((s) => this.cache.get(s.id)!.maxLevel <= 0.01);
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
     if (o.roads) this.drawRoadPreview(o.roads);
-    this.drawSurfaces([...groundRoads, ...feet], false);
-    this.drawTapers(game, 0, view);
-    // Площадка перекрёстка, поверх — скруглённые углы (закрывают её срезанные края) и островки.
-    this.drawJunctions(game, 0);
-    this.drawCorners(game, 0, view);
-    this.drawGores(game, 0, view, 'fill');
-    this.drawMarkings(groundRoads);
-    this.drawGores(game, 0, view, 'paint');
-    this.drawCrosswalks(game, view);
     this.drawStopLines(game, view);
     this.drawRailSteel(groundRails);
     this.drawCrossings(game, view);
     this.drawSignals(game, view);
-    if (o.heatmap) this.drawHeatmap(game, 0);
+    if (o.heatmap) this.drawHeatmap(game);
     this.drawVehicles(vehicles.filter((v) => band(v) === 0));
     this.drawLights(game);
     this.drawStructures(game, view, o);
     this.drawTrains(trains.filter((t) => trainBand(t.level) === 0));
     for (const level of [1, 2]) {
-      const layer = segs.filter((s) => {
+      const rails = segs.filter((s) => {
         const c = this.cache.get(s.id)!;
         return c.maxLevel > level - 0.99 && c.maxLevel <= level + 0.01;
       });
       const roads = this.lanes.hasLayer(roadNet, level);
-      if (!layer.length && !roads) continue;
-      const rails = layer.filter((s) => isRail(s.spec));
+      if (!rails.length && !roads) continue;
       if (roads) this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, level);
-      this.drawElevated(layer);
-      this.drawTapers(game, level, view);
-      this.drawJunctions(game, level);
-      this.drawCorners(game, level, view);
-      this.drawGores(game, level, view, 'fill');
-      this.drawMarkings(layer.filter((s) => !isRail(s.spec)));
-      this.drawGores(game, level, view, 'paint');
+      this.drawElevated(rails);
       this.drawRailBeds(rails, true);
       this.drawRailSteel(rails);
-      if (o.heatmap) this.drawHeatmap(game, level);
       this.drawVehicles(vehicles.filter((v) => band(v) === level));
       this.drawTrains(trains.filter((t) => trainBand(t.level) === level));
     }
@@ -306,278 +249,62 @@ export class Renderer {
     if (o.label && o.hover) this.drawTooltip(o.hover, o.label.text, o.label.ok);
   }
 
-  // ---------- Кэш геометрии ----------
+  // ---------- Кэш геометрии путей ----------
 
-  /** Пересобирает кэш только для изменившихся сегментов. */
-  /**
-   * Главная дорога, проходящая узел насквозь: два почти соосных сегмента, не уже остальных.
-   * Это стык (в том числе со сменой числа полос) или примыкание сбоку — съезд, улица.
-   * Такой узел рисуется без площадки перекрёстка: дорога непрерывна, разметка продолжается.
-   */
-  private throughPair(game: Game, nodeId: number): [number, number] | null {
-    if (this.through.has(nodeId)) return this.through.get(nodeId)!;
-    const net = game.net;
-    const n = net.nodes.get(nodeId);
-    let best: [number, number] | null = null;
-    if (n && !net.isCrossing(n) && n.roundabout === null && n.segments.length === net.roadSegs(n).length) {
-      const roads = net.roadSegs(n);
-      // Сквозная — и с изгибом в узле до ~30°. Из таких пар — самая широкая (ответвление бывает
-      // прямее изогнутой главной дороги), при равной ширине — самая прямая.
-      let bestDot = -0.86;
-      let bestWidth = -1;
-      for (let i = 0; i < roads.length; i++) {
-        for (let j = i + 1; j < roads.length; j++) {
-          const d = dot(net.dirFrom(nodeId, roads[i]), net.dirFrom(nodeId, roads[j]));
-          if (d >= -0.86) continue;
-          const w = Math.min(halfWidth(net.segment(roads[i]).spec), halfWidth(net.segment(roads[j]).spec));
-          if (w > bestWidth + 0.5 || (Math.abs(w - bestWidth) <= 0.5 && d < bestDot)) {
-            bestDot = d;
-            bestWidth = w;
-            best = [roads[i], roads[j]];
-          }
-        }
-      }
-      if (best && roads.length > 2) {
-        const w = Math.min(...best.map((id) => halfWidth(net.segment(id).spec)));
-        if (roads.some((id) => !best!.includes(id) && halfWidth(net.segment(id).spec) > w + 0.5)) best = null;
-      }
-      // Боковые дороги с обеих сторон — это уже перекрёсток: площадка без сквозной разметки.
-      if (best && roads.length > 2) {
-        const d = net.dirFrom(nodeId, best[0]);
-        const sides = new Set(
-          roads.filter((id) => !best!.includes(id)).map((id) => Math.sign(cross(d, net.dirFrom(nodeId, id)))),
-        );
-        if (sides.size > 1) best = null;
-      }
-    }
-    this.through.set(nodeId, best);
-    return best;
-  }
-
-  /**
-   * Пересекает ли хоть один разрешённый проезд в узле осевую сквозной дороги: поворот налево
-   * в боковую, налево из боковой, прямо с одной боковой на другую. Тогда осевая там — пунктиром.
-   */
-  private crossesCenter(game: Game, nodeId: number): boolean {
-    const known = this.crossing.get(nodeId);
-    if (known !== undefined) return known;
-    const net = game.net;
-    const n = net.nodes.get(nodeId);
-    const pair = this.throughPair(game, nodeId);
-    let res = false;
-    if (n && pair && net.roadSegs(n).length > 2) {
-      const dm = net.dirFrom(nodeId, pair[0]);
-      const N = { x: -dm.y, y: dm.x };
-      const side = (p: Vec) => dot(sub(p, n.pos), N);
-      for (const m of net.nodeMovements.get(nodeId) ?? []) {
-        const a = side(m.points[0]);
-        const b = side(m.points[m.points.length - 1]);
-        if (a * b < 0 && Math.abs(a) > 1 && Math.abs(b) > 1) {
-          res = true;
-          break;
-        }
-      }
-    }
-    this.crossing.set(nodeId, res);
-    return res;
-  }
-
-  /**
-   * Отгоны участка s у узла (стороны в системе a→b): где соседняя дорога на стыке шире,
-   * кромка s расходится к ней на длине T — так же, как рисует асфальт drawTapers.
-   */
-  private tapersAt(game: Game, nodeId: number, s: Segment): { r: Taper | null; l: Taper | null } {
-    const net = game.net;
-    const n = net.nodes.get(nodeId);
-    const pair = this.throughPair(game, nodeId);
-    if (!n || n.segments.length !== 2 || !pair || !pair.includes(s.id)) return NO_TAPERS;
-    const o = net.segment(pair[0] === s.id ? pair[1] : pair[0]);
-    const e = roadEdges(s.spec);
-    const eo = roadEdges(o.spec);
-    const res: { r: Taper | null; l: Taper | null } = { r: null, l: null };
-    for (const sigma of [1, -1]) {
-      const mine = sigma > 0 ? e.right : e.left;
-      // Та же кромка у соседа: сторона «от узла» у него противоположная.
-      const out = s.a === nodeId ? sigma : -sigma;
-      const so = o.a === nodeId ? -out : out;
-      const theirs = so > 0 ? eo.right : eo.left;
-      if (theirs > mine + 0.5) res[sigma > 0 ? 'r' : 'l'] = { T: Math.min(s.length * 0.45, 16 + (theirs - mine) * 4), wide: theirs };
-    }
-    return res;
-  }
-
-  /** Стороны сегмента s (в системе a→b), с которых в узле примыкают боковые дороги. */
-  private branchSides(game: Game, nodeId: number, s: Segment): Sides {
-    const net = game.net;
-    const pair = this.throughPair(game, nodeId);
-    const res = { r: false, l: false };
-    if (!pair) return res;
-    const away = net.dirFrom(nodeId, s.id);
-    const right = { x: -away.y, y: away.x };
-    // Правая сторона «от узла» — это правая сторона сегмента, если узел в его начале.
-    const flip = s.a === nodeId ? 1 : -1;
-    for (const id of net.roadSegs(net.node(nodeId))) {
-      if (pair.includes(id)) continue;
-      const dir = net.dirFrom(nodeId, id);
-      // Пологий съезд — не боковая улица: кромка остаётся сплошной и переходит в контур островка.
-      if (pair.some((p) => dot(dir, net.dirFrom(nodeId, p)) > Math.cos(GORE_ANGLE))) continue;
-      const side = dot(dir, right) > 0 ? 1 : -1;
-      if (side * flip > 0) res.r = true;
-      else res.l = true;
-    }
-    return res;
-  }
-
+  /** Пересобирает кэш только для изменившихся участков. */
   private refreshCache(game: Game): void {
     if (this.cacheVersion === game.net.version) return;
     this.cacheVersion = game.net.version;
-    this.through.clear();
-    this.crossing.clear();
     for (const id of [...this.cache.keys()]) if (!game.net.segments.has(id)) this.cache.delete(id);
     for (const s of game.net.segments.values()) {
-      const cached = this.cache.get(s.id);
-      // Участок сам не менялся, но в узле запретили или разрешили поворот — осевая другая.
-      const stale = !cached || cached.rev !== s.rev || cached.crossA !== this.crossesCenter(game, s.a) || cached.crossB !== this.crossesCenter(game, s.b);
-      if (stale) this.cache.set(s.id, this.buildCache(game, s));
+      if (this.cache.get(s.id)?.rev !== s.rev) this.cache.set(s.id, this.buildCache(game, s));
     }
   }
 
   private buildCache(game: Game, s: Segment): SegCache {
     const net = game.net;
-    const e = roadEdges(s.spec);
-    const off = (e.right - e.left) / 2;
-    const surface = s.lut.offsetPolyline(off, 0, s.length, 3);
+    const width = halfWidth(s.spec) * 2;
+    const surface = s.lut.offsetPolyline(0, 0, s.length, 3);
     const heights = surface.map((_, i) => net.levelAt(s, (s.length * i) / Math.max(1, surface.length - 1)));
-    const ra = net.node(s.a).radius;
-    const rb = net.node(s.b).radius;
-    // Если дорога проходит узел насквозь (стык или примыкание сбоку), разметка идёт до центра узла.
-    const thruA = this.throughPair(game, s.a)?.includes(s.id) ?? false;
-    const thruB = this.throughPair(game, s.b)?.includes(s.id) ?? false;
-    // Съезд, отходящий островком, размечается с того места, где он отделился от дороги.
-    const s0 = thruA ? 0 : Math.max(ra + 1, this.goreStartOf(game, s.a, s));
-    const s1 = thruB ? s.length : s.length - Math.max(rb + 1, this.goreStartOf(game, s.b, s));
-    // Сплошные линии — только вне зоны примыкания.
-    const z0 = ra + 1;
-    const z1 = s.length - rb - 1;
-    const sideA = thruA ? this.branchSides(game, s.a, s) : NO_SIDES;
-    const sideB = thruB ? this.branchSides(game, s.b, s) : NO_SIDES;
-    // Отгоны: у стыка с более широкой дорогой кромка уходит по скосу.
-    const tapA = thruA ? this.tapersAt(game, s.a, s) : NO_TAPERS;
-    const tapB = thruB ? this.tapersAt(game, s.b, s) : NO_TAPERS;
-    const crossA = this.crossesCenter(game, s.a);
-    const crossB = this.crossesCenter(game, s.b);
-    const markings: SegCache['markings'] = [];
-    let rail: SegCache['rail'] = null;
-    if (isRail(s.spec)) {
-      // Рельсы и шпалы — по всей длине, через узлы стрелок без разрывов; в тоннеле их не видно.
-      const la = net.node(s.a).level;
-      const lb = net.node(s.b).level;
-      const cut = la === lb ? null : (-0.4 - la) / (lb - la);
-      let v0 = 0;
-      let v1 = s.length;
-      if (la < -0.4 && lb < -0.4) v1 = 0;
-      else if (cut !== null && cut > 0 && cut < 1) {
-        if (la < -0.4) v0 = cut * s.length;
-        else v1 = cut * s.length;
-      }
-      const sleepers: Vec[] = [];
-      for (let at = v0 + 2; at < v1 - 1; at += 4.5) {
-        const p = s.lut.pointAt(at);
-        const t = s.lut.tangentAt(at);
-        sleepers.push({ x: p.x - t.y * 4.3, y: p.y + t.x * 4.3 }, { x: p.x + t.y * 4.3, y: p.y - t.x * 4.3 });
-      }
-      const rails = v1 > v0 ? [s.lut.offsetPolyline(2.4, v0, v1, 3), s.lut.offsetPolyline(-2.4, v0, v1, 3)] : [];
-      rail = { rails, sleepers };
-    } else if (s1 > s0) {
-      const m = medianHalf(s.spec);
-      const half = s.length / 2;
-      const in0 = thruA ? Math.min(z0, half) : s0;
-      const in1 = thruB ? Math.max(z1, half) : s1;
-      /**
-       * Линия разметки: в зоне примыкания кромка со стороны съезда становится прерывистой;
-       * осевая — жёлтым пунктиром, если через неё разрешён поворот, иначе остаётся сплошной.
-       * Барьер идёт насквозь. cutA/cutB — длина отгона у конца: там линия не нужна.
-       */
-      const line = (offset: number, style: SegCache['markings'][number]['style'], side: 'r' | 'l' | null = null, cutA = 0, cutB = 0) => {
-        const inner = (sides: Sides, cross: boolean) =>
-          style === 'edge' && side && sides[side] ? 'dash' : style === 'divider' && cross ? 'divdash' : style;
-        const a0 = cutA || in0;
-        const a1 = cutB ? s.length - cutB : in1;
-        if (a1 > a0) markings.push({ pts: s.lut.offsetPolyline(offset, a0, a1, 4), style });
-        if (!cutA && thruA && in0 > 0.5) markings.push({ pts: s.lut.offsetPolyline(offset, 0, in0, 4), style: inner(sideA, crossA) });
-        if (!cutB && thruB && s.length - in1 > 0.5) markings.push({ pts: s.lut.offsetPolyline(offset, in1, s.length, 4), style: inner(sideB, crossB) });
-      };
-      if (isOneWay(s.spec)) {
-        for (let i = 1; i < s.spec.lanesF; i++) line((i - s.spec.lanesF / 2) * LANE_W, 'dash');
-      } else {
-        line(0, m ? 'barrier' : s.spec.lanesF + s.spec.lanesB > 2 ? 'divider' : 'dash');
-        for (let i = 1; i < s.spec.lanesF; i++) line(m + i * LANE_W, 'dash');
-        for (let i = 1; i < s.spec.lanesB; i++) line(-m - i * LANE_W, 'dash');
-      }
-      // Сплошные кромки — у магистралей и у съездов развязок (отгон есть только у двусторонних).
-      if (isTrunk(s.spec.cls) || isRamp(s.spec)) {
-        const cut = (t: Taper | null) => (isOneWay(s.spec) ? 0 : (t?.T ?? 0));
-        line(e.right - 1.8, 'edge', 'r', cut(tapA.r), cut(tapB.r));
-        line(-e.left + 1.8, 'edge', 'l', cut(tapA.l), cut(tapB.l));
-      }
-      // Отгон: граница новой полосы — пунктир до стыка, кромка — по скосу от узкой дороги к широкой.
-      if (!isOneWay(s.spec)) {
-        for (const [tap, atA] of [
-          [tapA, true],
-          [tapB, false],
-        ] as const) {
-          for (const sigma of [1, -1] as const) {
-            const t = tap[sigma > 0 ? 'r' : 'l'];
-            if (!t) continue;
-            const lanes = sigma > 0 ? s.spec.lanesF : s.spec.lanesB;
-            const [r0, r1] = atA ? [0, t.T] : [s.length - t.T, s.length];
-            markings.push({ pts: s.lut.offsetPolyline(sigma * (m + lanes * LANE_W), r0, r1, 4), style: 'dash' });
-            if (!isTrunk(s.spec.cls)) continue;
-            const mine = sigma > 0 ? e.right : e.left;
-            const pts: Vec[] = [];
-            for (let k = 0; k <= 12; k++) {
-              const u = k / 12;
-              const smooth = u * u * (3 - 2 * u);
-              const cs = atA ? t.T * u : s.length - t.T * u;
-              const p = s.lut.pointAt(cs);
-              const tg = s.lut.tangentAt(cs);
-              const off = sigma * (t.wide + (mine - t.wide) * smooth - 1.8);
-              pts.push({ x: p.x - tg.y * off, y: p.y + tg.x * off });
-            }
-            markings.push({ pts, style: 'edge' });
-          }
-        }
-      }
-      // Сплошная линия у барьера с обеих сторон.
-      if (m) {
-        line(m + 0.6, 'edge');
-        line(-m - 0.6, 'edge');
-      }
+    // Рельсы и шпалы — по всей длине, через узлы стрелок без разрывов; в тоннеле их не видно.
+    const la = net.node(s.a).level;
+    const lb = net.node(s.b).level;
+    const cut = la === lb ? null : (-0.4 - la) / (lb - la);
+    let v0 = 0;
+    let v1 = s.length;
+    if (la < -0.4 && lb < -0.4) v1 = 0;
+    else if (cut !== null && cut > 0 && cut < 1) {
+      if (la < -0.4) v0 = cut * s.length;
+      else v1 = cut * s.length;
     }
-    const hw = halfWidth(s.spec) + 8;
+    const sleepers: Vec[] = [];
+    for (let at = v0 + 2; at < v1 - 1; at += 4.5) {
+      const p = s.lut.pointAt(at);
+      const t = s.lut.tangentAt(at);
+      sleepers.push({ x: p.x - t.y * 4.3, y: p.y + t.x * 4.3 }, { x: p.x + t.y * 4.3, y: p.y - t.x * 4.3 });
+    }
+    const rails = v1 > v0 ? [s.lut.offsetPolyline(2.4, v0, v1, 3), s.lut.offsetPolyline(-2.4, v0, v1, 3)] : [];
+    const hw = width / 2 + 8;
     const xs = surface.map((p) => p.x);
     const ys = surface.map((p) => p.y);
     let wet = false;
     for (let i = 0; i < surface.length; i += 3) if (game.terrain.isWater(surface[i], 0)) wet = true;
     return {
       surface,
-      width: e.left + e.right,
+      width,
       heights,
-      // Пунктир нарезан заранее: на концах — по половине пробела, тогда на стыках шаг ровный.
-      markings: markings.flatMap((mk) => (mk.style === 'dash' || mk.style === 'divdash' ? cutDashes(mk.pts).map((pts) => ({ pts, style: mk.style })) : [mk])),
-      rail,
+      rail: { rails, sleepers },
       bbox: { x0: Math.min(...xs) - hw, y0: Math.min(...ys) - hw, x1: Math.max(...xs) + hw, y1: Math.max(...ys) + hw },
       maxLevel: Math.max(...heights),
       minLevel: Math.min(...heights),
       wet,
       rev: s.rev,
-      crossA,
-      crossB,
     };
   }
 
+  /** Деревья под путями, дорогами (кроме тоннелей), строениями и в кольцах прячутся. */
   private refreshTrees(game: Game): void {
-    const key = `${game.net.version}:${game.index.items.size}`;
+    const key = `${game.net.version}:${game.roads.net.version}:${game.index.items.size}`;
     if (key === this.treeVersion) return;
     this.treeVersion = key;
     const trees = game.terrain.trees;
@@ -605,6 +332,14 @@ export class Renderer {
       if (!c || c.minLevel < -0.6) continue;
       const r = c.width / 2 + 6;
       for (let i = 0; i < c.surface.length; i += 2) hideNear(c.surface[i], r);
+    }
+    const roads = game.roads.net;
+    for (const c of roads.corridors.values()) {
+      for (const s of axisStations(c, 0, c.length, 6)) {
+        const e = edgesAt(c, s);
+        if (!e || roads.heightAt(c, s) < -0.6) continue;
+        hideNear(pointOff(c, s, (e[0] + e[1]) / 2), (e[1] - e[0]) / 2 + 6);
+      }
     }
     for (const it of game.index.items) hideNear(it.fp.center, Math.hypot(it.fp.w, it.fp.h) / 2 + 4);
     for (const c of game.roundaboutCenters.values()) hideNear(c, 50);
@@ -703,52 +438,13 @@ export class Renderer {
     return parts;
   }
 
-  private drawSurfaces(segs: Segment[], elevated: boolean): void {
-    const ctx = this.ctx;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    for (const pass of [0, 1]) {
-      for (const s of segs) {
-        const c = this.cache.get(s.id)!;
-        // Пандус вверх: здесь только нижняя половина, верхнюю рисует слой эстакад.
-        const parts =
-          c.maxLevel > 0.01 ? this.splitBy(c, (h) => h <= 0.5) : c.minLevel < -0.4 ? this.splitBy(c, (h) => h >= -0.4) : [c.surface];
-        const bridge = c.wet && !elevated && c.maxLevel <= 0.01;
-        ctx.strokeStyle = pass === 0 ? (bridge ? C.rail : C.roadEdge) : bridge ? C.deck : C.road;
-        ctx.lineWidth = c.width + (pass === 0 ? (bridge ? 5 : 2.5) : 0);
-        for (const part of parts) {
-          this.polyline(part);
-          ctx.stroke();
-        }
-        // Портал тоннеля.
-        if (pass === 1 && c.minLevel < -0.4 && c.maxLevel > -0.4) {
-          for (let i = 1; i < c.surface.length; i++) {
-            if ((c.heights[i - 1] < -0.4) !== (c.heights[i] < -0.4)) {
-              const p = c.surface[i];
-              const q = c.surface[i - 1];
-              const d = { x: p.x - q.x, y: p.y - q.y };
-              const l = Math.hypot(d.x, d.y) || 1;
-              const n = { x: (-d.y / l) * (c.width / 2 + 3), y: (d.x / l) * (c.width / 2 + 3) };
-              ctx.strokeStyle = '#3a3f46';
-              ctx.lineWidth = 4;
-              ctx.beginPath();
-              ctx.moveTo(p.x + n.x, p.y + n.y);
-              ctx.lineTo(p.x - n.x, p.y - n.y);
-              ctx.stroke();
-            }
-          }
-        }
-      }
-    }
-  }
-
+  /** Мосты и эстакады путей: тень со смещением по высоте, опоры и настил. */
   private drawElevated(segs: Segment[]): void {
     const ctx = this.ctx;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    // Пандус с земли: настил начинается с середины подъёма, без скругления (низ нарисован как дорога).
+    // Пандус с земли: тень — с середины подъёма.
     const isFoot = (c: SegCache) => c.minLevel > -0.01 && c.minLevel <= 0.01;
-    // Тени со смещением, зависящим от высоты.
     ctx.fillStyle = C.shadow;
     for (const s of segs) {
       const c = this.cache.get(s.id)!;
@@ -782,9 +478,8 @@ export class Renderer {
     for (const pass of [0, 1]) {
       for (const s of segs) {
         const c = this.cache.get(s.id)!;
-        const foot = isFoot(c) && !isRail(s.spec);
-        const parts = foot ? this.splitBy(c, (h) => h >= 0.5) : c.minLevel < 0.2 ? this.splitBy(c, (h) => h >= -0.4) : [c.surface];
-        ctx.lineCap = foot ? 'butt' : 'round';
+        const parts = c.minLevel < 0.2 ? this.splitBy(c, (h) => h >= -0.4) : [c.surface];
+        ctx.lineCap = 'round';
         ctx.strokeStyle = pass === 0 ? C.rail : C.deck;
         ctx.lineWidth = c.width + (pass === 0 ? 5 : 0);
         for (const part of parts) {
@@ -794,469 +489,6 @@ export class Renderer {
       }
     }
     ctx.lineCap = 'round';
-  }
-
-  private drawJunctions(game: Game, level: number): void {
-    const ctx = this.ctx;
-    const net = game.net;
-    const view = this.view();
-    for (const n of net.nodes.values()) {
-      // Площадка перекрёстка — только из дорог; стрелки путей её не дают, переезд — даёт.
-      const roads = net.roadSegs(n);
-      if (roads.length < (net.isCrossing(n) ? 2 : 3) || Math.abs(n.level - level) > 0.01 || n.radius <= 0) continue;
-      // Примыкание к сквозной дороге: асфальт уже непрерывен, площадка не нужна.
-      if (this.throughPair(game, n.id)) continue;
-      if (n.pos.x < view.x0 || n.pos.x > view.x1 || n.pos.y < view.y0 || n.pos.y > view.y1) continue;
-      const pts: Vec[] = [];
-      for (const sid of roads) {
-        const s = net.segment(sid);
-        const e = roadEdges(s.spec);
-        const cs = s.a === n.id ? Math.min(s.length, n.radius + 1) : Math.max(0, s.length - n.radius - 1);
-        const p = s.lut.pointAt(cs);
-        const t = s.lut.tangentAt(cs);
-        const N = { x: -t.y, y: t.x };
-        pts.push(add(p, scale(N, e.right)), add(p, scale(N, -e.left)));
-      }
-      pts.sort((a, b) => Math.atan2(a.y - n.pos.y, a.x - n.pos.x) - Math.atan2(b.y - n.pos.y, b.x - n.pos.x));
-      ctx.fillStyle = level > 0 ? C.deck : C.road;
-      ctx.strokeStyle = level > 0 ? C.rail : C.roadEdge;
-      ctx.lineWidth = 2;
-      ctx.lineJoin = 'round';
-      this.polyline(pts);
-      ctx.closePath();
-      ctx.stroke();
-      ctx.fill();
-    }
-  }
-
-  /**
-   * Смена ширины на стыке (добавилась или пропала полоса): кромка плавно сходится
-   * от широкой дороги к узкой на длине отгона, а не обрывается уступом.
-   */
-  private drawTapers(game: Game, level: number, view: ReturnType<Renderer['view']>): void {
-    const ctx = this.ctx;
-    const net = game.net;
-    const fill = level > 0 ? C.deck : C.road;
-    const edge = level > 0 ? C.rail : C.roadEdge;
-    for (const n of net.nodes.values()) {
-      if (n.segments.length !== 2 || Math.abs(n.level - level) > 0.01) continue;
-      if (n.pos.x < view.x0 || n.pos.x > view.x1 || n.pos.y < view.y0 || n.pos.y > view.y1) continue;
-      const pair = this.throughPair(game, n.id);
-      if (!pair) continue;
-      const [s1, s2] = pair.map((id) => net.segment(id));
-      // Полуширина сегмента справа (+1) или слева (−1) от направления «от узла».
-      const halfOn = (s: Segment, sign: number) => {
-        const e = roadEdges(s.spec);
-        const right = s.a === n.id ? e.right : e.left;
-        const left = s.a === n.id ? e.left : e.right;
-        return sign > 0 ? right : left;
-      };
-      // Точка кромки на расстоянии d от узла вдоль сегмента, со стороны sign.
-      const edgeAt = (s: Segment, d: number, w: number, sign: number) => {
-        const cs = s.a === n.id ? d : s.length - d;
-        const p = s.lut.pointAt(cs);
-        let t = s.lut.tangentAt(cs);
-        if (s.a !== n.id) t = scale(t, -1);
-        return add(p, scale({ x: -t.y, y: t.x }, w * sign));
-      };
-      for (const sign of [1, -1]) {
-        // Правая сторона первого сегмента — это левая сторона второго.
-        const w1 = halfOn(s1, sign);
-        const w2 = halfOn(s2, -sign);
-        if (Math.abs(w1 - w2) < 0.5) continue;
-        const [narrow, wide, wn, nSign] = w1 > w2 ? [s2, w1, w2, -sign] : [s1, w2, w1, sign];
-        const T = Math.min(narrow.length * 0.45, 16 + (wide - wn) * 4);
-        const pts: Vec[] = [];
-        for (let k = 0; k <= 10; k++) {
-          const u = k / 10;
-          const smooth = u * u * (3 - 2 * u);
-          pts.push(edgeAt(narrow, T * u, wide + (wn - wide) * smooth, nSign));
-        }
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-        ctx.strokeStyle = edge;
-        ctx.lineWidth = 2.5;
-        this.polyline(pts);
-        ctx.stroke();
-        ctx.fillStyle = fill;
-        this.polyline([...pts, edgeAt(narrow, T, wn - 1.5, nSign), edgeAt(narrow, 0, wn - 1.5, nSign)]);
-        ctx.closePath();
-        ctx.fill();
-      }
-    }
-  }
-
-  /**
-   * Примыкание к сквозной дороге (Т-перекрёсток, съезд): углы между кромкой боковой дороги
-   * и кромкой главной скругляются, как бордюр, а не сходятся под прямым углом.
-   */
-  private drawCorners(game: Game, level: number, view: ReturnType<Renderer['view']>): void {
-    const ctx = this.ctx;
-    const net = game.net;
-    const fill = level > 0 ? C.deck : C.road;
-    const edge = level > 0 ? C.rail : C.roadEdge;
-    // Полуширина участка x справа (+1) или слева (−1) от направления «от узла».
-    const halfOut = (x: Segment, nodeId: number, sign: number) => {
-      const e = roadEdges(x.spec);
-      return x.a === nodeId ? (sign > 0 ? e.right : e.left) : sign > 0 ? e.left : e.right;
-    };
-    const right = (d: Vec): Vec => ({ x: -d.y, y: d.x });
-    for (const n of net.nodes.values()) {
-      if (n.segments.length < 3 || Math.abs(n.level - level) > 0.01 || n.roundabout !== null || net.isCrossing(n)) continue;
-      if (n.pos.x < view.x0 || n.pos.x > view.x1 || n.pos.y < view.y0 || n.pos.y > view.y1) continue;
-      // Соседние по кругу дороги — между каждой парой свой угол.
-      const roads = net
-        .roadSegs(n)
-        .map((id) => ({ id, d: net.dirFrom(n.id, id) }))
-        .sort((x, y) => Math.atan2(x.d.y, x.d.x) - Math.atan2(y.d.y, y.d.x));
-      if (roads.length < 3) continue;
-      for (let i = 0; i < roads.length; i++) {
-        const bid = roads[i].id;
-        const kid = roads[(i + 1) % roads.length].id;
-        const b = net.segment(bid);
-        const db = roads[i].d;
-        {
-          const k = net.segment(kid);
-          const dk = roads[(i + 1) % roads.length].d;
-          // Угол между соседями по кругу (может быть и больше развёрнутого — тогда это не угол перекрёстка).
-          let between = Math.atan2(dk.y, dk.x) - Math.atan2(db.y, db.x);
-          if (between < 0) between += Math.PI * 2;
-          // Почти прямо — угла нет; под острым углом — островок с носом (drawGores), не скругление.
-          if (between > 2.95 || between < GORE_ANGLE) continue;
-          // Кромки, обращённые друг к другу: у боковой — в сторону k, у главной — в сторону боковой.
-          const sb = dot(dk, right(db)) > 0 ? 1 : -1;
-          const sk = dot(db, right(dk)) > 0 ? 1 : -1;
-          const pb = add(n.pos, scale(right(db), sb * halfOut(b, n.id, sb)));
-          const pk = add(n.pos, scale(right(dk), sk * halfOut(k, n.id, sk)));
-          // Угол P — пересечение двух кромок.
-          const den = db.x * dk.y - db.y * dk.x;
-          if (Math.abs(den) < 0.2) continue;
-          const w = sub(pk, pb);
-          const tb = (w.x * dk.y - w.y * dk.x) / den;
-          const P = add(pb, scale(db, tb));
-          // Кромки сходятся впереди по обеим дорогам — иначе это выпуклая сторона изгиба, угла нет.
-          if (tb <= 0 || dot(sub(P, pk), dk) <= 0) continue;
-          const theta = Math.acos(Math.max(-1, Math.min(1, dot(db, dk))));
-          // Длинная дуга тупого угла — только у сквозной дороги: у площадки перекрёстка она легла бы на асфальт.
-          if (theta > 2.2 && !this.throughPair(game, n.id)) continue;
-          const R = 9;
-          // Тупой угол (широкая дорога переходит в ответвление почти по прямой) — длинная плавная дуга.
-          const t = theta > 2.2 ? 25 : Math.min(R / Math.tan(theta / 2), 18);
-          if (!Number.isFinite(t) || t <= 0.5) continue;
-          const A = add(P, scale(dk, t));
-          const B = add(P, scale(db, t));
-          ctx.fillStyle = fill;
-          ctx.beginPath();
-          ctx.moveTo(P.x, P.y);
-          ctx.lineTo(A.x - dk.x * 0.5, A.y - dk.y * 0.5);
-          ctx.quadraticCurveTo(P.x, P.y, B.x, B.y);
-          ctx.closePath();
-          ctx.fill();
-          ctx.strokeStyle = edge;
-          ctx.lineWidth = 2.5;
-          ctx.lineCap = 'butt';
-          ctx.beginPath();
-          ctx.moveTo(A.x, A.y);
-          ctx.quadraticCurveTo(P.x, P.y, B.x, B.y);
-          ctx.stroke();
-        }
-      }
-    }
-  }
-
-  /**
-   * Островок съезда, как в Node Controller: где съезд под острым углом отходит от дороги
-   * (или вливается в неё), между их сплошными кромками — асфальт до скруглённого носа
-   * и штриховка «ёлочкой». Вершины ёлочки смотрят навстречу движению по съезду.
-   */
-  private drawGores(game: Game, level: number, view: ReturnType<Renderer['view']>, phase: 'fill' | 'paint'): void {
-    const net = game.net;
-    const z = this.camera.zoom;
-    if (phase === 'paint' && z < 0.35) return;
-    const fill = level > 0 ? C.deck : C.road;
-    const curb = level > 0 ? C.rail : C.roadEdge;
-    for (const n of net.nodes.values()) {
-      if (n.segments.length < 3 || Math.abs(n.level - level) > 0.01 || n.roundabout !== null || net.isCrossing(n)) continue;
-      if (n.pos.x < view.x0 - 100 || n.pos.x > view.x1 + 100 || n.pos.y < view.y0 - 100 || n.pos.y > view.y1 + 100) continue;
-      // Пары соседних дорог под острым углом: развилка, съезд или вливание.
-      const roads = net.roadSegs(n);
-      for (let i = 0; i < roads.length; i++) {
-        for (let j = i + 1; j < roads.length; j++) {
-          const x = net.segment(roads[i]);
-          const y = net.segment(roads[j]);
-          if (dot(net.dirFrom(n.id, x.id), net.dirFrom(n.id, y.id)) <= Math.cos(GORE_ANGLE)) continue;
-          // «Съезд» — односторонняя или более узкая из двух: по ней видно, куда едут.
-          const yIsBranch = (isRamp(y.spec) && !isRamp(x.spec)) || (isRamp(y.spec) === isRamp(x.spec) && halfWidth(y.spec) <= halfWidth(x.spec));
-          const [b, k] = yIsBranch ? [y, x] : [x, y];
-          this.drawGore(game, n.id, b, k, phase, fill, curb);
-        }
-      }
-    }
-  }
-
-  /** Островок между дорогами b и k, которые расходятся от узла под острым углом. */
-  /**
-   * Геометрия островка между b (съезд) и k (дорога), расходящимися от узла под острым углом:
-   * с какой стороны кромки смотрят друг на друга, где нарисованные кромки расходятся (d0)
-   * и где нос (d1). Нет островка — null.
-   */
-  private goreGeom(game: Game, nodeId: number, b: Segment, k: Segment) {
-    const net = game.net;
-    const right = (d: Vec): Vec => ({ x: -d.y, y: d.x });
-    const halfOut = (x: Segment, sign: number) => {
-      const e = roadEdges(x.spec);
-      return x.a === nodeId ? (sign > 0 ? e.right : e.left) : sign > 0 ? e.left : e.right;
-    };
-    // Точка на расстоянии d от узла вдоль участка, смещённая вбок (вправо «от узла» — плюс).
-    const along = (x: Segment, d: number, off: number): Vec => {
-      const cs = x.a === nodeId ? Math.min(d, x.length) : Math.max(0, x.length - d);
-      const p = x.lut.pointAt(cs);
-      let t = x.lut.tangentAt(cs);
-      if (x.a !== nodeId) t = scale(t, -1);
-      return add(p, scale(right(t), off));
-    };
-    // Направление участка «от узла» на расстоянии d.
-    const away = (x: Segment, d: number): Vec => {
-      const t = x.lut.tangentAt(x.a === nodeId ? Math.min(d, x.length) : Math.max(0, x.length - d));
-      return x.a === nodeId ? t : scale(t, -1);
-    };
-    const db = net.dirFrom(nodeId, b.id);
-    const dk = net.dirFrom(nodeId, k.id);
-    const sb = dot(dk, right(db)) > 0 ? 1 : -1;
-    const sk = dot(db, right(dk)) > 0 ? 1 : -1;
-    const hb = halfOut(b, sb);
-    const hk = halfOut(k, sk);
-    // Расхождение кромок (нарисованных линий) на расстоянии d: плюс — съезд уже снаружи.
-    const gap = (d: number) => dot(sub(along(b, d, sb * (hb - 1.8)), along(k, d, sk * (hk - 1.8))), scale(right(dk), sk));
-    const maxD = Math.min(b.length, k.length) * 0.9;
-    let d0 = -1;
-    let d1 = -1;
-    for (let d = 2; d <= maxD; d += 2) {
-      const g = gap(d);
-      if (d0 < 0 && g > 0) d0 = d;
-      if (d0 >= 0 && (g > 12 || d - d0 > 90)) {
-        d1 = d;
-        break;
-      }
-    }
-    if (d0 < 0 || d1 < 0 || d1 - d0 < 10) return null;
-    return { d0, d1, db, dk, sb, sk, hb, hk, along, away, right };
-  }
-
-  /**
-   * Дорога, которая подходит к узлу почти напротив съезда: её кромка с внешней стороны съезда
-   * переходит во внешнюю кромку съезда. drop — она шире дороги k с этой стороны:
-   * лишняя полоса уходит в съезд.
-   */
-  private goreFeed(game: Game, nodeId: number, b: Segment, k: Segment, geom: NonNullable<ReturnType<Renderer['goreGeom']>>) {
-    const net = game.net;
-    const n = net.node(nodeId);
-    const { d0, d1, db, sb, hb, hk, along, away, right } = geom;
-    const inc = net
-      .roadSegs(n)
-      .filter((id) => id !== b.id && id !== k.id)
-      .map((id) => net.segment(id))
-      .sort((x, y) => dot(net.dirFrom(nodeId, x.id), db) - dot(net.dirFrom(nodeId, y.id), db))[0];
-    if (!inc || dot(net.dirFrom(nodeId, inc.id), db) > -Math.cos(0.7)) return null;
-    const outer = scale(right(db), -sb);
-    const si = dot(outer, right(net.dirFrom(nodeId, inc.id))) > 0 ? 1 : -1;
-    const ei = roadEdges(inc.spec);
-    const hi = inc.a === nodeId ? (si > 0 ? ei.right : ei.left) : si > 0 ? ei.left : ei.right;
-    const T = Math.min(inc.length * 0.6, Math.max(25, (d1 - d0) * 0.6, n.radius + 10));
-    // Наружу от входящей дороги (в сторону внешней кромки съезда).
-    const lat = scale(right(net.dirFrom(nodeId, inc.id)), si);
-    const ctrl = (inset: number, r: number): [Vec, Vec, Vec, Vec] => {
-      const p0 = along(inc, T, si * (hi - inset));
-      const p3 = along(b, r, -sb * (hb - inset));
-      const t3 = away(b, r);
-      const reach = dist(p0, p3) * 0.4;
-      // Если съезд уходит вбок круче, чем расходятся кромки, подход к нему короче — иначе кривая провиснет внутрь.
-      const slope = dot(t3, lat);
-      const reach3 = slope > 0.01 ? Math.min(reach, Math.max(reach * 0.35, dot(sub(p3, p0), lat) / slope)) : reach;
-      return [p0, sub(p0, scale(away(inc, T), reach)), sub(p3, scale(t3, reach3)), p3];
-    };
-    // Съезд со своей разметкой начинается там, где выходит из полосы дороги. Если в него уходит
-    // своя полоса, там он ещё не дальше кромки входящей дороги — кривая встречает его дальше.
-    const drop = hi > hk + 3;
-    const rs = Math.max(n.radius + 1, d0);
-    let r = rs;
-    for (let at = rs; drop && at <= Math.min(b.length * 0.8, rs + 300); at += 5) {
-      const [p0, p1, p2, p3] = ctrl(0, at);
-      r = at;
-      if (dot(sub(p2, p0), lat) > -0.5 && dist(p2, p3) > dist(p0, p1) * 0.9) break;
-    }
-    /** Кривая от кромки входящей дороги (в T от узла) до внешней кромки съезда (в r); inset — отступ внутрь асфальта. */
-    const curve = (inset: number): Vec[] => {
-      const [p0, p1, p2, p3] = ctrl(inset, r);
-      return Array.from({ length: 25 }, (_, i) => cubicBezier(p0, p1, p2, p3, i / 24));
-    };
-    return { inc, si, hi, T, rs, r, curve, drop };
-  }
-
-  /**
-   * Где у съезда начинается своя разметка: если он отходит от дороги островком — там,
-   * где его кромка выходит из полосы дороги (иначе линии съезда легли бы поперёк её полосы).
-   */
-  private goreStartOf(game: Game, nodeId: number, s: Segment): number {
-    const net = game.net;
-    const n = net.nodes.get(nodeId);
-    if (!n || !isRamp(s.spec) || n.roundabout !== null || net.roadSegs(n).length < 3) return 0;
-    const ds = net.dirFrom(nodeId, s.id);
-    let k: Segment | null = null;
-    let best = Math.cos(GORE_ANGLE);
-    for (const id of net.roadSegs(n)) {
-      if (id === s.id) continue;
-      const c = dot(ds, net.dirFrom(nodeId, id));
-      if (c > best) {
-        best = c;
-        k = net.segment(id);
-      }
-    }
-    // Съезд — тот же выбор, что в drawGores: односторонняя или более узкая из двух.
-    if (!k || (isRamp(k.spec) && halfWidth(k.spec) < halfWidth(s.spec))) return 0;
-    return this.goreGeom(game, nodeId, s, k)?.d0 ?? 0;
-  }
-
-  /**
-   * Островок между b (съезд) и k (дорога). fill — асфальт до круглого носа и бордюр носа
-   * (до разметки); paint — сплошной контур, «ёлочка», отвод внешней кромки съезда от кромки
-   * дороги и стёртая кромка дороги там, где в съезд въезжают (после разметки, поверх неё).
-   */
-  private drawGore(game: Game, nodeId: number, b: Segment, k: Segment, phase: 'fill' | 'paint', fill: string, curb: string): void {
-    const ctx = this.ctx;
-    const n = game.net.node(nodeId);
-    const geom = this.goreGeom(game, nodeId, b, k);
-    if (!geom) return;
-    const { d0, d1, db, dk, sb, sk, hb, hk, right, along } = geom;
-    const feed = (isTrunk(b.spec.cls) || isRamp(b.spec)) && (isTrunk(k.spec.cls) || isRamp(k.spec)) ? this.goreFeed(game, nodeId, b, k, geom) : null;
-    const span = (x: Segment, a: number, z: number, off: number) => {
-      const steps = Math.max(8, Math.ceil(Math.abs(z - a) / 5));
-      return Array.from({ length: steps + 1 }, (_, i) => along(x, a + ((z - a) * i) / steps, off));
-    };
-    // Ось островка (от узла); нос — круглое «U», обращённое к узлу.
-    const axis = add(dk, db);
-    const u = scale(axis, 1 / (Math.hypot(axis.x, axis.y) || 1));
-    /** Контур от узла вдоль кромки k (смещение offK), «U» у носа и обратно вдоль кромки b. */
-    const outline = (offK: number, offB: number, end: number): { pts: Vec[]; nose: Vec[] } => {
-      const steps = Math.max(4, Math.ceil((end - d0) / 4));
-      const ds = Array.from({ length: steps + 1 }, (_, i) => d0 + ((end - d0) * i) / steps);
-      const pk = ds.map((d) => along(k, d, sk * offK));
-      const pb = ds.map((d) => along(b, d, sb * offB));
-      const e1 = pk[pk.length - 1];
-      const e2 = pb[pb.length - 1];
-      const w = dist(e1, e2);
-      const c1 = sub(e1, scale(u, w * 0.6));
-      const c2 = sub(e2, scale(u, w * 0.6));
-      const nose: Vec[] = [];
-      for (let i = 0; i <= 12; i++) nose.push(cubicBezier(e1, c1, c2, e2, i / 12));
-      return { pts: [...pk, ...nose.slice(1, -1), ...pb.reverse()], nose };
-    };
-    if (phase === 'fill') {
-      // Асфальт от кромки входящей дороги до внешней кромки съезда: без ступеньки и травы в углу у узла.
-      if (feed) {
-        const edge = feed.curve(0);
-        ctx.strokeStyle = curb;
-        ctx.lineWidth = 2.5;
-        ctx.lineCap = 'round';
-        this.polyline(edge);
-        ctx.stroke();
-        ctx.fillStyle = fill;
-        this.polyline([...edge, ...span(b, feed.r, 0, 0), ...span(feed.inc, 0, feed.T, 0)]);
-        ctx.closePath();
-        ctx.fill();
-        // Бордюр, зашедший на проезжую часть самих дорог, закрываем их асфальтом.
-        ctx.strokeStyle = fill;
-        ctx.lineCap = 'butt';
-        for (const [x, z] of [
-          [feed.inc, feed.T],
-          [b, feed.r],
-        ] as const) {
-          const e = roadEdges(x.spec);
-          ctx.lineWidth = e.left + e.right;
-          this.polyline(span(x, 0, z, ((x.a === nodeId ? 1 : -1) * (e.right - e.left)) / 2));
-          ctx.stroke();
-        }
-      }
-      // Асфальт между кромками дорог до носа: закрывает траву клина.
-      const asphalt = outline(hk, hb, d1);
-      ctx.fillStyle = fill;
-      this.polyline(asphalt.pts);
-      ctx.closePath();
-      ctx.fill();
-      // Бордюр носа — тонкий, как кромка дороги.
-      ctx.strokeStyle = curb;
-      ctx.lineWidth = 1.6;
-      ctx.lineCap = 'round';
-      this.polyline(asphalt.nose);
-      ctx.stroke();
-      return;
-    }
-    // Нарисованные кромки и «ёлочка» — только если у обеих дорог есть свои кромки.
-    if (!((isTrunk(b.spec.cls) || isRamp(b.spec)) && (isTrunk(k.spec.cls) || isRamp(k.spec)))) return;
-    const erase = (pts: Vec[]) => {
-      ctx.strokeStyle = fill;
-      ctx.lineWidth = 2.4;
-      ctx.lineCap = 'butt';
-      this.polyline(pts);
-      ctx.stroke();
-    };
-    const solid = (pts: Vec[]) => {
-      ctx.strokeStyle = C.dash;
-      ctx.lineWidth = 1;
-      this.polyline(pts);
-      ctx.stroke();
-    };
-    // Там, где в съезд перестраиваются, кромки дороги нет: от узла до островка полоса съезда открыта.
-    // Если же в съезд уходит своя полоса, кромка дороги — это граница этой полосы, она остаётся.
-    if (!feed?.drop) erase(span(k, 0, d0, sk * (hk - 1.8)));
-    if (feed) {
-      const { inc, si, hi, T, rs, r } = feed;
-      // Внешняя кромка съезда плавно продолжает кромку входящей дороги — до места, откуда у съезда своя разметка.
-      erase(span(inc, 0, T, si * (hi - 1.8)));
-      if (r > rs) erase(span(b, rs, r, -sb * (hb - 1.8)));
-      solid(feed.curve(1.8));
-      if (feed.drop) {
-        // Пунктир между уходящей полосой и остальными перед узлом становится сплошным и переходит в кромку дороги.
-        const div = hi - ROAD_MARGIN - Math.round((hi - hk) / LANE_W) * LANE_W;
-        erase(span(inc, 0, T, si * div));
-        solid(
-          Array.from({ length: 13 }, (_, i) => {
-            const t = i / 12;
-            return along(inc, T * (1 - t), si * (div + (hk - 1.8 - div) * t * t * (3 - 2 * t)));
-          }),
-        );
-      }
-    }
-    // Контур островка — на 1.8 внутри асфальта, с таким же круглым носом.
-    const paint = outline(hk - 1.8, hb - 1.8, d1 - 5);
-    ctx.save();
-    this.polyline(paint.pts);
-    ctx.closePath();
-    ctx.clip();
-    // Навстречу движению: на съезде с дороги едут от узла — вершины к узлу, на въезде — наоборот.
-    const diverge = (b.a === n.id) === b.spec.lanesF > 0;
-    const v = right(u);
-    const back = diverge ? 1 : -1;
-    const armLen = dist(along(k, d1, sk * hk), along(b, d1, sb * hb)) + 4;
-    const start = scale(add(paint.pts[0], paint.pts[paint.pts.length - 1]), 0.5);
-    ctx.strokeStyle = C.dash;
-    ctx.lineWidth = 1.1;
-    ctx.beginPath();
-    // Плечи — под 60° к оси островка: чёткие «галочки», не сливаются в зигзаг.
-    for (let t = -4; t <= d1 - d0 + 8; t += 5) {
-      const apex = add(start, scale(u, t));
-      for (const side of [1, -1]) {
-        const arm = add(scale(u, back * 0.5), scale(v, side * 0.87));
-        const end = add(apex, scale(arm, armLen));
-        ctx.moveTo(apex.x, apex.y);
-        ctx.lineTo(end.x, end.y);
-      }
-    }
-    ctx.stroke();
-    ctx.restore();
-    ctx.lineWidth = 1;
-    this.polyline(paint.pts);
-    ctx.stroke();
   }
 
   /** Насыпь со щебнем и шпалы; на мосту и эстакаде — только шпалы на настиле. */
@@ -1293,7 +525,7 @@ export class Renderer {
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     for (const s of segs) {
-      const sl = this.cache.get(s.id)!.rail?.sleepers ?? [];
+      const sl = this.cache.get(s.id)!.rail.sleepers;
       for (let i = 0; i + 1 < sl.length; i += 2) {
         ctx.moveTo(sl[i].x, sl[i].y);
         ctx.lineTo(sl[i + 1].x, sl[i + 1].y);
@@ -1311,7 +543,7 @@ export class Renderer {
     ctx.lineWidth = Math.max(1.1, 0.8 / this.camera.zoom);
     ctx.beginPath();
     for (const s of segs) {
-      for (const r of this.cache.get(s.id)!.rail?.rails ?? []) r.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      for (const r of this.cache.get(s.id)!.rail.rails) r.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
     }
     ctx.stroke();
   }
@@ -1403,109 +635,6 @@ export class Renderer {
     }
   }
 
-  private drawMarkings(segs: Segment[]): void {
-    if (this.camera.zoom < 0.35) return;
-    const ctx = this.ctx;
-    ctx.lineCap = 'butt';
-    // Барьер автомагистрали: бетонная полоса с отбойником посередине.
-    for (const [color, width] of [
-      ['#9aa1aa', 4],
-      ['#e8ebee', 1.6],
-    ] as const) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width;
-      ctx.beginPath();
-      for (const s of segs) {
-        for (const m of this.cache.get(s.id)!.markings) {
-          if (m.style === 'barrier') m.pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-        }
-      }
-      ctx.stroke();
-    }
-    for (const style of ['dash', 'divider', 'divdash', 'edge'] as const) {
-      const yellow = style === 'divider' || style === 'divdash';
-      ctx.strokeStyle = yellow ? C.divider : C.dash;
-      ctx.lineWidth = yellow ? 1.4 : 1;
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      for (const s of segs) {
-        for (const m of this.cache.get(s.id)!.markings) {
-          if (m.style !== style) continue;
-          m.pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-        }
-      }
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
-
-    ctx.fillStyle = C.dash;
-    for (const s of segs) {
-      if (!isOneWay(s.spec) || s.length < 40) continue;
-      for (const frac of s.length > 160 ? [0.3, 0.7] : [0.5]) {
-        const at = s.length * frac;
-        const p = s.lut.pointAt(at);
-        const d = s.lut.tangentAt(at);
-        const nrm = { x: -d.y, y: d.x };
-        for (let i = 0; i < s.spec.lanesF; i++) {
-          const o = (i - (s.spec.lanesF - 1) / 2) * LANE_W;
-          const c = add(p, scale(nrm, o));
-          ctx.beginPath();
-          ctx.moveTo(c.x + d.x * 3.5, c.y + d.y * 3.5);
-          ctx.lineTo(c.x - d.x * 2 + nrm.x * 2, c.y - d.y * 2 + nrm.y * 2);
-          ctx.lineTo(c.x - d.x * 2 - nrm.x * 2, c.y - d.y * 2 - nrm.y * 2);
-          ctx.fill();
-        }
-      }
-    }
-  }
-
-  /**
-   * Пешеходные переходы («зебра») на городских перекрёстках: поперёк каждого подъезда
-   * у самого входа в перекрёсток — машины останавливаются перед ними. На примыкании к сквозной
-   * улице — только поперёк боковой. У магистралей, съездов и переездов переходов нет.
-   */
-  private drawCrosswalks(game: Game, view: ReturnType<Renderer['view']>): void {
-    if (this.camera.zoom < 0.6) return;
-    const ctx = this.ctx;
-    const net = game.net;
-    // Улицы (и односторонние) и двусторонние проспекты; односторонний проспект — это съезд развязки.
-    const town = (sp: RoadSpec) => sp.cls === 'street' || (sp.cls === 'avenue' && !isOneWay(sp));
-    ctx.strokeStyle = C.dash;
-    ctx.lineWidth = 1.7;
-    ctx.lineCap = 'butt';
-    ctx.beginPath();
-    for (const n of net.nodes.values()) {
-      if (n.level !== 0 || n.roundabout !== null || n.buildingId !== null || net.isCrossing(n)) continue;
-      const roads = net.roadSegs(n);
-      if (roads.length < 3 || roads.length !== n.segments.length) continue;
-      if (n.pos.x < view.x0 || n.pos.x > view.x1 || n.pos.y < view.y0 || n.pos.y > view.y1) continue;
-      const segs = roads.map((id) => net.segment(id));
-      if (!segs.every((s) => town(s.spec))) continue;
-      const pair = this.throughPair(game, n.id);
-      // Сквозная улица: переход на боковой — за кромкой главной.
-      const mainHalf = pair ? Math.max(...pair.map((id) => halfWidth(net.segment(id).spec))) : 0;
-      for (const s of segs) {
-        if (pair?.includes(s.id)) continue;
-        const from = pair ? mainHalf + 2 : n.radius - 6.5;
-        const to = from + 5.5;
-        if (from < 1 || to > s.length * 0.4) continue;
-        const e = roadEdges(s.spec);
-        const atA = s.a === n.id;
-        const c0 = atA ? from : s.length - from;
-        const c1 = atA ? to : s.length - to;
-        const p0 = s.lut.pointAt(c0);
-        const p1 = s.lut.pointAt(c1);
-        const t = s.lut.tangentAt((c0 + c1) / 2);
-        const N = { x: -t.y, y: t.x };
-        for (let o = -e.left + 2; o <= e.right - 1.5; o += 3.2) {
-          ctx.moveTo(p0.x + N.x * o, p0.y + N.y * o);
-          ctx.lineTo(p1.x + N.x * o, p1.y + N.y * o);
-        }
-      }
-    }
-    ctx.stroke();
-  }
-
   /** Стоп-линии на въездах перекрёстков: пунктир — «уступи дорогу», сплошная — у светофора. */
   private drawStopLines(game: Game, view: ReturnType<Renderer['view']>): void {
     if (this.camera.zoom < 0.6) return;
@@ -1536,8 +665,7 @@ export class Renderer {
   }
 
   /** Карта пробок: каждая связь графа движения — цветом загрузки (зелёный — свободно, красный — стоят). */
-  private drawHeatmap(game: Game, level: number): void {
-    if (level !== 0) return;
+  private drawHeatmap(game: Game): void {
     const ctx = this.ctx;
     const g = game.roads.graph;
     const view = this.view();
@@ -2377,7 +1505,6 @@ export class Renderer {
     }
     if (o.chainStart) this.marker(o.chainStart.pos, '#2f80ed', o.chainStart.kind === 'free' ? 'small' : 'ring');
     if (o.snap) this.marker(o.snap.pos, o.plan && !o.plan.ok ? '#e8483f' : '#2f80ed', o.snap.kind === 'free' ? 'small' : 'ring');
-    if (o.upgrade) this.drawUpgradePreview(o.upgrade.curve, o.upgrade.spec);
     if (o.highlightSeg !== null) {
       const s = game.net.segments.get(o.highlightSeg);
       const c = s && this.cache.get(s.id);
@@ -2448,64 +1575,6 @@ export class Renderer {
     this.polyline([...left, ...right.reverse()]);
     ctx.closePath();
     ctx.fill();
-  }
-
-  private drawUpgradePreview(curve: Cubic, spec: RoadSpec): void {
-    const ctx = this.ctx;
-    const lut = new CurveLUT(curve);
-    const e = roadEdges(spec);
-    const off = (e.right - e.left) / 2;
-    const surface = lut.offsetPolyline(off, 0, lut.length, 3);
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'butt';
-    ctx.strokeStyle = 'rgba(46, 157, 87, 0.6)';
-    ctx.lineWidth = e.left + e.right + 5;
-    this.polyline(surface);
-    ctx.stroke();
-    ctx.strokeStyle = C.road;
-    ctx.lineWidth = e.left + e.right;
-    this.polyline(surface);
-    ctx.stroke();
-    // Разметка будущей дороги — как у настоящей: полосы, осевая, кромки.
-    const m = medianHalf(spec);
-    const line = (o: number, color: string, width: number, dash: number[]) => {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width;
-      ctx.setLineDash(dash);
-      this.polyline(lut.offsetPolyline(o, 0, lut.length, 4));
-      ctx.stroke();
-    };
-    if (isOneWay(spec)) {
-      const lanes = spec.lanesF + spec.lanesB;
-      for (let i = 1; i < lanes; i++) line((i - lanes / 2) * LANE_W, C.dash, 1, [5, 6]);
-    } else {
-      const wide = spec.lanesF + spec.lanesB > 2;
-      if (m) line(0, '#9aa1aa', 4, []);
-      else line(0, wide ? C.divider : C.dash, wide ? 1.4 : 1, wide ? [] : [5, 6]);
-      for (let i = 1; i < spec.lanesF; i++) line(m + i * LANE_W, C.dash, 1, [5, 6]);
-      for (let i = 1; i < spec.lanesB; i++) line(-m - i * LANE_W, C.dash, 1, [5, 6]);
-    }
-    if (isTrunk(spec.cls) || isOneWay(spec)) {
-      line(e.right - 1.8, C.dash, 1, []);
-      line(-e.left + 1.8, C.dash, 1, []);
-    }
-    ctx.setLineDash([]);
-    // Куда едут по односторонней — стрелки вдоль дороги.
-    if (isOneWay(spec)) {
-      const forward = spec.lanesF > 0;
-      ctx.fillStyle = 'rgba(255,255,255,0.9)';
-      for (let s = 20; s < lut.length - 10; s += 45) {
-        const p = lut.pointAt(s);
-        let t = lut.tangentAt(s);
-        if (!forward) t = scale(t, -1);
-        const n = { x: -t.y, y: t.x };
-        ctx.beginPath();
-        ctx.moveTo(p.x + t.x * 4, p.y + t.y * 4);
-        ctx.lineTo(p.x - t.x * 3 + n.x * 3, p.y - t.y * 3 + n.y * 3);
-        ctx.lineTo(p.x - t.x * 3 - n.x * 3, p.y - t.y * 3 - n.y * 3);
-        ctx.fill();
-      }
-    }
   }
 
   /**
@@ -2919,38 +1988,6 @@ export function smoothPath(ctx: CanvasRenderingContext2D, pts: Vec[], k = 1): vo
   }
   const last = pts[pts.length - 1];
   ctx.lineTo(last.x * k, last.y * k);
-}
-
-/**
- * Нарезает линию на штрихи (5 из каждых 11 единиц), растягивая шаг так, чтобы на обоих концах
- * осталось по половине пробела: соседние участки на стыке продолжают пунктир ровно.
- */
-function cutDashes(pts: Vec[], dash = 5, period = 11): Vec[][] {
-  const cum = [0];
-  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
-  const L = cum[cum.length - 1];
-  if (L < dash) return [];
-  const k = Math.max(1, Math.round(L / period));
-  const p = L / k;
-  const d = (p * dash) / period;
-  // Точка на расстоянии u вдоль ломаной.
-  let j = 1;
-  const at = (u: number): Vec => {
-    while (j < cum.length - 1 && cum[j] < u) j++;
-    const seg = cum[j] - cum[j - 1] || 1;
-    const f = Math.max(0, Math.min(1, (u - cum[j - 1]) / seg));
-    return { x: pts[j - 1].x + (pts[j].x - pts[j - 1].x) * f, y: pts[j - 1].y + (pts[j].y - pts[j - 1].y) * f };
-  };
-  const out: Vec[][] = [];
-  for (let i = 0; i < k; i++) {
-    const u0 = i * p + (p - d) / 2;
-    const u1 = u0 + d;
-    const piece = [at(u0)];
-    for (let q = j; q < cum.length - 1 && cum[q] < u1; q++) if (cum[q] > u0) piece.push(pts[q]);
-    piece.push(at(u1));
-    out.push(piece);
-  }
-  return out;
 }
 
 function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {

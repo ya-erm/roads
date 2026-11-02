@@ -97,12 +97,6 @@ export const LEVELS = [
 export const totalLanes = (s: RoadSpec) => s.lanesF + s.lanesB;
 export const isOneWay = (s: RoadSpec) => s.lanesB === 0 || s.lanesF === 0;
 
-/** Смещение полосы вправо от направления движения. index 0 — крайняя левая. */
-export function laneOffset(spec: RoadSpec, count: number, index: number): number {
-  if (isOneWay(spec)) return (index - (count - 1) / 2) * LANE_W;
-  return (index + 0.5) * LANE_W + medianHalf(spec);
-}
-
 /** Половина разделительной полосы (0, если её нет). */
 export const medianHalf = (spec: RoadSpec) => (isDivided(spec) ? MEDIAN / 2 : 0);
 

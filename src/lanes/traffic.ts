@@ -2,7 +2,7 @@ import { IDM, LIGHTS } from '../config';
 import { lerp as lerpNum } from '../core/math';
 import { rightNormal, scale, add, type Vec } from '../core/vec';
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
-import { GLane, GMove, GNode, LaneGraph } from './graph';
+import { GLane, GLink, GMove, GNode, LaneGraph } from './graph';
 import { findLaneRoute } from './routing';
 
 export interface LaneTrafficEvents {
@@ -20,6 +20,26 @@ export interface LaneSpawn extends VehicleSpec {
 
 /** Сколько машина смотрит вперёд через продолжения полос в поисках лидера. */
 const LOOKAHEAD = 250;
+/** Насколько вперёд по маршруту машина выбирает полосу: к съезду и повороту перестраивается заранее. */
+const PLAN_AHEAD = 600;
+/** Сколько дороги нужно на одно перестроение: на связи короче — перестраиваться тяжело. */
+const CHANGE_ROOM = 120;
+
+/**
+ * Трудность n перестроений на отрезке длиной room: само число перестроений и штраф, если места
+ * на них меньше, чем надо, — тогда лучше перестроиться раньше, на связи подлиннее.
+ */
+const changePenalty = (n: number, room: number) => (n ? n + (Math.max(0, n * CHANGE_ROOM - room) / CHANGE_ROOM) * 3 : 0);
+
+/**
+ * План полос на связи маршрута: stay — трудность дальнейшего пути, если проехать связь по этой полосе
+ * без перестроений; cost — то же, если до конца связи можно перестроиться (на всю её длину).
+ */
+interface LanePlan {
+  link: GLink;
+  stay: Map<number, number>;
+  cost: Map<number, number>;
+}
 /** После стольких секунд ожидания на второстепенной машину пропускают, даже если главная не пустеет. */
 const COURTESY = 40;
 /** Бронь узла машиной, которой ехать до него дольше, — «мягкая»: её можно перехватить. */
@@ -68,6 +88,8 @@ export class LaneTraffic {
   totalTripTime = 0;
   /** Шлагбаумы по полотнам. */
   barriers = new Map<number, Barrier[]>();
+  /** План полос машины (см. lanePlan) — пока те же граф, маршрут и связь маршрута. */
+  private plans = new WeakMap<Vehicle, { graph: LaneGraph; route: number[]; from: number; plan: LanePlan[] }>();
 
   constructor(
     public graph: LaneGraph,
@@ -280,33 +302,86 @@ export class LaneTraffic {
 
   // ---------- Перестроения ----------
 
+  /**
+   * План полос по маршруту от текущей связи машины: сама связь и следующие — пока они начинаются
+   * ближе PLAN_AHEAD от её конца. Считается с конца: трудность — сумма перестроений со штрафом за тесноту.
+   */
+  private lanePlan(veh: Vehicle): LanePlan[] {
+    const hit = this.plans.get(veh);
+    if (hit && hit.graph === this.graph && hit.route === veh.route && hit.from === veh.routeIndex) return hit.plan;
+    const route = veh.route;
+    const from = veh.routeIndex;
+    const links: GLink[] = [];
+    for (let i = from, dist = 0; i < route.length && dist < PLAN_AHEAD; i++) {
+      const link = this.graph.links.get(route[i]);
+      if (!link) break;
+      links.push(link);
+      if (i > from) dist += link.length;
+    }
+    const plan: LanePlan[] = new Array(links.length);
+    for (let k = links.length - 1; k >= 0; k--) {
+      const link = links[k];
+      const next = route[from + k + 1];
+      const stay = new Map<number, number>();
+      for (const l of link.lanes) {
+        let v = Infinity;
+        if (next === undefined) v = 0;
+        else if (k === links.length - 1) v = this.hasTransition(l, next) ? 0 : Infinity;
+        else for (const m of this.graph.movesFrom.get(l.id) ?? []) if (m.outLink === next) v = Math.min(v, plan[k + 1].cost.get(m.outLane) ?? Infinity);
+        stay.set(l.id, v);
+      }
+      const cost = new Map<number, number>();
+      for (const l of link.lanes) cost.set(l.id, this.bestLane(link, l, link.length, stay).cost);
+      plan[k] = { link, stay, cost };
+    }
+    this.plans.set(veh, { graph: this.graph, route, from, plan });
+    return plan;
+  }
+
+  /** Куда с полосы l перестроиться на связи (места — room), чтобы дальше было легче всего; сама l — при равенстве. */
+  private bestLane(link: GLink, l: GLane, room: number, stay: Map<number, number>): { lane: GLane; cost: number } {
+    let best = { lane: l, cost: stay.get(l.id) ?? Infinity };
+    for (const o of link.lanes) {
+      const c = changePenalty(Math.abs(o.index - l.index), room) + (stay.get(o.id) ?? Infinity);
+      if (c < best.cost - 1e-6) best = { lane: o, cost: c };
+    }
+    return best;
+  }
+
   private laneChange(veh: Vehicle, dt: number): void {
     veh.lcCooldown -= dt;
     if (veh.lcCooldown > 0 || veh.granted) return;
     const lane = this.currentLane(veh);
     if (!lane) return;
     const link = this.graph.links.get(lane.link)!;
-    if (link.lanes.length < 2) return;
-    const next = veh.routeIndex < veh.route.length - 1 ? veh.route[veh.routeIndex + 1] : undefined;
-    const ok = (l: GLane) => next === undefined || this.hasTransition(l, next);
+    if (link.lanes.length < 2 || link.id !== veh.route[veh.routeIndex]) return;
+    const plan = this.lanePlan(veh);
+    const { stay } = plan[0];
     const remaining = lane.length - veh.s;
+    // Трудность пути с полосы, если перестраиваться отсюда до конца связи.
+    const costFrom = (l: GLane) => this.bestLane(link, l, remaining, stay).cost;
     let target: GLane | undefined;
-    let mandatory = false;
-    if (!ok(lane)) {
-      // Полоса кончается или ведёт не туда — перестраиваемся к ближайшей подходящей.
-      const good = link.lanes.filter(ok).map((l) => l.index);
-      if (!good.length) return;
-      const nearest = good.reduce((a, b) => (Math.abs(b - lane.index) < Math.abs(a - lane.index) ? b : a));
-      target = link.lanes[lane.index + Math.sign(nearest - lane.index)];
-      mandatory = true;
+    let urgency = 0;
+    let strategic = false;
+    const goal = this.bestLane(link, lane, remaining, stay).lane;
+    const end = goal === lane ? null : this.laneEnd(veh, lane, plan);
+    veh.mergeWait = 0;
+    if (end && end.dist < PLAN_AHEAD) {
+      // Дальше по маршруту с другой полосы проще (съезд, поворот, полоса кончается) — перестраиваемся заранее;
+      // чем ближе место, где своя полоса уже не ведёт, и чем больше там перестроений, тем настойчивее.
+      target = link.lanes[lane.index + Math.sign(goal.index - lane.index)];
+      urgency = Math.max(0, Math.min(1, 1 - end.dist / (end.changes * CHANGE_ROOM + 20)));
+      strategic = true;
     } else if (remaining > 50) {
       const idx = lane.vehicles.indexOf(veh);
       const leader = idx > 0 ? lane.vehicles[idx - 1] : undefined;
       const gapAhead = leader ? leader.s - leader.length - veh.s : Infinity;
       if (leader && gapAhead < 30 && leader.v < Math.min(lane.speed, veh.maxSpeed) * 0.7) {
+        const mine = costFrom(lane);
         for (const d of [-1, 1]) {
           const adj = link.lanes[lane.index + d];
-          if (!adj || !ok(adj)) continue;
+          // Обгон — только в полосу, с которой дальше не труднее.
+          if (!adj || costFrom(adj) > mine + 1e-6) continue;
           if (this.freeAhead(adj, veh.s) > gapAhead + 20) {
             target = adj;
             break;
@@ -318,13 +393,47 @@ export class LaneTraffic {
     // Через сплошную не перестраиваются.
     const leftOne = target.index < lane.index ? target : lane;
     if (leftOne.solidRight) return;
-    const urgency = mandatory ? Math.max(0, Math.min(1, 1 - remaining / 140)) : 0;
     if (this.safeToEnter(target, veh, urgency)) {
       this.moveToLane(veh, lane, target);
-      veh.lcCooldown = mandatory ? 0.5 : 3;
+      veh.lcCooldown = strategic ? 0.8 : 3;
     } else {
-      veh.lcCooldown = 0.2;
+      // Не пускают — чуть отстаём от соседнего потока, чтобы подошло окно.
+      if (strategic) veh.mergeWait = Math.max(0.5, urgency);
+      veh.lcCooldown = urgency > 0 ? 0.2 : 0.5;
     }
+  }
+
+  /**
+   * Где своя полоса (и её продолжения по маршруту) перестаёт вести дальше: сколько до этого места
+   * и сколько там перестроений до полосы, что ведёт. Ведёт до конца плана — dist = Infinity.
+   */
+  private laneEnd(veh: Vehicle, lane: GLane, plan: LanePlan[]): { dist: number; changes: number } {
+    let dist = lane.length - veh.s;
+    let cur = lane;
+    for (let k = 0; k < plan.length; k++) {
+      const p = plan[k];
+      if ((p.stay.get(cur.id) ?? Infinity) === Infinity) {
+        let changes = Infinity;
+        for (const o of p.link.lanes) if ((p.stay.get(o.id) ?? Infinity) < Infinity) changes = Math.min(changes, Math.abs(o.index - cur.index));
+        return { dist, changes: Number.isFinite(changes) ? changes : 1 };
+      }
+      if (k + 1 >= plan.length) break;
+      const next = veh.route[veh.routeIndex + k + 1];
+      let best: GLane | undefined;
+      let bestCost = Infinity;
+      for (const m of this.graph.movesFrom.get(cur.id) ?? []) {
+        if (m.outLink !== next) continue;
+        const c = plan[k + 1].cost.get(m.outLane) ?? Infinity;
+        if (c < bestCost) {
+          bestCost = c;
+          best = this.graph.lanes.get(m.outLane);
+        }
+      }
+      if (!best) return { dist, changes: 1 };
+      cur = best;
+      dist += best.length;
+    }
+    return { dist: Infinity, changes: 0 };
   }
 
   private freeAhead(lane: GLane, s: number): number {
@@ -377,16 +486,18 @@ export class LaneTraffic {
     if (own && veh.granted) return this.graph.moves.get(veh.granted);
     const next = veh.route[routeIndex + 1];
     if (next === undefined) return undefined;
-    const after = veh.route[routeIndex + 2];
+    // Полоса выезда, с которой дальше по маршруту меньше перестраиваться, — лучше.
+    const cost = this.lanePlan(veh)[routeIndex - veh.routeIndex + 1]?.cost;
+    const outs = (this.graph.movesFrom.get(lane.id) ?? []).filter((m) => m.outLink === next);
+    const easiest = Math.min(Infinity, ...outs.map((m) => cost?.get(m.outLane) ?? 0));
     let best: GMove | undefined;
     let bestScore = Infinity;
-    for (const m of this.graph.movesFrom.get(lane.id) ?? []) {
-      if (m.outLink !== next) continue;
+    for (const m of outs) {
       if (m.cont) return m;
       const out = this.graph.lanes.get(m.outLane);
       if (!out) continue;
       let score = out.vehicles.length * 3 + m.vehicles.length * 2;
-      if (after !== undefined && !this.hasTransition(out, after)) score += 40;
+      if ((cost?.get(out.id) ?? 0) > easiest + 1e-6) score += 40;
       if (own && m.key === veh.planned) score -= 2.5;
       if (score < bestScore) {
         bestScore = score;
@@ -421,7 +532,8 @@ export class LaneTraffic {
 
     const lane = this.currentLane(veh)!;
     const idx = lane.vehicles.indexOf(veh);
-    let desired = Math.min(lane.speed, veh.maxSpeed);
+    // Ждёт окна, чтобы перестроиться, — едет чуть медленнее соседнего потока.
+    let desired = Math.min(lane.speed, veh.maxSpeed) * (1 - 0.3 * (veh.mergeWait ?? 0));
     // Закрытый переезд впереди на этой связи — как стоп-линия.
     const barrier = this.barrierAhead(lane.link, veh.centerS);
     const atBarrier = barrier < Infinity ? idmAccel(veh.v, desired, barrier + IDM.minGap - 0.5, veh.v, aMax) : Infinity;

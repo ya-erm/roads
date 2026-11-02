@@ -1,11 +1,33 @@
 import { describe, expect, it } from 'vitest';
 import type { Vehicle } from '../sim/vehicle';
 import { LaneDemand } from './demand';
-import { LaneGraph } from './graph';
+import { assignLanes, LaneGraph } from './graph';
 import { LaneNet, oneWay, slot, twoWay } from './model';
 import { findLaneRoute } from './routing';
 import { buildLab } from './scenes';
 import { LaneTraffic } from './traffic';
+
+describe('Распределение полос по выездам', () => {
+  it('две полосы: правая направо и прямо, левая налево и прямо', () => {
+    const exits = [
+      { count: 1, theta: 1.5, uTurn: false },
+      { count: 2, theta: 0, uTurn: false },
+      { count: 1, theta: -1.5, uTurn: false },
+    ];
+    const [right, straight, left] = assignLanes(2, exits);
+    expect(right).toEqual([[0, 0]]);
+    expect(straight.map((p) => p[0])).toEqual([0, 1]);
+    expect(left).toEqual([[1, 0]]);
+  });
+
+  it('одна полоса расходится на две', () => {
+    const [straight] = assignLanes(1, [{ count: 2, theta: 0, uTurn: false }]);
+    expect(straight).toEqual([
+      [0, 0],
+      [0, 1],
+    ]);
+  });
+});
 
 /** Повторяемый «случайный» поток. */
 function seeded(seed: number): () => number {
@@ -75,6 +97,70 @@ describe('Полосы: движение', { timeout: 30_000 }, () => {
     });
     expect(onRamp).toBe(true);
     expect(arrived.map((x) => x.id)).toEqual([placed.id]);
+  });
+
+  it('к съезду с короткой полосой торможения перестраиваются заранее — даже из левой полосы и в плотном потоке', () => {
+    // Магистраль 2+2, перед съездом — 110 м полосы торможения (как у развязок).
+    const net = new LaneNet();
+    const a = net.addSeam({ x: -1500, y: 0 }, EAST);
+    const s = net.addSeam({ x: 0, y: 0 }, EAST);
+    const e = net.addSeam({ x: 600, y: 0 }, EAST);
+    net.addCorridor(a.id, s.id, { cls: 'highway', lanes: [...twoWay(2, 2), slot(17.5, 1, 1390)] });
+    net.addCorridor(s.id, e.id, { cls: 'highway', lanes: twoWay(2, 2) });
+    const exit = net.addSeam({ x: 560, y: 230 }, { x: 1, y: 0.25 });
+    const ramp = net.addCorridor(s.id, exit.id, { cls: 'highway', portA: 17.5, lanes: oneWay(1) });
+    const graph = new LaneGraph(net);
+    let lost = 0;
+    const traffic = new LaneTraffic(graph, { onArrive: () => {}, onLost: () => lost++ });
+    const toExit = findLaneRoute(graph, graph.outLinks.get(a.id)!, exit.id)!;
+    const through = findLaneRoute(graph, graph.outLinks.get(a.id)!, e.id)!;
+    const first = graph.links.get(toExit[0])!;
+    const [left, right] = first.lanes;
+    /** Машина в начале нужной полосы (если там есть место). */
+    const spawnIn = (lane: typeof left, target: number, route: number[]): Vehicle | null => {
+      const v = traffic.spawn({ ...CAR, targetNode: target, route });
+      if (!v) return null;
+      const from = traffic.currentLane(v)!;
+      if (from === lane) return v;
+      const last = lane.vehicles[lane.vehicles.length - 1];
+      if (last && last.s - last.length < 15) {
+        traffic.remove(v);
+        return null;
+      }
+      from.vehicles = from.vehicles.filter((x) => x !== v);
+      v.lane = lane.id;
+      lane.vehicles.push(v);
+      return v;
+    };
+    // Связь с полосой торможения — вторая на маршруте к съезду.
+    const aux = toExit[1];
+    expect(graph.links.get(aux)!.lanes).toHaveLength(3);
+    const exiting = new Set<Vehicle>();
+    const tookRamp = new Set<Vehicle>();
+    /** В какой полосе (0 — левая) машина въехала на связь с полосой торможения. */
+    const enteredIn = new Map<Vehicle, number>();
+    let tick = 0;
+    run(traffic, 400, () => {
+      tick++;
+      // Плотный поток прямо — в правой полосе, к съезду — из левой.
+      if (tick % 40 === 0) spawnIn(right, e.id, through);
+      if (tick % 75 === 0 && traffic.time < 300) {
+        const v = spawnIn(left, exit.id, toExit);
+        if (v) exiting.add(v);
+      }
+      for (const v of exiting) {
+        const lane = traffic.currentLane(v);
+        if (!lane) continue;
+        if (lane.link === aux && !enteredIn.has(v)) enteredIn.set(v, lane.index);
+        if (graph.links.get(lane.link)!.corridor === ramp.id) tookRamp.add(v);
+      }
+    });
+    expect(exiting.size).toBeGreaterThan(50);
+    expect(lost).toBe(0);
+    expect(tookRamp.size).toBe(exiting.size);
+    // К полосе торможения подъезжают уже справа, а не тормозят в левой полосе.
+    expect([...enteredIn.values()].filter((i) => i === 0)).toHaveLength(0);
+    expect(Math.max(...[...exiting].map((v) => v.stoppedTime))).toBeLessThan(1);
   });
 
   it('перед закрытым шлагбаумом машины ждут, не заезжая на переезд, и едут, когда он открыт', () => {

@@ -1,7 +1,6 @@
 import { CAR_WIDTH, LIGHTS } from '../config';
 import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub, Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
-import { assignLanes, type ConflictKind } from '../world/network';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
 import { junctionCuts, pointOff } from './geometry';
 import { Corridor, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey } from './model';
@@ -68,6 +67,50 @@ export interface GMove {
   /** Для пересечений: где на этом манёвре зона, общая с другим, [начало, конец] по длине. */
   zones: Map<string, [number, number]>;
   vehicles: Vehicle[];
+}
+
+/** Как два манёвра узла мешают друг другу: сливаются в одну полосу, пересекаются или расходятся из одной. */
+export type ConflictKind = 'merge' | 'cross' | 'diverge';
+
+/**
+ * Распределяет полосы въезда по выездам. Выезды отсортированы справа налево, полосы считаются справа.
+ * Возвращает для каждого выезда пары [полоса въезда справа, полоса выезда справа].
+ */
+export function assignLanes(inCount: number, exits: { count: number; theta: number; uTurn: boolean }[]): [number, number][][] {
+  const k = exits.length;
+  let straight = -1;
+  let bestAbs = 0.6;
+  exits.forEach((e, i) => {
+    if (!e.uTurn && Math.abs(e.theta) < bestAbs) {
+      bestAbs = Math.abs(e.theta);
+      straight = i;
+    }
+  });
+  return exits.map((e, j) => {
+    if (e.uTurn) return [[inCount - 1, e.count - 1]];
+    let lo: number;
+    let hi: number;
+    if (j === straight) {
+      lo = 0;
+      hi = inCount - 1;
+    } else {
+      lo = Math.floor((j * inCount) / k);
+      hi = Math.max(lo, Math.ceil(((j + 1) * inCount) / k) - 1);
+    }
+    const m = hi - lo + 1;
+    const p = e.count;
+    const pairs: [number, number][] = [];
+    for (let i = 0; i < m; i++) {
+      if (m <= p) {
+        const a = Math.floor((i * p) / m);
+        const b = Math.max(a, Math.ceil(((i + 1) * p) / m) - 1);
+        for (let o = a; o <= b; o++) pairs.push([lo + i, o]);
+      } else {
+        pairs.push([lo + i, Math.floor((i * p) / m)]);
+      }
+    }
+    return pairs;
+  });
 }
 
 /** Светофор: фазы — полосы въезда, которым зелёный одновременно; между фазами — жёлтый (clearing). */

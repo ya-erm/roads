@@ -3,7 +3,7 @@ import { add, dist, Vec } from '../core/vec';
 import { snapPaste } from '../lanes/fragment';
 import { profileOf } from '../lanes/model';
 import type { RoadSpec } from '../world/roadTypes';
-import { DEFAULT_RING } from './build';
+import { DEFAULT_RING } from './roads';
 import { Game } from './game';
 import { AVENUE, road, roadPlan } from './testkit';
 

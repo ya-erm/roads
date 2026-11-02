@@ -1,5 +1,5 @@
 import { dist } from '../core/vec';
-import type { RingSize } from '../game/build';
+import type { RingSize } from '../game/roads';
 import { SAVE_VERSION, type Game, type Ledger, type Partner, type TurnKind } from '../game/game';
 import { TEMPLATES } from '../game/interchange';
 import type { SaveEntry } from '../game/persist';
