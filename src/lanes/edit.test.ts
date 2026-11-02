@@ -10,6 +10,7 @@ import {
   dragLane,
   flipLane,
   joinDeadEnd,
+  lanePortsNear,
   laneStep,
   laneTipAt,
   removeEdgeLane,
@@ -299,6 +300,30 @@ describe('Полосы: инструменты', () => {
       expect(reachable(net, deadEnds(net).find((n) => n.pos.x < 100)!.id, east.id)).toBe(true);
     });
   }
+
+  it('с любой полосы у конца дороги — своя однополосная, как путь от конца пути: дорога расходится на две односторонние', () => {
+    const net = new LaneNet();
+    const a = net.addSeam({ x: 0, y: 0 }, { x: 1, y: 0 });
+    const b = net.addSeam({ x: 800, y: 0 }, { x: 1, y: 0 });
+    net.addCorridor(a.id, b.id, { cls: 'street', lanes: twoWay(1, 1) });
+    expect(lanePortsNear(net, { x: 800, y: 0 }, 30)).toHaveLength(2);
+    // Правая полоса (едут на восток, наружу) — однополосная дальше на северо-восток.
+    const out = laneTipAt(net, { x: 800, y: 3.5 }, 14);
+    expect(out).toMatchObject({ kind: 'port', out: true });
+    expect(laneStep(net, out, { x: 1000, y: 200 }, 'street', 14).what).toBe('Однополосная');
+    expect(net.problems()).toEqual([]);
+    // Левая полоса (едут к нам) сошла на нет у конца, но с неё всё равно можно начать — однополосную внутрь.
+    const inn = laneTipAt(net, { x: 800, y: -3.5 }, 14);
+    expect(inn).toMatchObject({ kind: 'port', out: false });
+    laneStep(net, inn, { x: 1000, y: -200 }, 'street', 14);
+    expect(net.problems()).toEqual([]);
+    expect(lanePortsNear(net, { x: 800, y: 0 }, 30)).toHaveLength(0);
+    const west = deadEnds(net).find((n) => n.pos.x < 100)!;
+    const ne = deadEnds(net).find((n) => n.pos.y > 150)!;
+    const se = deadEnds(net).find((n) => n.pos.y < -150)!;
+    expect(reachable(net, west.id, ne.id)).toBe(true);
+    expect(reachable(net, se.id, west.id)).toBe(true);
+  });
 
   it('снос полосы по участкам, как пути: кусок за стыком остаётся и сходит на нет отгоном', () => {
     const net = new LaneNet();

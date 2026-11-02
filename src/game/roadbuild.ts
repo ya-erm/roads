@@ -3,7 +3,7 @@ import { Cubic, minRadius } from '../core/bezier';
 import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDraft, laneStep, LaneTip, RoadOptions, taperDeadLanes } from '../lanes/edit';
 import { edgesAt, laneShare } from '../lanes/geometry';
-import { Corridor, LaneNet, LaneSlot } from '../lanes/model';
+import { Corridor, Flow, LaneNet, LaneSlot } from '../lanes/model';
 import { LEVEL_RUN, RoadClass, ROAD_CLASSES, ROAD_MARGIN } from '../world/roadTypes';
 import { halfAtS } from '../world/worldgen';
 import type { Roads } from './roads';
@@ -211,6 +211,26 @@ export class RoadBuilder {
         n.setLanes(c, p.lanes);
         // В стыке с дорогой другого профиля лишние полосы (у неё или у соседа) сходят на нет отгоном.
         taperDeadLanes(n, [c.a, c.b]);
+      },
+      { shove: true },
+    );
+  }
+
+  /** Разворот односторонней дороги — всех её кусков разом, чтобы полосы на стыках не встречались лбами. */
+  reverse(ids: number[]): RoadPlan {
+    return this.plan(
+      (n) => {
+        const nodes: number[] = [];
+        for (const id of ids) {
+          const c = n.corridors.get(id);
+          if (!c || c.ring) return false;
+          n.setLanes(
+            c,
+            c.lanes.map((l) => ({ ...l, flow: -l.flow as Flow })),
+          );
+          nodes.push(c.a, c.b);
+        }
+        taperDeadLanes(n, nodes);
       },
       { shove: true },
     );

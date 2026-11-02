@@ -1024,12 +1024,17 @@ export class Renderer {
     const toRoad = node ? sub(node.pos, fp.center) : { x: -u.y, y: u.x };
     const l = Math.hypot(toRoad.x, toRoad.y) || 1;
     const n = { x: toRoad.x / l, y: toRoad.y / l };
-    // Автобусы на посадке — вдоль бордюра, в крайней полосе.
+    // Автобусы на посадке — сами автобусы вдоль бордюра, в крайней полосе, носом по ходу (остановка справа).
+    const ahead = dot(rightNormal(u), n) < 0 ? u : scale(u, -1);
+    const buses: VehicleLook[] = [];
     for (let i = 0; i < st.occupied.length; i++) {
       const along = (i - (st.occupied.length - 1) / 2) * 14;
       const c = add(add(fp.center, scale(u, along)), scale(n, fp.h / 2 + 2 + LANE_W / 2));
-      this.drawFootprint({ center: c, w: 12, h: 4.6, angle: fp.angle }, '#e07b39', '#8a4a22', 0.8);
+      const look = game.fleetLookAt(st.occupied[i], c, ahead);
+      if (look) buses.push(look);
+      else this.drawFootprint({ center: c, w: 12, h: 4.6, angle: fp.angle }, '#e07b39', '#8a4a22', 0.8);
     }
+    if (buses.length) this.drawVehicles(buses);
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 1.5, y: fp.center.y + 2 } }, 'rgba(30,40,25,0.2)');
     this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 2.4 : 1.2);
     // Крыша навеса — тёмная полоса со стороны тротуара.

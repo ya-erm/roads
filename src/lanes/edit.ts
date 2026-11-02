@@ -638,6 +638,8 @@ function joinAcross(net: LaneNet, c: Corridor, l: LaneSlot, end: End): boolean {
 
 /** Полоса торможения перед съездом, если её ещё нет. */
 const DECEL = 60;
+/** Насколько близко к полосе у конца дороги надо кликнуть, чтобы начать с неё (м). */
+const PORT_PICK = 3;
 /** Полоса разгона после въезда (дальше её тянут следующими точками). */
 const ACCEL = 80;
 
@@ -646,7 +648,76 @@ const ACCEL = 80;
  * вдоль (offset — место поперёк, flow — куда едут; нет — по ходу первой точки), либо в узле или в поле — дальше
  * однополосная дорога, съезд на неё или въезд на дорогу.
  */
-export type LaneTip = { kind: 'edge'; corridor: number; offset: number; s: number; flow?: Flow } | { kind: 'point'; anchor: Anchor };
+export type LaneTip =
+  | { kind: 'edge'; corridor: number; offset: number; s: number; flow?: Flow }
+  | { kind: 'point'; anchor: Anchor }
+  /** Полоса у конца дороги (тупик или стык, где дорога не продолжается): место поперёк port, едут ли наружу. */
+  | { kind: 'port'; node: number; port: number; out: boolean };
+
+/** Полоса у конца дороги, с которой можно начать однополосную — как путь от конца пути. */
+export interface LanePort {
+  node: number;
+  port: number;
+  out: boolean;
+  pos: Vec;
+}
+
+/**
+ * Полосы у концов дорог рядом с p (тупики и стыки, где дорога с одной стороны не продолжается): каждая — отдельно,
+ * как концы путей. Полоса, которая уже ушла в ответвление, не в счёт; сошедшая на нет отгоном у самого конца — в счёт
+ * (с неё начнут вторую однополосную).
+ */
+export function lanePortsNear(net: LaneNet, p: Vec, radius: number): LanePort[] {
+  const res: LanePort[] = [];
+  for (const n of net.nodesNear(p, radius)) {
+    const side = openSeamSide(net, n);
+    if (side === null) continue;
+    const ends = net.ends(n);
+    const taken = ends.filter((e) => e.side === side).map((e) => e.port);
+    for (const e of ends) {
+      if (e.side === side) continue;
+      const c = e.corridor;
+      const T = taperLen(c.cls) + 1;
+      c.lanes.forEach((l, i) => {
+        const near = e.end === 'a' ? l.from <= T : l.to >= c.length - T;
+        if (!near || (net.reaches(c, l, e.end) && net.across(c, i, e.end))) return;
+        const at = net.laneAtSeam(e, l);
+        if (taken.some((t) => Math.abs(t - at.lat) < LAT_EPS)) return;
+        res.push({ node: n.id, port: at.lat, out: at.forward === side > 0, pos: net.portPos(n, at.lat) });
+      });
+    }
+  }
+  return res;
+}
+
+/** Однополосная из полосы у конца дороги (как путь от конца пути): дугой по ходу дороги наружу, к q. */
+function fromPort(net: LaneNet, tip: Extract<LaneTip, { kind: 'port' }>, q: Vec, cls: RoadClass, radius: number): LaneTip {
+  const n = net.nodes.get(tip.node);
+  const side = n ? openSeamSide(net, n) : null;
+  if (!n || side === null) throw new EditError('Так не построить');
+  // Полоса, сошедшая на нет у самого конца, снова доходит до него.
+  for (const e of net.ends(n)) {
+    if (e.side === side) continue;
+    const c = e.corridor;
+    const lanes = c.lanes.map((l) => (Math.abs(net.laneAtSeam(e, l).lat - tip.port) < LAT_EPS ? (e.end === 'a' ? { ...l, from: 0 } : { ...l, to: Infinity }) : l));
+    if (lanes.some((l, i) => l !== c.lanes[i])) net.setLanes(c, lanes);
+  }
+  const t0 = scale(n.dir, side);
+  const p0 = net.portPos(n, tip.port);
+  const other = anchorAt(net, q, radius);
+  const lanes = [slot(0, tip.out ? 1 : -1)];
+  const arcTo = other.kind === 'free' ? arcCubic(p0, t0, other.pos) : null;
+  const end = resolveBranchEnd(net, other, arcTo ? sub(arcTo.p3, arcTo.p2) : sub(other.pos, p0), false, lanes);
+  const p3 = end.node.pos;
+  const h = dist(p0, p3) / 3;
+  const arc = arcTo ?? (end.side ? null : arcCubic(p0, t0, p3));
+  const t3 = end.side ? scale(end.node.dir, -end.side) : norm(sub(p3, add(p0, scale(t0, h))));
+  const curve = arc ?? { p0, p1: add(p0, scale(t0, h)), p2: sub(p3, scale(t3, h)), p3 };
+  net.addCorridor(n.id, end.node.id, { cls, lanes, portA: tip.port, sideA: side, curve: { ...curve, p0, p3 } });
+  // Остальные полосы у этого конца теперь никуда не ведут — сходят на нет отгоном.
+  taperDeadLanes(net, [n.id]);
+  return { kind: 'point', anchor: { kind: 'node', node: end.node.id, pos: end.node.pos } };
+}
 
 /** Крайняя ли полоса полотна (снаружи на её отрезке других нет). */
 function isEdgeLane(c: Corridor, l: LaneSlot): boolean {
@@ -655,6 +726,12 @@ function isEdgeLane(c: Corridor, l: LaneSlot): boolean {
 
 /** С чего начинается полоса у точки p: конец или середина пристроенной полосы, край дороги, узел или поле. */
 export function laneTipAt(net: LaneNet, p: Vec, radius: number): LaneTip {
+  // У самого конца дороги — её полоса: дальше однополосная из неё, как путь от конца пути.
+  const port = lanePortsNear(net, p, 30)
+    .map((x) => ({ x, d: dist(x.pos, p) }))
+    .filter((o) => o.d < PORT_PICK)
+    .sort((u, v) => u.d - v.d)[0]?.x;
+  if (port) return { kind: 'port', node: port.node, port: port.port, out: port.out };
   const end = laneEndAt(net, p);
   if (end) {
     const l = end.corridor.lanes[end.lane];
@@ -671,6 +748,10 @@ export function laneTipAt(net: LaneNet, p: Vec, radius: number): LaneTip {
 /** Где на карте конец полосы. */
 export function laneTipPos(net: LaneNet, tip: LaneTip): Vec | null {
   if (tip.kind === 'point') return tip.anchor.pos;
+  if (tip.kind === 'port') {
+    const n = net.nodes.get(tip.node);
+    return n ? net.portPos(n, tip.port) : null;
+  }
   const c = net.corridors.get(tip.corridor);
   return c ? pointOff(c, Math.max(0, Math.min(c.length, tip.s)), tip.offset) : null;
 }
@@ -688,6 +769,7 @@ export function laneStep(net: LaneNet, tip: LaneTip, q: Vec, cls: RoadClass, rad
     if (laneAlong(net, tip, q)) return { tip: alongLane(net, c, tip, q), what: 'Полоса' };
     return { tip: exitFrom(net, c, tip, q, cls, radius), what: 'Съезд' };
   }
+  if (tip.kind === 'port') return { tip: fromPort(net, tip, q, cls, radius), what: 'Однополосная' };
   const e = edgeAt(net, q);
   if (e) return { tip: entryTo(net, tip, e, cls), what: 'Въезд' };
   const to = anchorAt(net, q, radius);

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
 import { Game } from '../game/game';
 import { road } from '../game/testkit';
+import { oneWay } from '../lanes/model';
 import { RoadTools } from './roadtools';
 
 const STREET = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
@@ -38,6 +39,31 @@ describe('Инструмент «Полоса»: место рядом с дру
     // Соседняя улица — выше (−y): снизу полоса встаёт, сверху ей нет места.
     expect(drag(tools, [{ x: at.x + 100, y: at.y + 10.5 }, { x: at.x + 250, y: at.y + 10.5 }, { x: at.x + 350, y: at.y + 10.5 }])).toBeNull();
     expect(drag(tools, [{ x: at.x + 100, y: at.y - 10.5 }, { x: at.x + 250, y: at.y - 10.5 }, { x: at.x + 350, y: at.y - 10.5 }])).toBe('Слишком близко к другой дороге');
+  });
+});
+
+describe('Перестроить: разворот односторонней', () => {
+  it('тот же профиль поверх односторонней из нескольких кусков разворачивает её всю, без встречных полос на стыках', () => {
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const ONE = { cls: 'street' as const, lanes: oneWay(1) };
+    let o: Vec | null = null;
+    for (let y = 400; y < game.terrain.height - 400 && !o; y += 120) {
+      for (let x = 300; x < game.terrain.width - 1000 && !o; x += 160) {
+        if (road(game, { free: { x, y } }, { free: { x: x + 300, y } }, ONE)) o = { x, y };
+      }
+    }
+    const at = o!;
+    expect(road(game, { x: at.x + 300, y: at.y }, { free: { x: at.x + 600, y: at.y } }, ONE)).toBe(true);
+    expect(road(game, { x: at.x + 600, y: at.y }, { free: { x: at.x + 900, y: at.y } }, ONE)).toBe(true);
+    const mine = () => [...game.roads.net.corridors.values()].filter((c) => [c.a, c.b].every((id) => Math.abs(game.roads.net.node(id).pos.y - at.y) < 1));
+    expect(mine()).toHaveLength(3);
+    const dirs = () => mine().map((c) => Math.sign((game.roads.net.node(c.b).pos.x - game.roads.net.node(c.a).pos.x) * c.lanes[0].flow));
+    expect(dirs()).toEqual([1, 1, 1]);
+    const tools = new RoadTools(() => game);
+    expect(tools.upgrade({ x: at.x + 450, y: at.y }, { cls: 'street', lanesF: 1, lanesB: 0 }, 4)).toBeNull();
+    expect(dirs()).toEqual([-1, -1, -1]);
+    expect(mine().every((c) => c.lanes[0].from === 0)).toBe(true);
+    expect(game.roads.net.problems()).toEqual([]);
   });
 });
 

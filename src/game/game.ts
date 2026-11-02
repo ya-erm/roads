@@ -4410,6 +4410,15 @@ export class Game implements BuildContext {
     return { ...m.spec, color, load: v.cargo ? CARGO[v.cargo].color : undefined, pos: pose.pos, dir: pose.dir };
   }
 
+  /** Машина компании, поставленная в точку pos носом по dir (автобус на посадке у остановки). */
+  fleetLookAt(id: number, pos: Vec, dir: Vec): VehicleLook | undefined {
+    const v = this.fleet.get(id);
+    const m = v && MODELS[v.model];
+    if (!v || !m || m.mode !== 'road') return undefined;
+    const color = this.lines.get(v.lineId)?.color ?? m.spec.color;
+    return { ...m.spec, color, load: v.cargo ? CARGO[v.cargo].color : undefined, pos, dir };
+  }
+
   /** Машины, что сейчас заезжают на посты автостанций. */
   enteringLooks(): VehicleLook[] {
     const out: VehicleLook[] = [];

@@ -9,7 +9,7 @@ import { type Beside, besideGhost, besideTrack } from '../game/railEdit';
 import type { RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
 import { deleteTemplate, getTemplate, saveTemplate } from '../game/templates';
-import { anchorAt, corridorUnder, edgeAt, laneEndAt, laneTipPos, laneUnder } from '../lanes/edit';
+import { anchorAt, corridorUnder, edgeAt, laneEndAt, lanePortsNear, laneTipAt, laneTipPos, laneUnder } from '../lanes/edit';
 import { pointOff } from '../lanes/geometry';
 import { taperLen } from '../lanes/model';
 import { type Fragment, fragmentCurves, frameOf, snapPaste } from '../lanes/fragment';
@@ -1647,6 +1647,17 @@ export class Controller {
           break;
         }
         if (!rt.laneDrag) {
+          // У конца дороги — её полосы точками, как концы путей: с любой начинается своя однополосная.
+          const ports = lanePortsNear(g.roads.net, p, 30);
+          const pick = laneTipAt(g.roads.net, p, this.snapRadius);
+          if (ports.length) {
+            const on = pick.kind === 'port' ? ports.find((x) => x.node === pick.node && Math.abs(x.port - pick.port) < 0.01) : undefined;
+            o.points = ports.map((x) => ({ pos: x.pos, color: x === on ? '#27ae60' : '#2f80ed', r: x === on ? 4 : 2.2 }));
+            if (on) {
+              o.label = { text: on.out ? 'Однополосная из этой полосы' : 'Однополосная в эту полосу', ok: true };
+              break;
+            }
+          }
           // Конец пристроенной полосы под курсором — его можно тянуть: кружок на её отгоне.
           const end = laneEndAt(g.roads.net, p);
           if (end) {
@@ -1660,7 +1671,7 @@ export class Controller {
           }
           // Где встанет полоса: у края дороги — зелёный кружок.
           const e = edgeAt(g.roads.net, p);
-          o.points = e ? [{ pos: e.pos, color: '#27ae60', r: 5 }] : [];
+          o.points = [...(o.points ?? []), ...(e ? [{ pos: e.pos, color: '#27ae60', r: 5 }] : [])];
           o.label = { text: e ? 'Кликайте по точкам или тяните: вдоль края — полоса, в сторону — съезд' : 'Клик у края дороги, на полосе или в поле', ok: true };
           break;
         }
