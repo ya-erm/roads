@@ -7,7 +7,7 @@ import type { RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
 import { anchorAt, corridorUnder, edgeAt } from '../lanes/edit';
 import type { Camera } from '../render/camera';
-import { laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
+import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
 import type { StationServes, TownBuilding } from '../world/entities';
 import { MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec } from '../world/roadTypes';
 import { RoadTools } from './roadtools';
@@ -588,8 +588,8 @@ export class Controller {
         break;
       }
       case 'move': {
-        // Берём узел и тянем (дороги следом) или середину дороги — выгнуть; отпускаем — перестраивается.
-        if (!this.roadTools.moveDown(p, this.snapRadius)) this.showError('Возьмите за узел или середину дороги');
+        // Берём перо, узел (дороги следом) или середину дороги — выгнуть; отпускаем — перестраивается.
+        if (!this.roadTools.moveDown(p, this.snapRadius, (HANDLE_PX + 4) / this.camera.zoom)) this.showError('Возьмите за узел или середину дороги');
         break;
       }
       case 'signal': {
@@ -824,7 +824,7 @@ export class Controller {
     }
     const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > 8;
     if (this.action === 'move') {
-      const problem = this.roadTools.moveUp(this.worldAt(e), moved);
+      const problem = this.roadTools.moveUp(this.worldAt(e), moved, e.shiftKey);
       if (problem) this.showError(problem);
       this.onChange();
       return;
@@ -1119,26 +1119,42 @@ export class Controller {
       }
       case 'move': {
         const rt = this.roadTools;
-        if (rt.dragNode !== null || rt.bend !== null) {
+        if (rt.dragging) {
           // Тянем: дороги в новой форме; вернут больше, чем потратим, — показываем возврат.
-          const plan = rt.movePlan(p);
+          const plan = rt.movePlan(p, this.shift);
           if (plan) {
             const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
-            this.showRoadPlan(o, plan, `${rt.bend !== null ? 'Изогнуть · ' : ''}${price}`);
+            const what = rt.handle ? 'Перо · ' : rt.bend !== null ? 'Изогнуть · ' : '';
+            this.showRoadPlan(o, plan, `${what}${price}${rt.hint ? ` · ${rt.hint}` : ''}`);
+            if (rt.handle) o.handles = rt.handleMarks(rt.handle, plan.net ?? undefined);
+            if (rt.joinPos) o.points = [...(o.points ?? []), { pos: rt.joinPos, color: plan.ok ? '#2f80ed' : '#e8483f', r: 9 }];
           }
+          break;
+        }
+        // Сначала перья видимой дороги, потом узел, потом середина дороги.
+        const hr = (HANDLE_PX + 4) / this.camera.zoom;
+        const handle = rt.handleAt(p, hr);
+        if (handle) {
+          o.handles = rt.handleMarks(handle);
+          o.label = { text: 'Тяните перо · Shift — излом на стыке', ok: true };
           break;
         }
         const node = rt.nodeAt(p, this.snapRadius);
         if (node) {
           o.points = [{ pos: node.pos, color: '#2f80ed', r: 9 }];
-          o.label = { text: 'Тяните узел — дороги следом', ok: true };
+          const dead = g.roads.net.isDeadEnd(node);
+          o.label = { text: dead ? 'Тяните тупик — продлить, примкнуть' : 'Тяните узел — дороги следом', ok: true };
+          o.handles = rt.handleMarks(null);
           break;
         }
         const c = corridorAt(g, p, this.snapRadius * 0.3);
         if (c) {
+          // У дороги под курсором видны перья — они остаются, пока курсор идёт к ним.
+          rt.editCorridor = c.id;
           o.corridor = { id: c.id, color: 'blue' };
           o.label = { text: 'Тяните — изогнуть дорогу', ok: true };
         }
+        o.handles = rt.handleMarks(null);
         break;
       }
       case 'bulldoze': {

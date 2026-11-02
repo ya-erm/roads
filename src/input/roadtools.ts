@@ -3,7 +3,20 @@ import { add, angleOf, dist, dot, len, norm, scale, sub, Vec } from '../core/vec
 import type { DrawMode } from '../game/build';
 import type { Game } from '../game/game';
 import type { RoadPlan } from '../game/roadbuild';
-import { alignNode, Anchor, anchorAt, corridorUnder, dragLane, LaneDraft, startLane } from '../lanes/edit';
+import {
+  alignNode,
+  Anchor,
+  anchorAt,
+  corridorUnder,
+  dragHandle,
+  dragLane,
+  Handle,
+  handlePoints,
+  handlesOf,
+  joinDeadEnd,
+  LaneDraft,
+  startLane,
+} from '../lanes/edit';
 import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, oneWay, twoWay } from '../lanes/model';
 import { isDivided, MEDIAN, RoadClass, RoadSpec } from '../world/roadTypes';
 
@@ -37,6 +50,12 @@ export class RoadTools {
   dragNode: number | null = null;
   /** Полотно, которое выгибают за середину. */
   bend: number | null = null;
+  /** Перо, которое тянут. */
+  handle: Handle | null = null;
+  /** Полотно, у которого видны перья: последнее под курсором — они остаются, пока курсор идёт к ним. */
+  editCorridor: number | null = null;
+  /** Куда примкнёт тянущийся тупик. */
+  joinPos: Vec | null = null;
   /** Насколько близко к прямой между соседями узел к ней прилипает. */
   private moveSnap = 12;
   /** Прямая прилипла к направлению — подпись у курсора. */
@@ -49,7 +68,12 @@ export class RoadTools {
   }
 
   get busy(): boolean {
-    return !!(this.start || this.control || this.lane || this.dragNode !== null || this.bend !== null);
+    return !!(this.start || this.control || this.lane || this.dragging);
+  }
+
+  /** Тянут узел, перо или середину дороги. */
+  get dragging(): boolean {
+    return this.dragNode !== null || this.bend !== null || this.handle !== null;
   }
 
   /** Сменили инструмент — всё начатое забываем. */
@@ -59,15 +83,18 @@ export class RoadTools {
     this.lane = null;
     this.dragNode = null;
     this.bend = null;
+    this.handle = null;
+    this.editCorridor = null;
     this.hint = null;
   }
 
   /** Esc или правая кнопка: шаг назад. true — было что отменять. */
   cancel(): boolean {
-    if (this.lane || this.dragNode !== null || this.bend !== null) {
+    if (this.lane || this.dragging) {
       this.lane = null;
       this.dragNode = null;
       this.bend = null;
+      this.handle = null;
       return true;
     }
     if (this.control) {
@@ -232,14 +259,51 @@ export class RoadTools {
 
   // ---------- Двигать ----------
 
-  /** Узел у курсора (перекрёсток, стык, тупик). */
+  /** Узел у курсора (перекрёсток, стык, тупик), кроме узлов станций — их двигают вместе со станцией. */
   nodeAt(p: Vec, r: number): LaneNode | null {
-    return this.net.nodesNear(p, r).sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0] ?? null;
+    const stations = this.stationNodes();
+    return this.net.nodesNear(p, r).filter((n) => !stations.has(n.id)).sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0] ?? null;
   }
 
-  /** Взять узел или середину дороги. false — ничего не взяли. */
-  moveDown(p: Vec, r: number): boolean {
+  private stationNodes(): Set<number> {
+    return new Set([...this.game().stations.values()].map((s) => s.nodeId));
+  }
+
+  /** Перья полотна, у которого их сейчас видно (и продолжающих его в стыках). */
+  handles(): (Handle & { partner: boolean })[] {
+    return this.editCorridor !== null ? handlesOf(this.net, this.editCorridor) : [];
+  }
+
+  /** Перо под курсором; r — радиус попадания. */
+  handleAt(p: Vec, r: number): Handle | null {
+    let best: Handle | null = null;
+    let bestD = r;
+    for (const h of this.handles()) {
+      const d = dist(p, handlePoints(this.net.corridor(h.corridor), h.end).pos);
+      if (d <= bestD) {
+        bestD = d;
+        best = { corridor: h.corridor, end: h.end };
+      }
+    }
+    return best;
+  }
+
+  /** Перья для подсказки на карте; net — сеть плана, если перо тянут. */
+  handleMarks(active: Handle | null, net: LaneNet = this.net): { anchor: Vec; pos: Vec; active: boolean; partner: boolean }[] {
+    return this.handles()
+      .filter((h) => net.corridors.has(h.corridor))
+      .map((h) => ({
+        ...handlePoints(net.corridor(h.corridor), h.end),
+        active: !!active && active.corridor === h.corridor && active.end === h.end,
+        partner: h.partner,
+      }));
+  }
+
+  /** Взять перо, узел или середину дороги. false — ничего не взяли. hr — радиус попадания в перо. */
+  moveDown(p: Vec, r: number, hr = r): boolean {
     this.moveSnap = r;
+    this.handle = this.handleAt(p, hr);
+    if (this.handle) return true;
     const n = this.nodeAt(p, r);
     if (n) {
       this.dragNode = n.id;
@@ -248,22 +312,57 @@ export class RoadTools {
     const c = corridorUnder(this.net, p, r * 0.3);
     if (c) {
       this.bend = c.id;
+      this.editCorridor = c.id;
       return true;
     }
     return false;
   }
 
-  movePlan(p: Vec): RoadPlan | null {
+  /** Куда примкнёт тупик, если его отпустить в p: узел или дорога рядом (не своя). null — никуда. */
+  private joinTarget(id: number, p: Vec): Anchor | null {
+    const net = this.net;
+    const n = net.node(id);
+    if (!net.isDeadEnd(n) || n.corridors.length !== 1) return null;
+    const own = net.corridor(n.corridors[0]);
+    const a = anchorAt(net, p, this.moveSnap);
+    if (a.kind === 'free') return null;
+    if (a.kind === 'corridor' && a.corridor === own.id) return null;
+    if (a.kind === 'node' && (a.node === own.a || a.node === own.b || this.stationNodes().has(a.node))) return null;
+    return a;
+  }
+
+  /** План переноса; kink — излом пера в стыке (Shift). В hint — «примкнёт» или «ровно». */
+  movePlan(p: Vec, kink = false): RoadPlan | null {
     const b = this.game().roadBuilder;
-    if (this.dragNode !== null) return b.moveNode(this.dragNode, alignNode(this.net, this.dragNode, p, this.moveSnap));
+    this.hint = null;
+    this.joinPos = null;
+    if (this.handle) {
+      const h = this.handle;
+      if (kink) this.hint = 'излом';
+      return b.plan((n) => dragHandle(n, h, p, kink));
+    }
+    if (this.dragNode !== null) {
+      const id = this.dragNode;
+      const join = this.joinTarget(id, p);
+      this.joinPos = join?.pos ?? null;
+      if (join) {
+        this.hint = 'примкнёт';
+        return b.plan((n) => joinDeadEnd(n, id, join));
+      }
+      const to = alignNode(this.net, id, p, this.moveSnap);
+      if (to !== p) this.hint = 'ровно';
+      return b.moveNode(id, to);
+    }
     if (this.bend !== null) return b.reshape(this.bend, (n, c) => bendCurve(n, c, p));
     return null;
   }
 
-  moveUp(p: Vec, moved: boolean): string | null {
-    const plan = moved ? this.movePlan(p) : null;
+  moveUp(p: Vec, moved: boolean, kink = false): string | null {
+    const plan = moved ? this.movePlan(p, kink) : null;
     this.dragNode = null;
     this.bend = null;
+    this.handle = null;
+    this.hint = null;
     if (!plan) return null;
     if (!plan.ok) return plan.reason ?? 'Нельзя передвинуть';
     this.game().roadBuilder.apply(plan);

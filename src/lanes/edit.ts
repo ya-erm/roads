@@ -1,8 +1,8 @@
 import { Cubic, CurveLUT, intersectCurves, splitBezier } from '../core/bezier';
-import { add, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
+import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { LANE_W, RoadClass } from '../world/roadTypes';
 import { edgesAt, laneBand } from './geometry';
-import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, slot } from './model';
+import { Corridor, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, slot } from './model';
 
 /** Начало или конец новой дороги: узел (тупик или перекрёсток), место на полотне или чистое поле. */
 export type Anchor =
@@ -391,6 +391,130 @@ export function alignNode(net: LaneNet, id: number, p: Vec, radius: number): Vec
   if (t <= 0 || t >= 1) return p;
   const q = add(a, scale(ab, t));
   return dist(q, p) < radius ? q : p;
+}
+
+/**
+ * Тупик примыкает к другой дороге: к перекрёстку, к тупику (того же профиля и по ходу — продолжение,
+ * стык; иначе — перекрёсток) или к середине полотна (там новый перекрёсток). Узел тупика пропадает.
+ * false — так не примкнуть.
+ */
+export function joinDeadEnd(net: LaneNet, id: number, target: Anchor): boolean {
+  const D = net.nodes.get(id);
+  if (!D || !net.isDeadEnd(D) || D.corridors.length !== 1 || target.kind === 'free') return false;
+  const c = net.corridor(D.corridors[0]);
+  if (c.a === c.b || (target.kind === 'corridor' && target.corridor === c.id)) return false;
+  if (target.kind === 'node' && (target.node === c.a || target.node === c.b)) return false;
+  const J = target.kind === 'corridor' ? splitCorridor(net, net.corridor(target.corridor), target.s, 'junction').node : net.node(target.node);
+  if (J.level !== D.level) return false;
+  // Сначала дорога тянется концом в узел, потом конец переходит к нему.
+  net.moveNode(D.id, J.pos);
+  const atA = c.a === D.id;
+  const cv = { ...c.curve };
+  if (J.kind === 'seam') {
+    const ends = net.ends(J);
+    const free = net.isDeadEnd(J) ? (-ends[0].side as 1 | -1) : null;
+    const away = scale(J.dir, free ?? 1);
+    const along = atA ? free ?? 1 : -(free ?? 1);
+    const mine = c.lanes.filter((l) => net.reaches(c, l, atA ? 'a' : 'b')).map((l) => `${Math.round(l.offset * along * 2)}:${l.flow * along > 0}`);
+    const theirs = ends.flatMap((e) => e.corridor.lanes.filter((l) => net.reaches(e.corridor, l, e.end)).map((l) => net.laneAtSeam(e, l)));
+    const arrive = norm(sub(atA ? cv.p1 : cv.p2, J.pos));
+    const continues =
+      free !== null &&
+      !ends[0].port &&
+      dot(arrive, away) > Math.cos(Math.PI / 6) &&
+      mine.sort().join() === theirs.map((l) => `${Math.round(l.lat * 2)}:${l.forward}`).sort().join();
+    if (continues) {
+      // Продолжение: касательная — по стыку.
+      const h = dist(atA ? cv.p1 : cv.p2, J.pos);
+      if (atA) cv.p1 = add(J.pos, scale(away, h));
+      else cv.p2 = add(J.pos, scale(away, h));
+    } else if (ends.every((e) => Math.abs(e.port) < LAT_EPS)) J.kind = 'junction';
+    else return false;
+  }
+  D.corridors = [];
+  net.removeNode(D.id);
+  if (atA) {
+    c.a = J.id;
+    c.portA = 0;
+  } else {
+    c.b = J.id;
+    c.portB = 0;
+  }
+  J.corridors.push(c.id);
+  net.setCurve(c, cv);
+  return true;
+}
+
+// ---------- Перья ----------
+
+/** Перо — управляющая точка полотна у конца end: тянешь — меняется угол дороги у этого конца. */
+export interface Handle {
+  corridor: number;
+  end: End;
+}
+
+/** Где перо: конец полотна (anchor) и управляющая точка (pos). */
+export function handlePoints(c: Corridor, end: End): { anchor: Vec; pos: Vec } {
+  return end === 'a' ? { anchor: c.curve.p0, pos: c.curve.p1 } : { anchor: c.curve.p3, pos: c.curve.p2 };
+}
+
+/** Перья полотна и, в стыках на его концах, перья продолжающих его полотен (partner). */
+export function handlesOf(net: LaneNet, id: number): (Handle & { partner: boolean })[] {
+  const c = net.corridors.get(id);
+  if (!c) return [];
+  const res: (Handle & { partner: boolean })[] = [];
+  for (const end of ['a', 'b'] as const) {
+    res.push({ corridor: id, end, partner: false });
+    const n = net.node(end === 'a' ? c.a : c.b);
+    if (n.kind !== 'seam') continue;
+    for (const e of net.ends(n)) if (e.corridor.id !== id) res.push({ corridor: e.corridor.id, end: e.end, partner: true });
+  }
+  return res;
+}
+
+/**
+ * Тянет перо в p. У перекрёстка меняется только эта дорога. Стык поворачивается целиком — касательная
+ * у него общая, перья остальных полотен в нём идут следом. kink — излом: стык становится перекрёстком.
+ */
+export function dragHandle(net: LaneNet, h: Handle, p: Vec, kink = false): boolean {
+  const c = net.corridors.get(h.corridor);
+  if (!c) return false;
+  const atA = h.end === 'a';
+  const n = net.node(atA ? c.a : c.b);
+  const { anchor, pos } = handlePoints(c, h.end);
+  const to = sub(p, anchor);
+  if (len(to) < 2) return false;
+  if (n.kind === 'seam' && kink && !net.isDeadEnd(n) && net.ends(n).every((e) => Math.abs(e.port) < LAT_EPS)) n.kind = 'junction';
+  if (n.kind === 'junction' || c.a === c.b) {
+    const cv = { ...c.curve };
+    if (atA) cv.p1 = { ...p };
+    else cv.p2 = { ...p };
+    net.setCurve(c, cv);
+    return true;
+  }
+  // Стык поворачивается на угол, на который повернулось перо.
+  const from = sub(pos, anchor);
+  const theta = Math.atan2(cross(from, to), dot(from, to));
+  const cos = Math.cos(theta);
+  const sin = Math.sin(theta);
+  const rot = (v: Vec): Vec => ({ x: v.x * cos - v.y * sin, y: v.x * sin + v.y * cos });
+  const arms = net.ends(n).map((e) => ({ e, ...handlePoints(e.corridor, e.end) }));
+  n.dir = rot(n.dir);
+  for (const { e, anchor: a0, pos: p0 } of arms) {
+    const end = net.portPos(n, e.port);
+    const mine = e.corridor.id === c.id && e.end === h.end;
+    const arm = mine ? scale(norm(rot(from)), len(to)) : rot(sub(p0, a0));
+    const cv = { ...e.corridor.curve };
+    if (e.end === 'a') {
+      cv.p0 = end;
+      cv.p1 = add(end, arm);
+    } else {
+      cv.p3 = end;
+      cv.p2 = add(end, arm);
+    }
+    net.setCurve(e.corridor, cv);
+  }
+  return true;
 }
 
 /** Сносит полотно; перекрёсток, у которого осталась одна дорога, становится её тупиком. */

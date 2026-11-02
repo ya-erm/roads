@@ -49,6 +49,7 @@ import {
   moveEndSvg,
   moveNodeSvg,
   bendSvg,
+  handleSvg,
   railSvg,
   ringSvg,
   roadSvg,
@@ -1004,17 +1005,18 @@ export class Hud {
           <p class="muted">Наведите на прямой участок магистрали — или в чистое поле: тогда магистраль построится вместе с развязкой (R — повернуть). Для магистрали берётся выбранный тип дороги, если это магистраль. Концы дорог подключите к своей сети. Не понравилось — Ctrl+Z.</p></div></div>`;
     }
     if (c.roadMode === 'move') {
-      // Что можно тянуть — картинками: узел (дороги следом) и тупик (продлить, примкнуть).
+      // Что можно тянуть — картинками: узел (дороги следом), тупик (продлить, примкнуть), середину и перо.
       const what = [
         { svg: moveNodeSvg(), name: 'Узел', small: 'дороги следом' },
         { svg: moveEndSvg(), name: 'Тупик', small: 'продлить, примкнуть' },
         { svg: bendSvg(), name: 'Середина', small: 'изогнуть дугой' },
+        { svg: handleSvg(), name: 'Перо', small: 'угол у узла' },
       ]
         .map((x) => `<div class="card">${x.svg}<span class="name">${x.name}</span><small>${x.small}</small></div>`)
         .join('');
       return `<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Что тянуть</div><div class="cards">${what}</div></div>
         <div class="opt-group narrow"><div class="opt-title">Двигать</div>
-        <p class="muted">Тяните мышью. Изгиб у прямой между соседями встаёт ровно на неё. Тупик на другой дороге — перекрёсток. Середина дороги — выгнуть дугу через курсор.</p></div></div>`;
+        <p class="muted">Изгиб у прямой между соседями встаёт ровно на неё. Тупик на другой дороге — примыкает. Перья видны у дороги под курсором; в стыке соседняя дорога поворачивает следом, <kbd>Shift</kbd> — излом.</p></div></div>`;
     }
     const presets = ROAD_PRESETS.map(
       (p) => `<button class="card ${c.presetId === p.id ? 'active' : ''}" data-action="preset" data-id="${p.id}"

@@ -130,6 +130,16 @@ export function bendSvg(): string {
   </svg>`;
 }
 
+/** Перо: дорога выходит из узла под углом, который задаёт ручка. */
+export function handleSvg(): string {
+  return `<svg viewBox="0 0 48 36" width="48" height="36">
+    <path d="M6 30C18 30 26 8 44 8" stroke="#646b76" stroke-width="6" stroke-linecap="round" fill="none"/>
+    <path d="M6 30L22 30" stroke="#2f80ed" stroke-width="1.6" fill="none"/>
+    <circle cx="6" cy="30" r="2.6" fill="#2f80ed"/>
+    <circle cx="22" cy="30" r="3.6" fill="#2f80ed" stroke="#fff" stroke-width="1.4"/>
+  </svg>`;
+}
+
 /** Кольцо сверху: размер (0…1) и число полос. */
 export function ringSvg(size: number, lanes: number): string {
   const r = 7 + size * 7;

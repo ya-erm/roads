@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Vec } from '../core/vec';
-import { anchorAt, applyLane, buildRoad, bulldoze, dragLane, flipLane, startLane } from './edit';
+import { dot, Vec } from '../core/vec';
+import { anchorAt, applyLane, buildRoad, bulldoze, dragHandle, dragLane, flipLane, joinDeadEnd, startLane } from './edit';
 import { LaneGraph } from './graph';
 import { LaneNet, twoWay } from './model';
 import { findLaneRoute } from './routing';
@@ -106,6 +106,52 @@ describe('Полосы: инструменты', () => {
     expect(net.problems()).toEqual([]);
     const start = deadEnds(net).find((n) => n.pos.y > 200)!;
     expect(reachable(net, start.id, east.id)).toBe(true);
+  });
+
+  it('перо в стыке поворачивает стык: перо соседа на той же прямой; с изломом — перекрёсток', () => {
+    const net = road();
+    const east = deadEnds(net).find((n) => n.pos.x > 400)!;
+    buildRoad(net, anchorAt(net, east.pos, 14), free(1400, 0), AVENUE);
+    const seam = net.node(east.id);
+    const [left, right] = net.ends(seam).sort((x, y) => x.away.x - y.away.x);
+    // Тянем перо правого полотна вверх: стык поворачивается, у левого перо — по той же прямой назад.
+    expect(dragHandle(net, { corridor: right.corridor.id, end: right.end }, { x: 1000, y: -100 })).toBe(true);
+    const [l2, r2] = net.ends(seam).sort((x, y) => x.away.x - y.away.x);
+    expect(dot(l2.away, r2.away)).toBeLessThan(-0.9999);
+    expect(r2.away.y).toBeLessThan(-0.3);
+    expect(net.node(seam.id).kind).toBe('seam');
+    expect(net.problems()).toEqual([]);
+    expect(left.corridor.id).toBe(l2.corridor.id);
+    // С изломом стык становится перекрёстком, левое полотно не трогаем.
+    const before = { ...net.corridor(l2.corridor.id).curve };
+    expect(dragHandle(net, { corridor: r2.corridor.id, end: r2.end }, { x: 1000, y: 100 }, true)).toBe(true);
+    expect(net.node(seam.id).kind).toBe('junction');
+    expect(net.corridor(l2.corridor.id).curve).toEqual(before);
+  });
+
+  it('тупик примыкает: к середине дороги — перекрёсток, к тупику по ходу того же профиля — стык', () => {
+    const net = road();
+    // Улица с юга, её тупик бросаем на середину проспекта.
+    buildRoad(net, free(400, 400), free(400, 150), { cls: 'street', lanes: twoWay(1, 1) });
+    const tip = deadEnds(net).find((n) => n.pos.y > 100 && n.pos.y < 200)!;
+    const south = deadEnds(net).find((n) => n.pos.y > 300)!;
+    expect(joinDeadEnd(net, tip.id, anchorAt(net, { x: 400, y: 3 }, 14))).toBe(true);
+    expect(net.nodes.has(tip.id)).toBe(false);
+    const j = [...net.nodes.values()].find((n) => n.kind === 'junction')!;
+    expect(net.ends(j)).toHaveLength(3);
+    expect(net.problems()).toEqual([]);
+    const west = deadEnds(net).find((n) => n.pos.x < 100)!;
+    expect(reachable(net, south.id, west.id)).toBe(true);
+
+    // Отдельный проспект восточнее: его западный тупик тянем к восточному тупику первого — продолжение.
+    buildRoad(net, free(900, 0), free(1300, 0), AVENUE);
+    const a = deadEnds(net).find((n) => Math.abs(n.pos.x - 800) < 1)!;
+    const b = deadEnds(net).find((n) => Math.abs(n.pos.x - 900) < 1)!;
+    expect(joinDeadEnd(net, b.id, { kind: 'node', node: a.id, pos: a.pos })).toBe(true);
+    expect(net.node(a.id).kind).toBe('seam');
+    expect(net.problems()).toEqual([]);
+    const far = deadEnds(net).find((n) => n.pos.x > 1200)!;
+    expect(reachable(net, west.id, far.id)).toBe(true);
   });
 
   it('снос перекрёстной дороги оставляет тупики, разворот полосы, сохранение', () => {
