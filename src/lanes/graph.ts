@@ -79,7 +79,7 @@ export interface GNode {
   waiting: Vehicle[];
 }
 
-export const laneSpeed = (c: Corridor) => ROAD_CLASSES[c.cls].limit / KMH_PER_UNIT;
+export const laneSpeed = (c: Corridor) => (c.limit ?? ROAD_CLASSES[c.cls].limit) / KMH_PER_UNIT;
 export const moveKey = (inLane: number, outLane: number) => `${inLane}>${outLane}`;
 
 /** Граф движения по сети полос: связи, полосы, переходы, состояние перекрёстков. */
@@ -286,7 +286,8 @@ export class LaneGraph {
     for (const inL of ins) {
       const inDir = this.lanePose(inL.lanes[0], inL.length).dir;
       const exits = outs
-        .filter((o) => o.corridor !== inL.corridor)
+        // Разворот на то же полотно и повороты, запрещённые игроком, — нельзя.
+        .filter((o) => o.corridor !== inL.corridor && !n.bans?.includes(`${inL.corridor}>${o.corridor}`))
         .map((o) => ({ link: o, theta: angleDiff(angleOf(inDir), angleOf(this.lanePose(o.lanes[0], 0).dir)) }))
         .filter((e) => Math.abs(e.theta) < 2.6)
         .sort((a, b) => b.theta - a.theta);
@@ -312,8 +313,17 @@ export class LaneGraph {
         list[j].zones.set(list[i].key, conflictZone(list[j], list[i]));
       }
     }
-    // Главная: самая прямая и вместительная пара подъездов; если главные все — приоритета нет.
-    const main = this.mainPair(n);
+    // Кольцо главнее въездов в него.
+    const ring = ins.filter((l) => this.net.corridor(l.corridor).ring);
+    if (ring.length && ring.length < ins.length) {
+      for (const l of ring) for (const lane of l.lanes) state.priorityLanes.add(lane.id);
+      return;
+    }
+    // Главная: выбранная игроком пара ([] — равнозначный) или самая прямая и вместительная.
+    // Если главные все входы — приоритета нет.
+    const here = new Set(this.net.ends(n).map((e) => e.corridor.id));
+    const manual = n.mainPair;
+    const main = manual && manual.length === 0 ? null : manual && manual.length === 2 && manual.every((id) => here.has(id)) ? manual : this.mainPair(n);
     if (main) {
       for (const l of ins) if (main.includes(l.corridor)) for (const lane of l.lanes) state.priorityLanes.add(lane.id);
       if (ins.every((l) => main.includes(l.corridor))) state.priorityLanes.clear();

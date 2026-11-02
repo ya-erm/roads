@@ -2,6 +2,9 @@ import { Cubic, CurveLUT } from '../core/bezier';
 import { add, cross, cubicBezier, dist, dot, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import type { Game, LaneEnd } from '../game/game';
+import { LaneRenderer } from '../lanes/draw';
+import { edgesAt, pointOff, stations as axisStations } from '../lanes/geometry';
+import type { LaneNet } from '../lanes/model';
 import type { Vehicle } from '../sim/vehicle';
 import { cargoImage } from '../ui/cargoIcons';
 import { CARGO, CargoType, FREIGHT } from '../world/cargo';
@@ -63,6 +66,12 @@ export interface ToolOverlay {
   marks: { fp: Footprint; ok: boolean }[];
   label: { text: string; ok: boolean } | null;
   heatmap: boolean;
+  /** Дороги с тем, что сейчас строим или правим: эта сеть рисуется вместо настоящей, изменённое подсвечено. */
+  roads?: { net: LaneNet; ok: boolean; changed: number[] } | null;
+  /** Полотно под курсором: снос — красным, правка — синим, перестройка — зелёным. */
+  corridor?: { id: number; color: 'red' | 'blue' | 'green' } | null;
+  /** Кружки: начало дороги, куда примкнёт, узел под курсором. */
+  points?: { pos: Vec; color: string; r?: number }[];
   /** Настройка полос выбранного перекрёстка: метки концов полос, выбранный въезд, метка под курсором. */
   laneEdit: { node: number; ends: LaneEnd[]; from: { seg: number; i: number } | null; hover: LaneEnd | null } | null;
 }
@@ -164,6 +173,8 @@ export class Renderer {
   /** Узлы, где разрешённые повороты пересекают осевую главной дороги (кэш на версию сети). */
   private readonly crossing = new Map<number, boolean>();
   private treeVersion = '';
+  /** Дороги из полос. */
+  private readonly lanes = new LaneRenderer();
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -240,6 +251,9 @@ export class Renderer {
     });
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
+    // Дороги — сеть полос (или её копия с тем, что сейчас строим).
+    this.lanes.draw(ctx, o.roads?.net ?? game.roads.net, this.camera.zoom, false, view);
+    if (o.roads) this.drawRoadPreview(o.roads);
     this.drawSurfaces([...groundRoads, ...feet], false);
     this.drawTapers(game, 0, view);
     // Площадка перекрёстка, поверх — скруглённые углы (закрывают её срезанные края) и островки.
@@ -1540,13 +1554,18 @@ export class Renderer {
     }
   }
 
+  /** Карта пробок: каждая связь графа движения — цветом загрузки (зелёный — свободно, красный — стоят). */
   private drawHeatmap(game: Game, level: number): void {
+    if (level !== 0) return;
     const ctx = this.ctx;
+    const g = game.roads.graph;
+    const view = this.view();
     ctx.lineCap = 'round';
-    for (const link of game.net.links.values()) {
-      const s = game.net.segment(link.seg);
-      const c = this.cache.get(s.id);
-      if (!c || Math.abs(Math.round(c.maxLevel) - level) > 0) continue;
+    for (const link of g.links.values()) {
+      const c = g.net.corridors.get(link.corridor);
+      if (!c) continue;
+      const mid = c.lut.pointAt((link.s0 + link.s1) / 2);
+      if (mid.x < view.x0 - link.length || mid.x > view.x1 + link.length || mid.y < view.y0 - link.length || mid.y > view.y1 + link.length) continue;
       let count = 0;
       let stopped = 0;
       for (const lane of link.lanes) {
@@ -1555,11 +1574,10 @@ export class Renderer {
       }
       const density = Math.min(1, (count * 9) / Math.max(10, link.length * link.lanes.length));
       const load = Math.min(1, density * 0.7 + (count ? (stopped / count) * density : 0));
-      const avgOffset = link.lanes.reduce((a, l) => a + l.offset, 0) / link.lanes.length;
-      const off = link.dir === 0 ? avgOffset : -avgOffset;
+      const off = link.lanes.reduce((a, l) => a + l.offset, 0) / link.lanes.length;
       ctx.strokeStyle = `hsla(${120 - load * 120}, 80%, 46%, 0.8)`;
       ctx.lineWidth = Math.max(2.5, link.lanes.length * 2.5);
-      this.polyline(s.lut.offsetPolyline(off, 0, s.length, 6));
+      this.polyline(c.lut.offsetPolyline(off, link.s0, link.s1, 6));
       ctx.stroke();
     }
   }
@@ -2098,6 +2116,20 @@ export class Renderer {
 
   private drawOverlay(game: Game, o: ToolOverlay): void {
     const ctx = this.ctx;
+    if (o.corridor) {
+      const color = { red: 'rgba(232,72,63,0.5)', blue: 'rgba(47,128,237,0.35)', green: 'rgba(46,157,87,0.4)' }[o.corridor.color];
+      this.tintCorridor(o.roads?.net ?? game.roads.net, o.corridor.id, color);
+    }
+    for (const pt of o.points ?? []) {
+      const z = this.camera.zoom;
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.strokeStyle = pt.color;
+      ctx.lineWidth = 2 / z;
+      ctx.beginPath();
+      ctx.arc(pt.pos.x, pt.pos.y, (pt.r ?? 6) / z, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
     this.drawPartners(game, o.selection);
     if (o.highlight.length) {
       const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 200);
@@ -2341,6 +2373,31 @@ export class Renderer {
    * Предпросмотр перестройки: будущая дорога поверх старой на зелёной подложке —
    * новая ширина, разметка полос и кромок, у односторонней — стрелки направления.
    */
+  /** Что строим: изменённые полотна сети предпросмотра — зелёной (можно) или красной (нельзя) подсветкой. */
+  private drawRoadPreview(p: NonNullable<ToolOverlay['roads']>): void {
+    for (const id of p.changed) this.tintCorridor(p.net, id, p.ok ? 'rgba(46,157,87,0.28)' : 'rgba(232,72,63,0.4)');
+  }
+
+  /** Полупрозрачная заливка асфальта полотна. */
+  private tintCorridor(net: LaneNet, id: number, color: string): void {
+    const c = net.corridors.get(id);
+    if (!c) return;
+    const left: Vec[] = [];
+    const right: Vec[] = [];
+    for (const s of axisStations(c, 0, c.length, 5)) {
+      const e = edgesAt(c, s);
+      if (!e) continue;
+      left.push(pointOff(c, s, e[0] - ROAD_MARGIN));
+      right.push(pointOff(c, s, e[1] + ROAD_MARGIN));
+    }
+    if (left.length < 2) return;
+    const ctx = this.ctx;
+    ctx.fillStyle = color;
+    this.polyline([...left, ...right.reverse()]);
+    ctx.closePath();
+    ctx.fill();
+  }
+
   private drawUpgradePreview(curve: Cubic, spec: RoadSpec): void {
     const ctx = this.ctx;
     const lut = new CurveLUT(curve);

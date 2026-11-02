@@ -71,6 +71,16 @@ export function upgradeSvg(): string {
   </svg>`;
 }
 
+/** «Полоса»: дорога, у которой новая полоса прилипает к краю и уходит съездом. */
+export function laneSvg(): string {
+  return `<svg viewBox="0 0 48 36" width="48" height="36">
+    <rect x="2" y="9" width="44" height="12" rx="1.5" fill="#646b76"/>
+    <path d="M4 15H44" stroke="#f5f3e6" stroke-width="0.9" stroke-dasharray="2.5 2"/>
+    <path d="M10 22.5C18 22.5 22 22.5 28 22.5C34 22.5 38 26 44 32" stroke="#27ae60" stroke-width="5.5" fill="none" stroke-linecap="round"/>
+    <path d="M13 21V24M19 21V24" stroke="#f5f3e6" stroke-width="0.9"/>
+  </svg>`;
+}
+
 /** Значки статей финансов: круг цвета статьи с белым символом. */
 export function ledgerIcon(kind: string, size = 22): string {
   const glyphs: Record<string, [string, string]> = {

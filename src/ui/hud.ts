@@ -58,6 +58,7 @@ import {
   signalSvg,
   switchSvg,
   upgradeSvg,
+  laneSvg,
 } from './icons';
 import { Minimap } from './minimap';
 
@@ -566,7 +567,7 @@ export class Hud {
         c.setPreset(d.id!);
         break;
       case 'road-mode':
-        c.setRoadMode(d.id === 'upgrade' || d.id === 'move' || d.id === 'template' ? d.id : 'build');
+        c.setRoadMode(d.id === 'upgrade' || d.id === 'move' || d.id === 'template' || d.id === 'lane' ? d.id : 'build');
         break;
       case 'rail-mode':
         c.setRailMode(d.id === 'station' || d.id === 'signal' ? d.id : 'track');
@@ -988,8 +989,9 @@ export class Hud {
     const s = c.spec;
     const sw = this.kindSwitch('Действие', 'road-mode', c.roadMode, [
       { id: 'build', name: 'Строить', svg: modeSvg('arc'), hint: 'Новая дорога по точкам', key: 'N' },
+      { id: 'lane', name: 'Полоса', svg: laneSvg(), hint: 'Тяните от края дороги вдоль неё — новая полоса; уведите в сторону — съезд; из поля к краю и вдоль — въезд с полосой разгона', key: 'L' },
       { id: 'upgrade', name: 'Перестроить', svg: upgradeSvg(), hint: 'Клик по дороге — заменить её выбранным типом, полосами и скоростью', key: 'U' },
-      { id: 'move', name: 'Двигать', svg: moveNodeSvg(), hint: 'Тяните перекрёсток или изгиб — дороги следом; тупик — продлить или подвести к другой дороге', key: 'M' },
+      { id: 'move', name: 'Двигать', svg: moveNodeSvg(), hint: 'Тяните узел — дороги следом; середину дороги — выгнуть', key: 'M' },
       { id: 'template', name: 'Развязка', svg: diamondSvg(48, 36), hint: 'Готовая развязка на магистрали в один клик' },
     ], true);
     if (c.roadMode === 'template') {

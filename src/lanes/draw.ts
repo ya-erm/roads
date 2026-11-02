@@ -53,35 +53,78 @@ const NOSE_MAX = 110;
 /** Полотна в стыке чуть заходят друг на друга — без светлого шва между заливками. */
 const SEAM_OVERLAP = 0.8;
 
-/** Отрисовка сети из полос: асфальт и бордюры, островки, перекрёстки, тупики, разметка, стрелки. */
+export interface BBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/** Всё, что рисуется у узла: островки стыка, площадка перекрёстка, развороты тупика. */
+interface NodeGeo {
+  gores: GoreGeo[];
+  plate: PlateGeo | null;
+  caps: { poly: Vec[]; arc: Vec[] }[];
+}
+
+interface Cached<T> {
+  key: string;
+  geo: T;
+  bbox: BBox;
+}
+
+function bboxOf(lists: Vec[][]): BBox {
+  const b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+  for (const pts of lists) {
+    for (const p of pts) {
+      b.x0 = Math.min(b.x0, p.x);
+      b.y0 = Math.min(b.y0, p.y);
+      b.x1 = Math.max(b.x1, p.x);
+      b.y1 = Math.max(b.y1, p.y);
+    }
+  }
+  return b;
+}
+
+/**
+ * Отрисовка сети из полос: асфальт и бордюры, островки, перекрёстки, тупики, разметка, стрелки.
+ * Геометрия кэшируется по каждому полотну и узлу отдельно (ключ — ревизии и соседи), поэтому
+ * предпросмотр на копии большой сети пересчитывает только изменённое; рисуется только видимое.
+ */
 export class LaneRenderer {
   private net: LaneNet | null = null;
   private version = -1;
   private cuts = new Map<number, [number, number]>();
-  private corridors: CorridorGeo[] = [];
-  private gores: GoreGeo[] = [];
-  private plates: PlateGeo[] = [];
-  private caps: { poly: Vec[]; arc: Vec[] }[] = [];
+  private corridorCache = new Map<number, Cached<CorridorGeo>>();
+  private nodeCache = new Map<number, Cached<NodeGeo>>();
+  private corridors: Cached<CorridorGeo>[] = [];
+  private nodes: Cached<NodeGeo>[] = [];
 
-  draw(ctx: CanvasRenderingContext2D, net: LaneNet, zoom: number, debug = false): void {
+  draw(ctx: CanvasRenderingContext2D, net: LaneNet, zoom: number, debug = false, view?: BBox): void {
     this.refresh(net);
+    const seen = (b: BBox) => !view || !(b.x1 < view.x0 || b.x0 > view.x1 || b.y1 < view.y0 || b.y0 > view.y1);
+    const corridors = this.corridors.filter((x) => seen(x.bbox)).map((x) => x.geo);
+    const nodes = this.nodes.filter((x) => seen(x.bbox)).map((x) => x.geo);
+    const plates = nodes.flatMap((n) => (n.plate ? [n.plate] : []));
+    const caps = nodes.flatMap((n) => n.caps);
+    const gores = nodes.flatMap((n) => n.gores);
     ctx.lineJoin = 'round';
     // Бордюры под асфальтом: заливка соседнего полотна закрывает их там, где полотна сходятся.
     ctx.strokeStyle = C.roadEdge;
     ctx.lineWidth = 2.5;
     ctx.lineCap = 'round';
-    for (const g of this.corridors) {
+    for (const g of corridors) {
       this.stroke(ctx, g.left);
       this.stroke(ctx, g.right);
     }
-    for (const p of this.plates) for (const c of p.curbs) this.stroke(ctx, c);
-    for (const cap of this.caps) this.stroke(ctx, cap.arc);
+    for (const p of plates) for (const c of p.curbs) this.stroke(ctx, c);
+    for (const cap of caps) this.stroke(ctx, cap.arc);
     ctx.fillStyle = C.road;
-    for (const g of this.corridors) this.fill(ctx, g.poly);
-    for (const p of this.plates) this.fill(ctx, p.poly);
-    for (const cap of this.caps) this.fill(ctx, cap.poly);
+    for (const g of corridors) this.fill(ctx, g.poly);
+    for (const p of plates) this.fill(ctx, p.poly);
+    for (const cap of caps) this.fill(ctx, cap.poly);
     // Островки: асфальт до носа, нос — тонким бордюром.
-    for (const g of this.gores) {
+    for (const g of gores) {
       ctx.fillStyle = C.road;
       this.fill(ctx, g.asphalt);
       ctx.strokeStyle = C.roadEdge;
@@ -89,11 +132,17 @@ export class LaneRenderer {
       this.stroke(ctx, g.nose);
     }
     if (zoom >= 0.35) {
-      this.drawMarks(ctx);
-      for (const g of this.gores) this.drawGorePaint(ctx, g);
-      this.drawArrows(ctx);
+      this.drawMarks(ctx, corridors);
+      for (const g of gores) this.drawGorePaint(ctx, g);
+      this.drawArrows(ctx, corridors);
     }
     if (debug) this.drawDebug(ctx, net, zoom);
+  }
+
+  /** Обрыв полотен у перекрёстков — для движения и подсказок. */
+  cutsOf(net: LaneNet): Map<number, [number, number]> {
+    this.refresh(net);
+    return this.cuts;
   }
 
   // ---------- Кэш геометрии ----------
@@ -103,18 +152,41 @@ export class LaneRenderer {
     this.net = net;
     this.version = net.version;
     this.cuts = junctionCuts(net);
-    this.corridors = [...net.corridors.values()].map((c) => this.corridorGeo(net, c));
-    this.gores = [];
-    this.plates = [];
-    this.caps = [];
+    // Подпись узла: всё, от чего зависит геометрия вокруг него.
+    const sigs = new Map<number, string>();
     for (const n of net.nodes.values()) {
-      if (n.kind === 'junction') {
-        const plate = this.plateGeo(net, n);
-        if (plate) this.plates.push(plate);
-      } else if (net.isDeadEnd(n)) {
-        for (const e of net.ends(n)) this.caps.push(this.capGeo(e));
-      } else this.gores.push(...this.seamGores(net, n));
+      const arms = n.corridors.map((id) => `${id}.${net.corridor(id).rev}.${this.cuts.get(id)?.join('/')}`).join(',');
+      sigs.set(n.id, `${n.kind}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}`);
     }
+    const corridors: Cached<CorridorGeo>[] = [];
+    for (const c of net.corridors.values()) {
+      const key = `${c.rev}|${this.cuts.get(c.id)?.join('/')}|${sigs.get(c.a)}|${sigs.get(c.b)}`;
+      let item = this.corridorCache.get(c.id);
+      if (!item || item.key !== key) {
+        const geo = this.corridorGeo(net, c);
+        item = { key, geo, bbox: bboxOf([geo.poly]) };
+        this.corridorCache.set(c.id, item);
+      }
+      corridors.push(item);
+    }
+    for (const id of this.corridorCache.keys()) if (!net.corridors.has(id)) this.corridorCache.delete(id);
+    const nodes: Cached<NodeGeo>[] = [];
+    for (const n of net.nodes.values()) {
+      const key = sigs.get(n.id)!;
+      let item = this.nodeCache.get(n.id);
+      if (!item || item.key !== key) {
+        const geo: NodeGeo = { gores: [], plate: null, caps: [] };
+        if (n.kind === 'junction') geo.plate = this.plateGeo(net, n);
+        else if (net.isDeadEnd(n)) geo.caps = net.ends(n).map((e) => this.capGeo(e));
+        else geo.gores = this.seamGores(net, n);
+        item = { key, geo, bbox: bboxOf([geo.plate?.poly ?? [], ...geo.caps.map((c) => c.poly), ...geo.gores.map((g) => g.asphalt), [n.pos]]) };
+        this.nodeCache.set(n.id, item);
+      }
+      nodes.push(item);
+    }
+    for (const id of this.nodeCache.keys()) if (!net.nodes.has(id)) this.nodeCache.delete(id);
+    this.corridors = corridors;
+    this.nodes = nodes;
   }
 
   private corridorGeo(net: LaneNet, c: Corridor): CorridorGeo {
@@ -373,7 +445,7 @@ export class LaneRenderer {
 
   // ---------- Рисование ----------
 
-  private drawMarks(ctx: CanvasRenderingContext2D): void {
+  private drawMarks(ctx: CanvasRenderingContext2D, corridors: CorridorGeo[]): void {
     ctx.lineCap = 'butt';
     for (const [color, width] of [
       ['#9aa1aa', 4],
@@ -382,14 +454,14 @@ export class LaneRenderer {
       ctx.strokeStyle = color;
       ctx.lineWidth = width;
       ctx.beginPath();
-      for (const g of this.corridors) for (const m of g.marks) if (m.style === 'barrier') this.path(ctx, m.pts);
+      for (const g of corridors) for (const m of g.marks) if (m.style === 'barrier') this.path(ctx, m.pts);
       ctx.stroke();
     }
     for (const style of ['dash', 'solid', 'yellow'] as const) {
       ctx.strokeStyle = style === 'yellow' ? C.divider : C.dash;
       ctx.lineWidth = style === 'yellow' ? 1.4 : 1;
       ctx.beginPath();
-      for (const g of this.corridors) for (const m of g.marks) if (m.style === style) this.path(ctx, m.pts);
+      for (const g of corridors) for (const m of g.marks) if (m.style === style) this.path(ctx, m.pts);
       ctx.stroke();
     }
   }
@@ -424,9 +496,9 @@ export class LaneRenderer {
     ctx.stroke();
   }
 
-  private drawArrows(ctx: CanvasRenderingContext2D): void {
+  private drawArrows(ctx: CanvasRenderingContext2D, corridors: CorridorGeo[]): void {
     ctx.fillStyle = C.dash;
-    for (const g of this.corridors) {
+    for (const g of corridors) {
       for (const { pos: c, dir: d } of g.arrows) {
         const n = rightNormal(d);
         ctx.beginPath();

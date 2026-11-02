@@ -13,7 +13,6 @@ import {
   straightCubic,
 } from '../core/bezier';
 import { add, angleOf, closestOnSegment, cross, dist, dot, norm, scale, sub, Vec } from '../core/vec';
-import type { Traffic } from '../sim/traffic';
 import type { Network, RoadNode, Segment } from '../world/network';
 import {
   halfWidth,
@@ -43,7 +42,6 @@ export type Snap =
 /** То, что строитель знает об игре. Game реализует этот интерфейс. */
 export interface BuildContext {
   readonly net: Network;
-  readonly traffic: Traffic;
   /** Сколько можно потратить с учётом кредитного лимита. */
   readonly budget: number;
   readonly roundaboutCenters: Map<number, Vec>;
@@ -516,7 +514,6 @@ export class Builder {
     const spec = old.spec;
     const curve = old.curve;
     const [a, b] = [old.a, old.b];
-    this.ctx.traffic.evictSegment(old.id);
     // Узлы не удаляем: второй конец — начало нового участка.
     this.net.removeSegment(old.id, false);
     if (!this.build(req)) {
@@ -939,7 +936,6 @@ export class Builder {
     const check = this.upgradeCheck(p, spec, radius);
     if (!check.ok || !check.seg) return false;
     const seg = check.seg;
-    this.ctx.traffic.evictSegment(seg.id);
     if (sameSpec(seg.spec, spec)) this.net.reverseSegment(seg.id);
     else {
       this.net.setSpec(seg.id, spec);

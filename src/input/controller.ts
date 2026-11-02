@@ -1,13 +1,16 @@
 import { SNAP_PIXELS } from '../config';
-import { type Cubic, straightCubic } from '../core/bezier';
+import { straightCubic } from '../core/bezier';
 import { add, angleOf, dist, len, scale, sub, Vec } from '../core/vec';
 import { DEFAULT_RING, type DrawMode, type NetKind, type RingOptions, type RingSize, type Snap } from '../game/build';
 import type { AreaContents, Game, LaneEnd, StationKind } from '../game/game';
+import type { RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
+import { anchorAt, corridorUnder, edgeAt } from '../lanes/edit';
 import type { Camera } from '../render/camera';
-import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
+import { laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
 import type { StationServes, TownBuilding } from '../world/entities';
-import { MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, sameSpec } from '../world/roadTypes';
+import { MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec } from '../world/roadTypes';
+import { RoadTools } from './roadtools';
 
 export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze';
 
@@ -24,9 +27,9 @@ export const TOOLS: { id: Tool; key: string; alt?: string; name: string }[] = [
 ];
 
 /** Что делает клик: инструмент вместе с его режимом. */
-export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template';
-/** Дорога: строить, перестроить под выбранный тип, двигать узел или конец дороги, поставить развязку. */
-export type RoadMode = 'build' | 'upgrade' | 'move' | 'template';
+export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane';
+/** Дорога: строить, вести полосу вдоль края, перестроить под выбранный тип, двигать узел или выгнуть, поставить развязку. */
+export type RoadMode = 'build' | 'lane' | 'upgrade' | 'move' | 'template';
 /** Ж/д: класть путь или ставить вокзал. */
 export type RailMode = 'track' | 'station' | 'signal';
 
@@ -41,6 +44,7 @@ const PAN_SPEED = 900;
 /** Действия, которые строят или сносят, — и как назвать их в «Отменено: …». */
 const UNDO_LABELS: Partial<Record<Action, string>> = {
   road: 'дорога',
+  lane: 'полоса',
   bulldoze: 'снос',
   upgrade: 'перестройка',
   move: 'перенос дороги',
@@ -57,11 +61,17 @@ export function areaSummary(c: AreaContents): string {
     return d === 1 && dd !== 11 ? one : d >= 2 && d <= 4 && (dd < 12 || dd > 14) ? few : many;
   };
   const parts = [
-    c.segs.length && `${c.segs.length} ${word(c.segs.length, 'участок', 'участка', 'участков')} дорог`,
+    c.corridors.length && `${c.corridors.length} ${word(c.corridors.length, 'участок', 'участка', 'участков')} дорог`,
+    c.segs.length && `${c.segs.length} ${word(c.segs.length, 'участок', 'участка', 'участков')} путей`,
     c.buildings.length && `${c.buildings.length} ${word(c.buildings.length, 'дом', 'дома', 'домов')}`,
     c.stations.length && `${c.stations.length} ${word(c.stations.length, 'станция', 'станции', 'станций')}`,
   ].filter(Boolean);
   return parts.length ? `Снести: ${parts.join(', ')}` : 'Здесь нечего сносить';
+}
+
+/** Полотно дороги под курсором. */
+function corridorAt(g: Game, p: Vec, r: number) {
+  return corridorUnder(g.roads.net, p, r);
 }
 
 export class Controller {
@@ -72,14 +82,9 @@ export class Controller {
   ring: RingOptions = { ...DEFAULT_RING };
   /** С чем будет работать новая станция. */
   stationServes: StationServes = { pax: true, cargo: true };
-  /** Узел, который игрок тащит в режиме «Двигать»: тупик (тянется его участок) или изгиб/перекрёсток (все дороги следом). */
-  dragEnd: number | null = null;
-  /** Участок, который гнём за середину в режиме «Двигать». */
-  dragSeg: number | null = null;
-  /** Участок, у которого видны перья (последний под курсором), и перо, которое тянем. */
-  editSeg: number | null = null;
-  dragHandle: { seg: number; which: 1 | 2 } | null = null;
-  /** Прямая прилипла к продолжению дороги или перпендикуляру — подпись у курсора. */
+  /** Инструменты дороги на сети полос (строить, полоса, перестроить, двигать, снос). */
+  readonly roadTools: RoadTools;
+  /** Прямая пути прилипла к продолжению или перпендикуляру — подпись у курсора. */
   private angleHint: string | null = null;
   /** Камера следует за выбранной машиной или поездом (переключается F). */
   following = false;
@@ -131,6 +136,7 @@ export class Controller {
     readonly camera: Camera,
     private readonly game: () => Game,
   ) {
+    this.roadTools = new RoadTools(game);
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('mousedown', (e) => this.onDown(e));
     window.addEventListener('mousemove', (e) => this.onMove(e));
@@ -166,10 +172,7 @@ export class Controller {
     this.chain = null;
     this.control = null;
     this.moving = null;
-    this.dragEnd = null;
-    this.dragSeg = null;
-    this.dragHandle = null;
-    this.editSeg = null;
+    this.roadTools.clear();
     this.laneFrom = null;
     this.onChange();
   }
@@ -203,10 +206,7 @@ export class Controller {
     this.roadMode = mode;
     this.chain = null;
     this.control = null;
-    this.dragEnd = null;
-    this.dragSeg = null;
-    this.dragHandle = null;
-    this.editSeg = null;
+    this.roadTools.clear();
     this.onChange();
   }
 
@@ -250,7 +250,7 @@ export class Controller {
   private finishArea(a: Vec, b: Vec): void {
     const g = this.game();
     const contents = g.areaContents(a, b);
-    const total = contents.segs.length + contents.buildings.length + contents.stations.length;
+    const total = contents.segs.length + contents.corridors.length + contents.buildings.length + contents.stations.length;
     if (!total) return;
     if (total > 8 || contents.stations.length) this.pendingArea = { a, b, contents };
     else g.bulldozeArea(a, b);
@@ -460,9 +460,7 @@ export class Controller {
     const g = this.game();
     this.chain = null;
     this.control = null;
-    this.dragEnd = null;
-    this.dragSeg = null;
-    this.dragHandle = null;
+    this.roadTools.clear();
     const label = g.undo();
     if (label) g.notify(`Отменено: ${label}`);
     else this.showError('Нечего отменять');
@@ -527,51 +525,7 @@ export class Controller {
     return s;
   }
 
-  /** Перья видимого участка и, в его узлах, перья продолжающих его дорог. */
-  private handleList(): { seg: number; which: 1 | 2; partner: boolean }[] {
-    const g = this.game();
-    if (this.editSeg === null || !g.net.segments.has(this.editSeg)) return [];
-    const res: { seg: number; which: 1 | 2; partner: boolean }[] = [];
-    for (const which of [1, 2] as const) {
-      res.push({ seg: this.editSeg, which, partner: false });
-      const pt = g.builder.handlePartner(this.editSeg, which);
-      if (pt) res.push({ ...pt, partner: true });
-    }
-    return res;
-  }
-
-  /** Перо под курсором (с запасом в несколько пикселей). */
-  private handleAt(p: Vec): { seg: number; which: 1 | 2 } | null {
-    const net = this.game().net;
-    let best: { seg: number; which: 1 | 2 } | null = null;
-    let bestD = (HANDLE_PX + 4) / this.camera.zoom;
-    for (const h of this.handleList()) {
-      const c = net.segment(h.seg).curve;
-      const d = dist(p, h.which === 1 ? c.p1 : c.p2);
-      if (d <= bestD) {
-        bestD = d;
-        best = { seg: h.seg, which: h.which };
-      }
-    }
-    return best;
-  }
-
-  /** Перья для подсказки на карте; curves — формы участков с учётом перетаскиваемого пера. */
-  private handleMarks(curves: { seg: number; curve: Cubic }[] = []): NonNullable<ToolOverlay['handles']> {
-    const net = this.game().net;
-    const active = this.dragHandle ?? this.handleAt(this.hover ?? { x: NaN, y: NaN });
-    return this.handleList().map((h) => {
-      const c = curves.find((x) => x.seg === h.seg)?.curve ?? net.segment(h.seg).curve;
-      return {
-        anchor: h.which === 1 ? c.p0 : c.p3,
-        pos: h.which === 1 ? c.p1 : c.p2,
-        active: !!active && active.seg === h.seg && active.which === h.which,
-        partner: h.partner,
-      };
-    });
-  }
-
-  /** Направления «прямо» от начала новой дороги: продолжения дорог в узле или вдоль разрезаемой дороги. */
+  /** Направления «прямо» от начала нового пути: продолжения путей в узле или вдоль разрезаемого пути. */
   private chainDirections(): Vec[] {
     const g = this.game();
     const c = this.chain;
@@ -603,6 +557,11 @@ export class Controller {
     if (label) g.checkpoint(this.action === 'road' && this.netKind === 'rail' ? 'путь' : label);
     switch (this.action) {
       case 'road':
+        if (this.netKind === 'road') {
+          // Дорога — на сети полос: первый клик начинает, следующий (или отпускание после протяжки) строит.
+          if (this.roadTools.begin(p, this.snapRadius)) this.left.createdChain = true;
+          break;
+        }
         if (!this.chain) {
           this.chain = g.builder.snap(p, this.level, this.snapRadius, this.netKind);
           this.chainTangent = g.builder.continuationTangent(this.chain);
@@ -610,37 +569,27 @@ export class Controller {
           this.left.createdChain = true;
         }
         break;
+      case 'lane':
+        // Полоса: ведём мышью вдоль края дороги, отпускаем — строится.
+        this.roadTools.laneDown(p, this.snapRadius);
+        break;
       case 'bulldoze': {
         // Рамкой — сносим при отпускании кнопки.
         if (this.bulldozeMode === 'area') {
           this.areaStart = p;
           break;
         }
-        const st = g.structureAt(p);
-        if (st?.type === 'station') g.removeStation(st);
-        else if (st?.type === 'building') g.demolishBuilding(st);
-        else g.builder.bulldoze(p, this.snapRadius * 0.3);
+        this.bulldozeAt(p);
         break;
       }
       case 'upgrade': {
-        const check = g.builder.upgradeCheck(p, this.spec, this.snapRadius * 0.3);
-        if (!g.builder.upgrade(p, this.spec, this.snapRadius * 0.3)) this.showError(check.reason);
+        const problem = this.roadTools.upgrade(p, this.spec, this.snapRadius * 0.3);
+        if (problem) this.showError(problem);
         break;
       }
       case 'move': {
-        // Берём узел или тупик и тянем; отпускаем — дороги перестраиваются до новой точки.
-        // Сначала перья видимого участка, потом узел или тупик, потом середина дороги.
-        const handle = this.handleAt(p);
-        if (handle) {
-          this.dragHandle = handle;
-          break;
-        }
-        const node = g.builder.pickMovable(p, this.snapRadius);
-        // Не узел — так середина дороги: её можно изогнуть.
-        const seg = node ? null : g.builder.pickBendable(p, this.snapRadius * 0.3);
-        if (node) this.dragEnd = node.id;
-        else if (seg) this.dragSeg = seg.id;
-        else this.showError('Возьмите за узел, конец или середину дороги');
+        // Берём узел и тянем (дороги следом) или середину дороги — выгнуть; отпускаем — перестраивается.
+        if (!this.roadTools.moveDown(p, this.snapRadius)) this.showError('Возьмите за узел или середину дороги');
         break;
       }
       case 'signal': {
@@ -659,15 +608,14 @@ export class Controller {
         // У выбранного перекрёстка клики по меткам полос соединяют въезды с выездами.
         if (this.laneClick(p)) break;
         // Клик по перекрёстку открывает его настройки: светофор, главная дорога, повороты.
-        const n = g.builder.pickJunction(p, this.snapRadius);
+        const n = this.junctionAt(p);
         if (n) this.select({ type: 'junction', id: n.id });
         else if (this.laneFrom) this.clearLane();
         else this.showError('Кликните по перекрёстку');
         break;
       }
       case 'roundabout': {
-        const check = g.builder.canRoundabout(p, this.snapRadius, this.ring);
-        if (!g.builder.buildRoundabout(p, this.snapRadius, this.ring)) this.showError(check.reason);
+        this.showError('Кольца переезжают на полосы — скоро вернутся');
         break;
       }
       case 'station': {
@@ -719,6 +667,26 @@ export class Controller {
         break;
       }
     }
+  }
+
+  /** Снос того, что под курсором: станция, дом, путь или дорога. */
+  private bulldozeAt(p: Vec): void {
+    const g = this.game();
+    const st = g.structureAt(p);
+    if (st?.type === 'station') g.removeStation(st);
+    else if (st?.type === 'building') g.demolishBuilding(st);
+    else if (!g.builder.bulldoze(p, this.snapRadius * 0.3)) this.roadTools.bulldoze(p, this.snapRadius * 0.3);
+  }
+
+  /** Перекрёсток у курсора. */
+  private junctionAt(p: Vec) {
+    const net = this.game().roads.net;
+    return (
+      net
+        .nodesNear(p, this.snapRadius + 20)
+        .filter((n) => n.kind === 'junction')
+        .sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0] ?? null
+    );
   }
 
   // ---------- Полосы перекрёстка ----------
@@ -810,15 +778,19 @@ export class Controller {
     }
     if (e.target === this.canvas || this.pan || this.left) this.hover = this.worldAt(e);
     if (this.left && this.tool === 'bulldoze' && this.bulldozeMode === 'point' && this.hover) {
-      this.game().builder.bulldoze(this.hover, this.snapRadius * 0.3);
+      // Снос, который ведут мышью: дома и станции — только по клику.
+      if (!this.game().builder.bulldoze(this.hover, this.snapRadius * 0.3)) this.roadTools.bulldoze(this.hover, this.snapRadius * 0.3);
     }
+    if (this.left && this.action === 'lane' && this.hover) this.roadTools.laneMove(this.hover, this.snapRadius);
   }
 
   private onUp(e: MouseEvent): void {
     if ((e.button === 1 || e.button === 2) && this.pan) {
       if (!this.pan.moved && e.button === 2) {
         if (this.moving) this.moving = null;
-        else if (this.control) this.control = null;
+        else if (this.roadTools.cancel()) {
+          // Шаг назад в постройке дороги.
+        } else if (this.control) this.control = null;
         else if (this.chain) this.chain = null;
         else if (this.lineDraft.length) this.lineDraft.pop();
         else if (this.laneFrom) this.laneFrom = null;
@@ -845,81 +817,38 @@ export class Controller {
       this.areaStart = null;
       const p = this.worldAt(e);
       // Просто клик в режиме рамки — сносим то, что под курсором.
-      if (Math.hypot(e.clientX - left.sx, e.clientY - left.sy) <= 8) {
-        const g = this.game();
-        const st = g.structureAt(p);
-        if (st?.type === 'station') g.removeStation(st);
-        else if (st?.type === 'building') g.demolishBuilding(st);
-        else g.builder.bulldoze(p, this.snapRadius * 0.3);
-      } else this.finishArea(a, p);
+      if (Math.hypot(e.clientX - left.sx, e.clientY - left.sy) <= 8) this.bulldozeAt(p);
+      else this.finishArea(a, p);
       this.onChange();
       return;
     }
-    if (this.action === 'move' && this.dragHandle) {
-      const h = this.dragHandle;
-      this.dragHandle = null;
-      if (Math.hypot(e.clientX - left.sx, e.clientY - left.sy) <= 4) return;
-      const g = this.game();
-      // Перо продолжающей дороги встаёт на ту же прямую; с Shift — излом на стыке.
-      const res = g.builder.handlePlan(h.seg, h.which, this.worldAt(e), !e.shiftKey);
-      if (!res || !g.builder.applyHandle(res)) this.showError(res?.plan.reason ?? 'Нельзя изогнуть');
+    const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > 8;
+    if (this.action === 'move') {
+      const problem = this.roadTools.moveUp(this.worldAt(e), moved);
+      if (problem) this.showError(problem);
       this.onChange();
       return;
     }
-    if (this.action === 'move' && this.dragSeg !== null) {
-      const segId = this.dragSeg;
-      this.dragSeg = null;
-      if (Math.hypot(e.clientX - left.sx, e.clientY - left.sy) <= 8) return;
-      const g = this.game();
-      const plan = g.builder.bendPlan(segId, this.worldAt(e));
-      if (!plan.ok || !g.builder.bendSegment(segId, this.worldAt(e))) this.showError(plan.reason ?? 'Нельзя изогнуть');
-      this.onChange();
-      return;
-    }
-    if (this.action === 'move' && this.dragEnd !== null) {
-      const nodeId = this.dragEnd;
-      this.dragEnd = null;
-      // Просто клик по узлу — ничего не двигаем.
-      if (Math.hypot(e.clientX - left.sx, e.clientY - left.sy) <= 8) return;
-      const g = this.game();
-      const node = g.net.nodes.get(nodeId);
-      if (!node) return;
-      if (node.segments.length > 1) {
-        // Узел: все его дороги перестраиваются следом — или ничего.
-        const to = this.nodeTarget(nodeId, this.worldAt(e));
-        const plan = g.builder.moveNodePlan(nodeId, to);
-        if (!plan.ok || !g.builder.moveNode(nodeId, to)) this.showError(plan.reason ?? 'Нельзя передвинуть');
-        this.onChange();
-        return;
-      }
-      const target = this.moveTarget(nodeId, this.worldAt(e));
-      const req = g.builder.moveEndRequest(nodeId, target);
-      const plan = req && g.builder.plan(req);
-      if (!plan?.ok || !g.builder.moveEnd(nodeId, target)) this.showError(plan?.reason ?? 'Нельзя передвинуть');
+    if (this.action === 'lane') {
+      const problem = this.roadTools.laneUp(this.worldAt(e), this.snapRadius, this.spec);
+      if (problem) this.showError(problem);
       this.onChange();
       return;
     }
     if (this.action !== 'road') return;
-    const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > 8;
     if (left.createdChain && !moved) return;
     const p = this.worldAt(e);
+    if (this.netKind === 'road') {
+      const problem = this.roadTools.build(p, this.spec, this.drawMode, this.snapRadius, this.shift);
+      if (problem) this.showError(problem);
+      this.onChange();
+      return;
+    }
     if (this.drawMode === 'curve' && !this.control) {
       this.control = p;
       return;
     }
     this.tryBuild(p);
-  }
-
-  /** Куда встанет перетаскиваемый конец: узел, дорога или свободная точка (кроме самого участка). */
-  private moveTarget(nodeId: number, p: Vec): Snap {
-    const g = this.game();
-    const n = g.net.node(nodeId);
-    return g.builder.snap(p, n.level, this.snapRadius, 'road', { nodes: [nodeId], segs: [...n.segments] });
-  }
-
-  /** Куда встанет перетаскиваемый узел: у прямой между соседями — ровно на неё. */
-  private nodeTarget(nodeId: number, p: Vec): Vec {
-    return this.game().builder.alignNode(nodeId, p, this.snapRadius * 0.6);
   }
 
   private request(end: Snap) {
@@ -950,6 +879,18 @@ export class Controller {
       this.chainTangent = res.tangent;
       this.control = null;
     }
+  }
+
+  /** Предпросмотр правки дорог: сеть с ней, дома под снос, подпись (цена или что не так). */
+  private showRoadPlan(o: ToolOverlay, plan: RoadPlan, okText: string): void {
+    const g = this.game();
+    if (plan.net) o.roads = { net: plan.net, ok: plan.ok, changed: plan.changed };
+    for (const id of plan.demolish) {
+      const b = g.buildingById(id);
+      if (b) o.marks.push({ fp: b.fp, ok: false });
+    }
+    const razed = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
+    o.label = plan.ok ? { text: `${okText}${razed}`, ok: true } : { text: plan.reason ?? 'Нельзя', ok: false };
   }
 
   private showError(text?: string): void {
@@ -984,9 +925,7 @@ export class Controller {
       case 'Escape':
         if (this.pendingArea) this.cancelArea();
         else if (this.areaStart) this.areaStart = null;
-        else if (this.dragHandle) this.dragHandle = null;
-        else if (this.dragSeg !== null) this.dragSeg = null;
-        else if (this.dragEnd !== null) this.dragEnd = null;
+        else if (this.roadTools.cancel()) this.onChange();
         else if (this.addStopTo !== null) this.stopAddStop();
         else if (this.moving) this.moving = null;
         else if (this.control) this.control = null;
@@ -1027,6 +966,9 @@ export class Controller {
       // Режимы дороги: N — строить, U — перестроить, M — двигать (включают инструмент «Дорога»).
       case 'KeyN':
         this.setRoadMode('build');
+        break;
+      case 'KeyL':
+        this.setRoadMode('lane');
         break;
       case 'KeyU':
         this.setRoadMode('upgrade');
@@ -1112,6 +1054,28 @@ export class Controller {
 
     switch (this.action) {
       case 'road': {
+        if (this.netKind === 'road') {
+          const rt = this.roadTools;
+          // Начало — кружком у курсора (узел, дорога или поле), потом — будущая дорога целиком.
+          if (!rt.start) {
+            const a = anchorAt(g.roads.net, p, this.snapRadius);
+            o.points = [{ pos: a.pos, color: '#2f80ed', r: a.kind === 'free' ? 3 : 7 }];
+            break;
+          }
+          o.points = [{ pos: rt.start.pos, color: '#2f80ed', r: 6 }];
+          if (rt.control) o.points.push({ pos: rt.control, color: '#f2994a', r: 4 });
+          if (this.drawMode === 'curve' && !rt.control) {
+            o.label = { text: 'Укажите изгиб кривой', ok: true };
+            break;
+          }
+          const plan = rt.buildPlan(p, this.spec, this.drawMode, this.snapRadius, this.shift);
+          if (plan) {
+            const length = plan.net ? plan.changed.reduce((s, id) => s + (plan.net!.corridors.get(id)?.length ?? 0), 0) : 0;
+            const aligned = rt.hint ? ` · ${rt.hint}` : '';
+            this.showRoadPlan(o, plan, `${money(plan.cost)} · ${Math.round(length)} м${aligned}`);
+          }
+          break;
+        }
         o.chainStart = this.chain;
         o.snap = this.chain ? this.endSnap(p) : g.builder.snap(p, this.level, this.snapRadius, this.netKind);
         if (this.chain) {
@@ -1134,101 +1098,47 @@ export class Controller {
         }
         break;
       }
-      case 'upgrade': {
-        const check = g.builder.upgradeCheck(p, this.spec, this.snapRadius * 0.3);
-        if (check.seg) {
-          // Можно — показываем будущую дорогу (ширина, полосы, направление); нельзя — красным.
-          if (check.ok) {
-            // Тот же тип — перестройка разворачивает одностороннюю: в предпросмотре стрелки в другую сторону.
-            const spec = sameSpec(check.seg.spec, this.spec) ? { ...this.spec, lanesF: this.spec.lanesB, lanesB: this.spec.lanesF } : this.spec;
-            o.upgrade = { curve: check.seg.curve, spec };
-          } else o.highlightSeg = check.seg.id;
-          o.label = check.ok ? { text: check.cost ? money(check.cost) : 'Развернуть', ok: true } : { text: check.reason ?? '', ok: false };
+      case 'lane': {
+        const rt = this.roadTools;
+        if (!rt.lane) {
+          // Где встанет полоса: у края дороги — зелёный кружок.
+          const e = edgeAt(g.roads.net, p);
+          o.points = e ? [{ pos: e.pos, color: '#27ae60', r: 5 }] : [];
+          o.label = { text: e ? 'Тяните вдоль края — новая полоса, в сторону — съезд' : 'Начните у края дороги или в поле', ok: true };
+          break;
         }
+        const plan = rt.lanePlan(this.spec);
+        if (plan) this.showRoadPlan(o, plan, money(plan.cost));
+        break;
+      }
+      case 'upgrade': {
+        // Будущая дорога на месте полотна (ширина, полосы, направление); нельзя — красным.
+        const res = this.roadTools.upgradePlan(p, this.spec, this.snapRadius * 0.3);
+        if (res) this.showRoadPlan(o, res.plan, res.plan.cost ? money(res.plan.cost) : 'Перестроить');
         break;
       }
       case 'move': {
-        if (this.dragHandle && g.net.segments.has(this.dragHandle.seg)) {
-          // Тянем перо: кривая меняется, угол у этого конца — вслед за пером; перо соседа — на той же прямой.
-          const res = g.builder.handlePlan(this.dragHandle.seg, this.dragHandle.which, p, !this.shift)!;
-          const plan = res.plan;
-          o.plans = plan.plans;
-          o.handles = this.handleMarks(res.curves);
-          for (const id of plan.demolish) {
-            const b = g.buildingById(id);
-            if (b) o.marks.push({ fp: b.fp, ok: false });
-          }
-          const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
-          const kink = this.shift ? ' · излом' : '';
-          o.label = plan.ok ? { text: `Перо${kink} · ${price}`, ok: true } : { text: `${plan.reason} · ${price}`, ok: false };
-          break;
-        }
-        if (this.handleAt(p)) {
-          o.handles = this.handleMarks();
-          o.label = { text: 'Тяните перо · Shift — излом на стыке', ok: true };
-          break;
-        }
-        if (this.dragSeg !== null && g.net.segments.has(this.dragSeg)) {
-          // Гнём участок: новая форма через курсор, концы на месте.
-          const plan = g.builder.bendPlan(this.dragSeg, p);
-          o.plans = plan.plans;
-          o.highlightNode = { pos: p, ok: plan.ok, radius: 6 };
-          for (const id of plan.demolish) {
-            const b = g.buildingById(id);
-            if (b) o.marks.push({ fp: b.fp, ok: false });
-          }
-          const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
-          o.label = plan.ok ? { text: `Изогнуть · ${price}`, ok: true } : { text: `${plan.reason} · ${price}`, ok: false };
-          break;
-        }
-        const drag = this.dragEnd !== null ? g.net.nodes.get(this.dragEnd) : undefined;
-        if (drag && drag.segments.length > 1) {
-          // Тянем узел: все его дороги в новой форме; недопустимые — красным.
-          const to = this.nodeTarget(drag.id, p);
-          const plan = g.builder.moveNodePlan(drag.id, to);
-          o.plans = plan.plans;
-          o.highlightNode = { pos: to, ok: plan.ok, radius: 8 };
-          for (const id of plan.demolish) {
-            const b = g.buildingById(id);
-            if (b) o.marks.push({ fp: b.fp, ok: false });
-          }
-          // Вернут больше, чем потратим (дорога стала короче) — показываем возврат.
-          const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
-          const straight = to !== p ? ' · ровно' : '';
-          const razed = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
-          o.label = plan.ok ? { text: `${price}${straight}${razed}`, ok: true } : { text: `${plan.reason} · ${price}`, ok: false };
-          break;
-        }
-        if (this.dragEnd !== null && g.net.nodes.has(this.dragEnd)) {
-          // Тянем: показываем новый участок и куда он примкнёт.
-          o.snap = this.moveTarget(this.dragEnd, p);
-          const req = g.builder.moveEndRequest(this.dragEnd, o.snap);
-          if (req) {
-            o.plan = g.builder.plan(req);
-            o.chainStart = req.start;
-            o.highlightSeg = g.net.node(this.dragEnd).segments[0] ?? null;
-            const joins = o.snap.kind === 'free' ? '' : ' · примкнёт';
-            o.label = o.plan.ok
-              ? { text: `${money(o.plan.cost)}${joins}`, ok: true }
-              : { text: `${o.plan.reason} · ${money(o.plan.cost)}`, ok: false };
+        const rt = this.roadTools;
+        if (rt.dragNode !== null || rt.bend !== null) {
+          // Тянем: дороги в новой форме; вернут больше, чем потратим, — показываем возврат.
+          const plan = rt.movePlan(p);
+          if (plan) {
+            const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
+            this.showRoadPlan(o, plan, `${rt.bend !== null ? 'Изогнуть · ' : ''}${price}`);
           }
           break;
         }
-        const end = g.builder.pickMovable(p, this.snapRadius);
-        if (end) {
-          o.highlightNode = { pos: end.pos, ok: true, radius: 10 };
-          o.label = { text: end.segments.length > 1 ? 'Тяните узел — дороги следом' : 'Тяните конец дороги', ok: true };
+        const node = rt.nodeAt(p, this.snapRadius);
+        if (node) {
+          o.points = [{ pos: node.pos, color: '#2f80ed', r: 9 }];
+          o.label = { text: 'Тяните узел — дороги следом', ok: true };
           break;
         }
-        const bend = g.builder.pickBendable(p, this.snapRadius * 0.3);
-        if (bend) {
-          // У дороги под курсором видны перья — они остаются, пока курсор идёт к ним.
-          this.editSeg = bend.id;
-          o.highlightSeg = bend.id;
-          o.highlightEdit = true;
+        const c = corridorAt(g, p, this.snapRadius * 0.3);
+        if (c) {
+          o.corridor = { id: c.id, color: 'blue' };
           o.label = { text: 'Тяните — изогнуть дорогу', ok: true };
         }
-        o.handles = this.handleMarks();
         break;
       }
       case 'bulldoze': {
@@ -1250,6 +1160,12 @@ export class Controller {
         if (seg) {
           o.highlightSeg = seg.id;
           o.label = { text: `+${money(g.builder.segmentCost(seg) * 0.5)}`, ok: true };
+          break;
+        }
+        const road = this.roadTools.bulldozePlan(p, this.snapRadius * 0.3);
+        if (road) {
+          o.corridor = { id: road.corridor.id, color: 'red' };
+          o.label = { text: `+${money(-road.plan.cost)}`, ok: true };
         }
         break;
       }
@@ -1268,11 +1184,11 @@ export class Controller {
           }
           break;
         }
-        const n = g.builder.pickJunction(p, this.snapRadius);
+        const n = this.junctionAt(p);
         if (n && edit?.node === n.id) {
           o.label = { text: edit.from ? 'Оранжевый кружок — куда ехать' : 'Белый кружок — полоса въезда', ok: true };
         } else if (n) {
-          o.highlightNode = { pos: n.pos, ok: true, radius: n.radius + 8 };
+          o.highlightNode = { pos: n.pos, ok: true, radius: 24 };
           o.label = { text: 'Настроить перекрёсток', ok: true };
         }
         break;
@@ -1295,9 +1211,7 @@ export class Controller {
         break;
       }
       case 'roundabout': {
-        const check = g.builder.canRoundabout(p, this.snapRadius, this.ring);
-        if (check.center) o.highlightNode = { pos: check.center, ok: check.ok, radius: check.r };
-        o.label = check.ok ? { text: `Кольцо · ${money(check.cost)}`, ok: true } : { text: check.reason ?? '', ok: false };
+        o.label = { text: 'Кольца переезжают на полосы — скоро вернутся', ok: false };
         break;
       }
       case 'station': {
@@ -1315,11 +1229,8 @@ export class Controller {
         }
         // Автостанция: выезд, который построится вместе с ней, точка примыкания и дома под снос.
         const drive = plan.driveway;
-        if (drive?.plan.lut) {
-          o.plan = { ...drive.plan, ok: plan.ok };
-          if (drive.from.kind !== 'free') o.snap = drive.from;
-        }
-        const razed = [...(drive?.plan.demolish ?? []), ...(plan.demolish ?? [])];
+        if (drive?.net) o.roads = { net: drive.net, ok: plan.ok, changed: drive.changed };
+        const razed = [...(drive?.demolish ?? []), ...(plan.demolish ?? [])];
         for (const id of razed) {
           const b = g.buildingById(id);
           if (b) o.marks.push({ fp: b.fp, ok: false });

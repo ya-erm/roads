@@ -94,7 +94,7 @@ export class LaneTraffic {
   private laneAt(p: Vec, dir: Vec): { lane: GLane; u: number } | null {
     let best: { lane: GLane; u: number } | null = null;
     let bestD = 6;
-    for (const c of this.graph.net.corridors.values()) {
+    for (const c of this.graph.net.corridorsNear(p, 40)) {
       const hit = c.lut.closest(p);
       if (hit.d > 40) continue;
       const t = c.lut.tangentAt(hit.s);

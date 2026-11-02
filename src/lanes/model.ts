@@ -31,6 +31,12 @@ export interface Corridor {
   length: number;
   cls: RoadClass;
   lanes: LaneSlot[];
+  /** Участок кольца: на его узлах кольцо — главное. */
+  ring?: boolean;
+  /** Ограничение скорости, км/ч; нет — по умолчанию для класса. */
+  limit?: number;
+  /** Растёт при каждой правке полотна — по нему отрисовка узнаёт, что пересчитать. */
+  rev: number;
 }
 
 export type NodeKind = 'seam' | 'junction';
@@ -48,6 +54,19 @@ export interface LaneNode {
   dir: Vec;
   level: number;
   corridors: number[];
+  // ---------- Настройки перекрёстка ----------
+  /** Светофор. */
+  control?: 'lights';
+  /** Главная дорога — пара полотен; [] — равнозначный; нет — выбирается сама. */
+  mainPair?: number[] | null;
+  /** Запрещённые повороты: `${полотно въезда}>${полотно выезда}`. */
+  bans?: string[];
+  /** Длительность зелёного по фазам светофора, с. */
+  greens?: number[];
+  /** Светофор пропускает пустые фазы. По умолчанию да. */
+  adaptive?: boolean;
+  /** Узел кольца с этим центром (id из списка колец игры). */
+  roundabout?: number | null;
 }
 
 /** Конец полотна в узле. */
@@ -94,6 +113,8 @@ export interface CorridorOptions {
   portB?: number;
   cls: RoadClass;
   lanes: LaneSlot[];
+  limit?: number;
+  ring?: boolean;
   /** Своя форма; концы всё равно ставятся в узлы. */
   curve?: Cubic;
   /** Направление выхода из перекрёстка a / входа в перекрёсток b; по умолчанию — по хорде. */
@@ -108,8 +129,12 @@ export interface CorridorOptions {
 export interface LaneNetSave {
   nextId: number;
   nodes: Omit<LaneNode, 'corridors'>[];
-  corridors: Omit<Corridor, 'lut' | 'length'>[];
+  corridors: Omit<Corridor, 'lut' | 'length' | 'rev'>[];
 }
+
+/** Ячейка сетки поиска «что рядом». */
+const CELL = 160;
+const cellKey = (x: number, y: number) => x * 100003 + y;
 
 export class LaneNet {
   readonly nodes = new Map<number, LaneNode>();
@@ -117,6 +142,11 @@ export class LaneNet {
   /** Растёт при любом изменении — по нему отрисовка обновляет кэш. */
   version = 0;
   private nextId = 1;
+  private nextRev = 1;
+  /** Сетка поиска: ячейка → полотна, задевающие её (по рамке кривой с запасом на ширину). */
+  private grid = new Map<number, Set<number>>();
+  private cellsOf = new Map<number, number[]>();
+  private nodeGrid = new Map<number, Set<number>>();
 
   addSeam(pos: Vec, dir: Vec, level = 0): LaneNode {
     return this.addNode('seam', pos, norm(dir), level);
@@ -129,8 +159,72 @@ export class LaneNet {
   private addNode(kind: NodeKind, pos: Vec, dir: Vec, level: number): LaneNode {
     const n: LaneNode = { id: this.nextId++, kind, pos: { ...pos }, dir, level, corridors: [] };
     this.nodes.set(n.id, n);
+    this.indexNode(n, true);
     this.version++;
     return n;
+  }
+
+  // ---------- Сетка поиска ----------
+
+  private indexCorridor(c: Corridor, add: boolean): void {
+    if (!add) {
+      for (const k of this.cellsOf.get(c.id) ?? []) this.grid.get(k)?.delete(c.id);
+      this.cellsOf.delete(c.id);
+      return;
+    }
+    const pts = [c.curve.p0, c.curve.p1, c.curve.p2, c.curve.p3];
+    const pad = 40;
+    const x0 = Math.floor((Math.min(...pts.map((p) => p.x)) - pad) / CELL);
+    const x1 = Math.floor((Math.max(...pts.map((p) => p.x)) + pad) / CELL);
+    const y0 = Math.floor((Math.min(...pts.map((p) => p.y)) - pad) / CELL);
+    const y1 = Math.floor((Math.max(...pts.map((p) => p.y)) + pad) / CELL);
+    const keys: number[] = [];
+    for (let x = x0; x <= x1; x++) {
+      for (let y = y0; y <= y1; y++) {
+        const k = cellKey(x, y);
+        let set = this.grid.get(k);
+        if (!set) this.grid.set(k, (set = new Set()));
+        set.add(c.id);
+        keys.push(k);
+      }
+    }
+    this.cellsOf.set(c.id, keys);
+  }
+
+  private indexNode(n: LaneNode, add: boolean): void {
+    const k = cellKey(Math.floor(n.pos.x / CELL), Math.floor(n.pos.y / CELL));
+    if (add) {
+      let set = this.nodeGrid.get(k);
+      if (!set) this.nodeGrid.set(k, (set = new Set()));
+      set.add(n.id);
+    } else this.nodeGrid.get(k)?.delete(n.id);
+  }
+
+  /** Полотна, которые могут быть ближе r к точке (точно — проверяет вызывающий). */
+  corridorsNear(p: Vec, r: number): Corridor[] {
+    return this.corridorsInBox(p.x - r, p.y - r, p.x + r, p.y + r);
+  }
+
+  corridorsInBox(x0: number, y0: number, x1: number, y1: number): Corridor[] {
+    const ids = new Set<number>();
+    for (let x = Math.floor(x0 / CELL); x <= Math.floor(x1 / CELL); x++) {
+      for (let y = Math.floor(y0 / CELL); y <= Math.floor(y1 / CELL); y++) for (const id of this.grid.get(cellKey(x, y)) ?? []) ids.add(id);
+    }
+    return [...ids].map((id) => this.corridors.get(id)!).filter(Boolean);
+  }
+
+  /** Узлы не дальше r от точки. */
+  nodesNear(p: Vec, r: number): LaneNode[] {
+    const res: LaneNode[] = [];
+    for (let x = Math.floor((p.x - r) / CELL); x <= Math.floor((p.x + r) / CELL); x++) {
+      for (let y = Math.floor((p.y - r) / CELL); y <= Math.floor((p.y + r) / CELL); y++) {
+        for (const id of this.nodeGrid.get(cellKey(x, y)) ?? []) {
+          const n = this.nodes.get(id);
+          if (n && dist(n.pos, p) <= r) res.push(n);
+        }
+      }
+    }
+    return res;
   }
 
   node(id: number): LaneNode {
@@ -183,8 +277,12 @@ export class LaneNet {
       length: lut.length,
       cls: o.cls,
       lanes: o.lanes.map((l) => ({ ...l, from: Math.max(0, l.from), to: Math.min(lut.length, l.to) })),
+      rev: this.nextRev++,
     };
+    if (o.limit !== undefined) c.limit = o.limit;
+    if (o.ring) c.ring = true;
     this.corridors.set(c.id, c);
+    this.indexCorridor(c, true);
     A.corridors.push(c.id);
     if (b !== a) B.corridors.push(c.id);
     this.version++;
@@ -195,37 +293,57 @@ export class LaneNet {
   removeCorridor(id: number, keepNodes = false): void {
     const c = this.corridors.get(id);
     if (!c) return;
+    this.indexCorridor(c, false);
     this.corridors.delete(id);
     for (const nid of [c.a, c.b]) {
       const n = this.nodes.get(nid);
       if (!n) continue;
       n.corridors = n.corridors.filter((x) => x !== id);
-      if (!n.corridors.length && !keepNodes) this.nodes.delete(nid);
+      if (!n.corridors.length && !keepNodes) this.removeNode(nid);
     }
+    this.version++;
+  }
+
+  /** Убирает узел (его полотна должны быть уже убраны). */
+  removeNode(id: number): void {
+    const n = this.nodes.get(id);
+    if (!n) return;
+    this.indexNode(n, false);
+    this.nodes.delete(id);
+    this.version++;
+  }
+
+  /** Полотно поменялось без смены формы (класс, кольцо) — отрисовке пора пересчитать. */
+  touch(c: Corridor): void {
+    c.rev = this.nextRev++;
     this.version++;
   }
 
   /** Новая форма полотна: отрезки полос растягиваются вместе с ним. */
   setCurve(c: Corridor, curve: Cubic): void {
     const old = c.length;
+    this.indexCorridor(c, false);
     c.curve = curve;
     c.lut = new CurveLUT(curve);
     c.length = c.lut.length;
+    this.indexCorridor(c, true);
     const k = c.length / old;
     c.lanes = c.lanes.map((l) => ({ ...l, from: l.from <= 0.01 ? 0 : l.from * k, to: l.to >= old - 0.01 ? c.length : l.to * k }));
-    this.version++;
+    this.touch(c);
   }
 
   setLanes(c: Corridor, lanes: LaneSlot[]): void {
     c.lanes = lanes.map((l) => ({ ...l, from: Math.max(0, l.from), to: Math.min(c.length, l.to) }));
-    this.version++;
+    this.touch(c);
   }
 
   /** Двигает узел: концы его полотен — следом, их управляющие точки сдвигаются так же (форма сохраняется). */
   moveNode(id: number, pos: Vec): void {
     const n = this.node(id);
     const delta = sub(pos, n.pos);
+    this.indexNode(n, false);
     n.pos = { ...pos };
+    this.indexNode(n, true);
     for (const e of this.ends(n)) {
       const cv = { ...e.corridor.curve };
       if (e.end === 'a') {
@@ -244,17 +362,23 @@ export class LaneNet {
     return {
       nextId: this.nextId,
       nodes: [...this.nodes.values()].map(({ corridors: _, ...n }) => ({ ...n, pos: { ...n.pos }, dir: { ...n.dir } })),
-      corridors: [...this.corridors.values()].map(({ lut: _l, length: _n, ...c }) => ({ ...c, curve: { ...c.curve }, lanes: c.lanes.map((l) => ({ ...l })) })),
+      corridors: [...this.corridors.values()].map(({ lut: _l, length: _n, rev: _r, ...c }) => ({ ...c, curve: { ...c.curve }, lanes: c.lanes.map((l) => ({ ...l })) })),
     };
   }
 
   static fromJSON(data: LaneNetSave): LaneNet {
     const net = new LaneNet();
     net.nextId = data.nextId;
-    for (const n of data.nodes) net.nodes.set(n.id, { ...n, pos: { ...n.pos }, dir: { ...n.dir }, corridors: [] });
+    for (const n of data.nodes) {
+      const node = { ...n, pos: { ...n.pos }, dir: { ...n.dir }, corridors: [] };
+      net.nodes.set(n.id, node);
+      net.indexNode(node, true);
+    }
     for (const c of data.corridors) {
       const lut = new CurveLUT(c.curve);
-      net.corridors.set(c.id, { ...c, curve: { ...c.curve }, lut, length: lut.length, lanes: c.lanes.map((l) => ({ ...l })) });
+      const corridor: Corridor = { ...c, curve: { ...c.curve }, lut, length: lut.length, lanes: c.lanes.map((l) => ({ ...l })), rev: net.nextRev++ };
+      net.corridors.set(c.id, corridor);
+      net.indexCorridor(corridor, true);
       net.node(c.a).corridors.push(c.id);
       if (c.b !== c.a) net.node(c.b).corridors.push(c.id);
     }
@@ -262,8 +386,22 @@ export class LaneNet {
     return net;
   }
 
+  /**
+   * Копия для предпросмотра: свои объекты узлов и полотен, но общие (неизменяемые) кривые,
+   * таблицы длин и списки полос — копировать большую сеть дёшево. Правки копии заменяют эти
+   * поля целиком, не трогая оригинал. Номера ревизий сохраняются — отрисовка переиспользует кэш.
+   */
   clone(): LaneNet {
-    return LaneNet.fromJSON(this.toJSON());
+    const net = new LaneNet();
+    net.nextId = this.nextId;
+    net.nextRev = this.nextRev;
+    net.version = this.version;
+    for (const [id, n] of this.nodes) net.nodes.set(id, { ...n, corridors: [...n.corridors] });
+    for (const [id, c] of this.corridors) net.corridors.set(id, { ...c });
+    for (const [k, set] of this.grid) net.grid.set(k, new Set(set));
+    for (const [id, keys] of this.cellsOf) net.cellsOf.set(id, keys);
+    for (const [k, set] of this.nodeGrid) net.nodeGrid.set(k, new Set(set));
+    return net;
   }
 
   /** Конец полотна: где, куда смотрит, с какой стороны стыка. */
@@ -362,7 +500,7 @@ export class LaneNet {
   corridorNear(p: Vec, radius: number): Corridor | null {
     let best: Corridor | null = null;
     let bestD = radius;
-    for (const c of this.corridors.values()) {
+    for (const c of this.corridorsNear(p, radius)) {
       const d = dist(p, c.lut.closest(p).point);
       if (d < bestD) {
         bestD = d;

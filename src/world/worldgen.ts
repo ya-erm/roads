@@ -1,10 +1,11 @@
 import { circleArc, Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import type { Rng } from '../core/rng';
-import { add, angleOf, dist, lerp, norm, scale, sub, Vec } from '../core/vec';
+import { add, angleOf, dist, dot, lerp, norm, scale, sub, Vec } from '../core/vec';
+import { edgesAt } from '../lanes/geometry';
+import { Corridor, LaneNet, LaneNode, LaneSlot, twoWay } from '../lanes/model';
 import { CargoType, INDUSTRY_LIST, TOWN_CARGO } from './cargo';
 import type { Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
-import type { Network, RoadNode, Segment } from './network';
-import { halfWidth, isOneWay, isTrunk, RoadSpec } from './roadTypes';
+import { isTrunk, RoadClass, ROAD_MARGIN } from './roadTypes';
 import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, townSizes, WorldSettings } from './settings';
 import { Footprint, footprintRadius, FootprintIndex } from './spatial';
 import type { Terrain } from './terrain';
@@ -50,15 +51,34 @@ const COM_COLORS: [string, string][] = [
   ['#dfe2e6', '#8f96a0'],
 ];
 
-const STREET: RoadSpec = { cls: 'street', lanesF: 1, lanesB: 1 };
-const AVENUE: RoadSpec = { cls: 'avenue', lanesF: 2, lanesB: 2 };
+/** Профиль городской дороги: класс и полосы. */
+interface Profile {
+  cls: RoadClass;
+  lanes: LaneSlot[];
+}
+const STREET: Profile = { cls: 'street', lanes: twoWay(1, 1) };
+const AVENUE: Profile = { cls: 'avenue', lanes: twoWay(2, 2) };
 
 export interface WorldContext {
-  net: Network;
+  /** Дороги — сеть полос. */
+  roads: LaneNet;
   terrain: Terrain;
   index: FootprintIndex<Structure>;
   rng: Rng;
   nextId: () => number;
+}
+
+/** Полуширина асфальта полотна в точке s (по большей стороне). */
+export function halfAtS(c: Corridor, s: number): number {
+  const e = edgesAt(c, s);
+  return e ? Math.max(-e[0], e[1]) + ROAD_MARGIN : ROAD_MARGIN;
+}
+
+/** Полуширина полотна по всей длине (по самому широкому месту). */
+export function corridorHalf(c: Corridor): number {
+  let h = 0;
+  for (let i = 0; i <= 4; i++) h = Math.max(h, halfAtS(c, (c.length * i) / 4));
+  return h;
 }
 
 export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAULT_SETTINGS): { towns: Town[]; industries: Industry[] } {
@@ -111,32 +131,62 @@ function assignDemands(towns: Town[], rng: Rng): void {
 
 interface StreetBuilder {
   ctx: WorldContext;
-  segs: Segment[];
+  segs: Corridor[];
 }
 
-function nodeAt(sb: StreetBuilder, p: Vec): RoadNode | null {
-  const { terrain, net } = sb.ctx;
+function nodeAt(sb: StreetBuilder, p: Vec): LaneNode | null {
+  const { terrain, roads } = sb.ctx;
   if (!terrain.inBounds(p, 80) || terrain.isWater(p, 36)) return null;
-  const near = net.findNodeNear(p, 20);
-  return near ?? net.addNode(p);
+  const near = roads.nodesNear(p, 20).sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0];
+  return near ?? roads.addJunction(p);
 }
 
 /** Добавляет улицу, если она не пересекает воду и другие улицы. */
-function street(sb: StreetBuilder, a: RoadNode | null, b: RoadNode | null, curve: Cubic | null, spec: RoadSpec): Segment | null {
+function street(sb: StreetBuilder, a: LaneNode | null, b: LaneNode | null, curve: Cubic | null, profile: Profile): Corridor | null {
   if (!a || !b || a === b) return null;
-  const { net, terrain } = sb.ctx;
-  if (net.segmentBetween(a.id, b.id)) return null;
+  const { roads, terrain } = sb.ctx;
+  if (a.corridors.some((id) => b.corridors.includes(id))) return null;
   const c = curve ?? straightCubic(a.pos, b.pos);
   const fixed: Cubic = { p0: a.pos, p1: add(c.p1, sub(a.pos, c.p0)), p2: add(c.p2, sub(b.pos, c.p3)), p3: b.pos };
   const lut = new CurveLUT(fixed);
   for (let i = 1; i < 12; i++) if (terrain.isWater(lut.pointAt((lut.length * i) / 12), 22)) return null;
-  for (const other of net.segmentsNear(lerp(a.pos, b.pos, 0.5), lut.length / 2 + 40)) {
+  for (const other of roads.corridorsNear(lerp(a.pos, b.pos, 0.5), lut.length / 2 + 40)) {
     if ([other.a, other.b].some((id) => id === a.id || id === b.id)) continue;
     if (intersectCurves(lut, other.lut).length) return null;
   }
-  const seg = net.addSegment(a.id, b.id, fixed, spec);
+  const seg = roads.addCorridor(a.id, b.id, { cls: profile.cls, lanes: profile.lanes, curve: fixed });
   sb.segs.push(seg);
   return seg;
+}
+
+/**
+ * Две улицы одного профиля, продолжающие друг друга почти по прямой, сходятся не перекрёстком,
+ * а стыком: разметка идёт насквозь. Их концы выравниваются точно по общему направлению.
+ */
+export function smoothJoins(roads: LaneNet, nodes: Iterable<number>): void {
+  for (const id of nodes) {
+    const n = roads.nodes.get(id);
+    if (!n || n.kind !== 'junction' || n.corridors.length !== 2) continue;
+    const [e1, e2] = roads.ends(n);
+    if (!e1 || !e2 || e1.corridor === e2.corridor || e1.corridor.cls !== e2.corridor.cls) continue;
+    if (dot(e1.away, e2.away) > -Math.cos(0.3)) continue;
+    const dir = norm(sub(e2.away, e1.away));
+    // Полосы с обеих сторон должны совпасть по положению и направлению.
+    const sig = (away: Vec, c: Corridor, end: 'a' | 'b') => {
+      const along = dot(end === 'a' ? away : scale(away, -1), dir) >= 0 ? 1 : -1;
+      return c.lanes.map((l) => `${Math.round(l.offset * along * 2)}:${l.flow * along > 0}`).sort().join();
+    };
+    if (sig(e1.away, e1.corridor, e1.end) !== sig(e2.away, e2.corridor, e2.end)) continue;
+    n.kind = 'seam';
+    n.dir = dir;
+    for (const e of [e1, e2]) {
+      const side = dot(e.away, dir) >= 0 ? 1 : -1;
+      const cv = { ...e.corridor.curve };
+      if (e.end === 'a') cv.p1 = add(cv.p0, scale(dir, side * dist(cv.p0, cv.p1)));
+      else cv.p2 = add(cv.p3, scale(dir, side * dist(cv.p3, cv.p2)));
+      roads.setCurve(e.corridor, cv);
+    }
+  }
 }
 
 /** Отрезок кривой Катмулла-Рома между p1 и p2 с соседями p0 и p3 — плавная улица через узлы. */
@@ -158,7 +208,7 @@ function radialStreets(sb: StreetBuilder, center: Vec, size: number): void {
     counts.push(k === rings - 1 && k > 0 ? counts[k - 1] : n);
   }
   const angle = (n: number, i: number) => a0 + (i * Math.PI * 2) / n;
-  const nodes = new Map<string, RoadNode | null>();
+  const nodes = new Map<string, LaneNode | null>();
   const key = (k: number, n: number, i: number) => `${k}:${((i * rays * 8) / n) | 0}`;
   const nodeOn = (k: number, n: number, i: number) => {
     const id = key(k, n, i);
@@ -226,7 +276,7 @@ function organicStreets(sb: StreetBuilder, center: Vec, size: number): void {
     return add(center, add(scale(ux, lx + w.x), scale(uy, ly + w.y)));
   };
   const inside = (i: number, j: number) => Math.hypot(i, j) <= reach(i, j);
-  const grid = new Map<string, RoadNode | null>();
+  const grid = new Map<string, LaneNode | null>();
   for (let i = -n; i <= n; i++) {
     for (let j = -n; j <= n; j++) if (inside(i, j)) grid.set(`${i}:${j}`, nodeAt(sb, pos(i, j)));
   }
@@ -265,7 +315,7 @@ function linearStreets(sb: StreetBuilder, center: Vec, size: number): void {
   }
   // Поперечные улицы и задние улицы, образующие кварталы.
   for (const side of [-1, 1]) {
-    let prevEnd: RoadNode | null = null;
+    let prevEnd: LaneNode | null = null;
     for (let i = 1; i < pts.length - 1; i++) {
       const from = mainNodes[i];
       if (!from || !rng.chance(0.6)) {
@@ -284,7 +334,7 @@ function linearStreets(sb: StreetBuilder, center: Vec, size: number): void {
 }
 
 export function buildTown(ctx: WorldContext, id: number, center: Vec, name: string, size: number, style: TownStyle): Town | null {
-  const { net } = ctx;
+  const { roads } = ctx;
   const sb: StreetBuilder = { ctx, segs: [] };
   if (style === 'radial') radialStreets(sb, center, size);
   else if (style === 'organic') organicStreets(sb, center, size);
@@ -293,9 +343,9 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
   // Оставляем связную часть вокруг центра.
   const created = new Set<number>();
   for (const s of sb.segs) created.add(s.a).add(s.b);
-  let start: RoadNode | null = null;
+  let start: LaneNode | null = null;
   for (const nid of created) {
-    const n = net.node(nid);
+    const n = roads.node(nid);
     if (!start || dist(n.pos, center) < dist(start.pos, center)) start = n;
   }
   const keep = new Set<number>();
@@ -304,8 +354,8 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
     keep.add(start.id);
     while (queue.length) {
       const nid = queue.pop()!;
-      for (const sid of net.node(nid).segments) {
-        const s = net.segment(sid);
+      for (const sid of roads.node(nid).corridors) {
+        const s = roads.corridor(sid);
         const other = s.a === nid ? s.b : s.a;
         if (!keep.has(other)) {
           keep.add(other);
@@ -314,10 +364,22 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
       }
     }
   }
-  for (const nid of created) if (!keep.has(nid)) net.deleteNode(nid);
-  for (const n of [...net.nodes.values()]) if (n.segments.length === 0 && n.buildingId === null) net.deleteNode(n.id);
-  const alive = sb.segs.filter((s) => net.segments.has(s.id));
-  if (alive.length < 3) return null;
+  for (const s of sb.segs) if (!keep.has(s.a)) roads.removeCorridor(s.id);
+  for (const nid of created) if (!keep.has(nid) && roads.nodes.has(nid) && !roads.node(nid).corridors.length) roads.removeNode(nid);
+  const alive = sb.segs.filter((s) => roads.corridors.has(s.id));
+  if (alive.length < 3) {
+    for (const s of alive) roads.removeCorridor(s.id);
+    return null;
+  }
+  // Улица, продолжающая другую почти по прямой, — без перекрёстка; одиночные концы — тупики.
+  smoothJoins(roads, keep);
+  for (const nid of keep) {
+    const n = roads.nodes.get(nid);
+    if (n?.kind === 'junction' && n.corridors.length === 1) {
+      n.kind = 'seam';
+      n.dir = scale(roads.ends(n)[0].away, -1);
+    }
+  }
 
   let radius = 0;
   let top = center.y;
@@ -370,7 +432,7 @@ function placeLandmark(ctx: WorldContext, town: Town): void {
 function streetAngle(ctx: WorldContext, p: Vec): number {
   let best = Infinity;
   let angle = 0;
-  for (const seg of ctx.net.segmentsNear(p, 200)) {
+  for (const seg of ctx.roads.corridorsNear(p, 200)) {
     const hit = seg.lut.closest(p);
     if (hit.d < best) {
       best = hit.d;
@@ -392,15 +454,26 @@ function clearOfRoads(ctx: WorldContext, fp: Footprint, margin: number): boolean
       pts.push({ x: fp.center.x + lx * c - ly * s, y: fp.center.y + lx * s + ly * c });
     }
   }
-  for (const seg of ctx.net.segmentsNear(fp.center, footprintRadius(fp) + 60)) {
-    const hw = halfWidth(seg.spec) + margin;
+  for (const seg of ctx.roads.corridorsNear(fp.center, footprintRadius(fp) + 60)) {
+    const hw = corridorHalf(seg) + margin;
     if (pts.some((q) => seg.lut.closest(q).d < hw)) return false;
   }
   return true;
 }
 
+/** Узел, откуда выезжают и куда приезжают машины жителей дома: ближайший перекрёсток или тупик. */
+export function anchorFor(roads: LaneNet, p: Vec): number {
+  for (const r of [150, 400, 1200]) {
+    const near = roads
+      .nodesNear(p, r)
+      .filter((n) => n.kind === 'junction' || roads.isDeadEnd(n))
+      .sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0];
+    if (near) return near.id;
+  }
+  return 0;
+}
+
 function addLandmark(ctx: WorldContext, town: Town, fp: Footprint): void {
-  const near = ctx.net.nodesNear(fp.center, 300).sort((x, y) => dist(x.pos, fp.center) - dist(y.pos, fp.center))[0];
   const b: TownBuilding = {
     type: 'building',
     id: ctx.nextId(),
@@ -408,7 +481,7 @@ function addLandmark(ctx: WorldContext, town: Town, fp: Footprint): void {
     fp,
     kind: 'landmark',
     floors: 4,
-    anchor: near?.id ?? 0,
+    anchor: anchorFor(ctx.roads, fp.center),
     color: '#efe6d2',
     roof: '#5c7fa3',
   };
@@ -417,9 +490,9 @@ function addLandmark(ctx: WorldContext, town: Town, fp: Footprint): void {
 }
 
 /** Застраивает улицу домами по обеим сторонам. density — доля занятых мест. */
-export function fillStreet(ctx: WorldContext, town: Town, seg: Segment, density: number, limit = Infinity): number {
+export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density: number, limit = Infinity): number {
   const { rng } = ctx;
-  const hw = halfWidth(seg.spec);
+  const hw = corridorHalf(seg);
   let added = 0;
   for (const side of [-1, 1]) {
     let s = 26;
@@ -449,7 +522,7 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Segment, density:
         fp,
         kind,
         floors,
-        anchor: at < seg.length / 2 ? seg.a : seg.b,
+        anchor: anchorFor(ctx.roads, p),
         color,
         roof,
       };
@@ -478,30 +551,31 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Segment, density:
   return added;
 }
 
-/** Можно ли поставить здание: не в воде, не на дороге и не на другом здании. */
 /** Магистраль или съезд развязки: город к ним не пристраивается. */
-export const isHighway = (s: RoadSpec) => isTrunk(s.cls) || (isOneWay(s) && s.cls !== 'street');
+export const isHighway = (c: Corridor) => isTrunk(c.cls) || (c.cls !== 'street' && c.lanes.every((l) => l.flow === c.lanes[0]?.flow));
 /** Сколько свободного места оставляют дома до магистрали или съезда. */
 const HIGHWAY_BUFFER = 50;
 
-/** Участок — часть развязки или магистрали: сам магистральный или примыкает к ней в узле. */
-export function nearHighway(net: Network, seg: Segment): boolean {
-  if (isHighway(seg.spec)) return true;
-  return [seg.a, seg.b].some((id) => net.node(id).segments.some((sid) => isHighway(net.segment(sid).spec)));
+/** Полотно — часть развязки или магистрали: само магистральное или примыкает к ней в узле. */
+export function nearHighway(roads: LaneNet, seg: Corridor): boolean {
+  if (isHighway(seg)) return true;
+  return [seg.a, seg.b].some((id) => roads.node(id).corridors.some((sid) => isHighway(roads.corridor(sid))));
 }
 
+/** Можно ли поставить здание: не в воде, не на дороге и не на другом здании. */
 export function placeable(ctx: WorldContext, fp: Footprint, ownSeg: number): boolean {
-  const { net, terrain, index } = ctx;
+  const { roads, terrain, index } = ctx;
   if (!terrain.inBounds(fp.center, 30) || terrain.isWater(fp.center, footprintRadius(fp) + 4)) return false;
   if (index.overlaps(fp, 2)) return false;
   const r = footprintRadius(fp);
-  for (const seg of net.segmentsNear(fp.center, r + 30 + HIGHWAY_BUFFER)) {
+  for (const seg of roads.corridorsNear(fp.center, r + 30 + HIGHWAY_BUFFER)) {
     if (seg.id === ownSeg) continue;
-    const d = seg.lut.closest(fp.center).d;
-    if (d < halfWidth(seg.spec) + r - 3) return false;
-    if (isHighway(seg.spec) && d < halfWidth(seg.spec) + r + HIGHWAY_BUFFER) return false;
+    const hit = seg.lut.closest(fp.center);
+    const hw = halfAtS(seg, hit.s);
+    if (hit.d < hw + r - 3) return false;
+    if (isHighway(seg) && hit.d < hw + r + HIGHWAY_BUFFER) return false;
   }
-  if (net.nodesNear(fp.center, r + 12).length) return false;
+  if (roads.nodesNear(fp.center, r + 12).length) return false;
   return true;
 }
 
@@ -546,7 +620,7 @@ function placeIndustries(ctx: WorldContext, towns: Town[], density: number): Ind
   return result;
 }
 
-export function normalTowards(seg: Segment, s: number, p: Vec): Vec {
+export function normalTowards(seg: Corridor, s: number, p: Vec): Vec {
   const t = seg.lut.tangentAt(s);
   const n = { x: -t.y, y: t.x };
   const d = sub(p, seg.lut.pointAt(s));

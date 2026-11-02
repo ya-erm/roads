@@ -14,7 +14,7 @@ export type Anchor =
 export function anchorAt(net: LaneNet, p: Vec, radius: number): Anchor {
   let best: LaneNode | null = null;
   let bestD = radius;
-  for (const n of net.nodes.values()) {
+  for (const n of net.nodesNear(p, radius)) {
     if (n.kind === 'seam' && !net.isDeadEnd(n)) continue;
     const d = dist(n.pos, p);
     if (d < bestD) {
@@ -44,7 +44,7 @@ export function anchorAt(net: LaneNet, p: Vec, radius: number): Anchor {
 export function corridorUnder(net: LaneNet, p: Vec, margin = 0): Corridor | null {
   let best: Corridor | null = null;
   let bestD = Infinity;
-  for (const c of net.corridors.values()) {
+  for (const c of net.corridorsNear(p, margin + 40)) {
     const hit = c.lut.closest(p);
     const e = edgesAt(c, hit.s);
     if (!e) continue;
@@ -91,18 +91,25 @@ export function splitCorridor(net: LaneNet, c: Corridor, s: number, kind: NodeKi
   const lanes2 = c.lanes
     .filter((l) => l.to > s + 0.5)
     .map((l) => ({ ...l, from: l.from <= s + 0.01 ? 0 : l.from - s, to: l.to >= L - 0.01 ? Infinity : l.to - s }));
-  const { a, b, portA, portB, cls } = c;
+  const { a, b, portA, portB, cls, limit, ring } = c;
   net.removeCorridor(c.id, true);
-  const first = net.addCorridor(a, node.id, { cls, lanes: lanes1, portA, curve: c1 });
-  const second = net.addCorridor(node.id, b, { cls, lanes: lanes2, portB, curve: c2 });
+  const first = net.addCorridor(a, node.id, { cls, lanes: lanes1, portA, curve: c1, limit, ring });
+  const second = net.addCorridor(node.id, b, { cls, lanes: lanes2, portB, curve: c2, limit, ring });
   return { node, first, second };
 }
 
 export interface RoadOptions {
   cls: RoadClass;
   lanes: LaneSlot[];
+  /** Ограничение скорости, км/ч. */
+  limit?: number;
   /** Точка, через которую выгнуть дорогу (дуга); нет — прямая или плавное продолжение тупика. */
   control?: Vec;
+  /**
+   * Излом у тупика: дорога выходит не по касательной, а в сторону конца (тупик становится
+   * перекрёстком). Нет — тупик продолжается плавно.
+   */
+  kink?: boolean;
 }
 
 interface RoadEnd {
@@ -120,20 +127,25 @@ export function buildRoad(net: LaneNet, A: Anchor, B: Anchor, o: RoadOptions): C
   if (dist(A.pos, B.pos) < 12) return [];
   if (A.kind === 'node' && B.kind === 'node' && A.node === B.node) return [];
   // Сначала — направления у концов: продолжение тупика задаёт касательную, иначе — к точке изгиба или к другому концу.
-  const tangentAt = (x: Anchor, toward: Vec, start: boolean): Vec => {
-    if (x.kind === 'node') {
-      const n = net.node(x.node);
-      if (n.kind === 'seam') {
-        const free = -net.ends(n)[0].side as 1 | -1;
-        return scale(n.dir, start ? free : -free);
-      }
-    }
-    return norm(start ? sub(toward, x.pos) : sub(x.pos, toward));
+  // С изломом (kink) дорога из тупика идёт прямо к цели, если та не точно по касательной.
+  const chordDir = (x: Anchor, toward: Vec, start: boolean) => norm(start ? sub(toward, x.pos) : sub(x.pos, toward));
+  const seamDir = (x: Anchor, start: boolean): Vec | null => {
+    if (x.kind !== 'node') return null;
+    const n = net.node(x.node);
+    if (n.kind !== 'seam') return null;
+    const free = -net.ends(n)[0].side as 1 | -1;
+    return scale(n.dir, start ? free : -free);
   };
+  const kinked = (x: Anchor, toward: Vec, start: boolean) => {
+    const d = seamDir(x, start);
+    return !!o.kink && !!d && dot(d, chordDir(x, toward, start)) < Math.cos(0.05);
+  };
+  const tangentAt = (x: Anchor, toward: Vec, start: boolean): Vec =>
+    kinked(x, toward, start) ? chordDir(x, toward, start) : (seamDir(x, start) ?? chordDir(x, toward, start));
   const t0 = tangentAt(A, o.control ?? B.pos, true);
   const t3 = tangentAt(B, o.control ?? A.pos, false);
-  const start = resolveEnd(net, A, t0, true, o.lanes);
-  const end = resolveEnd(net, B, t3, false, o.lanes);
+  const start = resolveEnd(net, A, t0, true, o.lanes, kinked(A, o.control ?? B.pos, true));
+  const end = resolveEnd(net, B, t3, false, o.lanes, kinked(B, o.control ?? A.pos, false));
   const p0 = start.node.pos;
   const p3 = end.node.pos;
   const h0 = o.control ? (dist(p0, o.control) * 2) / 3 : dist(p0, p3) / 3;
@@ -142,8 +154,11 @@ export function buildRoad(net: LaneNet, A: Anchor, B: Anchor, o: RoadOptions): C
   return chain(net, start, end, curve, o);
 }
 
-/** Узел у конца новой дороги. dir — направление дороги в этой точке (по ходу от начала к концу). */
-function resolveEnd(net: LaneNet, x: Anchor, dir: Vec, start: boolean, lanes: LaneSlot[]): RoadEnd {
+/**
+ * Узел у конца новой дороги. dir — направление дороги в этой точке (по ходу от начала к концу).
+ * kink — из тупика под углом: он становится перекрёстком.
+ */
+function resolveEnd(net: LaneNet, x: Anchor, dir: Vec, start: boolean, lanes: LaneSlot[], kink = false): RoadEnd {
   if (x.kind === 'node') {
     const n = net.node(x.node);
     if (n.kind === 'junction') return { node: n };
@@ -156,7 +171,7 @@ function resolveEnd(net: LaneNet, x: Anchor, dir: Vec, start: boolean, lanes: La
       .flatMap((e) => e.corridor.lanes.filter((l) => net.reaches(e.corridor, l, e.end)).map((l) => net.laneAtSeam(e, l)))
       .map((l) => `${Math.round(l.lat * 2)}:${l.forward}`)
       .sort();
-    if (mine.join() === theirs.join()) return { node: n, side };
+    if (!kink && mine.join() === theirs.join()) return { node: n, side };
     if (net.ends(n).every((e) => Math.abs(e.port) < LAT_EPS)) n.kind = 'junction';
     return { node: n };
   }
@@ -174,7 +189,9 @@ function chain(net: LaneNet, start: RoadEnd, end: RoadEnd, curve: Cubic, o: Road
   for (let guard = 0; guard < 24; guard++) {
     const lut = new CurveLUT(rest);
     let hit: { t: number; c: Corridor; s: number } | null = null;
-    for (const c of net.corridors.values()) {
+    const xs = lut.points.map((p) => p.x);
+    const ys = lut.points.map((p) => p.y);
+    for (const c of net.corridorsInBox(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys))) {
       if (touches(c, from.node) || touches(c, end.node) || made.includes(c)) continue;
       for (const h of intersectCurves(lut, c.lut)) {
         if (h.s1 < 10 || h.s1 > lut.length - 10) continue;
@@ -187,11 +204,11 @@ function chain(net: LaneNet, start: RoadEnd, end: RoadEnd, curve: Cubic, o: Road
     const nearB = hit.s > hit.c.length - 10 && net.node(hit.c.b).kind === 'junction';
     const J = nearA ? net.node(hit.c.a) : nearB ? net.node(hit.c.b) : splitCorridor(net, hit.c, hit.s, 'junction').node;
     const [head, tail] = splitBezier(rest, hit.t);
-    made.push(net.addCorridor(from.node.id, J.id, { cls: o.cls, lanes: o.lanes, curve: head }));
+    made.push(net.addCorridor(from.node.id, J.id, { cls: o.cls, lanes: o.lanes, limit: o.limit, curve: head }));
     from = { node: J };
     rest = tail;
   }
-  made.push(net.addCorridor(from.node.id, end.node.id, { cls: o.cls, lanes: o.lanes, curve: rest }));
+  made.push(net.addCorridor(from.node.id, end.node.id, { cls: o.cls, lanes: o.lanes, limit: o.limit, curve: rest }));
   return made;
 }
 
@@ -212,7 +229,7 @@ export interface EdgeHit {
 export function edgeAt(net: LaneNet, p: Vec, tol = 4.5): EdgeHit | null {
   let best: EdgeHit | null = null;
   let bestD = tol;
-  for (const c of net.corridors.values()) {
+  for (const c of net.corridorsNear(p, 60)) {
     const hit = c.lut.closest(p);
     if (hit.d > 60 || hit.s < 1 || hit.s > c.length - 1) continue;
     const e = edgesAt(c, hit.s);

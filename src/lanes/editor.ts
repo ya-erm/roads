@@ -168,6 +168,7 @@ export class LabEditor {
             const cc = n.corridor(c.id);
             cc.cls = this.profile.cls;
             n.setLanes(cc, this.profile.lanes());
+            n.touch(cc);
           });
         }
         return !!c;
