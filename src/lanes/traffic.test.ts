@@ -232,4 +232,18 @@ describe('Полосы: движение', { timeout: 30_000 }, () => {
     run(traffic, 60);
     expect(lane).toBe(1);
   });
+
+  it('короткий «кармашек» у остановки (37 м) — автобус всё равно заезжает в него', () => {
+    const net = new LaneNet();
+    const a = net.addSeam({ x: -400, y: 0 }, EAST);
+    const b = net.addSeam({ x: 0, y: 0 }, EAST);
+    net.addCorridor(a.id, b.id, { cls: 'street', lanes: [...twoWay(1, 1), slot(10.5, 1, 363)] });
+    const graph = new LaneGraph(net);
+    let lane: number | null = null;
+    const traffic = new LaneTraffic(graph, { onArrive: (v) => (lane = graph.lanes.get(v.lane)!.index), onLost: () => {} });
+    const route = findLaneRoute(graph, graph.outLinks.get(a.id)!, b.id)!;
+    expect(traffic.spawn({ ...CAR, kind: 'bus', length: 12, targetNode: b.id, route })).not.toBeNull();
+    run(traffic, 60);
+    expect(lane).toBe(1);
+  });
 });
