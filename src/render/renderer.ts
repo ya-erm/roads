@@ -3,6 +3,7 @@ import { add, cross, cubicBezier, dist, dot, scale, sub, Vec } from '../core/vec
 import type { Plan, Snap } from '../game/build';
 import type { Game, LaneEnd } from '../game/game';
 import { LaneRenderer } from '../lanes/draw';
+import { insideRuns } from '../lanes/edit';
 import { edgesAt, pointOff, stations as axisStations } from '../lanes/geometry';
 import type { LaneNet } from '../lanes/model';
 import type { Vehicle } from '../sim/vehicle';
@@ -61,7 +62,7 @@ export interface ToolOverlay {
   /** Место, на которое показали из карточки (пульсирующее кольцо на пару секунд). */
   ping: { pos: Vec; r: number } | null;
   /** Рамка сноса и что под неё попадёт. */
-  area: { a: Vec; b: Vec; segs: number[]; fps: Footprint[] } | null;
+  area: { a: Vec; b: Vec; segs: number[]; corridors: number[]; fps: Footprint[] } | null;
   /** Отметки зданий: снос (bad) или место для переноса (ok/bad). */
   marks: { fp: Footprint; ok: boolean }[];
   label: { text: string; ok: boolean } | null;
@@ -262,7 +263,6 @@ export class Renderer {
     this.drawJunctions(game, 0);
     this.drawCorners(game, 0, view);
     this.drawGores(game, 0, view, 'fill');
-    this.drawRoundabouts(game);
     this.drawMarkings(groundRoads);
     this.drawGores(game, 0, view, 'paint');
     this.drawCrosswalks(game, view);
@@ -1533,35 +1533,6 @@ export class Renderer {
     ctx.setLineDash([]);
   }
 
-  private drawRoundabouts(game: Game): void {
-    const ctx = this.ctx;
-    // Радиус и число полос кольца — по его живым полотнам.
-    const net = game.roads.net;
-    const alive = new Map<number, { r: number; lanes: number }>();
-    for (const n of net.nodes.values()) {
-      if (n.roundabout === null || n.roundabout === undefined) continue;
-      const c = game.roundaboutCenters.get(n.roundabout);
-      const ring = n.corridors.map((id) => net.corridors.get(id)).find((s) => s?.ring);
-      if (c && ring) alive.set(n.roundabout, { r: dist(n.pos, c), lanes: ring.lanes.length });
-    }
-    for (const [id, { r, lanes }] of alive) {
-      const c = game.roundaboutCenters.get(id)!;
-      const inner = r - (lanes * LANE_W) / 2 - 3;
-      ctx.fillStyle = C.roadEdge;
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, inner + 1.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = C.island;
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, inner, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = C.trees[1];
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, inner * 0.45, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
   /** Карта пробок: каждая связь графа движения — цветом загрузки (зелёный — свободно, красный — стоят). */
   private drawHeatmap(game: Game, level: number): void {
     if (level !== 0) return;
@@ -2166,6 +2137,22 @@ export class Renderer {
         ctx.lineWidth = halfWidth(s.spec) * 2 + 4;
         this.polyline(s.lut.points);
         ctx.stroke();
+      }
+      // Дороги: снесётся только то, что внутри рамки.
+      const x0 = Math.min(a.x, b.x);
+      const x1 = Math.max(a.x, b.x);
+      const y0 = Math.min(a.y, b.y);
+      const y1 = Math.max(a.y, b.y);
+      const inside = (p: Vec) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+      for (const id of o.area.corridors) {
+        const c = game.roads.net.corridors.get(id);
+        if (!c) continue;
+        ctx.lineWidth = c.lanes.length * LANE_W + 6;
+        for (const [s0, s1] of insideRuns(c, inside)) {
+          const n = Math.max(2, Math.ceil((s1 - s0) / 4));
+          this.polyline(Array.from({ length: n + 1 }, (_, i) => c.lut.pointAt(s0 + ((s1 - s0) * i) / n)));
+          ctx.stroke();
+        }
       }
       for (const fp of o.area.fps) this.drawFootprint({ ...fp, w: fp.w + 4, h: fp.h + 4 }, 'rgba(232,72,63,0.35)', '#e8483f', 2 / z);
       ctx.fillStyle = 'rgba(232, 72, 63, 0.08)';

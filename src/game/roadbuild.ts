@@ -1,7 +1,7 @@
 import { COST } from '../config';
 import { Cubic, minRadius } from '../core/bezier';
 import { dist, Vec } from '../core/vec';
-import { Anchor, applyLane, buildRoad, bulldoze, EditError, LaneDraft, RoadOptions } from '../lanes/edit';
+import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDraft, RoadOptions } from '../lanes/edit';
 import { Corridor, LaneNet, LaneSlot } from '../lanes/model';
 import { LEVEL_RUN, RoadClass, ROAD_CLASSES } from '../world/roadTypes';
 import { halfAtS } from '../world/worldgen';
@@ -77,7 +77,7 @@ export class RoadBuilder {
    * Правка на копии сети и её проверка. free — за счёт города; shove — дома под дорогой не сносим:
    * после стройки их отодвинут (расширение улицы).
    */
-  plan(edit: (net: LaneNet) => boolean | void, opts: { free?: boolean; shove?: boolean } = {}): RoadPlan {
+  plan(edit: (net: LaneNet) => boolean | void, opts: { free?: boolean; shove?: boolean; raze?: boolean } = {}): RoadPlan {
     const before = this.net;
     const next = before.clone();
     try {
@@ -100,12 +100,13 @@ export class RoadBuilder {
     }
     const demolish = new Set<number>();
     let reason: string | undefined;
-    for (const c of changed) {
+    // Снос ничего не строит: оставшиеся куски дорог не проверяем и дома у них не сносим.
+    for (const c of opts.raze ? [] : changed) {
       reason = this.check(next, c, demolish, !!opts.shove);
       if (reason) break;
     }
     // Новые беды сети (оборванные полосы и т. п.) — только те, что появились от этой правки.
-    if (!reason) {
+    if (!reason && !opts.raze) {
       const old = new Set(before.problems());
       reason = next.problems().find((p) => !old.has(p)) ? 'Полосы не сходятся в стыке' : undefined;
     }
@@ -145,10 +146,18 @@ export class RoadBuilder {
 
   /** Снос полотен. */
   bulldoze(ids: number[]): RoadPlan {
-    return this.plan((n) => {
-      for (const id of ids) bulldoze(n, id);
-      return ids.length > 0;
-    });
+    return this.plan(
+      (n) => {
+        for (const id of ids) bulldoze(n, id);
+        return ids.length > 0;
+      },
+      { raze: true },
+    );
+  }
+
+  /** Снос рамкой: всё, что внутри; дороги на краю режутся по нему. */
+  bulldozeBox(x0: number, y0: number, x1: number, y1: number): RoadPlan {
+    return this.plan((n) => bulldozeBox(n, x0, y0, x1, y1) > 0, { raze: true });
   }
 
   /** Другие полосы, класс и ограничение скорости у полотна; дома, на которые налезет шире дорога, отодвигаются после стройки. */

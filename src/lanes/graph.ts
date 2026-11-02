@@ -113,9 +113,16 @@ export class LaneGraph {
     const cuts = junctionCuts(net);
     for (const c of net.corridors.values()) this.buildCorridor(c, ...cuts.get(c.id)!);
     for (const c of net.corridors.values()) this.linkSeams(c);
+    // Въезды и выезды узлов — одним проходом, а не перебором всех связей у каждого узла.
+    const ins = new Map<number, GLink[]>();
+    const outs = new Map<number, GLink[]>();
+    for (const l of this.links.values()) {
+      if (l.toNode !== null) push(ins, l.toNode, l);
+      if (l.fromNode !== null) push(outs, l.fromNode, l);
+    }
     for (const n of net.nodes.values()) {
-      if (n.kind === 'junction') this.buildJunction(n);
-      else if (net.isDeadEnd(n)) this.buildDeadEnd(n);
+      if (n.kind === 'junction') this.buildJunction(n, ins.get(n.id) ?? [], outs.get(n.id) ?? []);
+      else if (net.isDeadEnd(n)) this.buildDeadEnd(n, ins.get(n.id) ?? [], outs.get(n.id) ?? []);
     }
     this.buildIndexes();
   }
@@ -287,10 +294,8 @@ export class LaneGraph {
   }
 
   /** Манёвры перекрёстка: полосы въездов распределяются по выездам, как раньше; главная дорога — самая прямая и широкая. */
-  private buildJunction(n: LaneNode): void {
+  private buildJunction(n: LaneNode, ins: GLink[], outs: GLink[]): void {
     const state = this.nodeState(n);
-    const ins = [...this.links.values()].filter((l) => l.toNode === n.id);
-    const outs = [...this.links.values()].filter((l) => l.fromNode === n.id);
     const list: GMove[] = [];
     // Связи полос, заданные игроком: полоса въезда (полотно.номер справа) → куда.
     const custom = new Map<string, LaneLink[]>();
@@ -326,9 +331,11 @@ export class LaneGraph {
         }
       });
     }
+    // Рамки манёвров с запасом — пары, которые заведомо не сближаются, отсеиваются сразу.
+    const boxes = list.map((m) => boxOf(m.points, CONFLICT_GAP));
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
-        const kind = conflictKind(list[i], list[j]);
+        const kind = conflictKind(list[i], list[j], boxes[i], boxes[j]);
         if (!kind) continue;
         list[i].conflicts.set(list[j].key, kind);
         list[j].conflicts.set(list[i].key, kind);
@@ -404,10 +411,8 @@ export class LaneGraph {
   }
 
   /** Тупик: разворот с левой полосы въезда на левую полосу выезда того же полотна. */
-  private buildDeadEnd(n: LaneNode): void {
+  private buildDeadEnd(n: LaneNode, ins: GLink[], outs: GLink[]): void {
     this.nodeState(n);
-    const ins = [...this.links.values()].filter((l) => l.toNode === n.id);
-    const outs = [...this.links.values()].filter((l) => l.fromNode === n.id);
     for (const inL of ins) {
       const out = outs.find((o) => o.corridor === inL.corridor);
       if (out) this.turn(n.id, inL, inL.lanes[0], out, out.lanes[0]);
@@ -479,21 +484,51 @@ function push<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   else map.set(key, [value]);
 }
 
-function conflictKind(a: GMove, b: GMove): ConflictKind | null {
-  if (a.outLane === b.outLane) return 'merge';
-  if (a.inLane === b.inLane) return 'diverge';
-  return polylineDistance(a.points, b.points) < CAR_WIDTH * 0.9 ? 'cross' : null;
+/** Ближе этого траектории двух манёвров — машины на них мешают друг другу. */
+const CONFLICT_GAP = CAR_WIDTH * 0.9;
+
+interface Box {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
 }
 
-/** Где на манёвре a он проходит ближе CAR_WIDTH·0.9 к манёвру b: [начало, конец] по длине a. */
+function boxOf(pts: Vec[], pad: number): Box {
+  const b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+  for (const p of pts) {
+    b.x0 = Math.min(b.x0, p.x - pad);
+    b.y0 = Math.min(b.y0, p.y - pad);
+    b.x1 = Math.max(b.x1, p.x + pad);
+    b.y1 = Math.max(b.y1, p.y + pad);
+  }
+  return b;
+}
+
+const meets = (a: Box, b: Box) => a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
+
+function conflictKind(a: GMove, b: GMove, ba: Box, bb: Box): ConflictKind | null {
+  if (a.outLane === b.outLane) return 'merge';
+  if (a.inLane === b.inLane) return 'diverge';
+  return meets(ba, bb) && polylinesWithin(a.points, b.points, CONFLICT_GAP) ? 'cross' : null;
+}
+
+/**
+ * Где на манёвре a он проходит ближе CONFLICT_GAP к манёвру b: [начало, конец] по длине a.
+ * Проверяются концы и середины отрезков траектории — точность в треть отрезка, этого хватает.
+ */
 function conflictZone(a: GMove, b: GMove): [number, number] {
   let lo = Infinity;
   let hi = -Infinity;
-  const steps = Math.max(8, Math.ceil(a.length));
-  for (let i = 0; i <= steps; i++) {
-    const s = (a.length * i) / steps;
-    const p = LaneGraph.pointOnMove(a, s).pos;
-    if (polylineDistance([p, p], b.points) < CAR_WIDTH * 0.9) {
+  const bb = boxOf(b.points, CONFLICT_GAP);
+  for (let i = 0; i < a.points.length - 1; i++) {
+    const p = a.points[i];
+    const q = a.points[i + 1];
+    if (!meets(boxOf([p, q], 0), bb)) continue;
+    for (const t of [0, 0.5, 1]) {
+      const pt = { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t };
+      if (!pointWithin(pt, b.points, CONFLICT_GAP)) continue;
+      const s = a.cum[i] + (a.cum[i + 1] - a.cum[i]) * t;
       lo = Math.min(lo, s);
       hi = Math.max(hi, s);
     }
@@ -501,13 +536,27 @@ function conflictZone(a: GMove, b: GMove): [number, number] {
   return lo <= hi ? [lo, hi] : [0, a.length];
 }
 
-function polylineDistance(a: Vec[], b: Vec[]): number {
-  let best = Infinity;
+/** Подходят ли ломаные ближе d хоть где-то (с отсевом отрезков по рамкам). */
+function polylinesWithin(a: Vec[], b: Vec[], d: number): boolean {
   for (let i = 0; i < a.length - 1; i++) {
+    const sa = boxOf([a[i], a[i + 1]], d);
     for (let j = 0; j < b.length - 1; j++) {
-      best = Math.min(best, segSegDist(a[i], a[i + 1], b[j], b[j + 1]));
-      if (best === 0) return 0;
+      const p = b[j];
+      const q = b[j + 1];
+      if (Math.max(p.x, q.x) < sa.x0 || Math.min(p.x, q.x) > sa.x1 || Math.max(p.y, q.y) < sa.y0 || Math.min(p.y, q.y) > sa.y1) continue;
+      if (segSegDist(a[i], a[i + 1], p, q) < d) return true;
     }
   }
-  return best;
+  return false;
+}
+
+/** Точка ближе d к ломаной. */
+function pointWithin(pt: Vec, b: Vec[], d: number): boolean {
+  for (let j = 0; j < b.length - 1; j++) {
+    const p = b[j];
+    const q = b[j + 1];
+    if (Math.max(p.x, q.x) < pt.x - d || Math.min(p.x, q.x) > pt.x + d || Math.max(p.y, q.y) < pt.y - d || Math.min(p.y, q.y) > pt.y + d) continue;
+    if (segSegDist(pt, pt, p, q) < d) return true;
+  }
+  return false;
 }

@@ -114,7 +114,7 @@ const PRESET_HINTS: Record<string, string> = {
 };
 
 const MODE_HINTS: Record<string, string> = {
-  straight: 'Прямая от точки до точки. Shift — шаг угла 15°',
+  straight: 'Прямая от точки до точки. Сама прилипает к «прямо» и 90°; Alt — не прилипать, Shift — шаг угла 15°',
   arc: 'Дуга: плавно продолжает дорогу по касательной',
   curve: 'Кривая по трём кликам: начало, изгиб, конец',
 };
@@ -224,7 +224,7 @@ export class Hud {
           <p class="sub">Транспортная компания: дороги, грузы, пассажиры и пробки.</p>
           <ul>
             <li>Ставьте <b>станции</b> у дорог в городах или вплотную к <b>предприятию</b> — с любой его стороны.</li>
-            <li>Соедините станции <b>линией</b> и купите на неё грузовики или автобусы.</li>
+            <li>Соедините станции <b>маршрутом</b> и купите на него грузовики или автобусы.</li>
             <li>Для дальних перевозок проложите <b>ж/д путь</b>, поставьте <b>ж/д станции</b> и пустите поезда.</li>
             <li>Сырьё везите на заводы, готовую продукцию — в города. Что кому нужно, видно по значкам и в панели <b>«Цепочки»</b>.</li>
             <li>Выберите предприятие или город — пунктиром покажутся ближайшие партнёры.</li>
@@ -675,7 +675,7 @@ export class Hud {
         break;
       case 'cars': {
         const v = g.fleet.get(Number(d.id));
-        if (v && !g.setTrainCars(v.id, carsOf(v) + Number(d.d))) g.notify(Number(d.d) > 0 ? 'Длиннее состав не поместится на платформы линии' : 'Меньше двух вагонов нельзя');
+        if (v && !g.setTrainCars(v.id, carsOf(v) + Number(d.d))) g.notify(Number(d.d) > 0 ? 'Длиннее состав не поместится на платформы маршрута' : 'Меньше двух вагонов нельзя');
         break;
       }
       case 'close-sel':
@@ -849,7 +849,7 @@ export class Hud {
     ]);
     const tip =
       c.bulldozeMode === 'area'
-        ? 'Зажмите и растяните рамку: красным подсветится всё, что снесётся. Если объектов много или есть станция — спросим. Ратуша и станции с линиями не сносятся. Ctrl+Z — вернуть.'
+        ? 'Зажмите и растяните рамку: красным подсветится всё, что снесётся. Если объектов много или есть станция — спросим. Ратуша и станции с маршрутами не сносятся. Ctrl+Z — вернуть.'
         : 'Клик — снести дорогу, дом или станцию. Зажмите и ведите — сносится всё под курсором. Ctrl+Z — вернуть.';
     return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как сносить</div><p class="muted">${tip}</p></div></div>`;
   }
@@ -1070,7 +1070,7 @@ export class Hud {
     if (c.tool === 'line' && c.addStopTo !== null && g.lines.has(c.addStopTo)) return this.lineHtml(c.addStopTo);
     if (c.tool === 'line') {
       const names = c.lineDraft.map((id) => esc(g.stations.get(id)?.name ?? '?'));
-      parts.push(`<section><h3>Новая линия</h3>
+      parts.push(`<section><h3>Новый маршрут</h3>
         <p class="muted">${names.length ? names.join(' → ') : 'Кликните по станциям в порядке следования.'}</p>
         <div class="actions"><button class="primary small" data-action="finish-line" ${names.length < 2 ? 'disabled' : ''}>Готово</button>
         <button class="small" data-action="cancel-line">Отмена</button></div></section>`);
@@ -1095,10 +1095,10 @@ export class Hud {
     if (sel?.type === 'vehicle' || sel?.type === 'fleet') return '';
     const station = sel?.type === 'station' && this.controller.selectedLine === null ? g.stations.get(sel.id) : undefined;
     const list = station ? g.stationLines(station.id) : [...g.lines.values()];
-    const title = station ? 'Линии станции' : 'Линии';
+    const title = station ? 'Маршруты станции' : 'Маршруты';
     const empty = station
-      ? 'Через эту станцию линии не проходят.'
-      : 'Пока нет линий. Постройте две станции и соедините их линией.';
+      ? 'Через эту станцию маршруты не проходят.'
+      : 'Пока нет маршрутов. Постройте две станции и соедините их маршрутом.';
     const rows = station
       ? list.map((l) => this.lineRowHtml(l)).join('')
       : [...g.folders.values()].map((f) => this.folderHtml(f)).join('') +
@@ -1108,13 +1108,13 @@ export class Hud {
           .join('');
     const folderBtn = station
       ? ''
-      : `<button class="small with-ic" data-action="new-folder" title="Папка для линий: перетащите в неё строки линий">${folderSvg(15)}Папка</button>`;
+      : `<button class="small with-ic" data-action="new-folder" title="Папка для маршрутов: перетащите в неё строки маршрутов">${folderSvg(15)}Папка</button>`;
     // Заголовок сворачивает весь список; кнопки — рядом с ним, наверху.
     const collapsed = this.linesCollapsed;
     const head = `<header class="lines-head">
         <button class="lines-toggle" data-action="toggle-lines" title="${collapsed ? 'Развернуть' : 'Свернуть'} список">
           <span class="caret">${collapsed ? '▸' : '▾'}</span><h3>${title}</h3>${list.length ? `<span class="muted">${list.length}</span>` : ''}</button>
-        <button class="small" data-action="new-line" title="Новая линия">+ Линия</button>${folderBtn}</header>`;
+        <button class="small" data-action="new-line" title="Новый маршрут">+ Маршрут</button>${folderBtn}</header>`;
     return `<section class="lines-list" ${station ? '' : 'data-folder-drop="root"'}>${head}${
       collapsed ? '' : rows || `<p class="muted">${empty}</p>`
     }</section>`;
@@ -1132,7 +1132,7 @@ export class Hud {
     const dots = f.collapsed ? `<span class="folder-dots">${lines.slice(0, 6).map((l) => `<i style="background:${l.color}"></i>`).join('')}</span>` : '';
     const body = f.collapsed
       ? ''
-      : `<div class="folder-lines">${lines.map((l) => this.lineRowHtml(l, true)).join('') || '<p class="muted small-note">Перетащите сюда строку линии</p>'}</div>`;
+      : `<div class="folder-lines">${lines.map((l) => this.lineRowHtml(l, true)).join('') || '<p class="muted small-note">Перетащите сюда строку маршрута</p>'}</div>`;
     // Карандаш — сразу за названием, сводка и ✕ — у правого края.
     const pencil = renaming
       ? ''
@@ -1140,8 +1140,8 @@ export class Hud {
     return `<div class="folder ${f.collapsed ? 'collapsed' : ''}" data-folder-drop="${f.id}">
       <div class="folder-row" ${renaming ? '' : `data-action="toggle-folder" data-id="${f.id}"`} title="${f.collapsed ? 'Развернуть' : 'Свернуть'}">
         <span class="caret">${f.collapsed ? '▸' : '▾'}</span>${folderSvg(16, !f.collapsed)}${name}${pencil}${dots}
-        <small>${lines.length} лин.</small><small class="${profit >= 0 ? 'pos' : 'neg'}">${money(profit)}</small>${lines.some((l) => l.problem) ? '<b class="warn">!</b>' : ''}
-        <button class="icon" data-action="delete-folder" data-id="${f.id}" title="Удалить папку — линии останутся в списке">✕</button>
+        <small>${lines.length} мрш.</small><small class="${profit >= 0 ? 'pos' : 'neg'}">${money(profit)}</small>${lines.some((l) => l.problem) ? '<b class="warn">!</b>' : ''}
+        <button class="icon" data-action="delete-folder" data-id="${f.id}" title="Удалить папку — маршруты останутся в списке">✕</button>
       </div>${body}</div>`;
   }
 
@@ -1168,8 +1168,8 @@ export class Hud {
     const chip = (id: number | null, label: string) =>
       `<button class="opt ${(line.folder ?? null) === id ? 'active' : ''}" data-action="line-folder" data-line="${line.id}" data-folder="${id ?? ''}">${label}</button>`;
     const chips = [...this.game().folders.values()].map((f) => chip(f.id, esc(f.name))).join('');
-    return `<div class="folder-pick" title="Папка в списке линий">${folderSvg(18)}<div class="opts">${chip(null, 'Без папки')}${chips}
-      <button class="opt" data-action="line-folder-new" data-line="${line.id}" title="Новая папка с этой линией">+ Папка</button></div></div>`;
+    return `<div class="folder-pick" title="Папка в списке маршрутов">${folderSvg(18)}<div class="opts">${chip(null, 'Без папки')}${chips}
+      <button class="opt" data-action="line-folder-new" data-line="${line.id}" title="Новая папка с этим маршрутом">+ Папка</button></div></div>`;
   }
 
   /**
@@ -1198,7 +1198,7 @@ export class Hud {
         </div>${open ? this.stopRuleHtml(line, i, rule) : ''}`;
       })
       .join('');
-    return `<div class="route"><div class="route-head"><span class="lbl2">Маршрут</span>
+    return `<div class="route"><div class="route-head"><span class="lbl2">Остановки</span>
       <button class="small ${adding ? 'primary' : ''}" data-action="${adding ? 'stop-add-done' : 'stop-add'}" data-line="${line.id}">${adding ? 'Готово' : '+ Станция'}</button></div>
       ${adding ? '<p class="tip">Кликайте по станциям на карте — они добавятся в конец маршрута.</p>' : ''}
       ${rows}<p class="muted small-note">После последней станции — снова к первой.</p></div>`;
@@ -1224,7 +1224,7 @@ export class Hud {
         ${cargoChips('rule-load', loadList)}</div></div>
       <div class="rule-row"><span class="lbl2">Выгружать</span><div class="opts">
         <button class="opt ${rule.unload === 'auto' ? 'active' : ''}" data-action="rule-unload" ${attrs} data-c="auto" title="Только тому, кто здесь принимает груз">Авто</button>
-        <button class="opt ${rule.unload === 'all' ? 'active' : ''}" data-action="rule-unload" ${attrs} data-c="all" title="Всё, что везём: получателю, а остальное — на склад станции для другой линии">Всё на склад</button>
+        <button class="opt ${rule.unload === 'all' ? 'active' : ''}" data-action="rule-unload" ${attrs} data-c="all" title="Всё, что везём: получателю, а остальное — на склад станции для другого маршрута">Всё на склад</button>
         ${cargoChips('rule-unload', unloadList)}</div></div>
     </div>`;
   }
@@ -1265,7 +1265,7 @@ export class Hud {
     // Палитра открывается по клику на кружок цвета линии.
     const palette =
       this.colorsOpen === line.id
-        ? `<div class="swatches" title="Цвет линии">${LINE_COLORS.map(
+        ? `<div class="swatches" title="Цвет маршрута">${LINE_COLORS.map(
             (c) => `<button class="swatch ${c === line.color ? 'active' : ''}" style="background:${c}" data-action="line-color" data-id="${line.id}" data-color="${c}"></button>`,
           ).join('')}<label class="swatch custom" title="Свой цвет"><input type="color" data-line-color="${line.id}" value="${line.color}" /></label></div>`
         : '';
@@ -1293,8 +1293,8 @@ export class Hud {
             ${modelSvg(m)}<span>+ ${MODELS[m].name}</span><small>${MODELS[m].capacity} мест · ${money(MODELS[m].price)}</small></button>`,
         )
         .join('')}</div>
-      <div class="vehicles">${vehicles || `<p class="muted">Купите ${g.lineMode(line) === 'rail' ? 'поезд' : 'машину'}, чтобы линия заработала.</p>`}</div>
-      <div class="actions"><button class="small danger" data-action="delete-line" data-id="${line.id}">Удалить линию</button></div></section>`;
+      <div class="vehicles">${vehicles || `<p class="muted">Купите ${g.lineMode(line) === 'rail' ? 'поезд' : 'машину'}, чтобы маршрут заработал.</p>`}</div>
+      <div class="actions"><button class="small danger" data-action="delete-line" data-id="${line.id}">Удалить маршрут</button></div></section>`;
   }
 
   private selectionHtml(): string {
@@ -1395,7 +1395,7 @@ export class Hud {
             ? 'Работает, только когда привезли все виды сырья.'
             : info.accepts.length
               ? 'Перерабатывает сырьё, которое ему привозят.'
-              : 'Добывает сырьё, когда рядом есть станция с линией.'
+              : 'Добывает сырьё, когда рядом есть станция с маршрутом.'
         }</p>
         ${stock}
         <div class="kv"><span>Уровень производства</span><b>×${ind.level ?? 1} · до ${g.industryRate(ind)}/мес</b>
@@ -1785,7 +1785,7 @@ export class Hud {
           Math.min(ECONOMY.loanStep, g.loan || ECONOMY.loanStep),
         )}</button></div></div>
       <h4>За год <span class="legend"><i style="background:#3fae6a"></i>доход <i style="background:#e5534b"></i>расход</span></h4>${chart}
-      <h4>Линии по прибыли за прошлый месяц</h4>${lines || '<p class="muted">Линий пока нет.</p>'}`;
+      <h4>Маршруты по прибыли за прошлый месяц</h4>${lines || '<p class="muted">Маршрутов пока нет.</p>'}`;
   }
 
   reset(): void {

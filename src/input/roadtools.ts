@@ -120,8 +120,11 @@ export class RoadTools {
     return true;
   }
 
-  /** Где кончится дорога; с Shift — угол по 15° от направления начала и длина по 10 м. */
-  endAnchor(p: Vec, r: number, shift: boolean): Anchor {
+  /**
+   * Где кончится дорога; с Shift — угол по 15° от направления начала и длина по 10 м;
+   * free (Alt) — без прилипания к «прямо» и 90°.
+   */
+  endAnchor(p: Vec, r: number, shift: boolean, free = false): Anchor {
     this.hint = null;
     const s = this.start;
     if (shift && s) {
@@ -135,8 +138,8 @@ export class RoadTools {
       return near.kind === 'node' ? near : { kind: 'free', pos: q, level: this.level };
     }
     const a = anchorAt(this.net, p, r, this.level);
-    // Прямая от дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°).
-    if (a.kind === 'free' && s) {
+    // Прямая от дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°); с Alt (free) — нет.
+    if (a.kind === 'free' && s && !free) {
       const d = sub(p, s.pos);
       const l = len(d);
       if (l > 20) {
@@ -173,13 +176,13 @@ export class RoadTools {
     return [];
   }
 
-  buildPlan(p: Vec, spec: RoadSpec, mode: DrawMode, r: number, shift: boolean): RoadPlan | null {
+  buildPlan(p: Vec, spec: RoadSpec, mode: DrawMode, r: number, shift: boolean, free = false): RoadPlan | null {
     if (!this.start || (mode === 'curve' && !this.control)) return null;
     if (!this.valid(this.start)) {
       this.start = null;
       return null;
     }
-    const end = this.endAnchor(p, r, shift);
+    const end = this.endAnchor(p, r, shift, free);
     return this.game().roadBuilder.road(this.start, end, {
       ...profileOf(spec),
       control: this.control ?? undefined,
@@ -189,15 +192,15 @@ export class RoadTools {
   }
 
   /** Клик концом: точка изгиба кривой или постройка. Возвращает причину, если не построилось. */
-  build(p: Vec, spec: RoadSpec, mode: DrawMode, r: number, shift: boolean): string | null {
+  build(p: Vec, spec: RoadSpec, mode: DrawMode, r: number, shift: boolean, free = false): string | null {
     if (mode === 'curve' && !this.control) {
       this.control = { ...p };
       return null;
     }
-    const plan = this.buildPlan(p, spec, mode, r, shift);
+    const plan = this.buildPlan(p, spec, mode, r, shift, free);
     if (!plan) return null;
     if (!plan.ok) return plan.reason ?? 'Нельзя построить';
-    const end = this.endAnchor(p, r, shift);
+    const end = this.endAnchor(p, r, shift, free);
     this.game().roadBuilder.apply(plan);
     // Следующая дорога — от конца этой.
     this.start = anchorAt(this.net, end.pos, 3, end.kind === 'free' ? end.level : undefined);

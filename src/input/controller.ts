@@ -22,7 +22,7 @@ export const TOOLS: { id: Tool; key: string; alt?: string; name: string }[] = [
   { id: 'lights', key: '4', name: 'Перекрёсток' },
   { id: 'roundabout', key: '5', name: 'Кольцо' },
   { id: 'station', key: '6', name: 'Станция' },
-  { id: 'line', key: '7', name: 'Линия' },
+  { id: 'line', key: '7', name: 'Маршрут' },
   { id: 'bulldoze', key: '8', alt: 'B', name: 'Снос' },
 ];
 
@@ -125,6 +125,8 @@ export class Controller {
   onChange: () => void = () => {};
   private mouse = { x: 0, y: 0 };
   private shift = false;
+  /** Зажат Alt (Option): прямая не прилипает к «прямо» и 90°. */
+  private alt = false;
   private pan: { sx: number; sy: number; cx: number; cy: number; moved: boolean } | null = null;
   private left: { sx: number; sy: number; createdChain: boolean } | null = null;
   private keys = new Set<string>();
@@ -147,10 +149,12 @@ export class Controller {
     window.addEventListener('keyup', (e) => {
       this.keys.delete(e.code);
       if (e.key === 'Shift') this.shift = false;
+      if (e.key === 'Alt') this.alt = false;
     });
     window.addEventListener('blur', () => {
       this.keys.clear();
       this.shift = false;
+      this.alt = false;
     });
   }
 
@@ -500,8 +504,8 @@ export class Controller {
     }
     const s = g.builder.snap(p, this.level, this.snapRadius, this.netKind);
     this.angleHint = null;
-    // Прямая от существующей дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°).
-    if (s.kind === 'free' && this.chain && this.drawMode === 'straight') {
+    // Прямая от существующей дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°); с Alt — нет.
+    if (s.kind === 'free' && this.chain && this.drawMode === 'straight' && !this.alt) {
       const d = sub(p, this.chain.pos);
       const l = len(d);
       if (l > 20) {
@@ -766,6 +770,7 @@ export class Controller {
   private onMove(e: MouseEvent): void {
     this.mouse = { x: e.clientX, y: e.clientY };
     this.shift = e.shiftKey;
+    this.alt = e.altKey;
     if (this.pan) {
       const dx = e.clientX - this.pan.sx;
       const dy = e.clientY - this.pan.sy;
@@ -841,7 +846,7 @@ export class Controller {
     if (left.createdChain && !moved) return;
     const p = this.worldAt(e);
     if (this.netKind === 'road') {
-      const problem = this.roadTools.build(p, this.spec, this.drawMode, this.snapRadius, this.shift);
+      const problem = this.roadTools.build(p, this.spec, this.drawMode, this.snapRadius, this.shift, this.alt);
       if (problem) this.showError(problem);
       this.onChange();
       return;
@@ -911,6 +916,11 @@ export class Controller {
     if (e.target instanceof HTMLInputElement) return;
     this.keys.add(e.code);
     if (e.key === 'Shift') this.shift = true;
+    // Alt (Option) — строить без прилипания к «прямо» и 90°; браузерное меню по Alt не нужно.
+    if (e.key === 'Alt') {
+      this.alt = true;
+      e.preventDefault();
+    }
     if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
       e.preventDefault();
       this.undo();
@@ -1046,7 +1056,7 @@ export class Controller {
     const area = this.pendingArea ?? (this.areaStart && p ? { a: this.areaStart, b: p, contents: g.areaContents(this.areaStart, p) } : null);
     if (area) {
       const c = area.contents;
-      o.area = { a: area.a, b: area.b, segs: c.segs, fps: [...c.buildings.map((x) => x.fp), ...c.stations.map((x) => x.fp)] };
+      o.area = { a: area.a, b: area.b, segs: c.segs, corridors: c.corridors, fps: [...c.buildings.map((x) => x.fp), ...c.stations.map((x) => x.fp)] };
       if (!this.pendingArea) {
         o.label = { text: `${areaSummary(c)} · +${money(c.refund)}${c.cost ? ` −${money(c.cost)}` : ''}`, ok: true };
         return o;
@@ -1070,7 +1080,7 @@ export class Controller {
             o.label = { text: 'Укажите изгиб кривой', ok: true };
             break;
           }
-          const plan = rt.buildPlan(p, this.spec, this.drawMode, this.snapRadius, this.shift);
+          const plan = rt.buildPlan(p, this.spec, this.drawMode, this.snapRadius, this.shift, this.alt);
           if (plan) {
             const length = plan.net ? plan.changed.reduce((s, id) => s + (plan.net!.corridors.get(id)?.length ?? 0), 0) : 0;
             const aligned = rt.hint ? ` · ${rt.hint}` : '';
@@ -1272,7 +1282,7 @@ export class Controller {
           break;
         }
         o.label = st
-          ? { text: this.lineDraft.length >= 2 && st.id === this.lineDraft[0] ? 'Замкнуть линию' : `Добавить: ${st.name}`, ok: true }
+          ? { text: this.lineDraft.length >= 2 && st.id === this.lineDraft[0] ? 'Замкнуть маршрут' : `Добавить: ${st.name}`, ok: true }
           : { text: this.lineDraft.length ? 'Следующая станция · Enter — готово' : 'Выберите первую станцию', ok: true };
         break;
       }

@@ -35,15 +35,17 @@ export function anchorAt(net: LaneNet, p: Vec, radius: number, level?: number): 
   const c = corridorUnder(net, p, radius * 0.5, level);
   if (c) {
     const hit = c.lut.closest(p);
-    // У самого конца полотна — его узел, если к нему можно примкнуть.
+    // У самого конца полотна — его узел, если к нему можно примкнуть. «Самый конец» — по радиусу магнита
+    // (он сжимается при приближении), но не меньше 8 м: короче полотно не бывает.
+    const edge = Math.min(12, Math.max(8, radius));
     for (const [end, s] of [
       [c.a, 0],
       [c.b, c.length],
     ] as const) {
       const n = net.node(end);
-      if (Math.abs(hit.s - s) < 12 && (n.kind === 'junction' || net.isDeadEnd(n))) return { kind: 'node', node: n.id, pos: n.pos };
+      if (Math.abs(hit.s - s) < edge && (n.kind === 'junction' || net.isDeadEnd(n))) return { kind: 'node', node: n.id, pos: n.pos };
     }
-    const s = Math.max(12, Math.min(c.length - 12, hit.s));
+    const s = Math.max(edge, Math.min(c.length - edge, hit.s));
     return { kind: 'corridor', corridor: c.id, s, pos: c.lut.pointAt(s) };
   }
   return { kind: 'free', pos: { ...p }, level: level ?? 0 };
@@ -651,6 +653,67 @@ export function bulldoze(net: LaneNet, id: number): void {
     n.kind = 'seam';
     n.dir = scale(e.away, -1);
   }
+}
+
+/** Где полотно внутри рамки: отрезки оси [s0, s1]. */
+export function insideRuns(c: Corridor, inside: (p: Vec) => boolean): [number, number][] {
+  const runs: [number, number][] = [];
+  const step = 2;
+  // Граница между s0 и s1 (внутри и снаружи) — делением пополам.
+  const edge = (s0: number, s1: number) => {
+    const in0 = inside(c.lut.pointAt(s0));
+    for (let k = 0; k < 12; k++) {
+      const m = (s0 + s1) / 2;
+      if (inside(c.lut.pointAt(m)) === in0) s0 = m;
+      else s1 = m;
+    }
+    return (s0 + s1) / 2;
+  };
+  let start: number | null = null;
+  let prev = 0;
+  for (let s = 0; s <= c.length + step; s += step) {
+    const at = Math.min(s, c.length);
+    const isIn = inside(c.lut.pointAt(at));
+    if (isIn && start === null) start = at > 0 ? edge(prev, at) : 0;
+    if (!isIn && start !== null) {
+      runs.push([start, edge(prev, at)]);
+      start = null;
+    }
+    prev = at;
+    if (at === c.length) break;
+  }
+  if (start !== null) runs.push([start, c.length]);
+  return runs.filter(([a, b]) => b - a > 1);
+}
+
+/**
+ * Снос рамкой: полотна целиком внутри сносятся, задетые краем — режутся по рамке, и сносится
+ * то, что внутри (снаружи остаются тупики). Возвращает, сколько кусков снесено.
+ */
+export function bulldozeBox(net: LaneNet, x0: number, y0: number, x1: number, y1: number): number {
+  const inside = (p: Vec) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+  const MIN = 10;
+  let removed = 0;
+  for (const c0 of net.corridorsInBox(x0, y0, x1, y1)) {
+    let c: Corridor | null = net.corridors.get(c0.id) ?? null;
+    if (!c) continue;
+    // С конца к началу: разрез у бо́льшего s не сдвигает координаты меньших.
+    for (const [sa, sb] of insideRuns(c, inside).reverse()) {
+      if (!c) break;
+      let piece = c;
+      let rest: Corridor | null = null;
+      if (sb < c.length - MIN) piece = splitCorridor(net, piece, sb, 'seam').first;
+      if (sa > MIN) {
+        const r = splitCorridor(net, piece, sa, 'seam');
+        rest = r.first;
+        piece = r.second;
+      }
+      bulldoze(net, piece.id);
+      removed++;
+      c = rest;
+    }
+  }
+  return removed;
 }
 
 /** Разворачивает полосу. */

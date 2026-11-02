@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { add, Vec } from '../core/vec';
+import { add, dist, Vec } from '../core/vec';
 import { Game } from './game';
 import { road, roadPlan } from './testkit';
 
@@ -95,7 +95,18 @@ describe('Кольцо', () => {
     const loaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
     expect(loaded.roundaboutCenters.get(junction.id)).toEqual(c);
     expect([...loaded.roads.net.corridors.values()].filter((x) => x.ring).length).toBe([...net().corridors.values()].filter((x) => x.ring).length);
+    // Второе кольцо рядом не трогает центр первого; испорченный центр чинится сам.
+    const other = crossroads(game);
+    expect(game.buildRoundabout(other.c, 14, { lanes: 2, size: 'large' })).toBe(true);
+    expect(game.roundaboutCenters.get(junction.id)).toEqual(c);
+    const second = [...game.roundaboutCenters.entries()].find(([id]) => id !== junction.id)!;
+    expect(dist(second[1], other.c)).toBeLessThan(1);
+    game.roundaboutCenters.set(junction.id, { x: 0, y: 0 });
+    const repaired = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
+    expect(dist(repaired.roundaboutCenters.get(junction.id)!, c)).toBeLessThan(1);
+    game.roundaboutCenters.set(junction.id, c);
     // Отмена до кольца: перекрёсток на месте.
+    game.undo();
     game.undo();
     game.undo();
     expect(net().nodes.get(junction.id)?.kind).toBe('junction');

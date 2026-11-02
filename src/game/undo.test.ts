@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { add, scale } from '../core/vec';
+import { add, scale, Vec } from '../core/vec';
+import { insideRuns } from '../lanes/edit';
 import { Game } from './game';
 import type { RoadPlan } from './roadbuild';
-import { roadPlan, townStreets } from './testkit';
+import { road, roadPlan, townStreets } from './testkit';
 
 function runSeconds(game: Game, seconds: number) {
   game.speed = 1;
@@ -36,11 +37,35 @@ describe('Снос рамкой', () => {
     const corridors = game.roads.net.corridors.size;
     const houses = town.buildings.length;
     expect(game.bulldozeArea(a, b)).toBe(true);
-    expect(game.roads.net.corridors.size).toBeLessThan(corridors);
+    // Внутри рамки дорог не осталось (задетые краем — обрезаны по ней).
+    const inner = (p: Vec) => p.x > a.x + 3 && p.x < b.x - 3 && p.y > a.y + 3 && p.y < b.y - 3;
+    for (const x of game.roads.net.corridors.values()) expect(insideRuns(x, inner)).toEqual([]);
+    expect(game.roads.net.problems()).toEqual([]);
     expect(town.buildings.length).toBe(houses - c.buildings.filter((x) => x.townId === town.id).length);
     expect(game.undo()).toBe('снос области');
     expect(game.roads.net.corridors.size).toBe(corridors);
     expect(town.buildings.length).toBe(houses);
+  });
+
+  it('длинная дорога, задетая рамкой, режется по её краю: снаружи остаются тупики', () => {
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    let from: Vec | null = null;
+    for (let y = 400; y < game.terrain.height - 400 && !from; y += 120) {
+      for (let x = 300; x < game.terrain.width - 900 && !from; x += 160) {
+        if (road(game, { free: { x, y } }, { free: { x: x + 600, y } })) from = { x, y };
+      }
+    }
+    expect(from).not.toBeNull();
+    const f = from!;
+    const box = { a: { x: f.x + 200, y: f.y - 50 }, b: { x: f.x + 350, y: f.y + 50 } };
+    const c = game.areaContents(box.a, box.b);
+    expect(c.corridors).toHaveLength(1);
+    expect(c.refund).toBeGreaterThan(0);
+    expect(game.bulldozeArea(box.a, box.b)).toBe(true);
+    const net = game.roads.net;
+    const ends = [...net.nodes.values()].filter((n) => net.isDeadEnd(n) && Math.abs(n.pos.y - f.y) < 1).map((n) => Math.round(n.pos.x - f.x)).sort((x, y) => x - y);
+    expect(ends).toEqual([0, 200, 350, 600]);
+    expect(net.problems()).toEqual([]);
   });
 });
 

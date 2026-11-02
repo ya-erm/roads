@@ -14,7 +14,7 @@ import {
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../core/vec';
-import { Anchor, anchorAt, buildRing } from '../lanes/edit';
+import { Anchor, anchorAt, buildRing, insideRuns } from '../lanes/edit';
 import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, parseLaneKey, twoWay } from '../lanes/model';
 import type { LaneTraffic } from '../lanes/traffic';
 import { RailSim, Train } from '../sim/rail';
@@ -138,6 +138,16 @@ export interface LaneEnd {
 
 /** Сколько последних строек можно отменить. */
 const UNDO_DEPTH = 30;
+
+/** Центр окружности через три точки; на одной прямой — null. */
+function circleCenter(a: Vec, b: Vec, c: Vec): Vec | null {
+  const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+  if (Math.abs(d) < 1e-6) return null;
+  const a2 = a.x * a.x + a.y * a.y;
+  const b2 = b.x * b.x + b.y * b.y;
+  const c2 = c.x * c.x + c.y * c.y;
+  return { x: (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d, y: (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d };
+}
 
 /** Плата за кольцо: растёт с радиусом и числом полос. */
 function roundaboutFee(R: number, lanes: number): number {
@@ -689,12 +699,14 @@ export class Game implements BuildContext {
       segs.push(s.id);
       refund += this.builder.segmentCost(s) * COST.refundRatio;
     }
+    // Дороги, задетые рамкой: снесётся часть внутри (возврат — за неё).
     const corridors: number[] = [];
     for (const c of this.roads.net.corridorsInBox(x0, y0, x1, y1)) {
-      const pts = c.lut.points;
-      if (pts.filter(inside).length * 2 < pts.length) continue;
+      const runs = insideRuns(c, inside);
+      if (!runs.length) continue;
       corridors.push(c.id);
-      refund += corridorCost(this.roads.net, c, (q, m) => this.isWater(q, m)) * COST.refundRatio;
+      const share = runs.reduce((s, [p, q]) => s + q - p, 0) / c.length;
+      refund += corridorCost(this.roads.net, c, (q, m) => this.isWater(q, m)) * share * COST.refundRatio;
     }
     const buildings: TownBuilding[] = [];
     let cost = 0;
@@ -724,7 +736,13 @@ export class Game implements BuildContext {
       this.spend(c.cost);
     }
     this.builder.bulldozeSegments(c.segs);
-    if (c.corridors.length) this.roadBuilder.apply({ ...this.roadBuilder.bulldoze(c.corridors), ok: true });
+    if (c.corridors.length) {
+      const [x0, x1] = [Math.min(a.x, b.x), Math.max(a.x, b.x)];
+      const [y0, y1] = [Math.min(a.y, b.y), Math.max(a.y, b.y)];
+      // Снести можно всегда: оборванные полосы у новых тупиков — не повод отказать.
+      const plan = this.roadBuilder.bulldozeBox(x0, y0, x1, y1);
+      if (plan.net) this.roadBuilder.apply({ ...plan, ok: true });
+    }
     this.commit();
     return true;
   }
@@ -843,14 +861,21 @@ export class Game implements BuildContext {
    * остаются невидимые правила приоритета и остров посреди дороги.
    */
   private pruneRoundabouts(): void {
-    const alive = new Set<number>();
+    // Живое кольцо и одна из его дуг: по ней центр проверяется (и чинится, если записан не тот).
+    const alive = new Map<number, Corridor>();
     const roads = this.roads.net;
     for (const n of roads.nodes.values()) {
       if (n.roundabout === null || n.roundabout === undefined) continue;
-      if (n.corridors.some((id) => roads.corridors.get(id)?.ring)) alive.add(n.roundabout);
+      const arc = n.corridors.map((id) => roads.corridors.get(id)).find((c) => c?.ring);
+      if (arc) alive.set(n.roundabout, arc);
       else n.roundabout = null;
     }
     for (const id of [...this.roundaboutCenters.keys()]) if (!alive.has(id)) this.roundaboutCenters.delete(id);
+    for (const [id, arc] of alive) {
+      const center = circleCenter(arc.lut.pointAt(0), arc.lut.pointAt(arc.length / 2), arc.lut.pointAt(arc.length));
+      const was = this.roundaboutCenters.get(id);
+      if (center && (!was || dist(was, center) > 2)) this.roundaboutCenters.set(id, center);
+    }
   }
 
   /** Сеть дорог или путей изменилась: графы движения заново, машины и поезда — на новые пути. */
@@ -1067,7 +1092,11 @@ export class Game implements BuildContext {
    * Кольцо на месте перекрёстка у курсора: радиус по выбранному размеру (но чтобы влезли примыкающие дороги
    * и полосы кольца), проверки места и цена — как у любой стройки дорог.
    */
-  roundaboutPlan(p: Vec, radius: number, opts: RingOptions): { ok: boolean; reason?: string; cost: number; r: number; center?: Vec; plan?: RoadPlan } {
+  roundaboutPlan(
+    p: Vec,
+    radius: number,
+    opts: RingOptions,
+  ): { ok: boolean; reason?: string; cost: number; r: number; center?: Vec; ringId?: number; plan?: RoadPlan } {
     const net = this.roads.net;
     const n = net
       .nodesNear(p, radius + 20)
@@ -1098,17 +1127,17 @@ export class Game implements BuildContext {
     const plan = this.roadBuilder.plan((x) => buildRing(x, id, R, opts.lanes));
     // Кольцо — стройка: платим за него сверх разницы в стоимости дорог.
     const cost = plan.cost + roundaboutFee(R, opts.lanes);
-    if (plan.ok && cost > this.budget) return { ok: false, reason: 'Не хватает денег', cost, r: R, center: n.pos, plan };
-    return { ok: plan.ok, reason: plan.reason, cost, r: R, center: n.pos, plan };
+    if (plan.ok && cost > this.budget) return { ok: false, reason: 'Не хватает денег', cost, r: R, center: n.pos, ringId: id, plan };
+    return { ok: plan.ok, reason: plan.reason, cost, r: R, center: n.pos, ringId: id, plan };
   }
 
   /** Строит кольцо на месте перекрёстка у курсора. false — нельзя. */
   buildRoundabout(p: Vec, radius: number, opts: RingOptions): boolean {
     const check = this.roundaboutPlan(p, radius, opts);
-    if (!check.ok || !check.plan || !check.center) return false;
+    if (!check.ok || !check.plan || !check.center || check.ringId === undefined) return false;
+    // Кольцо помечено id перекрёстка, на месте которого оно встало.
+    const ringId = check.ringId;
     const center = { ...check.center };
-    const ringId = [...check.plan.net!.nodes.values()].find((x) => x.roundabout !== undefined && x.roundabout !== null)?.roundabout;
-    if (ringId === undefined || ringId === null) return false;
     this.roundaboutCenters.set(ringId, center);
     if (!this.roadBuilder.apply(check.plan)) {
       this.roundaboutCenters.delete(ringId);
@@ -1519,7 +1548,7 @@ export class Game implements BuildContext {
       // Новый год — новые модели в продаже.
       if (this.year !== yearBefore) {
         for (const m of Object.values(MODELS)) {
-          if (m.year === this.year) this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке линии`, '#4a8fe7');
+          if (m.year === this.year) this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
         }
       }
     }
@@ -1559,7 +1588,7 @@ export class Game implements BuildContext {
   /** Почему из этих станций нельзя собрать линию; null — можно. */
   lineProblem(stops: number[]): string | null {
     const kinds = new Set(stops.map((id) => this.stations.get(id)?.kind).filter((k) => k));
-    if (kinds.size > 1) return 'В одной линии — либо автостанции, либо ж/д станции';
+    if (kinds.size > 1) return 'В одном маршруте — либо автостанции, либо ж/д станции';
     return null;
   }
 
@@ -1716,7 +1745,7 @@ export class Game implements BuildContext {
    */
   setLineRoute(id: number, stops: number[], rules: (StopRule | null)[]): string | null {
     const line = this.lines.get(id);
-    if (!line) return 'Нет линии';
+    if (!line) return 'Нет маршрута';
     const clean: number[] = [];
     const cleanRules: (StopRule | null)[] = [];
     stops.forEach((sid, i) => {
@@ -1731,7 +1760,7 @@ export class Game implements BuildContext {
     if (clean.length < 2) return 'В маршруте нужно минимум две станции';
     const problem = this.lineProblem(clean);
     if (problem) return problem;
-    if (this.stations.get(clean[0])!.kind !== this.lineMode(line)) return 'Поезда и машины не смешиваются в одной линии';
+    if (this.stations.get(clean[0])!.kind !== this.lineMode(line)) return 'Поезда и машины не смешиваются в одном маршруте';
     this.forgetUndo();
     const before = line.stops;
     line.stops = clean;
@@ -1773,13 +1802,13 @@ export class Game implements BuildContext {
 
   addLineStop(id: number, stationId: number): string | null {
     const line = this.lines.get(id);
-    if (!line) return 'Нет линии';
+    if (!line) return 'Нет маршрута';
     return this.setLineRoute(id, [...line.stops, stationId], [...(line.rules ?? line.stops.map(() => null)), null]);
   }
 
   removeLineStop(id: number, index: number): string | null {
     const line = this.lines.get(id);
-    if (!line) return 'Нет линии';
+    if (!line) return 'Нет маршрута';
     const rules = line.rules ?? line.stops.map(() => null);
     return this.setLineRoute(
       id,
@@ -1790,7 +1819,7 @@ export class Game implements BuildContext {
 
   moveLineStop(id: number, index: number, delta: number): string | null {
     const line = this.lines.get(id);
-    if (!line) return 'Нет линии';
+    if (!line) return 'Нет маршрута';
     const to = index + delta;
     if (to < 0 || to >= line.stops.length) return null;
     const stops = [...line.stops];
@@ -2244,7 +2273,7 @@ export class Game implements BuildContext {
     }
     const profit = line.revenueLast - line.costLast;
     if (profit < 0 && line.costLast > 0 && !out.length) {
-      out.push('Линия в минусе: возите дальше (платят за расстояние), загружайте рейсы полностью или уберите лишний транспорт');
+      out.push('Маршрут в минусе: возите дальше (платят за расстояние), загружайте рейсы полностью или уберите лишний транспорт');
     }
     return out;
   }
@@ -3045,7 +3074,7 @@ export class Game implements BuildContext {
 
   removeStation(st: Station): boolean {
     if (this.stationLines(st.id).length) {
-      this.notify('Станцию используют линии — сначала удалите их');
+      this.notify('Станцию используют маршруты — сначала удалите их');
       return false;
     }
     this.index.remove(st);
