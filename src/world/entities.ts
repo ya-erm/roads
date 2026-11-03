@@ -80,6 +80,8 @@ export interface Industry {
   level?: number;
   /** Сколько месяцев подряд продукцию вывозили (или не обслуживали — со знаком минус). */
   streak?: number;
+  /** Предел роста уровня: событие «рост промышленности» поднимает его выше обычного. Нет — ECONOMY.maxLevel. */
+  cap?: number;
 }
 
 export interface PassengerGroup {

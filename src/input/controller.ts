@@ -572,9 +572,19 @@ export class Controller {
     this.onChange();
   }
 
-  setSpeed(speed: number): void {
+  /**
+   * Скорость игры. В испытании сценария время не останавливается: паузу ставят только меню и окна (force),
+   * а пробел и кнопка паузы лишь напоминают об этом.
+   */
+  setSpeed(speed: number, force = false): void {
+    const g = this.game();
+    if (speed === 0 && !force && g.scenario?.challenge) {
+      const text = 'Испытание: время не останавливается — пауза только в меню';
+      if (!g.notices.some((n) => n.text === text)) g.notify(text, '#c4662f');
+      return;
+    }
     if (speed > 0) this.lastSpeed = speed;
-    this.game().speed = speed;
+    g.speed = speed;
     this.onChange();
   }
 

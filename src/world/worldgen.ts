@@ -7,7 +7,7 @@ import { CargoType, INDUSTRY_LIST, TOWN_CARGO } from './cargo';
 import type { Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
-import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, townSizes, WorldSettings } from './settings';
+import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, townSizes, WorldProfile, WorldSettings } from './settings';
 import { Footprint, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import type { Terrain } from './terrain';
 
@@ -85,6 +85,8 @@ export function corridorHalf(c: Corridor): number {
 }
 
 export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAULT_SETTINGS): { towns: Town[]; industries: Industry[] } {
+  const profile = settings.scenario?.profile;
+  if (profile) return generateProfiled(ctx, settings, profile);
   const towns: Town[] = [];
   const names = [...TOWN_NAMES];
   // На тесной карте города ставим ближе друг к другу.
@@ -118,6 +120,116 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   // Места для городов и предприятий выбраны по всем улицам; дальше радиус города — по плотной застройке.
   for (const t of towns) measureTown(t);
   return { towns, industries };
+}
+
+/**
+ * Мир под архетип сценария: размеры и скученность городов, число предприятий по видам, заводы ближе к
+ * поставщикам или все предприятия вокруг крупнейшего города. Точка притяжения — случайная, но по seed.
+ */
+function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: WorldProfile): { towns: Town[]; industries: Industry[] } {
+  const { rng, terrain } = ctx;
+  const towns: Town[] = [];
+  const names = [...TOWN_NAMES];
+  const W = terrain.width;
+  const H = terrain.height;
+  // Центр скопления городов — не у края карты и не в воде.
+  let focus = { x: W / 2, y: H / 2 };
+  for (let i = 0; i < 30; i++) {
+    const c = { x: rng.range(W * 0.3, W * 0.7), y: rng.range(H * 0.3, H * 0.7) };
+    if (!terrain.isWater(c, 400)) {
+      focus = c;
+      break;
+    }
+  }
+  // Чем сильнее тяга, тем ближе к центру скопления ищем место; не нашлось — по всей карте.
+  const spread = Math.max(W, H) * (1 - profile.cluster) + 1600 * profile.cluster;
+  for (const size of townSizes(settings.towns, profile)) {
+    const reach = (size + 1.5) * 110;
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const free = attempt >= 80 || profile.cluster <= 0;
+      const a = rng.range(0, Math.PI * 2);
+      const r = rng.range(0, spread * (1 + attempt / 40));
+      const raw = free
+        ? { x: rng.range(reach + 300, W - reach - 300), y: rng.range(reach + 300, H - reach - 300) }
+        : { x: focus.x + Math.cos(a) * r, y: focus.y + Math.sin(a) * r };
+      const c = { x: Math.max(reach + 300, Math.min(W - reach - 300, raw.x)), y: Math.max(reach + 300, Math.min(H - reach - 300, raw.y)) };
+      if (terrain.isWater(c, 200)) continue;
+      if (towns.some((t) => dist(t.center, c) < t.radius + reach + profile.gap)) continue;
+      const name = names.splice(rng.int(0, names.length), 1)[0];
+      const style: TownStyle =
+        size === 3 ? 'radial' : size === 2 ? rng.pick(['radial', 'organic', 'organic', 'organic'] as const) : rng.pick(['linear', 'linear', 'organic'] as const);
+      const town = buildTown(ctx, towns.length + 1, c, name, size, style);
+      if (town) {
+        towns.push(town);
+        break;
+      }
+      names.push(name);
+    }
+  }
+  assignDemands(towns, rng);
+  const industries = placeProfiled(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), profile);
+  for (const t of towns) measureTown(t);
+  return { towns, industries };
+}
+
+/**
+ * Предприятия по профилю: сырьевые — первыми; заводу из нескольких подходящих мест достаётся ближайшее
+ * к поставщикам (affinity), а при тяге к узлу (hub) места ищутся вокруг крупнейшего города.
+ */
+function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profile: WorldProfile): Industry[] {
+  const { rng, terrain, index } = ctx;
+  const result: Industry[] = [];
+  const hub = [...towns].sort((a, b) => b.population - a.population)[0];
+  const hubSpread = Math.max(terrain.width, terrain.height) * (1 - profile.hub) + 2400 * profile.hub;
+  for (const info of INDUSTRY_LIST) {
+    const plant = info.accepts.length > 0;
+    const count = Math.max(1, Math.round(info.count * density * (plant ? profile.plants : profile.raw)));
+    // Сколько подходящих мест сравнить: у завода с тягой к поставщикам — несколько.
+    const choices = plant ? 1 + Math.round(profile.affinity * 6) : 1;
+    const supplierDist = (p: Vec) =>
+      info.accepts.reduce((sum, c) => {
+        const d = Math.min(...result.filter((i) => i.info.produces === c).map((i) => dist(i.fp.center, p)));
+        return sum + (Number.isFinite(d) ? d : 0);
+      }, 0);
+    for (let n = 0; n < count; n++) {
+      const found: { fp: Footprint; score: number }[] = [];
+      for (let attempt = 0; attempt < 160 && found.length < choices; attempt++) {
+        let center = { x: rng.range(300, terrain.width - 300), y: rng.range(300, terrain.height - 300) };
+        if (hub && profile.hub > 0 && attempt < 110) {
+          const a = rng.range(0, Math.PI * 2);
+          const r = rng.range(hub.radius + 300, hub.radius + 300 + hubSpread * (1 + attempt / 60));
+          center = { x: hub.center.x + Math.cos(a) * r, y: hub.center.y + Math.sin(a) * r };
+          if (center.x < 300 || center.y < 300 || center.x > terrain.width - 300 || center.y > terrain.height - 300) continue;
+        }
+        const fp: Footprint = { center, w: info.w, h: info.h, angle: rng.range(-0.6, 0.6) };
+        if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
+        if (towns.some((t) => dist(t.center, center) < t.radius + 280)) continue;
+        if (result.some((i) => dist(i.fp.center, center) < 520)) continue;
+        if (found.some((f) => dist(f.fp.center, center) < 520)) continue;
+        if (index.overlaps(fp, 20)) continue;
+        found.push({ fp, score: plant ? supplierDist(center) : 0 });
+      }
+      const best = found.sort((a, b) => a.score - b.score)[0];
+      if (!best) continue;
+      const nearest = towns.reduce<Town | null>((b, t) => (!b || dist(t.center, best.fp.center) < dist(b.center, best.fp.center) ? t : b), null);
+      const industry: Industry = {
+        type: 'industry',
+        id: ctx.nextId(),
+        info,
+        name: nearest ? `${info.name} (${nearest.name})` : info.name,
+        fp: best.fp,
+        stock: {},
+        output: 0,
+        producedMonth: 0,
+        producedLast: 0,
+        prodAcc: 0,
+      };
+      index.add(industry);
+      result.push(industry);
+      if (info.kind === 'forest') terrain.addForest(best.fp.center, 220, rng);
+    }
+  }
+  return result;
 }
 
 /** Раздаёт городам потребности так, чтобы каждый груз был нужен хотя бы одному городу. */

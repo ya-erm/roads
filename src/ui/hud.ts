@@ -35,7 +35,13 @@ import {
   WaterAmount,
   WorldSettings,
 } from '../world/settings';
+import { ARCHETYPE_LIST } from '../scenario/content';
+import type { Scenario } from '../scenario/manager';
+import { getBest, saveBest, slotOf } from '../scenario/records';
+import type { ScenarioSettings } from '../scenario/types';
 import { cargoIcon, townIcon } from './cargoIcons';
+import { scenarioModeSvg } from './scenarioIcons';
+import { briefHtml, modeTilesHtml, recordRowHtml, RecordView, resultsHtml, scenarioOptionsHtml, scenarioPanelHtml } from './scenarioUi';
 import {
   autoSvg,
   bulldozeAreaSvg,
@@ -145,6 +151,10 @@ const SPEEDS = [
   { value: 2, label: '▶▶', title: 'Быстро' },
   { value: 4, label: '▶▶▶', title: 'Очень быстро' },
 ];
+
+/** Окна поверх карты: правила или брифинг, меню, новая игра, итоги сценария. */
+const SCREENS = ['start', 'menu', 'newgame', 'results'] as const;
+type ScreenName = (typeof SCREENS)[number];
 
 const PRESET_HINTS: Record<string, string> = {
   street: 'Обычная двусторонняя улица: по полосе в каждую сторону',
@@ -303,6 +313,22 @@ export class Hud {
   private dragLine: number | null = null;
   /** Черновик параметров нового мира. */
   private draft: WorldSettings = { ...DEFAULT_SETTINGS };
+  /** Последний выбор сценария на экране новой игры: возвращается, когда снова выбирают «Сценарий». */
+  private scenarioOptions: ScenarioSettings = { difficulty: 'normal', challenge: false };
+  /** Откуда открыли «Новую игру»: «Отмена» и Esc возвращают туда. */
+  private newGameFrom: 'menu' | 'start' = 'menu';
+  /** Панель сценария свёрнута до заголовка (запоминается в браузере). */
+  private scenarioCollapsed = localStorage.getItem('roads.scenarioCollapsed') === '1';
+  /** Задания, у которых в панели раскрыто «почему». */
+  private readonly whyOpen = new Set<string>();
+  /** «Следующий этап» нажат один раз: второе нажатие переводит этап. */
+  private confirmAdvance = false;
+  private lastScenario = '';
+  /** Скорость до итогового экрана — к ней вернёмся по «Продолжить». */
+  private speedBeforeResults = 1;
+  /** Рекорд уже записан для этого сценария (итоговый экран можно открыть снова). */
+  private recordFor: Scenario | null = null;
+  private record: RecordView = { best: null, previous: null, isNew: false };
 
   constructor(
     private readonly root: HTMLElement,
@@ -324,23 +350,10 @@ export class Hud {
       <div class="panel side" data-side></div>
       <div class="panel chains hidden" data-chains></div>
       <div class="panel finance hidden" data-finance></div>
+      <div class="panel scenario hidden" data-scenario></div>
       <div class="panel minimap-wrap" data-minimap></div>
-      <div class="screen hidden" data-start>
-        <div class="modal">
-          <h1>Развязка</h1>
-          <p class="sub">Транспортная компания: дороги, грузы, пассажиры и пробки.</p>
-          <ul>
-            <li>Ставьте <b>станции</b> у дорог в городах или вплотную к <b>предприятию</b> — с любой его стороны.</li>
-            <li>Соедините станции <b>маршрутом</b> и купите на него грузовики или автобусы.</li>
-            <li>Для дальних перевозок проложите <b>ж/д путь</b>, поставьте <b>ж/д станции</b> и пустите поезда.</li>
-            <li>Сырьё везите на заводы, готовую продукцию — в города. Что кому нужно, видно по значкам и в панели <b>«Цепочки»</b>.</li>
-            <li>Выберите предприятие или город — пунктиром покажутся ближайшие партнёры.</li>
-            <li>Обеспеченные города растут, а жители ездят по вашим дорогам и создают пробки.</li>
-          </ul>
-          <div class="actions"><button class="primary" data-action="begin">Начать</button></div>
-          <p class="muted save-note">Прогресс сохраняется сам: каждый игровой месяц и при закрытии вкладки.</p>
-        </div>
-      </div>
+      <div class="screen hidden" data-start><div class="modal start" data-start-body></div></div>
+      <div class="screen hidden" data-results><div class="modal results" data-results-body></div></div>
       <div class="screen hidden" data-menu>
         <div class="modal menu">
           <div data-menu-main>
@@ -470,6 +483,8 @@ export class Hud {
     });
     // Карточка транспорта меняется каждый кадр (скорость): держим её, пока кнопка мыши зажата.
     this.q('[data-side]').addEventListener('pointerdown', () => (this.pressing = true));
+    // Панель сценария тоже обновляется сама (сроки, прогресс) — не перерисовываем её под нажатой кнопкой.
+    this.q('[data-scenario]').addEventListener('pointerdown', () => (this.pressing = true));
     window.addEventListener('pointerup', () => setTimeout(() => (this.pressing = false)));
     // Переименование линии: сохраняем по Enter или при уходе фокуса.
     root.addEventListener('change', (e) => {
@@ -630,14 +645,22 @@ export class Hud {
     const g = this.game();
     const d = el.dataset;
     if (d.action !== 'ng-create') this.confirmNew = false;
+    if (d.action !== 'sc-advance') this.confirmAdvance = false;
     switch (d.action) {
       case 'begin':
         this.hideScreens();
         c.setSpeed(1);
         break;
+      case 'play-scenario':
+        // Из окна правил песочницы — сразу «Новая игра» в режиме сценария.
+        this.draft = { ...this.draftFrom(g.settings), scenario: { ...this.scenarioOptions } };
+        this.newGameFrom = 'start';
+        this.showScreen('newgame');
+        this.renderNewGame();
+        break;
       case 'menu':
         this.speedBeforeMenu = g.speed || 1;
-        c.setSpeed(0);
+        c.setSpeed(0, true);
         this.showMenu();
         break;
       case 'resume':
@@ -699,13 +722,33 @@ export class Hud {
         void this.session.remove(d.id!).then(() => this.renderSaves());
         break;
       case 'new-game':
-        this.draft = { ...g.settings, seed: Math.floor(Math.random() * 1e9) };
+        this.draft = this.draftFrom(g.settings);
+        this.newGameFrom = 'menu';
         this.showScreen('newgame');
         this.renderNewGame();
         break;
       case 'ng-cancel':
-        this.showMenu();
+        this.closeNewGame();
         break;
+      case 'ng-mode': {
+        const next = { ...this.draft };
+        if (d.id === 'scenario') next.scenario = { ...this.scenarioOptions };
+        else delete next.scenario;
+        this.draft = next;
+        this.renderNewGame();
+        break;
+      }
+      case 'ng-diff':
+        this.setScenarioOption({ difficulty: d.id === 'easy' || d.id === 'hard' ? d.id : 'normal' });
+        break;
+      case 'ng-challenge':
+        this.setScenarioOption({ challenge: !this.scenarioOptions.challenge });
+        break;
+      case 'ng-pick': {
+        const pick = ARCHETYPE_LIST.find((a) => a.id === d.id)?.id;
+        this.setScenarioOption({ pick });
+        break;
+      }
       case 'ng-set':
         this.draft = { ...this.draft, [d.key!]: d.key === 'money' ? Number(d.v) : d.v };
         this.renderNewGame();
@@ -752,6 +795,53 @@ export class Hud {
         g.repayLoan();
         this.lastFinance = '';
         break;
+      case 'sc-toggle':
+        this.scenarioCollapsed = !this.scenarioCollapsed;
+        localStorage.setItem('roads.scenarioCollapsed', this.scenarioCollapsed ? '1' : '0');
+        break;
+      case 'sc-why':
+        if (!this.whyOpen.delete(d.id!)) this.whyOpen.add(d.id!);
+        break;
+      case 'sc-accept':
+      case 'sc-decline': {
+        const sc = g.scenario;
+        if (!sc || !d.id) break;
+        if (d.action === 'sc-accept') sc.accept(d.id);
+        else sc.decline(d.id);
+        // Стартовый контракт можно принять прямо в брифинге — обновим его.
+        if (!this.q('[data-start]').classList.contains('hidden')) this.renderStart();
+        break;
+      }
+      case 'sc-advance':
+        // Незакрытые цели этапа засчитаются как невыполненные — переходим со второго нажатия.
+        if (this.confirmAdvance) {
+          this.confirmAdvance = false;
+          g.scenario?.advancePhase();
+        } else this.confirmAdvance = true;
+        break;
+      case 'sc-results':
+        this.showResults();
+        break;
+      case 'sc-continue':
+        this.continueAfterResults();
+        break;
+      case 'sc-replay':
+        // Настройки уже с решённым архетипом и профилем: та же карта и тот же сценарий.
+        this.session.newGame(g.settings);
+        this.showWelcome();
+        break;
+      case 'sc-new': {
+        const s = g.settings;
+        this.session.newGame({
+          ...DEFAULT_SETTINGS,
+          size: s.size,
+          water: s.water,
+          seed: Math.floor(Math.random() * 1e9),
+          scenario: { difficulty: s.scenario?.difficulty ?? 'normal', challenge: !!s.scenario?.challenge },
+        });
+        this.showWelcome();
+        break;
+      }
       case 'town-streets': {
         const t = g.towns.find((x) => x.id === Number(d.id));
         if (t) t.autoStreets = t.autoStreets === false;
@@ -1116,9 +1206,23 @@ export class Hud {
     this.root.querySelectorAll<HTMLElement>('[data-action="speed"]').forEach((b) => b.classList.toggle('active', Number(b.dataset.v) === g.speed));
     this.q('[data-action="heatmap"]').classList.toggle('active', c.heatmap);
     this.q('[data-action="chains"]').classList.toggle('active', !this.q('[data-chains]').classList.contains('hidden'));
+    this.syncPause();
     this.renderOptions();
     this.renderConfirm();
-    if (force) this.renderSide();
+    if (force) {
+      this.renderSide();
+      this.renderScenario();
+    }
+  }
+
+  /** В испытании сценария кнопка паузы неактивна: нажатие только напомнит, что пауза — в меню. */
+  private syncPause(): void {
+    const pause = this.q<HTMLButtonElement>('[data-action="speed"][data-v="0"]');
+    const lock = !!this.game().scenario?.challenge;
+    if (pause.classList.contains('locked') === lock) return;
+    pause.classList.toggle('locked', lock);
+    pause.setAttribute('aria-disabled', String(lock));
+    pause.title = lock ? 'Испытание: время не останавливается — пауза только в меню' : SPEEDS[0].title;
   }
 
   /** Переключатель режима — большие карточки с картинками. */
@@ -2183,15 +2287,20 @@ export class Hud {
       <div class="actions">${follow}</div></section>`;
   }
 
-  private showScreen(name: 'start' | 'menu' | 'newgame'): void {
-    for (const s of ['start', 'menu', 'newgame']) this.q(`[data-${s}]`).classList.toggle('hidden', s !== name);
+  private showScreen(name: ScreenName): void {
+    for (const s of SCREENS) this.q(`[data-${s}]`).classList.toggle('hidden', s !== name);
   }
 
   private hideScreens(): void {
-    for (const s of ['start', 'menu', 'newgame']) this.q(`[data-${s}]`).classList.add('hidden');
+    for (const s of SCREENS) this.q(`[data-${s}]`).classList.add('hidden');
   }
 
-  /** Закрывает открытое окно: меню — продолжить игру, «Новая игра» — назад в меню. */
+  /** Открыто ли какое-нибудь окно. */
+  private anyScreen(): boolean {
+    return SCREENS.some((s) => !this.q(`[data-${s}]`).classList.contains('hidden'));
+  }
+
+  /** Закрывает открытое окно: меню — продолжить игру, «Новая игра» — назад туда, откуда открыли, итоги — продолжить. */
   private closeModal(): boolean {
     if (this.deletingTemplate) {
       this.deletingTemplate = null;
@@ -2199,8 +2308,11 @@ export class Hud {
       return true;
     }
     if (!this.q('[data-newgame]').classList.contains('hidden')) {
-      this.confirmNew = false;
-      this.showMenu();
+      this.closeNewGame();
+      return true;
+    }
+    if (!this.q('[data-results]').classList.contains('hidden')) {
+      this.continueAfterResults();
       return true;
     }
     if (!this.q('[data-menu-saves]').classList.contains('hidden') && !this.q('[data-menu]').classList.contains('hidden')) {
@@ -2216,10 +2328,101 @@ export class Hud {
     return false;
   }
 
-  /** Окно с правилами — только для только что созданного мира. */
+  /** «Новая игра» закрыта без создания мира: назад в меню или в окно правил, откуда её открыли. */
+  private closeNewGame(): void {
+    this.confirmNew = false;
+    if (this.newGameFrom === 'start') this.showScreen('start');
+    else this.showMenu();
+  }
+
+  /** Окно перед стартом только что созданного мира: в песочнице — правила, в сценарии — брифинг. */
   showWelcome(): void {
-    this.controller.setSpeed(0);
+    this.controller.setSpeed(0, true);
+    this.renderStart();
     this.showScreen('start');
+  }
+
+  private renderStart(): void {
+    const g = this.game();
+    const body = this.q('[data-start-body]');
+    body.classList.toggle('brief', !!g.scenario);
+    body.innerHTML = g.scenario ? briefHtml(g) : this.rulesHtml();
+  }
+
+  /** Правила песочницы и приглашение сыграть сценарий. */
+  private rulesHtml(): string {
+    return `<h1>Развязка</h1>
+      <p class="sub">Транспортная компания: дороги, грузы, пассажиры и пробки.</p>
+      <ul>
+        <li>Ставьте <b>станции</b> у дорог в городах или вплотную к <b>предприятию</b> — с любой его стороны.</li>
+        <li>Соедините станции <b>маршрутом</b> и купите на него грузовики или автобусы.</li>
+        <li>Для дальних перевозок проложите <b>ж/д путь</b>, поставьте <b>ж/д станции</b> и пустите поезда.</li>
+        <li>Сырьё везите на заводы, готовую продукцию — в города. Что кому нужно, видно по значкам и в панели <b>«Цепочки»</b>.</li>
+        <li>Выберите предприятие или город — пунктиром покажутся ближайшие партнёры.</li>
+        <li>Обеспеченные города растут, а жители ездят по вашим дорогам и создают пробки.</li>
+      </ul>
+      <div class="actions"><button class="primary" data-action="begin">Начать</button>
+        <button class="secondary with-ic" data-action="play-scenario" title="Регион со своей историей: задания по этапам, события экономики, контракты и медаль в конце">${scenarioModeSvg(
+          38,
+          25,
+        )}Сыграть сценарий</button></div>
+      <p class="muted save-note">Прогресс сохраняется сам: каждый игровой месяц и при закрытии вкладки.</p>`;
+  }
+
+  /** Итоговый экран сценария: игра на паузе, результат записывается в рекорды один раз за партию. */
+  private showResults(): void {
+    const g = this.game();
+    const sc = g.scenario;
+    if (!sc?.state.score) return;
+    if (this.q('[data-results]').classList.contains('hidden')) this.speedBeforeResults = g.speed || 1;
+    this.controller.setSpeed(0, true);
+    if (this.recordFor !== sc) {
+      this.recordFor = sc;
+      const slot = slotOf(g.settings);
+      // Итоги уже видели (экран открыт снова после перезагрузки) — рекорд только показываем.
+      this.record = !slot
+        ? { best: null, previous: null, isNew: false }
+        : sc.state.seen
+          ? { best: getBest(slot), previous: null, isNew: false }
+          : saveBest(slot, sc.state.score);
+    }
+    this.q('[data-results-body]').innerHTML = resultsHtml(g, this.record);
+    this.showScreen('results');
+  }
+
+  /** Сценарий закончился, итоги ещё не показаны и другие окна закрыты — показать. */
+  private checkResults(): void {
+    const sc = this.game().scenario;
+    if (!sc || sc.running || sc.state.seen || this.anyScreen()) return;
+    this.showResults();
+  }
+
+  /** «Продолжить в песочнице»: итоги просмотрены, игра идёт дальше без заданий. */
+  private continueAfterResults(): void {
+    const sc = this.game().scenario;
+    if (sc && !sc.running) sc.state.seen = true;
+    this.hideScreens();
+    this.controller.setSpeed(this.speedBeforeResults);
+    this.lastScenario = '';
+  }
+
+  /** Черновик новой игры по текущей: новый seed; у сценария — только выбор игрока, архетип решится заново. */
+  private draftFrom(s: WorldSettings): WorldSettings {
+    const seed = Math.floor(Math.random() * 1e9);
+    if (!s.scenario) return { ...s, seed };
+    const { difficulty, challenge, pick } = s.scenario;
+    this.scenarioOptions = pick ? { difficulty, challenge, pick } : { difficulty, challenge };
+    // Города, предприятия и капитал сценарий задаёт сам — для песочницы берём обычные.
+    return { ...DEFAULT_SETTINGS, size: s.size, water: s.water, seed, scenario: { ...this.scenarioOptions } };
+  }
+
+  /** Сложность, испытание или регион сценария на экране новой игры. */
+  private setScenarioOption(patch: Partial<ScenarioSettings>): void {
+    const next: ScenarioSettings = { ...this.scenarioOptions, ...patch };
+    if (!next.pick) delete next.pick;
+    this.scenarioOptions = next;
+    this.draft = { ...this.draft, scenario: { ...next } };
+    this.renderNewGame();
   }
 
   private showMenu(): void {
@@ -2305,32 +2508,42 @@ export class Hud {
       return { v: k, name: `${mapSvg(m.w, m.h)}${m.name}`, hint: `${((m.w * 0.6) / 1000).toFixed(1)} × ${((m.h * 0.6) / 1000).toFixed(1)} км` };
     });
     const progress = this.session.hasProgress();
-    this.q('[data-newgame-body]').innerHTML = `
-      <h2>Новая игра</h2>
-      <div class="ng-row"><span class="ng-label">Карта</span><div class="ng-options">${chips('size', d.size, sizes)}</div></div>
-      <div class="ng-row"><span class="ng-label">Города</span>
+    // В сценарии города, предприятия и капитал задаёт регион — эти строки скрыты.
+    const sc = d.scenario;
+    const slot = sc ? slotOf(d) : null;
+    const sandboxRows = `<div class="ng-row"><span class="ng-label">Города</span>
         <span class="stepper big"><button data-action="ng-towns" data-d="-1">−</button><b>${townIcon(18)} ${d.towns}</b><button data-action="ng-towns" data-d="1">+</button></span></div>
       <div class="ng-row"><span class="ng-label">Предприятия</span><div class="ng-options">${chips(
         'industries',
         d.industries,
         (Object.keys(INDUSTRY_DENSITY) as IndustryDensity[]).map((k) => ({ v: k, name: INDUSTRY_DENSITY[k].name })),
-      )}</div></div>
+      )}</div></div>`;
+    const capitalRow = `<div class="ng-row"><span class="ng-label">Капитал</span><div class="ng-options">${chips(
+      'money',
+      d.money,
+      MONEY_OPTIONS.map((o) => ({ v: o.value, name: o.name, hint: money(o.value) })),
+    )}</div></div>`;
+    const body = this.q('[data-newgame-body]');
+    body.classList.toggle('wide', !!sc);
+    body.innerHTML = `
+      <h2>Новая игра</h2>
+      <div class="ng-row"><span class="ng-label">Режим</span>${modeTilesHtml(!!sc)}</div>
+      ${sc ? scenarioOptionsHtml(sc) : ''}
+      <div class="ng-row"><span class="ng-label">Карта</span><div class="ng-options">${chips('size', d.size, sizes)}</div></div>
+      ${sc ? '' : sandboxRows}
       <div class="ng-row"><span class="ng-label">Вода</span><div class="ng-options">${chips(
         'water',
         d.water,
         (Object.keys(WATER) as WaterAmount[]).map((k) => ({ v: k, name: WATER[k].name })),
       )}</div></div>
-      <div class="ng-row"><span class="ng-label">Капитал</span><div class="ng-options">${chips(
-        'money',
-        d.money,
-        MONEY_OPTIONS.map((o) => ({ v: o.value, name: o.name, hint: money(o.value) })),
-      )}</div></div>
+      ${sc ? '' : capitalRow}
       <div class="ng-row"><span class="ng-label">Seed</span>
         <input class="ng-seed" data-ng-seed value="${d.seed}" inputmode="numeric" />
         <button class="secondary small" data-action="ng-seed" title="Случайный мир">🎲</button></div>
+      ${slot ? recordRowHtml(getBest(slot)) : ''}
       <div class="actions">
         <button class="primary ${this.confirmNew ? 'danger-fill' : ''}" data-action="ng-create">${
-          this.confirmNew ? 'Точно? Текущая партия пропадёт' : 'Создать мир'
+          this.confirmNew ? 'Точно? Текущая партия пропадёт' : sc ? 'Начать сценарий' : 'Создать мир'
         }</button>
         <button class="secondary" data-action="ng-cancel">Отмена</button>
       </div>
@@ -2353,6 +2566,7 @@ export class Hud {
     if (show) el.innerHTML = this.chainsHtml();
     else this.controller.highlight = [];
     this.sync();
+    this.renderScenario();
   }
 
   /** Панель цепочек: для каждого груза — кто производит и кому он нужен. */
@@ -2404,6 +2618,9 @@ export class Hud {
       this.panelTimer = 0.3;
       this.renderSide();
       this.renderFinance();
+      this.renderScenario();
+      this.syncPause();
+      this.checkResults();
     }
   }
 
@@ -2412,6 +2629,24 @@ export class Hud {
     el.classList.toggle('hidden');
     this.lastFinance = '';
     this.renderFinance();
+    this.renderScenario();
+  }
+
+  /**
+   * Панель сценария слева под деньгами. «Финансы» и «Цепочки» открываются на том же месте —
+   * пока они открыты, панель сценария спрятана.
+   */
+  private renderScenario(): void {
+    const el = this.q('[data-scenario]');
+    const g = this.game();
+    const show = !!g.scenario && this.q('[data-finance]').classList.contains('hidden') && this.q('[data-chains]').classList.contains('hidden');
+    el.classList.toggle('hidden', !show);
+    if (!show || this.pressing) return;
+    const html = scenarioPanelHtml(g, { collapsed: this.scenarioCollapsed, open: this.whyOpen, confirmAdvance: this.confirmAdvance });
+    if (html !== this.lastScenario) {
+      el.innerHTML = html;
+      this.lastScenario = html;
+    }
   }
 
   private lastFinance = '';
@@ -2441,6 +2676,12 @@ export class Hud {
       { kind: 'build', name: 'Строительство', sign: -1 },
       { kind: 'purchases', name: 'Покупка транспорта', sign: -1 },
       { kind: 'interest', name: 'Проценты по кредиту', sign: -1 },
+      ...(g.scenario
+        ? [
+            { kind: 'grants' as const, name: 'Награды и субсидии', sign: 1 as const },
+            { kind: 'fines' as const, name: 'Штрафы', sign: -1 as const },
+          ]
+        : []),
     ];
     const cell = (v: number | undefined, sign: number) =>
       v === undefined ? '<td class="muted">—</td>' : `<td class="${v === 0 ? 'muted' : sign > 0 ? 'pos' : 'neg'}">${v === 0 ? '0' : `${sign > 0 ? '+' : '−'}${money(v).replace('$', '$')}`}</td>`;
@@ -2463,10 +2704,10 @@ export class Hud {
       <table class="ledger"><tr><th></th><th></th><th>Этот месяц</th><th>Прошлый</th></tr>${table}
         <tr class="sum"><td></td><td>Итого</td>${total(netNow)}${total(netLast)}</tr></table>
       <h4>Кредит</h4>
-      <div class="loan"><div><b>${money(g.loan)}</b> <span class="muted">из ${money(ECONOMY.loanMax)} · ${Math.round(ECONOMY.loanRate * 100)}% в месяц = ${money(
+      <div class="loan"><div><b>${money(g.loan)}</b> <span class="muted">из ${money(g.loanMax)} · ${Math.round(ECONOMY.loanRate * 100)}% в месяц = ${money(
         g.loan * ECONOMY.loanRate,
       )}</span></div>
-        <div class="actions"><button class="small" data-action="loan-take" ${g.loan >= ECONOMY.loanMax ? 'disabled' : ''}>Взять ${money(ECONOMY.loanStep)}</button>
+        <div class="actions"><button class="small" data-action="loan-take" ${g.loan >= g.loanMax ? 'disabled' : ''}>Взять ${money(ECONOMY.loanStep)}</button>
         <button class="small" data-action="loan-repay" ${g.loan <= 0 || g.money < Math.min(ECONOMY.loanStep, g.loan) ? 'disabled' : ''}>Погасить ${money(
           Math.min(ECONOMY.loanStep, g.loan || ECONOMY.loanStep),
         )}</button></div></div>
@@ -2476,6 +2717,9 @@ export class Hud {
 
   reset(): void {
     this.lastPanel = '';
+    this.lastScenario = '';
+    this.whyOpen.clear();
+    this.confirmAdvance = false;
     this.q('[data-chains]').classList.add('hidden');
     this.q('[data-finance]').classList.add('hidden');
     this.minimap.reset();

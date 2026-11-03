@@ -2529,3 +2529,1056 @@ button.small.with-ic {
   border-radius: 8px;
   cursor: pointer;
 }
+
+/* ---------- Сценарий ---------- */
+
+/* Испытание: пауза только в меню — кнопка паузы погашена, нажатие лишь напоминает об этом. */
+.speed button.locked {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.speed button.locked:hover {
+  background: transparent;
+}
+
+/* Панель сценария — слева под деньгами, на месте «Финансов» и «Цепочек»: пока они открыты, она спрятана. */
+.scenario {
+  top: 84px;
+  left: 14px;
+  width: 330px;
+  max-width: calc(100vw - 28px);
+  max-height: calc(100vh - 290px);
+  overflow-y: auto;
+  padding: 6px 0 4px;
+}
+
+/* Узкое окно: панель сценария уже, чтобы не наезжать на правую панель. */
+@media (max-width: 860px) {
+  .scenario {
+    width: calc(100vw - 470px);
+    min-width: 240px;
+  }
+}
+
+.sc-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 12px 4px 10px;
+}
+
+.sc-head .lines-toggle {
+  min-width: 0;
+}
+
+.sc-head h3 {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Контракты ждут решения: свиток и число. */
+.sc-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px 2px 3px;
+  border-radius: 10px;
+  background: #fde9dc;
+  color: #b4531f;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sc-diff {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sc-sec {
+  padding: 8px 12px;
+  border-top: 1px solid #e8ecf0;
+}
+
+.sc-sec h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+/* Этапы A → B → C. */
+.sc-steps {
+  display: flex;
+  align-items: flex-start;
+}
+
+.sc-step {
+  flex: none;
+  min-width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  position: relative;
+  z-index: 1;
+}
+
+.sc-step b {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid #dfe4ea;
+  background: #f4f6f8;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sc-step small {
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sc-step.done b {
+  background: #2e9d57;
+  border-color: #2e9d57;
+  color: #fff;
+}
+
+.sc-step.now b {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 0 3px rgba(47, 128, 237, 0.18);
+}
+
+.sc-step.now small {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.sc-step.lost b {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.sc-step-line {
+  flex: 1;
+  min-width: 8px;
+  height: 2px;
+  margin: 11px -18px 0;
+  background: #dfe4ea;
+}
+
+/* Репутация: шкала от красного к зелёному и отметка. */
+.sc-rep {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  font-size: 12px;
+  cursor: help;
+}
+
+.sc-rep-scale {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #e5534b, #e9b52f 50%, #3fae6a);
+}
+
+.sc-rep-scale i {
+  position: absolute;
+  top: -3px;
+  width: 4px;
+  height: 12px;
+  margin-left: -2px;
+  border-radius: 2px;
+  background: var(--ink);
+  box-shadow: 0 0 0 1.5px #fff;
+}
+
+.sc-rep b {
+  min-width: 22px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Задание: значок, заголовок, полоска, прогресс · срок · награда. */
+.sc-obj {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 -4px 5px;
+  padding: 7px 8px;
+  border-radius: 10px;
+  border-left: 3px solid transparent;
+  background: #f6f8fa;
+}
+
+.sc-obj[data-action] {
+  cursor: pointer;
+}
+
+.sc-obj[data-action]:hover {
+  background: #eef2f6;
+}
+
+.sc-obj.main {
+  border-left-color: var(--accent);
+}
+
+.sc-obj.contract {
+  border-left-color: #c4662f;
+}
+
+.sc-obj.critical {
+  border-left-color: var(--danger);
+  background: #fff5f4;
+}
+
+.sc-obj.done,
+.sc-obj.failed {
+  opacity: 0.6;
+}
+
+.sc-obj-ic {
+  flex: none;
+  line-height: 0;
+  padding-top: 1px;
+}
+
+.sc-obj-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sc-obj-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.sc-obj-title > svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.sc-obj-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sc-role {
+  flex: none;
+  color: var(--accent);
+}
+
+.sc-crit {
+  flex: none;
+  font-size: 12px;
+  cursor: help;
+}
+
+.sc-state {
+  flex: none;
+  font-weight: 800;
+}
+
+.sc-state.done {
+  color: #2e9d57;
+}
+
+.sc-state.failed {
+  color: var(--danger);
+}
+
+.bar.sc-bar {
+  margin: 2px 0 0;
+}
+
+.sc-obj.contract .sc-bar > div {
+  background: #c4662f;
+}
+
+.sc-obj.done .sc-bar > div {
+  background: #3fae6a;
+}
+
+.sc-obj.failed .sc-bar > div {
+  background: var(--danger);
+}
+
+.sc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.sc-meta b {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.sc-left {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.sc-left.urgent {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.sc-reward {
+  overflow-wrap: anywhere;
+}
+
+.sc-now {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sc-why {
+  margin: 2px 0 0;
+  padding: 5px 7px;
+  border-radius: 8px;
+  background: #fff;
+  color: #3e4954;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.sc-chips .ind-chip {
+  max-width: 100%;
+  padding: 2px 8px 2px 2px;
+  font-size: 11.5px;
+}
+
+span.ind-chip {
+  cursor: default;
+}
+
+.sc-advance {
+  width: 100%;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sc-advance:hover {
+  filter: brightness(1.08);
+}
+
+.sc-advance.confirm {
+  background: var(--danger);
+}
+
+/* События и предложения контрактов. */
+.sc-card {
+  margin: 0 -4px 6px;
+  padding: 8px 9px;
+  border-radius: 10px;
+  background: #f6f8fa;
+  font-size: 12.5px;
+}
+
+.sc-card.event.major {
+  border-left: 3px solid #c4662f;
+}
+
+.sc-card.event.minor {
+  border-left: 3px solid #4a8fe7;
+}
+
+.sc-card.offer {
+  background: #fff7f0;
+  box-shadow: inset 0 0 0 1.5px #f1c9ab;
+}
+
+.sc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.sc-card-head > svg {
+  flex: none;
+}
+
+.sc-card-head b {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sc-card-head small {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.sc-ev-ic {
+  flex: none;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.sc-cause {
+  margin: 4px 0;
+  color: #3e4954;
+  line-height: 1.4;
+}
+
+.sc-effects {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sc-effects li {
+  position: relative;
+  padding-left: 15px;
+  line-height: 1.35;
+}
+
+.sc-effects li::before {
+  content: '•';
+  position: absolute;
+  left: 3px;
+  color: var(--muted);
+}
+
+.sc-effects li.up::before {
+  content: '▲';
+  top: 1px;
+  font-size: 9px;
+  color: #2e9d57;
+}
+
+.sc-effects li.down::before {
+  content: '▼';
+  top: 1px;
+  font-size: 9px;
+  color: var(--danger);
+}
+
+.sc-offer-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.sc-offer-title svg {
+  flex: none;
+}
+
+.sc-offer {
+  margin-top: 6px;
+}
+
+.sc-terms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  font-size: 12px;
+}
+
+.sc-fail {
+  color: #b4531f;
+}
+
+.sc-offer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.sc-offer-actions .sc-left {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.sc-offer-actions .sc-left.urgent {
+  color: var(--danger);
+}
+
+.sc-offer-state {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.sc-offer-state.active {
+  color: #b4531f;
+}
+
+.sc-offer-state.done {
+  color: #2e9d57;
+}
+
+.sc-offer-state.failed {
+  color: var(--danger);
+}
+
+/* Прошедшее событие — приглушённой строкой. */
+.sc-past {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: help;
+}
+
+.sc-past > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-past .sc-ev-ic {
+  font-size: 13px;
+  filter: grayscale(0.6);
+  opacity: 0.8;
+}
+
+.sc-past small {
+  flex: none;
+  font-size: 11px;
+}
+
+/* Свёрнутая панель и итог после конца сценария. */
+.sc-compact {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 12px 6px;
+  font-size: 12px;
+  cursor: default;
+}
+
+.sc-compact .sc-bar {
+  flex: 1;
+  margin: 0;
+}
+
+.sc-compact .muted {
+  margin: 0;
+  font-size: 12px;
+}
+
+.sc-letter {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+}
+
+.sc-final {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sc-final > div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+}
+
+.sc-final b {
+  font-size: 18px;
+}
+
+.sc-final small {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* Кнопка со значком в окнах. */
+.modal .actions .with-ic {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal .actions .secondary.with-ic {
+  padding: 8px 16px 8px 10px;
+}
+
+/* Брифинг сценария — вместо окна правил. */
+.modal.start.brief {
+  width: 640px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 24px 28px;
+}
+
+.modal.brief h4,
+.modal.results h4 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 16px 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.brief-head,
+.sc-res-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.brief-head > svg,
+.sc-res-head > svg {
+  flex: none;
+}
+
+.brief-title,
+.sc-res-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.brief-title h2,
+.sc-res-title h2 {
+  margin: 2px 0 4px;
+}
+
+.brief-title .sub {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.brief-kicker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.brief-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 16px 0 12px;
+}
+
+.brief-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 10px 6px 8px;
+  border-radius: 12px;
+  background: #f4f6f8;
+  text-align: center;
+  cursor: help;
+}
+
+.brief-tile b {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.brief-tile small {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.modal ul.brief-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 14px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.brief-facts li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.brief-facts svg,
+.brief-facts .dot {
+  flex: none;
+}
+
+.brief .sc-steps {
+  justify-content: center;
+  margin: 4px 0 2px;
+}
+
+.brief .sc-step-line {
+  flex: 0 1 80px;
+}
+
+.brief .sc-obj,
+.brief .sc-card {
+  margin: 0 0 6px;
+}
+
+.brief .tip {
+  margin: 14px 0 0;
+  font-size: 13px;
+}
+
+.brief .actions {
+  justify-content: center;
+  margin-top: 16px;
+}
+
+/* Итоговый экран сценария. */
+.modal.results {
+  width: 620px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 24px 28px;
+}
+
+.sc-lost {
+  margin: 0 0 6px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: #fde7e5;
+  color: #b0302a;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.sc-total {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.sc-total b {
+  font-size: 34px;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.sc-total > span {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.sc-total .sc-mult {
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: #eef2f6;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: help;
+}
+
+.sc-record {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sc-record.new {
+  color: #c9961a;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.sc-record small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* Шкала медалей: итог и пороги бронзы, серебра, золота. */
+.sc-scale {
+  position: relative;
+  margin: 26px 6px 4px;
+}
+
+.sc-scale-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: #e3e8ee;
+  overflow: hidden;
+}
+
+.sc-scale-bar > div {
+  height: 100%;
+  background: linear-gradient(90deg, #9cc0f2, var(--accent));
+}
+
+.sc-tick {
+  position: absolute;
+  top: -19px;
+  transform: translateX(-50%);
+  line-height: 0;
+  cursor: help;
+}
+
+.sc-tick::after {
+  content: '';
+  position: absolute;
+  top: 17px;
+  left: 50%;
+  width: 2px;
+  height: 12px;
+  margin-left: -1px;
+  background: rgba(31, 41, 51, 0.35);
+}
+
+.sc-parts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 16px;
+}
+
+.sc-part {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.sc-part > svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.sc-part-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.sc-part-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.sc-part-top span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sc-part small {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--muted);
+}
+
+.sc-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
+}
+
+.sc-res-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.sc-res-group > small {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.sc-res-obj {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.sc-res-obj > svg {
+  flex: none;
+}
+
+.sc-res-obj.failed {
+  color: var(--muted);
+}
+
+.modal.results .menu-buttons {
+  margin-top: 18px;
+}
+
+/* Новая игра: режим, сложность, испытание, регион, рекорд. */
+.modal.newgame {
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+
+.modal.newgame.wide {
+  width: 660px;
+  max-width: calc(100vw - 32px);
+}
+
+.ng-row.top {
+  align-items: flex-start;
+}
+
+.ng-row.top .ng-label {
+  padding-top: 10px;
+}
+
+.ng-modes .card {
+  min-width: 132px;
+}
+
+.card.ng-diff {
+  min-width: 108px;
+}
+
+.switch-row.ng-challenge {
+  flex: 1;
+  margin: 0;
+  max-width: 400px;
+}
+
+.ng-challenge .sw-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ng-challenge small {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.ng-region {
+  flex: 1;
+  min-width: 0;
+}
+
+.ng-region .muted {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.cards.ng-regions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.card.region {
+  min-width: 0;
+  padding: 5px 4px 4px;
+}
+
+.card.region .name {
+  font-size: 11.5px;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.ng-record {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 8px;
+  border-radius: 10px;
+  background: #fff8e1;
+  font-size: 13px;
+}

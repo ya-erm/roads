@@ -1,3 +1,5 @@
+import type { ScenarioSettings } from '../scenario/types';
+
 /** Параметры новой игры. */
 export interface WorldSettings {
   seed: number;
@@ -11,6 +13,28 @@ export interface WorldSettings {
    * 1 (нет поля) — реки независимые и могут пересекаться, 2 — притоки впадают в реки.
    */
   terrainVersion?: number;
+  /** Режим сценария; нет — песочница. */
+  scenario?: ScenarioSettings;
+}
+
+/**
+ * Как генерировать карту под архетип сценария. Без профиля генерация та же, что в песочнице.
+ */
+export interface WorldProfile {
+  /** Доли крупных и средних городов (остальные — маленькие). */
+  big: number;
+  mid: number;
+  /** Наименьший зазор между городами. */
+  gap: number;
+  /** Тяга городов к общему центру: 0 — по всей карте, 1 — плотной группой. */
+  cluster: number;
+  /** Множители числа сырьевых предприятий и заводов. */
+  raw: number;
+  plants: number;
+  /** Заводы встают ближе к поставщикам своего сырья: 0…1. */
+  affinity: number;
+  /** Предприятия тянутся к крупнейшему городу (логистический узел): 0…1. */
+  hub: number;
 }
 
 export const TERRAIN_VERSION = 2;
@@ -53,10 +77,10 @@ export const DEFAULT_SETTINGS: WorldSettings = {
   terrainVersion: TERRAIN_VERSION,
 };
 
-/** Размеры городов: немного крупных, больше средних, остальные маленькие. */
-export function townSizes(count: number): number[] {
-  const big = Math.max(1, Math.round(count * 0.2));
-  const mid = Math.round(count * 0.4);
+/** Размеры городов: немного крупных, больше средних, остальные маленькие (доли — по профилю сценария). */
+export function townSizes(count: number, shares: { big: number; mid: number } = { big: 0.2, mid: 0.4 }): number[] {
+  const big = Math.max(1, Math.round(count * shares.big));
+  const mid = Math.round(count * shares.mid);
   return Array.from({ length: count }, (_, i) => (i < big ? 3 : i < big + mid ? 2 : 1));
 }
 

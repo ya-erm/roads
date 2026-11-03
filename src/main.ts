@@ -4,6 +4,8 @@ import { clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readS
 import { Controller } from './input/controller';
 import { Camera } from './render/camera';
 import { Renderer } from './render/renderer';
+import { ARCHETYPE_LIST } from './scenario/content';
+import type { ScenarioSettings } from './scenario/types';
 import { testScene } from './testpages';
 import { Hud } from './ui/hud';
 import { DEFAULT_SETTINGS, WorldSettings } from './world/settings';
@@ -14,21 +16,36 @@ const hudRoot = document.getElementById('hud') as HTMLElement;
 const params = new URLSearchParams(location.search);
 const randomSeed = () => Math.floor(Math.random() * 1e9);
 
+/**
+ * Быстрый запуск сценария для проверки: `?scenario=easy|normal|hard` (и необязательно `&seed=`, `&pick=industrial`,
+ * `&challenge=1`) — если сохранения нет, сразу сценарная партия. Отдельный слот — `&slot=имя`.
+ */
+function quickScenario(): ScenarioSettings | undefined {
+  const d = params.get('scenario');
+  if (d !== 'easy' && d !== 'normal' && d !== 'hard') return undefined;
+  const pick = ARCHETYPE_LIST.find((a) => a.id === params.get('pick'))?.id;
+  const challenge = params.get('challenge') === '1';
+  return pick ? { difficulty: d, challenge, pick } : { difficulty: d, challenge };
+}
+
 // Тестовая страница (/test/bus): вместо сохранения — заранее собранная сцена, перезагрузка собирает её заново.
 // Автосохранения там нет, а сохранить вручную можно только в её собственный слот (см. persist).
 const scene = testScene(location.pathname);
 // Есть сохранение — продолжаем его. Новая игра начинается только по кнопке.
 const saved = scene ? null : loadSave();
+const quick = quickScenario();
 let game = scene
   ? scene.game
   : saved
     ? new Game(saved.settings, saved)
-    : new Game({ ...DEFAULT_SETTINGS, seed: Number(params.get('seed')) || randomSeed() });
-if (saved && params.has('seed')) {
-  params.delete('seed');
+    : new Game({ ...DEFAULT_SETTINGS, seed: Number(params.get('seed')) || randomSeed(), ...(quick ? { scenario: quick } : {}) });
+// Партия из сохранения: параметры новой игры в адресе уже ни при чём — убираем их, чтобы не путали.
+const startParams = ['seed', 'scenario', 'pick', 'challenge'];
+if (saved && startParams.some((p) => params.has(p))) {
+  for (const p of startParams) params.delete(p);
   history.replaceState(null, '', `${location.pathname}${params.size ? `?${params}` : ''}`);
 }
-// Сохранённая партия (и сцена) продолжается сразу, новая ждёт кнопку «Начать» в окне правил.
+// Сохранённая партия (и сцена) продолжается сразу, новая ждёт кнопку «Начать» в окне правил или в брифинге сценария.
 game.speed = saved || scene ? 1 : 0;
 
 const camera = new Camera();

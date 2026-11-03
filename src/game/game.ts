@@ -47,6 +47,10 @@ import {
   recountPopulation,
   WorldContext,
 } from '../world/worldgen';
+import { EconomyMods, NO_MODS } from '../scenario/effects';
+import { prepareSettings } from '../scenario/generator';
+import { Scenario } from '../scenario/manager';
+import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan } from './roadbuild';
 import { RING_SIZES, RingOptions, Roads } from './roads';
@@ -252,9 +256,13 @@ export interface Ledger {
   purchases: number;
   /** Проценты по кредиту. */
   interest: number;
+  /** Награды и субсидии сценария (в старых сохранениях нет). */
+  grants?: number;
+  /** Штрафы сценария. */
+  fines?: number;
 }
 
-export const emptyLedger = (): Ledger => ({ transport: 0, sales: 0, vehicles: 0, roads: 0, build: 0, purchases: 0, interest: 0 });
+export const emptyLedger = (): Ledger => ({ transport: 0, sales: 0, vehicles: 0, roads: 0, build: 0, purchases: 0, interest: 0, grants: 0, fines: 0 });
 
 export interface MonthRecord {
   label: string;
@@ -314,6 +322,8 @@ export interface SaveData {
   fleet: (FleetVehicle & { onRoad?: RoadSpot })[];
   roundabouts: [number, Vec][];
   history: MonthRecord[];
+  /** Состояние сценария; нет — песочница. */
+  scenario?: ScenarioState;
   /** Поезда в пути и на платформах. */
   rail?: ReturnType<RailSim['serialize']>;
   /** Положение камеры — заполняет интерфейс. */
@@ -406,11 +416,16 @@ export class Game implements BuildContext {
   private readonly lapGuess = new Map<number, { at: number; lap: number | null }>();
   /** Вызывается в конце каждого игрового месяца — для автосохранения. */
   onMonthEnd: () => void = () => {};
+  /** Сценарий партии; null — песочница. */
+  scenario: Scenario | null = null;
+  /** Множители экономики от событий сценария; в песочнице все равны 1. */
+  mods: EconomyMods = NO_MODS;
 
   readonly settings: WorldSettings;
 
   constructor(setup: WorldSettings | number, save?: SaveData) {
-    this.settings = typeof setup === 'number' ? { ...DEFAULT_SETTINGS, seed: setup } : setup;
+    // Сценарий решает архетип по seed ещё до генерации карты: от него зависят города и предприятия.
+    this.settings = prepareSettings(typeof setup === 'number' ? { ...DEFAULT_SETTINGS, seed: setup } : setup);
     this.rng = new Rng(this.settings.seed);
     this.terrain = new Terrain(this.rng, this.settings);
     this.money = this.settings.money;
@@ -435,6 +450,12 @@ export class Game implements BuildContext {
     this.industries = world.industries;
     this.net.rebuild();
     this.roads.changed();
+    if (this.settings.scenario) this.attachScenario(Scenario.create(this));
+  }
+
+  private attachScenario(sc: Scenario): void {
+    this.scenario = sc;
+    this.mods = sc.mods;
   }
 
   /** Машины на дорогах. */
@@ -474,6 +495,7 @@ export class Game implements BuildContext {
       roundabouts: [...this.roundaboutCenters],
       history: this.history,
       rail: this.rail.serialize(),
+      scenario: this.scenario?.toSave(),
     };
   }
 
@@ -618,6 +640,7 @@ export class Game implements BuildContext {
     this.loan = save.loan ?? 0;
     this.nextEntityId = save.nextEntityId;
     this.rng.seedState = save.rng;
+    if (save.scenario) this.attachScenario(Scenario.restore(this, save.scenario));
   }
 
   /**
@@ -1480,11 +1503,30 @@ export class Game implements BuildContext {
   /** Берёт кредит шагом loanStep, пока не достигнут предел. Деньги — не доход: в отчёте отдельно. */
   takeLoan(): boolean {
     const E = ECONOMY;
-    const amount = Math.min(E.loanStep, E.loanMax - this.loan);
+    const amount = Math.min(E.loanStep, this.loanMax - this.loan);
     if (amount <= 0) return false;
     this.loan += amount;
     this.money += amount;
     return true;
+  }
+
+  /** Предел кредита: в сценарии — по сложности. */
+  get loanMax(): number {
+    return this.scenario?.loanMax ?? ECONOMY.loanMax;
+  }
+
+  /** Награда или субсидия сценария: доход отдельной статьёй. */
+  grant(amount: number): void {
+    this.money += amount;
+    this.incomeMonth += amount;
+    this.ledger.grants = (this.ledger.grants ?? 0) + amount;
+  }
+
+  /** Штраф сценария. */
+  fine(amount: number): void {
+    this.money -= amount;
+    this.expensesMonth += amount;
+    this.ledger.fines = (this.ledger.fines ?? 0) + amount;
   }
 
   /** Гасит кредит шагом loanStep (или остаток), если хватает денег. */
@@ -1886,6 +1928,11 @@ export class Game implements BuildContext {
     return `${MONTHS[m]} ${START_YEAR + Math.floor(this.month / 12)}`;
   }
 
+  /** Номер текущего месяца с начала партии — единое время дедлайнов сценария. */
+  get monthIndex(): number {
+    return this.month;
+  }
+
   /** Текущий игровой год. */
   get year(): number {
     return START_YEAR + Math.floor(this.month / 12);
@@ -1994,6 +2041,7 @@ export class Game implements BuildContext {
     this.updateIndustries(dt);
     this.updateStations(dt);
     this.updateTowns(dt);
+    this.scenario?.tick(dt);
     const month = Math.floor(this.time / MONTH_LENGTH);
     if (month !== this.month) {
       this.monthEnd();
@@ -3103,8 +3151,11 @@ export class Game implements BuildContext {
         const distance = origin ? dist(origin.fp.center, st.fp.center) : 0;
         const k = v.fromStore || v.loadedTime === undefined ? 1 : this.speedFactor(distance, this.time - v.loadedTime);
         bonus = Math.max(bonus, k);
-        revenue += Math.round((v.amount * CARGO[v.cargo].rate * ECONOMY.tariff * distance * k) / 100);
-        this.deliver(st, v.cargo, v.amount);
+        revenue += Math.round((v.amount * CARGO[v.cargo].rate * ECONOMY.tariff * distance * k * this.mods.price(v.cargo)) / 100);
+        const receiver = this.deliver(st, v.cargo, v.amount);
+        // Откуда груз: предприятие у станции первой погрузки, которое его производит.
+        const maker = origin?.industryIds.find((id) => this.industries.find((i) => i.id === id)?.info.produces === v.cargo);
+        this.scenario?.onDelivered(v.cargo, v.amount, receiver, k, maker);
         moved += v.amount;
         line.carriedMonth += v.amount;
         v.dropped = v.cargo;
@@ -3141,9 +3192,10 @@ export class Game implements BuildContext {
         const distance = from ? dist(from.fp.center, st.fp.center) : 0;
         const k = g.at === undefined ? 1 : this.speedFactor(distance, this.time - g.at);
         bonus = Math.max(bonus, k);
-        revenue += Math.round((g.count * CARGO.passengers.rate * ECONOMY.tariff * distance * k) / 100);
+        revenue += Math.round((g.count * CARGO.passengers.rate * ECONOMY.tariff * distance * k * this.mods.price('passengers')) / 100);
         moved += g.count;
         line.carriedMonth += g.count;
+        this.scenario?.onPassengers(from?.townIds[0], st.townIds[0], g.count, k);
         const town = st.townIds.length ? this.towns.find((t) => t.id === st.townIds[0]) : undefined;
         if (town) town.growthAcc += g.count * 0.02;
       }
@@ -3361,14 +3413,17 @@ export class Game implements BuildContext {
     v.profitMonth += amount;
   }
 
-  private deliver(st: Station, cargo: CargoType, amount: number): void {
+  /** Груз — получателю у станции: заводу на склад или городу в снабжение. Возвращает, кто принял. */
+  private deliver(st: Station, cargo: CargoType, amount: number): Ref | null {
     const ind = this.industries.find((i) => st.industryIds.includes(i.id) && i.info.accepts.includes(cargo));
     if (ind) {
       ind.stock[cargo] = (ind.stock[cargo] ?? 0) + amount;
-      return;
+      return { type: 'industry', id: ind.id };
     }
     const town = this.towns.find((t) => st.townIds.includes(t.id) && t.demands.includes(cargo));
-    if (town) town.supplied[cargo] = (town.supplied[cargo] ?? 0) + amount;
+    if (!town) return null;
+    town.supplied[cargo] = (town.supplied[cargo] ?? 0) + amount;
+    return { type: 'town', id: town.id };
   }
 
   // ---------- Производство и пассажиры ----------
@@ -3394,7 +3449,8 @@ export class Game implements BuildContext {
     for (const ind of this.industries) {
       const served = [...this.stations.values()].filter((st) => st.serves.cargo && st.industryIds.includes(ind.id) && this.served(st));
       const inputs = ind.info.accepts;
-      const level = ind.level ?? 1;
+      // Уровень производства и временный множитель событий сценария.
+      const level = (ind.level ?? 1) * this.mods.industry(ind.id);
       if (!inputs.length) {
         if (served.length) ind.prodAcc += (ind.info.rate * level * dt) / MONTH_LENGTH;
       } else {
@@ -3458,7 +3514,7 @@ export class Game implements BuildContext {
       const dests = new Map<number, number>();
       for (const sid of routes.keys()) dests.set(sid, this.stations.get(sid)!.catchPop + 60);
       if (!dests.size) continue;
-      st.paxAcc += (st.catchPop / 1000) * 1.2 * dt;
+      st.paxAcc += (st.catchPop / 1000) * 1.2 * dt * (st.townIds.length ? this.mods.pax(st.townIds[0]) : 1);
       let waiting = 0;
       for (const c of st.passengers.values()) waiting += c;
       const cap = this.stationCap(st, 'passengers');
@@ -3589,6 +3645,8 @@ export class Game implements BuildContext {
       if (line.auto?.on) this.autoFleet(line, closed);
     }
     if (this.money < ECONOMY.creditLimit * 0.8) this.notify('Компания на грани банкротства!', '#e5534b');
+    // Сценарий — после экономики месяца: снабжение городов и рост предприятий уже подсчитаны.
+    this.scenario?.monthEnd();
     this.onMonthEnd();
   }
 
@@ -3609,8 +3667,9 @@ export class Game implements BuildContext {
       if (good) streak = Math.max(1, streak + 1);
       else if (!stations.length) streak = Math.min(-1, streak - 1);
       else streak = 0;
-      if (streak >= E.growthMonths && level < E.maxLevel) {
-        ind.level = Math.min(E.maxLevel, level + E.growthStep);
+      const cap = ind.cap ?? E.maxLevel;
+      if (streak >= E.growthMonths && level < cap) {
+        ind.level = Math.min(cap, level + E.growthStep);
         streak = 0;
         if (Math.floor(ind.level) > Math.floor(level)) this.notify(`${ind.name}: производство выросло до ×${ind.level}`, '#2e9d57');
       } else if (streak <= -E.declineMonths && level > 1) {
@@ -3623,7 +3682,7 @@ export class Game implements BuildContext {
 
   /** Сколько предприятие производит (или может переработать) в месяц сейчас. */
   industryRate(ind: Industry): number {
-    return Math.round((ind.info.accepts.length ? 120 : ind.info.rate) * (ind.level ?? 1));
+    return Math.round((ind.info.accepts.length ? 120 : ind.info.rate) * (ind.level ?? 1) * this.mods.industry(ind.id));
   }
 
   /**
@@ -3688,7 +3747,7 @@ export class Game implements BuildContext {
   private growTown(town: Town): void {
     this.closeTownMonth(town);
     const satisfaction = this.townSatisfaction(town);
-    town.growthAcc += town.population * (0.003 + 0.025 * satisfaction);
+    town.growthAcc += town.population * (0.003 + 0.025 * satisfaction) * this.mods.growth(town.id);
     const ctx = this.worldContext();
     const reach = this.townReach(town);
     // Город растёт вдоль любых своих улиц, включая построенные игроком, — ближние к центру раньше.

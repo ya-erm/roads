@@ -93,6 +93,9 @@ export function ledgerIcon(kind: string, size = 22): string {
     build: ['#e9b52f', '<path d="M6 18h12M8 18V8h3v10M8 8l9 0M15 8v4" stroke="#fff" stroke-width="1.8" fill="none"/>'],
     interest: ['#9a6be0', '<path d="M8 16L16 8" stroke="#fff" stroke-width="1.8"/><circle cx="8.5" cy="8.5" r="1.8" fill="#fff"/><circle cx="15.5" cy="15.5" r="1.8" fill="#fff"/>'],
     purchases: ['#4a8fe7','<path d="M5 6h2l2 8h8l2-6H8" stroke="#fff" stroke-width="1.8" fill="none" stroke-linejoin="round"/><circle cx="10" cy="17" r="1.3" fill="#fff"/><circle cx="16" cy="17" r="1.3" fill="#fff"/>'],
+    // Сценарий: награды и субсидии — значок-награда, штрафы — восклицательный знак.
+    grants: ['#2fb8b3', '<circle cx="12" cy="9.6" r="4.2" fill="none" stroke="#fff" stroke-width="1.8"/><path d="M9.6 13.2L8.2 19l3.8-2 3.8 2-1.4-5.8" fill="#fff"/>'],
+    fines: ['#d64541', '<path d="M12 6v7.2" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="17.2" r="1.4" fill="#fff"/>'],
   };
   const [color, body] = glyphs[kind] ?? ['#9aa3ad', ''];
   return `<svg viewBox="0 0 24 24" width="${size}" height="${size}"><circle cx="12" cy="12" r="11" fill="${color}"/>${body}</svg>`;
