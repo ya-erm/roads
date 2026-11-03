@@ -20,7 +20,7 @@ const attachments = {
     type: 'object',
     properties: {
       file: { type: 'string', description: 'Путь к файлу в папке для вложений' },
-      caption: { type: 'string', description: 'Подпись: что здесь видно' },
+      caption: { type: 'string', description: 'Подпись в 2–6 слов: что здесь видно' },
     },
     required: ['file', 'caption'],
     additionalProperties: false,
@@ -35,7 +35,7 @@ export const REPORT_SCHEMA = {
       enum: ['done', 'needs_info', 'failed'],
       description: 'done — сделано; needs_info — нужны уточнения пользователя; failed — сделать не получилось',
     },
-    summary: { type: 'string', description: 'Отчёт для комментария в задаче, markdown' },
+    summary: { type: 'string', description: 'Суть результата для комментария в задаче: 1–5 коротких пунктов markdown-списка' },
     screenshots: attachments,
     saves: attachments,
   },
@@ -49,6 +49,27 @@ export const TITLE_SCHEMA = {
   required: ['title'],
   additionalProperties: false,
 };
+
+/** Вложение, уже загруженное на сервис досок. */
+export interface PostedFile {
+  name: string;
+  caption: string;
+  url: string;
+}
+
+/** Комментарий с отчётом: суть, снимки с подписями, ссылки на сохранения — и ничего лишнего. */
+export function reportComment(report: AgentReport, shots: PostedFile[], saves: PostedFile[]): string {
+  const head = { done: '', needs_info: '**Нужны уточнения**\n\n', failed: '**Не сделано**\n\n' }[report.outcome];
+  const parts = [`${head}${report.summary.trim()}`];
+  for (const s of shots) parts.push(`${s.caption}\n\n![${s.caption.replace(/[[\]]/g, '')}](<${s.url}>)`);
+  for (const s of saves) parts.push(`Сохранение: [${s.name}](<${s.url}>) — ${s.caption}`);
+  return parts.join('\n\n');
+}
+
+/** Комментарий, когда Claude так и не справился. */
+export function errorComment(error: string, attempts: number): string {
+  return `**Не сделано:** ${error} (попыток: ${attempts})`;
+}
 
 export function titlePrompt(description: string): string {
   return `Придумай краткое название (3–8 слов, по-русски, без кавычек и точки в конце) для задачи в трекере по её описанию:\n\n${description.slice(0, 6000)}`;
@@ -133,10 +154,16 @@ ${comments}${inputs}
    Сохранение можно собрать и кодом в node (как в тестах: src/game/testkit.ts, сцены в src/testpages), записав \`JSON.stringify(game.toSave())\`. Любое сохранение обязательно открой через \`npm run shot -- --save\`: оно должно открываться в браузере и показывать то, что нужно проверить. Учти: рельеф в сохранение не пишется, а строится заново по seed — партия с тестовой страницы (/test/…) в обычной игре откроется с лесом и водой.
    Посмотри на снимки сам (Read) и убедись, что на них видно нужное.
 4. ${commit}
-5. Итог верни структурированным ответом:
-   - \`outcome\`: "done" — сделано; "needs_info" — нужны уточнения (вопросы — в summary); "failed" — не получилось (почему — в summary);
-   - \`summary\`: отчёт для комментария в задаче — markdown, по-русски, коротко и без вступлений: что сделано, как проверено, что не сделано или не проверено. Скриншоты и сохранения в текст не вставляй — скрипт приложит их сам. Без секретов и личных данных;
-   - \`screenshots\`: снимки из \`${out}/\` с подписями — что на снимке;
-   - \`saves\`: сохранения из \`${out}/\` с подписями — что в партии смотреть и где.
+5. Итог верни структурированным ответом. Пользователь прочитает его в комментарии к задаче — только суть, чётко и по делу:
+   - \`outcome\`: "done" — сделано; "needs_info" — нужны уточнения; "failed" — не получилось;
+   - \`summary\`: markdown-список из 1–5 пунктов по-русски, каждый — одна короткая фраза (до 15 слов): что изменилось (в игре, а если в игре не видно — в коде), чем проверено, что не сделано или не проверено (только если такое есть). Для needs_info — только вопросы, для failed — только причина.
+     Не пиши: вступления, пересказ задачи, повторы, оценки («успешно», «корректно»), рассказ о своих шагах и служебное — папки и пути вложений, \`npm run shot\`, статусы карточки: файлы и статус оформит скрипт. Без секретов и личных данных. Пример:
+     \`\`\`
+     - Автобус больше не стоит на перекрёстке: остановку нельзя поставить ближе 20 м к узлу.
+     - Проверено тестом в stops.test.ts и на сцене /test/bus.
+     - Не проверено: кольцевые развязки.
+     \`\`\`
+   - \`screenshots\`: снимки из \`${out}/\`, подпись — 2–6 слов о том, что на снимке;
+   - \`saves\`: сохранения из \`${out}/\`, подпись — 2–6 слов о том, что в партии смотреть.
 `;
 }

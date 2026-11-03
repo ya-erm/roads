@@ -18,7 +18,9 @@ import { fileURLToPath } from 'node:url';
 import { Board, BoardError, MAX_FILE_BYTES, STATUS_NAMES, type Task, type TaskStatus } from './board';
 import { askClaude, runClaude, type ClaudeResult, type ClaudeSettings } from './claude';
 import {
+  errorComment,
   REPORT_SCHEMA,
+  reportComment,
   SYSTEM_PROMPT,
   TITLE_SCHEMA,
   taskPrompt,
@@ -113,8 +115,6 @@ interface Delivery {
   runId: string;
   outDir: string;
   report: AgentReport;
-  durationMs: number;
-  costUsd?: number;
 }
 
 function readState(): State {
@@ -283,14 +283,7 @@ async function work(brief: Task): Promise<void> {
     await failed(card.id, from, result.error ?? 'неизвестная ошибка', runId);
     return;
   }
-  state.pending[card.id] = {
-    taskId: card.id,
-    runId,
-    outDir,
-    report: result.output as AgentReport,
-    durationMs: result.durationMs,
-    costUsd: result.costUsd,
-  };
+  state.pending[card.id] = { taskId: card.id, runId, outDir, report: result.output as AgentReport };
   delete state.failures[card.id];
   saveState();
   await deliver(state.pending[card.id]);
@@ -329,8 +322,7 @@ async function runAgent(taskId: string, title: string, prompt: string, runDir: s
 async function failed(taskId: string, from: TaskStatus, error: string, runId: string): Promise<void> {
   const count = (state.failures[taskId]?.count ?? 0) + 1;
   if (count >= cfg.maxAttempts) {
-    const text = `**Не получилось выполнить задачу автоматически.**\n\nПопыток: ${count}. Последняя ошибка: ${error}`;
-    await postComment(taskId, redact(text), `${SOURCE}:${taskId}:error:${runId}`);
+    await postComment(taskId, redact(errorComment(error, count)), `${SOURCE}:${taskId}:error:${runId}`);
     await patch(taskId, (c) => (c.status === 'in_progress' ? { status: 'review' } : null));
     delete state.failures[taskId];
     log(`Задача → «${STATUS_NAMES.review}» с описанием ошибки.`);
@@ -363,22 +355,12 @@ async function deliver(d: Delivery): Promise<void> {
   const skipped: string[] = [];
   const shots = pickFiles(d.report.screenshots, d.outDir, IMAGE_EXT, skipped);
   const saves = pickFiles(d.report.saves, d.outDir, SAVE_EXT, skipped);
+  if (skipped.length) log(`Не приложено: ${skipped.join('; ')}`);
   const files = [...shots, ...saves];
   const uploaded = await board.upload(files.map((f) => ({ name: f.name, data: readFileSync(f.path) })));
-  const url = (i: number) => uploaded[i].url;
-
-  const parts: string[] = [];
-  if (d.report.outcome === 'needs_info') parts.push('**Нужны уточнения**');
-  if (d.report.outcome === 'failed') parts.push('**Не получилось сделать**');
-  parts.push(d.report.summary.trim());
-  if (shots.length) parts.push(shots.map((s, i) => `${s.caption}\n\n![Скриншот ${i + 1}](<${url(i)}>)`).join('\n\n'));
-  if (saves.length) {
-    const list = saves.map((s, i) => `- [${s.name}](<${url(shots.length + i)}>) — ${s.caption}`);
-    parts.push(['**Сохранение для проверки** (Меню → Сохранения → «Открыть из файла»):', ...list].join('\n'));
-  }
-  if (skipped.length) parts.push(`Не приложено: ${skipped.join('; ')}`);
-  parts.push(`_${cfg.actor} · ${minutes(d.durationMs)}${cost(d.costUsd)}_`);
-  await postComment(d.taskId, redact(parts.join('\n\n')), `${SOURCE}:${d.taskId}:result:${d.runId}`);
+  const posted = files.map((f, i) => ({ name: f.name, caption: f.caption, url: uploaded[i].url }));
+  const text = reportComment(d.report, posted.slice(0, shots.length), posted.slice(shots.length));
+  await postComment(d.taskId, redact(text), `${SOURCE}:${d.taskId}:result:${d.runId}`);
 
   const moved = await patch(d.taskId, (c) => (c.status === 'in_progress' ? { status: 'review' } : null)).catch((e) => {
     if (e instanceof BoardError && (e.status === 404 || e.status === 410)) return null;
