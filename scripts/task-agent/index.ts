@@ -8,8 +8,8 @@
  *
  * Задачи «Новая» и «Доработать» (сначала доработки) по одной переводятся в «В работе» и отдаются Claude Code
  * в этом репозитории. Его отчёт со скриншотами и файлом сохранения уходит комментарием, а задача —
- * в «Нужно проверить». Настройки — переменные окружения или .env (образец — .env.example),
- * подробности — docs/TASK_AGENT.md.
+ * в «Нужно проверить». Что монитор делает сейчас, видно на доске по значку агента.
+ * Настройки — переменные окружения или .env (образец — .env.example), подробности — docs/TASK_AGENT.md.
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
@@ -17,6 +17,7 @@ import { basename, extname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 import { Board, BoardError, MAX_FILE_BYTES, STATUS_NAMES, type Task, type TaskStatus } from './board';
 import { askClaude, runClaude, type ClaudeResult, type ClaudeSettings } from './claude';
+import { idleStatus, Presence } from './presence';
 import {
   errorComment,
   REPORT_SCHEMA,
@@ -108,6 +109,8 @@ interface State {
   active?: { taskId: string; from: TaskStatus };
   /** Готовые отчёты, которые ещё не удалось опубликовать (например, не было сети). */
   pending: Record<string, Delivery>;
+  /** Задачи, где агенту нужен ответ человека: задал вопросы или не справился. */
+  attention: string[];
 }
 
 interface Delivery {
@@ -118,7 +121,7 @@ interface Delivery {
 }
 
 function readState(): State {
-  const empty: State = { sessions: {}, failures: {}, pending: {} };
+  const empty: State = { sessions: {}, failures: {}, pending: {}, attention: [] };
   try {
     return { ...empty, ...(JSON.parse(readFileSync(join(cfg.stateDir, 'state.json'), 'utf8')) as Partial<State>) };
   } catch {
@@ -141,6 +144,7 @@ const only = args.includes('--task') ? args[args.indexOf('--task') + 1] : undefi
 const cfg = loadConfig();
 const board = new Board(cfg.base, cfg.board, cfg.token);
 const state = readState();
+const presence = new Presence(board, log);
 /** Прервать работу Claude сейчас. */
 const abort = new AbortController();
 /** Разбудить монитор из ожидания. */
@@ -169,15 +173,17 @@ process.on('SIGTERM', () => {
   wake();
 });
 
-void main().catch((e) => {
+void main().catch(async (e) => {
   log(`Ошибка: ${message(e)}`);
+  if (!dryRun) await presence.clear();
   process.exit(1);
 });
 
 async function main(): Promise<void> {
   log(`Доска «${cfg.board}» (${cfg.base}), исполнитель «${cfg.actor}»${dryRun ? ', без изменений' : ''}`);
   if (dryRun) {
-    const queue = await nextTasks();
+    // Статус агента не трогаем: тем же токеном может работать запущенный монитор.
+    const queue = queueOf(await board.tasks());
     log(queue.length ? `В очереди ${queue.length}:` : 'Очередь пуста.');
     for (const t of queue) log(`  ${STATUS_NAMES[t.status]} · ${t.title?.trim() || '(без названия)'} · ${t.id}`);
     return;
@@ -187,11 +193,14 @@ async function main(): Promise<void> {
     let worked = false;
     try {
       await deliverPending();
-      const [task] = await nextTasks();
+      const tasks = await board.tasks();
+      const [task] = queueOf(tasks);
       if (task) {
         busy = true;
         await work(task);
         worked = true;
+      } else {
+        await presence.set(idle(tasks));
       }
     } catch (e) {
       log(`Ошибка: ${message(e)}`);
@@ -201,18 +210,32 @@ async function main(): Promise<void> {
     if (stopping || (once && !worked)) break;
     if (!worked) await sleep(cfg.pollMs);
   }
+  await presence.clear();
   log('Монитор остановлен.');
 }
 
 /** Задачи, которые пора брать: сначала доработки, потом новые; внутри — старые раньше. */
-async function nextTasks(): Promise<Task[]> {
+function queueOf(tasks: Task[]): Task[] {
   const now = Date.now();
   const rank = (t: Task) => QUEUE.indexOf(t.status);
   const time = (t: Task) => Date.parse(t.createdAt ?? '') || 0;
-  return (await board.tasks())
+  return tasks
     .filter((t) => QUEUE.includes(t.status) && (!only || t.id === only))
     .filter((t) => (state.failures[t.id]?.retryAt ?? 0) <= now)
     .sort((a, b) => rank(a) - rank(b) || time(a) - time(b));
+}
+
+/** Статус свободного монитора; задачи, которые человек уже разобрал, больше не ждут его ответа. */
+function idle(tasks: Task[]): ReturnType<typeof idleStatus> {
+  const status = new Map(tasks.map((t) => [t.id, t.status]));
+  const waiting = state.attention.filter((id) => status.get(id) === 'review');
+  if (waiting.length !== state.attention.length) {
+    state.attention = waiting;
+    saveState();
+  }
+  const now = Date.now();
+  const retrying = Object.keys(state.failures).filter((id) => state.failures[id].retryAt > now);
+  return idleStatus(tasks, state.attention, retrying, QUEUE);
 }
 
 /** После прерванного запуска: готовый отчёт — опубликовать, незаконченную задачу — вернуть в очередь. */
@@ -242,7 +265,9 @@ async function work(brief: Task): Promise<void> {
     return;
   }
   state.active = { taskId: card.id, from };
+  state.attention = state.attention.filter((id) => id !== card.id);
   saveState();
+  await presence.set({ status: 'working', taskId: card.id });
   log(`▶ «${title}»: ${STATUS_NAMES[from]} → ${STATUS_NAMES.in_progress}`);
 
   const runId = new Date().toISOString().replace(/[:.]/g, '-');
@@ -323,7 +348,8 @@ async function failed(taskId: string, from: TaskStatus, error: string, runId: st
   const count = (state.failures[taskId]?.count ?? 0) + 1;
   if (count >= cfg.maxAttempts) {
     await postComment(taskId, redact(errorComment(error, count)), `${SOURCE}:${taskId}:error:${runId}`);
-    await patch(taskId, (c) => (c.status === 'in_progress' ? { status: 'review' } : null));
+    const moved = await patch(taskId, (c) => (c.status === 'in_progress' ? { status: 'review' } : null));
+    if (moved) state.attention.push(taskId);
     delete state.failures[taskId];
     log(`Задача → «${STATUS_NAMES.review}» с описанием ошибки.`);
   } else {
@@ -368,6 +394,8 @@ async function deliver(d: Delivery): Promise<void> {
   });
   delete state.pending[d.taskId];
   if (state.active?.taskId === d.taskId) state.active = undefined;
+  // Вопросы или «не сделано» — агент ждёт ответа человека, пока задача в «Нужно проверить».
+  if (moved && d.report.outcome !== 'done') state.attention.push(d.taskId);
   saveState();
   log(
     moved

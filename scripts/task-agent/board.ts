@@ -39,6 +39,18 @@ export interface Task {
   updatedAt?: string;
 }
 
+/**
+ * Статус агента на доске (значок у имени токена): monitoring — следит за доской, working — работает над задачей,
+ * waiting — ждёт, blocked — нужна помощь.
+ */
+export type AgentState = 'monitoring' | 'working' | 'waiting' | 'blocked';
+
+export interface AgentStatus {
+  status: AgentState;
+  /** У working обязательна, у monitoring не бывает. */
+  taskId?: string;
+}
+
 export interface BoardDocument {
   text: string;
   hash: string;
@@ -108,6 +120,16 @@ export class Board {
   /** Записывает текст документа; 409 — текст успел измениться после чтения с этим hash. */
   async writeDocument(documentId: string, text: string, expectedHash: string): Promise<BoardDocument> {
     return this.request('PUT', `/documents/${encodeURIComponent(documentId)}`, { text, expectedHash });
+  }
+
+  /** Ставит или подтверждает свой статус; живёт 5 минут. Карточку это не меняет. */
+  async setAgentStatus(s: AgentStatus): Promise<void> {
+    await this.request('PUT', '/agent-status', s.taskId ? { status: s.status, taskId: s.taskId } : { status: s.status });
+  }
+
+  /** Убирает свой значок с доски (до следующего чтения списка задач). */
+  async clearAgentStatus(): Promise<void> {
+    await this.request('DELETE', '/agent-status');
   }
 
   /** Файл с сервиса досок (картинки и файлы из описаний). Чужие адреса не скачиваем. */
