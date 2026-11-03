@@ -131,6 +131,18 @@ function topOf(fp: Footprint): number {
   return fp.center.y - (Math.abs(Math.sin(fp.angle)) * fp.w + Math.abs(Math.cos(fp.angle)) * fp.h) / 2;
 }
 
+/** Нижний край здания на карте. */
+function bottomOf(fp: Footprint): number {
+  return 2 * fp.center.y - topOf(fp);
+}
+
+/** Остановка, к которой дорога подходит сверху: её название и плашку — под ней, иначе закроют автобус на посадке. */
+function labelsBelow(game: Game, st: Station): boolean {
+  if (st.kind !== 'stop') return false;
+  const node = game.roads.net.nodes.get(st.nodeId);
+  return !!node && node.pos.y < st.fp.center.y;
+}
+
 /** Метка транспорта выбранной линии: кружок и значок. */
 interface LineMark {
   pos: Vec;
@@ -1307,8 +1319,8 @@ export class Renderer {
       const widths = waiting.length ? waiting.map(([, n], i) => (i ? 0 : lead) + 22 / z + ctx.measureText(String(n)).width + 6 / z) : [18 / z];
       const total = widths.reduce((a, b) => a + b, 0) + (widths.length - 1) * (4 / z);
       let x = fp.center.x - total / 2;
-      // Над зданием; название станции — ещё выше (drawLabels).
-      const y = topOf(fp) - BADGE_RISE / z;
+      // Над зданием; название станции — ещё выше (drawLabels). Дорога сверху — под зданием, под названием.
+      const y = labelsBelow(game, st) ? bottomOf(fp) + NAME_RISE / z : topOf(fp) - BADGE_RISE / z;
       widths.forEach((w, i) => {
         ctx.fillStyle = 'rgba(255,255,255,0.95)';
         ctx.strokeStyle = 'rgba(60,70,80,0.25)';
@@ -1395,7 +1407,9 @@ export class Renderer {
         // Сверху вниз: название, плашка ожидающих, станция. Место плашки держим и пустым,
         // чтобы название не прыгало, когда груз забрали; плашек ещё не видно — название на её месте.
         const rise = st.kind === 'stop' || z >= STATION_BADGES_ZOOM ? NAME_RISE : BADGE_RISE;
-        text({ x: st.fp.center.x, y: topOf(st.fp) - rise / z }, st.name, 11, '#ffffff', 'rgba(35,45,60,0.82)');
+        // Дорога сверху — столбик под остановкой: сначала название, под ним плашка.
+        const y = labelsBelow(game, st) ? bottomOf(st.fp) + BADGE_RISE / z : topOf(st.fp) - rise / z;
+        text({ x: st.fp.center.x, y }, st.name, 11, '#ffffff', 'rgba(35,45,60,0.82)');
       }
     }
   }
