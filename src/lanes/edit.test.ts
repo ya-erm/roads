@@ -381,6 +381,41 @@ describe('Полосы: инструменты', () => {
     expect(lane(r.short)).toBe(-1);
   });
 
+  it('конец куска полосы дотянули до другого куска той же полосы — один кусок, а не два внахлёст', () => {
+    // Как у игрока: на магистрали два куска третьей полосы — у начала и коротенький у стыка, за которым она идёт дальше.
+    const build = () => {
+      const net = new LaneNet();
+      const [w, s, e] = [0, 300, 370].map((x) => net.addSeam({ x, y: 0 }, { x: 1, y: 0 }));
+      const extra = { offset: 10.5, flow: 1 as const };
+      const c = net.addCorridor(w.id, s.id, { cls: 'highway', lanes: [...twoWay(1, 1), { ...extra, from: 0, to: 60 }, { ...extra, from: 297, to: Infinity }] });
+      net.addCorridor(s.id, e.id, { cls: 'highway', lanes: [...twoWay(1, 1), { ...extra, from: 0, to: Infinity }] });
+      expect(net.problems()).toEqual([]);
+      return { net, c };
+    };
+    const extra = (c: { lanes: { offset: number; from: number; to: number }[] }) => c.lanes.filter((l) => l.offset > 7);
+    // Кружок на отгоне после первого куска — тянем к стыку: полоса сплошная до стыка и дальше.
+    let { net, c } = build();
+    expect(drawLane(net, [{ x: 95, y: 10.5 }, { x: 200, y: 10.5 }, { x: 290, y: 10.5 }])).toBe(true);
+    expect(net.problems()).toEqual([]);
+    expect(extra(c)).toEqual([expect.objectContaining({ from: 0, to: c.length })]);
+    // Начало второго куска — назад, к первому: тоже один кусок.
+    ({ net, c } = build());
+    expect(drawLane(net, [{ x: 262, y: 10.5 }, { x: 200, y: 10.5 }, { x: 150, y: 10.5 }])).toBe(true);
+    expect(net.problems()).toEqual([]);
+    expect(extra(c)).toEqual([expect.objectContaining({ from: 0, to: c.length })]);
+    // Как в игре: с конца куска — дальше вдоль края (по точкам или протяжкой), до стыка.
+    ({ net, c } = build());
+    const tip = laneTipAt(net, { x: 95, y: 10.5 }, 14);
+    expect(tip).toMatchObject({ kind: 'edge', s: 60 });
+    laneStep(net, tip, { x: 290, y: 10.5 }, 'highway', 14);
+    expect(net.problems()).toEqual([]);
+    expect(extra(c)).toEqual([expect.objectContaining({ from: 0, to: c.length })]);
+    // Чуть длиннее, но до другого куска далеко — кусков по-прежнему два.
+    ({ net, c } = build());
+    expect(drawLane(net, [{ x: 95, y: 10.5 }, { x: 120, y: 10.5 }])).toBe(true);
+    expect(extra(c)).toHaveLength(2);
+  });
+
   it('по точкам: из поля к краю дороги — въезд с полосой разгона, её можно тянуть дальше', () => {
     const net = road();
     const east = deadEnds(net).find((n) => n.pos.x > 700)!;

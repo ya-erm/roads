@@ -609,7 +609,8 @@ function taperThrough(net: LaneNet, host: Corridor, end: End, offset: number, fl
 
 /**
  * Конец пристроенной полосы сдвигается на delta вдоль оси: полоса длиннее или короче. Дотянули до стыка,
- * за которым она продолжается, — стыкуется без отгона. false — так не сдвинуть (короче 5 м, не сдвинули).
+ * за которым она продолжается, — стыкуется без отгона; до другого куска той же полосы на этом полотне
+ * (внахлёст или отгоны сошлись) — сливается с ним в один. false — так не сдвинуть (короче 5 м, не сдвинули).
  */
 function moveLaneEnd(net: LaneNet, c: Corridor, grab: NonNullable<LaneDraft['grab']>, delta: number): boolean {
   const l = c.lanes[grab.lane];
@@ -625,7 +626,7 @@ function moveLaneEnd(net: LaneNet, c: Corridor, grab: NonNullable<LaneDraft['gra
     if (to > c.length - T - 15 && joinAcross(net, c, { ...l, to: c.length }, 'b')) to = Infinity;
     next = { ...l, to };
   }
-  net.setLanes(c, c.lanes.map((x, i) => (i === grab.lane ? next : x)));
+  mergeLane(net, c, next, grab.lane);
   return true;
 }
 
@@ -642,14 +643,30 @@ function placeLane(net: LaneNet, c: Corridor, lane: LaneSlot): void {
   mergeLane(net, c, l);
 }
 
-/** Полоса на полотно; рядом с такой же (то же смещение и направление, внахлёст или впритык) — одна, подлиннее. */
-function mergeLane(net: LaneNet, c: Corridor, l: LaneSlot): void {
+/**
+ * Полоса на полотно; рядом с такой же (то же смещение и направление, внахлёст или впритык) — одна, подлиннее.
+ * Дотянулась до нескольких кусков той же полосы (между ними был разрыв) — все они сливаются в один.
+ * skip — номер этой же полосы на полотне (её конец сдвинули): она встаёт на своё место уже как l.
+ */
+function mergeLane(net: LaneNet, c: Corridor, l: LaneSlot, skip = -1): void {
   const T = taperLen(c.cls);
-  const lanes = [...c.lanes];
-  const i = lanes.findIndex((o) => Math.abs(o.offset - l.offset) < 0.5 && o.flow === l.flow && o.from <= l.to + 2 * T && l.from <= o.to + 2 * T);
-  if (i >= 0) lanes[i] = { ...lanes[i], from: Math.min(lanes[i].from, l.from), to: Math.max(lanes[i].to, l.to) };
-  else lanes.push(l);
-  net.setLanes(c, lanes);
+  let span = { from: l.from, to: l.to };
+  const joined: number[] = [];
+  for (let grew = true; grew; ) {
+    grew = false;
+    c.lanes.forEach((o, i) => {
+      if (i === skip || joined.includes(i) || Math.abs(o.offset - l.offset) >= 0.5 || o.flow !== l.flow) return;
+      if (o.from > span.to + 2 * T || span.from > o.to + 2 * T) return;
+      span = { from: Math.min(span.from, o.from), to: Math.max(span.to, o.to) };
+      joined.push(i);
+      grew = true;
+    });
+  }
+  // Слитая полоса — на месте первого куска (номера прочих полос зря не сдвигаются).
+  const keep = skip >= 0 ? skip : joined.length ? Math.min(...joined) : -1;
+  const lane = { ...(keep >= 0 && keep !== skip ? c.lanes[keep] : l), ...span };
+  const lanes = c.lanes.flatMap((o, i) => (i === keep ? [lane] : joined.includes(i) ? [] : [o]));
+  net.setLanes(c, keep >= 0 ? lanes : [...lanes, lane]);
 }
 
 /**
