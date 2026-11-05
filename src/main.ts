@@ -1,7 +1,7 @@
 import './style.css';
 import { Game, SAVE_VERSION, type SaveData } from './game/game';
 import { journalFile } from './game/journal';
-import { clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readSave, saveGame, writeSave } from './game/persist';
+import { backupGame, clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readSave, saveGame, writeSave } from './game/persist';
 import { Controller } from './input/controller';
 import { rememberTools } from './input/toolPrefs';
 import { Camera } from './render/camera';
@@ -53,10 +53,11 @@ game.speed = saved || scene ? 1 : 0;
 const camera = new Camera();
 const renderer = new Renderer(canvas, camera);
 const controller = new Controller(canvas, camera, () => game);
+const hasProgress = () => game.time > 0 || game.lines.size > 0 || game.net.version > 1 || game.canUndo;
 const hud = new Hud(hudRoot, controller, () => game, {
-  hasProgress: () => game.time > 0 || game.lines.size > 0 || game.net.version > 1 || game.canUndo,
+  hasProgress,
   save: () => persist(true),
-  newGame: (settings) => newGame(settings),
+  newGame: (settings, force) => newGame(settings, force),
   linked: () => linkedSave(),
   list: () => listSaves(),
   saveAs: (name, id) => saveNamed(name, id),
@@ -191,13 +192,26 @@ function initialView(): void {
   camera.touched = false;
 }
 
-function newGame(settings: WorldSettings): void {
+/**
+ * Новая партия вместо текущей — сразу, без вопросов: текущая, если в ней что-то сделано, сначала уходит
+ * в сохранения (резервной копией или поверх своего сохранения). Не сохранилась — новая не начинается
+ * и возвращается false; force — начать и так.
+ */
+async function newGame(settings: WorldSettings, force = false): Promise<boolean> {
+  if (hasProgress() && !scene) {
+    const kept = await backupGame(game, linkedSave(), camera).catch(() => null);
+    if (!kept && !force) {
+      game.notify('Не удалось сохранить текущую партию: мало места в браузере', '#e5534b');
+      return false;
+    }
+  }
   clearSave();
   linkSave(null);
   game = new Game(settings);
   game.speed = 0;
   restart();
   persist();
+  return true;
 }
 
 window.addEventListener('resize', () => {
@@ -214,7 +228,8 @@ if (saved?.view) {
 hookAutosave();
 if (!saved && !scene) {
   persist();
-  hud.showWelcome();
+  // Первый запуск: стартовый экран, «Начать» на нём открывает «Новую игру» (сценарий — по умолчанию).
+  hud.showWelcome(true);
 }
 // Сохраняемся, когда вкладку прячут или закрывают.
 document.addEventListener('visibilitychange', () => {

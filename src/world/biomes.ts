@@ -71,8 +71,9 @@ const classic: Partial<Record<IndustryKind, number>> = Object.fromEntries([...LE
 export const BIOMES: Record<BiomeId, BiomeInfo> = {
   temperate: {
     id: 'temperate',
-    name: 'Средняя полоса',
-    pitch: 'Луга, смешанный лес и реки. Все классические цепочки, а ещё лён и глина.',
+    // Внутренний id прежний — temperate: по нему открываются сохранения.
+    name: 'Луга',
+    pitch: 'Поля, смешанный лес и реки. Все классические цепочки, а ещё лён и глина.',
     industries: { ...classic, flaxfarm: 0.7, claypit: 1, linenmill: 1, brickworks: 1 },
     towns: BASE_TOWN_CARGO,
     extra: ['glass', 'furniture', 'textiles'],

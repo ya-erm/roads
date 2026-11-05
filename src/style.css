@@ -5113,9 +5113,9 @@ span.ind-chip {
   text-align: center;
 }
 
-/* Биомы: «по seed» и пять пейзажей в ряд; под ними — сырьё и потребности городов значками. */
+/* Биомы: пять пейзажей в ряд; под ними — «Ресурсы»: сырьё и потребности городов значками. */
 .cards.ng-biomes {
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(5, 1fr);
 }
 
 .ng-biome-strip {
@@ -5127,6 +5127,11 @@ span.ind-chip {
   font-size: 12.5px;
 }
 
+.ng-res-label {
+  font-weight: 700;
+  color: var(--muted);
+}
+
 .ng-biome-part {
   display: inline-flex;
   align-items: center;
@@ -5136,8 +5141,21 @@ span.ind-chip {
   background: #f4f6f8;
 }
 
+/* Значок группы (⛏ — сырьё, домик — что просят города): своя подсказка, как у значков грузов рядом. */
+.ng-part-ic {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 2px;
+}
+
 .ng-cargo {
   display: inline-flex;
+}
+
+/* Кнопки окна «Новая игра» — справа: «Отмена», за ней главная. */
+.actions.ng-actions {
+  justify-content: flex-end;
+  margin-top: 18px;
 }
 
 .ng-record {

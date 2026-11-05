@@ -84,6 +84,47 @@ export interface SaveEntry {
   /** «Мар 1963 · $1 200 000 · 6 городов». */
   summary: string;
   version: number;
+  /** Резервная копия: партия, которую сменила новая игра (см. backupGame). */
+  backup?: boolean;
+}
+
+/** Сколько резервных копий держать в списке сохранений: старые удаляются. */
+export const BACKUP_LIMIT = 3;
+
+/** Имя сохранения по умолчанию: крупнейший город и дата — «Сосновка · Мар 1963». */
+export function defaultSaveName(game: Game): string {
+  const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
+  return `${town?.name ?? 'Партия'} · ${game.dateLabel}`;
+}
+
+/** Резервные копии сверх предела — самые старые; их удаляют после записи новой. */
+export function staleBackups(entries: SaveEntry[], limit = BACKUP_LIMIT): string[] {
+  return entries
+    .filter((e) => e.backup)
+    .sort((a, b) => b.savedAt - a.savedAt)
+    .slice(limit)
+    .map((e) => e.id);
+}
+
+/** Где лежат сохранения со своими именами: IndexedDB, в тестах — подмена в памяти. */
+export interface SaveStore {
+  list(): Promise<SaveEntry[]>;
+  write(game: Game, name: string, camera?: Camera, id?: string, backup?: boolean): Promise<SaveEntry>;
+  remove(id: string): Promise<void>;
+}
+
+/**
+ * Перед новой игрой текущая партия сама уходит в сохранения — ничего не спрашиваем. Партия из сохранения
+ * пишется поверх него (как перед загрузкой другого), иначе — новой резервной копией «Резервная копия · Город · дата»;
+ * копий держим BACKUP_LIMIT последних. Возвращает запись, куда сохранили.
+ */
+export async function backupGame(game: Game, linked: string | null, camera?: Camera, store: SaveStore = savesDb): Promise<SaveEntry> {
+  const entries = await store.list();
+  const own = linked ? entries.find((e) => e.id === linked) : undefined;
+  if (own) return store.write(game, own.name, camera, own.id, own.backup);
+  const entry = await store.write(game, `Резервная копия · ${defaultSaveName(game)}`, camera, undefined, true);
+  for (const id of staleBackups([...entries, entry])) await store.remove(id);
+  return entry;
 }
 
 const DB_NAME = slot ? `razvyazka:${slot}` : 'razvyazka';
@@ -128,8 +169,8 @@ export async function listSaves(): Promise<SaveEntry[]> {
   return all.sort((a, b) => b.savedAt - a.savedAt);
 }
 
-/** Пишет партию под именем name (id — перезаписать это сохранение). */
-export async function writeSave(game: Game, name: string, camera?: Camera, id?: string): Promise<SaveEntry> {
+/** Пишет партию под именем name (id — перезаписать это сохранение; backup — это резервная копия). */
+export async function writeSave(game: Game, name: string, camera?: Camera, id?: string, backup?: boolean): Promise<SaveEntry> {
   const data = game.toSave();
   if (camera) data.view = { x: camera.x, y: camera.y, zoom: camera.zoom };
   const money = `$${Math.round(game.money).toLocaleString('ru-RU')}`;
@@ -139,6 +180,7 @@ export async function writeSave(game: Game, name: string, camera?: Camera, id?: 
     savedAt: Date.now(),
     summary: `${game.dateLabel} · ${money} · ${game.towns.length} городов`,
     version: SAVE_VERSION,
+    ...(backup ? { backup: true } : {}),
   };
   const db = await openDb();
   const tx = db.transaction([META, DATA], 'readwrite');
@@ -165,6 +207,9 @@ export async function deleteSave(id: string): Promise<void> {
   db.close();
   if (linkedSave() === id) linkSave(null);
 }
+
+/** Сохранения со своими именами в IndexedDB. */
+const savesDb: SaveStore = { list: listSaves, write: writeSave, remove: deleteSave };
 
 /** Сохранение, которому принадлежит текущая партия. */
 export function linkedSave(): string | null {

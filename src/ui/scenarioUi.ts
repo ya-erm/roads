@@ -6,7 +6,7 @@
 import { ECONOMY, MONTH_LENGTH } from '../config';
 import type { Game } from '../game/game';
 import { isIndustry, resolve } from '../scenario/analysis';
-import { ARCHETYPE_LIST, ARCHETYPES, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, MEDALS, PHASES, REPUTATION } from '../scenario/content';
+import { ARCHETYPE_LIST, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, MEDALS, PHASES, REPUTATION } from '../scenario/content';
 import { isActive } from '../scenario/events';
 import { fastBonus, type Scenario } from '../scenario/manager';
 import { closedNeeds, failText, fraction, isMonthly, monthValue, progressText, rewardText, supplyNeeds } from '../scenario/objectives';
@@ -38,6 +38,7 @@ import {
   scenarioModeSvg,
   stopwatchSvg,
 } from './scenarioIcons';
+import { randomCardHtml } from './newGame';
 import { timelapseItemHtml } from './timelapseButton';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
@@ -680,16 +681,16 @@ export function scenarioOptionsHtml(sc: ScenarioSettings): string {
   const bonus = Math.round((CHALLENGE_BONUS - 1) * 100);
   const challenge = `<button class="switch-row ng-challenge" data-action="ng-challenge" title="Время не останавливается: пауза — только в меню. Оценка ×${CHALLENGE_BONUS}">
     <span class="sw-label">${stopwatchSvg(22)}<span>Испытание: без паузы <small>+${bonus}% к оценке</small></span></span><span class="switch ${sc.challenge ? 'on' : ''}"><i></i></span></button>`;
+  // Какой регион выпал по seed, не пишем; описание выбранного — в подсказке карточки, как у биомов.
   const regions = [
-    `<button class="card region ${sc.pick ? '' : 'active'}" data-action="ng-pick" data-id="seed" title="Регион выберется по seed — тот же seed даст тот же регион">${diceMapSvg()}<span class="name">По seed</span></button>`,
+    randomCardHtml('ng-pick', !sc.pick, 'Случайный регион: его выберет seed — с тем же seed выпадет тот же'),
     ...ARCHETYPE_LIST.map(
-      (a) => `<button class="card region ${sc.pick === a.id ? 'active' : ''}" data-action="ng-pick" data-id="${a.id}" title="${esc(a.pitch)}">${archetypeSvg(a.id)}<span class="name">${esc(a.name)}</span></button>`,
+      (a) => `<button class="card region ${sc.pick === a.id ? 'active' : ''}" data-action="ng-pick" data-id="${a.id}" data-tip="${esc(a.pitch)}">${archetypeSvg(a.id)}<span class="name">${esc(a.name)}</span></button>`,
     ),
   ].join('');
-  const pitch = sc.pick ? ARCHETYPES[sc.pick].pitch : 'Один из пяти регионов — по seed.';
   return `<div class="ng-row"><span class="ng-label">Сложность</span><div class="cards">${diffs}</div></div>
     <div class="ng-row"><span class="ng-label"></span>${challenge}</div>
-    <div class="ng-row top"><span class="ng-label">Регион</span><div class="ng-region"><div class="cards ng-regions">${regions}</div><p class="muted">${esc(pitch)}</p></div></div>`;
+    <div class="ng-row top"><span class="ng-label">Регион</span><div class="ng-region"><div class="cards ng-regions">${regions}</div></div></div>`;
 }
 
 /** Личный рекорд для выбранных seed, сложности, испытания и региона; нет — пусто. */

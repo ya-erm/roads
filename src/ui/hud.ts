@@ -2,7 +2,7 @@ import { dist } from '../core/vec';
 import type { RingSize } from '../game/roads';
 import { platformCars, railStationFee, SAVE_VERSION, type Game, type Ledger, type Partner, type TurnKind } from '../game/game';
 import { TEMPLATES } from '../game/interchange';
-import type { SaveEntry } from '../game/persist';
+import { defaultSaveName, type SaveEntry } from '../game/persist';
 import { addTemplates, fragmentToFile, getTemplate, hasRail, listTemplates, parseTemplateFile, templateFileName, templatesToFile } from '../game/templates';
 import {
   AUTO_FLEET,
@@ -44,7 +44,6 @@ import type { Scenario } from '../scenario/manager';
 import { getBest, saveBest, slotOf } from '../scenario/records';
 import type { ScenarioSettings } from '../scenario/types';
 import { cargoIcon, townIcon } from './cargoIcons';
-import { scenarioModeSvg } from './scenarioIcons';
 import { fleetBar, fleetBarRoom } from './fleetBar';
 import { type LineBack, lineBackFrom, lineCloseTarget } from './lineBack';
 import { lineMoneyHtml } from './lineMoney';
@@ -130,16 +129,19 @@ import { adviceOf, type Advice, type AdviceFix } from '../game/advisor';
 import { stationWarnings } from '../game/stationWarnings';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
-import { BIOME_LIST, BIOMES, BiomeId, biomeForSeed, biomeRaw, cargoOnMap } from '../world/biomes';
-import { INDUSTRY_LIST } from '../world/cargo';
-import { diceMapSvg } from './scenarioIcons';
+import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
+import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
 
 /** Управление партией: сохранение и новая игра. */
 export interface HudSession {
   hasProgress(): boolean;
   /** Автосохранение текущей партии. */
   save(): void;
-  newGame(settings: WorldSettings): void;
+  /**
+   * Новая партия вместо текущей; текущая сначала сама уходит в сохранения. Не сохранилась — false и новая
+   * не начата; force — начать и так.
+   */
+  newGame(settings: WorldSettings, force?: boolean): Promise<boolean>;
   /** Сохранение со своим именем, которому принадлежит текущая партия. */
   linked(): string | null;
   list(): Promise<SaveEntry[]>;
@@ -397,14 +399,16 @@ export class Hud {
   private renamingStation: number | null = null;
   /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
   private dragLine: number | null = null;
-  /** Черновик параметров нового мира. */
-  private draft: WorldSettings = { ...DEFAULT_SETTINGS, relief: 'hills' };
-  /** Биом новой игры: выбранный игроком или null — «по seed» (решится при создании мира). */
-  private biomePick: BiomeId | null = null;
+  /** Черновик параметров нового мира; биом в нём — по seed или выбранный игроком (см. withSeed). */
+  private draft: WorldSettings = withSeed({ ...DEFAULT_SETTINGS, relief: 'hills' }, DEFAULT_SETTINGS.seed);
   /** Последний выбор сценария на экране новой игры: возвращается, когда снова выбирают «Сценарий». */
   private scenarioOptions: ScenarioSettings = { difficulty: 'normal', challenge: false };
   /** Откуда открыли «Новую игру»: «Отмена» и Esc возвращают туда. */
-  private newGameFrom: 'menu' | 'start' = 'menu';
+  private newGameFrom: NewGameFrom = 'menu';
+  /** Окно правил — стартовый экран первого запуска: «Начать» открывает «Новую игру», а не запускает время. */
+  private intro = false;
+  /** Новая игра уже создаётся (текущая партия сохраняется): повторные нажатия не в счёт. */
+  private starting = false;
   /** Панель сценария свёрнута до заголовка (запоминается в браузере). */
   private scenarioCollapsed = localStorage.getItem('roads.scenarioCollapsed') === '1';
   /** Задания, у которых в панели раскрыто «почему». */
@@ -549,7 +553,8 @@ export class Hud {
       }
       if (input.dataset.ngSeed === undefined) return;
       const v = Math.abs(Math.floor(Number(input.value.replace(/\D/g, '')))) || 1;
-      this.draft = { ...this.draft, seed: v };
+      // Другой seed — и биом тот, что даёт он (как у кубика).
+      if (v !== this.draft.seed) this.draft = withSeed(this.draft, v);
       this.renderNewGame();
     });
     window.addEventListener('keydown', (e) => {
@@ -809,12 +814,9 @@ export class Hud {
         this.hideScreens();
         c.setSpeed(1);
         break;
-      case 'play-scenario':
-        // Из окна правил песочницы — сразу «Новая игра» в режиме сценария.
-        this.draft = { ...this.draftFrom(g.settings), scenario: { ...this.scenarioOptions } };
-        this.newGameFrom = 'start';
-        this.showScreen('newgame');
-        this.renderNewGame();
+      case 'ng-intro':
+        // «Начать» на стартовом экране — «Новая игра», где уже выбран сценарий.
+        this.openNewGame('start');
         break;
       case 'menu':
         this.speedBeforeMenu = g.speed || 1;
@@ -898,10 +900,7 @@ export class Hud {
         void this.session.remove(d.id!).then(() => this.renderSaves());
         break;
       case 'new-game':
-        this.draft = this.draftFrom(g.settings);
-        this.newGameFrom = 'menu';
-        this.showScreen('newgame');
-        this.renderNewGame();
+        this.openNewGame('menu');
         break;
       case 'ng-cancel':
         this.closeNewGame();
@@ -934,27 +933,24 @@ export class Hud {
         this.renderNewGame();
         break;
       case 'ng-seed':
-        this.draft = { ...this.draft, seed: Math.floor(Math.random() * 1e9) };
+        // Кубик: новый seed — и биом, который он даёт, даже если до этого биом выбирали сами.
+        this.draft = withSeed(this.draft, Math.floor(Math.random() * 1e9));
         this.renderNewGame();
         break;
-      case 'ng-biome':
-        this.biomePick = BIOME_LIST.find((b) => b.id === d.id)?.id ?? null;
+      case 'ng-biome': {
+        const biome = BIOME_LIST.find((b) => b.id === d.id)?.id;
+        if (biome) this.draft = { ...this.draft, biome };
         this.renderNewGame();
-        break;
-      case 'ng-create': {
-        // Есть прогресс — просим подтвердить вторым нажатием.
-        if (this.session.hasProgress() && !this.confirmNew) {
-          this.confirmNew = true;
-          this.renderNewGame();
-          break;
-        }
-        this.confirmNew = false;
-        // Биом «по seed» решается сейчас и пишется в настройки: сохранение откроется в том же биоме.
-        const biome = this.biomePick ?? biomeForSeed(this.draft.seed);
-        this.session.newGame({ ...this.draft, biome, biomeBySeed: this.biomePick ? undefined : true });
-        this.showWelcome();
         break;
       }
+      case 'ng-create':
+        // Новая игра — сразу: текущая партия сама уходит в сохранения. Не сохранилась — кнопка спросит,
+        // начинать ли без неё (confirmNew), и второе нажатие начнёт.
+        this.startNewGame(this.draft, this.confirmNew, () => {
+          this.confirmNew = true;
+          this.renderNewGame();
+        });
+        break;
       case 'tool':
         c.setTool(d.id as Tool);
         break;
@@ -1043,19 +1039,14 @@ export class Hud {
         break;
       case 'sc-replay':
         // Настройки уже с решённым архетипом и профилем: та же карта и тот же сценарий.
-        this.session.newGame(g.settings);
-        this.showWelcome();
+        this.startNewGame(g.settings);
         break;
       case 'sc-new': {
+        // Другой регион — и биом по новому seed, как в окне «Новая игра» (без биома был бы мир старых версий).
         const s = g.settings;
-        this.session.newGame({
-          ...DEFAULT_SETTINGS,
-          size: s.size,
-          water: s.water,
-          seed: Math.floor(Math.random() * 1e9),
-          scenario: { difficulty: s.scenario?.difficulty ?? 'normal', challenge: !!s.scenario?.challenge },
-        });
-        this.showWelcome();
+        const scenario = { difficulty: s.scenario?.difficulty ?? 'normal', challenge: !!s.scenario?.challenge };
+        const next = { ...DEFAULT_SETTINGS, size: s.size, water: s.water, scenario };
+        this.startNewGame(withSeed(next, Math.floor(Math.random() * 1e9)));
         break;
       }
       case 'town-streets': {
@@ -2998,8 +2989,39 @@ export class Hud {
     else this.showMenu();
   }
 
-  /** Окно перед стартом только что созданного мира: в песочнице — правила, в сценарии — брифинг. */
-  showWelcome(): void {
+  /** Открывает «Новую игру»: со стартового экрана — сразу сценарий, из меню — режим текущей партии. */
+  private openNewGame(from: NewGameFrom): void {
+    const d = newGameDraft(this.game().settings, from, this.scenarioOptions, Math.floor(Math.random() * 1e9));
+    this.draft = d.settings;
+    this.scenarioOptions = d.scenario;
+    this.newGameFrom = from;
+    this.confirmNew = false;
+    this.showScreen('newgame');
+    this.renderNewGame();
+  }
+
+  /**
+   * Начинает новую партию в один клик: текущая сначала сама уходит в сохранения. Не сохранилась — onFail
+   * (окно «Новой игры» спросит, начинать ли без неё); force — начать и так.
+   */
+  private startNewGame(settings: WorldSettings, force = false, onFail?: () => void): void {
+    if (this.starting) return;
+    this.starting = true;
+    void this.session
+      .newGame(settings, force)
+      .then((ok) => {
+        if (ok) this.showWelcome();
+        else onFail?.();
+      })
+      .finally(() => (this.starting = false));
+  }
+
+  /**
+   * Окно перед стартом только что созданного мира: в песочнице — правила, в сценарии — брифинг.
+   * intro — стартовый экран первого запуска: «Начать» в правилах открывает «Новую игру».
+   */
+  showWelcome(intro = false): void {
+    this.intro = intro;
     this.controller.setSpeed(0, true);
     this.renderStart();
     this.showScreen('start');
@@ -3012,29 +3034,9 @@ export class Hud {
     // Брифинг прокручивается внутри окна: после «Принять» в открытом окне стартовый контракт остаётся на месте.
     const open = !this.q('[data-start]').classList.contains('hidden');
     const scroll = open ? (body.querySelector('[data-brief-scroll]')?.scrollTop ?? 0) : 0;
-    body.innerHTML = g.scenario ? briefHtml(g) : this.rulesHtml();
+    body.innerHTML = g.scenario ? briefHtml(g) : rulesHtml(this.intro);
     const el = body.querySelector('[data-brief-scroll]');
     if (el) el.scrollTop = scroll;
-  }
-
-  /** Правила песочницы и приглашение сыграть сценарий. */
-  private rulesHtml(): string {
-    return `<h1>Дороги региона</h1>
-      <p class="sub">Транспортная компания: дороги, грузы, пассажиры и пробки.</p>
-      <ul>
-        <li>Ставьте <b>станции</b> у дорог в городах или вплотную к <b>предприятию</b> — с любой его стороны.</li>
-        <li>Соедините станции <b>маршрутом</b> и купите на него грузовики или автобусы.</li>
-        <li>Для дальних перевозок проложите <b>ж/д путь</b>, поставьте <b>ж/д станции</b> и пустите поезда.</li>
-        <li>Сырьё везите на заводы, готовую продукцию — в города. Что кому нужно, видно по значкам и в панели <b>«Цепочки»</b>.</li>
-        <li>Выберите предприятие или город — пунктиром покажутся ближайшие партнёры.</li>
-        <li>Обеспеченные города растут, а жители ездят по вашим дорогам и создают пробки.</li>
-      </ul>
-      <div class="actions"><button class="primary" data-action="begin">Начать</button>
-        <button class="secondary with-ic" data-action="play-scenario" title="Регион со своей историей: задания по этапам, события экономики, контракты и медаль в конце">${scenarioModeSvg(
-          38,
-          25,
-        )}Сыграть сценарий</button></div>
-      <p class="muted save-note">Прогресс сохраняется сам: каждый игровой месяц и при закрытии вкладки.</p>`;
   }
 
   /** Итоговый экран сценария: игра на паузе, результат записывается в рекорды один раз за партию. */
@@ -3072,18 +3074,6 @@ export class Hud {
     this.hideScreens();
     this.controller.setSpeed(this.speedBeforeResults);
     this.lastScenario = '';
-  }
-
-  /** Черновик новой игры по текущей: новый seed; у сценария — только выбор игрока, архетип решится заново. */
-  private draftFrom(s: WorldSettings): WorldSettings {
-    const seed = Math.floor(Math.random() * 1e9);
-    // Биом выбирали сами — предлагаем его же; «по seed» (и старые миры без биома) — снова по seed.
-    this.biomePick = s.biome && !s.biomeBySeed ? s.biome : null;
-    if (!s.scenario) return { ...s, seed };
-    const { difficulty, challenge, pick } = s.scenario;
-    this.scenarioOptions = pick ? { difficulty, challenge, pick } : { difficulty, challenge };
-    // Города, предприятия и капитал сценарий задаёт сам — для песочницы берём обычные.
-    return { ...DEFAULT_SETTINGS, size: s.size, water: s.water, relief: s.relief ?? 'hills', seed, scenario: { ...this.scenarioOptions } };
   }
 
   /** Сложность, испытание или регион сценария на экране новой игры. */
@@ -3132,9 +3122,7 @@ export class Hud {
   }
 
   private defaultSaveName(): string {
-    const g = this.game();
-    const town = [...g.towns].sort((a, b) => b.population - a.population)[0];
-    return `${town?.name ?? 'Партия'} · ${g.dateLabel}`;
+    return defaultSaveName(this.game());
   }
 
   /** Список сохранений со своими именами: загрузить, удалить; текущее отмечено. fresh — новое имя в поле. */
@@ -3181,7 +3169,6 @@ export class Hud {
       const m = MAP_SIZES[k];
       return { v: k, name: `${mapSvg(m.w, m.h)}${m.name}`, hint: `${((m.w * 0.6) / 1000).toFixed(1)} × ${((m.h * 0.6) / 1000).toFixed(1)} км` };
     });
-    const progress = this.session.hasProgress();
     // В сценарии города, предприятия и капитал задаёт регион — эти строки скрыты.
     const sc = d.scenario;
     const slot = sc ? slotOf(d) : null;
@@ -3204,7 +3191,7 @@ export class Hud {
       <div class="ng-row"><span class="ng-label">Режим</span>${modeTilesHtml(!!sc)}</div>
       ${sc ? scenarioOptionsHtml(sc) : ''}
       <div class="ng-row"><span class="ng-label">Карта</span><div class="ng-options">${chips('size', d.size, sizes)}</div></div>
-      ${this.biomeRowHtml(d.seed)}
+      ${biomeRowHtml(d.biome ?? biomeForSeed(d.seed))}
       ${sc ? '' : sandboxRows}
       <div class="ng-row"><span class="ng-label">Вода</span><div class="ng-options">${chips(
         'water',
@@ -3219,38 +3206,14 @@ export class Hud {
       ${sc ? '' : capitalRow}
       <div class="ng-row"><span class="ng-label">Seed</span>
         <input class="ng-seed" data-ng-seed value="${d.seed}" inputmode="numeric" />
-        <button class="secondary small" data-action="ng-seed" title="Случайный мир">🎲</button></div>
+        <button class="secondary small" data-action="ng-seed" data-tip="Случайный мир">🎲</button></div>
       ${slot ? recordRowHtml(getBest(slot)) : ''}
-      <div class="actions">
-        <button class="primary ${this.confirmNew ? 'danger-fill' : ''}" data-action="ng-create">${
-          this.confirmNew ? 'Точно? Текущая партия пропадёт' : sc ? 'Начать сценарий' : 'Создать мир'
-        }</button>
+      <div class="actions ng-actions">
         <button class="secondary" data-action="ng-cancel">Отмена</button>
-      </div>
-      ${progress ? '<p class="muted">Текущая партия будет заменена новой.</p>' : ''}`;
-  }
-
-  /**
-   * Строка «Биом»: «по seed» и пять пейзажей; под ними — что в выбранном (или выпавшем по seed) биоме
-   * добывают и что просят города, значками.
-   */
-  private biomeRowHtml(seed: number): string {
-    const pick = this.biomePick;
-    const cards = [
-      `<button class="card region ${pick ? '' : 'active'}" data-action="ng-biome" data-id="seed" data-tip="Биом выберется по seed — тот же seed даст тот же биом">${diceMapSvg()}<span class="name">По seed</span></button>`,
-      ...BIOME_LIST.map(
-        (b) =>
-          `<button class="card region ${pick === b.id ? 'active' : ''}" data-action="ng-biome" data-id="${b.id}" data-tip="${esc(b.pitch)}">${biomeSvg(b.id)}<span class="name">${esc(b.name)}</span></button>`,
-      ),
-    ].join('');
-    const shown = BIOMES[pick ?? biomeForSeed(seed)];
-    const icon = (c: CargoType) => `<span class="ng-cargo" data-tip="${CARGO[c].name}">${cargoIcon(c, 20, false)}</span>`;
-    const raw = biomeRaw(shown.id, INDUSTRY_LIST).map(icon).join('');
-    const towns = [...shown.towns, ...shown.extra].map(icon).join('');
-    const strip = `<div class="ng-biome-strip">${pick ? '' : `<span class="ng-biome-seed" data-tip="Этот seed даёт такой биом">🎲</span>`}
-      <b>${esc(shown.name)}</b><span class="ng-biome-part" data-tip="Сырьё: что здесь добывают">⛏ ${raw}</span>
-      <span class="ng-biome-part" data-tip="Что просят города">${townIcon(18)} ${towns}</span></div>`;
-    return `<div class="ng-row top"><span class="ng-label">Биом</span><div class="ng-region"><div class="cards ng-regions ng-biomes">${cards}</div>${strip}</div></div>`;
+        <button class="primary ${this.confirmNew ? 'danger-fill' : ''}" data-action="ng-create">${
+          this.confirmNew ? 'Партия не сохранилась. Начать всё равно?' : sc ? 'Начать сценарий' : 'Создать мир'
+        }</button>
+      </div>`;
   }
 
   /**
