@@ -463,7 +463,7 @@ export class Hud {
             <div class="menu-buttons">
               <button class="primary" data-action="resume">${playSvg(18)}Продолжить</button>
               <button class="menu-item" data-action="save-game">${saveSvg(22)}<span class="menu-text"><b>Сохранить</b><small data-save-target></small></span></button>
-              <button class="menu-item" data-action="menu-saves">${savesSvg(22)}<span class="menu-text"><b>Сохранения</b><small data-saves-count></small></span><span class="menu-go">›</span></button>
+              <button class="menu-item" data-action="menu-saves">${savesSvg(22)}<span class="menu-text"><b>Загрузить</b><small data-saves-count></small></span><span class="menu-go">›</span></button>
               <button class="menu-item" data-action="new-game">${newGameSvg(22)}<span class="menu-text"><b>Новая игра</b><small>Другая карта, города, деньги</small></span><span class="menu-go">›</span></button>
               <button class="menu-item" data-action="export-journal" data-tip="Скачать журнал партии: стройка, маршруты, рейсы, производство, задания и события — для разбора">${journalSvg(22)}<span class="menu-text"><b>Журнал партии</b><small data-journal-count></small></span></button>
               <button class="menu-item" data-action="timelapse" data-timelapse-menu>${timelapseSvg(22)}<span class="menu-text"><b>Таймлапс партии</b><small></small></span></button>

@@ -5113,23 +5113,19 @@ span.ind-chip {
   text-align: center;
 }
 
-/* Биомы: пять пейзажей в ряд; под ними — «Ресурсы»: сырьё и потребности городов значками. */
+/* Биомы: пять пейзажей в ряд; строкой ниже — «Ресурсы»: сырьё и потребности городов значками. */
 .cards.ng-biomes {
   grid-template-columns: repeat(5, 1fr);
 }
 
 .ng-biome-strip {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 10px;
-  margin-top: 6px;
   font-size: 12.5px;
-}
-
-.ng-res-label {
-  font-weight: 700;
-  color: var(--muted);
 }
 
 .ng-biome-part {

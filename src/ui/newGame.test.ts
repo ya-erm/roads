@@ -133,7 +133,9 @@ describe('Новая игра: регион и биом', () => {
       const html = biomeRowHtml(b.id);
       expect(html.match(/data-action="ng-biome"/g)).toHaveLength(BIOME_LIST.length);
       expect(html).toContain('<span class="name">Луга</span>');
-      expect(html).toContain('>Ресурсы</span>');
+      // «Ресурсы» — заголовком в левом столбце, как у остальных строк, а не в строке значков.
+      expect(html).toContain('<span class="ng-label">Ресурсы</span>');
+      expect(html).not.toMatch(/ng-biome-strip">[^]*Ресурсы/);
       expect(html).not.toContain('Случайно');
       expect(html).not.toContain('По seed');
       expect(html).not.toContain('Средняя полоса');

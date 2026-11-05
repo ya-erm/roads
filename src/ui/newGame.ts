@@ -76,9 +76,9 @@ export function randomCardHtml(action: string, active: boolean, tip: string): st
 
 /**
  * Строка «Биом»: пять пейзажей, подсвечен биом черновика — тот, что даёт seed, или выбранный сами
- * («Случайно» не нужен: биом и так случайный, по seed). Под ними — «Ресурсы»: что в этом биоме добывают
- * и что просят города, значками. Подсказки — только у самих значков: вложенные друг в друга всплывали
- * разом и накрывали одна другую.
+ * («Случайно» не нужен: биом и так случайный, по seed). Под ней — строка «Ресурсы» (заголовок в левом
+ * столбце, как у остальных): что в этом биоме добывают и что просят города, значками. Подсказки — только
+ * у самих значков: вложенные друг в друга всплывали разом и накрывали одна другую.
  */
 export function biomeRowHtml(biome: BiomeId): string {
   const cards = BIOME_LIST.map(
@@ -89,8 +89,9 @@ export function biomeRowHtml(biome: BiomeId): string {
   const icon = (c: CargoType) => `<span class="ng-cargo" data-tip="${esc(CARGO[c].name)}">${cargoIcon(c, 20, false)}</span>`;
   const raw = biomeRaw(shown.id, INDUSTRY_LIST).map(icon).join('');
   const towns = [...shown.towns, ...shown.extra].map(icon).join('');
-  const strip = `<div class="ng-biome-strip"><span class="ng-res-label">Ресурсы</span>
+  const strip = `<div class="ng-biome-strip">
     <span class="ng-biome-part"><span class="ng-part-ic" data-tip="Сырьё: что здесь добывают">⛏</span>${raw}</span>
     <span class="ng-biome-part"><span class="ng-part-ic" data-tip="Что просят города">${townIcon(18)}</span>${towns}</span></div>`;
-  return `<div class="ng-row top"><span class="ng-label">Биом</span><div class="ng-region"><div class="cards ng-regions ng-biomes">${cards}</div>${strip}</div></div>`;
+  return `<div class="ng-row top"><span class="ng-label">Биом</span><div class="ng-region"><div class="cards ng-regions ng-biomes">${cards}</div></div></div>
+    <div class="ng-row ng-res-row"><span class="ng-label">Ресурсы</span>${strip}</div>`;
 }
