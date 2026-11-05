@@ -3023,7 +3023,7 @@ export class Controller {
         // Значок предупреждения — причина одной строкой (клик — карточка с объяснением).
         const mark = this.markUnder(p);
         if (mark) {
-          o.label = { text: `${mark.tip} · клик — подробнее`, ok: mark.level !== 'alert' };
+          o.label = { text: mark.tip, ok: mark.level !== 'alert' };
           break;
         }
         const st = g.structureAt(p);

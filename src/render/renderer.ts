@@ -26,6 +26,7 @@ import { drawIndustryArt } from './industryArt';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { drawTurnArrows } from './turnArrows';
+import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, frontLength } from './vehicleArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
 import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
@@ -2973,16 +2974,19 @@ export class Renderer {
     ctx.translate(at.x, at.y);
     ctx.scale(1 / z, 1 / z);
     ctx.font = '600 13px system-ui, -apple-system, sans-serif';
-    const w = ctx.measureText(text).width + 14;
-    // Не помещается справа от курсора — слева от него.
-    const x = this.camera.toScreen(at).x + 16 + w > this.camera.width - 8 ? -16 - w : 16;
+    // Длинная — в несколько строк не шире TOOLTIP_MAX_PX; у края экрана — сдвинута внутрь.
+    const lines = wrapLines(text, TOOLTIP_MAX_PX, (s) => ctx.measureText(s).width);
+    const w = Math.max(...lines.map((s) => ctx.measureText(s).width)) + 14;
+    const h = lines.length * 17 + 7;
+    const s = this.camera.toScreen(at);
+    const { x, y } = tooltipOffset(s.x, s.y, w, h, this.camera.width, this.camera.height);
     ctx.fillStyle = ok ? 'rgba(25, 32, 45, 0.88)' : 'rgba(170, 40, 35, 0.92)';
-    rr(ctx, x, 14, w, 24, 6);
+    rr(ctx, x, y, w, h, 6);
     ctx.fill();
     ctx.fillStyle = '#fff';
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = 'left';
-    ctx.fillText(text, x + 7, 31);
+    lines.forEach((line, i) => ctx.fillText(line, x + 7, y + 17 + i * 17));
     ctx.restore();
   }
 
