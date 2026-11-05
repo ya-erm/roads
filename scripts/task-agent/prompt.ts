@@ -7,11 +7,38 @@ export interface AgentReport {
   summary: string;
   screenshots: Attachment[];
   saves: Attachment[];
+  /** Название для задачи без названия (режим --chat: там его придумывает исполнитель). */
+  title?: string;
 }
 
 export interface Attachment {
   file: string;
   caption: string;
+}
+
+const OUTCOMES: AgentReport['outcome'][] = ['done', 'needs_info', 'failed'];
+
+/** Отчёт из report.json (режим --chat): проверяет поля и приводит вложения к нужному виду. */
+export function parseReport(text: string): AgentReport {
+  const r = JSON.parse(text) as Partial<Record<keyof AgentReport, unknown>>;
+  if (!OUTCOMES.includes(r.outcome as AgentReport['outcome'])) throw new Error(`outcome — одно из: ${OUTCOMES.join(', ')}`);
+  if (typeof r.summary !== 'string' || !r.summary.trim()) throw new Error('summary — непустая строка');
+  const files = (v: unknown, name: string): Attachment[] => {
+    if (v === undefined) return [];
+    if (!Array.isArray(v)) throw new Error(`${name} — список { file, caption }`);
+    return v.map((a: { file?: unknown; caption?: unknown }) => {
+      if (typeof a?.file !== 'string') throw new Error(`${name}: у вложения нет file`);
+      return { file: a.file, caption: typeof a.caption === 'string' ? a.caption : '' };
+    });
+  };
+  const title = typeof r.title === 'string' && r.title.trim() ? { title: r.title.trim() } : {};
+  return {
+    outcome: r.outcome as AgentReport['outcome'],
+    summary: r.summary,
+    screenshots: files(r.screenshots, 'screenshots'),
+    saves: files(r.saves, 'saves'),
+    ...title,
+  };
 }
 
 const attachments = {
@@ -71,6 +98,20 @@ export function errorComment(error: string, attempts: number): string {
   return `**Не сделано:** ${error} (попыток: ${attempts})`;
 }
 
+/** Название-заглушка: первая строка описания с текстом — без картинок, ссылок и разметки (описание часто начинается со скриншота). */
+export function firstLine(description: string): string {
+  const text = description
+    .split('\n')
+    .map((l) => l.replace(/!?\[[^\]]*\]\([^)]*\)/g, '').replace(/https?:\/\/\S+/g, '').replace(/[#*_`>[\]]/g, '').trim())
+    .find(Boolean);
+  return text?.slice(0, 80) || 'Задача без описания';
+}
+
+/** Ссылки из markdown-текста задачи: без экранирования (`\_` → `_`) и без точки или запятой после ссылки. */
+export function linksIn(text: string): string[] {
+  return (text.match(/https?:\/\/[^\s<>()"'\]]+/g) ?? []).map((url) => url.replace(/\\/g, '').replace(/[.,;:!?]+$/, ''));
+}
+
 export function titlePrompt(description: string): string {
   return `Придумай краткое название (3–8 слов, по-русски, без кавычек и точки в конце) для задачи в трекере по её описанию:\n\n${description.slice(0, 6000)}`;
 }
@@ -105,6 +146,10 @@ export interface PromptContext {
   /** Папка для вложений отчёта, от корня репозитория. */
   outDir: string;
   commit: boolean;
+  /** Режим --chat: отчёт — этим JSON-файлом, а не структурированным ответом. */
+  reportFile?: string;
+  /** У задачи нет названия — в режиме --chat его придумывает исполнитель. */
+  untitled?: boolean;
 }
 
 export function taskPrompt(c: PromptContext): string {
@@ -126,6 +171,9 @@ export function taskPrompt(c: PromptContext): string {
     ? 'Закоммить свои изменения одним коммитом: только файлы этой задачи (`git add <файлы>`), сообщение по-русски в стиле истории (`git log`). Не пушь.'
     : 'Не коммить: изменения останутся в рабочем дереве, пользователь проверит их сам.';
   const out = c.outDir;
+  const answer = c.reportFile
+    ? `Итог запиши JSON-файлом \`${c.reportFile}\` (поля \`outcome\`, \`summary\`, \`screenshots\`, \`saves\` — как ниже${c.untitled ? '; у задачи нет названия — добавь поле `title`, 3–8 слов по сути задачи' : ''}): по нему скрипт опубликует отчёт.`
+    : 'Итог верни структурированным ответом.';
   return `# Задача: «${c.title}»
 
 ${status}
@@ -154,7 +202,7 @@ ${comments}${inputs}
    Сохранение можно собрать и кодом в node (как в тестах: src/game/testkit.ts, сцены в src/testpages), записав \`JSON.stringify(game.toSave())\`. Любое сохранение обязательно открой через \`npm run shot -- --save\`: оно должно открываться в браузере и показывать то, что нужно проверить. Учти: рельеф в сохранение не пишется, а строится заново по seed — партия с тестовой страницы (/test/…) в обычной игре откроется с лесом и водой.
    Посмотри на снимки сам (Read) и убедись, что на них видно нужное.
 4. ${commit}
-5. Итог верни структурированным ответом. Пользователь прочитает его в комментарии к задаче — только суть, чётко и по делу:
+5. ${answer} Пользователь прочитает его в комментарии к задаче — только суть, чётко и по делу:
    - \`outcome\`: "done" — сделано; "needs_info" — нужны уточнения; "failed" — не получилось;
    - \`summary\`: markdown-список из 1–5 пунктов по-русски, каждый — одна короткая фраза (до 15 слов): что изменилось (в игре, а если в игре не видно — в коде), чем проверено, что не сделано или не проверено (только если такое есть). Для needs_info — только вопросы, для failed — только причина.
      Не пиши: вступления, пересказ задачи, повторы, оценки («успешно», «корректно»), рассказ о своих шагах и служебное — папки и пути вложений, \`npm run shot\`, статусы карточки: файлы и статус оформит скрипт. Без секретов и личных данных. Пример:

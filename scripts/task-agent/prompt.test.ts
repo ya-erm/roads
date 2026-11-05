@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { errorComment, reportComment, type AgentReport } from './prompt';
+import { errorComment, firstLine, linksIn, parseReport, reportComment, type AgentReport } from './prompt';
 
 const report = (outcome: AgentReport['outcome'], summary: string): AgentReport => ({ outcome, summary, screenshots: [], saves: [] });
 const shot = { name: '01-after.png', caption: 'Остановка у перекрёстка', url: 'https://boards.test/images/1/01-after.webp' };
@@ -34,5 +34,48 @@ describe('комментарий с отчётом', () => {
 
   it('ошибка — одной строкой', () => {
     expect(errorComment('превышено время работы (120 мин)', 2)).toBe('**Не сделано:** превышено время работы (120 мин) (попыток: 2)');
+  });
+});
+
+describe('report.json из чата', () => {
+  it('принимает отчёт, недостающие списки — пустые, название — без пробелов', () => {
+    expect(parseReport('{"outcome":"done","summary":"- Готово.","screenshots":[{"file":"a.png"}],"title":" Подсветка грузовиков "}')).toEqual({
+      outcome: 'done',
+      summary: '- Готово.',
+      screenshots: [{ file: 'a.png', caption: '' }],
+      saves: [],
+      title: 'Подсветка грузовиков',
+    });
+  });
+
+  it('не принимает отчёт без итога, сути или с битыми вложениями', () => {
+    expect(() => parseReport('{"outcome":"ok","summary":"- Готово."}')).toThrow(/outcome/);
+    expect(() => parseReport('{"outcome":"done","summary":"  "}')).toThrow(/summary/);
+    expect(() => parseReport('{"outcome":"done","summary":"- Готово.","saves":[{"caption":"x"}]}')).toThrow(/saves/);
+    expect(() => parseReport('{"outcome":"done",')).toThrow();
+  });
+});
+
+describe('название-заглушка', () => {
+  it('первая строка с текстом: картинка и ссылка в начале описания пропускаются', () => {
+    const text = '![image.png](<https://boards.test/images/1/image.webp> =582x131)\nhttps://boards.test/x\nДавай тут при наведении на **график** показывать значение';
+    expect(firstLine(text)).toBe('Давай тут при наведении на график показывать значение');
+    expect(firstLine('![a](<https://boards.test/a.png>)')).toBe('Задача без описания');
+  });
+});
+
+describe('ссылки из текста задачи', () => {
+  it('картинка, экранированные подчёркивания и точка после ссылки', () => {
+    const text = [
+      'Не могу удалить полосу',
+      '![image.png](<https://boards.test/images/2026-11-04_15-31/image.webp>)',
+      'https://boards.test/images/2026-11-04\\_15-32\\_MSK/%D0%9C%D0%BE%D1%8F%20%281%29.json',
+      'Ещё вот: https://boards.test/images/a/b.png.',
+    ].join('\n');
+    expect(linksIn(text)).toEqual([
+      'https://boards.test/images/2026-11-04_15-31/image.webp',
+      'https://boards.test/images/2026-11-04_15-32_MSK/%D0%9C%D0%BE%D1%8F%20%281%29.json',
+      'https://boards.test/images/a/b.png',
+    ]);
   });
 });

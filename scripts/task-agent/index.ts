@@ -5,6 +5,8 @@
  *   npm run agent -- --once       — разобрать текущую очередь и выйти
  *   npm run agent -- --dry-run    — показать очередь, ничего не меняя
  *   npm run agent -- --task <id>  — брать только эту задачу
+ *   npm run agent -- --chat       — задачи делает открытая сессия Claude Code: монитор отдаёт ей задание и ждёт report.json
+ *   npm run agent -- --parallel 3 — держать в работе до трёх задач одновременно
  *
  * Задачи «Новая» и «Доработать» (сначала доработки) по одной переводятся в «В работе» и отдаются Claude Code
  * в этом репозитории. Его отчёт со скриншотами и файлом сохранения уходит комментарием, а задача —
@@ -15,11 +17,14 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Board, BoardError, MAX_FILE_BYTES, STATUS_NAMES, type Task, type TaskStatus } from './board';
-import { askClaude, runClaude, type ClaudeResult, type ClaudeSettings } from './claude';
+import { Board, BoardError, MAX_FILE_BYTES, STATUS_NAMES, staleRevision, type Task, type TaskComment, type TaskStatus } from './board';
+import { askClaude, checkClaude, ClaudeError, runClaude, type ClaudeResult, type ClaudeSettings } from './claude';
 import { idleStatus, Presence } from './presence';
 import {
   errorComment,
+  firstLine,
+  linksIn,
+  parseReport,
   REPORT_SCHEMA,
   reportComment,
   SYSTEM_PROMPT,
@@ -38,6 +43,8 @@ const SOURCE = 'task-agent';
 const QUEUE: TaskStatus[] = ['revision', 'todo'];
 const IMAGE_EXT = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
 const SAVE_EXT = ['.json'];
+/** Строка журнала, по которой сессия в режиме --chat узнаёт, что задача ждёт её. */
+const HANDOFF = 'ЗАДАЧА ДЛЯ ЧАТА';
 
 // ---------- Настройки ----------
 
@@ -52,6 +59,8 @@ interface Config {
   maxAttempts: number;
   retryMs: number;
   titleModel: string;
+  /** Сколько задач держать в работе одновременно. */
+  parallel: number;
   /** Состояние, задания и журналы запусков. */
   stateDir: string;
   claude: ClaudeSettings;
@@ -85,11 +94,12 @@ function loadConfig(): Config {
     maxAttempts: num('TASK_AGENT_MAX_ATTEMPTS', 2),
     retryMs: num('TASK_AGENT_RETRY_MINUTES', 15) * 60_000,
     titleModel: env('TASK_AGENT_TITLE_MODEL') ?? 'haiku',
+    parallel: num('TASK_AGENT_PARALLEL', 1),
     stateDir: resolve(ROOT, env('TASK_AGENT_STATE_DIR') ?? '.task-agent'),
     claude: {
       bin: env('TASK_AGENT_CLAUDE_BIN') ?? 'claude',
-      model: env('TASK_AGENT_MODEL'),
-      effort: env('TASK_AGENT_EFFORT'),
+      model: env('TASK_AGENT_MODEL') ?? 'claude-opus-5-5',
+      effort: env('TASK_AGENT_EFFORT') ?? 'high',
       permissionMode: env('TASK_AGENT_PERMISSION_MODE') ?? 'auto',
       maxBudgetUsd: env('TASK_AGENT_MAX_BUDGET_USD'),
       extraArgs: env('TASK_AGENT_CLAUDE_ARGS')?.split(/\s+/) ?? [],
@@ -105,8 +115,8 @@ interface State {
   sessions: Record<string, string>;
   /** Неудачи подряд по задаче и когда пробовать снова. */
   failures: Record<string, { count: number; retryAt: number }>;
-  /** Задача в работе: если монитор прервали, при запуске она вернётся в очередь. */
-  active?: { taskId: string; from: TaskStatus };
+  /** Задачи в работе и откуда их взяли: если монитор прервали, при запуске они вернутся в очередь. */
+  active: Record<string, TaskStatus>;
   /** Готовые отчёты, которые ещё не удалось опубликовать (например, не было сети). */
   pending: Record<string, Delivery>;
   /** Задачи, где агенту нужен ответ человека: задал вопросы или не справился. */
@@ -118,15 +128,22 @@ interface Delivery {
   runId: string;
   outDir: string;
   report: AgentReport;
+  /** Название, под которым задача шла в работе (у задачи без названия — первая строка описания). */
+  title?: string;
 }
 
 function readState(): State {
-  const empty: State = { sessions: {}, failures: {}, pending: {}, attention: [] };
+  const empty: State = { sessions: {}, failures: {}, active: {}, pending: {}, attention: [] };
+  let saved: Partial<State>;
   try {
-    return { ...empty, ...(JSON.parse(readFileSync(join(cfg.stateDir, 'state.json'), 'utf8')) as Partial<State>) };
+    saved = JSON.parse(readFileSync(join(cfg.stateDir, 'state.json'), 'utf8')) as Partial<State>;
   } catch {
     return empty;
   }
+  // Раньше задача в работе была одна: { taskId, from }.
+  const old = saved.active as { taskId?: string; from?: TaskStatus } | undefined;
+  if (old?.taskId && old.from) saved.active = { [old.taskId]: old.from };
+  return { ...empty, ...saved };
 }
 
 function saveState(): void {
@@ -139,6 +156,7 @@ function saveState(): void {
 const args = process.argv.slice(2);
 const once = args.includes('--once');
 const dryRun = args.includes('--dry-run');
+const chat = args.includes('--chat');
 const only = args.includes('--task') ? args[args.indexOf('--task') + 1] : undefined;
 
 const cfg = loadConfig();
@@ -147,10 +165,19 @@ const state = readState();
 const presence = new Presence(board, log);
 /** Прервать работу Claude сейчас. */
 const abort = new AbortController();
+/** Сколько задач держать в работе одновременно. */
+const parallel = Math.max(1, Math.floor(Number(args.includes('--parallel') ? args[args.indexOf('--parallel') + 1] : cfg.parallel)) || 1);
 /** Разбудить монитор из ожидания. */
 let wake = () => {};
 let stopping = false;
-let busy = false;
+/** Задачи в работе: id → её обработка. */
+const running = new Map<string, Promise<void>>();
+/** Доработки, по которым нового ничего нет (см. staleRevision): id → revision карточки. Изменится карточка — проверим снова. */
+const settled = new Map<string, number>();
+/** Claude ответил на проверку: при запуске и после сбоя Claude задачи берём только после неё. В режиме --chat claude не запускаем. */
+let claudeOk = chat;
+/** Почему Claude недоступен (нет входа, лимит, сбой API); пока причина есть, задачи ждут. */
+let outage: string | undefined;
 
 let lastSigint = 0;
 process.on('SIGINT', () => {
@@ -158,9 +185,9 @@ process.on('SIGINT', () => {
   const now = Date.now();
   if (now - lastSigint < 1000) return;
   lastSigint = now;
-  if (busy && !stopping) {
+  if (running.size && !stopping) {
     stopping = true;
-    log('Остановлюсь после текущей задачи. Ctrl+C ещё раз — прервать её сейчас (задача вернётся в очередь).');
+    log('Остановлюсь, когда доделаю задачи в работе. Ctrl+C ещё раз — прервать их сейчас (задачи вернутся в очередь).');
   } else {
     stopping = true;
     abort.abort();
@@ -180,7 +207,9 @@ void main().catch(async (e) => {
 });
 
 async function main(): Promise<void> {
-  log(`Доска «${cfg.board}» (${cfg.base}), исполнитель «${cfg.actor}»${dryRun ? ', без изменений' : ''}`);
+  log(
+    `Доска «${cfg.board}» (${cfg.base}), исполнитель «${cfg.actor}»${dryRun ? ', без изменений' : ''}${chat ? ', задачи делает сессия Claude Code (--chat)' : ''}${parallel > 1 ? `, задач одновременно: до ${parallel}` : ''}`,
+  );
   if (dryRun) {
     // Статус агента не трогаем: тем же токеном может работать запущенный монитор.
     const queue = queueOf(await board.tasks());
@@ -190,28 +219,64 @@ async function main(): Promise<void> {
   }
   await recover();
   while (!stopping) {
-    let worked = false;
+    let took = 0;
     try {
       await deliverPending();
-      const tasks = await board.tasks();
-      const [task] = queueOf(tasks);
-      if (task) {
-        busy = true;
-        await work(task);
-        worked = true;
-      } else {
-        await presence.set(idle(tasks));
+      if (running.size < parallel && (claudeOk || (await probeClaude()))) {
+        const tasks = await board.tasks();
+        for (const task of queueOf(tasks).filter((t) => !running.has(t.id)).slice(0, parallel - running.size)) {
+          start(task);
+          took++;
+        }
+        if (!running.size) await presence.set(idle(tasks));
       }
     } catch (e) {
-      log(`Ошибка: ${message(e)}`);
-    } finally {
-      busy = false;
+      if (e instanceof ClaudeError && e.outage) await pause(e.outage);
+      else log(`Ошибка: ${message(e)}`);
     }
-    if (stopping || (once && !worked)) break;
-    if (!worked) await sleep(cfg.pollMs);
+    if (stopping || (once && !running.size && !took)) break;
+    // Ждём следующей проверки доски или, если раньше, пока освободится место под задачу.
+    await Promise.race([sleep(cfg.pollMs), ...running.values()]);
   }
+  await Promise.all(running.values());
   await presence.clear();
   log('Монитор остановлен.');
+}
+
+/** Задача — в работу параллельно с остальными; когда она закончится, значок покажет другую задачу в работе. */
+function start(task: Task): void {
+  const done = work(task)
+    .catch(async (e) => {
+      if (e instanceof ClaudeError && e.outage) await pause(e.outage);
+      else log(`Ошибка: ${message(e)}`);
+    })
+    .finally(async () => {
+      running.delete(task.id);
+      const [other] = running.keys();
+      if (other) await presence.set({ status: 'working', taskId: other });
+    });
+  running.set(task.id, done);
+}
+
+/** Короткий запрос к Claude перед тем, как брать задачи: при запуске и после сбоя, пока он не ответит. */
+async function probeClaude(): Promise<boolean> {
+  const problem = await checkClaude(cfg.claude.bin, cfg.claude.model ?? '', childEnv());
+  if (problem) {
+    await pause(problem);
+    return false;
+  }
+  if (outage) log('Claude снова отвечает — беру задачи.');
+  outage = undefined;
+  claudeOk = true;
+  return true;
+}
+
+/** Claude недоступен: задачи ждут, на доске — «нужна помощь», проверяем снова через обычную паузу. */
+async function pause(reason: string): Promise<void> {
+  claudeOk = false;
+  if (reason !== outage) log(`Claude недоступен: ${reason}. Задачи не беру, проверяю раз в ${minutes(cfg.pollMs)}.`);
+  outage = reason;
+  await presence.set({ status: 'blocked' });
 }
 
 /** Задачи, которые пора брать: сначала доработки, потом новые; внутри — старые раньше. */
@@ -222,6 +287,7 @@ function queueOf(tasks: Task[]): Task[] {
   return tasks
     .filter((t) => QUEUE.includes(t.status) && (!only || t.id === only))
     .filter((t) => (state.failures[t.id]?.retryAt ?? 0) <= now)
+    .filter((t) => settled.get(t.id) !== t.revision)
     .sort((a, b) => rank(a) - rank(b) || time(a) - time(b));
 }
 
@@ -240,13 +306,13 @@ function idle(tasks: Task[]): ReturnType<typeof idleStatus> {
 
 /** После прерванного запуска: готовый отчёт — опубликовать, незаконченную задачу — вернуть в очередь. */
 async function recover(): Promise<void> {
-  const active = state.active;
-  if (!active) return;
-  if (!state.pending[active.taskId]) {
-    const back = await patch(active.taskId, (c) => (c.status === 'in_progress' ? { status: active.from } : null)).catch(() => null);
-    if (back) log(`Прошлый запуск прервался: задача ${active.taskId} возвращена в «${STATUS_NAMES[active.from]}».`);
+  for (const [taskId, from] of Object.entries(state.active)) {
+    if (!state.pending[taskId]) {
+      const back = await patch(taskId, (c) => (c.status === 'in_progress' ? { status: from } : null)).catch(() => null);
+      if (back) log(`Прошлый запуск прервался: задача ${taskId} возвращена в «${STATUS_NAMES[from]}».`);
+    }
+    delete state.active[taskId];
   }
-  state.active = undefined;
   saveState();
 }
 
@@ -255,16 +321,23 @@ async function recover(): Promise<void> {
 async function work(brief: Task): Promise<void> {
   const from = brief.status;
   let card = await board.task(brief.id);
+  if (from === 'revision' && staleRevision(card, isMine)) {
+    settled.set(card.id, card.revision);
+    log(`«${card.title?.trim() || card.id}» в «${STATUS_NAMES.revision}», но после отчёта нового нет — не беру, пока не появятся замечания.`);
+    return;
+  }
   const description = await descriptionOf(card);
-  const title = card.title?.trim() || (await makeTitle(description));
+  const untitled = !card.title?.trim();
+  // В режиме --chat название придумывает сессия и присылает в отчёте; до того в журнале — первая строка описания.
+  const title = card.title?.trim() || (chat ? firstLine(description) : await makeTitle(description));
   const taken = await patch(card.id, (c) =>
-    QUEUE.includes(c.status) ? { status: 'in_progress', ...(c.title?.trim() ? {} : { title }) } : null,
+    QUEUE.includes(c.status) ? { status: 'in_progress', ...(c.title?.trim() || chat ? {} : { title }) } : null,
   );
   if (!taken) {
     log(`Задачу «${title}» уже кто-то взял или убрал из очереди — пропускаю.`);
     return;
   }
-  state.active = { taskId: card.id, from };
+  state.active[card.id] = from;
   state.attention = state.attention.filter((id) => id !== card.id);
   saveState();
   await presence.set({ status: 'working', taskId: card.id });
@@ -273,7 +346,7 @@ async function work(brief: Task): Promise<void> {
   const runId = new Date().toISOString().replace(/[:.]/g, '-');
   const runDir = join(cfg.stateDir, 'runs', card.id, runId);
   const outDir = join(runDir, 'out');
-  let result: ClaudeResult;
+  let result: ClaudeResult & { released?: boolean };
   try {
     card = await board.task(card.id);
     mkdirSync(outDir, { recursive: true });
@@ -288,27 +361,35 @@ async function work(brief: Task): Promise<void> {
       inputs,
       outDir: shown(outDir),
       commit: cfg.commit,
+      ...(chat ? { reportFile: shown(join(runDir, 'report.json')), untitled } : {}),
     });
     writeFileSync(join(runDir, 'prompt.md'), prompt);
-    log(`Задание и журнал Claude: ${shown(runDir)}`);
-    result = await runAgent(card.id, title, prompt, runDir);
+    if (chat) {
+      result = await handOff(runDir, title);
+    } else {
+      log(`Задание и журнал Claude: ${shown(runDir)}`);
+      result = await runAgent(card.id, title, prompt, runDir);
+    }
   } catch (e) {
     result = { ok: false, error: message(e), durationMs: 0 };
   }
-  log(`Claude: ${result.ok ? 'готово' : `не справился — ${result.error}`} (${minutes(result.durationMs)}${cost(result.costUsd)})`);
+  log(`${chat ? 'Сессия' : 'Claude'} «${title}»: ${result.ok ? 'готово' : `не справился — ${result.error}`} (${minutes(result.durationMs)}${cost(result.costUsd)})`);
 
-  if (abort.signal.aborted) {
-    await patch(card.id, (c) => (c.status === 'in_progress' ? { status: from } : null)).catch(() => null);
-    state.active = undefined;
+  if (abort.signal.aborted || (!result.ok && (result.outage || result.released))) {
+    // Задача тут ни при чём: возвращаем как была, попытку не засчитываем.
+    const back = await patch(card.id, (c) => (c.status === 'in_progress' ? { status: from } : null)).catch(() => null);
+    delete state.active[card.id];
     saveState();
-    log(`Прервано: задача возвращена в «${STATUS_NAMES[from]}».`);
+    const where = back ? `возвращена в «${STATUS_NAMES[from]}»` : 'статус уже поменяли — оставляю как есть';
+    log(`${abort.signal.aborted ? 'Прервано' : 'Попытка не засчитана'}: «${title}» ${where}.`);
+    if (!abort.signal.aborted && result.outage) await pause(result.outage);
     return;
   }
   if (!result.ok) {
-    await failed(card.id, from, result.error ?? 'неизвестная ошибка', runId);
+    await failed(card.id, title, from, result.error ?? 'неизвестная ошибка', runId);
     return;
   }
-  state.pending[card.id] = { taskId: card.id, runId, outDir, report: result.output as AgentReport };
+  state.pending[card.id] = { taskId: card.id, runId, outDir, report: result.output as AgentReport, title };
   delete state.failures[card.id];
   saveState();
   await deliver(state.pending[card.id]);
@@ -337,33 +418,63 @@ async function runAgent(taskId: string, title: string, prompt: string, runDir: s
     log(`Продолжаю сессию ${previous}`);
     const r = await run(previous, true);
     // Сессия не открылась (удалена, другая машина) — начинаем новую.
-    if (r.ok || r.turns !== 0 || abort.signal.aborted) return r;
+    if (r.ok || r.turns !== 0 || r.outage || abort.signal.aborted) return r;
     log(`Прежнюю сессию не продолжить (${r.error}) — начинаю новую.`);
   }
   return run(randomUUID(), false);
 }
 
+/**
+ * Режим --chat: задачу делает открытая сессия Claude Code. Она узнаёт о задаче по строке журнала HANDOFF,
+ * читает prompt.md и пишет report.json; файл release в папке запуска — вернуть задачу в очередь.
+ * Пока ждём, на доске — «работает над задачей».
+ */
+async function handOff(runDir: string, title: string): Promise<ClaudeResult & { released?: boolean }> {
+  const started = Date.now();
+  const reportFile = join(runDir, 'report.json');
+  const releaseFile = join(runDir, 'release');
+  log(`${HANDOFF}: «${title}» — задание ${shown(join(runDir, 'prompt.md'))}`);
+  log(`  Отчёт — ${shown(reportFile)}; вернуть задачу в очередь — пустой файл ${shown(releaseFile)}.`);
+  let problem = '';
+  while (!abort.signal.aborted) {
+    if (existsSync(releaseFile)) return { ok: false, released: true, error: 'сессия вернула задачу в очередь', durationMs: Date.now() - started };
+    if (existsSync(reportFile)) {
+      try {
+        return { ok: true, output: parseReport(readFileSync(reportFile, 'utf8')), durationMs: Date.now() - started };
+      } catch (e) {
+        // Файл мог быть дописан не до конца — ждём исправленный, о каждой новой ошибке говорим один раз.
+        if (message(e) !== problem) log(`report.json не принят: ${message(e)}`);
+        problem = message(e);
+      }
+    }
+    // Не sleep(): тот будит главный цикл, а ждать отчёт могут несколько задач сразу.
+    await new Promise((done) => setTimeout(done, 2000));
+  }
+  return { ok: false, error: 'остановлено', durationMs: Date.now() - started };
+}
+
 /** Claude не справился: вернуть задачу в очередь до следующей попытки, а после последней — отчитаться. */
-async function failed(taskId: string, from: TaskStatus, error: string, runId: string): Promise<void> {
+async function failed(taskId: string, title: string, from: TaskStatus, error: string, runId: string): Promise<void> {
   const count = (state.failures[taskId]?.count ?? 0) + 1;
   if (count >= cfg.maxAttempts) {
     await postComment(taskId, redact(errorComment(error, count)), `${SOURCE}:${taskId}:error:${runId}`);
     const moved = await patch(taskId, (c) => (c.status === 'in_progress' ? { status: 'review' } : null));
     if (moved) state.attention.push(taskId);
     delete state.failures[taskId];
-    log(`Задача → «${STATUS_NAMES.review}» с описанием ошибки.`);
+    log(`«${title}» → «${STATUS_NAMES.review}» с описанием ошибки.`);
   } else {
     state.failures[taskId] = { count, retryAt: Date.now() + cfg.retryMs };
     await patch(taskId, (c) => (c.status === 'in_progress' ? { status: from } : null));
-    log(`Задача возвращена в «${STATUS_NAMES[from]}», новая попытка через ${minutes(cfg.retryMs)}.`);
+    log(`«${title}» возвращена в «${STATUS_NAMES[from]}», новая попытка через ${minutes(cfg.retryMs)}.`);
   }
-  state.active = undefined;
+  delete state.active[taskId];
   saveState();
 }
 
-/** Отчёты, которые не опубликовались раньше. Задачу удалили — отчёт больше некуда публиковать. */
+/** Отчёты, которые не опубликовались раньше (кроме задач в работе — их отчёт публикует своя обработка). */
 async function deliverPending(): Promise<void> {
   for (const d of Object.values(state.pending)) {
+    if (running.has(d.taskId)) continue;
     try {
       await deliver(d);
     } catch (e) {
@@ -388,19 +499,23 @@ async function deliver(d: Delivery): Promise<void> {
   const text = reportComment(d.report, posted.slice(0, shots.length), posted.slice(shots.length));
   await postComment(d.taskId, redact(text), `${SOURCE}:${d.taskId}:result:${d.runId}`);
 
-  const moved = await patch(d.taskId, (c) => (c.status === 'in_progress' ? { status: 'review' } : null)).catch((e) => {
+  // Задаче без названия (режим --chat) — название из отчёта, а если его нет — то, под которым она шла в работе.
+  const fallback = d.report.title || d.title;
+  const named = (c: Task) => (!c.title?.trim() && fallback ? { title: fallback } : {});
+  const moved = await patch(d.taskId, (c) => (c.status === 'in_progress' ? { status: 'review', ...named(c) } : null)).catch((e) => {
     if (e instanceof BoardError && (e.status === 404 || e.status === 410)) return null;
     throw e;
   });
   delete state.pending[d.taskId];
-  if (state.active?.taskId === d.taskId) state.active = undefined;
+  delete state.active[d.taskId];
   // Вопросы или «не сделано» — агент ждёт ответа человека, пока задача в «Нужно проверить».
   if (moved && d.report.outcome !== 'done') state.attention.push(d.taskId);
   saveState();
+  const name = moved?.title?.trim() || fallback || d.taskId;
   log(
     moved
-      ? `✓ Отчёт опубликован (снимков ${shots.length}, сохранений ${saves.length}), задача → «${STATUS_NAMES.review}».`
-      : '✓ Отчёт опубликован; статус задачи за это время поменяли — оставляю его как есть.',
+      ? `✓ «${name}»: отчёт опубликован (снимков ${shots.length}, сохранений ${saves.length}), задача → «${STATUS_NAMES.review}».`
+      : `✓ «${name}»: отчёт опубликован; статус задачи за это время поменяли — оставляю его как есть.`,
   );
 }
 
@@ -420,7 +535,7 @@ async function commentsOf(card: Task): Promise<CommentView[]> {
       author: c.author ?? 'Без имени',
       date: c.createdAt ? new Date(c.createdAt).toLocaleString('ru-RU') : undefined,
       body,
-      mine: !!c.sourceKey?.startsWith(`${SOURCE}:`),
+      mine: isMine(c),
     });
   }
   return out;
@@ -428,12 +543,14 @@ async function commentsOf(card: Task): Promise<CommentView[]> {
 
 /** Название для задачи без него — по сути описания (как просит доска), а не первой строкой. */
 async function makeTitle(description: string): Promise<string> {
-  const fallback = description.trim().split('\n')[0]?.replace(/[#*_`>[\]]/g, '').trim().slice(0, 80) || 'Задача без описания';
+  const fallback = firstLine(description);
   if (!description.trim()) return fallback;
   try {
     const { title } = await askClaude<{ title: string }>(cfg.claude.bin, cfg.titleModel, titlePrompt(description), TITLE_SCHEMA, childEnv());
     return title.trim() || fallback;
   } catch (e) {
+    // Claude недоступен — задачу не берём вовсе, а не даём ей временное название навсегда.
+    if (e instanceof ClaudeError && e.outage) throw e;
     log(`Название не придумалось (${message(e)}) — беру первую строку описания.`);
     return fallback;
   }
@@ -494,7 +611,7 @@ async function downloadInputs(description: string, comments: CommentView[], dir:
   const seen = new Set<string>();
   const out: InputFile[] = [];
   for (const { where, text } of sources) {
-    for (const url of text.match(/https?:\/\/[^\s<>()"'\]]+/g) ?? []) {
+    for (const url of linksIn(text)) {
       if (seen.has(url) || !board.isOwnFile(url)) continue;
       seen.add(url);
       try {
@@ -541,6 +658,11 @@ function pickFiles(list: Attachment[], outDir: string, exts: string[], skipped: 
 }
 
 // ---------- Мелочи ----------
+
+/** Комментарий этого агента — по префиксу sourceKey. */
+function isMine(c: TaskComment): boolean {
+  return !!c.sourceKey?.startsWith(`${SOURCE}:`);
+}
 
 /** Окружение Claude — без токена доски: доской управляет только монитор. */
 function childEnv(): NodeJS.ProcessEnv {

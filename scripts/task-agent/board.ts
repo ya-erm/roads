@@ -35,8 +35,23 @@ export interface Task {
   /** Текст описания, если сервер отдаёт его вместе с карточкой. */
   description?: string;
   comments?: TaskComment[];
+  /** Смены статуса (в полной карточке). */
+  history?: { at: string; actor?: string; from?: TaskStatus; to?: TaskStatus }[];
   createdAt?: string;
   updatedAt?: string;
+}
+
+/**
+ * Доработка уже отработана: задачу вернули в «Доработать» раньше, чем вышел последний отчёт агента
+ * (человек и агент разминулись), и после отчёта люди ничего не написали. Брать её снова незачем.
+ */
+export function staleRevision(card: Task, mine: (c: TaskComment) => boolean): boolean {
+  const time = (s?: string) => Date.parse(s ?? '') || 0;
+  const lastReport = Math.max(0, ...(card.comments ?? []).filter(mine).map((c) => time(c.createdAt)));
+  if (!lastReport) return false;
+  const lastRevision = Math.max(0, ...(card.history ?? []).filter((h) => h.to === 'revision').map((h) => time(h.at)));
+  const humanAfter = (card.comments ?? []).some((c) => !mine(c) && time(c.createdAt) > lastReport);
+  return lastRevision > 0 && lastRevision < lastReport && !humanAfter;
 }
 
 /**
