@@ -2377,6 +2377,8 @@ export class Game implements BuildContext {
       carriedMonth: 0,
       carriedLast: 0,
       problem: null,
+      // Интервал у нового маршрута выключен: машины уходят с первой станции, как только готовы.
+      noSpacing: true,
     };
     this.lines.set(n, line);
     this.journal.add('line', { id: n, name: line.name, mode: line.mode, stops: clean });

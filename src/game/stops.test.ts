@@ -49,6 +49,8 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
     }
     const line = game.createLine(stops.map((s) => s.id))!;
     expect(line).not.toBeNull();
+    // С интервалом второй автобус набирает пассажиров на первой остановке и успевает довезти их за месяц.
+    game.setLineSpacing(line.id, true);
     expect(game.buyVehicle(line.id, 'truck')).toBeNull();
     expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
     expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();

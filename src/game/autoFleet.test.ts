@@ -203,6 +203,7 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
 
   it('купленные разом грузовики уходят с первой станции с интервалом, а не пачкой', () => {
     const { game, line } = farmRoute();
+    game.setLineSpacing(line.id, true);
     const trucks = [0, 1, 2].map(() => game.buyVehicle(line.id, 'truck')!);
     const departed = new Map<number, number>();
     let waitedForInterval = false;
@@ -230,6 +231,7 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
 
   it('машину, которая ждёт интервала, можно отправить вручную сразу', () => {
     const { game, line } = farmRoute();
+    game.setLineSpacing(line.id, true);
     const trucks = [0, 1, 2].map(() => game.buyVehicle(line.id, 'truck')!);
     game.speed = 1;
     let waiting: FleetVehicle | undefined;
@@ -248,7 +250,8 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
 
   it('выключенный интервал отпускает новые машины сразу, без очереди по одной', () => {
     const { game, line } = farmRoute();
-    game.setLineSpacing(line.id, false);
+    // У нового маршрута интервал выключен сразу.
+    expect(line.noSpacing).toBe(true);
     const trucks = [0, 1, 2].map(() => game.buyVehicle(line.id, 'truck')!);
     game.speed = 1;
     let anyWaited = false;
@@ -271,5 +274,29 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
       if (game.spacingLeft(extra) !== null) waitedAgain = true;
     }
     expect(waitedAgain).toBe(true);
+  });
+
+  it('новый маршрут — интервал выключен; старое сохранение без поля — как раньше, с интервалом', () => {
+    const { game, line } = farmRoute();
+    expect(line.noSpacing).toBe(true);
+    const reload = (save: ReturnType<Game['toSave']>) => withoutCitizens(new Game(game.settings, JSON.parse(JSON.stringify(save))));
+    // Выключенный интервал сохраняется; включённый игроком — тоже.
+    expect(reload(game.toSave()).lines.get(line.id)!.noSpacing).toBe(true);
+    game.setLineSpacing(line.id, true);
+    expect(reload(game.toSave()).lines.get(line.id)!.noSpacing).toBe(false);
+    // В сохранении до этого изменения поля нет — интервал включён: машины выжидают очередь на первой станции.
+    const save = JSON.parse(JSON.stringify(game.toSave()));
+    delete save.lines[0].noSpacing;
+    const old = reload(save);
+    const oldLine = old.lines.get(line.id)!;
+    expect(oldLine.noSpacing).toBeUndefined();
+    const trucks = [0, 1, 2].map(() => old.buyVehicle(oldLine.id, 'truck')!);
+    old.speed = 1;
+    let waited = false;
+    for (let t = 0; t < MONTH_LENGTH * 6 && !waited; t += 0.1) {
+      old.update(0.1);
+      waited = trucks.some((v) => old.spacingLeft(v) !== null);
+    }
+    expect(waited).toBe(true);
   });
 });
