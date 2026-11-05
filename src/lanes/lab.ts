@@ -1,6 +1,7 @@
 import type { Vec } from '../core/vec';
 import { Camera } from '../render/camera';
 import type { Vehicle } from '../sim/vehicle';
+import { siteRoot } from '../testpages/route';
 import { LaneDemand } from './demand';
 import { LaneRenderer } from './draw';
 import { LabEditor, LabTool, PROFILES } from './editor';
@@ -14,6 +15,9 @@ const canvas = document.getElementById('lab') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
 const toolbar = document.getElementById('tools') as HTMLElement;
 const panel = document.getElementById('panel') as HTMLElement;
+// «К игре» — корень сайта: лаборатория открывается и как /lab.html, и как /test/lanes (dev), и из подпапки на Pages.
+const home = document.getElementById('home');
+if (home instanceof HTMLAnchorElement) home.href = siteRoot(location.pathname);
 const camera = new Camera();
 const lab = buildLab();
 const renderer = new LaneRenderer();

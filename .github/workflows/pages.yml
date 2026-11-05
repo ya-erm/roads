@@ -1,0 +1,57 @@
+# Сборка и публикация игры на GitHub Pages при каждом push в main (и вручную — Actions → Run workflow).
+# В настройках репозитория: Settings → Pages → Source: GitHub Actions, Custom domain: roads.ya-erm.ru.
+# Свой домен задаётся там же, а не файлом CNAME: при публикации через Actions CNAME в сборке не читается.
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Одна публикация за раз; начатую не прерываем, чтобы сайт не остался наполовину обновлённым.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # Проверка типов и сборка всех страниц (игра, лаборатория, /test) в dist с относительными путями.
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
+
+  # Тесты — отдельно и не держат публикацию: красный значок виден на коммите, сайт при этом обновится.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test

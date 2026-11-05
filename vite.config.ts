@@ -29,6 +29,9 @@ const testPages: Plugin = {
 };
 
 export default defineConfig({
+  // Относительные пути в сборке: одна и та же dist работает и в корне домена (roads.ya-erm.ru), и в подпапке
+  // (ya-erm.github.io/roads/). Ссылки между страницами строятся от корня сайта — src/testpages/route.ts, siteRoot.
+  base: './',
   plugins: [testPages],
   server: {
     port: 4800,
