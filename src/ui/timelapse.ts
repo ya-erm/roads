@@ -842,8 +842,8 @@ class TimelapsePlayer {
     ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(255,255,255,0.7)';
     ctx.fillStyle = 'rgba(31,41,51,0.7)';
-    ctx.strokeText('Развязка', this.w - 10, this.h - 10);
-    ctx.fillText('Развязка', this.w - 10, this.h - 10);
+    ctx.strokeText('Дороги региона', this.w - 10, this.h - 10);
+    ctx.fillText('Дороги региона', this.w - 10, this.h - 10);
   }
 
   private coinIcon(x: number, y: number): void {
