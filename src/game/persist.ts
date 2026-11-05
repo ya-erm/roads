@@ -13,16 +13,38 @@ function testSlot(pathname: string): string | null {
 }
 const KEY = slot ? `razvyazka-save:${slot}` : 'razvyazka-save';
 
-/** Сохраняет игру в localStorage. Возвращает false, если места не хватило. */
+/** Сколько последних записей журнала оставить, если целиком партия в localStorage не влезает. */
+const JOURNAL_TAIL = 3000;
+
+/**
+ * Сохраняет игру в localStorage. Журнал большой: не влезает целиком — пишем его хвост, потом без него
+ * (в игре он остаётся целиком, а в сохранениях со своим именем — IndexedDB — хранится полностью).
+ * Кадры таймлапса сами держатся в пределах (timelapse.ts) и уходят последними: без них — только если иначе
+ * партия не сохранится вовсе. Возвращает false, если места не хватило и так.
+ */
 export function saveGame(game: Game, camera?: Camera): boolean {
+  let data: SaveData;
   try {
-    const data = game.toSave();
-    if (camera) data.view = { x: camera.x, y: camera.y, zoom: camera.zoom };
-    localStorage.setItem(KEY, JSON.stringify(data));
-    return true;
+    data = game.toSave();
   } catch {
     return false;
   }
+  if (camera) data.view = { x: camera.x, y: camera.y, zoom: camera.zoom };
+  const tries: Partial<SaveData>[] = [
+    { journal: data.journal },
+    { journal: data.journal?.slice(-JOURNAL_TAIL) },
+    { journal: undefined },
+    { journal: undefined, timelapse: undefined },
+  ];
+  for (const patch of tries) {
+    try {
+      localStorage.setItem(KEY, JSON.stringify({ ...data, ...patch }));
+      return true;
+    } catch {
+      // Не влезло — пробуем короче.
+    }
+  }
+  return false;
 }
 
 export function loadSave(): SaveData | null {

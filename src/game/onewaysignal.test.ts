@@ -5,6 +5,7 @@ import type { Station } from '../world/entities';
 import { RAIL_SPEC, TRACK_GAP } from '../world/roadTypes';
 import type { RoadRequest, Snap } from './build';
 import { Game } from './game';
+import { withoutCitizens } from './testkit';
 
 function runSeconds(game: Game, seconds: number, each?: () => void) {
   game.speed = 1;
@@ -18,9 +19,12 @@ function straight(from: Vec, to: Vec): RoadRequest {
   return { start: { kind: 'free', pos: from, level: 0 }, end: { kind: 'free', pos: to, level: 0 }, spec: RAIL_SPEC, mode: 'straight' };
 }
 
-/** Длинный путь с вокзалами у концов (как в rail.test.ts); сбоку (−n) есть место для второго пути. */
+/**
+ * Длинный путь с вокзалами у концов (как в rail.test.ts); сбоку (−n) есть место для второго пути. В чистом поле,
+ * без машин жителей: сюда они не доезжают, а счёт отнимают.
+ */
 function railWorld(): { game: Game; a: Station; b: Station; at: (k: number, side?: number) => Vec; dir: Vec; n: Vec } {
-  const game = new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' });
+  const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' }));
   const len = 2400;
   for (let y = 400; y < game.terrain.height - 400; y += 170) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 230) {

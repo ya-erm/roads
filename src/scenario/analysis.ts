@@ -42,6 +42,32 @@ export function producible(game: Game, cargo: CargoType, seen: ReadonlySet<Cargo
   return game.industries.some((i) => i.info.produces === cargo && i.info.accepts.every((c) => producible(game, c, next)));
 }
 
+/** Перевозка дальше полутора километров весит больше одной: дольше строить дорогу, нужно больше машин. */
+const LINK_LEN = 2500;
+
+/**
+ * Сколько работы — наладить поставки груза получателю to: перевозки самой лёгкой цепочки (сырьё → завод → …
+ * → получатель), длинная весит больше одной; уже налаженные (has — туда этот груз уже возили) не в счёт.
+ * Получить нельзя — Infinity.
+ */
+export function supplyEffort(game: Game, cargo: CargoType, to: Place, has: (to: Ref, cargo: CargoType) => boolean, seen: ReadonlySet<CargoType> = new Set()): number {
+  if (has(refOf(to), cargo)) return 0;
+  if (seen.has(cargo) || seen.size > 3) return Infinity;
+  const next = new Set(seen).add(cargo);
+  const at = posOf(to);
+  const makers = game.industries
+    .filter((i) => i.info.produces === cargo)
+    .sort((a, b) => dist(a.fp.center, at) - dist(b.fp.center, at))
+    .slice(0, 3);
+  let best = Infinity;
+  for (const m of makers) {
+    let cost = Math.max(1, dist(m.fp.center, at) / LINK_LEN);
+    for (const c of m.info.accepts) cost += supplyEffort(game, c, m, has, next);
+    best = Math.min(best, cost);
+  }
+  return best;
+}
+
 /** Кто принимает груз: заводы, которым это сырьё, и города, которым он нужен. */
 export function receivers(game: Game, cargo: CargoType): Place[] {
   return [...game.industries.filter((i) => i.info.accepts.includes(cargo)), ...game.towns.filter((t) => t.demands.includes(cargo))];
@@ -90,6 +116,24 @@ export function network(game: Game): NetworkInfo {
   return { stations: [...stations.values()], towns, industries, freight, pax };
 }
 
+/**
+ * Что подключено к сети: города — в охвате любой работающей станции (пассажиры или поставки в город),
+ * предприятия — у грузовых станций. Для заданий «подключить новые города и предприятия».
+ */
+export function connected(game: Game): { towns: Set<number>; industries: Set<number> } {
+  const info = network(game);
+  const towns = new Set(info.towns);
+  for (const st of info.stations) if (st.serves.cargo) for (const t of st.townIds) towns.add(t);
+  return { towns, industries: info.industries };
+}
+
+/** Сколько перевезли в прошлом месяце маршруты, созданные с момента since (у старых маршрутов отметки нет — не в счёт). */
+export function newRoutesCarried(game: Game, since: number): number {
+  let sum = 0;
+  for (const line of game.lines.values()) if (line.created !== undefined && line.created >= since) sum += line.carriedLast;
+  return sum;
+}
+
 /** До ближайшей работающей станции игрока; сети нет — Infinity. */
 export function distToNetwork(info: NetworkInfo, p: Vec): number {
   let best = Infinity;
@@ -126,8 +170,8 @@ export function rawOutput(ind: Industry, months: number): number {
   return total;
 }
 
-/** Месяца на стройку и разгон, прежде чем груз пойдёт. */
-export const RAMP = 2;
+/** Месяц на стройку и разгон, прежде чем груз пойдёт. */
+export const RAMP = 1;
 
 /**
  * Сколько груза можно привезти к точке за months месяцев: от двух ближайших производителей не дальше maxDist.
@@ -147,7 +191,7 @@ export function cargoPotential(game: Game, cargo: CargoType, near: Vec, months: 
       continue;
     }
     const inputs = ind.info.accepts.map((c) => cargoPotential(game, c, ind.fp.center, months - 1, maxDist, depth + 1));
-    total += Math.min(Math.min(...inputs), 120 * (ind.level ?? 1) * work);
+    total += Math.min(Math.min(...inputs), ECONOMY.processRate * (ind.level ?? 1) * work);
   }
   return total;
 }

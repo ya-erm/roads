@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MONTH_LENGTH, STOP } from '../config';
+import { STOP } from '../config';
 import { dist } from '../core/vec';
 import { LANE_W } from '../world/roadTypes';
 import { buildBusScene } from './bus';
@@ -23,7 +23,7 @@ describe('Тестовая страница /test/bus', { timeout: 60_000 }, () 
     const inBay: number[] = [];
     game.speed = 1;
     // Круг с разворотами в тупиках и стоянками — около двух минут.
-    for (let t = 0; t < 4 * MONTH_LENGTH; t += 0.1) {
+    for (let t = 0; t < 160; t += 0.1) {
       game.update(0.1);
       for (const v of game.fleet.values()) {
         if (v.state !== 'loading') continue;

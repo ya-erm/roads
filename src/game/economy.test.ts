@@ -1,66 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { MONTH_LENGTH } from '../config';
-import { dist, Vec } from '../core/vec';
+import { ECONOMY, MONTH_LENGTH } from '../config';
+import { dist } from '../core/vec';
 import type { IndustryKind } from '../world/cargo';
-import type { RoadOptions } from '../lanes/edit';
-import { twoWay } from '../lanes/model';
-import type { Industry, Station } from '../world/entities';
+import type { Station } from '../world/entities';
 import { Game } from './game';
-import { road, roadPlan, stationExit, townStreets } from './testkit';
+import { freightRoute, runMonths, townStreets, withoutCitizens } from './testkit';
 import { MODELS, modelsFor } from './transport';
 
 /**
- * Экономика: типичные линии должны окупаться, если их разумно построить,
- * а движение в городах — не вставать со временем (иначе линии постепенно уходят в минус).
+ * Экономика: типичные линии должны окупаться, если их разумно построить.
+ * Что движение в городах не встаёт со временем — в townTraffic.test.ts.
  */
 
-function runMonths(game: Game, months: number, each?: () => void) {
-  game.speed = 1;
-  for (let t = 0; t < months * MONTH_LENGTH; t += 0.1) {
-    game.update(0.1);
-    each?.();
-  }
-}
-
-function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Station | null {
-  const base = Math.atan2(toward.y - ind.fp.center.y, toward.x - ind.fp.center.x);
-  for (const k of [0, 1, -1, 2]) {
-    const a = base + (k * Math.PI) / 2;
-    const reach = Math.hypot(ind.fp.w, ind.fp.h) / 2 + 20;
-    const st = game.placeStation({ x: ind.fp.center.x + Math.cos(a) * reach, y: ind.fp.center.y + Math.sin(a) * reach }, 14);
-    if (st) return st;
-  }
-  return null;
-}
-
-/** Соединяет выезды двух станций дорогой из двух кусков. */
-function connect(game: Game, sA: Station, sB: Station, profile: RoadOptions): boolean {
-  const A = stationExit(game, sA.nodeId);
-  const B = stationExit(game, sB.nodeId);
-  const d = { x: B.pos.x - A.pos.x, y: B.pos.y - A.pos.y };
-  const n = { x: -d.y / Math.hypot(d.x, d.y), y: d.x / Math.hypot(d.x, d.y) };
-  for (const off of [0, 150, -150, 300, -300, 450, -450, 600, -600]) {
-    const M = { x: (A.pos.x + B.pos.x) / 2 + n.x * off, y: (A.pos.y + B.pos.y) / 2 + n.y * off };
-    if (!roadPlan(game, A.id, { free: M }, profile).ok) continue;
-    road(game, A.id, { free: M }, profile);
-    if (road(game, M, B.id, profile)) return true;
-  }
-  return false;
-}
-
-/** Грузовая линия между ближайшей парой предприятий; итоги за months месяцев после разгона. */
+/**
+ * Грузовая линия между ближайшей парой предприятий; итоги за months месяцев после разгона. Трасса — своя сеть
+ * в стороне от городов, машины жителей на неё не попадают: без них месяц симуляции — доли секунды.
+ */
 function freightLine(seed: number, from: IndustryKind, to: IndustryKind, trucks: number, months: number) {
-  const game = new Game(seed);
-  game.money = 5_000_000;
-  const pairs = game.industries
-    .filter((i) => i.info.kind === from)
-    .flatMap((f) => game.industries.filter((i) => i.info.kind === to).map((p) => ({ f, p, d: dist(f.fp.center, p.fp.center) })))
-    .sort((a, b) => a.d - b.d);
-  const { f, p } = pairs[0];
-  const sA = stationAtIndustry(game, f, p.fp.center)!;
-  const sB = stationAtIndustry(game, p, f.fp.center)!;
-  expect(connect(game, sA, sB, { cls: 'highway', lanes: twoWay(1, 1) })).toBe(true);
-  const line = game.createLine([sA.id, sB.id])!;
+  const game = withoutCitizens(new Game(seed));
+  const { built, line, from: f } = freightRoute(game, from, to);
+  expect(built).toBe(true);
   for (let i = 0; i < trucks; i++) game.buyVehicle(line.id, 'truck');
   runMonths(game, 1);
   const r0 = line.revenueTotal;
@@ -75,7 +34,7 @@ function freightLine(seed: number, from: IndustryKind, to: IndustryKind, trucks:
 // Симуляции на месяцы вперёд — дольше стандартного лимита теста.
 describe('Экономика', { timeout: 60_000 }, () => {
   it('грузовики на линии ферма → комбинат окупаются, а ферма растёт', () => {
-    const r = freightLine(7, 'farm', 'foodplant', 2, 6);
+    const r = freightLine(7, 'farm', 'foodplant', 2, 2);
     // Выручка заметно больше содержания.
     expect(r.revenue).toBeGreaterThan(r.cost * 2);
     // Продукцию исправно вывозят — производство растёт.
@@ -129,6 +88,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
   });
 
   it('автобусы в городе окупаются', () => {
+    // Машины жителей здесь нужны: автобусы делят с ними улицы.
     const game = new Game(7);
     game.money = 5_000_000;
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
@@ -149,25 +109,11 @@ describe('Экономика', { timeout: 60_000 }, () => {
     runMonths(game, 1);
     const r0 = line.revenueTotal;
     let cost = 0;
-    for (let m = 0; m < 6; m++) {
+    for (let m = 0; m < 2; m++) {
       runMonths(game, 1);
       cost += line.costLast;
     }
     expect(line.revenueTotal - r0).toBeGreaterThan(cost);
-  });
-
-  it('движение в городах не встаёт со временем', () => {
-    const game = new Game(7);
-    runMonths(game, 2);
-    const arrivals: number[] = [];
-    let last = game.traffic.arrivals;
-    for (let m = 0; m < 6; m++) {
-      runMonths(game, 1);
-      arrivals.push(game.traffic.arrivals - last);
-      last = game.traffic.arrivals;
-    }
-    // Пропускная способность не падает: последний месяц не хуже 85% первого.
-    expect(arrivals[arrivals.length - 1]).toBeGreaterThan(arrivals[0] * 0.85);
   });
 
   it('модели по эпохам: новые появляются со временем, старые меняются на новые', () => {
@@ -179,9 +125,15 @@ describe('Экономика', { timeout: 60_000 }, () => {
     expect(modelsFor('road', game.year)).toEqual(['truck', 'bus']);
     expect(game.buyVehicle(line.id, 'truck3')).toBeNull();
     expect(game.replacementFor(v)).toBeNull();
-    // Прошло 27 лет: есть «Фура» — её предлагают взамен, содержание старого не растёт.
-    (game as unknown as { month: number }).month = 27 * 12;
-    expect(game.year).toBe(1987);
+    // Эпохи сжаты втрое (месяц втрое длиннее): «Грузовик II» — в 1964-м, «Фура» — в 1969-м.
+    expect(MODELS.truck2.year).toBe(1964);
+    expect(MODELS.truck3.year).toBe(1969);
+    (game as unknown as { month: number }).month = 4 * 12;
+    expect(modelsFor('road', game.year)).toContain('truck2');
+    expect(game.replacementFor(v)).toBe('truck2');
+    // Прошло 9 лет: есть «Фура» — её предлагают взамен, содержание старого не растёт.
+    (game as unknown as { month: number }).month = 9 * 12;
+    expect(game.year).toBe(1969);
     expect(modelsFor('road', game.year)).toContain('truck3');
     expect(game.runningCost(v)).toBe(MODELS.truck.running);
     expect(game.replacementFor(v)).toBe('truck3');
@@ -192,14 +144,15 @@ describe('Экономика', { timeout: 60_000 }, () => {
   });
 
   it('кредит: проценты раз в месяц, гасится частями', () => {
-    const game = new Game(7);
+    // Проценты от жителей не зависят: месяц — без их машин.
+    const game = withoutCitizens(new Game(7));
     const money = game.money;
     expect(game.takeLoan()).toBe(true);
     expect(game.loan).toBe(100_000);
     expect(game.money).toBe(money + 100_000);
     runMonths(game, 1);
     const rec = game.history[game.history.length - 1];
-    expect(rec.ledger!.interest).toBe(1_000);
+    expect(rec.ledger!.interest).toBe(Math.round(100_000 * ECONOMY.loanRate));
     expect(game.repayLoan()).toBe(true);
     expect(game.loan).toBe(0);
     expect(game.repayLoan()).toBe(false);

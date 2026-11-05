@@ -1,6 +1,8 @@
 import type { Game } from '../game/game';
 import type { Camera } from '../render/camera';
+import { waterPath } from '../render/relief';
 import { smoothPath } from '../render/renderer';
+import { BIOMES } from '../world/biomes';
 import { cargoImage } from './cargoIcons';
 
 const WIDTH = 200;
@@ -66,23 +68,33 @@ export class Minimap {
     const g = this.game();
     const { w, h, k } = this.size();
     const [c, ctx] = this.layer(w, h);
-    ctx.fillStyle = '#d6e2bd';
+    const pal = BIOMES[g.terrain.biome].palette;
+    ctx.fillStyle = pal.grass;
     ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = 'rgba(110, 154, 82, 0.35)';
+    // Деревья — точками цвета леса биома (тайга темнее, пустыня — редкие кусты).
+    ctx.fillStyle = pal.trees[3] + '59';
     for (const tree of g.terrain.trees) ctx.fillRect(tree.pos.x * k, tree.pos.y * k, 1, 1);
     ctx.strokeStyle = '#8cc3e6';
     ctx.fillStyle = '#8cc3e6';
     ctx.lineCap = 'round';
-    for (const r of g.terrain.rivers) {
-      ctx.lineWidth = Math.max(1.5, r.width * k);
-      ctx.beginPath();
-      smoothPath(ctx, r.points, k);
-      ctx.stroke();
-    }
-    for (const lake of g.terrain.lakes) {
-      ctx.beginPath();
-      ctx.arc(lake.center.x * k, lake.center.y * k, lake.radius * k, 0, Math.PI * 2);
-      ctx.fill();
+    const shaped = waterPath(g.terrain);
+    if (shaped) {
+      ctx.save();
+      ctx.scale(k, k);
+      ctx.fill(shaped, 'evenodd');
+      ctx.restore();
+    } else {
+      for (const r of g.terrain.rivers) {
+        ctx.lineWidth = Math.max(1.5, r.width * k);
+        ctx.beginPath();
+        smoothPath(ctx, r.points, k);
+        ctx.stroke();
+      }
+      for (const lake of g.terrain.lakes) {
+        ctx.beginPath();
+        ctx.arc(lake.center.x * k, lake.center.y * k, lake.radius * k, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     this.base = c;
   }

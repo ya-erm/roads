@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
 import { Game } from '../game/game';
-import { road } from '../game/testkit';
-import { oneWay } from '../lanes/model';
+import { road, roadPlan } from '../game/testkit';
+import { oneWay, twoWay } from '../lanes/model';
 import { RoadTools } from './roadtools';
 
 const STREET = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
@@ -100,5 +100,45 @@ describe('Инструмент «Полоса»: протяжка', () => {
     const seam = net.node(ramp.portA ? ramp.a : ramp.b);
     expect(seam.pos.x - o.x).toBeCloseTo(250, -1);
     expect(net.problems()).toEqual([]);
+  });
+
+  it('въезд на магистраль за коротким куском после съезда: съезд из соседнего стыка — не «слишком близко»', () => {
+    // Как у игрока: магистраль 1+1 на восток, в стыке S1 вправо уходит съезд, через 20 м — ещё стык S2.
+    // Съезд за S2 идёт вплотную к магистрали («ёлочка» ещё не разошлась) — так построено, правке после S2 не мешает.
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 50_000_000, water: 'dry' });
+    const HIGHWAY = { cls: 'highway' as const, lanes: twoWay(1, 1) };
+    let o: Vec | null = null;
+    for (let y = 400; y < game.terrain.height - 400 && !o; y += 120) {
+      for (let x = 300; x < game.terrain.width - 1000 && !o; x += 160) {
+        const before = game.roads.net.clone();
+        const fits = road(game, { free: { x, y: y - 100 } }, { free: { x: x + 700, y: y - 100 } }, HIGHWAY) && road(game, { free: { x, y: y + 100 } }, { free: { x: x + 700, y: y + 100 } }, HIGHWAY);
+        game.roads.replace(before);
+        game.networkChanged();
+        if (fits && !game.roads.net.corridorsNear({ x: x + 350, y }, 450).length) o = { x, y };
+      }
+    }
+    expect(o).not.toBeNull();
+    const at = o!;
+    const setup = game.roadBuilder.plan(
+      (n) => {
+        const seam = (dx: number, dy = 0, dir = { x: 1, y: 0 }) => n.addSeam({ x: at.x + dx, y: at.y + dy }, dir);
+        const [W, S1, S2, E] = [seam(0), seam(300), seam(320), seam(700)];
+        n.addCorridor(W.id, S1.id, { cls: 'highway', lanes: [...twoWay(1, 1), { offset: 10.5, flow: 1, from: 200, to: Infinity }] });
+        n.addCorridor(S1.id, S2.id, { cls: 'highway', lanes: twoWay(1, 1) });
+        n.addCorridor(S2.id, E.id, { cls: 'highway', lanes: twoWay(1, 1) });
+        n.addCorridor(S1.id, seam(560, 90, { x: 0.95, y: 0.31 }).id, { cls: 'highway', portA: 10.5, lanes: oneWay(1) });
+      },
+      { raze: true },
+    );
+    expect(game.roadBuilder.apply(setup)).toBe(true);
+    const net = () => game.roads.net;
+    expect(net().problems()).toEqual([]);
+    const before = net().corridors.size;
+    // Въезд из поля с севера на полосы на запад, с полосой разгона — по куску после S2.
+    expect(drag(new RoadTools(() => game), [{ x: at.x + 640, y: at.y - 80 }, { x: at.x + 600, y: at.y - 40 }, { x: at.x + 560, y: at.y - 8.5 }, { x: at.x + 400, y: at.y - 8.5 }])).toBeNull();
+    expect(net().corridors.size).toBe(before + 2);
+    expect(net().problems()).toEqual([]);
+    // А дорога, что просто идёт рядом и ни с чем тут не сходится, по-прежнему слишком близко.
+    expect(roadPlan(game, { free: { x: at.x + 330, y: at.y - 14 } }, { free: { x: at.x + 390, y: at.y - 14 } }, HIGHWAY).reason).toBe('Слишком близко к другой дороге');
   });
 });

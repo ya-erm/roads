@@ -3,6 +3,7 @@ import { add, dist, rightNormal, scale, Vec } from '../core/vec';
 import type { Station } from '../world/entities';
 import { RAIL_SPEC } from '../world/roadTypes';
 import { Game } from './game';
+import { withoutCitizens } from './testkit';
 import type { StopRule } from './transport';
 
 function runSeconds(game: Game, seconds: number, each?: () => void) {
@@ -13,9 +14,9 @@ function runSeconds(game: Game, seconds: number, each?: () => void) {
   }
 }
 
-/** Длинный путь с вокзалами на три пути у концов. */
+/** Длинный путь с вокзалами на три пути у концов — в чистом поле, без машин жителей (сюда они не доезжают). */
 function railWorld(): { game: Game; a: Station; b: Station } {
-  const game = new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' });
+  const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
   const len = 2400;
   const serves = { pax: true, cargo: true };
   for (let y = 400; y < game.terrain.height - 400; y += 170) {

@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { STATION } from '../config';
+import { COST, STATION } from '../config';
 import { add, dist, scale, Vec } from '../core/vec';
-import { twoWay, type LaneNode } from '../lanes/model';
+import { twoWay, type Corridor, type LaneNode } from '../lanes/model';
 import { RoadTools } from '../input/roadtools';
-import type { TownBuilding } from '../world/entities';
-import type { RoadSpec } from '../world/roadTypes';
+import type { Station, TownBuilding } from '../world/entities';
+import { ROAD_PRESETS, specKmh, type RoadSpec } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
+import { fillStreet, nearHighway, type WorldContext } from '../world/worldgen';
 import { DEFAULT_RULE } from './transport';
 import { Game } from './game';
-import { AVENUE, End, roadPlan, stationExit, STREET } from './testkit';
+import { AVENUE, End, roadPlan, stationAtIndustry, stationExit, STREET, withoutCitizens } from './testkit';
 
 const AVENUE_SPEC: RoadSpec = { cls: 'avenue', lanesF: 2, lanesB: 2 };
 
@@ -139,7 +140,8 @@ describe('Станции', () => {
   });
 
   it('с бóльшим числом постов грузится больше машин одновременно', () => {
-    const game = new Game(42);
+    // Улица в чистом поле: машины жителей сюда не доезжают — без них счёт в разы быстрее.
+    const game = withoutCitizens(new Game(42));
     const road = fieldRoad(game, 500);
     const a = game.placeStation({ x: road.a.x + 120, y: road.y - 30 }, 14)!;
     const b = game.placeStation({ x: road.a.x + 380, y: road.y - 30 }, 14)!;
@@ -181,6 +183,99 @@ describe('Станции', () => {
     // Станция к северу от перекрёстка, ровно напротив ответвления.
     expect(st.fp.center.y).toBeLessThan(tee.pos.y - 30);
     expect(Math.abs(st.fp.center.x - tee.pos.x)).toBeLessThan(1);
+  });
+
+  it('выезд станции — сразу шоссе 1+1, 90 км/ч: у улицы, у перекрёстка и у предприятия; цена — по шоссе', () => {
+    const game = new Game(42);
+    game.money = 5_000_000;
+    const net = () => game.roads.net;
+    const shosse = ROAD_PRESETS.find((p) => p.id === 'road')!.spec;
+    expect(shosse).toEqual({ cls: 'highway', lanesF: 1, lanesB: 1 });
+    const expectShosse = (st: Station | null) => {
+      expect(st).not.toBeNull();
+      const node = net().node(st!.nodeId);
+      expect(node.corridors).toHaveLength(1);
+      const c = net().corridor(node.corridors[0]);
+      const spec: RoadSpec = { cls: c.cls, lanesF: c.lanes.filter((l) => l.flow > 0).length, lanesB: c.lanes.filter((l) => l.flow < 0).length, limit: c.limit };
+      expect(spec).toMatchObject(shosse);
+      expect(specKmh(spec)).toBe(90);
+    };
+    // У улицы: выезд от середины полотна. Цена — станция и выезд по цене шоссе (дороже такого же выезда-улицы).
+    const road = fieldRoad(game);
+    const p = { x: road.a.x + 200, y: road.y - 30 };
+    const plan = game.stationPlan(p, 14);
+    expect(plan.ok).toBe(true);
+    expect(plan.cost).toBe(COST.station + plan.driveway!.cost);
+    const asStreet = game.roadBuilder.road(plan.from!, { kind: 'free', pos: plan.nodePos! }, STREET);
+    expect(asStreet.ok).toBe(true);
+    expect(plan.driveway!.cost).toBeGreaterThan(asStreet.cost * 1.5);
+    expectShosse(game.placeStation(p, 14));
+    // У перекрёстка: выезд прямо из узла.
+    const tee = fieldTee(game);
+    const atJunction = game.placeStation({ x: tee.pos.x, y: tee.pos.y - 20 }, 14);
+    expectShosse(atJunction);
+    expect(stationExit(game, atJunction!.nodeId).id).toBe(tee.id);
+    // Главная дорога перекрёстка — по-прежнему улица запад — восток, а не ответвление с выездом напротив (шоссе быстрее).
+    const main = game.junctionMain(tee.id);
+    expect(main).not.toBeNull();
+    expect(main).not.toContain(net().node(atJunction!.nodeId).corridors[0]);
+    const farEnd = (id: number) => {
+      const c = net().corridor(id);
+      return net().node(c.a === tee.id ? c.b : c.a).pos;
+    };
+    for (const id of main!) expect(Math.abs(farEnd(id).y - tee.pos.y)).toBeLessThan(1);
+    // У предприятия: выезд от ворот грузового двора.
+    let dock: Station | null = null;
+    for (const ind of game.industries) {
+      dock = stationAtIndustry(game, ind, add(ind.fp.center, { x: 0, y: 300 }));
+      if (dock) break;
+    }
+    expectShosse(dock);
+    expect(dock!.industryId).not.toBeNull();
+  });
+
+  it('к перекрёстку с выездом-шоссе другой станции можно пристроить ещё одну станцию — напротив', () => {
+    const game = new Game(42);
+    const road = fieldRoad(game);
+    const north = game.placeStation({ x: road.a.x + 200, y: road.y - 30 }, 14)!;
+    const exit = stationExit(game, north.nodeId);
+    expect(exit.corridors).toHaveLength(3);
+    const p = { x: exit.pos.x, y: exit.pos.y + 20 };
+    const plan = game.stationPlan(p, 14);
+    expect(plan.reason).toBeUndefined();
+    expect(plan.from).toMatchObject({ kind: 'node', node: exit.id });
+    const south = game.placeStation(p, 14)!;
+    expect(south.fp.center.y).toBeGreaterThan(exit.pos.y + 30);
+    expect(stationExit(game, south.nodeId).id).toBe(exit.id);
+  });
+
+  it('у выезда-шоссе город застраивается, как у улицы: улица с автостанцией растёт, дома встают и рядом с выездом', () => {
+    const game = new Game(42);
+    const road = fieldRoad(game);
+    const st = game.placeStation({ x: road.a.x + 200, y: road.y - 30 }, 14)!;
+    const net = game.roads.net;
+    const drivewayId = net.node(st.nodeId).corridors[0];
+    const driveway = net.corridor(drivewayId);
+    expect(driveway.cls).toBe('highway');
+    const halves = stationExit(game, st.nodeId)
+      .corridors.filter((id) => id !== drivewayId)
+      .map((id) => net.corridor(id));
+    expect(halves).toHaveLength(2);
+    const ctx = (game as unknown as { worldContext(): WorldContext }).worldContext();
+    const streetLike = (c: Corridor) => (game as unknown as { streetLike(c: Corridor): boolean }).streetLike(c);
+    for (const c of halves) {
+      // Шоссе в узле делает улицу «частью магистрали» — но выезд станции не в счёт: город вдоль неё растёт.
+      expect(nearHighway(net, c)).toBe(true);
+      expect(nearHighway(net, c, ctx.driveways)).toBe(false);
+      expect(streetLike(c)).toBe(true);
+    }
+    // Дома встают и в паре десятков метров от выезда (от магистрали — не ближе 50 м от края).
+    const town = game.towns[0];
+    const before = new Set(town.buildings.map((b) => b.id));
+    for (const c of halves) fillStreet(ctx, town, c, 1);
+    const added = town.buildings.filter((b) => !before.has(b.id));
+    expect(added.length).toBeGreaterThan(0);
+    expect(Math.min(...added.map((b) => driveway.lut.closest(b.fp.center).d))).toBeLessThan(50);
   });
 
   it('курсор у самого перекрёстка вдоль дороги — тоже примыкание к узлу, а не отказ', () => {
@@ -330,7 +425,7 @@ describe('Станции', () => {
     const t = c2.lut.tangentAt(c2.length / 2);
     addHouse(game, { center: add(mid, scale({ x: -t.y, y: t.x }, 13)), w: 6, h: 6, angle: 0 }, 'landmark');
     expect(tools.upgrade(mid, AVENUE_SPEC, 4)).toBe('Мешает здание');
-    expect(driveway(st2).cls).toBe('street');
+    expect(driveway(st2).cls).toBe('highway');
   });
 
   it('у широкой дороги станция прилипает: у проспекта ставится, у магистрали — силуэт с понятной причиной', () => {
@@ -428,7 +523,8 @@ describe('Перенос станции', { timeout: 60_000 }, () => {
   }
 
   it('остановка переезжает на другую улицу: имя, пассажиры и маршрут те же, автобус доезжает до нового места; Ctrl+Z возвращает', () => {
-    const game = new Game(42);
+    // Улицы в чистом поле: машины жителей сюда не доезжают — без них счёт в разы быстрее.
+    const game = withoutCitizens(new Game(42));
     game.money = 5_000_000;
     const road = fieldRoad(game, 600);
     // Улица на юг из середины — туда перенесём остановку.

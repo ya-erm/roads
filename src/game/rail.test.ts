@@ -7,7 +7,7 @@ import { RAIL_SPEC, RoadSpec } from '../world/roadTypes';
 import type { RoadRequest, Snap } from './build';
 import { Game } from './game';
 import { snapRails } from './railFragment';
-import { road, roadPlan, STREET as STREET_LANES } from './testkit';
+import { road, roadPlan, STREET as STREET_LANES, withoutCitizens } from './testkit';
 import { carsOf, vehicleCapacity } from './transport';
 import { wagonFills } from '../sim/wagons';
 import { CARGO } from '../world/cargo';
@@ -102,8 +102,9 @@ function junctionYard(game: Game, far: Vec[], withRoad = false): Vec {
   });
 }
 
+/** Путь с вокзалами в чистом поле — вдали от городов: без машин жителей (они не доезжают сюда, а счёт отнимают). */
 function railWorld(): { game: Game; a: Station; b: Station; from: Vec; dir: Vec } {
-  const game = new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' });
+  const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' }));
   const len = 2400;
   const { from, dir } = layTrack(game, len);
   const n = { x: -dir.y, y: dir.x };
@@ -348,7 +349,7 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
     expect(game.levelCrossings).toHaveLength(1);
     expect(game.fleetTrain(v)).toBeDefined();
     expect(game.fleetTrain(v)!.moving).toBe(true);
-    const loaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
+    const loaded = withoutCitizens(new Game(game.settings, JSON.parse(JSON.stringify(game.toSave()))));
     const lv = loaded.fleet.get(v.id)!;
     const t0 = game.fleetTrain(v)!;
     const t1 = loaded.fleetTrain(lv)!;

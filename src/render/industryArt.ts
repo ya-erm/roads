@@ -1,4 +1,4 @@
-import type { IndustryKind } from '../world/cargo';
+import type { CargoType, IndustryKind } from '../world/cargo';
 import type { Industry } from '../world/entities';
 
 /**
@@ -615,6 +615,55 @@ class Art {
     if (!this.lod) return;
     c.fillStyle = load;
     c.fillRect(x - 2.2, y - 1.3, 4.4, 2.6);
+  }
+
+  /** Корова на выгуле: туловище, голова и пятно. Только вблизи — издалека стадо не разглядеть. */
+  animal(x: number, y: number, angle: number, i: number, sheep = false): void {
+    if (this.pass !== 2 || !this.d) return;
+    const c = this.c;
+    if (sheep) {
+      // Овца: круглое белое руно и тёмная голова.
+      c.save();
+      c.translate(x, y);
+      c.rotate(angle);
+      c.fillStyle = 'rgba(30,40,25,0.22)';
+      c.beginPath();
+      c.ellipse(this.sx * 0.6, this.sy * 0.6, 1.6, 1.2, 0, 0, Math.PI * 2);
+      c.fill();
+      c.fillStyle = this.r(i * 11 + 7) < 0.15 ? '#d9cfbd' : '#f6f3ea';
+      c.beginPath();
+      c.ellipse(0, 0, 1.6, 1.2, 0, 0, Math.PI * 2);
+      c.fill();
+      c.fillStyle = '#3d3a36';
+      c.beginPath();
+      c.ellipse(1.8, 0, 0.6, 0.45, 0, 0, Math.PI * 2);
+      c.fill();
+      c.restore();
+      return;
+    }
+    const brown = this.r(i * 11 + 7) < 0.4;
+    const body = brown ? '#8a5a3c' : '#f2efe8';
+    c.save();
+    c.translate(x, y);
+    c.rotate(angle);
+    c.fillStyle = 'rgba(30,40,25,0.22)';
+    c.beginPath();
+    c.ellipse(this.sx * 0.8, this.sy * 0.8, 2.2, 1.1, 0, 0, Math.PI * 2);
+    c.fill();
+    c.fillStyle = body;
+    c.beginPath();
+    c.ellipse(0, 0, 2.2, 1.1, 0, 0, Math.PI * 2);
+    c.fill();
+    c.fillStyle = brown ? '#5e3c27' : '#3d3a36';
+    c.beginPath();
+    c.ellipse(2.4, 0, 0.8, 0.6, 0, 0, Math.PI * 2);
+    c.fill();
+    if (!brown) {
+      c.beginPath();
+      c.ellipse(-0.6 + this.r(i * 11 + 8) * 1.2, -0.2, 0.7, 0.5, 0, 0, Math.PI * 2);
+      c.fill();
+    }
+    c.restore();
   }
 
   /** Конвейер-эстакада: z0 и z1 — высота концов (тень отходит от ленты). */
@@ -1242,6 +1291,711 @@ function factory(a: Art, ind: Industry): void {
   a.smoke(-18, 18.5, 1, '150,150,156', 1.1);
 }
 
+/** Стадо на выгуле: n коров в прямоугольнике, места и повороты — от id предприятия. */
+function herd(a: Art, x: number, y: number, w: number, h: number, n: number, i: number, sheep = false): void {
+  for (let k = 0; k < n; k++) {
+    a.animal(x + 3 + a.r(i + k) * (w - 6), y + 2.5 + a.r(i + 50 + k) * (h - 5), (a.r(i + 100 + k) - 0.5) * 2.4, i + k, sheep);
+  }
+}
+
+/** Животноводческая ферма: выгоны с изгородью и стадом, длинные коровники, силосы, рулоны сена, скотовоз. */
+function ranch(a: Art, ind: Industry): void {
+  const lv = a.level;
+  a.patch(-52, -37, 58, 74, '#a3bf72', 2);
+  for (let k = 0; k < 5; k++) a.stain(-44 + a.r(10 + k) * 44, -30 + a.r(20 + k) * 60, 6, 5, 'rgba(120,150,80,0.35)', 20 + k);
+  a.stain(-30, 10, 3.5, 2.5, '#86a3ad', 30, 0.15);
+  if (a.pass === 0 && a.lod) {
+    // Изгородь выгонов.
+    const c = a.c;
+    c.strokeStyle = '#8c6f4e';
+    c.lineWidth = 0.7;
+    c.beginPath();
+    c.rect(-50, -35, 54, 70);
+    c.moveTo(-23, -35);
+    c.lineTo(-23, 35);
+    c.moveTo(-50, 2);
+    c.lineTo(-23, 2);
+    c.stroke();
+  }
+  a.patch(10, -38, 43, 76, '#d4c6a0', 3);
+  a.fence(110, 80, '#8c6f4e');
+
+  const roof = ind.info.roof;
+  a.gable(12, -35, 40, 11, 6, roof);
+  a.gable(12, -21, 40, 11, 6, roof);
+  if (lv >= 3) a.gable(12, -7, 26, 10, 5, roof);
+  for (let k = 0; k < 2; k++) a.tank(44, -3 + k * 12, 4.5, 15, '#d5dadd', METAL);
+  for (let k = 0; k < Math.min(8, 3 + lv); k++) a.tank(16 + (k % 4) * 6, 9 + Math.floor(k / 4) * 6, 2.3, 2, '#e3c662', '#c8a742');
+  herd(a, -50, -35, 27, 37, Math.min(9, 3 + 2 * lv), 200);
+  herd(a, -50, 2, 27, 33, Math.min(6, 2 + lv), 300);
+  herd(a, -23, -35, 27, 70, Math.min(10, 4 + 2 * lv), 400);
+  a.tree(-2, 30, 4.5, '#6e9a52');
+  a.truck(32, 31, false, '#c4662f', '#b7a07a');
+}
+
+/** Песчаный карьер: светлая чаша с затопленным дном, земснаряд с пульповодом, сортировка и кучи песка. */
+function sandpit(a: Art, ind: Industry): void {
+  const sand = '#d9b77a';
+  const pit = ['#e4d2a4', '#d8c08c', '#cbae76', '#bc9d64'];
+  for (let k = 0; k < 4; k++) {
+    const m = 1 - k * 0.2;
+    a.stain(-16 + k * 1.2, 2 + k, 30 * m, 33 * m, pit[k], 5, 0.08, shade(pit[k], 0.3));
+  }
+  a.stain(-13, 6, 14, 13, '#7fa9b8', 8, 0.18, '#a9c7d1');
+  a.pipe(-10, 4, 20, -14, '#5c5f66', 1);
+  a.fence(100, 80, '#8a8f96');
+
+  const lv = a.level;
+  a.box(-14, 1, 7, 5, 2, '#e9b52f');
+  a.box(16, -34, 20, 16, 8, ind.info.roof, 1.8);
+  a.belt(30, -18, 7, 32, -2, 3);
+  a.heap(32, 4, 9 + Math.min(3, lv), sand, 1);
+  if (lv >= 2) a.heap(33, 23, 8, sand, 2);
+  if (lv >= 3) a.heap(44, -12, 5, shade(sand, -0.08), 3);
+  a.excavator(-30, -22, -34, -14);
+  if (a.d) a.vehicle(16, 14, 3.2, 4.6, YELLOW);
+  a.truck(8, 31, false, YELLOW, '#cbae76');
+}
+
+/** Мясокомбинат: загоны для скота, корпус с холодильником, кормовые силосы, рампа с рефрижераторами. */
+function meatplant(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(-52, -32, 26, 38, '#b8a684', 2);
+  a.rows(-52, -32, 26, 38, 6.5, 'rgba(110,85,60,0.55)', true, 0.5);
+  a.patch(-24, 10, 76, 22, '#cdc8bf', 2);
+  a.rows(-24, 10, 76, 22, 10, 'rgba(255,255,255,0.55)', true, 0.5);
+  a.fence(110, 70, '#8a8f96');
+
+  herd(a, -52, -32, 26, 38, Math.round(2 + 6 * fullness(ind.stock.livestock)), 500);
+  a.box(-22, -31, 42, 34, 7, roof);
+  for (let k = 0; k < 3; k++) a.flat(-18, -26 + k * 10, 34, 2, 'rgba(255,255,255,0.2)');
+  a.chimney(-14, -2, 2, 16, '#d9d4ca');
+  a.box(24, -31, 28, 22, 6, '#d5dde2', 2);
+  for (let k = 0; k < 3; k++) a.flat(27 + k * 8.5, -29.5, 4, 2.4, '#9aa3ab');
+  // Кормовые силосы: полнее склад зерна — больше силосов.
+  const silos = 1 + Math.min(2, Math.floor(fullness(ind.stock.grain) * 3));
+  for (let k = 0; k < silos; k++) a.tank(28 + k * 10, 0, 4.2, 14, '#ebe7df', '#b8b2a6');
+  a.box(-50, 10, 22, 22, 4, '#a88a63', 1.6);
+  for (let k = 0; k < Math.min(5, 1 + lv); k++) a.truck(-18 + k * 9, 22, true, roof, '#f4f1ea');
+  a.smoke(-14, -2, 1, '248,248,248');
+}
+
+/** Стекольный завод: составной цех, стекловаренная печь с высокой трубой, линия отжига, пирамиды стекла. */
+function glassworks(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(-2, 2, 58, 36, '#cfd3d6', 2);
+  a.stain(-44, 14, 15, 12, 'rgba(120,110,95,0.12)', 2);
+  a.fence(120, 80, '#8a8f96');
+
+  // Склад сырья: песок и уголь, кучи растут с запасом.
+  a.heap(-50, 10, 5 + 3 * fullness(ind.stock.sand), '#d9b77a', 1);
+  a.heap(-38, 22, 5 + 3 * fullness(ind.stock.coal), '#3d4148', 2);
+  a.belt(-46, 4, 2, -46, -14, 10);
+  a.box(-56, -34, 20, 20, 11, '#a9adb1', 1.6);
+  a.box(-32, -32, 46, 24, 9, roof);
+  for (let k = 0; k < 3; k++) a.flat(-28, -28 + k * 7, 38, 1.8, 'rgba(220,240,250,0.45)');
+  a.glow(-8, -8, 1.8);
+  // Линия отжига — длинная печь от варочного цеха.
+  a.box(14, -24, 42, 8, 4, '#c9cdd1', 1.4);
+  a.box(14, -36, 22, 10, 6, '#8f9aa3');
+  a.chimney(-22, 0, 2.6, 40, '#b9b4ad', '#c0392b');
+  for (let k = 0; k < Math.min(10, 3 + 2 * lv); k++) {
+    a.stack(2 + (k % 5) * 10.5, 6 + Math.floor(k / 5) * 10, 8, 6, 3, '#a9d8ea', 'rgba(255,255,255,0.75)', '#6d7076');
+  }
+  for (let k = 0; k < Math.min(3, lv); k++) a.truck(10 + k * 14, 32, false, roof, '#d9e6ec');
+  a.smoke(-22, 0, 1, '170,170,176', 1.1);
+}
+
+/** Мебельная фабрика: цех с шедовой крышей, пакеты досок и ящики стекла по запасу, склад и фургоны. */
+function furniture(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(4, -32, 44, 30, '#d8c8a2', 3);
+  a.patch(-48, 8, 96, 26, '#cdc8bf', 2);
+  a.stain(-40, 24, 8, 6, 'rgba(214,190,130,0.5)', 3);
+  a.fence(100, 70, '#8a8f96');
+
+  a.shed(-46, -31, 46, 34, 7, roof, '#ecdcb6', 6);
+  const planks = Math.min(4, 1 + Math.floor((ind.stock.planks ?? 0) / 40));
+  for (let k = 0; k < planks; k++) a.stack(6 + (k % 2) * 20, -30 + Math.floor(k / 2) * 13, 17, 10, 3, '#d8b377', '#b8925a', BARK);
+  const glass = Math.min(3, 1 + Math.floor((ind.stock.glass ?? 0) / 50));
+  for (let k = 0; k < glass; k++) a.stack(6 + k * 13, -4, 10, 5, 3, '#a9d8ea', 'rgba(255,255,255,0.75)', '#8a6a43');
+  a.box(10, 8, 36, 16, 6, '#b9a58c', 2);
+  for (let k = 0; k < 4; k++) a.flat(13 + k * 8.5, 23.4, 5, 1.4, '#55595f');
+  for (let k = 0; k < Math.min(6, 1 + lv); k++) a.stack(-44 + (k % 3) * 8, 10 + Math.floor(k / 3) * 6, 6.5, 5, 2.5, '#e2cfaa', 'rgba(0,0,0,0.12)');
+  a.chimney(-38, 26, 1.8, 18, '#b9b4ad');
+  for (let k = 0; k < Math.min(3, lv); k++) a.truck(-12 + k * 12, 30, false, roof, '#f4f1ea');
+  a.smoke(-38, 26, 1, '236,232,224');
+}
+
+/** Цементный завод: кучи камня и песка, сырьевая мельница, башня подогрева и вращающаяся печь, силосы цемента. */
+function cement(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.stain(0, 0, 54, 34, 'rgba(200,198,190,0.35)', 1, 0.1);
+  a.patch(24, 14, 32, 22, '#cdc8bf', 2);
+  a.fence(120, 80, '#8a8f96');
+
+  a.heap(-48, -24, 6 + 3 * fullness(ind.stock.stone), '#a9a49c', 1);
+  a.heap(-48, -4, 6 + 3 * fullness(ind.stock.sand), '#d9b77a', 2);
+  a.belt(-40, -14, 2, -26, -22, 9);
+  a.box(-30, -34, 18, 20, 9, roof, 1.6);
+  // Башня циклонного подогрева, от неё — длинная печь к холодильнику клинкера.
+  a.box(-8, -34, 14, 14, 26, '#a9adb1');
+  a.kiln(-2, -16, 48, 7);
+  a.box(44, -20, 12, 14, 5, '#8f969e', 1.6);
+  a.chimney(-24, 2, 2.6, 34, '#b9b4ad', '#9a4a36');
+  const silos = lv >= 3 ? 4 : 3;
+  for (let k = 0; k < silos; k++) a.tank(-40 + k * 13, 22, 5.8, 24, '#e2dfd8', '#b5b0a6');
+  a.box(10, 0, 12, 12, 7, '#b4b9be');
+  for (let k = 0; k < Math.min(3, lv); k++) a.truck(40, 18 + k * 7, false, '#c4662f', '#d9dde0');
+  a.smoke(-24, 2, 1, '178,172,164');
+}
+
+// ---------- Предприятия биомов ----------
+
+/** Точки по полю (цветки, коробочки хлопка) рядами со сдвигом — только вблизи, на земле. */
+function dots(a: Art, x: number, y: number, w: number, h: number, step: number, r: number, color: string, i: number): void {
+  if (a.pass !== 0 || !a.d) return;
+  const c = a.c;
+  c.fillStyle = color;
+  c.beginPath();
+  let k = 0;
+  for (let yy = y + step / 2; yy < y + h - r; yy += step) {
+    for (let xx = x + step / 2; xx < x + w - r; xx += step) {
+      k++;
+      const px = xx + (a.r(i * 997 + k) - 0.5) * step * 0.45;
+      const py = yy + (a.r(i * 991 + k) - 0.5) * step * 0.45;
+      c.moveTo(px + r, py);
+      c.arc(px, py, r, 0, Math.PI * 2);
+    }
+  }
+  c.fill();
+}
+
+interface Crop {
+  /** Цветущее (растущее) поле и его ряды. */
+  field: [string, string];
+  /** Поле под уборку. */
+  ripe: [string, string];
+  /** Цветки или коробочки по растущему полю. */
+  dot?: [string, number];
+  /** Тюки и рулоны урожая во дворе. */
+  bale: string;
+  /** Арык вдоль полей (хлопок в пустыне). */
+  canal?: boolean;
+}
+
+/** Поля одной культуры (лён, подсолнечник, хлопок): посевы, двор с амбаром, тюки урожая и трактор. */
+function cropFarm(a: Art, ind: Industry, crop: Crop): void {
+  const lv = a.level;
+  a.patch(-52, -37, 45, 34, crop.field[0], 1);
+  a.rows(-52, -37, 45, 34, 2.8, crop.field[1]);
+  a.patch(-52, 0, 45, 37, crop.ripe[0], 1);
+  a.rows(-52, 0, 45, 37, 2.8, crop.ripe[1], true);
+  a.patch(-4, -37, 17, 74, crop.field[0], 1);
+  a.rows(-4, -37, 17, 74, 2.8, crop.field[1]);
+  if (crop.dot) {
+    dots(a, -52, -37, 45, 34, 3.4, crop.dot[1], crop.dot[0], 1);
+    dots(a, -4, -37, 17, 74, 3.4, crop.dot[1], crop.dot[0], 2);
+  }
+  if (crop.canal) {
+    a.patch(-52, -2.6, 65, 2.2, '#86b3cf');
+    a.patch(-7.4, -37, 2.2, 74, '#86b3cf');
+  }
+  a.patch(16, -38, 37, 76, '#d8caa2', 3);
+  a.fence(110, 80, '#8c6f4e');
+
+  a.gable(18, -35, 26, 18, 7, ind.info.roof);
+  a.box(46, -35, 7, 14, 5, METAL, 1.6);
+  for (let k = 0; k < Math.min(9, 3 + 2 * lv); k++) {
+    a.stack(19 + (k % 3) * 9, -12 + Math.floor(k / 3) * 7, 7, 5.5, 2.5, crop.bale, shade(crop.bale, -0.22));
+  }
+  a.gable(22, 13, 18, 12, 6, '#7b5e4c');
+  a.tree(46, 30, 5, '#6e9a52');
+  a.tree(46, 12, 4, '#7aa55a');
+  if (a.d) {
+    const ty = -30 + a.r(3) * 58;
+    a.vehicle(4.5, ty, 3.2, 4.6, '#3f8f4a');
+    a.flat(3.6, ty - 0.6, 1.8, 1.6, '#2c6b37');
+  }
+}
+
+/** Льноводческое хозяйство: голубое цветущее поле, соломенное — под уборку, тресты в снопах. */
+function flaxfarm(a: Art, ind: Industry): void {
+  cropFarm(a, ind, { field: ['#93a9d9', '#7c93c6'], ripe: ['#cbbf86', '#b0a46c'], dot: ['#c9d6f2', 0.7], bale: '#d9c98e' });
+}
+
+/** Подсолнечные поля: жёлтые корзинки по зелени, поле под уборку, силосы семечек. */
+function sunflower(a: Art, ind: Industry): void {
+  cropFarm(a, ind, { field: ['#8fae55', '#7a9845'], ripe: ['#b9a556', '#9c8a42'], dot: ['#f2c21b', 1.15], bale: '#c8b26a' });
+  for (let k = 0; k < 2; k++) a.tank(49.5, 4 + k * 11, 3.4, 14, '#d5dadd', METAL);
+}
+
+/** Хлопковая плантация у воды: белые коробочки по зелени, арыки, белые модули хлопка. */
+function cottonfarm(a: Art, ind: Industry): void {
+  cropFarm(a, ind, { field: ['#8fae6a', '#7a9858'], ripe: ['#bdb48a', '#a39a70'], dot: ['#f7f6f0', 0.9], bale: '#f1efe6', canal: true });
+}
+
+/** Овцеводческая ферма: выгоны с отарами, кошары, стригальный пункт и тюки шерсти. */
+function sheepfarm(a: Art, ind: Industry): void {
+  const lv = a.level;
+  a.patch(-52, -37, 58, 74, '#b4c27a', 2);
+  for (let k = 0; k < 5; k++) a.stain(-44 + a.r(10 + k) * 44, -30 + a.r(20 + k) * 60, 6, 5, 'rgba(150,160,90,0.35)', 20 + k);
+  a.stain(-14, 22, 3.5, 2.5, '#86a3ad', 30, 0.15);
+  if (a.pass === 0 && a.lod) {
+    const c = a.c;
+    c.strokeStyle = '#8c6f4e';
+    c.lineWidth = 0.7;
+    c.beginPath();
+    c.rect(-50, -35, 54, 70);
+    c.moveTo(-23, -35);
+    c.lineTo(-23, 2);
+    c.moveTo(-50, 2);
+    c.lineTo(4, 2);
+    c.stroke();
+  }
+  a.patch(10, -38, 43, 76, '#d4c6a0', 3);
+  a.fence(110, 80, '#8c6f4e');
+
+  const roof = ind.info.roof;
+  a.gable(12, -35, 40, 12, 5, roof);
+  a.gable(12, -20, 28, 10, 5, roof);
+  a.box(42, -20, 10, 10, 4, '#b9a58c', 1.4);
+  for (let k = 0; k < Math.min(8, 2 + 2 * lv); k++) a.stack(14 + (k % 4) * 9, 0 + Math.floor(k / 4) * 8, 7, 6, 3, '#efe9da', '#c9c0aa');
+  herd(a, -50, -35, 27, 37, Math.min(12, 5 + 2 * lv), 200, true);
+  herd(a, -23, -35, 27, 37, Math.min(10, 4 + 2 * lv), 300, true);
+  herd(a, -50, 2, 54, 33, Math.min(14, 6 + 2 * lv), 400, true);
+  a.tree(4, 30, 4.5, '#6e9a52');
+  a.truck(32, 31, false, '#c4662f', '#efe9da');
+}
+
+/** Лодка у причала: корпус носом вверх, рубка. */
+function boat(a: Art, x: number, y: number, len: number, hull: string): void {
+  if (a.pass !== 2) return;
+  const c = a.c;
+  const w = len * 0.34;
+  c.fillStyle = hull;
+  c.beginPath();
+  c.moveTo(x, y - len / 2);
+  c.quadraticCurveTo(x + w, y - len * 0.2, x + w * 0.8, y + len / 2);
+  c.lineTo(x - w * 0.8, y + len / 2);
+  c.quadraticCurveTo(x - w, y - len * 0.2, x, y - len / 2);
+  c.fill();
+  if (!a.lod) return;
+  c.strokeStyle = shade(hull, -0.35);
+  c.lineWidth = 0.5;
+  c.stroke();
+  c.fillStyle = '#f2efe8';
+  c.fillRect(x - w * 0.45, y + len * 0.02, w * 0.9, len * 0.24);
+}
+
+/** Рыболовецкая артель: свой затон с причалами и лодками, засолочный цех, холодильник, сети на вешалах. */
+function fishery(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(-45, 14, 90, 26, '#8cc3e6', 3);
+  a.rows(-45, 17, 90, 22, 5, 'rgba(255,255,255,0.35)', false, 0.5);
+  a.patch(-45, 11, 90, 4, '#d9cfb4');
+  a.fence(90, 80, '#8a8f96');
+
+  a.box(-8, 10, 7, 26, 1.2, '#9c7b55', 1.5);
+  a.box(20, 10, 6, 20, 1.2, '#9c7b55', 1.5);
+  const hulls = ['#c0392b', '#2f6f94', '#e9b52f', '#f2efe8'];
+  // Лодки у причалов: больше уровень — больше лодок.
+  const berths: [number, number][] = [
+    [-14, 24],
+    [31, 22],
+    [5, 27],
+    [-26, 30],
+    [38, 32],
+  ];
+  for (let k = 0; k < Math.min(berths.length, 1 + lv); k++) boat(a, berths[k][0], berths[k][1], 9, hulls[k % hulls.length]);
+  a.gable(-41, -36, 30, 16, 6, roof);
+  a.gable(-41, -16, 20, 13, 5, '#7b6a58');
+  a.box(-4, -36, 24, 16, 6, '#d5dde2', 2);
+  for (let k = 0; k < 3; k++) a.flat(-1 + k * 7.5, -34.5, 4, 2.4, '#9aa3ab');
+  // Вешала с сетями.
+  if (a.pass === 2 && a.d) {
+    const c = a.c;
+    c.strokeStyle = '#6d5a44';
+    c.lineWidth = 0.6;
+    c.beginPath();
+    for (let k = 0; k < 3; k++) {
+      c.moveTo(24, -34 + k * 6);
+      c.lineTo(42, -34 + k * 6);
+    }
+    c.stroke();
+    c.strokeStyle = 'rgba(70,90,110,0.55)';
+    c.lineWidth = 1.6;
+    c.beginPath();
+    for (let k = 0; k < 3; k++) {
+      c.moveTo(25, -33 + k * 6);
+      c.lineTo(41, -33 + k * 6);
+    }
+    c.stroke();
+  }
+  for (let k = 0; k < Math.min(6, 2 + lv); k++) a.stack(-16 + (k % 3) * 6.5, -14 + Math.floor(k / 3) * 6, 5, 4.6, 2, '#e9ecef', '#3d8fbf');
+  a.truck(8, -10, false, roof, '#e9ecef');
+  a.chimney(-34, -22, 1.6, 12, '#d9d4ca');
+  a.smoke(-34, -22, 1, '236,236,236', 0.7);
+}
+
+/** Глиняный карьер: рыжая выемка с лужей на дне, экскаватор, бурты глины, навес и самосвал. */
+function claypit(a: Art, ind: Industry): void {
+  const clay = '#b8693f';
+  const pit = ['#d3a07a', '#c38963', '#b0744f', '#9c6140'];
+  for (let k = 0; k < 4; k++) {
+    const m = 1 - k * 0.2;
+    a.stain(-16 + k * 1.2, 2 + k, 30 * m, 33 * m, pit[k], 6, 0.09, shade(pit[k], 0.25));
+  }
+  a.stain(-12, 8, 9, 7, '#9db5a6', 12, 0.2, '#b9cbbf');
+  a.fence(100, 80, '#8a8f96');
+
+  const lv = a.level;
+  a.box(16, -34, 20, 15, 6, ind.info.roof, 1.8);
+  a.gable(38, -34, 10, 22, 4, '#8a6a4a', true);
+  a.belt(10, -10, 2, 24, -18, 6);
+  a.heap(32, 4, 9 + Math.min(3, lv), clay, 1);
+  if (lv >= 2) a.heap(32, 23, 7.5, clay, 2);
+  if (lv >= 3) a.heap(44, 12, 5, shade(clay, 0.08), 3);
+  a.excavator(-30, -20, -36, -12);
+  if (a.d) a.vehicle(14, 12, 3.2, 4.6, YELLOW);
+  a.truck(8, 31, false, YELLOW, clay);
+}
+
+/** Золотой прииск: вскрытая долина, гряды отвалов, пруд с драгой, промывочный цех и инкассаторская машина. */
+function goldmine(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(-48, -38, 62, 76, '#c9bb98', 4);
+  for (let k = 0; k < 6; k++) a.stain(-42 + k * 9.5, -24 + (k % 2) * 5, 4.5, 12, '#b6a88b', 30 + k, 0.15, '#9d9076');
+  a.stain(-16, 18, 20, 13, '#7fa9b8', 40, 0.12, '#a9c7d1');
+  a.fence(100, 80, '#8a8f96');
+
+  // Драга на пруду и её отвальный конвейер.
+  a.box(-24, 13, 13, 10, 5, roof, 1.4);
+  a.belt(-11, 18, 4, 4, 22, 7);
+  a.heap(8, 24, 6, '#a39a86', 1);
+  a.box(18, -34, 20, 16, 8, '#8f969e', 1.6);
+  a.belt(28, -18, 4, 30, -2, 3);
+  a.heap(31, 4, 5 + Math.min(3, lv), '#b0a78f', 2);
+  a.gable(20, 12, 24, 12, 5, roof);
+  for (let k = 0; k < Math.min(3, lv); k++) a.stack(40, -34 + k * 7, 6, 5, 2.5, '#d9b33a', '#a8862a');
+  a.excavator(-34, -14, -40, -8);
+  a.truck(36, 31, false, '#5c6470', '#8a8f96');
+}
+
+/** Самоцветные копи: скальный выход со штольней, рельсы с вагонетками, сортировка и отвалы с цветными камнями. */
+function gemmine(a: Art, ind: Industry): void {
+  const lv = a.level;
+  a.stain(-18, -8, 26, 27, '#b7b0a6', 50, 0.16, '#9d968c');
+  a.stain(-20, -12, 17, 17, '#a49d93', 51, 0.2);
+  a.stain(-24, -16, 9, 8, '#958e84', 52, 0.25);
+  a.track(-20, 22, 42, 22);
+  a.fence(90, 80, '#8a8f96');
+
+  // Портал штольни.
+  a.box(-24, 8, 10, 6, 3, '#4a4642');
+  a.flat(-22, 10, 6, 2.5, '#1f1d1b');
+  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.cart(-8 + k * 8, 22, k % 2 ? '#7b4fbf' : '#a9a49c');
+  a.box(10, -34, 24, 16, 7, ind.info.roof, 1.6);
+  a.gable(12, -14, 22, 12, 5, '#7d7468');
+  a.heap(36, -2, 7, '#a9a49c', 1);
+  if (lv >= 2) a.heap(26, 4, 5, '#b3aea6', 2);
+  if (a.pass === 2 && a.d) {
+    const gems = ['#7b4fbf', '#2e9e6e', '#ad1457', '#3d8fbf'];
+    for (let k = 0; k < 8; k++) a.flat(31 + a.r(600 + k) * 10, -7 + a.r(700 + k) * 9, 1.1, 1.1, gems[k % gems.length]);
+  }
+  a.truck(30, 30, false, '#5c6470', '#a9a49c');
+}
+
+/** Медный рудник: серо-зелёный карьер уступами с бирюзовой водой, дробилка, бурты руды, самосвалы. */
+function coppermine(a: Art, ind: Industry): void {
+  const ore = '#2a7d78';
+  const pit = ['#a9b2a0', '#98a290', '#879180', '#748070'];
+  for (let k = 0; k < 4; k++) {
+    const m = 1 - k * 0.22;
+    a.stain(-16 + k * 1.6, 4 + k * 1.4, 30 * m, 37 * m, pit[k], 8, 0.07, shade(pit[k], 0.28));
+  }
+  a.stain(-12, 9, 5, 3.6, '#5fae9e', 9, 0.2);
+  a.track(16, 41, 46, 41);
+  a.fence(100, 90, '#8a8f96');
+
+  const lv = a.level;
+  a.box(20, -40, 22, 16, 8, ind.info.roof, 1.8);
+  a.belt(4, -14, 0, 24, -24, 8);
+  a.belt(34, -24, 6, 33, -6, 4);
+  a.heap(33, 4, 10, ore, 1);
+  if (lv >= 2) a.heap(32, 24, 8, ore, 2);
+  for (let k = 0; k < Math.min(3, lv); k++) a.cart(24 + k * 7, 41, ore);
+  a.excavator(-14, 2, -20, -2);
+  if (a.d) a.vehicle(-2, -24, 4, 5.6, YELLOW);
+  a.truck(14, 30, false, YELLOW, '#5f7a6a');
+}
+
+/** Газовый промысел: устья скважин («ёлки»), шлейфы к установке подготовки, шаровые ёмкости и факел. */
+function gasfield(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  const wells: [number, number][] = [
+    [-32, -28],
+    [-34, -4],
+    [-30, 20],
+    [-12, 28],
+  ];
+  const n = Math.min(4, 2 + lv);
+  for (let k = 0; k < n; k++) {
+    const [x, y] = wells[k];
+    a.patch(x - 4.5, y - 4.5, 9, 9, '#c8c1b2', 1.5, '#b0a897');
+    a.pipe(x + 4, y, -2, y);
+  }
+  a.pipe(-2, wells[0][1], -2, wells[n - 1][1]);
+  a.pipe(-2, -6, 8, -6);
+  a.patch(10, -37, 30, 54, '#cec8bb', 3, '#b7b0a2');
+  a.fence(90, 80, '#8a8f96');
+
+  for (let k = 0; k < n; k++) {
+    const [x, y] = wells[k];
+    a.box(x - 1.6, y - 1.6, 3.2, 3.2, 4, '#c0392b');
+    a.flat(x - 2.8, y - 0.5, 5.6, 1, '#e9b52f');
+  }
+  a.box(12, -34, 14, 12, 7, METAL, 1.6);
+  a.tank(32, -27, 5, 10, '#ece8df', roof);
+  a.tank(18, -10, 6.5, 13, '#f0eee8', roof);
+  a.tank(33, -10, 6.5, 13, '#f0eee8', roof);
+  if (lv >= 3) a.tank(25, 7, 6, 12, '#f0eee8', roof);
+  a.chimney(30, 30, 1.3, 30, '#8f969e', '#c0392b');
+  a.glow(30, 30, 2.2);
+  a.truck(10, 30, false, roof, '#e9ecef');
+}
+
+/**
+ * Текстильная фабрика (льнокомбинат, суконная, хлопкопрядильная): краснокирпичный корпус с шедовой крышей,
+ * котельная с трубой, тюки сырья по запасу, рулоны тканей и фургоны.
+ */
+function textileMill(a: Art, ind: Industry, raw: CargoType, bale: string, cloth: string[]): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(-52, 12, 66, 21, '#cdc8bf', 2);
+  a.rows(-52, 12, 66, 21, 10, 'rgba(255,255,255,0.55)', true, 0.5);
+  a.patch(18, -32, 34, 64, '#d8d0c0', 3);
+  a.fence(110, 70, '#8a8f96');
+
+  a.shed(-52, -32, 56, 38, 8, roof, '#e8eef2', 7);
+  a.box(6, -32, 12, 14, 9, '#b5543c', 1.4);
+  a.chimney(12, -12, 2.4, 32, '#a24e36', '#e8e2d6');
+  const bales = Math.min(6, 1 + Math.floor((ind.stock[raw] ?? 0) / 40));
+  for (let k = 0; k < bales; k++) a.stack(21 + (k % 3) * 10, -30 + Math.floor(k / 3) * 9, 8, 7, 3, bale, shade(bale, -0.22));
+  for (let k = 0; k < Math.min(8, 2 + 2 * lv); k++) {
+    const color = cloth[k % cloth.length];
+    a.stack(21 + (k % 4) * 7.5, -6 + Math.floor(k / 4) * 8, 6, 6, 2.5, color, shade(color, -0.22));
+  }
+  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.truck(-46 + k * 10, 18.5, true, roof, '#f4f1ea');
+  a.box(22, 14, 26, 14, 5, '#b9a58c', 2);
+  a.smoke(12, -12, 1, '170,166,160', 1);
+}
+
+function linenmill(a: Art, ind: Industry): void {
+  textileMill(a, ind, 'flax', '#d9c98e', ['#f1ede0', '#c9d6f2', '#e7dcc4']);
+}
+
+function woolmill(a: Art, ind: Industry): void {
+  textileMill(a, ind, 'wool', '#efe9da', ['#7a4a8c', '#a5805c', '#5f6f8f', '#b5543c']);
+}
+
+function cottonmill(a: Art, ind: Industry): void {
+  textileMill(a, ind, 'cotton', '#f1efe6', ['#f6f4ee', '#8e44ad', '#4a8fe7', '#e5534b']);
+}
+
+/** Кирпичный завод: бурт глины, кольцевая печь с топочными люками, высокая труба, сушильные навесы, поддоны кирпича. */
+function brickworks(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.stain(-42, 22, 13, 11, 'rgba(184,105,63,0.35)', 2);
+  a.patch(12, -4, 42, 38, '#cdc8bf', 2);
+  a.fence(110, 75, '#8a8f96');
+
+  a.heap(-42, 22, 6 + 3 * fullness(ind.stock.clay), '#b8693f', 1);
+  a.belt(-36, 16, 2, -30, -8, 8);
+  a.box(-32, -34, 54, 22, 6, roof, 2);
+  for (let k = 0; k < 8; k++) a.flat(-28 + k * 6.2, -24, 2, 2, '#4a3a30');
+  a.chimney(30, -26, 3.2, 42, '#a4513a', '#e8e2d6');
+  a.gable(-32, -8, 40, 9, 4, '#8a6a4a', true);
+  a.gable(-32, 4, 40, 9, 4, '#8a6a4a', true);
+  for (let k = 0; k < Math.min(15, 5 + 2 * lv); k++) a.stack(16 + (k % 5) * 7.5, -1 + Math.floor(k / 5) * 7, 5.5, 5, 3, '#c4664a', '#a24e36');
+  a.truck(4, 28, false, roof, '#c4664a');
+  a.smoke(30, -26, 1, '170,160,150', 1.2);
+}
+
+/** Рыбоконсервный завод: цех, холодильник, баки рассола, ящики рыбы по запасу, поддоны банок, рефрижераторы. */
+function cannery(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(-48, 12, 96, 21, '#cdc8bf', 2);
+  a.rows(-48, 12, 96, 21, 10, 'rgba(255,255,255,0.55)', true, 0.5);
+  a.fence(100, 70, '#8a8f96');
+
+  a.box(-46, -31, 44, 36, 7, roof);
+  for (let k = 0; k < 3; k++) a.flat(-42, -26 + k * 11, 36, 2.2, 'rgba(255,255,255,0.22)');
+  a.chimney(-38, -24, 2.1, 16, '#d9d4ca');
+  a.box(2, -31, 28, 18, 6, '#d5dde2', 2);
+  for (let k = 0; k < 3; k++) a.flat(5 + k * 8.5, -29.5, 4, 2.4, '#9aa3ab');
+  a.tank(40, -25, 4.6, 14, '#ebe7df', '#b8b2a6');
+  a.tank(40, -12, 4.6, 14, '#ebe7df', '#b8b2a6');
+  const crates = 1 + Math.min(5, Math.floor(fullness(ind.stock.fish) * 6));
+  for (let k = 0; k < crates; k++) a.stack(4 + (k % 3) * 7, -9 + Math.floor(k / 3) * 7, 5.5, 5, 2, '#e9ecef', '#3d8fbf');
+  for (let k = 0; k < Math.min(6, 2 + lv); k++) a.stack(26 + (k % 3) * 7, 0 + Math.floor(k / 3) * 6, 5.5, 5, 2.5, '#c9ced3', '#e5534b');
+  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.truck(-39 + k * 10, 18.5, true, roof, '#f4f1ea');
+  a.smoke(-38, -24, 1, '248,248,248');
+}
+
+/** ЦБК: лесная биржа с брёвнами, щепа, варочные котлы, длинный корпус бумагоделательной машины, рулоны бумаги. */
+function papermill(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(-58, -38, 32, 52, '#d8c8a2', 3);
+  a.patch(12, 8, 46, 28, '#cdc8bf', 2);
+  a.stain(-42, 26, 12, 9, 'rgba(226,204,148,0.6)', 3);
+  a.fence(120, 80, '#8a8f96');
+
+  const piles = Math.min(4, 1 + Math.floor((ind.stock.logs ?? 0) / 60));
+  for (let k = 0; k < piles; k++) a.logs(-55, -34 + k * 12, 25, 5, k);
+  a.heap(-42, 26, 7.5, '#e2cc94', 1);
+  a.belt(-34, 20, 3, -18, -4, 16);
+  a.tank(-18, -28, 5, 32, '#c9ccd0', '#8f969e');
+  a.tank(-6, -28, 5, 32, '#c9ccd0', '#8f969e');
+  a.box(-22, -16, 70, 18, 9, roof, 2);
+  for (let k = 0; k < 4; k++) a.flat(-18 + k * 16, -12, 10, 2, 'rgba(255,255,255,0.22)');
+  a.box(8, -38, 28, 18, 7, '#b9c2c9', 2);
+  a.chimney(44, -30, 3, 46, '#b9b4ad', '#c0392b');
+  for (let k = 0; k < Math.min(8, 2 + 2 * lv); k++) a.tank(17 + (k % 4) * 8, 15 + Math.floor(k / 4) * 9, 3.4, 5, '#f4f1ea', '#d9d4ca');
+  a.truck(50, 20, true, roof, '#f4f1ea');
+  a.smoke(44, -30, 1, '236,236,236', 1.4);
+}
+
+/** Мастерская (ювелирный завод, гранильная фабрика): особняк цеха, сад с прудом, проходная, инкассаторский фургон. */
+function workshop(a: Art, ind: Industry, stones: boolean): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(-42, 10, 48, 22, '#cdc8bf', 2);
+  a.patch(10, -32, 32, 64, '#b8cf96', 4);
+  a.fence(90, 70, '#8a8f96');
+
+  a.gable(-40, -31, 44, 24, 8, roof);
+  a.box(-40, -5, 18, 12, 5, '#d9d4ca', 1.4);
+  if (lv >= 2) a.box(-20, -5, 18, 12, 4, '#cfc8bc', 1.4);
+  a.tank(28, 0, 4, 0.4, '#8cc3e6');
+  a.tree(18, -24, 5, '#6e9a52');
+  a.tree(34, -16, 4.5, '#7aa55a');
+  a.tree(20, 22, 5, '#6e9a52');
+  a.tree(36, 24, 4, '#8fb46a');
+  if (stones) {
+    a.heap(-8, 20, 5 + 2 * fullness(ind.stock.gems), '#a9a49c', 1);
+    if (a.pass === 2 && a.d) {
+      const gems = ['#7b4fbf', '#2e9e6e', '#ad1457'];
+      for (let k = 0; k < 6; k++) a.flat(-12 + a.r(800 + k) * 8, 17 + a.r(900 + k) * 6, 1, 1, gems[k % 3]);
+    }
+  } else {
+    for (let k = 0; k < 1 + Math.min(3, Math.floor(fullness(ind.stock.gold) * 4)); k++) a.stack(-10 + k * 5, 18, 4, 3, 1.6, '#d9b33a', '#a8862a');
+  }
+  a.box(0, 26, 6, 6, 3, '#9aa3ab');
+  a.truck(-30, 22, false, '#5c6470', '#8a8f96');
+}
+
+function jeweler(a: Art, ind: Industry): void {
+  workshop(a, ind, false);
+}
+
+function gemcutter(a: Art, ind: Industry): void {
+  workshop(a, ind, true);
+}
+
+/** Маслозавод: силосы семечек, прессовый цех, золотистые баки масла, лузга, автоцистерны. */
+function oilmill(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(-48, 12, 96, 21, '#cdc8bf', 2);
+  a.rows(-48, 12, 96, 21, 10, 'rgba(255,255,255,0.55)', true, 0.5);
+  a.fence(100, 70, '#8a8f96');
+
+  const silos = 2 + Math.min(2, Math.floor(fullness(ind.stock.sunflower) * 3));
+  for (let k = 0; k < silos; k++) a.tank(-41 + k * 11, -24, 5, 20, '#ebe7df', '#b8b2a6');
+  a.belt(-46, -24, 20, -46 + silos * 11, -24, 20);
+  a.box(-46, -14, 46, 22, 7, roof, 2);
+  a.chimney(-8, -8, 2, 18, '#d9d4ca');
+  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.tank(14 + (k % 2) * 14, -22 + Math.floor(k / 2) * 15, 6, 10, '#f2d36b', '#c49a1c');
+  a.heap(42, 2, 5.5, '#6b5a1e', 1);
+  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.truck(-39 + k * 10, 18.5, true, roof, '#efe2b0');
+  a.smoke(-8, -8, 1, '240,236,220');
+}
+
+/** Медеплавильный завод: отражательная печь, кучи медной руды и угля, конвертерный цех, трубы, медные слитки. */
+function smelter(a: Art, ind: Industry): void {
+  const lv = a.level;
+  a.stain(20, -27, 20, 11, 'rgba(42,125,120,0.1)', 2);
+  a.track(-40, -1, 58, -1);
+  a.fence(120, 80, '#8a8f96');
+
+  a.box(-56, 6, 66, 30, 9, ind.info.roof);
+  for (let k = 0; k < 3; k++) a.flat(-52, 11 + k * 8, 58, 2, 'rgba(240,220,200,0.35)');
+  a.box(-52, -32, 34, 18, 8, '#6d7076', 1.6);
+  a.glow(-34, -23, 2.6);
+  a.heap(10, -27, 7 + 3 * fullness(ind.stock.copperore), '#2a7d78', 1);
+  a.heap(29, -27, 7 + 3 * fullness(ind.stock.coal), '#3d4148', 2);
+  a.belt(3, -24, 0, -18, -24, 14);
+  a.box(42, -37, 15, 39, 12, '#8a6a5a', 2);
+  const stacks = lv >= 3 ? 3 : 2;
+  for (let k = 0; k < stacks; k++) a.chimney(12 + k * 11, -9, 3, 38, '#8f969e', '#d9824a');
+  a.cart(-14, -1, a.active ? '#f08a2c' : '#4f5258');
+  for (let k = 0; k < Math.min(6, 1 + lv); k++) a.stack(20 + (k % 2) * 19, 9 + Math.floor(k / 2) * 9, 16, 6, 2.5, '#d9824a', '#a85a2c');
+  for (let k = 0; k < stacks; k++) a.smoke(12 + k * 11, -9, k, '176,168,140', 1.1);
+}
+
+/** Электротехнический завод: сборочный цех с шедовой крышей, испытательная станция с трансформаторами, катушки кабеля. */
+function electro(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(12, -6, 46, 44, '#d0d5d9', 2);
+  a.fence(120, 80, '#8a8f96');
+
+  a.shed(-56, -34, 64, 44, 8, roof, '#cfe3ef', 8);
+  for (let k = 0; k < 3; k++) {
+    a.box(-54 + k * 11, 18, 8, 8, 5, '#7a8791', 1.2);
+    a.flat(-53 + k * 11, 27, 6, 1.2, '#55595f');
+  }
+  a.box(-20, 16, 24, 18, 6, '#b9c2c9', 2);
+  a.box(14, -34, 42, 22, 6, '#b9c2c9', 2);
+  for (let k = 0; k < 4; k++) a.flat(18 + k * 10, -13.4, 6, 1.4, '#55595f');
+  for (let k = 0; k < Math.min(9, 3 + 2 * lv); k++) a.tank(19 + (k % 3) * 12, 0 + Math.floor(k / 3) * 10, 4.2, 3, '#d9824a', '#8a5a3c');
+  for (let k = 0; k < Math.min(3, lv); k++) a.truck(52, 2 + k * 11, false, roof, '#f4f1ea');
+}
+
+/** ГПЗ: колонны осушки, эстакада, компрессорный цех, шаровые газгольдеры, факел и газовозы. */
+function gasplant(a: Art, ind: Industry): void {
+  const lv = a.level;
+  const roof = ind.info.roof;
+  a.patch(14, -37, 40, 72, '#cec8bb', 3, '#b7b0a2');
+  a.pipe(-38, -26, -38, -3, '#8f969e', 1);
+  a.pipe(-26, -22, -26, -3, '#8f969e', 1);
+  a.pipe(12, 0, 18, 0, '#8f969e', 1);
+  a.fence(110, 80, '#8a8f96');
+
+  a.rack(-50, -3, 62);
+  a.tank(-38, -26, 4, 30, '#c9ccd0', '#8f969e');
+  a.tank(-26, -22, 3.6, 26, '#c9ccd0', '#8f969e');
+  a.tank(-12, -26, 3.2, 22, '#c9ccd0', '#8f969e');
+  a.box(-50, 9, 22, 16, 6, roof, 1.6);
+  a.box(-24, 14, 20, 16, 4, METAL, 1.6);
+  const spheres = Math.min(6, 2 + 2 * Math.min(2, lv - 1));
+  for (let k = 0; k < spheres; k++) a.tank(25 + (k % 2) * 18, -25 + Math.floor(k / 2) * 19, 7.6, 14, '#f0eee8', roof);
+  a.chimney(4, 24, 1.4, 36, '#8f969e', '#c0392b');
+  a.glow(4, 24, 2.4);
+  a.truck(-6, 33, false, roof, '#e9ecef');
+}
+
 const SCENES: Record<IndustryKind, Scene> = {
   farm,
   forest,
@@ -1255,11 +2009,43 @@ const SCENES: Record<IndustryKind, Scene> = {
   refinery,
   buildmat,
   factory,
+  ranch,
+  sandpit,
+  meatplant,
+  glassworks,
+  furniture,
+  cement,
+  flaxfarm,
+  claypit,
+  fishery,
+  goldmine,
+  sheepfarm,
+  sunflower,
+  gemmine,
+  coppermine,
+  cottonfarm,
+  gasfield,
+  linenmill,
+  brickworks,
+  cannery,
+  papermill,
+  jeweler,
+  woolmill,
+  oilmill,
+  gemcutter,
+  smelter,
+  electro,
+  cottonmill,
+  gasplant,
 };
 
 /** Цвет участка под постройками; по умолчанию — цвет вида предприятия. */
 const GROUND: Partial<Record<IndustryKind, string>> = {
   farm: '#bccb8f',
+  flaxfarm: '#bccb8f',
+  sunflower: '#bccb8f',
+  cottonfarm: '#c7c89a',
+  sheepfarm: '#c3c98f',
 };
 
 /** Предприятие целиком: участок, тени, постройки. zoom решает, сколько мелочей рисовать. */

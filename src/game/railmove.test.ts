@@ -6,6 +6,7 @@ import { RAIL_SPEC, TRACK_GAP } from '../world/roadTypes';
 import type { RoadRequest } from './build';
 import { Game } from './game';
 import { besideTrack, trackHandlePoints } from './railEdit';
+import { withoutCitizens } from './testkit';
 
 function runSeconds(game: Game, seconds: number, each?: () => void) {
   game.speed = 1;
@@ -38,9 +39,9 @@ function freeTrack(game: Game, len: number, margin = 80): { from: Vec; dir: Vec 
   throw new Error('Нет места для пути');
 }
 
-/** Длинный путь с вокзалами у концов (как в rail.test.ts). */
+/** Длинный путь с вокзалами у концов (как в rail.test.ts) — в чистом поле, без машин жителей (сюда они не доезжают). */
 function railWorld(): { game: Game; a: Station; b: Station; from: Vec; dir: Vec } {
-  const game = dryGame(5_000_000);
+  const game = withoutCitizens(dryGame(5_000_000));
   const len = 2400;
   for (let y = 400; y < game.terrain.height - 400; y += 170) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 230) {

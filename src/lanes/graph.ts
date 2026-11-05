@@ -2,8 +2,9 @@ import { CAR_WIDTH, LIGHTS } from '../config';
 import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub, Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
-import { junctionCuts, pointOff } from './geometry';
+import { filletPath, junctionCuts, pointOff } from './geometry';
 import { Corridor, CorridorEnd, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey, taperLen } from './model';
+import { autoSolids } from './solid';
 
 /**
  * Связь — отрезок полотна, на котором набор полос одного направления не меняется.
@@ -38,6 +39,11 @@ export interface GLane {
   side: number;
   /** Линия к соседу справа (index + 1) сплошная — через неё не перестраиваются. */
   solidRight: boolean;
+  /**
+   * Где ещё линия к соседу справа сплошная сама (у развилки, после вливания, перед перекрёстком — `autoSolids`):
+   * отрезки [от, до] по полосе от её начала по ходу движения. Там тоже не перестраиваются.
+   */
+  solidZones?: [number, number][];
   length: number;
   speed: number;
   /** От головной машины к хвосту. */
@@ -132,6 +138,8 @@ export interface GNode {
 }
 
 export const laneSpeed = (c: Corridor) => (c.limit ?? ROAD_CLASSES[c.cls].limit) / KMH_PER_UNIT;
+/** Скорость манёвра в перекрёстке по радиусу поворота r (ед./с): шире — быстрее, не медленнее 5. */
+export const turnSpeed = (r: number) => Math.max(5, Math.sqrt(9 * Math.max(2, r)));
 export const moveKey = (inLane: number, outLane: number) => `${inLane}>${outLane}`;
 
 /**
@@ -186,8 +194,11 @@ export class LaneGraph {
   private readonly byCorridor = new Map<number, { flow: Flow; links: GLink[] }[]>();
   private nextId = 1;
 
-  constructor(readonly net: LaneNet) {
-    const cuts = junctionCuts(net);
+  /** cuts — обрезы у перекрёстков, если уже посчитаны по сети побольше (граф куска сети для предпросмотра). */
+  constructor(
+    readonly net: LaneNet,
+    cuts: Map<number, [number, number]> = junctionCuts(net),
+  ) {
     for (const c of net.corridors.values()) this.buildCorridor(c, ...cuts.get(c.id)!);
     for (const c of net.corridors.values()) this.linkSeams(c);
     // Въезды и выезды узлов — одним проходом, а не перебором всех связей у каждого узла.
@@ -286,7 +297,17 @@ export class LaneGraph {
           // Сплошную задаёт полоса с меньшим смещением из пары соседей.
           const next = present[index + 1]?.l;
           const solidRight = !!next && (l.offset < next.offset ? !!l.solid : !!next.solid);
-          return { id: this.nextId++, link: link.id, index, laneIdx: i, offset: l.offset, side: l.offset * flow, solidRight, length: link.length, speed, vehicles: [] };
+          const lane: GLane = { id: this.nextId++, link: link.id, index, laneIdx: i, offset: l.offset, side: l.offset * flow, solidRight, length: link.length, speed, vehicles: [] };
+          // Сплошная, которую дорога рисует сама, — там же, где она нарисована (по оси — в отрезки по полосе).
+          const j = present[index + 1]?.i;
+          if (j !== undefined) {
+            const zones = autoSolids(this.net, c, l.offset < c.lanes[j].offset ? i : j, l.offset < c.lanes[j].offset ? j : i, s0, s1)
+              .map(([u, v]) => [Math.max(u, a), Math.min(v, b)])
+              .filter(([u, v]) => v - u > 0.01)
+              .map(([u, v]) => (flow > 0 ? [u - a, v - a] : [b - v, b - u]) as [number, number]);
+            if (zones.length) lane.solidZones = zones;
+          }
+          return lane;
         });
         links.push(link);
       }
@@ -387,13 +408,14 @@ export class LaneGraph {
       const l = parseLaneKey(key);
       if (l) push(custom, `${l.from}.${l.i}`, l);
     }
+    const turn = (inL: GLink, lane: GLane, out: GLink, outLane: GLane) => this.turn(n.id, inL, lane, out, outLane);
     for (const inL of ins) {
       // Настроенные полосы — только по своим связям.
       inL.lanes.forEach((lane, idx) => {
         for (const l of custom.get(`${inL.corridor}.${inL.lanes.length - 1 - idx}`) ?? []) {
           const out = outs.find((o) => o.corridor === l.to && o.corridor !== inL.corridor);
           const outLane = out?.lanes[out.lanes.length - 1 - l.j];
-          if (out && outLane) list.push(this.turn(n.id, inL, lane, out, outLane));
+          if (out && outLane) list.push(turn(inL, lane, out, outLane));
         }
       });
       const inDir = this.lanePose(inL.lanes[0], inL.length).dir;
@@ -411,7 +433,7 @@ export class LaneGraph {
       exits.forEach((e, k) => {
         for (const [fromRight, outFromRight] of pairs[k]) {
           if (custom.has(`${inL.corridor}.${fromRight}`)) continue;
-          list.push(this.turn(n.id, inL, inL.lanes[inL.lanes.length - 1 - fromRight], e.link, e.link.lanes[e.link.lanes.length - 1 - outFromRight]));
+          list.push(turn(inL, inL.lanes[inL.lanes.length - 1 - fromRight], e.link, e.link.lanes[e.link.lanes.length - 1 - outFromRight]));
         }
       });
     }
@@ -481,25 +503,34 @@ export class LaneGraph {
     }
   }
 
-  /** Манёвр по кривой от конца полосы въезда к началу полосы выезда. */
+  /**
+   * Манёвр от конца полосы въезда к началу полосы выезда: прямо, по дуге окружности (самой плавной, что помещается
+   * между продолжениями полос) и снова прямо. Бордюр угла перекрёстка — дуга с тем же центром (`cornerCurb`), поэтому
+   * поворот вдоль угла не съезжает с асфальта. Разворот и почти прямой проезд (продолжения полос не сходятся) — по кривой.
+   */
   private turn(node: number, inL: GLink, inLane: GLane, outL: GLink, outLane: GLane): GMove {
     const a = this.lanePose(inLane, inLane.length);
     const b = this.lanePose(outLane, 0);
     const chord = dist(a.pos, b.pos);
     const uTurn = dot(a.dir, b.dir) < -0.95;
-    const k = uTurn ? Math.max(chord * 0.9, 7) : chord * 0.45;
-    const p1 = add(a.pos, scale(a.dir, k));
-    const p2 = sub(b.pos, scale(b.dir, k));
-    const points: Vec[] = [];
-    for (let i = 0; i <= 10; i++) points.push(cubicBezier(a.pos, p1, p2, b.pos, i / 10));
+    const arc = uTurn ? null : filletPath(a, b);
+    let points: Vec[];
+    if (arc) points = arc.points;
+    else {
+      const k = uTurn ? Math.max(chord * 0.9, 7) : chord * 0.45;
+      const p1 = add(a.pos, scale(a.dir, k));
+      const p2 = sub(b.pos, scale(b.dir, k));
+      points = [];
+      for (let i = 0; i <= 10; i++) points.push(cubicBezier(a.pos, p1, p2, b.pos, i / 10));
+    }
     const cum = [0];
     for (let i = 1; i < points.length; i++) cum.push(cum[i - 1] + dist(points[i - 1], points[i]));
     const length = Math.max(0.3, cum[cum.length - 1]);
     const theta = Math.abs(angleDiff(angleOf(a.dir), angleOf(b.dir)));
     let speed = Math.min(inLane.speed, outLane.speed);
     if (theta > 0.15) {
-      const r = Math.max(2, chord / (2 * Math.max(0.15, Math.sin(theta / 2))));
-      speed = Math.min(speed, Math.max(5, Math.sqrt(9 * r)));
+      const r = arc ? arc.r : Math.max(2, chord / (2 * Math.max(0.15, Math.sin(theta / 2))));
+      speed = Math.min(speed, turnSpeed(r));
     }
     const m: GMove = {
       key: moveKey(inLane.id, outLane.id),

@@ -52,7 +52,7 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
     expect(game.buyVehicle(line.id, 'truck')).toBeNull();
     expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
     expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
-    runMonths(game, 3);
+    runMonths(game, 1);
     expect(line.revenueTotal).toBeGreaterThan(0);
     expect(line.problem).toBeNull();
     // Сохранение — с остановками.

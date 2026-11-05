@@ -4,7 +4,7 @@
  * эффекты, а часто — контракт и продолжение цепочки. Частота: пауза после крупных событий, не больше
  * одного мелкого в месяц, предел активных, память «то же событие — не с тем же городом или предприятием».
  */
-import { ECONOMY } from '../config';
+import { ECONOMY, MONTH_SCALE } from '../config';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
 import { CARGO, CargoType, TOWN_CARGO } from '../world/cargo';
@@ -69,6 +69,18 @@ function busy(sc: Scenario, ref: Ref): boolean {
   );
 }
 
+/**
+ * У игрока уже есть задание везти на это предприятие (или растить его) — главная цель, цель этапа или контракт:
+ * второе такое же, контрактом, не нужно.
+ */
+function tasked(sc: Scenario, ind: Industry): boolean {
+  return sc.state.objectives.some((o) => {
+    if (o.status !== 'active' && o.status !== 'offered') return false;
+    const p = o.params;
+    return (p.kind === 'deliver' && p.to?.type === 'industry' && p.to.id === ind.id) || (p.kind === 'industry' && p.industry === ind.id);
+  });
+}
+
 /** Сырьё, которого заводу не хватает сильнее всего. */
 function scarcest(ind: Industry): CargoType {
   return [...ind.info.accepts].sort((a, b) => (ind.stock[a] ?? 0) - (ind.stock[b] ?? 0))[0];
@@ -95,8 +107,8 @@ const shortage: Template = {
   type: 'shortage',
   candidates: ({ game, sc, info }) =>
     game.industries
-      .filter((i) => i.info.accepts.length && (sc.state.watch[i.id]?.low ?? 0) >= 2 && hasMarket(game, i) && i.info.accepts.every((c) => producible(game, c)))
-      .filter((i) => !busy(sc, refOf(i)))
+      .filter((i) => i.info.accepts.length && (sc.state.watch[i.id]?.low ?? 0) >= 1 && hasMarket(game, i) && i.info.accepts.every((c) => producible(game, c)))
+      .filter((i) => !busy(sc, refOf(i)) && !tasked(sc, i))
       .map((i) => ({ i, d: distToNetwork(info, i.fp.center) }))
       .filter(({ i, d }) => info.industries.has(i.id) || d <= 4000)
       // Завод, который уже работал на сырье игрока, — главный кандидат; стоящий рядом с сетью — реже.
@@ -106,7 +118,7 @@ const shortage: Template = {
     const ind = industryById(game, c.subject!.id);
     if (!ind || !ind.info.accepts.length) return null;
     const cargo = scarcest(ind);
-    const months = Math.round(7 * sc.difficulty.time);
+    const months = Math.round(3 * sc.difficulty.time);
     const potential = cargoPotential(game, cargo, ind.fp.center, months);
     if (potential < 60) return null;
     const amount = round10(Math.min(600, potential * 0.4 * sc.difficulty.demand));
@@ -124,7 +136,7 @@ const shortage: Template = {
         importance: 'major',
         title: `${EVENT_INFO.shortage.icon} Дефицит сырья`,
         cause,
-        effects: [`Завод предлагает контракт: ${amount} ед. «${CARGO[cargo].name}» за ${months} мес.`, 'Выполните — завод расширится; откажетесь — сократит выпуск'],
+        effects: [`Завод предлагает контракт: ${amount} ед. «${CARGO[cargo].name}» за ${months} мес.`, 'Выполните — завод расширится; останется без сырья — сократит выпуск'],
         related: [refOf(ind)],
         until: sc.month + 1 + EVENT_RULES.offer + months,
         parent: parent?.id,
@@ -172,15 +184,15 @@ const expansion: Template = {
     if (!ind || levelCap(ind) >= 6) return null;
     const cap = levelCap(ind) + 1;
     const town = nearestTown(game, ind.fp.center);
-    const effects: EffectSpec[] = [{ kind: 'industry', target: ind.id, factor: 1.2, months: 6 }];
-    if (town) effects.push({ kind: 'growth', target: town.id, factor: 1.4, months: 6 });
+    const effects: EffectSpec[] = [{ kind: 'industry', target: ind.id, factor: 1.2, months: 2 }];
+    if (town) effects.push({ kind: 'growth', target: town.id, factor: 1.4, months: 2 });
     const cause = parent
       ? `Контракт выполнен: ${ind.name} получил сырьё и расширяет производство.`
       : `${ind.name} работает на пределе: продукцию исправно вывозят, владельцы строят новый цех.`;
     const follow: FollowUp[] = [];
-    if (ind.info.accepts.length) follow.push({ event: 'order', subject: refOf(ind), delay: 1, cargo: scarcest(ind) });
-    else follow.push({ event: 'order', subject: refOf(ind), delay: 2 });
-    if (town) follow.push({ event: 'boom', subject: refOf(town), delay: 3 });
+    if (ind.info.accepts.length) follow.push({ event: 'order', subject: refOf(ind), delay: 0, cargo: scarcest(ind) });
+    else follow.push({ event: 'order', subject: refOf(ind), delay: 1 });
+    if (town) follow.push({ event: 'boom', subject: refOf(town), delay: 1 });
     const rec = sc.addEvent(
       {
         type: 'expansion',
@@ -189,7 +201,7 @@ const expansion: Template = {
         cause,
         effects: [`${ind.name}: предел роста ×${cap}, уровень +0.5`, ...effectLines(game, effects), ind.info.accepts.length ? 'Заводу понадобится больше сырья' : 'Продукции станет больше — её нужно вывозить'],
         related: [refOf(ind), ...(town ? [refOf(town)] : [])],
-        until: sc.month + 1 + 6,
+        until: sc.month + 1 + 2,
         parent: parent?.id,
       },
       subjectKey('expansion', c),
@@ -208,19 +220,21 @@ const decline: Template = {
   type: 'decline',
   candidates: ({ game, sc }) =>
     game.industries
-      .filter((i) => i.info.accepts.length && sc.state.watch[i.id]?.active && (sc.state.watch[i.id]?.idle ?? 0) >= 3 && (i.level ?? 1) > 1)
+      .filter((i) => i.info.accepts.length && sc.state.watch[i.id]?.active && (sc.state.watch[i.id]?.idle ?? 0) >= 1 && (i.level ?? 1) > 1)
       .map((i) => ({ subject: refOf(i), weight: 1 })),
   fire(ctx, c, parent) {
     const { game, sc } = ctx;
     const ind = industryById(game, c.subject!.id);
     // Сокращать нечего: завод ни разу не работал и не рос.
     if (!ind || (!sc.state.watch[ind.id]?.active && (ind.level ?? 1) <= 1)) return null;
+    // После сорванного контракта: сырьё заводу всё-таки возят (в прошлом месяце он работал) — спада нет.
+    if (parent && (sc.state.watch[ind.id]?.idle ?? 1) === 0) return null;
     const town = nearestTown(game, ind.fp.center);
-    const effects: EffectSpec[] = [{ kind: 'industry', target: ind.id, factor: 0.6, months: 6 }];
-    if (town) effects.push({ kind: 'growth', target: town.id, factor: 0.75, months: 6 });
+    const effects: EffectSpec[] = [{ kind: 'industry', target: ind.id, factor: 0.6, months: 2 }];
+    if (town) effects.push({ kind: 'growth', target: town.id, factor: 0.75, months: 2 });
     const cause = parent
       ? `Поставки так и не наладили — ${ind.name} сокращает выпуск.`
-      : `${ind.name} уже ${sc.state.watch[ind.id]?.idle ?? 3} мес. стоит без сырья и сокращает выпуск.`;
+      : `${ind.name} уже ${sc.state.watch[ind.id]?.idle ?? 1} мес. стоит без сырья и сокращает выпуск.`;
     const rec = sc.addEvent(
       {
         type: 'decline',
@@ -229,7 +243,7 @@ const decline: Template = {
         cause,
         effects: [`${ind.name}: уровень −0.5`, ...effectLines(game, effects)],
         related: [refOf(ind), ...(town ? [refOf(town)] : [])],
-        until: sc.month + 1 + 6,
+        until: sc.month + 1 + 2,
         parent: parent?.id,
       },
       subjectKey('decline', c),
@@ -239,9 +253,9 @@ const decline: Template = {
     // Восстановить поставки: тот же завод, его самое редкое сырьё — спад прекращается.
     if (ind.info.accepts.length) {
       const cargo = scarcest(ind);
-      const months = Math.round(6 * sc.difficulty.time);
+      const months = Math.round(2 * sc.difficulty.time);
       const potential = cargoPotential(game, cargo, ind.fp.center, months);
-      if (potential >= 50 && !busy(sc, refOf(ind))) {
+      if (potential >= 50 && !busy(sc, refOf(ind)) && !tasked(sc, ind)) {
         const amount = round10(Math.min(400, potential * 0.3 * sc.difficulty.demand));
         const o = sc.tryObjective(
           { kind: 'deliver', cargo, amount, to: refOf(ind) },
@@ -274,9 +288,9 @@ const boom: Template = {
   type: 'boom',
   candidates: ({ game, info }) =>
     game.towns
-      .filter((t) => info.towns.has(t.id) && (t.supplyHistory ?? []).length >= 2)
+      .filter((t) => info.towns.has(t.id) && (t.supplyHistory ?? []).length >= 1)
       .filter((t) =>
-        (t.supplyHistory ?? []).slice(-2).every((m) => {
+        (t.supplyHistory ?? []).slice(-1).every((m) => {
           const ok = t.demands.filter((c) => (m.got[c] ?? 0) >= m.need).length;
           return t.demands.length > 0 && ok / t.demands.length >= 0.66;
         }),
@@ -287,8 +301,8 @@ const boom: Template = {
     const town = townById(game, c.subject!.id);
     if (!town || town.population <= 0) return null;
     const effects: EffectSpec[] = [
-      { kind: 'growth', target: town.id, factor: 1.8, months: 8 },
-      { kind: 'pax', target: town.id, factor: 1.3, months: 8 },
+      { kind: 'growth', target: town.id, factor: 1.8, months: 3 },
+      { kind: 'pax', target: town.id, factor: 1.3, months: 3 },
     ];
     const cause = parent
       ? `Рядом открылись новые рабочие места — в ${town.name} едут жить и работать.`
@@ -307,15 +321,15 @@ const boom: Template = {
         cause,
         effects: lines,
         related: [refOf(town), ...(partner ? [refOf(partner)] : [])],
-        until: sc.month + 1 + 8,
+        until: sc.month + 1 + 3,
         parent: parent?.id,
       },
       subjectKey('boom', c),
     );
-    sc.apply({ effects, follow: need ? [{ event: 'demand', subject: null, cargo: need, delay: 2 }] : [] }, rec.id);
+    sc.apply({ effects, follow: need ? [{ event: 'demand', subject: null, cargo: need, delay: 1 }] : [] }, rec.id);
     if (need) town.demands.push(need);
     if (partner && !busy(sc, refOf(town))) {
-      const months = Math.round(8 * sc.difficulty.time);
+      const months = Math.round(3 * sc.difficulty.time);
       const amount = round10(Math.max(60, paxPerMonth(town, partner) * (months - RAMP) * 0.35 * sc.difficulty.demand));
       const o = sc.tryObjective(
         { kind: 'passengers', amount, towns: [town.id, partner.id] },
@@ -358,7 +372,7 @@ const grant: Template = {
     const partner = [...info.towns].map((id) => townById(game, id)!).sort((a, b) => dist(a.center, town.center) - dist(b.center, town.center))[0];
     if (!partner) return null;
     const d = dist(partner.center, town.center);
-    const months = Math.round(10 * sc.difficulty.time);
+    const months = Math.round(4 * sc.difficulty.time);
     const amount = round10(Math.max(60, paxPerMonth(town, partner) * (months - RAMP) * 0.35 * sc.difficulty.demand));
     // Субсидия покрывает большую часть стройки: дорога, станции, автобусы.
     if (!assess(game, { kind: 'passengers', amount, towns: [town.id, partner.id] }, months).ok) return null;
@@ -386,7 +400,7 @@ const grant: Template = {
         offer: true,
         source: rec.id,
         why: cause,
-        reward: { money, reputation: 6, follow: [{ event: 'boom', subject: refOf(town), delay: 2 }] },
+        reward: { money, reputation: 6, follow: [{ event: 'boom', subject: refOf(town), delay: 1 }] },
         fail: { reputation: -6 },
         related: [refOf(town), refOf(partner)],
         points: 50,
@@ -413,7 +427,7 @@ const order: Template = {
     const { game, sc } = ctx;
     const ind = industryById(game, c.subject!.id);
     if (!ind) return null;
-    const months = Math.round(6 * sc.difficulty.time);
+    const months = Math.round(3 * sc.difficulty.time);
     // Заказ на сырьё для завода (после его расширения) или на продукцию предприятия.
     const cargo = c.cargo && ind.info.accepts.includes(c.cargo) ? c.cargo : ind.info.produces;
     const toPlant = cargo !== ind.info.produces;
@@ -422,7 +436,7 @@ const order: Template = {
     // заказ выполним, но транспорта нужно больше, чем сейчас.
     const amount = toPlant
       ? round10(Math.min(800, cargoPotential(game, cargo, ind.fp.center, months) * 0.45 * sc.difficulty.demand))
-      : round10(Math.min(game.industryRate(ind), Math.max(ind.producedLast, 12) * 1.3) * (months - 2) * (sc.difficulty.demand / 0.65));
+      : round10(Math.min(game.industryRate(ind), Math.max(ind.producedLast, 12 * MONTH_SCALE) * 1.3) * (months - 1) * (sc.difficulty.demand / 0.65));
     if (amount < 40) return null;
     const params: ObjectiveParams = toPlant ? { kind: 'deliver', cargo, amount, to: refOf(ind) } : { kind: 'deliver', cargo, amount, to: null, from: ind.id };
     if (!assess(game, params, months).ok) return null;
@@ -493,10 +507,10 @@ const demand: Template = {
     const ind = glut ? industryById(game, c.subject!.id) : undefined;
     if (glut && (!ind || (ind.stock[cargo] ?? 0) < 200)) return null;
     const effects: EffectSpec[] = glut
-      ? [{ kind: 'price', target: cargo, factor: 0.75, months: 4 }]
+      ? [{ kind: 'price', target: cargo, factor: 0.75, months: 1 }]
       : [
-          { kind: 'price', target: cargo, factor: 1.3, months: 6 },
-          ...game.industries.filter((i) => i.info.produces === cargo).map((i) => ({ kind: 'industry' as const, target: i.id, factor: 1.15, months: 6 })),
+          { kind: 'price', target: cargo, factor: 1.3, months: 2 },
+          ...game.industries.filter((i) => i.info.produces === cargo).map((i) => ({ kind: 'industry' as const, target: i.id, factor: 1.15, months: 2 })),
         ];
     const cause = glut
       ? `${ind!.name}: на складе ${Math.floor(ind!.stock[cargo] ?? 0)} ед. «${CARGO[cargo].name}» — завод не успевает перерабатывать.`
@@ -511,7 +525,7 @@ const demand: Template = {
         cause,
         effects: effectLines(game, effects).slice(0, 3),
         related: ind ? [refOf(ind)] : game.towns.filter((t) => t.demands.includes(cargo)).slice(0, 3).map(refOf),
-        until: sc.month + 1 + (glut ? 4 : 6),
+        until: sc.month + 1 + (glut ? 1 : 2),
         parent: parent?.id,
       },
       subjectKey('demand', c),

@@ -1,8 +1,10 @@
-import { COST, MIN_SEGMENT_LEN } from '../config';
+import { COST, GRADE, MIN_SEGMENT_LEN } from '../config';
 import { arcCubic, Cubic, CurveLUT, intersectCurves, minRadius, polylineMinDistance, quadToCubic, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, scale, sub, Vec } from '../core/vec';
 import type { Network, RoadNode, Segment } from '../world/network';
-import { halfWidth, RAIL_LEVEL_RUN, RAIL_SWITCH_ANGLE, ROAD_CLASSES, RoadSpec, sameSpec, specCost } from '../world/roadTypes';
+import { halfWidth, RAIL_LEVEL_RUN, RAIL_SWITCH_ANGLE, ROAD_CLASSES, RoadSpec, sameSpec, specCost, structureFactor } from '../world/roadTypes';
+import { curveProfile, earthFactor, earthworkProblem, GroundProfile, type ProfileSummary, structureGradeProblem } from './grade';
+import { levelDeck } from '../lanes/deck';
 import { stationsNear } from './railEdit';
 
 /**
@@ -25,6 +27,8 @@ export interface BuildContext {
   readonly budget: number;
   isWater(p: Vec, margin?: number): boolean;
   inBounds(p: Vec, margin?: number): boolean;
+  /** Отметка земли в точке (вода — NaN); без рельефа (старые миры) — null: профиль не считаем. */
+  ground(): ((p: Vec) => number) | null;
   /** Строения в точке: id и можно ли снести их ради пути. */
   obstaclesAt(p: Vec, radius: number): { id: number; demolishable: boolean }[];
   demolishCost(id: number): number;
@@ -72,6 +76,8 @@ export interface Plan {
   crossings: Crossing[];
   /** Здания, которые придётся снести (их цена уже в cost). */
   demolish: number[];
+  /** Продольный профиль пути на земле: наибольший уклон, выемка и насыпь, м. */
+  profile?: ProfileSummary;
 }
 
 /** Правка формы путей: новые кривые участков (концы — в их узлах) и, если узел переносят, — куда. */
@@ -94,12 +100,17 @@ export interface ReshapePlan extends TrackEdit {
   plans: Plan[];
 }
 
-/** Множитель цены в точке: мосты, эстакады и тоннели дороже земли. */
-function structureFactor(h: number, water: boolean): number {
-  if (water && h > -0.5) return 4;
-  if (h > 0.25) return 1 + 1.5 * Math.min(h, 1) + 0.6 * Math.max(0, h - 1);
-  if (h < -0.25) return 1 + 3 * Math.min(-h, 1) + (water ? 1 : 0);
-  return 1;
+/** Профиль пути на земле (оба конца на уровне 0) по рельефу; у ж/д уклон строже, чем у дороги. */
+export function trackProfile(lut: CurveLUT, levelA: number, levelB: number, ground: ((p: Vec) => number) | null): (GroundProfile & { ds: number }) | null {
+  if (!ground || levelA !== 0 || levelB !== 0) return null;
+  return curveProfile(lut, ground, GRADE.rail);
+}
+
+/** Множитель цены за насыпь или выемку в точке s профиля. */
+function earthAt(prof: (GroundProfile & { ds: number }) | null, s: number): number {
+  if (!prof) return 1;
+  const k = Math.min(prof.z.length - 1, Math.round(s / prof.ds));
+  return Number.isNaN(prof.h[k]) ? 1 : earthFactor(prof.z[k] - prof.h[k], GRADE.earthUnit);
 }
 
 export class Builder {
@@ -200,6 +211,7 @@ export class Builder {
     // Цена считается заранее, чтобы показывать её даже для недопустимого пути.
     const step = 4;
     const samples = Math.max(2, Math.ceil(length / step));
+    const prof = trackProfile(lut, levelA, levelB, this.ctx.ground());
     let cost = 0;
     const pts: { p: Vec; h: number; wet: boolean }[] = [];
     for (let i = 0; i <= samples; i++) {
@@ -208,9 +220,10 @@ export class Builder {
       const h = levelAt(s);
       const wet = this.ctx.isWater(p, 2);
       pts.push({ p, h, wet });
-      if (i > 0) cost += (length / samples) * specCost(spec) * structureFactor(h, wet);
+      if (i > 0) cost += (length / samples) * specCost(spec) * structureFactor(h, wet) * earthAt(prof, s);
     }
     withGeom.cost = Math.round(cost);
+    if (prof) withGeom.profile = { grade: prof.grade, cut: prof.cut, fill: prof.fill, slope: (prof.z[prof.z.length - 1] - prof.z[0]) / length };
 
     if (length < MIN_SEGMENT_LEN) return fail('Слишком коротко');
     if (start.kind === 'node' && end.kind === 'node') {
@@ -224,6 +237,19 @@ export class Builder {
     if (minRadius(curve) < ROAD_CLASSES[spec.cls].minRadius) return fail('Слишком крутой поворот');
     if (Math.abs(levelA - levelB) > 2) return fail('Слишком большой перепад');
     if (Math.abs(levelA - levelB) * RAIL_LEVEL_RUN > length) return fail('Слишком крутой подъём');
+    const earth = prof && earthworkProblem(prof, GRADE.rail, GRADE.railDepth);
+    if (earth) return fail(earth);
+    // Ж/д мост, эстакада, тоннель, пандус: уклон по отметкам полотна в концах — не круче, чем путь на земле
+    // (у пандуса — с запасом на насыпь или выемку у подножия).
+    const ground = this.ctx.ground();
+    if (ground && (levelA !== 0 || levelB !== 0)) {
+      const z = (p: Vec, level: number) => {
+        const g = ground(p);
+        return (Number.isFinite(g) ? g : 0) + levelDeck(level);
+      };
+      const steep = structureGradeProblem(z(start.pos, levelA), z(end.pos, levelB), length, GRADE.rail, levelA !== levelB ? GRADE.railDepth : 0);
+      if (steep) return fail(steep);
+    }
     for (const s of [start, end]) {
       if (s.kind === 'free' && s.level === 0 && this.ctx.isWater(s.pos, hw * 0.5)) return fail('Опора в воде — нужен мост');
     }
@@ -338,8 +364,8 @@ export class Builder {
     return this.net.addNode(s.pos, s.level).id;
   }
 
-  /** Строит путь. Возвращает конечный узел и касательную для продолжения. */
-  build(req: RoadRequest): { endNode: number; tangent: Vec } | null {
+  /** Строит путь. Возвращает начальный и конечный узлы и касательную для продолжения. */
+  build(req: RoadRequest): { startNode: number; endNode: number; tangent: Vec } | null {
     const plan = this.plan(req);
     if (!plan.ok || !plan.curve || !plan.lut) return null;
 
@@ -396,7 +422,7 @@ export class Builder {
     this.ctx.spend(plan.cost);
     this.ctx.networkChanged();
     const lut = new CurveLUT(last);
-    return { endNode: b, tangent: lut.tangentAt(lut.length) };
+    return { startNode: a, endNode: b, tangent: lut.tangentAt(lut.length) };
   }
 
   segmentCost(seg: Segment): number {
@@ -407,11 +433,13 @@ export class Builder {
   private trackCost(lut: CurveLUT, spec: RoadSpec, levelAt: (s: number) => number): number {
     let cost = 0;
     const length = lut.length;
+    const prof = trackProfile(lut, levelAt(0), levelAt(length), this.ctx.ground());
     const n = Math.max(2, Math.ceil(length / 6));
     for (let i = 1; i <= n; i++) {
       const s = (length * (i - 0.5)) / n;
       const p = lut.pointAt(s);
-      cost += (length / n) * specCost(spec) * structureFactor(levelAt(s), this.ctx.isWater(p, 2));
+      const h = levelAt(s);
+      cost += (length / n) * specCost(spec) * structureFactor(h, this.ctx.isWater(p, 2)) * earthAt(prof, s);
     }
     return Math.round(cost);
   }
@@ -437,6 +465,7 @@ export class Builder {
       budget: Infinity,
       isWater: (p, m) => ctx.isWater(p, m),
       inBounds: (p, m) => ctx.inBounds(p, m),
+      ground: () => ctx.ground(),
       obstaclesAt: (p, r) => ctx.obstaclesAt(p, r).filter((o) => !own.has(o.id)),
       demolishCost: (id) => ctx.demolishCost(id),
       demolish: () => {},

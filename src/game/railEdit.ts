@@ -1,4 +1,5 @@
-import { Cubic, offsetCubic, splitBezier } from '../core/bezier';
+import { MIN_SEGMENT_LEN } from '../config';
+import { Cubic, cubicLength, offsetCubic, offsetCubics, reverseCubic, splitBezier } from '../core/bezier';
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Network, Segment } from '../world/network';
 import { TRACK_GAP } from '../world/roadTypes';
@@ -316,4 +317,162 @@ export function besideGhost(net: Network, b: Beside, length = 60, gap = TRACK_GA
   if (t1 < 1) piece = splitBezier(piece, t1)[0];
   if (t0 > 0) piece = splitBezier(piece, t0 / t1)[1];
   return offsetCubic(piece, b.side * gap);
+}
+
+// ---------- Путь вдоль цепочки путей ----------
+
+/** Участок в цепочке путей: по ходу цепочки (forward — от a к b) или против. */
+export interface ChainLink {
+  seg: Segment;
+  forward: boolean;
+}
+
+/** Обычный путь: не платформа вокзала. */
+const plainTrack = (s: Segment) => s.spec.cls === 'rail' && s.platform === undefined;
+
+/**
+ * Цепочка путей через участок seg (он — по своему ходу a→b): по порядку, в обе стороны от него, пока
+ * узел не стрелка — в нём ровно два пути, платформы не в счёт.
+ */
+export function trackChain(net: Network, seg: Segment, limit = 60): ChainLink[] {
+  const chain: ChainLink[] = [{ seg, forward: true }];
+  const walk = (from: number, ahead: boolean) => {
+    let node = from;
+    for (let guard = 0; guard < limit; guard++) {
+      const segs = net.railSegs(net.node(node)).filter((id) => plainTrack(net.segment(id)));
+      if (segs.length !== 2) return;
+      const known = ahead ? chain[chain.length - 1].seg.id : chain[0].seg.id;
+      const nextId = segs.find((id) => id !== known);
+      if (nextId === undefined || chain.some((x) => x.seg.id === nextId)) return;
+      const next = net.segment(nextId);
+      if (ahead) {
+        chain.push({ seg: next, forward: next.a === node });
+        node = next.a === node ? next.b : next.a;
+      } else {
+        chain.unshift({ seg: next, forward: next.b === node });
+        node = next.b === node ? next.a : next.b;
+      }
+    }
+  };
+  walk(seg.b, true);
+  walk(seg.a, false);
+  return chain;
+}
+
+/** Координата u вдоль цепочки: где начинается каждый участок и u точки «участок i, длина s от его a». */
+export function chainCoords(chain: ChainLink[]): { starts: number[]; length: number; at: (i: number, s: number) => number } {
+  const starts: number[] = [];
+  let u = 0;
+  for (const x of chain) {
+    starts.push(u);
+    u += x.seg.length;
+  }
+  return { starts, length: u, at: (i, s) => starts[i] + (chain[i].forward ? s : chain[i].seg.length - s) };
+}
+
+/**
+ * Копия цепочки сбоку: от координаты u0 до u1 вдоль неё, на расстоянии off по нормали к ходу от u0 к u1
+ * (rightNormal). Кривые — параллелью по всей длине (где надо — несколькими кусками), а не только у концов.
+ * Куски — по порядку от u0 к u1, соседние стыкуются концами; куски короче minLen сливаются с соседними.
+ */
+export function chainOffset(chain: ChainLink[], u0: number, u1: number, off: number, minLen = MIN_SEGMENT_LEN): Cubic[] {
+  const [lo, hi] = u0 < u1 ? [u0, u1] : [u1, u0];
+  const { starts } = chainCoords(chain);
+  const pieces: Cubic[] = [];
+  chain.forEach((x, i) => {
+    const L = x.seg.length;
+    const a = Math.max(lo, starts[i]);
+    const b = Math.min(hi, starts[i] + L);
+    if (b - a < 1e-3) return;
+    const sOf = (u: number) => (x.forward ? u - starts[i] : L - (u - starts[i]));
+    const ta = x.seg.lut.tAt(sOf(a));
+    const tb = x.seg.lut.tAt(sOf(b));
+    const piece = subCubic(x.seg.curve, Math.min(ta, tb), Math.max(ta, tb));
+    pieces.push(x.forward ? piece : reverseCubic(piece));
+  });
+  const along = u0 <= u1 ? pieces : pieces.reverse().map(reverseCubic);
+  return joinPieces(along.flatMap((p) => offsetCubics(p, off, 0.15, minLen)), minLen);
+}
+
+/**
+ * Второй путь вдоль соседнего: от start (на междупутье от пути) до места end рядом с тем же путём — копия
+ * его цепочки сбоку на всю длину (через узлы без стрелок), а не своя кривая между концами: посередине дуги
+ * новый путь не отходит от старого и не прижимается к нему. null — start не рядом с той же цепочкой, с
+ * другой стороны от неё, рядом — подъём или другая высота; startDir (ход пути, который продолжаем из start)
+ * уходит не вдоль соседнего.
+ */
+export function besideRun(net: Network, start: Vec, end: Beside, level: number, startDir: Vec | null = null, gap = TRACK_GAP): Cubic[] | null {
+  const seg = net.segments.get(end.seg);
+  if (!seg || !plainTrack(seg)) return null;
+  const chain = trackChain(net, seg);
+  const { starts, at } = chainCoords(chain);
+  const iEnd = chain.findIndex((x) => x.seg.id === seg.id);
+  const uEnd = at(iEnd, end.s);
+  let near = { i: -1, s: 0, d: Infinity, point: start };
+  chain.forEach((x, i) => {
+    const h = x.seg.lut.closest(start);
+    if (h.d < near.d) near = { i, s: h.s, d: h.d, point: h.point };
+  });
+  if (near.i < 0) return null;
+  const uStart = at(near.i, near.s);
+  if (Math.abs(uEnd - uStart) < MIN_SEGMENT_LEN) return null;
+  // Ход — от начала к концу; сторона по нормали к ходу у обоих концов одна, начало — ровно сбоку от пути.
+  const ahead = uEnd > uStart;
+  const dirAt = (x: ChainLink, s: number) => scale(x.seg.lut.tangentAt(s), x.forward === ahead ? 1 : -1);
+  const t0 = dirAt(chain[near.i], near.s);
+  const side = Math.sign(dot(sub(start, near.point), rightNormal(t0)));
+  if (side === 0 || dist(start, add(near.point, scale(rightNormal(t0), side * gap))) > 1.5) return null;
+  if (Math.sign(dot(sub(end.pos, end.from), rightNormal(dirAt(chain[iEnd], end.s)))) !== side) return null;
+  if (startDir && dot(norm(startDir), t0) < Math.cos(0.1)) return null;
+  const [lo, hi] = ahead ? [uStart, uEnd] : [uEnd, uStart];
+  const levelOk = (s: Segment) => net.isFlat(s) && Math.abs(net.node(s.a).level - level) <= 0.25;
+  if (chain.some((x, i) => starts[i] < hi && starts[i] + x.seg.length > lo && !levelOk(x.seg))) return null;
+  const pieces = chainOffset(chain, uStart, uEnd, side * gap);
+  if (!pieces.length) return null;
+  moveEnd(pieces[0], 'a', start);
+  moveEnd(pieces[pieces.length - 1], 'b', end.pos);
+  return pieces;
+}
+
+/** Кусок кривой от t0 до t1. */
+function subCubic(c: Cubic, t0: number, t1: number): Cubic {
+  let piece = c;
+  if (t1 < 1) piece = splitBezier(piece, t1)[0];
+  if (t0 > 0) piece = splitBezier(piece, t0 / t1)[1];
+  return piece;
+}
+
+/** Переносит конец кривой в p вместе с его управляющей точкой (направление у конца не меняется). */
+function moveEnd(c: Cubic, end: TrackEnd, p: Vec): void {
+  if (end === 'a') {
+    c.p1 = add(c.p1, sub(p, c.p0));
+    c.p0 = { ...p };
+  } else {
+    c.p2 = add(c.p2, sub(p, c.p3));
+    c.p3 = { ...p };
+  }
+}
+
+/** Куски подряд: стыки — в одной точке, кусок короче minLen сливается с соседним (тот продлевается до его конца). */
+function joinPieces(list: Cubic[], minLen: number): Cubic[] {
+  const out = list.map((c) => ({ ...c }));
+  for (let i = 1; i < out.length; i++) {
+    const m = scale(add(out[i - 1].p3, out[i].p0), 0.5);
+    moveEnd(out[i - 1], 'b', m);
+    moveEnd(out[i], 'a', m);
+  }
+  let i = 0;
+  while (out.length > 1 && i < out.length) {
+    if (cubicLength(out[i]) >= minLen) {
+      i++;
+    } else if (i + 1 < out.length) {
+      moveEnd(out[i + 1], 'a', out[i].p0);
+      out.splice(i, 1);
+    } else {
+      moveEnd(out[i - 1], 'b', out[i].p3);
+      out.splice(i, 1);
+      i--;
+    }
+  }
+  return out;
 }

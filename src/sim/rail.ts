@@ -1,5 +1,6 @@
 import { minRadius } from '../core/bezier';
 import { dot, scale, Vec } from '../core/vec';
+import { GRADE } from '../config';
 import type { Network, Segment, SplitRecord } from '../world/network';
 import { RAIL_SWITCH_ANGLE, specSpeed } from '../world/roadTypes';
 
@@ -125,6 +126,8 @@ export class RailSim {
   constructor(
     private readonly net: Network,
     private readonly events: RailEvents,
+    /** Уклон рельефа вдоль dir в точке p (положителен — в гору); без рельефа — всегда 0. */
+    private readonly grade: (p: Vec, dir: Vec) => number = () => 0,
   ) {}
 
   // ---------- Геометрия графа ----------
@@ -357,6 +360,35 @@ export class RailSim {
   }
 
   /**
+   * Тот же путь, что previewRoute, — по участкам с пределом скорости (путь и кривые) и уклоном рельефа
+   * (на мосту и в тоннеле — без уклона): для графика скорости линии. null — пути нет.
+   */
+  previewTrack(from: number[], to: number[], through?: number, step = 12): { length: number; cap: number; grade: number; from: Vec; to: Vec }[] | null {
+    const starts = from.filter((id) => this.net.segments.has(id));
+    const goal = new Set(to.filter((id) => this.net.segments.has(id) && !from.includes(id)));
+    const route = this.findRoute(starts, goal, null, 0, through);
+    if (!route) return null;
+    const pieces: { length: number; cap: number; grade: number; from: Vec; to: Vec }[] = [];
+    route.states.forEach((st, i) => {
+      const seg = this.net.segment(st.seg);
+      const s0 = i === 0 ? seg.length / 2 : 0;
+      const s1 = i === route.states.length - 1 ? seg.length / 2 : seg.length;
+      const cap = this.segSpeed(seg.id);
+      const k = Math.max(1, Math.ceil((s1 - s0) / step));
+      for (let j = 0; j < k; j++) {
+        const s = s0 + ((s1 - s0) * (j + 0.5)) / k;
+        const cs = st.dir === 0 ? s : seg.length - s;
+        const t = seg.lut.tangentAt(cs);
+        const level = this.net.levelAt(seg, cs);
+        const grade = Math.abs(level) < 0.25 ? this.grade(seg.lut.pointAt(cs), st.dir === 0 ? t : scale(t, -1)) : 0;
+        const at = (u: number) => seg.lut.pointAt(st.dir === 0 ? u : seg.length - u);
+        pieces.push({ length: (s1 - s0) / k, cap, grade, from: at(s0 + ((s1 - s0) * j) / k), to: at(s0 + ((s1 - s0) * (j + 1)) / k) });
+      }
+    });
+    return pieces;
+  }
+
+  /**
    * Дейкстра по проходам пути; старт — платформы в обе стороны, цель — любая платформа из goal
    * длиной не меньше minLen. Чужие занятые участки сильно дороже — объезд выбирается, если есть;
    * сквозной путь вокзала through как цель дороже бокового.
@@ -437,6 +469,12 @@ export class RailSim {
     const path = train.path;
     let idx = this.edgeIndex(train, train.head);
     let target = train.maxSpeed;
+    // В подъём поезд медленнее — тем сильнее, чем круче склон (на мосту и в тоннеле не считаем).
+    const headPt = this.pointAt(train, train.head);
+    if (headPt && Math.abs(headPt.level) < 0.25) {
+      const grade = this.grade(headPt.pos, headPt.dir);
+      if (grade > 0) target *= Math.max(0.35, 1 - Math.min(1, grade / GRADE.rail) * 0.5);
+    }
     // Ограничения скорости на кривых впереди.
     for (let i = idx; i < path.length; i++) {
       const e = path[i];

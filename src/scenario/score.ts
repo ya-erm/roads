@@ -4,8 +4,8 @@
  * множитель сложности (и испытания).
  */
 import type { Scenario } from './manager';
-import { MEDALS } from './content';
-import type { ScoreLine, ScoreResult } from './types';
+import { FAST, MEDALS } from './content';
+import type { Objective, ScoreLine, ScoreResult } from './types';
 
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 
@@ -15,9 +15,10 @@ export function computeScore(sc: Scenario): ScoreResult {
   const parts: ScoreLine[] = [];
 
   // Цели этапов: заработанные очки от возможных. Восстановительная попытка приносит половину.
-  const phaseGoals = s.objectives.filter((o) => o.role !== 'contract' && !o.retryOf);
+  const ofPhase = (o: Objective) => o.role === 'main' || o.role === 'goal';
+  const phaseGoals = s.objectives.filter((o) => ofPhase(o) && !o.retryOf);
   const possible = phaseGoals.reduce((sum, o) => sum + o.points, 0);
-  const earned = s.objectives.filter((o) => o.role !== 'contract' && o.status === 'done').reduce((sum, o) => sum + o.points, 0);
+  const earned = s.objectives.filter((o) => ofPhase(o) && o.status === 'done').reduce((sum, o) => sum + o.points, 0);
   const goalsDone = phaseGoals.filter((o) => o.status === 'done' || (o.retry && s.objectives.find((r) => r.id === o.retry)?.status === 'done')).length;
   parts.push({
     id: 'objectives',
@@ -40,7 +41,7 @@ export function computeScore(sc: Scenario): ScoreResult {
   });
 
   // Сроки: насколько раньше дедлайна выполнены задания со сроком.
-  const timed = s.objectives.filter((o) => o.status === 'done' && o.deadline !== null && o.started !== undefined && o.closedAt !== undefined);
+  const timed = s.objectives.filter((o) => o.role !== 'extra' && o.status === 'done' && o.deadline !== null && o.started !== undefined && o.closedAt !== undefined);
   const early = timed.length
     ? timed.reduce((sum, o) => sum + clamp01((o.deadline! - o.closedAt!) / Math.max(1, o.deadline! - o.started!)), 0) / timed.length
     : 0;
@@ -51,6 +52,20 @@ export function computeScore(sc: Scenario): ScoreResult {
     max: 80,
     note: timed.length ? `в среднем запас ${Math.round(early * 100)}% срока` : 'нет выполненных заданий со сроком',
   });
+
+  // Быстрые сроки: доп. очки за каждое задание, выполненное к быстрому сроку (есть только у части заданий).
+  const fastOnes = s.objectives.filter((o) => o.role !== 'extra' && o.fast !== undefined);
+  if (fastOnes.length) {
+    const quick = fastOnes.filter((o) => o.quick).length;
+    const max = Math.min(FAST.maxPoints, fastOnes.length * FAST.points);
+    parts.push({
+      id: 'fast',
+      name: 'Быстрые сроки',
+      value: Math.min(max, quick * FAST.points),
+      max,
+      note: `успели к быстрому сроку ${quick} из ${fastOnes.length}`,
+    });
+  }
 
   // Финансы: операционная маржа за весь сценарий (перевозки минус содержание, ремонт и проценты).
   const income = s.stats.months.reduce((sum, m) => sum + m.income, 0);

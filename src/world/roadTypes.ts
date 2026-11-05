@@ -21,6 +21,19 @@ export const ROAD_CLASSES: Record<RoadClass, RoadClassInfo> = {
   rail: { id: 'rail', name: 'Ж/д путь', limit: 120, minRadius: 110, cost: 45 },
 };
 
+/**
+ * Во сколько раз метр полотна дороже, чем на земле: мост (уровень 1), эстакада (2), тоннель (−1),
+ * мост через воду. Пандусы между уровнями — по промежуточной высоте.
+ */
+export const STRUCTURE = { bridge: 8, overpass: 10, tunnel: 14, water: 9, underWater: 6 };
+
+/** Множитель цены в точке полотна на высоте h (уровень), water — под ней вода. */
+export function structureFactor(h: number, water: boolean): number {
+  if (h < -0.25) return 1 + (STRUCTURE.tunnel - 1) * Math.min(-h, 1) + (water ? STRUCTURE.underWater : 0);
+  const up = h > 0.25 ? 1 + (STRUCTURE.bridge - 1) * Math.min(h, 1) + (STRUCTURE.overpass - STRUCTURE.bridge) * Math.max(0, Math.min(1, h - 1)) : 1;
+  return water ? Math.max(up, STRUCTURE.water) : up;
+}
+
 /** Знаки ограничения скорости, которые можно поставить на дорогу. */
 export const SPEED_LIMITS = [40, 60, 80, 90, 100, 120];
 /** км/ч в одной единице скорости симуляции. */
@@ -81,6 +94,10 @@ export const ROAD_PRESETS: RoadPreset[] = [
   { id: 'hw2', name: 'Магистраль', short: '2+2', spec: { cls: 'highway', lanesF: 2, lanesB: 2 } },
   { id: 'mw2', name: 'Автомагистраль', short: '2‖2', spec: { cls: 'motorway', lanesF: 2, lanesB: 2 } },
 ];
+
+/** Что строится, пока игрок не выбрал другой тип, — шоссе. */
+export const DEFAULT_PRESET_ID = 'road';
+export const defaultPreset = (): RoadPreset => ROAD_PRESETS.find((p) => p.id === DEFAULT_PRESET_ID)!;
 
 export const MAX_LANES = 4;
 export const LANE_W = 7;

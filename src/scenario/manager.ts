@@ -6,13 +6,14 @@
 import { ECONOMY, MONTH_LENGTH } from '../config';
 import { Rng } from '../core/rng';
 import type { Game } from '../game/game';
+import type { ModelTier } from '../game/transport';
 import type { CargoType } from '../world/cargo';
-import { industryById, levelCap, operating } from './analysis';
-import { CHALLENGE_BONUS, DIFFICULTY, PHASES, POINTS, REPUTATION } from './content';
+import { industryById, levelCap, network, operating } from './analysis';
+import { CHALLENGE_BONUS, DIFFICULTY, EVENT_RULES, FAST, PHASES, POINTS, REPUTATION } from './content';
 import { EconomyMods, modsOf } from './effects';
 import { runEvents } from './events';
 import { assess } from './feasibility';
-import { generatePhase, startScenario } from './generator';
+import { extraObjectives, fastMonths, generatePhase, startScenario } from './generator';
 import { baseOf, isMonthly, liveProgress, makerKey, monthOk, pairKey, receiverKey, targetOf, titleOf } from './objectives';
 import { computeScore } from './score';
 import type {
@@ -44,6 +45,8 @@ export interface ObjectiveOptions {
   offer?: boolean;
   points?: number;
   title?: string;
+  /** false — без быстрого срока (последняя попытка). */
+  fast?: false;
 }
 
 /** Хеш seed для своего генератора: посторонние изменения игры не сдвигают случайности сценария. */
@@ -56,11 +59,19 @@ export function mixSeed(seed: number, salt: number): number {
 
 export const SCENARIO_SALT = 0x85ebca6b;
 
+/** Надбавка за быстрый срок: доля денег задания, до тысяч. */
+export const fastBonus = (o: Objective) => Math.round(((o.reward.money ?? 0) * FAST.money) / 1000) * 1000;
+
+/** Столько месяцев подряд за пределом кредита — и компания банкрот (после первого — предупреждение). */
+const BANKRUPT_MONTHS = 2;
+
 export class Scenario {
   readonly rng: Rng;
   readonly mods: EconomyMods;
   /** Секунды до следующей проверки прогресса. */
   private clock = 0;
+  /** Идут итоги месяца (monthEnd). */
+  private ending = false;
 
   private constructor(
     readonly game: Game,
@@ -102,6 +113,17 @@ export class Scenario {
     const sc = new Scenario(game, state);
     startScenario(sc);
     sc.state.rng = sc.rng.seedState;
+    const b = sc.state.brief;
+    game.journal.add('scenario', {
+      archetype: sc.state.archetype,
+      planned: settings.archetype !== sc.state.archetype ? settings.archetype : undefined,
+      difficulty: settings.difficulty,
+      challenge: settings.challenge || undefined,
+      capital: b.capital,
+      loan: b.loan,
+      loanMax: b.loanMax,
+      facts: b.facts,
+    });
     return sc;
   }
 
@@ -118,6 +140,20 @@ export class Scenario {
 
   get month(): number {
     return this.game.monthIndex;
+  }
+
+  /**
+   * Месяц, который сейчас идёт, — от него сроки новых заданий. В итогах месяца (monthEnd) счётчик игры ещё
+   * на закончившемся месяце, а задания, выданные там (новый этап, контракты событий), начинаются со следующего:
+   * иначе они теряли бы месяц срока.
+   */
+  get today(): number {
+    return this.ending ? this.month + 1 : this.month;
+  }
+
+  /** Сейчас, в месяцах игры с долей: с этого момента — «новое» (маршруты этапа). В итогах месяца — ровно его конец. */
+  get moment(): number {
+    return this.ending ? this.month + 1 : this.game.time / MONTH_LENGTH;
   }
 
   get difficulty() {
@@ -204,10 +240,12 @@ export class Scenario {
 
   /** Раз в секунду игрового времени — прогресс накопительных заданий: выполнено — сразу награда. */
   tick(dt: number): void {
-    if (!this.running) return;
+    if (!this.running && !this.afterWin) return;
     this.clock -= dt;
     if (this.clock > 0) return;
     this.clock = 1;
+    // Пройденный сценарий из старого сохранения: дополнительные задания — сейчас.
+    if (this.afterWin && !this.state.extras) this.giveExtras();
     for (const o of this.current) {
       if (this.blocked(o)) continue;
       o.progress = liveProgress(o, this.state, this.game);
@@ -217,21 +255,25 @@ export class Scenario {
 
   /** Конец месяца (после экономики игры): месячные цели, сроки, эффекты, события, этапы и банкротство. */
   monthEnd(): void {
+    this.ending = true;
+    try {
+      this.endMonth();
+    } finally {
+      this.ending = false;
+    }
+  }
+
+  private endMonth(): void {
     const s = this.state;
-    const now = this.month + 1;
+    const now = this.today;
     this.closeMonth();
     if (!this.running) {
+      // После победы идут только дополнительные задания: без сроков, событий и банкротства.
+      if (this.afterWin) this.monthly();
       s.effects = s.effects.filter((e) => e.until > now);
       return;
     }
-    // Месячные цели: условие этого месяца выполнено — +1 к серии, нет — серия с нуля.
-    const month = s.stats.months[s.stats.months.length - 1];
-    for (const o of this.current) {
-      if (!isMonthly(o.params) || this.blocked(o)) continue;
-      o.streak = monthOk(o.params, this.game, month) ? o.streak + 1 : 0;
-      o.progress = o.streak;
-      if (o.streak >= o.target) this.complete(o);
-    }
+    this.monthly();
     this.tick(0);
     this.clock = 1;
     // Сроки: не выполнено к началу месяца-дедлайна — провал; предложения истекают.
@@ -245,6 +287,28 @@ export class Scenario {
     this.checkPhase();
     this.checkBankrupt();
     s.rng = this.rng.seedState;
+  }
+
+  /** Месячные цели: условие закрытого месяца выполнено — +1 к серии, нет — серия с нуля. */
+  private monthly(): void {
+    const month = this.state.stats.months[this.state.stats.months.length - 1];
+    for (const o of this.current) {
+      if (!isMonthly(o.params) || this.blocked(o)) continue;
+      o.streak = monthOk(o.params, this.game, month) ? o.streak + 1 : 0;
+      o.progress = o.streak;
+      if (o.streak >= o.target) this.complete(o);
+    }
+  }
+
+  /** Сценарий пройден, а партия идёт дальше — с дополнительными заданиями. */
+  get afterWin(): boolean {
+    return this.state.status === 'won';
+  }
+
+  /** Дополнительные задания после победы — один раз. */
+  private giveExtras(): void {
+    this.state.extras = true;
+    extraObjectives(this);
   }
 
   /** Итоги месяца по перевозкам и финансам — в историю сценария. */
@@ -280,8 +344,8 @@ export class Scenario {
     }
     this.state.bankrupt++;
     const floor = `−$${Math.abs(ECONOMY.creditLimit).toLocaleString('ru-RU')}`;
-    if (this.state.bankrupt >= 3) this.lose(`Компания обанкротилась: три месяца подряд на счёте меньше ${floor}`);
-    else this.game.notify(`Сценарий: на счёте меньше ${floor}. Ещё ${3 - this.state.bankrupt} мес. — и компания обанкротится`, '#e5534b');
+    if (this.state.bankrupt >= BANKRUPT_MONTHS) this.lose(`Компания обанкротилась: ${BANKRUPT_MONTHS} мес. подряд на счёте меньше ${floor}`);
+    else this.game.notify(`Сценарий: на счёте меньше ${floor}. Ещё ${BANKRUPT_MONTHS - this.state.bankrupt} мес. — и компания обанкротится`, '#e5534b');
   }
 
   // ---------- Задания ----------
@@ -292,8 +356,9 @@ export class Scenario {
 
   /** Новое задание (или предложение контракта). Прогресс накопительных — с текущей отметки счётчика. */
   addObjective(params: ObjectiveParams, opts: ObjectiveOptions): Objective {
-    const now = this.month;
+    const now = this.today;
     const offer = !!opts.offer;
+    const fast = opts.months !== null && opts.fast !== false && opts.role !== 'extra' ? fastMonths(this.game, params, opts.months, this.state.settings.difficulty) : null;
     const o: Objective = {
       id: this.nextId('o'),
       params,
@@ -306,8 +371,10 @@ export class Scenario {
       created: now,
       started: offer ? undefined : now,
       deadline: offer || opts.months === null ? null : now + opts.months,
-      offerUntil: offer ? now + 2 : undefined,
+      fast: !offer && fast !== null ? this.fastFrom(fast) : undefined,
+      offerUntil: offer ? now + EVENT_RULES.offer : undefined,
       months: opts.months ?? undefined,
+      fastMonths: offer && fast !== null ? fast : undefined,
       base: baseOf(this.state, params, this.game),
       progress: 0,
       target: targetOf(params),
@@ -321,13 +388,43 @@ export class Scenario {
     o.progress = liveProgress(o, this.state, this.game);
     this.state.objectives.push(o);
     if (offer) this.log('offer', `Предложен контракт: ${o.title}`);
+    // В журнал — с оценкой выполнимого за срок: потом видно, можно ли было успеть.
+    const verdict = assess(this.game, params, opts.months ?? 24);
+    this.game.journal.add('obj', {
+      id: o.id,
+      role: o.role,
+      phase: o.phase ?? undefined,
+      status: o.status,
+      title: o.title,
+      params,
+      target: o.target,
+      base: o.base,
+      deadline: o.deadline ?? undefined,
+      fast: o.fast,
+      offerUntil: o.offerUntil,
+      months: o.months,
+      critical: o.critical || undefined,
+      $: o.reward.money,
+      est: verdict.estimate,
+      check: verdict.ok ? undefined : verdict.reason,
+      src: o.source,
+      why: o.why,
+    });
     return o;
+  }
+
+  /** Быстрый срок через months месяцев от этой минуты (месяц игры с долей — прикидка идёт от начала работы). */
+  private fastFrom(months: number): number {
+    return Math.round((this.moment + months) * 100) / 100;
   }
 
   /** Задание — только если оно выполнимо (feasibility.assess); иначе null, и вызывающий ищет другое. */
   tryObjective(params: ObjectiveParams, opts: ObjectiveOptions): Objective | null {
     const verdict = assess(this.game, params, opts.months ?? 24);
-    if (!verdict.ok) return null;
+    if (!verdict.ok) {
+      this.game.journal.add('skip', { role: opts.role, title: titleOf(params, this.game), reason: verdict.reason, est: verdict.estimate });
+      return null;
+    }
     return this.addObjective(params, opts);
   }
 
@@ -343,9 +440,11 @@ export class Scenario {
     o.status = 'active';
     o.started = this.month;
     o.deadline = o.months !== undefined ? this.month + o.months : null;
+    if (o.fastMonths !== undefined) o.fast = this.fastFrom(o.fastMonths);
     o.base = baseOf(this.state, o.params, this.game);
     o.progress = liveProgress(o, this.state, this.game);
     this.log('offer', `Контракт принят: ${o.title}`);
+    this.game.journal.add('accept', { id: o.id, deadline: o.deadline ?? undefined, fast: o.fast, base: o.base, progress: o.progress });
     return true;
   }
 
@@ -359,6 +458,7 @@ export class Scenario {
     // Альтернативный путь: то, что было бы при провале, кроме штрафов.
     this.apply({ effects: o.fail.effects, follow: o.fail.follow }, o.source ?? o.id);
     this.log('declined', `${expired ? 'Предложение истекло' : 'Отказ от контракта'}: ${o.title}`);
+    this.game.journal.add('decline', { id: o.id, expired: expired || undefined, rep: this.state.reputation });
     return true;
   }
 
@@ -368,8 +468,16 @@ export class Scenario {
     o.progress = Math.max(o.progress, o.target);
     this.changeReputation(o.role === 'main' ? REPUTATION.main : REPUTATION.done);
     this.apply(o.reward, o.source ?? o.id);
+    // Успели к быстрому сроку — надбавка к награде (и очки за быстроту в оценке).
+    const bonus = o.fast !== undefined && this.game.time < o.fast * MONTH_LENGTH ? fastBonus(o) : null;
+    if (bonus !== null) {
+      o.quick = true;
+      if (bonus > 0) this.game.grant(bonus);
+    }
     this.log('done', `Выполнено: ${o.title}`);
-    this.game.notify(`✓ Выполнено: ${o.title}${o.reward.money ? ` · +$${o.reward.money.toLocaleString('ru-RU')}` : ''}`, '#2e9d57');
+    this.game.journal.add('done', { id: o.id, progress: o.progress, target: o.target, $: o.reward.money, quick: bonus ?? undefined, rep: this.state.reputation });
+    const money = (o.reward.money ?? 0) + (bonus ?? 0);
+    this.game.notify(`${o.quick ? '⚡ Быстрее срока' : '✓ Выполнено'}: ${o.title}${money ? ` · +$${money.toLocaleString('ru-RU')}` : ''}`, '#2e9d57');
     if (o.phase === this.state.phase) this.checkPhase();
   }
 
@@ -379,6 +487,7 @@ export class Scenario {
     this.changeReputation(o.fail.reputation ?? (o.role === 'contract' ? REPUTATION.failed : REPUTATION.failed / 2));
     this.apply({ ...o.fail, reputation: undefined }, o.source ?? o.id, true);
     this.log('failed', `Провалено: ${o.title}`);
+    this.game.journal.add('fail', { id: o.id, progress: o.progress, target: o.target, critical: o.critical || undefined, rep: this.state.reputation });
     this.game.notify(`✗ Не успели: ${o.title}`, '#e5534b');
     if (o.critical) {
       this.lose(`Критическое задание провалено: ${o.title}`);
@@ -397,9 +506,10 @@ export class Scenario {
       role: 'main',
       phase: o.phase,
       why: 'Главная цель этапа не выполнена в срок. Это последняя попытка: провал закончит сценарий.',
-      months: Math.max(4, Math.ceil(span * 0.5)),
+      months: Math.max(2, Math.ceil(span * 0.5)),
       reward: { money: Math.round((o.reward.money ?? 0) / 2), reputation: 0 },
       critical: true,
+      fast: false,
       points: Math.round(o.points / 2),
       related: o.related,
       title: `Последний шанс: ${titleOf(p, this.game)}`,
@@ -460,6 +570,16 @@ export class Scenario {
     if (e.importance === 'major') this.state.lastMajor = this.month;
     else this.state.lastMinor = this.month;
     this.log('event', `${e.title}: ${e.cause}`);
+    this.game.journal.add('event', {
+      id: rec.id,
+      type: e.type,
+      title: e.title,
+      cause: e.cause,
+      effects: e.effects,
+      related: e.related.map((r) => `${r.type}:${r.id}`),
+      parent: e.parent,
+      key: memoryKey,
+    });
     this.game.notify(`${e.title}. ${e.cause}`, e.importance === 'major' ? '#c4662f' : '#4a8fe7');
     return rec;
   }
@@ -482,11 +602,14 @@ export class Scenario {
   /** Перейти к следующему этапу досрочно: незакрытые цели этапа засчитываются как невыполненные. */
   advancePhase(): boolean {
     if (!this.canAdvance) return false;
+    const dropped: string[] = [];
     for (const o of this.state.objectives) {
       if (o.phase !== this.state.phase || o.status !== 'active') continue;
       o.status = 'failed';
       o.closedAt = this.month;
+      dropped.push(o.id);
     }
+    this.game.journal.add('advance', { phase: this.state.phase, dropped });
     this.nextPhase();
     return true;
   }
@@ -498,10 +621,20 @@ export class Scenario {
       return;
     }
     s.phase++;
-    s.phaseStart = this.month;
+    s.phaseStart = this.today;
+    // Из чего строится следующий этап: сеть игрока и его лучшие месяцы — до заданий этапа.
+    const info = network(this.game);
+    this.game.journal.add('phase', {
+      phase: 'ABC'[s.phase],
+      net: { towns: [...info.towns], inds: [...info.industries], stations: info.stations.length, pax$: info.pax, freight$: info.freight },
+      best: Math.max(0, ...s.stats.months.slice(-6).map((m) => m.units)),
+      months: s.stats.months.slice(-6).map((m) => [m.units, m.pax ?? 0, m.speed]),
+    });
     generatePhase(this, s.phase);
     this.log('phase', `Этап ${'ABC'[s.phase]}: ${PHASES[s.phase].name}`);
     this.game.notify(`Новый этап: ${PHASES[s.phase].name}. ${PHASES[s.phase].hint}`, '#7a5cc4');
+    // Каждый этап открывает следующую ступень транспорта: B — Грузовик II и Автобус II, C — Фура и Автобус III.
+    this.game.openModelTier(Math.min(3, s.phase + 1) as ModelTier);
   }
 
   private win(): void {
@@ -509,6 +642,10 @@ export class Scenario {
     this.finish();
     this.log('phase', 'Сценарий пройден');
     this.game.notify(`Сценарий пройден! ${this.state.score!.total} очков`, '#2e9d57');
+    // Оценка уже посчитана — дополнительные задания на неё не влияют.
+    this.giveExtras();
+    const extras = this.current.length;
+    if (extras) this.game.notify(`Дополнительные задания: ${extras} — без сроков, за деньги`, '#7a5cc4');
   }
 
   lose(reason: string): void {
@@ -532,5 +669,13 @@ export class Scenario {
     }
     this.state.score = computeScore(this);
     this.state.seen = false;
+    const score = this.state.score;
+    this.game.journal.add('end', {
+      status: this.state.status,
+      reason: this.state.lostReason,
+      score: score.total,
+      medal: score.medal ?? undefined,
+      parts: score.parts.map((p) => [p.id, p.value, p.max, p.note]),
+    });
   }
 }

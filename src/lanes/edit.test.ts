@@ -343,6 +343,44 @@ describe('Полосы: инструменты', () => {
     expect(net.problems()).toEqual([]);
   });
 
+  it('снос полосы, когда соседний кусок короче отгона: полоса уходит и с него, отгон — на следующем', () => {
+    // Как у игрока: магистраль 1+1, у встречных — третья полоса; её хвост с отгоном на западном куске,
+    // за стыком — кусок в 50 м (отгон магистрали — 70 м), дальше — длинный.
+    const extra = { offset: -10.5, flow: -1 as const };
+    const build = () => {
+      const net = new LaneNet();
+      const s = [0, 200, 250, 450].map((x) => net.addSeam({ x, y: 0 }, { x: 1, y: 0 }));
+      const tail = net.addCorridor(s[0].id, s[1].id, { cls: 'highway', lanes: [...twoWay(1, 1), { ...extra, from: 195, to: Infinity }] });
+      const short = net.addCorridor(s[1].id, s[2].id, { cls: 'highway', lanes: [...twoWay(1, 1), { ...extra, from: 0, to: Infinity }] });
+      const long = net.addCorridor(s[2].id, s[3].id, { cls: 'highway', lanes: [...twoWay(1, 1), { ...extra, from: 0, to: Infinity }] });
+      expect(net.problems()).toEqual([]);
+      return { net, tail, short, long, west: s[0].id, east: s[3].id };
+    };
+    const lane = (c: { lanes: { offset: number }[] }) => c.lanes.findIndex((l) => l.offset < -7);
+
+    // Хвост: на коротком куске полосе не сойти на нет — она уходит и с него, сужается на длинном.
+    let r = build();
+    removeEdgeLane(r.net, r.tail, lane(r.tail));
+    expect(r.net.problems()).toEqual([]);
+    expect(lane(r.tail)).toBe(-1);
+    expect(lane(r.short)).toBe(-1);
+    expect(r.long.lanes[lane(r.long)]).toMatchObject({ from: 70, to: 200 });
+    expect(reachable(r.net, r.east, r.west)).toBe(true);
+
+    // Короткий кусок: хвост за стыком без него ни к чему — тоже уходит.
+    r = build();
+    removeEdgeLane(r.net, r.short, lane(r.short));
+    expect(r.net.problems()).toEqual([]);
+    expect(lane(r.tail)).toBe(-1);
+    expect(r.long.lanes[lane(r.long)].from).toBe(70);
+
+    // Кусок протяжкой с Shift по хвосту — то же.
+    r = build();
+    removeLaneSpan(r.net, r.tail, lane(r.tail), 120, 190);
+    expect(r.net.problems()).toEqual([]);
+    expect(lane(r.short)).toBe(-1);
+  });
+
   it('по точкам: из поля к краю дороги — въезд с полосой разгона, её можно тянуть дальше', () => {
     const net = road();
     const east = deadEnds(net).find((n) => n.pos.x > 700)!;

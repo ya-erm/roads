@@ -3,17 +3,19 @@
  * итоговый экран и часть экрана новой игры. Здесь только чтение состояния — клики по data-action
  * обрабатывает Hud. Объясняем картинками: значки заданий и грузов, полоски, медали; текст — подписи и title.
  */
-import { ECONOMY } from '../config';
+import { ECONOMY, MONTH_LENGTH } from '../config';
 import type { Game } from '../game/game';
 import { isIndustry, resolve } from '../scenario/analysis';
 import { ARCHETYPE_LIST, ARCHETYPES, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, MEDALS, PHASES, REPUTATION } from '../scenario/content';
 import { isActive } from '../scenario/events';
-import type { Scenario } from '../scenario/manager';
-import { failText, fraction, isMonthly, monthValue, progressText, rewardText } from '../scenario/objectives';
+import { fastBonus, type Scenario } from '../scenario/manager';
+import { closedNeeds, failText, fraction, isMonthly, monthValue, progressText, rewardText, supplyNeeds } from '../scenario/objectives';
+import { CARGO } from '../world/cargo';
+import { TOWN_NEED } from '../world/entities';
 import type { ScenarioRecord } from '../scenario/records';
 import type { Difficulty, EventRecord, Objective, Ref, ScenarioSettings, ScoreLine } from '../scenario/types';
 import { cargoIcon, townIcon } from './cargoIcons';
-import { chevronSvg, ledgerIcon, playSvg } from './icons';
+import { chevronSvg, journalSvg, ledgerIcon, playSvg } from './icons';
 import {
   archetypeSvg,
   boltIcon,
@@ -36,10 +38,20 @@ import {
   scenarioModeSvg,
   stopwatchSvg,
 } from './scenarioIcons';
+import { timelapseItemHtml } from './timelapseButton';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
 const num = (n: number) => Math.round(n).toLocaleString('ru-RU');
+
+/** «запись / записи / записей» — по числу записей журнала. */
+function entriesWord(n: number): string {
+  const d = n % 10;
+  const dd = n % 100;
+  if (d === 1 && dd !== 11) return 'запись';
+  if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return 'записи';
+  return 'записей';
+}
 const LETTERS = 'ABC';
 
 /** Крупные суммы коротко: «$1 млн», «$250 тыс.». */
@@ -57,6 +69,12 @@ export function leftText(m: number): string {
 
 /** Последствие события растёт или падает: «+20%» — вверх, «-30%» — вниз. */
 const trend = (text: string) => (/\+\d/.test(text) ? 'up' : /[-−]\d/.test(text) ? 'down' : '');
+
+/** Заголовок события без значка в начале: значок уже показан рядом отдельным элементом (`sc-ev-ic`). */
+function eventTitle(e: EventRecord): string {
+  const prefix = `${EVENT_INFO[e.type].icon} `;
+  return e.title.startsWith(prefix) ? e.title.slice(prefix.length) : e.title;
+}
 
 /** Города и предприятия задания или события; links — кнопками «показать на карте», иначе подписью (в окнах). */
 function placeChips(g: Game, refs: Ref[], links = true): string {
@@ -78,7 +96,52 @@ interface ObjectiveView {
   panel?: boolean;
   /** Показать «почему» текстом под полоской. */
   why?: boolean;
+  /** Свёрнуто в компактную строку (только в панели): значок, название, полоска, прогресс и срок. */
+  folded?: boolean;
+  /** Ещё не начато (брифинг): без пустой полоски и «0 / N» — срок, награда, «почему» и места. */
+  plan?: boolean;
 }
+
+/** Свёрнуто ли задание в панели: как выбрал игрок, а иначе выполненные свёрнуты сами. */
+export function isFolded(o: Objective): boolean {
+  return o.folded ?? o.status === 'done';
+}
+
+/**
+ * Свернуть или развернуть задание в панели. Выбор хранится в задании (и в сохранении партии), но только
+ * если он не совпадает с обычным: так свёрнутое или развёрнутое до выполнения задание свернётся,
+ * когда его выполнят, а развёрнутое после — останется развёрнутым.
+ */
+export function toggleFold(o: Objective): void {
+  const next = !isFolded(o);
+  if (next === (o.status === 'done')) delete o.folded;
+  else o.folded = next;
+}
+
+/** Остаток срока задания: красным — меньше 2 месяцев, ∞ — без срока; закрытое — пусто. */
+function timeHtml(sc: Scenario, o: Objective): string {
+  if (o.status === 'done' && o.quick) return '<span class="sc-fast done" data-tip="Выполнено к быстрому сроку: надбавка и очки за быстроту">⚡</span>';
+  if (o.status !== 'active') return '';
+  const left = sc.monthsLeft(o);
+  const main =
+    left !== null
+      ? `<span class="sc-left ${left < 2 ? 'urgent' : ''}" title="Осталось до срока">⏳ ${leftText(left)}</span>`
+      : '<span class="sc-left" title="Без срока">⏳ ∞</span>';
+  return fastHtml(sc, o) + main;
+}
+
+/** Быстрый срок, пока он не прошёл: ⚡ и сколько осталось; подсказка — что дают за него. */
+function fastHtml(sc: Scenario, o: Objective): string {
+  if (o.fast === undefined) return '';
+  const left = (o.fast * MONTH_LENGTH - sc.game.time) / MONTH_LENGTH;
+  if (left <= 0) return '';
+  const bonus = fastBonus(o);
+  const tip = `Быстрый срок — необязательный. Успеете: ${bonus ? `+$${bonus.toLocaleString('ru-RU')} к награде и ` : ''}очки за быстроту`;
+  return `<span class="sc-fast" data-tip="${esc(tip)}">⚡ ${leftText(left)}</span>`;
+}
+
+/** Размер значка задания в панели — один для свёрнутых и развёрнутых. */
+const OBJECTIVE_ICON = 26;
 
 /**
  * Задание: значок по типу, заголовок (★ — главная цель, свиток — контракт, ❗ — критическое),
@@ -87,10 +150,16 @@ interface ObjectiveView {
  */
 export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: ObjectiveView = {}): string {
   const active = o.status === 'active';
-  const left = active ? sc.monthsLeft(o) : null;
   const months = sc.state.stats.months;
   const now = active && isMonthly(o.params) ? monthValue(o.params, g, months[months.length - 1]) : null;
-  const role = o.role === 'main' ? '<span class="sc-role" title="Главная цель этапа">★</span>' : o.role === 'contract' ? contractSvg(16) : '';
+  const role =
+    o.role === 'main'
+      ? '<span class="sc-role" title="Главная цель этапа">★</span>'
+      : o.role === 'contract'
+        ? contractSvg(16)
+        : o.role === 'extra'
+          ? '<span class="sc-role extra" data-tip="Дополнительное задание: без срока, на медаль не влияет">✚</span>'
+          : '';
   const crit = o.critical ? `<span class="sc-crit" title="Критическое задание. Если не успеть: ${esc(failText(o))}">❗</span>` : '';
   const state =
     o.status === 'done'
@@ -98,24 +167,50 @@ export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: Objecti
       : o.status === 'failed'
         ? '<span class="sc-state failed" title="Не выполнено">✗</span>'
         : '';
-  const time =
-    left !== null
-      ? `<span class="sc-left ${left < 2 ? 'urgent' : ''}" title="Осталось до срока">⏳ ${leftText(left)}</span>`
-      : active
-        ? '<span class="sc-left" title="Без срока">⏳ ∞</span>'
-        : '';
-  const tip = `${o.why}${active && !o.critical ? `\nЕсли не успеть: ${failText(o)}` : ''}`;
+  const time = timeHtml(sc, o);
+  const tip = `${o.why}${active && !o.critical && o.deadline !== null ? `\nЕсли не успеть: ${failText(o)}` : ''}`;
+  const bar = `<div class="bar sc-bar"><div style="width:${(fraction(o) * 100).toFixed(1)}%"></div></div>`;
+  const cls = `sc-obj ${o.role} ${o.status} ${o.critical ? 'critical' : ''}`;
+  // Свёрнутая — две строки: название в одну строку и полоска с прогрессом и сроком; клик разворачивает.
+  // Значок — того же размера, что у развёрнутой: две строки его вмещают.
+  if (view.panel && view.folded) {
+    return `<div class="${cls} folded" data-action="sc-fold" data-id="${o.id}" title="${esc(`${o.title}\n${tip}`)}">
+      <span class="sc-obj-ic">${objectiveIcon(o, OBJECTIVE_ICON)}</span>
+      <div class="sc-obj-body">
+        <div class="sc-obj-title">${role}<span class="sc-obj-name">${esc(o.title)}</span>${crit}${state}<span class="sc-fold" title="Развернуть"><span class="caret closed">${chevronSvg()}</span></span></div>
+        <div class="sc-meta">${bar}<b>${progressText(o)}</b>${time}</div>
+      </div></div>`;
+  }
   const action = view.panel ? ` data-action="sc-why" data-id="${o.id}"` : '';
-  return `<div class="sc-obj ${o.role} ${o.status} ${o.critical ? 'critical' : ''}"${action} title="${esc(tip)}">
-    <span class="sc-obj-ic">${objectiveIcon(o, 26)}</span>
+  const fold = view.panel ? `<button class="sc-fold" data-action="sc-fold" data-id="${o.id}" title="Свернуть"><span class="caret">${chevronSvg()}</span></button>` : '';
+  return `<div class="${cls}"${action} title="${esc(tip)}">
+    <span class="sc-obj-ic">${objectiveIcon(o, OBJECTIVE_ICON)}</span>
     <div class="sc-obj-body">
-      <div class="sc-obj-title">${role}<span class="sc-obj-name">${esc(o.title)}</span>${crit}${state}</div>
-      <div class="bar sc-bar"><div style="width:${(fraction(o) * 100).toFixed(1)}%"></div></div>
-      <div class="sc-meta"><b>${progressText(o)}</b>${time}<span class="sc-reward" title="Награда">🎁 ${esc(rewardText(o))}</span></div>
+      <div class="sc-obj-title">${role}<span class="sc-obj-name">${esc(o.title)}</span>${crit}${state}${fold}</div>
+      ${view.plan ? '' : bar}
+      <div class="sc-meta">${view.plan ? '' : `<b>${progressText(o)}</b>`}${time}<span class="sc-reward" title="Награда">🎁 ${esc(rewardText(o))}</span></div>
+      ${needsHtml(g, o)}
       ${now ? `<small class="sc-now">${esc(now)}</small>` : ''}
       ${view.why ? `<p class="sc-why">${esc(o.why)}</p>` : ''}
       ${placeChips(g, o.related, !!view.panel)}
     </div></div>`;
+}
+
+/**
+ * Потребности города у задания «снабжать»: значки грузов, закрытые в этом месяце — яркие, остальные — бледные;
+ * в подсказке — сколько уже привезли. Рядом — сколько закрыто из нужных.
+ */
+function needsHtml(g: Game, o: Objective): string {
+  const p = o.params;
+  if (p.kind !== 'supply' || o.status !== 'active') return '';
+  const t = g.towns.find((x) => x.id === p.town);
+  if (!t?.demands.length) return '';
+  const closed = new Set(closedNeeds(t, 'current'));
+  const icons = t.demands.map((c) => {
+    const got = Math.min(TOWN_NEED, Math.round(t.supplied[c] ?? 0));
+    return `<span class="sc-need${closed.has(c) ? ' ok' : ''}" data-tip="${esc(`${CARGO[c].name}: ${got} из ${TOWN_NEED} в этом месяце`)}">${cargoIcon(c, 18, false)}</span>`;
+  });
+  return `<div class="sc-needs">${icons.join('')}<b data-tip="Закрыто в этом месяце из нужных">${closed.size} / ${supplyNeeds(p, t)}</b></div>`;
 }
 
 /** Этапы A → B → C: пройденные с галочкой, текущий выделен. */
@@ -139,22 +234,116 @@ function reputationHtml(sc: Scenario): string {
   return `<div class="sc-rep" title="${tip}">${reputationSvg(18)}<span class="sc-rep-scale"><i style="left:${r}%"></i></span><b>${r}</b></div>`;
 }
 
+/** Подсказка к «Отказаться»: чем обойдётся отказ. */
+function declineTip(o: Objective): string {
+  const worse = o.fail.effects?.length || o.fail.follow?.length ? ', а экономика региона пойдёт по худшему пути' : '';
+  return `Отказ: репутация ${REPUTATION.declined}${worse}`;
+}
+
+/** Быстрый срок в условиях контракта: через сколько месяцев после принятия и что за него дают. */
+function offerFastHtml(o: Objective): string {
+  if (o.fastMonths === undefined) return '';
+  const bonus = fastBonus(o);
+  const tip = `Быстрый срок — необязательный, с момента, как примете. Успеете: ${bonus ? `+$${bonus.toLocaleString('ru-RU')} к награде и ` : ''}очки за быстроту`;
+  return `<span class="sc-fast" data-tip="${esc(tip)}">⚡ ${o.fastMonths} мес.</span>`;
+}
+
 /** Условия контракта и решение: награда, срок после принятия, цена провала, сколько осталось думать. */
 function offerHtml(sc: Scenario, o: Objective): string {
   const left = sc.monthsLeft(o);
-  const worse = o.fail.effects?.length || o.fail.follow?.length ? ', а экономика региона пойдёт по худшему пути' : '';
   return `<div class="sc-offer">
     <div class="sc-terms">
       <span title="Награда">🎁 ${esc(rewardText(o))}</span>
       ${o.months !== undefined ? `<span title="Срок на выполнение — с момента, как примете">⏳ ${o.months} мес.</span>` : ''}
+      ${offerFastHtml(o)}
       <span class="sc-fail" title="Если принять и не успеть">⚠ ${esc(failText(o))}</span>
     </div>
     <div class="sc-offer-actions">
       <button class="small primary" data-action="sc-accept" data-id="${o.id}" title="Срок пойдёт с этой минуты">✓ Принять</button>
-      <button class="small" data-action="sc-decline" data-id="${o.id}" title="Отказ: репутация ${REPUTATION.declined}${worse}">✕ Отказаться</button>
+      <button class="small" data-action="sc-decline" data-id="${o.id}" title="${declineTip(o)}">✕ Отказаться</button>
       ${left !== null ? `<span class="sc-left ${left < 1 ? 'urgent' : ''}" title="Предложение действует ещё">⌛ ${leftText(left)}</span>` : ''}
     </div></div>`;
 }
+
+/** Предложения на решение: самое срочное — первым. */
+function offersByUrgency(sc: Scenario): Objective[] {
+  return [...sc.offers].sort((a, b) => (sc.monthsLeft(a) ?? 99) - (sc.monthsLeft(b) ?? 99));
+}
+
+/**
+ * Значки городов и предприятий кнопками: клик подводит камеру к месту и открывает его панель
+ * (действие `focus` — как у плашек мест в панели сценария). Одно и то же место — один раз.
+ */
+function placeIcons(g: Game, refs: Ref[]): string {
+  const seen = new Set<string>();
+  return refs
+    .map((r) => {
+      const key = `${r.type}:${r.id}`;
+      const place = seen.has(key) ? undefined : resolve(g, r);
+      seen.add(key);
+      if (!place) return '';
+      const icon = isIndustry(place) ? cargoIcon(place.info.produces, 20, false) : townIcon(20);
+      return `<button class="ob-place" data-action="focus" data-type="${r.type}" data-id="${r.id}" title="${esc(place.name)} — показать на карте">${icon}</button>`;
+    })
+    .join('');
+}
+
+/**
+ * Плашка предложения вверху экрана — уведомление, дублирует панель предложений внизу (решают там же):
+ * самое срочное предложение, остальные — счётчиком. Значки городов и предприятий — переход к ним на карте;
+ * клик по названию или счётчику показывает предложения в панели внизу. Меньше полумесяца на решение — подсвечена.
+ */
+export function offerBannerHtml(g: Game): string {
+  const sc = g.scenario;
+  if (!sc?.running) return '';
+  const offers = offersByUrgency(sc);
+  const o = offers[0];
+  if (!o) return '';
+  const left = sc.monthsLeft(o) ?? 0;
+  const more =
+    offers.length > 1
+      ? `<button class="small ob-more" data-action="sc-offer-show" title="Все предложения (${offers.length}) — в панели внизу слева">+${offers.length - 1}</button>`
+      : '';
+  // Мест нет (задание не о городе и не о предприятии) — просто значок задания.
+  const places = placeIcons(g, o.related) || `<span class="ob-obj">${objectiveIcon(o, 22)}</span>`;
+  return `<div class="offer-banner-in ${left < 0.5 ? 'urgent' : ''}">
+    <span class="ob-ic" title="Контракт ждёт решения">${contractSvg(18)}</span>
+    <span class="ob-places">${places}</span>
+    <button class="ob-title" data-action="sc-offer-show" data-id="${o.id}" title="${esc(o.title)}. ${esc(o.why)}\nПринять или отказаться — в панели внизу слева"><span>${esc(o.title)}</span></button>
+    <span class="ob-terms"><span title="Награда">🎁 ${esc(rewardText(o))}</span>${
+      o.months !== undefined ? `<span title="Срок на выполнение — с момента, как примете">⏳ ${o.months} мес.</span>` : ''
+    }${offerFastHtml(o)}</span>
+    <span class="sc-left ${left < 1 ? 'urgent' : ''}" title="Предложение действует ещё">⌛ ${leftText(left)}</span>${more}</div>`;
+}
+
+/**
+ * Предложения контрактов — отдельной панелью внизу слева, под панелью сценария: видны, пока ждут решения,
+ * даже когда панель сценария свёрнута или её закрыли «Финансы». Самое срочное — сверху; меньше полумесяца
+ * на решение — карточка подсвечена. Клик по названию раскрывает, откуда предложение и кто с ним связан.
+ * Вверху экрана их дублирует плашка (`offerBannerHtml`).
+ */
+export function offersPanelHtml(g: Game, open: ReadonlySet<string>): string {
+  const sc = g.scenario;
+  if (!sc?.running) return '';
+  const offers = offersByUrgency(sc);
+  if (!offers.length) return '';
+  const cards = offers.map((o) => {
+    const left = sc.monthsLeft(o) ?? 0;
+    const shown = open.has(o.id);
+    const source = o.source ? sourceEvent(sc, o.source) : undefined;
+    const icon = source ? `<span class="sc-ev-ic" title="${EVENT_INFO[source.type].name}">${EVENT_INFO[source.type].icon}</span>` : '';
+    return `<div class="sc-card offer of-card ${left < 0.5 ? 'urgent' : ''}" data-offer="${o.id}">
+      <div class="sc-card-head of-head" data-action="sc-why" data-id="${o.id}" title="${shown ? 'Скрыть подробности' : esc(o.why)}">
+        ${objectiveIcon(o, 24)}<b>${esc(o.title)}</b>${icon}<span class="caret ${shown ? '' : 'closed'}">${chevronSvg()}</span></div>
+      ${shown ? `<p class="sc-cause">${esc(o.why)}</p>${placeChips(g, o.related)}` : ''}
+      ${offerHtml(sc, o)}</div>`;
+  });
+  return `<header class="of-top">${contractSvg(18)}<h3>Предложения</h3><span class="sc-badge" title="Контракты ждут решения: ${offers.length}">${offers.length}</span></header>
+    ${cards.join('')}`;
+}
+
+/** Событие, предложившее контракт. */
+const sourceEvent = (sc: Scenario, id: string) => sc.state.events.find((e) => e.id === id);
 
 /** Предложение контракта без события (стартовый контракт): задание, почему, кто связан, условия. */
 function offerCardHtml(g: Game, sc: Scenario, o: Objective, links = true): string {
@@ -166,7 +355,7 @@ function offerCardHtml(g: Game, sc: Scenario, o: Objective, links = true): strin
 }
 
 const CONTRACT_STATE: Record<Objective['status'], string> = {
-  offered: 'ждёт решения',
+  offered: 'ждёт решения — в предложениях внизу',
   active: 'контракт принят',
   done: 'контракт выполнен',
   failed: 'контракт сорван',
@@ -175,13 +364,26 @@ const CONTRACT_STATE: Record<Objective['status'], string> = {
 
 const agoText = (sc: Scenario, e: EventRecord) => (sc.month - e.month <= 0 ? 'сейчас' : `${sc.month - e.month} мес. назад`);
 
-/** Прошедшее событие — приглушённой строкой: значок, заголовок, когда; причина и последствия — в подсказке. */
-function pastEventHtml(sc: Scenario, e: EventRecord): string {
+/**
+ * Прошедшее событие — приглушённой строкой: значок, заголовок, когда. Клик разворачивает причину,
+ * последствия, статус контракта и связанные места (кнопками — показать на карте).
+ */
+function pastEventHtml(g: Game, sc: Scenario, e: EventRecord, open: boolean): string {
   const contract = e.contract ? sc.objective(e.contract) : undefined;
-  const tip = [e.cause, ...e.effects, ...(contract ? [`${contract.title}: ${CONTRACT_STATE[contract.status]}`] : [])].join('\n');
-  return `<div class="sc-past" title="${esc(tip)}"><span class="sc-ev-ic">${EVENT_INFO[e.type].icon}</span><span>${esc(e.title)}</span>${
-    contract ? `<span class="sc-state ${contract.status}">${contract.status === 'done' ? '✓' : contract.status === 'failed' ? '✗' : '–'}</span>` : ''
-  }<small>${agoText(sc, e)}</small></div>`;
+  const effects = e.effects.map((t) => `<li class="${trend(t)}">${esc(t)}</li>`).join('');
+  const head = `<div class="sc-past ${open ? 'open' : ''}" data-action="sc-past" data-id="${e.id}" title="Нажмите, чтобы посмотреть подробности">
+    <span class="sc-ev-ic">${EVENT_INFO[e.type].icon}</span><span>${esc(eventTitle(e))}</span>${
+      contract ? `<span class="sc-state ${contract.status}">${contract.status === 'done' ? '✓' : contract.status === 'failed' ? '✗' : '–'}</span>` : ''
+    }<small>${agoText(sc, e)}</small>${chevronSvg()}</div>`;
+  if (!open) return head;
+  const state = contract
+    ? `<div class="sc-offer-state ${contract.status}" title="${esc(contract.title)}">${contractSvg(14)}<span>${esc(contract.title)}: ${CONTRACT_STATE[contract.status]}</span></div>`
+    : '';
+  return `${head}<div class="sc-past-detail">
+    <p class="sc-cause">${esc(e.cause)}</p>
+    ${effects ? `<ul class="sc-effects">${effects}</ul>` : ''}
+    ${placeChips(g, e.related)}
+    ${state}</div>`;
 }
 
 /** Событие: значок и заголовок, причина, последствия (▲/▼), связанные места; контракт — с решением. */
@@ -190,26 +392,37 @@ function eventHtml(g: Game, sc: Scenario, e: EventRecord): string {
   const when = agoText(sc, e);
   const contract = e.contract ? sc.objective(e.contract) : undefined;
   const effects = e.effects.map((t) => `<li class="${trend(t)}">${esc(t)}</li>`).join('');
-  const offer =
-    contract?.status === 'offered'
-      ? `<div class="sc-offer-title">${objectiveIcon(contract, 20)}<span>${esc(contract.title)}</span></div>${offerHtml(sc, contract)}`
-      : contract
-        ? `<div class="sc-offer-state ${contract.status}" title="${esc(contract.title)}">${contractSvg(14)}<span>${CONTRACT_STATE[contract.status]}</span></div>`
-        : '';
-  return `<div class="sc-card event ${e.importance} ${contract?.status === 'offered' ? 'offer' : ''}">
-    <div class="sc-card-head"><span class="sc-ev-ic" title="${info.name}">${info.icon}</span><b>${esc(e.title)}</b><small>${when}</small></div>
+  // Само предложение с кнопками — в панели предложений внизу, здесь только его состояние.
+  const offer = contract
+    ? `<div class="sc-offer-state ${contract.status}" title="${esc(contract.title)}">${contractSvg(14)}<span>${CONTRACT_STATE[contract.status]}</span></div>`
+    : '';
+  return `<div class="sc-card event ${e.importance}">
+    <div class="sc-card-head"><span class="sc-ev-ic" title="${info.name}">${info.icon}</span><b>${esc(eventTitle(e))}</b><small>${when}</small></div>
     <p class="sc-cause">${esc(e.cause)}</p>
     ${effects ? `<ul class="sc-effects">${effects}</ul>` : ''}
     ${placeChips(g, e.related)}
     ${offer}</div>`;
 }
 
+/** Дополнительные задания после победы (без сроков, на оценку не влияют). */
+const extrasOf = (sc: Scenario) => sc.state.objectives.filter((o) => o.role === 'extra' && (o.status === 'active' || o.status === 'done'));
+
+/** Дополнительные задания в панели после победы: открытые и выполненные. */
+function extrasHtml(g: Game, sc: Scenario, view: PanelView): string {
+  const list = extrasOf(sc);
+  if (!list.length) return '';
+  const done = list.filter((o) => o.status === 'done').length;
+  const rows = list.map((o) => objectiveHtml(g, sc, o, { panel: true, why: view.open.has(o.id), folded: isFolded(o) })).join('');
+  return `<section class="sc-sec sc-extras"><h4 data-tip="Без сроков и на медаль не влияют — только деньги">✚ Дополнительные задания <small>${done} / ${list.length}</small></h4>${rows}</section>`;
+}
+
 /** Итог в панели после конца сценария: медаль, очки и кнопка к итоговому экрану. */
 function finishedHtml(sc: Scenario): string {
   const score = sc.state.score;
   if (!score) return '';
+  const next = extrasOf(sc).some((o) => o.status === 'active') ? 'дальше — дополнительные задания' : 'дальше — песочница';
   return `<section class="sc-sec sc-final">${medalSvg(score.medal, 34)}
-    <div><b>${num(score.total)}</b> очков<small>${sc.state.status === 'won' ? 'Сценарий пройден' : 'Сценарий провален'} · дальше — песочница</small></div>
+    <div><b>${num(score.total)}</b> очков<small>${sc.state.status === 'won' ? 'Сценарий пройден' : 'Сценарий провален'} · ${next}</small></div>
     <button class="small" data-action="sc-results" title="Итоговый экран: оценка по показателям и задания">Итоги</button></section>`;
 }
 
@@ -232,7 +445,7 @@ function compactHtml(sc: Scenario): string {
 
 export interface PanelView {
   collapsed: boolean;
-  /** Задания, у которых раскрыто «почему». */
+  /** Задания, у которых раскрыто «почему» (по id), и прошедшие события с раскрытыми подробностями (ключ `ev:<id>`). */
   open: ReadonlySet<string>;
   /** «Следующий этап» нажат один раз — ждём подтверждения. */
   confirmAdvance: boolean;
@@ -240,7 +453,8 @@ export interface PanelView {
 
 /**
  * Панель сценария: заголовок (регион, контракты на решение, сложность), этапы и репутация,
- * задания этапа и принятые контракты, кнопка перехода к этапу, предложения и события.
+ * задания этапа и принятые контракты, кнопка перехода к этапу и события. Предложения контрактов —
+ * отдельной панелью внизу (`offersPanelHtml`).
  */
 export function scenarioPanelHtml(g: Game, view: PanelView): string {
   const sc = g.scenario!;
@@ -253,12 +467,12 @@ export function scenarioPanelHtml(g: Game, view: PanelView): string {
   const head = `<header class="sc-head">
     <button class="lines-toggle" data-action="sc-toggle" title="${view.collapsed ? 'Развернуть' : 'Свернуть'} · сценарий «${esc(s.brief.region)}»">
       <span class="caret ${view.collapsed ? 'closed' : ''}">${chevronSvg()}</span>${flagSvg(18)}<h3>${esc(s.brief.region)}</h3></button>${badge}${diff}</header>`;
-  if (s.status !== 'running') return head + finishedHtml(sc);
+  if (s.status !== 'running') return head + finishedHtml(sc) + (view.collapsed ? '' : extrasHtml(g, sc, view));
   if (view.collapsed) return head + compactHtml(sc);
 
   const now = sc.month;
   // Задания этапа (и уже закрытые — с галочкой или крестиком), принятые контракты и только что закрытые.
-  const rank = { main: 0, goal: 1, contract: 2 };
+  const rank: Record<Objective['role'], number> = { main: 0, goal: 1, contract: 2, extra: 3 };
   const list = s.objectives
     .filter(
       (o) =>
@@ -266,7 +480,8 @@ export function scenarioPanelHtml(g: Game, view: PanelView): string {
         (o.role === 'contract' && (o.status === 'active' || ((o.status === 'done' || o.status === 'failed') && (o.closedAt ?? -9) >= now - 1))),
     )
     .sort((a, b) => rank[a.role] - rank[b.role]);
-  const objectives = list.map((o) => objectiveHtml(g, sc, o, { panel: true, why: view.open.has(o.id) })).join('');
+  // Свёрнутые — компактной строкой (выбор игрока хранится в задании, выполненные свёрнуты сами).
+  const objectives = list.map((o) => objectiveHtml(g, sc, o, { panel: true, why: view.open.has(o.id), folded: isFolded(o) })).join('');
   const open = s.objectives.filter((o) => o.phase === s.phase && o.status === 'active').length;
   const last = s.phase >= PHASES.length - 1;
   const advance = sc.canAdvance
@@ -282,14 +497,12 @@ export function scenarioPanelHtml(g: Game, view: PanelView): string {
     .filter((e) => !isActive(sc, e, now))
     .slice(-3)
     .reverse();
-  const attached = new Set(events.map((e) => e.contract));
-  const loose = offers.filter((o) => !attached.has(o.id));
-  const eventsHtml = events.map((e) => eventHtml(g, sc, e)).join('') + past.map((e) => pastEventHtml(sc, e)).join('');
+  const eventsHtml =
+    events.map((e) => eventHtml(g, sc, e)).join('') + past.map((e) => pastEventHtml(g, sc, e, view.open.has(`ev:${e.id}`))).join('');
   return `${head}
     <section class="sc-sec">${stepsHtml(sc)}${reputationHtml(sc)}</section>
     <section class="sc-sec"><h4 title="${esc(sc.phaseInfo.hint)}">Этап ${LETTERS[s.phase]} · ${sc.phaseInfo.name}</h4>
       ${objectives || '<p class="muted">Заданий нет.</p>'}${advance}</section>
-    ${loose.length ? `<section class="sc-sec"><h4>Предложения</h4>${loose.map((o) => offerCardHtml(g, sc, o)).join('')}</section>` : ''}
     ${eventsHtml ? `<section class="sc-sec"><h4>События</h4>${eventsHtml}</section>` : ''}`;
 }
 
@@ -306,16 +519,19 @@ export function briefHtml(g: Game): string {
   const tile = (icon: string, value: string, label: string, title: string) =>
     `<div class="brief-tile" title="${esc(title)}">${icon}<b>${value}</b><small>${label}</small></div>`;
   const facts = b.facts.map((f, i) => `<li>${FACT_ICONS[i]?.() ?? '<i class="dot"></i>'}<span>${esc(f)}</span></li>`).join('');
+  // До старта прогресса нет — у целей только срок, награда, «почему» и места.
   const goals = s.objectives
     .filter((o) => o.phase === 0 && o.status === 'active')
-    .map((o) => objectiveHtml(g, sc, o, { why: true }))
+    .map((o) => objectiveHtml(g, sc, o, { why: true, plan: true }))
     .join('');
   const contracts = s.objectives
     .filter((o) => o.role === 'contract' && (o.status === 'offered' || o.status === 'active'))
-    .map((o) => (o.status === 'offered' ? offerCardHtml(g, sc, o, false) : objectiveHtml(g, sc, o, { why: true })))
+    .map((o) => (o.status === 'offered' ? offerCardHtml(g, sc, o, false) : objectiveHtml(g, sc, o, { why: true, plan: true })))
     .join('');
+  const later = sc.offers.length ? ' <small title="Решить можно и позже — в предложениях внизу слева">· можно решить позже</small>' : '';
   const interest = `${Math.round(ECONOMY.loanRate * 100)}% в месяц`;
-  return `<div class="brief-head">${archetypeSvg(s.archetype, 104, 72)}<div class="brief-title">
+  // Содержимое прокручивается, а подвал с подсказкой и «Начать» всегда виден внизу окна.
+  return `<div class="brief-scroll" data-brief-scroll><div class="brief-head">${archetypeSvg(s.archetype, 104, 72)}<div class="brief-title">
       <div class="brief-kicker">${flagSvg(16)}Сценарий · ${difficultySvg(s.settings.difficulty, 16)}${sc.difficulty.name}${
         s.settings.challenge ? ` · ${stopwatchSvg(16)}без паузы` : ''
       }</div>
@@ -329,10 +545,9 @@ export function briefHtml(g: Game): string {
     ${facts ? `<ul class="brief-facts">${facts}</ul>` : ''}
     ${stepsHtml(sc)}
     <h4>Цели этапа A · ${PHASES[0].name}</h4><div class="brief-goals">${goals || '<p class="muted">Заданий нет.</p>'}</div>
-    ${contracts ? `<h4>${contractSvg(16)} Стартовый контракт</h4>${contracts}` : ''}
-    ${sc.offers.length ? '<p class="muted small-note">Решить можно и позже — в панели сценария слева.</p>' : ''}
-    <p class="tip">💡 ${esc(PHASES[0].hint)}</p>
-    <div class="actions"><button class="primary with-ic" data-action="begin">${playSvg(18)}Начать</button></div>`;
+    ${contracts ? `<h4>${contractSvg(16)} Стартовый контракт${later}</h4>${contracts}` : ''}</div>
+    <div class="brief-foot"><p class="tip">💡 ${esc(PHASES[0].hint)}</p>
+      <button class="primary with-ic" data-action="begin">${playSvg(18)}Начать</button></div>`;
 }
 
 // ---------- Итоговый экран ----------
@@ -347,6 +562,7 @@ const PART_ICONS: Record<ScoreLine['id'], () => string> = {
   objectives: () => flagSvg(22),
   contracts: () => contractSvg(22),
   deadlines: () => calendarSvg(22),
+  fast: () => stopwatchSvg(22),
   finance: () => coinIcon(22),
   quality: () => boltIcon(22),
   region: () => growthIcon(22),
@@ -395,7 +611,9 @@ export function resultsHtml(g: Game, rec: RecordView): string {
   const groups = [
     ...PHASES.map((p, i) => ({ title: `Этап ${LETTERS[i]} · ${p.short}`, list: s.objectives.filter((o) => o.phase === i && closed(o)) })),
     { title: 'Контракты', list: s.objectives.filter((o) => o.role === 'contract' && closed(o)) },
+    { title: 'После победы', list: s.objectives.filter((o) => o.role === 'extra' && o.status === 'done') },
   ].filter((x) => x.list.length);
+  const extras = s.objectives.filter((o) => o.role === 'extra' && o.status === 'active').length;
   const row = (o: Objective) => `<div class="sc-res-obj ${o.status}" title="${esc(o.why)}">
       <span class="sc-state ${o.status}">${o.status === 'done' ? '✓' : '✗'}</span>${objectiveIcon(o, 18)}<span class="sc-obj-name">${esc(o.title)}</span>${
         o.role === 'main' ? '<span class="sc-role" title="Главная цель этапа">★</span>' : ''
@@ -404,7 +622,9 @@ export function resultsHtml(g: Game, rec: RecordView): string {
   const failed = s.objectives.filter((o) => o.status === 'failed').length;
   const list = groups.map((x) => `<div class="sc-res-group"><small>${x.title}</small>${x.list.map(row).join('')}</div>`).join('');
   const diff = sc.difficulty.name.toLowerCase();
-  return `<div class="sc-res-head">${medalSvg(score.medal, 76)}<div class="sc-res-title">
+  // Крестик закрывает итоги так же, как «Продолжить в песочнице» (и Esc).
+  return `<button class="icon modal-close" data-action="sc-continue" title="Закрыть и продолжить в песочнице (Esc)">✕</button>
+    <div class="sc-res-head">${medalSvg(score.medal, 76)}<div class="sc-res-title">
       <div class="brief-kicker">${difficultySvg(s.settings.difficulty, 16)}${sc.difficulty.name}${s.settings.challenge ? ` · ${stopwatchSvg(16)}без паузы` : ''} · ${esc(s.brief.region)}</div>
       <h2>${won ? 'Сценарий пройден!' : 'Сценарий провален'}</h2>
       ${!won && s.lostReason ? `<p class="sc-lost">${esc(s.lostReason)}</p>` : ''}
@@ -415,9 +635,15 @@ export function resultsHtml(g: Game, rec: RecordView): string {
     <h4>Задания <span class="sc-counts"><span class="sc-state done">✓</span>${done}<span class="sc-state failed">✗</span>${failed}</span></h4>
     <div class="sc-res-list">${list || '<p class="muted">Ни одно задание не закрыто.</p>'}</div>
     <div class="menu-buttons">
-      <button class="menu-item" data-action="sc-continue">${playSvg(22)}<span class="menu-text"><b>Продолжить в песочнице</b><small>Та же карта и сеть, без заданий и сроков</small></span></button>
+      <button class="menu-item" data-action="sc-continue">${playSvg(22)}<span class="menu-text">${
+        extras
+          ? `<b>Продолжить игру</b><small>Та же карта и сеть · дополнительных заданий: ${extras} — без сроков, за деньги</small>`
+          : '<b>Продолжить в песочнице</b><small>Та же карта и сеть, без заданий и сроков</small>'
+      }</span></button>
       <button class="menu-item" data-action="sc-replay">${replaySvg(22)}<span class="menu-text"><b>Переиграть этот сценарий</b><small>Тот же регион и задания — с самого начала</small></span></button>
       <button class="menu-item" data-action="sc-new">${diceMapSvg(30, 22)}<span class="menu-text"><b>Новый сценарий</b><small>Другой регион · ${diff}${s.settings.challenge ? ', без паузы' : ''}</small></span><span class="menu-go">›</span></button>
+      <button class="menu-item" data-action="export-journal">${journalSvg(22)}<span class="menu-text"><b>Сохранить журнал партии</b><small>Вся партия по шагам: стройка, рейсы, задания, события · ${num(g.journal.entries.length)} ${entriesWord(g.journal.entries.length)}</small></span></button>
+      ${timelapseItemHtml(g)}
     </div>`;
 }
 

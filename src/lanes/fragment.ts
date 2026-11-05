@@ -2,7 +2,7 @@ import { Cubic, CurveLUT } from '../core/bezier';
 import { add, angleDiff, angleOf, dist, rightNormal, scale, sub, Vec } from '../core/vec';
 import { ROAD_CLASS_IDS, RoadClass, RoadSpec } from '../world/roadTypes';
 import { Anchor, bulldozeInside, corridorUnder, insideRuns, joinDeadEnd, splitCorridor } from './edit';
-import { Corridor, LaneNet, LaneNode, LAT_EPS, laneKey, parseLaneKey } from './model';
+import { Corridor, LaneNet, LaneNode, LAT_EPS, laneKey, parseLaneKey, remapCorners } from './model';
 
 /**
  * Ж/д пути куска: узлы (стрелки, концы, высота, сигналы — на выезд к каким участкам, oneWay — какие из них
@@ -31,8 +31,8 @@ const MIN = 10;
 /** Тупик вставки примыкает к чужому узлу не дальше этого (срез дороги под рамкой бывает чуть за краем). */
 const JOIN = 12;
 
-type JunctionSettings = Pick<LaneNode, 'control' | 'mainPair' | 'bans' | 'greens' | 'adaptive' | 'lanes'>;
-const SETTINGS = ['control', 'mainPair', 'bans', 'greens', 'adaptive', 'lanes'] as const;
+type JunctionSettings = Pick<LaneNode, 'control' | 'mainPair' | 'bans' | 'greens' | 'adaptive' | 'lanes' | 'corners'>;
+const SETTINGS = ['control', 'mainPair', 'bans', 'greens', 'adaptive', 'lanes', 'corners'] as const;
 
 /** Настройки перекрёстка — на новые номера полотен; то, что ссылается на полотна, которых нет, — прочь. */
 function remapArms(n: JunctionSettings, map: (id: number) => number | undefined): void {
@@ -55,6 +55,11 @@ function remapArms(n: JunctionSettings, map: (id: number) => number | undefined)
       const to = l ? map(l.to) : undefined;
       return l && from !== undefined && to !== undefined ? [laneKey({ ...l, from, to })] : [];
     });
+  }
+  if (n.corners) {
+    const corners = remapCorners(n.corners, map);
+    if (corners) n.corners = corners;
+    else delete n.corners;
   }
 }
 

@@ -90,6 +90,18 @@ export function templateFileName(name: string): string {
   return `${safe || 'Шаблон'}.json`;
 }
 
+/** Имя шаблона, когда игрок не ввёл своё. */
+export const DEFAULT_TEMPLATE_NAME = 'Моя развязка';
+
+/**
+ * Скопированный кусок — файлом шаблона, не заходя в свои: имя файла и текст в том же формате,
+ * что «Скачать шаблон файлом», — открывается обратно «Открыть шаблоны из файла». Пустое имя — «Моя развязка».
+ */
+export function fragmentToFile(name: string, fragment: Fragment, createdAt = Date.now()): { fileName: string; text: string } {
+  const title = name.trim().slice(0, 40) || DEFAULT_TEMPLATE_NAME;
+  return { fileName: templateFileName(title), text: templatesToFile([{ name: title, createdAt, fragment }]) };
+}
+
 /** Имя, которого ещё нет: «Ромб», «Ромб (2)», «Ромб (3)»… */
 export function uniqueName(name: string, taken: Iterable<string>): string {
   const used = new Set(taken);
@@ -119,7 +131,8 @@ export function isFragment(x: unknown): x is Fragment {
       optional(n.greens, isNums) &&
       optional(n.adaptive, (v) => typeof v === 'boolean') &&
       optional(n.roundabout, (v) => v === null || isNum(v)) &&
-      optional(n.lanes, isStrs);
+      optional(n.lanes, isStrs) &&
+      optional(n.corners, (v) => isObj(v) && Object.values(v).every((r) => isNum(r) && r >= 0));
     if (!settings) return false;
     nodes.add(n.id);
   }

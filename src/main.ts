@@ -1,7 +1,9 @@
 import './style.css';
 import { Game, SAVE_VERSION, type SaveData } from './game/game';
+import { journalFile } from './game/journal';
 import { clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readSave, saveGame, writeSave } from './game/persist';
 import { Controller } from './input/controller';
+import { rememberTools } from './input/toolPrefs';
 import { Camera } from './render/camera';
 import { Renderer } from './render/renderer';
 import { ARCHETYPE_LIST } from './scenario/content';
@@ -61,8 +63,12 @@ const hud = new Hud(hudRoot, controller, () => game, {
   load: (id) => loadNamed(id),
   remove: (id) => deleteSave(id),
   exportFile: () => exportFile(),
+  exportJournal: () => exportJournal(),
   importFile: (file) => importFile(file),
 });
+// Инструмент и его режимы — как до перезагрузки. Тестовая сцена всегда начинает с «Выбора» и выбор в ней
+// не запоминается: снимки сцены не зависят от того, что выбрано в обычной игре, и наоборот.
+if (!scene) rememberTools(controller);
 
 function persist(manual = false): void {
   if (scene && !manual) return;
@@ -101,10 +107,19 @@ async function loadNamed(id: string): Promise<boolean> {
 function exportFile(): void {
   const data = game.toSave();
   data.view = { x: camera.x, y: camera.y, zoom: camera.zoom };
-  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  download(JSON.stringify(data), 'application/json', `razvyazka-${game.dateLabel.replace(/\s+/g, '-')}.json`);
+}
+
+/** Скачивает журнал партии (JSON Lines): «razvyazka-journal-12345-Мар-1963.jsonl». */
+function exportJournal(): void {
+  download(journalFile(game), 'application/x-ndjson', `razvyazka-journal-${game.seed}-${game.dateLabel.replace(/\s+/g, '-')}.jsonl`);
+}
+
+function download(text: string, type: string, name: string): void {
+  const blob = new Blob([text], { type });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `razvyazka-${game.dateLabel.replace(/\s+/g, '-')}.json`;
+  a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }

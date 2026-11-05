@@ -5,6 +5,8 @@ import { RAIL_SPEC } from '../world/roadTypes';
 import { Game } from './game';
 import {
   addTemplates,
+  DEFAULT_TEMPLATE_NAME,
+  fragmentToFile,
   hasRail,
   isFragment,
   parseTemplateFile,
@@ -121,6 +123,30 @@ describe('Шаблоны в файл и из файла', { timeout: 60_000 }, (
     if ('error' in mixed) throw new Error(mixed.error);
     expect(mixed.templates.map((t) => t.name)).toEqual(['Целый']);
     expect(mixed.skipped).toBe(2);
+  });
+
+  it('скопированное — сразу файлом: открывается «Открыть из файла» тем же куском и под тем же именем, и вставляется', () => {
+    const game = newGame();
+    const { frag, at } = crossingFragment(game);
+    const file = fragmentToFile('  Переезд: «мой»  ', frag, 7);
+    expect(file.fileName).toBe('Переезд «мой».json');
+    const parsed = parseTemplateFile(file.text);
+    if ('error' in parsed) throw new Error(parsed.error);
+    expect(parsed).toEqual({ templates: [{ name: 'Переезд: «мой»', createdAt: 7, fragment: frag }], skipped: 0 });
+    // Тот же формат, что у шаблона, скачанного из своих.
+    expect(file.text).toBe(templatesToFile([{ name: 'Переезд: «мой»', createdAt: 7, fragment: frag }]));
+    // Из файла — в свои и на карту, как скопированный.
+    const [added] = addTemplates(parsed.templates)!;
+    expect(added.fragment).toEqual(frag);
+    const q = somewhere(game, (p) => dist(p, at) > 700 && game.pastePlan(added.fragment, p, 0).ok);
+    expect(game.paste(added.fragment, q, 0)).toBeNull();
+    expect(game.levelCrossings).toHaveLength(2);
+    // Без имени — «Моя развязка».
+    const unnamed = fragmentToFile('   ', frag);
+    expect(unnamed.fileName).toBe(`${DEFAULT_TEMPLATE_NAME}.json`);
+    const back = parseTemplateFile(unnamed.text);
+    if ('error' in back) throw new Error(back.error);
+    expect(back.templates[0].name).toBe('Моя развязка');
   });
 
   it('имя файла — по названию шаблона, без знаков, которых не бывает в именах файлов', () => {

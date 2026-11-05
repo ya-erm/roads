@@ -126,8 +126,7 @@ const west = (x: number, y: number): Vec => ({ x: x - AT, y });
 /** Ровная пустая карта: генератор ставит реку, озёра, леса и предприятия всегда — убираем их. */
 function clearMap(game: Game): void {
   const t = game.terrain;
-  t.rivers.length = 0;
-  t.lakes.length = 0;
+  t.clearWater();
   t.trees.length = 0;
   t.extraForests.length = 0;
   for (const ind of game.industries) game.index.remove(ind);

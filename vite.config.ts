@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defineConfig, type Connect, type Plugin } from 'vite';
@@ -33,6 +34,11 @@ export default defineConfig({
   // (ya-erm.github.io/roads/). Ссылки между страницами строятся от корня сайта — src/testpages/route.ts, siteRoot.
   base: './',
   plugins: [testPages],
+  test: {
+    // По умолчанию vitest занимает все ядра, и на полном прогоне машина «встаёт». Половины хватает:
+    // общее время задают самые долгие файлы, а не число процессов.
+    maxWorkers: '50%',
+  },
   server: {
     port: 4800,
     strictPort: true,
@@ -49,6 +55,8 @@ export default defineConfig({
         lab: resolve(__dirname, 'lab.html'),
         test: resolve(__dirname, 'test/index.html'),
         testBus: resolve(__dirname, 'test/bus/index.html'),
+        testVehicles: resolve(__dirname, 'test/vehicles/index.html'),
+        testJunctions: resolve(__dirname, 'test/junctions/index.html'),
       },
     },
   },

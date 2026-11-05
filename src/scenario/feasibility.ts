@@ -3,7 +3,7 @@
  * города и предприятия существуют, объём не больше того, что регион может дать за срок, рост — не быстрее,
  * чем позволяет механика роста. Генератор и события не выдают задания, которые её не проходят.
  */
-import { ECONOMY } from '../config';
+import { ECONOMY, MONTH_SCALE } from '../config';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
 import { CARGO } from '../world/cargo';
@@ -34,8 +34,24 @@ export interface Assessment {
 const yes = (estimate?: number): Assessment => ({ ok: true, estimate });
 const no = (reason: string, estimate?: number): Assessment => ({ ok: false, reason, estimate });
 
-/** Население растёт не быстрее ≈3.5% в месяц при полном снабжении (дома за накопленный рост). */
-const MAX_TOWN_GROWTH = 0.035;
+/** Население растёт не быстрее ≈3.5% за 40 секунд при полном снабжении (дома за накопленный рост) — за месяц больше. */
+const MAX_TOWN_GROWTH = 1.035 ** MONTH_SCALE - 1;
+
+/** Сколько городов (или предприятий, которым есть куда везти и из чего делать) ещё вне сети: known — те, что в ней. */
+export function connectable(game: Game, what: 'town' | 'industry', known: Iterable<number>): number {
+  const inNet = new Set(known);
+  return what === 'town'
+    ? game.towns.filter((t) => !inNet.has(t.id)).length
+    : game.industries.filter((i) => !inNet.has(i.id) && hasMarket(game, i) && i.info.accepts.every((c) => producible(game, c))).length;
+}
+
+/**
+ * Сколько просить подключить: задуманное число, но с запасом в одного — вдруг до кого-то не дотянуться.
+ * Осталось вне сети мало — просим меньше; 0 — задания не будет.
+ */
+export function connectGoal(game: Game, what: 'town' | 'industry', known: Iterable<number>, planned: number): number {
+  return Math.max(0, Math.min(planned, connectable(game, what, known) - 1));
+}
 
 export function assess(game: Game, p: ObjectiveParams, months: number): Assessment {
   const work = months - RAMP;
@@ -53,7 +69,7 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
         const maker = industryById(game, p.from);
         if (!maker || maker.info.produces !== p.cargo) return no('предприятие не производит этот груз');
         const estimate = maker.info.accepts.length
-          ? Math.min(120 * levelCap(maker) * work, ...maker.info.accepts.map((c) => cargoPotential(game, c, maker.fp.center, months)))
+          ? Math.min(ECONOMY.processRate * levelCap(maker) * work, ...maker.info.accepts.map((c) => cargoPotential(game, c, maker.fp.center, months)))
           : rawOutput(maker, work);
         return p.amount <= estimate * 0.9 ? yes(estimate) : no(`${maker.name} выпустит за срок ≈${Math.round(estimate)}`, estimate);
       }
@@ -88,7 +104,9 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
     case 'supply': {
       const t = townById(game, p.town);
       if (!t) return no('города нет');
-      if (!t.demands.every((c) => producible(game, c))) return no('не все нужные городу грузы можно получить');
+      const can = t.demands.filter((c) => producible(game, c)).length;
+      const need = Math.min(p.needs ?? t.demands.length, t.demands.length);
+      if (!need || can < need) return no(`из нужных городу грузов можно получить ${can}, а закрыть надо ${need}`);
       return p.months <= work - 1 ? yes() : no('слишком короткий срок для снабжения подряд');
     }
     case 'population': {
@@ -100,6 +118,12 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
     case 'profit':
     case 'quality':
     case 'throughput':
+    case 'newRoutes':
       return p.months <= work ? yes() : no('слишком короткий срок');
+    case 'connect': {
+      // Есть из чего выбрать: городов и предприятий, которых в сети нет, хотя бы на одно больше, чем нужно.
+      const free = connectable(game, p.what, p.known);
+      return free > p.amount ? yes(free) : no(`вне сети осталось ${free}, а нужно подключить ${p.amount}`, free);
+    }
   }
 }

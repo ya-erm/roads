@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { add, dist, dot, scale, Vec } from '../core/vec';
-import { alignNode } from '../lanes/edit';
+import { alignNode, dragHandle, smoothCorner } from '../lanes/edit';
 import { Game } from './game';
-import { roadPlan, STREET } from './testkit';
+import { AVENUE, roadPlan, STREET } from './testkit';
 
 /** Цепочка прямых улиц: на поворотах — излом (перекрёсток из двух дорог), а не плавная дуга. */
 const KINKED = { ...STREET, kink: true };
@@ -267,5 +267,53 @@ describe('Перенос узла', () => {
     runSeconds(game, 20);
     expect(game.citizenCars).toBe(game.traffic.vehicles.size);
     expect(game.citizenCars).toBeGreaterThan(0);
+  });
+});
+
+describe('Излом снова гладкий', () => {
+  /** Тянет перо полотна id у узла node в точку p (kink — с Shift); true — построено. */
+  function pull(game: Game, id: number, node: number, p: Vec, kink = false): boolean {
+    const c = game.roads.net.corridor(id);
+    const plan = game.roadBuilder.plan((n) => dragHandle(n, { corridor: id, end: c.a === node ? 'a' : 'b' }, p, kink));
+    return plan.ok && game.roadBuilder.apply(plan);
+  }
+
+  it('перо излома из двух дорог без Shift — узел снова стык, перья на одной прямой; с Shift — излом остаётся', () => {
+    const game = dryGame();
+    const { a, b, c, origin } = buildBend(game);
+    const net = () => game.roads.net;
+    expect(net().node(b).kind).toBe('junction');
+    const [first, second] = net().node(b).corridors.map((id) => net().corridor(id));
+    const h = { corridor: first.id, end: (first.a === b ? 'a' : 'b') as 'a' | 'b' };
+    expect(smoothCorner(net(), h, false)).toBe(true);
+    // С Shift — только своё перо: узел так и остаётся изломом.
+    expect(pull(game, first.id, b, add(origin, { x: 140, y: 30 }), true)).toBe(true);
+    expect(net().node(b).kind).toBe('junction');
+    // Без Shift — стык: обе дороги касаются его по одной прямой, полосы продолжают друг друга.
+    expect(pull(game, first.id, b, add(origin, { x: 140, y: -40 }))).toBe(true);
+    expect(net().node(b).kind).toBe('seam');
+    const [e1, e2] = net().ends(net().node(b));
+    expect(dot(e1.away, e2.away)).toBeLessThan(-0.999);
+    // Длина пера соседа — прежняя.
+    const other = net().corridor(second.id);
+    const end = other.a === b ? other.curve.p1 : other.curve.p2;
+    const was = second.a === b ? second.curve.p1 : second.curve.p2;
+    expect(dist(end, net().node(b).pos)).toBeCloseTo(dist(was, net().node(b).pos), 6);
+    expect(net().problems()).toEqual([]);
+    expect(game.roads.route(a, c)).not.toBeNull();
+  });
+
+  it('излом дорог с разными полосами гладким не станет — тянется только своё перо', () => {
+    const game = dryGame();
+    const { b, origin } = buildBend(game);
+    const net = () => game.roads.net;
+    const [first, second] = net().node(b).corridors;
+    // Вторая дорога — проспект: полосы улицы её не продолжают.
+    const up = game.roadBuilder.rebuild(second, { cls: 'avenue', lanes: AVENUE.lanes });
+    expect(up.ok && game.roadBuilder.apply(up)).toBe(true);
+    const fc = net().corridor(first);
+    expect(smoothCorner(net(), { corridor: first, end: fc.a === b ? 'a' : 'b' }, false)).toBe(false);
+    expect(pull(game, first, b, add(origin, { x: 140, y: -40 }))).toBe(true);
+    expect(net().node(b).kind).toBe('junction');
   });
 });

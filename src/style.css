@@ -206,6 +206,159 @@ button {
   pointer-events: none !important;
 }
 
+/*
+ * Плашка предложения контракта (дублирует панель предложений внизу слева) — вверху между деньгами
+ * и кнопками скорости: границы пишет Hud в --ob-left и --ob-right. Тесно — во втором ряду, между
+ * панелями слева и справа (offer-low). Уведомления — под ней.
+ */
+.offer-banner {
+  position: absolute;
+  top: 14px;
+  left: var(--ob-left, 430px);
+  right: var(--ob-right, 490px);
+  display: flex;
+  justify-content: center;
+  container-type: inline-size;
+  pointer-events: none !important;
+}
+
+.offer-banner > * {
+  pointer-events: auto;
+}
+
+.offer-banner.hidden {
+  display: none;
+}
+
+.offer-low .offer-banner {
+  top: 84px;
+  left: 358px;
+  right: var(--ob-low-right, 368px);
+}
+
+.has-offer-banner .notices {
+  top: 76px;
+}
+
+.has-offer-banner.offer-low .notices {
+  top: 140px;
+}
+
+/* Совсем узкое окно: плашке негде встать — предложения остаются в панели внизу. */
+.offer-none .offer-banner {
+  display: none;
+}
+
+.has-offer-banner.offer-none .notices {
+  top: 16px;
+}
+
+.offer-banner-in {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 10px 4px 12px;
+  border-radius: 14px;
+  background: #fff7f0;
+  border: 2px solid #f1c9ab;
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+
+.offer-banner-in.urgent {
+  border-color: var(--danger);
+  animation: banner-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes banner-pulse {
+  50% {
+    box-shadow:
+      var(--shadow),
+      0 0 0 5px rgba(232, 72, 63, 0.25);
+  }
+}
+
+.offer-banner-in .ob-ic {
+  flex: none;
+  display: grid;
+}
+
+.offer-banner-in .ob-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  font-weight: 600;
+  text-align: left;
+}
+
+/* Значки городов и предприятий предложения — кнопки «показать на карте». */
+.offer-banner-in .ob-places {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.offer-banner-in .ob-place {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  transition: background 0.15s;
+}
+
+.offer-banner-in .ob-place:hover {
+  background: #f5e3d6;
+  box-shadow: inset 0 0 0 1.5px #e9b48f;
+}
+
+.offer-banner-in .ob-obj {
+  display: grid;
+}
+
+.offer-banner-in .ob-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.offer-banner-in .ob-title:hover span {
+  text-decoration: underline;
+}
+
+.offer-banner-in .ob-terms {
+  display: flex;
+  gap: 8px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.offer-banner-in button.small,
+.offer-banner-in .sc-left {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* Плашка поуже: сначала прячем условия (они в панели внизу), потом значок контракта. */
+@container (max-width: 760px) {
+  .offer-banner-in .ob-terms {
+    display: none;
+  }
+}
+
+@container (max-width: 560px) {
+  .offer-banner-in .ob-ic {
+    display: none;
+  }
+}
+
 .notice {
   background: var(--panel);
   box-shadow: var(--shadow);
@@ -367,6 +520,41 @@ button.icon.menu-back {
   color: var(--muted);
   font-size: 22px;
   line-height: 1;
+}
+
+/* Настройки (src/ui/settingsMenu.ts): строка — значок, название с пояснением, переключатель справа. */
+.menu-item.pref .menu-text small {
+  white-space: normal;
+}
+
+.pref-switch {
+  flex: none;
+  position: relative;
+  width: 40px;
+  height: 24px;
+  border-radius: 12px;
+  background: #c9d0d8;
+  transition: background 0.15s;
+}
+
+.pref-switch span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s;
+}
+
+.menu-item.pref.on .pref-switch {
+  background: #27ae60;
+}
+
+.menu-item.pref.on .pref-switch span {
+  transform: translateX(16px);
 }
 
 /* Партия файлом: скачать и открыть — внизу раздела сохранений. */
@@ -565,6 +753,13 @@ button.icon.menu-back {
 
 .map-mini {
   display: block;
+}
+
+/* Значки вариантов воды и рельефа в окне новой игры. */
+.ng-chip .ng-ic {
+  display: block;
+  flex: none;
+  margin-left: -3px;
 }
 
 .stepper.big b {
@@ -803,6 +998,11 @@ button.icon.menu-back {
   background: #e2e8ee;
 }
 
+/* Скопированное — файлом шаблона: под «Сохранить», по правому краю. */
+.tpl-save-file {
+  align-self: flex-end;
+}
+
 .custom {
   display: flex;
   gap: 12px;
@@ -852,6 +1052,12 @@ button.icon.menu-back {
   color: var(--accent);
 }
 
+/* В большой карточке — сразу за названием, в той же строке. */
+.card .name kbd {
+  margin-left: 4px;
+  vertical-align: 1px;
+}
+
 .price-tag {
   text-transform: none;
   letter-spacing: 0;
@@ -871,6 +1077,77 @@ button.icon.menu-back {
   white-space: nowrap;
 }
 
+/* Отправить машину, ждущую интервала, прямо сейчас: значок сразу после отсчёта в тексте. */
+.dispatch {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  padding: 0;
+  margin: 0 2px;
+  font-size: 9px;
+  vertical-align: middle;
+  color: #b7791f;
+}
+
+/* Своя подсказка (вместо браузерной title — та появляется с задержкой): видна сразу при наведении. */
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.3;
+  /* Короткая — в одну строку, длинная — переносится, не шире 240 px. */
+  width: max-content;
+  max-width: 240px;
+  white-space: normal;
+  text-align: left;
+  z-index: 50;
+  pointer-events: none;
+}
+
+/* У правого края панели — подсказка выровнена по правому краю элемента, чтобы не уходить за экран. */
+[data-tip][data-tip-end]:hover::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* Выключатель интервала в карточке маршрута — рядом со значением «Интервал»; не выше строки, как «Средняя скорость». */
+button.icon.toggle-spacing {
+  display: inline-grid;
+  place-items: center;
+  width: auto;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1;
+  vertical-align: top;
+}
+
+/* Значения-кнопки во втором столбце сводки — с той же линии, что и обычные: отступ кнопки уходит влево. */
+.kv .speed-toggle,
+.kv b > .toggle-spacing:first-child {
+  margin-left: -4px;
+}
+
+/* Значок ⏱ — из шрифта эмодзи, он выше текста: не раздвигает строку «Интервал». */
+.kv-clock {
+  font-style: normal;
+  line-height: 1;
+}
+
 .veh small .neg {
   color: #d64541;
 }
@@ -881,46 +1158,102 @@ button.icon.menu-back {
   font-weight: 600;
 }
 
-/* Авто-парк в карточке маршрута: выключатель, «от … до …» и ряд машин. */
+/* Авто-парк в карточке маршрута — один блок: заголовок с «от … до …» и выключателем, под ним ряд машин. */
+.auto-box {
+  margin: 4px 0;
+  background: #f4f6f8;
+  border-radius: 10px;
+}
+
+.auto-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 2px 4px 2px 0;
+}
+
 .auto-title {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  align-self: stretch;
+  padding: 0 4px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Выключенный: весь блок — одна строка, выключатель справа. */
+.auto-box:not(.on) .auto-title {
+  flex: 1;
+}
+
+.auto-toggle {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  margin-left: auto;
+  padding: 0 4px;
+}
+
+.auto-title:hover,
+.auto-toggle:hover {
+  background: #e8edf2;
 }
 
 .auto-range {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 4px 0 2px;
-  padding: 0 4px;
+  gap: 2px;
 }
 
 .auto-range .lbl3 {
   font-size: 12px;
   color: var(--muted);
-  margin-left: 4px;
+  margin-left: 2px;
+}
+
+.auto-range .stepper {
+  background: #e3e9ef;
+  margin-right: 0;
+}
+
+.auto-range .stepper button {
+  width: 22px;
+  height: 26px;
+}
+
+.auto-range .stepper b {
+  min-width: 22px;
 }
 
 .auto-flag {
+  flex: none;
   font-size: 15px;
   margin-left: 4px;
   cursor: help;
 }
 
-/* Ряд машин в одну строку: не помещаются — шаг между значками уменьшается, и они ложатся внахлёст. */
+/* Ряд машин в одну строку с постоянным шагом: сколько значков поместится — считает fleetBar, остальные — «+N». */
 .auto-bar {
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
-  margin: 2px 0 6px;
-  padding: 0 22px 0 4px;
+  padding: 0 26px 7px 8px;
+}
+
+/* Сколько машин на маршруте сейчас. */
+.auto-now {
+  flex: none;
+  min-width: 16px;
+  margin-right: 6px;
+  font-size: 14px;
+  text-align: center;
 }
 
 .auto-bar .slot {
-  flex: 0 1 20px;
-  min-width: 4px;
+  flex: none;
+  width: 20px;
   display: flex;
 }
 
@@ -938,11 +1271,14 @@ button.icon.menu-back {
   background: #8a96a3;
 }
 
-.auto-bar small {
+.auto-bar .auto-more {
   flex: none;
-  margin-left: 18px;
-  font-size: 11px;
+  margin-left: 2px;
+  font-size: 12px;
+  font-weight: 600;
   color: var(--muted);
+  white-space: nowrap;
+  cursor: help;
 }
 
 /* Отзывы жителей в карточке города. */
@@ -975,6 +1311,128 @@ button.icon.menu-back {
 
 .line-chart {
   margin: 6px 0 2px;
+}
+
+/* «Средняя скорость: 45 км/ч ▾» — раскрывает график скорости по маршруту. */
+.speed-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px 0 4px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-weight: 700;
+  color: inherit;
+  cursor: pointer;
+}
+
+.speed-toggle:hover {
+  background: #e1e7ee;
+}
+
+.speed-toggle .caret {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.speed-toggle .caret.closed {
+  transform: rotate(-90deg);
+}
+
+.speed-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Своя подсказка над графиком скорости (как [data-tip]): скорость в точке под курсором — сразу, без задержки title. */
+.line-chart[data-speed-line] {
+  position: relative;
+}
+
+.speed-tip {
+  position: absolute;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--ink);
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.speed-tip[hidden] {
+  display: none;
+}
+
+.speed-tip b {
+  font-size: 13px;
+}
+
+.speed-tip span {
+  color: #c4ccd5;
+}
+
+.speed-tip .st {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #fff;
+}
+
+.speed-tip .st i {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.speed-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.speed-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.speed-legend i {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.speed-legend .lg-cap {
+  height: 0;
+  border-top: 1.5px dashed #7b8794;
+}
+
+.speed-legend .lg-z {
+  height: 8px;
+  background: #e3e8ee;
+}
+
+.speed-legend .lg-sum {
+  margin-left: auto;
 }
 
 /* Перекрёсток: фазы светофора и повороты. */
@@ -1122,10 +1580,24 @@ button.icon.menu-back {
   background: #e7f0fd;
 }
 
+/* Строка остановки (кроме номера и названия) раскрывает и сворачивает её настройку. */
+.stop[data-action] {
+  cursor: pointer;
+}
+
+.stop[data-action]:hover {
+  background: #eef2f6;
+}
+
+.stop.open[data-action]:hover {
+  background: #dde9fb;
+}
+
 .stop .num {
   flex: none;
   width: 18px;
   height: 18px;
+  padding: 0;
   border-radius: 50%;
   background: #4f5965;
   color: #fff;
@@ -1135,6 +1607,32 @@ button.icon.menu-back {
   place-items: center;
 }
 
+/* Номер и название станции — одна кнопка «показать на карте»; справа от неё — свободное место строки. */
+.stop-place {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.stop button.stop-place .num {
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.stop button.stop-place:hover .num {
+  background: #2f80ed;
+  box-shadow: 0 0 0 3px rgba(47, 128, 237, 0.25);
+}
+
+.stop button.stop-place:hover .st-name {
+  color: var(--accent);
+}
+
 .stop .st-name {
   flex: 1;
   min-width: 0;
@@ -1142,6 +1640,33 @@ button.icon.menu-back {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
+}
+
+/* Станция не работает с тем, что возит линия: жёлтый значок с недостающим (груз или пассажиры), клик включает. */
+.stop-warn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  border: 1px solid #e3b341;
+  background: #fff4d6;
+  color: #9a6700;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  animation: stop-warn-pulse 1.6s ease-in-out infinite;
+}
+
+.stop-warn:hover {
+  background: #ffe8a8;
+}
+
+@keyframes stop-warn-pulse {
+  50% {
+    box-shadow: 0 0 0 3px rgba(227, 179, 65, 0.35);
+  }
 }
 
 .rule-chip {
@@ -1155,6 +1680,27 @@ button.icon.menu-back {
   background: #fff;
   font-size: 11px;
   cursor: pointer;
+}
+
+.rule-chip:hover {
+  border-color: #aab4bf;
+}
+
+/* Стрелка на плашке условий: вниз — развернуть настройку, вверх — свернуть. */
+.rule-chip .fold {
+  display: grid;
+  place-items: center;
+  margin-left: 1px;
+  color: #6b7480;
+  transition: transform 0.15s;
+}
+
+.rule-chip .fold.up {
+  transform: rotate(180deg);
+}
+
+.rule-chip:hover .fold {
+  color: var(--ink);
 }
 
 .rule-chip .rl {
@@ -1363,16 +1909,159 @@ button.icon.menu-back {
   padding: 0 4px;
 }
 
+/* Склад станции: полоска заполнения, «лежит / помещается» и пристройки-склады. */
+.store-row .lbl2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.store-bar {
+  position: relative;
+  flex: 1;
+  min-width: 60px;
+  height: 8px;
+  border-radius: 4px;
+  background: #e8ecf0;
+}
+
+.store-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 4px;
+  background: #c99a5b;
+}
+
+.store-bar.full i {
+  background: var(--danger);
+}
+
+.store-num {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stepper.depots b {
+  min-width: 24px;
+}
+
+/* Пути с платформами нового вокзала: схема путей и их число. */
+.stepper.tracks {
+  align-self: flex-start;
+}
+
+.stepper.tracks svg {
+  height: 30px;
+  width: auto;
+  background: #fff;
+  border-radius: 5px;
+}
+
+/* Проходная или конечная — пара значков-схем справа в заголовке «Платформы». */
+.st-kind {
+  display: inline-flex;
+  gap: 2px;
+  /* Выше строки заголовка — заходит в отступы, панель не растёт. */
+  margin: -5px 0 -5px auto;
+  padding: 2px;
+  background: #eef2f6;
+  border-radius: 7px;
+}
+
+.st-kind button {
+  display: grid;
+  place-items: center;
+  padding: 1px 4px;
+  border: 1.5px solid transparent;
+  border-radius: 5px;
+  color: #6b7785;
+  line-height: 0;
+}
+
+.st-kind button:hover {
+  background: #e2e8ee;
+}
+
+.st-kind button.active {
+  border-color: var(--accent);
+  background: #e7f0fd;
+  color: var(--ink);
+}
+
+/* Пути и длина нового вокзала — два счётчика друг под другом, подписи слева. */
+.st-params {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 3px 6px;
+  align-items: center;
+  justify-items: start;
+}
+
+.st-params .lbl3 {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.st-params .stepper.tracks svg {
+  height: 26px;
+}
+
+.st-params .stepper button {
+  height: 26px;
+}
+
+.st-len {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Сколько вагонов встанет: пассажирский вагон (синий) и грузовой (коричневый) — значком и числом. */
+.cars-fit {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.cars-fit .car {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: help;
+}
+
+.cars-fit .car svg {
+  display: block;
+}
+
+.cars-fit .car.pax {
+  color: #3b6fb6;
+}
+
+.cars-fit .car.freight {
+  color: #9a6431;
+}
+
+.cars-fit .car b {
+  color: var(--ink);
+  font-weight: 700;
+}
+
 .stepper button.off,
 .stepper button:disabled {
   opacity: 0.35;
 }
 
 /* Боковая панель */
+/* Своя ширина, не по верхней панели кнопок: та растёт с каждой новой кнопкой. */
 .side {
   top: 84px;
   right: 14px;
-  width: 340px;
+  width: 400px;
   max-height: calc(100vh - 290px);
   overflow-y: auto;
   padding: 4px 0;
@@ -1558,6 +2247,67 @@ button.icon.menu-back {
   font-weight: 600;
 }
 
+/* Предупреждения в карточке станции: значок как на карте, что случилось, подробно и кнопка действия. */
+.station-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+  border-radius: 12px;
+}
+
+.warn-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: #fff6dc;
+  color: #7a5600;
+  font-size: 13px;
+}
+
+.warn-row.alert {
+  background: #fdecea;
+  color: #a8322c;
+}
+
+.warn-row .no-entry,
+.warn-row .adv-ic,
+.warn.jam .no-entry {
+  flex: none;
+}
+
+.warn-row small {
+  display: block;
+  margin-top: 2px;
+  color: #5f5a50;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.warn-actions {
+  margin-top: 5px;
+}
+
+/* Открыли кликом по значку на карте — блок вспыхивает рамкой. */
+.station-warnings.flash {
+  animation: warn-flash 0.6s ease-in-out 3;
+}
+
+@keyframes warn-flash {
+  50% {
+    box-shadow: 0 0 0 3px rgba(229, 83, 75, 0.55);
+  }
+}
+
+.warn.jam {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
 .pos {
   color: #2e9d57;
 }
@@ -1585,6 +2335,11 @@ button.icon.menu-back {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* Раскрытые под прибылью линии строки денег — с отступом: видно, что это её подробности. */
+.kv span.kv-sub {
+  padding-left: 12px;
 }
 
 /* Заголовок списка линий: свернуть/развернуть и кнопки — в одну строку. */
@@ -2033,24 +2788,112 @@ button.small.with-ic {
   gap: 4px;
 }
 
-/* Выбор папки в карточке линии. */
+/* Выбор папки в карточке линии: кнопка с текущей папкой раскрывает список остальных. */
 .folder-pick {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  position: relative;
   margin: 2px 0 4px;
 }
 
-.folder-pick .opt {
+.folder-pick-current,
+.folder-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1.5px solid transparent;
   background: #f4f6f8;
-  max-width: 130px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.folder-pick-row {
+  cursor: default;
+}
+
+.folder-pick.open .folder-pick-current {
+  border-color: var(--accent);
+  background: #fff;
+}
+
+.folder-pick-current svg:last-child {
+  margin-left: auto;
+  flex: none;
+  color: var(--muted);
+}
+
+.folder-pick-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: left;
 }
 
-.folder-pick .opt.active {
+.folder-pick-current small,
+.folder-pick-opt small {
+  flex: none;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.folder-pick-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 3px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(20, 30, 45, 0.18);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.folder-pick-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-pick-opt:hover {
+  background: #eef2f6;
+}
+
+.folder-pick-opt.active {
   background: #e7f0fd;
+}
+
+.folder-pick-opt.new {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.folder-pick .folder-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 6px;
 }
 
 .vehicles {
@@ -2082,6 +2925,12 @@ button.small.with-ic {
   cursor: pointer;
 }
 
+/* Силуэт в цвете маршрута; три карточки в ряд — сжимается по ширине. */
+.buy-card .model-art {
+  max-width: 100%;
+  height: auto;
+}
+
 .buy-card:hover {
   background: #e7f0fd;
   border-color: var(--accent);
@@ -2093,22 +2942,69 @@ button.small.with-ic {
   color: var(--muted);
 }
 
-/* Правила для путей: значок и короткое пояснение. */
+/* Модель, которой ещё нет в продаже: серая, без наведения — когда откроется. */
+.buy-card.locked {
+  cursor: default;
+  color: var(--muted);
+  background: #f4f6f8;
+  border: 1.5px dashed #d5dce3;
+}
+
+.buy-card.locked:hover {
+  background: #f4f6f8;
+  border-color: #d5dce3;
+}
+
+/* Силуэт закрытой модели — бесцветный и полупрозрачный, чтобы не путать с той, что можно купить. */
+.buy-card.locked svg {
+  filter: grayscale(1);
+  opacity: 0.4;
+}
+
+/* Правила для путей: по строке — значок и короткая подпись (полное пояснение — в подсказке), панель не растёт в высоту. */
 .rules {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 1px;
   font-size: 12px;
+  line-height: 15px;
 }
 
 .rules > div {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  white-space: nowrap;
+  cursor: help;
 }
 
-.rules svg {
+.rules.inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 2px 18px;
+}
+
+/* Значки — в одинаковой рамке, подписи начинаются ровно. */
+.rule-ic {
   flex: none;
+  width: 32px;
+  height: 15px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+}
+
+.rule-ic svg {
+  width: 100%;
+  height: 100%;
+}
+
+.rules kbd {
+  font-family: inherit;
+  font-size: 10px;
+  background: #eef2f6;
+  border-radius: 4px;
+  padding: 0 4px;
 }
 
 .opt-title svg {
@@ -2125,6 +3021,11 @@ button.small.with-ic {
   padding: 5px 6px 5px 10px;
 }
 
+/* Под курсором — синеватая, как кольцо, которым эта машина подсвечена на карте. */
+.veh:hover {
+  background: #e7f0fd;
+}
+
 .veh > div {
   flex: 1;
   display: flex;
@@ -2136,6 +3037,17 @@ button.small.with-ic {
   color: var(--muted);
   display: block;
   line-height: 1.4;
+}
+
+/* Имя и загрузка «16/16» — в одной строке; загрузка остаётся обычным мелким текстом, не блоком. */
+.veh-head {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.veh-head small {
+  display: inline;
 }
 
 .veh small .cargo-icon {
@@ -2283,6 +3195,53 @@ button.small.with-ic {
 
 .partner small {
   color: var(--muted);
+}
+
+/* Заголовок «Куда / Откуда везти»: сворачивает список; галочка справа — как у потребностей города. */
+.side .fold-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0 4px;
+  padding: 0;
+  text-align: left;
+}
+
+.side .fold-head h4 {
+  margin: 0;
+}
+
+.fold-head .fold-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.fold-head .fold-icons {
+  display: flex;
+  gap: 3px;
+}
+
+.fold-head .caret {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  border-radius: 7px;
+  background: #eef1f4;
+  color: #4b525c;
+  transition: transform 0.15s, background 0.15s;
+}
+
+.fold-head:hover .caret {
+  background: #e1e7ee;
+}
+
+.fold-head .caret.closed {
+  transform: rotate(-90deg);
 }
 
 /* Цепочки производства */
@@ -2435,6 +3394,21 @@ button.small.with-ic {
   margin: 0;
 }
 
+/* Биом карты в заголовке цепочек: пейзаж и название. */
+.chain-biome {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.chain-biome svg {
+  border-radius: 4px;
+}
+
 .chain-head,
 .chain-row {
   display: grid;
@@ -2553,9 +3527,359 @@ button.small.with-ic {
   padding: 6px 0 4px;
 }
 
+/*
+ * Предложения контрактов — внизу слева, под панелью сценария. Пока они есть, панели слева над ними
+ * (сценарий, «Финансы», «Цепочки») кончаются над предложениями: их высоту Hud пишет в --offers-h.
+ */
+.offers {
+  bottom: 14px;
+  left: 14px;
+  width: 330px;
+  max-width: calc(100vw - 28px);
+  max-height: 45vh;
+  overflow-y: auto;
+  padding: 8px 12px 2px;
+}
+
+.offers.hidden {
+  display: none;
+}
+
+.has-offers {
+  --offers-top: calc(100vh - 84px - 10px - 14px - var(--offers-h, 0px));
+}
+
+.has-offers .scenario {
+  max-height: max(120px, var(--offers-top));
+}
+
+.has-offers .finance,
+.has-offers .chains,
+.has-offers .advisor {
+  max-height: max(160px, var(--offers-top));
+}
+
+/* Советник: кнопка с числом, панель слева на месте «Финансов», карточки советов. */
+/* Лампочка советника — в панели денег справа, с числом советов в уголке. */
+.advisor-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  margin: -4px -6px -4px -4px;
+  padding: 0;
+  border-radius: 10px;
+  background: #f4f6f8;
+}
+
+.advisor-btn:hover {
+  background: #fff4cc;
+}
+
+/* Подсказка лампочки — под ней: над панелью денег края экрана. */
+.advisor-btn[data-tip]:hover::after {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+
+.advice-badge {
+  position: absolute;
+  top: -5px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border: 2px solid #fff;
+  border-radius: 9px;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  color: #fff;
+  background: #8a96a3;
+}
+
+.advice-badge.tip {
+  background: #4a8fe7;
+}
+
+.advice-badge.warn {
+  background: #e0a100;
+}
+
+.advice-badge.alert {
+  background: var(--danger);
+}
+
+.advisor {
+  top: 84px;
+  left: 14px;
+  width: 360px;
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+
+.advisor header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.advisor header h3 {
+  flex: 1;
+  margin: 0;
+}
+
+/* Подсказки в заголовке панели — под значками: сверху их срезает край панели. */
+.advisor header [data-tip]:hover::after {
+  bottom: auto;
+  top: calc(100% + 6px);
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+.adv-sum {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  color: #fff;
+}
+
+.adv-sum.alert {
+  background: var(--danger);
+}
+
+.adv-sum.warn {
+  background: #e0a100;
+}
+
+.adv-sum.tip {
+  background: #4a8fe7;
+}
+
+.adv-card {
+  display: flex;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid #e8ecf0;
+}
+
+.adv-ic {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 2px solid #4a8fe7;
+  background: #eef4fd;
+}
+
+.adv-ic.warn {
+  border-color: #e0a100;
+  background: #fff6dd;
+}
+
+.adv-ic.alert {
+  border-color: var(--danger);
+  background: #fdeceb;
+}
+
+.adv-glyph {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.adv-count {
+  position: absolute;
+  right: -8px;
+  bottom: -5px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--ink);
+  color: #fff;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 14px;
+}
+
+.adv-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.adv-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.adv-title b {
+  flex: 1;
+  font-size: 13px;
+}
+
+.adv-body small {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.adv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.adv-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: #f1f4f7;
+  font-size: 11.5px;
+}
+
+.adv-line span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.adv-hide {
+  opacity: 0.5;
+}
+
+.adv-empty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.adv-empty span {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #2e9d57;
+  color: #fff;
+  font-weight: 700;
+}
+
+/* Окно поуже: панель инструментов внизу по центру доходит до левого края — предложения над ней. */
+@media (max-width: 1410px) {
+  .offers {
+    bottom: 96px;
+  }
+
+  .has-offers {
+    --offers-top: calc(100vh - 84px - 10px - 96px - var(--offers-h, 0px));
+  }
+}
+
+.of-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.of-top h3 {
+  margin: 0;
+  flex: 1;
+  font-size: 14px;
+}
+
+.of-top .sc-badge {
+  padding: 2px 7px;
+}
+
+.of-head {
+  cursor: pointer;
+}
+
+.of-head .caret {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+
+.of-head:hover .caret {
+  background: #f5e3d6;
+}
+
+.of-head .caret.closed {
+  transform: rotate(-90deg);
+}
+
+.of-card .sc-cause {
+  margin: 6px 0 0;
+}
+
+.of-card.urgent {
+  box-shadow: inset 0 0 0 2px var(--danger);
+  animation: offer-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes offer-pulse {
+  50% {
+    box-shadow:
+      inset 0 0 0 2px var(--danger),
+      0 0 0 4px rgba(232, 72, 63, 0.2);
+  }
+}
+
+/* Показали с плашки вверху — короткая подсветка карточки (или всей панели). */
+.of-card.flash {
+  animation: offer-card-flash 0.6s ease-in-out 2;
+}
+
+.offers.flash {
+  animation: offer-panel-flash 0.6s ease-in-out 2;
+}
+
+@keyframes offer-card-flash {
+  50% {
+    box-shadow: inset 0 0 0 3px rgba(74, 143, 231, 0.85);
+  }
+}
+
+@keyframes offer-panel-flash {
+  50% {
+    box-shadow:
+      var(--shadow),
+      0 0 0 4px rgba(74, 143, 231, 0.55);
+  }
+}
+
 /* Узкое окно: панель сценария уже, чтобы не наезжать на правую панель. */
 @media (max-width: 860px) {
-  .scenario {
+  .scenario,
+  .offers {
     width: calc(100vw - 470px);
     min-width: 240px;
   }
@@ -2790,6 +4114,68 @@ button.small.with-ic {
   overflow-wrap: anywhere;
 }
 
+/* Свернуть задание: галочка справа от названия; у свёрнутого — повёрнута вправо. */
+.sc-fold {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin: -1px -2px 0 2px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.sc-fold .caret {
+  display: grid;
+  place-items: center;
+  transition: transform 0.15s;
+}
+
+.sc-fold .caret.closed {
+  transform: rotate(-90deg);
+}
+
+.sc-obj:hover .sc-fold {
+  background: #e1e7ee;
+  color: var(--ink);
+}
+
+/* Свёрнутое задание — две строки: название в одну строку, полоска с прогрессом и сроком. */
+.sc-obj.folded {
+  align-items: center;
+  padding: 5px 8px;
+}
+
+.sc-obj.folded .sc-obj-ic {
+  padding-top: 0;
+}
+
+.sc-obj.folded .sc-obj-title {
+  align-items: center;
+}
+
+.sc-obj.folded .sc-obj-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-obj.folded .sc-meta {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.sc-obj.folded .sc-bar {
+  flex: 1;
+  min-width: 40px;
+  margin: 0;
+}
+
 .sc-role {
   flex: none;
   color: var(--accent);
@@ -2854,6 +4240,22 @@ button.small.with-ic {
   font-weight: 700;
 }
 
+/* Быстрый срок: необязательный, раньше обычного. */
+.sc-fast {
+  position: relative;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: #fff4cc;
+  color: #9a6b00;
+  font-weight: 600;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.sc-fast.done {
+  padding: 0 4px;
+}
+
 .sc-reward {
   overflow-wrap: anywhere;
 }
@@ -2861,6 +4263,46 @@ button.small.with-ic {
 .sc-now {
   font-size: 11px;
   color: var(--muted);
+}
+
+/* Потребности города у задания «снабжать»: закрытые в этом месяце — яркие. */
+.sc-needs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 3px 0 1px;
+}
+
+.sc-need {
+  position: relative;
+  display: inline-flex;
+  opacity: 0.35;
+  filter: grayscale(0.7);
+}
+
+.sc-need.ok {
+  opacity: 1;
+  filter: none;
+}
+
+.sc-need.ok::before {
+  content: '✓';
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #2e9d57;
+  color: #fff;
+  font-size: 8px;
+  line-height: 11px;
+  text-align: center;
+}
+
+.sc-needs b {
+  margin-left: 4px;
+  font-size: 12px;
 }
 
 .sc-why {
@@ -3071,7 +4513,7 @@ span.ind-chip {
   color: var(--danger);
 }
 
-/* Прошедшее событие — приглушённой строкой. */
+/* Прошедшее событие — приглушённой строкой; клик разворачивает подробности. */
 .sc-past {
   display: flex;
   align-items: center;
@@ -3079,7 +4521,12 @@ span.ind-chip {
   padding: 3px 4px;
   font-size: 12px;
   color: var(--muted);
-  cursor: help;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.sc-past:hover {
+  background: #eef1f4;
 }
 
 .sc-past > span:nth-child(2) {
@@ -3099,6 +4546,26 @@ span.ind-chip {
 .sc-past small {
   flex: none;
   font-size: 11px;
+}
+
+.sc-past svg {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  opacity: 0.6;
+  transition: transform 0.15s;
+}
+
+.sc-past.open svg {
+  transform: rotate(180deg);
+}
+
+.sc-past-detail {
+  margin: 0 4px 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #f6f8fa;
+  font-size: 12.5px;
 }
 
 /* Свёрнутая панель и итог после конца сценария. */
@@ -3156,6 +4623,24 @@ span.ind-chip {
   font-size: 11.5px;
 }
 
+/* Дополнительные задания после победы. */
+.sc-extras h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #7a5cc4;
+}
+
+.sc-extras h4 small {
+  margin-left: 4px;
+  color: var(--muted);
+  font-weight: normal;
+}
+
+.sc-role.extra {
+  color: #7a5cc4;
+  font-weight: 700;
+}
+
 /* Кнопка со значком в окнах. */
 .modal .actions .with-ic {
   display: inline-flex;
@@ -3167,13 +4652,52 @@ span.ind-chip {
   padding: 8px 16px 8px 10px;
 }
 
-/* Брифинг сценария — вместо окна правил. */
+/*
+ * Брифинг сценария — вместо окна правил. Содержимое прокручивается (.brief-scroll), а подвал с подсказкой
+ * и «Начать» закреплён внизу окна — кнопка всегда видна.
+ */
 .modal.start.brief {
+  display: flex;
+  flex-direction: column;
   width: 640px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 32px);
+  overflow: hidden;
+  padding: 0;
+}
+
+.brief-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 24px 28px;
+  padding: 22px 28px 14px;
+}
+
+.brief-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 28px 14px;
+  border-top: 1px solid #e6ebf0;
+  box-shadow: 0 -6px 14px -10px rgba(40, 52, 64, 0.35);
+}
+
+.brief-foot .tip {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+}
+
+.brief-foot .primary {
+  flex: none;
+}
+
+.brief-foot .with-ic {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .modal.brief h4,
@@ -3233,41 +4757,48 @@ span.ind-chip {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 8px;
-  margin: 16px 0 12px;
+  margin: 14px 0 10px;
 }
 
+/* Плитка: значок слева, значение и подпись справа — в две строки, а не в три. */
 .brief-tile {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: auto 1fr;
   align-items: center;
-  gap: 3px;
-  padding: 10px 6px 8px;
+  column-gap: 8px;
+  padding: 7px 10px;
   border-radius: 12px;
   background: #f4f6f8;
-  text-align: center;
   cursor: help;
 }
 
+.brief-tile > svg {
+  grid-row: span 2;
+}
+
 .brief-tile b {
-  font-size: 16px;
+  font-size: 15px;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .brief-tile small {
   font-size: 11px;
+  line-height: 1.2;
   color: var(--muted);
+  white-space: nowrap;
 }
 
 .modal ul.brief-facts {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px 14px;
-  margin: 0 0 12px;
+  gap: 5px 14px;
+  margin: 0 0 8px;
   padding: 0;
   list-style: none;
-  font-size: 13px;
-  line-height: 1.35;
+  font-size: 12px;
+  line-height: 1.3;
 }
 
 .brief-facts li {
@@ -3295,23 +4826,32 @@ span.ind-chip {
   margin: 0 0 6px;
 }
 
-.brief .tip {
-  margin: 14px 0 0;
-  font-size: 13px;
+/* Цели до старта: «почему» — обычной строкой под условиями, без отдельной плашки. */
+.brief .sc-why {
+  margin: 0;
+  padding: 0;
+  background: none;
 }
 
-.brief .actions {
-  justify-content: center;
-  margin-top: 16px;
+.brief h4 small {
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 /* Итоговый экран сценария. */
 .modal.results {
+  position: relative;
   width: 620px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 32px);
   overflow-y: auto;
   padding: 24px 28px;
+}
+
+/* Справа вверху — крестик «закрыть и продолжить в песочнице»: заголовок до него не доходит. */
+.modal.results .sc-res-head {
+  padding-right: 24px;
 }
 
 .sc-lost {
@@ -3573,6 +5113,33 @@ span.ind-chip {
   text-align: center;
 }
 
+/* Биомы: «по seed» и пять пейзажей в ряд; под ними — сырьё и потребности городов значками. */
+.cards.ng-biomes {
+  grid-template-columns: repeat(6, 1fr);
+}
+
+.ng-biome-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 6px;
+  font-size: 12.5px;
+}
+
+.ng-biome-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: #f4f6f8;
+}
+
+.ng-cargo {
+  display: inline-flex;
+}
+
 .ng-record {
   display: flex;
   align-items: center;
@@ -3581,4 +5148,79 @@ span.ind-chip {
   border-radius: 10px;
   background: #fff8e1;
   font-size: 13px;
+}
+
+/* Проект дороги или пути: переключатель в заголовке «Формы», плашка над панелью — панель того же размера. */
+.opt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 6px;
+  padding: 0 5px 0 3px;
+  height: 16px;
+  border-radius: 6px;
+  background: #eef2f6;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.opt-chip:hover {
+  background: #e2e8ee;
+}
+
+.opt-chip.active {
+  background: #e7f0fd;
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+  color: var(--accent);
+}
+
+.opt-chip svg {
+  height: 13px;
+  width: auto;
+}
+
+.project-bar {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+  font-size: 13px;
+  max-width: calc(100vw - 60px);
+}
+
+.project-bar svg {
+  height: 22px;
+  width: auto;
+  flex: none;
+}
+
+.project-total {
+  font-size: 15px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.project-total.bad {
+  color: var(--danger);
+}
+
+.project-why {
+  font-size: 12px;
+  line-height: 15px;
+  color: var(--danger);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
 }

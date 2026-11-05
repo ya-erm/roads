@@ -1,11 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
-import { dist, Vec } from '../core/vec';
+import { dist } from '../core/vec';
 import { Game } from '../game/game';
-import { road, roadPlan, stationExit } from '../game/testkit';
-import type { RoadOptions } from '../lanes/edit';
+import { connectStations as connect, stationAtIndustry, withoutCitizens } from '../game/testkit';
 import { twoWay } from '../lanes/model';
-import type { Industry, Station } from '../world/entities';
 import { DEFAULT_SETTINGS, WorldSettings } from '../world/settings';
 import { industryById, producible, receivers, refOf } from './analysis';
 import { ARCHETYPES, EVENT_INFO, EVENT_RULES } from './content';
@@ -34,31 +32,6 @@ function runMonths(game: Game, months: number, until?: () => boolean): void {
 function setMonth(game: Game, month: number): void {
   (game as unknown as { month: number }).month = month;
   game.time = month * MONTH_LENGTH;
-}
-
-function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Station | null {
-  const base = Math.atan2(toward.y - ind.fp.center.y, toward.x - ind.fp.center.x);
-  for (const k of [0, 1, -1, 2]) {
-    const a = base + (k * Math.PI) / 2;
-    const reach = Math.hypot(ind.fp.w, ind.fp.h) / 2 + 20;
-    const st = game.placeStation({ x: ind.fp.center.x + Math.cos(a) * reach, y: ind.fp.center.y + Math.sin(a) * reach }, 14);
-    if (st) return st;
-  }
-  return null;
-}
-
-function connect(game: Game, sA: Station, sB: Station, profile: RoadOptions): boolean {
-  const A = stationExit(game, sA.nodeId);
-  const B = stationExit(game, sB.nodeId);
-  const d = { x: B.pos.x - A.pos.x, y: B.pos.y - A.pos.y };
-  const n = { x: -d.y / Math.hypot(d.x, d.y), y: d.x / Math.hypot(d.x, d.y) };
-  for (const off of [0, 150, -150, 300, -300, 450, -450, 600, -600]) {
-    const M = { x: (A.pos.x + B.pos.x) / 2 + n.x * off, y: (A.pos.y + B.pos.y) / 2 + n.y * off };
-    if (!roadPlan(game, A.id, { free: M }, profile).ok) continue;
-    road(game, A.id, { free: M }, profile);
-    if (road(game, M, B.id, profile)) return true;
-  }
-  return false;
 }
 
 /** Все задания должны проходить проверку выполнимости и не требовать груза, которого не получить. */
@@ -158,7 +131,9 @@ describe('Сценарий: генерация', { timeout: 120_000 }, () => {
     expect(game.settings.scenario).toBeUndefined();
     // Население городов seed 1 — как до появления сценариев: генерация песочницы не изменилась.
     expect(game.towns.map((t) => t.population).sort((x, y) => y - x)).toEqual([10092, 7494, 4228, 3524, 3066, 2914, 2086, 1920, 1168, 1166]);
-    expect(game.industries).toHaveLength(32);
+    // Прежние 32 предприятия — те же, предприятия новых цепочек расставлены после них.
+    expect(game.industries).toHaveLength(41);
+    expect(game.industries.slice(32).map((i) => i.info.kind)).toEqual(['ranch', 'ranch', 'ranch', 'sandpit', 'sandpit', 'meatplant', 'glassworks', 'furniture', 'cement']);
     expect(game.loanMax).toBe(1_000_000);
     runMonths(game, 1);
     expect(game.monthIndex).toBe(1);
@@ -168,7 +143,8 @@ describe('Сценарий: генерация', { timeout: 120_000 }, () => {
 
 describe('Сценарий: задания по реальной симуляции', { timeout: 180_000 }, () => {
   it('поставка засчитывается фактической доставкой, а не постройкой; выполненный контракт платит награду', () => {
-    const game = new Game(scenario(42));
+    // Трасса — своя сеть в стороне от городов: машины жителей на неё не попадают, без них счёт в разы быстрее.
+    const game = withoutCitizens(new Game(scenario(42)));
     const sc = game.scenario!;
     game.money = 5_000_000;
     const supplies = game.industries
@@ -205,21 +181,22 @@ describe('Сценарий: задания по реальной симуляц�
 
   it('дедлайны идут по единому игровому времени при любой скорости', () => {
     for (const speed of [1, 4]) {
-      const game = new Game(scenario(42));
+      // Сроки — по игровому времени, жители ни при чём: месяц без их машин.
+      const game = withoutCitizens(new Game(scenario(42)));
       const sc = game.scenario!;
       const o = sc.addObjective(
         { kind: 'passengers', amount: 1_000_000, towns: null },
-        { role: 'contract', phase: null, months: 2, why: 'тест', reward: {}, fail: { money: 5000 } },
+        { role: 'contract', phase: null, months: 1, why: 'тест', reward: {}, fail: { money: 5000 } },
       );
-      expect(o.deadline).toBe(2);
+      expect(o.deadline).toBe(1);
       game.speed = speed;
-      // Чуть меньше двух месяцев игрового времени — задание ещё идёт, сколько бы кадров ни прошло.
-      while (game.time < 2 * MONTH_LENGTH - 1) game.update(0.05);
+      // Чуть меньше месяца игрового времени — задание ещё идёт, сколько бы кадров ни прошло.
+      while (game.time < MONTH_LENGTH - 1) game.update(0.05);
       expect(o.status).toBe('active');
       expect(sc.monthsLeft(o)!).toBeLessThan(0.1);
-      while (game.time < 2 * MONTH_LENGTH + 0.5) game.update(0.05);
+      while (game.time < MONTH_LENGTH + 0.5) game.update(0.05);
       expect(o.status).toBe('failed');
-      expect(o.closedAt).toBe(1);
+      expect(o.closedAt).toBe(0);
       // Штраф — в начале месяца-дедлайна, в его статьях.
       expect(game.ledger.fines).toBe(5000);
     }
@@ -239,7 +216,9 @@ describe('Сценарий: задания по реальной симуляц�
     sc.monthEnd();
     expect(sc.state.status).toBe('lost');
     expect(sc.state.score!.won).toBe(false);
-    expect(sc.state.score!.parts).toHaveLength(6);
+    // Шесть показателей и седьмой — быстрые сроки, если они были у заданий.
+    const fast = sc.state.objectives.some((o) => o.fast !== undefined);
+    expect(sc.state.score!.parts.map((p) => p.id)).toEqual(['objectives', 'contracts', 'deadlines', ...(fast ? ['fast'] : []), 'finance', 'quality', 'region']);
   });
 });
 
@@ -366,8 +345,9 @@ describe('Сценарий: экономические события', { timeou
       // Не больше одного случайного события за месяц.
       expect(sc.state.events.length - before).toBeLessThanOrEqual(1);
     }
+    // Даже когда причины есть всегда, события случаются не каждый месяц.
     expect(fired.length).toBeGreaterThan(3);
-    expect(fired.length).toBeLessThan(80);
+    expect(fired.length).toBeLessThan(120 * 0.8);
     // То же событие с тем же предприятием — не чаще, чем раз в EVENT_RULES.memory месяцев.
     const last = new Map<string, number>();
     for (const f of fired) {
@@ -385,7 +365,8 @@ describe('Сценарий: экономические события', { timeou
 
 describe('Сценарий: сохранение', { timeout: 120_000 }, () => {
   it('сохранение и загрузка не сбрасывают задания, прогресс, сроки, эффекты, историю и генератор', () => {
-    const game = new Game(scenario(42));
+    // Состояние сценария от машин жителей не зависит: полмесяца — без них.
+    const game = withoutCitizens(new Game(scenario(42)));
     const sc = game.scenario!;
     const offer = sc.offers[0];
     expect(offer).toBeTruthy();
@@ -393,7 +374,7 @@ describe('Сценарий: сохранение', { timeout: 120_000 }, () => {
     const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;
     forceEvent(sc, 'expansion', refOf(plant));
     sc.onPassengers(game.towns[0].id, game.towns[1].id, 25, 1.1);
-    runMonths(game, 1.5);
+    runMonths(game, 0.6);
     const save = JSON.parse(JSON.stringify(game.toSave()));
     const loaded = new Game(save.settings, save);
     const a = game.scenario!.toSave();

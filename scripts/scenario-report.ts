@@ -1,11 +1,12 @@
 /**
- * Диагностика сценариев: генерирует много сценариев на разных seed, размерах карт и сложностях и проверяет
- * базовую выполнимость — каждое задание этапов A, B и C (B и C — как если бы этап пропустили на пустой
- * сети) проходит feasibility.assess, а стартового капитала с кредитом хватает на главную цель.
+ * Диагностика сценариев: генерирует много сценариев на разных seed, размерах карт, сложностях и биомах
+ * (по кругу) и проверяет базовую выполнимость — каждое задание этапов A, B и C (B и C — как если бы этап
+ * пропустили на пустой сети) проходит feasibility.assess, а стартового капитала с кредитом хватает на главную цель.
  *
  *   npm run scenarios            — 30 seed
  *   npm run scenarios -- 100     — 100 seed
  *   npm run scenarios -- 20 -v   — с перечнем заданий
+ *   npm run scenarios -- --legacy — старые миры без биома
  *
  * Код выхода 1, если нашлись невыполнимые задания или не хватает денег.
  */
@@ -16,11 +17,14 @@ import { posOf, resolve, routeCost, townById } from '../src/scenario/analysis';
 import { assess } from '../src/scenario/feasibility';
 import type { Scenario } from '../src/scenario/manager';
 import type { ArchetypeId, Difficulty, Objective } from '../src/scenario/types';
+import { BIOME_LIST } from '../src/world/biomes';
 import { DEFAULT_SETTINGS, MapSize } from '../src/world/settings';
 
 const args = process.argv.slice(2);
 const count = Number(args.find((a) => /^\d+$/.test(a)) ?? 30);
 const verbose = args.includes('-v');
+/** --legacy — старые миры без биома (средняя полоса до биомов); иначе биомы по кругу. */
+const legacy = args.includes('--legacy');
 const sizes: MapSize[] = ['small', 'medium', 'large'];
 const difficulties: Difficulty[] = ['easy', 'normal', 'hard'];
 
@@ -31,6 +35,7 @@ interface Problem {
 }
 
 const problems: Problem[] = [];
+const biomes = new Map<string, number>();
 const archetypes = new Map<string, number>();
 const refits = new Map<string, number>();
 const mainKinds = new Map<string, number>();
@@ -75,17 +80,21 @@ for (let i = 0; i < count; i++) {
   const seed = 1000 + i * 7919;
   const size = sizes[i % sizes.length];
   const difficulty = difficulties[Math.floor(i / sizes.length) % difficulties.length];
+  // Биомов пять, размеров три: за 15 seed встречается каждое сочетание биома и размера.
+  const biome = legacy ? undefined : BIOME_LIST[i % BIOME_LIST.length].id;
   const t0 = performance.now();
-  const game = new Game({ ...DEFAULT_SETTINGS, seed, size, scenario: { difficulty, challenge: false } });
+  const game = new Game({ ...DEFAULT_SETTINGS, seed, size, biome, scenario: { difficulty, challenge: false } });
   time += performance.now() - t0;
   const sc = game.scenario!;
   scenarios++;
+  biomes.set(biome ?? 'без биома', (biomes.get(biome ?? 'без биома') ?? 0) + 1);
+  const before = problems.length;
   const planned = game.settings.scenario!.archetype as ArchetypeId;
   archetypes.set(sc.state.archetype, (archetypes.get(sc.state.archetype) ?? 0) + 1);
   if (planned !== sc.state.archetype) refits.set(`${planned} → ${sc.state.archetype}`, (refits.get(`${planned} → ${sc.state.archetype}`) ?? 0) + 1);
   const main = sc.state.objectives.find((o) => o.role === 'main' && o.phase === 0)!;
   mainKinds.set(main.params.kind, (mainKinds.get(main.params.kind) ?? 0) + 1);
-  if (verbose) console.log(`\nseed ${seed} · ${size} · ${difficulty} · ${sc.state.archetype} · капитал $${game.money.toLocaleString('ru-RU')} · кредит $${game.loan.toLocaleString('ru-RU')}`);
+  if (verbose) console.log(`\nseed ${seed} · ${size} · ${biome ?? 'без биома'} · ${difficulty} · ${sc.state.archetype} · капитал $${game.money.toLocaleString('ru-RU')} · кредит $${game.loan.toLocaleString('ru-RU')}`);
   const cost = mainCost(game, main);
   if (cost !== null && cost > game.money + game.loanMax - game.loan) {
     problems.push({ seed, where: 'старт', text: `главная цель стоит ≈$${cost.toLocaleString('ru-RU')}, а денег с кредитом $${(game.money + game.loanMax - game.loan).toLocaleString('ru-RU')}` });
@@ -95,10 +104,12 @@ for (let i = 0; i < count; i++) {
   else problems.push({ seed, where: 'этап B', text: 'не удалось перейти' });
   if (skipPhase(sc)) check(sc, seed, 2);
   else problems.push({ seed, where: 'этап C', text: 'не удалось перейти' });
+  for (const p of problems.slice(before)) p.where = `${biome ?? 'без биома'} · ${size} · ${p.where}`;
 }
 
 const list = (m: Map<string, number>) => [...m].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(', ') || '—';
 console.log(`\nСценариев: ${scenarios}, заданий проверено: ${objectives}, генерация мира со сценарием: ${(time / scenarios).toFixed(0)} мс в среднем`);
+console.log(`Биомы: ${list(biomes)}`);
 console.log(`Архетипы: ${list(archetypes)}`);
 console.log(`Карта не подошла под архетип: ${list(refits)}`);
 console.log(`Главная цель этапа A: ${list(mainKinds)}`);

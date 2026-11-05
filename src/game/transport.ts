@@ -1,7 +1,8 @@
+import { MONTH_SCALE, START_YEAR } from '../config';
 import { clamp } from '../core/math';
-import { add, cubicBezier, dist, dot, norm, scale, sub, type Vec } from '../core/vec';
+import { add, cubicBezier, dist, dot, norm, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { TrainSpec } from '../sim/rail';
-import { KMH_PER_UNIT } from '../world/roadTypes';
+import { KMH_PER_UNIT, LANE_W } from '../world/roadTypes';
 import type { VehicleSpec } from '../sim/vehicle';
 import type { CargoType } from '../world/cargo';
 import type { PassengerGroup } from '../world/entities';
@@ -31,7 +32,17 @@ interface ModelBase {
   running: number;
   /** С какого года модель продаётся. */
   year: number;
+  /** Ступень модели: 1 — с начала игры, 2 и 3 — новее. В сценарии ступени открывают этапы B и C. */
+  tier: ModelTier;
 }
+
+export type ModelTier = 1 | 2 | 3;
+
+/**
+ * Год выхода модели в игре по году её эпохи: месяц длится втрое дольше прежнего (MONTH_SCALE), поэтому
+ * отрезок от начала игры сжат во столько же раз — новые модели выходят через то же реальное время, что раньше.
+ */
+const era = (year: number) => START_YEAR + Math.round((year - START_YEAR) / MONTH_SCALE);
 
 export interface RoadModel extends ModelBase {
   mode: 'road';
@@ -57,9 +68,10 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     carries: 'freight',
     capacity: 16,
     price: 22_000,
-    running: 1_100,
-    year: 1960,
-    spec: { kind: 'truck', length: 11, width: 4.6, maxSpeed: 41, accel: 6, color: '#e07b39' },
+    running: 1_100 * MONTH_SCALE,
+    year: START_YEAR,
+    tier: 1,
+    spec: { kind: 'truck', body: 'van', length: 11, width: 4.6, maxSpeed: 41, accel: 6, color: '#e07b39' },
   },
   truck2: {
     id: 'truck2',
@@ -68,9 +80,11 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     carries: 'freight',
     capacity: 24,
     price: 32_000,
-    running: 1_400,
-    year: 1972,
-    spec: { kind: 'truck', length: 12.5, width: 4.8, maxSpeed: 41, accel: 6.5, color: '#e07b39' },
+    running: 1_400 * MONTH_SCALE,
+    year: era(1972),
+    tier: 2,
+    // Тягач с полуприцепом: на поворотах гнётся в седле (sim/body).
+    spec: { kind: 'truck', body: 'semi', length: 12.5, width: 4.8, maxSpeed: 41, accel: 6.5, color: '#e07b39' },
   },
   truck3: {
     id: 'truck3',
@@ -79,9 +93,10 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     carries: 'freight',
     capacity: 36,
     price: 48_000,
-    running: 1_900,
-    year: 1986,
-    spec: { kind: 'truck', length: 16, width: 5, maxSpeed: 41, accel: 6, color: '#e07b39' },
+    running: 1_900 * MONTH_SCALE,
+    year: era(1986),
+    tier: 3,
+    spec: { kind: 'truck', body: 'longSemi', length: 18, width: 5, maxSpeed: 41, accel: 6, color: '#e07b39' },
   },
   bus: {
     id: 'bus',
@@ -90,9 +105,10 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     carries: 'passengers',
     capacity: 30,
     price: 26_000,
-    running: 1_300,
-    year: 1960,
-    spec: { kind: 'bus', length: 12, width: 4.8, maxSpeed: 45, accel: 6, color: '#3b7dd8' },
+    running: 1_300 * MONTH_SCALE,
+    year: START_YEAR,
+    tier: 1,
+    spec: { kind: 'bus', body: 'microbus', length: 10.5, width: 4.6, maxSpeed: 45, accel: 6, color: '#3b7dd8' },
   },
   bus2: {
     id: 'bus2',
@@ -101,20 +117,23 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     carries: 'passengers',
     capacity: 40,
     price: 34_000,
-    running: 1_500,
-    year: 1974,
-    spec: { kind: 'bus', length: 12.5, width: 4.8, maxSpeed: 45, accel: 6.5, color: '#3b7dd8' },
+    running: 1_500 * MONTH_SCALE,
+    year: era(1974),
+    tier: 2,
+    spec: { kind: 'bus', body: 'cityBus', length: 14, width: 4.8, maxSpeed: 45, accel: 6.5, color: '#3b7dd8' },
   },
   bus3: {
     id: 'bus3',
     mode: 'road',
-    name: 'Сочленённый автобус',
+    name: 'Автобус III',
     carries: 'passengers',
     capacity: 60,
     price: 50_000,
-    running: 2_000,
-    year: 1988,
-    spec: { kind: 'bus', length: 18, width: 4.8, maxSpeed: 45, accel: 5.5, color: '#3b7dd8' },
+    running: 2_000 * MONTH_SCALE,
+    year: era(1988),
+    tier: 3,
+    // Сочленённый: две секции с гармошкой, гнётся посередине (sim/body).
+    spec: { kind: 'bus', body: 'articBus', length: 18, width: 4.8, maxSpeed: 45, accel: 5.5, color: '#3b7dd8' },
   },
   freightTrain: {
     id: 'freightTrain',
@@ -123,8 +142,9 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     carries: 'freight',
     capacity: 120,
     price: 240_000,
-    running: 8_000,
-    year: 1960,
+    running: 8_000 * MONTH_SCALE,
+    year: START_YEAR,
+    tier: 1,
     // 100 км/ч — быстрее грузовиков, но медленнее пассажирского.
     train: { kind: 'freight', cars: 6, carLength: 17, maxSpeed: 100 / KMH_PER_UNIT, accel: 2.2, brake: 3.5 },
   },
@@ -135,8 +155,9 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     carries: 'freight',
     capacity: 180,
     price: 320_000,
-    running: 10_000,
-    year: 1978,
+    running: 10_000 * MONTH_SCALE,
+    year: era(1978),
+    tier: 2,
     train: { kind: 'freight', cars: 8, carLength: 17, maxSpeed: 110 / KMH_PER_UNIT, accel: 2.4, brake: 3.5 },
   },
   passengerTrain: {
@@ -146,8 +167,9 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     carries: 'passengers',
     capacity: 180,
     price: 260_000,
-    running: 8_500,
-    year: 1960,
+    running: 8_500 * MONTH_SCALE,
+    year: START_YEAR,
+    tier: 1,
     train: { kind: 'passenger', cars: 5, carLength: 20, maxSpeed: 120 / KMH_PER_UNIT, accel: 2.6, brake: 4 },
   },
   passengerTrain2: {
@@ -157,22 +179,28 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     carries: 'passengers',
     capacity: 240,
     price: 360_000,
-    running: 11_000,
-    year: 1982,
+    running: 11_000 * MONTH_SCALE,
+    year: era(1982),
+    tier: 3,
     train: { kind: 'passenger', cars: 6, carLength: 20, maxSpeed: 120 / KMH_PER_UNIT, accel: 3.2, brake: 4.5 },
   },
 };
 
-/** Модели для линии этого вида, которые уже продаются в этом году. */
-export const modelsFor = (mode: LineMode, year = Infinity): ModelId[] =>
-  (Object.keys(MODELS) as ModelId[]).filter((id) => MODELS[id].mode === mode && MODELS[id].year <= year);
+/** Продаётся ли модель: открыта (см. Game.modelOpen) или — числом — вышла к этому году. */
+export type ModelOpen = number | ((id: ModelId) => boolean);
 
-/** Самая новая модель того же вида и назначения, доступная в этом году. */
-export function newestLike(model: ModelId, year: number): ModelId {
+const isOpen = (id: ModelId, open: ModelOpen) => (typeof open === 'number' ? MODELS[id].year <= open : open(id));
+
+/** Модели для линии этого вида, которые уже продаются. */
+export const modelsFor = (mode: LineMode, open: ModelOpen = Infinity): ModelId[] =>
+  (Object.keys(MODELS) as ModelId[]).filter((id) => MODELS[id].mode === mode && isOpen(id, open));
+
+/** Самая новая модель того же вида и назначения из тех, что продаются. */
+export function newestLike(model: ModelId, open: ModelOpen): ModelId {
   const m = MODELS[model];
-  return modelsFor(m.mode, year)
+  return modelsFor(m.mode, open)
     .filter((id) => MODELS[id].carries === m.carries)
-    .sort((a, b) => MODELS[b].year - MODELS[a].year)[0];
+    .sort((a, b) => MODELS[b].tier - MODELS[a].tier || MODELS[b].year - MODELS[a].year)[0];
 }
 
 export const LINE_COLORS = ['#e5534b', '#4a8fe7', '#3fae6a', '#e9b52f', '#9a6be0', '#2fb8b3', '#e07b39', '#d45d9a'];
@@ -208,6 +236,11 @@ export interface Line {
   /** Правила остановок, по индексу в stops; нет — по умолчанию. */
   rules?: (StopRule | null)[];
   vehicles: number[];
+  /**
+   * Когда маршрут создан, в месяцах игры с долей (9.5 — середина десятого месяца; в старых сохранениях — целый
+   * номер месяца или нет вовсе): по нему сценарий узнаёт маршруты, построенные с начала этапа.
+   */
+  created?: number;
   revenueMonth: number;
   revenueLast: number;
   revenueTotal: number;
@@ -228,6 +261,8 @@ export interface Line {
   auto?: LineAuto;
   /** Время круга (от отправления с первой станции до следующего), секунд, — среднее по рейсам; нет — ещё не измерено. */
   lap?: number;
+  /** Интервал между отправлениями выключен игроком: машины уезжают с первой станции, как только готовы. */
+  noSpacing?: boolean;
   /** Когда машина линии последний раз отправилась с первой станции (игровое время). */
   departedAt?: number;
   /**
@@ -246,6 +281,7 @@ export interface Line {
 /** Авто-парк линии. */
 export interface LineAuto {
   on: boolean;
+  /** Не меньше стольких машин; 0 — может убрать с линии все, пока они не нужны. */
   min: number;
   max: number;
   /** Окон подряд машины ездят полупустыми. */
@@ -259,8 +295,10 @@ export interface LineAuto {
 /**
  * Пороги авто-парка: докупаем, если с самой загруженной станции машины уходят почти полными, а груза
  * остаётся ждать хотя бы на полмашины; продаём, если несколько окон подряд уходят полупустыми.
+ * Линии без машин (минимум 0) возвращаем машину, когда за круг набралось бы хотя бы на wake машины —
+ * выше порога продажи, чтобы не покупать и не продавать её по кругу.
  */
-export const AUTO_FLEET = { maxVehicles: 50, full: 0.8, leftBehind: 0.5, low: 0.4, lowWindows: 2 };
+export const AUTO_FLEET = { maxVehicles: 50, defaultMax: 10, full: 0.8, leftBehind: 0.5, low: 0.4, lowWindows: 2, wake: 0.6 };
 
 /** Папка для группировки линий в списке. */
 export interface LineFolder {
@@ -319,6 +357,8 @@ export interface FleetVehicle {
   /** Ждёт интервала на первой станции: с какого и до какого игрового времени. */
   holdFrom?: number;
   holdUntil?: number;
+  /** Игрок велел отправиться немедленно, не дожидаясь интервала; одноразовый флаг. */
+  releaseHold?: boolean;
 }
 
 /** Откуда машина заезжает на пост: нос и курс там, где она сошла с дороги, её скорость и сколько секунд уже едет. */
@@ -341,6 +381,15 @@ function bayX(fp: Footprint, bays: number, bay: number): number {
   return -fp.w / 2 + 5 + bay * bw + (bw - 2) / 2;
 }
 
+/** Бокс поста bay на рисунке автостанции: от середины здания до ворот (front — см. bayFront). */
+export function bayBox(fp: Footprint, bays: number, bay: number, front: 1 | -1 = 1): Footprint {
+  const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+  const n = { x: -u.y * front, y: u.x * front };
+  const hh = fp.h / 2;
+  const w = (fp.w - 10) / bays - 2;
+  return { center: add(fp.center, add(scale(u, bayX(fp, bays, bay)), scale(n, (hh - 1) / 2))), w, h: hh + 1, angle: fp.angle };
+}
+
 /**
  * С какой стороны площадки ворота постов — там, где узел выезда gate: +1 — локальная +y
  * (автостанция у дороги), −1 — локальная −y (грузовой двор у предприятия повёрнут наоборот).
@@ -359,6 +408,19 @@ export function bayPose(fp: Footprint, bays: number, bay: number, length: number
   const n = { x: -u.y * front, y: u.x * front };
   const y = clamp(fp.h / 2 - length - 0.5, -fp.h / 2 + 1, -1);
   return { pos: add(fp.center, add(scale(u, bayX(fp, bays, bay)), scale(n, y))), dir: scale(n, -1) };
+}
+
+/**
+ * Место i-го из count автобусов на посадке у остановки: вдоль бордюра, в крайней полосе улицы
+ * (она — в сторону узла road), носом по ходу (остановка справа). Нет узла — улица с локальной +y.
+ */
+export function stopBerth(fp: Footprint, road: Vec | undefined, i: number, count: number): Pose {
+  const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+  const toRoad = road ? sub(road, fp.center) : { x: -u.y, y: u.x };
+  const l = Math.hypot(toRoad.x, toRoad.y) || 1;
+  const n = { x: toRoad.x / l, y: toRoad.y / l };
+  const along = (i - (count - 1) / 2) * 14;
+  return { pos: add(add(fp.center, scale(u, along)), scale(n, fp.h / 2 + 2 + LANE_W / 2)), dir: dot(rightNormal(u), n) < 0 ? u : scale(u, -1) };
 }
 
 /** Свободный пост, ближайший к точке p: машина сворачивает к ближнему. Свободных нет — следующий номер за последним. */

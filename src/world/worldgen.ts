@@ -3,7 +3,8 @@ import type { Rng } from '../core/rng';
 import { add, angleOf, dist, dot, lerp, norm, scale, sub, Vec } from '../core/vec';
 import { edgesAt } from '../lanes/geometry';
 import { Corridor, LaneNet, LaneNode, LaneSlot, twoWay } from '../lanes/model';
-import { CargoType, INDUSTRY_LIST, TOWN_CARGO } from './cargo';
+import { biomeOf, industryShare, townCargo } from './biomes';
+import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST, IndustryKind } from './cargo';
 import type { Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
@@ -46,6 +47,120 @@ const BLOCK_COLORS: [string, string][] = [
   ['#e4dccf', '#8c7d70'],
   ['#d9d2c6', '#6f6a66'],
 ];
+
+/** Предприятия хотят относительно ровное место (уклон рельефа, м/м); города — см. townSites. */
+const FLAT_SLOPE = 0.18;
+/** Шахты, рудники и карьеры тяготеют к склонам холмов. */
+const MINING_KINDS = new Set<IndustryKind>(['coalmine', 'ironmine', 'quarry', 'gemmine', 'coppermine', 'goldmine']);
+const HILL_SLOPE = 0.035;
+
+/** Рыбаки — на берегу (до воды не дальше стольких единиц от края участка); остальным «у воды» — до SHORE_FAR. */
+const SHORE_NEAR = 120;
+const SHORE_FAR = 450;
+/** После стольких попыток место у воды не требуется: на сухой карте предприятие всё равно встанет. */
+const SHORE_ATTEMPTS = 90;
+
+/**
+ * Предприятию нужно место у воды (рыбаки — всегда, в биоме — его виды «у воды»): берег не дальше reach
+ * от края участка. Без требования — всегда да.
+ */
+function shoreFits(terrain: Terrain, fp: Footprint, attempt: number, nearWater: ReadonlySet<IndustryKind>, kind: IndustryKind): boolean {
+  if (attempt >= SHORE_ATTEMPTS) return true;
+  if (kind === 'fishery') return terrain.isWater(fp.center, footprintRadius(fp) + SHORE_NEAR);
+  return !nearWater.has(kind) || terrain.isWater(fp.center, footprintRadius(fp) + SHORE_FAR);
+}
+
+/** Попыток найти место предприятию; у мира с биомом после обычных — ещё, с меньшим зазором до соседей. */
+const NORMAL_ATTEMPTS = 120;
+const RELAXED_ATTEMPTS = 200;
+const RELAXED_GAP = 360;
+/** Сверх 160 попыток мира под сценарий. */
+const PROFILED_EXTRA = 80;
+
+/** Сколько предприятий вида поставить: по множителю биома (0 — ни одного), но если вид есть — хотя бы одно. */
+function industryCount(settings: WorldSettings, kind: IndustryKind, base: number): number {
+  const share = industryShare(settings, kind);
+  return share > 0 ? Math.max(1, Math.round(base * share)) : 0;
+}
+
+/** Место для завода — ровное; для шахты, рудника, карьера — на склоне холма.
+ *  Без рельефа (старые миры) slopeAt всюду 0 и это условие ничего не отсеивает. Порог мягко
+ *  растёт (для равнинных) или падает (для холмистых) с номером попытки — на крутом мире место
+ *  всё равно найдётся. */
+function terrainFits(terrain: Terrain, p: Vec, attempt: number, mining = false): boolean {
+  if (!terrain.hasRelief) return true;
+  const slope = terrain.slopeAt(p);
+  return mining ? slope >= HILL_SLOPE * Math.max(0, 1 - attempt / 100) : slope <= FLAT_SLOPE * (1 + attempt / 50);
+}
+
+/** Сколько подходящих мест под город сравнить по рельефу, прежде чем выбрать самое ровное. */
+const TOWN_SITE_POOL = 6;
+
+/**
+ * Перепад высот под городом радиуса r с центром c, м, и средняя высота: центр и три кольца по 12 точек.
+ * Уклон в одной точке тут не годится — на макушке горы он нулевой.
+ */
+export function townRelief(terrain: Terrain, c: Vec, r: number): { spread: number; mean: number } {
+  let lo = Infinity;
+  let hi = -Infinity;
+  let sum = 0;
+  let n = 0;
+  for (const f of [0, 1 / 3, 2 / 3, 1]) {
+    for (let k = 0; k < (f ? 12 : 1); k++) {
+      const a = (k / 12) * Math.PI * 2;
+      const h = terrain.heightAt({ x: c.x + Math.cos(a) * r * f, y: c.y + Math.sin(a) * r * f });
+      lo = Math.min(lo, h);
+      hi = Math.max(hi, h);
+      sum += h;
+      n++;
+    }
+  }
+  return { spread: hi - lo, mean: sum / n };
+}
+
+/**
+ * Места под город по очереди попыток; propose(attempt) — точка, годная по воде и соседям, или null.
+ * Без рельефа — каждое место сразу (как было). С рельефом — копим TOWN_SITE_POOL мест и отдаём их от самого
+ * ровного по всей площади города (townRelief) к самому неровному: город встаёт в долину или на плато, а не на склон
+ * или вершину.
+ */
+export function* townSites(terrain: Terrain, reach: number, attempts: number, propose: (attempt: number) => Vec | null): Generator<Vec> {
+  let pool: { c: Vec; spread: number }[] = [];
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const c = propose(attempt);
+    if (c && !terrain.hasRelief) yield c;
+    else if (c) pool.push({ c, spread: townRelief(terrain, c, reach).spread });
+    if (pool.length && (pool.length >= TOWN_SITE_POOL || attempt === attempts - 1)) {
+      pool.sort((a, b) => a.spread - b.spread);
+      for (const s of pool) yield s.c;
+      pool = [];
+    }
+  }
+}
+
+/** Какую долю перепада высот под городом срезает площадка: остальное — рельеф, по которому идут улицы. */
+const TOWN_LEVEL = 0.7;
+
+/**
+ * Площадка под город: земля под улицами плавно тянется к средней высоте (на TOWN_LEVEL), за городом кисть
+ * сходит на нет — склоны становятся пологими, но холмы остаются. Правка пишется в правки рельефа, и
+ * сохранение (рельеф в нём строится заново по seed) восстанавливает её вместе с городом.
+ */
+function levelTown(terrain: Terrain, town: Town): void {
+  if (!terrain.hasRelief) return;
+  const r = town.radius * 1.3 + 100;
+  const { mean } = townRelief(terrain, town.center, town.radius);
+  terrain.terraform({
+    x: town.center.x,
+    y: town.center.y,
+    r,
+    mode: 'flatten',
+    amount: TOWN_LEVEL * 2,
+    target: Math.max(mean, terrain.waterLevel + 1),
+    pad: town.radius / r,
+  });
+}
+
 const COM_COLORS: [string, string][] = [
   ['#d5dde5', '#7d8a99'],
   ['#c9d3dc', '#5f6f80'],
@@ -69,6 +184,8 @@ export interface WorldContext {
   nextId: () => number;
   /** Ж/д пути: на них (кроме тоннелей) город не строит. */
   rail?: Network;
+  /** Выезды автостанций: они шоссе, но город застраивается у них, как у улиц, — не магистраль. */
+  driveways?: ReadonlySet<number>;
 }
 
 /** Полуширина асфальта полотна в точке s (по большей стороне). */
@@ -93,13 +210,16 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   const gap = settings.size === 'small' ? 600 : 900;
   for (const size of townSizes(settings.towns)) {
     const reach = (size + 1.5) * 110;
-    for (let attempt = 0; attempt < 80; attempt++) {
+    const propose = () => {
       const c = {
         x: ctx.rng.range(reach + 300, ctx.terrain.width - reach - 300),
         y: ctx.rng.range(reach + 300, ctx.terrain.height - reach - 300),
       };
-      if (ctx.terrain.isWater(c, 200)) continue;
-      if (towns.some((t) => dist(t.center, c) < t.radius + reach + gap)) continue;
+      if (ctx.terrain.isWater(c, 200)) return null;
+      if (towns.some((t) => dist(t.center, c) < t.radius + reach + gap)) return null;
+      return c;
+    };
+    for (const c of townSites(ctx.terrain, reach, 80, propose)) {
       const name = names.splice(ctx.rng.int(0, names.length), 1)[0];
       const style: TownStyle =
         size === 3
@@ -115,8 +235,9 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
       names.push(name);
     }
   }
-  assignDemands(towns, ctx.rng);
-  const industries = placeIndustries(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings));
+  assignDemands(towns, ctx.rng, townCargo(settings));
+  const placed = placeIndustries(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), settings);
+  const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   // Места для городов и предприятий выбраны по всем улицам; дальше радиус города — по плотной застройке.
   for (const t of towns) measureTown(t);
   return { towns, industries };
@@ -145,7 +266,7 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
   const spread = Math.max(W, H) * (1 - profile.cluster) + 1600 * profile.cluster;
   for (const size of townSizes(settings.towns, profile)) {
     const reach = (size + 1.5) * 110;
-    for (let attempt = 0; attempt < 120; attempt++) {
+    const propose = (attempt: number) => {
       const free = attempt >= 80 || profile.cluster <= 0;
       const a = rng.range(0, Math.PI * 2);
       const r = rng.range(0, spread * (1 + attempt / 40));
@@ -153,8 +274,11 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
         ? { x: rng.range(reach + 300, W - reach - 300), y: rng.range(reach + 300, H - reach - 300) }
         : { x: focus.x + Math.cos(a) * r, y: focus.y + Math.sin(a) * r };
       const c = { x: Math.max(reach + 300, Math.min(W - reach - 300, raw.x)), y: Math.max(reach + 300, Math.min(H - reach - 300, raw.y)) };
-      if (terrain.isWater(c, 200)) continue;
-      if (towns.some((t) => dist(t.center, c) < t.radius + reach + profile.gap)) continue;
+      if (terrain.isWater(c, 200)) return null;
+      if (towns.some((t) => dist(t.center, c) < t.radius + reach + profile.gap)) return null;
+      return c;
+    };
+    for (const c of townSites(terrain, reach, 120, propose)) {
       const name = names.splice(rng.int(0, names.length), 1)[0];
       const style: TownStyle =
         size === 3 ? 'radial' : size === 2 ? rng.pick(['radial', 'organic', 'organic', 'organic'] as const) : rng.pick(['linear', 'linear', 'organic'] as const);
@@ -166,8 +290,9 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
       names.push(name);
     }
   }
-  assignDemands(towns, rng);
-  const industries = placeProfiled(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), profile);
+  assignDemands(towns, rng, townCargo(settings));
+  const placed = placeProfiled(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), profile, settings);
+  const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   for (const t of towns) measureTown(t);
   return { towns, industries };
 }
@@ -176,14 +301,15 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
  * Предприятия по профилю: сырьевые — первыми; заводу из нескольких подходящих мест достаётся ближайшее
  * к поставщикам (affinity), а при тяге к узлу (hub) места ищутся вокруг крупнейшего города.
  */
-function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profile: WorldProfile): Industry[] {
+function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profile: WorldProfile, settings: WorldSettings): Industry[] {
   const { rng, terrain, index } = ctx;
   const result: Industry[] = [];
   const hub = [...towns].sort((a, b) => b.population - a.population)[0];
   const hubSpread = Math.max(terrain.width, terrain.height) * (1 - profile.hub) + 2400 * profile.hub;
+  const nearWater = new Set(biomeOf(settings).nearWater);
   for (const info of INDUSTRY_LIST) {
     const plant = info.accepts.length > 0;
-    const count = Math.max(1, Math.round(info.count * density * (plant ? profile.plants : profile.raw)));
+    const count = industryCount(settings, info.kind, info.count * density * (plant ? profile.plants : profile.raw));
     // Сколько подходящих мест сравнить: у завода с тягой к поставщикам — несколько.
     const choices = plant ? 1 + Math.round(profile.affinity * 6) : 1;
     const supplierDist = (p: Vec) =>
@@ -193,7 +319,10 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
       }, 0);
     for (let n = 0; n < count; n++) {
       const found: { fp: Footprint; score: number }[] = [];
-      for (let attempt = 0; attempt < 160 && found.length < choices; attempt++) {
+      // Мир с биомом: ни одного места за обычные попытки — ещё PROFILED_EXTRA попыток с меньшим зазором и на любом склоне.
+      const more = (attempt: number) => attempt < 160 || (!!settings.biome && !found.length && attempt < 160 + PROFILED_EXTRA);
+      for (let attempt = 0; more(attempt) && found.length < choices; attempt++) {
+        const relaxed = attempt >= 160;
         let center = { x: rng.range(300, terrain.width - 300), y: rng.range(300, terrain.height - 300) };
         if (hub && profile.hub > 0 && attempt < 110) {
           const a = rng.range(0, Math.PI * 2);
@@ -203,8 +332,10 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
         }
         const fp: Footprint = { center, w: info.w, h: info.h, angle: rng.range(-0.6, 0.6) };
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
+        if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;
+        if (!relaxed && !terrainFits(terrain, center, attempt, MINING_KINDS.has(info.kind))) continue;
         if (towns.some((t) => dist(t.center, center) < t.radius + 280)) continue;
-        if (result.some((i) => dist(i.fp.center, center) < 520)) continue;
+        if (result.some((i) => dist(i.fp.center, center) < (relaxed ? RELAXED_GAP : 520))) continue;
         if (found.some((f) => dist(f.fp.center, center) < 520)) continue;
         if (index.overlaps(fp, 20)) continue;
         found.push({ fp, score: plant ? supplierDist(center) : 0 });
@@ -232,15 +363,79 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
   return result;
 }
 
-/** Раздаёт городам потребности так, чтобы каждый груз был нужен хотя бы одному городу. */
-function assignDemands(towns: Town[], rng: Rng): void {
-  const used = new Map<CargoType, number>(TOWN_CARGO.map((c) => [c, 0]));
+/**
+ * Раздаёт городам потребности так, чтобы каждый груз был нужен хотя бы одному городу. Набор — по биому:
+ * просят только то, что в нём можно произвести.
+ */
+function assignDemands(towns: Town[], rng: Rng, cargo: { base: CargoType[]; extra: CargoType[] } = { base: BASE_TOWN_CARGO, extra: EXTRA_TOWN_CARGO }): void {
+  const used = new Map<CargoType, number>(cargo.base.map((c) => [c, 0]));
   const order = [...towns].sort((a, b) => b.population - a.population);
   for (const t of order) {
     const count = t.population > 2000 ? 3 : 2;
-    const pool = [...TOWN_CARGO].sort((a, b) => used.get(a)! - used.get(b)! + rng.range(-0.5, 0.5));
+    const pool = [...cargo.base].sort((a, b) => used.get(a)! - used.get(b)! + rng.range(-0.5, 0.5));
     t.demands = pool.slice(0, count);
     for (const c of t.demands) used.set(c, used.get(c)! + 1);
+  }
+  assignExtraDemands(towns, cargo.extra);
+}
+
+/** Груз можно получить на карте: его делает предприятие, всё сырьё которого тоже можно получить. */
+function makeable(industries: Industry[], cargo: CargoType, seen: ReadonlySet<CargoType> = new Set()): boolean {
+  if (seen.has(cargo)) return false;
+  const next = new Set(seen).add(cargo);
+  return industries.some((i) => i.info.produces === cargo && i.info.accepts.every((c) => makeable(industries, c, next)));
+}
+
+/**
+ * Города не просят то, чего на карте не сделать: если завод цепочки не нашёл места (тесная карта, мало
+ * предприятий), потребность в его продукции снимается. Только для миров с биомом — старые миры прежние.
+ */
+function pruneDemands(towns: Town[], industries: Industry[]): void {
+  const ok = new Map<CargoType, boolean>();
+  const can = (c: CargoType) => ok.get(c) ?? ok.set(c, makeable(industries, c)).get(c)!;
+  for (const t of towns) t.demands = t.demands.filter(can);
+}
+
+/**
+ * Цепочки мира с биомом без тупиков: города не просят того, чего не сделать, а предприятие, которому
+ * не привезти сырья или некуда сбыть продукцию (завод следующего звена не встал), убирается с карты.
+ * Повторяем, пока что-то меняется: убранный завод может оставить без сбыта своих поставщиков.
+ */
+function settleChains(ctx: WorldContext, towns: Town[], industries: Industry[]): Industry[] {
+  let list = industries;
+  for (;;) {
+    pruneDemands(towns, list);
+    const wanted = new Set<CargoType>(towns.flatMap((t) => t.demands));
+    for (const i of list) for (const c of i.info.accepts) wanted.add(c);
+    const keep = list.filter((i) => wanted.has(i.info.produces) && i.info.accepts.every((c) => makeable(list, c)));
+    if (keep.length === list.length) return list;
+    for (const i of list) if (!keep.includes(i)) ctx.index.remove(i);
+    list = keep;
+  }
+}
+
+/** Сколько жителей нужно городу, чтобы он просил ещё и продукцию новых цепочек (стекло, мебель). */
+export const EXTRA_DEMAND_POPULATION = 4000;
+
+/**
+ * Города покрупнее просят ещё одно из EXTRA_TOWN_CARGO — поровну между грузами; каждый такой груз нужен
+ * хотя бы одному городу. Без случайных чисел: основные потребности и предприятия мира по seed не меняются.
+ */
+export function assignExtraDemands(towns: Town[], extra: CargoType[] = EXTRA_TOWN_CARGO): void {
+  if (!extra.length) return;
+  const used = new Map<CargoType, number>(extra.map((c) => [c, 0]));
+  const order = [...towns].sort((a, b) => b.population - a.population);
+  const add = (t: Town, c: CargoType) => {
+    t.demands = [...t.demands, c];
+    used.set(c, used.get(c)! + 1);
+  };
+  for (const t of order) {
+    if (t.population <= EXTRA_DEMAND_POPULATION) continue;
+    add(t, [...extra].sort((a, b) => used.get(a)! - used.get(b)!)[0]);
+  }
+  for (const c of extra) {
+    const t = used.get(c) ? null : order.find((x) => !x.demands.includes(c));
+    if (t) add(t, c);
   }
 }
 
@@ -525,6 +720,7 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
   placeLandmark(ctx, town);
   for (const s of alive) fillStreet(ctx, town, s, style === 'linear' ? 0.75 : 0.88);
   recountPopulation(town);
+  levelTown(ctx.terrain, town);
   return town;
 }
 
@@ -676,10 +872,13 @@ export const isHighway = (c: Corridor) => isTrunk(c.cls) || (c.cls !== 'street' 
 /** Сколько свободного места оставляют дома до магистрали или съезда. */
 const HIGHWAY_BUFFER = 50;
 
+/** Магистраль для города: выезды станций (driveways) — не в счёт, хоть они и шоссе. */
+const townHighway = (c: Corridor, driveways?: ReadonlySet<number>) => isHighway(c) && !driveways?.has(c.id);
+
 /** Полотно — часть развязки или магистрали: само магистральное или примыкает к ней в узле. */
-export function nearHighway(roads: LaneNet, seg: Corridor): boolean {
-  if (isHighway(seg)) return true;
-  return [seg.a, seg.b].some((id) => roads.node(id).corridors.some((sid) => isHighway(roads.corridor(sid))));
+export function nearHighway(roads: LaneNet, seg: Corridor, driveways?: ReadonlySet<number>): boolean {
+  if (townHighway(seg, driveways)) return true;
+  return [seg.a, seg.b].some((id) => roads.node(id).corridors.some((sid) => townHighway(roads.corridor(sid), driveways)));
 }
 
 /** Сколько свободного места оставляют дома до насыпи путей. */
@@ -724,7 +923,7 @@ export function placeable(ctx: WorldContext, fp: Footprint, ownSeg: number): boo
     const hit = seg.lut.closest(fp.center);
     const hw = halfAtS(seg, hit.s);
     if (hit.d < hw + r - 3) return false;
-    if (isHighway(seg) && hit.d < hw + r + HIGHWAY_BUFFER) return false;
+    if (townHighway(seg, ctx.driveways) && hit.d < hw + r + HIGHWAY_BUFFER) return false;
   }
   if (roads.nodesNear(fp.center, r + 12).length) return false;
   return true;
@@ -768,19 +967,26 @@ export function measureTown(town: Town): void {
   town.extent = Math.max(town.radius, far + 10);
 }
 
-function placeIndustries(ctx: WorldContext, towns: Town[], density: number): Industry[] {
+function placeIndustries(ctx: WorldContext, towns: Town[], density: number, settings: WorldSettings): Industry[] {
   const { rng, terrain, index } = ctx;
   const result: Industry[] = [];
+  const nearWater = new Set(biomeOf(settings).nearWater);
+  // У мира с биомом цепочек меньше и каждое звено на счету: не нашлось места за обычные попытки — ищем ещё,
+  // ближе к соседям и на любом склоне. Старый мир — ровно как раньше (те же попытки и та же раскладка).
+  const attempts = settings.biome ? RELAXED_ATTEMPTS : NORMAL_ATTEMPTS;
   for (const info of INDUSTRY_LIST) {
-    // Каждого типа хотя бы одно, чтобы все цепочки были замкнуты.
-    const count = Math.max(1, Math.round(info.count * density));
+    // Каждого вида биома хотя бы одно, чтобы все цепочки были замкнуты; видов не из биома — ни одного.
+    const count = industryCount(settings, info.kind, info.count * density);
     for (let n = 0; n < count; n++) {
-      for (let attempt = 0; attempt < 120; attempt++) {
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const relaxed = attempt >= NORMAL_ATTEMPTS;
         const center = { x: rng.range(300, terrain.width - 300), y: rng.range(300, terrain.height - 300) };
         const fp: Footprint = { center, w: info.w, h: info.h, angle: rng.range(-0.6, 0.6) };
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
+        if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;
+        if (!relaxed && !terrainFits(terrain, center, attempt, MINING_KINDS.has(info.kind))) continue;
         if (towns.some((t) => dist(t.center, center) < t.radius + 280)) continue;
-        if (result.some((i) => dist(i.fp.center, center) < 520)) continue;
+        if (result.some((i) => dist(i.fp.center, center) < (relaxed ? RELAXED_GAP : 520))) continue;
         if (index.overlaps(fp, 20)) continue;
         const nearest = towns.reduce<Town | null>((best, t) => (!best || dist(t.center, center) < dist(best.center, center) ? t : best), null);
         const industry: Industry = {

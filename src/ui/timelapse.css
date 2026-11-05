@@ -1,0 +1,315 @@
+/* Таймлапс партии: окно поверх игры (и поверх итогов и меню), карта, кнопки и шкала времени. */
+
+.tl-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(30, 40, 30, 0.5);
+  backdrop-filter: blur(2px);
+  color: var(--ink);
+}
+
+.tl-modal {
+  position: relative;
+  background: #fff;
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 14px 20px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+/* У крестика своя подсказка, а [data-tip] делает его relative — возвращаем в угол. */
+.tl-modal .modal-close {
+  position: absolute;
+}
+
+.tl-head {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 34px;
+}
+
+.tl-head h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.tl-rough {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 8px;
+  background: #f1eefa;
+}
+
+.tl-canvas {
+  display: block;
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px rgba(31, 41, 51, 0.12);
+}
+
+.tl-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tl-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 36px;
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 10px;
+  background: #f1f4f7;
+  font-size: 12px;
+  font-weight: 700;
+  flex: none;
+}
+
+.tl-btn:hover {
+  background: #e6ebf0;
+}
+
+.tl-play {
+  width: 42px;
+  color: #fff;
+  background: var(--accent);
+}
+
+.tl-play:hover {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
+
+.tl-speeds {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 12px;
+  background: #f1f4f7;
+  flex: none;
+}
+
+.tl-speeds .tl-btn {
+  min-width: 34px;
+  height: 30px;
+  background: transparent;
+  letter-spacing: -0.05em;
+}
+
+.tl-speeds .tl-btn.active {
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(31, 41, 51, 0.18);
+}
+
+/* Шкала: значки заданий сверху, полоса, этапы и годы снизу. Нажать и тянуть — перемотка. */
+.tl-track {
+  position: relative;
+  flex: 1;
+  min-width: 120px;
+  height: 34px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.tl-track.with-marks {
+  height: 52px;
+}
+
+.tl-track.with-marks.with-bands,
+.tl-track.with-bands {
+  height: 56px;
+}
+
+.tl-rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 12px;
+  height: 8px;
+  border-radius: 4px;
+  background: #e3e8ee;
+  overflow: hidden;
+}
+
+.tl-track.with-marks .tl-rail {
+  top: 26px;
+}
+
+.tl-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  opacity: 0.75;
+}
+
+/* Начало партии по журналу (без дорог) — штриховкой. */
+.tl-zone {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 1;
+  background: repeating-linear-gradient(135deg, rgba(122, 92, 196, 0.35) 0 3px, transparent 3px 6px);
+}
+
+.tl-thumb {
+  position: absolute;
+  top: 6px;
+  width: 4px;
+  height: 20px;
+  margin-left: -2px;
+  border-radius: 2px;
+  background: var(--ink);
+  box-shadow: 0 0 0 2px #fff;
+  pointer-events: none;
+}
+
+.tl-track.with-marks .tl-thumb {
+  top: 20px;
+}
+
+.tl-bands {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 22px;
+  height: 12px;
+}
+
+.tl-track.with-marks .tl-bands {
+  top: 36px;
+}
+
+.tl-band {
+  position: absolute;
+  top: 0;
+  height: 12px;
+  border-radius: 3px;
+  opacity: 0.85;
+  display: flex;
+  align-items: center;
+  padding-left: 3px;
+  box-sizing: border-box;
+  box-shadow: inset -1px 0 0 #fff;
+}
+
+.tl-band b {
+  color: #fff;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.tl-year {
+  position: absolute;
+  top: 13px;
+  transform: translateX(-50%);
+  font-size: 9px;
+  font-style: normal;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.tl-year::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -3px;
+  width: 1px;
+  height: 3px;
+  background: var(--muted);
+}
+
+.tl-marks {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 24px;
+}
+
+.tl-mark {
+  position: absolute;
+  top: 6px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  line-height: 0;
+}
+
+.tl-mark.row1 {
+  top: -8px;
+}
+
+.tl-mark > i {
+  position: absolute;
+  right: -5px;
+  bottom: -3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 11px;
+  text-align: center;
+  color: #fff;
+  background: #2e9d57;
+}
+
+.tl-mark.failed > i,
+.tl-mark.lost > i {
+  background: #e5534b;
+}
+
+.tl-mark > i.tl-lost {
+  position: static;
+  width: 16px;
+  height: 16px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.tl-mark[data-tip]:hover::after {
+  line-height: 1.3;
+}
+
+.tl-video {
+  color: var(--ink);
+}
+
+/* Запись видео: перемотка и скорость недоступны, кнопка — «стоп». */
+.tl-screen.recording .tl-track,
+.tl-screen.recording .tl-speeds,
+.tl-screen.recording .tl-play {
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+.tl-screen.recording .tl-video {
+  background: #fdeceb;
+  animation: tl-rec 1.2s ease-in-out infinite;
+}
+
+@keyframes tl-rec {
+  50% {
+    box-shadow: 0 0 0 4px rgba(229, 83, 75, 0.25);
+  }
+}
+
+/* Пункт меню «Таймлапс партии», когда смотреть нечего: серый, подсказка объясняет почему. */
+.menu-item.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.menu-item.disabled:hover {
+  background: #f1f4f7;
+}

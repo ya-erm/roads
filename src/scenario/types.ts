@@ -22,7 +22,7 @@ export interface Ref {
   id: number;
 }
 
-export type ObjectiveKind = 'deliver' | 'passengers' | 'profit' | 'supply' | 'industry' | 'population' | 'quality' | 'throughput';
+export type ObjectiveKind = 'deliver' | 'passengers' | 'profit' | 'supply' | 'industry' | 'population' | 'quality' | 'throughput' | 'newRoutes' | 'connect';
 
 /** Условия выполнения по типам — всё проверяется по реальному состоянию симуляции. */
 export type ObjectiveParams =
@@ -32,8 +32,11 @@ export type ObjectiveParams =
   | { kind: 'passengers'; amount: number; towns: [number, number] | null }
   /** Операционная прибыль не меньше amount в месяц, months месяцев подряд. */
   | { kind: 'profit'; amount: number; months: number }
-  /** Все потребности города закрыты months месяцев подряд. */
-  | { kind: 'supply'; town: number; months: number }
+  /**
+   * Потребности города закрыты months месяцев подряд: не меньше needs из всех (нет needs — все; так в старых
+   * сохранениях). Закрыта — за месяц привезли не меньше TOWN_NEED.
+   */
+  | { kind: 'supply'; town: number; months: number; needs?: number }
   /** Довести производство предприятия до уровня. */
   | { kind: 'industry'; industry: number; level: number }
   /** Население города не меньше amount. */
@@ -41,10 +44,20 @@ export type ObjectiveParams =
   /** Средняя надбавка за скорость доставки не ниже speed при объёме от volume в месяц, months месяцев подряд. */
   | { kind: 'quality'; speed: number; volume: number; months: number }
   /** Перевозить не меньше amount в месяц при расходах не больше costRatio от выручки, months месяцев подряд. */
-  | { kind: 'throughput'; amount: number; costRatio: number; months: number };
+  | { kind: 'throughput'; amount: number; costRatio: number; months: number }
+  /**
+   * Маршруты, построенные с момента since (месяцы игры с долей — начало этапа), перевозят не меньше amount в месяц,
+   * months месяцев подряд: старая сеть, что растёт сама, не в счёт.
+   */
+  | { kind: 'newRoutes'; amount: number; since: number; months: number }
+  /** Подключить к сети amount новых городов или предприятий: known — те, что были в сети, когда задание появилось. */
+  | { kind: 'connect'; what: 'town' | 'industry'; amount: number; known: number[] };
 
-/** Главная цель этапа, обычная цель этапа или необязательный контракт. */
-export type ObjectiveRole = 'main' | 'goal' | 'contract';
+/**
+ * Главная цель этапа, обычная цель этапа, необязательный контракт или дополнительное задание после победы
+ * (без срока, только деньги — на оценку не влияет).
+ */
+export type ObjectiveRole = 'main' | 'goal' | 'contract' | 'extra';
 export type ObjectiveStatus = 'offered' | 'active' | 'done' | 'failed' | 'declined';
 
 export type EffectKind = 'industry' | 'growth' | 'pax' | 'price';
@@ -108,10 +121,19 @@ export interface Objective {
   started?: number;
   /** Номер месяца, к началу которого задание должно быть выполнено; null — без срока. */
   deadline: number | null;
+  /**
+   * Быстрый срок (необязательный): выполнено до начала этого месяца — надбавка к награде и очки за быстроту.
+   * Только у заданий, где время честно прикидывается по дороге (fastMonths).
+   */
+  fast?: number;
+  /** Выполнено быстрее быстрого срока. */
+  quick?: boolean;
   /** Предложение контракта действует до начала этого месяца. */
   offerUntil?: number;
   /** Сколько месяцев на выполнение после принятия контракта. */
   months?: number;
+  /** Быстрый срок контракта: месяцев после принятия. */
+  fastMonths?: number;
   /** Отметка счётчика на старте: прогресс накопительных заданий — от неё. */
   base: number;
   progress: number;
@@ -132,6 +154,11 @@ export interface Objective {
   retry?: string;
   /** Это восстановительное задание взамен проваленного. */
   retryOf?: string;
+  /**
+   * Свёрнуто ли задание в панели сценария — выбор игрока, сохраняется с партией. Не задано — как принято:
+   * выполненные свёрнуты, остальные развёрнуты (см. `isFolded` в ui/scenarioUi.ts).
+   */
+  folded?: boolean;
 }
 
 export interface EventRecord {
@@ -198,7 +225,7 @@ export interface IndustryWatch {
 }
 
 export interface ScoreLine {
-  id: 'objectives' | 'contracts' | 'deadlines' | 'finance' | 'quality' | 'region';
+  id: 'objectives' | 'contracts' | 'deadlines' | 'fast' | 'finance' | 'quality' | 'region';
   name: string;
   value: number;
   max: number;
@@ -265,4 +292,6 @@ export interface ScenarioState {
   bankrupt: number;
   score?: ScoreResult;
   log: LogEntry[];
+  /** Дополнительные задания после победы уже выданы (в старых сохранениях пройденного сценария — нет). */
+  extras?: boolean;
 }

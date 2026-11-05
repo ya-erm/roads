@@ -2,6 +2,7 @@ import { angleDiff, angleOf, Vec } from '../core/vec';
 import type { Game } from '../game/game';
 import { ARROW_K as K, ARROW_NOSE as NOSE, ARROW_TAIL as TAIL, arrowAt, arrowShape, Turn } from '../lanes/arrowShape';
 import type { GLane, GLink, LaneGraph } from '../lanes/graph';
+import { type JunctionPreview, previewHides } from '../lanes/preview';
 
 export { arrowShape };
 export type { Turn };
@@ -78,10 +79,12 @@ function placeArrow(g: LaneGraph, lane: GLane): { lane: GLane; u: number } | nul
 }
 
 /** Стрелка в мире: середина (для отсечения по экрану) и контуры. */
-interface Mark {
+export interface Mark {
   x: number;
   y: number;
   polys: Vec[][];
+  /** Перекрёсток, перед которым стрелка. */
+  node: number;
 }
 
 /** Граф пересоздаётся при каждой правке сети — по нему и кэш. */
@@ -110,7 +113,7 @@ function marksOf(g: LaneGraph): Mark[] {
         let shape = shapes.get(key);
         if (!shape) shapes.set(key, (shape = arrowShape(turns)));
         const { pos, dir } = g.lanePose(at.lane, at.u);
-        marks.push({ x: pos.x, y: pos.y, polys: arrowAt(shape, pos, dir) });
+        marks.push({ x: pos.x, y: pos.y, polys: arrowAt(shape, pos, dir), node: n.id });
       });
     }
   }
@@ -118,10 +121,27 @@ function marksOf(g: LaneGraph): Mark[] {
   return marks;
 }
 
+/**
+ * Стрелки перед перекрёстками для отрисовки: по графу игры, а в предпросмотре правки (preview) у перекрёстков, что она
+ * меняет, — по графу сети с правкой: стрелки едут вместе со стоп-линиями прямо во время протяжки.
+ */
+export function turnArrowMarks(g: LaneGraph, preview: JunctionPreview | null = null): Mark[] {
+  const marks = marksOf(g);
+  if (!preview) return marks;
+  const mine = preview.graph ? marksOf(preview.graph).filter((m) => preview.nodes.has(m.node)) : [];
+  return [...marks.filter((m) => !previewHides(preview, m.node)), ...mine];
+}
+
 /** Стрелки на асфальте перед перекрёстками — на полосах, с которых можно не во все стороны. */
-export function drawTurnArrows(ctx: CanvasRenderingContext2D, game: Game, view: { x0: number; y0: number; x1: number; y1: number }, zoom: number): void {
+export function drawTurnArrows(
+  ctx: CanvasRenderingContext2D,
+  game: Game,
+  view: { x0: number; y0: number; x1: number; y1: number },
+  zoom: number,
+  preview: JunctionPreview | null = null,
+): void {
   if (zoom < 0.6) return;
-  const marks = marksOf(game.roads.graph);
+  const marks = turnArrowMarks(game.roads.graph, preview);
   if (!marks.length) return;
   ctx.fillStyle = COLOR;
   ctx.beginPath();

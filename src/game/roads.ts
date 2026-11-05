@@ -3,7 +3,9 @@ import { dist } from '../core/vec';
 import { GLane, GLink, GMove, LaneGraph } from '../lanes/graph';
 import { LaneNet, LaneNode } from '../lanes/model';
 import { findLaneRoute, linkCost, transitionCost } from '../lanes/routing';
+import { PROFILE_STEP } from '../lanes/speedProfile';
 import { changePenalty, CURB_PULL, keepRightCost, LaneTraffic, LaneTrafficEvents, LATE_CHANGE } from '../lanes/traffic';
+import type { TrackPiece } from './speedChart';
 
 /** Размер кольца: радиус оси (если примыкающие дороги шире, кольцо будет больше). */
 export type RingSize = 'small' | 'medium' | 'large';
@@ -122,6 +124,50 @@ export class Roads {
   /** Длина маршрута. */
   routeLength(route: number[]): number {
     return route.reduce((sum, id) => sum + (this.graph.links.get(id)?.length ?? 0), 0);
+  }
+
+  /**
+   * Маршрут по участкам с пределом скорости — для графика скорости линии: по полосе — разрешённая и по
+   * изгибам (шагом профиля полосы, с уклоном), на перекрёстке — манёвра. Полоса на связи — самая правая
+   * из тех, откуда можно проехать дальше (грузовики и автобусы держатся правее). null — маршрута нет.
+   */
+  routeTrack(route: number[]): TrackPiece[] | null {
+    const g = this.graph;
+    const links = route.map((id) => g.links.get(id));
+    if (!links.length || links.some((l) => !l)) return null;
+    const pieces: TrackPiece[] = [];
+    const rightmost = <T>(xs: T[], index: (x: T) => number) => xs.reduce((a, b) => (index(b) > index(a) ? b : a));
+    for (let k = 0; k < links.length; k++) {
+      const link = links[k]!;
+      const next = links[k + 1];
+      const moves = next ? link.lanes.flatMap((l) => (g.movesFrom.get(l.id) ?? []).filter((m) => m.outLink === next.id)) : [];
+      const from = moves.length ? link.lanes.filter((l) => moves.some((m) => m.inLane === l.id)) : link.lanes;
+      const lane = rightmost(from, (l) => l.index);
+      const prof = this.traffic.profile(lane);
+      for (let i = 0; i < prof.c.length; i++) {
+        const s0 = i * PROFILE_STEP;
+        const s1 = Math.min(lane.length, s0 + PROFILE_STEP);
+        if (s1 <= s0) break;
+        const c = Math.min(prof.c[i], prof.c[Math.min(prof.c.length - 1, i + 1)]);
+        pieces.push({ length: s1 - s0, cap: Math.min(lane.speed, c), grade: prof.g[i], from: g.lanePose(lane, s0).pos, to: g.lanePose(lane, s1).pos });
+      }
+      const mine = moves.filter((m) => m.inLane === lane.id);
+      const move = mine.length ? rightmost(mine, (m) => g.lanes.get(m.outLane)?.index ?? 0) : null;
+      if (!move || !(move.length > 0)) continue;
+      // Манёвр — по его кривой: отрезками между её точками (длины — в долях длины манёвра).
+      const pts = move.points;
+      let total = 0;
+      for (let i = 1; i < pts.length; i++) total += dist(pts[i - 1], pts[i]);
+      if (pts.length < 2 || total <= 0) {
+        pieces.push({ length: move.length, cap: move.speed, grade: 0 });
+        continue;
+      }
+      for (let i = 1; i < pts.length; i++) {
+        const part = dist(pts[i - 1], pts[i]);
+        if (part > 0) pieces.push({ length: (move.length * part) / total, cap: move.speed, grade: 0, from: pts[i - 1], to: pts[i] });
+      }
+    }
+    return pieces;
   }
 
   /**

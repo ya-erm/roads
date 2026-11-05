@@ -1,4 +1,5 @@
 import type { ScenarioSettings } from '../scenario/types';
+import type { BiomeId } from './biomes';
 
 /** Параметры новой игры. */
 export interface WorldSettings {
@@ -13,6 +14,18 @@ export interface WorldSettings {
    * 1 (нет поля) — реки независимые и могут пересекаться, 2 — притоки впадают в реки.
    */
   terrainVersion?: number;
+  /**
+   * Рельеф местности: равнина, холмы или горы. Нет поля — старое сохранение, рельеф плоский
+   * (высота всюду 0), чтобы старые партии не ломались.
+   */
+  relief?: Relief;
+  /**
+   * Биом: какие предприятия и цепочки на карте, что просят города и как выглядит земля (src/world/biomes.ts).
+   * Нет поля — старое сохранение: средняя полоса с прежним набором предприятий.
+   */
+  biome?: BiomeId;
+  /** Биом выбран «по seed» — следующая партия по этим настройкам тоже выберет его по seed. */
+  biomeBySeed?: boolean;
   /** Режим сценария; нет — песочница. */
   scenario?: ScenarioSettings;
 }
@@ -42,6 +55,14 @@ export const TERRAIN_VERSION = 2;
 export type MapSize = 'small' | 'medium' | 'large';
 export type IndustryDensity = 'few' | 'normal' | 'many';
 export type WaterAmount = 'dry' | 'normal' | 'wet';
+export type Relief = 'plains' | 'hills' | 'mountains';
+
+/** Амплитуда высоты рельефа (м по обе стороны от нуля) и сколько метров между изолиниями. */
+export const RELIEF: Record<Relief, { name: string; amplitude: number; contour: number }> = {
+  plains: { name: 'Равнина', amplitude: 14, contour: 4 },
+  hills: { name: 'Холмы', amplitude: 55, contour: 10 },
+  mountains: { name: 'Горы', amplitude: 150, contour: 20 },
+};
 
 export const MAP_SIZES: Record<MapSize, { name: string; w: number; h: number }> = {
   small: { name: 'Маленькая', w: 6400, h: 4300 },

@@ -1,10 +1,14 @@
+import { buildLaneProfile, gradeFactor, LaneProfile, PROFILE_STEP } from './speedProfile';
 import { IDM, LIGHTS } from '../config';
 import { lerp as lerpNum } from '../core/math';
 import { rightNormal, scale, add, angleDiff, angleOf, dot, type Vec } from '../core/vec';
+import { follow, hitchOf, jointOf, steerBase } from '../sim/body';
 import type { Blinker, Vehicle, VehicleSpec } from '../sim/vehicle';
 import { GLane, GLink, GMove, GNode, LaneGraph } from './graph';
-import { Corridor, layerOf } from './model';
+import { bodyOnEnds, Corridor, layerOf } from './model';
 import { findLaneRoute } from './routing';
+import { onSolid, solidEnds } from './solid';
+import { LANE_W } from '../world/roadTypes';
 
 export interface LaneTrafficEvents {
   /**
@@ -135,6 +139,20 @@ export class LaneTraffic {
   private plans = new WeakMap<Vehicle, { graph: LaneGraph; route: number[]; from: number; plan: LanePlan[] }>();
   /** Поворотник манёвра (см. turnSignal): у нового графа — новые манёвры. */
   private turns = new WeakMap<GMove, Blinker>();
+  /** Рельеф для уклонов: отметка земли (null — плоский мир) и версия правок рельефа. */
+  relief: { ground: () => ((p: Vec) => number) | null; version: () => number } | null = null;
+  /** Профили скорости полос (изгибы и уклоны) — по версии рельефа. */
+  private profiles = new WeakMap<GLane, { ver: number; p: LaneProfile }>();
+
+  /** Профиль полосы: скорость по изгибам с торможением заранее и уклон по ходу. */
+  profile(lane: GLane): LaneProfile {
+    const ver = this.relief?.version() ?? 0;
+    const hit = this.profiles.get(lane);
+    if (hit && hit.ver === ver) return hit.p;
+    const p = buildLaneProfile(this.graph, lane, this.relief?.ground() ?? null);
+    this.profiles.set(lane, { ver, p });
+    return p;
+  }
 
   constructor(
     public graph: LaneGraph,
@@ -560,7 +578,10 @@ export class LaneTraffic {
       }
       const cost = new Map<number, number>();
       // Чем дальше связь, тем чуть труднее перестроиться на ней: «заранее» лучше, чем «в последний момент».
-      for (const l of link.lanes) cost.set(l.id, this.bestLane(link, l, link.length, stay, 1 + LATE_CHANGE * k).cost);
+      // Места для перестроений — без сплошной у её концов (там нельзя).
+      const [head, tail] = solidEnds(link.lanes, link.length);
+      const room = Math.max(1, link.length - head - tail);
+      for (const l of link.lanes) cost.set(l.id, this.bestLane(link, l, room, stay, 1 + LATE_CHANGE * k).cost);
       plan[k] = { link, stay, cost };
     }
     this.plans.set(veh, { graph: this.graph, route, from, plan });
@@ -593,7 +614,8 @@ export class LaneTraffic {
     if (link.lanes.length < 2 || link.id !== veh.route[veh.routeIndex]) return;
     const plan = this.lanePlan(veh);
     const { stay } = plan[0];
-    const remaining = lane.length - veh.s;
+    // До конца связи — без сплошной у её конца: там уже не перестроиться.
+    const remaining = Math.max(1, lane.length - veh.s - solidEnds(link.lanes, link.length)[1]);
     // Трудность пути с полосы, если перестраиваться отсюда до конца связи.
     const costFrom = (l: GLane) => this.bestLane(link, l, remaining, stay).cost;
     let target: GLane | undefined;
@@ -639,6 +661,12 @@ export class LaneTraffic {
     // Через сплошную не перестраиваются.
     const leftOne = toward.index < lane.index ? toward : lane;
     if (leftOne.solidRight) return;
+    // И через сплошную, что дорога рисует сама (у развилки, после вливания, перед перекрёстком), — пока машина рядом
+    // с ней: вбок она сдвигается не сразу (как в integrate), линию пересечёт на полпути. Встала в конце своей полосы,
+    // которая дальше не ведёт, — пусть уж перестроится, иначе так и стоять.
+    const ahead = (veh.v * LANE_W) / (6 + veh.v * 0.2) / 2;
+    const stuck = strategic && !!end && end.dist < 10 && veh.v < 2;
+    if (!stuck && onSolid(leftOne.solidZones, veh.s, veh.length, ahead)) return;
     const side: Blinker = toward.index > lane.index ? 1 : -1;
     if (signal !== side) veh.laneSignalSince = this.time;
     veh.laneSignal = side;
@@ -761,8 +789,8 @@ export class LaneTraffic {
   }
 
   private computeAccel(veh: Vehicle, dt: number): number {
-    const aMax = veh.accel;
     if (veh.onMovement) {
+      const aMax = veh.accel;
       const m = this.graph.moves.get(veh.onMovement)!;
       const idx = m.vehicles.indexOf(veh);
       let gap = Infinity;
@@ -784,8 +812,16 @@ export class LaneTraffic {
 
     const lane = this.currentLane(veh)!;
     const idx = lane.vehicles.indexOf(veh);
+    // Изгиб впереди — тормозим заранее; на уклоне грузовики и автобусы медленнее (и разгоняются хуже).
+    const prof = this.profile(lane);
+    const k = Math.max(0, Math.min(prof.v.length - 1, Math.floor(veh.s / PROFILE_STEP)));
+    const grade = prof.g[k];
+    const heavy = veh.kind !== 'car';
+    const curve = Math.min(prof.v[k], prof.v[Math.min(prof.v.length - 1, k + 1)]);
+    let aMax = veh.accel;
+    if (grade > 0 && heavy) aMax *= Math.max(0.35, 1 - 6 * grade);
     // Ждёт окна, чтобы перестроиться, — едет чуть медленнее соседнего потока.
-    let desired = Math.min(lane.speed, veh.maxSpeed) * (1 - 0.3 * (veh.mergeWait ?? 0));
+    let desired = Math.min(lane.speed, curve, veh.maxSpeed * gradeFactor(grade, heavy)) * (1 - 0.3 * (veh.mergeWait ?? 0));
     // Закрытый переезд впереди на этой связи — как стоп-линия.
     const barrier = this.barrierAhead(lane.link, veh.centerS);
     const atBarrier = barrier < Infinity ? idmAccel(veh.v, desired, barrier + IDM.minGap - 0.5, veh.v, aMax) : Infinity;
@@ -816,6 +852,8 @@ export class LaneTraffic {
       }
       if (m.cont) {
         const out = this.graph.lanes.get(m.outLane)!;
+        // Изгиб в начале следующей полосы — тоже тормозим заранее.
+        desired = Math.min(desired, Math.sqrt(this.profile(out).v[0] ** 2 + IDM.brake * ahead));
         const last = out.vehicles[out.vehicles.length - 1];
         const bar = this.barrierAhead(out.link, null);
         if (bar < (last ? last.s - last.length : Infinity)) return idmAccel(veh.v, desired, ahead + bar + IDM.minGap - 0.5, veh.v, aMax);
@@ -952,9 +990,13 @@ export class LaneTraffic {
     this.updatePose(veh);
   }
 
-  /** Курс кузова: задняя ось тянется за передней на длину базы — корма срезает угол на повороте. */
+  /**
+   * Курс кузова: задняя ось тянется за передней на длину базы — корма срезает угол на повороте. У машины из
+   * двух частей так же за шарниром тянется вторая часть: полуприцеп за седлом тягача, задняя секция автобуса
+   * за гармошкой (sim/body).
+   */
   private steer(veh: Vehicle, pathDir: Vec): void {
-    const base = veh.length * 0.7;
+    const base = veh.length * steerBase(veh.body);
     const front = veh.pos;
     let rear = veh.rear;
     const d = rear ? Math.hypot(front.x - rear.x, front.y - rear.y) : 0;
@@ -962,12 +1004,10 @@ export class LaneTraffic {
     const dx = front.x - rear.x;
     const dy = front.y - rear.y;
     const l = Math.hypot(dx, dy);
-    if (l < 1e-6) {
-      veh.dir = pathDir;
-      return;
-    }
-    veh.dir = { x: dx / l, y: dy / l };
-    veh.rear = { x: front.x - veh.dir.x * base, y: front.y - veh.dir.y * base };
+    veh.dir = l < 1e-6 ? pathDir : { x: dx / l, y: dy / l };
+    if (l >= 1e-6) veh.rear = { x: front.x - veh.dir.x * base, y: front.y - veh.dir.y * base };
+    const hitch = hitchOf(veh.body);
+    if (hitch) veh.trail = follow(jointOf(front, veh.dir, veh.length, hitch), veh.dir, veh.trail, veh.length * hitch.tail);
   }
 
   updatePose(veh: Vehicle): void {
@@ -979,9 +1019,10 @@ export class LaneTraffic {
       this.steer(veh, p.dir);
       if (m.node !== null) veh.level = this.graph.net.nodes.get(m.node)?.level ?? veh.level;
       // Корпус ещё (или уже) на полотне въезда или выезда — слой и его: у моста машина не ныряет под край.
+      // Хвост — на целую длину позади носа.
       const half = veh.length / 2 + 1;
       let layer = layerOf(veh.level, veh.level);
-      if (m.node === null || veh.s < half) layer = Math.max(layer, this.linkLayer(m.inLink));
+      if (m.node === null || veh.s < veh.length + 1) layer = Math.max(layer, this.linkLayer(m.inLink));
       if (m.node === null || veh.s > m.length - half) layer = Math.max(layer, this.linkLayer(m.outLink));
       veh.layer = layer;
       return;
@@ -993,16 +1034,17 @@ export class LaneTraffic {
     this.steer(veh, pose.dir);
     veh.centerS = this.graph.axisS(lane, veh.s);
     const net = this.graph.net;
-    const c = net.corridors.get(this.graph.links.get(lane.link)!.corridor);
+    const link = this.graph.links.get(lane.link)!;
+    const c = net.corridors.get(link.corridor);
     if (c) {
       veh.level = net.heightAt(c, veh.centerS);
       // На пандусе — в слое всего полотна (как его рисуют), иначе у начала моста машина ныряет под него.
       let layer = this.corridorLayer(c);
-      // Корпус у стыка с мостом заходит на него — рисуем со слоем моста, а не под его краем.
-      const half = veh.length / 2 + 1;
+      // Корпус у стыка с мостом заходит на него — рисуем со слоем моста, а не под его краем (весь кузов, до хвоста).
+      const on = bodyOnEnds(veh.centerS, veh.length, link.flow, c.length);
       for (const [id, near] of [
-        [c.a, veh.centerS < half],
-        [c.b, veh.centerS > c.length - half],
+        [c.a, on.a],
+        [c.b, on.b],
       ] as const) {
         const n = near ? net.nodes.get(id) : undefined;
         if (n?.kind === 'seam') for (const id2 of n.corridors) layer = Math.max(layer, this.corridorLayer(net.corridor(id2)));

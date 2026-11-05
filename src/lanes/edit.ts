@@ -1,6 +1,7 @@
 import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { LANE_W, RoadClass } from '../world/roadTypes';
+import { nodeDeck } from './deck';
 import { edgesAt, laneBand, pointOff } from './geometry';
 import { Corridor, CorridorEnd, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot, taperLen } from './model';
 
@@ -133,6 +134,9 @@ export function splitCorridor(net: LaneNet, c: Corridor, s: number, kind: NodeKi
   const [c1, c2] = splitBezier(c.curve, t);
   const level = net.heightAt(c, s);
   const node = kind === 'seam' ? net.addSeam(c1.p3, c.lut.tangentAt(s), level) : net.addJunction(c1.p3, level);
+  // Мост или тоннель с заданной высотой: новый узел — на той же высоте, что полотно в этом месте.
+  const [A, B] = [net.node(c.a), net.node(c.b)];
+  if (level !== 0 && (A.deck !== undefined || B.deck !== undefined)) node.deck = nodeDeck(A) + (nodeDeck(B) - nodeDeck(A)) * (s / c.length);
   const L = c.length;
   const lanes1 = c.lanes.filter((l) => l.from < s - 0.5).map((l) => ({ ...l, to: l.to >= s - 0.01 ? Infinity : l.to }));
   const lanes2 = c.lanes
@@ -166,6 +170,16 @@ export interface RoadOptions {
   kink?: boolean;
   /** Дуга окружности по касательной к тупику: конец дороги смотрит по дуге, а не вдоль хорды. */
   arc?: boolean;
+  /**
+   * Смены высоты по пути («Авто»: пандусы, мост, тоннель): at — доля длины от начала (по порядку), level —
+   * уровень стыка там. Дорога в плане та же, что без них, — куски одной кривой, а не каждый своей.
+   */
+  levels?: { at: number; level: number }[];
+  /**
+   * Готовая форма (проект дороги): перья p1, p2 — как задал игрок, концы — у узлов (перья едут за ними).
+   * Перо у тупика почти вдоль него — дорога продолжает тупик, заметно в сторону — излом (перекрёсток).
+   */
+  curve?: Cubic;
 }
 
 interface RoadEnd {
@@ -200,7 +214,7 @@ export function buildRoad(net: LaneNet, A: Anchor, B: Anchor, o: RoadOptions): C
     kinked(x, toward, start) ? chordDir(x, toward, start) : (seamDir(x, start) ?? chordDir(x, toward, start));
   let t0 = tangentAt(A, o.control ?? B.pos, true);
   let t3 = tangentAt(B, o.control ?? A.pos, false);
-  const kinkA = kinked(A, o.control ?? B.pos, true);
+  let kinkA = kinked(A, o.control ?? B.pos, true);
   let kinkB = kinked(B, o.control ?? A.pos, false);
   // Дуга: окружность по касательной к тупику в начале (или в конце) — конец смотрит по дуге;
   // тупики с обеих сторон — плавно в оба. Тупик в конце, смотрящий не туда, — излом (перекрёсток).
@@ -226,14 +240,45 @@ export function buildRoad(net: LaneNet, A: Anchor, B: Anchor, o: RoadOptions): C
       t3 = norm(sub(arc.p3, arc.p2));
     }
   }
+  // Готовая форма (проект): направления — по перьям; перо у тупика почти вдоль него — продолжение, иначе излом.
+  const fixed = o.curve;
+  if (fixed) {
+    const d0 = dist(fixed.p0, fixed.p1) > 1e-6 ? norm(sub(fixed.p1, fixed.p0)) : chordDir(A, B.pos, true);
+    const d3 = dist(fixed.p3, fixed.p2) > 1e-6 ? norm(sub(fixed.p3, fixed.p2)) : chordDir(B, A.pos, false);
+    const s0 = seamDir(A, true);
+    const s3 = seamDir(B, false);
+    kinkA = !!s0 && dot(s0, d0) < Math.cos(0.05);
+    kinkB = !!s3 && dot(s3, d3) < Math.cos(0.05);
+    t0 = s0 && !kinkA ? s0 : d0;
+    t3 = s3 && !kinkB ? s3 : d3;
+  }
   const start = resolveEnd(net, A, t0, true, o.lanes, kinkA);
   const end = resolveEnd(net, B, t3, false, o.lanes, kinkB);
   const p0 = start.node.pos;
   const p3 = end.node.pos;
-  const h0 = arc ? dist(arc.p0, arc.p1) : o.control ? (dist(p0, o.control) * 2) / 3 : dist(p0, p3) / 3;
-  const h3 = arc ? dist(arc.p3, arc.p2) : o.control ? (dist(p3, o.control) * 2) / 3 : dist(p0, p3) / 3;
+  const h0 = fixed ? dist(fixed.p0, fixed.p1) : arc ? dist(arc.p0, arc.p1) : o.control ? (dist(p0, o.control) * 2) / 3 : dist(p0, p3) / 3;
+  const h3 = fixed ? dist(fixed.p3, fixed.p2) : arc ? dist(arc.p3, arc.p2) : o.control ? (dist(p3, o.control) * 2) / 3 : dist(p0, p3) / 3;
   const curve: Cubic = { p0, p1: add(p0, scale(t0, h0)), p2: sub(p3, scale(t3, h3)), p3 };
-  return chain(net, start, end, curve, o);
+  if (!o.levels?.length) return chain(net, start, end, curve, o);
+  // Смены высоты — стыки на самой кривой: каждый кусок — её часть, форма дуги и касательные на стыках те же.
+  const lut = new CurveLUT(curve);
+  const made: Corridor[] = [];
+  let from = start;
+  let rest = curve;
+  let done = 0;
+  for (const q of o.levels) {
+    const s = q.at * lut.length;
+    const t = lut.tAt(s);
+    if (t <= done + 1e-6 || t >= 1 - 1e-6) continue;
+    const [head, tail] = splitBezier(rest, (t - done) / (1 - done));
+    const node = net.addSeam(head.p3, lut.tangentAt(s), q.level);
+    made.push(...chain(net, from, { node, side: -1 }, head, o));
+    from = { node, side: 1 };
+    rest = tail;
+    done = t;
+  }
+  made.push(...chain(net, from, end, rest, o));
+  return made;
 }
 
 /**
@@ -1010,6 +1055,46 @@ export function handlesOf(net: LaneNet, id: number): (Handle & { partner: boolea
 }
 
 /**
+ * Излом из двух дорог (перекрёсток без ответвлений, полосы одной продолжают полосы другой) — снова стык:
+ * перо соседа встаёт на одну прямую с пером h, длина прежняя; настройки перекрёстка уходят. false — так
+ * нельзя (не две дороги, полосы не сходятся, кольцо): узел остаётся изломом. apply = false — только проверить.
+ */
+export function smoothCorner(net: LaneNet, h: Handle, apply = true): boolean {
+  const c = net.corridors.get(h.corridor);
+  if (!c || c.a === c.b) return false;
+  const n = net.node(h.end === 'a' ? c.a : c.b);
+  if (n.kind !== 'junction' || (n.roundabout ?? null) !== null) return false;
+  const ends = net.ends(n);
+  if (ends.length !== 2 || ends.some((e) => Math.abs(e.port) >= LAT_EPS)) return false;
+  const mine = ends.find((e) => e.corridor.id === c.id && e.end === h.end);
+  const other = ends.find((e) => e !== mine);
+  if (!mine || !other) return false;
+  // Стык смотрит по перу h: эта дорога — с его стороны (+1), соседняя — с другой; полосы должны совпасть.
+  const keys = (e: CorridorEnd, side: 1 | -1) => {
+    const along = e.end === 'a' ? side : -side;
+    return e.corridor.lanes
+      .filter((l) => net.reaches(e.corridor, l, e.end))
+      .map((l) => `${Math.round(l.offset * along * 2)}:${l.flow * along > 0}`)
+      .sort()
+      .join();
+  };
+  if (keys(mine, 1) !== keys(other, -1)) return false;
+  if (!apply) return true;
+  const { anchor, pos } = handlePoints(c, h.end);
+  const d = norm(sub(pos, anchor));
+  const o = handlePoints(other.corridor, other.end);
+  const cv = { ...other.corridor.curve };
+  const arm = add(o.anchor, scale(d, -Math.max(2, dist(o.pos, o.anchor))));
+  if (other.end === 'a') cv.p1 = arm;
+  else cv.p2 = arm;
+  net.setCurve(other.corridor, cv);
+  n.kind = 'seam';
+  n.dir = d;
+  for (const k of ['control', 'mainPair', 'bans', 'greens', 'adaptive', 'lanes', 'corners'] as const) delete n[k];
+  return true;
+}
+
+/**
  * Тянет перо в p. У перекрёстка меняется только эта дорога. Стык поворачивается целиком — касательная
  * у него общая, перья остальных полотен в нём идут следом. kink — излом: стык становится перекрёстком.
  */
@@ -1022,6 +1107,8 @@ export function dragHandle(net: LaneNet, h: Handle, p: Vec, kink = false): boole
   const to = sub(p, anchor);
   if (len(to) < 2) return false;
   if (n.kind === 'seam' && kink && !net.isDeadEnd(n) && net.ends(n).every((e) => Math.abs(e.port) < LAT_EPS)) n.kind = 'junction';
+  // Без Shift излом из двух дорог снова становится стыком: перо соседа — на одну прямую с этим.
+  else if (!kink && n.kind === 'junction') smoothCorner(net, h);
   if (n.kind === 'junction' || c.a === c.b) {
     const cv = { ...c.curve };
     if (atA) cv.p1 = { ...p };
@@ -1403,24 +1490,36 @@ export function removeLaneSpan(net: LaneNet, c: Corridor, i: number, s0: number,
 
 /**
  * Полосы, которые упираются в стык и не продолжаются за ним (дорогу перестроили, у соседа другой профиль), —
- * кончаются отгоном перед стыком, как на настоящей дороге при смене числа полос. Полосу, которой на отгон
- * не хватает места, не трогаем (тогда проверка правки скажет, что полосы не сходятся).
+ * кончаются отгоном перед стыком, как на настоящей дороге при смене числа полос. Полосе, которой на отгон
+ * не хватает места (полотно короче отгона), на этом полотне не быть совсем: она уходит с него, а доходила
+ * до другого конца — там обрывается её продолжение и сходит на нет дальше. Единственную полосу полотна
+ * не трогаем (тогда проверка правки скажет, что полосы не сходятся).
  */
 export function taperDeadLanes(net: LaneNet, nodeIds: number[]): void {
+  const nodes = new Set(nodeIds);
   // Сужение полосы у одного полотна может оборвать продолжавшую её полосу соседа — повторяем, пока меняется.
-  for (let pass = 0; pass < 3; pass++) {
+  for (let pass = 0; pass < 100; pass++) {
     let changed = false;
-    for (const id of nodeIds) {
+    for (const id of [...nodes]) {
       const n = net.nodes.get(id);
       if (!n || n.kind !== 'seam' || net.isDeadEnd(n)) continue;
       for (const e of net.ends(n)) {
         const c = e.corridor;
         const T = taperLen(c.cls);
-        const lanes = c.lanes.map((l, i) => {
-          if (!net.reaches(c, l, e.end) || net.across(c, i, e.end)) return l;
-          return e.end === 'a' ? { ...l, from: Math.max(l.from, T) } : { ...l, to: Math.min(l.to, c.length - T) };
+        const far = e.end === 'a' ? 'b' : 'a';
+        const lanes: LaneSlot[] = [];
+        let cut = false;
+        c.lanes.forEach((l, i) => {
+          if (!net.reaches(c, l, e.end) || net.across(c, i, e.end)) {
+            lanes.push(l);
+            return;
+          }
+          cut = true;
+          const tapered = e.end === 'a' ? { ...l, from: Math.max(l.from, T) } : { ...l, to: Math.min(l.to, c.length - T) };
+          if (tapered.to - tapered.from >= 5) lanes.push(tapered);
+          else if (net.reaches(c, l, far)) nodes.add(far === 'a' ? c.a : c.b);
         });
-        if (lanes.every((l, i) => l === c.lanes[i]) || lanes.some((l) => l.to - l.from < 5)) continue;
+        if (!cut || !lanes.length) continue;
         net.setLanes(c, lanes);
         changed = true;
       }

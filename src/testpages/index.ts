@@ -1,6 +1,8 @@
 import type { Game } from '../game/game';
 import { buildBusScene } from './bus';
+import { buildJunctionsScene } from './junctions';
 import { testPageName } from './route';
+import { buildVehiclesScene } from './vehicles';
 
 /** Заранее собранная сцена тестовой страницы. */
 export interface TestScene {
@@ -13,7 +15,7 @@ export interface TestScene {
   errors: string[];
 }
 
-const PAGES: Record<string, () => TestScene> = { bus: buildBusScene };
+const PAGES: Record<string, () => TestScene> = { bus: buildBusScene, vehicles: buildVehiclesScene, junctions: buildJunctionsScene };
 
 /** Сцена тестовой страницы по адресу (/test/bus); обычная игра — null. */
 export function testScene(pathname: string): TestScene | null {

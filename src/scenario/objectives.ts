@@ -3,9 +3,9 @@
  * (доставки, производство, население, финансы месяца), а не по факту постройки.
  */
 import type { Game } from '../game/game';
-import { CARGO } from '../world/cargo';
-import { TOWN_NEED } from '../world/entities';
-import { industryById, operating, refName, townById } from './analysis';
+import { CARGO, type CargoType } from '../world/cargo';
+import { TOWN_NEED, type Town } from '../world/entities';
+import { connected, industryById, newRoutesCarried, operating, refName, townById } from './analysis';
 import type { MonthStat, Objective, ObjectiveParams, Ref, ScenarioState } from './types';
 
 /** Ключ пары городов: меньший id первым. */
@@ -16,7 +16,36 @@ export const makerKey = (industry: number, cargo: string) => `${industry}:${carg
 const fmt = (n: number) => Math.round(n).toLocaleString('ru-RU');
 export const moneyText = (n: number) => `$${fmt(n)}`;
 const monthsText = (n: number) => `${n} ${n === 1 ? 'месяц' : n < 5 ? 'месяца' : 'месяцев'}`;
+/** «1 новый город», «2 новых города», «5 новых предприятий». */
+function newPlaces(n: number, what: 'town' | 'industry'): string {
+  const d = n % 10;
+  const dd = n % 100;
+  const one = d === 1 && dd !== 11;
+  const few = d >= 2 && d <= 4 && (dd < 12 || dd > 14);
+  const noun = what === 'town' ? (one ? 'город' : few ? 'города' : 'городов') : one ? 'предприятие' : few ? 'предприятия' : 'предприятий';
+  return `${fmt(n)} ${one ? (what === 'town' ? 'новый' : 'новое') : 'новых'} ${noun}`;
+}
+
+/** Сколько городов или предприятий подключено к сети сверх тех, что были в ней, когда задание появилось. */
+function newlyConnected(game: Game, p: Extract<ObjectiveParams, { kind: 'connect' }>): number {
+  const now = connected(game)[p.what === 'town' ? 'towns' : 'industries'];
+  const known = new Set(p.known);
+  let n = 0;
+  for (const id of now) if (!known.has(id)) n++;
+  return n;
+}
 const inRow = (n: number) => (n > 1 ? `, ${monthsText(n)} подряд` : '');
+
+/** Сколько потребностей города надо закрыть: needs, а в старых заданиях — все. */
+export function supplyNeeds(p: Extract<ObjectiveParams, { kind: 'supply' }>, t: Town): number {
+  return Math.min(p.needs ?? t.demands.length, t.demands.length);
+}
+
+/** Сколько потребностей города закрыто: за прошлый месяц (last) или уже за этот. */
+export function closedNeeds(t: Town, month: 'last' | 'current' = 'last'): CargoType[] {
+  const got = month === 'last' ? t.lastSupplied : t.supplied;
+  return t.demands.filter((c) => (got[c] ?? 0) >= TOWN_NEED);
+}
 
 /**
  * Отметка на старте задания: накопительный счётчик (доставки, пассажиры), население города для роста;
@@ -44,6 +73,7 @@ export function targetOf(p: ObjectiveParams): number {
     case 'deliver':
     case 'passengers':
     case 'population':
+    case 'connect':
       return p.amount;
     case 'industry':
       return p.level;
@@ -53,7 +83,8 @@ export function targetOf(p: ObjectiveParams): number {
 }
 
 /** Задание держится по месяцам (выполняется в конце месяца), а не по накоплению. */
-export const isMonthly = (p: ObjectiveParams) => p.kind === 'profit' || p.kind === 'supply' || p.kind === 'quality' || p.kind === 'throughput';
+export const isMonthly = (p: ObjectiveParams) =>
+  p.kind === 'profit' || p.kind === 'supply' || p.kind === 'quality' || p.kind === 'throughput' || p.kind === 'newRoutes';
 
 /** Текущий прогресс в единицах цели. */
 export function liveProgress(o: Objective, s: ScenarioState, game: Game): number {
@@ -66,6 +97,8 @@ export function liveProgress(o: Objective, s: ScenarioState, game: Game): number
       return industryById(game, p.industry)?.level ?? 1;
     case 'population':
       return townById(game, p.town)?.population ?? 0;
+    case 'connect':
+      return newlyConnected(game, p);
     default:
       return o.streak;
   }
@@ -80,12 +113,14 @@ export function monthOk(p: ObjectiveParams, game: Game, month: MonthStat): boole
     }
     case 'supply': {
       const t = townById(game, p.town);
-      return !!t && t.demands.length > 0 && t.demands.every((c) => (t.lastSupplied[c] ?? 0) >= TOWN_NEED);
+      return !!t && t.demands.length > 0 && closedNeeds(t).length >= supplyNeeds(p, t);
     }
     case 'quality':
       return month.units >= p.volume && month.speed >= p.speed;
     case 'throughput':
       return month.units >= p.amount && month.income > 0 && month.costs <= p.costRatio * month.income;
+    case 'newRoutes':
+      return newRoutesCarried(game, p.since) >= p.amount;
     default:
       return false;
   }
@@ -102,8 +137,7 @@ export function monthValue(p: ObjectiveParams, game: Game, month: MonthStat | un
     case 'supply': {
       const t = townById(game, p.town);
       if (!t) return null;
-      const ok = t.demands.filter((c) => (t.lastSupplied[c] ?? 0) >= TOWN_NEED).length;
-      return `в прошлом месяце закрыто ${ok} из ${t.demands.length}`;
+      return `в прошлом месяце закрыто ${closedNeeds(t).length} из ${t.demands.length}`;
     }
     case 'quality':
       return `в прошлом месяце ×${month.speed.toFixed(2)} при объёме ${fmt(month.units)}`;
@@ -111,6 +145,8 @@ export function monthValue(p: ObjectiveParams, game: Game, month: MonthStat | un
       const ratio = month.income > 0 ? Math.round((month.costs / month.income) * 100) : null;
       return `в прошлом месяце ${fmt(month.units)}${ratio !== null ? `, расходы ${ratio}% выручки` : ''}`;
     }
+    case 'newRoutes':
+      return `в прошлом месяце ${fmt(newRoutesCarried(game, p.since))} ед. на новых маршрутах`;
     default:
       return null;
   }
@@ -131,8 +167,12 @@ export function titleOf(p: ObjectiveParams, game: Game): string {
         : `Перевезти ${fmt(p.amount)} пассажиров`;
     case 'profit':
       return `Операционная прибыль от ${moneyText(p.amount)} в месяц${inRow(p.months)}`;
-    case 'supply':
-      return `Снабжать город ${townById(game, p.town)?.name ?? '—'} всем необходимым${inRow(p.months)}`;
+    case 'supply': {
+      const t = townById(game, p.town);
+      const total = t?.demands.length ?? 0;
+      if (p.needs === undefined || p.needs >= total) return `Снабжать город ${t?.name ?? '—'} всем необходимым${inRow(p.months)}`;
+      return `Снабжать город ${t?.name ?? '—'}: закрыть ${p.needs} из ${total} потребностей${inRow(p.months)}`;
+    }
     case 'industry':
       return `Довести производство: ${industryById(game, p.industry)?.name ?? '—'} — до ×${p.level}`;
     case 'population':
@@ -141,6 +181,10 @@ export function titleOf(p: ObjectiveParams, game: Game): string {
       return `Быстрая доставка: надбавка за скорость от ×${p.speed} при ${fmt(p.volume)} ед. в месяц${inRow(p.months)}`;
     case 'throughput':
       return `Перевозить от ${fmt(p.amount)} ед. в месяц при расходах не больше ${Math.round(p.costRatio * 100)}% выручки${inRow(p.months)}`;
+    case 'newRoutes':
+      return `Новые маршруты этапа: перевозить от ${fmt(p.amount)} ед. в месяц${inRow(p.months)}`;
+    case 'connect':
+      return `Подключить к сети ${newPlaces(p.amount, p.what)}`;
   }
 }
 

@@ -2,6 +2,8 @@ import type { Vec } from '../core/vec';
 import type { DrawMode } from '../game/build';
 import type { Fragment } from '../lanes/fragment';
 import { isDivided, isOneWay, isTrunk, RoadSpec } from '../world/roadTypes';
+import type { BiomeId } from '../world/biomes';
+import type { Relief, WaterAmount } from '../world/settings';
 
 
 function arrow(x: number, y: number, dir: 1 | -1, color: string): string {
@@ -112,6 +114,19 @@ export function moveEndSvg(): string {
   </svg>`;
 }
 
+/** Двигать примыкание: въезд (был — пунктиром) примыкает дальше по дороге и поворачивает плавнее. */
+export function moveJointSvg(): string {
+  return `<svg viewBox="0 0 48 36" width="48" height="36">
+    <rect x="2" y="4" width="44" height="10" rx="1.5" fill="#646b76"/>
+    <path d="M3 33C8 27 11 19 13 15" stroke="#2f80ed" stroke-width="2" stroke-dasharray="3 3" fill="none"/>
+    <path d="M5 33C21 31 29 16 40 15.5" stroke="#646b76" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+    <path d="M17 9H31" stroke="#2f80ed" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M35.5 9L30.5 6V12Z" fill="#2f80ed"/>
+    <circle cx="13" cy="15" r="2.6" fill="#fff" stroke="#9aa3ad" stroke-width="1.4"/>
+    <circle cx="40" cy="15" r="3.4" fill="#fff" stroke="#2f80ed" stroke-width="1.8"/>
+  </svg>`;
+}
+
 /** Двигать узел: изгиб перетаскивается, дороги идут следом — и улица выпрямляется. */
 export function moveNodeSvg(): string {
   return `<svg viewBox="0 0 48 36" width="48" height="36">
@@ -142,6 +157,42 @@ export function handleSvg(): string {
     <path d="M6 30L22 30" stroke="#2f80ed" stroke-width="1.6" fill="none"/>
     <circle cx="6" cy="30" r="2.6" fill="#2f80ed"/>
     <circle cx="22" cy="30" r="3.6" fill="#2f80ed" stroke="#fff" stroke-width="1.4"/>
+  </svg>`;
+}
+
+/** Угол перекрёстка: острый угол между дорогами скруглён — ручку на бордюре тянут наружу, дуга шире. */
+export function cornerSvg(): string {
+  return `<svg viewBox="0 0 48 36" width="48" height="36">
+    <path d="M2 30H46" stroke="#646b76" stroke-width="6" stroke-linecap="round"/>
+    <path d="M2 30L30 4" stroke="#646b76" stroke-width="6" stroke-linecap="round"/>
+    <path d="M9.64 27L25.77 12A8.64 8.64 0 0 0 31.64 27Z" fill="#646b76"/>
+    <path d="M25.77 12L9.64 27L31.64 27" stroke="#fff" stroke-width="0.9" stroke-dasharray="1.6 1.4" fill="none"/>
+    <path d="M25.77 12A8.64 8.64 0 0 0 31.64 27" stroke="#2f80ed" stroke-width="1.8" fill="none"/>
+    <path d="M26.3 20.6L32.3 18.25" stroke="#2f80ed" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M36.5 16.6L33.25 20.67L31.35 15.83Z" fill="#2f80ed"/>
+    <circle cx="23.6" cy="21.64" r="2.6" fill="#fff" stroke="#2f80ed" stroke-width="1.8"/>
+  </svg>`;
+}
+
+/** Проект: дорога пунктиром, узлы квадратиками и перо — нарисовано, но не построено. */
+export function projectSvg(w = 48, h = 36): string {
+  return `<svg viewBox="0 0 48 36" width="${w}" height="${h}">
+    <path d="M6 28C16 28 24 8 42 8" stroke="#2f80ed" stroke-opacity="0.18" stroke-width="9" stroke-linecap="round" fill="none"/>
+    <path d="M6 24C15 24 22 4 42 4M6 32C17 32 26 12 42 12" stroke="#2f80ed" stroke-width="1.6" stroke-dasharray="3.5 2.5" fill="none"/>
+    <path d="M6 28L18 28" stroke="#2f80ed" stroke-width="1.2" fill="none"/>
+    <circle cx="18" cy="28" r="2.8" fill="#fff" stroke="#2f80ed" stroke-width="1.3"/>
+    <rect x="2.5" y="24.5" width="7" height="7" fill="#2f80ed" stroke="#fff" stroke-width="1"/>
+    <rect x="38.5" y="4.5" width="7" height="7" fill="#fff" stroke="#2f80ed" stroke-width="1.4"/>
+  </svg>`;
+}
+
+/** Узел на дороге: дорога, посередине — квадратик узла (как у проекта), по бокам — штрихи «здесь делится». */
+export function splitNodeSvg(w = 48, h = 36): string {
+  return `<svg viewBox="0 0 48 36" width="${w}" height="${h}">
+    <path d="M4 22C14 22 18 14 24 14S36 22 44 22" stroke="#646b76" stroke-width="7" stroke-linecap="round" fill="none"/>
+    <path d="M4 22C14 22 18 14 24 14S36 22 44 22" stroke="#e8ebef" stroke-width="1" stroke-dasharray="3 3" fill="none"/>
+    <path d="M24 5V9M24 19V23" stroke="#2f80ed" stroke-width="1.6" stroke-linecap="round"/>
+    <rect x="20" y="10" width="8" height="8" fill="#fff" stroke="#2f80ed" stroke-width="1.8"/>
   </svg>`;
 }
 
@@ -203,13 +254,78 @@ export function switchSvg(w = 40, h = 20): string {
   </svg>`;
 }
 
+/** Проходная станция схемой: главный путь насквозь, второй отходит и возвращается, платформа между ними. */
+export function throughStationSvg(w = 36): string {
+  return `<svg viewBox="0 0 36 22" width="${w}" height="${(w * 22) / 36}">
+    <path d="M1 15H35" stroke="currentColor" stroke-width="2"/>
+    <path d="M4 15C9 15 9 7 14 7H22C27 7 27 15 32 15" stroke="currentColor" stroke-width="2" fill="none"/>
+    <rect x="13" y="9.4" width="10" height="3.2" rx="0.8" fill="currentColor" opacity="0.4"/>
+    <path d="M31 3.5L35 5.5L31 7.5M5 3.5L1 5.5L5 7.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+/** Конечная (тупиковая) станция схемой: пути от горловины слева кончаются красными упорами справа. */
+export function terminalStationSvg(w = 36): string {
+  return `<svg viewBox="0 0 36 22" width="${w}" height="${(w * 22) / 36}">
+    <path d="M1 15H29" stroke="currentColor" stroke-width="2"/>
+    <path d="M4 15C9 15 9 7 14 7H29" stroke="currentColor" stroke-width="2" fill="none"/>
+    <rect x="14" y="9.4" width="12" height="3.2" rx="0.8" fill="currentColor" opacity="0.4"/>
+    <path d="M30.5 3.6V10.4M30.5 11.6V18.4" stroke="#d9534f" stroke-width="3" stroke-linecap="round"/>
+    <path d="M5 1.5L1 3.5L5 5.5" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+/** Пассажирский вагон сбоку: длинный кузов с рядом окон (цвет — currentColor). */
+export function passengerCarSvg(w = 22): string {
+  const windows = [3.2, 8.2, 13.2, 18.2].map((x) => `<rect x="${x}" y="3.4" width="2.8" height="3" rx="0.6" fill="#fff"/>`).join('');
+  return `<svg viewBox="0 0 24 14" width="${w}" height="${(w * 14) / 24}">
+    <rect x="1" y="1.2" width="22" height="9" rx="2.2" fill="currentColor"/>${windows}
+    <circle cx="6" cy="11.9" r="1.7" fill="currentColor"/><circle cx="18" cy="11.9" r="1.7" fill="currentColor"/>
+  </svg>`;
+}
+
+/** Грузовой вагон сбоку: открытый полувагон с горкой груза и рёбрами по борту (цвет — currentColor). */
+export function freightCarSvg(w = 22): string {
+  return `<svg viewBox="0 0 24 14" width="${w}" height="${(w * 14) / 24}">
+    <path d="M3.5 5.4C5.5 2.2 9 2.4 12 3.6C15 2.2 18.6 2.4 20.5 5.4Z" fill="currentColor" opacity="0.5"/>
+    <path d="M1.2 5H22.8L21.2 10.3H2.8Z" fill="currentColor"/>
+    <path d="M8 6.2V9.4M12 6.2V9.4M16 6.2V9.4" stroke="#fff" stroke-width="1" stroke-linecap="round"/>
+    <circle cx="6" cy="11.9" r="1.7" fill="currentColor"/><circle cx="18" cy="11.9" r="1.7" fill="currentColor"/>
+  </svg>`;
+}
+
+/**
+ * Длина платформы: под путём — платформа, тем шире, чем она длиннее (max — во всю ширину), на ней — вагоны,
+ * сколько встанет (по 20 м), снизу — размерная черта.
+ */
+export function platformLengthSvg(length: number, max: number): string {
+  const w = 8 + 36 * Math.min(1, Math.max(0, length / max));
+  const x0 = 24 - w / 2;
+  const cars = Math.max(1, Math.min(12, Math.floor((length - 6) / 20)));
+  const cw = w / cars;
+  const train = Array.from(
+    { length: cars },
+    (_, i) => `<rect x="${(x0 + i * cw + 0.4).toFixed(1)}" y="7.5" width="${(cw - 0.8).toFixed(1)}" height="5" rx="0.8" fill="${i === 0 ? '#3d4a5a' : '#d9534f'}"/>`,
+  ).join('');
+  const x1 = x0 + w;
+  return `<svg viewBox="0 0 48 36" width="48" height="36">
+    <path d="M1 10H47" stroke="#b9b1a6" stroke-width="3.6"/><path d="M1 9H47M1 11H47" stroke="#4f5965" stroke-width="0.6"/>
+    ${train}
+    <rect x="${x0.toFixed(1)}" y="14" width="${w.toFixed(1)}" height="7" rx="1" fill="#e4dfd4" stroke="#b9b2a6" stroke-width="0.6"/>
+    <path d="M${x0.toFixed(1)} 28H${x1.toFixed(1)}M${x0.toFixed(1)} 25V31M${x1.toFixed(1)} 25V31" stroke="#6b7785" stroke-width="1.2"/>
+  </svg>`;
+}
+
 /** Ж/д станция сверху: n путей с платформами между ними. */
 export function platformsSvg(n: number): string {
+  const track = (y: number) => `<path d="M2 ${y}H46" stroke="#b9b1a6" stroke-width="3.6"/><path d="M2 ${y - 1}H46M2 ${y + 1}H46" stroke="#4f5965" stroke-width="0.6"/>`;
+  // Один путь — платформа сбоку от него (со стороны здания), а не между путями.
+  if (n <= 1) return `<svg viewBox="0 0 48 36" width="48" height="36">${track(13)}<rect x="10" y="16.2" width="28" height="9" rx="1" fill="#e4dfd4"/></svg>`;
   const gap = 28 / n;
   const rows: string[] = [];
   for (let i = 0; i < n; i++) {
     const y = 6 + i * gap + gap / 2;
-    rows.push(`<path d="M2 ${y}H46" stroke="#b9b1a6" stroke-width="3.6"/><path d="M2 ${y - 1}H46M2 ${y + 1}H46" stroke="#4f5965" stroke-width="0.6"/>`);
+    rows.push(track(y));
     if (i < n - 1) rows.push(`<rect x="10" y="${y + 2.2}" width="28" height="${gap - 4.4}" rx="1" fill="#e4dfd4"/>`);
   }
   return `<svg viewBox="0 0 48 36" width="48" height="36">${rows.join('')}</svg>`;
@@ -316,6 +432,11 @@ export function savesSvg(size = 22): string {
 /** Новая игра: карта с плюсом. */
 export function newGameSvg(size = 22): string {
   return `<svg viewBox="0 0 22 22" width="${size}" height="${size}"><rect x="2.5" y="4" width="14" height="14" rx="2.5" fill="#d6e2bd" stroke="#8aa070" stroke-width="1.2"/><path d="M4.5 13c3-4 6 1 10-3" stroke="#8cc3e6" stroke-width="1.8" fill="none" stroke-linecap="round"/><circle cx="16.5" cy="5.5" r="4.6" fill="#27ae60"/><path d="M16.5 3.3V7.7M14.3 5.5H18.7" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>`;
+}
+
+/** Журнал партии: лист с записями и стрелка вниз — скачать. */
+export function journalSvg(size = 22): string {
+  return `<svg viewBox="0 0 22 22" width="${size}" height="${size}"><rect x="3" y="2.5" width="12.5" height="16" rx="2.2" fill="#fff" stroke="#5f7a8f" stroke-width="1.4"/><path d="M6 6.5H12.5M6 9.5H12.5M6 12.5H10" stroke="#9fb4cc" stroke-width="1.5" stroke-linecap="round"/><circle cx="16" cy="15.5" r="5" fill="#7a5cc4"/><path d="M16 12.6V18M13.8 15.8L16 18L18.2 15.8" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
 /** Открыть из файла: стрелка вверх из лотка. */
@@ -502,36 +623,177 @@ export function stationSvg(kind: 'road' | 'rail' | 'stop' | 'cargo' | 'pax', siz
   </svg>`;
 }
 
-/** Поезд или автомобиль для кнопок покупки. */
-export function modelSvg(id: string, w = 46, h = 22): string {
-  const body = (color: string) => `<rect x="2" y="6" width="${w - 4}" height="${h - 12}" rx="3" fill="${color}"/>`;
+/** Цвет светлее (k > 0 — к белому) или темнее (k < 0 — к чёрному); не #rrggbb — как есть. */
+export function shadeHex(hex: string, k: number): string {
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return hex;
+  const n = parseInt(hex.slice(1), 16);
+  const f = (c: number) => Math.round(k > 0 ? c + (255 - c) * k : c * (1 + k));
+  return `#${[(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) => f(c).toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** Длина силуэта машины в кнопке покупки, px: как длина самой машины. */
+const ROAD_ART_LEN: Record<string, number> = { bus: 42, bus2: 56, bus3: 80, truck: 48, truck2: 60, truck3: 86 };
+/** Низ колёс — земля силуэта. */
+const GROUND = 23;
+const STEEL = '#3a434d';
+const round1 = (v: number) => Math.round(v * 10) / 10;
+
+/** Стёкла тёмные, а на тёмном кузове — светлые, чтобы окна было видно. */
+export function glassFor(color: string): string {
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return '#2f3d4b';
+  const n = parseInt(color.slice(1), 16);
+  const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+  return lum < 0.32 ? '#9fb3c6' : '#2f3d4b';
+}
+
+/** Колесо сбоку на земле: тёмная арка над ним, шина, диск и ступица. */
+function sideWheel(x: number, r = 2.8): string {
+  const cy = GROUND - r;
+  const a = r + 0.8;
+  return `<path d="M${x - a} ${cy}A${a} ${a} 0 0 1 ${x + a} ${cy}Z" fill="#000" fill-opacity="0.3"/>
+    <circle cx="${x}" cy="${cy}" r="${r}" fill="#2b323b"/><circle cx="${x}" cy="${cy}" r="${round1(r * 0.48)}" fill="#c3cad2"/><circle cx="${x}" cy="${cy}" r="${round1(r * 0.16)}" fill="#6b7480"/>`;
+}
+
+/** Микроавтобус (как «Газель»): высокая крыша, капот, окна салона, сдвижная дверь. */
+function microbusArt(L: number, color: string): string {
+  const glass = glassFor(color);
+  const line = shadeHex(color, -0.3);
+  return `<path d="M1 5.2Q1 3 3.2 3H${L - 11}Q${L - 9} 3 ${L - 8} 4.4L${L - 4} 10.2Q${L - 0.6} 11 ${L} 13.4V18.8Q${L} 20 ${L - 1.2} 20H2.2Q1 20 1 18.8Z" fill="${color}"/>
+    <path d="M3 5.6h5.4v5H3zM9.6 5.6h9.6v5H9.6zM20.8 5.6h${L - 33.6}v5H20.8z" fill="${glass}"/>
+    <path d="M${L - 11.4} 5.6H${L - 8.4}L${L - 5} 10.6H${L - 11.4}Z" fill="${glass}"/>
+    <path d="M20 4V18.2M${L - 12.4} 4V18.2" stroke="${line}" stroke-width="0.5"/>
+    <path d="M1.4 13.4H${L - 13}" stroke="#fff" stroke-opacity="0.5" stroke-width="0.7"/>
+    <rect x="${L - 2.2}" y="17.4" width="2.6" height="2.6" rx="0.6" fill="${STEEL}"/><rect x="0.4" y="17.4" width="2.4" height="2.6" rx="0.6" fill="${STEEL}"/>
+    <rect x="${L - 1.6}" y="13.4" width="1.4" height="1.4" rx="0.5" fill="#ffe08a"/><rect x="0.6" y="9" width="0.9" height="2.6" fill="#d93a32"/>
+    ${sideWheel(9.5, 3)}${sideWheel(L - 8.5, 3)}`;
+}
+
+/**
+ * Городской автобус: большие окна, двери до пола, кондиционеры на крыше, колёса в арках.
+ * joints — «гармошки» сочленённого: кузов делится на секции.
+ */
+function cityBusArt(L: number, color: string, opts: { doors: number[]; axles: number[]; ac: [number, number][]; joints?: number[]; tower?: boolean }): string {
+  const glass = glassFor(color);
+  const roof = shadeHex(color, -0.18);
+  const panes: string[] = [];
+  for (let x = 9; x < L - 6; x += 7) panes.push(`M${x} 5.6V12.8`);
+  const door = (x: number) =>
+    `<rect x="${round1(x - 2.1)}" y="5.8" width="4.2" height="13.4" fill="${glass}"/><path d="M${round1(x)} 5.8V19.2" stroke="${color}" stroke-width="0.5"/><path d="M${round1(x - 2.5)} 5.2V19.6M${round1(x + 2.5)} 5.2V19.6" stroke="${color}" stroke-width="0.8"/>`;
+  const joint = (x: number) => {
+    const ribs: string[] = [];
+    for (let i = x - 2.2; i <= x + 2.2; i += 0.9) ribs.push(`M${round1(i)} 5V19.4`);
+    return `<rect x="${round1(x - 2.6)}" y="4.6" width="5.2" height="15" fill="#22272d"/><path d="${ribs.join('')}" stroke="#4a525c" stroke-width="0.35"/>`;
+  };
+  return `${opts.ac.map(([a, b]) => `<rect x="${round1(a)}" y="2.4" width="${round1(b - a)}" height="2" rx="0.8" fill="${roof}"/>`).join('')}
+    ${opts.tower ? `<rect x="1" y="2.6" width="4.6" height="2.4" rx="0.7" fill="${color}"/>` : ''}
+    <path d="M1 6Q1 4 3 4H${L - 2.5}Q${L + 0.6} 4 ${L + 0.8} 7L${L + 1} 18.6Q${L + 1} 20 ${L - 0.4} 20H2.4Q1 20 1 18.6Z" fill="${color}"/>
+    <rect x="3" y="5.8" width="${L - 5}" height="6.8" rx="0.6" fill="${glass}"/>
+    <path d="${panes.join('')}" stroke="${color}" stroke-width="0.8"/>
+    <path d="M${L - 1.8} 5.2H${L - 0.6}Q${L + 0.6} 5.5 ${L + 0.6} 7.5V15H${L - 1.8}Z" fill="${glass}"/>
+    ${opts.doors.map(door).join('')}${(opts.joints ?? []).map(joint).join('')}
+    <rect x="${L - 1.6}" y="17.6" width="2.6" height="2.4" rx="0.6" fill="${STEEL}"/><rect x="0.6" y="17.6" width="2.2" height="2.4" rx="0.6" fill="${STEEL}"/>
+    <rect x="${L - 0.4}" y="15.6" width="1.3" height="1.4" rx="0.5" fill="#ffe08a"/><rect x="0.5" y="13.4" width="1" height="2.6" fill="#d93a32"/>
+    ${opts.axles.map((x) => sideWheel(round1(x), 3)).join('')}`;
+}
+
+/** Автобусы: I — микроавтобус, II — городской, сочленённый — две секции с «гармошкой». */
+function busArt(L: number, gen: number, color: string): string {
+  if (gen === 1) return microbusArt(L, color);
+  if (gen === 2) return cityBusArt(L, color, { doors: [L * 0.1, L * 0.52, L - 4], axles: [L * 0.24, L - 12], ac: [[L * 0.3, L * 0.48]] });
+  return cityBusArt(L, color, {
+    doors: [L * 0.1, L * 0.28, L * 0.69, L - 4],
+    axles: [L * 0.19, L * 0.53, L * 0.85],
+    ac: [
+      [L * 0.14, L * 0.27],
+      [L * 0.62, L * 0.76],
+    ],
+    joints: [L * 0.43],
+    tower: true,
+  });
+}
+
+/** Кабина над передней осью (кабовер), кабина справа: большое окно, дверь, тёмный низ с подножкой. */
+function cabArt(x0: number, x1: number, top: number, color: string, spoiler?: number): string {
+  const glass = glassFor(color);
+  const line = shadeHex(color, -0.3);
+  const bottom = 20;
+  const deflector =
+    spoiler === undefined
+      ? ''
+      : `<path d="M${x0 + 0.4} ${top + 0.5}V${spoiler + 1.2}Q${x0 + 0.4} ${spoiler} ${x0 + 1.8} ${spoiler}H${x0 + 3.5}Q${x1 - 3.5} ${spoiler} ${x1 - 2.2} ${top + 0.5}Z" fill="${shadeHex(color, -0.12)}"/>`;
+  return `${deflector}<path d="M${x0} ${bottom}V${top + 1.5}Q${x0} ${top} ${x0 + 1.5} ${top}H${x1 - 2}Q${x1 - 0.4} ${top} ${x1 - 0.2} ${top + 2}L${x1} ${bottom}Z" fill="${color}"/>
+    <path d="M${x1 - 6.4} ${top + 2}H${x1 - 1.6}L${x1 - 0.9} ${top + 6.6}H${x1 - 6.4}Z" fill="${glass}"/>
+    <path d="M${x1 - 7.4} ${top + 1.4}V${bottom - 3.4}" stroke="${line}" stroke-width="0.5"/><path d="M${x1 - 6.6} ${top + 8}h1.4" stroke="${line}" stroke-width="0.6"/>
+    <rect x="${x0}" y="${bottom - 3.4}" width="${x1 - x0}" height="3.4" fill="${STEEL}"/>
+    <rect x="${x1 - 1.4}" y="${bottom - 4.8}" width="1.4" height="1.2" rx="0.4" fill="#ffe08a"/>`;
+}
+
+/** Кузов: фургон с рамкой по краю или тентованный — рейка поверху и ремни понизу. */
+function cargoBoxArt(x0: number, x1: number, top: number, bottom: number, color: string, curtain: boolean): string {
+  const frame = shadeHex(color, -0.25);
+  let detail = '';
+  if (curtain) {
+    const straps: string[] = [];
+    for (let x = x0 + 2.5; x < x1 - 1; x += 3.4) straps.push(`M${round1(x)} ${bottom - 1.6}V${bottom}`);
+    detail = `<rect x="${x0}" y="${top}" width="${round1(x1 - x0)}" height="1" fill="${frame}"/>
+      <path d="M${x0} ${bottom - 1.8}H${x1}" stroke="#fff" stroke-opacity="0.45" stroke-width="0.5"/>
+      <path d="${straps.join('')}" stroke="${STEEL}" stroke-width="0.5"/>`;
+  }
+  return `<rect x="${x0}" y="${top}" width="${round1(x1 - x0)}" height="${bottom - top}" rx="0.6" fill="${color}" stroke="${frame}" stroke-width="0.6"/>${detail}
+    <rect x="${x0 - 0.3}" y="${bottom - 1.6}" width="1" height="1.6" fill="#d93a32"/>`;
+}
+
+/** Рама под кузовом и защитная планка сбоку между колёсами. */
+function chassisArt(x0: number, x1: number, y: number, guard?: [number, number]): string {
+  return `<rect x="${x0}" y="${y}" width="${round1(x1 - x0)}" height="1.6" fill="${STEEL}"/>${
+    guard ? `<path d="M${guard[0]} ${y + 2.4}H${guard[1]}" stroke="#aab3bc" stroke-width="0.7"/>` : ''
+  }`;
+}
+
+/**
+ * Грузовики, кабина справа: I — фургон на двух осях, II — тентованный с тремя задними осями
+ * и передней под кабиной, фура — тягач на трёх осях с полуприцепом на трёх.
+ */
+function truckArt(L: number, gen: number, color: string): string {
+  if (gen === 1) {
+    return `${chassisArt(1.5, 36, 16.4, [15, 28])}<rect x="28" y="16.8" width="5" height="2.8" rx="0.6" fill="${STEEL}"/>
+      ${cargoBoxArt(1, 33.6, 2, 16.4, color, false)}${cabArt(34.6, L, 6.3, color, 3.3)}
+      ${sideWheel(11.6, 3.1)}${sideWheel(39.6, 3.1)}`;
+  }
+  if (gen === 2) {
+    return `${chassisArt(1.5, 48.5, 17, [23, 37])}
+      ${cargoBoxArt(1, 47.8, 2, 17, color, true)}${cabArt(48.6, L, 3.6, color)}
+      ${[13.2, 19.2, 40.4, 53.8].map((x) => sideWheel(x, 2.7)).join('')}`;
+  }
+  // Полуприцеп лежит на седле тягача — над его задними осями; посередине — опорные стойки.
+  return `${chassisArt(51, 75, 17.6)}<rect x="66" y="17.6" width="5.4" height="2.6" rx="1" fill="#aab3bc"/>
+    ${chassisArt(3, 71.5, 16.6)}<path d="M45 18.2V21.6M43.8 21.8H46.2" stroke="${STEEL}" stroke-width="0.8"/>
+    ${cargoBoxArt(1, 71.5, 2, 16.6, color, true)}${cabArt(72.4, L, 3.8, color)}
+    ${[14.3, 20.5, 26.7, 54.5, 61.5, 79.6].map((x) => sideWheel(x, 2.7)).join('')}`;
+}
+
+/** Поезд или автомобиль для кнопок покупки; автобус и грузовик — цвета маршрута. */
+export function modelSvg(id: string, color?: string, w = 46, h = 22): string {
   // Новые модели — на вагон длиннее или с полосой «II».
   const gen = /3$/.test(id) ? 3 : /2$/.test(id) ? 2 : 1;
-  if (id.startsWith('freightTrain') || id.startsWith('passengerTrain')) {
-    const freight = id.startsWith('freightTrain');
-    const cars: string[] = [];
-    const n = 2 + gen;
-    const cw = (w - 4) / n;
-    for (let i = 0; i < n; i++) {
-      const fill = i === 0 ? '#3a4651' : freight ? '#a0603c' : '#4a8fe7';
-      cars.push(`<rect x="${2 + i * cw + 0.6}" y="7" width="${cw - 1.2}" height="${h - 14}" rx="1.5" fill="${fill}"/>`);
-      if (!freight && i > 0) cars.push(`<path d="M${3 + i * cw} ${h / 2 - 1}H${i * cw + cw}" stroke="#fff" stroke-width="1.4" stroke-dasharray="1.6 1.2"/>`);
-    }
-    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><path d="M1 ${h - 5}H${w - 1}" stroke="#5c6670" stroke-width="1.4"/>${cars.join('')}</svg>`;
+  const len = ROAD_ART_LEN[id];
+  if (len) {
+    const bus = id.startsWith('bus');
+    const art = bus ? busArt(len, gen, color ?? '#3b7dd8') : truckArt(len, gen, color ?? '#e07b39');
+    // Чуть крупнее значка: в карточке покупки видно окна, двери и колёса.
+    return `<svg class="model-art" viewBox="0 0 ${len + 2} 24" width="${(len + 2) * 1.2}" height="${24 * 1.2}">${art}</svg>`;
   }
-  if (id.startsWith('bus')) {
-    const stripe = gen > 1 ? `<path d="M3 ${h - 7}H${w - 3}" stroke="#f0cd60" stroke-width="1.4"/>` : '';
-    const joint = gen === 3 ? `<path d="M${w / 2} 6V${h - 6}" stroke="#2a5aa0" stroke-width="1.4"/>` : '';
-    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${body('#3b7dd8')}
-      <path d="M6 ${h / 2 - 1}H${w - 10}" stroke="#fff" stroke-width="2" stroke-dasharray="3 2"/>${stripe}${joint}</svg>`;
+  // Остальное — поезда.
+  const freight = id.startsWith('freightTrain');
+  const cars: string[] = [];
+  const n = 2 + gen;
+  const cw = (w - 4) / n;
+  for (let i = 0; i < n; i++) {
+    const fill = i === 0 ? '#3a4651' : freight ? '#a0603c' : '#4a8fe7';
+    cars.push(`<rect x="${2 + i * cw + 0.6}" y="7" width="${cw - 1.2}" height="${h - 14}" rx="1.5" fill="${fill}"/>`);
+    if (!freight && i > 0) cars.push(`<path d="M${3 + i * cw} ${h / 2 - 1}H${i * cw + cw}" stroke="#fff" stroke-width="1.4" stroke-dasharray="1.6 1.2"/>`);
   }
-  if (gen > 1) {
-    const cab = 10;
-    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${body('#e07b39')}
-      <rect x="4" y="7.5" width="${w - 4 - cab - 3}" height="${h - 15}" fill="#f4efe6"/>${gen === 3 ? `<path d="M${(w - cab) / 2} 7V${h - 7}" stroke="#c9c2b4" stroke-width="1"/>` : ''}</svg>`;
-  }
-  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${body('#e07b39')}
-    <rect x="4" y="7.5" width="${w - 16}" height="${h - 15}" fill="#f4efe6"/></svg>`;
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><path d="M1 ${h - 5}H${w - 1}" stroke="#5c6670" stroke-width="1.4"/>${cars.join('')}</svg>`;
 }
 
 /** Знак ограничения скорости. */
@@ -638,4 +900,95 @@ export function autoSvg(size = 18): string {
   }).join('');
   return `<svg class="auto-ic" viewBox="0 0 20 20" width="${size}" height="${size}"><g fill="#2f80ed">${teeth}<circle cx="10" cy="10" r="6.6"/></g>
     <path d="M7 8.2h3M8.5 6.7v3M10 12.2h3" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+}
+
+const DROP_FILL = '#5aa9e6';
+const DROP_STROKE = '#2f7fc4';
+
+/** Контур капли: круглое дно радиуса r с центром (cx, cy), острый кончик сверху. */
+function dropPath(cx: number, cy: number, r: number): string {
+  const top = cy - 1.9 * r;
+  return `M${cx} ${top}Q${cx + r} ${cy - 0.6 * r} ${cx + r} ${cy}A${r} ${r} 0 0 1 ${cx - r} ${cy}Q${cx - r} ${cy - 0.6 * r} ${cx} ${top}Z`;
+}
+
+/** Сколько воды на карте: почти пустая капля, одна капля, две капли. */
+export function waterSvg(amount: WaterAmount, size = 22): string {
+  const drop = (cx: number, cy: number, r: number) =>
+    `<path d="${dropPath(cx, cy, r)}" fill="${DROP_FILL}" stroke="${DROP_STROKE}" stroke-width="1.2" stroke-linejoin="round"/>`;
+  let body: string;
+  if (amount === 'dry') {
+    // Пустая капля, вода только на донышке.
+    const [cx, cy, r, h] = [12, 14.5, 5.5, 3];
+    const w = Math.sqrt(r * r - h * h);
+    body = `<path d="${dropPath(cx, cy, r)}" fill="#fff"/>
+      <path d="M${cx - w} ${cy + h}A${r} ${r} 0 0 0 ${cx + w} ${cy + h}Z" fill="${DROP_FILL}"/>
+      <path d="${dropPath(cx, cy, r)}" fill="none" stroke="${DROP_STROKE}" stroke-width="1.2" stroke-linejoin="round"/>`;
+  } else if (amount === 'normal') {
+    body = drop(12, 14.5, 5.5);
+  } else {
+    // Две капли рядом, правая заходит на левую.
+    body = `${drop(8.2, 14.3, 5)}${drop(15.8, 14.3, 5)}`;
+  }
+  return `<svg class="ng-ic" viewBox="0 0 24 24" width="${size}" height="${size}">${body}</svg>`;
+}
+
+/** Рельеф местности в профиль: ровное поле, холмы, горы со снежными вершинами. */
+export function reliefSvg(relief: Relief, size = 22): string {
+  let body: string;
+  if (relief === 'plains') {
+    body = '<path d="M1.5 20V15Q12 13.6 22.5 15V20Z" fill="#b5cf8e" stroke="#7c9a5c" stroke-width="1.2" stroke-linejoin="round"/>';
+  } else if (relief === 'hills') {
+    body = '<path d="M1.5 20C3.5 13 8 10 11.5 15.5C14 9 20 8.5 22.5 20Z" fill="#b5cf8e" stroke="#7c9a5c" stroke-width="1.2" stroke-linejoin="round"/>';
+  } else {
+    body = `<path d="M1.5 20L7 10L10 14L15 4L22.5 20Z" fill="#a39a8f" stroke="#6e655c" stroke-width="1.2" stroke-linejoin="round"/>
+      <path class="snow" d="M15 4L17.25 8.8L16.1 8.2L15 9.3L13.8 8.3L12.6 8.8Z" fill="#fff"/>
+      <path class="snow" d="M7 10L8.8 12.4L7.8 12L6.9 12.8L5.68 12.4Z" fill="#fff"/>`;
+  }
+  return `<svg class="ng-ic" viewBox="0 0 24 24" width="${size}" height="${size}">${body}</svg>`;
+}
+
+/** Ель силуэтом: вершина в (x, y), высота h. */
+const fir = (x: number, y: number, h: number, color: string) =>
+  `<path d="M${x} ${y}L${x + h * 0.36} ${y + h * 0.55}H${x + h * 0.2}L${x + h * 0.42} ${y + h}H${x - h * 0.42}L${x - h * 0.2} ${y + h * 0.55}H${x - h * 0.36}Z" fill="${color}"/>`;
+/** Лиственное дерево: крона на стволе. */
+const leafy = (x: number, y: number, r: number, color: string) =>
+  `<path d="M${x} ${y + r}v${r * 0.9}" stroke="#7b5e4c" stroke-width="1.2"/><circle cx="${x}" cy="${y}" r="${r}" fill="${color}"/>`;
+
+/** Пейзаж биома в профиль (64×44): по нему биом узнаётся раньше, чем прочтёшь название. */
+export function biomeSvg(id: BiomeId, w = 64, h = 44): string {
+  const sky = '<rect width="64" height="44" fill="#e9f2f6"/>';
+  let body: string;
+  if (id === 'temperate') {
+    body = `<path d="M0 30Q16 18 34 27T64 24V44H0Z" fill="#bcd59a"/><path d="M0 36Q30 30 64 34V44H0Z" fill="#cfe0ae"/>
+      <path d="M22 44Q30 37 46 35" stroke="#8cc3e6" stroke-width="3.4" fill="none" stroke-linecap="round"/>
+      ${leafy(10, 27, 4, '#7aa55a')}${leafy(17, 30, 3.2, '#8fb46a')}${leafy(52, 25, 3.6, '#6e9a52')}`;
+  } else if (id === 'taiga') {
+    body = `<path d="M0 28Q20 20 40 26T64 22V44H0Z" fill="#8fb07c"/><path d="M0 36Q32 32 64 35V44H0Z" fill="#a9c49a"/>
+      <ellipse cx="38" cy="39" rx="12" ry="3" fill="#8cc3e6"/>
+      ${[
+        [6, 16, 14],
+        [13, 19, 12],
+        [20, 15, 15],
+        [50, 14, 14],
+        [57, 17, 13],
+        [27, 21, 10],
+      ]
+        .map(([x, y, s], k) => fir(x, y, s, k % 2 ? '#46704a' : '#3f6844'))
+        .join('')}`;
+  } else if (id === 'steppe') {
+    body = `<circle cx="50" cy="12" r="5" fill="#f2c94c"/><path d="M0 32Q32 29.5 64 31V44H0Z" fill="#e2d79a"/>
+      <path d="M0 38Q32 35 64 37V44H0Z" fill="#d8c983"/>
+      <path d="M8 36l1-3M10 36l-.6-3.4M44 34l1-3M46 34l-.6-3.4M30 40l1-3" stroke="#a8a060" stroke-width="0.9" stroke-linecap="round"/>
+      ${leafy(20, 27, 2.6, '#9cae6a')}`;
+  } else if (id === 'mountains') {
+    body = `<path d="M-2 36L14 12L22 22L34 6L48 26L54 18L66 34V44H-2Z" fill="#a39a8f"/>
+      <path d="M34 6L38.4 12.4L36 11.4L34 13.4L31.8 11.6L29.6 12.6ZM14 12L17.2 16.8L15.4 16L14 17.4L12.4 16.2L10.8 16.8Z" fill="#fff"/>
+      <path d="M0 38Q32 32 64 37V44H0Z" fill="#b7cc9c"/>${fir(8, 30, 9, '#577f50')}${fir(56, 30, 9, '#5f8c55')}${fir(46, 32, 7, '#4d7448')}`;
+  } else {
+    body = `<circle cx="14" cy="12" r="5" fill="#f2b84c"/><path d="M0 32Q14 24 30 31T64 28V44H0Z" fill="#e8cf96"/>
+      <path d="M0 38Q20 32 40 37T64 36V44H0Z" fill="#dcbc7c"/>
+      <ellipse cx="46" cy="38.5" rx="7" ry="2" fill="#8cc3e6"/>
+      <path d="M50 37V29M50 29l-4 1.6M50 29l4 1.4M50 29l-2.6-3M50 29l2.8-2.8" stroke="#6e9a52" stroke-width="1.3" stroke-linecap="round" fill="none"/>`;
+  }
+  return `<svg class="map-mini" viewBox="0 0 64 44" width="${w}" height="${h}"><clipPath id="bm-${id}"><rect width="64" height="44" rx="6"/></clipPath><g clip-path="url(#bm-${id})">${sky}${body}</g></svg>`;
 }

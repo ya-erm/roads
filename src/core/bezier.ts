@@ -80,6 +80,60 @@ export function offsetCubic(c: Cubic, d: number): Cubic {
   return { p0: a.p, p1: add(a.p, scale(sub(c.p1, c.p0), a.s)), p2: add(b.p, scale(sub(c.p2, c.p3), b.s)), p3: b.p };
 }
 
+/**
+ * Параллель кривой c на расстоянии d по всей длине. offsetCubic точен у дуги окружности, а где кривизна
+ * меняется (длинная или S-образная кривая), его середина отходит от параллели — тогда кривая делится
+ * пополам и сдвигается по кускам, пока каждый не ляжет на расстоянии d с точностью tol. Кривые короче
+ * 2·minLen не делятся. Куски — по порядку, стыкуются концами и касательными.
+ */
+export function offsetCubics(c: Cubic, d: number, tol = 0.15, minLen = 16): Cubic[] {
+  const o = offsetCubic(c, d);
+  if (offsetError(c, o, d) <= tol || cubicLength(c) < 2 * minLen) return [o];
+  const [a, b] = splitBezier(c, 0.5);
+  return [...offsetCubics(a, d, tol, minLen), ...offsetCubics(b, d, tol, minLen)];
+}
+
+/** Насколько кривая o отходит от параллели c на расстоянии d: наибольшее |расстояние до c − |d|| по точкам o. */
+export function offsetError(c: Cubic, o: Cubic, d: number, samples = 16): number {
+  let worst = 0;
+  for (let i = 1; i < samples; i++) worst = Math.max(worst, Math.abs(distanceToCubic(c, bezPoint(o, i / samples)) - Math.abs(d)));
+  return worst;
+}
+
+/** Расстояние от точки p до кривой c: грубо по точкам, затем уточнение Ньютоном. */
+export function distanceToCubic(c: Cubic, p: Vec, samples = 32): number {
+  let t = 0;
+  let best = Infinity;
+  for (let i = 0; i <= samples; i++) {
+    const d = dist(bezPoint(c, i / samples), p);
+    if (d < best) {
+      best = d;
+      t = i / samples;
+    }
+  }
+  for (let k = 0; k < 6; k++) {
+    const r = sub(bezPoint(c, t), p);
+    const d1 = bezDeriv(c, t);
+    const f = dot(r, d1);
+    const df = dot(d1, d1) + dot(r, bezSecond(c, t));
+    if (Math.abs(df) < 1e-12) break;
+    t = Math.max(0, Math.min(1, t - f / df));
+  }
+  return Math.min(best, dist(bezPoint(c, t), p));
+}
+
+/** Длина кривой (по ломаной из n кусков). */
+export function cubicLength(c: Cubic, n = 24): number {
+  let total = 0;
+  let prev = c.p0;
+  for (let i = 1; i <= n; i++) {
+    const p = bezPoint(c, i / n);
+    total += dist(prev, p);
+    prev = p;
+  }
+  return total;
+}
+
 export function quadToCubic(a: Vec, ctrl: Vec, b: Vec): Cubic {
   return { p0: a, p1: lerp(a, ctrl, 2 / 3), p2: lerp(b, ctrl, 2 / 3), p3: b };
 }

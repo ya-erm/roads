@@ -1,4 +1,5 @@
 import type { Vec } from '../core/vec';
+import type { VehicleBody } from './body';
 
 export type VehicleKind = 'car' | 'truck' | 'bus';
 
@@ -11,6 +12,8 @@ export interface VehicleSpec {
   color: string;
   /** Цвет груза в кузове (для грузовиков). */
   load?: string;
+  /** Кузов машины компании (см. sim/body); у машин жителей нет. */
+  body?: VehicleBody;
 }
 
 export interface Vehicle extends VehicleSpec {
@@ -34,6 +37,8 @@ export interface Vehicle extends VehicleSpec {
   dir: Vec;
   /** Середина задней оси — кузов тянется за передней точкой по ней. */
   rear?: Vec;
+  /** Задняя ось второй части (полуприцепа, задней секции автобуса) — тянется за шарниром; у цельных машин нет. */
+  trail?: Vec;
   level: number;
   /** Слой отрисовки — как у полотна или узла под машиной: на пандусе моста она рисуется вместе с мостом, а не под ним. */
   layer?: number;
@@ -64,5 +69,5 @@ export interface Vehicle extends VehicleSpec {
 /** Сторона поворотника: −1 левый, 1 правый, 0 выключен. */
 export type Blinker = -1 | 0 | 1;
 
-/** Что нужно, чтобы нарисовать машину: вид, цвет, нос и курс, поворотник. */
-export type VehicleLook = Pick<Vehicle, 'kind' | 'length' | 'width' | 'color' | 'load' | 'pos' | 'dir' | 'blinker'>;
+/** Что нужно, чтобы нарисовать машину: вид и кузов, цвет, нос и курс, вторая часть кузова, поворотник. */
+export type VehicleLook = Pick<Vehicle, 'kind' | 'body' | 'length' | 'width' | 'color' | 'load' | 'pos' | 'dir' | 'trail' | 'blinker'>;

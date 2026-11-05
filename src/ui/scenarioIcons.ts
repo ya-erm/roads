@@ -49,7 +49,32 @@ export const supplyIcon = (size = 24) =>
     'Снабжение города',
   );
 
-/** Значок задания по его типу: груз, пассажиры, деньги, город, завод, молния, поток. */
+/** Зелёный «плюс» в углу значка — новое: маршрут, город, предприятие. */
+const PLUS = '<circle cx="18" cy="6" r="4.6" fill="#2e9d57" stroke="#fff" stroke-width="1"/><path d="M18 3.6v4.8M15.6 6h4.8" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>';
+
+/** Новые маршруты: линия между двумя станциями и «плюс». */
+export const newRouteIcon = (size = 24) =>
+  disc(
+    '#4a8fe7',
+    `<path d="M5.5 17.5C9 17.5 9 10 14 10" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round"/><circle cx="5.5" cy="17.5" r="2.2" fill="#fff"/><circle cx="14" cy="10" r="2.2" fill="#fff"/>${PLUS}`,
+    size,
+    'Новые маршруты',
+  );
+
+/** Подключить новые города: дом и «плюс». */
+export const newTownIcon = (size = 24) =>
+  disc(TOWN_COLOR, `<path d="M3.8 13.4L10.4 7.6l6.6 5.8V20h-4.2v-4h-4.8v4H3.8z" fill="#fff"/>${PLUS}`, size, 'Новые города в сети');
+
+/** Подключить новые предприятия: завод и «плюс». */
+export const newIndustryIcon = (size = 24) =>
+  disc(
+    '#b0703a',
+    `<path d="M3.5 19.5v-6.8l3.8 2.3v-2.3l3.8 2.3V9h2l.5-2.2h1.4l.5 2.2h1.8v10.5z" fill="#fff"/>${PLUS}`,
+    size,
+    'Новые предприятия в сети',
+  );
+
+/** Значок задания по его типу: груз, пассажиры, деньги, город, завод, молния, поток, новое в сети. */
 export function objectiveIcon(o: Objective, size = 24): string {
   const p = o.params;
   switch (p.kind) {
@@ -69,6 +94,10 @@ export function objectiveIcon(o: Objective, size = 24): string {
       return boltIcon(size);
     case 'throughput':
       return flowIcon(size);
+    case 'newRoutes':
+      return newRouteIcon(size);
+    case 'connect':
+      return p.what === 'town' ? newTownIcon(size) : newIndustryIcon(size);
   }
 }
 

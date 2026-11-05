@@ -2,24 +2,29 @@ import {
   CAR_COLORS,
   COST,
   ECONOMY,
+  GRADE,
+  IDM,
   LIGHTS,
   MIN_SEGMENT_LEN,
   MONTH_LENGTH,
+  MONTH_SCALE,
   RAIL_STATION,
   SIM_DT,
   START_YEAR,
   STATION,
   STOP,
+  STORAGE,
   TOWN_GROWTH,
   TOWN_TRAFFIC,
 } from '../config';
-import { Cubic, CurveLUT, intersectCurves, offsetCubic, reverseCubic, splitBezier, straightCubic } from '../core/bezier';
+import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, insideRuns, splitCorridor } from '../lanes/edit';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
-import { mainPairOf } from '../lanes/graph';
+import { autoMainPair, mainPairOf } from '../lanes/graph';
 import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, parseLaneKey, twoWay } from '../lanes/model';
+import { gradeFactor } from '../lanes/speedProfile';
 import type { LaneTraffic } from '../lanes/traffic';
 import { RailSim, Train } from '../sim/rail';
 import { stepWagons } from '../sim/wagons';
@@ -27,10 +32,10 @@ import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
 import { Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TOWN_NEED, TownBuilding, TownSupplyMonth } from '../world/entities';
 import { Network, NetworkSave, Segment } from '../world/network';
-import { halfWidth, isRail, isTrunk, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
+import { halfWidth, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
 import { DEFAULT_SETTINGS, WorldSettings } from '../world/settings';
-import { Terrain } from '../world/terrain';
+import { Terrain, TerraformEdit, TerraformMode } from '../world/terrain';
 import {
   anchorFor,
   coreRadius,
@@ -52,11 +57,17 @@ import { prepareSettings } from '../scenario/generator';
 import { Scenario } from '../scenario/manager';
 import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
+import { Journal, JournalEntry } from './journal';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan } from './roadbuild';
 import { RING_SIZES, RingOptions, Roads } from './roads';
+import { TimelapseRecorder, type TimelapseSave } from './timelapse';
+import { Motion, SpeedChart, speedChart, TrackPiece } from './speedChart';
 import { BuildContext, Builder, Plan, RoadRequest, Snap } from './build';
 import { diamondPlan, TemplateOptions, templatePlan, TemplatePlan } from './interchange';
 import { cloneNetwork, copyRails, RailPaste } from './railFragment';
+import { chainCoords, chainOffset, trackChain } from './railEdit';
+import { linesForTown } from './townLines';
+import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import {
   AUTO_FLEET,
   DEFAULT_RULE,
@@ -68,17 +79,21 @@ import {
   LineMode,
   ModelId,
   MODELS,
+  modelsFor,
+  ModelTier,
   newestLike,
   RailModel,
   StopRule,
   vehicleCapacity,
   vehicleLoad,
   carsOf,
+  bayBox,
   bayFront,
   bayPose,
   entryPose,
   nearestBay,
   Pose,
+  stopBerth,
 } from './transport';
 
 export type StationKind = Station['kind'];
@@ -207,6 +222,8 @@ interface UndoSnapshot {
   buildings: { townId: number; list: TownBuilding[] }[];
   roundabouts: [number, Vec][];
   moneyBefore: number;
+  /** Сколько правок рельефа было до действия. */
+  terraform: number;
   /** Сколько стоило действие — вернётся при отмене. */
   spent: number;
 }
@@ -217,10 +234,15 @@ export const ALL_SERVICES: StationServes = { pax: true, cargo: true };
 /** Геометрия будущего вокзала: где резать путь и куда класть второй. */
 interface RailStationGeom {
   segId: number;
-  /** Стрелка, начало платформы, конец платформы, стрелка — вдоль пути. */
-  cuts: [number, number, number, number];
-  /** Дополнительные пути (2-й, 3-й, …): съезд, платформа, съезд. */
-  tracks: [Cubic, Cubic, Cubic][];
+  /** Проходная: стрелка, начало платформы, конец платформы, стрелка — вдоль пути. */
+  cuts?: [number, number, number, number];
+  /**
+   * Конечная (тупиковая): точки на главном пути — горловина (стрелка), начало платформы и упор
+   * (конец пути). Точками, а не длиной вдоль пути: путь в чистом поле строитель может положить в любую сторону.
+   */
+  terminal?: { throat: Vec; start: Vec; buffer: Vec };
+  /** Дополнительные пути (2-й, 3-й, …): съезд, платформа и (у проходной) съезд обратно. */
+  tracks: ([Cubic, Cubic] | [Cubic, Cubic, Cubic])[];
   /** Станция в чистом поле: сначала строим этот главный путь (segId тогда −1). */
   main?: RoadRequest;
 }
@@ -324,6 +346,14 @@ export interface SaveData {
   history: MonthRecord[];
   /** Состояние сценария; нет — песочница. */
   scenario?: ScenarioState;
+  /** Открытая ступень моделей (в старых сохранениях нет — по этапу сценария). */
+  modelTier?: ModelTier;
+  /** Журнал партии (в старых сохранениях нет). */
+  journal?: JournalEntry[];
+  /** Кадры таймлапса партии (в старых сохранениях нет — запись пойдёт с загрузки). */
+  timelapse?: TimelapseSave;
+  /** Правки рельефа игроком (рельеф строится по seed заново, правки — поверх). В старых сохранениях нет. */
+  terraform?: TerraformEdit[];
   /** Поезда в пути и на платформах. */
   rail?: ReturnType<RailSim['serialize']>;
   /** Положение камеры — заполняет интерфейс. */
@@ -359,16 +389,60 @@ export interface BaysPlan {
 }
 
 const MONTHS = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
-/** Выезд автостанции — улица 1+1. */
-const DRIVEWAY = { cls: 'street' as const, lanes: twoWay(1, 1) };
+/** Выезд автостанции — шоссе 1+1, 90 км/ч (как «Шоссе» в панели дорог): машины со станции сразу едут быстро. */
+const DRIVEWAY = { cls: 'highway' as const, lanes: twoWay(1, 1) };
 /** Выезд станции из перекрёстка — не ближе этого угла (рад) к соседним дорогам. */
 const STATION_JOIN_GAP = 0.5;
+
+/**
+ * Выезд-шоссе быстрее улиц, и «Авто» сделало бы главной дорогой перекрёстка его (с улицей напротив).
+ * Главной остаётся та, что была бы без выезда: закрепляем её в узле примыкания. net — сеть с выездом
+ * (план до стройки), nodePos — тупик выезда у станции. Главную, выбранную игроком, не трогаем.
+ */
+function keepMainRoad(net: LaneNet, nodePos: Vec): void {
+  const station = net.nodesNear(nodePos, 2)[0];
+  if (station?.corridors.length !== 1) return;
+  const drive = net.corridor(station.corridors[0]);
+  const join = net.node(drive.a === station.id ? drive.b : drive.a);
+  if (join.mainPair != null) return;
+  const ends = net.ends(join);
+  if (!autoMainPair(ends)?.includes(drive.id)) return;
+  const without = autoMainPair(ends.filter((e) => e.corridor.id !== drive.id));
+  if (without) join.mainPair = without;
+}
+
 /** Легковушка жителя: до ≈130 км/ч на автомагистрали. */
 const CAR_SPEC = { kind: 'car' as const, length: 7, width: 4, maxSpeed: 60, accel: 10 };
-/** Сквозной путь ж/д вокзала (первая платформа), если у него есть боковые пути. */
-const throughOf = (st: Station): number | undefined => (st.platforms.length > 1 ? st.platforms[0] : undefined);
-/** Платформы вокзала: боковые первыми, сквозной путь — последним. */
-const sidingsFirst = (st: Station): number[] => (st.platforms.length > 1 ? [...st.platforms.slice(1), st.platforms[0]] : st.platforms);
+/** Сквозной путь ж/д вокзала (первая платформа), если у него есть боковые пути; у конечной сквозного нет. */
+const throughOf = (st: Station): number | undefined => (st.platforms.length > 1 && !st.terminal ? st.platforms[0] : undefined);
+/** Платформы вокзала: боковые первыми, сквозной путь — последним (у конечной все тупики равны). */
+const sidingsFirst = (st: Station): number[] => (st.platforms.length > 1 && !st.terminal ? [...st.platforms.slice(1), st.platforms[0]] : st.platforms);
+/** Сколько путей с платформами у нового вокзала: от одного (остановочный пункт) до четырёх. */
+export const clampRailTracks = (n: number): number =>
+  Number.isFinite(n) ? Math.max(RAIL_STATION.minTracks, Math.min(RAIL_STATION.maxTracks, Math.round(n))) : 2;
+/** Длина платформ нового вокзала, м: от minLength до maxLength шагом lengthStep. */
+export const clampRailLength = (m: number): number => {
+  const R = RAIL_STATION;
+  if (!Number.isFinite(m)) return R.platform;
+  return Math.max(R.minLength, Math.min(R.maxLength, Math.round(m / R.lengthStep) * R.lengthStep));
+};
+/**
+ * Цена вокзала без путей: по цене станции за каждую платформу сверх первой (на один путь — как на два).
+ * Половина цены — здание, половина растёт с длиной платформ: у обычной (150 м) — ровно цена станции.
+ */
+export const railStationFee = (tracks: number, length: number = RAIL_STATION.platform): number =>
+  Math.round((RAIL_STATION.cost * Math.max(1, tracks - 1) * (0.5 + (0.5 * length) / RAIL_STATION.platform)) / 100) * 100;
+/** Сколько вагонов длиной carLength встанет на платформу (поезду нужен запас 6 м). */
+export const carsOnPlatform = (length: number, carLength: number): number => Math.max(0, Math.floor((length - 6) / carLength));
+/**
+ * Сколько пассажирских и сколько грузовых вагонов встанет на платформу — как предел состава в игре (maxCars):
+ * у каждого рода — по самому длинному вагону среди его моделей.
+ */
+export function platformCars(length: number): { passenger: number; freight: number } {
+  const longest = (kind: 'passenger' | 'freight') =>
+    Math.max(...Object.values(MODELS).flatMap((m) => (m.mode === 'rail' && m.train.kind === kind ? [m.train.carLength] : [])));
+  return { passenger: Math.max(2, carsOnPlatform(length, longest('passenger'))), freight: Math.max(2, carsOnPlatform(length, longest('freight'))) };
+}
 
 export class Game implements BuildContext {
   readonly rng: Rng;
@@ -412,6 +486,17 @@ export class Game implements BuildContext {
   private nextEntityId = 1;
   private readonly owners = new Map<number, SimOwner>();
   private roadValue = { version: -1, value: 0 };
+  /** Когда транспорт подъехал к нынешней станции (игровое время) — для журнала: сколько простоял. */
+  private readonly arrivedAt = new Map<number, number>();
+  /** Когда транспорт уехал с прошлой станции и сколько простоял в пути — для журнала: время и скорость рейса. */
+  private readonly departedAt = new Map<number, number>();
+  private readonly stoodOnTrip = new Map<number, number>();
+  /** Очереди у станций, где все посты заняты (id станции → очередь); пересчёт — раз в полсекунды. */
+  private readonly jams = new Map<number, Jam>();
+  private jamClock = 0;
+  /** Советнику: с какого времени машина готова уехать со станции (погрузилась) и с какого ждёт свободный пост. */
+  private readonly readyAt = new Map<number, number>();
+  private readonly bayWaitSince = new Map<number, number>();
   /** Прикидка времени круга линии, пока его не измерили по рейсам: когда считали и сколько вышло. */
   private readonly lapGuess = new Map<number, { at: number; lap: number | null }>();
   /** Вызывается в конце каждого игрового месяца — для автосохранения. */
@@ -420,12 +505,23 @@ export class Game implements BuildContext {
   scenario: Scenario | null = null;
   /** Множители экономики от событий сценария; в песочнице все равны 1. */
   mods: EconomyMods = NO_MODS;
+  /**
+   * Открытая ступень моделей транспорта: в сценарии её поднимают этапы (B — вторая, C — третья), и она
+   * остаётся открытой, если после сценария играть дальше в песочнице. Помимо неё модели выходят по годам.
+   */
+  modelTier: ModelTier = 1;
 
   readonly settings: WorldSettings;
+  /** Журнал партии для разбора: действия, рейсы, сводки, задания и события. */
+  readonly journal: Journal;
+  /** Таймлапс партии: кадр сети в конце каждого месяца (см. timelapse.ts). */
+  readonly timelapse: TimelapseRecorder;
 
   constructor(setup: WorldSettings | number, save?: SaveData) {
     // Сценарий решает архетип по seed ещё до генерации карты: от него зависят города и предприятия.
     this.settings = prepareSettings(typeof setup === 'number' ? { ...DEFAULT_SETTINGS, seed: setup } : setup);
+    this.journal = new Journal(() => this.time / MONTH_LENGTH, save?.journal);
+    this.timelapse = new TimelapseRecorder(save?.timelapse);
     this.rng = new Rng(this.settings.seed);
     this.terrain = new Terrain(this.rng, this.settings);
     this.money = this.settings.money;
@@ -435,12 +531,18 @@ export class Game implements BuildContext {
       onArrive: (v) => this.onArrive(v),
       onLost: (v) => this.onLost(v),
     });
-    this.rail = new RailSim(this.net, {
-      onArrive: (t) => this.onTrainArrive(t),
-      onLost: (t) => this.onTrainLost(t),
-    });
+    this.rail = new RailSim(
+      this.net,
+      {
+        onArrive: (t) => this.onTrainArrive(t),
+        onLost: (t) => this.onTrainLost(t),
+      },
+      (p, dir) => this.terrain.gradeAlong(p, dir),
+    );
     this.builder = new Builder(this);
     this.roadBuilder = new RoadBuilder(this);
+    // Машины на изгибах и уклонах: профиль скорости полос берёт рельеф отсюда.
+    this.roads.traffic.relief = { ground: () => this.ground(), version: () => this.terrain.version };
     if (save) {
       this.restore(save);
       return;
@@ -450,7 +552,11 @@ export class Game implements BuildContext {
     this.industries = world.industries;
     this.net.rebuild();
     this.roads.changed();
+    const s = this.settings;
+    this.journal.add('game', { seed: s.seed, size: s.size, towns: this.towns.length, industries: this.industries.length, water: s.water, money: this.money });
     if (this.settings.scenario) this.attachScenario(Scenario.create(this));
+    // Первый кадр таймлапса — мир до первой дороги игрока.
+    this.timelapse.capture(this);
   }
 
   private attachScenario(sc: Scenario): void {
@@ -496,6 +602,10 @@ export class Game implements BuildContext {
       history: this.history,
       rail: this.rail.serialize(),
       scenario: this.scenario?.toSave(),
+      modelTier: this.modelTier,
+      journal: this.journal.entries,
+      timelapse: this.timelapse.toSave(),
+      terraform: this.terrain.edits.length ? this.terrain.edits : undefined,
     };
   }
 
@@ -588,6 +698,7 @@ export class Game implements BuildContext {
    */
   private restore(save: SaveData): void {
     for (const f of save.extraForests) this.terrain.addForest(f.c, f.r, this.rng);
+    for (const e of save.terraform ?? []) this.terrain.terraform(e);
     this.net.load(save.net);
     this.roads.replace(LaneNet.fromJSON(save.roads));
     this.towns = save.towns;
@@ -641,6 +752,11 @@ export class Game implements BuildContext {
     this.nextEntityId = save.nextEntityId;
     this.rng.seedState = save.rng;
     if (save.scenario) this.attachScenario(Scenario.restore(this, save.scenario));
+    // Сохранения до ступеней: в сценарии открыто столько, сколько этапов пройдено.
+    this.modelTier = save.modelTier ?? (save.scenario ? (Math.min(3, save.scenario.phase + 1) as ModelTier) : 1);
+    this.journal.add('load', { date: this.dateLabel, money: this.money, lines: this.lines.size, fleet: this.fleet.size });
+    // Сохранение без таймлапса: запись начинается отсюда, с сети на момент загрузки.
+    if (!this.timelapse.frames.length) this.timelapse.capture(this);
   }
 
   /**
@@ -736,7 +852,18 @@ export class Game implements BuildContext {
   }
 
   private worldContext(): WorldContext {
-    return { roads: this.roads.net, terrain: this.terrain, index: this.index, rng: this.rng, nextId: () => this.nextEntityId++, rail: this.net };
+    const driveways = this.drivewayIds();
+    return { roads: this.roads.net, terrain: this.terrain, index: this.index, rng: this.rng, nextId: () => this.nextEntityId++, rail: this.net, driveways };
+  }
+
+  /** Полотна выездов автостанций (у узла станции): они шоссе, но для города и других станций — как улицы. */
+  private drivewayIds(): Set<number> {
+    const ids = new Set<number>();
+    for (const st of this.stations.values()) {
+      if (st.kind !== 'road') continue;
+      for (const id of this.roads.net.nodes.get(st.nodeId)?.corridors ?? []) ids.add(id);
+    }
+    return ids;
   }
 
   // ---------- BuildContext ----------
@@ -751,6 +878,12 @@ export class Game implements BuildContext {
 
   inBounds(p: Vec, margin = 0): boolean {
     return this.terrain.inBounds(p, margin);
+  }
+
+  /** Отметка земли для профиля дорог и путей (вода — NaN); без рельефа — null. */
+  ground(): ((p: Vec) => number) | null {
+    const t = this.terrain;
+    return t.hasRelief ? (p) => (t.isWater(p, 2) ? NaN : t.heightAt(p)) : null;
   }
 
   blocked(p: Vec, radius: number): boolean {
@@ -879,7 +1012,7 @@ export class Game implements BuildContext {
       if (!runs.length) continue;
       corridors.push(c.id);
       const share = runs.reduce((s, [p, q]) => s + q - p, 0) / c.length;
-      refund += corridorCost(this.roads.net, c, (q, m) => this.isWater(q, m)) * share * COST.refundRatio;
+      refund += corridorCost(this.roads.net, c, (q, m) => this.isWater(q, m), this.ground()) * share * COST.refundRatio;
     }
     const buildings: TownBuilding[] = [];
     let cost = 0;
@@ -1307,6 +1440,7 @@ export class Game implements BuildContext {
       budget: this.budget,
       isWater: (p, m) => this.isWater(p, m),
       inBounds: (p, m) => this.inBounds(p, m),
+      ground: () => this.ground(),
       obstaclesAt: (p, r) => this.obstaclesAt(p, r),
       demolishCost: (id) => this.demolishCost(id),
       demolish: () => {},
@@ -1325,6 +1459,7 @@ export class Game implements BuildContext {
       budget: this.budget,
       isWater: (p, m) => this.isWater(p, m),
       inBounds: (p, m) => this.inBounds(p, m),
+      ground: () => this.ground(),
       obstaclesAt: (p, r) => this.obstaclesAt(p, r),
       demolishCost: (id) => this.demolishCost(id),
       demolish: () => {},
@@ -1348,35 +1483,10 @@ export class Game implements BuildContext {
     const hit = net.findSegmentNear(a, Math.max(30, radius), onTrack);
     if (!hit) return fail('Зажмите на пути и протяните вдоль него');
     // Цепочка участков по порядку: от участка под курсором в обе стороны, пока узел — не стрелка.
-    const chain: { seg: Segment; forward: boolean }[] = [{ seg: hit.seg, forward: true }];
-    const walk = (from: number, ahead: boolean) => {
-      let node = from;
-      for (let guard = 0; guard < 60; guard++) {
-        const segs = net.railSegs(net.node(node)).filter((id) => onTrack(net.segment(id)));
-        if (segs.length !== 2) return;
-        const known = ahead ? chain[chain.length - 1].seg.id : chain[0].seg.id;
-        const next = net.segment(segs.find((id) => id !== known)!);
-        if (chain.some((x) => x.seg.id === next.id)) return;
-        if (ahead) {
-          chain.push({ seg: next, forward: next.a === node });
-          node = next.a === node ? next.b : next.a;
-        } else {
-          chain.unshift({ seg: next, forward: next.b === node });
-          node = next.b === node ? next.a : next.b;
-        }
-      }
-    };
-    walk(hit.seg.b, true);
-    walk(hit.seg.a, false);
+    const chain = trackChain(net, hit.seg);
     if (chain.some((x) => !net.isFlat(x.seg) || net.node(x.seg.a).level !== 0)) return fail('Пристроить путь — только на земле');
-    // Координата вдоль цепочки: u у начала каждого участка.
-    const starts: number[] = [];
-    let u = 0;
-    for (const x of chain) {
-      starts.push(u);
-      u += x.seg.length;
-    }
-    const along = (i: number, s: number) => starts[i] + (chain[i].forward ? s : chain[i].seg.length - s);
+    // Координата вдоль цепочки.
+    const along = chainCoords(chain).at;
     const uA = along(chain.findIndex((x) => x.seg.id === hit.seg.id), hit.s);
     let best = { i: 0, s: 0, d: Infinity, point: b };
     chain.forEach((x, i) => {
@@ -1390,23 +1500,14 @@ export class Game implements BuildContext {
     const tB = scale(segB.seg.lut.tangentAt(best.s), segB.forward ? 1 : -1);
     const side = dot(sub(b, best.point), { x: -tB.y, y: tB.x }) >= 0 ? 1 : -1;
     const [u0, u1] = uA < uB ? [uA, uB] : [uB, uA];
-    const reqs: RoadRequest[] = [];
-    chain.forEach((x, i) => {
-      const lo = Math.max(u0, starts[i]);
-      const hi = Math.min(u1, starts[i] + x.seg.length);
-      if (hi - lo < 1) return;
-      // Кусок участка между lo и hi, по ходу цепочки, и его копия сбоку.
-      const sOf = (uu: number) => (x.forward ? uu - starts[i] : x.seg.length - (uu - starts[i]));
-      const [ta, tb] = [x.seg.lut.tAt(sOf(lo)), x.seg.lut.tAt(sOf(hi))];
-      let piece = x.seg.curve;
-      const t0 = Math.min(ta, tb);
-      const t1 = Math.max(ta, tb);
-      if (t1 < 1) piece = splitBezier(piece, t1)[0];
-      if (t0 > 0) piece = splitBezier(piece, t0 / t1)[1];
-      if (!x.forward) piece = reverseCubic(piece);
-      const curve = offsetCubic(piece, side * TRACK_GAP);
-      reqs.push({ start: { kind: 'free', pos: curve.p0, level: 0 }, end: { kind: 'free', pos: curve.p3, level: 0 }, spec: RAIL_SPEC, mode: 'straight', curve });
-    });
+    // Копия цепочки сбоку — параллелью по всей длине (длинные и S-образные кривые — несколькими кусками).
+    const reqs: RoadRequest[] = chainOffset(chain, u0, u1, side * TRACK_GAP).map((curve) => ({
+      start: { kind: 'free', pos: curve.p0, level: 0 },
+      end: { kind: 'free', pos: curve.p3, level: 0 },
+      spec: RAIL_SPEC,
+      mode: 'straight',
+      curve,
+    }));
     // Каждый кусок — против нынешней сети; соседние куски стыкуются концами.
     let cost = 0;
     for (const req of reqs) {
@@ -1507,6 +1608,7 @@ export class Game implements BuildContext {
     if (amount <= 0) return false;
     this.loan += amount;
     this.money += amount;
+    this.journal.add('loan', { take: amount, loan: this.loan, money: this.money });
     return true;
   }
 
@@ -1535,6 +1637,7 @@ export class Game implements BuildContext {
     if (amount <= 0 || this.money < amount) return false;
     this.loan -= amount;
     this.money -= amount;
+    this.journal.add('loan', { repay: amount, loan: this.loan, money: this.money });
     return true;
   }
 
@@ -1784,6 +1887,39 @@ export class Game implements BuildContext {
     return mainPairOf(this.roads.net.ends(n), choice);
   }
 
+  // ---------- Рельеф ----------
+
+  /**
+   * Мазок кисти рельефа в точке p: что изменится и сколько стоит. Нельзя в воде, у края карты и под
+   * предприятием, станцией или ратушей; дома и дороги — можно (дороги ложатся на новый рельеф).
+   */
+  terraformPlan(p: Vec, mode: TerraformMode, r: number, target?: number): { ok: boolean; reason?: string; cost: number; edit: TerraformEdit } {
+    const edit: TerraformEdit = { x: p.x, y: p.y, r, mode, amount: mode === 'flatten' ? 1 : 1.5, target };
+    const fail = (reason: string) => ({ ok: false, reason, cost: 0, edit });
+    if (!this.terrain.hasRelief) return fail('В этом мире нет рельефа');
+    if (!this.inBounds(p, r * 0.5)) return fail('За краем карты');
+    if (this.isWater(p, r * 0.3)) return fail('Здесь вода');
+    for (const s of this.index.near(p, r + 120)) {
+      if (s.type === 'building' && s.kind !== 'landmark') continue;
+      if (!pointInFootprint(p, s.fp, r * 0.7)) continue;
+      return fail(s.type === 'industry' ? 'Мешает предприятие' : s.type === 'station' ? 'Мешает станция' : 'Мешает ратуша');
+    }
+    const volume = this.terrain.terraformVolume(edit);
+    const cost = Math.round(volume * COST.terraform);
+    if (volume < 1) return { ok: false, reason: mode === 'flatten' ? 'Здесь уже ровно' : mode === 'lower' ? 'Ниже — вода' : 'Нечего менять', cost: 0, edit };
+    if (cost > this.budget) return { ok: false, reason: 'Не хватает денег', cost, edit };
+    return { ok: true, cost, edit };
+  }
+
+  /** Мазок кисти рельефа (снимок для Ctrl+Z делает тот, кто ведёт кисть). */
+  terraform(p: Vec, mode: TerraformMode, r: number, target?: number): boolean {
+    const plan = this.terraformPlan(p, mode, r, target);
+    if (!plan.ok) return false;
+    this.terrain.terraform(plan.edit);
+    this.spend(plan.cost);
+    return true;
+  }
+
   // ---------- Отмена строительства ----------
 
   private readonly undoStack: UndoSnapshot[] = [];
@@ -1807,6 +1943,7 @@ export class Game implements BuildContext {
       stations: [...this.stations.values()].map((s) => structuredClone(this.stationToSave(s))),
       buildings: this.towns.map((t) => ({ townId: t.id, list: t.buildings.map((b) => structuredClone(b)) })),
       roundabouts: [...this.roundaboutCenters].map(([id, c]) => [id, { ...c }]),
+      terraform: this.terrain.edits.length,
       moneyBefore: this.money,
       spent: 0,
     });
@@ -1824,9 +1961,38 @@ export class Game implements BuildContext {
       top.roadsVersion !== this.roads.net.version ||
       top.stations.length !== this.stations.size ||
       top.buildings.some((b) => this.towns.find((t) => t.id === b.townId)?.buildings.length !== b.list.length) ||
-      top.moneyBefore !== this.money;
+      top.moneyBefore !== this.money ||
+      top.terraform !== this.terrain.edits.length;
     if (!changed) this.undoStack.pop();
-    else top.spent = top.moneyBefore - this.money;
+    else {
+      top.spent = top.moneyBefore - this.money;
+      this.journalBuild(top);
+    }
+  }
+
+  /** Стройка или снос в журнал: что, за сколько, насколько изменилось число полотен, путей и станций. */
+  private journalBuild(top: UndoSnapshot): void {
+    const net = this.roads.net;
+    const length = (n: LaneNet) => [...n.corridors.values()].reduce((s, c) => s + c.length, 0);
+    // Что построено: длина новых полотен по классу, полосам в обе стороны, ограничению скорости и высоте.
+    const kinds: Record<string, number> = {};
+    for (const c of net.corridors.values()) {
+      if (top.roads.corridors.has(c.id)) continue;
+      const fwd = c.lanes.filter((l) => l.flow > 0).length;
+      const back = c.lanes.filter((l) => l.flow < 0).length;
+      const level = Math.max(net.node(c.a).level, net.node(c.b).level) > 0 ? ' мост' : Math.min(net.node(c.a).level, net.node(c.b).level) < 0 ? ' тоннель' : '';
+      const key = `${c.cls} ${fwd}+${back}${c.limit ? ` ${c.limit}км/ч` : ''}${level}`;
+      kinds[key] = Math.round((kinds[key] ?? 0) + c.length);
+    }
+    this.journal.add('build', {
+      what: top.label,
+      $: top.spent,
+      roads: net.corridors.size - top.roads.corridors.size,
+      len: Math.round(length(net) - length(top.roads)),
+      kinds: Object.keys(kinds).length ? kinds : undefined,
+      rails: this.net.segments.size - top.net.segments.length,
+      stations: this.stations.size - top.stations.length,
+    });
   }
 
   /** После правок линий старые снимки могли бы сломать маршруты — забываем их. */
@@ -1869,10 +2035,11 @@ export class Game implements BuildContext {
       if (live) {
         // Посты погрузки, площадка и её место (перенос станции, навес остановки у нового бордюра) — как были до действия.
         const same = live.fp.w === s.fp.w && live.fp.center.x === s.fp.center.x && live.fp.center.y === s.fp.center.y && live.fp.angle === s.fp.angle;
-        if (live.bays !== s.bays || !same || live.nodeId !== s.nodeId || live.industryId !== s.industryId) {
+        if (live.bays !== s.bays || (live.depots ?? 0) !== (s.depots ?? 0) || !same || live.nodeId !== s.nodeId || live.industryId !== s.industryId) {
           this.index.remove(live);
           live.fp = s.fp;
           live.bays = s.bays;
+          live.depots = s.depots;
           live.nodeId = s.nodeId;
           live.industryId = s.industryId;
           this.index.add(live);
@@ -1903,6 +2070,7 @@ export class Game implements BuildContext {
       });
       recountPopulation(town);
     }
+    this.terrain.truncateEdits(snap.terraform);
     this.roundaboutCenters.clear();
     for (const [id, c] of snap.roundabouts) this.roundaboutCenters.set(id, c);
 
@@ -1918,6 +2086,7 @@ export class Game implements BuildContext {
     this.money += snap.spent;
     this.expensesMonth -= snap.spent;
     this.ledger.build -= Math.min(this.ledger.build, snap.spent);
+    this.journal.add('undo', { what: snap.label, back: snap.spent });
     return snap.label;
   }
 
@@ -1945,6 +2114,13 @@ export class Game implements BuildContext {
     return Math.round(m.running * length);
   }
 
+  /** Состав длиной length не встаёт ни на одну из платформ вокзала — причина для карточки линии; встаёт — null. */
+  private tooLongText(st: Station, platforms: number[], length: number, carLength: number): string | null {
+    const longest = Math.max(0, ...platforms.map((p) => this.net.segments.get(p)?.length ?? 0));
+    if (longest >= length + 6) return null;
+    return `Поезд длиннее платформ: ${st.name}, ${Math.round(longest)} м — уберите вагоны (встанет ${carsOnPlatform(longest, carLength)}) или постройте вокзал длиннее`;
+  }
+
   /** Сколько вагонов поместится на платформы всех станций линии. */
   maxCars(v: FleetVehicle): number {
     const m = MODELS[v.model];
@@ -1958,7 +2134,7 @@ export class Game implements BuildContext {
       const longest = Math.max(0, ...platforms.map((p) => this.net.segments.get(p)?.length ?? 0));
       shortest = Math.min(shortest, longest);
     });
-    return Math.max(2, Math.floor((shortest - 6) / m.train.carLength));
+    return Math.max(2, carsOnPlatform(shortest, m.train.carLength));
   }
 
   /**
@@ -1995,9 +2171,25 @@ export class Game implements BuildContext {
     return Math.round(MODELS[v.model].price * 0.6);
   }
 
-  /** Модель новее того же рода, если уже вышла. */
+  /** Продаётся ли модель: вышла по году или её ступень уже открыта (в сценарии — этапом). */
+  readonly modelOpen = (id: ModelId): boolean => MODELS[id].year <= this.year || MODELS[id].tier <= this.modelTier;
+
+  /**
+   * Открывает ступень моделей (сценарий — с новым этапом): заметка о каждой новой модели, которая ещё
+   * не вышла по году, и запись в журнале.
+   */
+  openModelTier(tier: ModelTier): void {
+    if (tier <= this.modelTier) return;
+    const fresh = (Object.keys(MODELS) as ModelId[]).filter((id) => !this.modelOpen(id) && MODELS[id].tier <= tier);
+    this.modelTier = tier;
+    if (!fresh.length) return;
+    this.journal.add('models', { tier, open: fresh });
+    for (const id of fresh) this.notify(`Новая модель: ${MODELS[id].name} — ${MODELS[id].capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
+  }
+
+  /** Модель новее того же рода, если уже продаётся. */
   replacementFor(v: FleetVehicle): ModelId | null {
-    const best = newestLike(v.model, this.year);
+    const best = newestLike(v.model, this.modelOpen);
     return best !== v.model ? best : null;
   }
 
@@ -2037,6 +2229,7 @@ export class Game implements BuildContext {
     this.traffic.step(dt);
     this.rail.step(dt);
     this.updateFleet(dt);
+    this.updateJams(dt);
     this.updateAutoSell();
     this.updateIndustries(dt);
     this.updateStations(dt);
@@ -2050,7 +2243,7 @@ export class Game implements BuildContext {
       // Новый год — новые модели в продаже.
       if (this.year !== yearBefore) {
         for (const m of Object.values(MODELS)) {
-          if (m.year === this.year) this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
+          if (m.year === this.year && m.tier > this.modelTier) this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
         }
       }
     }
@@ -2066,6 +2259,11 @@ export class Game implements BuildContext {
   industryLines(industryId: number): Line[] {
     const stations = new Set([...this.stations.values()].filter((s) => s.industryId === industryId || s.industryIds.includes(industryId)).map((s) => s.id));
     return [...this.lines.values()].filter((l) => l.stops.some((id) => stations.has(id)));
+  }
+
+  /** Маршруты города: через станции и остановки, в охват которых попадают его дома. */
+  townLines(townId: number): Line[] {
+    return linesForTown(this.lines.values(), this.stations.values(), townId);
   }
 
   private served(st: Station): boolean {
@@ -2122,11 +2320,39 @@ export class Game implements BuildContext {
     return people ? 'passengers' : null;
   }
 
+  /**
+   * Чего не хватает станции на остановке index, чтобы с ней работал транспорт линии: грузовому маршруту — груза
+   * (иначе грузовикам здесь нечего взять и некому сдать), пассажирскому — пассажиров; null — всё в порядке
+   * или маршрут смешанный.
+   */
+  stopMissing(line: Line, index: number): keyof StationServes | null {
+    const st = this.stations.get(line.stops[index]);
+    if (!st || st.kind === 'stop') return null;
+    const kind = this.lineKind(line);
+    if (kind === 'freight' && !st.serves.cargo) return 'cargo';
+    if (kind === 'passengers' && !st.serves.pax) return 'pax';
+    return null;
+  }
+
   /** Почему из этих станций нельзя собрать линию; null — можно. Остановки ездят вместе с автостанциями. */
   lineProblem(stops: number[]): string | null {
     const sts = stops.map((id) => this.stations.get(id)).filter((s): s is Station => !!s);
     if (new Set(sts.map(stationMode)).size > 1) return 'В одном маршруте — либо автостанции и остановки, либо ж/д станции';
     return null;
+  }
+
+  /** Цвет, который получит новая линия по этим станциям, — им же рисуется маршрут, пока его прокладывают.
+   *  Грузовой маршрут — цветом груза, который везут с первой станции (его принимают дальше по маршруту, иначе —
+   *  что там производят); пассажирский — первый цвет, которого ещё нет у других линий. */
+  newLineColor(stops: number[]): string {
+    const sts = stops.map((id) => this.stations.get(id)).filter((s): s is Station => !!s);
+    const [first, ...later] = sts;
+    const produced = first?.serves.cargo ? this.stationIndustries(first).map((ind) => ind.info.produces) : [];
+    const cargo = produced.find((c) => later.some((s) => s.accepts.has(c))) ?? produced[0];
+    if (cargo) return CARGO[cargo].color;
+    const used = new Set([...this.lines.values()].map((l) => l.color));
+    const n = this.lines.size ? Math.max(...this.lines.keys()) + 1 : 1;
+    return LINE_COLORS.find((c) => !used.has(c)) ?? LINE_COLORS[(n - 1) % LINE_COLORS.length];
   }
 
   createLine(stops: number[]): Line | null {
@@ -2135,21 +2361,14 @@ export class Game implements BuildContext {
     if (clean.length < 2 || this.lineProblem(clean)) return null;
     this.forgetUndo();
     const n = this.lines.size ? Math.max(...this.lines.keys()) + 1 : 1;
-    // Грузовой маршрут — цветом груза, который везут с первой станции (его принимают дальше по маршруту, иначе —
-    // что там производят); пассажирский — первый цвет, которого ещё нет у других линий.
-    const first = this.stations.get(clean[0])!;
-    const later = clean.slice(1).map((id) => this.stations.get(id)!);
-    const produced = first.serves.cargo ? this.stationIndustries(first).map((ind) => ind.info.produces) : [];
-    const cargo = produced.find((c) => later.some((s) => s.accepts.has(c))) ?? produced[0];
-    const used = new Set([...this.lines.values()].map((l) => l.color));
-    const color = cargo ? CARGO[cargo].color : (LINE_COLORS.find((c) => !used.has(c)) ?? LINE_COLORS[(n - 1) % LINE_COLORS.length]);
     const line: Line = {
       id: n,
       name: this.defaultLineName(clean),
-      color,
+      color: this.newLineColor(clean),
       mode: stationMode(this.stations.get(clean[0])!),
       stops: clean,
       vehicles: [],
+      created: this.time / MONTH_LENGTH,
       revenueMonth: 0,
       revenueLast: 0,
       revenueTotal: 0,
@@ -2160,6 +2379,7 @@ export class Game implements BuildContext {
       problem: null,
     };
     this.lines.set(n, line);
+    this.journal.add('line', { id: n, name: line.name, mode: line.mode, stops: clean });
     return line;
   }
 
@@ -2328,6 +2548,7 @@ export class Game implements BuildContext {
       // Станции больше нет в маршруте: машина возвращается к началу маршрута.
       this.resetVehicle(v, line);
     }
+    this.journal.add('route', { id, stops: clean, was: before });
     return null;
   }
 
@@ -2394,21 +2615,24 @@ export class Game implements BuildContext {
     const rules = [...(line.rules ?? line.stops.map(() => null))];
     rules[index] = rule;
     line.rules = rules;
+    this.journal.add('rule', { line: id, i: index, st: line.stops[index], rule });
   }
 
   deleteLine(id: number): void {
     const line = this.lines.get(id);
     if (!line) return;
+    this.journal.add('line-', { id, name: line.name, vehicles: line.vehicles.length });
     this.forgetUndo();
     for (const vid of [...line.vehicles]) this.sellVehicle(vid);
     this.lines.delete(id);
     this.lapGuess.delete(id);
   }
 
-  buyVehicle(lineId: number, model: ModelId): FleetVehicle | null {
+  /** auto — купил авто-парк линии, а не игрок (в журнале так и помечено). */
+  buyVehicle(lineId: number, model: ModelId, auto = false): FleetVehicle | null {
     const line = this.lines.get(lineId);
     const m = MODELS[model];
-    if (!line || m.price > this.budget || m.mode !== this.lineMode(line) || m.year > this.year) return null;
+    if (!line || m.price > this.budget || m.mode !== this.lineMode(line) || !this.modelOpen(model)) return null;
     // На остановке только пассажиры: грузовику там делать нечего.
     if (m.carries !== 'passengers' && line.stops.some((id) => this.stations.get(id)?.kind === 'stop')) return null;
     const first = this.stations.get(line.stops[0]);
@@ -2438,7 +2662,10 @@ export class Game implements BuildContext {
     };
     this.fleet.set(id, v);
     line.vehicles.push(id);
+    // Новый поезд — не длиннее самой короткой платформы линии, иначе ему негде встать.
+    if (m.mode === 'rail' && carsOf(v) > this.maxCars(v)) v.cars = this.maxCars(v);
     this.spend(m.price, 'purchases');
+    this.journal.add('buy', { v: id, model, line: lineId, $: m.price, n: line.vehicles.length, money: this.money, ...(auto ? { auto: true } : {}) });
     // Новая машина сначала грузится на первой остановке.
     if (first && m.mode === 'road') {
       this.handleStop(v, first, line);
@@ -2448,7 +2675,8 @@ export class Game implements BuildContext {
     return v;
   }
 
-  sellVehicle(id: number): void {
+  /** auto — продал авто-парк линии, а не игрок (в журнале так и помечено). */
+  sellVehicle(id: number, auto = false): void {
     const v = this.fleet.get(id);
     if (!v) return;
     if (v.simId !== null) {
@@ -2466,23 +2694,29 @@ export class Game implements BuildContext {
     this.money += sale;
     this.incomeMonth += sale;
     this.ledger.sales += sale;
+    this.journal.add('sell', { v: id, model: v.model, line: v.lineId, $: sale, lost: v.amount || undefined, ...(auto ? { auto: true } : {}) });
   }
 
   // ---------- Авто-парк ----------
 
   /**
-   * Настройки авто-парка линии. Впервые — от нынешнего числа машин до вдвое большего.
-   * Включённый сразу докупает до минимума (если хватает денег) и продаёт сверх максимума.
+   * Настройки авто-парка линии. Впервые — от нынешнего числа машин (пустой линии — от одной) до 10 (машин
+   * больше — до их числа). Минимум можно опустить до 0: тогда ненужные машины уйдут все, а вернутся, когда
+   * появится спрос (idleDemand). Включённый сразу докупает до минимума (если хватает денег) и продаёт сверх максимума.
    */
   setLineAuto(id: number, patch: Partial<Pick<LineAuto, 'on' | 'min' | 'max'>>): void {
     const line = this.lines.get(id);
     if (!line) return;
     const n = line.vehicles.length;
-    const auto = (line.auto ??= { on: false, min: Math.max(1, n), max: Math.max(3, n * 2) });
     const top = AUTO_FLEET.maxVehicles;
+    const auto = (line.auto ??= {
+      on: false,
+      min: Math.max(1, Math.min(top, n)),
+      max: Math.min(top, Math.max(AUTO_FLEET.defaultMax, n)),
+    });
     if (patch.on !== undefined) auto.on = patch.on;
     if (patch.min !== undefined) {
-      auto.min = Math.max(1, Math.min(top, Math.round(patch.min)));
+      auto.min = Math.max(0, Math.min(top, Math.round(patch.min)));
       auto.max = Math.max(auto.max, auto.min);
     }
     if (patch.max !== undefined) {
@@ -2490,6 +2724,7 @@ export class Game implements BuildContext {
       auto.min = Math.min(auto.min, auto.max);
     }
     delete auto.noMoney;
+    this.journal.add('auto', { line: id, on: auto.on, min: auto.min, max: auto.max });
     if (!auto.on) {
       delete auto.sell;
       return;
@@ -2499,14 +2734,15 @@ export class Game implements BuildContext {
 
   /**
    * Игрок сам купил или продал машину на линии с авто-парком: пределы раздвигаются под новое число,
-   * чтобы авто-парк не отменил его решение. Продал все — авто-парк выключается.
+   * чтобы авто-парк не отменил его решение. Продал все при минимуме больше 0 — авто-парк выключается (иначе
+   * он сразу докупил бы до минимума); при минимуме 0 остаётся: линия пустая, машину вернёт спрос.
    */
   fitAutoRange(lineId: number): void {
     const line = this.lines.get(lineId);
     const auto = line?.auto;
     if (!line || !auto?.on) return;
     const n = line.vehicles.length;
-    if (!n) {
+    if (!n && auto.min > 0) {
       auto.on = false;
       delete auto.sell;
       return;
@@ -2526,7 +2762,7 @@ export class Game implements BuildContext {
     if (last) return last.model;
     const freight = carries === 'freight';
     const base: ModelId = this.lineMode(line) === 'rail' ? (freight ? 'freightTrain' : 'passengerTrain') : freight ? 'truck' : 'bus';
-    return newestLike(base, this.year);
+    return newestLike(base, this.modelOpen);
   }
 
   /** Последняя купленная на линию машина, что возит carries. */
@@ -2554,13 +2790,18 @@ export class Game implements BuildContext {
       return false;
     }
     const last = this.lastVehicle(line, MODELS[model].carries);
-    const v = this.buyVehicle(line.id, model);
+    const v = this.buyVehicle(line.id, model, true);
     if (!v) return false;
     // Поезд — той же длины, что и последний такой на линии.
-    if (last?.model === model && last.cars !== undefined) v.cars = last.cars;
+    if (last?.model === model && last.cars !== undefined) v.cars = Math.min(last.cars, this.maxCars(v));
     delete auto.noMoney;
     this.restartDemand(line);
     return true;
+  }
+
+  /** Какую машину линии продать игроку («−1 машина» советника): самую незагруженную, лучше стоящую на станции. */
+  spareOf(line: Line): FleetVehicle | null {
+    return this.spareVehicle(line, true);
   }
 
   /** Какую машину продать: пустую, лучше стоящую на станции; force — хоть какую, самую незагруженную. */
@@ -2580,7 +2821,7 @@ export class Game implements BuildContext {
     while (line.vehicles.length > auto.max) {
       const v = this.spareVehicle(line, true);
       if (!v) break;
-      this.sellVehicle(v.id);
+      this.sellVehicle(v.id, true);
       this.restartDemand(line);
       acted = true;
     }
@@ -2632,13 +2873,55 @@ export class Game implements BuildContext {
     auto.low = d && d.load < A.low && d.left < 0.1 ? (auto.low ?? 0) + 1 : 0;
     // Машины снова нужны — продажу отменяем.
     if (!auto.low) delete auto.sell;
-    if (!d) return;
     const n = line.vehicles.length;
+    // Пустая линия (минимум 0): рейсов нет, загрузку не измерить — машину возвращаем, когда на станциях появится спрос.
+    if (!n) {
+      if (auto.max > 0 && this.idleDemand(line) >= A.wake) this.autoBuy(line);
+      return;
+    }
+    if (!d) return;
     if (d.load >= A.full && d.left >= A.leftBehind && d.profit >= 0) {
       if (n < auto.max) this.autoBuy(line);
     } else if (auto.low >= A.lowWindows && n > auto.min) {
       auto.sell ??= this.time;
     }
+  }
+
+  /**
+   * Спрос на линии без машин — для авто-парка: насколько (в долях вместимости машины, которую он купит)
+   * загрузилась бы за круг одна машина на самой загруженной остановке. Считает, что уже ждёт отправки этой
+   * линией, и что приходило бы за круг: груз предприятий станции, который принимают дальше по маршруту
+   * (добыча — сколько предприятие может дать, переработка — сколько выпустило за прошлый месяц; поровну
+   * с другими его станциями, к которым ходит транспорт), и пассажиры до других остановок линии.
+   */
+  idleDemand(line: Line): number {
+    const id = this.autoModel(line);
+    const model = MODELS[id];
+    const lap = line.lap ?? this.guessLap(line, id) ?? MONTH_LENGTH;
+    let best = 0;
+    line.stops.forEach((sid, i) => {
+      const st = this.stations.get(sid);
+      if (!st) return;
+      let perLap = 0;
+      if (model.carries === 'freight' && st.serves.cargo) {
+        const wanted = this.loadable(line, i);
+        for (const ind of this.stationIndustries(st)) {
+          if (!wanted.has(ind.info.produces)) continue;
+          const monthly = ind.info.accepts.length ? ind.producedLast : this.industryRate(ind);
+          const others = [...this.stations.values()].filter((o) => o !== st && o.serves.cargo && o.industryIds.includes(ind.id) && this.served(o));
+          perLap += (monthly * lap) / MONTH_LENGTH / (others.length + 1);
+        }
+      }
+      if (model.carries === 'passengers' && st.serves.pax && st.catchPop > 0) {
+        const ours = new Set(line.stops.filter((o) => o !== sid && this.stations.get(o)?.serves.pax));
+        const weigh = (ids: Iterable<number>) => [...ids].reduce((s, o) => s + this.paxWeight(o), 0);
+        const mine = weigh(ours);
+        const rest = weigh([...this.paxRoutes(st).keys()].filter((o) => !ours.has(o)));
+        if (mine) perLap += this.paxArrivals(st, lap) * (mine / (mine + rest));
+      }
+      best = Math.max(best, (this.lineWaiting(line, i, model.carries) + perLap) / model.capacity);
+    });
+    return best;
   }
 
   /** Решённая продажа: первая опустевшая машина линии, а не опустела за месяц — самая незагруженная. */
@@ -2652,7 +2935,7 @@ export class Game implements BuildContext {
       }
       const v = this.spareVehicle(line, this.time - auto.sell > MONTH_LENGTH);
       if (!v) continue;
-      this.sellVehicle(v.id);
+      this.sellVehicle(v.id, true);
       delete auto.sell;
       auto.low = 0;
       this.restartDemand(line);
@@ -2671,10 +2954,11 @@ export class Game implements BuildContext {
     return lap;
   }
 
-  private guessLap(line: Line): number | null {
-    const v = this.fleet.get(line.vehicles[0]);
-    if (!v) return null;
-    const m = MODELS[v.model];
+  /** model — чем прикидывать, пока на линии нет машин; без него пустой линии — null. */
+  private guessLap(line: Line, model?: ModelId): number | null {
+    const id = this.fleet.get(line.vehicles[0])?.model ?? model;
+    if (!id) return null;
+    const m = MODELS[id];
     let length = 0;
     for (let i = 0; i < line.stops.length; i++) {
       const a = this.stations.get(line.stops[i]);
@@ -2707,6 +2991,7 @@ export class Game implements BuildContext {
    * есть где встать, и не ждут полными, когда груз и так в очереди.
    */
   private spacingUntil(v: FleetVehicle, line: Line, st: Station): number | null {
+    if (v.releaseHold || line.noSpacing) return null;
     const interval = v.stop === 0 && line.departedAt !== undefined ? this.lineInterval(line) : null;
     if (!interval || !this.roomToHold(v, st)) return null;
     if (!v.fresh && vehicleLoad(v) >= vehicleCapacity(v) && this.lineWaiting(line, 0, MODELS[v.model].carries) >= 1) return null;
@@ -2738,7 +3023,20 @@ export class Game implements BuildContext {
     if (v.holdFrom !== undefined) v.lapHeld = (v.lapHeld ?? 0) + this.time - v.holdFrom;
     delete v.holdFrom;
     delete v.holdUntil;
+    delete v.releaseHold;
     return false;
+  }
+
+  /** Игрок отправляет машину, которая ждёт интервала за предыдущей, прямо сейчас. */
+  dispatchNow(id: number): void {
+    const v = this.fleet.get(id);
+    if (v && v.holdUntil !== undefined) v.releaseHold = true;
+  }
+
+  /** Включает или выключает ожидание интервала на маршруте: выключенный — машины уезжают с первой станции сразу. */
+  setLineSpacing(id: number, on: boolean): void {
+    const line = this.lines.get(id);
+    if (line) line.noSpacing = !on;
   }
 
   /** Машина уходит с первой станции: замеряем её круг (без ожидания интервала) и запоминаем отправление линии. */
@@ -2829,6 +3127,7 @@ export class Game implements BuildContext {
         if (!this.loadingDone(v, line, dt)) continue;
         v.state = 'departing';
         v.timer = 0;
+        this.readyAt.set(v.id, this.time);
         continue;
       }
       if (v.state !== 'departing') continue;
@@ -2870,6 +3169,8 @@ export class Game implements BuildContext {
         route,
       });
       if (!sim) {
+        // Выезд занят. После загрузки сохранения отметки готовности нет — ставим с этой минуты.
+        if (!this.readyAt.has(v.id)) this.readyAt.set(v.id, this.time);
         v.timer = 0.4;
         continue;
       }
@@ -2887,9 +3188,44 @@ export class Game implements BuildContext {
    * Загрузка при отправлении — для подсказки «машин больше, чем груза»; по станциям — ещё и сколько
    * груза осталось ждать (в вместимостях машины): по ним авто-парк решает, докупать ли.
    */
+  /**
+   * Рейс до этой станции — для журнала: секунд в пути от отправления с прошлой станции, длина пути по дорогам
+   * или путям, средняя скорость и сколько простоял в пути (пробки, светофоры). Первое прибытие — пусто.
+   */
+  private tripStats(v: FleetVehicle, line: Line): Record<string, number> {
+    const from = this.departedAt.get(v.id);
+    this.departedAt.delete(v.id);
+    if (from === undefined || line.stops.length < 2) return {};
+    const seconds = this.time - from;
+    const prev = (v.stop - 1 + line.stops.length) % line.stops.length;
+    const path = this.linePolyline(line, prev);
+    let len = 0;
+    if (path) for (let i = 1; i < path.length; i++) len += dist(path[i - 1], path[i]);
+    const out: Record<string, number> = { trip: seconds };
+    if (len > 0) Object.assign(out, { len: Math.round(len), kmh: seconds > 0 ? Math.round((len / seconds) * KMH_PER_UNIT) : 0 });
+    const stood = this.stoodOnTrip.get(v.id);
+    this.stoodOnTrip.delete(v.id);
+    if (stood !== undefined) out.jam = stood;
+    return out;
+  }
+
   private recordDeparture(line: Line, v: FleetVehicle): void {
+    this.departedAt.set(v.id, this.time);
+    this.readyAt.delete(v.id);
     const cap = vehicleCapacity(v);
     const load = vehicleLoad(v) / cap;
+    const freight = MODELS[v.model].carries === 'freight';
+    const at = this.arrivedAt.get(v.id);
+    this.journal.add('go', {
+      v: v.id,
+      l: line.id,
+      st: line.stops[v.stop],
+      load: vehicleLoad(v),
+      cap,
+      cargo: freight ? (v.cargo ?? '—') : 'passengers',
+      left: this.lineWaiting(line, v.stop, freight ? 'freight' : 'passengers'),
+      wait: at !== undefined ? this.time - at : undefined,
+    });
     line.loadSumMonth = (line.loadSumMonth ?? 0) + load;
     line.departuresMonth = (line.departuresMonth ?? 0) + 1;
     const sid = line.stops[v.stop];
@@ -2917,7 +3253,10 @@ export class Game implements BuildContext {
       if (!st || !this.rail.canPark(st.platforms, length)) {
         v.trainId = null;
         v.waited += dt;
-        if (v.waited > 20) line.problem = `Поезд ждёт свободную платформу: ${st?.name ?? '?'}`;
+        // Не встаёт ни на одну платформу — дело не в очереди, а в длине состава.
+        const long = st && this.tooLongText(st, st.platforms, length, model.train.carLength);
+        if (long) line.problem = long;
+        else if (v.waited > 20) line.problem = `Поезд ждёт свободную платформу: ${st?.name ?? '?'}`;
         return;
       }
       train = this.rail.create({ ...model.train, cars: carsOf(v), color: line.color });
@@ -2960,11 +3299,15 @@ export class Game implements BuildContext {
     const res = this.rail.depart(train, targets, through);
     if (res === 'noroute') {
       const k = own !== null ? to.platforms.indexOf(own) + 1 : 0;
-      const short = own !== null && (this.net.segments.get(own)?.length ?? 0) < train.length + 6;
+      // Состав длиннее платформ следующего вокзала (выбранного пути или всех) — путь есть, встать негде.
+      const long = this.tooLongText(to, targets, train.length, train.carLength);
+      const short = !!long;
       // Путь есть, но только против сигналов «без встречного» — так и говорим.
       const oneWay = !short && train.platform !== null && this.rail.blockedByOneWay([train.platform], targets, through);
       line.problem = short
-        ? `Поезд не помещается на путь ${k}: ${to.name}`
+        ? own !== null
+          ? `Поезд не помещается на путь ${k}: ${to.name}`
+          : long
         : `Нет пути: ${from.name} → ${to.name}${k ? `, путь ${k}` : ''}${oneWay ? ' — только против одностороннего сигнала' : ''}`;
       v.timer = 2;
       return;
@@ -3026,6 +3369,7 @@ export class Game implements BuildContext {
     v.trainId = null;
     const line = this.lines.get(v.lineId);
     if (line) line.problem = 'Путь поезда разобран — поезд вернулся на станцию';
+    this.journal.add('lost', { v: v.id, l: v.lineId, train: true });
   }
 
   private fleetOf(sim: Vehicle): FleetVehicle | undefined {
@@ -3063,7 +3407,82 @@ export class Game implements BuildContext {
     if (!v) return true;
     const line = this.lines.get(v.lineId);
     const st = line && this.stations.get(line.stops[v.stop]);
-    return !st || st.occupied.length < st.bays;
+    const free = !st || st.occupied.length < st.bays;
+    if (!free && !this.bayWaitSince.has(v.id)) this.bayWaitSince.set(v.id, this.time);
+    return free;
+  }
+
+  /** Сколько секунд машина погрузилась и не может выехать со станции (выезд занят); 0 — не ждёт. */
+  departWait(v: FleetVehicle): number {
+    const at = this.readyAt.get(v.id);
+    return at !== undefined && v.state === 'departing' && v.simId === null ? this.time - at : 0;
+  }
+
+  /** Сколько секунд машина стоит у станции и ждёт свободный пост; 0 — не ждёт. */
+  bayWait(v: FleetVehicle): number {
+    const at = this.bayWaitSince.get(v.id);
+    return at !== undefined && v.state === 'driving' && v.simId !== null ? this.time - at : 0;
+  }
+
+  /**
+   * Кто ждёт въезда на станции: машина, которой не дали поста (bayWait), и стоящие за ней на подъезде;
+   * поезд, который не может уехать, потому что все платформы следующего вокзала заняты (или встать на свою).
+   */
+  private approaches(): Approach[] {
+    const out: Approach[] = [];
+    for (const v of this.fleet.values()) {
+      const line = this.lines.get(v.lineId);
+      if (!line) continue;
+      if (MODELS[v.model].mode === 'rail') {
+        if (v.state !== 'departing' || v.waited <= 0) continue;
+        // Поезд на платформе ждёт путь к следующему вокзалу; без поезда — ждёт платформу на своём.
+        const next = v.trainId != null ? (v.stop + 1) % line.stops.length : v.stop;
+        const to = this.stations.get(line.stops[next]);
+        if (!to || to.kind !== 'rail') continue;
+        const own = v.trainId != null ? this.stopPlatform(line, next) : null;
+        const targets = own !== null ? [own] : to.platforms;
+        if (targets.length && targets.every((p) => this.rail.isReserved(p))) out.push({ station: to.id, line: line.id, blocked: true, stopped: true, dist: 0 });
+        continue;
+      }
+      const sim = v.state === 'driving' ? this.fleetSim(v) : undefined;
+      const st = sim && this.stations.get(line.stops[v.stop]);
+      const gate = st && this.roads.net.nodes.get(st.nodeId);
+      if (!sim || !st || st.kind !== 'road' || !gate) continue;
+      out.push({ station: st.id, line: line.id, blocked: this.bayWait(v) > 0, stopped: sim.v < 0.5, dist: dist(sim.pos, gate.pos) });
+    }
+    return out;
+  }
+
+  /** Раз в полсекунды: где все посты (платформы) заняты и сколько ждут въезда — для значка «нет мест» и подсказок. */
+  private updateJams(dt: number): void {
+    this.jamClock -= dt;
+    if (this.jamClock > 0) return;
+    this.jamClock = 0.5;
+    const list = this.approaches();
+    const ids = new Set([...list.map((a) => a.station), ...this.jams.keys()]);
+    for (const id of ids) {
+      const st = this.stations.get(id);
+      const full = !!st && (st.kind === 'rail' ? st.platforms.every((p) => this.rail.isReserved(p)) : st.occupied.length >= st.bays);
+      const jam = nextJam(this.jams.get(id), full, queuedAt(list, id), this.time);
+      if (jam) this.jams.set(id, jam);
+      else this.jams.delete(id);
+    }
+  }
+
+  /** Сколько машин (поездов) ждут въезда на станцию, где все посты (платформы) заняты; 0 — очереди нет или она недолгая. */
+  stationJam(st: Station): number {
+    const jam = this.jams.get(st.id);
+    return jamShown(jam, this.time) ? jam.waiting : 0;
+  }
+
+  /** Станции, у которых машины линии стоят в очереди на въезд (все посты заняты), и сколько там ждут всего. */
+  lineJams(line: Line): { station: Station; waiting: number }[] {
+    const out: { station: Station; waiting: number }[] = [];
+    for (const [id, jam] of this.jams) {
+      const st = this.stations.get(id);
+      if (st && jamShown(jam, this.time) && jam.lines.includes(line.id)) out.push({ station: st, waiting: jam.waiting });
+    }
+    return out;
   }
 
   private onArrive(sim: Vehicle): void {
@@ -3076,6 +3495,7 @@ export class Game implements BuildContext {
     const v = owner && this.fleet.get(owner.id);
     if (!v) return;
     v.simId = null;
+    this.bayWaitSince.delete(v.id);
     const line = this.lines.get(v.lineId);
     const st = line && this.stations.get(line.stops[v.stop]);
     if (!line || !st) {
@@ -3083,6 +3503,8 @@ export class Game implements BuildContext {
       v.timer = 1;
       return;
     }
+    // Для журнала: сколько машина простояла в пути (пробки, светофоры, перекрёстки).
+    this.stoodOnTrip.set(v.id, sim.stoppedTime);
     const bay = st.kind === 'road' ? this.freeBay(st, sim.pos) : undefined;
     st.occupied.push(v.id);
     v.inBay = true;
@@ -3103,7 +3525,7 @@ export class Game implements BuildContext {
       const bay = this.fleet.get(id)?.bay;
       if (bay !== undefined) taken.add(bay);
     }
-    return nearestBay(st.fp, st.bays, taken, p);
+    return nearestBay(this.bayArea(st), st.bays, taken, p);
   }
 
   /** Заезд на пост: доехала — выгружается и начинает погрузку. */
@@ -3129,11 +3551,14 @@ export class Game implements BuildContext {
     v.simId = null;
     v.state = 'departing';
     v.timer = 2;
+    this.bayWaitSince.delete(v.id);
+    this.readyAt.delete(v.id);
     if (line) {
       // Машина возвращается на предыдущую станцию и пробует снова.
       v.stop = (v.stop - 1 + line.stops.length) % line.stops.length;
       line.problem = 'Машина потеряла дорогу и вернулась на станцию';
     }
+    this.journal.add('lost', { v: v.id, l: v.lineId, back: line?.stops[v.stop] });
   }
 
   private handleStop(v: FleetVehicle, st: Station, line: Line): void {
@@ -3143,6 +3568,9 @@ export class Game implements BuildContext {
     // Наибольшая надбавка за скорость среди доставленного — для подписи над станцией.
     let bonus = 0;
     v.dropped = null;
+    // Рейс в журнал: что выгрузили и кому, что погрузили, сколько заплатили, сколько ехали и простояли.
+    const trip: Record<string, unknown> = { v: v.id, l: line.id, st: st.id, i: v.stop, ...this.tripStats(v, line) };
+    this.arrivedAt.set(v.id, this.time);
     if (model.carries === 'freight') {
       const what = v.cargo ? this.unloadsHere(line, v.stop, st, v.cargo) : null;
       if (v.cargo && what === 'deliver' && v.loadedAt !== st.id) {
@@ -3156,6 +3584,7 @@ export class Game implements BuildContext {
         // Откуда груз: предприятие у станции первой погрузки, которое его производит.
         const maker = origin?.industryIds.find((id) => this.industries.find((i) => i.id === id)?.info.produces === v.cargo);
         this.scenario?.onDelivered(v.cargo, v.amount, receiver, k, maker);
+        Object.assign(trip, { drop: { [v.cargo]: v.amount }, to: receiver ? `${receiver.type}:${receiver.id}` : 'никому', from: v.loadedAt, x: k });
         moved += v.amount;
         line.carriedMonth += v.amount;
         v.dropped = v.cargo;
@@ -3165,13 +3594,14 @@ export class Game implements BuildContext {
       } else if (v.cargo && what === 'store') {
         // Склад: выгружаем столько, сколько поместится; дальше груз повезёт другая линия.
         const c = v.cargo;
-        const take = Math.min(v.amount, Math.max(0, STATION.cargoCap * 2 - (st.cargo[c] ?? 0)));
+        const take = Math.min(v.amount, this.stationFree(st));
         if (take > 0) {
           st.cargo[c] = (st.cargo[c] ?? 0) + take;
           st.cargoOrigin = { ...st.cargoOrigin, [c]: v.loadedAt ?? st.id };
           v.amount -= take;
           moved += take;
           v.dropped = c;
+          trip.store = { [c]: take };
           if (v.amount <= 0) {
             v.cargo = null;
             v.amount = 0;
@@ -3179,8 +3609,13 @@ export class Game implements BuildContext {
           }
         }
       }
+      // Груз остался в кузове: здесь его не принимают — видно, если маршрут настроен не так.
+      if (v.cargo && v.amount > 0) trip.keep = { [v.cargo]: v.amount };
       this.wagonsUnloaded(v);
-      moved += this.loadFreight(v, st, line, v.dropped);
+      const taken = this.loadFreight(v, st, line, v.dropped);
+      if (taken > 0 && v.cargo) trip.take = { [v.cargo]: taken };
+      if (st.serves.cargo) trip.wait = this.lineWaiting(line, v.stop, 'freight');
+      moved += taken;
     } else {
       const stay = [];
       for (const g of v.passengers) {
@@ -3201,8 +3636,14 @@ export class Game implements BuildContext {
       }
       v.passengers = stay;
       this.wagonsUnloaded(v);
-      moved += this.boardPassengers(v, st, line);
+      if (moved > 0) Object.assign(trip, { off: moved, x: bonus });
+      const boarded = this.boardPassengers(v, st, line);
+      if (boarded > 0) trip.on = boarded;
+      trip.wait = this.lineWaiting(line, v.stop, 'passengers');
+      moved += boarded;
     }
+    if (revenue > 0) trip.pay = revenue;
+    this.journal.add('stop', trip);
     if (revenue > 0) {
       this.earn(revenue, line, v);
       // Быстрая доставка оплачивается дороже — показываем множитель рядом с суммой.
@@ -3311,11 +3752,16 @@ export class Game implements BuildContext {
    * сторону, а не разворотом в нём (путь участка зависит от того, как приехали на предыдущем); автобусы — правее.
    */
   private roadLegs(line: Line): (Vec[] | null)[] {
+    return this.roadLegData(line).legs;
+  }
+
+  /** Участки дорожного маршрута (roadLegs): связи графа и линия для карты — по версии сети и остановкам. */
+  private roadLegData(line: Line): { routes: (number[] | null)[]; legs: (Vec[] | null)[] } {
     const version = this.net.version * 100003 + this.roads.net.version;
     const keepRight = this.lineKind(line) === 'passengers';
     const key = `${version}|${line.stops.join(',')}|${keepRight}`;
     const hit = this.legCache.get(line.id);
-    if (hit?.key === key) return hit.legs;
+    if (hit?.key === key) return hit;
     const n = line.stops.length;
     const stop = (i: number) => this.stations.get(line.stops[((i % n) + n) % n]);
     const routes = line.stops.map((_, i) => {
@@ -3334,8 +3780,62 @@ export class Game implements BuildContext {
       }
     }
     const legs = routes.map((r) => (r ? this.roads.routePolyline(r, keepRight) : null));
-    this.legCache.set(line.id, { key, legs });
-    return legs;
+    const data = { key, routes, legs };
+    this.legCache.set(line.id, data);
+    return data;
+  }
+
+  /**
+   * Модель, по которой считать график скорости линии: первой машины маршрута, а пока их нет — новейшая из
+   * тех, что продаются для маршрута (по виду транспорта и тому, что он возит).
+   */
+  private chartModel(line: Line): ModelId | null {
+    const v = line.vehicles.map((id) => this.fleet.get(id)).find((x) => x);
+    if (v) return v.model;
+    const kind = this.lineKind(line);
+    const models = modelsFor(this.lineMode(line), this.modelOpen).filter((m) => !kind || MODELS[m].carries === kind);
+    return models[models.length - 1] ?? null;
+  }
+
+  /**
+   * График скорости круга линии (А→Б→…→А): пределы по пути (знаки, изгибы, перекрёстки, уклоны) и скорость
+   * её транспорта по свободной дороге, с разгоном от каждой остановки и торможением к ней. null — какого-то
+   * участка нет или купить для маршрута пока нечего.
+   */
+  lineSpeedChart(line: Line): SpeedChart | null {
+    const id = this.chartModel(line);
+    if (!id || line.stops.length < 2) return null;
+    const m = MODELS[id];
+    const plats = line.stops.map((_, i) => this.stopPlatform(line, i));
+    const key = `${this.net.version}|${this.roads.net.version}|${this.terrain.version}|${line.stops.join(',')}|${plats.join(',')}|${this.lineKind(line)}|${id}`;
+    const hit = this.speedChartCache.get(line.id);
+    if (hit?.key === key) return hit.chart;
+    let legs: (TrackPiece[] | null)[];
+    let motion: Motion;
+    if (m.mode === 'rail') {
+      const t = m.train;
+      legs = line.stops.map((sid, i) => {
+        const j = (i + 1) % line.stops.length;
+        const from = this.stations.get(sid);
+        const to = this.stations.get(line.stops[j]);
+        if (from?.kind !== 'rail' || to?.kind !== 'rail') return null;
+        // Как линия на карте (routePolyline): с выбранных платформ, иначе — с боковых путей.
+        const starts = plats[i] !== null ? [plats[i]!] : sidingsFirst(from).slice(0, Math.max(1, from.platforms.length - 1));
+        const goal = plats[j] !== null ? [plats[j]!] : to.platforms;
+        return this.rail.previewTrack(starts, goal, plats[j] !== null ? undefined : throughOf(to));
+      });
+      // Как поезд в симуляции: в подъём медленнее, чем круче склон.
+      motion = { top: (g) => t.maxSpeed * (g > 0 ? Math.max(0.35, 1 - Math.min(1, g / GRADE.rail) * 0.5) : 1), accel: () => t.accel, decel: t.brake };
+    } else {
+      const s = m.spec;
+      const heavy = s.kind !== 'car';
+      legs = this.roadLegData(line).routes.map((r) => (r ? this.roads.routeTrack(r) : null));
+      // Как машина в симуляции: на уклоне — gradeFactor, тяжёлые в гору ещё и разгоняются хуже.
+      motion = { top: (g) => s.maxSpeed * gradeFactor(g, heavy), accel: (g) => s.accel * (g > 0 && heavy ? Math.max(0.35, 1 - 6 * g) : 1), decel: IDM.brake / 2 };
+    }
+    const chart = legs.every((l): l is TrackPiece[] => !!l?.length) ? speedChart(legs.map((pieces) => ({ pieces })), motion) : null;
+    this.speedChartCache.set(line.id, { key, chart });
+    return chart;
   }
 
   /** Что делать с грузом на остановке: доставить получателю, оставить на складе или везти дальше. */
@@ -3362,7 +3862,7 @@ export class Game implements BuildContext {
   }
 
   /** Что можно грузить на этой остановке. */
-  private loadable(line: Line, index: number): Set<CargoType> {
+  loadable(line: Line, index: number): Set<CargoType> {
     const rule = this.stopRule(line, index);
     return rule.load === 'auto' ? this.wantedElsewhere(line, index) : new Set(rule.load);
   }
@@ -3442,7 +3942,30 @@ export class Game implements BuildContext {
         if (v && MODELS[v.model].carries === what) capacity += vehicleCapacity(v);
       }
     }
-    return Math.max(20, Math.min(STATION.cargoCap, capacity * 2));
+    return Math.max(20, Math.min(what === 'freight' ? this.stationStorage(st) : STATION.cargoCap, capacity * 2));
+  }
+
+  /** Склад станции: сколько груза всех видов может на ней лежать — база и пристройки-склады (STORAGE). */
+  stationStorage(st: Station): number {
+    if (st.kind === 'rail') return STORAGE.rail;
+    return STORAGE.base + (st.depots ?? 0) * STORAGE.per;
+  }
+
+  /** Сколько груза всех видов лежит на станции. */
+  stationStored(st: Station): number {
+    let n = 0;
+    for (const c of FREIGHT) n += st.cargo[c] ?? 0;
+    return n;
+  }
+
+  /** Свободного места на складе станции. */
+  stationFree(st: Station): number {
+    return Math.max(0, this.stationStorage(st) - this.stationStored(st));
+  }
+
+  /** Склад станции почти полон — продукции некуда класть, завод не растёт. */
+  stationFull(st: Station): boolean {
+    return this.stationStored(st) >= this.stationStorage(st) * 0.95;
   }
 
   private updateIndustries(dt: number): void {
@@ -3456,7 +3979,7 @@ export class Game implements BuildContext {
       } else {
         // Переработка идёт, только когда есть все виды сырья; выросший завод перерабатывает больше.
         const available = Math.min(...inputs.map((c) => ind.stock[c] ?? 0));
-        const conv = Math.min(available, (120 * level * dt) / MONTH_LENGTH);
+        const conv = Math.min(available, (ECONOMY.processRate * level * dt) / MONTH_LENGTH);
         if (conv > 0) {
           for (const c of inputs) ind.stock[c] = (ind.stock[c] ?? 0) - conv;
           ind.prodAcc += conv;
@@ -3472,11 +3995,15 @@ export class Game implements BuildContext {
         const per = Math.floor(ind.output / served.length);
         for (const st of served) {
           const c = ind.info.produces;
-          st.cargo[c] = Math.min(this.stationCap(st, 'freight'), (st.cargo[c] ?? 0) + per);
+          // Не больше, чем есть места на складе станции (все грузы вместе) и чем предел по транспорту.
+          st.cargo[c] = Math.min(this.stationCap(st, 'freight'), (st.cargo[c] ?? 0) + Math.min(per, this.stationFree(st)));
         }
         ind.output -= per * served.length;
       }
       ind.output = Math.min(ind.output, 300);
+      // Сколько времени за месяц продукция копилась у предела станции — транспорт не успевал (для роста).
+      const c = ind.info.produces;
+      if (served.some((st) => (st.cargo[c] ?? 0) >= this.stationCap(st, 'freight') * 0.9 || this.stationFull(st))) ind.piledMonth = (ind.piledMonth ?? 0) + dt;
     }
   }
 
@@ -3505,6 +4032,16 @@ export class Game implements BuildContext {
     return out;
   }
 
+  /** Сколько пассажиров появляется на станции за dt секунд (когда им есть куда ехать). */
+  private paxArrivals(st: Station, dt: number): number {
+    return (st.catchPop / 1000) * 1.2 * dt * (st.townIds.length ? this.mods.pax(st.townIds[0]) : 1);
+  }
+
+  /** Насколько охотно пассажиры едут на эту станцию: по жителям в её охвате. */
+  private paxWeight(sid: number): number {
+    return (this.stations.get(sid)?.catchPop ?? 0) + 60;
+  }
+
   private updateStations(dt: number): void {
     for (const st of this.stations.values()) {
       const routes = this.paxRoutes(st);
@@ -3512,9 +4049,9 @@ export class Game implements BuildContext {
       for (const [sid, n] of st.passengers) if (n <= 0 || !routes.has(sid)) st.passengers.delete(sid);
       if (st.catchPop <= 0) continue;
       const dests = new Map<number, number>();
-      for (const sid of routes.keys()) dests.set(sid, this.stations.get(sid)!.catchPop + 60);
+      for (const sid of routes.keys()) dests.set(sid, this.paxWeight(sid));
       if (!dests.size) continue;
-      st.paxAcc += (st.catchPop / 1000) * 1.2 * dt * (st.townIds.length ? this.mods.pax(st.townIds[0]) : 1);
+      st.paxAcc += this.paxArrivals(st, dt);
       let waiting = 0;
       for (const c of st.passengers.values()) waiting += c;
       const cap = this.stationCap(st, 'passengers');
@@ -3582,11 +4119,11 @@ export class Game implements BuildContext {
 
   /** Стоимость всех дорог и путей — от неё считается ремонт. */
   roadValueTotal(): number {
-    const version = this.net.version * 100003 + this.roads.net.version;
+    const version = (this.net.version * 100003 + this.roads.net.version) * 1009 + this.terrain.version;
     if (this.roadValue.version !== version) {
       let total = 0;
       for (const s of this.net.segments.values()) total += this.builder.segmentCost(s);
-      for (const c of this.roads.net.corridors.values()) total += corridorCost(this.roads.net, c, (p, m) => this.isWater(p, m));
+      for (const c of this.roads.net.corridors.values()) total += corridorCost(this.roads.net, c, (p, m) => this.isWater(p, m), this.ground());
       this.roadValue = { version, value: total };
     }
     return this.roadValue.value;
@@ -3647,7 +4184,39 @@ export class Game implements BuildContext {
     if (this.money < ECONOMY.creditLimit * 0.8) this.notify('Компания на грани банкротства!', '#e5534b');
     // Сценарий — после экономики месяца: снабжение городов и рост предприятий уже подсчитаны.
     this.scenario?.monthEnd();
+    this.journalMonth();
+    this.timelapse.capture(this);
     this.onMonthEnd();
+  }
+
+  /**
+   * Итоги месяца в журнал: деньги и статьи, линии, предприятия, у которых что-то происходит (уровень, выпуск,
+   * сырьё на складе, груз на станциях), города и прогресс заданий сценария.
+   */
+  private journalMonth(): void {
+    const last = this.history[this.history.length - 1];
+    const stations = [...this.stations.values()];
+    const waiting = (ind: Industry) =>
+      stations.filter((st) => st.industryIds.includes(ind.id)).reduce((s, st) => s + (st.cargo[ind.info.produces] ?? 0), 0);
+    const stock = (ind: Industry) => Object.values(ind.stock).reduce<number>((s, x) => s + (x ?? 0), 0);
+    const inds = this.industries
+      .map((i) => [i.id, i.level ?? 1, i.producedLast, Math.floor(stock(i)), Math.floor(waiting(i)), i.streak ?? 0])
+      .filter(([, level, made, st, wait]) => level !== 1 || made > 0 || st > 0 || wait > 0);
+    const sc = this.scenario;
+    this.journal.add('month', {
+      date: last?.label,
+      money: Math.round(this.money),
+      loan: this.loan,
+      income: last?.income,
+      expenses: last?.expenses,
+      ledger: last?.ledger,
+      lines: [...this.lines.values()].map((l) => [l.id, l.revenueLast, l.costLast, l.carriedLast, l.loadLast ?? null, l.vehicles.length]),
+      inds,
+      towns: this.towns.map((t) => [t.id, t.population, this.townSatisfaction(t), t.lastSupplied]),
+      obj: sc?.running ? sc.current.map((o) => [o.id, o.progress, o.target, sc.monthsLeft(o)]) : undefined,
+      rep: sc?.state.reputation,
+      fx: sc?.state.effects.map((e) => `${e.kind}:${e.target}×${e.factor}`),
+    });
   }
 
   /**
@@ -3660,8 +4229,13 @@ export class Game implements BuildContext {
       const level = ind.level ?? 1;
       const c = ind.info.produces;
       const stations = [...this.stations.values()].filter((st) => st.serves.cargo && st.industryIds.includes(ind.id) && this.served(st));
-      // Копится у самого предела станции — транспорт не успевает, расти незачем.
-      const piled = stations.some((st) => (st.cargo[c] ?? 0) >= this.stationCap(st, 'freight') * 0.9);
+      // Больше половины месяца копилось у самого предела станции — транспорт не успевает, расти незачем.
+      // Старые сохранения без счётчика — по тому, что на станции сейчас.
+      const piled =
+        ind.piledMonth !== undefined
+          ? ind.piledMonth > MONTH_LENGTH * 0.5
+          : stations.some((st) => (st.cargo[c] ?? 0) >= this.stationCap(st, 'freight') * 0.9 || this.stationFull(st));
+      ind.piledMonth = 0;
       const good = stations.length > 0 && ind.producedLast > 0 && !piled;
       let streak = ind.streak ?? 0;
       if (good) streak = Math.max(1, streak + 1);
@@ -3682,7 +4256,7 @@ export class Game implements BuildContext {
 
   /** Сколько предприятие производит (или может переработать) в месяц сейчас. */
   industryRate(ind: Industry): number {
-    return Math.round((ind.info.accepts.length ? 120 : ind.info.rate) * (ind.level ?? 1) * this.mods.industry(ind.id));
+    return Math.round((ind.info.accepts.length ? ECONOMY.processRate : ind.info.rate) * (ind.level ?? 1) * this.mods.industry(ind.id));
   }
 
   /**
@@ -3747,7 +4321,8 @@ export class Game implements BuildContext {
   private growTown(town: Town): void {
     this.closeTownMonth(town);
     const satisfaction = this.townSatisfaction(town);
-    town.growthAcc += town.population * (0.003 + 0.025 * satisfaction) * this.mods.growth(town.id);
+    // Рост за месяц — по его длине (MONTH_SCALE): за секунду город растёт так же, как при коротком месяце.
+    town.growthAcc += town.population * (0.003 + 0.025 * satisfaction) * MONTH_SCALE * this.mods.growth(town.id);
     const ctx = this.worldContext();
     const reach = this.townReach(town);
     // Город растёт вдоль любых своих улиц, включая построенные игроком, — ближние к центру раньше.
@@ -3761,19 +4336,19 @@ export class Game implements BuildContext {
       .sort((a, b) => a.d - b.d);
     let tries = 0;
     for (const { s } of streets) {
-      if (town.growthAcc < 20 || tries++ >= 12) break;
+      if (town.growthAcc < 20 || tries++ >= 12 * MONTH_SCALE) break;
       const added = fillStreet(ctx, town, s, 1, Math.min(3, Math.floor(town.growthAcc / 20)), reach);
       if (added) town.growthAcc -= added * 20;
       else this.fullStreets.set(s.id, this.month);
     }
-    // Мест вдоль улиц не хватает — город сам прокладывает новую улицу и застраивает её (если игрок не запретил).
-    if (town.growthAcc >= 40 && town.autoStreets !== false) {
+    // Мест вдоль улиц не хватает — город сам прокладывает новую улицу и застраивает её (если игрок не запретил);
+    // за месяц — не больше одной улицы на каждые прежние 40 секунд.
+    for (let k = 0; k < MONTH_SCALE && town.growthAcc >= 40 && town.autoStreets !== false; k++) {
       const seg = this.growStreet(town, reach);
-      if (seg) {
-        // Сеть после стройки — новая: дома ставим уже по ней.
-        const added = fillStreet(this.worldContext(), town, seg, 0.8, Math.floor(town.growthAcc / 20), reach);
-        town.growthAcc = Math.max(0, town.growthAcc - added * 20);
-      }
+      if (!seg) break;
+      // Сеть после стройки — новая: дома ставим уже по ней.
+      const added = fillStreet(this.worldContext(), town, seg, 0.8, Math.floor(town.growthAcc / 20), reach);
+      town.growthAcc = Math.max(0, town.growthAcc - added * 20);
     }
     const before = town.population;
     recountPopulation(town);
@@ -3813,7 +4388,7 @@ export class Game implements BuildContext {
   /** Городская улица: на земле, не кольцо и не часть магистрали или развязки. */
   private streetLike(c: Corridor): boolean {
     const net = this.roads.net;
-    return !c.ring && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c);
+    return !c.ring && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c, this.drivewayIds());
   }
 
   /**
@@ -3996,10 +4571,13 @@ export class Game implements BuildContext {
   /**
    * Вокзал на прямом участке пути: главный путь — первая платформа, рядом (со стороны курсора)
    * обгонный путь со второй платформой и плавными S-образными съездами, за ним здание вокзала.
+   * На один путь — только платформа на главном пути и здание рядом, без съездов. platform — длина платформ, м.
+   * terminal — конечная: горловина со стрелками с одной стороны, с другой пути кончаются упорами; ставится
+   * в конец пути (у тупика) или в чистое поле.
    */
-  private railStationPlan(p: Vec, snapRadius: number, angle: number, tracks: number): StationPlan {
+  private railStationPlan(p: Vec, snapRadius: number, angle: number, tracks: number, platform: number, terminal = false): StationPlan {
     const R = RAIL_STATION;
-    const fail = (reason: string, fp: Footprint | null = null, cost = R.cost * (tracks - 1)): StationPlan => ({
+    const fail = (reason: string, fp: Footprint | null = null, cost = railStationFee(tracks, platform)): StationPlan => ({
       ok: false,
       reason,
       cost,
@@ -4012,24 +4590,41 @@ export class Game implements BuildContext {
     );
     // Чем дальше крайний путь, тем длиннее съезды — чтобы стрелки оставались пологими.
     const switchLen = R.switchLen + 45 * (tracks - 2);
-    const half = R.platform / 2 + switchLen;
+    const half = platform / 2 + switchLen;
     const margin = MIN_SEGMENT_LEN + 20;
     // Путь, на который ставим станцию: существующий или новый прямой участок в чистом поле.
     let seg: { id: number; lut: CurveLUT; length: number };
     let sc: number;
     let main: RoadRequest | undefined;
     let mainCost = 0;
+    // Конечная: в какую сторону вдоль пути (по росту длины или против) упоры.
+    let toward: 1 | -1 = 1;
     // Что мешает главному пути в чистом поле — скажем после того, как посчитаем силуэт станции (он красным).
     let mainProblem: string | undefined;
-    if (hit) {
+    if (hit && terminal) {
+      // Конечная — у тупика: платформы доходят до самого конца пути, там упоры.
+      seg = hit.seg;
+      const dead = (id: number) => this.net.node(id).segments.length === 1 && this.net.node(id).buildingId === null;
+      // Тупик — тот, к которому курсор ближе, и не дальше самой станции: иначе она «уехала» бы в конец длинного пути.
+      const away = (end: 1 | -1) => (end > 0 ? seg.length - hit.s : hit.s);
+      const deadEnds = ([-1, 1] as const)
+        .filter((end) => dead(end > 0 ? hit.seg.b : hit.seg.a) && away(end) <= platform + switchLen + 60)
+        .sort((x, y) => away(x) - away(y));
+      if (!deadEnds.length) return fail('Конечная — у тупика пути или в чистом поле');
+      toward = deadEnds[0];
+      if (seg.length < platform + switchLen + margin) return fail('Нужен длинный прямой участок пути у тупика');
+      sc = toward > 0 ? seg.length - platform / 2 : platform / 2;
+    } else if (hit) {
       seg = hit.seg;
       if (seg.length < 2 * (half + margin)) return fail('Нужен длинный прямой участок пути');
       sc = Math.max(half + margin, Math.min(seg.length - half - margin, hit.s));
     } else {
       const dir = { x: Math.cos(angle), y: Math.sin(angle) };
-      const total = 2 * (half + margin);
-      const a = sub(p, scale(dir, total / 2));
-      const b = add(p, scale(dir, total / 2));
+      // Конечная в чистом поле: платформы — у курсора, подход с горловиной — сзади (против направления).
+      const back = terminal ? platform / 2 + switchLen + margin : half + margin;
+      const ahead = terminal ? platform / 2 : half + margin;
+      const a = sub(p, scale(dir, back));
+      const b = add(p, scale(dir, ahead));
       main = { start: { kind: 'free', pos: a, level: 0 }, end: { kind: 'free', pos: b, level: 0 }, spec: RAIL_SPEC, mode: 'straight' };
       const mp = this.builder.plan(main);
       if (!mp.ok) mainProblem = mp.reason ?? 'Нельзя построить путь';
@@ -4037,33 +4632,62 @@ export class Game implements BuildContext {
       mainCost = mp.cost;
       const lut = new CurveLUT(straightCubic(a, b));
       seg = { id: -1, lut, length: lut.length };
-      sc = total / 2;
+      sc = back;
     }
     const t = seg.lut.tangentAt(sc);
     const center = seg.lut.pointAt(sc);
-    const cuts: [number, number, number, number] = [sc - half, sc - R.platform / 2, sc + R.platform / 2, sc + half];
-    const curved = cuts.some((s) => dot(seg.lut.tangentAt(s), t) < Math.cos(0.06));
+    // Конечная: горловина, начало платформы и упор — вдоль пути к упорам (u).
+    const toBuffers = scale(t, toward);
+    const ends = terminal ? { throat: sc - toward * (platform / 2 + switchLen), start: sc - (toward * platform) / 2, buffer: sc + (toward * platform) / 2 } : null;
+    const cuts: [number, number, number, number] = [sc - half, sc - platform / 2, sc + platform / 2, sc + half];
+    const checks = ends ? [ends.throat, ends.start, ends.buffer] : cuts;
+    const curved = checks.some((s) => dot(seg.lut.tangentAt(s), t) < Math.cos(0.06));
     // Дополнительные пути и здание — со стороны курсора (в чистом поле — слева от направления, R поворачивает).
     const n = hit && cross(t, sub(p, center)) < 0 ? { x: t.y, y: -t.x } : { x: -t.y, y: t.x };
-    const j0 = seg.lut.pointAt(cuts[0]);
-    const j1 = seg.lut.pointAt(cuts[3]);
     const h = switchLen * 0.4;
-    const extra: [Cubic, Cubic, Cubic][] = [];
-    for (let k = 1; k < tracks; k++) {
-      const a = add(seg.lut.pointAt(cuts[1]), scale(n, R.spacing * k));
-      const b = add(seg.lut.pointAt(cuts[2]), scale(n, R.spacing * k));
-      extra.push([
-        { p0: j0, p1: add(j0, scale(t, h)), p2: sub(a, scale(t, h)), p3: a },
-        straightCubic(a, b),
-        { p0: b, p1: add(b, scale(t, h)), p2: sub(j1, scale(t, h)), p3: j1 },
-      ]);
+    const extra: ([Cubic, Cubic] | [Cubic, Cubic, Cubic])[] = [];
+    if (ends) {
+      // Тупики: съезд от стрелки горловины, платформа до упора.
+      const j0 = seg.lut.pointAt(ends.throat);
+      for (let k = 1; k < tracks; k++) {
+        const a = add(seg.lut.pointAt(ends.start), scale(n, R.spacing * k));
+        const b = add(seg.lut.pointAt(ends.buffer), scale(n, R.spacing * k));
+        extra.push([{ p0: j0, p1: add(j0, scale(toBuffers, h)), p2: sub(a, scale(toBuffers, h)), p3: a }, straightCubic(a, b)]);
+      }
+    } else {
+      const j0 = seg.lut.pointAt(cuts[0]);
+      const j1 = seg.lut.pointAt(cuts[3]);
+      for (let k = 1; k < tracks; k++) {
+        const a = add(seg.lut.pointAt(cuts[1]), scale(n, R.spacing * k));
+        const b = add(seg.lut.pointAt(cuts[2]), scale(n, R.spacing * k));
+        extra.push([
+          { p0: j0, p1: add(j0, scale(t, h)), p2: sub(a, scale(t, h)), p3: a },
+          straightCubic(a, b),
+          { p0: b, p1: add(b, scale(t, h)), p2: sub(j1, scale(t, h)), p3: j1 },
+        ]);
+      }
     }
-    const fp: Footprint = {
-      center: add(center, scale(n, R.spacing * (tracks - 1) + RAIL_HALF + 4 + R.size.h / 2)),
-      w: R.size.w,
-      h: R.size.h,
-      angle: angleOf(t),
-    };
+    // Проходная: здание сбоку, вдоль путей. Конечная: в торце — за упорами, поперёк всех путей с платформами
+    // (от главного до боковой платформы у крайнего), между упорами и зданием — перрон к платформам.
+    const across = { lo: -(RAIL_HALF + 4), hi: R.spacing * (tracks - 1) + RAIL_HALF + 8 };
+    const headW = Math.max(36, across.hi - across.lo);
+    const fp: Footprint = ends
+      ? {
+          center: add(
+            add(seg.lut.pointAt(ends.buffer), scale(toBuffers, R.concourse + R.size.h / 2)),
+            scale(n, (across.lo + across.hi) / 2),
+          ),
+          w: headW,
+          h: R.size.h,
+          angle: angleOf(n),
+        }
+      : {
+          center: add(center, scale(n, R.spacing * (tracks - 1) + RAIL_HALF + 4 + R.size.h / 2)),
+          // У короткой платформы и здание короче — не длиннее её самой.
+          w: Math.min(R.size.w, Math.max(36, platform - 10)),
+          h: R.size.h,
+          angle: angleOf(t),
+        };
     let length = 0;
     const samples: Vec[] = [];
     for (const c of extra.flat()) {
@@ -4072,9 +4696,11 @@ export class Game implements BuildContext {
       for (let s = 8; s < lut.length; s += 8) samples.push(lut.pointAt(s));
     }
     // Каждая дополнительная платформа — ещё одна стоимость станции.
-    const cost = Math.round(length * specCost(RAIL_SPEC)) + R.cost * (tracks - 1) + mainCost;
+    const cost = Math.round(length * specCost(RAIL_SPEC)) + railStationFee(tracks, platform) + mainCost;
     // Нельзя — силуэт (здание, пути с платформами и главный путь) всё равно показываем, красным.
-    const rail = { segId: seg.id, cuts, tracks: extra, main };
+    const rail: RailStationGeom = ends
+      ? { segId: seg.id, terminal: { throat: seg.lut.pointAt(ends.throat), start: seg.lut.pointAt(ends.start), buffer: seg.lut.pointAt(ends.buffer) }, tracks: extra, main }
+      : { segId: seg.id, cuts, tracks: extra, main };
     const blocked = (reason: string): StationPlan => ({ ...fail(reason, fp, cost), rail });
     if (curved) return blocked('Ж/д станция — только на прямом участке пути');
     if (mainProblem) return blocked(mainProblem);
@@ -4100,9 +4726,20 @@ export class Game implements BuildContext {
     return { ok: true, cost, fp, rail };
   }
 
-  /** angle — поворот ж/д станции в чистом поле, tracks — сколько у неё путей с платформами (2–4). */
-  stationPlan(p: Vec, snapRadius: number, kind: StationKind = 'road', angle = 0, tracks = 2): StationPlan {
-    if (kind === 'rail') return this.railStationPlan(p, snapRadius, angle, Math.max(2, Math.min(4, tracks)));
+  /**
+   * angle — поворот ж/д станции в чистом поле, tracks — сколько у неё путей с платформами (1–4),
+   * platform — их длина, м (50–400), terminal — конечная (тупиковая) вместо проходной.
+   */
+  stationPlan(
+    p: Vec,
+    snapRadius: number,
+    kind: StationKind = 'road',
+    angle = 0,
+    tracks = 2,
+    platform: number = RAIL_STATION.platform,
+    terminal = false,
+  ): StationPlan {
+    if (kind === 'rail') return this.railStationPlan(p, snapRadius, angle, clampRailTracks(tracks), clampRailLength(platform), terminal);
     if (kind === 'stop') return this.stopPlan(p, snapRadius);
     // Нельзя — силуэт станции всё равно показываем, красным.
     const fail = (reason: string, fp: Footprint): StationPlan => ({ ok: false, reason, cost: COST.station, fp });
@@ -4192,9 +4829,11 @@ export class Game implements BuildContext {
     if (n.level !== 0 || (n.roundabout ?? null) !== null || !n.corridors.length) return false;
     if (n.kind !== 'junction' && !net.isDeadEnd(n)) return false;
     if ([...this.stations.values()].some((st) => st.nodeId === n.id)) return false;
+    // Выезд другой станции — шоссе, но к узлу на нём пристроиться можно, как к улице.
+    const driveways = this.drivewayIds();
     return n.corridors.every((sid) => {
       const s = net.corridor(sid);
-      return !s.ring && !isTrunk(s.cls);
+      return !s.ring && (!isTrunk(s.cls) || driveways.has(sid));
     });
   }
 
@@ -4290,8 +4929,10 @@ export class Game implements BuildContext {
     serves: StationServes = ALL_SERVICES,
     angle = 0,
     tracks = 2,
+    platform: number = RAIL_STATION.platform,
+    terminal = false,
   ): Station | null {
-    const plan = this.stationPlan(p, snapRadius, kind, angle, tracks);
+    const plan = this.stationPlan(p, snapRadius, kind, angle, tracks, platform, terminal);
     if (!plan.ok || !plan.fp) return null;
     const id = this.nextEntityId++;
     let nodeId = -1;
@@ -4300,9 +4941,11 @@ export class Game implements BuildContext {
       // Главный путь в чистом поле оплачивает строитель — доплачиваем остальное.
       const before = this.money;
       platforms = this.buildRailStation(id, plan.rail);
-      if (platforms.length < 2) return null;
+      // Вокзал на один путь — платформа только на главном.
+      if (!platforms.length) return null;
       this.spend(plan.cost - (before - this.money));
     } else {
+      if (kind === 'road' && plan.driveway?.net && plan.nodePos) keepMainRoad(plan.driveway.net, plan.nodePos);
       if (!plan.driveway || !plan.nodePos || !this.roadBuilder.apply(plan.driveway)) return null;
       // Узел станции — тупик выезда (у остановки — стык посреди улицы).
       const node = this.roads.net.nodesNear(plan.nodePos, 2)[0];
@@ -4317,6 +4960,9 @@ export class Game implements BuildContext {
       }
     }
     const ind = plan.industryId !== undefined ? this.industries.find((i) => i.id === plan.industryId) : undefined;
+    // Остановка — только для пассажиров; станция у предприятия — с грузом, даже если выбран автовокзал.
+    const given = this.stationServesFor(plan.fp, kind, plan.industryId, serves);
+    const switched = kind !== 'stop' && given.cargo && !serves.cargo;
     const st: Station = {
       type: 'station',
       id,
@@ -4325,8 +4971,8 @@ export class Game implements BuildContext {
       fp: plan.fp,
       nodeId,
       platforms,
-      // Остановка — только для пассажиров.
-      serves: kind === 'stop' ? { pax: true, cargo: false } : { ...serves },
+      ...(plan.rail?.terminal ? { terminal: true } : {}),
+      serves: given,
       industryId: ind?.id ?? null,
       cargo: {},
       passengers: new Map(),
@@ -4342,6 +4988,19 @@ export class Game implements BuildContext {
     st.name = this.stationName(st, ind);
     this.stations.set(id, st);
     this.index.add(st);
+    this.journal.add('station', {
+      id,
+      name: st.name,
+      kind: st.kind,
+      serves: `${st.serves.pax ? 'пассажиры' : ''}${st.serves.pax && st.serves.cargo ? '+' : ''}${st.serves.cargo ? 'груз' : ''}`,
+      pos: [Math.round(st.fp.center.x), Math.round(st.fp.center.y)],
+      towns: st.townIds,
+      inds: st.industryIds,
+      pop: st.catchPop,
+      accepts: [...st.accepts],
+      ...(switched ? { auto: 'груз' } : {}),
+    });
+    if (switched) this.notify(`${st.name}: станция у предприятия — работает с грузом`);
     return st;
   }
 
@@ -4392,12 +5051,15 @@ export class Game implements BuildContext {
       if (!built) return [];
       cur = net.node(built.endNode).segments[0];
     }
+    if (g.terminal) return this.buildTerminalStation(id, g.terminal, g.tracks, cur);
+    if (!g.cuts) return [];
+    const cuts = g.cuts;
     const nodes: number[] = [];
     let platform1 = -1;
     // Режем с дальнего конца: начальная часть сохраняет отсчёт длины от начала пути.
     for (let k = 3; k >= 0; k--) {
       const s = net.segment(cur);
-      const res = net.splitSegmentDetailed(cur, s.lut.tAt(g.cuts[k]));
+      const res = net.splitSegmentDetailed(cur, s.lut.tAt(cuts[k]));
       nodes.unshift(res.node.id);
       if (k === 1) platform1 = res.second.id;
       cur = res.first.id;
@@ -4413,7 +5075,51 @@ export class Game implements BuildContext {
       const b = net.addNode(platform.p3, 0, id);
       net.addSegment(j0, a.id, down, RAIL_SPEC);
       const p = net.addSegment(a.id, b.id, platform, RAIL_SPEC);
-      net.addSegment(b.id, j1, up, RAIL_SPEC);
+      if (up) net.addSegment(b.id, j1, up, RAIL_SPEC);
+      p.platform = id;
+      platforms.push(p.id);
+    }
+    this.networkChanged();
+    return platforms;
+  }
+
+  /**
+   * Конечная: режет главный путь у горловины и в начале платформы; его конец — упор первой платформы.
+   * Остальные пути — съезд от стрелки горловины и платформа до своего упора (тупика). Узлы платформ
+   * принадлежат вокзалу: тупики-упоры нельзя продлить, пока стоит станция.
+   */
+  private buildTerminalStation(id: number, ends: NonNullable<RailStationGeom['terminal']>, tracks: RailStationGeom['tracks'], segId: number): number[] {
+    const net = this.net;
+    const seg = net.segment(segId);
+    const at = { throat: seg.lut.closest(ends.throat).s, start: seg.lut.closest(ends.start).s };
+    // Режем с дальнего от начала участка места: начальная часть сохраняет отсчёт длины.
+    const order = (Object.keys(at) as (keyof typeof at)[]).sort((x, y) => at[y] - at[x]);
+    const node = { throat: -1, start: -1 };
+    let cur = segId;
+    for (const k of order) {
+      const s = net.segment(cur);
+      const res = net.splitSegmentDetailed(cur, s.lut.tAt(at[k]));
+      node[k] = res.node.id;
+      cur = res.first.id;
+    }
+    const j0 = node.throat;
+    const a1 = node.start;
+    const other = (sid: number, from: number) => {
+      const s = net.segment(sid);
+      return s.a === from ? s.b : s.a;
+    };
+    const platform1 = net.node(a1).segments.find((sid) => other(sid, a1) !== j0);
+    if (platform1 === undefined) return [];
+    const buffer = other(platform1, a1);
+    net.node(a1).buildingId = id;
+    net.node(buffer).buildingId = id;
+    net.segment(platform1).platform = id;
+    const platforms = [platform1];
+    for (const [down, platform] of tracks) {
+      const a = net.addNode(down.p3, 0, id);
+      const b = net.addNode(platform.p3, 0, id);
+      net.addSegment(j0, a.id, down, RAIL_SPEC);
+      const p = net.addSegment(a.id, b.id, platform, RAIL_SPEC);
       p.platform = id;
       platforms.push(p.id);
     }
@@ -4426,11 +5132,12 @@ export class Game implements BuildContext {
       this.notify('Станцию используют маршруты — сначала удалите их');
       return false;
     }
+    this.journal.add('station-', { id: st.id, name: st.name });
     this.index.remove(st);
     this.stations.delete(st.id);
     if (st.kind === 'rail') {
       this.removeRailStation(st);
-      this.refund(RAIL_STATION.cost * Math.max(1, st.platforms.length - 1));
+      this.refund(railStationFee(st.platforms.length, this.net.segments.get(st.platforms[0])?.length ?? RAIL_STATION.platform));
       this.networkChanged();
       return true;
     }
@@ -4446,7 +5153,7 @@ export class Game implements BuildContext {
       if (plan.net) this.roadBuilder.apply({ ...plan, ok: true });
     }
     // Добавленные посты погрузки тоже возвращают часть цены.
-    this.refund(COST.station + Math.max(0, st.bays - STATION.bays) * STATION.bayCost);
+    this.refund(COST.station + Math.max(0, st.bays - STATION.bays) * STATION.bayCost + (st.depots ?? 0) * STORAGE.cost);
     this.networkChanged();
     return true;
   }
@@ -4480,7 +5187,7 @@ export class Game implements BuildContext {
       let cost = plan.cost;
       const demolish = [...(plan.demolish ?? [])];
       // Добавленные посты переезжают вместе со станцией: площадка шире — дома под ней сносим, прочее мешает.
-      const extra = st.kind === 'road' ? (st.bays - STATION.bays) * STATION.bayWidth : 0;
+      const extra = st.kind === 'road' ? (st.bays - STATION.bays) * STATION.bayWidth + (st.depots ?? 0) * STORAGE.width : 0;
       if (extra) {
         fp = { ...fp, w: fp.w + extra };
         const own = plan.industryId !== undefined ? this.industries.find((i) => i.id === plan.industryId) : undefined;
@@ -4519,6 +5226,7 @@ export class Game implements BuildContext {
     }
     this.index.remove(st);
     // Новая сеть — без старого выезда, с новым (или со стыком остановки на новой улице); дома под выездом сносит строитель.
+    if (st.kind === 'road') keepMainRoad(plan.driveway.net, plan.nodePos);
     if (!this.roadBuilder.apply(plan.driveway)) {
       this.index.add(st);
       return 'Нельзя перенести';
@@ -4575,6 +5283,66 @@ export class Game implements BuildContext {
     return { ok: true, cost, fp };
   }
 
+  /**
+   * Пристройки-склады автостанции: каждая добавляет места под груз (STORAGE.per) и удлиняет площадку на
+   * STORAGE.width — по половине с обоих концов, как посты. Где растёт — проверяем, как у постов: вода, дома,
+   * предприятия, другие станции, дороги, край карты. Убрать можно всегда, если груз поместится на меньший склад.
+   */
+  stationDepotsPlan(id: number, depots: number): BaysPlan {
+    const st = this.stations.get(id);
+    if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null };
+    if (st.kind !== 'road') return { ok: false, reason: st.kind === 'rail' ? 'У ж/д станции склад пока не растёт' : 'У остановки склада нет', cost: 0, fp: st.fp };
+    const n = Math.round(depots);
+    const extra = n - (st.depots ?? 0);
+    const fp: Footprint = { ...st.fp, w: st.fp.w + extra * STORAGE.width };
+    // Убираем — минус: refund вернёт часть цены (COST.refundRatio).
+    const cost = extra * STORAGE.cost;
+    const fail = (reason: string): BaysPlan => ({ ok: false, reason, cost, fp });
+    if (n < 0) return fail('Пристроек нет');
+    if (n > STORAGE.max) return fail(`Больше ${STORAGE.max} складов нельзя`);
+    if (extra <= 0) {
+      const stored = this.stationStored(st);
+      const room = STORAGE.base + n * STORAGE.per;
+      return stored > room ? fail(`На складе ${Math.round(stored)} ед. — на меньший не поместится`) : { ok: true, cost, fp };
+    }
+    if (!this.inBounds(fp.center, footprintRadius(fp))) return fail('За краем карты');
+    const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+    const grown: Vec[] = [];
+    for (let x = st.fp.w / 2; x <= fp.w / 2 + 0.01; x += 6) for (const k of [-1, 1]) grown.push(add(fp.center, scale(u, k * x)));
+    if (grown.some((q) => this.isWater(q, fp.h / 2))) return fail('Мешает вода');
+    const own = st.industryId !== null ? this.industries.find((i) => i.id === st.industryId) : undefined;
+    for (const s of this.index.near(fp.center, footprintRadius(fp) + 120)) {
+      if (s === st || s === own || !footprintsOverlap(fp, s.fp, 1)) continue;
+      return fail(s.type === 'building' ? 'Мешает здание' : s.type === 'industry' ? 'Мешает предприятие' : 'Мешает станция');
+    }
+    const road = this.roadUnder(fp, 2, st.nodeId);
+    if (road) return fail(road);
+    if (cost > this.budget) return fail('Не хватает денег');
+    return { ok: true, cost, fp };
+  }
+
+  /** Добавляет или убирает пристройки-склады (одним шагом для Ctrl+Z). Возвращает причину, если не получилось. */
+  setStationDepots(id: number, depots: number): string | null {
+    const plan = this.stationDepotsPlan(id, depots);
+    const st = this.stations.get(id);
+    if (!plan.ok || !plan.fp || !st) return plan.reason ?? 'Нельзя';
+    this.checkpoint('склад станции');
+    if (plan.cost > 0) this.spend(plan.cost);
+    else if (plan.cost < 0) this.refund(-plan.cost);
+    this.index.remove(st);
+    st.fp = plan.fp;
+    st.depots = Math.round(depots);
+    this.index.add(st);
+    this.commit();
+    return null;
+  }
+
+  /** Где посты автостанции: площадка без пристроек-складов по концам (они — по половине с обеих сторон). */
+  bayArea(st: Station): Footprint {
+    const depots = st.depots ?? 0;
+    return depots ? { ...st.fp, w: st.fp.w - depots * STORAGE.width } : st.fp;
+  }
+
   /** Добавляет или убирает посты погрузки (одним шагом для Ctrl+Z). Возвращает причину, если не получилось. */
   setStationBays(id: number, bays: number): string | null {
     const plan = this.stationBaysPlan(id, bays);
@@ -4621,21 +5389,46 @@ export class Game implements BuildContext {
     return st.kind === 'rail' ? RAIL_STATION.catchment : st.kind === 'stop' ? STOP.catchment : STATION.catchment;
   }
 
-  computeCatchment(st: Station): void {
-    const R = this.catchmentRadius(st);
-    st.industryIds = this.industries
-      .filter((i) => dist(i.fp.center, st.fp.center) < R + footprintRadius(i.fp) * 0.6)
-      .map((i) => i.id);
+  /** Предприятия в охвате радиусом R вокруг точки at. */
+  private industriesNear(at: Vec, R: number): Industry[] {
+    return this.industries.filter((i) => dist(i.fp.center, at) < R + footprintRadius(i.fp) * 0.6);
+  }
+
+  /** Жители в охвате радиусом R вокруг точки at: какие города и сколько людей. */
+  private peopleNear(at: Vec, R: number): { towns: Set<number>; pop: number } {
     const towns = new Set<number>();
     let pop = 0;
     for (const town of this.towns) {
-      if (dist(town.center, st.fp.center) > (town.extent ?? town.radius) + R + 50) continue;
+      if (dist(town.center, at) > (town.extent ?? town.radius) + R + 50) continue;
       for (const b of town.buildings) {
-        if (dist(b.fp.center, st.fp.center) > R) continue;
+        if (dist(b.fp.center, at) > R) continue;
         towns.add(town.id);
         pop += b.kind === 'res' ? b.floors * 14 : b.floors * 6;
       }
     }
+    return { towns, pop };
+  }
+
+  /**
+   * С чем будет работать новая станция. Станция у предприятия — грузовая, даже если выбран автовокзал:
+   * пристроенная к предприятию всегда берёт груз (пассажиров — только если рядом живут люди), а стоящая
+   * рядом с предприятием без жителей в охвате — только грузовая. Иначе грузовики стояли бы у неё без груза.
+   */
+  stationServesFor(fp: Footprint, kind: StationKind, industryId: number | undefined, serves: StationServes): StationServes {
+    if (kind === 'stop') return { pax: true, cargo: false };
+    if (serves.cargo) return { ...serves };
+    const R = this.catchmentRadius({ kind });
+    const docked = industryId !== undefined;
+    if (!docked && !this.industriesNear(fp.center, R).length) return { ...serves };
+    const people = this.peopleNear(fp.center, R).pop > 0;
+    if (people && !docked) return { ...serves };
+    return { pax: serves.pax && people, cargo: true };
+  }
+
+  computeCatchment(st: Station): void {
+    const R = this.catchmentRadius(st);
+    st.industryIds = this.industriesNear(st.fp.center, R).map((i) => i.id);
+    const { towns, pop } = this.peopleNear(st.fp.center, R);
     st.townIds = [...towns];
     // Пассажирская станция собирает жителей, грузовая принимает грузы.
     st.catchPop = st.serves.pax ? pop : 0;
@@ -4653,6 +5446,7 @@ export class Game implements BuildContext {
     if (!serves.pax) st.passengers.clear();
     if (!serves.cargo) st.cargo = {};
     this.computeCatchment(st);
+    this.journal.add('serves', { st: id, pax: serves.pax, cargo: serves.cargo, pop: st.catchPop });
   }
 
   /**
@@ -4700,7 +5494,9 @@ export class Game implements BuildContext {
   private routeCache = new Map<string, Vec[] | null>();
   private routeCacheVersion = -1;
   /** Линии дорожных маршрутов по участкам (roadLegs): по линии — ключ (версия сети, остановки) и участки. */
-  private legCache = new Map<number, { key: string; legs: (Vec[] | null)[] }>();
+  private legCache = new Map<number, { key: string; routes: (number[] | null)[]; legs: (Vec[] | null)[] }>();
+  /** Графики скорости линий (lineSpeedChart): по линии — ключ (версии сети и рельефа, остановки, модель) и график. */
+  private speedChartCache = new Map<number, { key: string; chart: SpeedChart | null }>();
 
   /**
    * Путь машины между станциями по полосам (с учётом стороны движения) — для отрисовки линий.
@@ -4807,7 +5603,7 @@ export class Game implements BuildContext {
     if (!v.enter || !st || m.mode !== 'road') return null;
     // Ворота постов — со стороны выезда (у грузового двора предприятия площадка повёрнута наоборот).
     const gate = this.roads.net.nodes.get(st.nodeId);
-    const to = bayPose(st.fp, st.bays, Math.min(v.bay ?? 0, st.bays - 1), m.spec.length, gate ? bayFront(st.fp, gate.pos) : 1);
+    const to = bayPose(this.bayArea(st), st.bays, Math.min(v.bay ?? 0, st.bays - 1), m.spec.length, gate ? bayFront(st.fp, gate.pos) : 1);
     return entryPose(v.enter, to, m.spec.length);
   }
 
@@ -4831,6 +5627,40 @@ export class Game implements BuildContext {
     return { ...m.spec, color, load: v.cargo ? CARGO[v.cargo].color : undefined, pos, dir };
   }
 
+  /**
+   * Где машина или поезд компании на карте сейчас — центр и радиус кольца вокруг (обводка выбранной,
+   * подсветка из списка маршрута): на дороге и на заезде — по кузову, на посту автостанции и у остановки —
+   * там, где её рисуют (и новую, что грузится, не заняв поста, — см. bayLayout), поезд — по середине состава.
+   * На посту автостанции ещё и box — сам бокс поста: подсвечивают его, а не кольцо во всю станцию.
+   * Самой машины на карте нет (все посты заняты, у остановки, поезд ждёт платформу) — кольцо вокруг станции, с station: true.
+   */
+  fleetSpot(v: FleetVehicle): { pos: Vec; r: number; station?: boolean; box?: Footprint } | null {
+    const train = this.fleetTrain(v);
+    const mid = train && this.rail.pointAt(train, train.head - train.length / 2);
+    if (train && mid) return { pos: mid.pos, r: train.length / 2 + 8 };
+    const m = MODELS[v.model];
+    const line = this.lines.get(v.lineId);
+    const st = line && this.stations.get(line.stops[v.stop]);
+    let look: Pose | undefined = m.mode === 'road' ? this.fleetLook(v) : undefined;
+    if (!look && st && m.mode === 'road' && v.state !== 'driving') {
+      const gate = this.roads.net.nodes.get(st.nodeId);
+      // Пост — тот, что окрашен под эту машину на рисунке станции.
+      const bay = st.kind === 'road' ? this.bayLayout(st).indexOf(v.id) : -1;
+      const i = st.kind === 'stop' && v.inBay ? st.occupied.indexOf(v.id) : -1;
+      if (bay >= 0) {
+        const box = bayBox(this.bayArea(st), st.bays, bay, gate ? bayFront(st.fp, gate.pos) : 1);
+        return { pos: box.center, r: Math.hypot(box.w, box.h) / 2 + 2, box };
+      }
+      if (i >= 0) look = stopBerth(st.fp, gate?.pos, i, st.occupied.length);
+    }
+    if (look && m.mode === 'road') {
+      const L = m.spec.length;
+      return { pos: sub(look.pos, scale(look.dir, L / 2)), r: L * 0.9 + 3 };
+    }
+    // В пути, но не на дороге (потерялась, ждёт выезда) — не показываем; на станции — её саму.
+    return st && v.state !== 'driving' ? { pos: st.fp.center, r: footprintRadius(st.fp), station: true } : null;
+  }
+
   /** Машины, что сейчас заезжают на посты автостанций. */
   enteringLooks(): VehicleLook[] {
     const out: VehicleLook[] = [];
@@ -4843,18 +5673,41 @@ export class Game implements BuildContext {
 
   /** Посты автостанции по порядку: цвет линии машины, что там стоит (или заезжает), или null — пусто. */
   stationBays(st: Station): (string | null)[] {
-    const out: (string | null)[] = Array.from({ length: st.bays }, () => null);
-    const rest: string[] = [];
-    for (const id of st.occupied) {
+    return this.bayLayout(st).map((id) => {
+      if (id === null) return null;
       const v = this.fleet.get(id);
-      const color = (v && this.lines.get(v.lineId)?.color) ?? '#e07b39';
-      if (v?.bay !== undefined && v.bay < st.bays && !out[v.bay]) out[v.bay] = color;
-      else rest.push(color);
+      return (v && this.lines.get(v.lineId)?.color) ?? '#e07b39';
+    });
+  }
+
+  /**
+   * Кто на каком посту автостанции нарисован (id машины или null — пусто). Сперва машины на своих постах; без своего
+   * (старое сохранение, постов убавили) — на первый свободный; за ними — машины, что грузятся здесь, не заняв поста
+   * (новые ждут на первой станции, не мешая подъезжающим), — на оставшиеся свободные: погрузку видно на посту.
+   */
+  private bayLayout(st: Station): (number | null)[] {
+    const out: (number | null)[] = Array.from({ length: st.bays }, () => null);
+    const rest: number[] = [];
+    for (const id of st.occupied) {
+      const bay = this.fleet.get(id)?.bay;
+      if (bay !== undefined && bay < st.bays && out[bay] === null) out[bay] = id;
+      else rest.push(id);
     }
-    // Без своего поста (старое сохранение, постов убавили) — на первый свободный.
-    for (const color of rest) {
+    for (const id of [...rest, ...this.waitingOffBay(st)]) {
       const i = out.indexOf(null);
-      if (i >= 0) out[i] = color;
+      if (i < 0) break;
+      out[i] = id;
+    }
+    return out;
+  }
+
+  /** Машины компании, что стоят на этой автостанции, не заняв поста: грузятся, ждут интервала или выезда. */
+  private waitingOffBay(st: Station): number[] {
+    if (st.kind !== 'road') return [];
+    const out: number[] = [];
+    for (const v of this.fleet.values()) {
+      if (v.inBay || v.simId !== null || v.state === 'driving' || MODELS[v.model].mode !== 'road') continue;
+      if (this.lines.get(v.lineId)?.stops[v.stop] === st.id) out.push(v.id);
     }
     return out;
   }
@@ -4865,6 +5718,7 @@ export class Game implements BuildContext {
 
   notify(text: string, color?: string): void {
     this.notices.push({ text, color, age: 0 });
+    this.journal.add('note', { text });
   }
 
   inFootprint(p: Vec, fp: Footprint): boolean {

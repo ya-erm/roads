@@ -1,23 +1,34 @@
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
+import { warningMarks } from '../game/stationWarnings';
 import type { Game, LaneEnd } from '../game/game';
-import { bayFront, type Line } from '../game/transport';
-import { LaneRenderer } from '../lanes/draw';
+import { bayFront, stopBerth, type FleetVehicle, type Line } from '../game/transport';
+import { bridgeLook, deckAlong } from '../lanes/deck';
+import { atPortals, type Portal, portalHalf, tunnelPortals } from '../lanes/tunnel';
+import { LaneRenderer, layerOf } from '../lanes/draw';
 import { insideRuns } from '../lanes/edit';
 import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
 import type { CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
+import type { LaneGraph } from '../lanes/graph';
+import { type JunctionPreview, junctionPreview, previewHides } from '../lanes/preview';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { wagonFills } from '../sim/wagons';
 import { cargoImage } from '../ui/cargoIcons';
+import { BIOMES } from '../world/biomes';
 import { CARGO, CargoType, FREIGHT } from '../world/cargo';
 import { Industry, Station, TOWN_NEED, TownBuilding } from '../world/entities';
 import type { Segment } from '../world/network';
-import { halfWidth, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
+import { halfWidth, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
 import { Camera } from './camera';
 import { drawIndustryArt } from './industryArt';
+import { EarthworkCache } from './earthworks';
+import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { drawTurnArrows } from './turnArrows';
+import { drawVehicleArt, frontLength } from './vehicleArt';
+import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
+import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
 
 export type Selection =
   | { type: 'station'; id: number }
@@ -65,20 +76,53 @@ export interface ToolOverlay {
   highlight: number[];
   /** Место, на которое показали из карточки (пульсирующее кольцо на пару секунд). */
   ping: { pos: Vec; r: number } | null;
+  /** Точка маршрута под курсором на графике скорости линии: где она и какая там скорость. */
+  chartPoint?: { pos: Vec; color: string; kmh: number } | null;
+  /** Машина открытого маршрута под курсором в его списке — пульсирующим кольцом. */
+  fleetHover?: number | null;
   /** Рамка сноса и что под неё попадёт. */
   area: { a: Vec; b: Vec; segs: number[]; corridors: number[]; fps: Footprint[] } | null;
   /** Отметки зданий: снос (bad) или место для переноса (ok/bad). */
   marks: { fp: Footprint; ok: boolean }[];
   label: { text: string; ok: boolean } | null;
   heatmap: boolean;
+  /** Карта скоростей: цвет дороги — разрешённая скорость, на поворотах — сниженная. */
+  speedmap?: boolean;
+  /** Строим дорогу или путь: изолинии ярче, у курсора подпись высоты. */
+  roadTool: boolean;
+  /** На сколько −/+ подняли или опустили конец дороги относительно начала («+14 м») — синим после высоты у курсора. */
+  rise?: string | null;
+  /** Курсор над мостом: вместо высоты земли — «высота моста 67 м · земля 55 м». */
+  heightText?: string | null;
+  /** Высота начала строящейся дороги или пути, м — подписью у начала (у курсора — высота конца). */
+  startHeight?: { pos: Vec; m: number } | null;
+  /** Кисть рельефа: где и какого радиуса (красная — здесь нельзя). */
+  brush?: { pos: Vec; r: number; ok: boolean } | null;
   /** Дороги с тем, что сейчас строим или правим: эта сеть рисуется вместо настоящей, изменённое подсвечено. */
-  roads?: { net: LaneNet; ok: boolean; changed: number[] } | null;
+  roads?: { net: LaneNet; ok: boolean; changed: number[]; /** Проект: изменённое — синим. */ project?: boolean } | null;
+  /**
+   * Проект дороги или пути: участки — пунктиром по кромкам (что не выходит — красным; fill — полупрозрачной
+   * заливкой, если участок не виден как будущая дорога), узлы — квадратиками (tip — откуда ведём, hot — под курсором).
+   */
+  project?: {
+    segs: { curve: Cubic; half: number; ok: boolean; fill: boolean; draft?: boolean }[];
+    nodes: { pos: Vec; tip: boolean; hot: boolean }[];
+    /** Знаки скорости перед поворотами (как у построенной дороги): на оси, по ходу, до кромки справа, км/ч. */
+    signs?: { pos: Vec; dir: Vec; side: number; kmh: number }[];
+  } | null;
+  /** Полотна построенной сети, что в проекте уходят или меняют форму: их знаки на поворотах — бледно (старые). */
+  staleSigns?: Set<number> | null;
+  /** Тянут дорогу в «Двигать»: знаки этих полотен построенной сети не рисуем — дорога уже в новой форме. */
+  hiddenSigns?: Set<number> | null;
+  /** …а знаки на её поворотах — по новой форме, прямо во время протяжки (как у построенной). */
+  liveSigns?: { pos: Vec; dir: Vec; side: number; kmh: number }[] | null;
   /** Полотно под курсором: снос — красным, правка — синим, перестройка — зелёным. */
   corridor?: { id: number; color: 'red' | 'blue' | 'green' } | null;
   /** Полоса под курсором, которую снесут, — красным. */
   lane?: { corridor: number; lane: number } | null;
   /** Кружки: начало дороги, куда примкнёт, узел под курсором. */
-  points?: { pos: Vec; color: string; r?: number }[];
+  /** node — узел, за который тянут («Двигать»): рисуется квадратом узла, а не кружком. */
+  points?: { pos: Vec; color: string; r?: number; node?: boolean }[];
   /** Настройка полос выбранного перекрёстка: метки концов полос, выбранный въезд, метка под курсором. */
   laneEdit: { node: number; ends: LaneEnd[]; from: { seg: number; i: number } | null; hover: LaneEnd | null } | null;
   /** Курсор на варианте главной дороги в карточке перекрёстка: его и показываем (mainPair: null — «Авто», [] — равнозначный). */
@@ -88,9 +132,8 @@ export interface ToolOverlay {
 /** Радиус метки полосы: по ширине полосы, но не меньше нескольких пикселей — чтобы попасть и издалека. */
 export const laneMarkRadius = (zoom: number) => Math.max(LANE_W * 0.36, 4 / zoom);
 
+/** Цвета карты; трава, деревья и фон вне карты — по биому (BIOMES[…].palette). */
 const C = {
-  outside: '#a9b98c',
-  grass: '#d6e2bd',
   water: '#8cc3e6',
   bank: '#c5e0ee',
   roadEdge: '#4b525c',
@@ -102,7 +145,6 @@ const C = {
   dash: 'rgba(245, 243, 230, 0.85)',
   divider: 'rgba(240, 205, 96, 0.9)',
   island: '#b4cf93',
-  trees: ['#8fb46a', '#7aa55a', '#9cc177', '#6e9a52'],
 };
 
 /** Радиус кружка пера на экране, пикселей (и за сколько его можно схватить). */
@@ -192,6 +234,18 @@ const BLINKER_MIN_PX = 3;
 /** Мигают ли и задние огоньки поворотника (пока — только передние). */
 const BLINK_REAR = false;
 
+/** Цвета карты скоростей: до скольких км/ч — каким цветом. */
+const SPEED_STEPS: [number, string][] = [
+  [20, '#b8322a'],
+  [40, '#e8743b'],
+  [60, '#efc23c'],
+  [80, '#9bc53d'],
+  [90, '#3fae5a'],
+  [100, '#2a9d8f'],
+  [120, '#3b6fd1'],
+];
+const speedColor = (kmh: number) => (SPEED_STEPS.find(([v]) => kmh <= v + 4) ?? SPEED_STEPS[SPEED_STEPS.length - 1])[1];
+
 export class Renderer {
   private readonly ctx: CanvasRenderingContext2D;
   private cache = new Map<number, SegCache>();
@@ -199,10 +253,20 @@ export class Renderer {
   private treeVersion = '';
   /** Горят ли поворотники в этом кадре: мигают по игровому времени, на паузе — горят ровно. */
   private blinkOn = false;
+  /** Полотна, чьи знаки на поворотах в этом кадре не рисуем (их тянут в «Двигать»), — из оверлея. */
+  private hiddenSigns: Set<number> | null = null;
   /** По чьей воде отрисовка дорог считает мосты над рекой. */
   private waterOf: unknown = null;
+  /** Порталы тоннелей сети дорог — пересчитываются, когда сеть меняется. */
+  private portalCache: { net: LaneNet; version: number; list: Portal[] } | null = null;
+  /** Предпросмотр правки дорог: перекрёстки, что она меняет, и граф вокруг них — на версию сети с правкой. */
+  private previewOf: { net: LaneNet; version: number; base: LaneNet; baseVersion: number; preview: JunctionPreview | null } | null = null;
   /** Дороги из полос. */
   private readonly lanes = new LaneRenderer();
+  /** Отмывка склонов и изолинии — кэш тайлами. */
+  private readonly relief = new ReliefRenderer();
+  /** Откосы насыпей и выемок у полотен на земле. */
+  private readonly earthworks = new EarthworkCache();
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -219,6 +283,8 @@ export class Renderer {
     this.cacheVersion = -1;
     this.treeVersion = '';
     this.lanes.reset();
+    this.relief.reset();
+    this.earthworks.reset();
   }
 
   resize(): void {
@@ -247,9 +313,10 @@ export class Renderer {
   draw(game: Game, o: ToolOverlay): void {
     const ctx = this.ctx;
     this.refreshCache(game);
+    this.hiddenSigns = o.hiddenSigns ?? null;
     this.blinkOn = game.speed === 0 || (game.time * BLINK_HZ) % 1 < 0.5;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = C.outside;
+    ctx.fillStyle = BIOMES[game.terrain.biome].palette.outside;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     this.camera.apply(ctx);
 
@@ -263,10 +330,13 @@ export class Renderer {
     const trains = this.trainCars(game, view);
     const trainBand = (lvl: number) => (lvl < -0.5 ? -1 : lvl < 0.5 ? 0 : lvl < 1.5 ? 1 : 2);
 
-    this.drawTerrain(game, view);
+    this.drawTerrain(game, view, o);
     this.drawTunnels(segs);
     // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты; над рекой на земле — мостом.
     const roadNet = o.roads?.net ?? game.roads.net;
+    // Стоп-линии и стрелки у перекрёстков, что правка меняет, — по сети с правкой, прямо во время протяжки.
+    const preview = this.junctionPreview(game.roads.net, roadNet);
+    this.earthworks.draw(ctx, game.ground(), roadNet, game.net, segs, view, this.camera.zoom, game.terrain.version);
     // Вода — вместе со светлой полосой берега (её рисуют на 7 шире).
     // Карта сменилась (новая партия, загрузка) — мосты над рекой считаем по её воде заново.
     if (this.waterOf !== game.terrain) {
@@ -275,9 +345,23 @@ export class Renderer {
       this.lanes.reset();
       this.lanes.water = (p) => terrain.isWater(p, 7);
     }
+    // Машины на линии портала тоннеля — по частям: за порталом бледно (под землёй), до него — как на земле. У портала
+    // под землёй или на земле машину рисуют по её кузову, а не по слою движения: тот меняется с запасом, и на кадр
+    // машина, уже целиком в тоннеле, моргала бы яркой.
+    const portals = this.portalsOf(roadNet).filter((p) => p.pos.x > view.x0 - 60 && p.pos.x < view.x1 + 60 && p.pos.y > view.y0 - 60 && p.pos.y < view.y1 + 60);
+    const atPortal = new Map<Vehicle, Portal>();
+    const portalBand = new Map<Vehicle, number>();
+    for (const v of vehicles) {
+      if (band(v) > 0 || !portals.length) continue;
+      const at = atPortals(portals, v.pos, v.dir, v.length);
+      if (at?.side === 'split') atPortal.set(v, at.portal);
+      else if (at) portalBand.set(v, at.side === 'in' ? -1 : 0);
+    }
+    const groundBand = (v: Vehicle) => portalBand.get(v) ?? band(v);
     ctx.globalAlpha = 0.35;
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, -1);
-    this.drawVehicles(vehicles.filter((v) => band(v) === -1));
+    this.drawVehicles(vehicles.filter((v) => groundBand(v) === -1 && !atPortal.has(v)));
+    for (const [v, p] of atPortal) this.drawClipped(portalHalf(p, 1), () => this.drawVehicles([v]));
     this.drawTrains(trains.filter((t) => trainBand(t.level) === -1));
     ctx.globalAlpha = 1;
     const groundRails = segs.filter((s) => this.cache.get(s.id)!.maxLevel <= 0.01);
@@ -286,16 +370,20 @@ export class Renderer {
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
     this.drawStationAprons(game, roadNet, view);
     if (o.roads) this.drawRoadPreview(o.roads);
-    this.drawStopLines(game, view);
-    drawTurnArrows(ctx, game, view, this.camera.zoom);
+    this.drawStopLines(game, view, 0, preview);
+    drawTurnArrows(ctx, game, view, this.camera.zoom, preview);
     this.drawRailSteel(groundRails);
     this.drawCrossings(game, view);
     this.drawSignals(game, view);
-    if (o.heatmap) this.drawHeatmap(game);
-    this.drawVehicles(vehicles.filter((v) => band(v) === 0));
+    if (o.heatmap) this.drawHeatmap(game, 0);
+    if (o.speedmap) this.drawSpeedmap(game, 0);
+    this.drawVehicles(vehicles.filter((v) => groundBand(v) === 0 && !atPortal.has(v)));
+    for (const [v, p] of atPortal) this.drawClipped(portalHalf(p, -1), () => this.drawVehicles([v]));
+    this.drawPortals(portals);
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
     this.drawLights(game);
+    this.drawCurveSigns(game, view, o.staleSigns, 0);
     this.drawStructures(game, view, o);
     this.drawTrains(trains.filter((t) => trainBand(t.level) === 0));
     for (const level of [1, 2]) {
@@ -306,17 +394,169 @@ export class Renderer {
       const roads = this.lanes.hasLayer(roadNet, level);
       if (!rails.length && !roads) continue;
       if (roads) this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, level);
+      if (roads && o.roads) this.drawRoadPreview(o.roads, level);
+      // Стоп-линии, пробки и скорость на мосту и съезде с него — поверх его полотна (с земли их закрыло бы полотно).
+      if (roads) this.drawStopLines(game, view, level, preview);
+      if (roads && o.heatmap) this.drawHeatmap(game, level);
+      if (roads && o.speedmap) this.drawSpeedmap(game, level);
       this.drawElevated(rails);
       this.drawRailBeds(rails, true);
       this.drawRailSteel(rails);
-      this.drawVehicles(vehicles.filter((v) => band(v) === level));
+      // Машины на мосту — вместе с поднятым полотном.
+      this.drawVehicles(
+        vehicles
+          .filter((v) => band(v) === level)
+          .map((v) => {
+            const d = this.lanes.liftAt(roadNet, v.pos);
+            return d.y ? { ...v, pos: add(v.pos, d), trail: v.trail && add(v.trail, d) } : v;
+          }),
+      );
+      if (roads) this.drawCurveSigns(game, view, o.staleSigns, level);
       this.drawTrains(trains.filter((t) => trainBand(t.level) === level));
     }
     this.drawLabels(game, view);
     this.drawOverlay(game, o);
     this.drawStationBadges(game, view);
+    this.drawWarningMarks(game, view);
     this.drawFloaters(game);
     if (o.label && o.hover) this.drawTooltip(o.hover, o.label.text, o.label.ok);
+    if (o.brush) this.drawBrush(o.brush);
+    if (o.speedmap) this.drawSpeedLegend();
+    if (o.roadTool && o.hover) this.drawHeight(game, o.hover, o.rise ?? null, o.heightText ?? null);
+    if (o.startHeight) this.drawStartHeight(o.startHeight.pos, o.startHeight.m, o.hover);
+  }
+
+  /** Высота у начала дороги — позади начала (против хода к курсору), за краем полотна, чтобы не ложиться на него. */
+  private drawStartHeight(p: Vec, m: number, hover: Vec | null): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const dx = hover ? hover.x - p.x : 1;
+    const dy = hover ? hover.y - p.y : 0;
+    const l = Math.hypot(dx, dy) || 1;
+    // Отступ: полуширина широкой дороги (м) и ещё немного на экране.
+    const back = 16 + 8 / z;
+    const x = p.x - (dx / l) * back;
+    const y = p.y - (dy / l) * back;
+    const label = altitudeText(m);
+    ctx.save();
+    ctx.font = `600 ${12 / z}px sans-serif`;
+    // Дорога уходит вправо — подпись слева от точки, влево — справа, почти вертикально — над или под ней.
+    const side = Math.abs(dx / l) > 0.35;
+    ctx.textAlign = side ? (dx > 0 ? 'right' : 'left') : 'center';
+    ctx.textBaseline = side ? 'middle' : dy > 0 ? 'bottom' : 'top';
+    ctx.lineWidth = 3 / z;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.strokeText(label, x, y);
+    ctx.fillStyle = 'rgba(70, 56, 30, 0.95)';
+    ctx.fillText(label, x, y);
+    ctx.restore();
+  }
+
+  /** Порталы тоннелей сети (кэш по версии сети). */
+  private portalsOf(net: LaneNet): Portal[] {
+    const c = this.portalCache;
+    if (c && c.net === net && c.version === net.version) return c.list;
+    const list = tunnelPortals(net);
+    this.portalCache = { net, version: net.version, list };
+    return list;
+  }
+
+  /** Рисует draw только внутри многоугольника clip. */
+  private drawClipped(clip: Vec[], draw: () => void): void {
+    const ctx = this.ctx;
+    ctx.save();
+    this.polyline(clip);
+    ctx.closePath();
+    ctx.clip();
+    draw();
+    ctx.restore();
+  }
+
+  /**
+   * Въезды в тоннели: тёмный зев внутрь (тень под сводом) и бетонный оголовок поперёк дороги по линии портала
+   * с откосными стенками наружу — видно, куда машины ныряют под землю.
+   */
+  private drawPortals(portals: Portal[]): void {
+    const ctx = this.ctx;
+    ctx.save();
+    for (const p of portals) {
+      const n = rightNormal(p.dir);
+      const at = (lat: number, along: number) => add(add(p.pos, scale(n, lat)), scale(p.dir, along));
+      // Зев: от линии портала внутрь темнеет и сходит на нет.
+      const g = ctx.createLinearGradient(p.pos.x, p.pos.y, p.pos.x + p.dir.x * 9, p.pos.y + p.dir.y * 9);
+      g.addColorStop(0, 'rgba(24, 26, 30, 0.6)');
+      g.addColorStop(1, 'rgba(24, 26, 30, 0)');
+      ctx.fillStyle = g;
+      this.polyline([at(p.left, 0), at(p.right, 0), at(p.right, 9), at(p.left, 9)]);
+      ctx.closePath();
+      ctx.fill();
+      // Оголовок и откосные стенки: стенки расходятся от краёв портала наружу, по склону выемки.
+      const wall = [at(p.left - 4, -5), at(p.left - 1.2, 0), at(p.right + 1.2, 0), at(p.right + 4, -5)];
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (const [color, width] of [
+        ['rgba(40, 38, 34, 0.35)', 3.4],
+        ['#8c877c', 2.4],
+        ['#d6d1c4', 1.1],
+      ] as const) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        this.polyline(wall);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  /** Круг кисти рельефа: сплошной край и пунктир на половине радиуса — там мазок ещё сильный. */
+  private drawBrush(b: { pos: Vec; r: number; ok: boolean }): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    ctx.save();
+    ctx.strokeStyle = b.ok ? 'rgba(120, 84, 40, 0.9)' : 'rgba(232, 72, 63, 0.9)';
+    ctx.fillStyle = b.ok ? 'rgba(160, 120, 60, 0.12)' : 'rgba(232, 72, 63, 0.1)';
+    ctx.lineWidth = 2 / z;
+    ctx.beginPath();
+    ctx.arc(b.pos.x, b.pos.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([5 / z, 4 / z]);
+    ctx.lineWidth = 1.2 / z;
+    ctx.beginPath();
+    ctx.arc(b.pos.x, b.pos.y, b.r * 0.5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * Высота рельефа под курсором — и до начала дороги, и пока тянем её конец; над подсказкой стройки, чтобы её не закрывать.
+   * rise — заданная −/+ высота конца относительно начала: следом, тем же шрифтом, синим. text — своя подпись
+   * вместо высоты земли (над мостом — и моста, и земли под ним).
+   */
+  private drawHeight(game: Game, p: Vec, rise: string | null, text: string | null = null): void {
+    const label = text ?? heightLabel(game.terrain, p);
+    if (!label) return;
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const x = p.x + 12 / z;
+    const y = p.y - 30 / z;
+    ctx.save();
+    ctx.font = `600 ${12 / z}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.lineWidth = 3 / z;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.strokeText(label, x, y);
+    ctx.fillStyle = 'rgba(70, 56, 30, 0.95)';
+    ctx.fillText(label, x, y);
+    if (rise) {
+      // Тем же шрифтом, что высота, — отличается только цветом.
+      const rx = x + ctx.measureText(label).width + 5 / z;
+      ctx.strokeText(rise, rx, y);
+      ctx.fillStyle = '#1f6fd6';
+      ctx.fillText(rise, rx, y);
+    }
+    ctx.restore();
   }
 
   // ---------- Кэш геометрии путей ----------
@@ -417,11 +657,16 @@ export class Renderer {
 
   // ---------- Рельеф ----------
 
-  private drawTerrain(game: Game, view: ReturnType<Renderer['view']>): void {
+  private drawTerrain(game: Game, view: ReturnType<Renderer['view']>, o: ToolOverlay): void {
     const ctx = this.ctx;
     const t = game.terrain;
-    ctx.fillStyle = C.grass;
+    // Трава, деревья и вне карты — по биому (у средней полосы — прежние цвета).
+    const pal = BIOMES[t.biome].palette;
+    ctx.fillStyle = pal.grass;
     ctx.fillRect(0, 0, t.width, t.height);
+    // Цвет земли по высоте, отмывка и изолинии — под водой, дорогами и застройкой: рисуются раньше них.
+    this.relief.drawGround(ctx, t, view);
+    this.relief.drawContours(ctx, t, view, this.camera.zoom, o.roadTool);
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, 0, t.width, t.height);
@@ -434,6 +679,12 @@ export class Renderer {
     ] as const) {
       ctx.strokeStyle = color;
       ctx.fillStyle = color;
+      // С рельефом берега рек и озёр идут по рельефу — вода одним контуром из поля расстояний до берега.
+      const shaped = waterPath(t, extra / 2);
+      if (shaped) {
+        ctx.fill(shaped, 'evenodd');
+        continue;
+      }
       for (const r of t.rivers) {
         ctx.lineWidth = r.width + extra;
         ctx.beginPath();
@@ -454,13 +705,14 @@ export class Renderer {
       if (tree.hidden) continue;
       const p = tree.pos;
       if (p.x < view.x0 || p.x > view.x1 || p.y < view.y0 || p.y > view.y1) continue;
+      const size = tree.size * pal.treeScale;
       ctx.fillStyle = 'rgba(40, 60, 30, 0.16)';
       ctx.beginPath();
-      ctx.arc(p.x + 2, p.y + 2.5, tree.size, 0, Math.PI * 2);
+      ctx.arc(p.x + 2 * pal.treeScale, p.y + 2.5 * pal.treeScale, size, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = C.trees[Math.floor(tree.shade * C.trees.length)];
+      ctx.fillStyle = pal.trees[Math.floor(tree.shade * pal.trees.length)];
       ctx.beginPath();
-      ctx.arc(p.x, p.y, tree.size, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -721,28 +973,41 @@ export class Renderer {
     }
   }
 
-  /** Стоп-линии — сплошные, поперёк всех полос подъезда к перекрёстку. */
-  private drawStopLines(game: Game, view: ReturnType<Renderer['view']>): void {
+  /**
+   * Стоп-линии — сплошные, поперёк всех полос подъезда к перекрёстку. pass — слой высоты подъезда: спуск с моста
+   * к перекрёстку рисуется слоем моста — его стоп-линия там же, поверх полотна (с земли её закрыло бы полотно).
+   * preview — предпросмотр правки: у перекрёстков, что она меняет, стоп-линии — по сети с правкой (едут за протяжкой).
+   */
+  private drawStopLines(game: Game, view: ReturnType<Renderer['view']>, pass: number, preview: JunctionPreview | null = null): void {
     if (this.camera.zoom < 0.6) return;
+    this.stopLinesOf(game.roads.graph, view, pass, (id) => !previewHides(preview, id));
+    if (preview?.graph) this.stopLinesOf(preview.graph, view, pass, (id) => preview.nodes.has(id));
+    this.ctx.setLineDash([]);
+  }
+
+  /** Стоп-линии перекрёстков графа g, которые keep пропускает. */
+  private stopLinesOf(g: LaneGraph, view: ReturnType<Renderer['view']>, pass: number, keep: (id: number) => boolean): void {
     const ctx = this.ctx;
-    const g = game.roads.graph;
-    const net = game.roads.net;
+    const net = g.net;
     for (const n of g.nodes.values()) {
       // Стоп-линии — на всех подъездах перекрёстка (и на главной дороге); на кольце — только на въездах.
       const node = net.nodes.get(n.id);
-      if (!node || node.kind !== 'junction' || node.corridors.length < 3) continue;
+      if (!node || node.kind !== 'junction' || node.corridors.length < 3 || !keep(n.id)) continue;
       if (n.pos.x < view.x0 || n.pos.x > view.x1 || n.pos.y < view.y0 || n.pos.y > view.y1) continue;
       const ring = (node.roundabout ?? null) !== null;
       for (const link of g.inLinks.get(n.id) ?? []) {
-        if (ring && net.corridors.get(link.corridor)?.ring) continue;
+        const c = net.corridors.get(link.corridor);
+        if (!c || (ring && c.ring) || !inPass(corridorLayer(net, c), pass)) continue;
         // Одной чертой поперёк всех полос подъезда (без щелей между полосами), чуть отступив от перекрёстка.
         const first = link.lanes[0];
         const last = link.lanes[link.lanes.length - 1];
         if (!first || !last) continue;
-        const l = g.lanePose(first, Math.max(0, first.length - STOP_LINE_BACK));
-        const r = g.lanePose(last, Math.max(0, last.length - STOP_LINE_BACK));
-        const a = add(l.pos, scale(rightNormal(l.dir), -LANE_W / 2 + STOP_LINE_INSET));
-        const b = add(r.pos, scale(rightNormal(r.dir), LANE_W / 2));
+        const u = Math.max(0, first.length - STOP_LINE_BACK);
+        const l = g.lanePose(first, u);
+        const r = g.lanePose(last, u);
+        const d = deckLift(net, c, g.axisS(first, u));
+        const a = add(add(l.pos, scale(rightNormal(l.dir), -LANE_W / 2 + STOP_LINE_INSET)), d);
+        const b = add(add(r.pos, scale(rightNormal(r.dir), LANE_W / 2)), d);
         // Белая без прозрачности: стоп-линия заметнее разметки полос.
         ctx.strokeStyle = '#f2f1ea';
         ctx.lineWidth = STOP_LINE_W;
@@ -754,18 +1019,29 @@ export class Renderer {
         ctx.stroke();
       }
     }
-    ctx.setLineDash([]);
   }
 
-  /** Карта пробок: каждая связь графа движения — цветом загрузки (зелёный — свободно, красный — стоят). */
-  private drawHeatmap(game: Game): void {
+  /** Предпросмотр сети net (с правкой) поверх сети игры base — один раз на её версию: перекрёстки, что правка меняет. */
+  private junctionPreview(base: LaneNet, net: LaneNet): JunctionPreview | null {
+    const c = this.previewOf;
+    if (c && c.net === net && c.version === net.version && c.base === base && c.baseVersion === base.version) return c.preview;
+    const preview = junctionPreview(base, net, () => this.lanes.cutsOf(net));
+    this.previewOf = { net, version: net.version, base, baseVersion: base.version, preview };
+    return preview;
+  }
+
+  /**
+   * Карта пробок: каждая связь графа движения — цветом загрузки (зелёный — свободно, красный — стоят). pass — слой
+   * высоты, как у карты скоростей: мосты, эстакады и съезды на них — в своём слое, поверх полотна и поднятые с ним.
+   */
+  private drawHeatmap(game: Game, pass: number): void {
     const ctx = this.ctx;
     const g = game.roads.graph;
     const view = this.view();
     ctx.lineCap = 'round';
     for (const link of g.links.values()) {
       const c = g.net.corridors.get(link.corridor);
-      if (!c) continue;
+      if (!c || !link.lanes.length || !inPass(corridorLayer(g.net, c), pass)) continue;
       const mid = c.lut.pointAt((link.s0 + link.s1) / 2);
       if (mid.x < view.x0 - link.length || mid.x > view.x1 + link.length || mid.y < view.y0 - link.length || mid.y > view.y1 + link.length) continue;
       let count = 0;
@@ -779,9 +1055,143 @@ export class Renderer {
       const off = link.lanes.reduce((a, l) => a + l.offset, 0) / link.lanes.length;
       ctx.strokeStyle = `hsla(${120 - load * 120}, 80%, 46%, 0.8)`;
       ctx.lineWidth = Math.max(2.5, link.lanes.length * 2.5);
-      this.polyline(c.lut.offsetPolyline(off, link.s0, link.s1, 6));
+      this.polyline(deckLine(g.net, c, link.s0, link.s1, off, 6));
       ctx.stroke();
     }
+  }
+
+  /**
+   * Карта скоростей: каждая связь — цветом разрешённой скорости, на поворотах — сниженной изгибом. Обычно — одной
+   * линией посередине полос; где полосы расходятся (отгон, развилка, вливание) — каждая полоса своей (speedStrokes).
+   * pass — слой высоты: на земле — дороги земли и тоннелей, на мостах и эстакадах — их, поверх полотна и поднятые с ним.
+   */
+  private drawSpeedmap(game: Game, pass: number): void {
+    const ctx = this.ctx;
+    const g = game.roads.graph;
+    const view = this.view();
+    ctx.save();
+    ctx.lineCap = 'butt';
+    for (const link of g.links.values()) {
+      const c = g.net.corridors.get(link.corridor);
+      if (!c || !link.lanes.length || !inPass(corridorLayer(g.net, c), pass)) continue;
+      const mid = c.lut.pointAt((link.s0 + link.s1) / 2);
+      if (mid.x < view.x0 - link.length || mid.x > view.x1 + link.length || mid.y < view.y0 - link.length || mid.y > view.y1 + link.length) continue;
+      for (const stroke of speedStrokes(g, link)) {
+        const lane = stroke.lanes[0];
+        const prof = game.traffic.profile(lane);
+        ctx.lineWidth = stroke.width;
+        const kmhAt = (k: number) => Math.min(lane.speed, prof.c[k]) * KMH_PER_UNIT;
+        const push = (pts: Vec[], u: number) => {
+          const p = strokePoint(g.net, c, stroke, g.axisS(lane, u));
+          if (p) pts.push(p);
+        };
+        let k0 = 0;
+        for (let k = 1; k <= prof.c.length; k++) {
+          if (k < prof.c.length && speedColor(kmhAt(k)) === speedColor(kmhAt(k0))) continue;
+          const u0 = Math.min(lane.length, k0 * PROFILE_STEP);
+          const u1 = Math.min(lane.length, k * PROFILE_STEP);
+          if (u1 > u0) {
+            const pts: Vec[] = [];
+            for (let u = u0; u < u1; u += 3) push(pts, u);
+            push(pts, u1);
+            ctx.strokeStyle = speedColor(kmhAt(k0));
+            this.polyline(pts);
+            ctx.stroke();
+          }
+          k0 = k;
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  /** Легенда карты скоростей — в углу экрана. */
+  private drawSpeedLegend(): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setTransform(this.camera.dpr, 0, 0, this.camera.dpr, 0, 0);
+    const x = 16;
+    const y = 88;
+    const items = SPEED_STEPS;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+    ctx.beginPath();
+    ctx.roundRect(x, y, 14 + items.length * 34, 34, 8);
+    ctx.fill();
+    ctx.font = '600 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    items.forEach(([kmh, color], i) => {
+      const cx = x + 24 + i * 34;
+      ctx.fillStyle = color;
+      ctx.fillRect(cx - 13, y + 8, 26, 6);
+      ctx.fillStyle = '#2b2f36';
+      ctx.fillText(String(kmh), cx, y + 24);
+    });
+    ctx.restore();
+  }
+
+  /**
+   * Знаки ограничения скорости перед поворотами, которые снижают скорость: по обе стороны дороги в начале
+   * изгиба, для каждого направления — по ходу движения (как на настоящих дорогах). pass — слой высоты, как у карты скоростей.
+   */
+  private drawCurveSigns(game: Game, view: ReturnType<Renderer['view']>, stale: Set<number> | null | undefined, pass: number): void {
+    const z = this.camera.zoom;
+    if (z < 0.45) return;
+    const ctx = this.ctx;
+    const g = game.roads.graph;
+    const r = Math.max(3.2, 9 / z);
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 ${r * 0.95}px sans-serif`;
+    for (const link of g.links.values()) {
+      const c = g.net.corridors.get(link.corridor);
+      if (!c || !link.lanes.length || c.ring || !inPass(corridorLayer(g.net, c), pass)) continue;
+      const mid = c.lut.pointAt((link.s0 + link.s1) / 2);
+      if (mid.x < view.x0 - link.length || mid.x > view.x1 + link.length || mid.y < view.y0 - link.length || mid.y > view.y1 + link.length) continue;
+      const right = link.lanes[link.lanes.length - 1];
+      const left = link.lanes[0];
+      const zones = curveZones(game.traffic.profile(right), right.speed, KMH_PER_UNIT);
+      for (const zone of zones) {
+        // Знак — чуть раньше начала изгиба, по ходу движения.
+        const u = Math.max(0, zone.from - 15);
+        // Слева — только там, где встречки рядом нет (односторонняя, магистраль с барьером).
+        const sides = c.cls === 'motorway' || c.lanes.every((l) => l.flow === link.flow) ? ([[right, 1], [left, -1]] as const) : ([[right, 1]] as const);
+        for (const [lane, side] of sides) {
+          // У кромки полосы (на отгоне — у настоящей); у развилки, где сбоку чужая дорога, — дальше, где есть место.
+          const p = signSpot(g, lane, u, side, r, zone.to);
+          // Полотно в проекте меняется — его знаки старые: бледно (новые — в стиле проекта); тянут его в «Двигать» —
+          // прежних знаков нет совсем, их место заняли знаки дороги в новой форме (liveSigns).
+          if (p && !this.hiddenSigns?.has(c.id)) this.limitSign(p, r, zone.kmh, stale?.has(c.id) ? 'stale' : 'road');
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Знак ограничения скорости радиуса r (мир) в точке p: у построенной дороги — красный; stale — бледный (полотно
+   * в проекте уйдёт или поменяет форму); project — знак проекта: синий пунктир по ободу, полупрозрачный, как сам проект.
+   */
+  private limitSign(p: Vec, r: number, kmh: number, style: 'road' | 'stale' | 'project' = 'road'): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 ${r * 0.95}px sans-serif`;
+    if (style === 'stale') ctx.globalAlpha *= 0.3;
+    ctx.fillStyle = style === 'project' ? 'rgba(231,240,253,0.9)' : '#fff';
+    ctx.strokeStyle = style === 'project' ? '#2f80ed' : '#d93a30';
+    ctx.lineWidth = r * (style === 'project' ? 0.24 : 0.28);
+    if (style === 'project') ctx.setLineDash([r * 0.55, r * 0.35]);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = style === 'project' ? '#1f5fbf' : '#1d2026';
+    ctx.fillText(String(kmh), p.x, p.y + r * 0.05);
+    ctx.restore();
   }
 
   /** Светофоры: столбик справа от крайней правой полосы каждого въезда, свет — по фазе. */
@@ -817,45 +1227,16 @@ export class Renderer {
   private drawVehicles(list: VehicleLook[], halo = false): void {
     const ctx = this.ctx;
     const detailed = this.camera.zoom > 0.5;
+    const ring = halo ? Math.max(1.2, 1.6 / this.camera.zoom) : 0;
     for (const v of list) {
+      // Кузов по модели (фургон, тягач с полуприцепом, автобусы), у машин из двух частей — с изгибом в шарнире.
+      drawVehicleArt(ctx, v, { detailed, halo: ring });
+      if (!v.blinker || !this.blinkOn || v.width * this.camera.zoom < BLINKER_MIN_PX) continue;
+      // Поворотники — на первой части кузова (у тягача, у передней секции).
       ctx.save();
       ctx.translate(v.pos.x, v.pos.y);
       ctx.rotate(Math.atan2(v.dir.y, v.dir.x));
-      const L = v.length;
-      const W = v.width;
-      if (halo) {
-        const h = Math.max(1.2, 1.6 / this.camera.zoom);
-        ctx.fillStyle = '#ffffff';
-        rr(ctx, -L - h, -W / 2 - h, L + 2 * h, W + 2 * h, 1.3 + h);
-        ctx.fill();
-      }
-      if (detailed) {
-        ctx.fillStyle = 'rgba(0,0,0,0.22)';
-        rr(ctx, -L + 0.8, -W / 2 + 0.9, L, W, 1.2);
-        ctx.fill();
-      }
-      ctx.fillStyle = v.color;
-      rr(ctx, -L, -W / 2, L, W, 1.3);
-      ctx.fill();
-      if (detailed) {
-        if (v.kind === 'truck') {
-          // Кузов окрашен в цвет груза, пустой — светлый.
-          ctx.fillStyle = v.load ?? '#f4efe6';
-          ctx.fillRect(-L + 0.6, -W / 2 + 0.6, L - 4.2, W - 1.2);
-          ctx.fillStyle = 'rgba(255,255,255,0.6)';
-          ctx.fillRect(-2.6, -W / 2 + 0.8, 1.3, W - 1.6);
-        } else if (v.kind === 'bus') {
-          ctx.fillStyle = 'rgba(255,255,255,0.7)';
-          for (let x = -L + 1.5; x < -2; x += 2.4) ctx.fillRect(x, -W / 2 + 0.5, 1.5, 0.8);
-          ctx.fillRect(-2.2, -W / 2 + 0.8, 1.2, W - 1.6);
-        } else {
-          ctx.fillStyle = 'rgba(255,255,255,0.45)';
-          ctx.fillRect(-2.6, -W / 2 + 0.7, 1.4, W - 1.4);
-          ctx.fillStyle = 'rgba(0,0,0,0.18)';
-          ctx.fillRect(-L + 1, -W / 2 + 0.7, 1.4, W - 1.4);
-        }
-      }
-      if (v.blinker && this.blinkOn && W * this.camera.zoom >= BLINKER_MIN_PX) this.drawBlinker(L, W, v.blinker);
+      this.drawBlinker(frontLength(v), v.width, v.blinker);
       ctx.restore();
     }
   }
@@ -904,20 +1285,39 @@ export class Renderer {
     const ctx = this.ctx;
     const tracks = st.platforms.map((id) => game.net.segments.get(id)).filter((s): s is Segment => !!s);
     const main = tracks[0];
-    if (main && tracks.length > 1) {
+    if (main) {
       const mid = main.lut.pointAt(main.length / 2);
       const t = main.lut.tangentAt(main.length / 2);
-      const nextMid = tracks[1].lut.pointAt(tracks[1].length / 2);
+      // Сторона боковых путей; у вокзала на один путь — сторона здания (там его боковая платформа).
+      const nextMid = tracks.length > 1 ? tracks[1].lut.pointAt(tracks[1].length / 2) : st.fp.center;
       const side = (nextMid.x - mid.x) * -t.y + (nextMid.y - mid.y) * t.x > 0 ? 1 : -1;
       const gap = dist(mid, nextMid);
+      // У конечной платформы доходят до упоров (к перрону у здания в торце), с другого конца — как обычно.
+      const dead = (id: number) => game.net.nodes.get(id)?.segments.length === 1;
+      const span = (s: Segment): [number, number] => (!st.terminal ? [4, s.length - 4] : dead(s.b) ? [4, s.length] : dead(s.a) ? [0, s.length - 4] : [4, s.length - 4]);
+      // Сдвиг — относительно своего направления участка: у конечной пути могут быть уложены навстречу главному.
+      const sideOf = (s: Segment) => (dot(s.lut.tangentAt(s.length / 2), t) >= 0 ? side : -side);
       // Островные платформы между соседними путями и боковая — у здания за крайним путём.
       const strips: [Vec[], number][] = [];
       for (let i = 0; i < tracks.length - 1; i++) {
         const s = tracks[i];
-        strips.push([s.lut.offsetPolyline((side * gap) / 2, 4, s.length - 4, 6), gap - 2 * RAIL_HALF - 1.5]);
+        strips.push([s.lut.offsetPolyline((sideOf(s) * gap) / 2, ...span(s), 6), gap - 2 * RAIL_HALF - 1.5]);
       }
       const last = tracks[tracks.length - 1];
-      strips.push([last.lut.offsetPolyline(side * (RAIL_HALF + 4.5), 4, last.length - 4, 6), 6]);
+      strips.push([last.lut.offsetPolyline(sideOf(last) * (RAIL_HALF + 4.5), ...span(last), 6), 6]);
+      // Конечная: перрон поперёк путей — от тупиков до здания в торце, во всю его ширину.
+      const head = st.terminal ? [main.a, main.b].find(dead) : undefined;
+      if (head !== undefined) {
+        const fp = st.fp;
+        const end = game.net.node(head).pos;
+        const across = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+        const toward = dot(sub(fp.center, end), rightNormal(across)) > 0 ? rightNormal(across) : scale(rightNormal(across), -1);
+        const depth = dot(sub(fp.center, end), toward) - fp.h / 2;
+        if (depth > 0) {
+          const c = sub(fp.center, scale(toward, fp.h / 2 + depth / 2));
+          strips.push([[sub(c, scale(across, fp.w / 2)), add(c, scale(across, fp.w / 2))], depth + 1]);
+        }
+      }
       ctx.lineCap = 'butt';
       for (const [pts, w] of strips) {
         ctx.strokeStyle = '#b9b2a6';
@@ -936,7 +1336,27 @@ export class Renderer {
         for (let i = 0; i < tracks.length - 1; i++) {
           const s = tracks[i];
           for (const k of [-1, 1]) {
-            this.polyline(s.lut.offsetPolyline((side * gap) / 2 + (k * (gap - 2 * RAIL_HALF - 3)) / 2, 6, s.length - 6, 6));
+            this.polyline(s.lut.offsetPolyline((sideOf(s) * gap) / 2 + (k * (gap - 2 * RAIL_HALF - 3)) / 2, ...span(s).map((x, j) => x + (j ? -2 : 2)) as [number, number], 6));
+            ctx.stroke();
+          }
+        }
+      }
+      // Конечная: на тупике каждого пути — упор, красный брус поперёк с белой полосой.
+      if (st.terminal) {
+        for (const s of tracks) {
+          const atB = dead(s.b);
+          if (!atB && !dead(s.a)) continue;
+          const at = atB ? s.length - 1.8 : 1.8;
+          const p = s.lut.pointAt(at);
+          const tg = s.lut.tangentAt(at);
+          const hw = RAIL_HALF + 1.5;
+          const a = { x: p.x - tg.y * hw, y: p.y + tg.x * hw };
+          const b = { x: p.x + tg.y * hw, y: p.y - tg.x * hw };
+          ctx.lineCap = 'butt';
+          for (const [color, w] of [['#5b2f27', 4], ['#d9534f', 2.8], ['#ffffff', 0.9]] as const) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = w;
+            this.polyline([a, b]);
             ctx.stroke();
           }
         }
@@ -1122,14 +1542,12 @@ export class Renderer {
     const l = Math.hypot(toRoad.x, toRoad.y) || 1;
     const n = { x: toRoad.x / l, y: toRoad.y / l };
     // Автобусы на посадке — сами автобусы вдоль бордюра, в крайней полосе, носом по ходу (остановка справа).
-    const ahead = dot(rightNormal(u), n) < 0 ? u : scale(u, -1);
     const buses: VehicleLook[] = [];
     for (let i = 0; i < st.occupied.length; i++) {
-      const along = (i - (st.occupied.length - 1) / 2) * 14;
-      const c = add(add(fp.center, scale(u, along)), scale(n, fp.h / 2 + 2 + LANE_W / 2));
-      const look = game.fleetLookAt(st.occupied[i], c, ahead);
+      const berth = stopBerth(fp, node?.pos, i, st.occupied.length);
+      const look = game.fleetLookAt(st.occupied[i], berth.pos, berth.dir);
       if (look) buses.push(look);
-      else this.drawFootprint({ center: c, w: 12, h: 4.6, angle: fp.angle }, '#e07b39', '#8a4a22', 0.8);
+      else this.drawFootprint({ center: berth.pos, w: 12, h: 4.6, angle: fp.angle }, '#e07b39', '#8a4a22', 0.8);
     }
     if (buses.length) this.drawVehicles(buses);
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 1.5, y: fp.center.y + 2 } }, 'rgba(30,40,25,0.2)');
@@ -1172,10 +1590,39 @@ export class Renderer {
     const hh = fp.h / 2;
     ctx.fillStyle = '#5c6470';
     ctx.fillRect(-fp.w / 2 + 3, -hh + 3, fp.w - 6, 4);
-    const bw = (fp.w - 10) / st.bays;
+    // Пристройки-склады — по концам площадки: ангары с двускатной крышей, заполнение склада — ящиками.
+    const area = game.bayArea(st);
+    const side = (fp.w - area.w) / 2;
+    if (side > 0) {
+      const fill = Math.min(1, game.stationStored(st) / game.stationStorage(st));
+      for (const k of [-1, 1]) {
+        const x0 = k < 0 ? -fp.w / 2 + 1.5 : area.w / 2 + 0.5;
+        const w = side - 2;
+        ctx.fillStyle = '#b9895a';
+        ctx.fillRect(x0, -hh + 1.5, w, fp.h - 3);
+        ctx.strokeStyle = '#7d5a39';
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(x0, -hh + 1.5, w, fp.h - 3);
+        // Конёк крыши поперёк площадки и рёбра кровли.
+        ctx.beginPath();
+        ctx.moveTo(x0 + w / 2, -hh + 1.5);
+        ctx.lineTo(x0 + w / 2, hh - 1.5);
+        for (let y = -hh + 5; y < hh - 2; y += 4) {
+          ctx.moveTo(x0 + 1, y);
+          ctx.lineTo(x0 + w - 1, y);
+        }
+        ctx.stroke();
+        // Сколько занято: ящики у ворот растут вместе с заполнением.
+        if (fill > 0.02) {
+          ctx.fillStyle = '#e2b866';
+          ctx.fillRect(x0 + 1.5, hh - 1.5 - (fp.h - 4) * fill, Math.min(4, w / 3), (fp.h - 4) * fill);
+        }
+      }
+    }
+    const bw = (area.w - 10) / st.bays;
     const doors = this.camera.zoom > 0.35;
     game.stationBays(st).forEach((color, i) => {
-      const x = -fp.w / 2 + 5 + i * bw;
+      const x = -area.w / 2 + 5 + i * bw;
       ctx.fillStyle = color ?? '#d5d2c8';
       ctx.fillRect(x, -1, bw - 2, hh + 1);
       // Открытые ворота — тёмный проём во всю ширину бокса: контур площадки здесь прерывается.
@@ -1342,6 +1789,52 @@ export class Renderer {
     }
   }
 
+  /**
+   * Значки предупреждений (stationWarnings: где, какие, что сказать): у станции или предприятия, где что-то не так, —
+   * кружок с «!» в правом верхнем углу (красный — стоит, жёлтый — теряете деньги или рост), у станции, где все посты
+   * заняты и машины давно ждут въезда, — красная плашка «въезд запрещён» с числом ждущих в левом. Одного размера
+   * при любом масштабе; наведение — причина одной строкой, клик — карточка с объяснением (controller).
+   */
+  private drawWarningMarks(game: Game, view: ReturnType<Renderer['view']>): void {
+    const z = this.camera.zoom;
+    const ctx = this.ctx;
+    for (const m of warningMarks(game, z)) {
+      if (m.x + m.hw < view.x0 || m.x - m.hw > view.x1 || m.y + m.hh < view.y0 || m.y - m.hh > view.y1) continue;
+      ctx.lineWidth = 2 / z;
+      ctx.strokeStyle = '#fff';
+      ctx.font = `800 ${12 / z}px system-ui, sans-serif`;
+      ctx.textBaseline = 'middle';
+      if (m.shape === 'dot') {
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.hw, 0, Math.PI * 2);
+        ctx.fillStyle = m.level === 'alert' ? '#e5534b' : '#e0a100';
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.fillText('!', m.x, m.y + 0.5 / z);
+        continue;
+      }
+      const x = m.x - m.hw;
+      ctx.beginPath();
+      ctx.roundRect(x, m.y - m.hh, m.hw * 2, m.hh * 2, m.hh);
+      ctx.fillStyle = '#e5534b';
+      ctx.fill();
+      ctx.stroke();
+      // Знак «въезд запрещён»: белый круг с красной чертой.
+      const cx = x + 11 / z;
+      ctx.beginPath();
+      ctx.arc(cx, m.y, 6.5 / z, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.fillStyle = '#e5534b';
+      ctx.fillRect(cx - 4 / z, m.y - 1.4 / z, 8 / z, 2.8 / z);
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'left';
+      ctx.fillText(String(m.count ?? ''), x + 20 / z, m.y + 0.5 / z);
+    }
+  }
+
   private drawLabels(game: Game, view: ReturnType<Renderer['view']>): void {
     const ctx = this.ctx;
     const z = this.camera.zoom;
@@ -1369,7 +1862,7 @@ export class Renderer {
     for (const t of game.towns) {
       if (!near(t.center, t.radius + 400)) continue;
       const top = { x: t.center.x, y: t.top - 26 / z };
-      text(top, `${t.name} · ${t.population}`, 15, '#1f2933');
+      text(top, t.labelOnly ? t.name : `${t.name} · ${t.population}`, 15, '#1f2933');
       // Потребности города: яркий значок — привозили достаточно в прошлом месяце.
       const n = t.demands.length;
       t.demands.forEach((c, i) => {
@@ -1485,14 +1978,85 @@ export class Renderer {
 
   // ---------- Оверлеи ----------
 
+  /**
+   * Машина маршрута, на которую навели в его списке: пульсирующее синее кольцо (как у предприятий из цепочек)
+   * поверх её кружка на маршруте — не меньше кружка, чтобы было видно и издалека.
+   */
+  private drawFleetHover(game: Game, id: number, lineId: number | null): void {
+    const v = game.fleet.get(id);
+    const spot = v && v.lineId === lineId ? game.fleetSpot(v) : null;
+    if (!spot) return;
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 200);
+    // На посту автостанции — сам пост, пока его видно; издалека — кольцом, как остальных.
+    if (spot.box && spot.box.w * z >= 6) {
+      this.drawBayMark(spot.box, (1 + pulse * 1.5) / z, `rgba(47, 128, 237, ${0.6 + pulse * 0.4})`);
+      return;
+    }
+    const r = Math.max(spot.r, 12 / z) + (4 + pulse * 6) / z;
+    ctx.lineWidth = 6 / z;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.beginPath();
+    ctx.arc(spot.pos.x, spot.pos.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 4 / z;
+    ctx.strokeStyle = `rgba(47, 128, 237, ${0.6 + pulse * 0.4})`;
+    ctx.stroke();
+  }
+
+  /** Пост автостанции, где стоит машина: рамка по боксу на pad шире (белая подложка, сверху цветная) и лёгкая заливка. */
+  private drawBayMark(box: Footprint, pad: number, color: string): void {
+    const z = this.camera.zoom;
+    const fp = { ...box, w: box.w + pad * 2, h: box.h + pad * 2 };
+    this.drawFootprint(fp, 'rgba(255, 255, 255, 0.25)', 'rgba(255, 255, 255, 0.9)', 5 / z);
+    this.drawFootprint(fp, 'rgba(47, 128, 237, 0.15)', color, 3 / z);
+  }
+
+  /** Точка с графика скорости — на маршруте: кружок цвета линии в белой обводке и плашка со скоростью над ним. */
+  private drawChartPoint(p: { pos: Vec; color: string; kmh: number }): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const { x, y } = p.pos;
+    ctx.save();
+    ctx.fillStyle = 'rgba(31, 41, 51, 0.18)';
+    ctx.beginPath();
+    ctx.arc(x, y, 14 / z, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = p.color;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 3 / z;
+    ctx.beginPath();
+    ctx.arc(x, y, 7 / z, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    const text = `${p.kmh} км/ч`;
+    ctx.font = `700 ${12 / z}px system-ui, sans-serif`;
+    const w = ctx.measureText(text).width + 12 / z;
+    const h = 18 / z;
+    const top = y - 14 / z - h;
+    ctx.fillStyle = '#1f2933';
+    ctx.beginPath();
+    ctx.roundRect(x - w / 2, top, w, h, 6 / z);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x, top + h / 2);
+    ctx.restore();
+  }
+
   private drawOverlay(game: Game, o: ToolOverlay): void {
     const ctx = this.ctx;
     if (o.corridor) {
       const color = { red: 'rgba(232,72,63,0.5)', blue: 'rgba(47,128,237,0.35)', green: 'rgba(46,157,87,0.4)' }[o.corridor.color];
       this.tintCorridor(o.roads?.net ?? game.roads.net, o.corridor.id, color);
     }
-    if (o.lane) this.tintLane(game.roads.net, o.lane.corridor, o.lane.lane, 'rgba(232,72,63,0.55)');
+    // Полоса — в той сети, что на карте (в проекте полос — в сети с ним).
+    if (o.lane) this.tintLane(o.roads?.net ?? game.roads.net, o.lane.corridor, o.lane.lane, 'rgba(232,72,63,0.55)');
     for (const pt of o.points ?? []) {
+      // Узлы, за которые тянут, — квадратом (как у проекта), поверх перьев: ниже, после них.
+      if (pt.node) continue;
       const z = this.camera.zoom;
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
       ctx.strokeStyle = pt.color;
@@ -1577,7 +2141,10 @@ export class Renderer {
     // Выбрана машина или поезд компании — показываем маршрут её линии, чтобы было видно, куда она едет.
     const fleetLine = o.selection?.type === 'fleet' ? game.fleet.get(o.selection.id)?.lineId : undefined;
     const shownLine = o.selectedLine ?? fleetLine ?? null;
-    if (shownLine !== null) this.drawLinePath(game, shownLine);
+    const selFleet = o.selection?.type === 'fleet' ? game.fleet.get(o.selection.id) : undefined;
+    // Подсветку и обводку машин линии рисует сама линия — под значками груза.
+    if (shownLine !== null) this.drawLinePath(game, shownLine, shownLine === o.selectedLine ? (o.fleetHover ?? null) : null, selFleet?.lineId === shownLine ? selFleet : undefined);
+    if (o.chartPoint) this.drawChartPoint(o.chartPoint);
     if (o.selection?.type === 'fleet') {
       // Станция, к которой машина едет сейчас, — кольцом цвета линии.
       const v = game.fleet.get(o.selection.id);
@@ -1593,7 +2160,8 @@ export class Renderer {
         ctx.stroke();
       }
     }
-    if (o.lineStops.length > 1) this.drawStopsRoute(game, o.lineStops, '#2f80ed', false);
+    // Прокладываемый маршрут — сразу цветом, который получит линия.
+    if (o.lineStops.length > 1) this.drawStopsRoute(game, o.lineStops, game.newLineColor(o.lineStops), false);
     for (const m of o.marks) {
       ctx.globalAlpha = 0.8;
       this.drawFootprint(m.fp, m.ok ? '#cfe3ff' : 'rgba(232, 72, 63, 0.45)', m.ok ? '#2f80ed' : '#e8483f', 2 / this.camera.zoom);
@@ -1688,6 +2256,12 @@ export class Renderer {
         ctx.setLineDash([]);
       }
     }
+    if (o.project) this.drawProject(o.project);
+    if (o.liveSigns?.length && this.camera.zoom >= 0.45) {
+      // Знаки поворотов дороги, которую тянут, — по её форме прямо сейчас, как у построенной.
+      const r = Math.max(3.2, 9 / this.camera.zoom);
+      for (const s of o.liveSigns) this.limitSign(add(s.pos, scale(rightNormal(s.dir), s.side - ROAD_MARGIN + 3 + r)), r, s.kmh);
+    }
     if (o.control && o.chainStart) {
       ctx.strokeStyle = 'rgba(47,128,237,0.7)';
       ctx.lineWidth = 1.5 / this.camera.zoom;
@@ -1724,6 +2298,9 @@ export class Renderer {
         ctx.stroke();
       }
     }
+    // Узлы — поверх линий перьев (квадрат не перечёркнут): «Двигать» и проект.
+    for (const pt of o.points ?? []) if (pt.node) this.nodeMark(pt.pos, { hot: (pt.r ?? 6) > 7, color: pt.color === '#2f80ed' ? undefined : pt.color });
+    for (const n of o.project?.nodes ?? []) this.nodeMark(n.pos, { hot: n.hot, tip: n.tip });
     if (o.chainStart) this.marker(o.chainStart.pos, '#2f80ed', o.chainStart.kind === 'free' ? 'small' : 'ring');
     if (o.snap) this.marker(o.snap.pos, o.plan && !o.plan.ok ? '#e8483f' : '#2f80ed', o.snap.kind === 'free' ? 'small' : 'ring');
     if (o.highlightSeg !== null) {
@@ -1754,31 +2331,101 @@ export class Renderer {
       const hover = o.mainHover?.node === sel.id ? o.mainHover : null;
       this.drawJunctionPaths(game, sel.id, o.laneEdit?.node === sel.id ? o.laneEdit : null, game.junctionMain(sel.id, hover ? hover.mainPair : undefined));
     }
-    let ring: { x: number; y: number; r: number } | null = null;
-    const fleet = sel?.type === 'fleet' ? game.fleet.get(sel.id) : undefined;
-    const sim = sel?.type === 'vehicle' ? game.traffic.vehicles.get(sel.simId) : fleet && game.fleetLook(fleet);
-    const train = fleet && game.fleetTrain(fleet);
-    if (sim) ring = { x: sim.pos.x - (sim.dir.x * sim.length) / 2, y: sim.pos.y - (sim.dir.y * sim.length) / 2, r: sim.length * 0.9 + 3 };
-    else if (train) {
-      const mid = game.rail.pointAt(train, train.head - train.length / 2);
-      if (mid) ring = { x: mid.pos.x, y: mid.pos.y, r: train.length / 2 + 8 };
-    }
-    if (ring) {
-      ctx.strokeStyle = '#2f80ed';
-      ctx.lineWidth = 2 / this.camera.zoom;
-      ctx.beginPath();
-      ctx.arc(ring.x, ring.y, ring.r, 0, Math.PI * 2);
-      ctx.stroke();
-    }
+    const sim = sel?.type === 'vehicle' ? game.traffic.vehicles.get(sel.simId) : undefined;
+    if (sim) this.drawSelectRing(sim.pos.x - (sim.dir.x * sim.length) / 2, sim.pos.y - (sim.dir.y * sim.length) / 2, sim.length * 0.9 + 3);
+    // Машину компании обводит её линия (drawLinePath), если та на карте.
+    else if (selFleet && selFleet.lineId !== shownLine) this.drawFleetSelected(game, selFleet);
+  }
+
+  /** Обводка выбранной машины компании: на посту автостанции — рамкой по посту, в пути и у остановки — кольцом. */
+  private drawFleetSelected(game: Game, fleet: FleetVehicle): void {
+    const spot = game.fleetSpot(fleet);
+    if (spot?.box && spot.box.w * this.camera.zoom >= 6) this.drawBayMark(spot.box, 1 / this.camera.zoom, '#2f80ed');
+    // Станцию, где её не видно, обводит кольцо цвета линии.
+    else if (spot && !spot.station) this.drawSelectRing(spot.pos.x, spot.pos.y, spot.r);
+  }
+
+  private drawSelectRing(x: number, y: number, r: number): void {
+    const ctx = this.ctx;
+    ctx.strokeStyle = '#2f80ed';
+    ctx.lineWidth = 2 / this.camera.zoom;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.stroke();
   }
 
   /**
    * Предпросмотр перестройки: будущая дорога поверх старой на зелёной подложке —
    * новая ширина, разметка полос и кромок, у односторонней — стрелки направления.
    */
+  /** Проект: заливка участков, которых не видно дорогой, пунктир кромок и оси, узлы квадратиками. */
+  private drawProject(p: NonNullable<ToolOverlay['project']>): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'round';
+    for (const s of p.segs) {
+      const lut = new CurveLUT(s.curve);
+      const blue = s.draft ? 'rgba(47,128,237,0.6)' : '#2f80ed';
+      if (s.fill) {
+        ctx.strokeStyle = s.ok ? 'rgba(47,128,237,0.18)' : 'rgba(232,72,63,0.35)';
+        ctx.lineWidth = s.half * 2;
+        this.polyline(lut.points);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = s.ok ? blue : '#e8483f';
+      ctx.lineWidth = (s.ok ? 1.6 : 2.4) / z;
+      ctx.setLineDash([7 / z, 5 / z]);
+      for (const off of [-s.half, s.half]) {
+        this.polyline(lut.offsetPolyline(off, 0, lut.length, 3));
+        ctx.stroke();
+      }
+      ctx.lineWidth = 1 / z;
+      ctx.setLineDash([2 / z, 6 / z]);
+      this.polyline(lut.points);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // Знаки скорости перед поворотами — как у построенной дороги: справа по ходу, у кромки.
+    if (z >= 0.45) {
+      const r = Math.max(3.2, 9 / z);
+      for (const s of p.signs ?? []) this.limitSign(add(s.pos, scale(rightNormal(s.dir), s.side - ROAD_MARGIN + 3 + r)), r, s.kmh, 'project');
+    }
+    // Узлы проекта — после перьев (drawOverlay), чтобы линии перьев их не перечёркивали.
+  }
+
+  /**
+   * Узел, за который тянут: белый квадрат с толстой тёмной обводкой — крупнее перьев (голубых кружков на
+   * линиях-ручках), чтобы их не путать; под курсором — ещё крупнее, tip — откуда ведём проект (синий).
+   * color — обводка не по умолчанию (красная — этот узел не двигается).
+   */
+  private nodeMark(p: Vec, o: { hot?: boolean; tip?: boolean; color?: string } = {}): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const r = (o.hot ? 9 : 7) / z;
+    ctx.fillStyle = o.tip ? '#2f80ed' : o.hot ? '#e3ecf8' : '#ffffff';
+    ctx.strokeStyle = o.color ?? '#2b3038';
+    ctx.lineWidth = 2.6 / z;
+    ctx.beginPath();
+    ctx.rect(p.x - r, p.y - r, r * 2, r * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
   /** Что строим: изменённые полотна сети предпросмотра — зелёной (можно) или красной (нельзя) подсветкой. */
-  private drawRoadPreview(p: NonNullable<ToolOverlay['roads']>): void {
-    for (const id of p.changed) this.tintCorridor(p.net, id, p.ok ? 'rgba(46,157,87,0.28)' : 'rgba(232,72,63,0.4)');
+  /**
+   * Подсветка того, что строим: зелёным — можно, красным — нельзя. layer — слой высоты: мост подсвечивается
+   * поверх своего полотна (с земли его закрыло бы полотно), земля и тоннель — в слое земли.
+   */
+  private drawRoadPreview(p: NonNullable<ToolOverlay['roads']>, layer = 0): void {
+    const color = p.project ? 'rgba(47,128,237,0.3)' : p.ok ? 'rgba(46,157,87,0.28)' : 'rgba(232,72,63,0.4)';
+    for (const id of p.changed) {
+      const c = p.net.corridors.get(id);
+      if (!c) continue;
+      const la = p.net.node(c.a).level;
+      const lb = p.net.node(c.b).level;
+      if (Math.max(0, layerOf(Math.min(la, lb), Math.max(la, lb))) === layer) this.tintCorridor(p.net, id, color);
+    }
   }
 
   /** Полупрозрачная заливка асфальта полотна. */
@@ -1792,8 +2439,10 @@ export class Renderer {
     for (const s of axisStations(c, 0, c.length, 4)) {
       const b = laneBand(c, lane, s);
       if (!b) continue;
-      left.push(pointOff(c, s, b[0]));
-      right.push(pointOff(c, s, b[1]));
+      // У моста — поднята вместе с полотном (как tintCorridor).
+      const d = deckLift(net, c, s);
+      left.push(add(pointOff(c, s, b[0]), d));
+      right.push(add(pointOff(c, s, b[1]), d));
     }
     if (left.length < 2) return;
     this.ctx.fillStyle = color;
@@ -1807,11 +2456,15 @@ export class Renderer {
     if (!c) return;
     const left: Vec[] = [];
     const right: Vec[] = [];
+    // У моста — поднята вместе с полотном (как его рисует LaneRenderer).
+    const raised = Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
     for (const s of axisStations(c, 0, c.length, 5)) {
       const e = edgesAt(c, s);
       if (!e) continue;
-      left.push(pointOff(c, s, e[0] - ROAD_MARGIN));
-      right.push(pointOff(c, s, e[1] + ROAD_MARGIN));
+      const d = raised ? bridgeLook(deckAlong(net, c, s)).lift : null;
+      const up = (p: Vec) => (d ? add(p, d) : p);
+      left.push(up(pointOff(c, s, e[0] - ROAD_MARGIN)));
+      right.push(up(pointOff(c, s, e[1] + ROAD_MARGIN)));
     }
     if (left.length < 2) return;
     const ctx = this.ctx;
@@ -2142,7 +2795,8 @@ export class Renderer {
     }
   }
 
-  private drawLinePath(game: Game, lineId: number): void {
+  /** Маршрут линии с её машинами; hover — машина под курсором в списке, selected — выбранная: их кольца — под значками груза. */
+  private drawLinePath(game: Game, lineId: number, hover: number | null = null, selected?: FleetVehicle): void {
     const line = game.lines.get(lineId);
     if (!line) return;
     this.drawStopsRoute(game, line.stops, line.color, true, line);
@@ -2183,11 +2837,13 @@ export class Renderer {
     }
     this.drawVehicles(own, true);
     if (trains.size) this.drawTrains(this.trainCars(game, this.view()).filter((c) => trains.has(c.trainId)), true);
+    // Издалека настоящая машина крошечная — рисуем внутри кружка её увеличенный значок.
+    for (const m of marks) if (m.r < R(m) * 0.75) this.markGlyph(m, R(m));
+    if (selected) this.drawFleetSelected(game, selected);
+    if (hover !== null) this.drawFleetHover(game, hover, lineId);
+    // Что везёт — значок сбоку от кружка, поверх колец подсветки и выбора.
     for (const m of marks) {
       const r = R(m);
-      // Издалека настоящая машина крошечная — рисуем внутри кружка её увеличенный значок.
-      if (m.r < r * 0.75) this.markGlyph(m, r);
-      // Что везёт — значок сбоку от кружка.
       if (m.cargo) this.icon(cargoImage(m.cargo), { x: m.pos.x + r * 0.8, y: m.pos.y - r * 0.8 }, 14 / z);
     }
   }
@@ -2318,13 +2974,15 @@ export class Renderer {
     ctx.scale(1 / z, 1 / z);
     ctx.font = '600 13px system-ui, -apple-system, sans-serif';
     const w = ctx.measureText(text).width + 14;
+    // Не помещается справа от курсора — слева от него.
+    const x = this.camera.toScreen(at).x + 16 + w > this.camera.width - 8 ? -16 - w : 16;
     ctx.fillStyle = ok ? 'rgba(25, 32, 45, 0.88)' : 'rgba(170, 40, 35, 0.92)';
-    rr(ctx, 16, 14, w, 24, 6);
+    rr(ctx, x, 14, w, 24, 6);
     ctx.fill();
     ctx.fillStyle = '#fff';
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = 'left';
-    ctx.fillText(text, 23, 31);
+    ctx.fillText(text, x + 7, 31);
     ctx.restore();
   }
 

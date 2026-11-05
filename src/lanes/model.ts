@@ -66,6 +66,8 @@ export interface LaneNode {
   /** Направление стыка (у перекрёстка не используется). */
   dir: Vec;
   level: number;
+  /** Мост: на сколько метров полотно над землёй (так задал профиль «Авто»); нет — обычная высота уровня (deck.ts). */
+  deck?: number;
   corridors: number[];
   // ---------- Настройки перекрёстка ----------
   /** Светофор. */
@@ -85,6 +87,23 @@ export interface LaneNode {
    * только по своим связям; остальные распределяются сами.
    */
   lanes?: string[];
+  /**
+   * Скругления углов, заданные игроком: пара полотен соседних подъездов (`cornerKey`, «12-15») → радиус бордюра
+   * угла, м. Нет угла — скругление само, по ширине дорог. Объект заменяется целиком (копии сети делят его).
+   */
+  corners?: Record<string, number>;
+}
+
+/** Переименовывает полотна в ключах скруглений углов («12-15»); map → undefined — угол прочь. */
+export function remapCorners(corners: Record<string, number>, map: (id: number) => number | undefined): Record<string, number> | undefined {
+  const res: Record<string, number> = {};
+  for (const [k, r] of Object.entries(corners)) {
+    const ids = k.split('-').map((x) => map(Number(x)));
+    if (ids.length !== 2 || ids.some((x) => x === undefined)) continue;
+    const [a, b] = ids as number[];
+    res[a < b ? `${a}-${b}` : `${b}-${a}`] = r;
+  }
+  return Object.keys(res).length ? res : undefined;
 }
 
 /** Связь полос на перекрёстке: полоса i (справа) полотна from → полоса j (справа) полотна to. */
@@ -112,6 +131,11 @@ export function renameArm(n: LaneNode, from: number, to: number): void {
       const l = parseLaneKey(k);
       return l ? laneKey({ ...l, from: swap(l.from), to: swap(l.to) }) : k;
     });
+  }
+  if (n.corners) {
+    const corners = remapCorners(n.corners, swap);
+    if (corners) n.corners = corners;
+    else delete n.corners;
   }
 }
 
@@ -143,6 +167,16 @@ export function layerOf(min: number, max: number): number {
   if (min < -0.25) return -1;
   if (max <= 0.25) return 0;
   return Math.min(2, Math.max(1, Math.round(max)));
+}
+
+/**
+ * Заходит ли кузов машины на концы полотна длиной L: нос — в точке оси nose, кузов длиной length тянется от него
+ * назад, против хода flow (1 — по оси a→b), запас margin. Заходит — машину рисуют и со слоем соседа по стыку
+ * (моста), иначе на съезде край моста закрывает её хвост.
+ */
+export function bodyOnEnds(nose: number, length: number, flow: Flow, L: number, margin = 1): { a: boolean; b: boolean } {
+  const rear = nose - flow * length;
+  return { a: Math.min(nose, rear) < margin, b: Math.max(nose, rear) > L - margin };
 }
 
 export const slot = (offset: number, flow: Flow, from = 0, to = Infinity): LaneSlot => ({ offset, flow, from, to });
@@ -204,13 +238,19 @@ export interface LaneNetSave {
 const CELL = 160;
 const cellKey = (x: number, y: number) => x * 100003 + y;
 
+/**
+ * Ревизии полотен — общий счёт на все сети: у копий для предпросмотра (каждый кадр — своя правка той же сети) и у
+ * сети из снимка (загрузка, Ctrl+Z) номера не повторяются, и кэш отрисовки по ревизии не берёт форму другой правки.
+ */
+let revCount = 1;
+const nextRev = () => revCount++;
+
 export class LaneNet {
   readonly nodes = new Map<number, LaneNode>();
   readonly corridors = new Map<number, Corridor>();
   /** Растёт при любом изменении — по нему отрисовка обновляет кэш. */
   version = 0;
   private nextId = 1;
-  private nextRev = 1;
   /** Сетка поиска: ячейка → полотна, задевающие её (по рамке кривой с запасом на ширину). */
   private grid = new Map<number, Set<number>>();
   private cellsOf = new Map<number, number[]>();
@@ -350,7 +390,7 @@ export class LaneNet {
       length: lut.length,
       cls: o.cls,
       lanes: o.lanes.map((l) => ({ ...l, from: Math.max(0, l.from), to: Math.min(lut.length, l.to) })),
-      rev: this.nextRev++,
+      rev: nextRev(),
     };
     if (o.limit !== undefined) c.limit = o.limit;
     if (o.ring) c.ring = true;
@@ -388,7 +428,7 @@ export class LaneNet {
 
   /** Полотно поменялось без смены формы (класс, кольцо) — отрисовке пора пересчитать. */
   touch(c: Corridor): void {
-    c.rev = this.nextRev++;
+    c.rev = nextRev();
     this.version++;
   }
 
@@ -489,7 +529,7 @@ export class LaneNet {
     }
     for (const c of data.corridors) {
       const lut = new CurveLUT(c.curve);
-      const corridor: Corridor = { ...c, curve: { ...c.curve }, lut, length: lut.length, lanes: c.lanes.map((l) => ({ ...l })), rev: net.nextRev++ };
+      const corridor: Corridor = { ...c, curve: { ...c.curve }, lut, length: lut.length, lanes: c.lanes.map((l) => ({ ...l })), rev: nextRev() };
       net.corridors.set(c.id, corridor);
       net.indexCorridor(corridor, true);
       net.node(c.a).corridors.push(c.id);
@@ -502,12 +542,12 @@ export class LaneNet {
   /**
    * Копия для предпросмотра: свои объекты узлов и полотен, но общие (неизменяемые) кривые,
    * таблицы длин и списки полос — копировать большую сеть дёшево. Правки копии заменяют эти
-   * поля целиком, не трогая оригинал. Номера ревизий сохраняются — отрисовка переиспользует кэш.
+   * поля целиком, не трогая оригинал. Номера ревизий сохраняются — отрисовка переиспользует кэш; правка копии
+   * берёт новый номер из общего счёта, а не тот, что взяла бы правка соседней копии.
    */
   clone(): LaneNet {
     const net = new LaneNet();
     net.nextId = this.nextId;
-    net.nextRev = this.nextRev;
     net.version = this.version;
     for (const [id, n] of this.nodes) net.nodes.set(id, { ...n, corridors: [...n.corridors] });
     for (const [id, c] of this.corridors) net.corridors.set(id, { ...c });

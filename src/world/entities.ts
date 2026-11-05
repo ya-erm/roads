@@ -1,3 +1,4 @@
+import { MONTH_SCALE } from '../config';
 import type { Vec } from '../core/vec';
 import type { CargoType, IndustryType } from './cargo';
 import type { Footprint } from './spatial';
@@ -43,6 +44,8 @@ export interface Town {
   growthAcc: number;
   /** Город сам прокладывает новые улицы, когда вдоль старых тесно. По умолчанию да. */
   autoStreets?: boolean;
+  /** Только подпись на карте (участок тестовой сцены без жителей): имя без числа жителей. */
+  labelOnly?: boolean;
 }
 
 /** Итоги месяца по снабжению города. */
@@ -56,7 +59,7 @@ export interface TownSupplyMonth {
 }
 
 /** Сколько единиц груза в месяц нужно, чтобы потребность города считалась закрытой. */
-export const TOWN_NEED = 10;
+export const TOWN_NEED = 10 * MONTH_SCALE;
 /** Сколько последних месяцев снабжения помнит город. */
 export const TOWN_HISTORY = 12;
 
@@ -82,6 +85,8 @@ export interface Industry {
   streak?: number;
   /** Предел роста уровня: событие «рост промышленности» поднимает его выше обычного. Нет — ECONOMY.maxLevel. */
   cap?: number;
+  /** Секунд за этот месяц продукция копилась у предела станции (транспорт не успевал). */
+  piledMonth?: number;
 }
 
 export interface PassengerGroup {
@@ -111,6 +116,8 @@ export interface Station {
   nodeId: number;
   /** Пути-платформы ж/д станции. */
   platforms: number[];
+  /** Конечная (тупиковая) ж/д станция: пути заканчиваются упорами, поезд разворачивается и уходит обратно. */
+  terminal?: boolean;
   /** С чем работает станция: пассажиры, груз или и то и другое. */
   serves: StationServes;
   /** Грузовой двор предприятия: обслуживает только его, снести нельзя. */
@@ -126,6 +133,8 @@ export interface Station {
   /** Компанейские машины, стоящие на постах погрузки. */
   occupied: number[];
   bays: number;
+  /** Пристройки-склады автостанции (нет — 0): каждая — больше места под груз и площадка длиннее (STORAGE). */
+  depots?: number;
   townIds: number[];
   industryIds: number[];
   accepts: Set<CargoType>;

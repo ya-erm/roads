@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { dist, Vec } from '../core/vec';
-import { INDUSTRY_LIST, TOWN_CARGO } from '../world/cargo';
+import { LEGACY_KINDS } from '../world/biomes';
+import { BASE_TOWN_CARGO, EXTRA_TOWN_CARGO, INDUSTRY_LIST } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
 import { corridorHalf } from '../world/worldgen';
 import { Game } from './game';
-import { road, roadPlan, stationExit, townStreets } from './testkit';
+import { road, roadPlan, stationExit, townStreets, withoutCitizens } from './testkit';
 
 function runSeconds(game: Game, seconds: number) {
   game.speed = 1;
@@ -67,8 +68,9 @@ describe('Игра', { timeout: 30_000 }, () => {
       expect(t.demands.length).toBeGreaterThanOrEqual(2);
       expect(t.buildings.some((b) => b.kind === 'landmark')).toBe(true);
     }
-    for (const c of TOWN_CARGO) expect(game.towns.some((t) => t.demands.includes(c))).toBe(true);
-    for (const info of INDUSTRY_LIST) expect(game.industries.some((i) => i.info.kind === info.kind)).toBe(true);
+    // Мир без биома — прежняя средняя полоса: все её грузы и предприятия (биомы — src/world/biomes.test.ts).
+    for (const c of [...BASE_TOWN_CARGO, ...EXTRA_TOWN_CARGO]) expect(game.towns.some((t) => t.demands.includes(c))).toBe(true);
+    for (const info of INDUSTRY_LIST.filter((t) => LEGACY_KINDS.has(t.kind))) expect(game.industries.some((i) => i.info.kind === info.kind)).toBe(true);
   });
 
   it('станцию можно пристроить к предприятию с любой стороны', () => {
@@ -104,6 +106,25 @@ describe('Игра', { timeout: 30_000 }, () => {
     expect(mill.stock.ore).toBeLessThan(30);
   });
 
+  it('мясокомбинат делает продукты из скота и зерна, а зерно ферма может везти на два вида заводов', () => {
+    const game = new Game(42);
+    const meat = game.industries.find((i) => i.info.kind === 'meatplant')!;
+    meat.stock.livestock = 30;
+    runSeconds(game, 5);
+    expect(meat.producedMonth + meat.output).toBe(0);
+    meat.stock.grain = 30;
+    runSeconds(game, 5);
+    expect(meat.producedMonth).toBeGreaterThan(0);
+    expect(meat.stock.livestock).toBeLessThan(30);
+    expect(meat.stock.grain).toBeLessThan(30);
+    const st = stationAtIndustry(game, meat, meat.fp.center)!;
+    expect([...st.accepts].sort()).toEqual(['grain', 'livestock']);
+    const farm = game.industries.find((i) => i.info.kind === 'farm')!;
+    const takers = new Set(game.partners(farm, 10).map((p) => game.industries.find((i) => i.id === p.ref.id)?.info.kind));
+    expect(takers).toContain('foodplant');
+    expect(takers).toContain('meatplant');
+  });
+
   it('подсказки партнёров: куда везти продукцию и откуда сырьё', () => {
     const game = new Game(42);
     const farm = game.industries.find((i) => i.info.kind === 'farm')!;
@@ -119,7 +140,8 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('грузовая линия ферма → пищевой комбинат возит зерно', () => {
-    const game = new Game(7);
+    // Дорога — своя сеть в стороне от городов: машины жителей на неё не попадают, без них счёт в разы быстрее.
+    const game = withoutCitizens(new Game(7));
     // Ближайшая пара «ферма — комбинат».
     const pairs = game.industries
       .filter((i) => i.info.kind === 'farm')
@@ -220,9 +242,11 @@ describe('Игра', { timeout: 30_000 }, () => {
     const driving = [...game.fleet.values()].filter((v) => v.state === 'driving').length;
     expect(loaded.traffic.vehicles.size).toBe(driving);
     for (const v of loaded.fleet.values()) expect(v.state).toBe(game.fleet.get(v.id)!.state);
-    // Загруженная партия продолжает работать и зарабатывать.
+    // Загруженная партия продолжает работать и зарабатывать: ждём первого дохода, но не дольше полутора месяцев.
     const before = loaded.lines.get(line.id)!.revenueTotal;
-    runSeconds(loaded, MONTH_LENGTH * 4);
+    const earned = () => loaded.lines.get(line.id)!.revenueTotal > before;
+    loaded.speed = 1;
+    for (let t = 0; t < MONTH_LENGTH * 1.5 && !earned(); t += 0.1) loaded.update(0.1);
     expect(loaded.lines.get(line.id)!.revenueTotal).toBeGreaterThan(before);
   });
 
@@ -259,7 +283,7 @@ describe('Игра', { timeout: 30_000 }, () => {
     expect(line).not.toBeNull();
     game.buyVehicle(line.id, 'bus');
     game.buyVehicle(line.id, 'bus');
-    runSeconds(game, MONTH_LENGTH * 5);
+    runSeconds(game, MONTH_LENGTH * 2);
     expect(line.problem).toBeNull();
     expect(line.revenueTotal).toBeGreaterThan(0);
   });
