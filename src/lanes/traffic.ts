@@ -124,10 +124,61 @@ export interface Barrier {
 /** Стоп-линия — на столько раньше шлагбаума (полпути и запас). */
 const BARRIER_STOP = 12;
 
+// ---------- Очереди полос и манёвров ----------
+// Машина знает своё место в очереди (queueIdx): каждая вставка и удаление ниже переписывают его у всех, кто за ней.
+
+/**
+ * Место машины в очереди list (vehicles полосы или манёвра) — по её queueIdx, без поиска; индекс сверяется с очередью,
+ * так что ошибиться не может: очередь меняли в обход этих функций (в тестах) — ищется, как прежде. Нет в ней — −1.
+ */
+export function queueIndex(list: Vehicle[], veh: Vehicle): number {
+  const i = veh.queueIdx ?? -1;
+  return i >= 0 && list[i] === veh ? i : list.indexOf(veh);
+}
+
+/** Места в очереди с from до конца — заново: за вставленной или убранной машиной все сдвинулись. */
+function renumber(list: Vehicle[], from: number): void {
+  for (let i = from; i < list.length; i++) list[i].queueIdx = i;
+}
+
+/** В конец очереди. */
+function queuePush(list: Vehicle[], veh: Vehicle): void {
+  veh.queueIdx = list.length;
+  list.push(veh);
+}
+
+/** В очередь по s — от головной к хвосту; среди стоящих там же, где она, — последней. */
 function insertSorted(list: Vehicle[], veh: Vehicle): void {
   let i = list.length;
   while (i > 0 && list[i - 1].s < veh.s) i--;
   list.splice(i, 0, veh);
+  renumber(list, i);
+}
+
+/** Из очереди (нет в ней — ничего). */
+function queueRemove(list: Vehicle[], veh: Vehicle): void {
+  const i = queueIndex(list, veh);
+  if (i < 0) return;
+  list.splice(i, 1);
+  renumber(list, i);
+}
+
+/** Головную — из очереди. */
+function queueShift(list: Vehicle[]): void {
+  list.shift();
+  renumber(list, 0);
+}
+
+/** Очереди графа, где место машины (queueIdx) не совпадает с настоящим: «полоса id: машина id на i, а записано j». */
+export function queueMismatches(graph: LaneGraph): string[] {
+  const out: string[] = [];
+  const check = (what: string, list: Vehicle[]) =>
+    list.forEach((v, i) => {
+      if (v.queueIdx !== i) out.push(`${what}: машина ${v.id} на ${i}, а записано ${v.queueIdx}`);
+    });
+  for (const lane of graph.lanes.values()) check(`полоса ${lane.id}`, lane.vehicles);
+  for (const m of graph.moves.values()) check(`манёвр ${m.key}`, m.vehicles);
+  return out;
 }
 
 /**
@@ -143,6 +194,12 @@ export class LaneTraffic {
   totalTripTime = 0;
   /** Шлагбаумы по полотнам. */
   barriers = new Map<number, Barrier[]>();
+  /**
+   * Стоп-линии перед закрытыми шлагбаумами — на такт (barrierAhead): по связям, по оси полотна. За такт движения
+   * шлагбаумы не меняются — их закрывает и открывает ж/д после него (rail.step), а переезды заново ищутся при правке
+   * сети, вне такта. null — закрытых нет.
+   */
+  private closedStops: Map<number, number[]> | null = null;
   /** План полос машины (см. lanePlan) — пока те же граф, маршрут и связь маршрута. */
   private plans = new WeakMap<Vehicle, { graph: LaneGraph; route: number[]; from: number; plan: LanePlan[] }>();
   /** Поворотник манёвра (см. turnSignal): у нового графа — новые манёвры. */
@@ -282,7 +339,7 @@ export class LaneTraffic {
     if (!lane) return null;
     const { targetNode, route, ...spec } = opts;
     const veh = this.create(spec, targetNode, route, lane, 0, 3);
-    lane.vehicles.push(veh);
+    queuePush(lane.vehicles, veh);
     return veh;
   }
 
@@ -347,7 +404,7 @@ export class LaneTraffic {
   reshape(veh: Vehicle, body: Omit<VehicleSpec, 'color' | 'load'>): boolean {
     if (body.length > veh.length) {
       const lane = this.currentLane(veh);
-      const i = lane && !veh.onMovement ? lane.vehicles.indexOf(veh) : -1;
+      const i = lane && !veh.onMovement ? queueIndex(lane.vehicles, veh) : -1;
       if (!lane || i < 0) return false;
       const rear = veh.s - body.length - IDM.minGap;
       const behind = lane.vehicles[i + 1];
@@ -378,6 +435,8 @@ export class LaneTraffic {
       route,
       routeIndex: 0,
       lane: lane.id,
+      // Место в очереди проставит вставка в неё (queuePush, insertSorted).
+      queueIdx: -1,
       onMovement: null,
       granted: null,
       planned: null,
@@ -407,10 +466,10 @@ export class LaneTraffic {
     if (!this.vehicles.has(veh.id)) return;
     this.vehicles.delete(veh.id);
     const lane = this.currentLane(veh);
-    if (lane) lane.vehicles = lane.vehicles.filter((x) => x !== veh);
+    if (lane) queueRemove(lane.vehicles, veh);
     if (veh.onMovement) {
       const m = this.graph.moves.get(veh.onMovement);
-      if (m) m.vehicles = m.vehicles.filter((x) => x !== veh);
+      if (m) queueRemove(m.vehicles, veh);
     }
     this.releaseNode(veh);
   }
@@ -434,11 +493,13 @@ export class LaneTraffic {
   step(dt: number): void {
     this.time += dt;
     this.updateLights(dt);
+    // Стоп-линии закрытых переездов — заново на каждый такт (barrierAhead); все открыты — их и не ищут.
+    this.closedStops = this.anyBarrierClosed() ? new Map() : null;
     const list = [...this.vehicles.values()];
     for (const veh of list) if (!veh.onMovement) this.laneChange(veh, dt);
-    const accel = new Map<Vehicle, number>();
-    for (const veh of list) accel.set(veh, this.computeAccel(veh, dt));
-    for (const veh of list) if (this.vehicles.has(veh.id)) this.integrate(veh, accel.get(veh)!, dt);
+    const accel = new Array<number>(list.length);
+    for (let i = 0; i < list.length; i++) accel[i] = this.computeAccel(list[i], dt);
+    for (let i = 0; i < list.length; i++) if (this.vehicles.has(list[i].id)) this.integrate(list[i], accel[i], dt);
     for (const veh of list) {
       if (!this.vehicles.has(veh.id)) continue;
       veh.rerouteTimer -= dt;
@@ -556,17 +617,30 @@ export class LaneTraffic {
     }
   }
 
+  private anyBarrierClosed(): boolean {
+    for (const list of this.barriers.values()) for (const b of list) if (b.closed) return true;
+    return false;
+  }
+
   /** До ближайшего закрытого шлагбаума впереди на связи: от оси from (нет — от начала связи); нет — Infinity. */
   private barrierAhead(linkId: number, from: number | null): number {
-    const link = this.graph.links.get(linkId);
-    const list = link && this.barriers.get(link.corridor);
-    if (!list) return Infinity;
+    if (!this.closedStops) return Infinity;
+    let stops = this.closedStops.get(linkId);
+    if (!stops) {
+      stops = [];
+      const link = this.graph.links.get(linkId);
+      for (const b of (link && this.barriers.get(link.corridor)) ?? []) {
+        if (!b.closed) continue;
+        const stop = b.s - link!.flow * BARRIER_STOP;
+        if (stop >= link!.s0 - 0.01 && stop <= link!.s1 + 0.01) stops.push(stop);
+      }
+      this.closedStops.set(linkId, stops);
+    }
+    if (!stops.length) return Infinity;
+    const link = this.graph.links.get(linkId)!;
     const start = from ?? (link.flow > 0 ? link.s0 : link.s1);
     let best = Infinity;
-    for (const b of list) {
-      if (!b.closed) continue;
-      const stop = b.s - link.flow * BARRIER_STOP;
-      if (stop < link.s0 - 0.01 || stop > link.s1 + 0.01) continue;
+    for (const stop of stops) {
       // Проехавшая стоп-линию машина освобождает переезд, а не встаёт на рельсах.
       const d = link.flow * (stop - start);
       if (d > -0.5) best = Math.min(best, Math.max(0, d));
@@ -669,7 +743,7 @@ export class LaneTraffic {
       // держится правее. Без спешки: не пустят — поедет и в своей.
       target = link.lanes[lane.index + Math.sign(goal.index - lane.index)];
     } else if (remaining > 50) {
-      const idx = lane.vehicles.indexOf(veh);
+      const idx = queueIndex(lane.vehicles, veh);
       const leader = idx > 0 ? lane.vehicles[idx - 1] : undefined;
       const gapAhead = leader ? leader.s - leader.length - veh.s : Infinity;
       if (leader && gapAhead < 30 && leader.v < Math.min(lane.speed, veh.maxSpeed) * 0.7) {
@@ -779,13 +853,13 @@ export class LaneTraffic {
   }
 
   private moveToLane(veh: Vehicle, from: GLane, to: GLane): void {
-    from.vehicles = from.vehicles.filter((x) => x !== veh);
+    queueRemove(from.vehicles, veh);
     insertSorted(to.vehicles, veh);
     veh.lateral += from.side - to.side;
     veh.lane = to.id;
     veh.planned = null;
     if (veh.waitingAt !== null) this.releaseNode(veh);
-    const behind = to.vehicles[to.vehicles.indexOf(veh) + 1];
+    const behind = to.vehicles[queueIndex(to.vehicles, veh) + 1];
     if (behind?.granted) this.revokeGrant(behind);
   }
 
@@ -823,7 +897,7 @@ export class LaneTraffic {
     if (veh.onMovement) {
       const aMax = veh.accel;
       const m = this.graph.moves.get(veh.onMovement)!;
-      const idx = m.vehicles.indexOf(veh);
+      const idx = queueIndex(m.vehicles, veh);
       let gap = Infinity;
       let leaderV = 0;
       if (idx > 0) {
@@ -842,7 +916,7 @@ export class LaneTraffic {
     }
 
     const lane = this.currentLane(veh)!;
-    const idx = lane.vehicles.indexOf(veh);
+    const idx = queueIndex(lane.vehicles, veh);
     // Изгиб впереди — тормозим заранее; на уклоне грузовики и автобусы медленнее (и разгоняются хуже).
     const prof = this.profile(lane);
     const k = Math.max(0, Math.min(prof.v.length - 1, Math.floor(veh.s / PROFILE_STEP)));
@@ -968,7 +1042,7 @@ export class LaneTraffic {
     if (veh.onMovement) {
       const m = this.graph.moves.get(veh.onMovement)!;
       if (veh.s >= m.length) {
-        m.vehicles = m.vehicles.filter((x) => x !== veh);
+        queueRemove(m.vehicles, veh);
         const node = this.graph.nodes.get(m.node!);
         if (node) node.reserved = node.reserved.filter((x) => x !== veh);
         veh.s -= m.length;
@@ -1006,7 +1080,7 @@ export class LaneTraffic {
       if (veh.s < lane.length) break;
       const m = veh.granted ? this.graph.moves.get(veh.granted) : this.pickMovement(veh, lane);
       if (m && lane.vehicles[0] === veh && (m.cont || veh.granted === m.key)) {
-        lane.vehicles.shift();
+        queueShift(lane.vehicles);
         veh.s -= lane.length;
         veh.planned = null;
         if (m.cont) {
@@ -1017,7 +1091,7 @@ export class LaneTraffic {
         }
         veh.onMovement = m.key;
         veh.granted = null;
-        m.vehicles.push(veh);
+        queuePush(m.vehicles, veh);
       } else {
         veh.s = lane.length;
         veh.v = 0;

@@ -24,6 +24,11 @@ export interface Vehicle extends VehicleSpec {
   routeIndex: number;
   /** Текущая полоса (на манёвре — полоса, с которой въехали). */
   lane: number;
+  /**
+   * Место в очереди, где машина сейчас (0 — головная): в vehicles полосы, а на манёвре — в vehicles манёвра. Ведёт
+   * LaneTraffic при каждой вставке и удалении (см. queueIndex) — чтобы не искать машину в очереди. Не сохраняется.
+   */
+  queueIdx?: number;
   onMovement: string | null;
   granted: string | null;
   /** Манёвр, который машина собирается выполнить в ближайшем узле. */
