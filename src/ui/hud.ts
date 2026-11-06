@@ -2390,12 +2390,15 @@ export class Hud {
         const load = vehicleLoad(v);
         const what = v.cargo ? cargoIcon(v.cargo, 14) : load ? cargoIcon('passengers', 14) : ' пусто';
         // Замена на модель новее, когда она вышла.
+        // Замена — на месте, там же, где машина едет или стоит; заказанная ждёт места сзади на дороге.
         const next = g.replacementFor(v);
-        const replace = next
-          ? `<button class="small replace" data-action="replace" data-id="${v.id}" title="Продать за ${money(g.saleValue(v))} и купить ${MODELS[next].name} за ${money(MODELS[next].price)}">⟳ ${
-              MODELS[next].name
-            }</button>`
-          : '';
+        const replace = v.upgradeTo
+          ? `<button class="small replace" disabled title="Новая ${MODELS[v.upgradeTo].name} длиннее, а сзади вплотную машина — заменится, как только освободится место">⟳ ждёт места</button>`
+          : next
+            ? `<button class="small replace" data-action="replace" data-id="${v.id}" title="Заменить на месте: продать за ${money(g.saleValue(v))} и купить ${MODELS[next].name} за ${money(MODELS[next].price)} — поедет дальше оттуда же, с тем же грузом">⟳ ${
+                MODELS[next].name
+              }</button>`
+            : '';
         // Длина состава: вагоны добавляются и снимаются, пока помещаются на платформы линии.
         const cars =
           m.mode === 'rail'

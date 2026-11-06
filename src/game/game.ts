@@ -2193,15 +2193,71 @@ export class Game implements BuildContext {
     return best !== v.model ? best : null;
   }
 
-  /** Продаёт старую машину и покупает новую на ту же линию. */
+  /**
+   * Меняет машину на модель новее там же, где она сейчас, а не на первой станции: старая продаётся, новая
+   * покупается, но это та же машина парка — номер, рейс и следующая остановка, груз и пассажиры, место в очереди
+   * интервала; на дороге — то же место на полосе и скорость, на посту станции — тот же пост. Новая длиннее, а сзади
+   * на дороге вплотную сосед — замена ждёт места (upgradeTo), самое позднее — до остановки. null — менять не на
+   * что или не хватает денег.
+   */
   replaceVehicle(id: number): FleetVehicle | null {
     const v = this.fleet.get(id);
     const model = v && this.replacementFor(v);
     if (!v || !model) return null;
     if (MODELS[model].price - this.saleValue(v) > this.budget) return null;
-    const lineId = v.lineId;
-    this.sellVehicle(id);
-    return this.buyVehicle(lineId, model);
+    v.upgradeTo = model;
+    if (!this.applyUpgrade(v)) this.journal.add('replace', { v: id, model, wait: true });
+    return v;
+  }
+
+  /**
+   * Замена на заказанную модель (upgradeTo) на месте. Кузов на дороге длиннее, а места сзади нет — false, ждёт
+   * (повторяется каждый шаг); к этому времени не хватает денег — замена отменяется. Поезд остаётся той же длины —
+   * с тем же числом вагонов (добавить можно в карточке), меняются ход и торможение. Груз и пассажиры остаются
+   * в машине; если новая вдруг меньше, лишнее теряется (модели новее не меньше прежних).
+   */
+  private applyUpgrade(v: FleetVehicle): boolean {
+    const model = v.upgradeTo;
+    if (!model) return false;
+    const old = MODELS[v.model];
+    const m = MODELS[model];
+    const cost = m.price - this.saleValue(v);
+    if (cost > this.budget) {
+      delete v.upgradeTo;
+      this.notify(`Не хватает денег на замену: ${v.name}`, '#e5534b');
+      return false;
+    }
+    if (m.mode === 'road') {
+      const sim = this.fleetSim(v);
+      const { color: _color, load: _load, ...body } = m.spec;
+      if (sim && !this.traffic.reshape(sim, body)) return false;
+    } else {
+      v.cars = carsOf(v);
+      const train = this.fleetTrain(v);
+      if (train) Object.assign(train, { maxSpeed: m.train.maxSpeed, accel: m.train.accel, brake: m.train.brake });
+    }
+    const sale = this.saleValue(v);
+    this.money += sale;
+    this.incomeMonth += sale;
+    this.ledger.sales += sale;
+    this.spend(m.price, 'purchases');
+    v.model = model;
+    v.name = `${m.name} №${v.id}`;
+    v.boughtMonth = this.month;
+    delete v.upgradeTo;
+    // Новая меньше (так не бывает, но вдруг) — лишнее теряется.
+    const cap = vehicleCapacity(v);
+    const lost = Math.max(0, vehicleLoad(v) - cap);
+    if (v.cargo) v.amount = Math.min(v.amount, cap);
+    for (let over = lost; over > 0 && v.passengers.length && !v.cargo; ) {
+      const g = v.passengers[v.passengers.length - 1];
+      const off = Math.min(over, g.count);
+      g.count -= off;
+      over -= off;
+      if (!g.count) v.passengers.pop();
+    }
+    this.journal.add('replace', { v: v.id, from: old.id, model, $: cost, lost: lost || undefined });
+    return true;
   }
 
   get monthProgress(): number {
@@ -3101,6 +3157,8 @@ export class Game implements BuildContext {
     for (const v of this.fleet.values()) {
       const line = this.lines.get(v.lineId);
       if (!line) continue;
+      // Заказанная замена ждала места на дороге — пробуем снова.
+      if (v.upgradeTo) this.applyUpgrade(v);
       const model = MODELS[v.model];
       if (model.mode === 'rail') {
         this.updateTrain(v, line, model, dt);

@@ -331,6 +331,29 @@ export class LaneTraffic {
     delete veh.holdDist;
   }
 
+  /**
+   * Другой кузов той же машине прямо на ходу (замена модели): нос, полоса, скорость и маршрут — прежние, корма —
+   * по новой длине. Длиннее прежней — только вне узла и если сзади до соседа хватает места, как при выезде
+   * на полосу (spaceAtStart); иначе false — кузов не меняется, пусть попробуют позже.
+   */
+  reshape(veh: Vehicle, body: Omit<VehicleSpec, 'color' | 'load'>): boolean {
+    if (body.length > veh.length) {
+      const lane = this.currentLane(veh);
+      const i = lane && !veh.onMovement ? lane.vehicles.indexOf(veh) : -1;
+      if (!lane || i < 0) return false;
+      const rear = veh.s - body.length - IDM.minGap;
+      const behind = lane.vehicles[i + 1];
+      if (behind && behind.s > rear) return false;
+      if (rear < 0) for (const m of this.graph.movesInto.get(lane.id) ?? []) for (const o of m.vehicles) if (m.length - o.s < -rear) return false;
+    }
+    Object.assign(veh, body);
+    // Оси кузова — заново под новую длину (и вторую секцию, если она теперь есть).
+    delete veh.rear;
+    delete veh.trail;
+    this.updatePose(veh);
+    return true;
+  }
+
   /** Машина стоит так, что её можно объехать: слева от её полосы есть попутная (она в «кармашке» или крайней правой). */
   standsAside(veh: Vehicle): boolean {
     const lane = this.currentLane(veh);
