@@ -23,11 +23,13 @@ import { Annex, Industry, Station, TOWN_NEED, TownBuilding } from '../world/enti
 import type { Segment } from '../world/network';
 import { halfWidth, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
+import { prefOn } from '../ui/prefs';
 import { drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
-import { drawIndustryArt } from './industryArt';
+import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
+import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, frontLength } from './vehicleArt';
@@ -257,11 +259,77 @@ const SPEED_STEPS: [number, string][] = [
 ];
 const speedColor = (kmh: number) => (SPEED_STEPS.find(([v]) => kmh <= v + 4) ?? SPEED_STEPS[SPEED_STEPS.length - 1])[1];
 
+/** Холст плитки кэша карты (src/render/tileCache.ts). */
+interface TileCanvasEl {
+  readonly opaque: boolean;
+  readonly canvas: HTMLCanvasElement;
+  readonly ctx: CanvasRenderingContext2D;
+}
+
+function makeTileCanvas(opaque: boolean): TileCanvasEl {
+  const canvas = document.createElement('canvas');
+  canvas.width = TILE_CANVAS;
+  canvas.height = TILE_CANVAS;
+  // Непрозрачный слой (земля) копируется на экран без смешивания — без видеокарты это заметно дешевле.
+  const ctx = canvas.getContext('2d', { alpha: !opaque });
+  if (!ctx) throw new Error('Canvas 2D недоступен');
+  return { opaque, canvas, ctx };
+}
+
+/** Что нарисовать неподвижным (на экране или в плитке): партия, оверлей и сеть дорог на карте (с правкой — её копия). */
+interface StillScene {
+  game: Game;
+  o: ToolOverlay;
+  roadNet: LaneNet;
+  preview: JunctionPreview | null;
+}
+
+/** Плитки в кадре: готовые текущего уровня, где их нет — запасные (растянутые), сдвиг камеры в пикселях холста. */
+interface TilePlan {
+  set: TileSet<TileCanvasEl>;
+  ready: Tile<TileCanvasEl>[];
+  missing: Box[];
+  fallback: { set: TileSet<TileCanvasEl>; tiles: Tile<TileCanvasEl>[] }[];
+  k: number;
+  tx: number;
+  ty: number;
+}
+
+/** На столько вокруг рамки изменения сбрасываются плитки: тени мостов, знаки у кромки, откосы, деревья. */
+const DIRTY_PAD = 80;
+/** Запас вокруг плитки, в котором объекты ещё рисуются в неё (как у края экрана, view()). */
+const TILE_MARGIN = 60;
+/** Бюджет кадра на перерисовку плиток, мс: устаревших на экране, недорисованных при смене уровня, про запас вокруг. */
+const DIRTY_MS = 8;
+const FILL_MS = 4;
+const AHEAD_MS = 2;
+
+/** Подпись рамки здания или участка — где и какой формы. */
+const fpSig = (fp: Footprint) => `${fp.center.x},${fp.center.y},${fp.w},${fp.h},${fp.angle}`;
+/** Рамка контура (повёрнутого прямоугольника) в мире. */
+function fpBox(fp: Footprint): Box {
+  const r = Math.hypot(fp.w, fp.h) / 2;
+  return { x0: fp.center.x - r, y0: fp.center.y - r, x1: fp.center.x + r, y1: fp.center.y + r };
+}
+
+/** Предприятие для кэша карты: уровень, работает ли (дым, огонь), запасы (кучи растут с шагом 5) и пристройки. */
+function industrySig(ind: Industry): string {
+  let stock = '';
+  for (const k in ind.stock) stock += `${k}${Math.floor((ind.stock[k as CargoType] ?? 0) / 5)},`;
+  const annexes = (ind.annexes ?? []).map((a) => `${a.id}@${fpSig(a.fp)}`).join(';');
+  return `${fpSig(ind.fp)}|${ind.level ?? 1}|${ind.producedMonth > 0 || ind.producedLast > 0 ? 1 : 0}|${stock}|${annexes}`;
+}
+
 export class Renderer {
-  private readonly ctx: CanvasRenderingContext2D;
+  /** Куда рисуем: экран, а при отрисовке плитки кэша — её холст. */
+  private ctx: CanvasRenderingContext2D;
   private cache = new Map<number, SegCache>();
   private cacheVersion = -1;
   private treeVersion = '';
+  /** Деревья по клеткам 60 м — одна сетка на карту (деревья не двигаются). */
+  private treeGrid: { trees: unknown; n: number; cells: Map<number, number[]> } | null = null;
+  /** Где полотно прячет деревья: кружки x, y, r вдоль оси — пока у полотна та же форма и высоты концов. */
+  private treeCuts = new Map<number, { key: string; pts: number[] }>();
   /** Горят ли поворотники в этом кадре: мигают по игровому времени, на паузе — горят ровно. */
   private blinkOn = false;
   /** Полотна, чьи знаки на поворотах в этом кадре не рисуем (их тянут в «Двигать»), — из оверлея. */
@@ -280,6 +348,29 @@ export class Renderer {
   private readonly relief = new ReliefRenderer();
   /** Откосы насыпей и выемок у полотен на земле. */
   private readonly earthworks = new EarthworkCache();
+  /** Кэш неподвижного плитками (src/render/tileCache.ts); выключатель — Меню → Настройки → «Кэш карты». */
+  private readonly tiles = new TileCache<TileCanvasEl>(makeTileCanvas);
+  /** Слепки нарисованного в плитках: что поменялось — те плитки и сбросить. */
+  private readonly diffs = {
+    corridors: new SceneDiff(),
+    nodes: new SceneDiff(),
+    rails: new SceneDiff(),
+    industries: new SceneDiff(),
+    aprons: new SceneDiff(),
+    towns: new Map<number, { list: TownBuilding[] | null; n: number; diff: SceneDiff }>(),
+  };
+  /** С чем сверены слепки: партия, карта, вид, сеть дорог на карте и её подсветка, версия путей. */
+  private still = { game: null as Game | null, terrain: null as unknown, look: '', net: null as LaneNet | null, version: -1, marks: '', rails: -1 };
+  /**
+   * В последнем кадре было то, что меняется само (мигание, дым, пульсация подсветки, всплывающие суммы, значки ещё
+   * грузятся) или плитки кэша не дорисованы: следующий кадр нужен, даже если ничего не трогали (src/render/redraw.ts).
+   */
+  private moving = true;
+
+  /** Нужен ли следующий кадр, даже если в игре и камере ничего не поменялось. */
+  get needsFrame(): boolean {
+    return this.moving;
+  }
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -295,9 +386,20 @@ export class Renderer {
     this.cache.clear();
     this.cacheVersion = -1;
     this.treeVersion = '';
+    this.treeGrid = null;
+    this.treeCuts.clear();
     this.lanes.reset();
     this.relief.reset();
     this.earthworks.reset();
+    this.forgetStill();
+  }
+
+  /** Плитки кэша и слепки нарисованного в них — заново. */
+  private forgetStill(): void {
+    this.tiles.clear();
+    for (const d of [this.diffs.corridors, this.diffs.nodes, this.diffs.rails, this.diffs.industries, this.diffs.aprons]) d.clear();
+    this.diffs.towns.clear();
+    this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1 };
   }
 
   resize(): void {
@@ -323,15 +425,57 @@ export class Renderer {
     return !(bb.x1 < v.x0 || bb.x0 > v.x1 || bb.y1 < v.y0 || bb.y0 > v.y1);
   }
 
+  /**
+   * Кадр. Неподвижное (земля, дороги, дома, мосты) — слоями по высоте: с кэшем карты (Меню → Настройки) они
+   * копируются из плиток (src/render/tileCache.ts), без него — рисуются прямо здесь; между слоями — машины своей
+   * высоты: в тоннелях → земля → на земле → мосты → на мостах. Поверх — светофоры, анимации, подписи, оверлеи.
+   */
   draw(game: Game, o: ToolOverlay): void {
     const ctx = this.ctx;
+    // Каждый кадр — с исходного состояния холста (как и плитки): ничего не тянется из прошлого кадра.
+    ctx.save();
+    try {
+      this.drawFrame(game, o);
+    } finally {
+      ctx.restore();
+    }
+  }
+
+  private drawFrame(game: Game, o: ToolOverlay): void {
+    const ctx = this.ctx;
+    // Пульсирующая подсветка (предприятия из цепочек, место, машина в списке, станция выбранной машины, полоса
+    // въезда, отказ фазы) и всплывающие суммы — меняются сами; остальное движущееся отмечают места, где его рисуют.
+    this.moving =
+      game.floaters.length > 0 ||
+      o.highlight.length > 0 ||
+      !!o.ping ||
+      (o.fleetHover ?? null) !== null ||
+      o.selection?.type === 'fleet' ||
+      !!o.laneEdit?.from ||
+      !!o.phaseEdit?.flash.length;
     this.refreshCache(game);
     this.hiddenSigns = o.hiddenSigns ?? null;
     this.blinkOn = game.speed === 0 || (game.time * BLINK_HZ) % 1 < 0.5;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = BIOMES[game.terrain.biome].palette.outside;
-    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    this.camera.apply(ctx);
+    // Вода — вместе со светлой полосой берега (её рисуют на 7 шире).
+    // Карта сменилась (новая партия, загрузка) — мосты над рекой считаем по её воде заново.
+    if (this.waterOf !== game.terrain) {
+      const terrain = game.terrain;
+      this.waterOf = terrain;
+      this.lanes.reset();
+      this.lanes.water = (p) => terrain.isWater(p, 7);
+    }
+    // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты; над рекой на земле — мостом.
+    const roadNet = o.roads?.net ?? game.roads.net;
+    // Стоп-линии и стрелки у перекрёстков, что правка меняет, — по сети с правкой, прямо во время протяжки.
+    const preview = this.junctionPreview(game.roads.net, roadNet);
+    const scene: StillScene = { game, o, roadNet, preview };
+    const cached = prefOn('mapCache');
+    if (!cached && this.tiles.sets.length) this.forgetStill();
+    // Сдвиг камеры — на целый пиксель холста: плитки кэша ложатся на экран без пересэмплирования, остальное — точно по ним.
+    const cam = this.camera;
+    const k = cam.zoom * cam.dpr;
+    const tx = Math.round((cam.width / 2 - cam.x * cam.zoom) * cam.dpr);
+    const ty = Math.round((cam.height / 2 - cam.y * cam.zoom) * cam.dpr);
 
     const view = this.view();
     const segs = [...game.net.segments.values()].filter((s) => this.visible(this.cache.get(s.id)!.bbox, view));
@@ -343,21 +487,6 @@ export class Renderer {
     const trains = this.trainCars(game, view);
     const trainBand = (lvl: number) => (lvl < -0.5 ? -1 : lvl < 0.5 ? 0 : lvl < 1.5 ? 1 : 2);
 
-    this.drawTerrain(game, view, o);
-    this.drawTunnels(segs);
-    // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты; над рекой на земле — мостом.
-    const roadNet = o.roads?.net ?? game.roads.net;
-    // Стоп-линии и стрелки у перекрёстков, что правка меняет, — по сети с правкой, прямо во время протяжки.
-    const preview = this.junctionPreview(game.roads.net, roadNet);
-    this.earthworks.draw(ctx, game.ground(), roadNet, game.net, segs, view, this.camera.zoom, game.terrain.version);
-    // Вода — вместе со светлой полосой берега (её рисуют на 7 шире).
-    // Карта сменилась (новая партия, загрузка) — мосты над рекой считаем по её воде заново.
-    if (this.waterOf !== game.terrain) {
-      const terrain = game.terrain;
-      this.waterOf = terrain;
-      this.lanes.reset();
-      this.lanes.water = (p) => terrain.isWater(p, 7);
-    }
     // Машины на линии портала тоннеля — по частям: за порталом бледно (под землёй), до него — как на земле. У портала
     // под землёй или на земле машину рисуют по её кузову, а не по слою движения: тот меняется с запасом, и на кадр
     // машина, уже целиком в тоннеле, моргала бы яркой.
@@ -371,50 +500,46 @@ export class Renderer {
       else if (at) portalBand.set(v, at.side === 'in' ? -1 : 0);
     }
     const groundBand = (v: Vehicle) => portalBand.get(v) ?? band(v);
+    // Мосты и эстакады: слои 1 и 2 — где есть дороги этого слоя (во всей сети) или пути в кадре.
+    const levels = [1, 2].filter((level) => this.lanes.hasLayer(roadNet, level) || segs.some((s) => this.railLevel(s, level)));
+
+    const plan = cached ? this.prepareTiles(scene, k, tx, ty) : null;
+    if (plan) this.blitTiles(plan, UNDER);
+    else {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = BIOMES[game.terrain.biome].palette.outside;
+      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+      ctx.setTransform(k, 0, 0, k, tx, ty);
+      this.drawUnder(scene, view, segs);
+    }
+    ctx.setTransform(k, 0, 0, k, tx, ty);
+    // Машины и поезда в тоннелях — бледно, под дорогами на земле.
     ctx.globalAlpha = 0.35;
-    this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, -1);
     this.drawVehicles(vehicles.filter((v) => groundBand(v) === -1 && !atPortal.has(v)));
     for (const [v, p] of atPortal) this.drawClipped(portalHalf(p, 1), () => this.drawVehicles([v]));
     this.drawTrains(trains.filter((t) => trainBand(t.level) === -1));
     ctx.globalAlpha = 1;
-    const groundRails = segs.filter((s) => this.cache.get(s.id)!.maxLevel <= 0.01);
-    // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
-    this.drawRailBeds(groundRails, false);
-    this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
-    this.drawStationAprons(game, roadNet, view);
-    if (o.roads) this.drawRoadPreview(o.roads);
-    this.drawStopLines(game, view, 0, preview);
-    drawTurnArrows(ctx, game, view, this.camera.zoom, preview);
-    this.drawRailSteel(groundRails);
+    if (plan) this.blitTiles(plan, GROUND);
+    else this.drawGround(scene, view, segs);
+    // На земле: переезды, сигналы, пробки, машины, порталы тоннелей, светофоры, движущееся у предприятий, станции, поезда.
     this.drawCrossings(game, view);
     this.drawSignals(game, view);
     if (o.heatmap) this.drawHeatmap(game, 0);
-    if (o.speedmap) this.drawSpeedmap(game, 0);
     this.drawVehicles(vehicles.filter((v) => groundBand(v) === 0 && !atPortal.has(v)));
     for (const [v, p] of atPortal) this.drawClipped(portalHalf(p, -1), () => this.drawVehicles([v]));
     this.drawPortals(portals);
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
     this.drawLights(game, 0, o.phaseEdit);
-    this.drawCurveSigns(game, view, o.staleSigns, 0);
-    this.drawStructures(game, view, o);
+    this.drawMotion(game, view);
+    this.drawStations(game, view, o);
     this.drawTrains(trains.filter((t) => trainBand(t.level) === 0));
-    for (const level of [1, 2]) {
-      const rails = segs.filter((s) => {
-        const c = this.cache.get(s.id)!;
-        return c.maxLevel > level - 0.99 && c.maxLevel <= level + 0.01;
-      });
+    for (const level of levels) {
       const roads = this.lanes.hasLayer(roadNet, level);
-      if (!rails.length && !roads) continue;
-      if (roads) this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, level);
-      if (roads && o.roads) this.drawRoadPreview(o.roads, level);
-      // Стоп-линии, пробки и скорость на мосту и съезде с него — поверх его полотна (с земли их закрыло бы полотно).
-      if (roads) this.drawStopLines(game, view, level, preview);
+      if (plan) this.blitTiles(plan, GROUND + level);
+      else this.drawBridges(scene, view, segs, level);
+      // Пробки на мосту и съезде с него — поверх его полотна (с земли их закрыло бы полотно).
       if (roads && o.heatmap) this.drawHeatmap(game, level);
-      if (roads && o.speedmap) this.drawSpeedmap(game, level);
-      this.drawElevated(rails);
-      this.drawRailBeds(rails, true);
-      this.drawRailSteel(rails);
       // Машины на мосту — вместе с поднятым полотном.
       this.drawVehicles(
         vehicles
@@ -426,7 +551,6 @@ export class Renderer {
       );
       // Светофоры у спуска с моста и на эстакаде — поверх её полотна и подняты вместе с ним.
       if (roads) this.drawLights(game, level, o.phaseEdit);
-      if (roads) this.drawCurveSigns(game, view, o.staleSigns, level);
       this.drawTrains(trains.filter((t) => trainBand(t.level) === level));
     }
     // Светофор перекрёстка под мостом не пропадает под полотном — приглушённым значком поверх.
@@ -443,6 +567,276 @@ export class Renderer {
     // Скорость дороги под курсором — подписью там же и так же, как высота.
     else if (o.speedText && o.hover) this.drawHeight(game, o.hover, null, o.speedText);
     if (o.startHeight) this.drawStartHeight(o.startHeight.pos, o.startHeight.m, o.hover);
+  }
+
+  // ---------- Неподвижное: слои по высоте (на экран или в плитку кэша) ----------
+
+  /** Путь в слое моста level (1 — мост, 2 — эстакада над ним). */
+  private railLevel(s: Segment, level: number): boolean {
+    const c = this.cache.get(s.id)!;
+    return c.maxLevel > level - 0.99 && c.maxLevel <= level + 0.01;
+  }
+
+  /** Земля: рельеф, вода, деревья, тоннели путей, откосы; дороги в тоннелях — бледно (машины в них — поверх). */
+  private drawUnder(s: StillScene, view: Box, segs: Segment[]): void {
+    const ctx = this.ctx;
+    ctx.save();
+    this.drawTerrain(s.game, view, s.o);
+    this.drawTunnels(segs);
+    this.earthworks.draw(ctx, s.game.ground(), s.roadNet, s.game.net, segs, view, this.camera.zoom, s.game.terrain.version);
+    ctx.globalAlpha = 0.35;
+    this.lanes.draw(ctx, s.roadNet, this.camera.zoom, false, view, -1);
+    ctx.restore();
+  }
+
+  /** На земле: пути, дороги с разметкой, площадки автостанций, знаки, дома и предприятия (без движущегося). */
+  private drawGround(s: StillScene, view: Box, segs: Segment[]): void {
+    const { game, o, roadNet, preview } = s;
+    const ctx = this.ctx;
+    ctx.save();
+    const groundRails = segs.filter((x) => this.cache.get(x.id)!.maxLevel <= 0.01);
+    // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
+    this.drawRailBeds(groundRails, false);
+    this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
+    this.drawStationAprons(game, roadNet, view);
+    if (o.roads) this.drawRoadPreview(o.roads);
+    this.drawStopLines(game, view, 0, preview);
+    drawTurnArrows(ctx, game, view, this.camera.zoom, preview);
+    this.drawRailSteel(groundRails);
+    if (o.speedmap) this.drawSpeedmap(game, 0, view);
+    this.drawCurveSigns(game, view, o.staleSigns, 0);
+    this.drawStill(game, view);
+    ctx.restore();
+  }
+
+  /** Мосты и эстакады слоя level: полотна с тенью, стоп-линии и знаки на них, пути на эстакадах. */
+  private drawBridges(s: StillScene, view: Box, segs: Segment[], level: number): void {
+    const { game, o, roadNet, preview } = s;
+    const ctx = this.ctx;
+    const rails = segs.filter((x) => this.railLevel(x, level));
+    const roads = this.lanes.hasLayer(roadNet, level);
+    if (!rails.length && !roads) return;
+    ctx.save();
+    if (roads) this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, level);
+    if (roads && o.roads) this.drawRoadPreview(o.roads, level);
+    // Стоп-линии и скорость на мосту и съезде с него — поверх его полотна (с земли их закрыло бы полотно).
+    if (roads) this.drawStopLines(game, view, level, preview);
+    if (roads && o.speedmap) this.drawSpeedmap(game, level, view);
+    this.drawElevated(rails);
+    this.drawRailBeds(rails, true);
+    this.drawRailSteel(rails);
+    if (roads) this.drawCurveSigns(game, view, o.staleSigns, level);
+    ctx.restore();
+  }
+
+  // ---------- Кэш карты плитками ----------
+
+  /**
+   * Плитки на кадр: сброс устаревших, уровень зума, перерисовка — дыры сразу, остальное в бюджет кадра. Ответ —
+   * что и откуда копировать на экран (blitTiles).
+   */
+  private prepareTiles(s: StillScene, k: number, tx: number, ty: number): TilePlan {
+    const cam = this.camera;
+    this.syncStill(s);
+    const set = this.tiles.frame(cam.zoom, cam.dpr, performance.now());
+    const a = cam.toWorld(0, 0);
+    const b = cam.toWorld(cam.width, cam.height);
+    // С пикселем запаса: сдвиг камеры округлён до целого пикселя — край экрана не останется без плитки.
+    const screen: Box = grow({ x0: a.x, y0: a.y, x1: b.x, y1: b.y }, 1 / k);
+    // Про запас — полплитки вокруг экрана, и только когда уровень точно под зум (не во время зума).
+    const steady = set.zoom === cam.zoom;
+    const around = grow(screen, steady ? set.world / 2 : 0);
+    const t0 = performance.now();
+    let dirtyDone = 0;
+    // Зум не устоялся (уровень растянут) — плитки под него будут, нужны ещё кадры; так же, если что-то отложено.
+    if (!steady) this.moving = true;
+    for (const job of this.tiles.jobs(set, screen, around)) {
+      if (!job.must) {
+        const spent = performance.now() - t0;
+        // Устаревшая на экране — хотя бы одна за кадр, даже сверх бюджета: стройка видна сразу.
+        const budget = job.ahead ? AHEAD_MS : job.dirty ? DIRTY_MS : FILL_MS;
+        if ((job.ahead && !steady) || (spent > budget && !(job.dirty && !job.ahead && dirtyDone === 0))) {
+          this.moving = true;
+          continue;
+        }
+      }
+      this.renderTile(s, set, job.tile);
+      if (job.dirty) dirtyDone++;
+    }
+    const need = this.tiles.cover(set, screen);
+    const ready = need.filter((t) => t.ready);
+    const missing = need.filter((t) => !t.ready).map((t) => tileBox(t.i, t.j, set.world));
+    const fallback: TilePlan['fallback'] = [];
+    if (missing.length) {
+      this.moving = true;
+      const hole = missing.reduce(unite);
+      // Сначала самый старый уровень, поверх — новее.
+      for (const fb of this.tiles.sets.slice(1).reverse()) {
+        const tiles = this.tiles.readyIn(fb, hole).filter((t) => missing.some((m) => meets(tileBox(t.i, t.j, fb.world), m)));
+        if (tiles.length) fallback.push({ set: fb, tiles });
+      }
+    } else this.tiles.dropFallback();
+    const aroundCount = this.tiles.cover(set, grow(screen, set.world / 2)).length;
+    this.tiles.trim(Math.max(48, Math.ceil(aroundCount * 1.6)));
+    return { set, ready, missing, fallback, k, tx, ty };
+  }
+
+  /** Копирует слой layer плиток на экран (запасной уровень — только в дыры текущего). */
+  private blitTiles(plan: TilePlan, layer: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.imageSmoothingEnabled = true;
+    const put = (set: TileSet<TileCanvasEl>, t: Tile<TileCanvasEl>) => {
+      const c = t.layers[layer];
+      if (!c) return;
+      const r = tileRect(t.i, t.j, set.world, plan.k, plan.tx, plan.ty);
+      // Без запаса по краям холста (TILE_PAD) — только сама плитка.
+      ctx.drawImage(c.canvas, TILE_PAD, TILE_PAD, TILE_PX, TILE_PX, r.x, r.y, r.size, r.size);
+    };
+    if (plan.fallback.length) {
+      ctx.save();
+      ctx.beginPath();
+      for (const m of plan.missing) {
+        const x0 = Math.round(m.x0 * plan.k + plan.tx);
+        const y0 = Math.round(m.y0 * plan.k + plan.ty);
+        ctx.rect(x0, y0, Math.round(m.x1 * plan.k + plan.tx) - x0, Math.round(m.y1 * plan.k + plan.ty) - y0);
+      }
+      ctx.clip();
+      for (const f of plan.fallback) for (const t of f.tiles) put(f.set, t);
+      ctx.restore();
+    }
+    for (const t of plan.ready) put(plan.set, t);
+    ctx.restore();
+  }
+
+  /**
+   * Рисует плитку t уровня set: каждый её слой — в свой холст (земля непрозрачная; с тоннелями земля под ними —
+   * отдельным холстом), с тем же масштабом, что на экране, и с запасом вокруг (что заходит в плитку от соседей).
+   */
+  private renderTile(s: StillScene, set: TileSet<TileCanvasEl>, t: Tile<TileCanvasEl>): void {
+    const view = grow(tileBox(t.i, t.j, set.world), TILE_MARGIN);
+    const segs = [...s.game.net.segments.values()].filter((x) => this.visible(this.cache.get(x.id)!.bbox, view));
+    const under = this.lanes.layerIn(s.roadNet, -1, view) || segs.some((x) => this.cache.get(x.id)!.minLevel < -0.4);
+    const bridge = (level: number) => this.lanes.layerIn(s.roadNet, level, view) || segs.some((x) => this.railLevel(x, level));
+    const k = set.zoom * set.dpr;
+    const outside = BIOMES[s.game.terrain.biome].palette.outside;
+    const screen = this.ctx;
+    const zoom = this.camera.zoom;
+    // Рисуют те же методы, что на экран: холст — плитки, зум — её уровня.
+    this.camera.zoom = set.zoom;
+    try {
+      const paint = (layer: number, opaque: boolean | null, draw: () => void) => {
+        const c = this.tiles.layer(t, layer, opaque);
+        if (!c) return;
+        const g = c.ctx;
+        g.setTransform(1, 0, 0, 1, 0, 0);
+        if (opaque) {
+          g.fillStyle = outside;
+          g.fillRect(0, 0, TILE_CANVAS, TILE_CANVAS);
+        } else g.clearRect(0, 0, TILE_CANVAS, TILE_CANVAS);
+        g.setTransform(k, 0, 0, k, TILE_PAD - t.i * TILE_PX, TILE_PAD - t.j * TILE_PX);
+        this.ctx = g;
+        draw();
+      };
+      paint(UNDER, under ? true : null, () => this.drawUnder(s, view, segs));
+      paint(GROUND, !under, () => {
+        if (!under) this.drawUnder(s, view, segs);
+        this.drawGround(s, view, segs);
+      });
+      for (const level of [1, 2]) paint(GROUND + level, bridge(level) ? false : null, () => this.drawBridges(s, view, segs, level));
+    } finally {
+      this.ctx = screen;
+      this.camera.zoom = zoom;
+    }
+    t.ready = true;
+    t.dirty = false;
+  }
+
+  /**
+   * Что поменялось в нарисованном плитками с прошлого кадра — те плитки и устарели: слепки сети дорог (с подсветкой
+   * стройки и знаками, что правка прячет), путей, домов городов, предприятий, площадок станций; правки рельефа.
+   * Другая партия или карта — плитки заново; поменялся вид (настройки, изолинии при стройке) — устарели все.
+   */
+  private syncStill(s: StillScene): void {
+    const { game, o, roadNet } = s;
+    const t = game.terrain;
+    const st = this.still;
+    const look = `${t.biome}|${o.roadTool && t.hasRelief ? 1 : 0}|${o.speedmap ? 1 : 0}|${prefOn('junctionMarks') ? 1 : 0}`;
+    if (st.game !== game || st.terrain !== t) {
+      this.forgetStill();
+      this.still.game = game;
+      this.still.terrain = t;
+      this.still.look = look;
+    } else if (st.look !== look) {
+      this.tiles.invalidateAll();
+      st.look = look;
+    }
+    const boxes: Box[] = [];
+    const add = (list: Box[]) => {
+      for (const b of list) boxes.push(grow(b, DIRTY_PAD));
+    };
+    const relief = this.relief.sync(t);
+    if (relief === 'all') this.tiles.invalidateAll();
+    else if (relief) boxes.push(grow(relief, DIRTY_PAD + 40));
+    // Дороги на карте: полотна и узлы по подписи геометрии; у полотна — ещё подсветка стройки и бледные/спрятанные знаки.
+    const tint = o.roads ? new Set(o.roads.changed) : null;
+    const tintColor = o.roads ? `${o.roads.project ? 'p' : ''}${o.roads.ok ? 'ok' : 'bad'}` : '';
+    const ids = (x: Set<number> | null | undefined) => (x?.size ? [...x].sort((p, q) => p - q).join(',') : '');
+    const marks = `${ids(tint)}:${tintColor}|${ids(o.staleSigns)}|${ids(o.hiddenSigns)}`;
+    const cur = this.still;
+    if (cur.net !== roadNet || cur.version !== roadNet.version || cur.marks !== marks) {
+      cur.net = roadNet;
+      cur.version = roadNet.version;
+      cur.marks = marks;
+      const flag = (id: number) => (tint?.has(id) ? `t${tintColor}` : '') + (o.staleSigns?.has(id) ? 's' : '') + (o.hiddenSigns?.has(id) ? 'h' : '');
+      add(
+        this.diffs.corridors.update((put) =>
+          this.lanes.eachItem(roadNet, (kind, id, sig, box) => {
+            if (kind !== 'corridor') return;
+            const f = flag(id);
+            put(id, f ? `${sig}|${f}` : sig, box);
+          }),
+        ),
+      );
+      add(this.diffs.nodes.update((put) => this.lanes.eachItem(roadNet, (kind, id, sig, box) => kind === 'node' && put(id, sig, box))));
+    }
+    if (cur.rails !== game.net.version) {
+      cur.rails = game.net.version;
+      add(
+        this.diffs.rails.update((put) => {
+          for (const seg of game.net.segments.values()) {
+            const c = this.cache.get(seg.id)!;
+            put(seg.id, `${c.rev}:${c.minLevel}:${c.maxLevel}`, c.bbox);
+          }
+        }),
+      );
+    }
+    // Дома города — когда его список заменили или он вырос.
+    for (const town of game.towns) {
+      let rec = this.diffs.towns.get(town.id);
+      if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, diff: new SceneDiff() }));
+      if (rec.list === town.buildings && rec.n === town.buildings.length) continue;
+      rec.list = town.buildings;
+      rec.n = town.buildings.length;
+      add(
+        rec.diff.update((put) => {
+          for (const b of town.buildings) put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${b.color}|${b.roof}`, fpBox(b.fp));
+        }),
+      );
+    }
+    add(
+      this.diffs.industries.update((put) => {
+        for (const ind of game.industries) put(ind.id, industrySig(ind), (ind.annexes ?? []).reduce((box, x) => unite(box, fpBox(x.fp)), fpBox(ind.fp)));
+      }),
+    );
+    add(
+      this.diffs.aprons.update((put) => {
+        for (const x of game.stations.values()) if (x.kind === 'road') put(x.id, `${fpSig(x.fp)}|${x.bays}|${x.nodeId}`, fpBox(x.fp));
+      }),
+    );
+    if (boxes.length) this.tiles.invalidate(boxes);
   }
 
   /** Высота у начала дороги — позади начала (против хода к курсору), за краем полотна, чтобы не ложиться на него. */
@@ -638,21 +1032,36 @@ export class Renderer {
     this.treeVersion = key;
     const trees = game.terrain.trees;
     const cell = 60;
-    const grid = new Map<string, number[]>();
-    trees.forEach((t, i) => {
-      t.hidden = false;
-      const k = `${Math.floor(t.pos.x / cell)}:${Math.floor(t.pos.y / cell)}`;
-      if (!grid.has(k)) grid.set(k, []);
-      grid.get(k)!.push(i);
-    });
-    const hideNear = (p: Vec, r: number) => {
-      const x0 = Math.floor((p.x - r) / cell);
-      const x1 = Math.floor((p.x + r) / cell);
-      const y0 = Math.floor((p.y - r) / cell);
-      const y1 = Math.floor((p.y + r) / cell);
+    // Номер клетки сетки — числом (строки на каждое дерево и каждый кружок заметно дороже).
+    const cellOf = (x: number, y: number) => (Math.floor(x / cell) + 4096) * 8192 + Math.floor(y / cell) + 4096;
+    // Деревья не двигаются: сетка — одна на карту.
+    let grid = this.treeGrid;
+    if (!grid || grid.trees !== trees || grid.n !== trees.length) {
+      const cells = new Map<number, number[]>();
+      trees.forEach((t, i) => {
+        const k = cellOf(t.pos.x, t.pos.y);
+        const list = cells.get(k);
+        if (list) list.push(i);
+        else cells.set(k, [i]);
+      });
+      grid = this.treeGrid = { trees, n: trees.length, cells };
+    }
+    for (const t of trees) t.hidden = false;
+    const cells = grid.cells;
+    const hideNear = (px: number, py: number, r: number) => {
+      const x0 = Math.floor((px - r) / cell);
+      const x1 = Math.floor((px + r) / cell);
+      const y0 = Math.floor((py - r) / cell);
+      const y1 = Math.floor((py + r) / cell);
+      const r2 = r * r;
       for (let x = x0; x <= x1; x++) {
         for (let y = y0; y <= y1; y++) {
-          for (const i of grid.get(`${x}:${y}`) ?? []) if (dist(trees[i].pos, p) < r) trees[i].hidden = true;
+          const list = cells.get((x + 4096) * 8192 + y + 4096);
+          if (!list) continue;
+          for (const i of list) {
+            const p = trees[i].pos;
+            if ((p.x - px) ** 2 + (p.y - py) ** 2 < r2) trees[i].hidden = true;
+          }
         }
       }
     };
@@ -660,18 +1069,31 @@ export class Renderer {
       const c = this.cache.get(s.id);
       if (!c || c.minLevel < -0.6) continue;
       const r = c.width / 2 + 6;
-      for (let i = 0; i < c.surface.length; i += 2) hideNear(c.surface[i], r);
+      for (let i = 0; i < c.surface.length; i += 2) hideNear(c.surface[i].x, c.surface[i].y, r);
     }
+    // Кружки вдоль полотна (кроме тоннелей) — один раз на его форму и высоты концов.
     const roads = game.roads.net;
     for (const c of roads.corridors.values()) {
-      for (const s of axisStations(c, 0, c.length, 6)) {
-        const e = edgesAt(c, s);
-        if (!e || roads.heightAt(c, s) < -0.6) continue;
-        hideNear(pointOff(c, s, (e[0] + e[1]) / 2), (e[1] - e[0]) / 2 + 6);
+      const na = roads.node(c.a);
+      const nb = roads.node(c.b);
+      const ck = `${c.rev}:${na.level}:${nb.level}`;
+      let cut = this.treeCuts.get(c.id);
+      if (cut?.key !== ck) {
+        const pts: number[] = [];
+        for (const s of axisStations(c, 0, c.length, 6)) {
+          const e = edgesAt(c, s);
+          if (!e || roads.heightAt(c, s) < -0.6) continue;
+          const p = pointOff(c, s, (e[0] + e[1]) / 2);
+          pts.push(p.x, p.y, (e[1] - e[0]) / 2 + 6);
+        }
+        this.treeCuts.set(c.id, (cut = { key: ck, pts }));
       }
+      const pts = cut.pts;
+      for (let i = 0; i < pts.length; i += 3) hideNear(pts[i], pts[i + 1], pts[i + 2]);
     }
-    for (const it of game.index.items) hideNear(it.fp.center, Math.hypot(it.fp.w, it.fp.h) / 2 + 4);
-    for (const c of game.roundaboutCenters.values()) hideNear(c, 50);
+    if (this.treeCuts.size > roads.corridors.size + 500) for (const id of [...this.treeCuts.keys()]) if (!roads.corridors.has(id)) this.treeCuts.delete(id);
+    for (const it of game.index.items) hideNear(it.fp.center.x, it.fp.center.y, Math.hypot(it.fp.w, it.fp.h) / 2 + 4);
+    for (const c of game.roundaboutCenters.values()) hideNear(c.x, c.y, 50);
   }
 
   // ---------- Рельеф ----------
@@ -952,6 +1374,8 @@ export class Renderer {
       if (x.pos.x < view.x0 || x.pos.x > view.x1 || x.pos.y < view.y0 || x.pos.y > view.y1) continue;
       const c = net.corridors.get(x.corridor);
       if (!c) continue;
+      // Огни закрытого переезда мигают — и на паузе.
+      if (x.closed) this.moving = true;
       // Два въезда на переезд — с каждой стороны пути; у каждого справа столбик, при поезде — шлагбаум.
       for (const side of [-1, 1]) {
         const cs = Math.max(0, Math.min(c.length, x.s + side * (RAIL_HALF + 4)));
@@ -1084,10 +1508,9 @@ export class Renderer {
    * линией посередине полос; где полосы расходятся (отгон, развилка, вливание) — каждая полоса своей (speedStrokes).
    * pass — слой высоты: на земле — дороги земли и тоннелей, на мостах и эстакадах — их, поверх полотна и поднятые с ним.
    */
-  private drawSpeedmap(game: Game, pass: number): void {
+  private drawSpeedmap(game: Game, pass: number, view: Box): void {
     const ctx = this.ctx;
     const g = game.roads.graph;
-    const view = this.view();
     ctx.save();
     ctx.lineCap = 'butt';
     for (const link of g.links.values()) {
@@ -1341,8 +1764,8 @@ export class Renderer {
 
   // ---------- Строения ----------
 
-  private drawStructures(game: Game, view: ReturnType<Renderer['view']>, o: ToolOverlay): void {
-    const ctx = this.ctx;
+  /** Дома городов, предприятия и пристройки — без движущегося (оно — drawMotion, поверх). */
+  private drawStill(game: Game, view: Box): void {
     const inView = (fp: Footprint) =>
       fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
     for (const town of game.towns) {
@@ -1351,9 +1774,30 @@ export class Renderer {
     }
     for (const ind of game.industries) {
       // Пристройка — своё вспомогательное здание предприятия (annexArt).
-      for (const a of ind.annexes ?? []) if (inView(a.fp)) this.drawAnnex(ind, a);
-      if (inView(ind.fp)) this.drawIndustry(ind);
+      for (const a of ind.annexes ?? []) if (inView(a.fp)) this.drawAnnex(ind, a, 'still');
+      if (inView(ind.fp)) this.drawIndustry(ind, 'still');
     }
+  }
+
+  /** Движущееся у предприятий и пристроек — дым, мерцание огня, качалки (только вблизи), — в каждом кадре. */
+  private drawMotion(game: Game, view: Box): void {
+    const z = this.camera.zoom;
+    if (!artMoves(z)) return;
+    const inView = (fp: Footprint) =>
+      fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
+    const time = performance.now() / 1000;
+    for (const ind of game.industries) {
+      // Дым, огонь и качалки движутся и на паузе (по часам, а не по времени игры).
+      for (const a of ind.annexes ?? []) if (inView(a.fp) && drawAnnexArt(this.ctx, ind, a, z, time, 'motion')) this.moving = true;
+      if (inView(ind.fp) && drawIndustryArt(this.ctx, ind, z, time, 'motion')) this.moving = true;
+    }
+  }
+
+  /** Станции со складами: выбранная — синей обводкой, посты — цветом машин в них, у остановок — автобусы на посадке. */
+  private drawStations(game: Game, view: Box, o: ToolOverlay): void {
+    const ctx = this.ctx;
+    const inView = (fp: Footprint) =>
+      fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
     const sel = o.selection;
     for (const st of game.stations.values()) {
       const selected = (sel?.type === 'station' && sel.id === st.id) || o.lineStops.includes(st.id);
@@ -1633,23 +2077,27 @@ export class Renderer {
     ctx.fill();
   }
 
-  /** Предприятие: участок с лёгкой тенью, постройки — в industryArt (мелочи только вблизи). */
-  private drawIndustry(ind: Industry): void {
+  /** Предприятие: участок с лёгкой тенью, постройки — в industryArt (мелочи только вблизи); layer — ArtLayer. */
+  private drawIndustry(ind: Industry, layer: ArtLayer): void {
     const fp = ind.fp;
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.16)');
-    drawIndustryArt(this.ctx, ind, this.camera.zoom, performance.now() / 1000);
+    drawIndustryArt(this.ctx, ind, this.camera.zoom, performance.now() / 1000, layer);
   }
 
-  /** Пристройка предприятия: участок с лёгкой тенью, вспомогательное здание — в annexArt. */
-  private drawAnnex(ind: Industry, a: Annex): void {
+  /** Пристройка предприятия: участок с лёгкой тенью, вспомогательное здание — в annexArt; layer — ArtLayer. */
+  private drawAnnex(ind: Industry, a: Annex, layer: ArtLayer): void {
     const fp = a.fp;
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
-    drawAnnexArt(this.ctx, ind, a, this.camera.zoom, performance.now() / 1000);
+    drawAnnexArt(this.ctx, ind, a, this.camera.zoom, performance.now() / 1000, layer);
   }
 
   /** Рисует картинку значка размером size в мировых единицах. */
   private icon(img: HTMLImageElement, p: Vec, size: number): void {
-    if (!img.complete || !img.naturalWidth) return;
+    if (!img.complete || !img.naturalWidth) {
+      // Значок ещё грузится — нарисуем, когда загрузится.
+      if (!img.complete) this.moving = true;
+      return;
+    }
     this.ctx.drawImage(img, p.x - size / 2, p.y - size / 2, size, size);
   }
 

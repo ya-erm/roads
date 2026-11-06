@@ -56,6 +56,39 @@ export function disc(c: CanvasRenderingContext2D, x: number, y: number, r: numbe
 /** Сколько сырья на складе — от 0 до 1 (кучи растут вместе с запасом). */
 const fullness = (n: number | undefined) => Math.min(1, (n ?? 0) / 100);
 
+/**
+ * Что из сцены рисовать: 'all' — всё; 'still' — без движущегося (дым, мерцание огня, противовесы качалок — вблизи),
+ * так её можно держать в кэше карты (src/render/tileCache.ts); 'motion' — только движущееся, поверх 'still' в каждом кадре.
+ */
+export type ArtLayer = 'all' | 'still' | 'motion';
+
+/** Методы холста, что меняют преобразование: в 'motion' они доходят до холста — движущееся встаёт на своё место. */
+const TRANSFORMS = new Set(['save', 'restore', 'translate', 'rotate', 'scale', 'transform', 'setTransform', 'resetTransform']);
+const noop = () => undefined;
+const blind = new WeakMap<CanvasRenderingContext2D, CanvasRenderingContext2D>();
+
+/** Холст, который ничего не рисует, но двигает преобразование настоящего: сцена в 'motion' проходит вхолостую. */
+function blindCtx(real: CanvasRenderingContext2D): CanvasRenderingContext2D {
+  let c = blind.get(real);
+  if (!c) {
+    const bound = new Map<string, unknown>();
+    c = new Proxy(real, {
+      get(target, prop) {
+        if (typeof prop === 'string' && TRANSFORMS.has(prop)) {
+          let f = bound.get(prop);
+          if (!f) bound.set(prop, (f = (target[prop as keyof CanvasRenderingContext2D] as (...a: unknown[]) => unknown).bind(target)));
+          return f;
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === 'function' ? noop : v;
+      },
+      set: () => true,
+    });
+    blind.set(real, c);
+  }
+  return c;
+}
+
 /** Общий буфер точек — без выделения памяти в каждом кадре. */
 const P = new Float64Array(32);
 const Q = new Float64Array(16);
@@ -78,15 +111,24 @@ export class Art {
   readonly level: number;
   /** Предприятие работает — дымят трубы, горит факел. */
   readonly active: boolean;
+  /** Холст сцены; в слое 'motion' — холостой (рисует только движущееся, через m). */
+  readonly c: CanvasRenderingContext2D;
+  /** Холст движущегося — всегда настоящий. */
+  readonly m: CanvasRenderingContext2D;
+  /** Нарисовано движущееся (дым, мерцающий огонь, качалка): картинка меняется сама — нужен следующий кадр. */
+  moved = false;
 
-  /** seed — зерно «случайных» раскладок: по умолчанию id предприятия (у пристройки — её id). */
+  /** seed — зерно «случайных» раскладок: по умолчанию id предприятия (у пристройки — её id); layer — что рисовать (ArtLayer). */
   constructor(
-    readonly c: CanvasRenderingContext2D,
+    real: CanvasRenderingContext2D,
     ind: Industry,
     zoom: number,
     readonly t: number,
     seed = ind.id,
+    readonly layer: ArtLayer = 'all',
   ) {
+    this.c = layer === 'motion' ? blindCtx(real) : real;
+    this.m = real;
     this.lod = zoom > 0.5 ? 2 : zoom > 0.25 ? 1 : 0;
     this.d = this.lod === 2;
     const cos = Math.cos(ind.fp.angle);
@@ -784,10 +826,15 @@ export class Art {
     if (this.lod) {
       c.fillStyle = '#6d7076';
       c.fillRect(-10, -1.6, 3, 3.2);
-      const sw = this.d ? Math.cos(this.t * 2.4 + this.r(i) * 6.283) * 2.2 : 0;
-      c.fillStyle = '#45484e';
-      c.fillRect(-7.3 + sw, -3.6, 2.6, 1.7);
-      c.fillRect(-7.3 + sw, 1.9, 2.6, 1.7);
+      // Противовесы вблизи качаются — это движущееся (ArtLayer); ни с чем в сцене они не пересекаются.
+      if (!this.d || this.layer !== 'still') {
+        const k = this.d ? this.m : c;
+        if (this.d) this.moved = true;
+        const sw = this.d ? Math.cos(this.t * 2.4 + this.r(i) * 6.283) * 2.2 : 0;
+        k.fillStyle = '#45484e';
+        k.fillRect(-7.3 + sw, -3.6, 2.6, 1.7);
+        k.fillRect(-7.3 + sw, 1.9, 2.6, 1.7);
+      }
       c.fillStyle = DARK;
       c.fillRect(0.4, -2.4, 2.4, 4.8);
     }
@@ -884,8 +931,9 @@ export class Art {
 
   /** Дым из трубы: клубы растут и тают по ветру. Только у работающего предприятия и вблизи. */
   smoke(x: number, y: number, i: number, rgb = '236,236,236', s = 1): void {
-    if (this.pass !== 2 || !this.d || !this.active) return;
-    const c = this.c;
+    if (this.pass !== 2 || !this.d || !this.active || this.layer === 'still') return;
+    const c = this.m;
+    this.moved = true;
     for (let k = 0; k < 4; k++) {
       const ph = (this.t * 0.18 + k / 4 + this.r(i * 7 + 99)) % 1;
       const dist = ph * 26 * s;
@@ -898,7 +946,10 @@ export class Art {
   /** Раскалённое: чугун в домне, факел. Мерцает, только когда завод работает. */
   glow(x: number, y: number, r: number): void {
     if (this.pass !== 2 || !this.lod || !this.active) return;
-    const c = this.c;
+    // Мерцает только вблизи: там это движущееся, издалека — ровный огонь вместе со сценой.
+    if (this.layer === (this.d ? 'still' : 'motion')) return;
+    const c = this.m;
+    if (this.d) this.moved = true;
     const f = this.d ? 0.85 + 0.15 * Math.sin(this.t * 11 + x) * Math.sin(this.t * 7.3) : 1;
     c.fillStyle = 'rgba(255,140,40,0.35)';
     disc(c, x, y, r * 1.7 * f);
@@ -2057,11 +2108,19 @@ export function industryGround(info: IndustryType): string {
   return GROUND[info.kind] ?? info.color;
 }
 
-/** Предприятие целиком: участок, тени, постройки. zoom решает, сколько мелочей рисовать. */
-export function drawIndustryArt(ctx: CanvasRenderingContext2D, ind: Industry, zoom: number, time: number): void {
+/**
+ * Предприятие целиком: участок, тени, постройки. zoom решает, сколько мелочей рисовать; layer — всё или его часть
+ * (ArtLayer). Ответ — нарисовано ли движущееся (картинка меняется сама).
+ */
+export function drawIndustryArt(ctx: CanvasRenderingContext2D, ind: Industry, zoom: number, time: number, layer: ArtLayer = 'all'): boolean {
   const info = ind.info;
-  paintScene(ctx, new Art(ctx, ind, zoom, time), ind.fp, info.w, info.h, industryGround(info), SCENES[info.kind], ind);
+  const a = new Art(ctx, ind, zoom, time, ind.id, layer);
+  paintScene(ctx, a, ind.fp, info.w, info.h, industryGround(info), SCENES[info.kind], ind);
+  return a.moved;
 }
+
+/** Есть ли у сцены на этом зуме движущееся (ArtLayer): всё оно — только вблизи. */
+export const artMoves = (zoom: number): boolean => zoom > 0.5;
 
 /**
  * Сцена в контуре fp: участок цвета ground с обводкой, общая тень всех построек, сами постройки.
@@ -2077,6 +2136,9 @@ export function paintScene<T>(
   scene: (a: Art, arg: T) => void,
   arg: T,
 ): void {
+  // Только движущееся: сцена — вхолостую (холст a.c лишь двигает преобразование), и только проход построек.
+  const motion = a.layer === 'motion';
+  if (motion) ctx = a.c;
   ctx.save();
   ctx.translate(fp.center.x, fp.center.y);
   ctx.rotate(fp.angle);
@@ -2085,6 +2147,7 @@ export function paintScene<T>(
   ctx.lineJoin = 'round';
   for (const pass of PASSES) {
     if (pass === 1 && !a.lod) continue;
+    if (motion && pass !== 2) continue;
     a.pass = pass;
     if (pass === 0) {
       ctx.fillStyle = ground;

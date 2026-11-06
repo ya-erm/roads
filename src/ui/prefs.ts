@@ -6,7 +6,7 @@
  * хранилищем — всё как по умолчанию.
  */
 
-export type Pref = 'junctionMarks';
+export type Pref = 'junctionMarks' | 'mapCache';
 
 /** Описание настройки — строка в разделе «Настройки». */
 export interface PrefInfo {
@@ -35,6 +35,20 @@ export function junctionMarksSvg(w = 32, h = 24): string {
   </svg>`;
 }
 
+/** Значок кэша карты: карта плитками 2×2 — дорога и дом, одна плитка готова (сплошная), над ней машина. */
+export function mapCacheSvg(w = 32, h = 24): string {
+  return `<svg viewBox="0 0 48 36" width="${w}" height="${h}" aria-hidden="true">
+    <rect x="4" y="3" width="19" height="14" rx="2" fill="#cfe0b8"/>
+    <rect x="25" y="3" width="19" height="14" rx="2" fill="#cfe0b8"/>
+    <rect x="4" y="19" width="19" height="14" rx="2" fill="#cfe0b8"/>
+    <rect x="25" y="19" width="19" height="14" rx="2" fill="#cfe0b8" stroke="#2f80ed" stroke-width="1.6" stroke-dasharray="3 2"/>
+    <path d="M4 22H44" stroke="#646b76" stroke-width="5"/>
+    <rect x="9" y="7" width="8" height="6" fill="#d98c5f"/>
+    <rect x="31" y="7" width="7" height="6" fill="#d98c5f"/>
+    <rect x="12" y="20.4" width="6" height="3.2" rx="1" fill="#f2c94c"/>
+  </svg>`;
+}
+
 /** Все настройки — по порядку в разделе меню. */
 export const PREFS: readonly PrefInfo[] = [
   {
@@ -42,6 +56,13 @@ export const PREFS: readonly PrefInfo[] = [
     name: 'Разметка перекрёстков',
     hint: 'Штриховка пустого асфальта и направляющие на больших перекрёстках',
     icon: junctionMarksSvg(),
+    default: true,
+  },
+  {
+    id: 'mapCache',
+    name: 'Кэш карты',
+    hint: 'Дороги и дома рисуются заранее плитками — кадр легче. Выключите, если карта рисуется с ошибками',
+    icon: mapCacheSvg(),
     default: true,
   },
 ];

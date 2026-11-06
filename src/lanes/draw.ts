@@ -156,6 +156,24 @@ interface Cached<T> {
   bbox: BBox;
   /** Слой по высоте (layerOf). */
   layer: number;
+  /** Отпечаток нарисованного (shapeOf): та же картинка — тот же отпечаток, даже если ревизии новые (предпросмотр). */
+  shape: string;
+}
+
+/** Отпечаток точек (с точностью 1/64 м) и прочего, от чего зависит картинка, — строкой. */
+function shapeOf(lists: Vec[][], extra: string): string {
+  let a = 0x811c9dc5 | 0;
+  let b = 0x1b873593 | 0;
+  for (const pts of lists) {
+    a = Math.imul(a ^ pts.length, 16777619);
+    for (const p of pts) {
+      const x = Math.round(p.x * 64);
+      const y = Math.round(p.y * 64);
+      a = Math.imul(Math.imul(a ^ x, 16777619) ^ y, 16777619);
+      b = Math.imul(b ^ (x * 31 + y), 0x5bd1e995);
+    }
+  }
+  return `${(a >>> 0).toString(36)}.${(b >>> 0).toString(36)}|${extra}`;
 }
 
 function bboxOf(lists: Vec[][]): BBox {
@@ -206,6 +224,24 @@ export class LaneRenderer {
   hasLayer(net: LaneNet, layer: number): boolean {
     this.refresh(net);
     return this.corridors.some((x) => x.layer === layer) || this.nodes.some((x) => x.layer === layer);
+  }
+
+  /** Есть ли что рисовать в слое высоты layer в рамке view (по рамкам полотен и узлов; тень моста — в пределах 40 м). */
+  layerIn(net: LaneNet, layer: number, view: BBox): boolean {
+    this.refresh(net);
+    const hit = (x: Cached<unknown>) => x.layer === layer && !(x.bbox.x1 < view.x0 || x.bbox.x0 > view.x1 || x.bbox.y1 < view.y0 || x.bbox.y0 > view.y1);
+    return this.corridors.some(hit) || this.nodes.some(hit);
+  }
+
+  /**
+   * Всё, что рисует сеть, — для кэша карты (src/render/tileCache.ts): полотна и узлы с отпечатком нарисованного
+   * (shapeOf — не ревизии: предпросмотр стройки, пересобранный без изменений, не меняет его) и рамкой — по смене
+   * отпечатка понятно, что и где перерисовать.
+   */
+  eachItem(net: LaneNet, fn: (kind: 'corridor' | 'node', id: number, sig: string, box: BBox) => void): void {
+    this.refresh(net);
+    for (const [id, x] of this.corridorCache) fn('corridor', id, x.shape, x.bbox);
+    for (const [id, x] of this.nodeCache) fn('node', id, x.shape, x.bbox);
   }
 
   /** Рисует сеть; layer — только этот слой высоты (тоннели, земля, мосты, эстакады), без него — всё. */
@@ -369,7 +405,13 @@ export class LaneRenderer {
         const geo = this.corridorGeo(net, c);
         const la = net.node(c.a).level;
         const lb = net.node(c.b).level;
-        item = { key, geo, bbox: bboxOf([geo.poly]), layer: layerOf(Math.min(la, lb), Math.max(la, lb)) };
+        const layer = layerOf(Math.min(la, lb), Math.max(la, lb));
+        // Отпечаток: всё, что рисуется, и то, от чего зависят знаки и скорости (класс, полосы, ограничение).
+        const shape = shapeOf(
+          [geo.poly, geo.left, geo.right, geo.shade, geo.lifts, ...geo.marks.map((m) => m.pts), ...geo.arrows],
+          `${layer}|${la}|${lb}|${geo.marks.map((m) => m.style).join(',')}|${geo.wet.join(';')}|${c.cls}|${c.limit ?? ''}|${c.ring ?? ''}|${JSON.stringify(c.lanes)}`,
+        );
+        item = { key, geo, bbox: bboxOf([geo.poly]), layer, shape };
         this.corridorCache.set(c.id, item);
       }
       corridors.push(item);
@@ -395,7 +437,20 @@ export class LaneRenderer {
         if (look.lift.y !== 0) geo = liftNode(geo, look.lift);
         geo.shade = sub(look.shadow, look.lift);
         const bbox = bboxOf([geo.plate?.poly ?? [], ...geo.caps.map((c) => c.poly), ...geo.gores.map((g) => g.asphalt), [n.pos]]);
-        item = { key, geo, bbox, layer: layerOf(n.level, n.level) };
+        const layer = layerOf(n.level, n.level);
+        const shape = shapeOf(
+          [
+            geo.plate?.poly ?? [],
+            ...(geo.plate?.curbs ?? []),
+            ...geo.caps.flatMap((c) => [c.poly, c.arc]),
+            ...geo.gores.flatMap((g) => [g.asphalt, g.nose, g.paint, ...g.hatch, [g.start, g.axis]]),
+            ...(geo.marks ? [...geo.marks.islands, ...geo.marks.hatch, ...geo.marks.dashes] : []),
+            [geo.shade, n.pos],
+          ],
+          // Запреты и связи полос — стрелки и стоп-линии перекрёстка.
+          `${layer}|${n.kind}|${n.roundabout ?? ''}|${geo.gores.map((g) => `${g.diverge}`).join()}|${n.bans?.join(';') ?? ''}|${n.lanes?.join(';') ?? ''}`,
+        );
+        item = { key, geo, bbox, layer, shape };
         this.nodeCache.set(n.id, item);
       }
       nodes.push(item);

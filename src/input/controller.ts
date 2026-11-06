@@ -278,6 +278,15 @@ export class Controller {
   private left: { sx: number; sy: number; createdChain: boolean } | null = null;
   private keys = new Set<string>();
   private flash: { text: string; until: number } | null = null;
+
+  /**
+   * На карте есть что-то на время — отказ подсказкой, кольцо «показать место», мигание отказа фазы: когда истечёт,
+   * картинка сменится сама, без ввода, — кадры нужны до тех пор (src/render/redraw.ts). Зажатые клавиши — тоже.
+   */
+  get timed(): boolean {
+    const now = performance.now();
+    return (this.flash?.until ?? 0) > now || (this.ping?.until ?? 0) > now || (this.phaseFlash?.until ?? 0) > now || this.keys.size > 0;
+  }
   /** В проекте строительства дорог тянут построенную дорогу (узел, перо, середину) — правкой проекта. */
   private builtDrag = false;
   private lastSpeed = 1;

@@ -293,14 +293,25 @@ export class ReliefRenderer {
     this.of = null;
   }
 
-  private bind(terrain: Terrain): void {
+  /**
+   * Правки рельефа с прошлого раза (свои тайлы уже сброшены): рамка правок, 'all' — карта другая, null — ничего.
+   * Для кэша карты (src/render/tileCache.ts): его плитки с рельефом — тоже заново.
+   */
+  sync(terrain: Terrain): { x0: number; y0: number; x1: number; y1: number } | 'all' | null {
+    return this.bind(terrain);
+  }
+
+  private bind(terrain: Terrain): { x0: number; y0: number; x1: number; y1: number } | 'all' | null {
+    let fresh = false;
     if (this.of !== terrain) {
       this.reset();
       this.of = terrain;
       terrain.takeDirty();
+      fresh = true;
     }
     // Правка рельефа: цвет и изолинии задетых тайлов — заново, прямо во время мазка.
     const d = terrain.takeDirty();
+    if (fresh) return 'all';
     if (d) {
       const pad = Math.max(TILE_RES * 2, 16);
       for (let ty = Math.floor((d.y0 - pad) / TILE); ty <= Math.floor((d.y1 + pad) / TILE); ty++) {
@@ -309,7 +320,11 @@ export class ReliefRenderer {
           this.contours.delete(`${tx}:${ty}`);
         }
       }
+      // Вне правки высоты те же — тайл заново даст те же пиксели; отмывка (уклон по соседям) и сглаживание пикселей
+      // тайла задевают ещё по паре пикселей тайла вокруг.
+      return { x0: d.x0 - pad * 2, y0: d.y0 - pad * 2, x1: d.x1 + pad * 2, y1: d.y1 + pad * 2 };
     }
+    return null;
   }
 
   /** Тайлы карты, видимые в рамке view. */

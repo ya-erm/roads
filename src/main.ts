@@ -7,12 +7,14 @@ import { saveFileText } from './game/saveFile';
 import { Controller } from './input/controller';
 import { rememberTools } from './input/toolPrefs';
 import { Camera } from './render/camera';
+import { RedrawGate } from './render/redraw';
 import { Renderer } from './render/renderer';
 import { ARCHETYPE_LIST } from './scenario/content';
 import type { ScenarioSettings } from './scenario/types';
 import { testScene } from './testpages';
 import { installBugReport } from './ui/bugReport';
 import { Hud } from './ui/hud';
+import { onPrefs } from './ui/prefs';
 import { DEFAULT_SETTINGS, WorldSettings } from './world/settings';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
@@ -255,13 +257,50 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => persist());
 
+// Кадр без изменений не перерисовывается (src/render/redraw.ts): ввод, окно и настройки — повод рисовать.
+const gate = new RedrawGate();
+const poke = () => gate.poke(performance.now());
+for (const type of ['pointermove', 'pointerdown', 'pointerup', 'wheel', 'keydown', 'keyup', 'click', 'input', 'change', 'focus', 'blur']) {
+  window.addEventListener(type, poke, { capture: true, passive: true });
+}
+window.addEventListener('resize', poke);
+window.addEventListener('storage', poke);
+document.addEventListener('visibilitychange', poke);
+onPrefs(poke);
+
 let last = performance.now();
 function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   controller.update(dt);
   game.update(dt);
-  renderer.draw(game, controller.overlay());
+  // Подпись кадра: камера, партия, ход времени, сеть, деньги, линии, станции, парк, всплывающие суммы; инструмент,
+  // выбор и курсор (их меняют и не вводом — из панелей и скриптов).
+  const key = [
+    controller.tool,
+    controller.selection,
+    controller.selectedLine,
+    controller.highlight,
+    controller.hover,
+    game,
+    game.speed,
+    game.time,
+    game.net.version,
+    game.roads.net.version,
+    game.money,
+    game.lines.size,
+    game.stations.size,
+    game.fleet.size,
+    game.floaters.length,
+    camera.x,
+    camera.y,
+    camera.zoom,
+    camera.width,
+    camera.height,
+    camera.dpr,
+  ];
+  const moving = game.speed > 0 || game.monthClosing || renderer.needsFrame || controller.timed;
+  if (gate.need(now, key, moving)) renderer.draw(game, controller.overlay());
   hud.update(dt);
   requestAnimationFrame(frame);
 }
