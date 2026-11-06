@@ -71,6 +71,7 @@ import { linesForTown } from './townLines';
 import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
 import { annexFootprint, annexReady, growthCap, inAnnexZone } from './annexes';
+import { type AutoFunds, autoFunds } from './autoFunds';
 import {
   AUTO_FLEET,
   DEFAULT_RULE,
@@ -2375,6 +2376,7 @@ export class Game implements BuildContext {
     this.updateFleet(dt);
     this.updateJams(dt);
     this.updateAutoSell();
+    this.updateAutoWait();
     this.updateIndustries(dt);
     this.updateStations(dt);
     this.updateTowns(dt);
@@ -2895,6 +2897,8 @@ export class Game implements BuildContext {
     }
     auto.min = Math.min(auto.min, n);
     auto.max = Math.max(auto.max, n);
+    // Решение авто-парка, ждавшее денег, устарело: игрок решил сам, спрос считается заново.
+    delete auto.noMoney;
     this.restartDemand(line);
   }
 
@@ -2920,24 +2924,39 @@ export class Game implements BuildContext {
     return undefined;
   }
 
-  /** Содержание всего транспорта за месяц — авто-парк оставляет его в запасе. */
+  /** Содержание всего транспорта за месяц — спишется в конце месяца. */
   private fleetRunning(): number {
     let total = 0;
     for (const v of this.fleet.values()) total += this.runningCost(v);
     return total;
   }
 
-  /** Покупка авто-парком — если и после неё до кредитного предела останется на месяц содержания транспорта. */
+  /**
+   * Хватит ли авто-парку денег на следующую машину линии: цена и запас на содержание транспорта в конце месяца,
+   * которое не покроет выручка маршрутов (см. autoFunds).
+   */
+  autoFunds(line: Line, model: ModelId = this.autoModel(line)): AutoFunds {
+    let revenue = 0;
+    for (const l of this.lines.values()) revenue += l.revenueLast ?? 0;
+    const m = MODELS[model];
+    return autoFunds({ money: this.money, price: m.price, running: this.fleetRunning() + m.running, revenue, monthLeft: 1 - this.monthProgress });
+  }
+
+  /** Покупка авто-парком — если хватает денег (autoFunds); не хватило — покупка ждёт денег (noMoney). */
   private autoBuy(line: Line): boolean {
     const auto = line.auto!;
     const model = this.autoModel(line);
-    if (MODELS[model].price + this.fleetRunning() > this.budget) {
+    if (!this.autoFunds(line, model).ok) {
       auto.noMoney = true;
       return false;
     }
     const last = this.lastVehicle(line, MODELS[model].carries);
     const v = this.buyVehicle(line.id, model, true);
-    if (!v) return false;
+    // Купить нельзя не из-за денег (модель не подходит маршруту) — ждать денег незачем.
+    if (!v) {
+      delete auto.noMoney;
+      return false;
+    }
     // Поезд — той же длины, что и последний такой на линии.
     if (last?.model === model && last.cars !== undefined) v.cars = Math.min(last.cars, this.maxCars(v));
     delete auto.noMoney;
@@ -3085,6 +3104,24 @@ export class Game implements BuildContext {
       delete auto.sell;
       auto.low = 0;
       this.restartDemand(line);
+    }
+  }
+
+  /**
+   * Покупка авто-парка ждёт денег (noMoney): как только их хватает — покупает сразу, не дожидаясь конца
+   * окна загрузки, и добирает до минимума.
+   */
+  private updateAutoWait(): void {
+    for (const line of this.lines.values()) {
+      const auto = line.auto;
+      if (!auto?.on || !auto.noMoney) continue;
+      if (line.vehicles.length >= auto.max) {
+        delete auto.noMoney;
+        continue;
+      }
+      const model = this.autoModel(line);
+      if (this.money < MODELS[model].price || !this.autoFunds(line, model).ok) continue;
+      if (this.autoBuy(line)) this.autoBounds(line);
     }
   }
 

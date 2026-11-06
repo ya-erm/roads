@@ -2655,8 +2655,12 @@ export class Hud {
       }>−</button><b>${value}</b><button
         data-action="auto-range" data-id="${line.id}" data-what="${what}" data-d="1" ${value < top ? '' : 'disabled'}>+</button></span>`;
     const kind = g.lineVehicleKind(line);
+    // Покупка ждёт денег — значок, пока их не хватает (на паузе игрок мог уже взять кредит).
+    const funds = auto.noMoney ? g.autoFunds(line) : null;
     const flagList = [
-      auto.noMoney ? '<span class="auto-flag warn" title="Не хватает денег на покупку">💸</span>' : '',
+      funds && !funds.ok
+        ? `<span class="auto-flag warn" data-tip="Ждёт денег на машину: нужно ${money(funds.need)}, на счёте ${money(funds.have)}" data-tip-end>💸</span>`
+        : '',
       auto.sell !== undefined ? '<span class="auto-flag" title="Продаст лишний транспорт, когда он опустеет">▼</span>' : '',
     ].filter(Boolean);
     const flags = flagList.join('');

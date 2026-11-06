@@ -36,11 +36,30 @@ describe('Советник', () => {
     expect(find(game, 'waiting')[0].fix).toEqual({ kind: 'autoMax', line: line.id });
   });
 
-  it('авто-парку не хватает денег — совет взять кредит; на грани банкротства — срочный совет', () => {
+  it('авто-парку не хватает денег — сколько нужно и сколько есть, совет взять кредит; на грани банкротства — срочный совет', () => {
     const { game, line } = setup();
     game.setLineAuto(line.id, { on: true });
     line.auto!.noMoney = true;
-    expect(find(game, 'noMoney')[0]).toMatchObject({ level: 'warn', line: line.id, fix: { kind: 'loan' } });
+    // Денег на счёте с запасом — покупка ждала их, но теперь хватает: совета нет (случай из задачи).
+    expect(find(game, 'noMoney')).toHaveLength(0);
+    // Выручки ещё не было — нужна цена грузовика и запас на месяц содержания двух грузовиков.
+    game.money = 10_000;
+    const [a] = find(game, 'noMoney');
+    const f = game.autoFunds(line);
+    expect(f).toMatchObject({ ok: false, price: 22_000, have: 10_000 });
+    expect(f.reserve).toBeGreaterThan(0);
+    expect(a).toMatchObject({ level: 'warn', line: line.id, fix: { kind: 'loan' }, funds: { have: 10_000, need: f.need } });
+    expect(a.detail).toContain(`нужно $${f.need.toLocaleString('ru-RU')}`);
+    expect(a.detail).toContain('на содержание транспорта в конце месяца');
+    expect(a.detail).toContain('а на счёте $10');
+    // Маршрут окупает содержание — запас не нужен, не хватает только на саму машину.
+    line.revenueLast = 1_000_000;
+    game.money = -5_000;
+    const [b] = find(game, 'noMoney');
+    expect(b.funds).toEqual({ have: -5_000, need: 22_000 });
+    expect(b.detail).toMatch(/^«.+» ждёт машину: машина стоит \$22.000, а на счёте −\$5.000\. Кредит — ещё до/);
+    game.money = 22_000;
+    expect(find(game, 'noMoney')).toHaveLength(0);
     game.money = ECONOMY.creditLimit * 0.9;
     const list = advise(game);
     expect(list[0]).toMatchObject({ kind: 'debt', level: 'alert', fix: { kind: 'loan' } });

@@ -3972,6 +3972,37 @@ button.small.with-ic {
   font-weight: 700;
 }
 
+/* Деньги совета: на счёте — полоска до нужной суммы — сколько нужно. */
+.adv-funds {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.adv-funds b.neg {
+  color: var(--danger);
+}
+
+.adv-meter {
+  flex: 1;
+  min-width: 40px;
+  height: 6px;
+  border-radius: 3px;
+  background: #e8ecf0;
+  overflow: hidden;
+}
+
+.adv-meter i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: #e0a100;
+}
+
 /* Окно поуже: панель инструментов внизу по центру доходит до левого края — предложения над ней. */
 @media (max-width: 1410px) {
   .offers {

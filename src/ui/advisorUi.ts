@@ -11,6 +11,7 @@ import { lineKindSvg } from './icons';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const fmt = (n: number) => Math.round(n).toLocaleString('ru-RU');
+const money = (n: number) => `${Math.round(n) < 0 ? '−' : ''}$${fmt(Math.abs(n))}`;
 
 /** Значок вида совета (кроме тех, где значок — груз). */
 const KIND_GLYPH: Record<AdviceKind, string> = {
@@ -88,6 +89,12 @@ export function fixLabel(g: Game, fix: AdviceFix): string {
   }
 }
 
+/** Деньги совета: на счёте — полоска до нужной суммы — сколько нужно. */
+export function fundsHtml(f: { have: number; need: number }): string {
+  const part = f.need > 0 ? Math.max(0, Math.min(1, f.have / f.need)) : 1;
+  return `<div class="adv-funds" data-tip="На счёте ${money(f.have)}, нужно ${money(f.need)}"><span>💰</span><b class="${f.have < 0 ? 'neg' : ''}">${money(f.have)}</b><span class="adv-meter"><i style="width:${Math.round(part * 100)}%"></i></span><b>${money(f.need)}</b></div>`;
+}
+
 /** Карточка совета. */
 function cardHtml(g: Game, a: Advice): string {
   const line = a.line !== undefined ? g.lines.get(a.line) : undefined;
@@ -99,7 +106,7 @@ function cardHtml(g: Game, a: Advice): string {
   const hide = a.level === 'tip' ? `<button class="icon adv-hide" data-action="advice-hide" data-key="${esc(a.key)}" data-tip="Скрыть этот совет" data-tip-end>✕</button>` : '';
   return `<div class="adv-card ${a.level}">${adviceIcon(a)}
     <div class="adv-body"><div class="adv-title"><b>${esc(a.title)}</b>${hide}</div>
-      <small>${esc(a.detail)}</small>
+      <small>${esc(a.detail)}</small>${a.funds ? fundsHtml(a.funds) : ''}
       ${chip || show || fix ? `<div class="adv-actions">${chip}${show}${fix}</div>` : ''}
     </div></div>`;
 }

@@ -3,7 +3,7 @@ import { MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
 import { Game } from './game';
-import { freightRoute, runMonths, townStreets, withoutCitizens } from './testkit';
+import { freightRoute, runMonths, runSeconds, townStreets, withoutCitizens } from './testkit';
 import { AUTO_FLEET, type FleetVehicle } from './transport';
 
 /**
@@ -178,6 +178,31 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
     expect(line.statsFrom).toBe(game.time);
     runMonths(game, 0.5);
     expect(line.vehicles).toHaveLength(0);
+  });
+
+  it('денег не хватило — покупка ждёт и случается, как только их хватает, не дожидаясь конца месяца', () => {
+    const { game, line } = farmRoute();
+    game.buyVehicle(line.id, 'truck');
+    game.money = 10_000;
+    game.setLineAuto(line.id, { on: true, min: 3, max: 5 });
+    expect(line.vehicles).toHaveLength(1);
+    expect(line.auto!.noMoney).toBe(true);
+    // Денег всё ещё мало — ждёт.
+    runSeconds(game, 1);
+    expect(line.vehicles).toHaveLength(1);
+    // Деньги пришли посреди месяца — сразу добирает до минимума, и ждать больше нечего.
+    game.money = 1_000_000;
+    runSeconds(game, 1);
+    expect(game.monthProgress).toBeLessThan(0.5);
+    expect(line.vehicles).toHaveLength(3);
+    expect(line.auto!.noMoney).toBeUndefined();
+    // Игрок сам купил машину на маршрут — ждавшая денег покупка отменяется.
+    game.money = 10_000;
+    game.setLineAuto(line.id, { min: 4 });
+    expect(line.auto!.noMoney).toBe(true);
+    game.buyVehicle(line.id, 'truck');
+    game.fitAutoRange(line.id);
+    expect(line.auto!.noMoney).toBeUndefined();
   });
 
   it('спрос пустой автобусной линии — по жителям у её остановок', () => {

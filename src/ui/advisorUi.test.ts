@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Advice } from '../game/advisor';
 import { Game } from '../game/game';
 import { DEFAULT_SETTINGS } from '../world/settings';
-import { adviceBadge, advisorHtml, fixLabel } from './advisorUi';
+import { adviceBadge, advisorHtml, fixLabel, fundsHtml } from './advisorUi';
 
 const advice = (over: Partial<Advice>): Advice => ({ key: 'k', kind: 'noVehicles', level: 'tip', title: 'Т', detail: 'Д', ...over });
 
@@ -30,5 +30,21 @@ describe('Панель советника', () => {
     // Советов нет — «всё работает».
     expect(advisorHtml(game, [])).toContain('Всё работает');
     expect(fixLabel(game, { kind: 'sell', line: 1 })).toBe('−1 машина');
+  });
+
+  it('деньги совета: на счёте, полоска до нужной суммы, сколько нужно', () => {
+    const sp = (s: string) => s.replace(/\s/g, ' ');
+    const html = sp(fundsHtml({ have: 12_000, need: 48_000 }));
+    expect(html).toContain('<b class="">$12 000</b>');
+    expect(html).toContain('width:25%');
+    expect(html).toContain('<b>$48 000</b>');
+    expect(html).toContain('data-tip="На счёте $12 000, нужно $48 000"');
+    // В минусе — красным, полоска пустая.
+    const neg = sp(fundsHtml({ have: -94_896, need: 48_000 }));
+    expect(neg).toContain('<b class="neg">−$94 896</b>');
+    expect(neg).toContain('width:0%');
+    // Полоска — в карточке совета.
+    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    expect(advisorHtml(game, [advice({ kind: 'noMoney', level: 'warn', funds: { have: 1, need: 2 } })])).toContain('adv-meter');
   });
 });

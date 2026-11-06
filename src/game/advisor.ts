@@ -9,6 +9,7 @@ import { ECONOMY, STATION, STORAGE } from '../config';
 import type { Vec } from '../core/vec';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
+import type { AutoFunds } from './autoFunds';
 import type { Game } from './game';
 import { type Line, MODELS, vehicleCapacity } from './transport';
 import { storageSlots } from './warehouses';
@@ -62,6 +63,8 @@ export interface Advice {
   fix?: AdviceFix;
   /** Причина одной строкой — подсказка у значка на карте (нет — по виду совета, см. stationWarnings). */
   reason?: string;
+  /** Деньги: сколько на счёте и сколько нужно — полоска в карточке совета. */
+  funds?: { have: number; need: number };
 }
 
 /** Машина погрузилась и не может выехать дольше стольких секунд — выезд забит. */
@@ -71,9 +74,11 @@ export const QUEUE_SECONDS = 15;
 
 const LEVEL_ORDER: Record<AdviceLevel, number> = { alert: 0, warn: 1, tip: 2 };
 const fmt = (n: number) => Math.round(n).toLocaleString('ru-RU');
-const money = (n: number) => `$${fmt(n)}`;
+const money = (n: number) => `${Math.round(n) < 0 ? '−' : ''}$${fmt(Math.abs(n))}`;
 const seconds = (s: number) => (s >= 90 ? `${Math.round(s / 60)} мин` : `${Math.round(s)} с`);
-const cars = (n: number) => `${n} ${n % 10 === 1 && n % 100 !== 11 ? 'машина' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'машины' : 'машин'}`;
+const plural = (n: number, one: string, few: string, many: string) =>
+  n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? few : many;
+const cars = (n: number) => `${n} ${plural(n, 'машина', 'машины', 'машин')}`;
 
 /** Все советы по партии — самые важные первыми. */
 export function advise(game: Game): Advice[] {
@@ -114,21 +119,38 @@ function money_(game: Game, out: Advice[]): void {
       fix: canLoan ? { kind: 'loan' } : undefined,
     });
   }
-  const starving = [...game.lines.values()].filter((l) => l.auto?.on && l.auto.noMoney);
+  // Покупка ждёт денег, и их всё ещё не хватает (на паузе игрок мог взять кредит — тогда совета уже нет).
+  const starving = [...game.lines.values()]
+    .filter((l) => l.auto?.on && l.auto.noMoney)
+    .map((line) => ({ line, f: game.autoFunds(line) }))
+    .filter((s) => !s.f.ok)
+    .sort((a, b) => a.f.need - b.f.need);
   if (starving.length) {
+    const { f } = starving[0];
     out.push({
       key: 'noMoney',
       kind: 'noMoney',
       level: 'warn',
       title: 'Авто-парку не хватает денег',
-      detail: `${starving.length === 1 ? `«${starving[0].name}»` : `${starving.length} маршрутов`} не докупает машины: после покупки не останется на месяц содержания.${
-        canLoan ? ` Кредит — ещё до ${money(game.loanMax - game.loan)}.` : ''
-      }`,
-      line: starving.length === 1 ? starving[0].id : undefined,
+      detail: `${noMoneyText(starving.length === 1 ? starving[0].line.name : null, starving.length, f)}${canLoan ? ` Кредит — ещё до ${money(game.loanMax - game.loan)}.` : ''}`,
+      line: starving.length === 1 ? starving[0].line.id : undefined,
       count: starving.length,
       fix: canLoan ? { kind: 'loan' } : undefined,
+      funds: { have: f.have, need: f.need },
     });
   }
+}
+
+/**
+ * Почему авто-парк не покупает: сколько нужно и сколько на счёте; запас на содержание — если он есть.
+ * name — маршрут (один), иначе — сколько маршрутов ждут, нужно — на первую машину.
+ */
+export function noMoneyText(name: string | null, lines: number, f: AutoFunds): string {
+  const who = name ? `«${name}» ждёт машину` : `${lines} ${plural(lines, 'маршрут ждёт', 'маршрута ждут', 'маршрутов ждут')} машины`;
+  const need = f.reserve
+    ? `нужно ${money(f.need)} — машина ${money(f.price)} и ${money(f.reserve)} на содержание транспорта в конце месяца (выручка его не покроет)`
+    : `машина стоит ${money(f.price)}`;
+  return `${who}: ${need}, а на счёте ${money(f.have)}.`;
 }
 
 // ---------- Маршруты ----------
