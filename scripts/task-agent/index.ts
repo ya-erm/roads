@@ -45,6 +45,8 @@ const IMAGE_EXT = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
 const SAVE_EXT = ['.json'];
 /** Строка журнала, по которой сессия в режиме --chat узнаёт, что задача ждёт её. */
 const HANDOFF = 'ЗАДАЧА ДЛЯ ЧАТА';
+/** Как часто, пока сессия делает задачу, проверять, не убрал ли её человек из «В работе». */
+const HANDOFF_CHECK_MS = 60_000;
 
 // ---------- Настройки ----------
 
@@ -365,7 +367,7 @@ async function work(brief: Task): Promise<void> {
     });
     writeFileSync(join(runDir, 'prompt.md'), prompt);
     if (chat) {
-      result = await handOff(runDir, title);
+      result = await handOff(runDir, title, card.id);
     } else {
       log(`Задание и журнал Claude: ${shown(runDir)}`);
       result = await runAgent(card.id, title, prompt, runDir);
@@ -427,17 +429,27 @@ async function runAgent(taskId: string, title: string, prompt: string, runDir: s
 /**
  * Режим --chat: задачу делает открытая сессия Claude Code. Она узнаёт о задаче по строке журнала HANDOFF,
  * читает prompt.md и пишет report.json; файл release в папке запуска — вернуть задачу в очередь.
- * Пока ждём, на доске — «работает над задачей».
+ * Пока ждём, на доске — «работает над задачей». Если человек сам убрал задачу из «В работе»,
+ * ждать отчёт больше незачем: место освобождается, а вернувшуюся в очередь задачу монитор возьмёт заново.
  */
-async function handOff(runDir: string, title: string): Promise<ClaudeResult & { released?: boolean }> {
+async function handOff(runDir: string, title: string, taskId: string): Promise<ClaudeResult & { released?: boolean }> {
   const started = Date.now();
   const reportFile = join(runDir, 'report.json');
   const releaseFile = join(runDir, 'release');
   log(`${HANDOFF}: «${title}» — задание ${shown(join(runDir, 'prompt.md'))}`);
   log(`  Отчёт — ${shown(reportFile)}; вернуть задачу в очередь — пустой файл ${shown(releaseFile)}.`);
   let problem = '';
+  let checked = Date.now();
   while (!abort.signal.aborted) {
     if (existsSync(releaseFile)) return { ok: false, released: true, error: 'сессия вернула задачу в очередь', durationMs: Date.now() - started };
+    if (Date.now() - checked >= HANDOFF_CHECK_MS) {
+      checked = Date.now();
+      // Сбой сети — не повод бросать задачу: проверим в следующий раз.
+      const now = await board.task(taskId).catch(() => null);
+      if (now && now.status !== 'in_progress' && !existsSync(reportFile)) {
+        return { ok: false, released: true, error: `задачу перевели в «${STATUS_NAMES[now.status]}» на доске`, durationMs: Date.now() - started };
+      }
+    }
     if (existsSync(reportFile)) {
       try {
         return { ok: true, output: parseReport(readFileSync(reportFile, 'utf8')), durationMs: Date.now() - started };
