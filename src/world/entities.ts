@@ -91,7 +91,7 @@ export interface Industry {
   annexes?: Annex[];
 }
 
-/** Пристройка предприятия — уменьшенное здание того же вида рядом с ним. */
+/** Пристройка предприятия — вспомогательное здание рядом с ним (вид по группе предприятия — render/annexArt). */
 export interface Annex {
   type: 'annex';
   id: number;

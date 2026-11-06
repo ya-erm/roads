@@ -18,10 +18,11 @@ import { wagonFills } from '../sim/wagons';
 import { cargoImage } from '../ui/cargoIcons';
 import { BIOMES } from '../world/biomes';
 import { CARGO, CargoType, FREIGHT } from '../world/cargo';
-import { Industry, Station, TOWN_NEED, TownBuilding } from '../world/entities';
+import { Annex, Industry, Station, TOWN_NEED, TownBuilding } from '../world/entities';
 import type { Segment } from '../world/network';
 import { halfWidth, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
+import { drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
 import { drawIndustryArt } from './industryArt';
 import { EarthworkCache } from './earthworks';
@@ -1340,8 +1341,8 @@ export class Renderer {
       for (const b of town.buildings) if (inView(b.fp)) this.drawBuilding(b);
     }
     for (const ind of game.industries) {
-      // Пристройка — то же предприятие в уменьшенном виде (сцена вписывается в её контур).
-      for (const a of ind.annexes ?? []) if (inView(a.fp)) this.drawIndustry({ ...ind, fp: a.fp });
+      // Пристройка — своё вспомогательное здание предприятия (annexArt).
+      for (const a of ind.annexes ?? []) if (inView(a.fp)) this.drawAnnex(ind, a);
       if (inView(ind.fp)) this.drawIndustry(ind);
     }
     const sel = o.selection;
@@ -1628,6 +1629,13 @@ export class Renderer {
     const fp = ind.fp;
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.16)');
     drawIndustryArt(this.ctx, ind, this.camera.zoom, performance.now() / 1000);
+  }
+
+  /** Пристройка предприятия: участок с лёгкой тенью, вспомогательное здание — в annexArt. */
+  private drawAnnex(ind: Industry, a: Annex): void {
+    const fp = a.fp;
+    this.drawFootprint({ ...fp, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
+    drawAnnexArt(this.ctx, ind, a, this.camera.zoom, performance.now() / 1000);
   }
 
   /** Рисует картинку значка размером size в мировых единицах. */

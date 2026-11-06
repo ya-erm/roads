@@ -1,11 +1,13 @@
-import type { CargoType, IndustryKind } from '../world/cargo';
+import type { CargoType, IndustryKind, IndustryType } from '../world/cargo';
 import type { Industry } from '../world/entities';
+import type { Footprint } from '../world/spatial';
 
 /**
  * Детальная графика предприятий, вид сверху. Рисуем в локальных координатах footprint:
  * начало — в центре, ось x — вдоль ширины. Сцена каждого вида вызывается три раза
  * одним и тем же кодом: земля → общая тень всех построек одной заливкой → сами постройки.
  * «Случайные» раскладки — хеш от id предприятия, поэтому картинка не дрожит между кадрами.
+ * Примитивы (Art) общие с пристройками предприятий — их сцены в annexArt.ts.
  */
 
 type Pass = 0 | 1 | 2;
@@ -17,14 +19,14 @@ const SUN = { x: 0.3, y: 0.5 };
 /** Куда сносит дым (в мире). */
 const WIND = { x: 0.85, y: -0.5 };
 
-const METAL = '#9aa3ab';
-const YELLOW = '#e9b52f';
-const DARK = '#5c5f66';
-const BARK = '#8d6a43';
+export const METAL = '#9aa3ab';
+export const YELLOW = '#e9b52f';
+export const DARK = '#5c5f66';
+export const BARK = '#8d6a43';
 
 const shades = new Map<string, Map<number, string>>();
 /** Светлее (k > 0) или темнее (k < 0) цвет вида #rrggbb. Кэш — без новых строк в каждом кадре. */
-function shade(hex: string, k: number): string {
+export function shade(hex: string, k: number): string {
   let byK = shades.get(hex);
   if (!byK) shades.set(hex, (byK = new Map()));
   let v = byK.get(k);
@@ -38,14 +40,14 @@ function shade(hex: string, k: number): string {
 }
 
 /** Детерминированное «случайное» число [0, 1) от зерна и номера. */
-function hash(seed: number, i: number): number {
+export function hash(seed: number, i: number): number {
   let h = Math.imul(seed + 0x9e3779b9, 0x85ebca6b) ^ Math.imul(i + 0x632be5ab, 0xc2b2ae35);
   h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
   h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
   return ((h ^ (h >>> 15)) >>> 0) / 4294967296;
 }
 
-function disc(c: CanvasRenderingContext2D, x: number, y: number, r: number): void {
+export function disc(c: CanvasRenderingContext2D, x: number, y: number, r: number): void {
   c.beginPath();
   c.arc(x, y, r, 0, Math.PI * 2);
   c.fill();
@@ -58,7 +60,7 @@ const fullness = (n: number | undefined) => Math.min(1, (n ?? 0) / 100);
 const P = new Float64Array(32);
 const Q = new Float64Array(16);
 
-class Art {
+export class Art {
   pass: Pass = 0;
   /** 0 — издалека, только крупные массы; 1 — с тенями; 2 — все мелочи и анимация. */
   readonly lod: number;
@@ -77,11 +79,13 @@ class Art {
   /** Предприятие работает — дымят трубы, горит факел. */
   readonly active: boolean;
 
+  /** seed — зерно «случайных» раскладок: по умолчанию id предприятия (у пристройки — её id). */
   constructor(
     readonly c: CanvasRenderingContext2D,
     ind: Industry,
     zoom: number,
     readonly t: number,
+    seed = ind.id,
   ) {
     this.lod = zoom > 0.5 ? 2 : zoom > 0.25 ? 1 : 0;
     this.d = this.lod === 2;
@@ -97,7 +101,7 @@ class Art {
     const wl = Math.hypot(wx, wy);
     this.wx = wx / wl;
     this.wy = wy / wl;
-    this.seed = ind.id;
+    this.seed = seed;
     this.level = Math.max(1, Math.floor(ind.level ?? 1));
     this.active = ind.producedMonth > 0 || ind.producedLast > 0;
   }
@@ -1292,7 +1296,7 @@ function factory(a: Art, ind: Industry): void {
 }
 
 /** Стадо на выгуле: n коров в прямоугольнике, места и повороты — от id предприятия. */
-function herd(a: Art, x: number, y: number, w: number, h: number, n: number, i: number, sheep = false): void {
+export function herd(a: Art, x: number, y: number, w: number, h: number, n: number, i: number, sheep = false): void {
   for (let k = 0; k < n; k++) {
     a.animal(x + 3 + a.r(i + k) * (w - 6), y + 2.5 + a.r(i + 50 + k) * (h - 5), (a.r(i + 100 + k) - 0.5) * 2.4, i + k, sheep);
   }
@@ -1573,7 +1577,7 @@ function sheepfarm(a: Art, ind: Industry): void {
 }
 
 /** Лодка у причала: корпус носом вверх, рубка. */
-function boat(a: Art, x: number, y: number, len: number, hull: string): void {
+export function boat(a: Art, x: number, y: number, len: number, hull: string): void {
   if (a.pass !== 2) return;
   const c = a.c;
   const w = len * 0.34;
@@ -2048,18 +2052,34 @@ const GROUND: Partial<Record<IndustryKind, string>> = {
   sheepfarm: '#c3c98f',
 };
 
+/** Цвет участка предприятия этого вида. */
+export function industryGround(info: IndustryType): string {
+  return GROUND[info.kind] ?? info.color;
+}
+
 /** Предприятие целиком: участок, тени, постройки. zoom решает, сколько мелочей рисовать. */
 export function drawIndustryArt(ctx: CanvasRenderingContext2D, ind: Industry, zoom: number, time: number): void {
-  const fp = ind.fp;
   const info = ind.info;
-  const W = info.w;
-  const H = info.h;
-  const a = new Art(ctx, ind, zoom, time);
-  const scene = SCENES[info.kind];
+  paintScene(ctx, new Art(ctx, ind, zoom, time), ind.fp, info.w, info.h, industryGround(info), SCENES[info.kind], ind);
+}
+
+/**
+ * Сцена в контуре fp: участок цвета ground с обводкой, общая тень всех построек, сами постройки.
+ * W×H — размер, под который нарисована сцена; в контур она вписывается масштабом (footprint из старого сохранения тоже).
+ */
+export function paintScene<T>(
+  ctx: CanvasRenderingContext2D,
+  a: Art,
+  fp: Footprint,
+  W: number,
+  H: number,
+  ground: string,
+  scene: (a: Art, arg: T) => void,
+  arg: T,
+): void {
   ctx.save();
   ctx.translate(fp.center.x, fp.center.y);
   ctx.rotate(fp.angle);
-  // Сцены нарисованы под размер вида; footprint из старого сохранения тоже впишется.
   ctx.scale(fp.w / W, fp.h / H);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -2067,11 +2087,11 @@ export function drawIndustryArt(ctx: CanvasRenderingContext2D, ind: Industry, zo
     if (pass === 1 && !a.lod) continue;
     a.pass = pass;
     if (pass === 0) {
-      ctx.fillStyle = GROUND[info.kind] ?? info.color;
+      ctx.fillStyle = ground;
       ctx.beginPath();
       ctx.roundRect(-W / 2, -H / 2, W, H, 3);
       ctx.fill();
-      scene(a, ind);
+      scene(a, arg);
       ctx.strokeStyle = 'rgba(60,50,40,0.45)';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
@@ -2079,10 +2099,10 @@ export function drawIndustryArt(ctx: CanvasRenderingContext2D, ind: Industry, zo
       ctx.stroke();
     } else if (pass === 1) {
       ctx.beginPath();
-      scene(a, ind);
+      scene(a, arg);
       ctx.fillStyle = SHADOW;
       ctx.fill();
-    } else scene(a, ind);
+    } else scene(a, arg);
   }
   ctx.restore();
 }

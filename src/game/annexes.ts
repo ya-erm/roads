@@ -26,7 +26,7 @@ export function annexZone(ind: Industry): number {
   return outbuildingZone(ind.fp, ANNEX.zone);
 }
 
-/** Пристройка с центром в p — уменьшенное здание того же вида, по оси предприятия. */
+/** Пристройка с центром в p — участок в долю ANNEX.scale от предприятия, по его оси. */
 export function annexFootprint(ind: Industry, p: Vec): Footprint {
   return outbuildingFootprint(ind.fp, p, ind.fp.w * ANNEX.scale, ind.fp.h * ANNEX.scale);
 }
