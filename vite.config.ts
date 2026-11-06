@@ -1,7 +1,28 @@
 /// <reference types="vitest/config" />
-import { existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defineConfig, type Connect, type Plugin } from 'vite';
+
+/**
+ * Версия игры (src/version.ts): MAJOR.MINOR.PATCH из package.json, а к PATCH прибавляется число коммитов после
+ * того, в котором поле version меняли, — каждая публикация получает свою версию без ручных правок. Нужна полная
+ * история git (в публикации — fetch-depth: 0); без git версия — как в package.json. Локальный сервер — «-dev».
+ */
+function appVersion(dev: boolean): string {
+  const base = (JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8')) as { version: string }).version;
+  const [major, minor, patch] = base.split('.').map((n) => Number.parseInt(n, 10) || 0);
+  let since = 0;
+  try {
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: __dirname, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const bump = git('log', '-1', '--format=%H', '-G^[[:space:]]*"version":', '--', 'package.json');
+    if (bump) since = Number(git('rev-list', '--count', `${bump}..HEAD`)) || 0;
+  } catch {
+    // Без git (архив исходников) — версия из package.json как есть.
+  }
+  return `${major}.${minor}.${patch + since}${dev ? '-dev' : ''}`;
+}
 
 /**
  * Короткие адреса тестовых страниц: /test — оглавление (test/index.html; без слеша иначе открылась бы игра),
@@ -29,11 +50,14 @@ const testPages: Plugin = {
   configurePreviewServer: (server) => void server.middlewares.use(aliasTestPages),
 };
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   // Относительные пути в сборке: одна и та же dist работает и в корне домена (roads.ya-erm.ru), и в подпапке
   // (ya-erm.github.io/roads/). Ссылки между страницами строятся от корня сайта — src/testpages/route.ts, siteRoot.
   base: './',
   plugins: [testPages],
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion(command === 'serve')),
+  },
   test: {
     // По умолчанию vitest занимает все ядра, и на полном прогоне машина «встаёт». Половины хватает:
     // общее время задают самые долгие файлы, а не число процессов.
@@ -60,4 +84,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

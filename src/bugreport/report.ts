@@ -145,8 +145,11 @@ export interface ReportInfo {
   author?: string;
   /** Момент отчёта — когда снят экран и взяты журнал и сохранение. */
   at: Date;
-  /** Сборка игры (хеш файла сборки; на локальном сервере — dev) и версия формата сохранения. */
+  /** Версия игры (semver, src/version.ts) — в текст отчёта. */
+  version: string;
+  /** Сборка игры (хеш файла сборки; на локальном сервере — dev) — только в сведения архива. */
   build: string;
+  /** Версия формата сохранения. */
   saveVersion: number;
   /** Игровая дата. */
   date: string;
@@ -165,10 +168,22 @@ export function buildLabel(moduleUrl: string): string {
   return m ? m[1] : 'dev';
 }
 
-/** «2026-11-06 16:05» — местное время. */
-export function localStamp(d: Date): string {
+/**
+ * «2026-11-06 16:05 UTC+1» — местное время с часовым поясом. offset — как у Date.getTimezoneOffset():
+ * минуты до UTC (у UTC+1 это −60).
+ */
+export function localStamp(d: Date, offset = d.getTimezoneOffset()): string {
   const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())} ${zoneLabel(offset)}`;
+}
+
+/** Часовой пояс по Date.getTimezoneOffset(): «UTC+3», «UTC+5:30», «UTC−4», «UTC». */
+export function zoneLabel(offset: number): string {
+  const east = -offset;
+  if (!east) return 'UTC';
+  const abs = Math.abs(east);
+  const m = abs % 60;
+  return `UTC${east > 0 ? '+' : '−'}${Math.floor(abs / 60)}${m ? `:${String(m).padStart(2, '0')}` : ''}`;
 }
 
 /** «1440×900 @2x». */
@@ -210,7 +225,7 @@ export function reportMarkdown(info: ReportInfo, files: ReportFile[], opts: { un
     info.date,
     `seed ${info.seed}`,
     info.scenario,
-    `сборка ${info.build}, сохранение v${info.saveVersion}`,
+    `версия ${info.version}, сохранение v${info.saveVersion}`,
     screenLabel(info.screen),
     localStamp(info.at),
     info.page,
@@ -218,7 +233,7 @@ export function reportMarkdown(info: ReportInfo, files: ReportFile[], opts: { un
   ]
     .filter(Boolean)
     .join(' · ');
-  parts.push(`<sub>${env}</sub>`);
+  parts.push(env);
   return parts.join('\n\n');
 }
 

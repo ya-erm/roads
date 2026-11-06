@@ -6,6 +6,7 @@ const info: ReportInfo = {
   description: '  Автобус встал на перекрёстке  ',
   author: ' Ярослав ',
   at: new Date(2026, 10, 6, 16, 5, 7),
+  version: '0.2.5',
   build: 'Bx3k9Q',
   saveVersion: 3,
   date: 'Мар 2001',
@@ -28,14 +29,14 @@ describe('Архив отчёта: содержимое', () => {
     expect(md.startsWith('**От:** Ярослав\n\nАвтобус встал на перекрёстке\n\n')).toBe(true);
     expect(md).toContain('`screenshot.png`');
     expect(md).toContain('журнал партии `journal.jsonl` · сохранение `save.json`');
-    expect(md).toContain('сборка Bx3k9Q, сохранение v3 · 1440×900 @2x · 2026-11-06 16:05');
+    expect(md).toContain('версия 0.2.5, сохранение v3 · 1440×900 @2x · 2026-11-06 16:05 UTC');
     const meta = JSON.parse(decode(entries[1].data));
+    expect(meta.localTime).toMatch(/^2026-11-06 16:05 UTC/);
     expect(meta).toMatchObject({
       app: 'razvyazka',
       author: 'Ярослав',
       description: 'Автобус встал на перекрёстке',
-      localTime: '2026-11-06 16:05',
-      game: { build: 'Bx3k9Q', saveVersion: 3, date: 'Мар 2001', seed: 42 },
+      game: { version: '0.2.5', build: 'Bx3k9Q', saveVersion: 3, date: 'Мар 2001', seed: 42 },
       screen: { width: 1440, height: 900, dpr: 2 },
       files: ['screenshot.png', 'journal.jsonl', 'save.json'],
     });

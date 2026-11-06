@@ -79,6 +79,7 @@ import {
 } from '../bugreport/report';
 import { zip } from '../bugreport/zip';
 import { SAVE_VERSION, type Game } from '../game/game';
+import { APP_VERSION } from '../version';
 
 /** Сборка игры — хеш файла сборки (на локальном сервере — dev): в отчёт и сведения архива. */
 const BUILD = buildLabel(import.meta.url);
@@ -208,6 +209,8 @@ export function installBugReport(deps: BugReportDeps): void {
 
 class BugReport {
   private readonly button: HTMLButtonElement;
+  /** Версия игры — мелко слева от кнопки. */
+  private readonly version: HTMLElement;
   private readonly screen: HTMLElement;
   private readonly stage: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
@@ -257,6 +260,14 @@ class BugReport {
       void this.open();
     });
     document.body.appendChild(this.button);
+
+    this.version = document.createElement('div');
+    this.version.className = 'app-version';
+    this.version.setAttribute('data-shot-skip', '');
+    this.version.dataset.tip = 'Версия игры — она же попадает в баг-репорт';
+    this.version.dataset.tipEnd = '';
+    this.version.textContent = `v${APP_VERSION}`;
+    document.body.appendChild(this.version);
 
     this.screen = document.createElement('div');
     this.screen.className = 'bug-screen hidden';
@@ -364,6 +375,18 @@ class BugReport {
     const spot = bugButtonSpot({ w: window.innerWidth, h: window.innerHeight }, rect('.minimap-wrap'), rect('.toolbar'), BUG_BUTTON.size);
     this.button.style.right = `${spot.right}px`;
     this.button.style.bottom = `${spot.bottom}px`;
+    // Версия — слева от кнопки по её середине; если там панель инструментов (узкое окно) — над кнопкой.
+    const v = this.version.style;
+    v.right = `${spot.right + BUG_BUTTON.size + 6}px`;
+    v.bottom = `${spot.bottom}px`;
+    v.height = `${BUG_BUTTON.size}px`;
+    const tools = rect('.toolbar');
+    const label = this.version.getBoundingClientRect();
+    if (tools && tools.width && label.left < tools.right + 4 && label.right > tools.left && label.top < tools.bottom && label.bottom > tools.top) {
+      v.right = `${spot.right}px`;
+      v.bottom = `${spot.bottom + BUG_BUTTON.size + 2}px`;
+      v.height = '18px';
+    }
   }
 
   // ---------- Открыть и закрыть ----------
@@ -1094,6 +1117,7 @@ class BugReport {
       description: this.desc.value,
       author: this.nameInput.value.trim() || undefined,
       at: this.moment!.at,
+      version: APP_VERSION,
       build: BUILD,
       saveVersion: SAVE_VERSION,
       date: g.dateLabel,

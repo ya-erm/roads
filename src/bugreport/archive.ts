@@ -24,7 +24,7 @@ export interface ArchiveInput {
   save?: string;
 }
 
-/** Сведения для разбора: кто, когда, какая сборка и партия, экран и браузер, что приложено. */
+/** Сведения для разбора: кто, когда, какая версия и сборка, партия, экран и браузер, что приложено. */
 export function reportMeta(info: ReportInfo, attached: AttachKind[]) {
   const author = info.author?.trim();
   return {
@@ -34,6 +34,7 @@ export function reportMeta(info: ReportInfo, attached: AttachKind[]) {
     created: info.at.toISOString(),
     localTime: localStamp(info.at),
     game: {
+      version: info.version,
       build: info.build,
       saveVersion: info.saveVersion,
       date: info.date,

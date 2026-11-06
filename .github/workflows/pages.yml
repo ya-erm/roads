@@ -23,6 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Полная история: номер версии (PATCH) — число коммитов после смены version в package.json (vite.config.ts).
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 24

@@ -8,6 +8,7 @@ import {
   buildLabel,
   cutBytes,
   localStamp,
+  zoneLabel,
   newReportKey,
   parseReceipt,
   parseUploaded,
@@ -107,6 +108,7 @@ describe('Текст отчёта', () => {
     description: 'Автобус стоит на перекрёстке\nи не едет',
     author: 'Ярослав',
     at: new Date(2026, 10, 6, 16, 5, 7),
+    version: '0.2.5',
     build: 'Bx3k9Q',
     saveVersion: 3,
     date: 'Мар 1963',
@@ -128,9 +130,12 @@ describe('Текст отчёта', () => {
     expect(md).toContain('[журнал партии](<https://b/2.jsonl.gz>) · [сохранение](<https://b/3.json.gz>)');
     expect(md).toContain('Открыть из файла');
     expect(md).not.toContain('приложен');
+    // Сведения — обычной строкой в конце: версия игры (не хеш сборки), время с часовым поясом.
     expect(md.split('\n').at(-1)).toBe(
-      '<sub>Мар 1963 · seed 42 · сценарий: normal · сборка Bx3k9Q, сохранение v3 · 1440×900 @2x · 2026-11-06 16:05 · https://roads.ya-erm.ru/ · Chrome</sub>',
+      `Мар 1963 · seed 42 · сценарий: normal · версия 0.2.5, сохранение v3 · 1440×900 @2x · 2026-11-06 16:05 ${zoneLabel(info.at.getTimezoneOffset())} · https://roads.ya-erm.ru/ · Chrome`,
     );
+    expect(md).not.toContain('<sub>');
+    expect(md).not.toContain('Bx3k9Q');
   });
 
   it('без доски — имена файлов, которые приложат вручную; без описания — подсказка смотреть снимок', () => {
@@ -154,7 +159,11 @@ describe('Текст отчёта', () => {
     expect(buildLabel('https://roads.ya-erm.ru/assets/index-Bx3k9Q_a.js')).toBe('Bx3k9Q_a');
     expect(buildLabel('http://localhost:4800/src/ui/bugReport.ts')).toBe('dev');
     expect(buildLabel('http://localhost:4800/src/ui/bugReport.ts?t=1730900000')).toBe('dev');
-    expect(localStamp(new Date(2026, 0, 2, 3, 4))).toBe('2026-01-02 03:04');
+    expect(localStamp(new Date(2026, 0, 2, 3, 4), -60)).toBe('2026-01-02 03:04 UTC+1');
+    expect(zoneLabel(0)).toBe('UTC');
+    expect(zoneLabel(-180)).toBe('UTC+3');
+    expect(zoneLabel(-330)).toBe('UTC+5:30');
+    expect(zoneLabel(240)).toBe('UTC−4');
   });
 
   it('имена файлов — латиницей по времени; доска и размеры', () => {
@@ -176,6 +185,7 @@ describe('Публичная отправка на доску', () => {
     description: '  Автобус встал на перекрёстке  \nи не уезжает',
     author: '  Ярослав  ',
     at: new Date(2026, 10, 6, 18, 0, 0),
+    version: '0.2.0-dev',
     build: 'dev',
     saveVersion: 3,
     date: 'Мар 2001',

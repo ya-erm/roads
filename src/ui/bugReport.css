@@ -28,6 +28,24 @@
   transform: translateY(-1px);
 }
 
+/* Версия игры — мелко слева от кнопки (место и высоту ставит bugReport.ts, place). */
+.app-version {
+  position: fixed;
+  right: 286px;
+  bottom: 14px;
+  height: 44px;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: rgba(31, 41, 51, 0.5);
+  text-shadow: 0 0 3px rgba(255, 255, 255, 0.9);
+  user-select: none;
+  cursor: default;
+}
+
 .bug-btn.busy {
   cursor: progress;
   opacity: 0.55;
