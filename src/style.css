@@ -4472,6 +4472,56 @@ button.small.with-ic {
   background: var(--danger);
 }
 
+/*
+ * Прогноз к сроку (scenario/forecast.ts): за выполненной частью шкалы — полупрозрачная синяя до прогноза,
+ * успеваем — до конца шкалы и ✓ за ней. Шкала тонкая — подсказку ловит полоса повыше (sc-track).
+ */
+.sc-track {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 0;
+  margin: -1px 0 -3px;
+}
+
+.sc-track .bar.sc-bar {
+  flex: 1;
+  display: flex;
+  margin: 0;
+}
+
+.sc-track .sc-bar > div {
+  flex: none;
+}
+
+.sc-bar > .sc-fc {
+  flex: none;
+  height: 100%;
+  background: rgba(47, 128, 237, 0.32);
+  box-shadow: inset -2px 0 0 rgba(47, 128, 237, 0.55);
+}
+
+.sc-fc-ok {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #2e9d57;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.sc-obj.folded .sc-track,
+.sc-compact .sc-track {
+  flex: 1;
+  min-width: 40px;
+  margin: -3px 0;
+}
+
 .sc-meta {
   display: flex;
   flex-wrap: wrap;

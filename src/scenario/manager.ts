@@ -14,6 +14,7 @@ import { CHALLENGE_BONUS, DIFFICULTY, EVENT_RULES, FAST, PHASES, POINTS, REPUTAT
 import { EconomyMods, modsOf } from './effects';
 import { runEvents } from './events';
 import { assess } from './feasibility';
+import { cargoKeys, type Forecast, forecastOf, PaceLog, paceKey, paxKeys } from './forecast';
 import { extraObjectives, fastMonths, generatePhase, startScenario } from './generator';
 import { baseOf, isMonthly, liveProgress, makerKey, monthOk, pairKey, receiverKey, targetOf, titleOf } from './objectives';
 import { computeScore } from './score';
@@ -77,6 +78,8 @@ export class Scenario {
   private clock = 0;
   /** Идут итоги месяца (monthEnd). */
   private ending = false;
+  /** Доставки и парк линий за последние минуты — для прогноза заданий; в сохранение не пишется. */
+  private readonly pace = new PaceLog();
 
   private constructor(
     readonly game: Game,
@@ -232,6 +235,20 @@ export class Scenario {
     return left > 0 ? left : null;
   }
 
+  /**
+   * Прогноз к сроку у накопительного задания (перевезти груз или пассажиров): темп последних минут × оставшееся
+   * время (scenario/forecast.ts). Без срока, без прогноза по виду задания или наблюдаем меньше минуты — null.
+   * Считается на время последнего замера (раз в секунду), чтобы шкала не менялась каждый кадр.
+   */
+  forecast(o: Objective): Forecast | null {
+    if (o.status !== 'active' || !this.running || o.deadline === null || this.blocked(o)) return null;
+    const key = paceKey(o.params);
+    if (!key) return null;
+    const rate = this.pace.rate(key, (id) => this.game.lines.get(id)?.vehicles.length ?? 0);
+    if (rate === null) return null;
+    return forecastOf(o.progress, o.target, Math.max(0, o.deadline * MONTH_LENGTH - this.pace.at), rate);
+  }
+
   /** Главная цель этапа выполнена — можно перейти дальше, не дожидаясь остальных целей. */
   get canAdvance(): boolean {
     return this.running && this.phaseMain()?.status === 'done';
@@ -244,8 +261,9 @@ export class Scenario {
 
   // ---------- Сообщения игры ----------
 
-  /** Груз выгружен получателю (receiver — кто его принял, maker — предприятие, откуда его везли). */
-  onDelivered(cargo: CargoType, amount: number, receiver: Ref | null, speed: number, maker?: number): void {
+  /** Груз выгружен получателю (receiver — кто его принял, maker — предприятие, откуда его везли, line — какая линия привезла). */
+  onDelivered(cargo: CargoType, amount: number, receiver: Ref | null, speed: number, maker?: number, line?: number): void {
+    if (this.running) this.pace.add({ t: this.game.time, line: line ?? null, amount, keys: cargoKeys(cargo, receiver, maker) });
     const s = this.state.stats;
     s.delivered[cargo] = (s.delivered[cargo] ?? 0) + amount;
     if (receiver) s.to[receiverKey(receiver, cargo)] = (s.to[receiverKey(receiver, cargo)] ?? 0) + amount;
@@ -257,8 +275,9 @@ export class Scenario {
     s.speedSum += amount * speed;
   }
 
-  /** Пассажиры доехали: из города from в город to (если станции в городах). */
-  onPassengers(from: number | undefined, to: number | undefined, count: number, speed: number): void {
+  /** Пассажиры доехали: из города from в город to (если станции в городах), линией line. */
+  onPassengers(from: number | undefined, to: number | undefined, count: number, speed: number, line?: number): void {
+    if (this.running) this.pace.add({ t: this.game.time, line: line ?? null, amount: count, keys: paxKeys(from, to) });
     const s = this.state.stats;
     s.pax += count;
     if (from !== undefined && to !== undefined && from !== to) s.between[pairKey(from, to)] = (s.between[pairKey(from, to)] ?? 0) + count;
@@ -273,6 +292,8 @@ export class Scenario {
     this.clock -= dt;
     if (this.clock > 0) return;
     this.clock = 1;
+    // Парк линий — раз в секунду, для темпа доставок в прогнозе заданий.
+    if (this.running) this.pace.sample(this.game.time, new Map([...this.game.lines.values()].map((l) => [l.id, l.vehicles.length])));
     // Пройденный сценарий из старого сохранения: дополнительные задания — сейчас.
     if (this.afterWin && !this.state.extras) this.giveExtras();
     for (const o of this.current) {

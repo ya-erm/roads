@@ -9,6 +9,7 @@ import type { Game } from '../game/game';
 import { isIndustry, resolve } from '../scenario/analysis';
 import { ARCHETYPE_LIST, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, MEDALS, PHASES, REPUTATION } from '../scenario/content';
 import { isActive } from '../scenario/events';
+import { type Forecast, forecastTip } from '../scenario/forecast';
 import { fastBonus, type Scenario } from '../scenario/manager';
 import {
   closedNeeds,
@@ -168,6 +169,19 @@ function gaugeOf(sc: Scenario, o: Objective): MonthGauge | null {
   return o.status === 'active' && isMonthly(o.params) ? monthGauge(o.params, monthNow(sc.game, sc.state, o.params)) : null;
 }
 
+const pct = (f: number) => (f * 100).toFixed(1);
+
+/**
+ * Шкала задания: заполненная часть — сделано; у накопительных со сроком дальше — полупрозрачная синяя до прогноза
+ * к сроку (`Scenario.forecast`), успеваем — синяя до конца и ✓ за шкалой; прогноз — в подсказке.
+ */
+function barHtml(fill: number, fc: Forecast | null): string {
+  const ahead = fc ? Math.max(0, fc.fraction - fill) : 0;
+  const bar = `<div class="bar sc-bar"><div style="width:${pct(fill)}%"></div>${ahead > 0 ? `<i class="sc-fc" style="width:${pct(ahead)}%"></i>` : ''}</div>`;
+  if (!fc) return bar;
+  return `<div class="sc-track" data-tip="${esc(forecastTip(fc))}">${bar}${fc.reach ? '<span class="sc-fc-ok">✓</span>' : ''}</div>`;
+}
+
 /** Месяцы подряд у месячного задания — точками: ●●○ — выполнено 2 из 3. Хватает одного месяца — без точек. */
 function streakHtml(o: Objective): string {
   if (o.status !== 'active' || !isMonthly(o.params) || o.target <= 1) return '';
@@ -214,7 +228,8 @@ export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: Objecti
   const tip = `${o.why}${active && !o.critical && o.deadline !== null ? `\nЕсли не успеть: ${failText(o)}` : ''}`;
   // У месячных полоска — по показателю этого месяца, а не по числу месяцев подряд (их показывают точки).
   const gauge = view.plan ? null : gaugeOf(sc, o);
-  const bar = `<div class="bar sc-bar"><div style="width:${((gauge ? gauge.fraction : fraction(o)) * 100).toFixed(1)}%"></div></div>`;
+  // Накопительные со сроком — с прогнозом к сроку за выполненной частью.
+  const bar = barHtml(gauge ? gauge.fraction : fraction(o), view.plan || gauge ? null : sc.forecast(o));
   const cls = `sc-obj ${o.role} ${o.status} ${o.critical ? 'critical' : ''}`;
   // Свёрнутая — две строки: название в одну строку и полоска с прогрессом и сроком; клик разворачивает.
   // Значок — того же размера, что у развёрнутой: две строки его вмещают.
@@ -493,7 +508,7 @@ function compactHtml(sc: Scenario): string {
   const gauge = gaugeOf(sc, main);
   const progress = gauge ? `${gauge.text} в этом месяце` : progressText(main);
   return `<div class="sc-compact" title="${esc(main.title)} · ${esc(progress)}">${letter}${objectiveIcon(main, 18)}
-    <div class="bar sc-bar"><div style="width:${((gauge ? gauge.fraction : fraction(main)) * 100).toFixed(1)}%"></div></div>
+    ${barHtml(gauge ? gauge.fraction : fraction(main), gauge ? null : sc.forecast(main))}
     ${left !== null ? `<span class="sc-left${urgent(left, URGENT.goal)}">⏳ ${leftText(left)}</span>` : ''}</div>`;
 }
 

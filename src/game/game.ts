@@ -3889,7 +3889,7 @@ export class Game implements BuildContext {
         const receiver = this.deliver(st, v.cargo, v.amount);
         // Откуда груз: предприятие у станции первой погрузки, которое его производит.
         const maker = origin?.industryIds.find((id) => this.industries.find((i) => i.id === id)?.info.produces === v.cargo);
-        this.scenario?.onDelivered(v.cargo, v.amount, receiver, k, maker);
+        this.scenario?.onDelivered(v.cargo, v.amount, receiver, k, maker, line.id);
         Object.assign(trip, { drop: { [v.cargo]: v.amount }, to: receiver ? `${receiver.type}:${receiver.id}` : 'никому', from: v.loadedAt, x: k });
         moved += v.amount;
         line.carriedMonth += v.amount;
@@ -3936,7 +3936,7 @@ export class Game implements BuildContext {
         revenue += Math.round((g.count * CARGO.passengers.rate * ECONOMY.tariff * distance * k * this.mods.price('passengers')) / 100);
         moved += g.count;
         line.carriedMonth += g.count;
-        this.scenario?.onPassengers(from?.townIds[0], st.townIds[0], g.count, k);
+        this.scenario?.onPassengers(from?.townIds[0], st.townIds[0], g.count, k, line.id);
         const town = st.townIds.length ? this.towns.find((t) => t.id === st.townIds[0]) : undefined;
         if (town) town.growthAcc += g.count * 0.02;
       }

@@ -159,6 +159,51 @@ describe('Шкала месячной цели в панели сценария'
   });
 });
 
+describe('Прогноз к сроку на шкале задания', () => {
+  /** Задание «привезти» и rate ед. каждые 10 с этого груза получателю, пока не пройдёт seconds секунд игры. */
+  function delivering(amount: number, rate: number, seconds: number) {
+    const { game, sc } = scenarioWithOffers();
+    const town = game.towns.find((t) => t.demands.length)!;
+    const cargo = town.demands[0];
+    const to = { type: 'town' as const, id: town.id };
+    const o = sc.addObjective({ kind: 'deliver', cargo, amount, to }, { role: 'contract', phase: null, months: 8, why: 'Проверка прогноза.', reward: { money: 1000 } });
+    const row = () => {
+      const html = scenarioPanelHtml(game, view());
+      return html.slice(html.indexOf(`data-id="${o.id}"`));
+    };
+    const first = row();
+    while (game.time < seconds) {
+      game.time += 1;
+      if (Math.round(game.time) % 10 === 0) sc.onDelivered(cargo, rate, to, 1);
+      sc.tick(1);
+    }
+    return { o, first, row };
+  }
+
+  it('за выполненной частью — полупрозрачная синяя до прогноза, в подсказке — прогноз и темп', () => {
+    const { o, first, row } = delivering(3000, 50, 120);
+    // В первую минуту прогноза нет — обычная шкала.
+    expect(first).not.toContain('sc-fc');
+    expect(o.progress).toBe(600);
+    const html = row();
+    expect(html).toContain('style="width:20.0%"></div><i class="sc-fc"');
+    expect(html).toMatch(/<div class="sc-track" data-tip="Прогноз к сроку: ~[\d\s]+ \(темп \d+ в мин\)\. Чтобы успеть — \d+ в мин">/);
+    expect(html.slice(0, html.indexOf('sc-meta'))).not.toContain('sc-fc-ok');
+    // В свёрнутом виде — та же шкала с прогнозом.
+    toggleFold(o);
+    expect(row()).toContain('<i class="sc-fc"');
+  });
+
+  it('прогноз выше цели — синяя до конца шкалы и ✓ «успеваем»', () => {
+    const { row } = delivering(1000, 50, 120);
+    const html = row();
+    // 600 из 1 000 — 60%, дальше до конца — прогноз.
+    expect(html).toContain('style="width:60.0%"></div><i class="sc-fc" style="width:40.0%"></i>');
+    expect(html).toMatch(/data-tip="Прогноз к сроку: ~[\d\s]+ \(темп \d+ в мин\) — успеваем"/);
+    expect(html).toContain('<span class="sc-fc-ok">✓</span>');
+  });
+});
+
 describe('Сроки — минутами и секундами, а не месяцами', () => {
   it('до срока задания — спокойно, «4 мин» (вверх), до конца предложения — таймер «м:сс», срок контракта — «N мин»', () => {
     const { game, sc, extra } = scenarioWithOffers();
