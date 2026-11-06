@@ -129,6 +129,7 @@ import { adviceOf, type Advice, type AdviceFix } from '../game/advisor';
 import { stationWarnings } from '../game/stationWarnings';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
+import { installTips } from './tipFloat';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
 
@@ -583,6 +584,8 @@ export class Hud {
       else this.controller.cancelArea();
     });
     root.addEventListener('click', (e) => this.onClick(e));
+    // Подсказки data-tip — одной плавающей плашкой: не обрезаются панелями и краем экрана.
+    installTips();
     // Курсор на варианте главной дороги — карта показывает его, пока курсор на кнопке.
     const mainChip = (t: EventTarget | null) => (t instanceof Element ? t.closest<HTMLElement>('[data-action="jn-main"]') : null);
     root.addEventListener('pointerover', (e) => {

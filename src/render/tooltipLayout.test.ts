@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
+import { tipPlacement, TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 
 /** Как ширина текста шрифтом 13 px — по 7 px на символ. */
 const measure = (s: string) => s.length * 7;
@@ -41,5 +41,39 @@ describe('Подсказка на карте: у края экрана', () => {
   it('широкая у левого края, когда не помещается ни справа, ни слева, — прижата к краю, не за ним', () => {
     const { x } = tooltipOffset(20, 300, 990, 40, W, H);
     expect(20 + x).toBe(8);
+  });
+});
+
+describe('Подсказка элемента панели [data-tip]', () => {
+  const W = 1440;
+  const H = 900;
+  const box = (left: number, top: number, w: number, h: number) => ({ left, top, right: left + w, bottom: top + h });
+
+  it('посередине — над элементом по центру', () => {
+    expect(tipPlacement(box(600, 400, 100, 40), 200, 20, W, H)).toEqual({ x: 550, y: 374 });
+  });
+
+  it('data-tip-end — по правому краю элемента', () => {
+    expect(tipPlacement(box(600, 400, 100, 40), 200, 20, W, H, true).x).toBe(500);
+  });
+
+  it('кнопка у левого края экрана, подсказка шире её — сдвинута вправо, первая буква на экране', () => {
+    const { x } = tipPlacement(box(10, 400, 60, 30), 260, 20, W, H);
+    expect(x).toBe(6);
+  });
+
+  it('у правого края — сдвинута влево, целиком на экране', () => {
+    const { x } = tipPlacement(box(1400, 400, 30, 30), 260, 20, W, H);
+    expect(x + 260).toBe(W - 6);
+  });
+
+  it('у верхнего края места сверху нет — под элементом', () => {
+    expect(tipPlacement(box(200, 10, 40, 30), 200, 34, W, H).y).toBe(46);
+  });
+
+  it('длинная многострочная у верхнего края в низком окне — прижата к краю, не за ним', () => {
+    const { y } = tipPlacement(box(200, 10, 40, 30), 200, 80, W, 100);
+    expect(y).toBeGreaterThanOrEqual(6);
+    expect(y + 80).toBeLessThanOrEqual(100 - 6 + 0.001);
   });
 });
