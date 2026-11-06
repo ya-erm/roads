@@ -31,6 +31,7 @@ import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, frontLength } from './vehicleArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
 import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
+import type { SpeedReading } from '../lanes/speedHover';
 
 export type Selection =
   | { type: 'station'; id: number }
@@ -90,6 +91,8 @@ export interface ToolOverlay {
   heatmap: boolean;
   /** Карта скоростей: цвет дороги — разрешённая скорость, на поворотах — сниженная. */
   speedmap?: boolean;
+  /** Карта скоростей в «Выборе»: скорость дороги под курсором — знаком у курсора (по направлениям разная — со стрелками). */
+  speedHover?: SpeedReading[] | null;
   /** Строим дорогу или путь: изолинии ярче, у курсора подпись высоты. */
   roadTool: boolean;
   /** На сколько −/+ подняли или опустили конец дороги относительно начала («+14 м») — синим после высоты у курсора. */
@@ -428,6 +431,7 @@ export class Renderer {
     this.drawWarningMarks(game, view);
     this.drawFloaters(game);
     if (o.label && o.hover) this.drawTooltip(o.hover, o.label.text, o.label.ok);
+    else if (o.speedHover?.length && o.hover) this.drawSpeedHover(o.hover, o.speedHover);
     if (o.brush) this.drawBrush(o.brush);
     if (o.speedmap) this.drawSpeedLegend();
     if (o.roadTool && o.hover) this.drawHeight(game, o.hover, o.rise ?? null, o.heightText ?? null);
@@ -1134,6 +1138,77 @@ export class Renderer {
       ctx.fillRect(cx - 13, y + 8, 26, 6);
       ctx.fillStyle = '#2b2f36';
       ctx.fillText(String(kmh), cx, y + 24);
+    });
+    ctx.restore();
+  }
+
+  /**
+   * Скорость дороги под курсором на карте скоростей: знак ограничения с числом, под ним — полоска цвета карты (как
+   * в легенде), плашкой у курсора. По направлениям скорость разная — знак на каждое, перед ним стрелка, куда едут.
+   */
+  private drawSpeedHover(at: Vec, items: SpeedReading[]): void {
+    const ctx = this.ctx;
+    const R = 13;
+    const PAD = 7;
+    const GAP = 10;
+    const ARROW = 18;
+    const widths = items.map((it) => (it.dir ? ARROW : 0) + R * 2);
+    const w = PAD * 2 + widths.reduce((a, b) => a + b, 0) + GAP * (items.length - 1);
+    const h = PAD * 2 + R * 2 + 9;
+    const s = this.camera.toScreen(at);
+    const off = tooltipOffset(s.x, s.y, w, h, this.camera.width, this.camera.height);
+    ctx.save();
+    ctx.setTransform(this.camera.dpr, 0, 0, this.camera.dpr, 0, 0);
+    ctx.translate(s.x + off.x, s.y + off.y);
+    ctx.shadowColor = 'rgba(25, 32, 45, 0.25)';
+    ctx.shadowBlur = 6;
+    ctx.shadowOffsetY = 1;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+    rr(ctx, 0, 0, w, h, 8);
+    ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    let x = PAD;
+    const cy = PAD + R;
+    items.forEach((it, i) => {
+      if (it.dir) {
+        // Стрелка по ходу движения (камера не вращается: на экране — то же направление).
+        const ax = x + ARROW / 2 - 2;
+        const d = it.dir;
+        const tip = { x: ax + d.x * 6, y: cy + d.y * 6 };
+        ctx.strokeStyle = '#2b2f36';
+        ctx.fillStyle = '#2b2f36';
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(ax - d.x * 6, cy - d.y * 6);
+        ctx.lineTo(tip.x - d.x * 2, tip.y - d.y * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(tip.x + d.x, tip.y + d.y);
+        ctx.lineTo(tip.x - d.x * 4 - d.y * 3.5, tip.y - d.y * 4 + d.x * 3.5);
+        ctx.lineTo(tip.x - d.x * 4 + d.y * 3.5, tip.y - d.y * 4 - d.x * 3.5);
+        ctx.closePath();
+        ctx.fill();
+        x += ARROW;
+      }
+      const cx = x + R;
+      // Знак — как у поворотов на дорогах: белый круг с красным ободом.
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#d93a30';
+      ctx.lineWidth = 3.2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R - 1.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#1d2026';
+      ctx.font = `700 ${it.kmh >= 100 ? 10.5 : 12.5}px system-ui, -apple-system, sans-serif`;
+      ctx.fillText(String(it.kmh), cx, cy + 0.5);
+      ctx.fillStyle = speedColor(it.kmh);
+      rr(ctx, cx - 11, cy + R + 4, 22, 5, 2.5);
+      ctx.fill();
+      x += R * 2 + (i < items.length - 1 ? GAP : 0);
     });
     ctx.restore();
   }
