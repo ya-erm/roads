@@ -285,9 +285,19 @@
   color: var(--ink);
 }
 
-/* Запись видео: перемотка и скорость недоступны, кнопка — «стоп». */
+/* Линии маршрутов: показаны — цветная ломаная, скрыты — перечёркнуто. */
+.tl-lines {
+  padding: 0 6px;
+}
+
+.tl-lines.off svg {
+  opacity: 0.85;
+}
+
+/* Запись видео: перемотка, скорость и линии недоступны, кнопка — «стоп». */
 .tl-screen.recording .tl-track,
 .tl-screen.recording .tl-speeds,
+.tl-screen.recording .tl-lines,
 .tl-screen.recording .tl-play {
   pointer-events: none;
   opacity: 0.55;

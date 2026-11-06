@@ -2,7 +2,8 @@
  * Проигрыватель таймлапса партии: окно поверх игры, карта рельефа и сеть игрока по кадрам (см. game/timelapse.ts)
  * с плавным переходом — новые дороги дорисовываются вдоль и недолго подсвечены, станции появляются, маршруты
  * прочерчиваются, снесённое гаснет. Дата и счётчики (деньги, маршруты, транспорт, жители) — на самом холсте, чтобы
- * попасть и в видео. Пауза, перемотка по шкале, скорость 1×/2×/4×; этапы и задания сценария — значками на шкале.
+ * попасть и в видео. Пауза, перемотка по шкале, скорость 1×/2×/3× (timelapseSpeed.ts), линии маршрутов по прямой
+ * между станциями можно скрыть (запоминается в браузере); этапы и задания сценария — значками на шкале.
  * Видео — встроенным MediaRecorder (WebM; где его нет — кнопки нет), без сторонних библиотек.
  */
 
@@ -18,14 +19,15 @@ import { cargoImage } from './cargoIcons';
 import { downloadSvg, journalSvg, playSvg } from './icons';
 import { flagSvg, objectiveIcon } from './scenarioIcons';
 import { timelapseSvg } from './timelapseButton';
+import { playRate, TL_SPEEDS } from './timelapseSpeed';
 
 const MONTHS = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
-/** Месяцев партии в секунду на 1× — но вся партия не короче MIN_SECONDS. */
-const MONTHS_PER_SECOND = 4;
-const MIN_SECONDS = 6;
 /** Кадры на шкале не ближе стольких месяцев: стройка на паузе в первый месяц тоже успевает показаться. */
 const MIN_GAP = 0.5;
-const SPEEDS = [1, 2, 4];
+/** Толщина линии маршрута (по прямой между станциями), px. */
+const LINE_WIDTH = 2.4;
+/** Показывать ли линии маршрутов — запоминается в браузере ('0' — скрыты). */
+const LINES_KEY = 'roads.timelapseLines';
 /** Сколько секунд видео стоит на первом и последнем кадре. */
 const HOLD_START = 0.6;
 const HOLD_END = 2;
@@ -56,6 +58,39 @@ function recSvg(size = 18): string {
 
 function stopSvg(size = 18): string {
   return `<svg viewBox="0 0 16 16" width="${size}" height="${size}"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="#e5534b"/></svg>`;
+}
+
+/** Линии маршрутов: ломаная по трём станциям; скрыты — от линии пунктир, значок перечёркнут. */
+function linesSvg(on: boolean, size = 18): string {
+  const path = 'M3 12.5L11 3.5L19 11';
+  const stations = [
+    [3, 12.5],
+    [11, 3.5],
+    [19, 11],
+  ]
+    .map(([x, y]) => `<circle cx="${x}" cy="${y}" r="1.9" fill="#fff" stroke="#1f2933" stroke-width="1.1"/>`)
+    .join('');
+  const line = on
+    ? `<path d="${path}" stroke="#e5534b" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`
+    : `<path d="${path}" stroke="#9aa5b1" stroke-width="1.3" stroke-dasharray="1.6 1.8" fill="none"/>`;
+  const slash = on ? '' : '<path d="M3.5 2L18.5 14.5" stroke="#fff" stroke-width="3.6" stroke-linecap="round"/><path d="M3.5 2L18.5 14.5" stroke="#55606e" stroke-width="1.7" stroke-linecap="round"/>';
+  return `<svg viewBox="0 0 22 16" width="${Math.round((size * 22) / 16)}" height="${size}">${line}${stations}${slash}</svg>`;
+}
+
+function storedLines(): boolean {
+  try {
+    return localStorage.getItem(LINES_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function storeLines(on: boolean): void {
+  try {
+    localStorage.setItem(LINES_KEY, on ? '1' : '0');
+  } catch {
+    // Хранилище запрещено — просто не запомним.
+  }
 }
 
 /** Значки SVG без <title>: та всплывает системной подсказкой. */
@@ -146,6 +181,8 @@ class TimelapsePlayer {
   private t: number;
   private playing = false;
   private speed = 1;
+  /** Линии маршрутов по прямой между станциями: показаны или скрыты (и в видео так же). */
+  private lines = storedLines();
   private scrubbing = false;
   /** Пауза перед стартом (и в видео — на первом кадре), с. */
   private hold = 0.4;
@@ -211,9 +248,9 @@ class TimelapsePlayer {
     return this.xs[this.xs.length - 1];
   }
 
-  /** Месяцев шкалы в секунду на 1×: вся партия — не короче MIN_SECONDS. */
+  /** Месяцев шкалы в секунду на выбранной скорости (timelapseSpeed.ts). */
   private get rate(): number {
-    return Math.min(MONTHS_PER_SECOND, Math.max(0.05, (this.end - this.xs[0]) / MIN_SECONDS));
+    return playRate(this.end - this.xs[0], this.speed);
   }
 
   // ---------- Разметка ----------
@@ -231,7 +268,8 @@ class TimelapsePlayer {
       <canvas class="tl-canvas"></canvas>
       <div class="tl-controls">
         <button class="tl-btn tl-play" data-tl="play" data-tip="Пауза · пробел"></button>
-        <div class="tl-speeds">${SPEEDS.map((s) => `<button class="tl-btn" data-tl="speed" data-v="${s}" data-tip="Скорость ×${s}">${s}×</button>`).join('')}</div>
+        <div class="tl-speeds">${TL_SPEEDS.map((s) => `<button class="tl-btn" data-tl="speed" data-v="${s}" data-tip="Скорость ×${s}">${s}×</button>`).join('')}</div>
+        <button class="tl-btn tl-lines" data-tl="lines"></button>
         <div class="tl-track" data-tl-track>
           <div class="tl-marks"></div>
           <div class="tl-rail"><div class="tl-zone"></div><div class="tl-fill"></div></div>
@@ -416,6 +454,9 @@ class TimelapsePlayer {
       case 'speed':
         this.speed = Number(el.dataset.v) || 1;
         break;
+      case 'lines':
+        this.toggleLines();
+        break;
       case 'video':
         if (this.recorder) this.stopRecording();
         else this.startRecording();
@@ -428,6 +469,13 @@ class TimelapsePlayer {
     if (!this.playing && this.t >= this.end - 1e-6) this.t = this.xs[0];
     this.playing = !this.playing;
     this.hold = 0;
+  }
+
+  /** Скрыть или показать линии маршрутов (во время записи — нельзя: видео пишется как выбрано). */
+  private toggleLines(): void {
+    if (this.recorder) return;
+    this.lines = !this.lines;
+    storeLines(this.lines);
   }
 
   /** Перемотка по шкале: нажать и тянуть. */
@@ -450,7 +498,7 @@ class TimelapsePlayer {
     track.addEventListener('pointercancel', up);
   }
 
-  /** Пробел — пауза, стрелки — на кадр, Home/End — в начало и конец. Остальное до карты не доходит. */
+  /** Пробел — пауза, стрелки — на кадр, Home/End — в начало и конец, L — линии маршрутов. Остальное до карты не доходит. */
   private key(e: KeyboardEvent): void {
     if (e.code === 'Escape') {
       closeTimelapse();
@@ -470,6 +518,8 @@ class TimelapsePlayer {
       this.t = this.xs[0];
     } else if (e.code === 'End') {
       this.t = this.end;
+    } else if (e.code === 'KeyL' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      this.toggleLines();
     } else {
       return;
     }
@@ -529,7 +579,7 @@ class TimelapsePlayer {
     this.last = now;
     if (this.playing && !this.scrubbing) {
       if (this.hold > 0) this.hold -= dt;
-      else this.t = Math.min(this.end, this.t + dt * this.rate * this.speed);
+      else this.t = Math.min(this.end, this.t + dt * this.rate);
       if (this.t >= this.end) {
         if (this.recorder) {
           this.endHold -= dt;
@@ -552,6 +602,15 @@ class TimelapsePlayer {
       play.dataset.tip = state === 'pause' ? 'Пауза · пробел' : state === 'again' ? 'Сначала · пробел' : 'Смотреть · пробел';
     }
     for (const b of this.root.querySelectorAll<HTMLElement>('[data-tl="speed"]')) b.classList.toggle('active', Number(b.dataset.v) === this.speed);
+    const lines = this.q('.tl-lines');
+    const shown = this.lines ? 'on' : 'off';
+    if (lines.dataset.state !== shown) {
+      lines.dataset.state = shown;
+      lines.innerHTML = linesSvg(this.lines);
+      lines.classList.toggle('off', !this.lines);
+      lines.setAttribute('aria-pressed', String(this.lines));
+      lines.dataset.tip = this.lines ? 'Скрыть линии маршрутов · L' : 'Показать линии маршрутов · L';
+    }
     const video = this.root.querySelector<HTMLElement>('.tl-video');
     if (video) {
       const rec = this.recorder ? 'rec' : 'idle';
@@ -669,11 +728,13 @@ class TimelapsePlayer {
     ctx.setLineDash([]);
     this.strokeChanging(s, 't', u);
 
-    // Маршруты — цветной линией по остановкам; новый прочерчивается.
-    ctx.lineWidth = 3.2 * px;
-    for (const item of s.stable.l) this.drawLine(item, 1, 1);
-    for (const item of s.appear.l) this.drawLine(item, ease(u), Math.min(1, u * 2));
-    for (const item of s.vanish.l) this.drawLine(item, 1, 1 - u);
+    // Маршруты — цветной линией по остановкам (если не скрыты); новый прочерчивается.
+    if (this.lines) {
+      ctx.lineWidth = LINE_WIDTH * px;
+      for (const item of s.stable.l) this.drawLine(item, 1, 1);
+      for (const item of s.appear.l) this.drawLine(item, ease(u), Math.min(1, u * 2));
+      for (const item of s.vanish.l) this.drawLine(item, 1, 1 - u);
+    }
 
     // Станции.
     for (const item of s.stable.s) this.drawStation(item, 1, 1, px);
