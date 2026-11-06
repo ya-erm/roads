@@ -42,9 +42,14 @@ export class UploadError extends Error {
 
 /** Имена файлов отчёта: латиницей и по времени, чтобы отчёты не путались и не ломались на доске. */
 export function attachmentNames(at: Date): Record<AttachKind, string> {
-  const p = (n: number) => String(n).padStart(2, '0');
-  const stem = `razvyazka-bug-${at.getFullYear()}-${p(at.getMonth() + 1)}-${p(at.getDate())}-${p(at.getHours())}${p(at.getMinutes())}${p(at.getSeconds())}`;
+  const stem = reportStem(at);
   return { shot: `${stem}.png`, journal: `${stem}-journal.jsonl`, save: `${stem}-save.json` };
+}
+
+/** Общее начало имён файлов отчёта: «razvyazka-bug-2026-11-06-090507». */
+export function reportStem(at: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `razvyazka-bug-${at.getFullYear()}-${p(at.getMonth() + 1)}-${p(at.getDate())}-${p(at.getHours())}${p(at.getMinutes())}${p(at.getSeconds())}`;
 }
 
 /** Манифест пакета: картинки — в WebP без уменьшения, текстовые файлы (.json, .jsonl) — gzip, если так меньше. */
@@ -132,18 +137,42 @@ export async function uploadAttachments(files: Attachment[], opts: UploadOptions
   return out;
 }
 
-/** Что известно о партии и окружении — последней строкой отчёта. */
+/** Что известно об отчёте, партии и окружении: описание и имя — в начале текста, остальное — мелко в конце. */
 export interface ReportInfo {
   description: string;
+  /** Кто сообщает — поле «Ваше имя» (может быть пустым). */
+  author?: string;
+  /** Момент отчёта — когда снят экран и взяты журнал и сохранение. */
+  at: Date;
+  /** Сборка игры (хеш файла сборки; на локальном сервере — dev) и версия формата сохранения. */
+  build: string;
+  saveVersion: number;
   /** Игровая дата. */
   date: string;
   seed: number;
-  /** Сценарий: сложность и регион, если партия сценарная. */
+  /** Сценарий: сложность, если партия сценарная. */
   scenario?: string;
-  /** Окно игры: «1440×900 @2x». */
-  screen: string;
+  /** Окно игры в точках экрана и плотность пикселей. */
+  screen: { width: number; height: number; dpr: number };
   page: string;
   userAgent: string;
+}
+
+/** Сборка игры по адресу её модуля: в сборке у файла хеш (index-Bx3k9Q.js), на локальном сервере — dev. */
+export function buildLabel(moduleUrl: string): string {
+  const m = /-([\w-]{6,})\.js(?:\?.*)?$/.exec(moduleUrl);
+  return m ? m[1] : 'dev';
+}
+
+/** «2026-11-06 16:05» — местное время. */
+export function localStamp(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** «1440×900 @2x». */
+export function screenLabel(s: ReportInfo['screen']): string {
+  return `${s.width}×${s.height} @${Math.round(s.dpr * 100) / 100}x`;
 }
 
 /** Файл в тексте отчёта: на доске — ссылка, нет — имя файла, который приложат вручную. */
@@ -155,11 +184,12 @@ export interface ReportFile {
 
 const FILE_LABEL: Record<AttachKind, string> = { shot: 'Снимок экрана', journal: 'журнал партии', save: 'сохранение' };
 
-/** Текст отчёта для карточки задачи (Markdown): описание, снимок, файлы для воспроизведения и окружение. */
+/** Текст отчёта для карточки задачи (Markdown): кто, описание, снимок, файлы для воспроизведения и окружение. */
 export function reportMarkdown(info: ReportInfo, files: ReportFile[]): string {
-  const desc = info.description.trim() || '_Без описания — смотрите снимок._';
-  const parts = [desc];
   const shot = files.find((f) => f.kind === 'shot');
+  const desc = info.description.trim() || (shot ? '_Без описания — смотрите снимок._' : '_Без описания._');
+  const author = info.author?.trim();
+  const parts = author ? [`**От:** ${author}`, desc] : [desc];
   if (shot) parts.push(shot.url ? `![${FILE_LABEL.shot}](<${shot.url}>)` : `${FILE_LABEL.shot}: \`${shot.name}\` (приложен файлом)`);
   const rest = files.filter((f) => f.kind !== 'shot');
   if (rest.length) {
@@ -168,7 +198,18 @@ export function reportMarkdown(info: ReportInfo, files: ReportFile[]): string {
     const local = rest.some((f) => !f.url) ? ' (приложены файлами)' : '';
     parts.push(`**Для воспроизведения:** ${list}${local}${howTo}.`);
   }
-  const env = [info.date, `seed ${info.seed}`, info.scenario, info.screen, info.page, info.userAgent].filter(Boolean).join(' · ');
+  const env = [
+    info.date,
+    `seed ${info.seed}`,
+    info.scenario,
+    `сборка ${info.build}, сохранение v${info.saveVersion}`,
+    screenLabel(info.screen),
+    localStamp(info.at),
+    info.page,
+    info.userAgent,
+  ]
+    .filter(Boolean)
+    .join(' · ');
   parts.push(`<sub>${env}</sub>`);
   return parts.join('\n\n');
 }

@@ -50,6 +50,7 @@
 }
 
 .bug-modal {
+  position: relative;
   width: min(1320px, 96vw);
   height: min(880px, 94vh);
   display: flex;
@@ -292,11 +293,6 @@
   cursor: pointer;
 }
 
-.bug-file.fixed {
-  cursor: default;
-  padding-left: 31px;
-}
-
 .bug-file input {
   margin: 0;
   accent-color: var(--accent);
@@ -312,12 +308,6 @@
   color: var(--muted);
   font-weight: 400;
   white-space: nowrap;
-}
-
-.bug-note {
-  margin: 0;
-  color: var(--muted);
-  font-size: 11px;
 }
 
 .bug-result {
@@ -461,6 +451,196 @@
 
 .bug-result .bug-secondary:hover {
   background: #fff;
+}
+
+/* Поле «Ваше имя» — со значком человечка, в стиле поля описания. */
+.bug-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1.5px solid #dfe5eb;
+  border-radius: 12px;
+  color: #8a96a3;
+}
+
+.bug-name:focus-within {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.bug-name svg {
+  flex: none;
+}
+
+.bug-name input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  user-select: text;
+}
+
+/* Скачать архив — значок слева от «Отмена». */
+.bug-icon-btn {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 12px;
+  background: #eef2f6;
+  color: var(--ink);
+}
+
+.bug-icon-btn:hover {
+  background: #e2e8ee;
+}
+
+.bug-icon-btn.busy {
+  cursor: progress;
+  opacity: 0.5;
+}
+
+/* Без снимка: снимок и инструменты гаснут, посередине — «Без снимка» и кнопка вернуть. */
+.bug-tools.off {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.bug-warn.dim {
+  opacity: 0.4;
+}
+
+.bug-stage.off canvas {
+  opacity: 0.16;
+  filter: grayscale(1);
+  pointer-events: none;
+}
+
+.bug-stage.off .bug-hint,
+.bug-stage:not(.off) .bug-off {
+  display: none;
+}
+
+.bug-off {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #8a96a3;
+}
+
+.bug-off b {
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.bug-off .bug-secondary {
+  margin-top: 4px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(30, 40, 30, 0.12);
+}
+
+/* Спасибо: поверх всего окна, картинка, пара строк, что ушло на доску, — и назад в игру. */
+.bug-thanks {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  border-radius: 20px;
+  background: #fff;
+  text-align: center;
+  animation: bug-thanks-in 0.25s ease-out;
+}
+
+@keyframes bug-thanks-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+.bug-thanks svg[aria-hidden] {
+  animation: bug-thanks-pop 0.5s cubic-bezier(0.3, 1.6, 0.5, 1);
+}
+
+@keyframes bug-thanks-pop {
+  from {
+    transform: scale(0.6);
+  }
+}
+
+.bug-thanks h2 {
+  margin: 6px 0 0;
+  font-size: 30px;
+  letter-spacing: -0.01em;
+}
+
+.bug-thanks p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.bug-thanks-files {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+
+.bug-thanks-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 10px;
+  border-radius: 10px;
+  background: #e9f6ee;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.bug-thanks-file:hover {
+  background: #d9f0e2;
+}
+
+.bug-thanks-file svg {
+  color: #5f7a8f;
+}
+
+.bug-thanks-file i {
+  display: grid;
+  color: #2e9d57;
+}
+
+.bug-thanks-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.bug-thanks-copy:hover {
+  color: var(--accent);
 }
 
 /* Узкое окно: колонка отчёта — под снимком. */

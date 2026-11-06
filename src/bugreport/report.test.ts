@@ -4,6 +4,8 @@ import {
   attachmentNames,
   batchId,
   boardUrl,
+  buildLabel,
+  localStamp,
   parseUploaded,
   reportMarkdown,
   sizeLabel,
@@ -95,38 +97,56 @@ describe('Загрузка файлов отчёта на доску', () => {
 describe('Текст отчёта', () => {
   const info: ReportInfo = {
     description: 'Автобус стоит на перекрёстке\nи не едет',
+    author: 'Ярослав',
+    at: new Date(2026, 10, 6, 16, 5, 7),
+    build: 'Bx3k9Q',
+    saveVersion: 3,
     date: 'Мар 1963',
     seed: 42,
     scenario: 'сценарий: normal',
-    screen: '1440×900 @2x',
+    screen: { width: 1440, height: 900, dpr: 2 },
     page: 'https://roads.ya-erm.ru/',
     userAgent: 'Chrome',
   };
 
-  it('с доски: снимок — картинкой, журнал и сохранение — ссылками, окружение — мелко в конце', () => {
+  it('с доски: имя, снимок — картинкой, журнал и сохранение — ссылками, окружение — мелко в конце', () => {
     const md = reportMarkdown(info, [
       { kind: 'shot', name: 'a.png', url: 'https://b/1.webp' },
       { kind: 'journal', name: 'j', url: 'https://b/2.jsonl.gz' },
       { kind: 'save', name: 's', url: 'https://b/3.json.gz' },
     ]);
-    expect(md.startsWith('Автобус стоит на перекрёстке\nи не едет\n\n')).toBe(true);
+    expect(md.startsWith('**От:** Ярослав\n\nАвтобус стоит на перекрёстке\nи не едет\n\n')).toBe(true);
     expect(md).toContain('![Снимок экрана](<https://b/1.webp>)');
     expect(md).toContain('[журнал партии](<https://b/2.jsonl.gz>) · [сохранение](<https://b/3.json.gz>)');
     expect(md).toContain('Открыть из файла');
     expect(md).not.toContain('приложен');
-    expect(md.split('\n').at(-1)).toBe('<sub>Мар 1963 · seed 42 · сценарий: normal · 1440×900 @2x · https://roads.ya-erm.ru/ · Chrome</sub>');
+    expect(md.split('\n').at(-1)).toBe(
+      '<sub>Мар 1963 · seed 42 · сценарий: normal · сборка Bx3k9Q, сохранение v3 · 1440×900 @2x · 2026-11-06 16:05 · https://roads.ya-erm.ru/ · Chrome</sub>',
+    );
   });
 
   it('без доски — имена файлов, которые приложат вручную; без описания — подсказка смотреть снимок', () => {
-    const md = reportMarkdown({ ...info, description: '  ', scenario: undefined }, [
+    const md = reportMarkdown({ ...info, description: '  ', author: ' ', scenario: undefined }, [
       { kind: 'shot', name: 'a.png' },
       { kind: 'journal', name: 'a-journal.jsonl' },
     ]);
-    expect(md).toContain('Без описания');
+    expect(md).toContain('Без описания — смотрите снимок');
+    expect(md).not.toContain('От:');
     expect(md).toContain('Снимок экрана: `a.png` (приложен файлом)');
     expect(md).toContain('журнал партии `a-journal.jsonl` (приложены файлами).');
     expect(md).not.toContain('Открыть из файла');
     expect(md).not.toContain('undefined');
+  });
+
+  it('без снимка — о снимке ни слова; сборка по адресу модуля', () => {
+    const md = reportMarkdown({ ...info, description: '' }, [{ kind: 'save', name: 's.json' }]);
+    expect(md).not.toContain('Снимок');
+    expect(md).not.toContain('снимок');
+    expect(md).toContain('_Без описания._');
+    expect(buildLabel('https://roads.ya-erm.ru/assets/index-Bx3k9Q_a.js')).toBe('Bx3k9Q_a');
+    expect(buildLabel('http://localhost:4800/src/ui/bugReport.ts')).toBe('dev');
+    expect(buildLabel('http://localhost:4800/src/ui/bugReport.ts?t=1730900000')).toBe('dev');
+    expect(localStamp(new Date(2026, 0, 2, 3, 4))).toBe('2026-01-02 03:04');
   });
 
   it('имена файлов — латиницей по времени; доска и размеры', () => {

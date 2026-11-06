@@ -4,12 +4,17 @@
  * толщина, размер текста; пометки выбираются, двигаются и правятся), а «Отправить» собирает отчёт: картинку
  * с пометками, журнал партии и сохранение — на момент снимка.
  *
+ * Снимок можно не прикладывать (текстовая идея) — тогда редактор пометок гаснет. Имя запоминается в браузере.
+ * Значок скачивания рядом с «Отмена» собирает всё одним ZIP-архивом (bugreport/archive.ts, zip.ts).
+ *
  * Модель пометок и отрисовка — src/bugreport (без DOM, с тестами), загрузка и текст отчёта — bugreport/report.ts.
- * Токенов доски здесь нет и быть не может: сайт публичный. Файлы идут в публичный загрузчик доски, а если он
- * не принимает их с сайта игры — их можно скачать и приложить вручную; текст отчёта копируется в буфер.
+ * Токенов доски здесь нет и быть не может: сайт публичный. Файлы идут в публичный загрузчик доски; загрузились —
+ * экран благодарности, нет — архив можно скачать и приложить вручную; текст отчёта копируется в буфер.
  */
 
 import './bugReport.css';
+import { archiveEntries, archiveName } from '../bugreport/archive';
+import { loadAuthor, saveAuthor } from '../bugreport/author';
 import { captureScreen, type Shot } from '../bugreport/capture';
 import { canvasMeasure, drawMarks, haloFor, markFont, outputSize, renderSketch } from '../bugreport/draw';
 import { BUG_BUTTON, bugButtonSpot } from '../bugreport/layout';
@@ -57,6 +62,7 @@ import {
 import {
   attachmentNames,
   boardUrl,
+  buildLabel,
   reportMarkdown,
   sizeLabel,
   uploadAttachments,
@@ -66,7 +72,20 @@ import {
   type ReportInfo,
   type Uploaded,
 } from '../bugreport/report';
-import type { Game } from '../game/game';
+import { zip } from '../bugreport/zip';
+import { SAVE_VERSION, type Game } from '../game/game';
+
+/** Сборка игры — хеш файла сборки (на локальном сервере — dev): в отчёт и сведения архива. */
+const BUILD = buildLabel(import.meta.url);
+
+/** Хранилище браузера для имени; закрыто (приватный режим, запрет) — без памяти. */
+function storage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 export interface BugReportDeps {
   /** Холст карты. */
@@ -81,14 +100,30 @@ export interface BugReportDeps {
 const svg = (body: string, size = 20) =>
   `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 
-/** Жук: кнопка и заголовок окна. */
-export function bugSvg(size = 24): string {
-  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}">
-    <g stroke="#1f2933" stroke-width="1.6" stroke-linecap="round" fill="none"><path d="M9.6 5.4L7.6 2.8M14.4 5.4L16.4 2.8"/><path d="M6 10.5L3 9.2M5.6 14.5H2.6M6.4 18.2L3.8 20.6M18 10.5L21 9.2M18.4 14.5H21.4M17.6 18.2L20.2 20.6"/></g>
+/** Жук в квадрате 24×24 — для кнопки, заголовка и экрана благодарности. */
+const BUG_PATHS = `<g stroke="#1f2933" stroke-width="1.6" stroke-linecap="round" fill="none"><path d="M9.6 5.4L7.6 2.8M14.4 5.4L16.4 2.8"/><path d="M6 10.5L3 9.2M5.6 14.5H2.6M6.4 18.2L3.8 20.6M18 10.5L21 9.2M18.4 14.5H21.4M17.6 18.2L20.2 20.6"/></g>
     <path d="M8.3 8.2a3.7 3.4 0 0 1 7.4 0z" fill="#1f2933"/>
     <ellipse cx="12" cy="14.6" rx="6.2" ry="7" fill="#e8483f" stroke="#1f2933" stroke-width="1.6"/>
     <path d="M12 8.2V21.4" stroke="#1f2933" stroke-width="1.4"/>
-    <circle cx="9.3" cy="13" r="1.15" fill="#1f2933"/><circle cx="14.7" cy="16.6" r="1.15" fill="#1f2933"/><circle cx="9.6" cy="17.8" r="0.9" fill="#1f2933"/></svg>`;
+    <circle cx="9.3" cy="13" r="1.15" fill="#1f2933"/><circle cx="14.7" cy="16.6" r="1.15" fill="#1f2933"/><circle cx="9.6" cy="17.8" r="0.9" fill="#1f2933"/>`;
+
+/** Жук: кнопка и заголовок окна. */
+export function bugSvg(size = 24): string {
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}">${BUG_PATHS}</svg>`;
+}
+
+/** Экран благодарности: зелёная галочка в круге, жук на ней и конфетти цветами игры. */
+function thanksSvg(): string {
+  return `<svg viewBox="0 0 140 112" width="175" height="140" aria-hidden="true">
+    <rect x="16" y="22" width="9" height="4" rx="2" fill="#f2c94c" transform="rotate(-25 20 24)"/>
+    <rect x="114" y="74" width="10" height="4" rx="2" fill="#2f80ed" transform="rotate(30 119 76)"/>
+    <rect x="98" y="98" width="8" height="3.6" rx="1.8" fill="#f2994a" transform="rotate(-15 102 100)"/>
+    <rect x="22" y="94" width="8" height="3.6" rx="1.8" fill="#7a5cc4" transform="rotate(20 26 96)"/>
+    <circle cx="30" cy="80" r="3.5" fill="#e8483f"/><circle cx="124" cy="34" r="3" fill="#7a5cc4"/><circle cx="12" cy="56" r="2.6" fill="#2e9d57"/><circle cx="46" cy="12" r="2.4" fill="#2f80ed"/>
+    <circle cx="70" cy="60" r="40" fill="#e9f6ee"/>
+    <circle cx="70" cy="60" r="29" fill="#2e9d57"/>
+    <path d="M56 60.5L66 70.5L85 50.5" stroke="#fff" stroke-width="7.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="translate(86 4) scale(1.55) rotate(18 12 12)">${BUG_PATHS}</g></svg>`;
 }
 
 const TOOLS: { id: Tool; key: string; code: string; tip: string; icon: string }[] = [
@@ -126,6 +161,9 @@ const ICON = {
   link: svg('<path d="M14 4H20V10"/><path d="M20 4L11 13"/><path d="M18 14V19A1 1 0 0 1 17 20H5A1 1 0 0 1 4 19V7A1 1 0 0 1 5 6H10"/>', 16),
   copy: svg('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5A1 1 0 0 0 15 4H5A1 1 0 0 0 4 5V15A1 1 0 0 0 5 16H8"/>', 16),
   download: svg('<path d="M12 4V15M7.5 10.5L12 15L16.5 10.5"/><path d="M4.5 16V19.5H19.5V16"/>', 16),
+  archive: svg('<path d="M12 3.5V14.5M7.5 10L12 14.5L16.5 10"/><path d="M4 15.5V20H20V15.5"/>', 21),
+  noShot: svg('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15.5L8.5 11L13 15L16 12.5L21 16.5"/><path d="M3.5 3.5L20.5 20.5"/>', 40),
+  person: svg('<circle cx="12" cy="8.5" r="3.6"/><path d="M5 20C5.6 16.2 8.4 14 12 14S18.4 16.2 19 20"/>', 18),
   ok: svg('<path d="M5 12.5L10 17.5L19 7"/>', 18),
   warn: svg('<path d="M12 3.5L21.5 20H2.5Z"/><path d="M12 10V14"/><path d="M12 17H12.01"/>', 18),
 };
@@ -148,7 +186,7 @@ interface Moment {
 
 interface Sent {
   text: string;
-  files: Attachment[];
+  /** Что легло на доску; [] — прикладывать было нечего; null — загрузка не удалась. */
   uploaded: Uploaded[] | null;
   error: string;
   copied: boolean;
@@ -167,6 +205,8 @@ class BugReport {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly textEdit: HTMLTextAreaElement;
   private readonly desc: HTMLTextAreaElement;
+  private readonly nameInput: HTMLInputElement;
+  private readonly thanks: HTMLElement;
   private readonly measure: Measure;
 
   private isOpen = false;
@@ -184,8 +224,10 @@ class BugReport {
   private colorBase: Sketch | null = null;
   private view: View = { zoom: 1, ox: 0, oy: 0 };
   private hoverText: number | null = null;
-  private readonly include: Record<'journal' | 'save', boolean> = { journal: true, save: true };
+  /** Что приложить к отчёту; снимок снят — редактор пометок гаснет, пометки ждут, пока его вернут. */
+  private readonly include: Record<AttachKind, boolean> = { shot: true, journal: true, save: true };
   private sending = false;
+  private archiving = false;
   private sent: Sent | null = null;
   private speedBefore = 0;
 
@@ -216,6 +258,8 @@ class BugReport {
     this.ctx = this.canvas.getContext('2d')!;
     this.textEdit = q('[data-bug-text]');
     this.desc = q('[data-bug-desc]');
+    this.nameInput = q('[data-bug-name]');
+    this.thanks = q('[data-bug-thanks]');
     this.measure = canvasMeasure(document.createElement('canvas').getContext('2d')!);
 
     this.screen.addEventListener('click', (e) => this.onClick(e));
@@ -285,18 +329,21 @@ class BugReport {
           <canvas data-bug-canvas></canvas>
           <textarea class="bug-text-edit hidden" data-bug-text spellcheck="false" rows="1"></textarea>
           <div class="bug-hint" data-bug-hint></div>
+          <div class="bug-off">${ICON.noShot}<b>Без снимка</b><button class="bug-secondary small" data-bug="shot-on">${ICON.shot}Приложить снимок</button></div>
         </div>
         <aside class="bug-side">
+          <label class="bug-name">${ICON.person}<input type="text" data-bug-name maxlength="60" autocomplete="name" placeholder="Ваше имя" /></label>
           <textarea class="bug-desc" data-bug-desc placeholder="Что пошло не так? Как это повторить?"></textarea>
           <div class="bug-files" data-bug-files></div>
-          <p class="bug-note">Снимок, журнал и сохранение попадут на доску задач по открытой ссылке.</p>
           <div class="bug-result hidden" data-bug-result></div>
           <div class="bug-actions">
+            <button class="bug-icon-btn" data-bug="archive" data-tip="Скачать всё одним архивом (.zip): снимок, журнал, сохранение, описание и сведения об игре">${ICON.archive}</button>
             <button class="bug-secondary" data-bug="close">Отмена</button>
             <button class="bug-primary" data-bug="send">Отправить</button>
           </div>
         </aside>
       </div>
+      <div class="bug-thanks hidden" data-bug-thanks></div>
     </div>`;
   }
 
@@ -337,14 +384,33 @@ class BugReport {
     this.drag = null;
     this.sent = null;
     this.desc.value = '';
+    this.nameInput.value = loadAuthor(storage());
+    this.include.shot = this.include.journal = this.include.save = true;
+    this.thanks.classList.add('hidden');
     this.isOpen = true;
     this.screen.classList.remove('hidden');
     this.button.classList.add('hidden');
     this.screen.querySelector('[data-bug-hudwarn]')!.classList.toggle('hidden', this.shot!.hud);
     this.setTool(this.tool);
     this.renderFiles();
+    this.setShotOn(true);
     this.renderResult();
     this.render();
+  }
+
+  /** Приложить снимок или нет. Без снимка редактор пометок гаснет; сами пометки остаются — вернётся снимок, вернутся и они. */
+  private setShotOn(on: boolean): void {
+    this.commitEdit();
+    this.include.shot = on;
+    this.selected = null;
+    this.drag = null;
+    this.stage.classList.toggle('off', !on);
+    this.screen.querySelector('.bug-tools')!.classList.toggle('off', !on);
+    this.screen.querySelector('[data-bug-hudwarn]')!.classList.toggle('dim', !on);
+    const box = this.screen.querySelector<HTMLInputElement>('[data-bug-include="shot"]');
+    if (box) box.checked = on;
+    this.changed();
+    this.redraw();
   }
 
   private close(): void {
@@ -451,8 +517,10 @@ class BugReport {
         return void this.send();
       case 'copy':
         return void this.copyAgain();
-      case 'download':
-        return this.downloadAll();
+      case 'archive':
+        return void this.downloadArchive();
+      case 'shot-on':
+        return this.setShotOn(true);
     }
   }
 
@@ -465,7 +533,9 @@ class BugReport {
       this.syncControls();
     }
     if (t.dataset.bugInclude) {
-      this.include[t.dataset.bugInclude as 'journal' | 'save'] = t.checked;
+      const kind = t.dataset.bugInclude as AttachKind;
+      if (kind === 'shot') return this.setShotOn(t.checked);
+      this.include[kind] = t.checked;
       this.changed();
     }
   }
@@ -474,6 +544,10 @@ class BugReport {
     const t = e.target as HTMLElement;
     if (t === this.textEdit) return this.onEditInput();
     if (t === this.desc) return this.changed();
+    if (t === this.nameInput) {
+      saveAuthor(storage(), this.nameInput.value);
+      return this.changed();
+    }
     if (t instanceof HTMLInputElement && t.dataset.bugCustom !== undefined) {
       this.colorBase ??= this.tl.now;
       this.applyStyle({ color: t.value }, true);
@@ -534,7 +608,7 @@ class BugReport {
   }
 
   private onDown(e: PointerEvent): void {
-    if (e.button !== 0 || !this.shot) return;
+    if (e.button !== 0 || !this.shot || !this.include.shot) return;
     const p = this.point(e);
     const sk = this.tl.now;
     if (this.editing !== null) {
@@ -771,8 +845,15 @@ class BugReport {
     }
     if ((t instanceof HTMLTextAreaElement && t !== this.textEdit) || (t instanceof HTMLInputElement && t.type !== 'checkbox')) {
       if (e.key === 'Escape') (t as HTMLElement).blur();
+      // Имя введено — Enter переводит к описанию.
+      if (t === this.nameInput && e.key === 'Enter') {
+        e.preventDefault();
+        this.desc.focus();
+      }
       return;
     }
+    // Без снимка пометок нет — из клавиш редактора остаётся только Esc.
+    if (!this.include.shot && e.key !== 'Escape') return;
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.code === 'KeyZ') {
       e.preventDefault();
@@ -917,13 +998,13 @@ class BugReport {
     const shot = this.shot;
     if (!m || !shot) return;
     const out = outputBox(this.tl.now, shot.width, shot.height);
-    const row = (kind: AttachKind, icon: string, name: string, note: string, toggle: boolean) =>
-      `<label class="bug-file ${toggle ? '' : 'fixed'}">${toggle ? `<input type="checkbox" data-bug-include="${kind}" ${this.include[kind as 'journal' | 'save'] ? 'checked' : ''} />` : ''}${icon}<span>${name}</span><small data-bug-file-note="${kind}">${note}</small></label>`;
+    const row = (kind: AttachKind, icon: string, name: string, note: string) =>
+      `<label class="bug-file"><input type="checkbox" data-bug-include="${kind}" ${this.include[kind] ? 'checked' : ''} />${icon}<span>${name}</span><small data-bug-file-note="${kind}">${note}</small></label>`;
     const enc = new TextEncoder();
     this.screen.querySelector('[data-bug-files]')!.innerHTML =
-      row('shot', ICON.shot, 'Снимок с пометками', `${Math.round(out.w)} × ${Math.round(out.h)}`, false) +
-      row('journal', ICON.journal, 'Журнал партии', `${m.journalEntries} зап. · ${sizeLabel(enc.encode(m.journal).length)}`, true) +
-      row('save', ICON.save, 'Сохранение', sizeLabel(enc.encode(m.save).length), true);
+      row('shot', ICON.shot, 'Приложить снимок', `${Math.round(out.w)} × ${Math.round(out.h)}`) +
+      row('journal', ICON.journal, 'Журнал партии', `${m.journalEntries} зап. · ${sizeLabel(enc.encode(m.journal).length)}`) +
+      row('save', ICON.save, 'Сохранение', sizeLabel(enc.encode(m.save).length));
   }
 
   /** Итоговая картинка с пометками и кадром — PNG. */
@@ -949,24 +1030,28 @@ class BugReport {
     this.status('Готовлю файлы…');
     const m = this.moment;
     const names = attachmentNames(m.at);
-    const files: Attachment[] = [{ kind: 'shot', name: names.shot, type: 'image/png', data: await this.renderPng() }];
+    const files: Attachment[] = [];
+    // Снимок не приложен — не загружается и в отчёт не попадает.
+    if (this.include.shot) files.push({ kind: 'shot', name: names.shot, type: 'image/png', data: await this.renderPng() });
     if (this.include.journal) files.push({ kind: 'journal', name: names.journal, type: 'application/x-ndjson', data: new Blob([m.journal], { type: 'application/x-ndjson' }) });
     if (this.include.save) files.push({ kind: 'save', name: names.save, type: 'application/json', data: new Blob([m.save], { type: 'application/json' }) });
     let uploaded: Uploaded[] | null = null;
     let error = '';
-    try {
-      uploaded = await uploadAttachments(files, {
-        fetch: window.fetch.bind(window),
-        onProgress: (done, total) => this.status(`Загружаю на доску: ${done} из ${total}`),
-      });
-    } catch (e) {
-      // Сеть или доска не пускает файлы с этого сайта (fetch бросает TypeError) — без подробностей.
-      error = e instanceof UploadError ? e.message : 'доска не принимает файлы с сайта игры';
-      console.warn('Баг-репорт: файлы не загрузились', e);
-    }
+    if (files.length) {
+      try {
+        uploaded = await uploadAttachments(files, {
+          fetch: window.fetch.bind(window),
+          onProgress: (done, total) => this.status(`Загружаю на доску: ${done} из ${total}`),
+        });
+      } catch (e) {
+        // Сеть или доска не пускает файлы с этого сайта (fetch бросает TypeError) — без подробностей.
+        error = e instanceof UploadError ? e.message : 'доска не принимает файлы с сайта игры';
+        console.warn('Баг-репорт: файлы не загрузились', e);
+      }
+    } else uploaded = [];
     const text = reportMarkdown(this.info(), files.map((f) => ({ kind: f.kind, name: f.name, url: uploaded?.find((u) => u.kind === f.kind)?.url })));
     const copied = await copyText(text);
-    this.sent = { text, files, uploaded, error, copied };
+    this.sent = { text, uploaded, error, copied };
     this.sending = false;
     this.renderResult();
     this.syncControls();
@@ -978,10 +1063,14 @@ class BugReport {
     const shot = this.shot!;
     return {
       description: this.desc.value,
+      author: this.nameInput.value.trim() || undefined,
+      at: this.moment!.at,
+      build: BUILD,
+      saveVersion: SAVE_VERSION,
       date: g.dateLabel,
       seed: g.seed,
       scenario: sc ? `сценарий ${sc.difficulty}${sc.challenge ? ', испытание' : ''}` : undefined,
-      screen: `${shot.width}×${shot.height} @${Math.round((window.devicePixelRatio || 1) * 100) / 100}x`,
+      screen: { width: shot.width, height: shot.height, dpr: window.devicePixelRatio || 1 },
       page: `${location.origin}${location.pathname}`,
       userAgent: navigator.userAgent,
     };
@@ -1002,48 +1091,83 @@ class BugReport {
       return;
     }
     const copied = s.copied ? 'Текст отчёта скопирован' : 'Текст отчёта — ниже';
-    const label: Record<AttachKind, string> = { shot: 'снимок', journal: 'журнал', save: 'сохранение' };
     const board = boardUrl();
     const copy = `<button class="bug-secondary small" data-bug="copy">${ICON.copy}Скопировать</button>`;
     const open = board ? `<a class="bug-secondary small" href="${board}" target="_blank" rel="noopener" data-tip="Доска задач игры">${ICON.link}Доска</a>` : '';
-    if (s.uploaded) {
-      const links = s.uploaded
-        .map((u) => `<a href="${escapeHtml(u.url)}" target="_blank" rel="noopener">${label[u.kind]}</a>${u.stored ? ` <small>${sizeLabel(u.size)} → ${sizeLabel(u.stored)}</small>` : ''}`)
-        .join(' · ');
+    if (s.uploaded?.length) {
+      // Файлы на доске — экран благодарности поверх окна.
+      el.className = 'bug-result hidden';
+      el.innerHTML = '';
+      this.showThanks(s);
+    } else if (s.uploaded) {
+      // Прикладывать было нечего: только текст.
       el.className = 'bug-result ok';
-      el.innerHTML = `<p class="bug-res-head">${ICON.ok}Файлы на доске: ${links}</p>
-        <p>${copied} — вставьте его в новую задачу на доске.</p>
+      el.innerHTML = `<p class="bug-res-head">${ICON.ok}${copied}.</p>
         <textarea class="bug-report-text" readonly>${escapeHtml(s.text)}</textarea>
         <div class="bug-res-actions">${copy}${open}</div>`;
     } else {
       el.className = 'bug-result fail';
       el.innerHTML = `<p class="bug-res-head">${ICON.warn}Файлы не загрузились: ${escapeHtml(s.error)}.</p>
-        <p>${copied}. Скачайте файлы и приложите их к задаче вместе с текстом.</p>
+        <p>${copied}. Скачайте архив и приложите его к задаче вместе с текстом.</p>
         <textarea class="bug-report-text" readonly>${escapeHtml(s.text)}</textarea>
-        <div class="bug-res-actions"><button class="bug-secondary small" data-bug="download">${ICON.download}Файлы</button>${copy}${open}</div>`;
+        <div class="bug-res-actions"><button class="bug-secondary small" data-bug="archive">${ICON.download}Архив</button>${copy}${open}</div>`;
     }
+  }
+
+  /** После отправки — короткое «спасибо»: картинка, что ушло на доску (галочками) и кнопка назад в игру. */
+  private showThanks(s: Sent): void {
+    const label: Record<AttachKind, string> = { shot: 'Снимок', journal: 'Журнал', save: 'Сохранение' };
+    const icon: Record<AttachKind, string> = { shot: ICON.shot, journal: ICON.journal, save: ICON.save };
+    const files = (s.uploaded ?? [])
+      .map((u) => `<a class="bug-thanks-file" href="${escapeHtml(u.url)}" target="_blank" rel="noopener" data-tip="Открыть на доске">${icon[u.kind]}${label[u.kind]}<i>${ICON.ok}</i></a>`)
+      .join('');
+    this.thanks.innerHTML = `${thanksSvg()}
+      <h2>Спасибо за отчёт!</h2>
+      <p>Файлы уже на доске задач — разберёмся, что пошло не так.</p>
+      <div class="bug-thanks-files">${files}</div>
+      <button class="bug-primary" data-bug="close">Вернуться в игру</button>
+      <button class="bug-thanks-copy" data-bug="copy">${ICON.copy}${s.copied ? 'Текст отчёта скопирован' : 'Скопировать текст отчёта'}</button>`;
+    this.thanks.classList.remove('hidden');
   }
 
   private async copyAgain(): Promise<void> {
     if (!this.sent) return;
     this.sent.copied = await copyText(this.sent.text);
     if (!this.sent.copied) this.screen.querySelector<HTMLTextAreaElement>('.bug-report-text')?.select();
-    const b = this.screen.querySelector<HTMLElement>('[data-bug="copy"]');
-    if (b && this.sent.copied) b.innerHTML = `${ICON.ok}Готово`;
+    if (this.sent.copied) for (const b of this.screen.querySelectorAll<HTMLElement>('[data-bug="copy"]')) b.innerHTML = `${ICON.ok}Скопировано`;
   }
 
-  /** Файлы отчёта — в «Загрузки», по очереди (браузер может спросить, можно ли скачать несколько). */
-  private downloadAll(): void {
-    const files = this.sent?.files ?? [];
-    files.forEach((f, i) =>
-      setTimeout(() => {
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(f.data);
-        a.download = f.name;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-      }, i * 350),
-    );
+  /**
+   * Всё одним архивом: снимок (если приложен), журнал, сохранение, report.md с именем и описанием и meta.json —
+   * сборка игры, дата партии, seed, экран, браузер, время. Можно и до отправки, и вместо неё.
+   */
+  private async downloadArchive(): Promise<void> {
+    if (this.archiving || !this.shot || !this.moment) return;
+    this.commitEdit();
+    this.archiving = true;
+    const btn = this.screen.querySelector<HTMLElement>('.bug-icon-btn[data-bug="archive"]')!;
+    btn.classList.add('busy');
+    try {
+      const m = this.moment;
+      const shot = this.include.shot ? new Uint8Array(await (await this.renderPng()).arrayBuffer()) : undefined;
+      const entries = archiveEntries({
+        info: this.info(),
+        shot,
+        journal: this.include.journal ? m.journal : undefined,
+        save: this.include.save ? m.save : undefined,
+      });
+      const data = await zip(entries, { at: m.at });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([data as BlobPart], { type: 'application/zip' }));
+      a.download = archiveName(m.at);
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    } catch (e) {
+      console.error('Баг-репорт: архив не собрался', e);
+    } finally {
+      this.archiving = false;
+      btn.classList.remove('busy');
+    }
   }
 }
 
