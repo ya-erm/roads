@@ -27,6 +27,16 @@ export function moneyShort(n: number): string {
   return `${s}$${Math.round(a).toLocaleString('ru-RU')}`;
 }
 
+/** Цвет текста плашки (--ink в style.css). */
+export const HUD_INK = '#1f2933';
+/** Отрицательный баланс — красным, как в интерфейсе игры (--danger в style.css). */
+export const HUD_DANGER = '#e8483f';
+
+/** Цвет денег на плашке: в минусе — красный (ровно тогда, когда moneyShort пишет «−»). */
+export function moneyColor(n: number, danger = HUD_DANGER): string {
+  return n < 0 ? danger : HUD_INK;
+}
+
 /** Жители коротко: «9 870», «43,8 тыс.», «120 тыс.», «1,25 млн». */
 export function countShort(n: number): string {
   if (n >= 1e6) return `${fixed(n / 1e6, 2)} млн`;

@@ -6,10 +6,13 @@ import {
   countShort,
   digitWidth,
   HUD_BADGE,
+  HUD_DANGER,
   HUD_GAP,
   HUD_ICON,
+  HUD_INK,
   HUD_PAD,
   hudLayout,
+  moneyColor,
   moneyShort,
   splitDate,
   tabText,
@@ -38,6 +41,17 @@ describe('Плашка таймлапса: форматы', () => {
     expect(moneyShort(1_800_000)).toBe('$1,80 млн');
     expect(moneyShort(15_000_000)).toBe('$15,0 млн');
     expect(moneyShort(150_000_000)).toBe('$150 млн');
+  });
+
+  it('деньги в минусе — красным, как баланс в интерфейсе (--danger)', () => {
+    expect(HUD_DANGER).toBe('#e8483f');
+    expect(moneyColor(-226_000)).toBe(HUD_DANGER);
+    expect(moneyColor(-9_800)).toBe(HUD_DANGER);
+    expect(moneyColor(0)).toBe(HUD_INK);
+    expect(moneyColor(1_870_000)).toBe(HUD_INK);
+    expect(moneyColor(-5, 'red')).toBe('red');
+    // Красное — ровно то, что написано с минусом, в том числе «−$0» при долях доллара.
+    for (const n of [-1e8, -12_345, -0.3, 0, 0.3, 9_999, 1e8]) expect(moneyColor(n) === HUD_DANGER).toBe(moneyShort(n).startsWith('−'));
   });
 
   it('жители и целые', () => {

@@ -18,7 +18,7 @@ import { cargoImage } from './cargoIcons';
 import { downloadSvg, journalSvg, playSvg } from './icons';
 import { flagSvg, objectiveIcon } from './scenarioIcons';
 import { timelapseSvg } from './timelapseButton';
-import { counterSlots, countInt, countShort, HUD_PAD, hudLayout, moneyShort, splitDate, tabText, type HudLayout, type Measure, type TabText } from './timelapseHud';
+import { counterSlots, countInt, countShort, HUD_DANGER, HUD_PAD, hudLayout, moneyColor, moneyShort, splitDate, tabText, type HudLayout, type Measure, type TabText } from './timelapseHud';
 import { playRate, TL_SPEEDS } from './timelapseSpeed';
 
 /** Кадры на шкале не ближе стольких месяцев: стройка на паузе в первый месяц тоже успевает показаться. */
@@ -178,6 +178,8 @@ class TimelapsePlayer {
   private chunks: Blob[] = [];
   private endHold = 0;
   private readonly font: string;
+  /** Красный отрицательного баланса — из style.css (--danger). */
+  private readonly danger: string;
   /** Раскладка плашки — одна на всю партию (timelapseHud.ts): ширины не прыгают от кадра к кадру. */
   private hud: HudLayout | null = null;
   private dateMeasure: Measure | null = null;
@@ -198,6 +200,7 @@ class TimelapsePlayer {
     for (const item of this.tl.layers.s) this.stationPos.set(item.id, { x: Number(item.rec[2]) * TL_STEP, y: Number(item.rec[3]) * TL_STEP });
     for (const town of game.towns) this.popNow.set(town.id, Math.max(1, town.population));
     this.font = getComputedStyle(document.body).fontFamily || 'system-ui, sans-serif';
+    this.danger = getComputedStyle(document.documentElement).getPropertyValue('--danger').trim() || HUD_DANGER;
 
     this.root = document.createElement('div');
     this.root.className = 'tl-screen';
@@ -881,7 +884,8 @@ class TimelapsePlayer {
     const slots = counterSlots(L.cells);
     items.forEach(([icon, text], n) => {
       icon(x0 + HUD_PAD + slots[n].icon, y0 + 45);
-      ctx.fillStyle = '#1f2933';
+      // Деньги в минусе — красным, как баланс в интерфейсе игры.
+      ctx.fillStyle = n === 0 ? moneyColor(money, this.danger) : '#1f2933';
       this.fillTab(tabText(text, this.numMeasure!, L.numDigit), x0 + HUD_PAD + slots[n].text, y0 + 45.5);
     });
     // Подпись игры — в углу (видно и в видео).
