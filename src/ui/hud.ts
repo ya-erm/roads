@@ -52,7 +52,7 @@ import { linePaceHtml } from './linePace';
 import { stopFoldHtml, stopPlaceHtml, toggleStop } from './routeStop';
 import { chartHoverAt, distLabel, speedChartSvg, speedTipHtml } from './speedChartSvg';
 import { travelTimeText } from './travelTime';
-import { supplyBarHtml, supplyLineHtml } from './supplyUi';
+import { needsHeadHtml, supplyBarHtml, supplyLineHtml, type TownNeed } from './supplyUi';
 import {
   briefHtml,
   modeTilesHtml,
@@ -403,6 +403,8 @@ export class Hud {
   private stopOpen: { line: number; i: number } | null = null;
   /** Потребности городов, раскрытые в диаграмму по месяцам: `город:груз`. */
   private readonly needsOpen = new Set<string>();
+  /** Блок «Что нужно городу» свёрнут до одной строки — у всех городов (запоминается в браузере). */
+  private needsFolded = localStorage.getItem('roads.needsFolded') === '1';
   /** Свёрнутые списки «Куда везти» (out) и «Откуда везти» (in) — у всех городов и предприятий (запоминается в браузере). */
   private readonly partnersFolded = new Set((localStorage.getItem('roads.partnersFolded') ?? '').split(',').filter(Boolean));
   /** Карточка маршрута открыта из панели города: крестик вернёт к нему. Сбрасывается, как только карточка закрылась. */
@@ -1081,6 +1083,14 @@ export class Hud {
         if (!this.needsOpen.delete(key)) this.needsOpen.add(key);
         break;
       }
+      case 'toggle-needs':
+        // «Что нужно городу» сворачивается до одной строки: значки грузов в кольцах заполнения.
+        this.needsFolded = !this.needsFolded;
+        localStorage.setItem('roads.needsFolded', this.needsFolded ? '1' : '0');
+        break;
+      case 'hint':
+        // «?» в заголовке только показывает подсказку (data-tip): клик по нему блок не сворачивает.
+        break;
       case 'toggle-partners': {
         // «Куда везти» / «Откуда везти» сворачиваются до заголовка со значками грузов.
         const dir = d.dir === 'out' ? 'out' : 'in';
@@ -2845,25 +2855,32 @@ export class Hud {
     if (sel.type === 'town') {
       const t = g.towns.find((x) => x.id === sel.id);
       if (!t) return '';
-      const needs = t.demands
-        .map((c) => {
-          const now = t.supplied[c] ?? 0;
-          const last = t.lastSupplied[c] ?? 0;
-          const open = this.needsOpen.has(`${t.id}:${c}`);
-          // Закрытые месяцы и текущий — последним, всего не больше 12 столбиков.
-          const months = [
-            ...(t.supplyHistory ?? [])
-              .slice(-(TOWN_HISTORY - 1))
-              .map((m) => ({ label: m.label, got: m.got[c] ?? 0, carried: m.carried?.[c] ?? 0, need: m.need })),
-            { label: g.dateLabel, got: now, carried: t.carried?.[c] ?? 0, need: TOWN_NEED, current: true },
-          ];
-          const chart = open ? `<div class="need-chart">${supplyChart(months, CARGO[c].color)}</div>` : '';
-          return `<div class="need" data-action="town-need" data-id="${t.id}" data-c="${c}" data-tip="${open ? 'Свернуть' : 'По месяцам'}">${cargoIcon(c, 24)}<div><b>${CARGO[c].name}</b>
-            ${supplyBarHtml(now, t.carried?.[c] ?? 0, TOWN_NEED, CARGO[c].color)}
-            <small>${supplyLineHtml(now, t.carried?.[c] ?? 0, last, TOWN_NEED, CARGO[c].color)}</small></div>
+      const demands: TownNeed[] = t.demands.map((c) => ({
+        cargo: c,
+        now: t.supplied[c] ?? 0,
+        carried: t.carried?.[c] ?? 0,
+        last: t.lastSupplied[c] ?? 0,
+      }));
+      // Свёрнутый блок — одной строкой в заголовке (needsHeadHtml), строки потребностей не нужны.
+      const rows = this.needsFolded
+        ? ''
+        : demands
+            .map(({ cargo: c, now, carried, last }) => {
+              const open = this.needsOpen.has(`${t.id}:${c}`);
+              // Закрытые месяцы и текущий — последним, всего не больше 12 столбиков.
+              const months = [
+                ...(t.supplyHistory ?? [])
+                  .slice(-(TOWN_HISTORY - 1))
+                  .map((m) => ({ label: m.label, got: m.got[c] ?? 0, carried: m.carried?.[c] ?? 0, need: m.need })),
+                { label: g.dateLabel, got: now, carried, need: TOWN_NEED, current: true },
+              ];
+              const chart = open ? `<div class="need-chart">${supplyChart(months, CARGO[c].color)}</div>` : '';
+              return `<div class="need" data-action="town-need" data-id="${t.id}" data-c="${c}" data-tip="${open ? 'Свернуть' : 'По месяцам'}">${cargoIcon(c, 24)}<div><b>${CARGO[c].name}</b>
+            ${supplyBarHtml(now, carried, TOWN_NEED, CARGO[c].color)}
+            <small>${supplyLineHtml(now, carried, last, TOWN_NEED, CARGO[c].color)}</small></div>
             <span class="caret ${open ? '' : 'closed'}">${chevronSvg(10)}</span></div>${chart}`;
-        })
-        .join('');
+            })
+            .join('');
       const faces = { good: '😊', ok: '😐', bad: '😠' };
       const reviews = g
         .townReviews(t)
@@ -2875,8 +2892,7 @@ export class Hud {
       return `<section class="detail">${head(t.name, `${t.population} жителей · ${STYLE_NAMES[t.style]}`)}
         ${streets}
         <h4>Что говорят жители</h4>${reviews}
-        <h4>Что нужно городу</h4>${needs}
-        <p class="muted">Каждая закрытая потребность ускоряет рост. Привозите груз на станцию в черте города.</p>
+        ${needsHeadHtml(demands, TOWN_NEED, this.needsFolded)}${rows}
         ${this.partnersHtml(g.partners(t, 2))}</section>`;
     }
     if (sel.type === 'junction') return this.junctionHtml(sel.id);

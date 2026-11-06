@@ -3377,6 +3377,119 @@ button.small.with-ic {
   border-radius: 2px;
 }
 
+/* Значок «?» после заголовка: подсказка при наведении (data-tip). */
+.help-q {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #eef1f4;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+}
+
+.help-q:hover {
+  background: #e1e7ee;
+  color: #4b525c;
+}
+
+/* Свёрнутый блок «Что нужно городу» одной строкой: значки грузов в кольцах заполнения и «✓ 2 из 5» (ui/supplyUi.ts). */
+/* Заголовок не переносится: не хватает места (у города много потребностей) — значки наезжают друг на друга. */
+.needs-head h4,
+.needs-head .need-count {
+  flex: none;
+  white-space: nowrap;
+}
+
+.need-dots {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 2px;
+  margin-left: 2px;
+}
+
+.need-dot {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 1 24px;
+  min-width: 6px;
+}
+
+/* Последний значок не сжимается — не наезжает на счётчик. */
+.need-dot:last-child {
+  flex-shrink: 0;
+}
+
+.need-dot > svg {
+  grid-area: 1 / 1;
+}
+
+.need-dot > .ring {
+  border-radius: 50%;
+  background: var(--panel);
+}
+
+.need-dot .ring circle {
+  fill: none;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.need-dot .ring .track {
+  stroke: #e3e8ee;
+}
+
+/* Ничего не привезли — значок бледный. */
+.need-dot.none .cargo-icon {
+  opacity: 0.4;
+  filter: grayscale(0.7);
+}
+
+/* Закрыто — зелёная галочка, как у потребностей в задании сценария. */
+.need-dot.ok::after {
+  content: '✓';
+  position: absolute;
+  /* От левого края: у сжатого значка коробка уже кольца. */
+  left: 16px;
+  top: 16px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2e9d57;
+  color: #fff;
+  font-size: 7px;
+  font-weight: 800;
+  line-height: 10px;
+  text-align: center;
+}
+
+.need-count {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #eef1f4;
+  color: #4b525c;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.need-count.all {
+  background: #e3f4e9;
+  color: #2e9d57;
+}
+
+.need-count.none {
+  background: #fdecea;
+  color: #c0392b;
+}
+
 .partner {
   width: 100%;
   display: flex;
