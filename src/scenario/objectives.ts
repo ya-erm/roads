@@ -152,6 +152,91 @@ export function monthValue(p: ObjectiveParams, game: Game, month: MonthStat | un
   }
 }
 
+/**
+ * Месячное задание в текущем месяце — то же, что проверится в его конце (monthOk): засчитывается
+ * календарный месяц, поэтому и шкала — по нему, а не по скользящим 30 дням.
+ */
+export interface MonthNow {
+  /** Перевезено в этом месяце: груз и пассажиры. */
+  units: number;
+  /** Средняя надбавка за скорость по объёму; доставок нет — 1. */
+  speed: number;
+  /** Выручка перевозок и расходы (содержание транспорта, ремонт дорог, проценты) за этот месяц. */
+  income: number;
+  costs: number;
+  /** Перевезли в этом месяце маршруты этапа (newRoutes). */
+  newRoutes: number;
+  /** Снабжение города (supply): закрыто потребностей, сколько нужно закрыть, доля привезённого 0…1. */
+  closed: number;
+  needs: number;
+  supplied: number;
+}
+
+/**
+ * Шкала месячного задания: какая доля условия месяца уже набрана, подпись «312 / 470 ед.» и второе условие,
+ * если оно есть (расходы у «перевозить при расходах», объём у «быстрой доставки») — с отметкой, выполнено ли.
+ */
+export interface MonthGauge {
+  fraction: number;
+  text: string;
+  extra?: { text: string; ok: boolean };
+}
+
+const share = (v: number, target: number) => Math.max(0, Math.min(1, v / Math.max(1, target)));
+const signedMoney = (n: number) => (n < 0 ? `−${moneyText(-n)}` : moneyText(n));
+
+/** Шкала месячного задания по показателю текущего месяца; у остальных заданий — null. */
+export function monthGauge(p: ObjectiveParams, now: MonthNow): MonthGauge | null {
+  switch (p.kind) {
+    case 'throughput': {
+      const ratio = now.income > 0 ? now.costs / now.income : null;
+      return {
+        fraction: share(now.units, p.amount),
+        text: `${fmt(now.units)} / ${fmt(p.amount)} ед.`,
+        extra: ratio !== null ? { text: `расходы ${Math.round(ratio * 100)}% / ${Math.round(p.costRatio * 100)}%`, ok: ratio <= p.costRatio } : undefined,
+      };
+    }
+    case 'newRoutes':
+      return { fraction: share(now.newRoutes, p.amount), text: `${fmt(now.newRoutes)} / ${fmt(p.amount)} ед.` };
+    case 'quality': {
+      // Нужны оба условия — шкала по тому, что дальше от цели.
+      const speed = Math.max(0, Math.min(1, (now.speed - 1) / Math.max(0.01, p.speed - 1)));
+      return {
+        fraction: Math.min(speed, share(now.units, p.volume)),
+        text: `×${now.speed.toFixed(2)} / ×${p.speed}`,
+        extra: { text: `${fmt(now.units)} / ${fmt(p.volume)} ед.`, ok: now.units >= p.volume },
+      };
+    }
+    case 'profit': {
+      const profit = now.income - now.costs;
+      return { fraction: share(profit, p.amount), text: `${signedMoney(profit)} / ${moneyText(p.amount)}` };
+    }
+    case 'supply':
+      return { fraction: Math.max(0, Math.min(1, now.supplied)), text: `закрыто ${now.closed} / ${now.needs}` };
+    default:
+      return null;
+  }
+}
+
+/** Показатели текущего месяца для шкалы месячного задания (monthGauge). */
+export function monthNow(game: Game, s: ScenarioState, p: ObjectiveParams): MonthNow {
+  const st = s.stats;
+  const fin = operating({ ledger: game.ledger });
+  const now: MonthNow = { units: st.units, speed: st.units > 0 ? st.speedSum / st.units : 1, income: fin.income, costs: fin.costs, newRoutes: 0, closed: 0, needs: 0, supplied: 0 };
+  if (p.kind === 'newRoutes') now.newRoutes = newRoutesCarried(game, p.since, 'current');
+  if (p.kind === 'supply') {
+    const t = townById(game, p.town);
+    if (t?.demands.length) {
+      now.needs = supplyNeeds(p, t);
+      now.closed = closedNeeds(t, 'current').length;
+      // Доля — по самым близким к норме потребностям: сколько из нужных уже привезли.
+      const parts = t.demands.map((c) => Math.min(1, (t.supplied[c] ?? 0) / TOWN_NEED)).sort((a, b) => b - a);
+      now.supplied = parts.slice(0, now.needs).reduce((a, b) => a + b, 0) / Math.max(1, now.needs);
+    }
+  }
+  return now;
+}
+
 /** Название задания для игрока. */
 export function titleOf(p: ObjectiveParams, game: Game): string {
   switch (p.kind) {

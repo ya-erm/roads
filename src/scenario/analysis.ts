@@ -127,10 +127,15 @@ export function connected(game: Game): { towns: Set<number>; industries: Set<num
   return { towns, industries: info.industries };
 }
 
-/** Сколько перевезли в прошлом месяце маршруты, созданные с момента since (у старых маршрутов отметки нет — не в счёт). */
-export function newRoutesCarried(game: Game, since: number): number {
+/**
+ * Сколько перевезли маршруты, созданные с момента since (у старых маршрутов отметки нет — не в счёт):
+ * в прошлом месяце (last) или уже в этом (current).
+ */
+export function newRoutesCarried(game: Game, since: number, month: 'last' | 'current' = 'last'): number {
   let sum = 0;
-  for (const line of game.lines.values()) if (line.created !== undefined && line.created >= since) sum += line.carriedLast;
+  for (const line of game.lines.values()) {
+    if (line.created !== undefined && line.created >= since) sum += month === 'last' ? line.carriedLast : line.carriedMonth;
+  }
   return sum;
 }
 

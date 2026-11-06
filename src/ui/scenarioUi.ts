@@ -9,7 +9,18 @@ import { isIndustry, resolve } from '../scenario/analysis';
 import { ARCHETYPE_LIST, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, MEDALS, PHASES, REPUTATION } from '../scenario/content';
 import { isActive } from '../scenario/events';
 import { fastBonus, type Scenario } from '../scenario/manager';
-import { closedNeeds, failText, fraction, isMonthly, monthValue, progressText, rewardText, supplyNeeds } from '../scenario/objectives';
+import {
+  closedNeeds,
+  failText,
+  fraction,
+  isMonthly,
+  monthGauge,
+  monthNow,
+  monthValue,
+  progressText,
+  rewardText,
+  type MonthGauge,
+} from '../scenario/objectives';
 import { CARGO } from '../world/cargo';
 import { TOWN_NEED } from '../world/entities';
 import type { ScenarioRecord } from '../scenario/records';
@@ -145,6 +156,32 @@ function fastHtml(sc: Scenario, o: Objective): string {
 const OBJECTIVE_ICON = 26;
 
 /**
+ * Шкала месячного задания (перевозить N в месяц, прибыль, снабжение…) — по показателю идущего месяца:
+ * засчитывается календарный месяц, и полоска показывает, сколько уже набрано. У остальных — null.
+ */
+function gaugeOf(sc: Scenario, o: Objective): MonthGauge | null {
+  return o.status === 'active' && isMonthly(o.params) ? monthGauge(o.params, monthNow(sc.game, sc.state, o.params)) : null;
+}
+
+/** Месяцы подряд у месячного задания — точками: ●●○ — выполнено 2 из 3. Хватает одного месяца — без точек. */
+function streakHtml(o: Objective): string {
+  if (o.status !== 'active' || !isMonthly(o.params) || o.target <= 1) return '';
+  const dots = Array.from({ length: o.target }, (_, i) => `<i class="${i < o.progress ? 'on' : ''}"></i>`).join('');
+  return `<span class="sc-streak" data-tip="Месяцев подряд выполнено: ${o.progress} из ${o.target}">${dots}</span>`;
+}
+
+/**
+ * Прогресс задания под полоской: у месячных — показатель этого месяца («312 / 470 ед.»), второе условие
+ * (в развёрнутом виде) и месяцы подряд точками; у остальных — «120 / 300», «×1.5 / ×2».
+ */
+function progressHtml(o: Objective, gauge: MonthGauge | null, full: boolean): string {
+  if (!gauge) return `<b>${progressText(o)}</b>`;
+  const extra = full && gauge.extra ? `<span class="sc-cond ${gauge.extra.ok ? 'ok' : 'bad'}">${esc(gauge.extra.text)}</span>` : '';
+  const tip = 'Набрано в этом месяце. Засчитывается месяц, к концу которого условие выполнено';
+  return `<b data-tip="${tip}">${esc(gauge.text)}</b>${full ? '<span class="sc-month">в этом месяце</span>' : ''}${extra}${streakHtml(o)}`;
+}
+
+/**
  * Задание: значок по типу, заголовок (★ — главная цель, свиток — контракт, ❗ — критическое),
  * полоска выполнения, прогресс, остаток срока (красным — меньше 2 месяцев), награда.
  * У месячных — как прошёл последний месяц.
@@ -170,7 +207,9 @@ export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: Objecti
         : '';
   const time = timeHtml(sc, o);
   const tip = `${o.why}${active && !o.critical && o.deadline !== null ? `\nЕсли не успеть: ${failText(o)}` : ''}`;
-  const bar = `<div class="bar sc-bar"><div style="width:${(fraction(o) * 100).toFixed(1)}%"></div></div>`;
+  // У месячных полоска — по показателю этого месяца, а не по числу месяцев подряд (их показывают точки).
+  const gauge = view.plan ? null : gaugeOf(sc, o);
+  const bar = `<div class="bar sc-bar"><div style="width:${((gauge ? gauge.fraction : fraction(o)) * 100).toFixed(1)}%"></div></div>`;
   const cls = `sc-obj ${o.role} ${o.status} ${o.critical ? 'critical' : ''}`;
   // Свёрнутая — две строки: название в одну строку и полоска с прогрессом и сроком; клик разворачивает.
   // Значок — того же размера, что у развёрнутой: две строки его вмещают.
@@ -179,7 +218,7 @@ export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: Objecti
       <span class="sc-obj-ic">${objectiveIcon(o, OBJECTIVE_ICON)}</span>
       <div class="sc-obj-body">
         <div class="sc-obj-title">${role}<span class="sc-obj-name">${esc(o.title)}</span>${crit}${state}<span class="sc-fold" title="Развернуть"><span class="caret closed">${chevronSvg()}</span></span></div>
-        <div class="sc-meta">${bar}<b>${progressText(o)}</b>${time}</div>
+        <div class="sc-meta">${bar}${progressHtml(o, gauge, false)}${time}</div>
       </div></div>`;
   }
   const action = view.panel ? ` data-action="sc-why" data-id="${o.id}"` : '';
@@ -189,7 +228,7 @@ export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: Objecti
     <div class="sc-obj-body">
       <div class="sc-obj-title">${role}<span class="sc-obj-name">${esc(o.title)}</span>${crit}${state}${fold}</div>
       ${view.plan ? '' : bar}
-      <div class="sc-meta">${view.plan ? '' : `<b>${progressText(o)}</b>`}${time}<span class="sc-reward" title="Награда">🎁 ${esc(rewardText(o))}</span></div>
+      <div class="sc-meta">${view.plan ? '' : progressHtml(o, gauge, true)}${time}<span class="sc-reward" title="Награда">🎁 ${esc(rewardText(o))}</span></div>
       ${needsHtml(g, o)}
       ${now ? `<small class="sc-now">${esc(now)}</small>` : ''}
       ${view.why ? `<p class="sc-why">${esc(o.why)}</p>` : ''}
@@ -199,7 +238,7 @@ export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: Objecti
 
 /**
  * Потребности города у задания «снабжать»: значки грузов, закрытые в этом месяце — яркие, остальные — бледные;
- * в подсказке — сколько уже привезли. Рядом — сколько закрыто из нужных.
+ * в подсказке — сколько уже привезли. Сколько закрыто из нужных — в подписи шкалы (monthGauge).
  */
 function needsHtml(g: Game, o: Objective): string {
   const p = o.params;
@@ -211,7 +250,8 @@ function needsHtml(g: Game, o: Objective): string {
     const got = Math.min(TOWN_NEED, Math.round(t.supplied[c] ?? 0));
     return `<span class="sc-need${closed.has(c) ? ' ok' : ''}" data-tip="${esc(`${CARGO[c].name}: ${got} из ${TOWN_NEED} в этом месяце`)}">${cargoIcon(c, 18, false)}</span>`;
   });
-  return `<div class="sc-needs">${icons.join('')}<b data-tip="Закрыто в этом месяце из нужных">${closed.size} / ${supplyNeeds(p, t)}</b></div>`;
+  // Сколько закрыто из нужных — в подписи шкалы над значками.
+  return `<div class="sc-needs">${icons.join('')}</div>`;
 }
 
 /** Этапы A → B → C: пройденные с галочкой, текущий выделен. */
@@ -439,8 +479,10 @@ function compactHtml(sc: Scenario): string {
   const letter = `<b class="sc-letter" title="Этап ${LETTERS[sc.state.phase]}: ${sc.phaseInfo.name}">${LETTERS[sc.state.phase]}</b>`;
   if (!main) return `<div class="sc-compact">${letter}<span class="muted">Главная цель выполнена</span></div>`;
   const left = sc.monthsLeft(main);
-  return `<div class="sc-compact" title="${esc(main.title)} · ${progressText(main)}">${letter}${objectiveIcon(main, 18)}
-    <div class="bar sc-bar"><div style="width:${(fraction(main) * 100).toFixed(1)}%"></div></div>
+  const gauge = gaugeOf(sc, main);
+  const progress = gauge ? `${gauge.text} в этом месяце` : progressText(main);
+  return `<div class="sc-compact" title="${esc(main.title)} · ${esc(progress)}">${letter}${objectiveIcon(main, 18)}
+    <div class="bar sc-bar"><div style="width:${((gauge ? gauge.fraction : fraction(main)) * 100).toFixed(1)}%"></div></div>
     ${left !== null ? `<span class="sc-left ${left < 2 ? 'urgent' : ''}">⏳ ${leftText(left)}</span>` : ''}</div>`;
 }
 

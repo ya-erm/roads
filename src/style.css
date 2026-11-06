@@ -4215,6 +4215,41 @@ button.small.with-ic {
   font-variant-numeric: tabular-nums;
 }
 
+/* Месячное задание: «в этом месяце» к подписи шкалы, второе условие и месяцы подряд точками. */
+.sc-meta .sc-month {
+  margin-left: -6px;
+}
+
+.sc-cond {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.sc-cond.ok {
+  color: #2e9d57;
+}
+
+.sc-cond.bad {
+  color: var(--danger);
+}
+
+.sc-streak {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.sc-streak i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d9e0e7;
+}
+
+.sc-streak i.on {
+  background: #2e9d57;
+}
+
 .sc-left {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;

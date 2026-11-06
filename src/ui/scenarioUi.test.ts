@@ -137,6 +137,26 @@ describe('Свёрнутые цели в панели сценария', () => {
   });
 });
 
+describe('Шкала месячной цели в панели сценария', () => {
+  it('полоска и подпись — сколько перевезено в этом месяце, месяцы подряд — точками; в свёрнутой — то же кратко', () => {
+    const { game, sc } = scenarioWithOffers();
+    const o = sc.addObjective({ kind: 'throughput', amount: 470, costRatio: 0.8, months: 3 }, { role: 'goal', phase: 0, months: 6, why: 'Проверка шкалы.', reward: { money: 1000 } });
+    o.streak = o.progress = 1;
+    sc.state.stats.units = 235;
+    const html = scenarioPanelHtml(game, view());
+    const row = html.slice(html.indexOf(`data-id="${o.id}"`));
+    expect(row).toContain('style="width:50.0%"');
+    expect(row).toContain('235 / 470 ед.</b><span class="sc-month">в этом месяце</span>');
+    expect(row).not.toContain('1 / 3 мес.');
+    expect(row).toMatch(/<span class="sc-streak"[^>]*><i class="on"><\/i><i class=""><\/i><i class=""><\/i><\/span>/);
+    toggleFold(o);
+    const folded = scenarioPanelHtml(game, view());
+    const frow = folded.slice(folded.indexOf(`data-id="${o.id}"`));
+    expect(frow).toContain('235 / 470 ед.</b><span class="sc-streak"');
+    expect(frow.slice(0, frow.indexOf('</div></div>'))).not.toContain('в этом месяце');
+  });
+});
+
 describe('Брифинг сценария', () => {
   it('«Начать» и подсказка — в подвале, вне прокручиваемого содержимого', () => {
     const { game } = scenarioWithOffers();
