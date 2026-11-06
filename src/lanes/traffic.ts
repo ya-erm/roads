@@ -4,7 +4,7 @@ import { lerp as lerpNum } from '../core/math';
 import { rightNormal, scale, add, angleDiff, angleOf, dot, type Vec } from '../core/vec';
 import { follow, hitchOf, jointOf, steerBase } from '../sim/body';
 import type { Blinker, Vehicle, VehicleSpec } from '../sim/vehicle';
-import { GLane, GLink, GMove, GNode, LaneGraph } from './graph';
+import { GLane, GLink, GMove, GNode, LaneGraph, LightPhase } from './graph';
 import { bodyOnEnds, Corridor, layerOf } from './model';
 import { findLaneRoute } from './routing';
 import { onSolid, solidEnds } from './solid';
@@ -67,6 +67,14 @@ interface LanePlan {
 const COURTESY = 40;
 /** Бронь узла машиной, которой ехать до него дольше, — «мягкая»: её можно перехватить. */
 const SOFT_GRANT = 3.5;
+/**
+ * Налево на общий зелёный: встречный ближе стольких секунд до узла — ждём (не меньше SOFT_GRANT: иначе поворачивающий
+ * перехватит бронь встречного, и тот затормозит на свой зелёный). Прождав 10 с, а потом 25 с, — соглашаемся на окно
+ * поменьше: при плотном встречном потоке иначе не повернуть вовсе.
+ */
+const lightYieldWindow = (waited: number) => (waited > 25 ? 2.2 : waited > 10 ? 2.8 : 3.5);
+/** Не дождавшийся окна налево поворачивает на жёлтый (встречные уже стоят), если он не дальше стольких метров от стоп-линии. */
+const LAST_CALL_REACH = 12;
 
 /** Поворотник перед узлом включают не ближе стольких метров до него… */
 const SIGNAL_AHEAD = 50;
@@ -915,11 +923,17 @@ export class LaneTraffic {
     }
   }
 
-  /** За сколько до узла просить проезд: без конфликтов и на главной — заранее, иначе ближе. */
+  /**
+   * За сколько до узла просить проезд: без конфликтов, на главной и на зелёный, когда уступать некому (прямо, направо,
+   * по стрелке), — заранее, чтобы не тормозить перед стоп-линией; иначе ближе.
+   */
   private grantLookahead(veh: Vehicle, m: GMove): number {
     const stop = (veh.v * veh.v) / (2 * IDM.brake * 0.6) + 6;
     const node = this.graph.nodes.get(m.node!)!;
-    const through = !node.lights && (m.conflicts.size === 0 || node.priorityLanes.has(m.inLane));
+    const L = node.lights;
+    const through = L
+      ? this.lightAllows(node, m) && !L.phases[L.phase].yields.get(m.key)?.size
+      : m.conflicts.size === 0 || node.priorityLanes.has(m.inLane);
     if (!through) return Math.max(stop, 8);
     const sStar = IDM.minGap + veh.v * IDM.headway + (veh.v * veh.v) / (2 * Math.sqrt(veh.accel * IDM.brake));
     return Math.max(stop, sStar * 3, 8);
@@ -1091,20 +1105,30 @@ export class LaneTraffic {
 
   // ---------- Проезд узлов ----------
 
-  /** Зелёный ли этой полосе въезда (без светофора — всегда). */
+  /** Зелёный ли этому манёвру (без светофора — всегда). */
   private lightAllows(node: GNode, m: GMove): boolean {
     const L = node.lights;
     if (!L) return true;
-    return !L.clearing && L.phases[L.phase].includes(m.inLane);
+    return !L.clearing && L.phases[L.phase].moves.has(m.key);
   }
 
-  /** Сколько машин подъезжает к узлу по полосам фазы. */
-  private phaseDemand(phase: number[]): number {
+  /**
+   * Сколько машин у узла (ближе 70 м к стоп-линии) хотят проехать по манёврам фазы, которым сейчас не зелёный
+   * (now — манёвры, что зелёные сейчас: их уже пропускают, ради них переключаться незачем).
+   */
+  private phaseDemand(node: GNode, phase: LightPhase, now?: Set<string>): number {
     let demand = 0;
-    for (const id of phase) {
-      const lane = this.graph.lanes.get(id);
-      if (!lane) continue;
-      for (const veh of lane.vehicles) if (lane.length - veh.s < 70) demand++;
+    const lanes = new Set<number>();
+    for (const key of phase.moves) {
+      const m = this.graph.moves.get(key);
+      if (m) lanes.add(m.inLane);
+    }
+    for (const id of lanes) {
+      const lane = this.graph.lanes.get(id)!;
+      for (const veh of lane.vehicles) {
+        if (lane.length - veh.s >= 70) continue;
+        if (this.potentialMovements(veh, node.id).some((k) => phase.moves.has(k) && !now?.has(k))) demand++;
+      }
     }
     return demand;
   }
@@ -1122,18 +1146,32 @@ export class LaneTraffic {
         L.clearing = false;
         for (let i = 1; i <= L.phases.length; i++) {
           const p = (L.phase + i) % L.phases.length;
-          if (!adaptive || this.phaseDemand(L.phases[p]) > 0 || i === L.phases.length) {
+          if (!adaptive || this.phaseDemand(node, L.phases[p]) > 0 || i === L.phases.length) {
             L.phase = p;
             break;
           }
         }
-        L.timer = settings?.greens?.[L.phase] ?? LIGHTS.green;
-      } else if (adaptive && !L.phases.some((p, i) => i !== L.phase && this.phaseDemand(p) > 0)) {
+        L.timer = L.phases[L.phase].green;
+      } else if (adaptive && !L.phases.some((p, i) => i !== L.phase && this.phaseDemand(node, p, L.phases[L.phase].moves) > 0)) {
         L.timer = 2;
       } else {
         L.clearing = true;
         L.timer = LIGHTS.clearance;
+        this.stopForYellow(node);
       }
+    }
+  }
+
+  /**
+   * Загорелся жёлтый: кто получил проезд заранее, но ещё далеко и успевает спокойно остановиться, — останавливается
+   * (иначе въедет на красный и задержит тех, кому уже зелёный). Близкие и уже въехавшие — проезжают.
+   */
+  private stopForYellow(node: GNode): void {
+    for (const r of [...node.reserved]) {
+      if (r.onMovement || !r.granted) continue;
+      const lane = this.currentLane(r);
+      const ahead = lane ? lane.length - r.s : 0;
+      if (r.v < 1 || ahead > (r.v * r.v) / IDM.brake + 1) this.revokeGrant(r);
     }
   }
 
@@ -1145,7 +1183,21 @@ export class LaneTraffic {
       veh.requestTime = this.time;
       node.waiting.push(veh);
     }
-    veh.ready = this.lightAllows(node, m) && this.hasSpace(node, m, veh);
+    const L = node.lights;
+    // Фаза, по которой решается, кто кому уступает; на жёлтом — та, что кончается.
+    const phase = L ? L.phases[L.phase] : null;
+    // Налево на общий зелёный не дождались окна — стоящие у стоп-линии заканчивают поворот на жёлтый, пока встречные
+    // стоят (иначе при плотном встречном потоке не повернуть никогда), — если успевают пересечь её до красного.
+    const atLine = () => {
+      const lane = this.currentLane(veh);
+      const ahead = lane ? lane.length - veh.s : Infinity;
+      // Когда доедет до линии — с запасом: разгоняется вполсилы (перед поворотом не разгоняются вовсю).
+      const a = veh.accel / 2;
+      const t = (Math.sqrt(veh.v * veh.v + 2 * a * ahead) - veh.v) / a;
+      return ahead < LAST_CALL_REACH && t < L!.timer - 0.2;
+    };
+    const lastCall = !!L && L.clearing && !!phase!.yields.get(m.key)?.size && atLine();
+    veh.ready = (this.lightAllows(node, m) || lastCall) && this.hasSpace(node, m, veh);
     if (!veh.ready) return false;
     // Подстраховка от зависших броней: держать узел может только машина на манёвре
     // или первая в своей полосе с действующим разрешением.
@@ -1166,8 +1218,14 @@ export class LaneTraffic {
       if (!ok && w.waitingAt === node.id) w.waitingAt = null;
       return ok;
     });
+    const isPriority = node.priorityLanes.has(m.inLane);
+    const waited = this.time - veh.requestTime;
+    // Кому уступаем по светофору (налево на общий зелёный — встречным). На жёлтом встречные стоят — некому.
+    const yieldTo = phase && !lastCall ? phase.yields.get(m.key) : undefined;
+    const window = lightYieldWindow(waited);
     // Бронь того, кто ещё далеко, — не помеха: если сами успеем проехать, его бронь снимем,
     // и он попросит проезд заново (на главной — заранее, чтобы не тормозить, поэтому брони там дальние).
+    // Тому, кому уступаем (встречный на зелёный), — «далеко» по окну уступания, а не раньше.
     const soft: Vehicle[] = [];
     for (const r of node.reserved) {
       const rKey = r.onMovement ?? r.granted;
@@ -1185,21 +1243,32 @@ export class LaneTraffic {
         const rm = this.graph.moves.get(r.onMovement);
         if (rm && rm.length - r.s + r.length + IDM.minGap < m.length - 4) continue;
       }
-      if (!r.onMovement && this.etaToNode(r) > SOFT_GRANT && this.etaToNode(veh) < 1.5) {
+      if (!r.onMovement && this.etaToNode(r) > (yieldTo?.has(rKey) ? window : SOFT_GRANT) && this.etaToNode(veh) < 1.5) {
         soft.push(r);
         continue;
       }
       return false;
     }
-    const isPriority = node.priorityLanes.has(m.inLane);
+    if (yieldTo?.size) {
+      const lanes = new Set([...yieldTo].map((k) => this.graph.moves.get(k)?.inLane ?? -1));
+      if (this.mustYield(node, m, lanes, yieldTo, window)) return false;
+    }
     // Совсем заждавшегося на второстепенной пропускают: главная ждёт его по брони узла, как обычного.
-    const waited = this.time - veh.requestTime;
-    if (node.priorityLanes.size && !isPriority && waited < COURTESY && this.mustYield(node, m, waited)) return false;
+    if (!L && node.priorityLanes.size && !isPriority && waited < COURTESY && this.mustYield(node, m, node.priorityLanes, null, waited > 15 ? 1.8 : 2.8)) return false;
     for (const w of node.waiting) {
-      if (w === veh || !w.ready || w.requestTime >= veh.requestTime - 0.05) continue;
-      if (isPriority && !node.priorityLanes.has(w.lane)) continue;
+      if (w === veh || !w.ready) continue;
       const wKey = w.planned;
-      if (wKey && wKey !== m.key && m.conflicts.has(wKey)) return false;
+      if (!wKey || wKey === m.key || !m.conflicts.has(wKey)) continue;
+      if (phase) {
+        // Светофор: кто уступает нам (налево навстречу) — не помеха; кому уступаем мы — помеха, даже подъехав позже.
+        if (phase.yields.get(wKey)?.has(m.key)) continue;
+        if (yieldTo?.has(wKey)) {
+          if (this.etaToNode(w) <= window) return false;
+          continue;
+        }
+      } else if (isPriority && !node.priorityLanes.has(w.lane)) continue;
+      if (w.requestTime >= veh.requestTime - 0.05) continue;
+      return false;
     }
     for (const r of soft) this.revokeGrant(r);
     veh.granted = m.key;
@@ -1217,20 +1286,20 @@ export class LaneTraffic {
   }
 
   /**
-   * Уступить главной: кто-то на ней въедет в узел наперерез раньше, чем через window секунд.
-   * Ползущие в своей очереди — не помеха: если доползут, их задержит бронь узла. Долго ждущий
-   * соглашается на меньший разрыв.
+   * Уступить: кто-то с полос lanes (главной или встречной на светофоре) въедет в узел наперерез раньше, чем через
+   * window секунд, — по манёвру из only (null — по любому). Ползущие в своей очереди — не помеха: если доползут,
+   * их задержит бронь узла. Долго ждущий соглашается на меньший разрыв (window меньше).
    */
-  private mustYield(node: GNode, m: GMove, waited: number): boolean {
-    const window = waited > 15 ? 1.8 : 2.8;
+  private mustYield(node: GNode, m: GMove, lanes: Iterable<number>, only: Set<string> | null, window: number): boolean {
     const checked = new Set<number>();
-    for (const pl of node.priorityLanes) {
+    for (const pl of lanes) {
       for (const { veh, distance } of this.upstream(pl, 120)) {
         if (checked.has(veh.id)) continue;
         checked.add(veh.id);
         if (veh.v < 1 && !veh.onMovement) continue;
         if (distance > 8 && distance / veh.v > window) continue;
         for (const key of this.potentialMovements(veh, node.id)) {
+          if (only && !only.has(key)) continue;
           const kind = m.conflicts.get(key);
           if (kind && kind !== 'diverge') return true;
         }

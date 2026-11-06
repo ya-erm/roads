@@ -127,8 +127,11 @@ import { type Pref, prefOn, setPref } from './prefs';
 import { settingsHtml, settingsSvg } from './settingsMenu';
 import { adviceOf, type Advice, type AdviceFix } from '../game/advisor';
 import { stationWarnings } from '../game/stationWarnings';
+import { storageSlots } from '../game/warehouses';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
+import { type PhaseFlash, phasesHtml, phaseTurns } from './phasesUi';
+import { addPhase, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, toggleTurn, withLeftArrows } from '../lanes/lights';
 import { installTips } from './tipFloat';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
@@ -358,6 +361,8 @@ export class Hud {
   private lastPanel = '';
   /** Кнопка мыши зажата над панелью: не перерисовываем, иначе клик потеряется. */
   private pressing = false;
+  /** Отказ дать зелёный в фазе светофора: пересекающиеся потоки мигают красным до until. */
+  private phaseFlash: (PhaseFlash & { until: number }) | null = null;
   /** Скорость игры до открытия меню — к ней вернёмся по «Продолжить». */
   private speedBeforeMenu = 1;
   private lastConfirm = '';
@@ -1261,9 +1266,20 @@ export class Hud {
         break;
       }
       case 'st-depots': {
+        // «−»: последний склад-здание, а у старых сохранений — пристройка.
         const st = g.stations.get(Number(d.id));
-        const problem = st && g.setStationDepots(st.id, (st.depots ?? 0) + Number(d.d));
+        const last = st?.warehouses?.[st.warehouses.length - 1];
+        const problem = last ? g.removeWarehouse(last) : st && g.setStationDepots(st.id, (st.depots ?? 0) + Number(d.d));
         if (problem) g.notify(problem);
+        break;
+      }
+      case 'st-warehouse': {
+        // «+»: склад ставят на карте — зона вокруг станции видна, клик в ней ставит здание; повторно — отмена.
+        const id = Number(d.id);
+        const st = g.stations.get(id);
+        if (st && storageSlots(st) >= STORAGE.max) g.notify(`Больше ${STORAGE.max} складов нельзя`);
+        else if (c.placingWarehouse === id) c.placingWarehouse = null;
+        else c.startWarehouse(id);
         break;
       }
       case 'toggle-colors':
@@ -1383,20 +1399,48 @@ export class Hud {
       case 'jn-adaptive':
       case 'jn-main':
       case 'jn-lanes-reset':
+      case 'jn-ph-turn':
+      case 'jn-ph-add':
+      case 'jn-ph-del':
+      case 'jn-ph-move':
+      case 'jn-ph-arrows':
+      case 'jn-ph-auto':
       case 'jn-ban': {
         // Настройки перекрёстка — тоже стройка: их можно отменить Ctrl+Z.
         const id = Number(d.id);
         const n = g.roads.net.nodes.get(id);
         if (!n) break;
+        const i = Number(d.i);
+        if (d.action === 'jn-ph-turn') {
+          // Зелёный поперёк другого зелёного той же фазы — нельзя: оба потока мигают красным.
+          const ph = g.junctionInfo(id)?.phases[i];
+          const clash = ph && !ph.go.includes(d.turn!) ? g.phaseClashes(id, ph.go, d.turn!) : [];
+          this.phaseFlash = clash.length ? { node: id, i, turns: [d.turn!, ...clash], until: performance.now() + 1600 } : null;
+          if (clash.length) {
+            g.notify('Нельзя: эти потоки пересекаются — дайте им зелёный в разных фазах');
+            break;
+          }
+        }
         g.checkpoint('настройка перекрёстка');
         if (d.action === 'jn-lights') g.toggleLights(id);
         else if (d.action === 'jn-lanes-reset') g.resetLanes(id);
         else if (d.action === 'jn-adaptive') g.setJunction(id, { adaptive: d.v === '1' });
+        else if (d.action === 'jn-ph-turn') g.editPhases(id, (s) => toggleTurn(s, i, d.turn!));
+        else if (d.action === 'jn-ph-add') g.editPhases(id, (s) => addPhase(s));
+        else if (d.action === 'jn-ph-del') g.editPhases(id, (s) => removePhase(s, i));
+        else if (d.action === 'jn-ph-move') g.editPhases(id, (s) => movePhase(s, i, Number(d.d)));
+        else if (d.action === 'jn-ph-auto') g.resetPhases(id);
+        else if (d.action === 'jn-ph-arrows') {
+          // Левые повороты, что сейчас уступают встречным, — по фазам.
+          const info = g.junctionInfo(id);
+          const lefts = new Set(info ? phaseTurns(info).filter((t) => t.kind === 'left').map((t) => t.key) : []);
+          g.editPhases(id, (s) => withLeftArrows(s, info?.phases.map((ph) => ph.yields.filter((k) => lefts.has(k))) ?? []));
+        } else if (d.action === 'jn-green' && n.phases?.length) g.editPhases(id, (s) => stepGreen(s, i, Number(d.d)));
         else if (d.action === 'jn-green') {
+          // Фазы «Авто» остаются «Авто»: меняется только их зелёный.
           const count = g.junctionInfo(id)?.phases.length ?? 0;
-          const greens = Array.from({ length: count }, (_, i) => n.greens?.[i] ?? LIGHTS.green);
-          const i = Number(d.i);
-          greens[i] = Math.max(4, Math.min(40, greens[i] + Number(d.d)));
+          const greens = Array.from({ length: count }, (_, k) => n.greens?.[k] ?? LIGHTS.green);
+          greens[i] = Math.max(GREEN_MIN, Math.min(GREEN_MAX, greens[i] + Number(d.d)));
           g.setJunction(id, { greens });
         } else if (d.action === 'jn-main') {
           g.setJunction(id, { mainPair: mainChoice(d.v) });
@@ -1655,7 +1699,9 @@ export class Hud {
         : c.tool === 'road' && c.roadMode === 'lane'
           ? 'Проект (P): сначала спланировать полосы, съезды и въезды — сколько угодно, дорога пока как есть; потом построить разом'
           : `Проект (P): нарисовать ${rail ? 'пути' : 'дорогу'} целиком, настроить узлы и перья, потом построить разом. Пока не построен — бесплатно`;
-    return `<button class="opt-chip ${c.projectOn ? 'active' : ''}" data-action="project" title="${hint}">
+    // Проект дорог один на «Строить», «Двигать» и «Полосу»: смена режима его не выключает.
+    const shared = rail ? '' : '. Проект общий: в «Строить», «Двигать» и «Полосе» — те же участки и правки, смена режима его не выключает';
+    return `<button class="opt-chip ${c.projectOn ? 'active' : ''}" data-action="project" title="${hint}${shared}">
       ${projectSvg(20, 15)}<span>Проект</span><kbd>P</kbd></button>`;
   }
 
@@ -1665,47 +1711,39 @@ export class Hud {
    */
   private projectBarHtml(): string {
     const c = this.controller;
-    if (c.moveProjectMode || c.laneProjectMode) return this.moveProjectBarHtml();
-    if (!c.projectMode) return '';
-    const { segs, plan } = c.projectSummary();
-    if (!segs) {
+    // Проект дорог — общий у «Строить», «Двигать» и «Полосы»: одна плашка, те же участки и правки в любом из них.
+    const kept = c.projectKept;
+    if (!c.projectOn && !kept) return '';
+    const { segs, edits, plan } = c.projectSummary();
+    // Что в проекте: новые участки и правки построенных дорог.
+    const parts = [segs ? `${segs} уч. · ${Math.round(plan.length)} м` : '', edits ? `${edits} ${edits === 1 ? 'правка' : edits < 5 ? 'правки' : 'правок'} дорог` : ''].filter(Boolean).join(' · ');
+    if (kept) {
+      // «Перестроить» в проект не входит: строит сразу, а проект ждёт (не пропал).
+      const hint = 'Перестройка в проект не входит — клик по дороге перестраивает её сразу. Проект сохранён: N, M, L или P — вернуться к нему';
+      const what = parts ? `${parts} — сохранён` : 'пуст';
+      return `<div class="project-bar" title="${hint}">${projectSvg(30, 22)}<b>Проект</b><span class="muted">${what} · «Перестроить» — вне проекта · N, M, L — к проекту</span></div>`;
+    }
+    if (!segs && !edits) {
+      const mode = c.tool === 'road' ? c.roadMode : 'build';
       const hint =
-        'Кликайте по точкам — участки рисуются, но не строятся и не стоят денег. Узлы (квадраты) и перья тяните мышью, середину участка — выгнуть, клик по ней — новый узел. Delete — убрать узел, Ctrl+Z — шаг назад, Enter — построить';
-      return `<div class="project-bar" title="${hint}">${projectSvg(30, 22)}<b>Проект</b><span class="muted">кликайте по точкам · узлы и перья — тянуть · Enter — построить</span></div>`;
+        mode === 'move'
+          ? 'Тяните узлы, перья и середины дорог — перенос рисуется проектом, а дорога остаётся как есть. Тот же проект — в «Строить» и «Полосе». Ctrl+Z — шаг назад, Enter — построить'
+          : mode === 'lane'
+            ? 'Тяните полосы, съезды и въезды или кликайте по точкам — они рисуются проектом, а дорога остаётся как есть. Тот же проект — в «Строить» и «Двигать». Ctrl+Z — шаг назад, Enter — построить'
+            : 'Кликайте по точкам — участки рисуются, но не строятся и не стоят денег. Узлы (квадраты) и перья тяните мышью, середину участка — выгнуть, клик по ней — новый узел. Построенную дорогу тоже можно тянуть — её правка войдёт в проект. Delete — убрать узел, Ctrl+Z — шаг назад, Enter — построить';
+      const what = mode === 'move' ? 'тяните узлы и перья · дорога пока как есть' : mode === 'lane' ? 'тяните полосы и съезды · дорога пока как есть' : 'кликайте по точкам · узлы и перья — тянуть';
+      return `<div class="project-bar" title="${hint}">${projectSvg(30, 22)}<b>Проект</b><span class="muted">${what} · Enter — построить</span></div>`;
     }
     const raze = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
     const reason = esc(plan.reason ?? 'Так не построить');
     // Невалидное в проекте рисуется и правится, но построить — только исправленное.
     const why = plan.ok ? '' : `<span class="project-why" title="Сначала исправьте: ${reason}">⚠ Сначала исправьте: ${reason}</span>`;
-    return `<div class="project-bar">${projectSvg(30, 22)}<b>Проект</b><span class="muted">${segs} уч. · ${Math.round(plan.length)} м${raze}</span>
-      <b class="project-total ${plan.ok ? '' : 'bad'}">${money(plan.cost)}</b>${why}
-      <button class="primary small" data-action="project-build" ${plan.ok ? '' : 'disabled'} title="${plan.ok ? 'Построить весь проект (Enter). Ctrl+Z — отменить стройку' : `Сначала исправьте: ${reason}`}">Построить</button>
-      <button class="small" data-action="project-cancel" title="Стереть нарисованное (Ctrl+Z вернёт)">Отменить</button></div>`;
-  }
-
-  /** Проект перемещения — плашка над панелью: сколько правок, цена (возврат — с плюсом), что не так, «Построить» и «Отменить». */
-  private moveProjectBarHtml(): string {
-    const c = this.controller;
-    const { edits, plan } = c.moveProjectSummary();
-    // Тот же проект правок — у «Полосы»: полосы, съезды и въезды.
-    const lanes = c.laneProjectMode;
-    const title = lanes ? 'Проект полос' : 'Проект переноса';
-    if (!edits || !plan) {
-      const hint = lanes
-        ? 'Тяните полосы, съезды и въезды или кликайте по точкам — они рисуются проектом, а дорога остаётся как есть. Можно сколько угодно, Ctrl+Z — шаг назад, Enter — построить'
-        : 'Тяните узлы, перья и середины дорог — перенос рисуется проектом, а дорога остаётся как есть. Можно поправлять сколько угодно, Ctrl+Z — шаг назад, Enter — построить';
-      const what = lanes ? 'тяните полосы и съезды' : 'тяните узлы и перья';
-      return `<div class="project-bar" title="${hint}">${projectSvg(30, 22)}<b>${title}</b><span class="muted">${what} · дорога пока как есть · Enter — построить</span></div>`;
-    }
-    const raze = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
-    const reason = esc(plan.reason ?? (lanes ? 'Так не построить' : 'Так не передвинуть'));
-    // Невалидное в проекте рисуется и правится, но построить — только исправленное.
-    const why = plan.ok ? '' : `<span class="project-why" title="Сначала исправьте: ${reason}">⚠ Сначала исправьте: ${reason}</span>`;
+    // Перенос или укороченная полоса бывает дешевле, чем было, — тогда возврат, с плюсом.
     const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
-    return `<div class="project-bar">${projectSvg(30, 22)}<b>${title}</b><span class="muted">${edits} ${edits === 1 ? 'правка' : edits < 5 ? 'правки' : 'правок'}${raze}</span>
+    return `<div class="project-bar">${projectSvg(30, 22)}<b>Проект</b><span class="muted">${parts}${raze}</span>
       <b class="project-total ${plan.ok ? '' : 'bad'}">${price}</b>${why}
-      <button class="primary small" data-action="project-build" ${plan.ok ? '' : 'disabled'} title="${plan.ok ? `${lanes ? 'Построить полосы' : 'Перенести'}, как в проекте (Enter). Ctrl+Z — отменить` : `Сначала исправьте: ${reason}`}">Построить</button>
-      <button class="small" data-action="project-cancel" title="Сбросить проект — дорога остаётся как есть">Отменить</button></div>`;
+      <button class="primary small" data-action="project-build" ${plan.ok ? '' : 'disabled'} title="${plan.ok ? 'Построить весь проект — новые участки и правки дорог (Enter). Ctrl+Z — отменить стройку' : `Сначала исправьте: ${reason}`}">Построить</button>
+      <button class="small" data-action="project-cancel" title="Стереть проект — и участки, и правки дорог (Ctrl+Z вернёт)">Отменить</button></div>`;
   }
 
   /** Развязки: кольцо на перекрёстке, готовый или свой шаблон, копия куска дорог. */
@@ -2061,7 +2099,8 @@ export class Hud {
     const tail =
       c.roadMode === 'build'
         ? this.shapeHtml()
-        : `<div class="opt-group narrow"><div class="opt-title">Перестроить</div>
+        : // Проект дорог в «Перестроить» не правится, но хранится — плашка над панелью об этом.
+          `${this.projectBarHtml()}<div class="opt-group narrow"><div class="opt-title">Перестроить</div>
           <p class="muted">Кликните по дороге, чтобы заменить её выбранным типом, полосами и скоростью. Повторный клик по односторонней дороге разворачивает её.</p></div>`;
     return `<div class="opt-row">${sw}<div class="opt-group wide"><div class="opt-title">Тип дороги</div><div class="cards">${presets}</div></div></div>
       <div class="opt-row"><div class="opt-group"><div class="opt-title">Полосы <span class="price-tag">≈ ${money(specCost(s) * 100)} за 100 м</span></div>${lanes}</div>
@@ -2217,14 +2256,17 @@ export class Hud {
     const share = Math.min(1, stored / room);
     const bar = `<span class="store-bar ${g.stationFull(st) ? 'full' : ''}" data-tip="На складе ${stored} из ${room} ед.: продукция предприятий и груз для пересадки"><i style="width:${(share * 100).toFixed(1)}%"></i></span><b class="store-num">${stored} / ${room}</b>`;
     if (st.kind !== 'road') return `<div class="icon-row store-row"><span class="lbl2">${depotSvg(16)} Склад</span>${bar}</div>`;
-    const depots = st.depots ?? 0;
-    const more = g.stationDepotsPlan(st.id, depots + 1);
-    const less = depots > 0 ? g.stationDepotsPlan(st.id, depots - 1) : null;
-    const plusTip = more.ok ? `Пристроить склад: +${STORAGE.per} ед. места, площадка длиннее · ${money(STORAGE.cost)}` : (more.reason ?? '');
-    const minusTip = less ? (less.ok ? `Снести пристройку · вернём ${money(STORAGE.cost * COST.refundRatio)}` : (less.reason ?? '')) : 'Пристроек нет';
+    // «+» — поставить склад-здание рядом (режим размещения на карте), «−» — снести последний (или пристройку старого сохранения).
+    const slots = storageSlots(st);
+    const placing = this.controller.placingWarehouse === st.id;
+    const full = slots >= STORAGE.max;
+    const plusTip = full ? `Больше ${STORAGE.max} складов нельзя` : placing ? 'Кликните на карте рядом со станцией · Esc — отмена' : `Поставить склад рядом со станцией: +${STORAGE.per} ед. места · ${money(STORAGE.cost)}`;
+    const last = st.warehouses?.[st.warehouses.length - 1];
+    const lessProblem = last ? g.warehouseRemoveProblem(last) : (st.depots ?? 0) > 0 ? (g.stationDepotsPlan(st.id, (st.depots ?? 0) - 1).reason ?? null) : 'Складов нет';
+    const minusTip = lessProblem ?? `Снести склад · вернём ${money(STORAGE.cost * COST.refundRatio)}`;
     return `<div class="icon-row store-row"><span class="lbl2">${depotSvg(16)} Склад</span>${bar}
-      <span class="stepper depots"><button data-action="st-depots" data-id="${st.id}" data-d="-1" class="${less?.ok ? '' : 'off'}" ${less ? '' : 'disabled'} data-tip="${esc(minusTip)}">−</button><b data-tip="Пристроек-складов: ${depots} из ${STORAGE.max}">${depots}</b><button
-        data-action="st-depots" data-id="${st.id}" data-d="1" class="${more.ok ? '' : 'off'}" data-tip="${esc(plusTip)}" data-tip-end>+</button></span></div>`;
+      <span class="stepper depots"><button data-action="st-depots" data-id="${st.id}" data-d="-1" class="${lessProblem ? 'off' : ''}" ${slots ? '' : 'disabled'} data-tip="${esc(minusTip)}">−</button><b data-tip="Складов: ${slots} из ${STORAGE.max}">${slots}</b><button
+        data-action="st-warehouse" data-id="${st.id}" class="${full ? 'off' : placing ? 'active' : ''}" data-tip="${esc(plusTip)}" data-tip-end>+</button></span></div>`;
   }
 
   /** «!» у строки маршрута: проблема линии, станция не того вида или совет советника (с его заголовком в подсказке). */
@@ -2855,17 +2897,12 @@ export class Hud {
     let control = '';
     if (lights) {
       const adaptive = n.adaptive !== false;
-      const phases = info.phases
-        .map(
-          (p, i) => `<div class="phase ${p.active ? 'active' : ''}"><span class="ph-dirs">${p.approaches.map((a) => `<b title="${a.name}">${a.arrow}</b>`).join('')}</span>
-            <span class="muted">${p.approaches.map((a) => a.name).join(' + ')}</span>
-            <span class="stepper"><button data-action="jn-green" ${attrs} data-i="${i}" data-d="-2">−</button><b>${p.green} с</b><button data-action="jn-green" ${attrs} data-i="${i}" data-d="2">+</button></span></div>`,
-        )
-        .join('');
+      // Фазы — плитками со схемой перекрёстка (src/ui/phasesUi.ts); отказ дать зелёный мигает, пока не прошло время.
+      const flash = this.phaseFlash && this.phaseFlash.until > performance.now() ? this.phaseFlash : null;
       control = `<div class="rule-row"><span class="lbl2">Режим</span><div class="opts">
           <button class="opt ${adaptive ? 'active' : ''}" data-action="jn-adaptive" ${attrs} data-v="1" title="Пропускает пустые фазы и держит зелёный, пока никто не ждёт">Умный</button>
           <button class="opt ${!adaptive ? 'active' : ''}" data-action="jn-adaptive" ${attrs} data-v="0" title="Строго по кругу с заданным временем">По таймеру</button></div></div>
-        <div class="rule-row"><span class="lbl2">Фазы: кому зелёный</span>${phases}</div>`;
+        ${phasesHtml(info, id, flash)}`;
     } else if ((n.roundabout ?? null) === null && info.approaches.length >= 3) {
       const manual = n.mainPair;
       const isAuto = manual === undefined || manual === null;
@@ -3359,12 +3396,10 @@ export class Hud {
         if (problem) g.notify(problem);
         break;
       }
-      case 'depot': {
-        const st = g.stations.get(fix.station);
-        const problem = st && g.setStationDepots(st.id, (st.depots ?? 0) + 1);
-        if (problem) g.notify(problem);
+      case 'depot':
+        // «+ склад» — ставим здание склада рядом со станцией: режим размещения на карте.
+        this.controller.startWarehouse(fix.station);
         break;
-      }
       case 'loan':
         if (!g.takeLoan()) g.notify('Кредит уже на пределе');
         this.lastFinance = '';

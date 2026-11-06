@@ -11,6 +11,7 @@ import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
 import type { Game } from './game';
 import { type Line, MODELS, vehicleCapacity } from './transport';
+import { storageSlots } from './warehouses';
 
 export type AdviceKind =
   | 'debt'
@@ -283,7 +284,7 @@ function stations(game: Game, out: Advice[]): void {
     if (!st.serves.cargo || st.kind === 'stop' || !game.stationFull(st)) continue;
     const makers = game.industries.filter((i) => st.industryIds.includes(i.id) && i.producedLast > 0);
     if (!makers.length) continue;
-    const more = st.kind === 'road' && (st.depots ?? 0) < STORAGE.max;
+    const more = st.kind === 'road' && storageSlots(st) < STORAGE.max;
     // Продукцию отсюда не берёт ни один маршрут с машинами — склад тут ни при чём: нужен маршрут к получателю.
     const product = makers[0].info.produces;
     const name = CARGO[product].name;
@@ -298,7 +299,7 @@ function stations(game: Game, out: Advice[]): void {
       title: 'Склад станции полон',
       reason: `Склад станции полон: ${why}`,
       detail: taken
-        ? `«${st.name}»: ${stored} — продукции ${makers[0].name} некуда класть, завод не растёт. ${more ? 'Пристройте склад или добавьте машин на вывоз.' : 'Добавьте машин на вывоз.'}`
+        ? `«${st.name}»: ${stored} — продукции ${makers[0].name} некуда класть, завод не растёт. ${more ? 'Поставьте рядом склад или добавьте машин на вывоз.' : 'Добавьте машин на вывоз.'}`
         : `«${st.name}»: ${stored} «${name}», а ${here.length ? `маршруты отсюда её не берут — на их остановках «${name}» никто не принимает` : 'отсюда не ходит ни один маршрут'}. Проведите маршрут к получателю «${name}».`,
       station: st.id,
       industry: makers[0].id,

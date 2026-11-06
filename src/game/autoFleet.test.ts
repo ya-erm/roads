@@ -240,6 +240,10 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
       waiting = trucks.find((v) => game.spacingLeft(v) !== null);
     }
     expect(waiting).toBeDefined();
+    // Интервал начинается, когда предыдущая только что уехала и ещё выезжает со станции: даём ей освободить
+    // выезд (машина всё это время ждёт интервала), иначе и без ожидания новой машине некуда встать.
+    for (let t = 0; t < 4; t += 0.1) game.update(0.1);
+    expect(game.spacingLeft(waiting!)).not.toBeNull();
     const before = game.time;
     game.dispatchNow(waiting!.id);
     // Отпускает в ближайший же тик, не дожидаясь исходного срока.

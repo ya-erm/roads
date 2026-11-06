@@ -1,4 +1,5 @@
-import { RAIL_STATION, SNAP_PIXELS } from '../config';
+import { COST, RAIL_STATION, SNAP_PIXELS, STORAGE } from '../config';
+import { warehouseZone } from '../game/warehouses';
 import { CurveLUT, minRadius, offsetCubic, straightCubic } from '../core/bezier';
 import { add, angleOf, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { DrawMode, NetKind, RoadRequest, Snap } from '../game/build';
@@ -6,7 +7,7 @@ import { DEFAULT_RING, type RingOptions, type RingSize } from '../game/roads';
 import type { AreaContents, Game, LaneEnd, PastePlan, StationKind } from '../game/game';
 import { snapRails } from '../game/railFragment';
 import { type Beside, besideGhost, besideRun, besideTrack } from '../game/railEdit';
-import type { RoadPlan } from '../game/roadbuild';
+import type { NetEdit, RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
 import { deleteTemplate, getTemplate, saveTemplate } from '../game/templates';
 import { anchorAt, corridorUnder, edgeAt, handlePoints, laneEndAt, lanePortsNear, type LaneTip, laneTipAt, laneTipPos, laneUnder, newLaneFlow } from '../lanes/edit';
@@ -27,13 +28,13 @@ import type { RoadNode } from '../world/network';
 import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
 import { dirArrow, failText, laneFlowText, money, NO_MONEY, riseLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
-import { MoveProject } from '../game/moveProject';
+import type { MoveProject } from '../game/moveProject';
 import { onOldAxis } from '../game/roadbuild';
 import { mergeEdit, mergeProblem, splitEdit, splitProblem } from '../lanes/nodeEdit';
 import type { CornerHandle } from '../lanes/corners';
 import { corridorHalf } from '../world/worldgen';
 import { corridorCurveSigns, freshSignCorridors, staleSignCorridors } from '../game/roadProject';
-import { type DrawSettings, ProjectTools } from './projecttools';
+import { type DrawSettings, type ProjectTools, sharedRoadProject } from './projecttools';
 import { RailTools } from './railtools';
 import { markAt, warningMarks, type WarningMark } from '../game/stationWarnings';
 import { deckHeight, RoadTools } from './roadtools';
@@ -170,10 +171,11 @@ export class Controller {
   readonly railTools: RailTools;
   /** «Проект» в инструментах «Дорога» и «Ж/д»: рисуем, правим узлы и перья, строим разом. */
   readonly projectTools: ProjectTools;
-  /** «Дорога → Двигать» с «Проектом»: перенос сначала проектом, потом — разом. */
+  /**
+   * Правки построенных дорог в проекте дорог — «Двигать» (перенос), «Полоса» (полосы, съезды: дома отодвигаются) и
+   * протяжки построенных дорог в «Строить»: один проект с новыми участками, строится разом.
+   */
   readonly moveProject: MoveProject;
-  /** «Дорога → Полоса» с «Проектом»: полосы сначала проектом, потом — разом (дома у расширенной дороги отодвигаются). */
-  readonly laneProject: MoveProject;
   /** Прямая пути прилипла к продолжению или перпендикуляру — подпись у курсора. */
   private angleHint: string | null = null;
   /** Конец пути прилип рядом с другим путём: дуга приходит по этому направлению (параллельно ему). */
@@ -238,6 +240,8 @@ export class Controller {
   moving: TownBuilding | null = null;
   /** Станция, которую игрок переносит: силуэт прилипает к дорогам, как при постройке. */
   movingStation: number | null = null;
+  /** Ставим склад-здание этой станции: клик в зоне вокруг неё — склад (Esc — отмена). */
+  placingWarehouse: number | null = null;
   /** Настройка полос выбранного перекрёстка: полоса въезда, которую сейчас соединяем. */
   laneFrom: { seg: number; i: number } | null = null;
   /** Курсор на варианте главной дороги в карточке перекрёстка — карта показывает этот вариант. */
@@ -264,6 +268,8 @@ export class Controller {
   private left: { sx: number; sy: number; createdChain: boolean } | null = null;
   private keys = new Set<string>();
   private flash: { text: string; until: number } | null = null;
+  /** В проекте строительства дорог тянут построенную дорогу (узел, перо, середину) — правкой проекта. */
+  private builtDrag = false;
   private lastSpeed = 1;
 
   constructor(
@@ -273,9 +279,10 @@ export class Controller {
   ) {
     this.roadTools = new RoadTools(game);
     this.railTools = new RailTools(game);
-    this.projectTools = new ProjectTools(game);
-    this.moveProject = new MoveProject(game);
-    this.laneProject = new MoveProject(game, { shove: true, label: 'полоса' });
+    // Проект дорог — один: новые участки (projectTools) и правки построенных дорог (moveProject) строятся вместе.
+    const shared = sharedRoadProject(game);
+    this.projectTools = shared.tools;
+    this.moveProject = shared.edits;
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('mousedown', (e) => this.onDown(e));
     window.addEventListener('mousemove', (e) => this.onMove(e));
@@ -334,6 +341,7 @@ export class Controller {
   // ---------- Настройки ----------
 
   setTool(tool: Tool): void {
+    this.placingWarehouse = null;
     if (this.tool === 'line' && tool !== 'line') this.lineDraft = [];
     if (tool !== 'line') this.addStopTo = null;
     // Новая линия собирается с чистого листа: прежняя выбранная линия и объект не мешают.
@@ -743,9 +751,12 @@ export class Controller {
     return this.tool === 'road' && this.roadMode === 'lane' && this.projectTools.on.road;
   }
 
-  /** Проект правок сейчас: перемещения («Двигать») или полос («Полоса»); null — другой инструмент или «Проект» выключен. */
+  /**
+   * Правки построенных дорог общего проекта дорог, если их сейчас и рисуют («Двигать», «Полоса»); null — другой
+   * инструмент или «Проект» выключен.
+   */
   get editProject(): MoveProject | null {
-    return this.moveProjectMode ? this.moveProject : this.laneProjectMode ? this.laneProject : null;
+    return this.moveProjectMode || this.laneProjectMode ? this.moveProject : null;
   }
 
   /** «Проект» включён в том, что сейчас выбрано (стройка, путь, перенос дороги или полоса). */
@@ -753,30 +764,73 @@ export class Controller {
     return this.projectMode || this.moveProjectMode || this.laneProjectMode;
   }
 
+  /**
+   * «Дорога → Перестроить» при включённом «Проекте»: перестройка в проект не входит (строится сразу), а проект
+   * дорог хранится как есть — вернётся в «Строить», «Двигать» и «Полосе».
+   */
+  get projectKept(): boolean {
+    return this.tool === 'road' && this.roadMode === 'upgrade' && this.projectTools.on.road;
+  }
+
+  /** Какой проект правят сейчас: дорог (в любом режиме «Дороги» с «Проектом») или путей; null — «Проект» выключен. */
+  private get projectKind(): NetKind | null {
+    return this.projectMode ? this.netKind : this.editProject ? 'road' : null;
+  }
+
   /** «Проект» вкл/выкл (P): нарисованное остаётся, пока его не построят или не отменят. */
   toggleProject(): void {
+    // «Перестроить» проект не правит, но хранит: P — назад к нему, в «Строить» (он остаётся включённым).
+    if (this.projectKept) {
+      this.setRoadMode('build');
+      return;
+    }
     const move = this.tool === 'road' && (this.roadMode === 'move' || this.roadMode === 'lane');
     if (!this.projectAllowed && !move) {
       if (this.tool === 'rail') this.setRailMode('track');
       else this.setRoadMode('build');
     }
     const kind = this.netKind;
+    const g = this.game();
+    const rt = this.roadTools;
+    const turningOn = !this.projectTools.on[kind];
+    const drawing = this.projectAllowed;
+    // Что начато: обычная прокладка (начало и точка изгиба) или ветка проекта — переходит в другой режим.
+    const begun = kind === 'road' ? rt.start && { pos: rt.start.pos, level: rt.startLevel ?? 0, attach: rt.start.kind !== 'free', control: rt.control } : this.chain && { pos: this.chain.pos, level: this.chain.level, attach: this.chain.kind !== 'free', control: this.control };
+    const tip = drawing && !turningOn ? this.projectTools.tipPos(kind) : null;
+    const tipControl = this.projectTools.control;
     this.projectTools.stop(kind);
-    this.projectTools.on[kind] = !this.projectTools.on[kind];
+    this.projectTools.on[kind] = turningOn;
     this.chain = null;
     this.control = null;
-    this.roadTools.clear();
+    rt.clear();
+    if (drawing && turningOn && begun) {
+      // Начатая дорога (путь) — первым узлом проекта: протяжка к курсору — уже участок проекта.
+      this.projectTools.adopt(kind, begun.pos, begun.level, begun.attach, begun.control);
+    } else if (drawing && tip) {
+      // Выключили «Проект» посреди ветки: проект остаётся (вернётся с «Проектом»), обычная стройка — от того же места.
+      if (kind === 'road') {
+        rt.start = anchorAt(g.roads.net, tip.pos, 3, tip.level);
+        rt.control = tipControl;
+      } else {
+        this.chain = g.builder.snap(tip.pos, tip.level, 3);
+        this.chainTangent = g.builder.continuationTangent(this.chain);
+        this.control = tipControl;
+      }
+    }
     this.syncMoveBase();
     this.onChange();
   }
 
-  /** Проект перемещения или полос: тянут от сети с ним (иначе — от настоящей), полосы — в проект, а не строятся. */
+  /**
+   * Общий проект дорог: построенные дороги — с его правками (их тянут, к ним примыкают; иначе — настоящая сеть),
+   * полосы — правками в тот же проект, а не стройкой.
+   */
   private syncMoveBase(): void {
-    const ep = this.editProject;
-    this.roadTools.base = ep ? ep.net() : null;
+    this.roadTools.base = this.projectKind === 'road' ? this.moveProject.net() : null;
     const lanes = this.laneProjectMode;
-    this.roadTools.lanePrefix = lanes ? this.laneProject.edits : [];
-    this.roadTools.laneSink = lanes ? (edit) => this.laneProject.add(edit) : null;
+    this.roadTools.lanePrefix = lanes ? this.moveProject.edits : [];
+    // Полоса расширяет дорогу: дома у неё не сносим, а отодвигаем после стройки.
+    this.roadTools.laneSink = lanes ? (edit) => this.projectTools.addEdit(edit, true) : null;
   }
 
   /** Как рисуем сейчас: что, какой формы и на какой высоте. */
@@ -794,40 +848,30 @@ export class Controller {
 
   /** «Построить»: весь проект разом (Ctrl+Z отменит). */
   buildProject(): void {
-    const kind = this.netKind;
-    const ep = this.editProject;
-    const problem = ep ? ep.build() : this.projectTools.build(kind);
+    const kind = this.projectKind;
+    if (!kind) return;
+    // Проект дорог общий: в любом режиме «Дороги» — новые участки и правки построенных дорог, одним шагом Ctrl+Z.
+    const problem = this.projectTools.build(kind);
     if (problem) this.showError(problem);
-    else {
-      const done = ep === this.laneProject ? 'Полосы по проекту построены' : ep ? 'Перенос по проекту построен' : kind === 'rail' ? 'Проект пути построен' : 'Проект дороги построен';
-      this.game().notify(done);
-    }
+    else this.game().notify(kind === 'rail' ? 'Проект пути построен' : 'Проект дорог построен');
     this.roadTools.clear();
     this.syncMoveBase();
     this.onChange();
   }
 
-  /** «Отменить проект»: нарисованное — прочь (Ctrl+Z в проекте вернёт; проект перемещения и полос — просто сбрасывается). */
+  /** «Отменить проект»: и новые участки, и правки построенных дорог — прочь (Ctrl+Z в проекте вернёт). */
   discardProject(): void {
-    const ep = this.editProject;
-    if (ep) ep.clear();
-    else this.projectTools.discard(this.netKind);
+    const kind = this.projectKind ?? (this.projectKept ? 'road' : null);
+    if (!kind) return;
+    this.projectTools.discard(kind);
     this.roadTools.clear();
     this.syncMoveBase();
     this.onChange();
   }
 
-  /** Проект перемещения или полос: сколько правок и что выйдет — для панели. */
-  moveProjectSummary(): { edits: number; plan: RoadPlan | null } {
-    const ep = this.editProject;
-    const n = ep?.edits.length ?? 0;
-    return { edits: n, plan: n && ep ? ep.plan() : null };
-  }
-
-  /** Проект текущего инструмента: сколько участков и что выйдет — для панели. */
-  projectSummary(): { segs: number; plan: ReturnType<ProjectTools['plan']> } {
-    const kind = this.netKind;
-    return { segs: this.projectTools.project(kind).segs.length, plan: this.projectTools.plan(kind) };
+  /** Проект дорог или путей: сколько участков и правок построенных дорог и что выйдет — для панели. */
+  projectSummary(kind: NetKind = this.netKind): { segs: number; edits: number; plan: ReturnType<ProjectTools['plan']> } {
+    return { segs: this.projectTools.project(kind).segs.length, edits: this.projectTools.edits(kind).length, plan: this.projectTools.plan(kind) };
   }
 
   /** −/+: конец строящейся дороги на 2 м выше или ниже начала (включает «Авто»); у путей — уровень. */
@@ -891,6 +935,16 @@ export class Controller {
     this.laneFrom = null;
     this.mainHover = null;
     this.fleetHover = null;
+    // Выбрали что-то другое — склад этой станции больше не ставим.
+    if (sel?.type !== 'station' || sel.id !== this.placingWarehouse) this.placingWarehouse = null;
+    this.onChange();
+  }
+
+  /** Режим «поставить склад» станции id: зона вокруг неё — на карте, клик в ней ставит здание склада. */
+  startWarehouse(id: number): void {
+    this.setTool('select');
+    this.select({ type: 'station', id });
+    this.placingWarehouse = id;
     this.onChange();
   }
 
@@ -904,6 +958,7 @@ export class Controller {
     else if (this.spanStart) this.spanStart = null;
     else if (this.moving) this.moving = null;
     else if (this.movingStation !== null) this.movingStation = null;
+    else if (this.placingWarehouse !== null) this.placingWarehouse = null;
     else if (this.copyStart) this.copyStart = null;
     else if (this.pasteDrag) this.pasteDrag = null;
     else if (this.cancelPaste()) {
@@ -995,7 +1050,6 @@ export class Controller {
     this.lastSpeed = 1;
     this.projectTools.reset();
     this.moveProject.clear();
-    this.laneProject.clear();
     this.roadTools.base = null;
   }
 
@@ -1258,7 +1312,11 @@ export class Controller {
     this.syncMoveBase();
     // Проект ничего не строит: узел, перо или середину участка — тянуть, клик — решится при отпускании.
     if (this.projectMode) {
-      this.projectTools.down(this.netKind, p, this.snapRadius, (HANDLE_PX + 4) / this.camera.zoom);
+      const hr = (HANDLE_PX + 4) / this.camera.zoom;
+      this.projectTools.down(this.netKind, p, this.snapRadius, hr);
+      // Мимо проекта, но у построенной дороги (её узел, перо, середина) — её можно тянуть правкой того же проекта,
+      // как в «Двигать» (клик без протяжки — как раньше: узел проекта, примкнувший к ней).
+      this.builtDrag = this.netKind === 'road' && this.projectTools.pressedEmpty && this.projectTools.tip === null && this.roadTools.moveDown(p, this.snapRadius, hr, this.freeAim);
       return;
     }
     // Всё, что строит или сносит, можно отменить (Ctrl+Z): снимок до действия, итог — при отпускании кнопки.
@@ -1424,6 +1482,17 @@ export class Controller {
         break;
       }
       case 'select': {
+        if (this.placingWarehouse !== null) {
+          // Склад-здание станции — в зоне вокруг неё; поставили — снова её карточка.
+          const id = this.placingWarehouse;
+          const problem = g.buildWarehouse(id, p);
+          if (problem) this.showError(problem);
+          else {
+            this.placingWarehouse = null;
+            this.select({ type: 'station', id });
+          }
+          break;
+        }
         if (this.movingStation !== null) {
           // Перенос станции: на новое место, с выездом; маршруты идут через неё же.
           const id = this.movingStation;
@@ -1498,6 +1567,10 @@ export class Controller {
     const st = g.structureAt(p);
     if (st?.type === 'station') g.removeStation(st);
     else if (st?.type === 'building') g.demolishBuilding(st);
+    else if (st?.type === 'warehouse') {
+      const problem = g.removeWarehouse(st);
+      if (problem) this.showError(problem);
+    }
     else if (!g.builder.bulldoze(p, this.snapRadius * 0.3)) this.roadTools.bulldoze(p, this.snapRadius * 0.3);
   }
 
@@ -1587,6 +1660,7 @@ export class Controller {
     if (veh) return { type: 'vehicle', simId: veh.sim.id };
     const st = g.structureAt(p);
     if (st?.type === 'station') return { type: 'station', id: st.id };
+    if (st?.type === 'warehouse') return { type: 'station', id: st.stationId };
     if (st?.type === 'industry') return { type: 'industry', id: st.id };
     if (st?.type === 'building') return { type: 'building', id: st.id };
     const town = g.townAt(p);
@@ -1659,6 +1733,20 @@ export class Controller {
     }
     const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > 8;
     if (this.projectMode) {
+      // Протянули построенную дорогу — её правка в проект (дорога пока как есть).
+      if (this.builtDrag) {
+        this.builtDrag = false;
+        const edit = moved ? this.roadTools.moveEdit(this.worldAt(e), e.shiftKey, this.freeAim) : null;
+        this.roadTools.moveEnd();
+        if (edit) {
+          this.projectTools.cancelPress();
+          const problem = this.projectTools.addEdit(edit);
+          if (problem) this.showError(problem);
+          this.syncMoveBase();
+          this.onChange();
+          return;
+        }
+      }
       this.projectTools.up(this.drawSettings(), this.worldAt(e), this.snapRadius, moved, e.shiftKey);
       this.onChange();
       return;
@@ -1697,7 +1785,8 @@ export class Controller {
       if (this.moveProjectMode) {
         const edit = moved ? this.roadTools.moveEdit(this.worldAt(e), e.shiftKey, this.freeAim) : null;
         this.roadTools.moveEnd();
-        const problem = edit && this.moveProject.add(edit);
+        // Общий проект дорог: правка — его шаг (Ctrl+Z в проекте уберёт), вместе с новыми участками из «Строить».
+        const problem = edit && this.projectTools.addEdit(edit);
         if (problem) this.showError(problem);
         this.syncMoveBase();
         this.onChange();
@@ -1726,7 +1815,7 @@ export class Controller {
       if (this.laneProjectMode && this.roadTools.dragging) {
         const edit = moved ? this.roadTools.moveEdit(this.worldAt(e), e.shiftKey, this.freeAim) : null;
         this.roadTools.moveEnd();
-        const problem = edit && this.laneProject.add(edit);
+        const problem = edit && this.projectTools.addEdit(edit, true);
         if (problem) this.showError(problem);
         this.syncMoveBase();
         this.onChange();
@@ -1923,7 +2012,7 @@ export class Controller {
   private moveDragOverlay(o: ToolOverlay, p: Vec, project: boolean): void {
     const g = this.game();
     const rt = this.roadTools;
-    const plan = rt.movePlan(p, this.shift, project ? this.moveProject.edits : [], this.freeAim);
+    const plan = project ? this.projectWith(rt.moveEdit(p, this.shift, this.freeAim)) : rt.movePlan(p, this.shift, [], this.freeAim);
     if (!plan) return;
     const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
     const what = rt.handle ? 'Перо · ' : rt.corner ? 'Угол · ' : rt.bend !== null ? 'Изогнуть · ' : rt.slide !== null ? 'Примыкание · ' : '';
@@ -2003,10 +2092,15 @@ export class Controller {
     const pt = this.projectTools;
     const s = this.drawSettings();
     const hr = (HANDLE_PX + 4) / this.camera.zoom;
-    const v = pt.view(s, p, this.snapRadius, hr, this.shift);
+    const rt = this.roadTools;
+    // Тянут построенную дорогу — её правка (после прочих) уже в плане проекта.
+    const built = this.builtDrag && rt.dragging && p ? rt.moveEdit(p, this.shift, this.freeAim) : null;
+    const v = pt.view(s, p, this.snapRadius, hr, this.shift, built);
     const plan = v.plan;
     if (plan.road?.net) {
-      o.roads = { net: plan.road.net, ok: true, changed: plan.road.changed, project: true };
+      // Не выходят правки построенных дорог (не участок и не деньги) — красным; иначе — синим, как проект.
+      const editsBad = !plan.ok && plan.bad === null && plan.reason !== NO_MONEY;
+      o.roads = { net: plan.road.net, ok: !editsBad, changed: plan.road.changed, project: !editsBad };
       // Знаки полотен, что проект меняет, — старые: бледно.
       o.staleSigns = staleSignCorridors(g.roads.net, plan.road.net);
     }
@@ -2021,15 +2115,40 @@ export class Controller {
     o.points = [];
     if (pt.control) o.points.push({ pos: pt.control, color: '#f2994a', r: 4 });
     if (!p) return;
+    const segs = pt.project(s.kind).segs.length;
+    const edits = pt.edits(s.kind).length;
+    const total = segs || edits || v.draft || built ? `${money(plan.cost)}${segs || v.draft ? ` · ${Math.round(plan.length)} м` : ''}` : '';
+    const problem = !plan.ok && plan.reason && (segs || edits || v.draft || built) ? plan.reason : null;
+    if (built) {
+      // Тянут построенную дорогу: перья — в новой форме, подпись — что тянут и цена всего проекта.
+      if (rt.handle) o.handles = rt.handleMarks(rt.handle, plan.road?.net ?? undefined);
+      const what = rt.handle ? 'Перо' : rt.bend !== null ? 'Изогнуть' : 'Узел';
+      const text = `${what} дороги${rt.hint ? ` · ${rt.hint}` : ''} · проект ${total}`;
+      o.label = problem ? { text: `${problem} · ${text}`, ok: false } : { text, ok: true };
+      return;
+    }
     const at = pt.drag ? null : pt.targetAt(s.kind, p, this.snapRadius, hr);
+    // Мимо проекта, у построенной дороги (не ведём ветку): видны её узлы и перья — их можно тянуть правкой проекта.
+    if (s.kind === 'road' && !pt.drag && at === null && pt.tip === null) {
+      const net = rt.base ?? g.roads.net;
+      const h = rt.handleAt(p, hr);
+      const n = h ? null : rt.nodeAt(p, this.snapRadius);
+      const c = h || n ? null : corridorUnder(net, p, this.snapRadius * 0.3);
+      if (c) rt.editCorridor = c.id;
+      if (h || n || c) {
+        o.handles = [...(o.handles ?? []), ...rt.handleMarks(h)];
+        o.points.push(...this.nodeMarks(rt.editCorridor));
+        if (n) o.points.push({ pos: n.pos, color: '#2f80ed', r: 9, node: true });
+        const text = h ? 'Тяните перо дороги — правка в проекте' : n ? 'Тяните узел дороги — правка в проекте · клик — вести отсюда' : 'Тяните — изогнуть дорогу в проекте · клик — узел проекта';
+        o.label = problem ? { text: `${problem} · ${text}`, ok: false } : { text, ok: true };
+        return;
+      }
+    }
     // Куда встанет узел от клика — кружком, как начало дороги: у узла или дороги (пути) — большим, в поле — маленьким.
     if (!pt.drag && (at === null || pt.tip !== null)) {
       const start = pt.pointAt(s, p, this.snapRadius);
       if (!start.own) o.points.push({ pos: start.pos, color: '#2f80ed', r: start.attach ? 7 : 3 });
     }
-    const segs = pt.project(s.kind).segs.length;
-    const total = segs || v.draft ? `${money(plan.cost)} · ${Math.round(plan.length)} м` : '';
-    const problem = !plan.ok && plan.reason && (segs || v.draft) ? plan.reason : null;
     // Поворот медленнее дороги — как у обычной стройки: «⚠ поворот 60 км/ч».
     const slow = v.slowest !== null ? ` · ⚠ поворот ${v.slowest} км/ч` : '';
     let text: string;
@@ -2059,10 +2178,21 @@ export class Controller {
     o.label = problem ? { text: `${problem} · ${text}`, ok: false } : { text, ok: true };
   }
 
+  /**
+   * Общий проект дорог с правкой, которую тянут сейчас («Двигать», «Полоса»): его правки, она и новые участки из
+   * «Строить» — для предпросмотра (участки не пропадают, пока тянут). null — правки нет. alone — план правки после
+   * правок проекта, если он уже посчитан: новых участков нет — он и есть весь проект.
+   */
+  private projectWith(edit: NetEdit | null, alone: RoadPlan | null = null): RoadPlan | null {
+    if (!edit) return null;
+    if (alone && !this.projectTools.project('road').segs.length) return alone;
+    return this.moveProject.plan(edit);
+  }
+
   /** Проект полос: новые полотна (съезды, въезды, однополосные), чьи узлы и перья можно тянуть, — в сети с проектом. */
   private laneProjectCorridors(): { net: LaneNet; ids: number[] } | null {
     const g = this.game();
-    const net = this.laneProjectMode && this.laneProject.edits.length ? this.laneProject.net() : null;
+    const net = this.laneProjectMode && this.moveProject.edits.length ? this.moveProject.net() : null;
     if (!net) return null;
     const fresh = [...net.corridors.keys()].filter((id) => !g.roads.net.corridors.has(id));
     return { net, ids: freshSignCorridors(g.roads.net, net, fresh) };
@@ -2175,7 +2305,7 @@ export class Controller {
     if (why) return this.showError(why);
     const edit = splitEdit(id, s);
     if (this.moveProjectMode) {
-      const problem = this.moveProject.add(edit);
+      const problem = this.projectTools.addEdit(edit);
       if (problem) this.showError(problem);
       this.syncMoveBase();
       return;
@@ -2208,7 +2338,7 @@ export class Controller {
     }
     const edit = mergeEdit(n.id);
     if (this.moveProjectMode) {
-      const problem = this.moveProject.add(edit);
+      const problem = this.projectTools.addEdit(edit);
       if (problem) this.showError(problem);
       this.syncMoveBase();
       return true;
@@ -2264,11 +2394,12 @@ export class Controller {
     if (e.key === 'Control' || e.key === 'Meta') this.ctrl = true;
     if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
       e.preventDefault();
-      // В проекте — сперва шаги его правки, потом (проект пуст) — стройка.
-      if (this.projectMode && this.projectTools.undo(this.netKind)) this.onChange();
-      else if (this.editProject && !this.roadTools.dragging && !this.roadTools.laneDrag && this.editProject.undo()) {
+      // В проекте — сперва шаги его правки (участки и правки построенных дорог — одной историей), потом (проект
+      // пуст) — стройка.
+      const kind = this.roadTools.dragging || this.roadTools.laneDrag ? null : this.projectKind;
+      if (kind && this.projectTools.undo(kind)) {
         // Конец «полосы по точкам» мог остаться в убранной правке — ведём заново.
-        this.roadTools.clear();
+        if (this.editProject) this.roadTools.clear();
         this.syncMoveBase();
         this.onChange();
       } else this.undo();
@@ -2439,8 +2570,8 @@ export class Controller {
     // Проект виден и без курсора над картой (курсор на панели — у кнопки «Построить»).
     if (!p) {
       if (this.projectMode) this.projectOverlay(o, null);
-      else if (this.moveProjectMode && this.moveProject.edits.length) this.showMoveProject(o, this.moveProject.plan(), null);
-      else if (this.laneProjectMode && this.laneProject.edits.length) this.showLaneProject(o, this.laneProject.plan());
+      else if (this.moveProjectMode && this.moveProject.hasWork) this.showMoveProject(o, this.moveProject.plan(), null);
+      else if (this.laneProjectMode && this.moveProject.hasWork) this.showLaneProject(o, this.moveProject.plan());
       return o;
     }
     // Тянут знак скорости: дорога под ним (до перекрёстков, с Cmd / Ctrl — один участок) — как будет, подпись — новая скорость.
@@ -2598,10 +2729,10 @@ export class Controller {
         // Проект полос: от сети с ним — и полосы под курсором, и то, что нарисовано, — будущей дорогой (синей).
         const lanesProject = this.laneProjectMode;
         const net = rt.base ?? g.roads.net;
-        if (lanesProject && this.laneProject.edits.length && !rt.laneDrag && !rt.dragging) this.showLaneProject(o, this.laneProject.plan());
+        if (lanesProject && this.moveProject.hasWork && !rt.laneDrag && !rt.dragging) this.showLaneProject(o, this.moveProject.plan());
         // Тянут узел или перо нового съезда: дорога с этой правкой — проектом, перья — в новой форме.
         if (lanesProject && rt.dragging) {
-          const plan = rt.movePlan(p, this.shift, this.laneProject.edits, this.freeAim);
+          const plan = this.projectWith(rt.moveEdit(p, this.shift, this.freeAim));
           if (plan) {
             this.showLaneProject(o, plan);
             const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
@@ -2616,7 +2747,7 @@ export class Controller {
           this.laneProjectMarks(o);
           const hit = this.laneProjectHit(p);
           if (hit) {
-            const pending = this.laneProject.plan();
+            const pending = this.moveProject.plan();
             const text = hit.what === 'handle' ? 'Тяните перо · Shift — излом' : 'Тяните узел — съезд следом · Cmd/Ctrl — без прилипания';
             o.label = pending.ok ? { text, ok: true } : { text: `${failText(pending.reason, pending.cost, 'Нельзя')} · ${text}`, ok: false };
             break;
@@ -2628,7 +2759,7 @@ export class Controller {
           const res = rt.laneStepPlan(p, this.spec, this.snapRadius);
           if (res) {
             this.showLanePlan(o, res.plan, `${res.step?.what ?? ''} · ${lanesProject ? 'проект ' : ''}${money(res.plan.cost)}`, res.step?.tip);
-            if (lanesProject) this.showLaneProject(o, res.plan);
+            if (lanesProject) this.showLaneProject(o, this.projectWith(res.edit, res.plan) ?? res.plan);
             const next = res.step && res.plan.net ? laneTipPos(res.plan.net, res.step.tip) : null;
             o.points = [{ pos: tipAt, color: '#27ae60', r: 6 }, ...(next ? [{ pos: next, color: '#27ae60', r: 4 }] : [])];
           }
@@ -2673,7 +2804,7 @@ export class Controller {
         const res = rt.lanePlan(this.spec);
         if (res) {
           this.showLanePlan(o, res.plan, `${res.what} · ${lanesProject ? 'проект ' : ''}${res.plan.cost < 0 ? `+${money(-res.plan.cost)}` : money(res.plan.cost)}`, res.step?.tip);
-          if (lanesProject) this.showLaneProject(o, res.plan);
+          if (lanesProject) this.showLaneProject(o, this.projectWith(res.edit, res.plan) ?? res.plan);
         }
         break;
       }
@@ -2692,8 +2823,8 @@ export class Controller {
           this.moveDragOverlay(o, p, project);
           break;
         }
-        // Нарисованное перемещение — проектом поверх дороги, какая она сейчас.
-        if (project && this.moveProject.edits.length) this.showMoveProject(o, this.moveProject.plan(), null);
+        // Нарисованное перемещение (и новые участки из «Строить») — проектом поверх дороги, какая она сейчас.
+        if (project && this.moveProject.hasWork) this.showMoveProject(o, this.moveProject.plan(), null);
         // Сначала перья видимой дороги, потом углы перекрёстка, потом узел, потом середина дороги.
         const hr = (HANDLE_PX + 4) / this.camera.zoom;
         // Углы перекрёстка рядом — ручками от острой вершины к середине бордюра: за них тянут, чтобы скруглить.
@@ -2840,6 +2971,12 @@ export class Controller {
           break;
         }
         const st = g.structureAt(p);
+        if (st?.type === 'warehouse') {
+          const problem = g.warehouseRemoveProblem(st);
+          o.marks.push({ fp: st.fp, ok: false });
+          o.label = problem ? { text: problem, ok: false } : { text: `Снести склад · +${money(STORAGE.cost * COST.refundRatio)}`, ok: true };
+          break;
+        }
         if (st?.type === 'station') {
           o.label = { text: `Снести станцию ${st.name}`, ok: true };
           o.station = { fp: st.fp, ok: false };
@@ -3013,6 +3150,18 @@ export class Controller {
         break;
       }
       case 'select': {
+        const home = this.placingWarehouse !== null ? g.stations.get(this.placingWarehouse) : undefined;
+        if (home) {
+          // Склад-здание: зона вокруг станции — кругом, здание под курсором — синим (красным, если нельзя).
+          const plan = g.warehousePlan(home.id, p);
+          o.catchmentAt = home.fp.center;
+          o.catchmentR = warehouseZone(home);
+          if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
+          o.label = plan.ok
+            ? { text: `Склад: +${STORAGE.per} ед. места · ${money(plan.cost)} · Esc — отмена`, ok: true }
+            : { text: failText(plan.reason, plan.cost, ''), ok: false };
+          break;
+        }
         const moving = this.movingStation !== null ? g.stations.get(this.movingStation) : undefined;
         if (moving) {
           // Перенос станции: старое место — красным, новое — силуэтом (красным, если нельзя), с выездом и охватом.
@@ -3050,6 +3199,7 @@ export class Controller {
         }
         const st = g.structureAt(p);
         if (st?.type === 'station') o.label = { text: st.name, ok: true };
+        else if (st?.type === 'warehouse') o.label = { text: `Склад: ${g.stations.get(st.stationId)?.name ?? ''}`, ok: true };
         else if (st?.type === 'industry') o.label = { text: st.name, ok: true };
         else if (st?.type === 'building') {
           const t = g.townOf(st);

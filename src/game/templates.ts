@@ -129,6 +129,7 @@ export function isFragment(x: unknown): x is Fragment {
       optional(n.mainPair, (v) => v === null || isNums(v)) &&
       optional(n.bans, isStrs) &&
       optional(n.greens, isNums) &&
+      optional(n.phases, (v) => Array.isArray(v) && v.every((p) => isObj(p) && isStrs(p.go) && isNum(p.green))) &&
       optional(n.adaptive, (v) => typeof v === 'boolean') &&
       optional(n.roundabout, (v) => v === null || isNum(v)) &&
       optional(n.lanes, isStrs) &&

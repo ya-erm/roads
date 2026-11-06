@@ -1122,7 +1122,7 @@ export function smoothCorner(net: LaneNet, h: Handle, apply = true): boolean {
   net.setCurve(other.corridor, cv);
   n.kind = 'seam';
   n.dir = d;
-  for (const k of ['control', 'mainPair', 'bans', 'greens', 'adaptive', 'lanes', 'corners'] as const) delete n[k];
+  for (const k of ['control', 'mainPair', 'bans', 'greens', 'phases', 'adaptive', 'lanes', 'corners'] as const) delete n[k];
   return true;
 }
 

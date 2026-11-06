@@ -14,7 +14,7 @@ import { Builder, type DrawMode, type NetKind, type Plan, type RoadRequest, type
 import type { Game } from './game';
 import { autoLevels, designProfile, PROFILE_STEP } from './grade';
 import { cloneNetwork } from './railFragment';
-import { onOldAxis, RoadBuilder, type RoadPlan } from './roadbuild';
+import { type NetEdit, onOldAxis, RoadBuilder, type RoadPlan } from './roadbuild';
 
 /**
  * Проект дороги или пути: нарисованные, но не построенные участки. Узлы и перья (управляющие точки кривых)
@@ -590,20 +590,37 @@ function previewRoads(g: Game): RoadBuilder {
   });
 }
 
+/**
+ * Проект дорог одной правкой сети: сперва правки построенных дорог (edits — перенос узлов, перья, изгибы, как в
+ * «Двигать»), потом первые count участков проекта — уже на сети с этими правками.
+ */
+export function roadProjectEdit(p: Project, ground: ((q: Vec) => number) | null, edits: NetEdit[] = [], count = p.segs.length): NetEdit {
+  return (net) => {
+    for (const e of edits) if (e(net) === false) return false;
+    if (count > 0) layRoadProject(net, p, ground, count);
+    return edits.length > 0 || count > 0;
+  };
+}
+
 /** Проект дорог: весь целиком; не выходит — первый участок, на котором ломается (делением пополам). */
-function roadProjectPlan(g: Game, p: Project, length: number): ProjectPlan {
+function roadProjectPlan(g: Game, p: Project, length: number, edits: NetEdit[] = [], shove = false): ProjectPlan {
   const b = previewRoads(g);
   const ground = g.ground();
-  const lay = (count: number) => b.plan((net) => layRoadProject(net, p, ground, count));
+  const lay = (count: number) => b.plan(roadProjectEdit(p, ground, edits, count), { shove });
   const full = lay(p.segs.length);
   if (full.ok) {
     const reason = full.cost > g.budget ? 'Не хватает денег' : undefined;
     return { ok: !reason, reason, cost: full.cost, length, bad: null, road: full, rails: new Map(), demolish: full.demolish };
   }
+  // Не выходят уже правки построенных дорог — участки тут ни при чём.
+  const base = edits.length ? lay(0) : null;
+  if (base && !base.ok) {
+    return { ok: false, reason: base.reason ?? 'Так не построить', cost: full.net ? full.cost : base.cost, length, bad: null, road: base.net ? base : null, rails: new Map(), demolish: base.demolish };
+  }
   // Первый участок, с которым проект уже не строится: всё до него — в предпросмотре как есть.
   let lo = 0;
   let hi = p.segs.length;
-  let good: RoadPlan | null = null;
+  let good: RoadPlan | null = base;
   let failed = full;
   while (hi - lo > 1) {
     const mid = (lo + hi) >> 1;
@@ -654,24 +671,27 @@ function railProjectPlan(g: Game, p: Project, length: number): ProjectPlan {
 }
 
 /** Что получится из проекта и сколько он стоит — ничего не строя и не тратя. */
-export function projectPlan(g: Game, kind: NetKind, p: Project): ProjectPlan {
+export function projectPlan(g: Game, kind: NetKind, p: Project, edits: NetEdit[] = [], shove = false): ProjectPlan {
   const length = projectLength(p);
-  if (!p.segs.length) return { ok: false, reason: 'Проект пуст', cost: 0, length, bad: null, road: null, rails: new Map(), demolish: [] };
-  return kind === 'rail' ? railProjectPlan(g, p, length) : roadProjectPlan(g, p, length);
+  const road = kind === 'road' ? edits : [];
+  if (!p.segs.length && !road.length) return { ok: false, reason: 'Проект пуст', cost: 0, length, bad: null, road: null, rails: new Map(), demolish: [] };
+  return kind === 'rail' ? railProjectPlan(g, p, length) : roadProjectPlan(g, p, length, road, shove);
 }
 
 /**
- * Строит проект целиком одним шагом для Ctrl+Z: те же строители и проверки, деньги списываются.
- * Не выходит — ничего не строится; ответ — причина (null — построен).
+ * Строит проект целиком одним шагом для Ctrl+Z: те же строители и проверки, деньги списываются; у дорог —
+ * вместе с правками построенных дорог (edits; shove — среди них расширение дороги «Полосой»: дома отодвигаются,
+ * а не сносятся). Не выходит — ничего не строится; ответ — причина (null — построен).
  */
-export function buildProject(g: Game, kind: NetKind, p: Project): string | null {
-  if (!p.segs.length) return 'Проект пуст';
+export function buildProject(g: Game, kind: NetKind, p: Project, edits: NetEdit[] = [], shove = false): string | null {
+  if (!p.segs.length && !(kind === 'road' && edits.length)) return 'Проект пуст';
   if (kind === 'road') {
     const ground = g.ground();
-    const plan = g.roadBuilder.plan((net) => layRoadProject(net, p, ground));
+    const plan = g.roadBuilder.plan(roadProjectEdit(p, ground, edits), { shove });
     if (!plan.ok) return plan.reason ?? 'Так не построить';
     g.checkpoint('проект дороги');
     g.roadBuilder.apply(plan);
+    if (shove) for (const id of plan.changed) g.roadWidened(id);
     g.commit();
     return null;
   }

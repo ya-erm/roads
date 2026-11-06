@@ -23,10 +23,10 @@ function setup() {
 }
 
 describe('Склад станции', () => {
-  it('у новой автостанции — 200 мест на все грузы вместе; продукция и груз на пересадку — не больше свободного места', () => {
+  it('у новой автостанции — 150 мест на все грузы вместе; продукция и груз на пересадку — не больше свободного места', () => {
     const { game, a, raw, input } = setup();
     expect(game.stationStorage(a)).toBe(STORAGE.base);
-    expect(STORAGE.base).toBeLessThan(400);
+    expect(STORAGE.base).toBe(150);
     // Почти полный склад: предприятие кладёт только то, что помещается.
     a.cargo[input] = STORAGE.base - 5;
     raw.output = 50;

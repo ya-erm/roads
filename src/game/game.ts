@@ -4,7 +4,6 @@ import {
   ECONOMY,
   GRADE,
   IDM,
-  LIGHTS,
   MIN_SEGMENT_LEN,
   MONTH_LENGTH,
   MONTH_SCALE,
@@ -23,6 +22,7 @@ import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../c
 import { Anchor, anchorAt, buildRing, insideRuns, splitCorridor } from '../lanes/edit';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { autoMainPair, mainPairOf } from '../lanes/graph';
+import { phaseRelations, PhaseSpec, specOf } from '../lanes/lights';
 import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, parseLaneKey, twoWay } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
 import type { LaneTraffic } from '../lanes/traffic';
@@ -30,7 +30,7 @@ import { RailSim, Train } from '../sim/rail';
 import { stepWagons } from '../sim/wagons';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
-import { Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TOWN_NEED, TownBuilding, TownSupplyMonth } from '../world/entities';
+import { Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TOWN_NEED, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
 import { Network, NetworkSave, Segment } from '../world/network';
 import { halfWidth, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
@@ -68,6 +68,7 @@ import { cloneNetwork, copyRails, RailPaste } from './railFragment';
 import { chainCoords, chainOffset, trackChain } from './railEdit';
 import { linesForTown } from './townLines';
 import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
+import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
 import {
   AUTO_FLEET,
   DEFAULT_RULE,
@@ -165,10 +166,31 @@ export interface JunctionInfo {
   pairs: { segs: [number, number]; name: string }[];
   /** Участки, у которых сейчас приоритет. */
   mainNow: number[];
-  phases: { approaches: Compass[]; green: number; active: boolean }[];
+  /** Фазы светофора, что работают сейчас (у узла без светофора — пусто). */
+  phases: JunctionPhase[];
+  /** Фазы задал игрок; нет — «Авто» (встречные подъезды вместе). */
+  phasesCustom: boolean;
+  /** Повороты, по которым можно проехать (есть манёвры), — `${полотно въезда}>${полотно выезда}`. */
+  liveTurns: string[];
   label: (seg: number) => Compass;
   /** Сколько полос въезда игрок настроил вручную. */
   customLanes: number;
+}
+
+/** Фаза светофора для карточки перекрёстка. */
+export interface JunctionPhase {
+  /** Повороты с зелёным: `${полотно въезда}>${полотно выезда}`. */
+  go: string[];
+  green: number;
+  /** Сейчас зелёный этой фазы (или жёлтый после неё — clearing). */
+  active: boolean;
+  clearing: boolean;
+  /** Повороты, которых игрок не дал ни в одну фазу, — своя фаза «Авто». */
+  extra: boolean;
+  /** Повороты, что едут, уступая встречным (налево на общий зелёный). */
+  yields: string[];
+  /** Повороты, что пересекаются с другими зелёными этой фазы, а уступать некому, — конфликт. */
+  clashes: string[];
 }
 
 /** Конец полосы у перекрёстка — метка для настройки связей полос на карте. */
@@ -720,6 +742,7 @@ export class Game implements BuildContext {
       this.stations.set(st.id, st);
       this.index.add(st);
     }
+    this.indexWarehouses();
     for (const line of save.lines) this.lines.set(line.id, line);
     for (const f of save.folders ?? []) this.folders.set(f.id, f);
     // Линия из несуществующей папки возвращается в корень списка.
@@ -1721,6 +1744,47 @@ export class Game implements BuildContext {
     return true;
   }
 
+  /**
+   * Правка фаз светофора (src/lanes/lights.ts: toggleTurn, addPhase, movePhase…): начинается с фаз, что работают
+   * сейчас (и «Авто», и дополненных для новых поворотов), — дальше фазы узла заданы игроком.
+   */
+  editPhases(nodeId: number, edit: (spec: PhaseSpec[]) => PhaseSpec[]): void {
+    const n = this.roads.net.nodes.get(nodeId);
+    const L = this.roads.graph.nodes.get(nodeId)?.lights;
+    if (!n || !L) return;
+    n.phases = edit(specOf(L.phases));
+    this.roads.net.version++;
+    this.networkChanged();
+  }
+
+  /** Фазы светофора — снова «Авто» (встречные подъезды вместе, зелёный по умолчанию). */
+  resetPhases(nodeId: number): void {
+    const n = this.roads.net.nodes.get(nodeId);
+    if (!n || (!n.phases && !n.greens)) return;
+    delete n.phases;
+    delete n.greens;
+    this.roads.net.version++;
+    this.networkChanged();
+  }
+
+  /**
+   * С какими поворотами из go пересечётся поворот turn, если дать ему зелёный в той же фазе, а уступать некому
+   * (поперечные потоки). Пусто — можно.
+   */
+  phaseClashes(nodeId: number, go: string[], turn: string): string[] {
+    const g = this.roads.graph;
+    const set = new Set([...go, turn]);
+    const moves = (g.junctionMoves.get(nodeId) ?? []).filter((m) => set.has(g.turnOf(m)));
+    const res = new Set<string>();
+    for (const [a, b] of phaseRelations(moves).clashes) {
+      const ta = g.turnOf(g.moves.get(a)!);
+      const tb = g.turnOf(g.moves.get(b)!);
+      if (ta === turn && tb !== turn) res.add(tb);
+      if (tb === turn && ta !== turn) res.add(ta);
+    }
+    return [...res];
+  }
+
   /** Можно ли поставить (или снять) светофор на перекрёстке и во что это обойдётся (минус — возврат). */
   lightsPlan(nodeId: number): { ok: boolean; reason?: string; cost: number } {
     const n = this.roads.net.nodes.get(nodeId);
@@ -1853,13 +1917,19 @@ export class Game implements BuildContext {
     }
     const priority = g.nodes.get(nodeId)?.priorityLanes ?? new Set<number>();
     const mainNow = [...new Set(ins.filter((l) => l.lanes.some((lane) => priority.has(lane.id))).map((l) => l.corridor))];
-    // Фазы светофора: чьи подъезды едут вместе, сколько горит зелёный, какая сейчас.
+    // Фазы светофора: какие повороты едут вместе, кто из них уступает, где конфликт, сколько горит зелёный, какая сейчас.
     const L = g.nodes.get(nodeId)?.lights;
-    const corridorOfLane = (id: number) => g.links.get(g.lanes.get(id)?.link ?? -1)?.corridor;
-    const phases = (L?.phases ?? []).map((ph, i) => ({
-      approaches: [...new Set(ph.map(corridorOfLane).filter((x): x is number => x !== undefined))].map(label),
-      green: n.greens?.[i] ?? LIGHTS.green,
-      active: !!L && i === L.phase && !L.clearing,
+    const moves = g.junctionMoves.get(nodeId) ?? [];
+    const turnOf = new Map(moves.map((m) => [m.key, g.turnOf(m)]));
+    const turnsOf = (keys: Iterable<string>) => [...new Set([...keys].map((k) => turnOf.get(k)).filter((t): t is string => !!t))];
+    const phases: JunctionPhase[] = (L?.phases ?? []).map((ph, i) => ({
+      go: ph.go,
+      green: ph.green,
+      active: !!L && i === L.phase,
+      clearing: !!L && i === L.phase && L.clearing,
+      extra: !!ph.extra,
+      yields: turnsOf([...ph.yields.keys()]),
+      clashes: turnsOf(ph.clashes.flat()),
     }));
     const here = new Set(approaches.map((a) => a.seg));
     const links = (n.lanes ?? []).map(parseLaneKey).filter((l): l is LaneLink => !!l && here.has(l.from) && here.has(l.to));
@@ -1871,6 +1941,8 @@ export class Game implements BuildContext {
       pairs: pairs.map((p) => ({ segs: p, name: `${label(p[0]).name}–${label(p[1]).name}` })),
       mainNow,
       phases,
+      phasesCustom: !!n.phases?.length,
+      liveTurns: turnsOf(moves.map((m) => m.key)),
       label,
       customLanes,
     };
@@ -2044,12 +2116,15 @@ export class Game implements BuildContext {
           live.industryId = s.industryId;
           this.index.add(live);
         }
+        // Склады-здания — как были до действия (в индекс — ниже, все разом).
+        live.warehouses = s.warehouses;
         continue;
       }
       const st = this.stationFromSave(s);
       this.stations.set(st.id, st);
       this.index.add(st);
     }
+    this.indexWarehouses();
     // Дома: снесённые возвращаются, перенесённые встают на старое место,
     // а выросшие с тех пор сами по себе — остаются.
     for (const { townId, list } of snap.buildings) {
@@ -3088,7 +3163,11 @@ export class Game implements BuildContext {
   /** Игрок отправляет машину, которая ждёт интервала за предыдущей, прямо сейчас. */
   dispatchNow(id: number): void {
     const v = this.fleet.get(id);
-    if (v && v.holdUntil !== undefined) v.releaseHold = true;
+    if (v && v.holdUntil !== undefined) {
+      v.releaseHold = true;
+      // Догрузка, пока ждала, — тоже не повод задерживаться: уезжает в ближайший тик.
+      v.timer = Math.min(v.timer, 0);
+    }
   }
 
   /** Включает или выключает ожидание интервала на маршруте: выключенный — машины уезжают с первой станции сразу. */
@@ -4005,10 +4084,10 @@ export class Game implements BuildContext {
     return Math.max(20, Math.min(what === 'freight' ? this.stationStorage(st) : STATION.cargoCap, capacity * 2));
   }
 
-  /** Склад станции: сколько груза всех видов может на ней лежать — база и пристройки-склады (STORAGE). */
+  /** Склад станции: сколько груза всех видов может на ней лежать — база, пристройки и склады-здания (STORAGE). */
   stationStorage(st: Station): number {
     if (st.kind === 'rail') return STORAGE.rail;
-    return STORAGE.base + (st.depots ?? 0) * STORAGE.per;
+    return STORAGE.base + storageSlots(st) * STORAGE.per;
   }
 
   /** Сколько груза всех видов лежит на станции. */
@@ -5212,8 +5291,9 @@ export class Game implements BuildContext {
       const plan = this.roadBuilder.bulldoze([...node.corridors]);
       if (plan.net) this.roadBuilder.apply({ ...plan, ok: true });
     }
-    // Добавленные посты погрузки тоже возвращают часть цены.
-    this.refund(COST.station + Math.max(0, st.bays - STATION.bays) * STATION.bayCost + (st.depots ?? 0) * STORAGE.cost);
+    // Добавленные посты погрузки и склады тоже возвращают часть цены; склады-здания сносятся вместе со станцией.
+    for (const w of st.warehouses ?? []) this.index.remove(w);
+    this.refund(COST.station + Math.max(0, st.bays - STATION.bays) * STATION.bayCost + storageSlots(st) * STORAGE.cost);
     this.networkChanged();
     return true;
   }
@@ -5359,10 +5439,11 @@ export class Game implements BuildContext {
     const cost = extra * STORAGE.cost;
     const fail = (reason: string): BaysPlan => ({ ok: false, reason, cost, fp });
     if (n < 0) return fail('Пристроек нет');
-    if (n > STORAGE.max) return fail(`Больше ${STORAGE.max} складов нельзя`);
+    const houses = st.warehouses?.length ?? 0;
+    if (n + houses > STORAGE.max) return fail(`Больше ${STORAGE.max} складов нельзя`);
     if (extra <= 0) {
       const stored = this.stationStored(st);
-      const room = STORAGE.base + n * STORAGE.per;
+      const room = STORAGE.base + (n + houses) * STORAGE.per;
       return stored > room ? fail(`На складе ${Math.round(stored)} ед. — на меньший не поместится`) : { ok: true, cost, fp };
     }
     if (!this.inBounds(fp.center, footprintRadius(fp))) return fail('За краем карты');
@@ -5395,6 +5476,72 @@ export class Game implements BuildContext {
     this.index.add(st);
     this.commit();
     return null;
+  }
+
+  /**
+   * Склад-здание станции id с центром в p: только у автостанции, целиком в зоне вокруг неё (warehouseZone), не больше
+   * STORAGE.max складов вместе с пристройками; мешают вода, дома, предприятия, станции, другие склады, дороги и пути.
+   */
+  warehousePlan(id: number, p: Vec): { ok: boolean; reason?: string; cost: number; fp: Footprint | null } {
+    const st = this.stations.get(id);
+    if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null };
+    const cost = STORAGE.cost;
+    const fp = warehouseFootprint(st, p);
+    const fail = (reason: string) => ({ ok: false, reason, cost, fp });
+    if (st.kind !== 'road') return fail(st.kind === 'rail' ? 'У ж/д станции склад пока не растёт' : 'У остановки склада нет');
+    if (storageSlots(st) >= STORAGE.max) return fail(`Больше ${STORAGE.max} складов нельзя`);
+    if (!inWarehouseZone(st, fp)) return fail('Склад — только рядом со станцией');
+    if (!this.inBounds(fp.center, footprintRadius(fp))) return fail('За краем карты');
+    if (this.isWater(fp.center, fp.h / 2) || footprintCorners(fp).some((c) => this.isWater(c))) return fail('Мешает вода');
+    for (const s of this.index.near(fp.center, footprintRadius(fp) + 120)) {
+      if (!footprintsOverlap(fp, s.fp, 1)) continue;
+      return fail(s.type === 'building' ? 'Мешает здание' : s.type === 'industry' ? 'Мешает предприятие' : s.type === 'warehouse' ? 'Мешает склад' : 'Мешает станция');
+    }
+    const road = this.roadUnder(fp, 2);
+    if (road) return fail(road);
+    if (cost > this.budget) return fail('Не хватает денег');
+    return { ok: true, cost, fp };
+  }
+
+  /** Ставит склад-здание станции id в точке p (одним шагом для Ctrl+Z). Возвращает причину, если нельзя. */
+  buildWarehouse(id: number, p: Vec): string | null {
+    const plan = this.warehousePlan(id, p);
+    const st = this.stations.get(id);
+    if (!plan.ok || !plan.fp || !st) return plan.reason ?? 'Нельзя';
+    this.checkpoint('склад станции');
+    this.spend(plan.cost);
+    const w: Warehouse = { type: 'warehouse', id: this.nextEntityId++, stationId: st.id, fp: plan.fp };
+    st.warehouses = [...(st.warehouses ?? []), w];
+    this.index.add(w);
+    this.commit();
+    return null;
+  }
+
+  /** Снести склад-здание нельзя, если груз станции не поместится на меньший склад: причина, иначе null. */
+  warehouseRemoveProblem(w: Warehouse): string | null {
+    const st = this.stations.get(w.stationId);
+    if (!st) return null;
+    const stored = this.stationStored(st);
+    return stored > this.stationStorage(st) - STORAGE.per ? `На складе ${Math.round(stored)} ед. — на меньший не поместится` : null;
+  }
+
+  /** Сносит склад-здание (часть цены вернётся). Возвращает причину, если нельзя. */
+  removeWarehouse(w: Warehouse): string | null {
+    const problem = this.warehouseRemoveProblem(w);
+    if (problem) return problem;
+    this.checkpoint('снос склада');
+    const st = this.stations.get(w.stationId);
+    if (st) st.warehouses = (st.warehouses ?? []).filter((x) => x.id !== w.id);
+    this.index.remove(w);
+    this.refund(STORAGE.cost);
+    this.commit();
+    return null;
+  }
+
+  /** Склады-здания станций — в пространственном индексе (после загрузки и Ctrl+Z — заново по станциям). */
+  private indexWarehouses(): void {
+    for (const s of [...this.index.items]) if (s.type === 'warehouse') this.index.remove(s);
+    for (const st of this.stations.values()) for (const w of st.warehouses ?? []) this.index.add(w);
   }
 
   /** Где посты автостанции: площадка без пристроек-складов по концам (они — по половине с обеих сторон). */

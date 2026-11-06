@@ -11,6 +11,7 @@ import { insideRuns } from '../lanes/edit';
 import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
 import type { CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
 import type { LaneGraph } from '../lanes/graph';
+import { LIGHT_STEP, type LightSpot, lightSpot } from '../lanes/lightSpot';
 import { type JunctionPreview, junctionPreview, previewHides } from '../lanes/preview';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { wagonFills } from '../sim/wagons';
@@ -262,6 +263,8 @@ export class Renderer {
   private portalCache: { net: LaneNet; version: number; list: Portal[] } | null = null;
   /** Предпросмотр правки дорог: перекрёстки, что она меняет, и граф вокруг них — на версию сети с правкой. */
   private previewOf: { net: LaneNet; version: number; base: LaneNet; baseVersion: number; preview: JunctionPreview | null } | null = null;
+  /** Где светофоры въездов (по связи въезда) — для графа движения, пока он тот же. */
+  private lightSpots: { graph: LaneGraph; spots: Map<number, LightSpot | null> } | null = null;
   /** Дороги из полос. */
   private readonly lanes = new LaneRenderer();
   /** Отмывка склонов и изолинии — кэш тайлами. */
@@ -383,7 +386,7 @@ export class Renderer {
     this.drawPortals(portals);
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
-    this.drawLights(game);
+    this.drawLights(game, 0);
     this.drawCurveSigns(game, view, o.staleSigns, 0);
     this.drawStructures(game, view, o);
     this.drawTrains(trains.filter((t) => trainBand(t.level) === 0));
@@ -412,9 +415,13 @@ export class Renderer {
             return d.y ? { ...v, pos: add(v.pos, d), trail: v.trail && add(v.trail, d) } : v;
           }),
       );
+      // Светофоры у спуска с моста и на эстакаде — поверх её полотна и подняты вместе с ним.
+      if (roads) this.drawLights(game, level);
       if (roads) this.drawCurveSigns(game, view, o.staleSigns, level);
       this.drawTrains(trains.filter((t) => trainBand(t.level) === level));
     }
+    // Светофор перекрёстка под мостом не пропадает под полотном — приглушённым значком поверх.
+    this.drawLights(game, 'covered');
     this.drawLabels(game, view);
     this.drawOverlay(game, o);
     this.drawStationBadges(game, view);
@@ -1195,31 +1202,90 @@ export class Renderer {
     ctx.restore();
   }
 
-  /** Светофоры: столбик справа от крайней правой полосы каждого въезда, свет — по фазе. */
-  private drawLights(game: Game): void {
+  /**
+   * Светофоры: столбик справа от крайней правой полосы каждого въезда. Основная секция — по фазе (зелёный, жёлтый,
+   * красный); рядом, дальше от дороги, — дополнительные со стрелкой, если у поворота есть своя фаза: стрелка
+   * горит зелёным, когда поворот разрешён по ней (src/lanes/lights.ts, signalHeads). pass — слой высоты: светофор
+   * рисуется в слое своего подъезда и поднят вместе с его полотном (спуск с моста, эстакада — src/lanes/lightSpot.ts);
+   * 'covered' — те, что сверху закрыл чужой мост, ещё раз поверх всего, приглушённо.
+   */
+  private drawLights(game: Game, pass: number | 'covered'): void {
     if (this.camera.zoom < 0.4) return;
     const ctx = this.ctx;
     const g = game.roads.graph;
+    const GREEN = '#3ad16b';
+    const YELLOW = '#f2c230';
+    const STEP = LIGHT_STEP;
+    // Где светофоры (слой подъезда, подъём с полотном, закрыт ли мостом сверху) — раз на граф движения.
+    if (this.lightSpots?.graph !== g) this.lightSpots = { graph: g, spots: new Map() };
+    const spots = this.lightSpots.spots;
+    // Закрытые сверху (перекрёсток под мостом) — ещё раз поверх всего, приглушённо: как значок.
+    ctx.save();
+    if (pass === 'covered') ctx.globalAlpha = 0.55;
     for (const n of g.nodes.values()) {
       const L = n.lights;
       if (!L) continue;
-      for (const link of g.inLinks.get(n.id) ?? []) {
-        const lane = link.lanes[link.lanes.length - 1];
-        const inPhase = L.phases[L.phase].includes(lane.id);
-        const color = !inPhase ? '#e8483f' : L.clearing ? '#f2c230' : '#3ad16b';
-        const end = g.lanePose(lane, lane.length);
-        const N = { x: -end.dir.y, y: end.dir.x };
-        const p = add(end.pos, scale(N, LANE_W / 2 + 3));
-        ctx.fillStyle = '#2a2e33';
+      const lit = (on: boolean | undefined) => (on ? (L.clearing ? YELLOW : GREEN) : null);
+      for (const head of L.heads) {
+        const link = g.links.get(head.link);
+        if (!link) continue;
+        if (!spots.has(head.link)) spots.set(head.link, lightSpot(g, link, head.arrows.length));
+        const spot = spots.get(head.link);
+        if (!spot || (pass === 'covered' ? !spot.covered : !inPass(spot.layer, pass))) continue;
+        const N = spot.out;
+        const p = spot.pos;
+        const last = add(p, scale(N, STEP * head.arrows.length));
+        // Корпус: основная секция и дополнительные рядом — одной капсулой.
+        ctx.strokeStyle = '#2a2e33';
+        ctx.lineCap = 'round';
+        ctx.lineWidth = 5.6;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 2.8, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = color;
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(last.x + 0.001, last.y);
+        ctx.stroke();
+        ctx.fillStyle = lit(head.main[L.phase]) ?? '#e8483f';
         ctx.beginPath();
         ctx.arc(p.x, p.y, 1.9, 0, Math.PI * 2);
         ctx.fill();
+        head.arrows.forEach((a, k) => {
+          const q = add(p, scale(N, STEP * (k + 1)));
+          const color = lit(a.on[L.phase]);
+          ctx.fillStyle = color ? 'rgba(58, 209, 107, 0.25)' : '#1d2024';
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, 2.3, 0, Math.PI * 2);
+          ctx.fill();
+          this.drawTurnArrow(q, spot.dir, a.dir, color ?? '#6b737d');
+        });
       }
     }
+    ctx.restore();
+  }
+
+  /** Стрелка поворота в секции светофора: от въезда (курс d) с изгибом на выезд (курс e), в круге радиусом ~2. */
+  private drawTurnArrow(c: Vec, d: Vec, e: Vec, color: string): void {
+    const ctx = this.ctx;
+    const at = (kd: number, ke: number) => add(c, add(scale(d, kd), scale(e, ke)));
+    const a = at(-1.3, -0.6);
+    const b = at(0.3, -0.6);
+    const t = at(0.3, 1.25);
+    const w1 = add(t, add(scale(e, -0.95), scale(d, 0.85)));
+    const w2 = add(t, add(scale(e, -0.95), scale(d, -0.85)));
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 0.6;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineTo(t.x, t.y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(t.x, t.y);
+    ctx.lineTo(w1.x, w1.y);
+    ctx.lineTo(w2.x, w2.y);
+    ctx.closePath();
+    ctx.fill();
   }
 
   // ---------- Машины ----------
@@ -1272,13 +1338,43 @@ export class Renderer {
     for (const ind of game.industries) if (inView(ind.fp)) this.drawIndustry(ind);
     const sel = o.selection;
     for (const st of game.stations.values()) {
-      if (!inView(st.fp)) continue;
       const selected = (sel?.type === 'station' && sel.id === st.id) || o.lineStops.includes(st.id);
+      for (const w of st.warehouses ?? []) if (inView(w.fp)) this.drawWarehouse(w.fp, selected);
+      if (!inView(st.fp)) continue;
       if (st.kind === 'rail') this.drawRailStation(game, st, selected);
       else if (st.kind === 'stop') this.drawStop(game, st, selected);
       else this.drawStation(game, st, selected);
     }
     ctx.globalAlpha = 1;
+  }
+
+  /** Склад станции: ангар с двускатной крышей (конёк вдоль), тенью и воротами с торца; у выбранной станции — синей обводкой. */
+  private drawWarehouse(fp: Footprint, selected: boolean): void {
+    const ctx = this.ctx;
+    this.drawFootprint({ ...fp, center: { x: fp.center.x + 2.5, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.22)');
+    this.drawFootprint(fp, '#d9c19a', selected ? '#2f80ed' : '#7d5a39', selected ? 2.4 : 1.2);
+    ctx.save();
+    ctx.translate(fp.center.x, fp.center.y);
+    ctx.rotate(fp.angle);
+    // Скаты крыши: тёмный — одна половина, конёк посередине, рёбра по скатам.
+    ctx.fillStyle = 'rgba(125, 90, 57, 0.28)';
+    ctx.fillRect(-fp.w / 2 + 1, 0, fp.w - 2, fp.h / 2 - 1);
+    ctx.strokeStyle = 'rgba(92, 70, 50, 0.7)';
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(-fp.w / 2 + 1, 0);
+    ctx.lineTo(fp.w / 2 - 1, 0);
+    for (let x = -fp.w / 2 + 4; x < fp.w / 2 - 2; x += 3.5) {
+      ctx.moveTo(x, -fp.h / 2 + 1.5);
+      ctx.lineTo(x, fp.h / 2 - 1.5);
+    }
+    ctx.globalAlpha = 0.45;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    // Ворота с торца.
+    ctx.fillStyle = '#5c4632';
+    ctx.fillRect(fp.w / 2 - 1.6, -fp.h * 0.22, 1.6, fp.h * 0.44);
+    ctx.restore();
   }
 
   /** Вокзал: островная платформа между путями, боковая у здания и само здание. */

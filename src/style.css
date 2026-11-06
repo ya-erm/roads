@@ -1499,6 +1499,152 @@ button.icon.toggle-spacing {
   text-decoration: line-through;
 }
 
+/* Фазы светофора: плитка на фазу — схема перекрёстка со стрелками, длительность, порядок. */
+.ph-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ph-tile {
+  width: 84px;
+  padding: 2px 3px 4px;
+  border-radius: 9px;
+  border: 1.5px solid transparent;
+  background: #f6f8fa;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+.ph-tile.active {
+  border-color: #3ad16b;
+  background: #eefaf2;
+}
+
+.ph-tile.clearing {
+  border-color: #f2c230;
+  background: #fdf8e6;
+}
+
+.ph-tile.extra {
+  border-style: dashed;
+  border-color: #b8c0ca;
+}
+
+.ph-head {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  font-size: 11px;
+}
+
+.ph-head .ph-n {
+  min-width: 14px;
+  text-align: center;
+}
+
+.ph-head .ph-auto {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--muted);
+  border: 1px solid #b8c0ca;
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.ph-head .ph-sp {
+  flex: 1;
+}
+
+.ph-btn {
+  width: 17px;
+  height: 18px;
+  padding: 0;
+  border-radius: 5px;
+  font-size: 9.5px;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.ph-btn:hover:not(:disabled) {
+  background: #e3e8ee;
+  color: var(--ink);
+}
+
+.ph-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.ph-pic {
+  display: block;
+}
+
+.ph-pic .ph-turn {
+  cursor: pointer;
+}
+
+.ph-pic .ph-turn:hover path.ph-vis[stroke] {
+  stroke-width: 3.6;
+}
+
+.ph-pic .ph-flash .ph-vis {
+  animation: ph-flash 0.4s ease-in-out 4;
+}
+
+@keyframes ph-flash {
+  50% {
+    opacity: 0.15;
+  }
+}
+
+.ph-tile .stepper {
+  margin: 0;
+}
+
+.ph-tile .stepper button {
+  width: 22px;
+  height: 22px;
+  font-size: 14px;
+}
+
+.ph-tile .stepper b {
+  min-width: 30px;
+  font-size: 11.5px;
+}
+
+.ph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 9px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.ph-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.ph-legend .ph-bad {
+  color: #d64541;
+}
+
+.ph-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ph-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
 /* Связи полос: шаги значками — как метки на карте. */
 .lane-steps {
   display: flex;
@@ -1909,7 +2055,13 @@ button.icon.toggle-spacing {
   padding: 0 4px;
 }
 
-/* Склад станции: полоска заполнения, «лежит / помещается» и пристройки-склады. */
+/* Склад станции: полоска заполнения, «лежит / помещается» и склады; «+» нажат — ставим склад на карте. */
+.stepper.depots button.active {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 8px;
+}
+
 .store-row .lbl2 {
   display: inline-flex;
   align-items: center;

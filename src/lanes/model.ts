@@ -1,6 +1,7 @@
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { isDivided, LANE_W, MEDIAN, RoadClass, RoadSpec } from '../world/roadTypes';
+import type { PhaseSpec } from './lights';
 
 /** Кривая — прямой отрезок: управляющие точки на хорде, между концами. */
 function isStraight(cv: Cubic): boolean {
@@ -76,8 +77,13 @@ export interface LaneNode {
   mainPair?: number[] | null;
   /** Запрещённые повороты: `${полотно въезда}>${полотно выезда}`. */
   bans?: string[];
-  /** Длительность зелёного по фазам светофора, с. */
+  /** Длительность зелёного по фазам светофора «Авто», с. */
   greens?: number[];
+  /**
+   * Фазы светофора, заданные игроком: повороты с зелёным (`${полотно въезда}>${полотно выезда}`) и длительность.
+   * Нет — «Авто»: встречные подъезды вместе (src/lanes/lights.ts). Массив заменяется целиком (копии сети делят его).
+   */
+  phases?: PhaseSpec[];
   /** Светофор пропускает пустые фазы. По умолчанию да. */
   adaptive?: boolean;
   /** Узел кольца с этим центром (id из списка колец игры). */
@@ -106,6 +112,17 @@ export function remapCorners(corners: Record<string, number>, map: (id: number) 
   return Object.keys(res).length ? res : undefined;
 }
 
+/** Переименовывает полотна в поворотах фаз светофора («12>15»); map → undefined — поворот прочь (фаза остаётся). */
+export function remapPhases(phases: PhaseSpec[], map: (id: number) => number | undefined): PhaseSpec[] {
+  return phases.map((p) => ({
+    ...p,
+    go: p.go.flatMap((k) => {
+      const ids = k.split('>').map((x) => map(Number(x)));
+      return ids.length === 2 && ids.every((x) => x !== undefined) ? [ids.join('>')] : [];
+    }),
+  }));
+}
+
 /** Связь полос на перекрёстке: полоса i (справа) полотна from → полоса j (справа) полотна to. */
 export interface LaneLink {
   from: number;
@@ -126,6 +143,7 @@ export function renameArm(n: LaneNode, from: number, to: number): void {
   const swap = (x: number) => (x === from ? to : x);
   if (n.bans) n.bans = n.bans.map((k) => k.split('>').map((x) => swap(Number(x))).join('>'));
   if (n.mainPair) n.mainPair = n.mainPair.map(swap);
+  if (n.phases) n.phases = remapPhases(n.phases, swap);
   if (n.lanes) {
     n.lanes = n.lanes.map((k) => {
       const l = parseLaneKey(k);

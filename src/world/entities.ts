@@ -135,6 +135,8 @@ export interface Station {
   bays: number;
   /** Пристройки-склады автостанции (нет — 0): каждая — больше места под груз и площадка длиннее (STORAGE). */
   depots?: number;
+  /** Склады — отдельные здания рядом (ставит игрок в зоне вокруг станции): каждый — больше места под груз. */
+  warehouses?: Warehouse[];
   townIds: number[];
   industryIds: number[];
   accepts: Set<CargoType>;
@@ -143,4 +145,12 @@ export interface Station {
   paxAcc: number;
 }
 
-export type Structure = TownBuilding | Industry | Station;
+/** Склад станции — отдельное здание рядом с автостанцией (ставит игрок в зоне вокруг неё): места под груз станции. */
+export interface Warehouse {
+  type: 'warehouse';
+  id: number;
+  stationId: number;
+  fp: Footprint;
+}
+
+export type Structure = TownBuilding | Industry | Station | Warehouse;

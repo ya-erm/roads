@@ -177,13 +177,16 @@ export interface IndustryType {
   count: number;
 }
 
+/** Сколько добывает сырьевое предприятие первого уровня за месяц (было 44 — склады забивались слишком быстро). */
+export const RAW_RATE = 36 * MONTH_SCALE;
+
 export const INDUSTRY_TYPES: Record<IndustryKind, IndustryType> = {
-  farm: { kind: 'farm', name: 'Ферма', short: 'Ферма', produces: 'grain', accepts: [], color: '#e6cf7a', roof: '#b5543c', w: 110, h: 80, rate: 44 * MONTH_SCALE, count: 4 },
-  forest: { kind: 'forest', name: 'Лесозаготовка', short: 'Лесозаготовка', produces: 'logs', accepts: [], color: '#a7b98a', roof: '#6b4f33', w: 100, h: 90, rate: 44 * MONTH_SCALE, count: 4 },
-  coalmine: { kind: 'coalmine', name: 'Угольная шахта', short: 'Шахта', produces: 'coal', accepts: [], color: '#b9b4ad', roof: '#3d4148', w: 90, h: 80, rate: 44 * MONTH_SCALE, count: 3 },
-  ironmine: { kind: 'ironmine', name: 'Железный рудник', short: 'Рудник', produces: 'ore', accepts: [], color: '#c9ab96', roof: '#7d4a33', w: 90, h: 80, rate: 44 * MONTH_SCALE, count: 3 },
-  oilwell: { kind: 'oilwell', name: 'Нефтяная скважина', short: 'Скважина', produces: 'oil', accepts: [], color: '#d4cfc4', roof: '#4a3b6b', w: 80, h: 80, rate: 44 * MONTH_SCALE, count: 3 },
-  quarry: { kind: 'quarry', name: 'Карьер', short: 'Карьер', produces: 'stone', accepts: [], color: '#cfcac0', roof: '#6f757c', w: 100, h: 90, rate: 44 * MONTH_SCALE, count: 3 },
+  farm: { kind: 'farm', name: 'Ферма', short: 'Ферма', produces: 'grain', accepts: [], color: '#e6cf7a', roof: '#b5543c', w: 110, h: 80, rate: RAW_RATE, count: 4 },
+  forest: { kind: 'forest', name: 'Лесозаготовка', short: 'Лесозаготовка', produces: 'logs', accepts: [], color: '#a7b98a', roof: '#6b4f33', w: 100, h: 90, rate: RAW_RATE, count: 4 },
+  coalmine: { kind: 'coalmine', name: 'Угольная шахта', short: 'Шахта', produces: 'coal', accepts: [], color: '#b9b4ad', roof: '#3d4148', w: 90, h: 80, rate: RAW_RATE, count: 3 },
+  ironmine: { kind: 'ironmine', name: 'Железный рудник', short: 'Рудник', produces: 'ore', accepts: [], color: '#c9ab96', roof: '#7d4a33', w: 90, h: 80, rate: RAW_RATE, count: 3 },
+  oilwell: { kind: 'oilwell', name: 'Нефтяная скважина', short: 'Скважина', produces: 'oil', accepts: [], color: '#d4cfc4', roof: '#4a3b6b', w: 80, h: 80, rate: RAW_RATE, count: 3 },
+  quarry: { kind: 'quarry', name: 'Карьер', short: 'Карьер', produces: 'stone', accepts: [], color: '#cfcac0', roof: '#6f757c', w: 100, h: 90, rate: RAW_RATE, count: 3 },
   foodplant: { kind: 'foodplant', name: 'Пищевой комбинат', short: 'Пищекомбинат', produces: 'food', accepts: ['grain'], color: '#e4ded2', roof: '#b04a42', w: 100, h: 70, rate: 0, count: 2 },
   sawmill: { kind: 'sawmill', name: 'Лесопилка', short: 'Лесопилка', produces: 'planks', accepts: ['logs'], color: '#e4ded2', roof: '#8a6a43', w: 100, h: 70, rate: 0, count: 2 },
   steelmill: { kind: 'steelmill', name: 'Металлургический завод', short: 'Завод металла', produces: 'steel', accepts: ['coal', 'ore'], color: '#d6d4d0', roof: '#4f6273', w: 120, h: 80, rate: 0, count: 2 },
@@ -193,24 +196,24 @@ export const INDUSTRY_TYPES: Record<IndustryKind, IndustryType> = {
   // Цепочки второй волны — в конце списка: мир по старому seed сохраняет прежние предприятия, новые добавляются к ним.
   // Сырьё у них общее со старыми заводами: зерно, уголь, доски и камень теперь нужны двум видам предприятий.
   // Стекло берёт мебельная фабрика и просят города; мебель — только города.
-  ranch: { kind: 'ranch', name: 'Животноводческая ферма', short: 'Животноводы', produces: 'livestock', accepts: [], color: '#b9cc8a', roof: '#8a5a3c', w: 110, h: 80, rate: 44 * MONTH_SCALE, count: 3 },
-  sandpit: { kind: 'sandpit', name: 'Песчаный карьер', short: 'Песчаный карьер', produces: 'sand', accepts: [], color: '#e3d3ae', roof: '#9a7b4f', w: 100, h: 80, rate: 44 * MONTH_SCALE, count: 2 },
+  ranch: { kind: 'ranch', name: 'Животноводческая ферма', short: 'Животноводы', produces: 'livestock', accepts: [], color: '#b9cc8a', roof: '#8a5a3c', w: 110, h: 80, rate: RAW_RATE, count: 3 },
+  sandpit: { kind: 'sandpit', name: 'Песчаный карьер', short: 'Песчаный карьер', produces: 'sand', accepts: [], color: '#e3d3ae', roof: '#9a7b4f', w: 100, h: 80, rate: RAW_RATE, count: 2 },
   meatplant: { kind: 'meatplant', name: 'Мясокомбинат', short: 'Мясокомбинат', produces: 'food', accepts: ['livestock', 'grain'], color: '#e4ded2', roof: '#8f4b5a', w: 110, h: 70, rate: 0, count: 1 },
   glassworks: { kind: 'glassworks', name: 'Стекольный завод', short: 'Стекольный', produces: 'glass', accepts: ['sand', 'coal'], color: '#dcdfe0', roof: '#3f7f9c', w: 120, h: 80, rate: 0, count: 1 },
   furniture: { kind: 'furniture', name: 'Мебельная фабрика', short: 'Мебельная', produces: 'furniture', accepts: ['planks', 'glass'], color: '#e6ddcf', roof: '#7a5236', w: 100, h: 70, rate: 0, count: 1 },
   cement: { kind: 'cement', name: 'Цементный завод', short: 'Цементный', produces: 'construction', accepts: ['stone', 'sand'], color: '#dad8d3', roof: '#7d8188', w: 120, h: 80, rate: 0, count: 1 },
   // Предприятия биомов — ещё дальше в конце: старые миры их не получают, прежние предприятия на своих местах.
   // count — сколько их в биоме с множителем 1; сам множитель (или его отсутствие) — в BIOMES.
-  flaxfarm: { kind: 'flaxfarm', name: 'Льноводческое хозяйство', short: 'Льноводы', produces: 'flax', accepts: [], color: '#c9d3a6', roof: '#7d5a44', w: 110, h: 80, rate: 44 * MONTH_SCALE, count: 3 },
-  claypit: { kind: 'claypit', name: 'Глиняный карьер', short: 'Глиняный карьер', produces: 'clay', accepts: [], color: '#d9bfa6', roof: '#8a5a44', w: 100, h: 80, rate: 44 * MONTH_SCALE, count: 2 },
-  fishery: { kind: 'fishery', name: 'Рыболовецкая артель', short: 'Рыбаки', produces: 'fish', accepts: [], color: '#d3d7d2', roof: '#2f6f94', w: 90, h: 80, rate: 44 * MONTH_SCALE, count: 4 },
-  goldmine: { kind: 'goldmine', name: 'Золотой прииск', short: 'Прииск', produces: 'gold', accepts: [], color: '#cfc4a8', roof: '#7a6230', w: 100, h: 80, rate: 44 * MONTH_SCALE, count: 2 },
-  sheepfarm: { kind: 'sheepfarm', name: 'Овцеводческая ферма', short: 'Овцеферма', produces: 'wool', accepts: [], color: '#d2cf98', roof: '#8a6a4a', w: 110, h: 80, rate: 44 * MONTH_SCALE, count: 3 },
-  sunflower: { kind: 'sunflower', name: 'Подсолнечные поля', short: 'Подсолнечник', produces: 'sunflower', accepts: [], color: '#d8cf86', roof: '#6b5a1e', w: 110, h: 80, rate: 44 * MONTH_SCALE, count: 3 },
-  gemmine: { kind: 'gemmine', name: 'Самоцветные копи', short: 'Копи', produces: 'gems', accepts: [], color: '#c9c3bd', roof: '#5e4a7a', w: 90, h: 80, rate: 44 * MONTH_SCALE, count: 2 },
-  coppermine: { kind: 'coppermine', name: 'Медный рудник', short: 'Медный рудник', produces: 'copperore', accepts: [], color: '#bfc4b4', roof: '#2a6560', w: 100, h: 90, rate: 44 * MONTH_SCALE, count: 3 },
-  cottonfarm: { kind: 'cottonfarm', name: 'Хлопковая плантация', short: 'Хлопок', produces: 'cotton', accepts: [], color: '#cfd2a2', roof: '#4f7f72', w: 110, h: 80, rate: 44 * MONTH_SCALE, count: 3 },
-  gasfield: { kind: 'gasfield', name: 'Газовый промысел', short: 'Газпромысел', produces: 'gas', accepts: [], color: '#d4d2cc', roof: '#2f58a8', w: 90, h: 80, rate: 44 * MONTH_SCALE, count: 2 },
+  flaxfarm: { kind: 'flaxfarm', name: 'Льноводческое хозяйство', short: 'Льноводы', produces: 'flax', accepts: [], color: '#c9d3a6', roof: '#7d5a44', w: 110, h: 80, rate: RAW_RATE, count: 3 },
+  claypit: { kind: 'claypit', name: 'Глиняный карьер', short: 'Глиняный карьер', produces: 'clay', accepts: [], color: '#d9bfa6', roof: '#8a5a44', w: 100, h: 80, rate: RAW_RATE, count: 2 },
+  fishery: { kind: 'fishery', name: 'Рыболовецкая артель', short: 'Рыбаки', produces: 'fish', accepts: [], color: '#d3d7d2', roof: '#2f6f94', w: 90, h: 80, rate: RAW_RATE, count: 4 },
+  goldmine: { kind: 'goldmine', name: 'Золотой прииск', short: 'Прииск', produces: 'gold', accepts: [], color: '#cfc4a8', roof: '#7a6230', w: 100, h: 80, rate: RAW_RATE, count: 2 },
+  sheepfarm: { kind: 'sheepfarm', name: 'Овцеводческая ферма', short: 'Овцеферма', produces: 'wool', accepts: [], color: '#d2cf98', roof: '#8a6a4a', w: 110, h: 80, rate: RAW_RATE, count: 3 },
+  sunflower: { kind: 'sunflower', name: 'Подсолнечные поля', short: 'Подсолнечник', produces: 'sunflower', accepts: [], color: '#d8cf86', roof: '#6b5a1e', w: 110, h: 80, rate: RAW_RATE, count: 3 },
+  gemmine: { kind: 'gemmine', name: 'Самоцветные копи', short: 'Копи', produces: 'gems', accepts: [], color: '#c9c3bd', roof: '#5e4a7a', w: 90, h: 80, rate: RAW_RATE, count: 2 },
+  coppermine: { kind: 'coppermine', name: 'Медный рудник', short: 'Медный рудник', produces: 'copperore', accepts: [], color: '#bfc4b4', roof: '#2a6560', w: 100, h: 90, rate: RAW_RATE, count: 3 },
+  cottonfarm: { kind: 'cottonfarm', name: 'Хлопковая плантация', short: 'Хлопок', produces: 'cotton', accepts: [], color: '#cfd2a2', roof: '#4f7f72', w: 110, h: 80, rate: RAW_RATE, count: 3 },
+  gasfield: { kind: 'gasfield', name: 'Газовый промысел', short: 'Газпромысел', produces: 'gas', accepts: [], color: '#d4d2cc', roof: '#2f58a8', w: 90, h: 80, rate: RAW_RATE, count: 2 },
   linenmill: { kind: 'linenmill', name: 'Льнокомбинат', short: 'Льнокомбинат', produces: 'textiles', accepts: ['flax'], color: '#e2ded6', roof: '#5a6f9e', w: 110, h: 70, rate: 0, count: 1 },
   brickworks: { kind: 'brickworks', name: 'Кирпичный завод', short: 'Кирпичный', produces: 'construction', accepts: ['clay'], color: '#e0d6cc', roof: '#a4513a', w: 110, h: 75, rate: 0, count: 1 },
   cannery: { kind: 'cannery', name: 'Рыбоконсервный завод', short: 'Рыбозавод', produces: 'food', accepts: ['fish'], color: '#e0e2e0', roof: '#2f6f94', w: 100, h: 70, rate: 0, count: 2 },

@@ -27,13 +27,17 @@ import {
   ProjectPlan,
   projectPlan,
   removeNode,
+  roadProjectEdit,
   segAt,
   segCurve,
   segsAt,
   smoothJoint,
   splitSeg,
 } from '../game/roadProject';
+import { MoveProject } from '../game/moveProject';
+import type { NetEdit } from '../game/roadbuild';
 import { anchorAt } from '../lanes/edit';
+import type { LaneNet } from '../lanes/model';
 import { halfWidth, type RoadSpec } from '../world/roadTypes';
 
 /** Что тянут в проекте: узел, перо или середину участка. */
@@ -106,18 +110,81 @@ export class ProjectTools {
   private before: Project | null = null;
   /** Что было под курсором при нажатии (клик без протяжки). */
   private press: { kind: 'node'; id: number } | { kind: 'seg'; seg: number; t: number } | { kind: 'handle' } | { kind: 'empty' } | null = null;
-  /** Шаги правки проекта для Ctrl+Z. */
-  private history: Record<NetKind, Project[]> = { road: [], rail: [] };
+  /** Шаги правки проекта для Ctrl+Z: проект и правки построенных дорог, какими они были до шага. */
+  private history: Record<NetKind, { p: Project; edits: NetEdit[] }[]> = { road: [], rail: [] };
   private cache = new Map<string, ProjectPlan>();
 
-  constructor(private readonly game: () => Game) {}
+  /**
+   * roadEdits — правки построенных дорог (перенос узла, перо, изгиб — как в «Двигать»): часть того же проекта дорог,
+   * строятся вместе с его участками.
+   */
+  constructor(
+    private readonly game: () => Game,
+    private readonly roadEdits: (() => MoveProject) | null = null,
+  ) {}
 
   project(kind: NetKind): Project {
     return this.projects[kind];
   }
 
+  /** Правки построенных дорог в проекте (у путей их нет). */
+  edits(kind: NetKind): NetEdit[] {
+    return kind === 'road' && this.roadEdits ? this.roadEdits().edits : [];
+  }
+
+  /** Среди правок проекта дорог — расширение дороги («Полоса»): дома отодвигаются, а не сносятся. */
+  private shoves(kind: NetKind): boolean {
+    return kind === 'road' && !!this.roadEdits && this.roadEdits().shove;
+  }
+
+  /** Построенные дороги с правками проекта: к ним примыкают новые участки (нет правок — настоящая сеть). */
+  private roadNet(): LaneNet {
+    return (this.roadEdits && this.roadEdits().net()) ?? this.game().roads.net;
+  }
+
   canUndo(kind: NetKind): boolean {
     return this.history[kind].length > 0;
+  }
+
+  /** Правка построенной дороги — в проект дорог (Ctrl+Z в проекте её уберёт). Ответ — что не так. */
+  addEdit(edit: NetEdit, shove = false): string | null {
+    if (!this.roadEdits) return 'Так не передвинуть';
+    const was = copyProject(this.projects.road);
+    const before = [...this.roadEdits().edits];
+    const problem = this.roadEdits().add(edit, shove);
+    if (!problem) this.remember('road', was, before);
+    return problem;
+  }
+
+  /** Нажатие ушло не в проект (тянули построенную дорогу) — забыть его. */
+  cancelPress(): void {
+    this.press = null;
+    this.before = null;
+    this.drag = null;
+    this.hint = null;
+  }
+
+  /** Нажали мимо проекта (ни узла, ни пера, ни участка). */
+  get pressedEmpty(): boolean {
+    return this.press?.kind === 'empty';
+  }
+
+  /** Где узел, от которого ведём (null — не ведём). */
+  tipPos(kind: NetKind): { pos: Vec; level: number } | null {
+    const n = this.tip === null ? undefined : this.projects[kind].nodes.find((x) => x.id === this.tip);
+    return n ? { pos: { ...n.pos }, level: n.level } : null;
+  }
+
+  /**
+   * Включили «Проект» посреди обычной стройки: её начало (pos — узел, дорога или поле, attach) становится узлом
+   * проекта, от которого ведём, точка изгиба кривой — та же; дальше протяжка — уже участок проекта.
+   */
+  adopt(kind: NetKind, pos: Vec, level: number, attach: boolean, control: Vec | null): void {
+    const p = this.projects[kind];
+    const own = nodeAt(p, pos, 0.5);
+    const n = own ?? addNode(p, pos, level, attach);
+    this.tip = n.id;
+    this.control = control ? { ...control } : null;
   }
 
   /** Сменили инструмент, режим или партию: что тянули и откуда вели — забываем, проект остаётся. */
@@ -143,9 +210,9 @@ export class ProjectTools {
     this.control = null;
   }
 
-  private remember(kind: NetKind, was: Project): void {
+  private remember(kind: NetKind, was: Project, edits: NetEdit[] = [...this.edits(kind)]): void {
     const h = this.history[kind];
-    h.push(was);
+    h.push({ p: was, edits });
     if (h.length > 100) h.shift();
   }
 
@@ -165,7 +232,7 @@ export class ProjectTools {
     const own = nodeAt(this.projects[kind], p, r * 0.8, skip);
     if (own) return { pos: own.pos, level: own.level, attach: own.attach, dir: () => continuation(this.projects[kind], own.id), node: own.id };
     if (kind === 'road') {
-      const net = g.roads.net;
+      const net = this.roadNet();
       const a = anchorAt(net, p, r, level);
       if (a.kind === 'node') {
         const n = net.node(a.node);
@@ -400,9 +467,12 @@ export class ProjectTools {
 
   /** Ctrl+Z в проекте: шаг правки назад. false — отменять нечего. */
   undo(kind: NetKind): boolean {
-    const was = this.history[kind].pop();
-    if (!was) return false;
+    const step = this.history[kind].pop();
+    if (!step) return false;
+    const was = step.p;
     this.projects[kind] = was;
+    // Правки построенных дорог — какими были до шага.
+    if (kind === 'road' && this.roadEdits) this.roadEdits().restore(step.edits);
     this.drag = null;
     this.before = null;
     this.control = null;
@@ -425,20 +495,32 @@ export class ProjectTools {
   /** «Отменить проект»: всё нарисованное — прочь (Ctrl+Z вернёт). */
   discard(kind: NetKind): void {
     const pr = this.projects[kind];
-    if (!pr.nodes.length) return;
+    const edits = this.edits(kind);
+    if (!pr.nodes.length && !edits.length) return;
     this.commit(kind, pr, emptyProject());
+    // И правки построенных дорог — тоже (Ctrl+Z в проекте вернёт и их).
+    if (kind === 'road' && this.roadEdits) this.roadEdits().clear();
     this.stop(kind);
   }
 
-  /** «Построить»: весь проект теми же строителями; построили — проект пуст (Ctrl+Z отменит стройку). */
-  build(kind: NetKind): string | null {
-    const g = this.game();
-    const problem = buildProject(g, kind, this.projects[kind]);
-    if (problem) return problem;
+  /** Проект дорог построили (здесь или из «Двигать») — участков и шагов правки больше нет. */
+  built(kind: NetKind): void {
     this.projects[kind] = emptyProject();
     this.history[kind] = [];
     this.cache.clear();
     this.stop(kind);
+  }
+
+  /**
+   * «Построить»: весь проект теми же строителями — у дорог вместе с правками построенных дорог; построили —
+   * проект пуст (Ctrl+Z отменит стройку целиком).
+   */
+  build(kind: NetKind): string | null {
+    const g = this.game();
+    const problem = buildProject(g, kind, this.projects[kind], this.edits(kind), this.shoves(kind));
+    if (problem) return problem;
+    if (kind === 'road' && this.roadEdits) this.roadEdits().clear();
+    this.built(kind);
     return null;
   }
 
@@ -461,13 +543,20 @@ export class ProjectTools {
     return segAt(pr, p, (x) => halfWidth(x.spec) + r * 0.3) ? 'seg' : null;
   }
 
-  /** План проекта (кэш по проекту, сетям и деньгам). */
-  plan(kind: NetKind, p: Project = this.projects[kind]): ProjectPlan {
+  /**
+   * План проекта (кэш по проекту, правкам построенных дорог, сетям и деньгам). extra — правка построенной дороги,
+   * которую тянут сейчас (после остальных; без кэша).
+   */
+  plan(kind: NetKind, p: Project = this.projects[kind], extra: NetEdit | null = null): ProjectPlan {
     const g = this.game();
-    const key = `${kind}|${idOf(g.roads.net)}.${g.roads.net.version}|${idOf(g.net)}.${g.net.version}|${Math.floor(g.budget)}|${JSON.stringify(p)}`;
+    const edits = this.edits(kind);
+    const shove = this.shoves(kind);
+    if (extra) return projectPlan(g, kind, p, [...edits, extra], shove);
+    const stamp = kind === 'road' && this.roadEdits ? this.roadEdits().stamp : 0;
+    const key = `${kind}|${idOf(g.roads.net)}.${g.roads.net.version}|${idOf(g.net)}.${g.net.version}|${Math.floor(g.budget)}|${stamp}|${JSON.stringify(p)}`;
     let plan = this.cache.get(key);
     if (!plan) {
-      plan = projectPlan(g, kind, p);
+      plan = projectPlan(g, kind, p, edits, shove);
       if (this.cache.size > 24) this.cache.clear();
       this.cache.set(key, plan);
     }
@@ -475,12 +564,12 @@ export class ProjectTools {
   }
 
   /** Проект на карте: с новым участком до курсора, если ведём ветку (и курсор не на чём тянуть). */
-  view(s: DrawSettings, hover: Vec | null, r: number, hr: number, kink = false): ProjectView {
+  view(s: DrawSettings, hover: Vec | null, r: number, hr: number, kink = false, extra: NetEdit | null = null): ProjectView {
     const kind = s.kind;
     const base = this.projects[kind];
-    const draft = !this.drag && hover && !(s.mode === 'curve' && !this.control) && !handleAt(base, hover, hr) ? this.withDraft(s, hover, r, kink) : null;
+    const draft = !this.drag && !extra && hover && !(s.mode === 'curve' && !this.control) && !handleAt(base, hover, hr) ? this.withDraft(s, hover, r, kink) : null;
     const pr = draft?.project ?? base;
-    const plan = this.plan(kind, pr);
+    const plan = this.plan(kind, pr, extra);
     const draftSeg = draft ? pr.segs[pr.segs.length - 1].id : null;
     const badAt = plan.bad === null ? -1 : pr.segs.findIndex((x) => x.id === plan.bad);
     const segs = pr.segs.map((x, i) => {
@@ -512,4 +601,21 @@ export class ProjectTools {
     const slowest = signs.length ? Math.min(...signs.map((x) => x.kmh)) : null;
     return { plan, segs, nodes, handles, draft: draftInfo, signs, slowest };
   }
+}
+
+/**
+ * Общий проект дорог «Дороги»: новые участки (ProjectTools, «Строить») и правки построенных дорог (MoveProject —
+ * «Двигать», «Полоса», протяжки построенных дорог в «Строить») — один проект: общие цена, проверки, знаки и история
+ * Ctrl+Z, строится разом. План правок — с участками после них (tail).
+ */
+export function sharedRoadProject(game: () => Game): { tools: ProjectTools; edits: MoveProject } {
+  const tools: ProjectTools = new ProjectTools(game, () => edits);
+  const edits: MoveProject = new MoveProject(game, {
+    tail: () => {
+      const pr = tools.project('road');
+      return pr.segs.length ? { edit: roadProjectEdit(pr, game().ground()), key: JSON.stringify(pr) } : null;
+    },
+    built: () => tools.built('road'),
+  });
+  return { tools, edits };
 }

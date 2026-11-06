@@ -3,6 +3,7 @@ import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub
 import type { Vehicle } from '../sim/vehicle';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
 import { filletPath, junctionCuts, pointOff } from './geometry';
+import { phaseRelations, resolvePhases, SignalHead, signalHeads, turnKey } from './lights';
 import { Corridor, CorridorEnd, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey, taperLen } from './model';
 import { autoSolids } from './solid';
 
@@ -119,12 +120,28 @@ export function assignLanes(inCount: number, exits: { count: number; theta: numb
   });
 }
 
-/** Светофор: фазы — полосы въезда, которым зелёный одновременно; между фазами — жёлтый (clearing). */
+/** Фаза светофора в графе: манёвры с зелёным, кто из них кому уступает, сколько горит. */
+export interface LightPhase {
+  /** Повороты фазы (`${полотно въезда}>${полотно выезда}`) — как в настройке узла. */
+  go: string[];
+  /** Манёвры (ключи GMove) с зелёным. */
+  moves: Set<string>;
+  /** Кому манёвр уступает (налево на общий зелёный — встречным); нет в списке — едет, никого не пропуская. */
+  yields: Map<string, Set<string>>;
+  /** Пересекающиеся потоки, которым уступать некому, — так фаза быть не может (едут по очереди). */
+  clashes: [string, string][];
+  green: number;
+  /** Повороты, которых игрок не дал ни в одну фазу, — своя фаза «Авто». */
+  extra?: boolean;
+}
+
+/** Светофор: фазы по кругу, между ними — жёлтый (clearing); секции светофора у каждого въезда. */
 export interface LightState {
-  phases: number[][];
+  phases: LightPhase[];
   phase: number;
   timer: number;
   clearing: boolean;
+  heads: SignalHead[];
 }
 
 /** Перекрёсток или тупик во время движения: кто проезжает, кто ждёт, кто главный, светофор. */
@@ -190,6 +207,8 @@ export class LaneGraph {
   readonly outLinks = new Map<number, GLink[]>();
   readonly inLinks = new Map<number, GLink[]>();
   readonly nodes = new Map<number, GNode>();
+  /** Манёвры каждого перекрёстка (без продолжений полос). */
+  readonly junctionMoves = new Map<number, GMove[]>();
   /** Связи каждого полотна по ходу оси. */
   private readonly byCorridor = new Map<number, { flow: Flow; links: GLink[] }[]>();
   private nextId = 1;
@@ -232,6 +251,11 @@ export class LaneGraph {
   /** Связи полотна (обоих направлений). */
   corridorLinks(id: number): GLink[] {
     return (this.byCorridor.get(id) ?? []).flatMap((g) => g.links);
+  }
+
+  /** Поворот манёвра — `${полотно въезда}>${полотно выезда}`, как в запретах и фазах светофора. */
+  turnOf(m: GMove): string {
+    return turnKey(this.links.get(m.inLink)?.corridor ?? -1, this.links.get(m.outLink)?.corridor ?? -1);
   }
 
   /** Полоса связи по полосе полотна. */
@@ -450,9 +474,10 @@ export class LaneGraph {
         list[j].zones.set(list[i].key, conflictZone(list[j], list[i]));
       }
     }
-    // Светофор: встречные подъезды едут в одну фазу; главной дороги нет — решает свет.
+    this.junctionMoves.set(n.id, list);
+    // Светофор: фазы игрока или «Авто» (встречные подъезды вместе); главной дороги нет — решает свет.
     if (n.control === 'lights' && ins.length >= 2 && this.net.ends(n).length >= 3) {
-      state.lights = { phases: this.groupPhases(ins), phase: 0, timer: LIGHTS.green, clearing: false };
+      state.lights = this.buildLights(n, ins, list);
       return;
     }
     // Кольцо главнее въездов в него.
@@ -470,28 +495,29 @@ export class LaneGraph {
     }
   }
 
-  /** Фазы светофора: каждый подъезд — со встречным (если есть), остальные — по одному. */
-  private groupPhases(ins: GLink[]): number[][] {
-    const dirOf = (l: GLink) => this.lanePose(l.lanes[0], l.length).dir;
-    const left = [...ins];
-    const phases: number[][] = [];
-    while (left.length) {
-      const first = left.shift()!;
-      const d1 = dirOf(first);
-      let bestIdx = -1;
-      let bestDot = -0.7;
-      left.forEach((l, i) => {
-        const d = dot(d1, dirOf(l));
-        if (d < bestDot) {
-          bestDot = d;
-          bestIdx = i;
-        }
-      });
-      const group = [first];
-      if (bestIdx >= 0) group.push(left.splice(bestIdx, 1)[0]);
-      phases.push(group.flatMap((l) => l.lanes.map((lane) => lane.id)));
-    }
-    return phases;
+  /**
+   * Светофор узла: фазы по настройке (`phases` игрока или «Авто» — src/lanes/lights.ts), в каждой — манёвры с зелёным,
+   * кто кому уступает (налево на общий зелёный — встречным) и недопустимые пары; секции светофора у въездов.
+   */
+  private buildLights(n: LaneNode, ins: GLink[], list: GMove[]): LightState {
+    const approaches = ins.map((l) => ({
+      corridor: l.corridor,
+      dir: this.lanePose(l.lanes[0], l.length).dir,
+      turns: [...new Set(list.filter((m) => m.inLink === l.id).map((m) => this.turnOf(m)))],
+    }));
+    const resolved = resolvePhases(n.phases, approaches, n.greens);
+    if (!resolved.length) resolved.push({ go: [], green: LIGHTS.green });
+    const phases: LightPhase[] = resolved.map((p) => {
+      const go = new Set(p.go);
+      const moves = list.filter((m) => go.has(this.turnOf(m)));
+      const { yields, clashes } = phaseRelations(moves);
+      return { go: p.go, moves: new Set(moves.map((m) => m.key)), yields, clashes, green: p.green, ...(p.extra ? { extra: true } : {}) };
+    });
+    const heads = signalHeads(
+      ins.map((l) => ({ link: l.id, moves: list.filter((m) => m.inLink === l.id) })),
+      phases,
+    );
+    return { phases, phase: 0, timer: phases[0].green, clearing: false, heads };
   }
 
   /** Тупик: разворот с левой полосы въезда на левую полосу выезда того же полотна. */
