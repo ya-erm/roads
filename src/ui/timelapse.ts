@@ -18,7 +18,7 @@ import { cargoImage } from './cargoIcons';
 import { downloadSvg, journalSvg, playSvg } from './icons';
 import { flagSvg, objectiveIcon } from './scenarioIcons';
 import { timelapseSvg } from './timelapseButton';
-import { countInt, countShort, HUD_GAP, HUD_ICON, HUD_PAD, hudLayout, moneyShort, splitDate, tabText, type HudLayout, type Measure, type TabText } from './timelapseHud';
+import { counterSlots, countInt, countShort, HUD_PAD, hudLayout, moneyShort, splitDate, tabText, type HudLayout, type Measure, type TabText } from './timelapseHud';
 import { playRate, TL_SPEEDS } from './timelapseSpeed';
 
 /** Кадры на шкале не ближе стольких месяцев: стройка на паузе в первый месяц тоже успевает показаться. */
@@ -877,14 +877,12 @@ class TimelapsePlayer {
       ctx.textAlign = 'left';
     }
     ctx.font = this.numFont;
-    let x = x0 + HUD_PAD;
+    // Число — вплотную к значку (по левому краю ячейки); запас под длинные числа — справа, значки на месте.
+    const slots = counterSlots(L.cells);
     items.forEach(([icon, text], n) => {
-      icon(x, y0 + 45);
+      icon(x0 + HUD_PAD + slots[n].icon, y0 + 45);
       ctx.fillStyle = '#1f2933';
-      // Число — по правому краю своей ячейки: разряды стоят на месте.
-      const t = tabText(text, this.numMeasure!, L.numDigit);
-      this.fillTab(t, x + HUD_ICON + L.cells[n] - t.width, y0 + 45.5);
-      x += HUD_ICON + L.cells[n] + HUD_GAP;
+      this.fillTab(tabText(text, this.numMeasure!, L.numDigit), x0 + HUD_PAD + slots[n].text, y0 + 45.5);
     });
     // Подпись игры — в углу (видно и в видео).
     ctx.font = `700 12px ${this.font}`;

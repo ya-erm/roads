@@ -157,3 +157,16 @@ export function hudLayout(series: HudSeries, dateMeasure: Measure, numMeasure: M
   const boxW = Math.max(row, dateW + (series.phase ? HUD_BADGE : 0)) + HUD_PAD * 2;
   return { dateDigit, numDigit, yearX, dateW, cells, boxW };
 }
+
+/**
+ * Где рисовать счётчики (от левого края строки): значок и число вплотную за ним — по левому краю ячейки.
+ * Запас ячейки под длинные числа — справа, до следующего значка; значки от числа не зависят и стоят на месте.
+ */
+export function counterSlots(cells: number[]): { icon: number; text: number }[] {
+  let x = 0;
+  return cells.map((c) => {
+    const slot = { icon: x, text: x + HUD_ICON };
+    x += HUD_ICON + c + HUD_GAP;
+    return slot;
+  });
+}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   cellWidth,
+  counterSlots,
   countInt,
   countShort,
   digitWidth,
@@ -135,5 +136,21 @@ describe('Плашка таймлапса: раскладка на всю пар
     const a = hudLayout({ dates, columns, phase: false }, measure, measure);
     const b = hudLayout({ dates: [...dates].reverse(), columns: columns.map((c) => ({ ...c, values: [...c.values].reverse() })), phase: false }, measure, measure);
     expect(b).toEqual(a);
+  });
+
+  it('число — вплотную к значку, запас ячейки — справа до следующего значка', () => {
+    const L = hudLayout({ dates, columns, phase: false }, measure, measure);
+    const slots = counterSlots(L.cells);
+    expect(slots).toHaveLength(4);
+    expect(slots[0].icon).toBe(0);
+    slots.forEach((s, n) => {
+      // Текст начинается сразу за значком, как бы коротко ни было число.
+      expect(s.text).toBe(s.icon + HUD_ICON);
+      // Следующий значок — после самой длинной строки этого счётчика: ничего не наезжает и не сдвигается.
+      if (n + 1 < slots.length) expect(slots[n + 1].icon).toBe(s.text + L.cells[n] + HUD_GAP);
+    });
+    // Последняя ячейка кончается у правого поля плашки (или раньше, если дата шире).
+    const last = slots[3].text + L.cells[3];
+    expect(last + HUD_PAD * 2).toBeLessThanOrEqual(L.boxW);
   });
 });
