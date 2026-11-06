@@ -2,7 +2,7 @@
  * Анализ карты и сети игрока — для генератора сценария, причин событий и оценки выполнимости.
  * Только чтение состояния игры; ничего не меняет.
  */
-import { COST, ECONOMY, MONTH_LENGTH, STATION } from '../config';
+import { COST, ECONOMY, MONTH_LENGTH, STATION, TERM_SCALE } from '../config';
 import { dist, Vec } from '../core/vec';
 import type { Game, MonthRecord } from '../game/game';
 import { MODELS } from '../game/transport';
@@ -175,8 +175,8 @@ export function rawOutput(ind: Industry, months: number): number {
   return total;
 }
 
-/** Месяц на стройку и разгон, прежде чем груз пойдёт. */
-export const RAMP = 1;
+/** Месяцев на стройку и разгон, прежде чем груз пойдёт (2 мин). */
+export const RAMP = 1 * TERM_SCALE;
 
 /**
  * Сколько груза можно привезти к точке за months месяцев: от двух ближайших производителей не дальше maxDist.
@@ -195,7 +195,8 @@ export function cargoPotential(game: Game, cargo: CargoType, near: Vec, months: 
       total += rawOutput(ind, work);
       continue;
     }
-    const inputs = ind.info.accepts.map((c) => cargoPotential(game, c, ind.fp.center, months - 1, maxDist, depth + 1));
+    // Сырьё до завода идёт на звено раньше: на 2 мин меньше срока.
+    const inputs = ind.info.accepts.map((c) => cargoPotential(game, c, ind.fp.center, months - TERM_SCALE, maxDist, depth + 1));
     total += Math.min(Math.min(...inputs), ECONOMY.processRate * (ind.level ?? 1) * work);
   }
   return total;

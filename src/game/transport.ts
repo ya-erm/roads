@@ -1,4 +1,4 @@
-import { MONTH_SCALE } from '../config';
+import { MONTH_LENGTH, MONTH_SCALE, TERM_SCALE } from '../config';
 import { clamp } from '../core/math';
 import { add, cubicBezier, dist, dot, norm, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { TrainSpec } from '../sim/rail';
@@ -42,8 +42,9 @@ interface ModelBase {
 export type ModelTier = 1 | 2 | 3;
 
 /**
- * Срок выхода модели в годах партии по сроку при прежнем 40-секундном месяце: месяц длится втрое дольше
- * (MONTH_SCALE), поэтому срок сжат во столько же раз — новые модели выходят через то же реальное время.
+ * Срок выхода модели в годах партии по сроку при самом первом, 40-секундном месяце: месяц длится в MONTH_SCALE
+ * раз дольше (сейчас — в полтора, минута), поэтому срок в годах во столько же раз короче — новые модели выходят
+ * через то же реальное время при любой длине месяца (при месяце в 2 минуты лет было вдвое меньше: 4 вместо 8).
  * Прежние сроки — от эпох моделей при старте в 1960-м: Грузовик II — 1972 (12 лет), Фура — 1986 (26) и т. д.
  */
 const later = (years: number) => Math.round(years / MONTH_SCALE);
@@ -273,7 +274,7 @@ export interface Line {
   /** Когда машина линии последний раз отправилась с первой станции (игровое время). */
   departedAt?: number;
   /**
-   * Загрузка с начала окна statsFrom (игровое время; окно — не короче месяца и круга линии), по станциям (id):
+   * Загрузка с начала окна statsFrom (игровое время; окно — не короче AUTO_FLEET.window и круга линии), по станциям (id):
    * сумма загрузки при отправлении, сумма оставшегося ждать (в вместимостях машины), число рейсов.
    */
   stopLoads?: Record<number, [number, number, number]>;
@@ -305,7 +306,20 @@ export interface LineAuto {
  * Линии без машин (минимум 0) возвращаем машину, когда за круг набралось бы хотя бы на wake машины —
  * выше порога продажи, чтобы не покупать и не продавать её по кругу.
  */
-export const AUTO_FLEET = { maxVehicles: 50, defaultMax: 10, full: 0.8, leftBehind: 0.5, low: 0.4, lowWindows: 2, wake: 0.6 };
+export const AUTO_FLEET = {
+  maxVehicles: 50,
+  defaultMax: 10,
+  full: 0.8,
+  leftBehind: 0.5,
+  low: 0.4,
+  lowWindows: 2,
+  wake: 0.6,
+  /**
+   * Окно загрузки, секунд (не короче круга линии): 2 минуты — прежний месяц, авто-парк решает так же часто,
+   * как при месяце в 2 минуты. Столько же решённая продажа ждёт, пока какая-нибудь машина опустеет.
+   */
+  window: TERM_SCALE * MONTH_LENGTH,
+};
 
 /** Папка для группировки линий в списке. */
 export interface LineFolder {

@@ -22,9 +22,12 @@ export function runSeconds(game: Game, seconds: number, each?: () => void): void
   }
 }
 
-/** Игра вперёд на months игровых месяцев (как runSeconds). */
+/**
+ * Игра вперёд на months игровых месяцев (как runSeconds) — и ещё кадр: время партии копится шагами по 1/30 с,
+ * и ровно months · MONTH_LENGTH секунд кадрами по 0.1 с может не дотянуть до границы месяца на доли наносекунды.
+ */
 export function runMonths(game: Game, months: number, each?: () => void): void {
-  runSeconds(game, months * MONTH_LENGTH, each);
+  runSeconds(game, months * MONTH_LENGTH + 0.1, each);
 }
 
 /**

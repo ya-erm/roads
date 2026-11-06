@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MONTH_LENGTH } from '../config';
+import { MONTH_LENGTH, TERM_SCALE } from '../config';
 import { dist } from '../core/vec';
 import { Game } from '../game/game';
 import { connectStations as connect, stationAtIndustry, withoutCitizens } from '../game/testkit';
@@ -20,9 +20,10 @@ const scenario = (seed: number, difficulty: Difficulty = 'normal', extra: Partia
   scenario: { difficulty, challenge: false },
 });
 
+/** months месяцев — и ещё кадр, чтобы точно пересечь границу месяца (время копится шагами симуляции). */
 function runMonths(game: Game, months: number, until?: () => boolean): void {
   game.speed = 1;
-  for (let t = 0; t < months * MONTH_LENGTH; t += 0.1) {
+  for (let t = 0; t < months * MONTH_LENGTH + 0.1; t += 0.1) {
     game.update(0.1);
     if (until?.()) return;
   }
@@ -42,7 +43,7 @@ function checkObjective(game: Game, o: Objective): void {
     expect(receivers(game, p.cargo).length, o.title).toBeGreaterThan(0);
   }
   if (o.retryOf) return;
-  const months = o.months ?? (o.deadline !== null ? o.deadline - o.created : 24);
+  const months = o.months ?? (o.deadline !== null ? o.deadline - o.created : 24 * TERM_SCALE);
   const verdict = assess(game, p, months);
   expect(verdict.ok, `${o.title}: ${verdict.reason}`).toBe(true);
 }

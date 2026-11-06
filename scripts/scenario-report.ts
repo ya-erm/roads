@@ -10,6 +10,7 @@
  *
  * Код выхода 1, если нашлись невыполнимые задания или не хватает денег.
  */
+import { TERM_SCALE } from '../src/config';
 import { dist } from '../src/core/vec';
 import { Game } from '../src/game/game';
 import { MODELS } from '../src/game/transport';
@@ -62,7 +63,7 @@ function mainCost(game: Game, o: Objective): number | null {
 function check(sc: Scenario, seed: number, phase: number): void {
   for (const o of sc.state.objectives.filter((x) => x.phase === phase || (phase === 0 && x.phase === null))) {
     objectives++;
-    const months = o.months ?? (o.deadline !== null ? o.deadline - o.created : 24);
+    const months = o.months ?? (o.deadline !== null ? o.deadline - o.created : 24 * TERM_SCALE);
     const v = assess(sc.game, o.params, months);
     if (!v.ok) problems.push({ seed, where: `этап ${'ABC'[phase]}`, text: `${o.title}: ${v.reason}` });
     if (verbose) console.log(`    ${'ABC'[phase]} ${o.role.padEnd(8)} ${v.ok ? '✓' : '✗'} ${o.title}${v.estimate ? ` (оценка ${Math.round(v.estimate)})` : ''}`);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MONTH_LENGTH } from '../config';
+import { MONTH_LENGTH, TERM_SCALE } from '../config';
 import { dist } from '../core/vec';
 import { twoWay } from '../lanes/model';
 import { DEFAULT_SETTINGS } from '../world/settings';
@@ -7,9 +7,10 @@ import { Game } from './game';
 import { Journal, JOURNAL_LIMIT, journalFile, tidy } from './journal';
 import { connectStations, stationAtIndustry, withoutCitizens } from './testkit';
 
+/** months месяцев — и ещё кадр: ровно на границе месяца время, накопленное шагами симуляции, может не дотянуть. */
 function runMonths(game: Game, months: number): void {
   game.speed = 1;
-  for (let t = 0; t < months * MONTH_LENGTH; t += 0.1) game.update(0.1);
+  for (let t = 0; t < months * MONTH_LENGTH + 0.1; t += 0.1) game.update(0.1);
 }
 
 /**
@@ -51,7 +52,8 @@ describe('Журнал партии', { timeout: 120_000 }, () => {
   it('пишет стройку, станции, маршрут, покупки, рейсы с доставкой и месячные сводки производства', () => {
     const game = new Game(7);
     const { line, farm, plant, sA, sB } = farmLine(game);
-    runMonths(game, 1.2);
+    // 2 мин 24 с: рейсы с доставкой и две месячные сводки.
+    runMonths(game, 1.2 * TERM_SCALE);
     const kinds = (k: string) => game.journal.entries.filter((e) => e.k === k);
     expect(kinds('game')).toHaveLength(1);
     expect(kinds('station').map((e) => e.id)).toEqual([sA.id, sB.id]);
@@ -84,9 +86,9 @@ describe('Журнал партии', { timeout: 120_000 }, () => {
     expect(kinds('serves').at(-1)).toMatchObject({ st: sA.id, pax: false, cargo: true });
     // Сводки по месяцам: линия, ферма и комбинат с уровнем, выпуском и складом.
     const months = kinds('month');
-    expect(months).toHaveLength(1);
-    const last = months[0];
-    expect((last.lines as number[][]).find((l) => l[0] === line.id)![3]).toBeGreaterThan(0);
+    expect(months).toHaveLength(TERM_SCALE);
+    const last = months[months.length - 1];
+    expect(months.some((m) => (m.lines as number[][]).find((l) => l[0] === line.id)![3] > 0)).toBe(true);
     const inds = last.inds as number[][];
     expect(inds.some((i) => i[0] === farm.id && i[2] > 0)).toBe(true);
     expect(inds.some((i) => i[0] === plant.id)).toBe(true);

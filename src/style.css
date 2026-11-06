@@ -3326,6 +3326,33 @@ button.small.with-ic {
   margin: 0 0 8px;
 }
 
+/* Полоска снабжения: излишек прошлого месяца, засчитанный в этот, — штриховкой в начале (ui/supplyUi.ts). */
+.bar.supply-bar {
+  display: flex;
+}
+
+.bar.supply-bar > .carry,
+.carry-chip > i {
+  background: repeating-linear-gradient(135deg, var(--c) 0 2px, color-mix(in srgb, var(--c) 30%, #fff) 2px 4px);
+}
+
+.carry-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: #eef1f4;
+  color: #4b525c;
+  font-weight: 600;
+}
+
+.carry-chip > i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
 .partner {
   width: 100%;
   display: flex;

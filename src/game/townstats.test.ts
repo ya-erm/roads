@@ -70,6 +70,34 @@ describe('Снабжение города по месяцам', { timeout: 60_00
     expect(loaded.towns[0].supplyHistory).toHaveLength(4);
   });
 
+  it('излишек сверх нормы засчитывается следующему месяцу (не больше нормы) и виден в истории и после загрузки', () => {
+    const game = new Game(7);
+    const town = game.towns.find((t) => t.demands.length >= 2)!;
+    const [a, b] = town.demands;
+    town.supplied[a] = TOWN_NEED + 5;
+    town.supplied[b] = TOWN_NEED * 4;
+    closeMonth(game);
+    // Новый месяц начинается с излишков: по a — 5, по b — не больше нормы.
+    expect(town.supplied).toEqual({ [a]: 5, [b]: TOWN_NEED });
+    expect(town.carried).toEqual({ [a]: 5, [b]: TOWN_NEED });
+    expect(game.townSatisfaction(town, 'current')).toBeGreaterThan(0);
+    expect(town.supplyHistory![0].carried).toBeUndefined();
+
+    const loaded = reload(roundTrip(game));
+    const t2 = loaded.towns.find((t) => t.id === town.id)!;
+    expect(t2.carried).toEqual(town.carried);
+    t2.supplied[a] = (t2.supplied[a] ?? 0) + 12;
+    closeMonth(loaded);
+    const month = t2.supplyHistory![t2.supplyHistory!.length - 1];
+    // Месяц закрыт вместе с перенесённым: 5 из прошлого + 12 = 17 ≥ нормы; по b — ровно норма из прошлого.
+    expect(month.got[a]).toBe(17);
+    expect(month.got[b]).toBe(TOWN_NEED);
+    expect(month.carried).toEqual({ [a]: 5, [b]: TOWN_NEED });
+    expect(t2.lastSupplied[a]).toBe(17);
+    expect(t2.supplied).toEqual({ [a]: 2 });
+    expect(t2.carried).toEqual({ [a]: 2 });
+  });
+
   it('старое сохранение без истории грузится: история пустая и начинается со следующего месяца', () => {
     const game = new Game(7);
     closeMonth(game);

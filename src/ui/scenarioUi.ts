@@ -4,6 +4,7 @@
  * обрабатывает Hud. Объясняем картинками: значки заданий и грузов, полоски, медали; текст — подписи и title.
  */
 import { ECONOMY, MONTH_LENGTH } from '../config';
+import { clockText, durationText } from '../core/timeText';
 import type { Game } from '../game/game';
 import { isIndustry, resolve } from '../scenario/analysis';
 import { ARCHETYPE_LIST, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, MEDALS, PHASES, REPUTATION } from '../scenario/content';
@@ -73,11 +74,15 @@ export function shortMoney(n: number): string {
   return money(n);
 }
 
-/** Остаток времени: «3,5 мес.»; от 10 месяцев — целыми. */
-export function leftText(m: number): string {
-  const v = m >= 10 ? Math.round(m) : Math.max(0.1, Math.floor(m * 10) / 10);
-  return `${v.toLocaleString('ru-RU')} мес.`;
-}
+/**
+ * Сколько осталось до срока — минутами и секундами игры: «3:20». Меньше стольких секунд — красным: задание —
+ * 4 мин, предложение контракта — 2 мин, плашка предложения вверху — минута.
+ */
+const URGENT = { goal: 240, offer: 120, banner: 60 };
+const urgent = (left: number, limit: number) => (left < limit ? ' urgent' : '');
+
+/** Срок в месяцах (условия контракта, длина этапа) — минутами: «6 мин». */
+const monthsSpan = (months: number) => durationText(months * MONTH_LENGTH);
 
 /** Последствие события растёт или падает: «+20%» — вверх, «-30%» — вниз. */
 const trend = (text: string) => (/\+\d/.test(text) ? 'up' : /[-−]\d/.test(text) ? 'down' : '');
@@ -130,26 +135,25 @@ export function toggleFold(o: Objective): void {
   else o.folded = next;
 }
 
-/** Остаток срока задания: красным — меньше 2 месяцев, ∞ — без срока; закрытое — пусто. */
+/** Остаток срока задания «м:сс»: красным — меньше 4 минут, ∞ — без срока; закрытое — пусто. */
 function timeHtml(sc: Scenario, o: Objective): string {
   if (o.status === 'done' && o.quick) return '<span class="sc-fast done" data-tip="Выполнено к быстрому сроку: надбавка и очки за быстроту">⚡</span>';
   if (o.status !== 'active') return '';
-  const left = sc.monthsLeft(o);
+  const left = sc.secondsLeft(o);
   const main =
     left !== null
-      ? `<span class="sc-left ${left < 2 ? 'urgent' : ''}" title="Осталось до срока">⏳ ${leftText(left)}</span>`
-      : '<span class="sc-left" title="Без срока">⏳ ∞</span>';
+      ? `<span class="sc-left${urgent(left, URGENT.goal)}" data-tip="Осталось до срока, мин:сек">⏳ ${clockText(left)}</span>`
+      : '<span class="sc-left" data-tip="Без срока">⏳ ∞</span>';
   return fastHtml(sc, o) + main;
 }
 
 /** Быстрый срок, пока он не прошёл: ⚡ и сколько осталось; подсказка — что дают за него. */
 function fastHtml(sc: Scenario, o: Objective): string {
-  if (o.fast === undefined) return '';
-  const left = (o.fast * MONTH_LENGTH - sc.game.time) / MONTH_LENGTH;
-  if (left <= 0) return '';
+  const left = sc.fastLeft(o);
+  if (left === null) return '';
   const bonus = fastBonus(o);
   const tip = `Быстрый срок — необязательный. Успеете: ${bonus ? `+$${bonus.toLocaleString('ru-RU')} к награде и ` : ''}очки за быстроту`;
-  return `<span class="sc-fast" data-tip="${esc(tip)}">⚡ ${leftText(left)}</span>`;
+  return `<span class="sc-fast" data-tip="${esc(tip)}">⚡ ${clockText(left)}</span>`;
 }
 
 /** Размер значка задания в панели — один для свёрнутых и развёрнутых. */
@@ -262,7 +266,7 @@ function stepsHtml(sc: Scenario): string {
     const now = i === s.phase && s.status !== 'won';
     const cls = done ? 'done' : now ? (s.status === 'lost' ? 'lost' : 'now') : '';
     const months = Math.round(p.months * sc.difficulty.time);
-    return `<div class="sc-step ${cls}" title="Этап ${LETTERS[i]} «${p.name}», около ${months} мес. ${p.hint}">
+    return `<div class="sc-step ${cls}" title="Этап ${LETTERS[i]} «${p.name}», около ${monthsSpan(months)}. ${p.hint}">
       <b>${done ? '✓' : s.status === 'lost' && now ? '✗' : LETTERS[i]}</b><small>${p.short}</small></div>`;
   });
   return `<div class="sc-steps">${steps.join('<i class="sc-step-line"></i>')}</div>`;
@@ -281,34 +285,42 @@ function declineTip(o: Objective): string {
   return `Отказ: репутация ${REPUTATION.declined}${worse}`;
 }
 
-/** Быстрый срок в условиях контракта: через сколько месяцев после принятия и что за него дают. */
+/** Быстрый срок в условиях контракта: через сколько минут после принятия и что за него дают. */
 function offerFastHtml(o: Objective): string {
   if (o.fastMonths === undefined) return '';
   const bonus = fastBonus(o);
   const tip = `Быстрый срок — необязательный, с момента, как примете. Успеете: ${bonus ? `+$${bonus.toLocaleString('ru-RU')} к награде и ` : ''}очки за быстроту`;
-  return `<span class="sc-fast" data-tip="${esc(tip)}">⚡ ${o.fastMonths} мес.</span>`;
+  return `<span class="sc-fast" data-tip="${esc(tip)}">⚡ ${monthsSpan(o.fastMonths)}</span>`;
 }
+
+/** Срок контракта после принятия — минутами. */
+const termHtml = (o: Objective) =>
+  o.months !== undefined ? `<span data-tip="Срок на выполнение — с момента, как примете">⏳ ${monthsSpan(o.months)}</span>` : '';
+
+/** Сколько ещё действует предложение — «м:сс»; меньше limit секунд — красным. */
+const offerLeftHtml = (left: number, limit: number) =>
+  `<span class="sc-left${urgent(left, limit)}" data-tip="Предложение действует ещё, мин:сек">⌛ ${clockText(left)}</span>`;
 
 /** Условия контракта и решение: награда, срок после принятия, цена провала, сколько осталось думать. */
 function offerHtml(sc: Scenario, o: Objective): string {
-  const left = sc.monthsLeft(o);
+  const left = sc.secondsLeft(o);
   return `<div class="sc-offer">
     <div class="sc-terms">
       <span title="Награда">🎁 ${esc(rewardText(o))}</span>
-      ${o.months !== undefined ? `<span title="Срок на выполнение — с момента, как примете">⏳ ${o.months} мес.</span>` : ''}
+      ${termHtml(o)}
       ${offerFastHtml(o)}
       <span class="sc-fail" title="Если принять и не успеть">⚠ ${esc(failText(o))}</span>
     </div>
     <div class="sc-offer-actions">
       <button class="small primary" data-action="sc-accept" data-id="${o.id}" title="Срок пойдёт с этой минуты">✓ Принять</button>
       <button class="small" data-action="sc-decline" data-id="${o.id}" title="${declineTip(o)}">✕ Отказаться</button>
-      ${left !== null ? `<span class="sc-left ${left < 1 ? 'urgent' : ''}" title="Предложение действует ещё">⌛ ${leftText(left)}</span>` : ''}
+      ${left !== null ? offerLeftHtml(left, URGENT.offer) : ''}
     </div></div>`;
 }
 
 /** Предложения на решение: самое срочное — первым. */
 function offersByUrgency(sc: Scenario): Objective[] {
-  return [...sc.offers].sort((a, b) => (sc.monthsLeft(a) ?? 99) - (sc.monthsLeft(b) ?? 99));
+  return [...sc.offers].sort((a, b) => (sc.secondsLeft(a) ?? 1e9) - (sc.secondsLeft(b) ?? 1e9));
 }
 
 /**
@@ -332,7 +344,7 @@ function placeIcons(g: Game, refs: Ref[]): string {
 /**
  * Плашка предложения вверху экрана — уведомление, дублирует панель предложений внизу (решают там же):
  * самое срочное предложение, остальные — счётчиком. Значки городов и предприятий — переход к ним на карте;
- * клик по названию или счётчику показывает предложения в панели внизу. Меньше полумесяца на решение — подсвечена.
+ * клик по названию или счётчику показывает предложения в панели внизу. Меньше минуты на решение — подсвечена.
  */
 export function offerBannerHtml(g: Game): string {
   const sc = g.scenario;
@@ -340,26 +352,24 @@ export function offerBannerHtml(g: Game): string {
   const offers = offersByUrgency(sc);
   const o = offers[0];
   if (!o) return '';
-  const left = sc.monthsLeft(o) ?? 0;
+  const left = sc.secondsLeft(o) ?? 0;
   const more =
     offers.length > 1
       ? `<button class="small ob-more" data-action="sc-offer-show" title="Все предложения (${offers.length}) — в панели внизу слева">+${offers.length - 1}</button>`
       : '';
   // Мест нет (задание не о городе и не о предприятии) — просто значок задания.
   const places = placeIcons(g, o.related) || `<span class="ob-obj">${objectiveIcon(o, 22)}</span>`;
-  return `<div class="offer-banner-in ${left < 0.5 ? 'urgent' : ''}">
+  return `<div class="offer-banner-in${urgent(left, URGENT.banner)}">
     <span class="ob-ic" title="Контракт ждёт решения">${contractSvg(18)}</span>
     <span class="ob-places">${places}</span>
     <button class="ob-title" data-action="sc-offer-show" data-id="${o.id}" title="${esc(o.title)}. ${esc(o.why)}\nПринять или отказаться — в панели внизу слева"><span>${esc(o.title)}</span></button>
-    <span class="ob-terms"><span title="Награда">🎁 ${esc(rewardText(o))}</span>${
-      o.months !== undefined ? `<span title="Срок на выполнение — с момента, как примете">⏳ ${o.months} мес.</span>` : ''
-    }${offerFastHtml(o)}</span>
-    <span class="sc-left ${left < 1 ? 'urgent' : ''}" title="Предложение действует ещё">⌛ ${leftText(left)}</span>${more}</div>`;
+    <span class="ob-terms"><span title="Награда">🎁 ${esc(rewardText(o))}</span>${termHtml(o)}${offerFastHtml(o)}</span>
+    ${offerLeftHtml(left, URGENT.offer)}${more}</div>`;
 }
 
 /**
  * Предложения контрактов — отдельной панелью внизу слева, под панелью сценария: видны, пока ждут решения,
- * даже когда панель сценария свёрнута или её закрыли «Финансы». Самое срочное — сверху; меньше полумесяца
+ * даже когда панель сценария свёрнута или её закрыли «Финансы». Самое срочное — сверху; меньше минуты
  * на решение — карточка подсвечена. Клик по названию раскрывает, откуда предложение и кто с ним связан.
  * Вверху экрана их дублирует плашка (`offerBannerHtml`).
  */
@@ -369,11 +379,11 @@ export function offersPanelHtml(g: Game, open: ReadonlySet<string>): string {
   const offers = offersByUrgency(sc);
   if (!offers.length) return '';
   const cards = offers.map((o) => {
-    const left = sc.monthsLeft(o) ?? 0;
+    const left = sc.secondsLeft(o) ?? 0;
     const shown = open.has(o.id);
     const source = o.source ? sourceEvent(sc, o.source) : undefined;
     const icon = source ? `<span class="sc-ev-ic" title="${EVENT_INFO[source.type].name}">${EVENT_INFO[source.type].icon}</span>` : '';
-    return `<div class="sc-card offer of-card ${left < 0.5 ? 'urgent' : ''}" data-offer="${o.id}">
+    return `<div class="sc-card offer of-card${urgent(left, URGENT.banner)}" data-offer="${o.id}">
       <div class="sc-card-head of-head" data-action="sc-why" data-id="${o.id}" title="${shown ? 'Скрыть подробности' : esc(o.why)}">
         ${objectiveIcon(o, 24)}<b>${esc(o.title)}</b>${icon}<span class="caret ${shown ? '' : 'closed'}">${chevronSvg()}</span></div>
       ${shown ? `<p class="sc-cause">${esc(o.why)}</p>${placeChips(g, o.related)}` : ''}
@@ -403,7 +413,7 @@ const CONTRACT_STATE: Record<Objective['status'], string> = {
   declined: 'от контракта отказались',
 };
 
-const agoText = (sc: Scenario, e: EventRecord) => (sc.month - e.month <= 0 ? 'сейчас' : `${sc.month - e.month} мес. назад`);
+const agoText = (sc: Scenario, e: EventRecord) => (sc.month - e.month <= 0 ? 'сейчас' : `${monthsSpan(sc.month - e.month)} назад`);
 
 /**
  * Прошедшее событие — приглушённой строкой: значок, заголовок, когда. Клик разворачивает причину,
@@ -478,12 +488,12 @@ function compactHtml(sc: Scenario): string {
   const main = mainObjective(sc);
   const letter = `<b class="sc-letter" title="Этап ${LETTERS[sc.state.phase]}: ${sc.phaseInfo.name}">${LETTERS[sc.state.phase]}</b>`;
   if (!main) return `<div class="sc-compact">${letter}<span class="muted">Главная цель выполнена</span></div>`;
-  const left = sc.monthsLeft(main);
+  const left = sc.secondsLeft(main);
   const gauge = gaugeOf(sc, main);
   const progress = gauge ? `${gauge.text} в этом месяце` : progressText(main);
   return `<div class="sc-compact" title="${esc(main.title)} · ${esc(progress)}">${letter}${objectiveIcon(main, 18)}
     <div class="bar sc-bar"><div style="width:${((gauge ? gauge.fraction : fraction(main)) * 100).toFixed(1)}%"></div></div>
-    ${left !== null ? `<span class="sc-left ${left < 2 ? 'urgent' : ''}">⏳ ${leftText(left)}</span>` : ''}</div>`;
+    ${left !== null ? `<span class="sc-left${urgent(left, URGENT.goal)}">⏳ ${clockText(left)}</span>` : ''}</div>`;
 }
 
 export interface PanelView {
@@ -583,7 +593,7 @@ export function briefHtml(g: Game): string {
       ${tile(ledgerIcon('sales', 26), money(b.capital), 'капитал', 'Деньги компании на старте')}
       ${tile(ledgerIcon('interest', 26), b.loan ? money(b.loan) : 'нет', 'кредит', b.loan ? `Компания начинает с долгом: проценты ${interest}` : 'Стартового кредита нет')}
       ${tile(limitSvg(26), shortMoney(b.loanMax), 'предел кредита', `Взять в долг можно не больше ${money(b.loanMax)} (в «Финансах»)`)}
-      ${tile(calendarSvg(26), `≈ ${b.months}`, 'месяцев', 'Ожидаемая продолжительность сценария')}
+      ${tile(calendarSvg(26), `≈ ${Math.round((b.months * MONTH_LENGTH) / 60)}`, 'мин', 'Ожидаемая продолжительность сценария на скорости 1×')}
     </div>
     ${facts ? `<ul class="brief-facts">${facts}</ul>` : ''}
     ${stepsHtml(sc)}

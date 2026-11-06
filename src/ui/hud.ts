@@ -24,7 +24,8 @@ import type { TerraformMode } from '../world/terrain';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
 import { type Station, StationServes, stationTitle, TOWN_HISTORY, TOWN_NEED, TownStyle } from '../world/entities';
 import { footprintRadius } from '../world/spatial';
-import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE } from '../config';
+import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE } from '../config';
+import { durationText } from '../core/timeText';
 import { isOneWay, KMH_PER_UNIT, LEVELS, RAIL_SPEC, ROAD_PRESETS, RoadSpec, SPEED_LIMITS, specCost, specKmh, STRUCTURE } from '../world/roadTypes';
 import {
   DEFAULT_SETTINGS,
@@ -50,6 +51,7 @@ import { lineMoneyHtml } from './lineMoney';
 import { stopFoldHtml, stopPlaceHtml, toggleStop } from './routeStop';
 import { chartHoverAt, distLabel, speedChartSvg, speedTipHtml } from './speedChartSvg';
 import { travelTimeText } from './travelTime';
+import { supplyBarHtml, supplyLineHtml } from './supplyUi';
 import {
   briefHtml,
   modeTilesHtml,
@@ -264,17 +266,20 @@ function railRules(rules: { svg: string; text: string; hint: string }[], inline 
 /** Условие отправления как одна из четырёх кнопок. */
 type WaitId = 'auto' | 'full' | 'fullm' | 'none';
 
+/** «Полная, но не дольше»: предел ожидания, секунд — 2 минуты (был месяц, когда месяц длился 2 минуты). */
+const WAIT_CAP = TERM_SCALE * MONTH_LENGTH;
+
 const WAIT_LABELS: Record<WaitId, string> = {
   auto: '⏳ Авто',
   full: '▣ Полная',
-  fullm: '▣ Полная ≤ мес',
+  fullm: `▣ Полная ≤ ${durationText(WAIT_CAP)}`,
   none: '→ Не ждать',
 };
 
 const WAIT_HINTS: Record<WaitId, string> = {
   auto: 'Пустой грузовик немного подождёт груз у производителя',
   full: 'Ждать полной загрузки сколько угодно',
-  fullm: 'Ждать полной загрузки, но не дольше месяца',
+  fullm: `Ждать полной загрузки, но не дольше ${durationText(WAIT_CAP)}`,
   none: 'Сразу в путь с тем, что успели погрузить',
 };
 
@@ -309,10 +314,11 @@ const monthTick = (x: number, H: number, label: string) =>
   `<text x="${x}" y="${H - 2}" text-anchor="middle" font-size="8" fill="#7b8794">${label.split(' ')[0]}</text>`;
 
 /**
- * Снабжение города одним грузом по месяцам: столбик цветом груза — сколько привезли,
- * пунктир — норма месяца, ✓ — норма закрыта. Текущий (ещё идущий) месяц бледнее.
+ * Снабжение города одним грузом по месяцам: столбик цветом груза — сколько привезли (снизу штриховкой —
+ * излишек прошлого месяца, засчитанный в этот), пунктир — норма месяца, ✓ — норма закрыта. Текущий (ещё
+ * идущий) месяц бледнее.
  */
-function supplyChart(months: { label: string; got: number; need: number; current?: boolean }[], color: string, H = 72): string {
+function supplyChart(months: { label: string; got: number; carried?: number; need: number; current?: boolean }[], color: string, H = 72): string {
   const W = 300;
   // Слева — число нормы у пунктира, сверху — место для галочки.
   const L = 16;
@@ -321,18 +327,24 @@ function supplyChart(months: { label: string; got: number; need: number; current
   const max = Math.max(1, ...months.map((m) => Math.max(m.got, m.need * 1.15)));
   const y = (v: number) => base - (v / max) * (base - top);
   const bw = (W - L) / Math.max(12, months.length);
+  const hatch = `sup-hatch-${color.replace(/[^\w]/g, '')}`;
   const bars = months
     .map((m, i) => {
       const x = L + i * bw;
       const h = base - y(m.got);
+      const hc = base - y(Math.min(m.carried ?? 0, m.got));
       const ok = m.got >= m.need;
-      const tip = `${m.current ? 'Этот месяц' : m.label}: привезли ${Math.round(m.got)} из ${m.need}${ok ? ' ✓' : ''}`;
-      return `<g${m.current ? ' opacity="0.4"' : ''}><title>${tip}</title><rect x="${x}" y="0" width="${bw}" height="${H}" fill="transparent"/>
-        ${h > 0 ? `<rect x="${x + bw * 0.18}" y="${base - h}" width="${bw * 0.64}" height="${h}" rx="1.5" fill="${color}"/>` : ''}
+      const carried = hc > 0 ? ` (${Math.round(m.carried!)} — излишек прошлого месяца)` : '';
+      const tip = `${m.current ? 'Этот месяц' : m.label}: привезли ${Math.round(m.got)}${carried} из ${m.need}${ok ? ' ✓' : ''}`;
+      return `<g${m.current ? ' opacity="0.4"' : ''} data-tip="${tip}"><rect x="${x}" y="0" width="${bw}" height="${H}" fill="transparent"/>
+        ${h > hc ? `<rect x="${x + bw * 0.18}" y="${base - h}" width="${bw * 0.64}" height="${h - hc}" rx="1.5" fill="${color}"/>` : ''}
+        ${hc > 0 ? `<rect x="${x + bw * 0.18}" y="${base - hc}" width="${bw * 0.64}" height="${hc}" fill="url(#${hatch})" stroke="${color}" stroke-width="0.8"/>` : ''}
         ${ok ? `<text x="${x + bw / 2}" y="${base - h - 2}" text-anchor="middle" font-size="9" font-weight="700" fill="#2e9d57">✓</text>` : ''}
         ${monthTick(x + bw / 2, H, m.label)}</g>`;
     })
     .join('');
+  const defs = `<defs><pattern id="${hatch}" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <rect width="4" height="4" fill="#fff"/><rect width="2" height="4" fill="${color}"/></pattern></defs>`;
   // Пунктир нормы — отрезками с одинаковой нормой; последний тянется до края.
   let norm = '';
   for (let i = 0, start = 0; i < months.length; i++) {
@@ -343,7 +355,7 @@ function supplyChart(months: { label: string; got: number; need: number; current
     start = i + 1;
   }
   const label = months.length ? `<text x="${L - 3}" y="${y(months[0].need) + 3}" text-anchor="end" font-size="8" fill="#7b8794">${months[0].need}</text>` : '';
-  return `<svg class="fin-chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">
+  return `<svg class="fin-chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${defs}
     <line x1="${L}" x2="${W}" y1="${base}" y2="${base}" stroke="#dfe4ea"/>${bars}${norm}${label}</svg>`;
 }
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
@@ -1500,7 +1512,7 @@ export class Hud {
         } else if (d.action === 'rule-wait') {
           const w = d.v as WaitId;
           rule.wait = w === 'fullm' ? 'full' : w;
-          rule.maxWait = w === 'fullm' ? MONTH_LENGTH : null;
+          rule.maxWait = w === 'fullm' ? WAIT_CAP : null;
         } else if (d.action === 'rule-load') {
           if (d.c === 'auto') rule.load = 'auto';
           else {
@@ -2479,7 +2491,7 @@ export class Hud {
     const interval = g.lineInterval(line);
     const kind = g.lineKind(line);
     const speed = this.lineSpeedHtml(line);
-    // Время в пути — круг маршрута со стоянками (тот же, от которого считается интервал): секунды и в скобках месяцы.
+    // Время в пути — круг маршрута со стоянками (тот же, от которого считается интервал): минуты и секунды.
     const lap = g.lineLap(line);
     const travel = lap
       ? `<span title="Круг маршрута со стоянками: от первой станции через все остановки и обратно${
@@ -2841,17 +2853,18 @@ export class Hud {
         .map((c) => {
           const now = t.supplied[c] ?? 0;
           const last = t.lastSupplied[c] ?? 0;
-          const pct = Math.min(100, (now / TOWN_NEED) * 100);
           const open = this.needsOpen.has(`${t.id}:${c}`);
           // Закрытые месяцы и текущий — последним, всего не больше 12 столбиков.
           const months = [
-            ...(t.supplyHistory ?? []).slice(-(TOWN_HISTORY - 1)).map((m) => ({ label: m.label, got: m.got[c] ?? 0, need: m.need })),
-            { label: g.dateLabel, got: now, need: TOWN_NEED, current: true },
+            ...(t.supplyHistory ?? [])
+              .slice(-(TOWN_HISTORY - 1))
+              .map((m) => ({ label: m.label, got: m.got[c] ?? 0, carried: m.carried?.[c] ?? 0, need: m.need })),
+            { label: g.dateLabel, got: now, carried: t.carried?.[c] ?? 0, need: TOWN_NEED, current: true },
           ];
           const chart = open ? `<div class="need-chart">${supplyChart(months, CARGO[c].color)}</div>` : '';
-          return `<div class="need" data-action="town-need" data-id="${t.id}" data-c="${c}" title="${open ? 'Свернуть' : 'По месяцам'}">${cargoIcon(c, 24)}<div><b>${CARGO[c].name}</b>
-            <div class="bar"><div style="width:${pct}%;background:${CARGO[c].color}"></div></div>
-            <small>в этом месяце ${now} из ${TOWN_NEED} · в прошлом ${last}${last >= TOWN_NEED ? ' ✓' : ''}</small></div>
+          return `<div class="need" data-action="town-need" data-id="${t.id}" data-c="${c}" data-tip="${open ? 'Свернуть' : 'По месяцам'}">${cargoIcon(c, 24)}<div><b>${CARGO[c].name}</b>
+            ${supplyBarHtml(now, t.carried?.[c] ?? 0, TOWN_NEED, CARGO[c].color)}
+            <small>${supplyLineHtml(now, t.carried?.[c] ?? 0, last, TOWN_NEED, CARGO[c].color)}</small></div>
             <span class="caret ${open ? '' : 'closed'}">${chevronSvg(10)}</span></div>${chart}`;
         })
         .join('');

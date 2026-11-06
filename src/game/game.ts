@@ -15,6 +15,7 @@ import {
   STATION,
   STOP,
   STORAGE,
+  TERM_SCALE,
   TOWN_GROWTH,
   TOWN_TRAFFIC,
 } from '../config';
@@ -33,6 +34,8 @@ import { stepWagons } from '../sim/wagons';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
 import { Annex, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TOWN_NEED, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
+import { closeSupply } from '../world/townSupply';
+import { repaceSave, saveMonthLength } from './monthPace';
 import { Network, NetworkSave, Segment } from '../world/network';
 import { halfWidth, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
@@ -349,7 +352,18 @@ export interface SaveData {
   settings: WorldSettings;
   savedAt: number;
   rng: number;
+  /** Время партии, секунд игры. */
   time: number;
+  /**
+   * Длина месяца партии, секунд (MONTH_LENGTH на момент сохранения). Нет — старое сохранение: 120 с (или 40 с);
+   * при загрузке партия пересчитывается под нынешний месяц с той же датой (monthPace.ts).
+   */
+  monthLength?: number;
+  /**
+   * Старая партия с месяцем длиннее нынешнего прожила больше реального времени, чем показывает календарь: на
+   * столько месяцев нынешнего темпа модели транспорта выходят раньше по календарю (Game.modelYear). Нет — 0.
+   */
+  paceShift?: number;
   /** Год начала партии; month считается от него. В старых сохранениях нет — LEGACY_START_YEAR. */
   startYear?: number;
   month: number;
@@ -542,6 +556,8 @@ export class Game implements BuildContext {
   modelTier: ModelTier = 1;
   /** Год начала партии: у новой — START_YEAR, у загруженной — из сохранения (в старых нет — LEGACY_START_YEAR). */
   readonly startYear: number;
+  /** На сколько месяцев модели выходят раньше по календарю — у старой партии с месяцем длиннее (SaveData.paceShift). */
+  readonly paceShift: number;
 
   readonly settings: WorldSettings;
   /** Журнал партии для разбора: действия, рейсы, сводки, задания и события. */
@@ -549,10 +565,14 @@ export class Game implements BuildContext {
   /** Таймлапс партии: кадр сети в конце каждого месяца (см. timelapse.ts). */
   readonly timelapse: TimelapseRecorder;
 
-  constructor(setup: WorldSettings | number, save?: SaveData) {
+  constructor(setup: WorldSettings | number, saved?: SaveData) {
     // Сценарий решает архетип по seed ещё до генерации карты: от него зависят города и предприятия.
     this.settings = prepareSettings(typeof setup === 'number' ? { ...DEFAULT_SETTINGS, seed: setup } : setup);
+    // Старая партия с другой длиной месяца — под нынешний месяц, с той же датой (monthPace.ts).
+    const paceFrom = saved && saveMonthLength(saved);
+    const save = saved && repaceSave(saved);
     this.startYear = save ? (save.startYear ?? LEGACY_START_YEAR) : START_YEAR;
+    this.paceShift = save?.paceShift ?? 0;
     this.journal = new Journal(() => this.time / MONTH_LENGTH, save?.journal);
     this.timelapse = new TimelapseRecorder(save?.timelapse);
     this.rng = new Rng(this.settings.seed);
@@ -578,6 +598,11 @@ export class Game implements BuildContext {
     this.roads.traffic.relief = { ground: () => this.ground(), version: () => this.terrain.version };
     if (save) {
       this.restore(save);
+      if (paceFrom !== MONTH_LENGTH) {
+        // Месячные задания называют условие месяца и «N месяцев подряд» — названия по пересчитанным условиям.
+        this.scenario?.retitle();
+        this.journal.add('pace', { from: paceFrom, to: MONTH_LENGTH });
+      }
       return;
     }
     const world = generateWorld(this.worldContext(), this.settings);
@@ -615,6 +640,8 @@ export class Game implements BuildContext {
       savedAt: Date.now(),
       rng: this.rng.seedState,
       time: this.time,
+      monthLength: MONTH_LENGTH,
+      paceShift: this.paceShift || undefined,
       startYear: this.startYear,
       month: this.month,
       money: this.money,
@@ -2207,9 +2234,13 @@ export class Game implements BuildContext {
     return this.startYear + Math.floor(this.month / 12);
   }
 
-  /** В каком году партии модель появляется в продаже (без учёта ступеней сценария). */
+  /**
+   * В каком году партии модель появляется в продаже (без учёта ступеней сценария): через debut лет от начала, а у
+   * старой партии с месяцем длиннее — по реальному времени, раньше на paceShift месяцев (с января того года, когда
+   * это время прошло): вышедшее до пересчёта остаётся в продаже (с точностью до округления лет у моделей).
+   */
   modelYear(id: ModelId): number {
-    return this.startYear + MODELS[id].debut;
+    return this.startYear + Math.max(0, Math.ceil((12 * MODELS[id].debut - this.paceShift) / 12 - 1e-9));
   }
 
   /** Содержание в месяц: у поезда растёт с длиной состава. */
@@ -3017,12 +3048,12 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Итог загрузки линии для авто-парка за окно не короче месяца и круга линии — чтобы в него попали рейсы
-   * со всех станций и доход за доставку. true — окно закрылось, итог новый.
+   * Итог загрузки линии для авто-парка за окно не короче AUTO_FLEET.window (2 мин) и круга линии — чтобы в него
+   * попали рейсы со всех станций и доход за доставку. true — окно закрылось, итог новый.
    */
   private closeDemand(line: Line): boolean {
     const span = this.time - (line.statsFrom ?? 0);
-    if (span < Math.max(MONTH_LENGTH, this.lineLap(line) ?? 0) - 1) return false;
+    if (span < Math.max(AUTO_FLEET.window, this.lineLap(line) ?? 0) - 1) return false;
     let load = 0;
     let left = 0;
     let runs = 0;
@@ -3105,7 +3136,7 @@ export class Game implements BuildContext {
     return best;
   }
 
-  /** Решённая продажа: первая опустевшая машина линии, а не опустела за месяц — самая незагруженная. */
+  /** Решённая продажа: первая опустевшая машина линии, а не опустела за окно авто-парка — самая незагруженная. */
   private updateAutoSell(): void {
     for (const line of this.lines.values()) {
       const auto = line.auto;
@@ -3114,7 +3145,7 @@ export class Game implements BuildContext {
         delete auto.sell;
         continue;
       }
-      const v = this.spareVehicle(line, this.time - auto.sell > MONTH_LENGTH);
+      const v = this.spareVehicle(line, this.time - auto.sell > AUTO_FLEET.window);
       if (!v) continue;
       this.sellVehicle(v.id, true);
       delete auto.sell;
@@ -4506,18 +4537,22 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Закрывает месяц снабжения города: привезённое уходит в «прошлый месяц» и в историю
-   * по месяцам (для диаграммы в карточке города), новый месяц начинается с нуля.
+   * Закрывает месяц снабжения города: привезённое уходит в «прошлый месяц» и в историю по месяцам (для диаграммы
+   * в карточке города), а новый месяц начинается с излишков — привезённого сверх нормы, не больше нормы
+   * (world/townSupply.ts): месяц — минута, и рейс не обязательно успевает в каждый.
    */
   private closeTownMonth(town: Town): void {
-    const got: TownSupplyMonth['got'] = {};
-    for (const c of town.demands) got[c] = town.supplied[c] ?? 0;
-    town.supplyHistory = [...(town.supplyHistory ?? []), { label: this.dateLabel, got, need: TOWN_NEED }].slice(-TOWN_HISTORY);
+    const { got, carry } = closeSupply(town.demands, town.supplied, TOWN_NEED);
+    const month: TownSupplyMonth = { label: this.dateLabel, got, need: TOWN_NEED };
+    if (town.carried && Object.keys(town.carried).length) month.carried = town.carried;
+    town.supplyHistory = [...(town.supplyHistory ?? []), month].slice(-TOWN_HISTORY);
     town.lastSupplied = { ...town.supplied };
-    town.supplied = {};
+    town.supplied = { ...carry };
+    if (Object.keys(carry).length) town.carried = carry;
+    else delete town.carried;
   }
 
-  /** Улицы, застроенные до отказа: id полотна → месяц, когда это выяснилось. Через год проверяем снова. */
+  /** Улицы, застроенные до отказа: id полотна → месяц, когда это выяснилось. Через 24 мин (два года) проверяем снова. */
   private readonly fullStreets = new Map<number, number>();
 
   /**
@@ -4548,8 +4583,9 @@ export class Game implements BuildContext {
       else this.fullStreets.set(s.id, this.month);
     }
     // Мест вдоль улиц не хватает — город сам прокладывает новую улицу и застраивает её (если игрок не запретил);
-    // за месяц — не больше одной улицы на каждые прежние 40 секунд.
-    for (let k = 0; k < MONTH_SCALE && town.growthAcc >= 40 && town.autoStreets !== false; k++) {
+    // не больше одной улицы на каждые прежние 40 секунд: за месяц — MONTH_SCALE (дробное — по очереди, 1 и 2 при 1.5).
+    const newStreets = Math.floor((this.month + 1) * MONTH_SCALE) - Math.floor(this.month * MONTH_SCALE);
+    for (let k = 0; k < newStreets && town.growthAcc >= 40 && town.autoStreets !== false; k++) {
       const seg = this.growStreet(town, reach);
       if (!seg) break;
       // Сеть после стройки — новая: дома ставим уже по ней.
@@ -4565,7 +4601,7 @@ export class Game implements BuildContext {
   private streetFull(id: number): boolean {
     const at = this.fullStreets.get(id);
     if (at === undefined) return false;
-    if (this.month - at < 12) return true;
+    if (this.month - at < 12 * TERM_SCALE) return true;
     this.fullStreets.delete(id);
     return false;
   }

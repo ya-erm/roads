@@ -1,3 +1,5 @@
+import { MONTH_LENGTH } from '../config';
+import { durationText } from '../core/timeText';
 import type { CargoType } from '../world/cargo';
 import type { Effect, EffectKind } from './types';
 
@@ -33,10 +35,10 @@ export function modsOf(effects: () => readonly Effect[]): EconomyMods {
   };
 }
 
-/** Как эффект звучит для игрока: «Производство ×1.2 на 6 мес.». */
+/** Как эффект звучит для игрока: «Завод: производство +20% на 4 мин» (срок — в месяцах, месяц — минута). */
 export function effectText(kind: EffectKind, factor: number, months: number, subject: string): string {
   const pct = Math.round((factor - 1) * 100);
   const sign = pct > 0 ? `+${pct}%` : `${pct}%`;
   const what = { industry: 'производство', growth: 'рост города', pax: 'пассажиропоток', price: 'тариф на перевозку' }[kind];
-  return `${subject}: ${what} ${sign} на ${months} мес.`;
+  return `${subject}: ${what} ${sign} на ${durationText(months * MONTH_LENGTH)}`;
 }

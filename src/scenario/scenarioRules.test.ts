@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MONTH_LENGTH } from '../config';
+import { MONTH_LENGTH, TERM_SCALE } from '../config';
 import { Game } from '../game/game';
 import { stationAtIndustry } from '../game/testkit';
 import { TOWN_NEED } from '../world/entities';
@@ -195,7 +195,7 @@ describe('После победы — дополнительные задани�
 });
 
 describe('Быстрый срок', () => {
-  it('у доставки получателю и пассажиров между городами — раньше обычного хотя бы на месяц; у остальных — нет', () => {
+  it('у доставки получателю и пассажиров между городами — раньше обычного хотя бы на 2 мин; у остальных — нет', () => {
     for (const seed of [42, 7, 295499027]) {
       const game = scenarioGame(seed);
       const sc = game.scenario!;
@@ -203,7 +203,7 @@ describe('Быстрый срок', () => {
       expect(withFast.length, `seed ${seed}`).toBeGreaterThan(0);
       for (const o of withFast) {
         expect(['deliver', 'passengers']).toContain(o.params.kind);
-        expect(o.fast!).toBeLessThanOrEqual(o.deadline! - 1);
+        expect(o.fast!).toBeLessThanOrEqual(o.deadline! - TERM_SCALE);
         expect(o.fast!).toBeGreaterThan(sc.month);
       }
       const profit = sc.state.objectives.find((o) => o.params.kind === 'profit');
@@ -217,12 +217,15 @@ describe('Быстрый срок', () => {
     const plants = game.industries
       .filter((i) => i.info.accepts.includes('grain'))
       .sort((a, b) => Math.hypot(a.fp.center.x - farm.fp.center.x, a.fp.center.y - farm.fp.center.y) - Math.hypot(b.fp.center.x - farm.fp.center.x, b.fp.center.y - farm.fp.center.y));
-    const near = fastMonths(game, { kind: 'deliver', cargo: 'grain', amount: 100, to: refOf(plants[0]) }, 12, 'normal')!;
-    expect(near).toBeGreaterThanOrEqual(1);
-    const big = fastMonths(game, { kind: 'deliver', cargo: 'grain', amount: 600, to: refOf(plants[0]) }, 12, 'normal')!;
+    // Обычный срок — 24 месяца (24 мин); быстрый — не раньше, чем через 2 мин, и хотя бы на 2 мин раньше обычного.
+    const months = 12 * TERM_SCALE;
+    const near = fastMonths(game, { kind: 'deliver', cargo: 'grain', amount: 100, to: refOf(plants[0]) }, months, 'normal')!;
+    expect(near).toBeGreaterThanOrEqual(TERM_SCALE);
+    const big = fastMonths(game, { kind: 'deliver', cargo: 'grain', amount: 600, to: refOf(plants[0]) }, months, 'normal')!;
     expect(big).toBeGreaterThan(near);
-    expect(fastMonths(game, { kind: 'deliver', cargo: 'grain', amount: 100, to: refOf(plants[0]) }, near, 'normal')).toBeNull();
-    expect(fastMonths(game, { kind: 'profit', amount: 1000, months: 1 }, 12, 'normal')).toBeNull();
+    expect(big).toBeLessThanOrEqual(months - TERM_SCALE);
+    expect(fastMonths(game, { kind: 'deliver', cargo: 'grain', amount: 100, to: refOf(plants[0]) }, near + 1, 'normal')).toBeNull();
+    expect(fastMonths(game, { kind: 'profit', amount: 1000, months: TERM_SCALE }, months, 'normal')).toBeNull();
   });
 
   it('успели к быстрому сроку — надбавка к награде и очки; не успели — только обычная награда', () => {

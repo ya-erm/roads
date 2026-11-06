@@ -4,7 +4,7 @@
  * построил, что выросло и что просело. Требования — от оценки выполнимого: производства, вместимости
  * разумного парка и денег, а не от богатства игрока.
  */
-import { ECONOMY, MONTH_LENGTH, MONTH_SCALE } from '../config';
+import { ECONOMY, MONTH_LENGTH, MONTH_SCALE, TERM_SCALE } from '../config';
 import { Rng } from '../core/rng';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
@@ -57,8 +57,8 @@ export function perVehicleMonth(d: number, capacity: number, both = false): numb
 /** Разумный парк на первую линию: столько машин позволяет себе осторожная стратегия на старте. */
 const START_FLEET = { easy: 6, normal: 5, hard: 4 } as const;
 
-/** Быстрый срок: стройка дороги, станций и покупка машин, месяцев. */
-const FAST_SETUP = 0.5;
+/** Быстрый срок: стройка дороги, станций и покупка машин, месяцев (1 мин). */
+const FAST_SETUP = 0.5 * TERM_SCALE;
 /** Быстрый срок: запас к прикидке. */
 const FAST_SLACK = 1.2;
 
@@ -67,7 +67,7 @@ const FAST_SLACK = 1.2;
  * где время честно прикидывается по дороге: доставка получателю от ближайшего производителя и пассажиры между
  * двумя городами. Прикидка: стройка и первый рейс, затем объём / (что возит парк в полтора раза больше
  * стартового новейшими машинами — но не больше, чем производитель даёт или города ездят), и запас 20%.
- * Возвращает месяцев от начала задания; не выходит хотя бы на месяц раньше обычного срока — null.
+ * Возвращает месяцев от начала задания; не выходит хотя бы на 2 мин раньше обычного срока — null.
  */
 export function fastMonths(game: Game, p: ObjectiveParams, months: number, difficulty: keyof typeof START_FLEET): number | null {
   const fleet = Math.ceil(START_FLEET[difficulty] * 1.5);
@@ -96,7 +96,7 @@ export function fastMonths(game: Game, p: ObjectiveParams, months: number, diffi
   if (rate <= 0) return null;
   const firstTrip = ((d * 1.3) / 26 + 10) / MONTH_LENGTH;
   const fast = Math.ceil((FAST_SETUP + firstTrip + p.amount / rate) * FAST_SLACK);
-  return fast <= months - 1 ? Math.max(1, fast) : null;
+  return fast <= months - TERM_SCALE ? Math.max(TERM_SCALE, fast) : null;
 }
 
 // ---------- До генерации карты ----------
@@ -335,7 +335,7 @@ function phaseA(sc: Scenario, months: number, paxMain: boolean, freight: Freight
   const net = Math.max(freight?.net ?? 0, pax?.net ?? 0);
   const amount = Math.max(3000, roundMoney(net * 0.6 * (diff.demand / 0.65), 1000));
   sc.addObjective(
-    { kind: 'profit', amount, months: 1 },
+    { kind: 'profit', amount, months: 1 * TERM_SCALE },
     {
       role: 'goal',
       phase: 0,
@@ -362,8 +362,9 @@ function startContract(sc: Scenario): void {
   const best = options.sort((a, b) => a.d - b.d).slice(0, 3);
   if (!best.length) return;
   const o = sc.rng.pick(best);
-  const months = Math.round(6 * sc.difficulty.time);
-  const amount = round10(Math.max(TOWN_NEED * 3, Math.min(cargoPotential(game, o.cargo, o.town.center, months) * 0.25, 160) * sc.difficulty.demand));
+  const months = Math.round(6 * TERM_SCALE * sc.difficulty.time);
+  // Не меньше нормы города за прежние три месяца (6 мин).
+  const amount = round10(Math.max(TOWN_NEED * 3 * TERM_SCALE, Math.min(cargoPotential(game, o.cargo, o.town.center, months) * 0.25, 160) * sc.difficulty.demand));
   sc.tryObjective(
     { kind: 'deliver', cargo: o.cargo, amount, to: refOf(o.town) },
     {
@@ -387,9 +388,12 @@ export function generatePhase(sc: Scenario, phase: number): void {
   else if (phase === 2) phaseC(sc);
 }
 
-/** Лучший месяц перевозок за последние два (объём груза и пассажиров). */
+/** Последние 4 мин итогов сценария — нынешний темп перевозок. */
+const RECENT_MONTHS = 2 * TERM_SCALE;
+
+/** Лучший месяц перевозок за последние 4 мин (объём груза и пассажиров). */
 function bestMonth(sc: Scenario): number {
-  const recent = sc.state.stats.months.slice(-2);
+  const recent = sc.state.stats.months.slice(-RECENT_MONTHS);
   return Math.max(0, ...recent.map((m) => m.units));
 }
 
@@ -432,11 +436,12 @@ function phaseB(sc: Scenario): void {
   const chain = newChain(sc, months, info);
   if (chain) options.push({ kind: 'chain', ...chain });
   // Пассажиропоток: нынешний темп с ростом и новый город рядом с сетью.
-  const recent = s.stats.months.slice(-2);
+  const recent = s.stats.months.slice(-RECENT_MONTHS);
   const paxRate = recent.reduce((sum, m) => sum + (m.pax ?? 0), 0) / Math.max(1, recent.length);
   const pairs = townPairs(game).filter((p) => !(info.towns.has(p.a.id) && info.towns.has(p.b.id)) && p.d <= 6000);
   const extra = pairs.length ? paxPerMonth(pairs[0].a, pairs[0].b) * 0.5 : 0;
-  const paxAmount = round10(Math.max(150, paxRate * 1.3 + extra) * work * diff.demand);
+  // Не меньше 50 пассажиров за каждые 40 с (75 в месяц).
+  const paxAmount = round10(Math.max(50 * MONTH_SCALE, paxRate * 1.3 + extra) * work * diff.demand);
   options.push({
     kind: 'pax',
     params: { kind: 'passengers', amount: paxAmount, towns: null },
@@ -467,14 +472,14 @@ function phaseB(sc: Scenario): void {
   }
   if (!mainKind) {
     sc.addObjective(
-      { kind: 'profit', amount: 15_000 * MONTH_SCALE, months: 1 },
+      { kind: 'profit', amount: 15_000 * MONTH_SCALE, months: 1 * TERM_SCALE },
       { role: 'main', phase: 1, months, critical: diff.critical, why: 'Компания должна стабильно зарабатывать.', reward: { money: 80_000, reputation: 0 } },
     );
   }
   // Цель: снабжать город сети (а нет такого — ближайший к ней), где закрыть часть потребностей проще всего.
   const served = game.towns.filter((t) => info.towns.has(t.id));
   const near = [...game.towns].sort((a, b) => distToNetwork(info, a.center) - distToNetwork(info, b.center)).slice(0, 3);
-  supplyObjective(sc, served.length ? served : near, { phase: 1, months, inRow: 1, money: 60_000, growth: true });
+  supplyObjective(sc, served.length ? served : near, { phase: 1, months, inRow: 1 * TERM_SCALE, money: 60_000, growth: true });
   // Вторая цель — другой вид перевозок.
   if (mainKind === 'pax' && chain) {
     sc.tryObjective(chain.params, { role: 'goal', phase: 1, months, why: chain.why, reward: { money: roundMoney(chain.value * 0.6) }, related: chain.related });
@@ -488,7 +493,7 @@ function phaseB(sc: Scenario): void {
           phase: 1,
           months,
           why: `Пригородное сообщение: ${p.a.name} — ${p.b.name}, ${km(p.d)}.`,
-          reward: { money: roundMoney(p.cost * 0.5), effects: [{ kind: 'growth', target: p.a.id, factor: 1.3, months: 6 }] },
+          reward: { money: roundMoney(p.cost * 0.5), effects: [{ kind: 'growth', target: p.a.id, factor: 1.3, months: 6 * TERM_SCALE }] },
           related: [refOf(p.a), refOf(p.b)],
         },
       );
@@ -509,7 +514,7 @@ function newChain(sc: Scenario, months: number, info: ReturnType<typeof network>
   const product = plant.info.produces;
   const potential = cargoPotential(game, product, plant.fp.center, months);
   // Цепочка из двух звеньев: сырьё на завод и продукцию от него — объём меньше, чем у одной линии.
-  const amount = round10(Math.max(40, Math.min(potential * 0.35, ECONOMY.processRate * (months - RAMP - 1) * 0.35)) * diff.demand);
+  const amount = round10(Math.max(40, Math.min(potential * 0.35, ECONOMY.processRate * (months - RAMP - TERM_SCALE) * 0.35)) * diff.demand);
   const to = receivers(game, product).sort((a, b) => dist('info' in a ? a.fp.center : a.center, plant.fp.center) - dist('info' in b ? b.fp.center : b.center, plant.fp.center))[0];
   const inputs = plant.info.accepts.map((c) => CARGO[c].name.toLowerCase()).join(' и ');
   return {
@@ -556,14 +561,14 @@ export function extraObjectives(sc: Scenario): void {
   const info = network(game);
   const opts = { role: 'extra' as const, phase: null, months: null };
   const served = game.towns.filter((t) => info.towns.has(t.id)).sort((a, b) => b.population - a.population);
-  supplyObjective(sc, served.slice(0, 3), { ...opts, inRow: 2, money: 150_000, needs: 'all' });
+  supplyObjective(sc, served.slice(0, 3), { ...opts, inRow: 2 * TERM_SCALE, money: 150_000, needs: 'all' });
   connectObjective(sc, 'town', 2, { ...opts, money: 120_000 });
   connectObjective(sc, 'industry', 4, { ...opts, money: 120_000 });
   const best = Math.max(0, ...sc.state.stats.months.map((m) => m.units));
   if (best > 0) {
     const amount = round10(best * 1.3);
     sc.tryObjective(
-      { kind: 'throughput', amount, costRatio: 0.75, months: 1 },
+      { kind: 'throughput', amount, costRatio: 0.75, months: 1 * TERM_SCALE },
       {
         ...opts,
         why: `Рекорд компании: лучший месяц — ${Math.round(best)} ед. Перевезите на треть больше, и чтобы расходы не съедали выручку.`,
@@ -589,7 +594,7 @@ function phaseC(sc: Scenario): void {
   const share = hard === 'easy' ? 0.3 : hard === 'normal' ? 0.4 : 0.5;
   const amount = round10(best * share);
   sc.addObjective(
-    { kind: 'newRoutes', amount, since: sc.moment, months: 1 },
+    { kind: 'newRoutes', amount, since: sc.moment, months: 1 * TERM_SCALE },
     {
       role: 'main',
       phase: 2,
@@ -606,7 +611,7 @@ function phaseC(sc: Scenario): void {
   connectObjective(sc, 'industry', hard === 'easy' ? 2 : hard === 'normal' ? 3 : 4, { phase: 2, months, money: 100_000 });
   // Снабжать один из крупных городов сети — тот, где проще закрыть нужную часть потребностей.
   const served = game.towns.filter((t) => info.towns.has(t.id)).sort((a, b) => b.population - a.population);
-  supplyObjective(sc, served.length ? served.slice(0, 3) : bigTowns(game).slice(0, 2), { phase: 2, months, inRow: 2, money: 100_000 });
+  supplyObjective(sc, served.length ? served.slice(0, 3) : bigTowns(game).slice(0, 2), { phase: 2, months, inRow: 2 * TERM_SCALE, money: 100_000 });
 }
 
 /** Какую часть потребностей города просить закрыть: доля по сложности, не меньше одной. */
@@ -654,7 +659,7 @@ function supplyObjective(
       phase: o.phase,
       months: o.months,
       why: `${why}${o.growth ? ' Снабжённый город растёт быстрее.' : ''}`,
-      reward: { money: o.money, effects: o.growth ? [{ kind: 'growth', target: t.id, factor: 1.5, months: 8 }] : undefined },
+      reward: { money: o.money, effects: o.growth ? [{ kind: 'growth', target: t.id, factor: 1.5, months: 8 * TERM_SCALE }] : undefined },
       related: [refOf(t)],
     },
   );

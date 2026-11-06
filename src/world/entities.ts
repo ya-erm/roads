@@ -36,8 +36,14 @@ export interface Town {
   streets: number[];
   /** Грузы, которые нужны городу для роста. */
   demands: CargoType[];
+  /** Привезено в этом месяце — вместе с излишком прошлого (carried). */
   supplied: Partial<Record<CargoType, number>>;
   lastSupplied: Partial<Record<CargoType, number>>;
+  /**
+   * Излишки прошлого месяца, с которых начался этот (уже в supplied): привезённое сверх нормы, не больше нормы
+   * (world/townSupply.ts). В старых сохранениях нет — переноса не было.
+   */
+  carried?: Partial<Record<CargoType, number>>;
   /** Снабжение по закрытым месяцам, старые — первыми (не больше TOWN_HISTORY). В старых сохранениях нет. */
   supplyHistory?: TownSupplyMonth[];
   tripAcc: number;
@@ -52,13 +58,15 @@ export interface Town {
 export interface TownSupplyMonth {
   /** «Май 1962» — как у истории линий. */
   label: string;
-  /** Сколько привезли за месяц — по каждому грузу, который нужен городу. */
+  /** Сколько привезли за месяц — по каждому грузу, который нужен городу (вместе с излишком прошлого месяца). */
   got: Partial<Record<CargoType, number>>;
+  /** Из них — излишек прошлого месяца (Town.carried); нет — не переносили. */
+  carried?: Partial<Record<CargoType, number>>;
   /** Норма месяца: столько нужно, чтобы потребность считалась закрытой. */
   need: number;
 }
 
-/** Сколько единиц груза в месяц нужно, чтобы потребность города считалась закрытой. */
+/** Сколько единиц груза в месяц нужно, чтобы потребность города считалась закрытой (15 за минуту). */
 export const TOWN_NEED = 10 * MONTH_SCALE;
 /** Сколько последних месяцев снабжения помнит город. */
 export const TOWN_HISTORY = 12;

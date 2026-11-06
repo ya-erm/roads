@@ -2,7 +2,8 @@
  * Пристройки в карточке предприятия: до какого уровня оно растёт само, готово ли расти дальше и кнопка
  * «Пристройка» (значок, цена) — она включает размещение на карте в зоне вокруг предприятия.
  */
-import { ANNEX, ECONOMY } from '../config';
+import { ANNEX, ECONOMY, MONTH_LENGTH } from '../config';
+import { durationText } from '../core/timeText';
 import { annexReady, growthCap } from '../game/annexes';
 import type { Industry } from '../world/entities';
 
@@ -35,6 +36,6 @@ export function annexHtml(ind: Industry, placing: boolean): string {
       ? `Предел — ×${cap}.`
       : level < grow
         ? `Растёт само до ×${grow}, если продукцию исправно вывозят; дальше — пристройка.`
-        : 'Упёрлось в предел: вывозите продукцию месяц без задержек — можно будет поставить пристройку.';
+        : `Упёрлось в предел: вывозите продукцию ${durationText(ECONOMY.growthMonths * MONTH_LENGTH)} без задержек — можно будет поставить пристройку.`;
   return `<div class="annex-row">${annexSvg(20)}<small>${note}</small>${count}</div>`;
 }

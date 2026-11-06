@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { MONTH_LENGTH } from '../config';
+import { clockText, durationText } from '../core/timeText';
 import { Game } from '../game/game';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { briefHtml, isFolded, offerBannerHtml, offersPanelHtml, scenarioPanelHtml, toggleFold, type PanelView } from './scenarioUi';
@@ -154,6 +156,31 @@ describe('Шкала месячной цели в панели сценария'
     const frow = folded.slice(folded.indexOf(`data-id="${o.id}"`));
     expect(frow).toContain('235 / 470 ед.</b><span class="sc-streak"');
     expect(frow.slice(0, frow.indexOf('</div></div>'))).not.toContain('в этом месяце');
+  });
+});
+
+describe('Сроки — минутами и секундами, а не месяцами', () => {
+  it('до срока задания и до конца предложения — «м:сс», срок контракта и быстрый срок — «N мин»', () => {
+    const { game, sc, extra } = scenarioWithOffers();
+    // Середина месяца: до начала следующего — ровно 30 с, до конца предложения — столько же.
+    game.time = (sc.month + 0.5) * MONTH_LENGTH;
+    const goal = sc.current.find((o) => o.deadline !== null)!;
+    goal.deadline = sc.month + 4;
+    const panel = scenarioPanelHtml(game, view());
+    expect(panel).toContain(`⏳ ${clockText(3.5 * MONTH_LENGTH)}`);
+    expect(panel).not.toMatch(/\d мес\./);
+    const offers = offersPanelHtml(game, new Set());
+    expect(offers).toContain(`⌛ ${clockText(0.5 * MONTH_LENGTH)}`);
+    expect(offers).toContain(`⏳ ${durationText(extra.months! * MONTH_LENGTH)}`);
+    // Меньше минуты на решение — предложение подсвечено.
+    expect(offers).toContain(`of-card urgent" data-offer="${extra.id}"`);
+    expect(offerBannerHtml(game)).toContain('offer-banner-in urgent');
+    expect(offers).not.toMatch(/\d мес\./);
+  });
+
+  it('брифинг: ожидаемая продолжительность — в минутах', () => {
+    const { game, sc } = scenarioWithOffers();
+    expect(briefHtml(game)).toContain(`<b>≈ ${Math.round((sc.state.brief.months * MONTH_LENGTH) / 60)}</b><small>мин</small>`);
   });
 });
 

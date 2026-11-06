@@ -3,8 +3,9 @@
  * счётчики перевозок, победа и поражение. Игра сообщает о доставках и конце месяца, сценарий отвечает
  * множителями экономики (mods), деньгами наград и штрафов и новыми заданиями.
  */
-import { ECONOMY, MONTH_LENGTH } from '../config';
+import { ECONOMY, MONTH_LENGTH, TERM_SCALE } from '../config';
 import { Rng } from '../core/rng';
+import { durationText } from '../core/timeText';
 import type { Game } from '../game/game';
 import type { ModelTier } from '../game/transport';
 import type { CargoType } from '../world/cargo';
@@ -62,8 +63,12 @@ export const SCENARIO_SALT = 0x85ebca6b;
 /** Надбавка за быстрый срок: доля денег задания, до тысяч. */
 export const fastBonus = (o: Objective) => Math.round(((o.reward.money ?? 0) * FAST.money) / 1000) * 1000;
 
-/** Столько месяцев подряд за пределом кредита — и компания банкрот (после первого — предупреждение). */
-const BANKRUPT_MONTHS = 2;
+/** Столько месяцев подряд за пределом кредита — и компания банкрот (4 мин; после первого — предупреждение). */
+const BANKRUPT_MONTHS = 2 * TERM_SCALE;
+/** Задание без срока проверяем на выполнимость за столько месяцев (48 мин). */
+const NO_TERM = 24 * TERM_SCALE;
+/** Сколько месяцев итогов помнит сценарий (для оценки и заданий новых этапов). */
+const STATS_MONTHS = 120 * TERM_SCALE;
 
 export class Scenario {
   readonly rng: Rng;
@@ -136,6 +141,17 @@ export class Scenario {
     return structuredClone(this.state);
   }
 
+  /**
+   * Названия идущих месячных заданий — заново по их условиям: после пересчёта старой партии под нынешний месяц
+   * (game/monthPace.ts) условие месяца и «N месяцев подряд» другие. «Последний шанс: …» остаётся последним шансом.
+   */
+  retitle(): void {
+    for (const o of this.state.objectives) {
+      if ((o.status !== 'active' && o.status !== 'offered') || !isMonthly(o.params)) continue;
+      o.title = `${o.retryOf ? 'Последний шанс: ' : ''}${titleOf(o.params, this.game)}`;
+    }
+  }
+
   // ---------- Сводка ----------
 
   get month(): number {
@@ -198,9 +214,22 @@ export class Scenario {
 
   /** Сколько месяцев осталось (дробно), null — без срока. */
   monthsLeft(o: Objective): number | null {
+    const left = this.secondsLeft(o);
+    return left === null ? null : left / MONTH_LENGTH;
+  }
+
+  /** Сколько секунд игры осталось до срока задания (у предложения — до конца предложения), null — без срока. */
+  secondsLeft(o: Objective): number | null {
     const until = o.status === 'offered' ? o.offerUntil : o.deadline;
     if (until === undefined || until === null) return null;
-    return Math.max(0, (until * MONTH_LENGTH - this.game.time) / MONTH_LENGTH);
+    return Math.max(0, until * MONTH_LENGTH - this.game.time);
+  }
+
+  /** Сколько секунд игры осталось до быстрого срока; его нет или прошёл — null. */
+  fastLeft(o: Objective): number | null {
+    if (o.fast === undefined) return null;
+    const left = o.fast * MONTH_LENGTH - this.game.time;
+    return left > 0 ? left : null;
   }
 
   /** Главная цель этапа выполнена — можно перейти дальше, не дожидаясь остальных целей. */
@@ -317,7 +346,7 @@ export class Scenario {
     const last = this.game.history[this.game.history.length - 1];
     const fin = last ? operating(last) : { income: 0, costs: 0 };
     s.months.push({ month: this.month, units: s.units, pax: s.paxUnits ?? 0, speed: s.units > 0 ? s.speedSum / s.units : 1, income: fin.income, costs: fin.costs });
-    if (s.months.length > 120) s.months.shift();
+    if (s.months.length > STATS_MONTHS) s.months.shift();
     s.units = 0;
     s.paxUnits = 0;
     s.speedSum = 0;
@@ -344,8 +373,9 @@ export class Scenario {
     }
     this.state.bankrupt++;
     const floor = `−$${Math.abs(ECONOMY.creditLimit).toLocaleString('ru-RU')}`;
-    if (this.state.bankrupt >= BANKRUPT_MONTHS) this.lose(`Компания обанкротилась: ${BANKRUPT_MONTHS} мес. подряд на счёте меньше ${floor}`);
-    else this.game.notify(`Сценарий: на счёте меньше ${floor}. Ещё ${BANKRUPT_MONTHS - this.state.bankrupt} мес. — и компания обанкротится`, '#e5534b');
+    const span = (months: number) => durationText(months * MONTH_LENGTH);
+    if (this.state.bankrupt >= BANKRUPT_MONTHS) this.lose(`Компания обанкротилась: ${span(BANKRUPT_MONTHS)} подряд на счёте меньше ${floor}`);
+    else this.game.notify(`Сценарий: на счёте меньше ${floor}. Ещё ${span(BANKRUPT_MONTHS - this.state.bankrupt)} — и компания обанкротится`, '#e5534b');
   }
 
   // ---------- Задания ----------
@@ -389,7 +419,7 @@ export class Scenario {
     this.state.objectives.push(o);
     if (offer) this.log('offer', `Предложен контракт: ${o.title}`);
     // В журнал — с оценкой выполнимого за срок: потом видно, можно ли было успеть.
-    const verdict = assess(this.game, params, opts.months ?? 24);
+    const verdict = assess(this.game, params, opts.months ?? NO_TERM);
     this.game.journal.add('obj', {
       id: o.id,
       role: o.role,
@@ -420,7 +450,7 @@ export class Scenario {
 
   /** Задание — только если оно выполнимо (feasibility.assess); иначе null, и вызывающий ищет другое. */
   tryObjective(params: ObjectiveParams, opts: ObjectiveOptions): Objective | null {
-    const verdict = assess(this.game, params, opts.months ?? 24);
+    const verdict = assess(this.game, params, opts.months ?? NO_TERM);
     if (!verdict.ok) {
       this.game.journal.add('skip', { role: opts.role, title: titleOf(params, this.game), reason: verdict.reason, est: verdict.estimate });
       return null;
@@ -501,12 +531,12 @@ export class Scenario {
   private retry(o: Objective): void {
     const p = { ...o.params } as ObjectiveParams;
     if (p.kind === 'deliver' || p.kind === 'passengers') p.amount = Math.max(10, Math.ceil((o.target - o.progress) / 10) * 10);
-    const span = o.deadline !== null && o.started !== undefined ? o.deadline - o.started : 12;
+    const span = o.deadline !== null && o.started !== undefined ? o.deadline - o.started : 12 * TERM_SCALE;
     const r = this.addObjective(p, {
       role: 'main',
       phase: o.phase,
       why: 'Главная цель этапа не выполнена в срок. Это последняя попытка: провал закончит сценарий.',
-      months: Math.max(2, Math.ceil(span * 0.5)),
+      months: Math.max(2 * TERM_SCALE, Math.ceil(span * 0.5)),
       reward: { money: Math.round((o.reward.money ?? 0) / 2), reputation: 0 },
       critical: true,
       fast: false,

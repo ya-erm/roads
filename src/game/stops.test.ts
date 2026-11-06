@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MONTH_LENGTH, STOP } from '../config';
+import { MONTH_LENGTH, STOP, TERM_SCALE } from '../config';
 import { dist } from '../core/vec';
 import { RoadTools } from '../input/roadtools';
 import { twoWay } from '../lanes/model';
@@ -10,9 +10,10 @@ import { road, townStreets } from './testkit';
 
 const STREET_SPEC = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
 
+/** months месяцев — и ещё кадр, чтобы точно пересечь границу месяца. */
 function runMonths(game: Game, months: number) {
   game.speed = 1;
-  for (let t = 0; t < months * MONTH_LENGTH; t += 0.1) game.update(0.1);
+  for (let t = 0; t < months * MONTH_LENGTH + 0.1; t += 0.1) game.update(0.1);
 }
 
 /** Остановки на улицах крупнейшего города — не ближе minGap друг к другу. */
@@ -49,12 +50,12 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
     }
     const line = game.createLine(stops.map((s) => s.id))!;
     expect(line).not.toBeNull();
-    // С интервалом второй автобус набирает пассажиров на первой остановке и успевает довезти их за месяц.
+    // С интервалом второй автобус набирает пассажиров на первой остановке и успевает довезти их за 2 мин.
     game.setLineSpacing(line.id, true);
     expect(game.buyVehicle(line.id, 'truck')).toBeNull();
     expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
     expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
-    runMonths(game, 1);
+    runMonths(game, TERM_SCALE);
     expect(line.revenueTotal).toBeGreaterThan(0);
     expect(line.problem).toBeNull();
     // Сохранение — с остановками.

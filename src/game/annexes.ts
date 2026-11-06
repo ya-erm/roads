@@ -1,5 +1,5 @@
 /**
- * Пристройки предприятий. Без них предприятие растёт само (продукцию исправно вывозят — уровень +growthStep в месяц)
+ * Пристройки предприятий. Без них предприятие растёт само (продукцию исправно вывозят — уровень +growthStep за 2 мин)
  * до ANNEX.base; дальше растёт, только если есть куда: каждая пристройка поднимает предел роста на 1 (до
  * ECONOMY.maxLevel или предела события сценария). «Готово к расширению» — упёрлось в предел, а продукцию вывозят.
  * Геометрия — общая со складами станций (outbuildings); проверки площадки и постройка — в Game.
@@ -15,7 +15,7 @@ export function growthCap(ind: Industry): number {
   return Math.min(ind.cap ?? ECONOMY.maxLevel, ANNEX.base + (ind.annexes?.length ?? 0));
 }
 
-/** Готово к расширению: упёрлось в предел роста, продукцию вывозят (месяц и больше подряд), а расти ещё есть куда. */
+/** Готово к расширению: упёрлось в предел роста, продукцию вывозят (growthMonths и больше подряд), а расти ещё есть куда. */
 export function annexReady(ind: Industry): boolean {
   const grow = growthCap(ind);
   return grow < (ind.cap ?? ECONOMY.maxLevel) && (ind.level ?? 1) >= grow - 1e-9 && (ind.streak ?? 0) >= ECONOMY.growthMonths;

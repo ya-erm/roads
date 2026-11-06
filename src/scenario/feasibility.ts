@@ -3,7 +3,7 @@
  * города и предприятия существуют, объём не больше того, что регион может дать за срок, рост — не быстрее,
  * чем позволяет механика роста. Генератор и события не выдают задания, которые её не проходят.
  */
-import { ECONOMY, MONTH_SCALE } from '../config';
+import { ECONOMY, MONTH_SCALE, TERM_SCALE } from '../config';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
 import { CARGO } from '../world/cargo';
@@ -86,8 +86,9 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
         if (dist(a.center, b.center) > 9000) return no('города слишком далеко', estimate);
         return p.amount <= estimate * 0.9 ? yes(estimate) : no(`между городами поедет ≈${Math.round(estimate)} за срок`, estimate);
       }
+      // По региону — осторожно: ≈16 поездок в 40 с на тысячу жителей в охвате (треть потока paxPerMonth).
       const pop = game.towns.reduce((s, t) => s + t.population, 0);
-      const estimate = ((pop * 0.3 * 1.2 * 40) / 1000) * work;
+      const estimate = ((pop * 0.3 * 16 * MONTH_SCALE) / 1000) * work;
       return p.amount <= estimate * 0.9 ? yes(estimate) : no(`региону столько не уехать: ≈${Math.round(estimate)}`, estimate);
     }
     case 'industry': {
@@ -107,7 +108,8 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
       const can = t.demands.filter((c) => producible(game, c)).length;
       const need = Math.min(p.needs ?? t.demands.length, t.demands.length);
       if (!need || can < need) return no(`из нужных городу грузов можно получить ${can}, а закрыть надо ${need}`);
-      return p.months <= work - 1 ? yes() : no('слишком короткий срок для снабжения подряд');
+      // На доставку первой партии — ещё 2 мин сверх разгона.
+      return p.months <= work - TERM_SCALE ? yes() : no('слишком короткий срок для снабжения подряд');
     }
     case 'population': {
       const t = townById(game, p.town);
