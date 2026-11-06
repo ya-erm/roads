@@ -1,7 +1,7 @@
 import { buildLaneProfile, gradeFactor, LaneProfile, PROFILE_STEP } from './speedProfile';
 import { IDM, LIGHTS } from '../config';
 import { lerp as lerpNum } from '../core/math';
-import { rightNormal, scale, add, angleDiff, angleOf, closestOnSegment, dot, type Vec } from '../core/vec';
+import { rightNormal, scale, add, angleDiff, angleOf, closestOnSegment, dist, dot, type Vec } from '../core/vec';
 import { follow, hitchOf, jointOf, steerBase } from '../sim/body';
 import type { Blinker, Vehicle, VehicleSpec } from '../sim/vehicle';
 import { GLane, GLink, GMove, GNode, LaneGraph, LightPhase } from './graph';
@@ -287,6 +287,7 @@ export class LaneTraffic {
     for (const veh of placed) {
       // Посреди перекрёстка, который правка поменяла: тот же поворот есть и в новом — едет по нему дальше.
       if (keyed && veh.onMovement && this.sameTurn(old, veh)) continue;
+      const was = { ...veh.pos };
       // Иначе полосы под машиной нет — ставим её в начало полосы, куда она выезжала.
       const exit = veh.onMovement ? this.exitSpot(old, veh.onMovement) : null;
       veh.onMovement = null;
@@ -309,7 +310,7 @@ export class LaneTraffic {
       veh.laneSignal = 0;
       veh.laneSignalUntil = undefined;
       insertSorted(spot.lane.vehicles, veh);
-      this.updatePose(veh);
+      this.glide(veh, was);
       veh.blinker = this.blinkerOf(veh);
     }
   }
@@ -362,7 +363,9 @@ export class LaneTraffic {
   /**
    * Машина посреди перекрёстка, который правка поменяла (rebind): тот же поворот в новом графе — с той же полосы того
    * же полотна на ту же полосу полотна выезда (связи у узла могли укоротиться или удлиниться). Есть — машина на нём,
-   * в ближайшей к ней точке кривой, с новым маршрутом от выезда (сразу) и в брони узла; true. Нет — false.
+   * в ближайшей к ней точке кривой (по проекции, а не по доле пути), с новым маршрутом от выезда (сразу) и в брони
+   * узла; true. Если попутная полоса под машиной ещё ближе (площадка сжалась) или поворота больше нет (снесли въезд
+   * или выезд) — false: машину ставят на полосу, как раньше.
    */
   private sameTurn(old: LaneGraph, veh: Vehicle): boolean {
     const g = this.graph;
@@ -376,11 +379,11 @@ export class LaneTraffic {
     };
     const from = spot(m.inLane, g.inLinks.get(m.node));
     const to = spot(m.outLane, g.outLinks.get(m.node));
+    const node = g.nodes.get(m.node);
     const nm = from?.lane && to?.lane ? g.moves.get(`${from.lane.id}>${to.lane.id}`) : undefined;
-    const node = nm && g.nodes.get(m.node);
     const rest = nm && findLaneRoute(g, [to!.link], veh.targetNode);
     if (!nm || !node || !rest) return false;
-    // Где на новой кривой машина: ближайшая к ней точка.
+    // Где на новой кривой машина: ближайшая к ней точка (проекция, а не та же доля пути).
     let best = Infinity;
     let s = 0;
     for (let i = 1; i < nm.points.length; i++) {
@@ -390,10 +393,16 @@ export class LaneTraffic {
         s = nm.cum[i - 1] + (nm.cum[i] - nm.cum[i - 1]) * hit.t;
       }
     }
-    veh.lane = from!.lane!.id;
+    // Новая кривая далеко (площадка перекрёстка сжалась — машина уже над полосой выезда или въезда): попутная полоса
+    // под ней ближе — пусть встаёт на неё (как и без поворота).
+    if (best > 1) {
+      const there = this.laneAt(veh.pos, veh.dir);
+      if (there && dist(g.lanePose(there.lane, there.u).pos, veh.pos) < best) return false;
+    }
+    veh.lane = nm.inLane;
     veh.onMovement = nm.key;
     veh.s = Math.min(s, nm.length);
-    veh.route = [from!.link.id, ...rest];
+    veh.route = [nm.inLink, ...rest];
     veh.routeIndex = 0;
     veh.granted = null;
     veh.planned = null;
@@ -402,9 +411,23 @@ export class LaneTraffic {
     veh.lateral = 0;
     insertSorted(nm.vehicles, veh);
     node.reserved.push(veh);
-    this.updatePose(veh);
+    this.glide(veh, { ...veh.pos });
     veh.blinker = this.blinkerOf(veh);
     return true;
+  }
+
+  /**
+   * Машину переставили (rebind) — нарисована она пока там, где была (from): сдвиг на разницу, который тает за долю
+   * секунды (integrate). Дальше 60 м (поставили совсем в другое место) — без сдвига.
+   */
+  private glide(veh: Vehicle, from: Vec): void {
+    delete veh.shift;
+    this.updatePose(veh);
+    const d = { x: from.x - veh.pos.x, y: from.y - veh.pos.y };
+    const l = Math.hypot(d.x, d.y);
+    if (l < 0.05 || l > 60) return;
+    veh.shift = d;
+    this.updatePose(veh);
   }
 
   /** Манёвр key прежнего графа — в новом: полосы как были, узел (если это манёвр в узле) как был. Нет — undefined. */
@@ -1293,6 +1316,13 @@ export class LaneTraffic {
       const step = Math.min(Math.abs(veh.lateral), (6 + veh.v * 0.2) * dt);
       veh.lateral -= Math.sign(veh.lateral) * step;
     }
+    // Сдвиг после правки сети тает: чем больше, тем быстрее (за 0,2–0,6 с).
+    if (veh.shift) {
+      const l = Math.hypot(veh.shift.x, veh.shift.y);
+      const step = (10 + 3 * l) * dt;
+      if (l <= step) delete veh.shift;
+      else veh.shift = scale(veh.shift, (l - step) / l);
+    }
     if (veh.onMovement) {
       const m = this.graph.moves.get(veh.onMovement)!;
       if (veh.s >= m.length) {
@@ -1380,7 +1410,7 @@ export class LaneTraffic {
       const m = this.graph.moves.get(veh.onMovement);
       if (!m) return;
       const p = LaneGraph.pointOnMove(m, veh.s);
-      veh.pos = p.pos;
+      veh.pos = veh.shift ? add(p.pos, veh.shift) : p.pos;
       this.steer(veh, p.dir);
       if (m.node !== null) veh.level = this.graph.net.nodes.get(m.node)?.level ?? veh.level;
       // Корпус ещё (или уже) на полотне въезда или выезда — слой и его: у моста машина не ныряет под край.
@@ -1396,6 +1426,7 @@ export class LaneTraffic {
     if (!lane) return;
     const pose = this.graph.lanePose(lane, Math.min(veh.s, lane.length));
     veh.pos = add(pose.pos, scale(rightNormal(pose.dir), veh.lateral));
+    if (veh.shift) veh.pos = add(veh.pos, veh.shift);
     this.steer(veh, pose.dir);
     veh.centerS = this.graph.axisS(lane, veh.s);
     const net = this.graph.net;

@@ -136,10 +136,11 @@ describe('Стройка и снос дорог: машины на новом г
       if (applied) break;
     }
     expect(applied).toBe(true);
+    // Посреди перекрёстка, у которого поменялась форма: на той же кривой поворота (в ближайшей точке) или на полосе под
+    // собой — и нарисована там же, где была: сдвиг тает потом.
     for (const { v, pos } of inside) {
       if (!t.vehicles.has(v.id)) continue;
-      expect(v.onMovement).not.toBeNull();
-      expect(dist(v.pos, pos)).toBeLessThan(6);
+      expect(dist(v.pos, pos)).toBeLessThan(0.05);
     }
     const cut = [...t.vehicles.values()].filter((v) => t.routeCut(v));
     expect(cut.length).toBeGreaterThan(0);
@@ -205,7 +206,14 @@ describe('Стройка и снос дорог: машины на новом г
       lost.push(v);
       onLost(v);
     };
+    const seen = new Map([...t.vehicles.values()].map((v) => [v, { ...v.pos }]));
     expect(game.roadBuilder.apply(game.roadBuilder.bulldoze([corridor]))).toBe(true);
+    // Кого переставили (посреди перекрёстка у снесённой дороги, на укоротившейся полосе), — нарисованы там же, где были;
+    // сдвиг тает меньше чем за секунду.
+    for (const [v, pos] of seen) if (t.vehicles.has(v.id)) expect(dist(v.pos, pos)).toBeLessThan(0.05);
+    const moved = [...t.vehicles.values()].filter((v) => v.shift);
+    runSeconds(game, 1);
+    for (const v of moved) expect(v.shift).toBeUndefined();
     // Под ней полосы нет: потеряна (или встала на соседнюю дорогу рядом) — сразу, а не в очереди.
     for (const v of riders) {
       if (!lost.includes(v)) {
@@ -258,6 +266,18 @@ describe('Стройка и снос дорог: машины на новом г
     const cross = [...game.roads.net.nodes.values()].find((n) => n.kind === 'junction' && n.corridors.length >= 3 && n.id !== lit.id)!;
     game.setJunction(cross.id, { bans: [`${cross.corridors[0]}>${cross.corridors[1]}`] });
     expect(game.roads.graph.sameNodes.has(cross.id)).toBe(false);
+    same();
+    // Главная дорога — тоже на месте: главная у узла — заново, а не копией.
+    const main = [...game.roads.net.nodes.values()].find((n) => n.kind === 'junction' && n.corridors.length >= 3 && !n.control && n.id !== cross.id)!;
+    game.setJunction(main.id, { mainPair: [] });
+    same();
+    game.setJunction(main.id, { mainPair: [main.corridors[0], main.corridors[1]] });
+    same();
+    // Правка ничего не изменила — всё копией.
+    game.roads.net.version++;
+    game.roads.changed();
+    expect(game.roads.graph.sameNodes.size).toBe(game.roads.graph.nodes.size);
+    expect(game.roads.graph.linkFromPrev.size).toBe(game.roads.graph.links.size);
     same();
     expect(net).not.toBe(game.roads.net);
   });

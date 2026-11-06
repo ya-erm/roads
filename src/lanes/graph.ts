@@ -234,6 +234,9 @@ export class LaneGraph {
    */
   private readonly shapes = new Map<number, CorridorShape>();
   private readonly nodeShapes = new Map<number, NodeShape>();
+  /** Обрезы полотен у перекрёстков, по которым собран граф, и номера (id), что заняли связи и полосы каждого полотна. */
+  private readonly cutsOf = new Map<number, [number, number]>();
+  private readonly idRange = new Map<number, [number, number]>();
 
   /**
    * cuts — обрезы у перекрёстков, если уже посчитаны по сети побольше (граф куска сети для предпросмотра).
@@ -248,8 +251,18 @@ export class LaneGraph {
     this.prev = prev;
     this.prevSerial = prev?.serial ?? null;
     for (const c of net.corridors.values()) this.shapes.set(c.id, shapeOfCorridor(net, c));
-    for (const n of net.nodes.values()) this.nodeShapes.set(n.id, { kind: n.kind, corridors: [...n.corridors], lanes: n.lanes && [...n.lanes], bans: n.bans && [...n.bans] });
-    for (const c of net.corridors.values()) this.buildCorridor(c, ...cuts.get(c.id)!);
+    for (const n of net.nodes.values()) {
+      const { kind, pos, dir } = n;
+      const rules = `${n.control ?? ''}|${n.mainPair === undefined ? '-' : n.mainPair === null ? 'null' : n.mainPair.join(',')}`;
+      this.nodeShapes.set(n.id, { kind, corridors: [...n.corridors], pos: [pos.x, pos.y, dir.x, dir.y], rules, lanes: n.lanes && [...n.lanes], bans: n.bans && [...n.bans] });
+    }
+    for (const c of net.corridors.values()) {
+      const cut = cuts.get(c.id)!;
+      const start = this.nextId;
+      if (!this.copyCorridor(c, cut)) this.buildCorridor(c, ...cut);
+      this.idRange.set(c.id, [start, this.nextId]);
+      this.cutsOf.set(c.id, cut);
+    }
     for (const c of net.corridors.values()) this.linkSeams(c);
     // Въезды и выезды узлов — одним проходом, а не перебором всех связей у каждого узла.
     const ins = new Map<number, GLink[]>();
@@ -391,6 +404,57 @@ export class LaneGraph {
   }
 
   /**
+   * Связи и полосы полотна копией прежних (prev), если строить их не из чего нового: полотно той же формы, с теми же
+   * обрезами, а узлы на его концах — те же (вид, место, полотна; у стыка — и полотна по ту сторону той же формы: от них
+   * сплошные у развилки). Номера — те же, что дала бы сборка заново: со сдвигом на начало полотна в этом графе.
+   * Не вышло — false (полотно строится заново).
+   */
+  private copyCorridor(c: Corridor, cut: [number, number]): boolean {
+    const prev = this.prev;
+    const range = prev?.idRange.get(c.id);
+    const was = prev?.byCorridor.get(c.id);
+    const wasCut = prev?.cutsOf.get(c.id);
+    if (!prev || !range || !was || !wasCut || wasCut[0] !== cut[0] || wasCut[1] !== cut[1]) return false;
+    const shape = prev.shapes.get(c.id);
+    if (!shape || !sameShape(shape, this.shapes.get(c.id)!)) return false;
+    for (const id of [c.a, c.b]) {
+      const a = prev.nodeShapes.get(id);
+      const b = this.nodeShapes.get(id)!;
+      if (!a || a.kind !== b.kind || !sameList(a.pos, b.pos) || !sameList(a.corridors, b.corridors)) return false;
+      if (b.kind === 'seam' && !b.corridors.every((o) => sameShape(prev.shapes.get(o) ?? [], this.shapes.get(o)!))) return false;
+    }
+    const shift = this.nextId - range[0];
+    const groups: { flow: Flow; links: GLink[] }[] = [];
+    for (const g of was) {
+      const links = g.links.map((o) => {
+        const link: GLink = { ...o, id: o.id + shift, lanes: [] };
+        link.lanes = o.lanes.map((l) => ({ ...l, id: l.id + shift, link: link.id, vehicles: [] }));
+        this.links.set(link.id, link);
+        this.linkFromPrev.set(o.id, link.id);
+        for (let i = 0; i < link.lanes.length; i++) {
+          this.lanes.set(link.lanes[i].id, link.lanes[i]);
+          this.laneFromPrev.set(o.lanes[i].id, link.lanes[i].id);
+        }
+        return link;
+      });
+      groups.push({ flow: g.flow, links });
+      // Продолжения полос внутри полотна — копией прежних, в том же порядке.
+      const along = g.flow > 0 ? g.links : [...g.links].reverse();
+      for (let k = 0; k + 1 < along.length; k++) {
+        for (const lane of along[k].lanes) {
+          for (const m of prev.movesFrom.get(lane.id) ?? []) {
+            if (!m.cont || m.outLink !== along[k + 1].id) continue;
+            this.addMove({ ...m, key: moveKey(m.inLane + shift, m.outLane + shift), inLane: m.inLane + shift, outLane: m.outLane + shift, inLink: m.inLink + shift, outLink: m.outLink + shift, conflicts: new Map(), zones: new Map(), vehicles: [] });
+          }
+        }
+      }
+    }
+    this.byCorridor.set(c.id, groups);
+    this.nextId += range[1] - range[0];
+    return true;
+  }
+
+  /**
    * Связи полотна, оставшиеся как в прежнем графе: полотно той же формы (и те же высоты концов), связь — на том же
    * отрезке оси в ту же сторону и с теми же полосами (смещения, сплошные, длины, скорость).
    */
@@ -512,8 +576,9 @@ export class LaneGraph {
   /** Манёвры перекрёстка: полосы въездов распределяются по выездам, как раньше; главная дорога — самая прямая и широкая. */
   private buildJunction(n: LaneNode, ins: GLink[], outs: GLink[]): void {
     const state = this.nodeState(n);
-    const list = this.copyMoves(n, ins, outs) ?? this.junctionMovesOf(n, ins, outs);
-    this.junctionConflicts(n, state, ins, list);
+    const copied = this.copyMoves(n, ins, outs);
+    const list = copied ?? this.junctionMovesOf(n, ins, outs);
+    this.junctionConflicts(n, state, ins, list, !!copied);
   }
 
   /** Манёвры перекрёстка заново: полосы въездов по выездам (или по связям полос, заданным игроком). */
@@ -590,10 +655,17 @@ export class LaneGraph {
   }
 
   /** Конфликты манёвров перекрёстка, его главная дорога или светофор; узел как был — в sameNodes. */
-  private junctionConflicts(n: LaneNode, state: GNode, ins: GLink[], list: GMove[]): void {
+  private junctionConflicts(n: LaneNode, state: GNode, ins: GLink[], list: GMove[], copied: boolean): void {
     const was = this.prev?.nodeMoves.get(n.id);
     const same = this.sameMoves(was, list);
-    if (same) {
+    if (same && list.every((m, k) => m.key === was[k].key)) {
+      // Узел как был, и даже номера полос те же (правка — дальше по списку полотен): те же словари конфликтов — общими
+      // (после сборки графа их не меняют).
+      list.forEach((m, k) => {
+        m.conflicts = was[k].conflicts;
+        m.zones = was[k].zones;
+      });
+    } else if (same) {
       // Узел как был: конфликты — те же, что в прежнем графе (по номерам манёвров в списке, в том же порядке).
       const index = new Map(was.map((m, i) => [m.key, i]));
       for (let k = 0; k < list.length; k++) {
@@ -617,12 +689,27 @@ export class LaneGraph {
     }
     this.junctionMoves.set(n.id, list);
     this.nodeMoves.set(n.id, list);
-    this.junctionRules(n, state, ins, list);
+    if (!(copied && this.copyPriority(n, state))) this.junctionRules(n, state, ins, list);
     const before = same && this.prev!.nodes.get(n.id);
     if (before && sameList(this.prev!.nodeShapes.get(n.id)?.corridors, n.corridors) && this.sameRules(before, state)) this.sameNodes.add(n.id);
   }
 
   /** Главная дорога перекрёстка или светофор. */
+  /**
+   * Главная дорога узла без светофора — копией прежней, если манёвры скопированы (copyMoves), а главная дорога
+   * и светофор в настройках и все полотна узла (их направления, полосы, скорости — по ним выбирается «Авто») — те же.
+   */
+  private copyPriority(n: LaneNode, state: GNode): boolean {
+    const prev = this.prev!;
+    const before = prev.nodes.get(n.id);
+    const a = prev.nodeShapes.get(n.id);
+    const b = this.nodeShapes.get(n.id)!;
+    if (n.control === 'lights' || !before || before.lights || !a || a.rules !== b.rules) return false;
+    if (!b.corridors.every((id) => sameShape(prev.shapes.get(id) ?? [], this.shapes.get(id)!))) return false;
+    for (const id of before.priorityLanes) state.priorityLanes.add(this.laneFromPrev.get(id)!);
+    return true;
+  }
+
   private junctionRules(n: LaneNode, state: GNode, ins: GLink[], list: GMove[]): void {
     // Светофор: фазы игрока или «Авто» (встречные подъезды вместе); главной дороги нет — решает свет.
     if (n.control === 'lights' && ins.length >= 2 && this.net.ends(n).length >= 3) {
@@ -769,6 +856,10 @@ type CorridorShape = (number | string)[];
 /** Копия настроек узла, от которых зависят его манёвры. */
 interface NodeShape {
   kind: string;
+  /** Место и направление стыка: x, y, dir.x, dir.y. */
+  pos: number[];
+  /** Светофор и главная дорога из настроек — строкой. */
+  rules: string;
   corridors: number[];
   lanes?: string[];
   bans?: string[];

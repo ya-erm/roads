@@ -255,13 +255,22 @@ export interface IslandOptions {
   minWidth?: number;
 }
 
-/** Расстояние от точки до отрезка. */
-function segDist(px: number, py: number, a: Vec, b: Vec): number {
+/**
+ * Расстояние от точки до отрезка — не меньше gap: Math.hypot(…) от ближайшей точки отрезка, но корень (дорогой) —
+ * только когда сумма квадратов слишком близка к gap², чтобы решить по ней (запас на округление).
+ */
+function atLeast(px: number, py: number, a: Vec, b: Vec, gap: number): boolean {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const l2 = dx * dx + dy * dy;
   const t = l2 > 0 ? Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / l2)) : 0;
-  return Math.hypot(px - a.x - dx * t, py - a.y - dy * t);
+  const ex = px - a.x - dx * t;
+  const ey = py - a.y - dy * t;
+  const d2 = ex * ex + ey * ey;
+  const g2 = gap * gap;
+  if (d2 >= g2 * (1 + 1e-6)) return true;
+  if (d2 <= g2 * (1 - 1e-6)) return false;
+  return Math.hypot(ex, ey) >= gap;
 }
 
 /**
@@ -310,16 +319,28 @@ export function freeIslands(plate: Vec[], paths: Vec[][], o: IslandOptions = {})
     }
   }
   // Расстояния до бордюра и до траекторий — только вблизи (дальше cap — неважно насколько).
+  // Расстояние до отрезка — Math.hypot от ближайшей его точки, но корень (дорогой) — только там, где сумма квадратов
+  // говорит, что точка может оказаться ближе записанного (с запасом на округление): поле то же, что с корнем везде.
   const stamp = (field: Float32Array, a: Vec, b: Vec) => {
     const i0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - cap - x0) / h));
     const i1 = Math.min(nx - 1, Math.ceil((Math.max(a.x, b.x) + cap - x0) / h));
     const j0 = Math.max(0, Math.floor((Math.min(a.y, b.y) - cap - y0) / h));
     const j1 = Math.min(ny - 1, Math.ceil((Math.max(a.y, b.y) + cap - y0) / h));
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
     for (let j = j0; j <= j1; j++) {
+      const py = y0 + j * h;
       for (let i = i0; i <= i1; i++) {
-        const d = segDist(x0 + i * h, y0 + j * h, a, b);
+        const px = x0 + i * h;
+        const t = l2 > 0 ? Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / l2)) : 0;
+        const ex = px - a.x - dx * t;
+        const ey = py - a.y - dy * t;
         const k = j * nx + i;
-        if (d < field[k]) field[k] = d;
+        const cur = field[k];
+        if (ex * ex + ey * ey >= cur * cur * (1 + 1e-6)) continue;
+        const d = Math.hypot(ex, ey);
+        if (d < cur) field[k] = d;
       }
     }
   };
@@ -496,7 +517,7 @@ export function clipGuide(pts: Vec[], plate: Vec[], curb: [Vec, Vec][]): Vec[][]
   let L = 0;
   for (let i = 1; i < pts.length; i++) L += dist(pts[i - 1], pts[i]);
   const fine = resample(pts, Math.max(4, Math.ceil(L / 0.75)));
-  const ok = (p: Vec) => insidePoly(p, plate) && curb.every(([a, b]) => segDist(p.x, p.y, a, b) >= GUIDE_CURB_GAP);
+  const ok = (p: Vec) => insidePoly(p, plate) && curb.every(([a, b]) => atLeast(p.x, p.y, a, b, GUIDE_CURB_GAP));
   const res: Vec[][] = [];
   let run: Vec[] = [];
   const flush = () => {

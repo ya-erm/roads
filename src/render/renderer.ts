@@ -34,6 +34,7 @@ import { drawTurnArrows } from './turnArrows';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, frontLength } from './vehicleArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
+import { type Hiders, TreeCover } from './treeCover';
 import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
 
 export type Selection =
@@ -326,8 +327,12 @@ export class Renderer {
   private cache = new Map<number, SegCache>();
   private cacheVersion = -1;
   private treeVersion = '';
-  /** Деревья по клеткам 60 м — одна сетка на карту (деревья не двигаются). */
-  private treeGrid: { trees: unknown; n: number; cells: Map<number, number[]> } | null = null;
+  /** Какие деревья спрятаны — пересчёт только там, где правка (сетка деревьев — одна на карту). */
+  private treeCover = new TreeCover();
+  /** Кружки пути, прячущие деревья, — по его кэшу отрисовки. */
+  private treeRails = new WeakMap<SegCache, number[]>();
+  /** Кружки строений, прячущие деревья, — по строению (и его месту и размеру). */
+  private treeItems = new WeakMap<object, { pts: number[]; w: number; h: number }>();
   /** Где полотно прячет деревья: кружки x, y, r вдоль оси — пока у полотна та же форма и высоты концов. */
   private treeCuts = new Map<number, { key: string; pts: number[] }>();
   /** Горят ли поворотники в этом кадре: мигают по игровому времени, на паузе — горят ровно. */
@@ -386,7 +391,7 @@ export class Renderer {
     this.cache.clear();
     this.cacheVersion = -1;
     this.treeVersion = '';
-    this.treeGrid = null;
+    this.treeCover = new TreeCover();
     this.treeCuts.clear();
     this.lanes.reset();
     this.relief.reset();
@@ -1030,46 +1035,19 @@ export class Renderer {
     const key = `${game.net.version}:${game.roads.net.version}:${game.index.items.size}`;
     if (key === this.treeVersion) return;
     this.treeVersion = key;
-    const trees = game.terrain.trees;
-    const cell = 60;
-    // Номер клетки сетки — числом (строки на каждое дерево и каждый кружок заметно дороже).
-    const cellOf = (x: number, y: number) => (Math.floor(x / cell) + 4096) * 8192 + Math.floor(y / cell) + 4096;
-    // Деревья не двигаются: сетка — одна на карту.
-    let grid = this.treeGrid;
-    if (!grid || grid.trees !== trees || grid.n !== trees.length) {
-      const cells = new Map<number, number[]>();
-      trees.forEach((t, i) => {
-        const k = cellOf(t.pos.x, t.pos.y);
-        const list = cells.get(k);
-        if (list) list.push(i);
-        else cells.set(k, [i]);
-      });
-      grid = this.treeGrid = { trees, n: trees.length, cells };
-    }
-    for (const t of trees) t.hidden = false;
-    const cells = grid.cells;
-    const hideNear = (px: number, py: number, r: number) => {
-      const x0 = Math.floor((px - r) / cell);
-      const x1 = Math.floor((px + r) / cell);
-      const y0 = Math.floor((py - r) / cell);
-      const y1 = Math.floor((py + r) / cell);
-      const r2 = r * r;
-      for (let x = x0; x <= x1; x++) {
-        for (let y = y0; y <= y1; y++) {
-          const list = cells.get((x + 4096) * 8192 + y + 4096);
-          if (!list) continue;
-          for (const i of list) {
-            const p = trees[i].pos;
-            if ((p.x - px) ** 2 + (p.y - py) ** 2 < r2) trees[i].hidden = true;
-          }
-        }
-      }
-    };
+    // Кто прячет деревья — кружками; пересчитываются только деревья там, где кто-то из них поменялся (TreeCover).
+    const hiders: Hiders = new Map();
     for (const s of game.net.segments.values()) {
       const c = this.cache.get(s.id);
       if (!c || c.minLevel < -0.6) continue;
       const r = c.width / 2 + 6;
-      for (let i = 0; i < c.surface.length; i += 2) hideNear(c.surface[i].x, c.surface[i].y, r);
+      let rail = this.treeRails.get(c);
+      if (!rail) {
+        rail = [];
+        for (let i = 0; i < c.surface.length; i += 2) rail.push(c.surface[i].x, c.surface[i].y, r);
+        this.treeRails.set(c, rail);
+      }
+      hiders.set(`r${s.id}`, rail);
     }
     // Кружки вдоль полотна (кроме тоннелей) — один раз на его форму и высоты концов.
     const roads = game.roads.net;
@@ -1088,12 +1066,21 @@ export class Renderer {
         }
         this.treeCuts.set(c.id, (cut = { key: ck, pts }));
       }
-      const pts = cut.pts;
-      for (let i = 0; i < pts.length; i += 3) hideNear(pts[i], pts[i + 1], pts[i + 2]);
+      hiders.set(`c${c.id}`, cut.pts);
     }
     if (this.treeCuts.size > roads.corridors.size + 500) for (const id of [...this.treeCuts.keys()]) if (!roads.corridors.has(id)) this.treeCuts.delete(id);
-    for (const it of game.index.items) hideNear(it.fp.center.x, it.fp.center.y, Math.hypot(it.fp.w, it.fp.h) / 2 + 4);
-    for (const c of game.roundaboutCenters.values()) hideNear(c.x, c.y, 50);
+    for (const it of game.index.items) {
+      // Кружок строения — прежним массивом, пока оно на месте (тогда сверка с прошлым разом — сразу).
+      const { center, w, h } = it.fp;
+      let item = this.treeItems.get(it);
+      if (!item || item.pts[0] !== center.x || item.pts[1] !== center.y || item.w !== w || item.h !== h) {
+        item = { pts: [center.x, center.y, Math.hypot(w, h) / 2 + 4], w, h };
+        this.treeItems.set(it, item);
+      }
+      hiders.set(it, item.pts);
+    }
+    for (const [id, c] of game.roundaboutCenters) hiders.set(`o${id}`, [c.x, c.y, 50]);
+    this.treeCover.update(game.terrain.trees, hiders);
   }
 
   // ---------- Рельеф ----------

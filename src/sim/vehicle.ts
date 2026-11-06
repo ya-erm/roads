@@ -51,6 +51,11 @@ export interface Vehicle extends VehicleSpec {
   centerS: number;
   /** Визуальное боковое смещение при перестроении. */
   lateral: number;
+  /**
+   * Визуальный сдвиг после правки сети: машину переставили на новую кривую или полосу, а нарисована она ещё там, где
+   * была, — сдвиг тает за долю секунды, без скачка. Нет — не сдвинута.
+   */
+  shift?: Vec;
   tripTime: number;
   stoppedTime: number;
   stuckTimer: number;

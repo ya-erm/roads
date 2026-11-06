@@ -391,7 +391,15 @@ export class LaneRenderer {
     // Подпись узла: всё, от чего зависит геометрия вокруг него.
     const sigs = new Map<number, string>();
     for (const n of net.nodes.values()) {
-      const arms = n.corridors.map((id) => `${id}.${net.corridor(id).rev}.${this.cuts.get(id)?.join('/')}`).join(',');
+      // Обрез подъезда — только у этого узла: обрез на другом конце полотна геометрию узла не меняет (иначе правка у
+      // перекрёстка пересчитывала бы и соседние перекрёстки с их разметкой, и их полотна).
+      const arms = n.corridors
+        .map((id) => {
+          const c = net.corridor(id);
+          const cut = this.cuts.get(id);
+          return `${id}.${c.rev}.${c.a === n.id ? cut?.[0] : ''}/${c.b === n.id ? cut?.[1] : ''}`;
+        })
+        .join(',');
       const corners = n.corners ? Object.entries(n.corners).join(';') : '';
       // Запреты и связи полос меняют траектории — а по ним разметка площадки.
       const turns = `${n.bans?.join(';') ?? ''}|${n.lanes?.join(';') ?? ''}`;
