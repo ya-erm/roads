@@ -1,4 +1,5 @@
 import './style.css';
+import { idleOnce } from './core/idle';
 import { Game, SAVE_VERSION, type SaveData } from './game/game';
 import { journalFile } from './game/journal';
 import { backupGame, clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readSave, saveGame, writeSave } from './game/persist';
@@ -176,8 +177,15 @@ function restart(): void {
   hookAutosave();
 }
 
+/** Сколько миллисекунд кадра отдавать итогам месяца (Game.monthBudget): остальное — в следующих кадрах. */
+const MONTH_FRAME_MS = 6;
+/** Автосохранение после итогов месяца — в простое браузера, а не в том же кадре. */
+const persistSoon = idleOnce(() => persist());
+
 function hookAutosave(): void {
-  game.onMonthEnd = () => persist();
+  // Итоги месяца — по кадрам (рост городов, граф движения): игра не замирает на смене месяца.
+  game.monthBudget = MONTH_FRAME_MS;
+  game.onMonthEnd = persistSoon;
 }
 
 /** Начальный вид — крупнейший город (у тестовой сцены — вся сцена). */

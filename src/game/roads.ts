@@ -34,12 +34,64 @@ export class Roads {
     this.traffic = new LaneTraffic(this.graph, events);
   }
 
-  /** Сеть поменялась (стройка, рост города): граф заново, машины переезжают на него. */
+  /**
+   * Сеть поменялась (стройка, рост города): граф заново, машины переезжают на него. Внутри quiet — позже
+   * (step): правка запоминается. Отложенные до того правки — сначала, по порядку.
+   */
   changed(): void {
+    const last = this.queue[this.queue.length - 1] ?? this.graphOf;
+    if (this.quieted) {
+      if (last.net !== this.net || last.version !== this.net.version) this.queue.push({ net: this.net, version: this.net.version });
+      return;
+    }
+    while (this.step());
     if (this.graphOf.net === this.net && this.graphOf.version === this.net.version) return;
-    this.graph = new LaneGraph(this.net);
-    this.graphOf = { net: this.net, version: this.net.version };
-    this.traffic.rebind(this.graph);
+    this.rebuild({ graph: new LaneGraph(this.net), net: this.net, version: this.net.version });
+  }
+
+  private quieted = 0;
+  /** Правки внутри quiet, по которым граф ещё не собран: сеть и её версия на тот момент — по порядку. */
+  private queue: { net: LaneNet; version: number }[] = [];
+  /** Граф первой из них, уже собранный: машины на него ещё не переехали. */
+  private built: { graph: LaneGraph; net: LaneNet; version: number } | null = null;
+
+  /**
+   * Правки, после которых граф не пересобирается сразу (улицы городов в итогах месяца): каждая запоминается,
+   * а граф по ней и переезд машин на него — шагами step, отдельно. Сборка графа и переезд всех машин — десятки
+   * миллисекунд; несколько улиц подряд подвешивали смену месяца на сотни. Графы — те же и в том же порядке,
+   * что и сразу после каждой правки: росту городов граф не нужен, так что и числа те же. Пока шаги не сделаны,
+   * граф прежний (машины едут по нему же), а сеть полос (net) — уже новая.
+   */
+  quiet<T>(fn: () => T): T {
+    this.quieted++;
+    try {
+      return fn();
+    } finally {
+      this.quieted--;
+    }
+  }
+
+  /**
+   * Один шаг отложенных правок: собрать граф очередной сети или пересадить машины на собранный.
+   * false — шагов не осталось, граф по нынешней сети (если её не меняли вне quiet).
+   */
+  step(): boolean {
+    if (this.built) {
+      const b = this.built;
+      this.built = null;
+      this.rebuild(b);
+      return true;
+    }
+    const next = this.queue.shift();
+    if (!next) return false;
+    this.built = { graph: new LaneGraph(next.net), ...next };
+    return true;
+  }
+
+  private rebuild(b: { graph: LaneGraph; net: LaneNet; version: number }): void {
+    this.graph = b.graph;
+    this.graphOf = { net: b.net, version: b.version };
+    this.traffic.rebind(b.graph);
   }
 
   /** Новая сеть целиком (загрузка, отмена). */

@@ -530,6 +530,9 @@ export class Game implements BuildContext {
   private nextEntityId = 1;
   private readonly owners = new Map<number, SimOwner>();
   private roadValue = { version: -1, value: 0 };
+  /** Части roadValueTotal: пути целиком (по версии путей и рельефа) и полотна дорог по одному (по их форме). */
+  private railValue = { version: -1, value: 0 };
+  private readonly corridorValue = new Map<number, { key: string; cost: number }>();
   /** Когда транспорт подъехал к нынешней станции (игровое время) — для журнала: сколько простоял. */
   private readonly arrivedAt = new Map<number, number>();
   /** Когда транспорт уехал с прошлой станции и сколько простоял в пути — для журнала: время и скорость рейса. */
@@ -543,8 +546,18 @@ export class Game implements BuildContext {
   private readonly bayWaitSince = new Map<number, number>();
   /** Прикидка времени круга линии, пока его не измерили по рейсам: когда считали и сколько вышло. */
   private readonly lapGuess = new Map<number, { at: number; lap: number | null }>();
-  /** Вызывается в конце каждого игрового месяца — для автосохранения. */
+  /** Вызывается в конце каждого игрового месяца, когда итоги подведены и месяц уже новый, — для автосохранения. */
   onMonthEnd: () => void = () => {};
+  /**
+   * Сколько миллисекунд кадра отдавать итогам месяца. Бесконечность — итоги целиком в том же такте (тесты, node);
+   * в браузере (main.ts) — несколько миллисекунд: рост городов, пересборка графа движения и остальное идут
+   * по кадрам, а такты партии ждут, пока итоги не подведены. Шаги и их порядок те же — те же и числа.
+   */
+  monthBudget = Infinity;
+  /** Итоги месяца, которые ещё идут (closeMonth); null — не идут. */
+  private closing: Generator<void, void, void> | null = null;
+  /** Сейчас выполняется шаг итогов. */
+  private closingStep = false;
   /** Сценарий партии; null — песочница. */
   scenario: Scenario | null = null;
   /** Множители экономики от событий сценария; в песочнице все равны 1. */
@@ -634,6 +647,8 @@ export class Game implements BuildContext {
   }
 
   toSave(): SaveData {
+    // Итоги месяца на середине (идут по кадрам) — сначала до конца: иначе после загрузки они пошли бы заново.
+    this.settleMonth();
     return {
       version: SAVE_VERSION,
       settings: this.settings,
@@ -2412,6 +2427,8 @@ export class Game implements BuildContext {
     while (this.notices.length && this.notices[0].age > 6) this.notices.shift();
     for (const f of this.floaters) f.age += realDt;
     while (this.floaters.length && this.floaters[0].age > 2.5) this.floaters.shift();
+    // Итоги месяца ещё идут — кадр им, такты ждут (и на паузе: незаконченные итоги не оставляем).
+    if (this.closing && !this.closeMonthSteps()) return;
     if (this.speed === 0) return;
     this.accumulator += Math.min(realDt, 0.1) * this.speed;
     let steps = 0;
@@ -2419,8 +2436,50 @@ export class Game implements BuildContext {
       this.tick(SIM_DT);
       this.accumulator -= SIM_DT;
       steps++;
+      // Месяц кончился: итоги — сколько успеют в этом кадре, остальное — в следующих.
+      if (this.closing && !this.closeMonthSteps()) return;
     }
     if (steps >= 24) this.accumulator = 0;
+  }
+
+  /**
+   * Шаги итогов месяца, пока не выйдет время кадра (monthBudget); true — итоги подведены. Подведены — onMonthEnd
+   * (автосохранение): уже с новым месяцем, так что после загрузки итоги этого месяца не повторятся.
+   */
+  private closeMonthSteps(): boolean {
+    // Изнутри шага (сохранение посреди итогов) — не дальше: генератор уже идёт.
+    if (this.closingStep) return false;
+    const until = performance.now() + this.monthBudget;
+    while (this.closing) {
+      this.closingStep = true;
+      let done: boolean | undefined;
+      try {
+        done = this.closing.next().done;
+      } finally {
+        this.closingStep = false;
+      }
+      if (done) {
+        this.closing = null;
+        this.onMonthEnd();
+      } else if (performance.now() >= until) return false;
+    }
+    return true;
+  }
+
+  /** Итоги месяца ещё идут (по кадрам). */
+  get monthClosing(): boolean {
+    return this.closing !== null;
+  }
+
+  /** Подвести итоги месяца до конца сейчас же — перед сохранением: половина итогов в сохранение не попадает. */
+  settleMonth(): void {
+    const budget = this.monthBudget;
+    this.monthBudget = Infinity;
+    try {
+      this.closeMonthSteps();
+    } finally {
+      this.monthBudget = budget;
+    }
   }
 
   private tick(dt: number): void {
@@ -2436,15 +2495,19 @@ export class Game implements BuildContext {
     this.updateTowns(dt);
     this.scenario?.tick(dt);
     const month = Math.floor(this.time / MONTH_LENGTH);
-    if (month !== this.month) {
-      this.monthEnd();
-      const yearBefore = this.year;
-      this.month = month;
-      // Новый год — новые модели в продаже.
-      if (this.year !== yearBefore) {
-        for (const m of Object.values(MODELS)) {
-          if (this.modelYear(m.id) === this.year && m.tier > this.modelTier) this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
-        }
+    // Итоги — сразу после такта (update): целиком или по кадрам (monthBudget).
+    if (month !== this.month && !this.closing) this.closing = this.closeMonth(month);
+  }
+
+  /** Итоги месяца и переход на следующий; yield — где их можно прервать до следующего кадра. */
+  private *closeMonth(month: number): Generator<void, void, void> {
+    yield* this.monthEnd();
+    const yearBefore = this.year;
+    this.month = month;
+    // Новый год — новые модели в продаже.
+    if (this.year !== yearBefore) {
+      for (const m of Object.values(MODELS)) {
+        if (this.modelYear(m.id) === this.year && m.tier > this.modelTier) this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
       }
     }
   }
@@ -4360,19 +4423,44 @@ export class Game implements BuildContext {
 
   // ---------- Месяц ----------
 
-  /** Стоимость всех дорог и путей — от неё считается ремонт. */
+  /**
+   * Стоимость всех дорог и путей — от неё считается ремонт. Города каждый месяц достраивают улицы, и сеть
+   * дорог всякий раз новая — поэтому полотна считаются по одному: прежние (та же форма, класс, полосы, уровни
+   * концов и рельеф) берутся готовыми. Цены целые — сумма та же, что и подряд.
+   */
   roadValueTotal(): number {
     const version = (this.net.version * 100003 + this.roads.net.version) * 1009 + this.terrain.version;
     if (this.roadValue.version !== version) {
-      let total = 0;
-      for (const s of this.net.segments.values()) total += this.builder.segmentCost(s);
-      for (const c of this.roads.net.corridors.values()) total += corridorCost(this.roads.net, c, (p, m) => this.isWater(p, m), this.ground());
+      const railVersion = this.net.version * 1009 + this.terrain.version;
+      if (this.railValue.version !== railVersion) {
+        let rails = 0;
+        for (const s of this.net.segments.values()) rails += this.builder.segmentCost(s);
+        this.railValue = { version: railVersion, value: rails };
+      }
+      let total = this.railValue.value;
+      const net = this.roads.net;
+      const ground = this.ground();
+      for (const c of net.corridors.values()) {
+        const key = `${this.terrain.version}|${net.node(c.a).level}|${net.node(c.b).level}|${c.cls}|${JSON.stringify(c.curve)}|${JSON.stringify(c.lanes)}`;
+        let hit = this.corridorValue.get(c.id);
+        if (hit?.key !== key) {
+          hit = { key, cost: corridorCost(net, c, (p, m) => this.isWater(p, m), ground) };
+          this.corridorValue.set(c.id, hit);
+        }
+        total += hit.cost;
+      }
+      for (const id of this.corridorValue.keys()) if (!net.corridors.has(id)) this.corridorValue.delete(id);
       this.roadValue = { version, value: total };
     }
     return this.roadValue.value;
   }
 
-  private monthEnd(): void {
+  /**
+   * Итоги месяца. Между yield — неделимые шаги: экономика и предприятия, рост каждого города, сборка графа
+   * движения, переезд машин на него, остальное. В браузере шаги идут по кадрам (monthBudget), такты партии
+   * в это время стоят — порядок и числа те же, что и целиком.
+   */
+  private *monthEnd(): Generator<void, void, void> {
     for (const v of this.fleet.values()) {
       const cost = this.runningCost(v);
       this.money -= cost;
@@ -4411,7 +4499,15 @@ export class Game implements BuildContext {
       ind.producedMonth = 0;
     }
     this.growIndustries();
-    for (const town of this.towns) this.growTown(town);
+    yield;
+    // Улицы городов: граф движения по каждой новой улице и переезд на него машин — не сразу внутри стройки,
+    // а отдельными шагами после города (roads.quiet, roads.step): те же графы в том же порядке, но по кадрам.
+    // Подряд, в одном кадре, несколько улиц подвешивали смену месяца на сотни миллисекунд.
+    for (const town of this.towns) {
+      this.roads.quiet(() => this.growTown(town));
+      yield;
+      while (this.roads.step()) yield;
+    }
     for (const st of this.stations.values()) this.computeCatchment(st);
 
     this.history.push({ label: this.dateLabel, income: this.incomeMonth, expenses: this.expensesMonth, money: this.money, ledger: { ...this.ledger } });
@@ -4425,11 +4521,11 @@ export class Game implements BuildContext {
       if (line.auto?.on) this.autoFleet(line, closed);
     }
     if (this.money < ECONOMY.creditLimit * 0.8) this.notify('Компания на грани банкротства!', '#e5534b');
+    yield;
     // Сценарий — после экономики месяца: снабжение городов и рост предприятий уже подсчитаны.
     this.scenario?.monthEnd();
     this.journalMonth();
     this.timelapse.capture(this);
-    this.onMonthEnd();
   }
 
   /**
