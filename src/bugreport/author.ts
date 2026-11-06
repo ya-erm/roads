@@ -4,7 +4,8 @@
  */
 
 export const AUTHOR_KEY = 'roads.bugReportName';
-export const AUTHOR_MAX = 60;
+/** Столько символов имени принимает публичная отправка доски. */
+export const AUTHOR_MAX = 32;
 
 type Read = Pick<Storage, 'getItem'>;
 type Write = Pick<Storage, 'setItem' | 'removeItem'>;

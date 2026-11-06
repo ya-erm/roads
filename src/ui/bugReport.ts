@@ -8,8 +8,9 @@
  * Значок скачивания рядом с «Отмена» собирает всё одним ZIP-архивом (bugreport/archive.ts, zip.ts).
  *
  * Модель пометок и отрисовка — src/bugreport (без DOM, с тестами), загрузка и текст отчёта — bugreport/report.ts.
- * Токенов доски здесь нет и быть не может: сайт публичный. Файлы идут в публичный загрузчик доски; загрузились —
- * экран благодарности, нет — архив можно скачать и приложить вручную; текст отчёта копируется в буфер.
+ * Токенов доски здесь нет и быть не может: сайт публичный. «Отправить»: файлы — в публичный загрузчик доски
+ * (ссылки войдут в карточку), затем карточка — публичной отправкой доски (POST tasks без авторизации).
+ * Дошло — экран благодарности с номером задачи; нет — текст в буфер и архив для ручной передачи.
  */
 
 import './bugReport.css';
@@ -65,8 +66,12 @@ import {
   buildLabel,
   reportMarkdown,
   sizeLabel,
+  boardReport,
+  newReportKey,
+  submitReport,
   uploadAttachments,
   UploadError,
+  type Receipt,
   type Attachment,
   type AttachKind,
   type ReportInfo,
@@ -185,10 +190,14 @@ interface Moment {
 }
 
 interface Sent {
+  /** Текст отчёта для буфера и ручной отправки (файлы — «приложены»). */
   text: string;
-  /** Что легло на доску; [] — прикладывать было нечего; null — загрузка не удалась. */
-  uploaded: Uploaded[] | null;
+  /** Карточка на доске; null — отчёт не отправился (error — почему), тогда буфер и архив. */
+  receipt: Receipt | null;
   error: string;
+  /** Файлы на доске; null — загрузчик их не принял (uploadError), [] — прикладывать было нечего. */
+  uploaded: Uploaded[] | null;
+  uploadError: string;
   copied: boolean;
 }
 
@@ -229,6 +238,8 @@ class BugReport {
   private sending = false;
   private archiving = false;
   private sent: Sent | null = null;
+  /** Ключ этого отчёта: повторная отправка после сбоя не создаст на доске вторую карточку. */
+  private reportKey = newReportKey();
   private speedBefore = 0;
 
   constructor(private readonly deps: BugReportDeps) {
@@ -332,7 +343,7 @@ class BugReport {
           <div class="bug-off">${ICON.noShot}<b>Без снимка</b><button class="bug-secondary small" data-bug="shot-on">${ICON.shot}Приложить снимок</button></div>
         </div>
         <aside class="bug-side">
-          <label class="bug-name">${ICON.person}<input type="text" data-bug-name maxlength="60" autocomplete="name" placeholder="Ваше имя" /></label>
+          <label class="bug-name">${ICON.person}<input type="text" data-bug-name maxlength="32" autocomplete="name" placeholder="Ваше имя" /></label>
           <textarea class="bug-desc" data-bug-desc placeholder="Что пошло не так? Как это повторить?"></textarea>
           <div class="bug-files" data-bug-files></div>
           <div class="bug-result hidden" data-bug-result></div>
@@ -379,6 +390,8 @@ class BugReport {
     this.speedBefore = game.speed;
     game.speed = 0;
     this.tl = new Timeline(emptySketch());
+    // Новый снимок — новый отчёт.
+    this.reportKey = newReportKey();
     this.selected = null;
     this.editing = null;
     this.drag = null;
@@ -1035,23 +1048,39 @@ class BugReport {
     if (this.include.shot) files.push({ kind: 'shot', name: names.shot, type: 'image/png', data: await this.renderPng() });
     if (this.include.journal) files.push({ kind: 'journal', name: names.journal, type: 'application/x-ndjson', data: new Blob([m.journal], { type: 'application/x-ndjson' }) });
     if (this.include.save) files.push({ kind: 'save', name: names.save, type: 'application/json', data: new Blob([m.save], { type: 'application/json' }) });
+    // Сначала файлы — в публичный загрузчик (ссылки на них войдут в карточку); не принял — карточка всё равно
+    // уйдёт, с пометкой, каких файлов в ней нет.
     let uploaded: Uploaded[] | null = null;
-    let error = '';
+    let uploadError = '';
     if (files.length) {
       try {
         uploaded = await uploadAttachments(files, {
           fetch: window.fetch.bind(window),
-          onProgress: (done, total) => this.status(`Загружаю на доску: ${done} из ${total}`),
+          onProgress: (done, total) => this.status(`Загружаю файлы: ${done} из ${total}`),
         });
       } catch (e) {
-        // Сеть или доска не пускает файлы с этого сайта (fetch бросает TypeError) — без подробностей.
-        error = e instanceof UploadError ? e.message : 'доска не принимает файлы с сайта игры';
+        // Сеть или загрузчик не пускает файлы с этого сайта (fetch бросает TypeError) — без подробностей.
+        uploadError = e instanceof UploadError ? e.message : 'загрузчик доски не принимает файлы с сайта игры';
         console.warn('Баг-репорт: файлы не загрузились', e);
       }
     } else uploaded = [];
-    const text = reportMarkdown(this.info(), files.map((f) => ({ kind: f.kind, name: f.name, url: uploaded?.find((u) => u.kind === f.kind)?.url })));
-    const copied = await copyText(text);
-    this.sent = { text, uploaded, error, copied };
+    const info = this.info();
+    const refs = files.map((f) => ({ kind: f.kind, name: f.name, url: uploaded?.find((u) => u.kind === f.kind)?.url }));
+    // Затем карточка — публичная отправка доски, без токена.
+    this.status('Отправляю отчёт на доску…');
+    let receipt: Receipt | null = null;
+    let error = '';
+    try {
+      receipt = await submitReport(boardReport(info, refs, this.reportKey), { fetch: window.fetch.bind(window) });
+    } catch (e) {
+      error = e instanceof UploadError ? e.message : 'нет связи с доской задач';
+      console.warn('Баг-репорт: отчёт не отправился', e);
+    }
+    // Текст с файлами «приложенными» — для буфера и архива: пригодится, если что-то не дошло.
+    const text = reportMarkdown(info, refs);
+    const copied = receipt ? false : await copyText(text);
+    this.sent = { text, receipt, error, uploaded, uploadError, copied };
+    if (receipt) this.reportKey = newReportKey();
     this.sending = false;
     this.renderResult();
     this.syncControls();
@@ -1090,43 +1119,49 @@ class BugReport {
       el.innerHTML = '';
       return;
     }
+    if (s.receipt) {
+      // Карточка на доске — экран благодарности поверх окна.
+      el.className = 'bug-result hidden';
+      el.innerHTML = '';
+      this.showThanks(s);
+      return;
+    }
     const copied = s.copied ? 'Текст отчёта скопирован' : 'Текст отчёта — ниже';
     const board = boardUrl();
     const copy = `<button class="bug-secondary small" data-bug="copy">${ICON.copy}Скопировать</button>`;
     const open = board ? `<a class="bug-secondary small" href="${board}" target="_blank" rel="noopener" data-tip="Доска задач игры">${ICON.link}Доска</a>` : '';
-    if (s.uploaded?.length) {
-      // Файлы на доске — экран благодарности поверх окна.
-      el.className = 'bug-result hidden';
-      el.innerHTML = '';
-      this.showThanks(s);
-    } else if (s.uploaded) {
-      // Прикладывать было нечего: только текст.
-      el.className = 'bug-result ok';
-      el.innerHTML = `<p class="bug-res-head">${ICON.ok}${copied}.</p>
-        <textarea class="bug-report-text" readonly>${escapeHtml(s.text)}</textarea>
-        <div class="bug-res-actions">${copy}${open}</div>`;
-    } else {
-      el.className = 'bug-result fail';
-      el.innerHTML = `<p class="bug-res-head">${ICON.warn}Файлы не загрузились: ${escapeHtml(s.error)}.</p>
-        <p>${copied}. Скачайте архив и приложите его к задаче вместе с текстом.</p>
-        <textarea class="bug-report-text" readonly>${escapeHtml(s.text)}</textarea>
-        <div class="bug-res-actions"><button class="bug-secondary small" data-bug="archive">${ICON.download}Архив</button>${copy}${open}</div>`;
-    }
+    el.className = 'bug-result fail';
+    el.innerHTML = `<p class="bug-res-head">${ICON.warn}Отчёт не отправился: ${reason(s.error)}.</p>
+      <p>${copied}. Можно отправить ещё раз или скачать архив и передать его вместе с текстом.</p>
+      <textarea class="bug-report-text" readonly>${escapeHtml(s.text)}</textarea>
+      <div class="bug-res-actions"><button class="bug-secondary small" data-bug="archive">${ICON.download}Архив</button>${copy}${open}</div>`;
   }
 
-  /** После отправки — короткое «спасибо»: картинка, что ушло на доску (галочками) и кнопка назад в игру. */
+  /**
+   * После отправки — короткое «спасибо»: картинка, номер задачи на доске (ссылкой), что из файлов дошло
+   * (галочками) и кнопка назад в игру. Файлы не загрузились — об этом строка и кнопка скачать архив.
+   */
   private showThanks(s: Sent): void {
+    const r = s.receipt!;
     const label: Record<AttachKind, string> = { shot: 'Снимок', journal: 'Журнал', save: 'Сохранение' };
     const icon: Record<AttachKind, string> = { shot: ICON.shot, journal: ICON.journal, save: ICON.save };
     const files = (s.uploaded ?? [])
-      .map((u) => `<a class="bug-thanks-file" href="${escapeHtml(u.url)}" target="_blank" rel="noopener" data-tip="Открыть на доске">${icon[u.kind]}${label[u.kind]}<i>${ICON.ok}</i></a>`)
+      .map((u) => `<a class="bug-thanks-file" href="${escapeHtml(u.url)}" target="_blank" rel="noopener" data-tip="Открыть файл">${icon[u.kind]}${label[u.kind]}<i>${ICON.ok}</i></a>`)
       .join('');
+    const name = r.number ? `Задача #${r.number}` : 'Задача';
+    const card = r.url
+      ? `<a class="bug-thanks-card" href="${escapeHtml(r.url)}" target="_blank" rel="noopener" data-tip="Открыть задачу на доске">${name}${ICON.link}</a>`
+      : `<b class="bug-thanks-card">${name}</b>`;
+    const lost = s.uploaded
+      ? ''
+      : `<p class="bug-thanks-lost">${ICON.warn}Файлы отчёта к задаче не приложились: ${reason(s.uploadError)}.</p>
+        <button class="bug-thanks-copy" data-bug="archive">${ICON.download}Скачать их архивом</button>`;
     this.thanks.innerHTML = `${thanksSvg()}
       <h2>Спасибо за отчёт!</h2>
-      <p>Файлы уже на доске задач — разберёмся, что пошло не так.</p>
-      <div class="bug-thanks-files">${files}</div>
-      <button class="bug-primary" data-bug="close">Вернуться в игру</button>
-      <button class="bug-thanks-copy" data-bug="copy">${ICON.copy}${s.copied ? 'Текст отчёта скопирован' : 'Скопировать текст отчёта'}</button>`;
+      <p>${card} на доске — разберёмся, что пошло не так.</p>
+      ${files ? `<div class="bug-thanks-files">${files}</div>` : ''}
+      ${lost}
+      <button class="bug-primary" data-bug="close">Вернуться в игру</button>`;
     this.thanks.classList.remove('hidden');
   }
 
@@ -1182,6 +1217,12 @@ async function copyText(text: string): Promise<boolean> {
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+}
+
+/** Причина отказа внутри фразы: без точки в конце (её ставит фраза) и с маленькой буквы. */
+function reason(message: string): string {
+  const s = message.trim().replace(/[.!]+$/, '');
+  return escapeHtml(s.charAt(0).toLowerCase() + s.slice(1));
 }
 
 /** Курсор над углом рамки: диагональ зависит от того, где противоположный угол. */

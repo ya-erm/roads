@@ -1,6 +1,7 @@
 /**
  * Баг-репорт: файлы отчёта (снимок с пометками, журнал партии, сохранение), загрузка их в публичный загрузчик
- * доски задач и текст отчёта в Markdown со ссылками. Без DOM: fetch передаётся снаружи — в тестах подделка.
+ * доски задач, текст отчёта в Markdown со ссылками и публичная отправка карточки на доску (внизу файла).
+ * Без DOM: fetch передаётся снаружи — в тестах подделка.
  *
  * Загрузчик доски (см. её /api/docs, раздел «Файлы и изображения»): POST ?action=create с манифестом файлов
  * и настройками сжатия → batch; затем каждый файл исходными байтами: POST ?batch=…&file=i → url и markdown.
@@ -184,20 +185,27 @@ export interface ReportFile {
 
 const FILE_LABEL: Record<AttachKind, string> = { shot: 'Снимок экрана', journal: 'журнал партии', save: 'сохранение' };
 
-/** Текст отчёта для карточки задачи (Markdown): кто, описание, снимок, файлы для воспроизведения и окружение. */
-export function reportMarkdown(info: ReportInfo, files: ReportFile[]): string {
+/**
+ * Текст отчёта (Markdown): кто, описание, снимок, файлы для воспроизведения и окружение. Файл без ссылки —
+ * «приложен файлом» (текст для ручной отправки и архива); unsent — в карточку на доске, где таких файлов нет:
+ * тогда о них одна строка «не загрузились на доску».
+ */
+export function reportMarkdown(info: ReportInfo, files: ReportFile[], opts: { unsent?: boolean } = {}): string {
   const shot = files.find((f) => f.kind === 'shot');
   const desc = info.description.trim() || (shot ? '_Без описания — смотрите снимок._' : '_Без описания._');
   const author = info.author?.trim();
   const parts = author ? [`**От:** ${author}`, desc] : [desc];
-  if (shot) parts.push(shot.url ? `![${FILE_LABEL.shot}](<${shot.url}>)` : `${FILE_LABEL.shot}: \`${shot.name}\` (приложен файлом)`);
-  const rest = files.filter((f) => f.kind !== 'shot');
+  const missing = opts.unsent ? files.filter((f) => !f.url) : [];
+  if (shot?.url) parts.push(`![${FILE_LABEL.shot}](<${shot.url}>)`);
+  else if (shot && !opts.unsent) parts.push(`${FILE_LABEL.shot}: \`${shot.name}\` (приложен файлом)`);
+  const rest = files.filter((f) => f.kind !== 'shot' && (f.url || !opts.unsent));
   if (rest.length) {
     const list = rest.map((f) => (f.url ? `[${FILE_LABEL[f.kind]}](<${f.url}>)` : `${FILE_LABEL[f.kind]} \`${f.name}\``)).join(' · ');
     const howTo = rest.some((f) => f.kind === 'save') ? ' — сохранение открывается через «Меню → Загрузить → Открыть из файла»' : '';
     const local = rest.some((f) => !f.url) ? ' (приложены файлами)' : '';
     parts.push(`**Для воспроизведения:** ${list}${local}${howTo}.`);
   }
+  if (missing.length) parts.push(`_Не загрузились на доску: ${missing.map((f) => FILE_LABEL[f.kind].toLowerCase()).join(', ')}._`);
   const env = [
     info.date,
     `seed ${info.seed}`,
@@ -224,4 +232,118 @@ export function sizeLabel(bytes: number): string {
   if (bytes < 1024) return `${bytes} Б`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`;
   return `${(bytes / 1024 / 1024).toFixed(1).replace('.', ',')} МБ`;
+}
+
+// ---------- Публичная отправка на доску ----------
+//
+// Доска (её /api/docs, раздел «Публичная отправка баг-репортов»): POST /api/boards/<slug>/tasks без токена и кук,
+// поля title, description (Markdown со ссылками на уже загруженные файлы), author, sourceKey. Ответ 201 —
+// квитанция {id, number, url}. Повтор с тем же sourceKey возвращает ту же квитанцию, новой задачи не создаёт.
+
+/** Пределы публичной отправки: название, описание (UTF-8), имя, ключ и весь JSON-запрос. */
+export const PUBLIC_LIMITS = { title: 160, description: 12 * 1024, author: 32, sourceKey: 160, request: 16 * 1024 };
+
+/** Что уходит на доску. */
+export interface BoardReport {
+  title: string;
+  description: string;
+  author?: string;
+  sourceKey: string;
+}
+
+/** Квитанция доски: id карточки, её номер и ссылка (открывается по обычным правилам входа на доску). */
+export interface Receipt {
+  id: string;
+  number?: number;
+  url?: string;
+}
+
+const utf8 = (s: string) => new TextEncoder().encode(s).length;
+
+/** Строка не длиннее max байт UTF-8 — без разрыва символа посередине. */
+export function cutBytes(s: string, max: number): string {
+  if (utf8(s) <= max) return s;
+  let out = '';
+  let size = 0;
+  for (const ch of s) {
+    const n = utf8(ch);
+    if (size + n > max) break;
+    out += ch;
+    size += n;
+  }
+  return out;
+}
+
+/** Ключ одного отчёта: повтор после сбоя сети с ним не создаст вторую карточку. */
+export function newReportKey(random: () => string = defaultRandom): string {
+  return `razvyazka-bug:${random()}`;
+}
+
+function defaultRandom(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+/** Название карточки — первая строка описания; описания нет — «Отчёт из игры» с датой партии. */
+export function reportTitle(info: ReportInfo): string {
+  const line = info.description
+    .split('\n')
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .find(Boolean);
+  if (!line) return `Отчёт из игры · ${info.date}`;
+  return line.length > 100 ? `${line.slice(0, 99).trimEnd()}…` : line;
+}
+
+/**
+ * Отчёт для публичной отправки: имя — отдельным полем (доска подпишет «Гость: имя»), описание — Markdown с
+ * ссылками на загруженные файлы и строкой о незагруженных. Длинное описание обрезается, чтобы уложиться
+ * в пределы доски (описание ≤ 12 КиБ, весь запрос ≤ 16 КиБ).
+ */
+export function boardReport(info: ReportInfo, files: ReportFile[], sourceKey: string): BoardReport {
+  const title = reportTitle(info).slice(0, PUBLIC_LIMITS.title);
+  const name = info.author?.replace(/\s+/g, ' ').trim().slice(0, PUBLIC_LIMITS.author).trim();
+  const head = { title, ...(name ? { author: name } : {}), sourceKey: sourceKey.slice(0, PUBLIC_LIMITS.sourceKey) };
+  let text = info.description;
+  let description = '';
+  for (let i = 0; i < 5; i++) {
+    description = reportMarkdown({ ...info, author: undefined, description: text }, files, { unsent: true });
+    const over = Math.max(utf8(description) - PUBLIC_LIMITS.description, utf8(JSON.stringify({ ...head, description })) - (PUBLIC_LIMITS.request - 256));
+    if (over <= 0) return { ...head, description };
+    text = `${cutBytes(text, Math.max(0, utf8(text) - over - 96))}…\n\n_(описание обрезано)_`;
+  }
+  return { ...head, description: cutBytes(description, PUBLIC_LIMITS.description / 2) };
+}
+
+/** Адрес публичной отправки: POST /api/boards/<slug>/tasks. */
+export function submitUrl(base = BUG_REPORT.boardBase, slug = BUG_REPORT.boardSlug): string {
+  return `${base.replace(/\/+$/, '')}/api/boards/${encodeURIComponent(slug)}/tasks`;
+}
+
+/** Квитанция из ответа: id обязателен, номер и ссылка — если есть. */
+export function parseReceipt(json: Json): Receipt {
+  const id = json.id;
+  if (typeof id !== 'string' && typeof id !== 'number') throw new UploadError('Доска не вернула номер задачи');
+  return {
+    id: String(id),
+    ...(typeof json.number === 'number' ? { number: json.number } : {}),
+    ...(typeof json.url === 'string' ? { url: json.url } : {}),
+  };
+}
+
+/**
+ * Создаёт карточку отчёта на доске — без токена и кук. Частые отправки доска ограничивает (429 с Retry-After),
+ * выключенная публичная отправка — отказ с её объяснением; сеть недоступна — fetch бросает TypeError.
+ */
+export async function submitReport(report: BoardReport, opts: { fetch: typeof fetch; url?: string }): Promise<Receipt> {
+  const r = await opts.fetch(opts.url ?? submitUrl(), {
+    method: 'POST',
+    credentials: 'omit',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(report),
+  });
+  if (r.status === 429) {
+    const wait = Number(r.headers.get('Retry-After'));
+    throw new UploadError(wait > 0 ? `слишком много отчётов подряд — попробуйте через ${Math.ceil(wait)} с` : 'слишком много отчётов подряд — попробуйте позже', 429);
+  }
+  if (r.status === 413) throw new UploadError('отчёт слишком большой', 413);
+  return parseReceipt(await readJson(r));
 }

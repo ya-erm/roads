@@ -3,10 +3,18 @@ import { BUG_REPORT } from '../config';
 import {
   attachmentNames,
   batchId,
+  boardReport,
   boardUrl,
   buildLabel,
+  cutBytes,
   localStamp,
+  newReportKey,
+  parseReceipt,
   parseUploaded,
+  PUBLIC_LIMITS,
+  reportTitle,
+  submitReport,
+  submitUrl,
   reportMarkdown,
   sizeLabel,
   uploadAttachments,
@@ -160,5 +168,100 @@ describe('Текст отчёта', () => {
     expect(sizeLabel(900)).toBe('900 Б');
     expect(sizeLabel(12_300)).toBe('12 КБ');
     expect(sizeLabel(1_468_006)).toBe('1,4 МБ');
+  });
+});
+
+describe('Публичная отправка на доску', () => {
+  const info: ReportInfo = {
+    description: '  Автобус встал на перекрёстке  \nи не уезжает',
+    author: '  Ярослав  ',
+    at: new Date(2026, 10, 6, 18, 0, 0),
+    build: 'dev',
+    saveVersion: 3,
+    date: 'Мар 2001',
+    seed: 7,
+    screen: { width: 1440, height: 900, dpr: 1 },
+    page: 'https://roads.ya-erm.ru/',
+    userAgent: 'Chrome',
+  };
+  const utf8 = (s: string) => new TextEncoder().encode(s).length;
+
+  it('имя — отдельным полем, название — первая строка; файлы с доски — ссылками, не загрузившиеся — строкой', () => {
+    const r = boardReport(
+      info,
+      [
+        { kind: 'shot', name: 'a.png' },
+        { kind: 'journal', name: 'j', url: 'https://b/j.jsonl.gz' },
+        { kind: 'save', name: 's' },
+      ],
+      'razvyazka-bug:k1',
+    );
+    expect(r.title).toBe('Автобус встал на перекрёстке');
+    expect(r.author).toBe('Ярослав');
+    expect(r.sourceKey).toBe('razvyazka-bug:k1');
+    expect(r.description).not.toContain('От:');
+    expect(r.description).toContain('[журнал партии](<https://b/j.jsonl.gz>)');
+    expect(r.description).toContain('_Не загрузились на доску: снимок экрана, сохранение._');
+    expect(r.description).not.toContain('приложен');
+    expect(r.description).not.toContain('a.png');
+    // На доску уходят только разрешённые поля.
+    expect(Object.keys(r).sort()).toEqual(['author', 'description', 'sourceKey', 'title']);
+  });
+
+  it('пределы доски: имя до 32 символов, длинное название — с многоточием, без имени — поля нет', () => {
+    const r = boardReport({ ...info, author: 'Я'.repeat(50), description: 'Слово '.repeat(60) }, [], 'k');
+    expect(r.author).toHaveLength(PUBLIC_LIMITS.author);
+    expect(r.title.length).toBeLessThanOrEqual(100);
+    expect(r.title.endsWith('…')).toBe(true);
+    expect(boardReport({ ...info, author: '   ' }, [], 'k')).not.toHaveProperty('author');
+    expect(reportTitle({ ...info, description: ' \n ' })).toBe('Отчёт из игры · Мар 2001');
+  });
+
+  it('огромное описание обрезается: описание ≤ 12 КиБ, весь запрос ≤ 16 КиБ — и с переносами строк', () => {
+    for (const text of ['Ж'.repeat(20_000), 'в\n'.repeat(6_000), 'a\n'.repeat(9_000)]) {
+      const r = boardReport({ ...info, description: text }, [{ kind: 'journal', name: 'j', url: 'https://b/j' }], 'k');
+      expect(utf8(r.description)).toBeLessThanOrEqual(PUBLIC_LIMITS.description);
+      expect(utf8(JSON.stringify(r))).toBeLessThanOrEqual(PUBLIC_LIMITS.request);
+      expect(r.description).toContain('описание обрезано');
+      // Ссылки и окружение не теряются.
+      expect(r.description).toContain('[журнал партии](<https://b/j>)');
+      expect(r.description).toContain('seed 7');
+    }
+    expect(cutBytes('ёжик', 5)).toBe('ёж');
+    expect(cutBytes('abc', 10)).toBe('abc');
+  });
+
+  it('ключ отчёта и адрес — публичный маршрут доски без токена', () => {
+    expect(newReportKey(() => 'uuid')).toBe('razvyazka-bug:uuid');
+    expect(newReportKey()).not.toBe(newReportKey());
+    expect(submitUrl()).toBe(`${BUG_REPORT.boardBase}/api/boards/${BUG_REPORT.boardSlug}/tasks`);
+    expect(submitUrl('https://x/', 'my board')).toBe('https://x/api/boards/my%20board/tasks');
+  });
+
+  it('отправка: POST без кук и авторизации, ответ — квитанция {id, number, url}', async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return new Response(JSON.stringify({ id: 'task-1', number: 42, url: 'https://board/b/roads/tasks/?task=task-1' }), { status: 201 });
+    }) as unknown as typeof globalThis.fetch;
+    const report = boardReport(info, [], 'k-1');
+    const receipt = await submitReport(report, { fetch, url: 'https://board/api/boards/roads/tasks' });
+    expect(receipt).toEqual({ id: 'task-1', number: 42, url: 'https://board/b/roads/tasks/?task=task-1' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.method).toBe('POST');
+    expect(calls[0].init.credentials).toBe('omit');
+    expect(JSON.stringify(calls[0].init.headers)).not.toMatch(/authorization/i);
+    expect(JSON.parse(String(calls[0].init.body))).toEqual(report);
+  });
+
+  it('отказы доски — понятные ошибки: частые отправки (Retry-After), выключено, слишком большой', async () => {
+    const reply = (status: number, body: object = {}, headers: Record<string, string> = {}) =>
+      (async () => new Response(JSON.stringify(body), { status, headers })) as unknown as typeof globalThis.fetch;
+    const report = boardReport(info, [], 'k');
+    await expect(submitReport(report, { fetch: reply(429, {}, { 'Retry-After': '30' }) })).rejects.toMatchObject({ status: 429, message: expect.stringContaining('30 с') });
+    await expect(submitReport(report, { fetch: reply(401, { error: 'Требуется вход' }) })).rejects.toThrow('Требуется вход');
+    await expect(submitReport(report, { fetch: reply(413) })).rejects.toMatchObject({ status: 413 });
+    await expect(submitReport(report, { fetch: reply(201, { ok: true }) })).rejects.toThrow('номер задачи');
+    expect(parseReceipt({ id: 5 })).toEqual({ id: '5' });
   });
 });
