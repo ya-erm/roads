@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { KMH_PER_UNIT } from '../world/roadTypes';
 import { GLane, LaneGraph } from './graph';
 import { LaneNet, oneWay, twoWay } from './model';
-import { laneKmhAt, signKmh, speedsAt, speedsUnder } from './speedHover';
+import { laneKmhAt, signKmh, speedsAt, speedsUnder, speedText } from './speedHover';
 import { buildLaneProfile, LaneProfile } from './speedProfile';
 
 const EAST = { x: 1, y: 0 };
@@ -28,50 +28,42 @@ describe('Скорость у курсора на карте скоростей'
     expect(signKmh(60, 4)).toBe(10);
   });
 
-  it('прямая дорога в обе стороны — одно число без стрелки, её разрешённая скорость', () => {
+  it('прямая дорога в обе стороны — одно число, её разрешённая скорость', () => {
     const { c, graph } = avenue();
-    for (const lat of [5, -5, 0]) expect(speedsAt(graph, profileOf(graph), c, 200, lat)).toEqual([{ kmh: 60, dir: null }]);
+    for (const lat of [5, -5, 0]) expect(speedsAt(graph, profileOf(graph), c, 200, lat)).toEqual([60]);
     // Своё ограничение дороги — оно.
     const slow = avenue(30);
-    expect(speedsAt(slow.graph, profileOf(slow.graph), slow.c, 200, 5)).toEqual([{ kmh: 30, dir: null }]);
+    expect(speedsAt(slow.graph, profileOf(slow.graph), slow.c, 200, 5)).toEqual([30]);
   });
 
   it('односторонняя — одно число', () => {
     const net = new LaneNet();
     const c = net.addCorridor(net.addSeam({ x: 0, y: 0 }, EAST).id, net.addSeam({ x: 300, y: 0 }, EAST).id, { cls: 'street', lanes: oneWay(2) });
     const graph = new LaneGraph(net);
-    expect(speedsAt(graph, profileOf(graph), c, 150, 2)).toEqual([{ kmh: 40, dir: null }]);
+    expect(speedsAt(graph, profileOf(graph), c, 150, 2)).toEqual([40]);
   });
 
-  it('на крутом повороте — сниженная там, где курсор; на прямых концах — разрешённая', () => {
+  it('на крутом повороте — сниженная, одна для обоих направлений', () => {
     // Шоссе (90 км/ч) поворачивает на 90° на коротком отрезке — радиус около 50 м.
     const net = new LaneNet();
     const c = net.addCorridor(net.addSeam({ x: 0, y: 0 }, EAST).id, net.addSeam({ x: 60, y: 60 }, SOUTH).id, { cls: 'highway', lanes: twoWay(1, 1) });
     const graph = new LaneGraph(net);
-    const prof = profileOf(graph);
-    const [mid] = speedsAt(graph, prof, c, c.length / 2, 2);
-    expect(mid.kmh).toBeLessThan(90);
-    expect(mid.kmh % 10).toBe(0);
-    // Тот же изгиб для обоих направлений — одно число.
-    expect(mid.dir).toBeNull();
+    const at = speedsAt(graph, profileOf(graph), c, c.length / 2, 2);
+    expect(at).toHaveLength(1);
+    expect(at[0]).toBeLessThan(90);
+    expect(at[0] % 10).toBe(0);
   });
 
-  it('по направлениям разная — обе, со стрелками по ходу; первой — та, на чьей полосе курсор', () => {
+  it('по направлениям разная — обе; первой — та, на чьей полосе курсор', () => {
     const { c, graph } = avenue();
     // Встречным (flow −1) поворот где-то впереди снижает скорость до 25 км/ч — тут, у курсора, тоже.
     const prof = (lane: GLane): LaneProfile => {
       const p = buildLaneProfile(graph, lane, null);
       return graph.links.get(lane.link)!.flow > 0 ? p : { ...p, c: p.c.map(() => 25 / KMH_PER_UNIT) };
     };
-    // Курсор на попутной полосе (справа от оси по a→b): сначала она — на восток, потом встречная — на запад.
-    const right = speedsAt(graph, prof, c, 200, 6);
-    expect(right.map((r) => r.kmh)).toEqual([60, 20]);
-    expect(right[0].dir!.x).toBeCloseTo(1);
-    expect(right[1].dir!.x).toBeCloseTo(-1);
-    // На встречной — наоборот.
-    const left = speedsAt(graph, prof, c, 200, -6);
-    expect(left.map((r) => r.kmh)).toEqual([20, 60]);
-    expect(left[0].dir!.x).toBeCloseTo(-1);
+    // Курсор на попутной полосе (справа от оси по a→b) — сначала её скорость, на встречной — наоборот.
+    expect(speedsAt(graph, prof, c, 200, 6)).toEqual([60, 20]);
+    expect(speedsAt(graph, prof, c, 200, -6)).toEqual([20, 60]);
   });
 
   it('скорость полосы — у шага профиля, в который попал курсор (как цвет карты)', () => {
@@ -89,8 +81,14 @@ describe('Скорость у курсора на карте скоростей'
 
   it('под точкой: на асфальте — скорость дороги, рядом с дорогой — ничего', () => {
     const { graph } = avenue(80);
-    expect(speedsUnder(graph, profileOf(graph), { x: 150, y: 4 })).toEqual([{ kmh: 80, dir: null }]);
+    expect(speedsUnder(graph, profileOf(graph), { x: 150, y: 4 })).toEqual([80]);
     expect(speedsUnder(graph, profileOf(graph), { x: 150, y: 40 })).toEqual([]);
     expect(speedsUnder(graph, profileOf(graph), { x: 600, y: 0 })).toEqual([]);
+  });
+
+  it('подпись: одно число или по направлениям через косую черту; не на дороге — нет', () => {
+    expect(speedText([90])).toBe('90 км/ч');
+    expect(speedText([80, 90])).toBe('80 / 90 км/ч');
+    expect(speedText([])).toBeNull();
   });
 });

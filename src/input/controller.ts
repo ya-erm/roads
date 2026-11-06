@@ -18,7 +18,7 @@ import { taperLen } from '../lanes/model';
 import { type Fragment, fragmentCurves, frameOf, snapPaste } from '../lanes/fragment';
 import type { Camera } from '../render/camera';
 import { curveSpeed } from '../lanes/speedProfile';
-import { speedsUnder } from '../lanes/speedHover';
+import { speedsUnder, speedText } from '../lanes/speedHover';
 import { laneSpeed } from '../lanes/graph';
 import { GRADE } from '../config';
 import { profileText, type ProfileSummary } from '../game/grade';
@@ -3250,8 +3250,8 @@ export class Controller {
           const t = g.townOf(st);
           if (t) o.label = { text: t.name, ok: true };
         }
-        // Карта скоростей включена: дорога под курсором — её скорость знаком у курсора.
-        else if (this.speedmap) o.speedHover = speedsUnder(g.roads.graph, (lane) => g.traffic.profile(lane), p);
+        // Карта скоростей включена: дорога под курсором — её скорость подписью у курсора, как высота.
+        else if (this.speedmap) o.speedText = speedText(speedsUnder(g.roads.graph, (lane) => g.traffic.profile(lane), p));
         break;
       }
     }
