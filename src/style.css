@@ -1148,6 +1148,19 @@ button.icon.toggle-spacing {
   line-height: 1;
 }
 
+/* Темп маршрута в карточке (ui/linePace.ts): по грузам — значок и «12/мин». */
+.kv b .lp {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.kv b .lp + .lp {
+  margin-left: 8px;
+}
+
 .veh small .neg {
   color: #d64541;
 }
@@ -4460,21 +4473,27 @@ button.small.with-ic {
   margin: 2px 0 0;
 }
 
-.sc-obj.contract .sc-bar > div {
-  background: #c4662f;
+/* Цвет заполненной части шкалы задания — переменной: прогноз за ней — тот же цвет, только полупрозрачный. */
+.sc-bar > div {
+  background: var(--sc-fill, var(--accent));
 }
 
-.sc-obj.done .sc-bar > div {
-  background: #3fae6a;
+.sc-obj.contract {
+  --sc-fill: #c4662f;
 }
 
-.sc-obj.failed .sc-bar > div {
-  background: var(--danger);
+.sc-obj.done {
+  --sc-fill: #3fae6a;
+}
+
+.sc-obj.failed {
+  --sc-fill: var(--danger);
 }
 
 /*
- * Прогноз к сроку (scenario/forecast.ts): за выполненной частью шкалы — полупрозрачная синяя до прогноза,
- * успеваем — до конца шкалы и ✓ за ней. Шкала тонкая — подсказку ловит полоса повыше (sc-track).
+ * Прогноз к сроку (scenario/forecast.ts): за выполненной частью шкалы — полупрозрачная того же цвета до прогноза,
+ * успеваем — до конца шкалы и приглушённая ✓ за ней (это не наверняка). Шкала тонкая — подсказку ловит полоса
+ * повыше (sc-track).
  */
 .sc-track {
   display: flex;
@@ -4497,8 +4516,8 @@ button.small.with-ic {
 .sc-bar > .sc-fc {
   flex: none;
   height: 100%;
-  background: rgba(47, 128, 237, 0.32);
-  box-shadow: inset -2px 0 0 rgba(47, 128, 237, 0.55);
+  background: color-mix(in srgb, var(--sc-fill, var(--accent)) 32%, transparent);
+  box-shadow: inset -2px 0 0 color-mix(in srgb, var(--sc-fill, var(--accent)) 55%, transparent);
 }
 
 .sc-fc-ok {
@@ -4508,8 +4527,8 @@ button.small.with-ic {
   width: 13px;
   height: 13px;
   border-radius: 50%;
-  background: #2e9d57;
-  color: #fff;
+  background: color-mix(in srgb, var(--sc-fill, var(--accent)) 22%, transparent);
+  color: color-mix(in srgb, var(--sc-fill, var(--accent)) 75%, transparent);
   font-size: 9px;
   font-weight: 800;
   line-height: 1;

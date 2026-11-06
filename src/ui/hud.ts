@@ -48,6 +48,7 @@ import { cargoIcon, townIcon } from './cargoIcons';
 import { fleetBar, fleetBarRoom } from './fleetBar';
 import { type LineBack, lineBackFrom, lineCloseTarget } from './lineBack';
 import { lineMoneyHtml } from './lineMoney';
+import { linePaceHtml } from './linePace';
 import { stopFoldHtml, stopPlaceHtml, toggleStop } from './routeStop';
 import { chartHoverAt, distLabel, speedChartSvg, speedTipHtml } from './speedChartSvg';
 import { travelTimeText } from './travelTime';
@@ -2506,6 +2507,7 @@ export class Hud {
         .join('')}
       <div class="kv">${lineMoneyHtml(line, this.lineMoneyOpen)}
         <span>Перевезено</span><b>${line.carriedLast}</b>
+        ${linePaceHtml(g, line)}
         <span>Загрузка рейсов</span><b>${line.loadLast === undefined || line.loadLast === null ? '—' : `${Math.round(line.loadLast * 100)}%`}</b>
         ${speed ? speed.row : ''}
         ${travel}

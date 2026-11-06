@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { clockText, durationText } from '../core/timeText';
 import { Game } from '../game/game';
+import { freightRoute, withoutCitizens } from '../game/testkit';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { briefHtml, isFolded, offerBannerHtml, offersPanelHtml, scenarioPanelHtml, toggleFold, type PanelView } from './scenarioUi';
 
@@ -160,47 +161,62 @@ describe('Шкала месячной цели в панели сценария'
 });
 
 describe('Прогноз к сроку на шкале задания', () => {
-  /** Задание «привезти» и rate ед. каждые 10 с этого груза получателю, пока не пройдёт seconds секунд игры. */
-  function delivering(amount: number, rate: number, seconds: number) {
-    const { game, sc } = scenarioWithOffers();
-    const town = game.towns.find((t) => t.demands.length)!;
-    const cargo = town.demands[0];
-    const to = { type: 'town' as const, id: town.id };
-    const o = sc.addObjective({ kind: 'deliver', cargo, amount, to }, { role: 'contract', phase: null, months: 8, why: 'Проверка прогноза.', reward: { money: 1000 } });
+  /** Сценарий с грузовым маршрутом ферма → пищекомбинат и контракт на amount ед. груза пищекомбинату за months мин. */
+  function contract(amount: number, months = 8) {
+    const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 5, scenario: { difficulty: 'easy', challenge: false } }));
+    const sc = game.scenario!;
+    const route = freightRoute(game);
+    const o = sc.addObjective(
+      { kind: 'deliver', cargo: route.from.info.produces, amount, to: { type: 'industry', id: route.to.id } },
+      { role: 'contract', phase: null, months, why: 'Проверка прогноза.', reward: { money: 1000 } },
+    );
     const row = () => {
       const html = scenarioPanelHtml(game, view());
       return html.slice(html.indexOf(`data-id="${o.id}"`));
     };
-    const first = row();
-    while (game.time < seconds) {
+    /** Купить грузовики и перейти к следующей секунде игры — прогноз пересчитывается раз в секунду. */
+    const buy = (n: number) => {
+      for (let i = 0; i < n; i++) game.buyVehicle(route.line.id, 'truck');
       game.time += 1;
-      if (Math.round(game.time) % 10 === 0) sc.onDelivered(cargo, rate, to, 1);
-      sc.tick(1);
-    }
-    return { o, first, row };
+    };
+    return { game, o, row, buy };
   }
 
-  it('за выполненной частью — полупрозрачная синяя до прогноза, в подсказке — прогноз и темп', () => {
-    const { o, first, row } = delivering(3000, 50, 120);
-    // В первую минуту прогноза нет — обычная шкала.
-    expect(first).not.toContain('sc-fc');
-    expect(o.progress).toBe(600);
+  it('линий нет — полупрозрачной части нет, подсказка: возить пока некому', () => {
+    const { row } = contract(500);
     const html = row();
-    expect(html).toContain('style="width:20.0%"></div><i class="sc-fc"');
-    expect(html).toMatch(/<div class="sc-track" data-tip="Прогноз к сроку: ~[\d\s]+ \(темп \d+ в мин\)\. Чтобы успеть — \d+ в мин">/);
+    expect(html).not.toContain('class="sc-fc"');
+    expect(html).toContain('data-tip="Прогноз к сроку: ~0 — возить пока некому"');
+  });
+
+  it('купили грузовик — прогноз сразу, до первой доставки: полупрозрачная часть и когда первая доставка', () => {
+    const { o, row, buy } = contract(5000);
+    buy(1);
+    const html = row();
+    expect(o.progress).toBe(0);
+    expect(html).toContain('style="width:0.0%"></div><i class="sc-fc"');
+    expect(html).toMatch(/<div class="sc-track" data-tip="Прогноз к сроку: ~[\d\s]+ · первая доставка через ~\d+ (сек|мин)">/);
     expect(html.slice(0, html.indexOf('sc-meta'))).not.toContain('sc-fc-ok');
-    // В свёрнутом виде — та же шкала с прогнозом.
+    // Ещё грузовики — прогноз больше; в свёрнутом виде — та же шкала.
+    const width = (h: string) => Number(/class="sc-fc" style="width:([\d.]+)%"/.exec(h)![1]);
+    buy(2);
+    expect(width(row())).toBeGreaterThan(width(html));
     toggleFold(o);
     expect(row()).toContain('<i class="sc-fc"');
   });
 
-  it('прогноз выше цели — синяя до конца шкалы и ✓ «успеваем»', () => {
-    const { row } = delivering(1000, 50, 120);
+  it('прогноз выше цели — до конца шкалы и приглушённая ✓ «успеваем»; срок раньше первой доставки — «не успеют»', () => {
+    const { row, buy } = contract(30);
+    buy(3);
     const html = row();
-    // 600 из 1 000 — 60%, дальше до конца — прогноз.
-    expect(html).toContain('style="width:60.0%"></div><i class="sc-fc" style="width:40.0%"></i>');
-    expect(html).toMatch(/data-tip="Прогноз к сроку: ~[\d\s]+ \(темп \d+ в мин\) — успеваем"/);
+    expect(html).toContain('<i class="sc-fc" style="width:100.0%"></i>');
+    expect(html).toMatch(/data-tip="Прогноз к сроку: ~[\d\s]+ · первая доставка через ~\d+ (сек|мин) — успеваем"/);
     expect(html).toContain('<span class="sc-fc-ok">✓</span>');
+    // Срок через полсекунды — первая машина не доедет.
+    const late = contract(30, 1);
+    late.buy(1);
+    late.game.time = MONTH_LENGTH - 0.5;
+    expect(late.row()).toContain('data-tip="Прогноз к сроку: ~0 — машины не успеют доехать до срока"');
   });
 });
 
