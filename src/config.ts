@@ -25,7 +25,13 @@ export const MONTH_LENGTH = 120;
  * а календарь идёт медленнее — рейс в пару километров занимает около месяца, а не четыре.
  */
 export const MONTH_SCALE = MONTH_LENGTH / 40;
-export const START_YEAR = 1960;
+/**
+ * Год начала новой партии. Год партии хранится в сохранении (SaveData.startYear): загруженная партия идёт
+ * по своему календарю, а модели транспорта выходят через столько же лет от её начала (MODELS[…].debut).
+ */
+export const START_YEAR = 2000;
+/** С какого года шли партии до SaveData.startYear: старые сохранения открываются с ним. */
+export const LEGACY_START_YEAR = 1960;
 
 export const COST = {
   trafficLight: 4000,

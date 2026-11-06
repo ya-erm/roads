@@ -5,6 +5,7 @@ import {
   ECONOMY,
   GRADE,
   IDM,
+  LEGACY_START_YEAR,
   MIN_SEGMENT_LEN,
   MONTH_LENGTH,
   MONTH_SCALE,
@@ -349,6 +350,8 @@ export interface SaveData {
   savedAt: number;
   rng: number;
   time: number;
+  /** Год начала партии; month считается от него. В старых сохранениях нет — LEGACY_START_YEAR. */
+  startYear?: number;
   month: number;
   money: number;
   incomeMonth: number;
@@ -537,6 +540,8 @@ export class Game implements BuildContext {
    * остаётся открытой, если после сценария играть дальше в песочнице. Помимо неё модели выходят по годам.
    */
   modelTier: ModelTier = 1;
+  /** Год начала партии: у новой — START_YEAR, у загруженной — из сохранения (в старых нет — LEGACY_START_YEAR). */
+  readonly startYear: number;
 
   readonly settings: WorldSettings;
   /** Журнал партии для разбора: действия, рейсы, сводки, задания и события. */
@@ -547,6 +552,7 @@ export class Game implements BuildContext {
   constructor(setup: WorldSettings | number, save?: SaveData) {
     // Сценарий решает архетип по seed ещё до генерации карты: от него зависят города и предприятия.
     this.settings = prepareSettings(typeof setup === 'number' ? { ...DEFAULT_SETTINGS, seed: setup } : setup);
+    this.startYear = save ? (save.startYear ?? LEGACY_START_YEAR) : START_YEAR;
     this.journal = new Journal(() => this.time / MONTH_LENGTH, save?.journal);
     this.timelapse = new TimelapseRecorder(save?.timelapse);
     this.rng = new Rng(this.settings.seed);
@@ -609,6 +615,7 @@ export class Game implements BuildContext {
       savedAt: Date.now(),
       rng: this.rng.seedState,
       time: this.time,
+      startYear: this.startYear,
       month: this.month,
       money: this.money,
       incomeMonth: this.incomeMonth,
@@ -2182,8 +2189,12 @@ export class Game implements BuildContext {
   // ---------- Время ----------
 
   get dateLabel(): string {
-    const m = this.month % 12;
-    return `${MONTHS[m]} ${START_YEAR + Math.floor(this.month / 12)}`;
+    return this.dateAt(this.month);
+  }
+
+  /** Дата месяца партии с этим номером (0 — первый): «Мар 2003». */
+  dateAt(month: number): string {
+    return `${MONTHS[month % 12]} ${this.startYear + Math.floor(month / 12)}`;
   }
 
   /** Номер текущего месяца с начала партии — единое время дедлайнов сценария. */
@@ -2193,7 +2204,12 @@ export class Game implements BuildContext {
 
   /** Текущий игровой год. */
   get year(): number {
-    return START_YEAR + Math.floor(this.month / 12);
+    return this.startYear + Math.floor(this.month / 12);
+  }
+
+  /** В каком году партии модель появляется в продаже (без учёта ступеней сценария). */
+  modelYear(id: ModelId): number {
+    return this.startYear + MODELS[id].debut;
   }
 
   /** Содержание в месяц: у поезда растёт с длиной состава. */
@@ -2261,7 +2277,7 @@ export class Game implements BuildContext {
   }
 
   /** Продаётся ли модель: вышла по году или её ступень уже открыта (в сценарии — этапом). */
-  readonly modelOpen = (id: ModelId): boolean => MODELS[id].year <= this.year || MODELS[id].tier <= this.modelTier;
+  readonly modelOpen = (id: ModelId): boolean => this.modelYear(id) <= this.year || MODELS[id].tier <= this.modelTier;
 
   /**
    * Открывает ступень моделей (сценарий — с новым этапом): заметка о каждой новой модели, которая ещё
@@ -2389,7 +2405,7 @@ export class Game implements BuildContext {
       // Новый год — новые модели в продаже.
       if (this.year !== yearBefore) {
         for (const m of Object.values(MODELS)) {
-          if (m.year === this.year && m.tier > this.modelTier) this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
+          if (this.modelYear(m.id) === this.year && m.tier > this.modelTier) this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
         }
       }
     }

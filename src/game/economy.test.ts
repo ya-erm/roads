@@ -121,20 +121,20 @@ describe('Экономика', { timeout: 60_000 }, () => {
     const game = r.game;
     const line = [...game.lines.values()][0];
     const v = game.fleet.get(line.vehicles[0])!;
-    expect(game.year).toBe(1960);
-    expect(modelsFor('road', game.year)).toEqual(['truck', 'bus']);
+    expect(game.year).toBe(2000);
+    expect(modelsFor('road', game.modelOpen)).toEqual(['truck', 'bus']);
     expect(game.buyVehicle(line.id, 'truck3')).toBeNull();
     expect(game.replacementFor(v)).toBeNull();
-    // Эпохи сжаты втрое (месяц втрое длиннее): «Грузовик II» — в 1964-м, «Фура» — в 1969-м.
-    expect(MODELS.truck2.year).toBe(1964);
-    expect(MODELS.truck3.year).toBe(1969);
+    // Эпохи сжаты втрое (месяц втрое длиннее): «Грузовик II» — через 4 года после начала, «Фура» — через 9.
+    expect(game.modelYear('truck2')).toBe(2004);
+    expect(game.modelYear('truck3')).toBe(2009);
     (game as unknown as { month: number }).month = 4 * 12;
-    expect(modelsFor('road', game.year)).toContain('truck2');
+    expect(modelsFor('road', game.modelOpen)).toContain('truck2');
     expect(game.replacementFor(v)).toBe('truck2');
     // Прошло 9 лет: есть «Фура» — её предлагают взамен, содержание старого не растёт.
     (game as unknown as { month: number }).month = 9 * 12;
-    expect(game.year).toBe(1969);
-    expect(modelsFor('road', game.year)).toContain('truck3');
+    expect(game.year).toBe(2009);
+    expect(modelsFor('road', game.modelOpen)).toContain('truck3');
     expect(game.runningCost(v)).toBe(MODELS.truck.running);
     expect(game.replacementFor(v)).toBe('truck3');
     const fresh = game.replaceVehicle(v.id)!;

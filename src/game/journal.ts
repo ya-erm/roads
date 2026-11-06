@@ -88,6 +88,8 @@ export function journalFile(game: Game): string {
     exported: new Date().toISOString(),
     date: game.dateLabel,
     month: game.monthIndex,
+    /** Год начала партии: month в записях — от него. */
+    startYear: game.startYear,
     monthSeconds: MONTH_LENGTH,
     seed: s.seed,
     settings: s,

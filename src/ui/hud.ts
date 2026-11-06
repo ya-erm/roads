@@ -2545,8 +2545,8 @@ export class Hud {
       .sort((a, b) => MODELS[a].tier - MODELS[b].tier)[0];
     if (!next) return '';
     const m = MODELS[next];
-    const when = g.scenario?.running ? `этап ${'ABC'[m.tier - 1]}` : `с ${m.year} г.`;
-    const tip = g.scenario?.running ? `Откроется на этапе ${'ABC'[m.tier - 1]} сценария` : `Появится в продаже в ${m.year} году`;
+    const when = g.scenario?.running ? `этап ${'ABC'[m.tier - 1]}` : `с ${g.modelYear(next)} г.`;
+    const tip = g.scenario?.running ? `Откроется на этапе ${'ABC'[m.tier - 1]} сценария` : `Появится в продаже в ${g.modelYear(next)} году`;
     // Карточка последняя в ряду, у края панели — подсказка выровнена по правому краю.
     return `<div class="buy-card locked" data-tip-end data-tip="${tip} · вместимость ${m.capacity} · ${money(m.price)}">
       ${modelSvg(next, '#aab3bc')}<span>🔒 ${m.name}</span><small>${when}</small></div>`;

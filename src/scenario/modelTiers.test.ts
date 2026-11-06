@@ -31,8 +31,8 @@ describe('Модели транспорта в сценарии', () => {
     advance(game);
     expect(game.modelTier).toBe(3);
     for (const id of ['truck3', 'bus3', 'passengerTrain2'] as const) expect(game.modelOpen(id)).toBe(true);
-    // Год всё ещё 1960 — открыли этапы, а не календарь.
-    expect(game.year).toBe(1960);
+    // Год всё ещё первый — открыли этапы, а не календарь.
+    expect(game.year).toBe(game.startYear);
   });
 
   it('ступень сохраняется; старое сохранение без неё — по этапу сценария', () => {
@@ -48,7 +48,7 @@ describe('Модели транспорта в сценарии', () => {
   it('в песочнице модели выходят по годам', () => {
     const game = new Game({ ...DEFAULT_SETTINGS, seed: 7 });
     expect(game.modelOpen('truck2')).toBe(false);
-    (game as unknown as { month: number }).month = (MODELS.truck2.year - 1960) * 12;
+    (game as unknown as { month: number }).month = MODELS.truck2.debut * 12;
     expect(game.modelOpen('truck2')).toBe(true);
     expect(game.modelOpen('truck3')).toBe(false);
   });

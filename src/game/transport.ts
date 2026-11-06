@@ -1,4 +1,4 @@
-import { MONTH_SCALE, START_YEAR } from '../config';
+import { MONTH_SCALE } from '../config';
 import { clamp } from '../core/math';
 import { add, cubicBezier, dist, dot, norm, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { TrainSpec } from '../sim/rail';
@@ -30,8 +30,11 @@ interface ModelBase {
   price: number;
   /** Расходы на содержание в месяц. */
   running: number;
-  /** С какого года модель продаётся. */
-  year: number;
+  /**
+   * Через сколько лет от начала партии модель появляется в продаже (0 — с начала). Отсчёт — от года начала
+   * этой партии (Game.startYear): у новой — START_YEAR, у старых сохранений — LEGACY_START_YEAR (Game.modelYear).
+   */
+  debut: number;
   /** Ступень модели: 1 — с начала игры, 2 и 3 — новее. В сценарии ступени открывают этапы B и C. */
   tier: ModelTier;
 }
@@ -39,10 +42,11 @@ interface ModelBase {
 export type ModelTier = 1 | 2 | 3;
 
 /**
- * Год выхода модели в игре по году её эпохи: месяц длится втрое дольше прежнего (MONTH_SCALE), поэтому
- * отрезок от начала игры сжат во столько же раз — новые модели выходят через то же реальное время, что раньше.
+ * Срок выхода модели в годах партии по сроку при прежнем 40-секундном месяце: месяц длится втрое дольше
+ * (MONTH_SCALE), поэтому срок сжат во столько же раз — новые модели выходят через то же реальное время.
+ * Прежние сроки — от эпох моделей при старте в 1960-м: Грузовик II — 1972 (12 лет), Фура — 1986 (26) и т. д.
  */
-const era = (year: number) => START_YEAR + Math.round((year - START_YEAR) / MONTH_SCALE);
+const later = (years: number) => Math.round(years / MONTH_SCALE);
 
 export interface RoadModel extends ModelBase {
   mode: 'road';
@@ -69,7 +73,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 16,
     price: 22_000,
     running: 1_100 * MONTH_SCALE,
-    year: START_YEAR,
+    debut: 0,
     tier: 1,
     spec: { kind: 'truck', body: 'van', length: 11, width: 4.6, maxSpeed: 41, accel: 6, color: '#e07b39' },
   },
@@ -81,7 +85,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 24,
     price: 32_000,
     running: 1_400 * MONTH_SCALE,
-    year: era(1972),
+    debut: later(12),
     tier: 2,
     // Тягач с полуприцепом: на поворотах гнётся в седле (sim/body).
     spec: { kind: 'truck', body: 'semi', length: 12.5, width: 4.8, maxSpeed: 41, accel: 6.5, color: '#e07b39' },
@@ -94,7 +98,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 36,
     price: 48_000,
     running: 1_900 * MONTH_SCALE,
-    year: era(1986),
+    debut: later(26),
     tier: 3,
     spec: { kind: 'truck', body: 'longSemi', length: 18, width: 5, maxSpeed: 41, accel: 6, color: '#e07b39' },
   },
@@ -106,7 +110,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 30,
     price: 26_000,
     running: 1_300 * MONTH_SCALE,
-    year: START_YEAR,
+    debut: 0,
     tier: 1,
     spec: { kind: 'bus', body: 'microbus', length: 10.5, width: 4.6, maxSpeed: 45, accel: 6, color: '#3b7dd8' },
   },
@@ -118,7 +122,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 40,
     price: 34_000,
     running: 1_500 * MONTH_SCALE,
-    year: era(1974),
+    debut: later(14),
     tier: 2,
     spec: { kind: 'bus', body: 'cityBus', length: 14, width: 4.8, maxSpeed: 45, accel: 6.5, color: '#3b7dd8' },
   },
@@ -130,7 +134,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 60,
     price: 50_000,
     running: 2_000 * MONTH_SCALE,
-    year: era(1988),
+    debut: later(28),
     tier: 3,
     // Сочленённый: две секции с гармошкой, гнётся посередине (sim/body).
     spec: { kind: 'bus', body: 'articBus', length: 18, width: 4.8, maxSpeed: 45, accel: 5.5, color: '#3b7dd8' },
@@ -143,7 +147,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 120,
     price: 240_000,
     running: 8_000 * MONTH_SCALE,
-    year: START_YEAR,
+    debut: 0,
     tier: 1,
     // 100 км/ч — быстрее грузовиков, но медленнее пассажирского.
     train: { kind: 'freight', cars: 6, carLength: 17, maxSpeed: 100 / KMH_PER_UNIT, accel: 2.2, brake: 3.5 },
@@ -156,7 +160,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 180,
     price: 320_000,
     running: 10_000 * MONTH_SCALE,
-    year: era(1978),
+    debut: later(18),
     tier: 2,
     train: { kind: 'freight', cars: 8, carLength: 17, maxSpeed: 110 / KMH_PER_UNIT, accel: 2.4, brake: 3.5 },
   },
@@ -168,7 +172,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 180,
     price: 260_000,
     running: 8_500 * MONTH_SCALE,
-    year: START_YEAR,
+    debut: 0,
     tier: 1,
     train: { kind: 'passenger', cars: 5, carLength: 20, maxSpeed: 120 / KMH_PER_UNIT, accel: 2.6, brake: 4 },
   },
@@ -180,16 +184,16 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     capacity: 240,
     price: 360_000,
     running: 11_000 * MONTH_SCALE,
-    year: era(1982),
+    debut: later(22),
     tier: 3,
     train: { kind: 'passenger', cars: 6, carLength: 20, maxSpeed: 120 / KMH_PER_UNIT, accel: 3.2, brake: 4.5 },
   },
 };
 
-/** Продаётся ли модель: открыта (см. Game.modelOpen) или — числом — вышла к этому году. */
+/** Продаётся ли модель: открыта (см. Game.modelOpen) или — числом — вышла за столько лет от начала партии. */
 export type ModelOpen = number | ((id: ModelId) => boolean);
 
-const isOpen = (id: ModelId, open: ModelOpen) => (typeof open === 'number' ? MODELS[id].year <= open : open(id));
+const isOpen = (id: ModelId, open: ModelOpen) => (typeof open === 'number' ? MODELS[id].debut <= open : open(id));
 
 /** Модели для линии этого вида, которые уже продаются. */
 export const modelsFor = (mode: LineMode, open: ModelOpen = Infinity): ModelId[] =>
@@ -200,7 +204,7 @@ export function newestLike(model: ModelId, open: ModelOpen): ModelId {
   const m = MODELS[model];
   return modelsFor(m.mode, open)
     .filter((id) => MODELS[id].carries === m.carries)
-    .sort((a, b) => MODELS[b].tier - MODELS[a].tier || MODELS[b].year - MODELS[a].year)[0];
+    .sort((a, b) => MODELS[b].tier - MODELS[a].tier || MODELS[b].debut - MODELS[a].debut)[0];
 }
 
 export const LINE_COLORS = ['#e5534b', '#4a8fe7', '#3fae6a', '#e9b52f', '#9a6be0', '#2fb8b3', '#e07b39', '#d45d9a'];

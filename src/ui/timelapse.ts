@@ -8,7 +8,6 @@
  */
 
 import './timelapse.css';
-import { START_YEAR } from '../config';
 import { splitBezier, type Cubic } from '../core/bezier';
 import type { Game } from '../game/game';
 import { buildTimeline, recCurve, timelapseOf, TL_STEP, type Timeline, type TimelapseSource, type TlItem, type TlLayer } from '../game/timelapse';
@@ -21,7 +20,6 @@ import { flagSvg, objectiveIcon } from './scenarioIcons';
 import { timelapseSvg } from './timelapseButton';
 import { playRate, TL_SPEEDS } from './timelapseSpeed';
 
-const MONTHS = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
 /** Кадры на шкале не ближе стольких месяцев: стройка на паузе в первый месяц тоже успевает показаться. */
 const MIN_GAP = 0.5;
 /** Толщина линии маршрута (по прямой между станциями), px. */
@@ -110,9 +108,9 @@ function countShort(n: number): string {
   return Math.round(n).toLocaleString('ru-RU');
 }
 
-function dateOf(m: number): string {
-  const i = Math.max(0, Math.floor(m + 1e-6));
-  return `${MONTHS[i % 12]} ${START_YEAR + Math.floor(i / 12)}`;
+/** Дата кадра (месяц партии m) — по календарю этой партии: «Мар 2003». */
+function dateOf(game: Game, m: number): string {
+  return game.dateAt(Math.max(0, Math.floor(m + 1e-6)));
 }
 
 /** Формат видео, который умеет браузер; null — записывать нельзя. */
@@ -257,7 +255,7 @@ class TimelapsePlayer {
 
   private html(): string {
     const rough = this.src.rough
-      ? `<span class="tl-rough" data-tip="Начало партии — по журналу: станции и маршруты, без дорог. Дороги — с ${dateOf(this.src.recordFrom)}">${journalSvg(18)}</span>`
+      ? `<span class="tl-rough" data-tip="Начало партии — по журналу: станции и маршруты, без дорог. Дороги — с ${dateOf(this.game, this.src.recordFrom)}">${journalSvg(18)}</span>`
       : '';
     const video = videoType()
       ? `<button class="tl-btn tl-video" data-tl="video" data-tip="Записать и скачать видео таймлапса">${recSvg(18)}${downloadSvg(14)}</button>`
@@ -327,8 +325,8 @@ class TimelapsePlayer {
     const years = (this.end - this.xs[0]) / 12;
     const step = years > 15 ? 5 : years > 6 ? 2 : 1;
     for (let y = Math.ceil(f[0].m / 12); y * 12 <= f[f.length - 1].m; y++) {
-      if ((START_YEAR + y) % step) continue;
-      bands.push(`<i class="tl-year" style="left:${pct(this.mToX(y * 12))}">${START_YEAR + y}</i>`);
+      if ((this.game.startYear + y) % step) continue;
+      bands.push(`<i class="tl-year" style="left:${pct(this.mToX(y * 12))}">${this.game.startYear + y}</i>`);
     }
     this.q('.tl-bands').innerHTML = bands.join('');
     if (this.src.rough) this.q('.tl-zone').style.width = pct(this.mToX(this.src.recordFrom));
@@ -863,7 +861,7 @@ class TimelapsePlayer {
     const widths = items.map(([, text]) => 18 + ctx.measureText(text).width);
     const row = widths.reduce((a, b) => a + b, 0) + 14 * (items.length - 1);
     ctx.font = `800 20px ${this.font}`;
-    const date = dateOf(m);
+    const date = dateOf(this.game, m);
     const dateW = ctx.measureText(date).width + (phase !== undefined ? 30 : 0);
     const boxW = Math.max(row, dateW) + 24;
     const x0 = 12;
