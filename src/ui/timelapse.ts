@@ -18,6 +18,7 @@ import { cargoImage } from './cargoIcons';
 import { downloadSvg, journalSvg, playSvg } from './icons';
 import { flagSvg, objectiveIcon } from './scenarioIcons';
 import { timelapseSvg } from './timelapseButton';
+import { countInt, countShort, HUD_GAP, HUD_ICON, HUD_PAD, hudLayout, moneyShort, splitDate, tabText, type HudLayout, type Measure, type TabText } from './timelapseHud';
 import { playRate, TL_SPEEDS } from './timelapseSpeed';
 
 /** Кадры на шкале не ближе стольких месяцев: стройка на паузе в первый месяц тоже успевает показаться. */
@@ -93,20 +94,6 @@ function storeLines(on: boolean): void {
 
 /** Значки SVG без <title>: та всплывает системной подсказкой. */
 const noTitle = (svg: string) => svg.replace(/<title>[^<]*<\/title>/g, '');
-
-function moneyShort(n: number): string {
-  const a = Math.abs(n);
-  const s = n < 0 ? '−' : '';
-  if (a >= 1e6) return `${s}$${(a / 1e6).toLocaleString('ru-RU', { maximumFractionDigits: a >= 1e8 ? 0 : a >= 1e7 ? 1 : 2 })} млн`;
-  if (a >= 1e4) return `${s}$${Math.round(a / 1e3).toLocaleString('ru-RU')} тыс.`;
-  return `${s}$${Math.round(a).toLocaleString('ru-RU')}`;
-}
-
-function countShort(n: number): string {
-  if (n >= 1e6) return `${(n / 1e6).toLocaleString('ru-RU', { maximumFractionDigits: 2 })} млн`;
-  if (n >= 1e4) return `${(n / 1e3).toLocaleString('ru-RU', { maximumFractionDigits: n >= 1e5 ? 0 : 1 })} тыс.`;
-  return Math.round(n).toLocaleString('ru-RU');
-}
 
 /** Дата кадра (месяц партии m) — по календарю этой партии: «Мар 2003». */
 function dateOf(game: Game, m: number): string {
@@ -191,6 +178,10 @@ class TimelapsePlayer {
   private chunks: Blob[] = [];
   private endHold = 0;
   private readonly font: string;
+  /** Раскладка плашки — одна на всю партию (timelapseHud.ts): ширины не прыгают от кадра к кадру. */
+  private hud: HudLayout | null = null;
+  private dateMeasure: Measure | null = null;
+  private numMeasure: Measure | null = null;
   private readonly onKey = (e: KeyboardEvent) => this.key(e);
   private readonly onResize = () => this.layout();
 
@@ -851,31 +842,30 @@ class TimelapsePlayer {
     const lines = s.stable.l.length + (u >= 0.5 ? s.appear.l.length : s.vanish.l.length);
     const phase = u >= 0.5 ? f1.phase : f0.phase;
 
+    // Ячейки фиксированной ширины на всю партию, цифры табличные — ничего не прыгает и в видео.
+    const L = (this.hud ??= this.hudLayout());
     const items: [(x: number, y: number) => void, string][] = [
       [(x, y) => this.coinIcon(x, y), moneyShort(money)],
-      [(x, y) => this.routeIcon(x, y), String(lines)],
-      [(x, y) => this.busIcon(x, y), String(vehicles)],
+      [(x, y) => this.routeIcon(x, y), countInt(lines)],
+      [(x, y) => this.busIcon(x, y), countInt(vehicles)],
       [(x, y) => this.personIcon(x, y), countShort(pop)],
     ];
-    ctx.font = `700 13px ${this.font}`;
-    const widths = items.map(([, text]) => 18 + ctx.measureText(text).width);
-    const row = widths.reduce((a, b) => a + b, 0) + 14 * (items.length - 1);
-    ctx.font = `800 20px ${this.font}`;
-    const date = dateOf(this.game, m);
-    const dateW = ctx.measureText(date).width + (phase !== undefined ? 30 : 0);
-    const boxW = Math.max(row, dateW) + 24;
     const x0 = 12;
     const y0 = 12;
     ctx.fillStyle = 'rgba(255,255,255,0.9)';
     ctx.beginPath();
-    ctx.roundRect(x0, y0, boxW, 62, 12);
+    ctx.roundRect(x0, y0, L.boxW, 62, 12);
     ctx.fill();
+    ctx.font = this.dateFont;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#1f2933';
-    ctx.fillText(date, x0 + 12, y0 + 20);
+    // Месяц слева, год — всегда на одном месте за самым длинным месяцем.
+    const [month, year] = splitDate(dateOf(this.game, m));
+    ctx.fillText(month, x0 + HUD_PAD, y0 + 20);
+    this.fillTab(tabText(year, this.dateMeasure!, L.dateDigit), x0 + HUD_PAD + L.yearX, y0 + 20);
     if (phase !== undefined) {
-      const cx = x0 + 12 + ctx.measureText(date).width + 16;
+      const cx = x0 + HUD_PAD + L.dateW + 16;
       ctx.fillStyle = PHASE_COLORS[phase];
       ctx.beginPath();
       ctx.arc(cx, y0 + 20, 10, 0, Math.PI * 2);
@@ -886,13 +876,15 @@ class TimelapsePlayer {
       ctx.fillText('ABC'[phase], cx, y0 + 20.5);
       ctx.textAlign = 'left';
     }
-    ctx.font = `700 13px ${this.font}`;
-    let x = x0 + 12;
+    ctx.font = this.numFont;
+    let x = x0 + HUD_PAD;
     items.forEach(([icon, text], n) => {
       icon(x, y0 + 45);
       ctx.fillStyle = '#1f2933';
-      ctx.fillText(text, x + 18, y0 + 45.5);
-      x += widths[n] + 14;
+      // Число — по правому краю своей ячейки: разряды стоят на месте.
+      const t = tabText(text, this.numMeasure!, L.numDigit);
+      this.fillTab(t, x + HUD_ICON + L.cells[n] - t.width, y0 + 45.5);
+      x += HUD_ICON + L.cells[n] + HUD_GAP;
     });
     // Подпись игры — в углу (видно и в видео).
     ctx.font = `700 12px ${this.font}`;
@@ -903,6 +895,53 @@ class TimelapsePlayer {
     ctx.fillStyle = 'rgba(31,41,51,0.7)';
     ctx.strokeText('Дороги региона', this.w - 10, this.h - 10);
     ctx.fillText('Дороги региона', this.w - 10, this.h - 10);
+  }
+
+  private get dateFont(): string {
+    return `800 20px ${this.font}`;
+  }
+
+  private get numFont(): string {
+    return `700 13px ${this.font}`;
+  }
+
+  /** Ширина строки шрифтом font — с запоминанием (плашка рисуется каждый кадр). */
+  private measurer(font: string): Measure {
+    const cache = new Map<string, number>();
+    return (text) => {
+      let w = cache.get(text);
+      if (w === undefined) {
+        const prev = this.ctx.font;
+        this.ctx.font = font;
+        w = this.ctx.measureText(text).width;
+        this.ctx.font = prev;
+        cache.set(text, w);
+      }
+      return w;
+    };
+  }
+
+  /** Раскладка плашки на всю партию: ячейки под самые длинные дату и числа по всем кадрам (и между ними). */
+  private hudLayout(): HudLayout {
+    const f = this.tl.frames;
+    const lines = f.map((_, n) => this.tl.layers.l.filter((it) => it.from <= n && it.to > n).length);
+    const pop = f.map((fr) => [...fr.pops.values()].reduce((a, b) => a + b, 0));
+    const dates: string[] = [];
+    for (let m = Math.floor(f[0].m); m <= Math.floor(f[f.length - 1].m + 1e-6); m++) dates.push(dateOf(this.game, m));
+    this.dateMeasure = this.measurer(this.dateFont);
+    this.numMeasure = this.measurer(this.numFont);
+    const columns = [
+      { values: f.map((fr) => fr.money), format: moneyShort },
+      { values: lines, format: countInt },
+      { values: f.map((fr) => fr.vehicles), format: countInt },
+      { values: pop, format: countShort },
+    ];
+    return hudLayout({ dates, columns, phase: f.some((fr) => fr.phase !== undefined) }, this.dateMeasure, this.numMeasure);
+  }
+
+  /** Текст по кускам (табличные цифры — timelapseHud.ts), x — левый край. */
+  private fillTab(t: TabText, x: number, y: number): void {
+    for (const p of t.parts) this.ctx.fillText(p.text, x + p.x, y);
   }
 
   private coinIcon(x: number, y: number): void {
