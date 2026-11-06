@@ -76,6 +76,7 @@ import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
 import { annexFootprint, annexReady, growthCap, inAnnexZone } from './annexes';
 import { type AutoFunds, autoFunds } from './autoFunds';
+import { firstRunWaits } from './firstRun';
 import {
   AUTO_FLEET,
   DEFAULT_RULE,
@@ -3195,11 +3196,8 @@ export class Game implements BuildContext {
         }
       }
       if (model.carries === 'passengers' && st.serves.pax && st.catchPop > 0) {
-        const ours = new Set(line.stops.filter((o) => o !== sid && this.stations.get(o)?.serves.pax));
-        const weigh = (ids: Iterable<number>) => [...ids].reduce((s, o) => s + this.paxWeight(o), 0);
-        const mine = weigh(ours);
-        const rest = weigh([...this.paxRoutes(st).keys()].filter((o) => !ours.has(o)));
-        if (mine) perLap += this.paxArrivals(st, lap) * (mine / (mine + rest));
+        const share = this.paxShare(line, sid);
+        if (share) perLap += this.paxArrivals(st, lap) * share;
       }
       best = Math.max(best, (this.lineWaiting(line, i, model.carries) + perLap) / model.capacity);
     });
@@ -3343,6 +3341,17 @@ export class Game implements BuildContext {
     if (line) line.noSpacing = !on;
   }
 
+  /**
+   * Ждёт ли первый рейс маршрута первых пассажиров (firstRun.ts): машина пассажирская, ещё не уезжала с первой
+   * станции и стоит на ней, а других машин в работе у линии нет (новая линия или все прежние проданы) —
+   * пассажиры здесь только начали появляться.
+   */
+  private waitsFirstPassengers(v: FleetVehicle, line: Line, st: Station): boolean {
+    if (!v.fresh || v.stop !== 0 || MODELS[v.model].carries !== 'passengers') return false;
+    if (!line.vehicles.every((id) => this.fleet.get(id)?.fresh)) return false;
+    return firstRunWaits(v.waited, vehicleLoad(v), vehicleCapacity(v), this.paxArrivals(st, 1) * this.paxShare(line, st.id));
+  }
+
   /** Машина уходит с первой станции: замеряем её круг (без ожидания интервала) и запоминаем отправление линии. */
   private noteLap(line: Line, v: FleetVehicle): void {
     if (v.lapAt !== undefined) {
@@ -3366,8 +3375,8 @@ export class Game implements BuildContext {
 
   /**
    * Погрузка на остановке по её условию отправления; true — можно ехать.
-   * auto: пустой грузовик у производителя немного ждёт груз; full: до полной загрузки
-   * (с пределом ожидания или без); none: сразу в путь.
+   * auto: пустой грузовик у производителя немного ждёт груз, первый рейс маршрута — первых пассажиров
+   * (firstRun.ts); full: до полной загрузки (с пределом ожидания или без); none: сразу в путь.
    */
   private loadingDone(v: FleetVehicle, line: Line, dt: number): boolean {
     v.timer -= dt;
@@ -3379,7 +3388,7 @@ export class Game implements BuildContext {
     let wait = false;
     if (here && notFull) {
       if (rule.wait === 'full') wait = rule.maxWait === null || v.waited < rule.maxWait;
-      else if (rule.wait === 'auto') wait = model.carries === 'freight' && v.waited < 25 && this.expectsCargo(here, line, v.stop);
+      else if (rule.wait === 'auto') wait = model.carries === 'freight' ? v.waited < 25 && this.expectsCargo(here, line, v.stop) : this.waitsFirstPassengers(v, line, here);
     }
     if (here && wait) {
       const moved = model.carries === 'freight' ? this.loadFreight(v, here, line, v.dropped ?? null) : this.boardPassengers(v, here, line);
@@ -4346,6 +4355,20 @@ export class Game implements BuildContext {
   /** Насколько охотно пассажиры едут на эту станцию: по жителям в её охвате. */
   private paxWeight(sid: number): number {
     return (this.stations.get(sid)?.catchPop ?? 0) + 60;
+  }
+
+  /**
+   * Какая доля пассажиров, что появляются на станции sid, поедет до других остановок линии (по весу направлений,
+   * как их выбирает updateStations); у линии без автобусов — сколько поехало бы, будь они.
+   */
+  private paxShare(line: Line, sid: number): number {
+    const st = this.stations.get(sid);
+    if (!st) return 0;
+    const ours = new Set(line.stops.filter((o) => o !== sid && this.stations.get(o)?.serves.pax));
+    const weigh = (ids: Iterable<number>) => [...ids].reduce((s, o) => s + this.paxWeight(o), 0);
+    const mine = weigh(ours);
+    const rest = weigh([...this.paxRoutes(st).keys()].filter((o) => !ours.has(o)));
+    return mine ? mine / (mine + rest) : 0;
   }
 
   private updateStations(dt: number): void {
