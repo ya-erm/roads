@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Board, BoardError, MAX_FILE_BYTES, STATUS_NAMES, staleRevision, type Task, type TaskComment, type TaskStatus } from './board';
+import { awaitsOwner, Board, BoardError, MAX_FILE_BYTES, STATUS_NAMES, staleRevision, type Task, type TaskComment, type TaskStatus } from './board';
 import { askClaude, checkClaude, ClaudeError, runClaude, type ClaudeResult, type ClaudeSettings } from './claude';
 import { idleStatus, Presence } from './presence';
 import {
@@ -326,6 +326,11 @@ async function work(brief: Task): Promise<void> {
   if (from === 'revision' && staleRevision(card, isMine)) {
     settled.set(card.id, card.revision);
     log(`«${card.title?.trim() || card.id}» в «${STATUS_NAMES.revision}», но после отчёта нового нет — не беру, пока не появятся замечания.`);
+    return;
+  }
+  if (awaitsOwner(card, QUEUE, cfg.actor)) {
+    settled.set(card.id, card.revision);
+    log(`«${card.title?.trim() || card.id}» — публичный баг-репорт от гостя: не беру, пока участник доски сам не переведёт его в очередь.`);
     return;
   }
   const description = await descriptionOf(card);

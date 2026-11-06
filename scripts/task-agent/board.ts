@@ -37,8 +37,21 @@ export interface Task {
   comments?: TaskComment[];
   /** Смены статуса (в полной карточке). */
   history?: { at: string; actor?: string; from?: TaskStatus; to?: TaskStatus }[];
+  /** Публичный баг-репорт: карточку без авторизации создал кто угодно с сайта (автор — «Гость…»). */
+  publicSubmission?: boolean;
   createdAt?: string;
   updatedAt?: string;
+}
+
+/**
+ * Публичный баг-репорт, который владелец ещё не одобрил. Его текст написал посторонний — это данные, а не задание:
+ * агент берёт такую задачу, только когда кто-то из участников доски (не гость и не сам агент) сам переведёт её
+ * в очередь — например, в «Черновик» и обратно в «Новая» или в «Доработать».
+ */
+export function awaitsOwner(card: Task, queue: TaskStatus[], agent: string): boolean {
+  if (!card.publicSubmission) return false;
+  const member = (actor?: string) => !!actor?.trim() && !/^гость(?![а-яё])/i.test(actor.trim()) && actor !== agent;
+  return !(card.history ?? []).some((h) => h.to !== undefined && queue.includes(h.to) && member(h.actor));
 }
 
 /**
