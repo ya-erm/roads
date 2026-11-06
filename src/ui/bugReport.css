@@ -1,0 +1,480 @@
+/*
+ * Баг-репорт (src/ui/bugReport.ts): кнопка слева от миникарты и окно пометок. Оба — в body и выше всего:
+ * окон игры, таймлапса (1000); над ними только плавающая подсказка data-tip (10000).
+ */
+
+/* Место (right/bottom) пишет bugButtonSpot — по миникарте; здесь запасное, как у неё в CSS. */
+.bug-btn {
+  position: fixed;
+  right: 234px;
+  bottom: 14px;
+  z-index: 9000;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: var(--panel);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+  transition:
+    transform 0.12s,
+    background 0.12s;
+}
+
+.bug-btn:hover {
+  background: #fff;
+  transform: translateY(-1px);
+}
+
+.bug-btn.busy {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+.bug-btn.hidden,
+.bug-screen.hidden,
+.bug-screen .hidden {
+  display: none !important;
+}
+
+.bug-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(40, 52, 40, 0.45);
+}
+
+.bug-modal {
+  width: min(1320px, 96vw);
+  height: min(880px, 94vh);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  background: #fff;
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+}
+
+.bug-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bug-head h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.bug-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: #fff4e5;
+  color: #a35a00;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bug-x {
+  margin-left: auto;
+  width: 34px;
+  height: 34px;
+  font-size: 16px;
+  background: #f1f4f7;
+}
+
+.bug-x:hover {
+  background: #e2e8ee;
+}
+
+/* ---------- Панель инструментов: группы значков ---------- */
+
+.bug-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.bug-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 12px;
+  background: #f1f4f7;
+  transition: opacity 0.15s;
+}
+
+/* Свойство не про выбранную пометку (толщина у текста, размер у фигуры). */
+.bug-group.dim {
+  opacity: 0.4;
+}
+
+.bug-group button,
+.bug-group .bug-color.custom {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 9px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.bug-group button:hover,
+.bug-group .bug-color.custom:hover {
+  background: #e2e8ee;
+}
+
+.bug-group button.active {
+  background: var(--ink);
+  color: #fff;
+}
+
+.bug-group button:disabled {
+  opacity: 0.32;
+  cursor: default;
+  background: transparent;
+}
+
+.bug-group span {
+  font-weight: 700;
+  line-height: 1;
+}
+
+.bug-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px rgba(31, 41, 51, 0.18);
+}
+
+/* Цвет выбран — кольцо вокруг, а не тёмная плашка: цвет должно быть видно. */
+.bug-group .bug-color.active {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 2px var(--ink);
+}
+
+.bug-color.custom {
+  position: relative;
+}
+
+.bug-color.custom .bug-swatch {
+  background: conic-gradient(#e8483f, #f2c94c, #2e9d57, #2f80ed, #7a5cc4, #e8483f);
+}
+
+.bug-color.custom input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+
+/* ---------- Снимок и колонка отчёта ---------- */
+
+.bug-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 14px;
+}
+
+.bug-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  background-color: #e9edf1;
+  background-image:
+    linear-gradient(45deg, #dde3e9 25%, transparent 25%, transparent 75%, #dde3e9 75%),
+    linear-gradient(45deg, #dde3e9 25%, transparent 25%, transparent 75%, #dde3e9 75%);
+  background-size: 20px 20px;
+  background-position:
+    0 0,
+    10px 10px;
+}
+
+.bug-stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+/* Текст правится прямо на снимке: прозрачное поле поверх пометки, тем же шрифтом и цветом. */
+.bug-text-edit {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  background: transparent;
+  user-select: text;
+  caret-color: var(--accent);
+  -webkit-text-stroke: 0.14em var(--halo, #fff);
+  paint-order: stroke fill;
+}
+
+.bug-hint {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  max-width: calc(100% - 20px);
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.bug-side {
+  width: 320px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.bug-desc {
+  flex: 1;
+  min-height: 110px;
+  padding: 10px 12px;
+  border: 1.5px solid #dfe5eb;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  resize: none;
+  user-select: text;
+}
+
+.bug-desc:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.bug-files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bug-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: #f1f4f7;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.bug-file.fixed {
+  cursor: default;
+  padding-left: 31px;
+}
+
+.bug-file input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.bug-file svg {
+  flex: none;
+  color: #5f7a8f;
+}
+
+.bug-file small {
+  margin-left: auto;
+  color: var(--muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.bug-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.bug-result {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.bug-result p {
+  margin: 0;
+}
+
+.bug-result.busy {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  background: #eef4fd;
+}
+
+.bug-result.ok {
+  background: #e9f6ee;
+}
+
+.bug-result.fail {
+  background: #fff4e5;
+}
+
+.bug-res-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-weight: 600;
+}
+
+.bug-result.ok .bug-res-head svg {
+  color: #2e9d57;
+}
+
+.bug-result.fail .bug-res-head svg {
+  color: #c7790c;
+}
+
+.bug-result a {
+  color: var(--accent);
+}
+
+.bug-result small {
+  color: var(--muted);
+}
+
+.bug-report-text {
+  height: 64px;
+  padding: 6px 8px;
+  border: 1px solid #dfe5eb;
+  border-radius: 8px;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  resize: vertical;
+  user-select: text;
+  background: #fff;
+}
+
+.bug-res-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.bug-spin {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #c6d6ee;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: bug-spin 0.8s linear infinite;
+}
+
+@keyframes bug-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.bug-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.bug-primary,
+.bug-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 18px;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.bug-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.bug-primary:hover {
+  filter: brightness(1.08);
+}
+
+.bug-primary:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.bug-secondary {
+  background: #eef2f6;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.bug-secondary:hover {
+  background: #e2e8ee;
+}
+
+.bug-secondary.small {
+  gap: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  border-radius: 9px;
+}
+
+/* В зелёной и жёлтой плашке результата кнопки — белые. */
+.bug-result .bug-secondary {
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--ink);
+}
+
+.bug-result .bug-secondary:hover {
+  background: #fff;
+}
+
+/* Узкое окно: колонка отчёта — под снимком. */
+@media (max-width: 900px) {
+  .bug-body {
+    flex-direction: column;
+  }
+
+  .bug-side {
+    width: auto;
+  }
+
+  .bug-desc {
+    flex: none;
+    min-height: 60px;
+  }
+}

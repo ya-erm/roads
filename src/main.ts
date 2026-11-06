@@ -2,6 +2,7 @@ import './style.css';
 import { Game, SAVE_VERSION, type SaveData } from './game/game';
 import { journalFile } from './game/journal';
 import { backupGame, clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readSave, saveGame, writeSave } from './game/persist';
+import { saveFileText } from './game/saveFile';
 import { Controller } from './input/controller';
 import { rememberTools } from './input/toolPrefs';
 import { Camera } from './render/camera';
@@ -9,6 +10,7 @@ import { Renderer } from './render/renderer';
 import { ARCHETYPE_LIST } from './scenario/content';
 import type { ScenarioSettings } from './scenario/types';
 import { testScene } from './testpages';
+import { installBugReport } from './ui/bugReport';
 import { Hud } from './ui/hud';
 import { DEFAULT_SETTINGS, WorldSettings } from './world/settings';
 
@@ -53,6 +55,9 @@ game.speed = saved || scene ? 1 : 0;
 const camera = new Camera();
 const renderer = new Renderer(canvas, camera);
 const controller = new Controller(canvas, camera, () => game);
+// Кнопка баг-репорта — поверх всего, и окон тоже. Ставится раньше панелей: пока открыт редактор пометок,
+// его клавиши (Esc, Delete, буквы инструментов) перехватываются до игровых.
+installBugReport({ canvas, game: () => game, saveText: () => saveText(), journalText: () => journalFile(game) });
 const hasProgress = () => game.time > 0 || game.lines.size > 0 || game.net.version > 1 || game.canUndo;
 const hud = new Hud(hudRoot, controller, () => game, {
   hasProgress,
@@ -104,11 +109,16 @@ async function loadNamed(id: string): Promise<boolean> {
   return true;
 }
 
-/** Скачивает текущую партию файлом: «razvyazka-Мар-1963.json». */
-function exportFile(): void {
+/** Партия файлом — с видом камеры: «Сохранить в файл» и баг-репорт. */
+function saveText(): string {
   const data = game.toSave();
   data.view = { x: camera.x, y: camera.y, zoom: camera.zoom };
-  download(JSON.stringify(data), 'application/json', `razvyazka-${game.dateLabel.replace(/\s+/g, '-')}.json`);
+  return JSON.stringify(data);
+}
+
+/** Скачивает текущую партию файлом: «razvyazka-Мар-1963.json». */
+function exportFile(): void {
+  download(saveText(), 'application/json', `razvyazka-${game.dateLabel.replace(/\s+/g, '-')}.json`);
 }
 
 /** Скачивает журнал партии (JSON Lines): «razvyazka-journal-12345-Мар-1963.jsonl». */
@@ -129,7 +139,7 @@ function download(text: string, type: string, name: string): void {
 async function importFile(file: File): Promise<boolean> {
   let data: SaveData;
   try {
-    data = JSON.parse(await file.text()) as SaveData;
+    data = JSON.parse(await saveFileText(file)) as SaveData;
   } catch {
     game.notify('Это не файл сохранения игры', '#e5534b');
     return false;

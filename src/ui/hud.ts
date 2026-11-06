@@ -490,7 +490,7 @@ export class Hud {
             <div class="saves" data-saves></div>
             <div class="file-row">
               <button class="small with-ic" data-action="export-save" title="Скачать партию файлом — например, чтобы отправить его">${downloadSvg(15)}Сохранить в файл</button>
-              <label class="small file-pick with-ic" title="Открыть партию из файла">${uploadSvg(15)}Открыть из файла<input type="file" accept=".json,application/json" data-import-save /></label>
+              <label class="small file-pick with-ic" title="Открыть партию из файла">${uploadSvg(15)}Открыть из файла<input type="file" accept=".json,.gz,application/json,application/gzip" data-import-save /></label>
             </div>
           </div>
         </div>
