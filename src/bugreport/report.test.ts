@@ -13,7 +13,7 @@ import {
   parseReceipt,
   parseUploaded,
   PUBLIC_LIMITS,
-  reportTitle,
+  UNTITLED_REPORT,
   submitReport,
   submitUrl,
   reportMarkdown,
@@ -196,7 +196,7 @@ describe('Публичная отправка на доску', () => {
   };
   const utf8 = (s: string) => new TextEncoder().encode(s).length;
 
-  it('имя — отдельным полем, название — первая строка; файлы с доски — ссылками, не загрузившиеся — строкой', () => {
+  it('имя — отдельным полем как есть, названия нет; файлы с доски — ссылками, не загрузившиеся — строкой', () => {
     const r = boardReport(
       info,
       [
@@ -206,8 +206,10 @@ describe('Публичная отправка на доску', () => {
       ],
       'razvyazka-bug:k1',
     );
-    expect(r.title).toBe('Автобус встал на перекрёстке');
+    // Название по описанию придумает агент доски; «Гость: » к имени добавляет сама доска, не игра.
+    expect(r).not.toHaveProperty('title');
     expect(r.author).toBe('Ярослав');
+    expect(JSON.stringify(r)).not.toContain('Гость');
     expect(r.sourceKey).toBe('razvyazka-bug:k1');
     expect(r.description).not.toContain('От:');
     expect(r.description).toContain('[журнал партии](<https://b/j.jsonl.gz>)');
@@ -215,16 +217,20 @@ describe('Публичная отправка на доску', () => {
     expect(r.description).not.toContain('приложен');
     expect(r.description).not.toContain('a.png');
     // На доску уходят только разрешённые поля.
-    expect(Object.keys(r).sort()).toEqual(['author', 'description', 'sourceKey', 'title']);
+    expect(Object.keys(r).sort()).toEqual(['author', 'description', 'sourceKey']);
   });
 
-  it('пределы доски: имя до 32 символов, длинное название — с многоточием, без имени — поля нет', () => {
-    const r = boardReport({ ...info, author: 'Я'.repeat(50), description: 'Слово '.repeat(60) }, [], 'k');
+  it('без описания (только снимок) — короткое название, чтобы запрос не был пустым', () => {
+    const r = boardReport({ ...info, description: ' \n ' }, [{ kind: 'shot', name: 'a.png', url: 'https://b/1.webp' }], 'k');
+    expect(r.title).toBe(UNTITLED_REPORT);
+    expect(r.title!.length).toBeLessThanOrEqual(PUBLIC_LIMITS.title);
+    expect(r.description).toContain('![Снимок экрана](<https://b/1.webp>)');
+  });
+
+  it('пределы доски: имя до 32 символов, без имени — поля нет', () => {
+    const r = boardReport({ ...info, author: 'Я'.repeat(50) }, [], 'k');
     expect(r.author).toHaveLength(PUBLIC_LIMITS.author);
-    expect(r.title.length).toBeLessThanOrEqual(100);
-    expect(r.title.endsWith('…')).toBe(true);
     expect(boardReport({ ...info, author: '   ' }, [], 'k')).not.toHaveProperty('author');
-    expect(reportTitle({ ...info, description: ' \n ' })).toBe('Отчёт из игры · Мар 2001');
   });
 
   it('огромное описание обрезается: описание ≤ 12 КиБ, весь запрос ≤ 16 КиБ — и с переносами строк', () => {

@@ -258,9 +258,9 @@ export function sizeLabel(bytes: number): string {
 /** Пределы публичной отправки: название, описание (UTF-8), имя, ключ и весь JSON-запрос. */
 export const PUBLIC_LIMITS = { title: 160, description: 12 * 1024, author: 32, sourceKey: 160, request: 16 * 1024 };
 
-/** Что уходит на доску. */
+/** Что уходит на доску. Название — только у отчёта без описания (иначе его по описанию придумает агент доски). */
 export interface BoardReport {
-  title: string;
+  title?: string;
   description: string;
   author?: string;
   sourceKey: string;
@@ -298,25 +298,23 @@ function defaultRandom(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-/** Название карточки — первая строка описания; описания нет — «Отчёт из игры» с датой партии. */
-export function reportTitle(info: ReportInfo): string {
-  const line = info.description
-    .split('\n')
-    .map((l) => l.replace(/\s+/g, ' ').trim())
-    .find(Boolean);
-  if (!line) return `Отчёт из игры · ${info.date}`;
-  return line.length > 100 ? `${line.slice(0, 99).trimEnd()}…` : line;
-}
+/** Название отчёта, в котором игрок ничего не написал (только снимок): чтобы карточка не была безымянной. */
+export const UNTITLED_REPORT = 'Баг-репорт без описания';
 
 /**
- * Отчёт для публичной отправки: имя — отдельным полем (доска подпишет «Гость: имя»), описание — Markdown с
- * ссылками на загруженные файлы и строкой о незагруженных. Длинное описание обрезается, чтобы уложиться
- * в пределы доски (описание ≤ 12 КиБ, весь запрос ≤ 16 КиБ).
+ * Отчёт для публичной отправки. Название не передаётся — его по описанию заполнит агент доски; только у отчёта
+ * без описания — короткое UNTITLED_REPORT. Имя — отдельным полем, как ввёл игрок: подпись «Гость: имя» у
+ * карточки ставит сама доска (её правило для всех публичных отчётов), игра к имени ничего не добавляет.
+ * Описание — Markdown с ссылками на загруженные файлы и строкой о незагруженных; длинное обрезается, чтобы
+ * уложиться в пределы доски (описание ≤ 12 КиБ, весь запрос ≤ 16 КиБ).
  */
 export function boardReport(info: ReportInfo, files: ReportFile[], sourceKey: string): BoardReport {
-  const title = reportTitle(info).slice(0, PUBLIC_LIMITS.title);
   const name = info.author?.replace(/\s+/g, ' ').trim().slice(0, PUBLIC_LIMITS.author).trim();
-  const head = { title, ...(name ? { author: name } : {}), sourceKey: sourceKey.slice(0, PUBLIC_LIMITS.sourceKey) };
+  const head = {
+    ...(info.description.trim() ? {} : { title: UNTITLED_REPORT }),
+    ...(name ? { author: name } : {}),
+    sourceKey: sourceKey.slice(0, PUBLIC_LIMITS.sourceKey),
+  };
   let text = info.description;
   let description = '';
   for (let i = 0; i < 5; i++) {
