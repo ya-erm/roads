@@ -89,21 +89,39 @@ export interface Mark {
 
 /** Граф пересоздаётся при каждой правке сети — по нему и кэш. */
 const cache = new WeakMap<LaneGraph, Mark[]>();
+/**
+ * Стрелки последних графов по узлам (по номеру графа): граф, пересобранный из такого, берёт готовые у узлов, что
+ * не менялись, — иначе после каждой правки стрелки считались бы заново по всей карте.
+ */
+const recent: { serial: number; byNode: Map<number, Mark[]> }[] = [];
 
 function marksOf(g: LaneGraph): Mark[] {
   const cached = cache.get(g);
   if (cached) return cached;
   const marks: Mark[] = [];
+  const byNode = new Map<number, Mark[]>();
   const shapes = new Map<string, Vec[][]>();
   const ground = (corridor: number) => {
     const c = g.net.corridors.get(corridor);
     return !!c && [c.a, c.b].every((id) => Math.abs(g.net.nodes.get(id)?.level ?? 0) <= 0.25);
   };
+  const was = g.prevSerial === null ? undefined : recent.find((r) => r.serial === g.prevSerial)?.byNode;
+  const kept = was ? new Set(g.linkFromPrev.values()) : null;
   for (const n of g.net.nodes.values()) {
     // На кольцах стрелок нет.
     if (n.kind !== 'junction' || (n.roundabout ?? null) !== null) continue;
     if (n.corridors.some((id) => g.net.corridors.get(id)?.ring)) continue;
-    for (const link of g.inLinks.get(n.id) ?? []) {
+    // Узел как был, подъезды — те же связи и не короче отступа стрелки (она на самом подъезде) — стрелки те же.
+    const ins = g.inLinks.get(n.id) ?? [];
+    const ready = was?.get(n.id);
+    if (ready && g.sameNodes.has(n.id) && ins.every((l) => kept!.has(l.id) && l.length >= BACK)) {
+      byNode.set(n.id, ready);
+      marks.push(...ready);
+      continue;
+    }
+    const mine: Mark[] = [];
+    byNode.set(n.id, mine);
+    for (const link of ins) {
       laneArrows(g, link).forEach((turns, i) => {
         if (!turns) return;
         const at = placeArrow(g, link.lanes[i]);
@@ -113,11 +131,15 @@ function marksOf(g: LaneGraph): Mark[] {
         let shape = shapes.get(key);
         if (!shape) shapes.set(key, (shape = arrowShape(turns)));
         const { pos, dir } = g.lanePose(at.lane, at.u);
-        marks.push({ x: pos.x, y: pos.y, polys: arrowAt(shape, pos, dir), node: n.id });
+        const mark = { x: pos.x, y: pos.y, polys: arrowAt(shape, pos, dir), node: n.id };
+        marks.push(mark);
+        mine.push(mark);
       });
     }
   }
   cache.set(g, marks);
+  recent.push({ serial: g.serial, byNode });
+  if (recent.length > 4) recent.shift();
   return marks;
 }
 

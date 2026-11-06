@@ -1,7 +1,7 @@
 import { buildLaneProfile, gradeFactor, LaneProfile, PROFILE_STEP } from './speedProfile';
 import { IDM, LIGHTS } from '../config';
 import { lerp as lerpNum } from '../core/math';
-import { rightNormal, scale, add, angleDiff, angleOf, dot, type Vec } from '../core/vec';
+import { rightNormal, scale, add, angleDiff, angleOf, closestOnSegment, dot, type Vec } from '../core/vec';
 import { follow, hitchOf, jointOf, steerBase } from '../sim/body';
 import type { Blinker, Vehicle, VehicleSpec } from '../sim/vehicle';
 import { GLane, GLink, GMove, GNode, LaneGraph, LightPhase } from './graph';
@@ -113,6 +113,14 @@ function jitter(x: number): number {
   return s - Math.floor(s);
 }
 
+/**
+ * Сколько машин с оборванным правкой сети маршрутом прокладывают его заново за такт (rerouteCuts). Числом машин, а не
+ * временем: партия с теми же действиями должна повторяться.
+ */
+export const REROUTE_BATCH = 24;
+/** Подъезжающую к разрыву маршрута ближе стольких метров (и ещё 2 с пути) перестраивают сразу, вне очереди. */
+export const REROUTE_NEAR = 30;
+
 /** Шлагбаум посреди полотна (переезд): закрыт — машины ждут перед ним; занят — на нём машина. */
 export interface Barrier {
   /** Где на оси полотна. */
@@ -208,6 +216,13 @@ export class LaneTraffic {
   relief: { ground: () => ((p: Vec) => number) | null; version: () => number } | null = null;
   /** Профили скорости полос (изгибы и уклоны) — по версии рельефа. */
   private profiles = new WeakMap<GLane, { ver: number; p: LaneProfile }>();
+  /**
+   * Машины, чей маршрут правка сети оборвала (rebind): маршрут до разрыва, по нему и узнаём, что его ещё не сменили.
+   * По порядку пересчёта — ближние к разрыву первыми (rerouteCuts).
+   */
+  private cuts = new Map<Vehicle, number[]>();
+  /** Сколько оборванных маршрутов пересчитывать за такт (REROUTE_BATCH; в тестах — меньше). */
+  rerouteBatch = REROUTE_BATCH;
 
   /** Профиль полосы: скорость по изгибам с торможением заранее и уклон по ходу. */
   profile(lane: GLane): LaneProfile {
@@ -225,8 +240,12 @@ export class LaneTraffic {
   ) {}
 
   /**
-   * Сеть перестроили: машины встают на полосу нового графа там же, где ехали (ближайшая попутная
-   * полоса у их положения), и прокладывают маршрут заново. Кому некуда — теряются.
+   * Сеть перестроили. Машина, чья полоса (или манёвр в узле) осталась как была (см. LaneGraph.laneFromPrev), едет
+   * дальше как ехала: та же полоса, место, очередь, бронь узла и маршрут — по соответствию связей, без поиска полосы
+   * и пути. Маршрут — до первой поменявшейся связи или узла; если он там оборвался, машина встаёт в очередь
+   * на новый маршрут (cuts — ближние к разрыву первыми, по REROUTE_BATCH за такт). Новые короткие пути она найдёт
+   * сама (rerouteTimer). Остальные встают на полосу нового графа там же, где ехали (ближайшая попутная полоса
+   * у их положения), и прокладывают маршрут сразу. Кому некуда — теряются.
    */
   rebind(graph: LaneGraph): void {
     // Светофоры не сбрасываются: та же фаза и тот же отсчёт, если фаз столько же.
@@ -240,8 +259,35 @@ export class LaneTraffic {
     }
     const old = this.graph;
     this.graph = graph;
+    // Соответствие связей — только к графу, из которого этот собран; иначе все — заново.
+    const keyed = graph.prevSerial === old.serial;
+    const kept = new Set<Vehicle>();
+    const cut: Vehicle[] = [];
+    const placed: Vehicle[] = [];
     for (const veh of [...this.vehicles.values()]) {
-      // Посреди перекрёстка полосы под машиной нет — ставим её в начало полосы, куда она выезжала.
+      const c = keyed ? this.carryOver(old, veh) : null;
+      if (c === null) placed.push(veh);
+      else {
+        kept.add(veh);
+        if (c) cut.push(veh);
+      }
+    }
+    if (keyed) {
+      // Профили скорости прежних полос — те же.
+      for (const [o, n] of graph.laneFromPrev) {
+        const ol = old.lanes.get(o);
+        const hit = ol && this.profiles.get(ol);
+        if (hit) this.profiles.set(graph.lanes.get(n)!, hit);
+      }
+      this.keepQueues(old, kept);
+    }
+    // Очередь на новый маршрут: ближние к разрыву — первыми.
+    const order = cut.map((veh) => ({ veh, d: this.routeLeft(veh) })).sort((a, b) => a.d - b.d || a.veh.id - b.veh.id);
+    this.cuts = new Map(order.map(({ veh }) => [veh, veh.route]));
+    for (const veh of placed) {
+      // Посреди перекрёстка, который правка поменяла: тот же поворот есть и в новом — едет по нему дальше.
+      if (keyed && veh.onMovement && this.sameTurn(old, veh)) continue;
+      // Иначе полосы под машиной нет — ставим её в начало полосы, куда она выезжала.
       const exit = veh.onMovement ? this.exitSpot(old, veh.onMovement) : null;
       veh.onMovement = null;
       veh.granted = null;
@@ -266,6 +312,207 @@ export class LaneTraffic {
       this.updatePose(veh);
       veh.blinker = this.blinkerOf(veh);
     }
+  }
+
+  /**
+   * Машина остаётся где была (rebind): её полоса или манёвр — в новом графе по соответствию прежнего (laneFromPrev),
+   * маршрут — его связи до первой поменявшейся (или перехода и узла, что поменялись), бронь и очередь узла — если узел
+   * как был. Полосы нет — null (машину ставят заново); иначе — оборвался ли маршрут (не доходит до цели).
+   */
+  private carryOver(old: LaneGraph, veh: Vehicle): boolean | null {
+    const g = this.graph;
+    let lane: number | undefined;
+    let move: string | null = null;
+    if (veh.onMovement) {
+      const m = this.sameMove(old, veh.onMovement);
+      if (!m) return null;
+      move = m.key;
+      lane = m.inLane;
+    } else lane = g.laneFromPrev.get(veh.lane);
+    if (lane === undefined) return null;
+    const from = veh.routeIndex;
+    const route: number[] = [];
+    let broken = false;
+    for (let i = from; i < veh.route.length; i++) {
+      const id = g.linkFromPrev.get(veh.route[i]);
+      if (id === undefined || (i > from && !this.sameStep(old, veh.route[i - 1], veh.route[i]))) {
+        broken = true;
+        break;
+      }
+      route.push(id);
+    }
+    // Связь под машиной поменялась (или манёвр ведёт за разрыв) — ставим заново.
+    if (!route.length || g.lanes.get(lane)!.link !== route[0] || (move && route.length < 2)) return null;
+    // Прошлая связь (по ней поворотник у развилки) — если и она, и переход с неё прежние.
+    const back = from > 0 ? g.linkFromPrev.get(veh.route[from - 1]) : undefined;
+    const withBack = back !== undefined && this.sameStep(old, veh.route[from - 1], veh.route[from]);
+    veh.route = withBack ? [back, ...route] : route;
+    veh.routeIndex = withBack ? 1 : 0;
+    veh.lane = lane;
+    veh.onMovement = move;
+    veh.granted = veh.granted ? (this.sameMove(old, veh.granted)?.key ?? null) : null;
+    veh.planned = veh.planned ? (this.sameMove(old, veh.planned)?.key ?? null) : null;
+    if (veh.waitingAt !== null && !g.sameNodes.has(veh.waitingAt)) {
+      veh.waitingAt = null;
+      veh.ready = false;
+    }
+    return broken || this.cuts.has(veh) || g.links.get(route[route.length - 1])!.toNode !== veh.targetNode;
+  }
+
+  /**
+   * Машина посреди перекрёстка, который правка поменяла (rebind): тот же поворот в новом графе — с той же полосы того
+   * же полотна на ту же полосу полотна выезда (связи у узла могли укоротиться или удлиниться). Есть — машина на нём,
+   * в ближайшей к ней точке кривой, с новым маршрутом от выезда (сразу) и в брони узла; true. Нет — false.
+   */
+  private sameTurn(old: LaneGraph, veh: Vehicle): boolean {
+    const g = this.graph;
+    const m = old.moves.get(veh.onMovement!);
+    if (!m || m.node === null) return false;
+    const spot = (laneId: number, list: GLink[] | undefined) => {
+      const lane = old.lanes.get(laneId)!;
+      const link = old.links.get(lane.link)!;
+      const now = list?.find((l) => l.corridor === link.corridor && l.flow === link.flow);
+      return now && { link: now, lane: g.laneOf(now, lane.laneIdx) };
+    };
+    const from = spot(m.inLane, g.inLinks.get(m.node));
+    const to = spot(m.outLane, g.outLinks.get(m.node));
+    const nm = from?.lane && to?.lane ? g.moves.get(`${from.lane.id}>${to.lane.id}`) : undefined;
+    const node = nm && g.nodes.get(m.node);
+    const rest = nm && findLaneRoute(g, [to!.link], veh.targetNode);
+    if (!nm || !node || !rest) return false;
+    // Где на новой кривой машина: ближайшая к ней точка.
+    let best = Infinity;
+    let s = 0;
+    for (let i = 1; i < nm.points.length; i++) {
+      const hit = closestOnSegment(veh.pos, nm.points[i - 1], nm.points[i]);
+      if (hit.d < best) {
+        best = hit.d;
+        s = nm.cum[i - 1] + (nm.cum[i] - nm.cum[i - 1]) * hit.t;
+      }
+    }
+    veh.lane = from!.lane!.id;
+    veh.onMovement = nm.key;
+    veh.s = Math.min(s, nm.length);
+    veh.route = [from!.link.id, ...rest];
+    veh.routeIndex = 0;
+    veh.granted = null;
+    veh.planned = null;
+    veh.waitingAt = null;
+    veh.ready = false;
+    veh.lateral = 0;
+    insertSorted(nm.vehicles, veh);
+    node.reserved.push(veh);
+    this.updatePose(veh);
+    veh.blinker = this.blinkerOf(veh);
+    return true;
+  }
+
+  /** Манёвр key прежнего графа — в новом: полосы как были, узел (если это манёвр в узле) как был. Нет — undefined. */
+  private sameMove(old: LaneGraph, key: string): GMove | undefined {
+    const m = old.moves.get(key);
+    const g = this.graph;
+    const i = m && g.laneFromPrev.get(m.inLane);
+    const o = m && g.laneFromPrev.get(m.outLane);
+    if (!m || i === undefined || o === undefined || (m.node !== null && !g.sameNodes.has(m.node))) return undefined;
+    return g.moves.get(`${i}>${o}`);
+  }
+
+  /** Переход маршрута со связи a на b (прежние id) — как был: все его манёвры есть и в новом графе, узел как был. */
+  private sameStep(old: LaneGraph, a: number, b: number): boolean {
+    const was = old.transitions.get(`${a}>${b}`) ?? [];
+    const now = this.graph.transitions.get(`${this.graph.linkFromPrev.get(a)}>${this.graph.linkFromPrev.get(b)}`) ?? [];
+    return was.length > 0 && was.length === now.length && was.every((m) => !!this.sameMove(old, m.key));
+  }
+
+  /**
+   * Очереди полос и манёвров и брони узлов для оставшихся на месте (kept) — в прежнем порядке; узел, что поменялся,
+   * начинает с пустыми (брони там сняты в carryOver).
+   */
+  private keepQueues(old: LaneGraph, kept: Set<Vehicle>): void {
+    const g = this.graph;
+    const queued = new Set<Vehicle>();
+    for (const lane of old.lanes.values()) {
+      for (const veh of lane.vehicles) {
+        if (!kept.has(veh) || veh.onMovement || queued.has(veh)) continue;
+        queuePush(g.lanes.get(veh.lane)!.vehicles, veh);
+        queued.add(veh);
+      }
+    }
+    for (const m of old.moves.values()) {
+      for (const veh of m.vehicles) {
+        if (!kept.has(veh) || !veh.onMovement || queued.has(veh)) continue;
+        queuePush(g.moves.get(veh.onMovement)!.vehicles, veh);
+        queued.add(veh);
+      }
+    }
+    // Не нашлась ни в одной очереди (не должно быть) — по месту.
+    for (const veh of kept) if (!queued.has(veh)) insertSorted(veh.onMovement ? g.moves.get(veh.onMovement)!.vehicles : g.lanes.get(veh.lane)!.vehicles, veh);
+    const nodeOf = (key: string | null) => (key ? (g.moves.get(key)?.node ?? null) : null);
+    for (const [id, was] of old.nodes) {
+      const node = g.nodes.get(id);
+      if (!node || !g.sameNodes.has(id)) continue;
+      node.reserved = was.reserved.filter((v) => kept.has(v) && nodeOf(v.onMovement ?? v.granted) === id);
+      node.waiting = was.waiting.filter((v) => kept.has(v) && v.waitingAt === id);
+    }
+  }
+
+  /** Сколько машине ехать до конца её маршрута (у оборванного — до разрыва). */
+  private routeLeft(veh: Vehicle): number {
+    const g = this.graph;
+    let d: number;
+    if (veh.onMovement) {
+      const m = g.moves.get(veh.onMovement);
+      d = m ? m.length - veh.s : 0;
+    } else {
+      const lane = this.currentLane(veh);
+      d = lane ? lane.length - veh.s : 0;
+    }
+    for (let i = veh.routeIndex + 1; i < veh.route.length; i++) d += g.links.get(veh.route[i])?.length ?? 0;
+    return d;
+  }
+
+  /**
+   * Машины с оборванным правкой маршрутом (cuts): по REROUTE_BATCH за такт — по порядку очереди (ближние к разрыву
+   * первыми), а та, что подъезжает к разрыву (ближе REROUTE_NEAR и ещё 2 с пути) или уже на последней связи, — сразу.
+   * Маршрут сменился сам (перестройка по таймеру, отправили дальше) — из очереди прочь.
+   */
+  private rerouteCuts(): void {
+    let batch = this.rerouteBatch;
+    for (const [veh, route] of this.cuts) {
+      if (!this.vehicles.has(veh.id) || veh.route !== route) {
+        this.cuts.delete(veh);
+        continue;
+      }
+      const near = veh.routeIndex >= veh.route.length - 1 || this.routeLeft(veh) < REROUTE_NEAR + veh.v * 2;
+      if (!near && batch <= 0) continue;
+      if (!near) batch--;
+      this.cuts.delete(veh);
+      this.rerouteCut(veh);
+    }
+  }
+
+  /** Новый маршрут машине с оборванным: с её связи (посреди манёвра — со связи выезда). Не доехать — теряется. */
+  private rerouteCut(veh: Vehicle): void {
+    const g = this.graph;
+    if (veh.onMovement) {
+      const m = g.moves.get(veh.onMovement);
+      const out = m && g.links.get(m.outLink);
+      const rest = out && findLaneRoute(g, [out], veh.targetNode);
+      if (!m || !rest) return this.lose(veh);
+      veh.route = [m.inLink, ...rest];
+      veh.routeIndex = 0;
+      return;
+    }
+    const lane = this.currentLane(veh);
+    const link = lane && g.links.get(lane.link);
+    const route = link && findLaneRoute(g, [link], veh.targetNode);
+    if (!route) return this.lose(veh);
+    this.setRoute(veh, route);
+  }
+
+  /** Маршрут машины оборван правкой сети и ждёт пересчёта (rerouteCuts): к его концу не тормозит, полосу не меняет. */
+  routeCut(veh: Vehicle): boolean {
+    return this.cuts.has(veh);
   }
 
   /** Попутная полоса у точки: ближайшая по смещению среди связей, идущих примерно по dir. */
@@ -465,6 +712,7 @@ export class LaneTraffic {
   remove(veh: Vehicle): void {
     if (!this.vehicles.has(veh.id)) return;
     this.vehicles.delete(veh.id);
+    this.cuts.delete(veh);
     const lane = this.currentLane(veh);
     if (lane) queueRemove(lane.vehicles, veh);
     if (veh.onMovement) {
@@ -495,6 +743,7 @@ export class LaneTraffic {
     this.updateLights(dt);
     // Стоп-линии закрытых переездов — заново на каждый такт (barrierAhead); все открыты — их и не ищут.
     this.closedStops = this.anyBarrierClosed() ? new Map() : null;
+    if (this.cuts.size) this.rerouteCuts();
     const list = [...this.vehicles.values()];
     for (const veh of list) if (!veh.onMovement) this.laneChange(veh, dt);
     const accel = new Array<number>(list.length);
@@ -706,7 +955,8 @@ export class LaneTraffic {
 
   private laneChange(veh: Vehicle, dt: number): void {
     veh.lcCooldown -= dt;
-    if (veh.lcCooldown > 0) return;
+    // Маршрут оборван правкой и ждёт пересчёта (такт-другой) — полосу по нему не выбирают.
+    if (veh.lcCooldown > 0 || (this.cuts.size && this.cuts.has(veh))) return;
     // Поворотник перестроения решается заново при каждой проверке: горит, пока машина собирается перестроиться.
     const signal = veh.laneSignal ?? 0;
     veh.laneSignal = 0;
@@ -945,7 +1195,11 @@ export class LaneTraffic {
     let cur = lane;
     let ri = veh.routeIndex;
     for (let hop = 0; ; hop++) {
-      if (ri === veh.route.length - 1) return idmAccel(veh.v, desired, ahead + IDM.minGap + 1.5, veh.v, aMax);
+      if (ri === veh.route.length - 1) {
+        // Маршрут оборван правкой и ждёт пересчёта: к разрыву не тормозит — до него новый маршрут будет (rerouteCuts).
+        if (this.cuts.size && this.cuts.has(veh)) return idmAccel(veh.v, desired, Infinity, 0, aMax);
+        return idmAccel(veh.v, desired, ahead + IDM.minGap + 1.5, veh.v, aMax);
+      }
       const m = this.pickMovement(veh, cur, ri);
       if (!m) {
         // Полоса кончается, а перестроиться не вышло: стоим у её конца.

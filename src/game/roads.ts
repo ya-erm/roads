@@ -35,7 +35,8 @@ export class Roads {
   }
 
   /**
-   * Сеть поменялась (стройка, рост города): граф заново, машины переезжают на него. Внутри quiet — позже
+   * Сеть поменялась (стройка, рост города): граф заново (что не поменялось — готовым из прежнего графа), машины
+   * переезжают на него (кого правка не задела — без поиска полосы и пути, см. LaneTraffic.rebind). Внутри quiet — позже
    * (step): правка запоминается. Отложенные до того правки — сначала, по порядку.
    */
   changed(): void {
@@ -46,7 +47,7 @@ export class Roads {
     }
     while (this.step());
     if (this.graphOf.net === this.net && this.graphOf.version === this.net.version) return;
-    this.rebuild({ graph: new LaneGraph(this.net), net: this.net, version: this.net.version });
+    this.rebuild({ graph: new LaneGraph(this.net, undefined, this.graph), net: this.net, version: this.net.version });
   }
 
   private quieted = 0;
@@ -84,7 +85,8 @@ export class Roads {
     }
     const next = this.queue.shift();
     if (!next) return false;
-    this.built = { graph: new LaneGraph(next.net), ...next };
+    // Прежний граф — тот, на котором машины сейчас: на собранный они переедут следующим шагом.
+    this.built = { graph: new LaneGraph(next.net, undefined, this.graph), ...next };
     return true;
   }
 
