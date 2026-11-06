@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
 import { Game } from '../game/game';
+import { MoveProject } from '../game/moveProject';
 import { road, roadPlan } from '../game/testkit';
-import { oneWay, twoWay } from '../lanes/model';
+import { type LaneNet, oneWay, twoWay } from '../lanes/model';
 import { RoadTools } from './roadtools';
 
 const STREET = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
@@ -140,5 +141,42 @@ describe('Инструмент «Полоса»: протяжка', () => {
     expect(net().problems()).toEqual([]);
     // А дорога, что просто идёт рядом и ни с чем тут не сходится, по-прежнему слишком близко.
     expect(roadPlan(game, { free: { x: at.x + 330, y: at.y - 14 } }, { free: { x: at.x + 390, y: at.y - 14 } }, HIGHWAY).reason).toBe('Слишком близко к другой дороге');
+  });
+});
+
+describe('Инструмент «Полоса»: направление новой полосы', () => {
+  /** Куда едут по пристроенным полосам улицы (|смещение| > 7) с её стороны side (1 — юг, y+; −1 — север): 1 — на восток, −1 — на запад. */
+  const extraFlows = (net: LaneNet, o: Vec, side: 1 | -1) =>
+    [...net.corridors.values()]
+      .filter((c) => [c.a, c.b].every((id) => Math.abs(net.node(id).pos.y - o.y) < 1))
+      .flatMap((c) => c.lanes.filter((l) => Math.abs(l.offset) > 7 && Math.sign(l.offset) * Math.sign(net.node(c.b).pos.x - net.node(c.a).pos.x) === side).map((l) => l.flow * Math.sign(net.node(c.b).pos.x - net.node(c.a).pos.x)));
+
+  it('тянут против движения — полоса всё равно по движению с этой стороны; с Alt — встречная; в проекте так же', () => {
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const o = streetWithSeam(game);
+    const at = (dx: number, dy: number) => ({ x: o.x + dx, y: o.y + dy });
+    const tools = new RoadTools(() => game);
+    // Улица на восток: справа по ходу (y+) едут на восток, слева (y−) — на запад. Тянем справа на запад, слева на восток.
+    expect(drag(tools, [at(850, 10.5), at(700, 10.5), at(500, 10.5)])).toBeNull();
+    expect(drag(tools, [at(500, -10.5), at(650, -10.5), at(850, -10.5)])).toBeNull();
+    expect(game.roads.net.problems()).toEqual([]);
+    expect(extraFlows(game.roads.net, o, 1)).toEqual([1]);
+    expect(extraFlows(game.roads.net, o, -1)).toEqual([-1]);
+
+    // Alt — встречная: справа на западном куске, тянут на восток — едут на запад.
+    tools.reverse = true;
+    expect(drag(tools, [at(50, 10.5), at(200, 10.5), at(350, 10.5)])).toBeNull();
+    expect(extraFlows(game.roads.net, o, 1).sort()).toEqual([-1, 1]);
+    tools.reverse = false;
+
+    // Проект «Полосы»: та же правка копится в проекте — слева на западном куске, тянут на восток, едут на запад.
+    const project = new MoveProject(() => game, { shove: true, label: 'полоса' });
+    tools.base = project.net();
+    tools.lanePrefix = project.edits;
+    tools.laneSink = (edit) => project.add(edit);
+    expect(drag(tools, [at(50, -10.5), at(200, -10.5), at(350, -10.5)])).toBeNull();
+    const plan = project.plan();
+    expect(plan.ok).toBe(true);
+    expect(extraFlows(plan.net!, o, -1)).toEqual([-1, -1]);
   });
 });

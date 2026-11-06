@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ECONOMY } from '../config';
 import { Game } from '../game/game';
 import { roadPlan } from '../game/testkit';
-import { failText, money, NO_MONEY, riseLabel, signedMetres, structureHeightText } from './labels';
+import { dirArrow, failText, laneFlowText, money, NO_MONEY, riseLabel, signedMetres, structureHeightText } from './labels';
 
 describe('Подписи стройки', () => {
   it('метры со знаком: выше — плюс, ниже — типографский минус, ноль — ±', () => {
@@ -63,5 +63,15 @@ describe('Подписи стройки', () => {
     expect(plan).not.toBeNull();
     expect(plan!.cost).toBeGreaterThan(game.budget);
     expect(failText(plan!.reason, plan!.cost)).toBe(`${NO_MONEY} · ${money(plan!.cost)}`);
+  });
+
+  it('направление новой полосы — стрелкой на экране (y вниз), встречная — словом, и как развернуть', () => {
+    expect(dirArrow({ x: 1, y: 0 })).toBe('→');
+    expect(dirArrow({ x: -1, y: 0.1 })).toBe('←');
+    expect(dirArrow({ x: 0, y: -1 })).toBe('↑');
+    expect(dirArrow({ x: 0.7, y: -0.7 })).toBe('↗');
+    expect(dirArrow({ x: -0.7, y: 0.7 })).toBe('↙');
+    expect(laneFlowText({ x: 1, y: 0 }, false)).toBe('→ · Alt — развернуть');
+    expect(laneFlowText({ x: -1, y: 0 }, true)).toBe('← встречная · Alt — развернуть');
   });
 });

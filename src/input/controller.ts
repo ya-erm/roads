@@ -9,7 +9,7 @@ import { type Beside, besideGhost, besideRun, besideTrack } from '../game/railEd
 import type { RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
 import { deleteTemplate, getTemplate, saveTemplate } from '../game/templates';
-import { anchorAt, corridorUnder, edgeAt, handlePoints, laneEndAt, lanePortsNear, laneTipAt, laneTipPos, laneUnder } from '../lanes/edit';
+import { anchorAt, corridorUnder, edgeAt, handlePoints, laneEndAt, lanePortsNear, type LaneTip, laneTipAt, laneTipPos, laneUnder, newLaneFlow } from '../lanes/edit';
 import type { LaneNet } from '../lanes/model';
 import { pointOff } from '../lanes/geometry';
 import { taperLen } from '../lanes/model';
@@ -25,7 +25,7 @@ import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
 import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
-import { failText, money, NO_MONEY, riseLabel, signedMetres, structureHeightText } from './labels';
+import { dirArrow, failText, laneFlowText, money, NO_MONEY, riseLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
 import { MoveProject } from '../game/moveProject';
 import { onOldAxis } from '../game/roadbuild';
@@ -1961,6 +1961,22 @@ export class Controller {
     return h && h.node === sel.id ? h : null;
   }
 
+  /**
+   * Предпросмотр «Полосы»: как showRoadPlan, а у новой полосы от края — куда по ней поедут (стрелка, встречная ли)
+   * и «Alt — развернуть» (и когда нельзя — съезд против движения); у однополосной навстречу ходу постройки — ⇄.
+   */
+  private showLanePlan(o: ToolOverlay, plan: RoadPlan, okText: string, tip: LaneTip | undefined): void {
+    const rt = this.roadTools;
+    if (!rt.laneFlips) {
+      this.showRoadPlan(o, plan, `${okText}${rt.reverse ? ' · ⇄' : ''}`);
+      return;
+    }
+    const c = tip?.kind === 'edge' && tip.flow ? plan.net?.corridors.get(tip.corridor) : undefined;
+    const way = c && tip?.kind === 'edge' && tip.flow ? laneFlowText(scale(c.lut.tangentAt(Math.max(0, Math.min(c.length, tip.s))), tip.flow), rt.reverse) : 'Alt — развернуть';
+    this.showRoadPlan(o, plan, `${okText} · ${way}`);
+    if (!plan.ok && o.label) o.label = { ...o.label, text: `${o.label.text} · Alt — развернуть` };
+  }
+
   private showRoadPlan(o: ToolOverlay, plan: RoadPlan, okText: string): void {
     const g = this.game();
     if (plan.net) o.roads = { net: plan.net, ok: plan.ok, changed: plan.changed };
@@ -2611,7 +2627,7 @@ export class Controller {
           // По точкам: следующий кусок до курсора — как построенный; кружок — где сейчас конец полосы.
           const res = rt.laneStepPlan(p, this.spec, this.snapRadius);
           if (res) {
-            this.showRoadPlan(o, res.plan, `${res.step?.what ?? ''} · ${lanesProject ? 'проект ' : ''}${money(res.plan.cost)}${rt.reverse ? ' · ⇄' : ''}`);
+            this.showLanePlan(o, res.plan, `${res.step?.what ?? ''} · ${lanesProject ? 'проект ' : ''}${money(res.plan.cost)}`, res.step?.tip);
             if (lanesProject) this.showLaneProject(o, res.plan);
             const next = res.step && res.plan.net ? laneTipPos(res.plan.net, res.step.tip) : null;
             o.points = [{ pos: tipAt, color: '#27ae60', r: 6 }, ...(next ? [{ pos: next, color: '#27ae60', r: 4 }] : [])];
@@ -2644,13 +2660,19 @@ export class Controller {
           // Где встанет полоса: у края дороги — зелёный кружок.
           const e = edgeAt(net, p);
           o.points = [...(o.points ?? []), ...(e ? [{ pos: e.pos, color: '#27ae60', r: 5 }] : [])];
-          o.label = { text: e ? 'Кликайте по точкам или тяните: вдоль края — полоса, в сторону — съезд' : 'Клик у края дороги, на полосе или в поле', ok: true };
+          // Куда поедут по новой полосе у этого края (по ходу движения с этой стороны; Alt — встречная).
+          const ec = e && net.corridors.get(e.corridor);
+          const way = e && ec ? ` ${dirArrow(scale(ec.lut.tangentAt(e.s), newLaneFlow(ec, e.offset, e.s, rt.reverse)))}${rt.reverse ? ' встречная' : ''}` : '';
+          o.label = {
+            text: e ? `Кликайте по точкам или тяните: вдоль края — полоса${way}, в сторону — съезд · Alt — развернуть` : 'Клик у края дороги, на полосе или в поле',
+            ok: true,
+          };
           break;
         }
         // Тянут: что построится (вдоль, съезд, въезд — и через стыки), возврат — если полоса короче.
         const res = rt.lanePlan(this.spec);
         if (res) {
-          this.showRoadPlan(o, res.plan, `${res.what} · ${lanesProject ? 'проект ' : ''}${res.plan.cost < 0 ? `+${money(-res.plan.cost)}` : money(res.plan.cost)}${rt.reverse ? ' · ⇄' : ''}`);
+          this.showLanePlan(o, res.plan, `${res.what} · ${lanesProject ? 'проект ' : ''}${res.plan.cost < 0 ? `+${money(-res.plan.cost)}` : money(res.plan.cost)}`, res.step?.tip);
           if (lanesProject) this.showLaneProject(o, res.plan);
         }
         break;

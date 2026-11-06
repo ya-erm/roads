@@ -47,3 +47,14 @@ export function failText(reason: string | undefined, cost: number | undefined, f
   if (reason === NO_MONEY && cost !== undefined && cost > 0) return `${NO_MONEY} · ${money(cost)}`;
   return reason || fallback;
 }
+
+/** Стрелка направления на экране (ось y — вниз): одна из восьми, ближайшая к dir. */
+export function dirArrow(dir: { x: number; y: number }): string {
+  const k = Math.round(Math.atan2(dir.y, dir.x) / (Math.PI / 4));
+  return ['→', '↘', '↓', '↙', '←', '↖', '↑', '↗'][((k % 8) + 8) % 8];
+}
+
+/** Подпись новой полосы у края: куда по ней поедут, встречная ли и как развернуть. */
+export function laneFlowText(dir: { x: number; y: number }, reversed: boolean): string {
+  return `${dirArrow(dir)}${reversed ? ' встречная' : ''} · Alt — развернуть`;
+}

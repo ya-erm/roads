@@ -92,7 +92,7 @@ export class RoadTools {
    * away — куда ушли в сторону (съезд или однополосная); r — радиус прилипания.
    */
   laneDrag: { tip: LaneTip; entry: Vec | null; along: Vec | null; away: Vec | null; r: number } | null = null;
-  /** Односторонняя и полоса — навстречу ходу постройки (Alt переключает). */
+  /** Односторонняя — навстречу ходу постройки, новая полоса у края — встречная (Alt переключает). */
   reverse = false;
   /** Узел, который тянут. */
   dragNode: number | null = null;
@@ -510,7 +510,7 @@ export class RoadTools {
   }
 
   /** Что построится по протяжке: план, подпись и сама правка (для проекта полос). */
-  lanePlan(spec: RoadSpec): { plan: RoadPlan; what: string; edit: NetEdit } | null {
+  lanePlan(spec: RoadSpec): { plan: RoadPlan; what: string; edit: NetEdit; step?: LaneStepOut['step'] } | null {
     const d = this.laneDrag;
     if (!d) return null;
     const tipCls = this.tipClass(d.tip);
@@ -531,7 +531,13 @@ export class RoadTools {
     const qs = pts.filter((q): q is Vec => !!q);
     if (!qs.length) return null;
     const res = this.laneSteps(d.tip, qs, tipCls, d.r, spec);
-    return { plan: res.plan, what: res.step?.what ?? '', edit: res.edit };
+    return { plan: res.plan, what: res.step?.what ?? '', edit: res.edit, step: res.step };
+  }
+
+  /** Ведут новую полосу от края дороги: её направление — по ходу движения с этой стороны, Alt разворачивает. */
+  get laneFlips(): boolean {
+    const tip = this.laneDrag?.tip ?? this.laneTip;
+    return tip?.kind === 'edge' && tip.flow === undefined;
   }
 
   /** «Полоса по точкам» от tip через qs: правка, её план (после правок проекта) и новый конец. */
