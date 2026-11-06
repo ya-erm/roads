@@ -4,7 +4,7 @@
  * обрабатывает Hud. Объясняем картинками: значки заданий и грузов, полоски, медали; текст — подписи и title.
  */
 import { ECONOMY, MONTH_LENGTH } from '../config';
-import { clockText, durationText } from '../core/timeText';
+import { clockText, durationText, leftText } from '../core/timeText';
 import type { Game } from '../game/game';
 import { isIndustry, resolve } from '../scenario/analysis';
 import { ARCHETYPE_LIST, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, MEDALS, PHASES, REPUTATION } from '../scenario/content';
@@ -75,7 +75,8 @@ export function shortMoney(n: number): string {
 }
 
 /**
- * Сколько осталось до срока — минутами и секундами игры: «3:20». Меньше стольких секунд — красным: задание —
+ * Сколько осталось до срока: у задания — спокойно, целыми минутами («5 мин», последнюю минуту — «59 сек»,
+ * leftText), у предложения контракта — таймером «3:20» (clockText). Меньше стольких секунд — красным: задание —
  * 4 мин, предложение контракта — 2 мин, плашка предложения вверху — минута.
  */
 const URGENT = { goal: 240, offer: 120, banner: 60 };
@@ -135,14 +136,14 @@ export function toggleFold(o: Objective): void {
   else o.folded = next;
 }
 
-/** Остаток срока задания «м:сс»: красным — меньше 4 минут, ∞ — без срока; закрытое — пусто. */
+/** Остаток срока задания — «5 мин», последнюю минуту — «59 сек»: красным — меньше 4 минут, ∞ — без срока; закрытое — пусто. */
 function timeHtml(sc: Scenario, o: Objective): string {
   if (o.status === 'done' && o.quick) return '<span class="sc-fast done" data-tip="Выполнено к быстрому сроку: надбавка и очки за быстроту">⚡</span>';
   if (o.status !== 'active') return '';
   const left = sc.secondsLeft(o);
   const main =
     left !== null
-      ? `<span class="sc-left${urgent(left, URGENT.goal)}" data-tip="Осталось до срока, мин:сек">⏳ ${clockText(left)}</span>`
+      ? `<span class="sc-left${urgent(left, URGENT.goal)}" data-tip="Осталось до срока">⏳ ${leftText(left)}</span>`
       : '<span class="sc-left" data-tip="Без срока">⏳ ∞</span>';
   return fastHtml(sc, o) + main;
 }
@@ -153,7 +154,7 @@ function fastHtml(sc: Scenario, o: Objective): string {
   if (left === null) return '';
   const bonus = fastBonus(o);
   const tip = `Быстрый срок — необязательный. Успеете: ${bonus ? `+$${bonus.toLocaleString('ru-RU')} к награде и ` : ''}очки за быстроту`;
-  return `<span class="sc-fast" data-tip="${esc(tip)}">⚡ ${clockText(left)}</span>`;
+  return `<span class="sc-fast" data-tip="${esc(tip)}">⚡ ${leftText(left)}</span>`;
 }
 
 /** Размер значка задания в панели — один для свёрнутых и развёрнутых. */
@@ -493,7 +494,7 @@ function compactHtml(sc: Scenario): string {
   const progress = gauge ? `${gauge.text} в этом месяце` : progressText(main);
   return `<div class="sc-compact" title="${esc(main.title)} · ${esc(progress)}">${letter}${objectiveIcon(main, 18)}
     <div class="bar sc-bar"><div style="width:${((gauge ? gauge.fraction : fraction(main)) * 100).toFixed(1)}%"></div></div>
-    ${left !== null ? `<span class="sc-left${urgent(left, URGENT.goal)}">⏳ ${clockText(left)}</span>` : ''}</div>`;
+    ${left !== null ? `<span class="sc-left${urgent(left, URGENT.goal)}">⏳ ${leftText(left)}</span>` : ''}</div>`;
 }
 
 export interface PanelView {

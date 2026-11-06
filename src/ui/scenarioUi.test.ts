@@ -160,15 +160,20 @@ describe('Шкала месячной цели в панели сценария'
 });
 
 describe('Сроки — минутами и секундами, а не месяцами', () => {
-  it('до срока задания и до конца предложения — «м:сс», срок контракта и быстрый срок — «N мин»', () => {
+  it('до срока задания — спокойно, «4 мин» (вверх), до конца предложения — таймер «м:сс», срок контракта — «N мин»', () => {
     const { game, sc, extra } = scenarioWithOffers();
     // Середина месяца: до начала следующего — ровно 30 с, до конца предложения — столько же.
     game.time = (sc.month + 0.5) * MONTH_LENGTH;
     const goal = sc.current.find((o) => o.deadline !== null)!;
     goal.deadline = sc.month + 4;
     const panel = scenarioPanelHtml(game, view());
-    expect(panel).toContain(`⏳ ${clockText(3.5 * MONTH_LENGTH)}`);
+    // 3,5 минуты — «4 мин»: секунды у сроков заданий не бегут.
+    expect(panel).toContain('⏳ 4 мин');
+    expect(panel).not.toContain(`⏳ ${clockText(3.5 * MONTH_LENGTH)}`);
     expect(panel).not.toMatch(/\d мес\./);
+    // Последняя минута — секундами.
+    goal.deadline = sc.month + 1;
+    expect(scenarioPanelHtml(game, view())).toContain('⏳ 30 сек');
     const offers = offersPanelHtml(game, new Set());
     expect(offers).toContain(`⌛ ${clockText(0.5 * MONTH_LENGTH)}`);
     expect(offers).toContain(`⏳ ${durationText(extra.months! * MONTH_LENGTH)}`);
@@ -178,9 +183,16 @@ describe('Сроки — минутами и секундами, а не мес�
     expect(offers).not.toMatch(/\d мес\./);
   });
 
-  it('брифинг: ожидаемая продолжительность — в минутах', () => {
+  it('брифинг: ожидаемая продолжительность и сроки целей — в минутах, «10 мин», а не «10:00»', () => {
     const { game, sc } = scenarioWithOffers();
-    expect(briefHtml(game)).toContain(`<b>≈ ${Math.round((sc.state.brief.months * MONTH_LENGTH) / 60)}</b><small>мин</small>`);
+    const html = briefHtml(game);
+    expect(html).toContain(`<b>≈ ${Math.round((sc.state.brief.months * MONTH_LENGTH) / 60)}</b><small>мин</small>`);
+    const goals = html.slice(html.indexOf('class="brief-goals"'), html.indexOf('Стартовый контракт'));
+    const goal = sc.current.find((o) => o.deadline !== null)!;
+    expect(goals).toContain(`⏳ ${Math.ceil(sc.secondsLeft(goal)! / 60)} мин`);
+    const fast = sc.current.find((o) => o.fast !== undefined);
+    if (fast) expect(goals).toContain(`⚡ ${Math.ceil(sc.fastLeft(fast)! / 60)} мин`);
+    expect(goals).not.toMatch(/[⏳⚡] \d+:\d\d/);
   });
 });
 
