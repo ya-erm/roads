@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addPhase, movePhase, removePhase, toggleTurn, withLeftArrows } from '../lanes/lights';
+import { addPhase, movePhase, phaseToggle, removePhase, specOf, toggleTurn, withLeftArrows } from '../lanes/lights';
 import { renameArm } from '../lanes/model';
 import { Game } from './game';
 import { withoutCitizens } from './testkit';
@@ -102,5 +102,41 @@ describe('Фазы светофора в игре', { timeout: 30_000 }, () => {
     renameArm(copy, arm, 999);
     expect(copy.phases.flatMap((p) => p.go).some((k) => k.split('>').includes(String(arm)))).toBe(false);
     expect(copy.phases.flatMap((p) => p.go).some((k) => k.split('>').includes('999'))).toBe(true);
+  });
+
+  it('правка фазы на карте: поперечный — нельзя, свой — снять; машины — по новой фазе; Ctrl+Z и сохранение', () => {
+    const { game, n, info, turn } = lit();
+    const L = () => game.roads.graph.nodes.get(n.id)!.lights!;
+    const [a, b] = info().phases;
+    // В фазе a поперечные прямые — «нельзя», с кем пересекутся — зелёные a.
+    const states = game.phaseStates(n.id, 0)!;
+    const cross = b.go.find((k) => states.get(k)!.look === 'blocked')!;
+    expect(cross).toBeDefined();
+    expect(states.get(cross)!.with.every((k) => a.go.includes(k))).toBe(true);
+    expect(game.phaseStates(n.id, 9)).toBeNull();
+    // Отказ: фазы не меняются.
+    const refused = phaseToggle(specOf(L().phases), 0, cross, states);
+    expect(refused.clash.length).toBeGreaterThan(0);
+    // Снять зелёный прямому фазы a (как клик по проезду), со снимком для Ctrl+Z.
+    const straight = a.go.find((k) => [0, 1, 2, 3].some((i) => k === turn(i, 'straight')))!;
+    expect(straight).toBeDefined();
+    game.checkpoint('фаза светофора');
+    game.editPhases(n.id, (s) => phaseToggle(s, 0, straight, states).spec);
+    game.commit();
+    expect(info().phases[0].go).not.toContain(straight);
+    // Машины едут по новой фазе: у прямого зелёного в фазе 0 больше нет — его манёвры не в ней.
+    const g = game.roads.graph;
+    const moves = (g.junctionMoves.get(n.id) ?? []).filter((m) => g.turnOf(m) === straight);
+    expect(moves.length).toBeGreaterThan(0);
+    expect(moves.some((m) => L().phases[0].moves.has(m.key))).toBe(false);
+    // Он не попал ни в одну фазу — своя «Авто» в конце: стоять вечно не будет.
+    expect(L().phases.some((p) => p.extra && p.go.includes(straight))).toBe(true);
+    // Сохранение: та же правка.
+    const loaded = withoutCitizens(new Game(game.settings, JSON.parse(JSON.stringify(game.toSave()))));
+    expect(loaded.junctionInfo(n.id)!.phases[0].go).not.toContain(straight);
+    // Ctrl+Z — как было («Авто»).
+    expect(game.undo()).toBe('фаза светофора');
+    expect(info().phasesCustom).toBe(false);
+    expect(info().phases[0].go).toContain(straight);
   });
 });

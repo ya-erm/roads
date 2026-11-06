@@ -3,7 +3,7 @@
  * секции светофора на карте и правка фаз игроком. Чистая логика — без графа и движения: манёвры приходят снаружи.
  */
 import { LIGHTS } from '../config';
-import { angleDiff, angleOf, dot, type Vec } from '../core/vec';
+import { angleDiff, angleOf, dist, dot, type Vec } from '../core/vec';
 import type { ConflictKind } from './graph';
 
 /**
@@ -203,15 +203,145 @@ export const stepGreen = (spec: PhaseSpec[], i: number, d: number): PhaseSpec[] 
 
 /**
  * Стрелки налево: перед каждой фазой, где кто-то поворачивает налево, уступая встречным (lefts[i] — эти повороты),
- * — своя короткая фаза только для них, без встречных. Уже есть такая перед ней — не добавляется.
+ * — своя короткая фаза только для них, без встречных. Перед ней уже есть фаза, где они все едут, никому не уступая
+ * (стрелка, может быть, вместе с правыми поворотами), — не добавляется.
  */
 export function withLeftArrows(spec: PhaseSpec[], lefts: string[][], green = ARROW_GREEN): PhaseSpec[] {
-  const same = (a: string[], b: string[]) => a.length === b.length && a.every((t) => b.includes(t));
   const res: PhaseSpec[] = [];
+  // Кто уступает в предыдущей фазе: у вставленной стрелки — никто.
+  let prevYields: string[] = [];
   spec.forEach((p, i) => {
     const l = lefts[i] ?? [];
-    if (l.length && !(res.length && same(res[res.length - 1].go, l))) res.push({ go: [...l], green });
+    const prev = res[res.length - 1];
+    const covered = !!prev && l.every((t) => prev.go.includes(t) && !prevYields.includes(t));
+    if (l.length && !covered) res.push({ go: [...l], green });
     res.push(p);
+    prevYields = l;
   });
   return res;
+}
+
+/**
+ * Какую фазу править дальше, если фазу i переставили на d мест (d = null — убрали), а правили фазу edited:
+ * номер едет вместе со своей фазой; убрали её саму — null. count — сколько фаз было (за край не переставить).
+ */
+export function editedAfter(edited: number, i: number, d: number | null, count: number): number | null {
+  if (d === null) {
+    if (count <= 1) return edited;
+    return edited === i ? null : edited > i ? edited - 1 : edited;
+  }
+  const j = i + d;
+  if (j < 0 || j >= count) return edited;
+  return edited === i ? j : edited === j ? i : edited;
+}
+
+// ---------- Правка фазы на карте: проезды перекрёстка ----------
+
+/**
+ * Поворот в фазе: едет; едет, уступая встречным; конфликт — зелёный, но пересекает другой зелёный (старая настройка);
+ * нельзя — красный, и зелёный ему не дать: пересечёт зелёный фазы; можно — красный, зелёный дать можно.
+ */
+export type TurnLook = 'go' | 'yield' | 'clash' | 'blocked' | 'free';
+
+export interface TurnState {
+  look: TurnLook;
+  /** Зелёные повороты фазы, которые этот пересекает, а уступать некому (у clash и blocked). */
+  with: string[];
+}
+
+/**
+ * Повороты перекрёстка в фазе с зелёным go: кто едет, кто уступает встречным и с какими зелёными пересечётся каждый
+ * (поперечные потоки — так фаза быть не может). moves — манёвры перекрёстка, turnOf — их поворот. Пары судит
+ * phaseRelations, а он смотрит на каждую пару отдельно — поэтому достаточно одного прохода по всем манёврам.
+ */
+export function phaseTurnStates<M extends PhaseMove>(moves: M[], turnOf: (m: M) => string, go: string[]): Map<string, TurnState> {
+  const on = new Set(go);
+  const turn = new Map(moves.map((m) => [m.key, turnOf(m)]));
+  const { yields, clashes } = phaseRelations(moves);
+  const clashWith = new Map<string, Set<string>>();
+  const note = (t: string, other: string) => {
+    if (t === other || !on.has(other)) return;
+    const set = clashWith.get(t);
+    if (set) set.add(other);
+    else clashWith.set(t, new Set([other]));
+  };
+  for (const [a, b] of clashes) {
+    note(turn.get(a)!, turn.get(b)!);
+    note(turn.get(b)!, turn.get(a)!);
+  }
+  // Уступает, если в фазе есть тот, кому уступать.
+  const yielding = new Set<string>();
+  for (const [who, to] of yields) {
+    const t = turn.get(who)!;
+    if (on.has(t) && [...to].some((k) => on.has(turn.get(k)!))) yielding.add(t);
+  }
+  const res = new Map<string, TurnState>();
+  for (const t of new Set(turn.values())) {
+    const w = [...(clashWith.get(t) ?? [])];
+    if (on.has(t)) res.set(t, { look: w.length ? 'clash' : yielding.has(t) ? 'yield' : 'go', with: w });
+    else res.set(t, { look: w.length ? 'blocked' : 'free', with: w });
+  }
+  return res;
+}
+
+/** С какими зелёными из go пересечётся поворот turn, если дать зелёный и ему (уступать некому). Пусто — можно. */
+export function turnClashes<M extends PhaseMove>(moves: M[], turnOf: (m: M) => string, go: string[], turn: string): string[] {
+  return phaseTurnStates(
+    moves,
+    turnOf,
+    go.filter((t) => t !== turn),
+  ).get(turn)?.with ?? [];
+}
+
+/**
+ * Клик по проезду в фазе i: зелёный был — снять; не было — дать, если не пересечёт зелёные фазы (states — её повороты,
+ * phaseTurnStates). Иначе отказ: фазы как были, clash — с какими зелёными пересёкся бы.
+ */
+export function phaseToggle(spec: PhaseSpec[], i: number, turn: string, states: Map<string, TurnState>): { spec: PhaseSpec[]; clash: string[] } {
+  if (!spec[i]) return { spec, clash: [] };
+  const clash = spec[i].go.includes(turn) ? [] : (states.get(turn)?.with ?? []);
+  return clash.length ? { spec, clash } : { spec: toggleTurn(spec, i, turn), clash };
+}
+
+/** Какую долю длины пути манёвра с каждого конца не считать при выборе проезда: там сходятся пути соседних поворотов. */
+const PATH_ENDS = 0.15;
+
+/** Расстояние от p до части ломаной pts от from до to (по длине). */
+function distToPart(pts: Vec[], p: Vec, from: number, to: number): number {
+  let best = Infinity;
+  let s = 0;
+  for (let k = 1; k < pts.length; k++) {
+    const a = pts[k - 1];
+    const b = pts[k];
+    const l = dist(a, b);
+    const s0 = s;
+    s += l;
+    if (l < 1e-9) continue;
+    const t0 = Math.max(0, (from - s0) / l);
+    const t1 = Math.min(1, (to - s0) / l);
+    if (t1 < t0) continue;
+    const t = Math.max(t0, Math.min(t1, ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / (l * l)));
+    best = Math.min(best, Math.hypot(p.x - a.x - (b.x - a.x) * t, p.y - a.y - (b.y - a.y) * t));
+  }
+  return best;
+}
+
+/**
+ * Проезд под точкой p: поворот, путь манёвра которого ближе всех к ней и не дальше r. Концы путей (у стоп-линии
+ * из одной полосы выходят и налево, и прямо; на выезде сходятся) — не в счёт, по PATH_ENDS длины с каждой стороны.
+ */
+export function turnAt(paths: { turn: string; points: Vec[] }[], p: Vec, r: number): string | null {
+  let best: string | null = null;
+  let bestD = r;
+  for (const path of paths) {
+    const pts = path.points;
+    let total = 0;
+    for (let k = 1; k < pts.length; k++) total += dist(pts[k - 1], pts[k]);
+    const d = distToPart(pts, p, total * PATH_ENDS, total * (1 - PATH_ENDS));
+    if (d <= bestD) {
+      bestD = d;
+      best = path.turn;
+    }
+  }
+  return best;
 }

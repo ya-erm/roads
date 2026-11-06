@@ -1460,45 +1460,6 @@ button.icon.toggle-spacing {
   flex: 1;
 }
 
-.turn-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 3px;
-}
-
-.turn-row .from {
-  width: 52px;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.turn {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  min-width: 34px;
-  padding: 2px 4px;
-  border-radius: 6px;
-  border: 1.5px solid #cfe0f7;
-  background: #eef5fe;
-  font-size: 16px;
-  line-height: 1.1;
-  cursor: pointer;
-}
-
-.turn small {
-  font-size: 9px;
-  color: var(--muted);
-}
-
-.turn.banned {
-  border-color: #f2c4c1;
-  background: #fdeceb;
-  color: #d64541;
-  text-decoration: line-through;
-}
-
 /* Фазы светофора: плитка на фазу — схема перекрёстка со стрелками, длительность, порядок. */
 .ph-tiles {
   display: flex;
@@ -1582,12 +1543,62 @@ button.icon.toggle-spacing {
   display: block;
 }
 
-.ph-pic .ph-turn {
-  cursor: pointer;
+/* Схема фазы — кнопка: выбрать фазу для правки на карте (кликами по проездам перекрёстка). */
+.ph-pick {
+  position: relative;
+  padding: 0;
+  line-height: 0;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
 }
 
-.ph-pic .ph-turn:hover path.ph-vis[stroke] {
-  stroke-width: 3.6;
+.ph-pick:hover {
+  border-color: #9ec5f4;
+  background: #fff;
+}
+
+.ph-tile.editing {
+  border-color: #2f80ed;
+  background: #eaf2fd;
+  box-shadow: 0 0 0 2px rgba(47, 128, 237, 0.25);
+}
+
+.ph-tile.editing .ph-pick {
+  border-color: #2f80ed;
+  background: #fff;
+}
+
+.ph-pen {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #2f80ed;
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.ph-editing {
+  margin-top: 4px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: #eaf2fd;
+  color: #1f5fbf;
+  font-size: 11.5px;
+}
+
+.ph-editing kbd {
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid #9ec5f4;
+  background: #fff;
 }
 
 .ph-pic .ph-flash .ph-vis {

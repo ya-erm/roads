@@ -27,7 +27,7 @@ import { altitudeText } from '../render/relief';
 import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
-import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
+import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LANE_W, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
 import { dirArrow, failText, laneFlowText, money, NO_MONEY, riseLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
 import type { MoveProject } from '../game/moveProject';
@@ -40,6 +40,8 @@ import { type DrawSettings, type ProjectTools, sharedRoadProject } from './proje
 import { RailTools } from './railtools';
 import { markAt, warningMarks, type WarningMark } from '../game/stationWarnings';
 import { deckHeight, RoadTools } from './roadtools';
+import { phaseToggle, specOf, turnAt } from '../lanes/lights';
+import { phaseTurns } from '../ui/phasesUi';
 
 export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain';
 
@@ -248,6 +250,10 @@ export class Controller {
   placingAnnex: number | null = null;
   /** Настройка полос выбранного перекрёстка: полоса въезда, которую сейчас соединяем. */
   laneFrom: { seg: number; i: number } | null = null;
+  /** Правка фазы светофора на карте: перекрёсток и номер фазы (выбрана в карточке); клик по проезду — его зелёный в ней. */
+  phaseEdit: { node: number; i: number } | null = null;
+  /** Отказ дать зелёный: проезд и зелёные, которые он пересёк бы, мигают красным на карте и в карточке до until. */
+  phaseFlash: { node: number; i: number; turns: string[]; until: number } | null = null;
   /** Курсор на варианте главной дороги в карточке перекрёстка — карта показывает этот вариант. */
   mainHover: { node: number; mainPair: number[] | null } | null = null;
   heatmap = false;
@@ -363,6 +369,7 @@ export class Controller {
     this.roadTools.clear();
     this.railTools.clear();
     this.laneFrom = null;
+    this.phaseEdit = null;
     this.onChange();
   }
 
@@ -938,6 +945,8 @@ export class Controller {
     if (sel) this.selectedLine = null;
     this.following = false;
     this.laneFrom = null;
+    // Выбрали другое — правка фазы закончена.
+    if (sel?.type !== 'junction' || sel.id !== this.phaseEdit?.node) this.phaseEdit = null;
     this.mainHover = null;
     this.fleetHover = null;
     // Выбрали что-то другое — склад этой станции больше не ставим.
@@ -974,6 +983,7 @@ export class Controller {
     else if (this.movingStation !== null) this.movingStation = null;
     else if (this.placingWarehouse !== null) this.placingWarehouse = null;
     else if (this.placingAnnex !== null) this.placingAnnex = null;
+    else if (this.phaseEdit) this.phaseEdit = null;
     else if (this.copyStart) this.copyStart = null;
     else if (this.pasteDrag) this.pasteDrag = null;
     else if (this.cancelPaste()) {
@@ -1324,6 +1334,8 @@ export class Controller {
     this.hover = p;
     const g = this.game();
     this.left = { sx: e.clientX, sy: e.clientY, createdChain: false };
+    // Правка фазы светофора: клик по проезду перекрёстка — его зелёный в этой фазе (снимок для Ctrl+Z — там же).
+    if (this.phaseEdit && this.phaseClick(p)) return;
     this.syncMoveBase();
     // Проект ничего не строит: узел, перо или середину участка — тянуть, клик — решится при отпускании.
     if (this.projectMode) {
@@ -1611,12 +1623,127 @@ export class Controller {
     );
   }
 
+  // ---------- Фазы светофора на карте ----------
+
+  /**
+   * Править на карте фазу i светофора node (выбрали в карточке); null — закончить. toggle — клик по плитке: та же
+   * фаза ещё раз — тоже закончить.
+   */
+  editPhase(node: number, i: number | null, toggle = true): void {
+    const same = this.phaseEdit?.node === node && this.phaseEdit.i === i;
+    if (i === null || (same && toggle)) this.phaseEdit = null;
+    else {
+      // В «Выборе» (или в «Перекрёстке», где открыли карточку): клики других инструментов строят.
+      if (this.tool !== 'select' && this.tool !== 'lights') this.setTool('select');
+      this.laneFrom = null;
+      this.phaseEdit = { node, i };
+    }
+    this.phaseFlash = null;
+    this.onChange();
+  }
+
+  /** Правка фазы, если она ещё в силе: перекрёсток выбран, светофор стоит, фаза есть (после Ctrl+Z может и не быть). */
+  private livePhase(): { node: number; i: number } | null {
+    const e = this.phaseEdit;
+    if (!e) return null;
+    const sel = this.selection;
+    const L = this.game().roads.graph.nodes.get(e.node)?.lights;
+    if (sel?.type !== 'junction' || sel.id !== e.node || !L || e.i >= L.phases.length) {
+      this.phaseEdit = null;
+      return null;
+    }
+    return e;
+  }
+
+  /** Проезд перекрёстка node под точкой p: поворот ближайшего пути манёвра (src/lanes/lights.ts, turnAt). */
+  private phaseTurnAt(node: number, p: Vec): string | null {
+    const g = this.game().roads.graph;
+    const paths = (g.junctionMoves.get(node) ?? []).map((m) => ({ turn: g.turnOf(m), points: m.points }));
+    return turnAt(paths, p, Math.max(LANE_W * 0.5, 9 / this.camera.zoom));
+  }
+
+  /** Точка p — на перекрёстке node: в круге, которым он обведён на карте. */
+  private onPhaseNode(node: number, p: Vec): boolean {
+    const g = this.game().roads.graph;
+    const n = g.nodes.get(node);
+    if (!n) return false;
+    const moves = g.junctionMoves.get(node) ?? [];
+    const r = Math.max(12, ...moves.map((m) => dist(n.pos, m.points[0])));
+    return dist(n.pos, p) <= r + 10;
+  }
+
+  /** Подписи поворотов перекрёстка: «З налево на С». */
+  private turnNames(node: number): Map<string, string> {
+    const info = this.game().junctionInfo(node);
+    return new Map(info ? phaseTurns(info).map((t) => [t.key, t.name]) : []);
+  }
+
+  /**
+   * Клик в правке фазы: по проезду — дать или снять ему зелёный (пересечёт зелёный — отказ, оба мигают красным);
+   * мимо проездов, но на перекрёстке — подсказка; дальше — правка закончена, клик как обычно. true — клик принят.
+   */
+  private phaseClick(p: Vec): boolean {
+    const e = this.livePhase();
+    if (!e) return false;
+    const g = this.game();
+    const turn = this.phaseTurnAt(e.node, p);
+    if (!turn) {
+      if (this.onPhaseNode(e.node, p)) {
+        this.showError('Кликните по проезду через перекрёсток');
+        return true;
+      }
+      this.phaseEdit = null;
+      this.onChange();
+      return false;
+    }
+    const L = g.roads.graph.nodes.get(e.node)?.lights;
+    const states = g.phaseStates(e.node, e.i);
+    if (!L || !states) return false;
+    const res = phaseToggle(specOf(L.phases), e.i, turn, states);
+    if (res.clash.length) {
+      this.phaseFlash = { node: e.node, i: e.i, turns: [turn, ...res.clash], until: performance.now() + 1600 };
+      this.showError('Нельзя: пересекается с зелёным этой фазы');
+    } else {
+      // Фазы — тоже стройка: отменяются Ctrl+Z.
+      g.checkpoint('фаза светофора');
+      g.editPhases(e.node, () => res.spec);
+      g.commit();
+      this.phaseFlash = null;
+    }
+    this.onChange();
+    return true;
+  }
+
+  /** Курсор в правке фазы: проезд под ним — ярче, подпись — что сделает клик. true — подпись есть. */
+  private phaseHover(o: ToolOverlay, p: Vec): boolean {
+    const pe = o.phaseEdit;
+    if (!pe) return false;
+    const turn = this.phaseTurnAt(pe.node, p);
+    if (!turn) {
+      if (!this.onPhaseNode(pe.node, p)) return false;
+      o.label = { text: `Фаза ${pe.i + 1}: кликните по проезду · Esc — готово`, ok: true };
+      return true;
+    }
+    pe.hover = turn;
+    const names = this.turnNames(pe.node);
+    const name = names.get(turn) ?? turn;
+    const st = pe.states.get(turn);
+    if (st?.look === 'blocked') {
+      // С чем пересечётся — два первых, остальные числом: их и так видно красным на карте.
+      const list = st.with.map((t) => names.get(t) ?? t);
+      const what = list.length > 2 ? `${list.slice(0, 2).join(', ')} и ещё ${list.length - 2}` : list.join(', ');
+      o.label = { text: `${name}: нельзя — пересечёт ${what}`, ok: false };
+    }
+    else o.label = { text: `${name}: ${st && st.look !== 'free' ? 'снять зелёный' : 'дать зелёный'}`, ok: true };
+    return true;
+  }
+
   // ---------- Полосы перекрёстка ----------
 
-  /** Метки полос выбранного перекрёстка — только с инструментом «Перекрёсток». */
+  /** Метки полос выбранного перекрёстка — только с инструментом «Перекрёсток» и не в правке фазы. */
   private laneEnds(): LaneEnd[] {
     const sel = this.selection;
-    if (this.tool !== 'lights' || sel?.type !== 'junction') return [];
+    if (this.tool !== 'lights' || sel?.type !== 'junction' || this.livePhase()) return [];
     return this.game().laneEnds(sel.id);
   }
 
@@ -2575,6 +2702,14 @@ export class Controller {
       if (this.laneFrom && !this.activeLane(laneEnds)) this.laneFrom = null;
       o.laneEdit = { node: this.selection.id, ends: laneEnds, from: this.laneFrom, hover: null };
     }
+    // Правка фазы светофора: проезды перекрёстка цветом по фазе, отказ — мигает.
+    const pe = this.livePhase();
+    const states = pe && g.phaseStates(pe.node, pe.i);
+    if (pe && states) {
+      const fl = this.phaseFlash;
+      const refused = fl && fl.until > performance.now() && fl.node === pe.node && fl.i === pe.i ? fl.turns : [];
+      o.phaseEdit = { node: pe.node, i: pe.i, states, hover: null, flash: refused };
+    }
     if (this.selection?.type === 'station') {
       const st = g.stations.get(this.selection.id);
       if (st) {
@@ -2607,6 +2742,11 @@ export class Controller {
       const part = res && res.parts > 1 ? (this.ctrl ? ' · только этот участок' : ' · Cmd/Ctrl — только этот участок') : '';
       if (res) this.showRoadPlan(o, res.plan, `${res.was} → ${this.dragLimit} км/ч${part}`);
       else o.label = { text: `${this.dragLimit} км/ч — отпустите на дороге`, ok: true };
+      return o;
+    }
+    // Правка фазы: над перекрёстком — проезд под курсором и что сделает клик (поверх подсказок инструмента).
+    if (this.phaseHover(o, p)) {
+      if (flash) o.label = { text: flash, ok: false };
       return o;
     }
 

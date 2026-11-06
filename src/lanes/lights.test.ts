@@ -4,13 +4,18 @@ import { GMove, LaneGraph } from './graph';
 import {
   addPhase,
   autoGroups,
+  editedAfter,
   movePhase,
   phaseRelations,
+  phaseToggle,
+  phaseTurnStates,
   removePhase,
   resolvePhases,
   signalHeads,
   stepGreen,
   toggleTurn,
+  turnAt,
+  turnClashes,
   turnKind,
   withLeftArrows,
 } from './lights';
@@ -155,6 +160,12 @@ describe('Фазы светофора: модель', () => {
     expect(arrows.map((p) => p.go)).toEqual([['a'], ['a'], ['c', 'b']]);
     // В самой фазе со стрелкой налево никому не уступают — у неё левых «на общий зелёный» нет.
     expect(withLeftArrows(arrows, [[], ['a'], []])).toEqual(arrows);
+    // Стрелку дополнили правым поворотом (правка на карте) — она всё равно стрелка: вторую не добавить.
+    const withRight = [{ go: ['a', 'r'], green: 6 }, { go: ['a', 'c'], green: 8 }];
+    expect(withLeftArrows(withRight, [[], ['a']])).toEqual(withRight);
+    // А если там, перед ней, налево тоже уступают — это не стрелка: добавить.
+    const twice = [{ go: ['a', 'x'], green: 8 }, { go: ['a', 'c'], green: 8 }];
+    expect(withLeftArrows(twice, [['a'], ['a']]).map((p) => p.go)).toEqual([['a'], ['a', 'x'], ['a'], ['a', 'c']]);
   });
 
   it('кто кому уступает: налево — встречному прямо и направо; поперечные потоки в одной фазе — конфликт', () => {
@@ -197,6 +208,101 @@ describe('Фазы светофора: модель', () => {
     const auto = crossroads();
     expect(auto.L.heads.every((h) => h.arrows.length === 0)).toBe(true);
     expect(signalHeads([], [])).toEqual([]);
+  });
+});
+
+describe('Фаза на карте: проезды перекрёстка', () => {
+  /** Крест 1+1 со светофором: манёвры, их повороты и ключ поворота с плеча на плечо. */
+  function junction() {
+    const x = crossroads();
+    const moves = x.graph.junctionMoves.get(x.j)!;
+    const turnOf = (m: GMove) => x.graph.turnOf(m);
+    const t = (from: Arm, to: Arm) => `${x.arms[from]}>${x.arms[to]}`;
+    return { ...x, moves, turnOf, t };
+  }
+
+  it('кто едет, кто уступает встречным, кому зелёный не дать (пересечёт зелёный) и кому можно', () => {
+    const { moves, turnOf, t } = junction();
+    // Общий зелёный запада и востока: прямо едут, налево — уступая встречным.
+    const states = phaseTurnStates(moves, turnOf, [t('w', 'e'), t('e', 'w'), t('w', 'n'), t('e', 's')]);
+    expect(states.get(t('w', 'e'))).toEqual({ look: 'go', with: [] });
+    expect(states.get(t('w', 'n'))!.look).toBe('yield');
+    expect(states.get(t('e', 's'))!.look).toBe('yield');
+    // С севера прямо — поперёк: нельзя, пересечёт оба прямых.
+    const ns = states.get(t('n', 's'))!;
+    expect(ns.look).toBe('blocked');
+    expect(ns.with).toEqual(expect.arrayContaining([t('w', 'e'), t('e', 'w')]));
+    // Направо с запада — тот же подъезд, никому не мешает: можно.
+    expect(states.get(t('w', 's'))).toEqual({ look: 'free', with: [] });
+    // Все 12 поворотов перекрёстка — в ответе.
+    expect(states.size).toBe(12);
+    // Встречному прямо, пока налево никого, уступать некому: просто едет.
+    expect(phaseTurnStates(moves, turnOf, [t('w', 'n'), t('w', 'e')]).get(t('w', 'n'))!.look).toBe('go');
+    // Поперечные в одной фазе (старая настройка) — оба конфликт, друг с другом.
+    const bad = phaseTurnStates(moves, turnOf, [t('w', 'e'), t('n', 's')]);
+    expect(bad.get(t('w', 'e'))).toEqual({ look: 'clash', with: [t('n', 's')] });
+    expect(bad.get(t('n', 's'))).toEqual({ look: 'clash', with: [t('w', 'e')] });
+    // Пустая фаза: всем можно.
+    expect([...phaseTurnStates(moves, turnOf, []).values()].every((s) => s.look === 'free')).toBe(true);
+  });
+
+  it('с кем пересечётся поворот, если дать ему зелёный; сам с собой — нет', () => {
+    const { moves, turnOf, t } = junction();
+    expect(turnClashes(moves, turnOf, [t('w', 'e')], t('n', 's'))).toEqual([t('w', 'e')]);
+    expect(turnClashes(moves, turnOf, [t('w', 'e'), t('n', 's')], t('n', 's'))).toEqual([t('w', 'e')]);
+    expect(turnClashes(moves, turnOf, [t('w', 'e')], t('e', 'w'))).toEqual([]);
+  });
+
+  it('клик по проезду: снять зелёный — всегда, дать — если не пересечёт зелёный фазы', () => {
+    const { moves, turnOf, t } = junction();
+    const spec = [
+      { go: [t('w', 'e')], green: 8 },
+      { go: [t('n', 's')], green: 8 },
+    ];
+    const states = phaseTurnStates(moves, turnOf, spec[0].go);
+    const ok = phaseToggle(spec, 0, t('e', 'w'), states);
+    expect(ok.clash).toEqual([]);
+    expect(ok.spec[0].go).toEqual([t('w', 'e'), t('e', 'w')]);
+    expect(ok.spec[1]).toBe(spec[1]);
+    // Поперёк — отказ: фазы те же, с кем пересёкся бы — в ответе.
+    const no = phaseToggle(spec, 0, t('n', 's'), states);
+    expect(no.spec).toBe(spec);
+    expect(no.clash).toEqual([t('w', 'e')]);
+    // Зелёный был — снимается.
+    expect(phaseToggle(spec, 0, t('w', 'e'), states).spec[0].go).toEqual([]);
+    // Нет такой фазы — ничего.
+    expect(phaseToggle(spec, 5, t('w', 'e'), states)).toEqual({ spec, clash: [] });
+  });
+
+  it('проезд под курсором — ближайший путь манёвра; мимо перекрёстка — ничего', () => {
+    const { moves, turnOf, t } = junction();
+    const paths = moves.map((m) => ({ turn: turnOf(m), points: m.points }));
+    const mid = (from: Arm, to: Arm) => {
+      const m = moves.find((x) => turnOf(x) === t(from, to))!;
+      return LaneGraph.pointOnMove(m, m.length / 2).pos;
+    };
+    for (const [from, to] of [['w', 'n'], ['w', 'e'], ['w', 's'], ['n', 's'], ['s', 'w']] as [Arm, Arm][]) {
+      expect(turnAt(paths, mid(from, to), 3)).toBe(t(from, to));
+    }
+    // Чуть в стороне от середины правого поворота — всё ещё он.
+    const p = mid('e', 'n');
+    expect(turnAt(paths, { x: p.x + 0.8, y: p.y - 0.8 }, 3)).toBe(t('e', 'n'));
+    expect(turnAt(paths, { x: 200, y: 200 }, 3)).toBeNull();
+    expect(turnAt([], { x: 0, y: 0 }, 3)).toBeNull();
+  });
+
+  it('правка идёт за своей фазой: переставили — номер следом, убрали её — правка закончена', () => {
+    // Переставили правимую фазу 1 раньше — она теперь 0; переставили соседнюю на её место — правимая сдвинулась.
+    expect(editedAfter(1, 1, -1, 3)).toBe(0);
+    expect(editedAfter(1, 0, 1, 3)).toBe(0);
+    expect(editedAfter(2, 0, 1, 3)).toBe(2);
+    // За край — не переставить: номер тот же.
+    expect(editedAfter(0, 0, -1, 3)).toBe(0);
+    // Убрали её — null; раньше неё — номер на один меньше; позже — тот же; последнюю не убрать.
+    expect(editedAfter(1, 1, null, 3)).toBeNull();
+    expect(editedAfter(2, 0, null, 3)).toBe(1);
+    expect(editedAfter(0, 2, null, 3)).toBe(0);
+    expect(editedAfter(0, 0, null, 1)).toBe(0);
   });
 });
 

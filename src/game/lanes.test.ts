@@ -143,6 +143,21 @@ describe('Связи полос на перекрёстке', () => {
     const lane = game.laneEnds(n.id).find((e) => e.kind === 'in' && e.seg === from.seg && e.i === from.i)!;
     expect(targets(game, lane.lane).some((id) => g.links.get(g.lanes.get(id)!.link)!.corridor === to.seg)).toBe(false);
   });
+
+  it('связь полос в запрещённую сторону снимает запрет: поворот снова есть (кнопок запрета в карточке нет)', () => {
+    const game = new Game(7);
+    const n = avenueCrossroads(game);
+    const { from, to } = pickPair(game, n);
+    const turn = `${from.seg}>${to.seg}`;
+    game.setJunction(n.id, { bans: [turn] });
+    expect(game.junctionInfo(n.id)!.liveTurns).not.toContain(turn);
+    // Запрещённый выезд — всё равно выезд для меток полос: туда можно протянуть связь.
+    const lane = game.laneEnds(n.id).find((e) => e.kind === 'in' && e.seg === from.seg && e.i === from.i)!;
+    expect(lane.exits).toContain(to.seg);
+    expect(game.toggleLaneConnection(n.id, from.seg, from.i, to.seg, to.i)).toBeNull();
+    expect(n.bans).toBeUndefined();
+    expect(game.junctionInfo(n.id)!.liveTurns).toContain(turn);
+  });
 });
 
 describe('Движение по настроенным полосам', () => {

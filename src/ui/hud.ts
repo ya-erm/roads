@@ -1,6 +1,6 @@
 import { dist } from '../core/vec';
 import type { RingSize } from '../game/roads';
-import { platformCars, railStationFee, SAVE_VERSION, type Game, type Ledger, type Partner, type TurnKind } from '../game/game';
+import { platformCars, railStationFee, SAVE_VERSION, type Game, type Ledger, type Partner } from '../game/game';
 import { TEMPLATES } from '../game/interchange';
 import { defaultSaveName, type SaveEntry } from '../game/persist';
 import { addTemplates, fragmentToFile, getTemplate, hasRail, listTemplates, parseTemplateFile, templateFileName, templatesToFile } from '../game/templates';
@@ -133,8 +133,8 @@ import { storageSlots } from '../game/warehouses';
 import { annexHtml } from './annexUi';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
-import { type PhaseFlash, phasesHtml, phaseTurns } from './phasesUi';
-import { addPhase, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, toggleTurn, withLeftArrows } from '../lanes/lights';
+import { phasesHtml, phaseTurns } from './phasesUi';
+import { addPhase, editedAfter, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, withLeftArrows } from '../lanes/lights';
 import { installTips } from './tipFloat';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
@@ -374,8 +374,6 @@ export class Hud {
   private lastPanel = '';
   /** Кнопка мыши зажата над панелью: не перерисовываем, иначе клик потеряется. */
   private pressing = false;
-  /** Отказ дать зелёный в фазе светофора: пересекающиеся потоки мигают красным до until. */
-  private phaseFlash: (PhaseFlash & { until: number }) | null = null;
   /** Скорость игры до открытия меню — к ней вернёмся по «Продолжить». */
   private speedBeforeMenu = 1;
   private lastConfirm = '';
@@ -1414,38 +1412,32 @@ export class Hud {
         // Настраивать полосы на карте можно инструментом «Перекрёсток» — выбор перекрёстка остаётся.
         c.setTool('lights');
         break;
+      case 'jn-ph-edit':
+        // Фаза — править на перекрёстке: кликами по проездам на карте (controller.editPhase); та же ещё раз — готово.
+        c.editPhase(Number(d.id), Number(d.i));
+        break;
       case 'jn-lights':
       case 'jn-green':
       case 'jn-adaptive':
       case 'jn-main':
       case 'jn-lanes-reset':
-      case 'jn-ph-turn':
       case 'jn-ph-add':
       case 'jn-ph-del':
       case 'jn-ph-move':
       case 'jn-ph-arrows':
-      case 'jn-ph-auto':
-      case 'jn-ban': {
+      case 'jn-ph-auto': {
         // Настройки перекрёстка — тоже стройка: их можно отменить Ctrl+Z.
         const id = Number(d.id);
         const n = g.roads.net.nodes.get(id);
         if (!n) break;
         const i = Number(d.i);
-        if (d.action === 'jn-ph-turn') {
-          // Зелёный поперёк другого зелёного той же фазы — нельзя: оба потока мигают красным.
-          const ph = g.junctionInfo(id)?.phases[i];
-          const clash = ph && !ph.go.includes(d.turn!) ? g.phaseClashes(id, ph.go, d.turn!) : [];
-          this.phaseFlash = clash.length ? { node: id, i, turns: [d.turn!, ...clash], until: performance.now() + 1600 } : null;
-          if (clash.length) {
-            g.notify('Нельзя: эти потоки пересекаются — дайте им зелёный в разных фазах');
-            break;
-          }
-        }
+        // Фаза, которую правят на карте, и сколько фаз до правки: номер правки едет вместе со своей фазой.
+        const edited = c.phaseEdit?.node === id ? c.phaseEdit.i : null;
+        const count = g.junctionInfo(id)?.phases.length ?? 0;
         g.checkpoint('настройка перекрёстка');
         if (d.action === 'jn-lights') g.toggleLights(id);
         else if (d.action === 'jn-lanes-reset') g.resetLanes(id);
         else if (d.action === 'jn-adaptive') g.setJunction(id, { adaptive: d.v === '1' });
-        else if (d.action === 'jn-ph-turn') g.editPhases(id, (s) => toggleTurn(s, i, d.turn!));
         else if (d.action === 'jn-ph-add') g.editPhases(id, (s) => addPhase(s));
         else if (d.action === 'jn-ph-del') g.editPhases(id, (s) => removePhase(s, i));
         else if (d.action === 'jn-ph-move') g.editPhases(id, (s) => movePhase(s, i, Number(d.d)));
@@ -1464,12 +1456,14 @@ export class Hud {
           g.setJunction(id, { greens });
         } else if (d.action === 'jn-main') {
           g.setJunction(id, { mainPair: mainChoice(d.v) });
-        } else {
-          const key = `${d.from}>${d.out}`;
-          const bans = n.bans ?? [];
-          g.setJunction(id, { bans: bans.includes(key) ? bans.filter((b) => b !== key) : [...bans, key] });
         }
         g.commit();
+        // Новую фазу — сразу править на перекрёстке (она в конце); переставили или убрали — правка за своей фазой;
+        // «Авто» и стрелки налево меняют все фазы — правка закончена.
+        if (d.action === 'jn-ph-add') c.editPhase(id, count, false);
+        else if (edited !== null && (d.action === 'jn-ph-del' || d.action === 'jn-ph-move'))
+          c.editPhase(id, editedAfter(edited, i, d.action === 'jn-ph-del' ? null : Number(d.d), count), false);
+        else if (edited !== null && (d.action === 'jn-ph-auto' || d.action === 'jn-ph-arrows')) c.editPhase(id, null);
         break;
       }
       case 'stop-open':
@@ -2905,8 +2899,8 @@ export class Hud {
   }
 
   /**
-   * Карточка перекрёстка: светофор и его фазы, главная дорога и повороты с каждого подъезда.
-   * Подъезды подписаны сторонами света и стрелками, повороты — значками.
+   * Карточка перекрёстка: светофор и его фазы (правят на карте), главная дорога и связи полос (тоже на карте).
+   * Подъезды подписаны сторонами света и стрелками.
    */
   private junctionHtml(id: number): string {
     const g = this.game();
@@ -2922,12 +2916,14 @@ export class Hud {
     let control = '';
     if (lights) {
       const adaptive = n.adaptive !== false;
-      // Фазы — плитками со схемой перекрёстка (src/ui/phasesUi.ts); отказ дать зелёный мигает, пока не прошло время.
-      const flash = this.phaseFlash && this.phaseFlash.until > performance.now() ? this.phaseFlash : null;
+      // Фазы — плитками со схемой перекрёстка (src/ui/phasesUi.ts); выбранную правят на карте, отказ дать зелёный
+      // мигает и здесь, пока не прошло время.
+      const pc = this.controller;
+      const flash = pc.phaseFlash && pc.phaseFlash.until > performance.now() ? pc.phaseFlash : null;
       control = `<div class="rule-row"><span class="lbl2">Режим</span><div class="opts">
           <button class="opt ${adaptive ? 'active' : ''}" data-action="jn-adaptive" ${attrs} data-v="1" title="Пропускает пустые фазы и держит зелёный, пока никто не ждёт">Умный</button>
           <button class="opt ${!adaptive ? 'active' : ''}" data-action="jn-adaptive" ${attrs} data-v="0" title="Строго по кругу с заданным временем">По таймеру</button></div></div>
-        ${phasesHtml(info, id, flash)}`;
+        ${phasesHtml(info, id, flash, pc.phaseEdit?.node === id ? pc.phaseEdit.i : null)}`;
     } else if ((n.roundabout ?? null) === null && info.approaches.length >= 3) {
       const manual = n.mainPair;
       const isAuto = manual === undefined || manual === null;
@@ -2943,23 +2939,12 @@ export class Hud {
           .join('')}
         <button class="opt ${isNone ? 'active' : ''}" data-action="jn-main" ${attrs} data-v="none" title="Все уступают по очереди, кто раньше подъехал">Равнозначный</button></div></div>`;
     }
-    const icons: Record<TurnKind, string> = { left: '↰', straight: '↑', right: '↱' };
-    const names: Record<TurnKind, string> = { left: 'налево', straight: 'прямо', right: 'направо' };
-    const turns = info.turns
-      .map(
-        (t) => `<div class="turn-row"><span class="from" title="Подъезд с ${t.label.name}">${t.label.arrow} ${t.label.name}</span>${t.exits
-          .map(
-            (e) => `<button class="turn ${e.banned ? 'banned' : ''}" data-action="jn-ban" ${attrs} data-from="${t.from}" data-out="${e.out}"
-              title="${names[e.kind]} на ${info.label(e.out).name}: ${e.banned ? 'запрещено' : 'разрешено'}">${icons[e.kind]}<small>${info.label(e.out).name}</small></button>`,
-          )
-          .join('')}</div>`,
-      )
-      .join('');
-    // Связи полос настраиваются на карте в два шага: белый кружок — въезд, оранжевые — куда с него ехать.
+    // Связи полос настраиваются на карте в два шага: белый кружок — въезд, оранжевые — куда с него ехать (так же
+    // убирают и возвращают повороты: отдельных кнопок запрета нет). В правке фазы меток полос на карте нет.
     const c = this.controller;
     const second = !!c.laneFrom;
     const steps =
-      c.tool === 'lights'
+      c.tool === 'lights' && !c.phaseEdit
         ? `<span class="lane-step ${second ? '' : 'now'}" title="Кликните на карте белый кружок — полосу въезда"><b>1</b><i class="lane-dot in"></i></span>
           <span class="lane-arrow">➜</span>
           <span class="lane-step ${second ? 'now' : ''}" title="Оранжевые кружки — куда с неё ехать; повторный клик убирает связь"><b>2</b><i class="lane-dot out"></i></span>`
@@ -2971,7 +2956,6 @@ export class Hud {
       <p class="muted">${info.approaches.map((a) => `${a.compass.arrow} ${a.compass.name}`).join(' · ')}</p>
       <div class="actions">${toggle}</div>
       ${control}
-      <div class="rule-row"><span class="lbl2">Повороты — клик запрещает или разрешает</span>${turns}</div>
       ${lanes}</section>`;
   }
 

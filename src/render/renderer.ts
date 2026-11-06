@@ -10,7 +10,8 @@ import { LaneRenderer, layerOf } from '../lanes/draw';
 import { insideRuns } from '../lanes/edit';
 import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
 import type { CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
-import type { LaneGraph } from '../lanes/graph';
+import type { GMove, LaneGraph } from '../lanes/graph';
+import type { TurnLook, TurnState } from '../lanes/lights';
 import { LIGHT_STEP, type LightSpot, lightSpot } from '../lanes/lightSpot';
 import { type JunctionPreview, junctionPreview, previewHides } from '../lanes/preview';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
@@ -130,6 +131,11 @@ export interface ToolOverlay {
   points?: { pos: Vec; color: string; r?: number; node?: boolean }[];
   /** Настройка полос выбранного перекрёстка: метки концов полос, выбранный въезд, метка под курсором. */
   laneEdit: { node: number; ends: LaneEnd[]; from: { seg: number; i: number } | null; hover: LaneEnd | null } | null;
+  /**
+   * Правка фазы i светофора на карте: проезды перекрёстка цветом по фазе (states — src/lanes/lights.ts, phaseTurnStates),
+   * hover — проезд под курсором, flash — отказ дать зелёный (мигают красным). Светофоры перекрёстка — в этой фазе.
+   */
+  phaseEdit?: { node: number; i: number; states: Map<string, TurnState>; hover: string | null; flash: string[] } | null;
   /** Курсор на варианте главной дороги в карточке перекрёстка: его и показываем (mainPair: null — «Авто», [] — равнозначный). */
   mainHover?: { node: number; mainPair: number[] | null } | null;
 }
@@ -389,7 +395,7 @@ export class Renderer {
     this.drawPortals(portals);
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
-    this.drawLights(game, 0);
+    this.drawLights(game, 0, o.phaseEdit);
     this.drawCurveSigns(game, view, o.staleSigns, 0);
     this.drawStructures(game, view, o);
     this.drawTrains(trains.filter((t) => trainBand(t.level) === 0));
@@ -419,12 +425,12 @@ export class Renderer {
           }),
       );
       // Светофоры у спуска с моста и на эстакаде — поверх её полотна и подняты вместе с ним.
-      if (roads) this.drawLights(game, level);
+      if (roads) this.drawLights(game, level, o.phaseEdit);
       if (roads) this.drawCurveSigns(game, view, o.staleSigns, level);
       this.drawTrains(trains.filter((t) => trainBand(t.level) === level));
     }
     // Светофор перекрёстка под мостом не пропадает под полотном — приглушённым значком поверх.
-    this.drawLights(game, 'covered');
+    this.drawLights(game, 'covered', o.phaseEdit);
     this.drawLabels(game, view);
     this.drawOverlay(game, o);
     this.drawStationBadges(game, view);
@@ -1212,9 +1218,10 @@ export class Renderer {
    * красный); рядом, дальше от дороги, — дополнительные со стрелкой, если у поворота есть своя фаза: стрелка
    * горит зелёным, когда поворот разрешён по ней (src/lanes/lights.ts, signalHeads). pass — слой высоты: светофор
    * рисуется в слое своего подъезда и поднят вместе с его полотном (спуск с моста, эстакада — src/lanes/lightSpot.ts);
-   * 'covered' — те, что сверху закрыл чужой мост, ещё раз поверх всего, приглушённо.
+   * 'covered' — те, что сверху закрыл чужой мост, ещё раз поверх всего, приглушённо. show — фазу, которую правят на
+   * карте: светофоры её перекрёстка горят так, как в ней.
    */
-  private drawLights(game: Game, pass: number | 'covered'): void {
+  private drawLights(game: Game, pass: number | 'covered', show?: { node: number; i: number } | null): void {
     if (this.camera.zoom < 0.4) return;
     const ctx = this.ctx;
     const g = game.roads.graph;
@@ -1230,7 +1237,9 @@ export class Renderer {
     for (const n of g.nodes.values()) {
       const L = n.lights;
       if (!L) continue;
-      const lit = (on: boolean | undefined) => (on ? (L.clearing ? YELLOW : GREEN) : null);
+      const shown = show?.node === n.id && show.i < L.phases.length;
+      const phase = shown ? show.i : L.phase;
+      const lit = (on: boolean | undefined) => (on ? (L.clearing && !shown ? YELLOW : GREEN) : null);
       for (const head of L.heads) {
         const link = g.links.get(head.link);
         if (!link) continue;
@@ -1248,13 +1257,13 @@ export class Renderer {
         ctx.moveTo(p.x, p.y);
         ctx.lineTo(last.x + 0.001, last.y);
         ctx.stroke();
-        ctx.fillStyle = lit(head.main[L.phase]) ?? '#e8483f';
+        ctx.fillStyle = lit(head.main[phase]) ?? '#e8483f';
         ctx.beginPath();
         ctx.arc(p.x, p.y, 1.9, 0, Math.PI * 2);
         ctx.fill();
         head.arrows.forEach((a, k) => {
           const q = add(p, scale(N, STEP * (k + 1)));
-          const color = lit(a.on[L.phase]);
+          const color = lit(a.on[phase]);
           ctx.fillStyle = color ? 'rgba(58, 209, 107, 0.25)' : '#1d2024';
           ctx.beginPath();
           ctx.arc(q.x, q.y, 2.3, 0, Math.PI * 2);
@@ -2442,7 +2451,13 @@ export class Renderer {
     const sel = o.selection;
     if (sel?.type === 'junction') {
       const hover = o.mainHover?.node === sel.id ? o.mainHover : null;
-      this.drawJunctionPaths(game, sel.id, o.laneEdit?.node === sel.id ? o.laneEdit : null, game.junctionMain(sel.id, hover ? hover.mainPair : undefined));
+      this.drawJunctionPaths(
+        game,
+        sel.id,
+        o.laneEdit?.node === sel.id ? o.laneEdit : null,
+        game.junctionMain(sel.id, hover ? hover.mainPair : undefined),
+        o.phaseEdit?.node === sel.id ? o.phaseEdit : null,
+      );
     }
     const sim = sel?.type === 'vehicle' ? game.traffic.vehicles.get(sel.simId) : undefined;
     if (sim) this.drawSelectRing(sim.pos.x - (sim.dir.x * sim.length) / 2, sim.pos.y - (sim.dir.y * sim.length) / 2, sim.length * 0.9 + 3);
@@ -2591,8 +2606,15 @@ export class Renderer {
    * Выбранный перекрёсток: разрешённые проезды — синие линии со стрелками, запрещённые — красный пунктир.
    * При настройке полос выбранная полоса въезда и её связи — зелёные, остальные проезды бледнее.
    * main — главная дорога (или та, на которую навели в карточке): жёлтая полоса и знаки у въездов.
+   * phase — правка фазы светофора: проезды цветом по фазе (drawPhasePaths) вместо синих.
    */
-  private drawJunctionPaths(game: Game, nodeId: number, edit: ToolOverlay['laneEdit'], main: [number, number] | null): void {
+  private drawJunctionPaths(
+    game: Game,
+    nodeId: number,
+    edit: ToolOverlay['laneEdit'],
+    main: [number, number] | null,
+    phase: ToolOverlay['phaseEdit'] = null,
+  ): void {
     const ctx = this.ctx;
     const net = game.roads.net;
     const g = game.roads.graph;
@@ -2602,16 +2624,17 @@ export class Renderer {
     const all = (g.inLinks.get(nodeId) ?? []).flatMap((l) => l.lanes.flatMap((lane) => g.movesFrom.get(lane.id) ?? [])).filter((m) => m.node === nodeId);
     const radius = Math.max(12, ...all.map((m) => dist(n.pos, m.points[0])));
     if (main) this.drawMainBand(net, n, main);
-    ctx.strokeStyle = 'rgba(47,128,237,0.55)';
+    ctx.strokeStyle = phase ? 'rgba(47,128,237,0.85)' : 'rgba(47,128,237,0.55)';
     ctx.lineWidth = 3 / z;
     ctx.beginPath();
     ctx.arc(n.pos.x, n.pos.y, radius + 10, 0, Math.PI * 2);
     ctx.stroke();
     ctx.lineCap = 'round';
+    if (phase) this.drawPhasePaths(g, n.pos, all, phase, radius + 10);
     const from = edit?.from ?? null;
     const active = from ? edit?.ends.find((e) => e.kind === 'in' && e.seg === from.seg && e.i === from.i) : undefined;
     const mine = all.filter((m) => m.inLane === active?.lane);
-    for (const m of [...all.filter((x) => !mine.includes(x)), ...mine]) {
+    for (const m of phase ? [] : [...all.filter((x) => !mine.includes(x)), ...mine]) {
       const bright = mine.includes(m);
       const color = bright ? '#27ae60' : '#2f80ed';
       ctx.globalAlpha = active && !bright ? 0.25 : 1;
@@ -2653,6 +2676,97 @@ export class Renderer {
     }
     ctx.setLineDash([]);
     if (main) this.drawPrioritySigns(net, n, main, new Set((g.inLinks.get(nodeId) ?? []).map((l) => l.corridor)), radius);
+  }
+
+  /**
+   * Правка фазы светофора: проезды через перекрёсток по фазе — зелёный (едет), зелёный пунктир (уступает встречным),
+   * белый (красный, зелёный дать можно), бледный красный пунктир (нельзя: пересечёт зелёный), красный (конфликт).
+   * Под курсором — толще, с ореолом; у запретного под курсором и при отказе — и зелёные, которые он пересечёт, красным.
+   * Над кругом перекрёстка (ring — его радиус) — номер фазы.
+   */
+  private drawPhasePaths(g: LaneGraph, center: Vec, all: GMove[], pe: NonNullable<ToolOverlay['phaseEdit']>, ring: number): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const blink = Math.floor(performance.now() / 180) % 2 === 0;
+    const hot = pe.hover ? pe.states.get(pe.hover) : undefined;
+    const against = new Set(hot?.look === 'blocked' ? hot.with : []);
+    const flash = new Set(pe.flash);
+    // Красные и белые — снизу, зелёные — поверх, конфликт и проезд под курсором — сверху.
+    const order: Record<TurnLook, number> = { free: 0, blocked: 0, go: 1, yield: 1, clash: 2 };
+    const rank = (t: { turn: string; look: TurnLook }) => order[t.look] + (t.turn === pe.hover ? 5 : 0);
+    const items = all.map((m) => ({ m, turn: g.turnOf(m), look: pe.states.get(g.turnOf(m))?.look ?? ('free' as TurnLook) })).sort((a, b) => rank(a) - rank(b));
+    ctx.lineCap = 'round';
+    for (const { m, turn, look } of items) {
+      const hover = turn === pe.hover;
+      let color = '#ffffff';
+      let width = 1.8;
+      let dash: number[] = [];
+      let alpha = 0.85;
+      if (look === 'go' || look === 'yield' || look === 'clash') {
+        color = look === 'clash' ? '#e8483f' : '#27ae60';
+        width = 3.2;
+        alpha = 1;
+        if (look === 'yield') dash = [6, 4];
+      } else if (look === 'blocked') {
+        color = '#e8483f';
+        width = 1.6;
+        dash = [3, 3];
+        alpha = 0.6;
+      }
+      if (against.has(turn) || (flash.has(turn) && blink)) {
+        color = '#e8483f';
+        alpha = 1;
+      }
+      if (hover) {
+        width += 1.6;
+        alpha = 1;
+        // Ореол: видно, по какому проезду придётся клик (у красного — каким станет: зелёным, если можно).
+        ctx.globalAlpha = 0.6;
+        ctx.strokeStyle = look === 'free' ? '#27ae60' : look === 'blocked' ? '#e8483f' : '#ffffff';
+        ctx.lineWidth = (width + 5) / z;
+        this.polyline(m.points);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width / z;
+      ctx.setLineDash(dash.map((d) => d / z));
+      this.polyline(m.points);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      this.pathArrow(m.points, (width + 2.2) / z, color);
+    }
+    ctx.globalAlpha = 1;
+    // Номер фазы — плашкой над кругом перекрёстка, синей, как выбранная плитка в карточке.
+    const text = `✎ Фаза ${pe.i + 1}`;
+    ctx.font = `700 ${12 / z}px sans-serif`;
+    const w = ctx.measureText(text).width + 14 / z;
+    const h = 20 / z;
+    const x = center.x - w / 2;
+    const y = center.y - ring - h - 4 / z;
+    ctx.fillStyle = '#2f80ed';
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, h / 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, center.x, y + h / 2 + 0.5 / z);
+  }
+
+  /** Стрелка на конце пути — по последнему отрезку, размером s. */
+  private pathArrow(pts: Vec[], s: number, color: string): void {
+    const ctx = this.ctx;
+    const end = pts[pts.length - 1];
+    const prev = pts[pts.length - 2] ?? pts[0];
+    const l = Math.hypot(end.x - prev.x, end.y - prev.y) || 1;
+    const u = { x: (end.x - prev.x) / l, y: (end.y - prev.y) / l };
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(end.x + u.x * s, end.y + u.y * s);
+    ctx.lineTo(end.x - u.x * s - u.y * s, end.y - u.y * s + u.x * s);
+    ctx.lineTo(end.x - u.x * s + u.y * s, end.y - u.y * s - u.x * s);
+    ctx.fill();
   }
 
   /**

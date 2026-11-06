@@ -25,7 +25,7 @@ import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../c
 import { Anchor, anchorAt, buildRing, insideRuns, splitCorridor } from '../lanes/edit';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { autoMainPair, mainPairOf } from '../lanes/graph';
-import { phaseRelations, PhaseSpec, specOf } from '../lanes/lights';
+import { PhaseSpec, phaseTurnStates, specOf, turnClashes, type TurnState } from '../lanes/lights';
 import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, parseLaneKey, twoWay } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
 import type { LaneTraffic } from '../lanes/traffic';
@@ -1812,16 +1812,14 @@ export class Game implements BuildContext {
    */
   phaseClashes(nodeId: number, go: string[], turn: string): string[] {
     const g = this.roads.graph;
-    const set = new Set([...go, turn]);
-    const moves = (g.junctionMoves.get(nodeId) ?? []).filter((m) => set.has(g.turnOf(m)));
-    const res = new Set<string>();
-    for (const [a, b] of phaseRelations(moves).clashes) {
-      const ta = g.turnOf(g.moves.get(a)!);
-      const tb = g.turnOf(g.moves.get(b)!);
-      if (ta === turn && tb !== turn) res.add(tb);
-      if (tb === turn && ta !== turn) res.add(ta);
-    }
-    return [...res];
+    return turnClashes(g.junctionMoves.get(nodeId) ?? [], (m) => g.turnOf(m), go, turn);
+  }
+
+  /** Повороты перекрёстка в фазе i светофора: едет, уступает, нельзя (пересечёт зелёный) — src/lanes/lights.ts. */
+  phaseStates(nodeId: number, i: number): Map<string, TurnState> | null {
+    const g = this.roads.graph;
+    const ph = g.nodes.get(nodeId)?.lights?.phases[i];
+    return ph ? phaseTurnStates(g.junctionMoves.get(nodeId) ?? [], (m) => g.turnOf(m), ph.go) : null;
   }
 
   /** Можно ли поставить (или снять) светофор на перекрёстке и во что это обойдётся (минус — возврат). */
@@ -1862,7 +1860,8 @@ export class Game implements BuildContext {
     const outs = g.outLinks.get(nodeId) ?? [];
     const res: LaneEnd[] = [];
     for (const l of g.inLinks.get(nodeId) ?? []) {
-      const exits = outs.filter((o) => o.corridor !== l.corridor && !n.bans?.includes(`${l.corridor}>${o.corridor}`)).map((o) => o.corridor);
+      // Запрещённый поворот — тоже выезд: связь полос туда снимает запрет (кнопок запрета в карточке больше нет).
+      const exits = outs.filter((o) => o.corridor !== l.corridor).map((o) => o.corridor);
       l.lanes.forEach((lane, idx) => {
         const i = l.lanes.length - 1 - idx;
         const pose = g.lanePose(lane, Math.max(0, lane.length - 6));
@@ -1906,7 +1905,15 @@ export class Game implements BuildContext {
     if (lanes.includes(key)) {
       if (lanes.filter((k) => k.startsWith(prefix)).length <= 1) return 'Полоса без выезда — тупик';
       lanes = lanes.filter((k) => k !== key);
-    } else lanes.push(key);
+    } else {
+      lanes.push(key);
+      // Связь в запрещённую сторону — поворот снова разрешён.
+      const turn = `${inSeg}>${outSeg}`;
+      if (n.bans?.includes(turn)) {
+        n.bans = n.bans.filter((b) => b !== turn);
+        if (!n.bans.length) delete n.bans;
+      }
+    }
     n.lanes = lanes;
     this.roads.net.version++;
     this.networkChanged();

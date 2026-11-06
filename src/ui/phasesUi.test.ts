@@ -38,7 +38,7 @@ describe('Фазы светофора в карточке', () => {
     expect(turnLabel(i, '1>3')).toBe('←↰');
   });
 
-  it('плитка на фазу: стрелки кликаются, налево с уступанием — пунктиром, конфликт — красным; длительность и порядок', () => {
+  it('плитка на фазу: схема выбирает фазу для правки на карте; налево с уступанием — пунктиром, конфликт — красным; длительность и порядок', () => {
     const html = phasesHtml(
       info([
         { go: ['1>2', '1>3', '2>1'], yields: ['1>3'], active: true },
@@ -50,26 +50,53 @@ describe('Фазы светофора в карточке', () => {
     );
     expect(html.match(/class="ph-tile /g)).toHaveLength(3);
     expect(html).toContain('ph-tile active');
-    expect(html).toContain('data-action="jn-ph-turn" data-id="7" data-i="0" data-turn="1>3"');
-    expect(html).toContain('З налево на С: зелёный, уступает встречным');
+    // Стрелки на схеме не кликаются — кликается вся схема: фаза на правку.
+    expect(html).not.toContain('jn-ph-turn');
+    expect(html).toContain('data-action="jn-ph-edit" data-id="7" data-i="0"');
+    expect(html).toContain('data-action="jn-ph-edit" data-id="7" data-i="2"');
+    expect(html).toContain('data-turn="1>3" data-state="yield"');
     expect(html).toContain('stroke-dasharray');
-    expect(html).toContain('С прямо на Ю: конфликт');
+    expect(html).toContain('data-turn="3>4" data-state="clash"');
     expect(html).toContain('ph-bad');
     expect(html).toContain('ph-auto');
+    // Системных подсказок нет — только data-tip.
+    expect(html).not.toContain('title=');
+    expect(html).not.toContain('<title>');
+    // Никого не правят — плитка не выделена, подсказки про правку нет.
+    expect(html).not.toContain('editing');
     // Первую не переставить раньше, последнюю — позже; зелёный 40 с — не дольше, 4 с — не короче.
     expect(html).toMatch(/data-action="jn-ph-move" data-id="7" data-i="0" data-d="-1" disabled/);
     expect(html).toMatch(/data-action="jn-ph-move" data-id="7" data-i="2" data-d="1" disabled/);
     expect(html).toMatch(/data-i="1" data-d="2" disabled/);
     expect(html).toMatch(/data-i="2" data-d="-2" disabled/);
     // Свои фазы — «Авто» доступно; налево уступают в фазе 1 — «Стрелки налево» доступны.
-    expect(html).toMatch(/data-action="jn-ph-auto" data-id="7"\s+title/);
-    expect(html).toMatch(/data-action="jn-ph-arrows" data-id="7"\s+title/);
+    expect(html).toMatch(/data-action="jn-ph-auto" data-id="7"\s+data-tip/);
+    expect(html).toMatch(/data-action="jn-ph-arrows" data-id="7"\s+data-tip/);
+  });
+
+  it('фазу правят на карте: её плитка выделена, под плитками — что делать и Esc; в легенде — «нельзя»', () => {
+    const phases = [{ go: ['1>2', '2>1'] }, { go: ['3>4', '4>3'] }];
+    const html = phasesHtml(info(phases, true), 7, null, 1);
+    expect(html.match(/ph-tile[^"]*editing/g)).toHaveLength(1);
+    expect(html).toMatch(/class="ph-tile\s+editing"[\s\S]*data-i="1"/);
+    expect(html).toContain('ph-pen');
+    expect(html).toContain('ph-editing');
+    expect(html).toContain('Фаза 2');
+    expect(html).toContain('Esc');
+    expect(html).toContain('нельзя: пересечёт зелёный');
+    // Номер правки за краем (фазу убрали) — как будто не правят.
+    expect(phasesHtml(info(phases, true), 7, null, 5)).not.toContain('ph-editing');
   });
 
   it('стрелки налево уже стоят — кнопка неактивна; отказ дать зелёный мигает', () => {
     const phases = [{ go: ['1>3', '2>4'] }, { go: ['1>2', '1>3', '2>1', '2>4'], yields: ['1>3', '2>4'] }];
     const html = phasesHtml(info(phases, true), 7, { node: 7, i: 0, turns: ['3>4', '1>3'] });
     expect(html).toMatch(/data-action="jn-ph-arrows" data-id="7" disabled/);
+    // Стрелку дополнили правыми — всё равно стоят; перед фазой левые тоже уступают — не стоят.
+    const withRights = [{ go: ['1>3', '2>4', '1>4', '2>3'] }, phases[1]];
+    expect(phasesHtml(info(withRights, true), 7, null)).toMatch(/data-action="jn-ph-arrows" data-id="7" disabled/);
+    const yielding = [{ go: ['1>3', '2>4', '1>2', '2>1'], yields: ['1>3', '2>4'] }, phases[1]];
+    expect(phasesHtml(info(yielding, true), 7, null)).toMatch(/data-action="jn-ph-arrows" data-id="7"\s+data-tip/);
     expect(html.match(/ph-turn ph-flash/g)).toHaveLength(2);
     // «Авто» без своих фаз — неактивна; одна фаза — не убрать.
     const one = phasesHtml(info([{ go: ['1>2'] }]), 7, null);
