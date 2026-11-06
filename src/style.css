@@ -3411,6 +3411,56 @@ button.small.with-ic {
   background: #3fae6a;
 }
 
+/* Пристройки предприятия: до какого уровня растёт само; готово расти дальше — зелёная плашка с кнопкой. */
+.annex-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.annex-row > svg {
+  flex: none;
+}
+
+.annex-row > small {
+  flex: 1;
+}
+
+.annex-row.ready {
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: #e8f6ee;
+  color: #1f6b3e;
+}
+
+.annex-row.ready > div {
+  flex: 1;
+  min-width: 160px;
+}
+
+.annex-row.ready small {
+  display: block;
+  margin-top: 2px;
+  color: #3c6a4f;
+  line-height: 1.35;
+}
+
+.annex-row button svg {
+  vertical-align: -3px;
+}
+
+.annex-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
 .kv .pos {
   color: #2e9d57;
 }

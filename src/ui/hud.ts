@@ -128,6 +128,7 @@ import { settingsHtml, settingsSvg } from './settingsMenu';
 import { adviceOf, type Advice, type AdviceFix } from '../game/advisor';
 import { stationWarnings } from '../game/stationWarnings';
 import { storageSlots } from '../game/warehouses';
+import { annexHtml } from './annexUi';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
 import { type PhaseFlash, phasesHtml, phaseTurns } from './phasesUi';
@@ -1271,6 +1272,13 @@ export class Hud {
         const last = st?.warehouses?.[st.warehouses.length - 1];
         const problem = last ? g.removeWarehouse(last) : st && g.setStationDepots(st.id, (st.depots ?? 0) + Number(d.d));
         if (problem) g.notify(problem);
+        break;
+      }
+      case 'ind-annex': {
+        // Пристройку ставят на карте — зона вокруг предприятия видна, клик в ней ставит; повторно — отмена.
+        const id = Number(d.id);
+        if (c.placingAnnex === id) c.placingAnnex = null;
+        else c.startAnnex(id);
         break;
       }
       case 'st-warehouse': {
@@ -2803,7 +2811,7 @@ export class Hud {
           <span>Произведено (прош. мес.)</span><b>${ind.producedLast}</b><span>В этом месяце</span><b>${ind.producedMonth}</b></div>
         <div class="level-bar" title="Растёт, если продукцию регулярно вывозят; падает, если предприятие долго не обслуживают">
           <div style="width:${(((ind.level ?? 1) - 1) / 3) * 100}%"></div></div>
-        <p class="muted small-note">Вывозите продукцию без задержек — производство вырастет до ×4.</p>
+        ${annexHtml(ind, this.controller.placingAnnex === ind.id)}
         <p class="tip">Инструментом «Станция» наведите на предприятие: станция встанет вплотную к той стороне, куда указывает курсор, и выезд будет смотреть туда же.</p>
         ${this.partnersHtml(g.partners(ind, 3))}</section>`;
     }

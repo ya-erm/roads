@@ -87,6 +87,16 @@ export interface Industry {
   cap?: number;
   /** Секунд за этот месяц продукция копилась у предела станции (транспорт не успевал). */
   piledMonth?: number;
+  /** Пристройки рядом (ставит игрок, когда предприятие готово расти дальше): каждая — предел роста +1 (ANNEX). */
+  annexes?: Annex[];
+}
+
+/** Пристройка предприятия — уменьшенное здание того же вида рядом с ним. */
+export interface Annex {
+  type: 'annex';
+  id: number;
+  industryId: number;
+  fp: Footprint;
 }
 
 export interface PassengerGroup {
@@ -153,4 +163,4 @@ export interface Warehouse {
   fp: Footprint;
 }
 
-export type Structure = TownBuilding | Industry | Station | Warehouse;
+export type Structure = TownBuilding | Industry | Station | Warehouse | Annex;

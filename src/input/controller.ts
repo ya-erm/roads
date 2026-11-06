@@ -1,5 +1,6 @@
-import { COST, RAIL_STATION, SNAP_PIXELS, STORAGE } from '../config';
+import { ANNEX, COST, ECONOMY, RAIL_STATION, SNAP_PIXELS, STORAGE } from '../config';
 import { warehouseZone } from '../game/warehouses';
+import { annexZone, growthCap } from '../game/annexes';
 import { CurveLUT, minRadius, offsetCubic, straightCubic } from '../core/bezier';
 import { add, angleOf, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { DrawMode, NetKind, RoadRequest, Snap } from '../game/build';
@@ -242,6 +243,8 @@ export class Controller {
   movingStation: number | null = null;
   /** Ставим склад-здание этой станции: клик в зоне вокруг неё — склад (Esc — отмена). */
   placingWarehouse: number | null = null;
+  /** Ставим пристройку этого предприятия: клик в зоне вокруг него — пристройка (Esc — отмена). */
+  placingAnnex: number | null = null;
   /** Настройка полос выбранного перекрёстка: полоса въезда, которую сейчас соединяем. */
   laneFrom: { seg: number; i: number } | null = null;
   /** Курсор на варианте главной дороги в карточке перекрёстка — карта показывает этот вариант. */
@@ -342,6 +345,7 @@ export class Controller {
 
   setTool(tool: Tool): void {
     this.placingWarehouse = null;
+    this.placingAnnex = null;
     if (this.tool === 'line' && tool !== 'line') this.lineDraft = [];
     if (tool !== 'line') this.addStopTo = null;
     // Новая линия собирается с чистого листа: прежняя выбранная линия и объект не мешают.
@@ -937,6 +941,15 @@ export class Controller {
     this.fleetHover = null;
     // Выбрали что-то другое — склад этой станции больше не ставим.
     if (sel?.type !== 'station' || sel.id !== this.placingWarehouse) this.placingWarehouse = null;
+    if (sel?.type !== 'industry' || sel.id !== this.placingAnnex) this.placingAnnex = null;
+    this.onChange();
+  }
+
+  /** Режим «поставить пристройку» предприятия id: зона вокруг него — на карте, клик в ней ставит пристройку. */
+  startAnnex(id: number): void {
+    this.setTool('select');
+    this.select({ type: 'industry', id });
+    this.placingAnnex = id;
     this.onChange();
   }
 
@@ -959,6 +972,7 @@ export class Controller {
     else if (this.moving) this.moving = null;
     else if (this.movingStation !== null) this.movingStation = null;
     else if (this.placingWarehouse !== null) this.placingWarehouse = null;
+    else if (this.placingAnnex !== null) this.placingAnnex = null;
     else if (this.copyStart) this.copyStart = null;
     else if (this.pasteDrag) this.pasteDrag = null;
     else if (this.cancelPaste()) {
@@ -1493,6 +1507,17 @@ export class Controller {
           }
           break;
         }
+        if (this.placingAnnex !== null) {
+          // Пристройка предприятия — в зоне вокруг него; поставили — снова его карточка.
+          const id = this.placingAnnex;
+          const problem = g.buildAnnex(id, p);
+          if (problem) this.showError(problem);
+          else {
+            this.placingAnnex = null;
+            this.select({ type: 'industry', id });
+          }
+          break;
+        }
         if (this.movingStation !== null) {
           // Перенос станции: на новое место, с выездом; маршруты идут через неё же.
           const id = this.movingStation;
@@ -1570,7 +1595,7 @@ export class Controller {
     else if (st?.type === 'warehouse') {
       const problem = g.removeWarehouse(st);
       if (problem) this.showError(problem);
-    }
+    } else if (st?.type === 'annex') g.removeAnnex(st);
     else if (!g.builder.bulldoze(p, this.snapRadius * 0.3)) this.roadTools.bulldoze(p, this.snapRadius * 0.3);
   }
 
@@ -1661,6 +1686,7 @@ export class Controller {
     const st = g.structureAt(p);
     if (st?.type === 'station') return { type: 'station', id: st.id };
     if (st?.type === 'warehouse') return { type: 'station', id: st.stationId };
+    if (st?.type === 'annex') return { type: 'industry', id: st.industryId };
     if (st?.type === 'industry') return { type: 'industry', id: st.id };
     if (st?.type === 'building') return { type: 'building', id: st.id };
     const town = g.townAt(p);
@@ -2977,6 +3003,11 @@ export class Controller {
           o.label = problem ? { text: problem, ok: false } : { text: `Снести склад · +${money(STORAGE.cost * COST.refundRatio)}`, ok: true };
           break;
         }
+        if (st?.type === 'annex') {
+          o.marks.push({ fp: st.fp, ok: false });
+          o.label = { text: `Снести пристройку — производство упадёт · +${money(ANNEX.cost * COST.refundRatio)}`, ok: true };
+          break;
+        }
         if (st?.type === 'station') {
           o.label = { text: `Снести станцию ${st.name}`, ok: true };
           o.station = { fp: st.fp, ok: false };
@@ -3162,6 +3193,18 @@ export class Controller {
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
+        const ind = this.placingAnnex !== null ? g.industries.find((i) => i.id === this.placingAnnex) : undefined;
+        if (ind) {
+          // Пристройка: зона вокруг предприятия — кругом, пристройка под курсором — синим (красным, если нельзя).
+          const plan = g.annexPlan(ind.id, p);
+          o.catchmentAt = ind.fp.center;
+          o.catchmentR = annexZone(ind);
+          if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
+          o.label = plan.ok
+            ? { text: `Пристройка: производство ×${(ind.level ?? 1) + ECONOMY.growthStep}, рост до ×${growthCap(ind) + 1} · ${money(plan.cost)} · Esc — отмена`, ok: true }
+            : { text: failText(plan.reason, plan.cost, ''), ok: false };
+          break;
+        }
         const moving = this.movingStation !== null ? g.stations.get(this.movingStation) : undefined;
         if (moving) {
           // Перенос станции: старое место — красным, новое — силуэтом (красным, если нельзя), с выездом и охватом.
@@ -3200,6 +3243,7 @@ export class Controller {
         const st = g.structureAt(p);
         if (st?.type === 'station') o.label = { text: st.name, ok: true };
         else if (st?.type === 'warehouse') o.label = { text: `Склад: ${g.stations.get(st.stationId)?.name ?? ''}`, ok: true };
+        else if (st?.type === 'annex') o.label = { text: `Пристройка: ${g.industries.find((i) => i.id === st.industryId)?.name ?? ''}`, ok: true };
         else if (st?.type === 'industry') o.label = { text: st.name, ok: true };
         else if (st?.type === 'building') {
           const t = g.townOf(st);

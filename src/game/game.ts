@@ -1,4 +1,5 @@
 import {
+  ANNEX,
   CAR_COLORS,
   COST,
   ECONOMY,
@@ -30,7 +31,7 @@ import { RailSim, Train } from '../sim/rail';
 import { stepWagons } from '../sim/wagons';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
-import { Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TOWN_NEED, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
+import { Annex, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TOWN_NEED, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
 import { Network, NetworkSave, Segment } from '../world/network';
 import { halfWidth, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
@@ -69,6 +70,7 @@ import { chainCoords, chainOffset, trackChain } from './railEdit';
 import { linesForTown } from './townLines';
 import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
+import { annexFootprint, annexReady, growthCap, inAnnexZone } from './annexes';
 import {
   AUTO_FLEET,
   DEFAULT_RULE,
@@ -242,6 +244,8 @@ interface UndoSnapshot {
   roadsVersion: number;
   stations: SaveData['stations'];
   buildings: { townId: number; list: TownBuilding[] }[];
+  /** Пристройки предприятий и уровень, который они дали (нет в старых снимках). */
+  industries?: { id: number; level?: number; streak?: number; annexes?: Annex[] }[];
   roundabouts: [number, Vec][];
   moneyBefore: number;
   /** Сколько правок рельефа было до действия. */
@@ -834,7 +838,7 @@ export class Game implements BuildContext {
     for (const s of this.index.near(fp.center, footprintRadius(fp) + margin + 120)) {
       if (s === skip || !footprintsOverlap(fp, s.fp, margin)) continue;
       if (s.type === 'building' && s.kind !== 'landmark') houses.push(s.id);
-      else return { houses, blocker: s.type === 'building' ? 'Мешает ратуша' : s.type === 'industry' ? 'Мешает предприятие' : 'Мешает станция' };
+      else return { houses, blocker: s.type === 'building' ? 'Мешает ратуша' : s.type === 'industry' || s.type === 'annex' ? 'Мешает предприятие' : 'Мешает станция' };
     }
     return { houses };
   }
@@ -2014,6 +2018,7 @@ export class Game implements BuildContext {
       version: this.net.version,
       stations: [...this.stations.values()].map((s) => structuredClone(this.stationToSave(s))),
       buildings: this.towns.map((t) => ({ townId: t.id, list: t.buildings.map((b) => structuredClone(b)) })),
+      industries: this.industries.map((i) => ({ id: i.id, level: i.level, streak: i.streak, annexes: i.annexes && structuredClone(i.annexes) })),
       roundabouts: [...this.roundaboutCenters].map(([id, c]) => [id, { ...c }]),
       terraform: this.terrain.edits.length,
       moneyBefore: this.money,
@@ -2123,6 +2128,14 @@ export class Game implements BuildContext {
       const st = this.stationFromSave(s);
       this.stations.set(st.id, st);
       this.index.add(st);
+    }
+    // Пристройки предприятий: поставленную или снесённую действием — как было, с уровнем, который она дала.
+    for (const s of snap.industries ?? []) {
+      const ind = this.industries.find((i) => i.id === s.id);
+      if (!ind || (ind.annexes?.length ?? 0) === (s.annexes?.length ?? 0)) continue;
+      ind.annexes = s.annexes;
+      ind.level = s.level;
+      ind.streak = s.streak;
     }
     this.indexWarehouses();
     // Дома: снесённые возвращаются, перенесённые встают на старое место,
@@ -4380,7 +4393,8 @@ export class Game implements BuildContext {
       if (good) streak = Math.max(1, streak + 1);
       else if (!stations.length) streak = Math.min(-1, streak - 1);
       else streak = 0;
-      const cap = ind.cap ?? E.maxLevel;
+      // Сам — до предела пристроек (ANNEX.base без них); дальше расти некуда — нужна пристройка (annexReady).
+      const cap = growthCap(ind);
       if (streak >= E.growthMonths && level < cap) {
         ind.level = Math.min(cap, level + E.growthStep);
         streak = 0;
@@ -5491,16 +5505,78 @@ export class Game implements BuildContext {
     if (st.kind !== 'road') return fail(st.kind === 'rail' ? 'У ж/д станции склад пока не растёт' : 'У остановки склада нет');
     if (storageSlots(st) >= STORAGE.max) return fail(`Больше ${STORAGE.max} складов нельзя`);
     if (!inWarehouseZone(st, fp)) return fail('Склад — только рядом со станцией');
-    if (!this.inBounds(fp.center, footprintRadius(fp))) return fail('За краем карты');
-    if (this.isWater(fp.center, fp.h / 2) || footprintCorners(fp).some((c) => this.isWater(c))) return fail('Мешает вода');
-    for (const s of this.index.near(fp.center, footprintRadius(fp) + 120)) {
-      if (!footprintsOverlap(fp, s.fp, 1)) continue;
-      return fail(s.type === 'building' ? 'Мешает здание' : s.type === 'industry' ? 'Мешает предприятие' : s.type === 'warehouse' ? 'Мешает склад' : 'Мешает станция');
-    }
-    const road = this.roadUnder(fp, 2);
-    if (road) return fail(road);
+    const problem = this.outbuildingProblem(fp);
+    if (problem) return fail(problem);
     if (cost > this.budget) return fail('Не хватает денег');
     return { ok: true, cost, fp };
+  }
+
+  /** Что мешает постройке рядом с хозяином (склад, пристройка): край карты, вода, здания и постройки, дороги и пути. */
+  private outbuildingProblem(fp: Footprint): string | null {
+    if (!this.inBounds(fp.center, footprintRadius(fp))) return 'За краем карты';
+    if (this.isWater(fp.center, fp.h / 2) || footprintCorners(fp).some((c) => this.isWater(c))) return 'Мешает вода';
+    for (const s of this.index.near(fp.center, footprintRadius(fp) + 120)) {
+      if (!footprintsOverlap(fp, s.fp, 1)) continue;
+      return s.type === 'building'
+        ? 'Мешает здание'
+        : s.type === 'industry'
+          ? 'Мешает предприятие'
+          : s.type === 'warehouse'
+            ? 'Мешает склад'
+            : s.type === 'annex'
+              ? 'Мешает пристройка'
+              : 'Мешает станция';
+    }
+    return this.roadUnder(fp, 2);
+  }
+
+  /**
+   * Пристройка предприятия id с центром в p: только когда оно готово к расширению (annexReady), целиком в зоне вокруг
+   * него; мешает то же, что складам станций.
+   */
+  annexPlan(id: number, p: Vec): { ok: boolean; reason?: string; cost: number; fp: Footprint | null } {
+    const ind = this.industries.find((i) => i.id === id);
+    if (!ind) return { ok: false, reason: 'Предприятия нет', cost: 0, fp: null };
+    const cost = ANNEX.cost;
+    const fp = annexFootprint(ind, p);
+    const fail = (reason: string) => ({ ok: false, reason, cost, fp });
+    if (!annexReady(ind)) return fail(`${ind.name} ещё не готово расти дальше`);
+    if (!inAnnexZone(ind, fp)) return fail('Пристройка — только рядом с предприятием');
+    const problem = this.outbuildingProblem(fp);
+    if (problem) return fail(problem);
+    if (cost > this.budget) return fail('Не хватает денег');
+    return { ok: true, cost, fp };
+  }
+
+  /** Ставит пристройку предприятия id в точке p: уровень сразу +growthStep, предел роста +1. Причина, если нельзя. */
+  buildAnnex(id: number, p: Vec): string | null {
+    const plan = this.annexPlan(id, p);
+    const ind = this.industries.find((i) => i.id === id);
+    if (!plan.ok || !plan.fp || !ind) return plan.reason ?? 'Нельзя';
+    this.checkpoint('пристройка предприятия');
+    this.spend(plan.cost);
+    const a: Annex = { type: 'annex', id: this.nextEntityId++, industryId: ind.id, fp: plan.fp };
+    ind.annexes = [...(ind.annexes ?? []), a];
+    this.index.add(a);
+    const level = ind.level ?? 1;
+    ind.level = Math.min(ind.cap ?? ECONOMY.maxLevel, level + ECONOMY.growthStep);
+    ind.streak = 0;
+    this.notify(`${ind.name}: пристройка — производство ×${ind.level}`, '#2e9d57');
+    this.commit();
+    return null;
+  }
+
+  /** Сносит пристройку (часть цены вернётся): предел роста −1, уровень — не выше него. */
+  removeAnnex(a: Annex): void {
+    const ind = this.industries.find((i) => i.id === a.industryId);
+    this.checkpoint('снос пристройки');
+    if (ind) {
+      ind.annexes = (ind.annexes ?? []).filter((x) => x.id !== a.id);
+      ind.level = Math.min(ind.level ?? 1, Math.max(1, growthCap(ind)));
+    }
+    this.index.remove(a);
+    this.refund(ANNEX.cost);
+    this.commit();
   }
 
   /** Ставит склад-здание станции id в точке p (одним шагом для Ctrl+Z). Возвращает причину, если нельзя. */
@@ -5538,10 +5614,11 @@ export class Game implements BuildContext {
     return null;
   }
 
-  /** Склады-здания станций — в пространственном индексе (после загрузки и Ctrl+Z — заново по станциям). */
+  /** Склады станций и пристройки предприятий — в пространственном индексе (после загрузки и Ctrl+Z — заново). */
   private indexWarehouses(): void {
-    for (const s of [...this.index.items]) if (s.type === 'warehouse') this.index.remove(s);
+    for (const s of [...this.index.items]) if (s.type === 'warehouse' || s.type === 'annex') this.index.remove(s);
     for (const st of this.stations.values()) for (const w of st.warehouses ?? []) this.index.add(w);
+    for (const ind of this.industries) for (const a of ind.annexes ?? []) this.index.add(a);
   }
 
   /** Где посты автостанции: площадка без пристроек-складов по концам (они — по половине с обеих сторон). */

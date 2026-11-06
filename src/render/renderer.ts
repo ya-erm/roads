@@ -1335,7 +1335,11 @@ export class Renderer {
       if (dist(town.center, { x: (view.x0 + view.x1) / 2, y: (view.y0 + view.y1) / 2 }) > (town.extent ?? town.radius) + (view.x1 - view.x0) * 1.2) continue;
       for (const b of town.buildings) if (inView(b.fp)) this.drawBuilding(b);
     }
-    for (const ind of game.industries) if (inView(ind.fp)) this.drawIndustry(ind);
+    for (const ind of game.industries) {
+      // Пристройка — то же предприятие в уменьшенном виде (сцена вписывается в её контур).
+      for (const a of ind.annexes ?? []) if (inView(a.fp)) this.drawIndustry({ ...ind, fp: a.fp });
+      if (inView(ind.fp)) this.drawIndustry(ind);
+    }
     const sel = o.selection;
     for (const st of game.stations.values()) {
       const selected = (sel?.type === 'station' && sel.id === st.id) || o.lineStops.includes(st.id);
