@@ -3964,6 +3964,12 @@ export class Game implements BuildContext {
     this.journal.add('lost', { v: v.id, l: v.lineId, train: true });
   }
 
+  /** Машина в потоке — самосвал строительной бригады: id бригады (иначе undefined). */
+  crewOfSim(simId: number): number | undefined {
+    const owner = this.owners.get(simId);
+    return owner?.type === 'crew' ? owner.id : undefined;
+  }
+
   private fleetOf(sim: Vehicle): FleetVehicle | undefined {
     const owner = this.owners.get(sim.id);
     return owner?.type === 'fleet' ? this.fleet.get(owner.id) : undefined;

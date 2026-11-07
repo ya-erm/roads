@@ -3062,6 +3062,16 @@ export class Hud {
     const sim = g.traffic.vehicles.get(sel.simId);
     if (!sim) return `<section class="detail">${head('Машина')}<p class="muted">Доехала.</p></section>`;
     const speed = Math.round(sim.v * KMH_PER_UNIT);
+    // Самосвал строительной бригады: чья, куда едет и что строит.
+    const crew = g.crewOfSim(sim.id);
+    if (crew !== undefined) {
+      const b = g.construction.crews.brigades.get(crew);
+      const where = g.brigadeWhere(crew);
+      const n = b ? g.construction.crews.of(b.base).indexOf(b) + 1 : 0;
+      return `<section class="detail">${head(`🚚 Строительная бригада${n ? ` ${n}` : ''}`, b ? `база «${esc(g.baseName(b.base))}»` : undefined)}
+      <div class="kv near"><span>Сейчас</span><b>${esc(where?.text ?? '')}</b><span>Скорость</span><b>${speed} км/ч</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
+      <div class="actions">${follow}</div></section>`;
+    }
     return `<section class="detail">${head('Машина жителя')}
       <div class="kv near"><span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
       <div class="actions">${follow}</div></section>`;

@@ -460,7 +460,11 @@ describe('Стройка дорог: базы и бригады', () => {
     for (let t = 0; t < 60 && !crews.working(id).length; t += 0.1) {
       runSeconds(game, 0.1);
       const b = [...crews.brigades.values()][0];
-      if (b.sim !== undefined && game.traffic.vehicles.has(b.sim)) drove = true;
+      if (b.sim !== undefined && game.traffic.vehicles.has(b.sim)) {
+        drove = true;
+        // Машина в потоке узнаётся как самосвал этой бригады (карточка — «Строительная бригада», не «машина жителя»).
+        expect(game.crewOfSim(b.sim)).toBe(b.id);
+      }
     }
     expect(drove).toBe(true);
     expect(crews.working(id).length).toBe(1);
