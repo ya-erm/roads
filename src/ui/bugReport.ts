@@ -9,7 +9,7 @@
  * (с параметрами `--area`/`--camera` для npm run shot), в meta.json и в сохранение (bugSpot) — открытая партия
  * покажет участок рамкой. Без рамки участок — по обведённому пометками или по кадру; камера пишется всегда.
  *
- * Горячая клавиша (F8 или Ctrl/Cmd+Shift+B, bugreport/hotkey.ts) открывает то же окно, не трогая мышь: на снимке
+ * Горячая клавиша («`» или Ctrl/Cmd+Shift+B, bugreport/hotkey.ts) открывает то же окно, не трогая мышь: на снимке
  * остаётся подсветка под курсором, предпросмотр стройки и подпись у курсора. Снимок, журнал и сохранение берутся
  * в самый момент нажатия, до открытия окна. Кнопка мыши, зажатая в этот момент (тянули дорогу или узел) и
  * отпущенная уже в окне, доходит до игры при его закрытии — там же, где был курсор на снимке.
@@ -1010,7 +1010,9 @@ class BugReport {
 
   private onKey(e: KeyboardEvent): void {
     // Горячая клавиша — в любом инструменте, с зажатой кнопкой мыши и поверх других окон; игра её не видит.
-    if (isBugHotkey(e)) {
+    // «`» — обычный символ: в поле ввода (название, описание отчёта) его просто печатают.
+    const typing = e.target instanceof HTMLElement && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName));
+    if (isBugHotkey(e) && !(typing && e.code === 'Backquote')) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (!e.repeat && !this.isOpen) void this.open();

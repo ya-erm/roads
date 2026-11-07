@@ -36,7 +36,7 @@ export function installTips(doc: Document = document): HTMLElement {
     if (shown !== `${text}\n${keys}`) {
       shown = `${text}\n${keys}`;
       el.textContent = text;
-      // Горячие клавиши — значками <kbd> после текста: «F8 или ⌘⇧B».
+      // Горячие клавиши — значками <kbd> после текста: «` или ⌘⇧B».
       keys
         .split('|')
         .filter(Boolean)

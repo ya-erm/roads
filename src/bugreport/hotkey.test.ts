@@ -4,12 +4,13 @@ import { bugHotkeyLabels, isBugHotkey, isMacPlatform, type KeyLike } from './hot
 const key = (code: string, mods: Partial<KeyLike> = {}): KeyLike => ({ code, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...mods });
 
 describe('горячая клавиша баг-репорта', () => {
-  it('F8 — и с Shift (зажат для прямой у курсора), но не с Cmd/Ctrl/Alt', () => {
-    expect(isBugHotkey(key('F8'))).toBe(true);
-    expect(isBugHotkey(key('F8', { shiftKey: true }))).toBe(true);
-    expect(isBugHotkey(key('F8', { ctrlKey: true }))).toBe(false);
-    expect(isBugHotkey(key('F8', { metaKey: true }))).toBe(false);
-    expect(isBugHotkey(key('F8', { altKey: true }))).toBe(false);
+  it('«`» («Ё») — и с Shift (зажат для прямой у курсора), но не с Cmd/Ctrl/Alt; F8 больше не она', () => {
+    expect(isBugHotkey(key('Backquote'))).toBe(true);
+    expect(isBugHotkey(key('Backquote', { shiftKey: true }))).toBe(true);
+    expect(isBugHotkey(key('Backquote', { ctrlKey: true }))).toBe(false);
+    expect(isBugHotkey(key('Backquote', { metaKey: true }))).toBe(false);
+    expect(isBugHotkey(key('Backquote', { altKey: true }))).toBe(false);
+    expect(isBugHotkey(key('F8'))).toBe(false);
   });
 
   it('Ctrl+Shift+B и Cmd+Shift+B', () => {
@@ -27,8 +28,8 @@ describe('горячая клавиша баг-репорта', () => {
   });
 
   it('подпись клавиш — по системе', () => {
-    expect(bugHotkeyLabels(true)).toEqual(['F8', '⌘⇧B']);
-    expect(bugHotkeyLabels(false)).toEqual(['F8', 'Ctrl+Shift+B']);
+    expect(bugHotkeyLabels(true)).toEqual(['`', '⌘⇧B']);
+    expect(bugHotkeyLabels(false)).toEqual(['`', 'Ctrl+Shift+B']);
     expect(isMacPlatform({ platform: 'MacIntel' })).toBe(true);
     expect(isMacPlatform({ platform: '', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' })).toBe(false);
   });

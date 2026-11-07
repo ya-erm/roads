@@ -1,8 +1,9 @@
 /**
  * Горячая клавиша баг-репорта: снимок, когда мышь занята — курсор над объектом, тянется дорога, открыт предпросмотр.
- * Две клавиши: F8 (на клавиатурах Mac без Fn это «Пауза» медиаплеера) и Ctrl/Cmd+Shift+B — она есть везде.
- * Игра этих клавиш не занимает (одиночные буквы и цифры у неё, сочетания с Cmd/Ctrl — браузеру), а B с Cmd/Ctrl
- * и Shift в браузере — только панель закладок, её нажатие отменяет.
+ * Две клавиши: «`» («Ё» в русской раскладке — слева от 1, под левой рукой, пока правая на мыши; F8 на MacBook
+ * без Fn — медиаклавиша) и Ctrl/Cmd+Shift+B. Игра их не занимает (буквы и цифры инструментов, сочетания
+ * с Cmd/Ctrl — браузеру), а B с Cmd/Ctrl и Shift в браузере — только панель закладок, её нажатие отменяет.
+ * В поле ввода «`» печатается как символ (см. BugReport.onKey).
  */
 
 export interface KeyLike {
@@ -13,16 +14,16 @@ export interface KeyLike {
   altKey: boolean;
 }
 
-/** Нажата клавиша баг-репорта: F8 без Cmd/Ctrl/Alt или Ctrl/Cmd+Shift+B. */
+/** Нажата клавиша баг-репорта: «`» без Cmd/Ctrl/Alt или Ctrl/Cmd+Shift+B. */
 export function isBugHotkey(e: KeyLike): boolean {
   const mod = e.ctrlKey || e.metaKey;
-  if (e.code === 'F8') return !mod && !e.altKey;
+  if (e.code === 'Backquote') return !mod && !e.altKey;
   return e.code === 'KeyB' && mod && e.shiftKey && !e.altKey;
 }
 
 /** Клавиши для подсказки — значками: на Mac сочетание значками ⌘⇧, у остальных — Ctrl+Shift. */
 export function bugHotkeyLabels(mac: boolean): string[] {
-  return ['F8', mac ? '⌘⇧B' : 'Ctrl+Shift+B'];
+  return ['`', mac ? '⌘⇧B' : 'Ctrl+Shift+B'];
 }
 
 /** Компьютер Apple: сочетание пишется через ⌘. */
