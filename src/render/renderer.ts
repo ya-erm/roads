@@ -939,6 +939,7 @@ export class Renderer {
     ctx.textAlign = side ? (dx > 0 ? 'right' : 'left') : 'center';
     ctx.textBaseline = side ? 'middle' : dy > 0 ? 'bottom' : 'top';
     ctx.lineWidth = 3 / z;
+    ctx.lineJoin = 'round';
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
     ctx.strokeText(label, x, y);
     ctx.fillStyle = 'rgba(70, 56, 30, 0.95)';
@@ -1039,6 +1040,7 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
     ctx.lineWidth = 3 / z;
+    ctx.lineJoin = 'round';
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
     ctx.strokeText(label, x, y);
     ctx.fillStyle = 'rgba(70, 56, 30, 0.95)';
@@ -2485,6 +2487,8 @@ export class Renderer {
         ctx.fill();
       }
       ctx.lineWidth = 3;
+      // Обводка букв — со скруглёнными углами: острый угол (miter) у «М», «Ж», «у» торчит белым шипом.
+      ctx.lineJoin = 'round';
       ctx.strokeStyle = 'rgba(255,255,255,0.75)';
       if (!bg) ctx.strokeText(s, 0, 0);
       ctx.fillStyle = color;
@@ -3526,6 +3530,7 @@ export class Renderer {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineJoin = 'round';
       ctx.strokeText(p.name, 0, -36);
       ctx.fillStyle = '#1f2933';
       ctx.fillText(p.name, 0, -36);
@@ -3738,6 +3743,7 @@ export class Renderer {
       ctx.font = '800 14px system-ui, -apple-system, sans-serif';
       ctx.textAlign = 'center';
       ctx.lineWidth = 3;
+      ctx.lineJoin = 'round';
       ctx.strokeStyle = 'rgba(255,255,255,0.9)';
       ctx.strokeText(f.text, 0, 0);
       ctx.fillStyle = f.color;

@@ -746,6 +746,8 @@ class TimelapsePlayer {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 3;
+    // Скруглённые углы обводки: острый угол (miter) у «М», «Ж» торчит белым шипом.
+    ctx.lineJoin = 'round';
     ctx.strokeStyle = 'rgba(255,255,255,0.85)';
     ctx.fillStyle = '#1f2933';
     for (const town of g.towns) {
@@ -893,6 +895,7 @@ class TimelapsePlayer {
     ctx.textAlign = 'right';
     ctx.textBaseline = 'alphabetic';
     ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
     ctx.strokeStyle = 'rgba(255,255,255,0.7)';
     ctx.fillStyle = 'rgba(31,41,51,0.7)';
     ctx.strokeText('Дороги региона', this.w - 10, this.h - 10);
