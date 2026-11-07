@@ -3,7 +3,8 @@
  * - проект — сама будущая дорога выбранного типа (полосы, разметка, мост, тоннель — отрисовкой дорог, своим
  *   LaneRenderer только по строящимся полотнам), полупрозрачной, с кромками синим пунктиром; по слоям высоты, как
  *   готовые дороги, в плитки кэша карты;
- * - этапы на строящемся участке (CONSTRUCTION.stages, идут колонной): 🟫 отсыпка, ⬛ покрытие, ⬜ разметка — до края
+ * - этапы на строящемся участке (CONSTRUCTION.stages, идут колонной): 🟫 отсыпка (у моста — опоры, балки и плита
+ *   настила, у тоннеля — выработка щита: src/render/structureArt.ts), ⬛ покрытие, ⬜ разметка — до края
  *   каждого, шагами CONSTRUCTION.drawStep: плитки обновляются по шагу, а не каждый такт (projectSig); отсыпка — не по
  *   площадке перекрёстка (там бывает готовая дорога), площадка — этапом, дошедшим до неё (nodeStage);
  * - тень мостов проекта — отдельным проходом под готовыми дорогами (drawProjectShadows): готовое — обычной, остальное —
@@ -14,7 +15,7 @@
  * Готовые участки рисует обычная отрисовка дорог: у них уже нет Corridor.build.
  */
 import { CONSTRUCTION } from '../config';
-import { add, rightNormal, scale, type Vec } from '../core/vec';
+import { add, rightNormal, scale, sub, type Vec } from '../core/vec';
 import { convoyGap, frontOf, nextSite, type StageReach, stageLayout, stageSpans } from '../game/constructionWork';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import type { LaneRenderer } from '../lanes/draw';
@@ -23,6 +24,7 @@ import type { Corridor, LaneNet } from '../lanes/model';
 import { corridorLayer } from '../lanes/speedDisplay';
 import type { BuildBase } from '../world/entities';
 import { ROAD_MARGIN } from '../world/roadTypes';
+import { bridgePiers, drawCraneSet, drawShieldSet, type SiteKind, siteKind, slabTo } from './structureArt';
 import { type Box, grow } from './tileCache';
 
 /** Строящиеся полотна сети — кэш по версии (стройка меняет её, когда закладывает или открывает участок). */
@@ -154,6 +156,172 @@ const GHOST = 0.55;
 const PROJECT_TINT = 'rgba(47, 128, 237, 0.3)';
 /** Отсыпка — цвет земляного полотна. */
 const EARTH = '#c4a57c';
+/** Мост: бетон плиты настила, балки пролёта, опоры. */
+const SLAB = '#cdc8bd';
+const BEAM = '#6f6a62';
+const PIER = '#a39d92';
+const PIER_EDGE = '#6f6a62';
+/** Тоннель: пройденная щитом выработка (сквозь землю — бледно) и кольца обделки. */
+const BORE = '#3b3128';
+const RING = '#9c8a72';
+
+/** Цвет первого этапа на площадке узла: у моста — бетон настила, в тоннеле — выработка, на земле — отсыпка. */
+const firstStageColor = (level: number) => (level > 0 ? SLAB : level < 0 ? BORE : EARTH);
+
+/** Линия вдоль полотна на [s0, s1] на доле f ширины (0 — левая кромка, 1 — правая), у моста — поднята с полотном. */
+function deckLine(net: LaneNet, c: Corridor, s0: number, s1: number, f: number, step = 5): Vec[] {
+  const out: Vec[] = [];
+  for (const s of stations(c, s0, s1, step)) {
+    const e = edgesAt(c, s);
+    if (!e) continue;
+    out.push(add(pointOff(c, s, e[0] + (e[1] - e[0]) * f), bridgeLook(deckAlong(net, c, s)).lift));
+  }
+  return out;
+}
+
+/** Поперечина полотна в точке s: от левой кромки до правой (с выносом pad), поднята с полотном на долю lift. */
+function across(net: LaneNet, c: Corridor, s: number, pad: number, lift = 1): [Vec, Vec] | null {
+  const e = edgesAt(c, s);
+  if (!e) return null;
+  const d = scale(bridgeLook(deckAlong(net, c, s)).lift, lift);
+  return [add(pointOff(c, s, e[0] - pad), d), add(pointOff(c, s, e[1] + pad), d)];
+}
+
+/**
+ * Мост, первый этап (вместо отсыпки): опоры впереди (bridgePiers: фундамент, потом столбы с ригелем), балки пролёта до
+ * края этапа earthTo (метров от начала заполнения) и плита настила за ними (slabTo). [lo, hi] — своё у полотна (без
+ * площадок перекрёстков), по оси от a.
+ */
+function drawBridgeFrame(ctx: CanvasRenderingContext2D, net: LaneNet, c: Corridor, earthTo: number, lo: number, hi: number): void {
+  const L = c.length;
+  const fromB = !!c.build?.fromB;
+  const span = (to: number): [number, number] => {
+    const [s0, s1] = fromB ? [L - to, L] : [0, to];
+    return [Math.max(lo, s0), Math.min(hi, s1)];
+  };
+  ctx.save();
+  ctx.lineJoin = 'round';
+  // Опоры: фундамент на земле; опора — столбы от земли до полотна и ригель поперёк под ним.
+  for (const p of bridgePiers(L, (s) => deckAlong(net, c, s), earthTo, fromB)) {
+    if (p.s < lo || p.s > hi) continue;
+    const t = c.lut.tangentAt(p.s);
+    const foot = across(net, c, p.s, 0.5, 0);
+    if (!foot) continue;
+    const half = scale(t, p.full ? 1.2 : 1.6);
+    ctx.lineWidth = 0.4;
+    ctx.strokeStyle = PIER_EDGE;
+    if (!p.full) {
+      // Фундамент в работе: бетонная плита на земле с торчащей арматурой будущих столбов.
+      ctx.fillStyle = PIER;
+      poly(ctx, [add(foot[0], half), add(foot[1], half), sub(foot[1], half), sub(foot[0], half)]);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#7a4a2a';
+      const e = edgesAt(c, p.s) ?? [-3.5, 3.5];
+      const w = Math.max(0, e[1] - e[0] - 2);
+      const n = Math.max(1, Math.round(w / 1.6));
+      for (let i = 0; i <= n; i++) {
+        for (const d of [-0.6, 0.6]) {
+          const q = add(pointOff(c, p.s, e[0] + 1 + (w * i) / n), scale(t, d));
+          ctx.fillRect(q.x - 0.25, q.y - 0.25, 0.5, 0.5);
+        }
+      }
+      continue;
+    }
+    const cap = across(net, c, p.s, 0.8);
+    if (!cap) continue;
+    // Столбы — у кромок полотна (и посередине у широкого): от земли до ригеля.
+    const e = edgesAt(c, p.s) ?? [-3.5, 3.5];
+    const lift = bridgeLook(deckAlong(net, c, p.s)).lift;
+    const cols = e[1] - e[0] > 12 ? [e[0] + 1.6, (e[0] + e[1]) / 2, e[1] - 1.6] : [e[0] + 1.6, e[1] - 1.6];
+    ctx.strokeStyle = '#8a857c';
+    ctx.lineWidth = 1.8;
+    ctx.lineCap = 'butt';
+    for (const lat of cols) {
+      const g = pointOff(c, p.s, lat);
+      ctx.beginPath();
+      ctx.moveTo(g.x, g.y);
+      ctx.lineTo(g.x + lift.x, g.y + lift.y);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#c2bdb2';
+    ctx.strokeStyle = PIER_EDGE;
+    ctx.lineWidth = 0.4;
+    poly(ctx, [add(cap[0], half), add(cap[1], half), sub(cap[1], half), sub(cap[0], half)]);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+  // Балки пролёта — вдоль, с поперечинами, до края этапа.
+  const [b0, b1] = span(earthTo);
+  if (b1 - b0 > 0.5) {
+    ctx.strokeStyle = '#8d8880';
+    ctx.lineWidth = 0.6;
+    for (let s = Math.ceil(b0 / 6) * 6; s <= b1; s += 6) {
+      const x = across(net, c, s, 0.3);
+      if (!x) continue;
+      poly(ctx, x);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = BEAM;
+    ctx.lineWidth = 1.3;
+    ctx.lineCap = 'butt';
+    for (const f of [0.08, 0.36, 0.64, 0.92]) {
+      const line = deckLine(net, c, b0, b1, f);
+      if (line.length < 2) continue;
+      poly(ctx, line);
+      ctx.stroke();
+    }
+  }
+  // Плита настила — за балками, со швами плит.
+  const [p0, p1] = span(slabTo(earthTo, L));
+  if (p1 - p0 > 0.5) {
+    const b = band(net, c, p0, p1, ROAD_MARGIN + 1.2);
+    ctx.fillStyle = SLAB;
+    poly(ctx, [...b.left, ...[...b.right].reverse()]);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#9a958b';
+    ctx.lineWidth = 0.5;
+    poly(ctx, b.left);
+    ctx.stroke();
+    poly(ctx, b.right);
+    ctx.stroke();
+    ctx.strokeStyle = '#bdb8ad';
+    ctx.lineWidth = 0.3;
+    for (let s = Math.ceil(p0 / 6) * 6; s < p1; s += 6) {
+      const x = across(net, c, s, ROAD_MARGIN + 1.2);
+      if (!x) continue;
+      poly(ctx, x);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+/**
+ * Тоннель, первый этап (вместо отсыпки): пройденная щитом выработка на [s0, s1] — тёмной полосой сквозь землю (ярче
+ * будущей дороги рядом) с кольцами обделки поперёк.
+ */
+function drawBore(ctx: CanvasRenderingContext2D, net: LaneNet, c: Corridor, s0: number, s1: number): void {
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, ctx.globalAlpha * 2);
+  const b = band(net, c, s0, s1, ROAD_MARGIN + 1.2);
+  ctx.fillStyle = BORE;
+  poly(ctx, [...b.left, ...[...b.right].reverse()]);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = RING;
+  ctx.lineWidth = 0.5;
+  for (let s = Math.ceil(s0 / 4) * 4; s <= s1; s += 4) {
+    const x = across(net, c, s, ROAD_MARGIN + 1.2, 0);
+    if (!x) continue;
+    poly(ctx, x);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
 
 /** Чистые холсты для полупрозрачного слоя — по размеру холста, куда рисуем (экран или плитка кэша карты). */
 const scratch = new Map<string, CanvasRenderingContext2D>();
@@ -298,11 +466,17 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
   // Этапы готового — непрозрачно, поверх будущей дороги.
   for (const c of list) {
     if (corridorLayer(net, c) !== layer) continue;
-    const [, paveTo, marksTo] = stageSpans(drawnDone(c), c.length);
+    const [earthTo, paveTo, marksTo] = stageSpans(drawnDone(c), c.length);
     const span = (to: number): [number, number] => (c.build?.fromB ? [c.length - to, c.length] : [0, to]);
-    // Отсыпка — только по своему у полотна, не по площадке перекрёстка: там бывает уже готовая дорога.
+    // Отсыпка — только по своему у полотна, не по площадке перекрёстка: там бывает уже готовая дорога. У моста вместо
+    // неё — опоры, балки и плита настила, у тоннеля — выработка щита (structureArt).
     const { earth } = projectLayout(c, cuts);
-    if (earth) {
+    const kind = siteKind(net, c);
+    if (kind === 'bridge') {
+      const [ca, cb] = cuts.get(c.id) ?? [0, 0];
+      drawBridgeFrame(ctx, net, c, earthTo, Math.max(0, ca), c.length - Math.max(0, cb));
+    } else if (earth && kind === 'tunnel') drawBore(ctx, net, c, ...earth);
+    else if (earth) {
       const b = band(net, c, ...earth, ROAD_MARGIN + 1.2);
       ctx.fillStyle = EARTH;
       poly(ctx, [...b.left, ...[...b.right].reverse()]);
@@ -326,7 +500,7 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
       drawFaded(ctx, grow(n.box, 4), 1, (g) => {
         lanes.draw(g, net, zoom, false, view, layer, pick);
         g.globalCompositeOperation = 'source-atop';
-        g.fillStyle = EARTH;
+        g.fillStyle = firstStageColor(net.node(n.id).level);
         g.fillRect(n.box.x0 - 4, n.box.y0 - 4, n.box.x1 - n.box.x0 + 8, n.box.y1 - n.box.y0 + 8);
       });
   }
@@ -525,9 +699,10 @@ export function baseBox(b: BuildBase): Box {
 
 /**
  * Техника бригады в точке at, носом по dir (в мире, метрами): этап 0 — грейдер и самосвал, 1 — асфальтоукладчик
- * и каток, 2 — машина разметки. light — маячок горит (работают).
+ * и каток, 2 — машина разметки. light — маячок горит (работают). На мосту (kind) этап 0 — автокран со стрелой и
+ * бетоновоз, в тоннеле — проходческий щит (structureArt); t — время игры, с: стрела качается, барабан и ротор крутятся.
  */
-export function drawMachines(ctx: CanvasRenderingContext2D, at: Vec, dir: Vec, stage: 0 | 1 | 2, light: boolean, shift = 0): void {
+export function drawMachines(ctx: CanvasRenderingContext2D, at: Vec, dir: Vec, stage: 0 | 1 | 2, light: boolean, shift = 0, kind: SiteKind = 'road', t = 0): void {
   ctx.save();
   ctx.translate(at.x, at.y);
   ctx.rotate(Math.atan2(dir.y, dir.x));
@@ -543,7 +718,10 @@ export function drawMachines(ctx: CanvasRenderingContext2D, at: Vec, dir: Vec, s
     ctx.fill();
     ctx.stroke();
   };
-  if (stage === 0) {
+  let beacon = -1.8;
+  if (stage === 0 && kind === 'bridge') beacon = drawCraneSet(ctx, t);
+  else if (stage === 0 && kind === 'tunnel') beacon = drawShieldSet(ctx, t);
+  else if (stage === 0) {
     // Грейдер: длинная рама и нож поперёк, кабина сзади; за ним — самосвал с грунтом.
     box(-6, -1.2, 7, 2.4, '#f2b81d');
     ctx.fillStyle = '#4d4f55';
@@ -569,12 +747,12 @@ export function drawMachines(ctx: CanvasRenderingContext2D, at: Vec, dir: Vec, s
   // Маячок.
   ctx.fillStyle = light ? '#ff7a1a' : '#b8682c';
   ctx.beginPath();
-  ctx.arc(-1.8, 0, 0.7, 0, Math.PI * 2);
+  ctx.arc(beacon, 0, 0.7, 0, Math.PI * 2);
   ctx.fill();
   if (light) {
     ctx.fillStyle = 'rgba(255, 140, 40, 0.28)';
     ctx.beginPath();
-    ctx.arc(-1.8, 0, 3, 0, Math.PI * 2);
+    ctx.arc(beacon, 0, 3, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();

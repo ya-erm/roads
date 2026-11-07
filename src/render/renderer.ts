@@ -33,6 +33,7 @@ import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_
 import { drawTurnArrows } from './turnArrows';
 import { baseBox, baseSig, buildingCorridors, crewConvoy, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
+import { drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
 import { corridorHalf } from '../world/worldgen';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
@@ -53,7 +54,9 @@ export type Selection =
   /** Перекрёсток: светофор, главная дорога, запреты поворотов. */
   | { type: 'junction'; id: number }
   /** Проект стройки (режим «Со строительством»): карточка — сроки, деньги, бригады, резерв и приоритет. */
-  | { type: 'project'; id: number };
+  | { type: 'project'; id: number }
+  /** Строительная база: карточка — название, бригады и что они делают, нанять и распустить, ближние стройки. */
+  | { type: 'base'; id: number };
 
 export interface ToolOverlay {
   hover: Vec | null;
@@ -189,6 +192,9 @@ const BADGE_RISE = 14;
 const NAME_RISE = BADGE_RISE + 20;
 
 /** Верхний край здания на карте — по углам повёрнутого прямоугольника, а не по его высоте. */
+/** Точка p в рамке view с запасом pad. */
+const seenAt = (p: Vec, view: Box, pad: number) => p.x > view.x0 - pad && p.x < view.x1 + pad && p.y > view.y0 - pad && p.y < view.y1 + pad;
+
 function topOf(fp: Footprint): number {
   return fp.center.y - (Math.abs(Math.sin(fp.angle)) * fp.w + Math.abs(Math.cos(fp.angle)) * fp.h) / 2;
 }
@@ -581,8 +587,14 @@ export class Renderer {
     }
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
-    // Самосвалы бригад, что едут вдоль стройки от дороги к краю работ (и назад), — по оси проекта.
-    this.drawVehicles(game.siteCrewLooks().filter((v) => v.pos.x > view.x0 - 20 && v.pos.x < view.x1 + 20 && v.pos.y > view.y0 - 20 && v.pos.y < view.y1 + 20));
+    // Самосвалы бригад, что едут вдоль стройки от дороги к краю работ (и назад), — по оси проекта; в тоннеле — уходят
+    // под землю за порталом (tunnelSight).
+    for (const v of game.siteCrewLooks()) {
+      if (!seenAt(v.pos, view, 20)) continue;
+      const sight = tunnelSight(game.roads.net, v.pos, v.dir, v.length);
+      if (sight === 'show') this.drawVehicles([v]);
+      else if (sight !== 'hide') this.drawClipped(sight, () => this.drawVehicles([v]));
+    }
     this.drawLights(game, 0, o.phaseEdit);
     this.drawMotion(game, view);
     this.drawStations(game, view, o);
@@ -947,6 +959,18 @@ export class Renderer {
     // Свободные бригады — на своей базе.
     for (const base of crews.bases.values()) {
       if (base.fp.center.x < view.x0 - 40 || base.fp.center.x > view.x1 + 40 || base.fp.center.y < view.y0 - 40 || base.fp.center.y > view.y1 + 40) continue;
+      // Выбранная база (её карточка справа) — в оранжевой рамке.
+      if (sel?.type === 'base' && sel.id === base.id) {
+        const z = this.camera.zoom;
+        ctx.save();
+        ctx.translate(base.fp.center.x, base.fp.center.y);
+        ctx.rotate(base.fp.angle);
+        ctx.strokeStyle = 'rgba(240, 138, 60, 0.9)';
+        ctx.lineWidth = 2.5 / z + 1;
+        const pad = 3 + 3 / z;
+        ctx.strokeRect(-base.fp.w / 2 - pad, -base.fp.h / 2 - pad, base.fp.w + 2 * pad, base.fp.h + 2 * pad);
+        ctx.restore();
+      }
       drawParked(ctx, base, crews.of(base.id).filter((b) => b.state === 'idle').length);
     }
     const list = game.construction.list();
@@ -976,9 +1000,24 @@ export class Renderer {
         ctx.restore();
       }
       const site = crew ? game.construction.current(p.id) : null;
-      for (const m of site ? crewConvoy(game.roads.net, site) : []) {
-        if (m.pos.x < view.x0 - 40 || m.pos.x > view.x1 + 40 || m.pos.y < view.y0 - 40 || m.pos.y > view.y1 + 40) continue;
-        for (let i = 0; i < (m.active ? crew : 1); i++) drawMachines(ctx, m.pos, m.dir, m.stage, m.active && working && blink, (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 5);
+      const net = game.roads.net;
+      // Мост — кран и бетоновоз у края пролёта; тоннель — техника уходит под землю за порталом (tunnelSight), у
+      // входного портала — проходческое хозяйство, ход работ — огоньками сквозь землю (structureArt).
+      const kind = site ? siteKind(net, site) : 'road';
+      if (site && kind === 'tunnel') {
+        const gate = entryPortal(net, site);
+        if (gate && seenAt(gate.pos, view, 60)) drawPortalGear(ctx, gate, game.time, working);
+        drawWorkLights(ctx, site, game.time, working);
+      }
+      for (const m of site ? crewConvoy(net, site) : []) {
+        if (!seenAt(m.pos, view, 40)) continue;
+        const sight = tunnelSight(net, m.pos, m.dir, 24);
+        if (sight === 'hide') continue;
+        for (let i = 0; i < (m.active ? crew : 1); i++) {
+          const draw = () => drawMachines(ctx, m.pos, m.dir, m.stage, m.active && working && blink, (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 5, kind, game.time);
+          if (sight === 'show') draw();
+          else this.drawClipped(sight, draw);
+        }
       }
     }
     // Плашки над проектами — при любом зуме одного размера на экране (projectBadges: клик по плашке ищет её там же).

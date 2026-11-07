@@ -138,6 +138,7 @@ import { addPhase, editedAfter, GREEN_MAX, GREEN_MIN, movePhase, removePhase, st
 import { installTips } from './tipFloat';
 import { buildBarHtml, buildModeRowHtml } from './constructionUi';
 import { projectCardHtml } from './projectCard';
+import { baseCardHtml } from './baseCard';
 import { planPrice } from '../input/labels';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
@@ -419,10 +420,8 @@ export class Hud {
   private folderPickOpen: number | null = null;
   /** Станция, у которой в карточке открыто поле названия. */
   private renamingStation: number | null = null;
-  /** База стройки, название которой правят на плашке стройки. */
+  /** База стройки, название которой правят в её карточке. */
   private renamingBase: number | null = null;
-  /** База, у которой нажали ✕: второе нажатие сносит её. */
-  private removingBase: number | null = null;
   /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
   private dragLine: number | null = null;
   /** Покупку из карточки маршрута тянут на остановку: какую модель и на какую линию (см. bindBuyDrag). */
@@ -691,7 +690,7 @@ export class Hud {
     this.sync(true);
   }
 
-  /** Название базы стройки на плашке: клик открывает поле, Enter или уход фокуса — сохранить, Esc — отменить. */
+  /** Название базы стройки в её карточке: клик открывает поле, Enter или уход фокуса — сохранить, Esc — отменить. */
   private bindBaseName(root: HTMLElement): void {
     root.addEventListener('keydown', (e) => {
       const input = e.target as HTMLInputElement;
@@ -705,7 +704,8 @@ export class Hud {
       this.game().renameBase(Number(input.dataset.baseName), input.value);
       this.renamingBase = null;
       this.lastBuild = '';
-      setTimeout(() => this.renderBuild());
+      // Пока идёт focusout, поле ещё считается активным — перерисуем карточку и плашку следом.
+      setTimeout(() => this.sync(true));
     });
   }
 
@@ -930,10 +930,6 @@ export class Hud {
     const d = el.dataset;
     if (d.action !== 'ng-create') this.confirmNew = false;
     if (d.action !== 'sc-advance') this.confirmAdvance = false;
-    if (d.action !== 'base-remove' && this.removingBase !== null) {
-      this.removingBase = null;
-      this.lastBuild = '';
-    }
     switch (d.action) {
       case 'begin':
         this.hideScreens();
@@ -1148,25 +1144,10 @@ export class Hud {
         this.lastBuild = '';
         this.renderBuild();
         break;
-      case 'base-remove': {
-        // Снос базы — вторым нажатием: первое превращает ✕ в «✕ Снести?» (что будет — в подсказке).
-        const id = Number(d.id);
-        if (this.removingBase !== id) this.removingBase = id;
-        else {
-          this.removingBase = null;
-          const problem = g.removeBase(id);
-          if (problem) g.notify(problem, '#e5534b');
-        }
-        this.lastBuild = '';
-        this.renderBuild();
-        break;
-      }
       case 'base-rename':
+        // Название — в карточке базы: поле сразу (кнопку уже отпустили), иначе первые нажатия ушли бы карте.
         this.renamingBase = Number(d.id);
-        // Кнопку уже отпустили: поле — сразу, иначе первые нажатия ушли бы карте.
         this.pressing = false;
-        this.lastBuild = '';
-        this.renderBuild();
         break;
       case 'crew-show': {
         // Бригада: камера — к ней (в пути — к машине, на стройке — к краю работ), что делает — уведомлением.
@@ -1178,8 +1159,12 @@ export class Hud {
         break;
       }
       case 'base-show': {
+        // К базе на карте — и её карточка справа (бригады, нанять и распустить, ближние стройки).
         const base = g.construction.crews.bases.get(Number(d.id));
-        if (base) this.controller.showPlace(base.fp.center, 80);
+        if (base) {
+          this.controller.showPlace(base.fp.center, 80);
+          c.select({ type: 'base', id: base.id });
+        }
         break;
       }
       case 'advice-fix':
@@ -2325,6 +2310,7 @@ export class Hud {
     const html = this.sideHtml();
     // Карточку станции закрыли раньше, чем открылось поле, — при следующем выборе станции оно не нужно.
     if (this.renamingStation !== null && !html.includes('data-station-name')) this.renamingStation = null;
+    if (this.renamingBase !== null && !html.includes('data-base-name')) this.renamingBase = null;
     if (html !== this.lastPanel) {
       const side = this.q('[data-side]');
       side.innerHTML = html;
@@ -2338,7 +2324,7 @@ export class Hud {
       // Открыли кликом по значку предупреждения — блок с объяснением на виду.
       side.querySelector('.station-warnings.flash')?.scrollIntoView({ block: 'nearest' });
       // Новую или переименовываемую папку (и название станции) сразу открываем для ввода.
-      const input = side.querySelector<HTMLInputElement>('[data-folder-name], [data-station-name], [data-new-folder-line]');
+      const input = side.querySelector<HTMLInputElement>('[data-folder-name], [data-station-name], [data-base-name], [data-new-folder-line]');
       input?.focus();
       input?.select();
     }
@@ -2376,8 +2362,9 @@ export class Hud {
   private linesListHtml(): string {
     const g = this.game();
     const sel = this.controller.selection;
-    // У машины жителя линий нет, а у машины компании её линия уже есть в карточке.
-    if (sel?.type === 'vehicle' || sel?.type === 'fleet') return '';
+    // У машины жителя линий нет, а у машины компании её линия уже есть в карточке. У проекта стройки и базы маршрутов
+    // нет — список всех маршрутов под их карточкой только отвлекает.
+    if (sel?.type === 'vehicle' || sel?.type === 'fleet' || sel?.type === 'project' || sel?.type === 'base') return '';
     // Выбрана станция, предприятие или город — только их маршруты, без папок.
     const station = sel?.type === 'station' ? g.stations.get(sel.id) : undefined;
     const industry = sel?.type === 'industry' ? g.industries.find((i) => i.id === sel.id) : undefined;
@@ -2905,6 +2892,7 @@ export class Hud {
     const head = (title: string, sub = '') =>
       `<header><h3>${esc(title)}</h3><button class="icon" data-action="close-sel">✕</button></header>${sub ? `<p class="muted">${sub}</p>` : ''}`;
     if (sel.type === 'project') return projectCardHtml(g, sel.id);
+    if (sel.type === 'base') return baseCardHtml(g, sel.id, this.renamingBase === sel.id);
     if (sel.type === 'station') {
       const st = g.stations.get(sel.id);
       if (!st) return '';
@@ -3749,18 +3737,13 @@ export class Hud {
       bar.style.bottom = `${bottom}px`;
       this.fitLeftPanels();
     }
-    // Пока правят название базы, плашку не перерисовываем — поле с фокусом и набранным текстом осталось бы старым.
-    if (document.activeElement instanceof HTMLInputElement && bar.contains(document.activeElement)) return;
     const sel = this.controller.selection;
-    const html = buildBarHtml(this.game(), this.controller.placingBase, this.renamingBase, sel?.type === 'project' ? sel.id : null, this.removingBase);
+    const html = buildBarHtml(this.game(), this.controller.placingBase, sel?.type === 'project' ? sel.id : null, sel?.type === 'base' ? sel.id : null);
     if (html === this.lastBuild) return;
     this.lastBuild = html;
     const el = this.q('[data-build]');
     el.innerHTML = html;
     el.classList.toggle('hidden', !html);
-    const input = el.querySelector<HTMLInputElement>('[data-base-name]');
-    input?.focus();
-    input?.select();
   }
 
   /** Плашка предложения вверху — напоминает о предложениях в панели сценария; пока она есть, уведомления опускаются под неё. */

@@ -1,0 +1,141 @@
+/**
+ * Карточка строительной базы (режим «Со строительством») в правой панели — открывается кликом по площадке базы на
+ * карте («Выбор») или по строке базы на плашке слева внизу. Наглядно, значками и полосками:
+ * - название (клик — переименовать) и сводка: бригад, в деле, содержание в месяц;
+ * - бригады: самосвал, номер, что делает (строит «…», едет по дороге, едет вдоль стройки, ждёт выезда, на базе, ждёт
+ *   подъезда); клик — показать бригаду на карте; «＋ 🚚» — нанять, «−» — распустить;
+ * - ближние стройки: как далеко от базы и вклад бригады отсюда (1 / (1 + d / reach)), можно ли доехать по дорогам;
+ *   клик — к проекту и его карточке;
+ * - снос — не кнопкой, а инструментом «Снос» по площадке (подсказка значком).
+ * Подсказки — data-tip (не системные).
+ */
+import { CONSTRUCTION } from '../config';
+import type { Brigade } from '../game/crews';
+import type { Game } from '../game/game';
+import { baseSvg, buildSvg } from './constructionUi';
+import { crewDoing } from './projectCard';
+
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
+const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1).replace('.', ',')} км` : `${Math.round(m)} м`);
+
+/** Сколько ближних строек показывать. */
+const NEAR_MAX = 4;
+
+/** Значок состояния бригады (как на самосвале в карточке проекта). */
+const MARK: Record<Brigade['state'], string> = { working: '🏗', going: '➜', back: '↩', idle: '' };
+
+/**
+ * Что делает бригада базы — коротко, с проектом: «строит «Улица 1+1»», «едет по дороге → «…»», «на базе»; свободна,
+ * а у незаконченных проектов нет подъезда — «на базе · ждёт подъезда» (иначе непонятно, почему она стоит).
+ */
+export function baseCrewText(game: Game, b: Brigade): string {
+  const info = b.project !== undefined ? game.construction.info(b.project) : null;
+  const label = info ? ` «${info.project.label}»` : '';
+  if (b.state === 'working') return `строит${label}`;
+  if (b.state === 'going') return `${crewDoing(b)} →${label}`;
+  if (b.state === 'back') return 'едет на базу';
+  const blocked = game.construction.list().some((i) => !i.project.paused && !i.access);
+  return blocked ? 'на базе · ждёт подъезда' : 'на базе';
+}
+
+/** Карточка базы id; renaming — вместо названия поле ввода. Базы нет (снесли) — короткая записка. */
+export function baseCardHtml(game: Game, id: number, renaming = false): string {
+  const close = `<button class="icon" data-action="close-sel" data-tip="Закрыть">✕</button>`;
+  const crews = game.construction.crews;
+  const base = crews.bases.get(id);
+  if (!base) return `<section class="detail project-card base-card"><header><h3>База</h3>${close}</header><p class="muted">Базы больше нет: снесена.</p></section>`;
+  const name = game.baseName(id);
+  const title = renaming
+    ? `<input class="line-name station-name" data-base-name="${id}" value="${esc(name)}" maxlength="40" />`
+    : `<h3 class="station-title" data-action="base-rename" data-id="${id}" data-tip="Нажмите, чтобы переименовать">${esc(name)}</h3>
+       <button class="icon pencil" data-action="base-rename" data-id="${id}" data-tip="Переименовать">✎</button>`;
+  const head = `<header class="pc-head station-head"><button class="icon pc-show" data-action="base-show" data-id="${id}" data-tip="Показать базу на карте">${baseSvg(30, 22)}</button>
+    ${title}${close}</header>`;
+  return `<section class="detail project-card base-card">${head}
+    ${summaryHtml(game, id)}
+    ${crewsHtml(game, id)}
+    ${nearHtml(game, id)}
+    <p class="bc-remove muted" data-tip="Снести базу — инструментом «Снос» по её площадке: половина цены — назад, бригады перейдут на ближайшую базу">🚜 снести — инструментом «Снос»</p></section>`;
+}
+
+/** Сводка значками: бригад из предела, в деле, содержание в месяц. */
+function summaryHtml(game: Game, id: number): string {
+  const list = game.construction.crews.of(id);
+  const busy = list.filter((b) => b.state === 'working' || b.state === 'going').length;
+  const upkeep = list.length * CONSTRUCTION.brigade.upkeep;
+  const max = CONSTRUCTION.base.maxBrigades;
+  return `<div class="pc-chips">
+    <span class="pc-chip" data-tip="Бригад на базе (не больше ${max})">🚚 <b>${list.length}</b><span class="muted"> из ${max}</span></span>
+    <span class="pc-chip" data-tip="В деле: строят или едут на стройку">🏗 <b>${busy}</b><span class="muted"> в деле</span></span>
+    <span class="pc-chip" data-tip="Содержание бригад базы в месяц (статья «транспорт»)">💸 <b>${money(upkeep)}</b><span class="muted"> / мес</span></span></div>`;
+}
+
+/** Бригады базы: самосвал, №, что делает (клик — к ней на карте); нанять и распустить. */
+function crewsHtml(game: Game, id: number): string {
+  const crews = game.construction.crews;
+  const list = crews.of(id);
+  const rows = list
+    .map((b, i) => {
+      const mark = MARK[b.state];
+      const text = baseCrewText(game, b);
+      const where = game.brigadeWhere(b.id);
+      return `<button class="pc-crew ${b.state}" data-action="crew-show" data-id="${b.id}" data-tip="${esc(`Бригада ${i + 1}: ${where?.text ?? text} — показать на карте`)}">
+        <span class="bb-crew ${b.state}">🚚${mark ? `<i>${mark}</i>` : ''}</span>
+        <span class="pc-crew-name"><b>№${i + 1}</b> · ${esc(text)}</span></button>`;
+    })
+    .join('');
+  const B = CONSTRUCTION.base;
+  const full = list.length >= B.maxBrigades;
+  const poor = CONSTRUCTION.brigade.cost > game.budget;
+  const upkeep = money(CONSTRUCTION.brigade.upkeep);
+  const hire = `<button class="small" data-action="base-hire" data-id="${id}" ${full || poor ? 'disabled' : ''} data-tip="${esc(
+    full ? `На базе не больше ${B.maxBrigades} бригад — поставьте ещё базу` : poor ? 'Не хватает денег' : `Нанять бригаду: ${money(CONSTRUCTION.brigade.cost)}, содержание ${upkeep} в месяц`,
+  )}">＋ 🚚 ${money(CONSTRUCTION.brigade.cost)}</button>`;
+  const fire = `<button class="small" data-action="base-fire" data-id="${id}" ${list.length ? '' : 'disabled'} data-tip="Распустить бригаду (свободную — первой): половина цены — назад">− 🚚</button>`;
+  const body = rows ? `<div class="pc-crews">${rows}</div>` : `<div class="pc-why"><span class="pc-why-ic">🚫</span><span>Бригад нет — строить некому</span></div>`;
+  return `<div class="pc-block"><div class="pc-title">🚚 Бригады <b>${list.length}</b><span class="muted"> из ${B.maxBrigades}</span></div>${body}
+    <div class="pc-actions">${hire}${fire}</div></div>`;
+}
+
+/**
+ * Ближние стройки: по расстоянию от базы до края работ (или середины недостроенного); вклад бригады отсюда — полоской
+ * (на reach от базы — вдвое медленнее); к проекту не доехать отсюда по дорогам — «⛔».
+ */
+function nearHtml(game: Game, id: number): string {
+  const base = game.construction.crews.bases.get(id)!;
+  const near = game.construction
+    .list()
+    .map((info) => {
+      const at = info.front ?? info.at;
+      return { info, d: Math.hypot(at.x - base.fp.center.x, at.y - base.fp.center.y) };
+    })
+    .sort((a, b) => a.d - b.d || a.info.project.id - b.info.project.id);
+  const title = `<div class="pc-title">${buildSvg(20, 15)} Стройки рядом${near.length ? ` <b>${near.length}</b>` : ''}</div>`;
+  if (!near.length) return `<div class="pc-block">${title}<p class="muted">Строек нет — свободные бригады стоят на базе.</p></div>`;
+  const rows = near
+    .slice(0, NEAR_MAX)
+    .map(({ info, d }) => {
+      const p = info.project;
+      const power = Math.round((1 / (1 + d / CONSTRUCTION.reach)) * 100);
+      const site = game.construction.site(p.id);
+      const reach = site !== null && (site.node === base.nodeId || game.reach(base.nodeId, site.node));
+      const state = !info.access
+        ? `<span class="pc-bad" data-tip="К проекту нет подъезда ни с одной базы: постройте дорогу к его началу или поставьте базу рядом">⛔ нет подъезда</span>`
+        : !reach
+          ? `<span class="pc-bad" data-tip="Отсюда по дорогам не доехать: бригады этой базы туда не поедут">⛔ не доехать</span>`
+          : p.paused
+            ? `<span class="muted" data-tip="Проект на паузе">⏸</span>`
+            : '';
+      return `<button class="pc-crew bc-near" data-action="build-show" data-id="${p.id}" data-tip="${esc(
+        `«${p.label}»: ${km(d)} от базы — бригада отсюда строит в силу ${power}% (дальше — медленнее: вклад 1 / (1 + d / ${km(CONSTRUCTION.reach)})). Нажмите — к проекту`,
+      )}">
+        <span class="bc-near-ic">${buildSvg(22, 16)}</span>
+        <span class="pc-crew-name">${esc(p.label)} <span class="muted">· ${Math.min(99, Math.floor(info.done * 100))}%</span></span>
+        <span class="pc-crew-state">${state || `📏 ${km(d)}`}</span>
+        <span class="pc-mini" data-tip="${esc(`Сила бригады отсюда ${power}%`)}"><i style="width:${power}%"></i></span></button>`;
+    })
+    .join('');
+  const more = near.length > NEAR_MAX ? `<p class="muted">ещё ${near.length - NEAR_MAX}</p>` : '';
+  return `<div class="pc-block">${title}<div class="pc-crews">${rows}</div>${more}</div>`;
+}

@@ -67,7 +67,7 @@ describe('Карточка проекта стройки', () => {
     expect(html).toContain('резерв покрывает всё');
     expect(html).toContain('pc-prio');
     expect(html).toContain('⬆ Приоритет ✓');
-    const bar = buildBarHtml(game, false, null, id);
+    const bar = buildBarHtml(game, false, id);
     expect(bar).toContain('build-plate  selected');
     expect(bar).toContain('🔒');
     expect(bar).toContain('⬆');
@@ -88,13 +88,14 @@ describe('Карточка проекта стройки', () => {
     expect(html).toContain(`＋ 🚚 $${CONSTRUCTION.brigade.cost.toLocaleString('ru-RU')}`);
   });
 
-  it('проекта больше нет — короткая записка; снос базы — что будет, одной строкой', () => {
+  it('проекта больше нет — короткая записка; снос базы — что будет, одной строкой (у курсора «Сноса»)', () => {
     const { game, id } = setup(true);
     game.cancelProject(id);
     expect(projectCardHtml(game, id)).toContain('Проекта больше нет');
     const base = [...game.construction.crews.bases.keys()][0];
     expect(baseRemoveText(game, base)).toContain('первая была бесплатной');
     expect(baseRemoveText(game, base)).toContain('распустить');
-    expect(buildBarHtml(game, false, null, null, base)).toContain('✕ Снести?');
+    // На плашке слева сноса нет — только «Сносом» по площадке.
+    expect(buildBarHtml(game, false, null, base)).not.toContain('base-remove');
   });
 });

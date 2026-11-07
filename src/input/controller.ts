@@ -1839,6 +1839,8 @@ export class Controller {
     if (st?.type === 'annex') return { type: 'industry', id: st.industryId };
     if (st?.type === 'industry') return { type: 'industry', id: st.id };
     if (st?.type === 'building') return { type: 'building', id: st.id };
+    // Строительная база — её карточка: бригады, нанять и распустить, ближние стройки.
+    if (st?.type === 'base') return { type: 'base', id: st.id };
     const town = g.townAt(p);
     if (town) return { type: 'town', id: town.id };
     return null;
