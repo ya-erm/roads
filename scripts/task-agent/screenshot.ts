@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { chromium, type Browser } from 'playwright';
 import { createServer } from 'vite';
+import { areaArg, fitCamera, parseArea, type WorldBox } from '../../src/bugreport/spot';
 
 const HELP = `npm run shot -- [параметры]
 
@@ -20,6 +21,7 @@ const HELP = `npm run shot -- [параметры]
   --save <файл.json>      открыть партию через «Меню → Загрузить → Открыть из файла»
   --speed <n>             скорость игры после загрузки: 0 — пауза, 1, 2, 4…
   --camera <x,y,zoom>     поставить камеру (координаты мира)
+  --area <x0,y0,x1,y1>    камера — на участок мира, участок — в синей рамке (как «Где на карте» в баг-репорте)
   --click <css>           нажать на элемент интерфейса (можно несколько раз, по порядку)
   --eval <js>             выполнить код на странице (есть window.game, camera, controller); return — напечатать
   --wait <мс>             подождать перед снимком (по умолчанию 1500)
@@ -27,6 +29,7 @@ const HELP = `npm run shot -- [параметры]
   --size <ШxВ>            размер окна (по умолчанию 1440x900)
   --scale <n>             плотность пикселей (по умолчанию 1)
 
+Сохранение из баг-репорта само открывается с участком в рамке; --area из строки «Где на карте» ставит на него камеру.
 Сохранения пишутся в отдельный слот (?slot=task-agent-shot) и партию пользователя не трогают.`;
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -38,6 +41,7 @@ const { values: opt } = parseArgs({
     save: { type: 'string' },
     speed: { type: 'string' },
     camera: { type: 'string' },
+    area: { type: 'string' },
     click: { type: 'string', multiple: true },
     eval: { type: 'string' },
     wait: { type: 'string', default: '1500' },
@@ -56,8 +60,16 @@ if (opt.help || !(opt.out || opt['export-save'] || opt.eval)) {
 /** Что игра выставляет в window для отладки (src/main.ts). */
 interface GameWindow {
   game: { speed: number; toSave(): { view?: { x: number; y: number; zoom: number } } };
-  camera: { x: number; y: number; zoom: number; touched: boolean };
+  camera: { x: number; y: number; zoom: number; width: number; height: number; minZoom: number; maxZoom: number; touched: boolean };
+  /** Рамка участка из баг-репорта (src/ui/bugSpotFrame.ts). */
+  bugSpot?: { show(area: WorldBox | null): void; readonly shown: WorldBox | null };
   __shotBefore?: unknown;
+}
+
+const area = opt.area ? parseArea(opt.area) : null;
+if (opt.area && !area) {
+  console.error(`--area ${opt.area}: нужно x0,y0,x1,y1 — числа, углы участка в мире`);
+  process.exit(1);
 }
 
 void main().catch((e) => {
@@ -92,6 +104,24 @@ async function main(): Promise<void> {
         .then(() => true)
         .catch(() => false);
       if (!opened) throw new Error(`Сохранение ${opt.save} не открылось: не файл сохранения или другая версия игры (SAVE_VERSION).`);
+      const marked = await page.evaluate(() => (window as unknown as GameWindow).bugSpot?.shown ?? null);
+      if (marked && !area) console.log(`В сохранении участок из баг-репорта (в рамке): --area ${areaArg(marked)}`);
+    }
+    if (area) {
+      // Тот же расчёт, что у рамки в игре (src/bugreport/spot.ts), — по размеру холста карты на странице.
+      const c = await page.evaluate(() => {
+        const { width, height, minZoom, maxZoom } = (window as unknown as GameWindow).camera;
+        return { width, height, minZoom, maxZoom };
+      });
+      const cam = fitCamera(area, c.width, c.height, { minZoom: c.minZoom, maxZoom: c.maxZoom });
+      await page.evaluate(
+        ({ area, cam }) => {
+          const w = window as unknown as GameWindow;
+          Object.assign(w.camera, cam, { touched: true });
+          w.bugSpot?.show(area);
+        },
+        { area, cam },
+      );
     }
     if (opt.speed !== undefined) {
       await page.evaluate((v) => void ((window as unknown as GameWindow).game.speed = v), Number(opt.speed));

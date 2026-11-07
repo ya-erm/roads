@@ -56,6 +56,14 @@ describe('Архив отчёта: содержимое', () => {
     expect(meta.game).not.toHaveProperty('scenario');
   });
 
+  it('место на карте — в сведениях (map) и строкой «Где на карте» в тексте', () => {
+    const spot = { camera: { x: 1000, y: 500, zoom: 2 }, view: { x0: 640, y0: 275, x1: 1360, y1: 725 }, area: { x0: 900, y0: 425, x1: 1100, y1: 575 }, source: 'marks' as const };
+    const entries = archiveEntries({ info: { ...info, spot }, save: '{"version":3}' });
+    expect(JSON.parse(decode(entries[1].data)).map).toEqual(spot);
+    expect(decode(entries[0].data)).toContain('**Где на карте:** участок 200 × 150 м, по пометкам');
+    expect(reportMeta(info, [])).not.toHaveProperty('map');
+  });
+
   it('сведения о сценарии — если партия сценарная; имя архива — по времени отчёта', () => {
     expect(reportMeta({ ...info, scenario: 'сценарий normal' }, []).game.scenario).toBe('сценарий normal');
     expect(archiveName(info.at)).toBe('razvyazka-bug-2026-11-06-160507.zip');

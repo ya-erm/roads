@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { drawMarks, haloFor, luminance, outputSize, renderSketch } from './draw';
+import { AREA_COLOR, AREA_TAG, drawArea, drawMarks, haloFor, luminance, outputSize, renderSketch } from './draw';
 import { addMark, emptySketch, setCrop, type Sketch } from './marks';
 
 /** Подделка 2D-контекста: записывает вызовы методов и присваивания свойств. */
@@ -78,5 +78,23 @@ describe('Итоговая картинка', () => {
     // Пометки — после снимка, поверх.
     const drawAt = calls.findIndex((c) => c[0] === 'drawImage');
     expect(calls.findIndex((c) => c[0] === 'fillText')).toBeGreaterThan(drawAt);
+  });
+
+  it('участок карты — синей пунктирной рамкой поверх снимка и под пометками', () => {
+    const sk: Sketch = { ...sample(), area: { x: 100, y: 80, w: 300, h: 200 } };
+    const { ctx, calls } = recorder();
+    const image = {} as CanvasImageSource;
+    renderSketch(ctx, image, sk, 1440, 900, 1);
+    const frame = calls.findIndex((c) => c[0] === 'strokeRect' && c[1] === 100);
+    expect(calls).toContainEqual(['fillRect', 100, 80, 300, 200]);
+    expect(calls).toContainEqual(['=strokeStyle', AREA_COLOR]);
+    expect(calls).toContainEqual(['setLineDash', [10, 6]]);
+    expect(frame).toBeGreaterThan(calls.findIndex((c) => c[0] === 'drawImage'));
+    expect(calls.findIndex((c) => c[0] === 'fillText')).toBeGreaterThan(frame);
+    // Ярлык с булавкой — над рамкой, а у верхнего края снимка — внутри неё.
+    expect(calls).toContainEqual(['rect', 100, 80 - AREA_TAG - 3, AREA_TAG, AREA_TAG]);
+    const top = recorder();
+    drawArea(top.ctx, { x: 10, y: 5, w: 100, h: 100 });
+    expect(top.calls).toContainEqual(['rect', 10, 8, AREA_TAG, AREA_TAG]);
   });
 });

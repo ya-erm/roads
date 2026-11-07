@@ -12,7 +12,9 @@ import { Renderer } from './render/renderer';
 import { ARCHETYPE_LIST } from './scenario/content';
 import type { ScenarioSettings } from './scenario/types';
 import { testScene } from './testpages';
+import { savedArea } from './bugreport/spot';
 import { installBugReport } from './ui/bugReport';
+import { BugSpotFrame } from './ui/bugSpotFrame';
 import { Hud } from './ui/hud';
 import { onPrefs } from './ui/prefs';
 import { DEFAULT_SETTINGS, WorldSettings } from './world/settings';
@@ -60,7 +62,9 @@ const renderer = new Renderer(canvas, camera);
 const controller = new Controller(canvas, camera, () => game);
 // Кнопка баг-репорта — поверх всего, и окон тоже. Ставится раньше панелей: пока открыт редактор пометок,
 // его клавиши (Esc, Delete, буквы инструментов) перехватываются до игровых.
-installBugReport({ canvas, game: () => game, saveText: () => saveText(), journalText: () => journalFile(game) });
+installBugReport({ canvas, game: () => game, saveText: () => saveText(), journalText: () => journalFile(game), camera: () => camera });
+// Участок из баг-репорта: сохранение из отчёта открывается с местом ошибки в рамке.
+const bugSpot = new BugSpotFrame(canvas, camera);
 const hasProgress = () => game.time > 0 || game.lines.size > 0 || game.net.version > 1 || game.canUndo;
 const hud = new Hud(hudRoot, controller, () => game, {
   hasProgress,
@@ -168,6 +172,7 @@ function open(data: SaveData): void {
     camera.zoom = data.view.zoom;
     camera.touched = true;
   }
+  bugSpot.show(savedArea(data), { reveal: true });
 }
 
 /** Новая или загруженная партия: сбросить управление, отрисовку и панели. */
@@ -227,6 +232,7 @@ async function newGame(settings: WorldSettings, force = false): Promise<boolean>
   }
   clearSave();
   linkSave(null);
+  bugSpot.show(null);
   game = new Game(settings);
   game.speed = 0;
   restart();
@@ -307,7 +313,7 @@ function frame(now: number): void {
 requestAnimationFrame(frame);
 
 // Для отладки из консоли.
-Object.assign(window, { camera, controller });
+Object.assign(window, { camera, controller, bugSpot });
 Object.defineProperty(window, 'game', { get: () => game, configurable: true });
 if (scene) {
   // id линий сцены по названиям участков: game.lines.get(scene.lines.bay) и т. п.

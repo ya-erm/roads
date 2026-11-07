@@ -328,6 +328,97 @@
   white-space: nowrap;
 }
 
+/* «Участок на карте»: кнопка в списке файлов — включает инструмент «Участок». */
+.bug-file.bug-spot {
+  width: 100%;
+  border: 1.5px dashed transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.bug-file.bug-spot svg {
+  color: #2f80ed;
+}
+
+.bug-file.bug-spot:hover {
+  background: #e7f0fd;
+}
+
+.bug-file.bug-spot.active {
+  border-color: #2f80ed;
+  background: #e7f0fd;
+}
+
+.bug-file.bug-spot.set small {
+  color: #2f80ed;
+  font-weight: 600;
+}
+
+/*
+ * Участок из баг-репорта поверх карты (src/ui/bugSpotFrame.ts): открыли сохранение из отчёта — место ошибки
+ * в синей рамке, как рамка копирования развязки. Под панелями игры, мышь проходит сквозь рамку на карту.
+ */
+.bug-spot-frame {
+  position: fixed;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  border: 2.5px dashed #2f80ed;
+  background: rgba(47, 128, 237, 0.08);
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.75);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.bug-spot-frame.hidden {
+  display: none;
+}
+
+.bug-spot-tag {
+  position: absolute;
+  left: -2.5px;
+  bottom: calc(100% + 4px);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 3px 2px 4px;
+  border-radius: 9px;
+  background: #2f80ed;
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+}
+
+.bug-spot-tag .bug-spot-bug {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: #fff;
+}
+
+.bug-spot-tag button {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.bug-spot-tag button:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
 .bug-result {
   display: flex;
   flex-direction: column;

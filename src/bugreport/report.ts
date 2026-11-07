@@ -9,6 +9,7 @@
  */
 
 import { BUG_REPORT } from '../config';
+import { spotLine, type MapSpot } from './spot';
 
 export type AttachKind = 'shot' | 'journal' | 'save';
 
@@ -158,6 +159,8 @@ export interface ReportInfo {
   scenario?: string;
   /** Окно игры в точках экрана и плотность пикселей. */
   screen: { width: number; height: number; dpr: number };
+  /** Где на карте снимок: камера и участок, на который жалуются (bugreport/spot.ts). */
+  spot?: MapSpot;
   page: string;
   userAgent: string;
 }
@@ -220,6 +223,7 @@ export function reportMarkdown(info: ReportInfo, files: ReportFile[], opts: { un
     const local = rest.some((f) => !f.url) ? ' (приложены файлами)' : '';
     parts.push(`**Для воспроизведения:** ${list}${local}${howTo}.`);
   }
+  if (info.spot) parts.push(spotLine(info.spot));
   if (missing.length) parts.push(`_Не загрузились на доску: ${missing.map((f) => FILE_LABEL[f.kind].toLowerCase()).join(', ')}._`);
   const env = [
     info.date,

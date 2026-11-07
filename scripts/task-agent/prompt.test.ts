@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { errorComment, firstLine, linksIn, parseReport, reportComment, type AgentReport } from './prompt';
+import { errorComment, firstLine, linksIn, parseReport, reportComment, spotSection, type AgentReport } from './prompt';
 
 const report = (outcome: AgentReport['outcome'], summary: string): AgentReport => ({ outcome, summary, screenshots: [], saves: [] });
 const shot = { name: '01-after.png', caption: 'Остановка у перекрёстка', url: 'https://boards.test/images/1/01-after.webp' };
@@ -53,6 +53,25 @@ describe('report.json из чата', () => {
     expect(() => parseReport('{"outcome":"done","summary":"  "}')).toThrow(/summary/);
     expect(() => parseReport('{"outcome":"done","summary":"- Готово.","saves":[{"caption":"x"}]}')).toThrow(/saves/);
     expect(() => parseReport('{"outcome":"done",')).toThrow();
+  });
+});
+
+describe('где на карте из баг-репорта', () => {
+  const line = '**Где на карте:** участок 200 × 150 м, отмечен рамкой: x 900…1100, y 425…575 · камера 1000, 500, ×2 · `--area 900,425,1100,575` `--camera 1000,500,2`';
+
+  it('участок — готовая команда с приложенным сохранением и --area', () => {
+    const text = spotSection(`Машины стоят\n\n${line}`, [
+      { file: '.task-agent/runs/x/input/01-a.webp', where: 'описание' },
+      { file: '.task-agent/runs/x/input/03-a-save.json.gz', where: 'описание' },
+    ]);
+    expect(text).toContain('## Где на карте');
+    expect(text).toContain('участок 200 × 150 м (x 900…1100, y 425…575)');
+    expect(text).toContain('npm run shot -- --save .task-agent/runs/x/input/03-a-save.json.gz --area 900,425,1100,575 --speed 0');
+  });
+
+  it('без участка — камера автора; без строки — ничего', () => {
+    expect(spotSection('`--camera 1000,500,2`', [])).toContain('--save <сохранение> --camera 1000,500,2');
+    expect(spotSection('Просто идея', [])).toBe('');
   });
 });
 

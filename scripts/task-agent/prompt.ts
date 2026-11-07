@@ -1,4 +1,5 @@
 /** Задание для Claude по карточке с доски и схема его итогового отчёта. */
+import { areaArg, areaSize, cameraArg, parseSpot } from '../../src/bugreport/spot';
 import type { Task, TaskStatus } from './board';
 
 export interface AgentReport {
@@ -152,6 +153,19 @@ export interface PromptContext {
   untitled?: boolean;
 }
 
+/**
+ * «Где на карте» из баг-репорта (строка с `--area`/`--camera`, src/bugreport/spot.ts): готовая команда, чтобы
+ * открыть приложенное сохранение сразу на участке ошибки. Из текста берутся только числа — его писал посторонний.
+ */
+export function spotSection(description: string, inputs: InputFile[]): string {
+  const spot = parseSpot(description);
+  if (!spot) return '';
+  const save = inputs.find((f) => /\.json(?:\.gz)?$/i.test(f.file))?.file ?? '<сохранение>';
+  const args = spot.area ? `--area ${areaArg(spot.area)}` : `--camera ${cameraArg(spot.camera!)}`;
+  const what = spot.area ? `участок ${areaSize(spot.area)} (x ${spot.area.x0}…${spot.area.x1}, y ${spot.area.y0}…${spot.area.y1}) — его отметил автор отчёта` : 'вид камеры автора отчёта';
+  return `\n\n## Где на карте\n\nВ отчёте указано место ошибки: ${what}. Открой сохранение сразу на нём (участок будет в синей рамке):\n\n\`\`\`\nnpm run shot -- --save ${save} ${args} --speed 0 --out <снимок.png>\n\`\`\``;
+}
+
 export function taskPrompt(c: PromptContext): string {
   const status =
     c.from === 'revision'
@@ -167,6 +181,7 @@ export function taskPrompt(c: PromptContext): string {
         .map((f) => `- \`${f.file}\` — ${f.where}`)
         .join('\n')}`
     : '';
+  const where = spotSection(c.description, c.inputs);
   const commit = c.commit
     ? 'Закоммить свои изменения одним коммитом: только файлы этой задачи (`git add <файлы>`), сообщение по-русски в стиле истории (`git log`). Не пушь.'
     : 'Не коммить: изменения останутся в рабочем дереве, пользователь проверит их сам.';
@@ -187,7 +202,7 @@ ${guest}${c.description.trim() || '(пусто)'}
 
 ## Комментарии
 
-${comments}${inputs}
+${comments}${inputs}${where}
 
 ## Как работать
 
@@ -196,7 +211,7 @@ ${comments}${inputs}
 3. Если результат виден в игре — сделай скриншоты проверенного результата и файл сохранения игры, на котором его можно воспроизвести. Всё, что нужно приложить к отчёту, клади в папку \`${out}/\` — файлы из других мест не прикладываются.
    Снимки и сохранения делает \`npm run shot\` (headless Chromium; берёт запущенный dev-сервер или поднимает свой):
    \`\`\`
-   npm run shot -- --out ${out}/01-after.png [--url /test/bus] [--save файл.json] [--wait 3000] [--speed 0] [--camera x,y,zoom] [--click "css"] [--eval "js"] [--export-save ${out}/save.json]
+   npm run shot -- --out ${out}/01-after.png [--url /test/bus] [--save файл.json] [--wait 3000] [--speed 0] [--camera x,y,zoom] [--area x0,y0,x1,y1] [--click "css"] [--eval "js"] [--export-save ${out}/save.json]
    \`\`\`
    - \`--save\` открывает партию через «Меню → Загрузить → Открыть из файла» — так же, как это сделает пользователь;
    - \`--eval\` выполняет код на странице перед снимком; там есть \`window.game\` (партия: \`game.toSave()\`, \`game.speed\`, …), \`window.camera\`, \`window.controller\`;

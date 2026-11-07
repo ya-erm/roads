@@ -21,8 +21,8 @@ export interface Box {
 
 export type ShapeKind = 'rect' | 'ellipse' | 'line' | 'arrow';
 export type MarkKind = ShapeKind | 'text';
-/** Инструменты редактора: выбор, кадр и виды пометок. */
-export type Tool = 'select' | 'crop' | MarkKind;
+/** Инструменты редактора: выбор, кадр, участок карты и виды пометок. */
+export type Tool = 'select' | 'crop' | 'area' | MarkKind;
 
 /** Фигура от точки a до точки b: у прямоугольника и овала это противоположные углы рамки. */
 export interface ShapeMark {
@@ -50,10 +50,14 @@ export type NewMark = Omit<ShapeMark, 'id'> | Omit<TextMark, 'id'>;
 /** Узелки: концы a и b; у прямоугольника и овала ещё два угла — ab (x от a, y от b) и ba (x от b, y от a). */
 export type Handle = 'a' | 'b' | 'ab' | 'ba';
 
-/** Все пометки снимка и кадр (null — снимок целиком). */
+/**
+ * Все пометки снимка и кадр (null — снимок целиком). area — участок карты, на который жалуются (рамка
+ * инструмента «Участок»): по нему отчёт пишет координаты в мире (bugreport/spot.ts).
+ */
 export interface Sketch {
   readonly marks: readonly Mark[];
   readonly crop: Box | null;
+  readonly area?: Box | null;
   readonly nextId: number;
 }
 
@@ -317,6 +321,21 @@ export function fixCrop(box: Box | null, W: number, H: number): Box | null {
 
 export function setCrop(sk: Sketch, crop: Box | null, W: number, H: number): Sketch {
   return { ...sk, crop: fixCrop(crop, W, H) };
+}
+
+/** Участок карты в пределах снимка W×H; слишком маленький — null (участок не отмечен). Во весь снимок — можно. */
+export function fixArea(box: Box | null, W: number, H: number): Box | null {
+  if (!box) return null;
+  const x0 = Math.max(0, Math.min(W, box.x));
+  const y0 = Math.max(0, Math.min(H, box.y));
+  const x1 = Math.max(0, Math.min(W, box.x + box.w));
+  const y1 = Math.max(0, Math.min(H, box.y + box.h));
+  const out = normBox({ x: x0, y: y0 }, { x: x1, y: y1 });
+  return out.w < MIN_CROP || out.h < MIN_CROP ? null : out;
+}
+
+export function setArea(sk: Sketch, area: Box | null, W: number, H: number): Sketch {
+  return { ...sk, area: fixArea(area, W, H) };
 }
 
 /** Кадр, сдвинутый целиком, — не выходит за снимок. */

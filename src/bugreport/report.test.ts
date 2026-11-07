@@ -166,6 +166,17 @@ describe('Текст отчёта', () => {
     expect(zoneLabel(240)).toBe('UTC−4');
   });
 
+  it('место на карте — строкой после файлов, до сведений; на доске — тоже', () => {
+    const spot = { camera: { x: 1000, y: 500, zoom: 2 }, view: { x0: 640, y0: 275, x1: 1360, y1: 725 }, area: { x0: 900, y0: 425, x1: 1100, y1: 575 }, source: 'frame' as const };
+    const parts = reportMarkdown({ ...info, spot }, [{ kind: 'save', name: 's', url: 'https://b/3.json.gz' }]).split('\n\n');
+    const at = parts.findIndex((p) => p.startsWith('**Где на карте:**'));
+    expect(parts[at]).toBe('**Где на карте:** участок 200 × 150 м, отмечен рамкой: x 900…1100, y 425…575 · камера 1000, 500, ×2 · `--area 900,425,1100,575` `--camera 1000,500,2`');
+    expect(parts[at - 1]).toMatch(/^\*\*Для воспроизведения:\*\*/);
+    expect(at).toBe(parts.length - 2);
+    expect(boardReport({ ...info, spot }, [], 'k').description).toContain('`--area 900,425,1100,575`');
+    expect(reportMarkdown(info, [])).not.toContain('Где на карте');
+  });
+
   it('имена файлов — латиницей по времени; доска и размеры', () => {
     const names = attachmentNames(new Date(2026, 10, 6, 9, 5, 7));
     expect(names).toEqual({

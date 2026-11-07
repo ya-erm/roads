@@ -3,7 +3,60 @@
  * Без DOM: на вход — 2D-контекст, в тестах — записывающая подделка.
  */
 
-import { arrowHead, LINE_HEIGHT, normBox, outputBox, type Mark, type Measure, type Sketch } from './marks';
+import { arrowHead, LINE_HEIGHT, normBox, outputBox, type Box, type Mark, type Measure, type Sketch } from './marks';
+
+/** Цвет участка карты — как у рамки копирования развязки в игре. */
+export const AREA_COLOR = '#2f80ed';
+/** Сторона ярлыка с булавкой у участка, точек экрана. */
+export const AREA_TAG = 22;
+
+/**
+ * Участок карты, на который жалуются: синяя пунктирная рамка с лёгкой заливкой (как рамка копирования развязки)
+ * и ярлык с булавкой у левого верхнего угла — над рамкой, а если сверху нет места — внутри.
+ */
+export function drawArea(ctx: CanvasRenderingContext2D, box: Box): void {
+  ctx.save();
+  ctx.fillStyle = 'rgba(47, 128, 237, 0.12)';
+  ctx.fillRect(box.x, box.y, box.w, box.h);
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.strokeRect(box.x, box.y, box.w, box.h);
+  ctx.setLineDash([10, 6]);
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = AREA_COLOR;
+  ctx.strokeRect(box.x, box.y, box.w, box.h);
+  ctx.setLineDash([]);
+  const s = AREA_TAG;
+  const x = box.x;
+  const y = box.y >= s + 3 ? box.y - s - 3 : box.y + 3;
+  ctx.fillStyle = AREA_COLOR;
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.rect(x, y, s, s);
+  ctx.fill();
+  ctx.stroke();
+  // Булавка: круглая головка и острие вниз.
+  const cx = x + s / 2;
+  const cy = y + s * 0.42;
+  const r = s * 0.22;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.moveTo(cx - r * 0.95, cy + r * 0.3);
+  ctx.lineTo(cx, y + s * 0.86);
+  ctx.lineTo(cx + r * 0.95, cy + r * 0.3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = AREA_COLOR;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.42, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
 
 /** Шрифт текста пометок. */
 export const markFont = (size: number) => `600 ${size}px system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif`;
@@ -104,6 +157,8 @@ export function renderSketch(ctx: CanvasRenderingContext2D, image: CanvasImageSo
   ctx.save();
   ctx.setTransform(scale, 0, 0, scale, -box.x * scale, -box.y * scale);
   ctx.drawImage(image, 0, 0, W, H);
+  // Участок — под пометками: обведённое поверх него остаётся видно.
+  if (sk.area) drawArea(ctx, sk.area);
   drawMarks(ctx, sk.marks);
   ctx.restore();
 }

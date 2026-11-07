@@ -9,6 +9,7 @@ import {
   emptySketch,
   findMark,
   fitView,
+  fixArea,
   fixCrop,
   handles,
   hitCrop,
@@ -20,6 +21,7 @@ import {
   removeMark,
   replaceMark,
   restyle,
+  setArea,
   setCrop,
   textBox,
   Timeline,
@@ -167,6 +169,19 @@ describe('Стрелка', () => {
     expect(100 - arrowHead({ x: 0, y: 0 }, { x: 100, y: 0 }, 10)!.base.x).toBeGreaterThan(100 - h.base.x);
     expect(20 - arrowHead({ x: 0, y: 0 }, { x: 20, y: 0 }, 10)!.base.x).toBeCloseTo(12);
     expect(arrowHead({ x: 5, y: 5 }, { x: 5, y: 5 }, 4)).toBeNull();
+  });
+});
+
+describe('Участок карты', () => {
+  it('держится в пределах снимка; крошечный — нет участка; во весь снимок — можно', () => {
+    expect(fixArea({ x: -10, y: 20, w: 100, h: 1000 }, 800, 600)).toEqual({ x: 0, y: 20, w: 90, h: 580 });
+    expect(fixArea({ x: 10, y: 10, w: 4, h: 100 }, 800, 600)).toBeNull();
+    expect(fixArea({ x: -5, y: -5, w: 900, h: 700 }, 800, 600)).toEqual({ x: 0, y: 0, w: 800, h: 600 });
+    expect(fixArea(null, 800, 600)).toBeNull();
+    // Рамка, протянутая справа налево, — та же рамка; кадр от участка не меняется.
+    const sk = setArea(emptySketch(), { x: 300, y: 200, w: -200, h: -100 }, 800, 600);
+    expect(sk.area).toEqual({ x: 100, y: 100, w: 200, h: 100 });
+    expect(sk.crop).toBeNull();
   });
 });
 

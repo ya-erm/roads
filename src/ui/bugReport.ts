@@ -4,6 +4,11 @@
  * толщина, размер текста; пометки выбираются, двигаются и правятся), а «Отправить» собирает отчёт: картинку
  * с пометками, журнал партии и сохранение — на момент снимка.
  *
+ * Инструмент «Участок» (булавка в рамке, M) отмечает на снимке место ошибки. Снимок — это вид камеры, поэтому
+ * рамка переводится в координаты карты (bugreport/spot.ts): они идут в текст отчёта строкой «Где на карте»
+ * (с параметрами `--area`/`--camera` для npm run shot), в meta.json и в сохранение (bugSpot) — открытая партия
+ * покажет участок рамкой. Без рамки участок — по обведённому пометками или по кадру; камера пишется всегда.
+ *
  * Снимок можно не прикладывать (текстовая идея) — тогда редактор пометок гаснет. Имя запоминается в браузере.
  * Значок скачивания рядом с «Отмена» собирает всё одним ZIP-архивом (bugreport/archive.ts, zip.ts).
  *
@@ -17,7 +22,8 @@ import './bugReport.css';
 import { archiveEntries, archiveName } from '../bugreport/archive';
 import { loadAuthor, saveAuthor } from '../bugreport/author';
 import { captureScreen, type Shot } from '../bugreport/capture';
-import { canvasMeasure, drawMarks, haloFor, markFont, outputSize, renderSketch } from '../bugreport/draw';
+import { canvasMeasure, drawArea, drawMarks, haloFor, markFont, outputSize, renderSketch } from '../bugreport/draw';
+import { areaSize, mapSpot, sketchArea, withSpot, worldBox, type MapSpot, type SnapCamera } from '../bugreport/spot';
 import { BUG_BUTTON, bugButtonSpot } from '../bugreport/layout';
 import {
   addMark,
@@ -41,6 +47,7 @@ import {
   removeMark,
   replaceMark,
   restyle,
+  setArea,
   setCrop,
   textBox,
   Timeline,
@@ -101,6 +108,8 @@ export interface BugReportDeps {
   saveText: () => string;
   /** Журнал партии (JSON Lines). */
   journalText: () => string;
+  /** Камера карты: центр вида в мире, масштаб и размер холста — чтобы перевести снимок в координаты карты. */
+  camera: () => { x: number; y: number; zoom: number; width: number; height: number };
 }
 
 const svg = (body: string, size = 20) =>
@@ -135,6 +144,15 @@ function thanksSvg(): string {
 const TOOLS: { id: Tool; key: string; code: string; tip: string; icon: string }[] = [
   { id: 'select', key: 'V', code: 'KeyV', tip: 'Выбрать и двигать', icon: svg('<path d="M6 3.5L18.5 12L12.6 13.4L9.6 19z" fill="currentColor" fill-opacity=".12"/>') },
   { id: 'crop', key: 'C', code: 'KeyC', tip: 'Кадрировать: оставить часть снимка', icon: svg('<path d="M6.5 2.5V17.5H21.5"/><path d="M2.5 6.5H17.5V21.5"/>') },
+  {
+    id: 'area',
+    key: 'M',
+    code: 'KeyM',
+    tip: 'Участок карты: обведите место, на которое жалуетесь, — его координаты попадут в отчёт и сохранение',
+    icon: svg(
+      '<rect x="3" y="4.5" width="18" height="15" rx="1.5" stroke="#2f80ed" stroke-dasharray="3.2 2.4" fill="rgba(47,128,237,0.14)"/><path d="M12 16.5L9.3 12.4A3.3 3.3 0 1 1 14.7 12.4Z" fill="#2f80ed" stroke="#2f80ed" stroke-width="1.2"/><circle cx="12" cy="10.6" r="1.1" fill="#fff" stroke="none"/>',
+    ),
+  },
   { id: 'rect', key: 'R', code: 'KeyR', tip: 'Прямоугольник', icon: svg('<rect x="3.5" y="5.5" width="17" height="13" rx="1.5"/>') },
   { id: 'ellipse', key: 'O', code: 'KeyO', tip: 'Овал', icon: svg('<ellipse cx="12" cy="12" rx="9" ry="6.8"/>') },
   { id: 'line', key: 'L', code: 'KeyL', tip: 'Линия', icon: svg('<path d="M4.5 19.5L19.5 4.5"/>') },
@@ -149,6 +167,7 @@ const SIZES = [16, 24, 32, 48];
 const HINTS: Record<Tool, string> = {
   select: 'Щёлкните пометку — выбрать; тяните её или узелки. Delete — удалить',
   crop: 'Обведите рамкой то, что оставить; узелки и сама рамка тянутся',
+  area: 'Обведите участок карты, где ошибка: его координаты уйдут в отчёт. Delete — убрать',
   rect: 'Протяните по снимку. Shift — квадрат',
   ellipse: 'Протяните по снимку. Shift — круг',
   line: 'Протяните по снимку. Shift — шаг 45°',
@@ -172,6 +191,7 @@ const ICON = {
   person: svg('<circle cx="12" cy="8.5" r="3.6"/><path d="M5 20C5.6 16.2 8.4 14 12 14S18.4 16.2 19 20"/>', 18),
   ok: svg('<path d="M5 12.5L10 17.5L19 7"/>', 18),
   warn: svg('<path d="M12 3.5L21.5 20H2.5Z"/><path d="M12 10V14"/><path d="M12 17H12.01"/>', 18),
+  pin: svg('<path d="M12 21L6.6 13.2A6.2 6.2 0 1 1 17.4 13.2Z" fill="#2f80ed" stroke="#2f80ed"/><circle cx="12" cy="9.6" r="2.2" fill="#fff" stroke="none"/>', 18),
 };
 
 type Drag =
@@ -180,14 +200,18 @@ type Drag =
   | { type: 'handle'; id: number; handle: Handle; orig: ShapeMark; base: Sketch }
   | { type: 'crop-new'; start: Pt; base: Sketch }
   | { type: 'crop-move'; start: Pt; orig: Box; base: Sketch }
-  | { type: 'crop-handle'; handle: Handle; orig: Box; base: Sketch };
+  | { type: 'crop-handle'; handle: Handle; orig: Box; base: Sketch }
+  | { type: 'area-new'; start: Pt; base: Sketch }
+  | { type: 'area-move'; start: Pt; orig: Box; base: Sketch }
+  | { type: 'area-handle'; handle: Handle; orig: Box; base: Sketch };
 
-/** Партия на момент снимка: журнал и сохранение — те же, что на картинке. */
+/** Партия на момент снимка: журнал, сохранение и камера — те же, что на картинке. */
 interface Moment {
   at: Date;
   journal: string;
   journalEntries: number;
   save: string;
+  camera: SnapCamera;
 }
 
 interface Sent {
@@ -398,7 +422,14 @@ class BugReport {
     const game = this.deps.game();
     try {
       // Журнал и сохранение — в тот же момент, что и снимок.
-      const moment: Moment = { at: new Date(), journal: this.deps.journalText(), journalEntries: game.journal.entries.length, save: this.deps.saveText() };
+      const r = this.deps.canvas.getBoundingClientRect();
+      const moment: Moment = {
+        at: new Date(),
+        journal: this.deps.journalText(),
+        journalEntries: game.journal.entries.length,
+        save: this.deps.saveText(),
+        camera: { ...this.deps.camera(), left: r.left, top: r.top },
+      };
       const shot = await captureScreen(this.deps.canvas, (el) => el.hasAttribute('data-shot-skip') || el.classList.contains('tip-float'));
       this.moment = moment;
       this.shot = shot;
@@ -468,10 +499,11 @@ class BugReport {
   private setTool(tool: Tool): void {
     this.commitEdit();
     this.tool = tool;
-    if (tool === 'crop') this.selected = null;
+    if (tool === 'crop' || tool === 'area') this.selected = null;
     this.stage.dataset.tool = tool;
     this.screen.querySelector('[data-bug-hint]')!.textContent = HINTS[tool];
     this.syncControls();
+    this.renderSpot();
     this.render();
   }
 
@@ -502,7 +534,7 @@ class BugReport {
     this.screen.querySelector('[data-bug-widths]')!.classList.toggle('dim', sel?.kind === 'text' || (!sel && this.tool === 'text'));
     this.screen.querySelector('[data-bug-sizes]')!.classList.toggle('dim', !!sel && sel.kind !== 'text');
     const btn = (name: string) => this.screen.querySelector<HTMLButtonElement>(`[data-bug="${name}"]`)!;
-    btn('delete').disabled = !sel;
+    btn('delete').disabled = !sel && !(this.tool === 'area' && this.tl.now.area);
     btn('undo').disabled = !this.tl.canUndo;
     btn('redo').disabled = !this.tl.canRedo;
     btn('uncrop').disabled = !this.tl.now.crop;
@@ -557,6 +589,9 @@ class BugReport {
         return void this.downloadArchive();
       case 'shot-on':
         return this.setShotOn(true);
+      case 'area-tool':
+        if (!this.include.shot) this.setShotOn(true);
+        return this.setTool('area');
     }
   }
 
@@ -600,6 +635,12 @@ class BugReport {
   }
 
   private deleteSelected(): void {
+    // С инструментом «Участок» Delete убирает участок.
+    if (this.selected === null && this.tool === 'area' && this.tl.now.area) {
+      this.tl.set({ ...this.tl.now, area: null });
+      this.changed();
+      return this.redraw();
+    }
     if (this.selected === null) return;
     if (this.editing !== null) {
       this.textEdit.classList.add('hidden');
@@ -630,6 +671,29 @@ class BugReport {
       const out = outputBox(this.tl.now, this.shot.width, this.shot.height);
       note.textContent = `${Math.round(out.w)} × ${Math.round(out.h)}`;
     }
+    this.renderSpot();
+  }
+
+  /** Строка «Участок на карте» в списке файлов: размер участка и откуда он (рамка, пометки, кадр) — или «отметить». */
+  private renderSpot(): void {
+    const el = this.screen.querySelector<HTMLElement>('[data-bug-spot]');
+    const m = this.moment;
+    if (!el || !m) return;
+    const area = sketchArea(this.tl.now);
+    const note = el.querySelector('small')!;
+    el.classList.toggle('set', area?.source === 'frame');
+    el.classList.toggle('active', this.tool === 'area' && this.include.shot);
+    if (!area) note.textContent = 'отметить';
+    else {
+      const size = areaSize(worldBox(m.camera, area.box));
+      note.textContent = area.source === 'frame' ? size : `${area.source === 'marks' ? 'по пометкам' : 'по кадру'} · ${size}`;
+    }
+  }
+
+  /** Где на карте снимок — для отчёта, архива и сохранения. */
+  private spot(): MapSpot {
+    const shot = this.shot!;
+    return mapSpot(this.moment!.camera, this.tl.now, shot.width, shot.height);
   }
 
   // ---------- Мышь на снимке ----------
@@ -661,6 +725,13 @@ class BugReport {
       if (h === 'move') this.drag = { type: 'crop-move', start: p, orig: sk.crop!, base: sk };
       else if (h) this.drag = { type: 'crop-handle', handle: h, orig: sk.crop!, base: sk };
       else this.drag = { type: 'crop-new', start: p, base: sk };
+      return;
+    }
+    if (this.tool === 'area') {
+      const h = sk.area ? hitCrop(sk.area, p, this.tol) : null;
+      if (h === 'move') this.drag = { type: 'area-move', start: p, orig: sk.area!, base: sk };
+      else if (h) this.drag = { type: 'area-handle', handle: h, orig: sk.area!, base: sk };
+      else this.drag = { type: 'area-new', start: p, base: sk };
       return;
     }
     const hit = hitTest(sk.marks, p, this.tol, this.measure, { selected: this.selected, inside: this.tool === 'select' });
@@ -725,8 +796,18 @@ class BugReport {
       case 'crop-handle':
         this.tl.preview({ ...d.base, crop: dragCrop(d.orig, d.handle, p) });
         break;
+      case 'area-new':
+        this.tl.preview({ ...d.base, area: normBox(d.start, p) });
+        break;
+      case 'area-move':
+        this.tl.preview({ ...d.base, area: moveCrop(d.orig, p.x - d.start.x, p.y - d.start.y, W, H) });
+        break;
+      case 'area-handle':
+        this.tl.preview({ ...d.base, area: dragCrop(d.orig, d.handle, p) });
+        break;
     }
     this.render();
+    if (d.type.startsWith('area')) this.renderSpot();
   }
 
   private onUp(e: PointerEvent): void {
@@ -753,6 +834,18 @@ class BugReport {
       case 'handle':
         this.tl.settle(d.base);
         break;
+      case 'area-new':
+      case 'area-move':
+      case 'area-handle': {
+        const area = setArea(this.tl.now, this.tl.now.area ?? null, W, H);
+        // Новый участок — случайный щелчок: остаётся прежний.
+        if (d.type === 'area-new' && !area.area) this.tl.preview(d.base);
+        else {
+          this.tl.preview(area);
+          this.tl.settle(d.base);
+        }
+        break;
+      }
       default: {
         const crop = setCrop(this.tl.now, this.tl.now.crop, W, H);
         // Новый кадр — случайный щелчок: остаётся прежний.
@@ -768,7 +861,7 @@ class BugReport {
   }
 
   private onDouble(e: MouseEvent): void {
-    if (this.tool === 'crop') return;
+    if (this.tool === 'crop' || this.tool === 'area') return;
     const hit = hitTest(this.tl.now.marks, this.point(e), this.tol, this.measure);
     const m = hit && findMark(this.tl.now, hit.id);
     if (m?.kind === 'text') this.startEdit(m.id);
@@ -779,8 +872,9 @@ class BugReport {
     const sk = this.tl.now;
     let cursor = this.tool === 'text' ? 'text' : this.tool === 'select' ? 'default' : 'crosshair';
     let text: number | null = null;
-    if (this.tool === 'crop') {
-      const h = sk.crop ? hitCrop(sk.crop, p, this.tol) : null;
+    if (this.tool === 'crop' || this.tool === 'area') {
+      const box = this.tool === 'crop' ? sk.crop : sk.area;
+      const h = box ? hitCrop(box, p, this.tol) : null;
       if (h === 'move') cursor = 'move';
       else if (h) cursor = h === 'a' || h === 'b' ? 'nwse-resize' : 'nesw-resize';
       else cursor = 'crosshair';
@@ -935,8 +1029,9 @@ class BugReport {
     const W = shot.width;
     const H = shot.height;
     const cropping = this.tool === 'crop';
-    // Пока кадрируем — виден весь снимок, потом — только кадр.
-    const region = cropping || !sk.crop ? { x: 0, y: 0, w: W, h: H } : sk.crop;
+    const marking = this.tool === 'area';
+    // Пока кадрируем или отмечаем участок — виден весь снимок, потом — только кадр.
+    const region = cropping || marking || !sk.crop ? { x: 0, y: 0, w: W, h: H } : sk.crop;
     const prev = this.view;
     this.view = fitView(region, cw, ch, 16);
     if (this.editing !== null && (prev.zoom !== this.view.zoom || prev.ox !== this.view.ox || prev.oy !== this.view.oy)) this.placeEditor();
@@ -960,11 +1055,15 @@ class BugReport {
     ctx.clip();
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(shot.canvas, 0, 0, W, H);
+    if (sk.area) drawArea(ctx, sk.area);
     drawMarks(ctx, sk.marks, this.editing);
     ctx.restore();
 
     if (cropping) this.drawCrop(sk.crop);
-    else this.drawSelection(sk);
+    else if (marking) {
+      if (sk.crop) this.dashed(sk.crop, '#8a96a3');
+      if (sk.area) for (const h of cropHandles(sk.area)) this.handle(h.p);
+    } else this.drawSelection(sk);
   }
 
   private handle(p: Pt, round = false): void {
@@ -1040,7 +1139,9 @@ class BugReport {
     this.screen.querySelector('[data-bug-files]')!.innerHTML =
       row('shot', ICON.shot, 'Приложить снимок', `${Math.round(out.w)} × ${Math.round(out.h)}`) +
       row('journal', ICON.journal, 'Журнал партии', `${m.journalEntries} зап. · ${sizeLabel(enc.encode(m.journal).length)}`) +
-      row('save', ICON.save, 'Сохранение', sizeLabel(enc.encode(m.save).length));
+      row('save', ICON.save, 'Сохранение', sizeLabel(enc.encode(m.save).length)) +
+      `<button class="bug-file bug-spot" data-bug="area-tool" data-bug-spot data-tip="Где на карте ошибка: обведите участок на снимке — его координаты попадут в отчёт, а сохранение откроется с этим участком в рамке (M)">${ICON.pin}<span>Участок на карте</span><small></small></button>`;
+    this.renderSpot();
   }
 
   /** Итоговая картинка с пометками и кадром — PNG. */
@@ -1070,7 +1171,7 @@ class BugReport {
     // Снимок не приложен — не загружается и в отчёт не попадает.
     if (this.include.shot) files.push({ kind: 'shot', name: names.shot, type: 'image/png', data: await this.renderPng() });
     if (this.include.journal) files.push({ kind: 'journal', name: names.journal, type: 'application/x-ndjson', data: new Blob([m.journal], { type: 'application/x-ndjson' }) });
-    if (this.include.save) files.push({ kind: 'save', name: names.save, type: 'application/json', data: new Blob([m.save], { type: 'application/json' }) });
+    if (this.include.save) files.push({ kind: 'save', name: names.save, type: 'application/json', data: new Blob([this.saveWithSpot()], { type: 'application/json' }) });
     // Сначала файлы — в публичный загрузчик (ссылки на них войдут в карточку); не принял — карточка всё равно
     // уйдёт, с пометкой, каких файлов в ней нет.
     let uploaded: Uploaded[] | null = null;
@@ -1124,9 +1225,15 @@ class BugReport {
       seed: g.seed,
       scenario: sc ? `сценарий ${sc.difficulty}${sc.challenge ? ', испытание' : ''}` : undefined,
       screen: { width: shot.width, height: shot.height, dpr: window.devicePixelRatio || 1 },
+      spot: this.spot(),
       page: `${location.origin}${location.pathname}`,
       userAgent: navigator.userAgent,
     };
+  }
+
+  /** Сохранение на момент снимка с местом отчёта (bugSpot): открытая партия покажет участок рамкой. */
+  private saveWithSpot(): string {
+    return withSpot(this.moment!.save, this.spot());
   }
 
   private status(text: string): void {
@@ -1213,7 +1320,7 @@ class BugReport {
         info: this.info(),
         shot,
         journal: this.include.journal ? m.journal : undefined,
-        save: this.include.save ? m.save : undefined,
+        save: this.include.save ? this.saveWithSpot() : undefined,
       });
       const data = await zip(entries, { at: m.at });
       const a = document.createElement('a');

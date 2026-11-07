@@ -24,7 +24,7 @@ export interface ArchiveInput {
   save?: string;
 }
 
-/** Сведения для разбора: кто, когда, какая версия и сборка, партия, экран и браузер, что приложено. */
+/** Сведения для разбора: кто, когда, какая версия и сборка, партия, экран, место на карте и браузер, что приложено. */
 export function reportMeta(info: ReportInfo, attached: AttachKind[]) {
   const author = info.author?.trim();
   return {
@@ -42,6 +42,8 @@ export function reportMeta(info: ReportInfo, attached: AttachKind[]) {
       ...(info.scenario ? { scenario: info.scenario } : {}),
     },
     screen: info.screen,
+    // Где на карте: камера игрока, видимая часть карты и участок (как --camera и --area у npm run shot).
+    ...(info.spot ? { map: info.spot } : {}),
     page: info.page,
     userAgent: info.userAgent,
     files: attached.map((k) => ARCHIVE_FILES[k]),
