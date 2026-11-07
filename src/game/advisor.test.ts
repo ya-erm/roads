@@ -97,12 +97,16 @@ describe('Советник', () => {
   });
 
   it('маршрут не работает, маршрут без машин, машины ездят полупустыми', () => {
-    const { game, line, a, b } = setup();
+    const { game, line, a, b, input } = setup();
     line.problem = 'Нет дороги: A → B';
     expect(find(game, 'noRoute')[0]).toMatchObject({ level: 'alert', line: line.id, station: line.stops[0] });
     line.problem = null;
     const empty = game.createLine([b.id, a.id])!;
     expect(find(game, 'noVehicles')[0]).toMatchObject({ level: 'tip', line: empty.id, fix: { kind: 'buy', line: empty.id } });
+    expect(find(game, 'noVehicles')[0].detail).not.toContain('ждут');
+    // Груз копится на станциях маршрута и без машин — совет говорит, сколько уже ждёт.
+    a.cargo[input] = 12;
+    expect(find(game, 'noVehicles')[0].detail).toContain('ждут 12 ед. груза');
     game.buyVehicle(line.id, 'truck');
     line.loadLast = 0.1;
     expect(find(game, 'empty')[0]).toMatchObject({ level: 'tip', line: line.id, fix: { kind: 'sell', line: line.id } });

@@ -2799,8 +2799,31 @@ export class Game implements BuildContext {
     return linesForTown(this.lines.values(), this.stations.values(), townId);
   }
 
+  /** Ходит ли через станцию транспорт хоть одной линии — для отзывов жителей («автобусов нет»). */
   private served(st: Station): boolean {
     for (const l of this.lines.values()) if (l.stops.includes(st.id) && l.vehicles.length) return true;
+    return false;
+  }
+
+  /**
+   * Может ли маршрут возить what — тогда на его станциях копятся пассажиры или груз, даже пока машин на нём нет.
+   * С машинами — как прежде: груз копится при любых машинах, пассажиры — при пассажирских. Без машин — по
+   * станциям маршрута (lineKind): грузовому — груз, пассажирскому — пассажиры, смешанному — и то и другое.
+   */
+  lineTakes(line: Line, what: 'freight' | 'passengers'): boolean {
+    if (line.vehicles.length) {
+      return what === 'freight' || line.vehicles.some((id) => {
+        const v = this.fleet.get(id);
+        return !!v && MODELS[v.model].carries === 'passengers';
+      });
+    }
+    const kind = this.lineKind(line);
+    return kind === null || kind === what;
+  }
+
+  /** Станция стоит в маршруте, который может возить груз, — предприятия кладут на неё продукцию. */
+  private routed(st: Station): boolean {
+    for (const l of this.lines.values()) if (l.stops.includes(st.id) && this.lineTakes(l, 'freight')) return true;
     return false;
   }
 
@@ -3452,7 +3475,7 @@ export class Game implements BuildContext {
    * загрузилась бы за круг одна машина на самой загруженной остановке. Считает, что уже ждёт отправки этой
    * линией, и что приходило бы за круг: груз предприятий станции, который принимают дальше по маршруту
    * (добыча — сколько предприятие может дать, переработка — сколько выпустило за прошлый месяц; поровну
-   * с другими его станциями, к которым ходит транспорт), и пассажиры до других остановок линии.
+   * с другими его станциями в маршрутах), и пассажиры до других остановок линии.
    */
   idleDemand(line: Line): number {
     const id = this.autoModel(line);
@@ -3468,7 +3491,7 @@ export class Game implements BuildContext {
         for (const ind of this.stationIndustries(st)) {
           if (!wanted.has(ind.info.produces)) continue;
           const monthly = ind.info.accepts.length ? ind.producedLast : this.industryRate(ind);
-          const others = [...this.stations.values()].filter((o) => o !== st && o.serves.cargo && o.industryIds.includes(ind.id) && this.served(o));
+          const others = [...this.stations.values()].filter((o) => o !== st && o.serves.cargo && o.industryIds.includes(ind.id) && this.routed(o));
           perLap += (monthly * lap) / MONTH_LENGTH / (others.length + 1);
         }
       }
@@ -4578,7 +4601,8 @@ export class Game implements BuildContext {
 
   private updateIndustries(dt: number): void {
     for (const ind of this.industries) {
-      const served = [...this.stations.values()].filter((st) => st.serves.cargo && st.industryIds.includes(ind.id) && this.served(st));
+      // Продукция идёт на станции в маршрутах, даже пока машин на них нет (lineTakes).
+      const served = [...this.stations.values()].filter((st) => st.serves.cargo && st.industryIds.includes(ind.id) && this.routed(st));
       const inputs = ind.info.accepts;
       // Уровень производства и временный множитель событий сценария.
       const level = (ind.level ?? 1) * this.mods.industry(ind.id);
@@ -4616,19 +4640,15 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Куда со станции может уехать пассажир: станция назначения → линии, где ходят автобусы
-   * или пассажирские поезда. Грузовики пассажиров не берут.
+   * Куда со станции может уехать пассажир: станция назначения → пассажирские линии (lineTakes): где ходят
+   * автобусы или пассажирские поезда, а пока машин нет — маршрут пассажирский по своим станциям. Пассажиры
+   * начинают ждать, как только маршрут проложен. Грузовики пассажиров не берут.
    */
   paxRoutes(st: Station): Map<number, Line[]> {
     const out = new Map<number, Line[]>();
     if (!st.serves.pax) return out;
     for (const line of this.lines.values()) {
-      if (!line.stops.includes(st.id)) continue;
-      const carries = line.vehicles.some((id) => {
-        const v = this.fleet.get(id);
-        return !!v && MODELS[v.model].carries === 'passengers';
-      });
-      if (!carries) continue;
+      if (!line.stops.includes(st.id) || !this.lineTakes(line, 'passengers')) continue;
       for (const sid of line.stops) {
         // Пассажиры едут только на станции, которые работают с пассажирами.
         if (sid === st.id || !this.stations.get(sid)?.serves.pax) continue;
@@ -4667,7 +4687,7 @@ export class Game implements BuildContext {
   private updateStations(dt: number): void {
     for (const st of this.stations.values()) {
       const routes = this.paxRoutes(st);
-      // Кому больше не на чем уехать (линию убрали, продали автобусы) — расходятся.
+      // Кому больше не на чем уехать (линию убрали или на ней теперь только грузовики) — расходятся.
       for (const [sid, n] of st.passengers) if (n <= 0 || !routes.has(sid)) st.passengers.delete(sid);
       if (st.catchPop <= 0) continue;
       const dests = new Map<number, number>();
@@ -4885,14 +4905,14 @@ export class Game implements BuildContext {
 
   /**
    * Предприятие растёт, если его продукцию исправно вывозят (на станциях она не копится),
-   * и сокращается, если его долго никто не обслуживает. Так большим линиям и поездам есть что возить.
+   * и сокращается, если долго нет маршрута через его станции. Так большим линиям и поездам есть что возить.
    */
   private growIndustries(): void {
     const E = ECONOMY;
     for (const ind of this.industries) {
       const level = ind.level ?? 1;
       const c = ind.info.produces;
-      const stations = [...this.stations.values()].filter((st) => st.serves.cargo && st.industryIds.includes(ind.id) && this.served(st));
+      const stations = [...this.stations.values()].filter((st) => st.serves.cargo && st.industryIds.includes(ind.id) && this.routed(st));
       // Больше половины месяца копилось у самого предела станции — транспорт не успевает, расти незачем.
       // Старые сохранения без счётчика — по тому, что на станции сейчас.
       const piled =

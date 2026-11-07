@@ -267,12 +267,16 @@ function routes(game: Game, out: Advice[]): void {
     const n = line.vehicles.length;
     const auto = line.auto?.on ? line.auto : null;
     if (!n && !(auto && auto.max > 0 && auto.min === 0)) {
+      // Пассажиры и груз копятся на станциях маршрута и без машин — сколько уже ждёт.
+      const carries = game.lineCarries(line);
+      const wait = Math.floor(Math.max(0, ...line.stops.map((_, i) => game.lineWaiting(line, i, carries))));
+      const what = carries === 'passengers' ? 'пассажиров' : 'ед. груза';
       out.push({
         key: `noVehicles:${line.id}`,
         kind: 'noVehicles',
         level: 'tip',
         title: 'Маршрут без машин',
-        detail: `«${line.name}» построен, но по нему никто не ездит.`,
+        detail: `«${line.name}» построен, но по нему никто не ездит.${wait ? ` На станции уже ждут ${fmt(wait)} ${what}.` : ''}`,
         line: line.id,
         at: first?.fp.center,
         fix: { kind: 'buy', line: line.id },
@@ -397,10 +401,11 @@ function stations(game: Game, out: Advice[]): void {
     const makers = game.industries.filter((i) => st.industryIds.includes(i.id) && i.producedLast > 0);
     if (!makers.length) continue;
     const more = st.kind === 'road' && storageSlots(st) < STORAGE.max;
-    // Продукцию отсюда не берёт ни один маршрут с машинами — склад тут ни при чём: нужен маршрут к получателю.
+    // Продукцию отсюда не берёт ни один маршрут — склад тут ни при чём: нужен маршрут к получателю.
     const product = makers[0].info.produces;
     const name = CARGO[product].name;
-    const here = [...game.lines.values()].filter((l) => l.vehicles.length && l.stops.includes(st.id));
+    // Маршруты отсюда — и без машин: продукция копится на станции, как только маршрут проложен.
+    const here = [...game.lines.values()].filter((l) => l.stops.includes(st.id));
     const taken = here.some((l) => l.stops.some((sid, i) => sid === st.id && game.loadable(l, i).has(product)));
     const stored = `${fmt(game.stationStored(st))} из ${fmt(game.stationStorage(st))} ед.`;
     const why = taken ? 'продукцию некуда класть' : here.length ? `«${name}» отсюда никто не везёт` : 'отсюда не ходит ни один маршрут';
@@ -451,8 +456,9 @@ function industries(game: Game, out: Advice[]): void {
     if (!at.length) continue;
     const product = ind.info.produces;
     // Завод работает, а его продукцию с его станций не берёт ни один маршрут — он не растёт.
+    // Маршрут без машин её берёт (копится на станции) — о нём свой совет «Маршрут без машин».
     if (ind.info.accepts.length && ind.producedLast > 0) {
-      const taken = [...game.lines.values()].some((l) => l.vehicles.length && l.stops.some((sid, i) => at.some((st) => st.id === sid) && game.loadable(l, i).has(product)));
+      const taken = [...game.lines.values()].some((l) => l.stops.some((sid, i) => at.some((st) => st.id === sid) && game.loadable(l, i).has(product)));
       const accepted = game.industries.some((i) => i.info.accepts.includes(product)) || game.towns.some((t) => t.demands.includes(product));
       if (!taken && accepted) {
         out.push({
