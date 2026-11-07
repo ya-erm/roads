@@ -283,7 +283,8 @@ export class RoadTools {
     // Односторонняя навстречу ходу постройки (Alt): полосы — от конца к началу.
     if (this.reverse && isOneWay(spec)) profile.lanes = profile.lanes.map((l) => ({ ...l, flow: -l.flow as Flow }));
     const opts: RoadOptions = { ...profile, control: this.control ?? undefined, kink: mode === 'straight', arc: mode === 'arc' };
-    const ground = this.game().roadBuilder.road(start, end, opts);
+    // «Со строительством» новая дорога — проект стройки.
+    const ground = this.game().roadBuilder.road(start, end, opts, { project: true });
     this.autoInfo = null;
     this.endRise = null;
     const plan = !this.auto || level !== undefined ? ground : (this.autoPlan(ground, start, end, opts) ?? ground);
@@ -385,7 +386,7 @@ export class RoadTools {
       if (!buildRoad(net, a, b, { ...opts, levels }).length) return false;
       setDecks(net, (x) => !this.net.nodes.has(x.id), zAt, groundAt);
       return true;
-    });
+    }, { project: true });
     let bridge = 0;
     let tunnel = 0;
     for (let k = 1; k < pts.length; k++) {

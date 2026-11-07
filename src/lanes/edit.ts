@@ -3,7 +3,7 @@ import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '
 import { LANE_W, RoadClass } from '../world/roadTypes';
 import { nodeDeck } from './deck';
 import { edgesAt, laneBand, pointOff } from './geometry';
-import { Corridor, CorridorEnd, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot, taperLen } from './model';
+import { Corridor, CorridorBuild, CorridorEnd, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot, taperLen } from './model';
 
 /** Начало или конец новой дороги: узел (тупик или перекрёсток), место на полотне или чистое поле. */
 export type Anchor =
@@ -146,6 +146,12 @@ export function splitCorridor(net: LaneNet, c: Corridor, s: number, kind: NodeKi
   net.removeCorridor(c.id, true);
   const first = net.addCorridor(a, node.id, { cls, lanes: lanes1, portA, curve: c1, limit, ring });
   const second = net.addCorridor(node.id, b, { cls, lanes: lanes2, portB, curve: c2, limit, ring });
+  // Строящееся полотно — оба куска тоже стройка того же проекта: готовое делится по месту разреза.
+  if (c.build) {
+    const [b1, b2] = splitBuild(c.build, L, first.length);
+    first.build = b1;
+    second.build = b2;
+  }
   // Настройки перекрёстков на концах (запреты, главная, связи полос) — на новые куски.
   if (a !== b) {
     renameArm(net.node(a), c.id, first.id);
@@ -154,6 +160,22 @@ export function splitCorridor(net: LaneNet, c: Corridor, s: number, kind: NodeKi
   // Новый въезд на кольцо — тоже узел кольца.
   if (ring) node.roundabout = net.node(a).roundabout ?? null;
   return { node, first, second };
+}
+
+/**
+ * Стройка полотна длиной L, разрезанного так, что первый кусок — длиной s: готовое (done метров от конца a или,
+ * с fromB, от b) делится между кусками. Готовый целиком кусок остаётся стройкой с done = длина — его откроет
+ * стройка в следующий такт (и засчитает в проект).
+ */
+export function splitBuild(b: CorridorBuild, L: number, s: number): [CorridorBuild, CorridorBuild] {
+  const rest = Math.max(0, L - s);
+  // Отсчёт от a: первый кусок получает готовое первым; от b — второй.
+  const near = b.fromB ? rest : s;
+  const far = b.fromB ? s : rest;
+  const nearDone = Math.min(near, b.done);
+  const farDone = Math.min(far, Math.max(0, b.done - near));
+  const mk = (done: number): CorridorBuild => (b.fromB ? { project: b.project, done, fromB: true } : { project: b.project, done });
+  return b.fromB ? [mk(farDone), mk(nearDone)] : [mk(nearDone), mk(farDone)];
 }
 
 export interface RoadOptions {

@@ -4,7 +4,7 @@
  * построил, что выросло и что просело. Требования — от оценки выполнимого: производства, вместимости
  * разумного парка и денег, а не от богатства игрока.
  */
-import { ECONOMY, MONTH_LENGTH, MONTH_SCALE, TERM_SCALE } from '../config';
+import { CONSTRUCTION, ECONOMY, MONTH_LENGTH, MONTH_SCALE, TERM_SCALE } from '../config';
 import { Rng } from '../core/rng';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
@@ -31,7 +31,9 @@ import {
   refOf,
   region,
   RegionInfo,
+  roadMonths,
   routeCost,
+  buildReach,
   Supply,
   supplyEffort,
   townPairs,
@@ -95,7 +97,9 @@ export function fastMonths(game: Game, p: ObjectiveParams, months: number, diffi
   } else return null;
   if (rate <= 0) return null;
   const firstTrip = ((d * 1.3) / 26 + 10) / MONTH_LENGTH;
-  const fast = Math.ceil((FAST_SETUP + firstTrip + p.amount / rate) * FAST_SLACK);
+  // «Со строительством» — и стройка дороги между ними.
+  const setup = game.buildMode ? FAST_SETUP + roadMonths(game, d) : FAST_SETUP;
+  const fast = Math.ceil((setup + firstTrip + p.amount / rate) * FAST_SLACK);
   return fast <= months - TERM_SCALE ? Math.max(TERM_SCALE, fast) : null;
 }
 
@@ -169,13 +173,16 @@ interface PaxPlan {
 function freightPlan(sc: Scenario, months: number): FreightPlan | null {
   const game = sc.game;
   const diff = sc.difficulty;
-  const options = rawSupplies(game).filter((s) => s.d >= 450 && s.d <= 4500 && hasMarket(game, s.to) && producible(game, s.to.info.produces));
+  const all = rawSupplies(game).filter((s) => s.d >= 450 && s.d <= 4500 && hasMarket(game, s.to) && producible(game, s.to.info.produces));
+  // «Со строительством» первая линия — без долгой стройки дороги (если такие на карте есть).
+  const short = game.buildMode ? all.filter((s) => s.d <= buildReach(CONSTRUCTION.firstBuild)) : all;
+  const options = short.length ? short : all;
   // Заводы на один вид сырья — первыми: там поставки сразу превращаются в продукцию.
   const single = options.filter((s) => s.to.info.accepts.length === 1);
   const pool = (single.length >= 2 ? single : options).slice(0, 3);
   if (!pool.length) return null;
   const supply = sc.rng.pick(pool);
-  const work = Math.max(1, months - RAMP);
+  const work = Math.max(1, months - RAMP - roadMonths(game, supply.d));
   const fleet = START_FLEET[sc.state.settings.difficulty];
   const perMonth = perVehicleMonth(supply.d, MODELS.truck.capacity);
   const can = Math.min(fleet * perMonth * work, rawOutput(supply.from, work));
@@ -188,14 +195,16 @@ function freightPlan(sc: Scenario, months: number): FreightPlan | null {
 function paxPlan(sc: Scenario, months: number, skip?: Set<number>): PaxPlan | null {
   const game = sc.game;
   const diff = sc.difficulty;
-  const pairs = townPairs(game)
-    .filter((p) => p.d >= 900 && p.d <= 6000 && !(skip?.has(p.a.id) && skip?.has(p.b.id)))
+  const all = townPairs(game).filter((p) => p.d >= 900 && p.d <= 6000 && !(skip?.has(p.a.id) && skip?.has(p.b.id)));
+  // «Со строительством» — пары, между которыми дорога строится недолго (если такие на карте есть).
+  const short = game.buildMode ? all.filter((p) => p.d <= buildReach(CONSTRUCTION.firstBuild)) : all;
+  const pairs = (short.length ? short : all)
     .map((p) => ({ ...p, value: paxPerMonth(p.a, p.b) / (p.d + 1500) }))
     .sort((x, y) => y.value - x.value)
     .slice(0, 3);
   if (!pairs.length) return null;
   const p = sc.rng.pick(pairs);
-  const work = Math.max(1, months - RAMP);
+  const work = Math.max(1, months - RAMP - roadMonths(game, p.d));
   const fleet = Math.max(2, START_FLEET[sc.state.settings.difficulty] - 2);
   const perMonth = perVehicleMonth(p.d, MODELS.bus.capacity, true);
   const can = Math.min(fleet * perMonth, paxPerMonth(p.a, p.b)) * work;

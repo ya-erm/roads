@@ -1,6 +1,7 @@
 import {
   ANNEX,
   CAR_COLORS,
+  CONSTRUCTION,
   COST,
   ECONOMY,
   GRADE,
@@ -21,7 +22,7 @@ import {
 } from '../config';
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { Rng } from '../core/rng';
-import { add, angleDiff, angleOf, cross, dist, dot, scale, sub, Vec } from '../core/vec';
+import { add, angleDiff, angleOf, cross, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, insideRuns, splitCorridor } from '../lanes/edit';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { autoMainPair, mainPairOf } from '../lanes/graph';
@@ -33,7 +34,7 @@ import { RailSim, Train } from '../sim/rail';
 import { stepWagons } from '../sim/wagons';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
-import { Annex, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TOWN_NEED, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
+import { Annex, type BuildBase, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TOWN_NEED, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
 import { closeSupply } from '../world/townSupply';
 import { repaceSave, saveMonthLength } from './monthPace';
 import { Network, NetworkSave, Segment } from '../world/network';
@@ -63,7 +64,10 @@ import { Scenario } from '../scenario/manager';
 import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
-import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan } from './roadbuild';
+import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, type ProjectStart } from './roadbuild';
+import { Construction, type ConstructionSave, type Project } from './construction';
+import { carryBuild } from './constructionWork';
+import type { Brigade } from './crews';
 import { RING_SIZES, RingOptions, Roads } from './roads';
 import { TimelapseRecorder, type TimelapseSave } from './timelapse';
 import { Motion, SpeedChart, speedChart, TrackPiece } from './speedChart';
@@ -258,6 +262,9 @@ interface UndoSnapshot {
   terraform: number;
   /** Сколько стоило действие — вернётся при отмене. */
   spent: number;
+  /** Проекты стройки до действия (нет в старых снимках) и какие проекты действие заложило. */
+  projects?: Project[];
+  creates?: number[];
 }
 
 /** По умолчанию станция работает и с пассажирами, и с грузом. */
@@ -279,7 +286,11 @@ interface RailStationGeom {
   main?: RoadRequest;
 }
 
-type SimOwner = { type: 'fleet'; id: number } | { type: 'citizen' };
+/** Машина бригады стройки (crews.ts): самосвал в потоке. */
+type SimOwner = { type: 'fleet'; id: number } | { type: 'citizen' } | { type: 'crew'; id: number };
+
+/** Машина бригады в потоке: жёлтый самосвал с грунтом в кузове. */
+const CREW_SPEC = { kind: 'truck' as const, body: 'van' as const, length: 10, width: 4.4, maxSpeed: 32, accel: 5, color: '#f2b81d', load: '#9a7b55' };
 
 export interface Notice {
   text: string;
@@ -401,6 +412,8 @@ export interface SaveData {
   terraform?: TerraformEdit[];
   /** Поезда в пути и на платформах. */
   rail?: ReturnType<RailSim['serialize']>;
+  /** Проекты стройки (режим «Со строительством»); готовое — в полотнах сети дорог. Нет — проектов нет. */
+  construction?: ConstructionSave;
   /** Положение камеры — заполняет интерфейс. */
   view?: { x: number; y: number; zoom: number };
 }
@@ -578,6 +591,8 @@ export class Game implements BuildContext {
   readonly journal: Journal;
   /** Таймлапс партии: кадр сети в конце каждого месяца (см. timelapse.ts). */
   readonly timelapse: TimelapseRecorder;
+  /** Стройка дорог (режим «Со строительством», src/game/construction.ts): проекты и их ход. */
+  readonly construction: Construction;
 
   constructor(setup: WorldSettings | number, saved?: SaveData) {
     // Сценарий решает архетип по seed ещё до генерации карты: от него зависят города и предприятия.
@@ -608,6 +623,7 @@ export class Game implements BuildContext {
     );
     this.builder = new Builder(this);
     this.roadBuilder = new RoadBuilder(this);
+    this.construction = new Construction(this);
     // Машины на изгибах и уклонах: профиль скорости полос берёт рельеф отсюда.
     this.roads.traffic.relief = { ground: () => this.ground(), version: () => this.terrain.version };
     if (save) {
@@ -624,6 +640,8 @@ export class Game implements BuildContext {
     this.industries = world.industries;
     this.net.rebuild();
     this.roads.changed();
+    // «Со строительством»: первая строительная база — бесплатно, у стартового города.
+    if (this.buildMode) this.autoBase();
     const s = this.settings;
     this.journal.add('game', { seed: s.seed, size: s.size, towns: this.towns.length, industries: this.industries.length, water: s.water, money: this.money });
     if (this.settings.scenario) this.attachScenario(Scenario.create(this));
@@ -683,6 +701,7 @@ export class Game implements BuildContext {
       journal: this.journal.entries,
       timelapse: this.timelapse.toSave(),
       terraform: this.terrain.edits.length ? this.terrain.edits : undefined,
+      construction: this.construction.toSave(),
     };
   }
 
@@ -778,6 +797,8 @@ export class Game implements BuildContext {
     for (const e of save.terraform ?? []) this.terrain.terraform(e);
     this.net.load(save.net);
     this.roads.replace(LaneNet.fromJSON(save.roads));
+    this.construction.load(save.construction);
+    for (const b of this.construction.crews.bases.values()) this.index.add(b);
     this.towns = save.towns;
     for (const t of this.towns) {
       // Дома, которые город по прежним правилам поставил прямо на пути, сносим.
@@ -948,6 +969,187 @@ export class Game implements BuildContext {
 
   get budget(): number {
     return this.money - ECONOMY.creditLimit;
+  }
+
+  // ---------- Стройка дорог (режим «Со строительством») ----------
+
+  /** Партия «Со строительством»: нарисованная дорога — проект, строится со временем (construction.ts). */
+  get buildMode(): boolean {
+    return this.settings.construction === 'build';
+  }
+
+  /** RoadContext: под каким номером новая дорога станет проектом; «Мгновенно» — null. */
+  projectId(): number | null {
+    return this.buildMode ? this.construction.peekId() : null;
+  }
+
+  /** RoadContext: проект заложен — запись стройки, отмена действия знает, что оно заложило проект. */
+  startProject(s: ProjectStart, net: LaneNet): void {
+    const p = this.construction.start(s.id, net, s.corridors);
+    const top = this.undoPending ? this.undoStack[this.undoStack.length - 1] : undefined;
+    if (top) (top.creates ??= []).push(p.id);
+    this.journal.add('project', { id: p.id, what: p.label, len: Math.round(s.length), $: s.cost, sec: Math.round(s.seconds) });
+  }
+
+  /** Стройка: проект достроен или встал без денег. */
+  projectEvent(kind: 'done' | 'stalled', p: Project): void {
+    if (kind === 'done') {
+      this.notify(`🚧 Стройка закончена: ${p.label}`, '#3f9d5a');
+      this.journal.add('project-done', { id: p.id, what: p.label, $: p.spent, sec: Math.round(this.time - p.created) });
+    } else {
+      // Встали сразу несколько — одно уведомление (советник покажет все).
+      const others = [...this.construction.projects.values()].some((x) => x !== p && x.stalled !== undefined);
+      if (!others) this.notify('🚧 Стройка стоит: не хватает денег', '#e5534b');
+      this.journal.add('project-stall', { id: p.id, money: this.money });
+    }
+  }
+
+  /** Пауза проекта (paused) или снова строить. */
+  pauseProject(id: number, paused: boolean): void {
+    if (!this.construction.projects.has(id)) return;
+    this.construction.setPaused(id, paused);
+    this.journal.add('project-pause', { id, on: paused });
+  }
+
+  /**
+   * Отмена проекта: недостроенные участки сносятся, заплаченное за начатый, но не готовый участок — назад,
+   * готовые участки остаются (они уже дороги — снос по обычным правилам). Одним шагом для Ctrl+Z. false — нет проекта.
+   */
+  cancelProject(id: number, undoable = true): boolean {
+    const p = this.construction.projects.get(id);
+    if (!p) return false;
+    const cs = this.construction.corridorsOf(id);
+    const water = (q: Vec, m?: number) => this.isWater(q, m);
+    const back = cs.reduce((s, c) => s + corridorCost(this.roads.net, c, water, this.ground()), 0);
+    if (undoable) this.checkpoint('отмена стройки');
+    const plan = this.roadBuilder.bulldoze(cs.map((c) => c.id));
+    // Снос недостроенного — без «возврата половины»: заплаченное за него возвращается целиком (ниже).
+    if (plan.net) this.roadBuilder.apply({ ...plan, ok: true, spend: 0, refund: 0, demolish: [] });
+    this.money += back;
+    this.expensesMonth -= back;
+    this.ledger.build -= Math.min(this.ledger.build, back);
+    this.construction.projects.delete(id);
+    this.construction.prune();
+    this.journal.add('project-cancel', { id, what: p.label, back, built: Math.round(p.builtLen) });
+    if (undoable) this.commit();
+    return true;
+  }
+
+  /** Стройка (crews.ts): машина бригады — в поток от узла from к узлу to; null — нет пути или места на выезде. */
+  drive(b: Brigade, from: number, to: number): number | null {
+    const route = this.roads.route(from, to);
+    if (!route) return null;
+    const sim = this.traffic.spawn({ ...CREW_SPEC, targetNode: to, route });
+    if (!sim) return null;
+    this.owners.set(sim.id, { type: 'crew', id: b.id });
+    return sim.id;
+  }
+
+  /** Стройка: машина бригады больше не нужна — с дороги долой. */
+  park(sim: number): void {
+    const v = this.traffic.vehicles.get(sim);
+    if (v) this.traffic.remove(v);
+    this.owners.delete(sim);
+  }
+
+  /** Стройка: узел есть в графе движения — до него можно доехать по дороге. */
+  onRoad(node: number): boolean {
+    const g = this.roads.graph;
+    return g.outLinks.has(node) || g.inLinks.has(node);
+  }
+
+  /**
+   * Где встанет строительная база у точки p: площадка вдоль ближайшей открытой дороги, с той стороны, где курсор;
+   * ворота — ближайший узел этой дороги, куда можно доехать. Дома под площадкой сносятся (за доплату),
+   * станции, предприятия, дороги, пути и вода мешают. free — первая база, бесплатно.
+   */
+  basePlan(p: Vec, free = false): { ok: boolean; reason?: string; cost: number; fp: Footprint | null; nodeId?: number; demolish: number[] } {
+    const B = CONSTRUCTION.base;
+    const net = this.roads.open;
+    const cost0 = free ? 0 : B.cost;
+    const fail = (reason: string, fp: Footprint | null = null) => ({ ok: false, reason, cost: cost0, fp, demolish: [] as number[] });
+    const c = net.corridorNear(p, 90);
+    if (!c) return fail('Поставьте рядом с дорогой');
+    const hit = c.lut.closest(p);
+    const t = c.lut.tangentAt(hit.s);
+    const n = rightNormal(t);
+    const side = dot(sub(p, hit.point), n) >= 0 ? 1 : -1;
+    const off = corridorHalf(c) + B.gap + B.h / 2;
+    const fp: Footprint = { center: add(hit.point, scale(n, side * off)), w: B.w, h: B.h, angle: Math.atan2(t.y, t.x) };
+    if (!this.inBounds(fp.center, 40)) return fail('За краем карты', fp);
+    if (footprintCorners(fp).some((q) => this.isWater(q, 2)) || this.isWater(fp.center, 2)) return fail('Мешает вода', fp);
+    if (net.node(c.a).level !== 0 || net.node(c.b).level !== 0) return fail('Нужна дорога на земле', fp);
+    const under = this.structuresUnder(fp, 1);
+    if (under.blocker) return fail(under.blocker, fp);
+    const road = this.roadUnder(fp, 1);
+    if (road) return fail(road, fp);
+    // Ворота: ближайший к площадке узел, куда можно доехать (конец этой дороги или узел рядом).
+    const nodes = [c.a, c.b, ...net.nodesNear(hit.point, 400).map((x) => x.id)].filter((id) => this.onRoad(id));
+    const gate = nodes.sort((x, y) => dist(net.node(x).pos, hit.point) - dist(net.node(y).pos, hit.point) || x - y)[0];
+    if (gate === undefined) return fail('Нет подъезда по дороге', fp);
+    const cost = cost0 + this.demolishTotal(under.houses);
+    if (cost > this.budget) return { ok: false, reason: 'Не хватает денег', cost, fp, demolish: under.houses };
+    return { ok: true, cost, fp, nodeId: gate, demolish: under.houses };
+  }
+
+  /** Ставит строительную базу у точки p (с бригадами по умолчанию). null — поставили, иначе причина. */
+  buildBase(p: Vec, free = false): string | null {
+    const plan = this.basePlan(p, free);
+    if (!plan.ok || !plan.fp || plan.nodeId === undefined) return plan.reason ?? 'Нельзя';
+    // База в отмену (Ctrl+Z) не входит: снесённые под ней дома прежние снимки вернули бы под площадку — забываем их.
+    if (plan.demolish.length) {
+      this.demolish(plan.demolish);
+      this.forgetUndo();
+    }
+    if (plan.cost) this.spend(plan.cost);
+    const base: BuildBase = { type: 'base', id: this.nextEntityId++, fp: plan.fp, nodeId: plan.nodeId };
+    this.construction.crews.bases.set(base.id, base);
+    this.index.add(base);
+    for (let i = 0; i < CONSTRUCTION.base.brigades; i++) this.construction.crews.hire(base.id);
+    this.construction.stamp++;
+    this.journal.add('base', { id: base.id, pos: [Math.round(base.fp.center.x), Math.round(base.fp.center.y)], $: plan.cost });
+    return null;
+  }
+
+  /** Ещё бригада на базе: цена — сразу, содержание — каждый месяц. null — наняли, иначе причина. */
+  hireBrigade(base: number): string | null {
+    const crews = this.construction.crews;
+    if (!crews.bases.has(base)) return 'Нет базы';
+    if (crews.of(base).length >= CONSTRUCTION.base.maxBrigades) return `На базе не больше ${CONSTRUCTION.base.maxBrigades} бригад`;
+    if (CONSTRUCTION.brigade.cost > this.budget) return 'Не хватает денег';
+    this.spend(CONSTRUCTION.brigade.cost, 'purchases');
+    crews.hire(base);
+    this.construction.stamp++;
+    this.journal.add('brigade', { base, n: crews.of(base).length, $: CONSTRUCTION.brigade.cost });
+    return null;
+  }
+
+  /** Распустить бригаду базы (свободную — первой): половина цены — назад. */
+  dismissBrigade(base: number): boolean {
+    const crews = this.construction.crews;
+    if (crews.of(base).length <= 0) return false;
+    crews.dismiss(base);
+    this.refund(CONSTRUCTION.brigade.cost);
+    this.construction.stamp++;
+    this.journal.add('brigade', { base, n: crews.of(base).length, sold: true });
+    return true;
+  }
+
+  /**
+   * Первая база — бесплатно, у стартового (самого большого) города: вдоль его улиц у края застройки, первое место,
+   * где площадка встаёт. Ничего не нашлось — базы нет, её ставят сами.
+   */
+  private autoBase(): void {
+    const town = [...this.towns].sort((a, b) => b.population - a.population || a.id - b.id)[0];
+    if (!town) return;
+    for (const k of [1, 0.75, 1.3, 0.5, 1.7]) {
+      for (let i = 0; i < 24; i++) {
+        const a = (i / 24) * Math.PI * 2;
+        const p = { x: town.center.x + Math.cos(a) * town.radius * k, y: town.center.y + Math.sin(a) * town.radius * k };
+        const plan = this.basePlan(p, true);
+        if (plan.ok && !plan.demolish.length && this.buildBase(p, true) === null) return;
+      }
+    }
   }
 
   isWater(p: Vec, margin = 0): boolean {
@@ -1296,7 +1498,8 @@ export class Game implements BuildContext {
 
   /** Переезды заново (дороги или пути поменялись): машины ждут у закрытых, поезда их закрывают. */
   private refreshCrossings(): void {
-    this.levelCrossings = findCrossings(this.roads.net, this.net);
+    // Переезды — только на открытых дорогах: у строящейся шлагбаумов ещё нет.
+    this.levelCrossings = findCrossings(this.roads.open, this.net);
     const byCorridor = new Map<number, LevelCrossing[]>();
     const byRail = new Map<number, LevelCrossing[]>();
     for (const x of this.levelCrossings) {
@@ -1438,7 +1641,7 @@ export class Game implements BuildContext {
         (n) => {
           mine = pasteFragment(n, frag, at, angle);
         },
-        { trusted: true, only: (c) => mine.has(c.id) },
+        { trusted: true, only: (c) => mine.has(c.id), project: true },
       );
       const next = road.net;
       if (road.ok && next) {
@@ -1545,6 +1748,7 @@ export class Game implements BuildContext {
       refund: () => {},
       networkChanged: () => {},
       railConflict: (n, c) => this.railConflict(n, c, rails),
+      projectId: () => this.projectId(),
     });
   }
 
@@ -2081,6 +2285,7 @@ export class Game implements BuildContext {
       terraform: this.terrain.edits.length,
       moneyBefore: this.money,
       spent: 0,
+      projects: this.construction.projects.size ? this.construction.snapshot() : undefined,
     });
     if (this.undoStack.length > UNDO_DEPTH) this.undoStack.shift();
   }
@@ -2144,6 +2349,18 @@ export class Game implements BuildContext {
     this.commit();
     const snap = this.undoStack.pop();
     if (!snap) return null;
+    // Действие заложило проект, а стройка уже идёт (или кончилась): готовые участки — уже дороги, их убирает
+    // только снос. Отмена — как «✕ Отмена» проекта: недостроенное прочь, заплаченное за него назад.
+    const started = (snap.creates ?? []).filter((id) => {
+      const p = this.construction.projects.get(id);
+      return !p || p.spent > 0 || p.builtLen > 0;
+    });
+    if (started.length) {
+      for (const id of snap.creates!) this.cancelProject(id, false);
+      this.journal.add('undo', { what: snap.label, back: 0, projects: started });
+      this.notify('Стройка уже шла: недостроенное убрано, готовые участки остались — их убирает снос', '#e5a33b');
+      return snap.label;
+    }
     const railSave = this.rail.serialize();
     this.rail.clearTrains();
     this.net.replaceWith(snap.net);
@@ -2156,7 +2373,11 @@ export class Game implements BuildContext {
       if (sim && back !== undefined && !v.boarding) sim.targetNode = back;
     }
     // Машины переезжают на восстановленные дороги сами; кому некуда — вернутся на станцию.
-    this.roads.replace(snap.roads.clone());
+    // Стройка с тех пор ушла вперёд — готовое переносим (оно уже оплачено); записи проектов — как в снимке.
+    const roads = snap.roads.clone();
+    carryBuild(this.roads.net, roads);
+    this.roads.replace(roads);
+    this.construction.restore(snap.projects ?? []);
 
     // Станции: живые остаются (со своими грузами и пассажирами), лишние уходят, снесённые возвращаются.
     const keep = new Set(snap.stations.map((s) => s.id));
@@ -2494,6 +2715,8 @@ export class Game implements BuildContext {
     this.updateIndustries(dt);
     this.updateStations(dt);
     this.updateTowns(dt);
+    // Стройка дорог: только если есть проекты или бригады («Мгновенно» их не бывает — такт тот же, что без стройки).
+    if (this.construction.projects.size || this.construction.crews.brigades.size) this.construction.tick(dt);
     this.scenario?.tick(dt);
     const month = Math.floor(this.time / MONTH_LENGTH);
     // Итоги — сразу после такта (update): целиком или по кадрам (monthBudget).
@@ -3807,6 +4030,11 @@ export class Game implements BuildContext {
       this.citizenCars--;
       return;
     }
+    if (owner?.type === 'crew') {
+      const crew = this.construction.crews.brigades.get(owner.id);
+      if (crew?.sim === sim.id) this.construction.crews.arrive(crew);
+      return;
+    }
     const v = owner && this.fleet.get(owner.id);
     if (!v) return;
     v.simId = null;
@@ -3858,6 +4086,11 @@ export class Game implements BuildContext {
     this.owners.delete(sim.id);
     if (owner?.type === 'citizen') {
       this.citizenCars--;
+      return;
+    }
+    if (owner?.type === 'crew') {
+      const crew = this.construction.crews.brigades.get(owner.id);
+      if (crew?.sim === sim.id) this.construction.crews.lost(crew);
       return;
     }
     const v = owner && this.fleet.get(owner.id);
@@ -4464,6 +4697,8 @@ export class Game implements BuildContext {
       const net = this.roads.net;
       const ground = this.ground();
       for (const c of net.corridors.values()) {
+        // Строящееся ремонтировать не нужно: в ремонт — когда участок готов (у него снимется build).
+        if (c.build) continue;
         const key = `${this.terrain.version}|${net.node(c.a).level}|${net.node(c.b).level}|${c.cls}|${JSON.stringify(c.curve)}|${JSON.stringify(c.lanes)}`;
         let hit = this.corridorValue.get(c.id);
         if (hit?.key !== key) {
@@ -4492,6 +4727,13 @@ export class Game implements BuildContext {
       this.ledger.vehicles += cost;
       const line = this.lines.get(v.lineId);
       if (line) line.costMonth += cost;
+    }
+    // Бригады стройки — как транспорт: содержание каждый месяц.
+    const crews = this.construction.crews.upkeep();
+    if (crews) {
+      this.money -= crews;
+      this.expensesMonth += crews;
+      this.ledger.vehicles += crews;
     }
     const upkeep = Math.round(this.roadValueTotal() * ECONOMY.roadUpkeepRate * 0.3);
     this.money -= upkeep;
@@ -4756,7 +4998,8 @@ export class Game implements BuildContext {
   /** Городская улица: на земле, не кольцо и не часть магистрали или развязки. */
   private streetLike(c: Corridor): boolean {
     const net = this.roads.net;
-    return !c.ring && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c, this.drivewayIds());
+    // Строящаяся дорога (проект) — ещё не улица: город от неё не продолжает и дома вдоль неё не ставит.
+    return !c.build && !c.ring && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c, this.drivewayIds());
   }
 
   /**

@@ -2,7 +2,7 @@
  * Анализ карты и сети игрока — для генератора сценария, причин событий и оценки выполнимости.
  * Только чтение состояния игры; ничего не меняет.
  */
-import { COST, ECONOMY, MONTH_LENGTH, STATION, TERM_SCALE } from '../config';
+import { CONSTRUCTION, COST, ECONOMY, MONTH_LENGTH, STATION, TERM_SCALE } from '../config';
 import { dist, Vec } from '../core/vec';
 import type { Game, MonthRecord } from '../game/game';
 import { MODELS } from '../game/transport';
@@ -178,6 +178,22 @@ export function rawOutput(ind: Industry, months: number): number {
 /** Месяцев на стройку и разгон, прежде чем груз пойдёт (2 мин). */
 export const RAMP = 1 * TERM_SCALE;
 
+/** Дорога между точками на d по прямой длиннее на столько (изгибы, объезды). */
+export const ROAD_DETOUR = 1.3;
+
+/**
+ * «Со строительством»: сколько месяцев строится дорога между точками на d по прямой (улица на земле, темп
+ * CONSTRUCTION) — сверх разгона RAMP. «Мгновенно» — 0: дорога готова сразу.
+ */
+export function roadMonths(game: Game, d: number): number {
+  return game.buildMode ? (d * ROAD_DETOUR) / CONSTRUCTION.speed / MONTH_LENGTH : 0;
+}
+
+/** «Со строительством»: на какое расстояние по прямой дорога строится не дольше seconds (для заданий этапа A). */
+export function buildReach(seconds: number): number {
+  return (seconds * CONSTRUCTION.speed) / ROAD_DETOUR;
+}
+
 /**
  * Сколько груза можно привезти к точке за months месяцев: от двух ближайших производителей не дальше maxDist.
  * Продукт завода — не больше, чем ему самому привезут сырья (по самому редкому виду) и чем он переработает.
@@ -191,13 +207,15 @@ export function cargoPotential(game: Game, cargo: CargoType, near: Vec, months: 
     .slice(0, 2);
   let total = 0;
   for (const ind of makers) {
+    // «Со строительством» груз пойдёт, только когда достроят дорогу до производителя.
+    const built = game.buildMode ? Math.max(0, work - roadMonths(game, dist(ind.fp.center, near))) : work;
     if (!ind.info.accepts.length) {
-      total += rawOutput(ind, work);
+      total += rawOutput(ind, built);
       continue;
     }
     // Сырьё до завода идёт на звено раньше: на 2 мин меньше срока.
     const inputs = ind.info.accepts.map((c) => cargoPotential(game, c, ind.fp.center, months - TERM_SCALE, maxDist, depth + 1));
-    total += Math.min(Math.min(...inputs), ECONOMY.processRate * (ind.level ?? 1) * work);
+    total += Math.min(Math.min(...inputs), ECONOMY.processRate * (ind.level ?? 1) * built);
   }
   return total;
 }

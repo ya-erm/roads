@@ -5711,3 +5711,174 @@ span.ind-chip {
   text-overflow: ellipsis;
   max-width: 300px;
 }
+
+/* Стройка дорог (режим «Со строительством»): плашки проектов слева внизу, над миникартой слева нет ничего. */
+.build-bar {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 290px;
+}
+
+.build-bar.hidden {
+  display: none;
+}
+
+/* Плашка в две строки: значок | название, сколько осталось / полоска готовности, пауза, отмена. */
+.build-plate {
+  display: grid;
+  grid-template-columns: 34px 1fr auto auto;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 5px 6px 6px 4px;
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  border-left: 4px solid #f08a3c;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.build-plate.paused {
+  border-left-color: #9aa3ad;
+}
+
+.build-plate.stalled {
+  border-left-color: var(--danger);
+}
+
+.build-plate .bp-show {
+  grid-row: span 2;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 40px;
+  padding: 0;
+}
+
+.build-plate .bp-left,
+.build-plate .bp-state {
+  grid-column: span 2;
+  text-align: right;
+}
+
+.build-plate .bp-show:hover {
+  background: #eef2f6;
+}
+
+.build-plate .bp-name {
+  flex: 1 1 auto;
+  min-width: 40px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+/* Полоска готовности: асфальт заполняет её слева направо, процент — поверх. */
+.build-plate .bp-bar {
+  position: relative;
+  height: 18px;
+  border-radius: 9px;
+  background: repeating-linear-gradient(-45deg, #f6dcc4 0 6px, #fbeee2 6px 12px);
+  overflow: hidden;
+}
+
+.build-plate .bp-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: #5c636d;
+}
+
+.build-plate .bp-bar b {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  color: #fff;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.7);
+}
+
+.build-plate .bp-left,
+.build-plate .bp-state {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.build-plate .bp-state.bad {
+  color: var(--danger);
+}
+
+.build-plate button.small {
+  padding: 3px 7px;
+  font-size: 12px;
+}
+
+.build-more {
+  padding-left: 8px;
+  font-size: 12px;
+}
+
+/* Базы стройки и «＋ База» — над плашками проектов. */
+.build-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 5px 6px 6px 4px;
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+
+.build-base {
+  display: grid;
+  grid-template-columns: 34px 1fr auto auto auto;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.build-base .bp-show {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 26px;
+  padding: 0;
+}
+
+.build-base .bp-show:hover {
+  background: #eef2f6;
+}
+
+.build-base .bb-name {
+  font-weight: 600;
+}
+
+.build-base .bb-crews {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.build-base button.small,
+.build-add {
+  padding: 3px 7px;
+  font-size: 12px;
+}
+
+.build-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  justify-self: start;
+  align-self: flex-start;
+  margin-left: 4px;
+}
+
+.build-add.active {
+  background: #e7f0fd;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}

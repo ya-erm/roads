@@ -125,6 +125,8 @@ function mergeShape(net: LaneNet, n: LaneNode): { curve: Cubic; dev: number; fir
   const { first, second } = ends;
   const c1 = first.corridor;
   const c2 = second.corridor;
+  // Стройку не сливаем: готовое и не готовое в одном полотне не помещается.
+  if (c1.build || c2.build) return 'Идёт стройка — узел нужен';
   // Точки прежней оси по новому ходу: c1 — к узлу, c2 — от узла.
   const pts: Vec[] = [];
   const steps = (c: Corridor) => Math.max(4, Math.ceil(c.length / 6));

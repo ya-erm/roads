@@ -2,6 +2,7 @@ import type { Vec } from '../core/vec';
 import { dist } from '../core/vec';
 import { GLane, GLink, GMove, LaneGraph } from '../lanes/graph';
 import { LaneNet, LaneNode } from '../lanes/model';
+import { openNet } from '../lanes/open';
 import { findLaneRoute, linkCost, transitionCost } from '../lanes/routing';
 import { PROFILE_STEP } from '../lanes/speedProfile';
 import { changePenalty, CURB_PULL, keepRightCost, LaneTraffic, LaneTrafficEvents, LATE_CHANGE } from '../lanes/traffic';
@@ -47,7 +48,7 @@ export class Roads {
     }
     while (this.step());
     if (this.graphOf.net === this.net && this.graphOf.version === this.net.version) return;
-    this.rebuild({ graph: new LaneGraph(this.net, undefined, this.graph), net: this.net, version: this.net.version });
+    this.rebuild({ graph: new LaneGraph(openNet(this.net), undefined, this.graph), net: this.net, version: this.net.version });
   }
 
   private quieted = 0;
@@ -86,7 +87,7 @@ export class Roads {
     const next = this.queue.shift();
     if (!next) return false;
     // Прежний граф — тот, на котором машины сейчас: на собранный они переедут следующим шагом.
-    this.built = { graph: new LaneGraph(next.net, undefined, this.graph), ...next };
+    this.built = { graph: new LaneGraph(openNet(next.net), undefined, this.graph), ...next };
     return true;
   }
 
@@ -100,6 +101,11 @@ export class Roads {
   replace(net: LaneNet): void {
     this.net = net;
     this.changed();
+  }
+
+  /** Сеть, открытая для движения: без строящихся полотен (src/lanes/open.ts); строящихся нет — сама net. */
+  get open(): LaneNet {
+    return openNet(this.net);
   }
 
   /** Узел, где можно начать и кончить поездку: перекрёсток или тупик (через стык полосы просто идут дальше). */

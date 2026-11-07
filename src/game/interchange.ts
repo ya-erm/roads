@@ -157,7 +157,7 @@ export function templatePlan(net: LaneNet, builder: RoadBuilder, p: Vec, radius:
         buildPiece(n, { from: piece.from, fromLevel: piece.fromLevel, to: piece.to, toLevel: piece.toLevel, o: profileOf(piece.spec), curve: piece.curve }, isHost);
       }
     },
-    { trusted: true },
+    { trusted: true, project: true },
   );
   if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', pieces, withTrunk, plan.cost, plan);
   if (plan.cost > budget) return fail('Не хватает денег', pieces, withTrunk, plan.cost, plan);

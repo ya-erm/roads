@@ -28,7 +28,27 @@ export interface WorldSettings {
   biomeBySeed?: boolean;
   /** Режим сценария; нет — песочница. */
   scenario?: ScenarioSettings;
+  /**
+   * Строительство дорог: «Мгновенно» (нет поля — так же, старые партии) или «Со строительством» — дорога сначала
+   * проект, потом стройка со временем (src/game/construction.ts).
+   */
+  construction?: BuildMode;
+  /** Стройматериалы: нужны ли стройке (только вместе со строительством). Нет поля — не нужны. */
+  materials?: MaterialsMode;
 }
+
+export type BuildMode = 'instant' | 'build';
+export type MaterialsMode = 'none' | 'needed';
+
+export const BUILD_MODES: Record<BuildMode, { name: string; hint: string }> = {
+  instant: { name: 'Мгновенно', hint: 'Дорога готова сразу после клика' },
+  build: { name: 'Со строительством', hint: 'Дорога — сначала проект, потом стройка: участок за участком, деньги — за каждый готовый метр' },
+};
+
+export const MATERIALS_MODES: Record<MaterialsMode, { name: string; hint: string }> = {
+  none: { name: 'Не нужны', hint: 'Стройке хватает денег' },
+  needed: { name: 'Нужны', hint: 'Стройке нужны стройматериалы или камень со склада базы' },
+};
 
 /**
  * Как генерировать карту под архетип сценария. Без профиля генерация та же, что в песочнице.

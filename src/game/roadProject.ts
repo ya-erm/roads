@@ -587,6 +587,7 @@ function previewRoads(g: Game): RoadBuilder {
     refund: () => {},
     networkChanged: () => {},
     railConflict: (n, c) => g.railConflict(n, c),
+    projectId: () => g.projectId(),
   });
 }
 
@@ -606,7 +607,7 @@ export function roadProjectEdit(p: Project, ground: ((q: Vec) => number) | null,
 function roadProjectPlan(g: Game, p: Project, length: number, edits: NetEdit[] = [], shove = false): ProjectPlan {
   const b = previewRoads(g);
   const ground = g.ground();
-  const lay = (count: number) => b.plan(roadProjectEdit(p, ground, edits, count), { shove });
+  const lay = (count: number) => b.plan(roadProjectEdit(p, ground, edits, count), { shove, project: true });
   const full = lay(p.segs.length);
   if (full.ok) {
     const reason = full.cost > g.budget ? 'Не хватает денег' : undefined;
@@ -687,7 +688,7 @@ export function buildProject(g: Game, kind: NetKind, p: Project, edits: NetEdit[
   if (!p.segs.length && !(kind === 'road' && edits.length)) return 'Проект пуст';
   if (kind === 'road') {
     const ground = g.ground();
-    const plan = g.roadBuilder.plan(roadProjectEdit(p, ground, edits), { shove });
+    const plan = g.roadBuilder.plan(roadProjectEdit(p, ground, edits), { shove, project: true });
     if (!plan.ok) return plan.reason ?? 'Так не построить';
     g.checkpoint('проект дороги');
     g.roadBuilder.apply(plan);

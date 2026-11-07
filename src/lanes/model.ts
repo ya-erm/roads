@@ -49,8 +49,20 @@ export interface Corridor {
   ring?: boolean;
   /** Ограничение скорости, км/ч; нет — по умолчанию для класса. */
   limit?: number;
+  /**
+   * Ещё строится (режим «Со строительством», src/game/construction.ts): проект и сколько метров готово. Нет —
+   * построено и открыто для движения. Объект заменяется целиком (копии сети делят его).
+   */
+  build?: CorridorBuild;
   /** Растёт при каждой правке полотна — по нему отрисовка узнаёт, что пересчитать. */
   rev: number;
+}
+
+/** Стройка полотна: номер проекта, готово метров от конца a (fromB — от конца b). */
+export interface CorridorBuild {
+  project: number;
+  done: number;
+  fromB?: boolean;
 }
 
 export type NodeKind = 'seam' | 'junction';
@@ -533,7 +545,12 @@ export class LaneNet {
     return {
       nextId: this.nextId,
       nodes: [...this.nodes.values()].map(({ corridors: _, ...n }) => ({ ...n, pos: { ...n.pos }, dir: { ...n.dir } })),
-      corridors: [...this.corridors.values()].map(({ lut: _l, length: _n, rev: _r, ...c }) => ({ ...c, curve: { ...c.curve }, lanes: c.lanes.map((l) => ({ ...l })) })),
+      corridors: [...this.corridors.values()].map(({ lut: _l, length: _n, rev: _r, ...c }) => ({
+        ...c,
+        curve: { ...c.curve },
+        lanes: c.lanes.map((l) => ({ ...l })),
+        ...(c.build ? { build: { ...c.build } } : {}),
+      })),
     };
   }
 

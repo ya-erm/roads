@@ -1,4 +1,4 @@
-import { ANNEX, COST, ECONOMY, RAIL_STATION, SNAP_PIXELS, STORAGE } from '../config';
+import { ANNEX, CONSTRUCTION, COST, ECONOMY, RAIL_STATION, SNAP_PIXELS, STORAGE } from '../config';
 import { warehouseZone } from '../game/warehouses';
 import { annexZone, growthCap } from '../game/annexes';
 import { CurveLUT, minRadius, offsetCubic, straightCubic } from '../core/bezier';
@@ -28,7 +28,7 @@ import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
 import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LANE_W, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
-import { dirArrow, failText, laneFlowText, money, NO_MONEY, riseLabel, signedMetres, structureHeightText } from './labels';
+import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, riseLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
 import type { MoveProject } from '../game/moveProject';
 import { onOldAxis } from '../game/roadbuild';
@@ -248,6 +248,8 @@ export class Controller {
   placingWarehouse: number | null = null;
   /** Ставим пристройку этого предприятия: клик в зоне вокруг него — пристройка (Esc — отмена). */
   placingAnnex: number | null = null;
+  /** Ставим строительную базу («Со строительством»): клик у дороги — база (Esc — отмена). */
+  placingBase = false;
   /** Настройка полос выбранного перекрёстка: полоса въезда, которую сейчас соединяем. */
   laneFrom: { seg: number; i: number } | null = null;
   /** Правка фазы светофора на карте: перекрёсток и номер фазы (выбрана в карточке); клик по проезду — его зелёный в ней. */
@@ -362,6 +364,7 @@ export class Controller {
   setTool(tool: Tool): void {
     this.placingWarehouse = null;
     this.placingAnnex = null;
+    this.placingBase = false;
     if (this.tool === 'line' && tool !== 'line') this.lineDraft = [];
     if (tool !== 'line') this.addStopTo = null;
     // Новая линия собирается с чистого листа: прежняя выбранная линия и объект не мешают.
@@ -972,6 +975,13 @@ export class Controller {
     this.onChange();
   }
 
+  /** Режим «поставить строительную базу»: площадка у дороги под курсором, клик ставит её. on = false — выйти. */
+  startBase(on = true): void {
+    this.setTool('select');
+    this.placingBase = on;
+    this.onChange();
+  }
+
   /** Режим «поставить склад» станции id: зона вокруг неё — на карте, клик в ней ставит здание склада. */
   startWarehouse(id: number): void {
     this.setTool('select');
@@ -992,6 +1002,7 @@ export class Controller {
     else if (this.movingStation !== null) this.movingStation = null;
     else if (this.placingWarehouse !== null) this.placingWarehouse = null;
     else if (this.placingAnnex !== null) this.placingAnnex = null;
+    else if (this.placingBase) this.placingBase = false;
     else if (this.phaseEdit) this.phaseEdit = null;
     else if (this.copyStart) this.copyStart = null;
     else if (this.pasteDrag) this.pasteDrag = null;
@@ -1518,6 +1529,14 @@ export class Controller {
         break;
       }
       case 'select': {
+        if (this.placingBase) {
+          // Строительная база — у дороги под курсором; поставили — режим кончился.
+          const problem = g.buildBase(p);
+          if (problem) this.showError(problem);
+          else this.placingBase = false;
+          this.onChange();
+          break;
+        }
         if (this.placingWarehouse !== null) {
           // Склад-здание станции — в зоне вокруг неё; поставили — снова её карточка.
           const id = this.placingWarehouse;
@@ -2280,7 +2299,8 @@ export class Controller {
     if (!p) return;
     const segs = pt.project(s.kind).segs.length;
     const edits = pt.edits(s.kind).length;
-    const total = segs || edits || v.draft || built ? `${money(plan.cost)}${segs || v.draft ? ` · ${Math.round(plan.length)} м` : ''}` : '';
+    const price = plan.road?.project ? planPrice({ cost: plan.cost, project: plan.road.project }) : money(plan.cost);
+    const total = segs || edits || v.draft || built ? `${price}${segs || v.draft ? ` · ${Math.round(plan.length)} м` : ''}` : '';
     const problem = !plan.ok && plan.reason && (segs || edits || v.draft || built) ? plan.reason : null;
     if (built) {
       // Тянут построенную дорогу: перья — в новой форме, подпись — что тянут и цена всего проекта.
@@ -2799,7 +2819,7 @@ export class Controller {
                 : '';
             const from = rt.startLevel ?? 0;
             const levels = !rt.auto && (from !== 0 || this.level !== 0) ? ` · ${levelName(from)} → ${levelName(this.level)}` : '';
-            this.showRoadPlan(o, plan, `${auto ? `${auto} · ` : ''}${money(plan.cost)} · ${Math.round(length)} м${rise}${levels}${aligned}${back}`);
+            this.showRoadPlan(o, plan, `${auto ? `${auto} · ` : ''}${planPrice(plan)} · ${Math.round(length)} м${rise}${levels}${aligned}${back}`);
             if (!plan.ok && o.label && rt.auto) o.label.text += `${plan.reason === NO_MONEY ? '' : rise} · −/+ — высота конца`;
             else if (!plan.ok && o.label && /Подъём|Выемка|Насыпь/.test(plan.reason ?? '')) o.label.text += ' · «Авто» — мост или тоннель сам';
           }
@@ -3228,7 +3248,7 @@ export class Controller {
         const plan = g.templatePlan(p, this.snapRadius, this.templateOptions());
         const name = TEMPLATES.find((t) => t.id === this.templateKind)!.name;
         if (plan.ok && plan.plan) {
-          this.showRoadPlan(o, plan.plan, `${name}${plan.withTrunk ? ' вместе с магистралью (R — повернуть)' : ''} · ${money(plan.cost)}`);
+          this.showRoadPlan(o, plan.plan, `${name}${plan.withTrunk ? ' вместе с магистралью (R — повернуть)' : ''} · ${plan.plan ? planPrice(plan.plan) : money(plan.cost)}`);
         } else {
           if (plan.preview.length) o.template = { curves: plan.preview, ok: false };
           o.label = { text: failText(plan.reason, plan.cost, ''), ok: false };
@@ -3258,7 +3278,7 @@ export class Controller {
         o.frame = { pts: frameOf(frag, pose.at, pose.angle), ok: plan.ok };
         if (plan.ok) {
           const deg = (((Math.round((pose.angle * 180) / Math.PI) % 360) + 360) % 360);
-          this.showRoadPlan(o, plan, `Вставить · ${money(plan.cost)} · ${deg}°${pose.snapped ? (pose.on === 'rail' ? ' вдоль пути' : ' вдоль дороги') : ''}`);
+          this.showRoadPlan(o, plan, `Вставить · ${plan.road?.project ? planPrice({ ...plan.road, cost: plan.cost }) : money(plan.cost)} · ${deg}°${pose.snapped ? (pose.on === 'rail' ? ' вдоль пути' : ' вдоль дороги') : ''}`);
           // Пути куска — как будущие пути (синим, с высотой).
           o.plans = plan.rails;
         } else {
@@ -3331,6 +3351,19 @@ export class Controller {
         break;
       }
       case 'select': {
+        if (this.placingBase) {
+          // База стройки: площадка у ближайшей дороги — синим (красным, если нельзя); круг — где бригады с неё быстры.
+          const plan = g.basePlan(p);
+          if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
+          if (plan.fp) {
+            o.catchmentAt = plan.fp.center;
+            o.catchmentR = CONSTRUCTION.reach;
+          }
+          o.label = plan.ok
+            ? { text: `База стройки · ${money(plan.cost)}${plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : ''} · Esc — отмена`, ok: true }
+            : { text: failText(plan.reason, plan.cost, ''), ok: false };
+          break;
+        }
         const home = this.placingWarehouse !== null ? g.stations.get(this.placingWarehouse) : undefined;
         if (home) {
           // Склад-здание: зона вокруг станции — кругом, здание под курсором — синим (красным, если нельзя).
@@ -3393,6 +3426,7 @@ export class Controller {
         const st = g.structureAt(p);
         if (st?.type === 'station') o.label = { text: st.name, ok: true };
         else if (st?.type === 'warehouse') o.label = { text: `Склад: ${g.stations.get(st.stationId)?.name ?? ''}`, ok: true };
+        else if (st?.type === 'base') o.label = { text: `База стройки · 🚚 ${g.construction.crews.of(st.id).length}`, ok: true };
         else if (st?.type === 'annex') o.label = { text: `Пристройка: ${g.industries.find((i) => i.id === st.industryId)?.name ?? ''}`, ok: true };
         else if (st?.type === 'industry') o.label = { text: st.name, ok: true };
         else if (st?.type === 'building') {

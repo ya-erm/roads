@@ -171,4 +171,15 @@ export interface Warehouse {
   fp: Footprint;
 }
 
-export type Structure = TownBuilding | Industry | Station | Warehouse | Annex;
+/**
+ * Строительная база (режим «Со строительством», src/game/crews.ts): площадка у дороги, откуда бригады едут на
+ * стройку. nodeId — узел дороги у ворот (оттуда бригады выезжают и туда возвращаются).
+ */
+export interface BuildBase {
+  type: 'base';
+  id: number;
+  fp: Footprint;
+  nodeId: number;
+}
+
+export type Structure = TownBuilding | Industry | Station | Warehouse | Annex | BuildBase;

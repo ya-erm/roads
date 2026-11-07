@@ -137,6 +137,8 @@ import { lineJamsHtml, stationWarningsHtml } from './jamUi';
 import { phasesHtml, phaseTurns } from './phasesUi';
 import { addPhase, editedAfter, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, withLeftArrows } from '../lanes/lights';
 import { installTips } from './tipFloat';
+import { buildBarHtml, buildModeRowHtml } from './constructionUi';
+import { planPrice } from '../input/labels';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
 
@@ -463,6 +465,7 @@ export class Hud {
       <div class="panel speed" data-speed></div>
       <div class="offer-banner hidden" data-offer-banner></div>
       <div class="notices" data-notices></div>
+      <div class="build-bar hidden" data-build></div>
       <div class="panel options hidden" data-options></div>
       <div class="panel toolbar" data-tools></div>
       <div class="panel side" data-side></div>
@@ -997,6 +1000,45 @@ export class Hud {
       case 'advice-show':
         this.showAdvice(d.key!);
         break;
+      case 'build-pause': {
+        const p = g.construction.projects.get(Number(d.id));
+        if (p) g.pauseProject(p.id, !p.paused);
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
+      }
+      case 'build-cancel':
+        g.cancelProject(Number(d.id));
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
+      case 'build-show': {
+        const info = g.construction.info(Number(d.id));
+        if (info) this.controller.showPlace(info.front ?? info.at, Math.max(60, Math.min(400, info.length / 3)));
+        break;
+      }
+      case 'base-place':
+        this.controller.startBase(!this.controller.placingBase);
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
+      case 'base-hire': {
+        const problem = g.hireBrigade(Number(d.id));
+        if (problem) g.notify(problem, '#e5534b');
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
+      }
+      case 'base-fire':
+        g.dismissBrigade(Number(d.id));
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
+      case 'base-show': {
+        const base = g.construction.crews.bases.get(Number(d.id));
+        if (base) this.controller.showPlace(base.fp.center, 80);
+        break;
+      }
       case 'advice-fix':
         this.fixAdvice(d.key!);
         break;
@@ -1067,7 +1109,7 @@ export class Hud {
         // Другой регион — и биом по новому seed, как в окне «Новая игра» (без биома был бы мир старых версий).
         const s = g.settings;
         const scenario = { difficulty: s.scenario?.difficulty ?? 'normal', challenge: !!s.scenario?.challenge };
-        const next = { ...DEFAULT_SETTINGS, size: s.size, water: s.water, scenario };
+        const next = { ...DEFAULT_SETTINGS, size: s.size, water: s.water, scenario, ...(s.construction ? { construction: s.construction } : {}) };
         this.startNewGame(withSeed(next, Math.floor(Math.random() * 1e9)));
         break;
       }
@@ -1764,7 +1806,8 @@ export class Hud {
     // Невалидное в проекте рисуется и правится, но построить — только исправленное.
     const why = plan.ok ? '' : `<span class="project-why" title="Сначала исправьте: ${reason}">⚠ Сначала исправьте: ${reason}</span>`;
     // Перенос или укороченная полоса бывает дешевле, чем было, — тогда возврат, с плюсом.
-    const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
+    // «Со строительством» — цена всего проекта и сколько строить (платится по готовым метрам).
+    const price = plan.road?.project ? planPrice({ cost: plan.cost, project: plan.road.project }) : plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
     return `<div class="project-bar">${projectSvg(30, 22)}<b>Проект</b><span class="muted">${parts}${raze}</span>
       <b class="project-total ${plan.ok ? '' : 'bad'}">${price}</b>${why}
       <button class="primary small" data-action="project-build" ${plan.ok ? '' : 'disabled'} title="${plan.ok ? 'Построить весь проект — новые участки и правки дорог (Enter). Ctrl+Z — отменить стройку' : `Сначала исправьте: ${reason}`}">Построить</button>
@@ -3274,6 +3317,7 @@ export class Hud {
         (Object.keys(RELIEF) as Relief[]).map((k) => ({ v: k, name: `${reliefSvg(k)}${RELIEF[k].name}` })),
       )}</div></div>
       ${sc ? '' : capitalRow}
+      ${buildModeRowHtml(d.construction)}
       <div class="ng-row"><span class="ng-label">Seed</span>
         <input class="ng-seed" data-ng-seed value="${d.seed}" inputmode="numeric" />
         <button class="secondary small" data-action="ng-seed" data-tip="Случайный мир">🎲</button></div>
@@ -3496,6 +3540,7 @@ export class Hud {
       this.renderScenario();
       this.renderOffers();
       this.renderOfferBanner();
+      this.renderBuild();
       this.syncPause();
       this.checkResults();
       // Проект: цена и «хватит ли денег» меняются и без кликов (доход, рост городов).
@@ -3505,6 +3550,24 @@ export class Hud {
 
   private lastOffers = '';
   private lastOfferBanner = '';
+  private lastBuild = '';
+
+  /** Плашки проектов стройки (режим «Со строительством») — слева внизу. */
+  private renderBuild(): void {
+    if (this.pressing) return;
+    // Панель инструмента снизу по центру широкая (дорога) — плашки встают над ней, а не под неё.
+    const bar = this.q('[data-build]');
+    const opt = this.q('[data-options]');
+    const o = opt.classList.contains('hidden') ? null : opt.getBoundingClientRect();
+    const bottom = o && o.width > 0 && o.left < bar.getBoundingClientRect().right + 8 ? Math.round(window.innerHeight - o.top + 8) : 14;
+    if (bar.style.bottom !== `${bottom}px`) bar.style.bottom = `${bottom}px`;
+    const html = buildBarHtml(this.game(), this.controller.placingBase);
+    if (html === this.lastBuild) return;
+    this.lastBuild = html;
+    const el = this.q('[data-build]');
+    el.innerHTML = html;
+    el.classList.toggle('hidden', !html);
+  }
 
   /** Плашка предложения вверху — дублирует панель внизу; пока она есть, уведомления опускаются под неё. */
   private renderOfferBanner(): void {

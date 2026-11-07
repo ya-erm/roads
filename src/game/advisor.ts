@@ -5,7 +5,7 @@
  * Каждый совет — что случилось, где (маршрут, станция, предприятие, точка на карте) и, если можно, быстрое
  * действие (купить машину, добавить пост, взять кредит). Только чтение: действия выполняет HUD.
  */
-import { ECONOMY, STATION, STORAGE } from '../config';
+import { CONSTRUCTION, ECONOMY, STATION, STORAGE } from '../config';
 import type { Vec } from '../core/vec';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
@@ -26,7 +26,13 @@ export type AdviceKind =
   | 'noVehicles'
   | 'unsold'
   | 'missingInput'
-  | 'empty';
+  | 'empty'
+  /** Стройка дороги стоит: не хватает денег на следующие метры. */
+  | 'buildMoney'
+  /** Проект заложен давно, а стройка так и не началась: нет свободной бригады или базы. */
+  | 'buildIdle'
+  /** Бригада работает далеко от своей базы — вдвое медленнее и хуже. */
+  | 'buildFar';
 
 /** Важность: alert — что-то стоит, warn — теряете деньги или рост, tip — можно лучше. */
 export type AdviceLevel = 'alert' | 'warn' | 'tip';
@@ -84,6 +90,8 @@ const cars = (n: number) => `${n} ${plural(n, 'машина', 'машины', '�
 export function advise(game: Game): Advice[] {
   const out: Advice[] = [];
   money_(game, out);
+  building(game, out);
+  crews(game, out);
   routes(game, out);
   stations(game, out);
   industries(game, out);
@@ -137,6 +145,72 @@ function money_(game: Game, out: Advice[]): void {
       count: starving.length,
       fix: canLoan ? { kind: 'loan' } : undefined,
       funds: { have: f.have, need: f.need },
+    });
+  }
+}
+
+/** Стройка дорог стоит без денег (проекты на паузе — не в счёт): сколько ещё стоит достроить и сколько есть. */
+function building(game: Game, out: Advice[]): void {
+  const stalled = game.construction.list().filter((i) => i.project.stalled !== undefined && !i.project.paused);
+  if (!stalled.length) return;
+  const first = stalled[0];
+  const need = stalled.reduce((s, i) => s + i.left, 0);
+  const canLoan = game.loan < game.loanMax;
+  const what = stalled.length === 1 ? `«${first.project.label}»` : `${stalled.length} ${plural(stalled.length, 'проект', 'проекта', 'проектов')}`;
+  out.push({
+    key: 'buildMoney',
+    kind: 'buildMoney',
+    level: 'warn',
+    title: 'Стройка стоит: не хватает денег',
+    detail: `${what}: достроить — ещё ${money(need)}, а на счёте ${money(game.money)} (в долг — до ${money(ECONOMY.creditLimit)}).${canLoan ? ' Возьмите кредит или поставьте лишнее на паузу.' : ' Поставьте лишнее на паузу.'}`,
+    at: first.front ?? first.at,
+    count: stalled.length,
+    fix: canLoan ? { kind: 'loan' } : undefined,
+    funds: { have: Math.max(0, game.money), need },
+  });
+}
+
+/**
+ * Бригады стройки: проект давно заложен, а работы не начались (нет базы, все бригады заняты, бригада ещё в пути
+ * издалека) — и бригада работает дальше CONSTRUCTION.reach от своей базы (метр там вдвое дольше).
+ */
+function crews(game: Game, out: Advice[]): void {
+  const c = game.construction;
+  const crews = c.crews;
+  for (const i of c.list()) {
+    const p = i.project;
+    if (p.paused || p.stalled !== undefined || i.done > 0 || game.time - p.created < CONSTRUCTION.idleWarn || crews.working(p.id).length) continue;
+    const coming = crews.assigned(p.id).length > 0;
+    const why = !crews.bases.size
+      ? 'нет строительной базы — поставьте её у дороги («＋ База» на плашке стройки)'
+      : !crews.brigades.size
+        ? 'на базах нет бригад — наймите («＋ Бригада»)'
+        : coming
+          ? 'бригада ещё в пути — база далеко; поставьте базу ближе'
+          : 'все бригады заняты на других проектах — наймите ещё («＋ Бригада») или поставьте лишнее на паузу';
+    out.push({
+      key: `buildIdle:${p.id}`,
+      kind: 'buildIdle',
+      level: 'warn',
+      title: 'Проект давно не запущен',
+      detail: `«${p.label}» заложен ${seconds(game.time - p.created)} назад, а стройка не началась: ${why}.`,
+      at: i.at,
+    });
+  }
+  for (const b of crews.brigades.values()) {
+    if (b.state !== 'working' || b.project === undefined || !b.pos) continue;
+    const base = crews.bases.get(b.base);
+    if (!base) continue;
+    const d = Math.hypot(base.fp.center.x - b.pos.x, base.fp.center.y - b.pos.y);
+    if (d <= CONSTRUCTION.reach) continue;
+    const slow = 1 + d / CONSTRUCTION.reach;
+    out.push({
+      key: `buildFar:${b.id}`,
+      kind: 'buildFar',
+      level: 'tip',
+      title: 'Бригада далеко от базы',
+      detail: `Стройка в ${(d / 1000).toFixed(1)} км от базы: бригада возит грунт и асфальт издалека — строит в ${slow.toFixed(1)} раза медленнее. Поставьте базу ближе к стройке.`,
+      at: b.pos,
     });
   }
 }

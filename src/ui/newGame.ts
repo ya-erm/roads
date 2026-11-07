@@ -46,7 +46,7 @@ export function newGameDraft(s: WorldSettings, from: NewGameFrom, remembered: Sc
   }
   if (!s.scenario && from === 'menu') return { settings: withSeed(s, seed), scenario };
   // Города, предприятия и капитал сценарий задаёт сам — у песочницы оставляем её прежние, иначе — обычные.
-  const base = s.scenario ? { ...DEFAULT_SETTINGS, size: s.size, water: s.water, relief: s.relief ?? 'hills' } : s;
+  const base = s.scenario ? { ...DEFAULT_SETTINGS, size: s.size, water: s.water, relief: s.relief ?? 'hills', ...(s.construction ? { construction: s.construction } : {}) } : s;
   return { settings: withSeed({ ...base, scenario: { ...scenario } }, seed), scenario };
 }
 

@@ -11,6 +11,7 @@ import { LEVEL_RUN, RoadClass, ROAD_CLASSES, ROAD_MARGIN, structureFactor } from
 import type { Footprint } from '../world/spatial';
 import { halfAtS } from '../world/worldgen';
 import type { Roads } from './roads';
+import { buildRate, carryBuild, paidFor } from './constructionWork';
 
 /** Что строитель дорог знает об игре. */
 export interface RoadContext {
@@ -37,6 +38,22 @@ export interface RoadContext {
   networkChanged(): void;
   /** Что не так у полотна с путями: переезд под острым углом, мало места по высоте, слишком близко. */
   railConflict?(net: LaneNet, c: Corridor): string | undefined;
+  /**
+   * Режим «Со строительством»: номер, под которым новая дорога станет проектом (src/game/construction.ts);
+   * null — «Мгновенно», строится сразу.
+   */
+  projectId?(): number | null;
+  /** Проект заложен (план применён): стройка заводит его. */
+  startProject?(p: ProjectStart, net: LaneNet): void;
+}
+
+/** Новая дорога — проект стройки: номер, полная цена, секунды стройки на ×1, длина и её полотна (в сети плана). */
+export interface ProjectStart {
+  id: number;
+  cost: number;
+  seconds: number;
+  length: number;
+  corridors: number[];
 }
 
 /** План правки дорог: сеть с правкой (для предпросмотра и стройки), цена, дома под снос, что не так. */
@@ -56,6 +73,11 @@ export interface RoadPlan {
   moved?: Footprint[];
   /** Продольный профиль новых полотен на земле: наибольший уклон, выемка и насыпь, м. */
   profile?: ProfileSummary;
+  /**
+   * Режим «Со строительством»: новые полотна — проект (в net уже помечены Corridor.build). cost плана — только то,
+   * что платится сразу (снос домов, правки готовых дорог); проект оплачивается по готовым метрам.
+   */
+  project?: ProjectStart;
 }
 
 const fail = (reason: string): RoadPlan => ({ ok: false, reason, cost: 0, spend: 0, refund: 0, demolish: [], net: null, changed: [] });
@@ -175,8 +197,18 @@ export function corridorProfile(net: LaneNet, c: Corridor, ground: ((p: Vec) => 
   return curveProfile(c.lut, ground, GRADE.road);
 }
 
-/** Стоимость полотна: длина × полосы × цена класса × мост, эстакада или тоннель (над водой — вчетверо) × насыпи и выемки. */
+/**
+ * Стоимость полотна: длина × полосы × цена класса × мост, эстакада или тоннель (над водой — вчетверо) × насыпи и
+ * выемки. Строящееся (Corridor.build) стоит столько, сколько за него уже заплачено, — за готовые метры: так снос
+ * и перестройка стройки считаются по тем же правилам, что у готовой дороги.
+ */
 export function corridorCost(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean, ground: ((p: Vec) => number) | null = null): number {
+  const full = fullCorridorCost(net, c, isWater, ground);
+  return c.build ? paidFor(full, c.build.done, c.length) : full;
+}
+
+/** Стоимость полотна целиком, построено оно или ещё строится. */
+export function fullCorridorCost(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean, ground: ((p: Vec) => number) | null = null): number {
   const n = Math.max(2, Math.ceil(c.length / 12));
   const prof = corridorProfile(net, c, ground);
   let cost = 0;
@@ -213,7 +245,7 @@ export class RoadBuilder {
    */
   plan(
     edit: NetEdit,
-    opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean; only?: (c: Corridor) => boolean } = {},
+    opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean; only?: (c: Corridor) => boolean; project?: boolean } = {},
   ): RoadPlan {
     const before = this.net;
     const next = before.clone();
@@ -222,6 +254,9 @@ export class RoadBuilder {
     } catch (e) {
       return fail(e instanceof EditError ? e.message : 'Так не построить');
     }
+    // «Со строительством»: новые дороги (не куски прежних, разрезанных ими) — проект, платить за них — по готовым метрам.
+    const pid = opts.project && !opts.free ? (this.ctx.projectId?.() ?? null) : null;
+    const project = pid === null ? undefined : this.markProject(before, next, pid);
     // Что изменилось: новые полотна, полотна с новой ревизией и исчезнувшие.
     const changed: Corridor[] = [];
     let after = 0;
@@ -277,6 +312,7 @@ export class RoadBuilder {
     if (!reason && cost > this.ctx.budget) reason = 'Не хватает денег';
     const plan: RoadPlan = { ok: !reason, reason, cost, spend, refund, demolish: razed, net: next, changed: changed.map((c) => c.id) };
     if (moved) plan.moved = moved;
+    if (project) plan.project = project;
     for (const c of checked) {
       const prof = onOldAxis(before, c) ? null : corridorProfile(next, c, ground);
       if (!prof) continue;
@@ -286,13 +322,35 @@ export class RoadBuilder {
     return plan;
   }
 
+  /**
+   * Новые полотна плана — проект pid: помечает их стройкой с нуля. Ответ — что за проект (нет новых — undefined).
+   * Новые — те, которых не было, и не на оси прежних (куски разрезанной дороги остаются, какими были).
+   */
+  private markProject(before: LaneNet, next: LaneNet, pid: number): ProjectStart | undefined {
+    const water = (p: Vec, m?: number) => this.ctx.isWater(p, m);
+    const ground = this.ctx.ground();
+    const res: ProjectStart = { id: pid, cost: 0, seconds: 0, length: 0, corridors: [] };
+    for (const c of next.corridors.values()) {
+      if (before.corridors.has(c.id) || c.build || onOldAxis(before, c)) continue;
+      c.build = { project: pid, done: 0 };
+      res.corridors.push(c.id);
+      res.cost += fullCorridorCost(next, c, water, ground);
+      res.seconds += c.length / buildRate(next, c, water);
+      res.length += c.length;
+    }
+    return res.corridors.length ? res : undefined;
+  }
+
   /** Строит по плану: сносит дома, копия сети становится сетью, деньги списываются. */
   apply(plan: RoadPlan): boolean {
     if (!plan.ok || !plan.net) return false;
     if (plan.demolish.length) this.ctx.demolish(plan.demolish);
+    // Стройка с тех пор, как план считали, ушла вперёд — готовое переносим в сеть плана.
+    carryBuild(this.ctx.roads.net, plan.net);
     this.ctx.roads.replace(plan.net);
     if (plan.spend) this.ctx.spend(plan.spend);
     if (plan.refund) this.ctx.refund(plan.refund);
+    if (plan.project) this.ctx.startProject?.(plan.project, plan.net);
     this.ctx.networkChanged();
     return true;
   }
@@ -300,7 +358,7 @@ export class RoadBuilder {
   // ---------- Действия ----------
 
   /** Дорога между якорями (якоря — в текущей сети; в копии те же id). */
-  road(a: Anchor, b: Anchor, o: RoadOptions, opts: { free?: boolean } = {}): RoadPlan {
+  road(a: Anchor, b: Anchor, o: RoadOptions, opts: { free?: boolean; project?: boolean } = {}): RoadPlan {
     return this.plan((n) => buildRoad(n, a, b, o).length > 0, opts);
   }
 

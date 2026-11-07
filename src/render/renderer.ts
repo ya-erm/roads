@@ -31,6 +31,8 @@ import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
+import { baseBox, baseSig, buildingCorridors, drawBases, drawMachines, drawParked, drawProjects, projectBox, projectSig, workFront } from './constructionArt';
+import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, frontLength } from './vehicleArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
@@ -281,7 +283,10 @@ function makeTileCanvas(opaque: boolean): TileCanvasEl {
 interface StillScene {
   game: Game;
   o: ToolOverlay;
+  /** Дороги, открытые для движения (без строящегося), — их рисует LaneRenderer. */
   roadNet: LaneNet;
+  /** Вся сеть с правкой (с проектами стройки) — чертежи стройки по ней. */
+  fullNet: LaneNet;
   preview: JunctionPreview | null;
 }
 
@@ -362,6 +367,8 @@ export class Renderer {
     rails: new SceneDiff(),
     industries: new SceneDiff(),
     aprons: new SceneDiff(),
+    projects: new SceneDiff(),
+    bases: new SceneDiff(),
     towns: new Map<number, { list: TownBuilding[] | null; n: number; diff: SceneDiff }>(),
   };
   /** С чем сверены слепки: партия, карта, вид, сеть дорог на карте и её подсветка, версия путей. */
@@ -402,7 +409,7 @@ export class Renderer {
   /** Плитки кэша и слепки нарисованного в них — заново. */
   private forgetStill(): void {
     this.tiles.clear();
-    for (const d of [this.diffs.corridors, this.diffs.nodes, this.diffs.rails, this.diffs.industries, this.diffs.aprons]) d.clear();
+    for (const d of [this.diffs.corridors, this.diffs.nodes, this.diffs.rails, this.diffs.industries, this.diffs.aprons, this.diffs.projects, this.diffs.bases]) d.clear();
     this.diffs.towns.clear();
     this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1 };
   }
@@ -470,10 +477,12 @@ export class Renderer {
       this.lanes.water = (p) => terrain.isWater(p, 7);
     }
     // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты; над рекой на земле — мостом.
-    const roadNet = o.roads?.net ?? game.roads.net;
+    // Строящееся («Со строительством») — чертежом по всей сети (fullNet), дороги — по открытой для движения.
+    const fullNet = o.roads?.net ?? game.roads.net;
+    const roadNet = openNet(fullNet);
     // Стоп-линии и стрелки у перекрёстков, что правка меняет, — по сети с правкой, прямо во время протяжки.
-    const preview = this.junctionPreview(game.roads.net, roadNet);
-    const scene: StillScene = { game, o, roadNet, preview };
+    const preview = this.junctionPreview(game.roads.open, roadNet);
+    const scene: StillScene = { game, o, roadNet, fullNet, preview };
     const cached = prefOn('mapCache');
     if (!cached && this.tiles.sets.length) this.forgetStill();
     // Сдвиг камеры — на целый пиксель холста: плитки кэша ложатся на экран без пересэмплирования, остальное — точно по ним.
@@ -560,6 +569,7 @@ export class Renderer {
     }
     // Светофор перекрёстка под мостом не пропадает под полотном — приглушённым значком поверх.
     this.drawLights(game, 'covered', o.phaseEdit);
+    this.drawConstruction(game, view);
     this.drawLabels(game, view);
     this.drawOverlay(game, o);
     this.drawStationBadges(game, view);
@@ -604,6 +614,9 @@ export class Renderer {
     this.drawRailBeds(groundRails, false);
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
     this.drawStationAprons(game, roadNet, view);
+    // Проекты стройки — чертежом с готовым до края работ (поверх земли, под подсветкой правки); базы стройки.
+    drawProjects(ctx, s.fullNet, this.camera.zoom, view);
+    drawBases(ctx, game.construction.crews.bases.values(), view);
     if (o.roads) this.drawRoadPreview(o.roads);
     this.drawStopLines(game, view, 0, preview);
     drawTurnArrows(ctx, game, view, this.camera.zoom, preview);
@@ -807,6 +820,17 @@ export class Renderer {
       );
       add(this.diffs.nodes.update((put) => this.lanes.eachItem(roadNet, (kind, id, sig, box) => kind === 'node' && put(id, sig, box))));
     }
+    // Стройка: чертежи и готовое на них — по шагам (projectSig), с подсветкой правки; рамка — полотна.
+    add(
+      this.diffs.projects.update((put) => {
+        for (const c of buildingCorridors(s.fullNet)) put(c.id, `${projectSig(c)}|${tint?.has(c.id) ? tintColor : ''}`, projectBox(c));
+      }),
+    );
+    add(
+      this.diffs.bases.update((put) => {
+        for (const b of game.construction.crews.bases.values()) put(b.id, baseSig(b), baseBox(b));
+      }),
+    );
     if (cur.rails !== game.net.version) {
       cur.rails = game.net.version;
       add(
@@ -842,6 +866,58 @@ export class Renderer {
       }),
     );
     if (boxes.length) this.tiles.invalidate(boxes);
+  }
+
+  /**
+   * Стройка поверх карты (динамически, не в плитках): у края работ — каток с мигающим маячком (пока стройка идёт),
+   * над проектом — плашка «🏗 45%» (на паузе — «⏸», без денег — «💸»).
+   */
+  private drawConstruction(game: Game, view: Box): void {
+    const crews = game.construction.crews;
+    const ctx = this.ctx;
+    // Свободные бригады — на своей базе.
+    for (const base of crews.bases.values()) {
+      if (base.fp.center.x < view.x0 - 40 || base.fp.center.x > view.x1 + 40 || base.fp.center.y < view.y0 - 40 || base.fp.center.y > view.y1 + 40) continue;
+      drawParked(ctx, base, crews.of(base.id).filter((b) => b.state === 'idle').length);
+    }
+    const list = game.construction.list();
+    if (!list.length) return;
+    const z = this.camera.zoom;
+    const going = game.speed > 0;
+    const blink = Math.floor(game.time * 3) % 2 === 0;
+    for (const info of list) {
+      const p = info.project;
+      const working = going && !p.paused && p.stalled === undefined;
+      const cs = game.construction.corridorsOf(p.id);
+      const front = cs.map(workFront).find((f) => f) ?? null;
+      // Техника — у края работ, по набору на каждую бригаду на месте (вторая — рядом, на соседней полосе).
+      const crew = crews.working(p.id).length;
+      if (front && crew && front.pos.x > view.x0 - 40 && front.pos.x < view.x1 + 40 && front.pos.y > view.y0 - 40 && front.pos.y < view.y1 + 40) {
+        for (let i = 0; i < crew; i++) drawMachines(ctx, front.pos, front.dir, front.stage, working && blink, (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 5);
+      }
+      // Плашка над проектом — при любом зуме одного размера на экране.
+      const at = front?.pos ?? info.at;
+      if (at.x < view.x0 - 200 || at.x > view.x1 + 200 || at.y < view.y0 - 200 || at.y > view.y1 + 200) continue;
+      const pct = Math.min(99, Math.floor(info.done * 100));
+      // Бригады нет на месте — проект ждёт её (едет или все заняты).
+      const text = p.paused ? `⏸ ${pct}%` : p.stalled !== undefined ? `💸 ${pct}%` : crew ? `🏗 ${pct}%` : `🚚 ${pct}%`;
+      ctx.save();
+      ctx.font = `600 ${12 / z}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const w = ctx.measureText(text).width + 12 / z;
+      const h = 18 / z;
+      const x = at.x;
+      // Над краем работ — выше техники, чтобы её не закрывать.
+      const y = at.y - 26 / z - 14;
+      ctx.fillStyle = p.stalled !== undefined && !p.paused ? 'rgba(232, 72, 63, 0.92)' : p.paused ? 'rgba(110, 118, 128, 0.92)' : 'rgba(240, 138, 60, 0.95)';
+      ctx.beginPath();
+      ctx.roundRect(x - w / 2, y - h / 2, w, h, h / 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillText(text, x, y + 0.5 / z);
+      ctx.restore();
+    }
   }
 
   /** Высота у начала дороги — позади начала (против хода к курсору), за краем полотна, чтобы не ложиться на него. */

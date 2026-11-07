@@ -19,6 +19,7 @@ import {
   rawOutput,
   receivers,
   resolve,
+  roadMonths,
   townById,
 } from './analysis';
 import type { ObjectiveParams } from './types';
@@ -82,8 +83,10 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
       if (p.towns) {
         const [a, b] = p.towns.map((id) => townById(game, id));
         if (!a || !b || a === b) return no('нет таких городов');
-        const estimate = paxPerMonth(a, b) * work;
-        if (dist(a.center, b.center) > 9000) return no('города слишком далеко', estimate);
+        // «Со строительством» автобусы пойдут, когда достроят дорогу между городами.
+        const d = dist(a.center, b.center);
+        const estimate = paxPerMonth(a, b) * (game.buildMode ? Math.max(0, work - roadMonths(game, d)) : work);
+        if (d > 9000) return no('города слишком далеко', estimate);
         return p.amount <= estimate * 0.9 ? yes(estimate) : no(`между городами поедет ≈${Math.round(estimate)} за срок`, estimate);
       }
       // По региону — осторожно: ≈16 поездок в 40 с на тысячу жителей в охвате (треть потока paxPerMonth).

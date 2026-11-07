@@ -1,4 +1,5 @@
 /** Подписи у курсора при стройке: цена и что не так. */
+import { durationText } from '../core/timeText';
 
 /** Причина отказа, когда стройка дороже денег на счету. */
 export const NO_MONEY = 'Не хватает денег';
@@ -6,6 +7,16 @@ export const NO_MONEY = 'Не хватает денег';
 /** Деньги в подсказке: «$12 345». */
 export function money(n: number): string {
   return `$${Math.round(n).toLocaleString('ru-RU')}`;
+}
+
+/**
+ * Цена стройки дороги у курсора. «Со строительством» новая дорога — проект: «🏗 $8 400 · ⏳ 25 с» — сколько
+ * стоит вся (платится по готовым метрам) и сколько строить на ×1; сразу платится только cost (снос домов и т. п.).
+ */
+export function planPrice(plan: { cost: number; project?: { cost: number; seconds: number } }): string {
+  const p = plan.project;
+  if (!p) return money(plan.cost);
+  return `🏗 ${money(p.cost + Math.max(0, plan.cost))} · ⏳ ${durationText(p.seconds)}`;
 }
 
 /** Метры со знаком, округлённые: «+14 м», «−4 м» (минус — типографский), «±0 м». */

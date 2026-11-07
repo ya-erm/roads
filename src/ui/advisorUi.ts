@@ -27,6 +27,9 @@ const KIND_GLYPH: Record<AdviceKind, string> = {
   unsold: '📤',
   missingInput: '📥',
   empty: '🪫',
+  buildMoney: '🏗',
+  buildIdle: '🚧',
+  buildFar: '🚚',
 };
 
 const LEVEL_TIP: Record<AdviceLevel, string> = {

@@ -113,7 +113,8 @@ export function recCurve(rec: TlRec): Cubic {
 /** Сеть игры сейчас — записями по слоям. */
 function snapshot(game: Game): Record<TlLayer, Map<number, TlRec>> {
   const r = new Map<number, TlRec>();
-  for (const c of game.roads.net.corridors.values()) r.set(c.id, curveRec(c.id, Math.max(0, ROAD_CLASSES.indexOf(c.cls)), c.curve));
+  // Строящееся («Со строительством») — ещё не дорога: в таймлапс попадёт, когда участок откроют.
+  for (const c of game.roads.net.corridors.values()) if (!c.build) r.set(c.id, curveRec(c.id, Math.max(0, ROAD_CLASSES.indexOf(c.cls)), c.curve));
   const t = new Map<number, TlRec>();
   for (const s of game.net.segments.values()) t.set(s.id, curveRec(s.id, s.platform !== undefined ? 1 : 0, s.curve));
   const s = new Map<number, TlRec>();
