@@ -140,6 +140,7 @@ import { phasesHtml, phaseTurns } from './phasesUi';
 import { addPhase, editedAfter, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, withLeftArrows } from '../lanes/lights';
 import { installTips } from './tipFloat';
 import { buildModeRowHtml } from './constructionUi';
+import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
 import { planPrice } from '../input/labels';
@@ -425,6 +426,8 @@ export class Hud {
   private renamingStation: number | null = null;
   /** База стройки, название которой правят в её карточке. */
   private renamingBase: number | null = null;
+  /** Проект стройки, название которого правят в его карточке. */
+  private renamingProject: number | null = null;
   /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
   private dragLine: number | null = null;
   /** Покупку из карточки маршрута тянут на остановку: какую модель и на какую линию (см. bindBuyDrag). */
@@ -684,6 +687,7 @@ export class Hud {
     this.bindFolders(root, this.q('[data-side]'));
     this.bindStationName(root);
     this.bindBaseName(root);
+    this.bindProjectName(root);
     controller.onChange = () => this.sync(true);
     // Esc, когда на карте отменять нечего, — меню; поверх другого окна (правила, брифинг) — нет.
     controller.onMenu = () => {
@@ -707,6 +711,32 @@ export class Hud {
       this.renamingBase = null;
       this.lastScenario = '';
       // Пока идёт focusout, поле ещё считается активным — перерисуем карточку и строку базы следом.
+      setTimeout(() => this.sync(true));
+    });
+  }
+
+  /**
+   * Название проекта стройки в его карточке: клик по нему или по ✎ открывает поле, Enter или уход фокуса — сохранить,
+   * Esc — отменить; пустое — снова автоматическое (Game.renameProject).
+   */
+  private bindProjectName(root: HTMLElement): void {
+    const project = (input: HTMLInputElement) => this.game().construction.projects.get(Number(input.dataset.projectName));
+    root.addEventListener('keydown', (e) => {
+      const input = e.target as HTMLInputElement;
+      if (!input.dataset?.projectName) return;
+      if (e.key === 'Escape') {
+        const p = project(input);
+        if (p) input.value = projectName(p);
+      }
+      if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+    });
+    root.addEventListener('focusout', (e) => {
+      const input = e.target as HTMLInputElement;
+      if (!input.dataset?.projectName) return;
+      this.game().renameProject(Number(input.dataset.projectName), input.value);
+      this.renamingProject = null;
+      this.lastScenario = '';
+      // Пока идёт focusout, поле ещё считается активным — перерисуем карточку и строку проекта следом.
       setTimeout(() => this.sync(true));
     });
   }
@@ -1126,6 +1156,11 @@ export class Hud {
       case 'project-priority':
         g.prioritizeProject(Number(d.id), d.on === '1');
         this.refreshLeft();
+        break;
+      case 'project-rename':
+        // Название — в карточке проекта: поле сразу (кнопку уже отпустили), иначе первые нажатия ушли бы карте.
+        this.renamingProject = Number(d.id);
+        this.pressing = false;
         break;
       case 'base-place':
         // «＋ База» — и с карточки проекта: ставим базу, а левая панель — на вкладке «Стройка» (кнопка там нажата).
@@ -2323,6 +2358,7 @@ export class Hud {
     // Карточку станции закрыли раньше, чем открылось поле, — при следующем выборе станции оно не нужно.
     if (this.renamingStation !== null && !html.includes('data-station-name')) this.renamingStation = null;
     if (this.renamingBase !== null && !html.includes('data-base-name')) this.renamingBase = null;
+    if (this.renamingProject !== null && !html.includes('data-project-name')) this.renamingProject = null;
     if (html !== this.lastPanel) {
       const side = this.q('[data-side]');
       side.innerHTML = html;
@@ -2336,7 +2372,7 @@ export class Hud {
       // Открыли кликом по значку предупреждения — блок с объяснением на виду.
       side.querySelector('.station-warnings.flash')?.scrollIntoView({ block: 'nearest' });
       // Новую или переименовываемую папку (и название станции) сразу открываем для ввода.
-      const input = side.querySelector<HTMLInputElement>('[data-folder-name], [data-station-name], [data-base-name], [data-new-folder-line]');
+      const input = side.querySelector<HTMLInputElement>('[data-folder-name], [data-station-name], [data-base-name], [data-project-name], [data-new-folder-line]');
       input?.focus();
       input?.select();
     }
@@ -2903,7 +2939,7 @@ export class Hud {
     const sel = this.controller.selection!;
     const head = (title: string, sub = '') =>
       `<header><h3>${esc(title)}</h3><button class="icon" data-action="close-sel">✕</button></header>${sub ? `<p class="muted">${sub}</p>` : ''}`;
-    if (sel.type === 'project') return projectCardHtml(g, sel.id);
+    if (sel.type === 'project') return projectCardHtml(g, sel.id, this.renamingProject === sel.id);
     if (sel.type === 'base') return baseCardHtml(g, sel.id, this.renamingBase === sel.id);
     if (sel.type === 'station') {
       const st = g.stations.get(sel.id);

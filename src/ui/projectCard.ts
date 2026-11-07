@@ -1,7 +1,7 @@
 /**
  * Карточка проекта стройки (режим «Со строительством») в правой панели — открывается кликом по плашке «🏗 45%» на
  * карте или по значку проекта на плашке слева внизу. Наглядно, значками и полосками:
- * - что строим: название, длина, мосты, тоннели, насыпи и выемки;
+ * - что строим: название (клик или ✎ — переименовать), длина, мосты, тоннели, насыпи и выемки;
  * - готовность: полоска и три этапа (🟫 отсыпка, ⬛ покрытие, ⬜ разметка);
  * - сколько ещё строить при нынешних бригадах и с ещё одной;
  * - деньги: потрачено / в резерве / осталось — полоской, хватает ли сейчас; «🔒 Зарезервировать» и «Снять резерв»;
@@ -11,7 +11,7 @@
  */
 import { CONSTRUCTION } from '../config';
 import { durationText } from '../core/timeText';
-import type { ProjectInfo } from '../game/construction';
+import { type ProjectInfo, projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
 import { buildSvg } from './constructionUi';
@@ -42,15 +42,21 @@ export function crewDoing(b: Brigade): string {
   return CREW_STATE[b.state].text;
 }
 
-/** Карточка проекта id; проекта нет (достроен, отменён) — короткая записка. */
-export function projectCardHtml(game: Game, id: number): string {
+/** Карточка проекта id; renaming — вместо названия поле ввода. Проекта нет (достроен, отменён) — короткая записка. */
+export function projectCardHtml(game: Game, id: number, renaming = false): string {
   const info = game.construction.info(id);
   const close = `<button class="icon" data-action="close-sel" data-tip="Закрыть">✕</button>`;
   if (!info) return `<section class="detail project-card"><header><h3>Стройка</h3>${close}</header><p class="muted">✅ Проекта больше нет: достроен или отменён.</p></section>`;
   const p = info.project;
   const prio = p.priority ? `<span class="pc-prio" data-tip="Приоритетный проект: бригады едут сначала сюда">⬆</span>` : '';
-  const head = `<header class="pc-head"><button class="icon pc-show" data-action="build-show" data-id="${p.id}" data-tip="Показать на карте">${buildSvg(30, 22)}</button>
-    <h3>${esc(p.label)}</h3>${prio}${close}</header>`;
+  // Название — переименовать: клик по нему или по ✎ открывает поле; пустое — снова автоматическое.
+  const name = projectName(p);
+  const title = renaming
+    ? `<input class="line-name station-name" data-project-name="${p.id}" value="${esc(name)}" maxlength="40" placeholder="${esc(p.label)}" />`
+    : `<h3 class="station-title" data-action="project-rename" data-id="${p.id}" data-tip="${esc(p.name ? `Нажмите, чтобы переименовать (без названия — «${p.label}»)` : 'Нажмите, чтобы переименовать')}">${esc(name)}</h3>
+       <button class="icon pencil" data-action="project-rename" data-id="${p.id}" data-tip="Переименовать">✎</button>`;
+  const head = `<header class="pc-head station-head"><button class="icon pc-show" data-action="build-show" data-id="${p.id}" data-tip="Показать на карте">${buildSvg(30, 22)}</button>
+    ${title}${prio}${close}</header>`;
   return `<section class="detail project-card">${head}
     ${whatHtml(game, info)}
     ${progressHtml(info)}

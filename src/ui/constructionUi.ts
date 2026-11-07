@@ -5,7 +5,7 @@
  */
 import { CONSTRUCTION } from '../config';
 import { durationText } from '../core/timeText';
-import type { ProjectInfo } from '../game/construction';
+import { type ProjectInfo, projectName } from '../game/construction';
 import type { Game } from '../game/game';
 import { BUILD_MODES, type BuildMode } from '../world/settings';
 
@@ -72,7 +72,7 @@ export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected 
   }`;
   return `<div class="build-plate ${state}${selected ? ' selected' : ''}">
     <button class="icon bp-show" data-action="build-show" data-id="${p.id}" data-tip="Показать на карте и открыть карточку проекта">${buildSvg(26, 20)}</button>
-    <span class="bp-name" data-action="build-show" data-id="${p.id}" data-tip="${esc(`${p.label} · ${Math.round(i.length)} м · ещё ${money(i.left)} — открыть карточку`)}">${marks}${esc(p.label)}</span>
+    <span class="bp-name" data-action="build-show" data-id="${p.id}" data-tip="${esc(`${projectName(p)} · ${Math.round(i.length)} м · ещё ${money(i.left)} — открыть карточку`)}">${marks}${esc(projectName(p))}</span>
     ${status}
     <span class="bp-bar" data-tip="Готово ${pct}% — участки от узла до узла открываются сразу"><i style="width:${pct}%"></i><b>${pct}%</b></span>
     ${pause}${cancel}</div>`;

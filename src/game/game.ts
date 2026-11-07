@@ -66,7 +66,7 @@ import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
 import { paxFare, ridePath } from './fare';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, type ProjectStart } from './roadbuild';
-import { Construction, type ConstructionSave, type Project } from './construction';
+import { Construction, type ConstructionSave, type Project, projectName } from './construction';
 import { carryBuild } from './constructionWork';
 import type { Brigade } from './crews';
 import { type CrewStep, CrewRoads } from './crewRoads';
@@ -1023,8 +1023,8 @@ export class Game implements BuildContext {
   /** Стройка: проект достроен или встал без денег. */
   projectEvent(kind: 'done' | 'stalled', p: Project): void {
     if (kind === 'done') {
-      this.notify(`🚧 Стройка закончена: ${p.label}`, '#3f9d5a');
-      this.journal.add('project-done', { id: p.id, what: p.label, $: p.spent, sec: Math.round(this.time - p.created) });
+      this.notify(`🚧 Стройка закончена: ${projectName(p)}`, '#3f9d5a');
+      this.journal.add('project-done', { id: p.id, what: projectName(p), $: p.spent, sec: Math.round(this.time - p.created) });
     } else {
       // Встали сразу несколько — одно уведомление (советник покажет все).
       const others = [...this.construction.projects.values()].some((x) => x !== p && x.stalled !== undefined);
@@ -1064,6 +1064,18 @@ export class Game implements BuildContext {
     return null;
   }
 
+  /** Своё название проекта: пробелы по краям обрезаются, не длиннее 40; пустое — снова автоматическое (label). */
+  renameProject(id: number, name: string): void {
+    const p = this.construction.projects.get(id);
+    if (!p) return;
+    const clean = name.trim().slice(0, 40);
+    if (clean === projectName(p)) return;
+    if (clean && clean !== p.label) p.name = clean;
+    else delete p.name;
+    this.construction.stamp++;
+    this.journal.add('project-name', { id, name: projectName(p), auto: p.name === undefined });
+  }
+
   /** Приоритет проекта (on) или снова обычный: бригады — сначала к нему (crews.ts). */
   prioritizeProject(id: number, on: boolean): void {
     if (!this.construction.projects.has(id)) return;
@@ -1090,7 +1102,7 @@ export class Game implements BuildContext {
     this.ledger.build -= Math.min(this.ledger.build, back);
     this.construction.projects.delete(id);
     this.construction.prune();
-    this.journal.add('project-cancel', { id, what: p.label, back, built: Math.round(p.builtLen) });
+    this.journal.add('project-cancel', { id, what: projectName(p), back, built: Math.round(p.builtLen) });
     if (undoable) this.commit();
     return true;
   }
@@ -1342,7 +1354,7 @@ export class Game implements BuildContext {
     const home = base?.fp.center ?? b.pos ?? { x: 0, y: 0 };
     const info = b.project !== undefined ? this.construction.info(b.project) : null;
     const site = info ? (info.front ?? info.at) : null;
-    const label = info ? `«${info.project.label}»` : '';
+    const label = info ? `«${projectName(info.project)}»` : '';
     // Колонна в пути — где головная машина: в потоке или уже доехала и ждёт остальных; ещё не выехала — откуда выезжает.
     const head = b.convoy?.cars[0];
     const lead = crews.lead(b);

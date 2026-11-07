@@ -4,6 +4,7 @@ import { Game } from '../game/game';
 import { anchorOf, road, runSeconds, STREET, withoutCitizens } from '../game/testkit';
 import type { WorldSettings } from '../world/settings';
 import { baseRemoveText, buildTabHtml } from './constructionUi';
+import { baseCardHtml } from './baseCard';
 import { projectCardHtml } from './projectCard';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
@@ -71,6 +72,26 @@ describe('Карточка проекта стройки', () => {
     expect(bar).toContain('build-plate  selected');
     expect(bar).toContain('🔒');
     expect(bar).toContain('⬆');
+  });
+
+  it('название: клик или ✎ — поле; своё название — в карточке, на вкладке «Стройка» и у базы', () => {
+    const { game, id } = setup(true);
+    const p = game.construction.projects.get(id)!;
+    const html = projectCardHtml(game, id);
+    expect(html).toContain(`data-action="project-rename" data-id="${id}"`);
+    expect(html).toContain('✎');
+    expect(html).not.toContain('data-project-name');
+    const field = projectCardHtml(game, id, true);
+    expect(field).toContain(`data-project-name="${id}"`);
+    expect(field).toContain(`placeholder="${p.label}"`);
+    game.renameProject(id, 'Объезд <рынка>');
+    expect(projectCardHtml(game, id)).toContain('Объезд &lt;рынка&gt;');
+    const tab = buildTabHtml(game, { placing: false, project: null, base: null });
+    expect(tab).toContain('Объезд &lt;рынка&gt;');
+    expect(tab).not.toContain(`>${p.label}<`);
+    const base = [...game.construction.crews.bases.keys()][0];
+    expect(baseCardHtml(game, base)).toContain('Объезд &lt;рынка&gt;');
+    expect(projectCardHtml(game, id, true)).not.toContain(' title=');
   });
 
   it('бригад нет: почему и кнопка — без базы «＋ База», все заняты — «⬆ Приоритет»', () => {

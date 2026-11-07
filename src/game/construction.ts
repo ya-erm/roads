@@ -39,6 +39,8 @@ export interface Project {
   id: number;
   /** Что строим — одной строкой для плашки: «Улица 1+1», «Магистраль 2+2 · мост». */
   label: string;
+  /** Своё название (игрок переименовал в карточке, Game.renameProject); нет — показывается label. */
+  name?: string;
   paused?: boolean;
   /** Готовые участки: метров (для процента). */
   builtLen: number;
@@ -613,6 +615,11 @@ export class Construction {
     }
     this.prune();
   }
+}
+
+/** Название проекта для показа: своё, если игрок его дал, иначе автоматическое (projectLabel). */
+export function projectName(p: Pick<Project, 'label' | 'name'>): string {
+  return p.name ?? p.label;
 }
 
 /** Подпись проекта по его полотнам: класс и полосы самого длинного, мост и тоннель — если есть. */

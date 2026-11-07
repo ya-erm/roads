@@ -4,6 +4,7 @@ import type { Vec } from '../core/vec';
 import { splitBuild } from '../lanes/edit';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
+import { projectName } from './construction';
 import { convoyGap, frontOf, stageSpans } from './constructionWork';
 import { Game } from './game';
 import { anchorOf, type End, road, runSeconds, STREET, withoutCitizens } from './testkit';
@@ -478,6 +479,49 @@ describe('Стройка дорог: базы и бригады', () => {
     expect(loaded.baseName(base.id)).toBe('Северная');
     game.renameBase(base.id, '   ');
     expect(game.baseName(base.id)).toBe(town.name);
+  });
+
+  it('название проекта: своё вместо автоматического, пустое — снова автоматическое; уходит в сохранение', async () => {
+    const { advise } = await import('./advisor');
+    const { baseCrewText } = await import('../ui/baseCard');
+    const game = buildGame();
+    const at = freeSpot(game, 900);
+    expect(project(game, { free: at }, { free: { x: at.x + 900, y: at.y } })).toBe(true);
+    const p = game.construction.list()[0].project;
+    const auto = p.label;
+    expect(projectName(p)).toBe(auto);
+    game.renameProject(p.id, '  Объездная у рынка  ');
+    expect(p.name).toBe('Объездная у рынка');
+    expect(p.label).toBe(auto);
+    expect(projectName(p)).toBe('Объездная у рынка');
+    expect(game.journal.entries.at(-1)).toMatchObject({ k: 'project-name', id: p.id, name: 'Объездная у рынка' });
+    // Не длиннее 40 знаков.
+    game.renameProject(p.id, 'Очень длинное название проекта объездной дороги у рынка');
+    expect(p.name).toBe('Очень длинное название проекта объездной дороги у рынка'.slice(0, 40));
+    game.renameProject(p.id, 'Объездная');
+    // Своё название — и в советах, и у бригады, и в уведомлении о конце стройки.
+    expect(advise(game).some((a) => a.detail.includes('«Объездная»'))).toBe(true);
+    game.projectEvent('done', p);
+    expect(game.notices.at(-1)?.text).toBe('🚧 Стройка закончена: Объездная');
+    const brigade = [...game.construction.crews.brigades.values()][0];
+    expect(baseCrewText(game, { ...brigade, state: 'working', project: p.id })).toBe('строит «Объездная»');
+    // Название уходит в сохранение и возвращается.
+    const save = JSON.parse(JSON.stringify(game.toSave()));
+    const loaded = withoutCitizens(new Game(save.settings, save));
+    expect(projectName(loaded.construction.projects.get(p.id)!)).toBe('Объездная');
+    // Старое сохранение (без name) открывается с автоматическим названием.
+    delete save.construction.projects[0].name;
+    const old = withoutCitizens(new Game(save.settings, save));
+    expect(projectName(old.construction.projects.get(p.id)!)).toBe(auto);
+    // Пустое — снова автоматическое; Esc-значение (то же название) ничего не пишет.
+    game.renameProject(p.id, '   ');
+    expect(p.name).toBeUndefined();
+    expect(projectName(p)).toBe(auto);
+    const n = game.journal.entries.length;
+    game.renameProject(p.id, auto);
+    expect(p.name).toBeUndefined();
+    expect(game.journal.entries.length).toBe(n);
+    expect(() => game.renameProject(999_999, 'Пусто')).not.toThrow();
   });
 
   it('где бригада: свободная — на базе, на стройке — у края работ', () => {

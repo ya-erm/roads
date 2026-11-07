@@ -11,6 +11,7 @@
  * Подсказки — data-tip (не системные).
  */
 import { CONSTRUCTION } from '../config';
+import { projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
 import { baseSvg, buildSvg } from './constructionUi';
@@ -32,7 +33,7 @@ const MARK: Record<Brigade['state'], string> = { working: '🏗', going: '➜', 
  */
 export function baseCrewText(game: Game, b: Brigade): string {
   const info = b.project !== undefined ? game.construction.info(b.project) : null;
-  const label = info ? ` «${info.project.label}»` : '';
+  const label = info ? ` «${projectName(info.project)}»` : '';
   if (b.state === 'working') return `строит${label}`;
   if (b.state === 'going') return `${crewDoing(b)} →${label}`;
   if (b.state === 'back') return 'едет на базу';
@@ -132,10 +133,10 @@ function nearHtml(game: Game, id: number): string {
             ? `<span class="muted" data-tip="Проект на паузе">⏸</span>`
             : '';
       return `<button class="pc-crew bc-near" data-action="build-show" data-id="${p.id}" data-tip="${esc(
-        `«${p.label}»: ${km(d)} от базы — бригада отсюда строит в силу ${power}% (дальше — медленнее: вклад 1 / (1 + d / ${km(CONSTRUCTION.reach)})). Нажмите — к проекту`,
+        `«${projectName(p)}»: ${km(d)} от базы — бригада отсюда строит в силу ${power}% (дальше — медленнее: вклад 1 / (1 + d / ${km(CONSTRUCTION.reach)})). Нажмите — к проекту`,
       )}">
         <span class="bc-near-ic">${buildSvg(22, 16)}</span>
-        <span class="pc-crew-name">${esc(p.label)} <span class="muted">· ${Math.min(99, Math.floor(info.done * 100))}%</span></span>
+        <span class="pc-crew-name">${esc(projectName(p))} <span class="muted">· ${Math.min(99, Math.floor(info.done * 100))}%</span></span>
         <span class="pc-crew-state">${state || `📏 ${km(d)}`}</span>
         <span class="pc-mini" data-tip="${esc(`Сила бригады отсюда ${power}%`)}"><i style="width:${power}%"></i></span></button>`;
     })

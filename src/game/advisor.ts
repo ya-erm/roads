@@ -10,6 +10,7 @@ import type { Vec } from '../core/vec';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
 import type { AutoFunds } from './autoFunds';
+import { projectName } from './construction';
 import type { Game } from './game';
 import { type Line, MODELS, vehicleCapacity } from './transport';
 import { storageSlots } from './warehouses';
@@ -162,7 +163,7 @@ function building(game: Game, out: Advice[]): void {
   const first = stalled[0];
   const need = stalled.reduce((s, i) => s + i.left, 0);
   const canLoan = game.loan < game.loanMax;
-  const what = stalled.length === 1 ? `«${first.project.label}»` : `${stalled.length} ${plural(stalled.length, 'проект', 'проекта', 'проектов')}`;
+  const what = stalled.length === 1 ? `«${projectName(first.project)}»` : `${stalled.length} ${plural(stalled.length, 'проект', 'проекта', 'проектов')}`;
   out.push({
     key: 'buildMoney',
     kind: 'buildMoney',
@@ -200,7 +201,7 @@ function crews(game: Game, out: Advice[]): void {
   const blocked = crews.bases.size ? c.list().filter((i) => !i.project.paused && !i.access && !i.waits) : [];
   if (blocked.length) {
     const first = blocked[0];
-    const what = blocked.length === 1 ? `«${first.project.label}»` : `${blocked.length} ${plural(blocked.length, 'проект', 'проекта', 'проектов')}`;
+    const what = blocked.length === 1 ? `«${projectName(first.project)}»` : `${blocked.length} ${plural(blocked.length, 'проект', 'проекта', 'проектов')}`;
     out.push({
       key: 'buildNoAccess',
       kind: 'buildNoAccess',
@@ -229,7 +230,7 @@ function crews(game: Game, out: Advice[]): void {
       kind: 'buildIdle',
       level: 'warn',
       title: 'Проект давно не запущен',
-      detail: `«${p.label}» заложен ${seconds(game.time - p.created)} назад, а стройка не началась: ${why}.`,
+      detail: `«${projectName(p)}» заложен ${seconds(game.time - p.created)} назад, а стройка не началась: ${why}.`,
       at: i.at,
     });
   }
