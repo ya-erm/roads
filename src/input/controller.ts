@@ -956,7 +956,28 @@ export class Controller {
     this.onChange();
   }
 
+  /**
+   * Открыть карточку sel «из» текущей (стройка из карточки базы): закрытие sel (✕ или Esc) вернёт к текущей.
+   * Выбрали что-то другое — возврат забывается.
+   */
+  selectFrom(sel: Selection): void {
+    const back = this.selection;
+    this.select(sel);
+    this.returnTo = back ? { from: sel, to: back } : null;
+  }
+
+  /** Закрыть карточку: открыта «из» другой — вернуться к той, иначе снять выбор. */
+  closeSelection(): void {
+    const r = this.returnTo;
+    const same = (a: Selection | null, b: Selection) => !!a && JSON.stringify(a) === JSON.stringify(b);
+    this.select(r && same(this.selection, r.from) ? r.to : null);
+  }
+
+  /** Куда вернуться при закрытии карточки, открытой из другой (selectFrom). */
+  private returnTo: { from: Selection; to: Selection } | null = null;
+
   select(sel: Selection | null): void {
+    this.returnTo = null;
     this.selection = sel;
     // Выбрали станцию, предприятие, машину — панель переключается на них, открытый маршрут закрывается.
     if (sel) this.selectedLine = null;
@@ -1029,7 +1050,7 @@ export class Controller {
     } else if (this.laneFrom) this.clearLane();
     else if (this.tool !== 'select') this.setTool('select');
     else if (this.selection || this.selectedLine !== null || this.following) {
-      this.select(null);
+      this.closeSelection();
       this.selectLine(null);
     } else return false;
     this.onChange();

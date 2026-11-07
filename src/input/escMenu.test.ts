@@ -74,6 +74,26 @@ describe('Esc и меню', () => {
     expect(menus()).toBe(1);
   });
 
+  it('карточка, открытая из другой (стройка из базы), закрывается назад к той; потом — как обычно', () => {
+    const { c, esc, menus } = setup();
+    c.select({ type: 'base', id: 7 });
+    c.selectFrom({ type: 'project', id: 3 });
+    esc();
+    expect(c.selection).toEqual({ type: 'base', id: 7 });
+    esc();
+    expect(c.selection).toBeNull();
+    expect(menus()).toBe(0);
+    // ✕ — так же; выбрали что-то третье — возврат забыт.
+    c.select({ type: 'base', id: 7 });
+    c.selectFrom({ type: 'project', id: 3 });
+    c.closeSelection();
+    expect(c.selection).toEqual({ type: 'base', id: 7 });
+    c.selectFrom({ type: 'project', id: 3 });
+    c.select({ type: 'town', id: game.towns[0].id });
+    c.closeSelection();
+    expect(c.selection).toBeNull();
+  });
+
   it('открытый маршрут сначала закрывается', () => {
     const { c, esc, menus } = setup();
     c.selectLine(1);
