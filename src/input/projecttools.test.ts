@@ -103,6 +103,29 @@ describe('Инструмент «Проект»: стыки участков', (
   });
 });
 
+describe('Инструмент «Проект»: правая кнопка по узлу', () => {
+  it('пока ведём ветку — не убирает узел (ПКМ — шаг назад); когда ничего не начато — убирает, как Delete', () => {
+    const { tools: t, at, draw } = setup();
+    click(t, draw, at(0, 0));
+    click(t, draw, at(200, 0));
+    click(t, draw, at(400, 0));
+    // Ведём ветку: ПКМ даже по узлу — не удаление, а шаг назад (у контроллера — cancel).
+    expect(t.busy).toBe(true);
+    expect(t.removeIdle('road', at(200, 0), R)).toBe(false);
+    expect(t.project('road').nodes.length).toBe(3);
+    expect(t.cancel('road')).toBe(true);
+    expect(t.busy).toBe(false);
+    // Ничего не начато: мимо узла — нечего убирать, по узлу — прочь вместе с участками (и концами, что повисли).
+    expect(t.removeIdle('road', at(300, 150), R)).toBe(false);
+    expect(t.removeIdle('road', at(203, 2), R)).toBe(true);
+    expect(t.project('road').segs.length).toBe(0);
+    expect(nodeAt(t.project('road'), at(200, 0), 1)).toBeNull();
+    // Ctrl+Z возвращает узел.
+    expect(t.undo('road')).toBe(true);
+    expect(t.project('road').segs.length).toBe(2);
+  });
+});
+
 describe('Инструмент «Проект»: прилипание к «прямо» и 90°', () => {
   /** Узел проекта у точки (null — нет). */
   const near = (t: ProjectTools, p: Vec) => nodeAt(t.project('road'), p, 0.5);

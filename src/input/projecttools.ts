@@ -512,6 +512,19 @@ export class ProjectTools {
     return true;
   }
 
+  /** Начато то, что отменит Esc или правая кнопка: протяжка, точка изгиба, ведём ветку. */
+  get busy(): boolean {
+    return this.drag !== null || this.control !== null || this.tip !== null;
+  }
+
+  /**
+   * Правая кнопка: пока ничего не начато — узел под курсором прочь, как Delete. true — убрали; false — начатое
+   * (черновик ветки) или узла нет: тогда правая кнопка — шаг назад, как раньше.
+   */
+  removeIdle(kind: NetKind, p: Vec, r: number): boolean {
+    return !this.busy && this.removeAt(kind, p, r);
+  }
+
   /** Delete у узла: убрать его с участками. true — убрали. */
   removeAt(kind: NetKind, p: Vec, r: number): boolean {
     const pr = this.projects[kind];

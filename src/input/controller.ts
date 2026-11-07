@@ -1857,8 +1857,8 @@ export class Controller {
 
   private onUp(e: MouseEvent): void {
     if ((e.button === 1 || e.button === 2) && this.pan) {
-      // Правая кнопка без протяжки — как Esc: не надо тянуться к клавиатуре.
-      if (!this.pan.moved && e.button === 2) this.back(true);
+      // Правая кнопка без протяжки — как Esc: не надо тянуться к клавиатуре (а по узлу — как Delete).
+      if (!this.pan.moved && e.button === 2) this.rightClick(this.worldAt(e));
       this.pan = null;
       return;
     }
@@ -2332,7 +2332,7 @@ export class Controller {
           : at === 'tip'
             ? 'Клик — закончить ветку · тяните — двигать узел'
             : at === 'node'
-              ? 'Тяните узел · клик — вести отсюда · Delete — убрать'
+              ? `Тяните узел · клик — вести отсюда · Delete${pt.busy ? '' : ' или ПКМ'} — убрать`
               : at === 'seg'
                 ? 'Тяните — изогнуть · клик — узел на участке'
                 : segs
@@ -2482,6 +2482,20 @@ export class Controller {
     g.checkpoint('узел на дороге');
     g.roadBuilder.apply(plan);
     g.commit();
+  }
+
+  /**
+   * Правая кнопка без протяжки. В «Проекте» и «Двигать», пока ничего не начато, по узлу — убрать его, как Delete;
+   * мимо узла или посреди начатого (черновик ветки, протяжка) — шаг назад, как Esc.
+   */
+  private rightClick(p: Vec): void {
+    let removed = false;
+    if (!this.left) {
+      if (this.projectMode) removed = this.projectTools.removeIdle(this.netKind, p, this.snapRadius);
+      else if (this.action === 'move' && !this.roadTools.busy) removed = this.removeRoadNode(p);
+    }
+    if (removed) this.onChange();
+    else this.back(true);
   }
 
   /**
@@ -3036,7 +3050,7 @@ export class Controller {
           // Тупик примыкает к дороге, изгиб встаёт на прямую — с Cmd / Ctrl (или Alt) узел идёт ровно за курсором.
           const free = dead || node.corridors.length === 2 ? ' · Cmd/Ctrl — без прилипания' : '';
           // Стык двух дорог можно убрать — они сольются в одну.
-          const merge = node.kind === 'seam' && !dead && mergeProblem(net, node.id) === null ? ' · Delete — убрать узел' : '';
+          const merge = node.kind === 'seam' && !dead && mergeProblem(net, node.id) === null ? ' · Delete или ПКМ — убрать узел' : '';
           o.label = { text: `${dead ? 'Тяните тупик — продлить, примкнуть' : 'Тяните узел — дороги следом'}${merge}${free}${corners.length ? ' · за угол — скруглить' : ''}`, ok: true };
           o.handles = [...rt.handleMarks(null), ...corners];
           break;
