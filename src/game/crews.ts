@@ -1,13 +1,14 @@
 /**
  * Строительные базы и бригады (режим «Со строительством», шаг 2 — docs/CONSTRUCTION.md): проект строится, только
  * пока на нём работает бригада (самосвал, грейдер, каток). Бригада приписана к базе; свободная едет с базы к стройке
- * только по готовым дорогам — машиной в общем потоке (стоит в пробках) — до узла проекта, куда есть подъезд (Site.node),
- * а от него до края работ — вдоль самой стройки, по отсыпке и полотну проекта (Host.path; самосвал видно на оси
- * проекта, walkAt). По полю бригады не ездят: к проекту, до которого не доехать по дорогам ни от одной базы, бригада
+ * только по готовым дорогам — колонной из трёх машин (самосвал, грейдер, каток; Convoy) в общем потоке (стоят в
+ * пробках, выезжают по одной, доехавшие ждут остальных) — до узла проекта, куда есть подъезд (Site.node), а от него до
+ * края работ — вдоль самой стройки, по отсыпке и полотну проекта, той же колонной (Host.path; машины видно на оси
+ * проекта, carsAt). По полю бригады не ездят: к проекту, до которого не доехать по дорогам ни от одной базы, бригада
  * не едет — проект ждёт подъезда (Construction.site — null). Проект закончили, отменили или поставили на паузу —
  * бригада едет вдоль стройки назад к дороге и дальше к другому проекту, которому не хватает рук, или домой на базу.
  *
- * Где без перескока не обойтись: машину бригады потеряли (дорогу под ней снесли), до дома нет пути, старое
+ * Где без перескока не обойтись: машину колонны потеряли (дорогу под ней снесли), до дома нет пути, старое
  * сохранение с поездкой по полю — бригада сразу оказывается на базе и выезжает оттуда заново.
  *
  * Приоритетный проект (Project.priority): свободная бригада едет сначала к нему; не хватает рук, а свободных нет —
@@ -39,8 +40,30 @@ export interface Brigade {
   eta?: number;
   /** Едет вдоль стройки: по каким точкам и когда выехала — где она сейчас, считается по времени (walkAt). */
   trip?: SiteTrip;
-  /** Машина в потоке (id в симуляции) — не сохраняется: после загрузки бригада выезжает заново. */
-  sim?: number;
+  /** Колонна в потоке (машины в симуляции) — не сохраняется: после загрузки бригада выезжает заново. */
+  convoy?: Convoy;
+}
+
+/**
+ * Машины бригады — колонной, по порядку: самосвал (головная), грейдер, каток (та же техника, что работает на стройке,
+ * constructionArt.drawMachines; вид и скорость каждой — у игры, Game.drive). Вдоль стройки машины едут друг за другом
+ * с интервалом CONVOY_GAP.
+ */
+export const CONVOY_CARS = 3;
+/** Интервал машин колонны вдоль стройки, м (от носа до носа). */
+export const CONVOY_GAP = 14;
+
+/** Машина колонны: ещё не выехала (ждёт места на выезде), в потоке (id в симуляции) или доехала (стоит, где встала). */
+export type ConvoyCar = { wait: true } | { sim: number } | { at: Vec; dir: Vec };
+
+/**
+ * Колонна бригады в пути по дорогам: от узла from к узлу to. Машины выезжают по одной (следующая — когда на выезде
+ * освободилось место), доехавшие ждут остальных там, где встали; бригада доехала, когда доехала последняя.
+ */
+export interface Convoy {
+  from: number;
+  to: number;
+  cars: ConvoyCar[];
 }
 
 /** Поездка бригады вдоль стройки: по точкам path (ось проекта), выехала в t0, доедет в Brigade.eta. */
@@ -53,7 +76,7 @@ export interface SiteTrip {
 
 export interface CrewSave {
   bases: BuildBase[];
-  brigades: Omit<Brigade, 'sim'>[];
+  brigades: Omit<Brigade, 'convoy'>[];
   nextBrigade: number;
   /** Первая (бесплатная) база уже была: снесли все — следующая снова платная. Нет в старых сохранениях. */
   firstUsed?: true;
@@ -79,10 +102,10 @@ export interface CrewHost {
   /** От узла from до узла to можно доехать по готовым дорогам. */
   reach(from: number, to: number): boolean;
   /**
-   * Выпустить машину бригады от узла from к узлу to: id машины; 'busy' — путь есть, но на выезде нет места (попробовать
-   * в следующий такт); null — пути по дорогам нет.
+   * Выпустить машину колонны бригады (car — её номер в колонне, 0 — головная) от узла from к узлу to: id машины;
+   * 'busy' — путь есть, но на выезде нет места (попробовать в следующий такт); null — пути по дорогам нет.
    */
-  drive(brigade: Brigade, from: number, to: number): number | 'busy' | null;
+  drive(brigade: Brigade, from: number, to: number, car: number): number | 'busy' | null;
   /** Машина бригады больше не нужна (бригаду продали, база снесена). */
   park(sim: number): void;
   /** Узел есть в графе движения (туда можно доехать по дороге). */
@@ -155,14 +178,71 @@ export class Crews {
     return crew;
   }
 
-  /** Убрать бригаду (свободную — первой): машина в пути исчезает. */
+  /** Убрать бригаду (свободную — первой): машины в пути исчезают. */
   dismiss(base: number): Brigade | null {
     const list = this.of(base);
     const crew = list.find((b) => b.state === 'idle') ?? list[list.length - 1];
     if (!crew) return null;
-    if (crew.sim !== undefined) this.host.park(crew.sim);
+    this.parkAll(crew);
     this.brigades.delete(crew.id);
     return crew;
+  }
+
+  /** Колонна больше не нужна: машины в потоке — с дороги долой. */
+  private parkAll(b: Brigade): void {
+    for (const car of b.convoy?.cars ?? []) if ('sim' in car) this.host.park(car.sim);
+    delete b.convoy;
+  }
+
+  /** В путь колонной по дорогам от узла from к узлу to: машины выезжают по одной (rollOut в такте). */
+  private setOff(b: Brigade, from: number, to: number): true {
+    b.convoy = { from, to, cars: Array.from({ length: CONVOY_CARS }, () => ({ wait: true as const })) };
+    return true;
+  }
+
+  /**
+   * Следующая машина колонны — на дорогу, если на выезде есть место (иначе — в следующий такт): по одной за такт, по
+   * порядку. false — пути по дорогам больше нет (колонна убрана).
+   */
+  private rollOut(b: Brigade): boolean {
+    const cv = b.convoy;
+    if (!cv) return true;
+    const k = cv.cars.findIndex((c) => 'wait' in c);
+    if (k < 0) return true;
+    const sim = this.host.drive(b, cv.from, cv.to, k);
+    if (sim === 'busy') return true;
+    if (sim === null) {
+      this.parkAll(b);
+      return false;
+    }
+    cv.cars[k] = { sim };
+    return true;
+  }
+
+  /** Головная машина колонны в потоке (id в симуляции) — её показывает «где бригада»; колонны нет — undefined. */
+  lead(b: Brigade): number | undefined {
+    for (const car of b.convoy?.cars ?? []) if ('sim' in car) return car.sim;
+    return undefined;
+  }
+
+  /**
+   * Машины бригады, которых нет в потоке, — где их рисовать: вдоль стройки — колонной по оси проекта (головная —
+   * walkAt, следующие — на CONVOY_GAP позади, не дальше начала пути); доехавшие по дороге — где встали, пока ждут
+   * остальных. car — номер машины в колонне.
+   */
+  carsAt(b: Brigade): { car: number; pos: Vec; dir: Vec }[] {
+    const out: { car: number; pos: Vec; dir: Vec }[] = [];
+    if (b.eta !== undefined && b.trip) {
+      const { path, t0 } = b.trip;
+      const len = pathLength(path);
+      const k = b.eta > t0 ? Math.max(0, Math.min(1, (this.host.time - t0) / (b.eta - t0))) : 1;
+      for (let i = 0; i < CONVOY_CARS; i++) out.push({ car: i, ...pointOnPath(path, Math.max(0, len * k - i * CONVOY_GAP)) });
+      return out;
+    }
+    b.convoy?.cars.forEach((c, i) => {
+      if ('at' in c) out.push({ car: i, pos: c.at, dir: c.dir });
+    });
+    return out;
   }
 
   /** Сколько бригад едут к проекту или работают на нём. */
@@ -265,9 +345,14 @@ export class Crews {
       // Проект кончился, отменён, на паузе или к нему больше нет подъезда — бригада свободна.
       if ((b.state === 'going' || b.state === 'working') && (b.project === undefined || !live.has(b.project) || !this.host.site(b.project))) this.release(b);
       // Свободна или едет домой не машиной — может сразу взяться за другой проект.
-      if (b.state === 'idle' || (b.state === 'back' && b.sim === undefined)) this.assign(b, projects);
-      if (b.state === 'going' && b.sim === undefined && b.eta === undefined) this.launch(b);
-      if (b.state === 'back' && b.sim === undefined && b.eta === undefined) this.launchHome(b);
+      if (b.state === 'idle' || (b.state === 'back' && !b.convoy)) this.assign(b, projects);
+      if (b.state === 'going' && !b.convoy && b.eta === undefined) this.launch(b);
+      if (b.state === 'back' && !b.convoy && b.eta === undefined) this.launchHome(b);
+      // Колонна выезжает по одной машине; пути больше нет — к стройке бригада свободна, домой — сразу на базе.
+      if (b.convoy && !this.rollOut(b)) {
+        if (b.state === 'going') this.release(b);
+        else this.home(b);
+      }
       // Вдоль стройки доехали.
       if (b.eta !== undefined && this.host.time >= b.eta) this.walked(b);
     }
@@ -322,10 +407,7 @@ export class Crews {
    * подъезд пропал) — сперва вдоль стройки назад к дороге; ехала вдоль стройки — назад по пройденному.
    */
   private release(b: Brigade): void {
-    if (b.sim !== undefined) {
-      this.host.park(b.sim);
-      delete b.sim;
-    }
+    this.parkAll(b);
     const back = this.walkBack(b) ?? this.pathBack(b)?.path ?? null;
     delete b.project;
     if (!b.pos && b.at === undefined) {
@@ -366,10 +448,7 @@ export class Crews {
       if (!best || (top && !best.top) || (top === best.top && (n < best.n || (n === best.n && d < best.d - 1e-6)))) best = { id, top, n, d };
     }
     if (!best) return;
-    if (b.sim !== undefined) {
-      this.host.park(b.sim);
-      delete b.sim;
-    }
+    this.parkAll(b);
     // Ехала вдоль стройки назад к дороге — доедет до неё, оттуда и выедет (launch после поездки).
     const back = this.walkBack(b);
     b.project = best.id;
@@ -379,10 +458,7 @@ export class Crews {
 
   /** Бригада на базе (перенос: без дороги ей оттуда не выехать). */
   private home(b: Brigade): void {
-    if (b.sim !== undefined) {
-      this.host.park(b.sim);
-      delete b.sim;
-    }
+    this.parkAll(b);
     delete b.pos;
     delete b.at;
     delete b.eta;
@@ -405,11 +481,7 @@ export class Crews {
     }
     if (from === null) return;
     if (from === s.node) return this.onSite(b, s);
-    if (!this.host.reach(from, s.node)) return this.release(b);
-    const sim = this.host.drive(b, from, s.node);
-    if (sim === 'busy') return;
-    if (sim === null) return this.release(b);
-    b.sim = sim;
+    if (!this.host.reach(from, s.node) || !this.setOff(b, from, s.node)) return this.release(b);
   }
 
   /** Бригада у узла подъезда: вдоль стройки к краю работ, а край рядом — сразу за работу. */
@@ -444,11 +516,7 @@ export class Crews {
     const base = this.bases.get(b.base);
     if (!base) return;
     const from = this.from(b);
-    if (from === null || from === base.nodeId || !this.host.reach(from, base.nodeId)) return this.home(b);
-    const sim = this.host.drive(b, from, base.nodeId);
-    if (sim === 'busy') return;
-    if (sim === null) return this.home(b);
-    b.sim = sim;
+    if (from === null || from === base.nodeId || !this.host.reach(from, base.nodeId) || !this.setOff(b, from, base.nodeId)) this.home(b);
   }
 
   /**
@@ -465,7 +533,7 @@ export class Crews {
     const to = this.nearestBase(old.fp.center)?.base;
     if (!to) {
       for (const b of list) {
-        if (b.sim !== undefined) this.host.park(b.sim);
+        this.parkAll(b);
         this.brigades.delete(b.id);
       }
       return list;
@@ -481,13 +549,25 @@ export class Crews {
     return [];
   }
 
+  /** Машина sim — из колонны бригады b (в потоке). */
+  owns(b: Brigade, sim: number): boolean {
+    return !!b.convoy?.cars.some((c) => 'sim' in c && c.sim === sim);
+  }
+
   /**
-   * Машина бригады доехала (Game.onArrive): at — узел и точка, куда. К стройке — дальше вдоль неё к краю работ (узел
-   * подъезда за время пути сменился — по дорогам дальше, launch); домой — на базе (ехала к воротам снесённой базы —
-   * дальше к новой, launchHome в такте).
+   * Машина колонны доехала (Game.onArrive): at — узел и точка, куда (dir — куда смотрит), sim — какая машина. Пока
+   * доехали не все, она ждёт остальных там, где встала (carsAt); доехала последняя — бригада на месте (sim не задан —
+   * сразу вся колонна). К стройке — дальше вдоль неё к краю работ (узел подъезда за время пути сменился — по дорогам
+   * дальше, launch); домой — на базе (ехала к воротам снесённой базы — дальше к новой, launchHome в такте).
    */
-  arrive(b: Brigade, at?: { node: number; pos: Vec }): void {
-    delete b.sim;
+  arrive(b: Brigade, at?: { node: number; pos: Vec; dir?: Vec }, sim?: number): void {
+    const cv = b.convoy;
+    if (cv && sim !== undefined && at) {
+      const i = cv.cars.findIndex((c) => 'sim' in c && c.sim === sim);
+      if (i >= 0) cv.cars[i] = { at: { ...at.pos }, dir: { ...(at.dir ?? { x: 1, y: 0 }) } };
+      if (cv.cars.some((c) => !('at' in c))) return;
+    }
+    this.parkAll(b);
     if (at) {
       b.at = at.node;
       b.pos = { ...at.pos };
@@ -506,11 +586,10 @@ export class Crews {
   }
 
   /**
-   * Машину бригады потеряли (дорогу под ней снесли): без дороги ей не проехать — бригада сразу на базе; ехала к
-   * стройке — выедет оттуда заново.
+   * Машину колонны потеряли (дорогу под ней снесли): без дороги ей не проехать — бригада (вся колонна) сразу на базе;
+   * ехала к стройке — выедет оттуда заново.
    */
   lost(b: Brigade): void {
-    delete b.sim;
     this.home(b);
   }
 
@@ -531,11 +610,11 @@ export class Crews {
     if (!this.bases.size && !this.brigades.size && !this.firstUsed) return undefined;
     return {
       bases: [...this.bases.values()].map((b) => ({ ...b, fp: { ...b.fp, center: { ...b.fp.center } } })),
-      // Машина в пути не сохраняется: после загрузки бригада выезжает заново оттуда, где была.
-      brigades: [...this.brigades.values()].map(({ sim: _s, ...b }) => ({
+      // Колонна в пути не сохраняется: после загрузки бригада выезжает заново оттуда, где была.
+      brigades: [...this.brigades.values()].map(({ convoy: _c, ...b }) => ({
         ...b,
         ...(b.pos ? { pos: { ...b.pos } } : {}),
-        ...(b.trip ? { trip: { path: b.trip.path.map((p) => ({ ...p })), t0: b.trip.t0 } } : {}),
+        ...(b.trip ? { trip: { path: b.trip.path.map((p) => ({ ...p })), t0: b.trip.t0, ...(b.trip.back ? { back: true as const } : {}) } } : {}),
       })),
       nextBrigade: this.nextBrigade,
       ...(this.firstUsed ? { firstUsed: true as const } : {}),

@@ -290,8 +290,15 @@ interface RailStationGeom {
 /** Машина бригады стройки (crews.ts): самосвал в потоке. */
 type SimOwner = { type: 'fleet'; id: number } | { type: 'citizen' } | { type: 'crew'; id: number };
 
-/** Машина бригады в потоке: жёлтый самосвал с грунтом в кузове. */
-const CREW_SPEC = { kind: 'truck' as const, body: 'van' as const, length: 10, width: 4.4, maxSpeed: 32, accel: 5, color: '#f2b81d', load: '#9a7b55' };
+/**
+ * Машины колонны бригады (crews.ts, по порядку): головной — жёлтый самосвал с грунтом, за ним грейдер с ножом и каток
+ * с вальцом — та же техника, что работает на стройке (constructionArt.drawMachines). Грейдер и каток тихоходнее.
+ */
+const CREW_CARS = [
+  { kind: 'truck' as const, body: 'van' as const, length: 10, width: 4.4, maxSpeed: 32, accel: 5, color: '#f2b81d', load: '#9a7b55' },
+  { kind: 'truck' as const, body: 'grader' as const, length: 11, width: 3.6, maxSpeed: 24, accel: 3.5, color: '#f2b81d' },
+  { kind: 'truck' as const, body: 'roller' as const, length: 7, width: 3.6, maxSpeed: 20, accel: 3, color: '#f2b81d' },
+];
 
 export interface Notice {
   text: string;
@@ -1099,13 +1106,14 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Стройка (crews.ts): машина бригады — в поток от узла from к узлу to; 'busy' — путь есть, но на выезде нет места;
-   * null — пути по дорогам нет (по полю бригады не ездят — к такому проекту они не едут).
+   * Стройка (crews.ts): машина колонны бригады (car — её номер, CREW_CARS) — в поток от узла from к узлу to; 'busy' —
+   * путь есть, но на выезде нет места; null — пути по дорогам нет (по полю бригады не ездят — к такому проекту они не
+   * едут). Все машины колонны принадлежат бригаде: клик по любой — её карточка (crewOfSim).
    */
-  drive(b: Brigade, from: number, to: number): number | 'busy' | null {
+  drive(b: Brigade, from: number, to: number, car = 0): number | 'busy' | null {
     const route = this.roads.route(from, to);
     if (!route) return null;
-    const sim = this.traffic.spawn({ ...CREW_SPEC, targetNode: to, route });
+    const sim = this.traffic.spawn({ ...CREW_CARS[Math.min(car, CREW_CARS.length - 1)], targetNode: to, route });
     if (!sim) return 'busy';
     this.owners.set(sim.id, { type: 'crew', id: b.id });
     return sim.id;
@@ -1286,7 +1294,10 @@ export class Game implements BuildContext {
     const info = b.project !== undefined ? this.construction.info(b.project) : null;
     const site = info ? (info.front ?? info.at) : null;
     const label = info ? `«${info.project.label}»` : '';
-    const car = b.sim !== undefined ? this.traffic.vehicles.get(b.sim)?.pos : undefined;
+    // Колонна в пути — где головная машина: в потоке или уже доехала и ждёт остальных; ещё не выехала — откуда выезжает.
+    const head = b.convoy?.cars[0];
+    const lead = crews.lead(b);
+    const car = head && 'at' in head ? head.at : head && 'sim' in head ? this.traffic.vehicles.get(head.sim)?.pos : lead !== undefined ? this.traffic.vehicles.get(lead)?.pos : undefined;
     const walk = crews.walkAt(b);
     const toRoad = !!b.trip?.back;
     switch (b.state) {
@@ -4261,7 +4272,7 @@ export class Game implements BuildContext {
     }
     if (owner?.type === 'crew') {
       const crew = this.construction.crews.brigades.get(owner.id);
-      if (crew?.sim === sim.id) this.construction.crews.arrive(crew, { node: sim.targetNode, pos: sim.pos });
+      if (crew && this.construction.crews.owns(crew, sim.id)) this.construction.crews.arrive(crew, { node: sim.targetNode, pos: sim.pos, dir: sim.dir }, sim.id);
       return;
     }
     const v = owner && this.fleet.get(owner.id);
@@ -4319,7 +4330,7 @@ export class Game implements BuildContext {
     }
     if (owner?.type === 'crew') {
       const crew = this.construction.crews.brigades.get(owner.id);
-      if (crew?.sim === sim.id) this.construction.crews.lost(crew);
+      if (crew && this.construction.crews.owns(crew, sim.id)) this.construction.crews.lost(crew);
       return;
     }
     const v = owner && this.fleet.get(owner.id);
@@ -6631,15 +6642,36 @@ export class Game implements BuildContext {
     return st && v.state !== 'driving' ? { pos: st.fp.center, r: footprintRadius(st.fp), station: true } : null;
   }
 
-  /** Самосвалы бригад, что едут вдоль стройки по оси проекта (по дороге их везёт поток — те рисуются как машины). */
+  /**
+   * Машины бригад не в потоке (в потоке их рисует сама симуляция): колонна, что едет вдоль стройки по оси проекта, и
+   * доехавшие по дороге машины, что ждут на месте остальных (Crews.carsAt).
+   */
+  /**
+   * База бригады, чья машина не в потоке (вдоль стройки, ждёт колонну) под точкой p: клик по ней открывает карточку
+   * базы со всеми её бригадами и что они делают (машины в потоке узнаются по симуляции — crewOfSim). Нет — undefined.
+   */
+  crewBaseAt(p: Vec, r = 6): number | undefined {
+    const crews = this.construction.crews;
+    for (const b of crews.brigades.values()) {
+      for (const m of crews.carsAt(b)) {
+        const s = CREW_CARS[Math.min(m.car, CREW_CARS.length - 1)];
+        // Точка машины — нос: середина кузова — на полдлины позади.
+        const mid = sub(m.pos, scale(m.dir, s.length / 2));
+        if (dist(mid, p) <= s.length / 2 + r) return b.base;
+      }
+    }
+    return undefined;
+  }
+
   siteCrewLooks(): VehicleLook[] {
     const out: VehicleLook[] = [];
     const crews = this.construction.crews;
     for (const b of crews.brigades.values()) {
-      const at = b.sim === undefined ? crews.walkAt(b) : null;
-      if (!at) continue;
-      // Точка бригады — нос самосвала (кузов тянется назад, как у машин в потоке).
-      out.push({ kind: CREW_SPEC.kind, body: CREW_SPEC.body, length: CREW_SPEC.length, width: CREW_SPEC.width, color: CREW_SPEC.color, load: CREW_SPEC.load, pos: at.pos, dir: at.dir });
+      for (const m of crews.carsAt(b)) {
+        const s = CREW_CARS[Math.min(m.car, CREW_CARS.length - 1)];
+        // Точка машины — её нос (кузов тянется назад, как у машин в потоке).
+        out.push({ kind: s.kind, body: s.body, length: s.length, width: s.width, color: s.color, load: 'load' in s ? s.load : undefined, pos: m.pos, dir: m.dir });
+      }
     }
     return out;
   }

@@ -31,7 +31,7 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
     expect(game.money).toBe(game.settings.money);
   });
 
-  it('бригады сами доезжают до своих проектов; через 60 с часть проектов готова и открыта, к 5 минутам — все', () => {
+  it('бригады сами доезжают до своих проектов; через 75 с часть проектов готова и открыта, к 5 минутам — все', () => {
     const scene = buildConstructionScene();
     const { game } = scene;
     const crews = game.construction.crews;
@@ -39,10 +39,12 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
     const streetIds = [...game.roads.net.corridors.values()].filter((c) => c.build?.project === street.project).map((c) => c.id);
     // Пока строится — по нему не ездят.
     for (const id of streetIds) expect(game.roads.graph.corridorLinks(id)).toHaveLength(0);
-    runSeconds(game, 20);
+    // Бригада едет колонной из трёх машин (самосвал, грейдер, каток — каток тихоходный) и берётся за работу, когда
+    // доехала последняя: по подъезду в 160 м — секунд 20.
+    runSeconds(game, 25);
     // Каждая бригада — на своём проекте (своей базы).
     for (const p of scene.projects) expect(crews.working(p.project!).map((b) => b.base), p.name).toEqual([p.base]);
-    runSeconds(game, 40);
+    runSeconds(game, 50);
     const done = scene.projects.filter((p) => !game.construction.projects.has(p.project!));
     expect(done.map((p) => p.key)).toEqual(expect.arrayContaining(['street', 'hill']));
     expect(done.length).toBeLessThan(scene.projects.length);

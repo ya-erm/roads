@@ -74,7 +74,7 @@ export interface ConstructionHost {
   /** Проект достроен или встал без денег — уведомление и журнал. */
   projectEvent?(kind: 'done' | 'stalled', p: Project): void;
   /** Машины бригад в потоке (Crews): выпустить от узла к узлу, убрать; есть ли узел в графе движения. */
-  drive(brigade: Brigade, from: number, to: number): number | 'busy' | null;
+  drive(brigade: Brigade, from: number, to: number, car: number): number | 'busy' | null;
   park(sim: number): void;
   onRoad(node: number): boolean;
   /** От узла from до узла to можно доехать по готовым дорогам (подъезд к проекту). */
@@ -147,7 +147,7 @@ export class Construction {
       site: (id) => self.site(id),
       path: (id) => self.approach(id)?.path() ?? null,
       reach: (from, to) => host.reach(from, to),
-      drive: (b, from, to) => host.drive(b, from, to),
+      drive: (b, from, to, car) => host.drive(b, from, to, car),
       park: (sim) => host.park(sim),
       onRoad: (node) => host.onRoad(node),
     });

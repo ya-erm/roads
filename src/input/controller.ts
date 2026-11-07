@@ -1833,6 +1833,9 @@ export class Controller {
     const veh = g.vehicleAt(p);
     if (veh?.fleet) return { type: 'fleet', id: veh.fleet.id };
     if (veh) return { type: 'vehicle', simId: veh.sim.id };
+    // Машина бригады вдоль стройки (не в потоке) — карточка её базы: там бригады и что они делают.
+    const crewBase = g.crewBaseAt(p);
+    if (crewBase !== undefined) return { type: 'base', id: crewBase };
     const st = g.structureAt(p);
     if (st?.type === 'station') return { type: 'station', id: st.id };
     if (st?.type === 'warehouse') return { type: 'station', id: st.stationId };

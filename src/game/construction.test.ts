@@ -520,16 +520,21 @@ describe('Стройка дорог: базы и бригады', () => {
     expect(built).toBe(true);
     const id = game.construction.list()[0].project.id;
     let drove = false;
+    const bodies = new Set<string | undefined>();
     for (let t = 0; t < 60 && !crews.working(id).length; t += 0.1) {
       runSeconds(game, 0.1);
       const b = [...crews.brigades.values()][0];
-      if (b.sim !== undefined && game.traffic.vehicles.has(b.sim)) {
+      for (const car of b.convoy?.cars ?? []) {
+        if (!('sim' in car) || !game.traffic.vehicles.has(car.sim)) continue;
         drove = true;
-        // Машина в потоке узнаётся как самосвал этой бригады (карточка — «Строительная бригада», не «машина жителя»).
-        expect(game.crewOfSim(b.sim)).toBe(b.id);
+        bodies.add(game.traffic.vehicles.get(car.sim)!.body);
+        // Любая машина колонны узнаётся как техника этой бригады (карточка — «Строительная бригада», не «машина жителя»).
+        expect(game.crewOfSim(car.sim)).toBe(b.id);
       }
     }
     expect(drove).toBe(true);
+    // По дороге едет вся бригада: самосвал, грейдер и каток.
+    expect([...bodies].sort()).toEqual(['grader', 'roller', 'van']);
     expect(crews.working(id).length).toBe(1);
     runSeconds(game, 3);
     expect(game.construction.list()[0].done).toBeGreaterThan(0);
@@ -550,13 +555,16 @@ describe('Стройка дорог: базы и бригады', () => {
       runSeconds(game, 6);
       return { done: game.construction.list()[0].done - done0, advice: advise(game) };
     };
-    const one = pace(1, 0);
-    const two = pace(2, 0);
+    // Колонны бригад выезжают с ворот по одной машине — когда на месте все, край уже ушёл от базы на разное
+    // расстояние: доли бригад сравниваем без поправки на расстояние.
+    const reach = CONSTRUCTION.reach;
+    CONSTRUCTION.reach = 1e12;
+    const [one, two, three] = [1, 2, 3].map((n) => pace(n, 0));
+    CONSTRUCTION.reach = reach;
     // Вторая бригада прибавляет долю crewShare[1], третья — crewShare[2]: вместе мешают друг другу.
     const [, s2, s3] = CONSTRUCTION.crewShare;
     expect(two.done).toBeGreaterThan(one.done * (1 + s2) * 0.93);
     expect(two.done).toBeLessThan(one.done * (1 + s2) * 1.07);
-    const three = pace(3, 0);
     expect(three.done).toBeGreaterThan(one.done * (1 + s2 + s3) * 0.93);
     expect(three.done).toBeLessThan(one.done * 3 * 0.8);
     const far = pace(1, CONSTRUCTION.reach * 1.5);

@@ -38,7 +38,7 @@ const CREW_STATE: Record<Brigade['state'], { mark: string; text: string }> = {
 
 /** Что бригада делает сейчас — коротко: едет по дороге, вдоль стройки к краю работ, ждёт выезда, строит. */
 export function crewDoing(b: Brigade): string {
-  if (b.state === 'going') return b.sim !== undefined ? 'едет по дороге' : b.eta !== undefined ? 'едет вдоль стройки' : 'ждёт выезда';
+  if (b.state === 'going') return b.convoy ? 'едет по дороге' : b.eta !== undefined ? 'едет вдоль стройки' : 'ждёт выезда';
   return CREW_STATE[b.state].text;
 }
 

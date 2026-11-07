@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
 import { dist, type Vec } from '../core/vec';
 import { advise } from './advisor';
-import { type Brigade, type CrewHost, Crews, type Site } from './crews';
+import { type Brigade, CONVOY_GAP, type CrewHost, Crews, type Site } from './crews';
 import { Game } from './game';
 import { anchorOf, road, runSeconds, STREET, withoutCitizens } from './testkit';
 import { projectBadges } from '../render/projectBadges';
@@ -63,32 +63,63 @@ describe('Бригады: только по дорогам и вдоль стр�
     site7(t);
     t.until(5);
     expect(t.b.state).toBe('idle');
-    expect(t.b.sim).toBeUndefined();
+    expect(t.b.convoy).toBeUndefined();
     expect(t.b.eta).toBeUndefined();
     expect(t.b.trip).toBeUndefined();
     expect(t.crews.working(7)).toEqual([]);
   });
 
-  it('путь есть, но на выезде нет места — ждёт и выезжает машиной', () => {
+  it('путь есть, но на выезде нет места — колонна ждёт и выезжает по одной машине', () => {
     let tries = 0;
-    const t = bench(() => (++tries < 3 ? 'busy' : 42));
+    const cars: number[] = [];
+    const t = bench((_b, _from, _to, car) => {
+      if (++tries < 3) return 'busy';
+      cars.push(car);
+      return 40 + car;
+    });
     site7(t);
     t.crews.tick();
     t.crews.tick();
     expect(t.b.state).toBe('going');
-    expect(t.b.sim).toBeUndefined();
-    expect(t.b.eta).toBeUndefined();
+    expect(t.crews.lead(t.b)).toBeUndefined();
+    expect(t.b.convoy?.cars).toEqual([{ wait: true }, { wait: true }, { wait: true }]);
     t.crews.tick();
-    expect(t.b.sim).toBe(42);
+    expect(t.crews.lead(t.b)).toBe(40);
+    // Остальные — по одной за такт, по порядку: самосвал, грейдер, каток.
+    t.crews.tick();
+    t.crews.tick();
+    expect(cars).toEqual([0, 1, 2]);
+    expect(t.b.convoy?.cars).toEqual([{ sim: 40 }, { sim: 41 }, { sim: 42 }]);
     expect(t.b.eta).toBeUndefined();
+  });
+
+  it('доехавшие машины колонны ждут остальных там, где встали; бригада на месте — когда доехала последняя', () => {
+    const t = bench((_b, _from, _to, car) => 40 + car);
+    const { node } = site7(t);
+    for (let i = 0; i < 3; i++) t.crews.tick();
+    t.crews.arrive(t.b, { node: 571, pos: node, dir: { x: 1, y: 0 } }, 40);
+    t.crews.arrive(t.b, { node: 571, pos: { x: 590, y: 0 }, dir: { x: 1, y: 0 } }, 41);
+    expect(t.b.convoy).toBeDefined();
+    expect(t.b.eta).toBeUndefined();
+    expect(t.crews.carsAt(t.b).map((m) => m.car)).toEqual([0, 1]);
+    expect(t.crews.owns(t.b, 42)).toBe(true);
+    t.crews.arrive(t.b, { node: 571, pos: { x: 578, y: 0 }, dir: { x: 1, y: 0 } }, 42);
+    // Все на месте — колонной вдоль стройки: головная впереди, остальные — через CONVOY_GAP позади.
+    expect(t.b.convoy).toBeUndefined();
+    expect(t.b.trip).toBeDefined();
+    t.until(5);
+    const along = t.crews.carsAt(t.b);
+    expect(along.map((m) => m.car)).toEqual([0, 1, 2]);
+    expect(dist(along[0].pos, along[1].pos)).toBeCloseTo(CONVOY_GAP, 6);
+    expect(dist(along[1].pos, along[2].pos)).toBeCloseTo(CONVOY_GAP, 6);
   });
 
   it('машиной до узла подъезда, оттуда — вдоль стройки к краю работ: видно, где едет; сохранение посреди пути', () => {
     const t = bench();
     const { node, front } = site7(t);
     t.crews.tick();
-    expect(t.b.sim).toBe(42);
-    // Машина доехала до узла подъезда (Game.onArrive).
+    expect(t.crews.lead(t.b)).toBe(42);
+    // Колонна доехала до узла подъезда (Game.onArrive).
     t.crews.arrive(t.b, { node: 571, pos: node });
     expect(t.b.state).toBe('going');
     expect(t.b.at).toBe(571);
@@ -121,7 +152,7 @@ describe('Бригады: только по дорогам и вдоль стр�
     t.paths.set(7, [{ x: 0, y: 0 }]);
     t.crews.tick();
     expect(t.b.state).toBe('working');
-    expect(t.b.sim).toBeUndefined();
+    expect(t.b.convoy).toBeUndefined();
   });
 
   it('проект на паузе — назад вдоль стройки к дороге, оттуда машиной домой', () => {
@@ -138,9 +169,10 @@ describe('Бригады: только по дорогам и вдоль стр�
     expect(t.b.trip?.back).toBe(true);
     near(t.crews.walkAt(t.b)?.pos, front);
     t.until(t.host.time + 300 / CONSTRUCTION.onSite + 0.3);
-    // Доехала до дороги — домой машиной от узла подъезда.
+    // Доехала до дороги — домой колонной от узла подъезда к воротам базы.
     expect(t.b.trip).toBeUndefined();
-    expect(t.b.sim).toBe(cars);
+    expect(t.b.convoy).toMatchObject({ from: 571, to: 1 });
+    expect(t.crews.lead(t.b)).toBeDefined();
     t.crews.arrive(t.b, { node: 1, pos: { x: 0, y: 0 } });
     expect(t.b.state).toBe('idle');
     expect(t.b.pos).toBeUndefined();
@@ -150,13 +182,13 @@ describe('Бригады: только по дорогам и вдоль стр�
     const t = bench();
     site7(t);
     t.crews.tick();
-    expect(t.b.sim).toBe(42);
+    expect(t.crews.lead(t.b)).toBe(42);
     t.crews.lost(t.b);
-    expect(t.b.sim).toBeUndefined();
+    expect(t.b.convoy).toBeUndefined();
     expect(t.b.pos).toBeUndefined();
     expect(t.b.at).toBeUndefined();
     t.crews.tick();
-    expect(t.b.sim).toBe(42);
+    expect(t.crews.lead(t.b)).toBe(42);
   });
 
   it('старое сохранение: ехала по полю (trip from → to) — открывается, бригада на базе и едет по дороге', () => {
@@ -166,8 +198,8 @@ describe('Бригады: только по дорогам и вдоль стр�
     t.crews.load({
       bases: [...t.crews.bases.values()],
       brigades: [
-        { id: 5, base: 100, state: 'going', project: 7, pos: { x: 50, y: 50 }, eta: 30, trip: { from: { x: 0, y: 0 }, to: { x: 600, y: -300 }, t0: 0 } } as unknown as Omit<Brigade, 'sim'>,
-        { id: 6, base: 100, state: 'back', pos: { x: 70, y: 70 }, eta: 20 } as Omit<Brigade, 'sim'>,
+        { id: 5, base: 100, state: 'going', project: 7, pos: { x: 50, y: 50 }, eta: 30, trip: { from: { x: 0, y: 0 }, to: { x: 600, y: -300 }, t0: 0 } } as unknown as Omit<Brigade, 'convoy'>,
+        { id: 6, base: 100, state: 'back', pos: { x: 70, y: 70 }, eta: 20 } as Omit<Brigade, 'convoy'>,
       ],
       nextBrigade: 7,
       firstUsed: true,
@@ -178,7 +210,7 @@ describe('Бригады: только по дорогам и вдоль стр�
     expect(b).toEqual({ id: 6, base: 100, state: 'idle' });
     expect(t.crews.walkAt(a)).toBeNull();
     t.crews.tick();
-    expect(a.sim).toBe(42);
+    expect(t.crews.lead(a)).toBe(42);
   });
 });
 
@@ -314,6 +346,10 @@ describe('Бригады в игре: нет подъезда', () => {
     expect(loaded.construction.crews.walkAt(twin)).toEqual(crews.walkAt(second));
     expect(loaded.siteCrewLooks().map((v) => v.pos)).toEqual(game.siteCrewLooks().map((v) => v.pos));
     expect(game.brigadeWhere(second.id)!.text).toContain('вдоль стройки');
+    // Вдоль стройки едет вся колонна — три машины; клик по любой — карточка её базы.
+    const looks = game.siteCrewLooks();
+    expect(looks.map((v) => v.body)).toEqual(['van', 'grader', 'roller']);
+    for (const v of looks) expect(game.crewBaseAt({ x: v.pos.x - v.dir.x * 2, y: v.pos.y - v.dir.y * 2 })).toBe(second.base);
     for (const g of [game, loaded]) runSeconds(g, 30);
     expect(loaded.construction.crews.toSave()).toEqual(game.construction.crews.toSave());
     expect(loaded.money).toBe(game.money);

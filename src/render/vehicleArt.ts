@@ -37,6 +37,48 @@ interface Part {
 
 const WORLD: Pick<Part, 'origin' | 'dir'> = { origin: { x: 0, y: 0 }, dir: { x: 1, y: 0 } };
 
+/**
+ * Техника строительной бригады в колонне (как на стройке, constructionArt.drawMachines): грейдер — длинная узкая рама,
+ * нож поперёк посередине, кабина сзади; каток — тёмный валец во всю ширину впереди, за ним корпус с кабиной.
+ */
+function crewMachineArt(ctx: CanvasRenderingContext2D, v: VehicleLook, detailed: boolean): void {
+  const L = v.length;
+  const W = v.width;
+  const dark = '#3d4148';
+  ctx.strokeStyle = '#6b5410';
+  ctx.lineWidth = 0.3;
+  if (v.body === 'grader') {
+    ctx.fillStyle = v.color;
+    rr(ctx, -L, -W * 0.3, L, W * 0.6, 0.6);
+    ctx.fill();
+    ctx.stroke();
+    // Нож поперёк рамы и кабина над задними колёсами.
+    ctx.fillStyle = '#4d4f55';
+    ctx.fillRect(-L * 0.48, -W / 2, 0.9, W);
+    ctx.fillStyle = shadeHex(v.color, -0.08);
+    rr(ctx, -L * 0.82, -W * 0.42, L * 0.24, W * 0.84, 0.5);
+    ctx.fill();
+    ctx.stroke();
+    if (detailed) {
+      ctx.fillStyle = 'rgba(255,255,255,0.65)';
+      ctx.fillRect(-L * 0.6, -W * 0.3, 0.6, W * 0.6);
+    }
+    return;
+  }
+  // Каток: валец впереди, корпус и кабина за ним.
+  ctx.fillStyle = dark;
+  rr(ctx, -2.2, -W / 2, 2.2, W, 0.9);
+  ctx.fill();
+  ctx.fillStyle = v.color;
+  rr(ctx, -L, -W * 0.42, L - 2.6, W * 0.84, 0.7);
+  ctx.fill();
+  ctx.stroke();
+  if (detailed) {
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.fillRect(-L * 0.55, -W * 0.3, 0.6, W * 0.6);
+  }
+}
+
 function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
   ctx.beginPath();
   ctx.roundRect(x, y, w, h, r);
@@ -113,6 +155,7 @@ function rigidArt(ctx: CanvasRenderingContext2D, v: VehicleLook, detailed: boole
   const W = v.width;
   if (v.body === 'microbus') return microbusArt(ctx, v, detailed);
   if (v.body === 'cityBus') return busSection(ctx, v, -L, 0, detailed, 'whole');
+  if (v.body === 'grader' || v.body === 'roller') return crewMachineArt(ctx, v, detailed);
   ctx.fillStyle = v.color;
   rr(ctx, -L, -W / 2, L, W, 1.3);
   ctx.fill();

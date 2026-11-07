@@ -5,10 +5,11 @@ import type { Vec } from '../core/vec';
  *  - van — фургон (Грузовик): кабина и кузов одним целым;
  *  - semi — тягач с полуприцепом (Грузовик II), longSemi — длинный, на трёх осях (Фура);
  *  - microbus — микроавтобус (Автобус), cityBus — городской (Автобус II);
- *  - articBus — сочленённый (Автобус III): две секции с «гармошкой».
+ *  - articBus — сочленённый (Автобус III): две секции с «гармошкой»;
+ *  - grader, roller — грейдер и каток колонны строительной бригады (за самосвалом-фургоном, src/game/crews.ts).
  * У машин жителей кузова нет — они рисуются как были.
  */
-export type VehicleBody = 'van' | 'semi' | 'longSemi' | 'microbus' | 'cityBus' | 'articBus';
+export type VehicleBody = 'van' | 'semi' | 'longSemi' | 'microbus' | 'cityBus' | 'articBus' | 'grader' | 'roller';
 
 /**
  * Сцепка машины из двух частей — доли её длины, считая от носа:
