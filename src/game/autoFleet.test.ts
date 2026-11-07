@@ -2,9 +2,52 @@ import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
+import { DEFAULT_SETTINGS } from '../world/settings';
+import { advise } from './advisor';
 import { Game } from './game';
-import { freightRoute, runMonths, runSeconds, townStreets, withoutCitizens } from './testkit';
+import {
+  anchorOf,
+  connectStations,
+  freightRoute,
+  HIGHWAY,
+  nearestPair,
+  roadPlan,
+  runMonths,
+  runSeconds,
+  stationAtIndustry,
+  stationExit,
+  townStreets,
+  withoutCitizens,
+} from './testkit';
 import { AUTO_FLEET, type FleetVehicle } from './transport';
+
+/** Станции у фермы и ближайшего пищекомбината (seed 7) и маршрут между ними — без дороги между выездами. */
+function roadlessRoute(game: Game) {
+  game.money = 5_000_000;
+  const { a, b } = nearestPair(game, 'farm', 'foodplant');
+  const sA = stationAtIndustry(game, a, b.fp.center)!;
+  const sB = stationAtIndustry(game, b, a.fp.center)!;
+  return { sA, sB, line: game.createLine([sA.id, sB.id])! };
+}
+
+/** Выезды станций — дорогой-проектом (как рисует игрок «Со строительством»), из двух кусков, как connectStations. */
+function projectBetween(game: Game, sA: Station, sB: Station): boolean {
+  const A = stationExit(game, sA.nodeId);
+  const B = stationExit(game, sB.nodeId);
+  const d = { x: B.pos.x - A.pos.x, y: B.pos.y - A.pos.y };
+  const n = { x: -d.y / Math.hypot(d.x, d.y), y: d.x / Math.hypot(d.x, d.y) };
+  const build = (from: Parameters<typeof anchorOf>[1], to: Parameters<typeof anchorOf>[1]) => {
+    const plan = game.roadBuilder.road(anchorOf(game, from), anchorOf(game, to), HIGHWAY, { project: true });
+    return plan.ok && game.roadBuilder.apply(plan);
+  };
+  for (const off of [0, 150, -150, 300, -300, 450, -450]) {
+    const M = { x: (A.pos.x + B.pos.x) / 2 + n.x * off, y: (A.pos.y + B.pos.y) / 2 + n.y * off };
+    if (!roadPlan(game, A.id, { free: M }, HIGHWAY).ok) continue;
+    build(A.id, { free: M });
+    if (build(M, B.id)) return true;
+  }
+  return false;
+}
 
 /**
  * Ферма и ближайший пищекомбинат (seed 7): станции у обоих, выезды соединены трассой, маршрут без транспорта.
@@ -204,6 +247,77 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
     game.buyVehicle(line.id, 'truck');
     game.fitAutoRange(line.id);
     expect(line.auto!.noMoney).toBeUndefined();
+  });
+
+  it('между станциями нет дороги — авто-парк не покупает, а проложили — сразу добирает до минимума', () => {
+    const game = withoutCitizens(new Game(7));
+    const { sA, sB, line } = roadlessRoute(game);
+    expect(game.lineGap(line)).toBe(`Нет дороги: ${sA.name} → ${sB.name}`);
+    // Минимум 2 — без дороги не докупает ни сразу, ни по итогам месяцев (груз на ферме копится).
+    game.setLineAuto(line.id, { on: true, min: 2, max: 4 });
+    expect(line.vehicles).toHaveLength(0);
+    expect(line.auto!.noRoad).toBe(true);
+    expect(line.auto!.noMoney).toBeUndefined();
+    runMonths(game, 2);
+    expect(line.vehicles).toHaveLength(0);
+    // Советник говорит о дороге, а не о машинах: без кнопки «купить».
+    const tips = advise(game).filter((a) => a.line === line.id);
+    expect(tips.map((a) => a.title)).toEqual(['Маршрут без дороги']);
+    expect(tips[0].detail).toContain(`Нет дороги: ${sA.name} → ${sB.name}`);
+    expect(tips[0].fix).toBeUndefined();
+    // Дорогу проложили — в ближайший же такт покупает до минимума, советов о дороге больше нет.
+    expect(connectStations(game, sA, sB, HIGHWAY)).toBe(true);
+    expect(game.lineGap(line)).toBeNull();
+    runSeconds(game, 0.5);
+    expect(line.vehicles).toHaveLength(2);
+    expect(line.auto!.noRoad).toBeUndefined();
+    expect(advise(game).filter((a) => a.line === line.id && a.title === 'Маршрут без дороги')).toEqual([]);
+  });
+
+  it('пустая линия без дороги (минимум 0): спрос есть, но машину не возвращает, пока нет дороги', () => {
+    const game = withoutCitizens(new Game(7));
+    const { sA, sB, line } = roadlessRoute(game);
+    game.setLineAuto(line.id, { on: true, min: 0, max: 3 });
+    expect(line.vehicles).toHaveLength(0);
+    runMonths(game, 3);
+    expect(game.idleDemand(line)).toBeGreaterThan(AUTO_FLEET.wake);
+    expect(line.vehicles).toHaveLength(0);
+    // Совет — о дороге (с минимумом 0 «Маршрут без машин» не показывается, а дорога всё равно нужна).
+    expect(advise(game).find((a) => a.line === line.id)?.title).toBe('Маршрут без дороги');
+    expect(connectStations(game, sA, sB, HIGHWAY)).toBe(true);
+    let months = 0;
+    while (!line.vehicles.length && months < 3) {
+      runMonths(game, 1);
+      months++;
+    }
+    expect(line.vehicles).toHaveLength(1);
+  });
+
+  it('«Со строительством»: пока дорога — проект, авто-парк ждёт; участки открыли — покупает', () => {
+    const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 7, construction: 'build' }));
+    const { sA, sB, line } = roadlessRoute(game);
+    expect(projectBetween(game, sA, sB)).toBe(true);
+    expect(game.construction.projects.size).toBeGreaterThan(0);
+    // Проект в движение не входит — маршрут не проехать.
+    expect(game.lineGap(line)).not.toBeNull();
+    game.setLineAuto(line.id, { on: true, min: 1, max: 3 });
+    expect(line.vehicles).toHaveLength(0);
+    // Бригад нет — стройка стоит, машины не покупаются.
+    runMonths(game, 1);
+    expect(line.vehicles).toHaveLength(0);
+    // Стройка пошла (бригада — сразу на месте и быстрая): пока открыт не весь путь — ждёт, весь — покупает.
+    game.construction.crews.rate = () => 40;
+    let bought = false;
+    let gapWhileBought = false;
+    for (let t = 0; t < 400 && !bought; t += 0.5) {
+      runSeconds(game, 0.5);
+      bought = line.vehicles.length > 0;
+      if (bought && game.construction.projects.size && game.lineGap(line)) gapWhileBought = true;
+    }
+    expect(bought).toBe(true);
+    expect(gapWhileBought).toBe(false);
+    expect(game.lineGap(line)).toBeNull();
+    expect(line.vehicles).toHaveLength(1);
   });
 
   it('спрос пустой автобусной линии — по жителям у её остановок', () => {

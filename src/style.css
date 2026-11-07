@@ -3102,6 +3102,20 @@ button.small.with-ic {
 }
 
 /* Силуэт в цвете маршрута; три карточки в ряд — сжимается по ширине. */
+/* Маршрут без готовой дороги: купить можно, но машина будет ждать на станции — значок в углу карточки. */
+.buy-card.no-road {
+  position: relative;
+}
+
+.buy-warn {
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  font-style: normal;
+  font-size: 13px;
+  color: #d97a00;
+}
+
 .buy-card .model-art {
   max-width: 100%;
   height: auto;

@@ -3408,6 +3408,7 @@ export class Game implements BuildContext {
       auto.min = Math.min(auto.min, auto.max);
     }
     delete auto.noMoney;
+    delete auto.noRoad;
     this.journal.add('auto', { line: id, on: auto.on, min: auto.min, max: auto.max });
     if (!auto.on) {
       delete auto.sell;
@@ -3428,8 +3429,9 @@ export class Game implements BuildContext {
     const n = line.vehicles.length;
     auto.min = Math.min(auto.min, n);
     auto.max = Math.max(auto.max, n);
-    // Решение авто-парка, ждавшее денег, устарело: игрок решил сам, спрос считается заново.
+    // Решение авто-парка, ждавшее денег (или дороги), устарело: игрок решил сам, спрос считается заново.
     delete auto.noMoney;
+    delete auto.noRoad;
     this.restartDemand(line);
   }
 
@@ -3473,9 +3475,33 @@ export class Game implements BuildContext {
     return autoFunds({ money: this.freeMoney, price: m.price, running: this.fleetRunning() + m.running, revenue, monthLeft: 1 - this.monthProgress });
   }
 
-  /** Покупка авто-парком — если хватает денег (autoFunds); не хватило — покупка ждёт денег (noMoney). */
+  /**
+   * Какого участка маршрута нет: между какими станциями не проехать по готовой дороге («Нет дороги: А → Б»);
+   * null — проехать можно. Проект стройки в движение не входит, пока участок не открыт, — по нему тоже не проехать.
+   * Только автомаршруты: у поездов — свои пути и свои проблемы (line.problem).
+   */
+  lineGap(line: Line): string | null {
+    if (this.lineMode(line) !== 'road' || line.stops.length < 2) return null;
+    const routes = this.roadLegData(line).routes;
+    const i = routes.findIndex((r) => !r);
+    if (i < 0) return null;
+    const from = this.stations.get(line.stops[i]);
+    const to = this.stations.get(line.stops[(i + 1) % line.stops.length]);
+    return `Нет дороги: ${from?.name ?? '?'} → ${to?.name ?? '?'}`;
+  }
+
+  /**
+   * Покупка авто-парком — если до станций маршрута есть дорога (lineGap; нет — ждёт дороги, noRoad) и хватает
+   * денег (autoFunds; не хватило — ждёт денег, noMoney).
+   */
   private autoBuy(line: Line): boolean {
     const auto = line.auto!;
+    if (this.lineGap(line)) {
+      auto.noRoad = true;
+      delete auto.noMoney;
+      return false;
+    }
+    delete auto.noRoad;
     const model = this.autoModel(line);
     if (!this.autoFunds(line, model).ok) {
       auto.noMoney = true;
@@ -3637,11 +3663,18 @@ export class Game implements BuildContext {
 
   /**
    * Покупка авто-парка ждёт денег (noMoney): как только их хватает — покупает сразу, не дожидаясь конца
-   * окна загрузки, и добирает до минимума.
+   * окна загрузки, и добирает до минимума. Ждёт дороги (noRoad): дорогу достроили — сразу добирает до минимума.
    */
   private updateAutoWait(): void {
     for (const line of this.lines.values()) {
       const auto = line.auto;
+      if (auto?.on && auto.noRoad) {
+        if (this.lineGap(line)) continue;
+        delete auto.noRoad;
+        this.restartDemand(line);
+        this.autoBounds(line);
+        continue;
+      }
       if (!auto?.on || !auto.noMoney) continue;
       if (line.vehicles.length >= auto.max) {
         delete auto.noMoney;

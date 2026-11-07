@@ -3,7 +3,7 @@ import { ECONOMY, STATION } from '../config';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { advise, adviceOf, QUEUE_SECONDS, STUCK_SECONDS } from './advisor';
 import { Game } from './game';
-import { stationAtIndustry } from './testkit';
+import { connectStations, HIGHWAY, stationAtIndustry } from './testkit';
 
 /** Песочница с маршрутом сырьё → ближайший завод: станции у обоих и грузовик. */
 function setup() {
@@ -102,6 +102,13 @@ describe('Советник', () => {
     expect(find(game, 'noRoute')[0]).toMatchObject({ level: 'alert', line: line.id, station: line.stops[0] });
     line.problem = null;
     const empty = game.createLine([b.id, a.id])!;
+    // Между станциями нет дороги — совет о дороге, а не о машинах (и без кнопки «купить»).
+    expect(find(game, 'noVehicles').filter((x) => x.line === empty.id)).toHaveLength(0);
+    const noRoad = find(game, 'noRoute').find((x) => x.line === empty.id)!;
+    expect(noRoad).toMatchObject({ level: 'tip', title: 'Маршрут без дороги', key: `noRoad:${empty.id}` });
+    expect(noRoad.fix).toBeUndefined();
+    expect(connectStations(game, a, b, HIGHWAY)).toBe(true);
+    expect(find(game, 'noRoute').filter((x) => x.line === empty.id)).toHaveLength(0);
     expect(find(game, 'noVehicles')[0]).toMatchObject({ level: 'tip', line: empty.id, fix: { kind: 'buy', line: empty.id } });
     expect(find(game, 'noVehicles')[0].detail).not.toContain('ждут');
     // Груз копится на станциях маршрута и без машин — совет говорит, сколько уже ждёт.

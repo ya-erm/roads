@@ -2484,7 +2484,7 @@ export class Hud {
   private lineWarn(l: Line): string {
     const advice = this.advice().find((a) => a.line === l.id && a.level !== 'tip');
     if (advice) return `<b class="warn" data-tip="${esc(advice.title)} — подробнее в «Советах»" data-tip-end>!</b>`;
-    return l.problem || this.lineMissing(l) ? '<b class="warn">!</b>' : '';
+    return l.problem || this.lineMissing(l) || this.game().lineGap(l) ? '<b class="warn">!</b>' : '';
   }
 
   /** На какой-то станции маршрута его транспорту нечего делать — та же «!», что и у проблем маршрута. */
@@ -2682,6 +2682,9 @@ export class Hud {
     const interval = g.lineInterval(line);
     const kind = g.lineKind(line);
     const speed = this.lineSpeedHtml(line);
+    // Между станциями нет готовой дороги: купить можно, но машина будет ждать на станции — значок на карточках покупки.
+    const gap = g.lineGap(line);
+    const vehicleWord = g.lineMode(line) === 'rail' ? 'поезд' : 'машину';
     // Время в пути — круг маршрута со стоянками (тот же, от которого считается интервал): минуты и секунды.
     const lap = g.lineLap(line);
     const travel = lap
@@ -2695,7 +2698,7 @@ export class Hud {
       ${palette}
       ${this.folderPickHtml(line)}
       ${this.routeHtml(line)}
-      ${line.problem ? `<p class="warn">${esc(line.problem)}</p>` : ''}
+      ${line.problem || gap ? `<p class="warn">${esc(line.problem || gap!)}</p>` : ''}
       ${lineJamsHtml(g.lineJams(line))}
       ${g
         .lineAdvice(line)
@@ -2724,18 +2727,22 @@ export class Hud {
         .filter((m) => !kind || MODELS[m].carries === kind)
         .map(
           // Клик — машина выедет с первой остановки; перетащить на остановку маршрута — сразу с неё (bindBuyDrag).
-          (m) => `<button class="buy-card" data-action="buy" data-line="${line.id}" data-model="${m}" draggable="true" data-drag-buy="${m}" data-tip="Вместимость ${
-            MODELS[m].capacity
-          } · содержание ${money(MODELS[m].running)}/мес · перетащите на остановку ▶ — выедет с неё">
-            ${modelSvg(m, line.color)}<span>+ ${MODELS[m].name}</span><small>${MODELS[m].capacity} мест · ${money(MODELS[m].price)}</small></button>`,
+          (m) => `<button class="buy-card${gap ? ' no-road' : ''}" data-action="buy" data-line="${line.id}" data-model="${m}" draggable="true" data-drag-buy="${m}" data-tip="${
+            gap ? `⚠ ${esc(gap)} — купленная машина будет ждать на станции · ` : ''
+          }Вместимость ${MODELS[m].capacity} · содержание ${money(MODELS[m].running)}/мес · перетащите на остановку ▶ — выедет с неё">
+            ${gap ? '<i class="buy-warn">⚠</i>' : ''}${modelSvg(m, line.color)}<span>+ ${MODELS[m].name}</span><small>${MODELS[m].capacity} мест · ${money(MODELS[m].price)}</small></button>`,
         )
         .join('')}${kind ? this.nextModelHtml(g.lineMode(line), kind) : ''}</div>
       <div class="vehicles">${
         vehicles ||
         `<p class="muted">${
-          line.auto?.on
-            ? `Пока транспорт не нужен — авто-парк купит ${g.lineMode(line) === 'rail' ? 'поезд' : 'машину'}, когда появится груз или пассажиры.`
-            : `Купите ${g.lineMode(line) === 'rail' ? 'поезд' : 'машину'}, чтобы маршрут заработал.`
+          gap
+            ? line.auto?.on
+              ? `Авто-парк купит ${vehicleWord}, когда до станций будет готовая дорога.`
+              : `Сначала соедините станции дорогой — без неё ${vehicleWord} не уедет со станции.`
+            : line.auto?.on
+              ? `Пока транспорт не нужен — авто-парк купит ${vehicleWord}, когда появится груз или пассажиры.`
+              : `Купите ${vehicleWord}, чтобы маршрут заработал.`
         }</p>`
       }</div>
       <div class="actions"><button class="small danger" data-action="delete-line" data-id="${line.id}">Удалить маршрут</button></div></section>`;
@@ -2864,7 +2871,10 @@ export class Hud {
     const kind = g.lineVehicleKind(line);
     // Покупка ждёт денег — значок, пока их не хватает (на паузе игрок мог уже взять кредит).
     const funds = auto.noMoney ? g.autoFunds(line) : null;
+    // Дороги между станциями нет (или она ещё строится) — машины не покупает, пока маршрут не станет проезжим.
+    const gap = g.lineGap(line);
     const flagList = [
+      gap ? `<span class="auto-flag warn" data-tip="Ждёт дорогу: ${esc(gap)} — машины купит, когда по маршруту можно будет проехать" data-tip-end>🚧</span>` : '',
       funds && !funds.ok
         ? `<span class="auto-flag warn" data-tip="Ждёт денег на машину: нужно ${money(funds.need)}, на счёте ${money(funds.have)}" data-tip-end>💸</span>`
         : '',

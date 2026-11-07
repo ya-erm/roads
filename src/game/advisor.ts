@@ -285,6 +285,23 @@ function routes(game: Game, out: Advice[]): void {
     }
     const n = line.vehicles.length;
     const auto = line.auto?.on ? line.auto : null;
+    // Машин нет, а между станциями и дороги нет (или её ещё строят) — совет о дороге: машины пока ни к чему.
+    const gap = n ? null : game.lineGap(line);
+    if (gap) {
+      out.push({
+        key: `noRoad:${line.id}`,
+        kind: 'noRoute',
+        level: 'tip',
+        title: 'Маршрут без дороги',
+        detail: `«${line.name}»: ${gap}. Соедините станции дорогой${game.buildMode ? ' или дождитесь, когда её достроят' : ''} — ${
+          auto ? 'тогда авто-парк купит машины' : 'тогда покупайте машины'
+        }.`,
+        line: line.id,
+        station: first?.id,
+        at: first?.fp.center,
+      });
+      continue;
+    }
     if (!n && !(auto && auto.max > 0 && auto.min === 0)) {
       // Пассажиры и груз копятся на станциях маршрута и без машин — сколько уже ждёт.
       const carries = game.lineCarries(line);
