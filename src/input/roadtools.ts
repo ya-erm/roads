@@ -33,6 +33,7 @@ import { branchSeam, slidePorts, slideSeam, slideTarget, slideTrack } from '../l
 import { CornerHandle, cornerHandleAt, cornerHandles, cornerLimitText, cornerRadiusAt, cornerTurn, setCornerRadius } from '../lanes/corners';
 import { junctionCorners } from '../lanes/geometry';
 import { GRADE } from '../config';
+import { aimAlong, roadDirs } from './aim';
 import { autoLevels, designProfile, PROFILE_STEP, steepText } from '../game/grade';
 import { laneEdit, laneStepEdit, moveNodeEdit, onOldAxis, reshapeEdit } from '../game/roadbuild';
 import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, profileOf } from '../lanes/model';
@@ -220,25 +221,10 @@ export class RoadTools {
     const a = anchorAt(this.net, p, r, this.level);
     // Прямая от дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°); с free — нет.
     if (a.kind === 'free' && s && !free) {
-      const d = sub(p, s.pos);
-      const l = len(d);
-      if (l > 20) {
-        const dir = scale(d, 1 / l);
-        let best: { v: Vec; hint: string; cos: number } | null = null;
-        for (const ref of this.startDirs()) {
-          for (const [v, hint] of [
-            [ref, 'прямо'],
-            [{ x: -ref.y, y: ref.x }, '90°'],
-            [{ x: ref.y, y: -ref.x }, '90°'],
-          ] as const) {
-            const c = dot(dir, v);
-            if (c > Math.cos(0.1) && (!best || c > best.cos)) best = { v, hint, cos: c };
-          }
-        }
-        if (best) {
-          this.hint = best.hint;
-          return { kind: 'free', pos: add(s.pos, scale(best.v, l * best.cos)), level: this.level };
-        }
+      const aim = aimAlong(s.pos, p, this.startDirs());
+      if (aim) {
+        this.hint = aim.hint;
+        return { kind: 'free', pos: aim.pos, level: this.level };
       }
     }
     return a;
@@ -246,14 +232,7 @@ export class RoadTools {
 
   /** Направления «прямо» от начала: продолжения дорог узла или вдоль полотна. */
   private startDirs(): Vec[] {
-    const s = this.start;
-    if (!s) return [];
-    if (s.kind === 'node' && this.net.nodes.has(s.node)) return this.net.ends(this.net.node(s.node)).map((e) => scale(e.away, -1));
-    if (s.kind === 'corridor' && this.net.corridors.has(s.corridor)) {
-      const t = this.net.corridor(s.corridor).lut.tangentAt(s.s);
-      return [t, scale(t, -1)];
-    }
-    return [];
+    return this.start ? roadDirs(this.net, this.start) : [];
   }
 
   /** Уровень начала: свободное начало можно поднять или опустить, пока дорога не построена (у узла — его уровень). */

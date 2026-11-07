@@ -37,6 +37,7 @@ import {
 import { MoveProject } from '../game/moveProject';
 import type { NetEdit } from '../game/roadbuild';
 import { anchorAt } from '../lanes/edit';
+import { aimAlong, railDirs, roadDirs } from './aim';
 import type { LaneNet } from '../lanes/model';
 import { halfWidth, type RoadSpec } from '../world/roadTypes';
 
@@ -72,8 +73,8 @@ export interface ProjectView {
   segs: { curve: Cubic; half: number; ok: boolean; fill: boolean; draft?: boolean }[];
   nodes: { pos: Vec; tip: boolean; hot: boolean }[];
   handles: { anchor: Vec; pos: Vec; active: boolean; partner: boolean }[];
-  /** Новый участок до курсора: сколько добавит к цене (null — не рисуем). */
-  draft: { cost: number; length: number } | null;
+  /** Новый участок до курсора: сколько добавит к цене и к чему прилип («прямо», «90°»); null — не рисуем. */
+  draft: { cost: number; length: number; aim: string | null } | null;
   /** Знаки скорости перед поворотами, что её снижают: на оси, по ходу, до кромки, км/ч. */
   signs: { pos: Vec; dir: Vec; side: number; kmh: number }[];
   /** Самый медленный поворот проекта, км/ч (null — поворотов, что снижают скорость, нет). */
@@ -283,21 +284,49 @@ export class ProjectTools {
     return !!addSeg(pr, from, to, curve, s.spec, { auto: s.kind === 'road' && s.auto, reverse: s.reverse });
   }
 
-  /** Новый участок от узла tip до точки: проект с ним (копия) и куда он пришёл. */
-  private withDraft(s: DrawSettings, p: Vec, r: number, kink = false): { project: Project; node: number } | null {
+  /** Направления «прямо» из узла проекта: продолжение его участка и дорог (путей), к которым он примкнул. */
+  private aimDirs(kind: NetKind, pr: Project, id: number, r: number): Vec[] {
+    const n = nodeOf(pr, id);
+    const own = continuation(pr, id);
+    const dirs = own ? [own] : [];
+    if (!n.attach) return dirs;
+    const near = Math.min(r, 3);
+    if (kind === 'road') {
+      const net = this.roadNet();
+      return [...dirs, ...roadDirs(net, anchorAt(net, n.pos, near, n.level))];
+    }
+    const g = this.game();
+    return [...dirs, ...railDirs(g.net, g.builder.snap(n.pos, n.level, near))];
+  }
+
+  /**
+   * Куда встанет конец участка от узла tip при курсоре в p: как snapAt, а в чистом поле — как у «Дороги»:
+   * прилипает к продолжению (180°) или перпендикуляру (90°) того, что выходит из tip; free (Alt или Cmd / Ctrl) — нет.
+   */
+  private endAt(kind: NetKind, p: Vec, r: number, level: number, free: boolean): SnapPoint & { hint?: string } {
+    const tip = this.tip;
+    const at = this.snapAt(kind, p, r, level, tip ?? undefined);
+    const pr = this.projects[kind];
+    if (free || tip === null || at.attach || at.node !== undefined || !pr.nodes.some((n) => n.id === tip)) return at;
+    const aim = aimAlong(nodeOf(pr, tip).pos, p, this.aimDirs(kind, pr, tip, r));
+    return aim ? { ...at, pos: aim.pos, hint: aim.hint } : at;
+  }
+
+  /** Новый участок от узла tip до точки: проект с ним (копия), куда он пришёл и к чему прилип (free — без прилипания). */
+  private withDraft(s: DrawSettings, p: Vec, r: number, kink = false, free = false): { project: Project; node: number; hint?: string } | null {
     if (this.tip === null) return null;
+    const at = this.endAt(s.kind, p, r, s.level, free);
     const pr = copyProject(this.projects[s.kind]);
     const from = nodeOf(pr, this.tip);
-    const at = this.snapAt(s.kind, p, r, s.level, this.tip);
     if (dist(at.pos, from.pos) < 8) return null;
     const end = at.node !== undefined ? nodeOf(pr, at.node) : addNode(pr, at.pos, at.level, at.attach);
     if (segsAt(pr, from.id).some((x) => x.a === end.id || x.b === end.id)) return null;
-    return this.link(s, pr, from.id, end.id, r, kink) ? { project: pr, node: end.id } : null;
+    return this.link(s, pr, from.id, end.id, r, kink) ? { project: pr, node: end.id, hint: at.hint } : null;
   }
 
-  /** Где встанет узел от клика в p: точка, примкнёт ли к построенному (для кружка у курсора). */
-  pointAt(s: DrawSettings, p: Vec, r: number): { pos: Vec; attach: boolean; own: boolean } {
-    const at = this.snapAt(s.kind, p, r, s.level, this.tip ?? undefined);
+  /** Где встанет узел от клика в p: точка, примкнёт ли к построенному (для кружка у курсора); free — без прилипания. */
+  pointAt(s: DrawSettings, p: Vec, r: number, free = false): { pos: Vec; attach: boolean; own: boolean } {
+    const at = this.endAt(s.kind, p, r, s.level, free);
     return { pos: at.pos, attach: at.attach, own: at.node !== undefined };
   }
 
@@ -361,8 +390,11 @@ export class ProjectTools {
     this.projects[kind] = pr;
   }
 
-  /** Отпустили: протяжка — правка готова; клик — следующий узел, ветка, узел на участке. */
-  up(s: DrawSettings, p: Vec, r: number, moved: boolean, kink: boolean): void {
+  /**
+   * Отпустили: протяжка — правка готова; клик — следующий узел, ветка, узел на участке. free (Alt или Cmd / Ctrl) —
+   * новый участок без прилипания к «прямо» и 90°.
+   */
+  up(s: DrawSettings, p: Vec, r: number, moved: boolean, kink: boolean, free = false): void {
     const kind = s.kind;
     const was = this.before;
     const press = this.press;
@@ -432,7 +464,7 @@ export class ProjectTools {
       this.tip = n.id;
       return;
     }
-    const res = this.withDraft(s, p, r, kink);
+    const res = this.withDraft(s, p, r, kink, free);
     if (!res) return;
     this.commit(kind, was, res.project);
     this.control = null;
@@ -564,10 +596,11 @@ export class ProjectTools {
   }
 
   /** Проект на карте: с новым участком до курсора, если ведём ветку (и курсор не на чём тянуть). */
-  view(s: DrawSettings, hover: Vec | null, r: number, hr: number, kink = false, extra: NetEdit | null = null): ProjectView {
+  view(s: DrawSettings, hover: Vec | null, r: number, hr: number, kink = false, extra: NetEdit | null = null, free = false): ProjectView {
     const kind = s.kind;
     const base = this.projects[kind];
-    const draft = !this.drag && !extra && hover && !(s.mode === 'curve' && !this.control) && !handleAt(base, hover, hr) ? this.withDraft(s, hover, r, kink) : null;
+    const draft =
+      !this.drag && !extra && hover && !(s.mode === 'curve' && !this.control) && !handleAt(base, hover, hr) ? this.withDraft(s, hover, r, kink, free) : null;
     const pr = draft?.project ?? base;
     const plan = this.plan(kind, pr, extra);
     const draftSeg = draft ? pr.segs[pr.segs.length - 1].id : null;
@@ -594,7 +627,7 @@ export class ProjectTools {
     if (draft) {
       const was = this.plan(kind, base);
       const seg = pr.segs[pr.segs.length - 1];
-      draftInfo = { cost: plan.cost - (base.segs.length ? was.cost : 0), length: new CurveLUT(segCurve(pr, seg)).length };
+      draftInfo = { cost: plan.cost - (base.segs.length ? was.cost : 0), length: new CurveLUT(segCurve(pr, seg)).length, aim: draft.hint ?? null };
     }
     // Знаки скорости на поворотах — как у построенной дороги (у путей их нет).
     const signs = kind === 'road' ? projectCurveSigns(pr) : [];

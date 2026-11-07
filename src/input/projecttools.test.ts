@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { add, dist, dot, norm, sub, Vec } from '../core/vec';
 import { Game } from '../game/game';
 import { handleOf, nodeAt, smoothPair } from '../game/roadProject';
+import { road } from '../game/testkit';
 import { type RoadSpec } from '../world/roadTypes';
 import { DrawSettings, ProjectTools } from './projecttools';
 
@@ -9,7 +10,7 @@ const STREET: RoadSpec = { cls: 'street', lanesF: 1, lanesB: 1 };
 const R = 14;
 const HR = 10;
 
-function setup(): { tools: ProjectTools; at: (x: number, y: number) => Vec; draw: DrawSettings } {
+function setup(): { game: Game; tools: ProjectTools; at: (x: number, y: number) => Vec; draw: DrawSettings } {
   const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
   // Пустое место: рядом ни дорог, ни путей.
   let origin: Vec | null = null;
@@ -22,16 +23,17 @@ function setup(): { tools: ProjectTools; at: (x: number, y: number) => Vec; draw
   if (!origin) throw new Error('Нет места');
   const o = origin;
   return {
+    game,
     tools: new ProjectTools(() => game),
     at: (x, y) => add(o, { x, y }),
     draw: { kind: 'road', spec: STREET, mode: 'arc', level: 0, auto: false, reverse: false },
   };
 }
 
-/** Клик мышью в инструменте проекта (kink — с Shift). */
-function click(t: ProjectTools, s: DrawSettings, p: Vec, kink = false): void {
+/** Клик мышью в инструменте проекта (kink — с Shift, free — с Cmd / Ctrl). */
+function click(t: ProjectTools, s: DrawSettings, p: Vec, kink = false, free = false): void {
   t.down(s.kind, p, R, HR);
-  t.up(s, p, R, false, kink);
+  t.up(s, p, R, false, kink, free);
 }
 
 function drag(t: ProjectTools, s: DrawSettings, from: Vec, to: Vec, kink = false): void {
@@ -98,5 +100,47 @@ describe('Инструмент «Проект»: стыки участков', (
     t.cancel('road');
     drag(t, draw, at(200, 0), at(210, 60));
     expect(smoothPair(t.project('road'), nodeId(t, at(210, 60)))).not.toBeNull();
+  });
+});
+
+describe('Инструмент «Проект»: прилипание к «прямо» и 90°', () => {
+  /** Узел проекта у точки (null — нет). */
+  const near = (t: ProjectTools, p: Vec) => nodeAt(t.project('road'), p, 0.5);
+
+  it('от построенной дороги конец прилипает к её продолжению и перпендикуляру; с Cmd / Ctrl — ровно под курсором', () => {
+    const { game, tools: t, at, draw } = setup();
+    expect(road(game, { free: at(-200, 0) }, { free: at(0, 0) })).toBe(true);
+    const straight = { ...draw, mode: 'straight' as const };
+    // От тупика улицы почти по её продолжению — ровно «прямо».
+    click(t, straight, at(0, 0));
+    expect(t.view(straight, at(150, 10), R, HR).draft?.aim).toBe('прямо');
+    click(t, straight, at(150, 10));
+    expect(near(t, at(150, 0))).not.toBeNull();
+    t.cancel('road');
+    // Почти поперёк — ровно 90°.
+    click(t, straight, at(0, 0));
+    expect(t.view(straight, at(8, 150), R, HR).draft?.aim).toBe('90°');
+    click(t, straight, at(8, 150));
+    expect(near(t, at(0, 150))).not.toBeNull();
+    t.cancel('road');
+    // С Cmd / Ctrl — без прилипания (в другую сторону от улицы: там ещё нет участков).
+    click(t, straight, at(0, 0));
+    expect(t.view(straight, at(-8, -150), R, HR).draft?.aim).toBe('90°');
+    expect(t.view(straight, at(-8, -150), R, HR, false, null, true).draft?.aim).toBeNull();
+    click(t, straight, at(-8, -150), false, true);
+    expect(near(t, at(-8, -150))).not.toBeNull();
+  });
+
+  it('следующий участок прилипает к продолжению предыдущего и к 90° от него', () => {
+    const { tools: t, at, draw } = setup();
+    click(t, draw, at(0, 0));
+    click(t, draw, at(200, 0));
+    click(t, draw, at(400, 15));
+    expect(near(t, at(400, 0))).not.toBeNull();
+    click(t, draw, at(412, -150));
+    expect(near(t, at(400, -150))).not.toBeNull();
+    // Далеко от «прямо» и 90° — конец под курсором.
+    click(t, draw, at(500, -300));
+    expect(near(t, at(500, -300))).not.toBeNull();
   });
 });

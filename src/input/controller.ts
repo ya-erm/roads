@@ -28,6 +28,7 @@ import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
 import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LANE_W, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
+import { aimAlong, railDirs } from './aim';
 import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, riseLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
 import type { MoveProject } from '../game/moveProject';
@@ -1214,25 +1215,10 @@ export class Controller {
     }
     // Прямая от существующей дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°); с Alt или Cmd / Ctrl — нет.
     if (s.kind === 'free' && this.chain && this.drawMode === 'straight' && !this.freeAim) {
-      const d = sub(p, this.chain.pos);
-      const l = len(d);
-      if (l > 20) {
-        const dir = scale(d, 1 / l);
-        let best: { v: Vec; hint: string; cos: number } | null = null;
-        for (const ref of this.chainDirections()) {
-          for (const [v, hint] of [
-            [ref, 'прямо'],
-            [{ x: -ref.y, y: ref.x }, '90°'],
-            [{ x: ref.y, y: -ref.x }, '90°'],
-          ] as const) {
-            const c = dir.x * v.x + dir.y * v.y;
-            if (c > Math.cos(0.1) && (!best || c > best.cos)) best = { v, hint, cos: c };
-          }
-        }
-        if (best) {
-          this.angleHint = best.hint;
-          return { kind: 'free', pos: add(this.chain.pos, scale(best.v, l * best.cos)), level: this.level };
-        }
+      const aim = aimAlong(this.chain.pos, p, this.chainDirections());
+      if (aim) {
+        this.angleHint = aim.hint;
+        return { kind: 'free', pos: aim.pos, level: this.level };
       }
     }
     return s;
@@ -1330,14 +1316,7 @@ export class Controller {
     const g = this.game();
     const c = this.chain;
     if (!c) return [];
-    if (c.kind === 'node' && g.net.nodes.has(c.nodeId)) {
-      return g.net.node(c.nodeId).segments.filter((id) => g.net.segments.has(id)).map((id) => scale(g.net.dirFrom(c.nodeId, id), -1));
-    }
-    if (c.kind === 'split' && g.net.segments.has(c.segId)) {
-      const seg = g.net.segment(c.segId);
-      const t = seg.lut.tangentAt(seg.lut.sAtT(c.t));
-      return [t, scale(t, -1)];
-    }
+    if ((c.kind === 'node' && g.net.nodes.has(c.nodeId)) || (c.kind === 'split' && g.net.segments.has(c.segId))) return railDirs(g.net, c);
     const b = this.besideStart;
     if (b && c.kind === 'free' && dist(b.pos, c.pos) < 0.5) return [b.axis, scale(b.axis, -1)];
     return this.chainTangent ? [this.chainTangent] : [];
@@ -1929,7 +1908,8 @@ export class Controller {
           return;
         }
       }
-      this.projectTools.up(this.drawSettings(), this.worldAt(e), this.snapRadius, moved, e.shiftKey);
+      // Cmd / Ctrl (или Alt) — новый участок без прилипания к «прямо» и 90°, как у обычной стройки.
+      this.projectTools.up(this.drawSettings(), this.worldAt(e), this.snapRadius, moved, e.shiftKey, e.altKey || e.ctrlKey || e.metaKey);
       this.onChange();
       return;
     }
@@ -2277,7 +2257,7 @@ export class Controller {
     const rt = this.roadTools;
     // Тянут построенную дорогу — её правка (после прочих) уже в плане проекта.
     const built = this.builtDrag && rt.dragging && p ? rt.moveEdit(p, this.shift, this.freeAim) : null;
-    const v = pt.view(s, p, this.snapRadius, hr, this.shift, built);
+    const v = pt.view(s, p, this.snapRadius, hr, this.shift, built, this.freeAim);
     const plan = v.plan;
     if (plan.road?.net) {
       // Не выходят правки построенных дорог (не участок и не деньги) — красным; иначе — синим, как проект.
@@ -2329,7 +2309,7 @@ export class Controller {
     }
     // Куда встанет узел от клика — кружком, как начало дороги: у узла или дороги (пути) — большим, в поле — маленьким.
     if (!pt.drag && (at === null || pt.tip !== null)) {
-      const start = pt.pointAt(s, p, this.snapRadius);
+      const start = pt.pointAt(s, p, this.snapRadius, this.freeAim);
       if (!start.own) o.points.push({ pos: start.pos, color: '#2f80ed', r: start.attach ? 7 : 3 });
     }
     // Поворот медленнее дороги — как у обычной стройки: «⚠ поворот 60 км/ч».
@@ -2339,7 +2319,8 @@ export class Controller {
       const what = pt.drag.kind === 'handle' ? 'Перо' : pt.drag.kind === 'bend' ? 'Изогнуть' : 'Узел';
       text = `${what}${pt.hint ? ` · ${pt.hint}` : ''} · проект ${total}${slow}`;
     } else if (v.draft) {
-      text = `+${money(v.draft.cost)} · ${Math.round(v.draft.length)} м · проект ${total}${slow} · Esc — закончить`;
+      const aim = v.draft.aim ? ` · ${v.draft.aim}` : '';
+      text = `+${money(v.draft.cost)} · ${Math.round(v.draft.length)} м${aim} · проект ${total}${slow} · Esc — закончить`;
     } else if (pt.tip !== null && s.mode === 'curve' && !pt.control) {
       text = 'Укажите изгиб кривой';
     } else {
