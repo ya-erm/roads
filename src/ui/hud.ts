@@ -419,6 +419,8 @@ export class Hud {
   private folderPickOpen: number | null = null;
   /** Станция, у которой в карточке открыто поле названия. */
   private renamingStation: number | null = null;
+  /** База стройки, название которой правят на плашке стройки. */
+  private renamingBase: number | null = null;
   /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
   private dragLine: number | null = null;
   /** Черновик параметров нового мира; биом в нём — по seed или выбранный игроком (см. withSeed). */
@@ -678,8 +680,27 @@ export class Hud {
     });
     this.bindFolders(root, this.q('[data-side]'));
     this.bindStationName(root);
+    this.bindBaseName(root);
     controller.onChange = () => this.sync(true);
     this.sync(true);
+  }
+
+  /** Название базы стройки на плашке: клик открывает поле, Enter или уход фокуса — сохранить, Esc — отменить. */
+  private bindBaseName(root: HTMLElement): void {
+    root.addEventListener('keydown', (e) => {
+      const input = e.target as HTMLInputElement;
+      if (!input.dataset?.baseName) return;
+      if (e.key === 'Escape') input.value = this.game().baseName(Number(input.dataset.baseName));
+      if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+    });
+    root.addEventListener('focusout', (e) => {
+      const input = e.target as HTMLInputElement;
+      if (!input.dataset?.baseName) return;
+      this.game().renameBase(Number(input.dataset.baseName), input.value);
+      this.renamingBase = null;
+      this.lastBuild = '';
+      setTimeout(() => this.renderBuild());
+    });
   }
 
   /**
@@ -1031,6 +1052,13 @@ export class Hud {
       }
       case 'base-fire':
         g.dismissBrigade(Number(d.id));
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
+      case 'base-rename':
+        this.renamingBase = Number(d.id);
+        // Кнопку уже отпустили: поле — сразу, иначе первые нажатия ушли бы карте.
+        this.pressing = false;
         this.lastBuild = '';
         this.renderBuild();
         break;
@@ -3475,6 +3503,11 @@ export class Hud {
         if (!g.takeLoan()) g.notify('Кредит уже на пределе');
         this.lastFinance = '';
         break;
+      case 'base':
+        this.controller.startBase();
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
     }
     this.lastAdvisor = '';
   }
@@ -3561,12 +3594,17 @@ export class Hud {
     const o = opt.classList.contains('hidden') ? null : opt.getBoundingClientRect();
     const bottom = o && o.width > 0 && o.left < bar.getBoundingClientRect().right + 8 ? Math.round(window.innerHeight - o.top + 8) : 14;
     if (bar.style.bottom !== `${bottom}px`) bar.style.bottom = `${bottom}px`;
-    const html = buildBarHtml(this.game(), this.controller.placingBase);
+    // Пока правят название базы, плашку не перерисовываем — поле с фокусом и набранным текстом осталось бы старым.
+    if (document.activeElement instanceof HTMLInputElement && bar.contains(document.activeElement)) return;
+    const html = buildBarHtml(this.game(), this.controller.placingBase, this.renamingBase);
     if (html === this.lastBuild) return;
     this.lastBuild = html;
     const el = this.q('[data-build]');
     el.innerHTML = html;
     el.classList.toggle('hidden', !html);
+    const input = el.querySelector<HTMLInputElement>('[data-base-name]');
+    input?.focus();
+    input?.select();
   }
 
   /** Плашка предложения вверху — дублирует панель внизу; пока она есть, уведомления опускаются под неё. */

@@ -180,6 +180,8 @@ export interface BuildBase {
   id: number;
   fp: Footprint;
   nodeId: number;
+  /** Своё название (игрок переименовал); нет — по ближайшему городу, см. Game.baseName. */
+  name?: string;
 }
 
 export type Structure = TownBuilding | Industry | Station | Warehouse | Annex | BuildBase;

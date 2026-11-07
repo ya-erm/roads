@@ -10,8 +10,33 @@ import { anchorOf, type End, road, runSeconds, STREET, withoutCitizens } from '.
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' };
 
-function buildGame(extra: Partial<WorldSettings> = {}): Game {
+/** «Со строительством», баз нет — первую игрок ставит сам. */
+function bareGame(extra: Partial<WorldSettings> = {}): Game {
   return withoutCitizens(new Game({ ...WORLD, construction: 'build', ...extra }));
+}
+
+/**
+ * Первая база — как поставил бы игрок: у улиц самого большого города, первое место по кругу, где площадка встаёт
+ * без сноса домов.
+ */
+function firstBase(game: Game): BuildBase {
+  const town = [...game.towns].sort((a, b) => b.population - a.population || a.id - b.id)[0];
+  for (const k of [1, 0.75, 1.3, 0.5, 1.7]) {
+    for (let i = 0; i < 24; i++) {
+      const a = (i / 24) * Math.PI * 2;
+      const p = { x: town.center.x + Math.cos(a) * town.radius * k, y: town.center.y + Math.sin(a) * town.radius * k };
+      const plan = game.basePlan(p);
+      if (plan.ok && !plan.demolish.length && game.buildBase(p) === null) return [...game.construction.crews.bases.values()][0];
+    }
+  }
+  throw new Error('нет места для базы');
+}
+
+/** «Со строительством» и первая база у самого большого города. */
+function buildGame(extra: Partial<WorldSettings> = {}): Game {
+  const game = bareGame(extra);
+  firstBase(game);
+  return game;
 }
 
 /** Дорога проектом — как рисует игрок (план с project). */
@@ -348,14 +373,19 @@ describe('Стройка дорог: «Со строительством»', () 
 });
 
 describe('Стройка дорог: базы и бригады', () => {
-  it('первая база — бесплатно, у самого большого города, с бригадой; новая стоит денег', () => {
-    const game = buildGame();
+  it('первую базу ставит игрок, где хочет, — бесплатно и с бригадой; новая стоит денег', async () => {
+    const { advise } = await import('./advisor');
+    const game = bareGame();
     const crews = game.construction.crews;
+    // Сама база не появляется: советник зовёт поставить, плата — ноль.
+    expect(crews.bases.size).toBe(0);
+    expect(game.firstBase).toBe(true);
+    expect(advise(game).find((a) => a.kind === 'noBase')?.fix).toEqual({ kind: 'base' });
+    const base = firstBase(game);
     expect(crews.bases.size).toBe(1);
     expect(crews.brigades.size).toBe(CONSTRUCTION.base.brigades);
-    const base = [...crews.bases.values()][0];
-    const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
-    expect(Math.hypot(base.fp.center.x - town.center.x, base.fp.center.y - town.center.y)).toBeLessThan(town.radius * 2);
+    expect(game.firstBase).toBe(false);
+    expect(advise(game).some((a) => a.kind === 'noBase')).toBe(false);
     expect(game.money).toBe(WORLD.money);
     // Ворота базы — узел дороги, куда можно доехать.
     expect(game.onRoad(base.nodeId)).toBe(true);
@@ -367,6 +397,24 @@ describe('Стройка дорог: базы и бригады', () => {
       expect(money - game.money).toBe(plan.cost);
       expect(plan.cost).toBeGreaterThanOrEqual(CONSTRUCTION.base.cost);
     }
+  });
+
+  it('название базы — по ближайшему городу, вторая там же — с номером; переименовать и вернуть', () => {
+    const game = buildGame();
+    const base = [...game.construction.crews.bases.values()][0];
+    const town = [...game.towns].sort((a, b) => b.population - a.population || a.id - b.id)[0];
+    expect(game.baseName(base.id)).toBe(town.name);
+    const second = crewAt(game, { ...base.fp.center });
+    expect(game.baseName(second.id)).toBe(`${town.name} 2`);
+    game.renameBase(base.id, '  Северная  ');
+    expect(game.baseName(base.id)).toBe('Северная');
+    // Первая переименована — вторая у города теперь одна по имени города.
+    expect(game.baseName(second.id)).toBe(town.name);
+    // Название уходит в сохранение и возвращается.
+    const loaded = new Game(WORLD, game.toSave());
+    expect(loaded.baseName(base.id)).toBe('Северная');
+    game.renameBase(base.id, '   ');
+    expect(game.baseName(base.id)).toBe(town.name);
   });
 
   it('бригада едет к стройке по дороге — машиной в общем потоке, и строит, когда доехала', () => {

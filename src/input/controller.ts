@@ -3360,7 +3360,7 @@ export class Controller {
             o.catchmentR = CONSTRUCTION.reach;
           }
           o.label = plan.ok
-            ? { text: `База стройки · ${money(plan.cost)}${plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : ''} · Esc — отмена`, ok: true }
+            ? { text: `База стройки · ${plan.cost ? money(plan.cost) : 'бесплатно'}${plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : ''} · Esc — отмена`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
@@ -3426,7 +3426,7 @@ export class Controller {
         const st = g.structureAt(p);
         if (st?.type === 'station') o.label = { text: st.name, ok: true };
         else if (st?.type === 'warehouse') o.label = { text: `Склад: ${g.stations.get(st.stationId)?.name ?? ''}`, ok: true };
-        else if (st?.type === 'base') o.label = { text: `База стройки · 🚚 ${g.construction.crews.of(st.id).length}`, ok: true };
+        else if (st?.type === 'base') o.label = { text: `База «${g.baseName(st.id)}» · 🚚 ${g.construction.crews.of(st.id).length}`, ok: true };
         else if (st?.type === 'annex') o.label = { text: `Пристройка: ${g.industries.find((i) => i.id === st.industryId)?.name ?? ''}`, ok: true };
         else if (st?.type === 'industry') o.label = { text: st.name, ok: true };
         else if (st?.type === 'building') {

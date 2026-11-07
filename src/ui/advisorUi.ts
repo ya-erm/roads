@@ -30,6 +30,7 @@ const KIND_GLYPH: Record<AdviceKind, string> = {
   buildMoney: '🏗',
   buildIdle: '🚧',
   buildFar: '🚚',
+  noBase: '🏗',
 };
 
 const LEVEL_TIP: Record<AdviceLevel, string> = {
@@ -89,6 +90,8 @@ export function fixLabel(g: Game, fix: AdviceFix): string {
       return '+ Маршрут отсюда';
     case 'loan':
       return 'Взять кредит';
+    case 'base':
+      return '＋ База · бесплатно';
   }
 }
 

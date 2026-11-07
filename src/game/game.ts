@@ -640,8 +640,6 @@ export class Game implements BuildContext {
     this.industries = world.industries;
     this.net.rebuild();
     this.roads.changed();
-    // «Со строительством»: первая строительная база — бесплатно, у стартового города.
-    if (this.buildMode) this.autoBase();
     const s = this.settings;
     this.journal.add('game', { seed: s.seed, size: s.size, towns: this.towns.length, industries: this.industries.length, water: s.water, money: this.money });
     if (this.settings.scenario) this.attachScenario(Scenario.create(this));
@@ -1061,9 +1059,9 @@ export class Game implements BuildContext {
   /**
    * Где встанет строительная база у точки p: площадка вдоль ближайшей открытой дороги, с той стороны, где курсор;
    * ворота — ближайший узел этой дороги, куда можно доехать. Дома под площадкой сносятся (за доплату),
-   * станции, предприятия, дороги, пути и вода мешают. free — первая база, бесплатно.
+   * станции, предприятия, дороги, пути и вода мешают. free — бесплатно: первую базу игрок ставит сам и даром.
    */
-  basePlan(p: Vec, free = false): { ok: boolean; reason?: string; cost: number; fp: Footprint | null; nodeId?: number; demolish: number[] } {
+  basePlan(p: Vec, free = this.firstBase): { ok: boolean; reason?: string; cost: number; fp: Footprint | null; nodeId?: number; demolish: number[] } {
     const B = CONSTRUCTION.base;
     const net = this.roads.open;
     const cost0 = free ? 0 : B.cost;
@@ -1093,7 +1091,7 @@ export class Game implements BuildContext {
   }
 
   /** Ставит строительную базу у точки p (с бригадами по умолчанию). null — поставили, иначе причина. */
-  buildBase(p: Vec, free = false): string | null {
+  buildBase(p: Vec, free = this.firstBase): string | null {
     const plan = this.basePlan(p, free);
     if (!plan.ok || !plan.fp || plan.nodeId === undefined) return plan.reason ?? 'Нельзя';
     // База в отмену (Ctrl+Z) не входит: снесённые под ней дома прежние снимки вернули бы под площадку — забываем их.
@@ -1135,21 +1133,43 @@ export class Game implements BuildContext {
     return true;
   }
 
+  /** «Со строительством» баз ещё нет: первую игрок ставит сам, где хочет, — бесплатно. */
+  get firstBase(): boolean {
+    return this.buildMode && this.construction.crews.bases.size === 0;
+  }
+
   /**
-   * Первая база — бесплатно, у стартового (самого большого) города: вдоль его улиц у края застройки, первое место,
-   * где площадка встаёт. Ничего не нашлось — базы нет, её ставят сами.
+   * Название базы: своё, если игрок его дал, иначе — ближайший город («Сосновка»); у второй базы того же города —
+   * с номером («Сосновка 2», по порядку постройки).
    */
-  private autoBase(): void {
-    const town = [...this.towns].sort((a, b) => b.population - a.population || a.id - b.id)[0];
-    if (!town) return;
-    for (const k of [1, 0.75, 1.3, 0.5, 1.7]) {
-      for (let i = 0; i < 24; i++) {
-        const a = (i / 24) * Math.PI * 2;
-        const p = { x: town.center.x + Math.cos(a) * town.radius * k, y: town.center.y + Math.sin(a) * town.radius * k };
-        const plan = this.basePlan(p, true);
-        if (plan.ok && !plan.demolish.length && this.buildBase(p, true) === null) return;
+  baseName(id: number): string {
+    const bases = this.construction.crews.bases;
+    const base = bases.get(id);
+    if (!base) return 'База';
+    if (base.name) return base.name;
+    const town = (b: BuildBase) => {
+      let best: Town | undefined;
+      let bd = Infinity;
+      for (const t of this.towns) {
+        const d = dist(t.center, b.fp.center) - t.radius;
+        if (d < bd || (d === bd && best && t.id < best.id)) [best, bd] = [t, d];
       }
-    }
+      return best?.name ?? 'База';
+    };
+    const own = town(base);
+    const same = [...bases.values()].filter((b) => !b.name && b.id <= id && town(b) === own).length;
+    return same > 1 ? `${own} ${same}` : own;
+  }
+
+  /** Своё название базы: пробелы по краям обрезаются; пустое — снова по ближайшему городу. */
+  renameBase(id: number, name: string): void {
+    const base = this.construction.crews.bases.get(id);
+    if (!base) return;
+    const clean = name.trim().slice(0, 40);
+    if (clean === this.baseName(id)) return;
+    if (clean) base.name = clean;
+    else delete base.name;
+    this.construction.stamp++;
   }
 
   isWater(p: Vec, margin = 0): boolean {

@@ -32,7 +32,9 @@ export type AdviceKind =
   /** Проект заложен давно, а стройка так и не началась: нет свободной бригады или базы. */
   | 'buildIdle'
   /** Бригада работает далеко от своей базы — вдвое медленнее и хуже. */
-  | 'buildFar';
+  | 'buildFar'
+  /** «Со строительством» базы ещё нет: первую — бесплатно, где удобно игроку. */
+  | 'noBase';
 
 /** Важность: alert — что-то стоит, warn — теряете деньги или рост, tip — можно лучше. */
 export type AdviceLevel = 'alert' | 'warn' | 'tip';
@@ -46,7 +48,9 @@ export type AdviceFix =
   | { kind: 'depot'; station: number }
   /** Начать новый маршрут с этой станции. */
   | { kind: 'route'; station: number }
-  | { kind: 'loan' };
+  | { kind: 'loan' }
+  /** Поставить строительную базу: режим размещения на карте. */
+  | { kind: 'base' };
 
 export interface Advice {
   /** Устойчивый ключ: вид и предмет — чтобы совет можно было скрыть и узнать снова. */
@@ -177,12 +181,24 @@ function building(game: Game, out: Advice[]): void {
 function crews(game: Game, out: Advice[]): void {
   const c = game.construction;
   const crews = c.crews;
+  if (game.firstBase) {
+    // Пока базы нет, строить некому: заложенные проекты ждут — тогда это уже предупреждение.
+    const waiting = c.list().length;
+    out.push({
+      key: 'noBase',
+      kind: 'noBase',
+      level: waiting ? 'warn' : 'tip',
+      title: 'Поставьте строительную базу',
+      detail: `Первая база — бесплатно и с бригадой. Ставьте у дороги ближе к будущим стройкам: оттуда бригада строит быстрее.${waiting ? ` Ждут бригаду: ${waiting} ${plural(waiting, 'проект', 'проекта', 'проектов')}.` : ''}`,
+      fix: { kind: 'base' },
+    });
+  }
   for (const i of c.list()) {
     const p = i.project;
     if (p.paused || p.stalled !== undefined || i.done > 0 || game.time - p.created < CONSTRUCTION.idleWarn || crews.working(p.id).length) continue;
     const coming = crews.assigned(p.id).length > 0;
     const why = !crews.bases.size
-      ? 'нет строительной базы — поставьте её у дороги («＋ База» на плашке стройки)'
+      ? 'нет строительной базы — поставьте её у дороги («＋ База» на плашке стройки, первая бесплатно)'
       : !crews.brigades.size
         ? 'на базах нет бригад — наймите («＋ Бригада»)'
         : coming
@@ -209,7 +225,7 @@ function crews(game: Game, out: Advice[]): void {
       kind: 'buildFar',
       level: 'tip',
       title: 'Бригада далеко от базы',
-      detail: `Стройка в ${(d / 1000).toFixed(1)} км от базы: бригада возит грунт и асфальт издалека — строит в ${slow.toFixed(1)} раза медленнее. Поставьте базу ближе к стройке.`,
+      detail: `Стройка в ${(d / 1000).toFixed(1)} км от базы «${game.baseName(base.id)}»: бригада возит грунт и асфальт издалека — строит в ${slow.toFixed(1)} раза медленнее. Поставьте базу ближе к стройке.`,
       at: b.pos,
     });
   }
