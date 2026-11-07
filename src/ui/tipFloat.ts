@@ -2,7 +2,8 @@
  * Свои подсказки панелей: у элемента с data-tip при наведении — плашка с этим текстом, сразу (браузерный title
  * появляется с задержкой). Одна на всю страницу, в body и с position: fixed — её не обрезает прокрутка панели; у краёв
  * экрана она сдвигается внутрь, нет места сверху — встаёт под элементом (tipPlacement). Длинный текст переносится
- * (max-width в CSS). data-tip-end — по правому краю элемента.
+ * (max-width в CSS). data-tip-end — по правому краю элемента. data-tip-keys — горячие клавиши через «|», они
+ * встают после текста значками <kbd>.
  */
 import { tipPlacement } from '../render/tooltipLayout';
 
@@ -16,6 +17,8 @@ export function installTips(doc: Document = document): HTMLElement {
   let anchor: HTMLElement | SVGElement | null = null;
   let pointer = { x: -1, y: -1 };
   let frame = 0;
+  /** Что сейчас на плашке: текст и клавиши. */
+  let shown = '';
 
   const hide = () => {
     anchor = null;
@@ -29,7 +32,19 @@ export function installTips(doc: Document = document): HTMLElement {
     if (!anchor.isConnected) anchor = tipOf(doc.elementFromPoint(pointer.x, pointer.y));
     const text = anchor?.dataset.tip;
     if (!anchor || !text) return hide();
-    if (el.textContent !== text) el.textContent = text;
+    const keys = anchor.dataset.tipKeys ?? '';
+    if (shown !== `${text}\n${keys}`) {
+      shown = `${text}\n${keys}`;
+      el.textContent = text;
+      // Горячие клавиши — значками <kbd> после текста: «F8 или ⌘⇧B».
+      keys
+        .split('|')
+        .filter(Boolean)
+        .forEach((k, i) => {
+          el.append(i ? ' или ' : ' ');
+          el.appendChild(doc.createElement('kbd')).textContent = k;
+        });
+    }
     el.hidden = false;
     const view = doc.defaultView!;
     const { x, y } = tipPlacement(anchor.getBoundingClientRect(), el.offsetWidth, el.offsetHeight, view.innerWidth, view.innerHeight, anchor.hasAttribute('data-tip-end'));

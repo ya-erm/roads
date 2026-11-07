@@ -9,6 +9,11 @@
  * (с параметрами `--area`/`--camera` для npm run shot), в meta.json и в сохранение (bugSpot) — открытая партия
  * покажет участок рамкой. Без рамки участок — по обведённому пометками или по кадру; камера пишется всегда.
  *
+ * Горячая клавиша (F8 или Ctrl/Cmd+Shift+B, bugreport/hotkey.ts) открывает то же окно, не трогая мышь: на снимке
+ * остаётся подсветка под курсором, предпросмотр стройки и подпись у курсора. Снимок, журнал и сохранение берутся
+ * в самый момент нажатия, до открытия окна. Кнопка мыши, зажатая в этот момент (тянули дорогу или узел) и
+ * отпущенная уже в окне, доходит до игры при его закрытии — там же, где был курсор на снимке.
+ *
  * Снимок можно не прикладывать (текстовая идея) — тогда редактор пометок гаснет. Имя запоминается в браузере.
  * Значок скачивания рядом с «Отмена» собирает всё одним ZIP-архивом (bugreport/archive.ts, zip.ts).
  *
@@ -24,6 +29,7 @@ import { loadAuthor, saveAuthor } from '../bugreport/author';
 import { captureScreen, type Shot } from '../bugreport/capture';
 import { canvasMeasure, drawArea, drawMarks, haloFor, markFont, outputSize, renderSketch } from '../bugreport/draw';
 import { areaSize, mapSpot, sketchArea, withSpot, worldBox, type MapSpot, type SnapCamera } from '../bugreport/spot';
+import { bugHotkeyLabels, isBugHotkey, isMacPlatform } from '../bugreport/hotkey';
 import { BUG_BUTTON, bugButtonSpot } from '../bugreport/layout';
 import {
   addMark,
@@ -268,12 +274,21 @@ class BugReport {
   /** Ключ этого отчёта: повторная отправка после сбоя не создаст на доске вторую карточку. */
   private reportKey = newReportKey();
   private speedBefore = 0;
+  /** Кнопки мыши, зажатые сейчас, и где курсор (с Shift/Alt/Ctrl) — по событиям до окна. */
+  private readonly held = new Set<number>();
+  private pointer: MouseEventInit = { clientX: 0, clientY: 0 };
+  /** Курсор в момент снимка. */
+  private pointerAtShot: MouseEventInit = this.pointer;
+  /** Кнопки, зажатые при открытии окна, и те из них, что отпустили уже в окне: их отпускание игра получит при закрытии. */
+  private heldAtOpen = new Set<number>();
+  private releasedInside: number[] = [];
 
   constructor(private readonly deps: BugReportDeps) {
     this.button = document.createElement('button');
     this.button.className = 'bug-btn';
     this.button.setAttribute('data-shot-skip', '');
     this.button.dataset.tip = 'Сообщить об ошибке: снимок экрана с пометками, журнал и сохранение партии';
+    this.button.dataset.tipKeys = bugHotkeyLabels(isMacPlatform(navigator)).join('|');
     this.button.dataset.tipEnd = '';
     this.button.setAttribute('aria-label', 'Сообщить об ошибке');
     this.button.innerHTML = bugSvg(26);
@@ -329,6 +344,28 @@ class BugReport {
     // Клавиши — раньше игры (слушатель на window в фазе захвата, поставлен до панелей): пока окно открыто,
     // до карты и панелей не доходит ни одна.
     window.addEventListener('keydown', (e) => this.onKey(e), { capture: true });
+    // Мышь — для горячей клавиши: где курсор и какие кнопки зажаты в момент снимка.
+    const mods = (e: MouseEvent): MouseEventInit => ({ clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey, altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey });
+    window.addEventListener('mousemove', (e) => !this.isOpen && (this.pointer = mods(e)), { capture: true, passive: true });
+    window.addEventListener(
+      'mousedown',
+      (e) => {
+        if (this.isOpen) return;
+        this.pointer = mods(e);
+        this.held.add(e.button);
+      },
+      { capture: true },
+    );
+    window.addEventListener(
+      'mouseup',
+      (e) => {
+        this.held.delete(e.button);
+        // Тянули на карте и отпустили уже в окне отчёта: до игры отпускание дойдёт при закрытии окна.
+        if (this.isOpen && this.heldAtOpen.delete(e.button)) this.releasedInside.push(e.button);
+      },
+      { capture: true },
+    );
+    window.addEventListener('blur', () => this.held.clear());
 
     const place = () => this.place();
     window.addEventListener('resize', place);
@@ -420,8 +457,10 @@ class BugReport {
     this.busy = true;
     this.button.classList.add('busy');
     const game = this.deps.game();
+    this.pointerAtShot = this.pointer;
     try {
-      // Журнал и сохранение — в тот же момент, что и снимок.
+      // Журнал и сохранение — в тот же момент, что и снимок. Всё это и сам снимок (карта и копия панелей) берутся
+      // сразу, в обработчике нажатия: подсветка под курсором и предпросмотр стройки ещё на экране.
       const r = this.deps.canvas.getBoundingClientRect();
       const moment: Moment = {
         at: new Date(),
@@ -455,6 +494,8 @@ class BugReport {
     this.include.shot = this.include.journal = this.include.save = true;
     this.thanks.classList.add('hidden');
     this.isOpen = true;
+    this.heldAtOpen = new Set(this.held);
+    this.releasedInside = [];
     this.screen.classList.remove('hidden');
     this.button.classList.add('hidden');
     this.screen.querySelector('[data-bug-hudwarn]')!.classList.toggle('hidden', this.shot!.hud);
@@ -492,6 +533,12 @@ class BugReport {
     if (game.speed === 0) game.speed = this.speedBefore;
     this.shot = null;
     this.moment = null;
+    // Кнопку, зажатую на карте, отпустили в окне — игра узнаёт об этом сейчас, там же, где был курсор на снимке:
+    // протяжка заканчивается, как если бы её отпустили в тот момент (Ctrl+Z — отменить).
+    const released = this.releasedInside;
+    this.releasedInside = [];
+    this.heldAtOpen.clear();
+    for (const button of released) window.dispatchEvent(new MouseEvent('mouseup', { ...this.pointerAtShot, button, bubbles: true }));
   }
 
   // ---------- Инструменты и свойства ----------
@@ -962,6 +1009,13 @@ class BugReport {
   // ---------- Клавиши ----------
 
   private onKey(e: KeyboardEvent): void {
+    // Горячая клавиша — в любом инструменте, с зажатой кнопкой мыши и поверх других окон; игра её не видит.
+    if (isBugHotkey(e)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (!e.repeat && !this.isOpen) void this.open();
+      return;
+    }
     if (!this.isOpen) return;
     // Пока окно открыто, игра клавиш не видит; набор текста в полях идёт как обычно.
     e.stopImmediatePropagation();

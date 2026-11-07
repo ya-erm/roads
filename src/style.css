@@ -1123,6 +1123,21 @@ button.icon.menu-back {
   display: none;
 }
 
+/* Горячая клавиша в подсказке (data-tip-keys) — светлым значком на тёмной плашке. */
+.tip-float kbd {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
 /* Выключатель интервала в карточке маршрута — рядом со значением «Интервал»; не выше строки, как «Средняя скорость». */
 button.icon.toggle-spacing {
   display: inline-grid;
