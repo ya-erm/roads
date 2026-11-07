@@ -15,8 +15,10 @@
  * Готовые участки рисует обычная отрисовка дорог: у них уже нет Corridor.build.
  */
 import { CONSTRUCTION } from '../config';
-import { add, rightNormal, scale, sub, type Vec } from '../core/vec';
-import { convoyGap, frontOf, nextSite, type StageReach, stageLayout, stageSpans } from '../game/constructionWork';
+import { add, scale, sub, type Vec } from '../core/vec';
+import { frontOf, nextSite, type StageReach, stageLayout, stageSpans } from '../game/constructionWork';
+import { CREW_UNITS, crewRows, fillet, polyAt, polyLength, polyProject, stageSlots } from '../game/crewLane';
+import { drawVehicleArt } from './vehicleArt';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import type { LaneRenderer } from '../lanes/draw';
 import { edgesAt, pointOff, stations } from '../lanes/geometry';
@@ -547,17 +549,6 @@ export interface CrewMachine {
   active: boolean;
 }
 
-/**
- * Где машины этапов ждут своего начала на обочине (метров позади начала участка) и стоят, кончив (столько же до
- * конца), когда колонна не идёт дальше по оси (crewConvoy): разметка — у самого начала, покрытие и грейдер — дальше,
- * друг за другом без нахлёста. Стоянка у конца участка совпадает с ожиданием на обочине в начале следующего.
- */
-const CREW_SLOT = [30, 10, 0] as const;
-/** За столько метров своего края машина въезжает с обочины на полотно (и в конце этапа съезжает на неё). */
-const CREW_RAMP = 24;
-/** Длина машин этапа (drawMachines: от носа до хвоста, с зазором) — на столько за ней держится следующая в колонне. */
-const CREW_LEN = [23, 19, 8] as const;
-
 /** Другое полотно у стыка node, если там ровно два полотна и одно из них c (прямое продолжение, не поворот и не развилка). */
 function seamNext(net: LaneNet, node: number, c: Corridor): Corridor | null {
   const n = net.node(node);
@@ -567,115 +558,55 @@ function seamNext(net: LaneNet, node: number, c: Corridor): Corridor | null {
 }
 
 /**
- * Колонна техники на строящемся участке c (src/game/constructionWork.ts, stageSpans): у каждого этапа — своя машина
- * у своего края. Если участок прямо продолжает готовую дорогу (стык без поворота и развилки, например только что
- * достроенный участок того же проекта), колонна стоит и едет по оси: не начатые этапы ждут за началом, друг за другом
- * (CREW_LEN). Если следующий участок проекта (nextSite) прямо продолжает этот от его конца, кончившие этапы ждут на оси
- * у конца, а догоняющие встают за ними — колонна переходит на следующий участок без съезда с полотна. Иначе, как
- * раньше: не начатый ждёт на обочине позади начала и за первые CREW_RAMP метров плавно въезжает на полотно к краю;
- * кончивший, пока следующий этап идёт свои CREW_RAMP метров, отъезжает на обочину к стоянке у конца участка (разметка
- * уходит туда сама в самом конце).
+ * Колонна техники на строящемся участке c — без бригады с её полосой (проверки, показ): те же места этапов
+ * (crewLane.stageSlots), что у бригады на её полосе, и всегда на оси, без съезда на обочину. Позади начала — по
+ * готовой дороге, прямо продолжающей участок (стык без поворота и развилки), иначе прямо назад по оси; за концом — по
+ * следующему участку проекта, если он прямо продолжает этот от его конца (колонна перейдёт на него без съезда).
  */
 export function crewConvoy(net: LaneNet, c: Corridor): CrewMachine[] {
   const b = c.build;
   if (!b) return [];
   const L = c.length;
   const fronts = stageSpans(b.done, L);
-  const ramp = Math.min(CREW_RAMP, L / 2);
   const raised = Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
-  const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
   const start = b.fromB ? c.b : c.a;
   const end = b.fromB ? c.a : c.b;
-  // Откуда колонна пришла по оси (готовое прямое продолжение у начала) и пойдёт ли дальше по оси (следующий участок
-  // проекта — прямое продолжение от конца и заполняется от него).
   const before = seamNext(net, start, c);
   const from = before && !before.build ? before : null;
   const next = nextSite(net, c, buildingCorridors(net));
-  const onward = next && seamNext(net, end, c) === next.c && (next.fromB ? next.c.b : next.c.a) === end ? next.c : null;
-  // Интервал в колонне — не больше отставания этапов (convoyGap) и у соседнего участка тоже: на стыке он один и тот же.
-  const spacing = (k: number, other: Corridor | null) => Math.min(CREW_LEN[k], convoyGap(L), other ? convoyGap(other.length) : Infinity);
-  /** Точка на u метров от начала заполнения (за концами — по касательной), сдвинутая вправо по ходу на lat. */
-  const place = (u: number, side: number): { pos: Vec; dir: Vec } => {
-    // Позади начала, на оси готовой дороги, откуда пришла колонна, — по её полотну.
-    if (u < 0 && from) {
-      const atA = from.a === start;
-      const s = atA ? Math.min(-u, from.length) : Math.max(0, from.length + u);
-      const t = from.lut.tangentAt(s);
-      let pos = from.lut.pointAt(s);
-      if (Math.max(net.node(from.a).level, net.node(from.b).level) > 0) pos = add(pos, bridgeLook(deckAlong(net, from, s)).lift);
-      return { pos, dir: atA ? scale(t, -1) : t };
-    }
-    const s = b.fromB ? L - u : u;
-    const sc = Math.max(0, Math.min(L, s));
-    const t = c.lut.tangentAt(sc);
-    const dir = b.fromB ? scale(t, -1) : t;
-    // Обочина справа по ходу: у стройки от конца b это левая кромка полотна.
-    const e = edgesAt(c, sc) ?? [-3.5, 3.5];
-    const edge = (b.fromB ? -e[0] : e[1]) + ROAD_MARGIN + 3;
-    let pos = add(c.lut.pointAt(sc), scale(t, s - sc));
-    pos = add(pos, scale(rightNormal(dir), edge * side));
-    if (raised) pos = add(pos, bridgeLook(deckAlong(net, c, sc)).lift);
-    return { pos, dir };
+  const onward = next && seamNext(net, end, c) === next.c && (next.fromB ? next.c.b : next.c.a) === end ? next : null;
+  // Полоса колонны: позади начала, сам участок по ходу заполнения, следующий участок.
+  const pts: Vec[] = [];
+  const along = (k: Corridor, s0: number, s1: number) => {
+    const n = Math.max(1, Math.ceil(Math.abs(s1 - s0) / 5));
+    for (let i = 0; i <= n; i++) pts.push(k.lut.pointAt(s0 + ((s1 - s0) * i) / n));
   };
-  // Каждой машине — где она вдоль участка (u, метров от начала заполнения), насколько на обочине (side) и работает ли.
-  const at = ([0, 1, 2] as const).map((k) => {
-    const f = fronts[k];
-    const slot = CREW_SLOT[k];
-    if (f >= L - 1e-6) {
-      // Кончил: дальше по оси — ждёт у конца; иначе с полотна — на обочину к стоянке у конца, пока следующий этап
-      // проходит CREW_RAMP.
-      if (onward) return { u: L, side: 0, active: false };
-      const next = k < 2 ? fronts[k + 1] : L;
-      const back = clamp01((next - (L - convoyGap(L))) / ramp);
-      return { u: L - slot * back, side: back, active: false };
-    }
-    if (f <= 0) return from ? { u: 0, side: 0, active: false } : { u: -slot, side: 1, active: false };
-    // Разметка (за ней уже никого) в самом конце сама уходит на обочину — к месту, где будет ждать на следующем
-    // участке, если колонна не идёт по оси дальше.
-    const out = k === 2 && !onward ? clamp01((f - (L - ramp / 2)) / (ramp / 2)) : 0;
-    if (from) return { u: f, side: out, active: true };
-    // Въезд с обочины в начале этапа.
-    const into = clamp01(f / ramp);
-    return { u: -slot + (f + slot) * into, side: Math.max(1 - into, out), active: true };
-  });
-  // На оси машины колонны не наезжают друг на друга: следующая — за хвостом предыдущей (у начала участка интервал —
-  // как у пришедшей колонны, у конца — как у той, что пойдёт дальше).
-  for (const k of [1, 2] as const) {
-    const lead = at[k - 1];
-    if (at[k].side !== 0 || lead.side !== 0) continue;
-    const cap = lead.u - spacing(k - 1, lead.u < L / 2 ? from : onward);
-    if (at[k].u > cap) at[k] = { u: cap, side: 0, active: false };
+  if (from) along(from, from.a === start ? Math.min(80, from.length) : Math.max(0, from.length - 80), from.a === start ? 0 : from.length);
+  else {
+    const t = c.lut.tangentAt(b.fromB ? L : 0);
+    pts.push(add(c.lut.pointAt(b.fromB ? L : 0), scale(t, b.fromB ? 80 : -80)));
   }
-  return at.map((m, k) => ({ ...place(m.u, m.side), stage: k as 0 | 1 | 2, active: m.active }));
+  along(c, b.fromB ? L : 0, b.fromB ? 0 : L);
+  if (onward) along(onward.c, onward.fromB ? onward.c.length : 0, onward.fromB ? 0 : onward.c.length);
+  const path = fillet(pts);
+  const probe = Math.min(15, L / 2);
+  const zero = polyProject(path, c.lut.pointAt(b.fromB ? L - probe : probe)) - probe;
+  const slots = stageSlots(b.done, L, {
+    ahead: siteKind(net, c) === 'road',
+    ext: onward ? Math.max(0, polyLength(path) - (zero + L)) : 0,
+    extAhead: !!onward && siteKind(net, onward.c) === 'road',
+  });
+  return slots.map((u, k) => {
+    const at = polyAt(path, zero + u);
+    const s = b.fromB ? L - u : u;
+    const pos = raised && u >= 0 && u <= L ? add(at.pos, bridgeLook(deckAlong(net, c, s)).lift) : at.pos;
+    const f = fronts[k];
+    return { pos, dir: at.dir, stage: k as 0 | 1 | 2, active: f > 0 && f < L - 1e-6 && Math.abs(u - f) < 1 };
+  });
 }
 
-/** Полуширина машины этапа поперёк хода (drawMachines, с увеличением) — на столько ряд техники выступает от своей оси. */
-const MACHINE_HALF = 3;
-/** Ряды техники бригад на месте — не дальше стольких метров друг от друга (на широком полотне). */
-const ROW_STEP = 5;
-
-/**
- * Сдвиги рядов техники n бригад на участке c (вправо по ходу машины, м; для drawMachines shift): ряды — бок о бок
- * поперёк полотна, середина — посередине полотна у края работ, шаг — не больше ROW_STEP и такой, чтобы крайние ряды
- * не вылезали за кромки с обочиной (ROAD_MARGIN). На однополосном (съезд, заезд) два ряда — плотно, в пределах полотна
- * и обочины. Одна бригада — на месте колонны (0).
- */
-export function crewRows(c: Corridor, n: number): number[] {
-  if (n <= 1) return [0];
-  const b = c.build;
-  const L = c.length;
-  const f = b ? frontOf(b.done, L).s : 0;
-  const s = Math.max(0, Math.min(L, b?.fromB ? L - f : f));
-  const e = edgesAt(c, s) ?? [-3.5, 3.5];
-  // Полоса для техники — полотно с обочинами; при ходе от конца b «вправо по ходу» — влево по оси полотна.
-  const sign = b?.fromB ? -1 : 1;
-  const lo = e[0] - ROAD_MARGIN;
-  const hi = e[1] + ROAD_MARGIN;
-  const mid = ((lo + hi) / 2) * sign;
-  const room = Math.max(0, (hi - lo) / 2 - MACHINE_HALF);
-  const step = Math.min(ROW_STEP, (2 * room) / (n - 1));
-  return Array.from({ length: n }, (_, k) => mid + (k - (n - 1) / 2) * step);
-}
+/** Ряды техники бригад на участке — поровну по ширине полотна (src/game/crewLane.ts). */
+export { crewRows };
 
 /** Площадка строительной базы: щебень за забором, вагончик, кучи песка и щебня. */
 export function drawBases(ctx: CanvasRenderingContext2D, bases: Iterable<BuildBase>, view: Box): void {
@@ -727,51 +658,24 @@ export function baseBox(b: BuildBase): Box {
 
 /**
  * Техника бригады в точке at, носом по dir (в мире, метрами): этап 0 — грейдер и самосвал, 1 — асфальтоукладчик
- * и каток, 2 — машина разметки. light — маячок горит (работают). На мосту (kind) этап 0 — автокран со стрелой и
- * бетоновоз, в тоннеле — проходческий щит (structureArt); t — время игры, с: стрела качается, барабан и ротор крутятся.
+ * и каток, 2 — машина разметки — тем же рисунком, что в потоке (vehicleArt, crewLane.CREW_UNITS). light — маячок
+ * горит (работают). На мосту (kind) этап 0 — автокран со стрелой и бетоновоз, в тоннеле — проходческий щит
+ * (structureArt); t — время игры, с: стрела качается, барабан и ротор крутятся.
  */
 export function drawMachines(ctx: CanvasRenderingContext2D, at: Vec, dir: Vec, stage: 0 | 1 | 2, light: boolean, shift = 0, kind: SiteKind = 'road', t = 0): void {
+  if (stage !== 0 || kind === 'road') {
+    const u = CREW_UNITS[stage];
+    const pos = shift ? add(at, scale({ x: -dir.y, y: dir.x }, shift)) : at;
+    drawVehicleArt(ctx, { kind: 'truck', body: u.body, length: u.length, width: u.width, color: '#f2b81d', pos, dir, beacon: light }, { detailed: true, halo: 0 });
+    return;
+  }
   ctx.save();
   ctx.translate(at.x, at.y);
   ctx.rotate(Math.atan2(dir.y, dir.x));
   ctx.translate(0, shift);
   // Чуть крупнее настоящих: на обзорном зуме технику должно быть видно.
   ctx.scale(1.35, 1.35);
-  const box =(x: number, y: number, w: number, h: number, fill: string, stroke = '#6b5410') => {
-    ctx.fillStyle = fill;
-    ctx.strokeStyle = stroke;
-    ctx.lineWidth = 0.35;
-    ctx.beginPath();
-    ctx.rect(x, y, w, h);
-    ctx.fill();
-    ctx.stroke();
-  };
-  let beacon = -1.8;
-  if (stage === 0 && kind === 'bridge') beacon = drawCraneSet(ctx, t);
-  else if (stage === 0 && kind === 'tunnel') beacon = drawShieldSet(ctx, t);
-  else if (stage === 0) {
-    // Грейдер: длинная рама и нож поперёк, кабина сзади; за ним — самосвал с грунтом.
-    box(-6, -1.2, 7, 2.4, '#f2b81d');
-    ctx.fillStyle = '#4d4f55';
-    ctx.fillRect(-2.6, -2.2, 0.8, 4.4);
-    box(-5.6, -1.4, 2, 2.8, '#e0a81a');
-    box(-16, -1.8, 7.5, 3.6, '#f2b81d');
-    ctx.fillStyle = '#9a7b55';
-    ctx.fillRect(-15.5, -1.3, 5, 2.6);
-  } else if (stage === 1) {
-    // Асфальтоукладчик и каток с тёмным вальцом.
-    box(-5, -2.2, 5, 4.4, '#f2b81d');
-    ctx.fillStyle = '#2f3237';
-    ctx.fillRect(-6.2, -2.4, 1.2, 4.8);
-    box(-13, -1.6, 4, 3.2, '#f2b81d');
-    ctx.fillStyle = '#3d4148';
-    ctx.fillRect(-9, -1.9, 1.6, 3.8);
-  } else {
-    // Машина разметки: белый фургон с полосой.
-    box(-5, -1.3, 5, 2.6, '#f4f5f7', '#8a9099');
-    ctx.fillStyle = '#e8743b';
-    ctx.fillRect(-4.6, -0.3, 4.2, 0.6);
-  }
+  const beacon = kind === 'bridge' ? drawCraneSet(ctx, t) : drawShieldSet(ctx, t);
   // Маячок.
   ctx.fillStyle = light ? '#ff7a1a' : '#b8682c';
   ctx.beginPath();

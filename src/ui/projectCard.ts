@@ -160,9 +160,10 @@ function crewsHtml(game: Game, info: ProjectInfo): string {
       const st = CREW_STATE[b.state];
       const power = Math.round(crews.power(b, at) * 100);
       const where = game.brigadeWhere(b.id);
-      return `<button class="pc-crew ${b.state}" data-action="crew-show" data-id="${b.id}" data-tip="${esc(`Бригада ${n} базы «${game.baseName(b.base)}»: ${where?.text ?? st.text} — показать на карте`)}">
+      const pin = b.pinned ? `<span data-tip="Назначена вами: автоматика её отсюда не перебросит">📌</span> ` : '';
+      return `<button class="pc-crew ${b.state}" data-action="crew-show" data-id="${b.id}" data-tip="${esc(`Бригада ${n} базы «${game.baseName(b.base)}»: ${where?.text ?? st.text} — открыть бригаду и показать на карте`)}">
         <span class="bb-crew ${b.state}">🚚${st.mark ? `<i>${st.mark}</i>` : ''}</span>
-        <span class="pc-crew-name"><b>№${n}</b> · ${esc(game.baseName(b.base))}</span>
+        <span class="pc-crew-name"><b>№${n}</b> · ${pin}${esc(game.baseName(b.base))}</span>
         <span class="pc-crew-state">${st.mark} ${crewDoing(b)}</span>
         <span class="pc-mini" data-tip="${esc(`Сила бригады ${power}%: чем дальше база от стройки, тем медленнее`)}"><i style="width:${power}%"></i></span></button>`;
     })

@@ -577,8 +577,8 @@ describe('Стройка дорог: базы и бригады', () => {
       }
     }
     expect(drove).toBe(true);
-    // По дороге едет вся бригада: самосвал, грейдер и каток.
-    expect([...bodies].sort()).toEqual(['grader', 'roller', 'van']);
+    // По дороге едет вся бригада — та же техника, что работает на стройке: отсыпка, покрытие, разметка.
+    expect([...bodies].sort()).toEqual(['crewEarth', 'crewMarks', 'crewPave']);
     expect(crews.working(id).length).toBe(1);
     runSeconds(game, 3);
     expect(game.construction.list()[0].done).toBeGreaterThan(0);

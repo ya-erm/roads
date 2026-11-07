@@ -3,7 +3,7 @@ import { CONSTRUCTION } from '../config';
 import { Game } from '../game/game';
 import { anchorOf, road, runSeconds, STREET, withoutCitizens } from '../game/testkit';
 import type { WorldSettings } from '../world/settings';
-import { baseCardHtml } from './baseCard';
+import { baseCardHtml, baseRemoveConfirm } from './baseCard';
 import { buildTabHtml } from './constructionUi';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
@@ -31,7 +31,7 @@ function setup(): { game: Game; base: number; project: number; blocked: number }
 }
 
 describe('Карточка строительной базы', () => {
-  it('название, сводка, бригады и что делают, нанять и распустить, ближние стройки; сноса кнопкой нет', () => {
+  it('название, сводка, бригады и что делают, нанять и распустить, ближние стройки, снос кнопкой', () => {
     const { game, base, project, blocked } = setup();
     expect(game.hireBrigade(base)).toBeNull();
     runSeconds(game, 30);
@@ -53,14 +53,52 @@ describe('Карточка строительной базы', () => {
     expect(near).toBeGreaterThan(0);
     expect(far).toBeGreaterThan(near);
     expect(html).toContain('⛔ нет подъезда');
-    // Снос — только инструментом «Снос».
-    expect(html).not.toContain('base-remove');
-    expect(html).toContain('инструментом «Снос»');
+    // Снос — кнопкой «🚜 Снести базу» (подсказки «инструментом «Снос»» больше нет).
+    expect(html).toContain(`data-action="base-remove" data-id="${base}"`);
+    expect(html).toContain('🚜 Снести базу');
+    expect(html).not.toContain('Точно?');
+    expect(html).not.toContain('инструментом «Снос»');
     expect(html).not.toContain(' title=');
     // Переименование — поле ввода.
     expect(baseCardHtml(game, base, true)).toContain(`data-base-name="${base}"`);
     // Базы больше нет — записка.
     expect(baseCardHtml(game, -1)).toContain('Базы больше нет');
+  });
+
+  it('снос кнопкой: второе нажатие спрашивает «Точно?» с возвратом и куда бригады; снос — как «Сносом»', () => {
+    const { game, base } = setup();
+    // Единственная база: бригады распустят (первая база была бесплатной — без возврата за неё).
+    const plan = game.baseRemovePlan(base)!;
+    expect(plan.to).toBeNull();
+    const ask = baseCardHtml(game, base, false, true);
+    expect(ask).toContain('class="small bc-remove confirm"');
+    expect(ask).toContain(`Точно? ${plan.refund ? `+$${plan.refund.toLocaleString('ru-RU')}` : 'без возврата'}, бригады распустят`);
+    expect(ask).not.toContain('🚜 Снести базу');
+    expect(baseRemoveConfirm(game, base)).toContain('бригады распустят');
+
+    // Вторая база (платная) — по другую сторону той же дороги: у неё «+$N» и бригады → на первую.
+    const fp = game.construction.crews.bases.get(base)!.fp.center;
+    expect(game.buildBase({ x: fp.x, y: fp.y + 80 })).toBeNull();
+    const other = [...game.construction.crews.bases.keys()].find((k) => k !== base)!;
+    const second = game.baseRemovePlan(other!)!;
+    expect(second.refund).toBeGreaterThan(0);
+    expect(second.to).toBe(base);
+    const text = baseRemoveConfirm(game, other!);
+    expect(text).toContain(`+$${second.refund.toLocaleString('ru-RU')}`);
+    if (second.brigades) expect(text).toContain(`бригады → «${game.baseName(base)}»`);
+    // Подсказка у кнопки — та же строка, что у курсора в «Сносе».
+    expect(baseCardHtml(game, other!, false, true)).toContain('нажмите ещё раз, чтобы снести');
+
+    // Действие кнопки (hud: «base-remove» вторым нажатием) — Game.removeBase: деньги назад, бригады — на первую базу.
+    expect(game.hireBrigade(other!)).toBeNull();
+    const crews = game.construction.crews.of(base).length + game.construction.crews.of(other!).length;
+    const budget = game.budget;
+    const refund = game.baseRemovePlan(other!)!.refund;
+    expect(game.removeBase(other!)).toBeNull();
+    expect(game.budget).toBe(budget + refund);
+    expect(game.construction.crews.bases.has(other!)).toBe(false);
+    expect(game.construction.crews.of(base).length).toBe(crews);
+    expect(baseCardHtml(game, other!)).toContain('Базы больше нет');
   });
 
   it('строка базы на плашке — коротко: название, число бригад и сколько в деле; клик — карточка', () => {

@@ -7,14 +7,14 @@
  * - ближние стройки: как далеко от базы и вклад бригады отсюда (1 / (1 + d / reach)), можно ли доехать по дорогам;
  *   клик — к проекту и его карточке;
  * - «↔ Перенести» — площадка за курсором у дороги, как при постановке (Controller.startBaseMove; ещё — «Двигать» по ней);
- * - снос — не кнопкой, а инструментом «Снос» по площадке (подсказка значком).
+ * - «🚜 Снести базу» — со второго нажатия («Точно? +$N, бригады → «…»»), как Game.removeBase; ещё — «Сносом» по площадке.
  * Подсказки — data-tip (не системные).
  */
 import { CONSTRUCTION } from '../config';
 import { projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
-import { baseSvg, buildSvg } from './constructionUi';
+import { baseRemoveText, baseSvg, buildSvg } from './constructionUi';
 import { crewDoing } from './projectCard';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -41,8 +41,31 @@ export function baseCrewText(game: Game, b: Brigade): string {
   return blocked ? 'на базе · ждёт подъезда' : 'на базе';
 }
 
-/** Карточка базы id; renaming — вместо названия поле ввода. Базы нет (снесли) — короткая записка. */
-export function baseCardHtml(game: Game, id: number, renaming = false): string {
+/**
+ * Что спросить на кнопке сноса перед вторым нажатием: «Точно? +$20 000, бригады → «Липки»»; других баз нет —
+ * «бригады распустят»; первая была бесплатной — «без возврата». Те же числа, что у Game.baseRemovePlan.
+ */
+export function baseRemoveConfirm(game: Game, id: number): string {
+  const plan = game.baseRemovePlan(id);
+  if (!plan) return 'Базы нет';
+  const parts = [plan.refund ? `+${money(plan.refund)}` : 'без возврата'];
+  if (plan.brigades) parts.push(plan.to !== null ? `бригады → «${game.baseName(plan.to)}»` : `бригады распустят (+${money(plan.dismissRefund)})`);
+  return `Точно? ${parts.join(', ')}`;
+}
+
+/** Кнопка сноса: первое нажатие — вопрос (confirm), второе — снос (hud: «base-remove»). */
+function removeButton(game: Game, id: number, confirm: boolean): string {
+  const tip = `${baseRemoveText(game, id)}${confirm ? ' — нажмите ещё раз, чтобы снести' : ''}. Ещё можно «Сносом» по площадке`;
+  return `<button class="small bc-remove ${confirm ? 'confirm' : ''}" data-action="base-remove" data-id="${id}" data-tip="${esc(tip)}">${
+    confirm ? esc(baseRemoveConfirm(game, id)) : '🚜 Снести базу'
+  }</button>`;
+}
+
+/**
+ * Карточка базы id; renaming — вместо названия поле ввода; confirmRemove — кнопка сноса ждёт второго нажатия. Базы нет
+ * (снесли) — короткая записка.
+ */
+export function baseCardHtml(game: Game, id: number, renaming = false, confirmRemove = false): string {
   const close = `<button class="icon" data-action="close-sel" data-tip="Закрыть">✕</button>`;
   const crews = game.construction.crews;
   const base = crews.bases.get(id);
@@ -58,8 +81,8 @@ export function baseCardHtml(game: Game, id: number, renaming = false): string {
     ${summaryHtml(game, id)}
     ${crewsHtml(game, id)}
     ${nearHtml(game, id)}
-    <div class="pc-actions"><button class="small" data-action="base-move" data-id="${id}" data-tip="Перенести базу к другой дороге: за саму базу не платить, только за снос домов на новом месте. Свободные бригады приедут туда сами, работающие доделают своё и вернутся уже туда">↔ Перенести</button></div>
-    <p class="bc-remove muted" data-tip="Снести базу — инструментом «Снос» по её площадке: половина цены — назад, бригады перейдут на ближайшую базу">🚜 снести — инструментом «Снос»</p></section>`;
+    <div class="pc-actions"><button class="small" data-action="base-move" data-id="${id}" data-tip="Перенести базу к другой дороге: за саму базу не платить, только за снос домов на новом месте. Свободные бригады приедут туда сами, работающие доделают своё и вернутся уже туда">↔ Перенести</button>
+      ${removeButton(game, id, confirmRemove)}</div></section>`;
 }
 
 /** Сводка значками: бригад из предела, в деле, содержание в месяц. */
@@ -83,9 +106,10 @@ function crewsHtml(game: Game, id: number): string {
       const mark = MARK[b.state];
       const text = baseCrewText(game, b);
       const where = game.brigadeWhere(b.id);
-      return `<button class="pc-crew ${b.state}" data-action="crew-show" data-id="${b.id}" data-tip="${esc(`Бригада ${i + 1}: ${where?.text ?? text} — показать на карте`)}">
+      const pin = b.pinned ? `<span data-tip="Назначена вами на этот проект: автоматика её не перебросит">📌</span> ` : '';
+      return `<button class="pc-crew ${b.state}" data-action="crew-show" data-id="${b.id}" data-tip="${esc(`Бригада ${i + 1}: ${where?.text ?? text} — открыть бригаду и показать на карте`)}">
         <span class="bb-crew ${b.state}">🚚${mark ? `<i>${mark}</i>` : ''}</span>
-        <span class="pc-crew-name"><b>№${i + 1}</b> · ${esc(text)}</span></button>`;
+        <span class="pc-crew-name"><b>№${i + 1}</b> · ${pin}${esc(text)}</span></button>`;
     })
     .join('');
   const B = CONSTRUCTION.base;

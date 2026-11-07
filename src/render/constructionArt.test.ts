@@ -5,7 +5,7 @@ import { Game } from '../game/game';
 import { anchorOf, STREET, withoutCitizens } from '../game/testkit';
 import { type RoadOptions, splitCorridor } from '../lanes/edit';
 import { edgesAt } from '../lanes/geometry';
-import { type Corridor, oneWay } from '../lanes/model';
+import { type Corridor, oneWay, twoWay } from '../lanes/model';
 import { ROAD_MARGIN } from '../world/roadTypes';
 import { buildingCorridors, crewConvoy, crewRows } from './constructionArt';
 
@@ -59,12 +59,15 @@ describe('Колонна техники стройки', () => {
     const join = track.filter((t) => (t[0].site === first && t[0].done > first.length - 1) || (t[0].site === next.c && t[0].done < 1));
     expect(join.length).toBeGreaterThan(2);
     for (const t of join) for (const m of t) expect(Math.abs(m.pos.y - y)).toBeLessThan(0.5);
-    // Проект кончился — дальше идти некуда: грейдер в конце уходит на обочину, как раньше.
+    // Проект кончился — дальше идти некуда: колонна стоит у конца на оси, на обочину никто не съезжает (и нигде —
+    // ни боком, ни по диагонали): курс каждой машины — вдоль оси.
+    for (const t of track) for (const m of t) expect(Math.abs(m.pos.y - y)).toBeLessThan(0.5);
     const last = track[track.length - 1];
-    expect(Math.abs(last[0].pos.y - y)).toBeGreaterThan(3);
+    expect(last[0].pos.x).toBeGreaterThan(last[1].pos.x);
+    expect(last[1].pos.x).toBeGreaterThan(last[2].pos.x);
   });
 
-  it('ряды техники бригад — бок о бок в пределах полотна с обочиной: на однополосном два ряда плотно, на 1+1 — три через 5 м', () => {
+  it('ряды бригад — поровну по ширине полотна, каждая посередине своей полосы; на однополосном — бок о бок в пределах полотна', () => {
     const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
     /** Полотно проекта профилем lanes вдоль x в поле, заполняется от конца fromB. */
     const site = (lanes: RoadOptions['lanes'], fromB: boolean): Corridor => {
@@ -79,26 +82,32 @@ describe('Колонна техники стройки', () => {
       }
       throw new Error('нет места');
     };
-    /** Ряды n бригад — в пределах полотна с обочиной поперёк (вправо по ходу), и их шаг. */
+    /** Ряды n бригад — в пределах полотна с обочиной поперёк (вправо по ходу), по порядку, и их шаг; e — кромки (по ходу). */
     const check = (c: Corridor, n: number) => {
       const rows = crewRows(c, n);
       expect(rows).toHaveLength(n);
-      const e = edgesAt(c, c.length / 2)!;
-      const [lo, hi] = c.build!.fromB ? [-e[1] - ROAD_MARGIN, -e[0] + ROAD_MARGIN] : [e[0] - ROAD_MARGIN, e[1] + ROAD_MARGIN];
+      const k = edgesAt(c, c.length / 2)!;
+      const e = c.build!.fromB ? [-k[1], -k[0]] : [k[0], k[1]];
       for (const r of rows) {
-        expect(r - 3).toBeGreaterThanOrEqual(lo - 1e-6);
-        expect(r + 3).toBeLessThanOrEqual(hi + 1e-6);
+        expect(r - 2.4).toBeGreaterThanOrEqual(e[0] - ROAD_MARGIN - 1e-6);
+        expect(r + 2.4).toBeLessThanOrEqual(e[1] + ROAD_MARGIN + 1e-6);
       }
-      return n > 1 ? rows[1] - rows[0] : 0;
+      for (let i = 1; i < n; i++) expect(rows[i]).toBeGreaterThan(rows[i - 1]);
+      return { step: n > 1 ? rows[1] - rows[0] : 0, rows, e };
     };
     expect(crewRows(site(oneWay(1), false), 1)).toEqual([0]);
     for (const fromB of [false, true]) {
       const narrow = site(oneWay(1), fromB);
       // Два ряда на однополосном — плотно, но не друг на друге.
-      expect(check(narrow, 2)).toBeGreaterThan(3);
-      const wide = site(STREET.lanes, fromB);
-      expect(check(wide, 2)).toBeCloseTo(5);
-      expect(check(wide, 3)).toBeCloseTo(5);
+      expect(check(narrow, 2).step).toBeGreaterThan(3);
+      // Широкий проспект 3+3: ширина поровну — каждая бригада посередине своей трети (шаг — треть ширины, больше 5 м).
+      const wide = site(twoWay(3, 3), fromB);
+      const w = check(wide, 3);
+      const W = w.e[1] - w.e[0];
+      expect(W / 3).toBeGreaterThan(5.2);
+      w.rows.forEach((r, i) => expect(r).toBeCloseTo(w.e[0] + ((i + 0.5) * W) / 3, 6));
+      const two = check(wide, 2);
+      two.rows.forEach((r, i) => expect(r).toBeCloseTo(two.e[0] + ((i + 0.5) * W) / 2, 6));
     }
   });
 });

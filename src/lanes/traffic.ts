@@ -1313,9 +1313,11 @@ export class LaneTraffic {
     if (veh.v < 0.5) veh.stoppedTime += dt;
     veh.s += veh.v * dt;
     if (veh.lateral !== 0) {
-      const step = Math.min(Math.abs(veh.lateral), (6 + veh.v * 0.2) * dt);
+      // glide — съезжает в полосу на ходу (наклон пути — около 10°), стоя — не сдвигается.
+      const step = Math.min(Math.abs(veh.lateral), veh.glide ? veh.v * dt * 0.18 : (6 + veh.v * 0.2) * dt);
       veh.lateral -= Math.sign(veh.lateral) * step;
-    }
+      if (veh.lateral === 0) delete veh.glide;
+    } else if (veh.glide) delete veh.glide;
     // Сдвиг после правки сети тает: чем больше, тем быстрее (за 0,2–0,6 с).
     if (veh.shift) {
       const l = Math.hypot(veh.shift.x, veh.shift.y);
@@ -1411,6 +1413,8 @@ export class LaneTraffic {
       if (!m) return;
       const p = LaneGraph.pointOnMove(m, veh.s);
       veh.pos = veh.shift ? add(p.pos, veh.shift) : p.pos;
+      // Съезжает в полосу на ходу (glide) — и в узле тоже, иначе остаток сдвига пропал бы рывком.
+      if (veh.glide && veh.lateral) veh.pos = add(veh.pos, scale(rightNormal(p.dir), veh.lateral));
       this.steer(veh, p.dir);
       if (m.node !== null) veh.level = this.graph.net.nodes.get(m.node)?.level ?? veh.level;
       // Корпус ещё (или уже) на полотне въезда или выезда — слой и его: у моста машина не ныряет под край.

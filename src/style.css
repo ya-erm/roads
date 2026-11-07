@@ -6479,7 +6479,68 @@ span.ind-chip {
   place-items: center;
 }
 
-.base-card .bc-remove {
-  margin: 2px 0 0;
+/* «🚜 Снести базу»: второе нажатие подтверждает — красная, как «Точно?» у «Следующего этапа». */
+.base-card button.bc-remove.confirm {
+  background: var(--danger);
+  color: #fff;
+}
+
+.base-card button.bc-remove.confirm:hover {
+  filter: brightness(1.08);
+}
+
+/* Карточка бригады (src/ui/crewCard.ts): закрепление, выбор стройки, стройки списком. */
+.crew-card .pc-show {
+  font-size: 20px;
+}
+
+.crew-card .cc-base {
+  cursor: pointer;
+}
+
+.crew-card .cc-base:hover {
+  background: #eef2f6;
+}
+
+.crew-card .cc-pin {
+  background: #fff1e4;
+  color: #b4561a;
+  font-weight: 600;
+}
+
+.crew-card .pc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.crew-card .cc-picking {
+  margin-top: 6px;
+  background: #eaf2fd;
+}
+
+.crew-card .cc-target {
+  grid-template-columns: 30px 1fr auto auto;
+}
+
+.crew-card .cc-target .bc-near-ic {
+  display: grid;
+  place-items: center;
+}
+
+.crew-card .cc-target.cc-off {
+  opacity: 0.55;
+}
+
+.crew-card .cc-target.cc-here {
+  background: #fff6ec;
+}
+
+.crew-card .cc-slots {
   font-size: 12px;
+  white-space: nowrap;
+}
+
+.crew-card .cc-slots.full {
+  color: var(--danger);
 }

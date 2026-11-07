@@ -9,7 +9,7 @@ import { atPortals, type Portal, portalHalf, tunnelPortals } from '../lanes/tunn
 import { LaneRenderer, layerOf } from '../lanes/draw';
 import { insideRuns } from '../lanes/edit';
 import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
-import type { CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
+import type { Corridor, CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
 import type { GMove, LaneGraph } from '../lanes/graph';
 import type { TurnLook, TurnState } from '../lanes/lights';
 import { LIGHT_STEP, type LightSpot, lightSpot } from '../lanes/lightSpot';
@@ -32,7 +32,7 @@ import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
-import { baseBox, baseSig, buildingCorridors, crewConvoy, crewRows, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
+import { baseBox, baseSig, buildingCorridors, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
 import { corridorHalf } from '../world/worldgen';
@@ -57,9 +57,13 @@ export type Selection =
   /** Проект стройки (режим «Со строительством»): карточка — сроки, деньги, бригады, резерв и приоритет. */
   | { type: 'project'; id: number }
   /** Строительная база: карточка — название, бригады и что они делают, нанять и распустить, ближние стройки. */
-  | { type: 'base'; id: number };
+  | { type: 'base'; id: number }
+  /** Строительная бригада: подсвечены все машины колонны; карточка — что делает, «🎯 На стройку…», «↺ Авто». */
+  | { type: 'crew'; id: number };
 
 export interface ToolOverlay {
+  /** Выбираем стройку для бригады («🎯 На стройку…»): проект под курсором — подсвечен, как выбранный. */
+  crewTarget?: number | null;
   hover: Vec | null;
   snap: Snap | null;
   chainStart: Snap | null;
@@ -101,7 +105,8 @@ export interface ToolOverlay {
   area: { a: Vec; b: Vec; segs: number[]; corridors: number[]; fps: Footprint[] } | null;
   /** Отметки зданий: снос (bad) или место для переноса (ok/bad). */
   marks: { fp: Footprint; ok: boolean }[];
-  label: { text: string; ok: boolean } | null;
+  /** Подпись у курсора: ok — тёмная, иначе красный отказ; warn — жёлтая (можно, но с оговоркой: проект дороже денег). */
+  label: { text: string; ok: boolean; warn?: boolean } | null;
   heatmap: boolean;
   /** Карта скоростей: цвет дороги — разрешённая скорость, на поворотах — сниженная. */
   speedmap?: boolean;
@@ -588,12 +593,6 @@ export class Renderer {
     }
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
-    // Самосвалы бригад, что едут вдоль стройки от дороги к краю работ (и назад), — по оси проекта; в тоннеле — за
-    // порталом видны призраком сквозь землю (tunnelSight, drawInSight).
-    for (const v of game.siteCrewLooks()) {
-      if (!seenAt(v.pos, view, 20)) continue;
-      drawInSight(ctx, tunnelSight(game.roads.net, v.pos, v.dir, v.length), () => this.drawVehicles([v]));
-    }
     this.drawLights(game, 0, o.phaseEdit);
     this.drawMotion(game, view);
     this.drawStations(game, view, o);
@@ -619,13 +618,13 @@ export class Renderer {
     }
     // Светофор перекрёстка под мостом не пропадает под полотном — приглушённым значком поверх.
     this.drawLights(game, 'covered', o.phaseEdit);
-    this.drawConstruction(game, view, o.selection);
+    this.drawConstruction(game, view, o.crewTarget != null ? { type: 'project', id: o.crewTarget } : o.selection);
     this.drawLabels(game, view);
     this.drawOverlay(game, o);
     this.drawStationBadges(game, view);
     this.drawWarningMarks(game, view);
     this.drawFloaters(game);
-    if (o.label && o.hover) this.drawTooltip(o.hover, o.label.text, o.label.ok);
+    if (o.label && o.hover) this.drawTooltip(o.hover, o.label.text, o.label.ok, o.label.warn);
     if (o.brush) this.drawBrush(o.brush);
     if (o.speedmap) this.drawSpeedLegend();
     if (o.roadTool && o.hover) this.drawHeight(game, o.hover, o.rise ?? null, o.heightText ?? null);
@@ -972,17 +971,15 @@ export class Renderer {
       }
       drawParked(ctx, base, crews.of(base.id).filter((b) => b.state === 'idle').length);
     }
+    // Проектов может уже не быть, а техника ещё стоит на достроенной дороге (выезжает в поток с мест) — её рисуем всё равно.
     const list = game.construction.list();
-    if (!list.length) return;
     const z = this.camera.zoom;
     const going = game.speed > 0;
-    const blink = Math.floor(game.time * 3) % 2 === 0;
+    const lights: { site: Corridor; working: boolean }[] = [];
     for (const info of list) {
       const p = info.project;
       const working = going && !p.paused && p.stalled === undefined;
       const cs = game.construction.corridorsOf(p.id);
-      // Техника — колонной на участке в работе: у каждого этапа своя машина у своего края (ждёт, въезжает, стоит —
-      // crewConvoy); у каждой следующей бригады на месте — ещё по машине работающих этапов рядом, бок о бок в пределах полотна (crewRows).
       const crew = crews.working(p.id).length;
       // Выбранный проект (его карточка справа) — под техникой оранжевой полупрозрачной полосой шире полотна.
       if (selected === p.id) {
@@ -1007,19 +1004,21 @@ export class Renderer {
         const gate = entryPortal(net, site);
         if (gate && seenAt(gate.pos, view, 60)) drawPortalGear(ctx, gate, game.time, working);
       }
-      // Ряды техники бригад — бок о бок поперёк полотна, не за его кромками (crewRows).
-      const rows = site ? crewRows(site, crew) : [0];
-      for (const m of site ? crewConvoy(net, site) : []) {
-        if (!seenAt(m.pos, view, 40)) continue;
-        const sight = tunnelSight(net, m.pos, m.dir, 24);
-        for (let i = 0; i < (m.active ? crew : 1); i++) {
-          const draw = () => drawMachines(ctx, m.pos, m.dir, m.stage, m.active && working && blink, m.active ? rows[i] : 0, kind, game.time);
-          drawInSight(ctx, sight, draw);
-        }
-      }
-      // Огоньки у краёв работ — поверх техники-призрака: их видно сквозь землю ярко.
-      if (site && kind === 'tunnel') drawWorkLights(ctx, site, game.time, working);
+      // Огоньки у краёв работ — поверх техники-призрака: их видно сквозь землю ярко (техника — ниже, после проектов).
+      if (site && kind === 'tunnel') lights.push({ site, working });
     }
+    // Техника бригад — каждая машина там, где она есть (Game.siteCrewLooks: по полосе бригады от подъезда к своему
+    // месту в колонне этапов и у края работ, вдоль стройки, ждёт выезда) — тем же рисунком, что в потоке. Отсыпку
+    // моста и тоннеля на участке ведут кран и щит (drawMachines); в тоннеле — за порталом призраком сквозь землю.
+    const net = game.roads.net;
+    for (const v of game.siteCrewLooks()) {
+      if (!seenAt(v.pos, view, 40)) continue;
+      const c = v.site !== undefined ? net.corridors.get(v.site) : undefined;
+      const kind = c ? siteKind(net, c) : 'road';
+      const draw = v.stage === 0 && kind !== 'road' ? () => drawMachines(ctx, v.pos, v.dir, 0, !!v.beacon, 0, kind, game.time) : () => this.drawVehicles([v]);
+      drawInSight(ctx, tunnelSight(net, v.pos, v.dir, v.length), draw);
+    }
+    for (const l of lights) drawWorkLights(ctx, l.site, game.time, l.working);
     // Плашки над проектами — при любом зуме одного размера на экране (projectBadges: клик по плашке ищет её там же).
     for (const b of projectBadges(game, z)) {
       if (b.x < view.x0 - 200 || b.x > view.x1 + 200 || b.y < view.y0 - 200 || b.y > view.y1 + 200) continue;
@@ -3112,6 +3111,15 @@ export class Renderer {
     if (sim) this.drawSelectRing(sim.pos.x - (sim.dir.x * sim.length) / 2, sim.pos.y - (sim.dir.y * sim.length) / 2, sim.length * 0.9 + 3);
     // Машину компании обводит её линия (drawLinePath), если та на карте.
     else if (selFleet && selFleet.lineId !== shownLine) this.drawFleetSelected(game, selFleet);
+    if (sel?.type === 'crew') this.drawCrewSelected(game, sel.id);
+  }
+
+  /**
+   * Выбранная бригада: кольцо у каждой её машины — в потоке, вдоль стройки, ждущих колонну и на работе у края
+   * (Game.crewSpots: машины бригады вне потока — те же, что рисуются, Crews.carsAt).
+   */
+  private drawCrewSelected(game: Game, id: number): void {
+    for (const s of game.crewSpots(id)) this.drawSelectRing(s.pos.x, s.pos.y, s.r);
   }
 
   /** Обводка выбранной машины компании: на посту автостанции — рамкой по посту, в пути и у остановки — кольцом. */
@@ -3843,7 +3851,7 @@ export class Renderer {
     ctx.stroke();
   }
 
-  private drawTooltip(at: Vec, text: string, ok: boolean): void {
+  private drawTooltip(at: Vec, text: string, ok: boolean, warn = false): void {
     const ctx = this.ctx;
     const z = this.camera.zoom;
     ctx.save();
@@ -3856,10 +3864,11 @@ export class Renderer {
     const h = lines.length * 17 + 7;
     const s = this.camera.toScreen(at);
     const { x, y } = tooltipOffset(s.x, s.y, w, h, this.camera.width, this.camera.height);
-    ctx.fillStyle = ok ? 'rgba(25, 32, 45, 0.88)' : 'rgba(170, 40, 35, 0.92)';
+    // Жёлтая (warn) — можно, но с оговоркой: тёмный текст на жёлтом.
+    ctx.fillStyle = !ok ? 'rgba(170, 40, 35, 0.92)' : warn ? 'rgba(240, 190, 60, 0.96)' : 'rgba(25, 32, 45, 0.88)';
     rr(ctx, x, y, w, h, 6);
     ctx.fill();
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = ok && warn ? '#2b2205' : '#fff';
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = 'left';
     lines.forEach((line, i) => ctx.fillText(line, x + 7, y + 17 + i * 17));

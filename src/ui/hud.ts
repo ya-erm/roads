@@ -143,6 +143,7 @@ import { buildModeRowHtml } from './constructionUi';
 import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
+import { crewCardHtml } from './crewCard';
 import { planPrice } from '../input/labels';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
@@ -450,6 +451,8 @@ export class Hud {
   private readonly whyOpen = new Set<string>();
   /** «Следующий этап» нажат один раз: второе нажатие переводит этап. */
   private confirmAdvance = false;
+  /** «🚜 Снести базу» в карточке базы нажат один раз (id базы): второе нажатие сносит. */
+  private confirmRemoveBase: number | null = null;
   private lastScenario = '';
   /** Советник: скрытые игроком подсказки (до новой партии) и последняя разметка панели. */
   private readonly hiddenAdvice = new Set<string>();
@@ -962,6 +965,7 @@ export class Hud {
     const d = el.dataset;
     if (d.action !== 'ng-create') this.confirmNew = false;
     if (d.action !== 'sc-advance') this.confirmAdvance = false;
+    if (d.action !== 'base-remove') this.confirmRemoveBase = null;
     switch (d.action) {
       case 'begin':
         this.hideScreens();
@@ -1186,20 +1190,52 @@ export class Hud {
         g.dismissBrigade(Number(d.id));
         this.refreshLeft();
         break;
+      case 'base-remove': {
+        // Снос базы из её карточки — со второго нажатия (первое спрашивает «Точно? +$N, бригады → «…»»), как «Сносом».
+        const id = Number(d.id);
+        if (this.confirmRemoveBase !== id) {
+          this.confirmRemoveBase = id;
+          break;
+        }
+        this.confirmRemoveBase = null;
+        const problem = g.removeBase(id);
+        if (problem) g.notify(problem, '#e5534b');
+        else c.select(null);
+        this.refreshLeft();
+        break;
+      }
       case 'base-rename':
         // Название — в карточке базы: поле сразу (кнопку уже отпустили), иначе первые нажатия ушли бы карте.
         this.renamingBase = Number(d.id);
         this.pressing = false;
         break;
       case 'crew-show': {
-        // Бригада: камера — к ней (в пути — к машине, на стройке — к краю работ), что делает — уведомлением.
-        const where = g.brigadeWhere(Number(d.id));
+        // Бригада: камера — к ней (в пути — к головной машине, на стройке — к краю работ) и её карточка справа (все
+        // машины колонны подсвечены); из карточки базы или проекта — закрытие карточки бригады вернёт к ней.
+        const id = Number(d.id);
+        const where = g.brigadeWhere(id);
         if (where) {
           this.controller.showPlace(where.pos, 60);
-          g.notify(`🚚 Бригада ${where.text}`);
+          const same = c.selection?.type === 'crew' && c.selection.id === id;
+          if (!same && (c.selection?.type === 'base' || c.selection?.type === 'project')) c.selectFrom({ type: 'crew', id });
+          else if (!same) c.select({ type: 'crew', id });
         }
         break;
       }
+      case 'crew-send':
+        // «🎯 На стройку…»: выбор проекта кликом по карте (ещё раз или Esc — отмена).
+        c.startCrewSend(Number(d.id), c.sendingCrew !== Number(d.id));
+        break;
+      case 'crew-to': {
+        // Стройка из списка в карточке бригады: едет туда и закрепляется; нельзя — причина уведомлением.
+        const problem = g.sendBrigade(Number(d.id), Number(d.p));
+        if (problem) g.notify(problem, '#e5534b');
+        else c.startCrewSend(Number(d.id), false);
+        break;
+      }
+      case 'crew-auto':
+        g.autoBrigade(Number(d.id));
+        break;
       case 'base-show': {
         // К базе на карте — и её карточка справа (бригады, нанять и распустить, ближние стройки).
         const base = g.construction.crews.bases.get(Number(d.id));
@@ -2358,6 +2394,8 @@ export class Hud {
     // Карточку станции закрыли раньше, чем открылось поле, — при следующем выборе станции оно не нужно.
     if (this.renamingStation !== null && !html.includes('data-station-name')) this.renamingStation = null;
     if (this.renamingBase !== null && !html.includes('data-base-name')) this.renamingBase = null;
+    // Карточку базы закрыли (или выбрали другое кликом по карте), не подтвердив снос, — вопрос снимается.
+    if (this.confirmRemoveBase !== null && !html.includes('bc-remove confirm')) this.confirmRemoveBase = null;
     if (this.renamingProject !== null && !html.includes('data-project-name')) this.renamingProject = null;
     if (html !== this.lastPanel) {
       const side = this.q('[data-side]');
@@ -2412,7 +2450,7 @@ export class Hud {
     const sel = this.controller.selection;
     // У машины жителя линий нет, а у машины компании её линия уже есть в карточке. У проекта стройки и базы маршрутов
     // нет — список всех маршрутов под их карточкой только отвлекает.
-    if (sel?.type === 'vehicle' || sel?.type === 'fleet' || sel?.type === 'project' || sel?.type === 'base') return '';
+    if (sel?.type === 'vehicle' || sel?.type === 'fleet' || sel?.type === 'project' || sel?.type === 'base' || sel?.type === 'crew') return '';
     // Выбрана станция, предприятие или город — только их маршруты, без папок.
     const station = sel?.type === 'station' ? g.stations.get(sel.id) : undefined;
     const industry = sel?.type === 'industry' ? g.industries.find((i) => i.id === sel.id) : undefined;
@@ -2940,7 +2978,8 @@ export class Hud {
     const head = (title: string, sub = '') =>
       `<header><h3>${esc(title)}</h3><button class="icon" data-action="close-sel">✕</button></header>${sub ? `<p class="muted">${sub}</p>` : ''}`;
     if (sel.type === 'project') return projectCardHtml(g, sel.id, this.renamingProject === sel.id);
-    if (sel.type === 'base') return baseCardHtml(g, sel.id, this.renamingBase === sel.id);
+    if (sel.type === 'base') return baseCardHtml(g, sel.id, this.renamingBase === sel.id, this.confirmRemoveBase === sel.id);
+    if (sel.type === 'crew') return crewCardHtml(g, sel.id, { following: this.controller.following, picking: this.controller.sendingCrew === sel.id });
     if (sel.type === 'station') {
       const st = g.stations.get(sel.id);
       if (!st) return '';

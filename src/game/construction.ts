@@ -26,11 +26,14 @@
  *
  * Состояние: готовое — в полотнах сети (сохраняется вместе с ней), записи проектов — здесь (toSave / load).
  */
-import { dist, type Vec } from '../core/vec';
+import { dist, dot, sub, type Vec } from '../core/vec';
+import { nodeCuts } from '../lanes/geometry';
+import { corridorLayer } from '../lanes/speedDisplay';
 import type { Corridor, LaneNet } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import { ROAD_CLASSES } from '../world/roadTypes';
-import { buildRate, crewCap, frontOf, paidFor, pickSite, stageSpans } from './constructionWork';
+import { buildRate, crewCap, frontOf, nextSite, paidFor, pickSite, stageSpans } from './constructionWork';
+import { type CrewLane, crewRows, fillet, laneRow, polyLength, polyProject, stageSlots } from './crewLane';
 import { type Brigade, type CrewSave, Crews, type Site } from './crews';
 import type { CrewStep } from './crewRoads';
 import { corridorProfile, fullCorridorCost } from './roadbuild';
@@ -81,6 +84,8 @@ export interface ConstructionHost {
   projectEvent?(kind: 'done' | 'stalled', p: Project): void;
   /** Машины бригад в потоке (Crews): выпустить от узла к узлу, убрать; есть ли узел в графе движения. */
   drive(brigade: Brigade, from: number, to: number, car: number): number | 'busy' | null;
+  /** Машину бригады — в поток прямо с места, где она стоит на готовой дороге (Crews: CrewHost.driveFrom). */
+  driveFrom?(brigade: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number): number | 'busy' | null;
   park(sim: number): void;
   onRoad(node: number): boolean;
   /**
@@ -166,6 +171,9 @@ export class Construction {
       reach: (from, to) => host.reach(from, to),
       ...(host.crewStep ? { step: (from: number, to: number) => host.crewStep!(from, to) } : {}),
       drive: (b, from, to, car) => host.drive(b, from, to, car),
+      ...(host.driveFrom ? { driveFrom: (b: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number) => host.driveFrom!(b, car, spot, to) } : {}),
+      lane: (id, cars) => self.crewLane(id, cars),
+      slots: (b) => self.crewSlots(b),
       park: (sim) => host.park(sim),
       onRoad: (node) => host.onRoad(node),
     });
@@ -209,10 +217,173 @@ export class Construction {
    * path — точки этого пути по оси проекта, от узла до края. Подъезда нет — null.
    */
   approach(id: number): { node: number; pos: Vec; path: () => Vec[] } | null {
+    const r = this.route(id);
+    if (!r) return null;
+    const { c, s, end, legs, entry } = r;
+    const net = this.host.roads.net;
+    const pos = c.lut.pointAt(s);
+    const path = () => {
+      const pts: Vec[] = [{ ...net.node(entry).pos }];
+      for (const leg of legs) alongCorridor(pts, leg.k, leg.k.a === leg.from ? 0 : leg.k.length, leg.k.a === leg.from ? leg.k.length : 0, 10);
+      alongCorridor(pts, c, end === c.a ? 0 : c.length, s, 10);
+      return pts;
+    };
+    return { node: entry, pos, path };
+  }
+
+  /**
+   * Полоса бригады на проекте id (crewLane.ts): от мест машин колонны cars (нос; нет — прямо позади начала заполнения
+   * участка, по его оси) через узел подъезда и вдоль стройки к началу заполнения, по участку и дальше по следующему,
+   * если тот продолжает его от конца (nextSite). Ряд бригады на участке — в такте (trackCrews). Путь вдоль стройки
+   * входит в участок не с начала заполнения (там уже строят от другого конца) — null.
+   */
+  crewLane(id: number, cars: readonly { pos: Vec; dir: Vec }[] | null): CrewLane | null {
+    const r = this.route(id);
+    if (!r) return null;
+    const { c, legs, entry, end } = r;
+    const net = this.host.roads.net;
+    const fromB = !!c.build!.fromB;
+    const start = fromB ? c.b : c.a;
+    if (cars?.length && end !== start) return null;
+    // Вдоль стройки: от узла подъезда по полотнам проекта к началу заполнения, по участку и по следующему, если тот
+    // продолжает его от конца (колонна перейдёт без съезда).
+    const body: Vec[] = [{ ...net.node(entry).pos }];
+    if (cars?.length) for (const leg of legs) alongCorridor(body, leg.k, leg.k.a === leg.from ? 0 : leg.k.length, leg.k.a === leg.from ? leg.k.length : 0, 5);
+    else body[0] = c.lut.pointAt(fromB ? c.length : 0);
+    alongCorridor(body, c, fromB ? c.length : 0, fromB ? 0 : c.length, 5);
+    const next = nextSite(net, c, this.corridorsOf(id));
+    const tail = fromB ? c.a : c.b;
+    const onward = next && (next.fromB ? next.c.b : next.c.a) === tail ? next : null;
+    if (onward) alongCorridor(body, onward.c, onward.fromB ? onward.c.length : 0, onward.fromB ? 0 : onward.c.length, 5);
+    let pts: Vec[];
+    if (cars?.length) {
+      // Машины — от хвоста к голове: по курсу головной (кто дальше по ходу, тот впереди).
+      const lead = cars[0];
+      const order = [...cars].sort((p, q) => dot(sub(p.pos, lead.pos), lead.dir) - dot(sub(q.pos, lead.pos), lead.dir));
+      const head = order[order.length - 1];
+      pts = [...order.map((m) => ({ ...m.pos })), ...turnIn(head.pos, head.dir, body)];
+    } else {
+      // Без колонны (старое сохранение, бригада уже на месте): позади начала — прямо по оси участка.
+      const t = c.lut.tangentAt(fromB ? c.length : 0);
+      const back = fromB ? t : { x: -t.x, y: -t.y };
+      pts = [{ x: body[0].x + back.x * 80, y: body[0].y + back.y * 80 }, ...body];
+    }
+    // Машины стоят там, где встали: поворот начинается не раньше головной.
+    const path = fillet(pts, undefined, cars?.length ?? 0);
+    // Где на полосе начало заполнения участка: по точке чуть дальше скругления поворота у узла.
+    const legAt = (k: Corridor, kFromB: boolean) => {
+      const u = Math.min(15, k.length / 2);
+      return polyProject(path, k.lut.pointAt(kFromB ? k.length - u : u)) - u;
+    };
+    const out: CrewLane = { path, legs: [{ corridor: c.id, fromB, at: legAt(c, fromB) }] };
+    // Начало следующего — ровно за концом этого по полосе: места колонны на стыке совпадают (без скачка при смене участка).
+    if (onward) out.legs.push({ corridor: onward.c.id, fromB: onward.fromB, at: out.legs[0].at + c.length });
+    if (cars?.length) {
+      out.from = cars.map((m) => polyProject(path, m.pos));
+      out.t0 = this.host.time;
+    }
+    return out;
+  }
+
+  /**
+   * Места машин бригады b на её полосе (м от начала полосы, по номеру машины): у краёв этапов участка, что строится
+   * (stageSlots), — если он на её полосе; иначе null.
+   */
+  crewSlots(b: Brigade): number[] | null {
+    if (!b.lane || b.project === undefined) return null;
+    const c = this.current(b.project);
+    if (!c?.build) return null;
+    const fromB = !!c.build.fromB;
+    const leg = b.lane.legs.find((g) => g.corridor === c.id && g.fromB === fromB);
+    if (!leg) return null;
+    // Полоса дальше не идёт, а в конце — готовая дорога: колонна встаёт перед её перекрёстком (оттуда выедет в поток),
+    // а не посреди площадки узла.
+    const net = this.host.roads.net;
+    const tail = fromB ? c.a : c.b;
+    let cut = 0;
+    const i = b.lane.legs.indexOf(leg);
+    const next = b.lane.legs[i + 1];
+    if (!next) {
+      // Обрез полотна у перекрёстка (как у готовой дороги: там кончается её полоса) и пара метров запаса.
+      const node = net.node(tail);
+      const ends = net.ends(node);
+      const cuts = nodeCuts(net, node, ends);
+      ends.forEach((e, i) => {
+        if (e.corridor === c && (e.end === 'a') === (c.a === tail) && cuts[i] > 0) cut = Math.max(cut, cuts[i] + 2);
+      });
+    }
+    const ext = next ? Math.max(0, polyLength(b.lane.path) - (leg.at + c.length)) : 0;
+    // Обычная дорога — не начатые этапы ждут на ней самой; мост и тоннель — позади начала.
+    const ground = (id: number) => {
+      const k = net.corridors.get(id);
+      return !!k && corridorLayer(net, k) === 0;
+    };
+    const o = { end: Math.max(0, c.length - cut), ahead: ground(c.id), ext, extAhead: !!next && ground(next.corridor) };
+    return stageSlots(c.build.done, c.length, o).map((u) => leg.at + u);
+  }
+
+  /**
+   * После такта стройки — бригады на своих полосах: места машин запоминаются (Brigade.spots: отсюда они выедут в
+   * поток, когда проект кончится); полоса больше не идёт по участку, что строится (тот кончился, а следующий — не от
+   * его конца), — бригаде своим ходом к нему от конца кончившегося участка (Crews.relocate).
+   */
+  private trackCrews(): void {
+    const net = this.host.roads.net;
+    /** Бригады на полосах по проектам — для раскладки рядов. */
+    const onSite = new Map<number, Brigade[]>();
+    for (const b of this.crews.brigades.values()) {
+      if (!b.lane || b.project === undefined || (b.state !== 'going' && b.state !== 'working')) continue;
+      const slots = this.crewSlots(b);
+      if (slots) {
+        this.crews.keepSpots(b);
+        const list = onSite.get(b.project) ?? [];
+        list.push(b);
+        onSite.set(b.project, list);
+        continue;
+      }
+      // Проект кончился — бригаду отпустят в такте бригад (выедет в поток с мест).
+      if (!this.current(b.project)) continue;
+      let node = b.at ?? null;
+      for (const g of b.lane.legs) {
+        const k = net.corridors.get(g.corridor);
+        if (k && !k.build) node = g.fromB ? k.a : k.b;
+      }
+      if (node !== null) this.crews.relocate(b, node);
+    }
+    for (const [id, list] of onSite) this.layRows(id, list);
+  }
+
+  /**
+   * Ряды бригад на участке проекта id (crewRows: ширина полотна поровну на всех, каждая — посередине своей полосы).
+   * Раскладка сменилась (бригада приехала или уехала, участок другой ширины) — бригада перестраивается в свой ряд
+   * плавно, с места, где сейчас её головная машина (а только что приехавшая — с начала участка): каждая машина
+   * сворачивает, проезжая это место, — стоящая ждёт в своём ряду (LaneShift). Порядок рядов — как стоят сейчас.
+   */
+  private layRows(id: number, list: Brigade[]): void {
+    const c = this.current(id);
+    if (!c) return;
+    const rows = crewRows(c, list.length);
+    const order = [...list].sort((p, q) => laneRow(p.lane!) - laneRow(q.lane!) || p.id - q.id);
+    order.forEach((b, k) => {
+      const lane = b.lane!;
+      const want = rows[k] ?? 0;
+      if (Math.abs(laneRow(lane) - want) < 0.05) return;
+      const lead = this.crews.carsAt(b)[0]?.s ?? lane.legs[0].at;
+      const at = Math.max(lead, lane.legs[0].at);
+      const shifts = (lane.shifts ?? []).filter((sh) => sh.at < at - 1e-6);
+      shifts.push({ at, to: want });
+      lane.shifts = shifts;
+    });
+  }
+
+  /**
+   * Путь бригады к краю работ проекта id (approach): участок c, край работ в s метрах от его конца a, узел подъезда
+   * entry, полотна проекта от него до участка (legs) и конец участка, через который путь в него входит (end).
+   */
+  private route(id: number): { c: Corridor; s: number; end: number; entry: number; legs: { k: Corridor; from: number }[] } | null {
     const c = this.current(id);
     if (!c) return null;
     const list = this.corridorsOf(id);
-    const net = this.host.roads.net;
     const b = c.build!;
     const f = frontOf(b.done, c.length).s;
     // Край работ — в s метрах от конца a.
@@ -249,19 +420,7 @@ export class Construction {
       legs.unshift(step);
       node = step.from;
     }
-    const pos = c.lut.pointAt(s);
-    const entry = node;
-    const path = () => {
-      const pts: Vec[] = [{ ...net.node(entry).pos }];
-      const along = (k: Corridor, s0: number, s1: number) => {
-        const n = Math.max(1, Math.ceil(Math.abs(s1 - s0) / 10));
-        for (let i = 1; i <= n; i++) pts.push(k.lut.pointAt(s0 + ((s1 - s0) * i) / n));
-      };
-      for (const leg of legs) along(leg.k, leg.k.a === leg.from ? 0 : leg.k.length, leg.k.a === leg.from ? leg.k.length : 0);
-      along(c, end === c.a ? 0 : c.length, s);
-      return pts;
-    };
-    return { node: entry, pos, path };
+    return { c, s, end, entry: node, legs };
   }
 
   /** Номер следующего проекта (план помечает им новые полотна, startProject заводит запись). */
@@ -345,6 +504,7 @@ export class Construction {
         this.host.projectEvent?.('done', p);
       }
     }
+    this.trackCrews();
     this.stamp++;
   }
 
@@ -615,6 +775,41 @@ export class Construction {
     }
     this.prune();
   }
+}
+
+/** Точки оси полотна k от s0 до s1 (без первой) с шагом не больше step метров — в конец pts. */
+function alongCorridor(pts: Vec[], k: Corridor, s0: number, s1: number, step: number): void {
+  const n = Math.max(1, Math.ceil(Math.abs(s1 - s0) / step));
+  for (let i = 1; i <= n; i++) pts.push(k.lut.pointAt(s0 + ((s1 - s0) * i) / n));
+}
+
+/**
+ * Съезд колонны с дороги на стройку: головная стоит в своей полосе у узла (p, курс d), дальше путь body — от центра
+ * узла по оси проекта. Поворот — там, где линия полосы пересекает ось проекта (как машина и повернула бы, не заезжая к
+ * центру узла и не виляя); прямо (ось — почти продолжение полосы) — плавно с полосы на ось на 25 м пути. Ответ — точки
+ * пути после p (скругляет их fillet).
+ */
+function turnIn(p: Vec, d: Vec, body: readonly Vec[]): Vec[] {
+  const c = body[0];
+  // Ось проекта у узла: от центра узла к точке метрах в 12 дальше.
+  const far = body.find((q) => dist(q, c) >= 12) ?? body[body.length - 1];
+  const len = dist(far, c);
+  if (len < 1) return [...body];
+  const o = { x: (far.x - c.x) / len, y: (far.y - c.y) / len };
+  const den = d.x * o.y - d.y * o.x;
+  if (Math.abs(den) > 0.25) {
+    // p + a·d = c + b·o.
+    const w = sub(c, p);
+    const a = (w.x * o.y - w.y * o.x) / den;
+    const b = (w.x * d.y - w.y * d.x) / den;
+    if (a > 0.5 && a < 40 && b > -15 && b < 15) {
+      const x = { x: p.x + d.x * a, y: p.y + d.y * a };
+      // Дальше — по оси: точки за точкой поворота, не ближе 10 м к ней (место на скругление).
+      return [x, ...body.filter((q) => dot(sub(q, c), o) > b + 10)];
+    }
+  }
+  // Почти прямо: с полосы на ось — плавно, без поворота у центра узла.
+  return body.filter((q) => dot(sub(q, p), d) > 25 || dist(q, p) > 25);
 }
 
 /** Название проекта для показа: своё, если игрок его дал, иначе автоматическое (projectLabel). */

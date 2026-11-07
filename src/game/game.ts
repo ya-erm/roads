@@ -33,6 +33,8 @@ import type { LaneTraffic } from '../lanes/traffic';
 import { RailSim, Train } from '../sim/rail';
 import { stepWagons } from '../sim/wagons';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
+import { hitchOf, steerBase } from '../sim/body';
+import { bridgeLook, deckAlong } from '../lanes/deck';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
 import { Annex, type BuildBase, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
 import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/townSupply';
@@ -67,8 +69,9 @@ import { Journal, JournalEntry } from './journal';
 import { paxFare, ridePath } from './fare';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
-import { carryBuild } from './constructionWork';
+import { carryBuild, stageSpans } from './constructionWork';
 import type { Brigade } from './crews';
+import { CREW_UNITS, laneTrail } from './crewLane';
 import { type CrewStep, CrewRoads } from './crewRoads';
 import { RING_SIZES, RingOptions, Roads } from './roads';
 import { TimelapseRecorder, type TimelapseSave } from './timelapse';
@@ -299,14 +302,28 @@ interface RailStationGeom {
 type SimOwner = { type: 'fleet'; id: number } | { type: 'citizen' } | { type: 'crew'; id: number };
 
 /**
- * Машины колонны бригады (crews.ts, по порядку): головной — жёлтый самосвал с грунтом, за ним грейдер с ножом и каток
- * с вальцом — та же техника, что работает на стройке (constructionArt.drawMachines). Грейдер и каток тихоходнее.
+ * Машины колонны бригады (crews.ts, по порядку) — та же техника, что работает на стройке, тот же рисунок, длина и
+ * ширина (crewLane.CREW_UNITS, vehicleArt.crewUnitArt): головная — грейдер с самосвалом грунта, за ней асфальтоукладчик
+ * с катком, последней — машина разметки. Тяжёлая техника тихоходнее.
  */
-const CREW_CARS = [
-  { kind: 'truck' as const, body: 'van' as const, length: 10, width: 4.4, maxSpeed: 32, accel: 5, color: '#f2b81d', load: '#9a7b55' },
-  { kind: 'truck' as const, body: 'grader' as const, length: 11, width: 3.6, maxSpeed: 24, accel: 3.5, color: '#f2b81d' },
-  { kind: 'truck' as const, body: 'roller' as const, length: 7, width: 3.6, maxSpeed: 20, accel: 3, color: '#f2b81d' },
-];
+const CREW_CARS = CREW_UNITS.map((u, k) => ({
+  kind: 'truck' as const,
+  body: u.body,
+  length: u.length,
+  width: u.width,
+  maxSpeed: [24, 22, 28][k],
+  accel: [3.5, 3, 4.5][k],
+  color: '#f2b81d',
+}));
+
+/** Сколько секунд головная машина колонны ждёт у конца пути остальных (Game.crewAssembled), прежде чем сойти одной. */
+const CREW_WAIT = 25;
+
+/**
+ * Машина бригады не в потоке — как её рисовать (Game.siteCrewLooks): вид машины, её этап (номер в колонне), участок,
+ * если она на нём (там техника отсыпки моста и тоннеля — кран и щит).
+ */
+export type CrewLook = VehicleLook & { stage: number; site?: number };
 
 export interface Notice {
   text: string;
@@ -559,6 +576,10 @@ export class Game implements BuildContext {
   private accumulator = 0;
   private nextEntityId = 1;
   private readonly owners = new Map<number, SimOwner>();
+  /** Машина колонны бригады стоит у конца пути и ждёт остальных (crewAssembled): с какого времени. */
+  private readonly crewWaitSince = new Map<number, number>();
+  /** Колонна собралась: машины, что стоят за головной в очереди, — снять с дороги после шага потока (gatherCrews). */
+  private crewGather: number[] = [];
   private roadValue = { version: -1, value: 0 };
   /** Части roadValueTotal: пути целиком (по версии путей и рельефа) и полотна дорог по одному (по их форме). */
   private railValue = { version: -1, value: 0 };
@@ -1138,6 +1159,41 @@ export class Game implements BuildContext {
     return sim.id;
   }
 
+  /**
+   * Стройка (crews.ts): машина колонны — в поток прямо с места spot, где она стоит на готовой дороге (кончили участок,
+   * колонна собралась у подъезда), к узлу to: на попутную полосу под ней, носом туда же. Полосы под ней нет (стоит на
+   * стройке, на площадке узла) или до цели оттуда не доехать — null: выедет от узла (drive).
+   */
+  driveFrom(b: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number): number | 'busy' | null {
+    const spec = CREW_CARS[Math.min(car, CREW_CARS.length - 1)];
+    // Выезжают по одной: следующая трогается, когда предыдущая отъехала на свою длину с запасом (у тупика та
+    // разворачивается и проезжает мимо — не задевая стоящую).
+    for (const c of b.convoy?.cars.slice(0, car) ?? []) {
+      const prev = 'sim' in c ? this.traffic.vehicles.get(c.sim) : undefined;
+      if (prev && dist(prev.pos, spot.pos) < prev.length + 14) return 'busy';
+    }
+    const sim = this.traffic.place({ ...spec, targetNode: to }, spot.pos, spot.dir);
+    if (!sim) return null;
+    // Полоса нашлась далеко (машина не на ней, а рядом — за концом дороги): не перескакиваем — выедет от узла.
+    const off = sub(spot.pos, sim.pos);
+    const lat = dot(off, rightNormal(sim.dir));
+    if (Math.abs(lat) > 4 || Math.abs(dot(off, sim.dir)) > 1.5 || dot(sim.dir, spot.dir) < 0.9) {
+      this.traffic.remove(sim);
+      return null;
+    }
+    // Стоит на оси дороги, а не посреди полосы: там и остаётся, а в полосу съезжает на ходу (glide), не боком; корпус —
+    // как стоял (задняя ось и вторая часть — прямо позади носа).
+    sim.lateral = lat;
+    sim.glide = true;
+    const h = hitchOf(sim.body);
+    sim.rear = sub(spot.pos, scale(spot.dir, steerBase(sim.body) * sim.length));
+    if (h) sim.trail = sub(spot.pos, scale(spot.dir, (h.joint + h.tail) * sim.length));
+    else delete sim.trail;
+    this.traffic.updatePose(sim);
+    this.owners.set(sim.id, { type: 'crew', id: b.id });
+    return sim.id;
+  }
+
   /** Стройка: машина бригады больше не нужна — с дороги долой. */
   park(sim: number): void {
     const v = this.traffic.vehicles.get(sim);
@@ -1379,6 +1435,84 @@ export class Game implements BuildContext {
       default:
         return { pos: home, text: 'свободна, стоит на базе' };
     }
+  }
+
+  // ---------- Бригада как выбор на карте и назначение игроком (карточка бригады, crewCard.ts) ----------
+
+  /**
+   * Может ли бригада id поехать на проект project («🎯 На стройку…»): null — да; иначе причина понятными словами — нет
+   * проекта, на паузе, нет подъезда (или ждёт соседний), места нет (cap), отсюда не доехать (Crews.canGo).
+   */
+  brigadeCanGo(id: number, project: number): string | null {
+    const crews = this.construction.crews;
+    const b = crews.brigades.get(id);
+    if (!b) return 'Бригады больше нет';
+    const info = this.construction.info(project);
+    if (!info) return 'Проекта больше нет: достроен или отменён';
+    const name = `«${projectName(info.project)}»`;
+    if (info.project.paused) return `${name} на паузе — сначала «▶ Дальше»`;
+    if (b.project === project && (b.state === 'going' || b.state === 'working')) return null;
+    if (!info.access)
+      return info.waits ? `${name}: подъезд — через соседний строящийся проект, туда пока не проехать` : `К ${name} нет подъезда: ни один конец не связан готовой дорогой с базой`;
+    const cap = crews.cap(project);
+    if (crews.assigned(project).length >= cap) return `На ${name} уже ${cap} из ${cap} бригад — больше не встанет`;
+    return crews.canGo(b, project);
+  }
+
+  /** Отправить бригаду id на проект project и закрепить её там (Crews.send): null — едет, иначе причина отказа. */
+  sendBrigade(id: number, project: number): string | null {
+    const problem = this.brigadeCanGo(id, project);
+    if (problem) return problem;
+    const crews = this.construction.crews;
+    const b = crews.brigades.get(id)!;
+    const was = b.project;
+    const fail = crews.send(b, project);
+    if (fail) return fail;
+    this.construction.stamp++;
+    this.journal.add('brigade-send', { b: id, base: b.base, id: project, what: projectName(this.construction.projects.get(project)!), ...(was !== undefined && was !== project ? { from: was } : {}) });
+    return null;
+  }
+
+  /** «↺ Авто»: снять закрепление бригады id — дальше её снова распределяет автоматика. */
+  autoBrigade(id: number): void {
+    const crews = this.construction.crews;
+    const b = crews.brigades.get(id);
+    if (!b?.pinned) return;
+    crews.unpin(b);
+    this.construction.stamp++;
+    this.journal.add('brigade-auto', { b: id, base: b.base, ...(b.project !== undefined ? { id: b.project } : {}) });
+  }
+
+  /**
+   * Машины бригады id на карте — для подсветки выбранной бригады: в потоке и вне его (вдоль стройки, ждут колонну),
+   * середина кузова и радиус кольца. Техника на работе у края — у рисовальщика стройки (renderer, crewConvoy).
+   */
+  crewSpots(id: number): { pos: Vec; r: number }[] {
+    const crews = this.construction.crews;
+    const b = crews.brigades.get(id);
+    if (!b) return [];
+    const out: { pos: Vec; r: number }[] = [];
+    for (const car of b.convoy?.cars ?? []) {
+      const sim = 'sim' in car ? this.traffic.vehicles.get(car.sim) : undefined;
+      if (sim) out.push({ pos: sub(sim.pos, scale(sim.dir, sim.length / 2)), r: sim.length * 0.9 + 3 });
+    }
+    for (const m of crews.carsAt(b)) {
+      const s = CREW_CARS[Math.min(m.car, CREW_CARS.length - 1)];
+      out.push({ pos: sub(m.pos, scale(m.dir, s.length / 2)), r: s.length * 0.9 + 3 });
+    }
+    return out;
+  }
+
+  /** Бригада, чья машина не в потоке (вдоль стройки, ждёт колонну), — под точкой p: клик по ней выбирает бригаду. */
+  crewAt(p: Vec, r = 6): number | undefined {
+    const crews = this.construction.crews;
+    for (const b of crews.brigades.values()) {
+      for (const m of crews.carsAt(b)) {
+        const s = CREW_CARS[Math.min(m.car, CREW_CARS.length - 1)];
+        if (dist(sub(m.pos, scale(m.dir, s.length / 2)), p) <= s.length / 2 + r) return b.id;
+      }
+    }
+    return undefined;
   }
 
   /** Своё название базы: пробелы по краям обрезаются; пустое — снова по ближайшему городу. */
@@ -2021,6 +2155,8 @@ export class Game implements BuildContext {
       demolish: [...razed],
       net: road?.net ?? null,
       changed: road?.changed ?? [],
+      // Проект стройки из дорог куска — для подписи (строит его road).
+      project: road?.project,
       road,
       rails: plans,
       railSpend,
@@ -3056,6 +3192,7 @@ export class Game implements BuildContext {
   private tick(dt: number): void {
     this.time += dt;
     this.traffic.step(dt);
+    this.gatherCrews();
     this.rail.step(dt);
     this.updateFleet(dt);
     this.updateJams(dt);
@@ -4354,7 +4491,61 @@ export class Game implements BuildContext {
     return true;
   }
 
+  /**
+   * Машина колонны бригады доехала до конца пути (узла подъезда к стройке или узла по дороге): встаёт у конца полосы и
+   * ждёт, пока подтянутся остальные — они встают за ней в очередь в потоке, друг за другом, без наложения. Собрались
+   * (каждая стоит сразу за предыдущей) — колонна сходит с дороги разом: головная — сейчас, остальные — после шага
+   * потока (gatherCrews), каждая там, где стоит; оттуда бригада поедет дальше по своей полосе. Домой на базу — сразу
+   * за ворота. Ждёт дольше CREW_WAIT секунд (кто-то застрял) — не держит полосу: доезжает одна.
+   */
+  private crewAssembled(id: number, sim: Vehicle): boolean {
+    const crews = this.construction.crews;
+    const b = crews.brigades.get(id);
+    const cv = b?.convoy;
+    if (!b || !cv) return true;
+    const base = crews.bases.get(b.base);
+    if (b.state === 'back' && base && sim.targetNode === base.nodeId) return true;
+    let since = this.crewWaitSince.get(sim.id);
+    if (since === undefined) this.crewWaitSince.set(sim.id, (since = this.time));
+    const rest: Vehicle[] = [];
+    let ok = true;
+    for (const c of cv.cars) {
+      if ('at' in c || ('sim' in c && c.sim === sim.id)) continue;
+      const o = 'sim' in c ? this.traffic.vehicles.get(c.sim) : undefined;
+      if (!o) ok = false;
+      else rest.push(o);
+    }
+    // Очередь: каждая следующая — стоит сразу за предыдущей (нос — не дальше её длины и пары метров).
+    let prev = sim;
+    for (const o of [...rest].sort((p, q) => dist(p.pos, sim.pos) - dist(q.pos, sim.pos))) {
+      if (o.v > 0.5 || dist(o.pos, prev.pos) > prev.length + 6) ok = false;
+      prev = o;
+    }
+    if (!ok && this.time - since < CREW_WAIT) return false;
+    this.crewWaitSince.delete(sim.id);
+    if (ok) for (const o of rest) this.crewGather.push(o.id);
+    return true;
+  }
+
+  /** Колонна собралась у конца пути (crewAssembled): машины за головной — с дороги, каждая там, где стоит. */
+  private gatherCrews(): void {
+    const ids = this.crewGather;
+    if (!ids.length) return;
+    this.crewGather = [];
+    for (const id of ids) {
+      const sim = this.traffic.vehicles.get(id);
+      const owner = this.owners.get(id);
+      const b = owner?.type === 'crew' ? this.construction.crews.brigades.get(owner.id) : undefined;
+      if (!sim || !b || !b.convoy || !this.construction.crews.owns(b, id)) continue;
+      const at = { node: b.convoy.to, pos: { ...sim.pos }, dir: { ...sim.dir } };
+      this.park(id);
+      this.construction.crews.arrive(b, at, id);
+    }
+  }
+
   private canArrive(sim: Vehicle): boolean {
+    const owner = this.owners.get(sim.id);
+    if (owner?.type === 'crew') return this.crewAssembled(owner.id, sim);
     const v = this.fleetOf(sim);
     if (!v) return true;
     const line = this.lines.get(v.lineId);
@@ -6840,14 +7031,56 @@ export class Game implements BuildContext {
     return undefined;
   }
 
-  siteCrewLooks(): VehicleLook[] {
-    const out: VehicleLook[] = [];
+  /**
+   * Машины бригад не в потоке (в потоке их рисует сама симуляция) — те же машины тем же рисунком (crewLane.CREW_UNITS):
+   * на стройке — по полосе бригады (едут на свои места в колонне этапов и работают у краёв этапов), вдоль стройки к
+   * дороге, ждут выезда в поток (Crews.carsAt). Вторая часть (самосвал за грейдером, каток за укладчиком) — по следу
+   * передней на полосе; на мосту — на высоте настила. stage — этап машины; site — участок, если машина на нём (там
+   * отсыпку моста и тоннеля ведут кран и щит); маячок мигает, пока машина работает у своего края.
+   */
+  siteCrewLooks(): CrewLook[] {
+    const out: CrewLook[] = [];
     const crews = this.construction.crews;
+    const net = this.roads.net;
+    const blink = this.speed > 0 && Math.floor(this.time * 3) % 2 === 0;
     for (const b of crews.brigades.values()) {
-      for (const m of crews.carsAt(b)) {
-        const s = CREW_CARS[Math.min(m.car, CREW_CARS.length - 1)];
-        // Точка машины — её нос (кузов тянется назад, как у машин в потоке).
-        out.push({ kind: s.kind, body: s.body, length: s.length, width: s.width, color: s.color, load: 'load' in s ? s.load : undefined, pos: m.pos, dir: m.dir });
+      const cars = crews.carsAt(b);
+      if (!cars.length) continue;
+      const p = b.project !== undefined ? this.construction.projects.get(b.project) : undefined;
+      const c = b.lane && b.project !== undefined ? this.construction.current(b.project) : null;
+      const fromB = !!c?.build?.fromB;
+      const leg = c?.build ? b.lane?.legs.find((g) => g.corridor === c.id && g.fromB === fromB) : undefined;
+      const spans = c?.build ? stageSpans(c.build.done, c.length) : null;
+      const going = !!p && !p.paused && p.stalled === undefined && b.state === 'working';
+      const raised = !!c && Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
+      for (const m of cars) {
+        const spec = CREW_CARS[Math.min(m.car, CREW_CARS.length - 1)];
+        const h = hitchOf(spec.body);
+        const u = leg && m.s !== undefined ? m.s - leg.at : null;
+        const site = !!c && u !== null && u >= -0.5 && u <= c.length + 0.5;
+        // Точка машины — её нос (кузов тянется назад, как у машин в потоке); вторая часть — по следу на полосе.
+        let pos = m.pos;
+        let trail = h && b.lane && m.s !== undefined ? laneTrail(b.lane, m.s, m.pos, m.dir, h.joint * spec.length, h.tail * spec.length) : undefined;
+        if (site && raised) {
+          const lift = bridgeLook(deckAlong(net, c!, fromB ? c!.length - u! : u!)).lift;
+          pos = add(pos, lift);
+          if (trail) trail = add(trail, lift);
+        }
+        const f = spans?.[m.car] ?? 0;
+        const active = site && f > 0 && f < c!.length - 1e-6 && Math.abs(u! - f) < 1;
+        out.push({
+          kind: spec.kind,
+          body: spec.body,
+          length: spec.length,
+          width: spec.width,
+          color: spec.color,
+          pos,
+          dir: m.dir,
+          ...(trail ? { trail } : {}),
+          beacon: active && going && blink,
+          stage: m.car,
+          ...(site ? { site: c!.id } : {}),
+        });
       }
     }
     return out;

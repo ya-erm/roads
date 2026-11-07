@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
 import { dist, type Vec } from '../core/vec';
 import { advise } from './advisor';
-import { type Brigade, CONVOY_GAP, type CrewHost, Crews, type Site } from './crews';
+import { type Brigade, convoyOffset, type CrewHost, Crews, type Site } from './crews';
 import { Game } from './game';
 import { anchorOf, road, runSeconds, STREET, withoutCitizens } from './testkit';
 import { projectBadges } from '../render/projectBadges';
@@ -104,14 +104,14 @@ describe('Бригады: только по дорогам и вдоль стр�
     expect(t.crews.carsAt(t.b).map((m) => m.car)).toEqual([0, 1]);
     expect(t.crews.owns(t.b, 42)).toBe(true);
     t.crews.arrive(t.b, { node: 571, pos: { x: 578, y: 0 }, dir: { x: 1, y: 0 } }, 42);
-    // Все на месте — колонной вдоль стройки: головная впереди, остальные — через CONVOY_GAP позади.
+    // Все на месте — колонной вдоль стройки: головная впереди, остальные — позади на свою длину с зазором.
     expect(t.b.convoy).toBeUndefined();
     expect(t.b.trip).toBeDefined();
     t.until(5);
     const along = t.crews.carsAt(t.b);
     expect(along.map((m) => m.car)).toEqual([0, 1, 2]);
-    expect(dist(along[0].pos, along[1].pos)).toBeCloseTo(CONVOY_GAP, 6);
-    expect(dist(along[1].pos, along[2].pos)).toBeCloseTo(CONVOY_GAP, 6);
+    expect(dist(along[0].pos, along[1].pos)).toBeCloseTo(convoyOffset(1), 6);
+    expect(dist(along[1].pos, along[2].pos)).toBeCloseTo(convoyOffset(2) - convoyOffset(1), 6);
   });
 
   it('машиной до узла подъезда, оттуда — вдоль стройки к краю работ: видно, где едет; сохранение посреди пути', () => {
@@ -346,9 +346,10 @@ describe('Бригады в игре: нет подъезда', () => {
     expect(loaded.construction.crews.walkAt(twin)).toEqual(crews.walkAt(second));
     expect(loaded.siteCrewLooks().map((v) => v.pos)).toEqual(game.siteCrewLooks().map((v) => v.pos));
     expect(game.brigadeWhere(second.id)!.text).toContain('вдоль стройки');
-    // Вдоль стройки едет вся колонна — три машины; клик по любой — карточка её базы.
+    // Вдоль стройки едет вся колонна — три машины (и три машины первой бригады работают у края, той же техникой);
+    // клик по любой — карточка её базы.
     const looks = game.siteCrewLooks();
-    expect(looks.map((v) => v.body)).toEqual(['van', 'grader', 'roller']);
+    expect(looks.map((v) => v.body)).toEqual(['crewEarth', 'crewPave', 'crewMarks', 'crewEarth', 'crewPave', 'crewMarks']);
     for (const v of looks) expect(game.crewBaseAt({ x: v.pos.x - v.dir.x * 2, y: v.pos.y - v.dir.y * 2 })).toBe(second.base);
     for (const g of [game, loaded]) runSeconds(g, 30);
     expect(loaded.construction.crews.toSave()).toEqual(game.construction.crews.toSave());

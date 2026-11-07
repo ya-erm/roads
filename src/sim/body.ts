@@ -6,10 +6,12 @@ import type { Vec } from '../core/vec';
  *  - semi — тягач с полуприцепом (Грузовик II), longSemi — длинный, на трёх осях (Фура);
  *  - microbus — микроавтобус (Автобус), cityBus — городской (Автобус II);
  *  - articBus — сочленённый (Автобус III): две секции с «гармошкой»;
- *  - grader, roller — грейдер и каток колонны строительной бригады (за самосвалом-фургоном, src/game/crews.ts).
+ *  - crewEarth, crewPave, crewMarks — техника строительной бригады (src/game/crewLane.ts, CREW_UNITS): грейдер с
+ *    самосвалом грунта, асфальтоукладчик с катком (две части, как тягач с прицепом: вторая идёт следом за первой) и
+ *    машина разметки — одни и те же в потоке, вдоль стройки и на месте работ.
  * У машин жителей кузова нет — они рисуются как были.
  */
-export type VehicleBody = 'van' | 'semi' | 'longSemi' | 'microbus' | 'cityBus' | 'articBus' | 'grader' | 'roller';
+export type VehicleBody = 'van' | 'semi' | 'longSemi' | 'microbus' | 'cityBus' | 'articBus' | 'crewEarth' | 'crewPave' | 'crewMarks';
 
 /**
  * Сцепка машины из двух частей — доли её длины, считая от носа:
@@ -42,6 +44,9 @@ const HITCHES: Partial<Record<VehicleBody, Hitch>> = {
   longSemi: { cab: 0.17, back: 0.287, joint: 0.309, base: 0.33, front: 0.37, tail: 0.551 },
   // Сочленённый: передняя секция чуть длиннее задней, между ними — гармошка.
   articBus: { base: 0.46, joint: 0.575, tail: 0.25, front: 0.555, back: 0.595 },
+  // Техника бригады (22 и 18 м): впереди грейдер (укладчик), за ним на «сцепке» — самосвал (каток), идёт по его следу.
+  crewEarth: { base: 0.33, joint: 0.455, tail: 0.43, front: 0.41, back: 0.5 },
+  crewPave: { base: 0.3, joint: 0.555, tail: 0.36, front: 0.47, back: 0.61 },
 };
 
 /** Сцепка кузова; цельный кузов — undefined. */

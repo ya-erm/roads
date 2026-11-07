@@ -52,6 +52,11 @@ export interface Vehicle extends VehicleSpec {
   /** Визуальное боковое смещение при перестроении. */
   lateral: number;
   /**
+   * Боковое смещение тает по пройденному пути, а не по времени: машина плавно съезжает в полосу на ходу, с поворотом
+   * корпуса, — стоя она не сдвигается вбок (техника бригады выезжает в поток с места на оси дороги, Game.driveFrom).
+   */
+  glide?: true;
+  /**
    * Визуальный сдвиг после правки сети: машину переставили на новую кривую или полосу, а нарисована она ещё там, где
    * была, — сдвиг тает за долю секунды, без скачка. Нет — не сдвинута.
    */
@@ -80,4 +85,7 @@ export interface Vehicle extends VehicleSpec {
 export type Blinker = -1 | 0 | 1;
 
 /** Что нужно, чтобы нарисовать машину: вид и кузов, цвет, нос и курс, вторая часть кузова, поворотник. */
-export type VehicleLook = Pick<Vehicle, 'kind' | 'body' | 'length' | 'width' | 'color' | 'load' | 'pos' | 'dir' | 'trail' | 'blinker'>;
+export type VehicleLook = Pick<Vehicle, 'kind' | 'body' | 'length' | 'width' | 'color' | 'load' | 'pos' | 'dir' | 'trail' | 'blinker'> & {
+  /** Маячок техники бригады горит (машина работает у своего края); нет — не горит. */
+  beacon?: boolean;
+};

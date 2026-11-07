@@ -26,6 +26,7 @@ import type { TerraformMode } from '../world/terrain';
 import { altitudeText } from '../render/relief';
 import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
 import { badgeAt, projectBadges } from '../render/projectBadges';
+import { projectName } from '../game/construction';
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
 import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LANE_W, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
@@ -255,6 +256,8 @@ export class Controller {
   placingBase = false;
   /** Переносим строительную базу: площадка у дороги под курсором, клик — база туда (Esc — отмена). */
   movingBase: number | null = null;
+  /** Выбираем стройку для бригады («🎯 На стройку…»): клик по плашке или полотну проекта — она едет туда (Esc — отмена). */
+  sendingCrew: number | null = null;
   /** Настройка полос выбранного перекрёстка: полоса въезда, которую сейчас соединяем. */
   laneFrom: { seg: number; i: number } | null = null;
   /** Правка фазы светофора на карте: перекрёсток и номер фазы (выбрана в карточке); клик по проезду — его зелёный в ней. */
@@ -372,6 +375,7 @@ export class Controller {
     this.placingWarehouse = null;
     this.placingAnnex = null;
     this.placingBase = false;
+    this.sendingCrew = null;
     if (this.tool === 'line' && tool !== 'line') this.lineDraft = [];
     if (tool !== 'line') this.addStopTo = null;
     // Новая линия собирается с чистого листа: прежняя выбранная линия и объект не мешают.
@@ -1010,7 +1014,29 @@ export class Controller {
     // Выбрали что-то другое — склад этой станции больше не ставим.
     if (sel?.type !== 'station' || sel.id !== this.placingWarehouse) this.placingWarehouse = null;
     if (sel?.type !== 'industry' || sel.id !== this.placingAnnex) this.placingAnnex = null;
+    // Выбрали другое — стройку для бригады больше не выбираем.
+    if (sel?.type !== 'crew' || sel.id !== this.sendingCrew) this.sendingCrew = null;
     this.onChange();
+  }
+
+  /**
+   * «🎯 На стройку…» в карточке бригады id: клик по плашке или полотну проекта отправит её туда (on = false — выйти).
+   * Карточка бригады остаётся открытой.
+   */
+  startCrewSend(id: number, on = true): void {
+    if (this.tool !== 'select') this.setTool('select');
+    if (this.selection?.type !== 'crew' || this.selection.id !== id) this.select({ type: 'crew', id });
+    this.sendingCrew = on ? id : null;
+    this.onChange();
+  }
+
+  /** Проект стройки под точкой p — плашка «🏗 45%» или его недостроенное полотно; нет — null. */
+  private projectUnder(p: Vec): number | null {
+    const g = this.game();
+    const badge = badgeAt(projectBadges(g, this.camera.zoom), p, this.camera.zoom);
+    if (badge) return badge.id;
+    const c = corridorUnder(g.roads.net, p, 4);
+    return c?.build && g.construction.projects.has(c.build.project) ? c.build.project : null;
   }
 
   /** Режим «поставить пристройку» предприятия id: зона вокруг него — на карте, клик в ней ставит пристройку. */
@@ -1051,6 +1077,7 @@ export class Controller {
     else if (this.placingWarehouse !== null) this.placingWarehouse = null;
     else if (this.placingAnnex !== null) this.placingAnnex = null;
     else if (this.placingBase) this.placingBase = false;
+    else if (this.sendingCrew !== null) this.sendingCrew = null;
     else if (this.phaseEdit) this.phaseEdit = null;
     else if (this.copyStart) this.copyStart = null;
     else if (this.pasteDrag) this.pasteDrag = null;
@@ -1188,6 +1215,8 @@ export class Controller {
     const g = this.game();
     const sel = this.selection;
     if (sel?.type === 'vehicle') return g.traffic.vehicles.get(sel.simId)?.pos ?? null;
+    // Бригада — за головной машиной колонны (на стройке — у края работ, на базе — база).
+    if (sel?.type === 'crew') return g.brigadeWhere(sel.id)?.pos ?? null;
     if (sel?.type === 'fleet') {
       const v = g.fleet.get(sel.id);
       if (!v) return null;
@@ -1578,6 +1607,19 @@ export class Controller {
           this.onChange();
           break;
         }
+        if (this.sendingCrew !== null) {
+          // Стройка для бригады: плашка или полотно проекта под курсором — она едет туда; карточка бригады остаётся.
+          const id = this.sendingCrew;
+          const project = this.projectUnder(p);
+          const problem = project === null ? 'Кликните по стройке: плашке «🏗» или полотну проекта' : g.sendBrigade(id, project);
+          if (problem) this.showError(problem);
+          else {
+            this.sendingCrew = null;
+            g.notify(`🚚 Бригада едет на «${projectName(g.construction.projects.get(project!)!)}» · 📌`);
+          }
+          this.onChange();
+          break;
+        }
         if (this.placingWarehouse !== null) {
           // Склад-здание станции — в зоне вокруг неё; поставили — снова её карточка.
           const id = this.placingWarehouse;
@@ -1899,10 +1941,12 @@ export class Controller {
     if (owner) return { type: 'fleet', id: owner.id };
     const veh = g.vehicleAt(p);
     if (veh?.fleet) return { type: 'fleet', id: veh.fleet.id };
+    // Любая машина колонны бригады — в потоке или вне его (вдоль стройки, ждёт колонну) — выбирает бригаду целиком.
+    const crewSim = veh ? g.crewOfSim(veh.sim.id) : undefined;
+    if (crewSim !== undefined) return { type: 'crew', id: crewSim };
     if (veh) return { type: 'vehicle', simId: veh.sim.id };
-    // Машина бригады вдоль стройки (не в потоке) — карточка её базы: там бригады и что они делают.
-    const crewBase = g.crewBaseAt(p);
-    if (crewBase !== undefined) return { type: 'base', id: crewBase };
+    const crew = g.crewAt(p);
+    if (crew !== undefined) return { type: 'crew', id: crew };
     const st = g.structureAt(p);
     if (st?.type === 'station') return { type: 'station', id: st.id };
     if (st?.type === 'warehouse') return { type: 'station', id: st.stationId };
@@ -3460,6 +3504,19 @@ export class Controller {
           o.label = plan.ok
             ? { text: `База стройки · ${plan.cost ? money(plan.cost) : 'бесплатно'}${plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : ''} · Esc — отмена`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
+          break;
+        }
+        if (this.sendingCrew !== null) {
+          // Стройка для бригады: проект под курсором подсвечен, подпись — поедет ли туда бригада и почему нет.
+          const project = this.projectUnder(p);
+          o.crewTarget = project;
+          const problem = project !== null ? g.brigadeCanGo(this.sendingCrew, project) : null;
+          const info = project !== null ? g.construction.projects.get(project) : undefined;
+          o.label = !info
+            ? { text: '🎯 Кликните по стройке: плашке «🏗» или полотну проекта · Esc — отмена', ok: true }
+            : problem
+              ? { text: `⛔ ${problem}`, ok: false }
+              : { text: `🎯 🚚 → «${projectName(info)}» · 📌 закрепить`, ok: true };
           break;
         }
         const home = this.placingWarehouse !== null ? g.stations.get(this.placingWarehouse) : undefined;

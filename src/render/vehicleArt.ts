@@ -38,46 +38,107 @@ interface Part {
 const WORLD: Pick<Part, 'origin' | 'dir'> = { origin: { x: 0, y: 0 }, dir: { x: 1, y: 0 } };
 
 /**
- * Техника строительной бригады в колонне (как на стройке, constructionArt.drawMachines): грейдер — длинная узкая рама,
- * нож поперёк посередине, кабина сзади; каток — тёмный валец во всю ширину впереди, за ним корпус с кабиной.
+ * Техника строительной бригады (crewLane.CREW_UNITS) — один рисунок в потоке, вдоль стройки и на месте работ:
+ *  - crewEarth: впереди грейдер (длинная рама, нож поперёк, кабина сзади), за ним — самосвал с грунтом;
+ *  - crewPave: впереди асфальтоукладчик (короткий широкий корпус, тёмный брус-выглаживатель сзади), за ним — каток
+ *    (тёмный валец во всю ширину впереди, корпус с кабиной);
+ *  - crewMarks: белая машина разметки с оранжевой полосой.
+ * Жёлтые, широкие, квадратные — как настоящая техника. Маячок на кабине передней машины: горит, пока она работает.
  */
-function crewMachineArt(ctx: CanvasRenderingContext2D, v: VehicleLook, detailed: boolean): void {
-  const L = v.length;
+const CREW_YELLOW_EDGE = '#6b5410';
+
+/** Передняя часть техники бригады (грейдер, укладчик) от x0 до носа, или вся машина разметки. */
+function crewFrontArt(ctx: CanvasRenderingContext2D, v: VehicleLook, x0: number, detailed: boolean): void {
   const W = v.width;
-  const dark = '#3d4148';
-  ctx.strokeStyle = '#6b5410';
-  ctx.lineWidth = 0.3;
-  if (v.body === 'grader') {
+  const F = -x0;
+  ctx.strokeStyle = CREW_YELLOW_EDGE;
+  ctx.lineWidth = 0.35;
+  let beacon = -1.2;
+  if (v.body === 'crewEarth') {
+    // Грейдер: рама во всю длину, нож поперёк посередине, кабина над задними колёсами.
     ctx.fillStyle = v.color;
-    rr(ctx, -L, -W * 0.3, L, W * 0.6, 0.6);
+    rr(ctx, x0, -W * 0.33, F, W * 0.66, 0.6);
     ctx.fill();
     ctx.stroke();
-    // Нож поперёк рамы и кабина над задними колёсами.
     ctx.fillStyle = '#4d4f55';
-    ctx.fillRect(-L * 0.48, -W / 2, 0.9, W);
+    ctx.fillRect(x0 + F * 0.42, -W / 2, Math.max(0.8, F * 0.11), W);
     ctx.fillStyle = shadeHex(v.color, -0.08);
-    rr(ctx, -L * 0.82, -W * 0.42, L * 0.24, W * 0.84, 0.5);
+    rr(ctx, x0 + 0.3, -W * 0.4, F * 0.3, W * 0.8, 0.5);
     ctx.fill();
     ctx.stroke();
-    if (detailed) {
-      ctx.fillStyle = 'rgba(255,255,255,0.65)';
-      ctx.fillRect(-L * 0.6, -W * 0.3, 0.6, W * 0.6);
-    }
-    return;
+    beacon = x0 + 0.3 + F * 0.15;
+  } else if (v.body === 'crewPave') {
+    // Асфальтоукладчик: широкий корпус, впереди бункер, сзади тёмный брус.
+    ctx.fillStyle = '#2f3237';
+    ctx.fillRect(x0, -W / 2, F * 0.2, W);
+    ctx.fillStyle = v.color;
+    rr(ctx, x0 + F * 0.2, -W * 0.46, F * 0.8, W * 0.92, 0.6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = shadeHex(v.color, -0.12);
+    rr(ctx, -F * 0.3, -W * 0.36, F * 0.27, W * 0.72, 0.4);
+    ctx.fill();
+    beacon = x0 + F * 0.45;
+  } else {
+    // Машина разметки: белый фургон с оранжевой полосой.
+    const L = v.length;
+    ctx.fillStyle = '#f4f5f7';
+    ctx.strokeStyle = '#8a9099';
+    rr(ctx, -L, -W / 2, L, W, 0.9);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#e8743b';
+    ctx.fillRect(-L * 0.92, -0.3, L * 0.84, 0.6);
+    if (detailed) windshield(ctx, 0, W, '#f4f5f7');
+    beacon = -2.4;
   }
-  // Каток: валец впереди, корпус и кабина за ним.
-  ctx.fillStyle = dark;
-  rr(ctx, -2.2, -W / 2, 2.2, W, 0.9);
+  // Маячок.
+  ctx.fillStyle = v.beacon ? '#ff7a1a' : '#b8682c';
+  ctx.beginPath();
+  ctx.arc(beacon, 0, 0.9, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = v.color;
-  rr(ctx, -L, -W * 0.42, L - 2.6, W * 0.84, 0.7);
-  ctx.fill();
-  ctx.stroke();
-  if (detailed) {
-    ctx.fillStyle = 'rgba(255,255,255,0.65)';
-    ctx.fillRect(-L * 0.55, -W * 0.3, 0.6, W * 0.6);
+  if (v.beacon) {
+    ctx.fillStyle = 'rgba(255, 140, 40, 0.28)';
+    ctx.beginPath();
+    ctx.arc(beacon, 0, 3.6, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
+
+/** Задняя часть техники бригады от x0 до x1 (x1 — ближе к носу): самосвал с грунтом или каток. */
+function crewRearArt(ctx: CanvasRenderingContext2D, v: VehicleLook, x0: number, x1: number): void {
+  const W = v.width;
+  const len = x1 - x0;
+  ctx.strokeStyle = CREW_YELLOW_EDGE;
+  ctx.lineWidth = 0.35;
+  if (v.body === 'crewEarth') {
+    // Самосвал: кабина впереди, кузов с грунтом.
+    ctx.fillStyle = v.color;
+    rr(ctx, x0, -W * 0.48, len, W * 0.96, 0.7);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#9a7b55';
+    rr(ctx, x0 + 0.5, -W * 0.36, len - 3.6, W * 0.72, 0.5);
+    ctx.fill();
+    ctx.fillStyle = shadeHex(v.color, -0.1);
+    ctx.fillRect(x1 - 2.6, -W * 0.4, 0.5, W * 0.8);
+    return;
+  }
+  // Каток: валец впереди во всю ширину, за ним корпус с кабиной.
+  ctx.fillStyle = '#3d4148';
+  rr(ctx, x1 - 2.2, -W / 2, 2.2, W, 0.9);
+  ctx.fill();
+  ctx.fillStyle = v.color;
+  rr(ctx, x0, -W * 0.4, len - 2.6, W * 0.8, 0.6);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = shadeHex(v.color, -0.1);
+  rr(ctx, x0 + len * 0.15, -W * 0.3, len * 0.3, W * 0.6, 0.4);
+  ctx.fill();
+}
+
+/** Техника бригады — кузов из двух частей (грейдер с самосвалом, укладчик с катком). */
+const isCrewPair = (b: VehicleLook['body']) => b === 'crewEarth' || b === 'crewPave';
 
 function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
   ctx.beginPath();
@@ -134,6 +195,11 @@ function partsOf(v: VehicleLook, detailed: boolean): Part[] {
   const td = trailDir(joint, v.trail, v.dir);
   // Вторая часть — от back (от носа прямой машины) до хвоста, в системе шарнира.
   const back = { x0: -(1 - h.joint) * L, x1: (h.joint - h.back) * L };
+  if (isCrewPair(v.body)) {
+    const rear: Part = { origin: joint, dir: td, ...back, paint: (ctx) => crewRearArt(ctx, v, back.x0, back.x1) };
+    const front: Part = { origin: v.pos, dir: v.dir, x0: -h.front * L, x1: 0, paint: (ctx) => crewFrontArt(ctx, v, -h.front * L, detailed) };
+    return [rear, front];
+  }
   if (v.body === 'articBus') {
     const rear: Part = { origin: joint, dir: td, ...back, paint: (ctx) => busSection(ctx, v, back.x0, back.x1, detailed, 'rear') };
     const front: Part = { origin: v.pos, dir: v.dir, x0: -h.front * L, x1: 0, paint: (ctx) => busSection(ctx, v, -h.front * L, 0, detailed, 'front') };
@@ -155,7 +221,7 @@ function rigidArt(ctx: CanvasRenderingContext2D, v: VehicleLook, detailed: boole
   const W = v.width;
   if (v.body === 'microbus') return microbusArt(ctx, v, detailed);
   if (v.body === 'cityBus') return busSection(ctx, v, -L, 0, detailed, 'whole');
-  if (v.body === 'grader' || v.body === 'roller') return crewMachineArt(ctx, v, detailed);
+  if (v.body === 'crewMarks') return crewFrontArt(ctx, v, -L, detailed);
   ctx.fillStyle = v.color;
   rr(ctx, -L, -W / 2, L, W, 1.3);
   ctx.fill();
