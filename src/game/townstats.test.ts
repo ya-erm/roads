@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { TOWN_HISTORY, TOWN_NEED } from '../world/entities';
+import { townNeed } from '../world/townSupply';
 import { Game, SaveData } from './game';
 
 /** Закрывает текущий месяц настоящим шагом игры: время — к самой границе месяца. */
@@ -22,16 +23,20 @@ describe('Снабжение города по месяцам', { timeout: 60_00
 
     const first = game.dateLabel;
     town.supplied[a] = 12;
+    // Норма месяца — по населению на его конце (город растёт уже после итогов).
+    const need1 = townNeed(town.population);
     closeMonth(game);
     const second = game.dateLabel;
     expect(second).not.toBe(first);
     town.supplied[b] = 4;
+    const need2 = townNeed(town.population);
     closeMonth(game);
 
     expect(town.supplyHistory).toHaveLength(2);
     const [m1, m2] = town.supplyHistory!;
     expect(m1.label).toBe(first);
-    expect(m1.need).toBe(TOWN_NEED);
+    expect(m1.need).toBe(need1);
+    expect(m2.need).toBe(need2);
     // Не привезли — ноль, а не пропуск: у каждого нужного груза свой столбик.
     expect(m1.got).toEqual({ ...Object.fromEntries(town.demands.map((c) => [c, 0])), [a]: 12 });
     expect(m2.label).toBe(second);
@@ -74,28 +79,55 @@ describe('Снабжение города по месяцам', { timeout: 60_00
     const game = new Game(7);
     const town = game.towns.find((t) => t.demands.length >= 2)!;
     const [a, b] = town.demands;
-    town.supplied[a] = TOWN_NEED + 5;
-    town.supplied[b] = TOWN_NEED * 4;
+    const n1 = townNeed(town.population);
+    town.supplied[a] = n1 + 5;
+    town.supplied[b] = n1 * 4;
     closeMonth(game);
     // Новый месяц начинается с излишков: по a — 5, по b — не больше нормы.
-    expect(town.supplied).toEqual({ [a]: 5, [b]: TOWN_NEED });
-    expect(town.carried).toEqual({ [a]: 5, [b]: TOWN_NEED });
+    expect(town.supplied).toEqual({ [a]: 5, [b]: n1 });
+    expect(town.carried).toEqual({ [a]: 5, [b]: n1 });
     expect(game.townSatisfaction(town, 'current')).toBeGreaterThan(0);
     expect(town.supplyHistory![0].carried).toBeUndefined();
 
     const loaded = reload(roundTrip(game));
     const t2 = loaded.towns.find((t) => t.id === town.id)!;
     expect(t2.carried).toEqual(town.carried);
-    t2.supplied[a] = (t2.supplied[a] ?? 0) + 12;
+    // Город вырос — норма нового месяца не меньше прежней.
+    const n2 = townNeed(t2.population);
+    expect(n2).toBeGreaterThanOrEqual(n1);
+    t2.supplied[a] = (t2.supplied[a] ?? 0) + n2 - 3;
     closeMonth(loaded);
     const month = t2.supplyHistory![t2.supplyHistory!.length - 1];
-    // Месяц закрыт вместе с перенесённым: 5 из прошлого + 12 = 17 ≥ нормы; по b — ровно норма из прошлого.
-    expect(month.got[a]).toBe(17);
-    expect(month.got[b]).toBe(TOWN_NEED);
-    expect(month.carried).toEqual({ [a]: 5, [b]: TOWN_NEED });
-    expect(t2.lastSupplied[a]).toBe(17);
+    // Месяц закрыт вместе с перенесённым: 5 из прошлого + (n2 − 3) = n2 + 2 ≥ нормы; по b — перенесённая норма прошлого.
+    expect(month.need).toBe(n2);
+    expect(month.got[a]).toBe(n2 + 2);
+    expect(month.got[b]).toBe(n1);
+    expect(month.carried).toEqual({ [a]: 5, [b]: n1 });
+    expect(t2.lastSupplied[a]).toBe(n2 + 2);
     expect(t2.supplied).toEqual({ [a]: 2 });
     expect(t2.carried).toEqual({ [a]: 2 });
+  });
+
+  it('крупному городу базовой нормы мало: месяц закрывает только норма по его населению', () => {
+    const game = new Game(7);
+    const big = [...game.towns].sort((x, y) => y.population - x.population)[0];
+    const small = [...game.towns].sort((x, y) => x.population - y.population)[0];
+    expect(big.population).toBeGreaterThan(10_000);
+    const need = townNeed(big.population);
+    expect(need).toBeGreaterThanOrEqual(3 * TOWN_NEED);
+    for (const c of big.demands) big.supplied[c] = TOWN_NEED;
+    for (const c of small.demands) small.supplied[c] = TOWN_NEED;
+    closeMonth(game);
+    // Те же 15 единиц: маленький город снабжён, крупный — нет; норма месяца — в истории.
+    expect(big.supplyHistory!.at(-1)!.need).toBe(need);
+    expect(game.townSatisfaction(big)).toBe(0);
+    expect(game.townSatisfaction(small)).toBe(1);
+    expect(game.townReviews(big).at(-1)!.mood).toBe('bad');
+
+    for (const c of big.demands) big.supplied[c] = townNeed(big.population);
+    closeMonth(game);
+    expect(game.townSatisfaction(big)).toBe(1);
+    expect(game.townReviews(big).at(-1)!.mood).toBe('good');
   });
 
   it('старое сохранение без истории грузится: история пустая и начинается со следующего месяца', () => {
@@ -109,9 +141,10 @@ describe('Снабжение города по месяцам', { timeout: 60_00
     const town = loaded.towns[0];
     const label = loaded.dateLabel;
     town.supplied[town.demands[0]] = 7;
+    const need = townNeed(town.population);
     closeMonth(loaded);
     expect(town.supplyHistory).toEqual([
-      { label, got: { ...Object.fromEntries(town.demands.map((c) => [c, 0])), [town.demands[0]]: 7 }, need: TOWN_NEED },
+      { label, got: { ...Object.fromEntries(town.demands.map((c) => [c, 0])), [town.demands[0]]: 7 }, need },
     ]);
   });
 });

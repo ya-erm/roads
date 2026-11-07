@@ -1,6 +1,6 @@
 /**
  * Плашки проектов стройки на карте («🏗 45%», на паузе — «⏸», без денег — «💸», бригада не на месте — «🚚», к проекту
- * не доехать по дорогам — «🚚 нет подъезда»;
+ * не доехать по дорогам — «🚚 нет подъезда», а примыкает к строящемуся соседу с подъездом — «⏳ после соседнего»;
  * приоритетный — со «⬆»): где они и что на них — одним расчётом для отрисовки (renderer.drawConstruction) и для клика
  * по плашке (controller: клик выбирает проект и открывает его карточку).
  */
@@ -43,11 +43,19 @@ export function projectBadges(game: Game, zoom: number): ProjectBadge[] {
     const pct = Math.min(99, Math.floor(info.done * 100));
     const crew = crews.working(p.id).length;
     // Нет подъезда (бригадам не доехать по дорогам ни с одной базы) — так и написано: иначе непонятно, почему стоит.
-    const blocked = !p.paused && !info.access && crews.bases.size > 0;
+    // Примыкает к строящемуся соседу с подъездом — не беда, а очередь: «⏳ после соседнего», спокойным цветом.
+    const stuck = !p.paused && !info.access && crews.bases.size > 0;
+    const waits = stuck && info.waits;
+    const blocked = stuck && !info.waits;
     const mark = p.paused ? '⏸' : p.stalled !== undefined ? '💸' : crew ? '🏗' : '🚚';
-    const text = blocked ? `${p.priority ? '⬆ ' : ''}🚚 нет подъезда` : `${p.priority ? '⬆ ' : ''}${mark} ${pct}%`;
+    const top = p.priority ? '⬆ ' : '';
+    const text = blocked ? `${top}🚚 нет подъезда` : waits ? `${top}⏳ после соседнего` : `${top}${mark} ${pct}%`;
     const fill =
-      (p.stalled !== undefined || blocked) && !p.paused ? 'rgba(232, 72, 63, 0.92)' : p.paused ? 'rgba(110, 118, 128, 0.92)' : 'rgba(240, 138, 60, 0.95)';
+      (p.stalled !== undefined || blocked) && !p.paused
+        ? 'rgba(232, 72, 63, 0.92)'
+        : p.paused || waits
+          ? 'rgba(110, 118, 128, 0.92)'
+          : 'rgba(240, 138, 60, 0.95)';
     // Над краем работ — выше техники, чтобы её не закрывать; при любом зуме одного размера на экране.
     out.push({ id: p.id, text, x: at.x, y: at.y - 26 / z - 14, hw: (badgeTextPx(text) + 12) / z / 2, hh: 9 / z, fill });
   }

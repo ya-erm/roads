@@ -19,8 +19,11 @@ export function supplyBarHtml(now: number, carried: number, need: number, color:
   return `<div class="bar supply-bar">${hatch}<div style="width:${fresh.toFixed(1)}%;background:${color}"></div></div>`;
 }
 
-/** Подпись под полоской: этот месяц (с переносом из прошлого и в следующий) и прошлый. */
-export function supplyLineHtml(now: number, carried: number, last: number, need: number, color: string): string {
+/**
+ * Подпись под полоской: этот месяц (с переносом из прошлого и в следующий) и прошлый. Норма растёт с населением:
+ * прошлый месяц сверяем с его нормой (lastNeed), если она другая.
+ */
+export function supplyLineHtml(now: number, carried: number, last: number, need: number, color: string, lastNeed = need): string {
   const n = (v: number) => Math.round(v);
   const into =
     carried > 0
@@ -28,7 +31,7 @@ export function supplyLineHtml(now: number, carried: number, last: number, need:
       : '';
   const out = supplyCarry(now, need);
   const next = out > 0 ? ` <span class="carry-chip" data-tip="Сверх нормы: ${n(out)} перейдёт в следующий месяц (не больше нормы)">+${n(out)} ↪</span>` : '';
-  return `${into}в этом месяце ${n(now)} из ${need}${now >= need ? ' ✓' : ''}${next} · в прошлом ${n(last)}${last >= need ? ' ✓' : ''}`;
+  return `${into}в этом месяце ${n(now)} из ${need}${now >= need ? ' ✓' : ''}${next} · в прошлом ${n(last)}${lastNeed !== need ? ` из ${lastNeed}` : ''}${last >= lastNeed ? ' ✓' : ''}`;
 }
 
 /** Потребность города — для блока «Что нужно городу». */
@@ -40,6 +43,8 @@ export interface TownNeed {
   carried: number;
   /** Итог прошлого месяца. */
   last: number;
+  /** Норма прошлого месяца, если она не та, что сейчас (город вырос). */
+  lastNeed?: number;
 }
 
 /** Потребность в этом месяце: закрыта, закрыта частично или ничего не привезли. */
@@ -54,7 +59,8 @@ export function needTip(n: TownNeed, need: number): string {
   if (n.carried > 0) parts.push(`${r(n.carried)} — излишек прошлого месяца`);
   const out = supplyCarry(n.now, need);
   if (out > 0) parts.push(`${r(out)} сверх нормы перейдёт в следующий`);
-  parts.push(`в прошлом ${r(n.last)}${n.last >= need ? ' ✓' : ''}`);
+  const lastNeed = n.lastNeed ?? need;
+  parts.push(`в прошлом ${r(n.last)}${lastNeed !== need ? ` из ${lastNeed}` : ''}${n.last >= lastNeed ? ' ✓' : ''}`);
   return parts.join(' · ');
 }
 
@@ -80,14 +86,15 @@ function needDotHtml(n: TownNeed, need: number): string {
 export function needsFoldHtml(needs: readonly TownNeed[], need: number): string {
   if (!needs.length) return '';
   const ok = needs.filter((n) => n.now >= need).length;
-  const okLast = needs.filter((n) => n.last >= need).length;
+  const okLast = needs.filter((n) => n.last >= (n.lastNeed ?? need)).length;
   const cls = ok === needs.length ? ' all' : ok ? '' : ' none';
   const tip = `Закрыто в этом месяце: ${ok} из ${needs.length} · в прошлом: ${okLast} из ${needs.length}`;
   return `<span class="need-dots">${needs.map((n) => needDotHtml(n, need)).join('')}</span><span class="need-count${cls}" data-tip="${tip}">✓ ${ok} из ${needs.length}</span>`;
 }
 
 /** Подсказка у «?» после заголовка блока. */
-export const NEEDS_HINT = 'Каждая закрытая потребность ускоряет рост города. Привозите груз на станцию в черте города.';
+export const NEEDS_HINT =
+  'Каждая закрытая потребность ускоряет рост города. Привозите груз на станцию в черте города. Чем больше жителей, тем больше нужно в месяц.';
 
 /**
  * Заголовок «Что нужно городу»: сворачивает блок, как «Куда везти». После названия — «?» с подсказкой о росте

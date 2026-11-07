@@ -34,8 +34,8 @@ import { RailSim, Train } from '../sim/rail';
 import { stepWagons } from '../sim/wagons';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
-import { Annex, type BuildBase, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TOWN_NEED, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
-import { closeSupply } from '../world/townSupply';
+import { Annex, type BuildBase, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
+import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/townSupply';
 import { repaceSave, saveMonthLength } from './monthPace';
 import { Network, NetworkSave, Segment } from '../world/network';
 import { halfWidth, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
@@ -69,6 +69,7 @@ import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, type 
 import { Construction, type ConstructionSave, type Project } from './construction';
 import { carryBuild } from './constructionWork';
 import type { Brigade } from './crews';
+import { type CrewStep, CrewRoads } from './crewRoads';
 import { RING_SIZES, RingOptions, Roads } from './roads';
 import { TimelapseRecorder, type TimelapseSave } from './timelapse';
 import { Motion, SpeedChart, speedChart, TrackPiece } from './speedChart';
@@ -266,6 +267,13 @@ interface UndoSnapshot {
   /** Проекты стройки до действия (нет в старых снимках) и какие проекты действие заложило. */
   projects?: Project[];
   creates?: number[];
+  /** Места строительных баз до действия (перенос базы, база, отодвинутая расширением улицы); нет в старых снимках. */
+  bases?: { id: number; fp: Footprint; nodeId: number }[];
+}
+
+/** База стоит там же (площадка и ворота), что и в снимке s. */
+function sameBasePlace(b: BuildBase, s: { fp: Footprint; nodeId: number }): boolean {
+  return b.nodeId === s.nodeId && b.fp.center.x === s.fp.center.x && b.fp.center.y === s.fp.center.y && b.fp.angle === s.fp.angle;
 }
 
 /** По умолчанию станция работает и с пассажирами, и с грузом. */
@@ -916,7 +924,11 @@ export class Game implements BuildContext {
     for (const s of this.index.near(fp.center, footprintRadius(fp) + margin + 120)) {
       if (s === skip || !footprintsOverlap(fp, s.fp, margin)) continue;
       if (s.type === 'building' && s.kind !== 'landmark') houses.push(s.id);
-      else return { houses, blocker: s.type === 'building' ? 'Мешает ратуша' : s.type === 'industry' || s.type === 'annex' ? 'Мешает предприятие' : 'Мешает станция' };
+      else
+        return {
+          houses,
+          blocker: s.type === 'building' ? 'Мешает ратуша' : s.type === 'industry' || s.type === 'annex' ? 'Мешает предприятие' : s.type === 'base' ? 'Мешает база' : 'Мешает станция',
+        };
     }
     return { houses };
   }
@@ -930,7 +942,7 @@ export class Game implements BuildContext {
    * Дорога или путь, задевающие площадку (с запасом pad), — проверяем по сетке точек внутри неё;
    * ответ — чем мешает. Полотна узла skipNode (выезд самой станции) не в счёт.
    */
-  private roadUnder(fp: Footprint, pad: number, skipNode = -1): string | null {
+  private roadUnder(fp: Footprint, pad: number, skipNode = -1, roads: LaneNet = this.roads.net): string | null {
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = { x: -u.y, y: u.x };
     const nx = Math.max(2, Math.ceil(fp.w / 6));
@@ -943,7 +955,7 @@ export class Game implements BuildContext {
       const reach = halfWidth(s.spec) + pad;
       if (probes.some((q) => s.lut.closest(q).d < reach)) return 'Мешает путь';
     }
-    for (const c of this.roads.net.corridorsNear(fp.center, footprintRadius(fp) + pad + 40)) {
+    for (const c of roads.corridorsNear(fp.center, footprintRadius(fp) + pad + 40)) {
       if (c.a === skipNode || c.b === skipNode) continue;
       if (
         probes.some((q) => {
@@ -1083,26 +1095,21 @@ export class Game implements BuildContext {
     return true;
   }
 
-  /** Граф движения, по которому посчитаны подъезды (reach), и ответы по нему: «from>to» — доехать можно. */
-  private reachOf: { graph: unknown; map: Map<string, boolean> } | null = null;
+  /** Дороги для строительной техники: подъезд без учёта направления полос и шаги пути бригады (crewRoads.ts). */
+  private readonly crewRoads = new CrewRoads();
 
   /**
-   * Стройка (construction.ts, crews.ts): от узла from до узла to можно доехать по готовым дорогам — тем же маршрутом,
-   * что поедет машина бригады. Ответы запоминаются до смены графа движения.
+   * Стройка (construction.ts, crews.ts): от узла from до узла to технике можно добраться по готовым дорогам — без учёта
+   * направления полос (едет она по правилам, а где по ним не доехать — отрезок против движения, crewStep). Ответы
+   * запоминаются до смены графа движения.
    */
   reach(from: number, to: number): boolean {
-    if (from === to) return this.onRoad(from);
-    const graph = this.roads.graph;
-    if (this.reachOf?.graph !== graph) this.reachOf = { graph, map: new Map() };
-    const map = this.reachOf.map;
-    const key = `${from}>${to}`;
-    let hit = map.get(key);
-    if (hit === undefined) {
-      if (map.size > 20_000) map.clear();
-      hit = this.roads.route(from, to) !== null;
-      map.set(key, hit);
-    }
-    return hit;
+    return this.crewRoads.reach(this.roads.graph, from, to);
+  }
+
+  /** Стройка (crews.ts): следующий шаг бригады от узла from к узлу to — по дорогам в потоке или против движения. */
+  crewStep(from: number, to: number): CrewStep | null {
+    return this.crewRoads.step(this.roads.graph, from, to);
   }
 
   /**
@@ -1184,6 +1191,48 @@ export class Game implements BuildContext {
     this.construction.stamp++;
     this.journal.add('base', { id: base.id, pos: [Math.round(base.fp.center.x), Math.round(base.fp.center.y)], $: plan.cost });
     return null;
+  }
+
+  /**
+   * Перенос базы id к точке p: место и ворота — как при постановке (basePlan), только сама база себе не мешает и
+   * платы за базу нет — платится лишь снос домов на новом месте.
+   */
+  baseMovePlan(id: number, p: Vec): ReturnType<Game['basePlan']> {
+    const base = this.construction.crews.bases.get(id);
+    if (!base) return { ok: false, reason: 'Нет базы', cost: 0, fp: null, demolish: [] };
+    this.index.remove(base);
+    try {
+      return this.basePlan(p, true);
+    } finally {
+      this.index.add(base);
+    }
+  }
+
+  /**
+   * Переносит базу id к точке p (снимок для Ctrl+Z делает тот, кто переносит, — как у переноса станции). Работающие
+   * бригады продолжают, домой вернутся уже сюда; свободные едут сюда по дорогам (Crews.moveBase). null — перенесли.
+   */
+  moveBase(id: number, p: Vec): string | null {
+    const base = this.construction.crews.bases.get(id);
+    const plan = this.baseMovePlan(id, p);
+    if (!base || !plan.ok || !plan.fp || plan.nodeId === undefined) return plan.reason ?? 'Нельзя перенести';
+    const from = [Math.round(base.fp.center.x), Math.round(base.fp.center.y)];
+    if (plan.demolish.length) this.demolish(plan.demolish);
+    if (plan.cost) this.spend(plan.cost);
+    this.relocateBase(base, plan.fp, plan.nodeId);
+    this.journal.add('base>', { id, name: this.baseName(id), from, pos: [Math.round(plan.fp.center.x), Math.round(plan.fp.center.y)], $: plan.cost, razed: plan.demolish.length || undefined });
+    return null;
+  }
+
+  /** База — на новое место fp с воротами nodeId; бригады — следом (Crews.moveBase). */
+  private relocateBase(base: BuildBase, fp: Footprint, nodeId: number): void {
+    const from = { pos: { ...base.fp.center }, node: base.nodeId };
+    this.index.remove(base);
+    base.fp = fp;
+    base.nodeId = nodeId;
+    this.index.add(base);
+    this.construction.crews.moveBase(base.id, from);
+    this.construction.stamp++;
   }
 
   /** Ещё бригада на базе: цена — сразу, содержание — каждый месяц. null — наняли, иначе причина. */
@@ -1300,15 +1349,19 @@ export class Game implements BuildContext {
     const car = head && 'at' in head ? head.at : head && 'sim' in head ? this.traffic.vehicles.get(head.sim)?.pos : lead !== undefined ? this.traffic.vehicles.get(lead)?.pos : undefined;
     const walk = crews.walkAt(b);
     const toRoad = !!b.trip?.back;
+    // Отрезок дороги против движения (там, где по правилам не доехать, — как будто стоит регулировщик).
+    const against = b.trip?.to !== undefined;
     switch (b.state) {
       case 'working':
         return { pos: site ?? b.pos ?? home, text: `строит ${label}` };
       case 'going':
         if (car) return { pos: car, text: `едет по дороге строить ${label}` };
+        if (walk && against) return { pos: walk.pos, text: `едет по дороге против движения (там регулировщик) строить ${label}` };
         if (walk) return { pos: walk.pos, text: toRoad ? `едет вдоль стройки к дороге, потом — строить ${label}` : `едет вдоль стройки к краю работ ${label}` };
         return { pos: b.pos ?? home, text: `ждёт выезда, чтобы ехать строить ${label}` };
       case 'back':
         if (car) return { pos: car, text: 'едет по дороге на базу' };
+        if (walk && against) return { pos: walk.pos, text: 'едет по дороге против движения (там регулировщик) на базу' };
         if (walk) return { pos: walk.pos, text: 'едет вдоль стройки к дороге, потом — на базу' };
         return { pos: b.pos ?? home, text: 'ждёт выезда, чтобы ехать на базу' };
       default:
@@ -1345,7 +1398,7 @@ export class Game implements BuildContext {
     return this.index.at(p, radius) !== null;
   }
 
-  obstaclesAt(p: Vec, radius: number): { id: number; demolishable: boolean; gate?: number; movable?: boolean }[] {
+  obstaclesAt(p: Vec, radius: number): { id: number; demolishable: boolean; gate?: number; movable?: boolean; reason?: string }[] {
     return this.index
       .near(p, radius + 60)
       .filter((s) => pointInFootprint(p, s.fp, radius))
@@ -1354,8 +1407,10 @@ export class Game implements BuildContext {
         demolishable: s.type === 'building' && s.kind !== 'landmark',
         // Автостанция стоит в торце своего выезда: дороге, что входит в её узел, она не мешает.
         gate: s.type === 'station' && s.kind === 'road' ? s.nodeId : undefined,
-        // Навес остановки при расширении улицы отодвигается к новому бордюру (shoveStops).
-        movable: s.type === 'station' && s.kind === 'stop',
+        // Навес остановки при расширении улицы отодвигается к новому бордюру, строительная база — от новой кромки
+        // (shoveStops).
+        movable: (s.type === 'station' && s.kind === 'stop') || s.type === 'base',
+        reason: s.type === 'base' ? 'Мешает база' : undefined,
       }));
   }
 
@@ -1371,11 +1426,95 @@ export class Game implements BuildContext {
   }
 
   /**
+   * Где встанет строительная база base, когда улицу расширили (net — сеть после правки, changed — изменённые полотна):
+   * её отодвигают по перпендикуляру от своей улицы (полотна вдоль длинной стороны площадки, хотя бы одно — из changed),
+   * пока до новой кромки снова не будет зазора base.gap, как при постановке (basePlan). Ворота — тот же узел, а пропал
+   * он — ближний конец этой улицы. moved — площадку правда сдвинули. null — правка базу не задевает.
+   */
+  private baseShove(net: LaneNet, base: BuildBase, changed: Corridor[]): { fp: Footprint; nodeId: number; moved: boolean } | null {
+    const B = CONSTRUCTION.base;
+    const at = base.fp.center;
+    const r = footprintRadius(base.fp);
+    if (!changed.some((c) => c.lut.closest(at).d < r + corridorHalf(c) + B.gap + 2)) return null;
+    const u = { x: Math.cos(base.fp.angle), y: Math.sin(base.fp.angle) };
+    const v = { x: -u.y, y: u.x };
+    // Полотна вдоль длинной стороны площадки рядом с ней; своя улица — ближайшее к площадке из изменённых.
+    const along = net.corridorsNear(at, r + 40).filter((c) => {
+      const hit = c.lut.closest(at);
+      return Math.abs(dot(c.lut.tangentAt(hit.s), u)) > 0.95 && hit.d < corridorHalf(c) + B.gap + B.h + 6;
+    });
+    const gap = (c: Corridor) => {
+      const hit = c.lut.closest(at);
+      return hit.d - halfAtS(c, hit.s);
+    };
+    const own = along
+      .filter((c) => changed.some((x) => x.id === c.id))
+      .sort((a, b) => gap(a) - gap(b) || a.id - b.id)[0];
+    if (!own) return { fp: base.fp, nodeId: base.nodeId, moved: false };
+    const side = dot(sub(at, own.lut.closest(at).point), v) >= 0 ? 1 : -1;
+    const away = scale(v, side);
+    // Улица (и параллельные ей полотна) с той же стороны, что своя: от них и отодвигаем; дорогу позади площадки
+    // не считаем — на неё база наедет, тогда «Мешает база».
+    const front = along.filter((c) => dot(sub(c.lut.closest(at).point, at), away) < 0);
+    let fp = base.fp;
+    for (let k = 0; k < 4; k++) {
+      const edge: Vec[] = [];
+      for (let i = 0; i <= 8; i++) edge.push(add(fp.center, add(scale(u, (i / 8 - 0.5) * fp.w), scale(away, -fp.h / 2))));
+      let need = 0;
+      for (const c of front) {
+        for (const q of edge) {
+          const hit = c.lut.closest(q);
+          need = Math.max(need, halfAtS(c, hit.s) + B.gap - hit.d);
+        }
+      }
+      if (need < 0.05) break;
+      fp = { ...fp, center: add(fp.center, scale(away, need)) };
+    }
+    const moved = dist(fp.center, at) >= 0.3;
+    if (!moved) fp = base.fp;
+    // Ворота: тот же узел, если он остался; иначе — ближний к площадке конец своей улицы.
+    const nodeId = net.nodes.has(base.nodeId) ? base.nodeId : dist(net.node(own.a).pos, at) <= dist(net.node(own.b).pos, at) ? own.a : own.b;
+    return { fp, nodeId, moved };
+  }
+
+  /**
+   * Расширение улицы и строительные базы у изменённых полотен (сеть net после правки): каждую отодвигают от новой
+   * кромки (baseShove); дома на новом месте — в demolish. Отодвинуть нельзя — за край карты, в воду, на станцию,
+   * предприятие, другую базу, дорогу или путь — «Мешает база». Ответ — новые места сдвинутых баз.
+   */
+  private shoveBases(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[] | string {
+    const moved: Footprint[] = [];
+    for (const base of this.construction.crews.bases.values()) {
+      const res = this.baseShove(net, base, changed);
+      if (!res) continue;
+      const fp = res.fp;
+      if (this.roadUnder(fp, 1, -1, net)) return 'Мешает база';
+      if (!res.moved) continue;
+      if (!this.inBounds(fp.center, 40)) return 'Мешает база';
+      if (footprintCorners(fp).some((q) => this.isWater(q, 2)) || this.isWater(fp.center, 2)) return 'Мешает база';
+      const under = this.structuresUnder(fp, 1, base);
+      if (under.blocker) return 'Мешает база';
+      for (const id of under.houses) demolish.add(id);
+      moved.push(fp);
+    }
+    return moved;
+  }
+
+  /**
    * Расширение улицы (полоса, «кармашек», перестройка): навесы остановок у изменённых полотен отодвигаются
-   * к новому бордюру. Дома на новом месте навеса сносятся (цена — в плане); другая станция, предприятие,
-   * ратуша или чужая дорога там — «Мешает здание». Ответ — новые места навесов (для предпросмотра).
+   * к новому бордюру, строительные базы — от новой кромки (shoveBases). Дома на новом месте навеса или базы сносятся
+   * (цена — в плане); другая станция, предприятие, ратуша или чужая дорога там — «Мешает здание» (у базы —
+   * «Мешает база»). Ответ — новые места навесов и баз (для предпросмотра).
    */
   shoveStops(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[] | string {
+    const bases = this.shoveBases(net, changed, demolish);
+    if (typeof bases === 'string') return bases;
+    const stops = this.shoveStopsOnly(net, changed, demolish);
+    return typeof stops === 'string' ? stops : [...stops, ...bases];
+  }
+
+  /** Навесы остановок у изменённых полотен — к новому бордюру (shoveStops). */
+  private shoveStopsOnly(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[] | string {
     const moved: Footprint[] = [];
     for (const { st, fp } of this.stopShoves(net, changed)) {
       const node = net.node(st.nodeId).pos;
@@ -1392,7 +1531,7 @@ export class Game implements BuildContext {
       for (const s of this.index.near(fp.center, footprintRadius(fp) + 120)) {
         if (s === st || !footprintsOverlap(fp, s.fp, 1)) continue;
         if (s.type === 'building' && s.kind !== 'landmark') demolish.add(s.id);
-        else return 'Мешает здание';
+        else return s.type === 'base' ? 'Мешает база' : 'Мешает здание';
       }
       moved.push(fp);
     }
@@ -1602,6 +1741,18 @@ export class Game implements BuildContext {
       const under = this.index.near(fp.center, footprintRadius(fp) + 120).filter((s) => s !== st && s.type === 'building' && s.kind !== 'landmark' && footprintsOverlap(fp, s.fp, 1));
       if (under.length) this.demolish(under.map((s) => s.id));
       this.computeCatchment(st);
+    }
+    // Строительные базы — от новой кромки (shoveBases): дома на новом месте план уже снёс, остальное — за счёт города.
+    // Что-то не снести (план такого не пропустил бы) — база остаётся, где была.
+    for (const base of this.construction.crews.bases.values()) {
+      const res = this.baseShove(this.roads.net, base, [seg]);
+      if (!res || (!res.moved && res.nodeId === base.nodeId)) continue;
+      const under = this.structuresUnder(res.fp, 1, base);
+      if (under.blocker) continue;
+      if (under.houses.length) this.demolish(under.houses);
+      const from = [Math.round(base.fp.center.x), Math.round(base.fp.center.y)];
+      this.relocateBase(base, res.fp, res.nodeId);
+      this.journal.add('base>', { id: base.id, name: this.baseName(base.id), from, pos: [Math.round(res.fp.center.x), Math.round(res.fp.center.y)], shove: true });
     }
     const edge = corridorHalf(seg) + 3;
     const ctx = this.worldContext();
@@ -2461,6 +2612,7 @@ export class Game implements BuildContext {
       moneyBefore: this.money,
       spent: 0,
       projects: this.construction.projects.size ? this.construction.snapshot() : undefined,
+      bases: this.construction.crews.bases.size ? [...this.construction.crews.bases.values()].map((b) => ({ id: b.id, fp: structuredClone(b.fp), nodeId: b.nodeId })) : undefined,
     });
     if (this.undoStack.length > UNDO_DEPTH) this.undoStack.shift();
   }
@@ -2477,7 +2629,11 @@ export class Game implements BuildContext {
       top.stations.length !== this.stations.size ||
       top.buildings.some((b) => this.towns.find((t) => t.id === b.townId)?.buildings.length !== b.list.length) ||
       top.moneyBefore !== this.money ||
-      top.terraform !== this.terrain.edits.length;
+      top.terraform !== this.terrain.edits.length ||
+      (top.bases ?? []).some((s) => {
+        const b = this.construction.crews.bases.get(s.id);
+        return !!b && !sameBasePlace(b, s);
+      });
     if (!changed) this.undoStack.pop();
     else {
       top.spent = top.moneyBefore - this.money;
@@ -2582,6 +2738,12 @@ export class Game implements BuildContext {
       const st = this.stationFromSave(s);
       this.stations.set(st.id, st);
       this.index.add(st);
+    }
+    // Строительные базы — на места до действия (перенос, отодвинутая расширением улицы); свободные бригады едут к
+    // прежним воротам по дорогам, как при переносе.
+    for (const s of snap.bases ?? []) {
+      const live = this.construction.crews.bases.get(s.id);
+      if (live && !sameBasePlace(live, s)) this.relocateBase(live, structuredClone(s.fp), s.nodeId);
     }
     // Пристройки предприятий: поставленную или снесённую действием — как было, с уровнем, который она дала.
     for (const s of snap.industries ?? []) {
@@ -5129,28 +5291,31 @@ export class Game implements BuildContext {
     if (share <= 0) out.push({ mood: 'bad', text: 'Автобусов нет — до работы и в другие города только на машине' });
     else if (share < 0.4) out.push({ mood: 'ok', text: `Автобус есть, но до остановки далеко: рядом с ней живёт ${Math.round(share * 100)}% горожан` });
     else out.push({ mood: 'good', text: 'Остановка рядом с домом, ездим на автобусе' });
-    const missing = town.demands.filter((c) => (town.lastSupplied[c] ?? 0) < TOWN_NEED).map((c) => CARGO[c].name.toLowerCase());
+    const need = lastTownNeed(town);
+    const missing = town.demands.filter((c) => (town.lastSupplied[c] ?? 0) < need).map((c) => CARGO[c].name.toLowerCase());
     if (!missing.length) out.push({ mood: 'good', text: 'В магазинах всего хватает — город растёт' });
     else if (missing.length < town.demands.length) out.push({ mood: 'ok', text: `Не хватает: ${missing.join(', ')}` });
     else out.push({ mood: 'bad', text: `Пустые полки: нужны ${missing.join(', ')}` });
     return out;
   }
 
-  /** Доля закрытых потребностей города за прошлый месяц (0…1). */
+  /** Доля закрытых потребностей города за прошлый месяц (0…1) — по норме того месяца (растёт с населением). */
   townSatisfaction(town: Town, month: 'last' | 'current' = 'last'): number {
     const src = month === 'last' ? town.lastSupplied : town.supplied;
-    const ok = town.demands.filter((c) => (src[c] ?? 0) >= TOWN_NEED).length;
+    const need = monthTownNeed(town, month);
+    const ok = town.demands.filter((c) => (src[c] ?? 0) >= need).length;
     return town.demands.length ? ok / town.demands.length : 0;
   }
 
   /**
    * Закрывает месяц снабжения города: привезённое уходит в «прошлый месяц» и в историю по месяцам (для диаграммы
    * в карточке города), а новый месяц начинается с излишков — привезённого сверх нормы, не больше нормы
-   * (world/townSupply.ts): месяц — минута, и рейс не обязательно успевает в каждый.
+   * (world/townSupply.ts): месяц — минута, и рейс не обязательно успевает в каждый. Норма — по населению (townNeed).
    */
   private closeTownMonth(town: Town): void {
-    const { got, carry } = closeSupply(town.demands, town.supplied, TOWN_NEED);
-    const month: TownSupplyMonth = { label: this.dateLabel, got, need: TOWN_NEED };
+    const need = townNeed(town.population);
+    const { got, carry } = closeSupply(town.demands, town.supplied, need);
+    const month: TownSupplyMonth = { label: this.dateLabel, got, need };
     if (town.carried && Object.keys(town.carried).length) month.carried = town.carried;
     town.supplyHistory = [...(town.supplyHistory ?? []), month].slice(-TOWN_HISTORY);
     town.lastSupplied = { ...town.supplied };

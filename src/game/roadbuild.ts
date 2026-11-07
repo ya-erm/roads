@@ -22,13 +22,14 @@ export interface RoadContext {
   /** Отметка земли в точке (вода — NaN); без рельефа (старые миры) — null: профиль не считаем. */
   ground(): ((p: Vec) => number) | null;
   /**
-   * Строения в точке: id, можно ли снести их ради дороги, узел въезда (у автостанции — торец её выезда)
-   * и movable — навес остановки: при расширении улицы (shove) не мешает, его отодвинут (shoveStops).
+   * Строения в точке: id, можно ли снести их ради дороги, узел въезда (у автостанции — торец её выезда),
+   * movable — навес остановки или строительная база: при расширении улицы (shove) не мешают, их отодвинут
+   * (shoveStops), и reason — чем мешает, если не «Мешает здание» («Мешает база»).
    */
-  obstaclesAt(p: Vec, radius: number): { id: number; demolishable: boolean; gate?: number; movable?: boolean }[];
+  obstaclesAt(p: Vec, radius: number): { id: number; demolishable: boolean; gate?: number; movable?: boolean; reason?: string }[];
   /**
-   * Расширение улицы (shove): остановки у изменённых полотен отодвигаются к новому бордюру сети net.
-   * Дома на новых местах навесов — в demolish; ответ — новые места навесов или чем мешает.
+   * Расширение улицы (shove): остановки у изменённых полотен отодвигаются к новому бордюру сети net, строительные
+   * базы — от новой кромки. Дома на новых местах — в demolish; ответ — новые места навесов и баз или чем мешает.
    */
   shoveStops?(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[] | string;
   demolishCost(id: number): number;
@@ -500,7 +501,7 @@ export class RoadBuilder {
         if (n.level > -0.75) {
           for (const o of this.ctx.obstaclesAt(p, 1)) {
             if (o.gate === n.id) continue;
-            if (!o.demolishable) return 'Мешает здание';
+            if (!o.demolishable) return o.reason ?? 'Мешает здание';
             demolish.add(o.id);
           }
         }
@@ -563,9 +564,9 @@ export class RoadBuilder {
         for (const o of this.ctx.obstaclesAt(deck, deckHalf + 1)) {
           // Своя станция в торце выезда: широкое полотно у ворот слегка заходит в её контур — так и задумано.
           if (o.gate !== undefined && (o.gate === c.a || o.gate === c.b)) continue;
-          // Навес остановки при расширении улицы отодвинется к новому бордюру (shoveStops).
+          // Навес остановки и строительная база при расширении улицы отодвинутся от новой кромки (shoveStops).
           if (shove && o.movable) continue;
-          if (!o.demolishable) return 'Мешает здание';
+          if (!o.demolishable) return o.reason ?? 'Мешает здание';
           if (!shove) demolish.add(o.id);
         }
       }

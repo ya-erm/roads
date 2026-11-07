@@ -6,6 +6,7 @@
  *   подъезда); клик — показать бригаду на карте; «＋ 🚚» — нанять, «−» — распустить;
  * - ближние стройки: как далеко от базы и вклад бригады отсюда (1 / (1 + d / reach)), можно ли доехать по дорогам;
  *   клик — к проекту и его карточке;
+ * - «↔ Перенести» — площадка за курсором у дороги, как при постановке (Controller.startBaseMove; ещё — «Двигать» по ней);
  * - снос — не кнопкой, а инструментом «Снос» по площадке (подсказка значком).
  * Подсказки — data-tip (не системные).
  */
@@ -56,6 +57,7 @@ export function baseCardHtml(game: Game, id: number, renaming = false): string {
     ${summaryHtml(game, id)}
     ${crewsHtml(game, id)}
     ${nearHtml(game, id)}
+    <div class="pc-actions"><button class="small" data-action="base-move" data-id="${id}" data-tip="Перенести базу к другой дороге: за саму базу не платить, только за снос домов на новом месте. Свободные бригады приедут туда сами, работающие доделают своё и вернутся уже туда">↔ Перенести</button></div>
     <p class="bc-remove muted" data-tip="Снести базу — инструментом «Снос» по её площадке: половина цены — назад, бригады перейдут на ближайшую базу">🚜 снести — инструментом «Снос»</p></section>`;
 }
 
@@ -120,7 +122,9 @@ function nearHtml(game: Game, id: number): string {
       const power = Math.round((1 / (1 + d / CONSTRUCTION.reach)) * 100);
       const site = game.construction.site(p.id);
       const reach = site !== null && (site.node === base.nodeId || game.reach(base.nodeId, site.node));
-      const state = !info.access
+      const state = !info.access && info.waits
+        ? `<span class="muted" data-tip="Подъезд — через соседний строящийся проект: начнётся, когда тот дорастёт сюда">⏳ после соседнего</span>`
+        : !info.access
         ? `<span class="pc-bad" data-tip="К проекту нет подъезда ни с одной базы: постройте дорогу к его началу или поставьте базу рядом">⛔ нет подъезда</span>`
         : !reach
           ? `<span class="pc-bad" data-tip="Отсюда по дорогам не доехать: бригады этой базы туда не поедут">⛔ не доехать</span>`

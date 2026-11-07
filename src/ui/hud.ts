@@ -22,7 +22,8 @@ import {
 import { BRUSH_SIZES, BrushSize, Controller, DRAW_MODES, Tool, TOOLS } from '../input/controller';
 import type { TerraformMode } from '../world/terrain';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
-import { type Station, StationServes, stationTitle, TOWN_HISTORY, TOWN_NEED, TownStyle } from '../world/entities';
+import { type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
+import { lastTownNeed, townNeed } from '../world/townSupply';
 import { footprintRadius } from '../world/spatial';
 import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE } from '../config';
 import { durationText } from '../core/timeText';
@@ -55,13 +56,15 @@ import { travelTimeText } from './travelTime';
 import { needsHeadHtml, supplyBarHtml, supplyLineHtml, type TownNeed } from './supplyUi';
 import {
   briefHtml,
+  leftPanelHtml,
+  leftTab,
+  type LeftTab,
   modeTilesHtml,
   offerBannerHtml,
   recordRowHtml,
   RecordView,
   resultsHtml,
   scenarioOptionsHtml,
-  scenarioPanelHtml,
   toggleFold,
 } from './scenarioUi';
 import {
@@ -136,7 +139,7 @@ import { lineJamsHtml, stationWarningsHtml } from './jamUi';
 import { phasesHtml, phaseTurns } from './phasesUi';
 import { addPhase, editedAfter, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, withLeftArrows } from '../lanes/lights';
 import { installTips } from './tipFloat';
-import { buildBarHtml, buildModeRowHtml } from './constructionUi';
+import { buildModeRowHtml } from './constructionUi';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
 import { planPrice } from '../input/labels';
@@ -438,6 +441,8 @@ export class Hud {
   private starting = false;
   /** Панель сценария свёрнута до заголовка (запоминается в браузере). */
   private scenarioCollapsed = localStorage.getItem('roads.scenarioCollapsed') === '1';
+  /** Выбранная вкладка левой панели (запоминается в браузере); её нет в партии — показывается первая. */
+  private leftTab: LeftTab = (['scenario', 'events', 'build'] as const).find((t) => t === localStorage.getItem('roads.leftTab')) ?? 'scenario';
   /** Задания, у которых в панели раскрыто «почему». */
   private readonly whyOpen = new Set<string>();
   /** «Следующий этап» нажат один раз: второе нажатие переводит этап. */
@@ -470,7 +475,6 @@ export class Hud {
       <div class="panel speed" data-speed></div>
       <div class="offer-banner hidden" data-offer-banner></div>
       <div class="notices" data-notices></div>
-      <div class="build-bar hidden" data-build></div>
       <div class="panel options hidden" data-options></div>
       <div class="panel toolbar" data-tools></div>
       <div class="panel side" data-side></div>
@@ -645,10 +649,8 @@ export class Hud {
     });
     // Карточка транспорта меняется каждый кадр (скорость): держим её, пока кнопка мыши зажата.
     this.q('[data-side]').addEventListener('pointerdown', () => (this.pressing = true));
-    // Панель сценария тоже обновляется сама (сроки, прогресс) — не перерисовываем её под нажатой кнопкой.
+    // Левая панель тоже обновляется сама (сроки, прогресс, стройка) — не перерисовываем её под нажатой кнопкой.
     this.q('[data-scenario]').addEventListener('pointerdown', () => (this.pressing = true));
-    // Плашки стройки внизу слева: панели слева над ними (сценарий, «Финансы», «Цепочки», советник) кончаются выше.
-    new ResizeObserver(() => this.fitLeftPanels()).observe(this.q('[data-build]'));
     this.q('[data-offer-banner]').addEventListener('pointerdown', () => (this.pressing = true));
     // Плашка предложения — вверху между деньгами и кнопками скорости: следим за их шириной, правой панелью и окном.
     const place = new ResizeObserver(() => this.placeOfferBanner());
@@ -703,8 +705,8 @@ export class Hud {
       if (!input.dataset?.baseName) return;
       this.game().renameBase(Number(input.dataset.baseName), input.value);
       this.renamingBase = null;
-      this.lastBuild = '';
-      // Пока идёт focusout, поле ещё считается активным — перерисуем карточку и плашку следом.
+      this.lastScenario = '';
+      // Пока идёт focusout, поле ещё считается активным — перерисуем карточку и строку базы следом.
       setTimeout(() => this.sync(true));
     });
   }
@@ -1097,14 +1099,12 @@ export class Hud {
       case 'build-pause': {
         const p = g.construction.projects.get(Number(d.id));
         if (p) g.pauseProject(p.id, !p.paused);
-        this.lastBuild = '';
-        this.renderBuild();
+        this.refreshLeft();
         break;
       }
       case 'build-cancel':
         g.cancelProject(Number(d.id));
-        this.lastBuild = '';
-        this.renderBuild();
+        this.refreshLeft();
         break;
       case 'build-show': {
         // К проекту на карте — и его карточка справа (сроки, деньги, бригады).
@@ -1120,31 +1120,36 @@ export class Hud {
       case 'project-reserve': {
         const problem = g.reserveProject(Number(d.id), d.on === '1');
         if (problem) g.notify(problem, '#e5534b');
-        this.lastBuild = '';
-        this.renderBuild();
+        this.refreshLeft();
         break;
       }
       case 'project-priority':
         g.prioritizeProject(Number(d.id), d.on === '1');
-        this.lastBuild = '';
-        this.renderBuild();
+        this.refreshLeft();
         break;
       case 'base-place':
+        // «＋ База» — и с карточки проекта: ставим базу, а левая панель — на вкладке «Стройка» (кнопка там нажата).
         this.controller.startBase(!this.controller.placingBase);
-        this.lastBuild = '';
-        this.renderBuild();
+        if (this.controller.placingBase) this.openLeftTab('build');
+        this.refreshLeft();
         break;
+      case 'left-tab': {
+        // Вкладка левой панели; в свёрнутой — ещё и развернуть, чтобы было видно, что на ней.
+        const tab = d.id as LeftTab;
+        this.openLeftTab(tab);
+        if (this.scenarioCollapsed) this.setLeftCollapsed(false);
+        this.refreshLeft();
+        break;
+      }
       case 'base-hire': {
         const problem = g.hireBrigade(Number(d.id));
         if (problem) g.notify(problem, '#e5534b');
-        this.lastBuild = '';
-        this.renderBuild();
+        this.refreshLeft();
         break;
       }
       case 'base-fire':
         g.dismissBrigade(Number(d.id));
-        this.lastBuild = '';
-        this.renderBuild();
+        this.refreshLeft();
         break;
       case 'base-rename':
         // Название — в карточке базы: поле сразу (кнопку уже отпустили), иначе первые нажатия ушли бы карте.
@@ -1188,8 +1193,8 @@ export class Hud {
         this.lastFinance = '';
         break;
       case 'sc-toggle':
-        this.scenarioCollapsed = !this.scenarioCollapsed;
-        localStorage.setItem('roads.scenarioCollapsed', this.scenarioCollapsed ? '1' : '0');
+        this.setLeftCollapsed(!this.scenarioCollapsed);
+        this.refreshLeft();
         break;
       case 'sc-why':
         if (!this.whyOpen.delete(d.id!)) this.whyOpen.add(d.id!);
@@ -1583,6 +1588,10 @@ export class Hud {
       }
       case 'move-station':
         c.startStationMove(Number(d.id));
+        break;
+      case 'base-move':
+        // Перенос строительной базы: площадка за курсором у дороги, клик — туда (Esc — отмена).
+        c.startBaseMove(Number(d.id));
         break;
       case 'show-fleet':
         // Выбираем машину или поезд компании и переносим к нему камеру.
@@ -3046,11 +3055,15 @@ export class Hud {
     if (sel.type === 'town') {
       const t = g.towns.find((x) => x.id === sel.id);
       if (!t) return '';
+      // Норма растёт с населением (world/townSupply.ts): у этого месяца — по нынешнему, у прошлого — его собственная.
+      const need = townNeed(t.population);
+      const lastNeed = lastTownNeed(t);
       const demands: TownNeed[] = t.demands.map((c) => ({
         cargo: c,
         now: t.supplied[c] ?? 0,
         carried: t.carried?.[c] ?? 0,
         last: t.lastSupplied[c] ?? 0,
+        lastNeed,
       }));
       // Свёрнутый блок — одной строкой в заголовке (needsHeadHtml), строки потребностей не нужны.
       const rows = this.needsFolded
@@ -3063,12 +3076,12 @@ export class Hud {
                 ...(t.supplyHistory ?? [])
                   .slice(-(TOWN_HISTORY - 1))
                   .map((m) => ({ label: m.label, got: m.got[c] ?? 0, carried: m.carried?.[c] ?? 0, need: m.need })),
-                { label: g.dateLabel, got: now, carried, need: TOWN_NEED, current: true },
+                { label: g.dateLabel, got: now, carried, need, current: true },
               ];
               const chart = open ? `<div class="need-chart">${supplyChart(months, CARGO[c].color)}</div>` : '';
               return `<div class="need" data-action="town-need" data-id="${t.id}" data-c="${c}" data-tip="${open ? 'Свернуть' : 'По месяцам'}">${cargoIcon(c, 24)}<div><b>${CARGO[c].name}</b>
-            ${supplyBarHtml(now, carried, TOWN_NEED, CARGO[c].color)}
-            <small>${supplyLineHtml(now, carried, last, TOWN_NEED, CARGO[c].color)}</small></div>
+            ${supplyBarHtml(now, carried, need, CARGO[c].color)}
+            <small>${supplyLineHtml(now, carried, last, need, CARGO[c].color, lastNeed)}</small></div>
             <span class="caret ${open ? '' : 'closed'}">${chevronSvg(10)}</span></div>${chart}`;
             })
             .join('');
@@ -3083,7 +3096,7 @@ export class Hud {
       return `<section class="detail">${head(t.name, `${t.population} жителей · ${STYLE_NAMES[t.style]}`)}
         ${streets}
         <h4>Что говорят жители</h4>${reviews}
-        ${needsHeadHtml(demands, TOWN_NEED, this.needsFolded)}${rows}
+        ${needsHeadHtml(demands, need, this.needsFolded)}${rows}
         ${this.partnersHtml(g.partners(t, 2))}</section>`;
     }
     if (sel.type === 'junction') return this.junctionHtml(sel.id);
@@ -3641,9 +3654,10 @@ export class Hud {
         this.lastFinance = '';
         break;
       case 'base':
+        // «＋ База» советника: ставим базу, а на месте советника — вкладка «Стройка» с нажатой «＋ База».
         this.controller.startBase();
-        this.lastBuild = '';
-        this.renderBuild();
+        this.openLeftTab('build', true);
+        this.refreshLeft();
         break;
     }
     this.lastAdvisor = '';
@@ -3717,7 +3731,6 @@ export class Hud {
       this.renderAdvisor();
       this.renderScenario();
       this.renderOfferBanner();
-      this.renderBuild();
       this.syncPause();
       this.checkResults();
       // Проект: цена и «хватит ли денег» меняются и без кликов (доход, рост городов).
@@ -3726,30 +3739,8 @@ export class Hud {
   }
 
   private lastOfferBanner = '';
-  private lastBuild = '';
 
-  /** Плашки проектов стройки (режим «Со строительством») — слева внизу. */
-  private renderBuild(): void {
-    if (this.pressing) return;
-    // Панель инструмента снизу по центру широкая (дорога) — плашки встают над ней, а не под неё.
-    const bar = this.q('[data-build]');
-    const opt = this.q('[data-options]');
-    const o = opt.classList.contains('hidden') ? null : opt.getBoundingClientRect();
-    const bottom = o && o.width > 0 && o.left < bar.getBoundingClientRect().right + 8 ? Math.round(window.innerHeight - o.top + 8) : 14;
-    if (bar.style.bottom !== `${bottom}px`) {
-      bar.style.bottom = `${bottom}px`;
-      this.fitLeftPanels();
-    }
-    const sel = this.controller.selection;
-    const html = buildBarHtml(this.game(), this.controller.placingBase, sel?.type === 'project' ? sel.id : null, sel?.type === 'base' ? sel.id : null);
-    if (html === this.lastBuild) return;
-    this.lastBuild = html;
-    const el = this.q('[data-build]');
-    el.innerHTML = html;
-    el.classList.toggle('hidden', !html);
-  }
-
-  /** Плашка предложения вверху — напоминает о предложениях в панели сценария; пока она есть, уведомления опускаются под неё. */
+  /** Плашка предложения вверху — напоминает о предложениях на вкладке «События»; пока она есть, уведомления опускаются под неё. */
   private renderOfferBanner(): void {
     if (this.pressing) return;
     const el = this.q('[data-offer-banner]');
@@ -3764,7 +3755,7 @@ export class Hud {
   /**
    * Плашка предложения — вверху между панелью денег и кнопками скорости (границы — в --ob-left и --ob-right).
    * Если там тесно, она спускается во второй ряд, до правой панели (класс offer-low, граница — --ob-low-right);
-   * негде и там — прячется (offer-none): предложения остаются в панели сценария.
+   * негде и там — прячется (offer-none): предложения остаются на вкладке «События».
    */
   private placeOfferBanner(): void {
     const box = this.root.getBoundingClientRect();
@@ -3784,14 +3775,13 @@ export class Hud {
   }
 
   /**
-   * С плашки вверху — к предложениям в панели сценария: «Финансы», «Цепочки» и советника закрыть (они на её
-   * месте), раскрыть подробности предложения (без id — просто к списку) и коротко подсветить, где оно.
+   * С плашки вверху — к предложениям на вкладке «События» левой панели: «Финансы», «Цепочки» и советника закрыть
+   * (они на её месте), раскрыть подробности предложения (без id — просто к списку) и коротко подсветить, где оно.
    */
   private showOffer(id?: string): void {
-    for (const sel of ['[data-finance]', '[data-chains]', '[data-advisor]']) this.q(sel).classList.add('hidden');
+    this.openLeftTab('events', true);
     if (id) this.whyOpen.add(id);
-    this.pressing = false;
-    this.lastScenario = '';
+    this.refreshLeft();
     this.renderScenario();
     const panel = this.q('[data-scenario]');
     const card = id ? panel.querySelector<HTMLElement>(`[data-offer="${id}"]`) : null;
@@ -3803,15 +3793,30 @@ export class Hud {
     target.addEventListener('animationend', () => target.classList.remove('flash'), { once: true });
   }
 
+  /** Левую панель перерисовать сразу: клик уже отпущен, ждать следующего обновления (0,3 с) незачем. */
+  private refreshLeft(): void {
+    this.pressing = false;
+    this.lastScenario = '';
+  }
+
   /**
-   * Плашки стройки внизу слева: сколько места снизу они занимают — в --build-space (0 — их нет).
-   * Панели слева под деньгами (сценарий, «Финансы», «Цепочки», советник) кончаются над ними.
+   * Вкладка левой панели (запоминается). reveal — показать саму панель: «Финансы», «Цепочки» и советник на её
+   * месте закрываются.
    */
-  private fitLeftPanels(): void {
-    const bar = this.q('[data-build]');
-    const r = bar.getBoundingClientRect();
-    const space = bar.classList.contains('hidden') || !r.height ? 0 : Math.round(window.innerHeight - r.top + 10);
-    this.root.style.setProperty('--build-space', `${space}px`);
+  private openLeftTab(tab: LeftTab, reveal = false): void {
+    this.leftTab = tab;
+    localStorage.setItem('roads.leftTab', tab);
+    if (reveal) {
+      this.q('[data-finance]').classList.add('hidden');
+      this.q('[data-advisor]').classList.add('hidden');
+      if (!this.q('[data-chains]').classList.contains('hidden')) this.toggleChains();
+    }
+  }
+
+  /** Свернуть левую панель до заголовка, вкладок и компактной строки (запоминается). */
+  private setLeftCollapsed(on: boolean): void {
+    this.scenarioCollapsed = on;
+    localStorage.setItem('roads.scenarioCollapsed', on ? '1' : '0');
   }
 
   toggleFinance(): void {
@@ -3823,24 +3828,38 @@ export class Hud {
     this.renderScenario();
   }
 
+  /** Вкладка, которую левая панель показывала в прошлый раз: сменилась — прокрутка к началу. */
+  private shownTab: LeftTab | null = null;
+
   /**
-   * Панель сценария слева под деньгами. «Финансы» и «Цепочки» открываются на том же месте —
-   * пока они открыты, панель сценария спрятана.
+   * Левая панель под деньгами — вкладки «Сценарий», «События» и «Стройка» (leftPanelHtml): есть, если в партии
+   * сценарий или стройка. «Финансы», «Цепочки» и советник открываются на том же месте — пока они открыты, панель
+   * спрятана.
    */
   private renderScenario(): void {
     const el = this.q('[data-scenario]');
     const g = this.game();
+    const tab = leftTab(g, this.leftTab);
     const show =
-      !!g.scenario &&
+      tab !== null &&
       this.q('[data-finance]').classList.contains('hidden') &&
       this.q('[data-chains]').classList.contains('hidden') &&
       this.q('[data-advisor]').classList.contains('hidden');
     el.classList.toggle('hidden', !show);
     if (!show || this.pressing) return;
-    const html = scenarioPanelHtml(g, { collapsed: this.scenarioCollapsed, open: this.whyOpen, confirmAdvance: this.confirmAdvance });
+    const sel = this.controller.selection;
+    const html = leftPanelHtml(g, {
+      collapsed: this.scenarioCollapsed,
+      open: this.whyOpen,
+      confirmAdvance: this.confirmAdvance,
+      tab,
+      build: { placing: this.controller.placingBase, project: sel?.type === 'project' ? sel.id : null, base: sel?.type === 'base' ? sel.id : null },
+    });
     if (html !== this.lastScenario) {
       el.innerHTML = html;
       this.lastScenario = html;
+      if (tab !== this.shownTab) el.scrollTop = 0;
+      this.shownTab = tab;
     }
   }
 

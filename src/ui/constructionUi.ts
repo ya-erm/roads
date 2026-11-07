@@ -1,7 +1,7 @@
 /**
  * Стройка дорог в интерфейсе (режим «Со строительством», src/game/construction.ts): строка «Стройка» в окне
- * «Новая игра» и плашки проектов слева внизу — что строится, сколько готово и сколько секунд осталось,
- * «⏸ Пауза» и «✕ Отмена», 📍 — к проекту. Подсказки — data-tip (не системные).
+ * «Новая игра» и вкладка «Стройка» левой панели — базы, «＋ База» и плашки проектов: что строится, сколько готово
+ * и сколько секунд осталось, «⏸ Пауза» и «✕ Отмена», клик — к проекту. Подсказки — data-tip (не системные).
  */
 import { CONSTRUCTION } from '../config';
 import { durationText } from '../core/timeText';
@@ -11,9 +11,6 @@ import { BUILD_MODES, type BuildMode } from '../world/settings';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
-
-/** Сколько плашек показывать; остальные — строкой «ещё N». */
-export const BAR_MAX = 4;
 
 /** Стройка: шлагбаум в полоску на дороге и конус — «дорога строится». */
 export function buildSvg(w = 28, h = 21): string {
@@ -59,6 +56,8 @@ export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected 
       ? `<span class="bp-state bad" data-tip="Стройка стоит: не хватает денег. Нужно ещё ${money(i.left)}">💸</span>`
       : !based
         ? `<span class="bp-state" data-tip="Строить некому: поставьте строительную базу («＋ База») — первая бесплатно">🚚 нет базы</span>`
+        : !i.access && i.waits
+        ? `<span class="bp-state" data-tip="Подъезд — через соседний строящийся проект: начнётся, когда тот дорастёт сюда">⏳ после соседнего</span>`
         : !i.access
         ? `<span class="bp-state bad" data-tip="Нет подъезда: ни один конец проекта не связан готовой дорогой с базой, а по полю бригады не ездят. Постройте дорогу к началу проекта или поставьте базу рядом">⛔ нет подъезда</span>`
         : !crew
@@ -125,31 +124,85 @@ export function baseRowHtml(game: Game, id: number, selected = false): string {
     <span class="bb-busy"><span class="bb-bar"><i style="width:${share}%"></i></span><small>в деле ${busy}</small></span></button>`;
 }
 
-/**
- * Плашки стройки: базы (коротко), «＋ База» и проекты. placing — ставим базу (кнопка нажата), selected — проект с
- * открытой карточкой, base — база с открытой карточкой. Не «Со строительством» — пусто.
- */
-export function buildBarHtml(game: Game, placing = false, selected: number | null = null, base: number | null = null): string {
-  if (!game.buildMode) return '';
-  const crews = game.construction.crews;
-  const bases = [...crews.bases.keys()];
-  const baseRows = bases
-    .slice(0, 3)
-    .map((id) => baseRowHtml(game, id, id === base))
-    .join('');
-  // Баз нет — первая бесплатно: кнопка заметнее, пока её не поставят.
+/** Что показывает вкладка «Стройка»: ставим ли базу (кнопка «＋ База» нажата) и чьи карточки открыты справа. */
+export interface BuildView {
+  placing: boolean;
+  /** Проект с открытой карточкой. */
+  project: number | null;
+  /** База с открытой карточкой. */
+  base: number | null;
+}
+
+export const NO_BUILD_VIEW: BuildView = { placing: false, project: null, base: null };
+
+/** «＋ База»: нажата — ставим базу; баз ещё не было — первая бесплатно, кнопка пульсирует, пока её не поставят. */
+function addBaseHtml(game: Game, placing: boolean): string {
   const first = game.firstBase;
   const tip = placing
     ? 'Кликните у дороги, где поставить базу (Esc — отмена)'
     : first
       ? 'Поставьте строительную базу у дороги — первая бесплатно, с бригадой. Ставьте ближе к будущим стройкам: оттуда бригада строит быстрее'
       : `Новая база у дороги: ${money(CONSTRUCTION.base.cost)}. Бригады с ближней базы строят быстрее`;
-  const add = `<button class="small build-add ${placing ? 'active' : ''} ${first ? 'first' : ''}" data-action="base-place" data-tip="${tip}">${baseSvg(20, 15)}＋ База${first ? ' · бесплатно' : ''}</button>`;
+  return `<button class="small build-add ${placing ? 'active' : ''} ${first ? 'first' : ''}" data-action="base-place" data-tip="${tip}">${baseSvg(20, 15)}＋ База${first ? ' · бесплатно' : ''}</button>`;
+}
+
+/** Бригады всех баз: сколько всего и сколько в деле (на стройке или в пути к ней). */
+function crewCounts(game: Game): { all: number; busy: number } {
+  const list = [...game.construction.crews.brigades.values()];
+  return { all: list.length, busy: list.filter((b) => b.state === 'working' || b.state === 'going').length };
+}
+
+/** Число на вкладке «Стройка» — проекты; first — первую базу ещё не ставили (вкладка подсвечена). */
+export function buildTabCount(game: Game): { projects: number; bases: number; first: boolean } {
+  return { projects: game.construction.list().length, bases: game.construction.crews.bases.size, first: game.firstBase };
+}
+
+/**
+ * Вкладка «Стройка» левой панели: все базы короткими строками (клик — карточка базы), «＋ База» и все проекты
+ * (пауза, отмена, клик — карточка проекта). Пусто — подсказка картинками: база у дороги → дорога → бригады строят.
+ * Не «Со строительством» — пусто.
+ */
+export function buildTabHtml(game: Game, view: BuildView = NO_BUILD_VIEW): string {
+  if (!game.buildMode) return '';
+  const crews = game.construction.crews;
+  const bases = [...crews.bases.keys()];
+  const baseRows = bases.map((id) => baseRowHtml(game, id, id === view.base)).join('');
   const list = game.construction.list();
-  const rows = list
-    .slice(0, BAR_MAX)
-    .map((i) => projectRowHtml(i, crews.working(i.project.id).length, bases.length > 0, i.project.id === selected))
-    .join('');
-  const more = list.length > BAR_MAX ? `<div class="build-more muted">ещё ${list.length - BAR_MAX}</div>` : '';
-  return `<div class="build-head">${baseRows}${add}</div>${rows}${more}`;
+  const rows = list.map((i) => projectRowHtml(i, crews.working(i.project.id).length, bases.length > 0, i.project.id === view.project)).join('');
+  const c = crewCounts(game);
+  const baseHead = `<h4 data-tip="Строительные базы: с них бригады едут на стройки по готовым дорогам">${baseSvg(18, 14)} Базы${
+    bases.length ? ` <small>${bases.length} · 🚚 ${c.busy} / ${c.all}</small>` : ''
+  }</h4>`;
+  const hint = !bases.length
+    ? `<p class="build-hint">${baseSvg(22, 17)}<span>Поставьте базу у дороги — с неё бригады едут строить. Первая — бесплатно</span></p>`
+    : '';
+  const empty = !list.length
+    ? `<p class="build-hint">${buildSvg(22, 17)}<span>Проложите дорогу — она станет проектом, и бригады построят её за время</span></p>`
+    : '';
+  return `<section class="sc-sec build-sec">${baseHead}<div class="build-head">${baseRows}${hint}${addBaseHtml(game, view.placing)}</div></section>
+    <section class="sc-sec build-sec"><h4 data-tip="Проекты стройки: что строится, сколько готово и сколько осталось">${buildSvg(18, 14)} Проекты${
+      list.length ? ` <small>${list.length}</small>` : ''
+    }</h4>${rows}${empty}</section>`;
+}
+
+/**
+ * Свёрнутая вкладка «Стройка» — одной строкой: базы, бригады в деле, проекты и общая готовность, «＋ База»
+ * (первая бесплатная видна и в свёрнутой панели).
+ */
+export function buildCompactHtml(game: Game, placing = false): string {
+  if (!game.buildMode) return '';
+  const list = game.construction.list();
+  const c = crewCounts(game);
+  const bases = game.construction.crews.bases.size;
+  const total = list.reduce((s, i) => s + i.length, 0);
+  const done = total ? list.reduce((s, i) => s + i.done * i.length, 0) / total : 0;
+  const pct = Math.min(99, Math.floor(done * 100));
+  const parts = [
+    bases ? `<span class="bc-item" data-tip="Баз: ${bases}">${baseSvg(20, 15)}<b>${bases}</b></span>` : '',
+    bases ? `<span class="bc-item" data-tip="Бригады в деле: ${c.busy} из ${c.all}">🚚 <b>${c.busy}</b>/${c.all}</span>` : '',
+    list.length
+      ? `<span class="bc-item" data-tip="Проектов: ${list.length}, готово ${pct}% (по длине)">${buildSvg(20, 15)}<b>${list.length}</b><span class="bb-bar"><i style="width:${pct}%"></i></span></span>`
+      : '',
+  ].join('');
+  return `<div class="sc-compact build-compact">${parts || '<span class="muted">Строек нет</span>'}${addBaseHtml(game, placing)}</div>`;
 }

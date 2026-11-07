@@ -581,6 +581,8 @@ function previewRoads(g: Game): RoadBuilder {
     inBounds: (q, m) => g.inBounds(q, m),
     ground: () => g.ground(),
     obstaclesAt: (q, r) => g.obstaclesAt(q, r),
+    // Расширение улицы проектом: навесы и строительные базы отодвигаются, как при стройке сразу (там — сама игра).
+    shoveStops: (n, c, d) => g.shoveStops(n, c, d),
     demolishCost: (id) => g.demolishCost(id),
     demolish: () => {},
     spend: () => {},

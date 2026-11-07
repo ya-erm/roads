@@ -3,9 +3,11 @@ import type { Vec } from '../core/vec';
 import { nextSite, pickSite } from '../game/constructionWork';
 import { Game } from '../game/game';
 import { anchorOf, STREET, withoutCitizens } from '../game/testkit';
-import { splitCorridor } from '../lanes/edit';
-import type { Corridor } from '../lanes/model';
-import { buildingCorridors, crewConvoy } from './constructionArt';
+import { type RoadOptions, splitCorridor } from '../lanes/edit';
+import { edgesAt } from '../lanes/geometry';
+import { type Corridor, oneWay } from '../lanes/model';
+import { ROAD_MARGIN } from '../world/roadTypes';
+import { buildingCorridors, crewConvoy, crewRows } from './constructionArt';
 
 /** Прямой проект улицы вдоль x длиной len в чистом поле, разрезанный стыком посередине: два участка подряд. */
 function straightProject(len: number): { game: Game; y: number } {
@@ -60,5 +62,43 @@ describe('Колонна техники стройки', () => {
     // Проект кончился — дальше идти некуда: грейдер в конце уходит на обочину, как раньше.
     const last = track[track.length - 1];
     expect(Math.abs(last[0].pos.y - y)).toBeGreaterThan(3);
+  });
+
+  it('ряды техники бригад — бок о бок в пределах полотна с обочиной: на однополосном два ряда плотно, на 1+1 — три через 5 м', () => {
+    const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
+    /** Полотно проекта профилем lanes вдоль x в поле, заполняется от конца fromB. */
+    const site = (lanes: RoadOptions['lanes'], fromB: boolean): Corridor => {
+      for (let y = 400; y < game.terrain.height - 400; y += 120) {
+        for (let x = 300; x < game.terrain.width - 700; x += 160) {
+          const plan = game.roadBuilder.road(anchorOf(game, { free: { x, y } }), anchorOf(game, { free: { x: x + 300, y } }), { cls: 'street', lanes }, { project: true });
+          if (!plan.ok || plan.demolish.length || !game.roadBuilder.apply(plan)) continue;
+          const c = buildingCorridors(game.roads.net).find((k) => Math.abs(k.lut.pointAt(0).y - y) < 1 && Math.abs(k.lut.pointAt(0).x - x) < 1)!;
+          c.build = { project: c.build!.project, done: 100, ...(fromB ? { fromB: true } : {}) };
+          return c;
+        }
+      }
+      throw new Error('нет места');
+    };
+    /** Ряды n бригад — в пределах полотна с обочиной поперёк (вправо по ходу), и их шаг. */
+    const check = (c: Corridor, n: number) => {
+      const rows = crewRows(c, n);
+      expect(rows).toHaveLength(n);
+      const e = edgesAt(c, c.length / 2)!;
+      const [lo, hi] = c.build!.fromB ? [-e[1] - ROAD_MARGIN, -e[0] + ROAD_MARGIN] : [e[0] - ROAD_MARGIN, e[1] + ROAD_MARGIN];
+      for (const r of rows) {
+        expect(r - 3).toBeGreaterThanOrEqual(lo - 1e-6);
+        expect(r + 3).toBeLessThanOrEqual(hi + 1e-6);
+      }
+      return n > 1 ? rows[1] - rows[0] : 0;
+    };
+    expect(crewRows(site(oneWay(1), false), 1)).toEqual([0]);
+    for (const fromB of [false, true]) {
+      const narrow = site(oneWay(1), fromB);
+      // Два ряда на однополосном — плотно, но не друг на друге.
+      expect(check(narrow, 2)).toBeGreaterThan(3);
+      const wide = site(STREET.lanes, fromB);
+      expect(check(wide, 2)).toBeCloseTo(5);
+      expect(check(wide, 3)).toBeCloseTo(5);
+    }
   });
 });

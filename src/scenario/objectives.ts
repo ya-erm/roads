@@ -4,7 +4,8 @@
  */
 import type { Game } from '../game/game';
 import { CARGO, type CargoType } from '../world/cargo';
-import { TOWN_NEED, type Town } from '../world/entities';
+import type { Town } from '../world/entities';
+import { monthTownNeed, townNeed } from '../world/townSupply';
 import { connected, industryById, newRoutesCarried, operating, refName, townById } from './analysis';
 import type { MonthStat, Objective, ObjectiveParams, Ref, ScenarioState } from './types';
 
@@ -44,7 +45,8 @@ export function supplyNeeds(p: Extract<ObjectiveParams, { kind: 'supply' }>, t: 
 /** Сколько потребностей города закрыто: за прошлый месяц (last) или уже за этот. */
 export function closedNeeds(t: Town, month: 'last' | 'current' = 'last'): CargoType[] {
   const got = month === 'last' ? t.lastSupplied : t.supplied;
-  return t.demands.filter((c) => (got[c] ?? 0) >= TOWN_NEED);
+  const need = monthTownNeed(t, month);
+  return t.demands.filter((c) => (got[c] ?? 0) >= need);
 }
 
 /**
@@ -230,7 +232,8 @@ export function monthNow(game: Game, s: ScenarioState, p: ObjectiveParams): Mont
       now.needs = supplyNeeds(p, t);
       now.closed = closedNeeds(t, 'current').length;
       // Доля — по самым близким к норме потребностям: сколько из нужных уже привезли.
-      const parts = t.demands.map((c) => Math.min(1, (t.supplied[c] ?? 0) / TOWN_NEED)).sort((a, b) => b - a);
+      const need = townNeed(t.population);
+      const parts = t.demands.map((c) => Math.min(1, (t.supplied[c] ?? 0) / need)).sort((a, b) => b - a);
       now.supplied = parts.slice(0, now.needs).reduce((a, b) => a + b, 0) / Math.max(1, now.needs);
     }
   }

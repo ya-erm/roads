@@ -253,6 +253,8 @@ export class Controller {
   placingAnnex: number | null = null;
   /** Ставим строительную базу («Со строительством»): клик у дороги — база (Esc — отмена). */
   placingBase = false;
+  /** Переносим строительную базу: площадка у дороги под курсором, клик — база туда (Esc — отмена). */
+  movingBase: number | null = null;
   /** Настройка полос выбранного перекрёстка: полоса въезда, которую сейчас соединяем. */
   laneFrom: { seg: number; i: number } | null = null;
   /** Правка фазы светофора на карте: перекрёсток и номер фазы (выбрана в карточке); клик по проезду — его зелёный в ней. */
@@ -383,6 +385,7 @@ export class Controller {
     this.control = null;
     this.moving = null;
     this.movingStation = null;
+    this.movingBase = null;
     this.roadTools.clear();
     this.railTools.clear();
     this.laneFrom = null;
@@ -401,6 +404,23 @@ export class Controller {
   startStationMove(id: number): void {
     this.setTool('select');
     this.movingStation = id;
+    this.onChange();
+  }
+
+  /** «Двигать»: под курсором площадка строительной базы, а не перо и не узел дороги, — её номер (её можно перенести). */
+  private baseToMove(p: Vec): number | null {
+    const st = this.game().structureAt(p);
+    if (st?.type !== 'base') return null;
+    const hr = (HANDLE_PX + 4) / this.camera.zoom;
+    if (this.roadTools.handleAt(p, hr) || this.roadTools.nodeAt(p, this.snapRadius)) return null;
+    return st.id;
+  }
+
+  /** Начать перенос строительной базы: площадка следует за курсором и встаёт у дороги, как при постановке, до клика. */
+  startBaseMove(id: number): void {
+    this.setTool('select');
+    this.select({ type: 'base', id });
+    this.movingBase = id;
     this.onChange();
   }
 
@@ -1027,6 +1047,7 @@ export class Controller {
     else if (this.spanStart) this.spanStart = null;
     else if (this.moving) this.moving = null;
     else if (this.movingStation !== null) this.movingStation = null;
+    else if (this.movingBase !== null) this.movingBase = null;
     else if (this.placingWarehouse !== null) this.placingWarehouse = null;
     else if (this.placingAnnex !== null) this.placingAnnex = null;
     else if (this.placingBase) this.placingBase = false;
@@ -1374,7 +1395,15 @@ export class Controller {
     }
     // Всё, что строит или сносит, можно отменить (Ctrl+Z): снимок до действия, итог — при отпускании кнопки.
     const corner = this.action === 'move' && !this.roadTools.handleAt(p, (HANDLE_PX + 4) / this.camera.zoom) && this.roadTools.cornerAt(p, (HANDLE_PX + 4) / this.camera.zoom);
-    const label = this.moving ? 'перенос здания' : this.movingStation !== null ? 'перенос станции' : corner ? 'скругление угла' : UNDO_LABELS[this.action];
+    const label = this.moving
+      ? 'перенос здания'
+      : this.movingStation !== null
+        ? 'перенос станции'
+        : this.movingBase !== null && this.action === 'select'
+          ? 'перенос базы'
+          : corner
+            ? 'скругление угла'
+            : UNDO_LABELS[this.action];
     if (label) g.checkpoint(this.action === 'road' && this.netKind === 'rail' ? 'путь' : label);
     switch (this.action) {
       case 'road':
@@ -1441,7 +1470,13 @@ export class Controller {
       }
       case 'move': {
         // Берём перо, примыкание въезда или съезда (вдоль дороги; с Alt — узлом), узел (дороги следом) или
-        // середину дороги — выгнуть; отпускаем — перестраивается.
+        // середину дороги — выгнуть; отпускаем — перестраивается. Площадка строительной базы (не узел и не перо
+        // рядом) — перенос базы, как из её карточки.
+        const base = this.baseToMove(p);
+        if (base !== null) {
+          this.startBaseMove(base);
+          break;
+        }
         if (!this.roadTools.moveDown(p, this.snapRadius, (HANDLE_PX + 4) / this.camera.zoom, this.freeAim)) this.showError('Возьмите за узел или середину дороги');
         break;
       }
@@ -1562,6 +1597,17 @@ export class Controller {
           else {
             this.placingAnnex = null;
             this.select({ type: 'industry', id });
+          }
+          break;
+        }
+        if (this.movingBase !== null) {
+          // Перенос базы: у дороги под курсором, как постановка, но без платы за базу; перенесли — её карточка.
+          const id = this.movingBase;
+          const problem = g.moveBase(id, p);
+          if (problem) this.showError(problem);
+          else {
+            this.movingBase = null;
+            this.select({ type: 'base', id });
           }
           break;
         }
@@ -3097,6 +3143,15 @@ export class Controller {
           o.handles = [...rt.handleMarks(null), ...corners];
           break;
         }
+        // Площадка строительной базы — её можно перенести (клик — перенос, как из карточки базы).
+        const base = this.baseToMove(p);
+        const bfp = base !== null ? g.construction.crews.bases.get(base)?.fp : undefined;
+        if (bfp) {
+          o.marks.push({ fp: bfp, ok: true });
+          o.label = { text: `База «${g.baseName(base!)}» · клик — перенести`, ok: true };
+          o.handles = [...rt.handleMarks(null), ...corners];
+          break;
+        }
         const c = corridorUnder(net, p, this.snapRadius * 0.3);
         if (c) {
           // У дороги под курсором видны перья — они остаются, пока курсор идёт к ним.
@@ -3428,6 +3483,26 @@ export class Controller {
           if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
           o.label = plan.ok
             ? { text: `Пристройка: производство ×${(ind.level ?? 1) + ECONOMY.growthStep}, рост до ×${growthCap(ind) + 1} · ${money(plan.cost)} · Esc — отмена`, ok: true }
+            : { text: failText(plan.reason, plan.cost, ''), ok: false };
+          break;
+        }
+        const movingBase = this.movingBase !== null ? g.construction.crews.bases.get(this.movingBase) : undefined;
+        if (movingBase) {
+          // Перенос базы: старое место — красным, новое — у дороги под курсором (красным, если нельзя), круг — где
+          // бригады с неё быстры; платится только снос домов.
+          const plan = g.baseMovePlan(movingBase.id, p);
+          o.marks.push({ fp: movingBase.fp, ok: false });
+          if (plan.fp) {
+            o.marks.push({ fp: plan.fp, ok: plan.ok });
+            o.catchmentAt = plan.fp.center;
+            o.catchmentR = CONSTRUCTION.reach;
+          }
+          for (const id of plan.demolish) {
+            const b = g.buildingById(id);
+            if (b) o.marks.push({ fp: b.fp, ok: false });
+          }
+          o.label = plan.ok
+            ? { text: `Перенести базу сюда · ${plan.cost ? `${money(plan.cost)} · снос ${plan.demolish.length} зд.` : 'бесплатно'} · Esc — отмена`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }

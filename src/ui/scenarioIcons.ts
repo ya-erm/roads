@@ -204,6 +204,13 @@ export function contractSvg(size = 18): string {
     <path d="M7 5.5h9.5v11.2a2 2 0 0 1-2 2H7z" fill="#fff"/><path d="M9 9h5.5M9 11.6h5.5M9 14.2h3.5" stroke="#c4662f" stroke-width="1.2"/></svg>`;
 }
 
+/** События региона: сложенная газета — заголовок, колонки текста и картинка. */
+export function newsSvg(size = 18): string {
+  return `<svg class="cargo-icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#3f7fcf"/>
+    <rect x="5" y="6" width="14" height="12" rx="1.5" fill="#fff"/><path d="M7 8.8h10" stroke="#3f7fcf" stroke-width="1.8"/>
+    <rect x="7" y="11" width="4.2" height="4.6" rx="0.6" fill="#9cc0ec"/><path d="M12.6 11.6h4.4M12.6 13.6h4.4M12.6 15.6h3" stroke="#7b8794" stroke-width="1.1"/></svg>`;
+}
+
 // ---------- Миниатюры карт ----------
 
 const MAP_BG = '<rect x="1" y="1" width="62" height="42" rx="6" fill="#d6e2bd" stroke="#8aa070"/>';

@@ -4,8 +4,9 @@
  * - мост (участок слоя выше земли, пандусы тоже): вместо отсыпки 🟫 растёт конструкция — впереди опоры (сначала
  *   фундамент, потом опора с ригелем, bridgePiers), за ними балки пролёта до края работ, за балками — плита настила
  *   (slabTo); дальше покрытие и разметка, как у дороги. Техника этапа — автокран со стрелой над пролётом и бетоновоз;
- * - тоннель (участок слоя под землёй): машины въезжают в портал и пропадают под землёй (tunnelSight: у портала кузов
- *   обрезан по его линии, глубже — не виден), у входного портала — проходческое хозяйство (entryPortal,
+ * - тоннель (участок слоя под землёй): машины въезжают в портал и уходят под землю (tunnelSight, drawInSight: у
+ *   портала кузов по линии портала делится — снаружи как есть, за линией призраком; глубже видны сквозь землю
+ *   полупрозрачными и приглушёнными, ghostly, как машины в готовом тоннеле), у входного портала — проходческое хозяйство (entryPortal,
  *   drawPortalGear), а ход работ виден сквозь землю: пройденная часть — тёмной выработкой с кольцами обделки (в
  *   плитках, constructionArt), у края каждого этапа — огонёк (drawWorkLights), у щита — крупный и мерцающий.
  * Статичное (опоры, балки, настил, выработка) — в плитках кэша карты по шагам drawStep (их подпись — projectSig),
@@ -110,22 +111,36 @@ export function buried(net: LaneNet, p: Vec): boolean {
   return false;
 }
 
-/** Снаружи портала p: полуплоскость перед его линией (с запасом в стороны на обочины) — кусок, где кузов ещё виден. */
-export function outsideOf(p: Portal): Vec[] {
+/** Полуплоскость у линии портала p (с запасом в стороны на обочины): side −1 — снаружи, перед линией; 1 — за ней, под землёй. */
+function portalSide(p: Portal, side: 1 | -1): Vec[] {
   const n = rightNormal(p.dir);
   const a = add(p.pos, scale(n, p.left - 40));
   const b = add(p.pos, scale(n, p.right + 40));
-  const back = scale(p.dir, -80);
-  return [a, b, add(b, back), add(a, back)];
+  const d = scale(p.dir, side * 80);
+  return [a, b, add(b, d), add(a, d)];
 }
 
-/** Как рисовать машину стройки у тоннеля: целиком, никак (под землёй) или обрезав по линии портала (многоугольник). */
-export type Sight = 'show' | 'hide' | Vec[];
+/** Снаружи портала p: полуплоскость перед его линией (с запасом в стороны на обочины) — кусок, где кузов виден как есть. */
+export const outsideOf = (p: Portal): Vec[] => portalSide(p, -1);
+
+/** За линией портала p (под землёй): кусок, где кузов виден призраком сквозь землю. */
+export const insideOf = (p: Portal): Vec[] => portalSide(p, 1);
+
+/**
+ * Как рисовать машину стройки у тоннеля: как есть, призраком (под землёй, сквозь неё — ghostly) или у портала по
+ * частям — снаружи (out) как есть, за линией (under) призраком.
+ */
+export type Sight = 'show' | 'ghost' | { out: Vec[]; under: Vec[] };
+
+/** Непрозрачность техники под землёй (сквозь землю, поверх выработки) — как у машин в готовом тоннеле. */
+export const GHOST_ALPHA = 0.4;
+/** Под землёй техника ещё и чуть приглушённая: блёклее и темнее (где canvas filter есть). */
+const GHOST_FILTER = 'saturate(0.55) brightness(0.85)';
 
 /**
  * Видна ли машина длиной length с носом в nose (смотрит по dir): у портала (на его проезде или обочине рядом, кузов
- * у линии) — обрезается по линии портала, так что въезжает под землю постепенно, без скачка; глубже в тоннеле — не
- * видна; иначе — целиком.
+ * у линии) — по частям по линии портала, так что въезжает под землю постепенно, без скачка; глубже в тоннеле —
+ * призраком; иначе — как есть.
  */
 export function tunnelSight(net: LaneNet, nose: Vec, dir: Vec, length: number): Sight {
   const u = undergroundOf(net);
@@ -137,10 +152,36 @@ export function tunnelSight(net: LaneNet, nose: Vec, dir: Vec, length: number): 
     if (lat < p.left - 12 || lat > p.right + 12) continue;
     // Кузов тянется от носа назад — у портала он, если нос чуть за линией (въезжает) или чуть перед ней (выезжает
     // задом наперёд не бывает, но нос перед линией — значит, весь кузов снаружи).
-    if (along > -2 && along < length + 4 && dot(dir, p.dir) > -0.2) return outsideOf(p);
-    if (along < 2 && along > -(length + 4) && dot(dir, p.dir) < 0.2) return outsideOf(p);
+    if (along > -2 && along < length + 4 && dot(dir, p.dir) > -0.2) return { out: outsideOf(p), under: insideOf(p) };
+    if (along < 2 && along > -(length + 4) && dot(dir, p.dir) < 0.2) return { out: outsideOf(p), under: insideOf(p) };
   }
-  return buried(net, nose) ? 'hide' : 'show';
+  return buried(net, nose) ? 'ghost' : 'show';
+}
+
+/** Рисует draw призраком: полупрозрачно (GHOST_ALPHA от текущей) и приглушённо — так видно технику сквозь землю. */
+export function ghostly(ctx: CanvasRenderingContext2D, draw: () => void): void {
+  ctx.save();
+  ctx.globalAlpha *= GHOST_ALPHA;
+  ctx.filter = GHOST_FILTER;
+  draw();
+  ctx.restore();
+}
+
+/** Рисует машину стройки draw так, как велит sight (tunnelSight): как есть, призраком или по частям у портала. */
+export function drawInSight(ctx: CanvasRenderingContext2D, sight: Sight, draw: () => void): void {
+  if (sight === 'show') return draw();
+  if (sight === 'ghost') return ghostly(ctx, draw);
+  const clipped = (poly: Vec[], fn: () => void) => {
+    ctx.save();
+    ctx.beginPath();
+    poly.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+    ctx.closePath();
+    ctx.clip();
+    fn();
+    ctx.restore();
+  };
+  clipped(sight.out, draw);
+  clipped(sight.under, () => ghostly(ctx, draw));
 }
 
 /**
@@ -347,7 +388,7 @@ export function drawCraneSet(ctx: CanvasRenderingContext2D, t: number): number {
 
 /**
  * Тоннель, этап проходки: щит — цилиндр с режущим ротором впереди (резцы бегут по кругу), за ним тележка с
- * оборудованием. Под землёй его не видно — только у портала, пока ждёт въезда. Ответ — где маячок (x).
+ * оборудованием. Под землёй он виден призраком сквозь землю (drawInSight). Ответ — где маячок (x).
  */
 export function drawShieldSet(ctx: CanvasRenderingContext2D, t: number): number {
   // Тележка с оборудованием.

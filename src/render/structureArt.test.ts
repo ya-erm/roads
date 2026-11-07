@@ -4,7 +4,39 @@ import { convoyGap, stageSpans } from '../game/constructionWork';
 import type { Corridor } from '../lanes/model';
 import { buildConstructionScene } from '../testpages/construction';
 import { buildingCorridors, crewConvoy } from './constructionArt';
-import { bridgePiers, entryPortal, PIER_LEAD, PIER_STEP, siteKind, slabTo, tunnelSight, undergroundOf, workLights } from './structureArt';
+import {
+  bridgePiers,
+  drawInSight,
+  entryPortal,
+  GHOST_ALPHA,
+  PIER_LEAD,
+  PIER_STEP,
+  type Sight,
+  siteKind,
+  slabTo,
+  tunnelSight,
+  undergroundOf,
+  workLights,
+} from './structureArt';
+
+/** Холст для проверки, что и как рисуют: прозрачность, фильтр и обрезка (последний многоугольник clip) с save/restore. */
+function fakeCtx() {
+  const stack: { globalAlpha: number; filter: string; clipped: Vec[] | null }[] = [];
+  let path: Vec[] = [];
+  const ctx = {
+    globalAlpha: 1,
+    filter: 'none',
+    clipped: null as Vec[] | null,
+    save: () => stack.push({ globalAlpha: ctx.globalAlpha, filter: ctx.filter, clipped: ctx.clipped }),
+    restore: () => Object.assign(ctx, stack.pop()),
+    beginPath: () => void (path = []),
+    moveTo: (x: number, y: number) => void path.push({ x, y }),
+    lineTo: (x: number, y: number) => void path.push({ x, y }),
+    closePath: () => {},
+    clip: () => void (ctx.clipped = path),
+  };
+  return ctx;
+}
 
 /** Внутри ли выпуклого многоугольника poly точка p. */
 function inside(poly: Vec[], p: Vec): boolean {
@@ -110,45 +142,71 @@ describe('Мост и тоннель сцены «Стройка»', () => {
     return { c, portal };
   };
 
-  it('у портала машина обрезается по его линии, глубже — не видна, снаружи — видна целиком', () => {
+  it('у портала машина делится по его линии: снаружи — как есть, за линией — призраком; глубже — призраком целиком', () => {
     const { c, portal } = descent();
     expect(portal).toBeTruthy();
     const at = (along: number, lat = 0) => add(add(portal.pos, scale(portal.dir, along)), scale(rightNormal(portal.dir), lat));
     expect(tunnelSight(net, at(-60), portal.dir, 20)).toBe('show');
-    expect(tunnelSight(net, at(c.length / 2 + 20), portal.dir, 20)).toBe('hide');
-    // Нос въехал на 5 м: видна только часть кузова перед линией портала.
-    const clip = tunnelSight(net, at(5), portal.dir, 20);
-    expect(Array.isArray(clip)).toBe(true);
-    const poly = clip as Vec[];
-    expect(inside(poly, at(-3))).toBe(true);
-    expect(inside(poly, at(3))).toBe(false);
+    expect(tunnelSight(net, at(c.length / 2 + 20), portal.dir, 20)).toBe('ghost');
+    // Нос въехал на 5 м: часть кузова перед линией портала — как есть, за ней — призраком; куски не перекрываются.
+    const cut = tunnelSight(net, at(5), portal.dir, 20);
+    expect(typeof cut).toBe('object');
+    const { out, under } = cut as Exclude<Sight, string>;
+    expect(inside(out, at(-3))).toBe(true);
+    expect(inside(out, at(3))).toBe(false);
+    expect(inside(under, at(3))).toBe(true);
+    expect(inside(under, at(-3))).toBe(false);
     // На обочине у портала (машина ждёт въезда) — тоже по линии портала, а не пропадает.
     const side = tunnelSight(net, at(-1, portal.right + 5), portal.dir, 20);
-    expect(Array.isArray(side) && inside(side, at(-3, portal.right + 5))).toBe(true);
+    expect(typeof side === 'object' && inside(side.out, at(-3, portal.right + 5))).toBe(true);
   });
 
-  it('колонна въезжает в тоннель без скачков: видна снаружи, у портала — обрезана, глубже — пропадает', () => {
+  it('колонна въезжает в тоннель без скачков: видна снаружи, у портала — по частям, глубже — призраком', () => {
     const { c, portal } = descent();
     const seen: Record<string, number> = {};
-    let prev: ('show' | 'hide' | 'clip')[] | null = null;
+    let prev: ('show' | 'ghost' | 'cut')[] | null = null;
     for (let done = 0; done <= c.length; done += 0.5) {
       c.build = { ...c.build!, done, fromB: false };
       const now = crewConvoy(net, c).map((m) => {
         const s = tunnelSight(net, m.pos, m.dir, 24);
-        const k = Array.isArray(s) ? 'clip' : s;
+        const k = typeof s === 'object' ? 'cut' : s;
         seen[k] = (seen[k] ?? 0) + 1;
         // Машина под землёй — правда за линией портала.
-        if (k === 'hide') expect(dot(sub(m.pos, portal.pos), portal.dir)).toBeGreaterThan(0);
+        if (k === 'ghost') expect(dot(sub(m.pos, portal.pos), portal.dir)).toBeGreaterThan(0);
         return k;
       });
-      // Из «видна целиком» в «не видна» — только через обрезку у портала.
-      if (prev) now.forEach((k, i) => expect(`${prev![i]}>${k}`).not.toBe('show>hide'));
+      // Из «как есть» в «призрак» — только через деление у портала.
+      if (prev) now.forEach((k, i) => expect(`${prev![i]}>${k}`).not.toBe('show>ghost'));
       prev = now;
     }
     expect(seen.show).toBeGreaterThan(0);
-    expect(seen.clip).toBeGreaterThan(0);
-    expect(seen.hide).toBeGreaterThan(0);
+    expect(seen.cut).toBeGreaterThan(0);
+    expect(seen.ghost).toBeGreaterThan(0);
     c.build = { ...c.build!, done: 0 };
+  });
+
+  it('прозрачность техники: снаружи — непрозрачно, под землёй — GHOST_ALPHA, у портала — оба куска по своим полуплоскостям', () => {
+    const { portal } = descent();
+    const at = (along: number) => add(portal.pos, scale(portal.dir, along));
+    const ctx = fakeCtx();
+    const drawn: { alpha: number; clip: Vec[] | null }[] = [];
+    const draw = () => drawn.push({ alpha: ctx.globalAlpha, clip: ctx.clipped });
+    drawInSight(ctx as unknown as CanvasRenderingContext2D, tunnelSight(net, at(-60), portal.dir, 20), draw);
+    drawInSight(ctx as unknown as CanvasRenderingContext2D, tunnelSight(net, at(60), portal.dir, 20), draw);
+    expect(drawn).toEqual([
+      { alpha: 1, clip: null },
+      { alpha: GHOST_ALPHA, clip: null },
+    ]);
+    drawn.length = 0;
+    // Нос за линией на 5 м: перед линией — непрозрачная часть, за ней — призрак.
+    drawInSight(ctx as unknown as CanvasRenderingContext2D, tunnelSight(net, at(5), portal.dir, 20), draw);
+    expect(drawn.map((d) => d.alpha)).toEqual([1, GHOST_ALPHA]);
+    expect(inside(drawn[0].clip!, at(-3)) && !inside(drawn[0].clip!, at(3))).toBe(true);
+    expect(inside(drawn[1].clip!, at(3)) && !inside(drawn[1].clip!, at(-3))).toBe(true);
+    // Состояние холста вернулось: следующее рисуется как обычно.
+    expect(ctx.globalAlpha).toBe(1);
+    expect(ctx.filter).toBe('none');
+    expect(ctx.clipped).toBe(null);
   });
 
   it('входной портал — позади начала стройки и для глубокого участка тоже; огоньки — у краёв начатых этапов', () => {

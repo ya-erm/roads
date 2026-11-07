@@ -196,7 +196,8 @@ function crews(game: Game, out: Advice[]): void {
     });
   }
   // Нет подъезда: бригады по полю не ездят — проект ждёт дороги к себе или базы рядом (сразу, а не через idleWarn).
-  const blocked = crews.bases.size ? c.list().filter((i) => !i.project.paused && !i.access) : [];
+  // Ждёт соседний строящийся проект с подъездом (ProjectInfo.waits) — это очередь, а не беда: не советуем.
+  const blocked = crews.bases.size ? c.list().filter((i) => !i.project.paused && !i.access && !i.waits) : [];
   if (blocked.length) {
     const first = blocked[0];
     const what = blocked.length === 1 ? `«${first.project.label}»` : `${blocked.length} ${plural(blocked.length, 'проект', 'проекта', 'проектов')}`;

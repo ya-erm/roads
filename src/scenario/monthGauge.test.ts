@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Game } from '../game/game';
-import { TOWN_NEED } from '../world/entities';
+import { townNeed } from '../world/townSupply';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { monthGauge, monthNow, type MonthNow } from './objectives';
 import type { ObjectiveParams } from './types';
@@ -86,7 +86,9 @@ describe('Показатели текущего месяца для шкалы',
     const g = game();
     const t = g.towns.find((x) => x.demands.length >= 3)!;
     const [a, b, c] = t.demands;
-    t.supplied = { [a]: TOWN_NEED, [b]: TOWN_NEED / 2, [c]: TOWN_NEED / 10 };
+    // Норма — по населению города (растёт с ним).
+    const need = townNeed(t.population);
+    t.supplied = { [a]: need, [b]: need / 2, [c]: need / 10 };
     const n = monthNow(g, g.scenario!.state, { kind: 'supply', town: t.id, months: 1, needs: 2 });
     expect(n.closed).toBe(1);
     expect(n.needs).toBe(2);

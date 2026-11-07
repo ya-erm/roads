@@ -4,7 +4,7 @@ import { clockText, durationText } from '../core/timeText';
 import { Game } from '../game/game';
 import { freightRoute, withoutCitizens } from '../game/testkit';
 import { DEFAULT_SETTINGS } from '../world/settings';
-import { briefHtml, isFolded, offerBannerHtml, offersSectionHtml, scenarioPanelHtml, toggleFold, type PanelView } from './scenarioUi';
+import { briefHtml, isFolded, leftPanelHtml, leftTab, leftTabs, offerBannerHtml, offersSectionHtml, toggleFold, type PanelView } from './scenarioUi';
 
 /** Партия-сценарий со стартовым предложением контракта и ещё одним — посрочнее. */
 function scenarioWithOffers() {
@@ -36,15 +36,73 @@ describe('Предложения контрактов в панели сцена
     expect(offersSectionHtml(game, new Set([extra.id]))).toContain('<p class="sc-cause">Город ищет перевозчика.</p>');
   });
 
-  it('первым разделом панели — и в свёрнутой тоже; решать нечего — раздела нет', () => {
+  it('первым разделом вкладки «События», не на «Сценарии»; в свёрнутой — на любой вкладке; решать нечего — раздела нет', () => {
     const { game, sc } = scenarioWithOffers();
-    const full = scenarioPanelHtml(game, view());
-    expect(full).toContain('sc-accept');
-    expect(full.indexOf('sc-offers')).toBeLessThan(full.indexOf('sc-steps') === -1 ? full.length : full.indexOf('sc-steps'));
-    expect(scenarioPanelHtml(game, { ...view(), collapsed: true })).toContain('sc-accept');
+    const events = leftPanelHtml(game, { ...view(), tab: 'events' });
+    expect(events).toContain('sc-accept');
+    expect(events.indexOf('sc-offers')).toBeLessThan(events.indexOf('sc-card event') === -1 ? events.length : events.indexOf('sc-card event'));
+    expect(leftPanelHtml(game, view())).not.toContain('sc-accept');
+    expect(leftPanelHtml(game, view())).toContain('sc-steps');
+    expect(leftPanelHtml(game, { ...view(), collapsed: true })).toContain('sc-accept');
+    expect(leftPanelHtml(game, { ...view(), collapsed: true, tab: 'events' })).toContain('sc-accept');
     for (const o of [...sc.offers]) sc.decline(o.id);
     expect(offersSectionHtml(game, new Set())).toBe('');
-    expect(scenarioPanelHtml(game, view())).not.toContain('sc-offers');
+    expect(leftPanelHtml(game, { ...view(), tab: 'events' })).not.toContain('sc-offers');
+  });
+});
+
+describe('Вкладки левой панели', () => {
+  const tabsOf = (html: string) => [...html.matchAll(/data-action="left-tab" data-id="(\w+)"/g)].map((m) => m[1]);
+  const tabHtml = (html: string, id: string) => html.slice(html.indexOf(`data-id="${id}"`), html.indexOf('</button>', html.indexOf(`data-id="${id}"`)));
+
+  it('сценарий без стройки: «Сценарий» и «События»; у «Событий» — число предложений и подсветка; выбранная — active', () => {
+    const { game, sc } = scenarioWithOffers();
+    expect(leftTabs(game)).toEqual(['scenario', 'events']);
+    const html = leftPanelHtml(game, view());
+    expect(tabsOf(html)).toEqual(['scenario', 'events']);
+    expect(html).toContain('class="lp-tab active " data-action="left-tab" data-id="scenario"');
+    const ev = tabHtml(html, 'events');
+    expect(ev).toContain(`<b class="lp-count call">${sc.offers.length}</b>`);
+    expect(ev).toContain('data-tip="Контракты ждут решения');
+    expect(html).toMatch(/class="lp-tab  call" data-action="left-tab" data-id="events"/);
+    // Меньше минуты на решение — красным и мигает.
+    game.time = (sc.month + 0.5) * MONTH_LENGTH;
+    expect(leftPanelHtml(game, view())).toMatch(/class="lp-tab  call urgent pulse" data-action="left-tab" data-id="events"/);
+    expect(leftPanelHtml(game, view())).toContain('<b class="lp-count call urgent">');
+    game.time = 0;
+    // Вкладки стройки нет — и выбор «Стройки» откатывается к первой.
+    expect(leftTab(game, 'build')).toBe('scenario');
+    expect(leftPanelHtml(game, { ...view(), tab: 'build' })).toBe(html);
+    // Решать нечего — без числа и подсветки.
+    for (const o of [...sc.offers]) sc.decline(o.id);
+    const calm = tabHtml(leftPanelHtml(game, view()), 'events');
+    expect(calm).not.toContain('lp-count');
+    expect(leftPanelHtml(game, view())).not.toMatch(/lp-tab [^"]*call/);
+  });
+
+  it('«Со строительством» — третья вкладка «Стройка»; первую базу ещё не ставили — вкладка подсвечена, кнопка зовёт', () => {
+    const game = new Game({ ...DEFAULT_SETTINGS, seed: 7, scenario: { difficulty: 'easy', challenge: false }, construction: 'build' });
+    expect(leftTabs(game)).toEqual(['scenario', 'events', 'build']);
+    const html = leftPanelHtml(game, { ...view(), tab: 'build' });
+    expect(tabsOf(html)).toEqual(['scenario', 'events', 'build']);
+    expect(html).toMatch(/class="lp-tab active call pulse" data-action="left-tab" data-id="build" data-tip="Стройка: поставьте первую базу — бесплатно/);
+    expect(html).toContain('build-add  first');
+    expect(html).toContain('＋ База · бесплатно');
+    // На «Сценарии» вкладка «Стройка» тоже подсвечена; в свёрнутой панели — строка стройки с «＋ База».
+    expect(leftPanelHtml(game, view())).toMatch(/class="lp-tab  call pulse" data-action="left-tab" data-id="build"/);
+    const folded = leftPanelHtml(game, { ...view(), tab: 'build', collapsed: true });
+    expect(folded).toContain('build-compact');
+    expect(folded).toContain('data-action="base-place"');
+    expect(folded).not.toContain('sc-steps');
+  });
+
+  it('свёрнутая «События» — последнее событие строкой, если решать нечего', () => {
+    const { game, sc } = scenarioWithOffers();
+    for (const o of [...sc.offers]) sc.decline(o.id);
+    const folded = leftPanelHtml(game, { ...view(), tab: 'events', collapsed: true });
+    expect(tabsOf(folded)).toEqual(['scenario', 'events']);
+    expect(folded).toContain('sc-compact');
+    expect(folded).not.toContain('sc-steps');
   });
 });
 
@@ -92,7 +150,7 @@ describe('Свёрнутые цели в панели сценария', () => {
     const goals = sc.state.objectives.filter((o) => o.phase === 0 && o.status === 'active');
     const [a, b] = goals;
     toggleFold(a);
-    const html = scenarioPanelHtml(game, view());
+    const html = leftPanelHtml(game, view());
     expect(html).toContain(`class="sc-obj ${a.role} active  folded" data-action="sc-fold" data-id="${a.id}"`);
     // Развёрнутая — с кнопкой «Свернуть» и наградой.
     expect(html).toContain(`<button class="sc-fold" data-action="sc-fold" data-id="${b.id}"`);
@@ -110,7 +168,7 @@ describe('Свёрнутые цели в панели сценария', () => {
     const { game, sc } = scenarioWithOffers();
     const goals = sc.state.objectives.filter((o) => o.phase === 0 && o.status === 'active');
     toggleFold(goals[0]);
-    const html = scenarioPanelHtml(game, view());
+    const html = leftPanelHtml(game, view());
     const sizes = [...html.matchAll(/<span class="sc-obj-ic"><svg[^>]*?\swidth="(\d+)"/g)].map((m) => m[1]);
     expect(sizes.length).toBe(goals.length);
     expect(new Set(sizes)).toEqual(new Set(['26']));
@@ -124,7 +182,7 @@ describe('Свёрнутые цели в панели сценария', () => {
     const loaded = new Game(save.settings, save);
     expect(isFolded(loaded.scenario!.objective(a.id)!)).toBe(true);
     expect(isFolded(loaded.scenario!.objective(b.id)!)).toBe(false);
-    expect(scenarioPanelHtml(loaded, view())).toContain(`folded" data-action="sc-fold" data-id="${a.id}"`);
+    expect(leftPanelHtml(loaded, view())).toContain(`folded" data-action="sc-fold" data-id="${a.id}"`);
   });
 
   it('выполненная цель сворачивается сама, а развёрнутая после выполнения — остаётся развёрнутой', () => {
@@ -150,14 +208,14 @@ describe('Шкала месячной цели в панели сценария'
     const o = sc.addObjective({ kind: 'throughput', amount: 470, costRatio: 0.8, months: 3 }, { role: 'goal', phase: 0, months: 6, why: 'Проверка шкалы.', reward: { money: 1000 } });
     o.streak = o.progress = 1;
     sc.state.stats.units = 235;
-    const html = scenarioPanelHtml(game, view());
+    const html = leftPanelHtml(game, view());
     const row = html.slice(html.indexOf(`data-id="${o.id}"`));
     expect(row).toContain('style="width:50.0%"');
     expect(row).toContain('235 / 470 ед.</b><span class="sc-month">в этом месяце</span>');
     expect(row).not.toContain('1 / 3 мес.');
     expect(row).toMatch(/<span class="sc-streak"[^>]*><i class="on"><\/i><i class=""><\/i><i class=""><\/i><\/span>/);
     toggleFold(o);
-    const folded = scenarioPanelHtml(game, view());
+    const folded = leftPanelHtml(game, view());
     const frow = folded.slice(folded.indexOf(`data-id="${o.id}"`));
     expect(frow).toContain('235 / 470 ед.</b><span class="sc-streak"');
     expect(frow.slice(0, frow.indexOf('</div></div>'))).not.toContain('в этом месяце');
@@ -175,7 +233,7 @@ describe('Прогноз к сроку на шкале задания', () => {
       { role: 'contract', phase: null, months, why: 'Проверка прогноза.', reward: { money: 1000 } },
     );
     const row = () => {
-      const html = scenarioPanelHtml(game, view());
+      const html = leftPanelHtml(game, view());
       return html.slice(html.indexOf(`data-id="${o.id}"`));
     };
     /** Купить грузовики и перейти к следующей секунде игры — прогноз пересчитывается раз в секунду. */
@@ -231,14 +289,14 @@ describe('Сроки — минутами и секундами, а не мес�
     game.time = (sc.month + 0.5) * MONTH_LENGTH;
     const goal = sc.current.find((o) => o.deadline !== null)!;
     goal.deadline = sc.month + 4;
-    const panel = scenarioPanelHtml(game, view());
+    const panel = leftPanelHtml(game, view());
     // 3,5 минуты — «4 мин»: секунды у сроков заданий не бегут.
     expect(panel).toContain('⏳ 4 мин');
     expect(panel).not.toContain(`⏳ ${clockText(3.5 * MONTH_LENGTH)}`);
     expect(panel).not.toMatch(/\d мес\./);
     // Последняя минута — секундами.
     goal.deadline = sc.month + 1;
-    expect(scenarioPanelHtml(game, view())).toContain('⏳ 30 сек');
+    expect(leftPanelHtml(game, view())).toContain('⏳ 30 сек');
     const offers = offersSectionHtml(game, new Set());
     expect(offers).toContain(`⌛ ${clockText(0.5 * MONTH_LENGTH)}`);
     expect(offers).toContain(`⏳ ${durationText(extra.months! * MONTH_LENGTH)}`);
@@ -283,7 +341,7 @@ describe('Брифинг сценария', () => {
     expect(goals).toContain('sc-reward');
     expect(goals).toContain('class="sc-why"');
     // Панель сценария по-прежнему с полоской и прогрессом.
-    expect(scenarioPanelHtml(game, view())).toContain('sc-bar');
+    expect(leftPanelHtml(game, view())).toContain('sc-bar');
     expect(sc.offers.length).toBeGreaterThan(0);
     expect(html).toContain('можно решить позже');
   });

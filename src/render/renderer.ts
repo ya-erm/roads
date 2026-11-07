@@ -19,7 +19,8 @@ import { wagonFills } from '../sim/wagons';
 import { cargoImage } from '../ui/cargoIcons';
 import { BIOMES } from '../world/biomes';
 import { CARGO, CargoType, FREIGHT } from '../world/cargo';
-import { Annex, Industry, Station, TOWN_NEED, TownBuilding } from '../world/entities';
+import { Annex, Industry, Station, TownBuilding } from '../world/entities';
+import { lastTownNeed } from '../world/townSupply';
 import type { Segment } from '../world/network';
 import { halfWidth, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
@@ -31,9 +32,9 @@ import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
-import { baseBox, baseSig, buildingCorridors, crewConvoy, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
+import { baseBox, baseSig, buildingCorridors, crewConvoy, crewRows, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
-import { drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
+import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
 import { corridorHalf } from '../world/worldgen';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
@@ -587,13 +588,11 @@ export class Renderer {
     }
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
-    // Самосвалы бригад, что едут вдоль стройки от дороги к краю работ (и назад), — по оси проекта; в тоннеле — уходят
-    // под землю за порталом (tunnelSight).
+    // Самосвалы бригад, что едут вдоль стройки от дороги к краю работ (и назад), — по оси проекта; в тоннеле — за
+    // порталом видны призраком сквозь землю (tunnelSight, drawInSight).
     for (const v of game.siteCrewLooks()) {
       if (!seenAt(v.pos, view, 20)) continue;
-      const sight = tunnelSight(game.roads.net, v.pos, v.dir, v.length);
-      if (sight === 'show') this.drawVehicles([v]);
-      else if (sight !== 'hide') this.drawClipped(sight, () => this.drawVehicles([v]));
+      drawInSight(ctx, tunnelSight(game.roads.net, v.pos, v.dir, v.length), () => this.drawVehicles([v]));
     }
     this.drawLights(game, 0, o.phaseEdit);
     this.drawMotion(game, view);
@@ -983,7 +982,7 @@ export class Renderer {
       const working = going && !p.paused && p.stalled === undefined;
       const cs = game.construction.corridorsOf(p.id);
       // Техника — колонной на участке в работе: у каждого этапа своя машина у своего края (ждёт, въезжает, стоит —
-      // crewConvoy); у каждой следующей бригады на месте — ещё по машине работающих этапов рядом, на соседней полосе.
+      // crewConvoy); у каждой следующей бригады на месте — ещё по машине работающих этапов рядом, бок о бок в пределах полотна (crewRows).
       const crew = crews.working(p.id).length;
       // Выбранный проект (его карточка справа) — под техникой оранжевой полупрозрачной полосой шире полотна.
       if (selected === p.id) {
@@ -1001,24 +1000,25 @@ export class Renderer {
       }
       const site = crew ? game.construction.current(p.id) : null;
       const net = game.roads.net;
-      // Мост — кран и бетоновоз у края пролёта; тоннель — техника уходит под землю за порталом (tunnelSight), у
-      // входного портала — проходческое хозяйство, ход работ — огоньками сквозь землю (structureArt).
+      // Мост — кран и бетоновоз у края пролёта; тоннель — техника за порталом видна призраком сквозь землю
+      // (tunnelSight, drawInSight), у входного портала — проходческое хозяйство, края работ — огоньками (structureArt).
       const kind = site ? siteKind(net, site) : 'road';
       if (site && kind === 'tunnel') {
         const gate = entryPortal(net, site);
         if (gate && seenAt(gate.pos, view, 60)) drawPortalGear(ctx, gate, game.time, working);
-        drawWorkLights(ctx, site, game.time, working);
       }
+      // Ряды техники бригад — бок о бок поперёк полотна, не за его кромками (crewRows).
+      const rows = site ? crewRows(site, crew) : [0];
       for (const m of site ? crewConvoy(net, site) : []) {
         if (!seenAt(m.pos, view, 40)) continue;
         const sight = tunnelSight(net, m.pos, m.dir, 24);
-        if (sight === 'hide') continue;
         for (let i = 0; i < (m.active ? crew : 1); i++) {
-          const draw = () => drawMachines(ctx, m.pos, m.dir, m.stage, m.active && working && blink, (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 5, kind, game.time);
-          if (sight === 'show') draw();
-          else this.drawClipped(sight, draw);
+          const draw = () => drawMachines(ctx, m.pos, m.dir, m.stage, m.active && working && blink, m.active ? rows[i] : 0, kind, game.time);
+          drawInSight(ctx, sight, draw);
         }
       }
+      // Огоньки у краёв работ — поверх техники-призрака: их видно сквозь землю ярко.
+      if (site && kind === 'tunnel') drawWorkLights(ctx, site, game.time, working);
     }
     // Плашки над проектами — при любом зуме одного размера на экране (projectBadges: клик по плашке ищет её там же).
     for (const b of projectBadges(game, z)) {
@@ -2635,9 +2635,10 @@ export class Renderer {
       text(top, t.labelOnly ? t.name : `${t.name} · ${t.population}`, 15, '#1f2933');
       // Потребности города: яркий значок — привозили достаточно в прошлом месяце.
       const n = t.demands.length;
+      const need = lastTownNeed(t);
       t.demands.forEach((c, i) => {
         const p = { x: t.center.x + ((i - (n - 1) / 2) * 24) / z, y: top.y + 20 / z };
-        const ok = (t.lastSupplied[c] ?? 0) >= TOWN_NEED;
+        const ok = (t.lastSupplied[c] ?? 0) >= need;
         ctx.globalAlpha = ok ? 1 : 0.55;
         this.icon(cargoImage(c), p, 20 / z);
         ctx.globalAlpha = 1;

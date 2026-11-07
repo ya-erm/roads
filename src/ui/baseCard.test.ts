@@ -4,7 +4,7 @@ import { Game } from '../game/game';
 import { anchorOf, road, runSeconds, STREET, withoutCitizens } from '../game/testkit';
 import type { WorldSettings } from '../world/settings';
 import { baseCardHtml } from './baseCard';
-import { buildBarHtml } from './constructionUi';
+import { buildTabHtml } from './constructionUi';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
@@ -67,7 +67,7 @@ describe('Карточка строительной базы', () => {
     const { game, base } = setup();
     expect(game.hireBrigade(base)).toBeNull();
     runSeconds(game, 30);
-    const bar = buildBarHtml(game, false, null, base);
+    const bar = buildTabHtml(game, { placing: false, project: null, base });
     expect(bar).toContain(`class="build-base selected" data-action="base-show" data-id="${base}"`);
     expect(bar).toContain(game.baseName(base));
     expect(bar).toContain('🚚 <b>2</b>');

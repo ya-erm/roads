@@ -89,6 +89,8 @@ function timeHtml(game: Game, info: ProjectInfo): string {
   const p = info.project;
   const crew = game.construction.crews.working(p.id).length;
   const trucks = (n: number) => '🚚'.repeat(Math.max(1, Math.min(3, n)));
+  if (!p.paused && !info.access && info.waits && game.construction.crews.bases.size)
+    return `<div class="pc-row"><span class="pc-time" data-tip="Подъезд — через соседний строящийся проект: начнётся, когда тот дорастёт сюда">⏳ <b>после соседнего</b></span></div>`;
   if (!p.paused && !info.access && game.construction.crews.bases.size)
     return `<div class="pc-row"><span class="pc-time pc-bad" data-tip="Бригадам не доехать по дорогам ни с одной базы — стройка ждёт подъезда">⛔ <b>стоит: нет подъезда</b></span></div>`;
   const now = p.paused
@@ -97,8 +99,8 @@ function timeHtml(game: Game, info: ProjectInfo): string {
   const plus =
     info.secondsPlus !== null && !p.paused
       ? `<span class="pc-arrow">→</span><span class="pc-time plus" data-tip="${esc(`С ещё одной бригадой (её вклад меньше: бригады мешают друг другу) — на ${durationText(info.seconds - info.secondsPlus)} быстрее`)}">＋🚚 ⏳ <b>${durationText(info.secondsPlus)}</b></span>`
-      : !p.paused && crew >= CONSTRUCTION.brigade.perProject
-        ? `<span class="muted" data-tip="Больше ${CONSTRUCTION.brigade.perProject} бригад на один проект не встанет">максимум бригад</span>`
+      : !p.paused && crew >= game.construction.crews.cap(p.id)
+        ? `<span class="muted" data-tip="Больше ${game.construction.crews.cap(p.id)} бригад на этот проект не встанет${game.construction.crews.cap(p.id) < CONSTRUCTION.brigade.perProject ? ' — полотно в одну полосу' : ''}">максимум бригад</span>`
         : '';
   return `<div class="pc-row">${now}${plus}</div>`;
 }
@@ -159,8 +161,10 @@ function crewsHtml(game: Game, info: ProjectInfo): string {
         <span class="pc-mini" data-tip="${esc(`Сила бригады ${power}%: чем дальше база от стройки, тем медленнее`)}"><i style="width:${power}%"></i></span></button>`;
     })
     .join('');
-  const title = `<div class="pc-title">🚚 Бригады <b>${list.length}</b><span class="muted"> из ${CONSTRUCTION.brigade.perProject}</span></div>`;
-  if (rows) return `<div class="pc-block">${title}<div class="pc-crews">${rows}</div>${list.length < CONSTRUCTION.brigade.perProject ? helpHtml(game, info, true) : ''}</div>`;
+  // Сколько встанет: на узком проекте (полотно в одну полосу) — меньше (crews.cap).
+  const cap = crews.cap(info.project.id);
+  const title = `<div class="pc-title">🚚 Бригады <b>${list.length}</b><span class="muted"> из ${cap}</span></div>`;
+  if (rows) return `<div class="pc-block">${title}<div class="pc-crews">${rows}</div>${list.length < cap ? helpHtml(game, info, true) : ''}</div>`;
   return `<div class="pc-block">${title}${helpHtml(game, info, false)}</div>`;
 }
 
@@ -181,6 +185,7 @@ function helpHtml(game: Game, info: ProjectInfo, some: boolean): string {
   if (p.paused) return some ? '' : why('⏸', 'На паузе — бригады ушли на другие проекты', `<button class="small" data-action="build-pause" data-id="${p.id}" data-tip="Строить дальше">▶ Дальше</button>`);
   if (!crews.bases.size)
     return why('🏚', 'Нет строительной базы', `<button class="small" data-action="base-place" data-tip="Поставьте базу у дороги, ближе к стройке${game.firstBase ? ' — первая бесплатно' : ''}">＋ База</button>`);
+  if (!info.access && info.waits) return why('⏳', 'После соседнего: подъезд — через соседний строящийся проект, начнётся, когда тот дорастёт сюда', '');
   if (!info.access)
     return why(
       '⛔',

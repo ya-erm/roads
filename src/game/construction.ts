@@ -9,9 +9,12 @@
  *   (src/lanes/open.ts — сеть без строящегося).
  * - Участок — сначала тот, что уже начат, потом тот, к концу которого есть подъезд: до узла можно доехать по готовым
  *   дорогам с ворот базы (accessRank); таких несколько — у ближайшего к базе конца, от него участок и заполняется.
+ *   Подъезд — без учёта направления полос (Game.reach, crewRoads.ts): к концу проекта у одностороннего съезда «от
+ *   проекта» технику пропустит регулировщик — бригада проедет последний отрезок против движения.
  *   Стройка так идёт от подъезда внутрь проекта; участок без подъезда ждёт, пока до него дорастёт соседний. Подъезда
- *   нет ни у одного узла проекта — бригады к нему не едут (site — null), проект ждёт: «🚚 нет подъезда» на плашке,
- *   в карточке и у советника. Участок проходят трижды: земляные работы, покрытие, разметка (CONSTRUCTION.stages).
+ *   нет ни у одного узла проекта — бригады к нему не едут (site — null), проект ждёт: примыкает к другому строящемуся
+ *   проекту с подъездом — «⏳ после соседнего» (ProjectInfo.waits), иначе «🚚 нет подъезда» на плашке, в карточке и
+ *   у советника. Участок проходят трижды: земляные работы, покрытие, разметка (CONSTRUCTION.stages).
  * - Строят бригады (crews.ts): проект идёт, пока на нём работает хоть одна; темп — сумма вкладов бригад (дальше от
  *   базы — медленнее). Проекты строятся одновременно, если бригад хватает.
  * - Пауза — проект стоит; отмена (Game.cancelProject) сносит недостроенное и возвращает заплаченное за него,
@@ -27,8 +30,9 @@ import { dist, type Vec } from '../core/vec';
 import type { Corridor, LaneNet } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import { ROAD_CLASSES } from '../world/roadTypes';
-import { buildRate, frontOf, paidFor, pickSite, stageSpans } from './constructionWork';
+import { buildRate, crewCap, frontOf, paidFor, pickSite, stageSpans } from './constructionWork';
 import { type Brigade, type CrewSave, Crews, type Site } from './crews';
+import type { CrewStep } from './crewRoads';
 import { corridorProfile, fullCorridorCost } from './roadbuild';
 
 export interface Project {
@@ -77,8 +81,13 @@ export interface ConstructionHost {
   drive(brigade: Brigade, from: number, to: number, car: number): number | 'busy' | null;
   park(sim: number): void;
   onRoad(node: number): boolean;
-  /** От узла from до узла to можно доехать по готовым дорогам (подъезд к проекту). */
+  /**
+   * От узла from до узла to технике можно добраться по готовым дорогам (подъезд к проекту) — без учёта направления
+   * полос: где по правилам не доехать, бригада проедет отрезок против движения (crewStep).
+   */
   reach(from: number, to: number): boolean;
+  /** Следующий шаг бригады от узла from к узлу to: по дорогам в потоке или против движения (crewRoads.ts). */
+  crewStep?(from: number, to: number): CrewStep | null;
 }
 
 /** Сводка проекта для плашки и советника. */
@@ -104,6 +113,11 @@ export interface ProjectInfo {
    * работ). Нет — бригады не едут, проект ждёт дороги к себе или базы рядом.
    */
   access: boolean;
+  /**
+   * Подъезда нет, но проект примыкает (через другие строящиеся проекты не на паузе) к узлу с подъездом: просто ждёт,
+   * пока до него дорастёт соседний, — не «нет подъезда» (Construction.waitsNeighbor).
+   */
+  waits: boolean;
 }
 
 /** Из чего проект: метров по видам (вода — мост над ней), насыпь и выемка — высота и глубина, м. */
@@ -144,9 +158,11 @@ export class Construction {
       },
       crewProjects: () => [...this.projects.values()].filter((p) => !p.paused && this.corridorsOf(p.id).length).map((p) => p.id),
       priority: (id) => !!this.projects.get(id)?.priority,
+      cap: (id) => crewCap(this.corridorsOf(id)),
       site: (id) => self.site(id),
       path: (id) => self.approach(id)?.path() ?? null,
       reach: (from, to) => host.reach(from, to),
+      ...(host.crewStep ? { step: (from: number, to: number) => host.crewStep!(from, to) } : {}),
       drive: (b, from, to, car) => host.drive(b, from, to, car),
       park: (sim) => host.park(sim),
       onRoad: (node) => host.onRoad(node),
@@ -410,8 +426,9 @@ export class Construction {
     // Ещё одна бригада — с ближайшей базы, своей долей (CONSTRUCTION.crewShare): вторая и третья прибавляют меньше.
     const n = Math.max(1, this.crews.working(id).length);
     const share = CONSTRUCTION.crewShare;
-    const plus = n < CONSTRUCTION.brigade.perProject ? k + this.crews.nearestPower(at) * (share[n] ?? share[share.length - 1]) : null;
+    const plus = n < this.crews.cap(id) ? k + this.crews.nearestPower(at) * (share[n] ?? share[share.length - 1]) : null;
     const stages: [number, number, number] = [p.builtLen, p.builtLen, p.builtLen];
+    const access = this.site(id) !== null;
     for (const c of list) {
       const b = c.build!;
       const { full, rate } = this.price(net, c);
@@ -435,8 +452,43 @@ export class Construction {
       at: weight > 0 ? { x: mid.x / weight, y: mid.y / weight } : (front ?? { x: 0, y: 0 }),
       secondsPlus: plus !== null ? (seconds * k) / plus : null,
       stages: stages.map((s) => (length > 0 ? Math.min(1, s / length) : 1)) as [number, number, number],
-      access: this.site(id) !== null,
+      access,
+      waits: !access && this.waitsNeighbor(id),
     };
+  }
+
+  /**
+   * Подъезда к проекту id нет, но по строящимся полотнам других проектов (не на паузе) от его узлов можно дойти до
+   * узла с подъездом (accessRank): соседний проект дорастёт — подъезд появится.
+   */
+  waitsNeighbor(id: number): boolean {
+    const own = this.corridorsOf(id);
+    if (!own.length) return false;
+    const at = new Map<number, Corridor[]>();
+    for (const p of this.projects.values()) {
+      if (p.id === id || p.paused) continue;
+      for (const c of this.corridorsOf(p.id)) for (const n of [c.a, c.b]) at.set(n, [...(at.get(n) ?? []), c]);
+    }
+    const seen = new Set<number>();
+    const queue: number[] = [];
+    for (const c of own) {
+      for (const n of [c.a, c.b]) {
+        if (seen.has(n)) continue;
+        seen.add(n);
+        queue.push(n);
+      }
+    }
+    while (queue.length) {
+      const n = queue.shift()!;
+      for (const c of at.get(n) ?? []) {
+        const m = c.a === n ? c.b : c.a;
+        if (seen.has(m)) continue;
+        if (this.accessRank(m) !== null) return true;
+        seen.add(m);
+        queue.push(m);
+      }
+    }
+    return false;
   }
 
   /** Из чего недостроенное: метров на земле, по мостам, в тоннелях, над водой; самая высокая насыпь и глубокая выемка. */

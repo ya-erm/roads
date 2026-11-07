@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { closeSupply, supplyCarry } from './townSupply';
+import { TOWN_NEED } from './entities';
+import { closeSupply, lastTownNeed, monthTownNeed, supplyCarry, townNeed } from './townSupply';
 
 describe('Перенос излишков снабжения города', () => {
   it('сверх нормы — в следующий месяц', () => {
@@ -41,5 +42,37 @@ describe('Перенос излишков снабжения города', () =
     });
     expect(closed.filter(Boolean).length).toBeGreaterThan(arrivals.filter((g) => g >= 15).length);
     expect(closed.slice(0, 3)).toEqual([true, false, true]);
+  });
+});
+
+describe('Норма города растёт с населением', () => {
+  it('до 2000 жителей — базовая, дальше — ещё одна базовая на каждые 4000, круглыми пятёрками', () => {
+    expect(TOWN_NEED).toBe(15);
+    expect(townNeed(0)).toBe(15);
+    expect(townNeed(1200)).toBe(15);
+    expect(townNeed(2000)).toBe(15);
+    expect(townNeed(4000)).toBe(25);
+    expect(townNeed(6000)).toBe(30);
+    expect(townNeed(10_000)).toBe(45);
+    expect(townNeed(14_000)).toBe(60);
+  });
+
+  it('растёт без скачков вниз и без взрыва: вдвое больше жителей — не больше чем вдвое больше нормы', () => {
+    let prev = 0;
+    for (let pop = 0; pop <= 40_000; pop += 50) {
+      const n = townNeed(pop);
+      expect(n % 5, `${pop}`).toBe(0);
+      expect(n, `${pop}`).toBeGreaterThanOrEqual(prev);
+      if (pop >= 2000) expect(townNeed(pop * 2), `${pop}`).toBeLessThanOrEqual(n * 2 + 5);
+      prev = n;
+    }
+  });
+
+  it('прошлый месяц — со своей нормой из истории, а без истории — по нынешнему населению', () => {
+    const month = (need: number) => ({ label: 'Май 2000', got: {}, need });
+    expect(lastTownNeed({ population: 10_000, supplyHistory: [month(15), month(30)] })).toBe(30);
+    expect(lastTownNeed({ population: 10_000 })).toBe(45);
+    expect(monthTownNeed({ population: 10_000, supplyHistory: [month(30)] }, 'last')).toBe(30);
+    expect(monthTownNeed({ population: 10_000, supplyHistory: [month(30)] }, 'current')).toBe(45);
   });
 });

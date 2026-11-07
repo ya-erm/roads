@@ -7,6 +7,9 @@
  * проекта, carsAt). По полю бригады не ездят: к проекту, до которого не доехать по дорогам ни от одной базы, бригада
  * не едет — проект ждёт подъезда (Construction.site — null). Проект закончили, отменили или поставили на паузу —
  * бригада едет вдоль стройки назад к дороге и дальше к другому проекту, которому не хватает рук, или домой на базу.
+ * Направление полос для техники — не преграда (Host.step, crewRoads.ts): где по правилам не доехать (конец проекта у
+ * одностороннего съезда «от проекта»), колонна проезжает короткий отрезок дороги против движения по её оси — как
+ * вдоль стройки (walk; SiteTrip.to — узел, куда доедет), будто там стоит регулировщик.
  *
  * Где без перескока не обойтись: машину колонны потеряли (дорогу под ней снесли), до дома нет пути, старое
  * сохранение с поездкой по полю — бригада сразу оказывается на базе и выезжает оттуда заново.
@@ -15,7 +18,9 @@
  * к нему переходит бригада, работающая на обычном проекте (reinforce).
  *
  * Темп проекта — сумма вкладов бригад на нём: 1 / (1 + d / reach), d — от базы бригады до края работ (возит грунт
- * и асфальт); бригад на проекте — не больше brigade.perProject. Содержание бригад — каждый месяц (Game.monthEnd).
+ * и асфальт); бригад на проекте — не больше brigade.perProject, на узком (полотно в одну полосу: съезд, заезд) — не
+ * больше brigade.perNarrow (cap, constructionWork.crewCap; лишние отпускаются — trim). Содержание бригад — каждый
+ * месяц (Game.monthEnd).
  *
  * Детерминизм: бригады перебираются по номеру, решения — по номерам и расстояниям, без случайности.
  */
@@ -72,6 +77,11 @@ export interface SiteTrip {
   t0: number;
   /** Назад к дороге (с края работ к узлу подъезда), а не к краю работ. */
   back?: true;
+  /**
+   * Не вдоль стройки, а по готовой дороге против движения (там, где по правилам не доехать, — Host.step): узел дороги,
+   * куда доедет; оттуда — дальше по правилам или уже к стройке.
+   */
+  to?: number;
 }
 
 export interface CrewSave {
@@ -95,12 +105,19 @@ export interface CrewHost {
   crewProjects(): number[];
   /** Приоритетный проект: бригады — сначала к нему, при нехватке — переходят к нему с обычных. */
   priority?(project: number): boolean;
+  /** Сколько бригад встанет на проект (по ширине его полотен, constructionWork.crewCap); нет — brigade.perProject. */
+  cap?(project: number): number;
   /** Куда ехать к проекту (null — проекта нет или к нему нет подъезда по дорогам). */
   site(project: number): Site | null;
   /** Путь вдоль стройки от узла Site.node до края работ: точки по оси проекта (null — проекта нет). */
   path(project: number): Vec[] | null;
-  /** От узла from до узла to можно доехать по готовым дорогам. */
+  /** От узла from до узла to можно добраться по готовым дорогам (без учёта направления полос — см. step). */
   reach(from: number, to: number): boolean;
+  /**
+   * Следующий шаг пути от узла from к узлу to: по дорогам в потоке до узла drive или против движения вдоль дороги по
+   * точкам walk до узла node (как будто там регулировщик); null — не добраться. Нет — всегда по дорогам до самой цели.
+   */
+  step?(from: number, to: number): { drive: number } | { walk: Vec[]; node: number } | null;
   /**
    * Выпустить машину колонны бригады (car — её номер в колонне, 0 — головная) от узла from к узлу to: id машины;
    * 'busy' — путь есть, но на выезде нет места (попробовать в следующий такт); null — пути по дорогам нет.
@@ -250,6 +267,11 @@ export class Crews {
     return [...this.brigades.values()].filter((b) => b.project === project && (b.state === 'going' || b.state === 'working'));
   }
 
+  /** Сколько бригад встанет на проект: на узком (полотно в одну полосу) — меньше (Host.cap). */
+  cap(project: number): number {
+    return this.host.cap?.(project) ?? CONSTRUCTION.brigade.perProject;
+  }
+
   /** Работают на проекте сейчас. */
   working(project: number): Brigade[] {
     return [...this.brigades.values()].filter((b) => b.project === project && b.state === 'working');
@@ -327,10 +349,10 @@ export class Crews {
    * В путь вдоль стройки по точкам path: к краю работ или (back) назад к дороге. Путь короче метра — уже на месте
    * (false).
    */
-  private walk(b: Brigade, path: Vec[] | null, back = false): boolean {
+  private walk(b: Brigade, path: Vec[] | null, back = false, to?: number): boolean {
     const len = path ? pathLength(path) : 0;
     if (!path || len < 1) return false;
-    b.trip = { path: path.map((p) => ({ ...p })), t0: this.host.time, ...(back ? { back: true as const } : {}) };
+    b.trip = { path: path.map((p) => ({ ...p })), t0: this.host.time, ...(back ? { back: true as const } : {}), ...(to !== undefined ? { to } : {}) };
     b.eta = this.host.time + len / CONSTRUCTION.onSite;
     b.pos = { ...path[0] };
     return true;
@@ -356,7 +378,24 @@ export class Crews {
       // Вдоль стройки доехали.
       if (b.eta !== undefined && this.host.time >= b.eta) this.walked(b);
     }
+    this.trim(projects);
     this.reinforce(projects);
+  }
+
+  /**
+   * На проекте бригад больше, чем на нём встанет (cap: проект узкий, а бригады назначили раньше — старое сохранение,
+   * правка конфига), — лишние отпускаются: едут вдоль стройки назад к дороге и оттуда к другому проекту или домой
+   * (release), без перескока. Сперва — те, что ещё едут, потом с большим номером; колонну в потоке не трогаем (машины
+   * исчезли бы посреди дороги) — отпустится, когда доедет.
+   */
+  private trim(projects: number[]): void {
+    for (const id of projects) {
+      const list = this.assigned(id);
+      const extra = list.length - this.cap(id);
+      if (extra <= 0) continue;
+      const free = list.filter((b) => !b.convoy).sort((x, y) => (x.state === y.state ? y.id - x.id : x.state === 'going' ? -1 : 1));
+      for (const b of free.slice(0, extra)) this.release(b);
+    }
   }
 
   /**
@@ -368,11 +407,11 @@ export class Crews {
   private reinforce(projects: number[]): void {
     const prio = this.host.priority;
     if (!prio) return;
-    const per = CONSTRUCTION.brigade.perProject;
     for (const id of projects) {
       if (!prio(id)) continue;
       const s = this.host.site(id);
       if (!s) continue;
+      const per = this.cap(id);
       while (this.assigned(id).length < per) {
         let best: { b: Brigade; n: number; d: number } | null = null;
         for (const b of this.brigades.values()) {
@@ -439,7 +478,7 @@ export class Crews {
     let best: { id: number; top: boolean; n: number; d: number } | null = null;
     for (const id of projects) {
       const n = this.assigned(id).length;
-      if (n >= CONSTRUCTION.brigade.perProject) continue;
+      if (n >= this.cap(id)) continue;
       const s = this.host.site(id);
       // К проекту без подъезда (или куда ей не доехать по дорогам) бригада не едет.
       if (!s || !this.canReach(b, s.node)) continue;
@@ -481,7 +520,25 @@ export class Crews {
     }
     if (from === null) return;
     if (from === s.node) return this.onSite(b, s);
-    if (!this.host.reach(from, s.node) || !this.setOff(b, from, s.node)) return this.release(b);
+    if (!this.go(b, from, s.node)) return this.release(b);
+  }
+
+  /**
+   * Шаг пути от узла from к узлу to (Host.step): колонной по дорогам в потоке — или, где по правилам не доехать, по
+   * дороге против движения вдоль её оси (как вдоль стройки, walk; trip.to — куда доедет), оттуда — следующий шаг.
+   * false — не добраться.
+   */
+  private go(b: Brigade, from: number, to: number): boolean {
+    const step = this.host.step ? this.host.step(from, to) : this.host.reach(from, to) ? { drive: to } : null;
+    if (!step) return false;
+    if ('drive' in step) return this.setOff(b, from, step.drive);
+    b.at = from;
+    // Отрезок короче метра — уже там: следующий шаг — в следующий такт.
+    if (!this.walk(b, step.walk, false, step.node)) {
+      b.at = step.node;
+      b.pos = { ...(step.walk[step.walk.length - 1] ?? b.pos ?? { x: 0, y: 0 }) };
+    }
+    return true;
   }
 
   /** Бригада у узла подъезда: вдоль стройки к краю работ, а край рядом — сразу за работу. */
@@ -505,6 +562,11 @@ export class Crews {
     delete b.eta;
     delete b.trip;
     if (end) b.pos = { ...end };
+    // Доехала против движения до узла дороги — оттуда дальше (launch / launchHome в такте).
+    if (trip?.to !== undefined) {
+      b.at = trip.to;
+      return;
+    }
     if (b.state !== 'going' || trip?.back) return;
     const s = b.project !== undefined ? this.host.site(b.project) : null;
     if (!s) return this.release(b);
@@ -516,7 +578,7 @@ export class Crews {
     const base = this.bases.get(b.base);
     if (!base) return;
     const from = this.from(b);
-    if (from === null || from === base.nodeId || !this.host.reach(from, base.nodeId) || !this.setOff(b, from, base.nodeId)) this.home(b);
+    if (from === null || from === base.nodeId || !this.go(b, from, base.nodeId)) this.home(b);
   }
 
   /**
@@ -547,6 +609,24 @@ export class Crews {
       }
     }
     return [];
+  }
+
+  /**
+   * База id переехала (игрок перенёс её или отодвинула расширенная улица); from — где стояла и её прежние ворота.
+   * Работающие и едущие к стройке продолжают как были — домой вернутся уже к новым воротам (ехавшие машиной к
+   * старым доедут до них и поедут дальше, как при сносе базы). Свободные на базе едут к новым воротам колонной по
+   * дорогам, а не перескоком, — если ворота сменились, старые у дороги и от них до новых можно доехать; иначе (или
+   * ворота те же) остаются на базе.
+   */
+  moveBase(id: number, from: { pos: Vec; node: number }): void {
+    const base = this.bases.get(id);
+    if (!base || from.node === base.nodeId || !this.host.onRoad(from.node) || !this.host.reach(from.node, base.nodeId)) return;
+    for (const b of this.of(id)) {
+      if (b.state !== 'idle' || b.pos || b.at !== undefined) continue;
+      b.state = 'back';
+      b.pos = { ...from.pos };
+      b.at = from.node;
+    }
   }
 
   /** Машина sim — из колонны бригады b (в потоке). */
@@ -614,7 +694,16 @@ export class Crews {
       brigades: [...this.brigades.values()].map(({ convoy: _c, ...b }) => ({
         ...b,
         ...(b.pos ? { pos: { ...b.pos } } : {}),
-        ...(b.trip ? { trip: { path: b.trip.path.map((p) => ({ ...p })), t0: b.trip.t0, ...(b.trip.back ? { back: true as const } : {}) } } : {}),
+        ...(b.trip
+          ? {
+              trip: {
+                path: b.trip.path.map((p) => ({ ...p })),
+                t0: b.trip.t0,
+                ...(b.trip.back ? { back: true as const } : {}),
+                ...(b.trip.to !== undefined ? { to: b.trip.to } : {}),
+              },
+            }
+          : {}),
       })),
       nextBrigade: this.nextBrigade,
       ...(this.firstUsed ? { firstUsed: true as const } : {}),

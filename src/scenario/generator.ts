@@ -11,6 +11,7 @@ import type { Game } from '../game/game';
 import { MODELS, newestLike } from '../game/transport';
 import { CARGO, CargoType, TOWN_CARGO } from '../world/cargo';
 import { TOWN_NEED } from '../world/entities';
+import { townNeed } from '../world/townSupply';
 import type { Industry, Town } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import {
@@ -372,7 +373,7 @@ function startContract(sc: Scenario): void {
   if (!best.length) return;
   const o = sc.rng.pick(best);
   const months = Math.round(6 * TERM_SCALE * sc.difficulty.time);
-  // Не меньше нормы города за прежние три месяца (6 мин).
+  // Не меньше базовой нормы города за прежние три месяца (6 мин) — без роста с населением: объём контракта прежний.
   const amount = round10(Math.max(TOWN_NEED * 3 * TERM_SCALE, Math.min(cargoPotential(game, o.cargo, o.town.center, months) * 0.25, 160) * sc.difficulty.demand));
   sc.tryObjective(
     { kind: 'deliver', cargo: o.cargo, amount, to: refOf(o.town) },
@@ -658,9 +659,11 @@ function supplyObjective(
   const { t, needs, easiest } = pick;
   const all = needs >= t.demands.length;
   const list = (cs: CargoType[]) => cs.map((c) => CARGO[c].name.toLowerCase()).join(', ');
+  // Норма — по нынешнему населению; город растёт, и она растёт вместе с ним.
+  const per = `по ${townNeed(t.population)} ед. в месяц (с ростом города — больше)`;
   const why = all
-    ? `${t.name} ждёт всё, что ему нужно: ${list(t.demands)} — по ${TOWN_NEED} ед. в месяц.`
-    : `${t.name} нужны ${list(t.demands)}. Закройте любые ${needs} — по ${TOWN_NEED} ед. в месяц; проще всего: ${list(easiest.map((x) => x.c))}.`;
+    ? `${t.name} ждёт всё, что ему нужно: ${list(t.demands)} — ${per}.`
+    : `${t.name} нужны ${list(t.demands)}. Закройте любые ${needs} — ${per}; проще всего: ${list(easiest.map((x) => x.c))}.`;
   return sc.tryObjective(
     { kind: 'supply', town: t.id, months: o.inRow, needs },
     {

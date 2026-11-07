@@ -3699,7 +3699,7 @@ button.small.with-ic {
   top: 84px;
   left: 14px;
   width: 340px;
-  max-height: max(160px, min(calc(100vh - 200px), calc(100vh - 84px - var(--build-space, 0px))));
+  max-height: max(160px, calc(100vh - 200px));
   overflow-y: auto;
   padding: 12px 14px;
 }
@@ -3802,7 +3802,7 @@ button.small.with-ic {
   left: 14px;
   width: 600px;
   max-width: calc(100vw - 400px);
-  max-height: max(160px, min(calc(100vh - 300px), calc(100vh - 84px - var(--build-space, 0px))));
+  max-height: max(160px, calc(100vh - 300px));
   overflow-y: auto;
   padding: 12px 14px;
 }
@@ -3940,17 +3940,194 @@ button.small.with-ic {
 }
 
 /*
- * Панель сценария — слева под деньгами, на месте «Финансов» и «Цепочек»: пока они открыты, она спрятана.
- * Эти панели кончаются над плашками стройки внизу слева: сколько места они занимают, Hud пишет в --build-space.
+ * Левая панель — слева под деньгами, на месте «Финансов», «Цепочек» и советника: пока они открыты, она спрятана.
+ * Вкладки: «Сценарий», «События», «Стройка» (в песочнице со стройкой — одна «Стройка» заголовком).
  */
 .scenario {
   top: 84px;
   left: 14px;
   width: 330px;
   max-width: calc(100vw - 28px);
-  max-height: max(120px, min(calc(100vh - 290px), calc(100vh - 84px - var(--build-space, 0px))));
+  max-height: max(120px, calc(100vh - 290px));
   overflow-y: auto;
   padding: 6px 0 4px;
+}
+
+/* Вкладки значками с подписью и числом: выбранная — белая на светлой подложке; ждут решения — оранжевым. */
+.lp-tabs {
+  position: sticky;
+  top: -6px;
+  z-index: 1;
+  display: flex;
+  gap: 2px;
+  margin: 0 6px 4px;
+  padding: 2px;
+  border-radius: 10px;
+  background: #eef1f4;
+}
+
+.lp-tab {
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 4px 3px;
+  border-radius: 8px;
+  background: transparent;
+  color: #4a5562;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.lp-tab > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lp-tab:hover {
+  background: #e1e7ee;
+}
+
+.lp-tab.active {
+  background: var(--panel);
+  color: #1f2933;
+  box-shadow: 0 1px 3px rgba(31, 41, 51, 0.18);
+}
+
+.lp-tab svg {
+  flex: none;
+}
+
+.lp-count {
+  flex: none;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #dde3ea;
+  color: #39404a;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.lp-count.call {
+  background: #e8743b;
+  color: #fff;
+}
+
+.lp-count.call.urgent {
+  background: var(--danger);
+}
+
+/*
+ * Вкладка зовёт: ждут решения предложения — подсвечена; первая (бесплатная) база не поставлена или меньше минуты
+ * на решение — ещё и мигает рамкой (срочное — красной).
+ */
+.lp-tab.call:not(.active) {
+  background: #fde9dc;
+  color: #b4531f;
+}
+
+.lp-tab.pulse:not(.active) {
+  animation: lp-tab-call 1.6s ease-in-out infinite;
+}
+
+.lp-tab.urgent:not(.active) {
+  --call: 232, 72, 63;
+  color: var(--danger);
+}
+
+@keyframes lp-tab-call {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(var(--call, 232, 116, 59), 0);
+  }
+  50% {
+    box-shadow: inset 0 0 0 2px rgba(var(--call, 232, 116, 59), 0.75);
+  }
+}
+
+/* Вкладка «Стройка»: базы и проекты плоскими строками внутри панели. */
+.build-sec h4 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.build-sec h4 small {
+  margin-left: auto;
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.build-sec .build-plate {
+  margin-bottom: 5px;
+  background: #f6f8fa;
+  box-shadow: none;
+}
+
+.build-sec .build-plate.selected {
+  box-shadow: inset 0 0 0 2px #f08a3c;
+}
+
+.build-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  background: #f6f8fa;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.build-hint svg {
+  flex: none;
+}
+
+/* Свёрнутая «Стройка» — одной строкой: базы, бригады в деле, проекты с общей готовностью, «＋ База». */
+.build-compact {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.build-compact .bc-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.build-compact .bb-bar {
+  display: block;
+  width: 36px;
+  height: 5px;
+  margin-left: 3px;
+  border-radius: 3px;
+  background: #e6e9ee;
+  overflow: hidden;
+}
+
+.build-compact .bb-bar i {
+  display: block;
+  height: 100%;
+  background: #5c636d;
+}
+
+.build-compact .build-add {
+  margin-left: auto;
+}
+
+.sc-compact .sc-compact-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 
@@ -4004,7 +4181,7 @@ button.small.with-ic {
   top: 84px;
   left: 14px;
   width: 360px;
-  max-height: max(160px, min(calc(100vh - 200px), calc(100vh - 84px - var(--build-space, 0px))));
+  max-height: max(160px, calc(100vh - 200px));
   overflow-y: auto;
   padding: 12px 14px;
 }
@@ -5743,21 +5920,7 @@ span.ind-chip {
   max-width: 300px;
 }
 
-/* Стройка дорог (режим «Со строительством»): плашки проектов слева внизу, над миникартой слева нет ничего. */
-.build-bar {
-  position: absolute;
-  left: 14px;
-  bottom: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 290px;
-}
-
-.build-bar.hidden {
-  display: none;
-}
-
+/* Стройка дорог (режим «Со строительством»): плашки проектов и строки баз — на вкладке «Стройка» левой панели. */
 /* Плашка в две строки: значок | название, сколько осталось / полоска готовности, пауза, отмена. */
 .build-plate {
   display: grid;
@@ -5848,20 +6011,11 @@ span.ind-chip {
   font-size: 12px;
 }
 
-.build-more {
-  padding-left: 8px;
-  font-size: 12px;
-}
-
-/* Базы стройки и «＋ База» — над плашками проектов. */
+/* Базы стройки и «＋ База» — над проектами. */
 .build-head {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 5px 6px 6px 4px;
-  border-radius: 12px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
   font-size: 13px;
 }
 

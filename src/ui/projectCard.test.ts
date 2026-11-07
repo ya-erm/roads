@@ -3,7 +3,7 @@ import { CONSTRUCTION } from '../config';
 import { Game } from '../game/game';
 import { anchorOf, road, runSeconds, STREET, withoutCitizens } from '../game/testkit';
 import type { WorldSettings } from '../world/settings';
-import { baseRemoveText, buildBarHtml } from './constructionUi';
+import { baseRemoveText, buildTabHtml } from './constructionUi';
 import { projectCardHtml } from './projectCard';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
@@ -67,7 +67,7 @@ describe('Карточка проекта стройки', () => {
     expect(html).toContain('резерв покрывает всё');
     expect(html).toContain('pc-prio');
     expect(html).toContain('⬆ Приоритет ✓');
-    const bar = buildBarHtml(game, false, id);
+    const bar = buildTabHtml(game, { placing: false, project: id, base: null });
     expect(bar).toContain('build-plate  selected');
     expect(bar).toContain('🔒');
     expect(bar).toContain('⬆');
@@ -96,6 +96,6 @@ describe('Карточка проекта стройки', () => {
     expect(baseRemoveText(game, base)).toContain('первая была бесплатной');
     expect(baseRemoveText(game, base)).toContain('распустить');
     // На плашке слева сноса нет — только «Сносом» по площадке.
-    expect(buildBarHtml(game, false, null, base)).not.toContain('base-remove');
+    expect(buildTabHtml(game, { placing: false, project: null, base })).not.toContain('base-remove');
   });
 });

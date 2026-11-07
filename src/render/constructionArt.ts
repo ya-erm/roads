@@ -649,6 +649,34 @@ export function crewConvoy(net: LaneNet, c: Corridor): CrewMachine[] {
   return at.map((m, k) => ({ ...place(m.u, m.side), stage: k as 0 | 1 | 2, active: m.active }));
 }
 
+/** Полуширина машины этапа поперёк хода (drawMachines, с увеличением) — на столько ряд техники выступает от своей оси. */
+const MACHINE_HALF = 3;
+/** Ряды техники бригад на месте — не дальше стольких метров друг от друга (на широком полотне). */
+const ROW_STEP = 5;
+
+/**
+ * Сдвиги рядов техники n бригад на участке c (вправо по ходу машины, м; для drawMachines shift): ряды — бок о бок
+ * поперёк полотна, середина — посередине полотна у края работ, шаг — не больше ROW_STEP и такой, чтобы крайние ряды
+ * не вылезали за кромки с обочиной (ROAD_MARGIN). На однополосном (съезд, заезд) два ряда — плотно, в пределах полотна
+ * и обочины. Одна бригада — на месте колонны (0).
+ */
+export function crewRows(c: Corridor, n: number): number[] {
+  if (n <= 1) return [0];
+  const b = c.build;
+  const L = c.length;
+  const f = b ? frontOf(b.done, L).s : 0;
+  const s = Math.max(0, Math.min(L, b?.fromB ? L - f : f));
+  const e = edgesAt(c, s) ?? [-3.5, 3.5];
+  // Полоса для техники — полотно с обочинами; при ходе от конца b «вправо по ходу» — влево по оси полотна.
+  const sign = b?.fromB ? -1 : 1;
+  const lo = e[0] - ROAD_MARGIN;
+  const hi = e[1] + ROAD_MARGIN;
+  const mid = ((lo + hi) / 2) * sign;
+  const room = Math.max(0, (hi - lo) / 2 - MACHINE_HALF);
+  const step = Math.min(ROW_STEP, (2 * room) / (n - 1));
+  return Array.from({ length: n }, (_, k) => mid + (k - (n - 1) / 2) * step);
+}
+
 /** Площадка строительной базы: щебень за забором, вагончик, кучи песка и щебня. */
 export function drawBases(ctx: CanvasRenderingContext2D, bases: Iterable<BuildBase>, view: Box): void {
   for (const b of bases) {

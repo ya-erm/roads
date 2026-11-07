@@ -10,7 +10,7 @@ import { dist } from '../core/vec';
 import type { Game } from '../game/game';
 import { CARGO, CargoType, TOWN_CARGO } from '../world/cargo';
 import type { Industry, Town } from '../world/entities';
-import { TOWN_NEED } from '../world/entities';
+import { lastTownNeed, townNeed } from '../world/townSupply';
 import {
   cargoPotential,
   distToNetwork,
@@ -318,7 +318,7 @@ const boom: Template = {
       : `${town.name}: удобный транспорт и полные магазины — город привлекает новых жителей.`;
     const lines = effectLines(game, effects);
     const need = town.demands.length < TOWN_CARGO.length ? missingDemand(game, town) : null;
-    if (need) lines.push(`Новая потребность: «${CARGO[need].name}» (${TOWN_NEED} ед. в месяц)`);
+    if (need) lines.push(`Новая потребность: «${CARGO[need].name}» (${townNeed(town.population)} ед. в месяц)`);
     const partner = [...game.towns]
       .filter((t) => t !== town && dist(t.center, town.center) <= 6500)
       .sort((a, b) => Number(info.towns.has(b.id)) - Number(info.towns.has(a.id)) || dist(a.center, town.center) - dist(b.center, town.center))[0];
@@ -496,7 +496,7 @@ const demand: Template = {
     for (const c of TOWN_CARGO) {
       if (!producible(game, c)) continue;
       const towns = game.towns.filter((t) => t.demands.includes(c));
-      const supplied = towns.filter((t) => (t.lastSupplied[c] ?? 0) >= TOWN_NEED).length;
+      const supplied = towns.filter((t) => (t.lastSupplied[c] ?? 0) >= lastTownNeed(t)).length;
       // Спрос растёт там, где груз уже возят: снабжённые города тянут за собой цены.
       if (supplied >= 1 && sc.state.start.population > 0) {
         const pop = game.towns.reduce((s, t) => s + t.population, 0);

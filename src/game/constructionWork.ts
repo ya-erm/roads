@@ -6,6 +6,16 @@ import { CONSTRUCTION } from '../config';
 import type { Vec } from '../core/vec';
 import type { Corridor, LaneNet } from '../lanes/model';
 
+/**
+ * Сколько бригад встанет на проект с недостроенными полотнами cs: есть полотно в одну полосу (съезд, заезд,
+ * односторонняя) — не больше brigade.perNarrow (столько рядов техники помещается на нём бок о бок), иначе perProject.
+ * По самому узкому полотну проекта, а не по участку у края работ: предел не скачет, пока колонна идёт по проекту.
+ */
+export function crewCap(cs: readonly Corridor[]): number {
+  const { perProject, perNarrow } = CONSTRUCTION.brigade;
+  return cs.some((c) => c.lanes.length <= 1) ? Math.min(perProject, perNarrow) : perProject;
+}
+
 /** Во сколько раз метр сооружения на высоте h (уровень) дольше метра на земле; water — под ним вода. */
 export function structureWork(h: number, water: boolean): number {
   const K = CONSTRUCTION;

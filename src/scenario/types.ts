@@ -34,7 +34,7 @@ export type ObjectiveParams =
   | { kind: 'profit'; amount: number; months: number }
   /**
    * Потребности города закрыты months месяцев подряд: не меньше needs из всех (нет needs — все; так в старых
-   * сохранениях). Закрыта — за месяц привезли не меньше TOWN_NEED.
+   * сохранениях). Закрыта — за месяц привезли не меньше нормы города (townNeed: растёт с населением).
    */
   | { kind: 'supply'; town: number; months: number; needs?: number }
   /** Довести производство предприятия до уровня. */

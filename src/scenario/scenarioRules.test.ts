@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH, TERM_SCALE } from '../config';
 import { Game } from '../game/game';
 import { stationAtIndustry } from '../game/testkit';
-import { TOWN_NEED } from '../world/entities';
+import { lastTownNeed } from '../world/townSupply';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { newRoutesCarried, refOf } from './analysis';
 import { FAST } from './content';
@@ -137,7 +137,7 @@ describe('Снабжение города: часть потребностей',
     const p = { kind: 'supply' as const, town: town.id, months: 1, needs: total - 1 };
     expect(titleOf(p, game)).toBe(`Снабжать город ${town.name}: закрыть ${total - 1} из ${total} потребностей`);
     // Закрыто всё, кроме одной, — хватает для «N−1 из N», но не для «всем необходимым».
-    town.lastSupplied = Object.fromEntries(town.demands.slice(1).map((c) => [c, TOWN_NEED]));
+    town.lastSupplied = Object.fromEntries(town.demands.slice(1).map((c) => [c, lastTownNeed(town)]));
     expect(monthOk(p, game, undefined as never)).toBe(true);
     expect(monthOk({ kind: 'supply', town: town.id, months: 1 }, game, undefined as never)).toBe(false);
     // Старое задание без needs — по-прежнему все потребности.
