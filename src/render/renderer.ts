@@ -31,7 +31,7 @@ import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
-import { baseBox, baseSig, buildingCorridors, drawBases, drawMachines, drawParked, drawProjects, projectBox, projectSig, workFront } from './constructionArt';
+import { baseBox, baseSig, buildingCorridors, crewConvoy, drawBases, drawMachines, drawParked, drawProjects, projectBox, projectSig, workFront } from './constructionArt';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, frontLength } from './vehicleArt';
@@ -354,6 +354,13 @@ export class Renderer {
   private lightSpots: { graph: LaneGraph; spots: Map<number, LightSpot | null> } | null = null;
   /** Дороги из полос. */
   private readonly lanes = new LaneRenderer();
+  /**
+   * Проекты стройки — будущие дороги (src/render/constructionArt.ts): свой кэш геометрии только по строящимся полотнам
+   * всей сети (fullNet) и их узлам; достроенное или отменённое из него уходит.
+   */
+  private readonly projectLanes = new LaneRenderer((c) => !!c.build);
+  /** Порталы тоннелей в проектах стройки — по версии сети. */
+  private projectPortalCache: { net: LaneNet; version: number; list: Portal[] } | null = null;
   /** Отмывка склонов и изолинии — кэш тайлами. */
   private readonly relief = new ReliefRenderer();
   /** Откосы насыпей и выемок у полотен на земле. */
@@ -368,11 +375,24 @@ export class Renderer {
     industries: new SceneDiff(),
     aprons: new SceneDiff(),
     projects: new SceneDiff(),
+    /** Будущие дороги проектов: полотна и узлы по отпечатку их геометрии (`c12`, `n7`). */
+    projectItems: new SceneDiff<string>(),
     bases: new SceneDiff(),
     towns: new Map<number, { list: TownBuilding[] | null; n: number; diff: SceneDiff }>(),
   };
   /** С чем сверены слепки: партия, карта, вид, сеть дорог на карте и её подсветка, версия путей. */
-  private still = { game: null as Game | null, terrain: null as unknown, look: '', net: null as LaneNet | null, version: -1, marks: '', rails: -1 };
+  private still = {
+    game: null as Game | null,
+    terrain: null as unknown,
+    look: '',
+    net: null as LaneNet | null,
+    version: -1,
+    marks: '',
+    rails: -1,
+    /** Вся сеть с проектами стройки и её версия — по ним геометрия будущих дорог. */
+    full: null as LaneNet | null,
+    fullVersion: -1,
+  };
   /**
    * В последнем кадре было то, что меняется само (мигание, дым, пульсация подсветки, всплывающие суммы, значки ещё
    * грузятся) или плитки кэша не дорисованы: следующий кадр нужен, даже если ничего не трогали (src/render/redraw.ts).
@@ -401,6 +421,8 @@ export class Renderer {
     this.treeCover = new TreeCover();
     this.treeCuts.clear();
     this.lanes.reset();
+    this.projectLanes.reset();
+    this.projectPortalCache = null;
     this.relief.reset();
     this.earthworks.reset();
     this.forgetStill();
@@ -410,8 +432,9 @@ export class Renderer {
   private forgetStill(): void {
     this.tiles.clear();
     for (const d of [this.diffs.corridors, this.diffs.nodes, this.diffs.rails, this.diffs.industries, this.diffs.aprons, this.diffs.projects, this.diffs.bases]) d.clear();
+    this.diffs.projectItems.clear();
     this.diffs.towns.clear();
-    this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1 };
+    this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1, full: null, fullVersion: -1 };
   }
 
   resize(): void {
@@ -474,7 +497,8 @@ export class Renderer {
       const terrain = game.terrain;
       this.waterOf = terrain;
       this.lanes.reset();
-      this.lanes.water = (p) => terrain.isWater(p, 7);
+      this.projectLanes.reset();
+      this.lanes.water = this.projectLanes.water = (p) => terrain.isWater(p, 7);
     }
     // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты; над рекой на земле — мостом.
     // Строящееся («Со строительством») — чертежом по всей сети (fullNet), дороги — по открытой для движения.
@@ -515,7 +539,9 @@ export class Renderer {
     }
     const groundBand = (v: Vehicle) => portalBand.get(v) ?? band(v);
     // Мосты и эстакады: слои 1 и 2 — где есть дороги этого слоя (во всей сети) или пути в кадре.
-    const levels = [1, 2].filter((level) => this.lanes.hasLayer(roadNet, level) || segs.some((s) => this.railLevel(s, level)));
+    const levels = [1, 2].filter(
+      (level) => this.lanes.hasLayer(roadNet, level) || this.projectLanes.hasLayer(fullNet, level) || segs.some((s) => this.railLevel(s, level)),
+    );
 
     const plan = cached ? this.prepareTiles(scene, k, tx, ty) : null;
     if (plan) this.blitTiles(plan, UNDER);
@@ -542,6 +568,13 @@ export class Renderer {
     this.drawVehicles(vehicles.filter((v) => groundBand(v) === 0 && !atPortal.has(v)));
     for (const [v, p] of atPortal) this.drawClipped(portalHalf(p, -1), () => this.drawVehicles([v]));
     this.drawPortals(portals);
+    // Порталы тоннелей в проектах стройки — бледно, как и сама будущая дорога.
+    const planned = this.projectPortals(fullNet).filter((p) => p.pos.x > view.x0 - 60 && p.pos.x < view.x1 + 60 && p.pos.y > view.y0 - 60 && p.pos.y < view.y1 + 60);
+    if (planned.length) {
+      ctx.globalAlpha = 0.5;
+      this.drawPortals(planned);
+      ctx.globalAlpha = 1;
+    }
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
     this.drawLights(game, 0, o.phaseEdit);
@@ -598,9 +631,16 @@ export class Renderer {
     ctx.save();
     this.drawTerrain(s.game, view, s.o);
     this.drawTunnels(segs);
-    this.earthworks.draw(ctx, s.game.ground(), s.roadNet, s.game.net, segs, view, this.camera.zoom, s.game.terrain.version);
+    const ground = s.game.ground();
+    this.earthworks.draw(ctx, ground, s.roadNet, s.game.net, segs, view, this.camera.zoom, s.game.terrain.version);
+    // Откосы проектов стройки — бледнее: насыпи и выемки ещё будут.
+    if (buildingCorridors(s.fullNet).length) {
+      ctx.globalAlpha = 0.55;
+      this.earthworks.draw(ctx, ground, s.fullNet, s.game.net, [], view, this.camera.zoom, s.game.terrain.version, (c) => !!c.build);
+    }
     ctx.globalAlpha = 0.35;
     this.lanes.draw(ctx, s.roadNet, this.camera.zoom, false, view, -1);
+    drawProjects(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, -1);
     ctx.restore();
   }
 
@@ -614,8 +654,8 @@ export class Renderer {
     this.drawRailBeds(groundRails, false);
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
     this.drawStationAprons(game, roadNet, view);
-    // Проекты стройки — чертежом с готовым до края работ (поверх земли, под подсветкой правки); базы стройки.
-    drawProjects(ctx, s.fullNet, this.camera.zoom, view);
+    // Проекты стройки — будущей дорогой с готовым до края работ (поверх земли, под подсветкой правки); базы стройки.
+    drawProjects(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
     drawBases(ctx, game.construction.crews.bases.values(), view);
     if (o.roads) this.drawRoadPreview(o.roads);
     this.drawStopLines(game, view, 0, preview);
@@ -633,10 +673,13 @@ export class Renderer {
     const ctx = this.ctx;
     const rails = segs.filter((x) => this.railLevel(x, level));
     const roads = this.lanes.hasLayer(roadNet, level);
-    if (!rails.length && !roads) return;
+    const projects = this.projectLanes.hasLayer(s.fullNet, level);
+    if (!rails.length && !roads && !projects) return;
     ctx.save();
     if (roads) this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, level);
-    if (roads && o.roads) this.drawRoadPreview(o.roads, level);
+    // Мосты и эстакады проектов стройки — в своём слое, как готовые (с тенью и парапетом), но полупрозрачные.
+    if (projects) drawProjects(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, level);
+    if ((roads || projects) && o.roads) this.drawRoadPreview(o.roads, level);
     // Стоп-линии и скорость на мосту и съезде с него — поверх его полотна (с земли их закрыло бы полотно).
     if (roads) this.drawStopLines(game, view, level, preview);
     if (roads && o.speedmap) this.drawSpeedmap(game, level, view);
@@ -736,8 +779,10 @@ export class Renderer {
   private renderTile(s: StillScene, set: TileSet<TileCanvasEl>, t: Tile<TileCanvasEl>): void {
     const view = grow(tileBox(t.i, t.j, set.world), TILE_MARGIN);
     const segs = [...s.game.net.segments.values()].filter((x) => this.visible(this.cache.get(x.id)!.bbox, view));
-    const under = this.lanes.layerIn(s.roadNet, -1, view) || segs.some((x) => this.cache.get(x.id)!.minLevel < -0.4);
-    const bridge = (level: number) => this.lanes.layerIn(s.roadNet, level, view) || segs.some((x) => this.railLevel(x, level));
+    // Слои тоннелей и мостов — и где они только в проектах стройки.
+    const roadsIn = (level: number) => this.lanes.layerIn(s.roadNet, level, view) || this.projectLanes.layerIn(s.fullNet, level, view);
+    const under = roadsIn(-1) || segs.some((x) => this.cache.get(x.id)!.minLevel < -0.4);
+    const bridge = (level: number) => roadsIn(level) || segs.some((x) => this.railLevel(x, level));
     const k = set.zoom * set.dpr;
     const outside = BIOMES[s.game.terrain.biome].palette.outside;
     const screen = this.ctx;
@@ -826,6 +871,12 @@ export class Renderer {
         for (const c of buildingCorridors(s.fullNet)) put(c.id, `${projectSig(c)}|${tint?.has(c.id) ? tintColor : ''}`, projectBox(c));
       }),
     );
+    // Будущие дороги проектов — по отпечатку геометрии полотен и узлов (площадки перекрёстков шире рамки полотна).
+    if (cur.full !== s.fullNet || cur.fullVersion !== s.fullNet.version) {
+      cur.full = s.fullNet;
+      cur.fullVersion = s.fullNet.version;
+      add(this.diffs.projectItems.update((put) => this.projectLanes.eachItem(s.fullNet, (kind, id, sig, box) => put(`${kind[0]}${id}`, sig, box))));
+    }
     add(
       this.diffs.bases.update((put) => {
         for (const b of game.construction.crews.bases.values()) put(b.id, baseSig(b), baseBox(b));
@@ -890,10 +941,13 @@ export class Renderer {
       const working = going && !p.paused && p.stalled === undefined;
       const cs = game.construction.corridorsOf(p.id);
       const front = cs.map(workFront).find((f) => f) ?? null;
-      // Техника — у края работ, по набору на каждую бригаду на месте (вторая — рядом, на соседней полосе).
+      // Техника — колонной на участке в работе: у каждого этапа своя машина у своего края (ждёт, въезжает, стоит —
+      // crewConvoy); у каждой следующей бригады на месте — ещё по машине работающих этапов рядом, на соседней полосе.
       const crew = crews.working(p.id).length;
-      if (front && crew && front.pos.x > view.x0 - 40 && front.pos.x < view.x1 + 40 && front.pos.y > view.y0 - 40 && front.pos.y < view.y1 + 40) {
-        for (let i = 0; i < crew; i++) drawMachines(ctx, front.pos, front.dir, front.stage, working && blink, (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 5);
+      const site = crew ? game.construction.current(p.id) : null;
+      for (const m of site ? crewConvoy(game.roads.net, site) : []) {
+        if (m.pos.x < view.x0 - 40 || m.pos.x > view.x1 + 40 || m.pos.y < view.y0 - 40 || m.pos.y > view.y1 + 40) continue;
+        for (let i = 0; i < (m.active ? crew : 1); i++) drawMachines(ctx, m.pos, m.dir, m.stage, m.active && working && blink, (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 5);
       }
       // Плашка над проектом — при любом зуме одного размера на экране.
       const at = front?.pos ?? info.at;
@@ -953,6 +1007,15 @@ export class Renderer {
     if (c && c.net === net && c.version === net.version) return c.list;
     const list = tunnelPortals(net);
     this.portalCache = { net, version: net.version, list };
+    return list;
+  }
+
+  /** Порталы тоннелей строящихся полотен сети (кэш по версии сети). */
+  private projectPortals(net: LaneNet): Portal[] {
+    const c = this.projectPortalCache;
+    if (c && c.net === net && c.version === net.version) return c.list;
+    const list = tunnelPortals(net, buildingCorridors(net));
+    this.projectPortalCache = { net, version: net.version, list };
     return list;
   }
 

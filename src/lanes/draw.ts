@@ -151,6 +151,8 @@ function markGeo(m: JunctionMarks): JunctionMarkGeo {
 }
 
 interface Cached<T> {
+  /** Номер полотна или узла. */
+  id: number;
   key: string;
   geo: T;
   bbox: BBox;
@@ -190,11 +192,25 @@ function bboxOf(lists: Vec[][]): BBox {
 }
 
 /**
+ * Что из сети рисует draw (по умолчанию — всё): только полотна и узлы с этими номерами; marks: false — без
+ * разметки и стрелок (покрытие строящейся дороги до разметки).
+ */
+export interface DrawPick {
+  corridor?: (id: number) => boolean;
+  node?: (id: number) => boolean;
+  marks?: boolean;
+}
+
+/**
  * Отрисовка сети из полос: асфальт и бордюры, островки, перекрёстки, тупики, разметка, стрелки.
  * Геометрия кэшируется по каждому полотну и узлу отдельно (ключ — ревизии и соседи), поэтому
  * предпросмотр на копии большой сети пересчитывает только изменённое; рисуется только видимое.
+ * scope — только часть сети (например, строящиеся полотна): геометрия и кэш — лишь у этих полотен и их узлов,
+ * вышедшее из неё (достроили, отменили) из кэша уходит.
  */
 export class LaneRenderer {
+  constructor(private readonly scope?: (c: Corridor) => boolean) {}
+
   private net: LaneNet | null = null;
   private version = -1;
   private cuts = new Map<number, [number, number]>();
@@ -244,13 +260,13 @@ export class LaneRenderer {
     for (const [id, x] of this.nodeCache) fn('node', id, x.shape, x.bbox);
   }
 
-  /** Рисует сеть; layer — только этот слой высоты (тоннели, земля, мосты, эстакады), без него — всё. */
-  draw(ctx: CanvasRenderingContext2D, net: LaneNet, zoom: number, debug = false, view?: BBox, layer?: number): void {
+  /** Рисует сеть; layer — только этот слой высоты (тоннели, земля, мосты, эстакады), без него — всё; pick — что из неё. */
+  draw(ctx: CanvasRenderingContext2D, net: LaneNet, zoom: number, debug = false, view?: BBox, layer?: number, pick?: DrawPick): void {
     this.refresh(net);
     const seen = (b: BBox) => !view || !(b.x1 < view.x0 || b.x0 > view.x1 || b.y1 < view.y0 || b.y0 > view.y1);
     const mine = (x: Cached<unknown>) => layer === undefined || x.layer === layer;
-    const corridors = this.corridors.filter((x) => mine(x) && seen(x.bbox)).map((x) => x.geo);
-    const nodes = this.nodes.filter((x) => mine(x) && seen(x.bbox)).map((x) => x.geo);
+    const corridors = this.corridors.filter((x) => mine(x) && seen(x.bbox) && (!pick?.corridor || pick.corridor(x.id))).map((x) => x.geo);
+    const nodes = this.nodes.filter((x) => mine(x) && seen(x.bbox) && (!pick?.node || pick.node(x.id))).map((x) => x.geo);
     const plates = nodes.flatMap((n) => (n.plate ? [n.plate] : []));
     const caps = nodes.flatMap((n) => n.caps);
     const gores = nodes.flatMap((n) => n.gores);
@@ -313,7 +329,7 @@ export class LaneRenderer {
         for (const pts of parapets) this.stroke(ctx, pts);
       }
     }
-    if (zoom >= 0.35) {
+    if (zoom >= 0.35 && pick?.marks !== false) {
       this.drawMarks(ctx, corridors);
       for (const g of gores) this.drawGorePaint(ctx, g);
       for (const n of nodes) if (n.marks) this.drawJunctionMarks(ctx, n.marks);
@@ -387,10 +403,14 @@ export class LaneRenderer {
     if (this.net === net && this.version === net.version) return;
     this.net = net;
     this.version = net.version;
-    this.cuts = junctionCuts(net);
+    // Часть сети (scope): её полотна и их узлы; обрезы — только у этих узлов.
+    const scope = this.scope;
+    const inScope = scope ? [...net.corridors.values()].filter(scope) : null;
+    const nodeList = inScope ? [...new Set(inScope.flatMap((c) => [c.a, c.b]))].map((id) => net.node(id)) : [...net.nodes.values()];
+    this.cuts = inScope ? junctionCuts(net, inScope, nodeList) : junctionCuts(net);
     // Подпись узла: всё, от чего зависит геометрия вокруг него.
     const sigs = new Map<number, string>();
-    for (const n of net.nodes.values()) {
+    for (const n of nodeList) {
       // Обрез подъезда — только у этого узла: обрез на другом конце полотна геометрию узла не меняет (иначе правка у
       // перекрёстка пересчитывала бы и соседние перекрёстки с их разметкой, и их полотна).
       const arms = n.corridors
@@ -406,7 +426,7 @@ export class LaneRenderer {
       sigs.set(n.id, `${n.kind}:${n.level}:${n.deck ?? ''}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}:${corners}:${turns}`);
     }
     const corridors: Cached<CorridorGeo>[] = [];
-    for (const c of net.corridors.values()) {
+    for (const c of inScope ?? net.corridors.values()) {
       const key = `${c.rev}|${this.cuts.get(c.id)?.join('/')}|${sigs.get(c.a)}|${sigs.get(c.b)}`;
       let item = this.corridorCache.get(c.id);
       if (!item || item.key !== key) {
@@ -419,14 +439,17 @@ export class LaneRenderer {
           [geo.poly, geo.left, geo.right, geo.shade, geo.lifts, ...geo.marks.map((m) => m.pts), ...geo.arrows],
           `${layer}|${la}|${lb}|${geo.marks.map((m) => m.style).join(',')}|${geo.wet.join(';')}|${c.cls}|${c.limit ?? ''}|${c.ring ?? ''}|${JSON.stringify(c.lanes)}`,
         );
-        item = { key, geo, bbox: bboxOf([geo.poly]), layer, shape };
+        item = { id: c.id, key, geo, bbox: bboxOf([geo.poly]), layer, shape };
         this.corridorCache.set(c.id, item);
       }
       corridors.push(item);
     }
-    for (const id of this.corridorCache.keys()) if (!net.corridors.has(id)) this.corridorCache.delete(id);
+    // Ушедшее из сети (или из её части scope) — из кэша.
+    const has = (ids: Cached<unknown>[]) => new Set(ids.map((x) => x.id));
+    const liveC = has(corridors);
+    for (const id of this.corridorCache.keys()) if (!liveC.has(id)) this.corridorCache.delete(id);
     const nodes: Cached<NodeGeo>[] = [];
-    for (const n of net.nodes.values()) {
+    for (const n of nodeList) {
       const key = sigs.get(n.id)!;
       let item = this.nodeCache.get(n.id);
       if (!item || item.key !== key) {
@@ -458,12 +481,13 @@ export class LaneRenderer {
           // Запреты и связи полос — стрелки и стоп-линии перекрёстка.
           `${layer}|${n.kind}|${n.roundabout ?? ''}|${geo.gores.map((g) => `${g.diverge}`).join()}|${n.bans?.join(';') ?? ''}|${n.lanes?.join(';') ?? ''}`,
         );
-        item = { key, geo, bbox, layer, shape };
+        item = { id: n.id, key, geo, bbox, layer, shape };
         this.nodeCache.set(n.id, item);
       }
       nodes.push(item);
     }
-    for (const id of this.nodeCache.keys()) if (!net.nodes.has(id)) this.nodeCache.delete(id);
+    const liveN = has(nodes);
+    for (const id of this.nodeCache.keys()) if (!liveN.has(id)) this.nodeCache.delete(id);
     this.corridors = corridors;
     this.nodes = nodes;
   }

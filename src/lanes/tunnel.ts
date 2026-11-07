@@ -6,7 +6,7 @@
 import { add, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import { ROAD_MARGIN } from '../world/roadTypes';
 import { edgesAt } from './geometry';
-import { type LaneNet, layerOf } from './model';
+import { type Corridor, type LaneNet, layerOf } from './model';
 
 export interface Portal {
   /** Середина линии портала (на оси полотна) и направление внутрь тоннеля. */
@@ -17,10 +17,10 @@ export interface Portal {
   right: number;
 }
 
-/** Порталы тоннелей сети: у каждого конца полотна-тоннеля, который выходит на землю. */
-export function tunnelPortals(net: LaneNet): Portal[] {
+/** Порталы тоннелей сети: у каждого конца полотна-тоннеля, который выходит на землю; corridors — только у этих полотен. */
+export function tunnelPortals(net: LaneNet, corridors: Iterable<Corridor> = net.corridors.values()): Portal[] {
   const res: Portal[] = [];
-  for (const c of net.corridors.values()) {
+  for (const c of corridors) {
     const la = net.node(c.a).level;
     const lb = net.node(c.b).level;
     if (layerOf(Math.min(la, lb), Math.max(la, lb)) !== -1) continue;

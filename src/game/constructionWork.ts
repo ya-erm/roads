@@ -37,20 +37,40 @@ export function buildRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: 
   return CONSTRUCTION.speed / workFactor(net, c, isWater);
 }
 
+/** На сколько метров этап колонны отстаёт от предыдущего на участке длиной L. */
+export function convoyGap(L: number): number {
+  return Math.min(CONSTRUCTION.convoyGap, L / 4);
+}
+
 /**
- * Этапы участка (CONSTRUCTION.stages): бригада проходит его трижды — земляные работы, покрытие, разметка и знаки.
+ * Этапы участка (CONSTRUCTION.stages) идут колонной: впереди земляные работы, за ними на convoyGap — покрытие, за ним
+ * так же — разметка и знаки; этап, которому впереди уже некого ждать (предыдущий дошёл до конца), догоняет до конца.
+ * Голова колонны x: этап k — на x − k·gap (в пределах участка), работа — сумма долей этапов по пройденному ими.
  * done — сколько работы готово «в метрах» (0…L, как платится); ответ — докуда (метров от начала заполнения) дошёл
  * каждый этап.
  */
 export function stageSpans(done: number, L: number): [number, number, number] {
-  const f = L > 0 ? Math.max(0, Math.min(1, done / L)) : 1;
-  const [a, b] = CONSTRUCTION.stages;
+  if (!(L > 0) || done <= 0) return [0, 0, 0];
   // Конец этапа — ровно L (без хвоста от деления дробей).
-  const part = (lo: number, w: number) => (f >= lo + w - 1e-9 ? L : Math.max(0, Math.min(1, (f - lo) / w)) * L);
-  return [part(0, a), part(a, b), part(a + b, 1 - a - b)];
+  if (done >= L) return [L, L, L];
+  const w = CONSTRUCTION.stages;
+  const g = convoyGap(L);
+  const at = (x: number): [number, number, number] => [0, 1, 2].map((k) => Math.max(0, Math.min(L, x - k * g))) as [number, number, number];
+  const work = (x: number) => at(x).reduce((sum, s, k) => sum + w[k] * s, 0);
+  // Работа от головы колонны — ломаная: изломы там, где этап начинается или доходит до конца.
+  const knots = [0, g, 2 * g, L, L + g, L + 2 * g].sort((p, q) => p - q);
+  for (let i = 0; i + 1 < knots.length; i++) {
+    const [x0, x1] = [knots[i], knots[i + 1]];
+    const [d0, d1] = [work(x0), work(x1)];
+    if (done <= d1 && d1 > d0) return at(x0 + ((done - d0) / (d1 - d0)) * (x1 - x0));
+  }
+  return [L, L, L];
 }
 
-/** Край работ на участке: метров от начала заполнения и какой этап идёт (0 — земля, 1 — покрытие, 2 — разметка). */
+/**
+ * Край работ на участке — голова колонны: метров от начала заполнения и её этап (0 — земля, 1 — покрытие, 2 — разметка;
+ * этап, дошедший до конца, головой уже не считается).
+ */
 export function frontOf(done: number, L: number): { s: number; stage: 0 | 1 | 2 } {
   const [earth, pave, marks] = stageSpans(done, L);
   if (earth < L - 1e-6) return { s: earth, stage: 0 };

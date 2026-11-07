@@ -78,16 +78,25 @@ const CORNER = 6;
 /**
  * Где полотна обрываются у перекрёстков: [у конца a, у конца b] по каждому полотну. У каждого подъезда
  * своё место — сразу за краем поперечной дороги и скруглением угла, как стоп-линия; у стыков — 0.
+ * corridors и nodes — только эти полотна и узлы (часть сети): у подъездов этих узлов из других полотен обрез — только
+ * у этого узла.
  */
-export function junctionCuts(net: LaneNet): Map<number, [number, number]> {
+export function junctionCuts(
+  net: LaneNet,
+  corridors: Iterable<Corridor> = net.corridors.values(),
+  nodes: Iterable<LaneNode> = net.nodes.values(),
+): Map<number, [number, number]> {
   const res = new Map<number, [number, number]>();
-  for (const c of net.corridors.values()) res.set(c.id, [0, 0]);
-  for (const n of net.nodes.values()) {
+  for (const c of corridors) res.set(c.id, [0, 0]);
+  for (const n of nodes) {
     if (n.kind !== 'junction') continue;
     const ends = net.ends(n);
     if (ends.length < 2) continue;
     nodeCuts(net, n, ends).forEach((cut, i) => {
-      res.get(ends[i].corridor.id)![ends[i].end === 'a' ? 0 : 1] = cut;
+      const id = ends[i].corridor.id;
+      let r = res.get(id);
+      if (!r) res.set(id, (r = [0, 0]));
+      r[ends[i].end === 'a' ? 0 : 1] = cut;
     });
   }
   return res;

@@ -4,7 +4,7 @@ import type { Vec } from '../core/vec';
 import { splitBuild } from '../lanes/edit';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
-import { frontOf, stageSpans } from './constructionWork';
+import { convoyGap, frontOf, stageSpans } from './constructionWork';
 import { Game } from './game';
 import { anchorOf, type End, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
@@ -99,16 +99,36 @@ describe('Стройка дорог: части', () => {
     ]);
   });
 
-  it('этапы участка: земляные работы, покрытие, разметка — по долям работы', () => {
-    const [a, b] = CONSTRUCTION.stages;
-    expect(stageSpans(0, 100)).toEqual([0, 0, 0]);
-    expect(stageSpans(a * 100, 100)[0]).toBeCloseTo(100, 6);
-    expect(stageSpans(a * 100, 100)[1]).toBeCloseTo(0, 6);
-    expect(stageSpans((a + b / 2) * 100, 100)[1]).toBeCloseTo(50, 6);
-    expect(stageSpans(100, 100)).toEqual([100, 100, 100]);
-    expect(frontOf((a / 2) * 100, 100)).toEqual({ s: 50, stage: 0 });
-    expect(frontOf((a + b / 2) * 100, 100).stage).toBe(1);
-    expect(frontOf(99.9, 100).stage).toBe(2);
+  it('этапы участка: земляные работы, покрытие, разметка — колонной, работа — по долям этапов', () => {
+    const w = CONSTRUCTION.stages;
+    const L = 100;
+    const gap = convoyGap(L);
+    expect(gap).toBe(25);
+    expect(convoyGap(1000)).toBe(CONSTRUCTION.convoyGap);
+    expect(stageSpans(0, L)).toEqual([0, 0, 0]);
+    expect(stageSpans(L, L)).toEqual([L, L, L]);
+    let prev = [0, 0, 0];
+    let together = false;
+    for (let i = 0; i <= 1000; i++) {
+      const done = (L * i) / 1000;
+      const [e, p, m] = stageSpans(done, L);
+      // Работа — сумма долей этапов по пройденному ими, каждый этап только вперёд.
+      expect(w[0] * e + w[1] * p + w[2] * m).toBeCloseTo(done, 6);
+      expect(e).toBeGreaterThanOrEqual(prev[0] - 1e-9);
+      expect(p).toBeGreaterThanOrEqual(prev[1] - 1e-9);
+      expect(m).toBeGreaterThanOrEqual(prev[2] - 1e-9);
+      prev = [e, p, m];
+      // Колонна: покрытие — на gap за отсыпкой, разметка — на gap за покрытием (пока впереди есть кого догонять).
+      if (e < L) expect(p).toBeCloseTo(Math.max(0, e - gap), 6);
+      if (p < L) expect(m).toBeCloseTo(Math.max(0, p - gap), 6);
+      if ([e, p, m].every((s) => s > 0 && s < L)) together = true;
+    }
+    // Все три этапа идут одновременно — техника видна колонной.
+    expect(together).toBe(true);
+    // Край работ — голова колонны: отсыпка, пока не дошла до конца, потом покрытие, потом разметка.
+    expect(frontOf(10, L)).toEqual({ s: stageSpans(10, L)[0], stage: 0 });
+    expect(frontOf(90, L).stage).toBe(1);
+    expect(frontOf(99.9, L).stage).toBe(2);
   });
 });
 

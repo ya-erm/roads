@@ -89,6 +89,7 @@ export class EarthworkCache {
     return t;
   }
 
+  /** Штрихи откосов в рамке view; only — из дорог только эти полотна (например, проекты стройки). */
   draw(
     ctx: CanvasRenderingContext2D,
     ground: ((p: Vec) => number) | null,
@@ -98,6 +99,7 @@ export class EarthworkCache {
     view: { x0: number; y0: number; x1: number; y1: number },
     zoom: number,
     version: number,
+    only?: (c: Corridor) => boolean,
   ): void {
     if (!ground || zoom < 0.3) return;
     this.version = version;
@@ -105,7 +107,7 @@ export class EarthworkCache {
     if (this.roads.size > roads.corridors.size + 500) this.roads.clear();
     if (this.rails.size > rails.segments.size + 500) this.rails.clear();
     const all: Ticks[] = [];
-    for (const c of roads.corridorsInBox(view.x0, view.y0, view.x1, view.y1)) all.push(this.road(roads, c, ground));
+    for (const c of roads.corridorsInBox(view.x0, view.y0, view.x1, view.y1)) if (!only || only(c)) all.push(this.road(roads, c, ground));
     for (const s of segs) if (s.platform === undefined) all.push(this.rail(rails, s, ground));
     ctx.save();
     ctx.lineCap = 'round';
