@@ -31,7 +31,7 @@ import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
-import { baseBox, baseSig, buildingCorridors, crewConvoy, drawBases, drawMachines, drawParked, drawProjects, projectBox, projectSig } from './constructionArt';
+import { baseBox, baseSig, buildingCorridors, crewConvoy, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
 import { corridorHalf } from '../world/worldgen';
 import { openNet } from '../lanes/open';
@@ -581,8 +581,8 @@ export class Renderer {
     }
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
-    // Самосвалы бригад, что едут к стройке своим ходом по бездорожью, — по прямой, на земле.
-    this.drawVehicles(game.offroadCrewLooks().filter((v) => v.pos.x > view.x0 - 20 && v.pos.x < view.x1 + 20 && v.pos.y > view.y0 - 20 && v.pos.y < view.y1 + 20));
+    // Самосвалы бригад, что едут вдоль стройки от дороги к краю работ (и назад), — по оси проекта.
+    this.drawVehicles(game.siteCrewLooks().filter((v) => v.pos.x > view.x0 - 20 && v.pos.x < view.x1 + 20 && v.pos.y > view.y0 - 20 && v.pos.y < view.y1 + 20));
     this.drawLights(game, 0, o.phaseEdit);
     this.drawMotion(game, view);
     this.drawStations(game, view, o);
@@ -631,6 +631,12 @@ export class Renderer {
     return c.maxLevel > level - 0.99 && c.maxLevel <= level + 0.01;
   }
 
+  /** Готовые дороги — без разворотов там, где их продолжает проект стройки (projectJoints): тупик там временный. */
+  private openRoads(s: StillScene): { node: (id: number) => boolean } | undefined {
+    const joints = projectJoints(s.roadNet, s.fullNet);
+    return joints.size ? { node: (id) => !joints.has(id) } : undefined;
+  }
+
   /** Земля: рельеф, вода, деревья, тоннели путей, откосы; дороги в тоннелях — бледно (машины в них — поверх). */
   private drawUnder(s: StillScene, view: Box, segs: Segment[]): void {
     const ctx = this.ctx;
@@ -645,7 +651,7 @@ export class Renderer {
       this.earthworks.draw(ctx, ground, s.fullNet, s.game.net, [], view, this.camera.zoom, s.game.terrain.version, (c) => !!c.build);
     }
     ctx.globalAlpha = 0.35;
-    this.lanes.draw(ctx, s.roadNet, this.camera.zoom, false, view, -1);
+    this.lanes.draw(ctx, s.roadNet, this.camera.zoom, false, view, -1, this.openRoads(s));
     drawProjects(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, -1);
     ctx.restore();
   }
@@ -658,7 +664,8 @@ export class Renderer {
     const groundRails = segs.filter((x) => this.cache.get(x.id)!.maxLevel <= 0.01);
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
-    this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0);
+    drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
+    this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0, this.openRoads(s));
     this.drawStationAprons(game, roadNet, view);
     // Проекты стройки — будущей дорогой с готовым до края работ (поверх земли, под подсветкой правки); базы стройки.
     drawProjects(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
@@ -682,7 +689,9 @@ export class Renderer {
     const projects = this.projectLanes.hasLayer(s.fullNet, level);
     if (!rails.length && !roads && !projects) return;
     ctx.save();
-    if (roads) this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, level);
+    // Тень мостов проектов — под готовыми полотнами слоя, как у готового моста.
+    if (projects) drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, level);
+    if (roads) this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, level, this.openRoads(s));
     // Мосты и эстакады проектов стройки — в своём слое, как готовые (с тенью и парапетом), но полупрозрачные.
     if (projects) drawProjects(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, level);
     if ((roads || projects) && o.roads) this.drawRoadPreview(o.roads, level);
@@ -875,6 +884,8 @@ export class Renderer {
     add(
       this.diffs.projects.update((put) => {
         for (const c of buildingCorridors(s.fullNet)) put(c.id, `${projectSig(c)}|${tint?.has(c.id) ? tintColor : ''}`, projectBox(c));
+        // Площадки узлов проектов — по дошедшему до них этапу, в своей рамке (шире рамки полотна); номера — отрицательные.
+        for (const n of projectNodes(s.fullNet, this.projectLanes)) put(-n.id, `n${nodeStage(s.fullNet, this.projectLanes, n.id)}|${nodeReach(s.fullNet, this.projectLanes, n.id)}`, n.box);
       }),
     );
     // Будущие дороги проектов — по отпечатку геометрии полотен и узлов (площадки перекрёстков шире рамки полотна).

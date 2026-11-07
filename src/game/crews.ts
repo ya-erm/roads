@@ -1,9 +1,14 @@
 /**
  * Строительные базы и бригады (режим «Со строительством», шаг 2 — docs/CONSTRUCTION.md): проект строится, только
  * пока на нём работает бригада (самосвал, грейдер, каток). Бригада приписана к базе; свободная едет с базы к стройке
- * по обычным дорогам — машиной в общем потоке (стоит в пробках), а где дороги до стройки нет (или пути по дорогам нет:
- * сеть разорвана) — своим ходом по бездорожью (CONSTRUCTION.offroad): по прямой, и самосвал видно в пути (offroadAt). Проект закончили, отменили или поставили на паузу — бригада едет к другому
- * проекту, которому не хватает рук, или домой на базу.
+ * только по готовым дорогам — машиной в общем потоке (стоит в пробках) — до узла проекта, куда есть подъезд (Site.node),
+ * а от него до края работ — вдоль самой стройки, по отсыпке и полотну проекта (Host.path; самосвал видно на оси
+ * проекта, walkAt). По полю бригады не ездят: к проекту, до которого не доехать по дорогам ни от одной базы, бригада
+ * не едет — проект ждёт подъезда (Construction.site — null). Проект закончили, отменили или поставили на паузу —
+ * бригада едет вдоль стройки назад к дороге и дальше к другому проекту, которому не хватает рук, или домой на базу.
+ *
+ * Где без перескока не обойтись: машину бригады потеряли (дорогу под ней снесли), до дома нет пути, старое
+ * сохранение с поездкой по полю — бригада сразу оказывается на базе и выезжает оттуда заново.
  *
  * Приоритетный проект (Project.priority): свободная бригада едет сначала к нему; не хватает рук, а свободных нет —
  * к нему переходит бригада, работающая на обычном проекте (reinforce).
@@ -26,26 +31,24 @@ export interface Brigade {
   state: BrigadeState;
   /** Проект, куда едет или где работает. */
   project?: number;
-  /** Узел дороги, где бригада сейчас (последняя стройка); нет — на базе. */
+  /** Узел дороги, откуда бригада съехала на стройку (или где стоит); нет — на базе. */
   at?: number;
-  /** Где бригада сейчас, если не на дороге: последняя стройка или база. */
+  /** Где бригада сейчас, если не на базе: у края работ, на стройке или у дороги. */
   pos?: Vec;
-  /** Едет по бездорожью — к какому времени доедет (секунды игры). */
+  /** Едет вдоль стройки — к какому времени доедет (секунды игры). */
   eta?: number;
-  /**
-   * Едет по бездорожью: откуда и куда по прямой, когда выехала (секунды игры) — где она сейчас, считается по времени
-   * (offroadAt). Нет в старых сохранениях: тогда — от места, где была, к цели, выехав за путь до eta.
-   */
-  trip?: OffroadTrip;
+  /** Едет вдоль стройки: по каким точкам и когда выехала — где она сейчас, считается по времени (walkAt). */
+  trip?: SiteTrip;
   /** Машина в потоке (id в симуляции) — не сохраняется: после загрузки бригада выезжает заново. */
   sim?: number;
 }
 
-/** Поездка бригады своим ходом: по прямой from → to, выехала в t0, доедет в Brigade.eta. */
-export interface OffroadTrip {
-  from: Vec;
-  to: Vec;
+/** Поездка бригады вдоль стройки: по точкам path (ось проекта), выехала в t0, доедет в Brigade.eta. */
+export interface SiteTrip {
+  path: Vec[];
   t0: number;
+  /** Назад к дороге (с края работ к узлу подъезда), а не к краю работ. */
+  back?: true;
 }
 
 export interface CrewSave {
@@ -56,9 +59,9 @@ export interface CrewSave {
   firstUsed?: true;
 }
 
-/** Куда ехать к проекту: узел дороги у края работ (если он в графе движения) и точка края работ. */
+/** Куда ехать к проекту: узел дороги, куда есть подъезд, и край работ (от узла до него — вдоль стройки, Host.path). */
 export interface Site {
-  node: number | null;
+  node: number;
   pos: Vec;
 }
 
@@ -69,17 +72,64 @@ export interface CrewHost {
   crewProjects(): number[];
   /** Приоритетный проект: бригады — сначала к нему, при нехватке — переходят к нему с обычных. */
   priority?(project: number): boolean;
-  /** Куда ехать к проекту (null — проекта нет). */
+  /** Куда ехать к проекту (null — проекта нет или к нему нет подъезда по дорогам). */
   site(project: number): Site | null;
+  /** Путь вдоль стройки от узла Site.node до края работ: точки по оси проекта (null — проекта нет). */
+  path(project: number): Vec[] | null;
+  /** От узла from до узла to можно доехать по готовым дорогам. */
+  reach(from: number, to: number): boolean;
   /**
    * Выпустить машину бригады от узла from к узлу to: id машины; 'busy' — путь есть, но на выезде нет места (попробовать
-   * в следующий такт); null — пути по дорогам нет (сеть разорвана, проект её и соединяет) — ехать своим ходом.
+   * в следующий такт); null — пути по дорогам нет.
    */
   drive(brigade: Brigade, from: number, to: number): number | 'busy' | null;
   /** Машина бригады больше не нужна (бригаду продали, база снесена). */
   park(sim: number): void;
   /** Узел есть в графе движения (туда можно доехать по дороге). */
   onRoad(node: number): boolean;
+}
+
+/** Длина ломаной. */
+function pathLength(path: readonly Vec[]): number {
+  let s = 0;
+  for (let i = 1; i < path.length; i++) s += dist(path[i - 1], path[i]);
+  return s;
+}
+
+/** Точка ломаной в s метрах от начала и направление участка там. */
+function pointOnPath(path: readonly Vec[], s: number): { pos: Vec; dir: Vec } {
+  let left = Math.max(0, s);
+  let dir = { x: 1, y: 0 };
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1];
+    const b = path[i];
+    const d = dist(a, b);
+    if (d < 1e-9) continue;
+    dir = { x: (b.x - a.x) / d, y: (b.y - a.y) / d };
+    if (left <= d) return { pos: { x: a.x + dir.x * left, y: a.y + dir.y * left }, dir };
+    left -= d;
+  }
+  return { pos: { ...(path[path.length - 1] ?? { x: 0, y: 0 }) }, dir };
+}
+
+/** Начало ломаной — первые s метров. */
+function pathHead(path: readonly Vec[], s: number): Vec[] {
+  const out: Vec[] = [];
+  let left = s;
+  for (let i = 0; i < path.length; i++) {
+    if (i === 0) {
+      out.push({ ...path[0] });
+      continue;
+    }
+    const d = dist(path[i - 1], path[i]);
+    if (left <= d) {
+      out.push(pointOnPath([path[i - 1], path[i]], left).pos);
+      return out;
+    }
+    out.push({ ...path[i] });
+    left -= d;
+  }
+  return out;
 }
 
 export class Crews {
@@ -159,99 +209,76 @@ export class Crews {
     return powers.reduce((k, p, i) => k + p * (share[i] ?? share[share.length - 1]), 0);
   }
 
-  /**
-   * Где бригада сейчас (для выбора ближайшего проекта и выезда): едет своим ходом — где успела доехать, иначе
-   * последняя стройка или база.
-   */
+  /** Где бригада сейчас (для выбора ближайшего проекта): едет вдоль стройки — где успела доехать, иначе где стоит. */
   private where(b: Brigade): Vec {
-    return this.offroadAt(b)?.pos ?? this.stand(b);
-  }
-
-  /** Где бригада стоит (не в пути): последняя стройка (или место, где съехала с дороги) или база. */
-  private stand(b: Brigade): Vec {
-    return b.pos ?? this.bases.get(b.base)?.fp.center ?? { x: 0, y: 0 };
+    return this.walkAt(b)?.pos ?? b.pos ?? this.bases.get(b.base)?.fp.center ?? { x: 0, y: 0 };
   }
 
   /**
-   * Узел, откуда бригада выедет по дороге: на базе — ворота; вне базы — узел, у которого стоит (последняя стройка у
-   * дороги), а стоит в поле — null: оттуда только своим ходом.
+   * Узел, откуда бригада выедет по дороге: на базе — ворота; вне базы — узел дороги, с которого съехала на стройку
+   * (или где стоит). Такого нет или он уже не дорога — null: бригада сперва окажется на базе.
    */
   private from(b: Brigade): number | null {
-    if (b.pos) return b.at !== undefined && this.host.onRoad(b.at) ? b.at : null;
+    if (b.pos || b.at !== undefined) return b.at !== undefined && this.host.onRoad(b.at) ? b.at : null;
     const base = this.bases.get(b.base);
     return base ? base.nodeId : null;
   }
 
+  /** Узел, откуда бригада поедет: где стоит, а не у дороги — ворота базы (туда её перенесёт launch). */
+  private startNode(b: Brigade): number | null {
+    return this.from(b) ?? this.bases.get(b.base)?.nodeId ?? null;
+  }
+
+  /** Бригада доедет до узла node по готовым дорогам оттуда, где стоит. */
+  private canReach(b: Brigade, node: number): boolean {
+    const from = this.startNode(b);
+    return from !== null && (from === node || this.host.reach(from, node));
+  }
+
+  /** Бригада едет вдоль стройки — где она сейчас и куда смотрит (по времени от выезда до eta); не едет — null. */
+  walkAt(b: Brigade): { pos: Vec; dir: Vec } | null {
+    if (b.eta === undefined || !b.trip) return null;
+    const { path, t0 } = b.trip;
+    const k = b.eta > t0 ? Math.max(0, Math.min(1, (this.host.time - t0) / (b.eta - t0))) : 1;
+    return pointOnPath(path, pathLength(path) * k);
+  }
+
   /**
-   * Бригада своим ходом — где она сейчас и куда смотрит: по прямой от места выезда к цели, по времени от выезда до eta.
-   * Не едет своим ходом — null. Старое сохранение (eta без trip) — от места, где стояла, к нынешней цели.
+   * В путь вдоль стройки по точкам path: к краю работ или (back) назад к дороге. Путь короче метра — уже на месте
+   * (false).
    */
-  offroadAt(b: Brigade): { pos: Vec; dir: Vec } | null {
-    if (b.eta === undefined) return null;
-    const trip = b.trip ?? this.legacyTrip(b, b.eta);
-    const d = dist(trip.from, trip.to);
-    const k = b.eta > trip.t0 ? Math.max(0, Math.min(1, (this.host.time - trip.t0) / (b.eta - trip.t0))) : 1;
-    const dir = d > 1e-9 ? { x: (trip.to.x - trip.from.x) / d, y: (trip.to.y - trip.from.y) / d } : { x: 1, y: 0 };
-    return { pos: { x: trip.from.x + (trip.to.x - trip.from.x) * k, y: trip.from.y + (trip.to.y - trip.from.y) * k }, dir };
+  private walk(b: Brigade, path: Vec[] | null, back = false): boolean {
+    const len = path ? pathLength(path) : 0;
+    if (!path || len < 1) return false;
+    b.trip = { path: path.map((p) => ({ ...p })), t0: this.host.time, ...(back ? { back: true as const } : {}) };
+    b.eta = this.host.time + len / CONSTRUCTION.onSite;
+    b.pos = { ...path[0] };
+    return true;
   }
 
-  /** Поездка из сохранения без trip: от места, где бригада стояла, к цели — выехала за путь до eta. */
-  private legacyTrip(b: Brigade, eta: number): OffroadTrip {
-    const from = this.stand(b);
-    const to = this.target(b) ?? from;
-    return { from, to, t0: eta - dist(from, to) / CONSTRUCTION.offroad };
-  }
-
-  /** Куда бригада едет: к стройке — край работ, домой — база. */
-  private target(b: Brigade): Vec | undefined {
-    if (b.state === 'back') return this.bases.get(b.base)?.fp.center;
-    return b.project !== undefined ? this.host.site(b.project)?.pos : undefined;
-  }
-
-  /** В путь своим ходом к точке to — от того места, где бригада сейчас. */
-  private offroad(b: Brigade, to: Vec): void {
-    const from = this.where(b);
-    b.trip = { from: { ...from }, to: { ...to }, t0: this.host.time };
-    b.eta = this.host.time + dist(from, to) / CONSTRUCTION.offroad;
-  }
-
-  /** Поездку своим ходом прервали (другой проект, снос базы): бригада стоит там, куда успела доехать, — в поле. */
-  private settle(b: Brigade): void {
-    const at = this.offroadAt(b);
-    if (at) {
-      b.pos = at.pos;
-      delete b.at;
-    }
-    delete b.eta;
-    delete b.trip;
-  }
-
-  /** Такт: решения бригад и дорога по бездорожью. */
+  /** Такт: решения бригад и поездки вдоль строек. */
   tick(): void {
     if (!this.brigades.size) return;
     const projects = this.host.crewProjects();
     const live = new Set(projects);
     for (const b of this.brigades.values()) {
-      // Проект кончился, отменён или на паузе — бригада свободна.
-      if ((b.state === 'going' || b.state === 'working') && (b.project === undefined || !live.has(b.project))) this.release(b);
-      // Свободна или идёт домой своим ходом — может сразу взяться за другой проект.
+      // Проект кончился, отменён, на паузе или к нему больше нет подъезда — бригада свободна.
+      if ((b.state === 'going' || b.state === 'working') && (b.project === undefined || !live.has(b.project) || !this.host.site(b.project))) this.release(b);
+      // Свободна или едет домой не машиной — может сразу взяться за другой проект.
       if (b.state === 'idle' || (b.state === 'back' && b.sim === undefined)) this.assign(b, projects);
       if (b.state === 'going' && b.sim === undefined && b.eta === undefined) this.launch(b);
       if (b.state === 'back' && b.sim === undefined && b.eta === undefined) this.launchHome(b);
-      // По бездорожью доехали.
-      if (b.eta !== undefined && this.host.time >= b.eta) {
-        delete b.eta;
-        delete b.trip;
-        this.arrive(b);
-      }
+      // Вдоль стройки доехали.
+      if (b.eta !== undefined && this.host.time >= b.eta) this.walked(b);
     }
     this.reinforce(projects);
   }
 
   /**
    * Приоритетным проектам не хватает рук, а свободных бригад нет — к ним переходят бригады, работающие на обычных
-   * проектах (в пути не трогаем: машина в потоке исчезла бы посреди дороги). Сперва — с проекта, где бригад больше всех,
-   * потом ближайшая к приоритетному, потом с меньшим номером. Приоритетные — по порядку закладки.
+   * проектах (в пути не трогаем: машина в потоке исчезла бы посреди дороги) и доезжающие до них по дорогам. Сперва —
+   * с проекта, где бригад больше всех, потом ближайшая к приоритетному, потом с меньшим номером. Приоритетные — по
+   * порядку закладки.
    */
   private reinforce(projects: number[]): void {
     const prio = this.host.priority;
@@ -264,30 +291,65 @@ export class Crews {
       while (this.assigned(id).length < per) {
         let best: { b: Brigade; n: number; d: number } | null = null;
         for (const b of this.brigades.values()) {
-          if (b.state !== 'working' || b.project === undefined || prio(b.project)) continue;
+          if (b.state !== 'working' || b.project === undefined || prio(b.project) || !this.canReach(b, s.node)) continue;
           const n = this.assigned(b.project).length;
           const d = dist(this.where(b), s.pos);
           if (!best || n > best.n || (n === best.n && d < best.d - 1e-6)) best = { b, n, d };
         }
         if (!best) break;
         const b = best.b;
+        // Сперва вдоль своей стройки назад к дороге, оттуда — к приоритетному (launch в такте).
+        const back = this.pathBack(b);
         b.project = id;
         b.state = 'going';
-        this.launch(b);
+        if (!back || !this.walk(b, back.path, true)) this.launch(b);
       }
     }
   }
 
-  /** Бригада без дела: к проекту, которому не хватает рук, иначе — домой. */
+  /** Путь работающей бригады назад к дороге — вдоль стройки от края работ к узлу подъезда (он же — новый b.at). */
+  private pathBack(b: Brigade): { path: Vec[]; node: number } | null {
+    if (b.state !== 'working' || b.project === undefined) return null;
+    const s = this.host.site(b.project);
+    const path = s && this.host.path(b.project);
+    if (!s || !path) return null;
+    b.at = s.node;
+    return { path: [...path].reverse(), node: s.node };
+  }
+
+  /**
+   * Бригада без дела: к проекту, которому не хватает рук, иначе — домой. Работала у края, а проект ещё есть (пауза,
+   * подъезд пропал) — сперва вдоль стройки назад к дороге; ехала вдоль стройки — назад по пройденному.
+   */
   private release(b: Brigade): void {
     if (b.sim !== undefined) {
       this.host.park(b.sim);
       delete b.sim;
     }
-    // Ехала своим ходом — стоит, где успела доехать (оттуда и поедет дальше), а не на месте выезда.
-    this.settle(b);
+    const back = this.walkBack(b) ?? this.pathBack(b)?.path ?? null;
     delete b.project;
-    b.state = b.pos ? 'back' : 'idle';
+    if (!b.pos && b.at === undefined) {
+      b.state = 'idle';
+      return;
+    }
+    b.state = 'back';
+    if (back) this.walk(b, back, true);
+  }
+
+  /** Едет вдоль стройки — остановиться, где успела доехать; ответ — путь назад к дороге (пройденное, наоборот). */
+  private walkBack(b: Brigade): Vec[] | null {
+    const trip = b.trip;
+    const at = this.walkAt(b);
+    const eta = b.eta;
+    delete b.eta;
+    delete b.trip;
+    if (!trip || !at || eta === undefined) return null;
+    b.pos = at.pos;
+    // Пройдено — по времени, той же долей пути, что и walkAt. Ехала к дороге — к ней же и дальше (остаток пути).
+    const k = eta > trip.t0 ? Math.max(0, Math.min(1, (this.host.time - trip.t0) / (eta - trip.t0))) : 1;
+    const total = pathLength(trip.path);
+    if (trip.back) return pathHead([...trip.path].reverse(), total * (1 - k)).reverse();
+    return pathHead(trip.path, total * k).reverse();
   }
 
   /** Свободной бригаде — проект: сначала приоритетный, потом где меньше всего бригад, ближайший, раньше заложенный. */
@@ -297,7 +359,8 @@ export class Crews {
       const n = this.assigned(id).length;
       if (n >= CONSTRUCTION.brigade.perProject) continue;
       const s = this.host.site(id);
-      if (!s) continue;
+      // К проекту без подъезда (или куда ей не доехать по дорогам) бригада не едет.
+      if (!s || !this.canReach(b, s.node)) continue;
       const top = !!this.host.priority?.(id);
       const d = dist(this.where(b), s.pos);
       if (!best || (top && !best.top) || (top === best.top && (n < best.n || (n === best.n && d < best.d - 1e-6)))) best = { id, top, n, d };
@@ -307,53 +370,92 @@ export class Crews {
       this.host.park(b.sim);
       delete b.sim;
     }
-    this.settle(b);
+    // Ехала вдоль стройки назад к дороге — доедет до неё, оттуда и выедет (launch после поездки).
+    const back = this.walkBack(b);
     b.project = best.id;
     b.state = 'going';
+    if (back) this.walk(b, back, true);
+  }
+
+  /** Бригада на базе (перенос: без дороги ей оттуда не выехать). */
+  private home(b: Brigade): void {
+    if (b.sim !== undefined) {
+      this.host.park(b.sim);
+      delete b.sim;
+    }
+    delete b.pos;
+    delete b.at;
+    delete b.eta;
+    delete b.trip;
+    if (b.state === 'back') b.state = 'idle';
   }
 
   /**
-   * В путь к проекту: по дороге, если до края работ можно доехать, иначе по бездорожью. Оба конца у дорог, но пути
-   * между ними нет (сеть разорвана — часто проект её и соединяет) — тоже своим ходом: ждать дороги нельзя, её построит
-   * только сама бригада. Путь есть, а на выезде нет места — пробуем в следующий такт.
+   * В путь к проекту: по дорогам до узла подъезда (Site.node), оттуда — вдоль стройки к краю работ. Уже у этого узла —
+   * сразу вдоль стройки. Стоит не у дороги — сперва на базу. Путь есть, а на выезде нет места — пробуем в следующий
+   * такт; пути по дорогам нет — бригада свободна (к проекту ей не доехать).
    */
   private launch(b: Brigade): void {
     const s = b.project !== undefined ? this.host.site(b.project) : null;
     if (!s) return this.release(b);
-    const from = this.from(b);
-    if (from !== null && s.node !== null) {
-      if (from === s.node) return this.arrive(b);
-      const sim = this.host.drive(b, from, s.node);
-      if (sim === 'busy') return;
-      if (sim !== null) {
-        b.sim = sim;
-        return;
-      }
+    let from = this.from(b);
+    if (from === null) {
+      this.home(b);
+      from = this.from(b);
     }
-    this.offroad(b, s.pos);
+    if (from === null) return;
+    if (from === s.node) return this.onSite(b, s);
+    if (!this.host.reach(from, s.node)) return this.release(b);
+    const sim = this.host.drive(b, from, s.node);
+    if (sim === 'busy') return;
+    if (sim === null) return this.release(b);
+    b.sim = sim;
   }
 
-  /** Домой на базу: по дороге (если до ворот есть путь) или своим ходом. */
+  /** Бригада у узла подъезда: вдоль стройки к краю работ, а край рядом — сразу за работу. */
+  private onSite(b: Brigade, s: Site): void {
+    b.at = s.node;
+    if (b.project !== undefined && this.walk(b, this.host.path(b.project))) return;
+    this.work(b, s);
+  }
+
+  /** За работу у края: стоит там, съехала с дороги у узла подъезда. */
+  private work(b: Brigade, s: Site): void {
+    b.state = 'working';
+    b.pos = { ...s.pos };
+    b.at = s.node;
+  }
+
+  /** Вдоль стройки доехали: к краю работ — за работу, назад к дороге — дальше по дорогам (launch / launchHome). */
+  private walked(b: Brigade): void {
+    const trip = b.trip;
+    const end = trip?.path[trip.path.length - 1];
+    delete b.eta;
+    delete b.trip;
+    if (end) b.pos = { ...end };
+    if (b.state !== 'going' || trip?.back) return;
+    const s = b.project !== undefined ? this.host.site(b.project) : null;
+    if (!s) return this.release(b);
+    this.work(b, s);
+  }
+
+  /** Домой на базу: по дорогам до ворот; не у дороги или пути до ворот нет — сразу на базе. */
   private launchHome(b: Brigade): void {
     const base = this.bases.get(b.base);
     if (!base) return;
     const from = this.from(b);
-    if (from !== null && from !== base.nodeId && this.host.onRoad(from) && this.host.onRoad(base.nodeId)) {
-      const sim = this.host.drive(b, from, base.nodeId);
-      if (sim === 'busy') return;
-      if (sim !== null) {
-        b.sim = sim;
-        return;
-      }
-    }
-    this.offroad(b, base.fp.center);
+    if (from === null || from === base.nodeId || !this.host.reach(from, base.nodeId)) return this.home(b);
+    const sim = this.host.drive(b, from, base.nodeId);
+    if (sim === 'busy') return;
+    if (sim === null) return this.home(b);
+    b.sim = sim;
   }
 
   /**
    * База снесена: её бригады — на ближайшую из оставшихся (по расстоянию между базами, потом по номеру). Работающие
-   * и едущие к стройке продолжают как были — у них лишь другая база; свободные выезжают от ворот снесённой базы к новой;
-   * ехавшие домой своим ходом — от того места, куда успели доехать, к новой (settle), ехавшие машиной доедут до старых
-   * ворот и поедут дальше (arrive). Других баз нет — бригады распускаются: возвращается их список (машины в пути убраны).
+   * и едущие к стройке продолжают как были — у них лишь другая база; свободные выезжают от ворот снесённой базы к новой
+   * (ворота не у дороги — сразу на новой), ехавшие машиной доедут до старых ворот и поедут дальше (arrive). Других баз
+   * нет — бригады распускаются: возвращается их список (машины в пути убраны).
    */
   removeBase(id: number, gateOnRoad: boolean): Brigade[] {
     const old = this.bases.get(id);
@@ -370,56 +472,52 @@ export class Crews {
     }
     for (const b of list) {
       b.base = to.id;
-      if (b.state === 'idle') {
+      if (b.state === 'idle' && gateOnRoad) {
         b.state = 'back';
         b.pos = { ...old.fp.center };
-        if (gateOnRoad) b.at = old.nodeId;
-        else delete b.at;
-      } else if (b.state === 'back' && b.sim === undefined && b.eta !== undefined) this.settle(b);
+        b.at = old.nodeId;
+      }
     }
     return [];
   }
 
-  /** Доехали (машиной или своим ходом). at — узел и точка, куда доехала машина (если машиной). */
+  /**
+   * Машина бригады доехала (Game.onArrive): at — узел и точка, куда. К стройке — дальше вдоль неё к краю работ (узел
+   * подъезда за время пути сменился — по дорогам дальше, launch); домой — на базе (ехала к воротам снесённой базы —
+   * дальше к новой, launchHome в такте).
+   */
   arrive(b: Brigade, at?: { node: number; pos: Vec }): void {
     delete b.sim;
-    // Ехала домой на базу, которую снесли: доехала до её ворот — дальше к новой базе (launchHome в такте).
-    const base = this.bases.get(b.base);
-    if (b.state === 'back' && at && base && at.node !== base.nodeId) {
+    if (at) {
       b.at = at.node;
       b.pos = { ...at.pos };
-      return;
     }
+    const base = this.bases.get(b.base);
     if (b.state === 'going') {
       const s = b.project !== undefined ? this.host.site(b.project) : null;
       if (!s) return this.release(b);
-      b.state = 'working';
-      b.pos = s.pos;
-      if (s.node !== null) b.at = s.node;
-      else delete b.at;
-    } else if (b.state === 'back') {
-      b.state = 'idle';
-      delete b.pos;
-      delete b.at;
+      if (at && at.node !== s.node) return;
+      return this.onSite(b, s);
+    }
+    if (b.state === 'back') {
+      if (at && base && at.node !== base.nodeId) return;
+      this.home(b);
     }
   }
 
-  /** Машина бригады потерялась (дорогу снесли) там, где машина была (at), — дальше оттуда своим ходом. */
-  lost(b: Brigade, at?: Vec): void {
+  /**
+   * Машину бригады потеряли (дорогу под ней снесли): без дороги ей не проехать — бригада сразу на базе; ехала к
+   * стройке — выедет оттуда заново.
+   */
+  lost(b: Brigade): void {
     delete b.sim;
-    if (at) {
-      b.pos = { ...at };
-      delete b.at;
-    }
-    const to = this.target(b);
-    if (to) this.offroad(b, to);
-    else b.eta = this.host.time + 1;
+    this.home(b);
   }
 
-  /** Работающим бригадам — новое место (край работ сдвинулся). */
+  /** Работающим бригадам — новое место (край работ сдвинулся); node — узел дороги, у которого он. */
   follow(project: number, front: Vec, node: number | null): void {
     for (const b of this.working(project)) {
-      b.pos = front;
+      b.pos = { ...front };
       if (node !== null) b.at = node;
     }
   }
@@ -437,7 +535,7 @@ export class Crews {
       brigades: [...this.brigades.values()].map(({ sim: _s, ...b }) => ({
         ...b,
         ...(b.pos ? { pos: { ...b.pos } } : {}),
-        ...(b.trip ? { trip: { from: { ...b.trip.from }, to: { ...b.trip.to }, t0: b.trip.t0 } } : {}),
+        ...(b.trip ? { trip: { path: b.trip.path.map((p) => ({ ...p })), t0: b.trip.t0 } } : {}),
       })),
       nextBrigade: this.nextBrigade,
       ...(this.firstUsed ? { firstUsed: true as const } : {}),
@@ -449,7 +547,7 @@ export class Crews {
     this.brigades.clear();
     this.nextBrigade = save?.nextBrigade ?? 1;
     for (const b of save?.bases ?? []) this.bases.set(b.id, { ...b });
-    for (const b of save?.brigades ?? []) this.brigades.set(b.id, { ...b });
+    for (const b of save?.brigades ?? []) this.brigades.set(b.id, legacyBrigade({ ...b }));
     this.firstUsed = !!save?.firstUsed;
     // Сохранение до сноса баз (без firstUsed и цен баз): базы тогда не сносились — первая поставленная (с меньшим
     // номером) была бесплатной, остальные — по цене базы.
@@ -459,4 +557,21 @@ export class Crews {
       this.firstUsed = true;
     }
   }
+}
+
+/**
+ * Бригада из старого сохранения: ехала своим ходом по полю (eta без пути вдоль стройки) или стояла в поле, не у
+ * дороги, — по полю бригады больше не ездят: она на базе (ехала домой — уже дома) и выезжает оттуда заново.
+ */
+function legacyBrigade(b: Brigade): Brigade {
+  const trip = b.trip as (SiteTrip & { from?: Vec }) | undefined;
+  if (b.eta !== undefined && !(trip && Array.isArray(trip.path))) {
+    delete b.eta;
+    delete b.trip;
+    delete b.pos;
+    delete b.at;
+  }
+  if (b.pos && b.at === undefined) delete b.pos;
+  if (b.state === 'back' && !b.pos && b.at === undefined) b.state = 'idle';
+  return b;
 }

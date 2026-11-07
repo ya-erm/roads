@@ -1,33 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
 import { Game } from '../game/game';
-import { anchorOf, runSeconds, STREET, withoutCitizens } from '../game/testkit';
+import { anchorOf, road, runSeconds, STREET, withoutCitizens } from '../game/testkit';
 import type { WorldSettings } from '../world/settings';
 import { baseRemoveText, buildBarHtml } from './constructionUi';
 import { projectCardHtml } from './projectCard';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
-/** Партия «Со строительством» с проектом улицы на 600 м в чистом поле; base — поставить базу у города. */
+/**
+ * Партия «Со строительством» с проектом улицы на 600 м в поле: base — от тупика готового подъезда, у которого первая
+ * база, иначе — сам по себе, баз нет.
+ */
 function setup(base: boolean): { game: Game; id: number } {
   const game = withoutCitizens(new Game(WORLD));
-  if (base) {
-    const town = [...game.towns].sort((a, b) => b.population - a.population || a.id - b.id)[0];
-    let placed = false;
-    for (const k of [1, 0.75, 1.3, 0.5, 1.7]) {
-      for (let i = 0; i < 24 && !placed; i++) {
-        const a = (i / 24) * Math.PI * 2;
-        const p = { x: town.center.x + Math.cos(a) * town.radius * k, y: town.center.y + Math.sin(a) * town.radius * k };
-        const plan = game.basePlan(p);
-        placed = plan.ok && !plan.demolish.length && game.buildBase(p) === null;
-      }
-    }
-    expect(placed).toBe(true);
-  }
   for (let y = 400; y < game.terrain.height - 400; y += 120) {
     for (let x = 300; x < game.terrain.width - 900; x += 160) {
-      const plan = game.roadBuilder.road(anchorOf(game, { free: { x, y } }), anchorOf(game, { free: { x: x + 600, y } }), STREET, { project: true });
-      if (plan.ok && !plan.demolish.length && game.roadBuilder.apply(plan)) return { game, id: game.construction.list()[0].project.id };
+      const plan = game.roadBuilder.road(anchorOf(game, { free: { x: x - 150, y } }), anchorOf(game, { free: { x: x + 600, y } }), STREET);
+      if (!plan.ok || plan.demolish.length) continue;
+      if (base) {
+        // Готовый подъезд с базой (первой, бесплатной) у него и проект от его тупика: по полю бригады не ездят.
+        expect(road(game, { free: { x: x - 150, y } }, { free: { x, y } })).toBe(true);
+        expect(game.buildBase({ x: x - 75, y: y - 40 })).toBeNull();
+        const end = [...game.roads.net.nodes.values()].find((n) => Math.hypot(n.pos.x - x, n.pos.y - y) < 1)!;
+        const p = game.roadBuilder.road(anchorOf(game, end.id), anchorOf(game, { free: { x: x + 600, y } }), STREET, { project: true });
+        expect(p.ok && game.roadBuilder.apply(p)).toBe(true);
+      } else {
+        const p = game.roadBuilder.road(anchorOf(game, { free: { x, y } }), anchorOf(game, { free: { x: x + 600, y } }), STREET, { project: true });
+        expect(p.ok && game.roadBuilder.apply(p)).toBe(true);
+      }
+      return { game, id: game.construction.list()[0].project.id };
     }
   }
   throw new Error('нет места');

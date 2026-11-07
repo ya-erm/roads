@@ -36,6 +36,12 @@ const CREW_STATE: Record<Brigade['state'], { mark: string; text: string }> = {
   idle: { mark: '', text: 'на базе' },
 };
 
+/** Что бригада делает сейчас — коротко: едет по дороге, вдоль стройки к краю работ, ждёт выезда, строит. */
+export function crewDoing(b: Brigade): string {
+  if (b.state === 'going') return b.sim !== undefined ? 'едет по дороге' : b.eta !== undefined ? 'едет вдоль стройки' : 'ждёт выезда';
+  return CREW_STATE[b.state].text;
+}
+
 /** Карточка проекта id; проекта нет (достроен, отменён) — короткая записка. */
 export function projectCardHtml(game: Game, id: number): string {
   const info = game.construction.info(id);
@@ -83,6 +89,8 @@ function timeHtml(game: Game, info: ProjectInfo): string {
   const p = info.project;
   const crew = game.construction.crews.working(p.id).length;
   const trucks = (n: number) => '🚚'.repeat(Math.max(1, Math.min(3, n)));
+  if (!p.paused && !info.access && game.construction.crews.bases.size)
+    return `<div class="pc-row"><span class="pc-time pc-bad" data-tip="Бригадам не доехать по дорогам ни с одной базы — стройка ждёт подъезда">⛔ <b>стоит: нет подъезда</b></span></div>`;
   const now = p.paused
     ? `<span class="pc-time" data-tip="На паузе: стройка стоит">⏸ <b>стоит</b></span>`
     : `<span class="pc-time" data-tip="${esc(crew ? `Сколько ещё строить на скорости ×1: бригад на месте — ${crew}` : 'Сколько займёт с одной бригадой с ближайшей базы, когда она приедет')}">${trucks(crew)} ⏳ <b>${durationText(info.seconds)}</b></span>`;
@@ -147,7 +155,7 @@ function crewsHtml(game: Game, info: ProjectInfo): string {
       return `<button class="pc-crew ${b.state}" data-action="crew-show" data-id="${b.id}" data-tip="${esc(`Бригада ${n} базы «${game.baseName(b.base)}»: ${where?.text ?? st.text} — показать на карте`)}">
         <span class="bb-crew ${b.state}">🚚${st.mark ? `<i>${st.mark}</i>` : ''}</span>
         <span class="pc-crew-name"><b>№${n}</b> · ${esc(game.baseName(b.base))}</span>
-        <span class="pc-crew-state">${st.mark} ${st.text}</span>
+        <span class="pc-crew-state">${st.mark} ${crewDoing(b)}</span>
         <span class="pc-mini" data-tip="${esc(`Сила бригады ${power}%: чем дальше база от стройки, тем медленнее`)}"><i style="width:${power}%"></i></span></button>`;
     })
     .join('');
@@ -173,6 +181,12 @@ function helpHtml(game: Game, info: ProjectInfo, some: boolean): string {
   if (p.paused) return some ? '' : why('⏸', 'На паузе — бригады ушли на другие проекты', `<button class="small" data-action="build-pause" data-id="${p.id}" data-tip="Строить дальше">▶ Дальше</button>`);
   if (!crews.bases.size)
     return why('🏚', 'Нет строительной базы', `<button class="small" data-action="base-place" data-tip="Поставьте базу у дороги, ближе к стройке${game.firstBase ? ' — первая бесплатно' : ''}">＋ База</button>`);
+  if (!info.access)
+    return why(
+      '⛔',
+      'Нет подъезда: ни один конец проекта не связан готовой дорогой с базой, а по полю бригады не ездят. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним',
+      `<button class="small" data-action="base-place" data-tip="Поставьте базу у дороги, связанной с проектом: бригада доедет по ней">＋ База</button>`,
+    );
   if (!crews.brigades.size) return why('🚫', 'Нет ни одной бригады', hire('Строить некому.'));
   const busy = [...crews.brigades.values()].every((b) => b.project !== undefined && b.project !== p.id && (b.state === 'going' || b.state === 'working'));
   if (some) return why('➕', 'Ещё бригада — быстрее', hire('Свободная бригада поедет туда, где рук меньше, — приоритетный проект первым.'));

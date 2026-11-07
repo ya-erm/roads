@@ -7,8 +7,11 @@
  *   Не хватает (бюджет — до кредитного предела, как у любой стройки) — проект стоит, пока деньги не появятся.
  * - Готовый участок сразу открыт: у полотна снимается build, ревизия новая — граф движения и карта его берут
  *   (src/lanes/open.ts — сеть без строящегося).
- * - Участок — сначала тот, что уже начат, потом примыкающий к готовым дорогам (от него и заполняется), иначе —
- *   первый по номеру. Участок проходят трижды: земляные работы, покрытие, разметка (CONSTRUCTION.stages).
+ * - Участок — сначала тот, что уже начат, потом тот, к концу которого есть подъезд: до узла можно доехать по готовым
+ *   дорогам с ворот базы (accessRank); таких несколько — у ближайшего к базе конца, от него участок и заполняется.
+ *   Стройка так идёт от подъезда внутрь проекта; участок без подъезда ждёт, пока до него дорастёт соседний. Подъезда
+ *   нет ни у одного узла проекта — бригады к нему не едут (site — null), проект ждёт: «🚚 нет подъезда» на плашке,
+ *   в карточке и у советника. Участок проходят трижды: земляные работы, покрытие, разметка (CONSTRUCTION.stages).
  * - Строят бригады (crews.ts): проект идёт, пока на нём работает хоть одна; темп — сумма вкладов бригад (дальше от
  *   базы — медленнее). Проекты строятся одновременно, если бригад хватает.
  * - Пауза — проект стоит; отмена (Game.cancelProject) сносит недостроенное и возвращает заплаченное за него,
@@ -20,11 +23,11 @@
  *
  * Состояние: готовое — в полотнах сети (сохраняется вместе с ней), записи проектов — здесь (toSave / load).
  */
-import type { Vec } from '../core/vec';
+import { dist, type Vec } from '../core/vec';
 import type { Corridor, LaneNet } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import { ROAD_CLASSES } from '../world/roadTypes';
-import { buildRate, frontOf, paidFor, stageSpans } from './constructionWork';
+import { buildRate, frontOf, paidFor, pickSite, stageSpans } from './constructionWork';
 import { type Brigade, type CrewSave, Crews, type Site } from './crews';
 import { corridorProfile, fullCorridorCost } from './roadbuild';
 
@@ -74,6 +77,8 @@ export interface ConstructionHost {
   drive(brigade: Brigade, from: number, to: number): number | 'busy' | null;
   park(sim: number): void;
   onRoad(node: number): boolean;
+  /** От узла from до узла to можно доехать по готовым дорогам (подъезд к проекту). */
+  reach(from: number, to: number): boolean;
 }
 
 /** Сводка проекта для плашки и советника. */
@@ -94,6 +99,11 @@ export interface ProjectInfo {
   secondsPlus: number | null;
   /** Готовность по этапам (земляные работы, покрытие, разметка): доли длины 0…1. */
   stages: [number, number, number];
+  /**
+   * Есть подъезд: до какого-нибудь узла проекта можно доехать по готовым дорогам с базы (и оттуда вдоль стройки до края
+   * работ). Нет — бригады не едут, проект ждёт дороги к себе или базы рядом.
+   */
+  access: boolean;
 }
 
 /** Из чего проект: метров по видам (вода — мост над ней), насыпь и выемка — высота и глубина, м. */
@@ -135,6 +145,8 @@ export class Construction {
       crewProjects: () => [...this.projects.values()].filter((p) => !p.paused && this.corridorsOf(p.id).length).map((p) => p.id),
       priority: (id) => !!this.projects.get(id)?.priority,
       site: (id) => self.site(id),
+      path: (id) => self.approach(id)?.path() ?? null,
+      reach: (from, to) => host.reach(from, to),
       drive: (b, from, to) => host.drive(b, from, to),
       park: (sim) => host.park(sim),
       onRoad: (node) => host.onRoad(node),
@@ -148,12 +160,90 @@ export class Construction {
     return { pos: c.lut.pointAt(b.fromB ? c.length - f : f), node: b.fromB ? c.b : c.a };
   }
 
-  /** Куда ехать бригаде к проекту: узел у края работ (если до него есть дорога) и сама точка. */
+  /**
+   * Куда ехать бригаде к проекту: узел дороги с подъездом (оттуда — вдоль стройки, approach) и край работ. Подъезда нет
+   * ни у одного узла проекта (или проекта нет) — null: бригады не едут.
+   */
   site(id: number): Site | null {
+    const a = this.approach(id);
+    return a ? { node: a.node, pos: a.pos } : null;
+  }
+
+  /**
+   * Подъезд к узлу: с ворот какой-нибудь базы до него можно доехать по готовым дорогам — расстояние от ближайшей такой
+   * базы до узла (по прямой; чем меньше, тем раньше отсюда строить), ни с какой — null.
+   */
+  accessRank(node: number): number | null {
+    if (!this.host.onRoad(node)) return null;
+    const pos = this.host.roads.net.node(node).pos;
+    let best: number | null = null;
+    for (const b of this.crews.bases.values()) {
+      if (b.nodeId !== node && !this.host.reach(b.nodeId, node)) continue;
+      const d = dist(b.fp.center, pos);
+      if (best === null || d < best) best = d;
+    }
+    return best;
+  }
+
+  /**
+   * Путь бригады к краю работ: узел дороги с подъездом (node) и оттуда вдоль стройки — по строящимся полотнам проекта
+   * (кратчайший по длине; обычно край работ — на участке, что заполняется прямо от этого узла) до края работ (pos).
+   * path — точки этого пути по оси проекта, от узла до края. Подъезда нет — null.
+   */
+  approach(id: number): { node: number; pos: Vec; path: () => Vec[] } | null {
     const c = this.current(id);
     if (!c) return null;
-    const f = this.frontOn(c);
-    return { node: this.host.onRoad(f.node) ? f.node : null, pos: f.pos };
+    const list = this.corridorsOf(id);
+    const net = this.host.roads.net;
+    const b = c.build!;
+    const f = frontOf(b.done, c.length).s;
+    // Край работ — в s метрах от конца a.
+    const s = b.fromB ? c.length - f : f;
+    // Дейкстра по полотнам проекта от всех узлов с подъездом (по номерам — детерминированно).
+    const far = new Map<number, number>();
+    const prev = new Map<number, { k: Corridor; from: number }>();
+    for (const k of list) for (const n of [k.a, k.b]) if (!far.has(n) && this.accessRank(n) !== null) far.set(n, 0);
+    if (!far.size) return null;
+    const done = new Set<number>();
+    for (;;) {
+      let u: number | null = null;
+      for (const [n, d] of far) if (!done.has(n) && (u === null || d < far.get(u)! - 1e-9)) u = n;
+      if (u === null) break;
+      done.add(u);
+      const du = far.get(u)!;
+      for (const k of list) {
+        if (k.a !== u && k.b !== u) continue;
+        const v = k.a === u ? k.b : k.a;
+        const dv = du + k.length;
+        if (dv < (far.get(v) ?? Infinity) - 1e-9) {
+          far.set(v, dv);
+          prev.set(v, { k, from: u });
+        }
+      }
+    }
+    const viaA = (far.get(c.a) ?? Infinity) + s;
+    const viaB = (far.get(c.b) ?? Infinity) + (c.length - s);
+    if (!Number.isFinite(Math.min(viaA, viaB))) return null;
+    const end = viaA <= viaB ? c.a : c.b;
+    const legs: { k: Corridor; from: number }[] = [];
+    let node = end;
+    for (let step = prev.get(node); step; step = prev.get(node)) {
+      legs.unshift(step);
+      node = step.from;
+    }
+    const pos = c.lut.pointAt(s);
+    const entry = node;
+    const path = () => {
+      const pts: Vec[] = [{ ...net.node(entry).pos }];
+      const along = (k: Corridor, s0: number, s1: number) => {
+        const n = Math.max(1, Math.ceil(Math.abs(s1 - s0) / 10));
+        for (let i = 1; i <= n; i++) pts.push(k.lut.pointAt(s0 + ((s1 - s0) * i) / n));
+      };
+      for (const leg of legs) along(leg.k, leg.k.a === leg.from ? 0 : leg.k.length, leg.k.a === leg.from ? leg.k.length : 0);
+      along(c, end === c.a ? 0 : c.length, s);
+      return pts;
+    };
+    return { node: entry, pos, path };
   }
 
   /** Номер следующего проекта (план помечает им новые полотна, startProject заводит запись). */
@@ -206,22 +296,17 @@ export class Construction {
    * иначе первый. Выбранному с нуля ставится, с какого конца он заполняется.
    */
   current(id: number): Corridor | null {
-    const list = this.corridorsOf(id);
-    if (!list.length) return null;
-    const started = list.find((c) => c.build!.done > 0);
-    if (started) return started;
     const net = this.host.roads.net;
-    const open = (node: number) => net.node(node).corridors.some((k) => !net.corridors.get(k)?.build);
-    for (const c of list) {
-      const a = open(c.a);
-      const b = open(c.b);
-      if (!a && !b) continue;
-      const fromB = !a && b;
-      if (!!c.build!.fromB !== fromB) c.build = fromB ? { project: id, done: 0, fromB: true } : { project: id, done: 0 };
-      return c;
-    }
-    const c = list[0];
-    if (c.build!.fromB) c.build = { project: id, done: 0 };
+    // Выбор — pickSite (тот же, что предсказывает следующий участок для колонны техники, nextSite).
+    // Из не начатых — от подъезда ближе к базе (accessRank); подъезда нет нигде — как прежде, только для показа.
+    const pick = pickSite(
+      this.corridorsOf(id),
+      (node) => net.node(node).corridors.some((k) => !net.corridors.get(k)?.build),
+      (node) => this.accessRank(node),
+    );
+    if (!pick) return null;
+    const { c, fromB } = pick;
+    if (c.build!.done <= 0 && !!c.build!.fromB !== fromB) c.build = fromB ? { project: id, done: 0, fromB: true } : { project: id, done: 0 };
     return c;
   }
 
@@ -230,7 +315,6 @@ export class Construction {
     // Бригады решают, куда ехать (и возвращаются на базы, когда проектов нет).
     this.crews.tick();
     if (!this.projects.size) return;
-    let opened = false;
     for (const p of [...this.projects.values()]) {
       // Недостроенное снесли (бульдозер, рамка) — проекта больше нет; достроенным он не считается.
       if (!this.corridorsOf(p.id).length) {
@@ -238,14 +322,12 @@ export class Construction {
         continue;
       }
       if (p.paused || !this.advance(p, dt)) continue;
-      opened = true;
       if (!this.corridorsOf(p.id).length) {
         this.projects.delete(p.id);
         this.host.projectEvent?.('done', p);
       }
     }
     this.stamp++;
-    if (opened) this.host.networkChanged();
   }
 
   /** Проект вперёд на dt секунд: метры, деньги за них, готовые участки открываются. true — открыт участок. */
@@ -253,6 +335,8 @@ export class Construction {
     const net = this.host.roads.net;
     let left = dt;
     let opened = false;
+    /** Узел, у которого кончился последний готовый участок (там бригады, если проект достроен). */
+    let last: number | null = null;
     // Участок кончился посреди такта — остаток времени идёт на следующий (не больше нескольких за такт).
     for (let guard = 0; left > 1e-9 && guard < 8; guard++) {
       const c = this.current(p.id);
@@ -292,14 +376,16 @@ export class Construction {
         net.touch(c);
         p.builtLen += c.length;
         opened = true;
+        last = b.fromB ? c.a : c.b;
+        // Граф движения — сразу: подъезд к следующему участку — по только что открытому (accessRank).
+        this.host.networkChanged();
       } else c.build = { ...b, done };
     }
-    // Бригады на месте — у нового края работ.
-    const cur = this.current(p.id);
-    if (cur) {
-      const f = this.frontOn(cur);
-      this.crews.follow(p.id, f.pos, this.host.onRoad(f.node) ? f.node : null);
-    }
+    // Бригады на месте — у нового края работ (съехали с дороги у узла подъезда); проект достроен — у конца последнего
+    // участка: оттуда они и поедут дальше по уже готовой дороге.
+    const site = this.site(p.id);
+    if (site) this.crews.follow(p.id, site.pos, site.node);
+    else if (last !== null && !this.corridorsOf(p.id).length) this.crews.follow(p.id, net.node(last).pos, last);
     return opened;
   }
 
@@ -349,6 +435,7 @@ export class Construction {
       at: weight > 0 ? { x: mid.x / weight, y: mid.y / weight } : (front ?? { x: 0, y: 0 }),
       secondsPlus: plus !== null ? (seconds * k) / plus : null,
       stages: stages.map((s) => (length > 0 ? Math.min(1, s / length) : 1)) as [number, number, number],
+      access: this.site(id) !== null,
     };
   }
 

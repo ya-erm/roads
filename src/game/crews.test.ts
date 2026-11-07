@@ -1,18 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
 import { dist, type Vec } from '../core/vec';
-import type { WorldSettings } from '../world/settings';
+import { advise } from './advisor';
 import { type Brigade, type CrewHost, Crews, type Site } from './crews';
 import { Game } from './game';
 import { anchorOf, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { projectBadges } from '../render/projectBadges';
+import { projectCardHtml } from '../ui/projectCard';
+import type { WorldSettings } from '../world/settings';
 
-/** Бригады без игры: проекты и края работ — вручную, дорога — как скажет drive. */
-function bench(drive: CrewHost['drive'] = () => null) {
+/**
+ * Бригады без игры: проекты, узлы подъезда, края работ и пути вдоль стройки — вручную; доехать по дорогам — как скажет
+ * reach, выехать машиной — как скажет drive.
+ */
+function bench(drive: CrewHost['drive'] = () => 42, reach: CrewHost['reach'] = () => true) {
   const sites = new Map<number, Site>();
+  const paths = new Map<number, Vec[]>();
+  /** Проекты, которым нужны бригады (нет в списке — на паузе). */
+  const paused = new Set<number>();
   const host = {
     time: 0,
-    crewProjects: () => [...sites.keys()],
+    crewProjects: () => [...sites.keys()].filter((id) => !paused.has(id)),
     site: (id: number) => sites.get(id) ?? null,
+    path: (id: number) => paths.get(id) ?? null,
+    reach,
     drive,
     park: () => {},
     onRoad: (node: number) => node >= 0,
@@ -29,7 +40,7 @@ function bench(drive: CrewHost['drive'] = () => null) {
       crews.tick();
     }
   };
-  return { host, crews, sites, b, until };
+  return { host, crews, sites, paths, paused, b, until };
 }
 
 const near = (a: Vec | undefined, b: Vec) => {
@@ -37,193 +48,273 @@ const near = (a: Vec | undefined, b: Vec) => {
   expect(dist(a!, b)).toBeLessThan(1e-6);
 };
 
-describe('Бригады: сеть разорвана', () => {
-  it('оба конца у дорог, но пути между ними нет — бригада не ждёт вечно, а едет своим ходом и строит', () => {
-    // Как в партии из баг-репорта: ворота базы и край работ — узлы дорог, но в разных кусках сети (их соединит проект).
-    const { host, crews, sites, b, until } = bench(() => null);
-    const site = { x: 600, y: 0 };
-    sites.set(7, { node: 571, pos: site });
-    crews.tick();
-    expect(b.state).toBe('going');
-    expect(b.sim).toBeUndefined();
-    expect(b.eta).toBeCloseTo(600 / CONSTRUCTION.offroad, 9);
-    expect(b.trip).toEqual({ from: { x: 0, y: 0 }, to: site, t0: 0 });
-    until(b.eta! + 0.1);
-    expect(b.state).toBe('working');
-    expect(crews.working(7)).toEqual([b]);
-    expect(host.time).toBeGreaterThan(0);
+/** Проект 7: подъезд — узел 571 в (600, 0), край работ — в 300 м вдоль стройки к северу. */
+function site7(t: ReturnType<typeof bench>) {
+  const node = { x: 600, y: 0 };
+  const front = { x: 600, y: -300 };
+  t.sites.set(7, { node: 571, pos: front });
+  t.paths.set(7, [node, { x: 600, y: -150 }, front]);
+  return { node, front };
+}
+
+describe('Бригады: только по дорогам и вдоль стройки', () => {
+  it('до узла подъезда по дорогам не доехать — бригада не едет и по полю не ездит', () => {
+    const t = bench(() => null, () => false);
+    site7(t);
+    t.until(5);
+    expect(t.b.state).toBe('idle');
+    expect(t.b.sim).toBeUndefined();
+    expect(t.b.eta).toBeUndefined();
+    expect(t.b.trip).toBeUndefined();
+    expect(t.crews.working(7)).toEqual([]);
   });
 
-  it('путь есть, но на выезде нет места — ждёт и выезжает машиной, своим ходом не едет', () => {
+  it('путь есть, но на выезде нет места — ждёт и выезжает машиной', () => {
     let tries = 0;
-    const { crews, sites, b } = bench(() => (++tries < 3 ? 'busy' : 42));
-    sites.set(7, { node: 571, pos: { x: 600, y: 0 } });
-    crews.tick();
-    crews.tick();
-    expect(b.sim).toBeUndefined();
-    expect(b.eta).toBeUndefined();
-    crews.tick();
-    expect(b.sim).toBe(42);
-    expect(b.eta).toBeUndefined();
+    const t = bench(() => (++tries < 3 ? 'busy' : 42));
+    site7(t);
+    t.crews.tick();
+    t.crews.tick();
+    expect(t.b.state).toBe('going');
+    expect(t.b.sim).toBeUndefined();
+    expect(t.b.eta).toBeUndefined();
+    t.crews.tick();
+    expect(t.b.sim).toBe(42);
+    expect(t.b.eta).toBeUndefined();
   });
 
-  it('домой — так же: пути до ворот нет — своим ходом, место занято — ждёт', () => {
-    const { crews, sites, b, until } = bench(() => null);
-    sites.set(7, { node: 571, pos: { x: 300, y: 400 } });
-    crews.tick();
-    until(b.eta! + 0.1);
-    expect(b.state).toBe('working');
-    sites.delete(7);
-    crews.tick();
-    expect(b.state).toBe('back');
-    expect(b.eta).toBeDefined();
-    expect(b.trip?.to).toEqual({ x: 0, y: 0 });
-    until(b.eta! + 0.1);
-    expect(b.state).toBe('idle');
-  });
-});
-
-describe('Бригады: своим ходом видно, где едет', () => {
-  it('по прямой от места выезда к стройке, по времени выезда и eta; после загрузки — там же', () => {
-    const { host, crews, sites, b, until } = bench();
-    const site = { x: 900, y: 1200 };
-    sites.set(7, { node: null, pos: site });
-    crews.tick();
-    const eta = b.eta!;
-    expect(eta).toBeCloseTo(1500 / CONSTRUCTION.offroad, 9);
-    near(crews.offroadAt(b)?.pos, { x: 0, y: 0 });
-    expect(crews.offroadAt(b)?.dir.x).toBeCloseTo(0.6, 9);
-    expect(crews.offroadAt(b)?.dir.y).toBeCloseTo(0.8, 9);
-    until(eta / 2);
-    const k = host.time / eta;
-    near(crews.offroadAt(b)?.pos, { x: 900 * k, y: 1200 * k });
+  it('машиной до узла подъезда, оттуда — вдоль стройки к краю работ: видно, где едет; сохранение посреди пути', () => {
+    const t = bench();
+    const { node, front } = site7(t);
+    t.crews.tick();
+    expect(t.b.sim).toBe(42);
+    // Машина доехала до узла подъезда (Game.onArrive).
+    t.crews.arrive(t.b, { node: 571, pos: node });
+    expect(t.b.state).toBe('going');
+    expect(t.b.at).toBe(571);
+    expect(t.b.trip?.path).toEqual(t.paths.get(7));
+    const eta = t.b.eta!;
+    expect(eta).toBeCloseTo(300 / CONSTRUCTION.onSite, 9);
+    near(t.crews.walkAt(t.b)?.pos, node);
+    expect(t.crews.walkAt(t.b)?.dir).toEqual({ x: 0, y: -1 });
+    t.until(eta / 2);
+    near(t.crews.walkAt(t.b)?.pos, { x: 600, y: (-300 * t.host.time) / eta });
     // Сохранение и загрузка посреди пути: та же поездка и та же точка.
-    const save = JSON.parse(JSON.stringify(crews.toSave()));
-    expect(save.brigades[0].trip).toEqual({ from: { x: 0, y: 0 }, to: site, t0: 0 });
+    const save = JSON.parse(JSON.stringify(t.crews.toSave()));
     const other = bench();
-    other.host.time = host.time;
-    other.sites.set(7, { node: null, pos: site });
+    other.host.time = t.host.time;
+    site7(other);
     other.crews.load(save);
-    const twin = other.crews.brigades.get(b.id)!;
-    expect(other.crews.offroadAt(twin)).toEqual(crews.offroadAt(b));
-    // И дальше — одинаково: доезжают в один такт.
-    until(eta + 0.2);
+    const twin = other.crews.brigades.get(t.b.id)!;
+    expect(other.crews.walkAt(twin)).toEqual(t.crews.walkAt(t.b));
+    t.until(eta + 0.2);
     other.until(eta + 0.2);
-    expect(b.state).toBe('working');
-    expect(other.crews.toSave()).toEqual(crews.toSave());
-    expect(crews.offroadAt(b)).toBeNull();
+    expect(t.b.state).toBe('working');
+    near(t.b.pos, front);
+    expect(other.crews.toSave()).toEqual(t.crews.toSave());
+    expect(t.crews.walkAt(t.b)).toBeNull();
   });
 
-  it('старое сохранение (eta без trip): тоже видно — от места, где стояла, к стройке', () => {
-    const { host, crews, sites } = bench();
-    const site = { x: 0, y: 1500 };
-    sites.set(7, { node: null, pos: site });
-    const eta = 1500 / CONSTRUCTION.offroad;
-    host.time = eta / 4;
-    crews.load({
-      bases: [...crews.bases.values()],
-      brigades: [{ id: 5, base: 100, state: 'going', project: 7, eta } as Omit<Brigade, 'sim'>],
-      nextBrigade: 6,
+  it('уже у узла подъезда, а край работ у самого узла — сразу за работу', () => {
+    const t = bench();
+    t.sites.set(7, { node: 1, pos: { x: 0, y: 0 } });
+    t.paths.set(7, [{ x: 0, y: 0 }]);
+    t.crews.tick();
+    expect(t.b.state).toBe('working');
+    expect(t.b.sim).toBeUndefined();
+  });
+
+  it('проект на паузе — назад вдоль стройки к дороге, оттуда машиной домой', () => {
+    let cars = 0;
+    const t = bench(() => ++cars);
+    const { node, front } = site7(t);
+    t.crews.tick();
+    t.crews.arrive(t.b, { node: 571, pos: node });
+    t.until(t.b.eta! + 0.2);
+    expect(t.b.state).toBe('working');
+    t.paused.add(7);
+    t.crews.tick();
+    expect(t.b.state).toBe('back');
+    expect(t.b.trip?.back).toBe(true);
+    near(t.crews.walkAt(t.b)?.pos, front);
+    t.until(t.host.time + 300 / CONSTRUCTION.onSite + 0.3);
+    // Доехала до дороги — домой машиной от узла подъезда.
+    expect(t.b.trip).toBeUndefined();
+    expect(t.b.sim).toBe(cars);
+    t.crews.arrive(t.b, { node: 1, pos: { x: 0, y: 0 } });
+    expect(t.b.state).toBe('idle');
+    expect(t.b.pos).toBeUndefined();
+  });
+
+  it('машину бригады потеряли (дорогу снесли) — бригада на базе и выезжает оттуда заново', () => {
+    const t = bench();
+    site7(t);
+    t.crews.tick();
+    expect(t.b.sim).toBe(42);
+    t.crews.lost(t.b);
+    expect(t.b.sim).toBeUndefined();
+    expect(t.b.pos).toBeUndefined();
+    expect(t.b.at).toBeUndefined();
+    t.crews.tick();
+    expect(t.b.sim).toBe(42);
+  });
+
+  it('старое сохранение: ехала по полю (trip from → to) — открывается, бригада на базе и едет по дороге', () => {
+    const t = bench();
+    site7(t);
+    t.host.time = 10;
+    t.crews.load({
+      bases: [...t.crews.bases.values()],
+      brigades: [
+        { id: 5, base: 100, state: 'going', project: 7, pos: { x: 50, y: 50 }, eta: 30, trip: { from: { x: 0, y: 0 }, to: { x: 600, y: -300 }, t0: 0 } } as unknown as Omit<Brigade, 'sim'>,
+        { id: 6, base: 100, state: 'back', pos: { x: 70, y: 70 }, eta: 20 } as Omit<Brigade, 'sim'>,
+      ],
+      nextBrigade: 7,
       firstUsed: true,
     });
-    const b = crews.brigades.get(5)!;
-    near(crews.offroadAt(b)?.pos, { x: 0, y: 375 });
-  });
-
-  it('проект отменили посреди пути — бригада стоит там, куда доехала, и едет домой оттуда', () => {
-    const { host, crews, sites, b, until } = bench();
-    sites.set(7, { node: null, pos: { x: 1000, y: 0 } });
-    crews.tick();
-    until(b.eta! / 2);
-    const mid = crews.offroadAt(b)!.pos;
-    sites.delete(7);
-    crews.tick();
-    expect(b.state).toBe('back');
-    // Домой — от середины пути, а не прыжком с места выезда.
-    expect(dist(b.trip!.from, mid)).toBeLessThan(CONSTRUCTION.offroad * 0.1 + 1e-6);
-    expect(b.trip!.to).toEqual({ x: 0, y: 0 });
-    expect(b.trip!.t0).toBe(host.time);
-  });
-
-  it('машину бригады потеряли (дорогу снесли) — дальше своим ходом от того места, где была машина', () => {
-    const { crews, sites, b } = bench(() => 42);
-    sites.set(7, { node: 571, pos: { x: 1000, y: 0 } });
-    crews.tick();
-    expect(b.sim).toBe(42);
-    crews.lost(b, { x: 400, y: 30 });
-    expect(b.sim).toBeUndefined();
-    expect(b.trip?.from).toEqual({ x: 400, y: 30 });
-    near(crews.offroadAt(b)?.pos, { x: 400, y: 30 });
+    const a = t.crews.brigades.get(5)!;
+    const b = t.crews.brigades.get(6)!;
+    expect(a).toEqual({ id: 5, base: 100, state: 'going', project: 7 });
+    expect(b).toEqual({ id: 6, base: 100, state: 'idle' });
+    expect(t.crews.walkAt(a)).toBeNull();
+    t.crews.tick();
+    expect(a.sim).toBe(42);
   });
 });
 
-describe('Бригады в игре: сеть разорвана', () => {
+describe('Бригады в игре: нет подъезда', () => {
   const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
-  /** Партия: база у улиц города, а проект начинается с отдельной дороги в поле, которую с городом ничто не связывает. */
-  function setup(): { game: Game; project: number } {
-    const game = withoutCitizens(new Game(WORLD));
+  /** Первая база — у улиц самого большого города. */
+  function townBase(game: Game): void {
     const town = [...game.towns].sort((a, b) => b.population - a.population || a.id - b.id)[0];
-    let placed = false;
     for (const k of [1, 0.75, 1.3, 0.5, 1.7]) {
-      for (let i = 0; i < 24 && !placed; i++) {
+      for (let i = 0; i < 24; i++) {
         const a = (i / 24) * Math.PI * 2;
         const p = { x: town.center.x + Math.cos(a) * town.radius * k, y: town.center.y + Math.sin(a) * town.radius * k };
         const plan = game.basePlan(p);
-        placed = plan.ok && !plan.demolish.length && game.buildBase(p) === null;
+        if (plan.ok && !plan.demolish.length && game.buildBase(p) === null) return;
       }
     }
-    expect(placed).toBe(true);
-    const base = [...game.construction.crews.bases.values()][0];
-    // Отдельная готовая дорога в поле подальше от города и проект от её конца.
+    throw new Error('нет места для базы');
+  }
+
+  /** Узел дороги в точке p (в пределах метра). */
+  const nodeAt = (game: Game, p: Vec) => [...game.roads.net.nodes.values()].find((n) => dist(n.pos, p) < 1)?.id ?? null;
+
+  /** Проект улицей от a до b (как рисует игрок). */
+  const project = (game: Game, a: number | Vec, b: number | Vec) => {
+    const end = (x: number | Vec) => anchorOf(game, typeof x === 'number' ? x : { free: x });
+    const plan = game.roadBuilder.road(end(a), end(b), STREET, { project: true });
+    return plan.ok && game.roadBuilder.apply(plan);
+  };
+
+  /** Место в поле, далеко от городов: ровная полоса в len метров вдоль x. */
+  function field(game: Game, len: number): Vec {
     for (let y = 400; y < game.terrain.height - 400; y += 120) {
-      for (let x = 300; x < game.terrain.width - 1200; x += 160) {
-        if (dist({ x, y }, town.center) < town.radius + 900) continue;
-        const before = new Set(game.roads.net.nodes.keys());
-        if (!road(game, { free: { x, y } }, { free: { x: x + 300, y } }, STREET)) continue;
-        // Стройка заменяет сеть копией — узлы ищем в новой.
-        const end = [...game.roads.net.nodes.values()].filter((n) => !before.has(n.id)).sort((p, q) => q.pos.x - p.pos.x)[0];
-        if (!end || !game.onRoad(end.id) || game.roads.route(base.nodeId, end.id)) continue;
-        const id = game.construction.peekId();
-        const plan = game.roadBuilder.road(anchorOf(game, end.id), anchorOf(game, { free: { x: x + 900, y } }), STREET, { project: true });
-        if (plan.ok && game.roadBuilder.apply(plan)) return { game, project: id };
+      for (let x = 300; x < game.terrain.width - len - 300; x += 160) {
+        if (game.towns.some((t) => dist({ x: x + len / 2, y }, t.center) < t.radius + len)) continue;
+        const plan = game.roadBuilder.road(anchorOf(game, { free: { x, y } }), anchorOf(game, { free: { x: x + len, y } }), STREET);
+        if (plan.ok && !plan.demolish.length) return { x, y };
       }
     }
     throw new Error('нет места');
   }
 
-  it('ворота базы и край работ — у дорог, пути нет: бригада едет своим ходом, её видно в пути, проект строится', () => {
-    const { game, project } = setup();
+  it('проект от отдельной дороги в поле: бригада не едет; видно «нет подъезда» — плашка, карточка, советник; база рядом — строит', () => {
+    const game = withoutCitizens(new Game(WORLD));
+    townBase(game);
     const crews = game.construction.crews;
     const b = [...crews.brigades.values()][0];
-    runSeconds(game, 0.2);
-    expect(b.state).toBe('going');
-    expect(b.project).toBe(project);
-    expect(b.eta).toBeDefined();
-    // В пути: самосвал на карте и «показать на карте» — там же, между базой и стройкой.
-    runSeconds(game, Math.min(5, (b.eta! - game.time) / 2));
-    const at = crews.offroadAt(b)!.pos;
-    expect(game.offroadCrewLooks().map((v) => v.pos)).toEqual([at]);
-    expect(game.brigadeWhere(b.id)).toEqual({ pos: at, text: `едет строить «${game.construction.info(project)!.project.label}» по бездорожью` });
-    const base = crews.bases.get(b.base)!;
-    const site = game.construction.site(project)!.pos;
-    expect(dist(at, base.fp.center)).toBeGreaterThan(1);
-    expect(dist(at, site)).toBeLessThan(dist(base.fp.center, site));
-    runSeconds(game, b.eta! - game.time + 1);
-    expect(b.state).toBe('working');
-    runSeconds(game, 5);
-    expect(game.construction.info(project)!.done).toBeGreaterThan(0);
+    const at = field(game, 900);
+    // Отдельная готовая дорога (с городом её ничто не связывает) и проект от её конца в поле.
+    expect(road(game, { free: at }, { free: { x: at.x + 300, y: at.y } })).toBe(true);
+    const end = nodeAt(game, { x: at.x + 300, y: at.y })!;
+    const id = game.construction.peekId();
+    expect(project(game, end, { x: at.x + 900, y: at.y })).toBe(true);
+    runSeconds(game, 10);
+    expect(b.state).toBe('idle');
+    expect(b.eta).toBeUndefined();
+    expect(game.siteCrewLooks()).toEqual([]);
+    const info = game.construction.info(id)!;
+    expect(info.access).toBe(false);
+    expect(info.done).toBe(0);
+    expect(game.construction.site(id)).toBeNull();
+    // Почему стоит — на плашке, в карточке и у советника.
+    expect(projectBadges(game, 1).find((x) => x.id === id)?.text).toContain('нет подъезда');
+    const card = projectCardHtml(game, id);
+    expect(card).toContain('Нет подъезда');
+    expect(card).toContain('data-action="base-place"');
+    const tip = advise(game).find((a) => a.kind === 'buildNoAccess');
+    expect(tip?.title).toBe('Нет подъезда к стройке');
+    expect(tip?.fix).toEqual({ kind: 'base' });
+    // База у этой дороги: её ворота — узел той же дороги, бригада доезжает и строит.
+    expect(game.buildBase({ x: at.x + 150, y: at.y - 40 })).toBeNull();
+    expect(game.construction.info(id)!.access).toBe(true);
+    for (let t = 0; t < 60 && !game.construction.info(id)!.done; t += 0.5) runSeconds(game, 0.5);
+    expect(game.construction.info(id)!.done).toBeGreaterThan(0);
+    expect(advise(game).some((a) => a.kind === 'buildNoAccess')).toBe(false);
   });
 
-  it('сохранение посреди поездки своим ходом: после загрузки — там же, и дальше всё одинаково', () => {
-    const { game } = setup();
-    runSeconds(game, 3);
-    const b = [...game.construction.crews.brigades.values()][0];
-    expect(b.trip).toBeDefined();
+  it('проект от тупика готовой дороги в поле к отдельной дороге: работы — от тупика, бригада к дальнему концу не едет', () => {
+    const game = withoutCitizens(new Game(WORLD));
+    const at = field(game, 1500);
+    // Своя дорога с базой (её тупик — в at.x + 300) и отдельная дорога дальше по полю, к которой подъезда нет.
+    expect(road(game, { free: at }, { free: { x: at.x + 300, y: at.y } })).toBe(true);
+    expect(road(game, { free: { x: at.x + 1200, y: at.y } }, { free: { x: at.x + 1500, y: at.y } })).toBe(true);
+    expect(game.buildBase({ x: at.x + 120, y: at.y - 40 })).toBeNull();
+    const deadEnd = nodeAt(game, { x: at.x + 300, y: at.y })!;
+    const far = nodeAt(game, { x: at.x + 1200, y: at.y })!;
+    const base = [...game.construction.crews.bases.values()][0];
+    expect(game.reach(base.nodeId, deadEnd)).toBe(true);
+    expect(game.reach(base.nodeId, far)).toBe(false);
+    // Проект рисуют от дальнего конца к тупику: прежде стройка начиналась у дальнего (он тоже у готовой дороги).
+    const id = game.construction.peekId();
+    expect(project(game, far, deadEnd)).toBe(true);
+    expect(game.construction.corridorsOf(id).length).toBeGreaterThan(0);
+    const site = game.construction.site(id)!;
+    expect(site.node).toBe(deadEnd);
+    const crews = game.construction.crews;
+    const b = [...crews.brigades.values()][0];
+    const farPos = game.roads.net.node(far).pos;
+    const deadPos = game.roads.net.node(deadEnd).pos;
+    let closest = Infinity;
+    for (let t = 0; t < 40; t += 0.2) {
+      runSeconds(game, 0.2);
+      const where = game.brigadeWhere(b.id)!.pos;
+      closest = Math.min(closest, dist(where, farPos));
+    }
+    expect(b.state).toBe('working');
+    const info = game.construction.info(id)!;
+    expect(info.done).toBeGreaterThan(0);
+    // Край работ — от тупика к дальнему концу; бригада к дальнему концу не ездила.
+    expect(dist(info.front!, deadPos)).toBeLessThan(dist(info.front!, farPos));
+    expect(closest).toBeGreaterThan(dist(farPos, deadPos) - dist(info.front!, deadPos) - 50);
+  });
+
+  it('сохранение посреди поездки вдоль стройки: после загрузки — там же, и дальше всё одинаково', () => {
+    const game = withoutCitizens(new Game(WORLD));
+    const at = field(game, 900);
+    expect(road(game, { free: at }, { free: { x: at.x + 300, y: at.y } })).toBe(true);
+    expect(game.buildBase({ x: at.x + 120, y: at.y - 40 })).toBeNull();
+    const deadEnd = nodeAt(game, { x: at.x + 300, y: at.y })!;
+    expect(project(game, deadEnd, { x: at.x + 900, y: at.y })).toBe(true);
+    const crews = game.construction.crews;
+    const [first] = [...crews.brigades.values()];
+    // Работает первая — вторая (нанятая позже) поедет от узла вдоль стройки к ушедшему вперёд краю.
+    for (let t = 0; t < 60 && first.state !== 'working'; t += 0.1) runSeconds(game, 0.1);
+    runSeconds(game, 20);
+    expect(game.hireBrigade(first.base)).toBeNull();
+    const second = [...crews.brigades.values()][1];
+    for (let t = 0; t < 60 && second.eta === undefined; t += 0.1) runSeconds(game, 0.1);
+    expect(second.trip).toBeDefined();
+    runSeconds(game, 0.3);
     const loaded = withoutCitizens(new Game(WORLD, JSON.parse(JSON.stringify(game.toSave()))));
-    const twin = loaded.construction.crews.brigades.get(b.id)!;
-    expect(loaded.construction.crews.offroadAt(twin)).toEqual(game.construction.crews.offroadAt(b));
-    for (const g of [game, loaded]) runSeconds(g, 60);
+    const twin = loaded.construction.crews.brigades.get(second.id)!;
+    expect(loaded.construction.crews.walkAt(twin)).toEqual(crews.walkAt(second));
+    expect(loaded.siteCrewLooks().map((v) => v.pos)).toEqual(game.siteCrewLooks().map((v) => v.pos));
+    expect(game.brigadeWhere(second.id)!.text).toContain('вдоль стройки');
+    for (const g of [game, loaded]) runSeconds(g, 30);
     expect(loaded.construction.crews.toSave()).toEqual(game.construction.crews.toSave());
     expect(loaded.money).toBe(game.money);
     expect(JSON.stringify(loaded.roads.net.toJSON())).toBe(JSON.stringify(game.roads.net.toJSON()));

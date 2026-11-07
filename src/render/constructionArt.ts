@@ -4,7 +4,10 @@
  *   LaneRenderer только по строящимся полотнам), полупрозрачной, с кромками синим пунктиром; по слоям высоты, как
  *   готовые дороги, в плитки кэша карты;
  * - этапы на строящемся участке (CONSTRUCTION.stages, идут колонной): 🟫 отсыпка, ⬛ покрытие, ⬜ разметка — до края
- *   каждого, шагами CONSTRUCTION.drawStep: плитки обновляются по шагу, а не каждый такт (projectSig);
+ *   каждого, шагами CONSTRUCTION.drawStep: плитки обновляются по шагу, а не каждый такт (projectSig); отсыпка — не по
+ *   площадке перекрёстка (там бывает готовая дорога), площадка — этапом, дошедшим до неё (nodeStage);
+ * - тень мостов проекта — отдельным проходом под готовыми дорогами (drawProjectShadows): готовое — обычной, остальное —
+ *   бледной;
  * - площадки строительных баз — тоже в плитках (drawBases);
  * - колонна техники (у каждого этапа своя машина у своего края, crewConvoy), самосвалы свободных бригад на базе и
  *   подпись «🏗 45%» — поверх, в динамическом проходе кадра, не в плитках.
@@ -12,7 +15,7 @@
  */
 import { CONSTRUCTION } from '../config';
 import { add, rightNormal, scale, type Vec } from '../core/vec';
-import { convoyGap, frontOf, stageSpans } from '../game/constructionWork';
+import { convoyGap, frontOf, nextSite, type StageReach, stageLayout, stageSpans } from '../game/constructionWork';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import type { LaneRenderer } from '../lanes/draw';
 import { edgesAt, pointOff, stations } from '../lanes/geometry';
@@ -20,7 +23,7 @@ import type { Corridor, LaneNet } from '../lanes/model';
 import { corridorLayer } from '../lanes/speedDisplay';
 import type { BuildBase } from '../world/entities';
 import { ROAD_MARGIN } from '../world/roadTypes';
-import type { Box } from './tileCache';
+import { type Box, grow } from './tileCache';
 
 /** Строящиеся полотна сети — кэш по версии (стройка меняет её, когда закладывает или открывает участок). */
 const cache = new WeakMap<LaneNet, { version: number; list: Corridor[] }>();
@@ -33,10 +36,72 @@ export function buildingCorridors(net: LaneNet): Corridor[] {
   return list;
 }
 
+const joints = new WeakMap<LaneNet, { version: number; open: LaneNet; ids: Set<number> }>();
+
+/**
+ * Узлы, где готовую дорогу продолжает проект: в открытой для движения сети open (без строящегося) это тупики, но
+ * разворота (и его тени у моста) там рисовать не надо — дальше идёт будущая дорога. Кэш — по версии всей сети full.
+ */
+export function projectJoints(open: LaneNet, full: LaneNet): Set<number> {
+  const hit = joints.get(full);
+  if (hit && hit.version === full.version && hit.open === open) return hit.ids;
+  const ids = new Set<number>();
+  for (const c of buildingCorridors(full)) {
+    for (const id of [c.a, c.b]) {
+      const n = open.nodes.get(id);
+      if (n && open.isDeadEnd(n)) ids.add(id);
+    }
+  }
+  joints.set(full, { version: full.version, open, ids });
+  return ids;
+}
+
 /** Готовое на карте — целыми шагами drawStep (последний шаг — только когда участок готов целиком). */
 export function drawnDone(c: Corridor): number {
   const done = c.build?.done ?? 0;
   return Math.min(c.length, Math.floor(done / CONSTRUCTION.drawStep) * CONSTRUCTION.drawStep);
+}
+
+/** Готовое на полотне c (как нарисовано, drawnDone): где отсыпка и какой этап дошёл до узлов на концах (stageLayout). */
+export function projectLayout(c: Corridor, cuts: Map<number, [number, number]>): ReturnType<typeof stageLayout> {
+  const [ca, cb] = cuts.get(c.id) ?? [0, 0];
+  return stageLayout(stageSpans(drawnDone(c), c.length), c.length, !!c.build?.fromB, ca, cb);
+}
+
+/**
+ * Этап готового на площадке узла id (перекрёсток, стык, тупик проекта) — дальний из дошедших до неё по строящимся
+ * полотнам (lanes — отрисовка проектов: её обрезы у перекрёстков). Отсыпки нет, если к узлу подходит готовая дорога:
+ * площадка там уже под асфальтом и до покрытия остаётся чертежом.
+ */
+export function nodeStage(net: LaneNet, lanes: LaneRenderer, id: number): StageReach {
+  const k = nodeReach(net, lanes, id);
+  const paved = net.nodes.get(id)?.corridors.some((cid) => !net.corridor(cid).build) ?? false;
+  return k === 0 && paved ? -1 : k;
+}
+
+/** Дальний этап, дошедший до узла id по строящимся полотнам (−1 — никакой), без оглядки на готовые дороги у него. */
+export function nodeReach(net: LaneNet, lanes: LaneRenderer, id: number): StageReach {
+  const n = net.nodes.get(id);
+  if (!n) return -1;
+  const cuts = lanes.cutsOf(net);
+  let k: StageReach = -1;
+  for (const cid of n.corridors) {
+    const c = net.corridor(cid);
+    if (!c.build) continue;
+    const { reach } = projectLayout(c, cuts);
+    if (c.a === id) k = Math.max(k, reach.a) as StageReach;
+    if (c.b === id) k = Math.max(k, reach.b) as StageReach;
+  }
+  return k;
+}
+
+/** Узлы проектов (площадки перекрёстков, стыки, тупики) с рамками — как их рисует lanes. */
+export function projectNodes(net: LaneNet, lanes: LaneRenderer): { id: number; box: Box }[] {
+  const out: { id: number; box: Box }[] = [];
+  lanes.eachItem(net, (kind, id, _sig, box) => {
+    if (kind === 'node') out.push({ id, box });
+  });
+  return out;
 }
 
 /** Подпись строящегося полотна для кэша плиток: форма (ревизия) и сколько готового нарисовано. */
@@ -58,15 +123,19 @@ export function projectBox(c: Corridor): Box {
 
 const seen = (b: Box, view: Box) => !(b.x1 < view.x0 || b.x0 > view.x1 || b.y1 < view.y0 || b.y0 > view.y1);
 
-/** Кромки полотна на [s0, s1]: левая и правая (с обочиной pad), у моста — подняты, как у готового. */
-function band(net: LaneNet, c: Corridor, s0: number, s1: number, pad: number): { left: Vec[]; right: Vec[] } {
+/**
+ * Кромки полотна на [s0, s1]: левая и правая (с обочиной pad), у моста — подняты, как у готового; shade — не само
+ * полотно, а его тень на земле (сдвинута по высоте, как у отрисовки дорог).
+ */
+function band(net: LaneNet, c: Corridor, s0: number, s1: number, pad: number, shade = false): { left: Vec[]; right: Vec[] } {
   const left: Vec[] = [];
   const right: Vec[] = [];
   const raised = Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
   for (const s of stations(c, s0, s1, 5)) {
     const e = edgesAt(c, s);
     if (!e) continue;
-    const d = raised ? bridgeLook(deckAlong(net, c, s)).lift : null;
+    const look = raised ? bridgeLook(deckAlong(net, c, s)) : null;
+    const d = look && (shade ? look.shadow : look.lift);
     const up = (p: Vec) => (d ? add(p, d) : p);
     left.push(up(pointOff(c, s, e[0] - pad)));
     right.push(up(pointOff(c, s, e[1] + pad)));
@@ -83,6 +152,8 @@ function poly(ctx: CanvasRenderingContext2D, pts: Vec[]): void {
 const GHOST = 0.55;
 /** Оттенок будущей дороги — синий проекта. */
 const PROJECT_TINT = 'rgba(47, 128, 237, 0.3)';
+/** Отсыпка — цвет земляного полотна. */
+const EARTH = '#c4a57c';
 
 /** Чистые холсты для полупрозрачного слоя — по размеру холста, куда рисуем (экран или плитка кэша карты). */
 const scratch = new Map<string, CanvasRenderingContext2D>();
@@ -153,6 +224,49 @@ function clipped(ctx: CanvasRenderingContext2D, b: { left: Vec[]; right: Vec[] }
   ctx.restore();
 }
 
+/** Рамка полупрозрачного слоя проектов в view: полотна и узлы с запасом на площадки перекрёстков и тень. */
+function ghostClip(list: Corridor[], nodes: { box: Box }[], view: Box): Box {
+  const pad = 60;
+  const box = [...list.map(projectBox), ...nodes.map((n) => n.box)].reduce((a, b) => ({ x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) }));
+  return { x0: Math.max(view.x0, box.x0 - pad), y0: Math.max(view.y0, box.y0 - pad), x1: Math.min(view.x1, box.x1 + pad), y1: Math.min(view.y1, box.y1 + pad) };
+}
+
+/**
+ * Тень мостов проектов слоя layer на земле — до готовых дорог этого слоя (их полотна её закрывают, как у готового
+ * моста). Готовое (с отсыпки: мост уже стоит) — обычной тенью, не начатое — бледной; каждая — только по своему куску
+ * полотна (в полосе тени, сдвинутой по высоте), на стыке — ни щели, ни двойной тени; площадки узлов — по дошедшему
+ * до них этапу (nodeReach). Под полотном самого проекта тени нет: его не начатое полупрозрачно, и тень сквозь него
+ * темнила бы его пятнами.
+ */
+export function drawProjectShadows(ctx: CanvasRenderingContext2D, net: LaneNet, lanes: LaneRenderer, zoom: number, view: Box, layer: number): void {
+  if (layer < 0) return;
+  const list = buildingCorridors(net).filter((c) => seen(projectBox(c), view));
+  const nodes = projectNodes(net, lanes).filter((n) => seen(n.box, view));
+  if ((!list.length && !nodes.length) || !lanes.layerIn(net, layer, view)) return;
+  const none = () => false;
+  const clip = ghostClip(list, nodes, view);
+  for (const built of [false, true]) {
+    drawFaded(ctx, clip, built ? 1 : GHOST, (g) => {
+      for (const c of list) {
+        const [earthTo] = stageSpans(drawnDone(c), c.length);
+        const [doneA, doneB] = c.build?.fromB ? [c.length - earthTo, c.length] : [0, earthTo];
+        const [s0, s1] = built ? [doneA, doneB] : c.build?.fromB ? [0, doneA] : [doneB, c.length];
+        if (s1 - s0 < 0.5) continue;
+        clipped(g, band(net, c, s0, s1, ROAD_MARGIN + 10, true), () =>
+          lanes.draw(g, net, zoom, false, view, layer, { corridor: (id) => id === c.id, node: none, shadow: 'only' }),
+        );
+      }
+      for (const n of nodes) {
+        if (nodeReach(net, lanes, n.id) >= 0 !== built) continue;
+        lanes.draw(g, net, zoom, false, view, layer, { corridor: none, node: (id) => id === n.id, shadow: 'only' });
+      }
+      // Под полотном проекта — без тени.
+      g.globalCompositeOperation = 'destination-out';
+      lanes.draw(g, net, zoom, false, view, layer, { shadow: 'skip', marks: false });
+    });
+  }
+}
+
 /**
  * Проекты стройки слоя высоты layer (−1 тоннели, 0 земля, 1 мосты, 2 эстакады) в рамке view. Не построенное — сама
  * будущая дорога (полотна и узлы проекта рисует lanes — как готовые: полосы, разметка, мост с парапетом и тенью),
@@ -162,21 +276,19 @@ function clipped(ctx: CanvasRenderingContext2D, b: { left: Vec[]; right: Vec[] }
  */
 export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes: LaneRenderer, zoom: number, view: Box, layer: number): void {
   const list = buildingCorridors(net).filter((c) => seen(projectBox(c), view));
-  if (!list.length) return;
+  // Площадки узлов проектов — по своим рамкам: у острого примыкания она длиннее запаса рамки полотна.
+  const nodes = projectNodes(net, lanes).filter((n) => seen(n.box, view));
+  if (!list.length && !nodes.length) return;
   ctx.save();
   ctx.lineJoin = 'round';
-  // Будущая дорога — одним полупрозрачным слоем, в рамке проектов (с запасом на площадки перекрёстков).
+  const cuts = lanes.cutsOf(net);
+  const none = () => false;
+  // Будущая дорога — одним полупрозрачным слоем, в рамке проектов (с запасом на площадки перекрёстков); тень мостов
+  // проекта — отдельно и раньше готовых дорог (drawProjectShadows).
   if (lanes.layerIn(net, layer, view)) {
-    const pad = 60;
-    const box = list.map(projectBox).reduce((a, b) => ({ x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) }));
-    const clip: Box = {
-      x0: Math.max(view.x0, box.x0 - pad),
-      y0: Math.max(view.y0, box.y0 - pad),
-      x1: Math.min(view.x1, box.x1 + pad),
-      y1: Math.min(view.y1, box.y1 + pad),
-    };
+    const clip = ghostClip(list, nodes, view);
     drawFaded(ctx, clip, GHOST, (g) => {
-      lanes.draw(g, net, zoom, false, view, layer);
+      lanes.draw(g, net, zoom, false, view, layer, { shadow: 'skip' });
       // Синеватый, как всё «проектное» (подсветка проекта, знаки, кромки), — только там, где уже нарисована дорога.
       g.globalCompositeOperation = 'source-atop';
       g.fillStyle = PROJECT_TINT;
@@ -186,20 +298,37 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
   // Этапы готового — непрозрачно, поверх будущей дороги.
   for (const c of list) {
     if (corridorLayer(net, c) !== layer) continue;
-    const [earthTo, paveTo, marksTo] = stageSpans(drawnDone(c), c.length);
+    const [, paveTo, marksTo] = stageSpans(drawnDone(c), c.length);
     const span = (to: number): [number, number] => (c.build?.fromB ? [c.length - to, c.length] : [0, to]);
-    if (earthTo > 0.5) {
-      const earth = band(net, c, ...span(earthTo), ROAD_MARGIN + 1.2);
-      ctx.fillStyle = '#c4a57c';
-      poly(ctx, [...earth.left, ...[...earth.right].reverse()]);
+    // Отсыпка — только по своему у полотна, не по площадке перекрёстка: там бывает уже готовая дорога.
+    const { earth } = projectLayout(c, cuts);
+    if (earth) {
+      const b = band(net, c, ...earth, ROAD_MARGIN + 1.2);
+      ctx.fillStyle = EARTH;
+      poly(ctx, [...b.left, ...[...b.right].reverse()]);
       ctx.closePath();
       ctx.fill();
     }
     // Покрытие и разметка — то же полотно, что у готовой дороги, в полосе готового (с запасом на бордюр и парапет).
     const only = (id: number) => id === c.id;
-    const none = () => false;
-    if (paveTo > 0.5) clipped(ctx, band(net, c, ...span(paveTo), ROAD_MARGIN + 3), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, marks: false }));
-    if (marksTo > 0.5) clipped(ctx, band(net, c, ...span(marksTo), ROAD_MARGIN + 3), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none }));
+    // Тень — уже нарисована (shadows): в полосе полотна от неё был бы лишь обрывок поверх.
+    if (paveTo > 0.5) clipped(ctx, band(net, c, ...span(paveTo), ROAD_MARGIN + 3), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, marks: false, shadow: 'skip' }));
+    if (marksTo > 0.5) clipped(ctx, band(net, c, ...span(marksTo), ROAD_MARGIN + 3), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
+  }
+  // Площадки узлов — этапом, дошедшим до них (nodeStage): покрытие — асфальтом площадки (у примыкания к готовой дороге
+  // закрывает и её разметку, как у готового перекрёстка), отсыпка — землёй по её контуру, если готовых дорог у узла нет.
+  for (const n of nodes) {
+    const k = nodeStage(net, lanes, n.id);
+    if (k < 0) continue;
+    const pick = { corridor: none, node: (id: number) => id === n.id, marks: k === 2, shadow: 'skip' as const };
+    if (k > 0) lanes.draw(ctx, net, zoom, false, view, layer, pick);
+    else
+      drawFaded(ctx, grow(n.box, 4), 1, (g) => {
+        lanes.draw(g, net, zoom, false, view, layer, pick);
+        g.globalCompositeOperation = 'source-atop';
+        g.fillStyle = EARTH;
+        g.fillRect(n.box.x0 - 4, n.box.y0 - 4, n.box.x1 - n.box.x0 + 8, n.box.y1 - n.box.y0 + 8);
+      });
   }
   // Кромки проекта — синим пунктиром: «это ещё проект». Тоннель — бледнее и поверх земли (его полотно — под ней).
   const px = 1 / Math.max(0.05, zoom);
@@ -211,7 +340,10 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
   for (const c of list) {
     const l = corridorLayer(net, c);
     if (Math.max(0, l) !== layer) continue;
-    const all = band(net, c, 0, c.length, ROAD_MARGIN);
+    // Только по своему у полотна: через площадку перекрёстка (и готовую дорогу на ней) кромки не идут.
+    const [ca, cb] = cuts.get(c.id) ?? [0, 0];
+    if (c.length - cb - ca < 1) continue;
+    const all = band(net, c, ca, c.length - cb, ROAD_MARGIN);
     if (all.left.length < 2) continue;
     ctx.globalAlpha = alpha * (l < 0 ? 0.55 : 1);
     poly(ctx, all.left);
@@ -242,19 +374,33 @@ export interface CrewMachine {
 }
 
 /**
- * Где машины этапов ждут своего начала (метров позади начала участка) и стоят, кончив (столько же до конца): разметка —
- * у самого начала, покрытие и грейдер — дальше, друг за другом без нахлёста. Стоянка у конца участка совпадает с
- * ожиданием в начале следующего, если он продолжает этот, — колонна переходит на него без скачков.
+ * Где машины этапов ждут своего начала на обочине (метров позади начала участка) и стоят, кончив (столько же до
+ * конца), когда колонна не идёт дальше по оси (crewConvoy): разметка — у самого начала, покрытие и грейдер — дальше,
+ * друг за другом без нахлёста. Стоянка у конца участка совпадает с ожиданием на обочине в начале следующего.
  */
 const CREW_SLOT = [30, 10, 0] as const;
 /** За столько метров своего края машина въезжает с обочины на полотно (и в конце этапа съезжает на неё). */
 const CREW_RAMP = 24;
+/** Длина машин этапа (drawMachines: от носа до хвоста, с зазором) — на столько за ней держится следующая в колонне. */
+const CREW_LEN = [23, 19, 8] as const;
+
+/** Другое полотно у стыка node, если там ровно два полотна и одно из них c (прямое продолжение, не поворот и не развилка). */
+function seamNext(net: LaneNet, node: number, c: Corridor): Corridor | null {
+  const n = net.node(node);
+  if (n.kind !== 'seam' || n.corridors.length !== 2) return null;
+  const other = n.corridors.find((id) => id !== c.id);
+  return other === undefined ? null : (net.corridors.get(other) ?? null);
+}
 
 /**
  * Колонна техники на строящемся участке c (src/game/constructionWork.ts, stageSpans): у каждого этапа — своя машина
- * у своего края. Этап не начат — машина ждёт на обочине позади начала; начался — за первые CREW_RAMP метров плавно
- * въезжает на полотно к краю; кончился — пока следующий этап идёт свои CREW_RAMP метров, отъезжает на обочину к стоянке
- * у конца участка. Разметка кончается вместе с участком — её стоянка уже на следующем.
+ * у своего края. Если участок прямо продолжает готовую дорогу (стык без поворота и развилки, например только что
+ * достроенный участок того же проекта), колонна стоит и едет по оси: не начатые этапы ждут за началом, друг за другом
+ * (CREW_LEN). Если следующий участок проекта (nextSite) прямо продолжает этот от его конца, кончившие этапы ждут на оси
+ * у конца, а догоняющие встают за ними — колонна переходит на следующий участок без съезда с полотна. Иначе, как
+ * раньше: не начатый ждёт на обочине позади начала и за первые CREW_RAMP метров плавно въезжает на полотно к краю;
+ * кончивший, пока следующий этап идёт свои CREW_RAMP метров, отъезжает на обочину к стоянке у конца участка (разметка
+ * уходит туда сама в самом конце).
  */
 export function crewConvoy(net: LaneNet, c: Corridor): CrewMachine[] {
   const b = c.build;
@@ -264,8 +410,27 @@ export function crewConvoy(net: LaneNet, c: Corridor): CrewMachine[] {
   const ramp = Math.min(CREW_RAMP, L / 2);
   const raised = Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
   const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+  const start = b.fromB ? c.b : c.a;
+  const end = b.fromB ? c.a : c.b;
+  // Откуда колонна пришла по оси (готовое прямое продолжение у начала) и пойдёт ли дальше по оси (следующий участок
+  // проекта — прямое продолжение от конца и заполняется от него).
+  const before = seamNext(net, start, c);
+  const from = before && !before.build ? before : null;
+  const next = nextSite(net, c, buildingCorridors(net));
+  const onward = next && seamNext(net, end, c) === next.c && (next.fromB ? next.c.b : next.c.a) === end ? next.c : null;
+  // Интервал в колонне — не больше отставания этапов (convoyGap) и у соседнего участка тоже: на стыке он один и тот же.
+  const spacing = (k: number, other: Corridor | null) => Math.min(CREW_LEN[k], convoyGap(L), other ? convoyGap(other.length) : Infinity);
   /** Точка на u метров от начала заполнения (за концами — по касательной), сдвинутая вправо по ходу на lat. */
   const place = (u: number, side: number): { pos: Vec; dir: Vec } => {
+    // Позади начала, на оси готовой дороги, откуда пришла колонна, — по её полотну.
+    if (u < 0 && from) {
+      const atA = from.a === start;
+      const s = atA ? Math.min(-u, from.length) : Math.max(0, from.length + u);
+      const t = from.lut.tangentAt(s);
+      let pos = from.lut.pointAt(s);
+      if (Math.max(net.node(from.a).level, net.node(from.b).level) > 0) pos = add(pos, bridgeLook(deckAlong(net, from, s)).lift);
+      return { pos, dir: atA ? scale(t, -1) : t };
+    }
     const s = b.fromB ? L - u : u;
     const sc = Math.max(0, Math.min(L, s));
     const t = c.lut.tangentAt(sc);
@@ -278,22 +443,36 @@ export function crewConvoy(net: LaneNet, c: Corridor): CrewMachine[] {
     if (raised) pos = add(pos, bridgeLook(deckAlong(net, c, sc)).lift);
     return { pos, dir };
   };
-  return ([0, 1, 2] as const).map((k) => {
+  // Каждой машине — где она вдоль участка (u, метров от начала заполнения), насколько на обочине (side) и работает ли.
+  const at = ([0, 1, 2] as const).map((k) => {
     const f = fronts[k];
     const slot = CREW_SLOT[k];
     if (f >= L - 1e-6) {
-      // Кончил: с полотна — на обочину к стоянке у конца, пока следующий этап проходит CREW_RAMP.
+      // Кончил: дальше по оси — ждёт у конца; иначе с полотна — на обочину к стоянке у конца, пока следующий этап
+      // проходит CREW_RAMP.
+      if (onward) return { u: L, side: 0, active: false };
       const next = k < 2 ? fronts[k + 1] : L;
       const back = clamp01((next - (L - convoyGap(L))) / ramp);
-      return { ...place(L - slot * back, back), stage: k, active: false };
+      return { u: L - slot * back, side: back, active: false };
     }
-    if (f <= 0) return { ...place(-slot, 1), stage: k, active: false };
-    // Въезд с обочины в начале этапа; разметка (за ней уже никого) в самом конце сама уходит на обочину — к месту,
-    // где будет ждать на следующем участке.
+    if (f <= 0) return from ? { u: 0, side: 0, active: false } : { u: -slot, side: 1, active: false };
+    // Разметка (за ней уже никого) в самом конце сама уходит на обочину — к месту, где будет ждать на следующем
+    // участке, если колонна не идёт по оси дальше.
+    const out = k === 2 && !onward ? clamp01((f - (L - ramp / 2)) / (ramp / 2)) : 0;
+    if (from) return { u: f, side: out, active: true };
+    // Въезд с обочины в начале этапа.
     const into = clamp01(f / ramp);
-    const out = k === 2 ? clamp01((f - (L - ramp / 2)) / (ramp / 2)) : 0;
-    return { ...place(-slot + (f + slot) * into, Math.max(1 - into, out)), stage: k, active: true };
+    return { u: -slot + (f + slot) * into, side: Math.max(1 - into, out), active: true };
   });
+  // На оси машины колонны не наезжают друг на друга: следующая — за хвостом предыдущей (у начала участка интервал —
+  // как у пришедшей колонны, у конца — как у той, что пойдёт дальше).
+  for (const k of [1, 2] as const) {
+    const lead = at[k - 1];
+    if (at[k].side !== 0 || lead.side !== 0) continue;
+    const cap = lead.u - spacing(k - 1, lead.u < L / 2 ? from : onward);
+    if (at[k].u > cap) at[k] = { u: cap, side: 0, active: false };
+  }
+  return at.map((m, k) => ({ ...place(m.u, m.side), stage: k as 0 | 1 | 2, active: m.active }));
 }
 
 /** Площадка строительной базы: щебень за забором, вагончик, кучи песка и щебня. */

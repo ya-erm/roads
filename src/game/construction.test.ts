@@ -39,10 +39,37 @@ function buildGame(extra: Partial<WorldSettings> = {}): Game {
   return game;
 }
 
-/** Дорога проектом — как рисует игрок (план с project). */
+/** Узел дороги в точке p (в пределах метра), если есть. */
+function nodeAt(game: Game, p: Vec): number | null {
+  return [...game.roads.net.nodes.values()].find((n) => Math.hypot(n.pos.x - p.x, n.pos.y - p.y) < 1)?.id ?? null;
+}
+
+/**
+ * Дорога проектом — как рисует игрок (план с project). Свободная точка, где уже кончается дорога (подъезд gateAt), —
+ * этот узел: проект начинается от тупика подъезда.
+ */
 function project(game: Game, a: End, b: End): boolean {
-  const plan = game.roadBuilder.road(anchorOf(game, a), anchorOf(game, b), STREET, { project: true });
+  const snap = (x: End): End => (typeof x === 'object' && 'free' in x ? (nodeAt(game, x.free) ?? x) : x);
+  const plan = game.roadBuilder.road(anchorOf(game, snap(a)), anchorOf(game, snap(b)), STREET, { project: true });
   return plan.ok && game.roadBuilder.apply(plan);
+}
+
+/**
+ * Подъезд к точке p: короткая готовая улица, что кончается тупиком в p (с запада — тогда проект на восток от p идёт её
+ * продолжением, — иначе с юга или севера). Ответ — узел на другом её конце (ворота базы).
+ */
+function gateAt(game: Game, p: Vec): number {
+  for (const d of [
+    { x: -90, y: 0 },
+    { x: 0, y: 90 },
+    { x: 0, y: -90 },
+  ]) {
+    const from = { x: p.x + d.x, y: p.y + d.y };
+    if (!road(game, { free: from }, { free: p })) continue;
+    const gate = nodeAt(game, from);
+    if (gate !== null && nodeAt(game, p) !== null) return gate;
+  }
+  throw new Error('нет места для подъезда');
 }
 
 /** Свободное место для прямой дороги длиной len вдоль x: первое, где она строится. */
@@ -57,13 +84,15 @@ function freeSpot(game: Game, len: number): Vec {
 }
 
 /**
- * Своя база в точке pos — и бригады только её (бригаду первой, бесплатной базы распускаем): в чистом поле дороги к
- * стройке нет, бригада идёт своим ходом — с базы под боком сразу на месте.
+ * Своя база в точке pos — и бригады только её (бригаду первой, бесплатной базы распускаем). По полю бригады не ездят:
+ * ворота базы — узел gate или конец подъезда (gateAt) к точке gate (по умолчанию — к pos): проект, нарисованный от
+ * этой точки, начинается от тупика подъезда, и бригада доезжает до него по дороге.
  */
-function crewAt(game: Game, pos: Vec, n = 1): BuildBase {
+function crewAt(game: Game, pos: Vec, n = 1, gate: number | Vec = pos): BuildBase {
   const crews = game.construction.crews;
   crews.brigades.clear();
-  const base: BuildBase = { type: 'base', id: 990_000 + crews.bases.size, fp: { center: { ...pos }, w: 36, h: 24, angle: 0 }, nodeId: -1 };
+  const nodeId = typeof gate === 'number' ? gate : gateAt(game, gate);
+  const base: BuildBase = { type: 'base', id: 990_000 + crews.bases.size, fp: { center: { ...pos }, w: 36, h: 24, angle: 0 }, nodeId };
   crews.bases.set(base.id, base);
   for (let i = 0; i < n; i++) crews.hire(base.id);
   return base;
@@ -203,7 +232,8 @@ describe('Стройка дорог: «Со строительством»', () 
     const { advise } = await import('./advisor');
     const game = buildGame();
     const at = freeSpot(game, 600);
-    game.construction.crews.brigades.clear();
+    // База с подъездом к проекту, но без бригад.
+    crewAt(game, at, 0);
     expect(project(game, { free: at }, { free: { x: at.x + 600, y: at.y } })).toBe(true);
     runSeconds(game, CONSTRUCTION.idleWarn + 2);
     expect(game.construction.list()[0].done).toBe(0);
@@ -217,7 +247,8 @@ describe('Стройка дорог: «Со строительством»', () 
     const at = freeSpot(game, 1200);
     // Готовая поперечная улица посередине: проект режется перекрёстком на два участка.
     expect(road(game, { free: { x: at.x + 400, y: at.y - 200 } }, { free: { x: at.x + 400, y: at.y + 200 } })).toBe(true);
-    crewAt(game, { x: at.x + 400, y: at.y + 40 });
+    // Ворота базы — южный конец поперечной улицы: по ней бригада доезжает до перекрёстка с проектом.
+    crewAt(game, { x: at.x + 400, y: at.y + 40 }, 1, nodeAt(game, { x: at.x + 400, y: at.y + 200 })!);
     expect(project(game, { free: at }, { free: { x: at.x + 1200, y: at.y } })).toBe(true);
     const cs = building(game);
     expect(cs.length).toBe(2);
@@ -285,7 +316,8 @@ describe('Стройка дорог: «Со строительством»', () 
     const game = buildGame();
     const at = freeSpot(game, 1200);
     expect(road(game, { free: { x: at.x + 400, y: at.y - 200 } }, { free: { x: at.x + 400, y: at.y + 200 } })).toBe(true);
-    crewAt(game, { x: at.x + 400, y: at.y + 40 });
+    // Ворота базы — южный конец поперечной улицы: по ней бригада доезжает до перекрёстка с проектом.
+    crewAt(game, { x: at.x + 400, y: at.y + 40 }, 1, nodeAt(game, { x: at.x + 400, y: at.y + 200 })!);
     const corridors = game.roads.net.corridors.size;
     game.checkpoint('дорога');
     expect(project(game, { free: at }, { free: { x: at.x + 1200, y: at.y } })).toBe(true);
@@ -376,9 +408,11 @@ describe('Стройка дорог: «Со строительством»', () 
     const at = freeSpot(game, 600);
     crewAt(game, at);
     expect(project(game, { free: at }, { free: { x: at.x + 600, y: at.y } })).toBe(true);
-    // Пока строится — по ней не проехать: в графе движения нет ни узлов, ни связей проекта.
+    // Пока строится — по ней не проехать: в графе движения нет ни связей проекта, ни его дальнего узла (ближний —
+    // тупик подъезда).
     const c = building(game)[0];
-    expect(game.roads.graph.outLinks.get(c.a)).toBeUndefined();
+    expect(game.roads.graph.outLinks.get(c.b)).toBeUndefined();
+    expect(game.roads.graph.corridorLinks(c.id).length).toBe(0);
     expect(game.roads.route(c.a, c.b)).toBeNull();
     untilWorking(game);
     runSeconds(game, 600 / CONSTRUCTION.speed + 8);
@@ -433,7 +467,7 @@ describe('Стройка дорог: базы и бригады', () => {
     const base = [...game.construction.crews.bases.values()][0];
     const town = [...game.towns].sort((a, b) => b.population - a.population || a.id - b.id)[0];
     expect(game.baseName(base.id)).toBe(town.name);
-    const second = crewAt(game, { ...base.fp.center });
+    const second = crewAt(game, { ...base.fp.center }, 1, base.nodeId);
     expect(game.baseName(second.id)).toBe(`${town.name} 2`);
     game.renameBase(base.id, '  Северная  ');
     expect(game.baseName(base.id)).toBe('Северная');
@@ -449,7 +483,7 @@ describe('Стройка дорог: базы и бригады', () => {
   it('где бригада: свободная — на базе, на стройке — у края работ', () => {
     const game = buildGame();
     const at = freeSpot(game, 900);
-    const base = crewAt(game, { x: at.x - 50, y: at.y });
+    const base = crewAt(game, { x: at.x - 50, y: at.y }, 1, at);
     const id = game.construction.crews.of(base.id)[0].id;
     expect(game.brigadeWhere(id)).toEqual({ pos: base.fp.center, text: 'свободна, стоит на базе' });
     project(game, { free: at }, { free: { x: at.x + 900, y: at.y } });
@@ -506,11 +540,15 @@ describe('Стройка дорог: базы и бригады', () => {
     const pace = (n: number, far: number) => {
       const game = buildGame();
       const at = freeSpot(game, 900);
-      crewAt(game, { x: at.x - far, y: at.y }, n);
+      // База далеко (темп — по расстоянию от неё), а подъезд — у самого проекта.
+      crewAt(game, { x: at.x - far, y: at.y }, n, at);
       project(game, { free: at }, { free: { x: at.x + 900, y: at.y } });
-      untilWorking(game, 1200);
+      // Бригады выезжают с ворот по одной — темп меряем, когда на месте все.
+      const id = game.construction.list()[0].project.id;
+      for (let t = 0; t < 1200 && game.construction.crews.working(id).length < n; t += 0.1) runSeconds(game, 0.1);
+      const done0 = game.construction.list()[0].done;
       runSeconds(game, 6);
-      return { done: game.construction.list()[0].done, advice: advise(game) };
+      return { done: game.construction.list()[0].done - done0, advice: advise(game) };
     };
     const one = pace(1, 0);
     const two = pace(2, 0);

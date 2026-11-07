@@ -68,6 +68,84 @@ export function stageSpans(done: number, L: number): [number, number, number] {
 }
 
 /**
+ * Какой участок проекта строить (Construction.current): начатый, иначе первый (list — по номерам), примыкающий к
+ * готовым дорогам (open — у узла есть готовая дорога; заполняется от неё, fromB — от конца b), иначе первый.
+ *
+ * access — подъезд к узлу (Construction.accessRank): до узла можно доехать с базы по готовым дорогам — число (чем
+ * меньше, тем ближе к базе), нельзя — null. С ним из не начатых — участок с подъездом у ближайшего к базе конца (от
+ * него и заполняется): стройка идёт от подъезда внутрь проекта, а участок без подъезда ждёт, пока до него дорастёт
+ * соседний. Подъезда нет нигде — как без access (проект ждёт, участок — только для показа).
+ */
+export function pickSite(
+  list: readonly Corridor[],
+  open: (node: number) => boolean,
+  access?: (node: number) => number | null,
+): { c: Corridor; fromB: boolean } | null {
+  if (!list.length) return null;
+  const started = list.find((c) => (c.build?.done ?? 0) > 0);
+  if (started) return { c: started, fromB: !!started.build?.fromB };
+  if (access) {
+    let best: { c: Corridor; fromB: boolean; r: number } | null = null;
+    for (const c of list) {
+      for (const fromB of [false, true]) {
+        const r = access(fromB ? c.b : c.a);
+        if (r !== null && (!best || r < best.r - 1e-6)) best = { c, fromB, r };
+      }
+    }
+    if (best) return { c: best.c, fromB: best.fromB };
+  }
+  for (const c of list) {
+    const a = open(c.a);
+    const b = open(c.b);
+    if (a || b) return { c, fromB: !a && b };
+  }
+  return { c: list[0], fromB: false };
+}
+
+/**
+ * Участок проекта, который станет строиться, когда достроят c (building — все строящиеся полотна сети): тот же выбор,
+ * что у Construction.current, но c уже готова — её концы считаются готовой дорогой.
+ */
+export function nextSite(net: LaneNet, c: Corridor, building: readonly Corridor[]): { c: Corridor; fromB: boolean } | null {
+  const id = c.build?.project;
+  if (id === undefined) return null;
+  const list = building.filter((x) => x !== c && x.build?.project === id).sort((p, q) => p.id - q.id);
+  const open = (node: number) => node === c.a || node === c.b || net.node(node).corridors.some((k) => !net.corridors.get(k)?.build);
+  return pickSite(list, open);
+}
+
+/** Этап, дошедший до узла на конце полотна: −1 — никакой, 0 — отсыпка, 1 — покрытие, 2 — разметка. */
+export type StageReach = -1 | 0 | 1 | 2;
+
+/**
+ * Где на полотне длиной L рисовать готовое по этапам spans (stageSpans: докуда дошёл каждый от начала заполнения;
+ * fromB — заполняется от конца b). У перекрёстка полотно обрезано (cutA, cutB — метров от концов a и b, как у
+ * отрисовки дорог): своё у полотна — только [cutA, L − cutB], дальше площадка перекрёстка, а она — общая с другими
+ * дорогами, часто уже готовыми. Отсыпка поэтому — только по своему (earth: отрезок по оси от a, null — нечего), а на
+ * площадку этап переходит целиком (reach): у начала заполнения — как только начат, у дальнего конца — когда дошёл до
+ * площадки. Покрытие и разметку полотна обрезает сама отрисовка дорог.
+ */
+export function stageLayout(
+  spans: readonly [number, number, number],
+  L: number,
+  fromB: boolean,
+  cutA: number,
+  cutB: number,
+): { earth: [number, number] | null; reach: { a: StageReach; b: StageReach } } {
+  const lo = Math.max(0, cutA);
+  const hi = Math.min(L, L - cutB);
+  const to = spans[0];
+  const [s0, s1] = fromB ? [Math.max(lo, L - to), hi] : [lo, Math.min(hi, to)];
+  const earth: [number, number] | null = to > 0 && s1 - s0 > 0.5 ? [s0, s1] : null;
+  // Этапы идут колонной: дальше всех — отсыпка, за ней покрытие, за ним разметка.
+  const last = (ok: (x: number) => boolean): StageReach => (ok(spans[2]) ? 2 : ok(spans[1]) ? 1 : ok(spans[0]) ? 0 : -1);
+  const start = last((x) => x > 0);
+  const farCut = Math.max(0, fromB ? cutA : cutB);
+  const far = last((x) => x > 0 && x >= L - farCut - 1e-6);
+  return { earth, reach: fromB ? { a: far, b: start } : { a: start, b: far } };
+}
+
+/**
  * Край работ на участке — голова колонны: метров от начала заполнения и её этап (0 — земля, 1 — покрытие, 2 — разметка;
  * этап, дошедший до конца, головой уже не считается).
  */

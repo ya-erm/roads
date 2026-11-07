@@ -7,7 +7,7 @@ import type { Vec } from '../core/vec';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import { Game } from './game';
-import { anchorOf, type End, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, type End, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
@@ -35,9 +35,31 @@ function buildGame(): Game {
   return game;
 }
 
+/** Узел дороги в точке p (в пределах метра), если есть. */
+function nodeAt(game: Game, p: Vec): number | null {
+  return [...game.roads.net.nodes.values()].find((n) => Math.hypot(n.pos.x - p.x, n.pos.y - p.y) < 1)?.id ?? null;
+}
+
+/** Дорога проектом; свободная точка, где уже кончается подъезд (gateAt), — этот узел (как в construction.test.ts). */
 function project(game: Game, a: End, b: End): boolean {
-  const plan = game.roadBuilder.road(anchorOf(game, a), anchorOf(game, b), STREET, { project: true });
+  const snap = (x: End): End => (typeof x === 'object' && 'free' in x ? (nodeAt(game, x.free) ?? x) : x);
+  const plan = game.roadBuilder.road(anchorOf(game, snap(a)), anchorOf(game, snap(b)), STREET, { project: true });
   return plan.ok && game.roadBuilder.apply(plan);
+}
+
+/** Подъезд к точке p: короткая готовая улица с запада (или юга, севера), тупиком в p. Ответ — узел другого конца. */
+function gateAt(game: Game, p: Vec): number {
+  for (const d of [
+    { x: -90, y: 0 },
+    { x: 0, y: 90 },
+    { x: 0, y: -90 },
+  ]) {
+    const from = { x: p.x + d.x, y: p.y + d.y };
+    if (!road(game, { free: from }, { free: p })) continue;
+    const gate = nodeAt(game, from);
+    if (gate !== null && nodeAt(game, p) !== null) return gate;
+  }
+  throw new Error('нет места для подъезда');
 }
 
 function freeSpot(game: Game, len: number, from = 400): Vec {
@@ -50,11 +72,15 @@ function freeSpot(game: Game, len: number, from = 400): Vec {
   throw new Error('нет места');
 }
 
-/** Своя база в точке pos с n бригадами — бригады прочих баз распущены (как в construction.test.ts). */
-function crewAt(game: Game, pos: Vec, n = 1): BuildBase {
+/**
+ * Своя база в точке pos с n бригадами — бригады прочих баз распущены (как в construction.test.ts); ворота — узел gate
+ * или конец подъезда к точке gate (по умолчанию — к pos).
+ */
+function crewAt(game: Game, pos: Vec, n = 1, gate: number | Vec = pos): BuildBase {
   const crews = game.construction.crews;
   crews.brigades.clear();
-  const base: BuildBase = { type: 'base', id: 990_000 + crews.bases.size, fp: { center: { ...pos }, w: 36, h: 24, angle: 0 }, nodeId: -1, paid: CONSTRUCTION.base.cost };
+  const nodeId = typeof gate === 'number' ? gate : gateAt(game, gate);
+  const base: BuildBase = { type: 'base', id: 990_000 + crews.bases.size, fp: { center: { ...pos }, w: 36, h: 24, angle: 0 }, nodeId, paid: CONSTRUCTION.base.cost };
   crews.bases.set(base.id, base);
   for (let i = 0; i < n; i++) crews.hire(base.id);
   return base;
@@ -208,13 +234,18 @@ describe('Стройка: резерв денег на проект', () => {
 });
 
 describe('Стройка: приоритет проекта', () => {
-  /** Два проекта, одна бригада; второй проект — дальше от базы. */
+  /**
+   * Два проекта, одна бригада; второй проект — дальше от базы. К обоим — подъезд от одних ворот: у первого — сами
+   * ворота, у второго — свой подъезд, связанный с воротами готовой дорогой.
+   */
   function twoProjects(): { game: Game; near: number; far: number } {
     const game = buildGame();
     const at = freeSpot(game, 500);
-    crewAt(game, { x: at.x - 30, y: at.y });
-    expect(project(game, { free: at }, { free: { x: at.x + 500, y: at.y } })).toBe(true);
+    const base = crewAt(game, { x: at.x - 30, y: at.y }, 1, at);
     const at2 = freeSpot(game, 500, at.y + 600);
+    const gate2 = gateAt(game, at2);
+    expect(road(game, base.nodeId, gate2)).toBe(true);
+    expect(project(game, { free: at }, { free: { x: at.x + 500, y: at.y } })).toBe(true);
     expect(project(game, { free: at2 }, { free: { x: at2.x + 500, y: at2.y } })).toBe(true);
     const [near, far] = game.construction.list().map((i) => i.project.id);
     return { game, near, far };
@@ -299,6 +330,8 @@ describe('Стройка: снос строительной базы', () => {
       const at = freeSpot(game, 600);
       // Вторая база (платная) — у стройки, с бригадой; бригада первой базы свободна на ней.
       const second = crewAt(game, at);
+      // Первая база — у дороги, связанной со стройкой (ворота — у того же подъезда): её бригады доедут.
+      first.nodeId = second.nodeId;
       game.construction.crews.hire(first.id);
       expect(project(game, { free: at }, { free: { x: at.x + 600, y: at.y } })).toBe(true);
       const id = game.construction.list()[0].project.id;

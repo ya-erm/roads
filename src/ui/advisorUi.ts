@@ -2,7 +2,7 @@
  * Панель советника: карточки советов (значок вида и важности, что случилось, где, кнопки «Показать» и быстрое
  * действие), значок с числом на кнопке «Советы». Подсказки — свои (data-tip), не системные.
  */
-import { STATION, STORAGE } from '../config';
+import { CONSTRUCTION, STATION, STORAGE } from '../config';
 import type { Advice, AdviceFix, AdviceKind, AdviceLevel } from '../game/advisor';
 import type { Game } from '../game/game';
 import { MODELS } from '../game/transport';
@@ -29,6 +29,7 @@ const KIND_GLYPH: Record<AdviceKind, string> = {
   empty: '🪫',
   buildMoney: '🏗',
   buildIdle: '🚧',
+  buildNoAccess: '⛔',
   buildFar: '🚚',
   noBase: '🏗',
 };
@@ -91,7 +92,7 @@ export function fixLabel(g: Game, fix: AdviceFix): string {
     case 'loan':
       return 'Взять кредит';
     case 'base':
-      return '＋ База · бесплатно';
+      return g.firstBase ? '＋ База · бесплатно' : `＋ База · $${fmt(CONSTRUCTION.base.cost)}`;
   }
 }
 

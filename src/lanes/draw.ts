@@ -193,12 +193,14 @@ function bboxOf(lists: Vec[][]): BBox {
 
 /**
  * Что из сети рисует draw (по умолчанию — всё): только полотна и узлы с этими номерами; marks: false — без
- * разметки и стрелок (покрытие строящейся дороги до разметки).
+ * разметки и стрелок (покрытие строящейся дороги до разметки); shadow: 'skip' — без тени мостов на земле, 'only' —
+ * только она (у проекта стройки тень готового и неготового — разной плотности, src/render/constructionArt.ts).
  */
 export interface DrawPick {
   corridor?: (id: number) => boolean;
   node?: (id: number) => boolean;
   marks?: boolean;
+  shadow?: 'skip' | 'only';
 }
 
 /**
@@ -274,7 +276,8 @@ export class LaneRenderer {
     const elevated = layer !== undefined && layer > 0;
     // Низкие мосты над рекой — в слое земли (и всё сразу, если слой не задан).
     const ground = layer === undefined || layer === 0;
-    if (elevated) {
+    const shadows = pick?.shadow !== 'skip';
+    if (elevated && shadows) {
       // Мост или эстакада: тень со сдвигом по высоте над землёй в каждой точке — у конца пандуса на земле она под
       // самой дорогой; выше мост — дальше тень.
       ctx.fillStyle = C.shadow;
@@ -284,11 +287,12 @@ export class LaneRenderer {
         for (const cap of n.caps) this.fill(ctx, cap.poly.map((q) => add(q, n.shade)));
       }
     }
-    if (ground) {
+    if (ground && shadows) {
       const low = bridgeLook(LOW_BRIDGE).shadow;
       ctx.fillStyle = C.shadow;
       for (const g of corridors) for (const [i0, i1] of g.wet) this.fill(ctx, this.shadowPoly(g, i0, i1, low));
     }
+    if (pick?.shadow === 'only') return;
     // Бордюры под асфальтом: заливка соседнего полотна закрывает их там, где полотна сходятся.
     ctx.strokeStyle = C.roadEdge;
     ctx.lineWidth = 2.5;

@@ -31,6 +31,8 @@ export type AdviceKind =
   | 'buildMoney'
   /** Проект заложен давно, а стройка так и не началась: нет свободной бригады или базы. */
   | 'buildIdle'
+  /** К проекту нет подъезда: ни один его узел не связан готовой дорогой с базой — бригады к нему не едут. */
+  | 'buildNoAccess'
   /** Бригада работает далеко от своей базы — вдвое медленнее и хуже. */
   | 'buildFar'
   /** «Со строительством» базы ещё нет: первую — бесплатно, где удобно игроку. */
@@ -193,9 +195,26 @@ function crews(game: Game, out: Advice[]): void {
       fix: { kind: 'base' },
     });
   }
+  // Нет подъезда: бригады по полю не ездят — проект ждёт дороги к себе или базы рядом (сразу, а не через idleWarn).
+  const blocked = crews.bases.size ? c.list().filter((i) => !i.project.paused && !i.access) : [];
+  if (blocked.length) {
+    const first = blocked[0];
+    const what = blocked.length === 1 ? `«${first.project.label}»` : `${blocked.length} ${plural(blocked.length, 'проект', 'проекта', 'проектов')}`;
+    out.push({
+      key: 'buildNoAccess',
+      kind: 'buildNoAccess',
+      level: 'warn',
+      title: 'Нет подъезда к стройке',
+      detail: `${what}: ни один конец не связан готовой дорогой с базой — бригадам не проехать, по полю они не ездят. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним.`,
+      at: first.front ?? first.at,
+      count: blocked.length,
+      fix: { kind: 'base' },
+    });
+  }
   for (const i of c.list()) {
     const p = i.project;
     if (p.paused || p.stalled !== undefined || i.done > 0 || game.time - p.created < CONSTRUCTION.idleWarn || crews.working(p.id).length) continue;
+    if (crews.bases.size && !i.access) continue;
     const coming = crews.assigned(p.id).length > 0;
     const why = !crews.bases.size
       ? 'нет строительной базы — поставьте её у дороги («＋ База» на плашке стройки, первая бесплатно)'

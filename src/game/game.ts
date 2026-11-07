@@ -1076,9 +1076,31 @@ export class Game implements BuildContext {
     return true;
   }
 
+  /** Граф движения, по которому посчитаны подъезды (reach), и ответы по нему: «from>to» — доехать можно. */
+  private reachOf: { graph: unknown; map: Map<string, boolean> } | null = null;
+
+  /**
+   * Стройка (construction.ts, crews.ts): от узла from до узла to можно доехать по готовым дорогам — тем же маршрутом,
+   * что поедет машина бригады. Ответы запоминаются до смены графа движения.
+   */
+  reach(from: number, to: number): boolean {
+    if (from === to) return this.onRoad(from);
+    const graph = this.roads.graph;
+    if (this.reachOf?.graph !== graph) this.reachOf = { graph, map: new Map() };
+    const map = this.reachOf.map;
+    const key = `${from}>${to}`;
+    let hit = map.get(key);
+    if (hit === undefined) {
+      if (map.size > 20_000) map.clear();
+      hit = this.roads.route(from, to) !== null;
+      map.set(key, hit);
+    }
+    return hit;
+  }
+
   /**
    * Стройка (crews.ts): машина бригады — в поток от узла from к узлу to; 'busy' — путь есть, но на выезде нет места;
-   * null — пути по дорогам нет (бригада поедет своим ходом).
+   * null — пути по дорогам нет (по полю бригады не ездят — к такому проекту они не едут).
    */
   drive(b: Brigade, from: number, to: number): number | 'busy' | null {
     const route = this.roads.route(from, to);
@@ -1251,9 +1273,9 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Где бригада и что делает — для «показать на карте»: машина в потоке — где она сейчас; своим ходом по
-   * бездорожью — где успела доехать (самосвал рисуется там же, Crews.offroadAt); ждёт места на выезде — откуда
-   * выезжает; на стройке — у края работ; свободна — на базе.
+   * Где бригада и что делает — для «показать на карте», карточки проекта и плашки базы: машина в потоке — где она
+   * сейчас («едет по дороге»); вдоль стройки — где успела доехать (самосвал рисуется там же, Crews.walkAt); ждёт места
+   * на выезде — откуда выезжает; на стройке — у края работ; свободна — на базе.
    */
   brigadeWhere(id: number): { pos: Vec; text: string } | null {
     const crews = this.construction.crews;
@@ -1265,14 +1287,19 @@ export class Game implements BuildContext {
     const site = info ? (info.front ?? info.at) : null;
     const label = info ? `«${info.project.label}»` : '';
     const car = b.sim !== undefined ? this.traffic.vehicles.get(b.sim)?.pos : undefined;
-    const field = crews.offroadAt(b)?.pos;
+    const walk = crews.walkAt(b);
+    const toRoad = !!b.trip?.back;
     switch (b.state) {
       case 'working':
         return { pos: site ?? b.pos ?? home, text: `строит ${label}` };
       case 'going':
-        return { pos: car ?? field ?? b.pos ?? home, text: `едет строить ${label}${field ? ' по бездорожью' : ''}` };
+        if (car) return { pos: car, text: `едет по дороге строить ${label}` };
+        if (walk) return { pos: walk.pos, text: toRoad ? `едет вдоль стройки к дороге, потом — строить ${label}` : `едет вдоль стройки к краю работ ${label}` };
+        return { pos: b.pos ?? home, text: `ждёт выезда, чтобы ехать строить ${label}` };
       case 'back':
-        return { pos: car ?? field ?? b.pos ?? home, text: `едет на базу${field ? ' по бездорожью' : ''}` };
+        if (car) return { pos: car, text: 'едет по дороге на базу' };
+        if (walk) return { pos: walk.pos, text: 'едет вдоль стройки к дороге, потом — на базу' };
+        return { pos: b.pos ?? home, text: 'ждёт выезда, чтобы ехать на базу' };
       default:
         return { pos: home, text: 'свободна, стоит на базе' };
     }
@@ -4259,7 +4286,7 @@ export class Game implements BuildContext {
     }
     if (owner?.type === 'crew') {
       const crew = this.construction.crews.brigades.get(owner.id);
-      if (crew?.sim === sim.id) this.construction.crews.lost(crew, sim.pos);
+      if (crew?.sim === sim.id) this.construction.crews.lost(crew);
       return;
     }
     const v = owner && this.fleet.get(owner.id);
@@ -6571,12 +6598,12 @@ export class Game implements BuildContext {
     return st && v.state !== 'driving' ? { pos: st.fp.center, r: footprintRadius(st.fp), station: true } : null;
   }
 
-  /** Самосвалы бригад, что едут своим ходом по бездорожью (по дороге их везёт поток — те рисуются как машины). */
-  offroadCrewLooks(): VehicleLook[] {
+  /** Самосвалы бригад, что едут вдоль стройки по оси проекта (по дороге их везёт поток — те рисуются как машины). */
+  siteCrewLooks(): VehicleLook[] {
     const out: VehicleLook[] = [];
     const crews = this.construction.crews;
     for (const b of crews.brigades.values()) {
-      const at = b.sim === undefined ? crews.offroadAt(b) : null;
+      const at = b.sim === undefined ? crews.walkAt(b) : null;
       if (!at) continue;
       // Точка бригады — нос самосвала (кузов тянется назад, как у машин в потоке).
       out.push({ kind: CREW_SPEC.kind, body: CREW_SPEC.body, length: CREW_SPEC.length, width: CREW_SPEC.width, color: CREW_SPEC.color, load: CREW_SPEC.load, pos: at.pos, dir: at.dir });
