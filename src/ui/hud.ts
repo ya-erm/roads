@@ -684,6 +684,10 @@ export class Hud {
     this.bindStationName(root);
     this.bindBaseName(root);
     controller.onChange = () => this.sync(true);
+    // Esc, когда на карте отменять нечего, — меню; поверх другого окна (правила, брифинг) — нет.
+    controller.onMenu = () => {
+      if (!this.anyScreen()) this.openMenu();
+    };
     this.sync(true);
   }
 
@@ -940,9 +944,7 @@ export class Hud {
         this.openNewGame('start');
         break;
       case 'menu':
-        this.speedBeforeMenu = g.speed || 1;
-        c.setSpeed(0, true);
-        this.showMenu();
+        this.openMenu();
         break;
       case 'resume':
         this.hideScreens();
@@ -3351,6 +3353,13 @@ export class Hud {
     this.scenarioOptions = next;
     this.draft = { ...this.draft, scenario: { ...next } };
     this.renderNewGame();
+  }
+
+  /** Кнопка «Меню» или Esc: пауза, меню; закрытое меню вернёт прежнюю скорость. */
+  private openMenu(): void {
+    this.speedBeforeMenu = this.game().speed || 1;
+    this.controller.setSpeed(0, true);
+    this.showMenu();
   }
 
   private showMenu(): void {

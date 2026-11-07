@@ -273,6 +273,8 @@ export class Controller {
   /** Знак скорости (км/ч), который тянут из панели на дорогу. */
   dragLimit: number | null = null;
   onChange: () => void = () => {};
+  /** Esc, когда отменять нечего: открыть меню игры (ставит интерфейс). */
+  onMenu: () => void = () => {};
   private mouse = { x: 0, y: 0 };
   private shift = false;
   /** Зажат Alt (Option): прямая не прилипает к «прямо» и 90°. */
@@ -996,8 +998,9 @@ export class Controller {
   /**
    * Esc или правая кнопка: шаг назад — отменить начатое, потом закрыть инструмент, потом снять выбор.
    * step — у черновика маршрута убрать последнюю станцию, а не весь (правая кнопка).
+   * false — отменять нечего: ничего не начато и не выбрано, инструмент «Выбор» (тогда Esc открывает меню).
    */
-  back(step = false): void {
+  back(step = false): boolean {
     if (this.pendingArea) this.cancelArea();
     else if (this.areaStart) this.areaStart = null;
     else if (this.spanStart) this.spanStart = null;
@@ -1025,11 +1028,12 @@ export class Controller {
       else this.cancelLine();
     } else if (this.laneFrom) this.clearLane();
     else if (this.tool !== 'select') this.setTool('select');
-    else {
+    else if (this.selection || this.selectedLine !== null || this.following) {
       this.select(null);
       this.selectLine(null);
-    }
+    } else return false;
     this.onChange();
+    return true;
   }
 
   selectLine(id: number | null): void {
@@ -2609,7 +2613,8 @@ export class Controller {
     }
     switch (e.code) {
       case 'Escape':
-        this.back();
+        // Отменять нечего — Esc открывает меню (зажатая клавиша — не открывает: повтор тут же закрыл бы его).
+        if (!this.back() && !e.repeat) this.onMenu();
         break;
       case 'Enter':
         if (this.tool === 'line') this.finishLine();
