@@ -358,9 +358,9 @@ function placeIcons(g: Game, refs: Ref[]): string {
 }
 
 /**
- * Плашка предложения вверху экрана — уведомление, дублирует панель предложений внизу (решают там же):
+ * Плашка предложения вверху экрана — уведомление о предложениях в панели сценария (решают там же):
  * самое срочное предложение, остальные — счётчиком. Значки городов и предприятий — переход к ним на карте;
- * клик по названию или счётчику показывает предложения в панели внизу. Меньше минуты на решение — подсвечена.
+ * клик по названию или счётчику показывает предложение в панели сценария. Меньше минуты на решение — подсвечена.
  */
 export function offerBannerHtml(g: Game): string {
   const sc = g.scenario;
@@ -371,25 +371,25 @@ export function offerBannerHtml(g: Game): string {
   const left = sc.secondsLeft(o) ?? 0;
   const more =
     offers.length > 1
-      ? `<button class="small ob-more" data-action="sc-offer-show" title="Все предложения (${offers.length}) — в панели внизу слева">+${offers.length - 1}</button>`
+      ? `<button class="small ob-more" data-action="sc-offer-show" title="Все предложения (${offers.length}) — в панели сценария">+${offers.length - 1}</button>`
       : '';
   // Мест нет (задание не о городе и не о предприятии) — просто значок задания.
   const places = placeIcons(g, o.related) || `<span class="ob-obj">${objectiveIcon(o, 22)}</span>`;
   return `<div class="offer-banner-in${urgent(left, URGENT.banner)}">
     <span class="ob-ic" title="Контракт ждёт решения">${contractSvg(18)}</span>
     <span class="ob-places">${places}</span>
-    <button class="ob-title" data-action="sc-offer-show" data-id="${o.id}" title="${esc(o.title)}. ${esc(o.why)}\nПринять или отказаться — в панели внизу слева"><span>${esc(o.title)}</span></button>
+    <button class="ob-title" data-action="sc-offer-show" data-id="${o.id}" title="${esc(o.title)}. ${esc(o.why)}\nПринять или отказаться — в панели сценария"><span>${esc(o.title)}</span></button>
     <span class="ob-terms"><span title="Награда">🎁 ${esc(rewardText(o))}</span>${termHtml(o)}${offerFastHtml(o)}</span>
     ${offerLeftHtml(left, URGENT.offer)}${more}</div>`;
 }
 
 /**
- * Предложения контрактов — отдельной панелью внизу слева, под панелью сценария: видны, пока ждут решения,
- * даже когда панель сценария свёрнута или её закрыли «Финансы». Самое срочное — сверху; меньше минуты
- * на решение — карточка подсвечена. Клик по названию раскрывает, откуда предложение и кто с ним связан.
- * Вверху экрана их дублирует плашка (`offerBannerHtml`).
+ * Предложения контрактов — первым разделом панели сценария (и в свёрнутой тоже): событие и его контракт —
+ * одной карточкой. Сверху — что случилось (значок события, заголовок, когда), под ним — задание и решение.
+ * Самое срочное — первым; меньше минуты на решение — подсвечено. Клик по заголовку раскрывает подробности:
+ * причину, последствия и связанные места. Вверху экрана о самом срочном напоминает плашка (`offerBannerHtml`).
  */
-export function offersPanelHtml(g: Game, open: ReadonlySet<string>): string {
+export function offersSectionHtml(g: Game, open: ReadonlySet<string>): string {
   const sc = g.scenario;
   if (!sc?.running) return '';
   const offers = offersByUrgency(sc);
@@ -397,16 +397,21 @@ export function offersPanelHtml(g: Game, open: ReadonlySet<string>): string {
   const cards = offers.map((o) => {
     const left = sc.secondsLeft(o) ?? 0;
     const shown = open.has(o.id);
-    const source = o.source ? sourceEvent(sc, o.source) : undefined;
-    const icon = source ? `<span class="sc-ev-ic" title="${EVENT_INFO[source.type].name}">${EVENT_INFO[source.type].icon}</span>` : '';
+    const ev = o.source ? sourceEvent(sc, o.source) : undefined;
+    const evLine = ev
+      ? `<div class="of-event ${ev.importance}"><span class="sc-ev-ic">${EVENT_INFO[ev.type].icon}</span><span>${esc(eventTitle(ev))}</span><small>${agoText(sc, ev)}</small></div>`
+      : '';
+    const effects = ev?.effects.map((t) => `<li class="${trend(t)}">${esc(t)}</li>`).join('') ?? '';
+    const detail = shown
+      ? `<p class="sc-cause">${esc(ev?.cause ?? o.why)}</p>${effects ? `<ul class="sc-effects">${effects}</ul>` : ''}${placeChips(g, ev ? ev.related : o.related)}`
+      : '';
     return `<div class="sc-card offer of-card${urgent(left, URGENT.banner)}" data-offer="${o.id}">
-      <div class="sc-card-head of-head" data-action="sc-why" data-id="${o.id}" title="${shown ? 'Скрыть подробности' : esc(o.why)}">
-        ${objectiveIcon(o, 24)}<b>${esc(o.title)}</b>${icon}<span class="caret ${shown ? '' : 'closed'}">${chevronSvg()}</span></div>
-      ${shown ? `<p class="sc-cause">${esc(o.why)}</p>${placeChips(g, o.related)}` : ''}
+      <div class="of-head" data-action="sc-why" data-id="${o.id}" data-tip="${shown ? 'Скрыть подробности' : esc(ev?.cause ?? o.why)}">
+        ${evLine}<div class="sc-card-head">${objectiveIcon(o, 24)}<b>${esc(o.title)}</b><span class="caret ${shown ? '' : 'closed'}">${chevronSvg()}</span></div></div>
+      ${detail}
       ${offerHtml(sc, o)}</div>`;
   });
-  return `<header class="of-top">${contractSvg(18)}<h3>Предложения</h3><span class="sc-badge" title="Контракты ждут решения: ${offers.length}">${offers.length}</span></header>
-    ${cards.join('')}`;
+  return `<section class="sc-sec sc-offers"><h4>${contractSvg(14)} Предложения <span class="sc-badge">${offers.length}</span></h4>${cards.join('')}</section>`;
 }
 
 /** Событие, предложившее контракт. */
@@ -422,7 +427,7 @@ function offerCardHtml(g: Game, sc: Scenario, o: Objective, links = true): strin
 }
 
 const CONTRACT_STATE: Record<Objective['status'], string> = {
-  offered: 'ждёт решения — в предложениях внизу',
+  offered: 'ждёт решения',
   active: 'контракт принят',
   done: 'контракт выполнен',
   failed: 'контракт сорван',
@@ -522,8 +527,8 @@ export interface PanelView {
 
 /**
  * Панель сценария: заголовок (регион, контракты на решение, сложность), этапы и репутация,
- * задания этапа и принятые контракты, кнопка перехода к этапу и события. Предложения контрактов —
- * отдельной панелью внизу (`offersPanelHtml`).
+ * задания этапа и принятые контракты, кнопка перехода к этапу и события. Предложения контрактов со своими
+ * событиями — первым разделом (`offersSectionHtml`), и в свёрнутой панели тоже.
  */
 export function scenarioPanelHtml(g: Game, view: PanelView): string {
   const sc = g.scenario!;
@@ -537,7 +542,9 @@ export function scenarioPanelHtml(g: Game, view: PanelView): string {
     <button class="lines-toggle" data-action="sc-toggle" title="${view.collapsed ? 'Развернуть' : 'Свернуть'} · сценарий «${esc(s.brief.region)}»">
       <span class="caret ${view.collapsed ? 'closed' : ''}">${chevronSvg()}</span>${flagSvg(18)}<h3>${esc(s.brief.region)}</h3></button>${badge}${diff}</header>`;
   if (s.status !== 'running') return head + finishedHtml(sc) + (view.collapsed ? '' : extrasHtml(g, sc, view));
-  if (view.collapsed) return head + compactHtml(sc);
+  // Предложения ждут решения — видны и в свёрнутой панели.
+  const offerCards = offersSectionHtml(g, view.open);
+  if (view.collapsed) return head + compactHtml(sc) + offerCards;
 
   const now = sc.month;
   // Задания этапа (и уже закрытые — с галочкой или крестиком), принятые контракты и только что закрытые.
@@ -560,7 +567,9 @@ export function scenarioPanelHtml(g: Game, view: PanelView): string {
         }</button>`
     : '';
   // События: активные (пока открыт их контракт или недавние) — карточками, новые сверху; несколько прошедших — строками.
-  const active = s.events.filter((e) => isActive(sc, e, now));
+  // Событие с контрактом на решение — уже в карточке предложения выше.
+  const offered = (e: EventRecord) => !!e.contract && sc.objective(e.contract)?.status === 'offered';
+  const active = s.events.filter((e) => isActive(sc, e, now) && !offered(e));
   const events = active.slice(-5).reverse();
   const past = s.events
     .filter((e) => !isActive(sc, e, now))
@@ -568,7 +577,7 @@ export function scenarioPanelHtml(g: Game, view: PanelView): string {
     .reverse();
   const eventsHtml =
     events.map((e) => eventHtml(g, sc, e)).join('') + past.map((e) => pastEventHtml(g, sc, e, view.open.has(`ev:${e.id}`))).join('');
-  return `${head}
+  return `${head}${offerCards}
     <section class="sc-sec">${stepsHtml(sc)}${reputationHtml(sc)}</section>
     <section class="sc-sec"><h4 title="${esc(sc.phaseInfo.hint)}">Этап ${LETTERS[s.phase]} · ${sc.phaseInfo.name}</h4>
       ${objectives || '<p class="muted">Заданий нет.</p>'}${advance}</section>
@@ -597,7 +606,7 @@ export function briefHtml(g: Game): string {
     .filter((o) => o.role === 'contract' && (o.status === 'offered' || o.status === 'active'))
     .map((o) => (o.status === 'offered' ? offerCardHtml(g, sc, o, false) : objectiveHtml(g, sc, o, { why: true, plan: true })))
     .join('');
-  const later = sc.offers.length ? ' <small title="Решить можно и позже — в предложениях внизу слева">· можно решить позже</small>' : '';
+  const later = sc.offers.length ? ' <small title="Решить можно и позже — в предложениях в панели сценария">· можно решить позже</small>' : '';
   const interest = `${Math.round(ECONOMY.loanRate * 100)}% в месяц`;
   // Содержимое прокручивается, а подвал с подсказкой и «Начать» всегда виден внизу окна.
   return `<div class="brief-scroll" data-brief-scroll><div class="brief-head">${archetypeSvg(s.archetype, 104, 72)}<div class="brief-title">

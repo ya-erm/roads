@@ -6,6 +6,7 @@
 import { CONSTRUCTION } from '../config';
 import { durationText } from '../core/timeText';
 import type { ProjectInfo } from '../game/construction';
+import type { BrigadeState } from '../game/crews';
 import type { Game } from '../game/game';
 import { BUILD_MODES, type BuildMode } from '../world/settings';
 
@@ -82,14 +83,23 @@ export function baseSvg(w = 26, h = 20): string {
   </svg>`;
 }
 
+/** Значок состояния бригады: на стройке — 🏗, в пути — ➜, на базе — без значка. */
+const CREW_MARK: Record<BrigadeState, string> = { working: '🏗', going: '➜', back: '↩', idle: '' };
+
+/** Бригада — кнопкой-самосвалом: цвет и значок — что делает; клик — показать её на карте. */
+function crewButton(game: Game, id: number, state: BrigadeState, n: number): string {
+  const where = game.brigadeWhere(id);
+  const tip = `Бригада ${n}: ${where?.text ?? ''} — показать на карте`;
+  return `<button class="bb-crew ${state}" data-action="crew-show" data-id="${id}" data-tip="${esc(tip)}">🚚${CREW_MARK[state] ? `<i>${CREW_MARK[state]}</i>` : ''}</button>`;
+}
+
 /**
- * Строка базы: название (по ближайшему городу; клик — переименовать), сколько бригад (и сколько из них на стройке),
+ * Строка базы: название (по ближайшему городу; клик — переименовать), бригады самосвалами (клик — где она),
  * нанять и распустить, к базе. renaming — вместо названия поле ввода.
  */
 export function baseRowHtml(game: Game, id: number, renaming = false): string {
   const crews = game.construction.crews;
   const list = crews.of(id);
-  const busy = list.filter((b) => b.state !== 'idle').length;
   const B = CONSTRUCTION.base;
   const full = list.length >= B.maxBrigades;
   const upkeep = money(CONSTRUCTION.brigade.upkeep);
@@ -101,7 +111,7 @@ export function baseRowHtml(game: Game, id: number, renaming = false): string {
         ? `<input class="bb-name-input" data-base-name="${id}" value="${esc(name)}" maxlength="40" />`
         : `<span class="bb-name" data-action="base-rename" data-id="${id}" data-tip="База «${esc(name)}» — нажмите, чтобы переименовать">${esc(name)}</span>`
     }
-    <span class="bb-crews" data-tip="Бригад: ${list.length}, на стройке или в пути: ${busy}. Содержание — ${upkeep} в месяц за бригаду">🚚 ${list.length}${busy ? ` · в деле ${busy}` : ''}</span>
+    <span class="bb-crews">${list.map((b, i) => crewButton(game, b.id, b.state, i + 1)).join('') || `<span class="muted" data-tip="Бригад нет — наймите: ＋ 🚚">нет бригад</span>`}</span>
     <button class="small" data-action="base-fire" data-id="${id}" ${list.length ? '' : 'disabled'} data-tip="Распустить бригаду: половина цены — назад">−</button>
     <button class="small" data-action="base-hire" data-id="${id}" ${full ? 'disabled' : ''} data-tip="${full ? `На базе не больше ${B.maxBrigades} бригад` : `Нанять бригаду: ${money(CONSTRUCTION.brigade.cost)}, содержание ${upkeep} в месяц`}">＋ 🚚</button></div>`;
 }

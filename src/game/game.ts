@@ -1161,6 +1161,32 @@ export class Game implements BuildContext {
     return same > 1 ? `${own} ${same}` : own;
   }
 
+  /**
+   * Где бригада и что делает — для «показать на карте»: машина в потоке — где она сейчас; на стройке — у края
+   * работ; по бездорожью — куда едет (саму её в пути не рисуем); свободна — на базе.
+   */
+  brigadeWhere(id: number): { pos: Vec; text: string } | null {
+    const crews = this.construction.crews;
+    const b = crews.brigades.get(id);
+    if (!b) return null;
+    const base = crews.bases.get(b.base);
+    const home = base?.fp.center ?? b.pos ?? { x: 0, y: 0 };
+    const info = b.project !== undefined ? this.construction.info(b.project) : null;
+    const site = info ? (info.front ?? info.at) : null;
+    const label = info ? `«${info.project.label}»` : '';
+    const car = b.sim !== undefined ? this.traffic.vehicles.get(b.sim)?.pos : undefined;
+    switch (b.state) {
+      case 'working':
+        return { pos: site ?? b.pos ?? home, text: `строит ${label}` };
+      case 'going':
+        return { pos: car ?? site ?? b.pos ?? home, text: `едет строить ${label}` };
+      case 'back':
+        return { pos: car ?? home, text: 'едет на базу' };
+      default:
+        return { pos: home, text: 'свободна, стоит на базе' };
+    }
+  }
+
   /** Своё название базы: пробелы по краям обрезаются; пустое — снова по ближайшему городу. */
   renameBase(id: number, name: string): void {
     const base = this.construction.crews.bases.get(id);

@@ -57,7 +57,6 @@ import {
   briefHtml,
   modeTilesHtml,
   offerBannerHtml,
-  offersPanelHtml,
   recordRowHtml,
   RecordView,
   resultsHtml,
@@ -475,7 +474,6 @@ export class Hud {
       <div class="panel finance hidden" data-finance></div>
       <div class="panel advisor hidden" data-advisor></div>
       <div class="panel scenario hidden" data-scenario></div>
-      <div class="panel offers hidden" data-offers></div>
       <div class="panel minimap-wrap" data-minimap></div>
       <div class="screen hidden" data-start><div class="modal start" data-start-body></div></div>
       <div class="screen hidden" data-results><div class="modal results" data-results-body></div></div>
@@ -645,9 +643,8 @@ export class Hud {
     this.q('[data-side]').addEventListener('pointerdown', () => (this.pressing = true));
     // Панель сценария тоже обновляется сама (сроки, прогресс) — не перерисовываем её под нажатой кнопкой.
     this.q('[data-scenario]').addEventListener('pointerdown', () => (this.pressing = true));
-    this.q('[data-offers]').addEventListener('pointerdown', () => (this.pressing = true));
-    // Высота предложений внизу слева — в --offers-h: панели слева над ними укорачиваются (см. renderOffers).
-    new ResizeObserver(([e]) => root.style.setProperty('--offers-h', `${Math.round(e.borderBoxSize[0]?.blockSize ?? 0)}px`)).observe(this.q('[data-offers]'));
+    // Плашки стройки внизу слева: панели слева над ними (сценарий, «Финансы», «Цепочки», советник) кончаются выше.
+    new ResizeObserver(() => this.fitLeftPanels()).observe(this.q('[data-build]'));
     this.q('[data-offer-banner]').addEventListener('pointerdown', () => (this.pressing = true));
     // Плашка предложения — вверху между деньгами и кнопками скорости: следим за их шириной, правой панелью и окном.
     const place = new ResizeObserver(() => this.placeOfferBanner());
@@ -1062,6 +1059,15 @@ export class Hud {
         this.lastBuild = '';
         this.renderBuild();
         break;
+      case 'crew-show': {
+        // Бригада: камера — к ней (в пути — к машине, на стройке — к краю работ), что делает — уведомлением.
+        const where = g.brigadeWhere(Number(d.id));
+        if (where) {
+          this.controller.showPlace(where.pos, 60);
+          g.notify(`🚚 Бригада ${where.text}`);
+        }
+        break;
+      }
       case 'base-show': {
         const base = g.construction.crews.bases.get(Number(d.id));
         if (base) this.controller.showPlace(base.fp.center, 80);
@@ -3571,7 +3577,6 @@ export class Hud {
       this.renderFinance();
       this.renderAdvisor();
       this.renderScenario();
-      this.renderOffers();
       this.renderOfferBanner();
       this.renderBuild();
       this.syncPause();
@@ -3581,7 +3586,6 @@ export class Hud {
     }
   }
 
-  private lastOffers = '';
   private lastOfferBanner = '';
   private lastBuild = '';
 
@@ -3593,7 +3597,10 @@ export class Hud {
     const opt = this.q('[data-options]');
     const o = opt.classList.contains('hidden') ? null : opt.getBoundingClientRect();
     const bottom = o && o.width > 0 && o.left < bar.getBoundingClientRect().right + 8 ? Math.round(window.innerHeight - o.top + 8) : 14;
-    if (bar.style.bottom !== `${bottom}px`) bar.style.bottom = `${bottom}px`;
+    if (bar.style.bottom !== `${bottom}px`) {
+      bar.style.bottom = `${bottom}px`;
+      this.fitLeftPanels();
+    }
     // Пока правят название базы, плашку не перерисовываем — поле с фокусом и набранным текстом осталось бы старым.
     if (document.activeElement instanceof HTMLInputElement && bar.contains(document.activeElement)) return;
     const html = buildBarHtml(this.game(), this.controller.placingBase, this.renamingBase);
@@ -3607,7 +3614,7 @@ export class Hud {
     input?.select();
   }
 
-  /** Плашка предложения вверху — дублирует панель внизу; пока она есть, уведомления опускаются под неё. */
+  /** Плашка предложения вверху — напоминает о предложениях в панели сценария; пока она есть, уведомления опускаются под неё. */
   private renderOfferBanner(): void {
     if (this.pressing) return;
     const el = this.q('[data-offer-banner]');
@@ -3622,7 +3629,7 @@ export class Hud {
   /**
    * Плашка предложения — вверху между панелью денег и кнопками скорости (границы — в --ob-left и --ob-right).
    * Если там тесно, она спускается во второй ряд, до правой панели (класс offer-low, граница — --ob-low-right);
-   * негде и там — прячется (offer-none): предложения остаются в панели внизу.
+   * негде и там — прячется (offer-none): предложения остаются в панели сценария.
    */
   private placeOfferBanner(): void {
     const box = this.root.getBoundingClientRect();
@@ -3642,18 +3649,19 @@ export class Hud {
   }
 
   /**
-   * С плашки вверху — к панели предложений внизу: раскрыть подробности предложения (без id — просто
-   * к списку) и коротко подсветить, где оно.
+   * С плашки вверху — к предложениям в панели сценария: «Финансы», «Цепочки» и советника закрыть (они на её
+   * месте), раскрыть подробности предложения (без id — просто к списку) и коротко подсветить, где оно.
    */
   private showOffer(id?: string): void {
+    for (const sel of ['[data-finance]', '[data-chains]', '[data-advisor]']) this.q(sel).classList.add('hidden');
     if (id) this.whyOpen.add(id);
-    this.lastOffers = '';
-    this.renderOffers(true);
-    const panel = this.q('[data-offers]');
+    this.pressing = false;
+    this.lastScenario = '';
+    this.renderScenario();
+    const panel = this.q('[data-scenario]');
     const card = id ? panel.querySelector<HTMLElement>(`[data-offer="${id}"]`) : null;
-    if (card) card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    else panel.scrollTo({ top: 0, behavior: 'smooth' });
-    const target = card ?? panel;
+    const target = card ?? panel.querySelector<HTMLElement>('.sc-offers') ?? panel;
+    target.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     target.classList.remove('flash');
     void target.offsetWidth;
     target.classList.add('flash');
@@ -3661,19 +3669,14 @@ export class Hud {
   }
 
   /**
-   * Предложения контрактов внизу слева. Высоту панели отдаём в --offers-h: панели слева над ней
-   * (сценарий, «Финансы», «Цепочки») укорачиваются, чтобы не наезжать на предложения.
-   * force — перерисовать, даже пока зажата кнопка мыши (нажатие было не на этой панели).
+   * Плашки стройки внизу слева: сколько места снизу они занимают — в --build-space (0 — их нет).
+   * Панели слева под деньгами (сценарий, «Финансы», «Цепочки», советник) кончаются над ними.
    */
-  private renderOffers(force = false): void {
-    if (this.pressing && !force) return;
-    const el = this.q('[data-offers]');
-    const html = offersPanelHtml(this.game(), this.whyOpen);
-    if (html === this.lastOffers) return;
-    this.lastOffers = html;
-    el.innerHTML = html;
-    el.classList.toggle('hidden', !html);
-    this.root.classList.toggle('has-offers', !!html);
+  private fitLeftPanels(): void {
+    const bar = this.q('[data-build]');
+    const r = bar.getBoundingClientRect();
+    const space = bar.classList.contains('hidden') || !r.height ? 0 : Math.round(window.innerHeight - r.top + 10);
+    this.root.style.setProperty('--build-space', `${space}px`);
   }
 
   toggleFinance(): void {
@@ -3775,7 +3778,6 @@ export class Hud {
   reset(): void {
     this.lastPanel = '';
     this.lastScenario = '';
-    this.lastOffers = '';
     this.lastOfferBanner = '';
     this.whyOpen.clear();
     this.confirmAdvance = false;

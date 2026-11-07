@@ -4,7 +4,7 @@ import { clockText, durationText } from '../core/timeText';
 import { Game } from '../game/game';
 import { freightRoute, withoutCitizens } from '../game/testkit';
 import { DEFAULT_SETTINGS } from '../world/settings';
-import { briefHtml, isFolded, offerBannerHtml, offersPanelHtml, scenarioPanelHtml, toggleFold, type PanelView } from './scenarioUi';
+import { briefHtml, isFolded, offerBannerHtml, offersSectionHtml, scenarioPanelHtml, toggleFold, type PanelView } from './scenarioUi';
 
 /** Партия-сценарий со стартовым предложением контракта и ещё одним — посрочнее. */
 function scenarioWithOffers() {
@@ -21,11 +21,11 @@ function scenarioWithOffers() {
 
 const view = (): PanelView => ({ collapsed: false, open: new Set(), confirmAdvance: false });
 
-describe('Панель предложений контрактов', () => {
-  it('показывает все предложения с кнопками, самое срочное — первым; подробности — по раскрытию', () => {
+describe('Предложения контрактов в панели сценария', () => {
+  it('все предложения с кнопками, самое срочное — первым; подробности — по раскрытию', () => {
     const { game, sc, extra } = scenarioWithOffers();
     expect(sc.offers.length).toBeGreaterThanOrEqual(2);
-    const html = offersPanelHtml(game, new Set());
+    const html = offersSectionHtml(game, new Set());
     for (const o of sc.offers) {
       expect(html).toContain(`data-action="sc-accept" data-id="${o.id}"`);
       expect(html).toContain(`data-action="sc-decline" data-id="${o.id}"`);
@@ -33,22 +33,26 @@ describe('Панель предложений контрактов', () => {
     }
     expect(html.indexOf(`data-id="${extra.id}"`)).toBeLessThan(html.indexOf(`data-id="${sc.offers.find((o) => o !== extra)!.id}"`));
     expect(html).not.toContain('<p class="sc-cause">Город ищет перевозчика.</p>');
-    expect(offersPanelHtml(game, new Set([extra.id]))).toContain('<p class="sc-cause">Город ищет перевозчика.</p>');
+    expect(offersSectionHtml(game, new Set([extra.id]))).toContain('<p class="sc-cause">Город ищет перевозчика.</p>');
   });
 
-  it('пуста, когда решать нечего, а в панели сценария кнопок предложений больше нет', () => {
+  it('первым разделом панели — и в свёрнутой тоже; решать нечего — раздела нет', () => {
     const { game, sc } = scenarioWithOffers();
-    expect(scenarioPanelHtml(game, view())).not.toContain('sc-accept');
+    const full = scenarioPanelHtml(game, view());
+    expect(full).toContain('sc-accept');
+    expect(full.indexOf('sc-offers')).toBeLessThan(full.indexOf('sc-steps') === -1 ? full.length : full.indexOf('sc-steps'));
+    expect(scenarioPanelHtml(game, { ...view(), collapsed: true })).toContain('sc-accept');
     for (const o of [...sc.offers]) sc.decline(o.id);
-    expect(offersPanelHtml(game, new Set())).toBe('');
+    expect(offersSectionHtml(game, new Set())).toBe('');
+    expect(scenarioPanelHtml(game, view())).not.toContain('sc-offers');
   });
 });
 
 describe('Плашка предложения вверху', () => {
-  it('уведомляет о самом срочном предложении без кнопок решения, остальные — счётчиком, клик ведёт к панели внизу', () => {
+  it('уведомляет о самом срочном предложении без кнопок решения, остальные — счётчиком, клик ведёт к предложению в панели сценария', () => {
     const { game, sc, extra } = scenarioWithOffers();
     const html = offerBannerHtml(game);
-    // Принять или отказаться — только в панели внизу.
+    // Принять или отказаться — только в панели сценария.
     expect(html).not.toContain('sc-accept');
     expect(html).not.toContain('sc-decline');
     expect(html).toContain(`data-action="sc-offer-show" data-id="${extra.id}"`);
@@ -235,7 +239,7 @@ describe('Сроки — минутами и секундами, а не мес�
     // Последняя минута — секундами.
     goal.deadline = sc.month + 1;
     expect(scenarioPanelHtml(game, view())).toContain('⏳ 30 сек');
-    const offers = offersPanelHtml(game, new Set());
+    const offers = offersSectionHtml(game, new Set());
     expect(offers).toContain(`⌛ ${clockText(0.5 * MONTH_LENGTH)}`);
     expect(offers).toContain(`⏳ ${durationText(extra.months! * MONTH_LENGTH)}`);
     // Меньше минуты на решение — предложение подсвечено.

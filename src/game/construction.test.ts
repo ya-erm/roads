@@ -417,6 +417,21 @@ describe('Стройка дорог: базы и бригады', () => {
     expect(game.baseName(base.id)).toBe(town.name);
   });
 
+  it('где бригада: свободная — на базе, на стройке — у края работ', () => {
+    const game = buildGame();
+    const at = freeSpot(game, 900);
+    const base = crewAt(game, { x: at.x - 50, y: at.y });
+    const id = game.construction.crews.of(base.id)[0].id;
+    expect(game.brigadeWhere(id)).toEqual({ pos: base.fp.center, text: 'свободна, стоит на базе' });
+    project(game, { free: at }, { free: { x: at.x + 900, y: at.y } });
+    untilWorking(game, 600);
+    const info = game.construction.list()[0];
+    const where = game.brigadeWhere(id)!;
+    expect(where.text).toBe(`строит «${info.project.label}»`);
+    expect(where.pos).toEqual(info.front ?? info.at);
+    expect(game.brigadeWhere(-1)).toBeNull();
+  });
+
   it('бригада едет к стройке по дороге — машиной в общем потоке, и строит, когда доехала', () => {
     const game = buildGame();
     const crews = game.construction.crews;

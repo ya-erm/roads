@@ -3642,7 +3642,7 @@ button.small.with-ic {
   top: 84px;
   left: 14px;
   width: 340px;
-  max-height: calc(100vh - 200px);
+  max-height: max(160px, min(calc(100vh - 200px), calc(100vh - 84px - var(--build-space, 0px))));
   overflow-y: auto;
   padding: 12px 14px;
 }
@@ -3745,7 +3745,7 @@ button.small.with-ic {
   left: 14px;
   width: 600px;
   max-width: calc(100vw - 400px);
-  max-height: calc(100vh - 300px);
+  max-height: max(160px, min(calc(100vh - 300px), calc(100vh - 84px - var(--build-space, 0px))));
   overflow-y: auto;
   padding: 12px 14px;
 }
@@ -3882,48 +3882,20 @@ button.small.with-ic {
   background: transparent;
 }
 
-/* Панель сценария — слева под деньгами, на месте «Финансов» и «Цепочек»: пока они открыты, она спрятана. */
+/*
+ * Панель сценария — слева под деньгами, на месте «Финансов» и «Цепочек»: пока они открыты, она спрятана.
+ * Эти панели кончаются над плашками стройки внизу слева: сколько места они занимают, Hud пишет в --build-space.
+ */
 .scenario {
   top: 84px;
   left: 14px;
   width: 330px;
   max-width: calc(100vw - 28px);
-  max-height: calc(100vh - 290px);
+  max-height: max(120px, min(calc(100vh - 290px), calc(100vh - 84px - var(--build-space, 0px))));
   overflow-y: auto;
   padding: 6px 0 4px;
 }
 
-/*
- * Предложения контрактов — внизу слева, под панелью сценария. Пока они есть, панели слева над ними
- * (сценарий, «Финансы», «Цепочки») кончаются над предложениями: их высоту Hud пишет в --offers-h.
- */
-.offers {
-  bottom: 14px;
-  left: 14px;
-  width: 330px;
-  max-width: calc(100vw - 28px);
-  max-height: 45vh;
-  overflow-y: auto;
-  padding: 8px 12px 2px;
-}
-
-.offers.hidden {
-  display: none;
-}
-
-.has-offers {
-  --offers-top: calc(100vh - 84px - 10px - 14px - var(--offers-h, 0px));
-}
-
-.has-offers .scenario {
-  max-height: max(120px, var(--offers-top));
-}
-
-.has-offers .finance,
-.has-offers .chains,
-.has-offers .advisor {
-  max-height: max(160px, var(--offers-top));
-}
 
 /* Советник: кнопка с числом, панель слева на месте «Финансов», карточки советов. */
 /* Лампочка советника — в панели денег справа, с числом советов в уголке. */
@@ -3975,7 +3947,7 @@ button.small.with-ic {
   top: 84px;
   left: 14px;
   width: 360px;
-  max-height: calc(100vh - 200px);
+  max-height: max(160px, min(calc(100vh - 200px), calc(100vh - 84px - var(--build-space, 0px))));
   overflow-y: auto;
   padding: 12px 14px;
 }
@@ -4167,36 +4139,39 @@ button.small.with-ic {
   background: #e0a100;
 }
 
-/* Окно поуже: панель инструментов внизу по центру доходит до левого края — предложения над ней. */
-@media (max-width: 1410px) {
-  .offers {
-    bottom: 96px;
-  }
-
-  .has-offers {
-    --offers-top: calc(100vh - 84px - 10px - 96px - var(--offers-h, 0px));
-  }
-}
-
-.of-top {
+/* Предложения — первым разделом панели сценария: событие и его контракт одной карточкой. */
+.sc-offers h4 {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: 5px;
 }
 
-.of-top h3 {
-  margin: 0;
-  flex: 1;
-  font-size: 14px;
-}
-
-.of-top .sc-badge {
-  padding: 2px 7px;
+.sc-offers h4 .sc-badge {
+  padding: 1px 6px;
 }
 
 .of-head {
   cursor: pointer;
+}
+
+/* Что случилось — строкой над заданием: значок события, заголовок, когда. */
+.of-event {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.of-event .sc-ev-ic {
+  font-size: 14px;
+}
+
+.of-event small {
+  margin-left: auto;
+  font-weight: 400;
 }
 
 .of-head .caret {
@@ -4240,7 +4215,7 @@ button.small.with-ic {
   animation: offer-card-flash 0.6s ease-in-out 2;
 }
 
-.offers.flash {
+.sc-offers.flash {
   animation: offer-panel-flash 0.6s ease-in-out 2;
 }
 
@@ -4260,8 +4235,7 @@ button.small.with-ic {
 
 /* Узкое окно: панель сценария уже, чтобы не наезжать на правую панель. */
 @media (max-width: 860px) {
-  .scenario,
-  .offers {
+  .scenario {
     width: calc(100vw - 470px);
     min-width: 240px;
   }
@@ -5884,8 +5858,44 @@ span.ind-chip {
 }
 
 .build-base .bb-crews {
+  display: flex;
+  gap: 2px;
   color: var(--muted);
-  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
+/* Бригада — самосвалом: на стройке — оранжевая подложка, в пути — синяя, на базе — серая; клик — где она. */
+.bb-crew {
+  position: relative;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border-radius: 7px;
+  font-size: 14px;
+  line-height: 24px;
+  background: #eef1f4;
+}
+
+.bb-crew.working {
+  background: #fde3c8;
+}
+
+.bb-crew.going,
+.bb-crew.back {
+  background: #dbe8fb;
+}
+
+.bb-crew:hover {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.bb-crew i {
+  position: absolute;
+  right: -3px;
+  bottom: -4px;
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1;
 }
 
 .build-base button.small,
