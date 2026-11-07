@@ -64,6 +64,7 @@ import { Scenario } from '../scenario/manager';
 import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
+import { paxFare, ridePath } from './fare';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project } from './construction';
 import { carryBuild } from './constructionWork';
@@ -4258,7 +4259,9 @@ export class Game implements BuildContext {
         const distance = from ? dist(from.fp.center, st.fp.center) : 0;
         const k = g.at === undefined ? 1 : this.speedFactor(distance, this.time - g.at);
         bonus = Math.max(bonus, k);
-        revenue += Math.round((g.count * CARGO.passengers.rate * ECONOMY.tariff * distance * k * this.mods.price('passengers')) / 100);
+        // Билет за посадку и тариф за прямую с долей объезда по остановкам линии (game/fare.ts).
+        const path = line.stops[v.stop] === st.id ? ridePath(line.stops, (id) => this.stations.get(id)?.fp.center, g.from, v.stop) : null;
+        revenue += Math.round(paxFare(g.count, distance, path, k) * this.mods.price('passengers'));
         moved += g.count;
         line.carriedMonth += g.count;
         this.scenario?.onPassengers(from?.townIds[0], st.townIds[0], g.count, k);
