@@ -154,7 +154,7 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
     expect(game.fleet.get(line.vehicles[0])!.model).toBe('truck');
   });
 
-  it('игрок сам продал последнюю машину: при минимуме 0 авто-парк остаётся включённым, при минимуме больше 0 — выключается', () => {
+  it('игрок сам продал все машины: авто-парк остаётся включённым, минимум опускается до 0 — обратно сразу не докупает', () => {
     const { game, line } = farmRoute();
     const sellAll = () => {
       for (const id of [...line.vehicles]) {
@@ -162,15 +162,8 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
         game.fitAutoRange(line.id);
       }
     };
-    game.setLineAuto(line.id, { on: true, min: 1, max: 3 });
-    expect(line.vehicles).toHaveLength(1);
-    sellAll();
-    expect(line.vehicles).toHaveLength(0);
-    expect(line.auto!.on).toBe(false);
-
-    game.setLineAuto(line.id, { on: true });
-    expect(line.vehicles).toHaveLength(1);
-    game.setLineAuto(line.id, { min: 0 });
+    game.setLineAuto(line.id, { on: true, min: 2, max: 3 });
+    expect(line.vehicles).toHaveLength(2);
     sellAll();
     expect(line.vehicles).toHaveLength(0);
     expect(line.auto).toMatchObject({ on: true, min: 0, max: 3 });
@@ -178,6 +171,14 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
     expect(line.statsFrom).toBe(game.time);
     runMonths(game, 0.5);
     expect(line.vehicles).toHaveLength(0);
+
+    // Минимум уже 0 — так же: остаётся включённым и пустым.
+    game.setLineAuto(line.id, { min: 1 });
+    expect(line.vehicles).toHaveLength(1);
+    game.setLineAuto(line.id, { min: 0 });
+    sellAll();
+    expect(line.vehicles).toHaveLength(0);
+    expect(line.auto).toMatchObject({ on: true, min: 0, max: 3 });
   });
 
   it('денег не хватило — покупка ждёт и случается, как только их хватает, не дожидаясь конца месяца', () => {
