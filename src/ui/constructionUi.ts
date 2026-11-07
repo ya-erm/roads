@@ -46,8 +46,11 @@ export function buildModeRowHtml(mode: BuildMode | undefined): string {
   return `<div class="ng-row"><span class="ng-label">Стройка</span><div class="ng-options">${chip('instant', instantSvg())}${chip('build', buildSvg())}</div></div>`;
 }
 
-/** Плашка проекта: что, полоска готовности с процентом, сколько осталось, пауза, отмена, к проекту. crew — бригад на месте, based — база уже есть. */
-export function projectRowHtml(i: ProjectInfo, crew = 1, based = true): string {
+/**
+ * Плашка проекта: что (⬆ — приоритетный, 🔒 — с резервом), полоска готовности с процентом, сколько осталось, пауза,
+ * отмена, к проекту и его карточке. crew — бригад на месте, based — база уже есть, selected — карточка открыта.
+ */
+export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected = false): string {
   const p = i.project;
   const pct = Math.min(99, Math.floor(i.done * 100));
   const state = p.paused ? 'paused' : p.stalled !== undefined ? 'stalled' : '';
@@ -64,9 +67,12 @@ export function projectRowHtml(i: ProjectInfo, crew = 1, based = true): string {
     ? `<button class="small" data-action="build-pause" data-id="${p.id}" data-tip="Строить дальше">▶ Дальше</button>`
     : `<button class="small" data-action="build-pause" data-id="${p.id}" data-tip="Пауза: проект стоит и не тратит денег">⏸ Пауза</button>`;
   const cancel = `<button class="small" data-action="build-cancel" data-id="${p.id}" data-tip="Отмена: недостроенное убрать, деньги за него — назад; готовые участки остаются (Ctrl+Z вернёт)">✕ Отмена</button>`;
-  return `<div class="build-plate ${state}">
-    <button class="icon bp-show" data-action="build-show" data-id="${p.id}" data-tip="Показать на карте">${buildSvg(26, 20)}</button>
-    <span class="bp-name" data-tip="${esc(`${p.label} · ${Math.round(i.length)} м · ещё ${money(i.left)}`)}">${esc(p.label)}</span>
+  const marks = `${p.priority ? `<span class="bp-mark" data-tip="Приоритетный проект: бригады едут сначала сюда">⬆</span>` : ''}${
+    p.reserve ? `<span class="bp-mark" data-tip="${esc(`В резерве ${money(p.reserve)}: стройка не встанет без денег`)}">🔒</span>` : ''
+  }`;
+  return `<div class="build-plate ${state}${selected ? ' selected' : ''}">
+    <button class="icon bp-show" data-action="build-show" data-id="${p.id}" data-tip="Показать на карте и открыть карточку проекта">${buildSvg(26, 20)}</button>
+    <span class="bp-name" data-action="build-show" data-id="${p.id}" data-tip="${esc(`${p.label} · ${Math.round(i.length)} м · ещё ${money(i.left)} — открыть карточку`)}">${marks}${esc(p.label)}</span>
     ${status}
     <span class="bp-bar" data-tip="Готово ${pct}% — участки от узла до узла открываются сразу"><i style="width:${pct}%"></i><b>${pct}%</b></span>
     ${pause}${cancel}</div>`;
@@ -83,6 +89,23 @@ export function baseSvg(w = 26, h = 20): string {
   </svg>`;
 }
 
+/**
+ * Что будет при сносе базы — одной строкой (подпись у курсора в «Сносе» и подсказка ✕ на плашке): «Снести базу
+ * «Сосновка» · +$20 000 · 🚚×2 → «Липки»»; других баз нет — бригады распускаются (с возвратом); первая была бесплатной.
+ */
+export function baseRemoveText(game: Game, id: number): string {
+  const plan = game.baseRemovePlan(id);
+  if (!plan) return 'Базы нет';
+  const parts = [`Снести базу «${game.baseName(id)}»`, plan.refund ? `+${money(plan.refund)}` : 'первая была бесплатной — денег не вернут'];
+  if (plan.brigades)
+    parts.push(
+      plan.to !== null
+        ? `🚚×${plan.brigades} → «${game.baseName(plan.to)}»`
+        : `🚚×${plan.brigades} распустить: других баз нет · +${money(plan.dismissRefund)}`,
+    );
+  return parts.join(' · ');
+}
+
 /** Значок состояния бригады: на стройке — 🏗, в пути — ➜, на базе — без значка. */
 const CREW_MARK: Record<BrigadeState, string> = { working: '🏗', going: '➜', back: '↩', idle: '' };
 
@@ -95,9 +118,10 @@ function crewButton(game: Game, id: number, state: BrigadeState, n: number): str
 
 /**
  * Строка базы: название (по ближайшему городу; клик — переименовать), бригады самосвалами (клик — где она),
- * нанять и распустить, к базе. renaming — вместо названия поле ввода.
+ * нанять и распустить, к базе, ✕ — снести (вторым нажатием: removing — первое уже было). renaming — вместо названия
+ * поле ввода.
  */
-export function baseRowHtml(game: Game, id: number, renaming = false): string {
+export function baseRowHtml(game: Game, id: number, renaming = false, removing = false): string {
   const crews = game.construction.crews;
   const list = crews.of(id);
   const B = CONSTRUCTION.base;
@@ -113,20 +137,21 @@ export function baseRowHtml(game: Game, id: number, renaming = false): string {
     }
     <span class="bb-crews">${list.map((b, i) => crewButton(game, b.id, b.state, i + 1)).join('') || `<span class="muted" data-tip="Бригад нет — наймите: ＋ 🚚">нет бригад</span>`}</span>
     <button class="small" data-action="base-fire" data-id="${id}" ${list.length ? '' : 'disabled'} data-tip="Распустить бригаду: половина цены — назад">−</button>
-    <button class="small" data-action="base-hire" data-id="${id}" ${full ? 'disabled' : ''} data-tip="${full ? `На базе не больше ${B.maxBrigades} бригад` : `Нанять бригаду: ${money(CONSTRUCTION.brigade.cost)}, содержание ${upkeep} в месяц`}">＋ 🚚</button></div>`;
+    <button class="small" data-action="base-hire" data-id="${id}" ${full ? 'disabled' : ''} data-tip="${full ? `На базе не больше ${B.maxBrigades} бригад` : `Нанять бригаду: ${money(CONSTRUCTION.brigade.cost)}, содержание ${upkeep} в месяц`}">＋ 🚚</button>
+    <button class="small bb-remove ${removing ? 'confirm' : ''}" data-action="base-remove" data-id="${id}" data-tip="${esc(removing ? `${baseRemoveText(game, id)} — нажмите ещё раз` : `${baseRemoveText(game, id)}`)}">${removing ? '✕ Снести?' : '✕'}</button></div>`;
 }
 
 /**
  * Плашки стройки: базы с бригадами, «＋ База» и проекты. placing — ставим базу (кнопка нажата), renaming — id базы,
  * которую переименовывают. Не «Со строительством» — пусто.
  */
-export function buildBarHtml(game: Game, placing = false, renaming: number | null = null): string {
+export function buildBarHtml(game: Game, placing = false, renaming: number | null = null, selected: number | null = null, removing: number | null = null): string {
   if (!game.buildMode) return '';
   const crews = game.construction.crews;
   const bases = [...crews.bases.keys()];
   const baseRows = bases
     .slice(0, 3)
-    .map((id) => baseRowHtml(game, id, id === renaming))
+    .map((id) => baseRowHtml(game, id, id === renaming, id === removing))
     .join('');
   // Баз нет — первая бесплатно: кнопка заметнее, пока её не поставят.
   const first = game.firstBase;
@@ -139,7 +164,7 @@ export function buildBarHtml(game: Game, placing = false, renaming: number | nul
   const list = game.construction.list();
   const rows = list
     .slice(0, BAR_MAX)
-    .map((i) => projectRowHtml(i, crews.working(i.project.id).length, bases.length > 0))
+    .map((i) => projectRowHtml(i, crews.working(i.project.id).length, bases.length > 0, i.project.id === selected))
     .join('');
   const more = list.length > BAR_MAX ? `<div class="build-more muted">ещё ${list.length - BAR_MAX}</div>` : '';
   return `<div class="build-head">${baseRows}${add}</div>${rows}${more}`;

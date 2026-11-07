@@ -13,15 +13,20 @@
  *   базы — медленнее). Проекты строятся одновременно, если бригад хватает.
  * - Пауза — проект стоит; отмена (Game.cancelProject) сносит недостроенное и возвращает заплаченное за него,
  *   готовые участки остаются.
+ * - Резерв (Project.reserve): деньги на счёте, отложенные на проект, — в бюджет прочих трат не входят (Game.budget),
+ *   проект платит за метры сперва из них, поэтому без денег не встаёт; кредитный предел резерв не обходит.
+ *   Проект кончился или отменён — запись уходит вместе с остатком резерва, он снова свободен.
+ * - Приоритет (Project.priority): бригады — сначала к нему, не хватает — переходят с обычных проектов (crews.ts).
  *
  * Состояние: готовое — в полотнах сети (сохраняется вместе с ней), записи проектов — здесь (toSave / load).
  */
 import type { Vec } from '../core/vec';
 import type { Corridor, LaneNet } from '../lanes/model';
+import { CONSTRUCTION } from '../config';
 import { ROAD_CLASSES } from '../world/roadTypes';
-import { buildRate, frontOf, paidFor } from './constructionWork';
+import { buildRate, frontOf, paidFor, stageSpans } from './constructionWork';
 import { type Brigade, type CrewSave, Crews, type Site } from './crews';
-import { fullCorridorCost } from './roadbuild';
+import { corridorProfile, fullCorridorCost } from './roadbuild';
 
 export interface Project {
   id: number;
@@ -36,6 +41,13 @@ export interface Project {
   created: number;
   /** Стоит без денег — с какого времени (секунд игры). */
   stalled?: number;
+  /**
+   * Отложено на проект, $ (целыми): эти деньги — на счёте, но в бюджет прочих трат не входят (Game.budget), проект
+   * платит за метры сперва из них. Кончился или отменён проект — запись уходит, остаток снова свободен.
+   */
+  reserve?: number;
+  /** Приоритет: свободные бригады — сначала сюда, не хватает — бригада с обычного проекта переходит сюда (crews.ts). */
+  priority?: true;
 }
 
 export interface ConstructionSave {
@@ -59,7 +71,7 @@ export interface ConstructionHost {
   /** Проект достроен или встал без денег — уведомление и журнал. */
   projectEvent?(kind: 'done' | 'stalled', p: Project): void;
   /** Машины бригад в потоке (Crews): выпустить от узла к узлу, убрать; есть ли узел в графе движения. */
-  drive(brigade: Brigade, from: number, to: number): number | null;
+  drive(brigade: Brigade, from: number, to: number): number | 'busy' | null;
   park(sim: number): void;
   onRoad(node: number): boolean;
 }
@@ -78,6 +90,20 @@ export interface ProjectInfo {
   front: Vec | null;
   /** Середина недостроенного — куда смотреть на карте. */
   at: Vec;
+  /** Сколько секунд строить с ещё одной бригадой (с ближайшей базы); null — больше бригад на проект нельзя. */
+  secondsPlus: number | null;
+  /** Готовность по этапам (земляные работы, покрытие, разметка): доли длины 0…1. */
+  stages: [number, number, number];
+}
+
+/** Из чего проект: метров по видам (вода — мост над ней), насыпь и выемка — высота и глубина, м. */
+export interface ProjectParts {
+  ground: number;
+  bridge: number;
+  tunnel: number;
+  water: number;
+  fill: number;
+  cut: number;
 }
 
 /** Полотна проекта по номерам — кэш по сети и её версии. */
@@ -95,6 +121,8 @@ export class Construction {
   private index: Index | null = null;
   /** Цена и темп полотна по ревизии: ревизия меняется с формой, полосами и классом. */
   private readonly prices = new Map<string, { full: number; rate: number }>();
+  /** Из чего полотно (мост, тоннель, насыпь) по ревизии — для карточки проекта. */
+  private readonly partsCache = new Map<string, ProjectParts>();
   /** Базы и бригады: проект строится, пока на нём работает бригада. */
   readonly crews: Crews;
 
@@ -105,6 +133,7 @@ export class Construction {
         return host.time;
       },
       crewProjects: () => [...this.projects.values()].filter((p) => !p.paused && this.corridorsOf(p.id).length).map((p) => p.id),
+      priority: (id) => !!this.projects.get(id)?.priority,
       site: (id) => self.site(id),
       drive: (b, from, to) => host.drive(b, from, to),
       park: (sim) => host.park(sim),
@@ -237,7 +266,10 @@ export class Construction {
       const step = Math.min(Math.max(0, c.length - b.done), left * rate);
       const done = b.done + step;
       const cost = paidFor(full, done, c.length) - paidFor(full, b.done, c.length);
-      if (cost > 0 && cost > this.host.budget) {
+      // Сперва — из резерва проекта, остальное — из свободного бюджета (до кредитного предела: резерв его не обходит).
+      const fromReserve = Math.min(cost, p.reserve ?? 0);
+      const free = this.host.budget;
+      if (cost > 0 && (cost - fromReserve > Math.max(0, free) || cost > free + this.reserved())) {
         if (p.stalled === undefined) {
           p.stalled = this.host.time;
           this.host.projectEvent?.('stalled', p);
@@ -246,6 +278,11 @@ export class Construction {
       }
       delete p.stalled;
       if (cost > 0) {
+        if (fromReserve > 0) {
+          const rest = (p.reserve ?? 0) - fromReserve;
+          if (rest > 0) p.reserve = rest;
+          else delete p.reserve;
+        }
         this.host.spend(cost);
         p.spent += cost;
       }
@@ -284,9 +321,16 @@ export class Construction {
     const at = front ?? list[0]?.lut.pointAt(0) ?? { x: 0, y: 0 };
     const crew = this.crews.rate(id, at);
     const k = crew > 0 ? crew : this.crews.nearestPower(at);
+    // Ещё одна бригада — с ближайшей базы, своей долей (CONSTRUCTION.crewShare): вторая и третья прибавляют меньше.
+    const n = Math.max(1, this.crews.working(id).length);
+    const share = CONSTRUCTION.crewShare;
+    const plus = n < CONSTRUCTION.brigade.perProject ? k + this.crews.nearestPower(at) * (share[n] ?? share[share.length - 1]) : null;
+    const stages: [number, number, number] = [p.builtLen, p.builtLen, p.builtLen];
     for (const c of list) {
       const b = c.build!;
       const { full, rate } = this.price(net, c);
+      const sp = stageSpans(b.done, c.length);
+      for (let i = 0; i < 3; i++) stages[i] += sp[i];
       length += c.length;
       ready += b.done;
       seconds += (c.length - b.done) / (rate * k);
@@ -303,7 +347,73 @@ export class Construction {
       left: Math.round(left),
       front,
       at: weight > 0 ? { x: mid.x / weight, y: mid.y / weight } : (front ?? { x: 0, y: 0 }),
+      secondsPlus: plus !== null ? (seconds * k) / plus : null,
+      stages: stages.map((s) => (length > 0 ? Math.min(1, s / length) : 1)) as [number, number, number],
     };
+  }
+
+  /** Из чего недостроенное: метров на земле, по мостам, в тоннелях, над водой; самая высокая насыпь и глубокая выемка. */
+  parts(id: number): ProjectParts {
+    const net = this.host.roads.net;
+    const out: ProjectParts = { ground: 0, bridge: 0, tunnel: 0, water: 0, fill: 0, cut: 0 };
+    for (const c of this.corridorsOf(id)) {
+      const key = `${c.id}:${c.rev}`;
+      let hit = this.partsCache.get(key);
+      if (!hit) {
+        if (this.partsCache.size > 2000) this.partsCache.clear();
+        hit = { ground: 0, bridge: 0, tunnel: 0, water: 0, fill: 0, cut: 0 };
+        const n = Math.max(2, Math.ceil(c.length / 24));
+        for (let i = 0; i < n; i++) {
+          const s = (c.length * (i + 0.5)) / n;
+          const h = net.heightAt(c, s);
+          const len = c.length / n;
+          if (h < -0.25) hit.tunnel += len;
+          else if (h > 0.25) {
+            if (this.host.isWater(c.lut.pointAt(s), 2)) hit.water += len;
+            else hit.bridge += len;
+          } else hit.ground += len;
+        }
+        const prof = corridorProfile(net, c, this.host.ground());
+        if (prof) {
+          hit.fill = prof.fill;
+          hit.cut = prof.cut;
+        }
+        this.partsCache.set(key, hit);
+      }
+      out.ground += hit.ground;
+      out.bridge += hit.bridge;
+      out.tunnel += hit.tunnel;
+      out.water += hit.water;
+      out.fill = Math.max(out.fill, hit.fill);
+      out.cut = Math.max(out.cut, hit.cut);
+    }
+    return out;
+  }
+
+  /** Сколько всего отложено на проекты, $. */
+  reserved(): number {
+    let sum = 0;
+    for (const p of this.projects.values()) sum += p.reserve ?? 0;
+    return sum;
+  }
+
+  /** Резерв проекта: amount (целыми долларами, 0 — снять). Сколько можно отложить, решает игра (Game.reserveProject). */
+  setReserve(id: number, amount: number): void {
+    const p = this.projects.get(id);
+    if (!p) return;
+    const a = Math.max(0, Math.floor(amount));
+    if (a > 0) p.reserve = a;
+    else delete p.reserve;
+    this.stamp++;
+  }
+
+  /** Приоритет проекта: бригады — сначала к нему (crews.ts). */
+  setPriority(id: number, on: boolean): void {
+    const p = this.projects.get(id);
+    if (!p || !!p.priority === on) return;
+    if (on) p.priority = true;
+    else delete p.priority;
+    this.stamp++;
   }
 
   /** Все проекты по порядку закладки — со сводками. */

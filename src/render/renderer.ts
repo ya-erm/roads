@@ -31,7 +31,9 @@ import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
-import { baseBox, baseSig, buildingCorridors, crewConvoy, drawBases, drawMachines, drawParked, drawProjects, projectBox, projectSig, workFront } from './constructionArt';
+import { baseBox, baseSig, buildingCorridors, crewConvoy, drawBases, drawMachines, drawParked, drawProjects, projectBox, projectSig } from './constructionArt';
+import { projectBadges } from './projectBadges';
+import { corridorHalf } from '../world/worldgen';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, frontLength } from './vehicleArt';
@@ -49,7 +51,9 @@ export type Selection =
   /** Машина или поезд компании: выбор сохраняется на остановках и после отправления. */
   | { type: 'fleet'; id: number }
   /** Перекрёсток: светофор, главная дорога, запреты поворотов. */
-  | { type: 'junction'; id: number };
+  | { type: 'junction'; id: number }
+  /** Проект стройки (режим «Со строительством»): карточка — сроки, деньги, бригады, резерв и приоритет. */
+  | { type: 'project'; id: number };
 
 export interface ToolOverlay {
   hover: Vec | null;
@@ -577,6 +581,8 @@ export class Renderer {
     }
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
+    // Самосвалы бригад, что едут к стройке своим ходом по бездорожью, — по прямой, на земле.
+    this.drawVehicles(game.offroadCrewLooks().filter((v) => v.pos.x > view.x0 - 20 && v.pos.x < view.x1 + 20 && v.pos.y > view.y0 - 20 && v.pos.y < view.y1 + 20));
     this.drawLights(game, 0, o.phaseEdit);
     this.drawMotion(game, view);
     this.drawStations(game, view, o);
@@ -602,7 +608,7 @@ export class Renderer {
     }
     // Светофор перекрёстка под мостом не пропадает под полотном — приглушённым значком поверх.
     this.drawLights(game, 'covered', o.phaseEdit);
-    this.drawConstruction(game, view);
+    this.drawConstruction(game, view, o.selection);
     this.drawLabels(game, view);
     this.drawOverlay(game, o);
     this.drawStationBadges(game, view);
@@ -923,7 +929,8 @@ export class Renderer {
    * Стройка поверх карты (динамически, не в плитках): у края работ — каток с мигающим маячком (пока стройка идёт),
    * над проектом — плашка «🏗 45%» (на паузе — «⏸», без денег — «💸»).
    */
-  private drawConstruction(game: Game, view: Box): void {
+  private drawConstruction(game: Game, view: Box, sel: Selection | null): void {
+    const selected = sel?.type === 'project' ? sel.id : null;
     const crews = game.construction.crews;
     const ctx = this.ctx;
     // Свободные бригады — на своей базе.
@@ -940,36 +947,49 @@ export class Renderer {
       const p = info.project;
       const working = going && !p.paused && p.stalled === undefined;
       const cs = game.construction.corridorsOf(p.id);
-      const front = cs.map(workFront).find((f) => f) ?? null;
       // Техника — колонной на участке в работе: у каждого этапа своя машина у своего края (ждёт, въезжает, стоит —
       // crewConvoy); у каждой следующей бригады на месте — ещё по машине работающих этапов рядом, на соседней полосе.
       const crew = crews.working(p.id).length;
+      // Выбранный проект (его карточка справа) — под техникой оранжевой полупрозрачной полосой шире полотна.
+      if (selected === p.id) {
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = 'rgba(240, 138, 60, 0.32)';
+        for (const c of cs) {
+          ctx.lineWidth = 2 * corridorHalf(c) + 10 + 6 / z;
+          ctx.beginPath();
+          c.lut.points.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
       const site = crew ? game.construction.current(p.id) : null;
       for (const m of site ? crewConvoy(game.roads.net, site) : []) {
         if (m.pos.x < view.x0 - 40 || m.pos.x > view.x1 + 40 || m.pos.y < view.y0 - 40 || m.pos.y > view.y1 + 40) continue;
         for (let i = 0; i < (m.active ? crew : 1); i++) drawMachines(ctx, m.pos, m.dir, m.stage, m.active && working && blink, (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 5);
       }
-      // Плашка над проектом — при любом зуме одного размера на экране.
-      const at = front?.pos ?? info.at;
-      if (at.x < view.x0 - 200 || at.x > view.x1 + 200 || at.y < view.y0 - 200 || at.y > view.y1 + 200) continue;
-      const pct = Math.min(99, Math.floor(info.done * 100));
-      // Бригады нет на месте — проект ждёт её (едет или все заняты).
-      const text = p.paused ? `⏸ ${pct}%` : p.stalled !== undefined ? `💸 ${pct}%` : crew ? `🏗 ${pct}%` : `🚚 ${pct}%`;
+    }
+    // Плашки над проектами — при любом зуме одного размера на экране (projectBadges: клик по плашке ищет её там же).
+    for (const b of projectBadges(game, z)) {
+      if (b.x < view.x0 - 200 || b.x > view.x1 + 200 || b.y < view.y0 - 200 || b.y > view.y1 + 200) continue;
       ctx.save();
       ctx.font = `600 ${12 / z}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const w = ctx.measureText(text).width + 12 / z;
-      const h = 18 / z;
-      const x = at.x;
-      // Над краем работ — выше техники, чтобы её не закрывать.
-      const y = at.y - 26 / z - 14;
-      ctx.fillStyle = p.stalled !== undefined && !p.paused ? 'rgba(232, 72, 63, 0.92)' : p.paused ? 'rgba(110, 118, 128, 0.92)' : 'rgba(240, 138, 60, 0.95)';
+      const w = ctx.measureText(b.text).width + 12 / z;
+      const h = 2 * b.hh;
+      ctx.fillStyle = b.fill;
       ctx.beginPath();
-      ctx.roundRect(x - w / 2, y - h / 2, w, h, h / 2);
+      ctx.roundRect(b.x - w / 2, b.y - h / 2, w, h, h / 2);
       ctx.fill();
+      if (selected === b.id) {
+        ctx.lineWidth = 2.5 / z;
+        ctx.strokeStyle = '#fff';
+        ctx.stroke();
+      }
       ctx.fillStyle = '#fff';
-      ctx.fillText(text, x, y + 0.5 / z);
+      ctx.fillText(b.text, b.x, b.y + 0.5 / z);
       ctx.restore();
     }
   }

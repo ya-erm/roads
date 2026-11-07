@@ -182,6 +182,8 @@ export interface BuildBase {
   nodeId: number;
   /** Своё название (игрок переименовал); нет — по ближайшему городу, см. Game.baseName. */
   name?: string;
+  /** Сколько заплачено за саму базу (без сноса домов под ней): при сносе возвращается половина. Первая — 0. */
+  paid?: number;
 }
 
 export type Structure = TownBuilding | Industry | Station | Warehouse | Annex | BuildBase;

@@ -137,6 +137,7 @@ import { phasesHtml, phaseTurns } from './phasesUi';
 import { addPhase, editedAfter, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, withLeftArrows } from '../lanes/lights';
 import { installTips } from './tipFloat';
 import { buildBarHtml, buildModeRowHtml } from './constructionUi';
+import { projectCardHtml } from './projectCard';
 import { planPrice } from '../input/labels';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
@@ -420,6 +421,8 @@ export class Hud {
   private renamingStation: number | null = null;
   /** База стройки, название которой правят на плашке стройки. */
   private renamingBase: number | null = null;
+  /** База, у которой нажали ✕: второе нажатие сносит её. */
+  private removingBase: number | null = null;
   /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
   private dragLine: number | null = null;
   /** Покупку из карточки маршрута тянут на остановку: какую модель и на какую линию (см. bindBuyDrag). */
@@ -459,7 +462,7 @@ export class Hud {
   ) {
     root.innerHTML = `
       <div class="panel stats" data-action="finance" title="Финансы: доходы и расходы по статьям">
-        <div class="stat"><span class="label">Деньги</span><span class="value" data-money></span></div>
+        <div class="stat"><span class="label">Деньги <span class="money-reserve hidden" data-reserve data-tip="В резерве стройки: деньги на счёте, но отложены на проекты — другие траты их не возьмут"></span></span><span class="value" data-money></span></div>
         <div class="stat"><span class="label">За месяц</span><span class="value small" data-balance></span></div>
         <div class="stat"><span class="label">Парк</span><span class="value small" data-fleet></span></div>
         <div class="stat day"><span class="label" data-date></span><div class="bar"><div data-month></div></div></div>
@@ -923,6 +926,10 @@ export class Hud {
     const d = el.dataset;
     if (d.action !== 'ng-create') this.confirmNew = false;
     if (d.action !== 'sc-advance') this.confirmAdvance = false;
+    if (d.action !== 'base-remove' && this.removingBase !== null) {
+      this.removingBase = null;
+      this.lastBuild = '';
+    }
     switch (d.action) {
       case 'begin':
         this.hideScreens();
@@ -1102,10 +1109,26 @@ export class Hud {
         this.renderBuild();
         break;
       case 'build-show': {
+        // К проекту на карте — и его карточка справа (сроки, деньги, бригады).
         const info = g.construction.info(Number(d.id));
-        if (info) this.controller.showPlace(info.front ?? info.at, Math.max(60, Math.min(400, info.length / 3)));
+        if (info) {
+          this.controller.showPlace(info.front ?? info.at, Math.max(60, Math.min(400, info.length / 3)));
+          c.select({ type: 'project', id: info.project.id });
+        }
         break;
       }
+      case 'project-reserve': {
+        const problem = g.reserveProject(Number(d.id), d.on === '1');
+        if (problem) g.notify(problem, '#e5534b');
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
+      }
+      case 'project-priority':
+        g.prioritizeProject(Number(d.id), d.on === '1');
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
       case 'base-place':
         this.controller.startBase(!this.controller.placingBase);
         this.lastBuild = '';
@@ -1123,6 +1146,19 @@ export class Hud {
         this.lastBuild = '';
         this.renderBuild();
         break;
+      case 'base-remove': {
+        // Снос базы — вторым нажатием: первое превращает ✕ в «✕ Снести?» (что будет — в подсказке).
+        const id = Number(d.id);
+        if (this.removingBase !== id) this.removingBase = id;
+        else {
+          this.removingBase = null;
+          const problem = g.removeBase(id);
+          if (problem) g.notify(problem, '#e5534b');
+        }
+        this.lastBuild = '';
+        this.renderBuild();
+        break;
+      }
       case 'base-rename':
         this.renamingBase = Number(d.id);
         // Кнопку уже отпустили: поле — сразу, иначе первые нажатия ушли бы карте.
@@ -1786,7 +1822,7 @@ export class Hud {
         ? 'Зажмите и растяните рамку: красным подсветится всё, что снесётся. Если объектов много или есть станция — спросим. Ратуша и станции с маршрутами не сносятся. Ctrl+Z — вернуть.'
         : c.bulldozeMode === 'lane'
           ? 'Клик по крайней полосе дороги — она уберётся (вместе с продолжениями через стыки); съезд или въезд, куда она уходит, снесётся целиком. Shift и протяжка вдоль — только кусок полосы. Ctrl+Z — вернуть.'
-          : 'Клик — снести дорогу, дом или станцию. Зажмите и ведите — сносится всё под курсором. Shift и протяжка вдоль дороги — только кусок между точками. Ctrl+Z — вернуть.';
+          : 'Клик — снести дорогу, дом, станцию или базу стройки. Зажмите и ведите — сносится всё под курсором. Shift и протяжка вдоль дороги — только кусок между точками. Ctrl+Z — вернуть.';
     return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как сносить</div><p class="muted">${tip}</p></div></div>`;
   }
 
@@ -2856,6 +2892,7 @@ export class Hud {
     const sel = this.controller.selection!;
     const head = (title: string, sub = '') =>
       `<header><h3>${esc(title)}</h3><button class="icon" data-action="close-sel">✕</button></header>${sub ? `<p class="muted">${sub}</p>` : ''}`;
+    if (sel.type === 'project') return projectCardHtml(g, sel.id);
     if (sel.type === 'station') {
       const st = g.stations.get(sel.id);
       if (!st) return '';
@@ -3638,6 +3675,14 @@ export class Hud {
     this.minimap.update(realDt);
     this.q('[data-money]').textContent = money(g.money);
     this.q('[data-money]').classList.toggle('negative', g.money < 0);
+    // Резерв стройки — рядом с подписью «Деньги»: «🔒 $40 000» (на счёте, но отложено на проекты).
+    const reserved = g.reserved;
+    const res = this.q('[data-reserve]');
+    const resText = reserved > 0 ? `🔒 ${money(reserved)}` : '';
+    if (res.textContent !== resText) {
+      res.textContent = resText;
+      res.classList.toggle('hidden', !resText);
+    }
     const balance = g.incomeMonth - g.expensesMonth;
     const bal = this.q('[data-balance]');
     bal.textContent = `${balance >= 0 ? '+' : ''}${money(balance)}`;
@@ -3687,7 +3732,8 @@ export class Hud {
     }
     // Пока правят название базы, плашку не перерисовываем — поле с фокусом и набранным текстом осталось бы старым.
     if (document.activeElement instanceof HTMLInputElement && bar.contains(document.activeElement)) return;
-    const html = buildBarHtml(this.game(), this.controller.placingBase, this.renamingBase);
+    const sel = this.controller.selection;
+    const html = buildBarHtml(this.game(), this.controller.placingBase, this.renamingBase, sel?.type === 'project' ? sel.id : null, this.removingBase);
     if (html === this.lastBuild) return;
     this.lastBuild = html;
     const el = this.q('[data-build]');
@@ -3852,7 +3898,7 @@ export class Hud {
         g.loan * ECONOMY.loanRate,
       )}</span></div>
         <div class="actions"><button class="small" data-action="loan-take" ${g.loan >= g.loanMax ? 'disabled' : ''}>Взять ${money(ECONOMY.loanStep)}</button>
-        <button class="small" data-action="loan-repay" ${g.loan <= 0 || g.money < Math.min(ECONOMY.loanStep, g.loan) ? 'disabled' : ''}>Погасить ${money(
+        <button class="small" data-action="loan-repay" ${g.loan <= 0 || g.freeMoney < Math.min(ECONOMY.loanStep, g.loan) ? 'disabled' : ''}>Погасить ${money(
           Math.min(ECONOMY.loanStep, g.loan || ECONOMY.loanStep),
         )}</button></div></div>
       <h4>За год <span class="legend"><i style="background:#3fae6a"></i>доход <i style="background:#e5534b"></i>расход</span></h4>${chart}

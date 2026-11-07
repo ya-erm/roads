@@ -25,6 +25,7 @@ import { profileText, type ProfileSummary } from '../game/grade';
 import type { TerraformMode } from '../world/terrain';
 import { altitudeText } from '../render/relief';
 import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
+import { badgeAt, projectBadges } from '../render/projectBadges';
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
 import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LANE_W, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
@@ -43,6 +44,7 @@ import { markAt, warningMarks, type WarningMark } from '../game/stationWarnings'
 import { deckHeight, RoadTools } from './roadtools';
 import { phaseToggle, specOf, turnAt } from '../lanes/lights';
 import { phaseTurns } from '../ui/phasesUi';
+import { baseRemoveText } from '../ui/constructionUi';
 
 export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain';
 
@@ -1567,6 +1569,12 @@ export class Controller {
           if (mark.station !== undefined) this.warnFocus = { station: mark.station, until: performance.now() + 2500 };
           break;
         }
+        // Плашка проекта стройки «🏗 45%» — его карточка справа.
+        const badge = badgeAt(projectBadges(g, this.camera.zoom), p, this.camera.zoom);
+        if (badge) {
+          this.select({ type: 'project', id: badge.id });
+          break;
+        }
         this.select(this.pick(p));
         break;
       }
@@ -1616,7 +1624,10 @@ export class Controller {
       const problem = g.removeWarehouse(st);
       if (problem) this.showError(problem);
     } else if (st?.type === 'annex') g.removeAnnex(st);
-    else if (!g.builder.bulldoze(p, this.snapRadius * 0.3)) this.roadTools.bulldoze(p, this.snapRadius * 0.3);
+    else if (st?.type === 'base') {
+      const problem = g.removeBase(st.id);
+      if (problem) this.showError(problem);
+    } else if (!g.builder.bulldoze(p, this.snapRadius * 0.3)) this.roadTools.bulldoze(p, this.snapRadius * 0.3);
   }
 
   /** Перекрёсток у курсора. */
@@ -3171,6 +3182,12 @@ export class Controller {
         if (st?.type === 'annex') {
           o.marks.push({ fp: st.fp, ok: false });
           o.label = { text: `Снести пристройку — производство упадёт · +${money(ANNEX.cost * COST.refundRatio)}`, ok: true };
+          break;
+        }
+        if (st?.type === 'base') {
+          // База стройки: возврат и куда уйдут её бригады (других баз нет — распустятся).
+          o.marks.push({ fp: st.fp, ok: false });
+          o.label = { text: baseRemoveText(g, st.id), ok: true };
           break;
         }
         if (st?.type === 'station') {

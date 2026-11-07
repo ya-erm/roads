@@ -966,8 +966,19 @@ export class Game implements BuildContext {
 
   // ---------- BuildContext ----------
 
+  /** Сколько можно потратить: до кредитного предела, без отложенного на проекты стройки (резерв). */
   get budget(): number {
-    return this.money - ECONOMY.creditLimit;
+    return this.money - ECONOMY.creditLimit - this.reserved;
+  }
+
+  /** Отложено на проекты стройки (Project.reserve): на счёте, но не для прочих трат. */
+  get reserved(): number {
+    return this.construction.reserved();
+  }
+
+  /** Деньги на счёте без резерва стройки — для трат «если хватает денег» (авто-парк, гашение кредита). */
+  get freeMoney(): number {
+    return this.money - this.reserved;
   }
 
   // ---------- Стройка дорог (режим «Со строительством») ----------
@@ -1011,6 +1022,37 @@ export class Game implements BuildContext {
   }
 
   /**
+   * Резерв проекта: on — отложить, сколько ещё стоит достроить (не хватает свободных денег — сколько есть; уже
+   * отложено меньше — доложить), off — снять. Отложенное остаётся на счёте, но в бюджет прочих трат не входит, а проект
+   * платит из него (construction.ts). null — сделано, иначе причина.
+   */
+  reserveProject(id: number, on: boolean): string | null {
+    const p = this.construction.projects.get(id);
+    if (!p) return 'Нет проекта';
+    if (!on) {
+      if (!p.reserve) return null;
+      this.construction.setReserve(id, 0);
+      this.journal.add('project-reserve', { id, $: 0 });
+      return null;
+    }
+    const left = this.construction.info(id)?.left ?? 0;
+    const have = p.reserve ?? 0;
+    const add = Math.min(left - have, Math.floor(this.budget));
+    if (left - have <= 0) return null;
+    if (add <= 0) return 'Не хватает денег';
+    this.construction.setReserve(id, have + add);
+    this.journal.add('project-reserve', { id, $: have + add, left });
+    return null;
+  }
+
+  /** Приоритет проекта (on) или снова обычный: бригады — сначала к нему (crews.ts). */
+  prioritizeProject(id: number, on: boolean): void {
+    if (!this.construction.projects.has(id)) return;
+    this.construction.setPriority(id, on);
+    this.journal.add('project-priority', { id, on });
+  }
+
+  /**
    * Отмена проекта: недостроенные участки сносятся, заплаченное за начатый, но не готовый участок — назад,
    * готовые участки остаются (они уже дороги — снос по обычным правилам). Одним шагом для Ctrl+Z. false — нет проекта.
    */
@@ -1034,12 +1076,15 @@ export class Game implements BuildContext {
     return true;
   }
 
-  /** Стройка (crews.ts): машина бригады — в поток от узла from к узлу to; null — нет пути или места на выезде. */
-  drive(b: Brigade, from: number, to: number): number | null {
+  /**
+   * Стройка (crews.ts): машина бригады — в поток от узла from к узлу to; 'busy' — путь есть, но на выезде нет места;
+   * null — пути по дорогам нет (бригада поедет своим ходом).
+   */
+  drive(b: Brigade, from: number, to: number): number | 'busy' | null {
     const route = this.roads.route(from, to);
     if (!route) return null;
     const sim = this.traffic.spawn({ ...CREW_SPEC, targetNode: to, route });
-    if (!sim) return null;
+    if (!sim) return 'busy';
     this.owners.set(sim.id, { type: 'crew', id: b.id });
     return sim.id;
   }
@@ -1101,8 +1146,9 @@ export class Game implements BuildContext {
       this.forgetUndo();
     }
     if (plan.cost) this.spend(plan.cost);
-    const base: BuildBase = { type: 'base', id: this.nextEntityId++, fp: plan.fp, nodeId: plan.nodeId };
+    const base: BuildBase = { type: 'base', id: this.nextEntityId++, fp: plan.fp, nodeId: plan.nodeId, paid: free ? 0 : CONSTRUCTION.base.cost };
     this.construction.crews.bases.set(base.id, base);
+    this.construction.crews.firstUsed = true;
     this.index.add(base);
     for (let i = 0; i < CONSTRUCTION.base.brigades; i++) this.construction.crews.hire(base.id);
     this.construction.stamp++;
@@ -1134,9 +1180,51 @@ export class Game implements BuildContext {
     return true;
   }
 
-  /** «Со строительством» баз ещё нет: первую игрок ставит сам, где хочет, — бесплатно. */
+  /**
+   * «Со строительством» баз ещё не было: первую игрок ставит сам, где хочет, — бесплатно. Снёс все базы — следующая
+   * уже платная (crews.firstUsed хранится в сохранении), иначе базу можно было бы сносить и ставить даром.
+   */
   get firstBase(): boolean {
-    return this.buildMode && this.construction.crews.bases.size === 0;
+    const crews = this.construction.crews;
+    return this.buildMode && crews.bases.size === 0 && !crews.firstUsed;
+  }
+
+  /**
+   * Что будет, если снести базу id: возврат (половина заплаченного за неё; первая была бесплатной — ничего), куда
+   * перейдут бригады (ближайшая из других баз) или сколько вернут за распущенные (других баз нет). null — базы нет.
+   */
+  baseRemovePlan(id: number): { refund: number; to: number | null; brigades: number; dismissRefund: number } | null {
+    const crews = this.construction.crews;
+    const base = crews.bases.get(id);
+    if (!base) return null;
+    const refund = Math.round((base.paid ?? CONSTRUCTION.base.cost) * COST.refundRatio);
+    let to: { id: number; d: number } | null = null;
+    for (const b of crews.bases.values()) {
+      if (b.id === id) continue;
+      const d = dist(b.fp.center, base.fp.center);
+      if (!to || d < to.d - 1e-6) to = { id: b.id, d };
+    }
+    const n = crews.of(id).length;
+    return { refund, to: to?.id ?? null, brigades: n, dismissRefund: to ? 0 : n * Math.round(CONSTRUCTION.brigade.cost * COST.refundRatio) };
+  }
+
+  /**
+   * Сносит строительную базу id: половина заплаченного за неё — назад (первая была бесплатной); бригады — на ближайшую
+   * другую базу (работающие доделывают своё, только база у них новая), других нет — распускаются с возвратом половины
+   * цены, как «−». В отмену (Ctrl+Z) не входит, как и постановка базы. null — снесли, иначе причина.
+   */
+  removeBase(id: number): string | null {
+    const plan = this.baseRemovePlan(id);
+    const base = this.construction.crews.bases.get(id);
+    if (!plan || !base) return 'Нет базы';
+    const name = this.baseName(id);
+    this.index.remove(base);
+    const gone = this.construction.crews.removeBase(id, this.onRoad(base.nodeId));
+    if (plan.refund) this.refund(base.paid ?? CONSTRUCTION.base.cost);
+    for (let i = 0; i < gone.length; i++) this.refund(CONSTRUCTION.brigade.cost);
+    this.construction.stamp++;
+    this.journal.add('base-', { id, name, back: plan.refund + plan.dismissRefund, to: plan.to ?? undefined, crews: plan.brigades });
+    return null;
   }
 
   /**
@@ -1163,8 +1251,9 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Где бригада и что делает — для «показать на карте»: машина в потоке — где она сейчас; на стройке — у края
-   * работ; по бездорожью — куда едет (саму её в пути не рисуем); свободна — на базе.
+   * Где бригада и что делает — для «показать на карте»: машина в потоке — где она сейчас; своим ходом по
+   * бездорожью — где успела доехать (самосвал рисуется там же, Crews.offroadAt); ждёт места на выезде — откуда
+   * выезжает; на стройке — у края работ; свободна — на базе.
    */
   brigadeWhere(id: number): { pos: Vec; text: string } | null {
     const crews = this.construction.crews;
@@ -1176,13 +1265,14 @@ export class Game implements BuildContext {
     const site = info ? (info.front ?? info.at) : null;
     const label = info ? `«${info.project.label}»` : '';
     const car = b.sim !== undefined ? this.traffic.vehicles.get(b.sim)?.pos : undefined;
+    const field = crews.offroadAt(b)?.pos;
     switch (b.state) {
       case 'working':
         return { pos: site ?? b.pos ?? home, text: `строит ${label}` };
       case 'going':
-        return { pos: car ?? site ?? b.pos ?? home, text: `едет строить ${label}` };
+        return { pos: car ?? field ?? b.pos ?? home, text: `едет строить ${label}${field ? ' по бездорожью' : ''}` };
       case 'back':
-        return { pos: car ?? home, text: 'едет на базу' };
+        return { pos: car ?? field ?? b.pos ?? home, text: `едет на базу${field ? ' по бездорожью' : ''}` };
       default:
         return { pos: home, text: 'свободна, стоит на базе' };
     }
@@ -1963,7 +2053,7 @@ export class Game implements BuildContext {
   /** Гасит кредит шагом loanStep (или остаток), если хватает денег. */
   repayLoan(): boolean {
     const amount = Math.min(ECONOMY.loanStep, this.loan);
-    if (amount <= 0 || this.money < amount) return false;
+    if (amount <= 0 || this.freeMoney < amount) return false;
     this.loan -= amount;
     this.money -= amount;
     this.journal.add('loan', { repay: amount, loan: this.loan, money: this.money });
@@ -3358,7 +3448,7 @@ export class Game implements BuildContext {
     let revenue = 0;
     for (const l of this.lines.values()) revenue += l.revenueLast ?? 0;
     const m = MODELS[model];
-    return autoFunds({ money: this.money, price: m.price, running: this.fleetRunning() + m.running, revenue, monthLeft: 1 - this.monthProgress });
+    return autoFunds({ money: this.freeMoney, price: m.price, running: this.fleetRunning() + m.running, revenue, monthLeft: 1 - this.monthProgress });
   }
 
   /** Покупка авто-парком — если хватает денег (autoFunds); не хватило — покупка ждёт денег (noMoney). */
@@ -3536,7 +3626,7 @@ export class Game implements BuildContext {
         continue;
       }
       const model = this.autoModel(line);
-      if (this.money < MODELS[model].price || !this.autoFunds(line, model).ok) continue;
+      if (this.freeMoney < MODELS[model].price || !this.autoFunds(line, model).ok) continue;
       if (this.autoBuy(line)) this.autoBounds(line);
     }
   }
@@ -4116,7 +4206,7 @@ export class Game implements BuildContext {
     }
     if (owner?.type === 'crew') {
       const crew = this.construction.crews.brigades.get(owner.id);
-      if (crew?.sim === sim.id) this.construction.crews.arrive(crew);
+      if (crew?.sim === sim.id) this.construction.crews.arrive(crew, { node: sim.targetNode, pos: sim.pos });
       return;
     }
     const v = owner && this.fleet.get(owner.id);
@@ -4174,7 +4264,7 @@ export class Game implements BuildContext {
     }
     if (owner?.type === 'crew') {
       const crew = this.construction.crews.brigades.get(owner.id);
-      if (crew?.sim === sim.id) this.construction.crews.lost(crew);
+      if (crew?.sim === sim.id) this.construction.crews.lost(crew, sim.pos);
       return;
     }
     const v = owner && this.fleet.get(owner.id);
@@ -6484,6 +6574,19 @@ export class Game implements BuildContext {
     }
     // В пути, но не на дороге (потерялась, ждёт выезда) — не показываем; на станции — её саму.
     return st && v.state !== 'driving' ? { pos: st.fp.center, r: footprintRadius(st.fp), station: true } : null;
+  }
+
+  /** Самосвалы бригад, что едут своим ходом по бездорожью (по дороге их везёт поток — те рисуются как машины). */
+  offroadCrewLooks(): VehicleLook[] {
+    const out: VehicleLook[] = [];
+    const crews = this.construction.crews;
+    for (const b of crews.brigades.values()) {
+      const at = b.sim === undefined ? crews.offroadAt(b) : null;
+      if (!at) continue;
+      // Точка бригады — нос самосвала (кузов тянется назад, как у машин в потоке).
+      out.push({ kind: CREW_SPEC.kind, body: CREW_SPEC.body, length: CREW_SPEC.length, width: CREW_SPEC.width, color: CREW_SPEC.color, load: CREW_SPEC.load, pos: at.pos, dir: at.dir });
+    }
+    return out;
   }
 
   /** Машины, что сейчас заезжают на посты автостанций. */
