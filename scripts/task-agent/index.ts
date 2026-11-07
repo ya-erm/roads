@@ -331,8 +331,14 @@ async function work(brief: Task): Promise<void> {
     return;
   }
   if (awaitsOwner(card, QUEUE, cfg.actor)) {
+    // Публичная форма создаёт карточку сразу в «Новая» (другой статус ей доска не разрешает) — переводим её
+    // в «Черновик»: участник доски посмотрит и сам вернёт в «Новая», тогда и возьмём.
+    const moved = await patch(card.id, (c) => (QUEUE.includes(c.status) ? { status: 'draft' } : null)).catch((e) => {
+      log(`«${card.title?.trim() || card.id}»: не удалось перевести в «${STATUS_NAMES.draft}» — ${message(e)}`);
+      return null;
+    });
     settled.set(card.id, card.revision);
-    log(`«${card.title?.trim() || card.id}» — публичный баг-репорт от гостя: не беру, пока участник доски сам не переведёт его в очередь.`);
+    if (moved) log(`«${card.title?.trim() || card.id}» — публичный баг-репорт → «${STATUS_NAMES.draft}»: возьму, когда участник доски переведёт его в «${STATUS_NAMES.todo}».`);
     return;
   }
   const description = await descriptionOf(card);
