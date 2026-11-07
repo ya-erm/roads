@@ -47,6 +47,8 @@ const SAVE_EXT = ['.json'];
 const HANDOFF = 'ЗАДАЧА ДЛЯ ЧАТА';
 /** Как часто, пока сессия делает задачу, проверять, не убрал ли её человек из «В работе». */
 const HANDOFF_CHECK_MS = 60_000;
+/** Отчёт записан, а снимков из него ещё нет: столько ждём, пока сессия их доснимет, потом публикуем что есть. */
+const ATTACH_WAIT_MS = 10 * 60_000;
 
 // ---------- Настройки ----------
 
@@ -457,7 +459,17 @@ async function handOff(runDir: string, title: string, taskId: string): Promise<C
     }
     if (existsSync(reportFile)) {
       try {
-        return { ok: true, output: parseReport(readFileSync(reportFile, 'utf8')), durationMs: Date.now() - started };
+        const report = parseReport(readFileSync(reportFile, 'utf8')) as AgentReport;
+        // Сессия могла записать отчёт раньше снимков: ждём файлы из него (не дольше ATTACH_WAIT_MS с записи отчёта).
+        const missing = missingAttachments(report, join(runDir, 'out'));
+        if (missing.length && Date.now() - statSync(reportFile).mtimeMs < ATTACH_WAIT_MS) {
+          const wait = `ждём вложения: ${missing.join(', ')}`;
+          if (wait !== problem) log(`«${title}»: отчёт есть, ${wait}`);
+          problem = wait;
+          await new Promise((done) => setTimeout(done, 2000));
+          continue;
+        }
+        return { ok: true, output: report, durationMs: Date.now() - started };
       } catch (e) {
         // Файл мог быть дописан не до конца — ждём исправленный, о каждой новой ошибке говорим один раз.
         if (message(e) !== problem) log(`report.json не принят: ${message(e)}`);
@@ -653,6 +665,16 @@ interface Picked {
 }
 
 /** Вложения отчёта: только существующие файлы нужного типа из папки вложений этого запуска. */
+/** Вложения отчёта, которых ещё нет на диске (имена — как в отчёте). */
+function missingAttachments(report: AgentReport, outDir: string): string[] {
+  return [...(report.screenshots ?? []), ...(report.saves ?? [])]
+    .filter((a) => {
+      const candidates = isAbsolute(a.file) ? [a.file] : [resolve(ROOT, a.file), resolve(outDir, a.file)];
+      return !candidates.some((p) => existsSync(p));
+    })
+    .map((a) => basename(a.file));
+}
+
 function pickFiles(list: Attachment[], outDir: string, exts: string[], skipped: string[]): Picked[] {
   const root = realpathSync(outDir);
   const out: Picked[] = [];
