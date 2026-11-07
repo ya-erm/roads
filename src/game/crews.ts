@@ -127,9 +127,12 @@ export class Crews {
 
   /** Темп проекта: сумма вкладов работающих на нём бригад (0 — никто не работает). */
   rate(project: number, front: Vec): number {
-    let k = 0;
-    for (const b of this.working(project)) k += this.power(b, front);
-    return k;
+    // Сильнейшая бригада — во всю силу, следующие — долями CONSTRUCTION.crewShare.
+    const powers = this.working(project)
+      .map((b) => this.power(b, front))
+      .sort((a, b) => b - a);
+    const share = CONSTRUCTION.crewShare;
+    return powers.reduce((k, p, i) => k + p * (share[i] ?? share[share.length - 1]), 0);
   }
 
   /** Где бригада сейчас (для выбора ближайшего проекта и выезда): последняя стройка или база. */

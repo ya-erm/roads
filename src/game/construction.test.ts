@@ -156,11 +156,20 @@ describe('Стройка дорог: «Со строительством»', () 
     CONSTRUCTION.reach = reach;
   });
 
-  it('дорога — проект: денег сразу не берут, по ней не ездят, строится 1 км за 30 с и платится по метрам', () => {
+  it('дорога — проект: денег сразу не берут, по ней не ездят, строится 1 км за 90 с и платится по метрам', () => {
+    const km = 1000 / CONSTRUCTION.speed;
+    expect(km).toBeCloseTo(90, 6);
     const game = buildGame();
     const at = freeSpot(game, 1000);
     crewAt(game, at);
     const money = game.money;
+    // Плата за стройку — отдельно от содержания бригады (оно идёт каждый месяц, а стройка теперь дольше месяца).
+    let paid = 0;
+    const spend = game.spend.bind(game);
+    game.spend = (amount, kind) => {
+      if (kind !== 'purchases') paid += amount;
+      spend(amount, kind);
+    };
     expect(project(game, { free: at }, { free: { x: at.x + 1000, y: at.y } })).toBe(true);
     expect(game.money).toBe(money);
     const cs = building(game);
@@ -174,20 +183,20 @@ describe('Стройка дорог: «Со строительством»', () 
     expect(info0.seconds).toBeCloseTo(c.length / CONSTRUCTION.speed, 0);
     untilWorking(game);
     // Половина времени — половина работы и половина денег.
-    runSeconds(game, 15);
+    runSeconds(game, km / 2);
     const half = game.construction.list()[0];
     expect(half.done).toBeGreaterThan(0.45);
     expect(half.done).toBeLessThan(0.55);
-    expect(money - game.money).toBeGreaterThan(full * 0.45);
-    expect(money - game.money).toBeLessThan(full * 0.55);
+    expect(paid).toBeGreaterThan(full * 0.45);
+    expect(paid).toBeLessThan(full * 0.55);
     expect(linksOf(game, c.id)).toBe(0);
-    // К 30 с (длина чуть больше 1000 — с запасом) дорога готова и открыта.
-    runSeconds(game, 16);
+    // К 90 с (длина чуть больше 1000 — с запасом) дорога готова и открыта.
+    runSeconds(game, km / 2 + 3);
     expect(building(game)).toEqual([]);
     expect(game.construction.projects.size).toBe(0);
     expect(linksOf(game, c.id)).toBeGreaterThan(0);
-    expect(money - game.money).toBeGreaterThan(full * 0.98);
-    expect(money - game.money).toBeLessThan(full * 1.03);
+    expect(paid).toBeGreaterThan(full * 0.98);
+    expect(paid).toBeLessThan(full * 1.03);
   });
 
   it('без бригады стройка не идёт: проект ждёт, советник говорит «Проект давно не запущен»', async () => {
@@ -218,7 +227,7 @@ describe('Стройка дорог: «Со строительством»', () 
     const started = building(game).find((c) => c.build!.done > 0)!;
     expect(started).toBeDefined();
     const first = started.id;
-    runSeconds(game, 30);
+    runSeconds(game, 500 / CONSTRUCTION.speed);
     expect(game.roads.net.corridors.get(first)?.build).toBeUndefined();
     expect(linksOf(game, first)).toBeGreaterThan(0);
     expect(building(game).length).toBe(1);
@@ -323,7 +332,7 @@ describe('Стройка дорог: «Со строительством»', () 
     // База — препятствие и после загрузки: на её место дорогу не построить.
     const base = [...loaded.construction.crews.bases.values()][0];
     expect(loaded.structureAt(base.fp.center)?.type).toBe('base');
-    for (const g of [game, loaded]) runSeconds(g, 60);
+    for (const g of [game, loaded]) runSeconds(g, 900 / CONSTRUCTION.speed + 10);
     expect(loaded.money).toBe(game.money);
     expect(building(loaded)).toEqual([]);
     expect(JSON.stringify(loaded.roads.net.toJSON())).toBe(JSON.stringify(game.roads.net.toJSON()));
@@ -372,7 +381,7 @@ describe('Стройка дорог: «Со строительством»', () 
     expect(game.roads.graph.outLinks.get(c.a)).toBeUndefined();
     expect(game.roads.route(c.a, c.b)).toBeNull();
     untilWorking(game);
-    runSeconds(game, 25);
+    runSeconds(game, 600 / CONSTRUCTION.speed + 8);
     expect(building(game)).toEqual([]);
     expect(game.roads.route(c.a, c.b)).not.toBeNull();
   });
@@ -492,7 +501,7 @@ describe('Стройка дорог: базы и бригады', () => {
     expect(game.construction.list()[0].done).toBeGreaterThan(0);
   });
 
-  it('две бригады строят быстрее одной; далёкая база — медленнее, и советник это видит', async () => {
+  it('две бригады строят быстрее одной, но не вдвое; далёкая база — медленнее, и советник это видит', async () => {
     const { advise } = await import('./advisor');
     const pace = (n: number, far: number) => {
       const game = buildGame();
@@ -505,7 +514,13 @@ describe('Стройка дорог: базы и бригады', () => {
     };
     const one = pace(1, 0);
     const two = pace(2, 0);
-    expect(two.done).toBeGreaterThan(one.done * 1.6);
+    // Вторая бригада прибавляет долю crewShare[1], третья — crewShare[2]: вместе мешают друг другу.
+    const [, s2, s3] = CONSTRUCTION.crewShare;
+    expect(two.done).toBeGreaterThan(one.done * (1 + s2) * 0.93);
+    expect(two.done).toBeLessThan(one.done * (1 + s2) * 1.07);
+    const three = pace(3, 0);
+    expect(three.done).toBeGreaterThan(one.done * (1 + s2 + s3) * 0.93);
+    expect(three.done).toBeLessThan(one.done * 3 * 0.8);
     const far = pace(1, CONSTRUCTION.reach * 1.5);
     expect(far.done).toBeLessThan(one.done * 0.5);
     expect(far.advice.some((a) => a.kind === 'buildFar' && a.title === 'Бригада далеко от базы')).toBe(true);
