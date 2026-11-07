@@ -3137,6 +3137,49 @@ button.small.with-ic {
   opacity: 0.4;
 }
 
+/* Покупку можно перетащить на остановку маршрута: карточка «берётся» рукой, взятая — бледнеет. */
+.buy-card[draggable='true'] {
+  cursor: grab;
+}
+
+.buy-card.buy-dragged {
+  opacity: 0.45;
+  border-style: dashed;
+  border-color: var(--accent);
+}
+
+/* Пока тянем покупку: остановки маршрута — пунктирные места, куда можно отпустить; под курсором — залитое. */
+.route.buy-drop .stop {
+  position: relative;
+  outline: 1.5px dashed var(--accent);
+  outline-offset: -1.5px;
+}
+
+.route.buy-drop .stop.buy-over {
+  background: #dbe9fd;
+  outline-style: solid;
+  outline-width: 2px;
+}
+
+/* Над остановкой, куда отпустится, — силуэт машины со стрелкой отправления. */
+.buy-drop-mark {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px 1px 4px;
+  background: #fff;
+  border: 1.5px solid var(--accent);
+  border-radius: 7px;
+  box-shadow: 0 2px 6px rgba(47, 128, 237, 0.3);
+  color: var(--accent);
+  font-size: 12px;
+  pointer-events: none;
+}
+
 /* Правила для путей: по строке — значок и короткая подпись (полное пояснение — в подсказке), панель не растёт в высоту. */
 .rules {
   display: flex;

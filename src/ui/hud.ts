@@ -422,6 +422,8 @@ export class Hud {
   private renamingBase: number | null = null;
   /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
   private dragLine: number | null = null;
+  /** Покупку из карточки маршрута тянут на остановку: какую модель и на какую линию (см. bindBuyDrag). */
+  private dragBuy: { line: number; model: ModelId } | null = null;
   /** Черновик параметров нового мира; биом в нём — по seed или выбранный игроком (см. withSeed). */
   private draft: WorldSettings = withSeed({ ...DEFAULT_SETTINGS, relief: 'hills' }, DEFAULT_SETTINGS.seed);
   /** Последний выбор сценария на экране новой игры: возвращается, когда снова выбирают «Сценарий». */
@@ -836,6 +838,75 @@ export class Hud {
     options.addEventListener('dragend', () => {
       this.pressing = false;
       this.controller.endLimitDrag();
+    });
+    this.bindBuyDrag(side);
+  }
+
+  /**
+   * Карточку покупки в карточке маршрута можно перетащить на остановку в списке: машина начнёт работу
+   * с неё, сразу. Пока тянем — силуэт машины под курсором, остановки маршрута обведены, а над той,
+   * куда отпустится, — тот же силуэт со стрелкой отправления.
+   */
+  private bindBuyDrag(side: HTMLElement): void {
+    let mark: HTMLElement | null = null;
+    const stopOf = (e: DragEvent) => {
+      const row = (e.target as HTMLElement).closest<HTMLElement>('.route .stop[data-i]');
+      return row && this.dragBuy && Number(row.dataset.line) === this.dragBuy.line ? row : null;
+    };
+    const clear = () => {
+      side.querySelectorAll('.buy-over').forEach((el) => el.classList.remove('buy-over'));
+      mark?.remove();
+    };
+    side.addEventListener('dragstart', (e) => {
+      const card = (e.target as HTMLElement).closest<HTMLElement>('[data-drag-buy]');
+      const line = card && this.game().lines.get(Number(card.dataset.line));
+      if (!card || !line || !e.dataTransfer) return;
+      const model = card.dataset.dragBuy as ModelId;
+      this.dragBuy = { line: line.id, model };
+      // Панель не перерисовываем, пока тянем (pointerup после перетаскивания не придёт — снимаем в dragend).
+      this.pressing = true;
+      e.dataTransfer.effectAllowed = 'copy';
+      e.dataTransfer.setData('text/plain', `buy:${model}`);
+      const art = card.querySelector('svg');
+      if (art) e.dataTransfer.setDragImage(art, art.clientWidth / 2, art.clientHeight / 2);
+      mark = document.createElement('span');
+      mark.className = 'buy-drop-mark';
+      mark.innerHTML = `${modelSvg(model, line.color, 34, 16)}<b>▶</b>`;
+      card.classList.add('buy-dragged');
+      card.closest('.detail')?.querySelector('.route')?.classList.add('buy-drop');
+    });
+    // Подсветка — по dragover (он идёт и над вложенными элементами строки): не над остановкой — снимаем.
+    side.addEventListener('dragover', (e) => {
+      if (!this.dragBuy) return;
+      const row = stopOf(e);
+      if (!row) return clear();
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      if (row.classList.contains('buy-over')) return;
+      clear();
+      row.classList.add('buy-over');
+      if (mark) row.append(mark);
+    });
+    side.addEventListener('dragleave', (e) => {
+      if (this.dragBuy && !side.contains(e.relatedTarget as Node | null)) clear();
+    });
+    side.addEventListener('drop', (e) => {
+      const row = stopOf(e);
+      if (!row || !this.dragBuy) return;
+      e.preventDefault();
+      const g = this.game();
+      const v = g.buyVehicle(this.dragBuy.line, this.dragBuy.model, false, Number(row.dataset.i));
+      if (!v) g.notify('Не хватает денег');
+      else g.fitAutoRange(v.lineId);
+    });
+    side.addEventListener('dragend', () => {
+      if (!this.dragBuy) return;
+      this.dragBuy = null;
+      this.pressing = false;
+      clear();
+      mark = null;
+      side.querySelectorAll('.buy-dragged, .buy-drop').forEach((el) => el.classList.remove('buy-dragged', 'buy-drop'));
+      this.sync(true);
     });
   }
 
@@ -2614,7 +2685,10 @@ export class Hud {
         // Грузовому маршруту — только грузовой транспорт, пассажирскому — пассажирский; смешанному — любой.
         .filter((m) => !kind || MODELS[m].carries === kind)
         .map(
-          (m) => `<button class="buy-card" data-action="buy" data-line="${line.id}" data-model="${m}" data-tip="Вместимость ${MODELS[m].capacity} · содержание ${money(MODELS[m].running)}/мес">
+          // Клик — машина выедет с первой остановки; перетащить на остановку маршрута — сразу с неё (bindBuyDrag).
+          (m) => `<button class="buy-card" data-action="buy" data-line="${line.id}" data-model="${m}" draggable="true" data-drag-buy="${m}" data-tip="Вместимость ${
+            MODELS[m].capacity
+          } · содержание ${money(MODELS[m].running)}/мес · перетащите на остановку ▶ — выедет с неё">
             ${modelSvg(m, line.color)}<span>+ ${MODELS[m].name}</span><small>${MODELS[m].capacity} мест · ${money(MODELS[m].price)}</small></button>`,
         )
         .join('')}${kind ? this.nextModelHtml(g.lineMode(line), kind) : ''}</div>

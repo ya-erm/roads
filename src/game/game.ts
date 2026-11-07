@@ -3163,21 +3163,27 @@ export class Game implements BuildContext {
     this.lapGuess.delete(id);
   }
 
-  /** auto — купил авто-парк линии, а не игрок (в журнале так и помечено). */
-  buyVehicle(lineId: number, model: ModelId, auto = false): FleetVehicle | null {
+  /**
+   * auto — купил авто-парк линии, а не игрок (в журнале так и помечено).
+   * from — номер остановки маршрута, с которой машина начнёт работу (игрок перетащил покупку на остановку
+   * в карточке маршрута). С первой — как обычно: новые уходят по очереди, выждав интервал. С другой — сразу:
+   * грузится там и едет дальше по маршруту, интервал выжидает уже на первой станции, как все.
+   */
+  buyVehicle(lineId: number, model: ModelId, auto = false, from = 0): FleetVehicle | null {
     const line = this.lines.get(lineId);
     const m = MODELS[model];
     if (!line || m.price > this.budget || m.mode !== this.lineMode(line) || !this.modelOpen(model)) return null;
     // На остановке только пассажиры: грузовику там делать нечего.
     if (m.carries !== 'passengers' && line.stops.some((id) => this.stations.get(id)?.kind === 'stop')) return null;
-    const first = this.stations.get(line.stops[0]);
+    const at = Number.isInteger(from) && from > 0 && from < line.stops.length ? from : 0;
+    const first = this.stations.get(line.stops[at]);
     const id = this.nextEntityId++;
     const v: FleetVehicle = {
       id,
       name: `${m.name} №${id}`,
       model,
       lineId,
-      stop: 0,
+      stop: at,
       state: 'departing',
       simId: null,
       // Поезд встанет на платформу первого вокзала, как только она освободится (updateTrain).
@@ -3195,17 +3201,19 @@ export class Game implements BuildContext {
       // Новая машина уедет с первой станции, выждав интервал за предыдущей (spacingUntil).
       fresh: true,
     };
+    // Выехала не с первой станции — уже в работе: в очередь новых на первой станции не встаёт.
+    if (at) delete v.fresh;
     this.fleet.set(id, v);
     line.vehicles.push(id);
     // Новый поезд — не длиннее самой короткой платформы линии, иначе ему негде встать.
     if (m.mode === 'rail' && carsOf(v) > this.maxCars(v)) v.cars = this.maxCars(v);
     this.spend(m.price, 'purchases');
-    this.journal.add('buy', { v: id, model, line: lineId, $: m.price, n: line.vehicles.length, money: this.money, ...(auto ? { auto: true } : {}) });
-    // Новая машина сначала грузится на первой остановке.
+    this.journal.add('buy', { v: id, model, line: lineId, $: m.price, n: line.vehicles.length, money: this.money, ...(auto ? { auto: true } : {}), ...(at ? { from: at } : {}) });
+    // Новая машина сначала грузится на своей остановке; с первой новые уходят не все разом.
     if (first && m.mode === 'road') {
       this.handleStop(v, first, line);
       v.state = 'loading';
-      v.timer += line.vehicles.length * 3;
+      if (!at) v.timer += line.vehicles.length * 3;
     }
     return v;
   }
