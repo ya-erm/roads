@@ -161,6 +161,15 @@
   color: #fff;
 }
 
+/* «Участок»: пин на карте — синий, как рамка участка; на тёмной выбранной кнопке — светлее, чтобы читался. */
+.bug-group button[data-bug-tool='area'] {
+  color: #2f80ed;
+}
+
+.bug-group button[data-bug-tool='area'].active {
+  color: #6aa8ff;
+}
+
 .bug-group button:disabled {
   opacity: 0.32;
   cursor: default;
@@ -326,35 +335,6 @@
   color: var(--muted);
   font-weight: 400;
   white-space: nowrap;
-}
-
-/* «Участок на карте»: кнопка в списке файлов — включает инструмент «Участок». */
-.bug-file.bug-spot {
-  width: 100%;
-  border: 1.5px dashed transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  text-align: left;
-}
-
-.bug-file.bug-spot svg {
-  color: #2f80ed;
-}
-
-.bug-file.bug-spot:hover {
-  background: #e7f0fd;
-}
-
-.bug-file.bug-spot.active {
-  border-color: #2f80ed;
-  background: #e7f0fd;
-}
-
-.bug-file.bug-spot.set small {
-  color: #2f80ed;
-  font-weight: 600;
 }
 
 /* «Схема участка»: дороги участка шаблоном развязки — только когда участок отмечен; пустой — бледный. */

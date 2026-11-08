@@ -31,7 +31,7 @@ import { areaTemplate, schemeBox, schemeNote, type AreaTemplate } from '../bugre
 import { loadAuthor, saveAuthor } from '../bugreport/author';
 import { captureScreen, type Shot } from '../bugreport/capture';
 import { canvasMeasure, drawArea, drawMarks, haloFor, markFont, outputSize, renderSketch } from '../bugreport/draw';
-import { areaSize, mapSpot, sketchArea, withSpot, worldBox, type MapSpot, type SnapCamera } from '../bugreport/spot';
+import { mapSpot, withSpot, type MapSpot, type SnapCamera } from '../bugreport/spot';
 import { bugHotkeyLabels, isBugHotkey, isMacPlatform } from '../bugreport/hotkey';
 import { BUG_BUTTON, bugButtonSpot } from '../bugreport/layout';
 import {
@@ -157,10 +157,9 @@ const TOOLS: { id: Tool; key: string; code: string; tip: string; icon: string }[
     id: 'area',
     key: 'M',
     code: 'KeyM',
-    tip: 'Участок карты: обведите место, на которое жалуетесь, — его координаты попадут в отчёт и сохранение',
-    icon: svg(
-      '<rect x="3" y="4.5" width="18" height="15" rx="1.5" stroke="#2f80ed" stroke-dasharray="3.2 2.4" fill="rgba(47,128,237,0.14)"/><path d="M12 16.5L9.3 12.4A3.3 3.3 0 1 1 14.7 12.4Z" fill="#2f80ed" stroke="#2f80ed" stroke-width="1.2"/><circle cx="12" cy="10.6" r="1.1" fill="#fff" stroke="none"/>',
-    ),
+    tip: 'Участок на карте: обведите место ошибки — его координаты попадут в отчёт, а сохранение откроется с этим участком в рамке',
+    // Пин на карте во весь значок: синий на светлой панели, голубой на тёмной кнопке (цвет — в CSS).
+    icon: svg('<path d="M12 22.2L6.2 13.8A7.2 7.2 0 1 1 17.8 13.8Z" fill="currentColor" stroke-width="1.4"/><circle cx="12" cy="9.6" r="2.7" fill="#fff" stroke="none"/>', 24),
   },
   { id: 'rect', key: 'R', code: 'KeyR', tip: 'Прямоугольник', icon: svg('<rect x="3.5" y="5.5" width="17" height="13" rx="1.5"/>') },
   { id: 'ellipse', key: 'O', code: 'KeyO', tip: 'Овал', icon: svg('<ellipse cx="12" cy="12" rx="9" ry="6.8"/>') },
@@ -202,7 +201,6 @@ const ICON = {
   warn: svg('<path d="M12 3.5L21.5 20H2.5Z"/><path d="M12 10V14"/><path d="M12 17H12.01"/>', 18),
   // Схема участка — как значок «Развязки» на панели инструментов: шаблон развязки.
   area: svg('<path d="M9.6 2v20M14.4 2v20"/><path d="M2 12h20"/><path d="M9.6 4.5L4.6 12L9.6 19.5M14.4 4.5L19.4 12L14.4 19.5"/>', 18),
-  pin: svg('<path d="M12 21L6.6 13.2A6.2 6.2 0 1 1 17.4 13.2Z" fill="#2f80ed" stroke="#2f80ed"/><circle cx="12" cy="9.6" r="2.2" fill="#fff" stroke="none"/>', 18),
 };
 
 type Drag =
@@ -559,7 +557,6 @@ class BugReport {
     this.stage.dataset.tool = tool;
     this.screen.querySelector('[data-bug-hint]')!.textContent = HINTS[tool];
     this.syncControls();
-    this.renderSpot();
     this.render();
   }
 
@@ -645,9 +642,6 @@ class BugReport {
         return void this.downloadArchive();
       case 'shot-on':
         return this.setShotOn(true);
-      case 'area-tool':
-        if (!this.include.shot) this.setShotOn(true);
-        return this.setTool('area');
     }
   }
 
@@ -726,23 +720,6 @@ class BugReport {
     if (note && this.shot) {
       const out = outputBox(this.tl.now, this.shot.width, this.shot.height);
       note.textContent = `${Math.round(out.w)} × ${Math.round(out.h)}`;
-    }
-    this.renderSpot();
-  }
-
-  /** Строка «Участок на карте» в списке файлов: размер участка и откуда он (рамка, пометки, кадр) — или «отметить». */
-  private renderSpot(): void {
-    const el = this.screen.querySelector<HTMLElement>('[data-bug-spot]');
-    const m = this.moment;
-    if (!el || !m) return;
-    const area = sketchArea(this.tl.now);
-    const note = el.querySelector('small')!;
-    el.classList.toggle('set', area?.source === 'frame');
-    el.classList.toggle('active', this.tool === 'area' && this.include.shot);
-    if (!area) note.textContent = 'отметить';
-    else {
-      const size = areaSize(worldBox(m.camera, area.box));
-      note.textContent = area.source === 'frame' ? size : `${area.source === 'marks' ? 'по пометкам' : 'по кадру'} · ${size}`;
     }
     this.renderScheme();
   }
@@ -900,7 +877,7 @@ class BugReport {
         break;
     }
     this.render();
-    if (d.type.startsWith('area')) this.renderSpot();
+    if (d.type.startsWith('area')) this.renderScheme();
   }
 
   private onUp(e: PointerEvent): void {
@@ -1242,9 +1219,8 @@ class BugReport {
       row('shot', ICON.shot, 'Приложить снимок', `${Math.round(out.w)} × ${Math.round(out.h)}`) +
       row('journal', ICON.journal, 'Журнал партии', `${m.journalEntries} зап. · ${sizeLabel(enc.encode(m.journal).length)}`) +
       row('save', ICON.save, 'Сохранение', sizeLabel(enc.encode(m.save).length)) +
-      `<button class="bug-file bug-spot" data-bug="area-tool" data-bug-spot data-tip="Где на карте ошибка: обведите участок на снимке — его координаты попадут в отчёт, а сохранение откроется с этим участком в рамке (M)">${ICON.pin}<span>Участок на карте</span><small></small></button>` +
       `<label class="bug-file bug-area hidden" data-bug-area data-tip="Дороги и пути участка файлом шаблона развязки: его можно вставить в любую партию — «Развязки → Шаблон → Открыть шаблоны из файла»"><input type="checkbox" data-bug-include="area" ${this.include.area ? 'checked' : ''} />${ICON.area}<span>Схема участка</span><small data-bug-file-note="area"></small></label>`;
-    this.renderSpot();
+    this.renderScheme();
   }
 
   /** Итоговая картинка с пометками и кадром — PNG. */
