@@ -28,7 +28,10 @@ const HELP = `npm run shot -- [параметры]
   --export-save <файл>    после ожидания сохранить партию в файл — как «Сохранить в файл»
   --size <ШxВ>            размер окна (по умолчанию 1440x900)
   --scale <n>             плотность пикселей (по умолчанию 1)
+  --start-screen          не закрывать стартовое окно («Дороги региона», брифинг сценария)
 
+Стартовое окно новой партии закрывается само (игра остаётся на паузе): под его размытым фоном headless-браузер
+не обновляет карту, и построенное через --eval на снимке не видно.
 Сохранение из баг-репорта само открывается с участком в рамке; --area из строки «Где на карте» ставит на него камеру.
 Сохранения пишутся в отдельный слот (?slot=task-agent-shot) и партию пользователя не трогают.`;
 
@@ -48,6 +51,7 @@ const { values: opt } = parseArgs({
     'export-save': { type: 'string' },
     size: { type: 'string', default: '1440x900' },
     scale: { type: 'string', default: '1' },
+    'start-screen': { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   },
 });
@@ -92,6 +96,8 @@ async function main(): Promise<void> {
     if (!url.searchParams.has('slot')) url.searchParams.set('slot', 'task-agent-shot');
     await page.goto(url.href);
     await page.waitForFunction(() => 'game' in window, null, { timeout: 30_000 });
+    // Стартовое окно — прочь, как кнопкой, но без запуска времени: под его размытым фоном карта на снимке не обновляется.
+    if (!opt['start-screen']) await page.evaluate(() => document.querySelector('[data-start]')?.classList.add('hidden'));
 
     if (opt.save) {
       await page.evaluate(() => {
