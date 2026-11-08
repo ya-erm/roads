@@ -31,7 +31,7 @@ import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
-import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
+import { type Box, grow, GROUND, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
 import { baseBox, baseSig, buildingCorridors, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
@@ -307,12 +307,20 @@ interface StillScene {
   preview: JunctionPreview | null;
 }
 
-/** Плитки в кадре: готовые текущего уровня, где их нет — запасные (растянутые), сдвиг камеры в пикселях холста. */
+/**
+ * Плитки в кадре: готовые текущего уровня, где их нет — запасные (растянутые), сдвиг камеры в пикселях холста;
+ * live — места устаревших плиток (и дыр без свежего запасного): там неподвижное рисуется прямо в кадре (drawLive).
+ */
 interface TilePlan {
   set: TileSet<TileCanvasEl>;
   ready: Tile<TileCanvasEl>[];
   missing: Box[];
   fallback: { set: TileSet<TileCanvasEl>; tiles: Tile<TileCanvasEl>[] }[];
+  live: Box[];
+  scene: StillScene;
+  /** Рамка, в которой рисуется вживую (с запасом, как у плитки), и пути в ней. */
+  liveView: Box | null;
+  liveSegs: Segment[];
   k: number;
   tx: number;
   ty: number;
@@ -740,7 +748,8 @@ export class Renderer {
     for (const job of this.tiles.jobs(set, screen, around)) {
       if (!job.must) {
         const spent = performance.now() - t0;
-        // Устаревшая на экране — хотя бы одна за кадр, даже сверх бюджета: стройка видна сразу.
+        // Устаревшая на экране — хотя бы одна за кадр, даже сверх бюджета: пока она не готова, её место рисуется
+        // вживую (drawLive) — дороже копии.
         const budget = job.ahead ? AHEAD_MS : job.dirty ? DIRTY_MS : FILL_MS;
         if ((job.ahead && !steady) || (spent > budget && !(job.dirty && !job.ahead && dirtyDone === 0))) {
           this.moving = true;
@@ -750,25 +759,48 @@ export class Renderer {
       this.renderTile(s, set, job.tile);
       if (job.dirty) dirtyDone++;
     }
-    const need = this.tiles.cover(set, screen);
-    const ready = need.filter((t) => t.ready);
-    const missing = need.filter((t) => !t.ready).map((t) => tileBox(t.i, t.j, set.world));
-    const fallback: TilePlan['fallback'] = [];
-    if (missing.length) {
-      this.moving = true;
-      const hole = missing.reduce(unite);
-      // Сначала самый старый уровень, поверх — новее.
-      for (const fb of this.tiles.sets.slice(1).reverse()) {
-        const tiles = this.tiles.readyIn(fb, hole).filter((t) => missing.some((m) => meets(tileBox(t.i, t.j, fb.world), m)));
-        if (tiles.length) fallback.push({ set: fb, tiles });
-      }
-    } else this.tiles.dropFallback();
+    // Устаревшее (не успели перерисовать в бюджет) не показываем: его место — вживую, пока плитки не догонят.
+    const { fresh: ready, holes: missing, live, fallback } = this.tiles.layout(set, screen);
+    if (missing.length || live.length) this.moving = true;
+    // Запасной уровень не нужен, когда текущий закрыл экран (пусть и устаревшими плитками).
+    if (this.tiles.cover(set, screen).every((t) => t.ready)) this.tiles.dropFallback();
+    const liveView = live.length ? grow(live.reduce(unite), TILE_MARGIN) : null;
+    const liveSegs = liveView ? [...s.game.net.segments.values()].filter((x) => this.visible(this.cache.get(x.id)!.bbox, liveView)) : [];
     const aroundCount = this.tiles.cover(set, grow(screen, set.world / 2)).length;
     this.tiles.trim(Math.max(48, Math.ceil(aroundCount * 1.6)));
-    return { set, ready, missing, fallback, k, tx, ty };
+    return { set, ready, missing, fallback, live, scene: s, liveView, liveSegs, k, tx, ty };
   }
 
-  /** Копирует слой layer плиток на экран (запасной уровень — только в дыры текущего). */
+  /**
+   * Слой layer неподвижного прямо в кадре — только в местах plan.live (устаревшие плитки), как без кэша: земля
+   * (UNDER), на земле (GROUND), мосты уровня (GROUND + уровень).
+   */
+  private drawLive(plan: TilePlan, layer: number): void {
+    if (!plan.liveView) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    for (const m of plan.live) {
+      const x0 = Math.round(m.x0 * plan.k + plan.tx);
+      const y0 = Math.round(m.y0 * plan.k + plan.ty);
+      ctx.rect(x0, y0, Math.round(m.x1 * plan.k + plan.tx) - x0, Math.round(m.y1 * plan.k + plan.ty) - y0);
+    }
+    ctx.clip();
+    const s = plan.scene;
+    if (layer === UNDER) {
+      ctx.fillStyle = BIOMES[s.game.terrain.biome].palette.outside;
+      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+    ctx.setTransform(plan.k, 0, 0, plan.k, plan.tx, plan.ty);
+    if (layer === UNDER) this.drawUnder(s, plan.liveView, plan.liveSegs);
+    else if (layer === GROUND) this.drawGround(s, plan.liveView, plan.liveSegs);
+    else this.drawBridges(s, plan.liveView, plan.liveSegs, layer - GROUND);
+    ctx.restore();
+  }
+
+  /** Копирует слой layer плиток на экран (запасной уровень — только в дыры текущего), устаревшее — рисует вживую. */
   private blitTiles(plan: TilePlan, layer: number): void {
     const ctx = this.ctx;
     ctx.save();
@@ -796,6 +828,7 @@ export class Renderer {
     }
     for (const t of plan.ready) put(plan.set, t);
     ctx.restore();
+    this.drawLive(plan, layer);
   }
 
   /**

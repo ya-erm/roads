@@ -117,6 +117,61 @@ describe('Плитки кэша', () => {
     expect(cache.jobs(set, far, far).every((j) => j.must)).toBe(true);
   });
 
+  it('устаревшая плитка на экран не копируется — её место рисуется вживую', () => {
+    const cache = new TileCache(fake);
+    const set = cache.frame(1, 1, 0);
+    const screen = { x0: 0, y0: 0, x1: 3 * TILE_PX - 1, y1: TILE_PX - 1 };
+    const [a, b, c] = cache.cover(set, screen);
+    for (const t of [a, b, c]) t.ready = true;
+    cache.invalidate([{ x0: TILE_PX + 10, y0: 10, x1: TILE_PX + 20, y1: 20 }]);
+    const l = cache.layout(set, screen);
+    expect(l.fresh).toEqual([a, c]);
+    expect(l.live).toEqual([tileBox(1, 0, set.world)]);
+    expect(l.holes).toEqual([]);
+  });
+
+  it('протяжка дороги: плитки устаревают каждый кадр, перерисовать успевают одну — на экране всё равно нет прежней', () => {
+    const cache = new TileCache(fake);
+    const set = cache.frame(1, 1, 0);
+    // Дорога сверху вниз через 4 ряда плиток.
+    const screen = { x0: 0, y0: 0, x1: TILE_PX - 1, y1: 4 * TILE_PX - 1 };
+    for (const t of cache.cover(set, screen)) t.ready = true;
+    const road = { x0: 100, y0: 0, x1: 200, y1: 4 * TILE_PX - 1 };
+    for (let frame = 0; frame < 10; frame++) {
+      cache.frame(1, 1, frame);
+      cache.invalidate([road]);
+      // Бюджет кадра — на одну плитку: первую по порядку работы (верхнюю).
+      const [job] = cache.jobs(set, screen, screen);
+      job.tile.dirty = false;
+      const l = cache.layout(set, screen);
+      // Ни одна плитка с прежней дорогой не копируется: свежая — только что перерисованная, остальное — вживую.
+      expect(l.fresh).toEqual([job.tile]);
+      expect(l.live).toHaveLength(3);
+      expect(l.fresh.every((t) => !t.dirty)).toBe(true);
+    }
+  });
+
+  it('дыра нового уровня: свежий запасной — растянутым, устаревший запасной — вживую', () => {
+    const cache = new TileCache(fake);
+    const old = cache.frame(1, 1, 0);
+    for (const t of cache.cover(old, { x0: 0, y0: 0, x1: 4 * TILE_PX, y1: 2 * TILE_PX })) t.ready = true;
+    cache.frame(1.2, 1, 10);
+    const set = cache.frame(1.2, 1, 10 + SETTLE_MS);
+    expect(cache.sets).toEqual([set, old]);
+    const w = set.world;
+    const screen = { x0: 10, y0: 10, x1: 2 * w - 10, y1: w - 10 };
+    let l = cache.layout(set, screen);
+    expect(l.live).toEqual([]);
+    expect(l.holes).toEqual([tileBox(0, 0, w), tileBox(1, 0, w)]);
+    expect(l.fallback.map((f) => f.set)).toEqual([old]);
+    // Дорогу поменяли во второй дыре: запасная плитка под ней устарела — эту дыру вживую, первую — из запасного.
+    cache.invalidate([{ x0: 1.5 * w, y0: 10, x1: 1.5 * w + 5, y1: 20 }]);
+    l = cache.layout(set, screen);
+    expect(l.holes).toEqual([tileBox(0, 0, w)]);
+    expect(l.live).toEqual([tileBox(1, 0, w)]);
+    expect(l.fallback.flatMap((f) => f.tiles).every((t) => !t.dirty)).toBe(true);
+  });
+
   it('холсты слоёв: нужен — выдаётся (тот же при перерисовке), не нужен — в запас и снова в дело', () => {
     const cache = new TileCache(fake);
     const set = cache.frame(1, 1, 0);

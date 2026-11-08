@@ -11,7 +11,8 @@
  * сильным (pickLevel). Пока новый уровень дорисовывается, недостающее берётся из прежнего (запасного).
  *
  * Сброс: что изменилось — рамками в мире (SceneDiff сравнивает слепки сети, зданий и прочего по подписям);
- * задетые плитки помечаются устаревшими и перерисовываются, пока видны старыми.
+ * задетые плитки помечаются устаревшими и перерисовываются в бюджет кадра, а пока не перерисованы, их место на
+ * экране рисуется вживую (layout) — старыми они не видны.
  */
 
 export interface Box {
@@ -163,6 +164,14 @@ export interface TileJob<C> {
   ahead: boolean;
 }
 
+/** Раскладка экрана в кадре (TileCache.layout): что копировать из плиток, что из запасных, что рисовать вживую. */
+export interface TileLayout<C> {
+  fresh: Tile<C>[];
+  holes: Box[];
+  live: Box[];
+  fallback: { set: TileSet<C>; tiles: Tile<C>[] }[];
+}
+
 /** Порядок работы: сначала дыры, потом устаревшие на экране, потом недорисованные уровня, потом про запас. */
 export function jobRank(j: { must: boolean; dirty: boolean; ahead: boolean }): number {
   return j.must ? 0 : j.ahead ? 3 : j.dirty ? 1 : 2;
@@ -241,14 +250,51 @@ export class TileCache<C extends TileCanvas> {
     return out;
   }
 
-  /** Закрывают ли рамку box (мир) целиком готовые плитки одного из запасных уровней. */
-  backed(box: Box): boolean {
+  /**
+   * Закрывают ли рамку box (мир) целиком готовые плитки одного из запасных уровней; clean — только не устаревшие
+   * (такие можно показывать: на них то же, что сейчас в мире).
+   */
+  backed(box: Box, clean = false): boolean {
     return this.sets.slice(1).some((fb) => {
       // Чуть внутрь: плитка, только касающаяся края, не нужна.
       const r = tileRange(grow(box, -fb.world * 1e-6), fb.world);
-      for (let j = r.j0; j <= r.j1; j++) for (let i = r.i0; i <= r.i1; i++) if (!fb.tiles.get(`${i}:${j}`)?.ready) return false;
+      for (let j = r.j0; j <= r.j1; j++) {
+        for (let i = r.i0; i <= r.i1; i++) {
+          const t = fb.tiles.get(`${i}:${j}`);
+          if (!t?.ready || (clean && t.dirty)) return false;
+        }
+      }
       return true;
     });
+  }
+
+  /**
+   * Что показать на экране screen (мир) после работы кадра: fresh — готовые плитки уровня, что не устарели; holes —
+   * дыры уровня, закрытые неустаревшими плитками запасных уровней (fallback); live — рамки плиток, которые надо
+   * нарисовать прямо в кадре: устаревшие (что-то в них поменялось, а перерисовать не успели) и дыры без
+   * свежего запасного. Устаревшее на экран не попадает никогда: иначе при протяжке дороги часть плиток показывает
+   * её новой, часть — прежней, со ступенькой по краю плитки.
+   */
+  layout(set: TileSet<C>, screen: Box): TileLayout<C> {
+    const fresh: Tile<C>[] = [];
+    const holes: Box[] = [];
+    const live: Box[] = [];
+    for (const t of this.cover(set, screen)) {
+      const box = tileBox(t.i, t.j, set.world);
+      if (t.ready && !t.dirty) fresh.push(t);
+      else if (!t.ready && this.backed(box, true)) holes.push(box);
+      else live.push(box);
+    }
+    const fallback: TileLayout<C>['fallback'] = [];
+    if (holes.length) {
+      const hole = holes.reduce(unite);
+      // Сначала самый старый уровень, поверх — новее.
+      for (const fb of this.sets.slice(1).reverse()) {
+        const tiles = this.readyIn(fb, hole).filter((t) => !t.dirty && holes.some((m) => meets(tileBox(t.i, t.j, fb.world), m)));
+        if (tiles.length) fallback.push({ set: fb, tiles });
+      }
+    }
+    return { fresh, holes, live, fallback };
   }
 
   /**
@@ -291,7 +337,7 @@ export class TileCache<C extends TileCanvas> {
     return n;
   }
 
-  /** Все плитки устарели (сменились настройки вида и т. п.): перерисуются, а пока видны старыми. */
+  /** Все плитки устарели (сменились настройки вида и т. п.): перерисуются, а пока на экране рисуется вживую. */
   invalidateAll(): void {
     for (const set of this.sets) for (const t of set.tiles.values()) if (t.ready) t.dirty = true;
   }
