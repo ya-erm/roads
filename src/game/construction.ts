@@ -248,6 +248,22 @@ export class Construction {
   }
 
   /**
+   * Чья это стройка: ближайшая база (Crews.span; при равенстве — с меньшим номером), в радиусе которой проект id и
+   * бригады которой до него доезжают (serves). Только её бригады автоматика сюда и шлёт. Нет такой — null.
+   */
+  owner(id: number): number | null {
+    let best: { base: number; d: number } | null = null;
+    for (const b of this.crews.bases.values()) {
+      if (!this.crews.of(b.id).length) continue;
+      const s = this.siteOfBase(id, b.id);
+      if (!s || !this.crews.serves(b.id, s)) continue;
+      const d = this.crews.span(b.id, s);
+      if (!best || d < best.d - 1e-6 || (Math.abs(d - best.d) <= 1e-6 && b.id < best.base)) best = { base: b.id, d };
+    }
+    return best?.base ?? null;
+  }
+
+  /**
    * Проект id вне радиуса базы бригады b — туда её можно отправить только вручную («🎯 На стройку…»), и строить будет
    * медленно: к фронту, куда она поедет (site с ней). Не доехать — false (тут другая причина, Crews.canGo).
    */

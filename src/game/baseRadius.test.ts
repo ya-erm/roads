@@ -80,16 +80,43 @@ describe('Радиус обслуживания базы: автоматика',
     expect(far.project).toBeUndefined();
   });
 
-  it('ближней базе не до этого проекта (другой ей ближе по выбору) — дальняя не ждёт вечно: едет в следующий такт', () => {
+  it('бригады ближней базы заняты — дальняя всё равно не едет, хотя место на проекте есть', () => {
     const t = bench();
     const [far] = t.base(100, { x: 0, y: 0 }, 1);
     const [near] = t.base(200, { x: 5000, y: 0 }, 2);
     t.sites.set(9, { node: 90, pos: { x: 5500, y: 0 } });
-    t.crews.tick();
-    // Ближняя уехала — на проекте ещё есть место (до трёх бригад), а дальняя в радиусе: едет помогать.
+    for (let i = 0; i < 5; i++) t.crews.tick();
+    // Ближняя уехала — на проекте ещё есть место (до трёх бригад), но стройка её: дальняя дома.
     expect(near.project).toBe(9);
+    expect(t.crews.assigned(9).length).toBeLessThan(t.crews.cap(9));
+    expect(far.state).toBe('idle');
+    expect(far.project).toBeUndefined();
+    // Свой проект — в радиусе только дальней: туда она едет.
+    t.sites.set(8, { node: 80, pos: { x: -2000, y: 0 } });
     t.crews.tick();
-    expect(far.project).toBe(9);
+    expect(far.project).toBe(8);
+    // Вручную — можно и на чужой.
+    expect(t.crews.canGo(far, 9)).toBeNull();
+  });
+
+  it('приоритетному не хватает рук — бригада дальней базы с другого проекта к нему не переходит', () => {
+    const t = bench();
+    const [far] = t.base(100, { x: 0, y: 0 }, 1);
+    t.sites.set(8, { node: 80, pos: { x: -1000, y: 0 } });
+    t.crews.tick();
+    expect(far.project).toBe(8);
+    t.crews.arrive(far, { node: 80, pos: { x: -1000, y: 0 } });
+    t.host.time = 100;
+    t.crews.tick();
+    expect(far.state).toBe('working');
+    // Ближняя база у приоритетного 9-го, её бригада уже там.
+    const [near] = t.base(200, { x: 5000, y: 0 }, 2);
+    t.sites.set(9, { node: 90, pos: { x: 5500, y: 0 } });
+    t.host.priority = (id) => id === 9;
+    t.crews.tick();
+    t.crews.tick();
+    expect(near.project).toBe(9);
+    expect(far.project).toBe(8);
   });
 
   it('приоритетному не хватает рук — к нему переходит только бригада, в радиусе базы которой он есть', () => {
@@ -273,6 +300,24 @@ describe('Радиус обслуживания базы в игре: «нет �
     expect(game.construction.info(id)!.done).toBeGreaterThan(0);
     expect(mine.project).toBe(id);
     expect(b.project).toBeUndefined();
+  });
+
+  it('стройка в радиусе двух баз — строит только ближняя; в карточке дальней она помечена ближней базой', () => {
+    CONSTRUCTION.serviceRadius = 1500;
+    const { game, at, id, b } = farProject();
+    expect(game.buildBase({ x: at.x + 1250, y: at.y - 40 })).toBeNull();
+    const crews = game.construction.crews;
+    const mine = [...crews.brigades.values()].find((x) => x.base !== b.base)!;
+    expect(game.construction.serves(id, b.base)).toBe(true);
+    expect(game.construction.owner(id)).toBe(mine.base);
+    for (let t = 0; t < 120 && !game.construction.info(id)!.done; t += 0.5) runSeconds(game, 0.5);
+    expect(game.construction.info(id)!.done).toBeGreaterThan(0);
+    expect(mine.project).toBe(id);
+    expect(b.project).toBeUndefined();
+    const html = baseCardHtml(game, b.base);
+    expect(html).toContain(`🏚 ${game.baseName(mine.base)}`);
+    expect(html).toContain('стройки у баз ближе');
+    expect(baseCardHtml(game, mine.base)).not.toContain('🏚 ');
   });
 
   it('сохранение посреди стройки вне радиуса — после загрузки всё так же, и дальше одинаково', () => {

@@ -24,7 +24,7 @@
  *
  * Радиус обслуживания базы (CONSTRUCTION.serviceRadius, serves): автоматика (assign, reinforce) шлёт бригаду только на
  * проект, чей край работ её фронта или подъезд к нему (Site.pos, Site.gate) — в радиусе её базы; подходят бригады
- * нескольких баз — едет бригада ближайшей (closer). Вручную (send) — без ограничения. Бригада, что уже работает вне
+ * нескольких баз — строят только бригады ближайшей (closer), дальняя не едет и когда бригады ближней заняты. Вручную (send) — без ограничения. Бригада, что уже работает вне
  * радиуса (старое сохранение, назначил игрок и снял закрепление), доделывает свой фронт, но, когда он кончится, к
  * другому фронту вне радиуса не едет (relocate) — свободна.
  *
@@ -431,11 +431,6 @@ export class Crews {
     return this.span(base, s) <= CONSTRUCTION.serviceRadius + 1e-6;
   }
 
-  /** Бригада свободна для автоматики: на базе или едет домой не машиной (assign её возьмёт). */
-  private free(b: Brigade): boolean {
-    return b.state === 'idle' || (b.state === 'back' && !b.convoy);
-  }
-
   /** Куда бригаде b ехать на проект id, если автоматика может её туда послать: место есть, доедет, в радиусе базы. */
   private fit(b: Brigade, id: number): Site | null {
     if (this.assigned(id).length >= this.cap(id)) return null;
@@ -445,15 +440,18 @@ export class Crews {
   }
 
   /**
-   * На проект id может поехать свободная бригада другой, более близкой базы (span меньше; при равенстве — база с
-   * меньшим номером): тогда b его уступает — едет бригада ближайшей базы. Бригады одной базы друг другу не мешают.
+   * Проект id — стройка другой, более близкой базы (span меньше; при равенстве — база с меньшим номером), чьи бригады
+   * до него доезжают и в чьём радиусе он есть: тогда b его не берёт, даже если бригады той базы сейчас заняты, — каждую
+   * стройку автоматика строит бригадами только ближайшей к ней базы. Бригады одной базы друг другу не мешают.
    */
   private closer(b: Brigade, id: number, s: Site): boolean {
     const mine = this.span(b.base, s);
+    const seen = new Set<number>([b.base]);
     for (const o of this.brigades.values()) {
-      if (o === b || o.base === b.base || !this.free(o)) continue;
-      const t = this.fit(o, id);
-      if (!t) continue;
+      if (seen.has(o.base)) continue;
+      const t = this.host.site(id, o);
+      if (!t || !this.canReach(o, t.node) || !this.serves(o.base, t)) continue;
+      seen.add(o.base);
       const d = this.span(o.base, t);
       if (d < mine - 1e-6 || (Math.abs(d - mine) <= 1e-6 && o.base < b.base)) return true;
     }
@@ -598,7 +596,7 @@ export class Crews {
           if (b.state !== 'working' || b.convoy || b.project === undefined || b.pinned || prio(b.project)) continue;
           // К какому фронту приоритетного она поедет (доедет ли туда по дорогам, в радиусе ли он её базы).
           const s = this.host.site(id, b);
-          if (!s || !this.canReach(b, s.node) || !this.serves(b.base, s)) continue;
+          if (!s || !this.canReach(b, s.node) || !this.serves(b.base, s) || this.closer(b, id, s)) continue;
           const n = this.assigned(b.project).length;
           const d = dist(this.where(b), s.pos);
           if (!best || n > best.n || (n === best.n && d < best.d - 1e-6)) best = { b, n, d };
