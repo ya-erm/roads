@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { awaitsOwner, Board, BoardError, MAX_FILE_BYTES, STATUS_NAMES, staleRevision, type Task, type TaskComment, type TaskStatus } from './board';
+import { Board, BoardError, MAX_FILE_BYTES, STATUS_NAMES, staleRevision, type Task, type TaskComment, type TaskStatus } from './board';
 import { askClaude, checkClaude, ClaudeError, runClaude, type ClaudeResult, type ClaudeSettings } from './claude';
 import { idleStatus, Presence } from './presence';
 import {
@@ -328,17 +328,6 @@ async function work(brief: Task): Promise<void> {
   if (from === 'revision' && staleRevision(card, isMine)) {
     settled.set(card.id, card.revision);
     log(`«${card.title?.trim() || card.id}» в «${STATUS_NAMES.revision}», но после отчёта нового нет — не беру, пока не появятся замечания.`);
-    return;
-  }
-  if (awaitsOwner(card, QUEUE, cfg.actor)) {
-    // Публичная форма создаёт карточку сразу в «Новая» (другой статус ей доска не разрешает) — переводим её
-    // в «Черновик»: участник доски посмотрит и сам вернёт в «Новая», тогда и возьмём.
-    const moved = await patch(card.id, (c) => (QUEUE.includes(c.status) ? { status: 'draft' } : null)).catch((e) => {
-      log(`«${card.title?.trim() || card.id}»: не удалось перевести в «${STATUS_NAMES.draft}» — ${message(e)}`);
-      return null;
-    });
-    settled.set(card.id, card.revision);
-    if (moved) log(`«${card.title?.trim() || card.id}» — публичный баг-репорт → «${STATUS_NAMES.draft}»: возьму, когда участник доски переведёт его в «${STATUS_NAMES.todo}».`);
     return;
   }
   const description = await descriptionOf(card);
