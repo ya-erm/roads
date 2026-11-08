@@ -39,6 +39,7 @@ import { baseBox, baseSig, buildingCorridors, drawBases, drawMachines, drawParke
 import { projectBadges } from './projectBadges';
 import { drawRailProjects, drawTrackMachines, railProjectSig } from './railProjectArt';
 import { WORK_TRAIN } from '../game/workTrains';
+import { SERVICES } from '../game/services';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
 import { corridorHalf } from '../world/worldgen';
 import { openNet } from '../lanes/open';
@@ -65,7 +66,9 @@ export type Selection =
   /** Строительная база: карточка — название, бригады и что они делают, нанять и распустить, ближние стройки. */
   | { type: 'base'; id: number }
   /** Строительная бригада: подсвечены все машины колонны; карточка — что делает, «🎯 На стройку…», «↺ Авто». */
-  | { type: 'crew'; id: number };
+  | { type: 'crew'; id: number }
+  /** Строительный поезд ж/д проекта (workTrains.ts): маршрут по путям до цели — на карте; карточка — куда, откуда. */
+  | { type: 'workTrain'; id: number };
 
 export interface ToolOverlay {
   /** Выбираем стройку для бригады («🎯 На стройку…»): проект под курсором — подсвечен, как выбранный. */
@@ -1452,7 +1455,7 @@ export class Renderer {
 
   // ---------- Дороги ----------
 
-  private polyline(pts: Vec[]): void {
+  private polyline(pts: readonly Vec[]): void {
     const ctx = this.ctx;
     ctx.beginPath();
     pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
@@ -3282,10 +3285,12 @@ export class Renderer {
       );
     }
     const sim = sel?.type === 'vehicle' ? game.traffic.vehicles.get(sel.simId) : undefined;
+    if (sim) this.drawVehicleTrip(game, sim.id);
     if (sim) this.drawSelectRing(sim.pos.x - (sim.dir.x * sim.length) / 2, sim.pos.y - (sim.dir.y * sim.length) / 2, sim.length * 0.9 + 3);
     // Машину компании обводит её линия (drawLinePath), если та на карте.
     else if (selFleet && selFleet.lineId !== shownLine) this.drawFleetSelected(game, selFleet);
     if (sel?.type === 'crew') this.drawCrewSelected(game, sel.id);
+    if (sel?.type === 'workTrain') this.drawWorkTrainSelected(game, sel.id);
   }
 
   /**
@@ -3977,41 +3982,132 @@ export class Renderer {
         ctx.setLineDash([]);
         continue;
       }
-      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-      ctx.lineWidth = 6.5 / z;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      this.polyline(pts);
-      ctx.stroke();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 4 / z;
-      this.polyline(pts);
-      ctx.stroke();
-      // Стрелки направления движения через равные промежутки экрана.
-      const spacing = 90 / z;
-      let acc = spacing / 2;
-      ctx.fillStyle = '#ffffff';
-      for (let k = 1; k < pts.length; k++) {
-        const p0 = pts[k - 1];
-        const p1 = pts[k];
-        const seg = Math.hypot(p1.x - p0.x, p1.y - p0.y);
-        if (seg < 1e-6) continue;
-        const ux = (p1.x - p0.x) / seg;
-        const uy = (p1.y - p0.y) / seg;
-        while (acc <= seg) {
-          const cx = p0.x + ux * acc;
-          const cy = p0.y + uy * acc;
-          const s = 3.2 / z;
-          ctx.beginPath();
-          ctx.moveTo(cx + ux * s * 1.4, cy + uy * s * 1.4);
-          ctx.lineTo(cx - ux * s - uy * s, cy - uy * s + ux * s);
-          ctx.lineTo(cx - ux * s + uy * s, cy - uy * s - ux * s);
-          ctx.fill();
-          acc += spacing;
-        }
-        acc -= seg;
-      }
+      this.strokeRoute(pts, color);
     }
+  }
+
+  /** Маршрут полосой цвета color на белой подложке со стрелками направления движения — линии, поезда, машины. */
+  private strokeRoute(pts: readonly Vec[], color: string): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 6.5 / z;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    this.polyline(pts);
+    ctx.stroke();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 4 / z;
+    this.polyline(pts);
+    ctx.stroke();
+    // Стрелки направления движения через равные промежутки экрана.
+    const spacing = 90 / z;
+    let acc = spacing / 2;
+    ctx.fillStyle = '#ffffff';
+    for (let k = 1; k < pts.length; k++) {
+      const p0 = pts[k - 1];
+      const p1 = pts[k];
+      const seg = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+      if (seg < 1e-6) continue;
+      const ux = (p1.x - p0.x) / seg;
+      const uy = (p1.y - p0.y) / seg;
+      while (acc <= seg) {
+        const cx = p0.x + ux * acc;
+        const cy = p0.y + uy * acc;
+        const s = 3.2 / z;
+        ctx.beginPath();
+        ctx.moveTo(cx + ux * s * 1.4, cy + uy * s * 1.4);
+        ctx.lineTo(cx - ux * s - uy * s, cy - uy * s + ux * s);
+        ctx.lineTo(cx - ux * s + uy * s, cy - uy * s - ux * s);
+        ctx.fill();
+        acc += spacing;
+      }
+      acc -= seg;
+    }
+  }
+
+  /**
+   * Куда едет выбранное (строительный поезд, машина): маршрут от него до цели — полосой цвета color (strokeRoute) и
+   * цель — пульсирующим кольцом радиуса r того же цвета. Маршрута нет (стоит, строит) — только цель.
+   */
+  private drawTripAhead(pts: readonly Vec[] | null, color: string, goal: { pos: Vec; r: number } | null): void {
+    if (pts && pts.length > 1) this.strokeRoute(pts, color);
+    if (!goal) return;
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3 / z;
+    ctx.beginPath();
+    ctx.arc(goal.pos.x, goal.pos.y, 4 / z, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(goal.pos.x, goal.pos.y, goal.r + (8 + pulse * 6) / z, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  /**
+   * Выбранная машина жителя или спецмашина: её маршрут по полосам от неё до цели (Game.vehicleAhead — только для
+   * выбранной) и цель — кольцом вокруг здания поездки. Спецмашина — цветом своей службы, машина жителя — синим.
+   */
+  private drawVehicleTrip(game: Game, simId: number): void {
+    const ahead = game.vehicleAhead(simId);
+    if (!ahead) return;
+    const service = game.serviceOfSim(simId);
+    const to = game.tripOf(simId)?.to;
+    const goal = to ? { pos: to.fp.center, r: footprintRadius(to.fp) } : { pos: ahead.goal, r: 4 };
+    this.drawTripAhead(ahead.pts, service ? SERVICES[service].color : '#2f80ed', goal);
+  }
+
+  /**
+   * Выбранный строительный поезд: маршрут по путям до цели (WorkTrains.route) его цветом, цель — край работ проекта
+   * или вокзал-депо при возврате, и кольцо вокруг состава (в пути — вагоны, на месте работ — техника у края).
+   */
+  private drawWorkTrainSelected(game: Game, id: number): void {
+    const trains = game.construction.trains;
+    const w = trains?.list.get(id);
+    if (!trains || !w) return;
+    const goal = trains.goal(w);
+    const st = goal?.depot ? game.stations.get(w.depot) : undefined;
+    // Строит у края работ — цель там же, где поезд: кольца цели не нужно.
+    const here = w.train !== undefined && trains.drawnBySite(w.train);
+    const mark = goal && !here ? { pos: st ? st.fp.center : goal.pos, r: st ? footprintRadius(st.fp) : 4 } : null;
+    this.drawTripAhead(trains.route(w)?.pts ?? null, WORK_TRAIN.color, mark);
+    const body = trains.body(w);
+    if (body && body.length > 1) this.drawBodyOutline(body, 5 + 3 / this.camera.zoom);
+  }
+
+  /**
+   * Обводка выбранного длинного состава (строительный поезд: вагоны в пути или техника вдоль края работ) — синей
+   * рамкой вдоль него на half от оси, а не кругом: круг вокруг стройки в сотню метров ничего не выделяет.
+   */
+  private drawBodyOutline(pts: readonly Vec[], half: number): void {
+    const ctx = this.ctx;
+    const left: Vec[] = [];
+    const right: Vec[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[Math.max(0, i - 1)];
+      const b = pts[Math.min(pts.length - 1, i + 1)];
+      const l = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      const d = { x: (b.x - a.x) / l, y: (b.y - a.y) / l };
+      // Концы — на half дальше по оси: рамка охватывает и торцы.
+      const ext = i === 0 ? -half : i === pts.length - 1 ? half : 0;
+      const p = { x: pts[i].x + d.x * ext, y: pts[i].y + d.y * ext };
+      left.push({ x: p.x - d.y * half, y: p.y + d.x * half });
+      right.push({ x: p.x + d.y * half, y: p.y - d.x * half });
+    }
+    ctx.beginPath();
+    left.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    for (let i = right.length - 1; i >= 0; i--) ctx.lineTo(right[i].x, right[i].y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(47,128,237,0.12)';
+    ctx.fill();
+    ctx.strokeStyle = '#2f80ed';
+    ctx.lineWidth = 2 / this.camera.zoom;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
   }
 
   private marker(p: Vec, color: string, shape: 'ring' | 'small' | 'square'): void {

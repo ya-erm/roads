@@ -11,6 +11,7 @@
 import { CONSTRUCTION } from '../config';
 import type { Vec } from '../core/vec';
 import { spansOf, type Spans } from '../game/constructionWork';
+import { sitePoint } from '../game/workTrains';
 import type { Network, Segment } from '../world/network';
 import { halfWidth } from '../world/roadTypes';
 
@@ -82,22 +83,8 @@ export function drawTrackMachines(
     { len: 13, body: '#8a6440', top: '#6e4c2e' },
     { len: 15, body: '#e2622c', top: '#f2b81d' },
   ];
-  const start = fromB ? seg.b : seg.a;
   /** Точка и курс (по ходу заполнения) в u метрах от начала участка: дальше назад — по готовому пути back. */
-  const at = (u: number): { p: Vec; d: Vec } => {
-    if (u >= 0 || !back) {
-      const x = Math.max(0, Math.min(L, u));
-      const s = fromB ? L - x : x;
-      const t = seg.lut.tangentAt(s);
-      return { p: seg.lut.pointAt(s), d: fromB ? { x: -t.x, y: -t.y } : t };
-    }
-    // По back от узла start назад: курс — к узлу.
-    const toStart = back.b === start;
-    const r = Math.min(back.length, -u);
-    const s = toStart ? back.length - r : r;
-    const t = back.lut.tangentAt(s);
-    return { p: back.lut.pointAt(s), d: toStart ? t : { x: -t.x, y: -t.y } };
-  };
+  const at = (u: number): { p: Vec; d: Vec } => sitePoint(seg, fromB, back, u);
   ctx.save();
   // Состав строительного поезда — за путеукладчиком по уложенному пути: вагоны со звеньями пути и балластом, локомотив
   // сзади (толкает). Сам поезд в общем движении при этом не рисуется (WorkTrains.drawnBySite).

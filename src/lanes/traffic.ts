@@ -525,8 +525,8 @@ export class LaneTraffic {
     }
   }
 
-  /** Сколько машине ехать до конца её маршрута (у оборванного — до разрыва). */
-  private routeLeft(veh: Vehicle): number {
+  /** Сколько машине ехать до конца её маршрута (у оборванного — до разрыва); и для карточки выбранной машины. */
+  routeLeft(veh: Vehicle): number {
     const g = this.graph;
     let d: number;
     if (veh.onMovement) {

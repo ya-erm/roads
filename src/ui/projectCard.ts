@@ -178,8 +178,14 @@ function crewsHtml(game: Game, info: ProjectInfo): string {
     const fix = rail.bad
       ? `<div class="pc-why"><span class="pc-why-ic">⛔</span><span>${esc(rail.tip)}</span><button class="small" data-action="tool" data-id="station" data-tip="Инструмент «Станция»: вокзал — на готовом пути">＋ Вокзал</button></div>`
       : '';
+    // Поезд уже на путях — чип кнопкой: к поезду на карте и его карточка (закрытие вернёт сюда). Ещё нет — подпись.
+    const w = game.construction.trains?.of(p.id);
+    const chip =
+      w && w.train !== undefined
+        ? `<button class="pc-time pc-link" data-action="worktrain-show" data-id="${w.id}" data-tip="${esc(`${rail.tip} — показать поезд на карте и открыть его`)}">🚂 <b>${esc(rail.text)}</b> ›</button>`
+        : `<span class="pc-time${rail.bad ? ' pc-bad' : ''}" data-tip="${esc(rail.tip)}">🚂 <b>${esc(rail.text)}</b></span>`;
     return `<div class="pc-block"><div class="pc-title">🚂 Строительный поезд</div>
-      <div class="pc-row"><span class="pc-time${rail.bad ? ' pc-bad' : ''}" data-tip="${esc(rail.tip)}">🚂 <b>${esc(rail.text)}</b></span></div>${fix}</div>`;
+      <div class="pc-row">${chip}</div>${fix}</div>`;
   }
   const crews = game.construction.crews;
   const list = crews.assigned(p.id);

@@ -1,12 +1,13 @@
 /** Помощники для тестов: дороги через строителя игры на сети полос, грузовой маршрут, прогон симуляции. */
 import { MONTH_LENGTH } from '../config';
-import { dist, type Vec } from '../core/vec';
+import { add, dist, scale, type Vec } from '../core/vec';
 import { Anchor, anchorAt, RoadOptions } from '../lanes/edit';
 import { Corridor, LaneNode, twoWay } from '../lanes/model';
 import type { IndustryKind } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
-import type { RoadClass } from '../world/roadTypes';
-import type { Game } from './game';
+import { RAIL_SPEC, type RoadClass } from '../world/roadTypes';
+import type { RoadRequest } from './build';
+import { Game } from './game';
 import type { RoadPlan } from './roadbuild';
 
 export const STREET = { cls: 'street' as RoadClass, lanes: twoWay(1, 1) };
@@ -126,6 +127,52 @@ export function townStreets(game: Game, townId: number): Corridor[] {
   const net = game.roads.net;
   const own = town.streets.map((id) => net.corridors.get(id)).filter((c): c is Corridor => !!c);
   return own.length ? own : net.corridorsNear(town.center, town.radius);
+}
+
+/** Прямой ж/д путь от from до to (instant — готов сразу и «Со строительством»). */
+export function railTrack(game: Game, from: Vec, to: Vec, instant = false): RoadRequest {
+  return { start: game.builder.snap(from, 0, 14), end: { kind: 'free', pos: to, level: 0 }, spec: RAIL_SPEC, mode: 'straight', ...(instant ? { instant: true as const } : {}) };
+}
+
+/** Партия «Со строительством» для ж/д стройки: мир без воды, денег с запасом. */
+export const RAIL_WORLD = { seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' } as const;
+
+/**
+ * Партия «Со строительством»: готовый путь 1200 м с вокзалом a, от его конца — ж/д проект ещё на 1200 м с вокзалом b
+ * на нём. Ни дорог рядом, ни строительных баз: путь строит строительный поезд с вокзала a. Пути — в чистом поле вдали
+ * от городов (без машин жителей).
+ */
+export function railProjectScene(): { game: Game; a: Station; b: Station; id: number; from: Vec; dir: Vec } {
+  const game = withoutCitizens(new Game(RAIL_WORLD));
+  const len = 2400;
+  for (let y = 500; y < game.terrain.height - 500; y += 170) {
+    for (let x = 300; x < game.terrain.width - len - 300; x += 230) {
+      const from = { x, y };
+      const dir = { x: 1, y: 0 };
+      const mid = add(from, scale(dir, len / 2));
+      const end = add(from, scale(dir, len));
+      if (!game.builder.plan(railTrack(game, from, end, true)).ok) continue;
+      game.checkpoint('проба');
+      const ok = (() => {
+        if (!game.builder.build(railTrack(game, from, mid, true))) return false;
+        const a = game.stationPlan(add(add(from, scale(dir, 400)), { x: 0, y: 40 }), 14, 'rail');
+        if (!a.ok) return false;
+        return game.builder.plan(railTrack(game, mid, end)).ok;
+      })();
+      game.commit();
+      if (!ok) {
+        game.undo();
+        continue;
+      }
+      const id = game.construction.peekId();
+      if (!game.builder.build(railTrack(game, mid, end))) throw new Error('проект не лёг');
+      const a = game.placeStation(add(add(from, scale(dir, 400)), { x: 0, y: 40 }), 14, 'rail')!;
+      const b = game.placeStation(add(add(from, scale(dir, len - 400)), { x: 0, y: 40 }), 14, 'rail')!;
+      if (!a || !b) throw new Error('вокзалы не встали');
+      return { game, a, b, id, from, dir };
+    }
+  }
+  throw new Error('нет места');
 }
 
 /** Чистое поле: ни домов, ни предприятий, ни дорог, ни воды на margin вокруг отрезка длиной length (с запада на восток). */

@@ -316,7 +316,20 @@ interface RailStationGeom {
 }
 
 /** Машина бригады стройки (crews.ts): самосвал в потоке. */
-type SimOwner = { type: 'fleet'; id: number } | { type: 'citizen' } | { type: 'crew'; id: number } | { type: 'service'; kind: ServiceKind };
+type SimOwner =
+  | { type: 'fleet'; id: number }
+  | { type: 'citizen'; trip?: CarTrip }
+  | { type: 'crew'; id: number }
+  | { type: 'service'; kind: ServiceKind; trip?: CarTrip };
+
+/**
+ * Поездка машины жителя или спецмашины: из какого здания и в какое (у каждого — свой город, TownBuilding.townId). Только
+ * в памяти — для карточки машины (машины в сохранение не пишутся); после загрузки у машин её нет.
+ */
+export interface CarTrip {
+  from: TownBuilding;
+  to: TownBuilding;
+}
 
 /**
  * Машины колонны бригады (crews.ts, по порядку) — та же техника, что работает на стройке, тот же рисунок, длина и
@@ -5669,20 +5682,20 @@ export class Game implements BuildContext {
   private serviceTrips(town: Town, dt: number): void {
     for (const n of serviceTick(town, dt)) {
       const call = this.serviceCars < SERVICE_TRAFFIC.maxCars ? serviceCall(this.seed, town, n) : null;
-      if (call) this.spawnService(call.kind, call.siren, call.from.anchor, call.to.anchor);
+      if (call) this.spawnService(call.kind, call.siren, call.from.anchor, call.to.anchor, { from: call.from, to: call.to });
     }
   }
 
   /**
    * Спецмашина (скорая, полиция, пожарная) выезжает из узла from в узел to — как машина жителя, своим кузовом; siren —
-   * с мигалкой. Нет пути или места на выезде — null.
+   * с мигалкой; trip — из какого здания в какое (для карточки). Нет пути или места на выезде — null.
    */
-  spawnService(kind: ServiceKind, siren: boolean, from: number, to: number): Vehicle | null {
+  spawnService(kind: ServiceKind, siren: boolean, from: number, to: number, trip?: CarTrip): Vehicle | null {
     const route = this.roads.route(from, to);
     if (!route) return null;
     const sim = this.traffic.spawn({ ...SERVICES[kind].spec, siren, targetNode: to, route });
     if (!sim) return null;
-    this.owners.set(sim.id, { type: 'service', kind });
+    this.owners.set(sim.id, trip ? { type: 'service', kind, trip } : { type: 'service', kind });
     this.serviceCars++;
     return sim;
   }
@@ -5719,8 +5732,64 @@ export class Game implements BuildContext {
     if (!route || !dest) return;
     const sim = this.traffic.spawn({ ...CAR_SPEC, color: this.rng.pick(CAR_COLORS), targetNode: dest.anchor, route });
     if (!sim) return;
-    this.owners.set(sim.id, { type: 'citizen' });
+    // Откуда и куда — уже выбранные дом и цель (без новых случайных чисел): для карточки машины.
+    this.owners.set(sim.id, { type: 'citizen', trip: { from: origin, to: dest } });
     this.citizenCars++;
+  }
+
+  /** Откуда и куда едет машина жителя или спецмашина (здания и их города); не знаем (после загрузки, чужая) — null. */
+  tripOf(simId: number): CarTrip | null {
+    const o = this.owners.get(simId);
+    return (o?.type === 'citizen' || o?.type === 'service') && o.trip ? o.trip : null;
+  }
+
+  /** Линия маршрута выбранной машины — пересчитывается, только когда она перешла на следующую связь (или сеть изменилась). */
+  private aheadCache: { sim: number; route: number[]; index: number; graph: object; pts: Vec[] } | null = null;
+
+  /**
+   * Куда едет машина в потоке — для выбранной (не для всего потока): маршрут по полосам от неё до цели (точки), сколько
+   * ещё метров и примерно секунд на скорости ×1 (по разрешённой скорости дорог, не быстрее самой машины) и где цель —
+   * здание поездки (tripOf) или конец маршрута. Машины нет или маршрут кончился — null.
+   */
+  vehicleAhead(simId: number): { pts: Vec[]; left: number; eta: number; goal: Vec } | null {
+    const v = this.traffic.vehicles.get(simId);
+    if (!v || v.routeIndex >= v.route.length) return null;
+    const g = this.roads.graph;
+    let c = this.aheadCache;
+    if (!c || c.sim !== simId || c.route !== v.route || c.index !== v.routeIndex || c.graph !== g) {
+      c = { sim: simId, route: v.route, index: v.routeIndex, graph: g, pts: this.roads.routePolyline(v.route.slice(v.routeIndex)) };
+      this.aheadCache = c;
+    }
+    if (c.pts.length < 2) return null;
+    // Линия идёт от начала текущей связи — обрезаем её у машины: с ближайшей точки первой связи.
+    const first = g.links.get(v.route[v.routeIndex]);
+    const reach = (first?.length ?? 0) + 30;
+    let best = 0;
+    let bestD = Infinity;
+    let run = 0;
+    for (let i = 0; i < c.pts.length && run <= reach; i++) {
+      if (i) run += dist(c.pts[i - 1], c.pts[i]);
+      const d = dist(c.pts[i], v.pos);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    const pts = [v.pos, ...c.pts.slice(best + 1)];
+    if (pts.length < 2) return null;
+    const left = this.traffic.routeLeft(v);
+    // Время: остаток текущей связи и все следующие — каждая на своей скорости, не быстрее машины.
+    const speed = (l: { speed: number } | undefined) => Math.max(1, Math.min(l?.speed ?? v.maxSpeed, v.maxSpeed));
+    let rest = 0;
+    let eta = 0;
+    for (let i = v.routeIndex + 1; i < v.route.length; i++) {
+      const l = g.links.get(v.route[i]);
+      rest += l?.length ?? 0;
+      eta += (l?.length ?? 0) / speed(l);
+    }
+    eta += Math.max(0, left - rest) / speed(first);
+    const trip = this.tripOf(simId);
+    return { pts, left, eta, goal: trip ? trip.to.fp.center : pts[pts.length - 1] };
   }
 
   // ---------- Месяц ----------
@@ -7677,6 +7746,8 @@ export class Game implements BuildContext {
   /** Поезд под курсором: по любому вагону. */
   trainAt(p: Vec): Train | null {
     for (const train of this.rail.trains.values()) {
+      // Строительный поезд на месте работ рисует стройка — у края работ, а не там, где он в симуляции.
+      if (this.construction.trains?.drawnBySite(train.id)) continue;
       for (const car of this.rail.cars(train)) {
         if (dist(car.pos, p) < train.carLength / 2 + 2) return train;
       }

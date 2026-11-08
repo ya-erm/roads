@@ -1042,6 +1042,21 @@ export class Controller {
     this.onChange();
   }
 
+  /**
+   * Строительный поезд id: камера — к нему (к голове состава, на месте работ — к краю работ) и его карточка справа; из
+   * карточки проекта — закрытие карточки поезда вернёт к ней. Поезда нет — ничего.
+   */
+  showWorkTrain(id: number): void {
+    const trains = this.game().construction.trains;
+    const w = trains?.list.get(id);
+    const at = w && trains!.where(w);
+    if (!at) return;
+    this.showPlace(at, 40);
+    if (this.selection?.type === 'workTrain' && this.selection.id === id) return;
+    if (this.selection?.type === 'project') this.selectFrom({ type: 'workTrain', id });
+    else this.select({ type: 'workTrain', id });
+  }
+
   /** Проект стройки под точкой p — плашка «🏗 45%» или его недостроенное полотно; нет — null. */
   private projectUnder(p: Vec): number | null {
     const g = this.game();
@@ -1232,6 +1247,12 @@ export class Controller {
     if (sel?.type === 'vehicle') return g.traffic.vehicles.get(sel.simId)?.pos ?? null;
     // Бригада — за головной машиной колонны (на стройке — у края работ, на базе — база).
     if (sel?.type === 'crew') return g.brigadeWhere(sel.id)?.pos ?? null;
+    // Строительный поезд — за головой состава (на месте работ — у края работ).
+    if (sel?.type === 'workTrain') {
+      const trains = g.construction.trains;
+      const w = trains?.list.get(sel.id);
+      return (w && trains!.where(w)) ?? null;
+    }
     if (sel?.type === 'fleet') {
       const v = g.fleet.get(sel.id);
       if (!v) return null;
@@ -1954,9 +1975,9 @@ export class Controller {
     const train = g.trainAt(p);
     const owner = train && g.trainOwner(train);
     if (owner) return { type: 'fleet', id: owner.id };
-    // Строительный поезд — карточка его ж/д проекта.
-    const work = train && g.construction.trains?.ofTrain(train.id);
-    if (work && g.construction.projects.has(work.project)) return { type: 'project', id: work.project };
+    // Строительный поезд — в пути (поезд симуляции) или на месте работ (техника и состав у края) — его карточка.
+    const work = g.construction.trains?.at(p);
+    if (work !== undefined) return { type: 'workTrain', id: work };
     const veh = g.vehicleAt(p);
     if (veh?.fleet) return { type: 'fleet', id: veh.fleet.id };
     // Любая машина колонны бригады — в потоке или вне его (вдоль стройки, ждёт колонну) — выбирает бригаду целиком.

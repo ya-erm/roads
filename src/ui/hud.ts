@@ -149,6 +149,8 @@ import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
 import { crewCardHtml } from './crewCard';
+import { workTrainCardHtml } from './workTrainCard';
+import { carTripHtml } from './carTrip';
 import { SERVICES } from '../game/services';
 import { planPrice, projectMoneyWarning } from '../input/labels';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
@@ -1231,6 +1233,10 @@ export class Hud {
         }
         break;
       }
+      case 'worktrain-show':
+        // Строительный поезд: камера — к нему и его карточка; из карточки проекта — закрытие вернёт к ней.
+        c.showWorkTrain(Number(d.id));
+        break;
       case 'crew-send':
         // «🎯 На стройку…»: выбор проекта кликом по карте (ещё раз или Esc — отмена).
         c.startCrewSend(Number(d.id), c.sendingCrew !== Number(d.id));
@@ -2487,7 +2493,7 @@ export class Hud {
     const sel = this.controller.selection;
     // У машины жителя линий нет, а у машины компании её линия уже есть в карточке. У проекта стройки и базы маршрутов
     // нет — список всех маршрутов под их карточкой только отвлекает.
-    if (sel?.type === 'vehicle' || sel?.type === 'fleet' || sel?.type === 'project' || sel?.type === 'base' || sel?.type === 'crew') return '';
+    if (sel?.type === 'vehicle' || sel?.type === 'fleet' || sel?.type === 'project' || sel?.type === 'base' || sel?.type === 'crew' || sel?.type === 'workTrain') return '';
     // Выбрана станция, предприятие или город — только их маршруты, без папок.
     const station = sel?.type === 'station' ? g.stations.get(sel.id) : undefined;
     const industry = sel?.type === 'industry' ? g.industries.find((i) => i.id === sel.id) : undefined;
@@ -3072,6 +3078,7 @@ export class Hud {
     if (sel.type === 'project') return projectCardHtml(g, sel.id, this.renamingProject === sel.id);
     if (sel.type === 'base') return baseCardHtml(g, sel.id, this.renamingBase === sel.id, this.confirmRemoveBase === sel.id);
     if (sel.type === 'crew') return crewCardHtml(g, sel.id, { following: this.controller.following, picking: this.controller.sendingCrew === sel.id });
+    if (sel.type === 'workTrain') return workTrainCardHtml(g, sel.id, { following: this.controller.following });
     if (sel.type === 'station') {
       const st = g.stations.get(sel.id);
       if (!st) return '';
@@ -3345,10 +3352,12 @@ export class Hud {
     if (service) {
       const info = SERVICES[service];
       return `<section class="detail">${head(`${info.icon} ${info.name}`, sim.siren ? '🚨 С мигалкой — ей уступают дорогу' : 'Без мигалки')}
+      ${carTripHtml(g, sim.id)}
       <div class="kv near"><span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
       <div class="actions">${follow}</div></section>`;
     }
     return `<section class="detail">${head('Машина жителя')}
+      ${carTripHtml(g, sim.id)}
       <div class="kv near"><span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
       <div class="actions">${follow}</div></section>`;
   }

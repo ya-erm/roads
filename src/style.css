@@ -6691,6 +6691,153 @@ span.ind-chip {
   filter: brightness(1.08);
 }
 
+/* Куда едет машина жителя или спецмашина (src/ui/carTrip.ts): «🏠 Липки → 🏢 Сосновка», сколько ещё. */
+.car-trip {
+  margin: 6px 0 8px;
+}
+
+.car-trip .ct-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+}
+
+.car-trip .ct-kind {
+  font-size: 16px;
+}
+
+.car-trip .ct-arrow {
+  margin: 0 2px;
+  color: var(--muted);
+}
+
+.car-trip .ct-town {
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: #f4f6f8;
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  cursor: pointer;
+}
+
+.car-trip .ct-town:hover {
+  background: #e7f0fd;
+}
+
+.car-trip .ct-chips {
+  display: flex;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.car-trip .ct-chip {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #f4f6f8;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Чип-кнопка в карточке проекта: «🚂 едет ›» — к строительному поезду и его карточке. */
+.project-card button.pc-time.pc-link {
+  border: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.project-card button.pc-time.pc-link:hover {
+  background: #e7f0fd;
+}
+
+/* Карточка строительного поезда (src/ui/workTrainCard.ts): откуда → куда полоской, поезд на ней. */
+.worktrain-card .pc-show {
+  font-size: 20px;
+}
+
+.worktrain-card .wt-doing.working {
+  background: #fff1e4;
+  color: #b4561a;
+  font-weight: 600;
+}
+
+.worktrain-card .wt-trip {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.worktrain-card .wt-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 130px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: #f4f6f8;
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.worktrain-card .wt-end:hover {
+  background: #eef2f6;
+}
+
+/* Путь — шпалы пунктиром; проеханное — цветом строительного поезда (WORK_TRAIN.color). */
+.worktrain-card .wt-track {
+  position: relative;
+  height: 8px;
+  margin: 0 8px;
+  border-radius: 4px;
+  background: repeating-linear-gradient(90deg, #8a8f97 0 3px, #dfe3e8 3px 7px);
+}
+
+.worktrain-card .wt-track i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 4px;
+  background: #e2622c;
+}
+
+.worktrain-card .wt-track.back i {
+  inset: 0 0 0 auto;
+}
+
+/* Значок 🚂 смотрит влево: к стройке (вправо) — зеркально. */
+.worktrain-card .wt-track b {
+  position: absolute;
+  top: 50%;
+  font-size: 16px;
+  line-height: 1;
+  transform: translate(-50%, -55%) scaleX(-1);
+}
+
+.worktrain-card .wt-track.back b {
+  transform: translate(-50%, -55%);
+}
+
+.worktrain-card .wt-left {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.worktrain-card .pc-actions {
+  display: flex;
+  gap: 5px;
+}
+
 /* Карточка бригады (src/ui/crewCard.ts): закрепление, выбор стройки, стройки списком. */
 .crew-card .pc-show {
   font-size: 20px;

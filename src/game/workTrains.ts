@@ -23,6 +23,9 @@ import { frontOf, spansOf } from './constructionWork';
 
 export type WorkTrainState = 'going' | 'working' | 'back';
 
+/** Что поезд делает — для карточки: ждёт выезда (ещё не на путях), едет к стройке, строит, едет домой на вокзал. */
+export type WorkTrainDoing = 'wait' | 'going' | 'working' | 'back';
+
 /** Строительный поезд ж/д проекта. */
 export interface WorkTrain {
   id: number;
@@ -61,6 +64,31 @@ export interface WorkTrainHost {
 
 /** Строительный поезд: состав (CONSTRUCTION.workTrain), цвет путейцев, в вагонах — балласт. */
 export const WORK_TRAIN = { ...CONSTRUCTION.workTrain, color: '#e2622c', load: '#9c948a' } as const;
+
+/** Путеукладчик на месте работ — длина с зазором (как рисует drawTrackMachines): вагоны — позади него. */
+const CRANE = 16;
+/** Через сколько метров брать точки состава и маршрута. */
+const STEP = 4;
+
+/**
+ * Точка и курс (по ходу заполнения) на месте работ: u метров от начала участка seg (заполняется с конца b — fromB);
+ * меньше нуля — назад по готовому пути back (нет — у начала участка). Так стоит техника и состав строительного поезда.
+ */
+export function sitePoint(seg: Segment, fromB: boolean, back: Segment | null, u: number): { p: Vec; d: Vec } {
+  const L = seg.length;
+  if (u >= 0 || !back) {
+    const x = Math.max(0, Math.min(L, u));
+    const s = fromB ? L - x : x;
+    const t = seg.lut.tangentAt(s);
+    return { p: seg.lut.pointAt(s), d: fromB ? { x: -t.x, y: -t.y } : t };
+  }
+  // По back от узла начала назад: курс — к узлу.
+  const toStart = back.b === (fromB ? seg.b : seg.a);
+  const r = Math.min(back.length, -u);
+  const s = toStart ? back.length - r : r;
+  const t = back.lut.tangentAt(s);
+  return { p: back.lut.pointAt(s), d: toStart ? t : { x: -t.x, y: -t.y } };
+}
 
 /** Не чаще стольких секунд игры — повторная попытка выехать или найти путь (платформа занята, пути нет). */
 const RETRY = 2;
@@ -429,6 +457,108 @@ export class WorkTrains {
   drawnBySite(train: number): boolean {
     const w = this.ofTrain(train);
     return !!w && w.state === 'working' && !!w.front && !!this.host.net.segments.get(w.front.corridor)?.build;
+  }
+
+  // ---------- Строительный поезд как выбор на карте (карточка — src/ui/workTrainCard.ts) ----------
+
+  /** Что поезд делает сейчас: ждёт выезда (ещё не на путях), едет к стройке, строит, едет домой. */
+  doing(w: WorkTrain): WorkTrainDoing {
+    if (w.state === 'back') return 'back';
+    if (w.state === 'working') return 'working';
+    return w.train === undefined ? 'wait' : 'going';
+  }
+
+  /**
+   * Состав на карте — точки от головы к хвосту через STEP м: на месте работ — техника у краёв этапов и вагоны за
+   * путеукладчиком (как рисует стройка, drawTrackMachines), в пути — вагоны поезда симуляции. Не на путях — null.
+   */
+  body(w: WorkTrain): Vec[] | null {
+    const site = w.train !== undefined && this.drawnBySite(w.train) ? this.site(w.project) : null;
+    const seg = site && this.host.net.segments.get(site.seg);
+    if (site && seg) {
+      const back = site.back !== null ? (this.host.net.segments.get(site.back) ?? null) : null;
+      const L = seg.length;
+      const nose = Math.max(0, Math.min(L, site.spans[0]));
+      const tail = Math.max(0, Math.min(L, site.spans[2])) - CRANE - WORK_TRAIN.cars * WORK_TRAIN.carLength;
+      const out: Vec[] = [];
+      for (let u = nose; u > tail; u -= STEP) out.push(sitePoint(seg, site.fromB, back, u).p);
+      out.push(sitePoint(seg, site.fromB, back, tail).p);
+      return out;
+    }
+    const t = this.sim(w);
+    if (!t) return null;
+    const out: Vec[] = [];
+    for (let s = t.head; s > t.head - t.length; s -= STEP) {
+      const p = this.host.rail.pointAt(t, s);
+      if (p) out.push(p.pos);
+    }
+    return out.length ? out : null;
+  }
+
+  /** Где поезд — для камеры и «◎ Следовать»: голова состава (на месте работ — у края работ), не вышел — его вокзал. */
+  where(w: WorkTrain): Vec | null {
+    const body = this.body(w);
+    if (body) return body[0];
+    return this.host.depots().find((d) => d.id === w.depot)?.pos ?? null;
+  }
+
+  /**
+   * Маршрут едущего поезда по путям (Train.path) — от головы до места остановки: точки через STEP м и сколько ещё
+   * метров. Стоит или строит у края работ — null.
+   */
+  route(w: WorkTrain): { pts: Vec[]; left: number } | null {
+    const t = this.sim(w);
+    if (!t || !t.moving || this.drawnBySite(t.id)) return null;
+    const left = t.stopAt - t.head;
+    if (!(left > 1)) return null;
+    const pts: Vec[] = [];
+    for (const e of t.path) {
+      const s0 = Math.max(e.start, t.head);
+      const s1 = Math.min(e.start + e.len, t.stopAt);
+      if (s1 <= s0) continue;
+      const seg = this.host.net.segments.get(e.seg);
+      if (!seg) continue;
+      const at = (s: number) => seg.lut.pointAt(e.dir === 0 ? s - e.start : seg.length - (s - e.start));
+      for (let s = s0; s < s1; s += STEP) pts.push(at(s));
+      pts.push(at(s1));
+    }
+    return pts.length > 1 ? { pts, left } : null;
+  }
+
+  /** Сколько маршрута уже проехано (0…1) — для полоски «откуда → куда» в карточке; не едет — null. */
+  progress(w: WorkTrain): number | null {
+    const t = this.sim(w);
+    if (!t || !t.moving || !(t.stopAt > 0)) return null;
+    return Math.max(0, Math.min(1, t.head / t.stopAt));
+  }
+
+  /**
+   * Куда поезд едет: к стройке — край работ на его участке (не начат — узел, откуда начнёт), домой — вокзал-депо
+   * (depot). Некуда — null.
+   */
+  goal(w: WorkTrain): { pos: Vec; depot: boolean } | null {
+    if (w.state === 'back') {
+      const d = this.host.depots().find((x) => x.id === w.depot);
+      return d ? { pos: d.pos, depot: true } : null;
+    }
+    const c = w.front && this.host.net.segments.get(w.front.corridor);
+    if (!c?.build) return null;
+    const x = frontOf(spansOf(c.build, c.length), c.length).s;
+    return { pos: sitePoint(c, !!c.build.fromB, null, x).p, depot: false };
+  }
+
+  /** Строительный поезд под точкой p (по составу на карте — body); нет — undefined. */
+  at(p: Vec, r = 5): number | undefined {
+    for (const w of this.list.values()) {
+      const body = this.body(w);
+      if (body?.some((q) => dist(q, p) <= r)) return w.id;
+    }
+    return undefined;
+  }
+
+  /** Поезд симуляции строительного поезда (едет или стоит на путях); не вышел — undefined. */
+  simOf(w: WorkTrain): Train | undefined {
+    return this.sim(w);
   }
 
   toSave(): WorkTrainSave | undefined {

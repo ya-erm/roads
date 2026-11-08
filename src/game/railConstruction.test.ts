@@ -1,58 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { add, scale, type Vec } from '../core/vec';
-import type { Station } from '../world/entities';
 import { Network } from '../world/network';
 import { RAIL_SPEC } from '../world/roadTypes';
 import type { RoadRequest } from './build';
 import { Game } from './game';
-import { runSeconds, withoutCitizens } from './testkit';
-
-/** Прямой путь от from до to (instant — готов сразу и «Со строительством»). */
-function track(game: Game, from: Vec, to: Vec, instant = false): RoadRequest {
-  return { start: game.builder.snap(from, 0, 14), end: { kind: 'free', pos: to, level: 0 }, spec: RAIL_SPEC, mode: 'straight', ...(instant ? { instant: true as const } : {}) };
-}
+import { RAIL_WORLD as WORLD, railProjectScene as railProject, railTrack as track, runSeconds, withoutCitizens } from './testkit';
 
 const building = (game: Game) => [...game.net.segments.values()].filter((s) => s.build);
-
-const WORLD = { seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' } as const;
-
-/**
- * Партия «Со строительством»: готовый путь 1200 м с вокзалом a, от его конца — ж/д проект ещё на 1200 м с вокзалом b
- * на нём. Ни дорог рядом, ни строительных баз: путь строит строительный поезд с вокзала a. Пути — в чистом поле вдали
- * от городов (без машин жителей).
- */
-function railProject(): { game: Game; a: Station; b: Station; id: number; from: Vec; dir: Vec } {
-  const game = withoutCitizens(new Game(WORLD));
-  const len = 2400;
-  for (let y = 500; y < game.terrain.height - 500; y += 170) {
-    for (let x = 300; x < game.terrain.width - len - 300; x += 230) {
-      const from = { x, y };
-      const dir = { x: 1, y: 0 };
-      const mid = add(from, scale(dir, len / 2));
-      const end = add(from, scale(dir, len));
-      if (!game.builder.plan(track(game, from, end, true)).ok) continue;
-      game.checkpoint('проба');
-      const ok = (() => {
-        if (!game.builder.build(track(game, from, mid, true))) return false;
-        const a = game.stationPlan(add(add(from, scale(dir, 400)), { x: 0, y: 40 }), 14, 'rail');
-        if (!a.ok) return false;
-        return game.builder.plan(track(game, mid, end)).ok;
-      })();
-      game.commit();
-      if (!ok) {
-        game.undo();
-        continue;
-      }
-      const id = game.construction.peekId();
-      if (!game.builder.build(track(game, mid, end))) throw new Error('проект не лёг');
-      const a = game.placeStation(add(add(from, scale(dir, 400)), { x: 0, y: 40 }), 14, 'rail')!;
-      const b = game.placeStation(add(add(from, scale(dir, len - 400)), { x: 0, y: 40 }), 14, 'rail')!;
-      if (!a || !b) throw new Error('вокзалы не встали');
-      return { game, a, b, id, from, dir };
-    }
-  }
-  throw new Error('нет места');
-}
 
 describe('Стройка ж/д путей: «Со строительством»', { timeout: 60_000 }, () => {
   it('путь ложится проектом: участки помечены стройкой, денег сразу не берёт, проект — «Ж/д путь»', () => {

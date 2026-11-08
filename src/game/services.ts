@@ -15,6 +15,8 @@ export interface ServiceInfo {
   icon: string;
   /** Доля среди выездов. */
   weight: number;
+  /** Цвет службы (полоса на кузове): им на карте подсвечен маршрут выбранной спецмашины. */
+  color: string;
   spec: VehicleSpec;
 }
 
@@ -24,18 +26,21 @@ export const SERVICES: Record<ServiceKind, ServiceInfo> = {
     name: 'Скорая помощь',
     icon: '🚑',
     weight: 0.45,
+    color: '#e5484d',
     spec: { kind: 'car', body: 'ambulance', length: 8, width: 4.2, maxSpeed: 58, accel: 9, color: '#f4f5f2' },
   },
   police: {
     name: 'Полиция',
     icon: '🚓',
     weight: 0.4,
+    color: '#2346b8',
     spec: { kind: 'car', body: 'police', length: 7, width: 4, maxSpeed: 62, accel: 11, color: '#f2f4f7' },
   },
   fire: {
     name: 'Пожарная охрана',
     icon: '🚒',
     weight: 0.15,
+    color: '#b3261e',
     spec: { kind: 'truck', body: 'fire', length: 11, width: 4.6, maxSpeed: 48, accel: 6, color: '#c8312b' },
   },
 };
