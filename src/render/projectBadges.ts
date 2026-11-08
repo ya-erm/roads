@@ -5,6 +5,7 @@
  * по плашке (controller: клик выбирает проект и открывает его карточку).
  */
 import type { Vec } from '../core/vec';
+import type { ProjectInfo } from '../game/construction';
 import type { Game } from '../game/game';
 import { workFront } from './constructionArt';
 
@@ -30,12 +31,15 @@ export function badgeTextPx(text: string): number {
   return w;
 }
 
-/** Плашки проектов при масштабе zoom, по порядку закладки (верхняя — последняя). */
-export function projectBadges(game: Game, zoom: number): ProjectBadge[] {
+/**
+ * Плашки проектов при масштабе zoom, по порядку закладки (верхняя — последняя). list — сводка проектов
+ * (Construction.list), если она уже посчитана в этом кадре: считать её заново незачем.
+ */
+export function projectBadges(game: Game, zoom: number, list: readonly ProjectInfo[] = game.construction.list()): ProjectBadge[] {
   const z = zoom;
   const out: ProjectBadge[] = [];
   const crews = game.construction.crews;
-  for (const info of game.construction.list()) {
+  for (const info of list) {
     const p = info.project;
     const cs = game.construction.corridorsOf(p.id);
     const front = cs.map(workFront).find((f) => f) ?? null;

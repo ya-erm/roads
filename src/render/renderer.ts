@@ -28,6 +28,7 @@ import { prefOn } from '../ui/prefs';
 import { drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
+import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, meets, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
@@ -972,6 +973,7 @@ export class Renderer {
       drawParked(ctx, base, crews.of(base.id).filter((b) => b.state === 'idle').length);
     }
     // Проектов может уже не быть, а техника ещё стоит на достроенной дороге (выезжает в поток с мест) — её рисуем всё равно.
+    // Сводка проектов — одна на кадр: и для техники, и для плашек (projectBadges).
     const list = game.construction.list();
     const z = this.camera.zoom;
     const going = game.speed > 0;
@@ -1020,13 +1022,13 @@ export class Renderer {
     }
     for (const l of lights) drawWorkLights(ctx, l.site, game.time, l.working);
     // Плашки над проектами — при любом зуме одного размера на экране (projectBadges: клик по плашке ищет её там же).
-    for (const b of projectBadges(game, z)) {
+    for (const b of projectBadges(game, z, list)) {
       if (b.x < view.x0 - 200 || b.x > view.x1 + 200 || b.y < view.y0 - 200 || b.y > view.y1 + 200) continue;
       ctx.save();
       ctx.font = `600 ${12 / z}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const w = ctx.measureText(b.text).width + 12 / z;
+      const w = this.textWidth(b.text) + 12 / z;
       const h = 2 * b.hh;
       ctx.fillStyle = b.fill;
       ctx.beginPath();
@@ -2288,6 +2290,22 @@ export class Renderer {
     drawAnnexArt(this.ctx, ind, a, this.camera.zoom, performance.now() / 1000, layer);
   }
 
+  /** Ширины подписей по шрифту и тексту (textWidth): плашки проектов — те же каждый кадр, пока не сменится зум. */
+  private readonly textWidths = new Map<string, number>();
+
+  /** Ширина text нынешним шрифтом холста — как measureText, но одна и та же подпись меряется один раз. */
+  private textWidth(text: string): number {
+    const key = `${this.ctx.font}\n${text}`;
+    let w = this.textWidths.get(key);
+    if (w === undefined) {
+      // Зум меняет шрифт — прежние ширины уже не нужны.
+      if (this.textWidths.size > 512) this.textWidths.clear();
+      w = this.ctx.measureText(text).width;
+      this.textWidths.set(key, w);
+    }
+    return w;
+  }
+
   /** Рисует картинку значка размером size в мировых единицах. */
   private icon(img: HTMLImageElement, p: Vec, size: number): void {
     if (!img.complete || !img.naturalWidth) {
@@ -2295,7 +2313,9 @@ export class Renderer {
       if (!img.complete) this.moving = true;
       return;
     }
-    this.ctx.drawImage(img, p.x - size / 2, p.y - size / 2, size, size);
+    // Готовым растром размера на экране (iconRaster): SVG-картинку браузер раскладывал бы и рисовал на каждый значок.
+    const m = this.ctx.getTransform();
+    this.ctx.drawImage(iconRaster(img, size * Math.hypot(m.a, m.b)), p.x - size / 2, p.y - size / 2, size, size);
   }
 
   /** Остановка: навес у края улицы, знак «А», у бордюра — автобусы на посадке. */

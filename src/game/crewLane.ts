@@ -114,8 +114,77 @@ export function polyLength(p: readonly Vec[]): number {
   return s;
 }
 
+/** Ломаная не короче стольких точек ищет место по разметке (polyMarks) половинным делением, а не перебором с начала. */
+export const POLY_INDEX_MIN = 16;
+
+/** Разметка длинной ломаной: её ненулевые отрезки (начало, курс, длина) и где каждый кончается, м от начала. */
+interface PolyMarks {
+  n: number;
+  first: Vec;
+  last: Vec;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  from: Vec[];
+  dirs: Vec[];
+  ends: Float64Array;
+}
+
+const polyMarksOf = new WeakMap<readonly Vec[], PolyMarks>();
+
+/**
+ * Разметка ломаной p — один раз на массив точек (полоса бригады, путь колонны): машины колонны и вторые части машин
+ * (laneTrail — десятки вызовов polyAt на машину в кадр) ищут своё место на длинной полосе половинным делением.
+ * Массив поменяли (другие точки или их число) — разметка заново.
+ */
+function polyMarks(p: readonly Vec[]): PolyMarks {
+  const n = p.length;
+  const first = p[0];
+  const last = p[n - 1];
+  const had = polyMarksOf.get(p);
+  if (had && had.n === n && had.first === first && had.last === last && had.x0 === first.x && had.y0 === first.y && had.x1 === last.x && had.y1 === last.y) return had;
+  const from: Vec[] = [];
+  const dirs: Vec[] = [];
+  const ends: number[] = [];
+  let s = 0;
+  for (let i = 1; i < n; i++) {
+    const a = p[i - 1];
+    const b = p[i];
+    const d = dist(a, b);
+    if (d < 1e-9) continue;
+    from.push(a);
+    dirs.push({ x: (b.x - a.x) / d, y: (b.y - a.y) / d });
+    s += d;
+    ends.push(s);
+  }
+  const marks: PolyMarks = { n, first, last, x0: first.x, y0: first.y, x1: last.x, y1: last.y, from, dirs, ends: Float64Array.from(ends) };
+  polyMarksOf.set(p, marks);
+  return marks;
+}
+
 /** Точка ломаной в s метрах от начала и направление там; за концами — по касательной (продолжение прямо). */
 export function polyAt(p: readonly Vec[], s: number): { pos: Vec; dir: Vec } {
+  if (p.length >= POLY_INDEX_MIN) {
+    // Длинная ломаная — по разметке: первый отрезок, что кончается не раньше s (как перебор ниже).
+    const m = polyMarks(p);
+    const k = m.ends.length;
+    if (!k) return { pos: add(p[p.length - 1], { x: Math.max(0, s), y: 0 }), dir: { x: 1, y: 0 } };
+    // Курс — копией: разметка общая, ответ вызывающий волен менять.
+    if (s < 0) return { pos: add(m.from[0], scale(m.dirs[0], s)), dir: { ...m.dirs[0] } };
+    let lo = 0;
+    let hi = k;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (m.ends[mid] >= s) hi = mid;
+      else lo = mid + 1;
+    }
+    if (lo < k) {
+      const start = lo ? m.ends[lo - 1] : 0;
+      return { pos: add(m.from[lo], scale(m.dirs[lo], s - start)), dir: { ...m.dirs[lo] } };
+    }
+    return { pos: add(p[p.length - 1], scale(m.dirs[k - 1], Math.max(0, s - m.ends[k - 1]))), dir: { ...m.dirs[k - 1] } };
+  }
   const pts = p.length ? p : [{ x: 0, y: 0 }];
   let dir = { x: 1, y: 0 };
   let left = s;

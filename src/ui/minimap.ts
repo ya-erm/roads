@@ -1,6 +1,7 @@
 import type { Game } from '../game/game';
 import type { Camera } from '../render/camera';
 import { waterPath } from '../render/relief';
+import { iconRaster } from '../render/iconRaster';
 import { smoothPath } from '../render/renderer';
 import { BIOMES } from '../world/biomes';
 import { cargoImage } from './cargoIcons';
@@ -143,7 +144,8 @@ export class Minimap {
     }
     for (const ind of g.industries) {
       const img = cargoImage(ind.info.produces);
-      if (img.complete) ctx.drawImage(img, ind.fp.center.x * k - 5, ind.fp.center.y * k - 5, 10, 10);
+      // Растром (iconRaster): SVG-картинку браузер раскладывал бы и рисовал заново на каждый значок.
+      if (img.complete) ctx.drawImage(iconRaster(img, 10 * dpr), ind.fp.center.x * k - 5, ind.fp.center.y * k - 5, 10, 10);
     }
     ctx.fillStyle = '#fff';
     ctx.strokeStyle = '#2f80ed';
