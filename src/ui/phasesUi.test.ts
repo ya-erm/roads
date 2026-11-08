@@ -74,16 +74,20 @@ describe('Фазы светофора в карточке', () => {
     expect(html).toMatch(/data-action="jn-ph-arrows" data-id="7"\s+data-tip/);
   });
 
-  it('фазу правят на карте: её плитка выделена, под плитками — что делать и Esc; в легенде — «нельзя»', () => {
+  it('фазу правят на карте: её плитка выделена, под плитками — что делать и Esc; без карандашей и «нельзя»', () => {
     const phases = [{ go: ['1>2', '2>1'] }, { go: ['3>4', '4>3'] }];
     const html = phasesHtml(info(phases, true), 7, null, 1);
     expect(html.match(/ph-tile[^"]*editing/g)).toHaveLength(1);
     expect(html).toMatch(/class="ph-tile\s+editing"[\s\S]*data-i="1"/);
-    expect(html).toContain('ph-pen');
     expect(html).toContain('ph-editing');
-    expect(html).toContain('Фаза 2');
+    expect(html).toContain('<b>Фаза 2</b> — настройте направления на перекрёстке');
     expect(html).toContain('Esc');
-    expect(html).toContain('нельзя: пересечёт зелёный');
+    expect(html).toContain('стоит');
+    expect(html).not.toContain('✎');
+    expect(html).not.toContain('ph-pen');
+    expect(html).not.toContain('нельзя');
+    expect(html).not.toContain('зелёный или нет');
+    expect(html).not.toContain('ph-bad');
     // Номер правки за краем (фазу убрали) — как будто не правят.
     expect(phasesHtml(info(phases, true), 7, null, 5)).not.toContain('ph-editing');
   });

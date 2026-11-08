@@ -1632,23 +1632,10 @@ button.icon.toggle-spacing {
   box-shadow: 0 0 0 2px rgba(47, 128, 237, 0.25);
 }
 
+/* Выбранную фазу выделяет синяя рамка плитки — у схемы своей рамки нет, только белый фон. */
 .ph-tile.editing .ph-pick {
-  border-color: #2f80ed;
+  border-color: transparent;
   background: #fff;
-}
-
-.ph-pen {
-  position: absolute;
-  top: -5px;
-  right: -5px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #2f80ed;
-  color: #fff;
-  font-size: 10px;
-  line-height: 16px;
-  text-align: center;
 }
 
 .ph-editing {
@@ -1730,6 +1717,17 @@ button.icon.toggle-spacing {
   display: flex;
   align-items: center;
   gap: 5px;
+}
+
+/* «Полосы» — чуть ниже кнопок фаз: отдельный раздел карточки. */
+.lanes-row {
+  margin-top: 8px;
+}
+
+.lane-steps .lanes-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .lane-step {

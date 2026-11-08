@@ -3526,7 +3526,7 @@ export class Renderer {
     }
     ctx.globalAlpha = 1;
     // Номер фазы — плашкой над кругом перекрёстка, синей, как выбранная плитка в карточке.
-    const text = `✎ Фаза ${pe.i + 1}`;
+    const text = `Фаза ${pe.i + 1}`;
     ctx.font = `700 ${12 / z}px sans-serif`;
     const w = ctx.measureText(text).width + 14 / z;
     const h = 20 / z;

@@ -187,6 +187,9 @@ function plural(n: number, one: string, few: string, many: string): string {
   return many;
 }
 
+/** Карандаш для кнопок «Настроить»: остриём вниз-влево, корпус и грифель — два простых силуэта цвета текста. */
+const PENCIL_ICON = `<svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true"><path d="M10 1.8 12.2 4 5.8 10.4 3.6 8.2ZM3 8.8 5.2 11 1.3 12.7Z" fill="currentColor"/></svg>`;
+
 /** Силуэт карты с пропорциями сторон. */
 function mapSvg(w: number, h: number): string {
   const k = 26 / Math.max(w, h);
@@ -3374,10 +3377,10 @@ export class Hud {
         ? `<span class="lane-step ${second ? '' : 'now'}" title="Кликните на карте белый кружок — полосу въезда"><b>1</b><i class="lane-dot in"></i></span>
           <span class="lane-arrow">➜</span>
           <span class="lane-step ${second ? 'now' : ''}" title="Оранжевые кружки — куда с неё ехать; повторный клик убирает связь"><b>2</b><i class="lane-dot out"></i></span>`
-        : `<button class="small" data-action="jn-lanes-edit" title="Включить инструмент «Перекрёсток» и кликать по полосам">✎ На карте</button>`;
-    const lanes = `<div class="rule-row"><span class="lbl2">Полосы ${info.customLanes ? `· своих: ${info.customLanes}` : '· авто'}</span>
+        : `<button class="small lanes-edit" data-action="jn-lanes-edit" data-tip="Включить инструмент «Перекрёсток» и кликать по полосам">${PENCIL_ICON} Настроить</button>`;
+    const lanes = `<div class="rule-row lanes-row"><span class="lbl2">Полосы ${info.customLanes ? `· своих: ${info.customLanes}` : '· авто'}</span>
       <div class="lane-steps">${steps}
-        <button class="small" data-action="jn-lanes-reset" ${attrs} ${info.customLanes ? '' : 'disabled'} title="Все полосы — снова автоматически">↺ Сбросить полосы</button></div></div>`;
+        <button class="small" data-action="jn-lanes-reset" ${attrs} ${info.customLanes ? '' : 'disabled'} data-tip="Все полосы — снова автоматически" data-tip-end>↺ Сбросить полосы</button></div></div>`;
     return `<section class="detail">${head}
       <p class="muted">${info.approaches.map((a) => `${a.compass.arrow} ${a.compass.name}`).join(' · ')}</p>
       <div class="actions">${toggle}</div>

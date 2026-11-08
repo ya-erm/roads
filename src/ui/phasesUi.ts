@@ -1,6 +1,6 @@
 /**
  * Фазы светофора в карточке перекрёстка: каждая фаза — плитка со схемой перекрёстка, где стрелки с подъездов
- * показывают, кому зелёный (сплошная — едет, пунктир — уступает встречным, красная — конфликт, серая — красный).
+ * показывают, кому зелёный (сплошная — едет, пунктир — уступает встречным, красная — конфликт, серая — стоит).
  * Клик по схеме выбирает фазу для правки на карте (там кликами по проездам дают и снимают зелёный — controller,
  * editPhase), повторный — заканчивает; у плитки — длительность (−/+), переставить (◀ ▶) и убрать (✕);
  * под плитками — новая фаза, стрелки налево и «Авто».
@@ -137,7 +137,7 @@ export function phasesHtml(info: JunctionInfo, id: number, flash: PhaseFlash | n
           <button class="ph-btn" data-action="jn-ph-move" ${attrs} data-i="${i}" data-d="-1" ${i > 0 ? '' : 'disabled'} data-tip="Раньше">◀</button>
           <button class="ph-btn" data-action="jn-ph-move" ${attrs} data-i="${i}" data-d="1" ${i < count - 1 ? '' : 'disabled'} data-tip="Позже">▶</button>
           <button class="ph-btn" data-action="jn-ph-del" ${attrs} data-i="${i}" ${count > 1 ? '' : 'disabled'} data-tip="Убрать фазу" data-tip-end>✕</button></div>
-        <button class="ph-pick" data-action="jn-ph-edit" ${attrs} data-i="${i}" data-tip="${pickTip}">${pic}${on ? '<span class="ph-pen">✎</span>' : ''}</button>
+        <button class="ph-pick" data-action="jn-ph-edit" ${attrs} data-i="${i}" data-tip="${pickTip}">${pic}</button>
         <span class="stepper"><button data-action="jn-green" ${attrs} data-i="${i}" data-d="-${GREEN_STEP}" ${ph.green > GREEN_MIN ? '' : 'disabled'} data-tip="Зелёный короче">−</button><b>${ph.green} с</b><button data-action="jn-green" ${attrs} data-i="${i}" data-d="${GREEN_STEP}" ${ph.green < GREEN_MAX ? '' : 'disabled'} data-tip="Зелёный дольше">+</button></span>
       </div>`;
     })
@@ -152,13 +152,14 @@ export function phasesHtml(info: JunctionInfo, id: number, flash: PhaseFlash | n
   });
   const clash = info.phases.some((ph) => ph.clashes.length);
   const editingNow = editing !== null && editing < count;
-  // На карте красный, которому зелёный дать можно, — белый; нельзя (пересечёт зелёный) — бледный красный пунктир.
-  const legend = `<div class="ph-legend"><span>${miniArrow('straight', COLOR.go)} едет</span><span>${miniArrow('left', COLOR.yield, true)} уступает встречным</span><span>${miniArrow('straight', COLOR.off)} красный</span>${
-    editingNow ? `<span class="ph-bad">${miniArrow('straight', '#ef9a94', true)} нельзя: пересечёт зелёный</span>` : ''
-  }${clash ? `<span class="ph-bad">${miniArrow('straight', COLOR.clash)} конфликт</span>` : ''}</div>`;
+  // Серая — стоит (красный). Бледный красный пунктир на карте (зелёный не дать) в легенде не объясняем: клик по нему
+  // и так отказывает подсказкой у курсора.
+  const legend = `<div class="ph-legend"><span>${miniArrow('straight', COLOR.go)} едет</span><span>${miniArrow('left', COLOR.yield, true)} уступает встречным</span><span>${miniArrow('straight', COLOR.off)} стоит</span>${
+    clash ? `<span class="ph-bad">${miniArrow('straight', COLOR.clash)} конфликт</span>` : ''
+  }</div>`;
   // Правят на карте — что делать и как закончить.
   const hint = editingNow
-    ? `<div class="ph-editing">✎ <b>Фаза ${editing + 1}</b> — кликайте проезды на перекрёстке: зелёный или нет · <kbd>Esc</kbd> — готово</div>`
+    ? `<div class="ph-editing"><b>Фаза ${editing + 1}</b> — настройте направления на перекрёстке · <kbd>Esc</kbd> — готово</div>`
     : '';
   return `<div class="rule-row"><span class="lbl2">Фазы ${info.phasesCustom ? '· свои' : '· авто'} — выберите фазу и правьте на перекрёстке</span>
     <div class="ph-tiles">${tiles}</div>
