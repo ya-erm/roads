@@ -71,14 +71,14 @@ import { paxFare, ridePath } from './fare';
 import { transferable, transferNeighbors } from './transfer';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
-import { carryBuild, spansOf } from './constructionWork';
+import { carryBuild, carryRailBuild, spansOf } from './constructionWork';
 import type { Brigade } from './crews';
 import { CREW_UNITS, laneTrail } from './crewLane';
 import { type CrewStep, CrewRoads } from './crewRoads';
 import { RING_SIZES, RingOptions, Roads } from './roads';
 import { TimelapseRecorder, type TimelapseSave } from './timelapse';
 import { Motion, SpeedChart, speedChart, TrackPiece } from './speedChart';
-import { BuildContext, Builder, Plan, RoadRequest, Snap } from './build';
+import { BuildContext, Builder, Plan, type RailProjectStart, RoadRequest, Snap } from './build';
 import { diamondPlan, TemplateOptions, templatePlan, TemplatePlan } from './interchange';
 import { cloneNetwork, copyRails, RailPaste } from './railFragment';
 import { chainCoords, chainOffset, trackChain } from './railEdit';
@@ -322,6 +322,12 @@ const CREW_CARS = CREW_UNITS.map((u, k) => ({
   accel: [3.5, 3, 4.5][k],
   color: '#f2b81d',
 }));
+
+/**
+ * Бригада на ж/д стройке (проект пути, construction.ts) — те же машины в цвете путейцев: головная отсыпает балласт,
+ * вторая кладёт шпалы, третья — рельсы (Game.crewCar).
+ */
+const RAIL_CREW_COLOR = '#e2622c';
 
 /** Сколько секунд головная машина колонны ждёт у конца пути остальных (Game.crewAssembled), прежде чем сойти одной. */
 const CREW_WAIT = 25;
@@ -1064,6 +1070,36 @@ export class Game implements BuildContext {
     this.journal.add('project', { id: p.id, what: p.label, len: Math.round(s.length), $: s.cost, sec: Math.round(s.seconds) });
   }
 
+  /**
+   * BuildContext: под каким номером новый путь от узлов nodes станет ж/д проектом — продолжение строящегося пути (его
+   * участок у одного из этих узлов) — тот же проект, иначе новый; «Мгновенно» — null.
+   */
+  railProjectId(nodes: number[]): number | null {
+    if (!this.buildMode) return null;
+    for (const n of nodes) {
+      for (const sid of this.net.nodes.get(n)?.segments ?? []) {
+        const id = this.net.segments.get(sid)?.build?.project;
+        if (id !== undefined && this.construction.projects.get(id)?.rail) return id;
+      }
+    }
+    return this.construction.peekId();
+  }
+
+  /** BuildContext: путь лёг проектом — запись стройки (или продолжение проекта), отмена действия знает о новом. */
+  startRailProject(s: RailProjectStart): void {
+    const fresh = !this.construction.projects.has(s.id);
+    const p = this.construction.startRail(s.id, s.segments);
+    if (!p) return;
+    const top = this.undoPending ? this.undoStack[this.undoStack.length - 1] : undefined;
+    if (top && fresh) (top.creates ??= []).push(p.id);
+    this.journal.add('project', { id: p.id, what: p.label, len: Math.round(s.length), $: s.cost, sec: Math.round(s.seconds), ...(fresh ? {} : { more: true }) });
+  }
+
+  /** ConstructionHost: полная цена ж/д пути — за метр ж/д проект платит её долю. */
+  railCost(seg: Segment): number {
+    return this.builder.fullSegmentCost(seg);
+  }
+
   /** Стройка: проект достроен или встал без денег. */
   projectEvent(kind: 'done' | 'stalled', p: Project): void {
     if (kind === 'done') {
@@ -1137,6 +1173,25 @@ export class Game implements BuildContext {
   cancelProject(id: number, undoable = true): boolean {
     const p = this.construction.projects.get(id);
     if (!p) return false;
+    if (p.rail) {
+      // Ж/д проект: недостроенные пути — прочь, заплаченное за них — назад целиком. Путь под станцией (платформа)
+      // не сносится — его проект достраивает.
+      const segs = this.construction.segmentsOf(id);
+      const back = segs.reduce((s, x) => s + (x.platform === undefined ? this.builder.segmentCost(x) : 0), 0);
+      if (undoable) this.checkpoint('отмена стройки');
+      this.builder.bulldozeSegments(
+        segs.map((x) => x.id),
+        false,
+      );
+      this.money += back;
+      this.expensesMonth -= back;
+      this.ledger.build -= Math.min(this.ledger.build, back);
+      if (!this.construction.segmentsOf(id).length) this.construction.projects.delete(id);
+      this.construction.prune();
+      this.journal.add('project-cancel', { id, what: projectName(p), back, built: Math.round(p.builtLen) });
+      if (undoable) this.commit();
+      return true;
+    }
     const cs = this.construction.corridorsOf(id);
     const water = (q: Vec, m?: number) => this.isWater(q, m);
     const back = cs.reduce((s, c) => s + corridorCost(this.roads.net, c, water, this.ground()), 0);
@@ -1171,6 +1226,13 @@ export class Game implements BuildContext {
     return this.crewRoads.step(this.roads.graph, from, to);
   }
 
+  /** Машина car колонны бригады b (CREW_CARS): на ж/д стройке — в цвете путейцев (RAIL_CREW_COLOR). */
+  private crewCar(b: Brigade, car: number): (typeof CREW_CARS)[number] {
+    const spec = CREW_CARS[Math.min(car, CREW_CARS.length - 1)];
+    const rail = b.project !== undefined && !!this.construction.projects.get(b.project)?.rail;
+    return rail ? { ...spec, color: RAIL_CREW_COLOR } : spec;
+  }
+
   /**
    * Стройка (crews.ts): машина колонны бригады (car — её номер, CREW_CARS) — в поток от узла from к узлу to; 'busy' —
    * путь есть, но на выезде нет места; null — пути по дорогам нет (по полю бригады не ездят — к такому проекту они не
@@ -1179,7 +1241,7 @@ export class Game implements BuildContext {
   drive(b: Brigade, from: number, to: number, car = 0): number | 'busy' | null {
     const route = this.roads.route(from, to);
     if (!route) return null;
-    const sim = this.traffic.spawn({ ...CREW_CARS[Math.min(car, CREW_CARS.length - 1)], targetNode: to, route });
+    const sim = this.traffic.spawn({ ...this.crewCar(b, car), targetNode: to, route });
     if (!sim) return 'busy';
     this.owners.set(sim.id, { type: 'crew', id: b.id });
     return sim.id;
@@ -1191,7 +1253,7 @@ export class Game implements BuildContext {
    * стройке, на площадке узла) или до цели оттуда не доехать — null: выедет от узла (drive).
    */
   driveFrom(b: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number): number | 'busy' | null {
-    const spec = CREW_CARS[Math.min(car, CREW_CARS.length - 1)];
+    const spec = this.crewCar(b, car);
     // Выезжают по одной: следующая трогается, когда предыдущая отъехала на свою длину с запасом (у тупика та
     // разворачивается и проезжает мимо — не задевая стоящую).
     for (const c of b.convoy?.cars.slice(0, car) ?? []) {
@@ -1992,6 +2054,8 @@ export class Game implements BuildContext {
 
   /** Сеть дорог или путей изменилась: графы движения заново, машины и поезда — на новые пути. */
   networkChanged(): void {
+    // Сеть дорог заменили правкой (перенос, изгиб): техника на подвинутых строящихся полотнах — вместе с ними, сразу (и на паузе).
+    this.construction.syncNet();
     this.pruneRoundabouts();
     this.roads.changed();
     this.net.rebuild();
@@ -2876,7 +2940,10 @@ export class Game implements BuildContext {
     }
     const railSave = this.rail.serialize();
     this.rail.clearTrains();
+    // Ж/д проекты с тех пор ушли вперёд — готовое на путях переносим (оно уже оплачено), как у дорог (carryBuild).
+    const railBuilt = new Map([...this.net.segments.values()].map((s) => [s.id, { build: s.build, p0: s.curve.p0, p3: s.curve.p3 }]));
     this.net.replaceWith(snap.net);
+    carryRailBuild(railBuilt, this.net);
     // Перенесённая станция вернётся на старый узел: машины, что едут к ней, — туда же.
     const nodeBack = new Map(snap.stations.filter((s) => this.stations.get(s.id)?.nodeId !== s.nodeId).map((s) => [s.id, s.nodeId]));
     for (const v of this.fleet.values()) {
@@ -6145,7 +6212,8 @@ export class Game implements BuildContext {
       const ahead = terminal ? platform / 2 : half + margin;
       const a = sub(p, scale(dir, back));
       const b = add(p, scale(dir, ahead));
-      main = { start: { kind: 'free', pos: a, level: 0 }, end: { kind: 'free', pos: b, level: 0 }, spec: RAIL_SPEC, mode: 'straight' };
+      // Главный путь вокзала в чистом поле — часть станции: готов сразу и «Со строительством» (instant).
+      main = { start: { kind: 'free', pos: a, level: 0 }, end: { kind: 'free', pos: b, level: 0 }, spec: RAIL_SPEC, mode: 'straight', instant: true };
       const mp = this.builder.plan(main);
       if (!mp.ok) mainProblem = mp.reason ?? 'Нельзя построить путь';
       else if (mp.crossings.length || mp.demolish.length) mainProblem = 'Мешает дорога или здание';
@@ -7567,9 +7635,11 @@ export class Game implements BuildContext {
       const leg = c?.build ? b.lane?.legs.find((g) => g.corridor === c.id && g.fromB === fromB) : undefined;
       const spans = c?.build ? spansOf(c.build, c.length) : null;
       const going = !!p && !p.paused && p.stalled === undefined && b.state === 'working';
-      const raised = !!c && Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
+      // Ж/д проект: участок — путь (сеть путей), техника — по земле, без крана и щита (у дороги — site).
+      const rail = !!p?.rail;
+      const raised = !rail && !!c && Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
       for (const m of cars) {
-        const spec = CREW_CARS[Math.min(m.car, CREW_CARS.length - 1)];
+        const spec = this.crewCar(b, m.car);
         const h = hitchOf(spec.body);
         const u = leg && m.s !== undefined ? m.s - leg.at : null;
         const site = !!c && u !== null && u >= -0.5 && u <= c.length + 0.5;
@@ -7577,7 +7647,7 @@ export class Game implements BuildContext {
         let pos = m.pos;
         let trail = h && b.lane && m.s !== undefined ? laneTrail(b.lane, m.s, m.pos, m.dir, h.joint * spec.length, h.tail * spec.length, m.car) : undefined;
         if (site && raised) {
-          const lift = bridgeLook(deckAlong(net, c!, fromB ? c!.length - u! : u!)).lift;
+          const lift = bridgeLook(deckAlong(net, c as Corridor, fromB ? c!.length - u! : u!)).lift;
           pos = add(pos, lift);
           if (trail) trail = add(trail, lift);
         }
@@ -7594,7 +7664,7 @@ export class Game implements BuildContext {
           ...(trail ? { trail } : {}),
           beacon: active && going && blink,
           stage: m.car,
-          ...(site ? { site: c!.id } : {}),
+          ...(site && !rail ? { site: c!.id } : {}),
         });
       }
     }

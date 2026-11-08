@@ -1,4 +1,4 @@
-import { COST, GRADE, MIN_SEGMENT_LEN } from '../config';
+import { CONSTRUCTION, COST, GRADE, MIN_SEGMENT_LEN } from '../config';
 import { arcCubic, Cubic, CurveLUT, intersectCurves, minRadius, polylineMinDistance, quadToCubic, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, scale, sub, Vec } from '../core/vec';
 import type { Network, RoadNode, Segment } from '../world/network';
@@ -6,6 +6,7 @@ import { halfWidth, RAIL_LEVEL_RUN, RAIL_SWITCH_ANGLE, ROAD_CLASSES, RoadSpec, s
 import { curveProfile, earthFactor, earthworkProblem, GroundProfile, type ProfileSummary, structureGradeProblem } from './grade';
 import { levelDeck } from '../lanes/deck';
 import { stationsNear } from './railEdit';
+import { paidFor, structureWork } from './constructionWork';
 
 /**
  * Строитель железной дороги: пути на сети `Network` (автодороги строит `RoadBuilder` на сети полос).
@@ -38,6 +39,22 @@ export interface BuildContext {
   networkChanged(): void;
   /** Что не так у нового пути (кривая lut, высота levelAt, полуширина hw) с дорогами. */
   roadConflict?(lut: CurveLUT, levelAt: (s: number) => number, hw: number): string | undefined;
+  /**
+   * Режим «Со строительством»: под каким номером новый путь от узлов nodes станет ж/д проектом стройки (продолжение
+   * строящегося пути — тот же проект; src/game/construction.ts); null — «Мгновенно», путь готов сразу.
+   */
+  railProjectId?(nodes: number[]): number | null;
+  /** Путь лёг проектом (его участки помечены Segment.build): стройка заводит проект или продолжает его. */
+  startRailProject?(p: RailProjectStart): void;
+}
+
+/** Новый путь — ж/д проект стройки: номер, его новые участки, полная цена (платится по готовым метрам) и длина. */
+export interface RailProjectStart {
+  id: number;
+  segments: number[];
+  cost: number;
+  length: number;
+  seconds: number;
 }
 
 export interface RoadRequest {
@@ -53,6 +70,8 @@ export interface RoadRequest {
   curve?: Cubic;
   /** Участки и узлы, которые заменяются этим путём, — их не проверяем на пересечения. */
   exclude?: { segs: number[]; nodes: number[] };
+  /** Путь готов сразу, даже «Со строительством» (главный путь вокзала в чистом поле — часть станции). */
+  instant?: true;
 }
 
 export interface Crossing {
@@ -78,6 +97,11 @@ export interface Plan {
   demolish: number[];
   /** Продольный профиль пути на земле: наибольший уклон, выемка и насыпь, м. */
   profile?: ProfileSummary;
+  /**
+   * «Со строительством»: путь ляжет проектом — его цена (cost; платится по готовым метрам, сразу — только снос домов,
+   * её часть now) и сколько секунд строить одной бригадой на ×1.
+   */
+  project?: { cost: number; seconds: number; now: number };
 }
 
 /** Правка формы путей: новые кривые участков (концы — в их узлах) и, если узел переносят, — куда. */
@@ -223,6 +247,7 @@ export class Builder {
       if (i > 0) cost += (length / samples) * specCost(spec) * structureFactor(h, wet) * earthAt(prof, s);
     }
     withGeom.cost = Math.round(cost);
+    const track = withGeom.cost;
     if (prof) withGeom.profile = { grade: prof.grade, cut: prof.cut, fill: prof.fill, slope: (prof.z[prof.z.length - 1] - prof.z[0]) / length };
 
     if (length < MIN_SEGMENT_LEN) return fail('Слишком коротко');
@@ -354,7 +379,15 @@ export class Builder {
     // Дороги — в своей сети: путь пересекает их переездом, мостом или тоннелем.
     const road = this.ctx.roadConflict?.(lut, levelAt, hw);
     if (road) return fail(road);
-    if (withGeom.cost > this.ctx.budget) return { ...fail('Не хватает денег'), crossings };
+    // «Со строительством» путь — проект: сразу платится только снос домов, сам путь — по готовым метрам (без денег
+    // проект всё равно закладывается и стоит, пока их нет).
+    if (!req.instant && (this.ctx.railProjectId?.([]) ?? null) !== null) {
+      let work = 0;
+      for (let i = 1; i < pts.length; i++) work += (length / samples) * structureWork(pts[i].h, pts[i].h > 0.25 && pts[i].wet);
+      withGeom.project = { cost: track, seconds: (work * CONSTRUCTION.cls.rail) / CONSTRUCTION.speed, now: withGeom.cost - track };
+    }
+    const due = withGeom.project ? withGeom.project.now : withGeom.cost;
+    if (due > this.ctx.budget && due > 0) return { ...fail('Не хватает денег'), crossings };
     return { ...withGeom, ok: true, crossings };
   }
 
@@ -405,6 +438,9 @@ export class Builder {
       consumed = t;
     }
     pieces.push(rest);
+    // «Со строительством» — путь ляжет проектом стройки (продолжение строящегося — тот же проект).
+    const pid = plan.project ? (this.ctx.railProjectId?.([a, b]) ?? null) : null;
+    const made: number[] = [];
     let last: Cubic = pieces[0];
     for (let i = 0; i < pieces.length; i++) {
       const from = this.net.node(chain[i]).pos;
@@ -416,16 +452,31 @@ export class Builder {
         p2: add(p.p2, sub(to, p.p3)),
         p3: to,
       };
-      this.net.addSegment(chain[i], chain[i + 1], fixed, req.spec);
+      const seg = this.net.addSegment(chain[i], chain[i + 1], fixed, req.spec);
+      if (pid !== null) {
+        seg.build = { project: pid, done: 0 };
+        made.push(seg.id);
+      }
       last = fixed;
     }
-    this.ctx.spend(plan.cost);
+    if (pid !== null && plan.project) {
+      this.ctx.spend(plan.project.now);
+      const length = made.reduce((s, id) => s + this.net.segment(id).length, 0);
+      this.ctx.startRailProject?.({ id: pid, segments: made, cost: plan.project.cost, length, seconds: plan.project.seconds });
+    } else this.ctx.spend(plan.cost);
     this.ctx.networkChanged();
     const lut = new CurveLUT(last);
     return { startNode: a, endNode: b, tangent: lut.tangentAt(lut.length) };
   }
 
+  /** Сколько стоит путь — то, что за него заплачено: у строящегося (проект стройки) — только за готовые метры. */
   segmentCost(seg: Segment): number {
+    const full = this.fullSegmentCost(seg);
+    return seg.build ? paidFor(full, seg.build.done, seg.length) : full;
+  }
+
+  /** Полная цена пути (как у готового), строится он или уже готов. */
+  fullSegmentCost(seg: Segment): number {
     return this.trackCost(seg.lut, seg.spec, (s) => this.net.levelAt(seg, s));
   }
 
@@ -481,6 +532,8 @@ export class Builder {
     let was = 0;
     let after = 0;
     let razeCost = 0;
+    // Путь, который уже строят (проект стройки с готовым), не перекладывают: дождаться или отменить проект.
+    if (ids.some((id) => (net.segment(id).build?.done ?? 0) > 0)) return fail('Путь уже строится');
     for (const id of ids) {
       const seg = net.segment(id);
       const curve = edit.curves.get(id)!;
@@ -501,7 +554,8 @@ export class Builder {
       plans.push(bad ? { ...p, ok: false, reason: bad } : p);
       reason ??= bad;
       was += this.segmentCost(seg);
-      after += this.trackCost(lut, seg.spec, (s) => levelA + (levelB - levelA) * Math.max(0, Math.min(1, s / lut.length)));
+      // Не начатый проект платится по готовым метрам — перекладка его ничего не стоит.
+      if (!seg.build) after += this.trackCost(lut, seg.spec, (s) => levelA + (levelB - levelA) * Math.max(0, Math.min(1, s / lut.length)));
       for (const d of p.demolish) {
         if (demolish.has(d)) continue;
         demolish.add(d);
@@ -569,8 +623,11 @@ export class Builder {
     return !!seg && this.bulldozeSegments([seg.id]) > 0;
   }
 
-  /** Сносит участки по списку (платформы — только вместе с вокзалом); лишние узлы потом сливаются. */
-  bulldozeSegments(ids: number[]): number {
+  /**
+   * Сносит участки по списку (платформы — только вместе с вокзалом); лишние узлы потом сливаются. refund — вернуть
+   * часть цены (как за снос); нет — ничего (отмена ж/д проекта возвращает заплаченное сама).
+   */
+  bulldozeSegments(ids: number[], refund = true): number {
     const ends = new Set<number>();
     let removed = 0;
     for (const id of ids) {
@@ -578,7 +635,7 @@ export class Builder {
       if (!seg || seg.platform !== undefined) continue;
       ends.add(seg.a);
       ends.add(seg.b);
-      this.ctx.refund(this.segmentCost(seg));
+      if (refund) this.ctx.refund(this.segmentCost(seg));
       this.net.removeSegment(seg.id);
       removed++;
     }
@@ -594,6 +651,8 @@ export class Builder {
     if (!n || n.segments.length !== 2 || n.buildingId !== null || n.signals?.length) return;
     const [s1, s2] = n.segments.map((id) => this.net.segment(id));
     if (!sameSpec(s1.spec, s2.spec) || s1.platform !== undefined || s2.platform !== undefined) return;
+    // Строящийся путь (проект стройки) со своим готовым — не сливаем: у каждого своя стройка.
+    if (s1.build || s2.build) return;
     if (!this.net.isFlat(s1) || !this.net.isFlat(s2)) return;
     const isStraight = (s: Segment) => minRadius(s.curve) > 1e5;
     if (!isStraight(s1) || !isStraight(s2)) return;

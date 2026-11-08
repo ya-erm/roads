@@ -8,7 +8,12 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
     expect(scene.errors).toEqual([]);
     const { game } = scene;
     expect(game.buildMode).toBe(true);
-    expect(scene.projects.map((p) => p.key)).toEqual(['street', 'avenue', 'motorway', 'hill', 'junctions', 'tunnel', 'bridge']);
+    expect(scene.projects.map((p) => p.key)).toEqual(['street', 'avenue', 'motorway', 'hill', 'junctions', 'tunnel', 'bridge', 'rail']);
+    // Ж/д проект — пути сети путей, а не полотна дорог; между вокзалами — линия с поездом.
+    const rail = scene.projects.find((p) => p.key === 'rail')!;
+    expect(scene.game.construction.projects.get(rail.project!)?.rail).toBe(true);
+    expect(scene.game.construction.segmentsOf(rail.project!).length).toBeGreaterThan(0);
+    expect(scene.game.lines.get(scene.lines.rail)?.vehicles).toHaveLength(1);
     const crews = game.construction.crews;
     for (const p of scene.projects) {
       expect(p.project, p.name).not.toBeNull();
@@ -44,6 +49,9 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
     runSeconds(game, 25);
     // Каждая бригада — на своём проекте (своей базы).
     for (const p of scene.projects) expect(crews.working(p.project!).map((b) => b.base), p.name).toEqual([p.base]);
+    // Поезд ж/д ряда стоит на своём вокзале: путь ко второму ещё строится.
+    const train = [...game.rail.trains.values()][0];
+    expect(train.moving).toBe(false);
     runSeconds(game, 50);
     const done = scene.projects.filter((p) => !game.construction.projects.has(p.project!));
     expect(done.map((p) => p.key)).toEqual(expect.arrayContaining(['street', 'hill']));
@@ -57,6 +65,7 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
     runSeconds(game, 285);
     expect(game.construction.projects.size).toBe(0);
     expect([...game.roads.net.corridors.values()].filter((c) => c.build)).toEqual([]);
+    expect([...game.net.segments.values()].filter((s) => s.build)).toEqual([]);
     expect(game.roads.net.problems()).toEqual([]);
   });
 });

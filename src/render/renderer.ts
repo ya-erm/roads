@@ -37,6 +37,7 @@ import { type Box, grow, GROUND, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TI
 import { drawTurnArrows } from './turnArrows';
 import { baseBox, baseSig, buildingCorridors, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
+import { drawRailProjects, railProjectSig } from './railProjectArt';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
 import { corridorHalf } from '../world/worldgen';
 import { openNet } from '../lanes/open';
@@ -404,6 +405,8 @@ export class Renderer {
     corridors: new SceneDiff(),
     nodes: new SceneDiff(),
     rails: new SceneDiff(),
+    /** Строящиеся пути ж/д проектов: чертёж и готовое по этапам (railProjectSig). */
+    railProjects: new SceneDiff(),
     industries: new SceneDiff(),
     aprons: new SceneDiff(),
     projects: new SceneDiff(),
@@ -463,7 +466,7 @@ export class Renderer {
   /** Плитки кэша и слепки нарисованного в них — заново. */
   private forgetStill(): void {
     this.tiles.clear();
-    for (const d of [this.diffs.corridors, this.diffs.nodes, this.diffs.rails, this.diffs.industries, this.diffs.aprons, this.diffs.projects, this.diffs.bases]) d.clear();
+    for (const d of [this.diffs.corridors, this.diffs.nodes, this.diffs.rails, this.diffs.railProjects, this.diffs.industries, this.diffs.aprons, this.diffs.projects, this.diffs.bases]) d.clear();
     this.diffs.projectItems.clear();
     this.diffs.towns.clear();
     this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1, full: null, fullVersion: -1 };
@@ -668,13 +671,16 @@ export class Renderer {
     const ctx = this.ctx;
     ctx.save();
     this.drawTerrain(s.game, view, s.o);
-    this.drawTunnels(segs);
+    // Строящиеся пути (ж/д проекты) — чертежом в своём проходе (drawRailProjects), не готовым тоннелем и откосом.
+    const planned = segs.filter((x) => x.build);
+    const built = planned.length ? segs.filter((x) => !x.build) : segs;
+    this.drawTunnels(built);
     const ground = s.game.ground();
-    this.earthworks.draw(ctx, ground, s.roadNet, s.game.net, segs, view, this.camera.zoom, s.game.terrain.version);
+    this.earthworks.draw(ctx, ground, s.roadNet, s.game.net, built, view, this.camera.zoom, s.game.terrain.version);
     // Откосы проектов стройки — бледнее: насыпи и выемки ещё будут.
-    if (buildingCorridors(s.fullNet).length) {
+    if (buildingCorridors(s.fullNet).length || planned.length) {
       ctx.globalAlpha = 0.55;
-      this.earthworks.draw(ctx, ground, s.fullNet, s.game.net, [], view, this.camera.zoom, s.game.terrain.version, (c) => !!c.build);
+      this.earthworks.draw(ctx, ground, s.fullNet, s.game.net, planned, view, this.camera.zoom, s.game.terrain.version, (c) => !!c.build);
     }
     ctx.globalAlpha = 0.35;
     this.lanes.draw(ctx, s.roadNet, this.camera.zoom, false, view, -1, this.openRoads(s));
@@ -687,7 +693,7 @@ export class Renderer {
     const { game, o, roadNet, preview } = s;
     const ctx = this.ctx;
     ctx.save();
-    const groundRails = segs.filter((x) => this.cache.get(x.id)!.maxLevel <= 0.01);
+    const groundRails = segs.filter((x) => this.cache.get(x.id)!.maxLevel <= 0.01 && !x.build);
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
     drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
@@ -695,6 +701,7 @@ export class Renderer {
     this.drawStationAprons(game, roadNet, view);
     // Проекты стройки — будущей дорогой с готовым до края работ (поверх земли, под подсветкой правки); базы стройки.
     drawProjects(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
+    drawRailProjects(ctx, game.net, segs, this.camera.zoom, 0);
     drawBases(ctx, game.construction.crews.bases.values(), view);
     if (o.roads) this.drawRoadPreview(o.roads);
     this.drawStopLines(game, view, 0, preview);
@@ -711,10 +718,12 @@ export class Renderer {
   private drawBridges(s: StillScene, view: Box, segs: Segment[], level: number): void {
     const { game, o, roadNet, preview } = s;
     const ctx = this.ctx;
-    const rails = segs.filter((x) => this.railLevel(x, level));
+    const layer = segs.filter((x) => this.railLevel(x, level));
+    // Строящиеся пути слоя — чертежом (drawRailProjects), не готовым мостом.
+    const rails = layer.filter((x) => !x.build);
     const roads = this.lanes.hasLayer(roadNet, level);
     const projects = this.projectLanes.hasLayer(s.fullNet, level);
-    if (!rails.length && !roads && !projects) return;
+    if (!layer.length && !roads && !projects) return;
     ctx.save();
     // Тень мостов проектов — под готовыми полотнами слоя, как у готового моста.
     if (projects) drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, level);
@@ -728,6 +737,7 @@ export class Renderer {
     this.drawElevated(rails);
     this.drawRailBeds(rails, true);
     this.drawRailSteel(rails);
+    drawRailProjects(ctx, game.net, layer, this.camera.zoom, level);
     if (o.speedmap) this.drawRailSpeedmap(rails);
     if (roads) this.drawCurveSigns(game, view, o.staleSigns, level);
     ctx.restore();
@@ -952,6 +962,18 @@ export class Renderer {
         for (const b of game.construction.crews.bases.values()) put(b.id, baseSig(b), baseBox(b));
       }),
     );
+    // Ж/д проекты: чертёж и готовое по шагам (railProjectSig) — каждый кадр, только строящиеся пути.
+    add(
+      this.diffs.railProjects.update((put) => {
+        for (const p of game.construction.projects.values()) {
+          if (!p.rail) continue;
+          for (const seg of game.construction.segmentsOf(p.id)) {
+            const c = this.cache.get(seg.id);
+            if (c) put(seg.id, railProjectSig(seg), c.bbox);
+          }
+        }
+      }),
+    );
     if (cur.rails !== game.net.version) {
       cur.rails = game.net.version;
       add(
@@ -1035,6 +1057,13 @@ export class Renderer {
           ctx.lineWidth = 2 * corridorHalf(c) + 10 + 6 / z;
           ctx.beginPath();
           c.lut.points.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+          ctx.stroke();
+        }
+        // Ж/д проект — его строящиеся пути.
+        for (const s of p.rail ? game.construction.segmentsOf(p.id) : []) {
+          ctx.lineWidth = 2 * RAIL_HALF + 10 + 6 / z;
+          ctx.beginPath();
+          s.lut.points.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
           ctx.stroke();
         }
         ctx.restore();

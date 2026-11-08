@@ -829,6 +829,28 @@ export class Crews {
     if (s && !this.serves(b.base, s)) this.release(b);
   }
 
+  /**
+   * Ж/д стройка (Construction.exitRail): фронт бригады кончился, а по готовому пути машинам не проехать — колонна едет
+   * по своей полосе назад (path: от машин вдоль пути и съездом к узлу дороги node, откуда съехала на стройку), оттуда —
+   * своим ходом к следующему фронту или проекту (launch в такте), как после relocate. Без пути или узла — сразу на базе
+   * и выезжает оттуда.
+   */
+  walkOut(b: Brigade, path: Vec[] | null, node: number | null): void {
+    delete b.lane;
+    delete b.eta;
+    delete b.trip;
+    if (b.state === 'working') b.state = 'going';
+    if (!path || node === null) {
+      this.home(b);
+      return;
+    }
+    b.at = node;
+    if (!this.walk(b, path, true)) b.pos = { ...path[path.length - 1] };
+    if (b.state !== 'going' || b.pinned || b.project === undefined) return;
+    const s = this.host.site(b.project, b);
+    if (s && !this.serves(b.base, s)) this.release(b);
+  }
+
   /** Вдоль стройки доехали: к краю работ — за работу, назад к дороге — дальше по дорогам (launch / launchHome). */
   private walked(b: Brigade): void {
     const trip = b.trip;

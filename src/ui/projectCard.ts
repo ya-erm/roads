@@ -29,6 +29,13 @@ const STAGES = [
   { name: 'Разметка', tip: 'Разметка и знаки: участок готов и открыт', color: '#e9ecef' },
 ] as const;
 
+/** Этапы ж/д пути (как на карте): балласт, шпалы, рельсы — после рельсов участок открыт для поездов. */
+const RAIL_STAGES = [
+  { name: 'Балласт', tip: 'Отсыпка балласта: щебёночная призма под путь', color: '#b9b1a6' },
+  { name: 'Шпалы', tip: 'Укладка шпал', color: '#7a5a3c' },
+  { name: 'Рельсы', tip: 'Рельсы: участок готов, поезда по нему ходят', color: '#4f5965' },
+] as const;
+
 /** Что делает бригада — значок и коротко. */
 const CREW_STATE: Record<Brigade['state'], { mark: string; text: string }> = {
   working: { mark: '🏗', text: 'строит' },
@@ -82,7 +89,7 @@ function whatHtml(game: Game, info: ProjectInfo): string {
 /** Готовность: общая полоска с процентом и три этапа. */
 function progressHtml(info: ProjectInfo): string {
   const all = Math.min(99, pct(info.done));
-  const stages = STAGES.map((s, i) => {
+  const stages = (info.project.rail ? RAIL_STAGES : STAGES).map((s, i) => {
     const v = pct(info.stages[i]);
     return `<div class="pc-stage" data-tip="${esc(`${s.name}: ${v}% — ${s.tip}`)}"><i class="pc-tile" style="background:${s.color}"></i>
       <span class="pc-mini"><i style="width:${v}%;background:${s.color}"></i></span><b>${v}%</b></div>`;
@@ -199,7 +206,9 @@ function helpHtml(game: Game, info: ProjectInfo, some: boolean): string {
   if (!info.access)
     return why(
       '⛔',
-      'Нет подъезда: ни один конец проекта не связан готовой дорогой с базой, а по полю бригады не ездят. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним',
+      p.rail
+        ? `Нет подъезда: по путям машины не ездят — бригаде нужна готовая дорога, связанная с базой, не дальше ${CONSTRUCTION.rail.access} м от конца пути. Постройте дорогу к началу пути или поставьте базу у дороги рядом с ним`
+        : 'Нет подъезда: ни один конец проекта не связан готовой дорогой с базой, а по полю бригады не ездят. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним',
       `<button class="small" data-action="base-place" data-tip="Поставьте базу у дороги, связанной с проектом: бригада доедет по ней">＋ База</button>`,
     );
   if (!info.near)

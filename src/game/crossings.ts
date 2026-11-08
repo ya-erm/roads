@@ -25,7 +25,8 @@ export interface LevelCrossing {
 export function findCrossings(roads: LaneNet, rail: Network): LevelCrossing[] {
   const res: LevelCrossing[] = [];
   for (const seg of rail.segments.values()) {
-    if (!isRail(seg.spec)) continue;
+    // У строящегося пути (проект стройки) шлагбаумов ещё нет: поезда по нему не ходят.
+    if (!isRail(seg.spec) || seg.build) continue;
     const xs = seg.lut.points.map((p) => p.x);
     const ys = seg.lut.points.map((p) => p.y);
     for (const c of roads.corridorsInBox(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys))) {

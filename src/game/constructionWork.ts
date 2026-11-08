@@ -3,8 +3,25 @@
  * полотна, сколько уже заплачено за готовое, перенос готового из одной копии сети в другую.
  */
 import { CONSTRUCTION } from '../config';
+import type { CurveLUT } from '../core/bezier';
 import type { Vec } from '../core/vec';
 import type { Corridor, CorridorBuild, LaneNet } from '../lanes/model';
+import type { Network, Segment } from '../world/network';
+
+/**
+ * Участок проекта стройки: полотно дороги (Corridor) или ж/д путь (Segment) — концы (узлы своей сети), длина, ось и
+ * стройка. Ход стройки, этапы, фронты и оплата у них общие (construction.ts).
+ */
+export interface Piece {
+  id: number;
+  a: number;
+  b: number;
+  length: number;
+  lut: CurveLUT;
+  build?: CorridorBuild;
+  /** Ревизия формы (кэши цены и состава по ней). */
+  rev: number;
+}
 
 /**
  * Сколько бригад встанет на проект с недостроенными полотнами cs: есть полотно в одну полосу (съезд, заезд,
@@ -45,6 +62,23 @@ export function workFactor(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?:
 /** Метров в секунду игры на скорости ×1 для этого полотна. */
 export function buildRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean): number {
   return CONSTRUCTION.speed / workFactor(net, c, isWater);
+}
+
+/** Во сколько раз метр ж/д пути строится дольше метра обычной дороги: класс «rail» и мосты, эстакады, тоннели по высоте. */
+export function railWorkFactor(net: Network, s: Segment, isWater: (p: Vec, margin?: number) => boolean): number {
+  const n = Math.max(2, Math.ceil(s.length / 24));
+  let struct = 0;
+  for (let i = 0; i < n; i++) {
+    const at = (s.length * (i + 0.5)) / n;
+    const h = net.levelAt(s, at);
+    struct += structureWork(h, h > 0.25 && isWater(s.lut.pointAt(at), 2));
+  }
+  return CONSTRUCTION.cls.rail * (struct / n);
+}
+
+/** Метров ж/д пути в секунду игры на скорости ×1 у одной бригады. */
+export function railBuildRate(net: Network, s: Segment, isWater: (p: Vec, margin?: number) => boolean): number {
+  return CONSTRUCTION.speed / railWorkFactor(net, s, isWater);
 }
 
 /** На сколько метров этап колонны отстаёт от предыдущего на участке длиной L. */
@@ -152,16 +186,16 @@ export function stageSpans(done: number, L: number): [number, number, number] {
  * него и заполняется): стройка идёт от подъезда внутрь проекта, а участок без подъезда ждёт, пока до него дорастёт
  * соседний. Подъезда нет нигде — как без access (проект ждёт, участок — только для показа).
  */
-export function pickSite(
-  list: readonly Corridor[],
+export function pickSite<T extends Piece>(
+  list: readonly T[],
   open: (node: number) => boolean,
   access?: (node: number) => number | null,
-): { c: Corridor; fromB: boolean } | null {
+): { c: T; fromB: boolean } | null {
   if (!list.length) return null;
   const started = list.find((c) => (c.build?.done ?? 0) > 0);
   if (started) return { c: started, fromB: !!started.build?.fromB };
   if (access) {
-    let best: { c: Corridor; fromB: boolean; r: number } | null = null;
+    let best: { c: T; fromB: boolean; r: number } | null = null;
     for (const c of list) {
       for (const fromB of [false, true]) {
         const r = access(fromB ? c.b : c.a);
@@ -235,6 +269,31 @@ export function frontOf(at: number | readonly number[], L: number): { s: number;
 /** Сколько заплачено за done готовых метров полотна длиной L ценой full: целые доллары, сумма тактов — та же. */
 export function paidFor(full: number, done: number, L: number): number {
   return L > 0 ? Math.round(full * Math.max(0, Math.min(1, done / L))) : 0;
+}
+
+/**
+ * Готовое на путях ж/д проектов — из живой сети (from: по номеру пути — его стройка и концы, как были до замены) в сеть
+ * to (снимок для отмены): у тех же путей (номер и концы) берётся больше готового; готовый там — готов и тут. Как
+ * carryBuild у дорог: стройка ушла вперёд, пока ждал снимок, — за готовое уже заплачено.
+ */
+export function carryRailBuild(from: ReadonlyMap<number, { build?: CorridorBuild; p0: Vec; p3: Vec }>, to: Network): void {
+  const same = (u: Vec, v: Vec) => Math.abs(u.x - v.x) < 0.01 && Math.abs(u.y - v.y) < 0.01;
+  let changed = false;
+  for (const s of to.segments.values()) {
+    if (!s.build) continue;
+    const o = from.get(s.id);
+    if (!o || !same(o.p0, s.curve.p0) || !same(o.p3, s.curve.p3)) continue;
+    if (!o.build) {
+      delete s.build;
+      to.touch(s.a);
+      to.touch(s.b);
+      changed = true;
+    } else if (o.build.project === s.build.project && o.build.done > s.build.done) {
+      s.build = { ...o.build, done: Math.min(s.length, o.build.done), ...(o.build.stages ? { stages: [...o.build.stages] as Spans } : {}) };
+      changed = true;
+    }
+  }
+  if (changed) to.rebuild();
 }
 
 /**

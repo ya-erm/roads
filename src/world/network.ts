@@ -1,5 +1,7 @@
 import { Cubic, CurveLUT, splitBezier } from '../core/bezier';
 import { dist, scale, Vec } from '../core/vec';
+import { CONSTRUCTION } from '../config';
+import type { CorridorBuild } from '../lanes/model';
 import { halfWidth, RoadSpec } from './roadTypes';
 
 /**
@@ -39,6 +41,11 @@ export interface Segment {
   rev: number;
   /** Путь — платформа вокзала с этим id. */
   platform?: number;
+  /**
+   * Режим «Со строительством»: путь — проект стройки, ещё не готов (src/game/construction.ts): поезда по нему не ходят,
+   * переездов на нём нет. Этапы — балласт, шпалы, рельсы (докуда дошёл каждый — как у полотна дороги, CorridorBuild).
+   */
+  build?: CorridorBuild;
 }
 
 export interface SplitRecord {
@@ -54,7 +61,42 @@ export interface NetworkSave {
   nextNodeId: number;
   nextSegId: number;
   nodes: Pick<RoadNode, 'id' | 'pos' | 'level' | 'buildingId' | 'signals' | 'oneWay'>[];
-  segments: Pick<Segment, 'id' | 'a' | 'b' | 'curve' | 'spec' | 'platform'>[];
+  segments: Pick<Segment, 'id' | 'a' | 'b' | 'curve' | 'spec' | 'platform' | 'build'>[];
+}
+
+/** Стройка пути из сохранения: номер проекта и готовое (что-то не так — null: путь готов, как в старых партиях). */
+function loadBuild(b: unknown, length: number): CorridorBuild | null {
+  if (!b || typeof b !== 'object') return null;
+  const x = b as Partial<CorridorBuild>;
+  if (typeof x.project !== 'number' || !Number.isFinite(x.project)) return null;
+  const out: CorridorBuild = { project: x.project, done: Math.max(0, Math.min(length, Number.isFinite(x.done) ? x.done! : 0)) };
+  if (x.fromB) out.fromB = true;
+  if (Array.isArray(x.stages) && x.stages.length === 3 && x.stages.every((v) => Number.isFinite(v))) out.stages = [...x.stages] as [number, number, number];
+  return out;
+}
+
+/**
+ * Стройка частей разрезанного пути (длины first и second): готовое — тем же местом, что на целом (этапы — метры от
+ * начала заполнения, fromB — от конца b). Каждая часть заполняется от того же конца, что и целый путь.
+ */
+function splitBuild(b: CorridorBuild, first: number, second: number): [CorridorBuild, CorridorBuild] {
+  const spans = b.stages ?? null;
+  const w = CONSTRUCTION.stages;
+  const part = (offset: number, len: number): CorridorBuild => {
+    const out: CorridorBuild = { project: b.project, done: 0, ...(b.fromB ? { fromB: true } : {}) };
+    if (!spans) {
+      // Без этапов (не начат) — одно done: от начала заполнения.
+      out.done = Math.max(0, Math.min(len, b.done - offset));
+      return out;
+    }
+    const st = spans.map((s) => Math.max(0, Math.min(len, s - offset))) as [number, number, number];
+    out.stages = st;
+    // Готовая работа части — по её этапам (как constructionWork.stageWork): за метр — та же цена.
+    out.done = st.every((s) => s >= len - 1e-9) ? len : Math.min(len, st.reduce((sum, s, k) => sum + w[k] * s, 0));
+    return out;
+  };
+  // Начало заполнения — у конца a (первая часть впереди) или у конца b (вторая).
+  return b.fromB ? [part(second, first), part(0, second)] : [part(0, first), part(first, second)];
 }
 
 const GRID = 160;
@@ -88,7 +130,15 @@ export class Network {
         signals: n.signals,
         ...(n.oneWay?.length ? { oneWay: n.oneWay } : {}),
       })),
-      segments: [...this.segments.values()].map((s) => ({ id: s.id, a: s.a, b: s.b, curve: s.curve, spec: s.spec, platform: s.platform })),
+      segments: [...this.segments.values()].map((s) => ({
+        id: s.id,
+        a: s.a,
+        b: s.b,
+        curve: s.curve,
+        spec: s.spec,
+        platform: s.platform,
+        ...(s.build ? { build: { ...s.build, ...(s.build.stages ? { stages: [...s.build.stages] as [number, number, number] } : {}) } } : {}),
+      })),
     };
   }
 
@@ -122,6 +172,8 @@ export class Network {
       const lut = new CurveLUT(sd.curve);
       const seg: Segment = { id: sd.id, a: sd.a, b: sd.b, curve: sd.curve, spec: sd.spec, lut, length: lut.length, rev: 0 };
       if (sd.platform !== undefined) seg.platform = sd.platform;
+      const build = loadBuild(sd.build, seg.length);
+      if (build) seg.build = build;
       this.segments.set(seg.id, seg);
       this.node(seg.a).segments.push(seg.id);
       this.node(seg.b).segments.push(seg.id);
@@ -323,6 +375,8 @@ export class Network {
     this.removeSegment(segId, false);
     const first = this.addSegment(s.a, node.id, c1, s.spec);
     const second = this.addSegment(node.id, s.b, c2, s.spec);
+    // Строящийся путь — обе части строятся дальше (готовое — где было).
+    if (s.build) [first.build, second.build] = splitBuild(s.build, first.length, second.length);
     this.pendingSplits.push({ oldSeg: s.id, oldLength: s.length, first: first.id, second: second.id, at: first.length });
     // Сигналы на концах ссылались на старый участок — теперь у каждого конца свой кусок.
     this.renameSegAt(s.a, s.id, first.id);

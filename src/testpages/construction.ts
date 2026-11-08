@@ -4,7 +4,8 @@ import { anchorOf, type End, roadPlan, STREET, withoutCitizens } from '../game/t
 import { profileOf, RoadTools } from '../input/roadtools';
 import type { RoadOptions } from '../lanes/edit';
 import type { Town } from '../world/entities';
-import type { RoadSpec } from '../world/roadTypes';
+import { RAIL_SPEC, type RoadSpec } from '../world/roadTypes';
+import type { RoadRequest } from '../game/build';
 import { TERRAIN_VERSION } from '../world/settings';
 import type { TestScene } from './index';
 
@@ -47,7 +48,9 @@ const ACCESS = 160;
  *  - верхний ряд: улица 1+1, проспект 2+2, автомагистраль 2+2 — на ровном, и улица через холм (выемка и насыпь);
  *  - нижний: улица, которую режут две готовые поперечные улицы (три участка), магистраль 1+1 тоннелем через гору,
  *    проспект мостом через реку.
- * Путь ж/д проектом пока не строится (он готов сразу) — его в сцене нет. Сцена заново — перезагрузить страницу.
+ *  - третий ряд: ж/д путь проектом — от готового пути с вокзалом, с вокзалом на самом проекте и поездом между ними
+ *    (ждёт, пока путь не готов): бригада подъезжает по улице к концу готового пути и строит балласт → шпалы → рельсы.
+ * Сцена заново — перезагрузить страницу.
  * Экран: y вниз, проекты идут с запада на восток.
  */
 export function buildConstructionScene(): ConstructionScene {
@@ -84,14 +87,24 @@ export function buildConstructionScene(): ConstructionScene {
   const bridgeLen = 660;
   const bridge = [70, 190, 470, 590].map((s, i) => ({ at: s / bridgeLen, level: i === 0 || i === 3 ? 0 : 1 }));
   sc.project('bridge', 'Мост через реку', { x: RIVER_X - 330, y: ROW[1] }, bridgeLen, SPECS.avenue, bridge);
-  // Путь ж/д проектом пока не строится (кладётся сразу, docs/DESIGN.md — «путеукладчик» в планах): его здесь нет.
+
+  // ---------- Третий ряд: ж/д путь проектом ----------
+  const lines: Record<string, number> = {};
+  const rail = sc.railProject('rail', 'Ж/д путь: балласт, шпалы, рельсы', { x: COL[0], y: RAIL_ROW });
+  if (rail !== null) lines.rail = rail;
 
   // Стройка сцены — не расходы игрока: месяц начинается с чистого счёта.
   game.money = game.settings.money;
   game.incomeMonth = game.expensesMonth = 0;
   game.ledger = emptyLedger();
-  return { game, view: sc.view(), lines: {}, errors: sc.errors, projects: sc.projects };
+  return { game, view: sc.view(), lines, errors: sc.errors, projects: sc.projects };
 }
+
+/** Ряд ж/д проекта: под нижним рядом дорог. */
+const RAIL_ROW = 2300;
+/** Готовый путь с вокзалом a и проект пути дальше с вокзалом b на нём, м. */
+const RAIL_DONE = 700;
+const RAIL_LEN = 1000;
 
 /** Начало тоннеля: за участками между перекрёстками. */
 const TUNNEL_X = COL[2] + 300;
@@ -177,6 +190,53 @@ class SceneBuilder {
       entry.project = id;
     } catch (e) {
       this.errors.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * Ж/д проект name: от start на восток — готовый путь RAIL_DONE м с вокзалом a (кладётся сразу, instant), от его конца —
+   * проект пути ещё на RAIL_LEN м с вокзалом b на нём; с севера к концу готового пути — подъезд (улица тупиком в 60 м
+   * от пути), у её северного конца — база с бригадой. Между вокзалами — линия с поездом: он ждёт, пока путь не готов.
+   * Ответ — номер линии (null — не построилось, причина в errors).
+   */
+  railProject(key: string, name: string, start: Vec): number | null {
+    const game = this.game;
+    const entry: SceneProject = { key, name, project: null, base: null };
+    this.projects.push(entry);
+    const mid = { x: start.x + RAIL_DONE, y: start.y };
+    const end = { x: mid.x + RAIL_LEN, y: start.y };
+    const gate = { x: mid.x, y: start.y - ACCESS };
+    this.label(name, { x: mid.x + RAIL_LEN / 2, y: start.y }, gate.y - 30);
+    const track = (a: Vec, b: Vec, instant: boolean): RoadRequest => ({
+      start: game.builder.snap(a, 0, 14),
+      end: { kind: 'free', pos: b, level: 0 },
+      spec: RAIL_SPEC,
+      mode: 'straight',
+      ...(instant ? { instant: true as const } : {}),
+    });
+    try {
+      if (!game.builder.build(track(start, mid, true))) throw new Error('готовый путь не построился');
+      const a = game.placeStation({ x: start.x + RAIL_DONE / 2, y: start.y + 40 }, 14, 'rail');
+      if (!a) throw new Error('вокзал a не встал');
+      this.finished({ free: gate }, { free: { x: mid.x, y: start.y - 60 } }, STREET);
+      const bases = new Set(game.construction.crews.bases.keys());
+      const err = game.buildBase({ x: gate.x - 40, y: gate.y + 30 });
+      if (err) throw new Error(`база у ${where(gate)}: ${err}`);
+      entry.base = [...game.construction.crews.bases.keys()].find((id) => !bases.has(id)) ?? null;
+      if (entry.base !== null) game.renameBase(entry.base, name);
+      const id = game.construction.peekId();
+      if (!game.builder.build(track(mid, end, false))) throw new Error('проект пути не лёг');
+      if (!game.construction.projects.get(id)?.rail) throw new Error('путь не стал проектом');
+      entry.project = id;
+      const b = game.placeStation({ x: mid.x + RAIL_LEN / 2, y: start.y + 40 }, 14, 'rail');
+      if (!b) throw new Error('вокзал b на проекте не встал');
+      const line = game.createLine([a.id, b.id]);
+      if (!line) throw new Error('линия не создалась');
+      game.buyVehicle(line.id, 'passengerTrain');
+      return line.id;
+    } catch (e) {
+      this.errors.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
     }
   }
 

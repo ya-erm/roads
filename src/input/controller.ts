@@ -1048,7 +1048,10 @@ export class Controller {
     const badge = badgeAt(projectBadges(g, this.camera.zoom), p, this.camera.zoom);
     if (badge) return badge.id;
     const c = corridorUnder(g.roads.net, p, 4);
-    return c?.build && g.construction.projects.has(c.build.project) ? c.build.project : null;
+    if (c?.build && g.construction.projects.has(c.build.project)) return c.build.project;
+    // Строящийся путь ж/д проекта.
+    const s = g.builder.pickSegment(p, 6);
+    return s?.build && g.construction.projects.has(s.build.project) ? s.build.project : null;
   }
 
   /** Режим «поставить пристройку» предприятия id: зона вокруг него — на карте, клик в ней ставит пристройку. */
@@ -3042,7 +3045,11 @@ export class Controller {
           }
           const aligned = this.chain && this.angleHint ? ` · ${this.angleHint}` : '';
           o.label = o.plan.ok
-            ? { text: `${money(o.plan.cost)} · ${Math.round(o.plan.lut?.length ?? 0)} м${aligned}${lvl}${profileNote(o.plan.profile)}${razed}`, ok: true }
+            ? {
+                // «Со строительством» — путь проектом: цена по готовым метрам и сколько строить (как у дороги).
+                text: `${o.plan.project ? planPrice({ cost: o.plan.project.now, project: o.plan.project }) : money(o.plan.cost)} · ${Math.round(o.plan.lut?.length ?? 0)} м${aligned}${lvl}${profileNote(o.plan.profile)}${razed}`,
+                ok: true,
+              }
             : { text: `${o.plan.reason} · ${money(o.plan.cost)}`, ok: false };
         }
         break;

@@ -187,7 +187,8 @@ export class RailSim {
     const arrive = this.arrivalDir(s, state.dir);
     const result: State[] = [];
     for (const sid of node.segments) {
-      if (sid === s.id || !this.net.isRailSeg(sid)) continue;
+      // Путь ещё строится (проект стройки, Segment.build) — поезда по нему не ходят.
+      if (sid === s.id || !this.net.isRailSeg(sid) || this.net.segment(sid).build) continue;
       const next = this.net.segment(sid);
       const dir: 0 | 1 = next.a === nodeId ? 0 : 1;
       if (dot(arrive, this.departDir(next, dir)) > Math.cos(RAIL_SWITCH_ANGLE)) result.push({ seg: sid, dir });
@@ -277,7 +278,7 @@ export class RailSim {
   park(train: Train, platforms: number[]): boolean {
     for (const pid of platforms) {
       const seg = this.net.segments.get(pid);
-      if (!seg || this.holder(pid) !== undefined || seg.length < train.length + 6) continue;
+      if (!seg || seg.build || this.holder(pid) !== undefined || seg.length < train.length + 6) continue;
       this.releaseAll(train);
       this.own(train, [pid], []);
       train.platform = pid;
@@ -944,7 +945,7 @@ export class RailSim {
   canPark(platforms: number[], length: number): boolean {
     return platforms.some((pid) => {
       const seg = this.net.segments.get(pid);
-      return seg && this.holder(pid) === undefined && seg.length >= length + 6;
+      return seg && !seg.build && this.holder(pid) === undefined && seg.length >= length + 6;
     });
   }
 
