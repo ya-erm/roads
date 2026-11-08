@@ -1,6 +1,7 @@
 /**
  * Как выглядят вагоны поезда: груз занимает их по порядку от головы, на стоянке
  * вагоны наполняются и пустеют по очереди — в темпе погрузки, а не скачком.
+ * Пассажиры — во всех вагонах сразу и поровну.
  */
 
 /** Единиц груза в секунду: стоянка длится 0.1 с на каждую погруженную или выгруженную единицу. */
@@ -24,6 +25,16 @@ export function wagonFills(amount: number, capacity: number, wagons: number): nu
   return out;
 }
 
+/**
+ * Доли заполнения вагонов состава kind по доле вместимости fill: груз — по порядку от головы (wagonFills),
+ * пассажиры рассаживаются по всем вагонам поровну — входят и выходят во все двери сразу.
+ */
+export function trainWagonFills(fill: number, wagons: number, kind: 'freight' | 'passenger'): number[] {
+  if (kind === 'freight') return wagonFills(fill, 1, wagons);
+  const f = Math.max(0, Math.min(1, Number.isFinite(fill) ? fill : 0));
+  return new Array(Math.max(0, Math.floor(wagons))).fill(f <= EPS ? 0 : f >= 1 - EPS ? 1 : f);
+}
+
 /** Вид вагонов поезда; хранится в самом поезде. */
 export interface WagonLook {
   /** Цвет груза в вагонах; пустые и пассажирские — нет. */
@@ -36,10 +47,11 @@ export interface WagonLook {
 
 /**
  * Шаг анимации за dt секунд: вид догоняет настоящую загрузку target (доля вместимости capacity)
- * с грузом цвета color — WAGON_RATE единиц в секунду. Сначала выгрузка до dip, другой груз
- * выгружается целиком, потом погрузка. dt = Infinity (поезд в пути) — сразу как есть.
+ * с грузом цвета color — WAGON_RATE единиц в секунду на каждый из streams потоков (пассажирский поезд —
+ * по потоку на вагон, см. handlingStreams). Сначала выгрузка до dip, другой груз выгружается целиком,
+ * потом погрузка. dt = Infinity (поезд в пути) — сразу как есть.
  */
-export function stepWagons(look: WagonLook, target: number, color: string | undefined, capacity: number, dt: number): void {
+export function stepWagons(look: WagonLook, target: number, color: string | undefined, capacity: number, dt: number, streams = 1): void {
   const goal = Math.max(0, Math.min(1, Number.isFinite(target) ? target : 0));
   if (look.fill === undefined || !Number.isFinite(dt) || !(capacity > 0)) {
     look.fill = goal;
@@ -47,7 +59,7 @@ export function stepWagons(look: WagonLook, target: number, color: string | unde
     delete look.dip;
     return;
   }
-  let left = (WAGON_RATE * Math.max(0, dt)) / capacity;
+  let left = (WAGON_RATE * Math.max(1, streams) * Math.max(0, dt)) / capacity;
   let fill = look.fill;
   /** Выгружает до доли to, сколько успеет; true — успела. */
   const empty = (to: number): boolean => {

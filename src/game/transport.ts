@@ -507,6 +507,23 @@ export function vehicleCapacity(v: FleetVehicle): number {
   return m.mode === 'rail' ? Math.round((m.capacity * carsOf(v)) / m.train.cars) : m.capacity;
 }
 
+/** Секунд стоянки на единицу груза или пассажира, что грузят или выгружают через одну дверь. */
+export const HANDLING_PER_UNIT = 0.1;
+
+/**
+ * Сколько потоков погрузки и выгрузки идёт сразу: пассажиры поезда входят и выходят через все вагоны
+ * параллельно (локомотив не в счёт), у грузового поезда, автобуса и грузовика — один поток.
+ */
+export function handlingStreams(v: FleetVehicle): number {
+  const m = MODELS[v.model];
+  return m.mode === 'rail' && m.carries === 'passengers' ? Math.max(1, carsOf(v) - 1) : 1;
+}
+
+/** Сколько секунд стоянки уходит на погрузку или выгрузку count единиц: пассажирский поезд — во все вагоны сразу. */
+export function handlingTime(v: FleetVehicle, count: number): number {
+  return (count * HANDLING_PER_UNIT) / handlingStreams(v);
+}
+
 export function vehicleLoad(v: FleetVehicle): number {
   return v.cargo ? v.amount : v.passengers.reduce((s, g) => s + g.count, 0);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { stepWagons, WAGON_RATE, WagonLook, wagonFills } from './wagons';
+import { stepWagons, trainWagonFills, WAGON_RATE, WagonLook, wagonFills } from './wagons';
 
 /** Гоняет анимацию секунд seconds шагами по 0.05 с; each — после каждого шага. */
 function run(look: WagonLook, target: number, color: string | undefined, capacity: number, seconds: number, each?: () => void) {
@@ -123,5 +123,39 @@ describe('Анимация погрузки по вагонам', () => {
     stepWagons(look, 0.3, undefined, 100, 0.05);
     expect(look.dip).toBeUndefined();
     expect(look.fill).toBeCloseTo(0.1 + (WAGON_RATE * 0.05) / 100, 9);
+  });
+
+  it('несколько потоков: вид догоняет во столько раз быстрее, один поток — как раньше', () => {
+    const one: WagonLook = { fill: 0 };
+    const four: WagonLook = { fill: 0 };
+    stepWagons(one, 1, undefined, 180, 1);
+    stepWagons(four, 1, undefined, 180, 1, 4);
+    expect(one.fill).toBeCloseTo(WAGON_RATE / 180, 9);
+    expect(four.fill).toBeCloseTo((4 * WAGON_RATE) / 180, 9);
+    // 180 вышли и 180 сели через 4 вагона — 9 с вместо 36.
+    const look: WagonLook = { fill: 1, dip: 0 };
+    const step = (seconds: number) => {
+      for (let i = 0; i < Math.round(seconds / 0.05); i++) stepWagons(look, 1, undefined, 180, 0.05, 4);
+    };
+    step(4.5);
+    expect(look.fill).toBeCloseTo(0, 6);
+    step(4.5);
+    expect(look.fill).toBeCloseTo(1, 6);
+    expect(look.dip).toBeUndefined();
+  });
+});
+
+describe('Вагоны поезда по виду состава', () => {
+  it('груз — по порядку от головы, пассажиры — во всех вагонах поровну', () => {
+    expect(trainWagonFills(0.5, 4, 'freight')).toEqual([1, 1, 0, 0]);
+    expect(trainWagonFills(0.5, 4, 'passenger')).toEqual([0.5, 0.5, 0.5, 0.5]);
+    expect(trainWagonFills(1, 3, 'passenger')).toEqual([1, 1, 1]);
+    expect(trainWagonFills(0, 3, 'passenger')).toEqual([0, 0, 0]);
+    // Погрешность и выход за пределы — как у груза: без щёлочек и перегруза.
+    expect(trainWagonFills(1 - 1e-9, 2, 'passenger')).toEqual([1, 1]);
+    expect(trainWagonFills(1e-9, 2, 'passenger')).toEqual([0, 0]);
+    expect(trainWagonFills(1.4, 2, 'passenger')).toEqual([1, 1]);
+    expect(trainWagonFills(Number.NaN, 2, 'passenger')).toEqual([0, 0]);
+    expect(trainWagonFills(0.5, 0, 'passenger')).toEqual([]);
   });
 });

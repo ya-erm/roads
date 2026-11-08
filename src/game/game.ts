@@ -105,6 +105,8 @@ import {
   vehicleCapacity,
   vehicleLoad,
   carsOf,
+  handlingStreams,
+  handlingTime,
   bayBox,
   bayFront,
   bayPose,
@@ -4174,13 +4176,13 @@ export class Game implements BuildContext {
     if (here && wait) {
       const moved = model.carries === 'freight' ? this.loadFreight(v, here, line, v.dropped ?? null) : this.boardPassengers(v, here, line);
       v.waited += 1;
-      v.timer = moved ? 1 + moved * 0.1 : 1;
+      v.timer = 1 + handlingTime(v, moved);
       return false;
     }
     // С первой станции машины уходят с интервалом, а не пачкой; пока ждёт — догружается.
     if (here && this.spacingHold(v, line, here)) {
       const moved = model.carries === 'freight' ? this.loadFreight(v, here, line, v.dropped ?? null) : this.boardPassengers(v, here, line);
-      v.timer = moved ? 0.5 + moved * 0.1 : 0.5;
+      v.timer = 0.5 + handlingTime(v, moved);
       return false;
     }
     if (v.stop === 0) this.noteLap(line, v);
@@ -4428,12 +4430,12 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Вагоны на вид догоняют настоящую загрузку: на стоянке наполняются и пустеют по очереди в темпе погрузки,
-   * в пути (и при dt = Infinity) — сразу как есть.
+   * Вагоны на вид догоняют настоящую загрузку: на стоянке наполняются и пустеют в темпе погрузки (грузовые —
+   * по очереди, пассажирские — все сразу, во столько раз быстрее), в пути (и при dt = Infinity) — сразу как есть.
    */
   private animateWagons(v: FleetVehicle, train: Train, dt: number): void {
     const cap = vehicleCapacity(v);
-    stepWagons(train, vehicleLoad(v) / cap, v.cargo ? CARGO[v.cargo].color : undefined, cap, train.moving ? Infinity : dt);
+    stepWagons(train, vehicleLoad(v) / cap, v.cargo ? CARGO[v.cargo].color : undefined, cap, train.moving ? Infinity : dt, handlingStreams(v));
   }
 
   /** Выгрузка на остановке закончилась: вагоны поезда сперва пустеют до этой загрузки, потом грузятся. */
@@ -4828,7 +4830,8 @@ export class Game implements BuildContext {
       const fast = bonus >= 1.1 ? ` ⚡×${bonus.toFixed(1)}` : bonus > 0 && bonus <= 0.9 ? ` 🐢×${bonus.toFixed(1)}` : '';
       this.floaters.push({ pos: { ...st.fp.center }, text: `+$${revenue.toLocaleString('ru-RU')}${fast}`, color: '#2e9d57', age: 0 });
     }
-    v.timer = 2 + moved * 0.1;
+    // Пассажирский поезд сажает и высаживает через все вагоны сразу — стоит во столько раз короче.
+    v.timer = 2 + handlingTime(v, moved);
   }
 
   /**

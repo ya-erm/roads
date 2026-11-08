@@ -15,7 +15,7 @@ import type { TurnLook, TurnState } from '../lanes/lights';
 import { LIGHT_STEP, type LightSpot, lightSpot } from '../lanes/lightSpot';
 import { type JunctionPreview, junctionPreview, previewHides } from '../lanes/preview';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
-import { wagonFills } from '../sim/wagons';
+import { trainWagonFills } from '../sim/wagons';
 import { cargoImage } from '../ui/cargoIcons';
 import { BIOMES } from '../world/biomes';
 import { CARGO, CargoType, FREIGHT } from '../world/cargo';
@@ -2179,8 +2179,8 @@ export class Renderer {
   private trainCars(game: Game, view: ReturnType<Renderer['view']>): TrainCar[] {
     const out: TrainCar[] = [];
     for (const train of game.rail.trains.values()) {
-      // Первый — локомотив, груз — в остальных, по порядку от головы.
-      const fills = wagonFills(train.fill ?? (train.load ? 1 : 0), 1, train.cars - 1);
+      // Первый — локомотив, груз — в остальных, по порядку от головы; пассажиры — во всех вагонах поровну.
+      const fills = trainWagonFills(train.fill ?? (train.load ? 1 : 0), train.cars - 1, train.kind);
       game.rail.cars(train).forEach((c, k) => {
         if (c.pos.x < view.x0 || c.pos.x > view.x1 || c.pos.y < view.y0 || c.pos.y > view.y1) return;
         const fill = k ? (fills[k - 1] ?? 0) : 0;
