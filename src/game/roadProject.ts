@@ -14,7 +14,7 @@ import { Builder, type DrawMode, type NetKind, type Plan, type RoadRequest, type
 import type { Game } from './game';
 import { autoLevels, designProfile, PROFILE_STEP } from './grade';
 import { cloneNetwork } from './railFragment';
-import { type NetEdit, onOldAxis, RoadBuilder, type RoadPlan } from './roadbuild';
+import { type NetEdit, onOldAxis, RoadBuilder, type RoadPlan, shortOfMoney } from './roadbuild';
 
 /**
  * Проект дороги или пути: нарисованные, но не построенные участки. Узлы и перья (управляющие точки кривых)
@@ -612,7 +612,8 @@ function roadProjectPlan(g: Game, p: Project, length: number, edits: NetEdit[] =
   const lay = (count: number) => b.plan(roadProjectEdit(p, ground, edits, count), { shove, project: true });
   const full = lay(p.segs.length);
   if (full.ok) {
-    const reason = full.cost > g.budget ? 'Не хватает денег' : undefined;
+    // «Со строительством» новые участки — проект: денег должно хватать только на то, что платится сразу (cost).
+    const reason = shortOfMoney(full.cost, g.budget, full.project) ? 'Не хватает денег' : undefined;
     return { ok: !reason, reason, cost: full.cost, length, bad: null, road: full, rails: new Map(), demolish: full.demolish };
   }
   // Не выходят уже правки построенных дорог — участки тут ни при чём.

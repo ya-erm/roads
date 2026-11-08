@@ -67,7 +67,7 @@ import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
 import { paxFare, ridePath } from './fare';
-import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, type ProjectStart } from './roadbuild';
+import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
 import { carryBuild, stageSpans } from './constructionWork';
 import type { Brigade } from './crews';
@@ -2145,7 +2145,8 @@ export class Game implements BuildContext {
     }
     const railRefund = cleared.refund;
     const cost = (road?.cost ?? 0) + railSpend - Math.round(railRefund * COST.refundRatio);
-    const reason = cost > this.budget ? 'Не хватает денег' : undefined;
+    // «Со строительством» дороги куска — проект: денег должно хватать только на то, что платится сразу (cost).
+    const reason = shortOfMoney(cost, this.budget, road?.project) ? 'Не хватает денег' : undefined;
     return {
       ok: !reason,
       reason,

@@ -144,7 +144,7 @@ import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
 import { crewCardHtml } from './crewCard';
-import { planPrice } from '../input/labels';
+import { planPrice, projectMoneyWarning } from '../input/labels';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
 
@@ -2019,8 +2019,11 @@ export class Hud {
     // Перенос или укороченная полоса бывает дешевле, чем было, — тогда возврат, с плюсом.
     // «Со строительством» — цена всего проекта и сколько строить (платится по готовым метрам).
     const price = plan.road?.project ? planPrice({ cost: plan.cost, project: plan.road.project }) : plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
+    // Проект дороже свободных денег — строить можно (платится по готовым метрам), но жёлтым: пойдёт по мере денег.
+    const short = plan.ok && plan.road?.project ? projectMoneyWarning({ cost: plan.cost, project: plan.road.project }, this.game().budget) : null;
+    const warn = short ? `<span class="project-short" data-tip="Проект дороже свободных денег: заложить можно — стройка платит за готовые метры и встаёт, пока денег нет">${short}</span>` : '';
     return `<div class="project-bar">${projectSvg(30, 22)}<b>Проект</b><span class="muted">${parts}${raze}</span>
-      <b class="project-total ${plan.ok ? '' : 'bad'}">${price}</b>${why}
+      <b class="project-total ${plan.ok ? (short ? 'warn' : '') : 'bad'}">${price}</b>${why}${warn}
       <button class="primary small" data-action="project-build" ${plan.ok ? '' : 'disabled'} title="${plan.ok ? 'Построить весь проект — новые участки и правки дорог (Enter). Ctrl+Z — отменить стройку' : `Сначала исправьте: ${reason}`}">Построить</button>
       <button class="small" data-action="project-cancel" title="Стереть проект — и участки, и правки дорог (Ctrl+Z вернёт)">Отменить</button></div>`;
   }

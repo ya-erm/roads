@@ -31,7 +31,7 @@ import { type StationServes, stationTitle, type TownBuilding } from '../world/en
 import type { RoadNode } from '../world/network';
 import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LANE_W, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
 import { aimAlong, railDirs } from './aim';
-import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, riseLabel, signedMetres, structureHeightText } from './labels';
+import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, projectMoneyWarning, riseLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
 import type { MoveProject } from '../game/moveProject';
 import { onOldAxis } from '../game/roadbuild';
@@ -2371,7 +2371,10 @@ export class Controller {
     const razed = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
     const info = `${okText}${profileNote(plan.profile)}${curveNote(plan)}${razed}`;
     // Не хватает денег — всё равно видно, сколько стоит и какая выйдет дорога, и сколько есть.
-    if (plan.ok) o.label = { text: info, ok: true };
+    // «Со строительством» проект дороже свободных денег — закладывается, но жёлтым: стройка пойдёт по мере денег.
+    const short = plan.ok ? projectMoneyWarning(plan, g.budget) : null;
+    if (short) o.label = { text: `${info} · ${short}`, ok: true, warn: true };
+    else if (plan.ok) o.label = { text: info, ok: true };
     else if (plan.reason === NO_MONEY) o.label = { text: `${NO_MONEY} · ${info}`, ok: false };
     else o.label = { text: plan.reason ?? 'Нельзя', ok: false };
   }
@@ -2413,12 +2416,16 @@ export class Controller {
     const price = plan.road?.project ? planPrice({ cost: plan.cost, project: plan.road.project }) : money(plan.cost);
     const total = segs || edits || v.draft || built ? `${price}${segs || v.draft ? ` · ${Math.round(plan.length)} м` : ''}` : '';
     const problem = !plan.ok && plan.reason && (segs || edits || v.draft || built) ? plan.reason : null;
+    // «Со строительством» проект дороже свободных денег — строится, но подпись жёлтая: стройка пойдёт по мере денег.
+    const short = plan.ok && total && plan.road?.project ? projectMoneyWarning({ cost: plan.cost, project: plan.road.project }, g.budget) : null;
+    const priced = (text: string): NonNullable<ToolOverlay['label']> =>
+      problem ? { text: `${problem} · ${text}`, ok: false } : short ? { text: `${text} · ${short}`, ok: true, warn: true } : { text, ok: true };
     if (built) {
       // Тянут построенную дорогу: перья — в новой форме, подпись — что тянут и цена всего проекта.
       if (rt.handle) o.handles = rt.handleMarks(rt.handle, plan.road?.net ?? undefined);
       const what = rt.handle ? 'Перо' : rt.bend !== null ? 'Изогнуть' : 'Узел';
       const text = `${what} дороги${rt.hint ? ` · ${rt.hint}` : ''} · проект ${total}`;
-      o.label = problem ? { text: `${problem} · ${text}`, ok: false } : { text, ok: true };
+      o.label = priced(text);
       return;
     }
     const at = pt.drag ? null : pt.targetAt(s.kind, p, this.snapRadius, hr);
@@ -2470,7 +2477,8 @@ export class Controller {
                   ? `Клик — новая ветка · Enter — построить${slow}`
                   : 'Клик — начало проекта';
     }
-    o.label = problem ? { text: `${problem} · ${text}`, ok: false } : { text, ok: true };
+    // Оговорка про деньги — где в подписи цена проекта (ведут ветку или тянут узел, перо).
+    o.label = v.draft || pt.drag ? priced(text) : problem ? { text: `${problem} · ${text}`, ok: false } : { text, ok: true };
   }
 
   /**

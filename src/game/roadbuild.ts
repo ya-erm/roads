@@ -208,6 +208,16 @@ export function corridorCost(net: LaneNet, c: Corridor, isWater: (p: Vec, margin
   return c.build ? paidFor(full, c.build.done, c.length) : full;
 }
 
+/**
+ * Не хватает денег на то, что план списывает сразу (cost). «Со строительством» новая дорога плана — проект (project):
+ * она платится по готовым метрам, её цены в cost нет, и без денег проект всё равно закладывается — стоит, пока денег
+ * нет. Сразу платится только снос домов, правки готовых дорог и т. п.: на них денег должно хватать, а платить сразу
+ * нечего (cost ≤ 0) — нечего и проверять, даже в долгу до кредитного предела. Без проекта — как всегда: cost > budget.
+ */
+export function shortOfMoney(cost: number, budget: number, project?: unknown): boolean {
+  return cost > budget && (cost > 0 || !project);
+}
+
 /** Стоимость полотна целиком, построено оно или ещё строится. */
 export function fullCorridorCost(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean, ground: ((p: Vec) => number) | null = null): number {
   const n = Math.max(2, Math.ceil(c.length / 12));
@@ -310,7 +320,7 @@ export class RoadBuilder {
     const spend = opts.free ? 0 : Math.max(0, diff) + demolishCost;
     const refund = opts.free ? 0 : Math.max(0, -diff);
     const cost = Math.round(spend - refund * COST.refundRatio);
-    if (!reason && cost > this.ctx.budget) reason = 'Не хватает денег';
+    if (!reason && shortOfMoney(cost, this.ctx.budget, project)) reason = 'Не хватает денег';
     const plan: RoadPlan = { ok: !reason, reason, cost, spend, refund, demolish: razed, net: next, changed: changed.map((c) => c.id) };
     if (moved) plan.moved = moved;
     if (project) plan.project = project;

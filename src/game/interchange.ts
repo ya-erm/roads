@@ -3,7 +3,7 @@ import { add, dot, scale, sub, Vec } from '../core/vec';
 import { buildPiece } from '../lanes/edit';
 import { Corridor, LaneNet, profileOf } from '../lanes/model';
 import { halfWidth, isTrunk, LEVEL_RUN, RoadSpec } from '../world/roadTypes';
-import type { RoadBuilder, RoadPlan } from './roadbuild';
+import { type RoadBuilder, type RoadPlan, shortOfMoney } from './roadbuild';
 
 /**
  * Шаблоны развязок на магистрали. Поперечная дорога проходит над магистралью по мосту,
@@ -160,7 +160,7 @@ export function templatePlan(net: LaneNet, builder: RoadBuilder, p: Vec, radius:
     { trusted: true, project: true },
   );
   if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', pieces, withTrunk, plan.cost, plan);
-  if (plan.cost > budget) return fail('Не хватает денег', pieces, withTrunk, plan.cost, plan);
+  if (shortOfMoney(plan.cost, budget, plan.project)) return fail('Не хватает денег', pieces, withTrunk, plan.cost, plan);
   return { ok: true, cost: plan.cost, pieces, preview: pieces.map(curveOf), withTrunk, plan };
 }
 

@@ -5925,6 +5925,21 @@ span.ind-chip {
   color: var(--danger);
 }
 
+/* «Со строительством» проект дороже свободных денег: строить можно, но стройка пойдёт по мере денег. */
+.project-total.warn {
+  color: #b7791f;
+}
+
+.project-short {
+  font-size: 12px;
+  line-height: 15px;
+  padding: 2px 7px;
+  border-radius: 8px;
+  background: #fbe7a8;
+  color: #5c4405;
+  white-space: nowrap;
+}
+
 .project-why {
   font-size: 12px;
   line-height: 15px;

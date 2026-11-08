@@ -19,6 +19,17 @@ export function planPrice(plan: { cost: number; project?: { cost: number; second
   return `🏗 ${money(p.cost + Math.max(0, plan.cost))} · ⏳ ${durationText(p.seconds)}`;
 }
 
+/**
+ * «Со строительством» проект дороже свободных денег (budget — до кредитного предела, без резерва): его всё равно можно
+ * заложить — платится он по готовым метрам, без денег стоит. Предупреждение к цене — «💸 свободно $20 000 — стройка
+ * пойдёт по мере денег» (жёлтым, а не отказом); денег хватает или это не проект — null.
+ */
+export function projectMoneyWarning(plan: { cost: number; project?: { cost: number } }, budget: number): string | null {
+  const p = plan.project;
+  if (!p || p.cost + Math.max(0, plan.cost) <= budget) return null;
+  return `💸 свободно ${money(Math.max(0, budget))} — стройка пойдёт по мере денег`;
+}
+
 /** Метры со знаком, округлённые: «+14 м», «−4 м» (минус — типографский), «±0 м». */
 export function signedMetres(v: number): string {
   const r = Math.round(v) || 0;
