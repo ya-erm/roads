@@ -706,7 +706,7 @@ export function buildProject(g: Game, kind: NetKind, p: Project, edits: NetEdit[
   g.commit();
   // Не вышло посередине (чего на копии не было) — уже уложенное откатываем.
   if (res.bad !== null) {
-    if (res.built) g.undo();
+    if (res.built) g.undo(false);
     return res.reason ?? 'Так не построить';
   }
   return null;

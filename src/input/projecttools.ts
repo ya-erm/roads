@@ -113,6 +113,8 @@ export class ProjectTools {
   private press: { kind: 'node'; id: number } | { kind: 'seg'; seg: number; t: number } | { kind: 'handle' } | { kind: 'empty' } | null = null;
   /** Шаги правки проекта для Ctrl+Z: проект и правки построенных дорог, какими они были до шага. */
   private history: Record<NetKind, { p: Project; edits: NetEdit[] }[]> = { road: [], rail: [] };
+  /** Отменённые шаги правки для Ctrl+Y: проект и правки построенных дорог, какими они были до отмены шага. */
+  private future: Record<NetKind, { p: Project; edits: NetEdit[] }[]> = { road: [], rail: [] };
   private cache = new Map<string, ProjectPlan>();
 
   /**
@@ -145,6 +147,10 @@ export class ProjectTools {
 
   canUndo(kind: NetKind): boolean {
     return this.history[kind].length > 0;
+  }
+
+  canRedo(kind: NetKind): boolean {
+    return this.future[kind].length > 0;
   }
 
   /** Правка построенной дороги — в проект дорог (Ctrl+Z в проекте её уберёт). Ответ — что не так. */
@@ -203,6 +209,7 @@ export class ProjectTools {
   reset(): void {
     this.projects = { road: emptyProject(), rail: emptyProject() };
     this.history = { road: [], rail: [] };
+    this.future = { road: [], rail: [] };
     this.cache.clear();
     this.drag = null;
     this.before = null;
@@ -215,6 +222,8 @@ export class ProjectTools {
     const h = this.history[kind];
     h.push({ p: was, edits });
     if (h.length > 100) h.shift();
+    // Новый шаг правки — отменённые шаги больше не повторить.
+    this.future[kind] = [];
   }
 
   /** Ведём из другого узла: начатая ветка из одного узла без участков — не нужна. */
@@ -501,6 +510,22 @@ export class ProjectTools {
   undo(kind: NetKind): boolean {
     const step = this.history[kind].pop();
     if (!step) return false;
+    this.future[kind].push({ p: this.projects[kind], edits: [...this.edits(kind)] });
+    this.apply(kind, step);
+    return true;
+  }
+
+  /** Ctrl+Y (Ctrl+Shift+Z) в проекте: отменённый шаг правки — снова. false — повторять нечего. */
+  redo(kind: NetKind): boolean {
+    const step = this.future[kind].pop();
+    if (!step) return false;
+    this.history[kind].push({ p: this.projects[kind], edits: [...this.edits(kind)] });
+    this.apply(kind, step);
+    return true;
+  }
+
+  /** Проект и правки построенных дорог — как в шаге истории (отмена или повтор). */
+  private apply(kind: NetKind, step: { p: Project; edits: NetEdit[] }): void {
     const was = step.p;
     this.projects[kind] = was;
     // Правки построенных дорог — какими были до шага.
@@ -509,7 +534,6 @@ export class ProjectTools {
     this.before = null;
     this.control = null;
     if (this.tip !== null && !was.nodes.some((n) => n.id === this.tip)) this.tip = null;
-    return true;
   }
 
   /** Начато то, что отменит Esc или правая кнопка: протяжка, точка изгиба, ведём ветку. */
@@ -552,6 +576,7 @@ export class ProjectTools {
   built(kind: NetKind): void {
     this.projects[kind] = emptyProject();
     this.history[kind] = [];
+    this.future[kind] = [];
     this.cache.clear();
     this.stop(kind);
   }

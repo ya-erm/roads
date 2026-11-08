@@ -161,7 +161,7 @@ export function railProjectScene(): { game: Game; a: Station; b: Station; id: nu
       })();
       game.commit();
       if (!ok) {
-        game.undo();
+        game.undo(false);
         continue;
       }
       const id = game.construction.peekId();

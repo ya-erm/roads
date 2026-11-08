@@ -289,6 +289,10 @@ interface UndoSnapshot {
   creates?: number[];
   /** Места строительных баз до действия (перенос базы, база, отодвинутая расширением улицы); нет в старых снимках. */
   bases?: { id: number; fp: Footprint; nodeId: number }[];
+  /** Снимок для повтора (Ctrl+Y): мазки кисти рельефа, что отмена убрала, — нанести снова. */
+  terraformRedo?: TerraformEdit[];
+  /** Снимок для повтора: дома, которые вернула отмена (действие их снесло), — снести снова. */
+  dropBuildings?: { townId: number; ids: number[] }[];
 }
 
 /** База стоит там же (площадка и ворота), что и в снимке s. */
@@ -2431,7 +2435,7 @@ export class Game implements BuildContext {
       const res = this.builder.build({ ...req, start, curve: req.curve && { ...req.curve, p0: start.pos } });
       if (!res) {
         this.commit();
-        this.undo();
+        this.undo(false);
         return 'Не удалось построить путь';
       }
       prev = res.endNode;
@@ -2883,15 +2887,28 @@ export class Game implements BuildContext {
   /** Снимок сделан, действие ещё идёт (например, тянем снос мышью). */
   private undoPending = false;
 
+  /** Отменённые стройки для повтора (Ctrl+Y): снимки построек, какими они были до отмены; новое действие их забывает. */
+  private readonly redoStack: UndoSnapshot[] = [];
+
   get canUndo(): boolean {
     return this.undoStack.length > 0;
+  }
+
+  get canRedo(): boolean {
+    return this.redoStack.length > 0;
   }
 
   /** Запоминает постройки перед действием игрока: дороги, пути, станции, здания, кольца. */
   checkpoint(label: string): void {
     if (this.undoPending) this.commit();
     this.undoPending = true;
-    this.undoStack.push({
+    this.undoStack.push(this.captureBuilt(label));
+    if (this.undoStack.length > UNDO_DEPTH) this.undoStack.shift();
+  }
+
+  /** Снимок построек сейчас: дороги, пути, станции, дома, пристройки, кольца, рельеф, проекты и базы стройки. */
+  private captureBuilt(label: string): UndoSnapshot {
+    return {
       label,
       roads: this.roads.net.clone(),
       roadsVersion: this.roads.net.version,
@@ -2906,8 +2923,7 @@ export class Game implements BuildContext {
       spent: 0,
       projects: this.construction.projects.size ? this.construction.snapshot() : undefined,
       bases: this.construction.crews.bases.size ? [...this.construction.crews.bases.values()].map((b) => ({ id: b.id, fp: structuredClone(b.fp), nodeId: b.nodeId })) : undefined,
-    });
-    if (this.undoStack.length > UNDO_DEPTH) this.undoStack.shift();
+    };
   }
 
   /** Действие закончено: если ничего не построили и не снесли, снимок не нужен. */
@@ -2931,6 +2947,8 @@ export class Game implements BuildContext {
     else {
       top.spent = top.moneyBefore - this.money;
       this.journalBuild(top);
+      // Новое действие после отмены — отменённое больше не повторить.
+      this.redoStack.length = 0;
     }
   }
 
@@ -2962,14 +2980,16 @@ export class Game implements BuildContext {
   /** После правок линий старые снимки могли бы сломать маршруты — забываем их. */
   private forgetUndo(): void {
     this.undoStack.length = 0;
+    this.redoStack.length = 0;
   }
 
   /**
    * Отменяет последнюю стройку: возвращает сеть, станции, дома и кольца как были
    * и возвращает потраченные деньги. Заработанное за это время остаётся,
    * машины и поезда продолжают путь (кто оказался на снесённом участке — вернётся на станцию).
+   * redoable — отменённое можно повторить (Ctrl+Y); откат неудавшегося действия (кусок не встал) — нельзя.
    */
-  undo(): string | null {
+  undo(redoable = true): string | null {
     this.commit();
     const snap = this.undoStack.pop();
     if (!snap) return null;
@@ -2983,8 +3003,65 @@ export class Game implements BuildContext {
       for (const id of snap.creates!) this.cancelProject(id, false);
       this.journal.add('undo', { what: snap.label, back: 0, projects: started });
       this.notify('Стройка уже шла: недостроенное убрано, готовые участки остались — их убирает снос', '#e5a33b');
+      // Это не возврат к прежнему, а отмена проектов — повторять нечего (и прежние повторы уже не к месту).
+      this.redoStack.length = 0;
       return snap.label;
     }
+    // Для повтора — постройки, какими они были до отмены, и то, что отмена вернёт поверх них (дома, рельеф).
+    const redo = redoable ? this.captureBuilt(snap.label) : null;
+    if (redo) {
+      redo.spent = snap.spent;
+      redo.creates = snap.creates;
+      redo.terraformRedo = this.terrain.edits.slice(snap.terraform);
+      redo.dropBuildings = snap.buildings
+        .map(({ townId, list }) => {
+          const have = new Set(this.towns.find((t) => t.id === townId)?.buildings.map((b) => b.id));
+          return { townId, ids: list.filter((b) => !have.has(b.id)).map((b) => b.id) };
+        })
+        .filter((d) => d.ids.length);
+    }
+    this.restoreBuilt(snap);
+
+    // Деньги за стройку — назад.
+    this.money += snap.spent;
+    this.expensesMonth -= snap.spent;
+    this.ledger.build -= Math.min(this.ledger.build, snap.spent);
+    this.journal.add('undo', { what: snap.label, back: snap.spent });
+    if (redo) this.redoStack.push(redo);
+    else this.redoStack.length = 0;
+    return snap.label;
+  }
+
+  /**
+   * Повторяет последнюю отменённую стройку (Ctrl+Y, Ctrl+Shift+Z): постройки — какими были до отмены, деньги за
+   * стройку — снова списаны; отменить её можно опять. null — повторять нечего.
+   */
+  redo(): string | null {
+    this.commit();
+    const snap = this.redoStack.pop();
+    if (!snap) return null;
+    const back = this.captureBuilt(snap.label);
+    back.spent = snap.spent;
+    back.creates = snap.creates;
+    this.restoreBuilt(snap, snap.dropBuildings);
+    // Мазки кисти, что убрала отмена, — снова (рельеф после отмены не менялся: новый мазок забыл бы повтор).
+    for (const e of snap.terraformRedo ?? []) this.terrain.terraform(e);
+
+    // Деньги за стройку — снова, как при самой стройке.
+    this.money -= snap.spent;
+    this.expensesMonth += snap.spent;
+    this.ledger.build += snap.spent;
+    this.journal.add('redo', { what: snap.label, $: snap.spent });
+    this.undoStack.push(back);
+    if (this.undoStack.length > UNDO_DEPTH) this.undoStack.shift();
+    return snap.label;
+  }
+
+  /**
+   * Постройки — как в снимке snap (отмена или повтор): сеть, станции, дома, пристройки, кольца, рельеф, проекты и базы
+   * стройки. drop — дома, которых в снимке нет и которые надо снести (повтор сноса); выросшие сами — остаются.
+   */
+  private restoreBuilt(snap: UndoSnapshot, drop?: { townId: number; ids: number[] }[]): void {
     const railSave = this.rail.serialize();
     this.rail.clearTrains();
     // Ж/д проекты с тех пор ушли вперёд — готовое на путях переносим (оно уже оплачено), как у дорог (carryBuild).
@@ -3061,6 +3138,7 @@ export class Game implements BuildContext {
     for (const { townId, list } of snap.buildings) {
       const town = this.towns.find((t) => t.id === townId);
       if (!town) continue;
+      const gone = new Set(drop?.find((d) => d.townId === townId)?.ids);
       const now = new Map(town.buildings.map((b) => [b.id, b]));
       for (const old of list) {
         const cur = now.get(old.id);
@@ -3068,9 +3146,12 @@ export class Game implements BuildContext {
         now.set(old.id, old);
         this.index.add(old);
       }
-      // Дома у улиц, которые город проложил после снимка (их отмена убрала), уходят вместе с ними.
+      // Дома у улиц, которые город проложил после снимка (их отмена убрала), уходят вместе с ними; дома из снимка
+      // остаются, какими были (и те, чью улицу действие обрезало снаружи рамки сноса).
+      // Повтор сноса: дома, что вернула отмена, — снова прочь.
+      const kept = new Set(list.map((b) => b.id));
       town.buildings = [...now.values()].filter((b) => {
-        if (this.roads.net.nodes.has(b.anchor)) return true;
+        if (!gone.has(b.id) && (kept.has(b.id) || this.roads.net.nodes.has(b.anchor))) return true;
         this.index.remove(b);
         return false;
       });
@@ -3087,13 +3168,6 @@ export class Game implements BuildContext {
     this.net.rebuild();
     this.refreshCrossings();
     for (const st of this.stations.values()) this.computeCatchment(st);
-
-    // Деньги за стройку — назад.
-    this.money += snap.spent;
-    this.expensesMonth -= snap.spent;
-    this.ledger.build -= Math.min(this.ledger.build, snap.spent);
-    this.journal.add('undo', { what: snap.label, back: snap.spent });
-    return snap.label;
   }
 
   // ---------- Время ----------

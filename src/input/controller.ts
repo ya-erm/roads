@@ -1281,6 +1281,62 @@ export class Controller {
     this.onChange();
   }
 
+  /** Повторяет последнюю отменённую стройку (Ctrl+Y, Ctrl+Shift+Z). */
+  redo(): void {
+    const g = this.game();
+    this.chain = null;
+    this.control = null;
+    this.roadTools.clear();
+    this.railTools.clear();
+    const label = g.redo();
+    if (label) g.notify(`Повторено: ${label}`);
+    else this.showError('Нечего повторять');
+    this.onChange();
+  }
+
+  /** Чем были отмены подряд (Ctrl+Z): шаг правки проекта или стройка, — Ctrl+Y повторяет их в обратном порядке. */
+  private undoTrail: ('project' | 'game')[] = [];
+
+  /** Проект, чьи шаги правки сейчас отменяет и повторяет Ctrl+Z / Ctrl+Y; протяжка дороги идёт — никакой. */
+  private get stepProject(): NetKind | null {
+    return this.roadTools.dragging || this.roadTools.laneDrag ? null : this.projectKind;
+  }
+
+  /** Ctrl+Z: в проекте — сперва шаги его правки (участки и правки построенных дорог — одной историей), потом (проект пуст) — стройка. */
+  undoStep(): void {
+    const kind = this.stepProject;
+    if (kind && this.projectTools.undo(kind)) {
+      this.afterProjectStep();
+      this.undoTrail.push('project');
+      return;
+    }
+    const had = this.game().canUndo;
+    this.undo();
+    if (had) this.undoTrail.push('game');
+    if (this.undoTrail.length > 200) this.undoTrail.shift();
+  }
+
+  /** Ctrl+Y / Ctrl+Shift+Z: отменённое — снова, в обратном порядке отмен; шаги проекта и стройка — одной историей. */
+  redoStep(): void {
+    const kind = this.stepProject;
+    const g = this.game();
+    // Последней отменили стройку — она первой и вернётся; повторять её нечего (новое действие) — шаг проекта.
+    const last = this.undoTrail.pop();
+    const project = kind && this.projectTools.canRedo(kind) && (last !== 'game' || !g.canRedo);
+    if (project) {
+      this.projectTools.redo(kind);
+      this.afterProjectStep();
+    } else this.redo();
+  }
+
+  /** Шаг правки проекта отменён или повторён. */
+  private afterProjectStep(): void {
+    // Конец «полосы по точкам» мог остаться в убранной правке — ведём заново.
+    if (this.editProject) this.roadTools.clear();
+    this.syncMoveBase();
+    this.onChange();
+  }
+
   /** Камера к выбранной машине или поезду. */
   focusSelection(): void {
     const p = this.followTarget();
@@ -2258,7 +2314,7 @@ export class Controller {
       if (!res) {
         // Кусок не встал — откатываем построенные (снимок сделан при нажатии).
         g.commit();
-        g.undo();
+        g.undo(false);
         this.showError('Не удалось построить путь');
         return;
       }
@@ -2291,7 +2347,7 @@ export class Controller {
       if (!res) {
         // Второй путь не встал — откатываем и первый (снимок сделан при нажатии).
         g.commit();
-        g.undo();
+        g.undo(false);
         this.showError('Не удалось построить оба пути');
         return;
       }
@@ -2748,17 +2804,11 @@ export class Controller {
     }
     // Cmd (macOS) / Ctrl — тоже без прилипания (направление односторонней не трогает); сочетания с ними — как были.
     if (e.key === 'Control' || e.key === 'Meta') this.ctrl = true;
-    if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
+    // Ctrl/Cmd+Z — шаг назад; Ctrl/Cmd+Y и Ctrl/Cmd+Shift+Z — повторить отменённое.
+    if ((e.ctrlKey || e.metaKey) && (e.code === 'KeyZ' || e.code === 'KeyY')) {
       e.preventDefault();
-      // В проекте — сперва шаги его правки (участки и правки построенных дорог — одной историей), потом (проект
-      // пуст) — стройка.
-      const kind = this.roadTools.dragging || this.roadTools.laneDrag ? null : this.projectKind;
-      if (kind && this.projectTools.undo(kind)) {
-        // Конец «полосы по точкам» мог остаться в убранной правке — ведём заново.
-        if (this.editProject) this.roadTools.clear();
-        this.syncMoveBase();
-        this.onChange();
-      } else this.undo();
+      if (e.code === 'KeyY' || e.shiftKey) this.redoStep();
+      else this.undoStep();
       return;
     }
     // Сочетания с Cmd / Ctrl / Alt — браузеру (Cmd+N, Cmd+M…), игре только одиночные клавиши.
