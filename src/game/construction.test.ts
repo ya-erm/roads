@@ -5,7 +5,7 @@ import { splitBuild } from '../lanes/edit';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import { projectName } from './construction';
-import { convoyGap, frontOf, stageSpans } from './constructionWork';
+import { convoyGap, frontOf, spansOf, stageSpans } from './constructionWork';
 import { Game } from './game';
 import { anchorOf, type End, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
@@ -99,10 +99,14 @@ function crewAt(game: Game, pos: Vec, n = 1, gate: number | Vec = pos): BuildBas
   return base;
 }
 
-/** Игра вперёд, пока на каком-нибудь проекте не заработает бригада (не дольше limit секунд). */
+/**
+ * Игра вперёд, пока на каком-нибудь проекте не заработает бригада всеми машинами — каждая на своём месте (машины
+ * сходят на стройку по одной, Crews.placed; не дольше limit секунд).
+ */
 function untilWorking(game: Game, limit = 120): number {
   let t = 0;
-  while (t < limit && ![...game.construction.crews.brigades.values()].some((b) => b.state === 'working')) {
+  const crews = game.construction.crews;
+  while (t < limit && ![...crews.brigades.values()].some((b) => crews.placed(b).every(Boolean))) {
     runSeconds(game, 0.1);
     t += 0.1;
   }
@@ -186,7 +190,7 @@ describe('Стройка дорог: «Со строительством»', () 
     CONSTRUCTION.reach = reach;
   });
 
-  it('дорога — проект: денег сразу не берут, по ней не ездят, строится 1 км за 90 с и платится по метрам', () => {
+  it('дорога — проект: денег сразу не берут, по ней не ездят, каждый этап идёт 1 км за 90 с, платится по метрам', () => {
     const km = 1000 / CONSTRUCTION.speed;
     expect(km).toBeCloseTo(90, 6);
     const game = buildGame();
@@ -210,7 +214,10 @@ describe('Стройка дорог: «Со строительством»', () 
     expect(linksOf(game, c.id)).toBe(0);
     const info0 = game.construction.list()[0];
     expect(info0.done).toBe(0);
-    expect(info0.seconds).toBeCloseTo(c.length / CONSTRUCTION.speed, 0);
+    // Участок готов, когда разметка дошла до конца: она идёт тем же темпом, что отсыпка, но на два интервала колонны
+    // позади.
+    const total = (c.length + 2 * convoyGap(c.length)) / CONSTRUCTION.speed;
+    expect(info0.seconds).toBeCloseTo(total, 0);
     untilWorking(game);
     // Половина времени — половина работы и половина денег.
     runSeconds(game, km / 2);
@@ -220,8 +227,8 @@ describe('Стройка дорог: «Со строительством»', () 
     expect(paid).toBeGreaterThan(full * 0.45);
     expect(paid).toBeLessThan(full * 0.55);
     expect(linksOf(game, c.id)).toBe(0);
-    // К 90 с (длина чуть больше 1000 — с запасом) дорога готова и открыта.
-    runSeconds(game, km / 2 + 3);
+    // К концу разметки (длина чуть больше 1000 — с запасом) дорога готова и открыта.
+    runSeconds(game, total - km / 2 + 3);
     expect(building(game)).toEqual([]);
     expect(game.construction.projects.size).toBe(0);
     expect(linksOf(game, c.id)).toBeGreaterThan(0);
@@ -273,14 +280,15 @@ describe('Стройка дорог: «Со строительством»', () 
     expect(project(game, { free: at }, { free: { x: at.x + 600, y: at.y } })).toBe(true);
     untilWorking(game);
     game.money = ECONOMY.creditLimit;
+    const before = game.construction.list()[0].done;
     runSeconds(game, 3);
     const info = game.construction.list()[0];
-    expect(info.done).toBeLessThan(0.01);
+    expect(info.done - before).toBeLessThan(0.002);
     expect(info.project.stalled).toBeDefined();
     expect(advise(game).some((a) => a.kind === 'buildMoney' && a.title === 'Стройка стоит: не хватает денег')).toBe(true);
     game.money = 1_000_000;
     runSeconds(game, 3);
-    expect(game.construction.list()[0].done).toBeGreaterThan(0.05);
+    expect(game.construction.list()[0].done - before).toBeGreaterThan(0.03);
     expect(game.construction.list()[0].project.stalled).toBeUndefined();
   });
 
@@ -416,7 +424,7 @@ describe('Стройка дорог: «Со строительством»', () 
     expect(game.roads.graph.corridorLinks(c.id).length).toBe(0);
     expect(game.roads.route(c.a, c.b)).toBeNull();
     untilWorking(game);
-    runSeconds(game, 600 / CONSTRUCTION.speed + 8);
+    runSeconds(game, (c.length + 2 * convoyGap(c.length)) / CONSTRUCTION.speed + 8);
     expect(building(game)).toEqual([]);
     expect(game.roads.route(c.a, c.b)).not.toBeNull();
   });
@@ -597,9 +605,20 @@ describe('Стройка дорог: базы и бригады', () => {
       // База далеко (темп — по расстоянию от неё), а подъезд — у самого проекта.
       crewAt(game, { x: at.x - far, y: at.y }, n, at);
       project(game, { free: at }, { free: { x: at.x + 900, y: at.y } });
-      // Бригады выезжают с ворот по одной — темп меряем, когда на месте все.
+      // Бригады выезжают с ворот по одной, а машина берётся за свой этап, только доехав до своего места: опоздавшая
+      // бригада догоняла бы ушедший вперёд край. Темп меряем честно: проект стоит без денег, пока на места не встанут
+      // все машины всех бригад, потом — деньги, и меряем, когда идут все этапы (в начале участка покрытие и разметка
+      // ждут, пока отсыпка уйдёт вперёд).
       const id = game.construction.list()[0].project.id;
-      for (let t = 0; t < 1200 && game.construction.crews.working(id).length < n; t += 0.1) runSeconds(game, 0.1);
+      const crews = game.construction.crews;
+      const money = game.money;
+      game.money = ECONOMY.creditLimit;
+      const placed = () => crews.working(id).length >= n && crews.working(id).every((b) => crews.placed(b).every(Boolean));
+      for (let t = 0; t < 1200 && !placed(); t += 0.1) runSeconds(game, 0.1);
+      expect(placed()).toBe(true);
+      game.money = money;
+      const marks = () => game.construction.fronts(id).some((c) => spansOf(c.build, c.length)[2] > 0);
+      for (let t = 0; t < 600 && !marks(); t += 0.1) runSeconds(game, 0.1);
       const done0 = game.construction.list()[0].done;
       runSeconds(game, 6);
       return { done: game.construction.list()[0].done - done0, advice: advise(game) };

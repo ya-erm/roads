@@ -31,7 +31,7 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
     expect(game.money).toBe(game.settings.money);
   });
 
-  it('бригады сами доезжают до своих проектов; через 75 с часть проектов готова и открыта, к 5 минутам — все', () => {
+  it('бригады сами доезжают до своих проектов; через 75 с часть проектов готова и открыта, к 6 минутам — все', () => {
     const scene = buildConstructionScene();
     const { game } = scene;
     const crews = game.construction.crews;
@@ -39,8 +39,8 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
     const streetIds = [...game.roads.net.corridors.values()].filter((c) => c.build?.project === street.project).map((c) => c.id);
     // Пока строится — по нему не ездят.
     for (const id of streetIds) expect(game.roads.graph.corridorLinks(id)).toHaveLength(0);
-    // Бригада едет колонной из трёх машин (самосвал, грейдер, каток — каток тихоходный) и берётся за работу, когда
-    // доехала последняя: по подъезду в 160 м — секунд 20.
+    // Бригада едет колонной из трёх машин (отсыпка, покрытие, разметка): у участка на земле каждая сходит на стройку и
+    // берётся за свой этап, как доехала, у моста и тоннеля — когда доехала последняя: по подъезду в 160 м — секунд 20.
     runSeconds(game, 25);
     // Каждая бригада — на своём проекте (своей базы).
     for (const p of scene.projects) expect(crews.working(p.project!).map((b) => b.base), p.name).toEqual([p.base]);
@@ -53,7 +53,8 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
       expect(game.roads.net.corridors.get(id)?.build).toBeUndefined();
       expect(game.roads.graph.corridorLinks(id).length).toBeGreaterThan(0);
     }
-    runSeconds(game, 240);
+    // Мост и тоннель — из коротких участков: на каждом разметка кончает на два интервала колонны позже отсыпки.
+    runSeconds(game, 285);
     expect(game.construction.projects.size).toBe(0);
     expect([...game.roads.net.corridors.values()].filter((c) => c.build)).toEqual([]);
     expect(game.roads.net.problems()).toEqual([]);

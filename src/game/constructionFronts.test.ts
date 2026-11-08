@@ -93,7 +93,11 @@ describe('Стройка: несколько фронтов навстречу �
 
   it('фронты — в сохранении: после загрузки бригады строят те же участки, и дальше всё одинаково', () => {
     const { game, id } = scene(true);
-    for (let t = 0; t < 120 && game.construction.crews.working(id).length < 2; t += 0.5) runSeconds(game, 0.5);
+    // Машины сходят на стройку по одной; поток не сохраняется — сохраняем, когда обе колонны уже целиком на стройке.
+    const crews = game.construction.crews;
+    const onSite = () => crews.working(id).length === 2 && crews.working(id).every((b) => !b.convoy);
+    for (let t = 0; t < 120 && !onSite(); t += 0.5) runSeconds(game, 0.5);
+    expect(onSite()).toBe(true);
     runSeconds(game, 5);
     expect(game.construction.fronts(id)).toHaveLength(2);
     const loaded = withoutCitizens(new Game(WORLD, JSON.parse(JSON.stringify(game.toSave()))));

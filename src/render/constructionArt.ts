@@ -16,7 +16,7 @@
  */
 import { CONSTRUCTION } from '../config';
 import { add, scale, sub, type Vec } from '../core/vec';
-import { frontOf, nextSite, type StageReach, stageLayout, stageSpans } from '../game/constructionWork';
+import { convoyGap, frontOf, nextSite, type Spans, spansOf, type StageReach, stageLayout } from '../game/constructionWork';
 import { CREW_UNITS, crewRows, fillet, polyAt, polyLength, polyProject, stageSlots } from '../game/crewLane';
 import { drawVehicleArt } from './vehicleArt';
 import { bridgeLook, deckAlong } from '../lanes/deck';
@@ -60,16 +60,29 @@ export function projectJoints(open: LaneNet, full: LaneNet): Set<number> {
   return ids;
 }
 
-/** Готовое на карте — целыми шагами drawStep (последний шаг — только когда участок готов целиком). */
-export function drawnDone(c: Corridor): number {
-  const done = c.build?.done ?? 0;
-  return Math.min(c.length, Math.floor(done / CONSTRUCTION.drawStep) * CONSTRUCTION.drawStep);
+/**
+ * Этапы на карте (spansOf) — целыми шагами drawStep: этап, дошедший до конца, — до конца. Этап, что идёт вплотную за
+ * предыдущим (на convoyGap позади), — на convoyGap позади нарисованного предыдущего: так этапы колонны переходят на
+ * следующий шаг разом, и плитки перерисовываются по шагу колонны, а не по шагу каждого этапа.
+ */
+export function drawnSpans(c: Corridor): Spans {
+  const L = c.length;
+  const step = CONSTRUCTION.drawStep;
+  const s = spansOf(c.build, L);
+  const g = convoyGap(L);
+  const out: Spans = [0, 0, 0];
+  for (let k = 0; k < 3; k++) {
+    const own = s[k] >= L - 1e-6 ? L : Math.min(L, Math.floor(s[k] / step) * step);
+    const locked = k > 0 && s[k - 1] < L - 1e-6 && Math.abs(s[k] - (s[k - 1] - g)) < 1e-6;
+    out[k] = locked ? Math.max(0, Math.min(own + step, out[k - 1] - g)) : own;
+  }
+  return out;
 }
 
-/** Готовое на полотне c (как нарисовано, drawnDone): где отсыпка и какой этап дошёл до узлов на концах (stageLayout). */
+/** Готовое на полотне c (как нарисовано, drawnSpans): где отсыпка и какой этап дошёл до узлов на концах (stageLayout). */
 export function projectLayout(c: Corridor, cuts: Map<number, [number, number]>): ReturnType<typeof stageLayout> {
   const [ca, cb] = cuts.get(c.id) ?? [0, 0];
-  return stageLayout(stageSpans(drawnDone(c), c.length), c.length, !!c.build?.fromB, ca, cb);
+  return stageLayout(drawnSpans(c), c.length, !!c.build?.fromB, ca, cb);
 }
 
 /**
@@ -110,7 +123,7 @@ export function projectNodes(net: LaneNet, lanes: LaneRenderer): { id: number; b
 
 /** Подпись строящегося полотна для кэша плиток: форма (ревизия) и сколько готового нарисовано. */
 export function projectSig(c: Corridor): string {
-  return `${c.rev}|${drawnDone(c)}|${c.build?.fromB ? 'b' : 'a'}`;
+  return `${c.rev}|${drawnSpans(c).join(',')}|${c.build?.fromB ? 'b' : 'a'}`;
 }
 
 /** Рамка полотна с запасом на ширину и подъём моста. */
@@ -418,7 +431,7 @@ export function drawProjectShadows(ctx: CanvasRenderingContext2D, net: LaneNet, 
   for (const built of [false, true]) {
     drawFaded(ctx, clip, built ? 1 : GHOST, (g) => {
       for (const c of list) {
-        const [earthTo] = stageSpans(drawnDone(c), c.length);
+        const [earthTo] = drawnSpans(c);
         const [doneA, doneB] = c.build?.fromB ? [c.length - earthTo, c.length] : [0, earthTo];
         const [s0, s1] = built ? [doneA, doneB] : c.build?.fromB ? [0, doneA] : [doneB, c.length];
         if (s1 - s0 < 0.5) continue;
@@ -468,7 +481,7 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
   // Этапы готового — непрозрачно, поверх будущей дороги.
   for (const c of list) {
     if (corridorLayer(net, c) !== layer) continue;
-    const [earthTo, paveTo, marksTo] = stageSpans(drawnDone(c), c.length);
+    const [earthTo, paveTo, marksTo] = drawnSpans(c);
     const span = (to: number): [number, number] => (c.build?.fromB ? [c.length - to, c.length] : [0, to]);
     // Отсыпка — только по своему у полотна, не по площадке перекрёстка: там бывает уже готовая дорога. У моста вместо
     // неё — опоры, балки и плита настила, у тоннеля — выработка щита (structureArt).
@@ -535,7 +548,7 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
 export function workFront(c: Corridor): { pos: Vec; dir: Vec; stage: 0 | 1 | 2; c: Corridor; s: number } | null {
   const b = c.build;
   if (!b || b.done <= 0) return null;
-  const f = frontOf(b.done, c.length);
+  const f = frontOf(spansOf(b, c.length), c.length);
   const s = b.fromB ? c.length - f.s : f.s;
   const t = c.lut.tangentAt(s);
   return { pos: c.lut.pointAt(s), dir: b.fromB ? scale(t, -1) : t, stage: f.stage, c, s };
@@ -567,7 +580,7 @@ export function crewConvoy(net: LaneNet, c: Corridor): CrewMachine[] {
   const b = c.build;
   if (!b) return [];
   const L = c.length;
-  const fronts = stageSpans(b.done, L);
+  const fronts = spansOf(b, L);
   const raised = Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
   const start = b.fromB ? c.b : c.a;
   const end = b.fromB ? c.a : c.b;
@@ -591,7 +604,7 @@ export function crewConvoy(net: LaneNet, c: Corridor): CrewMachine[] {
   const path = fillet(pts);
   const probe = Math.min(15, L / 2);
   const zero = polyProject(path, c.lut.pointAt(b.fromB ? L - probe : probe)) - probe;
-  const slots = stageSlots(b.done, L, {
+  const slots = stageSlots(fronts, L, {
     ahead: siteKind(net, c) === 'road',
     ext: onward ? Math.max(0, polyLength(path) - (zero + L)) : 0,
     extAhead: !!onward && siteKind(net, onward.c) === 'road',

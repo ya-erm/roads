@@ -14,7 +14,9 @@
  *   Стройка так идёт от подъезда внутрь проекта; участок без подъезда ждёт, пока до него дорастёт соседний. Подъезда
  *   нет ни у одного узла проекта — бригады к нему не едут (site — null), проект ждёт: примыкает к другому строящемуся
  *   проекту с подъездом — «⏳ после соседнего» (ProjectInfo.waits), иначе «🚚 нет подъезда» на плашке, в карточке и
- *   у советника. Участок проходят трижды: земляные работы, покрытие, разметка (CONSTRUCTION.stages).
+ *   у советника. Участок проходят трижды: земляные работы, покрытие, разметка (CONSTRUCTION.stages) — у каждого
+ *   этапа свой ход (CorridorBuild.stages): этап идёт, пока его машина на месте; покрытие — не ближе convoyGap к
+ *   отсыпке, разметка — к покрытию; участок готов, когда до конца дошла разметка (constructionWork.advanceStages).
  * - Строят бригады (crews.ts): проект идёт, пока на нём работает хоть одна; темп — сумма вкладов бригад (дальше от
  *   базы — медленнее). Проекты строятся одновременно, если бригад хватает.
  * - Пауза — проект стоит; отмена (Game.cancelProject) сносит недостроенное и возвращает заплаченное за него,
@@ -32,7 +34,7 @@ import { corridorLayer } from '../lanes/speedDisplay';
 import type { Corridor, LaneNet } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import { ROAD_CLASSES } from '../world/roadTypes';
-import { buildRate, crewCap, frontOf, paidFor, pickSite, stageSpans } from './constructionWork';
+import { advanceStages, buildRate, crewCap, frontOf, paidFor, pickSite, spansOf, stageSeconds, stageWork } from './constructionWork';
 import { type CrewLane, crewRows, fillet, laneRow, polyLength, polyProject, stageSlots } from './crewLane';
 import { type Brigade, type CrewSave, Crews, type Site } from './crews';
 import type { CrewStep } from './crewRoads';
@@ -181,6 +183,7 @@ export class Construction {
         : {}),
       lane: (id, cars, b) => self.crewLane(id, cars, b),
       slots: (b) => self.crewSlots(b),
+      stagger: (id, b) => self.stagger(id, b),
       park: (sim) => host.park(sim),
       onRoad: (node) => host.onRoad(node),
     });
@@ -189,7 +192,7 @@ export class Construction {
   /** Край работ проекта на участке c: точка и узел дороги, откуда участок заполняется. */
   private frontOn(c: Corridor): { pos: Vec; node: number } {
     const b = c.build!;
-    const f = frontOf(b.done, c.length).s;
+    const f = frontOf(spansOf(b, c.length), c.length).s;
     return {
       pos: c.lut.pointAt(b.fromB ? c.length - f : f),
       node: b.fromB ? c.b : c.a,
@@ -423,19 +426,9 @@ export class Construction {
     // Полоса дальше не идёт, а в конце — готовая дорога: колонна встаёт перед её перекрёстком (оттуда выедет в поток),
     // а не посреди площадки узла.
     const net = this.host.roads.net;
-    const tail = fromB ? c.a : c.b;
-    let cut = 0;
     const i = b.lane.legs.indexOf(leg);
     const next = b.lane.legs[i + 1];
-    if (!next) {
-      // Обрез полотна у перекрёстка (как у готовой дороги: там кончается её полоса) и пара метров запаса.
-      const node = net.node(tail);
-      const ends = net.ends(node);
-      const cuts = nodeCuts(net, node, ends);
-      ends.forEach((e, i) => {
-        if (e.corridor === c && (e.end === 'a') === (c.a === tail) && cuts[i] > 0) cut = Math.max(cut, cuts[i] + 2);
-      });
-    }
+    const cut = next ? 0 : this.tailCut(c, fromB);
     const ext = next ? Math.max(0, polyLength(b.lane.path) - (leg.at + c.length)) : 0;
     // Обычная дорога — не начатые этапы ждут на ней самой; мост и тоннель — позади начала.
     const ground = (id: number) => {
@@ -448,7 +441,42 @@ export class Construction {
       ext,
       extAhead: !!next && ground(next.corridor),
     };
-    return stageSlots(c.build.done, c.length, o).map((u) => leg.at + u);
+    return stageSlots(spansOf(c.build, c.length), c.length, o).map((u) => leg.at + u);
+  }
+
+  /**
+   * Полоса участка c (заполняется от fromB) кончается у готовой дороги — колонна встаёт перед её перекрёстком (оттуда
+   * выедет в поток), а не посреди площадки узла: на сколько метров раньше конца (обрез полотна у перекрёстка, как у
+   * готовой дороги, и пара метров запаса); 0 — не обрезано.
+   */
+  private tailCut(c: Corridor, fromB: boolean): number {
+    const net = this.host.roads.net;
+    const tail = fromB ? c.a : c.b;
+    const node = net.node(tail);
+    const ends = net.ends(node);
+    const cuts = nodeCuts(net, node, ends);
+    let cut = 0;
+    ends.forEach((e, i) => {
+      if (e.corridor === c && (e.end === 'a') === (c.a === tail) && cuts[i] > 0) cut = Math.max(cut, cuts[i] + 2);
+    });
+    return cut;
+  }
+
+  /**
+   * Машины бригады b могут сходить на стройку проекта id по одной, как доедут (Crews.board, CrewHost.stagger): её фронт
+   * — участок на земле, путь к нему входит в участок с начала заполнения (полосу можно построить от места одной
+   * машины), и места, где этапы ждут своего начала, — впереди начала заполнения: первой машине есть куда отъехать,
+   * пока остальные подъезжают. Иначе (мост, тоннель, короткий участок у готовой дороги) — колонна собирается целиком.
+   */
+  stagger(id: number, b: Brigade): boolean {
+    const f = this.frontFor(id, b);
+    const from = this.crews.startOf(b);
+    if (!f || from === null || corridorLayer(this.host.roads.net, f.c) !== 0) return false;
+    const r = this.routeTo(id, f.c, f.fromB, this.reachFrom(from));
+    if (!r || r.end !== (f.fromB ? f.c.b : f.c.a)) return false;
+    const L = f.c.length;
+    const y = stageSlots(spansOf(f.c.build, L), L, { end: Math.max(0, L - this.tailCut(f.c, f.fromB)), ahead: true });
+    return y[2] >= -1e-6;
   }
 
   /**
@@ -558,7 +586,7 @@ export class Construction {
     const busy = this.fronts(id);
     const list = this.corridorsOf(id).filter((k) => k === c || !busy.includes(k));
     const b = c.build!;
-    const f = b.done > 0 || !!b.fromB === fromB ? frontOf(b.done, c.length).s : 0;
+    const f = b.done > 0 || !!b.fromB === fromB ? frontOf(spansOf(b, c.length), c.length).s : 0;
     // Край работ — в s метрах от конца a.
     const s = fromB ? c.length - f : f;
     const far = new Map<number, number>();
@@ -725,15 +753,21 @@ export class Construction {
       // Участок кончился посреди такта — остаток времени идёт на следующий участок фронта (не больше нескольких за такт).
       for (let guard = 0; c && left > 1e-9 && guard < 8; guard++) {
         const b = c.build!;
+        const L = c.length;
         const crews = this.crews.working(p.id).filter((o) => o.front?.corridor === c!.id);
-        // Темп — по бригадам на месте у этого фронта: никого нет — фронт ждёт.
-        const crew = this.crews.rateOf(crews, this.frontOn(c).pos);
-        if (crew <= 0) break;
-        const { full } = this.price(net, c);
-        const rate = this.price(net, c).rate * crew;
-        const step = Math.min(Math.max(0, c.length - b.done), left * rate);
-        const done = b.done + step;
-        const cost = paidFor(full, done, c.length) - paidFor(full, b.done, c.length);
+        // Темп этапа — по бригадам этого фронта, чья машина этого этапа на месте (Crews.placed): первая доехавшая
+        // машина ведёт отсыпку, пока остальные в пути; никого нет — фронт ждёт.
+        const pos = this.frontOn(c).pos;
+        const placed = crews.map((o) => this.crews.placed(o));
+        const { full, rate } = this.price(net, c);
+        const speed = [0, 1, 2].map((k) => rate * this.crews.rateOf(crews.filter((_, i) => placed[i][k]), pos));
+        if (speed.every((v) => v <= 0)) break;
+        // Каждый этап — своим ходом (покрытие — не ближе convoyGap к отсыпке, разметка — к покрытию); готово и деньги —
+        // по долям этапов (stageWork): за метр — та же цена, за участок — та же сумма.
+        const moved = advanceStages(spansOf(b, L), L, speed, left);
+        const complete = moved.spans[2] >= L - 1e-6;
+        const done = complete ? L : Math.max(b.done, stageWork(moved.spans, L));
+        const cost = paidFor(full, done, L) - paidFor(full, b.done, L);
         // Сперва — из резерва проекта, остальное — из свободного бюджета (до кредитного предела: резерв его не обходит).
         const fromReserve = Math.min(cost, p.reserve ?? 0);
         const free = this.host.budget;
@@ -755,8 +789,8 @@ export class Construction {
           this.host.spend(cost);
           p.spent += cost;
         }
-        left -= step / rate;
-        if (done >= c.length - 1e-6) {
+        left -= moved.used;
+        if (complete) {
           // Следующий участок фронта — до открытия этого (пока он ещё «свой», continuation его не считает чужим).
           const next = this.continuation(p.id, c, !!b.fromB);
           delete c.build;
@@ -773,7 +807,7 @@ export class Construction {
             for (const o of crews) o.front = { corridor: next.c.id, fromB: next.fromB };
           } else for (const o of crews) delete o.front;
           c = next?.c ?? null;
-        } else c.build = { ...b, done };
+        } else c.build = { ...b, done, stages: moved.spans };
       }
     }
     // Бригады на месте — у нового края работ своего фронта (съехали с дороги у узла подъезда); проект достроен — у конца
@@ -816,11 +850,12 @@ export class Construction {
     for (const c of list) {
       const b = c.build!;
       const { full, rate } = this.price(net, c);
-      const sp = stageSpans(b.done, c.length);
+      const sp = spansOf(b, c.length);
       for (let i = 0; i < 3; i++) stages[i] += sp[i];
       length += c.length;
       ready += b.done;
-      seconds += (c.length - b.done) / (rate * k);
+      // Участок готов, когда разметка дошла до конца: каждый этап — не раньше, чем через convoyGap после предыдущего.
+      seconds += stageSeconds(sp, c.length, rate * k);
       left += full - paidFor(full, b.done, c.length);
       const m = c.lut.pointAt(c.length / 2);
       mid = { x: mid.x + m.x * c.length, y: mid.y + m.y * c.length };
@@ -1019,7 +1054,7 @@ export class Construction {
 /** Край работ на участке c, что заполняется от конца fromB (не начатый — у начала заполнения). */
 function frontPoint(c: Corridor, fromB: boolean): Vec {
   const b = c.build;
-  const f = b && b.done > 0 ? frontOf(b.done, c.length).s : 0;
+  const f = b && b.done > 0 ? frontOf(spansOf(b, c.length), c.length).s : 0;
   return c.lut.pointAt(fromB ? c.length - f : f);
 }
 

@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { dist, dot, scale, sub, type Vec } from '../core/vec';
 import { hitchOf } from '../sim/body';
 import type { WorldSettings } from '../world/settings';
-import { CREW_UNITS, lanePose, laneTrail } from './crewLane';
+import { convoyGap, spansOf, stageSpans } from './constructionWork';
+import { CREW_UNITS, laneCars, lanePose, laneTrail } from './crewLane';
 import type { Brigade } from './crews';
 import { Game } from './game';
 import { anchorOf, fieldSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
@@ -90,7 +91,7 @@ describe('Бригада: от подъезда к работе без скач�
     return { game, at, id, b };
   }
 
-  it('у подъезда машины встают друг за другом, съезжают на стройку на свои места и работают — без скачков, курсом вперёд; выезжают с готовой дороги так же', () => {
+  it('у подъезда машины сходят на стройку по одной, едут на свои места и работают — без скачков, курсом вперёд, не наезжая друг на друга; выезжают с готовой дороги так же', () => {
     const { game, id, b } = scene();
     let prev: (Pose | null)[] = poses(game, b);
     let maxStep = 0;
@@ -153,29 +154,106 @@ describe('Бригада: от подъезда к работе без скач�
     expect(worstSim).toBeGreaterThan(Math.cos((45 * Math.PI) / 180));
   });
 
-  it('доехавшие машины ждут у подъезда друг за другом, а не в одной точке; места на полосе совпадают с местами в колонне этапов', () => {
-    const { game, b } = scene();
+  it('машины не ждут друг друга у подъезда: первая сходит на стройку и ведёт отсыпку, вторая — покрытие за ней с отставанием, третья — разметку', () => {
+    const { game, id, b } = scene();
+    const crews = game.construction.crews;
     for (let t = 0; t < 120 && !b.lane; t += 0.1) runSeconds(game, 0.1);
     expect(b.lane).toBeDefined();
     const lane = b.lane!;
-    // Колонна собралась в потоке друг за другом: машины стояли на своих местах на полосе, от хвоста к голове.
-    expect(lane.from).toBeDefined();
-    const from = lane.from!;
-    expect(from[0] - from[1]).toBeGreaterThan(CREW_UNITS[0].length);
-    expect(from[1] - from[2]).toBeGreaterThan(CREW_UNITS[1].length);
-    // Головная собралась у начала участка (у стоп-линии перед перекрёстком), остальные — за ней на подъезде.
-    expect(Math.abs(from[0] - lane.legs[0].at)).toBeLessThan(8);
-    // Поехали — и встали на места в колонне этапов на той же полосе: доезжают и дальше идут вместе с ними.
-    let settled = false;
-    for (let t = 0; t < 30 && !settled; t += 0.1) {
-      runSeconds(game, 0.1);
-      const slots = game.construction.crewSlots(b);
-      settled = !!slots && game.construction.crews.carsAt(b).every((m, k) => Math.abs(m.s! - slots[k]) < 1e-6);
-    }
-    expect(settled).toBe(true);
+    // Сошла одна головная (у начала участка, у стоп-линии перед перекрёстком), остальные ещё едут в потоке.
+    expect(laneCars(lane)).toBe(1);
     expect(b.state).toBe('working');
+    expect(b.convoy?.cars.slice(1).every((c) => 'sim' in c)).toBe(true);
+    expect(Math.abs(lane.from![0] - lane.legs[0].at)).toBeLessThan(8);
+    const c = game.construction.current(id)!;
+    const L = c.length;
+    const gap = convoyGap(L);
+    let earthAlone = false;
+    let paveBehind = false;
+    let settled = false;
+    for (let t = 0; t < 60 && !settled; t += 0.1) {
+      runSeconds(game, 0.1);
+      const [e, p, m] = spansOf(c.build, L);
+      const placed = crews.placed(b);
+      // Этап, чья машина не на месте, стоит.
+      if (!placed[1]) expect(p).toBe(0);
+      if (!placed[2]) expect(m).toBe(0);
+      if (placed[0] && !placed[1] && e > 0) earthAlone = true;
+      // Покрытие — за отсыпкой, не ближе интервала колонны; разметка — так же за покрытием.
+      if (p > 0) {
+        expect(p).toBeLessThanOrEqual(e - gap + 1e-6);
+        paveBehind = true;
+      }
+      if (m > 0) expect(m).toBeLessThanOrEqual(p - gap + 1e-6);
+      // Колонна сошла целиком и машины на своих местах в колонне этапов той же полосы.
+      const slots = game.construction.crewSlots(b);
+      settled = !b.convoy && !!slots && m > 0 && crews.carsAt(b).every((x, k) => Math.abs(x.s! - slots[k]) < 1e-6);
+    }
+    expect(earthAlone).toBe(true);
+    expect(paveBehind).toBe(true);
+    expect(settled).toBe(true);
+    expect(laneCars(lane)).toBe(3);
+    // Сошедшие следом — на ту же полосу, друг за другом.
+    const from = lane.from!;
+    expect(lane.t![1]).toBeGreaterThan(lane.t![0]);
+    expect(lane.t![2]).toBeGreaterThan(lane.t![1]);
+    expect(Math.abs(from[1] - from[0])).toBeLessThan(8);
     // Колонна этапов — на оси участка: начало заполнения — на полосе у перекрёстка, к нему и съехали.
-    const c = game.construction.current(game.construction.list()[0].project.id)!;
-    expect(dist(lanePose(lane, lane.legs[0].at + 30).pos, c.lut.pointAt(c.build!.fromB ? c.length - 30 : 30))).toBeLessThan(0.5);
+    expect(dist(lanePose(lane, lane.legs[0].at + 30).pos, c.lut.pointAt(c.build!.fromB ? L - 30 : 30))).toBeLessThan(0.5);
+  });
+
+  it('деньги — те же: проект стоит столько, сколько стоил при заложении; сохранение, пока часть колонны в пути, открывается и достраивается', () => {
+    const { game, id, b } = scene();
+    const cost = game.construction.info(id)!.left;
+    let spent = 0;
+    const spend = game.spend.bind(game);
+    game.spend = (x: number, kind) => {
+      if (kind !== 'purchases') spent += x;
+      spend(x, kind);
+    };
+    // Головная уже ведёт отсыпку, остальные ещё в пути.
+    for (let t = 0; t < 120 && !(b.lane && crews(game).placed(b)[0] && b.convoy); t += 0.1) runSeconds(game, 0.1);
+    expect(b.convoy).toBeDefined();
+    const save = JSON.parse(JSON.stringify(game.toSave()));
+    // Этапы — в сохранении (у каждого свой ход).
+    const c = save.roads.corridors.find((k: { build?: { project: number } }) => k.build?.project === id);
+    expect(c.build.stages[0]).toBeGreaterThan(0);
+    expect(c.build.stages[1]).toBe(0);
+    const loaded = withoutCitizens(new Game(WORLD, save));
+    const twin = crews(loaded).brigades.get(b.id)!;
+    // Поток не сохраняется: машины, что ехали в нём, уже у подъезда — сошли на полосу следом за головной.
+    expect(laneCars(twin.lane!)).toBe(3);
+    for (let t = 0; t < 300 && loaded.construction.projects.has(id); t += 1) runSeconds(loaded, 1);
+    expect(loaded.construction.projects.has(id)).toBe(false);
+    for (let t = 0; t < 300 && game.construction.projects.has(id); t += 1) runSeconds(game, 1);
+    expect(game.construction.projects.has(id)).toBe(false);
+    expect(spent).toBe(cost);
+  });
+
+  it('старое сохранение (у участка одно done, этапов нет): этапы — колонной из него, стройка идёт дальше и стоит столько же', () => {
+    const { game, id } = scene();
+    const cost = game.construction.info(id)!.left;
+    for (let t = 0; t < 200 && !(game.construction.info(id)!.stages[2] > 0); t += 0.5) runSeconds(game, 0.5);
+    const save = JSON.parse(JSON.stringify(game.toSave()));
+    const c = save.roads.corridors.find((k: { build?: { project: number } }) => k.build?.project === id);
+    const done = c.build.done;
+    delete c.build.stages;
+    const loaded = withoutCitizens(new Game(WORLD, save));
+    const k = loaded.roads.net.corridors.get(c.id)!;
+    expect(spansOf(k.build, k.length)).toEqual(stageSpans(done, k.length));
+    const paid0 = loaded.construction.projects.get(id)!.spent;
+    let spent = 0;
+    const spend = loaded.spend.bind(loaded);
+    loaded.spend = (x: number, kind) => {
+      if (kind !== 'purchases') spent += x;
+      spend(x, kind);
+    };
+    runSeconds(loaded, 3);
+    expect(loaded.construction.info(id)!.done).toBeGreaterThan(game.construction.info(id)!.done - 1e-9);
+    for (let t = 0; t < 300 && loaded.construction.projects.has(id); t += 1) runSeconds(loaded, 1);
+    expect(loaded.construction.projects.has(id)).toBe(false);
+    expect(paid0 + spent).toBe(cost);
   });
 });
+
+const crews = (g: Game) => g.construction.crews;

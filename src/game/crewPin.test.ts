@@ -236,7 +236,8 @@ describe('Бригада, назначенная игроком, — в игре
     let pos = game.brigadeWhere(b.id)!.pos;
     let jump = 0;
     let three = false;
-    for (let t = 0; t < 240 && b.state !== 'working'; t += 0.2) {
+    // Пока часть колонны ещё в потоке (машины сходят на стройку по одной), сохранять рано: поток не сохраняется.
+    for (let t = 0; t < 240 && (b.state !== 'working' || b.convoy); t += 0.2) {
       runSeconds(game, 0.2);
       const now = game.brigadeWhere(b.id)!.pos;
       jump = Math.max(jump, dist(now, pos));

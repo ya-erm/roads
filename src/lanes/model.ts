@@ -61,8 +61,14 @@ export interface Corridor {
 /** Стройка полотна: номер проекта, готово метров от конца a (fromB — от конца b). */
 export interface CorridorBuild {
   project: number;
+  /** Сколько работы готово «в метрах» (0…length, как платится): сумма долей этапов по пройденному ими. */
   done: number;
   fromB?: boolean;
+  /**
+   * Докуда дошёл каждый этап (отсыпка, покрытие, разметка), метров от начала заполнения: у каждого этапа свой ход
+   * (src/game/constructionWork.ts, spansOf). Нет (старое сохранение, не начатый участок) — этапы колонной из done.
+   */
+  stages?: [number, number, number];
 }
 
 export type NodeKind = 'seam' | 'junction';

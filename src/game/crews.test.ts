@@ -324,7 +324,7 @@ describe('Бригады в игре: нет подъезда', () => {
     expect(closest).toBeGreaterThan(dist(farPos, deadPos) - dist(info.front!, deadPos) - 50);
   });
 
-  it('сохранение посреди поездки вдоль стройки: после загрузки — там же, и дальше всё одинаково', () => {
+  it('сохранение, пока вторая бригада едет по стройке к ушедшему вперёд краю: после загрузки — там же, и дальше всё одинаково', () => {
     const game = withoutCitizens(new Game(WORLD));
     const at = field(game, 900);
     expect(road(game, { free: at }, { free: { x: at.x + 300, y: at.y } })).toBe(true);
@@ -333,20 +333,23 @@ describe('Бригады в игре: нет подъезда', () => {
     expect(project(game, deadEnd, { x: at.x + 900, y: at.y })).toBe(true);
     const crews = game.construction.crews;
     const [first] = [...crews.brigades.values()];
-    // Работает первая — вторая (нанятая позже) поедет от узла вдоль стройки к ушедшему вперёд краю.
+    // Работает первая — вторая (нанятая позже) поедет от узла по своей полосе вдоль стройки к ушедшему вперёд краю.
     for (let t = 0; t < 60 && first.state !== 'working'; t += 0.1) runSeconds(game, 0.1);
     runSeconds(game, 20);
     expect(game.hireBrigade(first.base)).toBeNull();
     const second = [...crews.brigades.values()][1];
-    for (let t = 0; t < 60 && second.eta === undefined; t += 0.1) runSeconds(game, 0.1);
-    expect(second.trip).toBeDefined();
+    // Вся колонна сошла на стройку (поток не сохраняется), а машины ещё едут к своим местам.
+    for (let t = 0; t < 60 && (!second.lane || second.convoy); t += 0.1) runSeconds(game, 0.1);
+    expect(second.lane).toBeDefined();
+    expect(second.convoy).toBeUndefined();
     runSeconds(game, 0.3);
+    expect(crews.placed(second)).toEqual([false, false, false]);
     const loaded = withoutCitizens(new Game(WORLD, JSON.parse(JSON.stringify(game.toSave()))));
     const twin = loaded.construction.crews.brigades.get(second.id)!;
-    expect(loaded.construction.crews.walkAt(twin)).toEqual(crews.walkAt(second));
+    expect(loaded.construction.crews.carsAt(twin)).toEqual(crews.carsAt(second));
     expect(loaded.siteCrewLooks().map((v) => v.pos)).toEqual(game.siteCrewLooks().map((v) => v.pos));
-    expect(game.brigadeWhere(second.id)!.text).toContain('вдоль стройки');
-    // Вдоль стройки едет вся колонна — три машины (и три машины первой бригады работают у края, той же техникой);
+    expect(game.brigadeWhere(second.id)!.text).toContain('строит');
+    // По стройке едет вся колонна — три машины (и три машины первой бригады работают у края, той же техникой);
     // клик по любой — карточка её базы.
     const looks = game.siteCrewLooks();
     expect(looks.map((v) => v.body)).toEqual(['crewEarth', 'crewPave', 'crewMarks', 'crewEarth', 'crewPave', 'crewMarks']);

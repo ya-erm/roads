@@ -88,7 +88,9 @@ function crewAt(game: Game, pos: Vec, n = 1, gate: number | Vec = pos): BuildBas
 
 function untilWorking(game: Game, limit = 120): void {
   let t = 0;
-  while (t < limit && ![...game.construction.crews.brigades.values()].some((b) => b.state === 'working')) {
+  const crews = game.construction.crews;
+  // Машины сходят на стройку по одной — ждём, пока на своих местах все машины бригады (Crews.placed).
+  while (t < limit && ![...crews.brigades.values()].some((b) => crews.placed(b).every(Boolean))) {
     runSeconds(game, 0.1);
     t += 0.1;
   }
@@ -163,13 +165,15 @@ describe('Стройка: резерв денег на проект', () => {
       game.money = ECONOMY.creditLimit + game.reserved;
       const r0 = game.reserved;
       const m0 = game.money;
+      // Отсыпку головная машина начала, ещё пока подъезжали остальные: считаем готовое с этого места.
+      const d0 = game.construction.info(id)!.done;
       runSeconds(game, 10);
       const p = game.construction.projects.get(id)!;
-      return { game, p, paid: m0 - game.money, used: r0 - game.reserved, done: game.construction.info(id)!.done };
+      return { game, p, paid: m0 - game.money, used: r0 - game.reserved, done: game.construction.info(id)!.done - d0 };
     };
     const without = run(false);
     expect(without.p.stalled).toBeDefined();
-    expect(without.done).toBeLessThan(0.02);
+    expect(without.done).toBeLessThan(0.002);
     const withRes = run(true);
     expect(withRes.p.stalled).toBeUndefined();
     expect(withRes.done).toBeGreaterThan(0.1);
@@ -202,7 +206,8 @@ describe('Стройка: резерв денег на проект', () => {
     const b = withProject();
     b.game.reserveProject(b.id, true);
     untilWorking(b.game);
-    runSeconds(b.game, 600 / CONSTRUCTION.speed + 5);
+    // Участок готов, когда до конца дошла разметка — на два интервала колонны позади отсыпки.
+    runSeconds(b.game, (600 + 2 * CONSTRUCTION.convoyGap) / CONSTRUCTION.speed + 5);
     expect(b.game.construction.projects.size).toBe(0);
     expect(b.game.reserved).toBe(0);
   });

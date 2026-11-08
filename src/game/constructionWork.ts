@@ -4,7 +4,7 @@
  */
 import { CONSTRUCTION } from '../config';
 import type { Vec } from '../core/vec';
-import type { Corridor, LaneNet } from '../lanes/model';
+import type { Corridor, CorridorBuild, LaneNet } from '../lanes/model';
 
 /**
  * Сколько бригад встанет на проект с недостроенными полотнами cs: есть полотно в одну полосу (съезд, заезд,
@@ -52,12 +52,78 @@ export function convoyGap(L: number): number {
   return Math.min(CONSTRUCTION.convoyGap, L / 4);
 }
 
+/** Докуда дошёл каждый этап участка (отсыпка, покрытие, разметка): метров от начала заполнения. */
+export type Spans = [number, number, number];
+
+/**
+ * Этапы участка — у каждого свой ход (CorridorBuild.stages): каждый этап ведёт своя машина бригады, и этап, чья
+ * машина ещё не на месте, стоит, а остальные идут. Сохранение без stages (одно done) — этапы колонной из done
+ * (stageSpans). Нет стройки — ничего.
+ */
+export function spansOf(b: CorridorBuild | undefined, L: number): Spans {
+  if (!b) return [0, 0, 0];
+  const s = b.stages;
+  if (Array.isArray(s) && s.length === 3 && s.every((x) => Number.isFinite(x))) return s.map((x) => Math.max(0, Math.min(L, x))) as Spans;
+  return stageSpans(b.done, L);
+}
+
+/** Сколько работы готово «в метрах» (как платится, 0…L) при этапах spans: сумма долей этапов по пройденному ими. */
+export function stageWork(spans: readonly number[], L: number): number {
+  if (!(L > 0)) return 0;
+  // Все дошли до конца — ровно L (без хвоста от деления дробей).
+  if (spans.every((s) => s >= L - 1e-9)) return L;
+  const w = CONSTRUCTION.stages;
+  return Math.min(L, spans.reduce((sum, s, k) => sum + w[k] * Math.max(0, Math.min(L, s)), 0));
+}
+
+/**
+ * Докуда может дойти этап k (1 — покрытие, 2 — разметка) при предыдущем на prev: не ближе convoyGap к нему, пока тот не
+ * дошёл до конца участка; дошёл — до конца (разрыв в конце сходится к нулю).
+ */
+function stageCap(prev: number, L: number): number {
+  return prev >= L - 1e-9 ? L : Math.max(0, prev - convoyGap(L));
+}
+
+/**
+ * Этапы участка длиной L вперёд на dt секунд: этап k — со своим темпом speed[k] (м/с; 0 — его машины нет на месте),
+ * покрытие — не ближе convoyGap к отсыпке, разметка — так же к покрытию (stageCap); назад этап не идёт. used — сколько
+ * из dt этапы шли (меньше dt — участок дошёл до конца раньше: остаток времени — следующему участку).
+ */
+export function advanceStages(spans: readonly number[], L: number, speed: readonly number[], dt: number): { spans: Spans; used: number } {
+  const out: Spans = [0, 0, 0];
+  let used = 0;
+  for (let k = 0; k < 3; k++) {
+    const s = Math.max(0, Math.min(L, spans[k] ?? 0));
+    const v = Math.max(0, speed[k] ?? 0);
+    const cap = k === 0 ? L : stageCap(out[k - 1], L);
+    out[k] = Math.max(s, Math.min(cap, s + v * dt));
+    if (v > 0) used = Math.max(used, (out[k] - s) / v);
+  }
+  // Участок не кончился — время ушло целиком (этапы ждали друг друга или свою машину).
+  return { spans: out, used: out[2] >= L - 1e-9 ? Math.min(dt, used) : dt };
+}
+
+/**
+ * Сколько секунд ещё строить участок длиной L с этапами spans, если все машины на месте и каждый этап идёт v м/с:
+ * этап кончается не раньше, чем через convoyGap после предыдущего (stageCap), — по последнему, разметке.
+ */
+export function stageSeconds(spans: readonly number[], L: number, v: number): number {
+  if (!(v > 0)) return Infinity;
+  const g = convoyGap(L);
+  let t = 0;
+  for (let k = 0; k < 3; k++) {
+    const left = Math.max(0, L - (spans[k] ?? 0)) / v;
+    t = k > 0 && (spans[k - 1] ?? 0) < L - 1e-9 ? Math.max(t + Math.min(g, L - (spans[k] ?? 0)) / v, left) : Math.max(t, left);
+  }
+  return t;
+}
+
 /**
  * Этапы участка (CONSTRUCTION.stages) идут колонной: впереди земляные работы, за ними на convoyGap — покрытие, за ним
  * так же — разметка и знаки; этап, которому впереди уже некого ждать (предыдущий дошёл до конца), догоняет до конца.
  * Голова колонны x: этап k — на x − k·gap (в пределах участка), работа — сумма долей этапов по пройденному ими.
  * done — сколько работы готово «в метрах» (0…L, как платится); ответ — докуда (метров от начала заполнения) дошёл
- * каждый этап.
+ * каждый этап. Так этапы выводятся из одного done в сохранениях, где своего хода у этапов ещё не было (spansOf).
  */
 export function stageSpans(done: number, L: number): [number, number, number] {
   if (!(L > 0) || done <= 0) return [0, 0, 0];
@@ -157,10 +223,10 @@ export function stageLayout(
 
 /**
  * Край работ на участке — голова колонны: метров от начала заполнения и её этап (0 — земля, 1 — покрытие, 2 — разметка;
- * этап, дошедший до конца, головой уже не считается).
+ * этап, дошедший до конца, головой уже не считается). at — этапы (spansOf) или, по-старому, одно done (stageSpans).
  */
-export function frontOf(done: number, L: number): { s: number; stage: 0 | 1 | 2 } {
-  const [earth, pave, marks] = stageSpans(done, L);
+export function frontOf(at: number | readonly number[], L: number): { s: number; stage: 0 | 1 | 2 } {
+  const [earth, pave, marks] = typeof at === 'number' ? stageSpans(at, L) : at;
   if (earth < L - 1e-6) return { s: earth, stage: 0 };
   if (pave < L - 1e-6) return { s: pave, stage: 1 };
   return { s: marks, stage: 2 };
@@ -187,7 +253,7 @@ export function carryBuild(from: LaneNet, to: LaneNet): void {
       delete c.build;
       to.touch(c);
     } else if (o.build.project === c.build.project && o.build.done > c.build.done) {
-      c.build = { ...o.build, done: Math.min(c.length, o.build.done) };
+      c.build = { ...o.build, done: Math.min(c.length, o.build.done), ...(o.build.stages ? { stages: [...o.build.stages] as Spans } : {}) };
     }
   }
 }

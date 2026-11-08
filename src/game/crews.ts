@@ -1,10 +1,11 @@
 /**
  * Строительные базы и бригады (режим «Со строительством», шаг 2 — docs/CONSTRUCTION.md): проект строится, только
  * пока на нём работает бригада (самосвал, грейдер, каток). Бригада приписана к базе; свободная едет с базы к стройке
- * только по готовым дорогам — колонной из трёх машин (самосвал, грейдер, каток; Convoy) в общем потоке (стоят в
- * пробках, выезжают по одной, доехавшие ждут остальных) — до узла проекта, куда есть подъезд (Site.node), а от него до
- * края работ — вдоль самой стройки, по отсыпке и полотну проекта, той же колонной (Host.path; машины видно на оси
- * проекта, carsAt). По полю бригады не ездят: к проекту, до которого не доехать по дорогам ни от одной базы, бригада
+ * только по готовым дорогам — колонной из трёх машин (отсыпка, покрытие, разметка; Convoy) в общем потоке (стоят в
+ * пробках, выезжают по одной) — до узла проекта, куда есть подъезд (Site.node), а от него до края работ — по своей
+ * полосе вдоль самой стройки (crewLane.ts; машины видно на оси проекта, carsAt). К участку на земле машины сходят на
+ * стройку по одной, как доедут (boarding, board), и каждая берётся за свой этап, доехав до своего места (placed); у
+ * моста и тоннеля доехавшие ждут остальных и сходят разом. По полю бригады не ездят: к проекту, до которого не доехать по дорогам ни от одной базы, бригада
  * не едет — проект ждёт подъезда (Construction.site — null). Проект закончили, отменили или поставили на паузу —
  * бригада едет вдоль стройки назад к дороге и дальше к другому проекту, которому не хватает рук, или домой на базу.
  * Направление полос для техники — не преграда (Host.step, crewRoads.ts): где по правилам не доехать (конец проекта у
@@ -21,7 +22,7 @@
  * а назначение закреплено (Brigade.pinned) — reinforce и trim её не трогают, пока проект не кончится, не встанет на
  * паузу или игрок не снимет закрепление (unpin, «↺ Авто»). Предел бригад на проект (cap) соблюдается и тут.
  *
- * Темп проекта — сумма вкладов бригад на нём: 1 / (1 + d / reach), d — от базы бригады до края работ (возит грунт
+ * Темп этапа — сумма вкладов бригад, чья машина этого этапа на месте (placed): 1 / (1 + d / reach), d — от базы бригады до края работ (возит грунт
  * и асфальт); бригад на проекте — не больше brigade.perProject, на узком (полотно в одну полосу: съезд, заезд) — не
  * больше brigade.perNarrow (cap, constructionWork.crewCap; лишние отпускаются — trim). Содержание бригад — каждый
  * месяц (Game.monthEnd).
@@ -31,7 +32,7 @@
 import { CONSTRUCTION } from '../config';
 import { dist, type Vec } from '../core/vec';
 import type { BuildBase } from '../world/entities';
-import { CREW_CARS, type CrewLane, crewSpacing, laneArcs, lanePose, polyAt } from './crewLane';
+import { CREW_CARS, type CrewLane, crewSpacing, laneArcs, laneCarPose, laneCars, laneEntry, polyAt } from './crewLane';
 
 export type BrigadeState = 'idle' | 'going' | 'working' | 'back';
 
@@ -177,6 +178,12 @@ export interface CrewHost {
    * null — полоса не идёт по этому участку (участок сменился — бригаде туда своим ходом, relocate).
    */
   slots?(brigade: Brigade): number[] | null;
+  /**
+   * Машины бригады, доехав до узла подъезда, могут сходить на стройку по одной, не дожидаясь остальных (Crews.board):
+   * участок у подъезда — на земле, и места этапов — впереди начала заполнения (там, где их ждут, хватает места всей
+   * колонне). Нет или false — колонна собирается у подъезда целиком, как раньше.
+   */
+  stagger?(project: number, brigade: Brigade): boolean;
   /** Машина бригады больше не нужна (бригаду продали, база снесена). */
   park(sim: number): void;
   /** Узел есть в графе движения (туда можно доехать по дороге). */
@@ -324,7 +331,14 @@ export class Crews {
     const out: { car: number; pos: Vec; dir: Vec; s?: number }[] = [];
     const slots = b.lane && b.state !== 'back' ? this.host.slots?.(b) : null;
     if (b.lane && slots) {
-      laneArcs(b.lane, slots, this.host.time).forEach((s, i) => out.push({ car: i, ...lanePose(b.lane!, s), s }));
+      // На полосе — первые n машин (сошли по одной, board); остальные ещё в потоке или ждут у подъезда своей очереди.
+      const n = laneCars(b.lane);
+      laneArcs(b.lane, slots, this.host.time)
+        .slice(0, n)
+        .forEach((s, i) => out.push({ car: i, ...laneCarPose(b.lane!, i, s), s }));
+      b.convoy?.cars.forEach((c, i) => {
+        if (i >= n && 'at' in c && !c.home) out.push({ car: i, pos: c.at, dir: c.dir });
+      });
       return out;
     }
     if (b.eta !== undefined && b.trip) {
@@ -346,7 +360,22 @@ export class Crews {
   /** Бригада на своей полосе: запомнить, где сейчас её машины (spots — отсюда они выедут в поток). */
   keepSpots(b: Brigade): void {
     const cars = this.carsAt(b);
-    if (cars.length === CONVOY_CARS && cars[0].s !== undefined) b.spots = cars.map((m) => ({ pos: { ...m.pos }, dir: { ...m.dir } }));
+    if (cars.length === CONVOY_CARS && cars.every((m) => m.s !== undefined)) b.spots = cars.map((m) => ({ pos: { ...m.pos }, dir: { ...m.dir } }));
+  }
+
+  /**
+   * Чьи машины бригады b на месте работ — по этапам (отсыпка, покрытие, разметка): машина этапа сошла на полосу и
+   * доехала до своего места в колонне этапов (Host.slots). Темп этапа — только от бригад, чья машина этого этапа на
+   * месте (Construction.advance): первая машина начинает отсыпку, не дожидаясь остальных. Бригада не на работе — ничья;
+   * без полосы (старое сохранение, проверки без игры) или участок не на её полосе — все на месте, как раньше.
+   */
+  placed(b: Brigade): [boolean, boolean, boolean] {
+    if (b.state !== 'working') return [false, false, false];
+    const slots = b.lane ? this.host.slots?.(b) : null;
+    if (!b.lane || !slots) return [true, true, true];
+    const n = laneCars(b.lane);
+    const s = laneArcs(b.lane, slots, this.host.time);
+    return [0, 1, 2].map((k) => k < n && s[k] >= slots[k] - 0.5) as [boolean, boolean, boolean];
   }
 
   /** Сколько бригад едут к проекту или работают на нём. */
@@ -512,7 +541,8 @@ export class Crews {
       while (this.assigned(id).length < per) {
         let best: { b: Brigade; n: number; d: number } | null = null;
         for (const b of this.brigades.values()) {
-          if (b.state !== 'working' || b.project === undefined || b.pinned || prio(b.project)) continue;
+          // Часть колонны ещё в пути (сходят на стройку по одной) — её машины в потоке не трогаем.
+          if (b.state !== 'working' || b.convoy || b.project === undefined || b.pinned || prio(b.project)) continue;
           // К какому фронту приоритетного она поедет (доедет ли туда по дорогам).
           const s = this.host.site(id, b);
           if (!s || !this.canReach(b, s.node)) continue;
@@ -539,6 +569,8 @@ export class Crews {
     const path = s && this.host.path(b.project, b);
     if (!s || !path) return null;
     b.at = s.node;
+    // Часть колонны ещё ехала к стройке (сходят по одной) — назад едет вся колонна вдоль стройки.
+    this.parkAll(b);
     this.offSite(b);
     return { path: [...path].reverse(), node: s.node };
   }
@@ -663,8 +695,58 @@ export class Crews {
       this.host.claim?.(b.project, b);
       this.makeLane(b, b.project);
     }
-    if (b.project !== undefined && this.walk(b, this.host.path(b.project, b))) return;
+    // По своей полосе машины едут к своим местам сами (carsAt) и берутся за свой этап, как доехали (placed) — бригада
+    // сразу на работе; без полосы — колонной вдоль стройки к краю работ, там и за работу.
+    if (!b.lane && b.project !== undefined && this.walk(b, this.host.path(b.project, b))) return;
     this.work(b, s);
+  }
+
+  /**
+   * Машины колонны едут к стройке и сходят на неё по одной (Host.stagger): машина, доехавшая до узла подъезда node,
+   * не ждёт остальных. Та, что уже сошла, на полосе бригады — дальше сама; что ещё в пути — доедут и сойдут следом.
+   */
+  boarding(b: Brigade, node: number): boolean {
+    if (b.project === undefined || !b.convoy || b.convoy.to !== node) return false;
+    if (b.state === 'working') return !!b.lane && laneCars(b.lane) < CONVOY_CARS;
+    if (b.state !== 'going' || b.lane || !this.host.lane || !this.host.stagger?.(b.project, b)) return false;
+    return this.host.site(b.project, b)?.node === node;
+  }
+
+  /**
+   * Доехавшие до подъезда машины (стоят там, 'at') — на полосу бригады по порядку колонны, пока впереди никого не
+   * ждут: первая строит полосу от места, где сошла с дороги (Host.lane), — бригада на работе, а её машина едет к своему
+   * месту и начинает свой этап; следующие сходят на ту же полосу (laneEntry) со своих мест. На полосе все — колонна
+   * больше не в пути. false — полосу не построить: колонна собирается у подъезда целиком, как раньше.
+   */
+  private board(b: Brigade): boolean {
+    const cv = b.convoy;
+    if (!cv || b.project === undefined) return false;
+    let n = b.lane ? laneCars(b.lane) : 0;
+    while (n < CONVOY_CARS) {
+      const car = cv.cars[n];
+      if (!car || !('at' in car)) break;
+      if (!b.lane) {
+        const s = this.host.site(b.project, b);
+        if (!s) return false;
+        b.at = s.node;
+        this.host.claim?.(b.project, b);
+        const lane = this.host.lane?.(b.project, [{ pos: car.at, dir: car.dir }], b) ?? null;
+        if (!lane) return false;
+        b.lane = lane;
+        b.state = 'working';
+        b.pos = { ...s.pos };
+      } else {
+        const lane = b.lane;
+        const e = laneEntry(lane, car.at);
+        const t0 = lane.t0 ?? this.host.time;
+        lane.from = [...(lane.from ?? []), e.s];
+        lane.t = [...(lane.t ?? lane.from.slice(0, -1).map(() => t0)), this.host.time];
+        if (Math.abs(e.side) > 0.05 || lane.side) lane.side = [...(lane.side ?? lane.from.slice(0, -1).map(() => 0)), Math.abs(e.side) > 0.05 ? e.side : 0];
+      }
+      n++;
+    }
+    if (n >= CONVOY_CARS) delete b.convoy;
+    return true;
   }
 
   /** За работу у края: стоит там, съехала с дороги у узла подъезда. */
@@ -786,7 +868,11 @@ export class Crews {
       const i = cv.cars.findIndex((c) => 'sim' in c && c.sim === sim);
       // Домой: доехавшая до ворот машина уже на базе — её не видно (не стоит у ворот на других).
       const home = b.state === 'back' && !!base && at.node === base.nodeId;
+      // К стройке по одной (boarding): доехавшая машина сходит на полосу бригады, как только впереди по колонне все
+      // уже там, и едет к своему месту — остальных не ждёт.
+      const one = !home && i >= 0 && this.boarding(b, at.node);
       if (i >= 0) cv.cars[i] = { at: { ...at.pos }, dir: { ...(at.dir ?? { x: 1, y: 0 }) }, ...(home ? { home: true as const } : {}) };
+      if (one && this.board(b)) return;
       if (cv.cars.some((c) => !('at' in c))) return;
       // Собрались: дальше машины едут оттуда, где встали (по стройке — по полосе бригады, по дорогам — с мест).
       if (!home && cv.cars.length === CONVOY_CARS) b.spots = cv.cars.map((c) => ('at' in c ? { pos: { ...c.at }, dir: { ...c.dir } } : { pos: { ...at.pos }, dir: { x: 1, y: 0 } }));
@@ -952,6 +1038,8 @@ function copyLane(l: CrewLane): CrewLane {
     legs: l.legs.map((g) => ({ ...g })),
     ...(l.from ? { from: [...l.from] } : {}),
     ...(l.t0 !== undefined ? { t0: l.t0 } : {}),
+    ...(l.t ? { t: [...l.t] } : {}),
+    ...(l.side ? { side: [...l.side] } : {}),
     ...(l.shifts?.length ? { shifts: l.shifts.map((sh) => ({ at: sh.at, to: sh.to })) } : {}),
   };
 }
@@ -973,6 +1061,19 @@ function legacyBrigade(b: Brigade): Brigade {
   // Полоса — только у бригады на стройке и целая (старое сохранение без неё — построится заново, work).
   if (b.lane && (!Array.isArray(b.lane.path) || !Array.isArray(b.lane.legs) || (b.state !== 'going' && b.state !== 'working'))) delete b.lane;
   if (b.lane) b.lane = copyLane(b.lane);
+  // Часть колонны ещё ехала к стройке (поток не сохраняется) — эти машины уже у подъезда: сходят на полосу каждая
+  // следом за предыдущей, на её длину с зазором позади, и едут к своим местам вместе с ней.
+  const lane = b.lane;
+  if (lane?.from && lane.from.length < CONVOY_CARS && b.state === 'working') {
+    const t0 = lane.t0 ?? 0;
+    const t = lane.t ?? lane.from.map(() => t0);
+    for (let k = lane.from.length; k < CONVOY_CARS; k++) {
+      lane.from.push((lane.from[k - 1] ?? 0) - crewSpacing(k - 1));
+      t.push(t[k - 1] ?? t0);
+      lane.side?.push(0);
+    }
+    lane.t = t;
+  }
   delete b.spots;
   // Фронт — только у бригады при проекте (старые сохранения без него — выберет сама, Construction.claim).
   if (b.front && (typeof b.front.corridor !== 'number' || (b.state !== 'going' && b.state !== 'working'))) delete b.front;

@@ -11,7 +11,7 @@ import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import { edgesAt } from '../lanes/geometry';
 import type { Corridor } from '../lanes/model';
 import { ROAD_MARGIN } from '../world/roadTypes';
-import { frontOf, stageSpans } from './constructionWork';
+import { frontOf, spansOf, stageSpans } from './constructionWork';
 
 /**
  * Машины бригады, от головной, — они же техника этапов на стройке (одна и та же машина в потоке, вдоль стройки и на
@@ -68,9 +68,20 @@ export interface LaneShift {
 export interface CrewLane {
   path: Vec[];
   legs: LaneLeg[];
-  /** Откуда (м от начала полосы) машины колонны тронулись к своим местам и когда (секунды игры); нет — уже на местах. */
+  /**
+   * Откуда (м от начала полосы) машины колонны тронулись к своим местам и когда (секунды игры); нет — уже на местах.
+   * Короче колонны — на полосе пока только первые машины (сходят со дороги по одной, по порядку, как доехали:
+   * Crews.board); остальные ещё в пути.
+   */
   from?: number[];
   t0?: number;
+  /** Когда тронулась каждая машина (по номеру; нет — все в t0). */
+  t?: number[];
+  /**
+   * На сколько машина стояла вбок от линии полосы, когда сошла на неё (вправо по ходу, м; по номеру): за ROW_RAMP
+   * метров пути она плавно выходит на полосу (laneCarPose). Нет — стояла на ней.
+   */
+  side?: number[];
   /** Перестроения в ряды по порядку (laneShift); нет — по оси полосы. */
   shifts?: LaneShift[];
 }
@@ -215,11 +226,12 @@ export interface SlotOptions {
  * отсыпка — так они не стоят на готовой дороге, по которой приехали, и не мешают её движению), у моста и тоннеля —
  * позади начала (не на недостроенном пролёте и не в непрорытом тоннеле); трогаются, когда край их догонит. Догоняющий
  * не наезжает на кончившего: если на следующем участке ждут на нём самом (ext, extAhead), кончивший уступает — едет
- * вперёд к своему месту ожидания там; иначе догоняющий встаёт за ним. Всё непрерывно по done: машина нигде не прыгает и
- * не едет назад, а места у конца участка совпадают с местами ожидания у начала следующего.
+ * вперёд к своему месту ожидания там; иначе догоняющий встаёт за ним. Всё непрерывно по ходу этапов (at — этапы,
+ * spansOf, или по-старому одно done): машина нигде не прыгает и не едет назад, а места у конца участка совпадают с
+ * местами ожидания у начала следующего.
  */
-export function stageSlots(done: number, L: number, o: SlotOptions = {}): [number, number, number] {
-  const f = stageSpans(done, L);
+export function stageSlots(at: number | readonly number[], L: number, o: SlotOptions = {}): [number, number, number] {
+  const f = typeof at === 'number' ? stageSpans(at, L) : at;
   const sp = [crewSpacing(0), crewSpacing(1)];
   const wait = o.ahead ? [sp[0] + sp[1], sp[1], 0] : [0, -sp[0], -sp[0] - sp[1]];
   const push = (o.ext ?? 0) > 0 && !!o.extAhead;
@@ -245,7 +257,7 @@ export function crewRows(c: Corridor, n: number): number[] {
   if (n <= 1) return [0];
   const b = c.build;
   const L = c.length;
-  const f = b ? frontOf(b.done, L).s : 0;
+  const f = b ? frontOf(spansOf(b, L), L).s : 0;
   const s = Math.max(0, Math.min(L, b?.fromB ? L - f : f));
   const e = edgesAt(c, s) ?? [-3.5, 3.5];
   // При ходе от конца b «вправо по ходу» — влево по оси полотна: ряды — зеркально.
@@ -281,32 +293,74 @@ export function lanePose(lane: CrewLane, s: number): { pos: Vec; dir: Vec } {
  * сцепки (tail) от шарнира, а шарнир — прямо позади носа (как рисует vehicleArt). Так вторая часть на повороте идёт по
  * следу передней и не выступает назад на следующую машину. s — нос машины на полосе; nose и dir — его точка и курс.
  */
-export function laneTrail(lane: CrewLane, s: number, nose: Vec, dir: Vec, joint: number, tail: number): Vec {
+export function laneTrail(lane: CrewLane, s: number, nose: Vec, dir: Vec, joint: number, tail: number, car?: number): Vec {
   const j = sub(nose, scale(dir, joint));
+  const pose = (u: number) => (car === undefined ? lanePose(lane, u) : laneCarPose(lane, car, u));
   // Ближе к шарниру — короче; дальше назад по полосе — длиннее: половинным делением.
   let lo = s - joint - tail - 20;
   let hi = s - joint;
   for (let i = 0; i < 24; i++) {
     const mid = (lo + hi) / 2;
-    if (dist(lanePose(lane, mid).pos, j) > tail) lo = mid;
+    if (dist(pose(mid).pos, j) > tail) lo = mid;
     else hi = mid;
   }
-  return lanePose(lane, (lo + hi) / 2).pos;
+  return pose((lo + hi) / 2).pos;
+}
+
+/**
+ * Машина car на полосе в s метрах от начала: как lanePose, но сошедшая на полосу вбок от её линии (CrewLane.side) —
+ * плавно выходит на неё за ROW_RAMP метров пути от места, где сошла (курс — по касательной этого выхода).
+ */
+export function laneCarPose(lane: CrewLane, car: number, s: number): { pos: Vec; dir: Vec } {
+  const at = lanePose(lane, s);
+  const off = lane.side?.[car] ?? 0;
+  const s0 = lane.from?.[car];
+  if (Math.abs(off) < 1e-6 || s0 === undefined) return at;
+  const u = (s - s0) / ROW_RAMP;
+  if (u >= 1) return at;
+  const lat = off * (1 - smoothstep(u));
+  const slope = u > 0 ? (-off * 6 * u * (1 - u)) / ROW_RAMP : 0;
+  const n = rightNormal(at.dir);
+  const d = add(at.dir, scale(n, slope));
+  const l = Math.hypot(d.x, d.y);
+  return { pos: add(at.pos, scale(n, lat)), dir: { x: d.x / l, y: d.y / l } };
+}
+
+/**
+ * Где машина, стоящая в p (курс d), сходит на полосу: место на ней (м от начала; позади начала — меньше 0, по
+ * продолжению первого отрезка назад) и сдвиг вбок от её линии (вправо по ходу).
+ */
+export function laneEntry(lane: CrewLane, p: Vec): { s: number; side: number } {
+  let s = polyProject(lane.path, p);
+  if (s < 1e-6 && lane.path.length > 1) {
+    const a = lane.path[0];
+    const t = sub(lane.path[1], a);
+    const l = Math.hypot(t.x, t.y);
+    if (l > 1e-9) s = Math.min(0, dot(sub(p, a), t) / l);
+  }
+  const at = lanePose(lane, s);
+  return { s, side: dot(sub(p, at.pos), rightNormal(at.dir)) };
 }
 
 /**
  * Где на полосе (м от начала) машины колонны: идут от мест from со скоростью LANE_SPEED к целям target (местам
- * этапов), не дальше цели и не назад. Нет from — уже на местах.
+ * этапов), не дальше цели и не назад; каждая — со своего времени (CrewLane.t). Нет from — уже на местах; машины, что
+ * ещё не сошли на полосу (from короче), — сразу у цели (их на полосе не видно — Crews.carsAt).
  */
 export function laneArcs(lane: CrewLane, target: readonly number[], time: number): number[] {
   const from = lane.from;
   const t0 = lane.t0;
   if (!from || t0 === undefined) return [...target];
-  const go = Math.max(0, time - t0) * LANE_SPEED;
   return target.map((x, k) => {
     const s0 = from[k] ?? x;
+    const go = Math.max(0, time - (lane.t?.[k] ?? t0)) * LANE_SPEED;
     return Math.min(s0 + go, Math.max(x, s0));
   });
+}
+
+/** Сколько машин колонны уже на полосе (сошли с дороги по порядку): from короче колонны — только первые. */
+export function laneCars(lane: CrewLane): number {
+  return lane.from ? Math.min(lane.from.length, CREW_CARS) : CREW_CARS;
 }
 
 /** Колонна уже на местах: все машины доехали до целей. */

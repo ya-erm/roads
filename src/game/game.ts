@@ -69,7 +69,7 @@ import { Journal, JournalEntry } from './journal';
 import { paxFare, ridePath } from './fare';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
-import { carryBuild, stageSpans } from './constructionWork';
+import { carryBuild, spansOf } from './constructionWork';
 import type { Brigade } from './crews';
 import { CREW_UNITS, laneTrail } from './crewLane';
 import { type CrewStep, CrewRoads } from './crewRoads';
@@ -1426,7 +1426,8 @@ export class Game implements BuildContext {
     const against = b.trip?.to !== undefined;
     switch (b.state) {
       case 'working':
-        return { pos: site ?? b.pos ?? home, text: `строит ${label}` };
+        // Край работ; работы ещё не начаты (первая машина едет к своему месту) — там, куда она едет.
+        return { pos: info?.front ?? b.pos ?? site ?? home, text: `строит ${label}` };
       case 'going':
         if (car) return { pos: car, text: `едет по дороге строить ${label}` };
         if (walk && against) return { pos: walk.pos, text: `едет по дороге против движения (там регулировщик) строить ${label}` };
@@ -4509,6 +4510,10 @@ export class Game implements BuildContext {
    * (каждая стоит сразу за предыдущей) — колонна сходит с дороги разом: головная — сейчас, остальные — после шага
    * потока (gatherCrews), каждая там, где стоит; оттуда бригада поедет дальше по своей полосе. Домой на базу — сразу
    * за ворота. Ждёт дольше CREW_WAIT секунд (кто-то застрял) — не держит полосу: доезжает одна.
+   *
+   * К стройке, где машины сходят по одной (Crews.boarding: участок у подъезда на земле), колонну не собирают: машина
+   * сходит на стройку сразу, если все, кто впереди неё по колонне, уже сошли (первая — сразу), и едет к своему месту
+   * работ; обогнавшая предыдущую ждёт у конца пути, пока та сойдёт (не дольше CREW_WAIT).
    */
   private crewAssembled(id: number, sim: Vehicle): boolean {
     const crews = this.construction.crews;
@@ -4519,6 +4524,12 @@ export class Game implements BuildContext {
     if (b.state === 'back' && base && sim.targetNode === base.nodeId) return true;
     let since = this.crewWaitSince.get(sim.id);
     if (since === undefined) this.crewWaitSince.set(sim.id, (since = this.time));
+    if (crews.boarding(b, sim.targetNode)) {
+      const k = cv.cars.findIndex((c) => 'sim' in c && c.sim === sim.id);
+      if (cv.cars.slice(0, Math.max(0, k)).some((c) => !('at' in c)) && this.time - since < CREW_WAIT) return false;
+      this.crewWaitSince.delete(sim.id);
+      return true;
+    }
     const rest: Vehicle[] = [];
     let ok = true;
     for (const c of cv.cars) {
@@ -7063,7 +7074,7 @@ export class Game implements BuildContext {
       const c = front?.c ?? null;
       const fromB = !!front?.fromB;
       const leg = c?.build ? b.lane?.legs.find((g) => g.corridor === c.id && g.fromB === fromB) : undefined;
-      const spans = c?.build ? stageSpans(c.build.done, c.length) : null;
+      const spans = c?.build ? spansOf(c.build, c.length) : null;
       const going = !!p && !p.paused && p.stalled === undefined && b.state === 'working';
       const raised = !!c && Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
       for (const m of cars) {
@@ -7073,7 +7084,7 @@ export class Game implements BuildContext {
         const site = !!c && u !== null && u >= -0.5 && u <= c.length + 0.5;
         // Точка машины — её нос (кузов тянется назад, как у машин в потоке); вторая часть — по следу на полосе.
         let pos = m.pos;
-        let trail = h && b.lane && m.s !== undefined ? laneTrail(b.lane, m.s, m.pos, m.dir, h.joint * spec.length, h.tail * spec.length) : undefined;
+        let trail = h && b.lane && m.s !== undefined ? laneTrail(b.lane, m.s, m.pos, m.dir, h.joint * spec.length, h.tail * spec.length, m.car) : undefined;
         if (site && raised) {
           const lift = bridgeLook(deckAlong(net, c!, fromB ? c!.length - u! : u!)).lift;
           pos = add(pos, lift);

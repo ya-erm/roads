@@ -13,7 +13,7 @@
  * движущееся (техника, огоньки, хозяйство у портала) — в динамическом проходе кадра.
  */
 import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
-import { convoyGap, stageSpans } from '../game/constructionWork';
+import { convoyGap, spansOf } from '../game/constructionWork';
 import type { Corridor, LaneNet } from '../lanes/model';
 import { corridorLayer } from '../lanes/speedDisplay';
 import { type Portal, tunnelPortals } from '../lanes/tunnel';
@@ -210,7 +210,7 @@ export function workLights(c: Corridor): { pos: Vec; stage: 0 | 1 | 2 }[] {
   const b = c.build;
   if (!b) return [];
   const L = c.length;
-  return stageSpans(b.done, L).flatMap((f, k) => (f > 0 && f < L - 1e-6 ? [{ pos: c.lut.pointAt(b.fromB ? L - f : f), stage: k as 0 | 1 | 2 }] : []));
+  return spansOf(b, L).flatMap((f, k) => (f > 0 && f < L - 1e-6 ? [{ pos: c.lut.pointAt(b.fromB ? L - f : f), stage: k as 0 | 1 | 2 }] : []));
 }
 
 /**

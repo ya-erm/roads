@@ -1,5 +1,6 @@
 import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
+import { CONSTRUCTION } from '../config';
 import { LANE_W, RoadClass } from '../world/roadTypes';
 import { nodeDeck } from './deck';
 import { edgesAt, laneBand, pointOff } from './geometry';
@@ -172,9 +173,25 @@ export function splitBuild(b: CorridorBuild, L: number, s: number): [CorridorBui
   // Отсчёт от a: первый кусок получает готовое первым; от b — второй.
   const near = b.fromB ? rest : s;
   const far = b.fromB ? s : rest;
+  const mk = (done: number, stages?: [number, number, number]): CorridorBuild => ({
+    project: b.project,
+    done,
+    ...(b.fromB ? { fromB: true } : {}),
+    ...(stages ? { stages } : {}),
+  });
+  // У этапов свой ход (CorridorBuild.stages): каждый делится по месту разреза, готовое куска — по долям этапов (сумма
+  // кусков — то же, что было: заплаченное не теряется и не платится дважды).
+  if (b.stages) {
+    const s0 = b.stages.map((x) => Math.min(near, Math.max(0, x))) as [number, number, number];
+    const s1 = b.stages.map((x) => Math.min(far, Math.max(0, x - near))) as [number, number, number];
+    const w = CONSTRUCTION.stages;
+    const work = (st: number[], len: number) => (st.every((x) => x >= len - 1e-9) ? len : st.reduce((sum, x, k) => sum + w[k] * x, 0));
+    const nearDone = work(s0, near);
+    const farDone = Math.max(0, b.done - nearDone);
+    return b.fromB ? [mk(farDone, s1), mk(nearDone, s0)] : [mk(nearDone, s0), mk(farDone, s1)];
+  }
   const nearDone = Math.min(near, b.done);
   const farDone = Math.min(far, Math.max(0, b.done - near));
-  const mk = (done: number): CorridorBuild => (b.fromB ? { project: b.project, done, fromB: true } : { project: b.project, done });
   return b.fromB ? [mk(farDone), mk(nearDone)] : [mk(nearDone), mk(farDone)];
 }
 
