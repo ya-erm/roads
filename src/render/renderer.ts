@@ -37,7 +37,8 @@ import { type Box, grow, GROUND, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TI
 import { drawTurnArrows } from './turnArrows';
 import { baseBox, baseSig, buildingCorridors, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
-import { drawRailProjects, railProjectSig } from './railProjectArt';
+import { drawRailProjects, drawTrackMachines, railProjectSig } from './railProjectArt';
+import { WORK_TRAIN } from '../game/workTrains';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
 import { corridorHalf } from '../world/worldgen';
 import { openNet } from '../lanes/open';
@@ -1099,6 +1100,20 @@ export class Renderer {
       drawInSight(ctx, tunnelSight(net, v.pos, v.dir, v.length), draw);
     }
     for (const l of lights) drawWorkLights(ctx, l.site, game.time, l.working);
+    // Ж/д проекты: техника строительного поезда у краёв этапов (сам поезд — среди поездов, у края готового пути).
+    for (const info of list) {
+      const p = info.project;
+      const site = p.rail ? game.construction.trains?.site(p.id) : null;
+      const seg = site && game.net.segments.get(site.seg);
+      if (!site || !seg || !seenAt(seg.lut.pointAt(seg.length / 2), view, seg.length / 2 + 40)) continue;
+      const back = site.back !== null ? (game.net.segments.get(site.back) ?? null) : null;
+      drawTrackMachines(ctx, seg, site.spans, site.fromB, game.time, going && !p.paused && p.stalled === undefined, back, {
+        n: WORK_TRAIN.cars,
+        len: WORK_TRAIN.carLength,
+        color: WORK_TRAIN.color,
+        load: WORK_TRAIN.load,
+      });
+    }
     // Плашки над проектами — при любом зуме одного размера на экране (projectBadges: клик по плашке ищет её там же).
     for (const b of projectBadges(game, z, list)) {
       if (b.x < view.x0 - 200 || b.x > view.x1 + 200 || b.y < view.y0 - 200 || b.y > view.y1 + 200) continue;
@@ -2276,6 +2291,8 @@ export class Renderer {
   private trainCars(game: Game, view: ReturnType<Renderer['view']>): TrainCar[] {
     const out: TrainCar[] = [];
     for (const train of game.rail.trains.values()) {
+      // Строительный поезд на месте работ рисует стройка — за путеукладчиком (drawTrackMachines).
+      if (game.construction.trains?.drawnBySite(train.id)) continue;
       // Первый — локомотив, груз — в остальных, по порядку от головы; пассажиры — во всех вагонах поровну.
       const fills = trainWagonFills(train.fill ?? (train.load ? 1 : 0), train.cars - 1, train.kind);
       const cars = game.rail.cars(train);

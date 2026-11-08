@@ -60,6 +60,131 @@ function sleepers(ctx: CanvasRenderingContext2D, s: Segment, s0: number, s1: num
 }
 
 /**
+ * Строительный поезд на месте работ (workTrains.ts) на участке seg: у края балласта — думпкар с щебнем, у края шпал —
+ * шпалоукладчик со штабелем шпал, у края рельсов — путеукладочный кран с порталом, за ним по уложенному пути (и дальше
+ * по готовому пути back) — состав cars с локомотивом сзади. Нос — у своего края, корпус — позади по ходу заполнения
+ * (fromB — от конца b). working — стройка идёт: мигает маячок.
+ */
+export function drawTrackMachines(
+  ctx: CanvasRenderingContext2D,
+  seg: Segment,
+  spans: readonly number[],
+  fromB: boolean,
+  time: number,
+  working: boolean,
+  back: Segment | null = null,
+  cars: { n: number; len: number; color: string; load: string } | null = null,
+): void {
+  const L = seg.length;
+  const blink = working && Math.floor(time * 3) % 2 === 0;
+  const UNITS = [
+    { len: 11, body: '#7d756b', top: '#a59a8c' },
+    { len: 13, body: '#8a6440', top: '#6e4c2e' },
+    { len: 15, body: '#e2622c', top: '#f2b81d' },
+  ];
+  const start = fromB ? seg.b : seg.a;
+  /** Точка и курс (по ходу заполнения) в u метрах от начала участка: дальше назад — по готовому пути back. */
+  const at = (u: number): { p: Vec; d: Vec } => {
+    if (u >= 0 || !back) {
+      const x = Math.max(0, Math.min(L, u));
+      const s = fromB ? L - x : x;
+      const t = seg.lut.tangentAt(s);
+      return { p: seg.lut.pointAt(s), d: fromB ? { x: -t.x, y: -t.y } : t };
+    }
+    // По back от узла start назад: курс — к узлу.
+    const toStart = back.b === start;
+    const r = Math.min(back.length, -u);
+    const s = toStart ? back.length - r : r;
+    const t = back.lut.tangentAt(s);
+    return { p: back.lut.pointAt(s), d: toStart ? t : { x: -t.x, y: -t.y } };
+  };
+  ctx.save();
+  // Состав строительного поезда — за путеукладчиком по уложенному пути: вагоны со звеньями пути и балластом, локомотив
+  // сзади (толкает). Сам поезд в общем движении при этом не рисуется (WorkTrains.drawnBySite).
+  if (cars) {
+    const rails = Math.max(0, Math.min(L, spans[2] ?? 0));
+    for (let k = cars.n - 1; k >= 0; k--) {
+      const nose = rails - UNITS[2].len - 1 - k * cars.len;
+      const head = at(nose);
+      const tail = at(nose - cars.len + 1.6);
+      const mid = { x: (head.p.x + tail.p.x) / 2, y: (head.p.y + tail.p.y) / 2 };
+      const ang = Math.atan2(head.p.y - tail.p.y, head.p.x - tail.p.x);
+      const loco = k === cars.n - 1;
+      ctx.save();
+      ctx.translate(mid.x, mid.y);
+      ctx.rotate(ang);
+      const Lc = cars.len - 1.6;
+      ctx.fillStyle = loco ? cars.color : '#5f646b';
+      ctx.strokeStyle = '#2b2f35';
+      ctx.lineWidth = 0.35;
+      ctx.beginPath();
+      ctx.roundRect(-Lc / 2, -3.2, Lc, 6.4, 1.2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = loco ? '#f2b81d' : k % 2 ? cars.load : '#8a6440';
+      if (loco) ctx.fillRect(Lc / 2 - 3, -2.4, 2, 4.8);
+      else ctx.fillRect(-Lc / 2 + 1, -2.4, Lc - 2, 4.8);
+      ctx.restore();
+    }
+  }
+  // Сзади вперёд: кран (рельсы) — ближе всех к составу, впереди — шпалы, ещё дальше — балласт.
+  for (let k = 2; k >= 0; k--) {
+    const x = Math.max(0, Math.min(L, spans[k] ?? 0));
+    // Этап ещё не начат — его машина ждёт у начала участка.
+    if (x <= 0.5 && k < 2 && (spans[k + 1] ?? 0) <= 0.5) continue;
+    if (x >= L - 1e-6 && k === 2) continue;
+    const { p, d } = at(x);
+    const u = UNITS[k];
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(Math.atan2(d.y, d.x));
+    const W = 4.6;
+    ctx.fillStyle = u.body;
+    ctx.strokeStyle = '#3a2a1c';
+    ctx.lineWidth = 0.35;
+    ctx.beginPath();
+    ctx.roundRect(-u.len, -W / 2, u.len, W, 0.8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = u.top;
+    if (k === 0) {
+      // Думпкар: кузов с щебнем.
+      ctx.beginPath();
+      ctx.roundRect(-u.len + 1, -W * 0.36, u.len - 2, W * 0.72, 0.6);
+      ctx.fill();
+    } else if (k === 1) {
+      // Платформа со шпалами — поперечные бруски.
+      for (let i = 1; i < u.len - 1; i += 1.6) ctx.fillRect(-u.len + i, -W / 2 - 0.4, 0.9, W + 0.8);
+    } else {
+      // Путеукладчик: портал крана впереди и звено пути, которое он кладёт.
+      ctx.fillRect(-3, -W / 2 - 0.8, 1.2, W + 1.6);
+      ctx.fillRect(-u.len + 2, -0.5, u.len - 3, 1);
+      ctx.strokeStyle = '#4f5965';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(-2, -2.4);
+      ctx.lineTo(5, -2.4);
+      ctx.moveTo(-2, 2.4);
+      ctx.lineTo(5, 2.4);
+      ctx.stroke();
+    }
+    // Маячок на кабине.
+    ctx.fillStyle = blink ? '#ff7a1a' : '#b8682c';
+    ctx.beginPath();
+    ctx.arc(-1.6, 0, 0.8, 0, Math.PI * 2);
+    ctx.fill();
+    if (blink) {
+      ctx.fillStyle = 'rgba(255, 140, 40, 0.28)';
+      ctx.beginPath();
+      ctx.arc(-1.6, 0, 3.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/**
  * Строящиеся пути слоя level (0 — земля и тоннели, 1 — мосты, 2 — эстакады) из списка segs: чертёж и готовое по
  * этапам. zoom — масштаб камеры (шпалы — только вблизи, как у готовых путей).
  */

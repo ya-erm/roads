@@ -184,12 +184,42 @@ function building(game: Game, out: Advice[]): void {
  * издалека); нет подъезда; нет базы рядом (вне радиуса обслуживания всех баз) — и бригада работает дальше
  * CONSTRUCTION.reach от своей базы (метр там вдвое дольше; с радиусом обслуживания — обычно после ручной отправки).
  */
+/**
+ * Ж/д проекты без строительного поезда: нет вокзала или ни с одного не доехать по готовым путям до начала работ
+ * (WorkTrains.status) — стройка стоит. Ждёт соседний строящийся путь (ProjectInfo.waits) — очередь, не советуем.
+ */
+function railTrains(game: Game, out: Advice[]): void {
+  const trains = game.construction.trains;
+  if (!trains) return;
+  const name = (id: number) => game.stations.get(id)?.name ?? 'вокзал';
+  const stuck = game.construction
+    .list()
+    .filter((i) => i.project.rail && !i.project.paused && !i.waits)
+    .map((i) => ({ i, s: trains.status(i.project.id, name) }))
+    .filter((x) => x.s.bad);
+  if (!stuck.length) return;
+  const first = stuck[0];
+  const what = stuck.length === 1 ? `«${projectName(first.i.project)}»` : `${stuck.length} ${plural(stuck.length, 'проект', 'проекта', 'проектов')}`;
+  out.push({
+    key: 'buildNoTrain',
+    kind: 'buildNoAccess',
+    level: 'warn',
+    title: first.s.text === 'нет вокзала' ? 'Строительному поезду неоткуда выйти' : 'Строительному поезду не доехать',
+    detail: `${what}: ${first.s.tip}.`,
+    at: first.i.front ?? first.i.at,
+    count: stuck.length,
+  });
+}
+
 function crews(game: Game, out: Advice[]): void {
   const c = game.construction;
   const crews = c.crews;
+  // Ж/д проекты строят не бригады, а строительные поезда (workTrains.ts): им — свой совет, остальные — о дорогах.
+  railTrains(game, out);
+  const list = c.list().filter((i) => !i.project.rail);
   if (game.firstBase) {
     // Пока базы нет, строить некому: заложенные проекты ждут — тогда это уже предупреждение.
-    const waiting = c.list().length;
+    const waiting = list.length;
     out.push({
       key: 'noBase',
       kind: 'noBase',
@@ -201,7 +231,7 @@ function crews(game: Game, out: Advice[]): void {
   }
   // Нет подъезда: бригады по полю не ездят — проект ждёт дороги к себе или базы рядом (сразу, а не через idleWarn).
   // Ждёт соседний строящийся проект с подъездом (ProjectInfo.waits) — это очередь, а не беда: не советуем.
-  const blocked = crews.bases.size ? c.list().filter((i) => !i.project.paused && !i.access && !i.waits) : [];
+  const blocked = crews.bases.size ? list.filter((i) => !i.project.paused && !i.access && !i.waits) : [];
   if (blocked.length) {
     const first = blocked[0];
     const what = blocked.length === 1 ? `«${projectName(first.project)}»` : `${blocked.length} ${plural(blocked.length, 'проект', 'проекта', 'проектов')}`;
@@ -210,14 +240,14 @@ function crews(game: Game, out: Advice[]): void {
       kind: 'buildNoAccess',
       level: 'warn',
       title: 'Нет подъезда к стройке',
-      detail: `${what}: ни один конец не связан готовой дорогой с базой — бригадам не проехать, по полю они не ездят${first.project.rail ? ` (к ж/д пути — с дороги не дальше ${CONSTRUCTION.rail.access} м от его конца)` : ''}. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним.`,
+      detail: `${what}: ни один конец не связан готовой дорогой с базой — бригадам не проехать, по полю они не ездят. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним.`,
       at: first.front ?? first.at,
       count: blocked.length,
       fix: { kind: 'base' },
     });
   }
   // Нет базы рядом: подъезд есть, а стройка вне радиуса обслуживания всех баз — автоматика бригад туда не шлёт.
-  const far = crews.bases.size ? c.list().filter((i) => i.noBase) : [];
+  const far = crews.bases.size ? list.filter((i) => i.noBase) : [];
   if (far.length) {
     const first = far[0];
     const what = far.length === 1 ? `«${projectName(first.project)}»` : `${far.length} ${plural(far.length, 'проект', 'проекта', 'проектов')}`;
@@ -233,7 +263,7 @@ function crews(game: Game, out: Advice[]): void {
       fix: { kind: 'base' },
     });
   }
-  for (const i of c.list()) {
+  for (const i of list) {
     const p = i.project;
     if (p.paused || p.stalled !== undefined || i.done > 0 || game.time - p.created < CONSTRUCTION.idleWarn || crews.working(p.id).length) continue;
     // Нет подъезда или базы рядом — об этом свой совет (buildNoAccess, buildNoBase).

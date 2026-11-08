@@ -7,6 +7,7 @@ import { CONSTRUCTION } from '../config';
 import { durationText } from '../core/timeText';
 import { type ProjectInfo, projectName } from '../game/construction';
 import type { Game } from '../game/game';
+import type { WorkTrains } from '../game/workTrains';
 import { BUILD_MODES, type BuildMode } from '../world/settings';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -48,14 +49,17 @@ export function buildModeRowHtml(mode: BuildMode | undefined): string {
  * Плашка проекта: что (⬆ — приоритетный, 🔒 — с резервом), полоска готовности с процентом, сколько осталось, пауза,
  * отмена, к проекту и его карточке. crew — бригад на месте, based — база уже есть, selected — карточка открыта.
  */
-export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected = false): string {
+export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected = false, own: string | null = null): string {
   const p = i.project;
   const pct = Math.min(99, Math.floor(i.done * 100));
   const state = p.paused ? 'paused' : p.stalled !== undefined ? 'stalled' : '';
+  // own — своя подпись состояния (ж/д проект: строительный поезд, railRowHtml), кроме паузы и «нет денег».
   const status = p.paused
     ? `<span class="bp-state" data-tip="Проект на паузе — ничего не строится и не тратится">⏸</span>`
     : p.stalled !== undefined
       ? `<span class="bp-state bad" data-tip="Стройка стоит: не хватает денег. Нужно ещё ${money(i.left)}">💸</span>`
+      : own !== null
+        ? own
       : !based
         ? `<span class="bp-state" data-tip="Строить некому: поставьте строительную базу («＋ База») — первая бесплатно">🚚 нет базы</span>`
         : !i.access && i.waits
@@ -80,6 +84,30 @@ export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected 
     ${status}
     <span class="bp-bar" data-tip="Готово ${pct}% — участки от узла до узла открываются сразу"><i style="width:${pct}%"></i><b>${pct}%</b></span>
     ${pause}${cancel}</div>`;
+}
+
+/** Строительный поезд ж/д проекта id: что с ним (WorkTrains.status); не ж/д — null. */
+export function railTrainStatus(game: Game, id: number): ReturnType<WorkTrains['status']> | null {
+  const trains = game.construction.trains;
+  if (!trains || !game.construction.projects.get(id)?.rail) return null;
+  return trains.status(id, (st) => game.stations.get(st)?.name ?? 'вокзал');
+}
+
+/**
+ * Строка ж/д проекта: как у дороги (projectRowHtml), но вместо бригад — строительный поезд: «🚂 едет», «🚂 ⏳ 1:20»
+ * или почему стоит («⛔ нет пути к стройке», «⛔ нет вокзала»).
+ */
+export function railRowHtml(i: ProjectInfo, rail: { text: string; tip: string; bad: boolean; working: boolean }, selected = false): string {
+  // Своя подпись вместо бригадной: тот же ряд, те же кнопки.
+  const status =
+    !i.access && i.waits
+        ? `<span class="bp-state" data-tip="Начало — у соседнего строящегося пути: начнётся, когда тот дорастёт сюда">⏳ после соседнего</span>`
+        : rail.bad
+          ? `<span class="bp-state bad" data-tip="${esc(rail.tip)}">⛔ ${esc(rail.text)}</span>`
+          : rail.working
+            ? `<span class="bp-left" data-tip="${esc(`${rail.tip}. Сколько ещё строить на скорости ×1`)}">🚂 ⏳ ${durationText(i.seconds)}</span>`
+            : `<span class="bp-state" data-tip="${esc(rail.tip)}">🚂 ${esc(rail.text)}</span>`;
+  return projectRowHtml(i, 1, true, selected, status);
 }
 
 /** База стройки: площадка с вагончиком и самосвалом. */
@@ -172,7 +200,13 @@ export function buildTabHtml(game: Game, view: BuildView = NO_BUILD_VIEW): strin
   const bases = [...crews.bases.keys()];
   const baseRows = bases.map((id) => baseRowHtml(game, id, id === view.base)).join('');
   const list = game.construction.list();
-  const rows = list.map((i) => projectRowHtml(i, crews.working(i.project.id).length, bases.length > 0, i.project.id === view.project)).join('');
+  const rows = list
+    .map((i) => {
+      // Ж/д проект строит строительный поезд, а не бригады: его строка — по поезду.
+      const rail = railTrainStatus(game, i.project.id);
+      return rail ? railRowHtml(i, rail, i.project.id === view.project) : projectRowHtml(i, crews.working(i.project.id).length, bases.length > 0, i.project.id === view.project);
+    })
+    .join('');
   const c = crewCounts(game);
   const baseHead = `<h4 data-tip="Строительные базы: с них бригады едут на стройки по готовым дорогам">${baseSvg(18, 14)} Базы${
     bases.length ? ` <small>${bases.length} · 🚚 ${c.busy} / ${c.all}</small>` : ''

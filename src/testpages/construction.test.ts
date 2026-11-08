@@ -14,10 +14,13 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
     expect(scene.game.construction.projects.get(rail.project!)?.rail).toBe(true);
     expect(scene.game.construction.segmentsOf(rail.project!).length).toBeGreaterThan(0);
     expect(scene.game.lines.get(scene.lines.rail)?.vehicles).toHaveLength(1);
+    // Ж/д проект строит строительный поезд с вокзала — ни базы, ни дороги рядом у него нет.
+    expect(rail.base).toBeNull();
     const crews = game.construction.crews;
     for (const p of scene.projects) {
       expect(p.project, p.name).not.toBeNull();
       expect(game.construction.projects.has(p.project!), p.name).toBe(true);
+      if (p.key === 'rail') continue;
       expect(p.base, p.name).not.toBeNull();
       expect(crews.of(p.base!).length, p.name).toBe(1);
       expect(game.baseName(p.base!)).toBe(p.name);
@@ -48,10 +51,12 @@ describe('Тестовая страница /test/construction', { timeout: 60_0
     // берётся за свой этап, как доехала, у моста и тоннеля — когда доехала последняя: по подъезду в 160 м — секунд 20.
     runSeconds(game, 25);
     // Каждая бригада — на своём проекте (своей базы).
-    for (const p of scene.projects) expect(crews.working(p.project!).map((b) => b.base), p.name).toEqual([p.base]);
-    // Поезд ж/д ряда стоит на своём вокзале: путь ко второму ещё строится.
-    const train = [...game.rail.trains.values()][0];
-    expect(train.moving).toBe(false);
+    for (const p of scene.projects) expect(crews.working(p.project!).map((b) => b.base), p.name).toEqual(p.key === 'rail' ? [] : [p.base]);
+    // Ж/д ряд: строительный поезд вышел с вокзала a; поезд линии стоит на своём вокзале — путь ко второму строится.
+    const rail = scene.projects.find((p) => p.key === 'rail')!;
+    expect(game.construction.trains!.of(rail.project!)).toBeDefined();
+    const v = game.lines.get(scene.lines.rail)!.vehicles[0];
+    expect(game.fleetTrain(game.fleet.get(v)!)?.moving ?? false).toBe(false);
     runSeconds(game, 50);
     const done = scene.projects.filter((p) => !game.construction.projects.has(p.project!));
     expect(done.map((p) => p.key)).toEqual(expect.arrayContaining(['street', 'hill']));

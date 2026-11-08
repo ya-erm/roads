@@ -1103,6 +1103,20 @@ export class Game implements BuildContext {
     return this.builder.fullSegmentCost(seg);
   }
 
+  /**
+   * ConstructionHost: вокзалы игрока — депо строительных поездов (workTrains.ts), по номеру: где и платформы. Вокзал,
+   * что сам стоит на строящемся пути (его платформа ещё строится), — не депо: поезду туда не попасть.
+   */
+  railDepots(): { id: number; pos: Vec; platforms: number[] }[] {
+    const out: { id: number; pos: Vec; platforms: number[] }[] = [];
+    for (const st of [...this.stations.values()].sort((a, b) => a.id - b.id)) {
+      if (st.kind !== 'rail') continue;
+      const platforms = st.platforms.filter((id) => this.net.segments.has(id));
+      if (platforms.length && platforms.every((id) => !this.net.segment(id).build)) out.push({ id: st.id, pos: st.fp.center, platforms });
+    }
+    return out;
+  }
+
   /** Стройка: проект достроен или встал без денег. */
   projectEvent(kind: 'done' | 'stalled', p: Project): void {
     if (kind === 'done') {
@@ -3313,7 +3327,7 @@ export class Game implements BuildContext {
     this.updateStations(dt);
     this.updateTowns(dt);
     // Стройка дорог: только если есть проекты или бригады («Мгновенно» их не бывает — такт тот же, что без стройки).
-    if (this.construction.projects.size || this.construction.crews.brigades.size) this.construction.tick(dt);
+    if (this.construction.projects.size || this.construction.crews.brigades.size || this.construction.trains?.list.size) this.construction.tick(dt);
     this.scenario?.tick(dt);
     const month = Math.floor(this.time / MONTH_LENGTH);
     // Итоги — сразу после такта (update): целиком или по кадрам (monthBudget).
@@ -4704,6 +4718,8 @@ export class Game implements BuildContext {
   }
 
   private onTrainArrive(train: Train): void {
+    // Строительный поезд ж/д проекта (workTrains.ts) — стройка решает сама.
+    if (this.construction.trains?.arrive(train)) return;
     const v = this.trainOwner(train);
     const line = v && this.lines.get(v.lineId);
     const st = line && this.stations.get(line.stops[v.stop]);
@@ -4739,6 +4755,7 @@ export class Game implements BuildContext {
   }
 
   private onTrainLost(train: Train): void {
+    if (this.construction.trains?.lost(train)) return;
     const v = this.trainOwner(train);
     if (!v) return;
     v.trainId = null;
@@ -5702,7 +5719,8 @@ export class Game implements BuildContext {
       const railVersion = this.net.version * 1009 + this.terrain.version;
       if (this.railValue.version !== railVersion) {
         let rails = 0;
-        for (const s of this.net.segments.values()) rails += this.builder.segmentCost(s);
+        // Строящийся путь (ж/д проект) в ремонт не идёт — как и строящееся полотно: готов — у него снимется build.
+        for (const s of this.net.segments.values()) if (!s.build) rails += this.builder.segmentCost(s);
         this.railValue = { version: railVersion, value: rails };
       }
       let total = this.railValue.value;

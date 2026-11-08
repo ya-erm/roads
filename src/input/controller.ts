@@ -1954,6 +1954,9 @@ export class Controller {
     const train = g.trainAt(p);
     const owner = train && g.trainOwner(train);
     if (owner) return { type: 'fleet', id: owner.id };
+    // Строительный поезд — карточка его ж/д проекта.
+    const work = train && g.construction.trains?.ofTrain(train.id);
+    if (work && g.construction.projects.has(work.project)) return { type: 'project', id: work.project };
     const veh = g.vehicleAt(p);
     if (veh?.fleet) return { type: 'fleet', id: veh.fleet.id };
     // Любая машина колонны бригады — в потоке или вне его (вдоль стройки, ждёт колонну) — выбирает бригаду целиком.

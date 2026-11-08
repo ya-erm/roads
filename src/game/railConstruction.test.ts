@@ -1,43 +1,28 @@
 import { describe, expect, it } from 'vitest';
-import { add, dist, scale, type Vec } from '../core/vec';
-import type { BuildBase, Station } from '../world/entities';
+import { add, scale, type Vec } from '../core/vec';
+import type { Station } from '../world/entities';
 import { Network } from '../world/network';
 import { RAIL_SPEC } from '../world/roadTypes';
 import type { RoadRequest } from './build';
 import { Game } from './game';
-import { road, runSeconds, withoutCitizens } from './testkit';
+import { runSeconds, withoutCitizens } from './testkit';
 
 /** Прямой путь от from до to (instant — готов сразу и «Со строительством»). */
 function track(game: Game, from: Vec, to: Vec, instant = false): RoadRequest {
   return { start: game.builder.snap(from, 0, 14), end: { kind: 'free', pos: to, level: 0 }, spec: RAIL_SPEC, mode: 'straight', ...(instant ? { instant: true as const } : {}) };
 }
 
-/** Узел дороги в точке p (в пределах метра). */
-function roadNode(game: Game, p: Vec): number {
-  const n = [...game.roads.net.nodes.values()].find((k) => dist(k.pos, p) < 1);
-  if (!n) throw new Error('нет узла дороги');
-  return n.id;
-}
-
-/** Своя база с бригадой у узла дороги gate (бригады первой базы — прочь): ворота — этот узел. */
-function baseAt(game: Game, pos: Vec, gate: number): BuildBase {
-  const crews = game.construction.crews;
-  crews.brigades.clear();
-  const base: BuildBase = { type: 'base', id: 990_000 + crews.bases.size, fp: { center: { ...pos }, w: 36, h: 24, angle: 0 }, nodeId: gate };
-  crews.bases.set(base.id, base);
-  crews.hire(base.id);
-  return base;
-}
-
 const building = (game: Game) => [...game.net.segments.values()].filter((s) => s.build);
+
+const WORLD = { seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' } as const;
 
 /**
  * Партия «Со строительством»: готовый путь 1200 м с вокзалом a, от его конца — ж/д проект ещё на 1200 м с вокзалом b
- * на нём; к началу проекта — подъезд: улица, что кончается в 80 м от конца готового пути, у её дальнего конца — база с
- * бригадой. Пути — в чистом поле вдали от городов (без машин жителей).
+ * на нём. Ни дорог рядом, ни строительных баз: путь строит строительный поезд с вокзала a. Пути — в чистом поле вдали
+ * от городов (без машин жителей).
  */
-function railProject(): { game: Game; a: Station; b: Station; id: number; from: Vec; dir: Vec; gate: number; access: number } {
-  const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
+function railProject(): { game: Game; a: Station; b: Station; id: number; from: Vec; dir: Vec } {
+  const game = withoutCitizens(new Game(WORLD));
   const len = 2400;
   for (let y = 500; y < game.terrain.height - 500; y += 170) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 230) {
@@ -51,8 +36,6 @@ function railProject(): { game: Game; a: Station; b: Station; id: number; from: 
         if (!game.builder.build(track(game, from, mid, true))) return false;
         const a = game.stationPlan(add(add(from, scale(dir, 400)), { x: 0, y: 40 }), 14, 'rail');
         if (!a.ok) return false;
-        // Подъезд к началу проекта: с севера, тупиком в 80 м от конца готового пути.
-        if (!road(game, { free: { x: mid.x - 160, y: mid.y - 260 } }, { free: { x: mid.x, y: mid.y - 80 } })) return false;
         return game.builder.plan(track(game, mid, end)).ok;
       })();
       game.commit();
@@ -60,16 +43,12 @@ function railProject(): { game: Game; a: Station; b: Station; id: number; from: 
         game.undo();
         continue;
       }
-      const gate = roadNode(game, { x: mid.x - 160, y: mid.y - 260 });
-      // Подъезд к пути — тупик улицы у конца готового пути.
-      const access = roadNode(game, { x: mid.x, y: mid.y - 80 });
-      baseAt(game, { x: mid.x - 190, y: mid.y - 280 }, gate);
       const id = game.construction.peekId();
       if (!game.builder.build(track(game, mid, end))) throw new Error('проект не лёг');
       const a = game.placeStation(add(add(from, scale(dir, 400)), { x: 0, y: 40 }), 14, 'rail')!;
       const b = game.placeStation(add(add(from, scale(dir, len - 400)), { x: 0, y: 40 }), 14, 'rail')!;
       if (!a || !b) throw new Error('вокзалы не встали');
-      return { game, a, b, id, from, dir, gate, access };
+      return { game, a, b, id, from, dir };
     }
   }
   throw new Error('нет места');
@@ -114,47 +93,85 @@ describe('Стройка ж/д путей: «Со строительством»
     expect(game.money).toBe(money);
   });
 
-  it('бригада едет по дорогам к подъезду, строит путь этапами; поезд не едет, пока путь не готов, потом едет', () => {
-    const { game, id, a, b, access } = railProject();
+  it('строительный поезд выходит с вокзала по путям и строит этапами — без дорог и баз; поезд линии ждёт готовности', () => {
+    const { game, id, a, b } = railProject();
+    expect(game.construction.crews.bases.size).toBe(0);
     const line = game.createLine([a.id, b.id])!;
     game.setStopRule(line.id, 0, { wait: 'none', maxWait: null, load: 'auto', unload: 'auto' });
-    expect(game.buyVehicle(line.id, 'passengerTrain')).not.toBeNull();
-    const train = () => [...game.rail.trains.values()][0];
-    const crews = game.construction.crews;
-    const brigade = [...crews.brigades.values()][0];
+    const v = game.buyVehicle(line.id, 'passengerTrain')!;
+    expect(v).not.toBeNull();
+    const lineTrain = () => game.fleetTrain(v);
+    const trains = game.construction.trains!;
     let onSite = false;
+    let moved = false;
     let reachedB = false;
+    let simId: number | undefined;
     const startMoney = game.money;
-    runSeconds(game, 60, () => {
-      if (brigade.state === 'working') onSite = true;
-      if (train()?.platform !== null && b.platforms.includes(train()!.platform!)) reachedB = true;
+    runSeconds(game, 90, () => {
+      const w = trains.of(id);
+      if (w?.state === 'working') onSite = true;
+      if (w?.train !== undefined) simId = w.train;
+      const t = simId !== undefined ? game.rail.trains.get(simId) : undefined;
+      if (t?.moving) moved = true;
+      if (lineTrain()?.platform != null && b.platforms.includes(lineTrain()!.platform!)) reachedB = true;
     });
-    // Бригада на месте: доехала по улице от ворот базы до её тупика у пути, съехала оттуда и строит.
+    // Поезд вышел с вокзала a (депо), доехал по готовому пути до начала проекта и строит.
+    const w = trains.of(id)!;
+    expect(w.depot).toBe(a.id);
+    expect(moved).toBe(true);
     expect(onSite).toBe(true);
-    expect(brigade.at).toBe(access);
+    expect(game.construction.crews.assigned(id)).toEqual([]);
     const info = game.construction.info(id)!;
     expect(info.done).toBeGreaterThan(0);
     expect(info.stages[0]).toBeGreaterThan(info.stages[2]);
     expect(game.money).toBeLessThan(startMoney);
-    // Пока путь строится, поезд до b не доехал.
+    // Строительный поезд — в общем движении: стоит на готовом пути у края работ.
+    const t = game.rail.trains.get(w.train!)!;
+    expect(game.net.segment(t.platform!).build).toBeUndefined();
+    // Пока путь строится, поезд линии до b не доехал.
     expect(reachedB).toBe(false);
-    // Участки строятся цепочкой: колонна идёт вдоль пути от участка к участку, не возвращаясь к дороге.
-    let back = false;
-    runSeconds(game, 400, () => {
-      if (train()?.platform !== null && b.platforms.includes(train()!.platform!)) reachedB = true;
-      if (game.construction.projects.has(id) && brigade.trip?.back) back = true;
+    runSeconds(game, 500, () => {
+      if (lineTrain()?.platform != null && b.platforms.includes(lineTrain()!.platform!)) reachedB = true;
     });
-    expect(back).toBe(false);
     expect(game.construction.projects.has(id)).toBe(false);
     expect(building(game)).toEqual([]);
     expect(reachedB).toBe(true);
-    // Бригада вернулась к дороге (по полосе отвода к подъезду) и домой, а не осталась на путях.
-    expect(brigade.state === 'idle' || brigade.state === 'back').toBe(true);
+    // Строительный поезд вернулся на свой вокзал и ушёл из движения.
+    expect(trains.list.size).toBe(0);
+    expect(game.rail.trains.has(simId!)).toBe(false);
+  });
+
+  it('нет вокзала — «нет вокзала»; путь не связан с вокзалом — «нет пути к стройке»: поезд не едет', () => {
+    const game = withoutCitizens(new Game(WORLD));
+    let at: Vec | null = null;
+    for (let y = 500; y < game.terrain.height - 500 && !at; y += 170) {
+      for (let x = 300; x < game.terrain.width - 900 && !at; x += 230) {
+        if (game.builder.plan(track(game, { x, y }, { x: x + 600, y })).ok) at = { x, y };
+      }
+    }
+    expect(at).not.toBeNull();
+    const id = game.construction.peekId();
+    game.builder.build(track(game, at!, { x: at!.x + 600, y: at!.y }));
+    runSeconds(game, 1);
+    const trains = game.construction.trains!;
+    expect(trains.problem(id)).toBe('depot');
+    expect(game.construction.info(id)!.access).toBe(false);
+    // Вокзал на другом, готовом пути — до проекта по путям не доехать.
+    const { game: g2, from } = railProject();
+    const far = add(from, { x: 0, y: 340 });
+    const other = g2.construction.peekId();
+    if (g2.builder.plan(track(g2, far, add(far, { x: 500, y: 0 }))).ok) {
+      g2.builder.build(track(g2, far, add(far, { x: 500, y: 0 })));
+      runSeconds(g2, 3);
+      expect(g2.construction.trains!.problem(other)).toBe('route');
+      expect(g2.construction.trains!.status(other, () => '').text).toBe('нет пути к стройке');
+      expect(g2.construction.trains!.of(other)).toBeUndefined();
+    }
   });
 
   it('сохранение посреди стройки пути: та же стройка после загрузки, дальше — одинаково', () => {
     const { game, id } = railProject();
-    runSeconds(game, 45);
+    runSeconds(game, 90);
     const done = game.construction.info(id)!.done;
     expect(done).toBeGreaterThan(0);
     const save = JSON.parse(JSON.stringify(game.toSave()));
@@ -163,22 +180,33 @@ describe('Стройка ж/д путей: «Со строительством»
     const loaded = withoutCitizens(new Game(save.settings, save));
     expect(loaded.construction.info(id)!.done).toBeCloseTo(done, 9);
     expect(loaded.construction.projects.get(id)!.rail).toBe(true);
+    // Строительный поезд — тот же: там же в движении и на том же участке.
+    expect(save.construction.trains.trains).toHaveLength(1);
+    expect(loaded.construction.trains!.toSave()).toEqual(game.construction.trains!.toSave());
+    const w = loaded.construction.trains!.of(id)!;
+    expect(loaded.rail.trains.has(w.train!)).toBe(true);
     for (const g of [game, loaded]) runSeconds(g, 60);
     expect(loaded.money).toBe(game.money);
     expect(JSON.stringify(loaded.net.serialize())).toBe(JSON.stringify(game.net.serialize()));
+    expect(loaded.construction.trains!.toSave()).toEqual(game.construction.trains!.toSave());
   });
 
   it('отмена проекта сносит недостроенный путь и возвращает заплаченное; под вокзалом путь достраивается', () => {
     const { game, id, b } = railProject();
-    runSeconds(game, 45);
+    runSeconds(game, 90);
     const p = game.construction.projects.get(id)!;
     const spent = p.spent;
     expect(spent).toBeGreaterThan(0);
     const money = game.money;
+    expect(game.construction.trains!.of(id)?.state).toBe('working');
     expect(game.cancelProject(id)).toBe(true);
     expect(game.money).toBeGreaterThan(money);
-    // Остались только платформа вокзала b (её не сносят без вокзала) — её проект достроит.
+    // Остались только платформа вокзала b (её не сносят без вокзала).
     for (const s of building(game)) expect(s.platform).toBe(b.id);
+    // К ней по путям теперь не доехать — строительный поезд уходит домой.
+    runSeconds(game, 3);
+    expect(game.construction.trains!.of(id)).toBeUndefined();
+    expect([...game.construction.trains!.list.values()].every((w) => w.state === 'back')).toBe(true);
   });
 
   it('Ctrl+Z: не начатый путь-проект убирается целиком, начатый — как «Отмена»; начатый путь не переложить', () => {
@@ -197,7 +225,7 @@ describe('Стройка ж/д путей: «Со строительством»
     expect(game.construction.projects.has(next)).toBe(false);
     expect(building(game).every((s) => s.build!.project === id)).toBe(true);
     // Начатый — уже строится: перекладка участка с готовым — отказ.
-    runSeconds(game, 45);
+    runSeconds(game, 90);
     const started = building(game).find((s) => s.build!.done > 0)!;
     expect(started).toBeDefined();
     const plan = game.builder.reshape({ curves: new Map([[started.id, { ...started.curve, p1: add(started.curve.p1, { x: 0, y: 15 }) }]]) });
@@ -205,25 +233,13 @@ describe('Стройка ж/д путей: «Со строительством»
     expect(plan.reason).toBe('Путь уже строится');
   });
 
-  it('путь без дороги рядом — нет подъезда: бригады не едут', () => {
-    const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
-    // Самое пустое место карты: дальше всего от дорог.
-    let best: { p: Vec; d: number } | null = null;
-    for (let y = 400; y < game.terrain.height - 400; y += 150) {
-      for (let x = 400; x < game.terrain.width - 900; x += 150) {
-        const p = { x, y };
-        const near = [...game.roads.net.nodes.values()].reduce((m, n) => Math.min(m, dist(n.pos, p), dist(n.pos, { x: x + 500, y })), Infinity);
-        const req: RoadRequest = { start: { kind: 'free', pos: p, level: 0 }, end: { kind: 'free', pos: { x: x + 500, y }, level: 0 }, spec: RAIL_SPEC, mode: 'straight' };
-        if (near > 400 && (!best || near > best.d) && game.builder.plan(req).ok) best = { p, d: near };
-      }
-    }
-    expect(best).not.toBeNull();
-    const p = best!.p;
-    const id = game.construction.peekId();
-    game.builder.build({ start: { kind: 'free', pos: p, level: 0 }, end: { kind: 'free', pos: { x: p.x + 500, y: p.y }, level: 0 }, spec: RAIL_SPEC, mode: 'straight' });
-    const info = game.construction.info(id)!;
-    expect(info.access).toBe(false);
-    expect(game.construction.site(id)).toBeNull();
+  it('одни и те же действия дважды — тот же результат (поезд, стройка, деньги)', () => {
+    const run = () => {
+      const { game } = railProject();
+      runSeconds(game, 120);
+      return { money: game.money, net: JSON.stringify(game.net.serialize()), c: JSON.stringify(game.construction.toSave()), rail: JSON.stringify(game.rail.serialize()) };
+    };
+    expect(run()).toEqual(run());
   });
 
   it('разрез строящегося пути делит готовое по этапам с того же конца', () => {

@@ -15,7 +15,7 @@ import { durationText } from '../core/timeText';
 import { type ProjectInfo, projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
-import { buildSvg, km } from './constructionUi';
+import { buildSvg, km, railTrainStatus } from './constructionUi';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
@@ -101,6 +101,17 @@ function progressHtml(info: ProjectInfo): string {
 /** Сколько ещё: при нынешних бригадах и с ещё одной. */
 function timeHtml(game: Game, info: ProjectInfo): string {
   const p = info.project;
+  const rail = railTrainStatus(game, p.id);
+  if (rail) {
+    // Ж/д: строит строительный поезд — сколько ещё, или почему стоит (нет вокзала, нет пути к стройке).
+    if (!p.paused && !info.access && info.waits)
+      return `<div class="pc-row"><span class="pc-time" data-tip="Начало — у соседнего строящегося пути: начнётся, когда тот дорастёт сюда">⏳ <b>после соседнего</b></span></div>`;
+    if (!p.paused && rail.bad) return `<div class="pc-row"><span class="pc-time pc-bad" data-tip="${esc(rail.tip)}">⛔ <b>стоит: ${rail.text}</b></span></div>`;
+    const now = p.paused
+      ? `<span class="pc-time" data-tip="На паузе: стройка стоит">⏸ <b>стоит</b></span>`
+      : `<span class="pc-time" data-tip="${esc(rail.working ? 'Сколько ещё строить на скорости ×1' : 'Сколько займёт, когда строительный поезд встанет у края работ')}">🚂 ⏳ <b>${durationText(info.seconds)}</b></span>`;
+    return `<div class="pc-row">${now}</div>`;
+  }
   const crew = game.construction.crews.working(p.id).length;
   const trucks = (n: number) => '🚚'.repeat(Math.max(1, Math.min(3, n)));
   if (!p.paused && !info.access && info.waits && game.construction.crews.bases.size)
@@ -161,6 +172,15 @@ function moneyHtml(game: Game, info: ProjectInfo): string {
 /** Бригады на проекте: самосвал, номер и база, что делает; клик — к ней на карте. Нет никого — почему и как помочь. */
 function crewsHtml(game: Game, info: ProjectInfo): string {
   const p = info.project;
+  const rail = railTrainStatus(game, p.id);
+  if (rail) {
+    // Ж/д: вместо бригад — строительный поезд: что делает, откуда; стоит — почему и что сделать.
+    const fix = rail.bad
+      ? `<div class="pc-why"><span class="pc-why-ic">⛔</span><span>${esc(rail.tip)}</span><button class="small" data-action="tool" data-id="station" data-tip="Инструмент «Станция»: вокзал — на готовом пути">＋ Вокзал</button></div>`
+      : '';
+    return `<div class="pc-block"><div class="pc-title">🚂 Строительный поезд</div>
+      <div class="pc-row"><span class="pc-time${rail.bad ? ' pc-bad' : ''}" data-tip="${esc(rail.tip)}">🚂 <b>${esc(rail.text)}</b></span></div>${fix}</div>`;
+  }
   const crews = game.construction.crews;
   const list = crews.assigned(p.id);
   const at = info.front ?? info.at;
@@ -206,9 +226,7 @@ function helpHtml(game: Game, info: ProjectInfo, some: boolean): string {
   if (!info.access)
     return why(
       '⛔',
-      p.rail
-        ? `Нет подъезда: по путям машины не ездят — бригаде нужна готовая дорога, связанная с базой, не дальше ${CONSTRUCTION.rail.access} м от конца пути. Постройте дорогу к началу пути или поставьте базу у дороги рядом с ним`
-        : 'Нет подъезда: ни один конец проекта не связан готовой дорогой с базой, а по полю бригады не ездят. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним',
+      'Нет подъезда: ни один конец проекта не связан готовой дорогой с базой, а по полю бригады не ездят. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним',
       `<button class="small" data-action="base-place" data-tip="Поставьте базу у дороги, связанной с проектом: бригада доедет по ней">＋ База</button>`,
     );
   if (!info.near)
@@ -235,5 +253,6 @@ function actionsHtml(info: ProjectInfo): string {
     ? `<button class="small" data-action="build-pause" data-id="${p.id}" data-tip="Строить дальше">▶ Дальше</button>`
     : `<button class="small" data-action="build-pause" data-id="${p.id}" data-tip="Пауза: проект стоит и не тратит денег">⏸ Пауза</button>`;
   const cancel = `<button class="small" data-action="build-cancel" data-id="${p.id}" data-tip="Отмена: недостроенное убрать, деньги за него — назад, резерв — снова свободен; готовые участки остаются (Ctrl+Z вернёт)">✕ Отмена</button>`;
-  return `<div class="actions pc-actions">${prio}${pause}${cancel}</div>`;
+  // Ж/д проект строит свой поезд, бригады к нему не едут — приоритет ни к чему.
+  return `<div class="actions pc-actions">${p.rail ? '' : prio}${pause}${cancel}</div>`;
 }

@@ -56,11 +56,21 @@ export function projectBadges(game: Game, zoom: number, list: readonly ProjectIn
     const far = info.noBase && crews.bases.size > 0;
     const mark = p.paused ? '⏸' : p.stalled !== undefined ? '💸' : crew ? '🏗' : '🚚';
     const top = p.priority ? '⬆ ' : '';
-    const text = blocked ? `${top}🚚 нет подъезда` : waits ? `${top}⏳ после соседнего` : far ? `${top}⛔ нет базы рядом` : `${top}${mark} ${pct}%`;
+    let text = blocked ? `${top}🚚 нет подъезда` : waits ? `${top}⏳ после соседнего` : far ? `${top}⛔ нет базы рядом` : `${top}${mark} ${pct}%`;
+    // Ж/д проект строит строительный поезд (workTrains.ts): баз не ждёт; стоит без вокзала или пути к стройке.
+    const rail = p.rail ? game.construction.trains?.status(p.id, (id) => game.stations.get(id)?.name ?? '') : undefined;
+    let railBad = false;
+    if (rail) {
+      railBad = !p.paused && rail.bad && !info.waits;
+      const railMark = p.paused ? '⏸' : p.stalled !== undefined ? '💸' : rail.working ? '🏗' : '🚂';
+      text = railBad ? `🚂 ${rail.text}` : !p.paused && !info.access && info.waits ? '⏳ после соседнего' : `${railMark} ${pct}%`;
+    }
+    const bad = rail ? railBad : blocked || far;
+    const quiet = rail ? !info.access && info.waits : waits;
     const fill =
-      (p.stalled !== undefined || blocked || far) && !p.paused
+      (p.stalled !== undefined || bad) && !p.paused
         ? 'rgba(232, 72, 63, 0.92)'
-        : p.paused || waits
+        : p.paused || quiet
           ? 'rgba(110, 118, 128, 0.92)'
           : 'rgba(240, 138, 60, 0.95)';
     // Над краем работ — выше техники, чтобы её не закрывать; при любом зуме одного размера на экране.
