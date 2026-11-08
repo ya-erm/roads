@@ -838,7 +838,9 @@ export class Crews {
     if (!this.host.crewProjects().includes(project)) return 'Проект сейчас не строится: на паузе или уже готов';
     if (b.project === project && (b.state === 'going' || b.state === 'working')) return null;
     const cap = this.cap(project);
-    if (this.assigned(project).length >= cap) return `На проекте уже ${cap} из ${cap} бригад — больше не встанет`;
+    // Места нет — игрок ставит эту бригаду вместо назначенной автоматикой (дальней от стройки, displaced); если все
+    // там назначены игроком — отказ.
+    if (this.assigned(project).length >= cap && !this.displaced(b, project)) return `На проекте уже ${cap} из ${cap} бригад, и все назначены вручную (📌) — снимите одну («↺ Авто»)`;
     const s = this.host.site(project, b);
     if (!s) return 'К проекту нет подъезда по готовым дорогам';
     const from = b.convoy?.to ?? this.startNode(b);
@@ -857,6 +859,11 @@ export class Crews {
     if (problem) return problem;
     b.pinned = true;
     if (b.project === project && (b.state === 'going' || b.state === 'working')) return null;
+    // Мест нет — уступает назначенная автоматикой, что дальше всех от стройки: едет к другому проекту или домой.
+    if (this.assigned(project).length >= this.cap(project)) {
+      const out = this.displaced(b, project);
+      if (out) this.release(out);
+    }
     if (b.convoy && b.convoy.cars.every((c) => 'wait' in c)) this.parkAll(b);
     let back: Vec[] | null = null;
     if (b.state === 'working') back = this.pathBack(b)?.path ?? null;
@@ -866,6 +873,23 @@ export class Crews {
     b.state = 'going';
     if (back) this.walk(b, back, true);
     return null;
+  }
+
+  /**
+   * Кого заменит бригада b, если игрок отправит её на проект project, где мест нет: из назначенных автоматикой (не
+   * pinned) — дальше всех от стройки (от её подъезда; колонна в потоке — откуда выехала), при равенстве — с большим
+   * номером. null — заменять некого (все там назначены игроком) или место и так есть.
+   */
+  displaced(b: Brigade, project: number): Brigade | null {
+    const others = this.assigned(project).filter((x) => x !== b && !x.pinned);
+    if (!others.length) return null;
+    const at = this.host.site(project)?.pos ?? this.where(others[0]);
+    let best: { x: Brigade; d: number } | null = null;
+    for (const x of others) {
+      const d = dist(this.where(x), at);
+      if (!best || d > best.d + 1e-6 || (Math.abs(d - best.d) <= 1e-6 && x.id > best.x.id)) best = { x, d };
+    }
+    return best!.x;
   }
 
   /** «↺ Авто»: назначение игрока снято — дальше бригадой снова распоряжается автоматика (сама она никуда не едет). */

@@ -1454,8 +1454,7 @@ export class Game implements BuildContext {
     if (b.project === project && (b.state === 'going' || b.state === 'working')) return null;
     if (!info.access)
       return info.waits ? `${name}: подъезд — через соседний строящийся проект, туда пока не проехать` : `К ${name} нет подъезда: ни один конец не связан готовой дорогой с базой`;
-    const cap = crews.cap(project);
-    if (crews.assigned(project).length >= cap) return `На ${name} уже ${cap} из ${cap} бригад — больше не встанет`;
+    // Мест нет — проверка у Crews.canGo: уступит дальняя бригада, назначенная автоматикой (displaced).
     return crews.canGo(b, project);
   }
 
@@ -1466,8 +1465,15 @@ export class Game implements BuildContext {
     const crews = this.construction.crews;
     const b = crews.brigades.get(id)!;
     const was = b.project;
+    // Мест нет — уступит дальняя бригада, назначенная автоматикой: скажем, какая.
+    const full = b.project !== project && crews.assigned(project).length >= crews.cap(project);
+    const out = full ? crews.displaced(b, project) : null;
     const fail = crews.send(b, project);
     if (fail) return fail;
+    if (out) {
+      const n = crews.of(out.base).indexOf(out) + 1;
+      this.notify(`🚚 Бригада ${n} базы «${this.baseName(out.base)}» уступила место на «${projectName(this.construction.projects.get(project)!)}»`);
+    }
     this.construction.stamp++;
     this.journal.add('brigade-send', { b: id, base: b.base, id: project, what: projectName(this.construction.projects.get(project)!), ...(was !== undefined && was !== project ? { from: was } : {}) });
     return null;

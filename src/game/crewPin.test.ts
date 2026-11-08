@@ -111,12 +111,39 @@ describe('Бригада, назначенная игроком', () => {
     expect(t.b.project).not.toBe(8);
   });
 
+  it('места нет — уступает дальняя бригада автоматики; все закреплены игроком — отказ', () => {
+    const t = bench();
+    t.sites.delete(8);
+    t.caps.set(7, 2);
+    const c = t.crews.hire(100)!;
+    const d = t.crews.hire(100)!;
+    t.crews.tick();
+    expect(t.crews.assigned(7).length).toBe(2);
+    // Дальняя от стройки — та, что стоит дальше от подъезда; ставим новую вместо неё.
+    const site = t.sites.get(7)!.pos;
+    const [x, y] = t.crews.assigned(7);
+    x.pos = { x: site.x + 50, y: site.y };
+    y.pos = { x: site.x + 5000, y: site.y };
+    expect(t.crews.displaced(d, 7)).toBe(y);
+    expect(t.crews.send(d, 7)).toBeNull();
+    expect(d.project).toBe(7);
+    expect(y.project).toBeUndefined();
+    expect(x.project).toBe(7);
+    expect(t.crews.assigned(7)).toHaveLength(2);
+    // Обе на проекте назначены игроком — заменять некого.
+    expect(t.crews.send(x, 7)).toBeNull();
+    expect(t.crews.send(y, 7)).toContain('назначены вручную');
+    expect(y.pinned).toBeUndefined();
+    void c;
+  });
+
   it('отказ: места нет (cap), нет подъезда, по дорогам не доехать, на паузе — и бригада никуда не едет', () => {
     const t = bench();
     t.sites.delete(8);
     t.caps.set(7, 1);
     t.crews.tick();
     expect(t.b.project).toBe(7);
+    expect(t.crews.send(t.b, 7)).toBeNull();
     const c = t.crews.hire(100)!;
     expect(t.crews.send(c, 7)).toContain('1 из 1');
     t.blocked.add(9);

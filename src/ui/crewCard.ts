@@ -85,6 +85,12 @@ function targetsHtml(game: Game, id: number): string {
     .sort((x, y) => x.d - y.d || x.info.project.id - y.info.project.id);
   const title = `<div class="pc-title">${buildSvg(20, 15)} Стройки${list.length ? ` <b>${list.length}</b>` : ''}</div>`;
   if (!list.length) return `<div class="pc-block">${title}<p class="muted">Строек нет — отправить некуда.</p></div>`;
+  // Мест нет — кого заменит: дальнюю бригаду, назначенную автоматикой.
+  const replaced = (pid: number) => {
+    if (crews.assigned(pid).length < crews.cap(pid)) return '';
+    const out = crews.displaced(b, pid);
+    return out ? ` вместо бригады ${crews.of(out.base).indexOf(out) + 1} базы «${game.baseName(out.base)}» (она дальше)` : '';
+  };
   const rows = list
     .map(({ info, d }) => {
       const p = info.project;
@@ -109,7 +115,7 @@ function targetsHtml(game: Game, id: number): string {
           : `Бригада здесь — нажмите, чтобы закрепить её на «${projectName(p)}»`
         : problem
           ? `Нельзя: ${problem}`
-          : `«${projectName(p)}»: ${km(d)} отсюда — нажмите, бригада поедет туда по дорогам и закрепится`;
+          : `«${projectName(p)}»: ${km(d)} отсюда — нажмите, бригада поедет туда по дорогам и закрепится${replaced(p.id)}`;
       return `<button class="pc-crew cc-target ${problem ? 'cc-off' : ''} ${here ? 'cc-here' : ''}" data-action="crew-to" data-id="${id}" data-p="${p.id}" data-tip="${esc(tip)}">
         <span class="bc-near-ic">${buildSvg(22, 16)}</span>
         <span class="pc-crew-name">${esc(projectName(p))} <span class="muted">· ${Math.min(99, Math.floor(info.done * 100))}%</span></span>
