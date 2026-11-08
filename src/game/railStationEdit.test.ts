@@ -114,6 +114,87 @@ describe('Достроить путь ж/д станции', { timeout: 40_000 }
     expect(game.money).toBe(money);
   });
 
+  it('со стороны здания мешает — путь ложится с другой стороны от путей, здание на месте; Ctrl+Z — как было', () => {
+    const game = world();
+    const { at } = layTrack(game, 2400);
+    // Чужой путь вдоль станции со стороны здания: здание, отодвинутое на путь дальше, легло бы на него.
+    const wall = { start: { kind: 'free' as const, pos: at(700, 72), level: 0 }, end: { kind: 'free' as const, pos: at(1700, 72), level: 0 }, spec: RAIL_SPEC, mode: 'straight' as const };
+    expect(game.builder.plan(wall).ok).toBe(true);
+    game.builder.build(wall);
+    // Курсор — ближе к главному, чем к чужому пути: станция встаёт на главный, здание — к чужому.
+    const st = game.placeStation(at(1200, 25), 14, 'rail', SERVES, 0, 2)!;
+    expect(st.platforms).toHaveLength(2);
+    expect(offMain(game, st, at(1200))).toBeLessThan(1);
+    expect(game.railTrackPlan(st.id, 1).ok).toBe(false);
+    const plan = game.railTrackPlan(st.id);
+    expect(plan.ok).toBe(true);
+    expect(plan.side).toBe(-1);
+    const fp0 = { ...st.fp, center: { ...st.fp.center } };
+    const before = railCount(game);
+    const money = game.money;
+    expect(game.addRailTrack(st.id)).toBeNull();
+    expect(game.money).toBe(money - plan.cost);
+    expect(st.platforms).toHaveLength(3);
+    const main = game.net.segment(st.platforms[0]);
+    const mainMid = main.lut.pointAt(main.length / 2);
+    const second = game.net.segment(st.platforms[1]);
+    const added = game.net.segment(st.platforms[2]);
+    expect(added.platform).toBe(st.id);
+    // Новый путь — на путь от главного, по другую сторону от второго пути и здания (здание — в сторону +y).
+    const mid = added.lut.pointAt(added.length / 2);
+    expect(offMain(game, st, mid)).toBeCloseTo(RAIL_STATION.spacing, 0);
+    expect(mid.y).toBeLessThan(mainMid.y);
+    expect(dist(mid, second.lut.pointAt(second.length / 2))).toBeCloseTo(RAIL_STATION.spacing * 2, 0);
+    expect(Math.abs(added.length - main.length)).toBeLessThan(1);
+    expect(st.fp).toEqual(fp0);
+    // Сторона здания у станции — прежняя: следующий путь со стороны здания по-прежнему мешает, с другой — за новым.
+    expect(stationShape(game.net, st)!.n.y).toBeGreaterThan(0.99);
+    const next = game.railTrackPlan(st.id);
+    expect(next.ok).toBe(true);
+    expect(next.side).toBe(-1);
+    expect(game.addRailTrack(st.id)).toBeNull();
+    const fourth = game.net.segment(st.platforms[3]);
+    const mid4 = fourth.lut.pointAt(fourth.length / 2);
+    expect(offMain(game, st, mid4)).toBeCloseTo(RAIL_STATION.spacing * 2, 0);
+    expect(mid4.y).toBeLessThan(mid.y);
+    // Съезд на дальний путь — такой же пологий, как у станции, построенной сразу на 3 пути.
+    const down = game.net.node(fourth.a).segments.map((id) => game.net.segment(id)).find((s) => s.id !== fourth.id)!;
+    const sw = down.a === fourth.a ? down.b : down.a;
+    expect(dist(game.net.node(sw).pos, game.net.node(fourth.a).pos)).toBeGreaterThan(switchLenFor(3) - 1);
+    expect(st.fp).toEqual(fp0);
+    expect(game.undo()).toBe('путь станции');
+    expect(game.undo()).toBe('путь станции');
+    expect(st.platforms).toHaveLength(2);
+    expect(railCount(game)).toEqual(before);
+    expect(game.money).toBe(money);
+  });
+
+  it('конечная: путь с другой стороны — здание в торце шире, поперёк всех путей; сохранение открывается', () => {
+    const game = world();
+    const { at } = layTrack(game, 2400);
+    const st = game.placeStation(at(2400 - 150, 40), 14, 'rail', SERVES, 0, 2, 150, true)!;
+    const side1 = game.net.segment(st.platforms[1]);
+    const y1 = side1.lut.pointAt(side1.length / 2).y;
+    const w0 = st.fp.w;
+    const plan = game.railTrackPlan(st.id, -1);
+    expect(plan.ok).toBe(true);
+    expect(game.addRailTrack(st.id, -1)).toBeNull();
+    expect(st.platforms).toHaveLength(3);
+    const added = game.net.segment(st.platforms[2]);
+    const mid = added.lut.pointAt(added.length / 2);
+    expect(offMain(game, st, mid)).toBeCloseTo(RAIL_STATION.spacing, 0);
+    // По другую сторону от главного, чем второй путь.
+    const y0 = game.net.segment(st.platforms[0]).lut.pointAt(10).y;
+    expect(Math.sign(mid.y - y0)).toBe(-Math.sign(y1 - y0));
+    // Тупик нового пути — упор, здание в торце шире на путь и накрывает все три пути.
+    expect([added.a, added.b].filter((id) => game.net.node(id).segments.length === 1)).toHaveLength(1);
+    expect(st.fp.w).toBeCloseTo(w0 + RAIL_STATION.spacing, 3);
+    for (const y of [y1, y0, mid.y]) expect(Math.abs(y - st.fp.center.y)).toBeLessThan(st.fp.w / 2 - 4);
+    const save = JSON.parse(JSON.stringify(game.toSave()));
+    const back = new Game(game.settings, save);
+    expect(back.stations.get(st.id)!.platforms).toEqual(st.platforms);
+  });
+
   it('у автостанции путей нет', () => {
     const game = world();
     const road = [...game.stations.values()].find((s) => s.kind !== 'rail');
@@ -210,6 +291,32 @@ describe('Перенос ж/д станции', { timeout: 60_000 }, () => {
     expect(b.platforms.some((p) => visited.has(p))).toBe(true);
     expect(a.platforms.some((p) => visited.has(p))).toBe(true);
     expect(game.rail.trains.size).toBe(1);
+  });
+
+  it('путь с другой стороны от здания: к его платформе и от неё есть маршрут, поезд ходит, сохранение открывается', () => {
+    const game = world();
+    const { at } = layTrack(game, 2400);
+    const a = game.placeStation(at(500, 25), 14, 'rail', SERVES, 0, 2)!;
+    const b = game.placeStation(at(1700, 25), 14, 'rail', SERVES, 0, 2)!;
+    const line = game.createLine([a.id, b.id])!;
+    for (const i of [0, 1]) game.setStopRule(line.id, i, { wait: 'none', maxWait: null, load: 'auto', unload: 'auto' });
+    expect(game.buyVehicle(line.id, 'passengerTrain')).not.toBeNull();
+    runSeconds(game, 30);
+    // С другой стороны — явно (со стороны здания здесь тоже есть место).
+    expect(game.addRailTrack(b.id, -1)).toBeNull();
+    const far = b.platforms[2];
+    expect(game.rail.previewRoute(a.platforms, [far])).not.toBeNull();
+    expect(game.rail.previewRoute([far], a.platforms)).not.toBeNull();
+    let moving = 0;
+    runSeconds(game, 300, () => {
+      for (const t of game.rail.trains.values()) if (t.moving) moving++;
+    });
+    expect(moving).toBeGreaterThan(0);
+    expect(game.rail.trains.size).toBe(1);
+    // Сохранение с таким путём открывается: платформы и их участки — те же.
+    const back = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
+    expect(back.stations.get(b.id)!.platforms).toEqual(b.platforms);
+    for (const id of b.platforms) expect(back.net.segment(id).platform).toBe(b.id);
   });
 
   it('сохранение с достроенным путём и перенесённой станцией открывается', () => {

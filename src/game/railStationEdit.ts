@@ -45,11 +45,28 @@ export function stationShape(net: Network, st: Station): StationShape | null {
   if (dist(a, b) < 1) return null;
   const t = norm(sub(b, a));
   const mid = main.lut.pointAt(main.length / 2);
-  // Сторона — по соседнему пути, а у вокзала на один путь — по зданию.
-  const next = st.platforms.length > 1 ? net.segments.get(st.platforms[1]) : undefined;
-  const toward = next ? next.lut.pointAt(next.length / 2) : st.fp.center;
-  const n = cross(t, sub(toward, mid)) >= 0 ? { x: -t.y, y: t.x } : { x: t.y, y: -t.x };
+  const n = stationNormal(net, st, mid, t);
   return { main, ends, switches, t, n };
+}
+
+/**
+ * Поперёк путей вокзала — в сторону здания и боковых путей. У проходной — по зданию (оно сбоку, за крайним путём
+ * своей стороны; пути могут быть и по другую сторону от главного). У конечной здание в торце — по второму пути,
+ * а у конечной на один путь — по зданию. mid — середина главной платформы, t — вдоль неё.
+ */
+export function stationNormal(net: Network, st: Station, mid: Vec, t: Vec): Vec {
+  const next = st.terminal && st.platforms.length > 1 ? net.segments.get(st.platforms[1]) : undefined;
+  const toward = next ? next.lut.pointAt(next.length / 2) : st.fp.center;
+  return cross(t, sub(toward, mid)) >= 0 ? { x: -t.y, y: t.x } : { x: t.y, y: -t.x };
+}
+
+/** Где пути вокзала поперёк: смещение середины каждой платформы от главной вдоль n (главная — 0), по порядку st.platforms. */
+export function trackOffsets(net: Network, st: Station, shape: StationShape): number[] {
+  const mid = shape.main.lut.pointAt(shape.main.length / 2);
+  return st.platforms.map((id, i) => {
+    const s = net.segments.get(id);
+    return i === 0 || !s ? 0 : dot(sub(s.lut.pointAt(s.length / 2), mid), shape.n);
+  });
 }
 
 /** Длина съезда на k-й путь (1 — второй): чем дальше путь от главного, тем длиннее, чтобы стрелка была пологой. */
@@ -74,17 +91,26 @@ export interface ExtraTrack {
   platform: number;
 }
 
+/** С какой стороны от путей вокзала новый путь: 1 — со стороны здания (n), -1 — с другой. */
+export type TrackSide = 1 | -1;
+
 /**
- * Где ляжет следующий путь вокзала: на расстоянии spacing от крайнего, со стороны здания; здание отодвигается
- * (у проходной — на путь дальше, у конечной в торце — становится шире). Съезд — от стрелки горловины, а если
- * главный путь за ней прямой и достаточно длинный — от новой стрелки дальше, чтобы съезд на дальний путь
- * был таким же пологим, как у вокзала, построенного сразу на столько путей.
+ * Где ляжет следующий путь вокзала: на расстоянии spacing от крайнего пути стороны side. Со стороны здания
+ * (side = 1) здание отодвигается: у проходной — на путь дальше; с другой стороны (side = -1) здание стоит, где
+ * стояло, а платформа нового пути — островная, между ним и соседним. У конечной здание в торце становится шире —
+ * поперёк всех путей. Съезд — от стрелки горловины, а если главный путь за ней прямой и достаточно длинный —
+ * от новой стрелки дальше, чтобы съезд на дальний путь был таким же пологим, как у вокзала, построенного сразу
+ * на столько путей.
  */
-export function extraTrackGeom(net: Network, st: Station, shape: StationShape): ExtraTrack {
+export function extraTrackGeom(net: Network, st: Station, shape: StationShape, side: TrackSide = 1): ExtraTrack {
   const R = RAIL_STATION;
-  const k = st.platforms.length;
   const { t, n, ends, switches, main } = shape;
-  const want = switchLenFor(k + 1);
+  const offs = trackOffsets(net, st, shape);
+  const lo = Math.min(...offs);
+  const hi = Math.max(...offs);
+  // Новый путь — за крайним своей стороны; съезд — как у вокзала, где он столько же путей от главного.
+  const d = side > 0 ? hi + R.spacing : lo - R.spacing;
+  const want = switchLenFor(1 + Math.round(Math.abs(d) / R.spacing));
   const branchAt = (sw: number, end: number, sign: 1 | -1): TrackBranch => {
     const at = net.node(sw).pos;
     const have = Math.abs(dot(sub(net.node(end).pos, at), t));
@@ -107,7 +133,6 @@ export function extraTrackGeom(net: Network, st: Station, shape: StationShape): 
     if (Math.abs(dot(o.lut.tangentAt(from), t)) < Math.cos(0.06)) return { node: sw, pos: at };
     return { split: { seg: o.id, s: from }, pos: p };
   };
-  const d = R.spacing * k;
   const a = add(net.node(ends[0]).pos, scale(n, d));
   const b = add(net.node(ends[1]).pos, scale(n, d));
   const b0 = branchAt(switches[0]!, ends[0], 1);
@@ -120,10 +145,10 @@ export function extraTrackGeom(net: Network, st: Station, shape: StationShape): 
     const h1 = Math.abs(dot(sub(b1.pos, b), t)) * 0.4;
     curves.push({ p0: b, p1: add(b, scale(t, h1)), p2: sub(b1.pos, scale(t, h1)), p3: b1.pos });
     branches.push(b1);
-    fp = { ...st.fp, center: add(st.fp.center, scale(n, R.spacing)) };
+    fp = side > 0 ? { ...st.fp, center: add(st.fp.center, scale(n, R.spacing)) } : { ...st.fp };
   } else {
-    // Здание в торце — поперёк всех путей, от главного до боковой платформы у нового крайнего.
-    const across = { lo: -(RAIL_HALF + 4), hi: R.spacing * k + RAIL_HALF + 8 };
+    // Здание в торце — поперёк всех путей: от крайнего с другой стороны до боковой платформы у крайнего со стороны n.
+    const across = { lo: Math.min(lo, d) - (RAIL_HALF + 4), hi: Math.max(hi, d) + RAIL_HALF + 8 };
     const buffer = net.node(ends[1]).pos;
     fp = {
       ...st.fp,

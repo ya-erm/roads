@@ -82,7 +82,7 @@ import { BuildContext, Builder, Plan, RoadRequest, Snap } from './build';
 import { diamondPlan, TemplateOptions, templatePlan, TemplatePlan } from './interchange';
 import { cloneNetwork, copyRails, RailPaste } from './railFragment';
 import { chainCoords, chainOffset, trackChain } from './railEdit';
-import { type ExtraTrack, extraTrackGeom, healCuts, stationShape, stripRailStation } from './railStationEdit';
+import { type ExtraTrack, extraTrackGeom, healCuts, stationShape, stripRailStation, type TrackSide } from './railStationEdit';
 import { linesForTown } from './townLines';
 import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
@@ -491,6 +491,8 @@ export interface BaysPlan {
 /** Можно ли достроить ж/д вокзалу ещё один путь с платформой, где он ляжет и во что обойдётся. */
 export interface RailTrackPlan extends BaysPlan {
   geom?: ExtraTrack;
+  /** С какой стороны от путей ляжет новый: 1 — со стороны здания, -1 — с другой (там, где здание не мешает). */
+  side?: TrackSide;
 }
 
 /** Перенос ж/д станции: какой она станет на новом месте (конечной или проходной) и поворот в чистом поле. */
@@ -6876,9 +6878,20 @@ export class Game implements BuildContext {
   /**
    * Достроить ж/д вокзалу ещё один путь с платформой: рядом с крайним, со стороны здания (здание отодвигается
    * на путь дальше, у конечной — в торце становится шире), съезды — от стрелок горловины (extraTrackGeom).
+   * Не помещается со стороны здания (мешают дома, пути, дороги, вода, край карты) — за крайним путём с другой
+   * стороны, здание остаётся на месте. side — только эта сторона.
    * Цена — путь и прибавка к цене вокзала за платформу (railStationFee). Мешают — как при постановке станции.
    */
-  railTrackPlan(id: number): RailTrackPlan {
+  railTrackPlan(id: number, side?: TrackSide): RailTrackPlan {
+    if (side) return this.railTrackPlanAt(id, side);
+    const near = this.railTrackPlanAt(id, 1);
+    // Со стороны здания не хватает только денег, или пути не проложить вовсе (нет геометрии) — другая сторона не поможет.
+    if (near.ok || !near.geom || near.reason === 'Не хватает денег') return near;
+    const far = this.railTrackPlanAt(id, -1);
+    return far.ok ? far : near;
+  }
+
+  private railTrackPlanAt(id: number, side: TrackSide): RailTrackPlan {
     const st = this.stations.get(id);
     if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null };
     if (st.kind !== 'rail') return { ok: false, reason: 'Пути с платформами — только у ж/д станции', cost: 0, fp: st.fp };
@@ -6886,7 +6899,7 @@ export class Game implements BuildContext {
     if (k >= RAIL_STATION.maxTracks) return { ok: false, reason: `Больше ${RAIL_STATION.maxTracks} путей нельзя`, cost: 0, fp: st.fp };
     const shape = stationShape(this.net, st);
     if (!shape) return { ok: false, reason: 'Пути станции перестроены — новый не проложить', cost: 0, fp: st.fp };
-    const geom = extraTrackGeom(this.net, st, shape);
+    const geom = extraTrackGeom(this.net, st, shape, side);
     const L = clampRailLength(geom.platform);
     let length = 0;
     const samples: Vec[] = [];
@@ -6897,7 +6910,9 @@ export class Game implements BuildContext {
     }
     const cost = Math.round(length * specCost(RAIL_SPEC)) + railStationFee(k + 1, L) - railStationFee(k, L);
     const fp = geom.fp;
-    const fail = (reason: string): RailTrackPlan => ({ ok: false, reason, cost, fp, geom });
+    const fail = (reason: string): RailTrackPlan => ({ ok: false, reason, cost, fp, geom, side });
+    // Здание остаётся, где стояло (проходная, путь с другой стороны), — его место не проверяем: оно уже его.
+    const still = fp.w === st.fp.w && dist(fp.center, st.fp.center) < 0.01;
     // Свои пути не мешают: платформы, съезды к ним и главный путь у стрелок горловины (в том числе за ними).
     const net = this.net;
     const nodes = new Set<number>([...shape.switches.filter((x): x is number => x !== null)]);
@@ -6905,18 +6920,18 @@ export class Game implements BuildContext {
     const own = new Set<number>();
     for (const nid of nodes) for (const sid of net.node(nid).segments) own.add(sid);
     for (const b of geom.branches) if (b.split) own.add(b.split.seg);
-    if (!this.inBounds(fp.center, 30) || samples.some((q) => !this.inBounds(q, 20))) return fail('За краем карты');
-    if (this.isWater(fp.center, footprintRadius(fp) * 0.6) || samples.some((q) => this.isWater(q, RAIL_HALF))) return fail('Мешает вода');
+    if ((!still && !this.inBounds(fp.center, 30)) || samples.some((q) => !this.inBounds(q, 20))) return fail('За краем карты');
+    if ((!still && this.isWater(fp.center, footprintRadius(fp) * 0.6)) || samples.some((q) => this.isWater(q, RAIL_HALF))) return fail('Мешает вода');
     this.index.remove(st);
     try {
-      if (this.index.overlaps(fp, 3) || samples.some((q) => this.blocked(q, RAIL_HALF + 2))) return fail('Мешает здание');
+      if ((!still && this.index.overlaps(fp, 3)) || samples.some((q) => this.blocked(q, RAIL_HALF + 2))) return fail('Мешает здание');
     } finally {
       this.index.add(st);
     }
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = { x: -u.y, y: u.x };
     const probes = [...samples];
-    for (let i = -2; i <= 2; i++) for (let j = -1; j <= 1; j++) probes.push(add(fp.center, add(scale(u, (i * fp.w) / 4), scale(v, (j * fp.h) / 2))));
+    if (!still) for (let i = -2; i <= 2; i++) for (let j = -1; j <= 1; j++) probes.push(add(fp.center, add(scale(u, (i * fp.w) / 4), scale(v, (j * fp.h) / 2))));
     for (const q of probes) {
       for (const s of net.segmentsNear(q, 40)) {
         if (own.has(s.id)) continue;
@@ -6928,12 +6943,15 @@ export class Game implements BuildContext {
       }
     }
     if (cost > this.budget) return fail('Не хватает денег');
-    return { ok: true, cost, fp, geom };
+    return { ok: true, cost, fp, geom, side };
   }
 
-  /** Достраивает ж/д вокзалу путь с платформой (railTrackPlan); поезда на станции и маршруты — как были. */
-  addRailTrack(id: number): string | null {
-    const plan = this.railTrackPlan(id);
+  /**
+   * Достраивает ж/д вокзалу путь с платформой (railTrackPlan; side — только с этой стороны, без — где помещается);
+   * поезда на станции и маршруты — как были.
+   */
+  addRailTrack(id: number, side?: TrackSide): string | null {
+    const plan = this.railTrackPlan(id, side);
     const st = this.stations.get(id);
     if (!plan.ok || !plan.geom || !plan.fp || !st) return plan.reason ?? 'Нельзя';
     this.checkpoint('путь станции');

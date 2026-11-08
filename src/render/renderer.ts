@@ -1,6 +1,7 @@
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
+import { stationNormal } from '../game/railStationEdit';
 import { warningMarks } from '../game/stationWarnings';
 import type { Game, LaneEnd } from '../game/game';
 import { bayFront, stopBerth, type FleetVehicle, type Line } from '../game/transport';
@@ -2120,22 +2121,23 @@ export class Renderer {
     if (main) {
       const mid = main.lut.pointAt(main.length / 2);
       const t = main.lut.tangentAt(main.length / 2);
-      // Сторона боковых путей; у вокзала на один путь — сторона здания (там его боковая платформа).
-      const nextMid = tracks.length > 1 ? tracks[1].lut.pointAt(tracks[1].length / 2) : st.fp.center;
-      const side = (nextMid.x - mid.x) * -t.y + (nextMid.y - mid.y) * t.x > 0 ? 1 : -1;
-      const gap = dist(mid, nextMid);
+      // Сторона здания и боковой платформы (stationNormal): у проходной — по зданию, у конечной — по второму пути.
+      const n = stationNormal(game.net, st, mid, t);
+      const side = n.x * -t.y + n.y * t.x > 0 ? 1 : -1;
+      // Пути — по порядку поперёк (путь могли достроить и по другую сторону от главного): от дальнего с другой стороны к зданию.
+      const across = tracks
+        .map((s, i) => ({ s, off: i === 0 ? 0 : dot(sub(s.lut.pointAt(s.length / 2), mid), n) }))
+        .sort((p, q) => p.off - q.off);
       // У конечной платформы доходят до упоров (к перрону у здания в торце), с другого конца — как обычно.
       const dead = (id: number) => game.net.nodes.get(id)?.segments.length === 1;
       const span = (s: Segment): [number, number] => (!st.terminal ? [4, s.length - 4] : dead(s.b) ? [4, s.length] : dead(s.a) ? [0, s.length - 4] : [4, s.length - 4]);
       // Сдвиг — относительно своего направления участка: у конечной пути могут быть уложены навстречу главному.
       const sideOf = (s: Segment) => (dot(s.lut.tangentAt(s.length / 2), t) >= 0 ? side : -side);
       // Островные платформы между соседними путями и боковая — у здания за крайним путём.
+      const islands = across.slice(0, -1).map(({ s, off }, i) => ({ s, gap: across[i + 1].off - off }));
       const strips: [Vec[], number][] = [];
-      for (let i = 0; i < tracks.length - 1; i++) {
-        const s = tracks[i];
-        strips.push([s.lut.offsetPolyline((sideOf(s) * gap) / 2, ...span(s), 6), gap - 2 * RAIL_HALF - 1.5]);
-      }
-      const last = tracks[tracks.length - 1];
+      for (const { s, gap } of islands) strips.push([s.lut.offsetPolyline((sideOf(s) * gap) / 2, ...span(s), 6), gap - 2 * RAIL_HALF - 1.5]);
+      const last = across[across.length - 1].s;
       strips.push([last.lut.offsetPolyline(sideOf(last) * (RAIL_HALF + 4.5), ...span(last), 6), 6]);
       // Конечная: перрон поперёк путей — от тупиков до здания в торце, во всю его ширину.
       const head = st.terminal ? [main.a, main.b].find(dead) : undefined;
@@ -2165,8 +2167,7 @@ export class Renderer {
       if (this.camera.zoom > 0.6) {
         ctx.strokeStyle = 'rgba(233, 181, 47, 0.8)';
         ctx.lineWidth = 0.6;
-        for (let i = 0; i < tracks.length - 1; i++) {
-          const s = tracks[i];
+        for (const { s, gap } of islands) {
           for (const k of [-1, 1]) {
             this.polyline(s.lut.offsetPolyline((sideOf(s) * gap) / 2 + (k * (gap - 2 * RAIL_HALF - 3)) / 2, ...span(s).map((x, j) => x + (j ? -2 : 2)) as [number, number], 6));
             ctx.stroke();

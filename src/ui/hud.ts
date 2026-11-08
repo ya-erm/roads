@@ -3134,7 +3134,9 @@ export class Hud {
       if (st.kind === 'rail') {
         const more = g.railTrackPlan(st.id);
         const n = st.platforms.length;
-        const plusTip = more.ok ? `Достроить путь с платформой · ${money(more.cost)}` : (more.reason ?? '');
+        // Со стороны здания не помещается — новый путь ляжет с другой стороны от путей.
+        const where = more.side === -1 ? ' с другой стороны от путей' : '';
+        const plusTip = more.ok ? `Достроить путь с платформой${where} · ${money(more.cost)}` : (more.reason ?? '');
         baysRow = `<div class="icon-row"><span class="lbl2">Пути</span>
           <span class="stepper bays tracks"><b>${platformsSvg(n)}<span>${n}</span></b><button
             data-action="st-track" data-id="${st.id}" class="${more.ok ? '' : 'off'}" data-tip="${esc(plusTip)}">+</button></span>
