@@ -306,7 +306,7 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
     runMonths(game, 1);
     expect(line.vehicles).toHaveLength(0);
     // Стройка пошла (бригада — сразу на месте и быстрая): пока открыт не весь путь — ждёт, весь — покупает.
-    game.construction.crews.rate = () => 40;
+    game.construction.crews.rateOf = () => 40;
     let bought = false;
     let gapWhileBought = false;
     for (let t = 0; t < 400 && !bought; t += 0.5) {

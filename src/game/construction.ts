@@ -32,7 +32,7 @@ import { corridorLayer } from '../lanes/speedDisplay';
 import type { Corridor, LaneNet } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import { ROAD_CLASSES } from '../world/roadTypes';
-import { buildRate, crewCap, frontOf, nextSite, paidFor, pickSite, stageSpans } from './constructionWork';
+import { buildRate, crewCap, frontOf, paidFor, pickSite, stageSpans } from './constructionWork';
 import { type CrewLane, crewRows, fillet, laneRow, polyLength, polyProject, stageSlots } from './crewLane';
 import { type Brigade, type CrewSave, Crews, type Site } from './crews';
 import type { CrewStep } from './crewRoads';
@@ -166,13 +166,18 @@ export class Construction {
       crewProjects: () => [...this.projects.values()].filter((p) => !p.paused && this.corridorsOf(p.id).length).map((p) => p.id),
       priority: (id) => !!this.projects.get(id)?.priority,
       cap: (id) => crewCap(this.corridorsOf(id)),
-      site: (id) => self.site(id),
-      path: (id) => self.approach(id)?.path() ?? null,
+      site: (id, b) => self.site(id, b),
+      path: (id, b) => self.approach(id, b)?.path() ?? null,
+      claim: (id, b) => self.claim(id, b),
       reach: (from, to) => host.reach(from, to),
       ...(host.crewStep ? { step: (from: number, to: number) => host.crewStep!(from, to) } : {}),
       drive: (b, from, to, car) => host.drive(b, from, to, car),
-      ...(host.driveFrom ? { driveFrom: (b: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number) => host.driveFrom!(b, car, spot, to) } : {}),
-      lane: (id, cars) => self.crewLane(id, cars),
+      ...(host.driveFrom
+        ? {
+            driveFrom: (b: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number) => host.driveFrom!(b, car, spot, to),
+          }
+        : {}),
+      lane: (id, cars, b) => self.crewLane(id, cars, b),
       slots: (b) => self.crewSlots(b),
       park: (sim) => host.park(sim),
       onRoad: (node) => host.onRoad(node),
@@ -183,16 +188,125 @@ export class Construction {
   private frontOn(c: Corridor): { pos: Vec; node: number } {
     const b = c.build!;
     const f = frontOf(b.done, c.length).s;
-    return { pos: c.lut.pointAt(b.fromB ? c.length - f : f), node: b.fromB ? c.b : c.a };
+    return {
+      pos: c.lut.pointAt(b.fromB ? c.length - f : f),
+      node: b.fromB ? c.b : c.a,
+    };
   }
 
   /**
    * Куда ехать бригаде к проекту: узел дороги с подъездом (оттуда — вдоль стройки, approach) и край работ. Подъезда нет
-   * ни у одного узла проекта (или проекта нет) — null: бригады не едут.
+   * ни у одного узла проекта (или проекта нет) — null: бригады не едут. С бригадой b — к её фронту (frontFor: свой
+   * участок или тот, что ей ближе и куда она доедет); без — к главному (current).
    */
-  site(id: number): Site | null {
-    const a = this.approach(id);
+  site(id: number, b?: Brigade): Site | null {
+    const a = this.approach(id, b);
     return a ? { node: a.node, pos: a.pos } : null;
+  }
+
+  /** Куда ехать к проекту id бригадам с узла from (база, её ворота): к какому-нибудь его фронту; не доехать — null. */
+  siteFrom(id: number, from: number): Site | null {
+    const f = this.frontFrom(id, null, from);
+    const r = f && this.routeTo(id, f.c, f.fromB, this.reachFrom(from));
+    return f && r ? { node: r.entry, pos: frontPoint(f.c, f.fromB) } : null;
+  }
+
+  /**
+   * Фронты проекта id — участки, что строятся сейчас: начатые и те, куда уже едет бригада (Brigade.front), по номеру.
+   * У каждого фронта — своя колонна этапов и свои бригады; встречаются фронты на стыке участков (каждый участок
+   * строит один фронт — без двойной работы и двойной оплаты).
+   */
+  fronts(id: number): Corridor[] {
+    const claims = this.claims(id, null);
+    return this.corridorsOf(id).filter((c) => c.build!.done > 0 || claims.has(c.id));
+  }
+
+  /** Участки проекта id, куда уже едут или где работают бригады (кроме but): номер участка → с какого конца. */
+  private claims(id: number, but: Brigade | null): Map<number, boolean> {
+    const out = new Map<number, boolean>();
+    for (const o of this.crews.brigades.values()) {
+      if (o === but || o.project !== id || !o.front || (o.state !== 'going' && o.state !== 'working')) continue;
+      const c = this.host.roads.net.corridors.get(o.front.corridor);
+      if (c?.build?.project === id && !out.has(c.id)) out.set(c.id, c.build.done > 0 ? !!c.build.fromB : o.front.fromB);
+    }
+    return out;
+  }
+
+  /** Узел n — у готовой дороги, и до него можно доехать с узла from. */
+  private reachFrom(from: number): (n: number) => boolean {
+    return (n) => this.host.onRoad(n) && (n === from || this.host.reach(from, n));
+  }
+
+  /**
+   * Фронт бригады b на проекте id: свой участок (Brigade.front), пока он строится; иначе — ближайший к её базе из тех,
+   * куда она доедет по дорогам оттуда, где стоит: уже идущий фронт (подъезд к началу его участка — вдоль стройки по
+   * не начатым полотнам) или новый — не начатый и никем не занятый участок с подъездом к его концу (оттуда он и
+   * заполняется, навстречу остальным). При равенстве — к уже идущему. Некуда — null.
+   */
+  frontFor(id: number, b: Brigade): { c: Corridor; fromB: boolean } | null {
+    const own = b.front && b.project === id ? this.host.roads.net.corridors.get(b.front.corridor) : undefined;
+    if (own?.build?.project === id)
+      return {
+        c: own,
+        fromB: own.build.done > 0 ? !!own.build.fromB : b.front!.fromB,
+      };
+    const from = this.crews.startOf(b);
+    return from === null ? null : this.frontFrom(id, b, from);
+  }
+
+  /** Фронт для бригады b (или любой бригады с узла from): ближайший к базе (или к from) доступный — frontFor. */
+  private frontFrom(id: number, b: Brigade | null, from: number): { c: Corridor; fromB: boolean } | null {
+    const net = this.host.roads.net;
+    const ok = this.reachFrom(from);
+    const claims = this.claims(id, b);
+    const home = (b && this.crews.bases.get(b.base)?.fp.center) ?? net.node(from).pos;
+    let best: {
+      c: Corridor;
+      fromB: boolean;
+      d: number;
+      fresh: boolean;
+    } | null = null;
+    for (const c of this.corridorsOf(id)) {
+      const busy = c.build!.done > 0 ? !!c.build!.fromB : claims.get(c.id);
+      for (const fromB of busy !== undefined ? [busy] : [false, true]) {
+        const start = fromB ? c.b : c.a;
+        const entry = busy !== undefined ? (this.routeTo(id, c, fromB, ok)?.entry ?? null) : ok(start) ? start : null;
+        if (entry === null) continue;
+        const d = dist(home, net.node(entry).pos);
+        const fresh = busy === undefined;
+        if (!best || d < best.d - 1e-6 || (Math.abs(d - best.d) <= 1e-6 && !fresh && best.fresh)) best = { c, fromB, d, fresh };
+      }
+    }
+    return best && { c: best.c, fromB: best.fromB };
+  }
+
+  /**
+   * Бригада b берётся за фронт на проекте id (frontFor): участок — её (Brigade.front); не начатый заполняется от того
+   * конца, к которому она едет. Не за что — фронт снят.
+   */
+  claim(id: number, b: Brigade): void {
+    const f = this.frontFor(id, b);
+    if (!f) {
+      delete b.front;
+      return;
+    }
+    b.front = { corridor: f.c.id, fromB: f.fromB };
+    const k = f.c.build!;
+    if (k.done <= 0 && !!k.fromB !== f.fromB) f.c.build = f.fromB ? { project: id, done: 0, fromB: true } : { project: id, done: 0 };
+  }
+
+  /**
+   * Следующий участок фронта, что дошёл до конца участка c (заполнялся от fromB): не начатый и никем не занятый участок
+   * проекта, что продолжает c от его конца (по номеру). Нет — фронт кончился (встретил другой или проект достроен).
+   */
+  continuation(id: number, c: Corridor, fromB: boolean, but: Brigade | null = null): { c: Corridor; fromB: boolean } | null {
+    const tail = fromB ? c.a : c.b;
+    const claims = this.claims(id, but);
+    for (const k of this.corridorsOf(id)) {
+      if (k === c || k.build!.done > 0 || claims.has(k.id) || (k.a !== tail && k.b !== tail)) continue;
+      return { c: k, fromB: k.b === tail && k.a !== tail };
+    }
+    return null;
   }
 
   /**
@@ -216,8 +330,8 @@ export class Construction {
    * (кратчайший по длине; обычно край работ — на участке, что заполняется прямо от этого узла) до края работ (pos).
    * path — точки этого пути по оси проекта, от узла до края. Подъезда нет — null.
    */
-  approach(id: number): { node: number; pos: Vec; path: () => Vec[] } | null {
-    const r = this.route(id);
+  approach(id: number, by?: Brigade): { node: number; pos: Vec; path: () => Vec[] } | null {
+    const r = this.route(id, by);
     if (!r) return null;
     const { c, s, end, legs, entry } = r;
     const net = this.host.roads.net;
@@ -237,12 +351,13 @@ export class Construction {
    * если тот продолжает его от конца (nextSite). Ряд бригады на участке — в такте (trackCrews). Путь вдоль стройки
    * входит в участок не с начала заполнения (там уже строят от другого конца) — null.
    */
-  crewLane(id: number, cars: readonly { pos: Vec; dir: Vec }[] | null): CrewLane | null {
-    const r = this.route(id);
+  crewLane(id: number, cars: readonly { pos: Vec; dir: Vec }[] | null, by?: Brigade): CrewLane | null {
+    const r = this.route(id, by);
     if (!r) return null;
     const { c, legs, entry, end } = r;
     const net = this.host.roads.net;
-    const fromB = !!c.build!.fromB;
+    const f = by ? this.frontFor(id, by) : null;
+    const fromB = f ? f.fromB : !!c.build!.fromB;
     const start = fromB ? c.b : c.a;
     if (cars?.length && end !== start) return null;
     // Вдоль стройки: от узла подъезда по полотнам проекта к началу заполнения, по участку и по следующему, если тот
@@ -251,9 +366,7 @@ export class Construction {
     if (cars?.length) for (const leg of legs) alongCorridor(body, leg.k, leg.k.a === leg.from ? 0 : leg.k.length, leg.k.a === leg.from ? leg.k.length : 0, 5);
     else body[0] = c.lut.pointAt(fromB ? c.length : 0);
     alongCorridor(body, c, fromB ? c.length : 0, fromB ? 0 : c.length, 5);
-    const next = nextSite(net, c, this.corridorsOf(id));
-    const tail = fromB ? c.a : c.b;
-    const onward = next && (next.fromB ? next.c.b : next.c.a) === tail ? next : null;
+    const onward = this.continuation(id, c, fromB, by ?? null);
     if (onward) alongCorridor(body, onward.c, onward.fromB ? onward.c.length : 0, onward.fromB ? 0 : onward.c.length, 5);
     let pts: Vec[];
     if (cars?.length) {
@@ -275,9 +388,17 @@ export class Construction {
       const u = Math.min(15, k.length / 2);
       return polyProject(path, k.lut.pointAt(kFromB ? k.length - u : u)) - u;
     };
-    const out: CrewLane = { path, legs: [{ corridor: c.id, fromB, at: legAt(c, fromB) }] };
+    const out: CrewLane = {
+      path,
+      legs: [{ corridor: c.id, fromB, at: legAt(c, fromB) }],
+    };
     // Начало следующего — ровно за концом этого по полосе: места колонны на стыке совпадают (без скачка при смене участка).
-    if (onward) out.legs.push({ corridor: onward.c.id, fromB: onward.fromB, at: out.legs[0].at + c.length });
+    if (onward)
+      out.legs.push({
+        corridor: onward.c.id,
+        fromB: onward.fromB,
+        at: out.legs[0].at + c.length,
+      });
     if (cars?.length) {
       out.from = cars.map((m) => polyProject(path, m.pos));
       out.t0 = this.host.time;
@@ -291,9 +412,10 @@ export class Construction {
    */
   crewSlots(b: Brigade): number[] | null {
     if (!b.lane || b.project === undefined) return null;
-    const c = this.current(b.project);
-    if (!c?.build) return null;
-    const fromB = !!c.build.fromB;
+    const f = this.frontFor(b.project, b);
+    const c = f?.c;
+    if (!f || !c?.build) return null;
+    const fromB = f.fromB;
     const leg = b.lane.legs.find((g) => g.corridor === c.id && g.fromB === fromB);
     if (!leg) return null;
     // Полоса дальше не идёт, а в конце — готовая дорога: колонна встаёт перед её перекрёстком (оттуда выедет в поток),
@@ -318,7 +440,12 @@ export class Construction {
       const k = net.corridors.get(id);
       return !!k && corridorLayer(net, k) === 0;
     };
-    const o = { end: Math.max(0, c.length - cut), ahead: ground(c.id), ext, extAhead: !!next && ground(next.corridor) };
+    const o = {
+      end: Math.max(0, c.length - cut),
+      ahead: ground(c.id),
+      ext,
+      extAhead: !!next && ground(next.corridor),
+    };
     return stageSlots(c.build.done, c.length, o).map((u) => leg.at + u);
   }
 
@@ -329,20 +456,21 @@ export class Construction {
    */
   private trackCrews(): void {
     const net = this.host.roads.net;
-    /** Бригады на полосах по проектам — для раскладки рядов. */
+    /** Бригады на полосах по фронтам (участкам) — для раскладки рядов. */
     const onSite = new Map<number, Brigade[]>();
     for (const b of this.crews.brigades.values()) {
       if (!b.lane || b.project === undefined || (b.state !== 'going' && b.state !== 'working')) continue;
       const slots = this.crewSlots(b);
-      if (slots) {
+      const f = slots && this.frontFor(b.project, b);
+      if (f) {
         this.crews.keepSpots(b);
-        const list = onSite.get(b.project) ?? [];
+        const list = onSite.get(f.c.id) ?? [];
         list.push(b);
-        onSite.set(b.project, list);
+        onSite.set(f.c.id, list);
         continue;
       }
       // Проект кончился — бригаду отпустят в такте бригад (выедет в поток с мест).
-      if (!this.current(b.project)) continue;
+      if (!this.corridorsOf(b.project).length) continue;
       let node = b.at ?? null;
       for (const g of b.lane.legs) {
         const k = net.corridors.get(g.corridor);
@@ -353,6 +481,12 @@ export class Construction {
     for (const [id, list] of onSite) this.layRows(id, list);
   }
 
+  /** Фронт (участок) по номеру полотна — если он ещё строится. */
+  private corridorById(id: number): Corridor | null {
+    const c = this.host.roads.net.corridors.get(id);
+    return c?.build ? c : null;
+  }
+
   /**
    * Ряды бригад на участке проекта id (crewRows: ширина полотна поровну на всех, каждая — посередине своей полосы).
    * Раскладка сменилась (бригада приехала или уехала, участок другой ширины) — бригада перестраивается в свой ряд
@@ -360,7 +494,7 @@ export class Construction {
    * сворачивает, проезжая это место, — стоящая ждёт в своём ряду (LaneShift). Порядок рядов — как стоят сейчас.
    */
   private layRows(id: number, list: Brigade[]): void {
-    const c = this.current(id);
+    const c = this.corridorById(id);
     if (!c) return;
     const rows = crewRows(c, list.length);
     const order = [...list].sort((p, q) => laneRow(p.lane!) - laneRow(q.lane!) || p.id - q.id);
@@ -380,18 +514,54 @@ export class Construction {
    * Путь бригады к краю работ проекта id (approach): участок c, край работ в s метрах от его конца a, узел подъезда
    * entry, полотна проекта от него до участка (legs) и конец участка, через который путь в него входит (end).
    */
-  private route(id: number): { c: Corridor; s: number; end: number; entry: number; legs: { k: Corridor; from: number }[] } | null {
+  private route(
+    id: number,
+    by?: Brigade,
+  ): {
+    c: Corridor;
+    s: number;
+    end: number;
+    entry: number;
+    legs: { k: Corridor; from: number }[];
+  } | null {
+    if (by) {
+      // К своему фронту — входя в его участок с начала заполнения, от узла, куда бригада доедет.
+      const f = this.frontFor(id, by);
+      const from = this.crews.startOf(by);
+      if (!f || from === null) return null;
+      return this.routeTo(id, f.c, f.fromB, this.reachFrom(from));
+    }
     const c = this.current(id);
-    if (!c) return null;
-    const list = this.corridorsOf(id);
+    return c ? this.routeTo(id, c, !!c.build!.fromB, (n) => this.accessRank(n) !== null, true) : null;
+  }
+
+  /**
+   * Путь к краю работ участка c (заполняется от fromB) от узлов с подъездом (ok): Дейкстра по не занятым другими
+   * фронтами полотнам проекта (по номерам — детерминированно). Входит в участок с начала заполнения; anyEnd — с любого
+   * конца, какой ближе (показ, главный фронт). Нет пути — null.
+   */
+  private routeTo(
+    id: number,
+    c: Corridor,
+    fromB: boolean,
+    ok: (n: number) => boolean,
+    anyEnd = false,
+  ): {
+    c: Corridor;
+    s: number;
+    end: number;
+    entry: number;
+    legs: { k: Corridor; from: number }[];
+  } | null {
+    const busy = this.fronts(id);
+    const list = this.corridorsOf(id).filter((k) => k === c || !busy.includes(k));
     const b = c.build!;
-    const f = frontOf(b.done, c.length).s;
+    const f = b.done > 0 || !!b.fromB === fromB ? frontOf(b.done, c.length).s : 0;
     // Край работ — в s метрах от конца a.
-    const s = b.fromB ? c.length - f : f;
-    // Дейкстра по полотнам проекта от всех узлов с подъездом (по номерам — детерминированно).
+    const s = fromB ? c.length - f : f;
     const far = new Map<number, number>();
     const prev = new Map<number, { k: Corridor; from: number }>();
-    for (const k of list) for (const n of [k.a, k.b]) if (!far.has(n) && this.accessRank(n) !== null) far.set(n, 0);
+    for (const k of list) for (const n of [k.a, k.b]) if (!far.has(n) && ok(n)) far.set(n, 0);
     if (!far.size) return null;
     const done = new Set<number>();
     for (;;) {
@@ -401,7 +571,8 @@ export class Construction {
       done.add(u);
       const du = far.get(u)!;
       for (const k of list) {
-        if (k.a !== u && k.b !== u) continue;
+        // Сам участок фронта — только целью, не дорогой к нему.
+        if ((k.a !== u && k.b !== u) || k === c) continue;
         const v = k.a === u ? k.b : k.a;
         const dv = du + k.length;
         if (dv < (far.get(v) ?? Infinity) - 1e-9) {
@@ -410,10 +581,14 @@ export class Construction {
         }
       }
     }
-    const viaA = (far.get(c.a) ?? Infinity) + s;
-    const viaB = (far.get(c.b) ?? Infinity) + (c.length - s);
-    if (!Number.isFinite(Math.min(viaA, viaB))) return null;
-    const end = viaA <= viaB ? c.a : c.b;
+    const start = fromB ? c.b : c.a;
+    let end = start;
+    if (anyEnd) {
+      const viaA = (far.get(c.a) ?? Infinity) + s;
+      const viaB = (far.get(c.b) ?? Infinity) + (c.length - s);
+      if (!Number.isFinite(Math.min(viaA, viaB))) return null;
+      end = viaA <= viaB ? c.a : c.b;
+    } else if (!far.has(start)) return null;
     const legs: { k: Corridor; from: number }[] = [];
     let node = end;
     for (let step = prev.get(node); step; step = prev.get(node)) {
@@ -432,7 +607,13 @@ export class Construction {
   start(id: number, net: LaneNet, corridors: number[]): Project {
     this.nextId = Math.max(this.nextId, id + 1);
     const cs = corridors.map((c) => net.corridors.get(c)).filter((c): c is Corridor => !!c);
-    const p: Project = { id, label: projectLabel(net, cs), builtLen: 0, spent: 0, created: this.host.time };
+    const p: Project = {
+      id,
+      label: projectLabel(net, cs),
+      builtLen: 0,
+      spent: 0,
+      created: this.host.time,
+    };
     this.projects.set(id, p);
     this.stamp++;
     return p;
@@ -462,7 +643,10 @@ export class Construction {
     if (!hit) {
       if (this.prices.size > 4000) this.prices.clear();
       const water = (p: Vec, m?: number) => this.host.isWater(p, m);
-      hit = { full: fullCorridorCost(net, c, water, this.host.ground()), rate: buildRate(net, c, water) };
+      hit = {
+        full: fullCorridorCost(net, c, water, this.host.ground()),
+        rate: buildRate(net, c, water),
+      };
       this.prices.set(key, hit);
     }
     return hit;
@@ -474,6 +658,9 @@ export class Construction {
    */
   current(id: number): Corridor | null {
     const net = this.host.roads.net;
+    // Главный фронт: начатый участок, иначе тот, куда уже едет бригада (его конец она уже выбрала — не трогаем).
+    const front = this.fronts(id)[0];
+    if (front) return front;
     // Выбор — pickSite (тот же, что предсказывает следующий участок для колонны техники, nextSite).
     // Из не начатых — от подъезда ближе к базе (accessRank); подъезда нет нигде — как прежде, только для показа.
     const pick = pickSite(
@@ -511,59 +698,85 @@ export class Construction {
   /** Проект вперёд на dt секунд: метры, деньги за них, готовые участки открываются. true — открыт участок. */
   private advance(p: Project, dt: number): boolean {
     const net = this.host.roads.net;
-    let left = dt;
     let opened = false;
     /** Узел, у которого кончился последний готовый участок (там бригады, если проект достроен). */
     let last: number | null = null;
-    // Участок кончился посреди такта — остаток времени идёт на следующий (не больше нескольких за такт).
-    for (let guard = 0; left > 1e-9 && guard < 8; guard++) {
-      const c = this.current(p.id);
-      if (!c) break;
-      const b = c.build!;
-      // Темп — по бригадам на месте: никого нет — стройка ждёт.
-      const crew = this.crews.rate(p.id, this.frontOn(c).pos);
-      if (crew <= 0) break;
-      const { full } = this.price(net, c);
-      const rate = this.price(net, c).rate * crew;
-      const step = Math.min(Math.max(0, c.length - b.done), left * rate);
-      const done = b.done + step;
-      const cost = paidFor(full, done, c.length) - paidFor(full, b.done, c.length);
-      // Сперва — из резерва проекта, остальное — из свободного бюджета (до кредитного предела: резерв его не обходит).
-      const fromReserve = Math.min(cost, p.reserve ?? 0);
-      const free = this.host.budget;
-      if (cost > 0 && (cost - fromReserve > Math.max(0, free) || cost > free + this.reserved())) {
-        if (p.stalled === undefined) {
-          p.stalled = this.host.time;
-          this.host.projectEvent?.('stalled', p);
+    // Бригада на месте без своего фронта (старое сохранение) — за тот, что ей ближе (обычно — единственный начатый).
+    for (const b of this.crews.working(p.id)) if (!b.front || !this.corridorById(b.front.corridor)) this.claim(p.id, b);
+    // Каждый фронт — сам по себе: свой участок, свои бригады, свой темп; деньги — общие, кончились — встают все.
+    let stalled = false;
+    // Ни одного фронта ещё нет — главный (current): темпа без бригад у него нет, но так проект и начинается.
+    const fronts = this.fronts(p.id);
+    const main = fronts.length ? null : this.current(p.id);
+    if (main) fronts.push(main);
+    for (const front of fronts) {
+      if (stalled) break;
+      let c: Corridor | null = front;
+      let left = dt;
+      // Участок кончился посреди такта — остаток времени идёт на следующий участок фронта (не больше нескольких за такт).
+      for (let guard = 0; c && left > 1e-9 && guard < 8; guard++) {
+        const b = c.build!;
+        const crews = this.crews.working(p.id).filter((o) => o.front?.corridor === c!.id);
+        // Темп — по бригадам на месте у этого фронта: никого нет — фронт ждёт.
+        const crew = this.crews.rateOf(crews, this.frontOn(c).pos);
+        if (crew <= 0) break;
+        const { full } = this.price(net, c);
+        const rate = this.price(net, c).rate * crew;
+        const step = Math.min(Math.max(0, c.length - b.done), left * rate);
+        const done = b.done + step;
+        const cost = paidFor(full, done, c.length) - paidFor(full, b.done, c.length);
+        // Сперва — из резерва проекта, остальное — из свободного бюджета (до кредитного предела: резерв его не обходит).
+        const fromReserve = Math.min(cost, p.reserve ?? 0);
+        const free = this.host.budget;
+        if (cost > 0 && (cost - fromReserve > Math.max(0, free) || cost > free + this.reserved())) {
+          if (p.stalled === undefined) {
+            p.stalled = this.host.time;
+            this.host.projectEvent?.('stalled', p);
+          }
+          stalled = true;
+          break;
         }
-        break;
-      }
-      delete p.stalled;
-      if (cost > 0) {
-        if (fromReserve > 0) {
-          const rest = (p.reserve ?? 0) - fromReserve;
-          if (rest > 0) p.reserve = rest;
-          else delete p.reserve;
+        delete p.stalled;
+        if (cost > 0) {
+          if (fromReserve > 0) {
+            const rest = (p.reserve ?? 0) - fromReserve;
+            if (rest > 0) p.reserve = rest;
+            else delete p.reserve;
+          }
+          this.host.spend(cost);
+          p.spent += cost;
         }
-        this.host.spend(cost);
-        p.spent += cost;
+        left -= step / rate;
+        if (done >= c.length - 1e-6) {
+          // Следующий участок фронта — до открытия этого (пока он ещё «свой», continuation его не считает чужим).
+          const next = this.continuation(p.id, c, !!b.fromB);
+          delete c.build;
+          net.touch(c);
+          p.builtLen += c.length;
+          opened = true;
+          last = b.fromB ? c.a : c.b;
+          // Граф движения — сразу: подъезд к следующему участку — по только что открытому (accessRank).
+          this.host.networkChanged();
+          // Фронт идёт дальше по продолжению; продолжения нет (встретил другой фронт) — его бригады свободны для других
+          // фронтов и проектов (едут туда своим ходом — trackCrews, relocate).
+          if (next) {
+            next.c.build = next.fromB ? { project: p.id, done: 0, fromB: true } : { project: p.id, done: 0 };
+            for (const o of crews) o.front = { corridor: next.c.id, fromB: next.fromB };
+          } else for (const o of crews) delete o.front;
+          c = next?.c ?? null;
+        } else c.build = { ...b, done };
       }
-      left -= step / rate;
-      if (done >= c.length - 1e-6) {
-        delete c.build;
-        net.touch(c);
-        p.builtLen += c.length;
-        opened = true;
-        last = b.fromB ? c.a : c.b;
-        // Граф движения — сразу: подъезд к следующему участку — по только что открытому (accessRank).
-        this.host.networkChanged();
-      } else c.build = { ...b, done };
     }
-    // Бригады на месте — у нового края работ (съехали с дороги у узла подъезда); проект достроен — у конца последнего
-    // участка: оттуда они и поедут дальше по уже готовой дороге.
-    const site = this.site(p.id);
-    if (site) this.crews.follow(p.id, site.pos, site.node);
-    else if (last !== null && !this.corridorsOf(p.id).length) this.crews.follow(p.id, net.node(last).pos, last);
+    // Бригады на месте — у нового края работ своего фронта (съехали с дороги у узла подъезда); проект достроен — у конца
+    // последнего участка: оттуда они и поедут дальше по уже готовой дороге.
+    if (!this.corridorsOf(p.id).length) {
+      if (last !== null) this.crews.follow(p.id, net.node(last).pos, last);
+      return opened;
+    }
+    for (const o of this.crews.working(p.id)) {
+      const s = this.site(p.id, o);
+      if (s) this.crews.followOne(o, s.pos, s.node);
+    }
     return opened;
   }
 
@@ -656,7 +869,14 @@ export class Construction {
   /** Из чего недостроенное: метров на земле, по мостам, в тоннелях, над водой; самая высокая насыпь и глубокая выемка. */
   parts(id: number): ProjectParts {
     const net = this.host.roads.net;
-    const out: ProjectParts = { ground: 0, bridge: 0, tunnel: 0, water: 0, fill: 0, cut: 0 };
+    const out: ProjectParts = {
+      ground: 0,
+      bridge: 0,
+      tunnel: 0,
+      water: 0,
+      fill: 0,
+      cut: 0,
+    };
     for (const c of this.corridorsOf(id)) {
       const key = `${c.id}:${c.rev}`;
       let hit = this.partsCache.get(key);
@@ -754,7 +974,11 @@ export class Construction {
   toSave(): ConstructionSave | undefined {
     const crews = this.crews.toSave();
     if (!this.projects.size && this.nextId === 1 && !crews) return undefined;
-    return { nextId: this.nextId, projects: [...this.projects.values()].map((p) => ({ ...p })), ...(crews ? { crews } : {}) };
+    return {
+      nextId: this.nextId,
+      projects: [...this.projects.values()].map((p) => ({ ...p })),
+      ...(crews ? { crews } : {}),
+    };
   }
 
   load(save: ConstructionSave | undefined): void {
@@ -770,11 +994,24 @@ export class Construction {
       orphans.set(c.build.project, [...(orphans.get(c.build.project) ?? []), c]);
     }
     for (const [id, cs] of [...orphans].sort((a, b) => a[0] - b[0])) {
-      this.projects.set(id, { id, label: projectLabel(net, cs), builtLen: 0, spent: 0, created: this.host.time });
+      this.projects.set(id, {
+        id,
+        label: projectLabel(net, cs),
+        builtLen: 0,
+        spent: 0,
+        created: this.host.time,
+      });
       this.nextId = Math.max(this.nextId, id + 1);
     }
     this.prune();
   }
+}
+
+/** Край работ на участке c, что заполняется от конца fromB (не начатый — у начала заполнения). */
+function frontPoint(c: Corridor, fromB: boolean): Vec {
+  const b = c.build;
+  const f = b && b.done > 0 ? frontOf(b.done, c.length).s : 0;
+  return c.lut.pointAt(fromB ? c.length - f : f);
 }
 
 /** Точки оси полотна k от s0 до s1 (без первой) с шагом не больше step метров — в конец pts. */

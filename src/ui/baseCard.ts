@@ -145,8 +145,8 @@ function nearHtml(game: Game, id: number): string {
     .map(({ info, d }) => {
       const p = info.project;
       const power = Math.round((1 / (1 + d / CONSTRUCTION.reach)) * 100);
-      const site = game.construction.site(p.id);
-      const reach = site !== null && (site.node === base.nodeId || game.reach(base.nodeId, site.node));
+      // Доехать отсюда — до какого-нибудь фронта проекта (свой участок навстречу другим — тоже).
+      const reach = game.construction.siteFrom(p.id, base.nodeId) !== null;
       const state = !info.access && info.waits
         ? `<span class="muted" data-tip="Подъезд — через соседний строящийся проект: начнётся, когда тот дорастёт сюда">⏳ после соседнего</span>`
         : !info.access

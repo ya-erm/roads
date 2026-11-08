@@ -7048,8 +7048,9 @@ export class Game implements BuildContext {
       const cars = crews.carsAt(b);
       if (!cars.length) continue;
       const p = b.project !== undefined ? this.construction.projects.get(b.project) : undefined;
-      const c = b.lane && b.project !== undefined ? this.construction.current(b.project) : null;
-      const fromB = !!c?.build?.fromB;
+      const front = b.lane && b.project !== undefined ? this.construction.frontFor(b.project, b) : null;
+      const c = front?.c ?? null;
+      const fromB = !!front?.fromB;
       const leg = c?.build ? b.lane?.legs.find((g) => g.corridor === c.id && g.fromB === fromB) : undefined;
       const spans = c?.build ? stageSpans(c.build.done, c.length) : null;
       const going = !!p && !p.paused && p.stalled === undefined && b.state === 'working';

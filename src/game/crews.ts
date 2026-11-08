@@ -53,6 +53,12 @@ export interface Brigade {
   /** Колонна в потоке (машины в симуляции) — не сохраняется: после загрузки бригада выезжает заново. */
   convoy?: Convoy;
   /**
+   * Фронт бригады на проекте — участок (полотно), который она строит или к которому едет, и с какого конца он
+   * заполняется (Construction.frontFor, claim). У проекта может быть несколько фронтов — навстречу друг другу; каждый
+   * участок строит один фронт. Нет — выберет, когда поедет.
+   */
+  front?: { corridor: number; fromB: boolean };
+  /**
    * Полоса бригады на стройке (crewLane.ts): по ней машины от мест, где колонна собралась у подъезда, едут на свои
    * места в колонне этапов и работают — один непрерывный путь, без перескока. Нет — бригада не на стройке.
    */
@@ -135,10 +141,15 @@ export interface CrewHost {
   priority?(project: number): boolean;
   /** Сколько бригад встанет на проект (по ширине его полотен, constructionWork.crewCap); нет — brigade.perProject. */
   cap?(project: number): number;
-  /** Куда ехать к проекту (null — проекта нет или к нему нет подъезда по дорогам). */
-  site(project: number): Site | null;
-  /** Путь вдоль стройки от узла Site.node до края работ: точки по оси проекта (null — проекта нет). */
-  path(project: number): Vec[] | null;
+  /**
+   * Куда ехать к проекту (null — проекта нет или к нему нет подъезда по дорогам). С бригадой — к её фронту (свой
+   * участок или ближайший, куда она доедет); без — к главному.
+   */
+  site(project: number, brigade?: Brigade): Site | null;
+  /** Путь вдоль стройки от узла Site.node до края работ (фронта бригады): точки по оси проекта (null — проекта нет). */
+  path(project: number, brigade?: Brigade): Vec[] | null;
+  /** Бригада берётся за фронт проекта (Brigade.front) — тот, к которому поедет (site с ней). */
+  claim?(project: number, brigade: Brigade): void;
   /** От узла from до узла to можно добраться по готовым дорогам (без учёта направления полос — см. step). */
   reach(from: number, to: number): boolean;
   /**
@@ -160,7 +171,7 @@ export interface CrewHost {
    * Полоса бригады на проекте (crewLane.ts): от мест машин cars (нос и курс, по номеру; null — прямо позади начала
    * участка) к началу заполнения и по участку. null — не построить.
    */
-  lane?(project: number, cars: readonly { pos: Vec; dir: Vec }[] | null): CrewLane | null;
+  lane?(project: number, cars: readonly { pos: Vec; dir: Vec }[] | null, brigade: Brigade): CrewLane | null;
   /**
    * Места машин бригады на её полосе (м от начала полосы, по номеру машины) — у краёв этапов участка, что строится;
    * null — полоса не идёт по этому участку (участок сменился — бригаде туда своим ходом, relocate).
@@ -262,7 +273,7 @@ export class Crews {
 
   /** Полоса бригады на проекте: от мест машин (spots; нет — прямо позади начала участка). */
   private makeLane(b: Brigade, project: number): void {
-    const lane = this.host.lane?.(project, b.spots?.length === CONVOY_CARS ? b.spots : null) ?? null;
+    const lane = this.host.lane?.(project, b.spots?.length === CONVOY_CARS ? b.spots : null, b) ?? null;
     if (lane) b.lane = lane;
     else delete b.lane;
   }
@@ -379,10 +390,13 @@ export class Crews {
 
   /** Темп проекта: сумма вкладов работающих на нём бригад (0 — никто не работает). */
   rate(project: number, front: Vec): number {
+    return this.rateOf(this.working(project), front);
+  }
+
+  /** Темп фронта: сумма вкладов его бригад list у края работ front (сильнейшая — во всю силу, следующие — долями). */
+  rateOf(list: readonly Brigade[], front: Vec): number {
     // Сильнейшая бригада — во всю силу, следующие — долями CONSTRUCTION.crewShare.
-    const powers = this.working(project)
-      .map((b) => this.power(b, front))
-      .sort((a, b) => b - a);
+    const powers = list.map((b) => this.power(b, front)).sort((a, b) => b - a);
     const share = CONSTRUCTION.crewShare;
     return powers.reduce((k, p, i) => k + p * (share[i] ?? share[share.length - 1]), 0);
   }
@@ -405,6 +419,11 @@ export class Crews {
   /** Узел, откуда бригада поедет: где стоит, а не у дороги — ворота базы (туда её перенесёт launch). */
   private startNode(b: Brigade): number | null {
     return this.from(b) ?? this.bases.get(b.base)?.nodeId ?? null;
+  }
+
+  /** Узел, откуда бригада поедет к проекту (startNode); едет колонной — оттуда, куда едет. */
+  startOf(b: Brigade): number | null {
+    return b.convoy?.to ?? this.startNode(b);
   }
 
   /** Бригада доедет до узла node по готовым дорогам оттуда, где стоит. */
@@ -443,7 +462,7 @@ export class Crews {
     const live = new Set(projects);
     for (const b of this.brigades.values()) {
       // Проект кончился, отменён, на паузе или к нему больше нет подъезда — бригада свободна.
-      if ((b.state === 'going' || b.state === 'working') && (b.project === undefined || !live.has(b.project) || !this.host.site(b.project))) this.release(b);
+      if ((b.state === 'going' || b.state === 'working') && (b.project === undefined || !live.has(b.project) || !this.host.site(b.project, b))) this.release(b);
       // Свободна или едет домой не машиной — может сразу взяться за другой проект.
       if (b.state === 'idle' || (b.state === 'back' && !b.convoy)) this.assign(b, projects);
       if (b.state === 'going' && !b.convoy && b.eta === undefined) this.launch(b);
@@ -488,13 +507,15 @@ export class Crews {
     if (!prio) return;
     for (const id of projects) {
       if (!prio(id)) continue;
-      const s = this.host.site(id);
-      if (!s) continue;
+      if (!this.host.site(id)) continue;
       const per = this.cap(id);
       while (this.assigned(id).length < per) {
         let best: { b: Brigade; n: number; d: number } | null = null;
         for (const b of this.brigades.values()) {
-          if (b.state !== 'working' || b.project === undefined || b.pinned || prio(b.project) || !this.canReach(b, s.node)) continue;
+          if (b.state !== 'working' || b.project === undefined || b.pinned || prio(b.project)) continue;
+          // К какому фронту приоритетного она поедет (доедет ли туда по дорогам).
+          const s = this.host.site(id, b);
+          if (!s || !this.canReach(b, s.node)) continue;
           const n = this.assigned(b.project).length;
           const d = dist(this.where(b), s.pos);
           if (!best || n > best.n || (n === best.n && d < best.d - 1e-6)) best = { b, n, d };
@@ -504,6 +525,7 @@ export class Crews {
         // Сперва вдоль своей стройки назад к дороге, оттуда — к приоритетному (launch в такте).
         const back = this.pathBack(b);
         b.project = id;
+        delete b.front;
         b.state = 'going';
         if (!back || !this.walk(b, back.path, true)) this.launch(b);
       }
@@ -513,8 +535,8 @@ export class Crews {
   /** Путь работающей бригады назад к дороге — вдоль стройки от края работ к узлу подъезда (он же — новый b.at). */
   private pathBack(b: Brigade): { path: Vec[]; node: number } | null {
     if (b.state !== 'working' || b.project === undefined) return null;
-    const s = this.host.site(b.project);
-    const path = s && this.host.path(b.project);
+    const s = this.host.site(b.project, b);
+    const path = s && this.host.path(b.project, b);
     if (!s || !path) return null;
     b.at = s.node;
     this.offSite(b);
@@ -531,6 +553,7 @@ export class Crews {
     const back = this.walkBack(b) ?? this.pathBack(b)?.path ?? null;
     delete b.lane;
     delete b.project;
+    delete b.front;
     // Проект кончился, на паузе или к нему не подъехать — назначение игрока тоже кончилось.
     delete b.pinned;
     if (!b.pos && b.at === undefined) {
@@ -564,7 +587,7 @@ export class Crews {
     for (const id of projects) {
       const n = this.assigned(id).length;
       if (n >= this.cap(id)) continue;
-      const s = this.host.site(id);
+      const s = this.host.site(id, b);
       // К проекту без подъезда (или куда ей не доехать по дорогам) бригада не едет.
       if (!s || !this.canReach(b, s.node)) continue;
       const top = !!this.host.priority?.(id);
@@ -576,6 +599,7 @@ export class Crews {
     // Ехала вдоль стройки назад к дороге — доедет до неё, оттуда и выедет (launch после поездки).
     const back = this.walkBack(b);
     b.project = best.id;
+    delete b.front;
     b.state = 'going';
     if (back) this.walk(b, back, true);
   }
@@ -597,8 +621,10 @@ export class Crews {
    * такт; пути по дорогам нет — бригада свободна (к проекту ей не доехать).
    */
   private launch(b: Brigade): void {
-    const s = b.project !== undefined ? this.host.site(b.project) : null;
+    const s = b.project !== undefined ? this.host.site(b.project, b) : null;
     if (!s) return this.release(b);
+    // Едет к этому фронту — он её (другие бригады выберут свой или присоединятся).
+    this.host.claim?.(b.project!, b);
     let from = this.from(b);
     if (from === null) {
       this.home(b);
@@ -633,8 +659,11 @@ export class Crews {
    */
   private onSite(b: Brigade, s: Site): void {
     b.at = s.node;
-    if (b.project !== undefined) this.makeLane(b, b.project);
-    if (b.project !== undefined && this.walk(b, this.host.path(b.project))) return;
+    if (b.project !== undefined) {
+      this.host.claim?.(b.project, b);
+      this.makeLane(b, b.project);
+    }
+    if (b.project !== undefined && this.walk(b, this.host.path(b.project, b))) return;
     this.work(b, s);
   }
 
@@ -678,7 +707,7 @@ export class Crews {
       return;
     }
     if (b.state !== 'going' || trip?.back) return;
-    const s = b.project !== undefined ? this.host.site(b.project) : null;
+    const s = b.project !== undefined ? this.host.site(b.project, b) : null;
     if (!s) return this.release(b);
     this.work(b, s);
   }
@@ -768,7 +797,7 @@ export class Crews {
       b.pos = { ...at.pos };
     }
     if (b.state === 'going') {
-      const s = b.project !== undefined ? this.host.site(b.project) : null;
+      const s = b.project !== undefined ? this.host.site(b.project, b) : null;
       if (!s) return this.release(b);
       if (at && at.node !== s.node) return;
       return this.onSite(b, s);
@@ -789,10 +818,13 @@ export class Crews {
 
   /** Работающим бригадам — новое место (край работ сдвинулся); node — узел дороги, у которого он. */
   follow(project: number, front: Vec, node: number | null): void {
-    for (const b of this.working(project)) {
-      b.pos = { ...front };
-      if (node !== null) b.at = node;
-    }
+    for (const b of this.working(project)) this.followOne(b, front, node);
+  }
+
+  /** Работающей бригаде — новое место у края работ её фронта; node — узел дороги, откуда к нему подъезд. */
+  followOne(b: Brigade, front: Vec, node: number | null): void {
+    b.pos = { ...front };
+    if (node !== null) b.at = node;
   }
 
   // ---------- Назначение игроком («🎯 На стройку…» в карточке бригады) ----------
@@ -807,7 +839,7 @@ export class Crews {
     if (b.project === project && (b.state === 'going' || b.state === 'working')) return null;
     const cap = this.cap(project);
     if (this.assigned(project).length >= cap) return `На проекте уже ${cap} из ${cap} бригад — больше не встанет`;
-    const s = this.host.site(project);
+    const s = this.host.site(project, b);
     if (!s) return 'К проекту нет подъезда по готовым дорогам';
     const from = b.convoy?.to ?? this.startNode(b);
     if (from === null || (from !== s.node && !this.host.reach(from, s.node))) return 'Бригаде отсюда не доехать до проекта по дорогам';
@@ -830,6 +862,7 @@ export class Crews {
     if (b.state === 'working') back = this.pathBack(b)?.path ?? null;
     else if (b.trip && !b.trip.back && b.trip.to === undefined) back = this.walkBack(b);
     b.project = project;
+    delete b.front;
     b.state = 'going';
     if (back) this.walk(b, back, true);
     return null;
@@ -854,6 +887,7 @@ export class Crews {
         ...b,
         ...(b.pos ? { pos: { ...b.pos } } : {}),
         ...(b.lane ? { lane: copyLane(b.lane) } : {}),
+        ...(b.front ? { front: { ...b.front } } : {}),
         ...(b.trip
           ? {
               trip: {
@@ -916,6 +950,9 @@ function legacyBrigade(b: Brigade): Brigade {
   if (b.lane && (!Array.isArray(b.lane.path) || !Array.isArray(b.lane.legs) || (b.state !== 'going' && b.state !== 'working'))) delete b.lane;
   if (b.lane) b.lane = copyLane(b.lane);
   delete b.spots;
+  // Фронт — только у бригады при проекте (старые сохранения без него — выберет сама, Construction.claim).
+  if (b.front && (typeof b.front.corridor !== 'number' || (b.state !== 'going' && b.state !== 'working'))) delete b.front;
+  if (b.front) b.front = { corridor: b.front.corridor, fromB: !!b.front.fromB };
   // Назначение игрока — только у бригады при проекте (едет к нему или работает).
   if (b.pinned && (b.project === undefined || (b.state !== 'going' && b.state !== 'working'))) delete b.pinned;
   return b;

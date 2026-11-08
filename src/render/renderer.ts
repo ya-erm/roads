@@ -995,17 +995,17 @@ export class Renderer {
         }
         ctx.restore();
       }
-      const site = crew ? game.construction.current(p.id) : null;
       const net = game.roads.net;
-      // Мост — кран и бетоновоз у края пролёта; тоннель — техника за порталом видна призраком сквозь землю
-      // (tunnelSight, drawInSight), у входного портала — проходческое хозяйство, края работ — огоньками (structureArt).
-      const kind = site ? siteKind(net, site) : 'road';
-      if (site && kind === 'tunnel') {
+      // У каждого фронта (участка в работе) — своё: мост — кран и бетоновоз у края пролёта; тоннель — техника за
+      // порталом видна призраком сквозь землю (tunnelSight, drawInSight), у входного портала — проходческое хозяйство,
+      // края работ — огоньками (structureArt).
+      for (const site of crew ? game.construction.fronts(p.id) : []) {
+        if (siteKind(net, site) !== 'tunnel') continue;
         const gate = entryPortal(net, site);
         if (gate && seenAt(gate.pos, view, 60)) drawPortalGear(ctx, gate, game.time, working);
+        // Огоньки у краёв работ — поверх техники-призрака: их видно сквозь землю ярко (техника — ниже, после проектов).
+        lights.push({ site, working });
       }
-      // Огоньки у краёв работ — поверх техники-призрака: их видно сквозь землю ярко (техника — ниже, после проектов).
-      if (site && kind === 'tunnel') lights.push({ site, working });
     }
     // Техника бригад — каждая машина там, где она есть (Game.siteCrewLooks: по полосе бригады от подъезда к своему
     // месту в колонне этапов и у края работ, вдоль стройки, ждёт выезда) — тем же рисунком, что в потоке. Отсыпку
