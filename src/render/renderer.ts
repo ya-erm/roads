@@ -43,6 +43,7 @@ import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, frontLength } from './vehicleArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
 import { type Hiders, TreeCover } from './treeCover';
+import { carLayers, railSegLayer } from './trainLayer';
 import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
 
 export type Selection =
@@ -235,6 +236,8 @@ interface TrainCar {
   pos: Vec;
   dir: Vec;
   level: number;
+  /** Слой отрисовки (−1 тоннель, 0 земля, 1 мост, 2 эстакада) — по участкам под корпусом, см. carLayers. */
+  layer: number;
   loco: boolean;
   color: string;
   load?: string;
@@ -551,7 +554,6 @@ export class Renderer {
     const band = (v: Vehicle) => v.layer ?? (v.level < -0.5 ? -1 : v.level < 0.5 ? 0 : v.level < 1.5 ? 1 : 2);
 
     const trains = this.trainCars(game, view);
-    const trainBand = (lvl: number) => (lvl < -0.5 ? -1 : lvl < 0.5 ? 0 : lvl < 1.5 ? 1 : 2);
 
     // Машины на линии портала тоннеля — по частям: за порталом бледно (под землёй), до него — как на земле. У портала
     // под землёй или на земле машину рисуют по её кузову, а не по слою движения: тот меняется с запасом, и на кадр
@@ -585,7 +587,7 @@ export class Renderer {
     ctx.globalAlpha = 0.35;
     this.drawVehicles(vehicles.filter((v) => groundBand(v) === -1 && !atPortal.has(v)));
     for (const [v, p] of atPortal) this.drawClipped(portalHalf(p, 1), () => this.drawVehicles([v]));
-    this.drawTrains(trains.filter((t) => trainBand(t.level) === -1));
+    this.drawTrains(trains.filter((t) => t.layer === -1));
     ctx.globalAlpha = 1;
     if (plan) this.blitTiles(plan, GROUND);
     else this.drawGround(scene, view, segs);
@@ -608,7 +610,7 @@ export class Renderer {
     this.drawLights(game, 0, o.phaseEdit);
     this.drawMotion(game, view);
     this.drawStations(game, view, o);
-    this.drawTrains(trains.filter((t) => trainBand(t.level) === 0));
+    this.drawTrains(trains.filter((t) => t.layer === 0));
     for (const level of levels) {
       const roads = this.lanes.hasLayer(roadNet, level);
       if (plan) this.blitTiles(plan, GROUND + level);
@@ -626,7 +628,8 @@ export class Renderer {
       );
       // Светофоры у спуска с моста и на эстакаде — поверх её полотна и подняты вместе с ним.
       if (roads) this.drawLights(game, level, o.phaseEdit);
-      this.drawTrains(trains.filter((t) => trainBand(t.level) === level));
+      // Поезд на пандусе и заехавший на него краем — над его полотном (пандус целиком в слое моста).
+      this.drawTrains(trains.filter((t) => t.layer === level));
     }
     // Светофор перекрёстка под мостом не пропадает под полотном — приглушённым значком поверх.
     this.drawLights(game, 'covered', o.phaseEdit);
@@ -1479,12 +1482,24 @@ export class Renderer {
       for (const s of segs) {
         const c = this.cache.get(s.id)!;
         const parts = c.minLevel < 0.2 ? this.splitBy(c, (h) => h >= -0.4) : [c.surface];
-        ctx.lineCap = 'round';
+        // Пандус с земли обрезан ровно по узлу у земли: скруглённый край настила лёг бы на путь до него (и на поезд
+        // там); у моста — скругление кругом, стык с соседним пролётом без щели.
+        const foot = isFoot(c);
+        ctx.lineCap = foot ? 'butt' : 'round';
         ctx.strokeStyle = pass === 0 ? C.rail : C.deck;
         ctx.lineWidth = c.width + (pass === 0 ? 5 : 0);
         for (const part of parts) {
           this.polyline(part);
           ctx.stroke();
+        }
+        if (foot) {
+          ctx.fillStyle = ctx.strokeStyle;
+          for (const i of [0, c.surface.length - 1]) {
+            if (c.heights[i] < 0.5) continue;
+            ctx.beginPath();
+            ctx.arc(c.surface[i].x, c.surface[i].y, ctx.lineWidth / 2, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
       }
     }
@@ -2207,10 +2222,17 @@ export class Renderer {
     for (const train of game.rail.trains.values()) {
       // Первый — локомотив, груз — в остальных, по порядку от головы; пассажиры — во всех вагонах поровну.
       const fills = trainWagonFills(train.fill ?? (train.load ? 1 : 0), train.cars - 1, train.kind);
-      game.rail.cars(train).forEach((c, k) => {
+      const cars = game.rail.cars(train);
+      const layers = carLayers(
+        train,
+        cars.map((c) => c.level),
+        (id) => railSegLayer(this.cache.get(id)?.maxLevel ?? 0),
+      );
+      cars.forEach((c, k) => {
         if (c.pos.x < view.x0 || c.pos.x > view.x1 || c.pos.y < view.y0 || c.pos.y > view.y1) return;
         const fill = k ? (fills[k - 1] ?? 0) : 0;
-        out.push({ ...c, loco: k === 0, color: train.color, load: train.load, fill, kind: train.kind, length: train.carLength, trainId: train.id });
+        const layer = layers[k];
+        out.push({ ...c, layer, loco: k === 0, color: train.color, load: train.load, fill, kind: train.kind, length: train.carLength, trainId: train.id });
       });
     }
     return out;
