@@ -46,7 +46,7 @@ import { markAt, warningMarks, type WarningMark } from '../game/stationWarnings'
 import { deckHeight, RoadTools } from './roadtools';
 import { phaseToggle, specOf, turnAt } from '../lanes/lights';
 import { phaseTurns } from '../ui/phasesUi';
-import { baseRemoveText } from '../ui/constructionUi';
+import { basePlaceText, baseRemoveText } from '../ui/constructionUi';
 
 export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain';
 
@@ -83,7 +83,7 @@ const BRUSH_NAMES: Record<TerraformMode, string> = { raise: 'Поднять', lo
 const BRUSH_PERIOD = 0.12;
 
 /** Что делает клик: инструмент вместе с его режимом. */
-export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane' | 'parallel' | 'copy' | 'paste' | 'trackMove';
+export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane' | 'parallel' | 'copy' | 'paste' | 'trackMove' | 'base';
 /** Дорога: строить, вести полосу вдоль края, перестроить под выбранный тип, двигать узел или выгнуть. */
 export type RoadMode = 'build' | 'lane' | 'upgrade' | 'move';
 /** Развязки: кольцо на перекрёстке, шаблон развязки (готовый или свой) или копия куска дорог. */
@@ -255,7 +255,10 @@ export class Controller {
   placingWarehouse: number | null = null;
   /** Ставим пристройку этого предприятия: клик в зоне вокруг него — пристройка (Esc — отмена). */
   placingAnnex: number | null = null;
-  /** Ставим строительную базу («Со строительством»): клик у дороги — база (Esc — отмена). */
+  /**
+   * Ставим строительную базу («Со строительством»): инструмент «Станция → База стройки», клик у дороги — база (Esc —
+   * отмена). Сбрасывает setTool и выбор другого вида станции.
+   */
   placingBase = false;
   /** Переносим строительную базу: площадка у дороги под курсором, клик — база туда (Esc — отмена). */
   movingBase: number | null = null;
@@ -452,6 +455,8 @@ export class Controller {
       if (this.railMode === 'move') return 'trackMove';
       return this.railMode === 'station' ? 'station' : this.railMode === 'signal' ? 'signal' : this.railMode === 'parallel' ? 'parallel' : 'road';
     }
+    // База стройки — в инструменте «Станция», но своё действие: в отмену (Ctrl+Z) она не входит, как и раньше.
+    if (this.tool === 'station' && this.placingBase) return 'base';
     return this.tool;
   }
 
@@ -477,6 +482,7 @@ export class Controller {
   setStationMode(mode: StationMode): void {
     if (this.tool !== 'station') this.setTool('station');
     this.stationMode = mode;
+    this.placingBase = false;
     this.onChange();
   }
 
@@ -1077,10 +1083,15 @@ export class Controller {
     this.onChange();
   }
 
-  /** Режим «поставить строительную базу»: площадка у дороги под курсором, клик ставит её. on = false — выйти. */
+  /**
+   * Режим «поставить строительную базу» — инструмент «Станция → База стройки» (оттуда же, что «＋ База» на вкладке
+   * «Стройка» и в карточке проекта): площадка у дороги под курсором, клик ставит её. on = false — выйти к «Выбору».
+   * Не «Со строительством» — баз нет, режим не включается.
+   */
   startBase(on = true): void {
-    this.setTool('select');
-    this.placingBase = on;
+    const ok = on && this.game().buildMode;
+    this.setTool(ok ? 'station' : 'select');
+    this.placingBase = ok;
     this.onChange();
   }
 
@@ -1106,7 +1117,7 @@ export class Controller {
     else if (this.movingBase !== null) this.movingBase = null;
     else if (this.placingWarehouse !== null) this.placingWarehouse = null;
     else if (this.placingAnnex !== null) this.placingAnnex = null;
-    else if (this.placingBase) this.placingBase = false;
+    else if (this.placingBase) this.setTool('select');
     else if (this.sendingCrew !== null) this.sendingCrew = null;
     else if (this.phaseEdit) this.phaseEdit = null;
     else if (this.copyStart) this.copyStart = null;
@@ -1690,15 +1701,16 @@ export class Controller {
         this.onChange();
         break;
       }
+      case 'base': {
+        // Строительная база — у дороги под курсором; поставили — режим кончился (следующая уже платная: случайный
+        // второй клик не поставит вторую), снова — «Выбор».
+        const problem = g.buildBase(p);
+        if (problem) this.showError(problem);
+        else this.setTool('select');
+        this.onChange();
+        break;
+      }
       case 'select': {
-        if (this.placingBase) {
-          // Строительная база — у дороги под курсором; поставили — режим кончился.
-          const problem = g.buildBase(p);
-          if (problem) this.showError(problem);
-          else this.placingBase = false;
-          this.onChange();
-          break;
-        }
         if (this.sendingCrew !== null) {
           // Стройка для бригады: плашка или полотно проекта под курсором — она едет туда; карточка бригады остаётся.
           const id = this.sendingCrew;
@@ -3601,24 +3613,19 @@ export class Controller {
           : { text: this.lineDraft.length ? 'Следующая станция · Enter — готово' : 'Выберите первую станцию', ok: true };
         break;
       }
-      case 'select': {
-        if (this.placingBase) {
-          // База стройки: площадка у ближайшей дороги — синим (красным, если нельзя); круг — радиус обслуживания: на
-          // стройки в нём бригады базы поедут сами.
-          const plan = g.basePlan(p);
-          if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
-          if (plan.fp) {
-            o.catchmentAt = plan.fp.center;
-            o.catchmentR = CONSTRUCTION.serviceRadius;
-          }
-          o.label = plan.ok
-            ? {
-                text: `База стройки · ${plan.cost ? money(plan.cost) : 'бесплатно'}${plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : ''} · 📡 ${CONSTRUCTION.serviceRadius / 1000} км · Esc — отмена`,
-                ok: true,
-              }
-            : { text: failText(plan.reason, plan.cost, ''), ok: false };
-          break;
+      case 'base': {
+        // База стройки: площадка у ближайшей дороги — синим (красным, если нельзя); круг — радиус обслуживания: на
+        // стройки в нём бригады базы поедут сами. Подпись — цена этой базы, а у бесплатной первой — и следующих.
+        const plan = g.basePlan(p);
+        if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
+        if (plan.fp) {
+          o.catchmentAt = plan.fp.center;
+          o.catchmentR = CONSTRUCTION.serviceRadius;
         }
+        o.label = plan.ok ? { text: basePlaceText(g, plan), ok: true } : { text: failText(plan.reason, plan.cost, ''), ok: false };
+        break;
+      }
+      case 'select': {
         if (this.sendingCrew !== null) {
           // Стройка для бригады: проект под курсором подсвечен, подпись — поедет ли туда бригада и почему нет.
           const project = this.projectUnder(p);

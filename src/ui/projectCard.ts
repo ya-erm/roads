@@ -15,7 +15,7 @@ import { durationText } from '../core/timeText';
 import { type ProjectInfo, projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
-import { buildSvg, km, railTrainStatus } from './constructionUi';
+import { basePrices, basePriceText, buildSvg, km, railTrainStatus } from './constructionUi';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
@@ -225,21 +225,28 @@ function helpHtml(game: Game, info: ProjectInfo, some: boolean): string {
       : `<button class="small" data-action="base-hire" data-id="${near.base.id}" data-tip="${esc(`${why} Нанять бригаду на базе «${game.baseName(near.base.id)}» (ближайшей): ${money(CONSTRUCTION.brigade.cost)}`)}">＋ 🚚 ${money(CONSTRUCTION.brigade.cost)}</button>`;
   };
   const why = (icon: string, text: string, buttons: string) => `<div class="pc-why"><span class="pc-why-ic">${icon}</span><span>${text}</span>${buttons}</div>`;
+  // «＋ База · бесплатно» / «＋ База · $40 000» — сколько встанет база, видно сразу на кнопке.
+  const price = basePrices(game);
+  const addBase = (tip: string) => `<button class="small" data-action="base-place" data-tip="${esc(tip)}">＋ База · ${basePriceText(price.now)}</button>`;
   if (p.paused) return some ? '' : why('⏸', 'На паузе — бригады ушли на другие проекты', `<button class="small" data-action="build-pause" data-id="${p.id}" data-tip="Строить дальше">▶ Дальше</button>`);
   if (!crews.bases.size)
-    return why('🏚', 'Нет строительной базы', `<button class="small" data-action="base-place" data-tip="Поставьте базу у дороги, ближе к стройке${game.firstBase ? ' — первая бесплатно' : ''}">＋ База</button>`);
+    return why(
+      '🏚',
+      'Нет строительной базы',
+      addBase(`Поставьте базу у дороги, ближе к стройке${game.firstBase ? ` — первая бесплатно, следующие — по ${money(price.next)}` : ''}`),
+    );
   if (!info.access && info.waits) return why('⏳', 'После соседнего: подъезд — через соседний строящийся проект, начнётся, когда тот дорастёт сюда', '');
   if (!info.access)
     return why(
       '⛔',
       'Нет подъезда: ни один конец проекта не связан готовой дорогой с базой, а по полю бригады не ездят. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним',
-      `<button class="small" data-action="base-place" data-tip="Поставьте базу у дороги, связанной с проектом: бригада доедет по ней">＋ База</button>`,
+      addBase('Поставьте базу у дороги, связанной с проектом: бригада доедет по ней'),
     );
   if (!info.near)
     return why(
       '⛔',
       `Нет базы рядом: стройка дальше ${km(CONSTRUCTION.serviceRadius)} от всех баз — бригады сами сюда не поедут. Поставьте базу поближе или отправьте бригаду вручную («🎯 На стройку…» в её карточке) — строить она будет медленно`,
-      `<button class="small" data-action="base-place" data-tip="${esc(`Поставьте базу у дороги ближе ${km(CONSTRUCTION.serviceRadius)} к стройке: её бригады поедут сюда сами`)}">＋ База</button>`,
+      addBase(`Поставьте базу у дороги ближе ${km(CONSTRUCTION.serviceRadius)} к стройке: её бригады поедут сюда сами`),
     );
   if (!crews.brigades.size) return why('🚫', 'Нет ни одной бригады', hire('Строить некому.'));
   const busy = [...crews.brigades.values()].every((b) => b.project !== undefined && b.project !== p.id && (b.state === 'going' || b.state === 'working'));

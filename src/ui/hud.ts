@@ -27,7 +27,7 @@ import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/ca
 import { type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
 import { lastTownNeed, townNeed } from '../world/townSupply';
 import { footprintRadius } from '../world/spatial';
-import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
+import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
 import { durationText } from '../core/timeText';
 import { isOneWay, KMH_PER_UNIT, LEVELS, RAIL_SPEC, ROAD_PRESETS, RoadSpec, SPEED_LIMITS, specCost, specKmh, STRUCTURE } from '../world/roadTypes';
 import {
@@ -144,7 +144,7 @@ import { lineJamsHtml, stationWarningsHtml } from './jamUi';
 import { phasesHtml, phaseTurns } from './phasesUi';
 import { addPhase, editedAfter, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, withLeftArrows } from '../lanes/lights';
 import { installTips } from './tipFloat';
-import { buildModeRowHtml } from './constructionUi';
+import { basePriceHtml, baseSvg, buildModeRowHtml } from './constructionUi';
 import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
@@ -1534,7 +1534,9 @@ export class Hud {
         c.toggleStationServe(d.what === 'pax' ? 'pax' : 'cargo');
         break;
       case 'station-mode':
-        c.setStationMode(d.id === 'stop' || d.id === 'pax' || d.id === 'rail' ? d.id : 'cargo');
+        // «База стройки» — тот же режим, что «＋ База» на вкладке «Стройка».
+        if (d.id === 'base') c.startBase();
+        else c.setStationMode(d.id === 'stop' || d.id === 'pax' || d.id === 'rail' ? d.id : 'cargo');
         break;
       case 'st-serves': {
         const st = g.stations.get(Number(d.id));
@@ -1861,7 +1863,7 @@ export class Hud {
     return `<div class="opt-group"><div class="opt-title">${title}</div><div class="cards ${grid ? 'grid2' : ''}">${items
       .map((it) => {
         const kbd = it.key ? `<kbd>${it.key}</kbd>` : '';
-        return `<button class="card ${grid ? 'row' : ''} ${current === it.id ? 'active' : ''}" data-action="${action}" data-id="${it.id}" title="${it.key ? `${it.hint} (${it.key})` : it.hint}">
+        return `<button class="card ${grid ? 'row' : ''} ${current === it.id ? 'active' : ''}" data-action="${action}" data-id="${it.id}" data-tip="${it.key ? `${it.hint} (${it.key})` : it.hint}">
           ${it.svg}<span class="name">${it.name}${grid ? '' : kbd}</span>${grid ? kbd : ''}</button>`;
       })
       .join('')}</div></div>`;
@@ -2324,18 +2326,29 @@ export class Hud {
 
   private stationOptionsHtml(): string {
     const c = this.controller;
+    const g = this.game();
+    // «Со строительством» — ещё и строительная база (как «＋ База» на вкладке «Стройка»).
+    const base = g.buildMode
+      ? [{ id: 'base', name: 'База стройки', svg: baseSvg(34, 26), hint: 'Строительная база у дороги: с неё бригады едут строить. Цена — справа' }]
+      : [];
     const sw = this.kindSwitch(
       'Что ставим',
       'station-mode',
-      c.stationMode,
+      c.placingBase ? 'base' : c.stationMode,
       [
         { id: 'cargo', name: 'Автостанция', svg: stationSvg('cargo', 34), hint: 'Для грузов: грузовики, заезд и посты погрузки' },
         { id: 'pax', name: 'Автовокзал', svg: stationSvg('pax', 34), hint: 'Для пассажиров: междугородние и городские автобусы' },
         { id: 'stop', name: 'Остановка', svg: stationSvg('stop', 34), hint: 'Автобусная остановка прямо на улице — для маршрутов по городу' },
         { id: 'rail', name: 'Ж/д станция', svg: stationSvg('rail', 34), hint: 'Вокзал с платформами: на пути или в чистом поле (как в инструменте «Ж/д»)' },
+        ...base,
       ],
       true,
     );
+    if (c.placingBase) {
+      const tip = `База встаёт у дороги со стороны курсора, ворота — на ближайший узел. С неё бригады едут строить: сами — на стройки ближе ${CONSTRUCTION.serviceRadius / 1000} км (круг на карте). Дома под площадкой снесём (красные) — за доплату.`;
+      return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
+        <div class="base-prices">${basePriceHtml(g)}</div></div></div>`;
+    }
     if (c.stationMode === 'stop') {
       const tip = `Остановка встаёт у края улицы со стороны курсора: автобусы останавливаются прямо в полосе. Только пассажиры, охват ${STOP.catchment} м, ${STOP.bays} места для автобусов. Не ближе ${STOP.gap} м к перекрёстку. В маршруте её можно смешивать с автовокзалами.`;
       return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>

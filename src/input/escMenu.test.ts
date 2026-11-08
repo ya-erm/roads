@@ -33,11 +33,11 @@ afterAll(() => {
 
 const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
 
-function setup() {
+function setup(g: Game = game) {
   const camera = new Camera();
   camera.width = 0;
   camera.height = 0;
-  const c = new Controller(new Events() as unknown as HTMLCanvasElement, camera, () => game);
+  const c = new Controller(new Events() as unknown as HTMLCanvasElement, camera, () => g);
   let menus = 0;
   c.onMenu = () => menus++;
   const esc = (repeat = false) =>
@@ -103,10 +103,13 @@ describe('Esc и меню', () => {
   });
 
   it('режим размещения базы сначала отменяется', () => {
-    const { c, esc, menus } = setup();
+    // База — только «Со строительством»; ставят её инструментом «Станция → База стройки».
+    const { c, esc, menus } = setup(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
     c.startBase();
+    expect(c.placingBase).toBe(true);
     esc();
     expect(c.placingBase).toBe(false);
+    expect(c.tool).toBe('select');
     expect(menus()).toBe(0);
   });
 

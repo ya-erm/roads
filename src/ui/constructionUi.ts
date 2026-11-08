@@ -167,15 +167,54 @@ export interface BuildView {
 
 export const NO_BUILD_VIEW: BuildView = { placing: false, project: null, base: null };
 
+/**
+ * Цена строительной базы: now — той, что ставим сейчас (первая «Со строительством» — бесплатно), next — каждой
+ * следующей (цена одна: CONSTRUCTION.base.cost). Снос домов под площадкой — сверху, по месту (Game.basePlan).
+ */
+export function basePrices(game: Game): { now: number; next: number } {
+  const cost = CONSTRUCTION.base.cost;
+  return { now: game.firstBase ? 0 : cost, next: cost };
+}
+
+/** «бесплатно» или «$40 000». */
+export const basePriceText = (n: number) => (n ? money(n) : 'бесплатно');
+
+/**
+ * Цена базы значками: «[база] бесплатно» и «[база]+ $40 000» (следующие); первая уже стоит — одна плашка «$40 000».
+ * Где ставят базу — в панели инструмента «Станция → База стройки».
+ */
+export function basePriceHtml(game: Game): string {
+  const { now, next } = basePrices(game);
+  const chip = (cls: string, tip: string, label: string, sum: number) =>
+    `<span class="base-price ${cls}" data-tip="${tip}">${baseSvg(20, 15)}<small>${label}</small><b>${basePriceText(sum)}</b></span>`;
+  if (now === next) return chip('', `Каждая новая база — ${money(next)}, с бригадой. Снос домов под площадкой — отдельно`, 'база', next);
+  return (
+    chip('free', 'Первая база — бесплатно, с бригадой', 'первая', now) +
+    chip('next', `Каждая следующая база — ${money(next)}, с бригадой. Снос домов под площадкой — отдельно`, 'следующие', next)
+  );
+}
+
+/**
+ * Подпись у курсора, пока ставим базу: «База стройки · бесплатно · следующие — $40 000 · снос 2 зд. · 📡 6 км ·
+ * Esc — отмена». plan — Game.basePlan у курсора (cost — с доплатой за снос домов).
+ */
+export function basePlaceText(game: Game, plan: { cost: number; demolish: number[] }): string {
+  const { now, next } = basePrices(game);
+  const later = now < next ? ` · следующие — ${money(next)}` : '';
+  const raze = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
+  return `База стройки · ${basePriceText(plan.cost)}${later}${raze} · 📡 ${CONSTRUCTION.serviceRadius / 1000} км · Esc — отмена`;
+}
+
 /** «＋ База»: нажата — ставим базу; баз ещё не было — первая бесплатно, кнопка пульсирует, пока её не поставят. */
 function addBaseHtml(game: Game, placing: boolean): string {
   const first = game.firstBase;
+  const { now, next } = basePrices(game);
   const tip = placing
     ? 'Кликните у дороги, где поставить базу (Esc — отмена)'
     : first
-      ? 'Поставьте строительную базу у дороги — первая бесплатно, с бригадой. Ставьте ближе к будущим стройкам: оттуда бригада строит быстрее'
-      : `Новая база у дороги: ${money(CONSTRUCTION.base.cost)}. Бригады с ближней базы строят быстрее`;
-  return `<button class="small build-add ${placing ? 'active' : ''} ${first ? 'first' : ''}" data-action="base-place" data-tip="${tip}">${baseSvg(20, 15)}＋ База${first ? ' · бесплатно' : ''}</button>`;
+      ? `Поставьте строительную базу у дороги — первая бесплатно, с бригадой; следующие — по ${money(next)}. Ставьте ближе к будущим стройкам: оттуда бригада строит быстрее`
+      : `Новая база у дороги: ${money(next)}. Бригады с ближней базы строят быстрее`;
+  return `<button class="small build-add ${placing ? 'active' : ''} ${first ? 'first' : ''}" data-action="base-place" data-tip="${tip}">${baseSvg(20, 15)}＋ База · ${basePriceText(now)}</button>`;
 }
 
 /** Бригады всех баз: сколько всего и сколько в деле (на стройке или в пути к ней). */
@@ -212,7 +251,9 @@ export function buildTabHtml(game: Game, view: BuildView = NO_BUILD_VIEW): strin
     bases.length ? ` <small>${bases.length} · 🚚 ${c.busy} / ${c.all}</small>` : ''
   }</h4>`;
   const hint = !bases.length
-    ? `<p class="build-hint">${baseSvg(22, 17)}<span>Поставьте базу у дороги — с неё бригады едут строить. Первая — бесплатно</span></p>`
+    ? `<p class="build-hint">${baseSvg(22, 17)}<span>Поставьте базу у дороги — с неё бригады едут строить. ${
+        game.firstBase ? `Первая — бесплатно, следующие — по ${money(CONSTRUCTION.base.cost)}` : `База — ${money(CONSTRUCTION.base.cost)}`
+      }</span></p>`
     : '';
   const empty = !list.length
     ? `<p class="build-hint">${buildSvg(22, 17)}<span>Проложите дорогу — она станет проектом, и бригады построят её за время</span></p>`

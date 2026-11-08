@@ -6353,6 +6353,40 @@ span.ind-chip {
   box-shadow: inset 0 0 0 2px var(--accent);
 }
 
+/* Цена базы в «Станция → База стройки»: значок базы, подпись и сумма; первая (бесплатная) — зелёная. */
+.base-prices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.base-price {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 5px;
+  border-radius: 8px;
+  background: #eef2f6;
+  font-size: 12px;
+}
+
+.base-price small {
+  color: var(--muted);
+}
+
+.base-price b {
+  font-size: 13px;
+}
+
+.base-price.free {
+  background: #e3f4e6;
+}
+
+.base-price.free b {
+  color: #237a36;
+}
+
 /* Первая база ещё не поставлена: кнопка зовёт — мягкое кольцо пульсирует, пока не нажали. */
 .build-add.first:not(.active) {
   font-weight: 600;
