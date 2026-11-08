@@ -5,7 +5,7 @@
 import type { ScenarioSettings } from '../scenario/types';
 import { BIOME_LIST, BIOMES, type BiomeId, biomeForSeed, biomeRaw } from '../world/biomes';
 import { CARGO, type CargoType, INDUSTRY_LIST } from '../world/cargo';
-import { DEFAULT_SETTINGS, type WorldSettings } from '../world/settings';
+import { DEFAULT_SETTINGS, type Relief, type WorldSettings } from '../world/settings';
 import { cargoIcon, townIcon } from './cargoIcons';
 import { biomeSvg } from './icons';
 import { diceMapSvg } from './scenarioIcons';
@@ -44,10 +44,36 @@ export function newGameDraft(s: WorldSettings, from: NewGameFrom, remembered: Sc
     const { difficulty, challenge, pick } = s.scenario;
     scenario = pick ? { difficulty, challenge, pick } : { difficulty, challenge };
   }
-  if (!s.scenario && from === 'menu') return { settings: withSeed(s, seed), scenario };
+  // Рельеф в черновике — всегда явный. Без поля мир плоский (так открываются старые сохранения), а окно
+  // подсвечивает «Холмы»: партия первого запуска (DEFAULT_SETTINGS, без рельефа) давала плоский сценарий.
+  const own = { ...s, relief: s.relief ?? DEFAULT_RELIEF };
+  if (!s.scenario && from === 'menu') return { settings: withSeed(own, seed), scenario };
   // Города, предприятия и капитал сценарий задаёт сам — у песочницы оставляем её прежние, иначе — обычные.
-  const base = s.scenario ? { ...DEFAULT_SETTINGS, size: s.size, water: s.water, relief: s.relief ?? 'hills', ...(s.construction ? { construction: s.construction } : {}) } : s;
+  const base = s.scenario ? scenarioBase(s) : own;
   return { settings: withSeed({ ...base, scenario: { ...scenario } }, seed), scenario };
+}
+
+/** Рельеф новой партии, если его не выбирали: его и подсвечивает окно «Новая игра». */
+export const DEFAULT_RELIEF: Relief = 'hills';
+
+/**
+ * Обычные настройки мира под новый сценарий после партии s: города, предприятия и капитал сценарий задаёт сам,
+ * а карта, вода, рельеф и режим стройки — прежние.
+ */
+function scenarioBase(s: WorldSettings): WorldSettings {
+  return {
+    ...DEFAULT_SETTINGS,
+    size: s.size,
+    water: s.water,
+    relief: s.relief ?? DEFAULT_RELIEF,
+    ...(s.construction ? { construction: s.construction } : {}),
+  };
+}
+
+/** «Другой регион» после итогов сценария: тот же выбор сложности, новый seed — и рельеф прежней партии. */
+export function nextScenarioSettings(s: WorldSettings, seed: number): WorldSettings {
+  const scenario: ScenarioSettings = { difficulty: s.scenario?.difficulty ?? 'normal', challenge: !!s.scenario?.challenge };
+  return withSeed({ ...scenarioBase(s), scenario }, seed);
 }
 
 /**

@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { ScenarioSettings } from '../scenario/types';
 import { BIOME_LIST, BIOMES, biomeForSeed } from '../world/biomes';
 import { DEFAULT_SETTINGS, type WorldSettings } from '../world/settings';
-import { biomeRowHtml, newGameDraft, rulesHtml, withSeed } from './newGame';
+import { Rng } from '../core/rng';
+import { prepareSettings } from '../scenario/generator';
+import { Terrain } from '../world/terrain';
+import { biomeRowHtml, DEFAULT_RELIEF, newGameDraft, nextScenarioSettings, rulesHtml, withSeed } from './newGame';
 import { scenarioOptionsHtml } from './scenarioUi';
 
 const remembered: ScenarioSettings = { difficulty: 'hard', challenge: true };
@@ -24,6 +27,47 @@ function nestedTips(html: string): number {
   }
   return nested;
 }
+
+describe('Новая игра: рельеф', () => {
+  // Партия первого запуска (main.ts): DEFAULT_SETTINGS без поля relief — по ней мир плоский, как у старых сохранений.
+  const firstRun: WorldSettings = { ...DEFAULT_SETTINGS, seed: 884790648 };
+
+  it('сценарий со стартового экрана первого запуска — с холмами, которые подсвечивает окно (баг: был плоский)', () => {
+    const d = newGameDraft(firstRun, 'start', { difficulty: 'normal', challenge: false }, 884790648).settings;
+    expect(d.relief).toBe('hills');
+    // Дальше настройки идут в Game как есть: prepareSettings решает только регион и рельеф не трогает.
+    const world = prepareSettings(d);
+    expect(world.relief).toBe('hills');
+    const terrain = new Terrain(new Rng(world.seed), { ...world, size: 'small' });
+    expect(terrain.hasRelief).toBe(true);
+    expect(terrain.amplitude).toBeGreaterThan(0);
+  });
+
+  it('в черновике рельеф всегда явный: в песочнице и в сценарии, из меню и со старта', () => {
+    for (const s of [firstRun, { ...firstRun, scenario: { difficulty: 'easy' as const, challenge: false } }]) {
+      for (const from of ['menu', 'start'] as const) expect(newGameDraft(s, from, remembered, 3).settings.relief).toBe(DEFAULT_RELIEF);
+    }
+  });
+
+  it('выбранный рельеф прошлой партии сохраняется', () => {
+    for (const relief of ['plains', 'hills', 'mountains'] as const) {
+      for (const s of [{ ...sandbox, relief }, { ...sandbox, relief, scenario: remembered }]) {
+        for (const from of ['menu', 'start'] as const) expect(newGameDraft(s, from, remembered, 3).settings.relief).toBe(relief);
+      }
+    }
+  });
+
+  it('«Другой регион» после итогов — с рельефом прошлой партии, без рельефа — с холмами', () => {
+    const played: WorldSettings = { ...firstRun, size: 'large', relief: 'mountains', scenario: { difficulty: 'hard', challenge: true, archetype: 'industrial' } };
+    const next = nextScenarioSettings(played, 42);
+    expect(next.relief).toBe('mountains');
+    expect(next.size).toBe('large');
+    expect(next.scenario).toEqual({ difficulty: 'hard', challenge: true });
+    expect(next.seed).toBe(42);
+    expect(next.biome).toBe(biomeForSeed(42));
+    expect(nextScenarioSettings({ ...played, relief: undefined }, 42).relief).toBe(DEFAULT_RELIEF);
+  });
+});
 
 describe('Новая игра: режим по умолчанию', () => {
   it('со стартового экрана — сразу сценарий с прошлым выбором игрока, песочница остаётся прежней', () => {

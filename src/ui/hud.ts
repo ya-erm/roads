@@ -154,7 +154,7 @@ import { carTripHtml } from './carTrip';
 import { SERVICES } from '../game/services';
 import { planPrice, projectMoneyWarning } from '../input/labels';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
-import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
+import { biomeRowHtml, newGameDraft, type NewGameFrom, nextScenarioSettings, rulesHtml, withSeed } from './newGame';
 
 /** Управление партией: сохранение и новая игра. */
 export interface HudSession {
@@ -1328,10 +1328,7 @@ export class Hud {
         break;
       case 'sc-new': {
         // Другой регион — и биом по новому seed, как в окне «Новая игра» (без биома был бы мир старых версий).
-        const s = g.settings;
-        const scenario = { difficulty: s.scenario?.difficulty ?? 'normal', challenge: !!s.scenario?.challenge };
-        const next = { ...DEFAULT_SETTINGS, size: s.size, water: s.water, scenario, ...(s.construction ? { construction: s.construction } : {}) };
-        this.startNewGame(withSeed(next, Math.floor(Math.random() * 1e9)));
+        this.startNewGame(nextScenarioSettings(g.settings, Math.floor(Math.random() * 1e9)));
         break;
       }
       case 'town-streets': {
