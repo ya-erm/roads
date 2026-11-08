@@ -30,7 +30,7 @@ import { PhaseSpec, phaseTurnStates, specOf, turnClashes, type TurnState } from 
 import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, parseLaneKey, twoWay } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
 import type { LaneTraffic } from '../lanes/traffic';
-import { RailSim, Train } from '../sim/rail';
+import { Leaving, RailSim, Train } from '../sim/rail';
 import { stepWagons } from '../sim/wagons';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { hitchOf, steerBase } from '../sim/body';
@@ -892,6 +892,7 @@ export class Game implements BuildContext {
     this.pruneRoundabouts();
     this.net.rebuild();
     this.refreshCrossings();
+    this.orientStandingTrains();
     this.history.push(...save.history);
     this.time = save.time;
     this.month = save.month;
@@ -4356,7 +4357,8 @@ export class Game implements BuildContext {
 
   /**
    * Поезд: грузится на платформе, затем ждёт, пока весь путь до свободной платформы
-   * следующего вокзала освободится (автоблокировка), и только тогда отправляется.
+   * следующего вокзала освободится (автоблокировка), и только тогда отправляется. Все платформы
+   * заняты, но с одной поезд уйдёт к нашему приезду (trainLeaving) — отправляется сразу (RailSim.departAhead).
    */
   private updateTrain(v: FleetVehicle, line: Line, model: RailModel, dt: number): void {
     const n = line.stops.length;
@@ -4380,6 +4382,7 @@ export class Game implements BuildContext {
       // Сначала — на путь, выбранный для этой остановки (занят — на любой свободный).
       const own = this.stopPlatform(line, v.stop);
       this.rail.park(train, own !== null ? [own, ...sidingsFirst(st).filter((p) => p !== own)] : sidingsFirst(st));
+      this.orientTrain(v, line, train);
       v.trainId = train.id;
       v.waited = 0;
       // Встал на платформу — сначала погрузка; вагоны пока такие, с каким грузом поезд встал.
@@ -4390,7 +4393,12 @@ export class Game implements BuildContext {
     train.color = line.color;
     this.animateWagons(v, train, dt);
     if (v.state === 'driving') {
-      if ((train.held ?? 0) > 40) line.problem = 'Поезд долго стоит у красного сигнала. Если на однопутке сигналы в обе стороны — встречные поезда могли упереться друг в друга';
+      if ((train.held ?? 0) > 40) {
+        const to = this.rail.waitsPlatform(train) ? this.stations.get(line.stops[v.stop]) : undefined;
+        line.problem = to
+          ? `Поезд долго ждёт у входа на станцию, пока освободится платформа: ${to.name}`
+          : 'Поезд долго стоит у красного сигнала. Если на однопутке сигналы в обе стороны — встречные поезда могли упереться друг в друга';
+      }
       return;
     }
     if (v.state === 'loading') {
@@ -4413,7 +4421,9 @@ export class Game implements BuildContext {
     const own = this.stopPlatform(line, nextIdx);
     const targets = own !== null ? [own] : to.platforms;
     const through = own !== null ? undefined : throughOf(to);
-    const res = this.rail.depart(train, targets, through);
+    let res = this.rail.depart(train, targets, through);
+    // Все платформы заняты, но с одной поезд уйдёт к нашему приезду — едем сейчас и ждём, если что, у входа.
+    if (res === 'blocked') res = this.rail.departAhead(train, targets, (t) => this.trainLeaving(t));
     if (res === 'noroute') {
       const k = own !== null ? to.platforms.indexOf(own) + 1 : 0;
       // Состав длиннее платформ следующего вокзала (выбранного пути или всех) — путь есть, встать негде.
@@ -4449,6 +4459,72 @@ export class Game implements BuildContext {
   }
 
   /**
+   * Поезд, который стоит на платформе или едет к ней (для отправления к ней по прогнозу — RailSim.departAhead):
+   * через сколько секунд стоянки он будет готов уехать и к каким платформам следующей станции. null — не знаем:
+   * ждёт полной загрузки без предела, первых пассажиров и т. п.
+   */
+  private trainLeaving(train: Train): Leaving | null {
+    const v = this.trainOwner(train);
+    const line = v && this.lines.get(v.lineId);
+    if (!v || !line || !line.stops.length) return null;
+    const after = train.moving ? (v.state === 'driving' ? this.standAhead(v, line) : null) : this.standLeft(v, line);
+    if (after === null) return null;
+    const next = (v.stop + 1) % line.stops.length;
+    const to = this.stations.get(line.stops[next]);
+    if (!to) return null;
+    const own = this.stopPlatform(line, next);
+    return { after, targets: own !== null ? [own] : to.platforms, through: own !== null ? undefined : throughOf(to) };
+  }
+
+  /**
+   * Сколько ещё секунд поезд простоит на станции до готовности уехать — оценка по условию отправления
+   * (loadingDone): текущая погрузка, ожидание груза или полной загрузки с пределом, интервал на первой станции.
+   */
+  private standLeft(v: FleetVehicle, line: Line): number | null {
+    const st = this.stations.get(line.stops[v.stop]);
+    if (!st) return null;
+    let left = Math.max(0, v.timer);
+    if (v.state === 'departing') return left;
+    if (v.state !== 'loading') return null;
+    const model = MODELS[v.model];
+    const rule = this.stopRule(line, v.stop);
+    if (vehicleLoad(v) < vehicleCapacity(v)) {
+      if (rule.wait === 'full') {
+        if (rule.maxWait === null) return null;
+        left += Math.max(0, rule.maxWait - v.waited);
+      } else if (rule.wait === 'auto') {
+        if (model.carries === 'freight' && this.expectsCargo(st, line, v.stop)) left += Math.max(0, 25 - v.waited);
+        else if (model.carries !== 'freight' && this.waitsFirstPassengers(v, line, st)) return null;
+      }
+    }
+    const until = v.holdUntil ?? this.spacingUntil(v, line, st);
+    if (until !== null) left = Math.max(left, until - this.time);
+    return left;
+  }
+
+  /**
+   * Сколько простоит поезд, который ещё едет к остановке v.stop: выгрузка всего и посадка ждущих (как handleStop),
+   * ожидание по условию отправления, на первой станции — интервал. null — без предела (до полной загрузки).
+   */
+  private standAhead(v: FleetVehicle, line: Line): number | null {
+    const st = this.stations.get(line.stops[v.stop]);
+    if (!st) return null;
+    const model = MODELS[v.model];
+    const rule = this.stopRule(line, v.stop);
+    const cap = vehicleCapacity(v);
+    let left = 2 + handlingTime(v, vehicleLoad(v) + Math.min(cap, this.lineWaiting(line, v.stop, model.carries)));
+    if (rule.wait === 'full') {
+      if (rule.maxWait === null) return null;
+      left += rule.maxWait;
+    } else if (rule.wait === 'auto') {
+      if (model.carries === 'freight' && this.expectsCargo(st, line, v.stop)) left += 25;
+      else if (model.carries !== 'freight' && this.waitsFirstPassengers(v, line, st)) return null;
+    }
+    if (v.stop === 0 && !line.noSpacing) left = Math.max(left, (this.lineInterval(line) ?? 0) * 0.8);
+    return left;
+  }
+
+  /**
    * Вагоны на вид догоняют настоящую загрузку: на стоянке наполняются и пустеют в темпе погрузки (грузовые —
    * по очереди, пассажирские — все сразу, во столько раз быстрее), в пути (и при dt = Infinity) — сразу как есть.
    */
@@ -4477,7 +4553,31 @@ export class Game implements BuildContext {
     v.state = 'loading';
     // Длину состава меняли в пути — перецепляем вагоны на станции.
     this.recouple(v, train);
+    this.orientTrain(v, line, train);
     this.handleStop(v, st, line);
+  }
+
+  /**
+   * Стоящий на остановке v.stop поезд — сразу локомотивом в сторону выезда к следующей остановке линии
+   * (RailSim.orient): на погрузке он уже стоит так, как поедет.
+   */
+  private orientTrain(v: FleetVehicle, line: Line, train: Train): void {
+    const n = line.stops.length;
+    if (!n || train.moving) return;
+    const next = (v.stop + 1) % n;
+    const to = this.stations.get(line.stops[next]);
+    if (!to) return;
+    const own = this.stopPlatform(line, next);
+    this.rail.orient(train, own !== null ? [own] : to.platforms, own !== null ? undefined : throughOf(to));
+  }
+
+  /** Поезда, стоящие на станциях (в сохранении — и в старой ориентации), — локомотивом к выезду. */
+  private orientStandingTrains(): void {
+    for (const v of this.fleet.values()) {
+      const train = this.fleetTrain(v);
+      const line = this.lines.get(v.lineId);
+      if (train && line && (v.state === 'loading' || v.state === 'departing')) this.orientTrain(v, line, train);
+    }
   }
 
   private onTrainLost(train: Train): void {
@@ -4621,6 +4721,12 @@ export class Game implements BuildContext {
       const line = this.lines.get(v.lineId);
       if (!line) continue;
       if (MODELS[v.model].mode === 'rail') {
+        // Уехал по прогнозу, а платформа ещё занята — стоит у входа на станцию.
+        const train = v.state === 'driving' ? this.fleetTrain(v) : undefined;
+        if (train && this.rail.waitsPlatform(train)) {
+          out.push({ station: line.stops[v.stop], line: line.id, blocked: true, stopped: true, dist: 0 });
+          continue;
+        }
         if (v.state !== 'departing' || v.waited <= 0) continue;
         // Поезд на платформе ждёт путь к следующему вокзалу; без поезда — ждёт платформу на своём.
         const next = v.trainId != null ? (v.stop + 1) % line.stops.length : v.stop;

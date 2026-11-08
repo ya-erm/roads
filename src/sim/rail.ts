@@ -48,6 +48,16 @@ export interface Train extends TrainSpec {
   reservedTo?: number;
   /** Сколько секунд поезд стоит перед сигналом. */
   held?: number;
+  /**
+   * Платформа назначения, ещё занятая уходящим поездом (отправление по прогнозу — departAhead): за этим поездом
+   * она закреплена заявкой — другие её не займут, а он встанет перед ней и въедет, как только она освободится.
+   */
+  claim?: number;
+  /**
+   * Путь, по которому поезд уйдёт с платформы, — его первый блок и платформа назначения закреплены за ним
+   * заранее (заявкой): так к его платформе уже едет другой поезд (departAhead), и уйти ему ничто не помешает.
+   */
+  exit?: PathEdge[];
 }
 
 /** Где поезд останавливается перед закрытым сигналом. */
@@ -63,6 +73,16 @@ export type DepartResult = 'ok' | 'blocked' | 'noroute';
 interface State {
   seg: number;
   dir: 0 | 1;
+}
+
+/** Ждать у входа на станцию, пока уйдёт поезд с платформы, — по прогнозу не дольше стольких секунд. */
+export const AHEAD_SLACK = 20;
+
+/** Поезд на платформе: через сколько секунд будет готов уехать и куда (платформы следующей станции). */
+export interface Leaving {
+  after: number;
+  targets: number[];
+  through?: number;
 }
 
 const BLOCKED_COST = 1e4;
@@ -111,12 +131,19 @@ class Heap<T> {
 /**
  * Поезда. Безопасность — автоблокировка без сигналов: поезд отправляется, только
  * когда весь путь до свободной платформы следующей станции свободен, и резервирует его.
- * Пройденные участки освобождаются, как только их покидает хвост.
+ * Пройденные участки освобождаются, как только их покидает хвост. Платформа, с которой поезд
+ * уйдёт к нашему приезду, — по прогнозу (departAhead): едем сразу, ждём, если что, у входа.
  */
 export class RailSim {
   readonly trains = new Map<number, Train>();
   private readonly segOwner = new Map<number, number>();
   private readonly nodeOwner = new Map<number, number>();
+  /**
+   * Заявки (по поездам — syncClaims): платформа → поезд, который едет к ней, пока её не освободили (Train.claim);
+   * участки и узлы первого блока и платформа назначения → поезд, который по ним уйдёт (Train.exit).
+   */
+  private readonly claims = new Map<number, number>();
+  private readonly nodeClaims = new Map<number, number>();
   private nextId = 1;
   private speedVersion = -1;
   private readonly speedCache = new Map<number, number>();
@@ -202,10 +229,23 @@ export class RailSim {
     return train;
   }
 
+  /** Кто держит участок: поезд, забронировавший его, или (платформу) поезд с заявкой на неё. */
+  private holder(seg: number): number | undefined {
+    return this.segOwner.get(seg) ?? this.claims.get(seg);
+  }
+
+  private nodeHolder(node: number): number | undefined {
+    return this.nodeOwner.get(node) ?? this.nodeClaims.get(node);
+  }
+
   private own(train: Train, segs: number[], nodes: number[]): void {
     for (const s of segs) {
       this.segOwner.set(s, train.id);
       if (!train.segs.includes(s)) train.segs.push(s);
+      if (train.claim === s) {
+        delete train.claim;
+        this.syncClaims();
+      }
     }
     for (const n of nodes) {
       this.nodeOwner.set(n, train.id);
@@ -226,13 +266,18 @@ export class RailSim {
   private releaseAll(train: Train): void {
     for (const s of [...train.segs]) this.releaseSeg(train, s);
     for (const n of [...train.nodes]) this.releaseNode(train, n);
+    if (train.claim !== undefined || train.exit) {
+      delete train.claim;
+      delete train.exit;
+      this.syncClaims();
+    }
   }
 
   /** Ставит поезд на свободную платформу (при покупке или после сбоя). */
   park(train: Train, platforms: number[]): boolean {
     for (const pid of platforms) {
       const seg = this.net.segments.get(pid);
-      if (!seg || this.segOwner.has(pid) || seg.length < train.length + 6) continue;
+      if (!seg || this.holder(pid) !== undefined || seg.length < train.length + 6) continue;
       this.releaseAll(train);
       this.own(train, [pid], []);
       train.platform = pid;
@@ -246,19 +291,154 @@ export class RailSim {
     return false;
   }
 
-  /** Пытается отправить стоящий поезд к одной из платформ targets; through — сквозной путь вокзала. */
-  depart(train: Train, targets: number[], through?: number): DepartResult {
-    if (train.moving || train.platform === null) return 'noroute';
+  /**
+   * Стоящий поезд — головой (локомотивом) туда, куда он уйдёт к одной из платформ targets (тот же маршрут, что
+   * выбрал бы depart; закреплённый заранее Train.exit — по нему): на конечной и при возврате назад с проходной
+   * поезд разворачивается сразу по прибытии, а не при отправлении. Занятый отрезок платформы тот же — меняется
+   * только конец, с которого голова; брони не трогаются. Пути нет — стоит как стоял. true — развернулся.
+   */
+  orient(train: Train, targets: number[], through?: number): boolean {
+    if (train.moving || train.platform === null || train.path.length !== 1) return false;
     const P = this.net.segments.get(train.platform);
-    if (!P) return 'noroute';
     const edge = train.path[0];
-    // Отрезок платформы, занятый поездом, в координатах сегмента.
+    if (!P || edge.seg !== P.id) return false;
+    const exit = train.exit;
+    const dir = exit && exit.length > 1 && exit[0].seg === P.id ? exit[0].dir : this.plan(train, targets, through)?.[0]?.dir;
+    if (dir === undefined || dir === edge.dir) return false;
+    // Отрезок платформы под поездом в координатах сегмента — как в launch.
     const front = edge.dir === 0 ? train.head : P.length - train.head;
     const x0 = edge.dir === 0 ? front - train.length : front;
     const x1 = edge.dir === 0 ? front : front + train.length;
-    const goal = new Set(targets.filter((t) => t !== P.id));
-    const route = this.findRoute([P.id], goal, train.id, train.length + 6, through);
-    if (!route) return 'noroute';
+    train.path = [{ seg: P.id, dir, len: P.length, start: 0 }];
+    train.head = dir === 0 ? x1 : P.length - x0;
+    train.stopAt = train.head;
+    return true;
+  }
+
+  /** Пытается отправить стоящий поезд к одной из платформ targets; through — сквозной путь вокзала. */
+  depart(train: Train, targets: number[], through?: number): DepartResult {
+    // Путь, закреплённый заранее (к платформе уже едет другой поезд), — тот же, что и обещан.
+    const path = this.plannedExit(train, targets) ?? this.plan(train, targets, through);
+    if (!path) return 'noroute';
+    // Бронь: путь до первого сигнала по ходу (или до конца) и сразу платформа назначения —
+    // поезд, ждущий у сигнала, всегда знает, что его платформа свободна.
+    const k = this.blockEnd(path, 0);
+    const last = path.length - 1;
+    const segs = [...path.slice(0, k + 1).map((e) => e.seg), path[last].seg];
+    const nodes = this.pathNodes(path, 0, k);
+    if (!this.free(train, segs, nodes) || this.throughStanding(train, path, k)) return 'blocked';
+    this.launch(train, path, k, segs, nodes);
+    return 'ok';
+  }
+
+  /**
+   * За первым блоком маршрут идёт через платформу, на которой стоит другой поезд (объезда нет): уехав, поезд
+   * встанет у сигнала перед ним, а тот может уходить навстречу — по пути, который держит этот. Ждём на месте.
+   */
+  private throughStanding(train: Train, path: PathEdge[], k: number): boolean {
+    return path.slice(k + 1, -1).some((e) => {
+      const other = this.trains.get(this.segOwner.get(e.seg) ?? -1);
+      return !!other && other.id !== train.id && !other.moving;
+    });
+  }
+
+  /**
+   * Отправление по прогнозу: все платформы targets заняты, но с одной из них поезд скоро уйдёт — к нашему приезду
+   * (или не позже чем через slack секунд после него). Тогда едем сразу: бронь — путь без самой платформы (поезд
+   * встанет у входа на неё), а платформа закреплена за нами заявкой (Train.claim) — другой её не займёт.
+   * leaving(occupant) — через сколько секунд стоящий там поезд будет готов уехать и куда; null — неизвестно.
+   * Без взаимной блокировки: уходящий поезд уедет, не задев ни одного участка и узла нашего маршрута (встречный
+   * на однопутке, разворот в тупике — нельзя), и его первый блок с платформой назначения свободен уже сейчас.
+   * 'blocked' — ждать на месте, как и раньше.
+   */
+  departAhead(train: Train, targets: number[], leaving: (occupant: Train) => Leaving | null, slack = AHEAD_SLACK): DepartResult {
+    if (train.moving || train.platform === null || !this.net.segments.has(train.platform)) return 'noroute';
+    const own = train.platform;
+    const goals = targets.filter((t) => t !== own && this.net.segments.has(t));
+    // Свободная платформа есть — держит не она, а путь до неё: ждём, как обычно.
+    if (!goals.length || goals.some((t) => this.holder(t) === undefined)) return 'blocked';
+    let best: { path: PathEdge[]; k: number; wait: number; platform: number; occupant: Train; exit: PathEdge[] } | null = null;
+    for (const t of goals) {
+      if (this.claims.has(t)) continue;
+      // Платформу держит поезд, который на ней стоит или едет к ней, забронировав весь путь до неё (ни у какого
+      // сигнала он уже не встанет).
+      const occupant = this.trains.get(this.segOwner.get(t) ?? -1);
+      if (!occupant || occupant.id === train.id || occupant.exit) continue;
+      const last = occupant.path.length - 1;
+      const coming = occupant.moving && occupant.path[last]?.seg === t && (occupant.reservedTo ?? last) >= last - 1;
+      if (!coming && (occupant.moving || occupant.platform !== t)) continue;
+      const info = leaving(occupant);
+      if (!info || !Number.isFinite(info.after)) continue;
+      const path = this.plan(train, [t]);
+      const exit = this.plan(occupant, info.targets, info.through, t);
+      if (!path || path.length < 2 || !exit) continue;
+      if (!this.apart(path, exit) || !this.openFor(exit, [occupant.id, train.id], occupant.length)) continue;
+      if (this.throughStanding(occupant, exit, this.blockEnd(exit, 0))) continue;
+      const k = Math.min(this.blockEnd(path, 0), path.length - 2);
+      if (!this.free(train, path.slice(0, k + 1).map((e) => e.seg), this.pathNodes(path, 0, k)) || this.throughStanding(train, path, k)) continue;
+      const until = (coming ? this.arrivalTime(occupant) : 0) + info.after + this.clearTime(occupant, t);
+      const wait = until - this.travelTime(train, path);
+      if (wait > slack || (best && wait >= best.wait)) continue;
+      best = { path, k, wait, platform: t, occupant, exit };
+    }
+    if (!best) return 'blocked';
+    const { path, k, platform, occupant, exit } = best;
+    this.launch(train, path, k, path.slice(0, k + 1).map((e) => e.seg), this.pathNodes(path, 0, k));
+    train.claim = platform;
+    occupant.exit = exit;
+    this.syncClaims();
+    return 'ok';
+  }
+
+  /** Закреплённый заранее путь поезда (Train.exit), если он годится для отправления к targets; иначе снимается. */
+  private plannedExit(train: Train, targets: number[]): PathEdge[] | null {
+    const exit = train.exit;
+    if (!exit) return null;
+    const ok = exit.length > 1 && exit[0].seg === train.platform && targets.includes(exit[exit.length - 1].seg) && exit.every((e) => this.net.segments.has(e.seg));
+    if (!ok) {
+      delete train.exit;
+      this.syncClaims();
+      return null;
+    }
+    // Длины участков могли поменяться (правка формы пути) — смещения заново.
+    let acc = 0;
+    return exit.map((e) => {
+      const len = this.net.segment(e.seg).length;
+      const edge = { seg: e.seg, dir: e.dir, len, start: acc };
+      acc += len;
+      return edge;
+    });
+  }
+
+  /** Что закреплено за уходящим поездом по его пути exit: первый блок (без своей платформы) и платформа назначения. */
+  private exitHold(exit: PathEdge[]): { segs: number[]; nodes: number[] } {
+    const k = this.blockEnd(exit, 0);
+    const segs = exit.slice(1, k + 1).map((e) => e.seg);
+    const last = exit[exit.length - 1].seg;
+    if (!segs.includes(last)) segs.push(last);
+    return { segs, nodes: this.pathNodes(exit, 0, k) };
+  }
+
+  /**
+   * Поезд стоит у входа на платформу назначения, которую ещё не освободил уходящий поезд (заявка departAhead):
+   * ждёт именно из-за занятой платформы, а не из-за пути.
+   */
+  waitsPlatform(train: Train): boolean {
+    if (!train.moving || train.claim === undefined || !train.held) return false;
+    const from = (train.reservedTo ?? train.path.length - 1) + 1;
+    return from < train.path.length && this.blockEnd(train.path, from) === train.path.length - 1;
+  }
+
+  /**
+   * Маршрут поезда от платформы from (по умолчанию — той, где он стоит) к одной из targets — тот, что выбрал бы
+   * depart; null — пути нет.
+   */
+  private plan(train: Train, targets: number[], through?: number, from?: number): PathEdge[] | null {
+    const own = from ?? (train.moving ? null : train.platform);
+    if (own === null || !this.net.segments.has(own)) return null;
+    const goal = new Set(targets.filter((t) => t !== own));
+    const route = this.findRoute([own], goal, train.id, train.length + 6, through);
+    if (!route) return null;
     const path: PathEdge[] = [];
     let acc = 0;
     for (const st of route.states) {
@@ -266,33 +446,108 @@ export class RailSim {
       path.push({ seg: st.seg, dir: st.dir, len, start: acc });
       acc += len;
     }
-    // Бронь: путь до первого сигнала по ходу (или до конца) и сразу платформа назначения —
-    // поезд, ждущий у сигнала, всегда знает, что его платформа свободна.
-    const k = this.blockEnd(path, 0);
-    const last = path.length - 1;
-    const segs = [...path.slice(0, k + 1).map((e) => e.seg), path[last].seg];
-    const nodes = path.slice(0, k).map((e) => this.endNode(this.net.segment(e.seg), e.dir));
-    if (!this.free(train, segs, nodes)) return 'blocked';
+    return path;
+  }
+
+  /** Узлы маршрута между участками from…to (узел в конце каждого из них, кроме последнего). */
+  private pathNodes(path: PathEdge[], from: number, to: number): number[] {
+    return path.slice(from, to).map((e) => this.endNode(this.net.segment(e.seg), e.dir));
+  }
+
+  /** Трогает стоящий поезд по маршруту path: бронь — segs и nodes, до участка reservedTo включительно. */
+  private launch(train: Train, path: PathEdge[], reservedTo: number, segs: number[], nodes: number[]): void {
+    const P = this.net.segment(train.platform!);
+    const edge = train.path[0];
+    // Отрезок платформы, занятый поездом, в координатах сегмента.
+    const front = edge.dir === 0 ? train.head : P.length - train.head;
+    const x0 = edge.dir === 0 ? front - train.length : front;
+    const x1 = edge.dir === 0 ? front : front + train.length;
     const first = path[0];
+    const last = path[path.length - 1];
     train.path = path;
     train.head = first.dir === 0 ? x1 : P.length - x0;
-    train.stopAt = path[last].start + (path[last].len + train.length) / 2;
-    train.reservedTo = k;
+    train.stopAt = last.start + (last.len + train.length) / 2;
+    train.reservedTo = reservedTo;
     train.held = 0;
     train.moving = true;
     train.platform = null;
     this.own(train, segs, nodes);
-    return 'ok';
+    // Уехал — закреплённый за ним путь теперь его бронь, а остальное от заявки свободно.
+    if (train.exit) {
+      delete train.exit;
+      this.syncClaims();
+    }
   }
 
-  /** Свободны ли участки и узлы от чужих броней. */
+  /**
+   * Маршруты не делят ни участков, ни узлов: наш (без платформы, с которой уезжаем, — её освободим первыми)
+   * и уходящего поезда (без платформы, с которой уходит он, — на неё едем мы).
+   */
+  private apart(mine: PathEdge[], exit: PathEdge[]): boolean {
+    const segs = new Set(mine.slice(1).map((e) => e.seg));
+    const nodes = new Set(this.pathNodes(mine, 0, mine.length - 1));
+    if (exit.slice(1).some((e) => segs.has(e.seg))) return false;
+    return !this.pathNodes(exit, 0, exit.length - 1).some((n) => nodes.has(n));
+  }
+
+  /**
+   * Уехал бы поезд длиной length по маршруту прямо сейчас и увёл бы хвост со своей платформы, не дожидаясь
+   * следующих блоков: первый блок и платформа назначения свободны (или их держат ours), а первый блок за платформой
+   * длиннее поезда (или доходит до самого конца).
+   */
+  private openFor(path: PathEdge[], ours: number[], length: number): boolean {
+    const k = this.blockEnd(path, 0);
+    const room = path.slice(1, k + 1).reduce((s, e) => s + e.len, 0);
+    if (k < path.length - 1 && room < length + SIGNAL_GAP + 2) return false;
+    const { segs, nodes } = this.exitHold(path);
+    for (const s of segs) {
+      const h = this.holder(s);
+      if (h !== undefined && !ours.includes(h)) return false;
+    }
+    for (const n of nodes) {
+      const h = this.nodeHolder(n);
+      if (h !== undefined && !ours.includes(h)) return false;
+    }
+    return true;
+  }
+
+  /** Оценка снизу: сколько секунд поезду от середины своей платформы до входа на последний участок маршрута. */
+  private travelTime(train: Train, path: PathEdge[]): number {
+    let t = train.maxSpeed / (2 * train.accel);
+    path.slice(0, -1).forEach((e, i) => {
+      t += (i === 0 ? e.len / 2 : e.len) / Math.min(train.maxSpeed, this.segSpeed(e.seg));
+    });
+    return t;
+  }
+
+  /** Оценка снизу: сколько секунд едущему поезду до остановки на платформе назначения. */
+  private arrivalTime(train: Train): number {
+    let t = train.maxSpeed / (2 * train.brake);
+    for (const e of train.path) {
+      const a = Math.max(train.head, e.start);
+      const b = Math.min(train.stopAt, e.start + e.len);
+      if (b > a) t += (b - a) / Math.min(train.maxSpeed, this.segSpeed(e.seg));
+    }
+    return t;
+  }
+
+  /** Сколько секунд поезду, стоящему на платформе platform, тронуться и увести с неё хвост. */
+  private clearTime(train: Train, platform: number): number {
+    const seg = this.net.segments.get(platform);
+    const d = ((seg?.length ?? train.length) + train.length) / 2;
+    const v = Math.min(train.maxSpeed, seg ? this.segSpeed(seg.id) : train.maxSpeed);
+    const run = (v * v) / (2 * train.accel);
+    return d <= run ? Math.sqrt((2 * d) / train.accel) : v / train.accel + (d - run) / v;
+  }
+
+  /** Свободны ли участки и узлы от чужих броней (и заявок на платформы). */
   private free(train: Train, segs: number[], nodes: number[]): boolean {
     for (const s of segs) {
-      const owner = this.segOwner.get(s);
+      const owner = this.holder(s);
       if (owner !== undefined && owner !== train.id) return false;
     }
     for (const n of nodes) {
-      const owner = this.nodeOwner.get(n);
+      const owner = this.nodeHolder(n);
       if (owner !== undefined && owner !== train.id) return false;
     }
     return true;
@@ -435,7 +690,7 @@ export class RailSim {
         const nk = key(next);
         if (closed.has(nk)) continue;
         const ns = this.net.segment(next.seg);
-        const owner = self === null ? undefined : this.segOwner.get(next.seg);
+        const owner = self === null ? undefined : this.holder(next.seg);
         const blocked = owner !== undefined && owner !== self ? BLOCKED_COST : 0;
         const side = next.seg === through && goal.has(next.seg) ? THROUGH_COST : 0;
         const cost = base + ns.length / this.segSpeed(next.seg) + blocked + side;
@@ -588,6 +843,36 @@ export class RailSim {
       this.remove(train);
       this.events.onLost(train);
     }
+    this.syncClaims();
+  }
+
+  /**
+   * Заявки на платформы — заново по поездам: заявка жива, пока поезд едет и его маршрут кончается этой
+   * платформой (её разрезали или убрали — заявка снимается, поезд займёт платформу обычной бронью).
+   */
+  private syncClaims(): void {
+    this.claims.clear();
+    this.nodeClaims.clear();
+    for (const train of this.trains.values()) {
+      const c = train.claim;
+      if (c === undefined) continue;
+      const ok = train.moving && this.net.segments.has(c) && train.path[train.path.length - 1]?.seg === c && !train.segs.includes(c) && !this.claims.has(c);
+      if (ok) this.claims.set(c, train.id);
+      else delete train.claim;
+    }
+    // Путь ухода — за поездом, который стоит на его первой платформе или едет к ней.
+    for (const train of this.trains.values()) {
+      const exit = train.exit;
+      if (!exit) continue;
+      const at = train.moving ? train.path[train.path.length - 1]?.seg : train.platform;
+      if (exit.length < 2 || exit[0].seg !== at || !exit.every((e) => this.net.segments.has(e.seg))) {
+        delete train.exit;
+        continue;
+      }
+      const { segs, nodes } = this.exitHold(exit);
+      for (const s of segs) if (!this.claims.has(s)) this.claims.set(s, train.id);
+      for (const n of nodes) if (!this.nodeClaims.has(n)) this.nodeClaims.set(n, train.id);
+    }
   }
 
   private applySplits(train: Train, bySeg: Map<number, SplitRecord>): void {
@@ -659,13 +944,13 @@ export class RailSim {
   canPark(platforms: number[], length: number): boolean {
     return platforms.some((pid) => {
       const seg = this.net.segments.get(pid);
-      return seg && !this.segOwner.has(pid) && seg.length >= length + 6;
+      return seg && this.holder(pid) === undefined && seg.length >= length + 6;
     });
   }
 
   /** Занята ли платформа или участок пути. */
   isReserved(segId: number): boolean {
-    return this.segOwner.has(segId);
+    return this.holder(segId) !== undefined;
   }
 
   serialize(): { nextId: number; trains: Train[] } {
@@ -677,6 +962,7 @@ export class RailSim {
     this.trains.clear();
     this.segOwner.clear();
     this.nodeOwner.clear();
+    this.claims.clear();
   }
 
   restore(data: { nextId: number; trains: Train[] }): Set<number> {
@@ -691,6 +977,7 @@ export class RailSim {
       if (train.path.length) this.applyLengths(train);
       ok.add(train.id);
     }
+    this.syncClaims();
     return ok;
   }
 }

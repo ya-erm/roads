@@ -156,26 +156,34 @@ describe('Конечная ж/д станция', { timeout: 60_000 }, () => {
     // Где голова (локомотив) у стоящего на платформе поезда: со стороны упора или горловины.
     const stops: { st: number; loco: 'buffer' | 'throat' }[] = [];
     let moving = true;
+    let lastLoco: Vec | null = null;
+    // Сдвиг локомотива за первый шаг после отправления: без скачка на другой конец состава.
+    const jumps: number[] = [];
     runSeconds(game, 600, () => {
       const t = train();
       if (!t) return;
+      const loco = game.rail.cars(t)[0].pos;
       if (!t.moving && moving) {
         const st = [t1, t2].find((s) => t.platform !== null && s.platforms.includes(t.platform));
         if (st) {
-          const loco = game.rail.cars(t)[0].pos;
           const buffer = buffers(game, st).reduce((a, b) => (dist(a, loco) < dist(b, loco) ? a : b));
           const tail = game.rail.cars(t)[t.cars - 1].pos;
           stops.push({ st: st.id, loco: dist(loco, buffer) < dist(tail, buffer) ? 'buffer' : 'throat' });
         }
       }
+      if (t.moving && !moving && lastLoco) jumps.push(dist(loco, lastLoco));
       moving = t.moving;
+      lastLoco = loco;
     });
     const seq = stops.map((s) => s.st);
     // Туда и обратно, не раз: t1 → t2 → t1 → t2…
     expect(seq.length).toBeGreaterThanOrEqual(4);
     for (let i = 1; i < seq.length; i++) expect(seq[i]).not.toBe(seq[i - 1]);
-    // Приезжает локомотивом к упору — значит, на каждой конечной поезд развернулся и ушёл головой вперёд.
-    expect(stops.slice(1).every((s) => s.loco === 'buffer')).toBe(true);
+    // На стоянке локомотив уже со стороны горловины — поезд развернулся по прибытии и стоит к выезду.
+    expect(stops.every((s) => s.loco === 'throat')).toBe(true);
+    // Отправляется с места — локомотив не перескакивает на другой конец состава.
+    expect(jumps.length).toBeGreaterThanOrEqual(3);
+    for (const d of jumps) expect(d).toBeLessThan(2);
     expect(line.problem).toBeNull();
   });
 
