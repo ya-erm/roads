@@ -12,6 +12,8 @@ export interface VehicleSpec {
   color: string;
   /** Цвет груза в кузове (для грузовиков). */
   load?: string;
+  /** Автоцистерна: вместо кузова (фургона, тента полуприцепа) — цистерна; груз — нефть, топливо или газ. */
+  tank?: boolean;
   /** Кузов машины компании или спецмашины (см. sim/body); у машин жителей нет. */
   body?: VehicleBody;
   /**
@@ -98,7 +100,7 @@ export interface Vehicle extends VehicleSpec {
 export type Blinker = -1 | 0 | 1;
 
 /** Что нужно, чтобы нарисовать машину: вид и кузов, цвет, нос и курс, вторая часть кузова, поворотник. */
-export type VehicleLook = Pick<Vehicle, 'kind' | 'body' | 'length' | 'width' | 'color' | 'load' | 'pos' | 'dir' | 'trail' | 'blinker' | 'siren'> & {
+export type VehicleLook = Pick<Vehicle, 'kind' | 'body' | 'length' | 'width' | 'color' | 'load' | 'tank' | 'pos' | 'dir' | 'trail' | 'blinker' | 'siren'> & {
   /** Маячок техники бригады горит (машина работает у своего края); нет — не горит. */
   beacon?: boolean;
 };

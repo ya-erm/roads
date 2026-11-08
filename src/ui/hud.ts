@@ -15,6 +15,7 @@ import {
   LineMode,
   MODELS,
   ModelId,
+  modelName,
   modelsFor,
   renewOn,
   StopRule,
@@ -924,7 +925,7 @@ export class Hud {
       if (art) e.dataTransfer.setDragImage(art, art.clientWidth / 2, art.clientHeight / 2);
       mark = document.createElement('span');
       mark.className = 'buy-drop-mark';
-      mark.innerHTML = `${modelSvg(model, line.color, 34, 16)}<b>▶</b>`;
+      mark.innerHTML = `${modelSvg(model, line.color, 34, 16, this.game().tankLine(line))}<b>▶</b>`;
       card.classList.add('buy-dragged');
       card.closest('.detail')?.querySelector('.route')?.classList.add('buy-drop');
     });
@@ -2802,12 +2803,14 @@ export class Hud {
         // Замена на модель новее, когда она вышла.
         // Замена — на месте, там же, где машина едет или стоит; заказанная ждёт места сзади на дороге.
         const next = g.replacementFor(v);
+        const tank = g.isTanker(v);
         const replace = v.upgradeTo
-          ? `<button class="small replace" disabled title="Новая ${MODELS[v.upgradeTo].name} длиннее, а сзади вплотную машина — заменится, как только освободится место">⟳ ждёт места</button>`
+          ? `<button class="small replace" disabled title="Новая ${modelName(v.upgradeTo, tank)} длиннее, а сзади вплотную машина — заменится, как только освободится место">⟳ ждёт места</button>`
           : next
-            ? `<button class="small replace" data-action="replace" data-id="${v.id}" title="Заменить на месте: продать за ${money(g.saleValue(v))} и купить ${MODELS[next].name} за ${money(MODELS[next].price)} — поедет дальше оттуда же, с тем же грузом">⟳ ${
-                MODELS[next].name
-              }</button>`
+            ? `<button class="small replace" data-action="replace" data-id="${v.id}" title="Заменить на месте: продать за ${money(g.saleValue(v))} и купить ${modelName(next, tank)} за ${money(MODELS[next].price)} — поедет дальше оттуда же, с тем же грузом">⟳ ${modelName(
+                next,
+                tank,
+              )}</button>`
             : '';
         // Длина состава: вагоны добавляются и снимаются, пока помещаются на платформы линии.
         const cars =
@@ -2816,7 +2819,7 @@ export class Hud {
                 v,
               )}</b><button data-action="cars" data-id="${v.id}" data-d="1">+</button></span>`
             : '';
-        return `<div class="veh" data-veh="${v.id}"><div><div class="veh-head"><b>${esc(v.name)}</b> <small class="nowrap">· ${load}/${vehicleCapacity(v)}${what}</small></div><small>${state}</small></div>
+        return `<div class="veh" data-veh="${v.id}"><div><div class="veh-head"><b>${esc(g.vehicleTitle(v))}</b> <small class="nowrap">· ${load}/${vehicleCapacity(v)}${what}</small></div><small>${state}</small></div>
           ${cars}${replace}
           <button class="icon" title="Показать" data-action="show-fleet" data-id="${v.id}">◎</button>
           <button class="icon" title="Продать за ${money(g.saleValue(v))}" data-action="sell" data-id="${v.id}">✕</button></div>`;
@@ -2838,6 +2841,8 @@ export class Hud {
         : '';
     const interval = g.lineInterval(line);
     const kind = g.lineKind(line);
+    // Маршрут только наливных грузов: грузовики на нём — автоцистерны (так и на карточках покупки).
+    const tank = kind === 'freight' && g.tankLine(line);
     const speed = this.lineSpeedHtml(line);
     // Между станциями нет готовой дороги: купить можно, но машина будет ждать на станции — значок на карточках покупки.
     const gap = g.lineGap(line);
@@ -2887,9 +2892,11 @@ export class Hud {
           (m) => `<button class="buy-card${gap ? ' no-road' : ''}" data-action="buy" data-line="${line.id}" data-model="${m}" draggable="true" data-drag-buy="${m}" data-tip="${
             gap ? `⚠ ${esc(gap)} — купленная машина будет ждать на станции · ` : ''
           }Вместимость ${MODELS[m].capacity} · содержание ${money(MODELS[m].running)}/мес · перетащите на остановку ▶ — выедет с неё">
-            ${gap ? '<i class="buy-warn">⚠</i>' : ''}${modelSvg(m, line.color)}<span>+ ${MODELS[m].name}</span><small>${MODELS[m].capacity} мест · ${money(MODELS[m].price)}</small></button>`,
+            ${gap ? '<i class="buy-warn">⚠</i>' : ''}${modelSvg(m, line.color, undefined, undefined, tank)}<span>+ ${modelName(m, tank)}</span><small>${MODELS[m].capacity} мест · ${money(
+              MODELS[m].price,
+            )}</small></button>`,
         )
-        .join('')}${kind ? this.nextModelHtml(g.lineMode(line), kind) : ''}</div>
+        .join('')}${kind ? this.nextModelHtml(g.lineMode(line), kind, tank) : ''}</div>
       <div class="vehicles">${
         vehicles ||
         `<p class="muted">${
@@ -2909,7 +2916,7 @@ export class Hud {
    * Следующая модель, которой ещё нет в продаже, — серой карточкой с замком: когда откроется (в сценарии —
    * на каком этапе, в песочнице — с какого года).
    */
-  private nextModelHtml(mode: LineMode, carries: 'freight' | 'passengers'): string {
+  private nextModelHtml(mode: LineMode, carries: 'freight' | 'passengers', tank = false): string {
     const g = this.game();
     const next = (Object.keys(MODELS) as ModelId[])
       .filter((id) => MODELS[id].mode === mode && MODELS[id].carries === carries && !g.modelOpen(id))
@@ -2920,7 +2927,7 @@ export class Hud {
     const tip = g.scenario?.running ? `Откроется на этапе ${'ABC'[m.tier - 1]} сценария` : `Появится в продаже в ${g.modelYear(next)} году`;
     // Карточка последняя в ряду, у края панели — подсказка выровнена по правому краю.
     return `<div class="buy-card locked" data-tip-end data-tip="${tip} · вместимость ${m.capacity} · ${money(m.price)}">
-      ${modelSvg(next, '#aab3bc')}<span>🔒 ${m.name}</span><small>${when}</small></div>`;
+      ${modelSvg(next, '#aab3bc', undefined, undefined, tank)}<span>🔒 ${modelName(next, tank)}</span><small>${when}</small></div>`;
   }
 
   /**
@@ -3066,7 +3073,7 @@ export class Hud {
     const on = renewOn(line.auto);
     const status = on ? g.renewStatus(line) : null;
     const left = status?.old.length ?? 0;
-    const to = status?.to ? MODELS[status.to].name : '';
+    const to = status?.to ? modelName(status.to, g.tankLine(line)) : '';
     const broke = !!status?.funds && !status.funds.ok;
     const tip = !on
       ? 'Модернизация выключена: машины так и ездят старой модели, докупаются такие же. Нажмите — включить'
@@ -3456,8 +3463,16 @@ export class Hud {
       : load
         ? `<span class="chip-ic">${cargoIcon('passengers', 20)}<b>Пассажиры</b></span>`
         : '<span class="muted">пусто</span>';
-    return `<section class="detail"><header><h3>${esc(v.name)}</h3><button class="icon" data-action="close-sel">✕</button></header>
+    // Машина сбоку — как на карточке покупки: грузовик с наливным грузом — автоцистерна.
+    const tank = g.isTanker(v);
+    const model = MODELS[v.model];
+    const art =
+      model.mode === 'road'
+        ? `<div class="icon-row"><span class="lbl2">Машина</span><span data-tip="${modelName(v.model, tank)} · вместимость ${model.capacity}">${modelSvg(v.model, line?.color, undefined, undefined, tank)}</span></div>`
+        : '';
+    return `<section class="detail"><header><h3>${esc(g.vehicleTitle(v))}</h3><button class="icon" data-action="close-sel">✕</button></header>
       ${line ? `<button class="line-row" data-action="select-line" data-id="${line.id}">${this.lineIcon(line)}<span>${esc(line.name)}</span></button>` : ''}
+      ${art}
       <div class="icon-row"><span class="lbl2">Везёт</span>${cargo}<b>${load}/${vehicleCapacity(v)}</b></div>
       <div class="kv near"><span>Сейчас</span><b>${state}</b><span>Скорость</span><b>${speed} км/ч</b>
         <span title="За прошлый месяц">Прибыль</span><b>${money(v.profitLast)}</b>${extra}</div>

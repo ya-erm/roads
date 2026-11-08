@@ -241,6 +241,7 @@ function rigidArt(ctx: CanvasRenderingContext2D, v: VehicleLook, detailed: boole
   rr(ctx, -L, -W / 2, L, W, 1.3);
   ctx.fill();
   if (!detailed) return;
+  if (v.body === 'van' && v.tank) return vanTankArt(ctx, v);
   if (v.body === 'van') {
     // Кабина впереди, за ней фургон цвета груза (пустой — светлый) с рамкой.
     const cab = 3.4;
@@ -453,9 +454,91 @@ function cabArt(ctx: CanvasRenderingContext2D, color: string, x0: number, W: num
   windshield(ctx, 0, W, color, 0.9);
 }
 
-/** Полуприцеп: тентованный кузов цвета груза (пустой — светлый) с рамкой и поперечными дугами тента. */
+/**
+ * Автоцистерна (Грузовик с наливным грузом): кабина цвета линии, за ней на тёмной раме — цистерна цвета груза
+ * (пустая — стальная).
+ */
+function vanTankArt(ctx: CanvasRenderingContext2D, v: VehicleLook): void {
+  const L = v.length;
+  const W = v.width;
+  const cab = 3.4;
+  ctx.fillStyle = STEEL;
+  ctx.beginPath();
+  ctx.roundRect(-L, -W / 2, L - cab + 0.3, W, [1.3, 0, 0, 1.3]);
+  ctx.fill();
+  tankArt(ctx, -L + 0.25, -cab - 0.4, W, v.load, true);
+  windshield(ctx, 0, W, v.color);
+}
+
+/** Пустая цистерна — светлая сталь. */
+const TANK_EMPTY = '#d3d9de';
+
+/**
+ * Цистерна сверху от x0 до x1: цилиндр с выпуклыми днищами на концах, светлый блик по хребту и тень по бортам,
+ * обручи поперёк, по хребту — люки и мостик. Цвета груза; пустая — стальная. Без деталей — один силуэт.
+ */
+function tankArt(ctx: CanvasRenderingContext2D, x0: number, x1: number, W: number, load: string | undefined, detailed: boolean): void {
+  const base = load ?? TANK_EMPTY;
+  const w = W - 0.5;
+  const len = x1 - x0;
+  // Днища: вдоль — неглубокие, поперёк — во всю ширину (эллипс, как у настоящей цистерны сверху).
+  const head = { x: Math.min(1.2, len / 4), y: w / 2 };
+  ctx.beginPath();
+  ctx.roundRect(x0, -w / 2, len, w, [head, head, head, head]);
+  if (!detailed) {
+    ctx.fillStyle = base;
+    ctx.fill();
+    return;
+  }
+  const g = ctx.createLinearGradient(0, -w / 2, 0, w / 2);
+  g.addColorStop(0, shadeHex(base, -0.3));
+  g.addColorStop(0.3, shadeHex(base, 0.32));
+  g.addColorStop(0.6, base);
+  g.addColorStop(1, shadeHex(base, -0.42));
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.strokeStyle = shadeHex(base, -0.5);
+  ctx.lineWidth = 0.25;
+  ctx.stroke();
+  // Обручи поперёк — через равные промежутки.
+  const rings = Math.max(1, Math.round(len / 3.6) - 1);
+  ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+  ctx.lineWidth = 0.3;
+  ctx.beginPath();
+  for (let k = 1; k <= rings; k++) {
+    const x = x0 + (len * k) / (rings + 1);
+    ctx.moveTo(x, -w / 2 + 0.15);
+    ctx.lineTo(x, w / 2 - 0.15);
+  }
+  ctx.stroke();
+  // Мостик по хребту и люки на нём.
+  const ridge = -w * 0.12;
+  ctx.fillStyle = 'rgba(60,66,74,0.45)';
+  ctx.fillRect(x0 + head.x, ridge - 0.18, len - 2 * head.x, 0.36);
+  const hatches = Math.max(1, Math.round(len / 4.5));
+  for (let k = 0; k < hatches; k++) {
+    const x = x0 + (len * (k + 0.5)) / hatches;
+    ctx.fillStyle = '#eef1f3';
+    ctx.beginPath();
+    ctx.arc(x, ridge, Math.min(0.6, w * 0.14), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#59616b';
+    ctx.lineWidth = 0.2;
+    ctx.stroke();
+  }
+}
+
+/** Полуприцеп: тентованный кузов цвета груза (пустой — светлый) с рамкой и поперечными дугами тента; у автоцистерны — цистерна. */
 function trailerArt(ctx: CanvasRenderingContext2D, v: VehicleLook, x0: number, x1: number, detailed: boolean): void {
   const W = v.width;
+  if (v.tank) {
+    // Рама полуприцепа под цистерной видна по краям.
+    ctx.fillStyle = STEEL;
+    rr(ctx, x0, -W * 0.4, x1 - x0, W * 0.8, 0.6);
+    ctx.fill();
+    tankArt(ctx, x0 + 0.1, x1 - 0.1, W, v.load, detailed);
+    return;
+  }
   const load = v.load ?? EMPTY;
   ctx.fillStyle = load;
   rr(ctx, x0, -W / 2, x1 - x0, W, 0.7);

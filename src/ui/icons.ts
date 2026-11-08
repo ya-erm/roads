@@ -748,6 +748,26 @@ function cargoBoxArt(x0: number, x1: number, top: number, bottom: number, color:
     <rect x="${x0 - 0.3}" y="${bottom - 1.6}" width="1" height="1.6" fill="#d93a32"/>`;
 }
 
+/**
+ * Цистерна сбоку: цилиндр с выпуклыми днищами, блик вдоль, обручи, люки с мостиком поверху, лесенка сзади
+ * и оранжевая табличка опасного груза.
+ */
+function tankSideArt(x0: number, x1: number, top: number, bottom: number, color: string): string {
+  const h = bottom - top;
+  const frame = shadeHex(color, -0.3);
+  const rings: string[] = [];
+  const n = Math.max(1, Math.round((x1 - x0) / 13));
+  for (let k = 1; k <= n; k++) rings.push(`M${round1(x0 + ((x1 - x0) * k) / (n + 1))} ${round1(top + 0.4)}V${round1(bottom - 0.4)}`);
+  const hatches: string[] = [];
+  for (let k = 0; k < n + 1; k++) hatches.push(`<rect x="${round1(x0 + ((x1 - x0) * (k + 0.5)) / (n + 1) - 1.3)}" y="${round1(top - 1.3)}" width="2.6" height="1.5" rx="0.4" fill="${STEEL}"/>`);
+  return `${hatches.join('')}<path d="M${x0 + 3} ${round1(top - 0.5)}H${x1 - 3}" stroke="${STEEL}" stroke-width="0.5"/>
+    <rect x="${x0}" y="${top}" width="${round1(x1 - x0)}" height="${round1(h)}" rx="3" ry="${round1(h / 2)}" fill="${color}" stroke="${frame}" stroke-width="0.6"/>
+    <path d="M${x0 + 2.5} ${round1(top + h * 0.28)}H${x1 - 2.5}" stroke="#fff" stroke-opacity="0.5" stroke-width="1.1" stroke-linecap="round"/>
+    <path d="${rings.join('')}" stroke="${frame}" stroke-width="0.5"/>
+    <path d="M${x0 + 1.6} ${round1(top + 1)}V${bottom + 0.6}M${x0 + 2.8} ${round1(top + 1)}V${bottom + 0.6}M${x0 + 1.6} ${round1(top + h * 0.45)}h1.2M${x0 + 1.6} ${round1(top + h * 0.75)}h1.2" stroke="${STEEL}" stroke-width="0.4"/>
+    <rect x="${x0 + 4}" y="${round1(top + h * 0.5)}" width="3.4" height="2.4" rx="0.3" fill="#f39c12" stroke="#2b323b" stroke-width="0.35"/>`;
+}
+
 /** Рама под кузовом и защитная планка сбоку между колёсами. */
 function chassisArt(x0: number, x1: number, y: number, guard?: [number, number]): string {
   return `<rect x="${x0}" y="${y}" width="${round1(x1 - x0)}" height="1.6" fill="${STEEL}"/>${
@@ -757,34 +777,34 @@ function chassisArt(x0: number, x1: number, y: number, guard?: [number, number])
 
 /**
  * Грузовики, кабина справа: I — фургон на двух осях, II — тентованный с тремя задними осями
- * и передней под кабиной, фура — тягач на трёх осях с полуприцепом на трёх.
+ * и передней под кабиной, фура — тягач на трёх осях с полуприцепом на трёх. tank — автоцистерна: вместо кузова цистерна.
  */
-function truckArt(L: number, gen: number, color: string): string {
+function truckArt(L: number, gen: number, color: string, tank = false): string {
   if (gen === 1) {
     return `${chassisArt(1.5, 36, 16.4, [15, 28])}<rect x="28" y="16.8" width="5" height="2.8" rx="0.6" fill="${STEEL}"/>
-      ${cargoBoxArt(1, 33.6, 2, 16.4, color, false)}${cabArt(34.6, L, 6.3, color, 3.3)}
+      ${tank ? tankSideArt(1, 33.6, 5, 16.8, color) : cargoBoxArt(1, 33.6, 2, 16.4, color, false)}${cabArt(34.6, L, 6.3, color, tank ? undefined : 3.3)}
       ${sideWheel(11.6, 3.1)}${sideWheel(39.6, 3.1)}`;
   }
   if (gen === 2) {
     return `${chassisArt(1.5, 48.5, 17, [23, 37])}
-      ${cargoBoxArt(1, 47.8, 2, 17, color, true)}${cabArt(48.6, L, 3.6, color)}
+      ${tank ? tankSideArt(1, 47.8, 4.6, 17.2, color) : cargoBoxArt(1, 47.8, 2, 17, color, true)}${cabArt(48.6, L, 3.6, color)}
       ${[13.2, 19.2, 40.4, 53.8].map((x) => sideWheel(x, 2.7)).join('')}`;
   }
   // Полуприцеп лежит на седле тягача — над его задними осями; посередине — опорные стойки.
   return `${chassisArt(51, 75, 17.6)}<rect x="66" y="17.6" width="5.4" height="2.6" rx="1" fill="#aab3bc"/>
     ${chassisArt(3, 71.5, 16.6)}<path d="M45 18.2V21.6M43.8 21.8H46.2" stroke="${STEEL}" stroke-width="0.8"/>
-    ${cargoBoxArt(1, 71.5, 2, 16.6, color, true)}${cabArt(72.4, L, 3.8, color)}
+    ${tank ? tankSideArt(1, 71.5, 4.2, 17, color) : cargoBoxArt(1, 71.5, 2, 16.6, color, true)}${cabArt(72.4, L, 3.8, color)}
     ${[14.3, 20.5, 26.7, 54.5, 61.5, 79.6].map((x) => sideWheel(x, 2.7)).join('')}`;
 }
 
-/** Поезд или автомобиль для кнопок покупки; автобус и грузовик — цвета маршрута. */
-export function modelSvg(id: string, color?: string, w = 46, h = 22): string {
+/** Поезд или автомобиль для кнопок покупки; автобус и грузовик — цвета маршрута; tank — грузовик автоцистерной. */
+export function modelSvg(id: string, color?: string, w = 46, h = 22, tank = false): string {
   // Новые модели — на вагон длиннее или с полосой «II».
   const gen = /3$/.test(id) ? 3 : /2$/.test(id) ? 2 : 1;
   const len = ROAD_ART_LEN[id];
   if (len) {
     const bus = id.startsWith('bus');
-    const art = bus ? busArt(len, gen, color ?? '#3b7dd8') : truckArt(len, gen, color ?? '#e07b39');
+    const art = bus ? busArt(len, gen, color ?? '#3b7dd8') : truckArt(len, gen, color ?? '#e07b39', tank);
     // Чуть крупнее значка: в карточке покупки видно окна, двери и колёса.
     return `<svg class="model-art" viewBox="0 0 ${len + 2} 24" width="${(len + 2) * 1.2}" height="${24 * 1.2}">${art}</svg>`;
   }
@@ -861,8 +881,8 @@ export function levelSvg(level: number): string {
   return `<svg viewBox="0 0 48 36" width="48" height="36"><rect width="48" height="36" fill="#e3edd2"/>${body}</svg>`;
 }
 
-/** Значок линии в списках: автобус, грузовик или поезд сбоку, кузов — цвета линии. */
-export function lineKindSvg(kind: 'bus' | 'truck' | 'train', color: string, w = 20): string {
+/** Значок линии в списках: автобус, грузовик, автоцистерна или поезд сбоку, кузов — цвета линии. */
+export function lineKindSvg(kind: 'bus' | 'truck' | 'tanker' | 'train', color: string, w = 20): string {
   const wheel = (x: number, r = 2) => `<circle cx="${x}" cy="12.6" r="${r}" fill="#2b323b" stroke="#fff" stroke-width="0.9"/>`;
   const glass = 'fill="#fff" fill-opacity="0.85"';
   let body: string;
@@ -872,6 +892,14 @@ export function lineKindSvg(kind: 'bus' | 'truck' | 'train', color: string, w = 
       ${wheel(6)}${wheel(18)}`;
   } else if (kind === 'truck') {
     body = `<rect x="1" y="2" width="14" height="9.5" rx="1.2" fill="${color}"/>
+      <path d="M16 5h4.2l2.8 3.4v3.6H16z" fill="${color}"/>
+      <path d="M17.2 6.2h2.5l1.7 2.1h-4.2z" ${glass}/>
+      <path d="M1 11.5h22" stroke="#2b323b" stroke-width="1"/>
+      ${wheel(5)}${wheel(10)}${wheel(19.5)}`;
+  } else if (kind === 'tanker') {
+    // Цистерна — цилиндр с круглыми днищами и бликом, за ней кабина.
+    body = `<rect x="1" y="3.2" width="14.4" height="8" rx="2.6" ry="4" fill="${color}"/>
+      <path d="M3.2 5.4h10" stroke="#fff" stroke-opacity="0.6" stroke-width="1" stroke-linecap="round"/>
       <path d="M16 5h4.2l2.8 3.4v3.6H16z" fill="${color}"/>
       <path d="M17.2 6.2h2.5l1.7 2.1h-4.2z" ${glass}/>
       <path d="M1 11.5h22" stroke="#2b323b" stroke-width="1"/>

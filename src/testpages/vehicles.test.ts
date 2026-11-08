@@ -36,7 +36,11 @@ describe('Тестовая страница /test/vehicles', { timeout: 90_000 }
       const mine = loaded.filter((s) => s.body === body);
       expect(new Set(mine.map((s) => s.load)).size, body).toBe(3);
       for (const s of mine) expect(s.pos.x, body).toBeGreaterThan(empty[0].pos.x);
+      // Самый передний — с наливным грузом: автоцистерна, остальные — с кузовом.
+      const front = mine.reduce((a, b) => (b.pos.x > a.pos.x ? b : a));
+      expect(mine.filter((s) => s.tank), body).toEqual([front]);
     }
+    expect(empty.some((s) => s.tank)).toBe(false);
     // Застыли изогнутыми: у машин из двух частей вторая часть ещё в повороте.
     for (const s of shown.filter((s) => !showroom.includes(s) && hitchOf(s.body))) expect(bend(s), s.body).toBeGreaterThan(15);
     const still = shown.map((s) => ({ s, x: s.pos.x, y: s.pos.y }));

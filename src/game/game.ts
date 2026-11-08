@@ -35,7 +35,7 @@ import { stepWagons } from '../sim/wagons';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { hitchOf, steerBase } from '../sim/body';
 import { bridgeLook, deckAlong } from '../lanes/deck';
-import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
+import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind, isTankCargo } from '../world/cargo';
 import { Annex, type BuildBase, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
 import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/townSupply';
 import { addTownPax, closeTownPax, PAX_NOWHERE, PAX_PER_THOUSAND } from '../world/townPax';
@@ -110,6 +110,7 @@ import {
   LineFolder,
   LineMode,
   ModelId,
+  modelName,
   MODELS,
   modelsFor,
   ModelTier,
@@ -826,7 +827,7 @@ export class Game implements BuildContext {
     const next = onStop ? this.stations.get(line.stops[(v.stop + 1) % line.stops.length]) : to;
     if (!next) return null;
     const load = v.cargo ? CARGO[v.cargo].color : undefined;
-    const sim = this.traffic.place({ ...m.spec, color: line.color, load, targetNode: next.nodeId }, spot.pos, spot.dir, spot.v);
+    const sim = this.traffic.place({ ...m.spec, color: line.color, load, tank: this.isTanker(v), targetNode: next.nodeId }, spot.pos, spot.dir, spot.v);
     if (!sim) return null;
     if (onStop) this.traffic.holdAfter(sim, 0);
     sim.tripTime = spot.trip;
@@ -3317,7 +3318,7 @@ export class Game implements BuildContext {
     const cost = m.price - this.saleValue(v);
     if (cost > this.budget) {
       delete v.upgradeTo;
-      this.notify(`Не хватает денег на замену: ${v.name}`, '#e5534b');
+      this.notify(`Не хватает денег на замену: ${this.vehicleTitle(v)}`, '#e5534b');
       return false;
     }
     if (m.mode === 'road') {
@@ -3504,9 +3505,53 @@ export class Game implements BuildContext {
    * Чем ездит линия — для значка в списках: поезд, автобус или грузовик.
    * Автолиния — по своему транспорту, а пока его нет — по станциям маршрута.
    */
-  lineVehicleKind(line: Line): 'train' | 'bus' | 'truck' {
+  lineVehicleKind(line: Line): 'train' | 'bus' | 'truck' | 'tanker' {
     if (this.lineMode(line) === 'rail') return 'train';
-    return this.lineCarries(line) === 'passengers' ? 'bus' : 'truck';
+    if (this.lineCarries(line) === 'passengers') return 'bus';
+    return this.tankLine(line) ? 'tanker' : 'truck';
+  }
+
+  /**
+   * Какие грузы возит маршрут: что производят у одной его станции и принимают у другой, и что велено грузить
+   * правилами остановок (список грузов).
+   */
+  lineFreight(line: Line): CargoType[] {
+    const sts = line.stops.map((id) => this.stations.get(id)).filter((s): s is Station => !!s);
+    const out = new Set<CargoType>();
+    for (const s of sts) {
+      for (const ind of this.stationIndustries(s)) {
+        const c = ind.info.produces;
+        if (sts.some((o) => o !== s && o.accepts.has(c))) out.add(c);
+      }
+    }
+    for (const r of line.rules ?? []) if (r && Array.isArray(r.load)) for (const c of r.load) out.add(c);
+    return [...out];
+  }
+
+  /** Маршрут возит только наливные грузы (нефть, топливо, газ): его грузовики — автоцистерны, и порожняком тоже. */
+  tankLine(line: Line): boolean {
+    if (this.lineMode(line) !== 'road') return false;
+    const cargo = this.lineFreight(line);
+    return cargo.length > 0 && cargo.every(isTankCargo);
+  }
+
+  /**
+   * Автоцистерна: грузовик компании везёт наливной груз, а пустой — ездит по маршруту только наливных грузов.
+   * На маршруте с разными грузами грузовик с нефтью — цистерна, с зерном — фургон. Модель та же (цена, вместимость),
+   * поэтому старые сохранения не меняются: машины просто выглядят и называются по грузу.
+   */
+  isTanker(v: FleetVehicle): boolean {
+    const m = MODELS[v.model];
+    if (m.mode !== 'road' || m.carries !== 'freight') return false;
+    if (v.cargo) return isTankCargo(v.cargo);
+    const line = this.lines.get(v.lineId);
+    return !!line && this.tankLine(line);
+  }
+
+  /** Имя машины в интерфейсе: автоцистерна — «Автоцистерна №7», хотя записана, как куплена, «Грузовиком №7». */
+  vehicleTitle(v: FleetVehicle): string {
+    const base = `${MODELS[v.model].name} №`;
+    return this.isTanker(v) && v.name.startsWith(base) ? `${modelName(v.model, true)} №${v.name.slice(base.length)}` : v.name;
   }
 
   /** Что возит линия: по её транспорту, а пока его нет — по станциям маршрута. */
@@ -4559,6 +4604,7 @@ export class Game implements BuildContext {
         ...model.spec,
         color: line.color,
         load: v.cargo ? CARGO[v.cargo].color : undefined,
+        tank: this.isTanker(v),
         targetNode: to.nodeId,
         route,
       });
@@ -7853,7 +7899,7 @@ export class Game implements BuildContext {
     const pose = this.bayEntryPose(v);
     if (!pose || m.mode !== 'road') return undefined;
     const color = this.lines.get(v.lineId)?.color ?? m.spec.color;
-    return { ...m.spec, color, load: v.cargo ? CARGO[v.cargo].color : undefined, pos: pose.pos, dir: pose.dir };
+    return { ...m.spec, color, load: v.cargo ? CARGO[v.cargo].color : undefined, tank: this.isTanker(v), pos: pose.pos, dir: pose.dir };
   }
 
   /** Машина компании, поставленная в точку pos носом по dir (автобус на посадке у остановки). */
@@ -7862,7 +7908,7 @@ export class Game implements BuildContext {
     const m = v && MODELS[v.model];
     if (!v || !m || m.mode !== 'road') return undefined;
     const color = this.lines.get(v.lineId)?.color ?? m.spec.color;
-    return { ...m.spec, color, load: v.cargo ? CARGO[v.cargo].color : undefined, pos, dir };
+    return { ...m.spec, color, load: v.cargo ? CARGO[v.cargo].color : undefined, tank: this.isTanker(v), pos, dir };
   }
 
   /**

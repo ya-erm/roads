@@ -191,6 +191,19 @@ export const MODELS: Record<ModelId, VehicleModel> = {
   },
 };
 
+/**
+ * Грузовики с наливным грузом (нефть, топливо, газ) — автоцистерны: та же модель (цена, вместимость, скорость),
+ * но вместо фургона или тента — цистерна (Game.isTanker), и в интерфейсе — своё название.
+ */
+export const TANKER_NAMES: Partial<Record<ModelId, string>> = {
+  truck: 'Автоцистерна',
+  truck2: 'Автоцистерна II',
+  truck3: 'Автоцистерна III',
+};
+
+/** Название модели; tank — грузовик в роли автоцистерны. */
+export const modelName = (id: ModelId, tank = false): string => (tank && TANKER_NAMES[id]) || MODELS[id].name;
+
 /** Продаётся ли модель: открыта (см. Game.modelOpen) или — числом — вышла за столько лет от начала партии. */
 export type ModelOpen = number | ((id: ModelId) => boolean);
 

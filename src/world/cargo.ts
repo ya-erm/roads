@@ -39,6 +39,8 @@ export interface CargoInfo {
   color: string;
   /** Доход за единицу груза на 100 ед. расстояния. */
   rate: number;
+  /** Наливной (нефть, топливо, газ): его возят в цистернах — грузовик с ним становится автоцистерной. */
+  tank?: true;
 }
 
 export const CARGO: Record<CargoType, CargoInfo> = {
@@ -47,7 +49,7 @@ export const CARGO: Record<CargoType, CargoInfo> = {
   logs: { name: 'Брёвна', color: '#8d6a43', rate: 18 },
   coal: { name: 'Уголь', color: '#3d4148', rate: 18 },
   ore: { name: 'Железная руда', color: '#a0603c', rate: 18 },
-  oil: { name: 'Нефть', color: '#6a4f9e', rate: 20 },
+  oil: { name: 'Нефть', color: '#6a4f9e', rate: 20, tank: true },
   stone: { name: 'Камень', color: '#8f969e', rate: 16 },
   livestock: { name: 'Скот', color: '#7c9a3d', rate: 20 },
   sand: { name: 'Песок', color: '#d9b77a', rate: 16 },
@@ -55,7 +57,7 @@ export const CARGO: Record<CargoType, CargoInfo> = {
   planks: { name: 'Доски', color: '#c99a5b', rate: 24 },
   steel: { name: 'Металл', color: '#5f7a8f', rate: 26 },
   glass: { name: 'Стекло', color: '#5fb0d3', rate: 26 },
-  fuel: { name: 'Топливо', color: '#e07b39', rate: 28 },
+  fuel: { name: 'Топливо', color: '#e07b39', rate: 28, tank: true },
   construction: { name: 'Стройматериалы', color: '#b5543c', rate: 26 },
   goods: { name: 'Товары', color: '#2fb8b3', rate: 34 },
   furniture: { name: 'Мебель', color: '#c0607e', rate: 32 },
@@ -68,12 +70,15 @@ export const CARGO: Record<CargoType, CargoInfo> = {
   gems: { name: 'Самоцветы', color: '#7b4fbf', rate: 24 },
   copperore: { name: 'Медная руда', color: '#2a7d78', rate: 18 },
   cotton: { name: 'Хлопок', color: '#6aa596', rate: 18 },
-  gas: { name: 'Газ', color: '#3b6fd1', rate: 20 },
+  gas: { name: 'Газ', color: '#3b6fd1', rate: 20, tank: true },
   paper: { name: 'Бумага', color: '#a39e74', rate: 28 },
   textiles: { name: 'Ткани', color: '#8e44ad', rate: 30 },
   jewelry: { name: 'Украшения', color: '#ad1457', rate: 38 },
   copper: { name: 'Медь', color: '#d9824a', rate: 26 },
 };
+
+/** Наливной ли груз: нефть, топливо, газ — легковоспламеняющиеся, их возят автоцистерны. */
+export const isTankCargo = (c: CargoType | null | undefined): boolean => !!c && !!CARGO[c].tank;
 
 export const FREIGHT: CargoType[] = [
   'grain',

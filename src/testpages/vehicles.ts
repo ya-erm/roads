@@ -5,7 +5,7 @@ import { type ModelId, MODELS } from '../game/transport';
 import { oneWay } from '../lanes/model';
 import { hitchOf, jointOf, trailDir } from '../sim/body';
 import type { Vehicle } from '../sim/vehicle';
-import { CARGO, type CargoType } from '../world/cargo';
+import { CARGO, type CargoType, isTankCargo } from '../world/cargo';
 import type { Station } from '../world/entities';
 import { LANE_W } from '../world/roadTypes';
 import { TERRAIN_VERSION } from '../world/settings';
@@ -21,7 +21,8 @@ import type { TestScene } from './index';
  *  - Грузовик — с севера на юг через проспект, Грузовик II (тягач с полуприцепом) — с запада на восток,
  *    Фура — по кругу через все четыре автостанции у краёв сетки.
  * Над сеткой — машины без линий, они стоят: на одностороннем проспекте все шесть рядом, по полосе на модель,
- * носами на одной линии, а впереди пустых грузовиков — они же с разными грузами; выше — два ряда углов
+ * носами на одной линии, а впереди пустых грузовиков — они же с разными грузами (самые передние — с топливом, газом
+ * и нефтью — автоцистерны); выше — два ряда углов
  * (налево и направо), на каждом модель застыла посреди поворота.
  * Экран: y вниз, движение правостороннее — на улице с запада на восток едут у южного края.
  */
@@ -101,7 +102,7 @@ export function buildVehiclesScene(): TestScene {
     // Впереди пустых грузовиков — они же с грузом: кузов цвета груза, как в игре.
     for (const [model, cargos] of LOADED) {
       cargos.forEach((cargo, j) => {
-        const veh = sc.vehicle(model, color(model), { x: x0 + 360 + 30 * (j + 1), y: laneY(model) }, end, CARGO[cargo].color);
+        const veh = sc.vehicle(model, color(model), { x: x0 + 360 + 30 * (j + 1), y: laneY(model) }, end, cargo);
         game.traffic.holdAfter(veh, 0);
       });
     }
@@ -135,10 +136,13 @@ export function buildVehiclesScene(): TestScene {
 /** Модели на витрине и на поворотах — по порядку: автобусы, потом грузовики. */
 const SHOWCASE: ModelId[] = ['bus', 'bus2', 'bus3', 'truck', 'truck2', 'truck3'];
 
-/** Грузовики на витрине с грузом — по три разных груза на модель, впереди пустого. */
+/**
+ * Грузовики на витрине с грузом — по три разных груза на модель, впереди пустого; самый передний везёт наливной
+ * груз (топливо, газ, нефть) — он автоцистерна.
+ */
 const LOADED: [ModelId, CargoType[]][] = [
-  ['truck', ['grain', 'food', 'goods']],
-  ['truck2', ['coal', 'logs', 'sand']],
+  ['truck', ['grain', 'food', 'fuel']],
+  ['truck2', ['coal', 'logs', 'gas']],
   ['truck3', ['steel', 'stone', 'oil']],
 ];
 
@@ -246,11 +250,15 @@ class Builder {
     return node.id;
   }
 
-  /** Машина модели model (без линии — для показа) носом в точку pos, на восток, едет к узлу target; load — цвет груза в кузове. */
-  vehicle(model: ModelId, color: string, pos: Vec, target: number, load?: string): Vehicle {
+  /**
+   * Машина модели model (без линии — для показа) носом в точку pos, на восток, едет к узлу target; cargo — груз
+   * в кузове (его цвет), наливной — в цистерне.
+   */
+  vehicle(model: ModelId, color: string, pos: Vec, target: number, cargo?: CargoType): Vehicle {
     const m = MODELS[model];
     if (m.mode !== 'road') throw new Error(`${model} — не автомобиль`);
-    const veh = this.game.traffic.place({ ...m.spec, color, load, targetNode: target }, pos, { x: 1, y: 0 }, 0);
+    const load = cargo ? CARGO[cargo].color : undefined;
+    const veh = this.game.traffic.place({ ...m.spec, color, load, tank: isTankCargo(cargo), targetNode: target }, pos, { x: 1, y: 0 }, 0);
     if (!veh) throw new Error(`${m.name} не встал у (${pos.x}, ${pos.y})`);
     return veh;
   }
