@@ -666,6 +666,13 @@
   animation: bug-thanks-in 0.25s ease-out;
 }
 
+/* Крестик — на месте крестика окна отчёта (отступы .bug-modal). */
+.bug-thanks .bug-thanks-x {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+}
+
 @keyframes bug-thanks-in {
   from {
     opacity: 0;

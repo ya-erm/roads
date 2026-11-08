@@ -223,7 +223,7 @@ interface Moment {
   camera: SnapCamera;
 }
 
-interface Sent {
+export interface Sent {
   /** Текст отчёта для буфера и ручной отправки (файлы — «приложены»). */
   text: string;
   /** Карточка на доске; null — отчёт не отправился (error — почему), тогда буфер и архив. */
@@ -1354,26 +1354,7 @@ class BugReport {
    * (галочками) и кнопка назад в игру. Файлы не загрузились — об этом строка и кнопка скачать архив.
    */
   private showThanks(s: Sent): void {
-    const r = s.receipt!;
-    const label: Record<AttachKind, string> = { shot: 'Снимок', journal: 'Журнал', save: 'Сохранение', area: 'Схема участка' };
-    const icon: Record<AttachKind, string> = { shot: ICON.shot, journal: ICON.journal, save: ICON.save, area: ICON.area };
-    const files = (s.uploaded ?? [])
-      .map((u) => `<a class="bug-thanks-file" href="${escapeHtml(u.url)}" target="_blank" rel="noopener" data-tip="Открыть файл">${icon[u.kind]}${label[u.kind]}<i>${ICON.ok}</i></a>`)
-      .join('');
-    const name = r.number ? `Задача #${r.number}` : 'Задача';
-    const card = r.url
-      ? `<a class="bug-thanks-card" href="${escapeHtml(r.url)}" target="_blank" rel="noopener" data-tip="Открыть задачу на доске">${name}${ICON.link}</a>`
-      : `<b class="bug-thanks-card">${name}</b>`;
-    const lost = s.uploaded
-      ? ''
-      : `<p class="bug-thanks-lost">${ICON.warn}Файлы отчёта к задаче не приложились: ${reason(s.uploadError)}.</p>
-        <button class="bug-thanks-copy" data-bug="archive">${ICON.download}Скачать их архивом</button>`;
-    this.thanks.innerHTML = `${thanksSvg()}
-      <h2>Спасибо за отчёт!</h2>
-      <p>${card} на доске — разберёмся, что пошло не так.</p>
-      ${files ? `<div class="bug-thanks-files">${files}</div>` : ''}
-      ${lost}
-      <button class="bug-primary" data-bug="close">Вернуться в игру</button>`;
+    this.thanks.innerHTML = thanksHtml(s);
     this.thanks.classList.remove('hidden');
   }
 
@@ -1433,6 +1414,34 @@ function escapeHtml(s: string): string {
 }
 
 /** Причина отказа внутри фразы: без точки в конце (её ставит фраза) и с маленькой буквы. */
+/**
+ * Экран благодарности (отчёт на доске, s.receipt есть): крестик в углу — там же, где у окна отчёта, — картинка,
+ * номер задачи ссылкой, что из файлов дошло (галочками) и «Вернуться в игру». Крестик и кнопка — data-bug="close".
+ */
+export function thanksHtml(s: Sent): string {
+  const r = s.receipt!;
+  const label: Record<AttachKind, string> = { shot: 'Снимок', journal: 'Журнал', save: 'Сохранение', area: 'Схема участка' };
+  const icon: Record<AttachKind, string> = { shot: ICON.shot, journal: ICON.journal, save: ICON.save, area: ICON.area };
+  const files = (s.uploaded ?? [])
+    .map((u) => `<a class="bug-thanks-file" href="${escapeHtml(u.url)}" target="_blank" rel="noopener" data-tip="Открыть файл">${icon[u.kind]}${label[u.kind]}<i>${ICON.ok}</i></a>`)
+    .join('');
+  const name = r.number ? `Задача #${r.number}` : 'Задача';
+  const card = r.url
+    ? `<a class="bug-thanks-card" href="${escapeHtml(r.url)}" target="_blank" rel="noopener" data-tip="Открыть задачу на доске">${name}${ICON.link}</a>`
+    : `<b class="bug-thanks-card">${name}</b>`;
+  const lost = s.uploaded
+    ? ''
+    : `<p class="bug-thanks-lost">${ICON.warn}Файлы отчёта к задаче не приложились: ${reason(s.uploadError)}.</p>
+      <button class="bug-thanks-copy" data-bug="archive">${ICON.download}Скачать их архивом</button>`;
+  return `<button class="bug-x bug-thanks-x" data-bug="close" data-tip="Закрыть (Esc)" data-tip-end>✕</button>
+    ${thanksSvg()}
+    <h2>Спасибо за отчёт!</h2>
+    <p>${card} на доске — разберёмся, что пошло не так.</p>
+    ${files ? `<div class="bug-thanks-files">${files}</div>` : ''}
+    ${lost}
+    <button class="bug-primary" data-bug="close">Вернуться в игру</button>`;
+}
+
 function reason(message: string): string {
   const s = message.trim().replace(/[.!]+$/, '');
   return escapeHtml(s.charAt(0).toLowerCase() + s.slice(1));
