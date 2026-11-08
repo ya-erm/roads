@@ -1,6 +1,7 @@
 /**
  * Проигрыватель таймлапса партии: окно поверх игры, карта рельефа и сеть игрока по кадрам (см. game/timelapse.ts)
- * с плавным переходом — новые дороги дорисовываются вдоль и недолго подсвечены, станции появляются, маршруты
+ * с плавным переходом — новые дороги дорисовываются вдоль и недолго подсвечены, проекты дорог («Со строительством»)
+ * видны полупрозрачной синеватой линией дороги и гаснут, когда участок построен, станции появляются, маршруты
  * прочерчиваются, снесённое гаснет. Дата и счётчики (деньги, маршруты, транспорт, жители) — на самом холсте, чтобы
  * попасть и в видео. Пауза, перемотка по шкале, скорость 1×/2×/3× (timelapseSpeed.ts), линии маршрутов по прямой
  * между станциями можно скрыть (запоминается в браузере); этапы и задания сценария — значками на шкале.
@@ -10,7 +11,7 @@
 import './timelapse.css';
 import { splitBezier, type Cubic } from '../core/bezier';
 import type { Game } from '../game/game';
-import { buildTimeline, recCurve, timelapseOf, TL_STEP, type Timeline, type TimelapseSource, type TlItem, type TlLayer } from '../game/timelapse';
+import { buildTimeline, recCurve, timelapseOf, TL_LAYERS, TL_STEP, tlLayers, type Timeline, type TimelapseSource, type TlItem, type TlLayer } from '../game/timelapse';
 import { ReliefRenderer, waterPath } from '../render/relief';
 import { smoothPath } from '../render/renderer';
 import { BIOMES } from '../world/biomes';
@@ -37,11 +38,19 @@ const ROAD_COLOR = '#4b525c';
 const ROAD_WIDTHS = [0.9, 1.4, 2, 2.6];
 const NEW_COLOR = '#ff7a1a';
 const RAIL_COLOR = '#6b4f3a';
+/**
+ * Проект дороги («Со строительством») — та же линия дороги, полупрозрачная и синеватая, как проект на карте
+ * (render/constructionArt.ts: будущая дорога с прозрачностью 0.55 под синим оттенком проекта).
+ */
+const PROJECT_COLOR = '#3f6497';
+const PROJECT_ALPHA = 0.6;
 
 const ease = (u: number) => (u < 0.5 ? 2 * u * u : 1 - (-2 * u + 2) ** 2 / 2);
 const easeOutBack = (u: number) => 1 + 2.4 * (u - 1) ** 3 + 1.4 * (u - 1) ** 2;
 const lerp = (a: number, b: number, u: number) => a + (b - a) * u;
 const clamp = (x: number, a: number, b: number) => Math.max(a, Math.min(b, x));
+/** Класс дороги или проекта из записи (0 улица … 3 магистраль). */
+const roadClass = (item: TlItem) => clamp(Number(item.rec[1]) || 0, 0, ROAD_WIDTHS.length - 1);
 
 function pauseSvg(size = 18): string {
   return `<svg viewBox="0 0 16 16" width="${size}" height="${size}"><rect x="4" y="3" width="3" height="10" rx="1" fill="currentColor"/><rect x="9" y="3" width="3" height="10" rx="1" fill="currentColor"/></svg>`;
@@ -112,6 +121,8 @@ interface Slice {
   j: number;
   roads: Path2D[];
   fresh: Path2D[];
+  /** Проекты дорог, что стоят весь переход, — по классу. */
+  projects: Path2D[];
   rails: Path2D;
   stable: Record<TlLayer, TlItem[]>;
   appear: Record<TlLayer, TlItem[]>;
@@ -196,7 +207,7 @@ class TimelapsePlayer {
     for (const f of this.tl.frames) xs.push(xs.length ? Math.max(f.m, xs[xs.length - 1] + MIN_GAP) : f.m);
     this.xs = xs;
     this.t = xs[0];
-    for (const L of ['r', 't'] as const) for (const item of this.tl.layers[L]) this.curves.set(item, recCurve(item.rec));
+    for (const L of ['r', 't', 'b'] as const) for (const item of this.tl.layers[L]) this.curves.set(item, recCurve(item.rec));
     for (const item of this.tl.layers.s) this.stationPos.set(item.id, { x: Number(item.rec[2]) * TL_STEP, y: Number(item.rec[3]) * TL_STEP });
     for (const town of game.towns) this.popNow.set(town.id, Math.max(1, town.population));
     this.font = getComputedStyle(document.body).fontFamily || 'system-ui, sans-serif';
@@ -635,22 +646,24 @@ class TimelapsePlayer {
   private sliceAt(i: number): Slice {
     if (this.slice?.i === i) return this.slice;
     const j = Math.min(i + 1, this.xs.length - 1);
-    const empty = () => ({ r: [], t: [], s: [], l: [] }) as Record<TlLayer, TlItem[]>;
+    const empty = () => tlLayers<TlItem[]>(() => []);
     const stable = empty();
     const appear = empty();
     const vanish = empty();
     const roads = ROAD_WIDTHS.map(() => new Path2D());
     const fresh = ROAD_WIDTHS.map(() => new Path2D());
+    const projects = ROAD_WIDTHS.map(() => new Path2D());
     const rails = new Path2D();
-    for (const L of ['r', 't', 's', 'l'] as const) {
+    for (const L of TL_LAYERS) {
       for (const item of this.tl.layers[L]) {
         if (j > i && item.from === j) appear[L].push(item);
         else if (j > i && item.from <= i && item.to === j) vanish[L].push(item);
         if (!(item.from <= i && item.to > j)) continue;
         stable[L].push(item);
-        if (L !== 'r' && L !== 't') continue;
+        if (L !== 'r' && L !== 't' && L !== 'b') continue;
         const c = this.curves.get(item)!;
         if (L === 't') this.addCurve(rails, c);
+        else if (L === 'b') this.addCurve(projects[roadClass(item)], c);
         else {
           const cls = clamp(Number(item.rec[1]) || 0, 0, ROAD_WIDTHS.length - 1);
           this.addCurve(roads[cls], c);
@@ -659,7 +672,7 @@ class TimelapsePlayer {
         }
       }
     }
-    this.slice = { i, j, roads, fresh, rails, stable, appear, vanish };
+    this.slice = { i, j, roads, fresh, projects, rails, stable, appear, vanish };
     return this.slice;
   }
 
@@ -695,6 +708,8 @@ class TimelapsePlayer {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     const px = 1 / k;
+    // Проекты дорог — под дорогами: построенный участок ложится поверх своего проекта, пока тот гаснет.
+    this.strokeProjects(s, u);
     // Дороги: стоящие, новые (дорисовываются вдоль) и снесённые (гаснут).
     ctx.strokeStyle = ROAD_COLOR;
     s.roads.forEach((p, cls) => {
@@ -757,6 +772,34 @@ class TimelapsePlayer {
       ctx.fillText(town.name, x, y);
     }
     this.drawHud(f0, f1, u, s);
+  }
+
+  /**
+   * Проекты дорог — полупрозрачной линией дороги своего класса: стоящие — по классу одним штрихом (наложения не темнеют),
+   * новые проявляются за переход, построенные или отменённые — гаснут.
+   */
+  private strokeProjects(s: Slice, u: number): void {
+    const ctx = this.ctx;
+    const px = 1 / this.k;
+    ctx.strokeStyle = PROJECT_COLOR;
+    ctx.globalAlpha = PROJECT_ALPHA;
+    s.projects.forEach((p, cls) => {
+      ctx.lineWidth = ROAD_WIDTHS[cls] * px;
+      ctx.stroke(p);
+    });
+    const one = (item: TlItem, alpha: number) => {
+      if (alpha <= 0) return;
+      const c = this.curves.get(item)!;
+      ctx.globalAlpha = PROJECT_ALPHA * alpha;
+      ctx.lineWidth = ROAD_WIDTHS[roadClass(item)] * px;
+      ctx.beginPath();
+      ctx.moveTo(c.p0.x, c.p0.y);
+      ctx.bezierCurveTo(c.p1.x, c.p1.y, c.p2.x, c.p2.y, c.p3.x, c.p3.y);
+      ctx.stroke();
+    };
+    for (const item of s.appear.b) one(item, Math.min(1, u * 2));
+    for (const item of s.vanish.b) one(item, 1 - u);
+    ctx.globalAlpha = 1;
   }
 
   /** Новые полотна (дороги или пути) — дорисовываются вдоль, снесённые — гаснут. */

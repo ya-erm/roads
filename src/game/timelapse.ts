@@ -1,5 +1,5 @@
 /**
- * Таймлапс партии: в конце каждого месяца — компактный кадр сети игрока (дороги, пути, станции, маршруты)
+ * Таймлапс партии: в конце каждого месяца — компактный кадр сети игрока (дороги, проекты дорог, пути, станции, маршруты)
  * и счётчики (деньги, транспорт, жители городов). Кадр хранит только изменения с прошлого: что появилось
  * или поменялось — целиком, что снесли — номером. Первый кадр (начало партии или начало записи) — целиком.
  *
@@ -26,15 +26,23 @@ export const TL_FRAMES = 480;
 /** Меньше стольких кадров запись не прореживается. */
 const TL_MIN_FRAMES = 8;
 
-/** Слои кадра: r — дороги, t — ж/д пути, s — станции, l — маршруты. */
-export type TlLayer = 'r' | 't' | 's' | 'l';
-export const TL_LAYERS: readonly TlLayer[] = ['r', 't', 's', 'l'];
+/**
+ * Слои кадра: r — дороги, t — ж/д пути, s — станции, l — маршруты, b — проекты дорог («Со строительством»:
+ * полотна, которые ещё строятся; открытый участок уходит из b и появляется в r с тем же id).
+ */
+export type TlLayer = 'r' | 't' | 's' | 'l' | 'b';
+export const TL_LAYERS: readonly TlLayer[] = ['r', 't', 's', 'l', 'b'];
 type DelKey = `${TlLayer}d`;
+
+/** Пустые слои — по одному значению на каждый. */
+export function tlLayers<T>(make: () => T): Record<TlLayer, T> {
+  return Object.fromEntries(TL_LAYERS.map((L) => [L, make()])) as Record<TlLayer, T>;
+}
 
 /**
  * Запись объекта, первым — id:
- * - дорога: [id, класс (0 улица … 3 магистраль), x0, y0, dx1, dy1, dx2, dy2, dx3, dy3] — точки от начала;
- *   почти прямая — [id, класс, x0, y0, dx, dy];
+ * - дорога и проект дороги: [id, класс (0 улица … 3 магистраль), x0, y0, dx1, dy1, dx2, dy2, dx3, dy3] — точки
+ *   от начала; почти прямая — [id, класс, x0, y0, dx, dy];
  * - путь: [id, платформа (1/0), …те же точки];
  * - станция: [id, вид (0 автостанция, 1 остановка, 2 вокзал), x, y, грузовой двор (1/0)];
  * - маршрут: [id, цвет, вид (0 авто, 1 поезд), …id станций по порядку].
@@ -65,6 +73,8 @@ export interface TimelapseFrame {
   sd?: number[];
   l?: TlRec[];
   ld?: number[];
+  b?: TlRec[];
+  bd?: number[];
 }
 
 export interface TimelapseSave {
@@ -113,8 +123,9 @@ export function recCurve(rec: TlRec): Cubic {
 /** Сеть игры сейчас — записями по слоям. */
 function snapshot(game: Game): Record<TlLayer, Map<number, TlRec>> {
   const r = new Map<number, TlRec>();
-  // Строящееся («Со строительством») — ещё не дорога: в таймлапс попадёт, когда участок откроют.
-  for (const c of game.roads.net.corridors.values()) if (!c.build) r.set(c.id, curveRec(c.id, Math.max(0, ROAD_CLASSES.indexOf(c.cls)), c.curve));
+  // Строящееся («Со строительством») — ещё не дорога, а проект: своим слоем, дорогой станет, когда участок откроют.
+  const b = new Map<number, TlRec>();
+  for (const c of game.roads.net.corridors.values()) (c.build ? b : r).set(c.id, curveRec(c.id, Math.max(0, ROAD_CLASSES.indexOf(c.cls)), c.curve));
   const t = new Map<number, TlRec>();
   for (const s of game.net.segments.values()) t.set(s.id, curveRec(s.id, s.platform !== undefined ? 1 : 0, s.curve));
   const s = new Map<number, TlRec>();
@@ -123,7 +134,7 @@ function snapshot(game: Game): Record<TlLayer, Map<number, TlRec>> {
   }
   const l = new Map<number, TlRec>();
   for (const line of game.lines.values()) l.set(line.id, [line.id, line.color, line.mode === 'rail' ? 1 : 0, ...line.stops]);
-  return { r, t, s, l };
+  return { r, t, s, l, b };
 }
 
 const sameList = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -200,7 +211,7 @@ export class TimelapseRecorder {
   /** Последнее записанное состояние; после загрузки — по кадрам из сохранения. */
   private restored(): Record<TlLayer, Map<number, string>> {
     if (this.last) return this.last;
-    const state = { r: new Map(), t: new Map(), s: new Map(), l: new Map() } as Record<TlLayer, Map<number, string>>;
+    const state = tlLayers(() => new Map<number, string>());
     for (const f of this.frames) {
       if (f.tw) this.towns = f.tw;
       for (const L of TL_LAYERS) {
@@ -300,8 +311,8 @@ export interface Timeline {
  * в любом месте шкалы и что в нём появляется или исчезает.
  */
 export function buildTimeline(frames: TimelapseFrame[]): Timeline {
-  const layers = { r: [], t: [], s: [], l: [] } as Record<TlLayer, TlItem[]>;
-  const alive = { r: new Map(), t: new Map(), s: new Map(), l: new Map() } as Record<TlLayer, Map<number, { key: string; item: TlItem }>>;
+  const layers = tlLayers<TlItem[]>(() => []);
+  const alive = tlLayers(() => new Map<number, { key: string; item: TlItem }>());
   const info: TlFrameInfo[] = [];
   let tw: number[] = [];
   frames.forEach((f, i) => {

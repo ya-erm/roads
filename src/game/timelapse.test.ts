@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import { Game, type SaveData } from './game';
 import type { JournalEntry } from './journal';
-import { freightRoute, runMonths, withoutCitizens } from './testkit';
+import { anchorOf, fieldSpot, freightRoute, runMonths, STREET, withoutCitizens } from './testkit';
 import {
   buildTimeline,
   curveRec,
@@ -15,13 +15,14 @@ import {
   TL_FRAMES,
   TL_LAYERS,
   TL_STEP,
+  tlLayers,
   type TimelapseFrame,
   type TlLayer,
 } from './timelapse';
 
 /** Состояние сети после всех кадров: слой → id → запись строкой. */
 function replay(frames: TimelapseFrame[]): Record<TlLayer, Map<number, string>> {
-  const state = { r: new Map(), t: new Map(), s: new Map(), l: new Map() } as Record<TlLayer, Map<number, string>>;
+  const state = tlLayers(() => new Map<number, string>());
   for (const f of frames) {
     for (const L of TL_LAYERS) {
       if (f.full) state[L].clear();
@@ -223,6 +224,42 @@ describe('Таймлапс партии: запись кадров', { timeout: 
     expect(growth.size).toBeGreaterThan(TL_CHARS);
     (growth as unknown as { limit(): void }).limit();
     expect(growth.frames).toHaveLength(400);
+  });
+
+  it('«Со строительством»: проект дороги — своим слоем b, построенный участок уходит из b в r', () => {
+    const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
+    const at = fieldSpot(game, 600);
+    const plan = game.roadBuilder.road(anchorOf(game, { free: at }), anchorOf(game, { free: { x: at.x + 600, y: at.y } }), STREET, { project: true });
+    expect(plan.ok && game.roadBuilder.apply(plan)).toBe(true);
+    const net = game.roads.net;
+    const ids = () => [...net.corridors.values()].filter((c) => c.build).map((c) => c.id).sort((a, b) => a - b);
+    const planned = ids();
+    expect(planned.length).toBeGreaterThan(0);
+    // Проект — не дорога: в слое проектов, не в дорогах. Баз нет — так и стоит проектом.
+    runMonths(game, 1.05);
+    const month = game.timelapse.frames[1];
+    expect(month.b?.map((r) => r[0] as number).sort((a, b) => a - b)).toEqual(planned);
+    expect(month.r?.some((r) => planned.includes(r[0] as number)) ?? false).toBe(false);
+    for (const rec of month.b!) expect(rec[1]).toBe(0);
+    // Тихий месяц — проект не повторяется.
+    runMonths(game, 1);
+    expect(game.timelapse.frames[2].b).toBeUndefined();
+    // Участки открыли (как стройка: у полотна снимается build): те же полотна — дорогами, из проектов — сносом.
+    for (const id of planned) delete net.corridor(id).build;
+    const opened = game.timelapse.capture(game);
+    expect(opened.bd?.slice().sort((a, b) => a - b)).toEqual(planned);
+    expect((opened.r ?? []).map((r) => r[0] as number).filter((id) => planned.includes(id)).sort((a, b) => a - b)).toEqual(planned);
+    const state = replay(game.timelapse.frames);
+    expect(state.b.size).toBe(0);
+    expect([...state.r.keys()].sort((a, b) => a - b)).toEqual([...net.corridors.keys()].sort((a, b) => a - b));
+    // Раскладка: проект виден с кадра 1 до 3, дорога — с 3.
+    const tl = buildTimeline(game.timelapse.frames);
+    for (const id of planned) {
+      expect(tl.layers.b.find((i) => i.id === id)).toMatchObject({ from: 1, to: 3 });
+      expect(tl.layers.r.find((i) => i.id === id)).toMatchObject({ from: 3, to: Infinity });
+    }
+    // Склейка кадров держит и проекты.
+    expect(replay([game.timelapse.frames[0], mergeFrames(game.timelapse.frames[1], game.timelapse.frames[2]), game.timelapse.frames[3]])).toEqual(state);
   });
 
   it('за год партии кадры весят малую долю сохранения', () => {
