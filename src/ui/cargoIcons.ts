@@ -168,8 +168,8 @@ export function cargoIcon(c: CargoType, size = 20, title = true): string {
     <circle cx="12" cy="12" r="12" fill="${color}"/>${glyph(c, color)}</svg>`;
 }
 
-export function townIcon(size = 20): string {
-  return `<svg class="cargo-icon" viewBox="0 0 24 24" width="${size}" height="${size}"><title>Город</title>
+export function townIcon(size = 20, title = true): string {
+  return `<svg class="cargo-icon" viewBox="0 0 24 24" width="${size}" height="${size}">${title ? '<title>Город</title>' : ''}
     <circle cx="12" cy="12" r="12" fill="${TOWN_COLOR}"/>${TOWN_GLYPH}</svg>`;
 }
 

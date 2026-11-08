@@ -38,6 +38,7 @@ import { bridgeLook, deckAlong } from '../lanes/deck';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind } from '../world/cargo';
 import { Annex, type BuildBase, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
 import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/townSupply';
+import { addTownPax, closeTownPax, PAX_NOWHERE, PAX_PER_THOUSAND } from '../world/townPax';
 import { repaceSave, saveMonthLength } from './monthPace';
 import { Network, NetworkSave, Segment } from '../world/network';
 import { halfWidth, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
@@ -4831,6 +4832,9 @@ export class Game implements BuildContext {
         this.scenario?.onPassengers(from?.townIds[0], st.townIds[0], g.count, k);
         const town = st.townIds.length ? this.towns.find((t) => t.id === st.townIds[0]) : undefined;
         if (town) town.growthAcc += g.count * 0.02;
+        // Довезённые — в счёт города отправления: блок «Что нужно городу» (world/townPax.ts).
+        const home = from?.townIds.length ? this.towns.find((t) => t.id === from.townIds[0]) : undefined;
+        if (home) addTownPax(home, town?.id ?? PAX_NOWHERE, g.count);
       }
       v.passengers = stay;
       this.wagonsUnloaded(v);
@@ -5230,7 +5234,7 @@ export class Game implements BuildContext {
 
   /** Сколько пассажиров появляется на станции за dt секунд (когда им есть куда ехать). */
   private paxArrivals(st: Station, dt: number): number {
-    return (st.catchPop / 1000) * 1.2 * dt * (st.townIds.length ? this.mods.pax(st.townIds[0]) : 1);
+    return (st.catchPop / 1000) * PAX_PER_THOUSAND * dt * (st.townIds.length ? this.mods.pax(st.townIds[0]) : 1);
   }
 
   /** Насколько охотно пассажиры едут на эту станцию: по жителям в её охвате. */
@@ -5569,6 +5573,7 @@ export class Game implements BuildContext {
     town.supplied = { ...carry };
     if (Object.keys(carry).length) town.carried = carry;
     else delete town.carried;
+    closeTownPax(town);
   }
 
   /** Улицы, застроенные до отказа: id полотна → месяц, когда это выяснилось. Через 24 мин (два года) проверяем снова. */

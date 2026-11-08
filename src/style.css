@@ -3585,6 +3585,100 @@ button.small.with-ic {
   color: #c0392b;
 }
 
+/* Пассажиры в свёрнутой строке — отдельно, после счётчика: в «✓ из» не входят. */
+.needs-head .need-dot.pax {
+  flex: none;
+  margin-left: 2px;
+}
+
+/* Строка «Пассажиры» в «Что нужно городу»: полоски «по городу» и «в другие города», направления (ui/supplyUi.ts). */
+.pax-need {
+  align-items: flex-start;
+}
+
+.pax-need > .pax-ic {
+  display: grid;
+  margin-top: 2px;
+}
+
+.pax-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pax-lines {
+  display: flex;
+  gap: 2px;
+}
+
+.pax-kind {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pax-kind > .bar {
+  flex: 1;
+}
+
+.pax-n {
+  min-width: 58px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.pax-n b {
+  color: var(--ink);
+}
+
+.pax-kind.ok .pax-n {
+  color: #2e9d57;
+}
+
+.pax-dests {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0;
+}
+
+.pax-dest {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border: 0;
+  border-radius: 8px;
+  background: #e8f0fb;
+  color: #2f4f7f;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pax-dest i {
+  font-style: normal;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.pax-dest.off {
+  background: #f1f3f5;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+button.pax-dest:hover {
+  background: #d9e6f8;
+}
+
+button.pax-dest.off:hover {
+  background: #e6e9ed;
+}
+
 .partner {
   width: 100%;
   display: flex;

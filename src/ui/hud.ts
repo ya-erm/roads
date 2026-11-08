@@ -54,7 +54,8 @@ import { linePaceHtml } from './linePace';
 import { stopFoldHtml, stopPlaceHtml, toggleStop } from './routeStop';
 import { chartHoverAt, distLabel, speedChartSvg, speedTipHtml } from './speedChartSvg';
 import { travelTimeText } from './travelTime';
-import { needsHeadHtml, supplyBarHtml, supplyLineHtml, type TownNeed } from './supplyUi';
+import { needsHeadHtml, type PaxNeed, paxNeedHtml, supplyBarHtml, supplyLineHtml, type TownNeed } from './supplyUi';
+import { townPax } from '../game/townPax';
 import {
   briefHtml,
   leftPanelHtml,
@@ -562,7 +563,7 @@ export class Hud {
     speed.appendChild(heat);
     const limits = document.createElement('button');
     limits.textContent = 'Скорости';
-    limits.title = 'Разрешённая скорость на дорогах и где её снижают повороты (V)';
+    limits.dataset.tip = 'Разрешённая скорость на дорогах и ж/д путях и где её снижают повороты (V)';
     limits.dataset.action = 'speedmap';
     speed.appendChild(limits);
     const menu = document.createElement('button');
@@ -3193,6 +3194,22 @@ export class Hud {
             <span class="caret ${open ? '' : 'closed'}">${chevronSvg(10)}</span></div>${chart}`;
             })
             .join('');
+      // Пассажиры: хотят ездить по городу и в другие города, сколько довезли линии (game/townPax.ts).
+      const tp = townPax(g, t);
+      const pax: PaxNeed = {
+        ...tp,
+        linesHtml: tp.lines
+          .map((l) => `<button class="line-kind-btn" data-action="select-line" data-id="${l.id}" data-tip="${esc(l.name)}">${this.lineIcon(l, 16)}</button>`)
+          .join(''),
+        dests: tp.dests.map((d) => ({
+          town: d.town,
+          name: g.towns.find((x) => x.id === d.town)?.name ?? 'за город',
+          now: d.now,
+          waiting: d.waiting,
+          linked: d.lines.length > 0 || d.now > 0,
+        })),
+      };
+      const paxRow = this.needsFolded ? '' : paxNeedHtml(pax);
       const faces = { good: '😊', ok: '😐', bad: '😠' };
       const reviews = g
         .townReviews(t)
@@ -3204,7 +3221,7 @@ export class Hud {
       return `<section class="detail">${head(t.name, `${t.population} жителей · ${STYLE_NAMES[t.style]}`)}
         ${streets}
         <h4>Что говорят жители</h4>${reviews}
-        ${needsHeadHtml(demands, need, this.needsFolded)}${rows}
+        ${needsHeadHtml(demands, need, this.needsFolded, pax)}${rows}${paxRow}
         ${this.partnersHtml(g.partners(t, 2))}</section>`;
     }
     if (sel.type === 'junction') return this.junctionHtml(sel.id);

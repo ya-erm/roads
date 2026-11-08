@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { NEEDS_HINT, needLevel, needsFoldHtml, needsHeadHtml, needTip, supplyBarHtml, supplyLineHtml, type TownNeed } from './supplyUi';
+import {
+  NEEDS_HINT,
+  needLevel,
+  needsFoldHtml,
+  needsHeadHtml,
+  needTip,
+  type PaxNeed,
+  paxKindTip,
+  paxLineHtml,
+  paxNeedHtml,
+  supplyBarHtml,
+  supplyLineHtml,
+  type TownNeed,
+} from './supplyUi';
 
 const width = (html: string, cls = '') => {
   const m = new RegExp(`<div ${cls ? `class="${cls}" ` : ''}style="width:([\\d.]+)%`).exec(html);
@@ -112,5 +125,73 @@ describe('«Что нужно городу» свёрнутым — одной �
     expect(open).toContain('class="caret "');
     expect(folded).toContain(needsFoldHtml(needs, 15));
     expect(folded).toContain('class="caret closed"');
+  });
+});
+
+describe('Пассажиры в «Что нужно городу»', () => {
+  const pax: PaxNeed = {
+    want: { city: 108, intercity: 36 },
+    now: { city: 27, intercity: 40 },
+    last: { city: 50, intercity: 20 },
+    covered: 0.42,
+    waiting: 12,
+    linesHtml: '<button class="line-kind-btn" data-action="select-line" data-id="3">A</button>',
+    dests: [
+      { town: 2, name: 'Озёрск', now: 40, waiting: 12, linked: true },
+      { town: 5, name: 'Дубки "Новые"', now: 0, waiting: 0, linked: false },
+    ],
+  };
+  const fills = (html: string) => [...html.matchAll(/<div class="bar"><div style="width:([\d.]+)%;background:([^"]+)"/g)].map((m) => ({ w: Number(m[1]), c: m[2] }));
+
+  it('две полоски: по городу и в другие города — довезли из тех, кто хочет ездить; закрытое — зелёным', () => {
+    const html = paxNeedHtml(pax);
+    const [city, inter] = fills(html);
+    expect(city.w).toBeCloseTo(25, 1);
+    expect(inter.w).toBe(100);
+    expect(inter.c).toBe('#2e9d57');
+    expect(html).toContain('<b>27</b> / 108');
+    expect(html).toContain('class="pax-kind ok"');
+    expect(html).toContain(`data-tip="${paxKindTip('city', pax)}"`);
+    expect(paxKindTip('city', pax)).toBe('По городу: хотят ездить 108 в месяц · довезли 27 · в прошлом 50');
+    expect(paxKindTip('intercity', pax)).toBe('В другие города: хотят ездить 36 в месяц · довезли 40 ✓ · в прошлом 20');
+    expect(html).toContain(pax.linesHtml);
+  });
+
+  it('направления: с линией — сколько довезли и ждут, без линии — бледно; клик ведёт к городу', () => {
+    const html = paxNeedHtml(pax);
+    expect(html).toContain('<button class="pax-dest" data-action="focus" data-type="town" data-id="2"');
+    expect(html).toContain('→ Озёрск <b>40</b> <i>⏳12</i>');
+    expect(html).toContain('<button class="pax-dest off" data-action="focus" data-type="town" data-id="5"');
+    expect(html).toContain('линии нет — жители ездят туда на машине');
+    expect(html).toContain('Дубки &quot;Новые&quot;');
+    // Станции за городом — без перехода.
+    expect(paxNeedHtml({ ...pax, dests: [{ town: -1, name: 'за город', now: 3, waiting: 0, linked: true }] })).toContain('<span class="pax-dest"');
+  });
+
+  it('подпись: доля жителей у остановок, сколько ждут, прошлый месяц из всех желающих', () => {
+    expect(paxLineHtml(pax)).toContain('🚏 42%');
+    expect(paxLineHtml(pax)).toContain('⏳ 12');
+    expect(paxLineHtml(pax)).toContain('в прошлом 70 из 144');
+    expect(paxLineHtml({ ...pax, covered: 0, waiting: 0 })).toContain('Ни одной остановки с линией');
+    expect(paxLineHtml({ ...pax, waiting: 0 })).not.toContain('⏳');
+  });
+
+  it('без системных подсказок; у города без жителей строки нет', () => {
+    expect(paxNeedHtml(pax)).not.toContain('<title>');
+    expect(paxNeedHtml(pax)).not.toContain('title=');
+    expect(paxNeedHtml({ ...pax, want: { city: 0, intercity: 0 } })).toBe('');
+  });
+
+  it('свёрнутая строка: значок пассажиров после счётчика, в «✓ из» не входит', () => {
+    const needs: TownNeed[] = [{ cargo: 'food', now: 15, carried: 0, last: 15 }];
+    const html = needsFoldHtml(needs, 15, pax);
+    expect(html).toContain('✓ 1 из 1');
+    expect(html.indexOf('need-dot pax')).toBeGreaterThan(html.indexOf('need-count'));
+    // 67 из 144 — дуга почти в половину кольца.
+    const arc = Number(/class="need-dot pax part"[^]*?stroke-dasharray="([\d.]+)/.exec(html)![1]);
+    expect(arc).toBeCloseTo(2 * Math.PI * 10.6 * (67 / 144), 0);
+    expect(needsFoldHtml(needs, 15)).not.toContain('need-dot pax');
+    expect(needsHeadHtml(needs, 15, true, pax)).toContain('need-dot pax');
+    expect(NEEDS_HINT).toContain('Пассажиры');
   });
 });

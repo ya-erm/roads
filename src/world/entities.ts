@@ -46,6 +46,13 @@ export interface Town {
   carried?: Partial<Record<CargoType, number>>;
   /** Снабжение по закрытым месяцам, старые — первыми (не больше TOWN_HISTORY). В старых сохранениях нет. */
   supplyHistory?: TownSupplyMonth[];
+  /**
+   * Пассажиры из города, довезённые в этом месяце: id города назначения → сколько (свой id — по городу,
+   * -1 — станция назначения не в городе). Нет — никого не довезли; в старых сохранениях нет (world/townPax.ts).
+   */
+  paxMonth?: Record<number, number>;
+  /** То же за прошлый месяц. */
+  paxLast?: Record<number, number>;
   tripAcc: number;
   growthAcc: number;
   /** Город сам прокладывает новые улицы, когда вдоль старых тесно. По умолчанию да. */
