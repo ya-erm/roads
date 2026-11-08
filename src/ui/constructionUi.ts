@@ -11,6 +11,8 @@ import { BUILD_MODES, type BuildMode } from '../world/settings';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
+/** Расстояние коротко: «6 км», «2,5 км», «800 м». */
+export const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(m % 1000 ? 1 : 0).replace('.', ',')} км` : `${Math.round(m)} м`);
 
 /** Стройка: шлагбаум в полоску на дороге и конус — «дорога строится». */
 export function buildSvg(w = 28, h = 21): string {
@@ -60,6 +62,8 @@ export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected 
         ? `<span class="bp-state" data-tip="Подъезд — через соседний строящийся проект: начнётся, когда тот дорастёт сюда">⏳ после соседнего</span>`
         : !i.access
         ? `<span class="bp-state bad" data-tip="Нет подъезда: ни один конец проекта не связан готовой дорогой с базой, а по полю бригады не ездят. Постройте дорогу к началу проекта или поставьте базу рядом">⛔ нет подъезда</span>`
+        : i.noBase
+        ? `<span class="bp-state bad" data-tip="${esc(`Нет базы рядом: стройка дальше ${km(CONSTRUCTION.serviceRadius)} от всех баз — бригады сами сюда не поедут. Поставьте базу ближе («＋ База») или отправьте бригаду вручную («🎯 На стройку…» в её карточке)`)}">⛔ нет базы рядом</span>`
         : !crew
         ? `<span class="bp-state" data-tip="Ждёт бригаду: она в пути или все заняты — тогда наймите ещё на базе">🚚 ждёт</span>`
         : `<span class="bp-left" data-tip="Сколько ещё строить на скорости ×1 (бригад на месте: ${crew})">${'🚚'.repeat(Math.min(3, crew))} ⏳ ${durationText(i.seconds)}</span>`;

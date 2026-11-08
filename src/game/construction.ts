@@ -14,7 +14,8 @@
  *   Стройка так идёт от подъезда внутрь проекта; участок без подъезда ждёт, пока до него дорастёт соседний. Подъезда
  *   нет ни у одного узла проекта — бригады к нему не едут (site — null), проект ждёт: примыкает к другому строящемуся
  *   проекту с подъездом — «⏳ после соседнего» (ProjectInfo.waits), иначе «🚚 нет подъезда» на плашке, в карточке и
- *   у советника. Участок проходят трижды: земляные работы, покрытие, разметка (CONSTRUCTION.stages) — у каждого
+ *   у советника. Подъезд есть, а фронт и подъезд — вне радиуса обслуживания всех баз (CONSTRUCTION.serviceRadius,
+ *   serves) — автоматика бригад не шлёт: «⛔ нет базы рядом» (ProjectInfo.noBase). Участок проходят трижды: земляные работы, покрытие, разметка (CONSTRUCTION.stages) — у каждого
  *   этапа свой ход (CorridorBuild.stages): этап идёт, пока его машина на месте; покрытие — не ближе convoyGap к
  *   отсыпке, разметка — к покрытию; участок готов, когда до конца дошла разметка (constructionWork.advanceStages).
  * - Строят бригады (crews.ts): проект идёт, пока на нём работает хоть одна; темп — сумма вкладов бригад (дальше от
@@ -129,6 +130,16 @@ export interface ProjectInfo {
    * пока до него дорастёт соседний, — не «нет подъезда» (Construction.waitsNeighbor).
    */
   waits: boolean;
+  /**
+   * Есть база рядом: с какой-нибудь базы до проекта доехать, и его фронт или подъезд — в её радиусе обслуживания
+   * (CONSTRUCTION.serviceRadius, Construction.serves). Нет — автоматика бригад сюда не шлёт.
+   */
+  near: boolean;
+  /**
+   * Стоит: «⛔ нет базы рядом» — подъезд есть, а ни одной базы рядом (near) нет, и никто сюда не едет и не работает
+   * (вручную отправленная бригада — уже не «стоит»). Плашка, строка вкладки, карточка, советник.
+   */
+  noBase: boolean;
 }
 
 /** Из чего проект: метров по видам (вода — мост над ней), насыпь и выемка — высота и глубина, м. */
@@ -206,14 +217,59 @@ export class Construction {
    */
   site(id: number, b?: Brigade): Site | null {
     const a = this.approach(id, b);
-    return a ? { node: a.node, pos: a.pos } : null;
+    return a ? { node: a.node, pos: a.pos, gate: { ...this.host.roads.net.node(a.node).pos } } : null;
   }
 
   /** Куда ехать к проекту id бригадам с узла from (база, её ворота): к какому-нибудь его фронту; не доехать — null. */
   siteFrom(id: number, from: number): Site | null {
     const f = this.frontFrom(id, null, from);
     const r = f && this.routeTo(id, f.c, f.fromB, this.reachFrom(from));
-    return f && r ? { node: r.entry, pos: frontPoint(f.c, f.fromB) } : null;
+    return f && r ? { node: r.entry, pos: frontPoint(f.c, f.fromB), gate: { ...this.host.roads.net.node(r.entry).pos } } : null;
+  }
+
+  /**
+   * Куда поехала бы на проект id свободная бригада базы base (с её ворот): к фронту, ближайшему к базе, — как выберет
+   * автоматика (frontFor); не доехать по дорогам — null.
+   */
+  siteOfBase(id: number, base: number): Site | null {
+    const b = this.crews.bases.get(base);
+    if (!b) return null;
+    // Пробная бригада этой базы: чужих фронтов она не занимает, свой выберет ближе к базе.
+    const probe: Brigade = { id: 0, base, state: 'idle' };
+    const f = this.frontFrom(id, probe, b.nodeId);
+    const r = f && this.routeTo(id, f.c, f.fromB, this.reachFrom(b.nodeId));
+    return f && r ? { node: r.entry, pos: r.c.lut.pointAt(r.s), gate: { ...this.host.roads.net.node(r.entry).pos } } : null;
+  }
+
+  /** Проект id — в радиусе обслуживания базы base: её бригады доедут до него, и фронт или подъезд — в радиусе (Crews.serves). */
+  serves(id: number, base: number): boolean {
+    const s = this.siteOfBase(id, base);
+    return !!s && this.crews.serves(base, s);
+  }
+
+  /**
+   * Проект id вне радиуса базы бригады b — туда её можно отправить только вручную («🎯 На стройку…»), и строить будет
+   * медленно: к фронту, куда она поедет (site с ней). Не доехать — false (тут другая причина, Crews.canGo).
+   */
+  outOfRadius(id: number, b: Brigade): boolean {
+    const s = this.site(id, b);
+    return !!s && !this.crews.serves(b.base, s);
+  }
+
+  /** Есть база, в радиусе которой проект id (serves): по стройке, сети и базам — до следующего изменения. */
+  private nearCache = new Map<number, { net: LaneNet; key: string; near: boolean }>();
+
+  /** Проект id в радиусе хоть одной базы, с которой до него доехать (serves). */
+  nearBase(id: number): boolean {
+    const net = this.host.roads.net;
+    const bases = [...this.crews.bases.values()];
+    const key = `${this.stamp}:${net.version}:${bases.map((b) => `${b.id}@${b.nodeId}:${Math.round(b.fp.center.x)},${Math.round(b.fp.center.y)}`).join(';')}`;
+    const hit = this.nearCache.get(id);
+    if (hit && hit.net === net && hit.key === key) return hit.near;
+    const near = bases.some((b) => this.serves(id, b.id));
+    if (this.nearCache.size > 200) this.nearCache.clear();
+    this.nearCache.set(id, { net, key, near });
+    return near;
   }
 
   /**
@@ -847,6 +903,7 @@ export class Construction {
     const plus = n < this.crews.cap(id) ? k + this.crews.nearestPower(at) * (share[n] ?? share[share.length - 1]) : null;
     const stages: [number, number, number] = [p.builtLen, p.builtLen, p.builtLen];
     const access = this.site(id) !== null;
+    const near = access && this.nearBase(id);
     for (const c of list) {
       const b = c.build!;
       const { full, rate } = this.price(net, c);
@@ -873,6 +930,8 @@ export class Construction {
       stages: stages.map((s) => (length > 0 ? Math.min(1, s / length) : 1)) as [number, number, number],
       access,
       waits: !access && this.waitsNeighbor(id),
+      near,
+      noBase: access && !near && !p.paused && !this.crews.assigned(id).length,
     };
   }
 

@@ -1,11 +1,12 @@
 /**
  * Карточка строительной базы (режим «Со строительством») в правой панели — открывается кликом по площадке базы на
  * карте («Выбор») или по строке базы на плашке слева внизу. Наглядно, значками и полосками:
- * - название (клик — переименовать) и сводка: бригад, в деле, содержание в месяц;
+ * - название (клик — переименовать) и сводка: бригад, в деле, содержание в месяц, «📡 радиус 6 км» (радиус
+ *   обслуживания, CONSTRUCTION.serviceRadius; на карте у выбранной базы — кругом);
  * - бригады: самосвал, номер, что делает (строит «…», едет по дороге, едет вдоль стройки, ждёт выезда, на базе, ждёт
  *   подъезда); клик — показать бригаду на карте; «＋ 🚚» — нанять, «−» — распустить;
  * - ближние стройки: как далеко от базы и вклад бригады отсюда (1 / (1 + d / reach)), можно ли доехать по дорогам;
- *   клик — к проекту и его карточке;
+ *   дальние — «📡 вне радиуса» (бригады базы сами туда не поедут); клик — к проекту и его карточке;
  * - «↔ Перенести» — площадка за курсором у дороги, как при постановке (Controller.startBaseMove; ещё — «Двигать» по ней);
  * - «🚜 Снести базу» — со второго нажатия («Точно? +$N, бригады → «…»»), как Game.removeBase; ещё — «Сносом» по площадке.
  * Подсказки — data-tip (не системные).
@@ -14,12 +15,11 @@ import { CONSTRUCTION } from '../config';
 import { projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
-import { baseRemoveText, baseSvg, buildSvg } from './constructionUi';
+import { baseRemoveText, baseSvg, buildSvg, km } from './constructionUi';
 import { crewDoing } from './projectCard';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
-const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1).replace('.', ',')} км` : `${Math.round(m)} м`);
 
 /** Сколько ближних строек показывать. */
 const NEAR_MAX = 4;
@@ -37,8 +37,11 @@ export function baseCrewText(game: Game, b: Brigade): string {
   if (b.state === 'working') return `строит${label}`;
   if (b.state === 'going') return `${crewDoing(b)} →${label}`;
   if (b.state === 'back') return 'едет на базу';
-  const blocked = game.construction.list().some((i) => !i.project.paused && !i.access);
-  return blocked ? 'на базе · ждёт подъезда' : 'на базе';
+  const list = game.construction.list().filter((i) => !i.project.paused);
+  if (list.some((i) => !i.access)) return 'на базе · ждёт подъезда';
+  // Стройки есть, но все — вне радиуса этой базы: бригада сама к ним не поедет.
+  if (list.length && !list.some((i) => game.construction.serves(i.project.id, b.base))) return 'на базе · стройки вне радиуса';
+  return 'на базе';
 }
 
 /**
@@ -94,7 +97,10 @@ function summaryHtml(game: Game, id: number): string {
   return `<div class="pc-chips">
     <span class="pc-chip" data-tip="Бригад на базе (не больше ${max})">🚚 <b>${list.length}</b><span class="muted"> из ${max}</span></span>
     <span class="pc-chip" data-tip="В деле: строят или едут на стройку">🏗 <b>${busy}</b><span class="muted"> в деле</span></span>
-    <span class="pc-chip" data-tip="Содержание бригад базы в месяц (статья «транспорт»)">💸 <b>${money(upkeep)}</b><span class="muted"> / мес</span></span></div>`;
+    <span class="pc-chip" data-tip="Содержание бригад базы в месяц (статья «транспорт»)">💸 <b>${money(upkeep)}</b><span class="muted"> / мес</span></span>
+    <span class="pc-chip bc-radius" data-tip="${esc(
+      `Радиус обслуживания: бригады базы сами едут только на стройки не дальше ${km(CONSTRUCTION.serviceRadius)} от неё (круг на карте). Дальше — только вручную («🎯 На стройку…» в карточке бригады), и строить там медленно`,
+    )}">📡 <span class="muted">радиус</span> <b>${km(CONSTRUCTION.serviceRadius)}</b></span></div>`;
 }
 
 /** Бригады базы: самосвал, №, что делает (клик — к ней на карте); нанять и распустить. */
@@ -155,7 +161,11 @@ function nearHtml(game: Game, id: number): string {
           ? `<span class="pc-bad" data-tip="Отсюда по дорогам не доехать: бригады этой базы туда не поедут">⛔ не доехать</span>`
           : p.paused
             ? `<span class="muted" data-tip="Проект на паузе">⏸</span>`
-            : '';
+            : !game.construction.serves(p.id, id)
+              ? `<span class="pc-bad" data-tip="${esc(
+                  `Дальше ${km(CONSTRUCTION.serviceRadius)} от базы: её бригады сами туда не поедут — только вручную («🎯 На стройку…»), и строить будут медленно`,
+                )}">📡 вне радиуса</span>`
+              : '';
       return `<button class="pc-crew bc-near" data-action="build-show" data-id="${p.id}" data-tip="${esc(
         `«${projectName(p)}»: ${km(d)} от базы — бригада отсюда строит в силу ${power}% (дальше — медленнее: вклад 1 / (1 + d / ${km(CONSTRUCTION.reach)})). Нажмите — к проекту`,
       )}">

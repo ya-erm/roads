@@ -5,7 +5,8 @@
  * - готовность: полоска и три этапа (🟫 отсыпка, ⬛ покрытие, ⬜ разметка);
  * - сколько ещё строить при нынешних бригадах и с ещё одной;
  * - деньги: потрачено / в резерве / осталось — полоской, хватает ли сейчас; «🔒 Зарезервировать» и «Снять резерв»;
- * - бригады на проекте (клик — показать на карте); нет никого — почему и кнопка, которая поможет;
+ * - бригады на проекте (клик — показать на карте); нет никого — почему и кнопка, которая поможет (вне радиуса всех
+ *   баз — «нет базы рядом» и «＋ База»);
  * - «⬆ Приоритет», «⏸ Пауза» / «▶ Дальше», «✕ Отмена».
  * Подсказки — data-tip (не системные).
  */
@@ -14,7 +15,7 @@ import { durationText } from '../core/timeText';
 import { type ProjectInfo, projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
-import { buildSvg } from './constructionUi';
+import { buildSvg, km } from './constructionUi';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
@@ -99,6 +100,8 @@ function timeHtml(game: Game, info: ProjectInfo): string {
     return `<div class="pc-row"><span class="pc-time" data-tip="Подъезд — через соседний строящийся проект: начнётся, когда тот дорастёт сюда">⏳ <b>после соседнего</b></span></div>`;
   if (!p.paused && !info.access && game.construction.crews.bases.size)
     return `<div class="pc-row"><span class="pc-time pc-bad" data-tip="Бригадам не доехать по дорогам ни с одной базы — стройка ждёт подъезда">⛔ <b>стоит: нет подъезда</b></span></div>`;
+  if (info.noBase && game.construction.crews.bases.size)
+    return `<div class="pc-row"><span class="pc-time pc-bad" data-tip="${esc(`Стройка дальше ${km(CONSTRUCTION.serviceRadius)} от всех баз: бригады сами сюда не поедут`)}">⛔ <b>стоит: нет базы рядом</b></span></div>`;
   const now = p.paused
     ? `<span class="pc-time" data-tip="На паузе: стройка стоит">⏸ <b>стоит</b></span>`
     : `<span class="pc-time" data-tip="${esc(crew ? `Сколько ещё строить на скорости ×1: бригад на месте — ${crew}` : 'Сколько займёт с одной бригадой с ближайшей базы, когда она приедет')}">${trucks(crew)} ⏳ <b>${durationText(info.seconds)}</b></span>`;
@@ -198,6 +201,12 @@ function helpHtml(game: Game, info: ProjectInfo, some: boolean): string {
       '⛔',
       'Нет подъезда: ни один конец проекта не связан готовой дорогой с базой, а по полю бригады не ездят. Постройте дорогу к началу проекта или поставьте базу у дороги рядом с ним',
       `<button class="small" data-action="base-place" data-tip="Поставьте базу у дороги, связанной с проектом: бригада доедет по ней">＋ База</button>`,
+    );
+  if (!info.near)
+    return why(
+      '⛔',
+      `Нет базы рядом: стройка дальше ${km(CONSTRUCTION.serviceRadius)} от всех баз — бригады сами сюда не поедут. Поставьте базу поближе или отправьте бригаду вручную («🎯 На стройку…» в её карточке) — строить она будет медленно`,
+      `<button class="small" data-action="base-place" data-tip="${esc(`Поставьте базу у дороги ближе ${km(CONSTRUCTION.serviceRadius)} к стройке: её бригады поедут сюда сами`)}">＋ База</button>`,
     );
   if (!crews.brigades.size) return why('🚫', 'Нет ни одной бригады', hire('Строить некому.'));
   const busy = [...crews.brigades.values()].every((b) => b.project !== undefined && b.project !== p.id && (b.state === 'going' || b.state === 'working'));

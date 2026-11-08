@@ -70,7 +70,8 @@ export function crewCardHtml(game: Game, id: number, view: CrewCardView): string
 
 /**
  * Стройки, куда можно отправить бригаду, — по расстоянию от неё: название и готовность, расстояние, бригад x из N.
- * Где она сейчас — «📍»; нельзя — значок причины (⏸ пауза, ⛔ нет подъезда или не доехать, 🚚 места нет).
+ * Где она сейчас — «📍»; нельзя — значок причины (⏸ пауза, ⛔ нет подъезда или не доехать, 🚚 места нет); вне радиуса
+ * базы бригады — «⚠» (можно, но строить будет медленно).
  */
 function targetsHtml(game: Game, id: number): string {
   const crews = game.construction.crews;
@@ -98,12 +99,14 @@ function targetsHtml(game: Game, id: number): string {
       const problem = game.brigadeCanGo(id, p.id);
       const n = crews.assigned(p.id).length;
       const cap = crews.cap(p.id);
+      // Вне радиуса базы бригады: туда — только вручную, и строить она будет медленно (возит издалека).
+      const far = !here && !problem && game.construction.outOfRadius(p.id, b);
       const icon = here
         ? b.pinned
           ? '📌'
           : '📍'
         : !problem
-          ? `📏 ${km(d)}`
+          ? `${far ? '⚠ ' : ''}📏 ${km(d)}`
           : p.paused
             ? '⏸'
             : n >= cap
@@ -115,7 +118,9 @@ function targetsHtml(game: Game, id: number): string {
           : `Бригада здесь — нажмите, чтобы закрепить её на «${projectName(p)}»`
         : problem
           ? `Нельзя: ${problem}`
-          : `«${projectName(p)}»: ${km(d)} отсюда — нажмите, бригада поедет туда по дорогам и закрепится${replaced(p.id)}`;
+          : `«${projectName(p)}»: ${km(d)} отсюда — нажмите, бригада поедет туда по дорогам и закрепится${replaced(p.id)}${
+              far ? '. ⚠ вне радиуса базы — строить будет медленно' : ''
+            }`;
       return `<button class="pc-crew cc-target ${problem ? 'cc-off' : ''} ${here ? 'cc-here' : ''}" data-action="crew-to" data-id="${id}" data-p="${p.id}" data-tip="${esc(tip)}">
         <span class="bc-near-ic">${buildSvg(22, 16)}</span>
         <span class="pc-crew-name">${esc(projectName(p))} <span class="muted">· ${Math.min(99, Math.floor(info.done * 100))}%</span></span>

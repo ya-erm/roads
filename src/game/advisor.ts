@@ -34,6 +34,8 @@ export type AdviceKind =
   | 'buildIdle'
   /** К проекту нет подъезда: ни один его узел не связан готовой дорогой с базой — бригады к нему не едут. */
   | 'buildNoAccess'
+  /** Подъезд к проекту есть, но он вне радиуса обслуживания всех баз — автоматика бригад туда не шлёт. */
+  | 'buildNoBase'
   /** Бригада работает далеко от своей базы — вдвое медленнее и хуже. */
   | 'buildFar'
   /** «Со строительством» базы ещё нет: первую — бесплатно, где удобно игроку. */
@@ -179,7 +181,8 @@ function building(game: Game, out: Advice[]): void {
 
 /**
  * Бригады стройки: проект давно заложен, а работы не начались (нет базы, все бригады заняты, бригада ещё в пути
- * издалека) — и бригада работает дальше CONSTRUCTION.reach от своей базы (метр там вдвое дольше).
+ * издалека); нет подъезда; нет базы рядом (вне радиуса обслуживания всех баз) — и бригада работает дальше
+ * CONSTRUCTION.reach от своей базы (метр там вдвое дольше; с радиусом обслуживания — обычно после ручной отправки).
  */
 function crews(game: Game, out: Advice[]): void {
   const c = game.construction;
@@ -213,10 +216,28 @@ function crews(game: Game, out: Advice[]): void {
       fix: { kind: 'base' },
     });
   }
+  // Нет базы рядом: подъезд есть, а стройка вне радиуса обслуживания всех баз — автоматика бригад туда не шлёт.
+  const far = crews.bases.size ? c.list().filter((i) => i.noBase) : [];
+  if (far.length) {
+    const first = far[0];
+    const what = far.length === 1 ? `«${projectName(first.project)}»` : `${far.length} ${plural(far.length, 'проект', 'проекта', 'проектов')}`;
+    const r = CONSTRUCTION.serviceRadius / 1000;
+    out.push({
+      key: 'buildNoBase',
+      kind: 'buildNoBase',
+      level: 'warn',
+      title: 'Нет базы рядом со стройкой',
+      detail: `${what}: дальше ${r} км от всех баз — бригады сами туда не поедут. Поставьте базу у дороги ближе к стройке или отправьте бригаду вручную («🎯 На стройку…» в её карточке) — строить она будет медленно.`,
+      at: first.front ?? first.at,
+      count: far.length,
+      fix: { kind: 'base' },
+    });
+  }
   for (const i of c.list()) {
     const p = i.project;
     if (p.paused || p.stalled !== undefined || i.done > 0 || game.time - p.created < CONSTRUCTION.idleWarn || crews.working(p.id).length) continue;
-    if (crews.bases.size && !i.access) continue;
+    // Нет подъезда или базы рядом — об этом свой совет (buildNoAccess, buildNoBase).
+    if (crews.bases.size && (!i.access || i.noBase)) continue;
     const coming = crews.assigned(p.id).length > 0;
     const why = !crews.bases.size
       ? 'нет строительной базы — поставьте её у дороги («＋ База» на плашке стройки, первая бесплатно)'

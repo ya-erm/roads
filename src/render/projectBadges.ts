@@ -1,6 +1,7 @@
 /**
  * Плашки проектов стройки на карте («🏗 45%», на паузе — «⏸», без денег — «💸», бригада не на месте — «🚚», к проекту
  * не доехать по дорогам — «🚚 нет подъезда», а примыкает к строящемуся соседу с подъездом — «⏳ после соседнего»;
+ * вне радиуса обслуживания всех баз (ProjectInfo.noBase) — «⛔ нет базы рядом»;
  * приоритетный — со «⬆»): где они и что на них — одним расчётом для отрисовки (renderer.drawConstruction) и для клика
  * по плашке (controller: клик выбирает проект и открывает его карточку).
  */
@@ -51,11 +52,13 @@ export function projectBadges(game: Game, zoom: number, list: readonly ProjectIn
     const stuck = !p.paused && !info.access && crews.bases.size > 0;
     const waits = stuck && info.waits;
     const blocked = stuck && !info.waits;
+    // Подъезд есть, но стройка вне радиуса всех баз — автоматика бригад сюда не шлёт.
+    const far = info.noBase && crews.bases.size > 0;
     const mark = p.paused ? '⏸' : p.stalled !== undefined ? '💸' : crew ? '🏗' : '🚚';
     const top = p.priority ? '⬆ ' : '';
-    const text = blocked ? `${top}🚚 нет подъезда` : waits ? `${top}⏳ после соседнего` : `${top}${mark} ${pct}%`;
+    const text = blocked ? `${top}🚚 нет подъезда` : waits ? `${top}⏳ после соседнего` : far ? `${top}⛔ нет базы рядом` : `${top}${mark} ${pct}%`;
     const fill =
-      (p.stalled !== undefined || blocked) && !p.paused
+      (p.stalled !== undefined || blocked || far) && !p.paused
         ? 'rgba(232, 72, 63, 0.92)'
         : p.paused || waits
           ? 'rgba(110, 118, 128, 0.92)'

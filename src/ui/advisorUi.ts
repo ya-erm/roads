@@ -30,6 +30,7 @@ const KIND_GLYPH: Record<AdviceKind, string> = {
   buildMoney: '🏗',
   buildIdle: '🚧',
   buildNoAccess: '⛔',
+  buildNoBase: '⛔',
   buildFar: '🚚',
   noBase: '🏗',
 };

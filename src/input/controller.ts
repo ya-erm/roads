@@ -2881,6 +2881,14 @@ export class Controller {
         o.catchmentR = g.catchmentRadius(st);
       }
     }
+    // Выбрана база стройки — её радиус обслуживания: на стройки в круге её бригады едут сами.
+    if (this.selection?.type === 'base') {
+      const base = g.construction.crews.bases.get(this.selection.id);
+      if (base) {
+        o.catchmentAt = base.fp.center;
+        o.catchmentR = CONSTRUCTION.serviceRadius;
+      }
+    }
     const flash = this.flash && performance.now() < this.flash.until ? this.flash.text : null;
     const p = this.hover;
     // Рамка сноса: пока тянем — по курсору, после — ждёт подтверждения.
@@ -3502,15 +3510,19 @@ export class Controller {
       }
       case 'select': {
         if (this.placingBase) {
-          // База стройки: площадка у ближайшей дороги — синим (красным, если нельзя); круг — где бригады с неё быстры.
+          // База стройки: площадка у ближайшей дороги — синим (красным, если нельзя); круг — радиус обслуживания: на
+          // стройки в нём бригады базы поедут сами.
           const plan = g.basePlan(p);
           if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
           if (plan.fp) {
             o.catchmentAt = plan.fp.center;
-            o.catchmentR = CONSTRUCTION.reach;
+            o.catchmentR = CONSTRUCTION.serviceRadius;
           }
           o.label = plan.ok
-            ? { text: `База стройки · ${plan.cost ? money(plan.cost) : 'бесплатно'}${plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : ''} · Esc — отмена`, ok: true }
+            ? {
+                text: `База стройки · ${plan.cost ? money(plan.cost) : 'бесплатно'}${plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : ''} · 📡 ${CONSTRUCTION.serviceRadius / 1000} км · Esc — отмена`,
+                ok: true,
+              }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
@@ -3520,11 +3532,19 @@ export class Controller {
           o.crewTarget = project;
           const problem = project !== null ? g.brigadeCanGo(this.sendingCrew, project) : null;
           const info = project !== null ? g.construction.projects.get(project) : undefined;
+          // Радиус базы бригады — кругом: вне него отправить можно, но строить она будет медленно.
+          const crew = g.construction.crews.brigades.get(this.sendingCrew);
+          const home = crew && g.construction.crews.bases.get(crew.base);
+          if (home) {
+            o.catchmentAt = home.fp.center;
+            o.catchmentR = CONSTRUCTION.serviceRadius;
+          }
+          const far = !!crew && project !== null && !problem && g.construction.outOfRadius(project, crew);
           o.label = !info
             ? { text: '🎯 Кликните по стройке: плашке «🏗» или полотну проекта · Esc — отмена', ok: true }
             : problem
               ? { text: `⛔ ${problem}`, ok: false }
-              : { text: `🎯 🚚 → «${projectName(info)}» · 📌 закрепить`, ok: true };
+              : { text: `🎯 🚚 → «${projectName(info)}» · 📌 закрепить${far ? ' · ⚠ вне радиуса базы — строить будет медленно' : ''}`, ok: true };
           break;
         }
         const home = this.placingWarehouse !== null ? g.stations.get(this.placingWarehouse) : undefined;
@@ -3553,14 +3573,14 @@ export class Controller {
         }
         const movingBase = this.movingBase !== null ? g.construction.crews.bases.get(this.movingBase) : undefined;
         if (movingBase) {
-          // Перенос базы: старое место — красным, новое — у дороги под курсором (красным, если нельзя), круг — где
-          // бригады с неё быстры; платится только снос домов.
+          // Перенос базы: старое место — красным, новое — у дороги под курсором (красным, если нельзя), круг — радиус
+          // обслуживания на новом месте; платится только снос домов.
           const plan = g.baseMovePlan(movingBase.id, p);
           o.marks.push({ fp: movingBase.fp, ok: false });
           if (plan.fp) {
             o.marks.push({ fp: plan.fp, ok: plan.ok });
             o.catchmentAt = plan.fp.center;
-            o.catchmentR = CONSTRUCTION.reach;
+            o.catchmentR = CONSTRUCTION.serviceRadius;
           }
           for (const id of plan.demolish) {
             const b = g.buildingById(id);

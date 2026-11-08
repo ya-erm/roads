@@ -22,6 +22,12 @@
  * а назначение закреплено (Brigade.pinned) — reinforce и trim её не трогают, пока проект не кончится, не встанет на
  * паузу или игрок не снимет закрепление (unpin, «↺ Авто»). Предел бригад на проект (cap) соблюдается и тут.
  *
+ * Радиус обслуживания базы (CONSTRUCTION.serviceRadius, serves): автоматика (assign, reinforce) шлёт бригаду только на
+ * проект, чей край работ её фронта или подъезд к нему (Site.pos, Site.gate) — в радиусе её базы; подходят бригады
+ * нескольких баз — едет бригада ближайшей (closer). Вручную (send) — без ограничения. Бригада, что уже работает вне
+ * радиуса (старое сохранение, назначил игрок и снял закрепление), доделывает свой фронт, но, когда он кончится, к
+ * другому фронту вне радиуса не едет (relocate) — свободна.
+ *
  * Темп этапа — сумма вкладов бригад, чья машина этого этапа на месте (placed): 1 / (1 + d / reach), d — от базы бригады до края работ (возит грунт
  * и асфальт); бригад на проекте — не больше brigade.perProject, на узком (полотно в одну полосу: съезд, заезд) — не
  * больше brigade.perNarrow (cap, constructionWork.crewCap; лишние отпускаются — trim). Содержание бригад — каждый
@@ -131,6 +137,8 @@ export interface CrewSave {
 export interface Site {
   node: number;
   pos: Vec;
+  /** Где узел подъезда (node) на карте — для радиуса обслуживания базы (Crews.span); нет — считается по pos. */
+  gate?: Vec;
 }
 
 /** Что бригадам нужно знать об игре. */
@@ -407,6 +415,51 @@ export class Crews {
     return best || 1;
   }
 
+  /**
+   * Как далеко стройка от базы base для радиуса обслуживания: по прямой от центра базы до края работ (Site.pos) или до
+   * подъезда (Site.gate) — что ближе. Базы нет — бесконечно.
+   */
+  span(base: number, s: Site): number {
+    const b = this.bases.get(base);
+    if (!b) return Infinity;
+    const d = dist(b.fp.center, s.pos);
+    return s.gate ? Math.min(d, dist(b.fp.center, s.gate)) : d;
+  }
+
+  /** Стройка (её фронт s) — в радиусе обслуживания базы base (CONSTRUCTION.serviceRadius): автоматика шлёт туда бригады. */
+  serves(base: number, s: Site): boolean {
+    return this.span(base, s) <= CONSTRUCTION.serviceRadius + 1e-6;
+  }
+
+  /** Бригада свободна для автоматики: на базе или едет домой не машиной (assign её возьмёт). */
+  private free(b: Brigade): boolean {
+    return b.state === 'idle' || (b.state === 'back' && !b.convoy);
+  }
+
+  /** Куда бригаде b ехать на проект id, если автоматика может её туда послать: место есть, доедет, в радиусе базы. */
+  private fit(b: Brigade, id: number): Site | null {
+    if (this.assigned(id).length >= this.cap(id)) return null;
+    const s = this.host.site(id, b);
+    // К проекту без подъезда (или куда ей не доехать по дорогам) бригада не едет; вне радиуса её базы — тоже.
+    return s && this.canReach(b, s.node) && this.serves(b.base, s) ? s : null;
+  }
+
+  /**
+   * На проект id может поехать свободная бригада другой, более близкой базы (span меньше; при равенстве — база с
+   * меньшим номером): тогда b его уступает — едет бригада ближайшей базы. Бригады одной базы друг другу не мешают.
+   */
+  private closer(b: Brigade, id: number, s: Site): boolean {
+    const mine = this.span(b.base, s);
+    for (const o of this.brigades.values()) {
+      if (o === b || o.base === b.base || !this.free(o)) continue;
+      const t = this.fit(o, id);
+      if (!t) continue;
+      const d = this.span(o.base, t);
+      if (d < mine - 1e-6 || (Math.abs(d - mine) <= 1e-6 && o.base < b.base)) return true;
+    }
+    return false;
+  }
+
   /** Ближайшая к точке база и расстояние до неё. */
   nearestBase(at: Vec): { base: BuildBase; d: number } | null {
     let best: { base: BuildBase; d: number } | null = null;
@@ -543,9 +596,9 @@ export class Crews {
         for (const b of this.brigades.values()) {
           // Часть колонны ещё в пути (сходят на стройку по одной) — её машины в потоке не трогаем.
           if (b.state !== 'working' || b.convoy || b.project === undefined || b.pinned || prio(b.project)) continue;
-          // К какому фронту приоритетного она поедет (доедет ли туда по дорогам).
+          // К какому фронту приоритетного она поедет (доедет ли туда по дорогам, в радиусе ли он её базы).
           const s = this.host.site(id, b);
-          if (!s || !this.canReach(b, s.node)) continue;
+          if (!s || !this.canReach(b, s.node) || !this.serves(b.base, s)) continue;
           const n = this.assigned(b.project).length;
           const d = dist(this.where(b), s.pos);
           if (!best || n > best.n || (n === best.n && d < best.d - 1e-6)) best = { b, n, d };
@@ -613,18 +666,21 @@ export class Crews {
     return pathHead(trip.path, total * k).reverse();
   }
 
-  /** Свободной бригаде — проект: сначала приоритетный, потом где меньше всего бригад, ближайший, раньше заложенный. */
+  /**
+   * Свободной бригаде — проект в радиусе её базы (fit), если на него не едет бригада более близкой базы (closer):
+   * сначала приоритетный, потом где меньше всего бригад, ближайший, раньше заложенный.
+   */
   private assign(b: Brigade, projects: number[]): void {
     let best: { id: number; top: boolean; n: number; d: number } | null = null;
     for (const id of projects) {
+      const s = this.fit(b, id);
+      if (!s) continue;
       const n = this.assigned(id).length;
-      if (n >= this.cap(id)) continue;
-      const s = this.host.site(id, b);
-      // К проекту без подъезда (или куда ей не доехать по дорогам) бригада не едет.
-      if (!s || !this.canReach(b, s.node)) continue;
       const top = !!this.host.priority?.(id);
       const d = dist(this.where(b), s.pos);
-      if (!best || (top && !best.top) || (top === best.top && (n < best.n || (n === best.n && d < best.d - 1e-6)))) best = { id, top, n, d };
+      const better = !best || (top && !best.top) || (top === best.top && (n < best.n || (n === best.n && d < best.d - 1e-6)));
+      // Уступить бригаде ближней базы — проверяем, только если проект и так лучший (дешевле, а выбор тот же).
+      if (better && !this.closer(b, id, s)) best = { id, top, n, d };
     }
     if (!best) return;
     this.parkAll(b);
@@ -768,6 +824,11 @@ export class Crews {
     delete b.trip;
     b.at = node;
     if (b.state === 'working') b.state = 'going';
+    // Свой фронт доделан, а следующий — вне радиуса базы (работала там со старого сохранения или после «↺ Авто»):
+    // автоматика туда не шлёт — бригада свободна (поедет к проекту в радиусе или домой). Назначенная игроком — едет.
+    if (b.state !== 'going' || b.pinned || b.project === undefined) return;
+    const s = this.host.site(b.project, b);
+    if (s && !this.serves(b.base, s)) this.release(b);
   }
 
   /** Вдоль стройки доехали: к краю работ — за работу, назад к дороге — дальше по дорогам (launch / launchHome). */
