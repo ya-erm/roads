@@ -126,7 +126,7 @@ describe('Отмена строительства', () => {
     // Жизнь продолжается: машины ездят по восстановленной сети, у каждого дома есть своя дорога.
     for (const t of game.towns) for (const b of t.buildings) expect(game.roads.net.nodes.has(b.anchor)).toBe(true);
     runSeconds(game, 20);
-    expect(game.citizenCars).toBe(game.traffic.vehicles.size);
+    expect(game.citizenCars + game.serviceCars).toBe(game.traffic.vehicles.size);
     expect(game.citizenCars).toBeGreaterThan(0);
   });
 

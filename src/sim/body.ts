@@ -8,10 +8,23 @@ import type { Vec } from '../core/vec';
  *  - articBus — сочленённый (Автобус III): две секции с «гармошкой»;
  *  - crewEarth, crewPave, crewMarks — техника строительной бригады (src/game/crewLane.ts, CREW_UNITS): грейдер с
  *    самосвалом грунта, асфальтоукладчик с катком (две части, как тягач с прицепом: вторая идёт следом за первой) и
- *    машина разметки — одни и те же в потоке, вдоль стройки и на месте работ.
+ *    машина разметки — одни и те же в потоке, вдоль стройки и на месте работ;
+ *  - ambulance, police, fire — спецтранспорт городов (src/game/services.ts): скорая, полиция, пожарная, с мигалками.
  * У машин жителей кузова нет — они рисуются как были.
  */
-export type VehicleBody = 'van' | 'semi' | 'longSemi' | 'microbus' | 'cityBus' | 'articBus' | 'crewEarth' | 'crewPave' | 'crewMarks';
+export type VehicleBody =
+  | 'van'
+  | 'semi'
+  | 'longSemi'
+  | 'microbus'
+  | 'cityBus'
+  | 'articBus'
+  | 'crewEarth'
+  | 'crewPave'
+  | 'crewMarks'
+  | 'ambulance'
+  | 'police'
+  | 'fire';
 
 /**
  * Сцепка машины из двух частей — доли её длины, считая от носа:

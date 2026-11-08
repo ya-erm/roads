@@ -42,7 +42,7 @@ import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tun
 import { corridorHalf } from '../world/worldgen';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
-import { drawVehicleArt, frontLength } from './vehicleArt';
+import { drawVehicleArt, flashSpot, frontLength } from './vehicleArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
 import { type Hiders, TreeCover } from './treeCover';
 import { carLayers, railSegLayer } from './trainLayer';
@@ -272,6 +272,10 @@ const BLINK_HZ = 1.5;
 const BLINKER_MIN_PX = 3;
 /** Мигают ли и задние огоньки поворотника (пока — только передние). */
 const BLINK_REAR = false;
+/** Мигалка спецмашины: половины меняются столько раз в секунду игрового времени (пара — вдвое реже). */
+const SIREN_HZ = 2.5;
+/** Ореол горящей половины мигалки — не меньше стольких пикселей экрана: спецмашину видно и издали. */
+const SIREN_GLOW_PX = 10;
 
 /** Цвета карты скоростей: до скольких км/ч — каким цветом. */
 const SPEED_STEPS: [number, string][] = [
@@ -375,6 +379,8 @@ export class Renderer {
   private treeCuts = new Map<number, { key: string; pts: number[] }>();
   /** Горят ли поворотники в этом кадре: мигают по игровому времени, на паузе — горят ровно. */
   private blinkOn = false;
+  /** Какая половина мигалок спецмашин горит в этом кадре (по игровому времени). */
+  private flash: -1 | 1 = 1;
   /** Полотна, чьи знаки на поворотах в этом кадре не рисуем (их тянут в «Двигать»), — из оверлея. */
   private hiddenSigns: Set<number> | null = null;
   /** По чьей воде отрисовка дорог считает мосты над рекой. */
@@ -526,6 +532,7 @@ export class Renderer {
     this.refreshCache(game);
     this.hiddenSigns = o.hiddenSigns ?? null;
     this.blinkOn = game.speed === 0 || (game.time * BLINK_HZ) % 1 < 0.5;
+    this.flash = (game.time * SIREN_HZ) % 1 < 0.5 ? -1 : 1;
     // Вода — вместе со светлой полосой берега (её рисуют на 7 шире).
     // Карта сменилась (новая партия, загрузка) — мосты над рекой считаем по её воде заново.
     if (this.waterOf !== game.terrain) {
@@ -2037,7 +2044,8 @@ export class Renderer {
     const ring = halo ? Math.max(1.2, 1.6 / this.camera.zoom) : 0;
     for (const v of list) {
       // Кузов по модели (фургон, тягач с полуприцепом, автобусы), у машин из двух частей — с изгибом в шарнире.
-      drawVehicleArt(ctx, v, { detailed, halo: ring });
+      drawVehicleArt(ctx, v, { detailed, halo: ring, flash: this.flash });
+      if (v.siren) this.drawSirenGlow(v);
       if (!v.blinker || !this.blinkOn || v.width * this.camera.zoom < BLINKER_MIN_PX) continue;
       // Поворотники — на первой части кузова (у тягача, у передней секции).
       ctx.save();
@@ -2046,6 +2054,24 @@ export class Renderer {
       this.drawBlinker(frontLength(v), v.width, v.blinker);
       ctx.restore();
     }
+  }
+
+  /** Ореол горящей половины мигалки спецмашины — поверх кузова, не меньше SIREN_GLOW_PX на экране. */
+  private drawSirenGlow(v: VehicleLook): void {
+    const spot = flashSpot(v, this.flash);
+    if (!spot) return;
+    const ctx = this.ctx;
+    const r = Math.max(v.width * 1.5, SIREN_GLOW_PX / this.camera.zoom);
+    const x = v.pos.x + v.dir.x * spot.x - v.dir.y * spot.y;
+    const y = v.pos.y + v.dir.y * spot.x + v.dir.x * spot.y;
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, r);
+    glow.addColorStop(0, spot.color + 'ee');
+    glow.addColorStop(0.35, spot.color + '88');
+    glow.addColorStop(1, spot.color + '00');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   /** Огоньки поворотника на углах кузова со стороны поворота: спереди, а с BLINK_REAR и сзади (в системе машины: нос в 0, справа +y). */

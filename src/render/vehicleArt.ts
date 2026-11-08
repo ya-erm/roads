@@ -20,7 +20,21 @@ export interface VehicleDrawOptions {
   detailed: boolean;
   /** Белая обводка такой толщины (машины выбранной линии); 0 — без неё. */
   halo: number;
+  /** Какая половина мигалки спецмашины горит сейчас (мигалка включена — VehicleLook.siren): −1 левая, 1 правая. */
+  flash?: -1 | 1;
 }
+
+/**
+ * Спецмашины: кузов, полоса по борту и мигалка на крыше (две половины поперёк: левая и правая, своими цветами).
+ * Мигалка у носа на roof длины от носа; горящую половину рисует ярко, ореол вокруг неё — renderer (по размеру экрана).
+ */
+export const SERVICE_ART: Record<'ambulance' | 'police' | 'fire', { stripe: string; lights: [string, string]; roof: number }> = {
+  ambulance: { stripe: '#d6322b', lights: ['#2f7bff', '#ff3b30'], roof: 0.3 },
+  police: { stripe: '#1f5fbf', lights: ['#ff3b30', '#2f7bff'], roof: 0.42 },
+  fire: { stripe: '#f4f1e8', lights: ['#2f7bff', '#2f7bff'], roof: 0.12 },
+};
+
+export const isService = (b: VehicleLook['body']): b is keyof typeof SERVICE_ART => b === 'ambulance' || b === 'police' || b === 'fire';
 
 /**
  * Часть кузова: прямоугольник от x0 до x1 (x1 — ближе к носу) в системе с началом origin и курсом dir.
@@ -161,7 +175,7 @@ export function frontLength(v: Pick<VehicleLook, 'body' | 'length'>): number {
 
 /** Машина целиком: обводка, тени, части кузова по порядку снизу вверх. */
 export function drawVehicleArt(ctx: CanvasRenderingContext2D, v: VehicleLook, o: VehicleDrawOptions): void {
-  const parts = partsOf(v, o.detailed);
+  const parts = partsOf(v, o.detailed, o.flash);
   const shells = parts.filter((p) => !p.link);
   const W = v.width;
   if (o.halo > 0) {
@@ -186,11 +200,11 @@ export function drawVehicleArt(ctx: CanvasRenderingContext2D, v: VehicleLook, o:
 }
 
 /** Части кузова в порядке отрисовки (снизу вверх). */
-function partsOf(v: VehicleLook, detailed: boolean): Part[] {
+function partsOf(v: VehicleLook, detailed: boolean, flash?: -1 | 1): Part[] {
   const L = v.length;
   const W = v.width;
   const h = hitchOf(v.body);
-  if (!h) return [{ origin: v.pos, dir: v.dir, x0: -L, x1: 0, paint: (ctx) => rigidArt(ctx, v, detailed) }];
+  if (!h) return [{ origin: v.pos, dir: v.dir, x0: -L, x1: 0, paint: (ctx) => rigidArt(ctx, v, detailed, flash) }];
   const joint = jointOf(v.pos, v.dir, L, h);
   const td = trailDir(joint, v.trail, v.dir);
   // Вторая часть — от back (от носа прямой машины) до хвоста, в системе шарнира.
@@ -215,10 +229,11 @@ function partsOf(v: VehicleLook, detailed: boolean): Part[] {
   return [chassis, trailer, tractor];
 }
 
-/** Цельный кузов: машина жителя как раньше, фургон, микроавтобус и городской автобус. */
-function rigidArt(ctx: CanvasRenderingContext2D, v: VehicleLook, detailed: boolean): void {
+/** Цельный кузов: машина жителя как раньше, фургон, микроавтобус, городской автобус и спецмашины. */
+function rigidArt(ctx: CanvasRenderingContext2D, v: VehicleLook, detailed: boolean, flash?: -1 | 1): void {
   const L = v.length;
   const W = v.width;
+  if (isService(v.body)) return serviceArt(ctx, v, v.body, detailed, flash);
   if (v.body === 'microbus') return microbusArt(ctx, v, detailed);
   if (v.body === 'cityBus') return busSection(ctx, v, -L, 0, detailed, 'whole');
   if (v.body === 'crewMarks') return crewFrontArt(ctx, v, -L, detailed);
@@ -254,6 +269,86 @@ function rigidArt(ctx: CanvasRenderingContext2D, v: VehicleLook, detailed: boole
     ctx.fillStyle = 'rgba(0,0,0,0.18)';
     ctx.fillRect(-L + 1, -W / 2 + 0.7, 1.4, W - 1.4);
   }
+}
+
+/**
+ * Спецмашина: скорая — белый фургон с красными полосами по бортам и красным крестом на крыше; полиция — белая с синим
+ * капотом и полосами; пожарная — красная, с кабиной и лестницей на крыше. Мигалка поперёк крыши — две половины:
+ * с включённой горит то левая, то правая (flash), выключенная — тусклая.
+ */
+function serviceArt(ctx: CanvasRenderingContext2D, v: VehicleLook, body: keyof typeof SERVICE_ART, detailed: boolean, flash?: -1 | 1): void {
+  const L = v.length;
+  const W = v.width;
+  const art = SERVICE_ART[body];
+  ctx.fillStyle = v.color;
+  ctx.beginPath();
+  ctx.roundRect(-L, -W / 2, L, W, body === 'police' ? 1.3 : [1, 1.8, 1.8, 1]);
+  ctx.fill();
+  ctx.strokeStyle = body === 'fire' ? '#7d1d18' : '#9aa1aa';
+  ctx.lineWidth = 0.3;
+  ctx.stroke();
+  if (detailed) {
+    if (body === 'fire') {
+      // Кабина впереди — темнее, за ней лестница: две направляющие и перекладины.
+      const cab = 3;
+      ctx.fillStyle = shadeHex(v.color, -0.12);
+      rr(ctx, -cab, -W / 2 + 0.3, cab - 0.2, W - 0.6, 0.8);
+      ctx.fill();
+      windshield(ctx, 0, W, v.color, 0.9);
+      ctx.fillStyle = art.stripe;
+      ctx.fillRect(-L + 0.3, -W / 2 + 0.15, L - cab - 0.5, 0.35);
+      ctx.fillRect(-L + 0.3, W / 2 - 0.5, L - cab - 0.5, 0.35);
+      ctx.strokeStyle = '#c9cdd2';
+      ctx.lineWidth = 0.32;
+      ctx.beginPath();
+      const x0 = -L + 0.6;
+      const x1 = -cab - 0.5;
+      for (const y of [-W * 0.22, W * 0.22]) {
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x1, y);
+      }
+      for (let x = x0 + 0.4; x < x1; x += 0.9) {
+        ctx.moveTo(x, -W * 0.22);
+        ctx.lineTo(x, W * 0.22);
+      }
+      ctx.stroke();
+    } else {
+      // Полосы по бортам; у полиции — синий капот, у скорой — красный крест на крыше.
+      ctx.fillStyle = art.stripe;
+      ctx.fillRect(-L + 0.4, -W / 2 + 0.2, L - 0.8, 0.45);
+      ctx.fillRect(-L + 0.4, W / 2 - 0.65, L - 0.8, 0.45);
+      if (body === 'police') {
+        rr(ctx, -1.6, -W / 2 + 0.25, 1.4, W - 0.5, 0.7);
+        ctx.fill();
+      } else {
+        const cx = -L * 0.68;
+        const a = Math.min(W * 0.26, 1.2);
+        ctx.fillRect(cx - a, -a * 0.32, 2 * a, a * 0.64);
+        ctx.fillRect(cx - a * 0.32, -a, a * 0.64, 2 * a);
+      }
+      windshield(ctx, body === 'police' ? -1.7 : -0.4, W, v.color);
+    }
+  }
+  // Мигалка: две половины поперёк крыши.
+  const x = -L * art.roof - 0.9;
+  const half = W * 0.36;
+  for (const side of [-1, 1] as const) {
+    const color = art.lights[side < 0 ? 0 : 1];
+    const lit = !!v.siren && flash === side;
+    ctx.fillStyle = lit ? '#ffffff' : v.siren ? shadeHex(color, -0.15) : shadeHex(color, -0.45);
+    ctx.fillRect(x, side < 0 ? -half : 0, 0.9, half);
+    if (lit) {
+      ctx.fillStyle = color;
+      ctx.fillRect(x + 0.15, side < 0 ? -half + 0.15 : 0.1, 0.6, half - 0.25);
+    }
+  }
+}
+
+/** Где на кузове горящая половина мигалки (в системе машины: нос в 0, справа +y) и её цвет — для ореола. */
+export function flashSpot(v: Pick<VehicleLook, 'body' | 'length' | 'width'>, side: -1 | 1): { x: number; y: number; color: string } | null {
+  if (!isService(v.body)) return null;
+  const art = SERVICE_ART[v.body];
+  return { x: -v.length * art.roof - 0.45, y: side * v.width * 0.18, color: art.lights[side < 0 ? 0 : 1] };
 }
 
 /** Лобовое стекло у носа x1: тёмная (на тёмном кузове — светлая) полоса поперёк. */

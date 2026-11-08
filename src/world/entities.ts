@@ -54,6 +54,9 @@ export interface Town {
   /** То же за прошлый месяц. */
   paxLast?: Record<number, number>;
   tripAcc: number;
+  /** Накопитель выездов спецмашин и сколько их было (game/services.ts). В старых сохранениях нет — с нуля. */
+  serviceAcc?: number;
+  serviceCalls?: number;
   growthAcc: number;
   /** Город сам прокладывает новые улицы, когда вдоль старых тесно. По умолчанию да. */
   autoStreets?: boolean;

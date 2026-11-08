@@ -149,6 +149,7 @@ import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
 import { crewCardHtml } from './crewCard';
+import { SERVICES } from '../game/services';
 import { planPrice, projectMoneyWarning } from '../input/labels';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, rulesHtml, withSeed } from './newGame';
@@ -3320,6 +3321,14 @@ export class Hud {
       const n = b ? g.construction.crews.of(b.base).indexOf(b) + 1 : 0;
       return `<section class="detail">${head(`🚚 Строительная бригада${n ? ` ${n}` : ''}`, b ? `база «${esc(g.baseName(b.base))}»` : undefined)}
       <div class="kv near"><span>Сейчас</span><b>${esc(where?.text ?? '')}</b><span>Скорость</span><b>${speed} км/ч</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
+      <div class="actions">${follow}</div></section>`;
+    }
+    // Спецмашина города: скорая, полиция, пожарная — с мигалкой или без.
+    const service = g.serviceOfSim(sim.id);
+    if (service) {
+      const info = SERVICES[service];
+      return `<section class="detail">${head(`${info.icon} ${info.name}`, sim.siren ? '🚨 С мигалкой — ей уступают дорогу' : 'Без мигалки')}
+      <div class="kv near"><span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
       <div class="actions">${follow}</div></section>`;
     }
     return `<section class="detail">${head('Машина жителя')}

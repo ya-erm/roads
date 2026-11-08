@@ -56,7 +56,8 @@ describe('Игра', { timeout: 30_000 }, () => {
       for (const t of game.towns) expect(t.population).toBeGreaterThan(0);
       runSeconds(game, 30);
       expect(game.citizenCars).toBeGreaterThan(0);
-      expect(game.citizenCars).toBe([...game.traffic.vehicles.values()].length);
+      // В потоке — машины жителей и спецтранспорт городов.
+      expect(game.citizenCars + game.serviceCars).toBe([...game.traffic.vehicles.values()].length);
     });
   }
 
@@ -272,7 +273,7 @@ describe('Игра', { timeout: 30_000 }, () => {
     for (const s of added) expect(s.cls === 'street' || s.cls === 'avenue').toBe(true);
     // Машины по-прежнему ездят.
     runSeconds(game, 20);
-    expect(game.citizenCars).toBe([...game.traffic.vehicles.values()].length);
+    expect(game.citizenCars + game.serviceCars).toBe([...game.traffic.vehicles.values()].length);
   });
 
   it('автобусная линия в городе приносит доход', () => {

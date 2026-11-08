@@ -12,8 +12,13 @@ export interface VehicleSpec {
   color: string;
   /** Цвет груза в кузове (для грузовиков). */
   load?: string;
-  /** Кузов машины компании (см. sim/body); у машин жителей нет. */
+  /** Кузов машины компании или спецмашины (см. sim/body); у машин жителей нет. */
   body?: VehicleBody;
+  /**
+   * Спецмашина едет с включённой мигалкой: быстрее разрешённого, проезжает на красный, когда поперёк никто не едет;
+   * ей уступают — перестраиваются или прижимаются к краю полосы (lanes/traffic.ts). Нет — как все.
+   */
+  siren?: boolean;
 }
 
 export interface Vehicle extends VehicleSpec {
@@ -79,13 +84,21 @@ export interface Vehicle extends VehicleSpec {
   laneSignal?: Blinker;
   laneSignalSince?: number;
   laneSignalUntil?: number;
+  /**
+   * Сдвиг вбок внутри своей полосы (вправо по ходу — плюс): уступая спецмашине, машина прижимается к краю полосы,
+   * а спецмашина, объезжая её, — к другому краю. aside — сейчас, asideTo — куда смещается. Не сохраняется.
+   */
+  aside?: number;
+  asideTo?: number;
+  /** С какого времени движения машина уступает спецмашине позади (не дольше YIELD_MAX); не уступает — нет. */
+  yieldSince?: number;
 }
 
 /** Сторона поворотника: −1 левый, 1 правый, 0 выключен. */
 export type Blinker = -1 | 0 | 1;
 
 /** Что нужно, чтобы нарисовать машину: вид и кузов, цвет, нос и курс, вторая часть кузова, поворотник. */
-export type VehicleLook = Pick<Vehicle, 'kind' | 'body' | 'length' | 'width' | 'color' | 'load' | 'pos' | 'dir' | 'trail' | 'blinker'> & {
+export type VehicleLook = Pick<Vehicle, 'kind' | 'body' | 'length' | 'width' | 'color' | 'load' | 'pos' | 'dir' | 'trail' | 'blinker' | 'siren'> & {
   /** Маячок техники бригады горит (машина работает у своего края); нет — не горит. */
   beacon?: boolean;
 };

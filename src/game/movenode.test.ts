@@ -265,7 +265,7 @@ describe('Перенос узла', () => {
     }
     expect(moved).toBe(true);
     runSeconds(game, 20);
-    expect(game.citizenCars).toBe(game.traffic.vehicles.size);
+    expect(game.citizenCars + game.serviceCars).toBe(game.traffic.vehicles.size);
     expect(game.citizenCars).toBeGreaterThan(0);
   });
 });

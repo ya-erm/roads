@@ -67,6 +67,7 @@ import { Scenario } from '../scenario/manager';
 import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
+import { serviceCall, serviceTick, SERVICE_TRAFFIC, SERVICES, type ServiceKind } from './services';
 import { paxFare, ridePath } from './fare';
 import { transferable, transferNeighbors } from './transfer';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
@@ -306,7 +307,7 @@ interface RailStationGeom {
 }
 
 /** Машина бригады стройки (crews.ts): самосвал в потоке. */
-type SimOwner = { type: 'fleet'; id: number } | { type: 'citizen' } | { type: 'crew'; id: number };
+type SimOwner = { type: 'fleet'; id: number } | { type: 'citizen' } | { type: 'crew'; id: number } | { type: 'service'; kind: ServiceKind };
 
 /**
  * Машины колонны бригады (crews.ts, по порядку) — та же техника, что работает на стройке, тот же рисунок, длина и
@@ -600,6 +601,8 @@ export class Game implements BuildContext {
   /** Взятый кредит: проценты списываются раз в месяц. */
   loan = 0;
   citizenCars = 0;
+  /** Спецмашин городов в потоке (services.ts). */
+  serviceCars = 0;
   private month = 0;
   private accumulator = 0;
   private nextEntityId = 1;
@@ -4940,6 +4943,10 @@ export class Game implements BuildContext {
       this.citizenCars--;
       return;
     }
+    if (owner?.type === 'service') {
+      this.serviceCars--;
+      return;
+    }
     if (owner?.type === 'crew') {
       const crew = this.construction.crews.brigades.get(owner.id);
       if (crew && this.construction.crews.owns(crew, sim.id)) this.construction.crews.arrive(crew, { node: sim.targetNode, pos: sim.pos, dir: sim.dir }, sim.id);
@@ -4996,6 +5003,10 @@ export class Game implements BuildContext {
     this.owners.delete(sim.id);
     if (owner?.type === 'citizen') {
       this.citizenCars--;
+      return;
+    }
+    if (owner?.type === 'service') {
+      this.serviceCars--;
       return;
     }
     if (owner?.type === 'crew') {
@@ -5616,7 +5627,36 @@ export class Game implements BuildContext {
         if (this.citizenCars >= TOWN_TRAFFIC.maxCars) break;
         this.spawnCitizenTrip(town);
       }
+      this.serviceTrips(town, dt);
     }
+  }
+
+  /** Выезды спецтранспорта города за dt — по seed партии (services.ts), общий генератор не трогают. */
+  private serviceTrips(town: Town, dt: number): void {
+    for (const n of serviceTick(town, dt)) {
+      const call = this.serviceCars < SERVICE_TRAFFIC.maxCars ? serviceCall(this.seed, town, n) : null;
+      if (call) this.spawnService(call.kind, call.siren, call.from.anchor, call.to.anchor);
+    }
+  }
+
+  /**
+   * Спецмашина (скорая, полиция, пожарная) выезжает из узла from в узел to — как машина жителя, своим кузовом; siren —
+   * с мигалкой. Нет пути или места на выезде — null.
+   */
+  spawnService(kind: ServiceKind, siren: boolean, from: number, to: number): Vehicle | null {
+    const route = this.roads.route(from, to);
+    if (!route) return null;
+    const sim = this.traffic.spawn({ ...SERVICES[kind].spec, siren, targetNode: to, route });
+    if (!sim) return null;
+    this.owners.set(sim.id, { type: 'service', kind });
+    this.serviceCars++;
+    return sim;
+  }
+
+  /** Машина в потоке — спецмашина города: какая (иначе undefined). */
+  serviceOfSim(simId: number): ServiceKind | undefined {
+    const owner = this.owners.get(simId);
+    return owner?.type === 'service' ? owner.kind : undefined;
   }
 
   private spawnCitizenTrip(town: Town): void {

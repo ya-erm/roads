@@ -35,9 +35,11 @@ export function runMonths(game: Game, months: number, each?: () => void): void {
  * (до 400 на карте) — почти весь счёт симуляции: месяц игры с ними — секунды, без них — сотые доли. Только для
  * тестов, где они ни при чём: маршрут — отдельная сеть в стороне от городов (трасса между станциями
  * предприятий, пути в чистом поле), куда машины жителей не попадают. Игру из сохранения — так же, заново.
+ * Спецтранспорт городов (скорая, полиция, пожарная) тоже не выезжает.
  */
 export function withoutCitizens<G extends Game>(game: G): G {
   (game as unknown as { spawnCitizenTrip(): void }).spawnCitizenTrip = () => {};
+  (game as unknown as { serviceTrips(): void }).serviceTrips = () => {};
   return game;
 }
 
