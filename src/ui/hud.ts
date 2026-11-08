@@ -1641,6 +1641,12 @@ export class Hud {
         if (v && !g.setTrainCars(v.id, carsOf(v) + Number(d.d))) g.notify(Number(d.d) > 0 ? 'Длиннее состав не поместится на платформы маршрута' : 'Меньше двух вагонов нельзя');
         break;
       }
+      case 'notice-go': {
+        // Уведомление с местом («Стройка закончена») — камера туда.
+        const at = g.notices[Number(d.id)]?.at;
+        if (at) c.showPlace(at.pos, at.r);
+        break;
+      }
       case 'close-sel':
         // Открыта из другой карточки (стройка из карточки базы) — назад к той.
         c.closeSelection();
@@ -3798,7 +3804,12 @@ export class Hud {
     if (notices.dataset.key !== key) {
       notices.dataset.key = key;
       notices.innerHTML = g.notices
-        .map((n) => `<div class="notice" style="opacity:${Math.min(1, (6 - n.age) / 1.5)};${n.color ? `border-left-color:${n.color}` : ''}">${esc(n.text)}</div>`)
+        .map((n, i) =>
+          // С местом (достроенная улица) — кнопкой: клик ведёт камеру туда.
+          n.at
+            ? `<div class="notice go" data-action="notice-go" data-id="${i}" data-tip="Показать на карте" style="opacity:${Math.min(1, (6 - n.age) / 1.5)};${n.color ? `border-left-color:${n.color}` : ''}">${esc(n.text)} <span class="notice-go-ic">📍</span></div>`
+            : `<div class="notice" style="opacity:${Math.min(1, (6 - n.age) / 1.5)};${n.color ? `border-left-color:${n.color}` : ''}">${esc(n.text)}</div>`,
+        )
         .join('');
     }
     this.panelTimer -= realDt;

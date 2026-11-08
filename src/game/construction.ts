@@ -60,6 +60,8 @@ export interface Project {
   reserve?: number;
   /** Приоритет: свободные бригады — сначала сюда, не хватает — бригада с обычного проекта переходит сюда (crews.ts). */
   priority?: true;
+  /** Рамка полотен проекта на карте [x0, y0, x1, y1] — куда вести камеру, когда достроен (нет — старое сохранение). */
+  area?: [number, number, number, number];
 }
 
 export interface ConstructionSave {
@@ -614,6 +616,13 @@ export class Construction {
       spent: 0,
       created: this.host.time,
     };
+    // Где он на карте — рамка полотен: достроили — клик по уведомлению «Стройка закончена» ведёт камеру сюда.
+    const pts = cs.flatMap((c) => c.lut.points);
+    if (pts.length) {
+      const xs = pts.map((q) => q.x);
+      const ys = pts.map((q) => q.y);
+      p.area = [Math.round(Math.min(...xs)), Math.round(Math.min(...ys)), Math.round(Math.max(...xs)), Math.round(Math.max(...ys))];
+    }
     this.projects.set(id, p);
     this.stamp++;
     return p;

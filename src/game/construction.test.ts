@@ -503,6 +503,11 @@ describe('Стройка дорог: базы и бригады', () => {
     expect(advise(game).some((a) => a.detail.includes('«Объездная»'))).toBe(true);
     game.projectEvent('done', p);
     expect(game.notices.at(-1)?.text).toBe('🚧 Стройка закончена: Объездная');
+    // Клик по уведомлению ведёт к улице: место — середина рамки полотен проекта.
+    const go = game.notices.at(-1)?.at;
+    expect(p.area).toBeDefined();
+    expect(go?.pos.x).toBeCloseTo((p.area![0] + p.area![2]) / 2, 6);
+    expect(go!.r).toBeGreaterThanOrEqual(80);
     const brigade = [...game.construction.crews.brigades.values()][0];
     expect(baseCrewText(game, { ...brigade, state: 'working', project: p.id })).toBe('строит «Объездная»');
     // Название уходит в сохранение и возвращается.

@@ -329,6 +329,8 @@ export interface Notice {
   text: string;
   color?: string;
   age: number;
+  /** Куда ведёт клик по уведомлению: точка и радиус обзора (достроенная улица). */
+  at?: { pos: Vec; r: number };
 }
 
 export interface Floater {
@@ -1044,7 +1046,10 @@ export class Game implements BuildContext {
   /** Стройка: проект достроен или встал без денег. */
   projectEvent(kind: 'done' | 'stalled', p: Project): void {
     if (kind === 'done') {
-      this.notify(`🚧 Стройка закончена: ${projectName(p)}`, '#3f9d5a');
+      // Клик по уведомлению — камера к достроенной улице.
+      const a = p.area;
+      const at = a ? { pos: { x: (a[0] + a[2]) / 2, y: (a[1] + a[3]) / 2 }, r: Math.max(80, Math.hypot(a[2] - a[0], a[3] - a[1]) / 2 + 40) } : undefined;
+      this.notify(`🚧 Стройка закончена: ${projectName(p)}`, '#3f9d5a', at);
       this.journal.add('project-done', { id: p.id, what: projectName(p), $: p.spent, sec: Math.round(this.time - p.created) });
     } else {
       // Встали сразу несколько — одно уведомление (советник покажет все).
@@ -7149,8 +7154,8 @@ export class Game implements BuildContext {
     return this.owners.get(sim.id)?.type === 'fleet';
   }
 
-  notify(text: string, color?: string): void {
-    this.notices.push({ text, color, age: 0 });
+  notify(text: string, color?: string, at?: Notice['at']): void {
+    this.notices.push({ text, color, age: 0, ...(at ? { at } : {}) });
     this.journal.add('note', { text });
   }
 

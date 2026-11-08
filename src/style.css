@@ -369,6 +369,21 @@ button {
   font-weight: 600;
 }
 
+/* Уведомление с местом (достроенная улица) — кнопка: клик ведёт камеру туда. */
+.notices .notice.go {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.notices .notice.go:hover {
+  background: #eef4fd;
+}
+
+.notice-go-ic {
+  margin-left: 4px;
+  font-size: 12px;
+}
+
 .screen {
   position: absolute;
   inset: 0;
