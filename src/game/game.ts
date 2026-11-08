@@ -68,6 +68,7 @@ import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
 import { paxFare, ridePath } from './fare';
+import { transferable, transferNeighbors } from './transfer';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
 import { carryBuild, spansOf } from './constructionWork';
@@ -87,6 +88,7 @@ import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
 import { annexFootprint, annexReady, growthCap, inAnnexZone } from './annexes';
 import { type AutoFunds, autoFunds } from './autoFunds';
+import { RENEW_GAP, type RenewCar, renewStep } from './autoRenew';
 import { firstRunWaits } from './firstRun';
 import {
   AUTO_FLEET,
@@ -102,6 +104,7 @@ import {
   modelsFor,
   ModelTier,
   newestLike,
+  renewOn,
   RailModel,
   StopRule,
   vehicleCapacity,
@@ -3233,6 +3236,7 @@ export class Game implements BuildContext {
     this.updateJams(dt);
     this.updateAutoSell();
     this.updateAutoWait();
+    this.updateAutoRenew();
     this.updateIndustries(dt);
     this.updateStations(dt);
     this.updateTowns(dt);
@@ -3745,7 +3749,7 @@ export class Game implements BuildContext {
    * больше — до их числа). Минимум можно опустить до 0: тогда ненужные машины уйдут все, а вернутся, когда
    * появится спрос (idleDemand). Включённый сразу докупает до минимума (если хватает денег) и продаёт сверх максимума.
    */
-  setLineAuto(id: number, patch: Partial<Pick<LineAuto, 'on' | 'min' | 'max'>>): void {
+  setLineAuto(id: number, patch: Partial<Pick<LineAuto, 'on' | 'min' | 'max' | 'renew'>>): void {
     const line = this.lines.get(id);
     if (!line) return;
     const n = line.vehicles.length;
@@ -3766,7 +3770,14 @@ export class Game implements BuildContext {
     }
     delete auto.noMoney;
     delete auto.noRoad;
-    this.journal.add('auto', { line: id, on: auto.on, min: auto.min, max: auto.max });
+    // Модернизация: включена — по умолчанию (поля нет), выключена — false; выключили — запас прошлой забывается.
+    if (patch.renew !== undefined) {
+      if (patch.renew) delete auto.renew;
+      else auto.renew = false;
+      delete auto.renewSpare;
+      delete auto.renewAt;
+    }
+    this.journal.add('auto', { line: id, on: auto.on, min: auto.min, max: auto.max, ...(auto.renew === false ? { renew: false } : {}) });
     if (!auto.on) {
       delete auto.sell;
       return;
@@ -3794,12 +3805,14 @@ export class Game implements BuildContext {
 
   /**
    * Что докупает авто-парк: модель последней купленной машины, подходящей маршруту (грузовой — грузовики,
-   * пассажирский — автобусы; смешанный — по станциям), а если такой нет — новейшую подходящую.
+   * пассажирский — автобусы; смешанный — по станциям), а если такой нет — новейшую подходящую. С модернизацией
+   * (renewOn) — новейшую того же вида, что последняя купленная.
    */
   autoModel(line: Line): ModelId {
     const carries = this.lineKind(line) ?? this.stationsCarry(line);
     const last = this.lastVehicle(line, carries);
-    if (last) return last.model;
+    // Модернизация включена — докупает уже новейшую модель того же вида.
+    if (last) return renewOn(line.auto) ? newestLike(last.model, this.modelOpen) : last.model;
     const freight = carries === 'freight';
     const base: ModelId = this.lineMode(line) === 'rail' ? (freight ? 'freightTrain' : 'passengerTrain') : freight ? 'truck' : 'bus';
     return newestLike(base, this.modelOpen);
@@ -4040,6 +4053,79 @@ export class Game implements BuildContext {
       const model = this.autoModel(line);
       if (this.freeMoney < MODELS[model].price || !this.autoFunds(line, model).ok) continue;
       if (this.autoBuy(line)) this.autoBounds(line);
+    }
+  }
+
+  // ---------- Модернизация в авто-парке ----------
+
+  /**
+   * Что модернизации осталось на линии: машины старой модели, которые уже есть на что заменить (кроме заказанных),
+   * на какую модель (to; null — менять нечего) и хватит ли денег на следующую замену (funds; null — замен нет).
+   */
+  renewStatus(line: Line): { old: FleetVehicle[]; to: ModelId | null; funds: AutoFunds | null } {
+    const old = line.vehicles.map((id) => this.fleet.get(id)).filter((v): v is FleetVehicle => !!v && !v.upgradeTo && this.replacementFor(v) !== null);
+    return { old, to: old.length ? this.replacementFor(old[0]) : null, funds: old.length ? this.renewFunds(old[0]) : null };
+  }
+
+  /**
+   * Хватит ли авто-парку денег заменить машину на модель новее — как на покупку (autoFunds): доплата (цена новой
+   * минус выручка за старую) и запас на содержание в конце месяца — уже с новой вместо старой.
+   */
+  private renewFunds(v: FleetVehicle): AutoFunds | null {
+    const model = this.replacementFor(v);
+    if (!model) return null;
+    let revenue = 0;
+    for (const l of this.lines.values()) revenue += l.revenueLast ?? 0;
+    const m = MODELS[model];
+    const running = this.fleetRunning() - this.runningCost(v) + this.runningCost({ ...v, model });
+    return autoFunds({ money: this.freeMoney, price: m.price - this.saleValue(v), running, revenue, monthLeft: 1 - this.monthProgress });
+  }
+
+  /**
+   * Модернизация (renewOn): вышла модель новее того же вида — авто-парк меняет на неё машины линии по одной, не чаще
+   * раза в RENEW_GAP, и только свободные — стоящие на станции: на месте (replaceVehicle), линия не останавливается.
+   * Денег не хватает (renewFunds) — ждёт. Новые вместительнее: набрался запас на целую старую машину — её продаёт,
+   * а не меняет (renewStep). Пока покупка ждёт денег или дороги или решена продажа — не меняет: сначала число машин.
+   * Последняя старая заменена — заметка. Проверяет раз в секунду игры.
+   */
+  private updateAutoRenew(): void {
+    if (Math.floor(this.time) === Math.floor(this.time - SIM_DT)) return;
+    for (const line of this.lines.values()) {
+      const auto = line.auto;
+      if (!auto || !renewOn(auto) || auto.noMoney || auto.noRoad || auto.sell !== undefined) continue;
+      if (auto.renewAt !== undefined && this.time - auto.renewAt < RENEW_GAP) continue;
+      const { old } = this.renewStatus(line);
+      if (!old.length) {
+        if (auto.renewSpare === undefined) continue;
+        delete auto.renewSpare;
+        delete auto.renewAt;
+        this.notify(`Авто-парк обновил транспорт маршрута «${line.name}»: ${MODELS[this.autoModel(line)].name}`, '#3fae6a');
+        continue;
+      }
+      const cars: RenewCar[] = old.map((v) => ({
+        id: v.id,
+        capacity: vehicleCapacity(v),
+        next: vehicleCapacity({ ...v, model: this.replacementFor(v)! }),
+        free: v.state === 'loading' && !v.enter,
+        load: vehicleLoad(v),
+      }));
+      const waited = auto.renewAt !== undefined && this.time - auto.renewAt > AUTO_FLEET.window;
+      const step = renewStep({ old: cars, spare: auto.renewSpare ?? 0, count: line.vehicles.length, min: auto.min, waited });
+      const v = step && this.fleet.get(step.id);
+      const car = step && cars.find((c) => c.id === step.id);
+      if (!step || !v || !car) continue;
+      const from = v.model;
+      if (step.kind === 'sell') {
+        this.sellVehicle(v.id, true);
+        auto.renewSpare = (auto.renewSpare ?? 0) - car.capacity;
+        this.journal.add('renew', { line: line.id, v: v.id, from, sell: true });
+      } else {
+        if (!this.renewFunds(v)?.ok || !this.replaceVehicle(v.id)) continue;
+        auto.renewSpare = (auto.renewSpare ?? 0) + car.next - car.capacity;
+        this.journal.add('renew', { line: line.id, v: v.id, from, model: v.upgradeTo ?? v.model });
+      }
+      auto.renewAt = this.time;
+      this.restartDemand(line);
     }
   }
 
@@ -5031,8 +5117,51 @@ export class Game implements BuildContext {
       const others = new Set(line.stops.filter((x) => x !== st.id));
       for (const [dest, n] of st.passengers) if (others.has(dest)) waiting += n;
     }
-    if (what !== 'passengers' && st.serves.cargo) for (const c of this.loadable(line, index)) waiting += st.cargo[c] ?? 0;
+    if (what !== 'passengers' && st.serves.cargo) {
+      const near = this.transferSources(line, index);
+      for (const c of this.loadable(line, index)) {
+        waiting += st.cargo[c] ?? 0;
+        for (const o of near) waiting += transferable(o, c);
+      }
+    }
     return waiting;
+  }
+
+  /**
+   * Соседние станции, с которых маршрут на остановке index забирает груз перевалкой (src/game/transfer.ts):
+   * грузовые рядом с ней, кроме станций самого маршрута — иначе он перекладывал бы свой же груз туда-обратно.
+   */
+  transferSources(line: Line, index: number): Station[] {
+    const st = this.stations.get(line.stops[index]);
+    if (!st?.serves.cargo) return [];
+    return transferNeighbors(st, this.stations.values()).filter((o) => !line.stops.includes(o.id));
+  }
+
+  /**
+   * Перевалка у станции st для карточки: какой груз со склада какой соседней станции заберут маршруты другой
+   * (from → to). Соседи без перевалки — с пустым списком: видно, что рядом есть с кем перекладывать.
+   */
+  transferFlows(st: Station): { near: Station; flows: { from: Station; to: Station; cargo: CargoType; amount: number; lines: Line[] }[] }[] {
+    if (!st.serves.cargo) return [];
+    return transferNeighbors(st, this.stations.values()).map((near) => {
+      const flows: { from: Station; to: Station; cargo: CargoType; amount: number; lines: Line[] }[] = [];
+      for (const [from, to] of [
+        [near, st],
+        [st, near],
+      ]) {
+        for (const c of FREIGHT) {
+          // Только груз, который сюда уже выгружали на склад (сейчас его может и не быть): продукцию не перекладывают.
+          const origin = from.cargoOrigin?.[c];
+          if (origin === undefined || origin === from.id) continue;
+          const amount = transferable(from, c);
+          const lines = [...this.lines.values()].filter(
+            (l) => !l.stops.includes(from.id) && l.stops.some((sid, i) => sid === to.id && this.loadable(l, i).has(c)),
+          );
+          if (lines.length) flows.push({ from, to, cargo: c, amount, lines });
+        }
+      }
+      return { near, flows };
+    });
   }
 
   stopRule(line: Line, index: number): StopRule {
@@ -5185,32 +5314,48 @@ export class Game implements BuildContext {
   /**
    * Грузит (или догружает тем же грузом) грузовик. Груз со склада сохраняет станцию,
    * откуда его везут изначально. skip — то, что только что выгрузили здесь же.
+   * Сначала — со своей станции; нечего взять (или есть место) — перевалкой со склада соседней станции
+   * (transferSources: груз, который туда выгрузила другая линия), той же станции первой погрузки.
    */
   private loadFreight(v: FleetVehicle, st: Station, line: Line, skip: CargoType | null = null): number {
     if (!st.serves.cargo) return 0;
     const wanted = this.loadable(line, v.stop);
-    const originOf = (c: CargoType) => st.cargoOrigin?.[c] ?? st.id;
+    const sources = [st, ...this.transferSources(line, v.stop)];
+    // Своя станция отдаёт всё, соседняя — только привезённое на её склад другой линией.
+    const avail = (s: Station, c: CargoType) => (s === st ? (s.cargo[c] ?? 0) : transferable(s, c));
+    const originOf = (s: Station, c: CargoType) => s.cargoOrigin?.[c] ?? s.id;
     let best: CargoType | null = v.cargo;
-    if (best && v.loadedAt !== originOf(best)) return 0;
+    let origin = v.cargo ? v.loadedAt : null;
     if (!best) {
-      for (const c of FREIGHT) {
-        if (c === skip || !wanted.has(c) || (st.cargo[c] ?? 0) < 1) continue;
-        if (!best || (st.cargo[c] ?? 0) > (st.cargo[best] ?? 0)) best = c;
+      for (const s of sources) {
+        for (const c of FREIGHT) {
+          if (c === skip || !wanted.has(c) || avail(s, c) < 1) continue;
+          if (!best || avail(s, c) > avail(s, best)) best = c;
+        }
+        if (best) {
+          origin = originOf(s, best);
+          break;
+        }
       }
     }
     if (!best || !wanted.has(best)) return 0;
-    const take = Math.floor(Math.min(vehicleCapacity(v) - v.amount, st.cargo[best] ?? 0));
-    if (take <= 0) return 0;
-    st.cargo[best] = (st.cargo[best] ?? 0) - take;
-    v.cargo = best;
-    v.amount += take;
-    // Время доставки считаем от первой погрузки; со склада — без надбавки за скорость.
-    if (v.amount === take) {
-      v.loadedTime = this.time;
-      v.fromStore = originOf(best) !== st.id;
+    let total = 0;
+    for (const s of sources) {
+      if (originOf(s, best) !== origin) continue;
+      const take = Math.floor(Math.min(vehicleCapacity(v) - v.amount, avail(s, best)));
+      if (take <= 0) continue;
+      s.cargo[best] = (s.cargo[best] ?? 0) - take;
+      v.cargo = best;
+      v.amount += take;
+      total += take;
+      // Время доставки считаем от первой погрузки; со склада — без надбавки за скорость.
+      if (v.amount === take) {
+        v.loadedTime = this.time;
+        v.fromStore = origin !== st.id;
+      }
+      v.loadedAt = origin;
     }
-    v.loadedAt = originOf(best);
-    return take;
+    return total;
   }
 
   private earn(amount: number, line: Line, v: FleetVehicle): void {

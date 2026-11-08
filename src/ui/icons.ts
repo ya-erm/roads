@@ -907,6 +907,19 @@ export function autoSvg(size = 18): string {
     <path d="M7 8.2h3M8.5 6.7v3M10 12.2h3" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg>`;
 }
 
+/**
+ * Модернизация в авто-парке: кольцо из двух стрелок (замена) и стрелка вверх (модель новее). Выключена —
+ * серая и перечёркнута.
+ */
+export function renewSvg(on: boolean, size = 18): string {
+  const c = on ? '#3fae6a' : '#9aa3ad';
+  const arrows = `<path d="M4.6 7.2A6 6 0 0 1 15 6.2" /><path d="M15.4 12.8A6 6 0 0 1 5 13.8" />`;
+  const heads = `<path d="M15.8 2.8v3.8H12z" fill="${c}" stroke="none"/><path d="M4.2 17.2v-3.8H8z" fill="${c}" stroke="none"/>`;
+  const up = `<path d="M10 13.6V6.6M7.2 9.2 10 6.4l2.8 2.8" stroke-width="1.9"/>`;
+  const strike = on ? '' : `<path d="M3 17 17 3" stroke="#e5534b" stroke-width="1.8"/>`;
+  return `<svg class="renew-ic" viewBox="0 0 20 20" width="${size}" height="${size}"><g fill="none" stroke="${c}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${arrows}${heads}${up}${strike}</g></svg>`;
+}
+
 const DROP_FILL = '#5aa9e6';
 const DROP_STROKE = '#2f7fc4';
 

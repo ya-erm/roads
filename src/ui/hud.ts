@@ -16,6 +16,7 @@ import {
   MODELS,
   ModelId,
   modelsFor,
+  renewOn,
   StopRule,
   vehicleCapacity,
   vehicleLoad,
@@ -26,7 +27,7 @@ import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/ca
 import { type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
 import { lastTownNeed, townNeed } from '../world/townSupply';
 import { footprintRadius } from '../world/spatial';
-import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE } from '../config';
+import { COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
 import { durationText } from '../core/timeText';
 import { isOneWay, KMH_PER_UNIT, LEVELS, RAIL_SPEC, ROAD_PRESETS, RoadSpec, SPEED_LIMITS, specCost, specKmh, STRUCTURE } from '../world/roadTypes';
 import {
@@ -71,6 +72,7 @@ import {
 } from './scenarioUi';
 import {
   autoSvg,
+  renewSvg,
   bulldozeAreaSvg,
   bulldozeLaneSvg,
   bulldozePointSvg,
@@ -1625,6 +1627,11 @@ export class Hud {
       case 'line-auto':
         g.setLineAuto(Number(d.id), { on: !g.lines.get(Number(d.id))?.auto?.on });
         break;
+      case 'line-auto-renew': {
+        const line = g.lines.get(Number(d.id));
+        if (line) g.setLineAuto(line.id, { renew: !renewOn(line.auto) });
+        break;
+      }
       case 'auto-range': {
         const auto = g.lines.get(Number(d.id))?.auto;
         if (auto) g.setLineAuto(Number(d.id), d.what === 'min' ? { min: auto.min + Number(d.d) } : { max: auto.max + Number(d.d) });
@@ -2574,6 +2581,37 @@ export class Hud {
         data-action="st-warehouse" data-id="${st.id}" class="${full ? 'off' : placing ? 'active' : ''}" data-tip="${esc(plusTip)}" data-tip-end>+</button></span></div>`;
   }
 
+  /**
+   * Перевалка с соседними станциями (game/transfer.ts): по строке на соседа — его название (клик — показать) и
+   * что перекладывается: «⬅» груз с его склада заберут маршруты отсюда, «➡» — со склада этой станции заберут его маршруты.
+   */
+  private transferRowHtml(st: Station): string {
+    const g = this.game();
+    return g
+      .transferFlows(st)
+      .map(({ near, flows }) => {
+        const chips = flows.length
+          ? flows
+              .map((f) => {
+                const here = f.to === st;
+                const tip = `${CARGO[f.cargo].name}: ${f.amount} ед. на складе «${f.from.name}» заберёт ${f.lines.length > 1 ? 'маршруты' : 'маршрут'} ${f.lines
+                  .map((l) => `«${l.name}»`)
+                  .join(', ')}`;
+                return `<span class="chip-ic transfer-chip ${f.amount ? '' : 'idle'}" data-tip="${esc(tip)}"><span class="arrow">${here ? '⬅' : '➡'}</span>${cargoIcon(
+                  f.cargo,
+                  18,
+                )}<b>${f.amount}</b></span>`;
+              })
+              .join('')
+          : `<span class="muted" data-tip="${esc(
+              `Груз, который другая линия выгрузит на склад «${near.name}», заберут маршруты отсюда — и наоборот`,
+            )}">—</span>`;
+        return `<div class="icon-row transfer-row"><span class="lbl2" data-tip="Перевалка: соседняя станция ближе ${TRANSFER.reach} м — груз с её склада заберут маршруты отсюда">⇄ Перевалка</span>
+          <button class="place-link" data-action="show-station" data-id="${near.id}">${esc(near.name)}</button>${chips}</div>`;
+      })
+      .join('');
+  }
+
   /** «!» у строки маршрута: проблема линии, станция не того вида или совет советника (с его заголовком в подсказке). */
   private lineWarn(l: Line): string {
     const advice = this.advice().find((a) => a.line === l.id && a.level !== 'tip');
@@ -2975,6 +3013,7 @@ export class Hud {
       auto.sell !== undefined ? '<span class="auto-flag" title="Продаст лишний транспорт, когда он опустеет">▼</span>' : '',
     ].filter(Boolean);
     const flags = flagList.join('');
+    const renew = this.autoRenewHtml(line);
     // Значки — сколько поместится в ряд, остальные — «+N» в конце.
     const { shown, more } = fleetBar(n, auto.max, fleetBarRoom(this.q('[data-side]').clientWidth), flagList.length);
     // Минимум 0 — черта перед первой машиной: держать не обязан ни одной.
@@ -2989,8 +3028,31 @@ export class Hud {
       slots += `<small class="auto-more" title="${tip}">+${more}</small>`;
     }
     return `<div class="auto-box on"><div class="auto-head">${title}
-        <span class="auto-range"><span class="lbl3">от</span>${step('min', auto.min, 'Не меньше')}<span class="lbl3">до</span>${step('max', auto.max, 'Не больше')}</span>${toggle}</div>
+        <span class="auto-range"><span class="lbl3">от</span>${step('min', auto.min, 'Не меньше')}<span class="lbl3">до</span>${step('max', auto.max, 'Не больше')}</span>${renew}${toggle}</div>
       <div class="auto-bar" title="На маршруте ${n} · от ${auto.min} до ${auto.max}"><b class="auto-now" title="Сейчас на маршруте">${n}</b>${slots}${flags}</div></div>`;
+  }
+
+  /**
+   * Выключатель модернизации в авто-парке: значок замены со стрелкой вверх — зелёный, когда включена, серый
+   * и перечёркнутый — выключена. Идёт замена — сколько старых машин осталось, ждёт денег — значок тревоги.
+   */
+  private autoRenewHtml(line: Line): string {
+    const g = this.game();
+    const on = renewOn(line.auto);
+    const status = on ? g.renewStatus(line) : null;
+    const left = status?.old.length ?? 0;
+    const to = status?.to ? MODELS[status.to].name : '';
+    const broke = !!status?.funds && !status.funds.ok;
+    const tip = !on
+      ? 'Модернизация выключена: машины так и ездят старой модели, докупаются такие же. Нажмите — включить'
+      : left
+        ? `Модернизация: меняет на ${to} — осталось ${left} · по одной, когда машина стоит на станции; новые вместительнее — лишние продаст${
+            broke ? ` · ждёт денег: нужно ${money(status!.funds!.need)}` : ''
+          } · нажмите — выключить`
+        : 'Модернизация: выйдет модель новее — авто-парк заменит ею машины маршрута по одной, когда машина стоит на станции, и будет докупать уже новую. Нажмите — выключить';
+    return `<button class="auto-renew${on ? ' on' : ''}${left ? ' busy' : ''}" data-action="line-auto-renew" data-id="${line.id}" data-tip="${esc(tip)}" data-tip-end>${renewSvg(on)}${
+      left ? `<b>${left}</b>${broke ? '<i>💸</i>' : ''}` : ''
+    }</button>`;
   }
 
   private selectionHtml(): string {
@@ -3102,6 +3164,7 @@ export class Hud {
               }</div>`
             : ''
         }
+        ${this.transferRowHtml(st)}
         ${paxBlock}
         <div class="icon-row"><span class="lbl2">Отправляет</span>${
           supplies.length ? supplies.map((c) => cargoIcon(c, 20)).join('') : pax || st.catchPop ? cargoIcon('passengers', 20) : '<span class="muted">—</span>'
