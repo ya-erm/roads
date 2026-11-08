@@ -1,8 +1,8 @@
-import { minRadius } from '../core/bezier';
 import { dot, scale, Vec } from '../core/vec';
 import { GRADE } from '../config';
 import type { Network, Segment, SplitRecord } from '../world/network';
-import { RAIL_SWITCH_ANGLE, specSpeed } from '../world/roadTypes';
+import { RAIL_SWITCH_ANGLE } from '../world/roadTypes';
+import { trackSpeed } from './railSpeed';
 
 export interface TrainSpec {
   cars: number;
@@ -176,8 +176,7 @@ export class RailSim {
     }
     let v = this.speedCache.get(segId);
     if (v === undefined) {
-      const s = this.net.segment(segId);
-      v = Math.min(specSpeed(s.spec), Math.sqrt(5 * minRadius(s.curve)));
+      v = trackSpeed(this.net.segment(segId));
       this.speedCache.set(segId, v);
     }
     return v;

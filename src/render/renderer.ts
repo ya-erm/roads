@@ -14,6 +14,7 @@ import type { GMove, LaneGraph } from '../lanes/graph';
 import type { TurnLook, TurnState } from '../lanes/lights';
 import { LIGHT_STEP, type LightSpot, lightSpot } from '../lanes/lightSpot';
 import { type JunctionPreview, junctionPreview, previewHides } from '../lanes/preview';
+import { trackKmhExact } from '../sim/railSpeed';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { trainWagonFills } from '../sim/wagons';
 import { cargoImage } from '../ui/cargoIcons';
@@ -278,6 +279,8 @@ const SPEED_STEPS: [number, string][] = [
   [120, '#3b6fd1'],
 ];
 const speedColor = (kmh: number) => (SPEED_STEPS.find(([v]) => kmh <= v + 4) ?? SPEED_STEPS[SPEED_STEPS.length - 1])[1];
+/** Толщина линии карты скоростей по оси ж/д пути (мир): чуть шире полосы дороги, но между рельсами. */
+const RAIL_SPEEDMAP_W = 3.2;
 
 /** Холст плитки кэша карты (src/render/tileCache.ts). */
 interface TileCanvasEl {
@@ -693,6 +696,7 @@ export class Renderer {
     this.drawStopLines(game, view, 0, preview);
     drawTurnArrows(ctx, game, view, this.camera.zoom, preview);
     this.drawRailSteel(groundRails);
+    if (o.speedmap) this.drawRailSpeedmap(groundRails);
     if (o.speedmap) this.drawSpeedmap(game, 0, view);
     this.drawCurveSigns(game, view, o.staleSigns, 0);
     this.drawStill(game, view);
@@ -720,6 +724,7 @@ export class Renderer {
     this.drawElevated(rails);
     this.drawRailBeds(rails, true);
     this.drawRailSteel(rails);
+    if (o.speedmap) this.drawRailSpeedmap(rails);
     if (roads) this.drawCurveSigns(game, view, o.staleSigns, level);
     ctx.restore();
   }
@@ -1775,6 +1780,27 @@ export class Renderer {
           k0 = k;
         }
       }
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Карта скоростей на ж/д путях: каждый участок — по оси между рельсами цветом допустимой скорости поезда (та же шкала,
+   * что у дорог: путь — до 120 км/ч, изгиб снижает). Участки — уже своего слоя высоты (на мосту — поднятые с настилом).
+   */
+  private drawRailSpeedmap(segs: Segment[]): void {
+    if (!segs.length) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'round';
+    for (const s of segs) {
+      const c = this.cache.get(s.id)!;
+      // Издалека — шире, до полотна пути: иначе тонкую линию между рельсами не разглядеть.
+      ctx.lineWidth = Math.min(c.width, Math.max(RAIL_SPEEDMAP_W, 3.5 / this.camera.zoom));
+      ctx.strokeStyle = speedColor(trackKmhExact(s));
+      this.polyline(c.surface);
+      ctx.stroke();
     }
     ctx.restore();
   }
