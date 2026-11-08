@@ -15,7 +15,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { awaitsOwner, Board, BoardError, MAX_FILE_BYTES, STATUS_NAMES, staleRevision, type Task, type TaskComment, type TaskStatus } from './board';
 import { askClaude, checkClaude, ClaudeError, runClaude, type ClaudeResult, type ClaudeSettings } from './claude';
@@ -668,22 +668,27 @@ interface Picked {
   caption: string;
 }
 
-/** Вложения отчёта: только существующие файлы нужного типа из папки вложений этого запуска. */
+/**
+ * Где искать вложение из отчёта: путь от корня репозитория, от папки вложений и от папки запуска (сессии пишут и
+ * «out/01.png» — от report.json).
+ */
+function attachmentPaths(file: string, outDir: string): string[] {
+  return isAbsolute(file) ? [file] : [resolve(ROOT, file), resolve(outDir, file), resolve(dirname(outDir), file)];
+}
+
 /** Вложения отчёта, которых ещё нет на диске (имена — как в отчёте). */
 function missingAttachments(report: AgentReport, outDir: string): string[] {
   return [...(report.screenshots ?? []), ...(report.saves ?? [])]
-    .filter((a) => {
-      const candidates = isAbsolute(a.file) ? [a.file] : [resolve(ROOT, a.file), resolve(outDir, a.file)];
-      return !candidates.some((p) => existsSync(p));
-    })
+    .filter((a) => !attachmentPaths(a.file, outDir).some((p) => existsSync(p)))
     .map((a) => basename(a.file));
 }
 
+/** Вложения отчёта: только существующие файлы нужного типа из папки вложений этого запуска. */
 function pickFiles(list: Attachment[], outDir: string, exts: string[], skipped: string[]): Picked[] {
   const root = realpathSync(outDir);
   const out: Picked[] = [];
   for (const a of list ?? []) {
-    const candidates = isAbsolute(a.file) ? [a.file] : [resolve(ROOT, a.file), resolve(outDir, a.file)];
+    const candidates = attachmentPaths(a.file, outDir);
     const found = candidates.find((p) => existsSync(p) && statSync(p).isFile());
     const name = basename(a.file);
     if (!found) {
