@@ -331,10 +331,15 @@ export function platformsSvg(n: number): string {
   return `<svg viewBox="0 0 48 36" width="48" height="36">${rows.join('')}</svg>`;
 }
 
+/** Ширина картинки baysSvg для n постов, px: под неё в карточке станции держат место, чтобы «+» не смещалась. */
+export function baysSvgWidth(n: number): number {
+  return 6 + n * 7;
+}
+
 /** Автостанция сверху: навес и n постов погрузки; занятый — цвета машины, что на нём стоит (как на карте). */
 export function baysSvg(n: number, busy: (string | null)[] = [], h = 22): string {
   const bw = 7;
-  const w = 6 + n * bw;
+  const w = baysSvgWidth(n);
   const slots = Array.from(
     { length: n },
     (_, i) => `<rect x="${3.5 + i * bw}" y="9" width="${bw - 1.5}" height="${h - 12}" rx="1" fill="${busy[i] ?? '#d5d2c8'}"/>`,

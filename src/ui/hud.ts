@@ -92,6 +92,7 @@ import {
   platformLengthSvg,
   platformsSvg,
   baysSvg,
+  baysSvgWidth,
   moveEndSvg,
   moveJointSvg,
   moveNodeSvg,
@@ -3054,14 +3055,17 @@ export class Hud {
             : '';
       const freightWaiting = waiting.filter(([c]) => c !== 'passengers');
       // Посты погрузки автостанции: картинка станции с постами, «−» и «+» (с ценой или причиной, почему нельзя).
+      // Под картинку держим место на максимум постов: иначе с каждым постом «+» уезжает вправо из-под курсора.
       let baysRow = '';
       if (st.kind === 'road') {
         const more = g.stationBaysPlan(st.id, st.bays + 1);
-        const plusTitle = more.ok ? `Добавить пост погрузки · ${money(STATION.bayCost)}` : (more.reason ?? '');
+        const plusTip = more.ok ? `Добавить пост погрузки · ${money(STATION.bayCost)}` : (more.reason ?? '');
         baysRow = `<div class="icon-row"><span class="lbl2">Посты погрузки</span>
           <span class="stepper bays"><button data-action="st-bays" data-id="${st.id}" data-d="-1" ${st.bays > STATION.minBays ? '' : 'disabled'}
-            title="Убрать пост · вернём ${money(STATION.bayCost * COST.refundRatio)}">−</button><b>${baysSvg(st.bays, g.stationBays(st))}<span>${st.bays}</span></b><button
-            data-action="st-bays" data-id="${st.id}" data-d="1" class="${more.ok ? '' : 'off'}" title="${esc(plusTitle)}">+</button></span>
+            data-tip="Убрать пост · вернём ${money(STATION.bayCost * COST.refundRatio)}">−</button><b><i class="bays-pic" style="width:${baysSvgWidth(
+              STATION.maxBays,
+            )}px">${baysSvg(st.bays, g.stationBays(st))}</i><span>${st.bays}</span></b><button
+            data-action="st-bays" data-id="${st.id}" data-d="1" class="${more.ok ? '' : 'off'}" data-tip="${esc(plusTip)}">+</button></span>
           ${more.ok ? `<span class="muted">+${money(STATION.bayCost)}</span>` : ''}</div>`;
       }
       // Пути ж/д станции: схема платформ и «+» — достроить ещё один путь (с ценой или причиной, почему нельзя).

@@ -2107,6 +2107,20 @@ button.icon.toggle-spacing {
   align-items: center;
   gap: 5px;
   padding: 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Число постов/путей — постоянной ширины: «+» за ним не сдвигается ни при каком числе. */
+.stepper.bays b > span {
+  min-width: 2ch;
+  text-align: center;
+}
+
+/* Картинка постов растёт с их числом — место под неё на максимум постов задано шириной в разметке. */
+.stepper.bays .bays-pic {
+  display: inline-flex;
+  justify-content: center;
+  flex: none;
 }
 
 /* Склад станции: полоска заполнения, «лежит / помещается» и склады; «+» нажат — ставим склад на карте. */
