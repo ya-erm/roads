@@ -83,7 +83,16 @@ import { BuildContext, Builder, Plan, type RailProjectStart, RoadRequest, Snap }
 import { diamondPlan, TemplateOptions, templatePlan, TemplatePlan } from './interchange';
 import { cloneNetwork, copyRails, RailPaste } from './railFragment';
 import { chainCoords, chainOffset, trackChain } from './railEdit';
-import { type ExtraTrack, extraTrackGeom, healCuts, stationShape, stripRailStation, type TrackSide } from './railStationEdit';
+import {
+  extendGeom,
+  type ExtraTrack,
+  extraTrackGeom,
+  healCuts,
+  type PlatformExtend,
+  stationShape,
+  stripRailStation,
+  type TrackSide,
+} from './railStationEdit';
 import { linesForTown } from './townLines';
 import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
@@ -500,6 +509,14 @@ export interface RailTrackPlan extends BaysPlan {
   geom?: ExtraTrack;
   /** С какой стороны от путей ляжет новый: 1 — со стороны здания, -1 — с другой (там, где здание не мешает). */
   side?: TrackSide;
+}
+
+/** Удлинение платформ ж/д вокзала на шаг: сколько станет, куда (концы, стрелки) и почём. */
+export interface RailExtendPlan extends BaysPlan {
+  geom?: PlatformExtend;
+  /** Длина платформ сейчас и после удлинения, м. */
+  length: number;
+  next: number;
 }
 
 /** Перенос ж/д станции: какой она станет на новом месте (конечной или проходной) и поворот в чистом поле. */
@@ -7046,11 +7063,23 @@ export class Game implements BuildContext {
     const own = new Set<number>();
     for (const nid of nodes) for (const sid of net.node(nid).segments) own.add(sid);
     for (const b of geom.branches) if (b.split) own.add(b.split.seg);
-    if ((!still && !this.inBounds(fp.center, 30)) || samples.some((q) => !this.inBounds(q, 20))) return fail('За краем карты');
-    if ((!still && this.isWater(fp.center, footprintRadius(fp) * 0.6)) || samples.some((q) => this.isWater(q, RAIL_HALF))) return fail('Мешает вода');
+    const blocker = this.railEditBlocker(st, samples, fp, still, own);
+    if (blocker) return fail(blocker);
+    if (cost > this.budget) return fail('Не хватает денег');
+    return { ok: true, cost, fp, geom, side };
+  }
+
+  /**
+   * Что мешает правке построенного вокзала st (новый путь, длиннее платформы): точки samples на новых путях
+   * и здание fp на новом месте (still — здание стоит, где стояло, его место не проверяем). Свои пути own — не помеха.
+   */
+  private railEditBlocker(st: Station, samples: Vec[], fp: Footprint, still: boolean, own: Set<number>): string | null {
+    const net = this.net;
+    if ((!still && !this.inBounds(fp.center, 30)) || samples.some((q) => !this.inBounds(q, 20))) return 'За краем карты';
+    if ((!still && this.isWater(fp.center, footprintRadius(fp) * 0.6)) || samples.some((q) => this.isWater(q, RAIL_HALF))) return 'Мешает вода';
     this.index.remove(st);
     try {
-      if ((!still && this.index.overlaps(fp, 3)) || samples.some((q) => this.blocked(q, RAIL_HALF + 2))) return fail('Мешает здание');
+      if ((!still && this.index.overlaps(fp, 3)) || samples.some((q) => this.blocked(q, RAIL_HALF + 2))) return 'Мешает здание';
     } finally {
       this.index.add(st);
     }
@@ -7061,15 +7090,90 @@ export class Game implements BuildContext {
     for (const q of probes) {
       for (const s of net.segmentsNear(q, 40)) {
         if (own.has(s.id)) continue;
-        if (s.lut.closest(q).d < halfWidth(s.spec) + RAIL_HALF + 2) return fail(isRail(s.spec) ? 'Мешает другой путь' : 'Мешает дорога');
+        if (s.lut.closest(q).d < halfWidth(s.spec) + RAIL_HALF + 2) return isRail(s.spec) ? 'Мешает другой путь' : 'Мешает дорога';
       }
       for (const c of this.roads.net.corridorsNear(q, 60)) {
         const hit = c.lut.closest(q);
-        if (hit.d < halfAtS(c, hit.s) + RAIL_HALF + 2) return fail('Мешает дорога');
+        if (hit.d < halfAtS(c, hit.s) + RAIL_HALF + 2) return 'Мешает дорога';
       }
     }
-    if (cost > this.budget) return fail('Не хватает денег');
-    return { ok: true, cost, fp, geom, side };
+    return null;
+  }
+
+  /**
+   * Удлинить платформы ж/д вокзала на шаг (RAIL_STATION.lengthStep, как у вариантов длины при постановке) — все пути
+   * станции сразу, стрелки горловин отодвигаются (extendGeom). У проходной — поровну в обе стороны, не помещается —
+   * весь шаг в одну. У конечной — в сторону горловины (здание в торце на месте), не выходит — от упоров (здание
+   * отъезжает). Мешают — как при постановке станции (дома, пути, дороги, вода, край карты); причина — первого способа,
+   * которому мешает что-то на месте, а не устройство путей. Цена — новые метры пути и прибавка к цене вокзала за длину.
+   */
+  railExtendPlan(id: number): RailExtendPlan {
+    const R = RAIL_STATION;
+    const st = this.stations.get(id);
+    const none = (reason: string, length = 0): RailExtendPlan => ({ ok: false, reason, cost: 0, fp: st?.fp ?? null, length, next: length });
+    if (!st) return none('Станции нет');
+    if (st.kind !== 'rail') return none('Платформы удлиняются только у ж/д станции');
+    const main = this.net.segments.get(st.platforms[0]);
+    if (!main) return none('Пути станции перестроены — платформы не удлинить');
+    const length = clampRailLength(main.length);
+    const next = length + R.lengthStep;
+    if (next > R.maxLength) return { ...none(`Платформы длиннее ${R.maxLength} м не бывают`, length), next: length };
+    const shape = stationShape(this.net, st);
+    if (!shape) return { ...none('Пути станции перестроены — платформы не удлинить', length), next };
+    const step = next - main.length;
+    const ways: [number, number][] = st.terminal
+      ? [
+          [step, 0],
+          [0, step],
+        ]
+      : [
+          [step / 2, step / 2],
+          [step, 0],
+          [0, step],
+        ];
+    const k = st.platforms.length;
+    const fee = railStationFee(k, next) - railStationFee(k, length);
+    let structural: RailExtendPlan | null = null;
+    let blocked: RailExtendPlan | null = null;
+    for (const shift of ways) {
+      const geom = extendGeom(this.net, st, shape, shift);
+      if (typeof geom === 'string') {
+        structural ??= { ...none(geom, length), next };
+        continue;
+      }
+      const samples: Vec[] = [];
+      for (const c of geom.fresh) {
+        const lut = new CurveLUT(c);
+        for (let s = 4; s < lut.length; s += 8) samples.push(lut.pointAt(s));
+      }
+      const cost = Math.round(geom.added * specCost(RAIL_SPEC)) + fee;
+      const still = geom.fp.w === st.fp.w && dist(geom.fp.center, st.fp.center) < 0.01;
+      const blocker = this.railEditBlocker(st, samples, geom.fp, still, geom.own);
+      const plan: RailExtendPlan = { ok: !blocker, reason: blocker ?? undefined, cost, fp: geom.fp, geom, length, next };
+      if (!blocker) return cost > this.budget ? { ...plan, ok: false, reason: 'Не хватает денег' } : plan;
+      blocked ??= plan;
+    }
+    return blocked ?? structural ?? none('Нельзя удлинить', length);
+  }
+
+  /** Удлиняет платформы ж/д вокзала на шаг (railExtendPlan): узлы и участки те же — поезда и маршруты остаются. */
+  extendRailPlatforms(id: number): string | null {
+    const plan = this.railExtendPlan(id);
+    const st = this.stations.get(id);
+    if (!plan.ok || !plan.geom || !plan.fp || !st) return plan.reason ?? 'Нельзя';
+    this.checkpoint('длина платформ');
+    const net = this.net;
+    for (const [nid, p] of plan.geom.moves) net.moveNode(nid, p);
+    for (const [sid, c] of plan.geom.curves) net.setCurve(sid, c);
+    this.spend(plan.cost);
+    this.index.remove(st);
+    st.fp = plan.fp;
+    this.index.add(st);
+    this.computeCatchment(st);
+    this.networkChanged();
+    this.journal.add('station=', { id, name: st.name, length: plan.next, $: plan.cost });
+    this.commit();
+    return null;
   }
 
   /**

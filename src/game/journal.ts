@@ -178,6 +178,7 @@ export const JOURNAL_LEGEND: Record<string, string> = {
   'station-': 'станция снесена',
   'station>': 'ж/д станция id (name) перенесена из from в pos; terminal — стала конечной (нет — проходная)',
   'station+': 'ж/д станции id (name) достроен путь с платформой: tracks — путей теперь, $ — цена',
+  'station=': 'у ж/д станции id (name) удлинены платформы: length — длина теперь, м; $ — цена',
   line: 'маршрут создан: id, stops — id станций по порядку',
   route: 'маршрут изменён',
   'line-': 'маршрут удалён',

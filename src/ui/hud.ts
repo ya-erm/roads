@@ -1686,6 +1686,11 @@ export class Hud {
         if (problem) g.notify(problem);
         break;
       }
+      case 'st-extend': {
+        const problem = g.extendRailPlatforms(Number(d.id));
+        if (problem) g.notify(problem);
+        break;
+      }
       case 'base-move':
         // Перенос строительной базы: площадка за курсором у дороги, клик — туда (Esc — отмена).
         c.startBaseMove(Number(d.id));
@@ -3145,6 +3150,18 @@ export class Hud {
           <span class="stepper bays tracks"><b>${platformsSvg(n)}<span>${n}</span></b><button
             data-action="st-track" data-id="${st.id}" class="${more.ok ? '' : 'off'}" data-tip="${esc(plusTip)}">+</button></span>
           ${more.ok ? `<span class="muted">+${money(more.cost)}</span>` : ''}</div>`;
+        // Длина платформ: схема с вагонами, метры и «+» — удлинить на шаг (с ценой или причиной, почему нельзя);
+        // рядом — сколько пассажирских и грузовых вагонов встанет (предел состава, как при постановке).
+        const ext = g.railExtendPlan(st.id);
+        const L = ext.length;
+        const fit = platformCars(L);
+        const extTip = ext.ok ? `Удлинить платформы до ${ext.next} м · ${money(ext.cost)}` : (ext.reason ?? '');
+        baysRow += `<div class="icon-row len-row"><span class="lbl2">Длина</span>
+          <span class="stepper bays tracks len"><b data-tip="Длина платформ: ${L} м">${platformLengthSvg(L, RAIL_STATION.maxLength)}<span>${L} м</span></b><button
+            data-action="st-extend" data-id="${st.id}" class="${ext.ok ? '' : 'off'}" data-tip="${esc(extTip)}">+</button></span>
+          <span class="cars-fit"><span class="car pax" data-tip="Пассажирских вагонов встанет: ${fit.passenger}">${passengerCarSvg(18)}<b>${fit.passenger}</b></span><span
+            class="car freight" data-tip="Грузовых вагонов встанет: ${fit.freight}">${freightCarSvg(18)}<b>${fit.freight}</b></span></span>
+          ${ext.ok ? `<span class="muted">+${money(ext.cost)}</span>` : ''}</div>`;
       }
       const storageRow = st.kind === 'stop' ? '' : this.storageRowHtml(st);
       // Остановка — только для пассажиров: переключать нечего.

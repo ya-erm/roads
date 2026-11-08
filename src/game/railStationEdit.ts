@@ -1,5 +1,5 @@
 import { MIN_SEGMENT_LEN, RAIL_STATION } from '../config';
-import { Cubic, reverseCubic, splitBezier, straightCubic } from '../core/bezier';
+import { Cubic, CurveLUT, reverseCubic, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, norm, scale, sub, Vec } from '../core/vec';
 import type { Station } from '../world/entities';
 import type { Network, Segment } from '../world/network';
@@ -9,7 +9,7 @@ import type { Footprint } from '../world/spatial';
 /**
  * Правка построенного ж/д вокзала: ещё один путь с платформой («Достроить путь») и разбор станции перед
  * переносом (пути станции прочь, главный путь — снова цельный, как до неё). Здесь только геометрия
- * и сеть путей; цену, помехи и деньги считает Game (railTrackPlan, stationMovePlan).
+ * и сеть путей; цену, помехи и деньги считает Game (railTrackPlan, stationMovePlan, railExtendPlan).
  */
 
 /** Как устроен построенный вокзал: главная платформа, её концы, стрелки горловин, сторона боковых путей. */
@@ -259,4 +259,153 @@ export function stripRailStation(net: Network, st: Station, cost: (s: Segment) =
 /** Срастить главный путь в узлах, где его резала станция (те, что остались стыками двух участков). */
 export function healCuts(net: Network, cuts: number[]): void {
   for (const id of cuts) healRailNode(net, id);
+}
+
+/**
+ * Удлинение платформ вокзала: какие узлы куда встают и какие участки получают новую форму. Узлы и участки — те же
+ * (поезда на них остаются, длины подстроятся), меняются только их места.
+ */
+export interface PlatformExtend {
+  /** Новые места узлов: концов платформ с удлиняемой стороны, стрелок горловины, отодвинутых узлов главного пути. */
+  moves: Map<number, Vec>;
+  /** Новые формы участков, что касаются подвинутых узлов. */
+  curves: Map<number, Cubic>;
+  /** Что легло на новое место (платформы, съезды, продолжение тупика) — его проверяют на помехи. */
+  fresh: Cubic[];
+  /** Участки, которые удлинение двигает или укорачивает: себе они не мешают. */
+  own: Set<number>;
+  /** Здание на новом месте. */
+  fp: Footprint;
+  /** Длина платформ после удлинения, м. */
+  platform: number;
+  /** На сколько метров стало больше путей (цена). */
+  added: number;
+}
+
+/** Сдвинутая кривая. */
+const shiftCubic = (c: Cubic, d: Vec): Cubic => ({ p0: add(c.p0, d), p1: add(c.p1, d), p2: add(c.p2, d), p3: add(c.p3, d) });
+
+/** Участок прямой и идёт вдоль t (с допуском на неточность разрезов). */
+function straightAlong(s: Segment, t: Vec): boolean {
+  const c = s.curve;
+  const ab = sub(c.p3, c.p0);
+  const L = Math.hypot(ab.x, ab.y);
+  if (L < 1) return false;
+  const u = scale(ab, 1 / L);
+  if (Math.abs(cross(u, t)) > Math.sin(0.06)) return false;
+  return [c.p1, c.p2].every((p) => Math.abs(cross(u, sub(p, c.p0))) < 0.5);
+}
+
+/**
+ * Платформы вокзала длиннее: shift[0] — на сколько метров отодвинуть конец ends[0] (наружу, против t), shift[1] —
+ * конец ends[1] (по t). С удлиняемой стороны вместе с концами платформ отъезжают и стрелки горловины со съездами
+ * (съезды не меняют форму), а главный путь за последней стрелкой укорачивается; он короткий — дальше отодвигаются
+ * и узлы за ним (стыки на прямой), а тупик просто продлевается. У конечной сторона упоров (ends[1]) — только концы
+ * платформ и здание в торце. Не выходит (к стрелкам примыкают чужие пути, главный путь за горловиной изогнут или
+ * сразу упирается в другую стрелку) — причина строкой.
+ */
+export function extendGeom(net: Network, st: Station, shape: StationShape, shift: [number, number]): PlatformExtend | string {
+  const R = RAIL_STATION;
+  const { t, ends, switches, main } = shape;
+  const owned = (id: number) => net.nodes.get(id)?.buildingId === st.id;
+  const mid = main.lut.pointAt(main.length / 2);
+  const moves = new Map<number, Vec>();
+  /** Участки главного пути за горловиной, что отъезжают вдоль себя (у них нового места нет, кроме продолжения тупика). */
+  const along = new Set<number>();
+  const fresh: Cubic[] = [];
+  const stationNodes = [...net.nodes.values()].filter((n) => n.buildingId === st.id);
+  for (const k of [0, 1] as const) {
+    const d = shift[k];
+    if (d <= 0) continue;
+    const u = k === 0 ? scale(t, -d) : scale(t, d);
+    const go = (id: number) => moves.set(id, add(net.node(id).pos, u));
+    for (const n of stationNodes) if ((dot(sub(n.pos, mid), t) < 0 ? 0 : 1) === k) go(n.id);
+    // Упоры конечной: за ними — только перрон и здание.
+    if (st.terminal && k === 1) continue;
+    let prev = ends[k];
+    let cur = switches[k];
+    if (cur === null) return 'Пути станции перестроены — платформы не удлинить';
+    for (let guard = 0; ; guard++) {
+      go(cur);
+      const here = cur;
+      const back = prev;
+      const out = net.node(here).segments.filter((sid) => {
+        const o = other(net.segment(sid), here);
+        return o !== back && !owned(o);
+      });
+      if (out.length !== 1) return 'К стрелке горловины примыкают другие пути';
+      const s = net.segment(out[0]);
+      const next = other(s, here);
+      // Дальше по главному пути — ещё стрелка станции (съезд на дальний путь): отъезжает и она.
+      const feeds = net.node(next).segments.some((sid) => owned(other(net.segment(sid), next)));
+      if (feeds && guard < 6) {
+        prev = here;
+        cur = next;
+        continue;
+      }
+      // Главный путь за горловиной: укорачивается первый участок, что достаточно длинный; короткие перед ним — отъезжают целиком.
+      let seg = s;
+      let from = here;
+      for (let j = 0; ; j++) {
+        if (seg.build) return 'Путь за горловиной ещё строится';
+        if (!straightAlong(seg, t) || !net.isFlat(seg)) return 'Путь за горловиной изогнут — стрелку не отодвинуть';
+        if (seg.length - d >= MIN_SEGMENT_LEN + 4) break;
+        const far = other(seg, from);
+        const fn = net.node(far);
+        if (fn.buildingId !== null || fn.level !== net.node(from).level || j >= 6) return 'За горловиной нет места — стрелку некуда отодвинуть';
+        along.add(seg.id);
+        if (fn.segments.length === 1) {
+          // Тупик — путь просто продлевается.
+          fresh.push(straightCubic(fn.pos, add(fn.pos, u)));
+          go(far);
+          break;
+        }
+        if (fn.segments.length !== 2) return 'За горловиной сразу стрелка — горловину не отодвинуть';
+        go(far);
+        from = far;
+        seg = net.segment(fn.segments.find((x) => x !== seg.id)!);
+      }
+      break;
+    }
+  }
+  // Новые формы участков у подвинутых узлов: оба конца сдвинуты одинаково — участок едет целиком (съезд), иначе —
+  // прямая между новыми концами (платформа, укороченный главный путь).
+  const curves = new Map<number, Cubic>();
+  const own = new Set<number>();
+  let added = 0;
+  for (const nid of moves.keys()) {
+    for (const sid of net.node(nid).segments) {
+      if (curves.has(sid)) continue;
+      const s = net.segment(sid);
+      if (s.build) return 'Пути станции ещё строятся';
+      const pa = net.node(s.a).pos;
+      const pb = net.node(s.b).pos;
+      const ma = moves.get(s.a);
+      const mb = moves.get(s.b);
+      const da = ma ? sub(ma, pa) : { x: 0, y: 0 };
+      const db = mb ? sub(mb, pb) : { x: 0, y: 0 };
+      let c: Cubic;
+      if (dist(da, db) < 1e-6) c = shiftCubic(s.curve, da);
+      else if (straightAlong(s, t)) c = straightCubic(ma ?? pa, mb ?? pb);
+      else return 'К путям станции примыкают другие пути';
+      curves.set(sid, c);
+      own.add(sid);
+      const L = new CurveLUT(c).length;
+      added += L - s.length;
+      // Главный путь за горловиной лёг на себя же; укороченный — тоже: новое место — только у путей станции.
+      const shortened = !ma !== !mb && s.platform === undefined;
+      if (!along.has(sid) && !shortened) fresh.push(c);
+    }
+  }
+  // Свои пути у стрелок горловины (съезды, главный путь) тоже не помеха.
+  for (const n of stationNodes) for (const sid of n.segments) own.add(sid);
+  const platform = main.length + shift[0] + shift[1];
+  let fp: Footprint;
+  if (st.terminal) fp = { ...st.fp, center: add(st.fp.center, scale(t, shift[1])) };
+  else {
+    // Здание проходной — посередине платформ; у короткой платформы оно было короче — теперь может стать длиннее.
+    const w = Math.max(st.fp.w, Math.min(R.size.w, Math.max(36, platform - 10)));
+    fp = { ...st.fp, w, center: add(st.fp.center, scale(t, (shift[1] - shift[0]) / 2)) };
+  }
+  return { moves, curves, fresh, own, fp, platform, added: Math.max(0, added) };
 }

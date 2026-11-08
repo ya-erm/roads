@@ -2202,6 +2202,22 @@ button.icon.toggle-spacing {
   border-radius: 5px;
 }
 
+/* Длина платформ в карточке вокзала: «50 м» и «400 м» — одной ширины, «+» за ними не сдвигается. */
+.stepper.len b > span {
+  min-width: 5ch;
+}
+
+/* Строка длины платформ — в одну строку: схема, «+», вагоны и цена. */
+.icon-row.len-row {
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.len-row .cars-fit {
+  gap: 5px;
+  margin-left: 0;
+}
+
 /* Проходная или конечная — пара значков-схем справа в заголовке «Платформы». */
 .st-kind {
   display: inline-flex;
