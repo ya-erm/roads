@@ -64,6 +64,18 @@ describe('Архив отчёта: содержимое', () => {
     expect(reportMeta(info, [])).not.toHaveProperty('map');
   });
 
+  it('схема участка — area.json рядом с save.json, в сведениях и в тексте', () => {
+    const spot = { camera: { x: 1000, y: 500, zoom: 2 }, view: { x0: 640, y0: 275, x1: 1360, y1: 725 }, area: { x0: 900, y0: 425, x1: 1100, y1: 575 }, source: 'frame' as const };
+    const area = '{"kind":"razvyazka-templates","version":1,"templates":[]}';
+    const entries = archiveEntries({ info: { ...info, spot }, save: '{"version":3}', area });
+    expect(entries.map((e) => e.name)).toEqual(['report.md', 'meta.json', 'save.json', 'area.json']);
+    expect(decode(entries[3].data)).toBe(area);
+    expect(JSON.parse(decode(entries[1].data)).files).toEqual(['save.json', 'area.json']);
+    const md = decode(entries[0].data);
+    expect(md).toContain('сохранение `save.json` · схема участка `area.json`');
+    expect(md).toContain('· схема участка: `area.json`');
+  });
+
   it('сведения о сценарии — если партия сценарная; имя архива — по времени отчёта', () => {
     expect(reportMeta({ ...info, scenario: 'сценарий normal' }, []).game.scenario).toBe('сценарий normal');
     expect(archiveName(info.at)).toBe('razvyazka-bug-2026-11-06-160507.zip');

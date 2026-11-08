@@ -69,6 +69,18 @@ describe('где на карте из баг-репорта', () => {
     expect(text).toContain('npm run shot -- --save .task-agent/runs/x/input/03-a-save.json.gz --area 900,425,1100,575 --speed 0');
   });
 
+  it('схема участка среди вложений — упомянута; сохранение — другой файл, даже если схема раньше', () => {
+    const text = spotSection(line, [
+      { file: '.task-agent/runs/x/input/02-razvyazka-bug-2026-11-08-021205-area.json.gz', where: 'описание' },
+      { file: '.task-agent/runs/x/input/03-razvyazka-bug-2026-11-08-021205-save.json.gz', where: 'описание' },
+    ]);
+    expect(text).toContain('--save .task-agent/runs/x/input/03-razvyazka-bug-2026-11-08-021205-save.json.gz --area');
+    expect(text).toContain('Схема участка');
+    expect(text).toContain('`.task-agent/runs/x/input/02-razvyazka-bug-2026-11-08-021205-area.json.gz` (в gzip');
+    expect(text).toContain('«Развязки → Шаблон → Открыть шаблоны из файла»');
+    expect(spotSection(line, [{ file: 'in/03-a-save.json', where: 'описание' }])).not.toContain('Схема участка');
+  });
+
   it('без участка — камера автора; без строки — ничего', () => {
     expect(spotSection('`--camera 1000,500,2`', [])).toContain('--save <сохранение> --camera 1000,500,2');
     expect(spotSection('Просто идея', [])).toBe('');

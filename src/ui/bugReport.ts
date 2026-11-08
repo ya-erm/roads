@@ -8,6 +8,8 @@
  * рамка переводится в координаты карты (bugreport/spot.ts): они идут в текст отчёта строкой «Где на карте»
  * (с параметрами `--area`/`--camera` для npm run shot), в meta.json и в сохранение (bugSpot) — открытая партия
  * покажет участок рамкой. Без рамки участок — по обведённому пометками или по кадру; камера пишется всегда.
+ * Участок рамкой или по пометкам — ещё и «Схема участка» (bugreport/areaTemplate.ts): дороги и пути внутри него
+ * тем же кодом, что копирование рамкой, файлом шаблона развязки (area.json) — вставляется в любую партию.
  *
  * Горячая клавиша («`» или Ctrl/Cmd+Shift+B, bugreport/hotkey.ts) открывает то же окно, не трогая мышь: на снимке
  * остаётся подсветка под курсором, предпросмотр стройки и подпись у курсора. Снимок, журнал и сохранение берутся
@@ -25,6 +27,7 @@
 
 import './bugReport.css';
 import { archiveEntries, archiveName } from '../bugreport/archive';
+import { areaTemplate, schemeBox, schemeNote, type AreaTemplate } from '../bugreport/areaTemplate';
 import { loadAuthor, saveAuthor } from '../bugreport/author';
 import { captureScreen, type Shot } from '../bugreport/capture';
 import { canvasMeasure, drawArea, drawMarks, haloFor, markFont, outputSize, renderSketch } from '../bugreport/draw';
@@ -197,6 +200,8 @@ const ICON = {
   person: svg('<circle cx="12" cy="8.5" r="3.6"/><path d="M5 20C5.6 16.2 8.4 14 12 14S18.4 16.2 19 20"/>', 18),
   ok: svg('<path d="M5 12.5L10 17.5L19 7"/>', 18),
   warn: svg('<path d="M12 3.5L21.5 20H2.5Z"/><path d="M12 10V14"/><path d="M12 17H12.01"/>', 18),
+  // Схема участка — как значок «Развязки» на панели инструментов: шаблон развязки.
+  area: svg('<path d="M9.6 2v20M14.4 2v20"/><path d="M2 12h20"/><path d="M9.6 4.5L4.6 12L9.6 19.5M14.4 4.5L19.4 12L14.4 19.5"/>', 18),
   pin: svg('<path d="M12 21L6.6 13.2A6.2 6.2 0 1 1 17.4 13.2Z" fill="#2f80ed" stroke="#2f80ed"/><circle cx="12" cy="9.6" r="2.2" fill="#fff" stroke="none"/>', 18),
 };
 
@@ -267,7 +272,9 @@ class BugReport {
   private view: View = { zoom: 1, ox: 0, oy: 0 };
   private hoverText: number | null = null;
   /** Что приложить к отчёту; снимок снят — редактор пометок гаснет, пометки ждут, пока его вернут. */
-  private readonly include: Record<AttachKind, boolean> = { shot: true, journal: true, save: true };
+  private readonly include: Record<AttachKind, boolean> = { shot: true, journal: true, save: true, area: true };
+  /** Схема участка по последней рамке (копия сети — не на каждый кадр): ключ — участок. */
+  private scheme: { key: string; t: AreaTemplate | null } | null = null;
   private sending = false;
   private archiving = false;
   private sent: Sent | null = null;
@@ -491,7 +498,8 @@ class BugReport {
     this.sent = null;
     this.desc.value = '';
     this.nameInput.value = loadAuthor(storage());
-    this.include.shot = this.include.journal = this.include.save = true;
+    this.include.shot = this.include.journal = this.include.save = this.include.area = true;
+    this.scheme = null;
     this.thanks.classList.add('hidden');
     this.isOpen = true;
     this.heldAtOpen = new Set(this.held);
@@ -533,6 +541,7 @@ class BugReport {
     if (game.speed === 0) game.speed = this.speedBefore;
     this.shot = null;
     this.moment = null;
+    this.scheme = null;
     // Кнопку, зажатую на карте, отпустили в окне — игра узнаёт об этом сейчас, там же, где был курсор на снимке:
     // протяжка заканчивается, как если бы её отпустили в тот момент (Ctrl+Z — отменить).
     const released = this.releasedInside;
@@ -735,6 +744,43 @@ class BugReport {
       const size = areaSize(worldBox(m.camera, area.box));
       note.textContent = area.source === 'frame' ? size : `${area.source === 'marks' ? 'по пометкам' : 'по кадру'} · ${size}`;
     }
+    this.renderScheme();
+  }
+
+  /**
+   * Строка «Схема участка»: есть, когда участок отмечен рамкой или пометками; в нём нет дорог — пишет об этом
+   * и не прикладывается. Пока рамку тянут — не пересчитывается (копия сети), до отпускания.
+   */
+  private renderScheme(): void {
+    const el = this.screen.querySelector<HTMLElement>('[data-bug-area]');
+    if (!el || !this.moment || !this.shot) return;
+    const box = schemeBox(this.spot());
+    el.classList.toggle('hidden', !box);
+    if (!box || (this.drag && this.drag.type.startsWith('area'))) return;
+    const t = this.schemeTemplate();
+    const input = el.querySelector('input')!;
+    input.disabled = !t;
+    input.checked = !!t && this.include.area;
+    el.classList.toggle('empty', !t);
+    el.querySelector('small')!.textContent = t ? `${schemeNote(t.fragment)} · шаблон` : 'нет дорог';
+  }
+
+  /** Схема участка на момент снимка (игра стоит, пока окно открыто); участок не отмечен или пуст — null. */
+  private schemeTemplate(): AreaTemplate | null {
+    if (!this.moment || !this.shot) return null;
+    const spot = this.spot();
+    const box = schemeBox(spot);
+    const key = box ? `${box.x0},${box.y0},${box.x1},${box.y1}` : '';
+    if (this.scheme?.key !== key) {
+      const g = this.deps.game();
+      this.scheme = { key, t: box ? areaTemplate((a, b) => g.copyArea(a, b), spot, this.moment.at) : null };
+    }
+    return this.scheme.t;
+  }
+
+  /** Схема участка, если её прикладывают. */
+  private schemeFile(): AreaTemplate | null {
+    return this.include.area ? this.schemeTemplate() : null;
   }
 
   /** Где на карте снимок — для отчёта, архива и сохранения. */
@@ -1196,7 +1242,8 @@ class BugReport {
       row('shot', ICON.shot, 'Приложить снимок', `${Math.round(out.w)} × ${Math.round(out.h)}`) +
       row('journal', ICON.journal, 'Журнал партии', `${m.journalEntries} зап. · ${sizeLabel(enc.encode(m.journal).length)}`) +
       row('save', ICON.save, 'Сохранение', sizeLabel(enc.encode(m.save).length)) +
-      `<button class="bug-file bug-spot" data-bug="area-tool" data-bug-spot data-tip="Где на карте ошибка: обведите участок на снимке — его координаты попадут в отчёт, а сохранение откроется с этим участком в рамке (M)">${ICON.pin}<span>Участок на карте</span><small></small></button>`;
+      `<button class="bug-file bug-spot" data-bug="area-tool" data-bug-spot data-tip="Где на карте ошибка: обведите участок на снимке — его координаты попадут в отчёт, а сохранение откроется с этим участком в рамке (M)">${ICON.pin}<span>Участок на карте</span><small></small></button>` +
+      `<label class="bug-file bug-area hidden" data-bug-area data-tip="Дороги и пути участка файлом шаблона развязки: его можно вставить в любую партию — «Развязки → Шаблон → Открыть шаблоны из файла»"><input type="checkbox" data-bug-include="area" ${this.include.area ? 'checked' : ''} />${ICON.area}<span>Схема участка</span><small data-bug-file-note="area"></small></label>`;
     this.renderSpot();
   }
 
@@ -1228,6 +1275,8 @@ class BugReport {
     if (this.include.shot) files.push({ kind: 'shot', name: names.shot, type: 'image/png', data: await this.renderPng() });
     if (this.include.journal) files.push({ kind: 'journal', name: names.journal, type: 'application/x-ndjson', data: new Blob([m.journal], { type: 'application/x-ndjson' }) });
     if (this.include.save) files.push({ kind: 'save', name: names.save, type: 'application/json', data: new Blob([this.saveWithSpot()], { type: 'application/json' }) });
+    const scheme = this.schemeFile();
+    if (scheme) files.push({ kind: 'area', name: names.area, type: 'application/json', data: new Blob([scheme.text], { type: 'application/json' }) });
     // Сначала файлы — в публичный загрузчик (ссылки на них войдут в карточку); не принял — карточка всё равно
     // уйдёт, с пометкой, каких файлов в ней нет.
     let uploaded: Uploaded[] | null = null;
@@ -1330,8 +1379,8 @@ class BugReport {
    */
   private showThanks(s: Sent): void {
     const r = s.receipt!;
-    const label: Record<AttachKind, string> = { shot: 'Снимок', journal: 'Журнал', save: 'Сохранение' };
-    const icon: Record<AttachKind, string> = { shot: ICON.shot, journal: ICON.journal, save: ICON.save };
+    const label: Record<AttachKind, string> = { shot: 'Снимок', journal: 'Журнал', save: 'Сохранение', area: 'Схема участка' };
+    const icon: Record<AttachKind, string> = { shot: ICON.shot, journal: ICON.journal, save: ICON.save, area: ICON.area };
     const files = (s.uploaded ?? [])
       .map((u) => `<a class="bug-thanks-file" href="${escapeHtml(u.url)}" target="_blank" rel="noopener" data-tip="Открыть файл">${icon[u.kind]}${label[u.kind]}<i>${ICON.ok}</i></a>`)
       .join('');
@@ -1377,6 +1426,7 @@ class BugReport {
         shot,
         journal: this.include.journal ? m.journal : undefined,
         save: this.include.save ? this.saveWithSpot() : undefined,
+        area: this.schemeFile()?.text,
       });
       const data = await zip(entries, { at: m.at });
       const a = document.createElement('a');

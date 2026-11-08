@@ -4,6 +4,7 @@ import { Game, SAVE_VERSION, type SaveData } from './game/game';
 import { journalFile } from './game/journal';
 import { backupGame, clearSave, deleteSave, linkedSave, linkSave, listSaves, loadSave, readSave, saveGame, writeSave } from './game/persist';
 import { saveFileText } from './game/saveFile';
+import { TEMPLATE_FILE_KIND } from './game/templates';
 import { Controller } from './input/controller';
 import { rememberTools } from './input/toolPrefs';
 import { Camera } from './render/camera';
@@ -149,6 +150,11 @@ async function importFile(file: File): Promise<boolean> {
     data = JSON.parse(await saveFileText(file)) as SaveData;
   } catch {
     game.notify('Это не файл сохранения игры', '#e5534b');
+    return false;
+  }
+  // Шаблон развязки (и схема участка из баг-репорта) — не партия: его открывают в «Развязки → Шаблон».
+  if ((data as { kind?: unknown } | null)?.kind === TEMPLATE_FILE_KIND) {
+    game.notify('Это шаблон развязки — откройте его в «Развязки → Шаблон → Открыть шаблоны из файла»', '#e5534b');
     return false;
   }
   if (data.version !== SAVE_VERSION) {

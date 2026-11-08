@@ -24,6 +24,7 @@ import {
   type Attachment,
   type ReportInfo,
 } from './report';
+import { parseSpot } from './spot';
 
 const files = (): Attachment[] => [
   { kind: 'shot', name: 'a.png', type: 'image/png', data: new Blob([new Uint8Array(10)]) },
@@ -177,12 +178,36 @@ describe('Текст отчёта', () => {
     expect(reportMarkdown(info, [])).not.toContain('Где на карте');
   });
 
+  it('схема участка — ссылкой среди файлов (как открыть — шаблоном развязки) и в строке «Где на карте»', () => {
+    const spot = { camera: { x: 1000, y: 500, zoom: 2 }, view: { x0: 640, y0: 275, x1: 1360, y1: 725 }, area: { x0: 900, y0: 425, x1: 1100, y1: 575 }, source: 'frame' as const };
+    const refs = [
+      { kind: 'save' as const, name: 'b-save.json', url: 'https://b/3.json.gz' },
+      { kind: 'area' as const, name: 'b-area.json', url: 'https://b/4.json.gz' },
+    ];
+    const parts = reportMarkdown({ ...info, spot }, refs).split('\n\n');
+    const files = parts.find((p) => p.startsWith('**Для воспроизведения:**'))!;
+    expect(files).toContain('[сохранение](<https://b/3.json.gz>) · [схема участка](<https://b/4.json.gz>)');
+    expect(files).toContain('«Меню → Загрузить → Открыть из файла»; схема участка — шаблон развязки: «Развязки → Шаблон → Открыть шаблоны из файла»');
+    const where = parts.find((p) => p.startsWith('**Где на карте:**'))!;
+    expect(where.endsWith('`--camera 1000,500,2` · схема участка: [b-area.json](<https://b/4.json.gz>)')).toBe(true);
+    // Монитор задач по-прежнему находит участок в строке.
+    expect(parseSpot(where)?.area).toEqual(spot.area);
+    // Без ссылки — именем файла; на доске без загруженного файла — ни в списке, ни в строке места.
+    const local = reportMarkdown({ ...info, spot }, [{ kind: 'area', name: 'area.json' }]);
+    expect(local).toContain('схема участка `area.json` (приложены файлами)');
+    expect(local).toContain('· схема участка: `area.json`');
+    const board = boardReport({ ...info, spot }, [{ kind: 'area', name: 'area.json' }], 'k').description;
+    expect(board).not.toContain('area.json');
+    expect(board).toContain('_Не загрузились на доску: схема участка._');
+  });
+
   it('имена файлов — латиницей по времени; доска и размеры', () => {
     const names = attachmentNames(new Date(2026, 10, 6, 9, 5, 7));
     expect(names).toEqual({
       shot: 'razvyazka-bug-2026-11-06-090507.png',
       journal: 'razvyazka-bug-2026-11-06-090507-journal.jsonl',
       save: 'razvyazka-bug-2026-11-06-090507-save.json',
+      area: 'razvyazka-bug-2026-11-06-090507-area.json',
     });
     expect(boardUrl()).toBe(`${BUG_REPORT.boardBase}/b/${BUG_REPORT.boardSlug}/tasks/`);
     expect(sizeLabel(900)).toBe('900 Б');

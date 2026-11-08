@@ -1,5 +1,6 @@
 /**
- * Баг-репорт: файлы отчёта (снимок с пометками, журнал партии, сохранение), загрузка их в публичный загрузчик
+ * Баг-репорт: файлы отчёта (снимок с пометками, журнал партии, сохранение, схема участка — шаблоном развязки,
+ * bugreport/areaTemplate.ts), загрузка их в публичный загрузчик
  * доски задач, текст отчёта в Markdown со ссылками и публичная отправка карточки на доску (внизу файла).
  * Без DOM: fetch передаётся снаружи — в тестах подделка.
  *
@@ -11,7 +12,8 @@
 import { BUG_REPORT } from '../config';
 import { spotLine, type MapSpot } from './spot';
 
-export type AttachKind = 'shot' | 'journal' | 'save';
+/** Файлы отчёта; area — дороги и пути участка файлом шаблона развязки (вставляется в любую партию). */
+export type AttachKind = 'shot' | 'journal' | 'save' | 'area';
 
 /** Файл отчёта. */
 export interface Attachment {
@@ -45,7 +47,7 @@ export class UploadError extends Error {
 /** Имена файлов отчёта: латиницей и по времени, чтобы отчёты не путались и не ломались на доске. */
 export function attachmentNames(at: Date): Record<AttachKind, string> {
   const stem = reportStem(at);
-  return { shot: `${stem}.png`, journal: `${stem}-journal.jsonl`, save: `${stem}-save.json` };
+  return { shot: `${stem}.png`, journal: `${stem}-journal.jsonl`, save: `${stem}-save.json`, area: `${stem}-area.json` };
 }
 
 /** Общее начало имён файлов отчёта: «razvyazka-bug-2026-11-06-090507». */
@@ -201,7 +203,13 @@ export interface ReportFile {
   url?: string;
 }
 
-const FILE_LABEL: Record<AttachKind, string> = { shot: 'Снимок экрана', journal: 'журнал партии', save: 'сохранение' };
+const FILE_LABEL: Record<AttachKind, string> = { shot: 'Снимок экрана', journal: 'журнал партии', save: 'сохранение', area: 'схема участка' };
+
+/** Как открыть файлы в игре: сохранение — партией, схему участка — своим шаблоном развязки. */
+const HOW_TO: Partial<Record<AttachKind, string>> = {
+  save: 'сохранение открывается через «Меню → Загрузить → Открыть из файла»',
+  area: 'схема участка — шаблон развязки: «Развязки → Шаблон → Открыть шаблоны из файла», вставляется в любую партию',
+};
 
 /**
  * Текст отчёта (Markdown): кто, описание, снимок, файлы для воспроизведения и окружение. Файл без ссылки —
@@ -219,11 +227,17 @@ export function reportMarkdown(info: ReportInfo, files: ReportFile[], opts: { un
   const rest = files.filter((f) => f.kind !== 'shot' && (f.url || !opts.unsent));
   if (rest.length) {
     const list = rest.map((f) => (f.url ? `[${FILE_LABEL[f.kind]}](<${f.url}>)` : `${FILE_LABEL[f.kind]} \`${f.name}\``)).join(' · ');
-    const howTo = rest.some((f) => f.kind === 'save') ? ' — сохранение открывается через «Меню → Загрузить → Открыть из файла»' : '';
+    const how = rest.flatMap((f) => HOW_TO[f.kind] ?? []);
+    const howTo = how.length ? ` — ${how.join('; ')}` : '';
     const local = rest.some((f) => !f.url) ? ' (приложены файлами)' : '';
     parts.push(`**Для воспроизведения:** ${list}${local}${howTo}.`);
   }
-  if (info.spot) parts.push(spotLine(info.spot));
+  if (info.spot) {
+    // Схема участка — и в строке места: дороги именно этой рамки.
+    const area = rest.find((f) => f.kind === 'area');
+    const ref = area ? ` · ${FILE_LABEL.area}: ${area.url ? `[${area.name}](<${area.url}>)` : `\`${area.name}\``}` : '';
+    parts.push(`${spotLine(info.spot)}${ref}`);
+  }
   if (missing.length) parts.push(`_Не загрузились на доску: ${missing.map((f) => FILE_LABEL[f.kind].toLowerCase()).join(', ')}._`);
   const env = [
     info.date,

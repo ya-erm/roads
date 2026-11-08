@@ -3,6 +3,7 @@ import type { RingSize } from '../game/roads';
 import { platformCars, railStationFee, SAVE_VERSION, type Game, type Ledger, type Partner } from '../game/game';
 import { TEMPLATES } from '../game/interchange';
 import { defaultSaveName, type SaveEntry } from '../game/persist';
+import { saveFileText } from '../game/saveFile';
 import { addTemplates, fragmentToFile, getTemplate, hasRail, listTemplates, parseTemplateFile, templateFileName, templatesToFile } from '../game/templates';
 import {
   AUTO_FLEET,
@@ -2061,7 +2062,7 @@ export class Hud {
         .join('');
       // Файлы: все свои — одним файлом; открыть шаблоны из файла (добавятся к своим).
       const files = `<span class="tpl-files">${mine ? `<button class="icon" data-action="templates-dl-all" title="Скачать все свои шаблоны одним файлом">${downloadAllSvg(16)}</button>` : ''}
-        <label class="icon file-pick tpl-open" title="Открыть шаблоны из файла — добавятся к своим">${uploadSvg(15)}<input type="file" accept=".json,application/json" data-import-templates /></label></span>`;
+        <label class="icon file-pick tpl-open" title="Открыть шаблоны из файла — добавятся к своим">${uploadSvg(15)}<input type="file" accept=".json,.gz,application/json,application/gzip" data-import-templates /></label></span>`;
       const ownGroup = mine
         ? `<div class="opt-group"><div class="opt-title">Свои ${files}</div><div class="cards">${mine}</div></div>`
         : `<div class="opt-group narrow"><div class="opt-title">Свои ${files}</div><p class="muted">Скопируйте удачную развязку (режим «Копия») и сохраните её шаблоном — она появится здесь.</p></div>`;
@@ -2116,12 +2117,15 @@ export class Hud {
     downloadText(fileName, text);
   }
 
-  /** Шаблоны из файла — к своим (занятое имя — с суффиксом); битый или чужой файл — уведомлением. Один шаблон сразу выбран. */
+  /**
+   * Шаблоны из файла — к своим (занятое имя — с суффиксом); битый или чужой файл — уведомлением. Один шаблон сразу
+   * выбран. Файл может быть и в gzip: так доска задач отдаёт схему участка из баг-репорта («…-area.json.gz»).
+   */
   private async importTemplates(file: File): Promise<void> {
     const g = this.game();
     const bad = (text: string) => g.notify(text, '#e5534b');
     if (file.size > 20 * 1024 * 1024) return bad('Слишком большой файл для шаблонов');
-    const text = await file.text().catch(() => null);
+    const text = await saveFileText(file).catch(() => null);
     if (text === null) return bad('Файл не прочитать');
     const parsed = parseTemplateFile(text);
     if ('error' in parsed) return bad(parsed.error);

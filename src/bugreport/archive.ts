@@ -1,5 +1,6 @@
 /**
- * Отчёт одним архивом (значок скачивания в окне баг-репорта): снимок, журнал, сохранение — что приложено,
+ * Отчёт одним архивом (значок скачивания в окне баг-репорта): снимок, журнал, сохранение, схема участка
+ * (area.json — шаблон развязки) — что приложено,
  * report.md — текст отчёта с именем и описанием, meta.json — сведения об игре и окружении для разбора.
  * Здесь только содержимое; сам ZIP пишет zip.ts.
  */
@@ -12,6 +13,7 @@ export const ARCHIVE_FILES = {
   shot: 'screenshot.png',
   journal: 'journal.jsonl',
   save: 'save.json',
+  area: 'area.json',
   report: 'report.md',
   meta: 'meta.json',
 } as const;
@@ -22,6 +24,8 @@ export interface ArchiveInput {
   shot?: Uint8Array;
   journal?: string;
   save?: string;
+  /** Схема участка — файл шаблона развязки (bugreport/areaTemplate.ts), если участок отмечен. */
+  area?: string;
 }
 
 /** Сведения для разбора: кто, когда, какая версия и сборка, партия, экран, место на карте и браузер, что приложено. */
@@ -57,6 +61,7 @@ export function archiveEntries(input: ArchiveInput): ZipEntry[] {
   if (input.shot) attached.push({ kind: 'shot', data: input.shot });
   if (input.journal !== undefined) attached.push({ kind: 'journal', data: enc.encode(input.journal) });
   if (input.save !== undefined) attached.push({ kind: 'save', data: enc.encode(input.save) });
+  if (input.area !== undefined) attached.push({ kind: 'area', data: enc.encode(input.area) });
   const files: ReportFile[] = attached.map((a) => ({ kind: a.kind, name: ARCHIVE_FILES[a.kind] }));
   const kinds = attached.map((a) => a.kind);
   return [

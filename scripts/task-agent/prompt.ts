@@ -160,10 +160,17 @@ export interface PromptContext {
 export function spotSection(description: string, inputs: InputFile[]): string {
   const spot = parseSpot(description);
   if (!spot) return '';
-  const save = inputs.find((f) => /\.json(?:\.gz)?$/i.test(f.file))?.file ?? '<сохранение>';
+  const json = inputs.filter((f) => /\.json(?:\.gz)?$/i.test(f.file));
+  // Схема участка (…-area.json) — шаблон развязки, не партия: сохранение — другой файл.
+  const isArea = (f: InputFile) => /(?:^|[-_/])area\.json(?:\.gz)?$/i.test(f.file);
+  const save = json.find((f) => !isArea(f))?.file ?? '<сохранение>';
+  const area = json.find(isArea)?.file;
   const args = spot.area ? `--area ${areaArg(spot.area)}` : `--camera ${cameraArg(spot.camera!)}`;
   const what = spot.area ? `участок ${areaSize(spot.area)} (x ${spot.area.x0}…${spot.area.x1}, y ${spot.area.y0}…${spot.area.y1}) — его отметил автор отчёта` : 'вид камеры автора отчёта';
-  return `\n\n## Где на карте\n\nВ отчёте указано место ошибки: ${what}. Открой сохранение сразу на нём (участок будет в синей рамке):\n\n\`\`\`\nnpm run shot -- --save ${save} ${args} --speed 0 --out <снимок.png>\n\`\`\``;
+  const scheme = area
+    ? `\n\nСхема участка — дороги и пути внутри рамки файлом шаблона развязки: \`${area}\`${/\.gz$/i.test(area) ? ' (в gzip; игра открывает и так)' : ''}. Её можно вставить в пустую партию («Развязки → Шаблон → Открыть шаблоны из файла», затем клик по карте; в коде — \`game.paste(templates[0].fragment, {x, y}, 0)\`) — так ошибку проверяют отдельно от остальной сети.`
+    : '';
+  return `\n\n## Где на карте\n\nВ отчёте указано место ошибки: ${what}. Открой сохранение сразу на нём (участок будет в синей рамке):\n\n\`\`\`\nnpm run shot -- --save ${save} ${args} --speed 0 --out <снимок.png>\n\`\`\`${scheme}`;
 }
 
 export function taskPrompt(c: PromptContext): string {
