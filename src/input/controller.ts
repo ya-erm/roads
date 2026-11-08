@@ -248,6 +248,8 @@ export class Controller {
   moving: TownBuilding | null = null;
   /** Станция, которую игрок переносит: силуэт прилипает к дорогам, как при постройке. */
   movingStation: number | null = null;
+  /** Ж/д станция при переносе станет конечной (true) или проходной (false); null — какой была. */
+  moveTerminal: boolean | null = null;
   /** Ставим склад-здание этой станции: клик в зоне вокруг неё — склад (Esc — отмена). */
   placingWarehouse: number | null = null;
   /** Ставим пристройку этого предприятия: клик в зоне вокруг него — пристройка (Esc — отмена). */
@@ -404,11 +406,20 @@ export class Controller {
     this.onChange();
   }
 
-  /** Начать перенос станции: её силуэт следует за курсором и прилипает к дорогам до клика. */
-  startStationMove(id: number): void {
+  /**
+   * Начать перенос станции: её силуэт следует за курсором и прилипает к дорогам до клика. Ж/д станция —
+   * к путям, как при постановке; terminal — какой она станет на новом месте (не задано — какой была).
+   */
+  startStationMove(id: number, terminal?: boolean): void {
     this.setTool('select');
     this.movingStation = id;
+    this.moveTerminal = terminal ?? null;
     this.onChange();
+  }
+
+  /** Как переносить ж/д станцию: тип на новом месте и поворот в чистом поле (R). */
+  private get railMove(): { terminal?: boolean; angle: number } {
+    return { ...(this.moveTerminal !== null ? { terminal: this.moveTerminal } : {}), angle: this.stationAngle };
   }
 
   /** «Двигать»: под курсором площадка строительной базы, а не перо и не узел дороги, — её номер (её можно перенести). */
@@ -1656,7 +1667,7 @@ export class Controller {
         if (this.movingStation !== null) {
           // Перенос станции: на новое место, с выездом; маршруты идут через неё же.
           const id = this.movingStation;
-          const problem = g.moveStation(id, p, this.snapRadius);
+          const problem = g.moveStation(id, p, this.snapRadius, this.railMove);
           if (problem) this.showError(problem);
           else {
             this.movingStation = null;
@@ -2769,7 +2780,7 @@ export class Controller {
         break;
       case 'KeyR':
         // Поворот ж/д станции, которая ставится в чистом поле.
-        if (this.action === 'station' && this.stationKind === 'rail') {
+        if ((this.action === 'station' && this.stationKind === 'rail') || (this.movingStation !== null && this.game().stations.get(this.movingStation)?.kind === 'rail')) {
           this.stationAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
           this.onChange();
         }
@@ -3594,12 +3605,18 @@ export class Controller {
         const moving = this.movingStation !== null ? g.stations.get(this.movingStation) : undefined;
         if (moving) {
           // Перенос станции: старое место — красным, новое — силуэтом (красным, если нельзя), с выездом и охватом.
-          const plan = g.stationMovePlan(moving.id, p, this.snapRadius);
+          const plan = g.stationMovePlan(moving.id, p, this.snapRadius, this.railMove);
           o.marks.push({ fp: moving.fp, ok: false });
           if (plan.fp) {
             o.station = { fp: plan.fp, ok: plan.ok };
             o.catchmentAt = plan.fp.center;
             o.catchmentR = g.catchmentRadius(moving);
+          }
+          // Ж/д станция: боковые пути на новом месте, а в чистом поле — и главный путь.
+          if (plan.rail) {
+            const main = plan.rail.main;
+            const tracks = plan.rail.tracks.flat();
+            o.railPreview = main ? [...tracks, straightCubic(main.start.pos, main.end.pos)] : tracks;
           }
           const drive = plan.driveway;
           if (drive?.net) o.roads = { net: drive.net, ok: plan.ok, changed: drive.changed };
@@ -3608,7 +3625,11 @@ export class Controller {
             if (b) o.marks.push({ fp: b.fp, ok: false });
           }
           const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
-          o.label = plan.ok ? { text: `Перенести сюда · ${price} · Esc — отмена`, ok: true } : { text: failText(plan.reason, plan.cost, ''), ok: false };
+          const what = moving.kind !== 'rail' ? '' : (this.moveTerminal ?? !!moving.terminal) ? ' конечной' : ' проходной';
+          const turn = plan.rail?.main ? ' · R — повернуть' : '';
+          o.label = plan.ok
+            ? { text: `Перенести сюда${what} · ${price}${turn} · Esc — отмена`, ok: true }
+            : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
         if (this.moving) {

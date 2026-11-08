@@ -2743,6 +2743,14 @@ button.small:hover {
   background: #e2e8ee;
 }
 
+/* Перенос ж/д станции другим типом: схема станции и подпись. */
+button.small.st-retype {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px 3px 6px;
+}
+
 button.primary.small {
   background: var(--accent);
   color: #fff;

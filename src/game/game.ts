@@ -80,6 +80,7 @@ import { BuildContext, Builder, Plan, RoadRequest, Snap } from './build';
 import { diamondPlan, TemplateOptions, templatePlan, TemplatePlan } from './interchange';
 import { cloneNetwork, copyRails, RailPaste } from './railFragment';
 import { chainCoords, chainOffset, trackChain } from './railEdit';
+import { type ExtraTrack, extraTrackGeom, healCuts, stationShape, stripRailStation } from './railStationEdit';
 import { linesForTown } from './townLines';
 import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
@@ -481,6 +482,17 @@ export interface BaysPlan {
   /** Плюс — доплата за новые посты, минус — возврат за убранные. */
   cost: number;
   fp: Footprint | null;
+}
+
+/** Можно ли достроить ж/д вокзалу ещё один путь с платформой, где он ляжет и во что обойдётся. */
+export interface RailTrackPlan extends BaysPlan {
+  geom?: ExtraTrack;
+}
+
+/** Перенос ж/д станции: какой она станет на новом месте (конечной или проходной) и поворот в чистом поле. */
+export interface RailMoveOptions {
+  terminal?: boolean;
+  angle?: number;
 }
 
 const MONTHS = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
@@ -2893,6 +2905,12 @@ export class Game implements BuildContext {
           live.nodeId = s.nodeId;
           live.industryId = s.industryId;
           this.index.add(live);
+        }
+        // Ж/д станция: пути с платформами и тип (достроенный путь, перенос со сменой типа) — как были.
+        if (live.kind === 'rail') {
+          live.platforms = [...(s.platforms ?? [])];
+          if (s.terminal) live.terminal = true;
+          else delete live.terminal;
         }
         // Склады-здания — как были до действия (в индекс — ниже, все разом).
         live.warehouses = s.warehouses;
@@ -6409,12 +6427,13 @@ export class Game implements BuildContext {
   /**
    * Перенос станции в точку p — место, выезд и прилипание как при постройке (stationPlan), только без самой
    * станции и её старого выезда (он снесётся, как при сносе станции; стык остановки на улице остаётся).
-   * Цена — постройка на новом месте минус возврат за снос старой станции и её выезда. Вокзал не переносится.
+   * Цена — постройка на новом месте минус возврат за снос старой станции и её выезда. Ж/д станция переносится
+   * с теми же путями и длиной платформ, конечной или проходной — как в rail (railMovePlan).
    */
-  stationMovePlan(id: number, p: Vec, snapRadius: number): StationPlan & { refund: number } {
+  stationMovePlan(id: number, p: Vec, snapRadius: number, rail: RailMoveOptions = {}): StationPlan & { refund: number } {
     const st = this.stations.get(id);
     if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null, refund: 0 };
-    if (st.kind === 'rail') return { ok: false, reason: 'Ж/д станцию пока не перенести', cost: 0, fp: st.fp, refund: 0 };
+    if (st.kind === 'rail') return this.railMovePlan(st, p, snapRadius, rail);
     const node = this.roads.net.nodes.get(st.nodeId);
     const old = st.kind === 'road' && node?.corridors.length ? this.roadBuilder.bulldoze([...node.corridors]) : null;
     const base = st.kind === 'stop' ? STOP.cost : COST.station;
@@ -6457,8 +6476,9 @@ export class Game implements BuildContext {
    * Переносит станцию (id, имя, пассажиры, груз, посты и маршруты — те же). Машины, что едут к ней, едут
    * к новому месту; стоящие на ней уезжают уже оттуда. Возвращает причину, если не получилось.
    */
-  moveStation(id: number, p: Vec, snapRadius: number): string | null {
+  moveStation(id: number, p: Vec, snapRadius: number, rail: RailMoveOptions = {}): string | null {
     const st = this.stations.get(id);
+    if (st?.kind === 'rail') return this.moveRailStation(st, p, snapRadius, rail);
     const plan = this.stationMovePlan(id, p, snapRadius);
     if (!st || !plan.ok || !plan.fp || !plan.driveway?.net || !plan.nodePos) return plan.reason ?? 'Нельзя перенести';
     // Узел на новом месте уже есть в сети плана: машины к станции едут туда (иначе потеряли бы дорогу).
@@ -6491,6 +6511,200 @@ export class Game implements BuildContext {
     st.industryId = plan.industryId ?? null;
     this.index.add(st);
     this.computeCatchment(st);
+    return null;
+  }
+
+  /** Пути без вокзала st (копия сети) — для примерки переноса; пересчитываются, только когда сеть поменялась. */
+  private railMoveBase: { id: number; version: number; net: Network; worth: number } | null = null;
+
+  /**
+   * Пути, какими они станут, если разобрать вокзал st: боковые пути со съездами прочь, главный путь в местах,
+   * где его резала станция, снова цельный — на его месте можно поставить станцию другого типа. worth — цена
+   * разобранных путей (за них — возврат, как при сносе станции).
+   */
+  private railsWithout(st: Station): { net: Network; worth: number } {
+    const c = this.railMoveBase;
+    if (c && c.id === st.id && c.version === this.net.version) return c;
+    const net = cloneNetwork(this.net);
+    const { worth, cuts } = stripRailStation(net, st, (s) => this.builder.segmentCost(s));
+    healCuts(net, cuts);
+    net.rebuild();
+    this.railMoveBase = { id: st.id, version: this.net.version, net, worth };
+    return this.railMoveBase;
+  }
+
+  /** Возврат за снос вокзала st: здание и платформы, боковые пути со съездами (их цена — worth). */
+  private railRefund(st: Station, worth: number): number {
+    const length = clampRailLength(this.net.segments.get(st.platforms[0])?.length ?? RAIL_STATION.platform);
+    return Math.round((railStationFee(st.platforms.length, length) + worth) * COST.refundRatio);
+  }
+
+  /**
+   * Перенос ж/д станции в точку p: та же постановка, что у новой (railStationPlan) — на прямой путь, к тупику
+   * (конечная) или в чистое поле, — но на путях без самой станции (railsWithout): так её можно поставить и на
+   * прежнее место, сменив тип. Путей и длина платформ — как были; terminal — конечной или проходной она станет
+   * (по умолчанию — какой была). Цена — новая станция минус возврат за снос старой; возврат идёт и в бюджет.
+   */
+  private railMovePlan(st: Station, p: Vec, snapRadius: number, opts: RailMoveOptions): StationPlan & { refund: number } {
+    const { net, worth } = this.railsWithout(st);
+    const refund = this.railRefund(st, worth);
+    const length = clampRailLength(this.net.segments.get(st.platforms[0])?.length ?? RAIL_STATION.platform);
+    const terminal = opts.terminal ?? !!st.terminal;
+    const real = this.net;
+    const money = this.money;
+    const self = this as unknown as { net: Network };
+    this.index.remove(st);
+    self.net = net;
+    this.money = money + refund;
+    try {
+      const plan = this.railStationPlan(p, snapRadius, opts.angle ?? 0, st.platforms.length, length, terminal);
+      return { ...plan, cost: plan.cost - refund, refund };
+    } finally {
+      this.money = money;
+      self.net = real;
+      this.index.add(st);
+    }
+  }
+
+  /**
+   * Переносит ж/д станцию (id, имя, пассажиры, груз и маршруты — те же; правила «на какой путь» — по номеру пути):
+   * старые боковые пути разбираются, главный срастается, на новом месте строится станция с тем же числом путей.
+   * Поезда на разобранных путях встают на платформу заново, как после сноса путей под ними.
+   */
+  private moveRailStation(st: Station, p: Vec, snapRadius: number, opts: RailMoveOptions): string | null {
+    const check = this.railMovePlan(st, p, snapRadius, opts);
+    if (!check.ok) return check.reason ?? 'Нельзя перенести';
+    const tracks = st.platforms.length;
+    const length = clampRailLength(this.net.segments.get(st.platforms[0])?.length ?? RAIL_STATION.platform);
+    const terminal = opts.terminal ?? !!st.terminal;
+    const from = st.fp.center;
+    const saved = structuredClone(this.net.serialize());
+    const money = this.money;
+    const { worth, cuts } = stripRailStation(this.net, st, (s) => this.builder.segmentCost(s));
+    const refund = this.railRefund(st, worth);
+    healCuts(this.net, cuts);
+    this.index.remove(st);
+    this.money = money + refund;
+    const plan = this.railStationPlan(p, snapRadius, opts.angle ?? 0, tracks, length, terminal);
+    const before = this.money;
+    const platforms = plan.ok && plan.rail && plan.fp ? this.buildRailStation(st.id, plan.rail) : [];
+    if (!plan.fp || !platforms.length) {
+      // Не вышло (сеть оказалась не такой, как при примерке): всё как было.
+      this.money = money;
+      this.net.replaceWith(saved);
+      this.networkChanged();
+      this.index.add(st);
+      return plan.reason ?? 'Нельзя перенести';
+    }
+    this.incomeMonth += refund;
+    this.ledger.sales += refund;
+    this.spend(plan.cost - (before - this.money));
+    st.fp = plan.fp;
+    st.platforms = platforms;
+    if (plan.rail?.terminal) st.terminal = true;
+    else delete st.terminal;
+    st.bays = platforms.length;
+    this.index.add(st);
+    this.computeCatchment(st);
+    this.railMoveBase = null;
+    this.journal.add('station>', {
+      id: st.id,
+      name: st.name,
+      from: [Math.round(from.x), Math.round(from.y)],
+      pos: [Math.round(st.fp.center.x), Math.round(st.fp.center.y)],
+      ...(st.terminal ? { terminal: 1 } : {}),
+    });
+    return null;
+  }
+
+  /**
+   * Достроить ж/д вокзалу ещё один путь с платформой: рядом с крайним, со стороны здания (здание отодвигается
+   * на путь дальше, у конечной — в торце становится шире), съезды — от стрелок горловины (extraTrackGeom).
+   * Цена — путь и прибавка к цене вокзала за платформу (railStationFee). Мешают — как при постановке станции.
+   */
+  railTrackPlan(id: number): RailTrackPlan {
+    const st = this.stations.get(id);
+    if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null };
+    if (st.kind !== 'rail') return { ok: false, reason: 'Пути с платформами — только у ж/д станции', cost: 0, fp: st.fp };
+    const k = st.platforms.length;
+    if (k >= RAIL_STATION.maxTracks) return { ok: false, reason: `Больше ${RAIL_STATION.maxTracks} путей нельзя`, cost: 0, fp: st.fp };
+    const shape = stationShape(this.net, st);
+    if (!shape) return { ok: false, reason: 'Пути станции перестроены — новый не проложить', cost: 0, fp: st.fp };
+    const geom = extraTrackGeom(this.net, st, shape);
+    const L = clampRailLength(geom.platform);
+    let length = 0;
+    const samples: Vec[] = [];
+    for (const c of geom.curves) {
+      const lut = new CurveLUT(c);
+      length += lut.length;
+      for (let s = 8; s < lut.length; s += 8) samples.push(lut.pointAt(s));
+    }
+    const cost = Math.round(length * specCost(RAIL_SPEC)) + railStationFee(k + 1, L) - railStationFee(k, L);
+    const fp = geom.fp;
+    const fail = (reason: string): RailTrackPlan => ({ ok: false, reason, cost, fp, geom });
+    // Свои пути не мешают: платформы, съезды к ним и главный путь у стрелок горловины (в том числе за ними).
+    const net = this.net;
+    const nodes = new Set<number>([...shape.switches.filter((x): x is number => x !== null)]);
+    for (const n of net.nodes.values()) if (n.buildingId === st.id) nodes.add(n.id);
+    const own = new Set<number>();
+    for (const nid of nodes) for (const sid of net.node(nid).segments) own.add(sid);
+    for (const b of geom.branches) if (b.split) own.add(b.split.seg);
+    if (!this.inBounds(fp.center, 30) || samples.some((q) => !this.inBounds(q, 20))) return fail('За краем карты');
+    if (this.isWater(fp.center, footprintRadius(fp) * 0.6) || samples.some((q) => this.isWater(q, RAIL_HALF))) return fail('Мешает вода');
+    this.index.remove(st);
+    try {
+      if (this.index.overlaps(fp, 3) || samples.some((q) => this.blocked(q, RAIL_HALF + 2))) return fail('Мешает здание');
+    } finally {
+      this.index.add(st);
+    }
+    const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+    const v = { x: -u.y, y: u.x };
+    const probes = [...samples];
+    for (let i = -2; i <= 2; i++) for (let j = -1; j <= 1; j++) probes.push(add(fp.center, add(scale(u, (i * fp.w) / 4), scale(v, (j * fp.h) / 2))));
+    for (const q of probes) {
+      for (const s of net.segmentsNear(q, 40)) {
+        if (own.has(s.id)) continue;
+        if (s.lut.closest(q).d < halfWidth(s.spec) + RAIL_HALF + 2) return fail(isRail(s.spec) ? 'Мешает другой путь' : 'Мешает дорога');
+      }
+      for (const c of this.roads.net.corridorsNear(q, 60)) {
+        const hit = c.lut.closest(q);
+        if (hit.d < halfAtS(c, hit.s) + RAIL_HALF + 2) return fail('Мешает дорога');
+      }
+    }
+    if (cost > this.budget) return fail('Не хватает денег');
+    return { ok: true, cost, fp, geom };
+  }
+
+  /** Достраивает ж/д вокзалу путь с платформой (railTrackPlan); поезда на станции и маршруты — как были. */
+  addRailTrack(id: number): string | null {
+    const plan = this.railTrackPlan(id);
+    const st = this.stations.get(id);
+    if (!plan.ok || !plan.geom || !plan.fp || !st) return plan.reason ?? 'Нельзя';
+    this.checkpoint('путь станции');
+    const net = this.net;
+    // Стрелки: существующие или новые — разрезом главного пути дальше от станции.
+    const at = plan.geom.branches.map((b) => {
+      if (b.node !== undefined || !b.split) return b.node!;
+      const s = net.segment(b.split.seg);
+      return net.splitSegmentDetailed(s.id, s.lut.tAt(b.split.s)).node.id;
+    });
+    const [down, platform, up] = plan.geom.curves;
+    const a = net.addNode(down.p3, 0, id);
+    const b = net.addNode(platform.p3, 0, id);
+    net.addSegment(at[0], a.id, { ...down, p0: net.node(at[0]).pos }, RAIL_SPEC);
+    const seg = net.addSegment(a.id, b.id, platform, RAIL_SPEC);
+    seg.platform = id;
+    if (up && at[1] !== undefined) net.addSegment(b.id, at[1], { ...up, p3: net.node(at[1]).pos }, RAIL_SPEC);
+    this.spend(plan.cost);
+    this.index.remove(st);
+    st.platforms = [...st.platforms, seg.id];
+    st.bays = st.platforms.length;
+    st.fp = plan.fp;
+    this.index.add(st);
+    this.computeCatchment(st);
+    this.networkChanged();
+    this.journal.add('station+', { id, name: st.name, tracks: st.platforms.length, $: plan.cost });
+    this.commit();
     return null;
   }
 

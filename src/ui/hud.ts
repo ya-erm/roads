@@ -1665,8 +1665,14 @@ export class Hud {
         break;
       }
       case 'move-station':
-        c.startStationMove(Number(d.id));
+        // Ж/д станцию можно перенести и другим типом: data-terminal — конечной (1) или проходной (0).
+        c.startStationMove(Number(d.id), d.terminal === undefined ? undefined : d.terminal === '1');
         break;
+      case 'st-track': {
+        const problem = g.addRailTrack(Number(d.id));
+        if (problem) g.notify(problem);
+        break;
+      }
       case 'base-move':
         // Перенос строительной базы: площадка за курсором у дороги, клик — туда (Esc — отмена).
         c.startBaseMove(Number(d.id));
@@ -3057,6 +3063,16 @@ export class Hud {
             data-action="st-bays" data-id="${st.id}" data-d="1" class="${more.ok ? '' : 'off'}" title="${esc(plusTitle)}">+</button></span>
           ${more.ok ? `<span class="muted">+${money(STATION.bayCost)}</span>` : ''}</div>`;
       }
+      // Пути ж/д станции: схема платформ и «+» — достроить ещё один путь (с ценой или причиной, почему нельзя).
+      if (st.kind === 'rail') {
+        const more = g.railTrackPlan(st.id);
+        const n = st.platforms.length;
+        const plusTip = more.ok ? `Достроить путь с платформой · ${money(more.cost)}` : (more.reason ?? '');
+        baysRow = `<div class="icon-row"><span class="lbl2">Пути</span>
+          <span class="stepper bays tracks"><b>${platformsSvg(n)}<span>${n}</span></b><button
+            data-action="st-track" data-id="${st.id}" class="${more.ok ? '' : 'off'}" data-tip="${esc(plusTip)}">+</button></span>
+          ${more.ok ? `<span class="muted">+${money(more.cost)}</span>` : ''}</div>`;
+      }
       const storageRow = st.kind === 'stop' ? '' : this.storageRowHtml(st);
       // Остановка — только для пассажиров: переключать нечего.
       const servesRow = st.kind === 'stop' ? '' : `<div class="serves-row"><span class="lbl2">Работает с</span>${this.servesHtml(st.serves, 'st-serves', String(st.id))}</div>`;
@@ -3091,7 +3107,11 @@ export class Hud {
         <p class="muted">${towns ? `Город: ${esc(towns)} · ` : ''}жителей в охвате ${st.catchPop}</p>
         <div class="actions">${
           st.kind === 'rail'
-            ? '<button class="small" disabled title="Ж/д станцию пока не перенести: платформы и стрелки остаются на путях">Переместить</button>'
+            ? `<button class="small" data-action="move-station" data-id="${st.id}" data-tip="Станция встанет на другой путь с теми же путями и платформами; маршруты через неё сохранятся">Переместить</button><button
+                class="small st-retype" data-action="move-station" data-id="${st.id}" data-terminal="${st.terminal ? 0 : 1}"
+                data-tip="${st.terminal ? 'Перенести проходной: пути насквозь, поезда идут дальше' : 'Перенести конечной: к тупику пути или в поле, пути кончатся упорами'}">${
+                  st.terminal ? throughStationSvg(26) : terminalStationSvg(26)
+                }<span>${st.terminal ? 'Проходной' : 'Конечной'}</span></button>`
             : `<button class="small" data-action="move-station" data-id="${st.id}" title="Станция встанет у другой дороги; маршруты через неё сохранятся">Переместить</button>`
         }</div></section>`;
     }
