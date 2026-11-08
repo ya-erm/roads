@@ -342,12 +342,10 @@ async function work(brief: Task): Promise<void> {
     return;
   }
   const description = await descriptionOf(card);
-  const untitled = !card.title?.trim();
-  // В режиме --chat название придумывает сессия и присылает в отчёте; до того в журнале — первая строка описания.
-  const title = card.title?.trim() || (chat ? firstLine(description) : await makeTitle(description));
-  const taken = await patch(card.id, (c) =>
-    QUEUE.includes(c.status) ? { status: 'in_progress', ...(c.title?.trim() || chat ? {} : { title }) } : null,
-  );
+  // Название без него придумываем сразу, и в режиме --chat тоже: на доске задача в работе — уже с названием.
+  const title = card.title?.trim() || (await makeTitle(description));
+  const untitled = !card.title?.trim() && title === firstLine(description);
+  const taken = await patch(card.id, (c) => (QUEUE.includes(c.status) ? { status: 'in_progress', ...(c.title?.trim() ? {} : { title }) } : null));
   if (!taken) {
     log(`Задачу «${title}» уже кто-то взял или убрал из очереди — пропускаю.`);
     return;
