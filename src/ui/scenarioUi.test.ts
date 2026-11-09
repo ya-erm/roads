@@ -332,6 +332,23 @@ describe('Брифинг сценария', () => {
     expect(html.slice(0, foot)).not.toContain('data-action="begin"');
   });
 
+  it('«Со строительством»: этап A — с запасом 🚧 на стройку в подсказке, у целей — ⚡ к прежнему сроку', () => {
+    const game = new Game({ ...DEFAULT_SETTINGS, seed: 7, scenario: { difficulty: 'normal', challenge: false }, construction: 'build' });
+    const sc = game.scenario!;
+    const build = sc.state.brief.build!;
+    expect(build).toBeGreaterThan(0);
+    const html = briefHtml(game);
+    const stepA = html.slice(html.indexOf('class="sc-step'), html.indexOf('</div>', html.indexOf('class="sc-step')));
+    expect(stepA).toContain(`data-tip="Этап A «Основание компании», около ${10 + build} мин (🚧 +${build} мин на стройку, ⚡ — за 10 мин)`);
+    expect(stepA).not.toContain('title=');
+    const goals = html.slice(html.indexOf('class="brief-goals"'), html.indexOf('Стартовый контракт'));
+    expect(goals).toContain(`⏳ ${10 + build} мин`);
+    expect(goals).toContain('⚡ 10 мин');
+    // «Мгновенно» — без запаса.
+    const instant = briefHtml(new Game({ ...DEFAULT_SETTINGS, seed: 7, scenario: { difficulty: 'normal', challenge: false } }));
+    expect(instant).not.toContain('🚧');
+  });
+
   it('цели до старта — без пустой полоски и «0 / N», но со сроком, наградой и «почему»', () => {
     const { game, sc } = scenarioWithOffers();
     const html = briefHtml(game);

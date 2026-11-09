@@ -34,6 +34,7 @@ import {
   RegionInfo,
   roadMonths,
   routeCost,
+  buildAllowance,
   buildReach,
   Supply,
   supplyEffort,
@@ -248,6 +249,8 @@ export function startScenario(sc: Scenario): void {
   const months = Math.round(PHASES[0].months * diff.time);
   const freight = freightPlan(sc, months);
   const pax = paxPlan(sc, months);
+  // «Со строительством» к сроку этапа A — запас на стройку дорог обеих линий (объёмы — по прежнему сроку).
+  const build = buildAllowance(game, [freight?.supply.d, pax?.d].filter((d): d is number => d !== undefined));
   const paxMain = (arch.pax >= 0.5 && !!pax) || !freight;
   const main = paxMain ? pax : freight;
   // Капитал: на главную цель с запасом по сложности; на вторую цель — уже впритык или в кредит.
@@ -262,19 +265,27 @@ export function startScenario(sc: Scenario): void {
     capital,
     loan,
     loanMax: diff.loanMax,
-    months: Math.round(PHASES.reduce((sum, p) => sum + p.months, 0) * diff.time),
+    months: Math.round(PHASES.reduce((sum, p) => sum + p.months, 0) * diff.time) + build,
+    build: build || undefined,
     facts: describeRegion(sc, r),
   };
   // Кредит уже в капитале: часть стартовых денег заёмная, проценты — с первого месяца.
   if (loan > 0)
     s.brief.facts.unshift(`Из капитала ${moneyText(loan)} — заёмные: ${Math.round(ECONOMY.loanRate * 100)}% в месяц, гасить можно в «Финансах»`);
-  phaseA(sc, months, paxMain, freight, pax);
+  phaseA(sc, { months: months + build, fast: build ? months : undefined }, paxMain, freight, pax);
   // Стартовый контракт: груз городу, которому он нужен, если его можно получить на карте.
   startContract(sc);
   sc.log('phase', `Этап A: ${PHASES[0].name}`);
 }
 
-function phaseA(sc: Scenario, months: number, paxMain: boolean, freight: FreightPlan | null, pax: PaxPlan | null): void {
+/** Срок целей этапа A и быстрый срок (есть, когда к сроку добавлен запас на стройку). */
+interface Term {
+  months: number;
+  fast?: number;
+}
+
+function phaseA(sc: Scenario, term: Term, paxMain: boolean, freight: FreightPlan | null, pax: PaxPlan | null): void {
+  const { months, fast } = term;
   const diff = sc.difficulty;
   const critical = diff.critical;
   const paxGoal = () =>
@@ -285,6 +296,7 @@ function phaseA(sc: Scenario, months: number, paxMain: boolean, freight: Freight
         role: 'main',
         phase: 0,
         months,
+        fast,
         critical,
         why: `${pax.a.name} и ${pax.b.name} в ${km(pax.d)} друг от друга, жителям нужно ездить между ними. Хватит ${pax.fleet} автобусов, дорога и две станции — около ${moneyText(pax.cost)}.`,
         reward: { money: roundMoney(pax.cost * 0.5), reputation: 0 },
@@ -299,6 +311,7 @@ function phaseA(sc: Scenario, months: number, paxMain: boolean, freight: Freight
         role: 'main',
         phase: 0,
         months,
+        fast,
         critical,
         why: `${freight.supply.to.name} ждёт «${CARGO[freight.supply.cargo].name}». Ближайший поставщик — ${freight.supply.from.name}, ${km(freight.supply.d)}. Хватит ${freight.fleet} грузовиков — около ${moneyText(freight.cost)} вместе с дорогой.`,
         reward: { money: roundMoney(freight.cost * 0.5), reputation: 0 },
@@ -310,7 +323,7 @@ function phaseA(sc: Scenario, months: number, paxMain: boolean, freight: Freight
   if (!main) {
     sc.addObjective(
       { kind: 'passengers', amount: round10(120 * diff.demand), towns: null },
-      { role: 'main', phase: 0, months, critical, why: 'Первые пассажирские линии компании.', reward: { money: 60_000, reputation: 0 } },
+      { role: 'main', phase: 0, months, fast, critical, why: 'Первые пассажирские линии компании.', reward: { money: 60_000, reputation: 0 } },
     );
   }
   paxMain = main?.params.kind === 'passengers';
@@ -323,6 +336,7 @@ function phaseA(sc: Scenario, months: number, paxMain: boolean, freight: Freight
         role: 'goal',
         phase: 0,
         months,
+        fast,
         why: `${sp.from.name} → ${sp.to.name}, ${km(sp.d)}: первая грузовая линия.`,
         reward: { money: roundMoney(freight.cost * 0.3) },
         related: [refOf(sp.from), refOf(sp.to)],
@@ -335,6 +349,7 @@ function phaseA(sc: Scenario, months: number, paxMain: boolean, freight: Freight
         role: 'goal',
         phase: 0,
         months,
+        fast,
         why: `Соединить ${pax.a.name} и ${pax.b.name} (${km(pax.d)}) автобусами.`,
         reward: { money: roundMoney(pax.cost * 0.3) },
         related: [refOf(pax.a), refOf(pax.b)],
@@ -350,6 +365,7 @@ function phaseA(sc: Scenario, months: number, paxMain: boolean, freight: Freight
       role: 'goal',
       phase: 0,
       months,
+      fast,
       why: 'Компания должна зарабатывать на перевозках больше, чем тратит на транспорт, ремонт дорог и проценты.',
       reward: { money: roundMoney(amount * 2), reputation: 3 },
     },
@@ -373,6 +389,9 @@ function startContract(sc: Scenario): void {
   if (!best.length) return;
   const o = sc.rng.pick(best);
   const months = Math.round(6 * TERM_SCALE * sc.difficulty.time);
+  // «Со строительством» — запас на стройку обеих дорог цепочки: сырьё → завод и завод → город; прежний срок — быстрый.
+  const raw = rawSupplies(game).find((s) => s.to === o.plant);
+  const build = buildAllowance(game, raw ? [raw.d, o.d] : [o.d]);
   // Не меньше базовой нормы города за прежние три месяца (6 мин) — без роста с населением: объём контракта прежний.
   const amount = round10(Math.max(TOWN_NEED * 3 * TERM_SCALE, Math.min(cargoPotential(game, o.cargo, o.town.center, months) * 0.25, 160) * sc.difficulty.demand));
   sc.tryObjective(
@@ -380,7 +399,8 @@ function startContract(sc: Scenario): void {
     {
       role: 'contract',
       phase: null,
-      months,
+      months: months + build,
+      fast: build ? months : undefined,
       offer: true,
       why: `Торговая сеть города ${o.town.name} ищет перевозчика: нужны «${CARGO[o.cargo].name}». Их делает ${o.plant.name} (${km(o.d)}) — из сырья, которое ещё нужно туда привезти.`,
       reward: { money: roundMoney(amount * CARGO[o.cargo].rate * 30 * sc.rewardFactor), reputation: 4 },

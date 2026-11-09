@@ -47,8 +47,11 @@ export interface ObjectiveOptions {
   offer?: boolean;
   points?: number;
   title?: string;
-  /** false — без быстрого срока (последняя попытка). */
-  fast?: false;
+  /**
+   * Быстрый срок: false — без него (последняя попытка); число — через столько месяцев (прежний срок, к которому
+   * «Со строительством» добавлен запас на стройку); нет — прикидка generator.fastMonths.
+   */
+  fast?: false | number;
 }
 
 /** Хеш seed для своего генератора: посторонние изменения игры не сдвигают случайности сценария. */
@@ -411,7 +414,10 @@ export class Scenario {
   addObjective(params: ObjectiveParams, opts: ObjectiveOptions): Objective {
     const now = this.today;
     const offer = !!opts.offer;
-    const fast = opts.months !== null && opts.fast !== false && opts.role !== 'extra' ? fastMonths(this.game, params, opts.months, this.state.settings.difficulty) : null;
+    const fast =
+      opts.months === null || opts.fast === false || opts.role === 'extra'
+        ? null
+        : (opts.fast ?? fastMonths(this.game, params, opts.months, this.state.settings.difficulty));
     const o: Objective = {
       id: this.nextId('o'),
       params,

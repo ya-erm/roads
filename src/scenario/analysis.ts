@@ -189,6 +189,26 @@ export function roadMonths(game: Game, d: number): number {
   return game.buildMode ? (d * ROAD_DETOUR) / CONSTRUCTION.speed / MONTH_LENGTH : 0;
 }
 
+/**
+ * «Со строительством»: запас к сроку первых заданий — во столько раз больше прикидки roadMonths. Прикидка — улица у
+ * самой базы одной бригадой, а на деле бригада на старте одна и строит дороги по очереди, база не рядом (вдвое
+ * медленнее на CONSTRUCTION.reach от неё), магистраль строится в полтора раза дольше улицы (журнал 815481735:
+ * линии этапа A пошли только на 6-й и 11-й минуте из 10).
+ */
+export const BUILD_SLACK = 1.5;
+/** Запас на стройку, месяцев: не меньше и не больше (2 и 6 мин). */
+export const BUILD_ALLOWANCE = { min: 1 * TERM_SCALE, max: 3 * TERM_SCALE } as const;
+
+/**
+ * «Со строительством»: сколько месяцев добавить к сроку заданий, для которых надо построить дороги на ds по прямой
+ * (по очереди, одной бригадой) — целыми минутами. «Мгновенно» или дорог нет — 0.
+ */
+export function buildAllowance(game: Game, ds: readonly number[]): number {
+  if (!game.buildMode || !ds.length) return 0;
+  const months = ds.reduce((sum, d) => sum + roadMonths(game, d), 0) * BUILD_SLACK;
+  return Math.min(BUILD_ALLOWANCE.max, Math.max(BUILD_ALLOWANCE.min, Math.ceil(months)));
+}
+
 /** «Со строительством»: на какое расстояние по прямой дорога строится не дольше seconds (для заданий этапа A). */
 export function buildReach(seconds: number): number {
   return (seconds * CONSTRUCTION.speed) / ROAD_DETOUR;

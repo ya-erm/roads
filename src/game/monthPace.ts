@@ -140,6 +140,7 @@ function repaceScenario(sc: ScenarioState, p: Pace): void {
     q.delay = Math.round(q.delay * r);
   }
   sc.brief.months = Math.round(sc.brief.months * r);
+  if (sc.brief.build !== undefined) sc.brief.build = Math.round(sc.brief.build * r);
   for (const w of Object.values(sc.watch)) {
     w.low = Math.round(w.low * r);
     w.idle = Math.round(w.idle * r);

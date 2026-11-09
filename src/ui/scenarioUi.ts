@@ -284,8 +284,11 @@ function stepsHtml(sc: Scenario): string {
     const done = i < s.phase || s.status === 'won';
     const now = i === s.phase && s.status !== 'won';
     const cls = done ? 'done' : now ? (s.status === 'lost' ? 'lost' : 'now') : '';
-    const months = Math.round(p.months * sc.difficulty.time);
-    return `<div class="sc-step ${cls}" title="Этап ${LETTERS[i]} «${p.name}», около ${monthsSpan(months)}. ${p.hint}">
+    // Этап A «Со строительством» — с запасом на стройку дорог: прежний срок у его целей — быстрый (⚡).
+    const build = i === 0 ? (s.brief.build ?? 0) : 0;
+    const months = Math.round(p.months * sc.difficulty.time) + build;
+    const span = build ? `${monthsSpan(months)} (🚧 +${monthsSpan(build)} на стройку, ⚡ — за ${monthsSpan(months - build)})` : monthsSpan(months);
+    return `<div class="sc-step ${cls}" data-tip="Этап ${LETTERS[i]} «${p.name}», около ${span}. ${p.hint}">
       <b>${done ? '✓' : s.status === 'lost' && now ? '✗' : LETTERS[i]}</b><small>${p.short}</small></div>`;
   });
   return `<div class="sc-steps">${steps.join('<i class="sc-step-line"></i>')}</div>`;
