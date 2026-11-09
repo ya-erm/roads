@@ -21,7 +21,11 @@ import {
   uploadAttachments,
   uploadManifest,
   UploadError,
+  UPLOAD_SENT_SHARE,
+  xhrPost,
+  xhrResponse,
   type Attachment,
+  type PostFile,
   type ReportInfo,
 } from './report';
 import { parseSpot } from './spot';
@@ -92,6 +96,90 @@ describe('Загрузка файлов отчёта на доску', () => {
     const quiet = fakeBoard();
     await expect(uploadAttachments(huge, { fetch: quiet.fetch })).rejects.toBeInstanceOf(UploadError);
     expect(quiet.calls).toHaveLength(0);
+  });
+
+  it('с отправкой post у каждого файла своя полоска: 0, доли отправки до UPLOAD_SENT_SHARE, 1 — когда принят', async () => {
+    const board = fakeBoard();
+    const posted: string[] = [];
+    // Отправка файла: половина байтов, все байты, затем ответ загрузчика (тем же fakeBoard).
+    const post: PostFile = async (url, body, sent) => {
+      posted.push(url);
+      sent(0.5);
+      sent(1);
+      return board.fetch(url, { method: 'POST', body });
+    };
+    const steps: string[] = [];
+    const out = await uploadAttachments(files(), { fetch: board.fetch, post, base: 'https://board', path: '/up', onFile: (k, p) => steps.push(`${k}:${p}`) });
+    // Пакет создаётся через fetch, файлы — только через post.
+    expect(board.calls[0].url).toBe('https://board/up?action=create');
+    expect(posted).toEqual(['https://board/up?batch=b-1&file=0', 'https://board/up?batch=b-1&file=1', 'https://board/up?batch=b-1&file=2']);
+    const half = 0.5 * UPLOAD_SENT_SHARE;
+    expect(steps).toEqual(
+      ['shot', 'journal', 'save'].flatMap((k) => [`${k}:0`, `${k}:${half}`, `${k}:${UPLOAD_SENT_SHARE}`, `${k}:1`]),
+    );
+    expect(out.map((u) => u.kind)).toEqual(['shot', 'journal', 'save']);
+  });
+
+  it('файл не принят — его полоска не доходит до 1, следующие не начинаются', async () => {
+    const broken = fakeBoard({ at: 2, status: 500 });
+    const steps: string[] = [];
+    await expect(uploadAttachments(files(), { fetch: broken.fetch, onFile: (k, p) => steps.push(`${k}:${p}`) })).rejects.toBeInstanceOf(UploadError);
+    expect(steps).toEqual(['shot:0', 'shot:1', 'journal:0']);
+  });
+
+  it('xhrPost: байты POST без кук, прогресс отправки долей, ответ — как у fetch; сбой сети — TypeError', async () => {
+    class FakeXhr {
+      static last: FakeXhr;
+      opened = '';
+      headers: Record<string, string> = {};
+      withCredentials = true;
+      body: unknown;
+      status = 0;
+      responseText = '';
+      upload: { onprogress?: (e: { lengthComputable: boolean; loaded: number; total: number }) => void } = {};
+      onload?: () => void;
+      onerror?: () => void;
+      constructor() {
+        FakeXhr.last = this;
+      }
+      open(method: string, url: string) {
+        this.opened = `${method} ${url}`;
+      }
+      setRequestHeader(k: string, v: string) {
+        this.headers[k] = v;
+      }
+      send(body: unknown) {
+        this.body = body;
+      }
+    }
+    const post = xhrPost(FakeXhr as unknown as { new (): XMLHttpRequest });
+    const body = new Blob([new Uint8Array(200)]);
+    const sent: number[] = [];
+    const reply = post('https://board/up?batch=b&file=0', body, (p) => sent.push(p));
+    const x = FakeXhr.last;
+    expect(x.opened).toBe('POST https://board/up?batch=b&file=0');
+    expect(x.withCredentials).toBe(false);
+    expect(x.headers['Content-Type']).toBe('application/octet-stream');
+    expect(x.body).toBe(body);
+    x.upload.onprogress!({ lengthComputable: true, loaded: 50, total: 200 });
+    // Без длины в событии — по размеру файла.
+    x.upload.onprogress!({ lengthComputable: false, loaded: 200, total: 0 });
+    x.status = 201;
+    x.responseText = '{"url":"https://board/f"}';
+    x.onload!();
+    const r = await reply;
+    expect(sent).toEqual([0.25, 1]);
+    expect(r.status).toBe(201);
+    expect(await r.json()).toEqual({ url: 'https://board/f' });
+
+    const failed = post('https://board/up', body, () => {});
+    FakeXhr.last.onerror!();
+    await expect(failed).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it('ответ XMLHttpRequest без тела (204) не ломает Response', () => {
+    expect(xhrResponse(204, '').status).toBe(204);
+    expect(xhrResponse(500, 'x').ok).toBe(false);
   });
 
   it('ответы загрузчика: id пакета и ссылка — и во вложенном виде', () => {

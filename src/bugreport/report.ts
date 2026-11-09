@@ -96,12 +96,57 @@ async function readJson(r: Response): Promise<Json> {
   return json;
 }
 
+/**
+ * Отправка одного файла (POST байтами) с прогрессом: sent(доля 0…1) — по мере ухода байтов. У fetch прогресса
+ * отправки нет, поэтому в браузере — XMLHttpRequest (xhrPost).
+ */
+export type PostFile = (url: string, body: Blob, sent: (fraction: number) => void) => Promise<Response>;
+
+/**
+ * Какую долю полоски файла занимает отправка байтов: остаток — ответ загрузчика (картинку он ещё пережимает
+ * в WebP), иначе полоска стояла бы полной, пока файл на самом деле не принят.
+ */
+export const UPLOAD_SENT_SHARE = 0.9;
+
 export interface UploadOptions {
   fetch: typeof fetch;
+  /** Отправка файла с прогрессом; нет — файлы уходят через fetch, полоска прыгает от 0 сразу к 1. */
+  post?: PostFile;
   /** Адрес сервиса досок и путь загрузчика (по умолчанию — из BUG_REPORT). */
   base?: string;
   path?: string;
   onProgress?: (done: number, total: number) => void;
+  /** Прогресс каждого файла: 0 — пошёл, 1 — загрузчик принял и вернул ссылку. */
+  onFile?: (kind: AttachKind, fraction: number) => void;
+}
+
+/** Ответ XMLHttpRequest как Response: дальше он разбирается так же, как ответ fetch. */
+export function xhrResponse(status: number, text: string): Response {
+  // У 204/205/304 тела быть не может — конструктор Response на нём падает.
+  return new Response(status === 204 || status === 205 || status === 304 ? null : text, { status });
+}
+
+/**
+ * Отправка файла через XMLHttpRequest — ради upload.onprogress. Как у fetch с credentials: 'omit' — без кук
+ * (withCredentials выключен); сеть или CORS не пустили — TypeError, как бросил бы fetch.
+ */
+export function xhrPost(Xhr: { new (): XMLHttpRequest } = XMLHttpRequest): PostFile {
+  return (url, body, sent) =>
+    new Promise<Response>((resolve, reject) => {
+      const xhr = new Xhr();
+      xhr.open('POST', url);
+      xhr.withCredentials = false;
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.upload.onprogress = (e) => {
+        const total = e.lengthComputable && e.total > 0 ? e.total : body.size;
+        if (total > 0) sent(Math.min(1, e.loaded / total));
+      };
+      xhr.onload = () => resolve(xhrResponse(xhr.status, xhr.responseText));
+      xhr.onerror = () => reject(new TypeError('Сеть не пустила файл'));
+      xhr.ontimeout = () => reject(new TypeError('Загрузка файла не дождалась ответа'));
+      xhr.onabort = () => reject(new TypeError('Загрузка файла прервана'));
+      xhr.send(body);
+    });
 }
 
 /**
@@ -127,15 +172,20 @@ export async function uploadAttachments(files: Attachment[], opts: UploadOptions
   opts.onProgress?.(0, files.length);
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
+    const url = `${api}?batch=${encodeURIComponent(batch)}&file=${i}`;
+    opts.onFile?.(f.kind, 0);
     const json = await readJson(
-      await opts.fetch(`${api}?batch=${encodeURIComponent(batch)}&file=${i}`, {
-        method: 'POST',
-        credentials: 'omit',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: f.data,
-      }),
+      opts.post
+        ? await opts.post(url, f.data, (p) => opts.onFile?.(f.kind, p * UPLOAD_SENT_SHARE))
+        : await opts.fetch(url, {
+            method: 'POST',
+            credentials: 'omit',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: f.data,
+          }),
     );
     out.push({ kind: f.kind, name: f.name, ...parseUploaded(json) });
+    opts.onFile?.(f.kind, 1);
     opts.onProgress?.(i + 1, files.length);
   }
   return out;

@@ -87,6 +87,7 @@ import {
   submitReport,
   uploadAttachments,
   UploadError,
+  xhrPost,
   type Receipt,
   type Attachment,
   type AttachKind,
@@ -1213,13 +1214,13 @@ class BugReport {
     if (!m || !shot) return;
     const out = outputBox(this.tl.now, shot.width, shot.height);
     const row = (kind: AttachKind, icon: string, name: string, note: string) =>
-      `<label class="bug-file"><input type="checkbox" data-bug-include="${kind}" ${this.include[kind] ? 'checked' : ''} />${icon}<span>${name}</span><small data-bug-file-note="${kind}">${note}</small></label>`;
+      `<label class="bug-file" data-bug-file="${kind}"><input type="checkbox" data-bug-include="${kind}" ${this.include[kind] ? 'checked' : ''} />${icon}<span>${name}</span><small data-bug-file-note="${kind}">${note}</small></label>`;
     const enc = new TextEncoder();
     this.screen.querySelector('[data-bug-files]')!.innerHTML =
       row('shot', ICON.shot, 'Приложить снимок', `${Math.round(out.w)} × ${Math.round(out.h)}`) +
       row('journal', ICON.journal, 'Журнал партии', `${m.journalEntries} зап. · ${sizeLabel(enc.encode(m.journal).length)}`) +
       row('save', ICON.save, 'Сохранение', sizeLabel(enc.encode(m.save).length)) +
-      `<label class="bug-file bug-area hidden" data-bug-area data-tip="Дороги и пути участка файлом шаблона развязки: его можно вставить в любую партию — «Развязки → Шаблон → Открыть шаблоны из файла»"><input type="checkbox" data-bug-include="area" ${this.include.area ? 'checked' : ''} />${ICON.area}<span>Схема участка</span><small data-bug-file-note="area"></small></label>`;
+      `<label class="bug-file bug-area hidden" data-bug-area data-bug-file="area" data-tip="Дороги и пути участка файлом шаблона развязки: его можно вставить в любую партию — «Развязки → Шаблон → Открыть шаблоны из файла»"><input type="checkbox" data-bug-include="area" ${this.include.area ? 'checked' : ''} />${ICON.area}<span>Схема участка</span><small data-bug-file-note="area"></small></label>`;
     this.renderScheme();
   }
 
@@ -1258,10 +1259,14 @@ class BugReport {
     let uploaded: Uploaded[] | null = null;
     let uploadError = '';
     if (files.length) {
+      // Сколько ушло — полоской на фоне строки каждого файла; общая строка — только что идёт загрузка.
+      this.status('Загружаю файлы…');
+      for (const f of files) this.fileProgress(f.kind, 0);
       try {
         uploaded = await uploadAttachments(files, {
           fetch: window.fetch.bind(window),
-          onProgress: (done, total) => this.status(`Загружаю файлы: ${done} из ${total}`),
+          post: xhrPost(),
+          onFile: (kind, p) => this.fileProgress(kind, p),
         });
       } catch (e) {
         // Сеть или загрузчик не пускает файлы с этого сайта (fetch бросает TypeError) — без подробностей.
@@ -1287,6 +1292,7 @@ class BugReport {
     this.sent = { text, receipt, error, uploaded, uploadError, copied };
     if (receipt) this.reportKey = newReportKey();
     this.sending = false;
+    this.fileProgress(null);
     this.renderResult();
     this.syncControls();
   }
@@ -1315,6 +1321,25 @@ class BugReport {
   /** Сохранение на момент снимка с местом отчёта (bugSpot): открытая партия покажет участок рамкой. */
   private saveWithSpot(): string {
     return withSpot(this.moment!.save, this.spot());
+  }
+
+  /**
+   * Полоска загрузки на фоне строки файла: доля 0…1 заливкой слева направо, 1 — файл принят (зеленее).
+   * kind = null — убрать полоски у всех строк.
+   */
+  private fileProgress(kind: AttachKind | null, fraction = 0): void {
+    if (kind === null) {
+      for (const row of this.screen.querySelectorAll<HTMLElement>('[data-bug-file]')) {
+        row.classList.remove('uploading', 'uploaded');
+        row.style.removeProperty('--up');
+      }
+      return;
+    }
+    const row = this.screen.querySelector<HTMLElement>(`[data-bug-file="${kind}"]`);
+    if (!row) return;
+    row.classList.add('uploading');
+    row.classList.toggle('uploaded', fraction >= 1);
+    row.style.setProperty('--up', String(Math.max(0, Math.min(1, fraction))));
   }
 
   private status(text: string): void {

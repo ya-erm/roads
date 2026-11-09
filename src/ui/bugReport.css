@@ -318,6 +318,38 @@
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  /* Полоска загрузки (::before) — под содержимым строки, но над её фоном. */
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+/*
+ * Загрузка файла: бледная заливка слева направо на фоне строки (--up — доля 0…1, ставит bugReport.ts);
+ * принятый загрузчиком файл — заливка во всю строку, чуть зеленее. Процентов нет: видно и так.
+ */
+.bug-file::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: rgba(47, 128, 237, 0.16);
+  transform: scaleX(var(--up, 0));
+  transform-origin: left center;
+  opacity: 0;
+  transition:
+    transform 0.25s ease-out,
+    background-color 0.3s,
+    opacity 0.3s;
+  pointer-events: none;
+}
+
+.bug-file.uploading::before {
+  opacity: 1;
+}
+
+.bug-file.uploaded::before {
+  background: rgba(39, 174, 96, 0.16);
 }
 
 .bug-file input {
