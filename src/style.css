@@ -4499,6 +4499,12 @@ button.pax-dest.off:hover {
   opacity: 1;
 }
 
+/* Название вида рядом со значком — целиком, без обрезки: не помещаются — фильтры переносятся на новую строку. */
+.news-kind {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .news-all {
   display: inline-grid;
   place-items: center;
@@ -4547,6 +4553,17 @@ button.pax-dest.off:hover {
   border-radius: 10px;
   border-left: 4px solid var(--accent);
   background: #f7f8fa;
+}
+
+/* Запись с объектом или местом — вся кнопка: клик ведёт к нему на карте. */
+.news-row.go {
+  cursor: pointer;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+
+.news-row.go:hover {
+  background: #e7f0fd;
+  box-shadow: inset 0 0 0 1px #b9d3f6;
 }
 
 /* Новое с прошлого открытия окна — с точкой. */

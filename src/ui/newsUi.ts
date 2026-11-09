@@ -1,7 +1,8 @@
 /**
  * Окно «События» — история уведомлений за последние месяцы (src/game/news.ts): колокольчик с числом непрочитанного
- * в панели денег, окно с записями по месяцам, значки видов (они же фильтры) и кнопки-места: предприятие, город,
- * станция, маршрут, стройка — клик ведёт к ним на карте и открывает карточку. Подсказки — свои (data-tip).
+ * в панели денег, окно с записями по месяцам, фильтры (значок вида и его название) и кнопки-места: предприятие,
+ * город, станция, маршрут, стройка — клик ведёт к ним на карте и открывает карточку. Клик по самой записи — к её
+ * главному объекту (первая ссылка) или месту. Подсказки — свои (data-tip).
  */
 import type { Vec } from '../core/vec';
 import { projectName } from '../game/construction';
@@ -14,15 +15,15 @@ import { lineKindSvg, stationSvg } from './icons';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
-/** Вид записи: пиктограмма, цвет кружка, подпись (в подсказке). */
-export const NEWS_KIND_INFO: Record<NewsKind, { glyph: string; color: string; name: string }> = {
-  goal: { glyph: '🎯', color: '#7a5cc4', name: 'Задания и этапы' },
-  event: { glyph: '📰', color: '#c4662f', name: 'События экономики' },
-  industry: { glyph: '🏭', color: '#2e9d57', name: 'Предприятия' },
-  town: { glyph: '🏘', color: '#55606e', name: 'Города' },
-  build: { glyph: '🚧', color: '#e0a100', name: 'Стройка' },
-  fleet: { glyph: '🚌', color: '#4a8fe7', name: 'Транспорт' },
-  money: { glyph: '💸', color: '#e5534b', name: 'Деньги' },
+/** Вид записи: пиктограмма, цвет кружка, подпись (в подсказке) и короткое название — на фильтре рядом со значком. */
+export const NEWS_KIND_INFO: Record<NewsKind, { glyph: string; color: string; name: string; short: string }> = {
+  goal: { glyph: '🎯', color: '#7a5cc4', name: 'Задания и этапы', short: 'Задания' },
+  event: { glyph: '📰', color: '#c4662f', name: 'События экономики', short: 'События' },
+  industry: { glyph: '🏭', color: '#2e9d57', name: 'Предприятия', short: 'Предприятия' },
+  town: { glyph: '🏘', color: '#55606e', name: 'Города', short: 'Города' },
+  build: { glyph: '🚧', color: '#e0a100', name: 'Стройка', short: 'Стройка' },
+  fleet: { glyph: '🚌', color: '#4a8fe7', name: 'Транспорт', short: 'Транспорт' },
+  money: { glyph: '💸', color: '#e5534b', name: 'Деньги', short: 'Деньги' },
 };
 
 /** Значок вида в цветном кружке. */
@@ -116,6 +117,30 @@ function placeButtons(g: Game, e: NewsEntry): string {
   return out.join('');
 }
 
+/**
+ * Куда ведёт клик по самой записи: к первой ссылке, чей объект ещё есть на карте (главная — маршрут, стройка,
+ * предприятие — идёт первой), иначе к месту at; некуда — null (клик только «прочитано»).
+ */
+export function newsRowGo(g: Game, e: NewsEntry): { ref: NewsRef } | { at: NonNullable<NewsEntry['at']> } | null {
+  for (const ref of e.refs ?? []) if (newsTarget(g, ref)) return { ref };
+  return e.at ? { at: e.at } : null;
+}
+
+/**
+ * Запись окна. Вся она — кнопка (news-row): есть куда вести — клик к главному объекту или месту (подсветка
+ * под курсором, подсказка «Показать на карте»), некуда — только «прочитано». Кнопки-места внизу ведут каждая к своему.
+ */
+function rowHtml(g: Game, e: NewsEntry, unread: boolean): string {
+  const go = !!newsRowGo(g, e);
+  const cls = ['news-row', unread ? 'unread' : '', go ? 'go' : ''].filter(Boolean).join(' ');
+  const tip = go ? ' data-tip="Показать на карте"' : '';
+  const places = placeButtons(g, e);
+  return `<div class="${cls}" data-action="news-row" data-n="${e.n}"${tip} style="border-left-color:${e.color ?? NEWS_KIND_INFO[e.kind].color}">
+          ${newsKindIcon(e.kind)}
+          <div class="news-main"><div class="news-text">${esc(e.text)}</div>${places ? `<div class="news-places">${places}</div>` : ''}</div>
+        </div>`;
+}
+
 export interface NewsView {
   /** Включённые фильтры по видам; пусто — все. */
   kinds: ReadonlySet<NewsKind>;
@@ -129,7 +154,8 @@ export function newsHtml(g: Game, view: NewsView): string {
   const total = g.news.entries.length;
   const chip = (kind: NewsKind | null, n: number) => {
     const on = kind ? view.kinds.has(kind) : !view.kinds.size;
-    const icon = kind ? newsKindIcon(kind, 22) : `<span class="news-all">Все</span>`;
+    // Значок вида и сразу его короткое название — «🚧 Стройка 4»; не помещаются в строку — переносятся.
+    const icon = kind ? `${newsKindIcon(kind, 22)}<span class="news-kind">${NEWS_KIND_INFO[kind].short}</span>` : `<span class="news-all">Все</span>`;
     const tip = kind ? NEWS_KIND_INFO[kind].name : 'Все события';
     return `<button class="news-filter ${on ? 'active' : ''}" data-action="news-filter" data-kind="${kind ?? ''}" data-tip="${tip}">${icon}<b>${n}</b></button>`;
   };
@@ -144,17 +170,7 @@ export function newsHtml(g: Game, view: NewsView): string {
         .map(
           (m) => `<section class="news-month">
         <h4><span>${g.dateAt(m.month)}</span><small>${m.entries.length}</small></h4>
-        ${m.entries
-          .map(
-            (e) => `<div class="news-row ${view.unread.has(e.n) ? 'unread' : ''}" style="border-left-color:${e.color ?? NEWS_KIND_INFO[e.kind].color}">
-          ${newsKindIcon(e.kind)}
-          <div class="news-main"><div class="news-text">${esc(e.text)}</div>${(() => {
-            const places = placeButtons(g, e);
-            return places ? `<div class="news-places">${places}</div>` : '';
-          })()}</div>
-        </div>`,
-          )
-          .join('')}
+        ${m.entries.map((e) => rowHtml(g, e, view.unread.has(e.n))).join('')}
       </section>`,
         )
         .join('')

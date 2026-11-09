@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Game } from '../game/game';
 import { DEFAULT_SETTINGS } from '../world/settings';
-import { newsBadge, newsHtml, newsTarget, noticeHtml, noticeOpacity } from './newsUi';
+import { newsBadge, newsHtml, newsRowGo, newsTarget, noticeHtml, noticeOpacity } from './newsUi';
 
 describe('Окно «События»', () => {
   const setup = () => {
@@ -48,7 +48,44 @@ describe('Окно «События»', () => {
     game.news.read(1);
     const html = newsHtml(game, { kinds: new Set(), unread: game.news.unreadSet() });
     expect(html.match(/news-row unread/g)).toHaveLength(2);
-    expect(html).toMatch(/news-row " [^>]*>\s*<span class="news-ic"[^>]*>🏭/);
+    expect(html).toMatch(/class="news-row go" [^>]*>\s*<span class="news-ic"[^>]*>🏭/);
+  });
+
+  it('фильтры — значок и сразу название вида с числом', () => {
+    const { game } = setup();
+    const html = newsHtml(game, { kinds: new Set(), unread: new Set() });
+    expect(html).toMatch(/data-kind="build" data-tip="Стройка"><span class="news-ic"[^>]*>🚧<\/span><span class="news-kind">Стройка<\/span><b>1<\/b>/);
+    expect(html).toContain('<span class="news-kind">Предприятия</span><b>1</b>');
+    expect(html).toContain('<span class="news-kind">Города</span><b>1</b>');
+    expect(html).toMatch(/data-kind="" data-tip="Все события"><span class="news-all">Все<\/span><b>3<\/b>/);
+  });
+
+  it('клик по записи: к главному объекту, иначе к месту; некуда — только «прочитано»', () => {
+    const { game, ind, town } = setup();
+    // Две ссылки — запись ведёт к первой (предприятие), кнопки-места — каждая к своей.
+    const two = game.news.add(3, {
+      kind: 'industry',
+      text: 'Открылся завод',
+      refs: [
+        { type: 'industry', id: ind.id },
+        { type: 'town', id: town.id },
+      ],
+    });
+    expect(newsRowGo(game, two)).toEqual({ ref: { type: 'industry', id: ind.id } });
+    // Первой ссылки уже нет — ко второй.
+    const gone = game.news.add(3, { kind: 'build', text: 'Бригада', refs: [{ type: 'project', id: 999 }, { type: 'town', id: town.id }] });
+    expect(newsRowGo(game, gone)).toEqual({ ref: { type: 'town', id: town.id } });
+    // Объекта нет, место известно — к месту.
+    const built = game.news.entries.find((e) => e.kind === 'build')!;
+    expect(newsRowGo(game, built)).toEqual({ at: { pos: { x: 5, y: 5 }, r: 80 } });
+    // Ни объекта, ни места.
+    const plain = game.news.add(3, { kind: 'goal', text: 'Этап B' });
+    expect(newsRowGo(game, plain)).toBeNull();
+
+    const html = newsHtml(game, { kinds: new Set(), unread: new Set() });
+    expect(html).toContain(`class="news-row go" data-action="news-row" data-n="${two.n}" data-tip="Показать на карте"`);
+    expect(html).toContain(`data-action="news-go" data-n="${two.n}" data-i="1"`);
+    expect(html).toContain(`class="news-row" data-action="news-row" data-n="${plain.n}" style=`);
   });
 
   it('объекта нет — некуда вести; число на колокольчике', () => {

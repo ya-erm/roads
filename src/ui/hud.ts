@@ -147,7 +147,7 @@ import { annexHtml } from './annexUi';
 import { depositCardHtml, INDUSTRY_TOOL_SVG, industryModeRowHtml, industryOptionsHtml, industryRowsHtml, townRowsHtml } from './enterpriseUi';
 import type { IndustryKind } from '../world/cargo';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
-import { bellSvg, newsBadge, newsHtml, newsTarget, noticeHtml, noticeOpacity } from './newsUi';
+import { bellSvg, newsBadge, newsHtml, newsRowGo, newsTarget, noticeHtml, noticeOpacity } from './newsUi';
 import type { NewsKind, NewsRef } from '../game/news';
 import type { Notice } from '../game/game';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
@@ -1193,6 +1193,23 @@ export class Hud {
         if (!e) break;
         this.closeNews();
         this.goTo(d.i !== undefined && e.refs ? [e.refs[Number(d.i)]] : [], e.at);
+        break;
+      }
+      case 'news-row': {
+        // Клик по самой записи (мимо кнопок-мест): к главному объекту — первой ссылке, что ещё есть, — или к месту;
+        // некуда — запись просто прочитана (подсветка «новое» гаснет).
+        const e = g.news.entries.find((x) => x.n === Number(d.n));
+        if (!e) break;
+        g.news.read(e.n);
+        if (newsRowGo(g, e)) {
+          this.closeNews();
+          this.goTo(e.refs ?? [], e.at);
+        } else if (this.newsUnread.has(e.n)) {
+          const unread = new Set(this.newsUnread);
+          unread.delete(e.n);
+          this.newsUnread = unread;
+          this.renderNews();
+        }
         break;
       }
       case 'advice-show':
