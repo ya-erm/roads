@@ -32,7 +32,9 @@ describe('Поездка машины жителя и спецмашины', { t
     // Линия по маршруту — примерно его длины и кончается у цели.
     let len = 0;
     for (let i = 1; i < ahead.pts.length; i++) len += dist(ahead.pts[i - 1], ahead.pts[i]);
-    expect(Math.abs(len - ahead.left)).toBeLessThan(ahead.left * 0.15 + 30);
+    // Остаток пути (routeLeft) — по связям, без проездов перекрёстков, а линия идёт и через них: в частой сетке
+    // улиц линия длиннее на пятую-четверть.
+    expect(Math.abs(len - ahead.left)).toBeLessThan(ahead.left * 0.3 + 30);
     expect(dist(ahead.pts[ahead.pts.length - 1], ahead.goal)).toBeLessThan(120);
     // Карточка: откуда → куда значками, город — кнопкой к городу, сколько ещё и примерно когда.
     const trip = game.tripOf(v.id)!;

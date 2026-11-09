@@ -504,6 +504,107 @@ export function smoothJoins(roads: LaneNet, nodes: Iterable<number>): void {
   }
 }
 
+// ---------- Очертания города ----------
+
+/** Очертания города: во сколько раз край в направлении a (угол в мире) дальше обычного радиуса. */
+export type TownShape = (a: number) => number;
+
+/** По скольким направлениям город меряет место вокруг: до воды, края карты или крутого склона. */
+const SHAPE_DIRS = 24;
+/** Таблица очертаний: столько точек на оборот, между ними — линейно. */
+const SHAPE_STEPS = 96;
+
+const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+
+/**
+ * Очертания города вокруг center с обычным радиусом R — детерминированно по rng (seed). Город не круг:
+ * - вытянут (эллипс той же площади) вдоль направления, где больше всего места — вдоль реки, долины, берега;
+ *   на ровном месте без воды — вдоль случайной оси;
+ * - край неровный: несколько плавных волн по 2–5 на оборот;
+ * - вдоль выездов (petals — их углы) застройка тянется лепестками;
+ * - к воде, краю карты и крутому склону край поджимается, а площадь добирается в других направлениях.
+ * Средний квадрат множителя — около 1: площадь (а с ней и население) как у круга радиуса R.
+ * min / max — пределы множителя: у кольцевого города между кольцами должны помещаться дома.
+ */
+export function townShape(ctx: WorldContext, center: Vec, R: number, opts: { petals?: number[]; min?: number; max?: number } = {}): TownShape {
+  const { rng, terrain } = ctx;
+  const { petals = [], min = 0.6, max = 1.6 } = opts;
+  // Свободное место по направлениям, в долях R (не дальше max·1.1).
+  const h0 = terrain.heightAt(center);
+  const steep = Math.max(12, terrain.amplitude * 0.3);
+  const room: number[] = [];
+  for (let k = 0; k < SHAPE_DIRS; k++) {
+    const a = (k / SHAPE_DIRS) * Math.PI * 2;
+    const u = { x: Math.cos(a), y: Math.sin(a) };
+    let d = 60;
+    for (; d < R * max * 1.1; d += 30) {
+      const p = add(center, scale(u, d));
+      if (!terrain.inBounds(p, 80) || terrain.isWater(p, 40)) break;
+      if (terrain.hasRelief && Math.abs(terrain.heightAt(p) - h0) > steep) break;
+    }
+    // До последней сухой точки.
+    room.push((d - 30) / R);
+  }
+  // Сглаживаем, но не дальше, чем есть места в самом направлении.
+  const roomAt = room.map((r, k) => Math.min(r, (room[(k + SHAPE_DIRS - 1) % SHAPE_DIRS] + r + room[(k + 1) % SHAPE_DIRS]) / 3));
+  // Ось вытянутости: где места больше в обе стороны; при равенстве — ближе к случайной оси.
+  const pref = rng.range(0, Math.PI);
+  let axis = pref;
+  let best = -Infinity;
+  for (let k = 0; k < SHAPE_DIRS / 2; k++) {
+    const a = (k / SHAPE_DIRS) * Math.PI * 2;
+    const score = roomAt[k] + roomAt[k + SHAPE_DIRS / 2] + 0.25 * Math.cos(2 * (a - pref));
+    if (score > best) {
+      best = score;
+      axis = a;
+    }
+  }
+  // Полуоси эллипса — aspect и 1/aspect: длина к ширине — aspect².
+  const aspect = rng.range(1.06, 1.22);
+  const waves = [2, 3, 4, 5].map((m) => ({ m, amp: rng.range(0.03, 0.1) * (m === 2 ? 1.3 : 1), ph: rng.range(0, Math.PI * 2) }));
+  const raw = (a: number) => {
+    const c = Math.cos(a - axis);
+    const s = Math.sin(a - axis);
+    let f = 1 / Math.sqrt((c / aspect) ** 2 + (s * aspect) ** 2);
+    for (const w of waves) f *= 1 + w.amp * Math.sin(w.m * a + w.ph);
+    for (const p of petals) f *= 1 + 0.25 * Math.exp(-((wrapAngle(a - p) / 0.3) ** 2));
+    return f;
+  };
+  const roomOf = (a: number) => {
+    const t = ((((a / (Math.PI * 2)) % 1) + 1) % 1) * SHAPE_DIRS;
+    const k = Math.floor(t);
+    return lerpNum(roomAt[k % SHAPE_DIRS], roomAt[(k + 1) % SHAPE_DIRS], t - k);
+  };
+  const angles = Array.from({ length: SHAPE_STEPS }, (_, i) => (i / SHAPE_STEPS) * Math.PI * 2);
+  const base = angles.map(raw);
+  const cap = angles.map((a) => Math.max(min, roomOf(a) * 0.95));
+  // Масштаб, при котором площадь — как у круга R: поджатое у воды добирается в других направлениях.
+  let k = 1;
+  let table = base;
+  for (let it = 0; it < 6; it++) {
+    table = base.map((f, i) => Math.min(max, cap[i], Math.max(min, f * k)));
+    const mean = table.reduce((s, f) => s + f * f, 0) / SHAPE_STEPS;
+    k = Math.min(1.4, k / Math.sqrt(mean));
+  }
+  return (a: number) => {
+    const t = ((((a / (Math.PI * 2)) % 1) + 1) % 1) * SHAPE_STEPS;
+    const i = Math.floor(t);
+    return lerpNum(table[i % SHAPE_STEPS], table[(i + 1) % SHAPE_STEPS], t - i);
+  };
+}
+
+const lerpNum = (a: number, b: number, t: number) => a + (b - a) * t;
+
+/** Кусок кривой в полярных координатах от угла a0 до a1 (P — точка кривой под углом): гладкий, как дуга. */
+function polarArc(P: (a: number) => Vec, a0: number, a1: number): Cubic {
+  const h = 1e-3;
+  const d = (a: number) => scale(sub(P(a + h), P(a - h)), 1 / (2 * h));
+  const t = (4 / 3) * Math.tan((a1 - a0) / 4);
+  const s = P(a0);
+  const e = P(a1);
+  return { p0: s, p1: add(s, scale(d(a0), t)), p2: sub(e, scale(d(a1), t)), p3: e };
+}
+
 /** Отрезок кривой Катмулла-Рома между p1 и p2 с соседями p0 и p3 — плавная улица через узлы. */
 function catmull(p0: Vec, p1: Vec, p2: Vec, p3: Vec): Cubic {
   return { p0: p1, p1: add(p1, scale(sub(p2, p0), 1 / 6)), p2: sub(p2, scale(sub(p3, p1), 1 / 6)), p3: p2 };
@@ -515,6 +616,17 @@ function radialStreets(sb: StreetBuilder, center: Vec, size: number): void {
   const rings = size >= 3 ? 4 : 3;
   const radius = (k: number) => 110 + k * 140;
   const a0 = rng.range(0, Math.PI * 2);
+  const angle = (n: number, i: number) => a0 + (i * Math.PI * 2) / n;
+  // Выезды из города — по главным лучам; вдоль них застройка вытягивается лепестками.
+  const exits = Array.from({ length: rays }, () => rng.chance(0.6));
+  // Площадь у центра — круглая, дальше расстояние между кольцами следует очертаниям города.
+  const shape = townShape(sb.ctx, center, radius(rings - 1), {
+    petals: exits.flatMap((e, i) => (e ? [angle(rays, i)] : [])),
+    min: 0.7,
+    max: 1.5,
+  });
+  const ringAt = (k: number, a: number) => 110 + k * 140 * shape(a);
+  const ringPoint = (k: number) => (a: number) => add(center, scale({ x: Math.cos(a), y: Math.sin(a) }, ringAt(k, a)));
   // На каждом кольце столько лучей, чтобы дуга между ними была не длиннее ~260.
   const counts: number[] = [];
   for (let k = 0; k < rings; k++) {
@@ -522,23 +634,20 @@ function radialStreets(sb: StreetBuilder, center: Vec, size: number): void {
     while ((Math.PI * 2 * radius(k)) / n > 260) n *= 2;
     counts.push(k === rings - 1 && k > 0 ? counts[k - 1] : n);
   }
-  const angle = (n: number, i: number) => a0 + (i * Math.PI * 2) / n;
   const nodes = new Map<string, LaneNode | null>();
   const key = (k: number, n: number, i: number) => `${k}:${((i * rays * 8) / n) | 0}`;
   const nodeOn = (k: number, n: number, i: number) => {
     const id = key(k, n, i);
-    if (!nodes.has(id)) {
-      const a = angle(n, i);
-      nodes.set(id, nodeAt(sb, add(center, { x: Math.cos(a) * radius(k), y: Math.sin(a) * radius(k) })));
-    }
+    if (!nodes.has(id)) nodes.set(id, nodeAt(sb, ringPoint(k)(angle(n, i))));
     return nodes.get(id) ?? null;
   };
-  // Кольца.
+  // Кольца. Внешнее — с прорехами, чаще там, где город уже: край не замкнут в правильное кольцо.
   for (let k = 0; k < rings; k++) {
     const n = counts[k];
     for (let i = 0; i < n; i++) {
-      if (k === rings - 1 && rng.chance(0.15)) continue;
-      const arc = circleArc(center, radius(k), angle(n, i), angle(n, i + 1));
+      const narrow = Math.max(0, 1 - shape(angle(n, i + 0.5)));
+      if (k === rings - 1 && rng.chance(0.1 + narrow * 1.2)) continue;
+      const arc = k === 0 ? circleArc(center, radius(k), angle(n, i), angle(n, i + 1)) : polarArc(ringPoint(k), angle(n, i), angle(n, i + 1));
       street(sb, nodeOn(k, n, i), nodeOn(k, n, (i + 1) % n), arc, k === 0 ? AVENUE : STREET);
     }
   }
@@ -556,12 +665,13 @@ function radialStreets(sb: StreetBuilder, center: Vec, size: number): void {
   // Выезды из города по главным лучам.
   const last = rings - 1;
   for (let i = 0; i < rays; i++) {
-    if (!rng.chance(0.6)) continue;
+    if (!exits[i]) continue;
     const n = counts[last];
     const from = nodeOn(last, n, (i * n) / rays);
     if (!from) continue;
     const a = angle(rays, i);
-    const p = add(center, { x: Math.cos(a) * (radius(last) + 200), y: Math.sin(a) * (radius(last) + 200) });
+    const r = ringAt(last, a) + 200;
+    const p = add(center, { x: Math.cos(a) * r, y: Math.sin(a) * r });
     street(sb, from, nodeAt(sb, p), null, size >= 3 && i % 2 === 0 ? AVENUE : STREET);
   }
 }
@@ -572,9 +682,10 @@ function organicStreets(sb: StreetBuilder, center: Vec, size: number): void {
   const rot = rng.range(0, Math.PI / 2);
   const ux = { x: Math.cos(rot), y: Math.sin(rot) };
   const uy = { x: -Math.sin(rot), y: Math.cos(rot) };
-  const lobes = rng.int(2, 5);
-  const phase = rng.range(0, Math.PI * 2);
-  const reach = (i: number, j: number) => (size + 0.5) * (1 + 0.25 * Math.sin(lobes * Math.atan2(j, i) + phase));
+  // Край сетки — по очертаниям города (угол клетки в мире — её угол в сетке плюс поворот сетки).
+  const shape = townShape(sb.ctx, center, (size + 0.5) * spacing, { min: 0.55, max: 1.6 });
+  // 0.96: у воды город теперь не обрезается, а добирает место в другую сторону — население как у прежних городов.
+  const reach = (i: number, j: number) => (size + 0.5) * 0.96 * shape(Math.atan2(j, i) + rot);
   // Плавная деформация всей сетки: улицы изгибаются вместе, без изломов в узлах.
   const amp = spacing * rng.range(0.12, 0.2);
   const wl = spacing * rng.range(3, 4.5);
@@ -583,7 +694,7 @@ function organicStreets(sb: StreetBuilder, center: Vec, size: number): void {
     x: amp * Math.sin(y / wl + f1) + amp * 0.5 * Math.sin((x + y) / (wl * 0.8) + f2),
     y: amp * Math.sin(x / wl + f3) + amp * 0.5 * Math.sin((x - y) / (wl * 0.8) + f4),
   });
-  const n = size + 1;
+  const n = Math.ceil((size + 0.5) * 1.6);
   const pos = (i: number, j: number) => {
     const lx = i * spacing;
     const ly = j * spacing;

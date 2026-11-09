@@ -5,6 +5,7 @@ import { RAIL_SPEC, TRACK_GAP } from '../world/roadTypes';
 import type { RoadRequest, Snap } from './build';
 import { Game } from './game';
 import { besideRun, besideTrack } from './railEdit';
+import { clearStrip } from './testkit';
 
 const dryGame = () => new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
 
@@ -68,6 +69,8 @@ function layCurves(game: Game, make: (at: (x: number, y: number) => Vec) => Cubi
         const n = rightNormal(dir);
         const at = (u: number, v: number) => add(add({ x, y }, scale(dir, u)), scale(n, v));
         const curves = make(at);
+        // В чистом поле: без дорог (и стартовых просёлков) и домов рядом.
+        if (!curves.every((c) => clearStrip(game, c.p0, c.p3, 250))) continue;
         const room = curves.flatMap((c) => [c, ...[-1, 1].flatMap((k) => offsetCubics(c, k * TRACK_GAP))]);
         if (!room.every((c) => game.builder.plan(along(c)).ok)) continue;
         return { curves, built: buildPieces(game, curves) };

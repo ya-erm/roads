@@ -130,8 +130,8 @@ describe('Сценарий: генерация', { timeout: 120_000 }, () => {
     expect(game.scenario).toBeNull();
     expect(game.mods).toBe(NO_MODS);
     expect(game.settings.scenario).toBeUndefined();
-    // Население городов seed 1 — как до появления сценариев: генерация песочницы не изменилась.
-    expect(game.towns.map((t) => t.population).sort((x, y) => y - x)).toEqual([10092, 7494, 4228, 3524, 3066, 2914, 2086, 1920, 1168, 1166]);
+    // Население городов seed 1 — генерация песочницы не зависит от сценариев (числа — с неровными очертаниями городов).
+    expect(game.towns.map((t) => t.population).sort((x, y) => y - x)).toEqual([13122, 10896, 8244, 6214, 4026, 3642, 1766, 1550, 1092, 950]);
     // Прежние 32 предприятия — те же, предприятия новых цепочек расставлены после них.
     expect(game.industries).toHaveLength(41);
     expect(game.industries.slice(32).map((i) => i.info.kind)).toEqual(['ranch', 'ranch', 'ranch', 'sandpit', 'sandpit', 'meatplant', 'glassworks', 'furniture', 'cement']);

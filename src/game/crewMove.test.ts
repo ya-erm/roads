@@ -22,7 +22,7 @@ describe('Перенос строящегося участка: техника �
    */
   function scene() {
     const game = withoutCitizens(new Game(WORLD));
-    const at = fieldSpot(game, 1000, 420);
+    const at = fieldSpot(game, 1000, 340);
     expect(road(game, { free: at }, { free: { x: at.x + 1000, y: at.y } })).toBe(true);
     expect(game.buildBase({ x: at.x + 120, y: at.y - 40 })).toBeNull();
     const base = [...game.construction.crews.bases.keys()][0];

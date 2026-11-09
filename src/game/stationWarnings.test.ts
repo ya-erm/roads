@@ -1,20 +1,21 @@
 import { describe, expect, it } from 'vitest';
+import { dist } from '../core/vec';
 import { twoWay } from '../lanes/model';
 import { Game } from './game';
 import { adviceTip, markAt, stationWarnings, warningMarks } from './stationWarnings';
-import { connectStations, fieldSpot, road, stationAtIndustry, withoutCitizens } from './testkit';
+import { connectStations, fieldSpot, nearestPair, road, stationAtIndustry, withoutCitizens } from './testkit';
 import { DEFAULT_RULE } from './transport';
 
 /** Станция у добывающего предприятия, склад которой забит его продукцией. */
 function fullStation() {
   const game = withoutCitizens(new Game(7));
   game.money = 5_000_000;
-  const ind = game.industries.find((i) => !i.info.accepts.length && i.info.produces !== 'passengers')!;
-  const far = { x: ind.fp.center.x + 600, y: ind.fp.center.y };
-  const st = stationAtIndustry(game, ind, far)!;
+  // Ферма и ближайший к ней пищекомбинат; станция фермы — со стороны комбината (к нему потом ведёт шоссе).
+  const { a: ind, b: to } = nearestPair(game, 'farm', 'foodplant');
+  const st = stationAtIndustry(game, ind, to.fp.center)!;
   ind.producedLast = 40;
   st.cargo[ind.info.produces] = game.stationStorage(st);
-  return { game, ind, st };
+  return { game, ind, st, to };
 }
 
 describe('Предупреждения станции', () => {
@@ -42,8 +43,7 @@ describe('Предупреждения станции', () => {
   });
 
   it('маршрут с машинами отсюда есть — совет уже про склад и вывоз', () => {
-    const { game, ind, st } = fullStation();
-    const to = game.industries.find((i) => i.info.accepts.includes(ind.info.produces))!;
+    const { game, ind, st, to } = fullStation();
     const sB = stationAtIndustry(game, to, ind.fp.center)!;
     expect(connectStations(game, st, sB, { cls: 'highway', lanes: twoWay(1, 1) })).toBe(true);
     const line = game.createLine([st.id, sB.id])!;
@@ -57,7 +57,9 @@ describe('Предупреждения станции', () => {
 
   it('маршрут отсюда есть, но эту продукцию не берёт — так и сказано, действие — новый маршрут', () => {
     const { game, ind, st } = fullStation();
-    const other = game.industries.find((i) => i !== ind && !i.info.accepts.includes(ind.info.produces) && i.info.accepts.length)!;
+    const other = game.industries
+      .filter((i) => i !== ind && !i.info.accepts.includes(ind.info.produces) && i.info.accepts.length)
+      .sort((x, y) => dist(x.fp.center, ind.fp.center) - dist(y.fp.center, ind.fp.center))[0];
     const sB = stationAtIndustry(game, other, ind.fp.center)!;
     expect(connectStations(game, st, sB, { cls: 'highway', lanes: twoWay(1, 1) })).toBe(true);
     const line = game.createLine([st.id, sB.id])!;

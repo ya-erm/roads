@@ -126,8 +126,9 @@ describe('Сценарий «Со строительством»', () => {
       const longest = Math.max(...routes(new Game(scenario(seed))));
       const game = new Game(scenario(seed, { construction: 'build' }));
       const build = routes(game);
-      // Со стройкой маршруты не длиннее, чем без неё, и почти всегда — в пределах быстрой стройки.
-      expect(Math.max(...build), `seed ${seed}`).toBeLessThanOrEqual(longest + 1e-6);
+      // Со стройкой маршруты не длиннее, чем без неё (или строятся быстро — из коротких выбирается самая выгодная пара),
+      // и почти всегда — в пределах быстрой стройки.
+      expect(Math.max(...build), `seed ${seed}`).toBeLessThanOrEqual(Math.max(longest, buildReach(CONSTRUCTION.firstBuild)) + 1e-6);
       all += build.length;
       short += build.filter((d) => roadMonths(game, d) * MONTH_LENGTH <= CONSTRUCTION.firstBuild + 1e-6).length;
     }

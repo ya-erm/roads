@@ -32,6 +32,13 @@ function layTrack(game: Game, len: number): { from: Vec; dir: Vec } {
       for (const angle of [0, 0.3, -0.3]) {
         const dir = { x: Math.cos(angle), y: Math.sin(angle) };
         const from = { x, y };
+        // Путь — в поле, в стороне от дорог: без переездов, которых тест не строил, и с местом для дорог через него.
+        let crosses = false;
+        for (let s = 0; s <= len && !crosses; s += 25) {
+          const p = add(from, scale(dir, s));
+          crosses = game.roads.net.corridorsNear(p, 260).some((c) => c.lut.closest(p).d < 250);
+        }
+        if (crosses) continue;
         const req = straight(from, add(from, scale(dir, len)), RAIL_SPEC);
         if (!game.builder.plan(req).ok) continue;
         // Рядом с путём должно хватить места для вокзалов.

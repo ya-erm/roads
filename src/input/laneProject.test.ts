@@ -77,7 +77,9 @@ describe('Проект полос', () => {
     let o: Vec | null = null;
     for (let y = 400; y < game.terrain.height - 400 && !o; y += 20) {
       for (let x = 300; x < game.terrain.width - 900 && !o; x += 40) {
-        if (!game.isWater({ x: x + 300, y: y + 45 }, 4) || game.isWater({ x: x + 300, y: y + 25 }, 6)) continue;
+        if (!game.isWater({ x: x + 300, y: y + 45 }, -4) || game.isWater({ x: x + 300, y: y + 25 }, 6)) continue;
+        // Вдали от других дорог (и стартовых просёлков): съезд мешает только вода.
+        if (game.roads.net.corridorsInBox(x - 100, y - 150, x + 600, y + 150).length) continue;
         if (road(game, { free: { x, y } }, { free: { x: x + 500, y } })) o = { x, y };
       }
     }

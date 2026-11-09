@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { add, dist, Vec } from '../core/vec';
 import { Game } from './game';
-import { road, roadPlan } from './testkit';
+import { clearStrip, road, roadPlan } from './testkit';
 
 const RING = { lanes: 1, size: 'medium' as const };
 
@@ -21,8 +21,10 @@ function crossroads(game: Game): { c: Vec; arms: Vec[] } {
         { x: 0, y: -300 },
         { x: 0, y: 300 },
       ].map((d) => add(c, d));
-      if (!roadPlan(game, { free: arms[0] }, { free: arms[1] }).ok || !roadPlan(game, { free: arms[2] }, { free: arms[3] }).ok) continue;
       if (game.roads.net.corridorsNear(c, 400).length) continue;
+      // Вокруг — чистое поле (без домов, предприятий и воды): к кольцу потом тянут новые въезды.
+      if (!clearStrip(game, { x: c.x - 400, y: c.y }, { x: c.x + 400, y: c.y }, 400)) continue;
+      if (!roadPlan(game, { free: arms[0] }, { free: arms[1] }).ok || !roadPlan(game, { free: arms[2] }, { free: arms[3] }).ok) continue;
       road(game, { free: arms[0] }, { free: arms[1] });
       road(game, { free: arms[2] }, { free: arms[3] });
       return { c, arms };

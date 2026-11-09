@@ -124,6 +124,8 @@ describe('Таймлапс партии: запись кадров', { timeout: 
     expect(saved.timelapse?.frames).toHaveLength(3);
     const loaded = withoutCitizens(new Game(saved.settings, saved));
     expect(loaded.timelapse.frames).toEqual(game.timelapse.frames);
+    // Без новых улиц от роста городов: месяц после загрузки — без правок дорог.
+    for (const t of loaded.towns) t.autoStreets = false;
     runMonths(loaded, 1);
     const next = loaded.timelapse.frames[3];
     expect(next.full).toBeUndefined();

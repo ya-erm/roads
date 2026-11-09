@@ -19,7 +19,8 @@ const AVENUE = { cls: 'avenue' as const, lanesF: 2, lanesB: 2 };
 /** Улица с запада на восток в чистом поле и база у её середины с севера (−y). */
 function setup(): { game: Game; at: Vec; base: BuildBase } {
   const game = withoutCitizens(new Game({ ...WORLD }));
-  const at = fieldSpot(game, 600);
+  // Чистое поле и на 500 м к югу: там вторая улица (withSecondStreet).
+  const at = fieldSpot(game, 600, 520);
   expect(road(game, { free: at }, { free: { x: at.x + 600, y: at.y } })).toBe(true);
   expect(game.buildBase({ x: at.x + 300, y: at.y - 30 })).toBeNull();
   const base = [...game.construction.crews.bases.values()][0];

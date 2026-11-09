@@ -6,7 +6,7 @@ import { twoWay } from '../lanes/model';
 import type { Station, TownBuilding } from '../world/entities';
 import { halfAtS } from '../world/worldgen';
 import { Game } from './game';
-import { road, townStreets } from './testkit';
+import { clearStrip, road, townStreets } from './testkit';
 
 const STREET_SPEC = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
 
@@ -208,7 +208,10 @@ describe('Полоса у остановки («кармашек»)', { timeout:
     const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     let o: { x: number; y: number } | null = null;
     for (let y = 400; y < game.terrain.height - 400 && !o; y += 120) {
-      for (let x = 300; x < game.terrain.width - 1100 && !o; x += 160) if (road(game, { free: { x, y } }, { free: { x: x + 900, y } })) o = { x, y };
+      for (let x = 300; x < game.terrain.width - 1100 && !o; x += 160) {
+        // В чистом поле: улица ни с чем не пересекается (стартовые просёлки, дома).
+        if (clearStrip(game, { x, y }, { x: x + 900, y }, 120) && road(game, { free: { x, y } }, { free: { x: x + 900, y } })) o = { x, y };
+      }
     }
     expect(o).not.toBeNull();
     const at = o!;
@@ -270,7 +273,10 @@ describe('Полоса у остановки («кармашек»)', { timeout:
     const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     let o: { x: number; y: number } | null = null;
     for (let y = 400; y < game.terrain.height - 400 && !o; y += 120) {
-      for (let x = 300; x < game.terrain.width - 1100 && !o; x += 160) if (road(game, { free: { x, y } }, { free: { x: x + 900, y } })) o = { x, y };
+      for (let x = 300; x < game.terrain.width - 1100 && !o; x += 160) {
+        // В чистом поле: улица ни с чем не пересекается (стартовые просёлки, дома).
+        if (clearStrip(game, { x, y }, { x: x + 900, y }, 120) && road(game, { free: { x, y } }, { free: { x: x + 900, y } })) o = { x, y };
+      }
     }
     const at = o!;
     const stop = game.placeStation({ x: at.x + 450, y: at.y - 14 }, 14, 'stop')!;

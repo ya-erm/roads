@@ -105,7 +105,8 @@ describe('Настройка перекрёстка', { timeout: 20_000 }, () =>
         const m = v.onMovement ? game.roads.graph.moves.get(v.onMovement) : undefined;
         if (m?.node === n.id && prev.get(v.id) !== v.onMovement) {
           entered++;
-          if (!lights.clearing && !lights.phases[lights.phase].moves.has(m.key)) onRed++;
+          // Спецмашине с мигалкой на красный можно (traffic.ts) — её не считаем.
+          if (!v.siren && !lights.clearing && !lights.phases[lights.phase].moves.has(m.key)) onRed++;
         }
         prev.set(v.id, v.onMovement);
       }

@@ -82,6 +82,8 @@ describe('Снабжение города по месяцам', { timeout: 60_00
     const n1 = townNeed(town.population);
     town.supplied[a] = n1 + 5;
     town.supplied[b] = n1 * 4;
+    // Без роста: норма нового месяца — та же n1 (иначе выросший город просит больше).
+    town.growthAcc = -1e9;
     closeMonth(game);
     // Новый месяц начинается с излишков: по a — 5, по b — не больше нормы.
     expect(town.supplied).toEqual({ [a]: 5, [b]: n1 });

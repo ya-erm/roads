@@ -7,7 +7,7 @@ import type { WorldSettings } from '../world/settings';
 import { projectName } from './construction';
 import { convoyGap, frontOf, spansOf, stageSpans } from './constructionWork';
 import { Game } from './game';
-import { anchorOf, type End, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, clearStrip, type End, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' };
 
@@ -77,6 +77,8 @@ function gateAt(game: Game, p: Vec): number {
 function freeSpot(game: Game, len: number): Vec {
   for (let y = 400; y < game.terrain.height - 400; y += 120) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 160) {
+      // В чистом поле (без дорог, стартовых просёлков, зданий и воды): новая дорога ни с чем не пересекается.
+      if (!clearStrip(game, { x, y }, { x: x + len, y }, 200)) continue;
       const plan = game.roadBuilder.road(anchorOf(game, { free: { x, y } }), anchorOf(game, { free: { x: x + len, y } }), STREET);
       if (plan.ok && !plan.demolish.length) return { x, y };
     }

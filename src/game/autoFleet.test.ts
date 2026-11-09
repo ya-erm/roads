@@ -409,13 +409,16 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
     }
     expect(departed.size).toBe(3);
     expect(anyWaited).toBe(false);
-    // Включаем обратно — новая машина снова выжидает очередь.
+    // Включаем обратно — новые машины снова выжидают очередь. Две: первая могла и прогрузиться дольше интервала
+    // (на коротком маршруте он мал), а вторая встаёт в очередь уже за ней.
     game.setLineSpacing(line.id, true);
-    const extra = game.buyVehicle(line.id, 'truck')!;
+    // Груз на складе есть: машины грузятся сразу, а не ждут урожая дольше интервала.
+    game.stations.get(line.stops[0])!.cargo.grain = 500;
+    const extras = [game.buyVehicle(line.id, 'truck')!, game.buyVehicle(line.id, 'truck')!];
     let waitedAgain = false;
-    for (let t = 0; t < MONTH_LENGTH * 2 && extra.state !== 'driving'; t += 0.1) {
+    for (let t = 0; t < MONTH_LENGTH * 2 && extras.some((v) => v.state !== 'driving'); t += 0.1) {
       game.update(0.1);
-      if (game.spacingLeft(extra) !== null) waitedAgain = true;
+      if (extras.some((v) => game.spacingLeft(v) !== null)) waitedAgain = true;
     }
     expect(waitedAgain).toBe(true);
   });

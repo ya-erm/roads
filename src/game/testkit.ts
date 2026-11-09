@@ -106,6 +106,18 @@ export function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Stati
   return null;
 }
 
+/** Полоса ±d вдоль отрезка from → to — чистое поле: ни дорог (и стартовых просёлков), ни зданий, ни предприятий, ни воды. */
+export function clearStrip(game: Game, from: Vec, to: Vec, d: number): boolean {
+  const len = dist(from, to);
+  for (let s = 0; s <= len; s += 50) {
+    const p = add(from, scale({ x: to.x - from.x, y: to.y - from.y }, len ? s / len : 0));
+    if (game.isWater(p, 60)) return false;
+    if (game.roads.net.corridorsNear(p, d + 10).some((c) => c.lut.closest(p).d < d)) return false;
+    if (game.index.near(p, d + 100).some((x) => dist(x.fp.center, p) < d + Math.hypot(x.fp.w, x.fp.h) / 2)) return false;
+  }
+  return true;
+}
+
 /** Соединяет выезды двух станций дорогой из двух кусков (середина сдвигается, если прямо нельзя). */
 export function connectStations(game: Game, sA: Station, sB: Station, profile: RoadOptions): boolean {
   const A = stationExit(game, sA.nodeId);
@@ -114,7 +126,8 @@ export function connectStations(game: Game, sA: Station, sB: Station, profile: R
   const n = { x: -d.y / Math.hypot(d.x, d.y), y: d.x / Math.hypot(d.x, d.y) };
   for (const off of [0, 150, -150, 300, -300, 450, -450, 600, -600]) {
     const M = { x: (A.pos.x + B.pos.x) / 2 + n.x * off, y: (A.pos.y + B.pos.y) / 2 + n.y * off };
-    if (!roadPlan(game, A.id, { free: M }, profile).ok) continue;
+    // Второй кусок проверяем заранее: иначе первый остался бы висеть тупиком и мешал следующим попыткам.
+    if (!roadPlan(game, A.id, { free: M }, profile).ok || !roadPlan(game, { free: M }, B.id, profile).ok) continue;
     road(game, A.id, { free: M }, profile);
     if (road(game, M, B.id, profile)) return true;
   }
@@ -179,6 +192,8 @@ export function railProjectScene(): { game: Game; a: Station; b: Station; id: nu
 export function fieldSpot(game: Game, length: number, margin = 180): Vec {
   const { width, height } = game.terrain;
   for (let y = 300; y < height - 300; y += 83) {
+    // Полоса ±margin — целиком на карте (с запасом 100 м до края).
+    if (y - margin < 100 || y + margin > height - 100) continue;
     for (let x = 300; x < width - 300 - length; x += 97) {
       const mid = { x: x + length / 2, y };
       const reach = length / 2 + margin;

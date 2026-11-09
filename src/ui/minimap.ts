@@ -4,6 +4,7 @@ import { waterPath } from '../render/relief';
 import { iconRaster } from '../render/iconRaster';
 import { smoothPath } from '../render/renderer';
 import { BIOMES } from '../world/biomes';
+import type { Town } from '../world/entities';
 import { cargoImage } from './cargoIcons';
 
 const WIDTH = 200;
@@ -17,6 +18,7 @@ export class Minimap {
   private roadsVersion = -1;
   private timer = 0;
   private dragging = false;
+  private blobs = new WeakMap<Town, { key: string; path: Path2D }>();
 
   constructor(
     parent: HTMLElement,
@@ -116,6 +118,24 @@ export class Minimap {
     this.roadsVersion = g.net.version;
   }
 
+  /** Пятно города на миникарте: кружки вокруг домов сливаются в одно; пересчёт — когда меняется число домов. */
+  private townBlob(t: Town, k: number): Path2D {
+    const key = `${t.buildings.length}:${k}`;
+    const cached = this.blobs.get(t);
+    if (cached?.key === key) return cached.path;
+    const path = new Path2D();
+    const r = Math.max(1.6, 45 * k);
+    path.arc(t.center.x * k, t.center.y * k, 3, 0, Math.PI * 2);
+    for (const b of t.buildings) {
+      const x = b.fp.center.x * k;
+      const y = b.fp.center.y * k;
+      path.moveTo(x + r, y);
+      path.arc(x, y, r, 0, Math.PI * 2);
+    }
+    this.blobs.set(t, { key, path });
+    return path;
+  }
+
   update(dt: number): void {
     this.timer -= dt;
     if (this.timer > 0) return;
@@ -136,12 +156,9 @@ export class Minimap {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.drawImage(this.base!, 0, 0, w, h);
     ctx.drawImage(this.roads!, 0, 0, w, h);
-    for (const t of g.towns) {
-      ctx.fillStyle = 'rgba(85, 96, 110, 0.55)';
-      ctx.beginPath();
-      ctx.arc(t.center.x * k, t.center.y * k, Math.max(3, t.radius * k), 0, Math.PI * 2);
-      ctx.fill();
-    }
+    // Город — пятном по его домам (а не кругом): видно, как он вытянут вдоль реки или дорог.
+    ctx.fillStyle = 'rgba(85, 96, 110, 0.55)';
+    for (const t of g.towns) ctx.fill(this.townBlob(t, k));
     for (const ind of g.industries) {
       const img = cargoImage(ind.info.produces);
       // Растром (iconRaster): SVG-картинку браузер раскладывал бы и рисовал заново на каждый значок.

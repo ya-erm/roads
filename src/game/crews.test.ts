@@ -246,6 +246,8 @@ describe('Бригады в игре: нет подъезда', () => {
     for (let y = 400; y < game.terrain.height - 400; y += 120) {
       for (let x = 300; x < game.terrain.width - len - 300; x += 160) {
         if (game.towns.some((t) => dist({ x: x + len / 2, y }, t.center) < t.radius + len)) continue;
+        // Вдали от дорог (и стартовых просёлков): новая дорога ни с чем не пересекается.
+        if (game.roads.net.corridorsInBox(x - 80, y - 200, x + len + 80, y + 200).length) continue;
         const plan = game.roadBuilder.road(anchorOf(game, { free: { x, y } }), anchorOf(game, { free: { x: x + len, y } }), STREET);
         if (plan.ok && !plan.demolish.length) return { x, y };
       }

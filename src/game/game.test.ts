@@ -268,7 +268,8 @@ describe('Игра', { timeout: 30_000 }, () => {
     expect(town.buildings.length).toBeGreaterThan(houses);
     // Город строит за свой счёт.
     expect(game.money).toBe(money);
-    expect(town.radius).toBeGreaterThanOrEqual(radius);
+    // Радиус (край плотной застройки) меряется шагами по 20 м: ядро уплотнилось — край мог сдвинуться на шаг.
+    expect(town.radius).toBeGreaterThanOrEqual(radius - 20);
     // Новые улицы — обычные улицы (и куски разрезанных улиц и проспектов).
     for (const s of added) expect(s.cls === 'street' || s.cls === 'avenue').toBe(true);
     // Машины по-прежнему ездят.

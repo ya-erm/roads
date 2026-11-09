@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { add, scale, Vec } from '../core/vec';
 import { Game } from './game';
 import type { RoadPlan } from './roadbuild';
-import { anchorOf, road, roadPlan, runSeconds, STREET, townStreets, withoutCitizens } from './testkit';
+import { anchorOf, clearStrip, road, roadPlan, runSeconds, STREET, townStreets, withoutCitizens } from './testkit';
 
 /** Прямая дорога через самый большой город — поперёк его улиц, со сносом домов. */
 function throughTown(game: Game): RoadPlan | null {
@@ -33,6 +33,7 @@ const kinds = (game: Game, k: string) => game.journal.entries.filter((e) => e.k 
 function field(game: Game, len = 600): Vec {
   for (let y = 400; y < game.terrain.height - 400; y += 120) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 160) {
+      if (!clearStrip(game, { x, y }, { x: x + len, y }, 200)) continue;
       if (roadPlan(game, { free: { x, y } }, { free: { x: x + len, y } }).ok && !game.roads.net.corridorsNear({ x: x + len / 2, y }, len).length) return { x, y };
     }
   }
