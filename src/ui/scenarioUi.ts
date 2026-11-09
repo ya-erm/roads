@@ -682,7 +682,8 @@ function tabsHtml(g: Game, tab: LeftTab): string {
     if (id === 'scenario') {
       const sc = g.scenario!;
       const tasks = sc.state.status === 'running' ? openTasks(sc) : 0;
-      return btn('scenario', flagSvg(15), 'Сценарий', count(tasks), tasks ? `Этапы и задания: в работе ${tasks}` : 'Этапы, задания и контракты');
+      const region = `«${sc.state.brief.region}»`;
+      return btn('scenario', flagSvg(15), 'Сценарий', count(tasks), tasks ? `${region}: этапы и задания, в работе ${tasks}` : `${region}: этапы, задания и контракты`);
     }
     if (id === 'events') return eventsTabButton(g, btn, count);
     const b = buildTabCount(g);
@@ -739,8 +740,9 @@ function eventsTabHtml(g: Game, sc: Scenario | null, view: PanelView): string {
  * Левая панель под деньгами — вкладками: «Сценарий» (регион, этапы, репутация, задания этапа и принятые
  * контракты, «Следующий этап»), «События» (идеи без сроков, предложения контрактов с решением, события) и — «Со
  * строительством» — «Стройка» (базы, «＋ База», проекты). В песочнице — «Стройка» и «События», пока есть идеи;
- * одна из них — заголовком, обе — заголовок «Песочница» и вкладки. Свёрнутая — заголовок, вкладки, компактная
- * строка вкладки и предложения на решение. Ни сценария, ни стройки, ни идей — пусто.
+ * одна из них — заголовком, обе — вкладками. Вкладки — первой строкой (с галочкой «свернуть»), заголовок
+ * сценария (регион, сложность) — под ними и только на «Сценарии». Свёрнутая — вкладки, компактная строка вкладки
+ * и предложения на решение. Ни сценария, ни стройки, ни идей — пусто.
  */
 export function leftPanelHtml(g: Game, view: PanelView): string {
   const tab = leftTab(g, view.tab);
@@ -758,20 +760,16 @@ export function leftPanelHtml(g: Game, view: PanelView): string {
         : view.collapsed
           ? eventsCompactHtml(g, null)
           : eventsTabHtml(g, null, view);
-    // Одна вкладка — заголовком; стройка и события (идеи) — заголовок «Песочница» и вкладки.
+    // Одна вкладка — заголовком; стройка и события (идеи) — вкладки сверху, свернуть — галочкой слева от них.
     if (leftTabs(g).length === 1) {
       const [icon, name] = tab === 'build' ? [buildSvg(22, 17), 'Стройка'] : [newsSvg(18), 'События'];
       return `<header class="sc-head"><button class="lines-toggle" data-action="sc-toggle" data-tip="${toggle} · ${name.toLowerCase()}">${fold}${icon}<h3>${name}</h3></button></header>${body}`;
     }
-    const head = `<header class="sc-head"><button class="lines-toggle" data-action="sc-toggle" data-tip="${toggle} · песочница">${fold}${sandboxSvg(26, 17)}<h3>Песочница</h3></button></header>${tabsHtml(g, tab)}`;
-    return head + body;
+    return tabsHeadHtml(g, tab, fold, `${toggle} · песочница`) + body;
   }
   const s = sc.state;
-  const diff = `<span class="sc-diff" data-tip="Сложность: ${sc.difficulty.name}${s.settings.challenge ? ' · испытание без паузы' : ''}">${difficultySvg(s.settings.difficulty, 18)}${
-    s.settings.challenge ? stopwatchSvg(16) : ''
-  }</span>`;
-  const head = `<header class="sc-head">
-    <button class="lines-toggle" data-action="sc-toggle" data-tip="${toggle} · сценарий «${esc(s.brief.region)}»">${fold}${flagSvg(18)}<h3>${esc(s.brief.region)}</h3></button>${diff}</header>${tabsHtml(g, tab)}`;
+  // Вкладки — первой строкой; регион и сложность — заголовок только вкладки «Сценарий», под вкладками.
+  const head = tabsHeadHtml(g, tab, fold, `${toggle} · сценарий «${s.brief.region}»`);
   const running = s.status === 'running';
   if (view.collapsed) {
     // Предложения ждут решения — видны в свёрнутой панели на любой вкладке.
@@ -790,7 +788,21 @@ export function leftPanelHtml(g: Game, view: PanelView): string {
   }
   if (tab === 'build') return head + buildTabHtml(g, build);
   if (tab === 'events') return head + eventsTabHtml(g, sc, view);
-  return head + scenarioTabHtml(g, sc, view);
+  return head + scenarioTitleHtml(sc) + scenarioTabHtml(g, sc, view);
+}
+
+/** Верх панели с вкладками: галочка «свернуть» и вкладки одной строкой (прилипает при прокрутке). */
+function tabsHeadHtml(g: Game, tab: LeftTab, fold: string, tip: string): string {
+  return `<div class="lp-head"><button class="lines-toggle lp-fold" data-action="sc-toggle" data-tip="${esc(tip)}">${fold}</button>${tabsHtml(g, tab)}</div>`;
+}
+
+/** Заголовок вкладки «Сценарий»: флажок, регион и сложность (испытание без паузы — секундомером). */
+function scenarioTitleHtml(sc: Scenario): string {
+  const s = sc.state;
+  const diff = `<span class="sc-diff" data-tip="Сложность: ${sc.difficulty.name}${s.settings.challenge ? ' · испытание без паузы' : ''}">${difficultySvg(s.settings.difficulty, 18)}${
+    s.settings.challenge ? stopwatchSvg(16) : ''
+  }</span>`;
+  return `<header class="sc-head sc-title">${flagSvg(18)}<h3>${esc(s.brief.region)}</h3>${diff}</header>`;
 }
 
 /** Вкладка «Сценарий»: этапы и репутация, задания этапа и принятые контракты, «Следующий этап»; после конца — итог. */

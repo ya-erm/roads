@@ -96,6 +96,24 @@ describe('Вкладки левой панели', () => {
     expect(folded).not.toContain('sc-steps');
   });
 
+  it('вкладки — первой строкой с галочкой «свернуть»; заголовок сценария — под ними и только на «Сценарии»', () => {
+    const { game, sc } = scenarioWithOffers();
+    const region = sc.state.brief.region;
+    const html = leftPanelHtml(game, view());
+    expect(html.startsWith('<div class="lp-head"><button class="lines-toggle lp-fold" data-action="sc-toggle"')).toBe(true);
+    expect(html.indexOf('class="lp-tabs"')).toBeLessThan(html.indexOf('class="sc-head sc-title"'));
+    expect(html).toContain(`<h3>${region}</h3>`);
+    expect(html.indexOf('class="sc-head sc-title"')).toBeLessThan(html.indexOf('sc-steps'));
+    // Регион — и в подсказке вкладки, раз в свёрнутой панели и на других вкладках заголовка нет.
+    expect(tabHtml(html, 'scenario')).toContain(`«${region}»`);
+    for (const v of [{ ...view(), tab: 'events' as const }, { ...view(), collapsed: true }]) {
+      const other = leftPanelHtml(game, v);
+      expect(other).not.toContain('sc-title');
+      expect(other).not.toContain(`<h3>${region}</h3>`);
+      expect(tabsOf(other)).toEqual(['scenario', 'events']);
+    }
+  });
+
   it('свёрнутая «События» — последнее событие строкой, если решать нечего', () => {
     const { game, sc } = scenarioWithOffers();
     for (const o of [...sc.offers]) sc.decline(o.id);

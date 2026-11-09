@@ -4202,14 +4202,30 @@ button.pax-dest.off:hover {
   padding: 6px 0 4px;
 }
 
-/* Вкладки значками с подписью и числом: выбранная — белая на светлой подложке; ждут решения — оранжевым. */
-.lp-tabs {
+/* Верх панели: галочка «свернуть» и вкладки одной строкой — прилипает к верху при прокрутке. */
+.lp-head {
   position: sticky;
   top: -6px;
-  z-index: 1;
+  /* Выше этапов (.sc-step — z-index 1), что уезжают под вкладки при прокрутке. */
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 4px;
+  background: var(--panel);
+}
+
+.lp-head .lp-fold {
+  flex: none;
+  padding: 0;
+}
+
+/* Вкладки значками с подписью и числом: выбранная — белая на светлой подложке; ждут решения — оранжевым. */
+.lp-tabs {
+  flex: 1;
   display: flex;
   gap: 2px;
-  margin: 0 6px 4px;
+  min-width: 0;
   padding: 2px;
   border-radius: 10px;
   background: #eef1f4;
@@ -4954,6 +4970,15 @@ button.pax-dest.off:hover {
 
 .sc-head .lines-toggle {
   min-width: 0;
+}
+
+/* Заголовок вкладки «Сценарий» под вкладками: регион, справа — сложность. */
+.sc-title {
+  padding: 2px 12px 6px;
+}
+
+.sc-title h3 {
+  flex: 1 1 auto;
 }
 
 .sc-head h3 {

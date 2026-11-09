@@ -171,7 +171,8 @@ describe('Задания без сроков («Идеи»)', () => {
     expect(o).toBeDefined();
     expect(leftTabs(game)).toEqual(['build', 'events']);
     const html = leftPanelHtml(game, { collapsed: false, open: new Set(), confirmAdvance: false, tab: 'events' });
-    expect(html).toContain('<h3>Песочница</h3>');
+    // Как в сценарии: вкладки — первой строкой, свернуть — галочкой слева от них.
+    expect(html).toMatch(/^<div class="lp-head"><button class="lines-toggle lp-fold" data-action="sc-toggle" data-tip="Свернуть · песочница">/);
     expect(html).toMatch(/class="lp-tab active call" data-action="left-tab" data-id="events" data-tip="☕ Идея ждёт[^"]*"><svg[^]*?<b class="lp-count call">1<\/b>/);
     expect(html).not.toContain('data-id="ideas"');
     expect(html).toContain(`data-action="idea-take" data-id="${o.id}"`);
