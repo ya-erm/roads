@@ -74,6 +74,9 @@ export function deckHeight(level: number): number {
   return levelDeck(level);
 }
 
+/** Знак скорости отпустили не на дороге. */
+export const LIMIT_DROP_HINT = 'Отпустите знак на дороге';
+
 /**
  * Инструменты дороги на сети полос: строить (прямая, плавно, кривой), «Полоса» вдоль края,
  * перестроить, двигать узел или выгнуть дорогу, снести. Всё — через планы строителя дорог игры:
@@ -636,7 +639,7 @@ export class RoadTools {
   /**
    * Знак скорости над дорогой: ограничение на всей улице до перекрёстков, без перестройки; only (зажат Cmd / Ctrl) —
    * только на участке под курсором, между соседними узлами. was — какая скорость там сейчас, parts — из скольких
-   * участков вся улица.
+   * участков вся улица. Знак быстрее потолка класса (грунтовка — 40 км/ч) — план не ok с причиной (RoadBuilder.setLimit).
    */
   limitPlan(p: Vec, kmh: number, r: number, only = false): { plan: RoadPlan; was: number; parts: number } | null {
     const c = corridorUnder(this.net, p, r);
@@ -651,7 +654,7 @@ export class RoadTools {
 
   setLimitAt(p: Vec, kmh: number, r: number, only = false): string | null {
     const res = this.limitPlan(p, kmh, r, only);
-    if (!res) return 'Отпустите знак на дороге';
+    if (!res) return LIMIT_DROP_HINT;
     if (!res.plan.ok) return res.plan.reason ?? 'Нельзя';
     this.game().roadBuilder.apply(res.plan);
     return null;

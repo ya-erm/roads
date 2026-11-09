@@ -17,6 +17,28 @@ function exitNet() {
   return { net, main, on, ramp };
 }
 
+describe('Ограничение скорости — не выше потолка класса', () => {
+  it('новое полотно и старое сохранение со знаком 120 на грунтовке — 40 км/ч, у прежней дороги в перестройке — тоже', () => {
+    const net = new LaneNet();
+    const a = net.addSeam({ x: 0, y: 0 }, EAST);
+    const b = net.addSeam({ x: 300, y: 0 }, EAST);
+    const c = net.addCorridor(a.id, b.id, { cls: 'dirt', lanes: twoWay(1, 1), limit: 120 });
+    expect(c.limit).toBe(40);
+    const fast = net.addCorridor(b.id, net.addSeam({ x: 600, y: 0 }, EAST).id, { cls: 'highway', lanes: twoWay(1, 1), limit: 120 });
+    expect(fast.limit).toBe(120);
+
+    // Сохранение прошлой версии: знак ставился на любую дорогу.
+    const save = net.toJSON();
+    const old = save.corridors.find((x) => x.id === c.id)!;
+    old.limit = 120;
+    old.build = { project: 1, done: 0, was: { cls: 'street', lanes: twoWay(1, 1), len: 300, limit: 100, value: 0, price: 0, work: 1 } };
+    const loaded = LaneNet.fromJSON(save);
+    expect(loaded.corridor(c.id).limit).toBe(40);
+    expect(loaded.corridor(c.id).build!.was!.limit).toBe(80);
+    expect(loaded.corridor(fast.id).limit).toBe(120);
+  });
+});
+
 describe('Полосы: модель', () => {
   it('примеры лаборатории собраны без ошибок', () => {
     expect(buildLab().net.problems()).toEqual([]);

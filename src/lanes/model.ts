@@ -1,6 +1,6 @@
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { isDivided, LANE_W, MEDIAN, RoadClass, RoadSpec } from '../world/roadTypes';
+import { capLimit, isDivided, LANE_W, MEDIAN, RoadClass, RoadSpec } from '../world/roadTypes';
 import type { PhaseSpec } from './lights';
 
 /** Кривая — прямой отрезок: управляющие точки на хорде, между концами. */
@@ -276,7 +276,17 @@ export function profileOf(spec: RoadSpec): RoadProfile {
   const f = spec.lanesF;
   const b = spec.lanesB;
   const lanes = b === 0 ? oneWay(f) : f === 0 ? oneWay(b) : twoWay(f, b, isDivided(spec) ? MEDIAN : 0);
-  return { cls: spec.cls, lanes, limit: spec.limit };
+  return { cls: spec.cls, lanes, limit: capLimit(spec.cls, spec.limit) };
+}
+
+/**
+ * Ограничение скорости полотна (и прежней дороги в перестройке) — не выше потолка класса (`maxKmh`): старые
+ * сохранения, где знак 120 стоял на грунтовке, открываются с 40 км/ч. Объект build заменяется целиком (копии делят его).
+ */
+export function capCorridorLimit(c: Corridor): void {
+  if (c.limit !== undefined) c.limit = capLimit(c.cls, c.limit);
+  const w = c.build?.was;
+  if (w?.limit !== undefined && w.limit > capLimit(w.cls, w.limit)!) c.build = { ...c.build!, was: { ...w, limit: capLimit(w.cls, w.limit) } };
 }
 
 export interface CorridorOptions {
@@ -461,7 +471,9 @@ export class LaneNet {
       lanes: o.lanes.map((l) => ({ ...l, from: Math.max(0, l.from), to: Math.min(lut.length, l.to) })),
       rev: nextRev(),
     };
-    if (o.limit !== undefined) c.limit = o.limit;
+    // Знак быстрее потолка класса (шаблон, вставка, старая правка) — по потолку.
+    const limit = capLimit(o.cls, o.limit);
+    if (limit !== undefined) c.limit = limit;
     if (o.ring) c.ring = true;
     this.corridors.set(c.id, c);
     this.indexCorridor(c, true);
@@ -604,6 +616,7 @@ export class LaneNet {
     for (const c of data.corridors) {
       const lut = new CurveLUT(c.curve);
       const corridor: Corridor = { ...c, curve: { ...c.curve }, lut, length: lut.length, lanes: c.lanes.map((l) => ({ ...l })), rev: nextRev() };
+      capCorridorLimit(corridor);
       net.corridors.set(c.id, corridor);
       net.indexCorridor(corridor, true);
       net.node(c.a).corridors.push(c.id);

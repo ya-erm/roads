@@ -17,7 +17,7 @@ import {
   toggleSolid,
 } from './edit';
 import { edgesAt, laneBand, pointOff, stations } from './geometry';
-import { Corridor, LaneNet, LaneNetSave, LaneSlot, oneWay, twoWay } from './model';
+import { capCorridorLimit, Corridor, LaneNet, LaneNetSave, LaneSlot, oneWay, twoWay } from './model';
 
 export type LabTool = 'view' | 'road' | 'lane' | 'select' | 'rebuild' | 'move' | 'bulldoze';
 
@@ -167,6 +167,7 @@ export class LabEditor {
           this.commit((n) => {
             const cc = n.corridor(c.id);
             cc.cls = this.profile.cls;
+            capCorridorLimit(cc);
             n.setLanes(cc, this.profile.lanes());
             n.touch(cc);
           });

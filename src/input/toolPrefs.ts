@@ -10,7 +10,7 @@ import { RAIL_STATION } from '../config';
 import type { DrawMode } from '../game/build';
 import type { TemplateKind } from '../game/interchange';
 import type { RingOptions, RingSize } from '../game/roads';
-import { MAX_LANES, ROAD_CLASS_IDS, ROAD_PRESETS, type RoadSpec, SPEED_LIMITS } from '../world/roadTypes';
+import { capLimit, MAX_LANES, ROAD_CLASS_IDS, ROAD_PRESETS, type RoadSpec, SPEED_LIMITS } from '../world/roadTypes';
 import type { TerraformMode } from '../world/terrain';
 import type { BrushSize, Controller, JunctionMode, RailMode, RoadMode, StationMode, Tool } from './controller';
 
@@ -67,7 +67,8 @@ function parseSpec(v: unknown): RoadSpec | null {
   const s = record(v);
   if (!ROAD_CLASS_IDS.includes(s.cls as RoadSpec['cls']) || !int(s.lanesF, 1, MAX_LANES) || !int(s.lanesB, 0, MAX_LANES)) return null;
   const spec: RoadSpec = { cls: s.cls as RoadSpec['cls'], lanesF: s.lanesF, lanesB: s.lanesB };
-  return SPEED_LIMITS.includes(s.limit as number) ? { ...spec, limit: s.limit as number } : spec;
+  // Знак быстрее потолка класса (старая версия игры) — по потолку.
+  return SPEED_LIMITS.includes(s.limit as number) ? { ...spec, limit: capLimit(spec.cls, s.limit as number) } : spec;
 }
 
 /**

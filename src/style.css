@@ -2046,6 +2046,18 @@ button.icon.toggle-spacing {
   background: #e7f0fd;
 }
 
+/* Знак быстрее потолка выбранного типа дороги: не выбирается, но тянется на другую дорогу. */
+.limit.off {
+  opacity: 0.3;
+  filter: grayscale(1);
+  cursor: grab;
+}
+
+.limit.off:hover {
+  background: transparent;
+  opacity: 0.5;
+}
+
 .price {
   font-size: 12px;
   color: var(--muted);

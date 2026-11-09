@@ -30,7 +30,7 @@ import { lastTownNeed, townNeed } from '../world/townSupply';
 import { footprintRadius } from '../world/spatial';
 import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
 import { durationText } from '../core/timeText';
-import { isOneWay, KMH_PER_UNIT, LEVELS, RAIL_SPEC, ROAD_PRESETS, RoadSpec, SPEED_LIMITS, specCost, specKmh, STRUCTURE } from '../world/roadTypes';
+import { isOneWay, KMH_PER_UNIT, LEVELS, limitAllowed, limitCapText, RAIL_SPEC, ROAD_PRESETS, RoadSpec, SPEED_LIMITS, specCost, specKmh, STRUCTURE } from '../world/roadTypes';
 import {
   DEFAULT_SETTINGS,
   NEW_GAME_SETTINGS,
@@ -2542,12 +2542,17 @@ export class Hud {
           true,
         )}`;
     }
-    // Только знаки: ограничение скорости не зависит от типа дороги.
-    const limits = SPEED_LIMITS.map(
-      (v) =>
-        `<button class="limit ${specKmh(s) === v ? 'active' : ''}" data-action="limit" data-v="${v}" draggable="true" data-drag-limit="${v}"
-          title="Ограничение ${v} км/ч · перетащите знак на дорогу — сменить скорость без перестройки; Cmd/Ctrl — только этот участок">${speedSign(v, 26)}</button>`,
-    ).join('');
+    // Знаки быстрее потолка выбранного типа (грунтовка — 40, улица — 80, проспект — 100) — неактивны: клик не выбирает
+    // (уведомление — почему), но тянуть на другую дорогу можно — там проверка по её классу. У «Полосы» класс — от дороги,
+    // к которой её ведут, — все знаки доступны, при стройке скорость обрежется по её потолку.
+    const capName = ROAD_PRESETS.find((p) => p.id === c.presetId && p.spec.cls === s.cls)?.name;
+    const drag = 'перетащите знак на дорогу — сменить скорость без перестройки; Cmd/Ctrl — только этот участок';
+    const limits = SPEED_LIMITS.map((v) => {
+      const off = c.roadMode !== 'lane' && !limitAllowed(s.cls, v);
+      const tip = off ? `${limitCapText(s.cls, capName)} · знак можно перетащить на дорогу быстрее` : `Ограничение ${v} км/ч · ${drag}`;
+      return `<button class="limit ${specKmh(s) === v ? 'active' : ''}${off ? ' off' : ''}" data-action="limit" data-v="${v}" draggable="true" data-drag-limit="${v}"
+          ${off ? 'aria-disabled="true"' : ''} data-tip="${tip}">${speedSign(v, 26)}</button>`;
+    }).join('');
     if (c.roadMode === 'lane') {
       // Полоса — всегда одна, ширина и класс — как у дороги, от которой её ведут: выбирать нечего, кроме скорости.
       // «Проект» — тот же значок в заголовке и плашка над панелью: полосы сначала проектом, потом — разом.

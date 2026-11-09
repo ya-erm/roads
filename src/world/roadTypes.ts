@@ -8,6 +8,8 @@ export interface RoadClassInfo {
   name: string;
   /** Ограничение скорости по умолчанию, км/ч. */
   limit: number;
+  /** Потолок ограничения, км/ч: знак быстрее на дорогу этого класса не ставится. */
+  maxLimit: number;
   minRadius: number;
   /** Цена за единицу длины на одну полосу. */
   cost: number;
@@ -16,12 +18,14 @@ export interface RoadClassInfo {
 export const ROAD_CLASSES: Record<RoadClass, RoadClassInfo> = {
   // Просёлок: самая дешёвая и медленная, без асфальта и разметки. Мир на старте ведёт такие к предприятиям
   // (world/startRoads.ts); игрок строит её первой в панели дорог, сносит и перестраивает, как любую.
-  dirt: { id: 'dirt', name: 'Грунтовая', limit: 30, minRadius: 12, cost: 2 },
-  street: { id: 'street', name: 'Улица', limit: 40, minRadius: 12, cost: 7 },
-  avenue: { id: 'avenue', name: 'Проспект', limit: 60, minRadius: 26, cost: 9 },
-  highway: { id: 'highway', name: 'Магистраль', limit: 90, minRadius: 70, cost: 13 },
-  motorway: { id: 'motorway', name: 'Автомагистраль', limit: 120, minRadius: 150, cost: 17 },
-  rail: { id: 'rail', name: 'Ж/д путь', limit: 120, minRadius: 110, cost: 45 },
+  // Потолок скорости (maxLimit): грунтовка — 40, улица (и односторонняя — тоже улица) — 80, проспект — 100,
+  // шоссе, магистраль и автомагистраль — 120.
+  dirt: { id: 'dirt', name: 'Грунтовая', limit: 30, maxLimit: 40, minRadius: 12, cost: 2 },
+  street: { id: 'street', name: 'Улица', limit: 40, maxLimit: 80, minRadius: 12, cost: 7 },
+  avenue: { id: 'avenue', name: 'Проспект', limit: 60, maxLimit: 100, minRadius: 26, cost: 9 },
+  highway: { id: 'highway', name: 'Магистраль', limit: 90, maxLimit: 120, minRadius: 70, cost: 13 },
+  motorway: { id: 'motorway', name: 'Автомагистраль', limit: 120, maxLimit: 120, minRadius: 150, cost: 17 },
+  rail: { id: 'rail', name: 'Ж/д путь', limit: 120, maxLimit: 120, minRadius: 110, cost: 45 },
 };
 
 /**
@@ -39,6 +43,18 @@ export function structureFactor(h: number, water: boolean): number {
 
 /** Знаки ограничения скорости, которые можно поставить на дорогу. */
 export const SPEED_LIMITS = [40, 60, 80, 90, 100, 120];
+/** Потолок ограничения скорости для класса дороги, км/ч. */
+export const maxKmh = (cls: RoadClass) => ROAD_CLASSES[cls].maxLimit;
+/** Знак kmh можно поставить на дорогу класса cls. */
+export const limitAllowed = (cls: RoadClass, kmh: number) => kmh <= maxKmh(cls);
+/** Ограничение скорости, обрезанное по потолку класса; не задано — так и остаётся (по классу). */
+export const capLimit = (cls: RoadClass, limit: number | undefined): number | undefined => (limit === undefined ? undefined : Math.min(limit, maxKmh(cls)));
+
+/** Почему знак не ставится: «Грунтовая: не быстрее 40 км/ч». Название — как в панели («Односторонняя» — улица). */
+export function limitCapText(cls: RoadClass, name = ROAD_CLASSES[cls].name): string {
+  return `${name}: не быстрее ${maxKmh(cls)} км/ч`;
+}
+
 /** км/ч в одной единице скорости симуляции. */
 export const KMH_PER_UNIT = 2.2;
 

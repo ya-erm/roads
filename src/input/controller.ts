@@ -30,7 +30,22 @@ import { badgeAt, projectBadges } from '../render/projectBadges';
 import { projectName } from '../game/construction';
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
-import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LANE_W, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
+import {
+  capLimit,
+  DEFAULT_PRESET_ID,
+  defaultPreset,
+  isOneWay,
+  KMH_PER_UNIT,
+  LANE_W,
+  LEVELS,
+  limitAllowed,
+  limitCapText,
+  MAX_LANES,
+  RAIL_SPEC,
+  ROAD_PRESETS,
+  RoadSpec,
+  TRACK_GAP,
+} from '../world/roadTypes';
 import { aimAlong, railDirs } from './aim';
 import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, projectMoneyWarning, rebuildPrice, riseLabel, shiftLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
@@ -43,7 +58,7 @@ import { corridorCurveSigns, freshSignCorridors, staleSignCorridors } from '../g
 import { type DrawSettings, type ProjectTools, sharedRoadProject } from './projecttools';
 import { RailTools } from './railtools';
 import { markAt, warningMarks, type WarningMark } from '../game/stationWarnings';
-import { deckHeight, RoadTools } from './roadtools';
+import { deckHeight, LIMIT_DROP_HINT, RoadTools } from './roadtools';
 import { phaseToggle, specOf, turnAt } from '../lanes/lights';
 import { phaseTurns } from '../ui/phasesUi';
 import { basePlaceText, baseRemoveText } from '../ui/constructionUi';
@@ -360,6 +375,8 @@ export class Controller {
       const problem = this.roadTools.setLimitAt(this.worldAt(e), this.dragLimit, this.snapRadius * 0.3, only);
       g.commit();
       if (problem) this.showError(problem);
+      // Знак быстрее потолка дороги («Грунтовая: не быстрее 40 км/ч») — ещё и уведомлением: подпись у курсора гаснет быстро.
+      if (problem && problem !== LIMIT_DROP_HINT) g.notify(problem, '#e5534b');
       this.endLimitDrag();
     });
     window.addEventListener('keydown', (e) => this.onKey(e));
@@ -533,6 +550,8 @@ export class Controller {
     if (this.tool !== 'road') this.setTool('road');
     this.projectTools.stop('road');
     this.roadMode = mode;
+    // Знак, выбранный для полосы (её класс — от дороги), у выбранного типа — не выше его потолка.
+    if (mode !== 'lane') this.spec = { ...this.spec, limit: capLimit(this.spec.cls, this.spec.limit) };
     this.chain = null;
     this.control = null;
     this.roadTools.clear();
@@ -803,6 +822,13 @@ export class Controller {
 
   /** Знак ограничения скорости для строящейся (или перестраиваемой) дороги. */
   setLimit(kmh: number): void {
+    // Быстрее потолка типа дороги знак не выбирается: уведомление — почему и какой потолок. У «Полосы» класс —
+    // от дороги, к которой её ведут: там знак обрежется по её потолку при стройке.
+    if (this.roadMode !== 'lane' && !limitAllowed(this.spec.cls, kmh)) {
+      const preset = ROAD_PRESETS.find((p) => p.id === this.presetId && p.spec.cls === this.spec.cls);
+      this.game().notify(limitCapText(this.spec.cls, preset?.name), '#e5534b');
+      return;
+    }
     this.spec = { ...this.spec, limit: kmh };
     this.onChange();
   }

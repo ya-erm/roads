@@ -186,4 +186,25 @@ describe('Знак скорости: с Cmd / Ctrl — только участо
     expect(game.undo()).toBe('скорость участка');
     expect(under(at.x + 300).limit).toBeUndefined();
   });
+
+  it('знак быстрее потолка класса не ставится: улица — до 80 км/ч, причина — в плане', () => {
+    const fast = tools.limitPlan(mid, 100, 5)!;
+    expect(fast.plan.ok).toBe(false);
+    expect(fast.plan.reason).toBe('Улица: не быстрее 80 км/ч');
+    expect(tools.setLimitAt(mid, 120, 5)).toBe('Улица: не быстрее 80 км/ч');
+    expect(under(at.x + 300).limit).toBeUndefined();
+    expect(tools.limitPlan(mid, 80, 5)!.plan.ok).toBe(true);
+  });
+
+  it('перестройка в класс с меньшим потолком обрезает знак: проспект 100 → улица 80', () => {
+    const c = under(at.x + 300);
+    expect(game.roadBuilder.apply(game.roadBuilder.rebuild(c.id, { cls: 'avenue', lanes: c.lanes, limit: 100 }))).toBe(true);
+    expect(under(at.x + 300).limit).toBe(100);
+    const back = under(at.x + 300);
+    expect(game.roadBuilder.apply(game.roadBuilder.rebuild(back.id, { cls: 'street', lanes: back.lanes, limit: back.limit }))).toBe(true);
+    expect(under(at.x + 300).cls).toBe('street');
+    expect(under(at.x + 300).limit).toBe(80);
+    expect(game.roadBuilder.apply(game.roadBuilder.rebuild(back.id, { cls: 'dirt', lanes: back.lanes, limit: 80 }))).toBe(true);
+    expect(under(at.x + 300).limit).toBe(40);
+  });
 });

@@ -7,7 +7,7 @@ import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDra
 import { cornerCost, cornerHandles } from '../lanes/corners';
 import { edgesAt, laneShare } from '../lanes/geometry';
 import { Corridor, type CorridorWas, Flow, LaneNet, type LaneNode, LaneSlot, LAT_EPS } from '../lanes/model';
-import { LEVEL_RUN, RoadClass, ROAD_CLASSES, ROAD_MARGIN, structureFactor } from '../world/roadTypes';
+import { capLimit, LEVEL_RUN, limitAllowed, limitCapText, RoadClass, ROAD_CLASSES, ROAD_MARGIN, structureFactor } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
 import { halfAtS } from '../world/worldgen';
 import type { Roads } from './roads';
@@ -130,7 +130,8 @@ export function laneStepEdit(tip: LaneTip, qs: Vec[], cls: RoadClass, radius: nu
       at = s.tip;
       what.push(s.what);
     }
-    if (limit !== undefined) for (const c of n.corridors.values()) if (!before.has(c.id) && c.lanes.length === 1 && c.lanes[0].offset === 0) c.limit = limit;
+    // Скорость — не выше потолка класса съезда (знак 120 у полосы от улицы — 80).
+    if (limit !== undefined) for (const c of n.corridors.values()) if (!before.has(c.id) && c.lanes.length === 1 && c.lanes[0].offset === 0) c.limit = capLimit(c.cls, limit);
     out.step = { tip: at, what: what.join(' → ') };
     return qs.length > 0;
   };
@@ -502,7 +503,8 @@ export class RoadBuilder {
         if (!c) return false;
         if (c.ring) throw new EditError('Кольцо не перестраивается');
         c.cls = p.cls;
-        c.limit = p.limit;
+        // Класс с меньшим потолком скорости (проспект 100 → улица) — знак обрезается до потолка.
+        c.limit = capLimit(p.cls, p.limit);
         n.setLanes(c, p.lanes);
         // В стыке с дорогой другого профиля лишние полосы (у неё или у соседа) сходят на нет отгоном.
         taperDeadLanes(n, [c.a, c.b]);
@@ -513,7 +515,7 @@ export class RoadBuilder {
 
   /**
    * Ограничение скорости на полотнах ids без перестройки: форма, полосы и цена те же, проверять нечего.
-   * limit не задан — по классу дороги.
+   * limit не задан — по классу дороги. Знак быстрее потолка класса (грунтовка — 40) не ставится: план с причиной.
    */
   setLimit(ids: number[], limit: number | undefined): RoadPlan {
     return this.plan(
@@ -521,6 +523,7 @@ export class RoadBuilder {
         for (const id of ids) {
           const c = n.corridors.get(id);
           if (!c) return false;
+          if (limit !== undefined && !limitAllowed(c.cls, limit)) throw new EditError(limitCapText(c.cls));
           c.limit = limit;
           // Новая ревизия полотна — граф движения возьмёт новую скорость.
           n.setLanes(c, c.lanes);
