@@ -1,5 +1,18 @@
-import { describe, expect, it } from 'vitest';
-import { loadToolPrefs, parseToolPrefs, serializeToolPrefs, TOOL_PREFS_KEY, type ToolPrefs, toolPrefsWriter } from './toolPrefs';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Game } from '../game/game';
+import { Camera } from '../render/camera';
+import { Controller } from './controller';
+import {
+  defaultToolPrefs,
+  isFirstGame,
+  loadToolPrefs,
+  parseToolPrefs,
+  rememberTools,
+  serializeToolPrefs,
+  TOOL_PREFS_KEY,
+  type ToolPrefs,
+  toolPrefsWriter,
+} from './toolPrefs';
 
 /** Как у нового Controller. */
 const DEFAULTS: ToolPrefs = {
@@ -163,5 +176,86 @@ describe('Запомненный инструмент: хранилище', () =
     expect(loadToolPrefs(DEFAULTS, memoryStorage(true))).toEqual(DEFAULTS);
     expect(() => toolPrefsWriter(null)(CHOSEN)).not.toThrow();
     expect(() => toolPrefsWriter(memoryStorage(true))(CHOSEN)).not.toThrow();
+  });
+});
+
+describe('Первая партия: «Дорога» с «Проектом»', () => {
+  it('первая — пока настроек инструментов нет и сохранённой партии тоже', () => {
+    expect(isFirstGame(memoryStorage(), false)).toBe(true);
+    const s = memoryStorage();
+    toolPrefsWriter(s)(DEFAULTS);
+    expect(isFirstGame(s, false)).toBe(false);
+    // Игрок с прошлых версий: настройки тогда не запоминались, но партия сохранена.
+    expect(isFirstGame(memoryStorage(), true)).toBe(false);
+  });
+
+  it('без хранилища — не первая: выключенный «Проект» не запомнить, навязывать его каждый раз нельзя', () => {
+    expect(isFirstGame(null, false)).toBe(false);
+    expect(isFirstGame(memoryStorage(true), false)).toBe(false);
+  });
+
+  it('в первой партии по умолчанию включён «Проект» дороги, остальное — как у нового инструмента', () => {
+    expect(defaultToolPrefs(DEFAULTS, true)).toEqual({ ...DEFAULTS, project: { road: true, rail: false } });
+    expect(defaultToolPrefs(DEFAULTS, false)).toEqual(DEFAULTS);
+  });
+
+  it('запомненное важнее: выключенный «Проект» остаётся выключенным', () => {
+    const raw = serializeToolPrefs({ ...DEFAULTS, project: { road: false, rail: false } });
+    expect(parseToolPrefs(raw, defaultToolPrefs(DEFAULTS, true)).project.road).toBe(false);
+  });
+
+  describe('в игре (Controller)', () => {
+    type Handler = (e: unknown) => void;
+    /** Подписки на события — вместо окна и холста (тесты идут без браузера). */
+    class Events {
+      addEventListener(_type: string, _h: Handler): void {}
+    }
+    const g = globalThis as Record<string, unknown>;
+    const saved = { window: g.window, input: g.HTMLInputElement };
+    beforeAll(() => {
+      g.window = new Events();
+      g.HTMLInputElement = class {};
+    });
+    afterAll(() => {
+      g.window = saved.window;
+      g.HTMLInputElement = saved.input;
+    });
+
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    /** Загрузка страницы: новый Controller и запомненные инструменты из того же хранилища. */
+    const load = (storage: ReturnType<typeof memoryStorage> | null, played = false): Controller => {
+      const c = new Controller(new Events() as unknown as HTMLCanvasElement, new Camera(), () => game);
+      rememberTools(c, { storage, played });
+      return c;
+    };
+
+    it('новичок: «Дорога → Строить» — сразу проект; выключил сам — после перезагрузки выключен', () => {
+      const s = memoryStorage();
+      const first = load(s);
+      first.setTool('road');
+      expect(first.projectMode).toBe(true);
+      first.toggleProject();
+      expect(first.projectMode).toBe(false);
+
+      const again = load(s);
+      again.setTool('road');
+      expect(again.projectMode).toBe(false);
+    });
+
+    it('новичок, ничего не трогавший, после перезагрузки — с «Проектом»: выбор по умолчанию уже записан', () => {
+      const s = memoryStorage();
+      load(s);
+      expect(s.data.has(TOOL_PREFS_KEY)).toBe(true);
+      const again = load(s);
+      again.setTool('road');
+      expect(again.projectMode).toBe(true);
+    });
+
+    it('не первая партия (сохранение без настроек) и без хранилища — «Проект» выключен, как раньше', () => {
+      for (const c of [load(memoryStorage(), true), load(null)]) {
+        c.setTool('road');
+        expect(c.projectMode).toBe(false);
+      }
+    });
   });
 });

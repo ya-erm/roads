@@ -3,7 +3,8 @@
  * выбрано то же, что было. Запоминаются только настройки инструментов (режим, тип дороги, форма, «Проект» вкл/выкл,
  * кисть…), но не то, что игрок делал ими: незаконченный проект, черновик маршрута, выделение, скопированный кусок,
  * высота (мост или тоннель) и повороты — с чистого листа. Без localStorage (тесты, приватный режим, переполненное
- * хранилище) ничего не запоминается — ошибок не бывает.
+ * хранилище) ничего не запоминается — ошибок не бывает. В первой партии (настроек ещё нет) «Дорога» открывается
+ * с включённым «Проектом» — дальше он, как и всё остальное, такой, каким его оставил игрок.
  */
 import { RAIL_STATION } from '../config';
 import type { DrawMode } from '../game/build';
@@ -199,12 +200,36 @@ export function applyToolPrefs(c: Controller, p: ToolPrefs): void {
 }
 
 /**
- * Инструмент и режимы — как в прошлый раз, и дальше запоминать каждую смену. Звать после Hud: он задаёт
- * controller.onChange, а запись встаёт следом за ним.
+ * Первая партия у игрока: настроек инструментов в хранилище ещё нет и продолжать нечего (played — есть сохранённая
+ * партия: игрок с прошлых версий, где настройки не запоминались). Без хранилища — не первая: выключенный «Проект»
+ * там не запомнить, и он навязывался бы при каждой загрузке.
  */
-export function rememberTools(c: Controller, storage: PrefsStorage | null = browserStorage()): void {
-  applyToolPrefs(c, loadToolPrefs(toolPrefsOf(c), storage));
+export function isFirstGame(storage: PrefsStorage | null, played: boolean): boolean {
+  if (played || !storage) return false;
+  try {
+    return storage.getItem(TOOL_PREFS_KEY) === null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Настройки по умолчанию: в первой партии «Дорога» открывается с «Проектом» — новичок сразу видит, что дорогу можно
+ * сначала нарисовать, а построить потом. Дальше «Проект» — как запомнено: выключил сам — так и останется.
+ */
+export function defaultToolPrefs(base: ToolPrefs, firstGame: boolean): ToolPrefs {
+  return firstGame ? { ...base, project: { ...base.project, road: true } } : base;
+}
+
+/**
+ * Инструмент и режимы — как в прошлый раз, и дальше запоминать каждую смену. Звать после Hud: он задаёт
+ * controller.onChange, а запись встаёт следом за ним. played — продолжаем сохранённую партию (см. isFirstGame).
+ */
+export function rememberTools(c: Controller, { storage = browserStorage(), played = false }: { storage?: PrefsStorage | null; played?: boolean } = {}): void {
+  applyToolPrefs(c, loadToolPrefs(defaultToolPrefs(toolPrefsOf(c), isFirstGame(storage, played)), storage));
   const write = toolPrefsWriter(storage);
+  // Сразу в хранилище: следующая загрузка — уже не первая партия, даже если игрок ничего не трогал.
+  write(toolPrefsOf(c));
   const sync = c.onChange;
   c.onChange = () => {
     sync();
