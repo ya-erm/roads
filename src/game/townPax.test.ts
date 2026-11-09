@@ -11,9 +11,11 @@ function stationIn(game: Game, townId: number, toward: { x: number; y: number })
   const mid = (c: ReturnType<typeof townStreets>[number]) => c.lut.pointAt(c.length / 2);
   const streets = townStreets(game, townId).sort((a, b) => dist(mid(a), toward) - dist(mid(b), toward));
   for (const seg of streets) {
-    for (const side of [-1, 1]) {
-      const p = mid(seg);
-      const t = seg.lut.tangentAt(seg.length / 2);
+    const p = mid(seg);
+    const t = seg.lut.tangentAt(seg.length / 2);
+    // Сперва — по ту сторону улицы, что дальше от соседнего города: шоссе к нему от перекрёстка выезда не упрётся в саму станцию.
+    const away = (toward.x - p.x) * t.y - (toward.y - p.y) * t.x > 0 ? 1 : -1;
+    for (const side of [away, -away]) {
       const st = game.placeStation({ x: p.x - t.y * side * 40, y: p.y + t.x * side * 40 }, 14);
       if (st) return st;
     }

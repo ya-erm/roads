@@ -36,9 +36,11 @@ function stationIn(game: Game, townId: number, toward: { x: number; y: number })
   const mid = (c: ReturnType<typeof townStreets>[number]) => c.lut.pointAt(c.length / 2);
   const streets = townStreets(game, townId).sort((a, b) => dist(mid(a), toward) - dist(mid(b), toward));
   for (const seg of streets) {
-    for (const side of [-1, 1]) {
-      const p = mid(seg);
-      const t = seg.lut.tangentAt(seg.length / 2);
+    const p = mid(seg);
+    const t = seg.lut.tangentAt(seg.length / 2);
+    // Сперва — по ту сторону улицы, что дальше от соседнего города: шоссе к нему от перекрёстка выезда не упрётся в саму станцию.
+    const away = (toward.x - p.x) * t.y - (toward.y - p.y) * t.x > 0 ? 1 : -1;
+    for (const side of [away, -away]) {
       const st = game.placeStation({ x: p.x - t.y * side * 40, y: p.y + t.x * side * 40 }, 14);
       if (st) return st;
     }
@@ -101,19 +103,24 @@ describe('Первый автобус новой линии между горо�
   });
 
   it('линия уже возит — новый автобус не ждёт; все проданы и куплен новый — снова ждёт', () => {
-    const { game, line } = intercityLine();
+    const { game, line, sA } = intercityLine();
     const first = game.buyVehicle(line.id, 'bus')!;
     firstDeparture(game, first);
     // Вторая машина на работающей линии уходит как обычно — после посадки, без ожидания первых пассажиров.
     const second = game.buyVehicle(line.id, 'bus')!;
-    expect(firstDeparture(game, second).t).toBeLessThan(10);
+    const usual = firstDeparture(game, second).t;
+    expect(usual).toBeLessThan(10);
     // Маршрут остался без машин — пассажиры ждут дальше (маршрут-то есть); новый автобус — снова первый рейс.
     game.sellVehicle(first.id);
     game.sellVehicle(second.id);
     game.update(0.1);
+    // Ждущих на станции — меньше половины автобуса (иначе он и так уехал бы полным после посадки): у станции
+    // с большим охватом их успевает набраться больше, поэтому начинаем с пустой.
+    sA.passengers.clear();
     const again = game.buyVehicle(line.id, 'bus')!;
     const run = firstDeparture(game, again);
-    expect(run.t).toBeGreaterThan(10);
+    // Ждёт дольше обычной посадки — пока не займёт половину мест.
+    expect(run.t).toBeGreaterThan(usual + 1);
     expect(run.load).toBeGreaterThanOrEqual(10);
   });
 });
