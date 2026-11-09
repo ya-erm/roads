@@ -68,6 +68,8 @@ export function fitLanes(lanes: readonly LaneSlot[], from: number, to: number): 
 export function partLanes(net: LaneNet, c: Corridor): LaneSlot[] {
   const w = c.build?.was;
   if (!w) return [];
+  // Пристройка полосы с краю — прежние полосы все на месте: перекрыто только место новой.
+  if (w.edge) return fitLanes(w.lanes, w.len, c.length);
   // «С проездом» на узкой — открытая половина (на участке под реверсом по ней едут по очереди в обе стороны).
   if (laneWise(c.build)) {
     const side = workSide(c.build!);
@@ -97,7 +99,7 @@ export function reversible(lanes: readonly LaneSlot[]): boolean {
 /** Стройка — перестройка «с проездом» узкой дороги (◐ на 1+1, 2+1): полотно — половинами, по другой — реверс. */
 export function laneWise(b: CorridorBuild | undefined): boolean {
   const w = b?.was;
-  return !!w && !!w.part && !w.moved && reversible(w.lanes);
+  return !!w && !!w.part && !w.moved && !w.edge && reversible(w.lanes);
 }
 
 /**

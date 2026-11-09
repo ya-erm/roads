@@ -35,7 +35,7 @@ import { junctionCorners } from '../lanes/geometry';
 import { GRADE } from '../config';
 import { aimAlong, roadDirs } from './aim';
 import { autoLevels, designProfile, PROFILE_STEP, steepText } from '../game/grade';
-import { laneEdit, laneStepEdit, moveNodeEdit, onOldAxis, reshapeEdit } from '../game/roadbuild';
+import { laneEdit, laneStepEdit, moveNodeEdit, onOldAxis, reshapeEdit, splitTip } from '../game/roadbuild';
 import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, profileOf } from '../lanes/model';
 import { isOneWay, LANE_W, LEVEL_RUN, ROAD_CLASSES, ROAD_MARGIN, type RoadClass, type RoadSpec } from '../world/roadTypes';
 
@@ -488,8 +488,8 @@ export class RoadTools {
         for (const e of prefix) if (e(n) === false) return false;
         return edit(n);
       },
-      // «Со строительством» новая полоса — перестройка дороги стройкой (rebuild.ts).
-      { shove: true, rebuild: true },
+      // «Со строительством» новая полоса — перестройка дороги стройкой (rebuild.ts), только там, где дорога стала шире.
+      { shove: true, rebuild: true, lane: true },
     );
   }
 
@@ -529,7 +529,9 @@ export class RoadTools {
     const out: LaneStepOut = { step: null };
     const edit = laneStepEdit(tip, qs, cls, r, spec.limit, this.reverse, out);
     const plan = this.lanePlanOf(edit);
-    return { plan, step: this.laneFits(plan) ? out.step : null, edit };
+    const step = this.laneFits(plan) ? out.step : null;
+    // Полотно под концом полосы могли разрезать под стройку пристройки — конец на его куске.
+    return { plan, step: step && plan.split ? { ...step, tip: splitTip(plan, step.tip) } : step, edit };
   }
 
   /**

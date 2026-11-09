@@ -3,7 +3,7 @@ import { curveProfile, earthFactor, earthworkProblem, GroundProfile, type Profil
 import { nodeDeck } from '../lanes/deck';
 import { Cubic, minRadius } from '../core/bezier';
 import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
-import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDraft, laneStep, LaneTip, RoadOptions, taperDeadLanes } from '../lanes/edit';
+import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, joinTaperedLanes, LaneDraft, laneStep, LaneTip, RoadOptions, taperDeadLanes } from '../lanes/edit';
 import { cornerCost, cornerHandles } from '../lanes/corners';
 import { edgesAt, laneShare } from '../lanes/geometry';
 import { Corridor, type CorridorWas, Flow, LaneNet, type LaneNode, LaneSlot, LAT_EPS } from '../lanes/model';
@@ -12,7 +12,7 @@ import type { Footprint } from '../world/spatial';
 import { halfAtS } from '../world/worldgen';
 import type { Roads } from './roads';
 import { buildRate, carryBuild, paidFor, pieceRate } from './constructionWork';
-import { isMoved, rebuildCost, rebuildDiff, substantial, wasCorridor, wasOf } from './rebuild';
+import { isMoved, rebuildCost, rebuildDiff, splitWidened, substantial, wasCorridor, wasOf } from './rebuild';
 
 /** Что строитель дорог знает об игре. */
 export interface RoadContext {
@@ -90,6 +90,30 @@ export interface RoadPlan {
    * что платится сразу (снос домов, правки готовых дорог); проект оплачивается по готовым метрам.
    */
   project?: ProjectStart;
+  /**
+   * Пристройка «Полосой» «Со строительством» разрезала готовые полотна (rebuild.ts, splitWidened): номер прежнего →
+   * его куски по порядку (номер и где кусок начинался на прежнем). Конец полосы по точкам на таком полотне — splitTip.
+   */
+  split?: Map<number, { id: number; s0: number }[]>;
+}
+
+/** Конец полосы по точкам (в сети до плана) — в сети плана, где полотно под ним могли разрезать (RoadPlan.split). */
+export function splitTip(plan: RoadPlan, tip: LaneTip): LaneTip {
+  const at = (id: number, s: number) => {
+    const pieces = plan.split?.get(id);
+    if (!pieces) return null;
+    const p = [...pieces].reverse().find((k) => k.s0 <= s + 1e-6) ?? pieces[0];
+    return { corridor: p.id, s: Math.max(0, s - p.s0) };
+  };
+  if (tip.kind === 'edge') {
+    const k = at(tip.corridor, tip.s);
+    return k ? { ...tip, ...k } : tip;
+  }
+  if (tip.kind === 'point' && tip.anchor.kind === 'corridor') {
+    const k = at(tip.anchor.corridor, tip.anchor.s);
+    return k ? { ...tip, anchor: { ...tip.anchor, ...k } } : tip;
+  }
+  return tip;
 }
 
 const fail = (reason: string): RoadPlan => ({ ok: false, reason, cost: 0, spend: 0, refund: 0, demolish: [], net: null, changed: [] });
@@ -271,7 +295,7 @@ export class RoadBuilder {
    */
   plan(
     edit: NetEdit,
-    opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean; only?: (c: Corridor) => boolean; project?: boolean; rebuild?: boolean } = {},
+    opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean; only?: (c: Corridor) => boolean; project?: boolean; rebuild?: boolean; lane?: boolean } = {},
   ): RoadPlan {
     const before = this.net;
     const next = before.clone();
@@ -285,7 +309,7 @@ export class RoadBuilder {
     const pid = (opts.project || opts.rebuild) && !opts.free && !opts.raze ? (this.ctx.projectId?.() ?? null) : null;
     // Новые полотна правки готовой дороги («Полоса» пристроила съезд) — тоже новая дорога, стройкой.
     const fresh = pid !== null ? this.markProject(before, next, pid) : undefined;
-    const re = pid === null ? null : this.markRebuild(before, next, pid);
+    const re = pid === null ? null : this.markRebuild(before, next, pid, !!opts.lane);
     const project = mergeStart(fresh, re?.start);
     // Что изменилось: новые полотна, полотна с новой ревизией и исчезнувшие.
     const changed: Corridor[] = [];
@@ -344,6 +368,7 @@ export class RoadBuilder {
     if (moved) plan.moved = moved;
     if (project) plan.project = project;
     if (re && re.shift > 0.5) plan.shift = re.shift;
+    if (re?.split) plan.split = re.split;
     for (const c of checked) {
       const prof = onOldAxis(before, c) ? null : corridorProfile(next, c, ground);
       if (!prof) continue;
@@ -377,14 +402,36 @@ export class RoadBuilder {
    * разрезанной — полотно под ним, у перестройки в стройке — прежняя дорога из её записи). Существенная правка —
    * перестройка проектом pid (Corridor.build с CorridorWas), небольшая — сразу. Уже идущая перестройка, которую правят
    * снова, — тем же проектом, цена и темп — заново от прежней дороги; правку вернули к прежней дороге — стройки нет.
-   * Ответ — что заложено (нет — undefined) и наибольший сдвиг оси, м.
+   * Пристройка «Полосой» (lane) на готовом полотне — стройка только на куске, где полотно стало шире: полотно
+   * режется стыками (splitWidened), остальное готово как было; прежние полосы при перекрытии все открыты (was.edge).
+   * Ответ — что заложено (нет — undefined), наибольший сдвиг оси, м, и разрезанные полотна.
    */
-  private markRebuild(before: LaneNet, next: LaneNet, pid: number): { start?: ProjectStart; shift: number } {
+  private markRebuild(
+    before: LaneNet,
+    next: LaneNet,
+    pid: number,
+    lane = false,
+  ): { start?: ProjectStart; shift: number; split?: Map<number, { id: number; s0: number }[]> } {
     const water = (p: Vec, m?: number) => this.ctx.isWater(p, m);
     const ground = this.ctx.ground();
     const res: ProjectStart = { id: pid, cost: 0, seconds: 0, length: 0, corridors: [] };
     const rb = { count: 0, moved: false, cost: 0, seconds: 0 };
     let shift = 0;
+    // Куски разрезанных пристройкой полотен — их прежняя дорога (полосы прежнего полотна по куску).
+    const pieces = new Map<number, Corridor>();
+    const split = new Map<number, { id: number; s0: number }[]>();
+    if (lane) {
+      for (const c of [...next.corridors.values()]) {
+        const prev = before.corridors.get(c.id);
+        if (!prev || prev.rev === c.rev || c.build || prev.build) continue;
+        const d = rebuildDiff(prev, c);
+        if (!substantial(d) || isMoved(d) || d.cls) continue;
+        const cut = splitWidened(next, prev, c);
+        if (!cut) continue;
+        for (const p of cut) pieces.set(p.id, p.old);
+        split.set(c.id, cut.map((p) => ({ id: p.id, s0: p.s0 })));
+      }
+    }
     for (const c of next.corridors.values()) {
       const prev = before.corridors.get(c.id);
       if ((prev && prev.rev === c.rev) || c.ring) continue;
@@ -393,6 +440,7 @@ export class RoadBuilder {
       const own = c.build?.was;
       let old: Corridor | undefined;
       if (own) old = wasCorridor(c, own);
+      else if (pieces.has(c.id)) old = pieces.get(c.id);
       else if (prev) old = prev.build ? undefined : prev;
       else old = onOldAxis(before, c) ? axisUnder(before, c) : undefined;
       if (!old || old.build) continue;
@@ -418,6 +466,8 @@ export class RoadBuilder {
         continue;
       }
       w = wasOf(before, next, old, c, d, { value: 0, price: 0, work: 1 });
+      // Пристройка «Полосой»: прежние полосы на месте — при перекрытии все открыты, реверса нет.
+      if (lane && w.part) w.edge = true;
       w.value = prev ? fullCorridorCost(before, prev, water, ground) : fullCorridorCost(next, wasCorridor(c, w), water, ground);
       Object.assign(w, rebuildCost(full, w.value, d, c.length));
       c.build = { project: pid, done: 0, was: w };
@@ -432,7 +482,7 @@ export class RoadBuilder {
       if (w.moved) rb.moved = true;
     }
     if (rb.count) res.rebuild = rb;
-    return { ...(res.corridors.length ? { start: res } : {}), shift };
+    return { ...(res.corridors.length ? { start: res } : {}), shift, ...(split.size ? { split } : {}) };
   }
 
   /** Строит по плану: сносит дома, копия сети становится сетью, деньги списываются. */
@@ -459,7 +509,7 @@ export class RoadBuilder {
   /** Полоса по черновику инструмента «Полоса». */
   lane(d: LaneDraft, cls: RoadClass): RoadPlan {
     // Дома у дороги не сносим: после стройки их отодвинут от неё (roadWidened), сносят — только если места нет.
-    return this.plan(laneEdit(d, cls), { shove: true, rebuild: true });
+    return this.plan(laneEdit(d, cls), { shove: true, rebuild: true, lane: true });
   }
 
   /**
@@ -475,8 +525,9 @@ export class RoadBuilder {
     reverse = false,
   ): { plan: RoadPlan; step: { tip: LaneTip; what: string } | null } {
     const out: LaneStepOut = { step: null };
-    const plan = this.plan(laneStepEdit(tip, qs, cls, radius, limit, reverse, out), { shove: true, rebuild: true });
-    return { plan, step: plan.ok ? out.step : null };
+    const plan = this.plan(laneStepEdit(tip, qs, cls, radius, limit, reverse, out), { shove: true, rebuild: true, lane: true });
+    const step = plan.ok ? out.step : null;
+    return { plan, step: step && plan.split ? { ...step, tip: splitTip(plan, step.tip) } : step };
   }
 
   /** Снос полотен. */
@@ -506,6 +557,8 @@ export class RoadBuilder {
         // Класс с меньшим потолком скорости (проспект 100 → улица) — знак обрезается до потолка.
         c.limit = capLimit(p.cls, p.limit);
         n.setLanes(c, p.lanes);
+        // Сосед того же профиля (дорогу перестраивают по кускам): его отгон к прежнему профилю — снова полосы до стыка.
+        joinTaperedLanes(n, [c.a, c.b]);
         // В стыке с дорогой другого профиля лишние полосы (у неё или у соседа) сходят на нет отгоном.
         taperDeadLanes(n, [c.a, c.b]);
       },

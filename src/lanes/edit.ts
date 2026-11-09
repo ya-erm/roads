@@ -1646,6 +1646,124 @@ export function taperDeadLanes(net: LaneNet, nodeIds: number[]): void {
   }
 }
 
+/**
+ * Обратное к taperDeadLanes — для перестройки дороги по кускам (RoadBuilder.rebuild): полоса, что сходила на нет
+ * отгоном перед стыком (сосед был другого профиля), снова доходит до стыка, если за ним теперь есть её продолжение
+ * (соседа перестроили в тот же профиль). Иначе у куска, перестроенного первым, отгон к прежнему 1+1 оставался
+ * навсегда — магистраль 2+2 сужалась на каждом стыке между кусками (отчёт 0.2.115). Отгоном считается конец полосы
+ * не дальше длины отгона от стыка (taperDeadLanes ставит его ровно туда).
+ * Полотно короче отгона, с которого taperDeadLanes снял такую полосу совсем, получает её снова, если по обе его
+ * стороны у стыков есть эта полоса: короткий кусок 1+1 между двумя кусками 2+2 — то же сужение.
+ * Звать до taperDeadLanes: что так и осталось без продолжения, сойдёт на нет им.
+ */
+export function joinTaperedLanes(net: LaneNet, nodeIds: number[]): void {
+  const nodes = new Set(nodeIds);
+  for (let pass = 0; pass < 20; pass++) {
+    let changed = false;
+    for (const id of [...nodes]) {
+      const n = net.nodes.get(id);
+      if (!n || n.kind !== 'seam' || net.isDeadEnd(n)) continue;
+      const ends = net.ends(n);
+      for (const e of ends) {
+        if (e.side !== 1) continue;
+        for (const o of ends) {
+          if (o.side === e.side) continue;
+          for (let i = 0; i < e.corridor.lanes.length; i++) if (joinPair(net, e, o, i)) changed = true;
+        }
+      }
+      for (const e of ends) {
+        const added = bridgeShort(net, e, ends);
+        if (!added) continue;
+        changed = true;
+        nodes.add(added.a).add(added.b);
+      }
+    }
+    if (!changed) return;
+  }
+}
+
+/** Полоса полотна конца e с поперечной lat и ходом forward в стыке, ближайшая к нему, если она у стыка или кончается отгоном перед ним; −1 — нет. */
+function laneNearEnd(net: LaneNet, e: CorridorEnd, lat: number, forward: boolean): number {
+  const c = e.corridor;
+  let best = -1;
+  let gap = Infinity;
+  c.lanes.forEach((l, i) => {
+    const at = net.laneAtSeam(e, l);
+    if (at.forward !== forward || Math.abs(at.lat - lat) >= LAT_EPS) return;
+    const g = e.end === 'a' ? l.from : c.length - l.to;
+    if (g < gap) {
+      gap = g;
+      best = i;
+    }
+  });
+  return gap <= taperLen(c.cls) + 1 ? best : -1;
+}
+
+/** Полоса i, продлённая до конца end; null — уже доходит или продлить нельзя (налезет на другую полосу). */
+function extended(c: Corridor, i: number, end: End): LaneSlot | null {
+  const l = c.lanes[i];
+  const [lo, hi] = end === 'a' ? [0, l.from] : [l.to, c.length];
+  if (hi - lo <= 0.01) return null;
+  if (c.lanes.some((o, k) => k !== i && Math.abs(o.offset - l.offset) < LANE_W - 0.01 && o.from < hi && lo < o.to)) return null;
+  return end === 'a' ? { ...l, from: 0 } : { ...l, to: c.length };
+}
+
+/** Полоса i полотна конца e и её пара за стыком (у конца o): у стыка обе — если хоть одна сходила на нет отгоном. */
+function joinPair(net: LaneNet, e: CorridorEnd, o: CorridorEnd, i: number): boolean {
+  const c = e.corridor;
+  const l = c.lanes[i];
+  const at = net.laneAtSeam(e, l);
+  if (laneNearEnd(net, e, at.lat, at.forward) !== i) return false;
+  const j = laneNearEnd(net, o, at.lat, at.forward);
+  if (j < 0) return false;
+  const oc = o.corridor;
+  const m = oc.lanes[j];
+  const mine = net.reaches(c, l, e.end);
+  const theirs = net.reaches(oc, m, o.end);
+  if (mine === theirs) return false;
+  // Доходящая полоса уже продолжается за стыком (другим полотном) — её пара не эта.
+  if (mine ? net.across(c, i, e.end) : net.across(oc, j, o.end)) return false;
+  const [k, idx, end] = mine ? [oc, j, o.end] : [c, i, e.end];
+  const lane = extended(k, idx, end);
+  if (!lane) return false;
+  net.setLanes(
+    k,
+    k.lanes.map((x, n) => (n === idx ? lane : x)),
+  );
+  return true;
+}
+
+/**
+ * Короткое (короче отгона) полотно конца e между двумя стыками: полосы соседей у обоих его концов, что сходят на нет
+ * перед ним (или упираются в него) на одной поперечной, — снова и на нём, во всю длину. Ответ — полотно, если ему
+ * добавили полосы.
+ */
+function bridgeShort(net: LaneNet, e: CorridorEnd, ends: CorridorEnd[]): Corridor | null {
+  const d = e.corridor;
+  if (d.a === d.b || d.ring || d.length >= taperLen(d.cls) + 5) return null;
+  const farNode = net.node(e.end === 'a' ? d.b : d.a);
+  if (farNode.kind !== 'seam' || net.isDeadEnd(farNode)) return null;
+  const f = net.end(d, e.end === 'a' ? 'b' : 'a');
+  const add: LaneSlot[] = [];
+  for (const o of ends) {
+    if (o.side === e.side) continue;
+    o.corridor.lanes.forEach((m, j) => {
+      const at = net.laneAtSeam(o, m);
+      if (laneNearEnd(net, o, at.lat, at.forward) !== j) return;
+      if (net.reaches(o.corridor, m, o.end) && net.across(o.corridor, j, o.end)) return;
+      const offset = (at.lat - e.port) * e.along;
+      const flow = (at.forward ? e.along : -e.along) as Flow;
+      if ([...d.lanes, ...add].some((x) => Math.abs(x.offset - offset) < LANE_W - 0.01)) return;
+      const far = net.laneAtSeam(f, { offset, flow, from: 0, to: d.length });
+      const beyond = net.ends(farNode).some((g) => g.side !== f.side && laneNearEnd(net, g, far.lat, far.forward) >= 0);
+      if (beyond) add.push({ offset, flow, from: 0, to: d.length });
+    });
+  }
+  if (!add.length) return null;
+  net.setLanes(d, [...d.lanes, ...add]);
+  return d;
+}
+
 /** Сплошная или пунктир между полосой и её соседом справа (по оси полотна — с бо́льшим смещением). */
 export function toggleSolid(net: LaneNet, c: Corridor, i: number): void {
   net.setLanes(

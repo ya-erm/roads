@@ -1315,7 +1315,7 @@ export class Construction {
       out.length += c.length;
       if (w.moved) out.moved++;
       if (w.part) out.part++;
-      if (!w.moved && reversible(w.lanes)) out.narrow++;
+      if (!w.moved && !w.edge && reversible(w.lanes)) out.narrow++;
       if (closed(c.build)) out.closed++;
       if (w.part && c.length > longest) {
         longest = c.length;

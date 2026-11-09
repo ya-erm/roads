@@ -17,12 +17,13 @@
  * - отмена проекта (revertRebuild) возвращает прежнюю дорогу (и узлы на прежние места), заплаченное — назад.
  */
 import { CONSTRUCTION } from '../config';
-import { CurveLUT } from '../core/bezier';
+import { CurveLUT, type Cubic } from '../core/bezier';
 import type { Vec } from '../core/vec';
 import { fitLanes } from '../lanes/closure';
-import { taperDeadLanes } from '../lanes/edit';
+import { splitCorridor, taperDeadLanes } from '../lanes/edit';
 import { edgesAt, laneShare } from '../lanes/geometry';
-import type { Corridor, CorridorWas, LaneNet, LaneSlot } from '../lanes/model';
+import { type Corridor, type CorridorWas, type LaneNet, type LaneSlot, taperLen } from '../lanes/model';
+import { LANE_W } from '../world/roadTypes';
 
 /** Чем новая дорога отличается от прежней. */
 export interface RebuildDiff {
@@ -30,7 +31,10 @@ export interface RebuildDiff {
   shift: number;
   /** Доля длины, ушедшая с прежней оси дальше CONSTRUCTION.rebuild.shift (0 — дорога на месте). */
   moved: number;
-  /** Метров, где полос (или ширины полотна) стало больше. */
+  /**
+   * Метров, где полос (или ширины полотна) стало больше, — но не больше, чем прибавилось полосы (прибавка ширины в
+   * полосах по длине): продлённый на 30 м конец полосы — 30 м, хоть отгон и сдвинулся вместе с ним.
+   */
   widened: number;
   /** Другой класс дороги. */
   cls: boolean;
@@ -54,6 +58,7 @@ export function rebuildDiff(old: Corridor, c: Corridor): RebuildDiff {
   let shift = 0;
   let far = 0;
   let widened = 0;
+  let added = 0;
   const ds = c.length / n;
   for (let i = 0; i <= n; i++) {
     const s = Math.min(c.length, i * ds);
@@ -68,11 +73,14 @@ export function rebuildDiff(old: Corridor, c: Corridor): RebuildDiff {
     const e = edgesAt(c, s);
     const o0 = edgesAt(old, hit.s);
     const o = o0 && (flip ? ([-o0[1], -o0[0]] as [number, number]) : o0);
-    const more = lanesAt(c, s) > lanesAt(old, hit.s) + 0.25;
+    const k = lanesAt(c, s) - lanesAt(old, hit.s);
+    const more = k > 0.25;
     const wider = !!e && (!o || e[0] < o[0] - 1 || e[1] > o[1] + 1);
     if (more || wider) widened += ds;
+    const grow = e ? (e[1] - e[0] - (o ? o[1] - o[0] : 0)) / LANE_W : 0;
+    added += Math.max(0, k, grow) * ds;
   }
-  return { shift, moved: far / (n + 1), widened, cls: c.cls !== old.cls, flip };
+  return { shift, moved: far / (n + 1), widened: Math.min(widened, added), cls: c.cls !== old.cls, flip };
 }
 
 /** Правка существенная — перестройка проектом стройки, а не сразу. */
@@ -208,6 +216,7 @@ export function healLostWas(net: LaneNet, ids: ReadonlySet<number>): number {
       const was: CorridorWas = { cls: w.cls, lanes, len: c.length, value: Math.round(w.value * k), price: Math.round(w.price * k), work: w.work };
       if (w.limit !== undefined) was.limit = w.limit;
       if (w.part) was.part = true;
+      if (w.edge) was.edge = true;
       c.build = { ...c.build!, was };
       net.touch(c);
       lost.splice(i, 1);
@@ -216,6 +225,97 @@ export function healLostWas(net: LaneNet, ids: ReadonlySet<number>): number {
     }
   }
   return healed;
+}
+
+// ---------- Пристройка «Полосой»: стройка — только там, где полотно стало шире ----------
+
+/** Кусок полотна, отрезанный под стройку пристройки: его номер, где он начинается на прежнем полотне и прежняя дорога на нём. */
+export interface EdgePiece {
+  id: number;
+  s0: number;
+  old: Corridor;
+}
+
+/** Куски короче этого по краям изменённого не отрезаем: стройка доходит до конца полотна. */
+const PIECE_MIN = 20;
+
+function sameCurve(a: Cubic, b: Cubic): boolean {
+  const eq = (p: Vec, q: Vec) => Math.abs(p.x - q.x) < 1e-6 && Math.abs(p.y - q.y) < 1e-6;
+  return eq(a.p0, b.p0) && eq(a.p1, b.p1) && eq(a.p2, b.p2) && eq(a.p3, b.p3);
+}
+
+/** Где полотно c (на той же оси, что old) шире прежнего или с бо́льшим числом полос: [s0, s1] по оси; нигде — null. */
+export function widenedSpan(old: Corridor, c: Corridor): [number, number] | null {
+  let lo = Infinity;
+  let hi = -Infinity;
+  const n = Math.max(2, Math.ceil(c.length));
+  for (let i = 0; i <= n; i++) {
+    const s = (c.length * i) / n;
+    const e = edgesAt(c, s);
+    const o = edgesAt(old, s);
+    const wider = !!e && (!o || e[0] < o[0] - 0.05 || e[1] > o[1] + 0.05);
+    if (!wider && lanesAt(c, s) <= lanesAt(old, s) + 0.01) continue;
+    lo = Math.min(lo, s);
+    hi = Math.max(hi, s);
+  }
+  return lo <= hi ? [lo, hi] : null;
+}
+
+/** Полосы lanes полотна, обрезанные по куску [a, b] (как у splitCorridor): на куске длиной len. */
+function clipLanes(lanes: readonly LaneSlot[], a: number, b: number, len: number): LaneSlot[] {
+  return lanes
+    .filter((l) => l.from < b - 0.5 && l.to > a + 0.5)
+    .map((l) => ({ ...l, from: l.from <= a + 0.01 ? 0 : l.from - a, to: l.to >= b - 0.01 ? len : l.to - a }));
+}
+
+/**
+ * Пристройка «Полосой» (новая полоса, продлённый конец) на готовом полотне c — правка того же полотна old (та же ось):
+ * стройкой становится не всё полотно, а кусок, где оно стало шире. Полотно в сети next режется стыками по краям
+ * изменённого (с отгоном новой полосы); место разреза не попадает на отгон ни прежних, ни новых полос — иначе отгон
+ * разрезало бы стыком (разрез отодвигается за него). Кусок у конца короче PIECE_MIN не отрезается. Ответ — куски
+ * полотна по порядку от a с прежней дорогой на каждом (полосы old по куску); резать нечего — null.
+ */
+export function splitWidened(next: LaneNet, old: Corridor, c: Corridor): EdgePiece[] | null {
+  if (c.ring || c.a === c.b || !sameCurve(old.curve, c.curve)) return null;
+  const span = widenedSpan(old, c);
+  if (!span) return null;
+  const L = c.length;
+  const T = taperLen(c.cls);
+  const zones: [number, number][] = [];
+  for (const l of [...old.lanes, ...c.lanes]) {
+    if (l.to < L - 0.01) zones.push([l.to - 2, l.to + T + 2]);
+    if (l.from > 0.01) zones.push([l.from - T - 2, l.from + 2]);
+  }
+  // Место разреза у s — не на отгоне: сдвигаем в сторону dir (от изменённого), пока не выйдет.
+  const clear = (s: number, dir: 1 | -1): number | null => {
+    for (let k = 0; k < 50; k++) {
+      const z = zones.find(([a, b]) => s > a && s < b);
+      if (!z) return s >= PIECE_MIN && s <= L - PIECE_MIN ? s : null;
+      s = dir > 0 ? z[1] + 3 : z[0] - 3;
+    }
+    return null;
+  };
+  const hi = clear(span[1] + 2, 1);
+  const lo = clear(span[0] - 2, -1);
+  if (hi === null && lo === null) return null;
+  const cuts = [0, ...(lo !== null ? [lo] : []), ...(hi !== null ? [hi] : []), L];
+  // С конца к началу: разрез у бо́льшего s не сдвигает координаты меньших.
+  const ids: number[] = [];
+  let rest = c;
+  for (let i = cuts.length - 2; i >= 1; i--) {
+    const r = splitCorridor(next, rest, cuts[i], 'seam');
+    ids.unshift(r.second.id);
+    rest = r.first;
+  }
+  ids.unshift(rest.id);
+  return ids.map((id, i) => {
+    const p = next.corridor(id);
+    const o: Corridor = { ...p, cls: old.cls, lanes: clipLanes(old.lanes, cuts[i], cuts[i + 1], p.length) };
+    delete o.build;
+    if (old.limit === undefined) delete o.limit;
+    else o.limit = old.limit;
+    return { id, s0: cuts[i], old: o };
+  });
 }
 
 /** Полотно в стройке — перестройка готовой дороги (а не новая дорога). */
