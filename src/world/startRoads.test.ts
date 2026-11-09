@@ -115,6 +115,18 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
     }
   });
 
+  it('тупики улиц остаются тупиками: машинам есть где развернуться, не уезжая в конец просёлка', () => {
+    for (const seed of [1, 7]) {
+      const game = new Game(seed);
+      const net = game.roads.net;
+      for (const n of net.nodes.values()) {
+        const cls = n.corridors.map((id) => net.corridor(id).cls);
+        // Просёлок примыкает к улице только перекрёстком — не продолжает её тупик стыком.
+        if (cls.includes('dirt') && cls.some((c) => c !== 'dirt')) expect(n.kind).toBe('junction');
+      }
+    }
+  });
+
   it('мир под ними тот же: города, предприятия и случайность партии от просёлков не зависят', () => {
     const game = new Game(3);
     const ctx = game['worldContext']() as WorldContext;
@@ -129,14 +141,17 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
     expect(dirtOf(net).length).toBeGreaterThan(0);
   });
 
-  it('грузовой двор с той стороны, куда подходит просёлок, сам к нему подключается', () => {
+  it('грузовой двор с той стороны, куда подходит просёлок, встаёт напротив него и сам к нему подключается', () => {
     const game = new Game(1);
     game.money = 5_000_000;
     let checked = 0;
     for (const ind of game.industries) {
       const side = roadSide(game, ind);
       if (!side) continue;
-      const st = game.placeStation(add(ind.fp.center, scale(side.n, side.half + 20)), 14);
+      // Курсор — не посередине стены, а ближе к углу (по очереди к разным): двор всё равно встаёт напротив просёлка.
+      const along = side.half === ind.fp.w / 2 ? ind.fp.h : ind.fp.w;
+      const shift = scale({ x: -side.n.y, y: side.n.x }, (checked % 2 ? 0.3 : -0.3) * along);
+      const st = game.placeStation(add(add(ind.fp.center, scale(side.n, side.half + 20)), shift), 14);
       expect(st?.industryId).toBe(ind.id);
       const net = game.roads.net;
       // Выезд двора — продолжение просёлка: от станции по дорогам — до улиц города.

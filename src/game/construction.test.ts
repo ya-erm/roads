@@ -578,7 +578,9 @@ describe('Стройка дорог: базы и бригады', () => {
     const id = game.construction.list()[0].project.id;
     let drove = false;
     const bodies = new Set<string | undefined>();
-    for (let t = 0; t < 60 && !crews.working(id).length; t += 0.1) {
+    // Пока бригада не на работе и пока с базы не выехала вся колонна: до близкой стройки головная машина доезжает
+    // раньше, чем с базы выедет последняя.
+    for (let t = 0; t < 60 && (!crews.working(id).length || bodies.size < 3); t += 0.1) {
       runSeconds(game, 0.1);
       const b = [...crews.brigades.values()][0];
       for (const car of b.convoy?.cars ?? []) {

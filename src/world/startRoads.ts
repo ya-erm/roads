@@ -1,7 +1,7 @@
 import { Cubic, CurveLUT, minRadius } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleOf, angleDiff, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { buildRoad, openSeamSide, type Anchor } from '../lanes/edit';
+import { buildRoad, type Anchor } from '../lanes/edit';
 import { edgesAt } from '../lanes/geometry';
 import { twoWay, type Corridor, type LaneNet, type LaneNode } from '../lanes/model';
 import type { IndustryKind } from './cargo';
@@ -27,8 +27,8 @@ export const START_ROADS = {
   /** Дорога к предприятию — не длиннее. */
   industryReach: 1500,
   /**
-   * Тупик просёлка у предприятия — на столько от стены: там же, где выезд грузового двора (Game.industryStationPlan,
-   * at(64)), — двор, поставленный с этой стороны, подключится к просёлку сам.
+   * Тупик просёлка у предприятия — на столько от стены: там же, где выезд грузового двора (Game.industryStationPlan
+   * берёт это число), — двор, поставленный с этой стороны, встаёт напротив просёлка и подключается к нему сам.
    */
   industryExit: 64,
   /** Доля предприятий с дорогой: хозяйства и лесопилки — чаще, прочее сырьё — реже, заводы — ещё реже. */
@@ -50,8 +50,6 @@ const RURAL = new Set<IndustryKind>(['farm', 'forest', 'ranch', 'flaxfarm', 'fis
 interface Start {
   anchor: Anchor;
   dir: Vec;
-  /** Продолжение тупика по его оси (касательная задана), иначе — ответвление. */
-  along: boolean;
   /** Полотна, вплотную к которым дорога может идти у самого начала. */
   host: Set<number>;
 }
@@ -100,7 +98,7 @@ function lay(ctx: WorldContext, towns: Town[], r: Route): Corridor[] {
   return made;
 }
 
-/** Узлы и полотна города, откуда можно начать дорогу в сторону target: тупики, перекрёстки, места на улицах. */
+/** Узлы и полотна города, откуда можно начать дорогу в сторону target: перекрёстки и места на улицах. */
 function startsToward(net: LaneNet, town: Town, target: Vec, dirAt?: (p: Vec) => Vec): Start[] {
   const res: Start[] = [];
   const toward = (p: Vec) => dirAt?.(p) ?? norm(sub(target, p));
@@ -111,16 +109,11 @@ function startsToward(net: LaneNet, town: Town, target: Vec, dirAt?: (p: Vec) =>
     const n = net.node(id);
     if (n.level !== 0) continue;
     const d = toward(n.pos);
-    if (net.isDeadEnd(n) && n.kind === 'seam') {
-      const side = openSeamSide(net, n);
-      if (side === null) continue;
-      const dir = scale(n.dir, side);
-      // Продолжаем тупик, только если он и так смотрит в нужную сторону.
-      if (dot(dir, d) > 0.5) res.push({ anchor: { kind: 'node', node: n.id, pos: n.pos }, dir, along: true, host: new Set(n.corridors) });
-      continue;
-    }
+    // Тупик улицы не продолжаем: на нём разворачиваются машины жителей и автобусы, а за ним они уезжали бы
+    // разворачиваться в конец просёлка — к предприятию или на край карты.
+    if (net.isDeadEnd(n)) continue;
     if (n.kind !== 'junction' || n.corridors.length > 3 || !freeArm(net, n, d)) continue;
-    res.push({ anchor: { kind: 'node', node: n.id, pos: n.pos }, dir: d, along: false, host: new Set(n.corridors) });
+    res.push({ anchor: { kind: 'node', node: n.id, pos: n.pos }, dir: d, host: new Set(n.corridors) });
   }
   // Ответвление посреди улицы — под прямым углом к ней, в ту сторону, где цель.
   for (const c of streets) {
@@ -133,7 +126,7 @@ function startsToward(net: LaneNet, town: Town, target: Vec, dirAt?: (p: Vec) =>
     const d = toward(p);
     if (dot(nrm, d) < 0) nrm = scale(nrm, -1);
     if (dot(nrm, d) < 0.6) continue;
-    res.push({ anchor: { kind: 'corridor', corridor: c.id, s, pos: p }, dir: nrm, along: false, host: new Set([c.id]) });
+    res.push({ anchor: { kind: 'corridor', corridor: c.id, s, pos: p }, dir: nrm, host: new Set([c.id]) });
   }
   return res;
 }
@@ -146,7 +139,7 @@ function freeArm(net: LaneNet, n: LaneNode, d: Vec): boolean {
 
 /**
  * Кривая от начала к концу end, где дорога приходит по направлению arrive. Ручки — по трети хорды:
- * плавный изгиб от тупика или улицы к цели.
+ * плавный изгиб от перекрёстка или улицы к цели.
  */
 function curveFor(start: Start, end: Vec, arrive: Vec): Cubic {
   const p0 = start.anchor.pos;
@@ -190,7 +183,7 @@ function routeOk(ctx: WorldContext, start: Start, curve: Cubic, target?: Industr
 /** Первая годная дорога из вариантов, ближние — раньше. */
 function firstRoute(ctx: WorldContext, cands: { start: Start; curve: Cubic }[], reach: number, target?: Industry): Route | null {
   const scored = cands
-    .map((c) => ({ ...c, d: dist(c.curve.p0, c.curve.p3) + (c.start.along ? 0 : 30) }))
+    .map((c) => ({ ...c, d: dist(c.curve.p0, c.curve.p3) }))
     .filter((c) => c.d <= reach)
     .sort((a, b) => a.d - b.d)
     .slice(0, START_ROADS.tries);
@@ -212,8 +205,8 @@ function edges(w: number, h: number): { out: Vec; gap: (p: Vec) => number }[] {
 }
 
 /**
- * Дорога от города за ближний край карты, если до него недалеко: из тупика улицы — прямо, пока он смотрит к краю
- * (не дальше 30° от перпендикуляра), иначе с изгибом и к краю под прямым углом. Тупик — ровно на краю: разворот
+ * Дорога от города за ближний край карты, если до него недалеко: от перекрёстка или улицы — прямо, пока она смотрит
+ * к краю (не дальше 30° от перпендикуляра), иначе с изгибом и к краю под прямым углом. Тупик — ровно на краю: разворот
  * там не рисуется (LaneRenderer.inMap), дорога обрывается краем карты — уходит за него.
  */
 export function edgeRoute(ctx: WorldContext, town: Town): Route | null {
@@ -228,7 +221,7 @@ export function edgeRoute(ctx: WorldContext, town: Town): Route | null {
       const g = e.gap(p0);
       const cos = dot(start.dir, e.out);
       if (cos <= 0.2) continue;
-      const straight = start.along && cos > Math.cos(Math.PI / 6);
+      const straight = cos > Math.cos(Math.PI / 6);
       const end = straight ? add(p0, scale(start.dir, g / cos)) : add(p0, scale(e.out, g));
       cands.push({ start, curve: curveFor(start, end, straight ? start.dir : e.out) });
     }
@@ -238,7 +231,7 @@ export function edgeRoute(ctx: WorldContext, town: Town): Route | null {
 
 /**
  * Дорога от ближнего города к предприятию: к середине стены, обращённой к городу, тупиком у выезда грузового
- * двора (START_ROADS.industryExit). Начало — тупик, перекрёсток или место на улице любого города, а также
+ * двора (START_ROADS.industryExit). Начало — перекрёсток или место на улице любого города (не тупик), а также
  * просёлок, проложенный раньше (к соседнему предприятию или за край).
  */
 export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): Route | null {
@@ -277,7 +270,7 @@ export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): 
     const d = norm(sub(fp.center, p));
     if (dot(nrm, d) < 0) nrm = scale(nrm, -1);
     if (dot(nrm, d) < 0.6) continue;
-    add2({ anchor: { kind: 'corridor', corridor: c.id, s, pos: p }, dir: nrm, along: false, host: new Set([c.id]) });
+    add2({ anchor: { kind: 'corridor', corridor: c.id, s, pos: p }, dir: nrm, host: new Set([c.id]) });
   }
   return firstRoute(ctx, cands, START_ROADS.industryReach, ind);
 }

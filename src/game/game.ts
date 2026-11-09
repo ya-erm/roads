@@ -61,6 +61,7 @@ import {
   recountPopulation,
   WorldContext,
 } from '../world/worldgen';
+import { START_ROADS } from '../world/startRoads';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
 import { prepareSettings } from '../scenario/generator';
 import { Scenario } from '../scenario/manager';
@@ -546,6 +547,8 @@ export interface RailMoveOptions {
 const MONTHS = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
 /** Выезд автостанции — шоссе 1+1, 90 км/ч (как «Шоссе» в панели дорог): машины со станции сразу едут быстро. */
 const DRIVEWAY = { cls: 'highway' as const, lanes: twoWay(1, 1) };
+/** Выезд грузового двора кончается на столько от стены предприятия; там же — тупик стартового просёлка. */
+const INDUSTRY_EXIT = START_ROADS.industryExit;
 /** Выезд станции из перекрёстка — не ближе этого угла (рад) к соседним дорогам. */
 const STATION_JOIN_GAP = 0.5;
 
@@ -977,7 +980,18 @@ export class Game implements BuildContext {
     const along = alongX ? fp.h : fp.w;
     const axis = alongX ? v : u;
     const dockW = Math.min(64, along * 0.7);
-    const slide = Math.max(-(along / 2 - dockW / 2), Math.min(along / 2 - dockW / 2, alongX ? ly : lx));
+    const room = along / 2 - dockW / 2;
+    let slide = Math.max(-room, Math.min(room, alongX ? ly : lx));
+    // К этой стене уже подходит дорога и кончается тупиком у места выезда (стартовый просёлок): двор встаёт напротив
+    // неё, где бы вдоль стены ни был курсор, — выезд продолжает дорогу, а не упирается ей в бок.
+    const net = this.roads.net;
+    for (const node of net.nodesNear(add(fp.center, scale(n, half + INDUSTRY_EXIT)), along / 2 + 10)) {
+      const off = sub(node.pos, fp.center);
+      const s = dot(off, axis);
+      if (!net.isDeadEnd(node) || Math.abs(dot(off, n) - half - INDUSTRY_EXIT) > 6 || Math.abs(s) > room) continue;
+      slide = s;
+      break;
+    }
     const at = (k: number) => add(add(fp.center, scale(axis, slide)), scale(n, half + k));
     const dock: Footprint = { center: at(12), w: dockW, h: 18, angle: Math.atan2(n.x, -n.y) };
     const fail = (reason: string, cost = COST.station, driveway?: RoadPlan): StationPlan => ({
@@ -989,7 +1003,7 @@ export class Game implements BuildContext {
       driveway,
     });
     const gate = at(26);
-    const exit = at(64);
+    const exit = at(INDUSTRY_EXIT);
     if ([dock.center, gate, exit].some((q) => this.isWater(q, 10) || !this.inBounds(q, 40))) return fail('Мешает вода');
     // Дома на месте площадки сносим за доплату; другое предприятие или станция мешают.
     const under = this.structuresUnder(dock, 0);
