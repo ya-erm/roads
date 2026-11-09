@@ -196,9 +196,16 @@ describe('Сценарий: задания по реальной симуляц�
       expect(o.status).toBe('active');
       expect(sc.monthsLeft(o)!).toBeLessThan(0.1);
       while (game.time < MONTH_LENGTH + 0.5) game.update(0.05);
+      // Срок вышел — просрочка: ещё 2 месяца (не меньше LATE.min) можно доделать, штрафа пока нет.
+      expect(o.status).toBe('active');
+      expect(o.lateUntil).toBe(1 + 2);
+      expect(game.ledger.fines).toBe(0);
+      expect(sc.secondsLeft(o)).toBeCloseTo(3 * MONTH_LENGTH - game.time, 5);
+      // Не успели и к концу просрочки — провал; штраф — в начале месяца конца просрочки, в его статьях.
+      setMonth(game, o.lateUntil! - 1);
+      sc.monthEnd();
       expect(o.status).toBe('failed');
-      expect(o.closedAt).toBe(0);
-      // Штраф — в начале месяца-дедлайна, в его статьях.
+      expect(o.closedAt).toBe(2);
       expect(game.ledger.fines).toBe(5000);
     }
   });

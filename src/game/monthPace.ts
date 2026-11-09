@@ -117,6 +117,7 @@ function repaceScenario(sc: ScenarioState, p: Pace): void {
   for (const o of sc.objectives) {
     if (o.status !== 'active' && o.status !== 'offered') continue;
     if (o.deadline !== null) o.deadline = ahead(o.deadline);
+    if (o.lateUntil !== undefined) o.lateUntil = ahead(o.lateUntil);
     if (o.offerUntil !== undefined) o.offerUntil = ahead(o.offerUntil);
     if (o.fast !== undefined && o.fast > now) o.fast = Math.round((now + (o.fast - now) * r) * 100) / 100;
     if (o.months !== undefined) o.months = months(o.months);

@@ -5139,6 +5139,32 @@ button.pax-dest.off:hover {
   padding: 0 4px;
 }
 
+/* Просрочка: срок вышел, но задание ещё можно выполнить с меньшей наградой (Objective.lateUntil). */
+.sc-late {
+  padding: 0 5px;
+  border-radius: 8px;
+  background: #fde4e2;
+  color: var(--danger);
+  font-weight: 700;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.sc-late.done {
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.sc-late-cut {
+  color: var(--danger);
+}
+
+.sc-obj.overdue {
+  border-left-color: var(--danger);
+  background: #fff5f4;
+  --sc-fill: #d9822b;
+}
+
 .sc-reward {
   overflow-wrap: anywhere;
 }

@@ -4,7 +4,7 @@ import { clockText, durationText } from '../core/timeText';
 import { Game } from '../game/game';
 import { freightRoute, withoutCitizens } from '../game/testkit';
 import { DEFAULT_SETTINGS } from '../world/settings';
-import { briefHtml, isFolded, leftPanelHtml, leftTab, leftTabs, offerBannerHtml, offersSectionHtml, toggleFold, type PanelView } from './scenarioUi';
+import { briefHtml, isFolded, leftPanelHtml, leftTab, leftTabs, objectiveHtml, offerBannerHtml, offersSectionHtml, toggleFold, type PanelView } from './scenarioUi';
 
 /** Партия-сценарий со стартовым предложением контракта и ещё одним — посрочнее. */
 function scenarioWithOffers() {
@@ -316,6 +316,37 @@ describe('Сроки — минутами и секундами, а не мес�
     const fast = sc.current.find((o) => o.fast !== undefined);
     if (fast) expect(goals).toContain(`⚡ ${Math.ceil(sc.fastLeft(fast)! / 60)} мин`);
     expect(goals).not.toMatch(/[⏳⚡] \d+:\d\d/);
+  });
+});
+
+describe('Просроченное задание в панели', () => {
+  it('до срока — в подсказке, что будет просрочка; в просрочке — красная ⌛ до её конца и урезанная награда; выполненное с опозданием — ⌛', () => {
+    const { game, sc } = scenarioWithOffers();
+    const o = sc.addObjective(
+      { kind: 'passengers', amount: 100, towns: null },
+      { role: 'goal', phase: null, months: 8, why: 'Тест.', reward: { money: 40_000 }, fail: { money: 5000 } },
+    );
+    const html = () => objectiveHtml(game, sc, o, { panel: true });
+    expect(html()).toContain('⏳ ');
+    expect(html()).toContain(`ещё ${durationText(4 * MONTH_LENGTH)} можно доделать с опозданием (награда −50%)`);
+    expect(html()).not.toContain('sc-late');
+
+    o.lateUntil = o.deadline! + 4;
+    game.time = (o.deadline! + 0.5) * MONTH_LENGTH;
+    const late = html();
+    expect(late).toContain('overdue');
+    expect(late).toContain('<span class="sc-late" data-tip="Срок вышел — задание просрочено.');
+    // До конца просрочки 3,5 мин — «4 мин», как у обычного срока.
+    expect(late).toContain('⌛ 4 мин</span>');
+    expect(late).not.toContain('⏳');
+    expect(late).toContain('<b class="sc-late-cut">−50%</b> $20');
+    expect(late).not.toMatch(/ title="[^"]*sc-late/);
+
+    o.status = 'done';
+    o.late = true;
+    const done = html();
+    expect(done).toContain('<span class="sc-late done"');
+    expect(done).toContain('−50%');
   });
 });
 

@@ -10,7 +10,7 @@ import type { Game } from '../game/game';
 import type { ModelTier } from '../game/transport';
 import type { CargoType } from '../world/cargo';
 import { industryById, levelCap, network, operating } from './analysis';
-import { CHALLENGE_BONUS, DIFFICULTY, EVENT_RULES, FAST, PHASES, POINTS, REPUTATION } from './content';
+import { CHALLENGE_BONUS, DIFFICULTY, EVENT_RULES, FAST, LATE, PHASES, POINTS, REPUTATION } from './content';
 import { EconomyMods, modsOf } from './effects';
 import { runEvents } from './events';
 import { assess } from './feasibility';
@@ -66,6 +66,31 @@ export const SCENARIO_SALT = 0x85ebca6b;
 
 /** Надбавка за быстрый срок: доля денег задания, до тысяч. */
 export const fastBonus = (o: Objective) => Math.round(((o.reward.money ?? 0) * FAST.money) / 1000) * 1000;
+
+/**
+ * Сколько месяцев можно доделывать задание после срока (content.LATE): половина исходного срока, не меньше 2 мин.
+ * Без просрочки — null: главная цель (у неё «последний шанс»), критические, сам «последний шанс», без срока и
+ * дополнительные после победы.
+ */
+export function lateMonths(o: Objective): number | null {
+  if (o.critical || o.retryOf || o.role === 'main' || o.role === 'extra') return null;
+  // Исходный срок: от начала до дедлайна; у предложения контракта — сколько дадут после принятия.
+  const span = o.deadline === null ? o.months : o.started !== undefined ? o.deadline - o.started : (o.months ?? o.deadline - o.created);
+  return span === undefined ? null : Math.max(LATE.min, Math.ceil(span * LATE.share));
+}
+
+/** Награда за выполненное с опозданием: деньги и репутация — доля LATE.reward (деньги — до сотен), остальное — как было. */
+export function lateReward(o: Objective): Reward {
+  const r = o.reward;
+  return {
+    ...r,
+    money: r.money ? Math.round((r.money * LATE.reward) / 100) * 100 : r.money,
+    reputation: r.reputation ? Math.round(r.reputation * LATE.reward) : r.reputation,
+  };
+}
+
+/** Просрочено: срок вышел, но ещё можно выполнить с меньшей наградой. */
+export const isOverdue = (o: Objective) => o.status === 'active' && o.lateUntil !== undefined;
 
 /** Столько месяцев подряд за пределом кредита — и компания банкрот (4 мин; после первого — предупреждение). */
 const BANKRUPT_MONTHS = 2 * TERM_SCALE;
@@ -224,9 +249,12 @@ export class Scenario {
     return left === null ? null : left / MONTH_LENGTH;
   }
 
-  /** Сколько секунд игры осталось до срока задания (у предложения — до конца предложения), null — без срока. */
+  /**
+   * Сколько секунд игры осталось до срока задания (у предложения — до конца предложения, у просроченного — до конца
+   * просрочки), null — без срока.
+   */
   secondsLeft(o: Objective): number | null {
-    const until = o.status === 'offered' ? o.offerUntil : o.deadline;
+    const until = o.status === 'offered' ? o.offerUntil : (o.lateUntil ?? o.deadline);
     if (until === undefined || until === null) return null;
     return Math.max(0, until * MONTH_LENGTH - this.game.time);
   }
@@ -252,7 +280,7 @@ export class Scenario {
     if (this.forecasts.at !== at) this.forecasts = { at, map: new Map() };
     const key = `${o.id}:${o.progress}`;
     if (!this.forecasts.map.has(key)) {
-      const left = Math.max(0, o.deadline * MONTH_LENGTH - this.game.time);
+      const left = Math.max(0, (o.lateUntil ?? o.deadline) * MONTH_LENGTH - this.game.time);
       this.forecasts.map.set(key, forecastOf(o.progress, o.target, outlookOf(this.game, haul, left)));
     }
     return this.forecasts.map.get(key) ?? null;
@@ -331,10 +359,17 @@ export class Scenario {
     this.monthly();
     this.tick(0);
     this.clock = 1;
-    // Сроки: не выполнено к началу месяца-дедлайна — провал; предложения истекают.
+    // Сроки: не выполнено к началу месяца-дедлайна — просрочка (можно доделать за меньшую награду) или провал,
+    // не выполнено и к концу просрочки — провал; предложения истекают.
     for (const o of [...s.objectives]) {
-      if (o.status === 'active' && o.deadline !== null && now >= o.deadline) this.failObjective(o);
-      else if (o.status === 'offered' && o.offerUntil !== undefined && now >= o.offerUntil) this.decline(o.id, true);
+      if (o.status === 'active' && o.lateUntil !== undefined) {
+        if (now >= o.lateUntil) this.failObjective(o);
+      } else if (o.status === 'active' && o.deadline !== null && now >= o.deadline) {
+        const late = lateMonths(o);
+        if (late !== null) this.overdue(o, o.deadline + late);
+        else this.failObjective(o);
+      } else if (o.status === 'offered' && o.offerUntil !== undefined && now >= o.offerUntil) this.decline(o.id, true);
+      if (!this.running) break;
     }
     s.effects = s.effects.filter((e) => e.until > now);
     this.watchIndustries();
@@ -522,22 +557,52 @@ export class Scenario {
   }
 
   private complete(o: Objective): void {
+    // Просроченное — с опозданием: доля денег, репутации и очков (content.LATE), без надбавки за быстроту.
+    const late = o.lateUntil !== undefined;
+    const reward = late ? lateReward(o) : o.reward;
     o.status = 'done';
     o.closedAt = this.month;
     o.progress = Math.max(o.progress, o.target);
-    this.changeReputation(o.role === 'main' ? REPUTATION.main : REPUTATION.done);
-    this.apply(o.reward, o.source ?? o.id);
+    if (late) o.late = true;
+    const rep = o.role === 'main' ? REPUTATION.main : REPUTATION.done;
+    this.changeReputation(late ? Math.round(rep * LATE.reward) : rep);
+    this.apply(reward, o.source ?? o.id);
     // Успели к быстрому сроку — надбавка к награде (и очки за быстроту в оценке).
-    const bonus = o.fast !== undefined && this.game.time < o.fast * MONTH_LENGTH ? fastBonus(o) : null;
+    const bonus = !late && o.fast !== undefined && this.game.time < o.fast * MONTH_LENGTH ? fastBonus(o) : null;
     if (bonus !== null) {
       o.quick = true;
       if (bonus > 0) this.game.grant(bonus);
     }
-    this.log('done', `Выполнено: ${o.title}`);
-    this.game.journal.add('done', { id: o.id, progress: o.progress, target: o.target, $: o.reward.money, quick: bonus ?? undefined, rep: this.state.reputation });
-    const money = (o.reward.money ?? 0) + (bonus ?? 0);
-    this.game.notify(`${o.quick ? '⚡ Быстрее срока' : '✓ Выполнено'}: ${o.title}${money ? ` · +$${money.toLocaleString('ru-RU')}` : ''}`, '#2e9d57');
+    this.log('done', `${late ? 'Выполнено с опозданием' : 'Выполнено'}: ${o.title}`);
+    this.game.journal.add('done', {
+      id: o.id,
+      progress: o.progress,
+      target: o.target,
+      $: reward.money,
+      quick: bonus ?? undefined,
+      late: late || undefined,
+      rep: this.state.reputation,
+    });
+    const money = (reward.money ?? 0) + (bonus ?? 0);
+    const head = o.quick ? '⚡ Быстрее срока' : late ? '⌛ С опозданием' : '✓ Выполнено';
+    this.game.notify(`${head}: ${o.title}${money ? ` · +$${money.toLocaleString('ru-RU')}` : ''}${late ? ` (−${Math.round((1 - LATE.reward) * 100)}%)` : ''}`, '#2e9d57');
     if (o.phase === this.state.phase) this.checkPhase();
+  }
+
+  /**
+   * Срок вышел, но задание ещё можно доделать до начала месяца until — с меньшей наградой. Последствия провала —
+   * только если не успеют и к нему. Цели этапа в просрочке держат этап, как и до срока: его можно закрыть досрочно.
+   */
+  private overdue(o: Objective, until: number): void {
+    if (until <= this.today) {
+      this.failObjective(o);
+      return;
+    }
+    o.lateUntil = until;
+    const span = durationText((until - this.today) * MONTH_LENGTH);
+    this.log('late', `Срок вышел: ${o.title}`);
+    this.game.journal.add('late', { id: o.id, progress: o.progress, target: o.target, until });
+    this.game.notify(`⌛ Срок вышел: ${o.title}. Ещё ${span} можно доделать — награда −${Math.round((1 - LATE.reward) * 100)}%`, '#c4662f');
   }
 
   private failObjective(o: Objective): void {
@@ -718,11 +783,11 @@ export class Scenario {
 
   /**
    * Конец сценария: незакрытые цели этапов — невыполненные, а предложения и контракты, которые ещё шли, просто
-   * снимаются (их срок не вышел — в оценке они не считаются сорванными). Считается оценка.
+   * снимаются (их срок не вышел — в оценке они не считаются сорванными; просроченные — сорваны). Считается оценка.
    */
   private finish(): void {
     for (const o of this.state.objectives) {
-      if (o.status === 'offered' || (o.status === 'active' && o.role === 'contract')) o.status = 'declined';
+      if (o.status === 'offered' || (o.status === 'active' && o.role === 'contract' && o.lateUntil === undefined)) o.status = 'declined';
       if (o.status === 'active') o.status = 'failed';
       if (o.closedAt === undefined && o.status !== 'done') o.closedAt = this.month;
     }

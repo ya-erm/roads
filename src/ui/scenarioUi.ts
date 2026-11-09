@@ -7,10 +7,10 @@ import { ECONOMY, MONTH_LENGTH } from '../config';
 import { clockText, durationText, leftText } from '../core/timeText';
 import type { Game } from '../game/game';
 import { isIndustry, resolve } from '../scenario/analysis';
-import { ARCHETYPE_LIST, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, MEDALS, PHASES, REPUTATION } from '../scenario/content';
+import { ARCHETYPE_LIST, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, LATE, MEDALS, PHASES, REPUTATION } from '../scenario/content';
 import { isActive } from '../scenario/events';
 import { type Forecast, forecastTip } from '../scenario/forecast';
-import { fastBonus, type Scenario } from '../scenario/manager';
+import { fastBonus, isOverdue, lateMonths, lateReward, type Scenario } from '../scenario/manager';
 import {
   closedNeeds,
   failText,
@@ -142,8 +142,13 @@ export function toggleFold(o: Objective): void {
 /** Остаток срока задания — «5 мин», последнюю минуту — «59 сек»: красным — меньше 4 минут, ∞ — без срока; закрытое — пусто. */
 function timeHtml(sc: Scenario, o: Objective): string {
   if (o.status === 'done' && o.quick) return '<span class="sc-fast done" data-tip="Выполнено к быстрому сроку: надбавка и очки за быстроту">⚡</span>';
+  if (o.status === 'done' && o.late) return `<span class="sc-late done" data-tip="${esc(`Выполнено с опозданием: награда и очки ${LATE_CUT}`)}">⌛</span>`;
   if (o.status !== 'active') return '';
   const left = sc.secondsLeft(o);
+  if (isOverdue(o) && left !== null) {
+    const tip = `Срок вышел — задание просрочено. Ещё можно выполнить с опозданием: награда и очки ${LATE_CUT}. Не успеете и к этому сроку: ${failText(o)}`;
+    return `<span class="sc-late" data-tip="${esc(tip)}">⌛ ${leftText(left)}</span>`;
+  }
   const main =
     left !== null
       ? `<span class="sc-left${urgent(left, URGENT.goal)}" data-tip="Осталось до срока">⏳ ${leftText(left)}</span>`
@@ -158,6 +163,22 @@ function fastHtml(sc: Scenario, o: Objective): string {
   const bonus = fastBonus(o);
   const tip = `Быстрый срок — необязательный. Успеете: ${bonus ? `+$${bonus.toLocaleString('ru-RU')} к награде и ` : ''}очки за быстроту`;
   return `<span class="sc-fast" data-tip="${esc(tip)}">⚡ ${leftText(left)}</span>`;
+}
+
+/** На сколько меньше награда за выполненное с опозданием: «−50%». */
+const LATE_CUT = `−${Math.round((1 - LATE.reward) * 100)}%`;
+
+/** Чем обернётся невыполненный срок: просрочка (сколько минут и во что обойдётся) или сразу провал. */
+function missText(o: Objective): string {
+  const late = lateMonths(o);
+  return late !== null ? `⌛ ещё ${monthsSpan(late)} можно доделать с опозданием (награда ${LATE_CUT}), потом — ${failText(o)}` : failText(o);
+}
+
+/** Награда задания: у просроченного и выполненного с опозданием — урезанная, с меткой «−50%». */
+function rewardHtml(o: Objective): string {
+  if (!isOverdue(o) && !(o.status === 'done' && o.late)) return `<span class="sc-reward" title="Награда">🎁 ${esc(rewardText(o))}</span>`;
+  const tip = `Награда с опозданием: ${LATE_CUT} денег и репутации (было ${rewardText(o)})`;
+  return `<span class="sc-reward" data-tip="${esc(tip)}">🎁 <b class="sc-late-cut">${LATE_CUT}</b> ${esc(rewardText({ ...o, reward: lateReward(o) }))}</span>`;
 }
 
 /** Размер значка задания в панели — один для свёрнутых и развёрнутых. */
@@ -227,12 +248,14 @@ export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: Objecti
         ? '<span class="sc-state failed" title="Не выполнено">✗</span>'
         : '';
   const time = timeHtml(sc, o);
-  const tip = `${o.why}${active && !o.critical && o.deadline !== null ? `\nЕсли не успеть: ${failText(o)}` : ''}`;
+  const overdue = isOverdue(o);
+  const miss = overdue ? `\nСрок вышел. Не успеете с опозданием: ${failText(o)}` : `\nЕсли не успеть: ${missText(o)}`;
+  const tip = `${o.why}${active && !o.critical && o.deadline !== null ? miss : ''}`;
   // У месячных полоска — по показателю этого месяца, а не по числу месяцев подряд (их показывают точки).
   const gauge = view.plan ? null : gaugeOf(sc, o);
   // Накопительные со сроком — с прогнозом к сроку за выполненной частью.
   const bar = barHtml(gauge ? gauge.fraction : fraction(o), view.plan || gauge ? null : sc.forecast(o));
-  const cls = `sc-obj ${o.role} ${o.status} ${o.critical ? 'critical' : ''}`;
+  const cls = `sc-obj ${o.role} ${o.status} ${o.critical ? 'critical' : ''}${overdue ? ' overdue' : ''}`;
   // Свёрнутая — две строки: название в одну строку и полоска с прогрессом и сроком; клик разворачивает.
   // Значок — того же размера, что у развёрнутой: две строки его вмещают.
   if (view.panel && view.folded) {
@@ -250,7 +273,7 @@ export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: Objecti
     <div class="sc-obj-body">
       <div class="sc-obj-title">${role}<span class="sc-obj-name">${esc(o.title)}</span>${crit}${state}${fold}</div>
       ${view.plan ? '' : bar}
-      <div class="sc-meta">${view.plan ? '' : progressHtml(o, gauge, true)}${time}<span class="sc-reward" title="Награда">🎁 ${esc(rewardText(o))}</span></div>
+      <div class="sc-meta">${view.plan ? '' : progressHtml(o, gauge, true)}${time}${rewardHtml(o)}</div>
       ${needsHtml(g, o)}
       ${now ? `<small class="sc-now">${esc(now)}</small>` : ''}
       ${view.why ? `<p class="sc-why">${esc(o.why)}</p>` : ''}
@@ -331,7 +354,7 @@ function offerHtml(sc: Scenario, o: Objective): string {
       <span title="Награда">🎁 ${esc(rewardText(o))}</span>
       ${termHtml(o)}
       ${offerFastHtml(o)}
-      <span class="sc-fail" title="Если принять и не успеть">⚠ ${esc(failText(o))}</span>
+      <span class="sc-fail" data-tip="${esc(`Если принять и не успеть: ${missText(o)}`)}">⚠ ${esc(failText(o))}</span>
     </div>
     <div class="sc-offer-actions">
       <button class="small primary" data-action="sc-accept" data-id="${o.id}" title="Срок пойдёт с этой минуты">✓ Принять</button>
@@ -800,7 +823,7 @@ export function resultsHtml(g: Game, rec: RecordView): string {
   const row = (o: Objective) => `<div class="sc-res-obj ${o.status}" title="${esc(o.why)}">
       <span class="sc-state ${o.status}">${o.status === 'done' ? '✓' : '✗'}</span>${objectiveIcon(o, 18)}<span class="sc-obj-name">${esc(o.title)}</span>${
         o.role === 'main' ? '<span class="sc-role" title="Главная цель этапа">★</span>' : ''
-      }</div>`;
+      }${o.status === 'done' && o.late ? `<span class="sc-late done" data-tip="${esc(`Выполнено с опозданием: награда и очки ${LATE_CUT}`)}">⌛</span>` : ''}</div>`;
   const done = s.objectives.filter((o) => o.status === 'done').length;
   const failed = s.objectives.filter((o) => o.status === 'failed').length;
   const list = groups.map((x) => `<div class="sc-res-group"><small>${x.title}</small>${x.list.map(row).join('')}</div>`).join('');

@@ -149,6 +149,14 @@ export const POINTS: Record<ObjectiveRole, number> = { main: 120, goal: 60, cont
  */
 export const FAST = { money: 0.25, points: 20, maxPoints: 80 };
 
+/**
+ * Просрочка: срок вышел, а задание (обычная цель этапа или контракт) ещё можно доделать — за share исходного срока,
+ * но не меньше min месяцев. С опозданием — доля reward денег и репутации, доля points очков в оценке; эффекты и
+ * продолжения цепочки — как обычно. Не успели и тут — провал со всеми последствиями. У главной цели вместо этого —
+ * «последний шанс» (manager.retry), у критических и после победы просрочки нет.
+ */
+export const LATE = { share: 0.5, min: 1 * TERM_SCALE, reward: 0.5, points: 0.5 };
+
 /** Репутация: старт, изменения и влияние на награды контрактов. */
 export const REPUTATION = { start: 50, done: 6, main: 10, failed: -10, declined: -3, rewardMin: 0.8, rewardMax: 1.25 };
 

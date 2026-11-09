@@ -4,7 +4,7 @@
  * множитель сложности (и испытания).
  */
 import type { Scenario } from './manager';
-import { FAST, MEDALS } from './content';
+import { FAST, LATE, MEDALS } from './content';
 import type { Objective, ScoreLine, ScoreResult } from './types';
 
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
@@ -14,30 +14,35 @@ export function computeScore(sc: Scenario): ScoreResult {
   const game = sc.game;
   const parts: ScoreLine[] = [];
 
-  // Цели этапов: заработанные очки от возможных. Восстановительная попытка приносит половину.
+  // Цели этапов: заработанные очки от возможных. Восстановительная попытка приносит половину, выполненное
+  // с опозданием — долю LATE.points.
   const ofPhase = (o: Objective) => o.role === 'main' || o.role === 'goal';
+  const share = (o: Objective) => (o.late ? LATE.points : 1);
   const phaseGoals = s.objectives.filter((o) => ofPhase(o) && !o.retryOf);
   const possible = phaseGoals.reduce((sum, o) => sum + o.points, 0);
-  const earned = s.objectives.filter((o) => ofPhase(o) && o.status === 'done').reduce((sum, o) => sum + o.points, 0);
+  const earned = s.objectives.filter((o) => ofPhase(o) && o.status === 'done').reduce((sum, o) => sum + o.points * share(o), 0);
   const goalsDone = phaseGoals.filter((o) => o.status === 'done' || (o.retry && s.objectives.find((r) => r.id === o.retry)?.status === 'done')).length;
+  const goalsLate = phaseGoals.filter((o) => o.status === 'done' && o.late).length;
   parts.push({
     id: 'objectives',
     name: 'Цели этапов',
     value: Math.round(400 * clamp01(possible ? earned / possible : 0)),
     max: 400,
-    note: `${goalsDone} из ${phaseGoals.length}`,
+    note: `${goalsDone} из ${phaseGoals.length}${goalsLate ? `, с опозданием ${goalsLate}` : ''}`,
   });
 
-  // Контракты: каждый выполненный — 30 очков, не больше 120; сорванные отнимают по 15.
+  // Контракты: каждый выполненный — 30 очков (с опозданием — доля LATE.points), не больше 120; сорванные отнимают по 15.
   const contracts = s.objectives.filter((o) => o.role === 'contract');
-  const cDone = contracts.filter((o) => o.status === 'done').length;
+  const cDone = contracts.filter((o) => o.status === 'done');
+  const cLate = cDone.filter((o) => o.late).length;
   const cFailed = contracts.filter((o) => o.status === 'failed').length;
+  const cPoints = cDone.reduce((sum, o) => sum + 30 * share(o), 0);
   parts.push({
     id: 'contracts',
     name: 'Контракты',
-    value: Math.max(0, Math.min(120, cDone * 30 - cFailed * 15)),
+    value: Math.round(Math.max(0, Math.min(120, cPoints - cFailed * 15))),
     max: 120,
-    note: `выполнено ${cDone}, сорвано ${cFailed}, предложено ${contracts.length}`,
+    note: `выполнено ${cDone.length}${cLate ? ` (с опозданием ${cLate})` : ''}, сорвано ${cFailed}, предложено ${contracts.length}`,
   });
 
   // Сроки: насколько раньше дедлайна выполнены задания со сроком.

@@ -44,10 +44,14 @@ describe('Задания, выданные в итогах месяца, не т
     advance(game);
     const sc = game.scenario!;
     const m = sc.month;
-    // Главная цель B выполнена, остальные цели этапа проваливаются по сроку в итогах месяца — и сразу этап C.
+    // Главная цель B выполнена, остальные цели этапа уже просрочены, и просрочка кончается в итогах месяца — они
+    // проваливаются, и сразу этап C.
     for (const o of sc.state.objectives.filter((x) => x.phase === 1)) {
       if (o.role === 'main') o.status = 'done';
-      else o.deadline = m + 1;
+      else {
+        o.deadline = m;
+        o.lateUntil = m + 1;
+      }
     }
     sc.monthEnd();
     expect(sc.state.phase).toBe(2);

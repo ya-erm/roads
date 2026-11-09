@@ -128,6 +128,13 @@ export interface Objective {
   fast?: number;
   /** Выполнено быстрее быстрого срока. */
   quick?: boolean;
+  /**
+   * Срок (deadline) вышел, задание просрочено: его ещё можно выполнить до начала этого месяца — с меньшей наградой
+   * (content.LATE). Нет — не просрочено (так и в старых сохранениях).
+   */
+  lateUntil?: number;
+  /** Выполнено с опозданием — после срока, в просрочку. */
+  late?: boolean;
   /** Предложение контракта действует до начала этого месяца. */
   offerUntil?: number;
   /** Сколько месяцев на выполнение после принятия контракта. */
@@ -243,7 +250,7 @@ export interface ScoreResult {
 
 export interface LogEntry {
   month: number;
-  kind: 'phase' | 'done' | 'failed' | 'event' | 'offer' | 'declined';
+  kind: 'phase' | 'done' | 'failed' | 'late' | 'event' | 'offer' | 'declined';
   text: string;
 }
 
