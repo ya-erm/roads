@@ -66,6 +66,30 @@ describe('Длина выезда автостанции', () => {
     expect(game.stations.get(st.id)!.driveway).toBe(STATION.driveway + 3 * STATION.drivewayRange.step);
   });
 
+  it('цена шага — только разница выезда: длиннее — доплата за прибавку, короче — возврат половины; туда-обратно — копейки', () => {
+    const { game, x, y } = scene();
+    const st = terminal(game, x + 300, y + 40);
+    const step = STATION.drivewayRange.step;
+    const m0 = game.money;
+    const longer = game.stationDrivewayPlan(st.id, STATION.driveway + step);
+    expect(longer.ok).toBe(true);
+    // За станцию (COST.station) ни платы, ни возврата: шаг стоит как кусок выезда длиной step, не тысячи.
+    expect(longer.cost).toBeGreaterThan(0);
+    expect(longer.cost).toBeLessThan(1000);
+    expect(game.setStationDriveway(st.id, STATION.driveway + step)).toBeNull();
+    expect(m0 - game.money).toBeCloseTo(longer.cost, -1);
+    const m1 = game.money;
+    const shorter = game.stationDrivewayPlan(st.id, STATION.driveway);
+    expect(shorter.cost).toBeLessThanOrEqual(0);
+    expect(game.setStationDriveway(st.id, STATION.driveway)).toBeNull();
+    expect(game.money - m1).toBeCloseTo(-shorter.cost, -1);
+    // Восемь шагов туда и обратно — дешевле одной станции.
+    const m2 = game.money;
+    for (let i = 1; i <= 4; i++) expect(game.setStationDriveway(st.id, STATION.driveway + i * step)).toBeNull();
+    for (let i = 3; i >= 0; i--) expect(game.setStationDriveway(st.id, STATION.driveway + i * step)).toBeNull();
+    expect(m2 - game.money).toBeLessThan(2000);
+  });
+
   it('станции вдоль дороги и старой без длины — тоже: у первой выезда нет, у второй длина по умолчанию прежняя', () => {
     const { game, x, y } = scene();
     const side = terminal(game, x + 300, y + 40, { side: true });

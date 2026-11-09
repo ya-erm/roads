@@ -7407,7 +7407,9 @@ export class Game implements BuildContext {
     const l = Math.hypot(d.x, d.y) || 1;
     const dir = { x: d.x / l, y: d.y / l };
     const want = clampDriveway(len);
-    return this.relocatePlan(st, () => {
+    return this.relocatePlan(
+      st,
+      () => {
       // Выезд уже снесён: примыкаем там же — к узлу, если он остался (перекрёсток, тупик), иначе к полотну.
       const n2 = this.roads.net.nodesNear(exit.pos, 1)[0];
       if (n2 && n2.corridors.length) {
@@ -7422,7 +7424,9 @@ export class Game implements BuildContext {
       if (!hit) return { ok: false, reason: 'Нельзя', cost: 0, fp: st.fp };
       const from: Anchor = { kind: 'corridor', corridor: hit.seg.id, s: hit.s, pos: hit.seg.lut.pointAt(hit.s) };
       return this.drivewayStationPlan(from, dir, halfAtS(hit.seg, hit.s), want);
-    });
+      },
+      true,
+    );
   }
 
   /**
@@ -7453,23 +7457,32 @@ export class Game implements BuildContext {
    * Примерка станции st на новом месте (make — план постройки): без самой станции и её старого выезда (он снесётся,
    * как при сносе станции; стык остановки и станции вдоль дороги на улице остаётся). Цена — постройка на новом месте
    * минус возврат за снос старой станции и её выезда; добавленные посты и склады переезжают с ней.
+   * keep — станция остаётся, меняется только выезд (длина выезда): за станцию ни платы, ни возврата, а за выезд —
+   * только разница: длиннее — доплата за прибавку, короче — возврат половины цены убранного куска.
    */
-  private relocatePlan(st: Station, make: () => StationPlan): StationPlan & { refund: number } {
+  private relocatePlan(st: Station, make: () => StationPlan, keep = false): StationPlan & { refund: number; keep?: boolean } {
     const node = this.roads.net.nodes.get(st.nodeId);
     const old = st.kind === 'road' && !st.side && node?.corridors.length ? this.roadBuilder.bulldoze([...node.corridors]) : null;
     const base = st.kind === 'stop' ? STOP.cost : COST.station;
     // Возврат: старая станция (без добавленных постов — они переезжают вместе с ней) и её выезд.
-    const refund = Math.round((base + (old?.refund ?? 0)) * COST.refundRatio);
+    let refund = Math.round((base + (old?.refund ?? 0)) * COST.refundRatio);
     const net = this.roads.net;
     this.index.remove(st);
     this.movingStation = st.id;
     if (old?.net) this.roads.net = old.net;
     try {
       const plan = make();
-      const fail = (reason: string) => ({ ...plan, ok: false, reason, refund });
-      if (!plan.ok || !plan.fp) return { ...plan, refund };
-      let fp = plan.fp;
       let cost = plan.cost;
+      if (keep) {
+        // Выезд стал длиннее — платим только прибавку; короче — возврат половины цены убранного куска.
+        const was = old?.refund ?? 0;
+        const now = plan.driveway?.cost ?? 0;
+        refund = Math.round(Math.min(was, now) + Math.max(0, was - now) * COST.refundRatio);
+        cost -= base;
+      }
+      const fail = (reason: string) => ({ ...plan, ok: false, reason, refund, keep });
+      if (!plan.ok || !plan.fp) return { ...plan, refund, keep };
+      let fp = plan.fp;
       const demolish = [...(plan.demolish ?? [])];
       // Добавленные посты переезжают вместе со станцией: площадка шире — дома под ней сносим, прочее мешает.
       const extra = st.kind === 'road' ? (st.bays - STATION.bays) * STATION.bayWidth + (st.depots ?? 0) * STORAGE.width : 0;
@@ -7485,7 +7498,7 @@ export class Game implements BuildContext {
         const road = this.roadUnder(fp, 2);
         if (road) return fail(road);
       }
-      return { ...plan, fp, demolish, cost: cost - refund, refund };
+      return { ...plan, fp, demolish, cost: cost - refund, refund, keep };
     } finally {
       this.roads.net = net;
       this.movingStation = null;
@@ -7509,7 +7522,7 @@ export class Game implements BuildContext {
    * Ставит станцию st по плану переноса (relocatePlan): новый выезд (или стык на улице), снос домов, деньги; машины,
    * что едут к ней, едут к новому месту. checkpoint — подпись шага для Ctrl+Z, если это отдельное действие игрока.
    */
-  private applyRelocation(st: Station, plan: StationPlan & { refund: number }, checkpoint?: string): string | null {
+  private applyRelocation(st: Station, plan: StationPlan & { refund: number; keep?: boolean }, checkpoint?: string): string | null {
     if (!plan.ok || !plan.fp || !plan.driveway?.net || !plan.nodePos) return plan.reason ?? 'Нельзя перенести';
     if (checkpoint) this.checkpoint(checkpoint);
     // Узел на новом месте уже есть в сети плана: машины к станции едут туда (иначе потеряли бы дорогу).
@@ -7532,8 +7545,8 @@ export class Game implements BuildContext {
       this.demolish(plan.demolish);
       this.spend(cost);
     }
-    const base = st.kind === 'stop' ? STOP.cost : COST.station;
-    this.spend(base);
+    // Меняется только выезд — станция та же: за неё не платим.
+    if (!plan.keep) this.spend(st.kind === 'stop' ? STOP.cost : COST.station);
     this.money += plan.refund;
     this.incomeMonth += plan.refund;
     this.ledger.sales += plan.refund;
