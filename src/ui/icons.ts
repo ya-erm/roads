@@ -53,17 +53,19 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
   return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${parts.join('')}</svg>`;
 }
 
-/** Грунтовая дорога сверху: укатанная земля и две пары колей, без разметки. */
+/** Грунтовая дорога сверху — как на карте: пыльная охра с размытым краем, по колее на полосу, без разметки. */
 export function dirtSvg(w = 84, h = 40, lanes = 2, oneWay = false): string {
-  // Полоса — пара колей; полос больше — дорога шире (не выше картинки); односторонняя — со стрелками.
+  // Полоса — колея посередине; полос больше — дорога шире (не выше картинки); односторонняя — со стрелками.
   const laneH = Math.min(7, (h - 8) / lanes);
   const total = lanes * laneH;
   const top = (h - total) / 2;
   const ruts: string[] = [];
-  for (let i = 0; i < lanes; i++) for (const k of [0.32, 0.68]) ruts.push(`M2 ${(top + (i + k) * laneH).toFixed(1)}H${w - 2}`);
+  for (let i = 0; i < lanes; i++) ruts.push(`M3 ${(top + (i + 0.5) * laneH).toFixed(1)}H${w - 3}`);
+  const rect = (pad: number, attrs: string) =>
+    `<rect x="${1 - pad}" y="${top - pad}" width="${w - 2 + pad * 2}" height="${total + pad * 2}" rx="${4 + pad}" ${attrs}/>`;
   return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
-    <rect x="1" y="${top}" width="${w - 2}" height="${total}" rx="4" fill="#b8a07a" stroke="#a08762" stroke-width="1.2"/>
-    <path d="${ruts.join('')}" stroke="rgba(118,92,60,0.6)" stroke-width="1.1" stroke-linecap="round"/>
+    ${rect(1.6, 'fill="rgba(196,185,156,0.28)"')}${rect(0.8, 'fill="rgba(196,185,156,0.55)"')}${rect(0, 'fill="#c4b99c"')}
+    <path d="${ruts.join('')}" stroke="rgba(150,135,105,0.55)" stroke-width="2" stroke-linecap="round"/>
     ${oneWay ? Array.from({ length: lanes }, (_, i) => arrow(w / 2, top + (i + 0.5) * laneH, 1, '#fff8ea')).join('') : ''}
   </svg>`;
 }
@@ -420,7 +422,7 @@ export function fragmentSvg(frag: Fragment, w = 64, h = 48): string {
     .sort((a, b) => (width[a.cls] ?? 2) - (width[b.cls] ?? 2))
     .map((c) => {
       const { p0, p1, p2, p3 } = c.curve;
-      const color = c.cls === 'motorway' || c.cls === 'highway' ? '#646b76' : c.cls === 'dirt' ? '#a08762' : '#7a828e';
+      const color = c.cls === 'motorway' || c.cls === 'highway' ? '#646b76' : c.cls === 'dirt' ? '#b0a283' : '#7a828e';
       return `<path d="M${at(p0)}C${at(p1)} ${at(p2)} ${at(p3)}" stroke="${color}" stroke-width="${width[c.cls] ?? 2}" fill="none" stroke-linecap="round"/>`;
     })
     .join('');

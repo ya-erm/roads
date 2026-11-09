@@ -42,7 +42,7 @@ import { townEdge, townIndustries, townSlots } from '../world/enterprise';
 import { sizeDots } from '../ui/enterpriseUi';
 import { lastTownNeed } from '../world/townSupply';
 import type { Segment } from '../world/network';
-import { halfWidth, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
+import { halfWidth, isDirt, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
 import { prefOn } from '../ui/prefs';
 import { drawAnnexArt } from './annexArt';
@@ -1794,7 +1794,8 @@ export class Renderer {
       const ring = (node.roundabout ?? null) !== null;
       for (const link of g.inLinks.get(n.id) ?? []) {
         const c = net.corridors.get(link.corridor);
-        if (!c || (ring && c.ring) || !inPass(corridorLayer(net, c), pass)) continue;
+        // На грунтовке разметки нет — и стоп-линии тоже (и у самой улицы со стороны просёлка).
+        if (!c || isDirt(c.cls) || (ring && c.ring) || !inPass(corridorLayer(net, c), pass)) continue;
         // Одной чертой поперёк всех полос подъезда (без щелей между полосами), чуть отступив от перекрёстка.
         const first = link.lanes[0];
         const last = link.lanes[link.lanes.length - 1];

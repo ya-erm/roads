@@ -3,6 +3,7 @@ import type { Game } from '../game/game';
 import { ARROW_K as K, ARROW_NOSE as NOSE, ARROW_TAIL as TAIL, arrowAt, arrowShape, Turn } from '../lanes/arrowShape';
 import type { GLane, GLink, LaneGraph } from '../lanes/graph';
 import { type JunctionPreview, previewHides } from '../lanes/preview';
+import { isDirt } from '../world/roadTypes';
 
 export { arrowShape };
 export type { Turn };
@@ -122,6 +123,9 @@ function marksOf(g: LaneGraph): Mark[] {
     const mine: Mark[] = [];
     byNode.set(n.id, mine);
     for (const link of ins) {
+      // На грунтовке белой разметки нет — и стрелок перед перекрёстком.
+      const cls = g.net.corridors.get(link.corridor)?.cls;
+      if (cls && isDirt(cls)) continue;
       laneArrows(g, link).forEach((turns, i) => {
         if (!turns) return;
         const at = placeArrow(g, link.lanes[i]);
