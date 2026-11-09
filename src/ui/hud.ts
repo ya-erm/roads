@@ -1209,8 +1209,9 @@ export class Hud {
         const info = g.construction.info(Number(d.id));
         if (info) {
           this.controller.showPlace(info.front ?? info.at, Math.max(60, Math.min(400, info.length / 3)));
-          // Из карточки базы («стройки рядом») — закрытие карточки стройки вернёт к базе.
-          if (c.selection?.type === 'base') c.selectFrom({ type: 'project', id: info.project.id });
+          // Из карточки базы («стройки рядом», строки бригад) или бригады (название стройки) — закрытие карточки
+          // стройки вернёт к ним.
+          if (c.selection?.type === 'base' || c.selection?.type === 'crew') c.selectFrom({ type: 'project', id: info.project.id });
           else c.select({ type: 'project', id: info.project.id });
         }
         break;

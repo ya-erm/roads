@@ -521,6 +521,22 @@ export class Crews {
   }
 
   /**
+   * Бригада едет вдоль стройки (или против движения по дороге) — сколько ей ещё ехать: точки пути от того места, где
+   * она сейчас (walkAt), до конца поездки; не едет — null. Для маршрута на карте (Game.brigadeRoute).
+   */
+  tripAhead(b: Brigade): Vec[] | null {
+    const at = this.walkAt(b);
+    if (!at || !b.trip) return null;
+    const path = b.trip.path;
+    const len = pathLength(path);
+    // Пройденное — та же доля пути по времени, что у walkAt; остаток — конец ломаной, развёрнутый обратно.
+    const k = b.eta !== undefined && b.eta > b.trip.t0 ? Math.max(0, Math.min(1, (this.host.time - b.trip.t0) / (b.eta - b.trip.t0))) : 1;
+    const rest = pathHead([...path].reverse(), len * (1 - k)).reverse();
+    rest[0] = { ...at.pos };
+    return rest;
+  }
+
+  /**
    * В путь вдоль стройки по точкам path: к краю работ или (back) назад к дороге. Путь короче метра — уже на месте
    * (false).
    */

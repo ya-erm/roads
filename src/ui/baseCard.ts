@@ -4,7 +4,8 @@
  * - название (клик — переименовать) и сводка: бригад, в деле, содержание в месяц, «📡 радиус 2,5 км» (радиус
  *   обслуживания, CONSTRUCTION.serviceRadius; на карте у выбранной базы — кругом);
  * - бригады: самосвал, номер, что делает (строит «…», едет по дороге, едет вдоль стройки, ждёт выезда, на базе, ждёт
- *   подъезда); клик — показать бригаду на карте; «＋ 🚚» — нанять, «−» — распустить;
+ *   подъезда); клик — показать бригаду на карте, по названию стройки — к стройке; «＋ 🚚» — нанять, «−» — распустить;
+ *   пути бригад в дороге у выбранной базы — на карте (Renderer.drawCrewRoute);
  * - ближние стройки: как далеко от базы и вклад бригады отсюда (1 / (1 + d / reach)), можно ли доехать по дорогам;
  *   дальние — «📡 вне радиуса» (бригады базы сами туда не поедут), ближе к другой базе — «🏚 «…»» (её стройка);
  *   клик — к проекту и его карточке;
@@ -13,10 +14,9 @@
  * Подсказки — data-tip (не системные).
  */
 import { CONSTRUCTION } from '../config';
-import { projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
-import { baseRemoveText, baseSvg, buildSvg, km } from './constructionUi';
+import { baseRemoveText, baseSvg, buildSvg, km, withProjectLink } from './constructionUi';
 import { crewDoing } from './projectCard';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -34,7 +34,7 @@ const MARK: Record<Brigade['state'], string> = { working: '🏗', going: '➜', 
  */
 export function baseCrewText(game: Game, b: Brigade): string {
   const info = b.project !== undefined ? game.construction.info(b.project) : null;
-  const label = info ? ` «${projectName(info.project)}»` : '';
+  const label = info ? ` «${game.projectTitle(info.project.id)}»` : '';
   if (b.state === 'working') return `строит${label}`;
   if (b.state === 'going') return `${crewDoing(b)} →${label}`;
   if (b.state === 'back') return 'едет на базу';
@@ -116,9 +116,10 @@ function crewsHtml(game: Game, id: number): string {
       const text = baseCrewText(game, b);
       const where = game.brigadeWhere(b.id);
       const pin = b.pinned ? `<span data-tip="Назначена вами на этот проект: автоматика её не перебросит">📌</span> ` : '';
+      // Название стройки — ссылкой (к ней и её карточка); строка — открыть бригаду. Едет — её путь на карте (у выбранной базы).
       return `<button class="pc-crew ${b.state}" data-action="crew-show" data-id="${b.id}" data-tip="${esc(`Бригада ${i + 1}: ${where?.text ?? text} — открыть бригаду и показать на карте`)}">
         <span class="bb-crew ${b.state}">🚚${mark ? `<i>${mark}</i>` : ''}</span>
-        <span class="pc-crew-name"><b>№${i + 1}</b> · ${pin}${esc(text)}</span></button>`;
+        <span class="pc-crew-name"><b>№${i + 1}</b> · ${pin}${withProjectLink(game, text, b.project)}</span></button>`;
     })
     .join('');
   const B = CONSTRUCTION.base;
@@ -180,10 +181,10 @@ function nearHtml(game: Game, id: number): string {
                 )}">📡 вне радиуса</span>`
               : other(game, p.id, id);
       return `<button class="pc-crew bc-near" data-action="build-show" data-id="${p.id}" data-tip="${esc(
-        `«${projectName(p)}»: ${km(d)} от базы — бригада отсюда строит в силу ${power}% (дальше — медленнее: вклад 1 / (1 + d / ${km(CONSTRUCTION.reach)})). Нажмите — к проекту`,
+        `«${game.projectTitle(p.id)}»: ${km(d)} от базы — бригада отсюда строит в силу ${power}% (дальше — медленнее: вклад 1 / (1 + d / ${km(CONSTRUCTION.reach)})). Нажмите — к проекту`,
       )}">
         <span class="bc-near-ic">${buildSvg(22, 16)}</span>
-        <span class="pc-crew-name">${esc(projectName(p))} <span class="muted">· ${Math.min(99, Math.floor(info.done * 100))}%</span></span>
+        <span class="pc-crew-name">${esc(game.projectTitle(p.id))} <span class="muted">· ${Math.min(99, Math.floor(info.done * 100))}%</span></span>
         <span class="pc-crew-state">${state || `📏 ${km(d)}`}</span>
         <span class="pc-mini" data-tip="${esc(`Сила бригады отсюда ${power}%`)}"><i style="width:${power}%"></i></span></button>`;
     })

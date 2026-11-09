@@ -59,9 +59,12 @@ export function projectCardHtml(game: Game, id: number, renaming = false): strin
   const prio = p.priority ? `<span class="pc-prio" data-tip="Приоритетный проект: бригады едут сначала сюда">⬆</span>` : '';
   // Название — переименовать: клик по нему или по ✎ открывает поле; пустое — снова автоматическое.
   const name = projectName(p);
+  // У другой стройки такое же название — серым место (ближайший город, Game.projectPlace): «Улица 1+1 · Заречье».
+  const place = game.projectPlace(p.id);
+  const where = place ? ` <span class="muted" data-tip="Такое же название — и у другой стройки: место по ближайшему городу (в одном городе — с номером)">· ${esc(place)}</span>` : '';
   const title = renaming
     ? `<input class="line-name station-name" data-project-name="${p.id}" value="${esc(name)}" maxlength="40" placeholder="${esc(p.label)}" />`
-    : `<h3 class="station-title" data-action="project-rename" data-id="${p.id}" data-tip="${esc(p.name ? `Нажмите, чтобы переименовать (без названия — «${p.label}»)` : 'Нажмите, чтобы переименовать')}">${esc(name)}</h3>
+    : `<h3 class="station-title" data-action="project-rename" data-id="${p.id}" data-tip="${esc(p.name ? `Нажмите, чтобы переименовать (без названия — «${p.label}»)` : 'Нажмите, чтобы переименовать')}">${esc(name)}${where}</h3>
        <button class="icon pencil" data-action="project-rename" data-id="${p.id}" data-tip="Переименовать">✎</button>`;
   const head = `<header class="pc-head station-head"><button class="icon pc-show" data-action="build-show" data-id="${p.id}" data-tip="Показать на карте">${buildSvg(30, 22)}</button>
     ${title}${prio}${close}</header>`;

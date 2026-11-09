@@ -44,7 +44,9 @@ describe('Карточка строительной базы', () => {
     expect(html).toContain(`$${Math.round(2 * CONSTRUCTION.brigade.upkeep).toLocaleString('ru-RU')}`);
     // Бригады: что делают, клик — к ней на карте.
     expect(html.match(/data-action="crew-show"/g)?.length).toBe(2);
-    expect(html).toContain(`строит «${game.construction.info(project)!.project.label}»`);
+    // Название стройки — ссылкой к ней (одинаковые названия различает место: «Улица 1+1 · Берёзовка»).
+    expect(html).toContain(`строит <span class="pc-site-link" data-action="build-show" data-id="${project}"`);
+    expect(html).toContain(`«${game.projectTitle(project)}»</span>`);
     expect(html).toContain('data-action="base-hire"');
     expect(html).toContain('data-action="base-fire"');
     // Ближние стройки: ближняя — первой, у той, к которой нет подъезда, — «⛔».

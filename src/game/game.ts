@@ -1693,7 +1693,7 @@ export class Game implements BuildContext {
     const home = base?.fp.center ?? b.pos ?? { x: 0, y: 0 };
     const info = b.project !== undefined ? this.construction.info(b.project) : null;
     const site = info ? (info.front ?? info.at) : null;
-    const label = info ? `«${projectName(info.project)}»` : '';
+    const label = info ? `«${this.projectTitle(info.project.id)}»` : '';
     // Колонна в пути — где головная машина: в потоке или уже доехала и ждёт остальных; ещё не выехала — откуда выезжает.
     const head = b.convoy?.cars[0];
     const lead = crews.lead(b);
@@ -1733,7 +1733,7 @@ export class Game implements BuildContext {
     if (!b) return 'Бригады больше нет';
     const info = this.construction.info(project);
     if (!info) return 'Проекта больше нет: достроен или отменён';
-    const name = `«${projectName(info.project)}»`;
+    const name = `«${this.projectTitle(project)}»`;
     if (info.project.paused) return `${name} на паузе — сначала «▶ Дальше»`;
     if (b.project === project && (b.state === 'going' || b.state === 'working')) return null;
     if (!info.access)
@@ -1756,7 +1756,10 @@ export class Game implements BuildContext {
     if (fail) return fail;
     if (out) {
       const n = crews.of(out.base).indexOf(out) + 1;
-      this.notify(`🚚 Бригада ${n} базы «${this.baseName(out.base)}» уступила место на «${projectName(this.construction.projects.get(project)!)}»`);
+      // Клик по уведомлению — к стройке и её карточке.
+      this.notify(`🚚 Бригада ${n} базы «${this.baseName(out.base)}» уступила место на «${this.projectTitle(project)}»`, undefined, {
+        refs: [{ type: 'project', id: project }],
+      });
     }
     this.construction.stamp++;
     this.journal.add('brigade-send', { b: id, base: b.base, id: project, what: projectName(this.construction.projects.get(project)!), ...(was !== undefined && was !== project ? { from: was } : {}) });
@@ -1791,6 +1794,156 @@ export class Game implements BuildContext {
       out.push({ pos: sub(m.pos, scale(m.dir, s.length / 2)), r: s.length * 0.9 + 3 });
     }
     return out;
+  }
+
+  /** Путь бригады по дорогам от узла к узлу (шаги crewStep) — до смены графа движения. */
+  private crewPathCache: { graph: object; paths: Map<string, Vec[]> } | null = null;
+
+  /**
+   * Маршрут бригады id для карты (её выбрали, или её базу, или проект, куда она едет): от головной машины (в потоке —
+   * по полосам, как у выбранной машины; вдоль стройки и против движения — остаток поездки; ждёт выезда — от узла)
+   * шагами по дорогам (crewStep: по правилам и против движения) до узла подъезда, оттуда вдоль стройки до края работ
+   * (goal). Едет домой — до ворот базы (goal — середина базы, home). Работает или стоит на базе — null.
+   */
+  brigadeRoute(id: number): { pts: Vec[]; goal: Vec; home: boolean; project?: number } | null {
+    const crews = this.construction.crews;
+    const b = crews.brigades.get(id);
+    if (!b || (b.state !== 'going' && b.state !== 'back')) return null;
+    const home = b.state === 'back';
+    const base = crews.bases.get(b.base);
+    const site = !home && b.project !== undefined ? this.construction.approach(b.project, b) : null;
+    if (home ? !base : !site) return null;
+    const target = home ? base!.nodeId : site!.node;
+    const net = this.roads.net;
+    const nodePos = (n: number) => (net.nodes.has(n) ? { ...net.node(n).pos } : null);
+    const pts: Vec[] = [];
+    // Узел, где кончается нынешний отрезок пути (дальше — шагами по дорогам); null — поездка уже к краю работ.
+    let node: number | null;
+    const trip = crews.tripAhead(b);
+    if (b.convoy) {
+      const lead = crews.lead(b);
+      const ahead = lead !== undefined ? this.vehicleAhead(lead) : null;
+      if (ahead) pts.push(...ahead.pts);
+      else if (b.convoy.cars.every((c) => 'wait' in c)) {
+        // Ещё не выехала: от места (или узла) выезда — по дорогам до цели этого шага.
+        const from = b.pos ?? nodePos(b.convoy.from);
+        if (from) pts.push(from);
+        const route = this.roads.route(b.convoy.from, b.convoy.to);
+        if (route) pts.push(...this.roads.routePolyline(route));
+      }
+      node = b.convoy.to;
+    } else if (trip && b.trip) {
+      pts.push(...trip);
+      // Против движения — до узла дороги; назад вдоль стройки — к узлу, где съехала (b.at); иначе — к краю работ.
+      node = b.trip.to ?? (b.trip.back ? (b.at ?? null) : null);
+    } else {
+      node = crews.startOf(b);
+      const from = b.pos ?? (node !== null ? nodePos(node) : null) ?? base?.fp.center;
+      if (from) pts.push({ ...from });
+    }
+    if (node !== null && node !== target) pts.push(...this.crewPath(node, target));
+    if (site && (node !== null || !trip)) pts.push(...site.path());
+    if (!pts.length) return null;
+    const goal = home ? base!.fp.center : site!.pos;
+    return { pts, goal: { ...goal }, home, ...(!home && b.project !== undefined ? { project: b.project } : {}) };
+  }
+
+  /** Точки пути техники от узла from до узла to: шаги crewStep (по полосам в потоке и против движения по оси). */
+  private crewPath(from: number, to: number): Vec[] {
+    const g = this.roads.graph;
+    const key = `${from}>${to}`;
+    // Граф сменился — путей заново; у выбранной базы их несколько (по бригаде), поэтому — набором.
+    if (this.crewPathCache?.graph !== g || this.crewPathCache.paths.size > 64) this.crewPathCache = { graph: g, paths: new Map() };
+    const hit = this.crewPathCache.paths.get(key);
+    if (hit) return hit;
+    const pts: Vec[] = [];
+    let node = from;
+    // Шагов немного (против движения — не больше двух на путь); предел — от зацикливания.
+    for (let i = 0; i < 16 && node !== to; i++) {
+      const step = this.crewStep(node, to);
+      if (!step) break;
+      if ('drive' in step) {
+        const route = this.roads.route(node, step.drive);
+        if (!route) break;
+        pts.push(...this.roads.routePolyline(route));
+        node = step.drive;
+      } else {
+        pts.push(...step.walk);
+        node = step.node;
+      }
+    }
+    this.crewPathCache.paths.set(key, pts);
+    return pts;
+  }
+
+  /**
+   * Название проекта для списков и карточек, различимое среди строек: своё или автоматическое (projectName), а если
+   * у другого проекта сейчас такое же — ещё и место: ближайший город («Улица 1+1 · Заречье»); у двух таких в одном
+   * городе — и сторона города стрелкой («Улица 1+1 · Заречье ↗», север — вверх); с одной стороны — ещё номер по
+   * порядку закладки («Улица 1+1 · Заречье ↗ 2»).
+   */
+  projectTitle(id: number): string {
+    const p = this.construction.projects.get(id);
+    if (!p) return 'Стройка';
+    const place = this.projectPlaces().get(id);
+    return place ? `${projectName(p)} · ${place}` : projectName(p);
+  }
+
+  /** Место проекта id для различения одинаковых названий (projectTitle); название и так одно такое — ''. */
+  projectPlace(id: number): string {
+    return this.projectPlaces().get(id) ?? '';
+  }
+
+  private placeCache: { stamp: number; size: number; places: Map<number, string> } | null = null;
+
+  /** Места проектов с одинаковыми названиями (projectTitle): город, сторона, номер. До следующего такта стройки. */
+  private projectPlaces(): Map<number, string> {
+    const c = this.construction;
+    const hit = this.placeCache;
+    if (hit && hit.stamp === c.stamp && hit.size === c.projects.size) return hit.places;
+    const places = new Map<number, string>();
+    const byName = new Map<string, Project[]>();
+    for (const p of [...c.projects.values()].sort((a, b) => a.id - b.id)) {
+      const name = projectName(p);
+      const list = byName.get(name);
+      if (list) list.push(p);
+      else byName.set(name, [p]);
+    }
+    // Ближайший город (как у базы: расстояние до его края) и с какой стороны от его середины стройка — стрелкой
+    // (на карте север — вверх); в самом центре города — без стрелки.
+    const ARROWS = ['→', '↘', '↓', '↙', '←', '↖', '↑', '↗'];
+    const place = (p: Project): { town: string; side: string } => {
+      const a = p.area;
+      const at = a ? { x: (a[0] + a[2]) / 2, y: (a[1] + a[3]) / 2 } : (c.info(p.id)?.at ?? { x: 0, y: 0 });
+      let best: Town | undefined;
+      let bd = Infinity;
+      for (const t of this.towns) {
+        const d = dist(t.center, at) - t.radius;
+        if (d < bd || (d === bd && best && t.id < best.id)) [best, bd] = [t, d];
+      }
+      if (!best) return { town: `№${p.id}`, side: '' };
+      const off = sub(at, best.center);
+      const central = Math.hypot(off.x, off.y) < best.radius * 0.25;
+      const k = Math.round(Math.atan2(off.y, off.x) / (Math.PI / 4));
+      return { town: best.name, side: central ? '' : ARROWS[((k % 8) + 8) % 8] };
+    };
+    const count = <T>(xs: T[]) => xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<T, number>());
+    for (const list of byName.values()) {
+      if (list.length < 2) continue;
+      const named = list.map((p) => ({ p, ...place(p) }));
+      const towns = count(named.map((n) => n.town));
+      // Город один такой — его хватает; несколько в одном городе — ещё и сторона, а с одной стороны — номер.
+      const labels = named.map((n) => (towns.get(n.town)! > 1 && n.side ? `${n.town} ${n.side}` : n.town));
+      const seen = new Map<string, number>();
+      const total = count(labels);
+      named.forEach(({ p }, i) => {
+        const k = (seen.get(labels[i]) ?? 0) + 1;
+        seen.set(labels[i], k);
+        places.set(p.id, total.get(labels[i])! > 1 && k > 1 ? `${labels[i]} ${k}` : labels[i]);
+      });
+    }
+    this.placeCache = { stamp: c.stamp, size: c.projects.size, places };
+    return places;
   }
 
   /** Бригада, чья машина не в потоке (вдоль стройки, ждёт колонну), — под точкой p: клик по ней выбирает бригаду. */

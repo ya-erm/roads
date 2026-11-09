@@ -6719,6 +6719,17 @@ span.ind-chip {
   cursor: pointer;
 }
 
+/* Место стройки под названием, когда у другой такое же (Game.projectPlace): «Берёзовка ↖». */
+.build-plate .bp-place {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
 .build-plate .bp-mark {
   margin-right: 3px;
   font-size: 12px;
@@ -6981,6 +6992,11 @@ span.ind-chip {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Бригады базы: что делает и название стройки (ссылкой) — переносом, а не обрезкой: место стройки в конце. */
+.base-card .pc-crew:not(.bc-near) .pc-crew-name {
+  white-space: normal;
 }
 
 .project-card .pc-crew-state {
@@ -7257,6 +7273,36 @@ span.ind-chip {
 
 .crew-card .cc-slots.full {
   color: var(--danger);
+}
+
+/* Значок стройки в строке списка — к ней на карте и её карточка (сама строка — отправить бригаду). */
+.crew-card .cc-target .cc-go {
+  border-radius: 6px;
+  cursor: zoom-in;
+}
+
+.crew-card .cc-target .cc-go:hover {
+  background: #ffe3c9;
+}
+
+.crew-card .cc-route {
+  color: #b4561a;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Название стройки ссылкой (Game.projectTitle; карточки бригады и базы): к ней на карте и её карточка. */
+.project-card .pc-site-link {
+  color: #b4561a;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.project-card .pc-site-link:hover {
+  background: #ffe3c9;
+  text-decoration-style: solid;
 }
 
 /* ---------- Предприятия строит игрок (src/ui/enterpriseUi.ts) ---------- */

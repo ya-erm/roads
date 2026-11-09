@@ -15,6 +15,27 @@ const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
 /** Расстояние коротко: «6 км», «2,5 км», «800 м». */
 export const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(m % 1000 ? 1 : 0).replace('.', ',')} км` : `${Math.round(m)} м`);
 
+/**
+ * Название стройки id — ссылкой: «🏗 «Улица 1+1 · Заречье»» (различимое название, Game.projectTitle), клик — камера к
+ * стройке и её карточка (hud: «build-show»). Проекта нет — просто название из text.
+ */
+export function projectLinkHtml(game: Game, id: number): string {
+  const title = game.projectTitle(id);
+  return `<span class="pc-site-link" data-action="build-show" data-id="${id}" data-tip="${esc(`К стройке «${title}» на карте и её карточка`)}">«${esc(title)}»</span>`;
+}
+
+/**
+ * Текст о бригаде («едет по дороге строить «…»») — название стройки id в нём ссылкой (projectLinkHtml), остальное —
+ * как есть (экранировано). Названия в тексте нет — текст целиком.
+ */
+export function withProjectLink(game: Game, text: string, id: number | undefined): string {
+  if (id === undefined || !game.construction.projects.has(id)) return esc(text);
+  const quoted = `«${game.projectTitle(id)}»`;
+  const k = text.indexOf(quoted);
+  if (k < 0) return esc(text);
+  return `${esc(text.slice(0, k))}${projectLinkHtml(game, id)}${esc(text.slice(k + quoted.length))}`;
+}
+
 /** Стройка: шлагбаум в полоску на дороге и конус — «дорога строится». */
 export function buildSvg(w = 28, h = 21): string {
   return `<svg viewBox="0 0 48 36" width="${w}" height="${h}" aria-hidden="true">
@@ -47,9 +68,10 @@ export function buildModeRowHtml(mode: BuildMode | undefined): string {
 
 /**
  * Плашка проекта: что (⬆ — приоритетный, 🔒 — с резервом), полоска готовности с процентом, сколько осталось, пауза,
- * отмена, к проекту и его карточке. crew — бригад на месте, based — база уже есть, selected — карточка открыта.
+ * отмена, к проекту и его карточке. crew — бригад на месте, based — база уже есть, selected — карточка открыта; place —
+ * место, когда у другой стройки такое же название (Game.projectPlace: «Заречье ↗» серым под названием).
  */
-export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected = false, own: string | null = null): string {
+export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected = false, own: string | null = null, place = ''): string {
   const p = i.project;
   const pct = Math.min(99, Math.floor(i.done * 100));
   const state = p.paused ? 'paused' : p.stalled !== undefined ? 'stalled' : '';
@@ -84,7 +106,9 @@ export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected 
   }${re ? `<span class="bp-mark" data-tip="${esc(reTip)}">🚧${shut}</span>` : ''}`;
   return `<div class="build-plate ${state}${selected ? ' selected' : ''}">
     <button class="icon bp-show" data-action="build-show" data-id="${p.id}" data-tip="Показать на карте и открыть карточку проекта">${buildSvg(26, 20)}</button>
-    <span class="bp-name" data-action="build-show" data-id="${p.id}" data-tip="${esc(`${projectName(p)} · ${Math.round(i.length)} м · ещё ${money(i.left)} — открыть карточку`)}">${marks}${esc(projectName(p))}</span>
+    <span class="bp-name" data-action="build-show" data-id="${p.id}" data-tip="${esc(`${projectName(p)}${place ? ` · ${place}` : ''} · ${Math.round(i.length)} м · ещё ${money(i.left)} — открыть карточку`)}">${marks}${esc(projectName(p))}${
+      place ? `<span class="bp-place">${esc(place)}</span>` : ''
+    }</span>
     ${status}
     <span class="bp-bar" data-tip="Готово ${pct}% — участки от узла до узла открываются сразу"><i style="width:${pct}%"></i><b>${pct}%</b></span>
     ${pause}${cancel}</div>`;
@@ -101,7 +125,7 @@ export function railTrainStatus(game: Game, id: number): ReturnType<WorkTrains['
  * Строка ж/д проекта: как у дороги (projectRowHtml), но вместо бригад — строительный поезд: «🚂 едет», «🚂 ⏳ 1:20»
  * или почему стоит («⛔ нет пути к стройке», «⛔ нет вокзала»).
  */
-export function railRowHtml(i: ProjectInfo, rail: { text: string; tip: string; bad: boolean; working: boolean }, selected = false): string {
+export function railRowHtml(i: ProjectInfo, rail: { text: string; tip: string; bad: boolean; working: boolean }, selected = false, place = ''): string {
   // Своя подпись вместо бригадной: тот же ряд, те же кнопки.
   const status =
     !i.access && i.waits
@@ -111,7 +135,7 @@ export function railRowHtml(i: ProjectInfo, rail: { text: string; tip: string; b
           : rail.working
             ? `<span class="bp-left" data-tip="${esc(`${rail.tip}. Сколько ещё строить на скорости ×1`)}">🚂 ⏳ ${durationText(i.seconds)}</span>`
             : `<span class="bp-state" data-tip="${esc(rail.tip)}">🚂 ${esc(rail.text)}</span>`;
-  return projectRowHtml(i, 1, true, selected, status);
+  return projectRowHtml(i, 1, true, selected, status, place);
 }
 
 /** База стройки: площадка с вагончиком и самосвалом. */
@@ -247,7 +271,9 @@ export function buildTabHtml(game: Game, view: BuildView = NO_BUILD_VIEW): strin
     .map((i) => {
       // Ж/д проект строит строительный поезд, а не бригады: его строка — по поезду.
       const rail = railTrainStatus(game, i.project.id);
-      return rail ? railRowHtml(i, rail, i.project.id === view.project) : projectRowHtml(i, crews.working(i.project.id).length, bases.length > 0, i.project.id === view.project);
+      return rail
+        ? railRowHtml(i, rail, i.project.id === view.project, game.projectPlace(i.project.id))
+        : projectRowHtml(i, crews.working(i.project.id).length, bases.length > 0, i.project.id === view.project, null, game.projectPlace(i.project.id));
     })
     .join('');
   const c = crewCounts(game);

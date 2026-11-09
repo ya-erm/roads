@@ -27,7 +27,6 @@ import type { TerraformMode } from '../world/terrain';
 import { altitudeText } from '../render/relief';
 import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
 import { badgeAt, projectBadges } from '../render/projectBadges';
-import { projectName } from '../game/construction';
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
 import {
@@ -1806,7 +1805,8 @@ export class Controller {
           if (problem) this.showError(problem);
           else {
             this.sendingCrew = null;
-            g.notify(`🚚 Бригада едет на «${projectName(g.construction.projects.get(project!)!)}» · 📌`);
+            // Клик по уведомлению — к стройке и её карточке.
+            g.notify(`🚚 Бригада едет на «${g.projectTitle(project!)}» · 📌`, undefined, { refs: [{ type: 'project', id: project! }] });
           }
           this.onChange();
           break;
@@ -3766,7 +3766,7 @@ export class Controller {
             ? { text: '🎯 Кликните по стройке: плашке «🏗» или полотну проекта · Esc — отмена', ok: true }
             : problem
               ? { text: `⛔ ${problem}`, ok: false }
-              : { text: `🎯 🚚 → «${projectName(info)}» · 📌 закрепить${far ? ' · ⚠ вне радиуса базы — строить будет медленно' : ''}`, ok: true };
+              : { text: `🎯 🚚 → «${g.projectTitle(info.id)}» · 📌 закрепить${far ? ' · ⚠ вне радиуса базы — строить будет медленно' : ''}`, ok: true };
           break;
         }
         const home = this.placingWarehouse !== null ? g.stations.get(this.placingWarehouse) : undefined;

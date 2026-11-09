@@ -1,19 +1,21 @@
 /**
  * Карточка строительной бригады (режим «Со строительством») в правой панели — открывается кликом по любой машине её
  * колонны на карте (в потоке, вдоль стройки) или по строке бригады в карточках базы и проекта. Наглядно, значками:
- * - что делает сейчас (строит «…», едет по дороге, вдоль стройки, на базе) и чья (база — клик к ней);
+ * - что делает сейчас (строит «…», едет по дороге, вдоль стройки, на базе) и чья (база — клик к ней); название стройки —
+ *   ссылкой (камера к ней и её карточка); едет — «📏 868 м» до края работ, а на карте её путь (Game.brigadeRoute);
  * - назначение: «📌 «Проект»» — игрок закрепил её там, «🤖 авто» — её распределяет автоматика;
  * - «◎ Следовать» (за головной машиной), «🎯 На стройку…» (выбрать проект кликом по карте, Esc — отмена), «↺ Авто»;
  * - стройки списком: расстояние, готовность, бригад x из N; нельзя — значок причины (клик скажет её словами).
  * Подсказки — data-tip (не системные).
  */
-import { projectName } from '../game/construction';
+import { dist, type Vec } from '../core/vec';
 import type { Game } from '../game/game';
 import { KMH_PER_UNIT } from '../world/roadTypes';
-import { buildSvg } from './constructionUi';
+import { buildSvg, projectLinkHtml, withProjectLink } from './constructionUi';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1).replace('.', ',')} км` : `${Math.round(m)} м`);
+const pathLen = (pts: readonly Vec[]) => pts.reduce((s, p, i) => (i ? s + dist(pts[i - 1], p) : 0), 0);
 
 /** Значок состояния бригады (как в карточках базы и проекта). */
 const MARK = { working: '🏗', going: '➜', back: '↩', idle: '🏚' } as const;
@@ -44,12 +46,17 @@ export function crewCardHtml(game: Game, id: number, view: CrewCardView): string
   const info = b.project !== undefined ? game.construction.info(b.project) : null;
   const lead = crews.lead(b);
   const sim = lead !== undefined ? game.traffic.vehicles.get(lead) : undefined;
+  // Едет — на карте её маршрут до края работ (или до базы) и цель кольцом (Renderer.drawCrewRoute).
+  const route = b.state === 'going' || b.state === 'back' ? game.brigadeRoute(id) : null;
   const chips = [
-    `<span class="pc-chip cc-doing" data-tip="Что делает бригада сейчас">${MARK[b.state]} ${esc(where?.text ?? '')}</span>`,
+    // Название стройки — ссылкой: камера к ней и её карточка.
+    `<span class="pc-chip cc-doing" data-tip="Что делает бригада сейчас${route ? ' — её путь на карте оранжевой линией' : ''}">${MARK[b.state]} ${withProjectLink(game, where?.text ?? '', b.project)}${
+      route ? ` <span class="cc-route" data-tip="${esc(`Ещё ${km(pathLen(route.pts))} пути ${route.home ? 'до базы' : 'до края работ'} — оранжевая линия на карте`)}">📏 ${km(pathLen(route.pts))}</span>` : ''
+    }</span>`,
     `<span class="pc-chip cc-base" data-action="base-show" data-id="${b.base}" data-tip="База бригады — нажмите, чтобы открыть">🏚 ${esc(game.baseName(b.base))}</span>`,
     sim ? `<span class="pc-chip" data-tip="Скорость головной машины колонны">🚀 <b>${Math.round(sim.v * KMH_PER_UNIT)}</b> км/ч</span>` : '',
     b.pinned && info
-      ? `<span class="pc-chip cc-pin" data-tip="Назначена вами: автоматика не перебросит её, пока проект не закончится, не встанет на паузу или вы не нажмёте «↺ Авто»">📌 «${esc(projectName(info.project))}»</span>`
+      ? `<span class="pc-chip cc-pin" data-tip="Назначена вами: автоматика не перебросит её, пока проект не закончится, не встанет на паузу или вы не нажмёте «↺ Авто»">📌 ${projectLinkHtml(game, info.project.id)}</span>`
       : `<span class="pc-chip cc-auto" data-tip="Куда ехать, решает автоматика: где рук меньше, приоритетный проект первым">🤖 авто</span>`,
   ].join('');
   const follow = `<button class="small ${view.following ? 'primary' : ''}" data-action="toggle-follow" data-tip="Камера — за головной машиной колонны">${view.following ? '◉ Камера следует' : '◎ Следовать'} <kbd>F</kbd></button>`;
@@ -112,18 +119,21 @@ function targetsHtml(game: Game, id: number): string {
             : n >= cap
               ? '🈵'
               : '⛔';
+      // Одинаковые названия различает место (Game.projectTitle): «Улица 1+1 · Заречье».
+      const name = game.projectTitle(p.id);
       const tip = here
         ? b.pinned
           ? `Бригада здесь и закреплена`
-          : `Бригада здесь — нажмите, чтобы закрепить её на «${projectName(p)}»`
+          : `Бригада здесь — нажмите, чтобы закрепить её на «${name}»`
         : problem
           ? `Нельзя: ${problem}`
-          : `«${projectName(p)}»: ${km(d)} отсюда — нажмите, бригада поедет туда по дорогам и закрепится${replaced(p.id)}${
+          : `«${name}»: ${km(d)} отсюда — нажмите, бригада поедет туда по дорогам и закрепится${replaced(p.id)}${
               far ? '. ⚠ вне радиуса базы — строить будет медленно' : ''
             }`;
+      // Значок стройки — ссылкой: к ней на карте и её карточка (а сама строка — отправить бригаду туда).
       return `<button class="pc-crew cc-target ${problem ? 'cc-off' : ''} ${here ? 'cc-here' : ''}" data-action="crew-to" data-id="${id}" data-p="${p.id}" data-tip="${esc(tip)}">
-        <span class="bc-near-ic">${buildSvg(22, 16)}</span>
-        <span class="pc-crew-name">${esc(projectName(p))} <span class="muted">· ${Math.min(99, Math.floor(info.done * 100))}%</span></span>
+        <span class="bc-near-ic cc-go" data-action="build-show" data-id="${p.id}" data-tip="${esc(`К стройке «${name}» на карте и её карточка`)}">${buildSvg(22, 16)}</span>
+        <span class="pc-crew-name">${esc(name)} <span class="muted">· ${Math.min(99, Math.floor(info.done * 100))}%</span></span>
         <span class="pc-crew-state">${icon}</span>
         <span class="cc-slots ${n >= cap ? 'full' : ''}" data-tip="${esc(`Бригад на проекте: ${n} из ${cap}`)}">🚚 ${n}/${cap}</span></button>`;
     })

@@ -215,6 +215,8 @@ const C = {
 export const HANDLE_PX = 6;
 /** Докуда от перекрёстка подсвечена главная дорога (≈ 45 м: полоса — LANE_W ≈ 3,5 м). */
 const MAIN_REACH = 90;
+/** Маршрут строительной бригады на карте — оранжевый, как подсветка выбранной стройки и базы. */
+const CREW_ROUTE_COLOR = '#f08a3c';
 
 /** Стоп-линия шириной STOP_LINE_W — у самого края перекрёстка: линии полос кончаются ровно на ней. */
 const STOP_LINE_W = 1.8;
@@ -3628,15 +3630,36 @@ export class Renderer {
     // Машину компании обводит её линия (drawLinePath), если та на карте.
     else if (selFleet && selFleet.lineId !== shownLine) this.drawFleetSelected(game, selFleet);
     if (sel?.type === 'crew') this.drawCrewSelected(game, sel.id);
+    // Выбрана база — пути её бригад в дороге; проект — бригад, что едут к нему (куда и откуда едут).
+    if (sel?.type === 'base' || sel?.type === 'project') {
+      for (const b of game.construction.crews.brigades.values()) {
+        if (sel.type === 'base' ? b.base !== sel.id : b.project !== sel.id || b.state !== 'going') continue;
+        if (b.state === 'going' || b.state === 'back') this.drawCrewRoute(game, b.id, sel.type === 'base' ? 'goal' : 'none');
+      }
+    }
     if (sel?.type === 'workTrain') this.drawWorkTrainSelected(game, sel.id);
   }
 
   /**
-   * Выбранная бригада: кольцо у каждой её машины — в потоке, вдоль стройки, ждущих колонну и на работе у края
-   * (Game.crewSpots: машины бригады вне потока — те же, что рисуются, Crews.carsAt).
+   * Выбранная бригада: её маршрут — куда едет (drawCrewRoute), и кольцо у каждой её машины — в потоке, вдоль стройки,
+   * ждущих колонну и на работе у края (Game.crewSpots: машины бригады вне потока — те же, что рисуются, Crews.carsAt).
    */
   private drawCrewSelected(game: Game, id: number): void {
+    this.drawCrewRoute(game, id, 'goal');
     for (const s of game.crewSpots(id)) this.drawSelectRing(s.pos.x, s.pos.y, s.r);
+  }
+
+  /**
+   * Маршрут бригады id (Game.brigadeRoute): оранжевой линией со стрелками от головной машины по дорогам до узла
+   * подъезда и вдоль стройки до края работ (домой — до базы); mark 'goal' — цель кольцом (край работ, база), 'none' —
+   * без кольца (выбран сам проект: он и так подсвечен).
+   */
+  private drawCrewRoute(game: Game, id: number, mark: 'goal' | 'none'): void {
+    const route = game.brigadeRoute(id);
+    if (!route) return;
+    const base = route.home ? game.construction.crews.bases.get(game.construction.crews.brigades.get(id)?.base ?? -1) : undefined;
+    const goal = mark === 'none' ? null : { pos: route.goal, r: base ? footprintRadius(base.fp) : 6 };
+    this.drawTripAhead(route.pts, CREW_ROUTE_COLOR, goal);
   }
 
   /** Обводка выбранной машины компании: на посту автостанции — рамкой по посту, в пути и у остановки — кольцом. */

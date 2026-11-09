@@ -251,7 +251,8 @@ describe('Бригада, назначенная игроком, — в игре
     // Карточка бригады: закрепление, кнопки, стройки строками «x из N».
     const html = crewCardHtml(game, b.id, { following: false, picking: false });
     expect(html).toContain('Бригада 1');
-    expect(html).toContain('📌 «');
+    // Закреплена — название стройки ссылкой к ней.
+    expect(html).toContain(`📌 <span class="pc-site-link" data-action="build-show" data-id="${to}"`);
     expect(html).toContain('data-action="crew-send"');
     expect(html).toContain('data-action="crew-auto"');
     expect(html.match(/data-action="crew-to"/g)).toHaveLength(2);
