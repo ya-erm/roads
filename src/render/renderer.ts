@@ -692,7 +692,7 @@ export class Renderer {
     this.drawConstruction(game, view, o.crewTarget != null ? { type: 'project', id: o.crewTarget } : o.selection);
     this.drawLabels(game, view);
     this.drawOverlay(game, o);
-    this.drawStationBadges(game, view);
+    this.drawStationBadges(game, view, o.selection?.type === 'station' ? o.selection.id : null);
     this.drawWarningMarks(game, view);
     this.drawFloaters(game);
     if (o.label && o.hover) this.drawTooltip(o.hover, o.label.text, o.label.ok, o.label.warn);
@@ -2993,8 +2993,9 @@ export class Renderer {
   /**
    * Ожидающие на станциях грузы — поверх линий маршрутов, на белых плашках. У остановки в первой плашке
    * впереди — значок автобуса; никто не ждёт — плашка из одного значка (им остановка видна и издалека).
+   * Сколько ушло пешком — только у выбранной станции (`selected`): у всех сразу эти плашки загромождают карту.
    */
-  private drawStationBadges(game: Game, view: ReturnType<Renderer['view']>): void {
+  private drawStationBadges(game: Game, view: ReturnType<Renderer['view']>, selected: number | null): void {
     const z = this.camera.zoom;
     if (z <= 0.22) return;
     const ctx = this.ctx;
@@ -3007,8 +3008,9 @@ export class Renderer {
       let pax = 0;
       for (const n of st.passengers.values()) pax += n;
       if (pax > 0) waiting.push(['passengers', Math.floor(pax)]);
-      // Ушли за месяц, не дождавшись места в автобусе (game/paxPatience.ts), — серый значок с идущим человеком.
-      const gone = paxGone(st);
+      // Ушли за месяц, не дождавшись места в автобусе (game/paxPatience.ts), — серый значок с идущим человеком;
+      // только у выбранной станции, у остальных это число — в совете «Пассажиры уходят».
+      const gone = st.id === selected ? paxGone(st) : 0;
       if (gone > 0) waiting.push(['walk', gone]);
       if (!waiting.length && !stop) continue;
       ctx.font = `700 ${11 / z}px system-ui, sans-serif`;
