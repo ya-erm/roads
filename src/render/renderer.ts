@@ -21,7 +21,7 @@ import { trainWagonFills } from '../sim/wagons';
 import { cargoImage } from '../ui/cargoIcons';
 import { BIOMES } from '../world/biomes';
 import { CARGO, CargoType, FREIGHT } from '../world/cargo';
-import { Annex, Industry, Station, TownBuilding } from '../world/entities';
+import { Annex, Industry, isBusTerminal, Station, TownBuilding } from '../world/entities';
 import { lastTownNeed } from '../world/townSupply';
 import type { Segment } from '../world/network';
 import { halfWidth, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
@@ -2154,6 +2154,7 @@ export class Renderer {
       if (!inView(st.fp)) continue;
       if (st.kind === 'rail') this.drawRailStation(game, st, selected);
       else if (st.kind === 'stop') this.drawStop(game, st, selected);
+      else if (isBusTerminal(st)) this.drawBusTerminal(game, st, selected);
       else this.drawStation(game, st, selected);
     }
     ctx.globalAlpha = 1;
@@ -2536,35 +2537,8 @@ export class Renderer {
     const hh = fp.h / 2;
     ctx.fillStyle = '#5c6470';
     ctx.fillRect(-fp.w / 2 + 3, -hh + 3, fp.w - 6, 4);
-    // Пристройки-склады — по концам площадки: ангары с двускатной крышей, заполнение склада — ящиками.
     const area = game.bayArea(st);
-    const side = (fp.w - area.w) / 2;
-    if (side > 0) {
-      const fill = Math.min(1, game.stationStored(st) / game.stationStorage(st));
-      for (const k of [-1, 1]) {
-        const x0 = k < 0 ? -fp.w / 2 + 1.5 : area.w / 2 + 0.5;
-        const w = side - 2;
-        ctx.fillStyle = '#b9895a';
-        ctx.fillRect(x0, -hh + 1.5, w, fp.h - 3);
-        ctx.strokeStyle = '#7d5a39';
-        ctx.lineWidth = 0.8;
-        ctx.strokeRect(x0, -hh + 1.5, w, fp.h - 3);
-        // Конёк крыши поперёк площадки и рёбра кровли.
-        ctx.beginPath();
-        ctx.moveTo(x0 + w / 2, -hh + 1.5);
-        ctx.lineTo(x0 + w / 2, hh - 1.5);
-        for (let y = -hh + 5; y < hh - 2; y += 4) {
-          ctx.moveTo(x0 + 1, y);
-          ctx.lineTo(x0 + w - 1, y);
-        }
-        ctx.stroke();
-        // Сколько занято: ящики у ворот растут вместе с заполнением.
-        if (fill > 0.02) {
-          ctx.fillStyle = '#e2b866';
-          ctx.fillRect(x0 + 1.5, hh - 1.5 - (fp.h - 4) * fill, Math.min(4, w / 3), (fp.h - 4) * fill);
-        }
-      }
-    }
+    this.drawDepotSides(game, st, area);
     const bw = (area.w - 10) / st.bays;
     const doors = this.camera.zoom > 0.35;
     game.stationBays(st).forEach((color, i) => {
@@ -2578,6 +2552,126 @@ export class Renderer {
       }
     });
     ctx.restore();
+  }
+
+  /**
+   * Пристройки-склады — по концам площадки (рисуется в её координатах, +y — к воротам): ангары с двускатной крышей,
+   * заполнение склада — ящиками.
+   */
+  private drawDepotSides(game: Game, st: Station, area: Footprint): void {
+    const ctx = this.ctx;
+    const fp = st.fp;
+    const hh = fp.h / 2;
+    const side = (fp.w - area.w) / 2;
+    if (side <= 0) return;
+    const fill = Math.min(1, game.stationStored(st) / game.stationStorage(st));
+    for (const k of [-1, 1]) {
+      const x0 = k < 0 ? -fp.w / 2 + 1.5 : area.w / 2 + 0.5;
+      const w = side - 2;
+      ctx.fillStyle = '#b9895a';
+      ctx.fillRect(x0, -hh + 1.5, w, fp.h - 3);
+      ctx.strokeStyle = '#7d5a39';
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(x0, -hh + 1.5, w, fp.h - 3);
+      // Конёк крыши поперёк площадки и рёбра кровли.
+      ctx.beginPath();
+      ctx.moveTo(x0 + w / 2, -hh + 1.5);
+      ctx.lineTo(x0 + w / 2, hh - 1.5);
+      for (let y = -hh + 5; y < hh - 2; y += 4) {
+        ctx.moveTo(x0 + 1, y);
+        ctx.lineTo(x0 + w - 1, y);
+      }
+      ctx.stroke();
+      // Сколько занято: ящики у ворот растут вместе с заполнением.
+      if (fill > 0.02) {
+        ctx.fillStyle = '#e2b866';
+        ctx.fillRect(x0 + 1.5, hh - 1.5 - (fp.h - 4) * fill, Math.min(4, w / 3), (fp.h - 4) * fill);
+      }
+    }
+  }
+
+  /**
+   * Автовокзал — места для автобусов между перронами: у задней стены здание вокзала (синяя кромка навеса), вдоль
+   * фасада — посадочная галерея, от неё к выезду — перроны-островки под навесами. Автобус встаёт на своё место носом
+   * к зданию, между двумя перронами, — на рисунке он сам, цвета линии (и тот, что заезжает). К выезду площадка
+   * открыта: перед местами — асфальт drawStationAprons со стрелками въезда и выезда.
+   */
+  private drawBusTerminal(game: Game, st: Station, selected: boolean): void {
+    const ctx = this.ctx;
+    const fp = st.fp;
+    const gate = game.roads.net.nodes.get(st.nodeId);
+    const front = gate ? bayFront(fp, gate.pos) : 1;
+    const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+    // Локальная +y в мире — к воротам (у грузового двора предприятия площадка повёрнута наоборот).
+    const n = { x: -u.y * front, y: u.x * front };
+    const hw = fp.w / 2;
+    const hh = fp.h / 2;
+    const area = game.bayArea(st);
+    const bw = (area.w - 10) / st.bays;
+    // Здание — у задней стены (сочленённый автобус встаёт носом к самому фасаду), галерея — вдоль фасада,
+    // перроны — от неё почти до края площадки.
+    const B = Math.min(6.5, fp.h * 0.25);
+    const yHall = -hh + 1;
+    const yGallery = yHall + B;
+    const yEnd = hh - 2.5;
+    // Перрон — сколько остаётся между автобусами (они шириной ~5), но не уже 1.4 и не шире 3.
+    const pw = Math.min(3, Math.max(1.4, bw - 7.4));
+    const x0 = -area.w / 2 + 1;
+    ctx.save();
+    ctx.translate(fp.center.x, fp.center.y);
+    ctx.rotate(fp.angle);
+    ctx.scale(1, front);
+    // Асфальт мест — заодно с площадкой перед ними; бордюр — по бокам и сзади, к выезду открыто.
+    ctx.fillStyle = C.road;
+    ctx.fillRect(-hw, -hh, fp.w, fp.h);
+    ctx.strokeStyle = selected ? '#2f80ed' : C.roadEdge;
+    ctx.lineWidth = selected ? 3 : 1.4;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'butt';
+    ctx.beginPath();
+    ctx.moveTo(-hw, hh);
+    ctx.lineTo(-hw, -hh);
+    ctx.lineTo(hw, -hh);
+    ctx.lineTo(hw, hh);
+    ctx.stroke();
+    this.drawDepotSides(game, st, area);
+    // Тень здания — туда же, куда у остальных зданий (в мире: вправо-вниз).
+    const shadow = { x: 2.5, y: 3 };
+    ctx.fillStyle = 'rgba(30,40,25,0.22)';
+    ctx.fillRect(x0 + dot(shadow, u), yHall + dot(shadow, n), area.w - 2, B);
+    // Здание вокзала: светлая крыша со световым фонарём, по фасаду — синяя кромка навеса.
+    ctx.fillStyle = '#f2efe8';
+    ctx.fillRect(x0, yHall, area.w - 2, B);
+    ctx.strokeStyle = selected ? '#2f80ed' : '#4f5965';
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(x0, yHall, area.w - 2, B);
+    ctx.fillStyle = '#d9d4ca';
+    ctx.fillRect(x0 + 3, yHall + B * 0.28, area.w - 8, B * 0.26);
+    ctx.fillStyle = '#2f80ed';
+    ctx.fillRect(x0, yGallery - 1.4, area.w - 2, 1.4);
+    // Посадочная галерея вдоль фасада и перроны-островки между местами: бетон, конец к выезду скруглён.
+    ctx.fillStyle = '#d7d9dc';
+    ctx.fillRect(x0, yGallery, area.w - 2, 1.4);
+    for (let i = 0; i <= st.bays; i++) {
+      const cx = -area.w / 2 + 4 + i * bw;
+      ctx.beginPath();
+      ctx.moveTo(cx - pw / 2, yGallery);
+      ctx.lineTo(cx - pw / 2, yEnd - pw / 2);
+      ctx.arc(cx, yEnd - pw / 2, pw / 2, Math.PI, 0, true);
+      ctx.lineTo(cx + pw / 2, yGallery);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // Навесы над перронами — синей полосой по оси, от галереи почти до конца перрона.
+    ctx.fillStyle = 'rgba(47, 128, 237, 0.8)';
+    for (let i = 0; i <= st.bays; i++) {
+      const cx = -area.w / 2 + 4 + i * bw;
+      ctx.fillRect(cx - pw * 0.22, yGallery - 0.2, pw * 0.44, yEnd - yGallery - pw * 0.9);
+    }
+    ctx.restore();
+    // Автобусы на местах и на заезде — поверх асфальта (под площадкой их не прячем, как грузовики в боксах).
+    const buses = game.bayLooks(st);
+    if (buses.length) this.drawVehicles(buses);
   }
 
   /**
@@ -2658,14 +2752,16 @@ export class Renderer {
       ctx.closePath();
       ctx.fill();
       if (this.camera.zoom >= 0.35) {
-        const bw = (fp.w - 10) / st.bays;
-        // «Зубцы» между местами — продолжают стенки между боксами.
+        // Посты — без пристроек-складов по концам (как на рисунке станции).
+        const area = game.bayArea(st);
+        const bw = (area.w - 10) / st.bays;
+        // «Зубцы» между местами — продолжают стенки между боксами (у автовокзала — перроны).
         ctx.strokeStyle = C.dash;
         ctx.lineWidth = 0.8;
         ctx.lineCap = 'butt';
         ctx.beginPath();
         for (let i = 0; i <= st.bays; i++) {
-          const x = -fp.w / 2 + 4 + i * bw;
+          const x = -area.w / 2 + 4 + i * bw;
           ctx.moveTo(x, hh);
           ctx.lineTo(x, hh + 3.5);
         }
@@ -2673,7 +2769,7 @@ export class Renderer {
         // Стрелка к воротам каждого бокса.
         ctx.fillStyle = C.dash;
         for (let i = 0; i < st.bays; i++) {
-          const cx = -fp.w / 2 + 5 + i * bw + (bw - 2) / 2;
+          const cx = -area.w / 2 + 5 + i * bw + (bw - 2) / 2;
           ctx.beginPath();
           ctx.moveTo(cx, hh + 1.2);
           ctx.lineTo(cx + 1.8, hh + 3.6);
@@ -2681,9 +2777,77 @@ export class Renderer {
           ctx.closePath();
           ctx.fill();
         }
+        // Въезд и выезд: правая по ходу полоса выезда ведёт на площадку, левая — обратно к улице.
+        const axis = local(pointOff(c, s, 0)).x;
+        const lanes = [ed[0] / 2, ed[1] / 2].map((o) => local(pointOff(c, s, o)).x);
+        const inSide = Math.sign(dot(rightNormal(scale(v, -1)), u)) || 1;
+        const xIn = (lanes[0] - axis) * inSide > 0 ? lanes[0] : lanes[1];
+        const xOut = xIn === lanes[0] ? lanes[1] : lanes[0];
+        // Знаки — на обочине у устья выезда, сразу за скруглением своей стороны.
+        const sign = (x: number): Vec => (x > axis ? { x: r + 2.6, y: Y + rr + 2.4 } : { x: l - 2.6, y: Y + rl + 2.4 });
+        this.drawEntryExit(xIn, xOut, hh + 4.5, Y, sign(xIn), sign(xOut));
       }
       ctx.restore();
     }
+  }
+
+  /**
+   * Въезд и выезд станции — в координатах площадки (+y — от здания к улице): на площадке перед постами (от y0 до y1)
+   * стрелки по полосам выезда — по полосе xIn к постам, по xOut — к улице; на обочине у устья — знаки:
+   * у въезда синий «прямо», у выезда красный «въезд запрещён».
+   */
+  private drawEntryExit(xIn: number, xOut: number, y0: number, y1: number, signIn: Vec, signOut: Vec): void {
+    const ctx = this.ctx;
+    const len = Math.min(7, y1 - y0 - 1);
+    if (len >= 3) {
+      const mid = (y0 + y1) / 2;
+      ctx.fillStyle = C.dash;
+      /** Стрелка вдоль полосы x: остриё в yHead, хвост — на len от него. */
+      const arrow = (x: number, yHead: number, toward: 1 | -1) => {
+        const head = Math.min(2.4, len * 0.45);
+        const yTail = yHead - toward * len;
+        const yNeck = yHead - toward * head;
+        ctx.beginPath();
+        ctx.moveTo(x - 0.4, yTail);
+        ctx.lineTo(x - 0.4, yNeck);
+        ctx.lineTo(x - 1.3, yNeck);
+        ctx.lineTo(x, yHead);
+        ctx.lineTo(x + 1.3, yNeck);
+        ctx.lineTo(x + 0.4, yNeck);
+        ctx.lineTo(x + 0.4, yTail);
+        ctx.closePath();
+        ctx.fill();
+      };
+      arrow(xIn, mid - len / 2, -1);
+      arrow(xOut, mid + len / 2, 1);
+    }
+    const disc = (p: Vec, fill: string) => {
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1.65, 0, Math.PI * 2);
+      ctx.fill();
+    };
+    // Въезд: синий круг со стрелкой к станции.
+    disc(signIn, '#2f80ed');
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(signIn.x, signIn.y - 1.25);
+    ctx.lineTo(signIn.x + 0.85, signIn.y - 0.2);
+    ctx.lineTo(signIn.x + 0.3, signIn.y - 0.2);
+    ctx.lineTo(signIn.x + 0.3, signIn.y + 1.1);
+    ctx.lineTo(signIn.x - 0.3, signIn.y + 1.1);
+    ctx.lineTo(signIn.x - 0.3, signIn.y - 0.2);
+    ctx.lineTo(signIn.x - 0.85, signIn.y - 0.2);
+    ctx.closePath();
+    ctx.fill();
+    // Выезд: «кирпич» — сюда не въезжают.
+    disc(signOut, '#d64545');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(signOut.x - 1.15, signOut.y - 0.35, 2.3, 0.7);
   }
 
   /**

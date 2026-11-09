@@ -25,7 +25,7 @@ import {
 import { BRUSH_SIZES, BrushSize, Controller, DRAW_MODES, Tool, TOOLS } from '../input/controller';
 import type { TerraformMode } from '../world/terrain';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
-import { type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
+import { isBusTerminal, type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
 import { lastTownNeed, townNeed } from '../world/townSupply';
 import { footprintRadius } from '../world/spatial';
 import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
@@ -2357,7 +2357,7 @@ export class Hud {
     }
     if (c.stationMode === 'rail') return this.railStationOptionsHtml(sw);
     const pax = c.stationMode === 'pax';
-    const tip = `${pax ? 'Автовокзал — для пассажиров: автобусы между городами и по городу' : 'Автостанция — для грузов: грузовики везут сюда и отсюда груз предприятий'}. Ставится у дороги, прямо у перекрёстка или вплотную к ${pax ? 'городу' : 'предприятию'} — с той стороны, где курсор. Дома на месте станции снесём (красные). Охват ${STATION.catchment} м. Посты ${pax ? 'посадки' : 'погрузки'} добавляются в карточке станции.`;
+    const tip = `${pax ? 'Автовокзал — для пассажиров: автобусы между городами и по городу' : 'Автостанция — для грузов: грузовики везут сюда и отсюда груз предприятий'}. Ставится у дороги, прямо у перекрёстка или вплотную к ${pax ? 'городу' : 'предприятию'} — с той стороны, где курсор. Дома на месте станции снесём (красные). Охват ${STATION.catchment} м. ${pax ? 'Перроны' : 'Посты погрузки'} добавляются в карточке станции.`;
     return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
       <div class="price">${money(COST.station)}</div></div></div>`;
   }
@@ -3122,7 +3122,7 @@ export class Hud {
           ? `платформ занято ${st.platforms.filter((p) => g.rail.isReserved(p)).length} из ${st.platforms.length} · ${Math.round(g.net.segments.get(st.platforms[0])?.length ?? 0)} м`
           : st.kind === 'stop'
             ? `автобусов ${st.occupied.length} из ${st.bays}`
-            : `постов занято ${g.stationBays(st).filter(Boolean).length} из ${st.bays}`;
+            : `${isBusTerminal(st) ? 'у перронов автобусов' : 'постов занято'} ${g.stationBays(st).filter(Boolean).length} из ${st.bays}`;
       const supplies = st.serves.cargo ? suppliesAll : [];
       // Куда едут пассажиры: станция назначения (клик — показать), сколько ждут и какие линии туда ходят.
       const routes = g.paxRoutes(st);
@@ -3153,13 +3153,15 @@ export class Hud {
       // Под картинку держим место на максимум постов: иначе с каждым постом «+» уезжает вправо из-под курсора.
       let baysRow = '';
       if (st.kind === 'road') {
+        // У автовокзала посты — места у перронов: автобус встаёт между двумя перронами.
+        const terminal = isBusTerminal(st);
         const more = g.stationBaysPlan(st.id, st.bays + 1);
-        const plusTip = more.ok ? `Добавить пост погрузки · ${money(STATION.bayCost)}` : (more.reason ?? '');
-        baysRow = `<div class="icon-row"><span class="lbl2">Посты погрузки</span>
+        const plusTip = more.ok ? `${terminal ? 'Добавить перрон' : 'Добавить пост погрузки'} · ${money(STATION.bayCost)}` : (more.reason ?? '');
+        baysRow = `<div class="icon-row"><span class="lbl2">${terminal ? 'Перроны' : 'Посты погрузки'}</span>
           <span class="stepper bays"><button data-action="st-bays" data-id="${st.id}" data-d="-1" ${st.bays > STATION.minBays ? '' : 'disabled'}
-            data-tip="Убрать пост · вернём ${money(STATION.bayCost * COST.refundRatio)}">−</button><b><i class="bays-pic" style="width:${baysSvgWidth(
+            data-tip="${terminal ? 'Убрать перрон' : 'Убрать пост'} · вернём ${money(STATION.bayCost * COST.refundRatio)}">−</button><b><i class="bays-pic" style="width:${baysSvgWidth(
               STATION.maxBays,
-            )}px">${baysSvg(st.bays, g.stationBays(st))}</i><span>${st.bays}</span></b><button
+            )}px">${baysSvg(st.bays, g.stationBays(st), 22, terminal)}</i><span>${st.bays}</span></b><button
             data-action="st-bays" data-id="${st.id}" data-d="1" class="${more.ok ? '' : 'off'}" data-tip="${esc(plusTip)}">+</button></span>
           ${more.ok ? `<span class="muted">+${money(STATION.bayCost)}</span>` : ''}</div>`;
       }

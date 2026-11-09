@@ -482,8 +482,9 @@ describe('Машины в пути и сохранение', () => {
       expect(lv.state).toBe('driving');
       expect(lv.stop).toBe(v.stop);
       expect(ls).toBeDefined();
-      // На манёвре в узле машина встаёт в начало полосы выезда из него — чуть впереди.
-      expect(dist(ls!.pos, sim.pos)).toBeLessThan(sim.onMovement ? 25 : 3);
+      // На манёвре в узле машина встаёт в начало полосы выезда из него — чуть впереди (налево с выезда станции
+      // через встречную — манёвр длиной ~28 м).
+      expect(dist(ls!.pos, sim.pos)).toBeLessThan(sim.onMovement ? 30 : 3);
       expect(ls!.v).toBeCloseTo(sim.v);
       if (!midway && !sim.onMovement && dist(sim.pos, a.fp.center) > 100 && dist(sim.pos, b.fp.center) > 100) midway = loaded;
       checks++;

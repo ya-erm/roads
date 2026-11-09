@@ -6734,7 +6734,7 @@ export class Game implements BuildContext {
 
   /** Площадка автостанции в конце выезда от from по dir (clearance — отступ от оси дороги): длинной стороной к выезду. */
   private drivewayFootprint(from: Vec, dir: Vec, clearance: number): Footprint {
-    const center = add(from, scale(dir, clearance + STATION.driveway + STATION.size.h / 2 + 4));
+    const center = add(from, scale(dir, clearance + STATION.driveway + STATION.gate + STATION.size.h / 2));
     // Посты погрузки смотрят на выезд.
     return { center, w: STATION.size.w, h: STATION.size.h, angle: Math.atan2(dir.x, -dir.y) };
   }
@@ -7889,7 +7889,9 @@ export class Game implements BuildContext {
     // Ворота постов — со стороны выезда (у грузового двора предприятия площадка повёрнута наоборот).
     const gate = this.roads.net.nodes.get(st.nodeId);
     const to = bayPose(this.bayArea(st), st.bays, Math.min(v.bay ?? 0, st.bays - 1), m.spec.length, gate ? bayFront(st.fp, gate.pos) : 1);
-    return entryPose(v.enter, to, m.spec.length);
+    // По площадке станции — прямо, носом к зданию (между перронами, в бокс): от края площадки до поста.
+    const run = st.fp.h / 2 + dot(sub(to.pos, st.fp.center), to.dir);
+    return entryPose(v.enter, to, m.spec.length, run);
   }
 
   /** Машина компании на виду: на дороге — из движения, на заезде — по пути к посту. */
@@ -8042,6 +8044,27 @@ export class Game implements BuildContext {
       const v = this.fleet.get(id);
       return (v && this.lines.get(v.lineId)?.color) ?? '#e07b39';
     });
+  }
+
+  /**
+   * Машины на постах автостанции — сами, как их рисовать (у автовокзала автобус виден между перронами): на своём посту
+   * (том, что окрашен под неё, — bayLayout) носом к зданию, а та, что ещё заезжает, — там, где она на заезде.
+   */
+  bayLooks(st: Station): VehicleLook[] {
+    if (st.kind !== 'road') return [];
+    const gate = this.roads.net.nodes.get(st.nodeId);
+    const front = gate ? bayFront(st.fp, gate.pos) : 1;
+    const area = this.bayArea(st);
+    const out: VehicleLook[] = [];
+    this.bayLayout(st).forEach((id, bay) => {
+      const v = id !== null ? this.fleet.get(id) : undefined;
+      const m = v && MODELS[v.model];
+      if (!v || !m || m.mode !== 'road') return;
+      const pose = v.enter ? null : bayPose(area, st.bays, bay, m.spec.length, front);
+      const look = pose ? this.fleetLookAt(v.id, pose.pos, pose.dir) : this.fleetLook(v);
+      if (look) out.push(look);
+    });
+    return out;
   }
 
   /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { glassFor, modelSvg, reliefSvg, shadeHex, waterSvg } from './icons';
+import { baysSvg, baysSvgWidth, glassFor, modelSvg, reliefSvg, shadeHex, waterSvg } from './icons';
 
 describe('shadeHex', () => {
   it('светлее — к белому, темнее — к чёрному', () => {
@@ -89,5 +89,20 @@ describe('reliefSvg', () => {
   it('у каждого варианта свой значок', () => {
     const all = new Set([reliefSvg('plains'), reliefSvg('hills'), reliefSvg('mountains')]);
     expect(all.size).toBe(3);
+  });
+});
+
+describe('baysSvg', () => {
+  it('автостанция — n постов, занятый — цвета машины', () => {
+    const svg = baysSvg(3, ['#ff0000', null, null]);
+    expect(svg.match(/<rect /g)).toHaveLength(2 + 3);
+    expect(svg).toContain('#ff0000');
+  });
+
+  it('автовокзал — перроны по обе стороны каждого места, автобусы — только на занятых', () => {
+    const svg = baysSvg(3, [null, '#00aa00', null], 22, true);
+    expect(svg.match(/fill="#d7d9dc"/g)).toHaveLength(4);
+    expect(svg.match(/fill="#00aa00"/g)).toHaveLength(1);
+    expect(svg).toContain(`width="${baysSvgWidth(3)}"`);
   });
 });

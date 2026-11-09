@@ -488,24 +488,28 @@ export function nearestBay(fp: Footprint, bays: number, taken: Set<number>, p: V
 /**
  * Где машина длиной length на заезде к посту to: плавная кривая от точки съезда с дороги,
  * скорость — от той, с какой съехала, до остановки на посту; кузов тянется за носом по кривой.
- * done — машина уже на посту.
+ * run — последние метры до поста машина едет прямо (между перронами автовокзала, в бокс), но кривой до них
+ * оставляем не меньше 6 м вперёд. done — машина уже на посту.
  */
-export function entryPose(e: BayEntry, to: Pose, length: number): Pose & { done: boolean } {
-  const k = Math.max(dist(e.pos, to.pos) * 0.4, 2);
+export function entryPose(e: BayEntry, to: Pose, length: number, run = 0): Pose & { done: boolean } {
+  const ahead = dot(sub(to.pos, e.pos), to.dir);
+  const straight = clamp(Math.min(run, ahead - 6), 0, run);
+  const mouth = sub(to.pos, scale(to.dir, straight));
+  const k = Math.max(dist(e.pos, mouth) * 0.4, 2);
   const c1 = add(e.pos, scale(e.dir, k));
-  const c2 = sub(to.pos, scale(to.dir, k));
+  const c2 = sub(mouth, scale(to.dir, k));
   const pts: Vec[] = [];
+  for (let i = 0; i <= 16; i++) pts.push(cubicBezier(e.pos, c1, c2, mouth, i / 16));
+  if (straight > 0) for (let i = 1; i <= 4; i++) pts.push(add(mouth, scale(to.dir, (straight * i) / 4)));
+  const last = pts.length - 1;
   const cum = [0];
-  for (let i = 0; i <= 16; i++) {
-    pts.push(cubicBezier(e.pos, c1, c2, to.pos, i / 16));
-    if (i) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
-  }
-  const total = Math.max(0.1, cum[16]);
-  /** Точка кривой на расстоянии s от съезда; до него — позади, на прямой съезда. */
+  for (let i = 1; i <= last; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
+  const total = Math.max(0.1, cum[last]);
+  /** Точка пути на расстоянии s от съезда; до него — позади, на прямой съезда. */
   const at = (s: number): Vec => {
     if (s <= 0) return add(e.pos, scale(e.dir, s));
     let i = 1;
-    while (i < 16 && cum[i] < s) i++;
+    while (i < last && cum[i] < s) i++;
     const f = clamp((s - cum[i - 1]) / Math.max(1e-6, cum[i] - cum[i - 1]), 0, 1);
     return add(pts[i - 1], scale(sub(pts[i], pts[i - 1]), f));
   };

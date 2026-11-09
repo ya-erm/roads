@@ -347,10 +347,23 @@ export function baysSvgWidth(n: number): number {
   return 6 + n * 7;
 }
 
-/** Автостанция сверху: навес и n постов погрузки; занятый — цвета машины, что на нём стоит (как на карте). */
-export function baysSvg(n: number, busy: (string | null)[] = [], h = 22): string {
+/**
+ * Автостанция сверху: навес и n постов погрузки; занятый — цвета машины, что на нём стоит (как на карте).
+ * Автовокзал (terminal) — здание с синей кромкой навеса и n мест на асфальте между перронами; на занятом — автобус.
+ */
+export function baysSvg(n: number, busy: (string | null)[] = [], h = 22, terminal = false): string {
   const bw = 7;
   const w = baysSvgWidth(n);
+  if (terminal) {
+    const islands = Array.from({ length: n + 1 }, (_, i) => `<rect x="${2.3 + i * bw}" y="7" width="1.6" height="${h - 9.5}" rx="0.8" fill="#d7d9dc"/>`).join('');
+    const buses = busy
+      .slice(0, n)
+      .map((c, i) => (c ? `<rect x="${4.6 + i * bw}" y="7.6" width="${bw - 2.6}" height="${h - 11}" rx="1.2" fill="${c}" stroke="#1e2530" stroke-width="0.5"/>` : ''))
+      .join('');
+    return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
+    <rect x="0.7" y="0.7" width="${w - 1.4}" height="${h - 1.4}" rx="2" fill="#646b76" stroke="#4b525c" stroke-width="1.4"/>
+    <rect x="1.5" y="1.5" width="${w - 3}" height="4.5" fill="#f2efe8"/><rect x="1.5" y="5" width="${w - 3}" height="1.2" fill="#2f80ed"/>${islands}${buses}</svg>`;
+  }
   const slots = Array.from(
     { length: n },
     (_, i) => `<rect x="${3.5 + i * bw}" y="9" width="${bw - 1.5}" height="${h - 12}" rx="1" fill="${busy[i] ?? '#d5d2c8'}"/>`,

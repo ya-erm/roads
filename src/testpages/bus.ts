@@ -1,6 +1,7 @@
 import type { Vec } from '../core/vec';
 import { emptyLedger, Game } from '../game/game';
 import { AVENUE, type End, roadPlan, STREET } from '../game/testkit';
+import type { ModelId } from '../game/transport';
 import { RoadTools } from '../input/roadtools';
 import type { RoadOptions } from '../lanes/edit';
 import { oneWay } from '../lanes/model';
@@ -17,6 +18,8 @@ import type { TestScene } from './index';
  *  - «Туда и обратно» — улица 1+1, пары остановок по обе стороны улицы;
  *  - «Проспект» — 2+2, остановки у правого края в обе стороны;
  *  - «Кармашек» — улица 1+1, у двух остановок полоса вдоль края до и после навеса (в обе стороны);
+ *  - «Автовокзалы» — два автовокзала по обе стороны улицы, между ними четыре автобуса разных моделей: каждый
+ *    встаёт на свой перрон;
  *  - «Кварталы» — четыре квартала с перекрёстками и односторонней улицей посередине: один маршрут
  *    поворачивает налево, другой направо, общая остановка — на односторонней.
  * Экран: y вниз, движение правостороннее — на улице с запада на восток едут у южного края, остановки
@@ -25,6 +28,8 @@ import type { TestScene } from './index';
 export function buildBusScene(): TestScene {
   const game = new Game({ seed: 1, size: 'small', towns: 0, industries: 'few', money: 1_000_000_000, water: 'dry', terrainVersion: TERRAIN_VERSION });
   clearMap(game);
+  // Все модели сразу: у автовокзалов — автобусы разной длины.
+  game.modelTier = 3;
   const sc = new SceneBuilder(game);
 
   // Слева столбиком улицы, справа кварталы; правый верхний угол пуст — там панель маршрутов.
@@ -80,6 +85,17 @@ export function buildBusScene(): TestScene {
     sc.lane([2740, 2620, 2500].map((x) => ({ x, y: y - edge })));
     sc.houses();
     sc.line('bay', 'Кармашек', [bayEast, plainEast, bayWest, plainWest], 2);
+  });
+
+  // ---------- Автовокзалы: по обе стороны улицы, автобусы встают на разные перроны ----------
+  sc.section('Автовокзалы', { x: 2450, y: 3100 }, 'linear', () => {
+    const y = 3100;
+    sc.road({ free: { x: 2000, y } }, { free: { x: 2900, y } }, STREET);
+    // Сперва дома, потом вокзалы: под площадками дома снесутся, как у игрока.
+    sc.houses();
+    const southTerminal = sc.terminal({ x: 2250, y: y + 40 });
+    const northTerminal = sc.terminal({ x: 2650, y: y - 40 });
+    sc.line('terminal', 'Автовокзалы', [southTerminal, northTerminal], 4, ['bus', 'bus2', 'bus3', 'bus']);
   });
 
   // ---------- Кварталы: перекрёстки, повороты, односторонняя посередине ----------
@@ -198,6 +214,13 @@ class SceneBuilder {
     return st;
   }
 
+  /** Автовокзал (только пассажиры) у ближайшей к точке p улицы — выездом к ней, с её стороны, где p. */
+  terminal(p: Vec): Station {
+    const st = this.game.placeStation(p, 30, 'road', { pax: true, cargo: false });
+    if (!st) throw new Error(`автовокзал у (${p.x}, ${p.y}): ${this.game.stationPlan(p, 30, 'road').reason ?? 'не встал'}`);
+    return st;
+  }
+
   /** Полоса вдоль края — протяжкой инструментом «Полоса» через точки pts, как это делает игрок мышью. */
   lane(pts: Vec[]): void {
     const tools = new RoadTools(() => this.game);
@@ -223,14 +246,20 @@ class SceneBuilder {
     for (const st of this.game.stations.values()) this.game.computeCatchment(st);
   }
 
-  /** Маршрут по остановкам (по кругу) и автобусы на нём; key — как его звать из консоли. */
-  line(key: string, name: string, stops: Station[], buses: number): void {
+  /**
+   * Маршрут по остановкам (по кругу) и автобусы на нём; key — как его звать из консоли, models — модели по порядку
+   * (не хватит — обычные автобусы).
+   */
+  line(key: string, name: string, stops: Station[], buses: number, models: ModelId[] = []): void {
     const ids = stops.map((s) => s.id);
     const line = this.game.createLine(ids);
     if (!line) throw new Error(`маршрут «${name}» не создался: ${this.game.lineProblem(ids) ?? 'мало остановок'}`);
     this.game.renameLine(line.id, name);
     this.lines[key] = line.id;
-    for (let i = 0; i < buses; i++) if (!this.game.buyVehicle(line.id, 'bus')) throw new Error(`автобус на «${name}» не купить`);
+    for (let i = 0; i < buses; i++) {
+      const model = models[i] ?? 'bus';
+      if (!this.game.buyVehicle(line.id, model)) throw new Error(`${model} на «${name}» не купить`);
+    }
   }
 
   /** Рамка всей сцены: дороги и дома. */

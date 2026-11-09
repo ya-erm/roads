@@ -136,6 +136,9 @@ export interface StationServes {
 /** Как зовётся станция у дороги по тому, с чем работает: грузы — автостанция, пассажиры — автовокзал. */
 export const stationTitle = (s: StationServes) => (s.cargo && s.pax ? 'Автостанция и автовокзал' : s.pax ? 'Автовокзал' : 'Автостанция');
 
+/** Автовокзал — станция у дороги только для пассажиров: вместо боксов-постов у неё перроны, автобусы видны на местах. */
+export const isBusTerminal = (st: Pick<Station, 'kind' | 'serves'>) => st.kind === 'road' && st.serves.pax && !st.serves.cargo;
+
 export interface Station {
   type: 'station';
   id: number;
