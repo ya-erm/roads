@@ -45,11 +45,14 @@ export function withoutCitizens<G extends Game>(game: G): G {
   return game;
 }
 
-/** Сохранения свежих партий по настройкам (в пределах файла тестов: у каждого файла свои модули). */
+/**
+ * Сохранения свежих партий по настройкам. Файлы одного потока делят модули (vite.config.ts, ISOLATED_TESTS) —
+ * и этот кэш тоже: мир по одним настройкам генерируется раз на поток.
+ */
 const freshSaves = new Map<string, { settings: WorldSettings; save: string }>();
 
 /**
- * Свежая партия — как new Game(setup), но мир по этим настройкам генерируется один раз на файл тестов: первый
+ * Свежая партия — как new Game(setup), но мир по этим настройкам генерируется один раз (на поток тестов): первый
  * вызов отдаёт саму сгенерированную партию, следующие — её копию из сохранения, снятого сразу после генерации
  * (загрузка в несколько раз быстрее генерации). Копия — та же партия: то же сохранение и та же симуляция до бита,
  * с машинами жителей тоже; запись журнала о загрузке убрана. Партии друг от друга не зависят — каждую можно менять.
@@ -58,12 +61,12 @@ export function freshGame(setup: WorldSettings | number): Game {
   const key = JSON.stringify(setup);
   const had = freshSaves.get(key);
   if (had) {
-    const game = new Game(had.settings, JSON.parse(had.save) as SaveData);
+    const game = new Game(structuredClone(had.settings), JSON.parse(had.save) as SaveData);
     if (game.journal.entries[game.journal.entries.length - 1]?.k === 'load') game.journal.entries.pop();
     return game;
   }
   const game = new Game(setup);
-  freshSaves.set(key, { settings: game.settings, save: JSON.stringify(game.toSave()) });
+  freshSaves.set(key, { settings: structuredClone(game.settings), save: JSON.stringify(game.toSave()) });
   return game;
 }
 

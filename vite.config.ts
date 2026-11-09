@@ -3,6 +3,25 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defineConfig, type Connect, type Plugin } from 'vite';
+import { defaultExclude } from 'vitest/config';
+
+/**
+ * Тесты, которые подменяют глобальное (vi.stubGlobal, window и HTMLInputElement, vi.mock модуля игры), — каждый
+ * файл в своих модулях, как по умолчанию. Остальные файлы одного потока делят модули: игра загружается и
+ * разогревается один раз на поток, а не на каждый файл (процессор на полном прогоне — на треть меньше).
+ */
+const ISOLATED_TESTS = [
+  'src/core/idle.test.ts',
+  'src/ui/prefs.test.ts',
+  'src/ui/settingsMenu.test.ts',
+  'src/input/baseTool.test.ts',
+  'src/input/escMenu.test.ts',
+  'src/input/redoKeys.test.ts',
+  'src/input/sharedProject.test.ts',
+  'src/game/templates.test.ts',
+  'src/game/workTrainSelect.test.ts',
+  'src/game/roadEditTraffic.test.ts',
+];
 
 /**
  * Версия игры (src/version.ts): MAJOR.MINOR.PATCH из package.json, а к PATCH прибавляется число коммитов после
@@ -65,6 +84,10 @@ export default defineConfig(({ command }) => ({
     // Тесты со сценариями и генерацией мира идут по 2–3 с, а под нагрузкой (параллельные прогоны, dev-серверы)
     // переваливали за 5 с по умолчанию — и падали по таймауту то один, то другой.
     testTimeout: 15_000,
+    projects: [
+      { extends: true, test: { name: 'shared', isolate: false, exclude: [...defaultExclude, ...ISOLATED_TESTS] } },
+      { extends: true, test: { name: 'isolated', include: ISOLATED_TESTS } },
+    ],
   },
   server: {
     port: 4800,
