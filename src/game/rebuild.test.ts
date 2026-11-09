@@ -487,7 +487,8 @@ describe('Перестройка «с проездом»: на разрытую 
     const host = game as unknown as { onLost(v: { id: number }): void };
     const onLost = host.onLost.bind(game);
     host.onLost = (v) => {
-      lost.push(v.id);      onLost(v);
+      lost.push(v.id);
+      onLost(v);
     };
     expect(game.roadBuilder.apply(game.roadBuilder.rebuild(c.id, { cls: into.cls, lanes: into.lanes }))).toBe(true);
     const sent: number[] = [];

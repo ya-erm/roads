@@ -649,6 +649,9 @@ export class LaneTraffic {
       if (hit.d > 40) continue;
       const t = c.lut.tangentAt(hit.s);
       const lat = (p.x - hit.point.x) * -t.y + (p.y - hit.point.y) * t.x;
+      // Точка за концом полотна (ближайшая — его конец, а машина дальше вдоль оси, на соседнем): не на нём. Иначе
+      // машину на соседнем полотне у стыка ставило на это — назад по ходу, задом наперёд.
+      if (Math.abs((p.x - hit.point.x) * t.x + (p.y - hit.point.y) * t.y) > 1.5) continue;
       for (const link of this.graph.corridorLinks(c.id)) {
         if (hit.s < link.s0 - 0.5 || hit.s > link.s1 + 0.5 || (t.x * dir.x + t.y * dir.y) * link.flow < 0.3) continue;
         for (const lane of link.lanes) {
