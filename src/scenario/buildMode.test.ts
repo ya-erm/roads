@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CONSTRUCTION, MONTH_LENGTH, TERM_SCALE } from '../config';
 import { dist } from '../core/vec';
-import type { Game } from '../game/game';
+import { Game } from '../game/game';
 import { freshGame } from '../game/testkit';
 import { DEFAULT_SETTINGS, type WorldSettings } from '../world/settings';
 import { BUILD_ALLOWANCE, BUILD_SLACK, buildAllowance, buildReach, industryById, roadMonths, townById } from './analysis';
