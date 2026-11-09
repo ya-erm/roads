@@ -365,7 +365,7 @@ export class Enterprises {
       ind.paid = (ind.paid ?? 0) + Math.round(b.paid);
       delete ind.build;
       this.changed();
-      g.notify(`🏭 ${ind.name}: построено`, '#2e9d57');
+      g.notify(`🏭 ${ind.name}: построено`, '#2e9d57', { kind: 'industry', refs: [{ type: 'industry', id: ind.id }] });
       g.journal.add('industry!', { id: ind.id });
     }
   }
@@ -414,7 +414,13 @@ export class Enterprises {
     });
     if (!fp || g.roadUnder(fp, 2) || g.structuresUnder(fp, 2).blocker || g.structuresUnder(fp, 2).houses.length) return null;
     const ind = this.add(info, fp, { builtBy: 'town', paid: 0 });
-    g.notify(`🏭 В городе ${t.name} открылся ${info.name.toLowerCase()}`, '#2e9d57');
+    g.notify(`🏭 В городе ${t.name} открылся ${info.name.toLowerCase()}`, '#2e9d57', {
+      kind: 'industry',
+      refs: [
+        { type: 'industry', id: ind.id },
+        { type: 'town', id: t.id },
+      ],
+    });
     g.journal.add('industry+', { id: ind.id, kind: info.kind, town: t.id, by: 'town' });
     return ind;
   }

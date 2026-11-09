@@ -147,6 +147,9 @@ import { annexHtml } from './annexUi';
 import { depositCardHtml, INDUSTRY_TOOL_SVG, industryModeRowHtml, industryOptionsHtml, industryRowsHtml, townRowsHtml } from './enterpriseUi';
 import type { IndustryKind } from '../world/cargo';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
+import { bellSvg, newsBadge, newsHtml, newsTarget } from './newsUi';
+import type { NewsKind, NewsRef } from '../game/news';
+import type { Notice } from '../game/game';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
 import { phasesHtml, phaseTurns } from './phasesUi';
 import { addPhase, editedAfter, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, withLeftArrows } from '../lanes/lights';
@@ -256,7 +259,7 @@ const SPEEDS = [
 ];
 
 /** Окна поверх карты: правила или брифинг, меню, новая игра, итоги сценария. */
-const SCREENS = ['start', 'menu', 'newgame', 'results'] as const;
+const SCREENS = ['start', 'menu', 'newgame', 'results', 'news'] as const;
 type ScreenName = (typeof SCREENS)[number];
 
 const PRESET_HINTS: Record<string, string> = {
@@ -405,6 +408,12 @@ export class Hud {
   private pressing = false;
   /** Скорость игры до открытия меню — к ней вернёмся по «Продолжить». */
   private speedBeforeMenu = 1;
+  /** Окно «События»: скорость до него (вернётся при закрытии), фильтры по видам, с какой записи — новое, разметка. */
+  private speedBeforeNews = 1;
+  private readonly newsKinds = new Set<NewsKind>();
+  private newsUnreadFrom = 0;
+  private lastNews = '';
+  private lastNewsBadge = '';
   private lastConfirm = '';
   /** Свой шаблон, который игрок собрался удалить: ждёт подтверждения в окне. */
   private deletingTemplate: string | null = null;
@@ -497,6 +506,7 @@ export class Hud {
         <div class="stat"><span class="label">Парк</span><span class="value small" data-fleet></span></div>
         <div class="stat day"><span class="label" data-date></span><div class="bar"><div data-month></div></div></div>
         <button class="advisor-btn" data-action="advisor" title="" data-tip="Советник: что мешает сети работать">${bulbSvg(22)}<b class="advice-badge hidden" data-advice-badge></b></button>
+        <button class="advisor-btn news-btn" data-action="news" title="" data-tip="История уведомлений">${bellSvg(22)}<b class="advice-badge news-badge hidden" data-news-badge></b></button>
       </div>
       <div class="panel speed" data-speed></div>
       <div class="offer-banner hidden" data-offer-banner></div>
@@ -511,6 +521,7 @@ export class Hud {
       <div class="panel minimap-wrap" data-minimap></div>
       <div class="screen hidden" data-start><div class="modal start" data-start-body></div></div>
       <div class="screen hidden" data-results><div class="modal results" data-results-body></div></div>
+      <div class="screen hidden" data-news><div class="modal news" data-news-body></div></div>
       <div class="screen hidden" data-menu>
         <div class="modal menu">
           <div data-menu-main>
@@ -629,7 +640,7 @@ export class Hud {
       { capture: true },
     );
     // Клик мимо окна — то же, что Esc.
-    for (const s of ['menu', 'newgame']) {
+    for (const s of ['menu', 'newgame', 'news']) {
       this.q(`[data-${s}]`).addEventListener('click', (e) => {
         if (e.target === e.currentTarget) this.closeModal();
       });
@@ -1159,6 +1170,27 @@ export class Hud {
       case 'advisor':
         this.toggleAdvisor();
         break;
+      case 'news':
+        this.openNews();
+        break;
+      case 'news-close':
+        this.closeNews();
+        break;
+      case 'news-filter': {
+        // «Все» — снять фильтры; значок вида — включить или выключить его.
+        const kind = d.kind as NewsKind | '';
+        if (!kind) this.newsKinds.clear();
+        else if (!this.newsKinds.delete(kind)) this.newsKinds.add(kind);
+        this.renderNews(true);
+        break;
+      }
+      case 'news-go': {
+        const e = g.news.entries.find((x) => x.n === Number(d.n));
+        if (!e) break;
+        this.closeNews();
+        this.goTo(d.i !== undefined && e.refs ? [e.refs[Number(d.i)]] : [], e.at);
+        break;
+      }
       case 'advice-show':
         this.showAdvice(d.key!);
         break;
@@ -1724,9 +1756,9 @@ export class Hud {
         break;
       }
       case 'notice-go': {
-        // Уведомление с местом («Стройка закончена») — камера туда.
-        const at = g.notices[Number(d.id)]?.at;
-        if (at) c.showPlace(at.pos, at.r);
+        // Уведомление с местом («Стройка закончена») или о предприятии, городе, маршруте — туда.
+        const n: Notice | undefined = g.notices[Number(d.id)];
+        if (n) this.goTo(n.refs ?? [], n.at);
         break;
       }
       case 'close-sel':
@@ -3635,6 +3667,10 @@ export class Hud {
       this.continueAfterResults();
       return true;
     }
+    if (!this.q('[data-news]').classList.contains('hidden')) {
+      this.closeNews();
+      return true;
+    }
     const inSection = ['[data-menu-saves]', '[data-menu-settings]'].some((s) => !this.q(s).classList.contains('hidden'));
     if (inSection && !this.q('[data-menu]').classList.contains('hidden')) {
       this.menuView('main');
@@ -3930,6 +3966,72 @@ export class Hud {
     return adviceOf(this.game()).filter((a) => !this.hiddenAdvice.has(a.key));
   }
 
+  /** Окно «События»: пауза на время чтения, всё в нём — прочитано; новое с прошлого раза — подсвечено. */
+  openNews(): void {
+    if (!this.q('[data-news]').classList.contains('hidden')) return;
+    const g = this.game();
+    this.speedBeforeNews = g.speed;
+    this.controller.setSpeed(0, true);
+    const unread = g.news.entries.length - g.news.unread;
+    this.newsUnreadFrom = g.news.entries[unread]?.n ?? Infinity;
+    this.showScreen('news');
+    this.renderNews(true);
+  }
+
+  /** Закрыть «События» — время идёт с прежней скоростью. */
+  closeNews(): void {
+    if (this.q('[data-news]').classList.contains('hidden')) return;
+    this.q('[data-news]').classList.add('hidden');
+    this.controller.setSpeed(this.speedBeforeNews, true);
+  }
+
+  /** Число непрочитанного на колокольчике; окно открыто — его записи (новое, пока оно открыто, — сразу прочитано). */
+  private renderNews(force = false): void {
+    const g = this.game();
+    const open = !this.q('[data-news]').classList.contains('hidden');
+    if (open) g.news.markRead();
+    const badge = newsBadge(g.news.unread);
+    if (badge !== this.lastNewsBadge) {
+      this.lastNewsBadge = badge;
+      const b = this.q('[data-news-badge]');
+      b.textContent = badge;
+      b.classList.toggle('hidden', !badge);
+      b.parentElement!.dataset.tip = badge ? `История уведомлений: новых — ${badge}` : 'История уведомлений';
+    }
+    if (!open) return;
+    const html = newsHtml(g, { kinds: this.newsKinds, unreadFrom: this.newsUnreadFrom });
+    if (!force && html === this.lastNews) return;
+    this.lastNews = html;
+    const body = this.q('[data-news-body]');
+    const list = body.querySelector('.news-list');
+    const scroll = list?.scrollTop ?? 0;
+    body.innerHTML = html;
+    // Перерисовка (новая запись, фильтр) — список остаётся на месте.
+    if (!force) body.querySelector('.news-list')!.scrollTop = scroll;
+  }
+
+  /**
+   * К объекту из уведомления или записи «Событий»: первый, что ещё есть на карте, — камера к нему и его карточка
+   * (предприятие, город, станция, маршрут, проект, база); таких нет — к месту at.
+   */
+  private goTo(refs: readonly NewsRef[], at?: Notice['at']): void {
+    const g = this.game();
+    const c = this.controller;
+    for (const ref of refs) {
+      const t = newsTarget(g, ref);
+      if (!t) continue;
+      c.showPlace(t.pos, t.r);
+      if (ref.type === 'line') {
+        c.select(null);
+        c.selectLine(ref.id);
+      } else {
+        c.select({ type: ref.type, id: ref.id });
+      }
+      return;
+    }
+    if (at) c.showPlace(at.pos, at.r);
+  }
+
   /** Панель советника — на месте «Финансов» и «Цепочек» (они закрываются), панель сценария прячется. */
   toggleAdvisor(): void {
     const el = this.q('[data-advisor]');
@@ -4105,13 +4207,14 @@ export class Hud {
       notices.dataset.key = key;
       notices.innerHTML = g.notices
         .map((n, i) =>
-          // С местом (достроенная улица) — кнопкой: клик ведёт камеру туда.
-          n.at
+          // С местом (достроенная улица) или объектом (предприятие, город, маршрут) — кнопкой: клик ведёт туда.
+          n.at || n.refs?.some((r) => newsTarget(g, r))
             ? `<div class="notice go" data-action="notice-go" data-id="${i}" data-tip="Показать на карте" style="opacity:${Math.min(1, (6 - n.age) / 1.5)};${n.color ? `border-left-color:${n.color}` : ''}">${esc(n.text)} <span class="notice-go-ic">📍</span></div>`
             : `<div class="notice" style="opacity:${Math.min(1, (6 - n.age) / 1.5)};${n.color ? `border-left-color:${n.color}` : ''}">${esc(n.text)}</div>`,
         )
         .join('');
     }
+    this.renderNews();
     this.panelTimer -= realDt;
     if (this.panelTimer <= 0) {
       this.panelTimer = 0.3;

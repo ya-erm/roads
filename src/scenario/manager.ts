@@ -436,7 +436,7 @@ export class Scenario {
     const floor = `−$${Math.abs(ECONOMY.creditLimit).toLocaleString('ru-RU')}`;
     const span = (months: number) => durationText(months * MONTH_LENGTH);
     if (this.state.bankrupt >= BANKRUPT_MONTHS) this.lose(`Компания обанкротилась: ${span(BANKRUPT_MONTHS)} подряд на счёте меньше ${floor}`);
-    else this.game.notify(`Сценарий: на счёте меньше ${floor}. Ещё ${span(BANKRUPT_MONTHS - this.state.bankrupt)} — и компания обанкротится`, '#e5534b');
+    else this.game.notify(`Сценарий: на счёте меньше ${floor}. Ещё ${span(BANKRUPT_MONTHS - this.state.bankrupt)} — и компания обанкротится`, '#e5534b', { kind: 'money' });
   }
 
   // ---------- Задания ----------
@@ -585,7 +585,10 @@ export class Scenario {
     });
     const money = (reward.money ?? 0) + (bonus ?? 0);
     const head = o.quick ? '⚡ Быстрее срока' : late ? '⌛ С опозданием' : '✓ Выполнено';
-    this.game.notify(`${head}: ${o.title}${money ? ` · +$${money.toLocaleString('ru-RU')}` : ''}${late ? ` (−${Math.round((1 - LATE.reward) * 100)}%)` : ''}`, '#2e9d57');
+    this.game.notify(`${head}: ${o.title}${money ? ` · +$${money.toLocaleString('ru-RU')}` : ''}${late ? ` (−${Math.round((1 - LATE.reward) * 100)}%)` : ''}`, '#2e9d57', {
+      kind: 'goal',
+      refs: o.related,
+    });
     if (o.phase === this.state.phase) this.checkPhase();
   }
 
@@ -602,7 +605,10 @@ export class Scenario {
     const span = durationText((until - this.today) * MONTH_LENGTH);
     this.log('late', `Срок вышел: ${o.title}`);
     this.game.journal.add('late', { id: o.id, progress: o.progress, target: o.target, until });
-    this.game.notify(`⌛ Срок вышел: ${o.title}. Ещё ${span} можно доделать — награда −${Math.round((1 - LATE.reward) * 100)}%`, '#c4662f');
+    this.game.notify(`⌛ Срок вышел: ${o.title}. Ещё ${span} можно доделать — награда −${Math.round((1 - LATE.reward) * 100)}%`, '#c4662f', {
+      kind: 'goal',
+      refs: o.related,
+    });
   }
 
   private failObjective(o: Objective): void {
@@ -612,7 +618,7 @@ export class Scenario {
     this.apply({ ...o.fail, reputation: undefined }, o.source ?? o.id, true);
     this.log('failed', `Провалено: ${o.title}`);
     this.game.journal.add('fail', { id: o.id, progress: o.progress, target: o.target, critical: o.critical || undefined, rep: this.state.reputation });
-    this.game.notify(`✗ Не успели: ${o.title}`, '#e5534b');
+    this.game.notify(`✗ Не успели: ${o.title}`, '#e5534b', { kind: 'goal', refs: o.related });
     if (o.critical) {
       this.lose(`Критическое задание провалено: ${o.title}`);
       return;
@@ -640,7 +646,7 @@ export class Scenario {
     });
     r.retryOf = o.id;
     o.retry = r.id;
-    this.game.notify(`Последний шанс: ${titleOf(p, this.game)}`, '#e5534b');
+    this.game.notify(`Последний шанс: ${titleOf(p, this.game)}`, '#e5534b', { kind: 'goal', refs: o.related });
   }
 
   // ---------- Награды, эффекты, репутация ----------
@@ -704,7 +710,7 @@ export class Scenario {
       parent: e.parent,
       key: memoryKey,
     });
-    this.game.notify(`${e.title}. ${e.cause}`, e.importance === 'major' ? '#c4662f' : '#4a8fe7');
+    this.game.notify(`${e.title}. ${e.cause}`, e.importance === 'major' ? '#c4662f' : '#4a8fe7', { kind: 'event', refs: e.related });
     return rec;
   }
 
@@ -756,7 +762,7 @@ export class Scenario {
     });
     generatePhase(this, s.phase);
     this.log('phase', `Этап ${'ABC'[s.phase]}: ${PHASES[s.phase].name}`);
-    this.game.notify(`Новый этап: ${PHASES[s.phase].name}. ${PHASES[s.phase].hint}`, '#7a5cc4');
+    this.game.notify(`Новый этап: ${PHASES[s.phase].name}. ${PHASES[s.phase].hint}`, '#7a5cc4', { kind: 'goal' });
     // Каждый этап открывает следующую ступень транспорта: B — Грузовик II и Автобус II, C — Фура и Автобус III.
     this.game.openModelTier(Math.min(3, s.phase + 1) as ModelTier);
   }
@@ -765,11 +771,11 @@ export class Scenario {
     this.state.status = 'won';
     this.finish();
     this.log('phase', 'Сценарий пройден');
-    this.game.notify(`Сценарий пройден! ${this.state.score!.total} очков`, '#2e9d57');
+    this.game.notify(`Сценарий пройден! ${this.state.score!.total} очков`, '#2e9d57', { kind: 'goal' });
     // Оценка уже посчитана — дополнительные задания на неё не влияют.
     this.giveExtras();
     const extras = this.current.length;
-    if (extras) this.game.notify(`Дополнительные задания: ${extras} — без сроков, за деньги`, '#7a5cc4');
+    if (extras) this.game.notify(`Дополнительные задания: ${extras} — без сроков, за деньги`, '#7a5cc4', { kind: 'goal' });
   }
 
   lose(reason: string): void {
@@ -778,7 +784,7 @@ export class Scenario {
     this.state.lostReason = reason;
     this.finish();
     this.log('failed', `Сценарий провален: ${reason}`);
-    this.game.notify(`Сценарий провален: ${reason}`, '#e5534b');
+    this.game.notify(`Сценарий провален: ${reason}`, '#e5534b', { kind: 'goal' });
   }
 
   /**

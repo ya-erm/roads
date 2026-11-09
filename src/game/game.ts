@@ -70,6 +70,7 @@ import { Scenario } from '../scenario/manager';
 import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
+import { News, type NewsKind, type NewsRef, type NewsSave } from './news';
 import { serviceCall, serviceTick, SERVICE_TRAFFIC, SERVICES, type ServiceKind } from './services';
 import { paxFare, ridePath } from './fare';
 import { transferable, transferNeighbors } from './transfer';
@@ -377,6 +378,15 @@ export interface Notice {
   age: number;
   /** Куда ведёт клик по уведомлению: точка и радиус обзора (достроенная улица). */
   at?: { pos: Vec; r: number };
+  /** О чём уведомление: клик открывает первое из них (предприятие, город, станция, маршрут…). */
+  refs?: NewsRef[];
+}
+
+/** Что ещё знает уведомление: вид (с ним оно попадает в историю «События»), о чём оно и где. */
+export interface NoticeInfo {
+  kind?: NewsKind;
+  refs?: NewsRef[];
+  at?: Notice['at'];
 }
 
 export interface Floater {
@@ -487,6 +497,8 @@ export interface SaveData {
   modelTier?: ModelTier;
   /** Журнал партии (в старых сохранениях нет). */
   journal?: JournalEntry[];
+  /** История уведомлений (окно «События»); в старых сохранениях нет. */
+  news?: NewsSave;
   /** Кадры таймлапса партии (в старых сохранениях нет — запись пойдёт с загрузки). */
   timelapse?: TimelapseSave;
   /** Правки рельефа игроком (рельеф строится по seed заново, правки — поверх). В старых сохранениях нет. */
@@ -725,6 +737,8 @@ export class Game implements BuildContext {
   readonly settings: WorldSettings;
   /** Журнал партии для разбора: действия, рейсы, сводки, задания и события. */
   readonly journal: Journal;
+  /** История уведомлений за последние месяцы — окно «События» (см. news.ts). */
+  readonly news: News;
   /** Таймлапс партии: кадр сети в конце каждого месяца (см. timelapse.ts). */
   readonly timelapse: TimelapseRecorder;
   /** Стройка дорог (режим «Со строительством», src/game/construction.ts): проекты и их ход. */
@@ -741,6 +755,7 @@ export class Game implements BuildContext {
     this.startYear = save ? (save.startYear ?? LEGACY_START_YEAR) : START_YEAR;
     this.paceShift = save?.paceShift ?? 0;
     this.journal = new Journal(() => this.time / MONTH_LENGTH, save?.journal);
+    this.news = new News(save?.news);
     this.timelapse = new TimelapseRecorder(save?.timelapse);
     this.rng = new Rng(this.settings.seed);
     this.terrain = new Terrain(this.rng, this.settings);
@@ -845,6 +860,7 @@ export class Game implements BuildContext {
       scenario: this.scenario?.toSave(),
       modelTier: this.modelTier,
       journal: this.journal.entries,
+      news: this.news.toSave(),
       timelapse: this.timelapse.toSave(),
       terraform: this.terrain.edits.length ? this.terrain.edits : undefined,
       construction: this.construction.toSave(),
@@ -1219,12 +1235,12 @@ export class Game implements BuildContext {
       // Клик по уведомлению — камера к достроенной улице.
       const a = p.area;
       const at = a ? { pos: { x: (a[0] + a[2]) / 2, y: (a[1] + a[3]) / 2 }, r: Math.max(80, Math.hypot(a[2] - a[0], a[3] - a[1]) / 2 + 40) } : undefined;
-      this.notify(`🚧 Стройка закончена: ${projectName(p)}`, '#3f9d5a', at);
+      this.notify(`🚧 Стройка закончена: ${projectName(p)}`, '#3f9d5a', { kind: 'build', at, refs: [{ type: 'project', id: p.id }] });
       this.journal.add('project-done', { id: p.id, what: projectName(p), $: p.spent, sec: Math.round(this.time - p.created) });
     } else {
       // Встали сразу несколько — одно уведомление (советник покажет все).
       const others = [...this.construction.projects.values()].some((x) => x !== p && x.stalled !== undefined);
-      if (!others) this.notify('🚧 Стройка стоит: не хватает денег', '#e5534b');
+      if (!others) this.notify('🚧 Стройка стоит: не хватает денег', '#e5534b', { kind: 'build', refs: [{ type: 'project', id: p.id }] });
       this.journal.add('project-stall', { id: p.id, money: this.money });
     }
   }
@@ -3379,7 +3395,8 @@ export class Game implements BuildContext {
     this.modelTier = tier;
     if (!fresh.length) return;
     this.journal.add('models', { tier, open: fresh });
-    for (const id of fresh) this.notify(`Новая модель: ${MODELS[id].name} — ${MODELS[id].capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
+    for (const id of fresh)
+      this.notify(`Новая модель: ${MODELS[id].name} — ${MODELS[id].capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7', { kind: 'fleet' });
   }
 
   /** Модель новее того же рода, если уже продаётся. */
@@ -3419,7 +3436,7 @@ export class Game implements BuildContext {
     const cost = m.price - this.saleValue(v);
     if (cost > this.budget) {
       delete v.upgradeTo;
-      this.notify(`Не хватает денег на замену: ${this.vehicleTitle(v)}`, '#e5534b');
+      this.notify(`Не хватает денег на замену: ${this.vehicleTitle(v)}`, '#e5534b', { kind: 'money', refs: [{ type: 'line', id: v.lineId }] });
       return false;
     }
     if (m.mode === 'road') {
@@ -3550,7 +3567,8 @@ export class Game implements BuildContext {
     // Новый год — новые модели в продаже.
     if (this.year !== yearBefore) {
       for (const m of Object.values(MODELS)) {
-        if (this.modelYear(m.id) === this.year && m.tier > this.modelTier) this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7');
+        if (this.modelYear(m.id) === this.year && m.tier > this.modelTier)
+          this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7', { kind: 'fleet' });
       }
     }
   }
@@ -4437,7 +4455,7 @@ export class Game implements BuildContext {
         if (auto.renewSpare === undefined) continue;
         delete auto.renewSpare;
         delete auto.renewAt;
-        this.notify(`Авто-парк обновил транспорт маршрута «${line.name}»: ${MODELS[this.autoModel(line)].name}`, '#3fae6a');
+        this.notify(`Авто-парк обновил транспорт маршрута «${line.name}»: ${MODELS[this.autoModel(line)].name}`, '#3fae6a', { kind: 'fleet', refs: [{ type: 'line', id: line.id }] });
         continue;
       }
       const cars: RenewCar[] = old.map((v) => ({
@@ -6255,7 +6273,7 @@ export class Game implements BuildContext {
       const closed = this.closeDemand(line);
       if (line.auto?.on) this.autoFleet(line, closed);
     }
-    if (this.money < ECONOMY.creditLimit * 0.8) this.notify('Компания на грани банкротства!', '#e5534b');
+    if (this.money < ECONOMY.creditLimit * 0.8) this.notify('Компания на грани банкротства!', '#e5534b', { kind: 'money' });
     yield;
     // Сценарий — после экономики месяца: снабжение городов и рост предприятий уже подсчитаны.
     this.scenario?.monthEnd();
@@ -6321,7 +6339,8 @@ export class Game implements BuildContext {
       if (streak >= E.growthMonths && level < cap) {
         ind.level = Math.min(cap, level + E.growthStep);
         streak = 0;
-        if (Math.floor(ind.level) > Math.floor(level)) this.notify(`${ind.name}: производство выросло до ×${ind.level}`, '#2e9d57');
+        if (Math.floor(ind.level) > Math.floor(level))
+          this.notify(`${ind.name}: производство выросло до ×${ind.level}`, '#2e9d57', { kind: 'industry', refs: [{ type: 'industry', id: ind.id }] });
       } else if (streak <= -E.declineMonths && level > 1) {
         ind.level = Math.max(1, level - E.growthStep);
         streak = 0;
@@ -6448,7 +6467,8 @@ export class Game implements BuildContext {
     const before = town.population;
     recountPopulation(town);
     measureTown(town);
-    if (town.population > before && satisfaction >= 1) this.notify(`${town.name} растёт: ${town.population} жителей`);
+    if (town.population > before && satisfaction >= 1)
+      this.notify(`${town.name} растёт: ${town.population} жителей`, undefined, { kind: 'town', refs: [{ type: 'town', id: town.id }] });
   }
 
   private streetFull(id: number): boolean {
@@ -8527,9 +8547,15 @@ export class Game implements BuildContext {
     return this.owners.get(sim.id)?.type === 'fleet';
   }
 
-  notify(text: string, color?: string, at?: Notice['at']): void {
-    this.notices.push({ text, color, age: 0, ...(at ? { at } : {}) });
+  /**
+   * Всплывающее уведомление. С видом (info.kind) — ещё и запись в истории «События»: так отмечены события партии,
+   * а подсказки на действия игрока («Не хватает денег») — без вида и в историю не идут.
+   */
+  notify(text: string, color?: string, info: NoticeInfo = {}): void {
+    const { kind, refs, at } = info;
+    this.notices.push({ text, color, age: 0, ...(at ? { at } : {}), ...(refs?.length ? { refs } : {}) });
     this.journal.add('note', { text });
+    if (kind) this.news.add(this.month, { kind, text, color, refs, at });
   }
 
   inFootprint(p: Vec, fp: Footprint): boolean {
