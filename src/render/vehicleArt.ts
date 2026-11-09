@@ -37,6 +37,19 @@ export const SERVICE_ART: Record<'ambulance' | 'police' | 'fire', { stripe: stri
 export const isService = (b: VehicleLook['body']): b is keyof typeof SERVICE_ART => b === 'ambulance' || b === 'police' || b === 'fire';
 
 /**
+ * Масштаб камеры (пикселей экрана на метр), при котором мигалки видно: от SIREN_ZOOM[1] и ближе — во всю силу (машина
+ * на экране — от ~8 пикселей), к SIREN_ZOOM[0] плавно гаснут, а ещё дальше (весь город в кадре) их не видно вовсе —
+ * издали спецмашины не мельтешат над городом.
+ */
+export const SIREN_ZOOM: readonly [number, number] = [0.3, 1.2];
+
+/** Насколько видна мигалка при масштабе камеры zoom: 0 — не видна (не горит и без ореола), 1 — во всю силу. */
+export function sirenVisibility(zoom: number): number {
+  const u = (zoom - SIREN_ZOOM[0]) / (SIREN_ZOOM[1] - SIREN_ZOOM[0]);
+  return u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u);
+}
+
+/**
  * Часть кузова: прямоугольник от x0 до x1 (x1 — ближе к носу) в системе с началом origin и курсом dir.
  * link — перемычка между частями (гармошка): рисуется в координатах мира, без обводки и тени.
  */

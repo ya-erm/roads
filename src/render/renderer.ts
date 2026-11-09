@@ -44,7 +44,7 @@ import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tun
 import { corridorHalf } from '../world/worldgen';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
-import { drawVehicleArt, flashSpot, frontLength } from './vehicleArt';
+import { drawVehicleArt, flashSpot, frontLength, sirenVisibility } from './vehicleArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
 import { type Hiders, TreeCover } from './treeCover';
 import { carLayers, railSegLayer } from './trainLayer';
@@ -2062,10 +2062,13 @@ export class Renderer {
     const ctx = this.ctx;
     const detailed = this.camera.zoom > 0.5;
     const ring = halo ? Math.max(1.2, 1.6 / this.camera.zoom) : 0;
+    // Издали мигалки бледнее и меньше, а совсем издали не горят вовсе.
+    const siren = sirenVisibility(this.camera.zoom);
+    const flash = siren > 0 ? this.flash : undefined;
     for (const v of list) {
       // Кузов по модели (фургон, тягач с полуприцепом, автобусы), у машин из двух частей — с изгибом в шарнире.
-      drawVehicleArt(ctx, v, { detailed, halo: ring, flash: this.flash });
-      if (v.siren) this.drawSirenGlow(v);
+      drawVehicleArt(ctx, v, { detailed, halo: ring, flash });
+      if (v.siren && siren > 0) this.drawSirenGlow(v, siren);
       if (!v.blinker || !this.blinkOn || v.width * this.camera.zoom < BLINKER_MIN_PX) continue;
       // Поворотники — на первой части кузова (у тягача, у передней секции).
       ctx.save();
@@ -2076,12 +2079,17 @@ export class Renderer {
     }
   }
 
-  /** Ореол горящей половины мигалки спецмашины — поверх кузова, не меньше SIREN_GLOW_PX на экране. */
-  private drawSirenGlow(v: VehicleLook): void {
+  /**
+   * Ореол горящей половины мигалки спецмашины — поверх кузова, не меньше SIREN_GLOW_PX на экране; издали (seen < 1,
+   * sirenVisibility) — бледнее и меньше.
+   */
+  private drawSirenGlow(v: VehicleLook, seen: number): void {
     const spot = flashSpot(v, this.flash);
     if (!spot) return;
     const ctx = this.ctx;
-    const r = Math.max(v.width * 1.5, SIREN_GLOW_PX / this.camera.zoom);
+    const r = Math.max(v.width * 1.5, (SIREN_GLOW_PX * seen) / this.camera.zoom);
+    const alpha = ctx.globalAlpha;
+    ctx.globalAlpha = alpha * seen;
     const x = v.pos.x + v.dir.x * spot.x - v.dir.y * spot.y;
     const y = v.pos.y + v.dir.y * spot.x + v.dir.x * spot.y;
     const glow = ctx.createRadialGradient(x, y, 0, x, y, r);
@@ -2092,6 +2100,7 @@ export class Renderer {
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
+    ctx.globalAlpha = alpha;
   }
 
   /** Огоньки поворотника на углах кузова со стороны поворота: спереди, а с BLINK_REAR и сзади (в системе машины: нос в 0, справа +y). */

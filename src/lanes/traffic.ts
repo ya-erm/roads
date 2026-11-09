@@ -8,7 +8,7 @@ import { GLane, GLink, GMove, GNode, LaneGraph, LightPhase } from './graph';
 import { bodyOnEnds, Corridor, layerOf } from './model';
 import { findLaneRoute } from './routing';
 import { onSolid, solidEnds } from './solid';
-import { LANE_W } from '../world/roadTypes';
+import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 
 export interface LaneTrafficEvents {
   /**
@@ -138,10 +138,33 @@ const BARRIER_STOP = 12;
 export const SIREN_SPEED = 1.3;
 /** Спецмашину позади замечают за столько метров и уступают ей. */
 export const SIREN_NOTICE = 70;
-/** Насколько прижимается к краю полосы уступающая машина — и насколько смещается к другому краю объезжающая спецмашина. */
+/**
+ * Насколько прижимается к краю полосы уступающая машина между полосами (в соседней тоже прижимаются к краю) — и
+ * насколько самое большее смещается к другому краю объезжающая спецмашина.
+ */
 export const ASIDE = 2.2;
+/**
+ * Насколько прижимается уступающая машина в полосе у обочины: частью кузова выезжает на неё (кромка полотна — в
+ * LANE_W / 2 + ROAD_MARGIN от середины полосы), и спецмашина проходит, почти не выезжая из своей полосы.
+ */
+export const ASIDE_CURB = 4.6;
+/** На мосту и в тоннеле обочины нет: прижимается, не доезжая стольких метров до кромки полотна. */
+const CURB_KEEP = 0.2;
+/** Спецмашина объезжает прижавшуюся с таким зазором между кузовами (м) — и смещается при этом хотя бы на PASS_MIN. */
+export const PASS_GAP = 0.5;
+const PASS_MIN = 0.4;
+/** Спецмашина начинает смещаться к другому краю, когда до кормы прижавшейся впереди меньше стольких метров. */
+const PASS_LOOK = 25;
+/** На сколько поперёк должны разойтись середины машин a и b, чтобы между кузовами остался зазор PASS_GAP. */
+export const passWidth = (a: Pick<Vehicle, 'width'>, b: Pick<Vehicle, 'width'>) => (a.width + b.width) / 2 + PASS_GAP;
 /** С какой скоростью (м/с) машина смещается вбок внутри полосы. */
-const ASIDE_RATE = 2.5;
+const ASIDE_RATE = 3;
+/**
+ * Смещаясь вбок внутри полосы, кузов поворачивается к ней не круче ASIDE_YAW (рад), а за ASIDE_STRAIGHT метров до
+ * края, куда смещается, выравнивается вдоль полосы.
+ */
+const ASIDE_YAW = 0.25;
+const ASIDE_STRAIGHT = 2;
 /** Ближе стольких метров к концу полосы (у перекрёстка) не прижимаются: едут как обычно — освобождают дорогу через узел. */
 export const ASIDE_END = 18;
 /** Уступающая сбрасывает скорость до такой (м/с) с таким замедлением — почти останавливается у края полосы. */
@@ -1034,11 +1057,30 @@ export class LaneTraffic {
   /** Куда сместиться в полосе спецмашине: рядом прижавшаяся (впереди или только что обойдённая) — к другому краю. */
   private passSide(veh: Vehicle, lane: GLane, idx: number): number {
     const near = (o: Vehicle | undefined): o is Vehicle =>
-      !!o && this.passable(lane, o) && o.s - o.length - veh.s < 10 && o.s > veh.s - veh.length - 2;
+      !!o && this.yielding(lane, o) && o.s - o.length - veh.s < PASS_LOOK && o.s > veh.s - veh.length - 2;
     const ahead = idx > 0 ? lane.vehicles[idx - 1] : undefined;
     const behind = lane.vehicles[idx + 1];
     const o = near(ahead) ? ahead : near(behind) ? behind : undefined;
-    return o ? -Math.sign(o.asideTo ?? 0) * ASIDE : 0;
+    if (!o) return 0;
+    // Прижалась сильно (у обочины) — спецмашине хватает места почти посреди своей полосы.
+    const to = Math.abs(o.asideTo ?? 0);
+    return -Math.sign(o.asideTo ?? 0) * Math.min(ASIDE, Math.max(PASS_MIN, passWidth(o, veh) - to));
+  }
+
+  /**
+   * Насколько уступающая машина прижимается к краю полосы (знак — сторона: + вправо). Крайняя правая (и крайняя левая
+   * на односторонней) — к обочине, частью кузова на неё (ASIDE_CURB); на мосту и в тоннеле обочины нет — до кромки
+   * полотна. Остальные — влево на ASIDE: между полосами остаётся коридор.
+   */
+  private asideFor(veh: Vehicle, lane: GLane, link: GLink): number {
+    const net = this.graph.net;
+    const c = net.corridors.get(link.corridor);
+    const right = lane.index === link.lanes.length - 1;
+    const oneWay = !!c && c.lanes.every((l) => l.flow === c.lanes[0].flow);
+    if (!right && !(oneWay && lane.index === 0)) return -ASIDE;
+    const ground = !!c && net.node(c.a).level === 0 && net.node(c.b).level === 0;
+    const reach = ground ? ASIDE_CURB : Math.max(ASIDE, LANE_W / 2 + ROAD_MARGIN - veh.width / 2 - CURB_KEEP);
+    return right ? reach : -reach;
   }
 
   /**
@@ -1078,7 +1120,7 @@ export class LaneTraffic {
         return true;
       }
     }
-    veh.asideTo = room > ASIDE_END ? (lane.index === link.lanes.length - 1 ? ASIDE : -ASIDE) : 0;
+    veh.asideTo = room > ASIDE_END ? this.asideFor(veh, lane, link) : 0;
     return false;
   }
 
@@ -1090,9 +1132,21 @@ export class LaneTraffic {
     return false;
   }
 
-  /** Прижалась и почти стоит, не у самого перекрёстка: спецмашина объезжает её внутри полосы, не считая помехой. */
-  private passable(lane: GLane, o: Vehicle): boolean {
-    return !o.siren && !!o.asideTo && Math.abs(o.aside ?? 0) > ASIDE * 0.6 && o.v < 2.5 && o.s < lane.length - ASIDE_END + 3;
+  /** Уступает: прижимается к краю полосы и почти стоит, не у самого перекрёстка. */
+  private yielding(lane: GLane, o: Vehicle): boolean {
+    return !o.siren && !!o.asideTo && o.v < 2.5 && o.s < lane.length - ASIDE_END + 3;
+  }
+
+  /**
+   * Прижалась и почти стоит, не у самого перекрёстка: спецмашина объезжает её внутри полосы, не считая помехой. by —
+   * сама спецмашина: тогда — только когда между кузовами уже есть зазор (насколько он вообще возможен), не впритирку.
+   */
+  private passable(lane: GLane, o: Vehicle, by?: Vehicle): boolean {
+    if (!this.yielding(lane, o)) return false;
+    const at = o.aside ?? 0;
+    const to = Math.abs(o.asideTo ?? 0);
+    if (!by) return Math.abs(at) > to * 0.6;
+    return Math.abs(at - (by.aside ?? 0)) >= Math.min(passWidth(o, by), to + ASIDE) - 0.05;
   }
 
   /** Последняя в полосе, кроме прижавшихся (для спецмашины — кто ей помеха); нет — undefined. */
@@ -1455,7 +1509,7 @@ export class LaneTraffic {
       if (veh.waitingAt !== null) this.releaseNode(veh);
       // Спецмашина прижавшихся впереди не считает помехой — объезжает их не спеша.
       let li = idx - 1;
-      if (veh.siren) while (li >= 0 && this.passable(lane, lane.vehicles[li])) li--;
+      if (veh.siren) while (li >= 0 && this.passable(lane, lane.vehicles[li], veh)) li--;
       if (li < idx - 1) desired = Math.min(desired, PASS_SPEED);
       if (li >= 0) {
         const leader = lane.vehicles[li];
@@ -1659,7 +1713,7 @@ export class LaneTraffic {
    * двух частей так же за шарниром тянется вторая часть: полуприцеп за седлом тягача, задняя секция автобуса
    * за гармошкой (sim/body).
    */
-  private steer(veh: Vehicle, pathDir: Vec): void {
+  private steer(veh: Vehicle, pathDir: Vec, maxYaw = Infinity): void {
     const base = veh.length * steerBase(veh.body);
     const front = veh.pos;
     let rear = veh.rear;
@@ -1669,6 +1723,15 @@ export class LaneTraffic {
     const dy = front.y - rear.y;
     const l = Math.hypot(dx, dy);
     veh.dir = l < 1e-6 ? pathDir : { x: dx / l, y: dy / l };
+    // Не круче maxYaw к полосе (сдвиг к краю почти стоя иначе развернул бы кузов поперёк).
+    if (maxYaw < Infinity) {
+      const path = angleOf(pathDir);
+      const yaw = angleDiff(path, angleOf(veh.dir));
+      if (Math.abs(yaw) > maxYaw) {
+        const a = path + Math.sign(yaw) * maxYaw;
+        veh.dir = { x: Math.cos(a), y: Math.sin(a) };
+      }
+    }
     if (l >= 1e-6) veh.rear = { x: front.x - veh.dir.x * base, y: front.y - veh.dir.y * base };
     const hitch = hitchOf(veh.body);
     if (hitch) veh.trail = follow(jointOf(front, veh.dir, veh.length, hitch), veh.dir, veh.trail, veh.length * hitch.tail);
@@ -1700,7 +1763,9 @@ export class LaneTraffic {
     const pose = this.graph.lanePose(lane, Math.min(veh.s, lane.length));
     veh.pos = add(pose.pos, scale(rightNormal(pose.dir), veh.lateral + (veh.aside ?? 0)));
     if (veh.shift) veh.pos = add(veh.pos, veh.shift);
-    this.steer(veh, pose.dir);
+    // Прижимаясь к краю (или возвращаясь от него), кузов чуть наискось, а у цели — снова вдоль полосы.
+    const yaw = veh.aside === undefined || veh.lateral ? Infinity : ASIDE_YAW * Math.min(1, Math.abs((veh.asideTo ?? 0) - veh.aside) / ASIDE_STRAIGHT);
+    this.steer(veh, pose.dir, yaw);
     veh.centerS = this.graph.axisS(lane, veh.s);
     const net = this.graph.net;
     const link = this.graph.links.get(lane.link)!;

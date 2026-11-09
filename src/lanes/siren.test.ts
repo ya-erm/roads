@@ -5,7 +5,8 @@ import { LaneGraph } from './graph';
 import { LaneNet, oneWay, twoWay } from './model';
 import { findLaneRoute } from './routing';
 import { buildLab } from './scenes';
-import { ASIDE, LaneTraffic } from './traffic';
+import { ASIDE, ASIDE_CURB, LaneTraffic, PASS_GAP } from './traffic';
+import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 
 const CAR = { kind: 'car' as const, length: 7, width: 4, maxSpeed: 60, accel: 10, color: '#fff' };
 const AMBULANCE: VehicleSpec = { kind: 'car', body: 'ambulance', length: 8, width: 4.2, maxSpeed: 60, accel: 10, color: '#f4f5f2', siren: true };
@@ -88,7 +89,117 @@ function crossWatch(traffic: LaneTraffic) {
   };
 }
 
+/**
+ * Зазор между кузовами спецмашины sv и тех, кого она объезжает в той же полосе бок о бок (по длине кузова перекрываются):
+ * min — самый малый, side — сколько раз шли рядом.
+ */
+function gapWatch(traffic: LaneTraffic, sv: Vehicle) {
+  let min = Infinity;
+  let side = 0;
+  return {
+    sample() {
+      if (!traffic.vehicles.has(sv.id) || sv.onMovement) return;
+      for (const o of traffic.vehicles.values()) {
+        if (o === sv || o.onMovement || o.lane !== sv.lane) continue;
+        if (o.s <= sv.s - sv.length || sv.s <= o.s - o.length) continue;
+        side++;
+        min = Math.min(min, Math.abs((o.aside ?? 0) - (sv.aside ?? 0)) - (o.width + sv.width) / 2);
+      }
+    },
+    get min() {
+      return min;
+    },
+    get side() {
+      return side;
+    },
+  };
+}
+
+/**
+ * Прямая улица из lanes длиной 1000 м (концы на уровне level): во всех полосах — ползущая пробка, в полосе laneIndex
+ * позади неё — спецмашина. queue — пробка в её полосе.
+ */
+function jamOn(lanes: ReturnType<typeof twoWay>, level: number, laneIndex: number) {
+  const net = new LaneNet();
+  const a = net.addSeam({ x: -500, y: 0 }, { x: 1, y: 0 }, level);
+  const b = net.addSeam({ x: 500, y: 0 }, { x: 1, y: 0 }, level);
+  net.addCorridor(a.id, b.id, { cls: 'street', lanes });
+  const graph = new LaneGraph(net);
+  const traffic = new LaneTraffic(graph, { onArrive: () => {}, onLost: () => {} });
+  const link = graph.links.get(findLaneRoute(graph, graph.outLinks.get(a.id)!, b.id)![0])!;
+  const queue: Vehicle[] = [];
+  // Ползут по 1 м/с почти вплотную — 12 м от носа до носа.
+  for (const lane of link.lanes) {
+    for (let s = 300; s < 420; s += 12) {
+      const at = graph.lanePose(lane, s);
+      const v = traffic.place({ ...CAR, maxSpeed: 1, targetNode: b.id }, at.pos, at.dir, 1)!;
+      if (lane.index === laneIndex) queue.push(v);
+    }
+  }
+  const at = graph.lanePose(link.lanes[laneIndex], 150);
+  const amb = traffic.place({ ...AMBULANCE, targetNode: b.id }, at.pos, at.dir, 12)!;
+  return { traffic, queue, amb, graph };
+}
+
 describe('Спецмашины с мигалкой', { timeout: 30_000 }, () => {
+  it('на мосту обочины нет: уступающие прижимаются до кромки полотна, не за неё, — спецмашина всё равно проходит', () => {
+    const { traffic, queue, amb } = jamOn(twoWay(1, 1), 1, 0);
+    const gap = gapWatch(traffic, amb);
+    let maxAside = 0;
+    run(traffic, 40, () => {
+      for (const v of queue) maxAside = Math.max(maxAside, v.aside ?? 0);
+      gap.sample();
+    });
+    expect(maxAside).toBeGreaterThan(ASIDE);
+    expect(maxAside + CAR.width / 2).toBeLessThanOrEqual(LANE_W / 2 + ROAD_MARGIN);
+    expect(gap.side).toBeGreaterThan(5);
+    expect(gap.min).toBeGreaterThan(PASS_GAP - 0.1);
+    // Обогнала всю пробку.
+    for (const v of queue) expect(!traffic.vehicles.has(amb.id) || amb.s > v.s).toBe(true);
+  });
+
+  it('прижимаясь к обочине почти стоя, кузов лишь чуть наискось, а прижавшись — снова вдоль полосы', () => {
+    const { traffic, queue, amb, graph } = jamOn(twoWay(1, 1), 0, 0);
+    const yawOf = (v: Vehicle) => {
+      const d = graph.lanePose(graph.lanes.get(v.lane)!, v.s).dir;
+      return Math.abs(Math.asin(Math.max(-1, Math.min(1, d.x * v.dir.y - d.y * v.dir.x))));
+    };
+    let maxYaw = 0;
+    let settled = 0;
+    run(traffic, 8, () => {
+      for (const v of queue) {
+        if (v.onMovement) continue;
+        maxYaw = Math.max(maxYaw, yawOf(v));
+        // Уже у обочины, а спецмашина ещё не доехала.
+        if (v.aside === ASIDE_CURB && amb.s < v.s - v.length - 5) settled = Math.max(settled, yawOf(v));
+      }
+    });
+    expect(maxYaw).toBeGreaterThan(0.05);
+    expect(maxYaw).toBeLessThan(0.3);
+    expect(settled).toBeLessThan(0.01);
+  });
+
+  it('на односторонней улице левая полоса прижимается к левой обочине, правая — к правой; спецмашина проходит между', () => {
+    for (const [index, sign] of [
+      [0, -1],
+      [1, 1],
+    ] as const) {
+      const { traffic, queue, amb } = jamOn(oneWay(2), 0, index);
+      // Спецмашина держится своей полосы (сама к цели у бордюра перестроилась бы вправо).
+      amb.lcCooldown = 1e9;
+      let most = 0;
+      const gap = gapWatch(traffic, amb);
+      run(traffic, 40, () => {
+        for (const v of queue) if (Math.abs(v.aside ?? 0) > Math.abs(most)) most = v.aside ?? 0;
+        gap.sample();
+      });
+      expect(Math.sign(most)).toBe(sign);
+      expect(Math.abs(most)).toBeCloseTo(ASIDE_CURB, 5);
+      expect(gap.side).toBeGreaterThan(5);
+      expect(gap.min).toBeGreaterThan(PASS_GAP - 0.1);
+    }
+  });
+
   it('на красный при плотном поперечном потоке: спецмашина проезжает, поперечные её пропускают; обычная стоит', () => {
     const pass = (spec: VehicleSpec) => {
       const { traffic, arrived, go, holdNorthSouth } = crossroads();
@@ -131,15 +242,24 @@ describe('Спецмашины с мигалкой', { timeout: 30_000 }, () => 
     const amb = go('w', 'e', AMBULANCE)!;
     let maxAside = 0;
     let sirenAside = 0;
+    const gap = gapWatch(traffic, amb);
     // Плечо — 500 м до перекрёстка и 500 после: на объезд пробки и дорогу — полторы минуты.
     run(traffic, 90, () => {
       for (const v of traffic.vehicles.values()) {
         if (v === amb) sirenAside = Math.max(sirenAside, Math.abs(v.aside ?? 0));
         else maxAside = Math.max(maxAside, v.aside ?? 0);
       }
+      gap.sample();
     });
-    expect(maxAside).toBeGreaterThan(ASIDE * 0.9);
-    expect(sirenAside).toBeGreaterThan(ASIDE * 0.9);
+    // Прижимаются к обочине вправо — частью кузова на неё (кромка полотна — в LANE_W / 2 + ROAD_MARGIN от середины полосы).
+    expect(maxAside).toBeCloseTo(ASIDE_CURB, 5);
+    expect(maxAside + CAR.width / 2).toBeGreaterThan(LANE_W / 2 + ROAD_MARGIN + 1);
+    // Спецмашина объезжает, почти не сдвигаясь: кузов — в своей полосе, на встречную не выезжает.
+    expect(sirenAside).toBeGreaterThan(0);
+    expect(sirenAside + AMBULANCE.width / 2).toBeLessThan(LANE_W / 2);
+    // Проходит рядом с прижавшимися и с зазором между кузовами — не сквозь них.
+    expect(gap.side).toBeGreaterThan(5);
+    expect(gap.min).toBeGreaterThan(PASS_GAP - 0.1);
     // Спецмашина доехала; из пробки на красный проехали лишь те, кто стоял первым и пропускал её.
     expect(arrived).toContain(amb);
     expect(arrived.length).toBeLessThan(4);
