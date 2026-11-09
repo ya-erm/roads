@@ -5,8 +5,8 @@
  */
 import type { Vec } from '../core/vec';
 import { projectName } from '../game/construction';
-import type { Game } from '../game/game';
-import { NEWS_KINDS, NEWS_MONTHS, type NewsEntry, type NewsKind, type NewsRef } from '../game/news';
+import type { Game, Notice } from '../game/game';
+import { NEWS_KINDS, NEWS_MONTHS, NOTICE_FADE, NOTICE_LIFE, type NewsEntry, type NewsKind, type NewsRef } from '../game/news';
 import { footprintRadius } from '../world/spatial';
 import { cargoIcon, townIcon } from './cargoIcons';
 import { baseSvg, buildSvg } from './constructionUi';
@@ -87,6 +87,24 @@ export function newsTarget(g: Game, ref: NewsRef): NewsTarget | null {
   }
 }
 
+/** Прозрачность всплывающего уведомления: последние NOTICE_FADE секунд жизни гаснет. */
+export function noticeOpacity(n: Notice): number {
+  return Math.max(0, Math.min(1, (NOTICE_LIFE - n.age) / NOTICE_FADE));
+}
+
+/**
+ * Всплывающее уведомление вверху экрана. О месте или объекте (достроенная улица, предприятие, город, маршрут) —
+ * кнопка: клик ведёт туда (подсказка «Показать на карте», подсветка под курсором). Клик по любому — прочитано
+ * (с колокольчика уходит). Справа — крестик: убрать с экрана, в истории оно остаётся.
+ */
+export function noticeHtml(g: Game, n: Notice): string {
+  const go = !!n.at || !!n.refs?.some((r) => newsTarget(g, r));
+  const attrs = go ? `class="notice go" data-action="notice-go" data-tip="Показать на карте"` : `class="notice" data-action="notice-read"`;
+  const border = n.color ? `;border-left-color:${n.color}` : '';
+  const tip = n.news !== undefined ? 'Скрыть — останется в истории 🔔' : 'Скрыть';
+  return `<div ${attrs} data-id="${n.id}" style="opacity:${noticeOpacity(n)}${border}"><span class="notice-text">${esc(n.text)}</span><button class="notice-x" data-action="notice-close" data-id="${n.id}" data-tip="${tip}">×</button></div>`;
+}
+
 /** Кнопки-места записи: объекты, что ещё есть на карте; нет ни одного, а место известно — «📍 на карте». */
 function placeButtons(g: Game, e: NewsEntry): string {
   const out: string[] = [];
@@ -101,8 +119,8 @@ function placeButtons(g: Game, e: NewsEntry): string {
 export interface NewsView {
   /** Включённые фильтры по видам; пусто — все. */
   kinds: ReadonlySet<NewsKind>;
-  /** Записи с этим номером и новее — непрочитанные (на момент открытия окна). */
-  unreadFrom: number;
+  /** Номера записей, непрочитанных на момент открытия окна (News.unreadSet): они подсвечены. */
+  unread: ReadonlySet<number>;
 }
 
 /** Окно «События»: фильтры-значки, записи по месяцам (свежие сверху), кнопки-места. */
@@ -128,7 +146,7 @@ export function newsHtml(g: Game, view: NewsView): string {
         <h4><span>${g.dateAt(m.month)}</span><small>${m.entries.length}</small></h4>
         ${m.entries
           .map(
-            (e) => `<div class="news-row ${e.n >= view.unreadFrom ? 'unread' : ''}" style="border-left-color:${e.color ?? NEWS_KIND_INFO[e.kind].color}">
+            (e) => `<div class="news-row ${view.unread.has(e.n) ? 'unread' : ''}" style="border-left-color:${e.color ?? NEWS_KIND_INFO[e.kind].color}">
           ${newsKindIcon(e.kind)}
           <div class="news-main"><div class="news-text">${esc(e.text)}</div>${(() => {
             const places = placeButtons(g, e);

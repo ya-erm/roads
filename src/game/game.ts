@@ -71,7 +71,7 @@ import { Scenario } from '../scenario/manager';
 import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
-import { News, type NewsKind, type NewsRef, type NewsSave } from './news';
+import { News, NOTICE_AFTER_PAUSE, NOTICE_LIFE, type NewsKind, type NewsRef, type NewsSave } from './news';
 import { serviceCall, serviceTick, SERVICE_TRAFFIC, SERVICES, type ServiceKind } from './services';
 import { paxFare, ridePath } from './fare';
 import { transferable, transferNeighbors } from './transfer';
@@ -375,9 +375,14 @@ const CREW_WAIT = 25;
 export type CrewLook = VehicleLook & { stage: number; site?: number };
 
 export interface Notice {
+  /** Номер уведомления — по нему его находят клик и крестик (порядок в списке меняется). */
+  id: number;
   text: string;
   color?: string;
+  /** Сколько уже показано, с (реальных; на паузе не растёт). */
   age: number;
+  /** Номер записи в истории «События» (уведомление с видом) — клик по уведомлению отмечает её прочитанной. */
+  news?: number;
   /** Куда ведёт клик по уведомлению: точка и радиус обзора (достроенная улица). */
   at?: { pos: Vec; r: number };
   /** О чём уведомление: клик открывает первое из них (предприятие, город, станция, маршрут…). */
@@ -664,6 +669,7 @@ export class Game implements BuildContext {
   readonly fleet = new Map<number, FleetVehicle>();
   readonly roundaboutCenters = new Map<number, Vec>();
   readonly notices: Notice[] = [];
+  private noticeSeq = 0;
   readonly floaters: Floater[] = [];
   readonly history: MonthRecord[] = [];
 
@@ -3666,8 +3672,7 @@ export class Game implements BuildContext {
   }
 
   update(realDt: number): void {
-    for (const n of this.notices) n.age += realDt;
-    while (this.notices.length && this.notices[0].age > 6) this.notices.shift();
+    this.ageNotices(realDt);
     for (const f of this.floaters) f.age += realDt;
     while (this.floaters.length && this.floaters[0].age > 2.5) this.floaters.shift();
     // Итоги месяца ещё идут — кадр им, такты ждут (и на паузе: незаконченные итоги не оставляем).
@@ -8761,9 +8766,43 @@ export class Game implements BuildContext {
    */
   notify(text: string, color?: string, info: NoticeInfo = {}): void {
     const { kind, refs, at } = info;
-    this.notices.push({ text, color, age: 0, ...(at ? { at } : {}), ...(refs?.length ? { refs } : {}) });
+    const entry = kind ? this.news.add(this.month, { kind, text, color, refs, at }) : undefined;
+    // То же уведомление ещё на экране (на паузе оно не гаснет, а «Не хватает денег» можно получить десять раз
+    // подряд) — не второе такое же, а прежнее заново, внизу.
+    const same = this.notices.findIndex((n) => n.text === text);
+    if (same >= 0) this.notices.splice(same, 1);
+    this.notices.push({
+      id: ++this.noticeSeq,
+      text,
+      color,
+      age: 0,
+      ...(entry ? { news: entry.n } : {}),
+      ...(at ? { at } : {}),
+      ...(refs?.length ? { refs } : {}),
+    });
     this.journal.add('note', { text });
-    if (kind) this.news.add(this.month, { kind, text, color, refs, at });
+  }
+
+  /**
+   * Время уведомлений (реальное, от скорости игры не зависит): идёт игра — стареют и через NOTICE_LIFE уходят;
+   * пауза — не стареют и горят в полную силу (уже гаснувшее — тоже), пока игру не продолжат или их не закроют.
+   */
+  private ageNotices(realDt: number): void {
+    const paused = this.speed === 0;
+    for (const n of this.notices) n.age = paused ? Math.min(n.age, NOTICE_LIFE - NOTICE_AFTER_PAUSE) : n.age + realDt;
+    for (let i = this.notices.length - 1; i >= 0; i--) if (this.notices[i].age > NOTICE_LIFE) this.notices.splice(i, 1);
+  }
+
+  /** Крестик на уведомлении: убрать с экрана (запись в истории «События» остаётся). */
+  closeNotice(id: number): void {
+    const i = this.notices.findIndex((n) => n.id === id);
+    if (i >= 0) this.notices.splice(i, 1);
+  }
+
+  /** Клик по уведомлению: его запись в истории — прочитана, на колокольчике её больше нет. */
+  readNotice(id: number): void {
+    const n = this.notices.find((x) => x.id === id);
+    if (n?.news !== undefined) this.news.read(n.news);
   }
 
   inFootprint(p: Vec, fp: Footprint): boolean {

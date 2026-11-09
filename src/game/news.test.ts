@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { Game } from './game';
-import { News, NEWS_LIMIT, NEWS_MONTHS } from './news';
+import { News, NEWS_LIMIT, NEWS_MONTHS, NOTICE_AFTER_PAUSE, NOTICE_LIFE } from './news';
 
 describe('История событий', () => {
   it('хранит записи за последние NEWS_MONTHS месяцев, старые уходят', () => {
@@ -73,5 +73,64 @@ describe('История событий', () => {
     const loaded = new Game(game.settings, save);
     expect(loaded.news.entries).toEqual([]);
     expect(loaded.news.unread).toBe(0);
+  });
+
+  it('клик по плашке — запись прочитана, на колокольчике её нет; отметка сохраняется до открытия окна', () => {
+    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const town = game.towns[0];
+    game.notify('a', undefined, { kind: 'town', refs: [{ type: 'town', id: town.id }] });
+    game.notify('b', undefined, { kind: 'goal' });
+    game.notify('Не хватает денег');
+    expect(game.news.unread).toBe(2);
+    game.readNotice(game.notices[0].id);
+    game.readNotice(game.notices[2].id); // подсказка — не в истории, ничего не меняет
+    expect(game.news.unread).toBe(1);
+    expect([...game.news.unreadSet()]).toEqual([game.notices[1].news]);
+    const loaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
+    expect(loaded.news.unread).toBe(1);
+    game.news.markRead();
+    expect(game.news.entries.some((e) => e.read)).toBe(false);
+    expect(game.news.unread).toBe(0);
+  });
+
+  it('крестик убирает только плашку — запись в истории остаётся непрочитанной', () => {
+    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    game.notify('Задание выполнено', undefined, { kind: 'goal' });
+    game.closeNotice(game.notices[0].id);
+    expect(game.notices).toHaveLength(0);
+    expect(game.news.entries.map((e) => e.text)).toEqual(['Задание выполнено']);
+    expect(game.news.unread).toBe(1);
+  });
+
+  it('на паузе плашки не гаснут; после паузы уходят по реальному времени', () => {
+    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    game.notify('Стройка закончена', undefined, { kind: 'build' });
+    game.notify('Не хватает денег');
+    game.update(5); // первое уже гаснет
+    game.notify('Игра сохранена');
+    game.speed = 0;
+    for (let i = 0; i < 100; i++) game.update(1); // долгая пауза
+    expect(game.notices.map((n) => n.age)).toEqual([NOTICE_LIFE - NOTICE_AFTER_PAUSE, NOTICE_LIFE - NOTICE_AFTER_PAUSE, 0]);
+    // Продолжили — гаснувшим остаётся NOTICE_AFTER_PAUSE, свежему — вся жизнь; скорость игры не влияет.
+    game.speed = 4;
+    game.update(NOTICE_AFTER_PAUSE - 0.5);
+    expect(game.notices).toHaveLength(3);
+    game.update(1);
+    expect(game.notices.map((n) => n.text)).toEqual(['Игра сохранена']);
+    game.update(NOTICE_LIFE);
+    expect(game.notices).toHaveLength(0);
+  });
+
+  it('то же уведомление, пока прежнее на экране, — не второе, а прежнее заново внизу', () => {
+    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    game.notify('Не хватает денег');
+    game.notify('Игра сохранена');
+    game.notices[0].age = 4;
+    game.notify('Не хватает денег');
+    expect(game.notices.map((n) => [n.text, n.age])).toEqual([
+      ['Игра сохранена', 0],
+      ['Не хватает денег', 0],
+    ]);
+    expect(new Set(game.notices.map((n) => n.id)).size).toBe(2);
   });
 });

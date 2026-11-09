@@ -147,7 +147,7 @@ import { annexHtml } from './annexUi';
 import { depositCardHtml, INDUSTRY_TOOL_SVG, industryModeRowHtml, industryOptionsHtml, industryRowsHtml, townRowsHtml } from './enterpriseUi';
 import type { IndustryKind } from '../world/cargo';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
-import { bellSvg, newsBadge, newsHtml, newsTarget } from './newsUi';
+import { bellSvg, newsBadge, newsHtml, newsTarget, noticeHtml, noticeOpacity } from './newsUi';
 import type { NewsKind, NewsRef } from '../game/news';
 import type { Notice } from '../game/game';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
@@ -408,10 +408,10 @@ export class Hud {
   private pressing = false;
   /** Скорость игры до открытия меню — к ней вернёмся по «Продолжить». */
   private speedBeforeMenu = 1;
-  /** Окно «События»: скорость до него (вернётся при закрытии), фильтры по видам, с какой записи — новое, разметка. */
+  /** Окно «События»: скорость до него (вернётся при закрытии), фильтры по видам, какие записи — новые, разметка. */
   private speedBeforeNews = 1;
   private readonly newsKinds = new Set<NewsKind>();
-  private newsUnreadFrom = 0;
+  private newsUnread: ReadonlySet<number> = new Set();
   private lastNews = '';
   private lastNewsBadge = '';
   private lastConfirm = '';
@@ -1777,9 +1777,20 @@ export class Hud {
         break;
       }
       case 'notice-go': {
-        // Уведомление с местом («Стройка закончена») или о предприятии, городе, маршруте — туда.
-        const n: Notice | undefined = g.notices[Number(d.id)];
-        if (n) this.goTo(n.refs ?? [], n.at);
+        // Уведомление с местом («Стройка закончена») или о предприятии, городе, маршруте — туда; оно прочитано.
+        const n: Notice | undefined = g.notices.find((x) => x.id === Number(d.id));
+        if (!n) break;
+        g.readNotice(n.id);
+        this.goTo(n.refs ?? [], n.at);
+        break;
+      }
+      case 'notice-read':
+        // Уведомление без места: клик — прочитано (с колокольчика уходит).
+        g.readNotice(Number(d.id));
+        break;
+      case 'notice-close': {
+        // Крестик: убрать с экрана, запись в истории «События» остаётся (и непрочитанной, если была).
+        g.closeNotice(Number(d.id));
         break;
       }
       case 'close-sel':
@@ -3998,8 +4009,7 @@ export class Hud {
     const g = this.game();
     this.speedBeforeNews = g.speed;
     this.controller.setSpeed(0, true);
-    const unread = g.news.entries.length - g.news.unread;
-    this.newsUnreadFrom = g.news.entries[unread]?.n ?? Infinity;
+    this.newsUnread = g.news.unreadSet();
     this.showScreen('news');
     this.renderNews(true);
   }
@@ -4025,7 +4035,7 @@ export class Hud {
       b.parentElement!.dataset.tip = badge ? `История уведомлений: новых — ${badge}` : 'История уведомлений';
     }
     if (!open) return;
-    const html = newsHtml(g, { kinds: this.newsKinds, unreadFrom: this.newsUnreadFrom });
+    const html = newsHtml(g, { kinds: this.newsKinds, unread: this.newsUnread });
     if (!force && html === this.lastNews) return;
     this.lastNews = html;
     const body = this.q('[data-news-body]');
@@ -4228,18 +4238,17 @@ export class Hud {
     this.q('[data-month]').style.width = `${g.monthProgress * 100}%`;
 
     const notices = this.q('[data-notices]');
-    const key = g.notices.map((n) => n.text + Math.floor(n.age)).join('|');
+    // Разметка — только когда меняется состав (перерисовка под курсором съела бы клик), угасание — на месте.
+    const key = g.notices.map((n) => n.id).join('|');
     if (notices.dataset.key !== key) {
       notices.dataset.key = key;
-      notices.innerHTML = g.notices
-        .map((n, i) =>
-          // С местом (достроенная улица) или объектом (предприятие, город, маршрут) — кнопкой: клик ведёт туда.
-          n.at || n.refs?.some((r) => newsTarget(g, r))
-            ? `<div class="notice go" data-action="notice-go" data-id="${i}" data-tip="Показать на карте" style="opacity:${Math.min(1, (6 - n.age) / 1.5)};${n.color ? `border-left-color:${n.color}` : ''}">${esc(n.text)} <span class="notice-go-ic">📍</span></div>`
-            : `<div class="notice" style="opacity:${Math.min(1, (6 - n.age) / 1.5)};${n.color ? `border-left-color:${n.color}` : ''}">${esc(n.text)}</div>`,
-        )
-        .join('');
+      notices.innerHTML = g.notices.map((n) => noticeHtml(g, n)).join('');
     }
+    g.notices.forEach((n, i) => {
+      const el = notices.children[i] as HTMLElement | undefined;
+      const op = String(noticeOpacity(n));
+      if (el && el.style.opacity !== op) el.style.opacity = op;
+    });
     this.renderNews();
     this.panelTimer -= realDt;
     if (this.panelTimer <= 0) {

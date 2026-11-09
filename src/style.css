@@ -364,14 +364,21 @@ button {
   box-shadow: var(--shadow);
   border-radius: 10px;
   border-left: 5px solid var(--accent);
-  padding: 8px 14px;
+  padding: 8px 6px 8px 14px;
   font-size: 14px;
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-/* Уведомление с местом (достроенная улица) — кнопка: клик ведёт камеру туда. */
-.notices .notice.go {
+/* Клик по уведомлению — прочитано, у крестика — убрать: уведомление ловит мышь (список под ним — нет). */
+.notices .notice {
   pointer-events: auto;
+}
+
+/* Уведомление с местом (достроенная улица) или объектом — кнопка: клик ведёт камеру туда. */
+.notices .notice.go {
   cursor: pointer;
 }
 
@@ -379,9 +386,22 @@ button {
   background: #eef4fd;
 }
 
-.notice-go-ic {
-  margin-left: 4px;
-  font-size: 12px;
+/* Крестик справа внутри уведомления: только с экрана, в истории «События» оно остаётся. */
+.notice-x {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 15px;
+  line-height: 1;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.notice-x:hover {
+  background: #e3e8ee;
+  color: var(--ink);
 }
 
 .screen {
