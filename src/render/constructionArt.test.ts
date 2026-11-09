@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
+import { CurveLUT } from '../core/bezier';
 import type { Vec } from '../core/vec';
 import { nextSite, pickSite } from '../game/constructionWork';
 import { Game } from '../game/game';
@@ -113,6 +114,39 @@ describe('Колонна техники стройки', () => {
       const two = check(wide, 2);
       two.rows.forEach((r, i) => expect(r).toBeCloseTo(two.e[0] + ((i + 0.5) * W) / 2, 6));
     }
+  });
+
+  it('«◐ с проездом» на широкой и пристройка «Полосой»: ряды бригад — вне открытых прежних полос, не по оси среди машин', () => {
+    const L = 300;
+    const strip = (lanes: Corridor['lanes'], build: Corridor['build']): Corridor => {
+      const curve = { p0: { x: 0, y: 0 }, p1: { x: L / 3, y: 0 }, p2: { x: (2 * L) / 3, y: 0 }, p3: { x: L, y: 0 } };
+      const lut = new CurveLUT(curve);
+      return { id: 1, a: 1, b: 2, portA: 0, portB: 0, curve, lut, length: lut.length, cls: 'highway', lanes, rev: 1, build } as Corridor;
+    };
+    const was = (lanes: Corridor['lanes'], more: object = {}) => ({ cls: 'highway' as const, lanes, len: L, value: 1, price: 1, work: 0.5, part: true as const, ...more });
+    const MH = 2.6;
+    for (const fromB of [false, true]) {
+      // Магистраль 2+2 → 3+3: открыты внутренние прежние (|x| ≤ 7) — бригады на внешних, не ближе машины друг к другу.
+      const c = strip(twoWay(3, 3), { project: 1, done: 50, ...(fromB ? { fromB: true } : {}), was: was(twoWay(2, 2)) });
+      for (const n of [1, 2, 3]) {
+        const rows = crewRows(c, n);
+        expect(rows).toHaveLength(n);
+        for (const r of rows) {
+          expect(Math.abs(r) - MH).toBeGreaterThanOrEqual(LANE_W - 1e-6);
+          expect(Math.abs(r) + MH).toBeLessThanOrEqual(3 * LANE_W + ROAD_MARGIN + 1e-6);
+        }
+        for (let i = 1; i < n; i++) expect(rows[i] - rows[i - 1]).toBeGreaterThanOrEqual(2 * MH - 1e-6);
+      }
+      // Одна бригада — справа по ходу заполнения (раньше — по оси, прямо по открытым полосам).
+      expect(crewRows(c, 1)[0]).toBeGreaterThan(LANE_W);
+      // ⛔ целиком — как раньше: одна по оси.
+      expect(crewRows(strip(twoWay(3, 3), { project: 1, done: 50, was: { ...was(twoWay(2, 2)), part: undefined } }), 1)).toEqual([0]);
+    }
+    // Пристройка полосы справа к 1+1: прежние полосы открыты все — ряд на месте новой.
+    const edge = strip([...twoWay(1, 1), slot(10.5, 1)], { project: 1, done: 50, was: was(twoWay(1, 1), { edge: true }) });
+    const [row] = crewRows(edge, 1);
+    expect(row - MH).toBeGreaterThanOrEqual(LANE_W - 1e-6);
+    expect(row + MH).toBeLessThanOrEqual(2 * LANE_W + ROAD_MARGIN + 1e-6);
   });
 });
 

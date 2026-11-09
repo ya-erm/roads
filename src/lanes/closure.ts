@@ -98,20 +98,45 @@ export function zoneLimit(limit: number | undefined, classLimit: number): number
 
 // ---------- «С проездом» на узкой дороге: по половине полотна, реверс со светофорами ----------
 
-/**
- * Двусторонняя дорога, где половина полос (keptLanes) оставила бы одно направление: 1+1, 2+1. Её «◐ с проездом» —
- * реверс по одной полосе, а не одностороннее движение с объездом обратно.
- */
-export function reversible(lanes: readonly LaneSlot[]): boolean {
+/** Полосы в одном сечении — узкая двусторонняя: половина полос (keptLanes) оставила бы одно направление. */
+function narrowSection(lanes: readonly LaneSlot[]): boolean {
   if (!lanes.some((l) => l.flow > 0) || !lanes.some((l) => l.flow < 0)) return false;
   const kept = keptLanes(lanes);
   return !(kept.some((l) => l.flow > 0) && kept.some((l) => l.flow < 0));
 }
 
+/**
+ * Двусторонняя дорога, где половина полос (keptLanes) оставила бы одно направление: 1+1, 2+1. Её «◐ с проездом» —
+ * реверс по одной полосе, а не одностороннее движение с объездом обратно.
+ *
+ * По сечениям вдоль полотна длиной len: узкая, если узкое сечение тянется дольше отгона taper (или по всей длине).
+ * Иначе 1+1 с коротким куском второй полосы у конца (полоса соседа 2+2, доведённая до стыка, joinTaperedLanes)
+ * считалась широкой 2+2 (отчёт 0.2.120): перекрыты только эти куски, по 1+1 едут в обе стороны, а бригады — до трёх
+ * поперёк всего полотна, прямо среди машин. Узкий конец широкой дороги — только её отгон (taperDeadLanes): не узкая.
+ */
+export function reversible(lanes: readonly LaneSlot[], len = Infinity, taper = 0): boolean {
+  const ends = lanes.flatMap((l) => [l.from, l.to]).filter((x) => Number.isFinite(x) && x > 0 && x < len);
+  const cuts = [...new Set([0, ...ends])].sort((p, q) => p - q);
+  let run = 0;
+  for (let i = 0; i < cuts.length; i++) {
+    const s0 = cuts[i];
+    const s1 = i + 1 < cuts.length ? cuts[i + 1] : len;
+    if (s1 - s0 < 1e-6) continue;
+    const mid = Number.isFinite(s1) ? (s0 + s1) / 2 : s0 + 1;
+    if (!narrowSection(lanes.filter((l) => l.from <= mid && l.to >= mid))) {
+      run = 0;
+      continue;
+    }
+    run += s1 - s0;
+    if (run > taper + 1 || run >= len - 1e-6) return true;
+  }
+  return false;
+}
+
 /** Стройка — перестройка «с проездом» узкой дороги (◐ на 1+1, 2+1): полотно — половинами, по другой — реверс. */
 export function laneWise(b: CorridorBuild | undefined): boolean {
   const w = b?.was;
-  return !!w && !!w.part && !w.moved && !w.edge && reversible(w.lanes);
+  return !!w && !!w.part && !w.moved && !w.edge && reversible(w.lanes, w.len, taperLen(w.cls));
 }
 
 /**

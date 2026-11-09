@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CurveLUT } from '../core/bezier';
 import { CONSTRUCTION } from '../config';
 import { approachAt, laneDone, laneWise, partLanes, REACH, reverseLanes, reverseSite, reverseStops, reverseZone, reversible, workSide } from './closure';
-import { type Corridor, type CorridorBuild, LaneNet, oneWay, taperLen, twoWay } from './model';
+import { type Corridor, type CorridorBuild, LaneNet, oneWay, slot, taperLen, twoWay } from './model';
 import { openNet } from './open';
 
 const K = CONSTRUCTION.rebuild;
@@ -27,6 +27,23 @@ describe('«С проездом» на узкой дороге', () => {
     // ⛔ целиком и перенос — не «с проездом».
     expect(laneWise({ project: 1, done: 0, was: { ...was(100), part: undefined } })).toBe(false);
     expect(laneWise({ project: 1, done: 0, was: { ...was(100), moved: true } })).toBe(false);
+  });
+
+  it('узкая — по сечениям вдоль полотна: 1+1 с куском второй полосы у конца — узкая, у 2+2 узкий только отгон — нет (отчёт 0.2.120)', () => {
+    const L = 421;
+    const T = taperLen('highway');
+    const one = twoWay(1, 1).map((l) => ({ ...l, to: L }));
+    // Шоссе 1+1, у конца a — 70 м второй полосы (полоса соседа 2+2, доведённая до стыка): ◐ — реверс, бригада одна.
+    const stub = [...one, slot(10.5, 1, 0, 71.6), slot(-10.5, -1, 0, 75.1)];
+    expect(reversible(stub, L, T)).toBe(true);
+    expect(laneWise({ project: 1, done: 0, was: { cls: 'highway', lanes: stub, len: L, value: 1, price: 1, work: 0.5, part: true } })).toBe(true);
+    // 2+2, сходящаяся на нет отгоном у одного или обоих концов, — широкая.
+    expect(reversible([...one, slot(10.5, 1, 0, L - T), slot(-10.5, -1, 0, L - T)], L, T)).toBe(false);
+    expect(reversible([...one, slot(10.5, 1, T, L - T), slot(-10.5, -1, T, L - T)], L, T)).toBe(false);
+    expect(reversible(twoWay(2, 2), L, T)).toBe(false);
+    // 2+2 только на коротком куске посередине — узкая; 1+1 короче отгона — узкая.
+    expect(reversible([...one, slot(10.5, 1, 150, 250), slot(-10.5, -1, 150, 250)], L, T)).toBe(true);
+    expect(reversible(twoWay(1, 1), 50, T)).toBe(true);
   });
 
   it('проходы: правая по ходу заполнения половина, второй — навстречу и другая; готовое — половина за проход', () => {

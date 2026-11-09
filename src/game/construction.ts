@@ -39,7 +39,7 @@ import { add, dist, dot, scale, sub, type Vec } from '../core/vec';
 import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { corridorLayer } from '../lanes/speedDisplay';
 import { closed, endCuts, laneDone, laneWise, partLanes, reverseStops, reverseZone, reversible } from '../lanes/closure';
-import type { Corridor, CorridorBuild, CorridorWas, LaneNet } from '../lanes/model';
+import { type Corridor, type CorridorBuild, type CorridorWas, type LaneNet, taperLen } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import type { Network, Segment } from '../world/network';
 import { ROAD_CLASSES } from '../world/roadTypes';
@@ -1481,7 +1481,7 @@ export class Construction {
       out.length += c.length;
       if (w.moved) out.moved++;
       if (w.part) out.part++;
-      if (!w.moved && !w.edge && reversible(w.lanes)) out.narrow++;
+      if (!w.moved && !w.edge && reversible(w.lanes, w.len, taperLen(w.cls))) out.narrow++;
       if (closed(c.build)) out.closed++;
       if (w.part && c.length > longest) {
         longest = c.length;

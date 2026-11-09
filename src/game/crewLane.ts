@@ -8,8 +8,8 @@
  */
 import { smoothstep } from '../core/math';
 import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
-import { laneWise } from '../lanes/closure';
-import { edgesAt } from '../lanes/geometry';
+import { fitLanes, keptLanes, laneWise } from '../lanes/closure';
+import { edgesAt, laneBand } from '../lanes/geometry';
 import type { Corridor, CorridorBuild } from '../lanes/model';
 import { steerBase } from '../sim/body';
 import { ROAD_MARGIN } from '../world/roadTypes';
@@ -658,7 +658,8 @@ const MACHINE_HALF = 2.6;
  * Ряды техники n бригад на участке c (сдвиг вправо по ходу заполнения, м; по порядку слева направо): ширина полотна
  * по кромкам делится поровну на n полос, каждая бригада — посередине своей, но не дальше кромки с обочиной
  * (ROAD_MARGIN). Полосы уже машины (n бригад на узком полотне) — ряды бок о бок в пределах полотна с обочинами,
- * посередине. Одна бригада — по оси (0).
+ * посередине. Одна бригада — по оси (0). Перекрытие по полосам на широкой и пристройка «Полосой» — то же, но только
+ * там, где не едут (workStrips); не помещаются там — как раньше, по всей ширине.
  */
 export function crewRows(c: Corridor, n: number): number[] {
   const b = c.build;
@@ -666,12 +667,19 @@ export function crewRows(c: Corridor, n: number): number[] {
   // «С проездом» на узкой (closure.ts, laneWise): бригада одна и идёт посередине своей половины полотна — правой по
   // ходу заполнения (по другой едут машины).
   if (b && laneWise(b)) return [halfRow(c, b)];
-  if (n <= 1) return [0];
   const f = b ? frontOf(spansOf(b, L), L).s : 0;
   const s = Math.max(0, Math.min(L, b?.fromB ? L - f : f));
   const e = edgesAt(c, s) ?? [-3.5, 3.5];
   // При ходе от конца b «вправо по ходу» — влево по оси полотна: ряды — зеркально.
   const sign = b?.fromB ? -1 : 1;
+  // «◐ с проездом» на широкой и пристройка «Полосой»: по открытым прежним полосам едут машины — ряды только вне их.
+  const strips = b && n >= 1 ? workStrips(c, b, s, e) : null;
+  const free = strips && stripRows(strips, n, sign);
+  if (free) {
+    const rows = free.map((r) => r * sign);
+    return sign < 0 ? rows.reverse() : rows;
+  }
+  if (n <= 1) return [0];
   const lo = e[0] - ROAD_MARGIN + MACHINE_HALF;
   const hi = e[1] + ROAD_MARGIN - MACHINE_HALF;
   const strip = (e[1] - e[0]) / n;
@@ -684,6 +692,59 @@ export function crewRows(c: Corridor, n: number): number[] {
   }
   rows = rows.map((r) => r * sign);
   return sign < 0 ? rows.reverse() : rows;
+}
+
+/**
+ * Где на полотне c (стройка b) на s нет движения при перекрытии по полосам на широкой («◐ с проездом», не laneWise) и у
+ * пристройки «Полосой»: поперёк, в смещениях от оси, — от кромки с обочиной (e — кромки нового полотна) до кромки с
+ * обочиной без открытых прежних полос (closure.ts: keptLanes — половина у оси в каждую сторону, у пристройки — все
+ * прежние; тупик, где partLanes оставляет хоть одну в каждую сторону, не различаем). Перекрыто целиком, перенос, новая
+ * дорога — null: техника по всей ширине. Раньше бригады делили поровну всю ширину — одна шла по оси, прямо по открытым
+ * полосам, среди машин.
+ */
+function workStrips(c: Corridor, b: CorridorBuild, s: number, e: [number, number]): [number, number][] | null {
+  const w = b.was;
+  if (!w?.part || w.moved) return null;
+  const old = fitLanes(w.lanes, w.len, c.length);
+  const open = w.edge ? old : keptLanes(old);
+  // Отгон открытых полос — по прежнему классу.
+  const was = { ...c, cls: w.cls };
+  const bands = open
+    .map((l) => laneBand(was, l, s))
+    .filter((x): x is [number, number] => !!x)
+    .sort((p, q) => p[0] - q[0]);
+  const out: [number, number][] = [];
+  let at = e[0] - ROAD_MARGIN;
+  for (const [lo, hi] of bands) {
+    if (lo > at) out.push([at, lo]);
+    at = Math.max(at, hi);
+  }
+  if (e[1] + ROAD_MARGIN > at) out.push([at, e[1] + ROAD_MARGIN]);
+  return out;
+}
+
+/**
+ * Ряды n бригад (в осях от a, по возрастанию) в свободных полосах strips (workStrips): каждая бригада — в той, где ей
+ * шире всего (поровну — правее по ходу заполнения sign), в полосе — посередине своих равных долей; ряды не ближе
+ * ширины машины. Не помещаются — null.
+ */
+function stripRows(strips: readonly [number, number][], n: number, sign: 1 | -1): number[] | null {
+  const room = strips.map(([lo, hi]) => Math.floor((hi - lo) / (2 * MACHINE_HALF) + 1e-6));
+  if (room.reduce((a, k) => a + k, 0) < n) return null;
+  const count = strips.map(() => 0);
+  const share = (i: number) => (strips[i][1] - strips[i][0]) / (count[i] + 1);
+  const right = (i: number) => (strips[i][0] + strips[i][1]) * sign;
+  for (let k = 0; k < n; k++) {
+    let best = -1;
+    for (let i = 0; i < strips.length; i++) {
+      if (count[i] >= room[i]) continue;
+      if (best < 0 || share(i) > share(best) + 1e-6 || (share(i) > share(best) - 1e-6 && right(i) > right(best))) best = i;
+    }
+    count[best]++;
+  }
+  return strips.flatMap(([lo, hi], i) =>
+    Array.from({ length: count[i] }, (_, j) => Math.max(lo + MACHINE_HALF, Math.min(hi - MACHINE_HALF, lo + ((j + 0.5) * (hi - lo)) / count[i]))),
+  );
 }
 
 /**

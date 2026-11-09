@@ -584,7 +584,8 @@ export class Crews {
   private trim(projects: number[]): void {
     for (const id of projects) {
       const list = this.assigned(id);
-      const extra = list.length - this.cap(id);
+      // Колонна в потоке — лишняя, когда доедет (отпустится тогда): работающую на месте ради неё сейчас не снимаем.
+      const extra = list.filter((b) => !b.convoy).length - this.cap(id);
       if (extra <= 0) continue;
       // Назначенных игроком (pinned) не отпускаем: их ставят только туда, где есть место.
       const free = list.filter((b) => !b.convoy && !b.pinned).sort((x, y) => (x.state === y.state ? y.id - x.id : x.state === 'going' ? -1 : 1));
