@@ -6956,15 +6956,47 @@ span.ind-chip {
 
 /* ---------- Предприятия строит игрок (src/ui/enterpriseUi.ts) ---------- */
 
-.ent-opts {
+/*
+ * Обе группы — в одну полосу, карточки — в две строки; не влезает — прокрутка вбок. Панель по центру и не заходит
+ * под миникарту, кнопку баг-репорта и номер версии справа (по ~340 px с каждой стороны).
+ */
+.ent-scroll {
+  display: flex;
   align-items: flex-start;
+  gap: 14px;
+  max-width: calc(100vw - 680px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  padding-bottom: 4px;
+}
+
+.ent-group {
+  flex: none;
+}
+
+/* Узкое окно (телефон): панель во всю ширину, но над миникартой. */
+@media (max-width: 900px) {
+  .ent-scroll {
+    max-width: calc(100vw - 64px);
+  }
+
+  .options:has(.ent-scroll) {
+    bottom: 190px;
+  }
+}
+
+.ent-group .opt-title {
+  white-space: nowrap;
 }
 
 .cards.ent-cards {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(2, auto);
+  grid-auto-columns: max-content;
   gap: 4px;
-  max-width: 560px;
 }
 
 .card.ent-card {
@@ -7016,19 +7048,6 @@ span.ind-chip {
 .ent-price {
   font-size: 10px;
   color: var(--muted);
-}
-
-.ent-rules {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-}
-
-.ent-rule {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .ent-ic {

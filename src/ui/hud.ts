@@ -886,6 +886,18 @@ export class Hud {
     });
     // Знак скорости из панели можно перетащить на дорогу — ограничение без перестройки.
     const options = this.q('[data-options]');
+    // Полоса карточек с прокруткой вбок (data-hscroll, «Предприятие»): колесо мыши листает её вбок; трекпад
+    // (горизонтальный жест) — как есть.
+    options.addEventListener(
+      'wheel',
+      (e) => {
+        const strip = (e.target as HTMLElement).closest<HTMLElement>('[data-hscroll]');
+        if (!strip || strip.scrollWidth <= strip.clientWidth || Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return;
+        e.preventDefault();
+        strip.scrollLeft += e.deltaY;
+      },
+      { passive: false },
+    );
     options.addEventListener('dragstart', (e) => {
       const sign = (e.target as HTMLElement).closest<HTMLElement>('[data-drag-limit]');
       if (!sign || !e.dataTransfer) return;
@@ -1929,8 +1941,12 @@ export class Hud {
                 ? this.terrainOptionsHtml()
                 : this.roadOptionsHtml();
     if (html !== this.lastOptions) {
+      // Прокрученная вбок полоса карточек (data-hscroll) остаётся на месте, когда выбрали другую карточку.
+      const scroll = el.querySelector<HTMLElement>('[data-hscroll]')?.scrollLeft ?? 0;
       el.innerHTML = html;
       this.lastOptions = html;
+      const strip = el.querySelector<HTMLElement>('[data-hscroll]');
+      if (strip) strip.scrollLeft = scroll;
     }
   }
 

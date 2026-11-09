@@ -46,7 +46,7 @@ export function recipeHtml(info: Pick<IndustryType, 'accepts' | 'produces'>, big
 /**
  * Панель инструмента «Предприятие»: карточки видов двумя группами — «⛏️ Добыча» и «🏭 Переработка». На карточке —
  * рецепт, цена, 👷 рабочих, ☁ вред, у добычи — ⛏️ свободных месторождений, у завода — значок города, если его
- * продукция нужна городам. Справа — правила картинками.
+ * продукция нужна городам. Карточки — в две строки с прокруткой вбок; правила — подсказкой у заголовков групп.
  */
 export function industryOptionsHtml(g: Game, current: IndustryKind | null): string {
   const kinds = g.enterprises.kinds();
@@ -64,18 +64,19 @@ export function industryOptionsHtml(g: Game, current: IndustryKind | null): stri
     return `<button class="card ent-card ${current === k.kind ? 'active' : ''}" data-action="ind-kind" data-id="${k.kind}" data-tip="${esc(tip)}">
       <span class="ent-recipe">${recipeHtml(k)}</span><span class="name">${esc(k.short)}</span><span class="ent-badges">${badges}</span><span class="ent-price">${money(buildCost(k))}</span></button>`;
   };
-  const group = (title: string, list: IndustryType[]) =>
-    list.length ? `<div class="opt-group"><div class="opt-title">${title}</div><div class="cards ent-cards">${list.map(card).join('')}</div></div>` : '';
-  const rules = [
-    ['⛏️', 'Добыча — на месторождении', 'Добыча встаёт только на свободное месторождение своего сырья: значки на карте'],
-    ['👷', `Рабочие — из города до ${km(ENTERPRISE.commute.near)}`, `Рабочие сами доходят из городов ближе ${km(ENTERPRISE.commute.near)}, дальше — меньше; чего не хватает — везите автобусом (без билета)`],
-    ['☁', 'Вредное — подальше', 'Вредное предприятие тормозит рост города рядом: оранжевое кольцо — докуда'],
-    ['🏙', 'В черте — по местам', `В черте города — по местам: с ${ENTERPRISE.slots.firstPop} жителей одно, дальше больше; пустует — город строит сам`],
-  ]
-    .map(([ic, text, tip]) => `<div class="ent-rule" data-tip="${esc(tip)}"><span class="ent-ic">${ic}</span><span>${esc(text)}</span></div>`)
-    .join('');
-  return `<div class="opt-row ent-opts">${group('⛏️ Добыча', kinds.filter(isRaw))}${group('🏭 Переработка', kinds.filter((k) => !isRaw(k)))}
-    <div class="opt-group narrow"><div class="opt-title">Как ставить <span class="muted">R — повернуть</span></div><div class="ent-rules">${rules}</div></div></div>`;
+  // Правила — подсказкой у заголовка группы: отдельный блок «Как ставить» занимал полпанели.
+  const group = (title: string, tip: string, list: IndustryType[]) =>
+    list.length
+      ? `<div class="ent-group"><div class="opt-title" data-tip="${esc(tip)}">${title}</div><div class="cards ent-cards">${list.map(card).join('')}</div></div>`
+      : '';
+  const rawTip = 'Добыча встаёт только на свободное месторождение своего сырья: значки ⛏️ на карте';
+  const plantTip = `Рабочие сами доходят из городов ближе ${km(ENTERPRISE.commute.near)}, дальше — везите автобусом (без билета). Вредное тормозит рост города рядом. В черте города — по местам (с ${ENTERPRISE.slots.firstPop} жителей)`;
+  // Карточки — в две строки; не влезают — прокрутка вбок (колесо мыши тоже листает вбок — Hud, data-hscroll).
+  return `<div class="ent-scroll" data-hscroll>${group('⛏️ Добыча', rawTip, kinds.filter(isRaw))}${group(
+    '🏭 Переработка <span class="muted">· R — повернуть</span>',
+    plantTip,
+    kinds.filter((k) => !isRaw(k)),
+  )}</div>`;
 }
 
 /** Подпись у курсора: что встанет, цена, рабочие, вред городам, место в черте — или почему нельзя. */
