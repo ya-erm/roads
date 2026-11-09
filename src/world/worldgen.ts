@@ -1,4 +1,4 @@
-import { circleArc, Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
+import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import type { Rng } from '../core/rng';
 import { add, angleOf, dist, dot, lerp, norm, scale, sub, Vec } from '../core/vec';
 import { edgesAt } from '../lanes/geometry';
@@ -13,6 +13,7 @@ import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, playerIndustries, townS
 import { industryCount, MINING_KINDS, shoreFits, terrainFits } from './sites';
 import { Footprint, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
+import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
 
 const TOWN_NAMES = [
@@ -579,176 +580,18 @@ export function townShape(ctx: WorldContext, center: Vec, R: number, opts: { pet
 
 const lerpNum = (a: number, b: number, t: number) => a + (b - a) * t;
 
-/** Кусок кривой в полярных координатах от угла a0 до a1 (P — точка кривой под углом): гладкий, как дуга. */
-function polarArc(P: (a: number) => Vec, a0: number, a1: number): Cubic {
-  const h = 1e-3;
-  const d = (a: number) => scale(sub(P(a + h), P(a - h)), 1 / (2 * h));
-  const t = (4 / 3) * Math.tan((a1 - a0) / 4);
-  const s = P(a0);
-  const e = P(a1);
-  return { p0: s, p1: add(s, scale(d(a0), t)), p2: sub(e, scale(d(a1), t)), p3: e };
-}
-
-/** Отрезок кривой Катмулла-Рома между p1 и p2 с соседями p0 и p3 — плавная улица через узлы. */
-function catmull(p0: Vec, p1: Vec, p2: Vec, p3: Vec): Cubic {
-  return { p0: p1, p1: add(p1, scale(sub(p2, p0), 1 / 6)), p2: sub(p2, scale(sub(p3, p1), 1 / 6)), p3: p2 };
-}
-
-function radialStreets(sb: StreetBuilder, center: Vec, size: number): void {
-  const { rng } = sb.ctx;
-  const rays = size >= 3 ? 6 : 5;
-  const rings = size >= 3 ? 4 : 3;
-  const radius = (k: number) => 110 + k * 140;
-  const a0 = rng.range(0, Math.PI * 2);
-  const angle = (n: number, i: number) => a0 + (i * Math.PI * 2) / n;
-  // Выезды из города — по главным лучам; вдоль них застройка вытягивается лепестками.
-  const exits = Array.from({ length: rays }, () => rng.chance(0.6));
-  // Площадь у центра — круглая, дальше расстояние между кольцами следует очертаниям города.
-  const shape = townShape(sb.ctx, center, radius(rings - 1), {
-    petals: exits.flatMap((e, i) => (e ? [angle(rays, i)] : [])),
-    min: 0.7,
-    max: 1.5,
-  });
-  const ringAt = (k: number, a: number) => 110 + k * 140 * shape(a);
-  const ringPoint = (k: number) => (a: number) => add(center, scale({ x: Math.cos(a), y: Math.sin(a) }, ringAt(k, a)));
-  // На каждом кольце столько лучей, чтобы дуга между ними была не длиннее ~260.
-  const counts: number[] = [];
-  for (let k = 0; k < rings; k++) {
-    let n = k === 0 ? rays : counts[k - 1];
-    while ((Math.PI * 2 * radius(k)) / n > 260) n *= 2;
-    counts.push(k === rings - 1 && k > 0 ? counts[k - 1] : n);
-  }
-  const nodes = new Map<string, LaneNode | null>();
-  const key = (k: number, n: number, i: number) => `${k}:${((i * rays * 8) / n) | 0}`;
-  const nodeOn = (k: number, n: number, i: number) => {
-    const id = key(k, n, i);
-    if (!nodes.has(id)) nodes.set(id, nodeAt(sb, ringPoint(k)(angle(n, i))));
-    return nodes.get(id) ?? null;
-  };
-  // Кольца. Внешнее — с прорехами, чаще там, где город уже: край не замкнут в правильное кольцо.
-  for (let k = 0; k < rings; k++) {
-    const n = counts[k];
-    for (let i = 0; i < n; i++) {
-      const narrow = Math.max(0, 1 - shape(angle(n, i + 0.5)));
-      if (k === rings - 1 && rng.chance(0.1 + narrow * 1.2)) continue;
-      const arc = k === 0 ? circleArc(center, radius(k), angle(n, i), angle(n, i + 1)) : polarArc(ringPoint(k), angle(n, i), angle(n, i + 1));
-      street(sb, nodeOn(k, n, i), nodeOn(k, n, (i + 1) % n), arc, k === 0 ? AVENUE : STREET);
-    }
-  }
-  // Лучи: каждый узел внешнего кольца соединяется с внутренним, если там есть узел под тем же углом.
-  for (let k = 0; k < rings - 1; k++) {
-    const inner = counts[k];
-    const outer = counts[k + 1];
-    for (let i = 0; i < outer; i++) {
-      const j = (i * inner) / outer;
-      if (!Number.isInteger(j)) continue;
-      const isMain = (i * rays) % outer === 0 && ((i * rays) / outer) % 2 === 0;
-      street(sb, nodeOn(k, inner, j), nodeOn(k + 1, outer, i), null, isMain && size >= 3 ? AVENUE : STREET);
-    }
-  }
-  // Выезды из города по главным лучам.
-  const last = rings - 1;
-  for (let i = 0; i < rays; i++) {
-    if (!exits[i]) continue;
-    const n = counts[last];
-    const from = nodeOn(last, n, (i * n) / rays);
-    if (!from) continue;
-    const a = angle(rays, i);
-    const r = ringAt(last, a) + 200;
-    const p = add(center, { x: Math.cos(a) * r, y: Math.sin(a) * r });
-    street(sb, from, nodeAt(sb, p), null, size >= 3 && i % 2 === 0 ? AVENUE : STREET);
-  }
-}
-
-function organicStreets(sb: StreetBuilder, center: Vec, size: number): void {
-  const { rng } = sb.ctx;
-  const spacing = rng.range(135, 165);
-  const rot = rng.range(0, Math.PI / 2);
-  const ux = { x: Math.cos(rot), y: Math.sin(rot) };
-  const uy = { x: -Math.sin(rot), y: Math.cos(rot) };
-  // Край сетки — по очертаниям города (угол клетки в мире — её угол в сетке плюс поворот сетки).
-  const shape = townShape(sb.ctx, center, (size + 0.5) * spacing, { min: 0.55, max: 1.6 });
-  // 0.96: у воды город теперь не обрезается, а добирает место в другую сторону — население как у прежних городов.
-  const reach = (i: number, j: number) => (size + 0.5) * 0.96 * shape(Math.atan2(j, i) + rot);
-  // Плавная деформация всей сетки: улицы изгибаются вместе, без изломов в узлах.
-  const amp = spacing * rng.range(0.12, 0.2);
-  const wl = spacing * rng.range(3, 4.5);
-  const [f1, f2, f3, f4] = [0, 0, 0, 0].map(() => rng.range(0, Math.PI * 2));
-  const warp = (x: number, y: number): Vec => ({
-    x: amp * Math.sin(y / wl + f1) + amp * 0.5 * Math.sin((x + y) / (wl * 0.8) + f2),
-    y: amp * Math.sin(x / wl + f3) + amp * 0.5 * Math.sin((x - y) / (wl * 0.8) + f4),
-  });
-  const n = Math.ceil((size + 0.5) * 1.6);
-  const pos = (i: number, j: number) => {
-    const lx = i * spacing;
-    const ly = j * spacing;
-    const w = warp(lx, ly);
-    return add(center, add(scale(ux, lx + w.x), scale(uy, ly + w.y)));
-  };
-  const inside = (i: number, j: number) => Math.hypot(i, j) <= reach(i, j);
-  const grid = new Map<string, LaneNode | null>();
-  for (let i = -n; i <= n; i++) {
-    for (let j = -n; j <= n; j++) if (inside(i, j)) grid.set(`${i}:${j}`, nodeAt(sb, pos(i, j)));
-  }
-  const connect = (i: number, j: number, di: number, dj: number) => {
-    const a = grid.get(`${i}:${j}`);
-    const b = grid.get(`${i + di}:${j + dj}`);
-    if (!a || !b) return;
-    const major = di ? j === 0 : i === 0;
-    const curve = catmull(pos(i - di, j - dj), pos(i, j), pos(i + di, j + dj), pos(i + 2 * di, j + 2 * dj));
-    street(sb, a, b, curve, major && size >= 2 ? AVENUE : STREET);
-  };
-  for (let i = -n; i <= n; i++) {
-    for (let j = -n; j <= n; j++) {
-      connect(i, j, 1, 0);
-      connect(i, j, 0, 1);
-    }
-  }
-}
-
-function linearStreets(sb: StreetBuilder, center: Vec, size: number): void {
-  const { rng } = sb.ctx;
-  const dir = rng.range(0, Math.PI * 2);
-  const u = { x: Math.cos(dir), y: Math.sin(dir) };
-  const nrm = { x: -u.y, y: u.x };
-  const K = 2 + size;
-  const step = rng.range(150, 180);
-  const amp = rng.range(30, 70);
-  const ph = rng.range(0, Math.PI * 2);
-  const pts: Vec[] = [];
-  for (let k = -K; k <= K; k++) pts.push(add(center, add(scale(u, k * step), scale(nrm, amp * Math.sin(k * 0.45 + ph)))));
-  const mainNodes = pts.map((p) => nodeAt(sb, p));
-  // Главная улица — гладкая кривая через точки.
-  for (let i = 0; i < pts.length - 1; i++) {
-    const curve = catmull(pts[Math.max(0, i - 1)], pts[i], pts[i + 1], pts[Math.min(pts.length - 1, i + 2)]);
-    street(sb, mainNodes[i], mainNodes[i + 1], curve, size >= 2 ? AVENUE : STREET);
-  }
-  // Поперечные улицы и задние улицы, образующие кварталы.
-  for (const side of [-1, 1]) {
-    let prevEnd: LaneNode | null = null;
-    for (let i = 1; i < pts.length - 1; i++) {
-      const from = mainNodes[i];
-      if (!from || !rng.chance(0.6)) {
-        prevEnd = null;
-        continue;
-      }
-      const tangent = norm(sub(pts[i + 1], pts[i - 1]));
-      const out = { x: -tangent.y * side, y: tangent.x * side };
-      const endPos = add(from.pos, scale(out, rng.range(130, 170)));
-      const end = nodeAt(sb, endPos);
-      const seg = street(sb, from, end, null, STREET);
-      if (seg && end && prevEnd && rng.chance(0.7)) street(sb, prevEnd, end, null, STREET);
-      prevEnd = seg ? end : null;
-    }
-  }
-}
-
 export function buildTown(ctx: WorldContext, id: number, center: Vec, name: string, size: number, style: TownStyle): Town | null {
   const { roads } = ctx;
   const sb: StreetBuilder = { ctx, segs: [] };
-  if (style === 'radial') radialStreets(sb, center, size);
-  else if (style === 'organic') organicStreets(sb, center, size);
-  else linearStreets(sb, center, size);
+  // Очертания — по месту (вода, склоны, край карты); улицы — как у настоящего города (townStreets.ts).
+  const shape = townShape(ctx, center, streetsRadius(style, size), { min: 0.6, max: 1.5 });
+  const kit: StreetKit = {
+    ctx,
+    node: (p) => nodeAt(sb, p),
+    street: (a, b, curve, main) => street(sb, a, b, curve, main ? AVENUE : STREET),
+    shape,
+  };
+  townStreets(kit, center, size, style);
 
   // Оставляем связную часть вокруг центра.
   const created = new Set<number>();
@@ -791,14 +634,17 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
     }
   }
 
-  let radius = 0;
+  // Радиус до первой застройки — по 90 % концов улиц: длинный выезд в поле соседний город не отодвигает.
+  const far: number[] = [];
   let top = center.y;
   for (const s of alive) {
     for (const p of [s.curve.p0, s.curve.p3]) {
-      radius = Math.max(radius, dist(p, center));
+      far.push(dist(p, center));
       top = Math.min(top, p.y);
     }
   }
+  far.sort((a, b) => a - b);
+  const radius = far[Math.min(far.length - 1, Math.floor(far.length * 0.9))];
   const town: Town = {
     id,
     name,

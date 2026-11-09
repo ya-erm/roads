@@ -30,7 +30,7 @@ function freeTrack(game: Game, len: number, margin = 80): { from: Vec; dir: Vec 
       const dir = { x: 1, y: 0 };
       const n = rightNormal(dir);
       // В чистом поле: без дорог (и стартовых просёлков) и домов рядом.
-      if (!clearStrip(game, from, add(from, scale(dir, len)), 250)) continue;
+      if (!clearStrip(game, from, add(from, scale(dir, len)), 150)) continue;
       // Место по бокам: туда потом ляжет второй путь или уйдёт перенесённый узел.
       const sides = [-margin, margin].map((k) => straight(add(from, scale(n, k)), add(add(from, scale(dir, len)), scale(n, k))));
       if (!sides.every((r) => game.builder.plan(r).ok)) continue;
@@ -51,7 +51,7 @@ function railWorld(): { game: Game; a: Station; b: Station; from: Vec; dir: Vec 
         const dir = { x: Math.cos(angle), y: Math.sin(angle) };
         const from = { x, y };
         const req = straight(from, add(from, scale(dir, len)));
-        if (!clearStrip(game, from, add(from, scale(dir, len)), 250)) continue;
+        if (!clearStrip(game, from, add(from, scale(dir, len)), 150)) continue;
         if (!game.builder.plan(req).ok) continue;
         game.builder.build(req);
         const n = rightNormal(dir);

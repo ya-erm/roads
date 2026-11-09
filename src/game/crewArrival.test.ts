@@ -6,7 +6,7 @@ import { convoyGap, spansOf, stageSpans } from './constructionWork';
 import { CREW_UNITS, laneCars, lanePose, laneTrail } from './crewLane';
 import type { Brigade } from './crews';
 import { Game } from './game';
-import { anchorOf, fieldSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 /**
  * Техника бригады от выезда с базы до работы и обратно — одним непрерывным путём: машины колонны не накладываются,
@@ -78,7 +78,11 @@ describe('Бригада: от подъезда к работе без скач�
    */
   function scene() {
     const game = withoutCitizens(new Game(WORLD));
-    const at = fieldSpot(game, 1000, 320);
+    // Чистое поле под обе улицы (северную и южную, в 300 м) и проект между ними.
+    const at = openSpot(game, [
+      [{ x: 0, y: 0 }, { x: 1000, y: 0 }, 120],
+      [{ x: 0, y: 300 }, { x: 1000, y: 300 }, 120],
+    ]);
     const south = at.y + 300;
     expect(road(game, { free: at }, { free: { x: at.x + 1000, y: at.y } })).toBe(true);
     expect(road(game, { free: { x: at.x, y: south } }, { free: { x: at.x + 1000, y: south } })).toBe(true);

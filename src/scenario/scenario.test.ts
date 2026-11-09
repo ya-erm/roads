@@ -130,8 +130,8 @@ describe('Сценарий: генерация', { timeout: 120_000 }, () => {
     expect(game.scenario).toBeNull();
     expect(game.mods).toBe(NO_MODS);
     expect(game.settings.scenario).toBeUndefined();
-    // Население городов seed 1 — генерация песочницы не зависит от сценариев (числа — с неровными очертаниями городов).
-    expect(game.towns.map((t) => t.population).sort((x, y) => y - x)).toEqual([13122, 10896, 8244, 6214, 4026, 3642, 1766, 1550, 1092, 950]);
+    // Население городов seed 1 — генерация песочницы не зависит от сценариев (числа — с улицами как у настоящих городов).
+    expect(game.towns.map((t) => t.population).sort((x, y) => y - x)).toEqual([12768, 9580, 4344, 3818, 3604, 3058, 2532, 2362, 2142, 2118]);
     // Прежние 32 предприятия — те же, предприятия новых цепочек расставлены после них.
     expect(game.industries).toHaveLength(41);
     expect(game.industries.slice(32).map((i) => i.info.kind)).toEqual(['ranch', 'ranch', 'ranch', 'sandpit', 'sandpit', 'meatplant', 'glassworks', 'furniture', 'cement']);
@@ -254,7 +254,11 @@ describe('Сценарий: экономические события', { timeou
     forceEvent(sc, 'demand', null, 'food');
     expect(game.mods.price('food')).toBeCloseTo(1.3);
 
-    const plant = game.industries.find((i) => i.info.kind === 'sawmill')!;
+    // Лесопилка без своего задания: на занятую заданием контракт на восстановление не выдают.
+    const open = (o: Objective) => o.status === 'active' || o.status === 'offered';
+    const tasked = (id: number) =>
+      sc.state.objectives.some((o) => open(o) && ((o.params.kind === 'deliver' && o.params.to?.type === 'industry' && o.params.to.id === id) || (o.params.kind === 'industry' && o.params.industry === id)));
+    const plant = game.industries.find((i) => i.info.kind === 'sawmill' && !tasked(i.id))!;
     plant.level = 2;
     const dec = forceEvent(sc, 'decline', refOf(plant))!;
     expect(plant.level).toBe(1.5);

@@ -4,7 +4,7 @@ import { splitCorridor } from '../lanes/edit';
 import { buildingCorridors } from '../render/constructionArt';
 import type { WorldSettings } from '../world/settings';
 import { Game } from './game';
-import { anchorOf, fieldSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 /**
  * Несколько фронтов у проекта: к обоим концам длинной дороги из нескольких участков есть подъезд от разных баз (как
@@ -21,7 +21,12 @@ describe('Стройка: несколько фронтов навстречу �
    */
   function scene(both: boolean) {
     const game = withoutCitizens(new Game(WORLD));
-    const at = fieldSpot(game, LEN, 260);
+    // Чистое поле: по проекту и по обеим улицам с севера на юг.
+    const at = openSpot(game, [
+      [{ x: 0, y: 0 }, { x: LEN, y: 0 }, 120],
+      [{ x: 0, y: -260 }, { x: 0, y: 260 }, 100],
+      [{ x: LEN, y: -260 }, { x: LEN, y: 260 }, 100],
+    ]);
     const west = { x: at.x, y: at.y };
     const east = { x: at.x + LEN, y: at.y };
     expect(road(game, { free: { x: west.x, y: at.y - 200 } }, { free: { x: west.x, y: at.y + 200 } })).toBe(true);

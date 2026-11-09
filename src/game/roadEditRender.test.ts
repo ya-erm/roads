@@ -26,7 +26,8 @@ describe('Стройка: отрисовка дорог пересчитывае
     const r = new LaneRenderer();
     picture(r, game);
     const net = game.roads.net;
-    const j = [...net.nodes.values()].filter((n) => n.kind === 'junction').sort((a, b) => b.corridors.length - a.corridors.length || a.id - b.id)[0];
+    // Обычный перекрёсток на четыре стороны (у площади в центре города улиц бывает и больше — там тесно).
+    const j = [...net.nodes.values()].filter((n) => n.kind === 'junction' && n.corridors.length === 4).sort((a, b) => a.id - b.id)[0];
     let plan = null;
     for (let k = 0; k < 16 && !plan?.ok; k++) {
       const ang = (k / 16) * Math.PI * 2;

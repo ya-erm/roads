@@ -166,16 +166,19 @@ describe('Стройка и снос дорог: машины на новом г
       return d;
     };
     const nearest = [...cut].sort((x, y) => left(x) - left(y) || x.id - y.id)[0];
+    // Пересчёт пути порцией считаем по вызовам: машина, что сама сменила маршрут, из очереди уходит без пересчёта.
+    const rerouted = vi.spyOn(t as unknown as { rerouteCut(v: Vehicle): void }, 'rerouteCut');
     let ticks = 0;
     while (cut.some((v) => t.routeCut(v)) && ticks < 100) {
       const waiting = cut.filter((v) => t.routeCut(v));
       // Подъезжающих к разрыву (ближе 30 м и 2 с пути) перестраивают вне очереди.
       const near = waiting.filter((v) => left(v) < 30 + v.v * 2 || v.routeIndex >= v.route.length - 1).length;
+      rerouted.mockClear();
       t.step(1 / 30);
       ticks++;
       const done = waiting.length - cut.filter((v) => t.routeCut(v)).length;
       expect(done).toBeGreaterThan(0);
-      expect(done).toBeLessThanOrEqual(batch + near);
+      expect(rerouted.mock.calls.length).toBeLessThanOrEqual(batch + near);
       // Ближняя к разрыву — в первой порции.
       if (ticks === 1) expect(t.routeCut(nearest)).toBe(false);
       for (const v of cut) if (t.routeCut(v)) expect(v.routeIndex).toBeLessThan(v.route.length - 1);

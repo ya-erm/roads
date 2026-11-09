@@ -19,7 +19,7 @@ function layTrack(game: Game, len: number): { at: (s: number, side?: number) => 
       const at = (s: number, side = 0) => add(from, { x: s, y: side });
       const req = { start: { kind: 'free' as const, pos: from, level: 0 }, end: { kind: 'free' as const, pos: at(len), level: 0 }, spec: RAIL_SPEC, mode: 'straight' as const };
       // В чистом поле: стартовые просёлки к предприятиям и дома городов не мешают вокзалам и их переносу.
-      if (!clearStrip(game, from, at(len), 250)) continue;
+      if (!clearStrip(game, from, at(len), 150)) continue;
       if (!game.builder.plan(req).ok) continue;
       game.builder.build(req);
       const mid = game.stationPlan(at(len / 2, 40), 14, 'rail', 0, 4, 150);

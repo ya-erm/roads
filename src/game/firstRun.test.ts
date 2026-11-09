@@ -31,10 +31,16 @@ describe('Первый рейс маршрута: ждать ли пассажи
   });
 });
 
-/** Станция у улицы города — на той, что ближе к соседнему городу toward. */
+/**
+ * Станция у улицы города — на той, что ближе к соседнему городу toward, среди застроенных: на окраинной улице-ветке
+ * жителей вокруг мало, и первые пассажиры подходят дольше предела ожидания.
+ */
 function stationIn(game: Game, townId: number, toward: { x: number; y: number }): Station {
   const mid = (c: ReturnType<typeof townStreets>[number]) => c.lut.pointAt(c.length / 2);
-  const streets = townStreets(game, townId).sort((a, b) => dist(mid(a), toward) - dist(mid(b), toward));
+  const houses = (c: ReturnType<typeof townStreets>[number]) => game.index.near(mid(c), 200).filter((s) => s.type === 'building' && dist(s.fp.center, mid(c)) < 200).length;
+  const all = townStreets(game, townId);
+  const built = all.filter((c) => houses(c) >= 25);
+  const streets = (built.length ? built : all).sort((a, b) => dist(mid(a), toward) - dist(mid(b), toward));
   for (const seg of streets) {
     const p = mid(seg);
     const t = seg.lut.tangentAt(seg.length / 2);

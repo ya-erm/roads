@@ -7,7 +7,7 @@ import type { WorldSettings } from '../world/settings';
 import type { RoadClass } from '../world/roadTypes';
 import { advise } from './advisor';
 import { Game } from './game';
-import { anchorOf, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 /**
  * Подъезд к стройке без учёта направления полос: проект между двумя односторонними съездами (въезд к проекту и выезд
@@ -27,23 +27,12 @@ describe('Стройка: подъезд без учёта односторон�
     return plan.ok && game.roadBuilder.apply(plan);
   };
 
-  /** Место в поле, далеко от городов: ровный прямоугольник len × 600 м к югу от (x, y). */
+  /** Место в поле: без дорог, домов и воды полоса в len метров вдоль x и ещё одна — в 250 м к югу (там съезды и проект). */
   function field(game: Game, len: number): Vec {
-    for (let y = 400; y < game.terrain.height - 800; y += 120) {
-      for (let x = 300; x < game.terrain.width - len - 300; x += 160) {
-        if (game.towns.some((t) => dist({ x: x + len / 2, y: y + 200 }, t.center) < t.radius + len)) continue;
-        // Без воды: через реку дорога прошла бы мостом, а съезды над водой не построить.
-        let wet = false;
-        for (let dx = -60; dx <= len + 60 && !wet; dx += 60) for (let dy = -60; dy <= 660 && !wet; dy += 60) wet = game.isWater({ x: x + dx, y: y + dy }, 20);
-        if (wet) continue;
-        const ok = [0, 200, 400, 600].every((dy) => {
-          const plan = game.roadBuilder.road(anchorOf(game, { free: { x, y: y + dy } }), anchorOf(game, { free: { x: x + len, y: y + dy } }), STREET);
-          return plan.ok && !plan.demolish.length;
-        });
-        if (ok) return { x, y };
-      }
-    }
-    throw new Error('нет места');
+    return openSpot(game, [
+      [{ x: 0, y: 0 }, { x: len, y: 0 }, 150],
+      [{ x: 0, y: 250 }, { x: len, y: 250 }, 150],
+    ]);
   }
 
   /**

@@ -7,7 +7,7 @@ import type { Brigade } from './crews';
 import { Game } from './game';
 import { MoveProject } from './moveProject';
 import { moveNodeEdit, reshapeEdit } from './roadbuild';
-import { anchorOf, fieldSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 /**
  * Проект подвинули («Двигать»: изогнули, перенесли узел), пока его строят: техника бригад на нём едет вместе с ним —
@@ -22,7 +22,11 @@ describe('Перенос строящегося участка: техника �
    */
   function scene() {
     const game = withoutCitizens(new Game(WORLD));
-    const at = fieldSpot(game, 1000, 340);
+    // Чистое поле вдоль улицы и к югу от её середины — там проект.
+    const at = openSpot(game, [
+      [{ x: 0, y: 0 }, { x: 1000, y: 0 }, 150],
+      [{ x: 500, y: 0 }, { x: 500, y: 380 }, 120],
+    ]);
     expect(road(game, { free: at }, { free: { x: at.x + 1000, y: at.y } })).toBe(true);
     expect(game.buildBase({ x: at.x + 120, y: at.y - 40 })).toBeNull();
     const base = [...game.construction.crews.bases.keys()][0];

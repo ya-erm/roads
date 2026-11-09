@@ -118,13 +118,37 @@ export function clearStrip(game: Game, from: Vec, to: Vec, d: number): boolean {
   return true;
 }
 
+/**
+ * Точка (x, y) в чистом поле под сцену: каждая полоса strips — [от, до, полуширина], концы — смещения от (x, y) —
+ * свободна (clearStrip) и целиком на карте. Ищет с северо-запада, по рядам.
+ */
+export function openSpot(game: Game, strips: [Vec, Vec, number][]): Vec {
+  const { width, height } = game.terrain;
+  const inside = (p: Vec, d: number) => p.x > d + 100 && p.y > d + 100 && p.x < width - d - 100 && p.y < height - d - 100;
+  for (let y = 300; y < height - 300; y += 83) {
+    for (let x = 300; x < width - 300; x += 97) {
+      const ok = strips.every(([a, b, d]) => {
+        const p = add({ x, y }, a);
+        const q = add({ x, y }, b);
+        return inside(p, d) && inside(q, d) && clearStrip(game, p, q, d);
+      });
+      if (ok) return { x, y };
+    }
+  }
+  throw new Error('Нет чистого поля');
+}
+
 /** Соединяет выезды двух станций дорогой из двух кусков (середина сдвигается, если прямо нельзя). */
 export function connectStations(game: Game, sA: Station, sB: Station, profile: RoadOptions): boolean {
-  const A = stationExit(game, sA.nodeId);
-  const B = stationExit(game, sB.nodeId);
+  return connectNodes(game, stationExit(game, sA.nodeId), stationExit(game, sB.nodeId), profile);
+}
+
+/** Соединяет два узла дороги дорогой из двух кусков (середина сдвигается, если прямо нельзя). */
+export function connectNodes(game: Game, A: LaneNode, B: LaneNode, profile: RoadOptions): boolean {
   const d = { x: B.pos.x - A.pos.x, y: B.pos.y - A.pos.y };
   const n = { x: -d.y / Math.hypot(d.x, d.y), y: d.x / Math.hypot(d.x, d.y) };
-  for (const off of [0, 150, -150, 300, -300, 450, -450, 600, -600]) {
+  // Дальние сдвиги — в обход города или предприятия, что стоит между ними.
+  for (const off of [0, 150, -150, 300, -300, 450, -450, 600, -600, 800, -800, 1000, -1000]) {
     const M = { x: (A.pos.x + B.pos.x) / 2 + n.x * off, y: (A.pos.y + B.pos.y) / 2 + n.y * off };
     // Второй кусок проверяем заранее: иначе первый остался бы висеть тупиком и мешал следующим попыткам.
     if (!roadPlan(game, A.id, { free: M }, profile).ok || !roadPlan(game, { free: M }, B.id, profile).ok) continue;

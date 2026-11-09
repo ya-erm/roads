@@ -17,9 +17,11 @@ function layTrack(game: Game, len: number): { at: (s: number, side?: number) => 
       const from = { x, y };
       const at = (s: number, side = 0) => add(from, { x: s, y: side });
       const req = { start: { kind: 'free' as const, pos: from, level: 0 }, end: { kind: 'free' as const, pos: at(len), level: 0 }, spec: RAIL_SPEC, mode: 'straight' as const };
-      // В чистом поле: без дорог (и стартовых просёлков) и домов рядом.
-      if (!clearStrip(game, from, at(len), 250)) continue;
-      if (!game.builder.plan(req).ok) continue;
+      // В чистом поле: без дорог (и стартовых просёлков) и домов рядом; у горловин средней станции поперёк путей
+      // потом тянут дороги по 200 м в обе стороны.
+      if (!clearStrip(game, from, at(len), 150)) continue;
+      const throat = 75 + RAIL_STATION.switchLen + 30;
+      if (![len / 2 - throat, len / 2 + throat].every((s) => clearStrip(game, at(s, -230), at(s, 230), 40))) continue;      if (!game.builder.plan(req).ok) continue;
       game.builder.build(req);
       const mid = game.stationPlan(at(len / 2, 40), 14, 'rail', 0, 4, 400);
       const end = game.stationPlan(at(len - 200, 60), 14, 'rail', 0, 4, 400, true);
@@ -194,7 +196,7 @@ describe('Удлинение платформ ж/д станции', { timeout: 
     const game = world();
     const { at } = layTrack(game, 2400);
     // Поодаль от пути — вокзал со своим главным путём в чистом поле (короткие хвосты за стрелками).
-    const st = game.placeStation(at(1200, 300), 14, 'rail', SERVES, 0, 2)!;
+    const st = [300, -300, 400, -400].map((side) => game.placeStation(at(1200, side), 14, 'rail', SERVES, 0, 2)).find(Boolean)!;
     expect(st).toBeTruthy();
     const before = railCount(game);
     expect(game.extendRailPlatforms(st.id)).toBeNull();

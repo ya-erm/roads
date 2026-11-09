@@ -57,12 +57,20 @@ describe('Предупреждения станции', () => {
 
   it('маршрут отсюда есть, но эту продукцию не берёт — так и сказано, действие — новый маршрут', () => {
     const { game, ind, st } = fullStation();
-    const other = game.industries
+    // Ближайший завод, который эту продукцию не берёт и до которого можно провести шоссе.
+    const others = game.industries
       .filter((i) => i !== ind && !i.info.accepts.includes(ind.info.produces) && i.info.accepts.length)
-      .sort((x, y) => dist(x.fp.center, ind.fp.center) - dist(y.fp.center, ind.fp.center))[0];
-    const sB = stationAtIndustry(game, other, ind.fp.center)!;
-    expect(connectStations(game, st, sB, { cls: 'highway', lanes: twoWay(1, 1) })).toBe(true);
-    const line = game.createLine([st.id, sB.id])!;
+      .sort((x, y) => dist(x.fp.center, ind.fp.center) - dist(y.fp.center, ind.fp.center));
+    let sB = null;
+    for (const other of others.slice(0, 4)) {
+      const s = stationAtIndustry(game, other, ind.fp.center);
+      if (s && connectStations(game, st, s, { cls: 'highway', lanes: twoWay(1, 1) })) {
+        sB = s;
+        break;
+      }
+    }
+    expect(sB).not.toBeNull();
+    const line = game.createLine([st.id, sB!.id])!;
     game.buyVehicle(line.id, 'truck');
     st.cargo[ind.info.produces] = game.stationStorage(st);
     const w = stationWarnings(game, st).find((x) => x.key === `storage:${st.id}`)!;

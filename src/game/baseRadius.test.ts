@@ -10,7 +10,7 @@ import type { WorldSettings } from '../world/settings';
 import { advise } from './advisor';
 import { type Brigade, type CrewHost, Crews, type Site } from './crews';
 import { Game } from './game';
-import { anchorOf, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 /**
  * Радиус обслуживания базы (CONSTRUCTION.serviceRadius): автоматика шлёт бригаду только на стройку в радиусе её базы,
@@ -222,16 +222,9 @@ describe('Радиус обслуживания базы в игре: «нет �
   /** Узел дороги в точке p (в пределах метра). */
   const nodeAt = (game: Game, p: Vec) => [...game.roads.net.nodes.values()].find((n) => dist(n.pos, p) < 1)?.id ?? null;
 
-  /** Место в поле, далеко от городов: ровная полоса в len метров вдоль x. */
+  /** Место в поле: полоса в len метров вдоль x без дорог, домов и воды. */
   function field(game: Game, len: number): Vec {
-    for (let y = 400; y < game.terrain.height - 400; y += 120) {
-      for (let x = 300; x < game.terrain.width - len - 300; x += 160) {
-        if (game.towns.some((t) => dist({ x: x + len / 2, y }, t.center) < t.radius + len)) continue;
-        const plan = game.roadBuilder.road(anchorOf(game, { free: { x, y } }), anchorOf(game, { free: { x: x + len, y } }), STREET);
-        if (plan.ok && !plan.demolish.length) return { x, y };
-      }
-    }
-    throw new Error('нет места');
+    return openSpot(game, [[{ x: 0, y: 0 }, { x: len, y: 0 }, 150]]);
   }
 
   /** Готовая дорога в поле, база у её начала и проект от её дальнего конца: подъезд есть, а база далеко. */

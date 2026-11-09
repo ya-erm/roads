@@ -7,7 +7,7 @@ import { RAIL_SPEC, RoadSpec } from '../world/roadTypes';
 import type { RoadRequest, Snap } from './build';
 import { Game } from './game';
 import { snapRails } from './railFragment';
-import { road, roadPlan, STREET as STREET_LANES, withoutCitizens } from './testkit';
+import { clearStrip, road, roadPlan, STREET as STREET_LANES, withoutCitizens } from './testkit';
 import { carsOf, vehicleCapacity } from './transport';
 import { wagonFills } from '../sim/wagons';
 import { CARGO } from '../world/cargo';
@@ -97,6 +97,8 @@ function tryBuild(game: Game, build: () => boolean): boolean {
 function junctionYard(game: Game, far: Vec[], withRoad = false): Vec {
   return somewhere(game, (o) => {
     if (o.x > game.terrain.width - 900 || far.some((f) => dist(f, add(o, { x: 250, y: 0 })) < 700)) return false;
+    // Под рамкой копирования — только пути двора: без чужих дорог (стартовых просёлков) и домов.
+    if (!clearStrip(game, add(o, { x: -60, y: 0 }), add(o, { x: 560, y: 0 }), 140)) return false;
     const main = straight(o, add(o, { x: 500, y: 0 }), RAIL_SPEC);
     if (!game.builder.plan(main).ok) return false;
     return tryBuild(game, () => {

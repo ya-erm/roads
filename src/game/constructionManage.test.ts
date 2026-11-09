@@ -7,7 +7,7 @@ import type { Vec } from '../core/vec';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import { Game } from './game';
-import { anchorOf, type End, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, clearStrip, type End, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
@@ -65,6 +65,8 @@ function gateAt(game: Game, p: Vec): number {
 function freeSpot(game: Game, len: number, from = 400): Vec {
   for (let y = from; y < game.terrain.height - 400; y += 120) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 160) {
+      // В чистом поле (без дорог, стартовых просёлков, зданий и воды): новая дорога ни с чем не пересекается.
+      if (!clearStrip(game, { x, y }, { x: x + len, y }, 150)) continue;
       const plan = game.roadBuilder.road(anchorOf(game, { free: { x, y } }), anchorOf(game, { free: { x: x + len, y } }), STREET);
       if (plan.ok && !plan.demolish.length) return { x, y };
     }
@@ -245,9 +247,14 @@ describe('Стройка: приоритет проекта', () => {
    */
   function twoProjects(): { game: Game; near: number; far: number } {
     const game = buildGame();
-    const at = freeSpot(game, 500);
+    // Оба места — в поле, второе в 600 м южнее; дорога от ворот ко второму тоже идёт полем.
+    const at = openSpot(game, [
+      [{ x: 0, y: 0 }, { x: 500, y: 0 }, 150],
+      [{ x: 0, y: 600 }, { x: 500, y: 600 }, 150],
+      [{ x: -150, y: 0 }, { x: -150, y: 600 }, 100],
+    ]);
     const base = crewAt(game, { x: at.x - 30, y: at.y }, 1, at);
-    const at2 = freeSpot(game, 500, at.y + 600);
+    const at2 = { x: at.x, y: at.y + 600 };
     const gate2 = gateAt(game, at2);
     expect(road(game, base.nodeId, gate2)).toBe(true);
     expect(project(game, { free: at }, { free: { x: at.x + 500, y: at.y } })).toBe(true);

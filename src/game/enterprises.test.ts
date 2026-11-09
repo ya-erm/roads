@@ -7,7 +7,7 @@ import type { Industry, Station, Town } from '../world/entities';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
 import { footprintRadius } from '../world/spatial';
 import { Game } from './game';
-import { connectStations, runMonths, runSeconds, STREET, stationAtIndustry, townStreets, withoutCitizens } from './testkit';
+import { connectNodes, runMonths, runSeconds, STREET, stationAtIndustry, stationExit, townStreets, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 7, size: 'small', towns: 5, money: 5_000_000, biome: 'temperate', relief: 'plains' };
 
@@ -198,16 +198,33 @@ describe('постройка', () => {
     // Станция у завода сама берёт пассажиров: ему нужен подвоз рабочих.
     const dock = stationAtIndustry(g, ind, town.center)!;
     expect(dock.serves.pax).toBe(true);
-    // Автовокзал на улице в центре города.
-    const street = townStreets(g, town.id).sort((a, b) => a.lut.closest(town.center).d - b.lut.closest(town.center).d)[0];
-    const mid = street.lut.pointAt(street.length / 2);
-    const st = [0, 10, -10, 20, -20].map((k) => g.placeStation(add(mid, { x: k, y: k }), 14, 'road', { pax: true, cargo: false })).find(Boolean)!;
-    expect(st).toBeTruthy();
-    expect(connectStations(g, st, dock, STREET)).toBe(true);
-    const line = g.createLine([st.id, dock.id])!;
+    // Автовокзал на городской улице-тупике, ближайшей к заводу (на окраине со стороны завода): от её конца — дорога к
+    // заводу, не сквозь кварталы.
+    const net = g.roads.net;
+    const ends = [...new Set(townStreets(g, town.id).flatMap((c) => [c.a, c.b]))]
+      .map((id) => net.node(id))
+      .filter((n) => n.corridors.length === 1)
+      .sort((a, b) => dist(a.pos, ind.fp.center) - dist(b.pos, ind.fp.center));
+    let st: Station | null = null;
+    for (const end of ends.slice(0, 6)) {
+      const street = net.corridor(end.corridors[0]);
+      const mid = street.lut.pointAt(street.length / 2);
+      const t = street.lut.tangentAt(street.length / 2);
+      const placed = [-1, 1].map((side) => g.placeStation({ x: mid.x - t.y * side * 40, y: mid.y + t.x * side * 40 }, 14, 'road', { pax: true, cargo: false })).find(Boolean);
+      if (!placed) continue;
+      // Узел на месте тупика (улицу станция могла разрезать — берём ближайший к его месту).
+      const tip = net.nodesNear(end.pos, 2)[0] ?? end;
+      if (connectNodes(g, tip, stationExit(g, dock.nodeId), STREET)) {
+        st = placed;
+        break;
+      }
+    }
+    expect(st).not.toBeNull();
+    const line = g.createLine([st!.id, dock.id])!;
     for (let i = 0; i < 3; i++) g.buyVehicle(line.id, 'bus');
     const money = g.money;
-    runMonths(g, 3);
+    // Завод далеко (дальше дальней поездки на работу): первый автобус доезжает за пару месяцев.
+    for (let m = 0; m < 10 && (ind.crew ?? 0) <= 1; m++) runMonths(g, 0.5);
     expect(ind.crew ?? 0).toBeGreaterThan(1);
     expect(g.enterprises.staff(ind)).toBeGreaterThan(0.05);
     // Рабочие проезд не оплачивают: у линии в один конец выручки нет, только содержание.
