@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { RENEW_GAP, type RenewCar, renewStep } from './autoRenew';
 import { Game } from './game';
-import { freightRoute, runSeconds, withoutCitizens } from './testkit';
+import { freightRoute, freshGame, runSeconds, withoutCitizens } from './testkit';
 import { type Line, MODELS, renewOn, vehicleCapacity } from './transport';
 
 const car = (id: number, over: Partial<RenewCar> = {}): RenewCar => ({ id, capacity: 16, next: 24, free: true, load: 0, ...over });
@@ -28,7 +28,7 @@ describe('Шаг модернизации (renewStep)', () => {
 
 /** Ферма → пищекомбинат по своей трассе, без машин жителей: n грузовиков и авто-парк от 1 до n. */
 function truckLine(n = 3) {
-  const game = withoutCitizens(new Game(7));
+  const game = withoutCitizens(freshGame(7));
   const { built, line } = freightRoute(game);
   expect(built).toBe(true);
   for (let i = 0; i < n; i++) game.buyVehicle(line.id, 'truck');

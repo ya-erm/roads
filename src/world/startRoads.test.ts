@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { add, dist, scale, type Vec } from '../core/vec';
 import { Game } from '../game/game';
+import { freshGame } from '../game/testkit';
 import { RoadTools } from '../input/roadtools';
 import type { Corridor, LaneNet } from '../lanes/model';
 import type { Industry } from './entities';
@@ -69,7 +70,8 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
   it('по seed — одни и те же; дорога — к части предприятий, от них — к улицам города', () => {
     const shape = (g: Game) => startOf(g).map((c) => [c.curve.p0, c.curve.p3].map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).join('>'));
     for (const seed of [1, 5]) {
-      const game = new Game(seed);
+      const game = freshGame(seed);
+      // Вторая партия — заново генерацией, не копией.
       expect(shape(game)).toEqual(shape(new Game(seed)));
       const served = game.industries.filter((i) => roadSide(game, i));
       expect(served.length).toBeGreaterThan(game.industries.length / 5);
@@ -81,7 +83,7 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
   it('у городов близко к краю — шоссе 1+1 за край карты: от улиц города перекрёстком, прямо до края', () => {
     let found = 0;
     for (const seed of [1, 2, 3]) {
-      const game = new Game(seed);
+      const game = freshGame(seed);
       const net = game.roads.net;
       for (const c of edgeRoads(game)) {
         expect(c.cls).toBe('highway');
@@ -125,7 +127,7 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
 
   it('тупики улиц остаются тупиками: машинам есть где развернуться, не уезжая в конец просёлка', () => {
     for (const seed of [1, 7]) {
-      const game = new Game(seed);
+      const game = freshGame(seed);
       const net = game.roads.net;
       for (const n of net.nodes.values()) {
         const cls = n.corridors.map((id) => net.corridor(id).cls);
@@ -136,7 +138,7 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
   });
 
   it('мир под ними тот же: города, предприятия и случайность партии от просёлков не зависят', () => {
-    const game = new Game(3);
+    const game = freshGame(3);
     const ctx = game['worldContext']() as WorldContext;
     const net = game.roads.net;
     for (const c of startOf(game)) net.removeCorridor(c.id);
@@ -151,7 +153,7 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
   });
 
   it('грузовой двор с той стороны, куда подходит просёлок, встаёт напротив него и сам к нему подключается', () => {
-    const game = new Game(1);
+    const game = freshGame(1);
     game.money = 5_000_000;
     let checked = 0;
     for (const ind of game.industries) {
@@ -173,7 +175,7 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
   });
 
   it('игрок перестраивает и сносит просёлок, как обычную дорогу; шоссе за край — тоже', () => {
-    const game = new Game(1);
+    const game = freshGame(1);
     game.money = 5_000_000;
     const tools = new RoadTools(() => game);
     const net = () => game.roads.net;
@@ -194,7 +196,7 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
   });
 
   it('сохраняются вместе с дорогами; партия без них (старое сохранение) открывается без них', () => {
-    const game = new Game(2);
+    const game = freshGame(2);
     const count = startOf(game).length;
     expect(count).toBeGreaterThan(0);
     const save = JSON.parse(JSON.stringify(game.toSave()));

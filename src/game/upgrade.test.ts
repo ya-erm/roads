@@ -4,14 +4,13 @@ import { oneWay } from '../lanes/model';
 import type { RoadSpec } from '../world/roadTypes';
 import { footprintCorners } from '../world/spatial';
 import { corridorHalf } from '../world/worldgen';
-import { Game } from './game';
-import { townStreets } from './testkit';
+import { freshGame, townStreets } from './testkit';
 
 const AVENUE: RoadSpec = { cls: 'avenue', lanesF: 2, lanesB: 2 };
 
 describe('Перестройка дороги', () => {
   it('расширенная улица отодвигает дома, которые на неё налезли', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     // Улица города с домами вдоль неё.
@@ -41,7 +40,7 @@ describe('Перестройка дороги', () => {
   });
 
   it('односторонняя «против оси» при расширении едет в ту же сторону, повторный клик — разворачивает', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const net = game.roads.net;
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];

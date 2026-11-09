@@ -3,6 +3,7 @@ import { MONTH_LENGTH } from '../config';
 import { TOWN_HISTORY, TOWN_NEED } from '../world/entities';
 import { townNeed } from '../world/townSupply';
 import { Game, SaveData } from './game';
+import { freshGame } from './testkit';
 
 /** Закрывает текущий месяц настоящим шагом игры: время — к самой границе месяца. */
 function closeMonth(game: Game): void {
@@ -16,7 +17,7 @@ const roundTrip = (game: Game) => JSON.parse(JSON.stringify(game.toSave())) as S
 
 describe('Снабжение города по месяцам', { timeout: 60_000 }, () => {
   it('итоги каждого месяца пишутся в историю города: привезено по каждому грузу и норма', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = game.towns.find((t) => t.demands.length >= 2)!;
     const [a, b] = town.demands;
     expect(town.supplyHistory ?? []).toEqual([]);
@@ -48,7 +49,7 @@ describe('Снабжение города по месяцам', { timeout: 60_00
   });
 
   it(`история хранит только последние ${TOWN_HISTORY} месяцев`, () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = game.towns[0];
     const c = town.demands[0];
     const labels: string[] = [];
@@ -63,7 +64,7 @@ describe('Снабжение города по месяцам', { timeout: 60_00
   });
 
   it('история переживает сохранение и загрузку и дальше пополняется', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     for (let m = 0; m < 3; m++) {
       for (const t of game.towns) t.supplied[t.demands[0]] = 5 * (m + 1);
       closeMonth(game);
@@ -76,7 +77,7 @@ describe('Снабжение города по месяцам', { timeout: 60_00
   });
 
   it('излишек сверх нормы засчитывается следующему месяцу (не больше нормы) и виден в истории и после загрузки', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = game.towns.find((t) => t.demands.length >= 2)!;
     const [a, b] = town.demands;
     const n1 = townNeed(town.population);
@@ -111,7 +112,7 @@ describe('Снабжение города по месяцам', { timeout: 60_00
   });
 
   it('крупному городу базовой нормы мало: месяц закрывает только норма по его населению', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const big = [...game.towns].sort((x, y) => y.population - x.population)[0];
     const small = [...game.towns].sort((x, y) => x.population - y.population)[0];
     expect(big.population).toBeGreaterThan(10_000);
@@ -133,7 +134,7 @@ describe('Снабжение города по месяцам', { timeout: 60_00
   });
 
   it('старое сохранение без истории грузится: история пустая и начинается со следующего месяца', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     closeMonth(game);
     const save = roundTrip(game);
     for (const t of save.towns) delete t.supplyHistory;

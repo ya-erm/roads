@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { SIM_DT } from '../config';
 import { CARGO, FREIGHT, isTankCargo } from '../world/cargo';
 import { Game } from './game';
-import { freightRoute, withoutCitizens } from './testkit';
+import { freightRoute, freshGame, withoutCitizens } from './testkit';
 import { type FleetVehicle, MODELS, modelName, TANKER_NAMES } from './transport';
 
 /** Ждёт, пока машина не поедет с грузом по дороге. */
@@ -33,7 +33,7 @@ describe('Автоцистерны: нефть, топливо и газ воз�
   });
 
   it('на маршруте скважина → НПЗ грузовик — автоцистерна: и пустой, и с нефтью, на карте — цистерна', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { built, line } = freightRoute(game, 'oilwell', 'refinery');
     expect(built).toBe(true);
     expect(game.lineFreight(line)).toEqual(['oil']);
@@ -51,7 +51,7 @@ describe('Автоцистерны: нефть, топливо и газ воз�
   });
 
   it('на маршруте ферма → пищекомбинат — обычный грузовик с кузовом', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { built, line } = freightRoute(game);
     expect(built).toBe(true);
     expect(game.tankLine(line)).toBe(false);
@@ -71,7 +71,7 @@ describe('Автоцистерны: нефть, топливо и газ воз�
   });
 
   it('груз из правила остановки входит в грузы маршрута: топливо и зерно — маршрут смешанный, не наливной', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { line } = freightRoute(game);
     line.rules = [{ wait: 'auto', maxWait: null, load: ['fuel'], unload: 'auto' }];
     // Поток зерна остаётся — маршрут смешанный.
@@ -80,7 +80,7 @@ describe('Автоцистерны: нефть, топливо и газ воз�
   });
 
   it('старое сохранение: купленный раньше грузовик на нефтяном маршруте после загрузки едет автоцистерной', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { line } = freightRoute(game, 'oilwell', 'refinery');
     const truck = game.buyVehicle(line.id, 'truck')!;
     driveLoaded(game, truck);

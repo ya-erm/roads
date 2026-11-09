@@ -3,7 +3,7 @@ import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
 import { townPaxWant } from '../world/townPax';
 import { Game, type SaveData } from './game';
-import { connectStations, HIGHWAY, runMonths, townStreets, withoutCitizens } from './testkit';
+import { connectStations, freshGame, HIGHWAY, runMonths, townStreets, withoutCitizens } from './testkit';
 import { townPax } from './townPax';
 
 /** Станция у улицы города — на той, что ближе к соседнему городу toward (как в routeWaiting.test.ts). */
@@ -25,7 +25,7 @@ function stationIn(game: Game, townId: number, toward: { x: number; y: number })
 
 describe('Пассажиры города в «Что нужно городу»', { timeout: 120_000 }, () => {
   it('без линий: хотят ездить по населению, никого не везут, ближние города — без линии', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const town = [...game.towns].sort((x, y) => y.population - x.population)[0];
     const p = townPax(game, town);
     expect(p.want).toEqual(townPaxWant(town.population));
@@ -39,7 +39,7 @@ describe('Пассажиры города в «Что нужно городу»'
   });
 
   it('автобус между городами: довезённые — в счёт города отправления, направление — с линией; месяц закрывается и сохраняется', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     game.money = 5_000_000;
     const [a, ...rest] = [...game.towns].sort((x, y) => y.population - x.population);
     const b = rest.sort((x, y) => dist(x.center, a.center) - dist(y.center, a.center))[0];

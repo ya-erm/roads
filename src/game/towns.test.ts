@@ -6,7 +6,7 @@ import type { Town, TownBuilding } from '../world/entities';
 import { RAIL_HALF, RAIL_SPEC } from '../world/roadTypes';
 import { coreRadius, fillStreet, measureTown, onRail, railNear, WorldContext } from '../world/worldgen';
 import { Game } from './game';
-import { road } from './testkit';
+import { freshGame, road } from './testkit';
 
 const grow = (game: Game, town: Town) => (game as unknown as { growTown(t: Town): void }).growTown(town);
 const farthest = (town: Town) => Math.max(...town.buildings.map((b) => dist(b.fp.center, town.center)));
@@ -45,7 +45,7 @@ describe('Рост городов', { timeout: 60_000 }, () => {
   });
 
   it('город растёт компактно: дома и новые улицы — у края застройки, без отростков в поле', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const sorted = [...game.towns].sort((a, b) => b.population - a.population);
     const towns = [sorted[0], sorted[sorted.length - 1]];
     const before = new Set(game.roads.net.corridors.keys());
@@ -74,7 +74,7 @@ describe('Рост городов', { timeout: 60_000 }, () => {
   });
 
   it('старый отросток (из прежних сохранений) остаётся как есть: город его не продлевает, радиус по нему не растёт', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     // Сеть после каждой стройки — новая.
     const net = () => game.roads.net;
@@ -116,7 +116,7 @@ describe('Рост городов', { timeout: 60_000 }, () => {
   });
 
   it('на ж/д путях город не строит ни домов, ни улиц; дома на путях из старых сохранений сносятся', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     // Путь насквозь через город — как в старом сохранении, где дома под ним остались.
     const dir = { x: Math.cos(0.4), y: Math.sin(0.4) };

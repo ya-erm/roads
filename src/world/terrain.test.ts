@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Game } from '../game/game';
-import { roadPlan } from '../game/testkit';
+import { freshGame, roadPlan } from '../game/testkit';
 import { RoadTools } from '../input/roadtools';
 import { Rng } from '../core/rng';
 import { altitudeText, buildContours, heightLabel } from '../render/relief';
@@ -206,7 +206,7 @@ describe('Рельеф', () => {
   });
 
   it('склон, по которому дорога не проходит, можно срыть кистью — и дорога строится', () => {
-    const game = new Game({ ...settings('mountains', 13), money: 50_000_000 });
+    const game = freshGame({ ...settings('mountains', 13), money: 50_000_000 });
     const t = game.terrain;
     const free = (p: { x: number; y: number }) => !t.isWater(p, 60) && t.inBounds(p, 200) && !game.blocked(p, 120) && !game.roads.net.corridorsNear(p, 150).length;
     let done = false;
@@ -229,7 +229,7 @@ describe('Рельеф', () => {
   });
 
   it('«Авто»: дорога, упёршаяся в насыпь, сама строится с мостом и пандусами; конец −/+ — выше начала', () => {
-    const game = new Game({ ...settings('mountains', 13), money: 50_000_000 });
+    const game = freshGame({ ...settings('mountains', 13), money: 50_000_000 });
     const t = game.terrain;
     const rt = new RoadTools(() => game);
     const spec = { cls: 'street' as const, lanesF: 1, lanesB: 1 };

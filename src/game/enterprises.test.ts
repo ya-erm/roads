@@ -7,11 +7,11 @@ import type { Industry, Station, Town } from '../world/entities';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
 import { footprintRadius } from '../world/spatial';
 import { Game } from './game';
-import { connectNodes, runMonths, runSeconds, STREET, stationAtIndustry, stationExit, townStreets, withoutCitizens } from './testkit';
+import { connectNodes, freshGame, runMonths, runSeconds, STREET, stationAtIndustry, stationExit, townStreets, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 7, size: 'small', towns: 5, money: 5_000_000, biome: 'temperate', relief: 'plains' };
 
-const player = (extra: Partial<WorldSettings> = {}) => withoutCitizens(new Game({ ...WORLD, ...extra }));
+const player = (extra: Partial<WorldSettings> = {}) => withoutCitizens(freshGame({ ...WORLD, ...extra }));
 /** Просторная карта с редкими городами: есть места, куда рабочие сами не дойдут. */
 const SPARSE: Partial<WorldSettings> = { size: 'medium', towns: 4 };
 
@@ -73,7 +73,8 @@ describe('мир «Строит игрок»', () => {
 
   it('по seed мир тот же; сохранение хранит месторождения и состояние предприятий', () => {
     const a = player();
-    const b = player();
+    // Заново по тому же seed — генерация, а не копия свежей партии (player).
+    const b = new Game({ ...WORLD });
     expect(b.enterprises.deposits).toEqual(a.enterprises.deposits);
     expect(b.industries.map((i) => [i.info.kind, i.fp.center])).toEqual(a.industries.map((i) => [i.info.kind, i.fp.center]));
     const ruin = a.industries.find((i) => i.ruin);

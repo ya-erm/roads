@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH, TERM_SCALE } from '../config';
 import { dist } from '../core/vec';
 import { Game } from '../game/game';
-import { connectStations as connect, stationAtIndustry, withoutCitizens } from '../game/testkit';
+import { connectStations as connect, freshGame, stationAtIndustry, withoutCitizens } from '../game/testkit';
 import { twoWay } from '../lanes/model';
 import { DEFAULT_SETTINGS, WorldSettings } from '../world/settings';
 import { industryById, producible, receivers, refOf } from './analysis';
@@ -82,7 +82,7 @@ describe('Сценарий: генерация', { timeout: 120_000 }, () => {
 
   it('не выдаёт заданий с недоступными грузами: и на старте, и на этапах B и C', () => {
     for (const seed of [5, 42, 99, 314]) {
-      const game = new Game(scenario(seed));
+      const game = freshGame(scenario(seed));
       const sc = game.scenario!;
       for (const o of sc.state.objectives) checkObjective(game, o);
       skipPhase(sc);
@@ -97,7 +97,7 @@ describe('Сценарий: генерация', { timeout: 120_000 }, () => {
   });
 
   it('проверка выполнимости отсекает невозможное', () => {
-    const game = new Game(scenario(42));
+    const game = freshGame(scenario(42));
     const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;
     const town = game.towns[0];
     // Комбинат не принимает доски, город не растёт в 10 раз за год, 100 000 зерна регион не даст.
@@ -145,7 +145,7 @@ describe('Сценарий: генерация', { timeout: 120_000 }, () => {
 describe('Сценарий: задания по реальной симуляции', { timeout: 180_000 }, () => {
   it('поставка засчитывается фактической доставкой, а не постройкой; выполненный контракт платит награду', () => {
     // Трасса — своя сеть в стороне от городов: машины жителей на неё не попадают, без них счёт в разы быстрее.
-    const game = withoutCitizens(new Game(scenario(42)));
+    const game = withoutCitizens(freshGame(scenario(42)));
     const sc = game.scenario!;
     game.money = 5_000_000;
     const supplies = game.industries
@@ -183,7 +183,7 @@ describe('Сценарий: задания по реальной симуляц�
   it('дедлайны идут по единому игровому времени при любой скорости', () => {
     for (const speed of [1, 4]) {
       // Сроки — по игровому времени, жители ни при чём: месяц без их машин.
-      const game = withoutCitizens(new Game(scenario(42)));
+      const game = withoutCitizens(freshGame(scenario(42)));
       const sc = game.scenario!;
       const o = sc.addObjective(
         { kind: 'passengers', amount: 1_000_000, towns: null },
@@ -211,7 +211,7 @@ describe('Сценарий: задания по реальной симуляц�
   });
 
   it('главная цель не выполнена — «последний шанс», провал и его — конец сценария с оценкой', () => {
-    const game = new Game(scenario(42));
+    const game = freshGame(scenario(42));
     const sc = game.scenario!;
     const main = sc.state.objectives.find((o) => o.role === 'main')!;
     setMonth(game, main.deadline! - 1);
@@ -232,7 +232,7 @@ describe('Сценарий: задания по реальной симуляц�
 
 describe('Сценарий: экономические события', { timeout: 120_000 }, () => {
   it('события меняют состояние мира: мощность, производство, рост, потребности, цены — и эффекты истекают', () => {
-    const game = new Game(scenario(42));
+    const game = freshGame(scenario(42));
     const sc = game.scenario!;
     const farm = game.industries.find((i) => i.info.kind === 'farm')!;
     farm.level = 4;
@@ -283,7 +283,7 @@ describe('Сценарий: экономические события', { timeou
   });
 
   it('цепочка: дефицит → контракт выполнен → завод расширяется → заказ на сырьё и развитие города', () => {
-    const game = new Game(scenario(42));
+    const game = freshGame(scenario(42));
     const sc = game.scenario!;
     const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;
     const town = game.towns.reduce((best, t) => (dist(t.center, plant.fp.center) < dist(best.center, plant.fp.center) ? t : best));
@@ -312,7 +312,7 @@ describe('Сценарий: экономические события', { timeou
   });
 
   it('отказ от контракта — другой путь: завод сокращает выпуск, регион теряет активность', () => {
-    const game = new Game(scenario(42));
+    const game = freshGame(scenario(42));
     const sc = game.scenario!;
     const plant = game.industries.find((i) => i.info.kind === 'sawmill')!;
     plant.level = 2;
@@ -328,7 +328,7 @@ describe('Сценарий: экономические события', { timeou
   });
 
   it('события не повторяются бесконечно: память, паузы, предел активных и предел роста', () => {
-    const game = new Game(scenario(42));
+    const game = freshGame(scenario(42));
     const sc = game.scenario!;
     sc.state.phase = 1;
     const fired: { type: string; key: string; month: number }[] = [];
@@ -378,7 +378,7 @@ describe('Сценарий: экономические события', { timeou
 describe('Сценарий: сохранение', { timeout: 120_000 }, () => {
   it('сохранение и загрузка не сбрасывают задания, прогресс, сроки, эффекты, историю и генератор', () => {
     // Состояние сценария от машин жителей не зависит: полмесяца — без них.
-    const game = withoutCitizens(new Game(scenario(42)));
+    const game = withoutCitizens(freshGame(scenario(42)));
     const sc = game.scenario!;
     const offer = sc.offers[0];
     expect(offer).toBeTruthy();

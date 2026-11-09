@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import { Game, type SaveData } from './game';
 import type { JournalEntry } from './journal';
-import { anchorOf, fieldSpot, freightRoute, runMonths, STREET, withoutCitizens } from './testkit';
+import { anchorOf, fieldSpot, freightRoute, freshGame, runMonths, STREET, withoutCitizens } from './testkit';
 import {
   buildTimeline,
   curveRec,
@@ -57,7 +57,7 @@ describe('Таймлапс партии: запись кадров', { timeout: 
   });
 
   it('первый кадр — мир на старте целиком, дальше — только изменения: дорога, станции, маршрут, транспорт', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const frames = game.timelapse.frames;
     expect(frames).toHaveLength(1);
     const start = frames[0];
@@ -99,7 +99,7 @@ describe('Таймлапс партии: запись кадров', { timeout: 
   });
 
   it('снос — номером в кадре; раскладка знает, когда объект появился и когда исчез', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { line, sA } = freightRoute(game);
     runMonths(game, 1.05);
     game.deleteLine(line.id);
@@ -117,7 +117,7 @@ describe('Таймлапс партии: запись кадров', { timeout: 
   });
 
   it('кадры сохраняются и загружаются: после загрузки запись продолжается изменениями, не целиком', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     freightRoute(game);
     runMonths(game, 2.05);
     const saved = roundTrip(game);
@@ -137,7 +137,7 @@ describe('Таймлапс партии: запись кадров', { timeout: 
   });
 
   it('старое сохранение без кадров: запись начинается с загрузки — первым кадром целиком', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { sA } = freightRoute(game);
     runMonths(game, 1.05);
     const saved = roundTrip(game);
@@ -157,7 +157,7 @@ describe('Таймлапс партии: запись кадров', { timeout: 
   });
 
   it('новая партия — без кадров по журналу; финал — сеть на сейчас, даже если месяц не кончился', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     freightRoute(game);
     const src = timelapseOf(game);
     expect(src.rough).toBe(false);
@@ -265,7 +265,7 @@ describe('Таймлапс партии: запись кадров', { timeout: 
   });
 
   it('за год партии кадры весят малую долю сохранения', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     freightRoute(game);
     runMonths(game, 12.05);
     const save = JSON.stringify(game.toSave()).length;

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
 import { Game } from '../game/game';
 import { MoveProject } from '../game/moveProject';
-import { road, roadPlan } from '../game/testkit';
+import { freshGame, road, roadPlan } from '../game/testkit';
 import type { LaneNet } from '../lanes/model';
 import { RoadTools } from './roadtools';
 
@@ -39,7 +39,7 @@ const lanesAt = (net: LaneNet, y: number) =>
 
 describe('Проект полос', () => {
   it('протяжки «Полосы» копятся проектом, дорога не меняется; «Построить» — все разом одним Ctrl+Z', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     const o = street(game);
     const tools = new RoadTools(() => game);
     const project = new MoveProject(() => game, { shove: true, label: 'полоса' });
@@ -122,7 +122,7 @@ describe('Проект полос', () => {
   });
 
   it('без проекта «Полоса» строит сразу, как раньше', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     const o = street(game);
     const tools = new RoadTools(() => game);
     const before = lanesAt(game.roads.net, o.y);

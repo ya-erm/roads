@@ -5,7 +5,7 @@ import { twoWay } from '../lanes/model';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { Game } from './game';
 import { Journal, JOURNAL_LIMIT, journalFile, tidy } from './journal';
-import { connectStations, stationAtIndustry, withoutCitizens } from './testkit';
+import { connectStations, freshGame, stationAtIndustry, withoutCitizens } from './testkit';
 
 /** months месяцев — и ещё кадр: ровно на границе месяца время, накопленное шагами симуляции, может не дотянуть. */
 function runMonths(game: Game, months: number): void {
@@ -50,7 +50,7 @@ describe('Журнал партии', { timeout: 120_000 }, () => {
   });
 
   it('пишет стройку, станции, маршрут, покупки, рейсы с доставкой и месячные сводки производства', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const { line, farm, plant, sA, sB } = farmLine(game);
     // 2 мин 24 с: рейсы с доставкой и две месячные сводки.
     runMonths(game, 1.2 * TERM_SCALE);
@@ -98,7 +98,7 @@ describe('Журнал партии', { timeout: 120_000 }, () => {
   });
 
   it('хранится в сохранении и продолжается после загрузки', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     farmLine(game);
     runMonths(game, 0.5);
     const n = game.journal.entries.length;

@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { addPhase, movePhase, phaseToggle, removePhase, specOf, toggleTurn, withLeftArrows } from '../lanes/lights';
 import { renameArm } from '../lanes/model';
 import { Game } from './game';
-import { withoutCitizens } from './testkit';
+import { freshGame, withoutCitizens } from './testkit';
 
 /** Перекрёсток на четыре дороги без светофора и кольца — со светофором. */
 function lit() {
-  const game = withoutCitizens(new Game(7));
+  const game = withoutCitizens(freshGame(7));
   game.money = 1_000_000;
   const net = game.roads.net;
   const n = [...net.nodes.values()].find(

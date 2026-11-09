@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
 import { Game } from '../game/game';
 import { MoveProject } from '../game/moveProject';
-import { road, roadPlan } from '../game/testkit';
+import { freshGame, road, roadPlan } from '../game/testkit';
 import { type LaneNet, oneWay, twoWay } from '../lanes/model';
 import { RoadTools } from './roadtools';
 
@@ -27,7 +27,7 @@ function drag(tools: RoadTools, pts: Vec[]): string | null {
 
 describe('Инструмент «Полоса»: место рядом с другой дорогой', () => {
   it('полоса с дальней от соседней дороги стороны строится, с ближней — слишком близко', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     let o: Vec | null = null;
     for (let y = 400; y < game.terrain.height - 400 && !o; y += 120) {
       for (let x = 300; x < game.terrain.width - 900 && !o; x += 160) {
@@ -45,7 +45,7 @@ describe('Инструмент «Полоса»: место рядом с дру
 
 describe('Перестроить: разворот односторонней', () => {
   it('тот же профиль поверх односторонней из нескольких кусков разворачивает её всю, без встречных полос на стыках', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     const ONE = { cls: 'street' as const, lanes: oneWay(1) };
     let o: Vec | null = null;
     for (let y = 400; y < game.terrain.height - 400 && !o; y += 120) {
@@ -70,7 +70,7 @@ describe('Перестроить: разворот односторонней', 
 
 describe('Инструмент «Полоса»: протяжка', () => {
   it('полоса, которую тянут вдоль края, проходит через стык дальше', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     const o = streetWithSeam(game);
     const tools = new RoadTools(() => game);
     const edge = (dx: number) => ({ x: o.x + dx, y: o.y + 10.5 });
@@ -84,7 +84,7 @@ describe('Инструмент «Полоса»: протяжка', () => {
   });
 
   it('тянут вдоль и уводят в сторону — съезд там, где ушли от края; правой кнопкой — отмена протяжки', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     const o = streetWithSeam(game);
     const tools = new RoadTools(() => game);
     const before = game.roads.net.corridors.size;
@@ -152,7 +152,7 @@ describe('Инструмент «Полоса»: направление ново
       .flatMap((c) => c.lanes.filter((l) => Math.abs(l.offset) > 7 && Math.sign(l.offset) * Math.sign(net.node(c.b).pos.x - net.node(c.a).pos.x) === side).map((l) => l.flow * Math.sign(net.node(c.b).pos.x - net.node(c.a).pos.x)));
 
   it('тянут против движения — полоса всё равно по движению с этой стороны; с Alt — встречная; в проекте так же', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     const o = streetWithSeam(game);
     const at = (dx: number, dy: number) => ({ x: o.x + dx, y: o.y + dy });
     const tools = new RoadTools(() => game);

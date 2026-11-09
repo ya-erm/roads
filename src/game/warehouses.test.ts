@@ -5,12 +5,12 @@ import type { Station } from '../world/entities';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { footprintRadius } from '../world/spatial';
 import { Game } from './game';
-import { stationAtIndustry, withoutCitizens } from './testkit';
+import { freshGame, stationAtIndustry, withoutCitizens } from './testkit';
 import { storageSlots, warehouseZone } from './warehouses';
 
 /** Автостанция у сырьевого предприятия. */
 function setup() {
-  const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 42 }));
+  const game = withoutCitizens(freshGame({ ...DEFAULT_SETTINGS, seed: 42 }));
   game.money = 5_000_000;
   const raw = game.industries.find((i) => !i.info.accepts.length)!;
   const st = stationAtIndustry(game, raw, { x: raw.fp.center.x + 600, y: raw.fp.center.y })!;

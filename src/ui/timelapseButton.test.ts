@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Game, type SaveData } from '../game/game';
-import { freightRoute, runMonths, withoutCitizens } from '../game/testkit';
+import { freightRoute, freshGame, runMonths, withoutCitizens } from '../game/testkit';
 import { spanText, timelapseItemHtml, timelapseState } from './timelapseButton';
 
 /** Сохранение без кадров таймлапса — как до этой версии игры; journal: false — и без журнала. */
@@ -13,7 +13,7 @@ function legacy(game: Game, journal = true): Game {
 
 describe('Кнопка «Таймлапс партии»', { timeout: 120_000 }, () => {
   it('новая партия: серая, в подсказке — когда появится; после стройки — можно смотреть', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const empty = timelapseState(game);
     expect(empty.ok).toBe(false);
     expect(empty.tip).toMatch(/в конце каждого месяца/);
@@ -33,7 +33,7 @@ describe('Кнопка «Таймлапс партии»', { timeout: 120_000 },
   });
 
   it('старое сохранение: начало — по журналу; без журнала и кадров — серая с объяснением', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     freightRoute(game);
     runMonths(game, 2.05);
     const rough = timelapseState(legacy(game));

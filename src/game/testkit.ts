@@ -6,8 +6,9 @@ import { Corridor, LaneNode, twoWay } from '../lanes/model';
 import type { IndustryKind } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
 import { RAIL_SPEC, type RoadClass } from '../world/roadTypes';
+import type { WorldSettings } from '../world/settings';
 import type { RoadRequest } from './build';
-import { Game } from './game';
+import { Game, type SaveData } from './game';
 import type { RoadPlan } from './roadbuild';
 
 export const STREET = { cls: 'street' as RoadClass, lanes: twoWay(1, 1) };
@@ -41,6 +42,28 @@ export function runMonths(game: Game, months: number, each?: () => void): void {
 export function withoutCitizens<G extends Game>(game: G): G {
   (game as unknown as { spawnCitizenTrip(): void }).spawnCitizenTrip = () => {};
   (game as unknown as { serviceTrips(): void }).serviceTrips = () => {};
+  return game;
+}
+
+/** Сохранения свежих партий по настройкам (в пределах файла тестов: у каждого файла свои модули). */
+const freshSaves = new Map<string, { settings: WorldSettings; save: string }>();
+
+/**
+ * Свежая партия — как new Game(setup), но мир по этим настройкам генерируется один раз на файл тестов: первый
+ * вызов отдаёт саму сгенерированную партию, следующие — её копию из сохранения, снятого сразу после генерации
+ * (загрузка в несколько раз быстрее генерации). Копия — та же партия: то же сохранение и та же симуляция до бита,
+ * с машинами жителей тоже; запись журнала о загрузке убрана. Партии друг от друга не зависят — каждую можно менять.
+ */
+export function freshGame(setup: WorldSettings | number): Game {
+  const key = JSON.stringify(setup);
+  const had = freshSaves.get(key);
+  if (had) {
+    const game = new Game(had.settings, JSON.parse(had.save) as SaveData);
+    if (game.journal.entries[game.journal.entries.length - 1]?.k === 'load') game.journal.entries.pop();
+    return game;
+  }
+  const game = new Game(setup);
+  freshSaves.set(key, { settings: game.settings, save: JSON.stringify(game.toSave()) });
   return game;
 }
 
@@ -180,7 +203,7 @@ export const RAIL_WORLD = { seed: 11, size: 'small', towns: 3, industries: 'few'
  * от городов (без машин жителей).
  */
 export function railProjectScene(): { game: Game; a: Station; b: Station; id: number; from: Vec; dir: Vec } {
-  const game = withoutCitizens(new Game(RAIL_WORLD));
+  const game = withoutCitizens(freshGame(RAIL_WORLD));
   const len = 2400;
   for (let y = 500; y < game.terrain.height - 500; y += 170) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 230) {

@@ -3,12 +3,12 @@ import { dist } from '../core/vec';
 import { twoWay } from '../lanes/model';
 import { Game } from './game';
 import { adviceTip, markAt, stationWarnings, warningMarks } from './stationWarnings';
-import { connectStations, fieldSpot, nearestPair, road, stationAtIndustry, withoutCitizens } from './testkit';
+import { connectStations, fieldSpot, freshGame, nearestPair, road, stationAtIndustry, withoutCitizens } from './testkit';
 import { DEFAULT_RULE } from './transport';
 
 /** Станция у добывающего предприятия, склад которой забит его продукцией. */
 function fullStation() {
-  const game = withoutCitizens(new Game(7));
+  const game = withoutCitizens(freshGame(7));
   game.money = 5_000_000;
   // Ферма и ближайший к ней пищекомбинат; станция фермы — со стороны комбината (к нему потом ведёт шоссе).
   const { a: ind, b: to } = nearestPair(game, 'farm', 'foodplant');

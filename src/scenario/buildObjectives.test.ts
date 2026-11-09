@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Game } from '../game/game';
-import { withoutCitizens } from '../game/testkit';
+import { freshGame, withoutCitizens } from '../game/testkit';
 import { isRaw } from '../world/enterprise';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
 import { producible, region } from './analysis';
@@ -32,7 +32,7 @@ describe('сценарий «Строит игрок»', () => {
   it('этап A: кроме первой линии — цель построить предприятие (завод для добычи без сбыта или добычу для завода)', () => {
     let seen = 0;
     for (const seed of [7, 42, 101]) {
-      const game = withoutCitizens(new Game(scenario(seed)));
+      const game = withoutCitizens(freshGame(scenario(seed)));
       const sc = game.scenario!;
       expect(sc.state.objectives.some((o) => o.phase === 0 && o.role === 'main')).toBe(true);
       const goal = buildGoals(game, 0)[0];
@@ -50,7 +50,7 @@ describe('сценарий «Строит игрок»', () => {
   });
 
   it('груз «можно получить», если его можно построить: месторождения и заводы биома', () => {
-    const game = withoutCitizens(new Game(scenario(7)));
+    const game = withoutCitizens(freshGame(scenario(7)));
     // Пиломатериалов на старте может не быть — но лесные участки есть, лесопилку можно построить.
     expect(game.enterprises.deposits.some((d) => d.kind === 'forest')).toBe(true);
     expect(producible(game, 'planks')).toBe(true);
@@ -58,7 +58,7 @@ describe('сценарий «Строит игрок»', () => {
   });
 
   it('прогресс «построить»: известные на выдаче не в счёт, новое — в счёт; «и выпустить» — по выпуску нового', () => {
-    const game = withoutCitizens(new Game(scenario(7)));
+    const game = withoutCitizens(freshGame(scenario(7)));
     const sc = game.scenario!;
     const d = game.enterprises.deposits.find((x) => x.used === undefined)!;
     const kind = d.kind;
@@ -77,7 +77,7 @@ describe('сценарий «Строит игрок»', () => {
   });
 
   it('этапы B и C подталкивают строить: своя новая цепочка, «построить N предприятий» вместо «подключить»', () => {
-    const game = withoutCitizens(new Game(scenario(42)));
+    const game = withoutCitizens(freshGame(scenario(42)));
     advance(game);
     const b = game.scenario!.state.objectives.filter((o) => o.phase === 1);
     expect(b.some((o) => o.params.kind === 'build' && o.params.produce)).toBe(true);
@@ -89,7 +89,7 @@ describe('сценарий «Строит игрок»', () => {
   });
 
   it('«построить» не выдаётся, если вида нет или нет свободных месторождений', () => {
-    const game = withoutCitizens(new Game(scenario(7)));
+    const game = withoutCitizens(freshGame(scenario(7)));
     const raw = game.enterprises.kinds().find(isRaw)!;
     for (const d of game.enterprises.deposits) if (d.kind === raw.kind) d.used = -1;
     expect(assess(game, { kind: 'build', count: 1, what: raw.kind, known: [] }, 10).ok).toBe(false);

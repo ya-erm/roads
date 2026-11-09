@@ -6,11 +6,11 @@ import { footprintRadius } from '../world/spatial';
 import { annexHtml } from '../ui/annexUi';
 import { annexReady, annexZone, growthCap } from './annexes';
 import { Game } from './game';
-import { freightRoute, withoutCitizens } from './testkit';
+import { freightRoute, freshGame, withoutCitizens } from './testkit';
 
 /** Ферма с маршрутом (её продукцию вывозят) — как после месяцев исправной работы. */
 function setup() {
-  const game = withoutCitizens(new Game(7));
+  const game = withoutCitizens(freshGame(7));
   game.money = 5_000_000;
   const { built, line, from } = freightRoute(game);
   expect(built).toBe(true);

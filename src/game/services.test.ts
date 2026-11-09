@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { Game } from './game';
 import { serviceCall, SERVICE_KINDS, SERVICE_TRAFFIC, type ServiceKind } from './services';
-import { runSeconds } from './testkit';
+import { freshGame, runSeconds } from './testkit';
 
 describe('Спецтранспорт городов', { timeout: 60_000 }, () => {
   it('выезды — по seed партии: те же номер и город — та же машина; все три службы, мигалка — у части', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const kinds = new Map<ServiceKind, number>();
     let sirens = 0;
@@ -57,7 +57,7 @@ describe('Спецтранспорт городов', { timeout: 60_000 }, () =>
   });
 
   it('счётчик выездов — в сохранении; старое сохранение без него открывается и выезды идут', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     runSeconds(game, 20);
     const save = JSON.parse(JSON.stringify(game.toSave()));
     const loaded = new Game(save.settings, save);
@@ -67,12 +67,15 @@ describe('Спецтранспорт городов', { timeout: 60_000 }, () =>
       delete t.serviceCalls;
     }
     const old = new Game(save.settings, save);
-    runSeconds(old, 60);
-    expect(old.towns.reduce((n, t) => n + (t.serviceCalls ?? 0), 0)).toBeGreaterThan(0);
+    // Первый выезд — не позже чем за минуту: дальше ждать незачем.
+    const calls = () => old.towns.reduce((n, t) => n + (t.serviceCalls ?? 0), 0);
+    old.speed = 1;
+    for (let t = 0; t < 60 && calls() === 0; t += 0.1) old.update(0.1);
+    expect(calls()).toBeGreaterThan(0);
   });
 
   it('карточка машины: спецмашина узнаётся — какая служба', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const call = Array.from({ length: 50 }, (_, i) => serviceCall(game.seed, town, i + 1)).find((c) => c)!;
     const sim = game.spawnService('fire', true, call.from.anchor, call.to.anchor)!;

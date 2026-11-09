@@ -6,15 +6,9 @@ import { twoWay } from '../lanes/model';
 import type { Station, TownBuilding } from '../world/entities';
 import { halfAtS } from '../world/worldgen';
 import { Game } from './game';
-import { clearStrip, road, townStreets } from './testkit';
+import { clearStrip, freshGame, road, townStreets } from './testkit';
 
 const STREET_SPEC = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
-
-/** months месяцев — и ещё кадр, чтобы точно пересечь границу месяца. */
-function runMonths(game: Game, months: number) {
-  game.speed = 1;
-  for (let t = 0; t < months * MONTH_LENGTH + 0.1; t += 0.1) game.update(0.1);
-}
 
 /** Остановки на улицах крупнейшего города — не ближе minGap друг к другу. */
 function placeStops(game: Game, count: number, minGap = 350): Station[] {
@@ -35,7 +29,7 @@ function placeStops(game: Game, count: number, minGap = 350): Station[] {
 
 describe('Автобусные остановки', { timeout: 60_000 }, () => {
   it('маршрут по остановкам на улицах приносит доход; грузовики к остановкам не ездят', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const corridorsBefore = game.roads.net.corridors.size;
     const stops = placeStops(game, 3);
@@ -55,7 +49,9 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
     expect(game.buyVehicle(line.id, 'truck')).toBeNull();
     expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
     expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();
-    runMonths(game, TERM_SCALE);
+    // Первый доход — не позже чем за 2 мин: дальше ждать незачем.
+    game.speed = 1;
+    for (let t = 0; t < TERM_SCALE * MONTH_LENGTH + 0.1 && line.revenueTotal <= 0; t += 0.1) game.update(0.1);
     expect(line.revenueTotal).toBeGreaterThan(0);
     expect(line.problem).toBeNull();
     // Сохранение — с остановками.
@@ -69,7 +65,7 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
   });
 
   it('автобус на остановке стоит на дороге — его видно и можно выбрать — и едет дальше оттуда же, не появляясь заново', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const stops = placeStops(game, 2);
     const line = game.createLine(stops.map((s) => s.id))!;
@@ -104,7 +100,7 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
   });
 
   it('остановки и автостанции — в одном маршруте; рядом с остановкой вторую не поставить', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const [stop] = placeStops(game, 1);
     const near = game.stationPlan({ x: stop.fp.center.x + 10, y: stop.fp.center.y }, 14, 'stop');
@@ -124,7 +120,7 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
   });
 
   it('станцию можно переименовать: пробелы обрезаются, пустое имя не принимается, имя переживает загрузку', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const [a, b, c] = placeStops(game, 3);
     const auto = game.createLine([a.id, b.id])!;
@@ -150,7 +146,7 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
   });
 
   it('где остановку не поставить, её силуэт всё равно есть — для красного предпросмотра', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const net = game.roads.net;
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     // У самого перекрёстка — навес у края улицы.
@@ -182,7 +178,7 @@ describe('Автобусные остановки', { timeout: 60_000 }, () => {
 
 describe('Линия автобусного маршрута на карте', { timeout: 60_000 }, () => {
   it('от остановки линия идёт дальше по улице, как автобус (разворот — в тупике), а не обратно из её узла', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     let o: { x: number; y: number } | null = null;
     for (let y = 400; y < game.terrain.height - 400 && !o; y += 120) {
       for (let x = 300; x < game.terrain.width - 900 && !o; x += 160) {
@@ -205,7 +201,7 @@ describe('Линия автобусного маршрута на карте', {
 
 describe('Полоса у остановки («кармашек»)', { timeout: 60_000 }, () => {
   it('полоса вдоль края у остановки строится: навес отходит к новому бордюру, дом на его пути сносится, автобусы ходят', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     let o: { x: number; y: number } | null = null;
     for (let y = 400; y < game.terrain.height - 400 && !o; y += 120) {
       for (let x = 300; x < game.terrain.width - 1100 && !o; x += 160) {
@@ -270,7 +266,7 @@ describe('Полоса у остановки («кармашек»)', { timeout:
   });
 
   it('«Перестроить» улицу у остановки в проспект: навес отходит к новому бордюру, а не мешает', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     let o: { x: number; y: number } | null = null;
     for (let y = 400; y < game.terrain.height - 400 && !o; y += 120) {
       for (let x = 300; x < game.terrain.width - 1100 && !o; x += 160) {

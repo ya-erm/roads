@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { Game, type SaveData } from '../game/game';
-import { withoutCitizens } from '../game/testkit';
+import { freshGame, withoutCitizens } from '../game/testkit';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { LATE, POINTS, REPUTATION } from './content';
 import { lateMonths, lateReward, type Scenario } from './manager';
@@ -9,7 +9,7 @@ import type { Difficulty, Objective } from './types';
 
 /** Партия-сценарий без предложений контрактов: их истечение не меняет репутацию посреди проверки. */
 function newGame(difficulty: Difficulty = 'normal'): Game {
-  const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 42, scenario: { difficulty, challenge: false } }));
+  const game = withoutCitizens(freshGame({ ...DEFAULT_SETTINGS, seed: 42, scenario: { difficulty, challenge: false } }));
   for (const o of game.scenario!.offers) game.scenario!.decline(o.id);
   return game;
 }

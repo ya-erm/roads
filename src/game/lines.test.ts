@@ -4,7 +4,7 @@ import type { Station } from '../world/entities';
 import { ECONOMY } from '../config';
 import { dist } from '../core/vec';
 import { Game } from './game';
-import { stationAtIndustry, townStreets } from './testkit';
+import { freshGame, stationAtIndustry, townStreets } from './testkit';
 import { LINE_COLORS, type FleetVehicle, type Line } from './transport';
 
 // Авто-парк и равномерный выпуск машин (симуляции на месяцы) — в autoFleet.test.ts.
@@ -25,7 +25,7 @@ type Internals = { handleStop(v: FleetVehicle, st: Station, line: Line): void };
 
 describe('Маршруты и склады', () => {
   it('маршрут редактируется: станции добавляются, переставляются и удаляются', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const farm = game.industries.find((i) => i.info.kind === 'farm')!;
     const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;
     const a = stationAtIndustry(game, farm, plant.fp.center)!;
@@ -44,7 +44,7 @@ describe('Маршруты и склады', () => {
   });
 
   it('склад: груз выгружается на пересадке и оплачивается при доставке от первой станции', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const farm = game.industries.find((i) => i.info.kind === 'farm')!;
     const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;
@@ -90,7 +90,7 @@ describe('Маршруты и склады', () => {
   });
 
   it('прокладываемый маршрут — цветом будущей линии: грузовой — цветом груза, пассажирский — свободным цветом', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const farm = game.industries.find((i) => i.info.kind === 'farm')!;
     const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;
     const a = stationAtIndustry(game, farm, plant.fp.center)!;
@@ -110,7 +110,7 @@ describe('Маршруты и склады', () => {
   });
 
   it('станция только для груза не набирает пассажиров', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const hub = townStation(game);
     expect(hub.serves.pax).toBe(false);
     expect(hub.catchPop).toBe(0);

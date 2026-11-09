@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { clockText, durationText } from '../core/timeText';
 import { Game } from '../game/game';
-import { freightRoute, withoutCitizens } from '../game/testkit';
+import { freightRoute, freshGame, withoutCitizens } from '../game/testkit';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { briefHtml, isFolded, leftPanelHtml, leftTab, leftTabs, objectiveHtml, offerBannerHtml, offersSectionHtml, toggleFold, type PanelView } from './scenarioUi';
 
 /** Партия-сценарий со стартовым предложением контракта и ещё одним — посрочнее. */
 function scenarioWithOffers() {
-  const game = new Game({ ...DEFAULT_SETTINGS, seed: 7, scenario: { difficulty: 'easy', challenge: false } });
+  const game = freshGame({ ...DEFAULT_SETTINGS, seed: 7, scenario: { difficulty: 'easy', challenge: false } });
   const sc = game.scenario!;
   const town = game.towns.find((t) => t.demands.length)!;
   const extra = sc.addObjective(

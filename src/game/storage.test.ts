@@ -5,11 +5,11 @@ import type { TownBuilding } from '../world/entities';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { advise } from './advisor';
 import { Game } from './game';
-import { stationAtIndustry } from './testkit';
+import { freshGame, stationAtIndustry } from './testkit';
 
 /** Песочница: станции у сырья и у завода, маршрут с грузовиком. */
 function setup() {
-  const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+  const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
   game.money = 5_000_000;
   const plant = game.industries.find((i) => i.info.accepts.length === 1)!;
   const input = plant.info.accepts[0];

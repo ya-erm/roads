@@ -3,8 +3,7 @@ import { ECONOMY, MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import type { IndustryKind } from '../world/cargo';
 import type { Station } from '../world/entities';
-import { Game } from './game';
-import { freightRoute, runMonths, townStreets, withoutCitizens } from './testkit';
+import { freightRoute, freshGame, runMonths, townStreets, withoutCitizens } from './testkit';
 import { MODELS, modelsFor } from './transport';
 
 /**
@@ -17,7 +16,7 @@ import { MODELS, modelsFor } from './transport';
  * в стороне от городов, машины жителей на неё не попадают: без них месяц симуляции — доли секунды.
  */
 function freightLine(seed: number, from: IndustryKind, to: IndustryKind, trucks: number, months: number) {
-  const game = withoutCitizens(new Game(seed));
+  const game = withoutCitizens(freshGame(seed));
   const { built, line, from: f } = freightRoute(game, from, to);
   expect(built).toBe(true);
   for (let i = 0; i < trucks; i++) game.buyVehicle(line.id, 'truck');
@@ -89,7 +88,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
 
   it('автобусы в городе окупаются', () => {
     // Машины жителей здесь нужны: автобусы делят с ними улицы.
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const placed: Station[] = [];
@@ -146,7 +145,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
 
   it('кредит: проценты раз в месяц, гасится частями', () => {
     // Проценты от жителей не зависят: месяц — без их машин.
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const money = game.money;
     expect(game.takeLoan()).toBe(true);
     expect(game.loan).toBe(100_000);
@@ -160,7 +159,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
   });
 
   it('быстрая доставка оплачивается дороже, медленная — дешевле', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     expect(game.speedFactor(1500, 100)).toBe(1);
     expect(game.speedFactor(4500, 100)).toBe(1.5);
     expect(game.speedFactor(300, 100)).toBe(0.8);

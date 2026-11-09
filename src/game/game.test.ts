@@ -6,7 +6,7 @@ import { BASE_TOWN_CARGO, EXTRA_TOWN_CARGO, INDUSTRY_LIST } from '../world/cargo
 import type { Industry, Station } from '../world/entities';
 import { corridorHalf } from '../world/worldgen';
 import { Game } from './game';
-import { road, roadPlan, stationExit, townStreets, withoutCitizens } from './testkit';
+import { freshGame, road, roadPlan, stationExit, townStreets, withoutCitizens } from './testkit';
 
 function runSeconds(game: Game, seconds: number) {
   game.speed = 1;
@@ -62,7 +62,7 @@ describe('Игра', { timeout: 30_000 }, () => {
   }
 
   it('города разных стилей, у каждого свой спрос, все виды спроса покрыты', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     expect(game.towns.length).toBeGreaterThanOrEqual(8);
     expect(new Set(game.towns.map((t) => t.style)).size).toBeGreaterThanOrEqual(2);
     for (const t of game.towns) {
@@ -75,7 +75,7 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('станцию можно пристроить к предприятию с любой стороны', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;
     let sides = 0;
     for (const dir of [0, 1, 2, 3]) {
@@ -95,7 +95,7 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('металлургический завод работает только при наличии угля и руды', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const mill = game.industries.find((i) => i.info.kind === 'steelmill')!;
     mill.stock.coal = 30;
     runSeconds(game, 5);
@@ -108,7 +108,7 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('мясокомбинат делает продукты из скота и зерна, а зерно ферма может везти на два вида заводов', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const meat = game.industries.find((i) => i.info.kind === 'meatplant')!;
     meat.stock.livestock = 30;
     runSeconds(game, 5);
@@ -127,7 +127,7 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('подсказки партнёров: куда везти продукцию и откуда сырьё', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const farm = game.industries.find((i) => i.info.kind === 'farm')!;
     const out = game.partners(farm).filter((p) => p.direction === 'out');
     expect(out.length).toBeGreaterThan(0);
@@ -142,7 +142,7 @@ describe('Игра', { timeout: 30_000 }, () => {
 
   it('грузовая линия ферма → пищевой комбинат возит зерно', () => {
     // Дорога — своя сеть в стороне от городов: машины жителей на неё не попадают, без них счёт в разы быстрее.
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     // Ближайшая пара «ферма — комбинат».
     const pairs = game.industries
       .filter((i) => i.info.kind === 'farm')
@@ -183,7 +183,7 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('здания можно сносить, переносить, а дорога сквозь дома сносит их', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const houses = town.buildings.filter((b) => b.kind === 'res');
     // Снос.
@@ -222,7 +222,7 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('сохранение и загрузка восстанавливают партию', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const stations = placeStations(game, 2, 220);
     const line = game.createLine(stations.map((s) => s.id))!;
     game.renameLine(line.id, 'Кольцевая');
@@ -252,7 +252,7 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('город, которому тесно, сам прокладывает новые улицы и застраивает их', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const grow = (game as unknown as { growTown(t: typeof town): void }).growTown.bind(game);
     const before = new Set(game.roads.net.corridors.keys());
@@ -278,14 +278,16 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('автобусная линия в городе приносит доход', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const stations = placeStations(game, 2, 220);
     expect(stations).toHaveLength(2);
     const line = game.createLine(stations.map((s) => s.id))!;
     expect(line).not.toBeNull();
     game.buyVehicle(line.id, 'bus');
     game.buyVehicle(line.id, 'bus');
-    runSeconds(game, MONTH_LENGTH * 2);
+    // Первый доход — не позже чем за два месяца: дальше ждать незачем.
+    game.speed = 1;
+    for (let t = 0; t < MONTH_LENGTH * 2 && line.revenueTotal <= 0; t += 0.1) game.update(0.1);
     expect(line.problem).toBeNull();
     expect(line.revenueTotal).toBeGreaterThan(0);
   });

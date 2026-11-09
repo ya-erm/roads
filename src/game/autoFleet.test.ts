@@ -9,6 +9,7 @@ import {
   anchorOf,
   connectStations,
   freightRoute,
+  freshGame,
   HIGHWAY,
   nearestPair,
   roadPlan,
@@ -54,7 +55,7 @@ function projectBetween(game: Game, sA: Station, sB: Station): boolean {
  * Трасса — своя сеть вдали от городов, машины жителей на неё не попадают: без них месяцы симуляции — доли секунды.
  */
 function farmRoute() {
-  const game = withoutCitizens(new Game(7));
+  const game = withoutCitizens(freshGame(7));
   const { built, line, from } = freightRoute(game);
   expect(built).toBe(true);
   return { game, line, farm: from };
@@ -250,7 +251,7 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
   });
 
   it('между станциями нет дороги — авто-парк не покупает, а проложили — сразу добирает до минимума', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { sA, sB, line } = roadlessRoute(game);
     expect(game.lineGap(line)).toBe(`Нет дороги: ${sA.name} → ${sB.name}`);
     // Минимум 2 — без дороги не докупает ни сразу, ни по итогам месяцев (груз на ферме копится).
@@ -275,7 +276,7 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
   });
 
   it('пустая линия без дороги (минимум 0): спрос есть, но машину не возвращает, пока нет дороги', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { sA, sB, line } = roadlessRoute(game);
     game.setLineAuto(line.id, { on: true, min: 0, max: 3 });
     expect(line.vehicles).toHaveLength(0);
@@ -321,7 +322,7 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
   });
 
   it('спрос пустой автобусной линии — по жителям у её остановок', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const placed: Station[] = [];
     for (const seg of townStreets(game, town.id)) {

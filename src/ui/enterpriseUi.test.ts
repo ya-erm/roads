@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ENTERPRISE } from '../config';
 import { Game } from '../game/game';
-import { withoutCitizens } from '../game/testkit';
+import { freshGame, withoutCitizens } from '../game/testkit';
 import { CARGO, INDUSTRY_TYPES } from '../world/cargo';
 import { townEdge, workersNeeded } from '../world/enterprise';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
@@ -18,7 +18,7 @@ function freeDeposit(g: Game) {
 
 describe('карточка месторождения', () => {
   it('клик по пятну выбирает свободное месторождение; занятое — нет', () => {
-    const g = withoutCitizens(new Game(WORLD));
+    const g = withoutCitizens(freshGame(WORLD));
     const d = freeDeposit(g);
     expect(g.enterprises.depositAt({ x: d.center.x + 20, y: d.center.y })?.id).toBe(d.id);
     const used = g.enterprises.deposits.find((x) => x.used !== undefined);
@@ -26,7 +26,7 @@ describe('карточка месторождения', () => {
   });
 
   it('что за сырьё, размер, добыча в месяц, рабочие и что строить — с ценой и кнопкой', () => {
-    const g = withoutCitizens(new Game(WORLD));
+    const g = withoutCitizens(freshGame(WORLD));
     const d = freeDeposit(g);
     const info = INDUSTRY_TYPES[d.kind];
     const html = depositCardHtml(g, d.id);
@@ -42,7 +42,7 @@ describe('карточка месторождения', () => {
   });
 
   it('у кого перерабатывают — заводы на это сырьё; построили — записка со ссылкой на предприятие', () => {
-    const g = withoutCitizens(new Game(WORLD));
+    const g = withoutCitizens(freshGame(WORLD));
     const d = freeDeposit(g);
     const cargo = INDUSTRY_TYPES[d.kind].produces;
     const plants = g.enterprises.kinds().filter((k) => k.accepts.includes(cargo));
@@ -57,7 +57,7 @@ describe('карточка месторождения', () => {
   });
 
   it('добыча на нём — с его богатством; прогноз в месяц по размеру', () => {
-    const g = withoutCitizens(new Game(WORLD));
+    const g = withoutCitizens(freshGame(WORLD));
     const d = freeDeposit(g);
     const probe = g.enterprises.depositProbe(d);
     expect(probe.info.kind).toBe(d.kind);

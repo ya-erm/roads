@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Industry, Station } from '../world/entities';
 import { Vec } from '../core/vec';
 import { Game, SaveData } from './game';
+import { freshGame } from './testkit';
 import type { Line } from './transport';
 
 function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Station | null {
@@ -17,7 +18,7 @@ function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Station | nu
 
 /** Игра с двумя линиями между фермой и пищевым комбинатом. */
 function setup(): { game: Game; l1: Line; l2: Line } {
-  const game = new Game(7);
+  const game = freshGame(7);
   const farm = game.industries.find((i) => i.info.kind === 'farm')!;
   const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;
   const a = stationAtIndustry(game, farm, plant.fp.center)!;

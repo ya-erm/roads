@@ -9,7 +9,7 @@ import type { Footprint } from '../world/spatial';
 import { fillStreet, nearHighway, type WorldContext } from '../world/worldgen';
 import { DEFAULT_RULE } from './transport';
 import { Game } from './game';
-import { AVENUE, End, roadPlan, stationAtIndustry, stationExit, STREET, withoutCitizens } from './testkit';
+import { AVENUE, End, freshGame, roadPlan, stationAtIndustry, stationExit, STREET, withoutCitizens } from './testkit';
 
 const AVENUE_SPEC: RoadSpec = { cls: 'avenue', lanesF: 2, lanesB: 2 };
 
@@ -81,7 +81,7 @@ function addHouse(game: Game, fp: Footprint, kind: TownBuilding['kind'] = 'res')
 
 describe('Станции', () => {
   it('посты погрузки можно добавлять и убирать, они сохраняются вместе со станцией', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const road = fieldRoad(game);
     const st = game.placeStation({ x: road.a.x + 200, y: road.y - 30 }, 14)!;
     expect(st).not.toBeNull();
@@ -123,7 +123,7 @@ describe('Станции', () => {
   });
 
   it('станция не растёт, если мешает дом, и называет причину', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const road = fieldRoad(game);
     const st = game.placeStation({ x: road.a.x + 200, y: road.y - 30 }, 14)!;
     const u = { x: Math.cos(st.fp.angle), y: Math.sin(st.fp.angle) };
@@ -141,7 +141,7 @@ describe('Станции', () => {
 
   it('с бóльшим числом постов грузится больше машин одновременно', () => {
     // Улица в чистом поле: машины жителей сюда не доезжают — без них счёт в разы быстрее.
-    const game = withoutCitizens(new Game(42));
+    const game = withoutCitizens(freshGame(42));
     const road = fieldRoad(game, 500);
     const a = game.placeStation({ x: road.a.x + 120, y: road.y - 30 }, 14)!;
     const b = game.placeStation({ x: road.a.x + 380, y: road.y - 30 }, 14)!;
@@ -166,7 +166,7 @@ describe('Станции', () => {
   }, 20_000);
 
   it('у перекрёстка выезд станции примыкает прямо к узлу', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const tee = fieldTee(game);
     expect(tee.kind).toBe('junction');
     expect(tee.corridors).toHaveLength(3);
@@ -186,7 +186,7 @@ describe('Станции', () => {
   });
 
   it('выезд станции — сразу шоссе 1+1, 90 км/ч: у улицы, у перекрёстка и у предприятия; цена — по шоссе', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     game.money = 5_000_000;
     const net = () => game.roads.net;
     const shosse = ROAD_PRESETS.find((p) => p.id === 'road')!.spec;
@@ -235,7 +235,7 @@ describe('Станции', () => {
   });
 
   it('к перекрёстку с выездом-шоссе другой станции можно пристроить ещё одну станцию — напротив', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const road = fieldRoad(game);
     const north = game.placeStation({ x: road.a.x + 200, y: road.y - 30 }, 14)!;
     const exit = stationExit(game, north.nodeId);
@@ -250,7 +250,7 @@ describe('Станции', () => {
   });
 
   it('у выезда-шоссе город застраивается, как у улицы: улица с автостанцией растёт, дома встают и рядом с выездом', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const road = fieldRoad(game);
     const st = game.placeStation({ x: road.a.x + 200, y: road.y - 30 }, 14)!;
     const net = game.roads.net;
@@ -279,7 +279,7 @@ describe('Станции', () => {
   });
 
   it('курсор у самого перекрёстка вдоль дороги — тоже примыкание к узлу, а не отказ', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const tee = fieldTee(game);
     // Вдоль дороги на восток, но в 20 м от перекрёстка: раньше здесь было «Слишком близко к перекрёстку».
     const north = game.stationPlan({ x: tee.pos.x + 20, y: tee.pos.y - 30 }, 14);
@@ -298,7 +298,7 @@ describe('Станции', () => {
   });
 
   it('где станцию не поставить, её силуэт всё равно есть — для красного предпросмотра', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     // В чистом поле — под курсором.
     const spot = fieldSpot(game, 200, 300);
     const p = { x: spot.x + 100, y: spot.y };
@@ -321,7 +321,7 @@ describe('Станции', () => {
   });
 
   it('дом на месте станции сносится за доплату, а Ctrl+Z его возвращает', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const road = fieldRoad(game);
     const p = { x: road.a.x + 200, y: road.y - 30 };
     const clean = game.stationPlan(p, 14);
@@ -346,7 +346,7 @@ describe('Станции', () => {
   });
 
   it('ратуша по-прежнему мешает: её не сносим', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const road = fieldRoad(game);
     const p = { x: road.a.x + 200, y: road.y - 30 };
     const clean = game.stationPlan(p, 14);
@@ -358,7 +358,7 @@ describe('Станции', () => {
   });
 
   it('дом на месте площадки у предприятия тоже идёт под снос', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     let checked = 0;
     for (const ind of game.industries) {
       for (const k of [0, 1, 2, 3]) {
@@ -383,7 +383,7 @@ describe('Станции', () => {
   });
 
   it('выезд станции перестраивается в проспект: своя станция не мешает, чужое здание — мешает', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     game.money = 5_000_000;
     const tools = new RoadTools(() => game);
     const net = () => game.roads.net;
@@ -429,7 +429,7 @@ describe('Станции', () => {
   });
 
   it('у широкой дороги станция прилипает: у проспекта ставится, у магистрали — силуэт с понятной причиной', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     game.money = 5_000_000;
     // Проспект 2+2: курсор в 45 от оси (≈30 от края) — раньше «Поставьте рядом с дорогой».
     const a = fieldSpot(game, 400);
@@ -460,7 +460,7 @@ describe('Станции', () => {
 
 describe('Машины в пути и сохранение', () => {
   it('после загрузки машина в пути едет дальше с того же места, а не со станции', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     const road = fieldRoad(game, 500);
     const a = game.placeStation({ x: road.a.x + 120, y: road.y - 30 }, 14)!;
     const b = game.placeStation({ x: road.a.x + 380, y: road.y - 30 }, 14)!;
@@ -525,7 +525,7 @@ describe('Перенос станции', { timeout: 60_000 }, () => {
 
   it('остановка переезжает на другую улицу: имя, пассажиры и маршрут те же, автобус доезжает до нового места; Ctrl+Z возвращает', () => {
     // Улицы в чистом поле: машины жителей сюда не доезжают — без них счёт в разы быстрее.
-    const game = withoutCitizens(new Game(42));
+    const game = withoutCitizens(freshGame(42));
     game.money = 5_000_000;
     const road = fieldRoad(game, 600);
     // Улица на юг из середины — туда перенесём остановку.
@@ -571,7 +571,7 @@ describe('Перенос станции', { timeout: 60_000 }, () => {
   });
 
   it('станция у предприятия переезжает на другую его сторону: груз и посты те же, грузовики ездят; Ctrl+Z возвращает', () => {
-    const game = new Game(42);
+    const game = freshGame(42);
     game.money = 5_000_000;
     const net = () => game.roads.net;
     let done = false;

@@ -3,7 +3,7 @@ import { add, scale, Vec } from '../core/vec';
 import { insideRuns } from '../lanes/edit';
 import { Game } from './game';
 import type { RoadPlan } from './roadbuild';
-import { road, roadPlan, townStreets } from './testkit';
+import { freshGame, road, roadPlan, townStreets } from './testkit';
 
 function runSeconds(game: Game, seconds: number) {
   game.speed = 1;
@@ -25,7 +25,7 @@ function throughTown(game: Game): RoadPlan | null {
 
 describe('Снос рамкой', () => {
   it('сносит дороги и дома внутри рамки одним шагом, Ctrl+Z возвращает', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const a = { x: town.center.x - 120, y: town.center.y - 120 };
     const b = { x: town.center.x + 120, y: town.center.y + 120 };
@@ -71,7 +71,7 @@ describe('Снос рамкой', () => {
 
 describe('Отмена развязки', () => {
   it('Ctrl+Z отменяет развязку, даже если город успел сам проложить улицу', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const before = game.roads.net.corridors.size;
     let built = false;
     for (let y = 800; y < game.terrain.height - 800 && !built; y += 200) {
@@ -95,7 +95,7 @@ describe('Отмена развязки', () => {
   });
 
   it('выключатель в городе запрещает прокладывать улицы', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     town.autoStreets = false;
     const corridors = game.roads.net.corridors.size;
@@ -107,7 +107,7 @@ describe('Отмена развязки', () => {
 
 describe('Отмена строительства', () => {
   it('Ctrl+Z возвращает дорогу, снесённые дома и деньги', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     runSeconds(game, 10);
     const plan = throughTown(game);
     expect(plan).not.toBeNull();
@@ -131,7 +131,7 @@ describe('Отмена строительства', () => {
   });
 
   it('пустое действие не занимает место в истории, станция отменяется', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.checkpoint('снос');
     game.commit();
     expect(game.canUndo).toBe(false);

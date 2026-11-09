@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
 import { Game } from '../game/game';
-import { road, roadPlan } from '../game/testkit';
+import { freshGame, road, roadPlan } from '../game/testkit';
 import { RoadTools } from './roadtools';
 
 const STREET = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
@@ -18,7 +18,7 @@ function streetEnd(game: Game): Vec {
 }
 
 describe('Прямая без прилипания (Cmd / Ctrl или Alt)', () => {
-  const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
   const end = streetEnd(game);
   const tools = new RoadTools(() => game);
   tools.begin(end, 14);
@@ -86,7 +86,7 @@ function moveScene(game: Game): { B: Vec; T: Vec; line: number } {
 }
 
 describe('«Двигать» без прилипания (Cmd / Ctrl или Alt)', () => {
-  const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
   const { B, T, line } = moveScene(game);
   const tools = new RoadTools(() => game);
   const nodeAt = (p: Vec) => game.roads.net.nodesNear(p, 1)[0];
@@ -144,7 +144,7 @@ describe('«Двигать» без прилипания (Cmd / Ctrl или Alt)
 });
 
 describe('Знак скорости: с Cmd / Ctrl — только участок под курсором', () => {
-  const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
   // Улица из трёх участков со стыками: (x, y) → +200 → +400 → +600.
   let o: Vec | null = null;
   for (let y = 400; y < game.terrain.height - 400 && !o; y += 150) {

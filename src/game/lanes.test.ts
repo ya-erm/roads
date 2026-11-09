@@ -6,6 +6,7 @@ import { laneKey, LaneNet, LaneNode, parseLaneKey, twoWay } from '../lanes/model
 import { findLaneRoute } from '../lanes/routing';
 import { LaneTraffic } from '../lanes/traffic';
 import { Game, LaneEnd } from './game';
+import { freshGame } from './testkit';
 
 const CAR = { kind: 'car' as const, length: 7, width: 4, maxSpeed: 30, accel: 10, color: '#888' };
 
@@ -38,7 +39,7 @@ function pickPair(game: Game, n: LaneNode): { from: LaneEnd; to: LaneEnd } {
 
 describe('Связи полос на перекрёстке', () => {
   it('настроенная полоса едет только по своим связям, остальные — как раньше', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const n = avenueCrossroads(game);
     const { from, to } = pickPair(game, n);
     expect(to).toBeDefined();
@@ -77,7 +78,7 @@ describe('Связи полос на перекрёстке', () => {
   });
 
   it('связи сохраняются вместе с игрой', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const n = avenueCrossroads(game);
     const { from, to } = pickPair(game, n);
     game.toggleLaneConnection(n.id, from.seg, from.i, to.seg, to.i);
@@ -88,7 +89,7 @@ describe('Связи полос на перекрёстке', () => {
   });
 
   it('связи, запреты и главная переживают разрезание примыкающих полотен', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const n = avenueCrossroads(game);
     const { from, to } = pickPair(game, n);
     game.toggleLaneConnection(n.id, from.seg, from.i, to.seg, to.i);
@@ -120,7 +121,7 @@ describe('Связи полос на перекрёстке', () => {
   });
 
   it('сброс возвращает автоматические связи', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const n = avenueCrossroads(game);
     const { from, to } = pickPair(game, n);
     const auto = targets(game, from.lane).length;
@@ -133,7 +134,7 @@ describe('Связи полос на перекрёстке', () => {
   });
 
   it('новый запрет поворота снимает связи полос в ту сторону', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const n = avenueCrossroads(game);
     const { from, to } = pickPair(game, n);
     game.toggleLaneConnection(n.id, from.seg, from.i, to.seg, to.i);
@@ -145,7 +146,7 @@ describe('Связи полос на перекрёстке', () => {
   });
 
   it('связь полос в запрещённую сторону снимает запрет: поворот снова есть (кнопок запрета в карточке нет)', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const n = avenueCrossroads(game);
     const { from, to } = pickPair(game, n);
     const turn = `${from.seg}>${to.seg}`;

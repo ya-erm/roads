@@ -3,7 +3,7 @@ import { MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
 import { Game } from './game';
-import { connectStations, freightRoute, HIGHWAY, nearestPair, runSeconds, stationAtIndustry, townStreets, withoutCitizens } from './testkit';
+import { connectStations, freightRoute, freshGame, HIGHWAY, nearestPair, runSeconds, stationAtIndustry, townStreets, withoutCitizens } from './testkit';
 
 /** Станция у улицы города — на той, что ближе к соседнему городу toward. */
 function stationIn(game: Game, townId: number, toward: { x: number; y: number }): Station {
@@ -24,7 +24,7 @@ function stationIn(game: Game, townId: number, toward: { x: number; y: number })
 
 /** Станции в двух ближних больших городах мира 7, шоссе между ними; line — строить ли маршрут. */
 function twoTowns(line: boolean) {
-  const game = withoutCitizens(new Game(7));
+  const game = withoutCitizens(freshGame(7));
   game.money = 5_000_000;
   const [a, ...rest] = [...game.towns].sort((x, y) => y.population - x.population);
   const b = rest.sort((x, y) => dist(x.center, a.center) - dist(y.center, a.center))[0];
@@ -62,7 +62,7 @@ describe('Пассажиры и груз копятся, как только е�
   });
 
   it('грузовой маршрут без грузовиков: продукция фермы идёт на станцию, пассажиров не ждут', () => {
-    const plain = withoutCitizens(new Game(7));
+    const plain = withoutCitizens(freshGame(7));
     const { a, b } = nearestPair(plain, 'farm', 'foodplant');
     const alone = stationAtIndustry(plain, a, b.fp.center)!;
     runSeconds(plain, MONTH_LENGTH);
@@ -70,7 +70,7 @@ describe('Пассажиры и груз копятся, как только е�
     expect(alone.cargo.grain ?? 0).toBe(0);
     expect(plain.industries.find((i) => i.id === a.id)!.producedMonth).toBe(0);
 
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { built, line, sA, from } = freightRoute(game);
     expect(built).toBe(true);
     expect(line.vehicles).toHaveLength(0);
@@ -87,7 +87,7 @@ describe('Пассажиры и груз копятся, как только е�
   });
 
   it('маршрут убрали — продукция больше не поступает', () => {
-    const game = withoutCitizens(new Game(7));
+    const game = withoutCitizens(freshGame(7));
     const { line, sA } = freightRoute(game);
     runSeconds(game, MONTH_LENGTH);
     const had = sA.cargo.grain ?? 0;

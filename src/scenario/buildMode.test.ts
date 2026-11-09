@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { CONSTRUCTION, MONTH_LENGTH, TERM_SCALE } from '../config';
 import { dist } from '../core/vec';
-import { Game } from '../game/game';
+import type { Game } from '../game/game';
+import { freshGame } from '../game/testkit';
 import { DEFAULT_SETTINGS, type WorldSettings } from '../world/settings';
 import { BUILD_ALLOWANCE, BUILD_SLACK, buildAllowance, buildReach, industryById, roadMonths, townById } from './analysis';
 import { PHASES } from './content';
@@ -17,16 +18,16 @@ const scenario = (seed: number, extra: Partial<WorldSettings> = {}): WorldSettin
 
 describe('Сценарий «Со строительством»', () => {
   it('время стройки дороги: столько, сколько строится улица на земле с запасом на изгибы', () => {
-    const instant = new Game({ ...DEFAULT_SETTINGS, seed: 3 });
-    const build = new Game({ ...DEFAULT_SETTINGS, seed: 3, construction: 'build' });
+    const instant = freshGame({ ...DEFAULT_SETTINGS, seed: 3 });
+    const build = freshGame({ ...DEFAULT_SETTINGS, seed: 3, construction: 'build' });
     expect(roadMonths(instant, 3000)).toBe(0);
     expect(roadMonths(build, 3000)).toBeCloseTo((3000 * 1.3) / CONSTRUCTION.speed / MONTH_LENGTH, 9);
     expect(buildReach(90)).toBeCloseTo((90 * CONSTRUCTION.speed) / 1.3, 9);
   });
 
   it('запас на стройку: полторы прикидки дорог по очереди, целыми минутами, от 2 до 6 мин; «Мгновенно» — без запаса', () => {
-    const instant = new Game({ ...DEFAULT_SETTINGS, seed: 3 });
-    const build = new Game({ ...DEFAULT_SETTINGS, seed: 3, construction: 'build' });
+    const instant = freshGame({ ...DEFAULT_SETTINGS, seed: 3 });
+    const build = freshGame({ ...DEFAULT_SETTINGS, seed: 3, construction: 'build' });
     expect(buildAllowance(instant, [525, 1786])).toBe(0);
     expect(buildAllowance(build, [])).toBe(0);
     // Короткая дорога — всё равно не меньше 2 мин: бригаде доехать, станции, машины.
@@ -42,8 +43,8 @@ describe('Сценарий «Со строительством»', () => {
 
   it('срок целей этапа A — с запасом на стройку, а прежний срок — быстрый (⚡) у каждой цели', () => {
     for (const seed of [5, 8, 13]) {
-      const instant = new Game(scenario(seed)).scenario!.state;
-      const game = new Game(scenario(seed, { construction: 'build' }));
+      const instant = freshGame(scenario(seed)).scenario!.state;
+      const game = freshGame(scenario(seed, { construction: 'build' }));
       const s = game.scenario!.state;
       const base = PHASES[0].months;
       const build = s.brief.build!;
@@ -67,7 +68,7 @@ describe('Сценарий «Со строительством»', () => {
   it('стартовый контракт — с запасом на стройку цепочки: быстрый срок — прежний, отсчёт с принятия', () => {
     let checked = 0;
     for (const seed of [5, 8, 13]) {
-      const game = new Game(scenario(seed, { construction: 'build' }));
+      const game = freshGame(scenario(seed, { construction: 'build' }));
       const sc = game.scenario!;
       const offer = sc.state.objectives.find((o) => o.role === 'contract' && o.status === 'offered');
       if (!offer) continue;
@@ -86,8 +87,8 @@ describe('Сценарий «Со строительством»', () => {
 
   it('оценка выполнимости и быстрый срок учитывают стройку дороги', () => {
     for (const seed of [5, 8]) {
-      const instant = new Game(scenario(seed));
-      const build = new Game(scenario(seed, { construction: 'build' }));
+      const instant = freshGame(scenario(seed));
+      const build = freshGame(scenario(seed, { construction: 'build' }));
       const main = build.scenario!.state.objectives.find((o) => o.role === 'main' && o.phase === 0)!;
       expect(main).toBeDefined();
       const p = main.params;
@@ -123,8 +124,8 @@ describe('Сценарий «Со строительством»', () => {
     let short = 0;
     let all = 0;
     for (const seed of [5, 8, 13, 21]) {
-      const longest = Math.max(...routes(new Game(scenario(seed))));
-      const game = new Game(scenario(seed, { construction: 'build' }));
+      const longest = Math.max(...routes(freshGame(scenario(seed))));
+      const game = freshGame(scenario(seed, { construction: 'build' }));
       const build = routes(game);
       // Со стройкой маршруты не длиннее, чем без неё (или строятся быстро — из коротких выбирается самая выгодная пара),
       // и почти всегда — в пределах быстрой стройки.

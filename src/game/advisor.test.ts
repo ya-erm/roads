@@ -3,11 +3,11 @@ import { ECONOMY, STATION } from '../config';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { advise, adviceOf, QUEUE_SECONDS, STUCK_SECONDS } from './advisor';
 import { Game } from './game';
-import { connectStations, HIGHWAY, stationAtIndustry } from './testkit';
+import { connectStations, freshGame, HIGHWAY, stationAtIndustry } from './testkit';
 
 /** Песочница с маршрутом сырьё → ближайший завод: станции у обоих и грузовик. */
 function setup() {
-  const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+  const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
   game.money = 5_000_000;
   const plant = game.industries.find((i) => i.info.accepts.length === 1)!;
   const input = plant.info.accepts[0];

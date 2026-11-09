@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
 import { Game } from './game';
-import { runSeconds, townStreets } from './testkit';
+import { freshGame, runSeconds, townStreets } from './testkit';
 
 /** Остановки на улицах крупнейшего города — не ближе minGap друг к другу. */
 function placeStops(game: Game, count: number, minGap = 350): Station[] {
@@ -23,7 +23,7 @@ function placeStops(game: Game, count: number, minGap = 350): Station[] {
 
 /** Городской автобусный маршрут по трём остановкам мира 7. */
 function townLine() {
-  const game = new Game(7);
+  const game = freshGame(7);
   game.money = 5_000_000;
   const stops = placeStops(game, 3);
   expect(stops).toHaveLength(3);

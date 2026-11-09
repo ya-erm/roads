@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import type { Industry, Station, StationServes } from '../world/entities';
 import { Game } from './game';
-import { stationAtIndustry, townStreets } from './testkit';
+import { freshGame, stationAtIndustry, townStreets } from './testkit';
 
 const PAX: StationServes = { pax: true, cargo: false };
 
@@ -29,7 +29,7 @@ function remoteMine(game: Game): Industry {
 
 describe('Станция у предприятия', () => {
   it('выбран автовокзал, а станция у предприятия без жителей — ставится грузовой, с заметкой и записью в журнале', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const mine = remoteMine(game);
     const st = dockAt(game, mine, PAX)!;
@@ -43,7 +43,7 @@ describe('Станция у предприятия', () => {
   });
 
   it('подпись инструмента знает заранее, какой станция получится', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const mine = remoteMine(game);
     const reach = Math.hypot(mine.fp.w, mine.fp.h) / 2 + 20;
@@ -62,7 +62,7 @@ describe('Станция у предприятия', () => {
   });
 
   it('автовокзал на улице города остаётся пассажирским', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     let st: Station | null = null;
@@ -79,7 +79,7 @@ describe('Станция у предприятия', () => {
   });
 
   it('грузовой маршрут через станцию без груза — остановка помечена, включили груз — пометка ушла', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const farm = game.industries.find((i) => i.info.kind === 'farm')!;
     const plant = game.industries

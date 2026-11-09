@@ -4,7 +4,7 @@ import { profileOf } from '../lanes/model';
 import type { RoadSpec } from '../world/roadTypes';
 import { Game } from './game';
 import type { TemplateKind } from './interchange';
-import { roadPlan } from './testkit';
+import { freshGame, roadPlan } from './testkit';
 
 const MOTORWAY: RoadSpec = { cls: 'motorway', lanesF: 2, lanesB: 2 };
 
@@ -101,7 +101,7 @@ describe('Шаблоны развязок', { timeout: 60_000 }, () => {
   });
 
   it('«Т-образная»: ответвление в сторону курсора, проезд во все стороны без перекрёстков на магистрали', () => {
-    const game = new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
     const center = placeOn(game, 'tee', 1600);
     // Курсор чуть ниже оси — ответвление вниз (+y).
     const plan = game.templatePlan({ x: center.x, y: center.y + 10 }, 14, { kind: 'tee', angle: 0, trunk: MOTORWAY });
@@ -118,7 +118,7 @@ describe('Шаблоны развязок', { timeout: 60_000 }, () => {
   });
 
   it('«клеверный лист» на магистрали: 12 направлений без перекрёстков', () => {
-    const game = new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
     const center = placeOn(game, 'clover', 1800);
     const plan = game.templatePlan(center, 14, { kind: 'clover', angle: 0, trunk: MOTORWAY });
     expect(game.buildTemplate(plan, 'клеверный лист')).toBeNull();
@@ -131,7 +131,7 @@ describe('Шаблоны развязок', { timeout: 60_000 }, () => {
 
   it('в чистом поле развязка строится вместе с магистралью', () => {
     for (const kind of ['diamond', 'tee', 'clover'] as TemplateKind[]) {
-      const game = new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+      const game = freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
       let built: Vec | null = null;
       for (let y = 800; y < game.terrain.height - 800 && !built; y += 200) {
         for (let x = 800; x < game.terrain.width - 800 && !built; x += 200) {

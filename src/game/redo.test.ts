@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { add, scale, Vec } from '../core/vec';
 import { Game } from './game';
 import type { RoadPlan } from './roadbuild';
-import { anchorOf, clearStrip, road, roadPlan, runSeconds, STREET, townStreets, withoutCitizens } from './testkit';
+import { anchorOf, clearStrip, freshGame, road, roadPlan, runSeconds, STREET, townStreets, withoutCitizens } from './testkit';
 
 /** Прямая дорога через самый большой город — поперёк его улиц, со сносом домов. */
 function throughTown(game: Game): RoadPlan | null {
@@ -42,7 +42,7 @@ function field(game: Game, len = 600): Vec {
 
 describe('Повтор отменённой стройки (Ctrl+Y)', () => {
   it('дорога со сносом домов: повтор строит её снова, сносит те же дома и списывает те же деньги — один раз', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     runSeconds(game, 10);
     const plan = throughTown(game);
     expect(plan).not.toBeNull();
@@ -89,7 +89,7 @@ describe('Повтор отменённой стройки (Ctrl+Y)', () => {
   });
 
   it('несколько отмен подряд повторяются в обратном порядке', () => {
-    const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' }));
+    const game = withoutCitizens(freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' }));
     const o = field(game, 900);
     const states = [built(game)];
     const money = [game.money];
@@ -116,7 +116,7 @@ describe('Повтор отменённой стройки (Ctrl+Y)', () => {
   });
 
   it('новое действие после отмены забывает повтор; пустое действие (клик без стройки) — нет', () => {
-    const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' }));
+    const game = withoutCitizens(freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' }));
     const o = field(game, 900);
     game.checkpoint('первая');
     expect(road(game, { free: o }, { free: add(o, { x: 300, y: 0 }) })).toBe(true);
@@ -137,7 +137,7 @@ describe('Повтор отменённой стройки (Ctrl+Y)', () => {
   });
 
   it('откат неудавшегося действия (undo(false)) повторить нельзя', () => {
-    const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' }));
+    const game = withoutCitizens(freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' }));
     const o = field(game);
     game.checkpoint('путь');
     expect(road(game, { free: o }, { free: add(o, { x: 300, y: 0 }) })).toBe(true);
@@ -147,7 +147,7 @@ describe('Повтор отменённой стройки (Ctrl+Y)', () => {
   });
 
   it('станция: повтор ставит её снова, отмена — снова убирает', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     let done = false;
     for (const seg of townStreets(game, town.id)) {
@@ -176,7 +176,7 @@ describe('Повтор отменённой стройки (Ctrl+Y)', () => {
   });
 
   it('снос рамкой: повтор сносит те же дороги и дома', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     const a = { x: town.center.x - 120, y: town.center.y - 120 };
     const b = { x: town.center.x + 120, y: town.center.y + 120 };

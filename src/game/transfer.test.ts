@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { TRANSFER } from '../config';
 import type { Station } from '../world/entities';
-import { Game } from './game';
-import { stationAtIndustry } from './testkit';
+import { freshGame, stationAtIndustry } from './testkit';
 import { transferable, transferNear, transferNeighbors } from './transfer';
 import type { FleetVehicle, Line } from './transport';
 
@@ -59,7 +58,7 @@ describe('Перевалка между соседними станциями', 
   });
 
   it('маршрут с автостанции забирает груз со склада соседней станции и везёт его от станции первой погрузки', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const farm = game.industries.find((i) => i.info.kind === 'farm')!;
     const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;
@@ -95,7 +94,7 @@ describe('Перевалка между соседними станциями', 
   });
 
   it('станции самого маршрута — не источник перевалки: свой груз туда-обратно не перекладывается', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 5_000_000;
     const farm = game.industries.find((i) => i.info.kind === 'farm')!;
     const plant = game.industries.find((i) => i.info.kind === 'foodplant')!;

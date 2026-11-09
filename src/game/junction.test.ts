@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { COST } from '../config';
 import { Game } from './game';
+import { freshGame } from './testkit';
 
 /** Обычный перекрёсток на четыре дороги без светофора и кольца. */
 function crossroads(game: Game) {
@@ -21,7 +22,7 @@ function movesCount(game: Game, node: number, from: number, out: number): number
 // Симуляция светофора и загрузка игры — дольше стандартного лимита при параллельном прогоне.
 describe('Настройка перекрёстка', { timeout: 20_000 }, () => {
   it('запрет поворота убирает манёвр и сохраняется вместе с игрой', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const n = crossroads(game);
     expect(n).toBeDefined();
     const info = game.junctionInfo(n.id)!;
@@ -37,7 +38,7 @@ describe('Настройка перекрёстка', { timeout: 20_000 }, () =>
   });
 
   it('главную дорогу выбирает игрок, а равнозначный перекрёсток — без приоритета', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const n = crossroads(game);
     const info = game.junctionInfo(n.id)!;
     expect(info.pairs.length).toBeGreaterThan(0);
@@ -50,7 +51,7 @@ describe('Настройка перекрёстка', { timeout: 20_000 }, () =>
   });
 
   it('главная дорога на карте — та, которой уступают машины; вариант под курсором перекрёсток не меняет', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 1_000_000;
     const n = crossroads(game);
     const sorted = (p: number[] | null) => [...(p ?? [])].sort((a, b) => a - b);
@@ -79,7 +80,7 @@ describe('Настройка перекрёстка', { timeout: 20_000 }, () =>
   });
 
   it('светофор по таймеру переключает фазы через заданное время, на красный никто не въезжает', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     const n = crossroads(game);
     game.money = 1_000_000;
     const money = game.money;
