@@ -20,6 +20,27 @@ export function planPrice(plan: { cost: number; project?: { cost: number; second
 }
 
 /**
+ * Перестройка готовой дороги у курсора («Со строительством», src/game/rebuild.ts): «🚧 $3 200 · ⏳ 40 с · ◐» — цена
+ * работ (по готовым метрам), сколько строить на ×1 и перекрытие на время работ: ◐ — по полосам (часть открыта),
+ * ⛔ — целиком (дорогу переносят). Правка — не перестройка (только новые дороги) — как planPrice; не проект — null.
+ */
+export function rebuildPrice(plan: { cost: number; project?: { cost: number; seconds: number; rebuild?: { moved: boolean } } }): string | null {
+  const p = plan.project;
+  if (!p) return null;
+  if (!p.rebuild) return planPrice(plan);
+  return `🚧 ${money(p.cost + Math.max(0, plan.cost))} · ⏳ ${durationText(p.seconds)} · ${p.rebuild.moved ? '⛔' : '◐'}`;
+}
+
+/**
+ * Сдвиг оси готовой дороги у курсора: «↔ 5 м ⚡» — не дальше порога limit (сразу, без стройки), «↔ 12 м 🚧» — дальше
+ * (перенос стройкой). Меньше полуметра — не сдвиг (null).
+ */
+export function shiftLabel(shift: number | undefined, limit: number): string | null {
+  if (shift === undefined || shift < 0.5) return null;
+  return `↔ ${Math.round(shift)} м ${shift > limit ? '🚧' : '⚡'}`;
+}
+
+/**
  * «Со строительством» проект дороже свободных денег (budget — до кредитного предела, без резерва): его всё равно можно
  * заложить — платится он по готовым метрам, без денег стоит. Предупреждение к цене — «💸 свободно $20 000 — стройка
  * пойдёт по мере денег» (жёлтым, а не отказом); денег хватает или это не проект — null.

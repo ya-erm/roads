@@ -32,7 +32,7 @@ import { type StationServes, stationTitle, type TownBuilding } from '../world/en
 import type { RoadNode } from '../world/network';
 import { DEFAULT_PRESET_ID, defaultPreset, isOneWay, KMH_PER_UNIT, LANE_W, LEVELS, MAX_LANES, RAIL_SPEC, ROAD_PRESETS, RoadSpec, TRACK_GAP } from '../world/roadTypes';
 import { aimAlong, railDirs } from './aim';
-import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, projectMoneyWarning, riseLabel, signedMetres, structureHeightText } from './labels';
+import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, projectMoneyWarning, rebuildPrice, riseLabel, shiftLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
 import type { MoveProject } from '../game/moveProject';
 import { onOldAxis } from '../game/roadbuild';
@@ -2544,7 +2544,10 @@ export class Controller {
     // Новое место навеса остановки, которую отодвинет расширение улицы.
     if (plan.ok) for (const fp of plan.moved ?? []) o.marks.push({ fp, ok: true });
     const razed = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
-    const info = `${okText}${profileNote(plan.profile)}${curveNote(plan)}${razed}`;
+    // «Со строительством» правка готовой дороги: сдвиг оси (⚡ сразу или 🚧 стройкой) и цена перестройки (rebuild.ts).
+    const moved = shiftLabel(plan.shift, CONSTRUCTION.rebuild.shift);
+    const works = okText.includes('🏗') ? null : rebuildPrice(plan);
+    const info = `${okText}${moved ? ` · ${moved}` : ''}${works ? ` · ${works}` : ''}${profileNote(plan.profile)}${curveNote(plan)}${razed}`;
     // Не хватает денег — всё равно видно, сколько стоит и какая выйдет дорога, и сколько есть.
     // «Со строительством» проект дороже свободных денег — закладывается, но жёлтым: стройка пойдёт по мере денег.
     const short = plan.ok ? projectMoneyWarning(plan, g.budget) : null;

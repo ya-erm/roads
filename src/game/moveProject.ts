@@ -75,7 +75,8 @@ export class MoveProject {
         if (tail && tail(n) === false) return false;
         return list.length > 0 || !!tail;
       },
-      { shove: this.shoves(list) },
+      // «Со строительством» существенные правки готовых дорог — перестройка стройкой (rebuild.ts).
+      { shove: this.shoves(list), rebuild: true },
     );
   }
 

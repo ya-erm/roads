@@ -54,9 +54,12 @@ export function projectBadges(game: Game, zoom: number, list: readonly ProjectIn
     const blocked = stuck && !info.waits;
     // Подъезд есть, но стройка вне радиуса всех баз — автоматика бригад сюда не шлёт.
     const far = info.noBase && crews.bases.size > 0;
-    const mark = p.paused ? '⏸' : p.stalled !== undefined ? '💸' : crew ? '🏗' : '🚚';
+    // Перестройка готовой дороги (rebuild.ts): «🚧 45%», а пока она перекрыта — как: «◐» по полосам, «⛔» целиком.
+    const re = info.rebuild;
+    const mark = p.paused ? '⏸' : p.stalled !== undefined ? '💸' : crew ? (re ? '🚧' : '🏗') : '🚚';
+    const shut = re?.closed ? (re.part > 0 && re.moved < re.count ? ' ◐' : ' ⛔') : '';
     const top = p.priority ? '⬆ ' : '';
-    let text = blocked ? `${top}🚚 нет подъезда` : waits ? `${top}⏳ после соседнего` : far ? `${top}⛔ нет базы рядом` : `${top}${mark} ${pct}%`;
+    let text = blocked ? `${top}🚚 нет подъезда` : waits ? `${top}⏳ после соседнего` : far ? `${top}⛔ нет базы рядом` : `${top}${mark} ${pct}%${shut}`;
     // Ж/д проект строит строительный поезд (workTrains.ts): баз не ждёт; стоит без вокзала или пути к стройке.
     const rail = p.rail ? game.construction.trains?.status(p.id, (id) => game.stations.get(id)?.name ?? '') : undefined;
     let railBad = false;

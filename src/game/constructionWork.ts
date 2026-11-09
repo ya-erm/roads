@@ -64,6 +64,16 @@ export function buildRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: 
   return CONSTRUCTION.speed / workFactor(net, c, isWater);
 }
 
+/**
+ * Темп стройки полотна, м/с на ×1 у одной бригады: новая дорога — buildRate; перестройка готовой (CorridorBuild.was,
+ * rebuild.ts) — быстрее на долю work (на месте часть работы уже сделана), а по полосам (part) — в partial раз дольше.
+ */
+export function pieceRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean): number {
+  const w = c.build?.was;
+  const rate = buildRate(net, c, isWater);
+  return w ? rate / (Math.max(0.05, w.work) * (w.part ? CONSTRUCTION.rebuild.partial : 1)) : rate;
+}
+
 /** Во сколько раз метр ж/д пути строится дольше метра обычной дороги: класс «rail» и мосты, эстакады, тоннели по высоте. */
 export function railWorkFactor(net: Network, s: Segment, isWater: (p: Vec, margin?: number) => boolean): number {
   const n = Math.max(2, Math.ceil(s.length / 24));
@@ -301,6 +311,13 @@ export function carryRailBuild(from: ReadonlyMap<number, { build?: CorridorBuild
  * готового; построенное там целиком — построено и тут. Нужна там, где сеть заменяют копией, сделанной раньше:
  * стройка за это время ушла вперёд. Поменянные полотна получают новую ревизию (отрисовка и граф их обновят).
  */
+/** Та же дорога: класс, ось и полосы (смещения и направления) совпадают. */
+function sameRoad(o: Corridor, c: Corridor): boolean {
+  const near = (u: Vec, v: Vec) => Math.abs(u.x - v.x) < 0.01 && Math.abs(u.y - v.y) < 0.01;
+  if (o.cls !== c.cls || o.lanes.length !== c.lanes.length || !near(o.curve.p1, c.curve.p1) || !near(o.curve.p2, c.curve.p2)) return false;
+  return o.lanes.every((l, i) => Math.abs(l.offset - c.lanes[i].offset) < 0.01 && l.flow === c.lanes[i].flow && Math.abs(l.to - l.from - (c.lanes[i].to - c.lanes[i].from)) < 0.5);
+}
+
 export function carryBuild(from: LaneNet, to: LaneNet): void {
   for (const c of to.corridors.values()) {
     if (!c.build) continue;
@@ -309,6 +326,8 @@ export function carryBuild(from: LaneNet, to: LaneNet): void {
     const same = (u: Vec, v: Vec) => Math.abs(u.x - v.x) < 0.01 && Math.abs(u.y - v.y) < 0.01;
     if (!o || !same(o.curve.p0, c.curve.p0) || !same(o.curve.p3, c.curve.p3)) continue;
     if (!o.build) {
+      // Перестройка готовой дороги (план её только что заложил): в живой сети — ещё прежняя дорога, а не достроенная.
+      if (c.build.was && !sameRoad(o, c)) continue;
       delete c.build;
       to.touch(c);
     } else if (o.build.project === c.build.project && o.build.done > c.build.done) {

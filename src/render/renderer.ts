@@ -54,7 +54,7 @@ import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
-import { baseBox, baseSig, buildingCorridors, drawBases, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
+import { baseBox, baseSig, buildingCorridors, drawBases, drawClosures, partialCorridors, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
 import { drawRailProjects, drawTrackMachines, railProjectSig } from './railProjectArt';
 import { WORK_TRAIN } from '../game/workTrains';
@@ -755,6 +755,9 @@ export class Renderer {
     this.drawStationAprons(game, roadNet, view);
     // Проекты стройки — будущей дорогой с готовым до края работ (поверх земли, под подсветкой правки); базы стройки.
     drawProjects(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
+    // Перестройка по полосам: открытые прежние полосы — поверх стройки (по ним едут), без площадок узлов.
+    const partial = partialCorridors(s.fullNet);
+    if (partial.size) this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0, { corridor: (id) => partial.has(id), node: () => false, shadow: 'skip' });
     drawRailProjects(ctx, game.net, segs, this.camera.zoom, 0);
     drawBases(ctx, game.construction.crews.bases.values(), view);
     if (o.roads) this.drawRoadPreview(o.roads);
@@ -1167,6 +1170,8 @@ export class Renderer {
         load: WORK_TRAIN.load,
       });
     }
+    // Перекрытия перестройки: щиты у концов закрытого и конусы вдоль открытых полос (rebuild.ts, closure.ts).
+    drawClosures(ctx, net, this.projectLanes.cutsOf(net), z, view);
     // Плашки над проектами — при любом зуме одного размера на экране (projectBadges: клик по плашке ищет её там же).
     for (const b of projectBadges(game, z, list)) {
       if (b.x < view.x0 - 200 || b.x > view.x1 + 200 || b.y < view.y0 - 200 || b.y > view.y1 + 200) continue;

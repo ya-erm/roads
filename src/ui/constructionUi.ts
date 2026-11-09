@@ -75,9 +75,13 @@ export function projectRowHtml(i: ProjectInfo, crew = 1, based = true, selected 
     ? `<button class="small" data-action="build-pause" data-id="${p.id}" data-tip="Строить дальше">▶ Дальше</button>`
     : `<button class="small" data-action="build-pause" data-id="${p.id}" data-tip="Пауза: проект стоит и не тратит денег">⏸ Пауза</button>`;
   const cancel = `<button class="small" data-action="build-cancel" data-id="${p.id}" data-tip="Отмена: недостроенное убрать, деньги за него — назад; готовые участки остаются (Ctrl+Z вернёт)">✕ Отмена</button>`;
+  // Перестройка готовой дороги (rebuild.ts): 🚧, а перекрыта — ◐ по полосам или ⛔ целиком.
+  const re = i.rebuild;
+  const shut = re?.closed ? (re.part > 0 && re.moved < re.count ? '◐' : '⛔') : '';
+  const reTip = !re ? '' : shut === '◐' ? 'Перестройка: открыта часть прежних полос, машины едут медленнее' : shut ? 'Перестройка: дорога перекрыта, машины объезжают' : 'Перестройка: пока не начали — ездят по прежней дороге';
   const marks = `${p.priority ? `<span class="bp-mark" data-tip="Приоритетный проект: бригады едут сначала сюда">⬆</span>` : ''}${
     p.reserve ? `<span class="bp-mark" data-tip="${esc(`В резерве ${money(p.reserve)}: стройка не встанет без денег`)}">🔒</span>` : ''
-  }`;
+  }${re ? `<span class="bp-mark" data-tip="${esc(reTip)}">🚧${shut}</span>` : ''}`;
   return `<div class="build-plate ${state}${selected ? ' selected' : ''}">
     <button class="icon bp-show" data-action="build-show" data-id="${p.id}" data-tip="Показать на карте и открыть карточку проекта">${buildSvg(26, 20)}</button>
     <span class="bp-name" data-action="build-show" data-id="${p.id}" data-tip="${esc(`${projectName(p)} · ${Math.round(i.length)} м · ещё ${money(i.left)} — открыть карточку`)}">${marks}${esc(projectName(p))}</span>

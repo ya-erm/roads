@@ -25,7 +25,8 @@ import { edgesAt, pointOff, stations } from '../lanes/geometry';
 import type { Corridor, LaneNet } from '../lanes/model';
 import { corridorLayer } from '../lanes/speedDisplay';
 import type { BuildBase } from '../world/entities';
-import { ROAD_MARGIN } from '../world/roadTypes';
+import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
+import { closureOf, fitLanes, partLanes } from '../lanes/closure';
 import { bridgePiers, drawCraneSet, drawShieldSet, type SiteKind, siteKind, slabTo } from './structureArt';
 import { type Box, grow } from './tileCache';
 
@@ -38,6 +39,14 @@ export function buildingCorridors(net: LaneNet): Corridor[] {
   const list = [...net.corridors.values()].filter((c) => c.build);
   cache.set(net, { version: net.version, list });
   return list;
+}
+
+/**
+ * Полотна перестройки, перекрытые по полосам (closure.ts, 'part'): открытые прежние полосы рисуются ещё раз — поверх
+ * стройки (отсыпки и чертежа), чтобы было видно, где едут машины.
+ */
+export function partialCorridors(net: LaneNet): Set<number> {
+  return new Set(buildingCorridors(net).filter((c) => closureOf(c.build) === 'part').map((c) => c.id));
 }
 
 const joints = new WeakMap<LaneNet, { version: number; open: LaneNet; ids: Set<number> }>();
@@ -541,6 +550,80 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
     ctx.stroke();
   }
   ctx.setLineDash([]);
+  ctx.restore();
+}
+
+/**
+ * Перекрытие перестройки на карте (rebuild.ts, closure.ts), поверх дорог в динамическом проходе: у концов перекрытого
+ * — красно-белые щиты поперёк закрытых полос (целиком — поперёк всего полотна), по полосам — ещё и ряд конусов по
+ * границе открытого и закрытого. cuts — обрезы полотен у перекрёстков (щит — сразу за площадкой узла).
+ */
+export function drawClosures(ctx: CanvasRenderingContext2D, net: LaneNet, cuts: Map<number, [number, number]>, zoom: number, view: Box): void {
+  if (zoom < 0.18) return;
+  const list = buildingCorridors(net).filter((c) => c.build?.was && seen(projectBox(c), view));
+  if (!list.length) return;
+  ctx.save();
+  ctx.lineCap = 'butt';
+  const px = 1 / Math.max(0.05, zoom);
+  for (const c of list) {
+    const k = closureOf(c.build);
+    if (k !== 'part' && k !== 'closed') continue;
+    const w = c.build!.was!;
+    const [ca, cb] = cuts.get(c.id) ?? [0, 0];
+    const L = c.length;
+    const ends = [Math.min(L / 2, Math.max(0, ca) + 3), Math.max(L / 2, L - Math.max(0, cb) - 3)];
+    // Закрытые полосы — поперечными отрезками [lo, hi] от оси: целиком — всё полотно (прежнее и новое), по полосам —
+    // прежние полосы, что не открыты.
+    const old = fitLanes(w.lanes, w.len, L);
+    const kept = new Set(k === 'part' ? partLanes(net, c).map((l) => l.offset) : []);
+    const half = LANE_W / 2;
+    const bands: [number, number][] = [];
+    if (k === 'closed') {
+      const e = edgesAt(c, L / 2);
+      const lo = Math.min(e?.[0] ?? 0, ...old.map((l) => l.offset - half));
+      const hi = Math.max(e?.[1] ?? 0, ...old.map((l) => l.offset + half));
+      bands.push([lo, hi]);
+    } else for (const l of old) if (!kept.has(l.offset)) bands.push([l.offset - half, l.offset + half]);
+    if (!bands.length) continue;
+    const bar = Math.max(2, 4 * px);
+    for (const s of ends) {
+      for (const [lo, hi] of bands) {
+        const p = pointOff(c, s, lo + 0.4);
+        const q = pointOff(c, s, hi - 0.4);
+        ctx.lineWidth = bar;
+        ctx.setLineDash([]);
+        ctx.strokeStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(q.x, q.y);
+        ctx.stroke();
+        ctx.strokeStyle = '#e8483f';
+        ctx.setLineDash([1.6, 1.6]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+    // По полосам: конусы по границе закрытого (со стороны открытых полос), каждые 12 м.
+    if (k === 'part') {
+      const keptOld = old.filter((l) => kept.has(l.offset));
+      const r = Math.max(0.7, 2.2 * px);
+      for (const [lo, hi] of bands) {
+        const edge = keptOld.some((l) => l.offset > hi - 0.01) ? hi : keptOld.some((l) => l.offset < lo + 0.01) ? lo : (lo + hi) / 2;
+        for (let s = ends[0] + 6; s < ends[1] - 3; s += 12) {
+          const p = pointOff(c, s, edge);
+          if (p.x < view.x0 - 5 || p.x > view.x1 + 5 || p.y < view.y0 - 5 || p.y > view.y1 + 5) continue;
+          ctx.fillStyle = '#f08a3c';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r * 0.4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }
   ctx.restore();
 }
 

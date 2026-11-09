@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ECONOMY } from '../config';
 import { Game } from '../game/game';
 import { roadPlan } from '../game/testkit';
-import { dirArrow, failText, laneFlowText, money, NO_MONEY, riseLabel, signedMetres, structureHeightText } from './labels';
+import { dirArrow, failText, laneFlowText, money, NO_MONEY, rebuildPrice, riseLabel, shiftLabel, signedMetres, structureHeightText } from './labels';
 
 describe('Подписи стройки', () => {
   it('метры со знаком: выше — плюс, ниже — типографский минус, ноль — ±', () => {
@@ -73,5 +73,18 @@ describe('Подписи стройки', () => {
     expect(dirArrow({ x: -0.7, y: 0.7 })).toBe('↙');
     expect(laneFlowText({ x: 1, y: 0 }, false)).toBe('→ · Alt — развернуть');
     expect(laneFlowText({ x: -1, y: 0 }, true)).toBe('← встречная · Alt — развернуть');
+  });
+
+  it('перестройка у курсора: цена работ, время и перекрытие; сдвиг — ⚡ сразу или 🚧 стройкой', () => {
+    const rebuild = { cost: 0, project: { cost: 3200, seconds: 40, rebuild: { moved: false } } };
+    expect(rebuildPrice(rebuild)).toBe('🚧 $3 200 · ⏳ 40 с · ◐');
+    expect(rebuildPrice({ cost: 0, project: { cost: 3200, seconds: 40, rebuild: { moved: true } } })).toContain('⛔');
+    // Только новые дороги — как planPrice; не проект — ничего.
+    expect(rebuildPrice({ cost: 0, project: { cost: 3200, seconds: 40 } })?.startsWith('🏗')).toBe(true);
+    expect(rebuildPrice({ cost: 500 })).toBeNull();
+    expect(shiftLabel(5.2, 7)).toBe('↔ 5 м ⚡');
+    expect(shiftLabel(12, 7)).toBe('↔ 12 м 🚧');
+    expect(shiftLabel(0.2, 7)).toBeNull();
+    expect(shiftLabel(undefined, 7)).toBeNull();
   });
 });

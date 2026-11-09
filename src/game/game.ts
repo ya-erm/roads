@@ -23,7 +23,7 @@ import {
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
-import { Anchor, anchorAt, buildRing, buildRoad, insideRuns, splitCorridor } from '../lanes/edit';
+import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, insideRuns, splitCorridor } from '../lanes/edit';
 import { edgesAt } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { autoMainPair, mainPairOf } from '../lanes/graph';
@@ -78,7 +78,8 @@ import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, short
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
 import { Enterprises } from './enterprises';
 import { isActive } from '../world/enterprise';
-import { carryBuild, carryRailBuild, spansOf } from './constructionWork';
+import { carryBuild, carryRailBuild, paidFor, spansOf } from './constructionWork';
+import { revertRebuild } from './rebuild';
 import type { Brigade } from './crews';
 import { CREW_UNITS, laneTrail } from './crewLane';
 import { type CrewStep, CrewRoads } from './crewRoads';
@@ -1288,6 +1289,16 @@ export class Game implements BuildContext {
     this.journal.add('project-name', { id, name: projectName(p), auto: p.name === undefined });
   }
 
+  /**
+   * Перекрытие перестройки проекта id (rebuild.ts, closure.ts): part — по полосам (часть прежних полос открыта на
+   * скорости зоны работ, стройка дольше), иначе целиком (объезд, быстрее). Граф движения — заново.
+   */
+  setProjectClosure(id: number, part: boolean): void {
+    if (!this.construction.setClosure(id, part)) return;
+    this.networkChanged();
+    this.journal.add('project-closure', { id, part });
+  }
+
   /** Приоритет проекта (on) или снова обычный: бригады — сначала к нему (crews.ts). */
   prioritizeProject(id: number, on: boolean): void {
     if (!this.construction.projects.has(id)) return;
@@ -1323,9 +1334,25 @@ export class Game implements BuildContext {
     }
     const cs = this.construction.corridorsOf(id);
     const water = (q: Vec, m?: number) => this.isWater(q, m);
-    const back = cs.reduce((s, c) => s + corridorCost(this.roads.net, c, water, this.ground()), 0);
+    // Перестройка готовой дороги (rebuild.ts) — назад прежней дорогой (а не сносом), заплаченное за работы — назад.
+    const redo = cs.filter((c) => c.build?.was);
+    const fresh = cs.filter((c) => !c.build?.was);
+    const back =
+      fresh.reduce((s, c) => s + corridorCost(this.roads.net, c, water, this.ground()), 0) +
+      redo.reduce((s, c) => s + paidFor(c.build!.was!.price, c.build!.done, c.length), 0);
     if (undoable) this.checkpoint('отмена стройки');
-    const plan = this.roadBuilder.bulldoze(cs.map((c) => c.id));
+    const plan = redo.length
+      ? this.roadBuilder.plan(
+          (n) => {
+            for (const c of fresh) bulldoze(n, c.id);
+            revertRebuild(
+              n,
+              redo.map((c) => c.id),
+            );
+          },
+          { raze: true },
+        )
+      : this.roadBuilder.bulldoze(cs.map((c) => c.id));
     // Снос недостроенного — без «возврата половины»: заплаченное за него возвращается целиком (ниже).
     if (plan.net) this.roadBuilder.apply({ ...plan, ok: true, spend: 0, refund: 0, demolish: [] });
     this.money += back;

@@ -485,7 +485,8 @@ export class RoadTools {
         for (const e of prefix) if (e(n) === false) return false;
         return edit(n);
       },
-      { shove: true },
+      // «Со строительством» новая полоса — перестройка дороги стройкой (rebuild.ts).
+      { shove: true, rebuild: true },
     );
   }
 
@@ -907,10 +908,14 @@ export class RoadTools {
   movePlan(p: Vec, kink = false, before: NetEdit[] = [], free = false): RoadPlan | null {
     const edit = this.moveEdit(p, kink, free);
     if (!edit) return null;
-    return this.game().roadBuilder.plan((n) => {
-      for (const e of before) if (e(n) === false) return false;
-      return edit(n);
-    });
+    // «Со строительством» перенос дальше CONSTRUCTION.rebuild.shift — перестройка стройкой, ближе — сразу (rebuild.ts).
+    return this.game().roadBuilder.plan(
+      (n) => {
+        for (const e of before) if (e(n) === false) return false;
+        return edit(n);
+      },
+      { rebuild: true },
+    );
   }
 
   /** Отпустили: ничего больше не тянут. */

@@ -2,11 +2,20 @@
  * Сеть, открытая для движения: без полотен, что ещё строятся (Corridor.build, режим «Со строительством»). По ней
  * собирается граф движения и рисуются дороги; строящееся рисуется отдельно — чертежом (src/render/constructionArt.ts).
  * Строящихся нет — это та же сеть (режим «Мгновенно» ничего не копирует).
+ *
+ * Перестройка готовой дороги (CorridorBuild.was, src/game/rebuild.ts) — по перекрытию (closure.ts): пока работы не
+ * начаты, в сети прежняя дорога; начаты — перекрыта целиком (полотна нет) или по полосам (часть прежних полос, скорость
+ * зоны работ). Полосы соседей, что упёрлись в закрытые, сходят на нет отгоном (taperDeadLanes), как при перестройке.
  */
 import { scale } from '../core/vec';
+import { ROAD_CLASSES } from '../world/roadTypes';
+import { closureOf, fitLanes, partLanes, zoneLimit } from './closure';
+import { taperDeadLanes } from './edit';
 import type { LaneNet } from './model';
 
 const cache = new WeakMap<LaneNet, { version: number; open: LaneNet }>();
+/** Ревизии прежней дороги в открытой сети: по ревизии полотна в стройке и его перекрытию. */
+const revs = new Map<string, number>();
 
 /** Есть ли в сети строящиеся полотна. */
 export function hasBuilding(net: LaneNet): boolean {
@@ -17,7 +26,7 @@ export function hasBuilding(net: LaneNet): boolean {
 /**
  * Копия сети без строящихся полотен (кэш по версии сети: стройка меняет версию, когда открывает участок).
  * Перекрёсток, у которого осталась одна дорога, становится её тупиком — как после сноса (edit.ts, bulldoze);
- * узлы, у которых не осталось дорог, уходят.
+ * узлы, у которых не осталось дорог, уходят. Перестраиваемые полотна — прежней дорогой или её частью (closureOf).
  */
 export function openNet(net: LaneNet): LaneNet {
   const hit = cache.get(net);
@@ -26,8 +35,33 @@ export function openNet(net: LaneNet): LaneNet {
   if (hasBuilding(net)) {
     open = net.clone();
     const touched = new Set<number>();
+    const kept: number[] = [];
     for (const c of net.corridors.values()) {
       if (!c.build) continue;
+      const k = closureOf(c.build);
+      const w = c.build.was;
+      if (w && (k === 'old' || k === 'part')) {
+        // Своё полотно копии: исходное (с проектом) не трогаем.
+        const o = { ...c };
+        delete o.build;
+        open.corridors.set(c.id, o);
+        o.cls = w.cls;
+        // По полосам — половина прежних; у улицы в тупик — в обе стороны (развернуться там негде).
+        const lanes = k === 'part' ? partLanes(net, c) : fitLanes(w.lanes, w.len, c.length);
+        if (k === 'part') o.limit = zoneLimit(w.limit, ROAD_CLASSES[w.cls].limit);
+        else if (w.limit === undefined) delete o.limit;
+        else o.limit = w.limit;
+        open.setLanes(o, lanes);
+        // Ревизия — та же для того же полотна и перекрытия: отрисовка и граф движения не пересчитывают его зря.
+        const key = `${c.rev}|${k}|${lanes.length}`;
+        const rev = revs.get(key);
+        if (rev === undefined) {
+          if (revs.size > 2000) revs.clear();
+          revs.set(key, o.rev);
+        } else o.rev = rev;
+        kept.push(c.a, c.b);
+        continue;
+      }
       open.removeCorridor(c.id);
       touched.add(c.a);
       touched.add(c.b);
@@ -39,6 +73,8 @@ export function openNet(net: LaneNet): LaneNet {
       const e = open.ends(n)[0];
       open.nodes.set(id, { ...n, kind: 'seam', dir: scale(e.away, -1) });
     }
+    // Прежняя дорога (её часть) у стыка с другим профилем: лишние полосы — отгоном, как после перестройки.
+    if (kept.length) taperDeadLanes(open, kept);
     open.version = net.version;
   }
   cache.set(net, { version: net.version, open });

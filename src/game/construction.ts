@@ -38,12 +38,13 @@
 import { dist, dot, sub, type Vec } from '../core/vec';
 import { nodeCuts } from '../lanes/geometry';
 import { corridorLayer } from '../lanes/speedDisplay';
-import type { Corridor, LaneNet } from '../lanes/model';
+import { closed, partLanes } from '../lanes/closure';
+import type { Corridor, CorridorWas, LaneNet } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import type { Network, Segment } from '../world/network';
 import { ROAD_CLASSES } from '../world/roadTypes';
 import { trackProfile } from './build';
-import { advanceStages, buildRate, crewCap, frontOf, paidFor, type Piece, pickSite, railBuildRate, spansOf, stageSeconds, stageWork } from './constructionWork';
+import { advanceStages, crewCap, frontOf, paidFor, type Piece, pickSite, pieceRate, railBuildRate, spansOf, stageSeconds, stageWork } from './constructionWork';
 import { type CrewLane, crewRows, fillet, laneRow, polyLength, polyProject, stageSlots } from './crewLane';
 import { CrewCarry } from './crewCarry';
 import { type Brigade, type CrewSave, Crews, type Site } from './crews';
@@ -163,6 +164,19 @@ export interface ProjectInfo {
    * (вручную отправленная бригада — уже не «стоит»). Плашка, строка вкладки, карточка, советник.
    */
   noBase: boolean;
+  /** Перестройка готовых дорог в проекте (rebuild.ts): сколько, перекрытие; нет — только новые дороги. */
+  rebuild?: RebuildInfo;
+}
+
+/** Перестройка готовых дорог в проекте (Construction.rebuildOf). */
+export interface RebuildInfo {
+  count: number;
+  length: number;
+  moved: number;
+  part: number;
+  closed: number;
+  /** Полос прежней дороги открыто при перекрытии по полосам — сколько из скольких; по полосам нет — null. */
+  open: [number, number] | null;
 }
 
 /** Из чего проект: метров по видам (вода — мост над ней), насыпь и выемка — высота и глубина, м. */
@@ -939,9 +953,11 @@ export class Construction {
     if (!hit) {
       if (this.prices.size > 4000) this.prices.clear();
       const water = (p: Vec, m?: number) => this.host.isWater(p, m);
+      // Перестройка готовой дороги (rebuild.ts): своя цена и темп (на месте быстрее, по полосам — дольше).
+      const w = c.build?.was;
       hit = {
-        full: fullCorridorCost(net, c, water, this.host.ground()),
-        rate: buildRate(net, c, water),
+        full: w ? w.price : fullCorridorCost(net, c, water, this.host.ground()),
+        rate: pieceRate(net, c, water),
       };
       this.prices.set(key, hit);
     }
@@ -1075,7 +1091,15 @@ export class Construction {
           // Ж/д: поезд перекатывается на готовый участок и строит следующий (или ищет другой участок).
           if (rail) this.trains?.completed(p.id, c as Segment, next);
           c = next?.c ?? null;
-        } else c.build = { ...b, done, stages: moved.spans };
+        } else {
+          c.build = { ...b, done, stages: moved.spans };
+          // Перестройка на месте: начались работы — дорогу перекрывают (целиком или по полосам, closure.ts) — граф
+          // движения заново, машины объезжают.
+          if (!rail && b.was && !b.was.moved && b.done <= 0 && done > 0) {
+            this.touchPiece(p.id, c);
+            this.host.networkChanged();
+          }
+        }
       }
     }
     // Бригады на месте — у нового края работ своего фронта (съехали с дороги у узла подъезда); проект достроен — у конца
@@ -1121,6 +1145,7 @@ export class Construction {
     // Ж/д: подъезд — есть вокзал, откуда поезду доехать по путям (WorkTrains.problem); баз и их радиуса у него нет.
     const access = rail ? rail.problem(id) === null : this.site(id) !== null;
     const near = rail ? access : access && this.nearBase(id);
+    const rebuild = this.rebuildOf(id);
     for (const c of list) {
       const b = c.build!;
       const { full, rate } = this.priceOf(id, c);
@@ -1149,6 +1174,7 @@ export class Construction {
       waits: !access && this.waitsNeighbor(id),
       near,
       noBase: !rail && access && !near && !p.paused && !this.crews.assigned(id).length,
+      ...(rebuild ? { rebuild } : {}),
     };
   }
 
@@ -1234,6 +1260,51 @@ export class Construction {
       out.cut = Math.max(out.cut, hit.cut);
     }
     return out;
+  }
+
+  /**
+   * Перестройка готовых дорог в проекте id (CorridorBuild.was, rebuild.ts): сколько полотен (count) и метров (length),
+   * из них перенесено (moved — перекрыты сразу), по полосам (part), идут работы — перекрыты сейчас (closed, closure.ts);
+   * open — сколько прежних полос открыто из скольких (по самому длинному из перекрытых по полосам). Нет — null.
+   */
+  rebuildOf(id: number): RebuildInfo | null {
+    if (this.isRail(id)) return null;
+    const list = this.corridorsOf(id).filter((c) => c.build?.was);
+    if (!list.length) return null;
+    const out: RebuildInfo = { count: list.length, length: 0, moved: 0, part: 0, closed: 0, open: null };
+    let longest = -1;
+    for (const c of list) {
+      const w = c.build!.was!;
+      out.length += c.length;
+      if (w.moved) out.moved++;
+      if (w.part) out.part++;
+      if (closed(c.build)) out.closed++;
+      if (w.part && c.length > longest) {
+        longest = c.length;
+        out.open = [partLanes(this.host.roads.net, c).length, w.lanes.length];
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Перекрытие перестройки проекта id: part — по полосам (часть прежних полос открыта, стройка дольше), иначе целиком
+   * (объезд, быстрее). Перенесённые полотна — всегда целиком. true — что-то поменялось (граф движения — заново).
+   */
+  setClosure(id: number, part: boolean): boolean {
+    let changed = false;
+    for (const c of this.corridorsOf(id)) {
+      const w = c.build?.was;
+      if (!w || w.moved || !!w.part === part) continue;
+      const was: CorridorWas = { ...w };
+      if (part) was.part = true;
+      else delete was.part;
+      c.build = { ...c.build!, was };
+      this.host.roads.net.touch(c);
+      changed = true;
+    }
+    if (changed) this.stamp++;
+    return changed;
   }
 
   /** Сколько всего отложено на проекты, $. */
@@ -1450,6 +1521,8 @@ export function projectLabel(net: LaneNet, cs: Corridor[]): string {
   const fwd = main.lanes.filter((l) => l.flow > 0).length;
   const back = main.lanes.filter((l) => l.flow < 0).length;
   const parts = [`${ROAD_CLASSES[main.cls].name} ${back ? `${fwd}+${back}` : `${fwd}→`}`];
+  // Перестройка готовых дорог (rebuild.ts): «Перестройка · Проспект 2+2», дорогу сдвинули — «Перенос · Улица 1+1».
+  if (cs.every((c) => c.build?.was)) parts.unshift(cs.every((c) => c.build?.was?.moved) ? 'Перенос' : 'Перестройка');
   const level = (c: Corridor) => [net.node(c.a).level, net.node(c.b).level];
   if (cs.some((c) => level(c).some((l) => l > 0))) parts.push('мост');
   if (cs.some((c) => level(c).some((l) => l < 0))) parts.push('тоннель');

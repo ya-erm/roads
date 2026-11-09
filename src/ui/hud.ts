@@ -1225,6 +1225,11 @@ export class Hud {
         g.prioritizeProject(Number(d.id), d.on === '1');
         this.refreshLeft();
         break;
+      case 'project-closure':
+        // Перестройка: перекрытие по полосам (◐) или целиком (⛔) — src/game/rebuild.ts.
+        g.setProjectClosure(Number(d.id), d.on === '1');
+        this.refreshLeft();
+        break;
       case 'project-rename':
         // Название — в карточке проекта: поле сразу (кнопку уже отпустили), иначе первые нажатия ушли бы карте.
         this.renamingProject = Number(d.id);

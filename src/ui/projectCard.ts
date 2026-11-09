@@ -67,6 +67,7 @@ export function projectCardHtml(game: Game, id: number, renaming = false): strin
     ${title}${prio}${close}</header>`;
   return `<section class="detail project-card">${head}
     ${whatHtml(game, info)}
+    ${closureHtml(game, info)}
     ${progressHtml(info)}
     ${timeHtml(game, info)}
     ${moneyHtml(game, info)}
@@ -84,6 +85,54 @@ function whatHtml(game: Game, info: ProjectInfo): string {
   if (parts.fill >= 0.7) chips.push(`<span class="pc-chip" data-tip="Насыпь: дорога выше земли — дороже">⛰ <b>до ${parts.fill.toFixed(1).replace('.', ',')} м</b></span>`);
   if (parts.cut >= 0.7) chips.push(`<span class="pc-chip" data-tip="Выемка: дорога ниже земли — дороже">⛏ <b>до ${parts.cut.toFixed(1).replace('.', ',')} м</b></span>`);
   return `<div class="pc-chips">${chips.join('')}</div>`;
+}
+
+/**
+ * Схема перекрытия — кусок дороги в две полосы сверху: part — одна полоса закрыта (красно-белая штриховка, конусы),
+ * по другой едут; full — закрыты обе (шлагбаум), стрелка объезда дугой; open — работы не начаты, едут по обеим.
+ */
+export function closureSvg(kind: 'part' | 'full' | 'open', w = 46, h = 26): string {
+  const hatch = (y: number) =>
+    `<rect x="4" y="${y}" width="38" height="7" fill="url(#cz-h)"/><rect x="4" y="${y}" width="38" height="7" fill="none" stroke="#c0392b" stroke-width="0.8"/>`;
+  const car = (y: number, dir: 1 | -1) => `<path d="M${dir > 0 ? 18 : 28} ${y + 3.5} l${dir * 8} 0 m${-dir * 3} -2.5 l${dir * 3} 2.5 l${-dir * 3} 2.5" stroke="#fff" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`;
+  const road = `<rect x="2" y="9" width="42" height="16" rx="1.5" fill="#5c636d"/><line x1="4" y1="17" x2="42" y2="17" stroke="#e9ecef" stroke-width="0.9" stroke-dasharray="3 2.5"/>`;
+  const body =
+    kind === 'open'
+      ? `${car(9.5, 1)}${car(17.5, -1)}`
+      : kind === 'part'
+        ? `${hatch(17.5)}<circle cx="9" cy="17" r="1.4" fill="#f08a3c"/><circle cx="23" cy="17" r="1.4" fill="#f08a3c"/><circle cx="37" cy="17" r="1.4" fill="#f08a3c"/>${car(9.5, 1)}`
+        : `${hatch(9.5)}${hatch(17.5)}<path d="M5 8 Q23 -3 41 8" stroke="#2f80ed" stroke-width="1.6" fill="none" stroke-dasharray="2.5 1.8"/><path d="M38 4.5 l3 3.5 l-4.2 0.8" stroke="#2f80ed" stroke-width="1.6" fill="none" stroke-linecap="round"/>`;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 46 26" aria-hidden="true"><defs><pattern id="cz-h" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="#fff"/><rect width="2.5" height="5" fill="#e8483f"/></pattern></defs>${road}${body}</svg>`;
+}
+
+/**
+ * Перестройка готовой дороги (rebuild.ts): что сейчас с движением — схемой и коротко (работы не начаты — ездят по
+ * прежней; идут — перекрыта по полосам «открыто 1 из 2 · 30 км/ч» или целиком — объезд; перенос — перекрыта сразу) и
+ * выбор перекрытия: ◐ по полосам (часть открыта, стройка ×1,5 дольше) или ⛔ целиком (объезд, быстрее). Не перестройка
+ * — ничего.
+ */
+function closureHtml(game: Game, info: ProjectInfo): string {
+  const r = game.construction.rebuildOf(info.project.id);
+  if (!r) return '';
+  const K = CONSTRUCTION.rebuild;
+  const id = info.project.id;
+  const allMoved = r.moved === r.count;
+  const part = r.part > 0;
+  const zone = `${K.zone} км/ч`;
+  const status = allMoved
+    ? { kind: 'full' as const, text: '⛔ перенос: перекрыта до конца работ', tip: 'Дорогу кладут на новом месте — прежней там уже нет: машины объезжают, пока не достроят' }
+    : !r.closed
+      ? { kind: 'open' as const, text: '🟢 открыта — перекроют, когда начнут', tip: 'Бригада ещё не начала: ездят по прежней дороге, как раньше' }
+      : part && r.open
+        ? { kind: 'part' as const, text: `◐ открыто ${r.open[0]} из ${r.open[1]} · ${zone}`, tip: `Работы идут половинами: по прежней дороге открыто ${r.open[0]} из ${r.open[1]} полос, скорость — ${zone}; на дороге в одну полосу в каждую сторону — движение в одну сторону, обратно — объезд` }
+        : { kind: 'full' as const, text: '⛔ перекрыта — объезд', tip: 'Дорога закрыта целиком: машины объезжают, пока не достроят' };
+  const pick = allMoved
+    ? ''
+    : `<div class="pc-closure-pick">
+      <button class="small pc-closure-opt${part ? ' primary' : ''}" data-action="project-closure" data-id="${id}" data-on="1" data-tip="${esc(`По полосам: открыта половина прежних полос (на 1+1 — одна, в одну сторону), ${zone}; стройка в ${String(K.partial).replace('.', ',')} раза дольше`)}">${closureSvg('part', 38, 22)}<span>◐</span></button>
+      <button class="small pc-closure-opt${part ? '' : ' primary'}" data-action="project-closure" data-id="${id}" data-on="0" data-tip="Целиком: дорога закрыта, машины объезжают; стройка быстрее">${closureSvg('full', 38, 22)}<span>⛔</span></button></div>`;
+  const what = `<span class="pc-chip" data-tip="${esc(`Перестройка готовой дороги: ${meters(r.length)}${r.moved ? `, перенесено полотен — ${r.moved}` : ''}`)}">🚧 <b>${meters(r.length)}</b></span>`;
+  return `<div class="pc-block pc-closure"><div class="pc-row">${what}<span class="pc-closure-now" data-tip="${esc(status.tip)}">${closureSvg(status.kind)}<b>${esc(status.text)}</b></span></div>${pick}</div>`;
 }
 
 /** Готовность: общая полоска с процентом и три этапа. */

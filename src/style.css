@@ -6926,6 +6926,30 @@ span.ind-chip {
   font-size: 12px;
 }
 
+/* Перестройка: перекрытие на время работ (projectCard.ts, closureHtml) — схема и выбор ◐ по полосам / ⛔ целиком. */
+.project-card .pc-closure .pc-chip {
+  white-space: nowrap;
+}
+
+.project-card .pc-closure .pc-closure-now {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.project-card .pc-closure-pick {
+  display: flex;
+  gap: 6px;
+}
+
+.project-card .pc-closure-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+}
+
 .project-card .pc-why {
   display: flex;
   flex-wrap: wrap;

@@ -6,12 +6,13 @@ import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, LaneDraft, laneStep, LaneTip, RoadOptions, taperDeadLanes } from '../lanes/edit';
 import { cornerCost, cornerHandles } from '../lanes/corners';
 import { edgesAt, laneShare } from '../lanes/geometry';
-import { Corridor, Flow, LaneNet, type LaneNode, LaneSlot, LAT_EPS } from '../lanes/model';
+import { Corridor, type CorridorWas, Flow, LaneNet, type LaneNode, LaneSlot, LAT_EPS } from '../lanes/model';
 import { LEVEL_RUN, RoadClass, ROAD_CLASSES, ROAD_MARGIN, structureFactor } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
 import { halfAtS } from '../world/worldgen';
 import type { Roads } from './roads';
-import { buildRate, carryBuild, paidFor } from './constructionWork';
+import { buildRate, carryBuild, paidFor, pieceRate } from './constructionWork';
+import { isMoved, rebuildCost, rebuildDiff, substantial, wasCorridor, wasOf } from './rebuild';
 
 /** Что строитель дорог знает об игре. */
 export interface RoadContext {
@@ -55,6 +56,11 @@ export interface ProjectStart {
   seconds: number;
   length: number;
   corridors: number[];
+  /**
+   * Из них — перестройка готовых дорог (rebuild.ts): сколько полотен, перенесены ли (перекрыты сразу), и сколько из
+   * cost и seconds — на неё. Нет — только новые дороги.
+   */
+  rebuild?: { count: number; moved: boolean; cost: number; seconds: number };
 }
 
 /** План правки дорог: сеть с правкой (для предпросмотра и стройки), цена, дома под снос, что не так. */
@@ -74,6 +80,11 @@ export interface RoadPlan {
   moved?: Footprint[];
   /** Продольный профиль новых полотен на земле: наибольший уклон, выемка и насыпь, м. */
   profile?: ProfileSummary;
+  /**
+   * «Со строительством», правка готовых дорог (rebuild): на сколько метров сдвинулась ось самой сдвинутой из них — у
+   * курсора видно, сдвиг ещё «сразу» (до CONSTRUCTION.rebuild.shift) или уже перенос стройкой. Нет — оси на месте.
+   */
+  shift?: number;
   /**
    * Режим «Со строительством»: новые полотна — проект (в net уже помечены Corridor.build). cost плана — только то,
    * что платится сразу (снос домов, правки готовых дорог); проект оплачивается по готовым метрам.
@@ -204,6 +215,9 @@ export function corridorProfile(net: LaneNet, c: Corridor, ground: ((p: Vec) => 
  * и перестройка стройки считаются по тем же правилам, что у готовой дороги.
  */
 export function corridorCost(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean, ground: ((p: Vec) => number) | null = null): number {
+  // Перестройка готовой дороги (rebuild.ts): прежняя дорога и заплаченное за готовые метры перестройки.
+  const w = c.build?.was;
+  if (w) return w.value + paidFor(w.price, c.build!.done, c.length);
   const full = fullCorridorCost(net, c, isWater, ground);
   return c.build ? paidFor(full, c.build.done, c.length) : full;
 }
@@ -256,7 +270,7 @@ export class RoadBuilder {
    */
   plan(
     edit: NetEdit,
-    opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean; only?: (c: Corridor) => boolean; project?: boolean } = {},
+    opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean; only?: (c: Corridor) => boolean; project?: boolean; rebuild?: boolean } = {},
   ): RoadPlan {
     const before = this.net;
     const next = before.clone();
@@ -266,8 +280,12 @@ export class RoadBuilder {
       return fail(e instanceof EditError ? e.message : 'Так не построить');
     }
     // «Со строительством»: новые дороги (не куски прежних, разрезанных ими) — проект, платить за них — по готовым метрам.
-    const pid = opts.project && !opts.free ? (this.ctx.projectId?.() ?? null) : null;
-    const project = pid === null ? undefined : this.markProject(before, next, pid);
+    // Правка готовых дорог (rebuild, и проект с правками) — существенная перестройка тоже проект (rebuild.ts).
+    const pid = (opts.project || opts.rebuild) && !opts.free && !opts.raze ? (this.ctx.projectId?.() ?? null) : null;
+    // Новые полотна правки готовой дороги («Полоса» пристроила съезд) — тоже новая дорога, стройкой.
+    const fresh = pid !== null ? this.markProject(before, next, pid) : undefined;
+    const re = pid === null ? null : this.markRebuild(before, next, pid);
+    const project = mergeStart(fresh, re?.start);
     // Что изменилось: новые полотна, полотна с новой ревизией и исчезнувшие.
     const changed: Corridor[] = [];
     let after = 0;
@@ -324,6 +342,7 @@ export class RoadBuilder {
     const plan: RoadPlan = { ok: !reason, reason, cost, spend, refund, demolish: razed, net: next, changed: changed.map((c) => c.id) };
     if (moved) plan.moved = moved;
     if (project) plan.project = project;
+    if (re && re.shift > 0.5) plan.shift = re.shift;
     for (const c of checked) {
       const prof = onOldAxis(before, c) ? null : corridorProfile(next, c, ground);
       if (!prof) continue;
@@ -352,6 +371,69 @@ export class RoadBuilder {
     return res.corridors.length ? res : undefined;
   }
 
+  /**
+   * Правка готовых дорог плана (rebuild.ts): каждое изменённое полотно — против прежней дороги (то же полотно, у куска
+   * разрезанной — полотно под ним, у перестройки в стройке — прежняя дорога из её записи). Существенная правка —
+   * перестройка проектом pid (Corridor.build с CorridorWas), небольшая — сразу. Уже идущая перестройка, которую правят
+   * снова, — тем же проектом, цена и темп — заново от прежней дороги; правку вернули к прежней дороге — стройки нет.
+   * Ответ — что заложено (нет — undefined) и наибольший сдвиг оси, м.
+   */
+  private markRebuild(before: LaneNet, next: LaneNet, pid: number): { start?: ProjectStart; shift: number } {
+    const water = (p: Vec, m?: number) => this.ctx.isWater(p, m);
+    const ground = this.ctx.ground();
+    const res: ProjectStart = { id: pid, cost: 0, seconds: 0, length: 0, corridors: [] };
+    const rb = { count: 0, moved: false, cost: 0, seconds: 0 };
+    let shift = 0;
+    for (const c of next.corridors.values()) {
+      const prev = before.corridors.get(c.id);
+      if ((prev && prev.rev === c.rev) || c.ring) continue;
+      // Новая дорога в стройке (свой проект или только что заложенная) — как была.
+      if (c.build && !c.build.was) continue;
+      const own = c.build?.was;
+      let old: Corridor | undefined;
+      if (own) old = wasCorridor(c, own);
+      else if (prev) old = prev.build ? undefined : prev;
+      else old = onOldAxis(before, c) ? axisUnder(before, c) : undefined;
+      if (!old || old.build) continue;
+      const d = rebuildDiff(old, c);
+      shift = Math.max(shift, d.shift);
+      if (!substantial(d)) {
+        // Перестройку вернули к прежней дороге — она снова готова (заплаченное за работы — не вернуть).
+        if (own) {
+          delete c.build;
+          next.touch(c);
+        }
+        continue;
+      }
+      const full = fullCorridorCost(next, c, water, ground);
+      let w: CorridorWas;
+      if (own) {
+        w = { ...own, ...rebuildCost(full, own.value, d, c.length) };
+        if (isMoved(d)) {
+          w.moved = true;
+          delete w.part;
+        }
+        c.build = { ...c.build!, was: w };
+        continue;
+      }
+      w = wasOf(before, next, old, c, d, { value: 0, price: 0, work: 1 });
+      w.value = prev ? fullCorridorCost(before, prev, water, ground) : fullCorridorCost(next, wasCorridor(c, w), water, ground);
+      Object.assign(w, rebuildCost(full, w.value, d, c.length));
+      c.build = { project: pid, done: 0, was: w };
+      const seconds = c.length / pieceRate(next, c, water);
+      res.corridors.push(c.id);
+      res.cost += w.price;
+      res.seconds += seconds;
+      res.length += c.length;
+      rb.count++;
+      rb.cost += w.price;
+      rb.seconds += seconds;
+      if (w.moved) rb.moved = true;
+    }
+    if (rb.count) res.rebuild = rb;
+    return { ...(res.corridors.length ? { start: res } : {}), shift };
+  }
+
   /** Строит по плану: сносит дома, копия сети становится сетью, деньги списываются. */
   apply(plan: RoadPlan): boolean {
     if (!plan.ok || !plan.net) return false;
@@ -376,7 +458,7 @@ export class RoadBuilder {
   /** Полоса по черновику инструмента «Полоса». */
   lane(d: LaneDraft, cls: RoadClass): RoadPlan {
     // Дома у дороги не сносим: после стройки их отодвинут от неё (roadWidened), сносят — только если места нет.
-    return this.plan(laneEdit(d, cls), { shove: true });
+    return this.plan(laneEdit(d, cls), { shove: true, rebuild: true });
   }
 
   /**
@@ -392,7 +474,7 @@ export class RoadBuilder {
     reverse = false,
   ): { plan: RoadPlan; step: { tip: LaneTip; what: string } | null } {
     const out: LaneStepOut = { step: null };
-    const plan = this.plan(laneStepEdit(tip, qs, cls, radius, limit, reverse, out), { shove: true });
+    const plan = this.plan(laneStepEdit(tip, qs, cls, radius, limit, reverse, out), { shove: true, rebuild: true });
     return { plan, step: plan.ok ? out.step : null };
   }
 
@@ -425,7 +507,7 @@ export class RoadBuilder {
         // В стыке с дорогой другого профиля лишние полосы (у неё или у соседа) сходят на нет отгоном.
         taperDeadLanes(n, [c.a, c.b]);
       },
-      { shove: true },
+      { shove: true, rebuild: true },
     );
   }
 
@@ -470,12 +552,12 @@ export class RoadBuilder {
 
   /** Новая форма полотна (концы на месте). */
   reshape(id: number, curve: (net: LaneNet, c: Corridor) => Cubic): RoadPlan {
-    return this.plan(reshapeEdit(id, curve));
+    return this.plan(reshapeEdit(id, curve), { rebuild: true });
   }
 
   /** Перенос узла: дороги следом. */
   moveNode(id: number, pos: Vec): RoadPlan {
-    return this.plan(moveNodeEdit(id, pos));
+    return this.plan(moveNodeEdit(id, pos), { rebuild: true });
   }
 
   // ---------- Проверки ----------
@@ -623,6 +705,30 @@ function roundedNodes(before: LaneNet, next: LaneNet): LaneNode[] {
     if (!same) res.push(n);
   }
   return res;
+}
+
+/** Полотно сети net, на оси которого лежит середина c (кусок разрезанной дороги — её прежнее полотно). */
+function axisUnder(net: LaneNet, c: Corridor): Corridor | undefined {
+  const q = c.lut.pointAt(c.length / 2);
+  let best: { o: Corridor; d: number } | undefined;
+  for (const o of net.corridorsNear(q, 10)) {
+    const d = o.lut.closest(q).d;
+    if (d < 0.5 && (!best || d < best.d)) best = { o, d };
+  }
+  return best?.o;
+}
+
+/** Один проект из новых дорог (fresh) и перестройки готовых (re) — под тем же номером. */
+function mergeStart(fresh: ProjectStart | undefined, re: ProjectStart | undefined): ProjectStart | undefined {
+  if (!fresh || !re) return fresh ?? re;
+  return {
+    id: fresh.id,
+    cost: fresh.cost + re.cost,
+    seconds: fresh.seconds + re.seconds,
+    length: fresh.length + re.length,
+    corridors: [...fresh.corridors, ...re.corridors],
+    ...(re.rebuild ? { rebuild: re.rebuild } : {}),
+  };
 }
 
 /** Полотно лежит на оси дороги, что уже была (расширение, разрезание перекрёстком), — форма не новая. */
