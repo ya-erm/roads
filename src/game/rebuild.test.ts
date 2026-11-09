@@ -1,17 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
-import type { Vec } from '../core/vec';
-import { closureOf, endCuts, keptLanes, reverseZone } from '../lanes/closure';
-import { splitBuild } from '../lanes/edit';
+import { dot, rightNormal, sub, type Vec } from '../core/vec';
+import { closureOf, endCuts, keptLanes, reverseZone, workSide } from '../lanes/closure';
+import { type RoadOptions, splitBuild } from '../lanes/edit';
 import { type Corridor, type CorridorWas, oneWay, twoWay } from '../lanes/model';
 import type { BuildBase } from '../world/entities';
+import { LANE_W } from '../world/roadTypes';
 import type { WorldSettings } from '../world/settings';
 import { projectCardHtml } from '../ui/projectCard';
 import { unstarted } from './construction';
+import { spansOf } from './constructionWork';
 import { Game } from './game';
 import { rebuildCost, rebuildDiff } from './rebuild';
 import { fullCorridorCost } from './roadbuild';
-import { anchorOf, AVENUE, clearStrip, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, AVENUE, clearStrip, HIGHWAY, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' };
 const K = CONSTRUCTION.rebuild;
@@ -21,11 +23,11 @@ function nodeAt(game: Game, p: Vec): number | null {
 }
 
 /** Свободное место для прямой улицы длиной len вдоль x с подъездом с запада. */
-function freeSpot(game: Game, len: number): Vec {
+function freeSpot(game: Game, len: number, profile: RoadOptions = STREET): Vec {
   for (let y = 400; y < game.terrain.height - 400; y += 120) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 160) {
       if (!clearStrip(game, { x: x - 120, y }, { x: x + len + 100, y }, 200)) continue;
-      const plan = game.roadBuilder.road(anchorOf(game, { free: { x: x - 90, y } }), anchorOf(game, { free: { x: x + len, y } }), STREET);
+      const plan = game.roadBuilder.road(anchorOf(game, { free: { x: x - 90, y } }), anchorOf(game, { free: { x: x + len, y } }), profile);
       if (plan.ok && !plan.demolish.length) return { x, y };
     }
   }
@@ -33,19 +35,19 @@ function freeSpot(game: Game, len: number): Vec {
 }
 
 /**
- * Готовая улица 1+1 от at на восток длиной len, а к ней с запада — подъезд от ворот базы (база своя, одна бригада;
- * бригаду бесплатной базы партии не берём). Ответ — полотно улицы.
+ * Готовая улица 1+1 (или другой профиль) от at на восток длиной len, а к ней с запада — подъезд от ворот базы (база
+ * своя, одна бригада; бригаду бесплатной базы партии не берём). Ответ — полотно улицы.
  */
-function scene(mode: 'build' | 'instant', len = 600, reverse = false): { game: Game; c: Corridor; at: Vec; base: BuildBase | null } {
+function scene(mode: 'build' | 'instant', len = 600, reverse = false, profile: RoadOptions = STREET): { game: Game; c: Corridor; at: Vec; base: BuildBase | null } {
   const game = withoutCitizens(new Game({ ...WORLD, ...(mode === 'build' ? { construction: 'build' as const } : {}) }));
-  const at = freeSpot(game, len);
+  const at = freeSpot(game, len, profile);
   const gate = { x: at.x - 90, y: at.y };
-  expect(road(game, { free: gate }, { free: at })).toBe(true);
+  expect(road(game, { free: gate }, { free: at }, profile)).toBe(true);
   // reverse — улица нарисована с востока: её конец b — у базы, бригада заполняет её от b (fromB).
-  if (reverse) expect(road(game, { free: { x: at.x + len, y: at.y } }, nodeAt(game, at)!)).toBe(true);
-  else expect(road(game, nodeAt(game, at)!, { free: { x: at.x + len, y: at.y } })).toBe(true);
+  if (reverse) expect(road(game, { free: { x: at.x + len, y: at.y } }, nodeAt(game, at)!, profile)).toBe(true);
+  else expect(road(game, nodeAt(game, at)!, { free: { x: at.x + len, y: at.y } }, profile)).toBe(true);
   // За дальним концом — ещё кусок улицы: улица не в тупик (по полосам на ней можно оставить одну сторону).
-  if (mode === 'build') expect(road(game, nodeAt(game, { x: at.x + len, y: at.y })!, { free: { x: at.x + len + 90, y: at.y } })).toBe(true);
+  if (mode === 'build') expect(road(game, nodeAt(game, { x: at.x + len, y: at.y })!, { free: { x: at.x + len + 90, y: at.y } }, profile)).toBe(true);
   let base: BuildBase | null = null;
   if (mode === 'build') {
     const crews = game.construction.crews;
@@ -201,17 +203,20 @@ describe('Перестройка: «Со строительством»', () => 
     }
     expect(live(game, c.id).build?.done).toBeGreaterThan(0);
     // «С проездом» на 1+1: на участке под реверсом — одна полоса (открытая половина) в обе стороны, вне его — обе
-    // стороны на своих местах; скорость зоны работ.
+    // стороны на своих местах; скорость зоны работ. Бригада начала у конца a — участок от самого конца.
     expect(closureOf(live(game, c.id).build)).toBe('part');
     const o = opened(game, c.id)!;
     const zone = reverseZone(live(game, c.id), live(game, c.id).build!, endCuts(game.roads.net, live(game, c.id)));
+    expect(zone[0]).toBe(0);
     const mid = (zone[0] + zone[1]) / 2;
     const inZone = o.lanes.filter((l) => l.from <= mid && l.to >= mid);
     expect(inZone.map((l) => l.flow).sort()).toEqual([-1, 1]);
     expect(new Set(inZone.map((l) => l.offset)).size).toBe(1);
-    const before = o.lanes.filter((l) => l.from <= 1);
-    expect(before.map((l) => l.flow).sort()).toEqual([-1, 1]);
-    expect(new Set(before.map((l) => l.offset)).size).toBe(2);
+    const start = o.lanes.filter((l) => l.from <= 1);
+    expect(new Set(start.map((l) => l.offset)).size).toBe(1);
+    const after = o.lanes.filter((l) => l.to >= o.length - 1);
+    expect(after.map((l) => l.flow).sort()).toEqual([-1, 1]);
+    expect(new Set(after.map((l) => l.offset)).size).toBe(2);
     expect(o.limit).toBe(K.zone);
     expect(game.construction.rebuildOf(id)?.open).toEqual([1, 2]);
     // Перекрыть целиком — полотна в сети движения нет, стройка быстрее.
@@ -434,5 +439,114 @@ describe('Перестройка «с проездом» узкой дороги
     expect(opened(game, c.id)?.cls).toBe('avenue');
     expect(paid).toBeGreaterThan(price - 2);
     expect(paid).toBeLessThan(price + 2);
+  });
+});
+
+describe('Перестройка «с проездом»: на разрытую половину не заезжают', () => {
+  const reach = CONSTRUCTION.reach;
+  beforeEach(() => {
+    CONSTRUCTION.reach = 1e12;
+  });
+  afterEach(() => {
+    CONSTRUCTION.reach = reach;
+  });
+  const CAR = { kind: 'car' as const, length: 5, width: 2, maxSpeed: 60, accel: 10, color: '#fff' };
+
+  /**
+   * Машины из mine на перекладываемой половине полотна id там, где разрыто (от разметки до отсыпки нынешнего прохода,
+   * у самых концов полотна тоже), — «где и когда»; работы не идут — пусто.
+   */
+  function onDug(game: Game, id: number, mine: Iterable<number>): string[] {
+    const c = live(game, id);
+    const b = c.build;
+    if (!b || closureOf(b) !== 'part') return [];
+    const L = c.length;
+    const sp = spansOf(b, L);
+    const along = (x: number) => (b.fromB ? L - x : x);
+    const d0 = Math.min(along(sp[2]), along(sp[0]));
+    const d1 = Math.max(along(sp[2]), along(sp[0]));
+    const side = workSide(b);
+    const out: string[] = [];
+    for (const vid of mine) {
+      const v = game.traffic.vehicles.get(vid);
+      if (!v) continue;
+      for (const p of [v.pos, v.rear ?? v.pos]) {
+        const hit = c.lut.closest(p);
+        // За концами полотна (на соседе, в перекрёстке) — не на нём.
+        if (hit.d > LANE_W * 2 || hit.s < Math.max(d0, 0.5) || hit.s > Math.min(d1, L - 0.5)) continue;
+        const lat = dot(sub(p, c.lut.pointAt(hit.s)), rightNormal(c.lut.tangentAt(hit.s)));
+        if (lat * side > LANE_W / 4) out.push(`t=${game.time.toFixed(1)} проход ${b.pass ?? 1}: машина ${vid} на ${hit.s.toFixed(0)} м (разрыто ${d0.toFixed(0)}…${d1.toFixed(0)}), ${v.v.toFixed(1)} м/с`);
+      }
+    }
+    return out;
+  }
+
+  /** Перестройка 1+1 в 2+2 (по умолчанию улицы в проспект) «с проездом» от начала до конца, машины в обе стороны каждые 1.5 с. */
+  function drive(game: Game, c: Corridor, from: number, to: number, into: RoadOptions = AVENUE): { bad: string[]; sent: number[]; lost: number[] } {
+    const lost: number[] = [];
+    const host = game as unknown as { onLost(v: { id: number }): void };
+    const onLost = host.onLost.bind(game);
+    host.onLost = (v) => {
+      lost.push(v.id);      onLost(v);
+    };
+    expect(game.roadBuilder.apply(game.roadBuilder.rebuild(c.id, { cls: into.cls, lanes: into.lanes }))).toBe(true);
+    const sent: number[] = [];
+    const bad: string[] = [];
+    for (let t = 0; t < 900 && live(game, c.id).build; t += 0.5) {
+      runSeconds(game, 0.5);
+      if ((live(game, c.id).build?.done ?? 0) > 0 && Math.round(t * 2) % 3 === 0) {
+        for (const [a, b] of [
+          [from, to],
+          [to, from],
+        ]) {
+          const route = game.roads.route(a, b);
+          const v = route && game.traffic.spawn({ ...CAR, targetNode: b, route });
+          if (v) sent.push(v.id);
+        }
+      }
+      bad.push(...onDug(game, c.id, sent));
+    }
+    expect(live(game, c.id).build).toBeUndefined();
+    for (let i = 0; i < 300 && sent.some((id) => game.traffic.vehicles.has(id)); i++) runSeconds(game, 1);
+    return { bad, sent, lost };
+  }
+
+  it('за всю перестройку ни одна машина не стоит и не едет по разрытому — и у стыков с соседями, где бригада у самого конца; все доехали', () => {
+    const { game, c, at } = scene('build');
+    const gate = nodeAt(game, { x: at.x - 90, y: at.y })!;
+    const far = nodeAt(game, { x: at.x + 690, y: at.y })!;
+    // Оба конца — стыки с готовыми соседями: съезд на открытую половину — на соседе.
+    expect([c.a, c.b].map((id) => game.roads.net.node(id).kind)).toEqual(['seam', 'seam']);
+    const { bad, sent, lost } = drive(game, c, gate, far);
+    expect(sent.length).toBeGreaterThan(40);
+    expect(bad).toEqual([]);
+    expect(lost).toEqual([]);
+    expect(sent.filter((id) => game.traffic.vehicles.has(id))).toEqual([]);
+  });
+
+  it('магистраль 1+1 → 2+2 (отчёт 0.2.115): отгон длинный — съезжают на открытую половину до участка, а не на нём', () => {
+    const { game, c, at } = scene('build', 400, false, HIGHWAY);
+    const gate = nodeAt(game, { x: at.x - 90, y: at.y })!;
+    const far = nodeAt(game, { x: at.x + 490, y: at.y })!;
+    const { bad, sent, lost } = drive(game, c, gate, far, { cls: 'highway', lanes: twoWay(2, 2) });
+    expect(sent.length).toBeGreaterThan(30);
+    expect(bad).toEqual([]);
+    expect(lost).toEqual([]);
+    expect(sent.filter((id) => game.traffic.vehicles.has(id))).toEqual([]);
+  });
+
+  it('конец у перекрёстка: ждут перед ним, на разрытое не заезжают', () => {
+    const { game, c, at } = scene('build');
+    const gate = nodeAt(game, { x: at.x - 90, y: at.y })!;
+    const far = nodeAt(game, { x: at.x + 690, y: at.y })!;
+    // Улица вбок от дальнего конца — там перекрёсток.
+    expect(road(game, nodeAt(game, { x: at.x + 600, y: at.y })!, { free: { x: at.x + 600, y: at.y + 90 } })).toBe(true);
+    const cc = live(game, c.id);
+    expect(game.roads.net.node(cc.b).kind).toBe('junction');
+    const { bad, sent, lost } = drive(game, cc, gate, far);
+    expect(sent.length).toBeGreaterThan(40);
+    expect(bad).toEqual([]);
+    expect(lost).toEqual([]);
+    expect(sent.filter((id) => game.traffic.vehicles.has(id))).toEqual([]);
   });
 });

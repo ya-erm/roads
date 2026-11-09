@@ -11,7 +11,8 @@
  *   бригада перекладывает полотно половинами: первым проходом — правую по ходу заполнения, вторым (навстречу) —
  *   другую. Вне участка у бригады обе стороны открыты (за ней — уже новая половина, впереди — прежняя), на участке
  *   (reverseZone: куски по reverse.chunk м) — одна полоса открытой половины, по ней — по очереди в обе стороны
- *   (reverseLanes), светофоры на концах (src/game/workSignals.ts).
+ *   (reverseLanes), светофоры на концах (src/game/workSignals.ts). Бригада у самого узла — участок до конца полотна,
+ *   съезд на открытую половину — на соседе за стыком (reverseSite, approachLanes) или перед перекрёстком.
  */
 import { CONSTRUCTION } from '../config';
 import { nodeCuts } from './geometry';
@@ -138,7 +139,9 @@ export const zoneMargin = (b: CorridorBuild) => taperLen(b.was!.cls) / 2 + 15;
  * Участок под реверсом на полотне c («с проездом», laneWise), [s0, s1] по оси от a. Своё у полотна (без площадок
  * узлов, cuts — endCuts) за вычетом zoneMargin с каждой стороны делится на равные куски не длиннее reverse.chunk;
  * участок — куски, на которых сейчас разрыто (от разметки до отсыпки нынешнего прохода, с запасом 5 м). Не начато —
- * первый кусок по ходу заполнения. Короткое полотно — 20 м посередине.
+ * первый кусок по ходу заполнения. Короткое полотно — 20 м посередине. Разрыто и в запасе у конца (бригада у самого
+ * узла: в начале и в конце прохода) — участок до самого конца полотна (0 или длина): съезд на открытую половину тогда
+ * — до узла (на соседе за стыком, reverseSite; у перекрёстка ждут перед ним).
  */
 export function reverseZone(c: Corridor, b: CorridorBuild, cuts: [number, number]): [number, number] {
   const K = CONSTRUCTION.rebuild.reverse;
@@ -164,7 +167,100 @@ export function reverseZone(c: Corridor, b: CorridorBuild, cuts: [number, number
   const idx = (s: number) => Math.max(0, Math.min(n - 1, Math.floor((s - e0) / size)));
   const k0 = idx(t0 - 5);
   const k1 = idx(t1 + 5);
-  return [e0 + k0 * size, e0 + (k1 + 1) * size];
+  // Разрыто в запасе у конца — участок до конца полотна: иначе там, под техникой, ехали бы по прежней полосе.
+  return [t0 - 5 < e0 + 1e-6 ? 0 : e0 + k0 * size, t1 + 5 > e1 - 1e-6 ? L : e0 + (k1 + 1) * size];
+}
+
+/** На столько метров участок под реверсом заходит на соседа за стыком (reverseSite): там уже одна полоса открытой половины. */
+export const REACH = 5;
+
+/**
+ * Сосед за стыком, на котором съезжают на открытую половину, когда участок под реверсом дошёл до конца полотна:
+ * его полотно и конец у стыка; k — ход его оси относительно оси перестраиваемого (1 — туда же, −1 — навстречу);
+ * смещение вправо по его оси = base + k × смещение по оси перестраиваемого (как сходятся полосы в стыке).
+ */
+export interface Approach {
+  corridor: Corridor;
+  end: End;
+  k: 1 | -1;
+  base: number;
+}
+
+/** Сколько соседу нужно длины под съезд: заход участка, половина отгона (съезд) и место под очередь у стоп-линии. */
+const approachLen = (n: Corridor) => REACH + taperLen(n.cls) / 2 + 20;
+
+/** Перестройка «с проездом», где сейчас идут работы (перекрытие по полосам): у неё реверс. */
+const reversing = (c: Corridor | undefined) => !!c && closureOf(c.build) === 'part' && laneWise(c.build);
+
+/**
+ * Сосед за стыком на конце end полотна c, где съезжают на открытую половину перед участком под реверсом, дошедшим до
+ * стыка: стык ровно двух полотен (прямое продолжение), сосед открыт для движения (готов или его перестройка не начата)
+ * и достаточно длинный (с реверсом и на другом его конце — вдвое). Нет такого — null: съезд и стоп-линия — у самого
+ * узла (у стыка с другим соседом это направление на время работ у узла перекрыто — машины объезжают).
+ */
+export function approachAt(net: LaneNet, c: Corridor, end: End): Approach | null {
+  const n = net.nodes.get(end === 'a' ? c.a : c.b);
+  if (!n || n.kind !== 'seam' || net.isDeadEnd(n)) return null;
+  const ends = net.ends(n);
+  if (ends.length !== 2) return null;
+  const me = ends.find((e) => e.corridor.id === c.id && e.end === end);
+  const o = ends.find((e) => e !== me);
+  if (!me || !o || o.corridor.id === c.id || o.side === me.side) return null;
+  const other = o.corridor;
+  if (other.build && closureOf(other.build) !== 'old') return null;
+  const far = net.nodes.get(o.end === 'a' ? other.b : other.a);
+  const twice = !!far && far.corridors.some((id) => id !== other.id && reversing(net.corridors.get(id)));
+  if (other.length < approachLen(other) * (twice ? 2 : 1)) return null;
+  return { corridor: other, end: o.end, k: (me.along * o.along) as 1 | -1, base: (me.port - o.port) * o.along };
+}
+
+/**
+ * Реверс на полотне c («с проездом», laneWise) целиком: участок (reverseZone) и стоп-линии по оси c, и соседи за
+ * стыками на концах, куда участок заходит, если дошёл до конца полотна (reach: [у a, у b]). Тогда участок и стоп-линия
+ * той стороны — за концом полотна (меньше 0 или больше длины): по оси соседа (siteSpot). Карта, движение и светофоры
+ * берут реверс отсюда.
+ */
+export interface ReverseSite {
+  zone: [number, number];
+  stops: [number, number];
+  reach: [Approach | null, Approach | null];
+}
+
+export function reverseSite(net: LaneNet, c: Corridor, b: CorridorBuild): ReverseSite {
+  const z = reverseZone(c, b, endCuts(net, c));
+  const reach: [Approach | null, Approach | null] = [z[0] <= 0 ? approachAt(net, c, 'a') : null, z[1] >= c.length ? approachAt(net, c, 'b') : null];
+  const zone: [number, number] = [reach[0] ? -REACH : z[0], reach[1] ? c.length + REACH : z[1]];
+  return { zone, stops: reverseStops(c, b, zone, reach), reach };
+}
+
+/**
+ * Точка оси c на s (за концами — на соседе за стыком из reach): полотно, место на его оси, ход его оси относительно c
+ * и пересчёт смещения (смещение по его оси = base + k × смещение по c). Соседа там нет — конец полотна c.
+ */
+export function siteSpot(c: Corridor, reach: ReverseSite['reach'], s: number): { corridor: Corridor; s: number; k: 1 | -1; base: number } {
+  const L = c.length;
+  const r = s < 0 ? reach[0] : s > L ? reach[1] : null;
+  if (!r) return { corridor: c, s: Math.max(0, Math.min(L, s)), k: 1, base: 0 };
+  const d = Math.min(r.corridor.length, s < 0 ? -s : s - L);
+  return { corridor: r.corridor, s: r.end === 'a' ? d : r.corridor.length - d, k: r.k, base: r.base };
+}
+
+/** Место sN на оси соседа r (у конца at полотна c) — по оси c (за её концом). */
+export function siteS(c: Corridor, r: Approach, at: End, sN: number): number {
+  const d = r.end === 'a' ? sN : r.corridor.length - sN;
+  return at === 'a' ? -d : c.length + d;
+}
+
+/** Перекладываемая половина и полоса встречных на участке: какие полосы прежней дороги закрыты и куда съезжают. */
+function reverseParts(c: Corridor, b: CorridorBuild): { side: 1 | -1; open: LaneSlot[]; work: LaneSlot[]; inner: LaneSlot | undefined; flows: (1 | -1)[] } {
+  const w = b.was!;
+  const old = fitLanes(w.lanes, w.len, c.length);
+  const side = workSide(b);
+  const onWork = (l: LaneSlot) => l.offset * side > 0.01;
+  const open = old.filter((l) => !onWork(l));
+  const work = old.filter(onWork);
+  const inner = [...open].sort((p, q) => Math.abs(p.offset) - Math.abs(q.offset))[0];
+  return { side, open, work, inner, flows: [...new Set(work.map((l) => l.flow))] };
 }
 
 /**
@@ -173,31 +269,69 @@ export function reverseZone(c: Corridor, b: CorridorBuild, cuts: [number, number
  * оси полосе открытой половины, в сторону закрытых (туда и обратно — по очереди, по светофорам; съезд на неё и назад —
  * отгоном, как у «кармашка»). Карта рисует прежнюю дорогу целиком, но только там, где её ещё не разрыли
  * (constructionArt, drawOldRoad).
+ *
+ * Съезд — до участка, а не на нём: граф движения (graph.ts) держит полосу ещё половину отгона за её концом, поэтому
+ * закрытая полоса кончается на половину отгона раньше участка — на участок по ней не заехать (и съехать назад на неё
+ * можно только за участком). Участок до конца полотна (zone за его концами — съезд на соседе) — закрытых полос у того
+ * конца нет совсем.
  */
 export function reverseLanes(c: Corridor, b: CorridorBuild, zone: [number, number]): LaneSlot[] {
-  const w = b.was!;
-  const old = fitLanes(w.lanes, w.len, c.length);
-  const side = workSide(b);
-  const onWork = (l: LaneSlot) => l.offset * side > 0.01;
-  const open = old.filter((l) => !onWork(l));
+  const { open, work, inner, flows } = reverseParts(c, b);
+  const h = taperLen(b.was!.cls) / 2;
+  const L = c.length;
   const out: LaneSlot[] = open.map((l) => ({ ...l }));
   const [z0, z1] = zone;
-  for (const l of old.filter(onWork)) {
+  for (const l of work) {
     const bare = { offset: l.offset, flow: l.flow };
-    if (Math.min(l.to, z0) - l.from >= 5) out.push({ ...bare, from: l.from, to: Math.min(l.to, z0) });
-    if (l.to - Math.max(l.from, z1) >= 5) out.push({ ...bare, from: Math.max(l.from, z1), to: l.to });
+    if (z0 > 0 && Math.min(l.to, z0 - h) - l.from >= 5) out.push({ ...bare, from: l.from, to: Math.min(l.to, z0 - h) });
+    if (z1 < L && l.to - Math.max(l.from, z1 + h) >= 5) out.push({ ...bare, from: Math.max(l.from, z1 + h), to: l.to });
   }
-  const inner = [...open].sort((p, q) => Math.abs(p.offset) - Math.abs(q.offset))[0];
-  const flows = [...new Set(old.filter(onWork).map((l) => l.flow))];
-  if (inner) for (const flow of flows) out.push({ offset: inner.offset, flow, from: z0, to: z1 });
+  if (inner) for (const flow of flows) out.push({ offset: inner.offset, flow, from: Math.max(0, z0), to: Math.min(L, z1) });
+  return out;
+}
+
+/**
+ * Полосы соседа r за стыком на конце at перестраиваемого c (участок под реверсом zone заходит на него): полосы, что у
+ * стыка продолжают перекладываемую половину, кончаются за половину отгона до захода участка, а у стыка — полоса
+ * встречных по ближней к оси полосе открытой половины (туда съезжают перед стыком и с неё — после). lanes — полосы
+ * соседа в сети движения.
+ */
+export function approachLanes(c: Corridor, b: CorridorBuild, zone: [number, number], r: Approach, at: End, lanes: readonly LaneSlot[]): LaneSlot[] {
+  const { side, inner, flows } = reverseParts(c, b);
+  const n = r.corridor;
+  const LN = n.length;
+  const h = taperLen(n.cls) / 2;
+  const depth = Math.min(LN, at === 'a' ? -zone[0] : zone[1] - c.length);
+  const out: LaneSlot[] = [];
+  for (const l of lanes) {
+    // Смещение по оси c: на перекладываемой ли половине.
+    if ((l.offset - r.base) * r.k * side <= 0.01) {
+      out.push({ ...l });
+      continue;
+    }
+    if (r.end === 'a') {
+      const from = Math.max(l.from, depth + h);
+      if (l.to - from >= 5) out.push({ ...l, from });
+    } else {
+      const to = Math.min(l.to, LN - depth - h);
+      if (to - l.from >= 5) out.push({ ...l, to });
+    }
+  }
+  if (inner) {
+    const offset = r.base + r.k * inner.offset;
+    for (const flow of flows) out.push({ offset, flow: (flow * r.k) as 1 | -1, from: r.end === 'a' ? 0 : LN - depth, to: r.end === 'a' ? depth : LN });
+  }
   return out;
 }
 
 /**
  * Стоп-линии светофоров реверса по оси от a: [для идущих по оси (a→b), для идущих против]. Перед съездом на открытую
- * половину (половина отгона и 3 м) — с обеих сторон участка.
+ * половину (половина отгона и 3 м) — с обеих сторон участка; съезд на соседе за стыком (reach) — на соседе (за концом
+ * оси c), участок до конца полотна без соседа — у самого узла (0 или длина).
  */
-export function reverseStops(c: Corridor, b: CorridorBuild, zone: [number, number]): [number, number] {
-  const d = taperLen(b.was!.cls) / 2 + 3;
-  return [Math.max(0.5, zone[0] - d), Math.min(c.length - 0.5, zone[1] + d)];
+export function reverseStops(c: Corridor, b: CorridorBuild, zone: [number, number], reach: ReverseSite['reach'] = [null, null]): [number, number] {
+  const d = (r: Approach | null) => taperLen(r ? r.corridor.cls : b.was!.cls) / 2 + 3;
+  const s0 = zone[0] - d(reach[0]);
+  const s1 = zone[1] + d(reach[1]);
+  return [reach[0] ? s0 : Math.max(0, s0), reach[1] ? s1 : Math.min(c.length, s1)];
 }

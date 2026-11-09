@@ -373,7 +373,9 @@ export class LaneTraffic {
       veh.planned = null;
       veh.waitingAt = null;
       veh.ready = false;
-      const spot = this.laneAt(veh.pos, veh.dir) ?? exit;
+      // Своей полосы рядом нет (её закрыли — перекрытие на перестройке, реверс переехал дальше): на соседнюю попутную,
+      // через полосу (съезжает плавно, glide), а не с дороги долой.
+      const spot = this.laneAt(veh.pos, veh.dir) ?? exit ?? this.laneAt(veh.pos, veh.dir, LANE_W + 1.5);
       const route = spot && findLaneRoute(graph, [graph.links.get(spot.lane.link)!], veh.targetNode);
       if (!spot || !route) {
         this.vehicles.delete(veh.id);
@@ -630,15 +632,18 @@ export class LaneTraffic {
     const start = outLink.flow > 0 ? outLink.s0 : outLink.s1;
     for (const link of this.graph.corridorLinks(outLink.corridor)) {
       if (link.flow !== outLink.flow || Math.abs((link.flow > 0 ? link.s0 : link.s1) - start) > 1) continue;
-      const lane = link.lanes.find((l) => l.laneIdx === outLane.laneIdx) ?? link.lanes.find((l) => Math.abs(l.offset - outLane.offset) < 1);
+      // Той полосы нет (закрыли — перекрытие на перестройке) — соседняя попутная, через полосу.
+      const near = (d: number) => link.lanes.filter((l) => Math.abs(l.offset - outLane.offset) < d).sort((p, q) => Math.abs(p.offset - outLane.offset) - Math.abs(q.offset - outLane.offset))[0];
+      const lane = link.lanes.find((l) => l.laneIdx === outLane.laneIdx) ?? near(1) ?? near(LANE_W + 1.5);
       if (lane) return { lane, u: 0 };
     }
     return null;
   }
 
-  private laneAt(p: Vec, dir: Vec): { lane: GLane; u: number } | null {
+  /** Попутная полоса у точки p с курсом dir — ближайшая, не дальше reach м вбок от неё; нет — null. */
+  private laneAt(p: Vec, dir: Vec, reach = 6): { lane: GLane; u: number } | null {
     let best: { lane: GLane; u: number } | null = null;
-    let bestD = 6;
+    let bestD = reach;
     for (const c of this.graph.net.corridorsNear(p, 40)) {
       const hit = c.lut.closest(p);
       if (hit.d > 40) continue;
@@ -1568,6 +1573,9 @@ export class LaneTraffic {
       // Проезд просим, только стоя в последней полосе перед узлом и первой в ней (спецмашина, объезжая прижавшихся,
       // ещё за ними); дальше узел — как стоп-линия.
       if (cur !== lane || idx > 0) return idmAccel(veh.v, desired, ahead + IDM.minGap - 0.5, veh.v, aMax);
+      // Сразу за узлом — красный реверса (участок перестройки у самого перекрёстка, workSignals.ts): ждём перед узлом,
+      // а не на выезде из него, навстречу тем, кому зелёный.
+      if (veh.granted !== m.key && this.barrierAhead(m.outLink, null) < 1) return idmAccel(veh.v, desired, ahead + IDM.minGap - 0.5, veh.v, aMax);
       if (veh.granted !== m.key && ahead <= this.grantLookahead(veh, m)) this.tryGrant(veh, m);
       let gap: number;
       let leaderV = 0;

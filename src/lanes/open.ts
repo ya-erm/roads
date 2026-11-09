@@ -6,7 +6,8 @@
  * Перестройка готовой дороги (CorridorBuild.was, src/game/rebuild.ts) — по перекрытию (closure.ts): пока работы не
  * начаты, в сети прежняя дорога; начаты — перекрыта целиком (полотна нет) или по полосам (часть прежних полос, скорость
  * зоны работ); узкая «с проездом» — полосы вне участка под реверсом и полоса встречных по открытой половине в нём
- * (reverseLanes). Полосы соседей, что упёрлись в закрытые, сходят на нет отгоном (taperDeadLanes), как при перестройке.
+ * (reverseLanes); участок, дошедший до стыка, заходит на соседа — съезд на открытую половину на нём (approachLanes).
+ * Полосы соседей, что упёрлись в закрытые, сходят на нет отгоном (taperDeadLanes), как при перестройке.
  *
  * Для карты (view) — та же сеть, но такой, какая она на земле: без отгона у соседей (асфальт готовой дороги у
  * перекрытия не сужается — машины перестраиваются по конусам, их рисует drawClosures), а узкая «с проездом» — прежней
@@ -15,9 +16,9 @@
  */
 import { scale } from '../core/vec';
 import { ROAD_CLASSES } from '../world/roadTypes';
-import { closureOf, endCuts, fitLanes, laneWise, partLanes, reverseLanes, reverseZone, zoneLimit } from './closure';
+import { type Approach, approachLanes, closureOf, fitLanes, laneWise, partLanes, reverseLanes, type ReverseSite, reverseSite, workSide, zoneLimit } from './closure';
 import { taperDeadLanes } from './edit';
-import type { LaneNet } from './model';
+import type { Corridor, End, LaneNet } from './model';
 
 const cache = new WeakMap<LaneNet, { version: number; open: LaneNet }>();
 const viewCache = new WeakMap<LaneNet, { version: number; open: LaneNet }>();
@@ -45,6 +46,8 @@ export function openNet(net: LaneNet, view = false): LaneNet {
     open = net.clone();
     const touched = new Set<number>();
     const kept: number[] = [];
+    // Соседи за стыками, на которых съезжают на открытую половину перед участком под реверсом (closure.ts, reverseSite).
+    const approaches: { c: Corridor; site: ReverseSite; at: End; r: Approach }[] = [];
     for (const c of net.corridors.values()) {
       if (!c.build) continue;
       const k = closureOf(c.build);
@@ -58,25 +61,34 @@ export function openNet(net: LaneNet, view = false): LaneNet {
         // По полосам — половина прежних; у улицы в тупик — в обе стороны (развернуться там негде). Узкая «с проездом» —
         // реверс на участке у бригады, вне его — обе стороны.
         // На карте — прежняя дорога целиком: её ещё не разрытое рисуется поверх стройки (constructionArt, drawOldRoad).
-        const zone = k === 'part' && laneWise(c.build) ? reverseZone(c, c.build, endCuts(net, c)) : null;
+        const site = k === 'part' && laneWise(c.build) ? reverseSite(net, c, c.build) : null;
+        const zone = site?.zone;
         const lanes = zone ? (view ? fitLanes(w.lanes, w.len, c.length) : reverseLanes(c, c.build, zone)) : k === 'part' ? partLanes(net, c) : fitLanes(w.lanes, w.len, c.length);
         if (k === 'part') o.limit = zoneLimit(w.limit, ROAD_CLASSES[w.cls].limit);
         else if (w.limit === undefined) delete o.limit;
         else o.limit = w.limit;
         open.setLanes(o, lanes);
         // Ревизия — та же для того же полотна и перекрытия: отрисовка и граф движения не пересчитывают его зря.
-        const key = `${c.rev}|${k}|${lanes.length}|${zone ? zone.map((x) => x.toFixed(1)).join(',') : ''}|${view ? 'v' : ''}`;
-        const rev = revs.get(key);
-        if (rev === undefined) {
-          if (revs.size > 2000) revs.clear();
-          revs.set(key, o.rev);
-        } else o.rev = rev;
+        keepRev(o, `${c.rev}|${k}|${lanes.length}|${zone ? zone.map((x) => x.toFixed(1)).join(',') : ''}|${view ? 'v' : ''}`);
         kept.push(c.a, c.b);
+        if (site && !view) site.reach.forEach((r, i) => r && approaches.push({ c, site, at: i ? 'b' : 'a', r }));
         continue;
       }
       open.removeCorridor(c.id);
       touched.add(c.a);
       touched.add(c.b);
+    }
+    // Съезд перед участком, дошедшим до стыка, — на соседе: его полосы, что продолжают перекладываемую половину,
+    // кончаются раньше, у стыка — полоса встречных (approachLanes). На карте — нет: там асфальт как был.
+    for (const { c, site, at, r } of approaches) {
+      const cur = open.corridors.get(r.corridor.id);
+      if (!cur) continue;
+      const o = { ...cur };
+      open.corridors.set(o.id, o);
+      const lanes = approachLanes(c, c.build!, site.zone, r, at, cur.lanes);
+      open.setLanes(o, lanes);
+      keepRev(o, `${cur.rev}|near ${c.id}${at}|${workSide(c.build!)}|${lanes.length}|${site.zone.map((x) => x.toFixed(1)).join(',')}`);
+      kept.push(o.a, o.b);
     }
     for (const id of touched) {
       const n = open.nodes.get(id);
@@ -92,4 +104,13 @@ export function openNet(net: LaneNet, view = false): LaneNet {
   }
   store.set(net, { version: net.version, open });
   return open;
+}
+
+/** Ревизия полотна o копии — та же для того же ключа (полотно и его перекрытие): отрисовка и граф его не пересчитывают зря. */
+function keepRev(o: Corridor, key: string): void {
+  const rev = revs.get(key);
+  if (rev === undefined) {
+    if (revs.size > 2000) revs.clear();
+    revs.set(key, o.rev);
+  } else o.rev = rev;
 }

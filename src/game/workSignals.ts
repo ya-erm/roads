@@ -18,7 +18,7 @@
  * сохраняется: после загрузки и у нового участка светофор начинает с очистки.
  */
 import { CONSTRUCTION } from '../config';
-import { closureOf, endCuts, laneWise, reverseStops, reverseZone } from '../lanes/closure';
+import { closureOf, laneWise, type ReverseSite, reverseSite, siteS, siteSpot } from '../lanes/closure';
 import type { LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import type { Barrier } from '../lanes/traffic';
@@ -38,14 +38,20 @@ export interface PhaseState {
 /** Светофоры одного участка под реверсом. */
 export interface WorkSignal {
   corridor: number;
+  /** Участок по оси от a; дошёл до стыка — заходит на соседа (closure.ts, reverseSite): за концами оси. */
   zone: [number, number];
-  /** Стоп-линии по оси от a: [идущих по оси, идущих против]. */
+  /** Стоп-линии по оси от a: [идущих по оси, идущих против]; съезд на соседе — за концами оси (на соседе). */
   stops: [number, number];
+  /** Соседи за стыками, куда заходит участок и где стоп-линия: [у a, у b]. */
+  reach: ReverseSite['reach'];
   state: PhaseState;
-  /** Стоп-линии для движения (LaneTraffic.signals): [по оси, против]. */
+  /** Стоп-линии для движения (LaneTraffic.signals): [по оси, против] — на полотнах on (своём или соседа). */
   barriers: [Barrier, Barrier];
+  on: [number, number];
   /** Держат красный для бригады (hold), и участок уже пуст — ей можно разворачиваться. */
   clear?: boolean;
+  /** Стоп-линии, когда кончился зелёный: очистка ждёт машины только там (WorkSignals.step). */
+  clearZone?: [number, number];
 }
 
 /** Секунд ехать по участку длиной len на скорости зоны работ. */
@@ -127,24 +133,44 @@ export class WorkSignals {
     if (!this.list.size) return;
     for (const sig of this.list.values()) {
       const [s0, s1] = sig.stops;
-      const links = graph.corridorLinks(sig.corridor);
       const c = net.corridors.get(sig.corridor);
-      const L = c?.length ?? s1;
+      if (!c) continue;
+      const L = c.length;
+      // Машины на своём полотне и на соседях за стыками — по оси c (ход — как по ней).
+      const parts: { id: number; at: (s: number) => number; k: 1 | -1 }[] = [{ id: c.id, at: (s) => s, k: 1 }];
+      sig.reach.forEach((r, i) => r && parts.push({ id: r.corridor.id, at: (s) => siteS(c, r, i ? 'b' : 'a', s), k: r.k }));
       const count = (ok: (flow: 1 | -1, s: number) => boolean) => {
         let n = 0;
-        for (const link of links) for (const lane of link.lanes) for (const v of lane.vehicles) if (ok(link.flow, v.centerS)) n++;
+        for (const p of parts) {
+          for (const link of graph.corridorLinks(p.id)) {
+            const flow = (link.flow * p.k) as 1 | -1;
+            for (const lane of link.lanes) for (const v of lane.vehicles) if (ok(flow, p.at(v.centerS))) n++;
+          }
+        }
         return n;
       };
+      // Видно ли очередь: от стоп-линии назад до начала своего полотна (или соседа за стыком).
+      const lo = sig.reach[0] ? -sig.reach[0].corridor.length : 0;
+      const hi = sig.reach[1] ? L + sig.reach[1].corridor.length : L;
       const demand = (f: 1 | -1): number | null => {
         const n = count((flow, s) => flow === f && (f > 0 ? s < s0 && s > s0 - QUEUE_LOOK : s > s1 && s < s1 + QUEUE_LOOK));
         if (n > 0) return n;
-        return (f > 0 ? s0 : L - s1) < BLIND ? null : 0;
+        return (f > 0 ? s0 - lo : hi - s1) < BLIND ? null : 0;
       };
-      const inside = (f: 1 | -1) => count((flow, s) => flow === f && s > s0 - 1 && s < s1 + 1);
-      if (this.holds.has(sig.corridor)) holdPhase(sig, dt, s1 - s0, inside);
-      else {
+      if (this.holds.has(sig.corridor)) {
+        // Бригада разворачивается — участок целиком должен быть пуст.
+        const all = (f: 1 | -1) => count((flow, s) => flow === f && s > s0 - 1 && s < s1 + 1);
+        holdPhase(sig, dt, s1 - s0, all);
+      } else {
         sig.clear = false;
-        stepPhase(sig.state, dt, s1 - s0, demand, inside);
+        // Очистка — участок, по которому ехали на прошлый зелёный: переехал во время очистки — только общее с ним. Иначе
+        // бригада, идущая почти со скоростью машин, всё время «догоняет» уехавших вперёд, и очистка тянется до clearMax;
+        // а ждущие у стоп-линии, переехавшей вперёд, уже не на участке.
+        if (sig.state.go !== 0 || !sig.clearZone) sig.clearZone = [s0, s1];
+        const c0 = Math.max(s0, sig.clearZone[0]);
+        const c1 = Math.min(s1, sig.clearZone[1]);
+        const inside = (f: 1 | -1) => count((flow, s) => flow === f && s > c0 - 1 && s < c1 + 1);
+        stepPhase(sig.state, dt, Math.max(0, c1 - c0), demand, inside);
       }
       sig.barriers[0].closed = sig.state.go !== 1;
       sig.barriers[1].closed = sig.state.go !== -1;
@@ -170,8 +196,7 @@ export class WorkSignals {
     const next = new Map<number, WorkSignal>();
     for (const c of net.corridors.values()) {
       if (!c.build || closureOf(c.build) !== 'part' || !laneWise(c.build)) continue;
-      const zone = reverseZone(c, c.build, endCuts(net, c));
-      const stops = reverseStops(c, c.build, zone);
+      const { zone, stops, reach } = reverseSite(net, c, c.build);
       // Участок переехал на следующий кусок — фазы идут дальше (сброс отдавал бы зелёный всё время одной стороне:
       // бригада проходит кусок быстрее, чем светофор — круг); новый участок — с очистки.
       const old = this.list.get(c.id);
@@ -182,15 +207,31 @@ export class WorkSignals {
             { s: stops[0], closed: true, busy: false, flow: 1, stop: 0 },
             { s: stops[1], closed: true, busy: false, flow: -1, stop: 0 },
           ];
-      barriers[0].s = stops[0];
-      barriers[1].s = stops[1];
+      // Стоп-линия — на своём полотне или на соседе за стыком (там ход по его оси).
+      const on: [number, number] = [0, 0];
+      ([1, -1] as const).forEach((flow, i) => {
+        const spot = siteSpot(c, reach, stops[i]);
+        barriers[i].s = spot.s;
+        barriers[i].flow = (flow * spot.k) as 1 | -1;
+        on[i] = spot.corridor.id;
+      });
       barriers[0].closed = state.go !== 1;
       barriers[1].closed = state.go !== -1;
-      next.set(c.id, { corridor: c.id, zone, stops, state, barriers, ...(old?.clear ? { clear: true } : {}) });
+      next.set(c.id, {
+        corridor: c.id,
+        zone,
+        stops,
+        reach,
+        state,
+        barriers,
+        on,
+        ...(old?.clear ? { clear: true } : {}),
+        ...(old?.clearZone ? { clearZone: old.clearZone } : {}),
+      });
     }
     this.list = next;
     const map = new Map<number, Barrier[]>();
-    for (const sig of next.values()) map.set(sig.corridor, sig.barriers);
+    for (const sig of next.values()) sig.barriers.forEach((b, i) => map.set(sig.on[i], [...(map.get(sig.on[i]) ?? []), b]));
     traffic.signals = map;
   }
 

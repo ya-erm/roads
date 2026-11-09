@@ -21,12 +21,12 @@ import { CREW_UNITS, crewRows, fillet, polyAt, polyLength, polyProject, stageSlo
 import { drawVehicleArt } from './vehicleArt';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import type { LaneRenderer } from '../lanes/draw';
-import { edgesAt, pointOff, stations } from '../lanes/geometry';
+import { edgesAt, pointOff, pointOff as geoPointOff, stations } from '../lanes/geometry';
 import { type Corridor, type LaneNet, taperLen } from '../lanes/model';
 import { corridorLayer } from '../lanes/speedDisplay';
 import type { BuildBase } from '../world/entities';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
-import { closureOf, endCuts, fitLanes, laneWise, partLanes, reverseStops, reverseZone, workSide } from '../lanes/closure';
+import { closureOf, fitLanes, laneWise, partLanes, reverseSite, siteSpot, workSide } from '../lanes/closure';
 import { bridgePiers, drawCraneSet, drawShieldSet, type SiteKind, siteKind, slabTo } from './structureArt';
 import { type Box, grow } from './tileCache';
 
@@ -675,10 +675,11 @@ export function drawClosures(
 }
 
 /**
- * Перестройка «с проездом» на узкой (closure.ts, laneWise) на карте: участок под реверсом (reverseZone) — конусы по оси
+ * Перестройка «с проездом» на узкой (closure.ts, laneWise) на карте: участок под реверсом (reverseSite) — конусы по оси
  * между открытой и перекладываемой половиной, у концов участка — отгоном (косой линией конусов от края полосы к оси,
- * где машины съезжают на открытую половину) и щит поперёк перекладываемой половины; на стоп-линиях (reverseStops) —
- * белая линия поперёк полосы и временный светофор справа по ходу: горит красный или зелёный (lamp, workSignals.ts).
+ * где машины съезжают на открытую половину) и щит поперёк перекладываемой половины; на стоп-линиях — белая линия
+ * поперёк полосы и временный светофор справа по ходу: горит красный или зелёный (lamp, workSignals.ts). Участок,
+ * дошедший до стыка, заходит на соседа — его съезд, щит и светофор рисуются на соседе.
  */
 function drawReverse(
   ctx: CanvasRenderingContext2D,
@@ -691,8 +692,17 @@ function drawReverse(
   const b = c.build!;
   const w = b.was!;
   const L = c.length;
-  const zone = reverseZone(c, b, endCuts(net, c));
-  const stops = reverseStops(c, b, zone);
+  // Участок, дошедший до стыка, заходит на соседа: съезд, щит и стоп-линия — на нём (по оси c за её концом).
+  const { zone, stops, reach } = reverseSite(net, c, b);
+  const pointOff = (_: Corridor, s: number, off: number): Vec => {
+    const p = siteSpot(c, reach, s);
+    return geoPointOff(p.corridor, p.s, p.base + p.k * off);
+  };
+  const tangentAt = (s: number): Vec => {
+    const p = siteSpot(c, reach, s);
+    const t = p.corridor.lut.tangentAt(p.s);
+    return p.k > 0 ? t : scale(t, -1);
+  };
   const side = workSide(b);
   const old = fitLanes(w.lanes, w.len, L);
   const half = LANE_W / 2;
@@ -723,8 +733,9 @@ function drawReverse(
       cone(pointOff(c, from + (to - from) * u, outer - side * 0.8 + (axis - outer + side * 0.8) * u));
     }
   };
-  taper(zone[0] - T, zone[0]);
-  taper(zone[1] + T, zone[1]);
+  // Участок до самого узла без соседа (перекрёсток, тупик) — съезжать перед ним негде, отгона нет.
+  if (zone[0] > 0 || reach[0]) taper(zone[0] - T, zone[0]);
+  if (zone[1] < L || reach[1]) taper(zone[1] + T, zone[1]);
   for (let s = zone[0] + 8; s < zone[1] - 4; s += 10) cone(pointOff(c, s, axis));
   // Щиты поперёк перекладываемой половины — за отгоном, у концов участка.
   const bar = Math.max(2, 4 * px);
@@ -763,7 +774,7 @@ function drawReverse(
     // Светофор — у правой по ходу кромки, чуть за обочиной: корпус вдоль дороги, сверху — красный, ниже — зелёный.
     const edge = flow > 0 ? Math.max(hi, ...old.map((l) => l.offset + half)) : Math.min(lo, ...old.map((l) => l.offset - half));
     const at = pointOff(c, s, edge + flow * (ROAD_MARGIN + 1.6));
-    const t = c.lut.tangentAt(s);
+    const t = tangentAt(s);
     const dir = flow > 0 ? t : scale(t, -1);
     const lit = lamp(c.id, flow);
     const k = Math.max(1, 1.6 * px);
