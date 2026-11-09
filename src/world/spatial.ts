@@ -40,19 +40,46 @@ export function footprintCorners(f: Footprint): Vec[] {
 
 /** Пересекаются ли прямоугольники (по разделяющим осям). */
 export function footprintsOverlap(a: Footprint, b: Footprint, margin = 0): boolean {
-  const ca = footprintCorners({ ...a, w: a.w + margin * 2, h: a.h + margin * 2 });
-  const cb = footprintCorners(b);
-  for (const f of [a, b]) {
-    for (const angle of [f.angle, f.angle + Math.PI / 2]) {
-      const ax = Math.cos(angle);
-      const ay = Math.sin(angle);
-      const proj = (pts: Vec[]) => pts.map((p) => p.x * ax + p.y * ay);
-      const pa = proj(ca);
-      const pb = proj(cb);
-      if (Math.max(...pa) < Math.min(...pb) || Math.max(...pb) < Math.min(...pa)) return false;
+  // Горячее место генерации городов: углы и проекции — та же арифметика, что footprintCorners и
+  // проекция на оси, только без временных массивов и объектов.
+  const ca = cornersInto(CA, a.center, a.w + margin * 2, a.h + margin * 2, a.angle);
+  const cb = cornersInto(CB, b.center, b.w, b.h, b.angle);
+  for (let k = 0; k < 4; k++) {
+    const angle = k === 0 ? a.angle : k === 1 ? a.angle + Math.PI / 2 : k === 2 ? b.angle : b.angle + Math.PI / 2;
+    const ax = Math.cos(angle);
+    const ay = Math.sin(angle);
+    let minA = Infinity;
+    let maxA = -Infinity;
+    let minB = Infinity;
+    let maxB = -Infinity;
+    for (let i = 0; i < 8; i += 2) {
+      const pa = ca[i] * ax + ca[i + 1] * ay;
+      const pb = cb[i] * ax + cb[i + 1] * ay;
+      if (pa < minA) minA = pa;
+      if (pa > maxA) maxA = pa;
+      if (pb < minB) minB = pb;
+      if (pb > maxB) maxB = pb;
     }
+    if (maxA < minB || maxB < minA) return false;
   }
   return true;
+}
+
+const CA = new Float64Array(8);
+const CB = new Float64Array(8);
+const CORNER_SIGNS = [-1, -1, 1, -1, 1, 1, -1, 1];
+
+/** Углы как у footprintCorners (x, y по очереди) — в готовый массив out. */
+function cornersInto(out: Float64Array, center: Vec, w: number, h: number, angle: number): Float64Array {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  for (let i = 0; i < 8; i += 2) {
+    const lx = (CORNER_SIGNS[i] * w) / 2;
+    const ly = (CORNER_SIGNS[i + 1] * h) / 2;
+    out[i] = center.x + lx * c - ly * s;
+    out[i + 1] = center.y + lx * s + ly * c;
+  }
+  return out;
 }
 
 /** Сеточный индекс прямоугольников для быстрых проверок «занято ли место». */
@@ -107,7 +134,13 @@ export class FootprintIndex<T extends { fp: Footprint }> {
   }
 
   overlaps(f: Footprint, margin = 0): boolean {
+    // Описанные окружности врозь (с запасом в метр) — прямоугольники точно не пересекаются: без точной проверки.
+    const r = Math.hypot(f.w + margin * 2, f.h + margin * 2) / 2 + 1;
     for (const it of this.near(f.center, footprintRadius(f) + margin + 200)) {
+      const dx = it.fp.center.x - f.center.x;
+      const dy = it.fp.center.y - f.center.y;
+      const reach = r + footprintRadius(it.fp);
+      if (dx * dx + dy * dy > reach * reach) continue;
       if (footprintsOverlap(f, it.fp, margin)) return true;
     }
     return false;

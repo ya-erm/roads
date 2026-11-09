@@ -270,19 +270,38 @@ export class CurveLUT {
 
   /** Ближайшая точка кривой к p. */
   closest(p: Vec): { s: number; t: number; point: Vec; d: number } {
-    let best = { i: 0, f: 0, d: Infinity };
-    for (let i = 0; i < this.points.length - 1; i++) {
-      const a = this.points[i];
-      const b = this.points[i + 1];
-      const ab = sub(b, a);
-      const l2 = dot(ab, ab);
-      const f = l2 > 0 ? Math.max(0, Math.min(1, dot(sub(p, a), ab) / l2)) : 0;
-      const d = dist(p, lerp(a, b, f));
-      if (d < best.d) best = { i, f, d };
+    // Самое горячее место генерации мира и движения: та же арифметика, что dist(p, lerp(a, b, f)), но без
+    // временных объектов, а Math.hypot — только у отрезков, что могут оказаться ближе лучшего: квадрат
+    // расстояния заметно больше квадрата лучшего — и hypot больше, ответ тот же до бита.
+    const pts = this.points;
+    const px = p.x;
+    const py = p.y;
+    let bi = 0;
+    let bf = 0;
+    let bd = Infinity;
+    let bound2 = Infinity;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      const abx = b.x - a.x;
+      const aby = b.y - a.y;
+      const l2 = abx * abx + aby * aby;
+      const f = l2 > 0 ? Math.max(0, Math.min(1, ((px - a.x) * abx + (py - a.y) * aby) / l2)) : 0;
+      const dx = px - (a.x + abx * f);
+      const dy = py - (a.y + aby * f);
+      if (dx * dx + dy * dy > bound2) continue;
+      const d = Math.hypot(dx, dy);
+      if (d < bd) {
+        bi = i;
+        bf = f;
+        bd = d;
+        const r = d * (1 + 1e-9);
+        bound2 = r * r;
+      }
     }
-    const s = this.cum[best.i] + (this.cum[best.i + 1] - this.cum[best.i]) * best.f;
-    const t = this.ts[best.i] + (this.ts[best.i + 1] - this.ts[best.i]) * best.f;
-    return { s, t, point: this.pointAt(s), d: best.d };
+    const s = this.cum[bi] + (this.cum[bi + 1] - this.cum[bi]) * bf;
+    const t = this.ts[bi] + (this.ts[bi + 1] - this.ts[bi]) * bf;
+    return { s, t, point: this.pointAt(s), d: bd };
   }
 }
 

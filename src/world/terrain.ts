@@ -472,7 +472,12 @@ export class Terrain {
         // Быстрый отсев далёких кусков.
         if (Math.abs(p.x - a.x) > 400 && Math.abs(p.x - b.x) > 400) continue;
         if (Math.abs(p.y - a.y) > 400 && Math.abs(p.y - b.y) > 400) continue;
-        best = Math.min(best, closestOnSegment(p, a, b).d - r.width / 2);
+        // То же, что closestOnSegment(p, a, b).d, без временных объектов (горячее место генерации мира).
+        const abx = b.x - a.x;
+        const aby = b.y - a.y;
+        const l2 = abx * abx + aby * aby;
+        const t = Math.max(0, Math.min(1, l2 > 0 ? ((p.x - a.x) * abx + (p.y - a.y) * aby) / l2 : 0));
+        best = Math.min(best, Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t)) - r.width / 2);
       }
     }
     return best;
