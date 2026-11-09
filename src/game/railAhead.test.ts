@@ -21,6 +21,9 @@ function railLine(along: number[], signals: number[] = []): { game: Game; statio
         const from = { x, y };
         const at = (k: number, side = 0): Vec => add(add(from, scale(dir, k)), scale({ x: -dir.y, y: dir.x }, side));
         const req = { start: { kind: 'free' as const, pos: from, level: 0 }, end: { kind: 'free' as const, pos: at(len), level: 0 }, spec: RAIL_SPEC, mode: 'straight' as const };
+        // В чистом поле: без переездов через стартовые просёлки к предприятиям.
+        const road = (k: number) => game.roads.net.corridorsNear(at(k), 150).some((c) => c.lut.closest(at(k)).d < 150);
+        if (Array.from({ length: len / 100 + 1 }, (_, i) => i * 100).some(road)) continue;
         if (!game.builder.plan(req).ok) continue;
         game.builder.build(req);
         if (along.every((k) => game.stationPlan(at(k, 40), 14, 'rail').ok)) {

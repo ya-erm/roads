@@ -15,6 +15,15 @@ function runSeconds(game: Game, seconds: number, each?: () => void) {
   }
 }
 
+/** Дорога ближе r к отрезку от from по dir длиной len. */
+function roadNear(game: Game, from: Vec, dir: Vec, len: number, r: number): boolean {
+  for (let s = 0; s <= len; s += 100) {
+    const p = add(from, scale(dir, s));
+    if (game.roads.net.corridorsNear(p, r).some((c) => c.lut.closest(p).d < r)) return true;
+  }
+  return false;
+}
+
 /** Прямой путь длиной len в свободном месте, рядом с которым встают два вокзала на один путь. */
 function layTrack(game: Game, len: number): { from: Vec; dir: Vec; n: Vec } {
   for (let y = 400; y < game.terrain.height - 400; y += 170) {
@@ -22,6 +31,8 @@ function layTrack(game: Game, len: number): { from: Vec; dir: Vec; n: Vec } {
       const dir = { x: 1, y: 0 };
       const from = { x, y };
       const req = { start: { kind: 'free' as const, pos: from, level: 0 }, end: { kind: 'free' as const, pos: add(from, scale(dir, len)), level: 0 }, spec: RAIL_SPEC, mode: 'straight' as const };
+      // В чистом поле: стартовые просёлки к предприятиям не мешают вокзалам любой длины.
+      if (roadNear(game, from, dir, len, 250)) continue;
       if (!game.builder.plan(req).ok) continue;
       game.builder.build(req);
       const n = { x: 0, y: 1 };

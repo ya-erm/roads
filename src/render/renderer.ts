@@ -545,6 +545,8 @@ export class Renderer {
       this.lanes.reset();
       this.projectLanes.reset();
       this.lanes.water = this.projectLanes.water = (p) => terrain.isWater(p, 7);
+      // Дорога, уходящая за край карты, обрывается краем — без разворота на конце.
+      this.lanes.inMap = this.projectLanes.inMap = (p) => terrain.inBounds(p, 1);
     }
     // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты; над рекой на земле — мостом.
     // Строящееся («Со строительством») — чертежом по всей сети (fullNet), дороги — по открытой для движения.

@@ -562,7 +562,8 @@ export class RoadBuilder {
       const p = c.lut.pointAt(s);
       const half = halfAtS(c, s);
       const h = net.heightAt(c, s);
-      if (!this.ctx.inBounds(p, 20)) return 'За краем карты';
+      // Дорога на прежней оси (перестройка) — где была: стартовый просёлок от города уходит за край карты.
+      if (reshaped && !this.ctx.inBounds(p, 20)) return 'За краем карты';
       if (h < -0.25 && h > -0.75 && this.ctx.isWater(p, 2)) return 'Въезд в тоннель в воде';
       // Полотно бывает шире с одной стороны (пристроенная полоса): дома и дороги проверяем по кромке своей стороны.
       const n = rightNormal(c.lut.tangentAt(s));

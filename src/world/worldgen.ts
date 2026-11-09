@@ -10,6 +10,7 @@ import type { Network } from './network';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
 import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, townSizes, WorldProfile, WorldSettings } from './settings';
 import { Footprint, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
+import { layStartRoads } from './startRoads';
 import type { Terrain } from './terrain';
 
 const TOWN_NAMES = [
@@ -240,6 +241,7 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   // Места для городов и предприятий выбраны по всем улицам; дальше радиус города — по плотной застройке.
   for (const t of towns) measureTown(t);
+  layStartRoads(ctx, towns, industries, settings.seed);
   return { towns, industries };
 }
 
@@ -294,6 +296,7 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
   const placed = placeProfiled(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), profile, settings);
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   for (const t of towns) measureTown(t);
+  layStartRoads(ctx, towns, industries, settings.seed);
   return { towns, industries };
 }
 

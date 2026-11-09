@@ -41,7 +41,7 @@ import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/tow
 import { addTownPax, closeTownPax, PAX_NOWHERE, PAX_PER_THOUSAND } from '../world/townPax';
 import { repaceSave, saveMonthLength } from './monthPace';
 import { Network, NetworkSave, Segment } from '../world/network';
-import { halfWidth, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
+import { halfWidth, isDirt, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
 import { DEFAULT_SETTINGS, WorldSettings } from '../world/settings';
 import { Terrain, TerraformEdit, TerraformMode } from '../world/terrain';
@@ -6239,7 +6239,8 @@ export class Game implements BuildContext {
   private streetLike(c: Corridor): boolean {
     const net = this.roads.net;
     // Строящаяся дорога (проект) — ещё не улица: город от неё не продолжает и дома вдоль неё не ставит.
-    return !c.build && !c.ring && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c, this.drivewayIds());
+    // Просёлок в поле — тоже: город не тянется вдоль него отростком; перестроенный игроком — уже улица.
+    return !c.build && !c.ring && !isDirt(c.cls) && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c, this.drivewayIds());
   }
 
   /**

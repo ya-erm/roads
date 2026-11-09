@@ -192,7 +192,7 @@ export interface CorridorEnd {
 }
 
 /** Длина отгона: на столько вдоль оси полоса расширяется от нуля до полной ширины. */
-export const TAPER: Record<RoadClass, number> = { street: 25, avenue: 35, highway: 70, motorway: 90, rail: 0 };
+export const TAPER: Record<RoadClass, number> = { dirt: 25, street: 25, avenue: 35, highway: 70, motorway: 90, rail: 0 };
 export const taperLen = (cls: RoadClass) => TAPER[cls];
 
 /** Поперечные координаты в стыке совпадают с такой точностью. */

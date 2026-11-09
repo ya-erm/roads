@@ -15,6 +15,7 @@ function arrow(x: number, y: number, dir: 1 | -1, color: string): string {
 /** Вид дороги сверху: полосы, разметка и стрелки направления. */
 export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
   if (spec.cls === 'rail') return railSvg(w, h);
+  if (spec.cls === 'dirt') return dirtSvg(w, h);
   const back = isOneWay(spec) ? 0 : spec.lanesB;
   const fwd = spec.lanesF;
   const lanes = back + fwd;
@@ -50,6 +51,16 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
     for (const x of w > 70 ? [w * 0.3, w * 0.72] : [w / 2]) parts.push(arrow(x, y, dir, '#ffffff'));
   }
   return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">${parts.join('')}</svg>`;
+}
+
+/** Грунтовая дорога сверху: укатанная земля и две пары колей, без разметки. */
+export function dirtSvg(w = 84, h = 40): string {
+  const top = h / 2 - 7;
+  const ruts = [top + 2.5, top + 5, top + 9, top + 11.5].map((y) => `M2 ${y}H${w - 2}`).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
+    <rect x="1" y="${top}" width="${w - 2}" height="14" rx="4" fill="#b8a07a" stroke="#a08762" stroke-width="1.2"/>
+    <path d="${ruts}" stroke="rgba(118,92,60,0.6)" stroke-width="1.1" stroke-linecap="round"/>
+  </svg>`;
 }
 
 /** Путь сверху: щебень, шпалы и два рельса. */
@@ -380,7 +391,7 @@ export function fragmentSvg(frag: Fragment, w = 64, h = 48): string {
   const pad = 3;
   const k = Math.min((w - pad * 2) / (frag.half.x * 2), (h - pad * 2) / (frag.half.y * 2));
   const at = (p: Vec) => `${(w / 2 + p.x * k).toFixed(1)} ${(h / 2 + p.y * k).toFixed(1)}`;
-  const width: Record<string, number> = { motorway: 3.4, highway: 3, avenue: 2.4, street: 1.6 };
+  const width: Record<string, number> = { motorway: 3.4, highway: 3, avenue: 2.4, street: 1.6, dirt: 1.3 };
   const rails = (frag.rail?.segs ?? [])
     .map(({ curve: { p0, p1, p2, p3 } }) => {
       const d = `M${at(p0)}C${at(p1)} ${at(p2)} ${at(p3)}`;
@@ -391,7 +402,7 @@ export function fragmentSvg(frag: Fragment, w = 64, h = 48): string {
     .sort((a, b) => (width[a.cls] ?? 2) - (width[b.cls] ?? 2))
     .map((c) => {
       const { p0, p1, p2, p3 } = c.curve;
-      const color = c.cls === 'motorway' || c.cls === 'highway' ? '#646b76' : '#7a828e';
+      const color = c.cls === 'motorway' || c.cls === 'highway' ? '#646b76' : c.cls === 'dirt' ? '#a08762' : '#7a828e';
       return `<path d="M${at(p0)}C${at(p1)} ${at(p2)} ${at(p3)}" stroke="${color}" stroke-width="${width[c.cls] ?? 2}" fill="none" stroke-linecap="round"/>`;
     })
     .join('');

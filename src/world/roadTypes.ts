@@ -1,7 +1,7 @@
-export type RoadClass = 'street' | 'avenue' | 'highway' | 'motorway' | 'rail';
+export type RoadClass = 'dirt' | 'street' | 'avenue' | 'highway' | 'motorway' | 'rail';
 
-/** Классы автодорог (без железной дороги) — для панели выбора. */
-export const ROAD_CLASS_IDS: RoadClass[] = ['street', 'avenue', 'highway', 'motorway'];
+/** Классы автодорог (без железной дороги), от самой простой: грунтовая — только стартовые просёлки (world/startRoads.ts). */
+export const ROAD_CLASS_IDS: RoadClass[] = ['dirt', 'street', 'avenue', 'highway', 'motorway'];
 
 export interface RoadClassInfo {
   id: RoadClass;
@@ -14,6 +14,9 @@ export interface RoadClassInfo {
 }
 
 export const ROAD_CLASSES: Record<RoadClass, RoadClassInfo> = {
+  // Просёлок: самая дешёвая и медленная, без асфальта и разметки. Строит её только мир на старте — к предприятиям и от
+  // городов за край карты (world/startRoads.ts); игрок сносит и перестраивает её, как любую дорогу.
+  dirt: { id: 'dirt', name: 'Грунтовая', limit: 30, minRadius: 12, cost: 2 },
   street: { id: 'street', name: 'Улица', limit: 40, minRadius: 12, cost: 7 },
   avenue: { id: 'avenue', name: 'Проспект', limit: 60, minRadius: 26, cost: 9 },
   highway: { id: 'highway', name: 'Магистраль', limit: 90, minRadius: 70, cost: 13 },
@@ -64,6 +67,8 @@ export const TRACK_GAP = 13;
 export const RAIL_LEVEL_RUN = 130;
 
 export const isRail = (s: RoadSpec) => s.cls === 'rail';
+/** Грунтовая дорога — без асфальта и разметки. */
+export const isDirt = (cls: RoadClass) => cls === 'dirt';
 /** Максимальный угол, под которым поезд проходит узел (стрелка или продолжение пути). */
 export const RAIL_SWITCH_ANGLE = 0.55;
 
