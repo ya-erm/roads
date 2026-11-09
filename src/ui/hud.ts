@@ -143,7 +143,7 @@ import { adviceOf, type Advice, type AdviceFix } from '../game/advisor';
 import { stationWarnings } from '../game/stationWarnings';
 import { storageSlots } from '../game/warehouses';
 import { annexHtml } from './annexUi';
-import { INDUSTRY_TOOL_SVG, industryModeRowHtml, industryOptionsHtml, industryRowsHtml, townRowsHtml } from './enterpriseUi';
+import { depositCardHtml, INDUSTRY_TOOL_SVG, industryModeRowHtml, industryOptionsHtml, industryRowsHtml, townRowsHtml } from './enterpriseUi';
 import type { IndustryKind } from '../world/cargo';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
@@ -1271,6 +1271,22 @@ export class Hud {
       case 'crew-auto':
         g.autoBrigade(Number(d.id));
         break;
+      case 'deposit-show': {
+        const dep = g.enterprises.deposit(Number(d.id));
+        if (dep) this.controller.showPlace(dep.center, 120);
+        break;
+      }
+      case 'dep-build': {
+        // Добыча на месторождение из его карточки — как кликом инструментом «Предприятие»; поставили — её карточка.
+        const dep = g.enterprises.deposit(Number(d.id));
+        const problem = dep ? g.enterprises.build(dep.kind, dep.center, dep.angle) : 'Месторождения нет';
+        if (problem) g.notify(problem, '#e5534b');
+        else {
+          const ind = g.industries[g.industries.length - 1];
+          if (ind) c.select({ type: 'industry', id: ind.id });
+        }
+        break;
+      }
       case 'base-show': {
         // К базе на карте — и её карточка справа (бригады, нанять и распустить, ближние стройки).
         const base = g.construction.crews.bases.get(Number(d.id));
@@ -2579,7 +2595,7 @@ export class Hud {
     const sel = this.controller.selection;
     // У машины жителя линий нет, а у машины компании её линия уже есть в карточке. У проекта стройки и базы маршрутов
     // нет — список всех маршрутов под их карточкой только отвлекает.
-    if (sel?.type === 'vehicle' || sel?.type === 'fleet' || sel?.type === 'project' || sel?.type === 'base' || sel?.type === 'crew' || sel?.type === 'workTrain') return '';
+    if (sel?.type === 'vehicle' || sel?.type === 'fleet' || sel?.type === 'project' || sel?.type === 'base' || sel?.type === 'crew' || sel?.type === 'workTrain' || sel?.type === 'deposit') return '';
     // Выбрана станция, предприятие или город — только их маршруты, без папок.
     const station = sel?.type === 'station' ? g.stations.get(sel.id) : undefined;
     const industry = sel?.type === 'industry' ? g.industries.find((i) => i.id === sel.id) : undefined;
@@ -3171,6 +3187,11 @@ export class Hud {
     if (sel.type === 'base') return baseCardHtml(g, sel.id, this.renamingBase === sel.id, this.confirmRemoveBase === sel.id);
     if (sel.type === 'crew') return crewCardHtml(g, sel.id, { following: this.controller.following, picking: this.controller.sendingCrew === sel.id });
     if (sel.type === 'workTrain') return workTrainCardHtml(g, sel.id, { following: this.controller.following });
+    if (sel.type === 'deposit') {
+      const d = g.enterprises.deposit(sel.id);
+      const partners = d && d.used === undefined ? this.partnersHtml(g.partners(g.enterprises.depositProbe(d), 3)) : '';
+      return depositCardHtml(g, sel.id, partners);
+    }
     if (sel.type === 'station') {
       const st = g.stations.get(sel.id);
       if (!st) return '';

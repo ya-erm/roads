@@ -2127,6 +2127,9 @@ export class Controller {
     if (st?.type === 'building') return { type: 'building', id: st.id };
     // Строительная база — её карточка: бригады, нанять и распустить, ближние стройки.
     if (st?.type === 'base') return { type: 'base', id: st.id };
+    // Свободное месторождение — по пятну или значку над ним: что за сырьё и что на нём строить.
+    const dep = g.enterprises.depositAt(p, 12 / this.camera.zoom);
+    if (dep) return { type: 'deposit', id: dep.id };
     const town = g.townAt(p);
     if (town) return { type: 'town', id: town.id };
     return null;

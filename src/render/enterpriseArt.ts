@@ -4,10 +4,9 @@
  * вредных предприятий; заброшенные (ржавчина, выбитые окна, трава); стройплощадка (котлован, леса, кран, штабеля,
  * здание растёт по готовности). Всё неподвижное рисуется в плитки кэша карты; мелочи — только вблизи.
  */
-import { ENTERPRISE } from '../config';
 import { dist } from '../core/vec';
 import { CARGO, INDUSTRY_TYPES, type IndustryKind } from '../world/cargo';
-import { harmClass, harmReach, isActive } from '../world/enterprise';
+import { depositRadius, harmClass, harmReach, isActive } from '../world/enterprise';
 import type { Deposit, Industry, TownBuilding } from '../world/entities';
 import { type Footprint, footprintRadius } from '../world/spatial';
 import { disc, drawIndustryArt, hash, shade, YELLOW } from './industryArt';
@@ -52,10 +51,8 @@ const TINT: Partial<Record<IndustryKind, string>> = {
   cottonfarm: '#f2f0e6',
 };
 
-/** Радиус пятна месторождения: по размеру (малое — меньше). */
-export function depositRadius(d: Pick<Deposit, 'size'>): number {
-  return ENTERPRISE.deposits.radius * (0.7 + 0.15 * d.size);
-}
+/** Радиус пятна месторождения: по размеру (малое — меньше) — world/enterprise.ts, по нему же и клик. */
+export { depositRadius };
 
 /** Рамка месторождения на карте — для кэша плиток (с запасом под значок). */
 export function depositBox(d: Deposit): { x0: number; y0: number; x1: number; y1: number } {

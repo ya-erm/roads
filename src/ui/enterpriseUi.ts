@@ -8,7 +8,8 @@ import type { Game } from '../game/game';
 import type { IndustryPlan } from '../game/enterprises';
 import { money } from '../input/labels';
 import { CARGO, type CargoType, INDUSTRY_TYPES, type IndustryKind, type IndustryType } from '../world/cargo';
-import { buildCost, freeDeposits, harmClass, harmTo, isRaw, townFor, townSlots, workersNeeded } from '../world/enterprise';
+import { dist } from '../core/vec';
+import { buildCost, buildTime, freeDeposits, harmClass, harmTo, isRaw, townFor, townSlots, workersNeeded } from '../world/enterprise';
 import type { Industry, Town } from '../world/entities';
 import { INDUSTRY_MODES, type IndustryMode } from '../world/settings';
 import { cargoIcon, townIcon } from './cargoIcons';
@@ -164,6 +165,107 @@ export function industryRowsHtml(g: Game, ind: Industry): string {
   const town = townFor(g.towns, ind.fp);
   if (town) rows.push(`<div class="ent-row"><span class="ent-ic">🏙</span><small>в черте города ${esc(town.name)}${ind.builtBy === 'town' ? ' · построил город' : ''}</small></div>`);
   return rows.length ? `<div class="ent-rows">${rows.join('')}</div>` : '';
+}
+
+/** Что за место у месторождения вида: руда и камень — месторождение, поля — угодье, лес — делянка и т. д. */
+const PLACE: Partial<Record<IndustryKind, string>> = {
+  farm: 'угодье',
+  flaxfarm: 'угодье',
+  sunflower: 'угодье',
+  cottonfarm: 'угодье',
+  ranch: 'пастбище',
+  sheepfarm: 'пастбище',
+  forest: 'лесной участок',
+  fishery: 'рыбное место',
+  oilwell: 'нефтяное месторождение',
+  gasfield: 'газовое месторождение',
+};
+export const depositPlace = (kind: IndustryKind): string => PLACE[kind] ?? 'месторождение';
+
+/**
+ * Карточка свободного месторождения в правой панели — открывается кликом по пятну или значку на карте («Выбор»).
+ * Значками: сырьё и размер (●●○ ×1), сколько добудет в месяц, 👷 рабочих, ☁ вред; «🏗 Что строить» — какая
+ * добыча встанет, прогноз (рабочие из городов, вред, черта города) и кнопка «Построить» (нельзя — причина в
+ * подсказке); «🏭 Перерабатывают» — заводы на это сырьё (клик — инструмент с этим заводом); partners — «Куда
+ * везти» (Hud.partnersHtml). Месторождение заняли — короткая записка со ссылкой на предприятие.
+ */
+export function depositCardHtml(g: Game, id: number, partners = ''): string {
+  const close = `<button class="icon" data-action="close-sel" data-tip="Закрыть">✕</button>`;
+  const e = g.enterprises;
+  const d = e.deposit(id);
+  if (!d) return `<section class="detail project-card dep-card"><header><h3>Месторождение</h3>${close}</header><p class="muted">Месторождения больше нет.</p></section>`;
+  const info = INDUSTRY_TYPES[d.kind];
+  const c = info.produces;
+  const head = `<header class="pc-head station-head"><button class="icon pc-show" data-action="deposit-show" data-id="${d.id}" data-tip="Показать на карте">${cargoIcon(c, 24, false)}</button>
+    <h3>${esc(CARGO[c].name)}</h3>${close}</header>`;
+  if (d.used !== undefined) {
+    const ind = g.industries.find((i) => i.id === d.used);
+    return `<section class="detail project-card dep-card">${head}<p class="muted">⛏️ ${depositPlace(d.kind)} занято</p>${
+      ind ? `<button class="partner" data-action="focus" data-type="industry" data-id="${ind.id}">${cargoIcon(c, 18)}<span>${esc(ind.name)}</span></button>` : ''
+    }</section>`;
+  }
+  const sizes = ENTERPRISE.deposits.sizes;
+  const k = sizes[d.size].k;
+  const cls = harmClass(d.kind);
+  const sizeTip = `Размер — множитель добычи: ${SIZE_NAMES.map((n, i) => `${n} ×${sizes[i].k}`).join(' · ')}`;
+  const chips = [
+    `<span class="pc-chip" data-tip="${esc(sizeTip)}"><b class="dots">${sizeDots(d.size)}</b> <span class="muted">${SIZE_NAMES[d.size]}</span> ×${k}</span>`,
+    `<span class="pc-chip dep-yield" data-tip="Добыча в месяц, когда рабочих хватает; растёт, если груз регулярно вывозят">${cargoIcon(c, 14, false)} <b>${e.depositYield(d)}</b><span class="muted"> / мес</span></span>`,
+    `<span class="pc-chip" data-tip="Рабочих в месяц нужно добыче">👷 <b>${workersNeeded(info)}</b></span>`,
+    cls
+      ? `<span class="pc-chip harm" data-tip="${esc(`Вредность ${cls} из 3: город ближе ${km(cls * ENTERPRISE.harm.reach)} растёт медленнее`)}">${harmIcons(cls)}</span>`
+      : `<span class="pc-chip" data-tip="Не вредит городам">☁ <span class="muted">—</span></span>`,
+  ].join('');
+  return `<section class="detail project-card dep-card">${head}
+    <p class="muted">⛏️ ${depositPlace(d.kind)}</p>
+    <div class="pc-chips">${chips}</div>
+    ${depositBuildHtml(g, d.id)}
+    ${depositUseHtml(g, c)}
+    ${partners}</section>`;
+}
+
+/** «🏗 Что строить»: добыча на месторождении — название, цена, прогноз рабочих и вреда, кнопка «Построить». */
+function depositBuildHtml(g: Game, id: number): string {
+  const e = g.enterprises;
+  const d = e.deposit(id)!;
+  const info = INDUSTRY_TYPES[d.kind];
+  const plan = e.plan(d.kind, d.center, d.angle);
+  const rows: string[] = [];
+  const s = plan.staff;
+  if (s) {
+    const from = s.from.map((f) => `${esc(g.towns.find((t) => t.id === f.town)?.name ?? '')} ${Math.round(f.n)}`).join(', ');
+    const tip = `Рабочие сами приходят из городов ближе ${km(ENTERPRISE.commute.near)}, дальше — меньше; не хватает — везите автобусом`;
+    const detail = [from && `🚶 ${from}`, s.bus > 0.5 ? `🚌 ${Math.ceil(s.bus)}/мес` : ''].filter(Boolean).join(' · ');
+    rows.push(`<div class="ent-row" data-tip="${esc(tip)}"><span class="ent-ic">👷</span>${bar(s.local, s.local < 0.5 ? 'bad' : s.local < 0.999 ? 'warn' : '')}<b>${pct(s.local)}</b><small>${detail || 'городов рядом нет'}</small></div>`);
+  }
+  if (plan.harm.length)
+    rows.push(
+      `<div class="ent-row" data-tip="Вредная добыча тормозит рост городов рядом"><span class="ent-ic harm">☁</span><small>рост: ${plan.harm.map((h) => `${esc(h.town.name)} −${pct(h.cut)}`).join(', ')}</small></div>`,
+    );
+  const near = [...g.towns].sort((a, b) => dist(a.center, d.center) - dist(b.center, d.center))[0];
+  if (near) rows.push(`<div class="ent-row" data-tip="Ближайший город"><span class="ent-ic">${townIcon(15, false)}</span><small>${esc(near.name)} · ${km(dist(near.center, d.center))}</small></div>`);
+  const time = plan.timed ? ` · ⏳ ${buildTime(info)} с` : '';
+  const btn = `<button class="small ${plan.ok ? 'primary' : 'off'}" data-action="dep-build" data-id="${d.id}" data-tip="${esc(
+    plan.ok ? `Построить ${info.name.toLowerCase()} на этом месте${plan.timed ? ': стройплощадка, нужна строительная база рядом' : ''}` : `⛔ ${plan.reason ?? 'Нельзя'}`,
+  )}">🏗 ${money(plan.cost)}</button>`;
+  return `<div class="pc-block"><div class="pc-title" data-tip="На месторождении можно поставить только добычу своего сырья">🏗 Что строить</div>
+    <div class="dep-what">${cargoIcon(info.produces, 22, false)}<b>${esc(info.name)}</b><small class="muted">${time}</small>${btn}</div>
+    ${plan.ok ? '' : `<div class="ent-row hint"><span class="ent-ic">⛔</span><small>${esc(plan.reason ?? 'Нельзя')}</small></div>`}
+    <div class="ent-rows">${rows.join('')}</div></div>`;
+}
+
+/** «🏭 Перерабатывают»: заводы на это сырьё (рецепт значками; клик — инструмент «Предприятие» с этим заводом). */
+function depositUseHtml(g: Game, c: CargoType): string {
+  const plants = g.enterprises.kinds().filter((k) => k.accepts.includes(c));
+  if (!plants.length) return '';
+  const wanted = new Set(g.towns.flatMap((t) => t.demands));
+  const list = plants
+    .map(
+      (k) => `<button class="dep-plant" data-action="ind-build-for" data-id="${k.kind}" data-tip="${esc(`${k.name}: ${money(buildCost(k))} — выбрать и поставить на карте`)}">
+      <span class="ent-recipe">${recipeHtml(k, 20, 15)}</span>${wanted.has(k.produces) ? `<span class="ent-b town">${townIcon(12, false)}</span>` : ''}</button>`,
+    )
+    .join('');
+  return `<div class="pc-block"><div class="pc-title" data-tip="Заводы, которым нужно это сырьё; значок города — их продукция нужна городам">🏭 Перерабатывают</div><div class="dep-plants">${list}</div></div>`;
 }
 
 /** Каким видом завода сделать груз c (первый, что можно построить; на одно сырьё — раньше). */

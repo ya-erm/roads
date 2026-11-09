@@ -237,6 +237,29 @@ export function freeDeposits(deposits: readonly Deposit[], kind: IndustryKind, n
 /** Множитель добычи месторождения по его размеру. */
 export const depositRichness = (d: Pick<Deposit, 'size'>): number => ENTERPRISE.deposits.sizes[d.size].k;
 
+/** Радиус пятна месторождения на карте: по размеру (малое — меньше). По нему же — клик по месторождению. */
+export function depositRadius(d: Pick<Deposit, 'size'>): number {
+  return ENTERPRISE.deposits.radius * (0.7 + 0.15 * d.size);
+}
+
+/**
+ * Свободное месторождение под точкой p: в его пятне или не дальше slack от края (значок поверх пятна — тоже он).
+ * Несколько — ближайшее к центру; занятые (на них предприятие) не в счёт.
+ */
+export function depositAt(deposits: readonly Deposit[], p: Vec, slack = 0): Deposit | null {
+  let best: Deposit | null = null;
+  let bestD = Infinity;
+  for (const d of deposits) {
+    if (d.used !== undefined) continue;
+    const r = dist(d.center, p);
+    if (r <= depositRadius(d) + slack && r < bestD) {
+      best = d;
+      bestD = r;
+    }
+  }
+  return best;
+}
+
 /** Участок предприятия вида info на месторождении: ровно по центру и повороту участка. */
 export function depositFootprint(d: Deposit, info: Pick<IndustryType, 'w' | 'h'>): Footprint {
   return { center: { ...d.center }, w: info.w, h: info.h, angle: d.angle };

@@ -71,6 +71,8 @@ import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, stro
 export type Selection =
   | { type: 'station'; id: number }
   | { type: 'industry'; id: number }
+  /** Свободное месторождение (режим «Строит игрок»): карточка — что за сырьё, размер, что на нём строить и куда везти. */
+  | { type: 'deposit'; id: number }
   | { type: 'town'; id: number }
   | { type: 'building'; id: number }
   /** Машина жителя — по её id в симуляции. */
@@ -4110,6 +4112,20 @@ export class Renderer {
 
   /** Пунктиры от выбранного предприятия или города к ближайшим партнёрам по цепочке. */
   private drawPartners(game: Game, sel: Selection | null): void {
+    if (sel?.type === 'deposit') {
+      // Выбранное месторождение — синим кольцом; пунктиры — к тем, кто примет его сырьё (как у добычи на нём).
+      const d = game.enterprises.deposit(sel.id);
+      if (!d || d.used !== undefined) return;
+      const ctx = this.ctx;
+      const z = this.camera.zoom;
+      ctx.strokeStyle = '#2f80ed';
+      ctx.lineWidth = 3 / z;
+      ctx.beginPath();
+      ctx.arc(d.center.x, d.center.y, depositRadius(d) + 10 / z, 0, Math.PI * 2);
+      ctx.stroke();
+      this.drawPartnerLines(d.center, game.partners(game.enterprises.depositProbe(d), 1));
+      return;
+    }
     if (!sel || (sel.type !== 'industry' && sel.type !== 'town')) return;
     const target = sel.type === 'industry' ? game.industries.find((i) => i.id === sel.id) : game.towns.find((t) => t.id === sel.id);
     if (!target) return;

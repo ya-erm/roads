@@ -15,6 +15,7 @@ import {
   buildableKinds,
   buildCost,
   buildTime,
+  depositAt,
   depositFootprint,
   depositRichness,
   growthFactor,
@@ -485,6 +486,27 @@ export class Enterprises {
   /** Класс вредности предприятия (для подписи ☁). */
   harmOf(ind: Pick<Industry, 'info'>): number {
     return harmClass(ind.info.kind);
+  }
+
+  /** Месторождение по id. */
+  deposit(id: number): Deposit | undefined {
+    return this.deposits.find((d) => d.id === id);
+  }
+
+  /** Свободное месторождение под точкой p (клик по пятну или значку, slack — запас от края). */
+  depositAt(p: Vec, slack = 0): Deposit | null {
+    return depositAt(this.deposits, p, slack);
+  }
+
+  /** Добыча, которая встанет на месторождение d: вид, участок, богатство — для партнёров и подсказок карточки. */
+  depositProbe(d: Deposit): Industry {
+    const info = INDUSTRY_TYPES[d.kind];
+    return { type: 'industry', id: -1, info, fp: depositFootprint(d, info), name: info.name, stock: {}, output: 0, producedMonth: 0, producedLast: 0, prodAcc: 0, richness: depositRichness(d) };
+  }
+
+  /** Сколько добудет в месяц предприятие на месторождении d при полных рабочих (уровень 1): по его размеру. */
+  depositYield(d: Deposit): number {
+    return Math.round(INDUSTRY_TYPES[d.kind].rate * depositRichness(d));
   }
 
   /** Месторождение под предприятием (добыча). */

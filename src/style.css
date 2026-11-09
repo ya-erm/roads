@@ -7109,6 +7109,66 @@ span.ind-chip {
   letter-spacing: 1px;
 }
 
+/* Карточка месторождения (enterpriseUi.depositCardHtml). */
+.dep-card .pc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.dep-card .pc-chip .dots {
+  letter-spacing: 1px;
+}
+
+.dep-card .pc-chip.harm {
+  color: #b45f1c;
+  letter-spacing: -1px;
+}
+
+.dep-card .dep-what {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: #f4f6f8;
+  font-size: 13px;
+}
+
+.dep-card .dep-what button {
+  margin-left: auto;
+}
+
+.dep-card button.small.off {
+  opacity: 0.5;
+}
+
+.dep-card .dep-plants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.dep-card .dep-plant {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 6px;
+  border: 1px solid #e3e7ec;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.dep-card .dep-plant:hover {
+  background: #eef2f6;
+}
+
+.dep-card .dep-plant .ent-recipe {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
 .ent-bar {
   flex: none;
   width: 90px;

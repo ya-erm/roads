@@ -6,6 +6,8 @@ import {
   buildCost,
   buildTime,
   commuteShare,
+  depositAt,
+  depositRadius,
   growthFactor,
   harmClass,
   harmTo,
@@ -19,7 +21,7 @@ import {
   townSlots,
   workersNeeded,
 } from './enterprise';
-import type { Industry, Town } from './entities';
+import type { Deposit, Industry, Town } from './entities';
 
 const town = (id: number, x: number, population: number, radius = 300): Town =>
   ({ id, name: `Т${id}`, center: { x, y: 0 }, radius, extent: radius, population, buildings: [], demands: [] }) as unknown as Town;
@@ -137,5 +139,22 @@ describe('что можно получить', () => {
     // Товарам нужен ещё металл — его не получить.
     expect(obtainable('goods', kinds)).toBe(false);
     expect(obtainable('goods', [...kinds, INDUSTRY_TYPES.steelmill, INDUSTRY_TYPES.coalmine, INDUSTRY_TYPES.ironmine])).toBe(true);
+  });
+});
+
+describe('клик по месторождению', () => {
+  const dep = (id: number, x: number, size: 0 | 1 | 2, used?: number): Deposit => ({ id, kind: 'coalmine', center: { x, y: 0 }, angle: 0, size, used });
+
+  it('пятно больше у богатого; под точкой — ближайшее к центру свободное, занятое не выбирается', () => {
+    expect(depositRadius({ size: 2 })).toBeGreaterThan(depositRadius({ size: 0 }));
+    const list = [dep(1, 0, 1), dep(2, 120, 2), dep(3, 1000, 2, 99)];
+    expect(depositAt(list, { x: 10, y: 0 })?.id).toBe(1);
+    expect(depositAt(list, { x: 110, y: 0 })?.id).toBe(2);
+    // Занятое (на нём предприятие) — не месторождение для клика.
+    expect(depositAt(list, { x: 1000, y: 0 })).toBeNull();
+    // За краем пятна — нет; с запасом под значок — да.
+    const edge = depositRadius({ size: 1 }) + 5;
+    expect(depositAt([list[0]], { x: 0, y: edge })).toBeNull();
+    expect(depositAt([list[0]], { x: 0, y: edge }, 10)?.id).toBe(1);
   });
 });
