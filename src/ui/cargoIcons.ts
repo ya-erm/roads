@@ -168,6 +168,17 @@ export function cargoIcon(c: CargoType, size = 20, title = true): string {
     <circle cx="12" cy="12" r="12" fill="${color}"/>${glyph(c, color)}</svg>`;
 }
 
+/** Ушли, не дождавшись автобуса: серый кружок с идущим человеком (game/paxPatience.ts). Подсказка — data-tip снаружи. */
+export const WALK_COLOR = '#7b8794';
+const WALK_GLYPH = `<circle cx="13.2" cy="5.4" r="2.1" fill="#fff"/>
+  <path d="M12.6 8.6l-1.5 5.6M11.1 14.2l-2.8 5M11.1 14.2l2.9 2.3.6 3.2M12.4 9.6l-3.3 2.2M12.4 9.6l1.6 2.6 2.6.8"
+    stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`;
+
+export function walkIcon(size = 20): string {
+  return `<svg class="cargo-icon" viewBox="0 0 24 24" width="${size}" height="${size}">
+    <circle cx="12" cy="12" r="12" fill="${WALK_COLOR}"/>${WALK_GLYPH}</svg>`;
+}
+
 export function townIcon(size = 20, title = true): string {
   return `<svg class="cargo-icon" viewBox="0 0 24 24" width="${size}" height="${size}">${title ? '<title>Город</title>' : ''}
     <circle cx="12" cy="12" r="12" fill="${TOWN_COLOR}"/>${TOWN_GLYPH}</svg>`;
@@ -194,4 +205,8 @@ export function cargoImage(c: CargoType): HTMLImageElement {
 
 export function townImage(): HTMLImageElement {
   return image('town', TOWN_GLYPH, TOWN_COLOR);
+}
+
+export function walkImage(): HTMLImageElement {
+  return image('walk', WALK_GLYPH, WALK_COLOR);
 }

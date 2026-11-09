@@ -75,6 +75,8 @@ export interface Advice {
   cargo?: CargoType | 'passengers';
   /** Число для значка: сколько машин стоит, сколько груза ждёт. */
   count?: number;
+  /** Пассажиры, что ушли с остановки, не дождавшись (за месяц), — значок 🚶 в совете. */
+  gone?: number;
   fix?: AdviceFix;
   /** Причина одной строкой — подсказка у значка на карте (нет — по виду совета, см. stationWarnings). */
   reason?: string;
@@ -416,9 +418,38 @@ function waiting(game: Game, line: Line, i: number, st: Station, out: Advice[]):
   const v = game.fleet.get(line.vehicles[0]);
   if (!v) return;
   const carries = MODELS[v.model].carries;
+  // Пассажиры станции к линии — одни и те же, сколько бы раз она ни встречалась в маршруте (кольцо туда-обратно).
+  if (carries === 'passengers' && line.stops.indexOf(st.id) !== i) return;
   const wait = Math.floor(game.lineWaiting(line, i, carries));
   const cap = vehicleCapacity(v);
-  if (wait < Math.max(60, cap * 3)) return;
+  // Пассажиры длинную очередь не стоят — уходят пешком (paxPatience.ts): нехватку видно по ушедшим за месяц.
+  const gone = carries === 'passengers' ? game.lineGone(line, i) : 0;
+  const leaving = gone >= Math.max(20, cap / 2);
+  if (wait < Math.max(60, cap * 3) && !leaving) return;
+  if (leaving) {
+    out.push({
+      key: `waiting:${line.id}:${i}`,
+      kind: 'waiting',
+      level: 'warn',
+      title: 'Пассажиры уходят',
+      detail: `«${st.name}»: за месяц ${fmt(gone)} ${plural(gone, 'пассажир не дождался', 'пассажира не дождались', 'пассажиров не дождались')} места в автобусе и ${plural(
+        gone,
+        'ушёл',
+        'ушли',
+        'ушли',
+      )} пешком, ждут ещё ${fmt(wait)}; на «${line.name}» ${cars(line.vehicles.length)}.${
+        auto ? ' Авто-парк упёрся в максимум — поднимите его.' : ' Купите ещё или включите авто-парк.'
+      }`,
+      line: line.id,
+      station: st.id,
+      at: st.fp.center,
+      cargo: 'passengers',
+      count: wait,
+      gone,
+      fix: auto ? { kind: 'autoMax', line: line.id } : { kind: 'buy', line: line.id },
+    });
+    return;
+  }
   // Что копится больше всего — для значка.
   let cargo: CargoType | 'passengers' = 'passengers';
   if (carries === 'freight') {

@@ -6,7 +6,7 @@ import { CONSTRUCTION, STATION, STORAGE } from '../config';
 import type { Advice, AdviceFix, AdviceKind, AdviceLevel } from '../game/advisor';
 import type { Game } from '../game/game';
 import { MODELS } from '../game/transport';
-import { cargoIcon } from './cargoIcons';
+import { cargoIcon, walkIcon } from './cargoIcons';
 import { lineKindSvg } from './icons';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -46,10 +46,14 @@ export function adviceIcon(a: Advice, size = 28): string {
   const inner =
     a.kind === 'storage'
       ? depotSvg(size - 10)
-      : a.cargo && (a.kind === 'waiting' || a.kind === 'unsold' || a.kind === 'missingInput')
-        ? cargoIcon(a.cargo, size - 8, false)
-        : `<span class="adv-glyph">${KIND_GLYPH[a.kind]}</span>`;
-  const count = a.count && a.count > 1 ? `<i class="adv-count">${a.count >= 1000 ? `${Math.round(a.count / 100) / 10}k` : fmt(a.count)}</i>` : '';
+      : a.gone
+        ? walkIcon(size - 8)
+        : a.cargo && (a.kind === 'waiting' || a.kind === 'unsold' || a.kind === 'missingInput')
+          ? cargoIcon(a.cargo, size - 8, false)
+          : `<span class="adv-glyph">${KIND_GLYPH[a.kind]}</span>`;
+  // Пассажиры уходят — число ушедших за месяц, а не ждущих.
+  const n = a.gone ?? a.count;
+  const count = n && n > 1 ? `<i class="adv-count">${n >= 1000 ? `${Math.round(n / 100) / 10}k` : fmt(n)}</i>` : '';
   return `<span class="adv-ic ${a.level}" style="width:${size}px;height:${size}px" data-tip="${LEVEL_TIP[a.level]}">${inner}${count}</span>`;
 }
 

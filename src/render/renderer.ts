@@ -3,6 +3,7 @@ import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../co
 import type { Plan, Snap } from '../game/build';
 import { stationNormal } from '../game/railStationEdit';
 import { warningMarks } from '../game/stationWarnings';
+import { paxGone } from '../game/paxPatience';
 import type { Game, LaneEnd, Partner } from '../game/game';
 import { bayFront, stopBerth, type FleetVehicle, type Line } from '../game/transport';
 import { bridgeLook, deckAlong } from '../lanes/deck';
@@ -18,7 +19,7 @@ import { type JunctionPreview, junctionPreview, previewHides } from '../lanes/pr
 import { trackKmhExact } from '../sim/railSpeed';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { trainWagonFills } from '../sim/wagons';
-import { cargoImage } from '../ui/cargoIcons';
+import { cargoImage, walkImage } from '../ui/cargoIcons';
 import { BIOMES } from '../world/biomes';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, type IndustryKind } from '../world/cargo';
 import { Annex, Industry, isBusTerminal, Station, TownBuilding } from '../world/entities';
@@ -2997,10 +2998,13 @@ export class Renderer {
       if (fp.center.x < view.x0 || fp.center.x > view.x1 || fp.center.y < view.y0 || fp.center.y > view.y1) continue;
       const stop = st.kind === 'stop';
       if (!stop && z < STATION_BADGES_ZOOM) continue;
-      const waiting: [CargoType, number][] = FREIGHT.map((c) => [c, Math.floor(st.cargo[c] ?? 0)] as [CargoType, number]).filter(([, n]) => n > 0);
+      const waiting: [CargoType | 'walk', number][] = FREIGHT.map((c) => [c, Math.floor(st.cargo[c] ?? 0)] as [CargoType, number]).filter(([, n]) => n > 0);
       let pax = 0;
       for (const n of st.passengers.values()) pax += n;
-      if (pax > 0) waiting.push(['passengers', pax]);
+      if (pax > 0) waiting.push(['passengers', Math.floor(pax)]);
+      // Ушли за месяц, не дождавшись места в автобусе (game/paxPatience.ts), — серый значок с идущим человеком.
+      const gone = paxGone(st);
+      if (gone > 0) waiting.push(['walk', gone]);
       if (!waiting.length && !stop) continue;
       ctx.font = `700 ${11 / z}px system-ui, sans-serif`;
       ctx.textAlign = 'left';
@@ -3024,8 +3028,9 @@ export class Renderer {
         const item = waiting[i];
         if (item) {
           const x0 = x + (i ? 0 : lead);
-          this.icon(cargoImage(item[0]), { x: x0 + 9 / z, y }, 15 / z);
-          ctx.fillStyle = '#1f2933';
+          const walk = item[0] === 'walk';
+          this.icon(walk ? walkImage() : cargoImage(item[0] as CargoType), { x: x0 + 9 / z, y }, 15 / z);
+          ctx.fillStyle = walk ? '#5b6670' : '#1f2933';
           ctx.fillText(String(item[1]), x0 + 19 / z, y + 0.5 / z);
         }
         x += w + 4 / z;

@@ -2770,6 +2770,21 @@ button.icon.toggle-spacing {
   border-radius: 3px;
 }
 
+/* Ушли, не дождавшись места в автобусе (game/paxPatience.ts): серый значок с идущим человеком и число. */
+.pax-gone {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: #5b6670;
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pax-row .pax-gone {
+  min-width: 34px;
+}
+
 .kv span i,
 .dot {
   display: inline-block;

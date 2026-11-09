@@ -49,7 +49,8 @@ import { ARCHETYPE_LIST } from '../scenario/content';
 import type { Scenario } from '../scenario/manager';
 import { getBest, saveBest, slotOf } from '../scenario/records';
 import type { ScenarioSettings } from '../scenario/types';
-import { cargoIcon, townIcon } from './cargoIcons';
+import { cargoIcon, townIcon, walkIcon } from './cargoIcons';
+import { paxGone, paxGoneTo, paxPatience } from '../game/paxPatience';
 import { fleetBar, fleetBarRoom } from './fleetBar';
 import { type LineBack, lineBackFrom, lineCloseTarget } from './lineBack';
 import { lineMoneyHtml } from './lineMoney';
@@ -3233,14 +3234,28 @@ export class Hud {
           const lines = d.lines
             .map((l) => `<button class="line-kind-btn" data-action="select-line" data-id="${l.id}" title="${esc(l.name)}">${this.lineIcon(l, 18)}</button>`)
             .join('');
+          // Ушли к этой остановке, не дождавшись места (paxPatience.ts): ближние уходят первыми, дальние ждут.
+          const gone = paxGoneTo(st, d.sid);
+          const km = dist(st.fp.center, to.fp.center) / 1000;
+          const walked = gone
+            ? `<span class="pax-gone" data-tip="Ушли за месяц, не дождавшись места: ${gone}. Ехать ${km.toFixed(1)} км — ждут до ${Math.round(
+                paxPatience(km * 1000),
+              )} с">${walkIcon(14)}${gone}</span>`
+            : '';
           return `<div class="pax-row">${lines}<span class="arrow">→</span>
             <button class="place-link" data-action="show-station" data-id="${to.id}" title="Показать на карте">${esc(to.name)}</button>
-            <span class="pax-bar"><i style="width:${(d.n / most) * 100}%"></i></span><b>${d.n}</b></div>`;
+            <span class="pax-bar"><i style="width:${(d.n / most) * 100}%"></i></span><b>${d.n}</b>${walked}</div>`;
         })
         .join('');
+      const goneAll = paxGone(st);
+      const goneHead = goneAll
+        ? `<span class="pax-gone" data-tip="Ушли за месяц пешком или иначе: очередь длинная, а в автобусах мало мест. Ждут те, кому ехать далеко">${walkIcon(
+            14,
+          )}${goneAll}</span>`
+        : '';
       const paxBlock =
         st.serves.pax && (pax || dests.length)
-          ? `<div class="rule-row"><span class="lbl2">${cargoIcon('passengers', 16)} Куда едут пассажиры</span>${paxRows}</div>`
+          ? `<div class="rule-row"><span class="lbl2">${cargoIcon('passengers', 16)} Куда едут пассажиры ${goneHead}</span>${paxRows}</div>`
           : st.serves.pax && st.catchPop > 0
             ? `<p class="muted">${cargoIcon('passengers', 14)} Пассажиры появятся, когда отсюда пойдёт автобус или пассажирский поезд.</p>`
             : '';

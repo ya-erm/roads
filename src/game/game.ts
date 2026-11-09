@@ -41,6 +41,7 @@ import { Annex, type BuildBase, type Deposit, Industry, Station, StationServes, 
 import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/townSupply';
 import { addTownPax, closeTownPax, PAX_NOWHERE, PAX_PER_THOUSAND } from '../world/townPax';
 import { repaceSave, saveMonthLength } from './monthPace';
+import { PAX_WAIT, paxLeaving, paxPatience, paxStayShare, paxTolerance } from './paxPatience';
 import { Network, NetworkSave, Segment } from '../world/network';
 import { halfWidth, isDirt, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, ROAD_MARGIN, specCost, TRACK_GAP } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
@@ -687,6 +688,14 @@ export class Game implements BuildContext {
   private readonly bayWaitSince = new Map<number, number>();
   /** Прикидка времени круга линии, пока его не измерили по рейсам: когда считали и сколько вышло. */
   private readonly lapGuess = new Map<number, { at: number; lap: number | null }>();
+  /**
+   * Терпение пассажиров (paxPatience.ts), не сохраняется: свободных мест в машине линии, когда она приходит
+   * на станцию (скользящее среднее; ключ «линия:станция»), дробный остаток уходящих по направлениям
+   * («станция:назначение») и сколько ушло к остановкам линии с её последнего отправления отсюда — для авто-парка.
+   */
+  private readonly paxSeats = new Map<string, number>();
+  private readonly paxLeaveAcc = new Map<string, number>();
+  private readonly paxGoneSince = new Map<string, number>();
   /** Вызывается в конце каждого игрового месяца, когда итоги подведены и месяц уже новый, — для автосохранения. */
   onMonthEnd: () => void = () => {};
   /**
@@ -4766,7 +4775,11 @@ export class Game implements BuildContext {
     const stats = (line.stopLoads ??= {});
     const s = stats[sid] ?? [0, 0, 0];
     s[0] += load;
-    s[1] += this.lineWaiting(line, v.stop, MODELS[v.model].carries) / cap;
+    // Осталось ждать — и кто ушёл, не дождавшись, с прошлого отправления линии отсюда: спрос, который она не увезла.
+    const since = `${line.id}:${sid}`;
+    const gone = this.paxGoneSince.get(since) ?? 0;
+    this.paxGoneSince.delete(since);
+    s[1] += (this.lineWaiting(line, v.stop, MODELS[v.model].carries) + gone) / cap;
     s[2] += 1;
     stats[sid] = s;
   }
@@ -5387,6 +5400,13 @@ export class Game implements BuildContext {
       }
       this.wagonsUnloaded(v);
       if (moved > 0) Object.assign(trip, { off: moved, x: bonus });
+      // Сколько мест у машины линии, когда она приходит сюда: по ним пассажиры решают, ждать ли (paxPatience.ts).
+      if (st.serves.pax) {
+        const key = `${line.id}:${st.id}`;
+        const free = Math.max(0, vehicleCapacity(v) - vehicleLoad(v));
+        const was = this.paxSeats.get(key);
+        this.paxSeats.set(key, was === undefined ? free : was + (free - was) * PAX_WAIT.seatsEma);
+      }
       const boarded = this.boardPassengers(v, st, line);
       if (boarded > 0) trip.on = boarded;
       trip.wait = this.lineWaiting(line, v.stop, 'passengers');
@@ -5446,9 +5466,12 @@ export class Game implements BuildContext {
     line.stops.forEach((sid, i) => {
       const st = this.stations.get(sid);
       if (!st) return;
+      if (auto && n < auto.max) return;
+      const fix = auto ? 'поднимите максимум авто-парка' : 'купите ещё';
       const waiting = Math.floor(this.lineWaiting(line, i));
-      if (waiting < 150 || (auto && n < auto.max)) return;
-      out.push(`${st.name}: ждут отправки ${waiting} — не хватает транспорта, ${auto ? 'поднимите максимум авто-парка' : 'купите ещё'}`);
+      const gone = this.lineGone(line, i);
+      if (waiting >= 150) out.push(`${st.name}: ждут отправки ${waiting} — не хватает транспорта, ${fix}`);
+      else if (gone >= 60) out.push(`${st.name}: за месяц ${gone} не дождались и ушли пешком — не хватает транспорта, ${fix}`);
     });
     const load = line.loadLast;
     if (load !== undefined && load !== null && load < 0.35 && n >= 2 && !(auto && n > auto.min)) {
@@ -5481,6 +5504,23 @@ export class Game implements BuildContext {
       }
     }
     return waiting;
+  }
+
+  /**
+   * Сколько пассажиров до других остановок линии ушло с её остановки index, не дождавшись (paxPatience.ts):
+   * за этот месяц или прошлый — что больше.
+   */
+  lineGone(line: Line, index: number): number {
+    const st = this.stations.get(line.stops[index]);
+    if (!st) return 0;
+    let now = 0;
+    let last = 0;
+    for (const dest of new Set(line.stops)) {
+      if (dest === st.id) continue;
+      now += st.paxGone?.[dest] ?? 0;
+      last += st.paxGoneLast?.[dest] ?? 0;
+    }
+    return Math.max(now, last);
   }
 
   /**
@@ -5901,6 +5941,70 @@ export class Game implements BuildContext {
           }
         }
       }
+      this.paxWalkOff(st, routes, dt);
+    }
+  }
+
+  /**
+   * Очередь к линии на станции st: сколько ждёт её машин, сколько мест в приходящей машине (замер, а пока его нет —
+   * вместимость; не меньше PAX_WAIT.minSeats от неё) и как часто они приходят. null — машин с пассажирами на линии нет.
+   */
+  paxQueue(line: Line, st: Station): { queue: number; seats: number; headway: number } | null {
+    let n = 0;
+    let capacity = 0;
+    for (const id of line.vehicles) {
+      const v = this.fleet.get(id);
+      if (!v || MODELS[v.model].carries !== 'passengers') continue;
+      n++;
+      capacity += vehicleCapacity(v);
+    }
+    const index = line.stops.indexOf(st.id);
+    if (!n || index < 0) return null;
+    const cap = capacity / n;
+    const seats = Math.max(cap * PAX_WAIT.minSeats, this.paxSeats.get(`${line.id}:${st.id}`) ?? cap);
+    const headway = (this.lineLap(line) ?? MONTH_LENGTH) / n;
+    return { queue: this.lineWaiting(line, index, 'passengers'), seats, headway };
+  }
+
+  /**
+   * Длинная очередь — часть пассажиров уходит пешком или едет иначе (paxPatience.ts): каждый готов ждать тем
+   * дольше, чем дальше ему ехать; ждать остаются, кого увезут машины, что придут за это время (и кто сядет в
+   * ближайшую), остальные уходят из хвоста — по лучшей из линий, что туда идут. Ушедших считаем по направлениям
+   * (Station.paxGone) и к линии (paxGoneSince — авто-парку: спрос, который линия не увезла).
+   */
+  private paxWalkOff(st: Station, routes: Map<number, Line[]>, dt: number): void {
+    if (!st.passengers.size) return;
+    const queues = new Map<Line, ReturnType<Game['paxQueue']>>();
+    const queueOf = (line: Line) => {
+      if (!queues.has(line)) queues.set(line, this.paxQueue(line, st));
+      return queues.get(line)!;
+    };
+    for (const [dest, n] of st.passengers) {
+      const to = this.stations.get(dest);
+      const via = routes.get(dest);
+      if (!to || !via || n < 1) continue;
+      const patience = paxPatience(dist(st.fp.center, to.fp.center));
+      let best: { line: Line; share: number } | null = null;
+      for (const line of via) {
+        const q = queueOf(line);
+        // Линия без машин: пассажиры ждут первую, как раньше (их и так немного — stationCap).
+        const share = q ? paxStayShare(paxTolerance(q.seats, q.headway, patience), q.queue) : 1;
+        if (!best || share > best.share) best = { line, share };
+      }
+      const key = `${st.id}:${dest}`;
+      if (!best || best.share >= 1) {
+        this.paxLeaveAcc.delete(key);
+        continue;
+      }
+      const acc = (this.paxLeaveAcc.get(key) ?? 0) + paxLeaving(n, best.share, dt);
+      const k = Math.min(Math.floor(acc), Math.floor(n));
+      this.paxLeaveAcc.set(key, acc - k);
+      if (k <= 0) continue;
+      st.passengers.set(dest, n - k);
+      const gone = (st.paxGone ??= {});
+      gone[dest] = (gone[dest] ?? 0) + k;
+      const since = `${best.line.id}:${st.id}`;
+      this.paxGoneSince.set(since, (this.paxGoneSince.get(since) ?? 0) + k);
     }
   }
 
@@ -6118,6 +6222,12 @@ export class Game implements BuildContext {
     for (const ind of this.industries) {
       ind.producedLast = ind.producedMonth;
       ind.producedMonth = 0;
+    }
+    // Ушедшие, не дождавшись автобуса (paxPatience.ts): итог месяца.
+    for (const st of this.stations.values()) {
+      if (st.paxGone) st.paxGoneLast = st.paxGone;
+      else delete st.paxGoneLast;
+      delete st.paxGone;
     }
     this.growIndustries();
     // Пустующие места в черте городов: город строит сам (enterprises.ts).

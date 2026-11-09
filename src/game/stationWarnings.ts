@@ -33,6 +33,7 @@ export function adviceTip(a: Advice): string {
   const what = a.cargo === 'passengers' ? 'пассажиров' : a.cargo ? `ед. «${CARGO[a.cargo].name}»` : '';
   switch (a.kind) {
     case 'waiting':
+      if (a.gone) return `${a.title}: 🚶 ${fmt(a.gone)} за месяц не дождались места — машин на маршруте мало`;
       return `${a.title}: ждут отправки ${fmt(a.count ?? 0)} ${what} — машин на маршруте мало`;
     case 'queue':
       return `${a.title}: ${a.count ?? 0} ждут свободный пост`;
