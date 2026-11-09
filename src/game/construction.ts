@@ -450,9 +450,12 @@ export class Construction {
   /** Фронт для бригады b (или любой бригады с узла from): ближайший к базе (или к from) доступный — frontFor. */
   private frontFrom(id: number, b: Brigade | null, from: number): { c: Piece; fromB: boolean } | null {
     const net = this.host.roads.net;
+    // Узла from уже нет в сети (ворота базы на снесённом узле) — отсюда никуда не доехать.
+    const at = net.nodes.get(from);
+    if (!at) return null;
     const ok = this.reachFrom(from);
     const claims = this.claims(id, b);
-    const home = (b && this.crews.bases.get(b.base)?.fp.center) ?? net.node(from).pos;
+    const home = (b && this.crews.bases.get(b.base)?.fp.center) ?? at.pos;
     let best: {
       c: Piece;
       fromB: boolean;

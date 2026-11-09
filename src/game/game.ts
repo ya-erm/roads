@@ -937,6 +937,8 @@ export class Game implements BuildContext {
     this.roads.replace(LaneNet.fromJSON(save.roads));
     this.construction.load(save.construction);
     for (const b of this.construction.crews.bases.values()) this.index.add(b);
+    // Сохранения, где ворота базы ссылаются на пропавший узел (перенос дороги у базы до исправления), — ворота заново.
+    this.healBaseGates();
     this.towns = save.towns;
     for (const t of this.towns) {
       // Дома, которые город по прежним правилам поставил прямо на пути, сносим.
@@ -1491,6 +1493,36 @@ export class Game implements BuildContext {
     this.index.add(base);
     this.construction.crews.moveBase(base.id, from);
     this.construction.stamp++;
+  }
+
+  /**
+   * Ворота строительных баз, чей узел пропал из сети дорог (дорогу у базы перенесли, стык слился, улицу снесли):
+   * новые ворота — как при постановке (basePlan), ближайший к площадке узел ближней дороги, куда можно доехать;
+   * таких нет — ближайший узел сети. Без этого стройки базы искали путь от несуществующего узла («Нет узла N»).
+   */
+  private healBaseGates(): void {
+    const net = this.roads.net;
+    if (!net.nodes.size) return;
+    for (const base of this.construction.crews.bases.values()) {
+      if (net.nodes.has(base.nodeId)) continue;
+      const gate = this.baseGate(base.fp.center);
+      if (gate !== null) this.relocateBase(base, base.fp, gate);
+    }
+  }
+
+  /** Ворота для площадки у точки at: узел ближней открытой дороги, куда можно доехать (как в basePlan), иначе ближайший узел. */
+  private baseGate(at: Vec): number | null {
+    const net = this.roads.net;
+    const c = this.roads.open.corridorNear(at, 90);
+    const near = c ? c.lut.closest(at).point : at;
+    const ids = [...(c ? [c.a, c.b] : []), ...net.nodesNear(near, 400).map((x) => x.id)].filter((id) => net.nodes.has(id));
+    const byDist = (x: number, y: number) => dist(net.node(x).pos, near) - dist(net.node(y).pos, near) || x - y;
+    const road = ids.filter((id) => this.onRoad(id)).sort(byDist)[0];
+    if (road !== undefined) return road;
+    if (ids.length) return ids.sort(byDist)[0];
+    let best: number | null = null;
+    for (const n of net.nodes.values()) if (best === null || byDist(n.id, best) < 0) best = n.id;
+    return best;
   }
 
   /** Ещё бригада на базе: цена — сразу, содержание — каждый месяц. null — наняли, иначе причина. */
@@ -2165,6 +2197,8 @@ export class Game implements BuildContext {
     this.construction.syncNet();
     this.pruneRoundabouts();
     this.roads.changed();
+    // Узел ворот базы правка могла убрать (перенос дороги, слияние стыка, снос) — ворота заново.
+    this.healBaseGates();
     this.net.rebuild();
     const splits = [...this.net.pendingSplits];
     this.net.pendingSplits = [];
@@ -6097,6 +6131,8 @@ export class Game implements BuildContext {
       yield;
       while (this.roads.step()) yield;
     }
+    // Город мог слить или убрать узел у ворот базы.
+    this.healBaseGates();
     for (const st of this.stations.values()) this.computeCatchment(st);
 
     this.history.push({ label: this.dateLabel, income: this.incomeMonth, expenses: this.expensesMonth, money: this.money, ledger: { ...this.ledger } });
