@@ -2777,6 +2777,28 @@ export class Renderer {
       const c = end.corridor;
       const s = end.end === 'a' ? 0 : c.length;
       const ed = edgesAt(c, s) ?? [-LANE_W / 2, LANE_W / 2];
+      if (st.side) {
+        // Станция вдоль дороги: асфальт от фасада до кромки кармана во всю ширину площадки — посты прямо на карман.
+        const Y = Math.min(...ed.map((o) => local(pointOff(c, s, o)).y)) + 0.6;
+        ctx.save();
+        ctx.translate(fp.center.x, fp.center.y);
+        ctx.rotate(fp.angle);
+        ctx.scale(1, front);
+        ctx.fillStyle = C.road;
+        ctx.fillRect(-fp.w / 2, hh - 1.5, fp.w, Y - hh + 1.5);
+        // Бордюр по бокам — от угла площадки до кармана.
+        ctx.strokeStyle = C.roadEdge;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        for (const x of [-fp.w / 2, fp.w / 2]) {
+          ctx.moveTo(x, hh - 1.5);
+          ctx.lineTo(x, Y - 0.6);
+        }
+        ctx.stroke();
+        if (this.camera.zoom >= 0.35) this.drawBayMarks(game, st, hh);
+        ctx.restore();
+        continue;
+      }
       const [l, r] = [ed[0] - ROAD_MARGIN, ed[1] + ROAD_MARGIN].map((o) => local(pointOff(c, s, o)).x).sort((a, b) => a - b);
       /** Радиус скруглений, если хватает места. */
       const R0 = 6;
@@ -2830,31 +2852,7 @@ export class Renderer {
       ctx.closePath();
       ctx.fill();
       if (this.camera.zoom >= 0.35) {
-        // Посты — без пристроек-складов по концам (как на рисунке станции).
-        const area = game.bayArea(st);
-        const bw = (area.w - 10) / st.bays;
-        // «Зубцы» между местами — продолжают стенки между боксами (у автовокзала — перроны).
-        ctx.strokeStyle = C.dash;
-        ctx.lineWidth = 0.8;
-        ctx.lineCap = 'butt';
-        ctx.beginPath();
-        for (let i = 0; i <= st.bays; i++) {
-          const x = -area.w / 2 + 4 + i * bw;
-          ctx.moveTo(x, hh);
-          ctx.lineTo(x, hh + 3.5);
-        }
-        ctx.stroke();
-        // Стрелка к воротам каждого бокса.
-        ctx.fillStyle = C.dash;
-        for (let i = 0; i < st.bays; i++) {
-          const cx = -area.w / 2 + 5 + i * bw + (bw - 2) / 2;
-          ctx.beginPath();
-          ctx.moveTo(cx, hh + 1.2);
-          ctx.lineTo(cx + 1.8, hh + 3.6);
-          ctx.lineTo(cx - 1.8, hh + 3.6);
-          ctx.closePath();
-          ctx.fill();
-        }
+        this.drawBayMarks(game, st, hh);
         // Въезд и выезд: правая по ходу полоса выезда ведёт на площадку, левая — обратно к улице.
         const axis = local(pointOff(c, s, 0)).x;
         const lanes = [ed[0] / 2, ed[1] / 2].map((o) => local(pointOff(c, s, o)).x);
@@ -2866,6 +2864,36 @@ export class Renderer {
         this.drawEntryExit(xIn, xOut, hh + 4.5, Y, sign(xIn), sign(xOut));
       }
       ctx.restore();
+    }
+  }
+
+  /**
+   * Разметка перед постами (в координатах площадки, +y — к выезду, фасад — на hh): «зубцы» между местами — продолжают
+   * стенки между боксами (у автовокзала — перроны), стрелка к воротам каждого бокса. Посты — без пристроек-складов.
+   */
+  private drawBayMarks(game: Game, st: Station, hh: number): void {
+    const ctx = this.ctx;
+    const area = game.bayArea(st);
+    const bw = (area.w - 10) / st.bays;
+    ctx.strokeStyle = C.dash;
+    ctx.lineWidth = 0.8;
+    ctx.lineCap = 'butt';
+    ctx.beginPath();
+    for (let i = 0; i <= st.bays; i++) {
+      const x = -area.w / 2 + 4 + i * bw;
+      ctx.moveTo(x, hh);
+      ctx.lineTo(x, hh + 3.5);
+    }
+    ctx.stroke();
+    ctx.fillStyle = C.dash;
+    for (let i = 0; i < st.bays; i++) {
+      const cx = -area.w / 2 + 5 + i * bw + (bw - 2) / 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, hh + 1.2);
+      ctx.lineTo(cx + 1.8, hh + 3.6);
+      ctx.lineTo(cx - 1.8, hh + 3.6);
+      ctx.closePath();
+      ctx.fill();
     }
   }
 

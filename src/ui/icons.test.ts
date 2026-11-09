@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { baysSvg, baysSvgWidth, glassFor, modelSvg, reliefSvg, shadeHex, waterSvg } from './icons';
+import { baysSvg, baysSvgWidth, drivewaySvg, glassFor, modelSvg, reliefSvg, shadeHex, stationPlaceSvg, waterSvg } from './icons';
 
 describe('shadeHex', () => {
   it('светлее — к белому, темнее — к чёрному', () => {
@@ -104,5 +104,13 @@ describe('baysSvg', () => {
     expect(svg.match(/fill="#d7d9dc"/g)).toHaveLength(4);
     expect(svg.match(/fill="#00aa00"/g)).toHaveLength(1);
     expect(svg).toContain(`width="${baysSvgWidth(3)}"`);
+  });
+});
+
+describe('Как ставить автостанцию', () => {
+  it('в конце выезда и вдоль дороги — разные схемы; выезд длиннее — станция на схеме выше', () => {
+    expect(stationPlaceSvg('end')).not.toBe(stationPlaceSvg('side'));
+    const top = (svg: string) => Number(/<rect x="8" y="([\d.-]+)"/.exec(svg)![1]);
+    expect(top(drivewaySvg(50, 50))).toBeLessThan(top(drivewaySvg(10, 50)));
   });
 });

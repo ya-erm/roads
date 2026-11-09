@@ -93,6 +93,8 @@ import {
   passengerCarSvg,
   terminalStationSvg,
   throughStationSvg,
+  stationPlaceSvg,
+  drivewaySvg,
   platformLengthSvg,
   platformsSvg,
   baysSvg,
@@ -1536,6 +1538,21 @@ export class Hud {
       case 'st-terminal':
         c.setStationTerminal(d.v === '1');
         break;
+      case 'st-side':
+        c.setStationSide(d.v === '1');
+        break;
+      case 'st-driveway':
+        c.setStationDriveway(c.stationDriveway + (Number(d.d) || 0) * STATION.drivewayRange.step);
+        break;
+      case 'st-drive': {
+        // Карточка станции: выезд длиннее или короче — станция переезжает в его новый конец.
+        const st = g.stations.get(Number(d.id));
+        const now = st && g.stationDrivewayLen(st);
+        if (!st || now === null || now === undefined) break;
+        const problem = g.setStationDriveway(st.id, now + (Number(d.d) || 0) * STATION.drivewayRange.step);
+        if (problem) g.notify(problem);
+        break;
+      }
       case 'new-serves':
         c.toggleStationServe(d.what === 'pax' ? 'pax' : 'cargo');
         break;
@@ -2380,8 +2397,27 @@ export class Hud {
     }
     if (c.stationMode === 'rail') return this.railStationOptionsHtml(sw);
     const pax = c.stationMode === 'pax';
-    const tip = `${pax ? 'Автовокзал — для пассажиров: автобусы между городами и по городу' : 'Автостанция — для грузов: грузовики везут сюда и отсюда груз предприятий'}. Ставится у дороги, прямо у перекрёстка или вплотную к ${pax ? 'городу' : 'предприятию'} — с той стороны, где курсор. Дома на месте станции снесём (красные). Охват ${STATION.catchment} м. ${pax ? 'Перроны' : 'Посты погрузки'} добавляются в карточке станции.`;
-    return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
+    const side = c.stationSide;
+    // Как ставить — двумя значками-схемами в заголовке: в конце выезда или вдоль дороги с карманом.
+    const how = `<span class="st-kind">${[
+      { on: false, svg: stationPlaceSvg('end', 30), hint: 'В конце выезда: от дороги к станции — выезд-тупик, его длину выбираете' },
+      { on: true, svg: stationPlaceSvg('side', 30), hint: 'Вдоль дороги: у края улицы — карман, посты выходят прямо на него; машины не разворачиваются, а едут дальше' },
+    ]
+      .map((k) => `<button class="${side === k.on ? 'active' : ''}" data-action="st-side" data-v="${k.on ? 1 : 0}" data-tip="${k.hint}">${k.svg}</button>`)
+      .join('')}</span>`;
+    // Длина выезда — счётчиком «− схема N м +», как длина платформ у ж/д станции.
+    const R = STATION.drivewayRange;
+    const L = c.stationDriveway;
+    const length = side
+      ? ''
+      : `<div class="st-params"><span class="lbl3">Выезд</span><span class="stepper bays tracks" data-tip="Длина выезда от кромки дороги: ${L} м · [ и ] — короче и длиннее">
+      <button data-action="st-driveway" data-d="-1" ${L > R.min ? '' : 'disabled'} data-tip="Короче на ${R.step} м · [">−</button><b>${drivewaySvg(L, R.max)}<span>${L} м</span></b><button
+        data-action="st-driveway" data-d="1" ${L < R.max ? '' : 'disabled'} data-tip="Длиннее на ${R.step} м · ]">+</button></span></div>`;
+    const where = side
+      ? `вдоль улицы со стороны курсора, не у перекрёстка; у края — карман`
+      : `у дороги, прямо у перекрёстка или вплотную к ${pax ? 'городу' : 'предприятию'} — с той стороны, где курсор`;
+    const tip = `${pax ? 'Автовокзал' : 'Автостанция'} ${where}. Дома под ней снесём (красные). Охват ${STATION.catchment} м, ${pax ? 'перроны' : 'посты'} добавляются в карточке.`;
+    return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить${how}</div>${length}<p class="muted">${tip}</p>
       <div class="price">${money(COST.station)}</div></div></div>`;
   }
 
@@ -3187,6 +3223,17 @@ export class Hud {
             )}px">${baysSvg(st.bays, g.stationBays(st), 22, terminal)}</i><span>${st.bays}</span></b><button
             data-action="st-bays" data-id="${st.id}" data-d="1" class="${more.ok ? '' : 'off'}" data-tip="${esc(plusTip)}">+</button></span>
           ${more.ok ? `<span class="muted">+${money(STATION.bayCost)}</span>` : ''}</div>`;
+        // Длина выезда — «− схема N м +»: станция переезжает в новый конец выезда (нельзя — причина всплывёт).
+        const L = g.stationDrivewayLen(st);
+        const R = STATION.drivewayRange;
+        if (L !== null) {
+          baysRow += `<div class="icon-row"><span class="lbl2">Выезд</span>
+          <span class="stepper bays tracks"><button data-action="st-drive" data-id="${st.id}" data-d="-1" ${L > R.min ? '' : 'disabled'}
+            data-tip="Выезд короче на ${R.step} м — станция ближе к дороге">−</button><b data-tip="Длина выезда от кромки дороги: ${L} м">${drivewaySvg(L, R.max)}<span>${L} м</span></b><button
+            data-action="st-drive" data-id="${st.id}" data-d="1" ${L < R.max ? '' : 'disabled'} data-tip="Выезд длиннее на ${R.step} м — станция дальше от дороги">+</button></span></div>`;
+        } else if (st.side) {
+          baysRow += `<div class="icon-row"><span class="lbl2">Как стоит</span><b class="st-kind" data-tip="Вдоль дороги: посты выходят прямо на карман у края улицы">${stationPlaceSvg('side', 24)}</b></div>`;
+        }
       }
       // Пути ж/д станции: схема платформ и «+» — достроить ещё один путь (с ценой или причиной, почему нельзя).
       if (st.kind === 'rail') {

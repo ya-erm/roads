@@ -12,7 +12,7 @@ describe('Тестовая страница /test/bus', { timeout: 60_000 }, () 
     const scene = buildBusScene();
     expect(scene.errors).toEqual([]);
     const { game } = scene;
-    expect(Object.keys(scene.lines).sort()).toEqual(['avenue', 'bay', 'block', 'block2', 'both', 'straight', 'terminal']);
+    expect(Object.keys(scene.lines).sort()).toEqual(['avenue', 'bay', 'block', 'block2', 'both', 'side', 'straight', 'terminal']);
     expect(game.terrain.rivers).toHaveLength(0);
     expect(game.terrain.lakes).toHaveLength(0);
     expect(game.industries).toHaveLength(0);

@@ -23,11 +23,12 @@ import {
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
-import { Anchor, anchorAt, buildRing, insideRuns, splitCorridor } from '../lanes/edit';
+import { Anchor, anchorAt, buildRing, buildRoad, insideRuns, splitCorridor } from '../lanes/edit';
+import { edgesAt } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { autoMainPair, mainPairOf } from '../lanes/graph';
 import { PhaseSpec, phaseTurnStates, specOf, turnClashes, type TurnState } from '../lanes/lights';
-import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, parseLaneKey, twoWay } from '../lanes/model';
+import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, twoWay } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
 import type { LaneTraffic } from '../lanes/traffic';
 import { Leaving, RailSim, Train } from '../sim/rail';
@@ -41,7 +42,7 @@ import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/tow
 import { addTownPax, closeTownPax, PAX_NOWHERE, PAX_PER_THOUSAND } from '../world/townPax';
 import { repaceSave, saveMonthLength } from './monthPace';
 import { Network, NetworkSave, Segment } from '../world/network';
-import { halfWidth, isDirt, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, specCost, TRACK_GAP } from '../world/roadTypes';
+import { halfWidth, isDirt, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, ROAD_MARGIN, specCost, TRACK_GAP } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
 import { DEFAULT_SETTINGS, WorldSettings } from '../world/settings';
 import { Terrain, TerraformEdit, TerraformMode } from '../world/terrain';
@@ -516,6 +517,22 @@ export interface StationPlan {
   nodePos?: Vec;
   /** Дома под самой станцией: снесём за доплату (их цена уже в cost). Дома под выездом — в driveway.demolish. */
   demolish?: number[];
+  /** Станция вдоль дороги: узел — стык на улице, вдоль края — карман (Station.side). */
+  side?: boolean;
+  /** Длина выезда, м от кромки дороги (у станции в конце выезда, не у грузового двора). */
+  drivewayLen?: number;
+}
+
+/** Как ставить автостанцию или автовокзал: длина выезда (м от кромки дороги) или вдоль дороги с карманом. */
+export interface RoadStationOptions {
+  driveway?: number;
+  side?: boolean;
+}
+
+/** Длина выезда — в допустимых границах и с шагом STATION.drivewayRange. */
+export function clampDriveway(m: number): number {
+  const R = STATION.drivewayRange;
+  return Math.max(R.min, Math.min(R.max, R.min + Math.round((m - R.min) / R.step) * R.step));
 }
 
 /** Можно ли сделать на станции столько постов погрузки и во что это обойдётся. */
@@ -1097,7 +1114,8 @@ export class Game implements BuildContext {
   private drivewayIds(): Set<number> {
     const ids = new Set<number>();
     for (const st of this.stations.values()) {
-      if (st.kind !== 'road') continue;
+      // У станции вдоль дороги узел — на самой улице: выезда у неё нет.
+      if (st.kind !== 'road' || st.side) continue;
       for (const id of this.roads.net.nodes.get(st.nodeId)?.corridors ?? []) ids.add(id);
     }
     return ids;
@@ -3140,6 +3158,9 @@ export class Game implements BuildContext {
           live.depots = s.depots;
           live.nodeId = s.nodeId;
           live.industryId = s.industryId;
+          // Длина выезда — как была (её меняют вместе с местом площадки).
+          if (s.driveway !== undefined) live.driveway = s.driveway;
+          else delete live.driveway;
           this.index.add(live);
         }
         // Ж/д станция: пути с платформами и тип (достроенный путь, перенос со сменой типа) — как были.
@@ -6668,7 +6689,8 @@ export class Game implements BuildContext {
 
   /**
    * angle — поворот ж/д станции в чистом поле, tracks — сколько у неё путей с платформами (1–4),
-   * platform — их длина, м (50–400), terminal — конечная (тупиковая) вместо проходной.
+   * platform — их длина, м (50–400), terminal — конечная (тупиковая) вместо проходной. road — как ставить
+   * автостанцию или автовокзал: длина выезда или вдоль дороги с карманом.
    */
   stationPlan(
     p: Vec,
@@ -6678,9 +6700,12 @@ export class Game implements BuildContext {
     tracks = 2,
     platform: number = RAIL_STATION.platform,
     terminal = false,
+    road: RoadStationOptions = {},
   ): StationPlan {
     if (kind === 'rail') return this.railStationPlan(p, snapRadius, angle, clampRailTracks(tracks), clampRailLength(platform), terminal);
     if (kind === 'stop') return this.stopPlan(p, snapRadius);
+    if (road.side) return this.sideStationPlan(p, snapRadius);
+    const len = clampDriveway(road.driveway ?? STATION.driveway);
     // Нельзя — силуэт станции всё равно показываем, красным.
     const fail = (reason: string, fp: Footprint): StationPlan => ({ ok: false, reason, cost: COST.station, fp });
     // Курсор у предприятия — пристраиваем станцию к нему с этой стороны.
@@ -6692,8 +6717,8 @@ export class Game implements BuildContext {
     const endId = hit && (hit.s < edge ? hit.seg.a : hit.seg.length - hit.s < edge ? hit.seg.b : null);
     if (hit && endId !== null) {
       const end = this.roads.net.node(endId);
-      if (this.stationJoinable(end)) return this.junctionStationPlan(end, p);
-      const fp = this.drivewayFootprint(hit.seg.lut.pointAt(hit.s), normalTowards(hit.seg, hit.s, p), halfAtS(hit.seg, hit.s));
+      if (this.stationJoinable(end)) return this.junctionStationPlan(end, p, len);
+      const fp = this.drivewayFootprint(hit.seg.lut.pointAt(hit.s), normalTowards(hit.seg, hit.s, p), halfAtS(hit.seg, hit.s), len);
       return fail('Слишком близко к перекрёстку', fp);
     }
     // Рядом с дорогой магнит небольшой (иначе в городе всё липло бы к перекрёсткам), в стороне от дорог — побольше.
@@ -6702,19 +6727,93 @@ export class Game implements BuildContext {
       .nodesNear(p, magnet)
       .filter((n) => this.stationJoinable(n))
       .sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0];
-    if (junction) return this.junctionStationPlan(junction, p);
+    if (junction) return this.junctionStationPlan(junction, p, len);
     if (!hit) {
       // Рядом только магистраль: вдоль быстрых дорог станций нет — силуэт всё равно у неё, с понятной причиной.
       const fast = this.roadNear(p, Math.max(40, snapRadius), (c) => isTrunk(c.cls));
       if (fast) {
-        const fp = this.drivewayFootprint(fast.seg.lut.pointAt(fast.s), normalTowards(fast.seg, fast.s, p), halfAtS(fast.seg, fast.s));
+        const fp = this.drivewayFootprint(fast.seg.lut.pointAt(fast.s), normalTowards(fast.seg, fast.s, p), halfAtS(fast.seg, fast.s), len);
         return fail('К магистрали станцию не пристроить', fp);
       }
       return fail('Поставьте рядом с дорогой', this.looseFootprint(p, STATION.size));
     }
     const seg = hit.seg;
     const from: Anchor = { kind: 'corridor', corridor: seg.id, s: hit.s, pos: seg.lut.pointAt(hit.s) };
-    return this.drivewayStationPlan(from, normalTowards(seg, hit.s, p), halfAtS(seg, hit.s));
+    return this.drivewayStationPlan(from, normalTowards(seg, hit.s, p), halfAtS(seg, hit.s), len);
+  }
+
+  /**
+   * Автостанция или автовокзал вдоль дороги: площадка боком к улице со стороны курсора, между ними — дублёр:
+   * односторонняя дорога в одну полосу по ходу движения этого края улицы — съезд с улицы, вдоль площадки и обратный
+   * въезд на улицу (между улицей и дублёром — островок). Узел станции — стык на дублёре напротив её середины:
+   * машины съезжают на дублёр, встают на посты прямо с него и возвращаются на улицу дальше по ходу.
+   * Не у перекрёстка и не у конца улицы, не рядом с другой станцией или остановкой.
+   */
+  private sideStationPlan(p: Vec, snapRadius: number): StationPlan {
+    const fail = (reason: string, fp: Footprint | null = null): StationPlan => ({ ok: false, reason, cost: COST.station, fp, side: true });
+    const hit = this.streetNear(p, Math.max(40, snapRadius));
+    if (!hit) return fail('Поставьте вдоль улицы', this.looseFootprint(p, STATION.size));
+    const c = hit.seg;
+    const s = hit.s;
+    const t = c.lut.tangentAt(s);
+    const point = c.lut.pointAt(s);
+    const n = normalTowards(c, s, p);
+    // Сторона улицы: 1 — справа от a→b. Дублёр едет туда же, куда полосы у этого края (правостороннее движение).
+    const right = dot(n, rightNormal(t)) > 0 ? 1 : -1;
+    const along = right;
+    const dir = scale(t, along);
+    const edges = edgesAt(c, s) ?? [-LANE_W, LANE_W];
+    const edge = (right > 0 ? edges[1] : -edges[0]) + ROAD_MARGIN;
+    const W = STATION.size.w;
+    const laneHalf = LANE_W / 2 + ROAD_MARGIN;
+    // Ось дублёра — за островком; площадка — сразу за его кромкой.
+    const d = edge + STATION.pocketIsland + laneHalf;
+    const N = add(point, scale(n, d));
+    const fp: Footprint = {
+      center: add(point, scale(n, d + laneHalf + STATION.pocketGap + STATION.size.h / 2)),
+      w: W,
+      h: STATION.size.h,
+      angle: Math.atan2(t.y, t.x),
+    };
+    // У края в другую сторону полос нет (односторонняя улица) — дублёр вливался бы навстречу.
+    if (!c.lanes.some((l) => l.flow === along)) return fail('Улица здесь — в другую сторону', fp);
+    // Вдоль площадки — run с каждой стороны от узла, съезд и въезд — ещё по div; до узлов улицы — не ближе 12.
+    const run = W / 2 + STATION.pocketRun;
+    const div = STATION.pocketDiverge;
+    const s0 = s - along * (run + div);
+    const s1 = s + along * (run + div);
+    if (Math.min(s0, s1) < 12 || Math.max(s0, s1) > c.length - 12) return fail('Слишком близко к перекрёстку', fp);
+    for (const st of this.stations.values()) {
+      if (st.id === this.movingStation || st.kind === 'rail') continue;
+      if (dist(st.fp.center, fp.center) < W + STOP.gap) return fail(st.kind === 'stop' ? 'Рядом уже есть остановка' : 'Рядом уже есть станция', fp);
+    }
+    if (!this.inBounds(fp.center, 30)) return fail('За краем карты', fp);
+    if (this.isWater(fp.center, footprintRadius(fp))) return fail('Мешает вода', fp);
+    const under = this.structuresUnder(fp, 2);
+    if (under.blocker) return fail(under.blocker, fp);
+    const road = this.roadUnder(fp, 2);
+    if (road) return fail(road, fp);
+    const id = c.id;
+    const P0 = c.lut.pointAt(s0);
+    const P1 = c.lut.pointAt(s1);
+    // Съезд и въезд отходят от улицы под углом (~30°) и выходят на дублёр уже вдоль неё — плавно, без излома.
+    const k = div * 0.5;
+    const tilt = 0.58;
+    const opts = { cls: 'street' as const, lanes: oneWay(1) };
+    const plan = this.roadBuilder.plan((nn) => {
+      const off: Cubic = { p0: P0, p1: add(add(P0, scale(dir, k)), scale(n, k * tilt)), p2: sub(N, scale(dir, run + k)), p3: N };
+      buildRoad(nn, { kind: 'corridor', corridor: id, s: s0, pos: P0 }, { kind: 'free', pos: N }, { ...opts, curve: off });
+      const node = nn.nodesNear(N, 1)[0];
+      const back = anchorAt(nn, P1, 3);
+      if (!node || back.kind !== 'corridor') return false;
+      const on: Cubic = { p0: N, p1: add(N, scale(dir, run + k)), p2: add(sub(P1, scale(dir, k)), scale(n, k * tilt)), p3: P1 };
+      buildRoad(nn, { kind: 'node', node: node.id, pos: N }, back, { ...opts, curve: on });
+    });
+    const cost = plan.cost + COST.station + this.demolishTotal(under.houses);
+    const done = { cost, fp, driveway: plan, nodePos: N, demolish: under.houses, side: true };
+    if (!plan.ok) return { ...done, ok: false, reason: plan.reason ?? 'Нельзя поставить' };
+    if (cost > this.budget) return { ...done, ok: false, reason: 'Не хватает денег' };
+    return { ...done, ok: true };
   }
 
   /**
@@ -6781,7 +6880,7 @@ export class Game implements BuildContext {
    * Станция у перекрёстка: выезд прямо из узла в свободный промежуток со стороны курсора —
    * лучше напротив одной из дорог или под прямым углом к ней, но не ближе STATION_JOIN_GAP к соседним.
    */
-  private junctionStationPlan(node: LaneNode, p: Vec): StationPlan {
+  private junctionStationPlan(node: LaneNode, p: Vec, len: number = STATION.driveway): StationPlan {
     const ends = this.roads.net.ends(node);
     const arms = ends.map((e) => angleOf(e.away));
     const clearance = Math.max(...ends.map((e) => corridorHalf(e.corridor))) + 6;
@@ -6808,20 +6907,23 @@ export class Game implements BuildContext {
     let first: StationPlan | null = null;
     // Если лучшее направление занято, пробуем соседние с той же стороны.
     for (const c of picked.slice(0, 4)) {
-      const plan = this.drivewayStationPlan(from, { x: Math.cos(c.a), y: Math.sin(c.a) }, clearance);
+      const plan = this.drivewayStationPlan(from, { x: Math.cos(c.a), y: Math.sin(c.a) }, clearance, len);
       if (plan.ok) return plan;
       first ??= plan;
     }
     if (first) return first;
     // Места нет — силуэт к курсору (курсор над узлом — в самый широкий промежуток).
     const a = aim ?? options.reduce((x, y) => (gapTo(y.a) > gapTo(x.a) ? y : x), { a: 0 }).a;
-    const fp = this.drivewayFootprint(node.pos, { x: Math.cos(a), y: Math.sin(a) }, clearance);
+    const fp = this.drivewayFootprint(node.pos, { x: Math.cos(a), y: Math.sin(a) }, clearance, len);
     return { ok: false, reason: 'У перекрёстка нет места для выезда', cost: COST.station, fp };
   }
 
-  /** Площадка автостанции в конце выезда от from по dir (clearance — отступ от оси дороги): длинной стороной к выезду. */
-  private drivewayFootprint(from: Vec, dir: Vec, clearance: number): Footprint {
-    const center = add(from, scale(dir, clearance + STATION.driveway + STATION.gate + STATION.size.h / 2));
+  /**
+   * Площадка автостанции в конце выезда от from по dir (clearance — отступ от оси дороги, len — длина выезда от него):
+   * длинной стороной к выезду.
+   */
+  private drivewayFootprint(from: Vec, dir: Vec, clearance: number, len: number = STATION.driveway): Footprint {
+    const center = add(from, scale(dir, clearance + len + STATION.gate + STATION.size.h / 2));
     // Посты погрузки смотрят на выезд.
     return { center, w: STATION.size.w, h: STATION.size.h, angle: Math.atan2(dir.x, -dir.y) };
   }
@@ -6843,11 +6945,11 @@ export class Game implements BuildContext {
    * Автостанция в конце выезда: выезд идёт от from по dir (clearance — отступ от оси дороги),
    * станция стоит к нему длинной стороной. Дома под станцией сносятся за доплату.
    */
-  private drivewayStationPlan(from: Anchor, dir: Vec, clearance: number): StationPlan {
-    const nodePos = add(from.pos, scale(dir, clearance + STATION.driveway));
-    const fp = this.drivewayFootprint(from.pos, dir, clearance);
+  private drivewayStationPlan(from: Anchor, dir: Vec, clearance: number, len: number = STATION.driveway): StationPlan {
+    const nodePos = add(from.pos, scale(dir, clearance + len));
+    const fp = this.drivewayFootprint(from.pos, dir, clearance, len);
     const plan = this.roadBuilder.road(from, { kind: 'free', pos: nodePos }, DRIVEWAY);
-    const fail = (reason: string, cost = plan.cost + COST.station): StationPlan => ({ ok: false, reason, cost, fp, driveway: plan, from });
+    const fail = (reason: string, cost = plan.cost + COST.station): StationPlan => ({ ok: false, reason, cost, fp, driveway: plan, from, drivewayLen: len });
     if (!this.inBounds(fp.center, 30)) return fail('За краем карты');
     if (this.isWater(fp.center, footprintRadius(fp)) || this.isWater(nodePos, 8)) return fail('Мешает вода');
     const under = this.structuresUnder(fp, 3);
@@ -6859,7 +6961,7 @@ export class Game implements BuildContext {
     const cost = plan.cost + COST.station + this.demolishTotal(demolish);
     if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', cost);
     if (cost > this.budget) return fail('Не хватает денег', cost);
-    return { ok: true, cost, fp, driveway: plan, from, nodePos, demolish };
+    return { ok: true, cost, fp, driveway: plan, from, nodePos, demolish, drivewayLen: len };
   }
 
   placeStation(
@@ -6871,8 +6973,9 @@ export class Game implements BuildContext {
     tracks = 2,
     platform: number = RAIL_STATION.platform,
     terminal = false,
+    road: RoadStationOptions = {},
   ): Station | null {
-    const plan = this.stationPlan(p, snapRadius, kind, angle, tracks, platform, terminal);
+    const plan = this.stationPlan(p, snapRadius, kind, angle, tracks, platform, terminal, road);
     if (!plan.ok || !plan.fp) return null;
     const id = this.nextEntityId++;
     let nodeId = -1;
@@ -6885,9 +6988,9 @@ export class Game implements BuildContext {
       if (!platforms.length) return null;
       this.spend(plan.cost - (before - this.money));
     } else {
-      if (kind === 'road' && plan.driveway?.net && plan.nodePos) keepMainRoad(plan.driveway.net, plan.nodePos);
+      if (kind === 'road' && !plan.side && plan.driveway?.net && plan.nodePos) keepMainRoad(plan.driveway.net, plan.nodePos);
       if (!plan.driveway || !plan.nodePos || !this.roadBuilder.apply(plan.driveway)) return null;
-      // Узел станции — тупик выезда (у остановки — стык посреди улицы).
+      // Узел станции — тупик выезда (у остановки и станции вдоль дороги — стык посреди улицы).
       const node = this.roads.net.nodesNear(plan.nodePos, 2)[0];
       if (!node) return null;
       nodeId = node.id;
@@ -6912,6 +7015,8 @@ export class Game implements BuildContext {
       nodeId,
       platforms,
       ...(plan.rail?.terminal ? { terminal: true } : {}),
+      ...(plan.side ? { side: true } : {}),
+      ...(plan.drivewayLen !== undefined ? { driveway: plan.drivewayLen } : {}),
       serves: given,
       industryId: ind?.id ?? null,
       cargo: {},
@@ -7086,9 +7191,9 @@ export class Game implements BuildContext {
       this.refund(STOP.cost);
       return true;
     }
-    // Выезд станции сносится вместе с ней.
+    // Выезд станции сносится вместе с ней; у станции вдоль дороги выезда нет — улица и карман остаются.
     const node = this.roads.net.nodes.get(st.nodeId);
-    if (node?.corridors.length) {
+    if (node?.corridors.length && !st.side) {
       const plan = this.roadBuilder.bulldoze([...node.corridors]);
       if (plan.net) this.roadBuilder.apply({ ...plan, ok: true });
     }
@@ -7112,8 +7217,80 @@ export class Game implements BuildContext {
     const st = this.stations.get(id);
     if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null, refund: 0 };
     if (st.kind === 'rail') return this.railMovePlan(st, p, snapRadius, rail);
+    // Как стояла, так и встанет: вдоль дороги или в конце выезда той же длины.
+    const road: RoadStationOptions = st.side ? { side: true } : { driveway: st.driveway ?? STATION.driveway };
+    return this.relocatePlan(st, () => this.stationPlan(p, snapRadius, st.kind, 0, 2, RAIL_STATION.platform, false, road));
+  }
+
+  /**
+   * Другая длина выезда станции id (м от кромки дороги): тот же выезд из того же места дороги и в ту же сторону,
+   * станция — в его конце. Только у станции в конце выезда (не вдоль дороги и не у грузового двора предприятия).
+   */
+  stationDrivewayPlan(id: number, len: number): StationPlan & { refund: number } {
+    const st = this.stations.get(id);
+    const none = (reason: string): StationPlan & { refund: number } => ({ ok: false, reason, cost: 0, fp: st?.fp ?? null, refund: 0 });
+    if (!st || st.kind !== 'road') return none('Выезд есть только у автостанции');
+    if (st.side) return none('Станция вдоль дороги — без выезда');
+    if (st.industryId !== null) return none('Грузовой двор стоит вплотную к предприятию');
+    const net = this.roads.net;
+    const node = net.nodes.get(st.nodeId);
+    const c = node && node.corridors.length === 1 ? net.corridor(node.corridors[0]) : null;
+    if (!node || !c) return none('Нельзя');
+    const exit = net.node(c.a === node.id ? c.b : c.a);
+    const d = sub(node.pos, exit.pos);
+    const l = Math.hypot(d.x, d.y) || 1;
+    const dir = { x: d.x / l, y: d.y / l };
+    const want = clampDriveway(len);
+    return this.relocatePlan(st, () => {
+      // Выезд уже снесён: примыкаем там же — к узлу, если он остался (перекрёсток, тупик), иначе к полотну.
+      const n2 = this.roads.net.nodesNear(exit.pos, 1)[0];
+      if (n2 && n2.corridors.length) {
+        const ends = this.roads.net.ends(n2);
+        // От перекрёстка и тупика — с запасом, как у станции у перекрёстка; от стыка посреди улицы — как от полотна.
+        const straight = ends.length === 2 && dot(ends[0].away, ends[1].away) < -0.85;
+        const junction = !straight && (n2.kind === 'junction' || this.roads.net.isDeadEnd(n2));
+        const clearance = Math.max(...ends.map((e) => corridorHalf(e.corridor))) + (junction ? 6 : 0);
+        return this.drivewayStationPlan({ kind: 'node', node: n2.id, pos: n2.pos }, dir, clearance, want);
+      }
+      const hit = this.streetNear(exit.pos, 4) ?? this.roadNear(exit.pos, 4, () => true);
+      if (!hit) return { ok: false, reason: 'Нельзя', cost: 0, fp: st.fp };
+      const from: Anchor = { kind: 'corridor', corridor: hit.seg.id, s: hit.s, pos: hit.seg.lut.pointAt(hit.s) };
+      return this.drivewayStationPlan(from, dir, halfAtS(hit.seg, hit.s), want);
+    });
+  }
+
+  /**
+   * Длина выезда станции, м от кромки дороги: какую выбрал игрок, а у старых станций — по самому выезду (его длина
+   * без полуширины дороги, к которой он примыкает). Выезда нет (вдоль дороги, грузовой двор) — null.
+   */
+  stationDrivewayLen(st: Station): number | null {
+    if (st.kind !== 'road' || st.side || st.industryId !== null) return null;
+    if (st.driveway !== undefined) return st.driveway;
+    const net = this.roads.net;
+    const node = net.nodes.get(st.nodeId);
+    const c = node && node.corridors.length === 1 ? net.corridor(node.corridors[0]) : null;
+    if (!node || !c) return null;
+    const exit = net.node(c.a === node.id ? c.b : c.a);
+    const half = Math.max(0, ...net.ends(exit).filter((e) => e.corridor.id !== c.id).map((e) => corridorHalf(e.corridor)));
+    return Math.round(c.length - half);
+  }
+
+  /** Меняет длину выезда станции (одним шагом для Ctrl+Z). Возвращает причину, если нельзя. */
+  setStationDriveway(id: number, len: number): string | null {
+    const st = this.stations.get(id);
+    const plan = this.stationDrivewayPlan(id, len);
+    if (!st || !plan.ok) return plan.reason ?? 'Нельзя';
+    return this.applyRelocation(st, plan, 'выезд станции');
+  }
+
+  /**
+   * Примерка станции st на новом месте (make — план постройки): без самой станции и её старого выезда (он снесётся,
+   * как при сносе станции; стык остановки и станции вдоль дороги на улице остаётся). Цена — постройка на новом месте
+   * минус возврат за снос старой станции и её выезда; добавленные посты и склады переезжают с ней.
+   */
+  private relocatePlan(st: Station, make: () => StationPlan): StationPlan & { refund: number } {
     const node = this.roads.net.nodes.get(st.nodeId);
-    const old = st.kind === 'road' && node?.corridors.length ? this.roadBuilder.bulldoze([...node.corridors]) : null;
+    const old = st.kind === 'road' && !st.side && node?.corridors.length ? this.roadBuilder.bulldoze([...node.corridors]) : null;
     const base = st.kind === 'stop' ? STOP.cost : COST.station;
     // Возврат: старая станция (без добавленных постов — они переезжают вместе с ней) и её выезд.
     const refund = Math.round((base + (old?.refund ?? 0)) * COST.refundRatio);
@@ -7122,7 +7299,7 @@ export class Game implements BuildContext {
     this.movingStation = st.id;
     if (old?.net) this.roads.net = old.net;
     try {
-      const plan = this.stationPlan(p, snapRadius, st.kind);
+      const plan = make();
       const fail = (reason: string) => ({ ...plan, ok: false, reason, refund });
       if (!plan.ok || !plan.fp) return { ...plan, refund };
       let fp = plan.fp;
@@ -7158,7 +7335,17 @@ export class Game implements BuildContext {
     const st = this.stations.get(id);
     if (st?.kind === 'rail') return this.moveRailStation(st, p, snapRadius, rail);
     const plan = this.stationMovePlan(id, p, snapRadius);
-    if (!st || !plan.ok || !plan.fp || !plan.driveway?.net || !plan.nodePos) return plan.reason ?? 'Нельзя перенести';
+    if (!st || !plan.ok) return plan.reason ?? 'Нельзя перенести';
+    return this.applyRelocation(st, plan);
+  }
+
+  /**
+   * Ставит станцию st по плану переноса (relocatePlan): новый выезд (или стык на улице), снос домов, деньги; машины,
+   * что едут к ней, едут к новому месту. checkpoint — подпись шага для Ctrl+Z, если это отдельное действие игрока.
+   */
+  private applyRelocation(st: Station, plan: StationPlan & { refund: number }, checkpoint?: string): string | null {
+    if (!plan.ok || !plan.fp || !plan.driveway?.net || !plan.nodePos) return plan.reason ?? 'Нельзя перенести';
+    if (checkpoint) this.checkpoint(checkpoint);
     // Узел на новом месте уже есть в сети плана: машины к станции едут туда (иначе потеряли бы дорогу).
     const node = plan.driveway.net.nodesNear(plan.nodePos, 2)[0];
     if (!node) return 'Нельзя перенести';
@@ -7169,7 +7356,7 @@ export class Game implements BuildContext {
     }
     this.index.remove(st);
     // Новая сеть — без старого выезда, с новым (или со стыком остановки на новой улице); дома под выездом сносит строитель.
-    if (st.kind === 'road') keepMainRoad(plan.driveway.net, plan.nodePos);
+    if (st.kind === 'road' && !plan.side) keepMainRoad(plan.driveway.net, plan.nodePos);
     if (!this.roadBuilder.apply(plan.driveway)) {
       this.index.add(st);
       return 'Нельзя перенести';
@@ -7187,8 +7374,10 @@ export class Game implements BuildContext {
     st.fp = plan.fp;
     st.nodeId = node.id;
     st.industryId = plan.industryId ?? null;
+    if (plan.drivewayLen !== undefined) st.driveway = plan.drivewayLen;
     this.index.add(st);
     this.computeCatchment(st);
+    if (checkpoint) this.commit();
     return null;
   }
 

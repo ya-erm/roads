@@ -1,5 +1,6 @@
+import { STATION } from '../config';
 import type { Vec } from '../core/vec';
-import { emptyLedger, Game } from '../game/game';
+import { emptyLedger, Game, type RoadStationOptions } from '../game/game';
 import { AVENUE, type End, roadPlan, STREET } from '../game/testkit';
 import type { ModelId } from '../game/transport';
 import { RoadTools } from '../input/roadtools';
@@ -19,7 +20,9 @@ import type { TestScene } from './index';
  *  - «Проспект» — 2+2, остановки у правого края в обе стороны;
  *  - «Кармашек» — улица 1+1, у двух остановок полоса вдоль края до и после навеса (в обе стороны);
  *  - «Автовокзалы» — два автовокзала по обе стороны улицы, между ними четыре автобуса разных моделей: каждый
- *    встаёт на свой перрон;
+ *    встаёт на свой перрон; выезд у южного — самый короткий, у северного — длиннее обычного;
+ *  - «Вдоль дороги» — два автовокзала боком к улице, у края — карман: автобусы съезжают в него, встают на перроны
+ *    и едут дальше;
  *  - «Кварталы» — четыре квартала с перекрёстками и односторонней улицей посередине: один маршрут
  *    поворачивает налево, другой направо, общая остановка — на односторонней.
  * Экран: y вниз, движение правостороннее — на улице с запада на восток едут у южного края, остановки
@@ -93,9 +96,21 @@ export function buildBusScene(): TestScene {
     sc.road({ free: { x: 2000, y } }, { free: { x: 2900, y } }, STREET);
     // Сперва дома, потом вокзалы: под площадками дома снесутся, как у игрока.
     sc.houses();
-    const southTerminal = sc.terminal({ x: 2250, y: y + 40 });
-    const northTerminal = sc.terminal({ x: 2650, y: y - 40 });
+    // Выезды разной длины: у южного — самый короткий, у северного — длиннее обычного.
+    const southTerminal = sc.terminal({ x: 2250, y: y + 40 }, { driveway: STATION.drivewayRange.min });
+    const northTerminal = sc.terminal({ x: 2650, y: y - 40 }, { driveway: 30 });
     sc.line('terminal', 'Автовокзалы', [southTerminal, northTerminal], 4, ['bus', 'bus2', 'bus3', 'bus']);
+  });
+
+  // ---------- Вдоль дороги: автовокзалы боком к улице, у края — карман, автобусы едут дальше ----------
+  sc.section('Вдоль дороги', { x: 2450, y: 3500 }, 'linear', () => {
+    const y = 3500;
+    sc.road({ free: { x: 2000, y } }, { free: { x: 2900, y } }, STREET);
+    sc.houses();
+    // На восток — у южного края (карман по ходу), на запад — у северного.
+    const eastward = sc.terminal({ x: 2300, y: y + 40 }, { side: true });
+    const westward = sc.terminal({ x: 2600, y: y - 40 }, { side: true });
+    sc.line('side', 'Вдоль дороги', [eastward, westward], 3, ['bus2', 'bus3', 'bus']);
   });
 
   // ---------- Кварталы: перекрёстки, повороты, односторонняя посередине ----------
@@ -214,10 +229,13 @@ class SceneBuilder {
     return st;
   }
 
-  /** Автовокзал (только пассажиры) у ближайшей к точке p улицы — выездом к ней, с её стороны, где p. */
-  terminal(p: Vec): Station {
-    const st = this.game.placeStation(p, 30, 'road', { pax: true, cargo: false });
-    if (!st) throw new Error(`автовокзал у (${p.x}, ${p.y}): ${this.game.stationPlan(p, 30, 'road').reason ?? 'не встал'}`);
+  /**
+   * Автовокзал (только пассажиры) у ближайшей к точке p улицы, с её стороны, где p: выездом к ней (road.driveway —
+   * его длина) или вдоль неё с карманом (road.side).
+   */
+  terminal(p: Vec, road: RoadStationOptions = {}): Station {
+    const st = this.game.placeStation(p, 30, 'road', { pax: true, cargo: false }, 0, 2, undefined, false, road);
+    if (!st) throw new Error(`автовокзал у (${p.x}, ${p.y}): ${this.game.stationPlan(p, 30, 'road', 0, 2, undefined, false, road).reason ?? 'не встал'}`);
     return st;
   }
 

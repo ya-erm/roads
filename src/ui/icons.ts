@@ -601,6 +601,41 @@ export function tracksSvg(n: number, dashed = false): string {
   return `<svg viewBox="0 0 52 36" width="52" height="36">${rows}</svg>`;
 }
 
+/**
+ * Как ставить автостанцию: end — в конце выезда (улица внизу, от неё вверх — выезд к площадке с постами),
+ * side — вдоль дороги (у края улицы — карман со скосами, площадка боком к нему).
+ */
+export function stationPlaceSvg(mode: 'end' | 'side', size = 30): string {
+  const posts = (x0: number, y: number, n: number, w: number) =>
+    Array.from({ length: n + 1 }, (_, i) => `<rect x="${x0 + i * w - 0.6}" y="${y}" width="1.2" height="6" fill="#d7d9dc"/>`).join('');
+  if (mode === 'end') {
+    return `<svg viewBox="0 0 40 36" width="${(size * 40) / 36}" height="${size}">
+      <rect x="0" y="27" width="40" height="8" fill="#646b76"/><path d="M0 31H40" stroke="#f5f3e6" stroke-width="0.9" stroke-dasharray="3 2"/>
+      <rect x="16.5" y="15" width="7" height="13" fill="#646b76"/><path d="M20 16V27" stroke="#f5f3e6" stroke-width="0.7" stroke-dasharray="2 1.5"/>
+      <rect x="8" y="2" width="24" height="14" rx="1" fill="#646b76" stroke="#4b525c" stroke-width="1"/>
+      <rect x="8.5" y="2.5" width="23" height="3.5" fill="#f2efe8"/><rect x="8.5" y="5.5" width="23" height="1" fill="#2f80ed"/>${posts(11, 7, 3, 6)}
+    </svg>`;
+  }
+  return `<svg viewBox="0 0 40 36" width="${(size * 40) / 36}" height="${size}">
+    <rect x="0" y="27" width="40" height="8" fill="#646b76"/><path d="M0 31H40" stroke="#f5f3e6" stroke-width="0.9" stroke-dasharray="3 2"/>
+    <path d="M2 27L8 22H32L38 27Z" fill="#646b76"/><path d="M8 24.5H32" stroke="#f5f3e6" stroke-width="0.7" stroke-dasharray="2 1.5"/>
+    <rect x="8" y="5" width="24" height="17" rx="1" fill="#646b76" stroke="#4b525c" stroke-width="1"/>
+    <rect x="8.5" y="5.5" width="23" height="4" fill="#f2efe8"/><rect x="8.5" y="9" width="23" height="1" fill="#2f80ed"/>${posts(11, 10.5, 3, 6)}
+  </svg>`;
+}
+
+/** Длина выезда: станция наверху, улица внизу, между ними — выезд с меткой длины (чем длиннее, тем выше станция). */
+export function drivewaySvg(len: number, max: number): string {
+  const h = 4 + Math.round((Math.min(len, max) / max) * 14);
+  const top = 22 - h;
+  return `<svg viewBox="0 0 22 26" width="22" height="26">
+    <rect x="0" y="21" width="22" height="5" fill="#646b76"/>
+    <rect x="8" y="${top}" width="6" height="${h}" fill="#646b76"/>
+    <rect x="3" y="${top - 5}" width="16" height="5" rx="1" fill="#f2efe8" stroke="#4f5965" stroke-width="0.9"/>
+    <path d="M19.5 ${top + 0.5}V${21.5}M18 ${top + 0.5}H21M18 21.5H21" stroke="#2f80ed" stroke-width="1"/>
+  </svg>`;
+}
+
 export function stationSvg(kind: 'road' | 'rail' | 'stop' | 'cargo' | 'pax', size = 40): string {
   if (kind === 'cargo') {
     // Автостанция для грузов: склад с воротами, ящики и грузовик у рампы.

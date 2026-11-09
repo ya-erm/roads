@@ -1,11 +1,11 @@
-import { ANNEX, CONSTRUCTION, COST, ECONOMY, RAIL_STATION, SNAP_PIXELS, STORAGE } from '../config';
+import { ANNEX, CONSTRUCTION, COST, ECONOMY, RAIL_STATION, SNAP_PIXELS, STATION, STORAGE } from '../config';
 import { warehouseZone } from '../game/warehouses';
 import { annexZone, growthCap } from '../game/annexes';
 import { CurveLUT, minRadius, offsetCubic, straightCubic } from '../core/bezier';
 import { add, angleOf, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { DrawMode, NetKind, RoadRequest, Snap } from '../game/build';
 import { DEFAULT_RING, type RingOptions, type RingSize } from '../game/roads';
-import type { AreaContents, Game, LaneEnd, PastePlan, StationKind } from '../game/game';
+import { type AreaContents, clampDriveway, type Game, type LaneEnd, type PastePlan, type RoadStationOptions, type StationKind } from '../game/game';
 import { snapRails } from '../game/railFragment';
 import { type Beside, besideGhost, besideRun, besideTrack } from '../game/railEdit';
 import type { NetEdit, RoadPlan } from '../game/roadbuild';
@@ -207,6 +207,10 @@ export class Controller {
   stationLength = RAIL_STATION.platform;
   /** Конечная (тупиковая) вместо проходной: пути кончаются упорами, поезда разворачиваются. */
   stationTerminal = false;
+  /** Автостанция и автовокзал — вдоль дороги, с карманом (иначе — в конце выезда). */
+  stationSide = false;
+  /** Длина выезда новой автостанции, м от кромки дороги ([ и ] — короче и длиннее). */
+  stationDriveway = STATION.driveway;
   /** Шаблон развязки и поворот магистрали, если она строится вместе с развязкой (R). */
   templateKind: TemplateKind = 'diamond';
   templateAngle = 0;
@@ -492,6 +496,28 @@ export class Controller {
     if (this.tool !== 'industry') this.setTool('industry');
     if (this.tool !== 'industry') return;
     this.industryKind = kind;
+    this.onChange();
+  }
+
+  /** Как ставить новую автостанцию или автовокзал: вдоль дороги с карманом или в конце выезда выбранной длины. */
+  get roadStationOptions(): RoadStationOptions {
+    return this.stationSide ? { side: true } : { driveway: this.stationDriveway };
+  }
+
+  /** [ и ] меняют длину выезда: ставим автостанцию или автовокзал в конце выезда. */
+  private drivewayKeys(code: string): boolean {
+    return code.startsWith('Bracket') && this.tool === 'station' && !this.placingBase && this.stationKind === 'road' && !this.stationSide;
+  }
+
+  /** Автостанция и автовокзал — вдоль дороги с карманом (true) или в конце выезда. */
+  setStationSide(on: boolean): void {
+    this.stationSide = on;
+    this.onChange();
+  }
+
+  /** Длина выезда новой автостанции — шагом STATION.drivewayRange.step в его границах. */
+  setStationDriveway(m: number): void {
+    this.stationDriveway = clampDriveway(m);
     this.onChange();
   }
 
@@ -1677,7 +1703,8 @@ export class Controller {
         break;
       }
       case 'station': {
-        const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.stationAngle, this.stationTracks, this.stationLength, this.stationTerminal);
+        const road = this.roadStationOptions;
+        const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.stationAngle, this.stationTracks, this.stationLength, this.stationTerminal, road);
         const st = g.placeStation(
           p,
           this.snapRadius,
@@ -1687,6 +1714,7 @@ export class Controller {
           this.stationTracks,
           this.stationLength,
           this.stationTerminal,
+          road,
         );
         if (!st) this.showError(plan.reason);
         else this.select({ type: 'station', id: st.id });
@@ -2946,11 +2974,14 @@ export class Controller {
       }
       case 'BracketRight':
       case 'PageUp':
-        this.setLevel(this.level + 1);
+        // Автостанция в конце выезда — ] длиннее выезд (уровень дороги ей не нужен).
+        if (this.drivewayKeys(e.code)) this.setStationDriveway(this.stationDriveway + STATION.drivewayRange.step);
+        else this.setLevel(this.level + 1);
         break;
       case 'BracketLeft':
       case 'PageDown':
-        this.setLevel(this.level - 1);
+        if (this.drivewayKeys(e.code)) this.setStationDriveway(this.stationDriveway - STATION.drivewayRange.step);
+        else this.setLevel(this.level - 1);
         break;
       // −/+ — высота конца строящейся дороги относительно начала.
       case 'Equal':
@@ -3622,7 +3653,7 @@ export class Controller {
         break;
       }
       case 'station': {
-        const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.stationAngle, this.stationTracks, this.stationLength, this.stationTerminal);
+        const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.stationAngle, this.stationTracks, this.stationLength, this.stationTerminal, this.roadStationOptions);
         if (plan.fp) {
           o.station = { fp: plan.fp, ok: plan.ok };
           o.catchmentAt = plan.fp.center;
@@ -3642,7 +3673,8 @@ export class Controller {
           const b = g.buildingById(id);
           if (b) o.marks.push({ fp: b.fp, ok: false });
         }
-        const free = plan.rail?.main ? ' · R — повернуть' : '';
+        // Автостанция в конце выезда: какой длины выезд и как её менять.
+        const free = plan.rail?.main ? ' · R — повернуть' : plan.drivewayLen !== undefined ? ` · выезд ${plan.drivewayLen} м [ ]` : '';
         const raze = razed.length ? ` · снос ${razed.length} зд.` : '';
         // У предприятия станция сама становится грузовой — подпись показывает, какой она получится.
         const serves = plan.fp ? g.stationServesFor(plan.fp, this.stationKind, plan.industryId, this.newStationServes) : this.newStationServes;
