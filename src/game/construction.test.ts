@@ -615,6 +615,8 @@ describe('Стройка дорог: базы и бригады', () => {
       // ждут, пока отсыпка уйдёт вперёд).
       const id = game.construction.list()[0].project.id;
       const crews = game.construction.crews;
+      // База за радиусом обслуживания: сама бригада туда не едет — отправляем вручную («🎯 На стройку…»).
+      if (far > CONSTRUCTION.serviceRadius) for (const b of crews.brigades.values()) expect(game.sendBrigade(b.id, id)).toBeNull();
       const money = game.money;
       game.money = ECONOMY.creditLimit;
       const placed = () => crews.working(id).length >= n && crews.working(id).every((b) => crews.placed(b).every(Boolean));

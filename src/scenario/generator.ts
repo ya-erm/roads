@@ -6,7 +6,7 @@
  */
 import { CONSTRUCTION, ECONOMY, MONTH_LENGTH, MONTH_SCALE, TERM_SCALE } from '../config';
 import { Rng } from '../core/rng';
-import { dist } from '../core/vec';
+import { dist, type Vec } from '../core/vec';
 import type { Game } from '../game/game';
 import { MODELS, newestLike } from '../game/transport';
 import { CARGO, CargoType, type IndustryType, TOWN_CARGO } from '../world/cargo';
@@ -264,8 +264,11 @@ export function startScenario(sc: Scenario): void {
   const main = paxMain ? pax : freight;
   // Капитал: на главную цель с запасом по сложности; на вторую цель — уже впритык или в кредит.
   const mainCost = main?.cost ?? 150_000;
-  const capital = Math.max(200_000, Math.min(900_000, roundMoney(mainCost * diff.capital * arch.capital, 10_000)));
-  const loan = roundMoney(capital * (arch.loan + (s.settings.difficulty === 'hard' ? 0.15 : 0)), 50_000);
+  const funds = Math.max(200_000, Math.min(900_000, roundMoney(mainCost * diff.capital * arch.capital, 10_000)));
+  const loan = roundMoney(funds * (arch.loan + (s.settings.difficulty === 'hard' ? 0.15 : 0)), 50_000);
+  // «Со строительством»: стройки этапа A не достать одной базой (первая бесплатна) — на вторую добавим к капиталу.
+  const secondBase = game.buildMode && !oneBaseReaches(phaseASites(game, freight, pax), baseSpots(game, freight, pax)) ? CONSTRUCTION.base.cost : 0;
+  const capital = funds + secondBase;
   game.money = capital;
   game.loan = loan;
   s.brief = {
@@ -281,10 +284,45 @@ export function startScenario(sc: Scenario): void {
   // Кредит уже в капитале: часть стартовых денег заёмная, проценты — с первого месяца.
   if (loan > 0)
     s.brief.facts.unshift(`Из капитала ${moneyText(loan)} — заёмные: ${Math.round(ECONOMY.loanRate * 100)}% в месяц, гасить можно в «Финансах»`);
+  if (secondBase)
+    s.brief.facts.push(
+      `Стройки первых целей далеко друг от друга: одна строительная база (📡 ${baseRadiusText()}) их не достанет — в капитале ${moneyText(secondBase)} на вторую`,
+    );
   phaseA(sc, { months: months + build, fast: build ? months : undefined }, paxMain, freight, pax);
   // Стартовый контракт: груз городу, которому он нужен, если его можно получить на карте.
   startContract(sc);
   sc.log('phase', `Этап A: ${PHASES[0].name}`);
+}
+
+/**
+ * «Со строительством»: куда этапу A нужна строительная база — по группе точек на стройку, хватит любой из группы.
+ * Линия — её концы (бригада съезжает на стройку с готовой дороги у того конца, откуда её ведут); первой надо построить
+ * добычу (buildTarget) — свободные месторождения её вида. Завод игрок ставит у своего города — он группой не считается.
+ */
+export function phaseASites(game: Game, freight: FreightPlan | null, pax: PaxPlan | null): Vec[][] {
+  const groups: Vec[][] = [];
+  if (freight) groups.push([freight.supply.from.fp.center, freight.supply.to.fp.center]);
+  if (pax) groups.push([pax.a.center, pax.b.center]);
+  const target = game.enterprises.on ? buildTarget(game) : null;
+  if (target && isRaw(target.kind)) groups.push(freeDeposits(game.enterprises.deposits, target.kind.kind).map((d) => d.center));
+  return groups.filter((g) => g.length);
+}
+
+/** Где игрок поставит базу: у дороги — в городе или у предприятия линии этапа A. */
+function baseSpots(game: Game, freight: FreightPlan | null, pax: PaxPlan | null): Vec[] {
+  const spots = game.towns.map((t) => t.center);
+  if (freight) spots.push(freight.supply.from.fp.center, freight.supply.to.fp.center);
+  if (pax) spots.push(pax.a.center, pax.b.center);
+  return spots;
+}
+
+/** Радиус обслуживания базы — как в её карточке: «2,5 км». */
+const baseRadiusText = (): string => `${String(CONSTRUCTION.serviceRadius / 1000).replace('.', ',')} км`;
+
+/** Есть место spot, из радиуса обслуживания базы в котором достаётся хотя бы одна точка каждой группы. */
+export function oneBaseReaches(groups: readonly (readonly Vec[])[], spots: readonly Vec[]): boolean {
+  const R = CONSTRUCTION.serviceRadius;
+  return !groups.length || spots.some((s) => groups.every((g) => g.some((p) => dist(p, s) <= R)));
 }
 
 /** Срок целей этапа A и быстрый срок (есть, когда к сроку добавлен запас на стройку). */
@@ -757,7 +795,9 @@ export function buildTarget(game: Game): { kind: IndustryType; why: string; rela
       if (raw)
         return {
           kind: raw,
-          why: `${plant.name} ждёт «${CARGO[c].name}», а его никто не добывает. Месторождения отмечены значком ⛏️ — постройте добычу на ближайшем.`,
+          why: `${plant.name} ждёт «${CARGO[c].name}», а его никто не добывает. Месторождения отмечены значком ⛏️ — постройте добычу на ближайшем${
+            game.buildMode ? `: стройка идёт, только если строительная база не дальше ${baseRadiusText()}` : ''
+          }.`,
           related: [refOf(plant)],
         };
     }

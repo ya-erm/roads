@@ -6,7 +6,7 @@ import { DEFAULT_SETTINGS, type WorldSettings } from '../world/settings';
 import { BUILD_ALLOWANCE, BUILD_SLACK, buildAllowance, buildReach, industryById, roadMonths, townById } from './analysis';
 import { PHASES } from './content';
 import { assess } from './feasibility';
-import { fastMonths } from './generator';
+import { fastMonths, oneBaseReaches } from './generator';
 
 const scenario = (seed: number, extra: Partial<WorldSettings> = {}): WorldSettings => ({
   ...DEFAULT_SETTINGS,
@@ -133,5 +133,36 @@ describe('Сценарий «Со строительством»', () => {
       short += build.filter((d) => roadMonths(game, d) * MONTH_LENGTH <= CONSTRUCTION.firstBuild + 1e-6).length;
     }
     expect(short).toBeGreaterThanOrEqual(all * 0.75);
+  }, 60_000);
+
+  it('одна база достаёт стройки, если есть место, из радиуса которого видно хотя бы по точке каждой группы', () => {
+    const R = CONSTRUCTION.serviceRadius;
+    const groups = [
+      [{ x: 0, y: 0 }, { x: 10 * R, y: 0 }],
+      [{ x: 1.5 * R, y: 0 }],
+    ];
+    expect(oneBaseReaches(groups, [{ x: 0.75 * R, y: 0 }])).toBe(true);
+    expect(oneBaseReaches(groups, [{ x: -0.5 * R, y: 0 }, { x: 10 * R, y: 0 }])).toBe(false);
+    expect(oneBaseReaches([], [])).toBe(true);
+  });
+
+  it('стройки этапа A не достать одной базой — к капиталу цена второй базы и строка в брифинге; «Мгновенно» — без неё', () => {
+    const radius = CONSTRUCTION.serviceRadius;
+    const brief = (r: number, extra: Partial<WorldSettings>) => {
+      CONSTRUCTION.serviceRadius = r;
+      try {
+        return new Game(scenario(5, extra)).scenario!.state.brief;
+      } finally {
+        CONSTRUCTION.serviceRadius = radius;
+      }
+    };
+    const second = (b: { facts: string[] }) => b.facts.some((f) => f.includes('на вторую'));
+    const wide = brief(1e9, { construction: 'build' });
+    const narrow = brief(300, { construction: 'build' });
+    expect(second(wide)).toBe(false);
+    expect(second(narrow)).toBe(true);
+    expect(narrow.capital).toBe(wide.capital + CONSTRUCTION.base.cost);
+    expect(narrow.loan).toBe(wide.loan);
+    expect(second(brief(300, {}))).toBe(false);
   }, 60_000);
 });

@@ -3,7 +3,7 @@
  * строки в карточках предприятия и города, строка «Предприятия» в окне новой игры. Объясняет значками:
  * 👷 рабочие, 🚌 подвоз, ☁ вред, 🏙 место в черте города, ⛏️ месторождение, 🏚 заброшенное, 🏗 стройка.
  */
-import { ENTERPRISE } from '../config';
+import { CONSTRUCTION, ENTERPRISE } from '../config';
 import type { Game } from '../game/game';
 import type { IndustryPlan } from '../game/enterprises';
 import { money } from '../input/labels';
@@ -13,6 +13,7 @@ import { buildCost, buildTime, freeDeposits, harmClass, harmTo, isRaw, townFor, 
 import type { Industry, Town } from '../world/entities';
 import { INDUSTRY_MODES, type IndustryMode } from '../world/settings';
 import { cargoIcon, townIcon } from './cargoIcons';
+import { km as radiusText } from './constructionUi';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 const pct = (x: number) => `${Math.round(x * 100)}%`;
@@ -125,7 +126,7 @@ export function industryRowsHtml(g: Game, ind: Industry): string {
     const stall = e.stalls.get(ind.id);
     const state =
       stall === 'base'
-        ? `<span class="bad" data-tip="Стройка стоит: поставьте строительную базу ближе ${km(6000)}">⛔ нет базы</span>`
+        ? `<span class="bad" data-tip="Стройка стоит: поставьте строительную базу ближе ${radiusText(CONSTRUCTION.serviceRadius)}">⛔ нет базы</span>`
         : stall === 'money'
           ? '<span class="bad" data-tip="Стройка стоит: не хватает денег">💸</span>'
           : `<span class="muted">⏳ ${Math.ceil((1 - ind.build.done) * ind.build.time)} с</span>`;

@@ -253,7 +253,7 @@ function crews(game: Game, out: Advice[]): void {
   if (far.length) {
     const first = far[0];
     const what = far.length === 1 ? `«${projectName(first.project)}»` : `${far.length} ${plural(far.length, 'проект', 'проекта', 'проектов')}`;
-    const r = CONSTRUCTION.serviceRadius / 1000;
+    const r = String(CONSTRUCTION.serviceRadius / 1000).replace('.', ',');
     out.push({
       key: 'buildNoBase',
       kind: 'buildNoBase',

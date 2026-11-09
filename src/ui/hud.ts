@@ -154,7 +154,7 @@ import { lineJamsHtml, stationWarningsHtml } from './jamUi';
 import { phasesHtml, phaseTurns } from './phasesUi';
 import { addPhase, editedAfter, GREEN_MAX, GREEN_MIN, movePhase, removePhase, stepGreen, withLeftArrows } from '../lanes/lights';
 import { installTips } from './tipFloat';
-import { basePriceHtml, baseSvg, buildModeRowHtml } from './constructionUi';
+import { basePriceHtml, baseSvg, buildModeRowHtml, km as distText } from './constructionUi';
 import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
@@ -2467,7 +2467,7 @@ export class Hud {
       true,
     );
     if (c.placingBase) {
-      const tip = `База встаёт у дороги со стороны курсора, ворота — на ближайший узел. С неё бригады едут строить: сами — на стройки ближе ${CONSTRUCTION.serviceRadius / 1000} км (круг на карте). Дома под площадкой снесём (красные) — за доплату.`;
+      const tip = `База встаёт у дороги со стороны курсора, ворота — на ближайший узел. С неё бригады едут строить: сами — на стройки ближе ${distText(CONSTRUCTION.serviceRadius)} (круг на карте). Дома под площадкой снесём (красные) — за доплату.`;
       return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
         <div class="base-prices">${basePriceHtml(g)}</div></div></div>`;
     }

@@ -199,14 +199,14 @@ export function basePriceHtml(game: Game): string {
 }
 
 /**
- * Подпись у курсора, пока ставим базу: «База стройки · бесплатно · следующие — $40 000 · снос 2 зд. · 📡 6 км ·
+ * Подпись у курсора, пока ставим базу: «База стройки · бесплатно · следующие — $40 000 · снос 2 зд. · 📡 2,5 км ·
  * Esc — отмена». plan — Game.basePlan у курсора (cost — с доплатой за снос домов).
  */
 export function basePlaceText(game: Game, plan: { cost: number; demolish: number[] }): string {
   const { now, next } = basePrices(game);
   const later = now < next ? ` · следующие — ${money(next)}` : '';
   const raze = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
-  return `База стройки · ${basePriceText(plan.cost)}${later}${raze} · 📡 ${CONSTRUCTION.serviceRadius / 1000} км · Esc — отмена`;
+  return `База стройки · ${basePriceText(plan.cost)}${later}${raze} · 📡 ${km(CONSTRUCTION.serviceRadius)} · Esc — отмена`;
 }
 
 /** «＋ База»: нажата — ставим базу; баз ещё не было — первая бесплатно, кнопка пульсирует, пока её не поставят. */

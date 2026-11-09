@@ -44,16 +44,19 @@ function bench(cap?: number) {
   return { host, crews, sites, base };
 }
 
+/** Радиус обслуживания: координаты проверок автоматики — в долях от него. */
+const R = CONSTRUCTION.serviceRadius;
+
 describe('Радиус обслуживания базы: автоматика', () => {
   it('бригада не едет на проект вне радиуса — едет на тот, что в радиусе', () => {
     const t = bench();
     const [b] = t.base(100, { x: 0, y: 0 }, 1);
-    // Проект 7 — в 8 км (и подъезд там же), проект 8 — в 3 км.
-    t.sites.set(7, { node: 70, pos: { x: 8000, y: 0 }, gate: { x: 7900, y: 0 } });
+    // Проект 7 — за радиусом (и подъезд там же), проект 8 — в полрадиуса.
+    t.sites.set(7, { node: 70, pos: { x: R + 2000, y: 0 }, gate: { x: R + 1900, y: 0 } });
     t.crews.tick();
     expect(b.state).toBe('idle');
     expect(t.crews.serves(100, t.sites.get(7)!)).toBe(false);
-    t.sites.set(8, { node: 80, pos: { x: 0, y: 3000 }, gate: { x: 0, y: 2900 } });
+    t.sites.set(8, { node: 80, pos: { x: 0, y: R / 2 }, gate: { x: 0, y: R / 2 - 100 } });
     t.crews.tick();
     expect(b.state).toBe('going');
     expect(b.project).toBe(8);
@@ -71,8 +74,8 @@ describe('Радиус обслуживания базы: автоматика',
   it('две базы в радиусе — едет бригада ближней, хотя дальняя по номеру раньше', () => {
     const t = bench(1);
     const [far] = t.base(100, { x: 0, y: 0 }, 1);
-    const [near] = t.base(200, { x: 5000, y: 0 }, 2);
-    t.sites.set(9, { node: 90, pos: { x: 5500, y: 0 } });
+    const [near] = t.base(200, { x: R * 0.6, y: 0 }, 2);
+    t.sites.set(9, { node: 90, pos: { x: R * 0.8, y: 0 } });
     expect(t.crews.serves(100, t.sites.get(9)!)).toBe(true);
     for (let i = 0; i < 5; i++) t.crews.tick();
     expect(near.project).toBe(9);
@@ -83,8 +86,8 @@ describe('Радиус обслуживания базы: автоматика',
   it('бригады ближней базы заняты — дальняя всё равно не едет, хотя место на проекте есть', () => {
     const t = bench();
     const [far] = t.base(100, { x: 0, y: 0 }, 1);
-    const [near] = t.base(200, { x: 5000, y: 0 }, 2);
-    t.sites.set(9, { node: 90, pos: { x: 5500, y: 0 } });
+    const [near] = t.base(200, { x: R * 0.6, y: 0 }, 2);
+    t.sites.set(9, { node: 90, pos: { x: R * 0.8, y: 0 } });
     for (let i = 0; i < 5; i++) t.crews.tick();
     // Ближняя уехала — на проекте ещё есть место (до трёх бригад), но стройка её: дальняя дома.
     expect(near.project).toBe(9);
@@ -92,7 +95,7 @@ describe('Радиус обслуживания базы: автоматика',
     expect(far.state).toBe('idle');
     expect(far.project).toBeUndefined();
     // Свой проект — в радиусе только дальней: туда она едет.
-    t.sites.set(8, { node: 80, pos: { x: -2000, y: 0 } });
+    t.sites.set(8, { node: 80, pos: { x: -R * 0.8, y: 0 } });
     t.crews.tick();
     expect(far.project).toBe(8);
     // Вручную — можно и на чужой.
@@ -110,8 +113,8 @@ describe('Радиус обслуживания базы: автоматика',
     t.crews.tick();
     expect(far.state).toBe('working');
     // Ближняя база у приоритетного 9-го, её бригада уже там.
-    const [near] = t.base(200, { x: 5000, y: 0 }, 2);
-    t.sites.set(9, { node: 90, pos: { x: 5500, y: 0 } });
+    const [near] = t.base(200, { x: R * 0.6, y: 0 }, 2);
+    t.sites.set(9, { node: 90, pos: { x: R * 0.8, y: 0 } });
     t.host.priority = (id) => id === 9;
     t.crews.tick();
     t.crews.tick();
@@ -210,7 +213,7 @@ describe('Радиус обслуживания базы: вручную и ст
 
 describe('Радиус обслуживания базы в игре: «нет базы рядом»', () => {
   const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
-  // Маленькая карта меньше радиуса: в проверке радиус — 600 м.
+  // Свободное поле на маленькой карте короче радиуса: в проверке радиус — 600 м.
   const radius = CONSTRUCTION.serviceRadius;
   beforeEach(() => {
     CONSTRUCTION.serviceRadius = 600;
