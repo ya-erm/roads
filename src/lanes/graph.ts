@@ -2,7 +2,7 @@ import { CAR_WIDTH, LIGHTS } from '../config';
 import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub, Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
-import { filletPath, junctionCuts, pointOff } from './geometry';
+import { filletPath, junctionCuts } from './geometry';
 import { phaseRelations, resolvePhases, SignalHead, signalHeads, turnKey } from './lights';
 import { Corridor, CorridorEnd, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey, taperLen } from './model';
 import { autoSolids } from './solid';
@@ -284,7 +284,10 @@ export class LaneGraph {
     const link = this.links.get(lane.link)!;
     const c = this.net.corridor(link.corridor);
     const s = link.flow > 0 ? link.s0 + u : link.s1 - u;
-    return { pos: pointOff(c, s, lane.offset), dir: scale(c.lut.tangentAt(s), link.flow) };
+    // Как pointOff(c, s, lane.offset) и tangentAt(s), но точка и касательная — за один поиск по кривой.
+    const { point: p, tangent: t } = c.lut.frameAt(s);
+    const off = lane.offset;
+    return { pos: off ? { x: p.x + -t.y * off, y: p.y + t.x * off } : p, dir: { x: t.x * link.flow, y: t.y * link.flow } };
   }
 
   /** s на оси полотна для положения u на полосе. */

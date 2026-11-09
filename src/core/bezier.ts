@@ -248,6 +248,15 @@ export class CurveLUT {
     return norm(sub(this.curve.p3, this.curve.p0));
   }
 
+  /** Точка и касательная на s — те же, что pointAt(s) и tangentAt(s), за один поиск по таблице (машины в потоке). */
+  frameAt(s: number): { point: Vec; tangent: Vec } {
+    const { i, f } = this.index(s);
+    const point = lerp(this.points[i], this.points[i + 1], f);
+    const d = bezDeriv(this.curve, this.ts[i] + (this.ts[i + 1] - this.ts[i]) * f);
+    const l = len(d);
+    return { point, tangent: l > 1e-6 ? scale(d, 1 / l) : norm(sub(this.curve.p3, this.curve.p0)) };
+  }
+
   /** Полилиния, смещённая вправо на off, на участке [s0, s1]. */
   offsetPolyline(off: number, s0 = 0, s1 = this.length, step = 3): Vec[] {
     const pts: Vec[] = [];
