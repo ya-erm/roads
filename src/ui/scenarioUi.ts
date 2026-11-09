@@ -55,7 +55,6 @@ import {
   stopwatchSvg,
 } from './scenarioIcons';
 import { randomCardHtml } from './newGame';
-import { ideasSvg } from './prefs';
 import { timelapseItemHtml } from './timelapseButton';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
@@ -588,9 +587,13 @@ function ideaHtml(g: Game, i: Idea): string {
     ${needsHtml(g, i)}${i.status === 'active' ? placeChips(g, i.related) : ''}</div></div>`;
 }
 
-/** Вкладка «Идеи» (есть, пока есть что показать): предложение, взятые и только что выполненные. */
-function ideasTabHtml(g: Game): string {
+/**
+ * Раздел «☕ Без сроков» — первым во вкладке «События» (есть, пока есть что показать): предложение, взятые и только
+ * что выполненные. Нечего — пусто.
+ */
+function ideasSectionHtml(g: Game): string {
   const ideas = g.ideas;
+  if (!ideas.visible) return '';
   const order = { offered: 0, active: 1, done: 2, declined: 3 };
   const cards = [...ideas.shown].sort((a, b) => order[a.status] - order[b.status]).map((i) => ideaHtml(g, i)).join('');
   const tip = `Без сроков и штрафов: взять, отложить или отказаться. Новая — не чаще раза в ${IDEAS.gap} мин, взятых — до ${IDEAS.active}. Выключить — Меню → Настройки`;
@@ -598,7 +601,7 @@ function ideasTabHtml(g: Game): string {
   return `<section class="sc-sec sc-ideas"><h4 data-tip="${esc(tip)}">☕ Без сроков ${total}</h4>${cards}</section>`;
 }
 
-/** Свёрнутая вкладка «Идеи»: предложение, первое взятое или только что выполненное — строкой. */
+/** Идеи в свёрнутой вкладке «События»: предложение, первое взятое или только что выполненное — строкой. */
 function ideasCompactHtml(g: Game): string {
   const i = g.ideas.offer ?? g.ideas.active[0] ?? g.ideas.shown[0];
   if (!i) return '';
@@ -607,17 +610,17 @@ function ideasCompactHtml(g: Game): string {
   return `<div class="sc-compact" data-tip="${esc(`${i.title}. ${i.why}`)}">${objectiveIcon(i, 18)}<span class="sc-compact-text">${esc(i.title)}</span>${bar}</div>`;
 }
 
-/** Вкладки левой панели: сценарий (этапы и задания), события с предложениями контрактов, стройка, идеи без сроков. */
-export type LeftTab = 'scenario' | 'events' | 'build' | 'ideas';
+/** Вкладки левой панели: сценарий (этапы и задания), события (идеи без сроков, предложения контрактов), стройка. */
+export type LeftTab = 'scenario' | 'events' | 'build';
 
 /**
- * Какие вкладки есть в этой партии: сценарий и события — со сценарием, стройка — «Со строительством», идеи —
- * в песочнице и после конца сценария (не выключены в настройках), пока есть что показать.
+ * Какие вкладки есть в этой партии: сценарий и события — со сценарием, стройка — «Со строительством». Идеи без
+ * сроков — во «Событиях»; в песочнице «События» есть, пока есть что показать из идей (после «Стройки»).
  */
 export function leftTabs(g: Game): LeftTab[] {
   const tabs: LeftTab[] = g.scenario ? ['scenario', 'events'] : [];
   if (g.buildMode) tabs.push('build');
-  if (g.ideas.visible) tabs.push('ideas');
+  if (!g.scenario && g.ideas.visible) tabs.push('events');
   return tabs;
 }
 
@@ -644,62 +647,72 @@ const openTasks = (sc: Scenario) =>
   sc.state.objectives.filter((o) => o.status === 'active' && (o.phase === sc.state.phase || o.role === 'contract')).length;
 
 /**
+ * Вкладка «События»: число — предложений на решение, контрактов или идеи (есть — вкладка подсвечена; контракт,
+ * которому меньше минуты на решение, — красным и мигает; идея без срока — не мигает).
+ */
+function eventsTabButton(g: Game, btn: (id: LeftTab, icon: string, name: string, n: string, tip: string, cls?: string) => string, count: (n: number, cls?: string) => string): string {
+  const sc = g.scenario;
+  const offers = sc && sc.state.status === 'running' ? offersByUrgency(sc) : [];
+  if (sc && offers.length) {
+    const hot = (sc.secondsLeft(offers[0]) ?? Infinity) < URGENT.banner ? ' urgent' : '';
+    const tip = `Контракты ждут решения: ${offers.length} — принять или отказаться`;
+    // Ждут решения — вкладка подсвечена; меньше минуты — ещё и мигает красным.
+    return btn('events', newsSvg(15), 'События', count(offers.length, `call${hot}`), tip, `call${hot ? `${hot} pulse` : ''}`);
+  }
+  const idea = g.ideas.visible ? g.ideas.offer : undefined;
+  if (idea) return btn('events', newsSvg(15), 'События', count(1, 'call'), `☕ Идея ждёт: ${idea.title} — без срока`, 'call');
+  const taken = g.ideas.visible ? g.ideas.active.length : 0;
+  const tip = taken
+    ? `☕ Идеи в работе: ${taken} — без сроков`
+    : sc
+      ? 'События региона и предложения контрактов'
+      : '☕ Идеи без сроков: изредка, по ходу игры';
+  return btn('events', newsSvg(15), 'События', '', tip);
+}
+
+/**
  * Вкладки значками с подписью и числом: «Сценарий» — заданий в работе, «События» — предложений на решение
- * (есть — вкладка подсвечена, меньше минуты на решение — красным), «Стройка» — проектов (первую базу ещё не
- * ставили — подсвечена: она бесплатна).
+ * (`eventsTabButton`), «Стройка» — проектов (первую базу ещё не ставили — подсвечена: она бесплатна).
  */
 function tabsHtml(g: Game, tab: LeftTab): string {
   const count = (n: number, cls = '') => (n ? `<b class="lp-count ${cls}">${n}</b>` : '');
   const btn = (id: LeftTab, icon: string, name: string, n: string, tip: string, cls = '') =>
     `<button class="lp-tab ${id === tab ? 'active' : ''} ${cls}" data-action="left-tab" data-id="${id}" data-tip="${esc(tip)}">${icon}<span>${name}</span>${n}</button>`;
-  const out: string[] = [];
-  const sc = g.scenario;
-  if (sc) {
-    const tasks = sc.state.status === 'running' ? openTasks(sc) : 0;
-    out.push(btn('scenario', flagSvg(15), 'Сценарий', count(tasks), tasks ? `Этапы и задания: в работе ${tasks}` : 'Этапы, задания и контракты'));
-    const offers = sc.state.status === 'running' ? offersByUrgency(sc) : [];
-    const hot = offers.length && (sc.secondsLeft(offers[0]) ?? Infinity) < URGENT.banner ? ' urgent' : '';
-    out.push(
-      btn(
-        'events',
-        newsSvg(15),
-        'События',
-        count(offers.length, `call${hot}`),
-        offers.length ? `Контракты ждут решения: ${offers.length} — принять или отказаться` : 'События региона и предложения контрактов',
-        // Ждут решения — вкладка подсвечена; меньше минуты — ещё и мигает красным.
-        offers.length ? `call${hot ? `${hot} pulse` : ''}` : '',
-      ),
-    );
-  }
-  if (g.buildMode) {
+  const out = leftTabs(g).map((id) => {
+    if (id === 'scenario') {
+      const sc = g.scenario!;
+      const tasks = sc.state.status === 'running' ? openTasks(sc) : 0;
+      return btn('scenario', flagSvg(15), 'Сценарий', count(tasks), tasks ? `Этапы и задания: в работе ${tasks}` : 'Этапы, задания и контракты');
+    }
+    if (id === 'events') return eventsTabButton(g, btn, count);
     const b = buildTabCount(g);
     const tip = b.first
       ? 'Стройка: поставьте первую базу — бесплатно, с бригадой'
       : `Стройка: баз ${b.bases}, проектов ${b.projects}`;
-    out.push(btn('build', buildSvg(18, 14), 'Стройка', count(b.projects), tip, b.first ? 'call pulse' : ''));
-  }
-  if (g.ideas.visible) {
-    // Предложение ждёт — вкладка подсвечена, но не мигает: срока нет.
-    const offer = g.ideas.offer;
-    const taken = g.ideas.active.length;
-    const tip = offer ? `Идея ждёт: ${offer.title} — без срока` : taken ? `Идеи в работе: ${taken} — без сроков` : 'Идеи без сроков: изредка, по ходу игры';
-    out.push(btn('ideas', ideasSvg(18, 14), 'Идеи', offer ? count(1, 'call') : count(taken), tip, offer ? 'call' : ''));
-  }
+    return btn('build', buildSvg(18, 14), 'Стройка', count(b.projects), tip, b.first ? 'call pulse' : '');
+  });
   return `<nav class="lp-tabs">${out.join('')}</nav>`;
 }
 
-/** Свёрнутая вкладка «События»: последнее событие строкой (предложения на решение показаны под ней всегда). */
-function eventsCompactHtml(sc: Scenario): string {
+/**
+ * Свёрнутая вкладка «События»: идея без срока, если есть, иначе последнее событие строкой (предложения контрактов
+ * на решение показаны под ней всегда).
+ */
+function eventsCompactHtml(g: Game, sc: Scenario | null): string {
+  if (g.ideas.visible || !sc) return ideasCompactHtml(g);
   const e = sc.state.events[sc.state.events.length - 1];
   if (!e) return '<div class="sc-compact"><span class="muted">Событий пока нет</span></div>';
   return `<div class="sc-compact" data-tip="${esc(e.cause)}"><span class="sc-ev-ic">${EVENT_INFO[e.type].icon}</span><span class="sc-compact-text">${esc(eventTitle(e))}</span><small>${agoText(sc, e)}</small></div>`;
 }
 
 /**
- * Вкладка «События»: предложения контрактов с «Принять / Отказаться» — первыми (`offersSectionHtml`), под ними
- * активные события карточками (новые сверху) и прошедшие — строками.
+ * Вкладка «События»: идеи без сроков (`ideasSectionHtml`; в песочнице — только они) и предложения контрактов с
+ * «Принять / Отказаться» (`offersSectionHtml`) — первыми, под ними активные события карточками (новые сверху) и
+ * прошедшие — строками.
  */
-function eventsTabHtml(g: Game, sc: Scenario, view: PanelView): string {
+function eventsTabHtml(g: Game, sc: Scenario | null, view: PanelView): string {
+  const ideas = ideasSectionHtml(g);
+  if (!sc) return ideas;
   const s = sc.state;
   const now = sc.month;
   // Событие с контрактом на решение — уже в карточке предложения выше.
@@ -713,17 +726,21 @@ function eventsTabHtml(g: Game, sc: Scenario, view: PanelView): string {
   const cards = events.map((e) => eventHtml(g, sc, e)).join('');
   const rows = past.map((e) => pastEventHtml(g, sc, e, view.open.has(`ev:${e.id}`))).join('');
   const offers = offersSectionHtml(g, view.open);
-  const empty = !offers && !cards && !rows ? '<section class="sc-sec"><p class="muted">Событий пока нет: они случаются раз в несколько месяцев — город растёт, завод закрывается, приходят контракты.</p></section>' : '';
-  return `${offers}${cards ? `<section class="sc-sec"><h4>${newsSvg(14)} События</h4>${cards}</section>` : ''}${
+  const empty =
+    !ideas && !offers && !cards && !rows
+      ? '<section class="sc-sec"><p class="muted">Событий пока нет: они случаются раз в несколько месяцев — город растёт, завод закрывается, приходят контракты.</p></section>'
+      : '';
+  return `${ideas}${offers}${cards ? `<section class="sc-sec"><h4>${newsSvg(14)} События</h4>${cards}</section>` : ''}${
     rows ? `<section class="sc-sec"><h4>Прошедшие</h4>${rows}</section>` : ''
   }${empty}`;
 }
 
 /**
  * Левая панель под деньгами — вкладками: «Сценарий» (регион, этапы, репутация, задания этапа и принятые
- * контракты, «Следующий этап»), «События» (предложения контрактов с решением, события) и — «Со строительством» —
- * «Стройка» (базы, «＋ База», проекты). В песочнице со стройкой — одна вкладка «Стройка» заголовком. Свёрнутая —
- * заголовок, вкладки, компактная строка вкладки и предложения на решение. Ни сценария, ни стройки — пусто.
+ * контракты, «Следующий этап»), «События» (идеи без сроков, предложения контрактов с решением, события) и — «Со
+ * строительством» — «Стройка» (базы, «＋ База», проекты). В песочнице — «Стройка» и «События», пока есть идеи;
+ * одна из них — заголовком, обе — заголовок «Песочница» и вкладки. Свёрнутая — заголовок, вкладки, компактная
+ * строка вкладки и предложения на решение. Ни сценария, ни стройки, ни идей — пусто.
  */
 export function leftPanelHtml(g: Game, view: PanelView): string {
   const tab = leftTab(g, view.tab);
@@ -739,11 +756,11 @@ export function leftPanelHtml(g: Game, view: PanelView): string {
           ? buildCompactHtml(g, build.placing)
           : buildTabHtml(g, build)
         : view.collapsed
-          ? ideasCompactHtml(g)
-          : ideasTabHtml(g);
-    // Одна вкладка — заголовком; стройка и идеи — заголовок «Песочница» и вкладки.
+          ? eventsCompactHtml(g, null)
+          : eventsTabHtml(g, null, view);
+    // Одна вкладка — заголовком; стройка и события (идеи) — заголовок «Песочница» и вкладки.
     if (leftTabs(g).length === 1) {
-      const [icon, name] = tab === 'build' ? [buildSvg(22, 17), 'Стройка'] : [ideasSvg(24, 18), 'Идеи'];
+      const [icon, name] = tab === 'build' ? [buildSvg(22, 17), 'Стройка'] : [newsSvg(18), 'События'];
       return `<header class="sc-head"><button class="lines-toggle" data-action="sc-toggle" data-tip="${toggle} · ${name.toLowerCase()}">${fold}${icon}<h3>${name}</h3></button></header>${body}`;
     }
     const head = `<header class="sc-head"><button class="lines-toggle" data-action="sc-toggle" data-tip="${toggle} · песочница">${fold}${sandboxSvg(26, 17)}<h3>Песочница</h3></button></header>${tabsHtml(g, tab)}`;
@@ -762,19 +779,16 @@ export function leftPanelHtml(g: Game, view: PanelView): string {
     const line =
       tab === 'build'
         ? buildCompactHtml(g, build.placing)
-        : tab === 'ideas'
-          ? ideasCompactHtml(g)
-          : tab === 'events'
-            ? offers
-              ? ''
-              : eventsCompactHtml(sc)
-            : running
-              ? compactHtml(sc)
-              : finishedHtml(sc);
+        : tab === 'events'
+          ? offers
+            ? ''
+            : eventsCompactHtml(g, sc)
+          : running
+            ? compactHtml(sc)
+            : finishedHtml(sc);
     return head + line + offers;
   }
   if (tab === 'build') return head + buildTabHtml(g, build);
-  if (tab === 'ideas') return head + ideasTabHtml(g);
   if (tab === 'events') return head + eventsTabHtml(g, sc, view);
   return head + scenarioTabHtml(g, sc, view);
 }

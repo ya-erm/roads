@@ -474,8 +474,12 @@ export class Hud {
   private starting = false;
   /** Панель сценария свёрнута до заголовка (запоминается в браузере). */
   private scenarioCollapsed = localStorage.getItem('roads.scenarioCollapsed') === '1';
-  /** Выбранная вкладка левой панели (запоминается в браузере); её нет в партии — показывается первая. */
-  private leftTab: LeftTab = (['scenario', 'events', 'build', 'ideas'] as const).find((t) => t === localStorage.getItem('roads.leftTab')) ?? 'scenario';
+  /**
+   * Выбранная вкладка левой панели (запоминается в браузере); её нет в партии — показывается первая. Прежняя
+   * вкладка «Идеи» — теперь «События».
+   */
+  private leftTab: LeftTab =
+    (['scenario', 'events', 'build'] as const).find((t) => t === localStorage.getItem('roads.leftTab')?.replace(/^ideas$/, 'events')) ?? 'scenario';
   /** Задания, у которых в панели раскрыто «почему». */
   private readonly whyOpen = new Set<string>();
   /** «Следующий этап» нажат один раз: второе нажатие переводит этап. */
