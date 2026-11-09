@@ -35,17 +35,37 @@
  *
  * Состояние: готовое — в полотнах сети (сохраняется вместе с ней), записи проектов — здесь (toSave / load).
  */
-import { dist, dot, sub, type Vec } from '../core/vec';
-import { nodeCuts } from '../lanes/geometry';
+import { add, dist, dot, scale, sub, type Vec } from '../core/vec';
+import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { corridorLayer } from '../lanes/speedDisplay';
-import { closed, endCuts, laneDone, laneWise, partLanes, reverseZone, reversible } from '../lanes/closure';
+import { closed, endCuts, laneDone, laneWise, partLanes, reverseStops, reverseZone, reversible } from '../lanes/closure';
 import type { Corridor, CorridorBuild, CorridorWas, LaneNet } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import type { Network, Segment } from '../world/network';
 import { ROAD_CLASSES } from '../world/roadTypes';
 import { trackProfile } from './build';
 import { advanceStages, crewCap, frontOf, paidFor, type Piece, pickSite, pieceRate, railBuildRate, spansOf, stageSeconds, stageWork } from './constructionWork';
-import { type CrewLane, crewRows, fillet, laneRow, polyLength, polyProject, stageSlots } from './crewLane';
+import {
+  CREW_CARS,
+  type CrewLane,
+  crewRows,
+  crewSpacing,
+  fillet,
+  halfRow,
+  lanePose,
+  laneRow,
+  laneShift,
+  planTurn,
+  polyLength,
+  polyProject,
+  releaseTurn,
+  stageSlots,
+  TURN_TAIL,
+  turnAhead,
+  turning,
+  turnRoom,
+  U_TURN,
+} from './crewLane';
 import { CrewCarry } from './crewCarry';
 import { type Brigade, type CrewSave, Crews, type Site } from './crews';
 import type { CrewStep } from './crewRoads';
@@ -125,6 +145,12 @@ export interface ConstructionHost {
   reach(from: number, to: number): boolean;
   /** Следующий шаг бригады от узла from к узлу to: по дорогам в потоке или против движения (crewRoads.ts). */
   crewStep?(from: number, to: number): CrewStep | null;
+  /**
+   * Бригада разворачивается через обе половины полотна corridor («с проездом», реверс): светофоры реверса — на красный
+   * обеим сторонам и держат его, пока зовут (каждый такт). true — участок под реверсом пуст, можно разворачиваться.
+   * Нет — разворот сразу.
+   */
+  turnGate?(corridor: number): boolean;
 }
 
 /** Сводка проекта для плашки и советника. */
@@ -632,7 +658,10 @@ export class Construction {
     const f = this.frontFor(b.project, b);
     const c = f?.c;
     if (!f || !c?.build) return null;
-    const fromB = f.fromB;
+    // Первый проход «с проездом» готов, бригада разворачивается на второй (turnFlip): места — второго прохода, он ещё
+    // не начат.
+    const flip = this.turnFlip(b, c, f.fromB);
+    const fromB = flip ? !f.fromB : f.fromB;
     const leg = b.lane.legs.find((g) => g.corridor === c.id && g.fromB === fromB);
     if (!leg) return null;
     // Полоса дальше не идёт, а в конце — готовая дорога: колонна встаёт перед её перекрёстком (оттуда выедет в поток),
@@ -647,13 +676,128 @@ export class Construction {
       const k = this.piece(project, id);
       return !!k && this.layer(project, k) === 0;
     };
+    // «С проездом», первый проход: колонна встаёт так, чтобы впереди хватило места развернуться (turnCap).
+    const cap = flip ? null : this.turnCap(c);
     const o = {
-      end: Math.max(0, c.length - cut),
+      end: Math.max(0, Math.min(c.length - cut, cap ?? Infinity)),
       ahead: ground(c.id),
       ext,
       extAhead: !!next && ground(next.corridor),
     };
-    return stageSlots(spansOf(c.build, c.length), c.length, o).map((u) => leg.at + u);
+    const spans: [number, number, number] = flip ? [0, 0, 0] : spansOf(c.build, c.length);
+    const y = stageSlots(spans, c.length, o).map((u) => leg.at + u);
+    // После разворота машины встают не раньше его конца, друг за другом: места этапов у начала прохода — позади
+    // разворота, туда машине не попасть; этап начнётся, когда его машина доедет до своего места за разворотом (placed).
+    const turn = b.lane.turn;
+    if (turn) {
+      y[2] = Math.max(y[2], turn.end + TURN_TAIL);
+      y[1] = Math.max(y[1], y[2] + crewSpacing(1));
+      y[0] = Math.max(y[0], y[1] + crewSpacing(0));
+    }
+    return y;
+  }
+
+  /** Первый проход «с проездом» на узком полотне c кончился, второго ещё нет: бригады разворачиваются. */
+  private passTurn(c: Piece): boolean {
+    const b = c.build;
+    return !!b && laneWise(b) && !b.pass && spansOf(b, c.length)[2] >= c.length - 1e-6;
+  }
+
+  /** Полоса бригады b — разворот на второй проход по c (заполняемому сейчас от fromB), а участок ещё на первом. */
+  private turnFlip(b: Brigade, c: Piece, fromB: boolean): boolean {
+    const leg = b.lane?.legs[0];
+    return !!b.lane?.turn && !!leg && leg.corridor === c.id && leg.fromB !== fromB && this.passTurn(c);
+  }
+
+  /**
+   * Первый проход «с проездом» на узкой (laneWise) — дальше какого места (м по ходу заполнения) головная не заезжает:
+   * в конце прохода колонна разворачивается на другую половину, и вся дуга разворота (turnAhead впереди головной) —
+   * на участке под реверсом последнего куска, за 3 м до дальней стоп-линии: пока обе стороны на красном, там машин
+   * нет. Не первый проход или полотно слишком короткое для колонны — null.
+   */
+  private turnCap(c: Piece): number | null {
+    const b = c.build;
+    if (!b || !laneWise(b) || b.pass) return null;
+    const net = this.host.roads.net;
+    // От хода работ не зависит — только от полотна и узлов: запоминается до смены сети (места машин — каждый кадр).
+    const key = `${net.version}:${c.id}:${b.fromB ? 1 : 0}`;
+    const had = this.caps.get(c.id);
+    if (had?.key === key && had.net === net) return had.cap;
+    const k = c as Corridor;
+    const L = k.length;
+    const last: CorridorBuild = { ...b, stages: [L, L, L] };
+    const stops = reverseStops(k, last, reverseZone(k, last, endCuts(net, k)));
+    const far = b.fromB ? L - stops[0] : stops[1];
+    const at = far - 3 - turnAhead(roomAlong(k, !!b.fromB, far - 3 - turnAhead(U_TURN.max), far));
+    const cap = at >= crewSpacing(0) + crewSpacing(1) + 5 ? at : null;
+    this.caps.set(c.id, { net, key, cap });
+    return cap;
+  }
+
+  /** turnCap по полотнам: для какой сети и хода посчитано. */
+  private caps = new Map<number, { net: LaneNet; key: string; cap: number | null }>();
+
+  /**
+   * Первый проход «с проездом» на c кончился — бригада o разворачивается на второй: её новая полоса — по c от его
+   * другого конца (второй проход идёт навстречу), в ряду другой половины, а перед ней — разворот с прежней полосы от
+   * мест, где машины стоят (planTurn). Колонна ждёт очистки реверса (turn.wait, trackCrews). Не на полосе всей
+   * колонной — false (бригада поедет к новому краю своим ходом, как раньше).
+   */
+  private startTurn(id: number, c: Piece, o: Brigade): boolean {
+    const old = o.lane;
+    const cars = this.crews.carsAt(o);
+    if (!old || cars.length !== CREW_CARS || cars.some((m) => m.s === undefined)) return false;
+    const b = c.build!;
+    const next: CorridorBuild = { ...b, stages: [0, 0, 0], pass: 2 };
+    if (b.fromB) delete next.fromB;
+    else next.fromB = true;
+    const fromB = !!next.fromB;
+    const L = c.length;
+    // Полоса второго прохода — по оси от его начала, позади начала — прямо по оси.
+    const start = c.lut.pointAt(fromB ? L : 0);
+    const t = c.lut.tangentAt(fromB ? L : 0);
+    const path: Vec[] = [add(start, scale(fromB ? t : { x: -t.x, y: -t.y }, 80)), start];
+    alongCorridor(path, c, fromB ? L : 0, fromB ? 0 : L, 5);
+    const onward = this.continuation(id, c, fromB, o);
+    if (onward) alongCorridor(path, onward.c, onward.fromB ? onward.c.length : 0, onward.fromB ? 0 : onward.c.length, 5);
+    // Ряд — сразу ряд второго прохода (layRows его не меняет): на полосе после разворота машины уже в нём.
+    const lane: CrewLane = { path, legs: [{ corridor: c.id, fromB, at: 80 }], shifts: [{ at: -1e4, to: halfRow(c as Corridor, next) }] };
+    if (onward) lane.legs.push({ corridor: onward.c.id, fromB: onward.fromB, at: 80 + L });
+    const s = cars.map((m) => m.s!);
+    const head = Math.max(...s);
+    // Ширина — самая узкая там, где пройдёт разворот: от головной до дальней точки дуги (у узла полотно сужается).
+    const along = L - (polyProject(path, lanePose(old, head).pos) - 80);
+    const room = roomAlong(c as Corridor, !!b.fromB, along, along + turnAhead(U_TURN.max) + 2);
+    const plan = planTurn((u) => lanePose(old, u), laneShift(old, head).lat, s, lane, room);
+    const now = this.host.time;
+    lane.turn = { ...plan.turn, wait: true };
+    lane.from = plan.from;
+    lane.t0 = now;
+    lane.t = plan.from.map(() => now);
+    o.lane = lane;
+    return true;
+  }
+
+  /**
+   * Первый проход на c готов и бригады развернулись (или их нет) — участок на второй проход: навстречу первому, по другой
+   * половине; реверс теперь — по новой половине. Развернувшиеся остаются на своей полосе, остальные — к новому краю
+   * своим ходом (relocate).
+   */
+  private secondPass(c: Piece, crews: readonly Brigade[]): void {
+    const b = c.build!;
+    const end = b.fromB ? c.a : c.b;
+    const next: CorridorBuild = { ...b, stages: [0, 0, 0], pass: 2 };
+    if (b.fromB) delete next.fromB;
+    else next.fromB = true;
+    c.build = next;
+    this.touchPiece(b.project, c);
+    this.host.networkChanged();
+    for (const o of crews) {
+      const fromB = !!next.fromB;
+      o.front = { corridor: c.id, fromB };
+      const leg = o.lane?.legs[0];
+      if (!(o.lane?.turn && leg?.corridor === c.id && leg.fromB === fromB)) this.crews.relocate(o, end);
+    }
   }
 
   /**
@@ -709,6 +853,16 @@ export class Construction {
       const f = slots && this.frontFor(b.project, b);
       if (f) {
         this.crews.keepSpots(b);
+        const flip = this.turnFlip(b, f.c, f.fromB);
+        const turn = b.lane.turn;
+        if (turn && (flip || turning(b.lane, slots, this.host.time))) {
+          // Разворот — через обе половины: когда участок под реверсом пуст и обе стороны на красном (Host.turnGate);
+          // светофоры держат красный, пока колонна не развернётся и участок не перейдёт на второй проход.
+          const clear = this.host.turnGate?.(f.c.id) ?? true;
+          if (turn.wait && clear) releaseTurn(b.lane, this.host.time);
+        }
+        // Ряд разворачивающейся — уже второго прохода (startTurn), а участок ещё на первом.
+        if (flip) continue;
         const at = onSite.get(f.c) ?? { project: b.project, list: [] };
         at.list.push(b);
         onSite.set(f.c, at);
@@ -1041,6 +1195,14 @@ export class Construction {
         const b = c.build!;
         const L = c.length;
         const crews = this.crews.working(p.id).filter((o) => o.front?.corridor === c!.id);
+        if (!rail && this.passTurn(c)) {
+          // Первый проход «с проездом» готов: второй — когда колонна развернулась на другую половину (до тех пор
+          // половины меняются местами только у неё: движение — по-прежнему, по светофорам реверса).
+          const piece = c;
+          if (crews.some((o) => this.turnFlip(o, piece, !!b.fromB) && turning(o.lane!, this.crewSlots(o) ?? [], this.host.time))) break;
+          this.secondPass(c, crews);
+          continue;
+        }
         // Темп этапа — по бригадам этого фронта, чья машина этого этапа на месте (Crews.placed): первая доехавшая
         // машина ведёт отсыпку, пока остальные в пути; никого нет — фронт ждёт.
         const pos = this.frontOn(c).pos;
@@ -1082,19 +1244,13 @@ export class Construction {
         }
         left -= moved.used;
         if (complete && lane && !b.pass) {
-          // Первая половина готова — бригада разворачивается у конца и идёт назад по второй половине (своей стороной по
-          // ходу): участок не открывается, реверс теперь — по новой половине.
-          const end = b.fromB ? c.a : c.b;
-          const next: CorridorBuild = { ...b, done, stages: [0, 0, 0], pass: 2 };
-          if (b.fromB) delete next.fromB;
-          else next.fromB = true;
-          c.build = next;
+          // Первая половина готова — бригада разворачивается у конца (startTurn) и идёт назад по второй половине (своей
+          // стороной по ходу): участок не открывается; развернулась — второй проход (secondPass, в начале цикла), реверс
+          // — по новой половине.
+          c.build = { ...b, done, stages: moved.spans };
           this.touchPiece(p.id, c);
           this.host.networkChanged();
-          for (const o of crews) {
-            o.front = { corridor: c.id, fromB: !!next.fromB };
-            this.crews.relocate(o, end);
-          }
+          for (const o of crews) this.startTurn(p.id, c, o);
           continue;
         }
         if (complete) {
@@ -1500,6 +1656,20 @@ function frontPoint(c: Piece, fromB: boolean): Vec {
 function alongCorridor(pts: Vec[], k: Piece, s0: number, s1: number, step: number): void {
   const n = Math.max(1, Math.ceil(Math.abs(s1 - s0) / step));
   for (let i = 1; i <= n; i++) pts.push(k.lut.pointAt(s0 + ((s1 - s0) * i) / n));
+}
+
+/**
+ * Место для разворота на полотне c (turnRoom) — самое узкое на отрезке [a0, a1] м по ходу заполнения от конца fromB:
+ * у узлов новое полотно сужается к прежнему.
+ */
+function roomAlong(c: Corridor, fromB: boolean, a0: number, a1: number): number {
+  const L = c.length;
+  let room = Infinity;
+  for (let a = Math.max(0, a0); a <= Math.min(L, a1) + 1e-6; a += 2) {
+    const e = edgesAt(c, fromB ? L - a : a);
+    if (e) room = Math.min(room, turnRoom(e));
+  }
+  return Number.isFinite(room) ? room : turnRoom([-3.5, 3.5]);
 }
 
 

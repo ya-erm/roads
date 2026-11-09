@@ -144,6 +144,17 @@ export class CrewCarry {
     const n = laneCars(lane);
     const now = lane.from && slots ? laneArcs(lane, slots, time).slice(0, n) : (lane.from?.slice(0, n) ?? null);
     lane.path = path;
+    // Разворот (CrewLane.turn) — его точки тоже переезжают; места на нём — на столько же метров до его конца.
+    const turn = lane.turn;
+    const end = turn?.end;
+    const shift = end !== undefined ? arc(end) - end : 0;
+    if (turn) {
+      turn.path = turn.path.map((p) => this.point(p));
+      turn.end += shift;
+      turn.lead += shift;
+      if (turn.back) turn.back = [turn.back[0] + shift, turn.back[1] + shift];
+    }
+    const along = (s: number) => (end !== undefined && s < end ? s + shift : arc(s));
     let prev: { at: number; corridor: number } | null = null;
     for (const g of lane.legs) {
       // Начало следующего участка — ровно за концом предыдущего (как строит полосу Construction.crewLane).
@@ -161,7 +172,9 @@ export class CrewCarry {
       const u = (s - s0) / ROW_RAMP;
       return u >= 1 ? 0 : off * (1 - smoothstep(Math.max(0, u)));
     });
-    lane.from = now.map((s) => arc(s));
+    lane.from = now.map((s) => along(s));
+    // Колонна ждёт разворота — ждёт и дальше; уже едет — все с одной скоростью, на тех же расстояниях друг от друга.
+    if (turn?.wait) return;
     lane.t0 = time;
     lane.t = lane.from.map(() => time);
     if (side.some((x) => Math.abs(x) > 0.05)) lane.side = side.map((x) => (Math.abs(x) > 0.05 ? x : 0));

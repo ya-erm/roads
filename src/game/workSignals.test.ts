@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
-import { clearMax, crossTime, type PhaseState, reverseGreen, stepPhase } from './workSignals';
+import { clearMax, crossTime, holdPhase, type PhaseState, reverseGreen, stepPhase, type WorkSignal } from './workSignals';
 
 const R = CONSTRUCTION.rebuild.reverse;
 
@@ -53,5 +53,29 @@ describe('Светофоры реверса: фазы', () => {
     expect(blind.go).toBe(0);
     for (let t = 0; t < clearMax(len) + 0.2; t += 0.5) stepPhase(blind, 0.5, len, () => null, () => 1);
     expect(blind.go).toBe(-1);
+  });
+
+  it('бригада держит красный на разворот: зелёный после minGreen гаснет, очистка не кончается, пусто — можно', () => {
+    const sig = { state: { go: 1, next: 1, t: 0 } } as WorkSignal;
+    const len = 250;
+    let inside = 2;
+    const step = (sec: number) => {
+      for (let t = 0; t < sec; t += 0.1) holdPhase(sig, 0.1, len, () => inside);
+    };
+    step(R.minGreen - 0.5);
+    expect(sig.state.go).toBe(1);
+    expect(sig.clear).toBe(false);
+    step(1);
+    expect(sig.state.go).toBe(0);
+    expect(sig.state.next).toBe(-1);
+    // Пока на участке машины — ждать.
+    step(5);
+    expect(sig.clear).toBe(false);
+    inside = 0;
+    step(R.allRed + 0.2);
+    expect(sig.clear).toBe(true);
+    // Держат — красный не кончается.
+    step(120);
+    expect(sig.state.go).toBe(0);
   });
 });

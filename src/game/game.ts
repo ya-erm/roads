@@ -1400,6 +1400,11 @@ export class Game implements BuildContext {
     return this.crewRoads.step(this.roads.graph, from, to);
   }
 
+  /** Стройка: бригада разворачивается через обе половины полотна — реверс на красный обеим сторонам (WorkSignals.hold). */
+  turnGate(corridor: number): boolean {
+    return this.workSignals.hold(corridor);
+  }
+
   /** Машина car колонны бригады b (CREW_CARS): на ж/д стройке — в цвете путейцев (RAIL_CREW_COLOR). */
   private crewCar(b: Brigade, car: number): (typeof CREW_CARS)[number] {
     const spec = CREW_CARS[Math.min(car, CREW_CARS.length - 1)];

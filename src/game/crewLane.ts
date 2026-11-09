@@ -10,7 +10,8 @@ import { smoothstep } from '../core/math';
 import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import { laneWise } from '../lanes/closure';
 import { edgesAt } from '../lanes/geometry';
-import type { Corridor } from '../lanes/model';
+import type { Corridor, CorridorBuild } from '../lanes/model';
+import { steerBase } from '../sim/body';
 import { ROAD_MARGIN } from '../world/roadTypes';
 import { frontOf, spansOf, stageSpans } from './constructionWork';
 
@@ -85,6 +86,252 @@ export interface CrewLane {
   side?: number[];
   /** Перестроения в ряды по порядку (laneShift); нет — по оси полосы. */
   shifts?: LaneShift[];
+  /** Разворот колонны перед полосой (planTurn); нет — полоса начинается сразу. */
+  turn?: LaneTurn;
+}
+
+/**
+ * Разворот колонны на 180° перед её полосой (перестройка «с проездом», второй проход — назад по другой половине):
+ * машины идут не по полосе, а по пути разворота path — настоящим точкам носа, без рядов. Он кончается на полосе:
+ * последняя точка — место полосы end (м от её начала) с её рядом и курсом; места на полосе до end — на path, path
+ * кончается в end. На развороте машины едут медленно (TURN_SPEED), каждая — тем же путём следом за предыдущей.
+ */
+export interface LaneTurn {
+  path: Vec[];
+  end: number;
+  /** Откуда (м по полосе) головная тронулась на разворот: дальше курс машины — по хорде к её задней оси (laneCarPose). */
+  lead: number;
+  /** Разворот в три приёма — где (м по полосе) машины идут задним ходом; нет — одной дугой. */
+  back?: [number, number];
+  /** Колонна ждёт, когда можно развернуться (Construction: обе стороны реверса на красном и участок пуст). */
+  wait?: true;
+}
+
+/** Скорость машин бригады на развороте, м/с игры (~9 км/ч). */
+export const TURN_SPEED = 4;
+
+/**
+ * Радиус разворота, м: сколько позволяет ширина полотна — нос машины не дальше от оси, чем кромка с обочиной минус
+ * полмашины (turnRoom), но не больше max; меньше min — разворот в три приёма с радиусом min.
+ */
+export const U_TURN = { min: 5, max: 10 };
+
+/** За столько метров машина отходит к кромке перед дугой разворота и после неё возвращается в свой ряд. */
+const TURN_IN = 10;
+const TURN_OUT = 12;
+/**
+ * За концом разворота машина ещё столько метров идёт медленно: её задняя ось (по ней курс корпуса, laneCarPose) ещё на
+ * развороте. Ближе к концу разворота машины после него не встают (Construction.crewSlots).
+ */
+export const TURN_TAIL = 10;
+/** Шаг точек пути разворота, м. */
+const TURN_STEP = 0.25;
+
+/** Насколько далеко от оси может быть нос машины на развороте, м: от оси до кромки с обочиной минус полмашины и запас. */
+export function turnRoom(edges: readonly [number, number]): number {
+  return Math.min(-edges[0], edges[1]) + ROAD_MARGIN - MACHINE_HALF - 0.3;
+}
+
+/** Сколько метров вперёд от головной нужно на разворот (до дальней точки дуги). */
+export function turnAhead(room: number): number {
+  return TURN_IN + Math.max(U_TURN.min, Math.min(U_TURN.max, room));
+}
+
+/** Длина ломаной — по разметке, если она длинная (без перебора точек на каждый вызов). */
+function pathLen(p: readonly Vec[]): number {
+  if (p.length < POLY_INDEX_MIN) return polyLength(p);
+  const m = polyMarks(p);
+  return m.ends.length ? m.ends[m.ends.length - 1] : 0;
+}
+
+/** Место на пути разворота: s — м по полосе (до turn.end). Курс — по точкам рядом (плавно), задним ходом — назад. */
+function turnPose(turn: LaneTurn, s: number): { pos: Vec; dir: Vec } {
+  const start = turn.end - pathLen(turn.path);
+  const u = s - start;
+  const pos = polyAt(turn.path, u).pos;
+  const d = smoothDir(turn.path, u);
+  const back = turn.back;
+  const sign = back && s >= back[0] && s < back[1] ? -1 : 1;
+  return { pos, dir: { x: sign * d.x, y: sign * d.y } };
+}
+
+/**
+ * Касательная ломаной p в u м от начала — плавно: в точках излома — средняя соседних отрезков, между ними — по
+ * доле отрезка. Там, где путь идёт назад (машина меняет ход), — касательная своего отрезка.
+ */
+function smoothDir(p: readonly Vec[], u: number): Vec {
+  const m = polyMarks(p);
+  const k = m.ends.length;
+  if (!k) return { x: 1, y: 0 };
+  let lo = 0;
+  let hi = k - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (m.ends[mid] >= u) hi = mid;
+    else lo = mid + 1;
+  }
+  const d = m.dirs[lo];
+  const unit = (x: number, y: number): Vec => {
+    const l = Math.hypot(x, y);
+    return l > 1e-9 ? { x: x / l, y: y / l } : d;
+  };
+  const at = (i: number): Vec => {
+    if (i < 0 || i >= k) return d;
+    const e = m.dirs[i];
+    if (dot(e, d) < 0) {
+      // Путь поворачивает назад (машина меняет ход) — касательная своего отрезка, продолженная по изгибу с другой его
+      // стороны: в точке смены хода курс тот же, что и до неё.
+      const o = m.dirs[i > lo ? lo - 1 : lo + 1];
+      return o && dot(o, d) > 0 ? unit(1.5 * d.x - 0.5 * o.x, 1.5 * d.y - 0.5 * o.y) : d;
+    }
+    return unit(d.x + e.x, d.y + e.y);
+  };
+  const a = at(lo - 1);
+  const b = at(lo + 1);
+  const s0 = lo ? m.ends[lo - 1] : 0;
+  const f = Math.max(0, Math.min(1, (u - s0) / Math.max(1e-9, m.ends[lo] - s0)));
+  const x = a.x + (b.x - a.x) * f;
+  const y = a.y + (b.y - a.y) * f;
+  const l = Math.hypot(x, y);
+  return l > 1e-9 ? { x: x / l, y: y / l } : d;
+}
+
+/**
+ * Разворот колонны на 180° с прежнего пути на полосу next (planTurn — ответ: путь разворота и где на полосе машины).
+ * old(s) — нос и курс на прежнем пути в s м; cars — где на нём машины колонны (по номеру, головная — дальше всех);
+ * rowOld — на сколько прежний путь правее оси полотна; room — turnRoom. Головная отходит вправо к кромке (TURN_IN),
+ * дугой через обе половины полотна разворачивается налево и возвращается в ряд полосы next (TURN_OUT). Радиус — сколько
+ * позволяет ширина (до U_TURN.max); меньше U_TURN.min — в три приёма: вперёд налево до другой кромки, назад с поворотом
+ * (нос продолжает разворачиваться), вперёд налево в свой ряд. Машины за головной — тем же путём: он начинается
+ * позади последней по прежнему пути.
+ */
+export function planTurn(
+  old: (s: number) => { pos: Vec; dir: Vec },
+  rowOld: number,
+  cars: readonly number[],
+  next: CrewLane,
+  room: number,
+): { turn: LaneTurn; from: number[] } {
+  const head = Math.max(...cars);
+  const tail = Math.min(...cars);
+  const pts: Vec[] = [];
+  const at: number[] = [];
+  // Позади последней машины и до головной — по прежнему пути (там же, где машины стоят), с местами машин.
+  const marks = [...new Set([...cars, ...Array.from({ length: Math.ceil((head - tail + 30) / 2) + 1 }, (_, i) => Math.min(head, tail - 30 + i * 2))])].sort((x, y) => x - y);
+  for (const s of marks) pts.push(old(s).pos);
+  const k = room >= U_TURN.min;
+  const R = k ? Math.min(U_TURN.max, room) : U_TURN.min;
+  // Отход к кромке (направо — от оси), дальше дуга налево.
+  const edge = k ? R : room;
+  const n = (s: number) => rightNormal(old(s).dir);
+  const runIn = (u: number) => add(old(head + u * TURN_IN).pos, scale(n(head + u * TURN_IN), (edge - rowOld) * smoothstep(u)));
+  const steps = (len: number) => Math.max(4, Math.ceil(len / TURN_STEP));
+  for (let i = 1, m = steps(TURN_IN); i <= m; i++) pts.push(runIn(i / m));
+  const q = pts[pts.length - 1];
+  const d1 = old(head + TURN_IN).dir;
+  const rowNext = laneShift(next, Number.MAX_SAFE_INTEGER / 2).lat;
+  let back: [number, number] | undefined;
+  let backAt: [number, number] | undefined;
+  let e: Vec;
+  let sa: number;
+  if (k) {
+    // Дуга: от отхода к кромке до такой же точки у другой кромки, напротив (кубическая кривая — почти полукруг).
+    sa = polyProject(next.path, q);
+    const np = lanePose(next, sa);
+    e = add(np.pos, scale(rightNormal(np.dir), R - rowNext));
+    const r = dist(q, e) / 2;
+    const c1 = add(q, scale(d1, (4 / 3) * r));
+    const c2 = sub(e, scale(np.dir, (4 / 3) * r));
+    for (let i = 1, m = steps(Math.PI * r); i <= m; i++) pts.push(cubic(q, c1, c2, e, i / m));
+  } else {
+    // В три приёма, в осях от оси полотна напротив q (q — на y0, у правой кромки): x — вперёд по прежнему ходу, y —
+    // налево (к другой кромке).
+    const y = scale(n(head + TURN_IN), -1);
+    const r = R;
+    const y0 = -room;
+    const o = sub(q, scale(y, y0));
+    const P = (x: number, yy: number) => add(o, add(scale(d1, x), scale(y, yy)));
+    const y1 = room;
+    const th1 = Math.acos(Math.max(-1, Math.min(1, 1 - (y1 - y0) / r)));
+    const x1 = r * Math.sin(th1);
+    // Ряд полосы next — правее её хода, то есть левее прежнего.
+    const Y = rowNext;
+    const c2 = Math.max(-1, Math.min(Math.cos(th1), (Y - r - y1 + r * Math.cos(th1)) / (2 * r)));
+    const th2 = Math.acos(c2);
+    const x2 = x1 - r * (Math.sin(th2) - Math.sin(th1));
+    const y2 = y1 - r * (Math.cos(th1) - Math.cos(th2));
+    for (let i = 1, m = steps(r * th1); i <= m; i++) {
+      const f = (th1 * i) / m;
+      pts.push(P(r * Math.sin(f), y0 + r * (1 - Math.cos(f))));
+    }
+    const b0 = pts.length - 1;
+    for (let i = 1, m = steps(r * (th2 - th1)); i <= m; i++) {
+      const f = th1 + ((th2 - th1) * i) / m;
+      pts.push(P(x1 - r * (Math.sin(f) - Math.sin(th1)), y1 - r * (Math.cos(th1) - Math.cos(f))));
+    }
+    const b1 = pts.length - 1;
+    for (let i = 1, m = steps(r * (Math.PI - th2)); i <= m; i++) {
+      const f = th2 + ((Math.PI - th2) * i) / m;
+      pts.push(P(x2 + r * (Math.sin(f) - Math.sin(th2)), y2 + r * (Math.cos(th2) - Math.cos(f))));
+    }
+    backAt = [b0, b1];
+    e = pts[pts.length - 1];
+    sa = polyProject(next.path, e);
+  }
+  // Назад в ряд полосы: с прямой от конца дуги плавно на полосу.
+  const d2 = lanePose(next, sa).dir;
+  for (let i = 1, m = steps(TURN_OUT); i <= m; i++) {
+    const u = i / m;
+    const line = add(e, scale(d2, u * TURN_OUT));
+    pts.push(lerpVec(line, lanePose(next, sa + u * TURN_OUT).pos, smoothstep(u)));
+  }
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
+  const end = sa + TURN_OUT;
+  const start = end - cum[cum.length - 1];
+  for (const s of cars) at.push(start + cum[marks.indexOf(s)]);
+  if (backAt) back = [start + cum[backAt[0]], start + cum[backAt[1]]];
+  const turn: LaneTurn = { path: pts, end, lead: at[cars.indexOf(head)], ...(back ? { back } : {}) };
+  return { turn, from: at };
+}
+
+function cubic(p0: Vec, p1: Vec, p2: Vec, p3: Vec, t: number): Vec {
+  const u = 1 - t;
+  const a = u * u * u;
+  const b = 3 * u * u * t;
+  const c = 3 * u * t * t;
+  const d = t * t * t;
+  return { x: a * p0.x + b * p1.x + c * p2.x + d * p3.x, y: a * p0.y + b * p1.y + c * p2.y + d * p3.y };
+}
+
+const lerpVec = (a: Vec, b: Vec, t: number): Vec => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+
+/**
+ * Колонне можно разворачиваться (lane.turn.wait снят в момент now): машины трогаются по очереди — каждая не ближе к
+ * предыдущей, чем её длина с зазором (crewSpacing), и дальше идут с одной скоростью.
+ */
+export function releaseTurn(lane: CrewLane, now: number): void {
+  if (!lane.turn) return;
+  delete lane.turn.wait;
+  const from = lane.from ?? [];
+  const t: number[] = [];
+  from.forEach((s, k) => {
+    if (!k) return t.push(now);
+    const gap = from[k - 1] - s;
+    t.push(t[k - 1] + Math.max(0, crewSpacing(k - 1) - gap) / TURN_SPEED);
+  });
+  lane.t0 = now;
+  lane.t = t;
+}
+
+/** Колонна ещё разворачивается: ждёт своей очереди или какая-то машина не доехала до конца разворота. */
+export function turning(lane: CrewLane, target: readonly number[], time: number): boolean {
+  const turn = lane.turn;
+  if (!turn) return false;
+  if (turn.wait) return true;
+  return laneArcs(lane, target, time)
+    .slice(0, laneCars(lane))
+    .some((s) => s < turn.end - 1e-6);
 }
 
 /** Ряд, в который бригада перестроится последним (куда она едет сейчас), м вправо по ходу. */
@@ -328,12 +575,7 @@ export function crewRows(c: Corridor, n: number): number[] {
   const L = c.length;
   // «С проездом» на узкой (closure.ts, laneWise): бригада одна и идёт посередине своей половины полотна — правой по
   // ходу заполнения (по другой едут машины).
-  if (b && laneWise(b)) {
-    const f = frontOf(spansOf(b, L), L).s;
-    const e = edgesAt(c, Math.max(0, Math.min(L, b.fromB ? L - f : f))) ?? [-3.5, 3.5];
-    const half = b.fromB ? -e[0] : e[1];
-    return [Math.max(MACHINE_HALF, half / 2)];
-  }
+  if (b && laneWise(b)) return [halfRow(c, b)];
   if (n <= 1) return [0];
   const f = b ? frontOf(spansOf(b, L), L).s : 0;
   const s = Math.max(0, Math.min(L, b?.fromB ? L - f : f));
@@ -354,8 +596,24 @@ export function crewRows(c: Corridor, n: number): number[] {
   return sign < 0 ? rows.reverse() : rows;
 }
 
-/** Точка полосы в s метрах от начала с учётом ряда: нос машины и курс корпуса (по касательной перестроения). */
+/**
+ * Ряд бригады «с проездом» на узкой (laneWise) при стройке b на полотне c: посередине перекладываемой половины —
+ * правой по ходу заполнения.
+ */
+export function halfRow(c: Corridor, b: CorridorBuild): number {
+  const L = c.length;
+  const f = frontOf(spansOf(b, L), L).s;
+  const e = edgesAt(c, Math.max(0, Math.min(L, b.fromB ? L - f : f))) ?? [-3.5, 3.5];
+  const half = b.fromB ? -e[0] : e[1];
+  return Math.max(MACHINE_HALF, half / 2);
+}
+
+/**
+ * Точка полосы в s метрах от начала с учётом ряда: нос машины и курс корпуса (по касательной перестроения). До конца
+ * разворота (CrewLane.turn) — на пути разворота.
+ */
 export function lanePose(lane: CrewLane, s: number): { pos: Vec; dir: Vec } {
+  if (lane.turn && s < lane.turn.end) return turnPose(lane.turn, s);
   const at = polyAt(lane.path, s);
   if (!lane.shifts?.length) return at;
   const { lat, slope } = laneShift(lane, s);
@@ -373,6 +631,10 @@ export function lanePose(lane: CrewLane, s: number): { pos: Vec; dir: Vec } {
  */
 export function laneTrail(lane: CrewLane, s: number, nose: Vec, dir: Vec, joint: number, tail: number, car?: number): Vec {
   const j = sub(nose, scale(dir, joint));
+  // Разворот в три приёма: задним ходом след впереди — вторая часть всё время разворота прямо за первой (до и после
+  // него путь прямой — там это и так её место).
+  const turn = lane.turn;
+  if (turn?.back && s >= turn.lead && s <= turn.end + joint + tail + 2) return sub(j, scale(dir, tail));
   const pose = (u: number) => (car === undefined ? lanePose(lane, u) : laneCarPose(lane, car, u));
   // Ближе к шарниру — короче; дальше назад по полосе — длиннее: половинным делением.
   let lo = s - joint - tail - 20;
@@ -391,6 +653,25 @@ export function laneTrail(lane: CrewLane, s: number, nose: Vec, dir: Vec, joint:
  */
 export function laneCarPose(lane: CrewLane, car: number, s: number): { pos: Vec; dir: Vec } {
   const at = lanePose(lane, s);
+  const turn = lane.turn;
+  if (turn && !turn.back && s > turn.lead) {
+    // На дуге разворота корпус — по хорде от задней оси (она идёт по тому же следу на base позади) к носу: машина
+    // срезает дугу внутрь, а не торчит по касательной за кромку. С места, где головная тронулась, — плавно с касательной.
+    const spec = CREW_UNITS[Math.min(car, CREW_UNITS.length - 1)];
+    const base = steerBase(spec.body) * spec.length;
+    if (s - base < turn.end) {
+      const rear = lanePose(lane, s - base).pos;
+      const c = sub(at.pos, rear);
+      const l = Math.hypot(c.x, c.y);
+      const w = smoothstep((s - turn.lead) / TURN_IN);
+      if (l > 1e-6) {
+        const d = add(scale(at.dir, 1 - w), scale(c, w / l));
+        const m = Math.hypot(d.x, d.y);
+        if (m > 1e-6) return { pos: at.pos, dir: { x: d.x / m, y: d.y / m } };
+      }
+    }
+    return at;
+  }
   const off = lane.side?.[car] ?? 0;
   const s0 = lane.from?.[car];
   if (Math.abs(off) < 1e-6 || s0 === undefined) return at;
@@ -429,11 +710,25 @@ export function laneArcs(lane: CrewLane, target: readonly number[], time: number
   const from = lane.from;
   const t0 = lane.t0;
   if (!from || t0 === undefined) return [...target];
+  const turn = lane.turn;
   return target.map((x, k) => {
     const s0 = from[k] ?? x;
-    const go = Math.max(0, time - (lane.t?.[k] ?? t0)) * LANE_SPEED;
-    return Math.min(s0 + go, Math.max(x, s0));
+    // Ждут разворота — стоят, где стояли.
+    if (turn?.wait) return s0;
+    const dt = Math.max(0, time - (lane.t?.[k] ?? t0));
+    return Math.min(advance(s0, dt, turn?.end), Math.max(x, s0));
   });
+}
+
+/**
+ * Откуда s0 за dt секунд: до конца разворота end и ещё TURN_TAIL за ним (пока задняя ось машины выходит из
+ * разворота) — медленно (TURN_SPEED), дальше — LANE_SPEED.
+ */
+function advance(s0: number, dt: number, turnEnd: number | undefined): number {
+  const end = turnEnd === undefined ? undefined : turnEnd + TURN_TAIL;
+  if (end === undefined || s0 >= end) return s0 + dt * LANE_SPEED;
+  const slow = (end - s0) / TURN_SPEED;
+  return dt <= slow ? s0 + dt * TURN_SPEED : end + (dt - slow) * LANE_SPEED;
 }
 
 /** Сколько машин колонны уже на полосе (сошли с дороги по порядку): from короче колонны — только первые. */
