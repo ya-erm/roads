@@ -30,11 +30,13 @@ function motorway(game: Game, len: number): { from: Vec; dir: Vec } {
   throw new Error('нет места');
 }
 
-/** Тупики рядом с центром: концы магистрали и поперечной дороги (стартовые просёлки мира — не в счёт). */
+/** Тупики рядом с центром: концы магистрали и поперечной дороги (стартовые дороги мира — просёлки и шоссе за край — не в счёт). */
 function deadEnds(game: Game, center: Vec, radius: number): number[] {
   const net = game.roads.net;
   const dirt = (n: { corridors: number[] }) => n.corridors.every((id) => net.corridor(id).cls === 'dirt');
-  return [...net.nodes.values()].filter((n) => net.isDeadEnd(n) && !dirt(n) && Math.hypot(n.pos.x - center.x, n.pos.y - center.y) < radius).map((n) => n.id);
+  return [...net.nodes.values()]
+    .filter((n) => net.isDeadEnd(n) && !dirt(n) && game.terrain.inBounds(n.pos, 1) && Math.hypot(n.pos.x - center.x, n.pos.y - center.y) < radius)
+    .map((n) => n.id);
 }
 
 /** Отовсюду можно доехать всюду, кроме разворота обратно. */

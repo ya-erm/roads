@@ -6253,8 +6253,17 @@ export class Game implements BuildContext {
   private streetLike(c: Corridor): boolean {
     const net = this.roads.net;
     // Строящаяся дорога (проект) — ещё не улица: город от неё не продолжает и дома вдоль неё не ставит.
-    // Просёлок в поле — тоже: город не тянется вдоль него отростком; перестроенный игроком — уже улица.
-    return !c.build && !c.ring && !isDirt(c.cls) && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c, this.drivewayIds());
+    // Просёлок в поле — тоже: город не тянется вдоль него отростком. Грунтовка внутри города (оба конца — в круге
+    // плотной застройки, как проложил бы игрок между кварталами) — улица, её застраивают.
+    if (isDirt(c.cls) && !this.dirtInTown(c)) return false;
+    return !c.build && !c.ring && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c, this.drivewayIds());
+  }
+
+  /** Грунтовка внутри города: оба её конца — в круге плотной застройки одного города. */
+  private dirtInTown(c: Corridor): boolean {
+    const a = this.roads.net.node(c.a).pos;
+    const b = this.roads.net.node(c.b).pos;
+    return this.towns.some((t) => dist(a, t.center) <= t.radius && dist(b, t.center) <= t.radius);
   }
 
   /**

@@ -253,6 +253,7 @@ const SCREENS = ['start', 'menu', 'newgame', 'results'] as const;
 type ScreenName = (typeof SCREENS)[number];
 
 const PRESET_HINTS: Record<string, string> = {
+  dirt: 'Грунтовая: самая дешёвая и медленная, без асфальта. Подъезд к ферме или карьеру; потом — перестроить',
   street: 'Обычная двусторонняя улица: по полосе в каждую сторону',
   avenue: 'Широкий проспект: по две полосы в каждую сторону, быстрее улицы',
   oneway: 'Односторонняя: две полосы в одну сторону. Одна полоса — инструментом «Полоса»',
@@ -2417,7 +2418,7 @@ export class Hud {
     }
     const presets = ROAD_PRESETS.map(
       (p) => `<button class="card ${c.presetId === p.id ? 'active' : ''}" data-action="preset" data-id="${p.id}"
-        title="${PRESET_HINTS[p.id] ?? p.name}">${roadSvg(p.spec, 64, 26)}<span class="name">${p.name}</span>
+        data-tip="${PRESET_HINTS[p.id] ?? p.name}">${roadSvg(p.spec, 64, 26)}<span class="name">${p.name}</span>
         <small>${lanesLabel(p.spec)} · ${specKmh(p.spec)} км/ч</small></button>`,
     ).join('');
     const stepper = (key: 'f' | 'b', value: number, arrow: string, title: string) =>

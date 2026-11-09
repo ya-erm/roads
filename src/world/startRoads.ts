@@ -6,23 +6,32 @@ import { edgesAt } from '../lanes/geometry';
 import { twoWay, type Corridor, type LaneNet, type LaneNode } from '../lanes/model';
 import type { IndustryKind } from './cargo';
 import type { Industry, Town } from './entities';
-import { halfWidth, isDirt, ROAD_MARGIN, type RoadSpec } from './roadTypes';
+import { GRADE } from '../config';
+import { halfWidth, isDirt, ROAD_CLASSES, ROAD_MARGIN, type RoadSpec } from './roadTypes';
 import { pointInFootprint } from './spatial';
 import type { WorldContext } from './worldgen';
 
 /**
- * Стартовые просёлки: мир на старте уже с грунтовыми дорогами — от части предприятий к ближнему городу (ферма
- * не стоит в чистом поле) и от городов у края карты за край (город не стоит особняком). Это обычные полотна сети
- * класса «Грунтовая»: сохраняются вместе с дорогами (SaveData.roads), игрок сносит и перестраивает их, как любые.
+ * Стартовые дороги: мир на старте уже с дорогами — грунтовыми от части предприятий к ближнему городу (ферма
+ * не стоит в чистом поле) и шоссе от городов у края карты за край (город не стоит особняком). Это обычные полотна
+ * сети: сохраняются вместе с дорогами (SaveData.roads), игрок сносит и перестраивает их, как любые.
  * Случайность — своя, от seed: ни города, ни предприятия, ни ход партии по seed от них не меняются.
  */
 
 export const DIRT_SPEC: RoadSpec = { cls: 'dirt', lanesF: 1, lanesB: 1 };
-const DIRT = { cls: DIRT_SPEC.cls, lanes: twoWay(1, 1) };
-const HALF = halfWidth(DIRT_SPEC);
+/** Дорога от края карты к городу — шоссе 1+1, 90 км/ч (как «Шоссе» в панели дорог). */
+export const EDGE_SPEC: RoadSpec = { cls: 'highway', lanesF: 1, lanesB: 1 };
+
+/** Что за дорогу кладём: профиль, полуширина, наименьший радиус поворота и наибольший уклон вдоль. */
+interface Kind {
+  profile: { cls: RoadSpec['cls']; lanes: ReturnType<typeof twoWay> };
+  half: number;
+  radius: number;
+  grade: number;
+}
 
 export const START_ROADS = {
-  /** Дальше этого от города (по длине дороги) до края карты просёлок не тянем: город далеко от края. */
+  /** Дальше этого от города (по длине дороги) до края карты шоссе не тянем: город далеко от края. */
   edgeReach: 900,
   /** Дорога к предприятию — не длиннее. */
   industryReach: 1500,
@@ -43,6 +52,16 @@ export const START_ROADS = {
   tries: 14,
 };
 
+/** Просёлок к предприятию. */
+const DIRT_ROAD: Kind = { profile: { cls: 'dirt', lanes: twoWay(1, 1) }, half: halfWidth(DIRT_SPEC), radius: START_ROADS.radius, grade: START_ROADS.grade };
+/** Шоссе от края карты: повороты — не круче, чем игрок построил бы шоссе, уклон — как у дороги игрока. */
+const EDGE_ROAD: Kind = {
+  profile: { cls: 'highway', lanes: twoWay(1, 1) },
+  half: halfWidth(EDGE_SPEC),
+  radius: Math.max(START_ROADS.radius, ROAD_CLASSES.highway.minRadius),
+  grade: GRADE.road,
+};
+
 /** Сельские предприятия: к ним просёлок — чаще всего. */
 const RURAL = new Set<IndustryKind>(['farm', 'forest', 'ranch', 'flaxfarm', 'fishery', 'sheepfarm', 'sunflower', 'cottonfarm', 'sawmill']);
 
@@ -59,15 +78,16 @@ interface Route {
   start: Start;
   curve: Cubic;
   length: number;
+  kind: Kind;
 }
 
 const seedOf = (seed: number) => (Math.imul(seed ^ 0x5d1a7e, 0x9e3779b1) ^ 0x2c1b3c6d) >>> 0;
 
-/** Прокладывает стартовые просёлки. Вызывается в конце генерации мира, когда города и предприятия уже стоят. */
+/** Прокладывает стартовые дороги. Вызывается в конце генерации мира, когда города и предприятия уже стоят. */
 export function layStartRoads(ctx: WorldContext, towns: Town[], industries: Industry[], seed: number): void {
   if (!towns.length) return;
   const rng = new Rng(seedOf(seed));
-  // Сначала — от городов за край карты, потом — к предприятиям (они могут ответвиться и от этих дорог).
+  // Сначала — шоссе от городов за край карты (просёлки потом их обходят), затем — просёлки к предприятиям.
   for (const town of towns) {
     const route = edgeRoute(ctx, town);
     if (route) lay(ctx, towns, route);
@@ -89,7 +109,7 @@ export function layStartRoads(ctx: WorldContext, towns: Town[], industries: Indu
 function lay(ctx: WorldContext, towns: Town[], r: Route): Corridor[] {
   const net = ctx.roads;
   const before = new Set(net.corridors.keys());
-  const made = buildRoad(net, r.start.anchor, { kind: 'free', pos: r.curve.p3 }, { ...DIRT, curve: r.curve });
+  const made = buildRoad(net, r.start.anchor, { kind: 'free', pos: r.curve.p3 }, { ...r.kind.profile, curve: r.curve });
   const fresh = [...net.corridors.values()].filter((c) => !before.has(c.id) && !made.includes(c));
   for (const t of towns) {
     if (t.streets.every((id) => net.corridors.has(id))) continue;
@@ -110,7 +130,7 @@ function startsToward(net: LaneNet, town: Town, target: Vec, dirAt?: (p: Vec) =>
     if (n.level !== 0) continue;
     const d = toward(n.pos);
     // Тупик улицы не продолжаем: на нём разворачиваются машины жителей и автобусы, а за ним они уезжали бы
-    // разворачиваться в конец просёлка — к предприятию или на край карты.
+    // разворачиваться в конец новой дороги — к предприятию или на край карты.
     if (net.isDeadEnd(n)) continue;
     if (n.kind !== 'junction' || n.corridors.length > 3 || !freeArm(net, n, d)) continue;
     res.push({ anchor: { kind: 'node', node: n.id, pos: n.pos }, dir: d, host: new Set(n.corridors) });
@@ -151,9 +171,10 @@ function curveFor(start: Start, end: Vec, arrive: Vec): Cubic {
  * Можно ли так проложить: поворот не круче, в карте — ни воды, ни зданий, ни чужих дорог рядом (у начала можно
  * вплотную к своей улице), уклон не круче. Точки за краем карты (дорога уходит за край) не проверяются.
  */
-function routeOk(ctx: WorldContext, start: Start, curve: Cubic, target?: Industry): Route | null {
+function routeOk(ctx: WorldContext, start: Start, curve: Cubic, kind: Kind, target?: Industry): Route | null {
   const { terrain, roads, index } = ctx;
-  if (minRadius(curve) < START_ROADS.radius) return null;
+  const HALF = kind.half;
+  if (minRadius(curve) < kind.radius) return null;
   const lut = new CurveLUT(curve);
   const L = lut.length;
   const step = START_ROADS.step;
@@ -166,7 +187,7 @@ function routeOk(ctx: WorldContext, start: Start, curve: Cubic, target?: Industr
     }
     if (terrain.isWater(p, HALF + 6)) return null;
     const h = terrain.heightAt(p);
-    if (prevH !== null && Math.abs(h - prevH) / step > START_ROADS.grade) return null;
+    if (prevH !== null && Math.abs(h - prevH) / step > kind.grade) return null;
     prevH = h;
     for (const it of index.near(p, HALF + 60)) if (it !== target && pointInFootprint(p, it.fp, HALF + 4)) return null;
     // Своё предприятие — дорога подходит к стене, но не заходит на двор будущей станции.
@@ -177,18 +198,18 @@ function routeOk(ctx: WorldContext, start: Start, curve: Cubic, target?: Industr
       if (hit.d < HALF + halfAt(o, hit.s) + 10) return null;
     }
   }
-  return { start, curve, length: L };
+  return { start, curve, length: L, kind };
 }
 
 /** Первая годная дорога из вариантов, ближние — раньше. */
-function firstRoute(ctx: WorldContext, cands: { start: Start; curve: Cubic }[], reach: number, target?: Industry): Route | null {
+function firstRoute(ctx: WorldContext, cands: { start: Start; curve: Cubic }[], reach: number, kind: Kind, target?: Industry): Route | null {
   const scored = cands
     .map((c) => ({ ...c, d: dist(c.curve.p0, c.curve.p3) }))
     .filter((c) => c.d <= reach)
     .sort((a, b) => a.d - b.d)
     .slice(0, START_ROADS.tries);
   for (const c of scored) {
-    const r = routeOk(ctx, c.start, c.curve, target);
+    const r = routeOk(ctx, c.start, c.curve, kind, target);
     if (r && r.length <= reach) return r;
   }
   return null;
@@ -205,7 +226,8 @@ function edges(w: number, h: number): { out: Vec; gap: (p: Vec) => number }[] {
 }
 
 /**
- * Дорога от города за ближний край карты, если до него недалеко: от перекрёстка или улицы — прямо, пока она смотрит
+ * Шоссе 1+1 (EDGE_SPEC) от города за ближний край карты, если до него недалеко; к улице города — перекрёстком (с
+ * ним рядом город, как у любого шоссе, не застраивается). От перекрёстка или улицы — прямо, пока она смотрит
  * к краю (не дальше 30° от перпендикуляра), иначе с изгибом и к краю под прямым углом. Тупик — ровно на краю: разворот
  * там не рисуется (LaneRenderer.inMap), дорога обрывается краем карты — уходит за него.
  */
@@ -226,13 +248,13 @@ export function edgeRoute(ctx: WorldContext, town: Town): Route | null {
       cands.push({ start, curve: curveFor(start, end, straight ? start.dir : e.out) });
     }
   }
-  return firstRoute(ctx, cands, START_ROADS.edgeReach);
+  return firstRoute(ctx, cands, START_ROADS.edgeReach, EDGE_ROAD);
 }
 
 /**
  * Дорога от ближнего города к предприятию: к середине стены, обращённой к городу, тупиком у выезда грузового
  * двора (START_ROADS.industryExit). Начало — перекрёсток или место на улице любого города (не тупик), а также
- * просёлок, проложенный раньше (к соседнему предприятию или за край).
+ * просёлок, проложенный раньше к соседнему предприятию.
  */
 export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): Route | null {
   const { roads } = ctx;
@@ -258,7 +280,7 @@ export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): 
     if (dist(t.center, fp.center) - (t.extent ?? t.radius) > START_ROADS.industryReach) continue;
     for (const s of startsToward(roads, t, fp.center)) add2(s);
   }
-  // Ответвление от уже проложенного просёлка — посередине его (не у тупиков: там выезды дворов и край карты).
+  // Ответвление от уже проложенного просёлка — посередине его (не у тупиков: там выезды дворов).
   for (const c of roads.corridorsNear(fp.center, START_ROADS.industryReach)) {
     if (!isDirt(c.cls) || c.length < 200) continue;
     const hit = c.lut.closest(fp.center);
@@ -272,7 +294,7 @@ export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): 
     if (dot(nrm, d) < 0.6) continue;
     add2({ anchor: { kind: 'corridor', corridor: c.id, s, pos: p }, dir: nrm, host: new Set([c.id]) });
   }
-  return firstRoute(ctx, cands, START_ROADS.industryReach, ind);
+  return firstRoute(ctx, cands, START_ROADS.industryReach, DIRT_ROAD, ind);
 }
 
 /** Полуширина полотна по большей стороне в точке s. */

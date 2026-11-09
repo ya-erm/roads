@@ -1,7 +1,7 @@
 import type { Vec } from '../core/vec';
 import type { DrawMode } from '../game/build';
 import type { Fragment } from '../lanes/fragment';
-import { isDivided, isOneWay, isTrunk, RoadSpec } from '../world/roadTypes';
+import { isDivided, isOneWay, isTrunk, RoadSpec, totalLanes } from '../world/roadTypes';
 import type { BiomeId } from '../world/biomes';
 import type { Relief, WaterAmount } from '../world/settings';
 
@@ -15,7 +15,7 @@ function arrow(x: number, y: number, dir: 1 | -1, color: string): string {
 /** Вид дороги сверху: полосы, разметка и стрелки направления. */
 export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
   if (spec.cls === 'rail') return railSvg(w, h);
-  if (spec.cls === 'dirt') return dirtSvg(w, h);
+  if (spec.cls === 'dirt') return dirtSvg(w, h, totalLanes(spec), isOneWay(spec));
   const back = isOneWay(spec) ? 0 : spec.lanesB;
   const fwd = spec.lanesF;
   const lanes = back + fwd;
@@ -54,12 +54,17 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
 }
 
 /** Грунтовая дорога сверху: укатанная земля и две пары колей, без разметки. */
-export function dirtSvg(w = 84, h = 40): string {
-  const top = h / 2 - 7;
-  const ruts = [top + 2.5, top + 5, top + 9, top + 11.5].map((y) => `M2 ${y}H${w - 2}`).join('');
+export function dirtSvg(w = 84, h = 40, lanes = 2, oneWay = false): string {
+  // Полоса — пара колей; полос больше — дорога шире (не выше картинки); односторонняя — со стрелками.
+  const laneH = Math.min(7, (h - 8) / lanes);
+  const total = lanes * laneH;
+  const top = (h - total) / 2;
+  const ruts: string[] = [];
+  for (let i = 0; i < lanes; i++) for (const k of [0.32, 0.68]) ruts.push(`M2 ${(top + (i + k) * laneH).toFixed(1)}H${w - 2}`);
   return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">
-    <rect x="1" y="${top}" width="${w - 2}" height="14" rx="4" fill="#b8a07a" stroke="#a08762" stroke-width="1.2"/>
-    <path d="${ruts}" stroke="rgba(118,92,60,0.6)" stroke-width="1.1" stroke-linecap="round"/>
+    <rect x="1" y="${top}" width="${w - 2}" height="${total}" rx="4" fill="#b8a07a" stroke="#a08762" stroke-width="1.2"/>
+    <path d="${ruts.join('')}" stroke="rgba(118,92,60,0.6)" stroke-width="1.1" stroke-linecap="round"/>
+    ${oneWay ? Array.from({ length: lanes }, (_, i) => arrow(w / 2, top + (i + 0.5) * laneH, 1, '#fff8ea')).join('') : ''}
   </svg>`;
 }
 

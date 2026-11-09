@@ -1,6 +1,6 @@
 export type RoadClass = 'dirt' | 'street' | 'avenue' | 'highway' | 'motorway' | 'rail';
 
-/** Классы автодорог (без железной дороги), от самой простой: грунтовая — только стартовые просёлки (world/startRoads.ts). */
+/** Классы автодорог (без железной дороги), от самой простой. */
 export const ROAD_CLASS_IDS: RoadClass[] = ['dirt', 'street', 'avenue', 'highway', 'motorway'];
 
 export interface RoadClassInfo {
@@ -14,8 +14,8 @@ export interface RoadClassInfo {
 }
 
 export const ROAD_CLASSES: Record<RoadClass, RoadClassInfo> = {
-  // Просёлок: самая дешёвая и медленная, без асфальта и разметки. Строит её только мир на старте — к предприятиям и от
-  // городов за край карты (world/startRoads.ts); игрок сносит и перестраивает её, как любую дорогу.
+  // Просёлок: самая дешёвая и медленная, без асфальта и разметки. Мир на старте ведёт такие к предприятиям
+  // (world/startRoads.ts); игрок строит её первой в панели дорог, сносит и перестраивает, как любую.
   dirt: { id: 'dirt', name: 'Грунтовая', limit: 30, minRadius: 12, cost: 2 },
   street: { id: 'street', name: 'Улица', limit: 40, minRadius: 12, cost: 7 },
   avenue: { id: 'avenue', name: 'Проспект', limit: 60, minRadius: 26, cost: 9 },
@@ -91,6 +91,8 @@ export interface RoadPreset {
 
 /** От самой простой к самой быстрой; больше полос — в редакторе полос. */
 export const ROAD_PRESETS: RoadPreset[] = [
+  // Самая дешёвая и медленная: подъезд к ферме или карьеру, пока возить мало.
+  { id: 'dirt', name: 'Грунтовая', short: '1+1', spec: { cls: 'dirt', lanesF: 1, lanesB: 1 } },
   // Одна полоса в одну сторону — это «Полоса»; односторонняя дорога — две.
   { id: 'oneway', name: 'Односторонняя', short: '2→', spec: { cls: 'street', lanesF: 2, lanesB: 0 } },
   { id: 'street', name: 'Улица', short: '1+1', spec: { cls: 'street', lanesF: 1, lanesB: 1 } },

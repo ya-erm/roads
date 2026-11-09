@@ -608,7 +608,8 @@ export class LaneRenderer {
       lifts,
       wet,
       marks: isDirt(c.cls) ? this.ruts(c, ss, up) : this.corridorMarks(net, c, ss, s0, s1, up),
-      arrows: isDirt(c.cls) ? [] : this.corridorArrows(c, s0, s1, up),
+      // Односторонняя — со стрелками и на грунтовке: иначе не понять, куда по ней ехать.
+      arrows: this.corridorArrows(c, s0, s1, up),
       dirt: isDirt(c.cls),
     };
   }
