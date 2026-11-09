@@ -5751,6 +5751,56 @@ span.ind-chip {
   font-size: 11.5px;
 }
 
+/* Идеи без сроков (песочница и после сценария): тёплые, спокойные — без красного и мигания. */
+.sc-ideas h4 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #8a6d3b;
+}
+
+.sc-ideas h4 small {
+  margin-left: auto;
+  color: #2e9d57;
+  font-weight: 600;
+}
+
+.sc-obj.idea {
+  border-left-color: #c98a4b;
+  background: #fbf7f1;
+}
+
+.sc-obj.idea.offered {
+  border-left-style: dashed;
+}
+
+.sc-obj.idea.done {
+  border-left-color: #2e9d57;
+}
+
+.idea-calm {
+  font-size: 13px;
+}
+
+.idea-actions {
+  margin-top: 6px;
+}
+
+.idea-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sc-fold.idea-drop {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
 /* Дополнительные задания после победы. */
 .sc-extras h4 {
   margin: 0 0 6px;

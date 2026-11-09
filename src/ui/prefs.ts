@@ -2,11 +2,11 @@
  * Настройки интерфейса игрока (Меню → Настройки): как показывать карту, а не каким будет мир (это — настройки мира,
  * src/world/settings.ts). Хранятся в браузере — localStorage 'roads.prefs', JSON-объект `{ имя: вкл }`, общие для всех
  * партий. Новая настройка — одна строка в PREFS (название, пояснение, значок, как по умолчанию) и имя в `Pref`;
- * раздел меню (src/ui/settingsMenu.ts) покажет её сам. Ни от чего в игре не зависит; без браузера (тесты) и с битым
- * хранилищем — всё как по умолчанию.
+ * раздел меню (src/ui/settingsMenu.ts) покажет её сам. Ни от чего в игре не зависит (кроме «Задания без сроков»:
+ * её Hud передаёт в `game.ideas`); без браузера (тесты) и с битым хранилищем — всё как по умолчанию.
  */
 
-export type Pref = 'junctionMarks' | 'mapCache';
+export type Pref = 'junctionMarks' | 'mapCache' | 'ideas';
 
 /** Описание настройки — строка в разделе «Настройки». */
 export interface PrefInfo {
@@ -49,6 +49,16 @@ export function mapCacheSvg(w = 32, h = 24): string {
   </svg>`;
 }
 
+/** Значок заданий без сроков: чашка с паром — «когда будет удобно». */
+export function ideasSvg(w = 32, h = 24): string {
+  return `<svg viewBox="0 0 48 36" width="${w}" height="${h}" aria-hidden="true">
+    <path d="M17 4Q14 7 17 10Q20 13 17 16M24 3Q21 6 24 9Q27 12 24 15M31 4Q28 7 31 10Q34 13 31 16" fill="none" stroke="#b9a58a" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M10 18H38V22Q38 32 24 32Q10 32 10 22Z" fill="#c98a4b"/>
+    <path d="M38 20.5Q44 20.5 44 24.5Q44 28.5 37 28" fill="none" stroke="#c98a4b" stroke-width="2.6"/>
+    <path d="M14 21H34" stroke="#f3d9b5" stroke-width="1.6" stroke-linecap="round"/>
+  </svg>`;
+}
+
 /** Все настройки — по порядку в разделе меню. */
 export const PREFS: readonly PrefInfo[] = [
   {
@@ -63,6 +73,13 @@ export const PREFS: readonly PrefInfo[] = [
     name: 'Кэш карты',
     hint: 'Дороги и дома рисуются заранее плитками — кадр легче. Выключите, если карта рисуется с ошибками',
     icon: mapCacheSvg(),
+    default: true,
+  },
+  {
+    id: 'ideas',
+    name: 'Задания без сроков',
+    hint: 'В песочнице и после сценария иногда предлагать дело по ходу игры — без срока и штрафа',
+    icon: ideasSvg(),
     default: true,
   },
 ];

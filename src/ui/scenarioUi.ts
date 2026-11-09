@@ -10,6 +10,7 @@ import { isIndustry, resolve } from '../scenario/analysis';
 import { ARCHETYPE_LIST, CHALLENGE_BONUS, DIFFICULTY, EVENT_INFO, LATE, MEDALS, PHASES, REPUTATION } from '../scenario/content';
 import { isActive } from '../scenario/events';
 import { type Forecast, forecastTip } from '../scenario/forecast';
+import { IDEAS, type Idea } from '../scenario/ideas';
 import { fastBonus, isOverdue, lateMonths, lateReward, type Scenario } from '../scenario/manager';
 import {
   closedNeeds,
@@ -54,6 +55,7 @@ import {
   stopwatchSvg,
 } from './scenarioIcons';
 import { randomCardHtml } from './newGame';
+import { ideasSvg } from './prefs';
 import { timelapseItemHtml } from './timelapseButton';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
@@ -104,7 +106,7 @@ function placeChips(g: Game, refs: Ref[], links = true): string {
       const place = resolve(g, r);
       if (!place) return '';
       const icon = isIndustry(place) ? cargoIcon(place.info.produces, 16, false) : townIcon(16);
-      const attrs = links ? ` data-action="focus" data-type="${r.type}" data-id="${r.id}" title="Показать на карте"` : '';
+      const attrs = links ? ` data-action="focus" data-type="${r.type}" data-id="${r.id}" data-tip="Показать на карте"` : '';
       const tag = links ? 'button' : 'span';
       return `<${tag} class="ind-chip ${r.type === 'town' ? 'town' : ''}"${attrs}>${icon}${esc(place.name)}</${tag}>`;
     })
@@ -285,7 +287,7 @@ export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: Objecti
  * Потребности города у задания «снабжать»: значки грузов, закрытые в этом месяце — яркие, остальные — бледные;
  * в подсказке — сколько уже привезли. Сколько закрыто из нужных — в подписи шкалы (monthGauge).
  */
-function needsHtml(g: Game, o: Objective): string {
+function needsHtml(g: Game, o: Pick<Objective, 'params' | 'status'>): string {
   const p = o.params;
   if (p.kind !== 'supply' || o.status !== 'active') return '';
   const t = g.towns.find((x) => x.id === p.town);
@@ -546,13 +548,76 @@ function compactHtml(sc: Scenario): string {
     ${left !== null ? `<span class="sc-left${urgent(left, URGENT.goal)}">⏳ ${leftText(left)}</span>` : ''}</div>`;
 }
 
-/** Вкладки левой панели: сценарий (этапы и задания), события с предложениями контрактов, стройка. */
-export type LeftTab = 'scenario' | 'events' | 'build';
+// ---------- Задания без сроков («Идеи», scenario/ideas.ts) ----------
 
-/** Какие вкладки есть в этой партии: сценарий и события — со сценарием, стройка — «Со строительством». */
+/** «Без срока» — чашка вместо ⏳: делайте, когда удобно. */
+const NO_RUSH = `<span class="sc-left idea-calm" data-tip="Без срока и без штрафа — когда будет удобно">☕</span>`;
+
+/** Награда идеи. */
+const ideaRewardHtml = (i: Idea) => `<span class="sc-reward" data-tip="Награда — в «Финансах», статья «Награды и субсидии»">🎁 ${money(i.reward.money)}</span>`;
+
+/**
+ * Карточка идеи: значок по типу, название, места кнопками, награда и ☕; «почему» — в подсказке.
+ * Предложение — с «Взять / Позже / ✕», взятое — с полоской и ✕ «бросить», выполненное — с ✓.
+ */
+function ideaHtml(g: Game, i: Idea): string {
+  const ideas = g.ideas;
+  const icon = `<span class="sc-obj-ic">${objectiveIcon(i, OBJECTIVE_ICON)}</span>`;
+  const done = i.status === 'done' ? '<span class="sc-state done" data-tip="Выполнено, награда получена">✓</span>' : '';
+  const drop =
+    i.status === 'active'
+      ? `<button class="sc-fold idea-drop" data-action="idea-drop" data-id="${i.id}" data-tip="Бросить — без штрафа">✕</button>`
+      : '';
+  const head = `<div class="sc-obj-title"><span class="sc-obj-name">${esc(i.title)}</span>${done}${drop}</div>`;
+  if (i.status === 'offered') {
+    const full = ideas.active.length >= IDEAS.active;
+    const take = full
+      ? `<button class="small primary" disabled data-tip="Взято уже ${IDEAS.active} — сначала закончите или бросьте одно">✓ Взять</button>`
+      : `<button class="small primary" data-action="idea-take" data-id="${i.id}" data-tip="Срока нет — делайте, когда удобно">✓ Взять</button>`;
+    return `<div class="sc-obj idea offered" data-tip="${esc(i.why)}">${icon}<div class="sc-obj-body">${head}
+      <div class="sc-meta">${NO_RUSH}${ideaRewardHtml(i)}</div>
+      ${placeChips(g, i.related)}
+      <div class="sc-offer-actions idea-actions">${take}
+        <button class="small" data-action="idea-later" data-id="${i.id}" data-tip="Напомнить через ${IDEAS.later} мин">💤 Позже</button>
+        <button class="small" data-action="idea-drop" data-id="${i.id}" data-tip="Не надо — без штрафа. Это место не предложим ${IDEAS.skip} мин">✕</button>
+      </div></div></div>`;
+  }
+  const bar = `<div class="bar sc-bar"><div style="width:${pct(fraction(i))}%"></div></div>`;
+  return `<div class="sc-obj idea ${i.status}" data-tip="${esc(i.why)}">${icon}<div class="sc-obj-body">${head}
+    ${bar}<div class="sc-meta"><b>${progressText(i)}</b>${i.status === 'active' ? NO_RUSH : ''}${ideaRewardHtml(i)}</div>
+    ${needsHtml(g, i)}${i.status === 'active' ? placeChips(g, i.related) : ''}</div></div>`;
+}
+
+/** Вкладка «Идеи» (есть, пока есть что показать): предложение, взятые и только что выполненные. */
+function ideasTabHtml(g: Game): string {
+  const ideas = g.ideas;
+  const order = { offered: 0, active: 1, done: 2, declined: 3 };
+  const cards = [...ideas.shown].sort((a, b) => order[a.status] - order[b.status]).map((i) => ideaHtml(g, i)).join('');
+  const tip = `Без сроков и штрафов: взять, отложить или отказаться. Новая — не чаще раза в ${IDEAS.gap} мин, взятых — до ${IDEAS.active}. Выключить — Меню → Настройки`;
+  const total = ideas.state.done ? `<small data-tip="Выполнено идей за партию">✓ ${ideas.state.done}</small>` : '';
+  return `<section class="sc-sec sc-ideas"><h4 data-tip="${esc(tip)}">☕ Без сроков ${total}</h4>${cards}</section>`;
+}
+
+/** Свёрнутая вкладка «Идеи»: предложение, первое взятое или только что выполненное — строкой. */
+function ideasCompactHtml(g: Game): string {
+  const i = g.ideas.offer ?? g.ideas.active[0] ?? g.ideas.shown[0];
+  if (!i) return '';
+  const bar =
+    i.status === 'offered' ? '<span class="lp-count call">1</span>' : i.status === 'done' ? '<span class="sc-state done">✓</span>' : `<div class="bar sc-bar"><div style="width:${pct(fraction(i))}%"></div></div>`;
+  return `<div class="sc-compact" data-tip="${esc(`${i.title}. ${i.why}`)}">${objectiveIcon(i, 18)}<span class="sc-compact-text">${esc(i.title)}</span>${bar}</div>`;
+}
+
+/** Вкладки левой панели: сценарий (этапы и задания), события с предложениями контрактов, стройка, идеи без сроков. */
+export type LeftTab = 'scenario' | 'events' | 'build' | 'ideas';
+
+/**
+ * Какие вкладки есть в этой партии: сценарий и события — со сценарием, стройка — «Со строительством», идеи —
+ * в песочнице и после конца сценария (не выключены в настройках), пока есть что показать.
+ */
 export function leftTabs(g: Game): LeftTab[] {
   const tabs: LeftTab[] = g.scenario ? ['scenario', 'events'] : [];
   if (g.buildMode) tabs.push('build');
+  if (g.ideas.visible) tabs.push('ideas');
   return tabs;
 }
 
@@ -613,6 +678,13 @@ function tabsHtml(g: Game, tab: LeftTab): string {
       : `Стройка: баз ${b.bases}, проектов ${b.projects}`;
     out.push(btn('build', buildSvg(18, 14), 'Стройка', count(b.projects), tip, b.first ? 'call pulse' : ''));
   }
+  if (g.ideas.visible) {
+    // Предложение ждёт — вкладка подсвечена, но не мигает: срока нет.
+    const offer = g.ideas.offer;
+    const taken = g.ideas.active.length;
+    const tip = offer ? `Идея ждёт: ${offer.title} — без срока` : taken ? `Идеи в работе: ${taken} — без сроков` : 'Идеи без сроков: изредка, по ходу игры';
+    out.push(btn('ideas', ideasSvg(18, 14), 'Идеи', offer ? count(1, 'call') : count(taken), tip, offer ? 'call' : ''));
+  }
   return `<nav class="lp-tabs">${out.join('')}</nav>`;
 }
 
@@ -661,8 +733,21 @@ export function leftPanelHtml(g: Game, view: PanelView): string {
   const fold = `<span class="caret ${view.collapsed ? 'closed' : ''}">${chevronSvg()}</span>`;
   const toggle = view.collapsed ? 'Развернуть' : 'Свернуть';
   if (!sc) {
-    const head = `<header class="sc-head"><button class="lines-toggle" data-action="sc-toggle" data-tip="${toggle} · стройка">${fold}${buildSvg(22, 17)}<h3>Стройка</h3></button></header>`;
-    return head + (view.collapsed ? buildCompactHtml(g, build.placing) : buildTabHtml(g, build));
+    const body =
+      tab === 'build'
+        ? view.collapsed
+          ? buildCompactHtml(g, build.placing)
+          : buildTabHtml(g, build)
+        : view.collapsed
+          ? ideasCompactHtml(g)
+          : ideasTabHtml(g);
+    // Одна вкладка — заголовком; стройка и идеи — заголовок «Песочница» и вкладки.
+    if (leftTabs(g).length === 1) {
+      const [icon, name] = tab === 'build' ? [buildSvg(22, 17), 'Стройка'] : [ideasSvg(24, 18), 'Идеи'];
+      return `<header class="sc-head"><button class="lines-toggle" data-action="sc-toggle" data-tip="${toggle} · ${name.toLowerCase()}">${fold}${icon}<h3>${name}</h3></button></header>${body}`;
+    }
+    const head = `<header class="sc-head"><button class="lines-toggle" data-action="sc-toggle" data-tip="${toggle} · песочница">${fold}${sandboxSvg(26, 17)}<h3>Песочница</h3></button></header>${tabsHtml(g, tab)}`;
+    return head + body;
   }
   const s = sc.state;
   const diff = `<span class="sc-diff" data-tip="Сложность: ${sc.difficulty.name}${s.settings.challenge ? ' · испытание без паузы' : ''}">${difficultySvg(s.settings.difficulty, 18)}${
@@ -675,10 +760,21 @@ export function leftPanelHtml(g: Game, view: PanelView): string {
     // Предложения ждут решения — видны в свёрнутой панели на любой вкладке.
     const offers = offersSectionHtml(g, view.open);
     const line =
-      tab === 'build' ? buildCompactHtml(g, build.placing) : tab === 'events' ? (offers ? '' : eventsCompactHtml(sc)) : running ? compactHtml(sc) : finishedHtml(sc);
+      tab === 'build'
+        ? buildCompactHtml(g, build.placing)
+        : tab === 'ideas'
+          ? ideasCompactHtml(g)
+          : tab === 'events'
+            ? offers
+              ? ''
+              : eventsCompactHtml(sc)
+            : running
+              ? compactHtml(sc)
+              : finishedHtml(sc);
     return head + line + offers;
   }
   if (tab === 'build') return head + buildTabHtml(g, build);
+  if (tab === 'ideas') return head + ideasTabHtml(g);
   if (tab === 'events') return head + eventsTabHtml(g, sc, view);
   return head + scenarioTabHtml(g, sc, view);
 }
@@ -844,7 +940,7 @@ export function resultsHtml(g: Game, rec: RecordView): string {
       <button class="menu-item" data-action="sc-continue">${playSvg(22)}<span class="menu-text">${
         extras
           ? `<b>Продолжить игру</b><small>Та же карта и сеть · дополнительных заданий: ${extras} — без сроков, за деньги</small>`
-          : '<b>Продолжить в песочнице</b><small>Та же карта и сеть, без заданий и сроков</small>'
+          : '<b>Продолжить в песочнице</b><small>Та же карта и сеть, без сроков · изредка ☕ идеи — по желанию</small>'
       }</span></button>
       <button class="menu-item" data-action="sc-replay">${replaySvg(22)}<span class="menu-text"><b>Переиграть этот сценарий</b><small>Тот же регион и задания — с самого начала</small></span></button>
       <button class="menu-item" data-action="sc-new">${diceMapSvg(30, 22)}<span class="menu-text"><b>Новый сценарий</b><small>Другой регион · ${diff}${s.settings.challenge ? ', без паузы' : ''}</small></span><span class="menu-go">›</span></button>
@@ -858,8 +954,8 @@ export function resultsHtml(g: Game, rec: RecordView): string {
 /** Плитки режима: песочница или сценарий. */
 export function modeTilesHtml(scenario: boolean): string {
   return `<div class="cards ng-modes">
-    <button class="card ${scenario ? '' : 'active'}" data-action="ng-mode" data-id="sandbox" title="Свободная игра: стройте что хотите, без заданий и сроков">
-      ${sandboxSvg()}<span class="name">Песочница</span><small>без заданий и сроков</small></button>
+    <button class="card ${scenario ? '' : 'active'}" data-action="ng-mode" data-id="sandbox" data-tip="Свободная игра: стройте что хотите, без сроков. Изредка — ☕ идеи без срока и штрафа (выключаются в настройках)">
+      ${sandboxSvg()}<span class="name">Песочница</span><small>без сроков · ☕ идеи</small></button>
     <button class="card ${scenario ? 'active' : ''}" data-action="ng-mode" data-id="scenario" title="Регион со своей историей: три этапа заданий, события экономики, контракты и итоговая оценка с медалью">
       ${scenarioModeSvg()}<span class="name">Сценарий</span><small>этапы, задания, медаль</small></button></div>`;
 }

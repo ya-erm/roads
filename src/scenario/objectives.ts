@@ -9,7 +9,7 @@ import { isActive, townGap } from '../world/enterprise';
 import type { Industry, Town } from '../world/entities';
 import { monthTownNeed, townNeed } from '../world/townSupply';
 import { connected, industryById, newRoutesCarried, operating, refName, townById } from './analysis';
-import type { MonthStat, Objective, ObjectiveParams, Ref, ScenarioState } from './types';
+import type { MonthStat, Objective, ObjectiveParams, Ref, ScenarioState, ScenarioStats } from './types';
 
 /** Ключ пары городов: меньший id первым. */
 export const pairKey = (a: number, b: number) => (a < b ? `${a}-${b}` : `${b}-${a}`);
@@ -74,17 +74,41 @@ export function closedNeeds(t: Town, month: 'last' | 'current' = 'last'): CargoT
   return t.demands.filter((c) => (got[c] ?? 0) >= need);
 }
 
+/** Чьи счётчики перевозок: сценария или заданий без сроков (scenario/ideas.ts) — у обоих одинаковые. */
+export type Counters = Pick<ScenarioState, 'stats'>;
+
+/** Груз выгружен получателю (receiver — кто принял, maker — предприятие, откуда везли): в счётчики. */
+export function countDelivery(s: ScenarioStats, cargo: CargoType, amount: number, receiver: Ref | null, speed: number, maker?: number): void {
+  s.delivered[cargo] = (s.delivered[cargo] ?? 0) + amount;
+  if (receiver) s.to[receiverKey(receiver, cargo)] = (s.to[receiverKey(receiver, cargo)] ?? 0) + amount;
+  if (maker !== undefined) {
+    const from = (s.from ??= {});
+    from[makerKey(maker, cargo)] = (from[makerKey(maker, cargo)] ?? 0) + amount;
+  }
+  s.units += amount;
+  s.speedSum += amount * speed;
+}
+
+/** Пассажиры доехали из города from в город to (если станции в городах): в счётчики. */
+export function countPassengers(s: ScenarioStats, from: number | undefined, to: number | undefined, count: number, speed: number): void {
+  s.pax += count;
+  if (from !== undefined && to !== undefined && from !== to) s.between[pairKey(from, to)] = (s.between[pairKey(from, to)] ?? 0) + count;
+  s.units += count;
+  s.paxUnits = (s.paxUnits ?? 0) + count;
+  s.speedSum += count * speed;
+}
+
 /**
  * Отметка на старте задания: накопительный счётчик (доставки, пассажиры), население города для роста;
  * у остальных — 0.
  */
-export function baseOf(s: ScenarioState, p: ObjectiveParams, game: Game): number {
+export function baseOf(s: Counters, p: ObjectiveParams, game: Game): number {
   if (p.kind === 'population') return townById(game, p.town)?.population ?? 0;
   return counterOf(s, p);
 }
 
 /** Накопительный счётчик задания (доставки, пассажиры); у остальных — 0. */
-export function counterOf(s: ScenarioState, p: ObjectiveParams): number {
+export function counterOf(s: Counters, p: ObjectiveParams): number {
   if (p.kind === 'deliver') {
     if (p.to) return s.stats.to[receiverKey(p.to, p.cargo)] ?? 0;
     if (p.from !== undefined) return s.stats.from?.[makerKey(p.from, p.cargo)] ?? 0;
@@ -116,7 +140,7 @@ export const isMonthly = (p: ObjectiveParams) =>
   p.kind === 'profit' || p.kind === 'supply' || p.kind === 'quality' || p.kind === 'throughput' || p.kind === 'newRoutes';
 
 /** Текущий прогресс в единицах цели. */
-export function liveProgress(o: Objective, s: ScenarioState, game: Game): number {
+export function liveProgress(o: Pick<Objective, 'params' | 'base' | 'streak'>, s: Counters, game: Game): number {
   const p = o.params;
   switch (p.kind) {
     case 'deliver':
@@ -320,7 +344,7 @@ export function titleOf(p: ObjectiveParams, game: Game): string {
 }
 
 /** Прогресс для полоски: «120 / 300», «×1.75 / ×2.5», «1 / 3 мес.». */
-export function progressText(o: Objective): string {
+export function progressText(o: Pick<Objective, 'params' | 'progress' | 'target'>): string {
   const p = o.params;
   if (p.kind === 'industry') return `×${o.progress.toFixed(2).replace(/\.?0+$/, '')} / ×${p.level}`;
   if (isMonthly(p)) return `${o.progress} / ${o.target} мес.`;
@@ -328,7 +352,7 @@ export function progressText(o: Objective): string {
 }
 
 /** Доля выполнения 0…1. Уровень предприятия считается от 1. */
-export function fraction(o: Objective): number {
+export function fraction(o: Pick<Objective, 'params' | 'progress' | 'target' | 'base' | 'status'>): number {
   if (o.status === 'done') return 1;
   if (o.params.kind === 'industry') return Math.max(0, Math.min(1, (o.progress - 1) / Math.max(0.01, o.target - 1)));
   // Население — от того, сколько было, когда задание появилось.

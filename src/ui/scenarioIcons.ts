@@ -75,7 +75,7 @@ export const newIndustryIcon = (size = 24) =>
   );
 
 /** Значок задания по его типу: груз, пассажиры, деньги, город, завод, молния, поток, новое в сети. */
-export function objectiveIcon(o: Objective, size = 24): string {
+export function objectiveIcon(o: Pick<Objective, 'params'>, size = 24): string {
   const p = o.params;
   switch (p.kind) {
     case 'deliver':

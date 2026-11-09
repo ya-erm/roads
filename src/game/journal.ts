@@ -212,4 +212,5 @@ export const JOURNAL_LEGEND: Record<string, string> = {
   event: 'экономическое событие: type, cause, effects, related, contract, parent (из какого события)',
   phase: 'новый этап сценария: phase, net — сеть игрока на переходе, best — лучший месяц перевозок',
   end: 'конец сценария: status, reason, score',
+  idea: 'задание без срока (песочница, после сценария): act — offer (kind, title, params, $ — награда) / take / later / no — отказ / drop — брошено / done',
 };

@@ -16,7 +16,7 @@ import { runEvents } from './events';
 import { assess } from './feasibility';
 import { type Forecast, forecastOf, haulOf, outlookOf } from './forecast';
 import { extraObjectives, fastMonths, generatePhase, startScenario } from './generator';
-import { baseOf, isMonthly, liveProgress, makerKey, monthOk, pairKey, receiverKey, targetOf, titleOf } from './objectives';
+import { baseOf, countDelivery, countPassengers, isMonthly, liveProgress, monthOk, targetOf, titleOf } from './objectives';
 import { computeScore } from './score';
 import type {
   Consequence,
@@ -300,25 +300,12 @@ export class Scenario {
 
   /** Груз выгружен получателю (receiver — кто его принял, maker — предприятие, откуда его везли). */
   onDelivered(cargo: CargoType, amount: number, receiver: Ref | null, speed: number, maker?: number): void {
-    const s = this.state.stats;
-    s.delivered[cargo] = (s.delivered[cargo] ?? 0) + amount;
-    if (receiver) s.to[receiverKey(receiver, cargo)] = (s.to[receiverKey(receiver, cargo)] ?? 0) + amount;
-    if (maker !== undefined) {
-      const from = (s.from ??= {});
-      from[makerKey(maker, cargo)] = (from[makerKey(maker, cargo)] ?? 0) + amount;
-    }
-    s.units += amount;
-    s.speedSum += amount * speed;
+    countDelivery(this.state.stats, cargo, amount, receiver, speed, maker);
   }
 
   /** Пассажиры доехали: из города from в город to (если станции в городах). */
   onPassengers(from: number | undefined, to: number | undefined, count: number, speed: number): void {
-    const s = this.state.stats;
-    s.pax += count;
-    if (from !== undefined && to !== undefined && from !== to) s.between[pairKey(from, to)] = (s.between[pairKey(from, to)] ?? 0) + count;
-    s.units += count;
-    s.paxUnits = (s.paxUnits ?? 0) + count;
-    s.speedSum += count * speed;
+    countPassengers(this.state.stats, from, to, count, speed);
   }
 
   /** Раз в секунду игрового времени — прогресс накопительных заданий: выполнено — сразу награда. */

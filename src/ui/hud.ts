@@ -475,7 +475,7 @@ export class Hud {
   /** Панель сценария свёрнута до заголовка (запоминается в браузере). */
   private scenarioCollapsed = localStorage.getItem('roads.scenarioCollapsed') === '1';
   /** Выбранная вкладка левой панели (запоминается в браузере); её нет в партии — показывается первая. */
-  private leftTab: LeftTab = (['scenario', 'events', 'build'] as const).find((t) => t === localStorage.getItem('roads.leftTab')) ?? 'scenario';
+  private leftTab: LeftTab = (['scenario', 'events', 'build', 'ideas'] as const).find((t) => t === localStorage.getItem('roads.leftTab')) ?? 'scenario';
   /** Задания, у которых в панели раскрыто «почему». */
   private readonly whyOpen = new Set<string>();
   /** «Следующий этап» нажат один раз: второе нажатие переводит этап. */
@@ -535,7 +535,7 @@ export class Hud {
               <button class="menu-item" data-action="new-game">${newGameSvg(22)}<span class="menu-text"><b>Новая игра</b><small>Другая карта, города, деньги</small></span><span class="menu-go">›</span></button>
               <button class="menu-item" data-action="export-journal" data-tip="Скачать журнал партии: стройка, маршруты, рейсы, производство, задания и события — для разбора">${journalSvg(22)}<span class="menu-text"><b>Журнал партии</b><small data-journal-count></small></span></button>
               <button class="menu-item" data-action="timelapse" data-timelapse-menu>${timelapseSvg(22)}<span class="menu-text"><b>Таймлапс партии</b><small></small></span></button>
-              <button class="menu-item" data-action="menu-settings">${settingsSvg(22)}<span class="menu-text"><b>Настройки</b><small>Как показывать карту</small></span><span class="menu-go">›</span></button>
+              <button class="menu-item" data-action="menu-settings">${settingsSvg(22)}<span class="menu-text"><b>Настройки</b><small>Карта и задания без сроков</small></span><span class="menu-go">›</span></button>
             </div>
           </div>
           <div class="hidden" data-menu-settings>
@@ -1381,6 +1381,17 @@ export class Hud {
         else sc.decline(d.id);
         // Стартовый контракт можно принять прямо в брифинге — обновим его.
         if (!this.q('[data-start]').classList.contains('hidden')) this.renderStart();
+        break;
+      }
+      case 'idea-take':
+      case 'idea-later':
+      case 'idea-drop': {
+        // Идеи без сроков: взять, отложить на 10 мин, отказаться или бросить — без последствий.
+        if (!d.id) break;
+        if (d.action === 'idea-take') g.ideas.take(d.id);
+        else if (d.action === 'idea-later') g.ideas.later(d.id);
+        else g.ideas.drop(d.id);
+        this.refreshLeft();
         break;
       }
       case 'sc-advance':
@@ -4336,6 +4347,8 @@ export class Hud {
   private renderScenario(): void {
     const el = this.q('[data-scenario]');
     const g = this.game();
+    // Настройка «Задания без сроков» (Меню → Настройки) — в игру: выключили — идей нет, вкладки тоже.
+    g.ideas.setEnabled(prefOn('ideas'));
     const tab = leftTab(g, this.leftTab);
     const show =
       tab !== null &&
@@ -4392,7 +4405,10 @@ export class Hud {
             { kind: 'grants' as const, name: 'Награды и субсидии', sign: 1 as const },
             { kind: 'fines' as const, name: 'Штрафы', sign: -1 as const },
           ]
-        : []),
+        : g.ideas.state.done || g.ledger.grants || last?.ledger?.grants
+          ? // Песочница: награды заданий без сроков (scenario/ideas.ts) — той же статьёй.
+            [{ kind: 'grants' as const, name: 'Награды и субсидии', sign: 1 as const }]
+          : []),
     ];
     const cell = (v: number | undefined, sign: number) =>
       v === undefined ? '<td class="muted">—</td>' : `<td class="${v === 0 ? 'muted' : sign > 0 ? 'pos' : 'neg'}">${v === 0 ? '0' : `${sign > 0 ? '+' : '−'}${money(v).replace('$', '$')}`}</td>`;

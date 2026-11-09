@@ -66,6 +66,7 @@ import {
 import { START_ROADS } from '../world/startRoads';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
 import { prepareSettings } from '../scenario/generator';
+import { Ideas, type IdeasState } from '../scenario/ideas';
 import { Scenario } from '../scenario/manager';
 import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
@@ -494,6 +495,8 @@ export interface SaveData {
   history: MonthRecord[];
   /** Состояние сценария; нет — песочница. */
   scenario?: ScenarioState;
+  /** Задания без сроков в песочнице и после сценария (scenario/ideas.ts); нет — ещё не включались. */
+  ideas?: IdeasState;
   /** Открытая ступень моделей (в старых сохранениях нет — по этапу сценария). */
   modelTier?: ModelTier;
   /** Журнал партии (в старых сохранениях нет). */
@@ -723,6 +726,8 @@ export class Game implements BuildContext {
   private closingStep = false;
   /** Сценарий партии; null — песочница. */
   scenario: Scenario | null = null;
+  /** Задания без сроков («Идеи»): в песочнице и после конца сценария. */
+  ideas: Ideas = new Ideas(this);
   /** Множители экономики от событий сценария; в песочнице все равны 1. */
   mods: EconomyMods = NO_MODS;
   /**
@@ -859,6 +864,7 @@ export class Game implements BuildContext {
       history: this.history,
       rail: this.rail.serialize(),
       scenario: this.scenario?.toSave(),
+      ideas: this.ideas.toSave(),
       modelTier: this.modelTier,
       journal: this.journal.entries,
       news: this.news.toSave(),
@@ -1019,6 +1025,7 @@ export class Game implements BuildContext {
     this.nextEntityId = save.nextEntityId;
     this.rng.seedState = save.rng;
     if (save.scenario) this.attachScenario(Scenario.restore(this, save.scenario));
+    if (save.ideas) this.ideas = new Ideas(this, save.ideas);
     // Сохранения до ступеней: в сценарии открыто столько, сколько этапов пройдено.
     this.modelTier = save.modelTier ?? (save.scenario ? (Math.min(3, save.scenario.phase + 1) as ModelTier) : 1);
     this.journal.add('load', { date: this.dateLabel, money: this.money, lines: this.lines.size, fleet: this.fleet.size });
@@ -3581,6 +3588,7 @@ export class Game implements BuildContext {
     // Стройка дорог: только если есть проекты или бригады («Мгновенно» их не бывает — такт тот же, что без стройки).
     if (this.construction.projects.size || this.construction.crews.brigades.size || this.construction.trains?.list.size) this.construction.tick(dt);
     this.scenario?.tick(dt);
+    this.ideas.tick(dt);
     const month = Math.floor(this.time / MONTH_LENGTH);
     // Итоги — сразу после такта (update): целиком или по кадрам (monthBudget).
     if (month !== this.month && !this.closing) this.closing = this.closeMonth(month);
@@ -5372,6 +5380,7 @@ export class Game implements BuildContext {
         // Откуда груз: предприятие у станции первой погрузки, которое его производит.
         const maker = origin?.industryIds.find((id) => this.industries.find((i) => i.id === id)?.info.produces === v.cargo);
         this.scenario?.onDelivered(v.cargo, v.amount, receiver, k, maker);
+        this.ideas.onDelivered(v.cargo, v.amount, receiver, k, maker);
         Object.assign(trip, { drop: { [v.cargo]: v.amount }, to: receiver ? `${receiver.type}:${receiver.id}` : 'никому', from: v.loadedAt, x: k });
         moved += v.amount;
         line.carriedMonth += v.amount;
@@ -5420,6 +5429,7 @@ export class Game implements BuildContext {
           moved += g.count;
           line.carriedMonth += g.count;
           this.scenario?.onPassengers(from?.townIds[0], undefined, g.count, 1);
+          this.ideas.onPassengers(from?.townIds[0], undefined, g.count, 1);
           continue;
         }
         const distance = from ? dist(from.fp.center, st.fp.center) : 0;
@@ -5431,6 +5441,7 @@ export class Game implements BuildContext {
         moved += g.count;
         line.carriedMonth += g.count;
         this.scenario?.onPassengers(from?.townIds[0], st.townIds[0], g.count, k);
+        this.ideas.onPassengers(from?.townIds[0], st.townIds[0], g.count, k);
         const town = st.townIds.length ? this.towns.find((t) => t.id === st.townIds[0]) : undefined;
         if (town) town.growthAcc += g.count * 0.02;
         // Довезённые — в счёт города отправления: блок «Что нужно городу» (world/townPax.ts).
@@ -6304,6 +6315,8 @@ export class Game implements BuildContext {
     yield;
     // Сценарий — после экономики месяца: снабжение городов и рост предприятий уже подсчитаны.
     this.scenario?.monthEnd();
+    // Задания без сроков — в песочнице и после конца сценария (в идущем сценарии молчат).
+    this.ideas.monthEnd();
     this.journalMonth();
     this.timelapse.capture(this);
   }
