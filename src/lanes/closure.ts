@@ -30,6 +30,17 @@ export function closureOf(b: CorridorBuild | undefined): Closure | null {
   return w.part ? 'part' : 'closed';
 }
 
+/**
+ * Перестройка оставляет прежнее полотно (c — полотно в стройке): тот же класс на той же оси — это расширение
+ * («Перестроить» в больше полос, «Полоса»): прежний асфальт остаётся, стройка (отсыпка, покрытие) — только на
+ * прибавке ширины за его кромкой, разметка — потом по всему полотну. Другой класс (переукладка: цена — работа по всей
+ * длине, rebuildCost) и перенос — полотно перекладывают целиком. Не перестройка — false.
+ */
+export function keepsPavement(c: Corridor): boolean {
+  const w = c.build?.was;
+  return !!w && !w.moved && w.cls === c.cls;
+}
+
 /** Перекрытие активно: работы идут, и часть дороги (или вся) закрыта. */
 export function closed(b: CorridorBuild | undefined): boolean {
   const k = closureOf(b);

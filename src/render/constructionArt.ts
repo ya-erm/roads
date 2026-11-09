@@ -6,7 +6,9 @@
  * - этапы на строящемся участке (CONSTRUCTION.stages, идут колонной): 🟫 отсыпка (у моста — опоры, балки и плита
  *   настила, у тоннеля — выработка щита: src/render/structureArt.ts), ⬛ покрытие, ⬜ разметка — до края
  *   каждого, шагами CONSTRUCTION.drawStep: плитки обновляются по шагу, а не каждый такт (projectSig); отсыпка — не по
- *   площадке перекрёстка (там бывает готовая дорога), площадка — этапом, дошедшим до неё (nodeStage);
+ *   площадке перекрёстка (там бывает готовая дорога), площадка — этапом, дошедшим до неё (nodeStage); у расширения
+ *   (тот же класс на месте, keepsPavement) отсыпка и покрытие — только на прибавке ширины (wideningBands), прежний
+ *   асфальт до разметки — прежней дорогой (drawOldRoad);
  * - тень мостов проекта — отдельным проходом под готовыми дорогами (drawProjectShadows): готовое — обычной, остальное —
  *   бледной;
  * - площадки строительных баз — тоже в плитках (drawBases);
@@ -26,7 +28,8 @@ import { type Corridor, type LaneNet, taperLen } from '../lanes/model';
 import { corridorLayer } from '../lanes/speedDisplay';
 import type { BuildBase } from '../world/entities';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
-import { closureOf, fitLanes, laneWise, partLanes, reverseSite, siteSpot, workSide } from '../lanes/closure';
+import { closureOf, fitLanes, keepsPavement, laneWise, partLanes, reverseSite, siteSpot, workSide } from '../lanes/closure';
+import { wasCorridor } from '../game/rebuild';
 import { bridgePiers, drawCraneSet, drawShieldSet, type SiteKind, siteKind, slabTo } from './structureArt';
 import { type Box, grow } from './tileCache';
 
@@ -42,28 +45,36 @@ export function buildingCorridors(net: LaneNet): Corridor[] {
 }
 
 /**
- * Прежняя дорога перестройки по полосам — поверх стройки (по ней едут), из сети для карты road (openNet view):
- * широкая (2+2 и шире) — открытые полосы целиком; узкая «с проездом» (laneWise) — только то, что ещё не разрыто:
- * первым проходом — другая половина целиком и своя впереди отсыпки, вторым — своя впереди отсыпки (другая уже новая,
- * её рисует drawProjects). Без площадок узлов.
+ * Прежняя дорога перестройки — поверх стройки, из сети для карты road (openNet view), без площадок узлов:
+ * - по полосам на широкой (2+2 и шире) — открытые полосы целиком (по ним едут);
+ * - узкая «с проездом» (laneWise) — только то, что ещё не разрыто: первым проходом — другая половина целиком и своя
+ *   впереди отсыпки, вторым — своя впереди отсыпки (другая уже новая, её рисует drawProjects);
+ * - расширение (keepsPavement, и при перекрытии целиком) — прежний асфальт не разрывают: всё прежнее полотно впереди
+ *   разметки (у «с проездом» — на своей половине; другая — как выше), отсыпка и покрытие прибавки — рядом с ним.
  */
 export function drawOldRoad(ctx: CanvasRenderingContext2D, full: LaneNet, road: LaneNet, lanes: LaneRenderer, zoom: number, view: Box): void {
-  const list = buildingCorridors(full).filter((c) => closureOf(c.build) === 'part' && seen(projectBox(c), view));
+  const list = buildingCorridors(full).filter((c) => {
+    const k = closureOf(c.build);
+    return (k === 'part' || (k === 'closed' && keepsPavement(c))) && seen(projectBox(c), view);
+  });
   if (!list.length) return;
   const none = () => false;
-  const wide = new Set(list.filter((c) => !laneWise(c.build)).map((c) => c.id));
+  const wide = new Set(list.filter((c) => !laneWise(c.build) && !keepsPavement(c)).map((c) => c.id));
   if (wide.size) lanes.draw(ctx, road, zoom, false, view, 0, { corridor: (id) => wide.has(id), node: none, shadow: 'skip' });
   for (const c of list) {
     const o = road.corridors.get(c.id);
     if (wide.has(c.id) || !o) continue;
     const b = c.build!;
-    const side = workSide(b);
+    const halves = laneWise(b);
+    const side = halves ? workSide(b) : undefined;
     const L = o.length;
-    const [earthTo] = drawnSpans(c);
-    const ahead: [number, number] = b.fromB ? [0, L - earthTo] : [earthTo, L];
+    // Прежнее полотно уходит под стройку: узкая — с отсыпкой, расширение — только с разметкой (до неё оно на месте).
+    const [earthTo, , marksTo] = drawnSpans(c);
+    const to = keepsPavement(c) ? marksTo : earthTo;
+    const ahead: [number, number] = b.fromB ? [0, L - to] : [to, L];
     const parts: { left: Vec[]; right: Vec[] }[] = [];
     if (ahead[1] - ahead[0] > 0.5) parts.push(band(road, o, ahead[0], ahead[1], ROAD_MARGIN + 3, false, side));
-    if (!b.pass) parts.push(band(road, o, 0, L, ROAD_MARGIN + 3, false, -side as 1 | -1));
+    if (halves && !b.pass) parts.push(band(road, o, 0, L, ROAD_MARGIN + 3, false, -side! as 1 | -1));
     const shapes = parts.filter((p) => p.left.length >= 2);
     if (!shapes.length) continue;
     ctx.save();
@@ -131,7 +142,8 @@ export function projectLayout(c: Corridor, cuts: Map<number, [number, number]>):
  */
 export function nodeStage(net: LaneNet, lanes: LaneRenderer, id: number): StageReach {
   const k = nodeReach(net, lanes, id);
-  const paved = net.nodes.get(id)?.corridors.some((cid) => !net.corridor(cid).build) ?? false;
+  // Готовая дорога — и расширяемая (keepsPavement): асфальт площадки остаётся.
+  const paved = net.nodes.get(id)?.corridors.some((cid) => !net.corridor(cid).build || keepsPavement(net.corridor(cid))) ?? false;
   return k === 0 && paved ? -1 : k;
 }
 
@@ -198,6 +210,50 @@ function band(net: LaneNet, c: Corridor, s0: number, s1: number, pad: number, sh
     right.push(up(pointOff(c, s, side === -1 ? 0 : e[1] + pad)));
   }
   return { left, right };
+}
+
+/**
+ * Прибавка ширины полотна c (расширение, keepsPavement) к прежней дороге old на [s0, s1]: по полосе с каждого края,
+ * где новое полотно шире прежнего, — от прежней кромки наружу до новой с обочиной pad (не шире самой прибавки: где
+ * прибавка только начинается, у отгона, — без ступеньки). Прежнего полотна на s нет — прибавка всё полотно. side —
+ * только по эту сторону оси (перестройка «с проездом»). Ответ — полосы как у band: левая и правая границы.
+ */
+export function wideningBands(c: Corridor, old: Corridor, s0: number, s1: number, pad: number, side?: 1 | -1): { left: Vec[]; right: Vec[] }[] {
+  const lo = { left: [] as Vec[], right: [] as Vec[] };
+  const hi = { left: [] as Vec[], right: [] as Vec[] };
+  const ss = [...new Set([...stations(c, s0, s1, 5), ...stations(old, s0, s1, 5)])].sort((x, y) => x - y);
+  for (const s of ss) {
+    const e = edgesAt(c, s);
+    if (!e) continue;
+    const mid = (e[0] + e[1]) / 2;
+    const o = edgesAt(old, s) ?? [mid, mid];
+    // Ширина прибавки с каждого края (0 — там не шире).
+    const wl = Math.max(0, o[0] - e[0]);
+    const wr = Math.max(0, e[1] - o[1]);
+    const cut = (x: number) => (side === 1 ? Math.max(0, x) : side === -1 ? Math.min(0, x) : x);
+    lo.left.push(pointOff(c, s, cut(e[0] - Math.min(pad, wl))));
+    lo.right.push(pointOff(c, s, cut(e[0] + wl)));
+    hi.left.push(pointOff(c, s, cut(e[1] - wr)));
+    hi.right.push(pointOff(c, s, cut(e[1] + Math.min(pad, wr))));
+  }
+  return side === 1 ? [hi] : side === -1 ? [lo] : [lo, hi];
+}
+
+/** Прежняя дорога перестройки c на той же оси — полотном (для кромок прежнего асфальта). */
+function oldCorridor(c: Corridor): Corridor | null {
+  const w = c.build?.was;
+  return w && !w.moved ? wasCorridor(c, w) : null;
+}
+
+/** Заливка полос bands (как у band) одним путём. */
+function fillBands(ctx: CanvasRenderingContext2D, bands: { left: Vec[]; right: Vec[] }[]): void {
+  ctx.beginPath();
+  for (const b of bands) {
+    if (b.left.length < 2) continue;
+    [...b.left, ...[...b.right].reverse()].forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+    ctx.closePath();
+  }
+  ctx.fill();
 }
 
 function poly(ctx: CanvasRenderingContext2D, pts: Vec[]): void {
@@ -436,12 +492,16 @@ function drawFaded(ctx: CanvasRenderingContext2D, box: Box, alpha: number, draw:
   ctx.restore();
 }
 
-/** Рисует draw только внутри полосы полотна band. */
-function clipped(ctx: CanvasRenderingContext2D, b: { left: Vec[]; right: Vec[] }, draw: () => void): void {
-  if (b.left.length < 2) return;
+/** Рисует draw только внутри полосы полотна band (или полос: прибавка ширины с обоих краёв). */
+function clipped(ctx: CanvasRenderingContext2D, bands: { left: Vec[]; right: Vec[] } | { left: Vec[]; right: Vec[] }[], draw: () => void): void {
+  const list = (Array.isArray(bands) ? bands : [bands]).filter((b) => b.left.length >= 2);
+  if (!list.length) return;
   ctx.save();
-  poly(ctx, [...b.left, ...[...b.right].reverse()]);
-  ctx.closePath();
+  ctx.beginPath();
+  for (const b of list) {
+    [...b.left, ...[...b.right].reverse()].forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+    ctx.closePath();
+  }
   ctx.clip();
   draw();
   ctx.restore();
@@ -530,23 +590,25 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
     // «С проездом» на узкой (closure.ts, laneWise): этапы — только на перекладываемой половине полотна; во втором
     // проходе другая половина уже новая — целиком.
     const side = kind === 'road' && laneWise(c.build) ? workSide(c.build!) : undefined;
+    // Расширение (keepsPavement): прежний асфальт остаётся — отсыпка и покрытие только на прибавке ширины за его
+    // кромкой; прежнее полотно до разметки — прежней дорогой (drawOldRoad), разметка — по всему новому полотну.
+    const old = kind === 'road' && keepsPavement(c) ? oldCorridor(c) : null;
+    const area = (s0: number, s1: number, pad: number) => (old ? wideningBands(c, old, s0, s1, pad, side) : band(net, c, s0, s1, pad, false, side));
     if (kind === 'bridge') {
       const [ca, cb] = cuts.get(c.id) ?? [0, 0];
       drawBridgeFrame(ctx, net, c, earthTo, Math.max(0, ca), c.length - Math.max(0, cb));
     } else if (earth && kind === 'tunnel') drawBore(ctx, net, c, ...earth);
     else if (earth) {
-      const b = band(net, c, ...earth, ROAD_MARGIN + 1.2, false, side);
+      const b = area(...earth, ROAD_MARGIN + 1.2);
       ctx.fillStyle = EARTH;
-      poly(ctx, [...b.left, ...[...b.right].reverse()]);
-      ctx.closePath();
-      ctx.fill();
+      fillBands(ctx, Array.isArray(b) ? b : [b]);
     }
     // Покрытие и разметка — то же полотно, что у готовой дороги, в полосе готового (с запасом на бордюр и парапет).
     const only = (id: number) => id === c.id;
     // Тень — уже нарисована (shadows): в полосе полотна от неё был бы лишь обрывок поверх.
     // Второй проход (и после него перекрыли целиком) — первая половина уже новая.
     if (kind === 'road' && c.build!.pass) clipped(ctx, band(net, c, 0, c.length, ROAD_MARGIN + 3, false, -workSide(c.build!) as 1 | -1), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
-    if (paveTo > 0.5) clipped(ctx, band(net, c, ...span(paveTo), ROAD_MARGIN + 3, false, side), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, marks: false, shadow: 'skip' }));
+    if (paveTo > 0.5) clipped(ctx, area(...span(paveTo), ROAD_MARGIN + 3), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, marks: false, shadow: 'skip' }));
     if (marksTo > 0.5) clipped(ctx, band(net, c, ...span(marksTo), ROAD_MARGIN + 3, false, side), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
   }
   // Площадки узлов — этапом, дошедшим до них (nodeStage): покрытие — асфальтом площадки (у примыкания к готовой дороге

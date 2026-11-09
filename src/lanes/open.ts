@@ -12,11 +12,12 @@
  * Для карты (view) — та же сеть, но такой, какая она на земле: без отгона у соседей (асфальт готовой дороги у
  * перекрытия не сужается — машины перестраиваются по конусам, их рисует drawClosures), а узкая «с проездом» — прежней
  * дорогой целиком (её не разрытое рисуется поверх стройки, constructionArt.drawOldRoad; полосы встречных в зоне
- * реверса на карте нет — она на той же полосе, что и открытая).
+ * реверса на карте нет — она на той же полосе, что и открытая). Расширение (closure.ts, keepsPavement) — тоже прежней
+ * дорогой целиком, и при перекрытии целиком: прежний асфальт на месте, стройка — рядом, на прибавке ширины.
  */
 import { scale } from '../core/vec';
 import { ROAD_CLASSES } from '../world/roadTypes';
-import { type Approach, approachLanes, closureOf, fitLanes, laneWise, partLanes, reverseLanes, type ReverseSite, reverseSite, workSide, zoneLimit } from './closure';
+import { type Approach, approachLanes, closureOf, fitLanes, keepsPavement, laneWise, partLanes, reverseLanes, type ReverseSite, reverseSite, workSide, zoneLimit } from './closure';
 import { taperDeadLanes } from './edit';
 import type { Corridor, End, LaneNet } from './model';
 
@@ -52,7 +53,9 @@ export function openNet(net: LaneNet, view = false): LaneNet {
       if (!c.build) continue;
       const k = closureOf(c.build);
       const w = c.build.was;
-      if (w && (k === 'old' || k === 'part')) {
+      // Расширение (keepsPavement): прежний асфальт на месте и при перекрытии целиком — на карте он есть всегда.
+      const pave = view && keepsPavement(c);
+      if (w && (k === 'old' || k === 'part' || (k === 'closed' && pave))) {
         // Своё полотно копии: исходное (с проектом) не трогаем.
         const o = { ...c };
         delete o.build;
@@ -60,10 +63,12 @@ export function openNet(net: LaneNet, view = false): LaneNet {
         o.cls = w.cls;
         // По полосам — половина прежних; у улицы в тупик — в обе стороны (развернуться там негде). Узкая «с проездом» —
         // реверс на участке у бригады, вне его — обе стороны.
-        // На карте — прежняя дорога целиком: её ещё не разрытое рисуется поверх стройки (constructionArt, drawOldRoad).
+        // На карте — прежняя дорога целиком (узкая «с проездом», расширение): её ещё не разрытое (у расширения — ещё не
+        // размеченное) рисуется поверх стройки (constructionArt, drawOldRoad).
         const site = k === 'part' && laneWise(c.build) ? reverseSite(net, c, c.build) : null;
         const zone = site?.zone;
-        const lanes = zone ? (view ? fitLanes(w.lanes, w.len, c.length) : reverseLanes(c, c.build, zone)) : k === 'part' ? partLanes(net, c) : fitLanes(w.lanes, w.len, c.length);
+        const all = fitLanes(w.lanes, w.len, c.length);
+        const lanes = pave ? all : zone ? (view ? all : reverseLanes(c, c.build, zone)) : k === 'part' ? partLanes(net, c) : all;
         if (k === 'part') o.limit = zoneLimit(w.limit, ROAD_CLASSES[w.cls].limit);
         else if (w.limit === undefined) delete o.limit;
         else o.limit = w.limit;
