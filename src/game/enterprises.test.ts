@@ -297,6 +297,41 @@ describe('места в черте города', () => {
     expect(inTown(t, fresh.fp)).toBe(true);
     expect(footprintRadius(fresh.fp)).toBeGreaterThan(0);
   });
+
+  it('второй завод того же рецепта, что уже стоит в городе со старта, город сам не строит', () => {
+    const g = player({ size: 'medium', towns: 8 });
+    // Город со стартовым заводом; мест — все четыре, а нужна городам только его продукция.
+    const t = g.towns.find((x) => townIndustries(x, g.towns, g.industries).some((i) => !i.builtBy && !i.ruin && !isRaw(i.info)))!;
+    expect(t).toBeTruthy();
+    const start = townIndustries(t, g.towns, g.industries).find((i) => !i.builtBy && !i.ruin)!;
+    t.population = 30_000;
+    for (const x of g.towns) x.demands = [start.info.produces];
+    // Другие заводы той же продукции город может поставить, но каждый — по одному.
+    for (let n = 0; n < 4 && g.enterprises.townPlant(t); n++) g.enterprises.townBuilds(t);
+    const kinds = townIndustries(t, g.towns, g.industries).map((i) => i.info.kind);
+    expect(new Set(kinds).size).toBe(kinds.length);
+    expect(g.enterprises.townPlant(t)).toBeNull();
+    // Место пустует сколько угодно — город его не занимает: ждёт игрока.
+    const before = townIndustries(t, g.towns, g.industries).length;
+    expect(before).toBeLessThan(townSlots(t));
+    for (let n = 0; n < ENTERPRISE.slots.idleMonths + 2; n++) g.enterprises.monthEnd();
+    expect(townIndustries(t, g.towns, g.industries).length).toBe(before);
+  });
+
+  it('игрок может поставить второй такой же завод в город сам', () => {
+    const g = player({ size: 'medium', towns: 8 });
+    const t = [...g.towns].sort((a, b) => b.population - a.population)[0];
+    t.population = 30_000;
+    const ind = g.enterprises.townBuilds(t)!;
+    expect(ind).toBeTruthy();
+    for (let k = 0; k < 64; k++) {
+      const a = (k / 64) * Math.PI * 2;
+      const p = add(t.center, { x: Math.cos(a) * (townEdge(t) - 30), y: Math.sin(a) * (townEdge(t) - 30) });
+      const plan = g.enterprises.plan(ind.info.kind, p);
+      if (plan.town === t && plan.ok) return;
+    }
+    throw new Error('второй такой же завод игроку не поставить');
+  });
 });
 
 /** Для отладки: что за предприятия. */

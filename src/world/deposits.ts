@@ -150,7 +150,9 @@ function range(a: number, b: number, step: number): number[] {
 
 /**
  * Завод для города: невредный (класс 0) вид биома, чья продукция нужна городу (а нет таких — любому городу),
- * сырьё для него можно получить на карте. На одно сырьё — первыми. Нет — null.
+ * сырьё для него можно получить на карте. На одно сырьё — первыми; виды, которых на карте ещё нет (have), — первыми.
+ * Вид, который уже есть в черте этого города (inTown: стартовый, игрока, городской, заброшенный, стройка), город
+ * второй раз не строит — в городе не больше одного предприятия каждого рецепта. Нет — null.
  */
 export function townPlantKind(
   town: Town,
@@ -158,8 +160,11 @@ export function townPlantKind(
   kinds: readonly IndustryType[],
   pick: (n: number) => number,
   have: readonly IndustryType['kind'][] = [],
+  inTown: readonly IndustryType['kind'][] = [],
 ): IndustryType | null {
-  const clean = kinds.filter((k) => !isRaw(k) && harmClass(k.kind) === 0 && k.accepts.every((c) => obtainable(c, kinds)));
+  const clean = kinds.filter(
+    (k) => !isRaw(k) && harmClass(k.kind) === 0 && !inTown.includes(k.kind) && k.accepts.every((c) => obtainable(c, kinds)),
+  );
   const wanted = towns.flatMap((t) => t.demands);
   // Сначала — виды, которых на карте ещё нет, на одно сырьё.
   const pool = (list: IndustryType[]) => {

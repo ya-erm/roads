@@ -289,7 +289,12 @@ export function townRowsHtml(g: Game, t: Town): string {
     .map((i) => `<span class="ent-slot used" data-tip="${esc(i.name)}">${cargoIcon(i.info.produces, 18, false)}</span>`)
     .join('');
   const left = Math.max(0, ENTERPRISE.slots.idleMonths - (t.slotIdle ?? 0));
-  const free = Array.from({ length: Math.max(0, total - info.inside.length) }, () => `<span class="ent-slot free" data-tip="Свободно: можно поставить завод, а пустует — через ${left} мин город построит сам">＋</span>`).join('');
+  const slots = Math.max(0, total - info.inside.length);
+  // Город сам не строит второй завод того же рецепта: всё нужное уже есть — место ждёт игрока.
+  const freeTip = slots && e.townPlant(t)
+    ? `Свободно: можно поставить завод, а пустует — через ${left} мин город построит сам`
+    : 'Свободно: можно поставить завод. Город сам не построит — нужные ему заводы в городе уже есть';
+  const free = Array.from({ length: slots }, () => `<span class="ent-slot free" data-tip="${freeTip}">＋</span>`).join('');
   rows.push(
     `<div class="ent-row" data-tip="Мест под предприятия в черте города: по населению, первое — с ${ENTERPRISE.slots.firstPop} жителей"><span class="ent-ic">🏙</span>${
       total ? `${used}${free}` : `<small>мест нет — с ${ENTERPRISE.slots.firstPop} жителей</small>`

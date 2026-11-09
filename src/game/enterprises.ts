@@ -386,16 +386,26 @@ export class Enterprises {
     this.changed();
   }
 
-  /** Город сам строит завод на пустующем месте: невредный, его продукция нужна городу, без сноса. */
-  townBuilds(t: Town): Industry | null {
+  /**
+   * Какой завод город построил бы сам на пустующем месте (pick — жребий среди равных): невредный, его продукция
+   * нужна городу, и такого в черте города ещё нет — второй того же рецепта город не строит. Нечего — null.
+   */
+  townPlant(t: Town, pick: (n: number) => number = () => 0): IndustryType | null {
     const g = this.game;
-    const info = townPlantKind(
+    return townPlantKind(
       t,
       g.towns,
       this.kinds(),
-      (n) => g.rng.int(0, n),
+      pick,
       g.industries.map((i) => i.info.kind),
+      townIndustries(t, g.towns, g.industries).map((i) => i.info.kind),
     );
+  }
+
+  /** Город сам строит завод на пустующем месте (townPlant), без сноса. */
+  townBuilds(t: Town): Industry | null {
+    const g = this.game;
+    const info = this.townPlant(t, (n) => g.rng.int(0, n));
     if (!info) return null;
     const fp = townSpot({ roads: g.roads.net, terrain: g.terrain, index: g.index }, t, info, g.rng.range(0, Math.PI * 2), {
       inside: true,
