@@ -15,6 +15,7 @@ import { durationText } from '../core/timeText';
 import { type ProjectInfo, projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
+import { reverseGreen } from '../game/workSignals';
 import { basePrices, basePriceText, buildSvg, km, railTrainStatus } from './constructionUi';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -92,17 +93,23 @@ function whatHtml(game: Game, info: ProjectInfo): string {
 
 /**
  * Схема перекрытия — кусок дороги в две полосы сверху: part — одна полоса закрыта (красно-белая штриховка, конусы),
- * по другой едут; full — закрыты обе (шлагбаум), стрелка объезда дугой; open — работы не начаты, едут по обеим.
+ * по другой едут; full — закрыты обе (шлагбаум), стрелка объезда дугой; open — работы не начаты, едут по обеим;
+ * reverse — узкая «с проездом»: одна полоса закрыта, по другой стрелки в обе стороны, на концах — светофоры (красный
+ * и зелёный).
  */
-export function closureSvg(kind: 'part' | 'full' | 'open', w = 46, h = 26): string {
+export function closureSvg(kind: 'part' | 'full' | 'open' | 'reverse', w = 46, h = 26): string {
   const hatch = (y: number) =>
     `<rect x="4" y="${y}" width="38" height="7" fill="url(#cz-h)"/><rect x="4" y="${y}" width="38" height="7" fill="none" stroke="#c0392b" stroke-width="0.8"/>`;
   const car = (y: number, dir: 1 | -1) => `<path d="M${dir > 0 ? 18 : 28} ${y + 3.5} l${dir * 8} 0 m${-dir * 3} -2.5 l${dir * 3} 2.5 l${-dir * 3} 2.5" stroke="#fff" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`;
   const road = `<rect x="2" y="9" width="42" height="16" rx="1.5" fill="#5c636d"/><line x1="4" y1="17" x2="42" y2="17" stroke="#e9ecef" stroke-width="0.9" stroke-dasharray="3 2.5"/>`;
+  const light = (x: number, y: number, on: string) =>
+    `<rect x="${x - 2.4}" y="${y - 4.2}" width="4.8" height="8.4" rx="1.2" fill="#2b2f36"/><circle cx="${x}" cy="${y - 1.8}" r="1.4" fill="${on === 'red' ? '#ff4b3e' : '#5a5f66'}"/><circle cx="${x}" cy="${y + 1.8}" r="1.4" fill="${on === 'green' ? '#3ddc84' : '#5a5f66'}"/>`;
   const body =
     kind === 'open'
       ? `${car(9.5, 1)}${car(17.5, -1)}`
-      : kind === 'part'
+      : kind === 'reverse'
+        ? `${hatch(17.5)}<circle cx="13" cy="17" r="1.4" fill="#f08a3c"/><circle cx="23" cy="17" r="1.4" fill="#f08a3c"/><circle cx="33" cy="17" r="1.4" fill="#f08a3c"/><path d="M15 13 h16 m-3 -2.5 l3 2.5 l-3 2.5 M15 13 l3 -2.5 m-3 2.5 l3 2.5" stroke="#fff" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>${light(5, 5, 'green')}${light(41, 5, 'red')}`
+        : kind === 'part'
         ? `${hatch(17.5)}<circle cx="9" cy="17" r="1.4" fill="#f08a3c"/><circle cx="23" cy="17" r="1.4" fill="#f08a3c"/><circle cx="37" cy="17" r="1.4" fill="#f08a3c"/>${car(9.5, 1)}`
         : `${hatch(9.5)}${hatch(17.5)}<path d="M5 8 Q23 -3 41 8" stroke="#2f80ed" stroke-width="1.6" fill="none" stroke-dasharray="2.5 1.8"/><path d="M38 4.5 l3 3.5 l-4.2 0.8" stroke="#2f80ed" stroke-width="1.6" fill="none" stroke-linecap="round"/>`;
   return `<svg width="${w}" height="${h}" viewBox="0 0 46 26" aria-hidden="true"><defs><pattern id="cz-h" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="#fff"/><rect width="2.5" height="5" fill="#e8483f"/></pattern></defs>${road}${body}</svg>`;
@@ -110,9 +117,10 @@ export function closureSvg(kind: 'part' | 'full' | 'open', w = 46, h = 26): stri
 
 /**
  * Перестройка готовой дороги (rebuild.ts): что сейчас с движением — схемой и коротко (работы не начаты — ездят по
- * прежней; идут — перекрыта по полосам «открыто 1 из 2 · 30 км/ч» или целиком — объезд; перенос — перекрыта сразу) и
- * выбор перекрытия: ◐ по полосам (часть открыта, стройка ×1,5 дольше) или ⛔ целиком (объезд, быстрее). Не перестройка
- * — ничего.
+ * прежней; идут — перекрыта по полосам «открыто 2 из 4 · 30 км/ч», на узкой — реверс «⇄ 🚦 по очереди», или целиком —
+ * объезд; перенос — перекрыта сразу) и выбор перекрытия: ◐ с проездом (широкая — половина полос в каждую сторону,
+ * ×1,5 дольше; узкая — полоса за полосой, реверс, одна бригада «🚚×1», ×1,8) или ⛔ быстро — целиком (объезд, до трёх
+ * бригад «🚚×3»). Не перестройка — ничего.
  */
 function closureHtml(game: Game, info: ProjectInfo): string {
   const r = game.construction.rebuildOf(info.project.id);
@@ -121,19 +129,32 @@ function closureHtml(game: Game, info: ProjectInfo): string {
   const id = info.project.id;
   const allMoved = r.moved === r.count;
   const part = r.part > 0;
+  // Узкая (1+1, 2+1): «◐ с проездом» — полоса за полосой, реверс со светофорами 🚦, одна бригада.
+  const narrow = r.narrow > 0;
   const zone = `${K.zone} км/ч`;
+  const slower = (x: number) => String(Math.round(x * 10) / 10).replace('.', ',');
+  const crews = CONSTRUCTION.brigade.perProject;
   const status = allMoved
     ? { kind: 'full' as const, text: '⛔ перенос: перекрыта до конца работ', tip: 'Дорогу кладут на новом месте — прежней там уже нет: машины объезжают, пока не достроят' }
     : !r.closed
       ? { kind: 'open' as const, text: '🟢 открыта — перекроют, когда начнут', tip: 'Бригада ещё не начала: ездят по прежней дороге, как раньше' }
-      : part && r.open
-        ? { kind: 'part' as const, text: `◐ открыто ${r.open[0]} из ${r.open[1]} · ${zone}`, tip: `Работы идут половинами: по прежней дороге открыто ${r.open[0]} из ${r.open[1]} полос, скорость — ${zone}; на дороге в одну полосу в каждую сторону — движение в одну сторону, обратно — объезд` }
-        : { kind: 'full' as const, text: '⛔ перекрыта — объезд', tip: 'Дорога закрыта целиком: машины объезжают, пока не достроят' };
+      : part && narrow
+        ? {
+            kind: 'reverse' as const,
+            text: `⇄ 🚦 по очереди · ${zone}`,
+            tip: `С проездом: бригада перекладывает полосу за полосой, у неё — участок до ${K.reverse.chunk} м, где по оставшейся полосе едут в обе стороны по очереди: на концах светофоры, зелёный ${Math.round(reverseGreen(K.reverse.chunk))} с, потом красный обеим, пока участок не опустеет; скорость — ${zone}`,
+          }
+        : part && r.open
+          ? { kind: 'part' as const, text: `◐ открыто ${r.open[0]} из ${r.open[1]} · ${zone}`, tip: `Работы идут половинами: по прежней дороге открыто ${r.open[0]} из ${r.open[1]} полос в каждую сторону, скорость — ${zone}` }
+          : { kind: 'full' as const, text: '⛔ перекрыта — объезд', tip: 'Дорога закрыта целиком: машины объезжают, пока не достроят' };
+  const partTip = narrow
+    ? `С проездом: полоса за полосой, по другой — по очереди в обе стороны, светофоры 🚦; бригада одна, стройка в ${slower(2 * K.pass)} раза дольше, чем одной бригадой целиком`
+    : `По полосам: открыта половина прежних полос в каждую сторону, ${zone}; стройка в ${slower(K.partial)} раза дольше`;
   const pick = allMoved
     ? ''
     : `<div class="pc-closure-pick">
-      <button class="small pc-closure-opt${part ? ' primary' : ''}" data-action="project-closure" data-id="${id}" data-on="1" data-tip="${esc(`По полосам: открыта половина прежних полос (на 1+1 — одна, в одну сторону), ${zone}; стройка в ${String(K.partial).replace('.', ',')} раза дольше`)}">${closureSvg('part', 38, 22)}<span>◐</span></button>
-      <button class="small pc-closure-opt${part ? '' : ' primary'}" data-action="project-closure" data-id="${id}" data-on="0" data-tip="Целиком: дорога закрыта, машины объезжают; стройка быстрее">${closureSvg('full', 38, 22)}<span>⛔</span></button></div>`;
+      <button class="small pc-closure-opt${part ? ' primary' : ''}" data-action="project-closure" data-id="${id}" data-on="1" data-tip="${esc(partTip)}">${closureSvg(narrow ? 'reverse' : 'part', 38, 22)}<span>◐${narrow ? ' 🚚×1' : ''}</span></button>
+      <button class="small pc-closure-opt${part ? '' : ' primary'}" data-action="project-closure" data-id="${id}" data-on="0" data-tip="${esc(`Быстро — целиком: дорога закрыта, машины объезжают; бригад — до ${crews}, стройка быстрее`)}">${closureSvg('full', 38, 22)}<span>⛔${narrow ? ` 🚚×${crews}` : ''}</span></button></div>`;
   const what = `<span class="pc-chip" data-tip="${esc(`Перестройка готовой дороги: ${meters(r.length)}${r.moved ? `, перенесено полотен — ${r.moved}` : ''}`)}">🚧 <b>${meters(r.length)}</b></span>`;
   return `<div class="pc-block pc-closure"><div class="pc-row">${what}<span class="pc-closure-now" data-tip="${esc(status.tip)}">${closureSvg(status.kind)}<b>${esc(status.text)}</b></span></div>${pick}</div>`;
 }

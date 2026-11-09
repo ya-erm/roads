@@ -2,7 +2,7 @@ import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, splitBezier, str
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { CONSTRUCTION } from '../config';
 import { LANE_W, RoadClass } from '../world/roadTypes';
-import { fitLanes } from './closure';
+import { fitLanes, laneDone, laneWise } from './closure';
 import { nodeDeck } from './deck';
 import { edgesAt, laneBand, pointOff } from './geometry';
 import { Corridor, CorridorBuild, CorridorEnd, CorridorWas, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot, taperLen } from './model';
@@ -174,10 +174,22 @@ export function splitBuild(b: CorridorBuild, L: number, s: number): [CorridorBui
   const pair = splitDone(b, L, s);
   if (!b.was) return pair;
   const was = splitWas(b.was, L, s);
-  return [
+  const out: [CorridorBuild, CorridorBuild] = [
     { ...pair[0], was: was[0] },
     { ...pair[1], was: was[1] },
   ];
+  // «С проездом» на узкой: готовое — за оба прохода (closure.ts, laneDone), этапы — нынешнего; второй проход — у обоих.
+  if (laneWise(b) && b.done > 0) {
+    const lens = [s, Math.max(0, L - s)];
+    out.forEach((k, i) => {
+      const st = k.stages ?? [0, 0, 0];
+      const w = CONSTRUCTION.stages;
+      const work = st.every((x) => x >= lens[i] - 1e-9) ? lens[i] : st.reduce((sum, x, j) => sum + w[j] * x, 0);
+      k.done = laneDone(!!b.pass, work, lens[i]);
+      if (b.pass) k.pass = 2;
+    });
+  }
+  return out;
 }
 
 /**

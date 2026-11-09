@@ -8,6 +8,7 @@
  */
 import { smoothstep } from '../core/math';
 import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
+import { laneWise } from '../lanes/closure';
 import { edgesAt } from '../lanes/geometry';
 import type { Corridor } from '../lanes/model';
 import { ROAD_MARGIN } from '../world/roadTypes';
@@ -323,9 +324,17 @@ const MACHINE_HALF = 2.6;
  * посередине. Одна бригада — по оси (0).
  */
 export function crewRows(c: Corridor, n: number): number[] {
-  if (n <= 1) return [0];
   const b = c.build;
   const L = c.length;
+  // «С проездом» на узкой (closure.ts, laneWise): бригада одна и идёт посередине своей половины полотна — правой по
+  // ходу заполнения (по другой едут машины).
+  if (b && laneWise(b)) {
+    const f = frontOf(spansOf(b, L), L).s;
+    const e = edgesAt(c, Math.max(0, Math.min(L, b.fromB ? L - f : f))) ?? [-3.5, 3.5];
+    const half = b.fromB ? -e[0] : e[1];
+    return [Math.max(MACHINE_HALF, half / 2)];
+  }
+  if (n <= 1) return [0];
   const f = b ? frontOf(spansOf(b, L), L).s : 0;
   const s = Math.max(0, Math.min(L, b?.fromB ? L - f : f));
   const e = edgesAt(c, s) ?? [-3.5, 3.5];

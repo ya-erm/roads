@@ -77,6 +77,7 @@ import { paxFare, ridePath } from './fare';
 import { transferable, transferNeighbors } from './transfer';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
+import { WorkSignals } from './workSignals';
 import { Enterprises } from './enterprises';
 import { isActive } from '../world/enterprise';
 import { carryBuild, carryRailBuild, paidFor, spansOf } from './constructionWork';
@@ -755,6 +756,8 @@ export class Game implements BuildContext {
   readonly timelapse: TimelapseRecorder;
   /** Стройка дорог (режим «Со строительством», src/game/construction.ts): проекты и их ход. */
   readonly construction: Construction;
+  /** Временные светофоры реверса на перестройке «с проездом» узких дорог (src/game/workSignals.ts). */
+  readonly workSignals = new WorkSignals();
   /** Предприятия строит игрок (режим «Строит игрок», src/game/enterprises.ts): месторождения, постройка, рабочие, вред. */
   readonly enterprises: Enterprises;
 
@@ -3732,6 +3735,8 @@ export class Game implements BuildContext {
 
   private tick(dt: number): void {
     this.time += dt;
+    // Светофоры реверса на перестройке «с проездом» — до движения: красный — стоп-линия своего направления.
+    if (this.construction.projects.size || this.workSignals.list.size) this.workSignals.step(dt, this.roads.net, this.roads.graph, this.traffic);
     this.traffic.step(dt);
     this.gatherCrews();
     this.rail.step(dt);

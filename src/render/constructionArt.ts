@@ -22,11 +22,11 @@ import { drawVehicleArt } from './vehicleArt';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import type { LaneRenderer } from '../lanes/draw';
 import { edgesAt, pointOff, stations } from '../lanes/geometry';
-import type { Corridor, LaneNet } from '../lanes/model';
+import { type Corridor, type LaneNet, taperLen } from '../lanes/model';
 import { corridorLayer } from '../lanes/speedDisplay';
 import type { BuildBase } from '../world/entities';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
-import { closureOf, fitLanes, partLanes } from '../lanes/closure';
+import { closureOf, endCuts, fitLanes, laneWise, partLanes, reverseStops, reverseZone, workSide } from '../lanes/closure';
 import { bridgePiers, drawCraneSet, drawShieldSet, type SiteKind, siteKind, slabTo } from './structureArt';
 import { type Box, grow } from './tileCache';
 
@@ -42,11 +42,41 @@ export function buildingCorridors(net: LaneNet): Corridor[] {
 }
 
 /**
- * Полотна перестройки, перекрытые по полосам (closure.ts, 'part'): открытые прежние полосы рисуются ещё раз — поверх
- * стройки (отсыпки и чертежа), чтобы было видно, где едут машины.
+ * Прежняя дорога перестройки по полосам — поверх стройки (по ней едут), из сети для карты road (openNet view):
+ * широкая (2+2 и шире) — открытые полосы целиком; узкая «с проездом» (laneWise) — только то, что ещё не разрыто:
+ * первым проходом — другая половина целиком и своя впереди отсыпки, вторым — своя впереди отсыпки (другая уже новая,
+ * её рисует drawProjects). Без площадок узлов.
  */
-export function partialCorridors(net: LaneNet): Set<number> {
-  return new Set(buildingCorridors(net).filter((c) => closureOf(c.build) === 'part').map((c) => c.id));
+export function drawOldRoad(ctx: CanvasRenderingContext2D, full: LaneNet, road: LaneNet, lanes: LaneRenderer, zoom: number, view: Box): void {
+  const list = buildingCorridors(full).filter((c) => closureOf(c.build) === 'part' && seen(projectBox(c), view));
+  if (!list.length) return;
+  const none = () => false;
+  const wide = new Set(list.filter((c) => !laneWise(c.build)).map((c) => c.id));
+  if (wide.size) lanes.draw(ctx, road, zoom, false, view, 0, { corridor: (id) => wide.has(id), node: none, shadow: 'skip' });
+  for (const c of list) {
+    const o = road.corridors.get(c.id);
+    if (wide.has(c.id) || !o) continue;
+    const b = c.build!;
+    const side = workSide(b);
+    const L = o.length;
+    const [earthTo] = drawnSpans(c);
+    const ahead: [number, number] = b.fromB ? [0, L - earthTo] : [earthTo, L];
+    const parts: { left: Vec[]; right: Vec[] }[] = [];
+    if (ahead[1] - ahead[0] > 0.5) parts.push(band(road, o, ahead[0], ahead[1], ROAD_MARGIN + 3, false, side));
+    if (!b.pass) parts.push(band(road, o, 0, L, ROAD_MARGIN + 3, false, -side as 1 | -1));
+    const shapes = parts.filter((p) => p.left.length >= 2);
+    if (!shapes.length) continue;
+    ctx.save();
+    ctx.beginPath();
+    for (const p of shapes) {
+      const pts = [...p.left, ...[...p.right].reverse()];
+      pts.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+      ctx.closePath();
+    }
+    ctx.clip();
+    lanes.draw(ctx, road, zoom, false, view, 0, { corridor: (id) => id === c.id, node: none, shadow: 'skip' });
+    ctx.restore();
+  }
 }
 
 const joints = new WeakMap<LaneNet, { version: number; open: LaneNet; ids: Set<number> }>();
@@ -153,7 +183,7 @@ const seen = (b: Box, view: Box) => !(b.x1 < view.x0 || b.x0 > view.x1 || b.y1 <
  * Кромки полотна на [s0, s1]: левая и правая (с обочиной pad), у моста — подняты, как у готового; shade — не само
  * полотно, а его тень на земле (сдвинута по высоте, как у отрисовки дорог).
  */
-function band(net: LaneNet, c: Corridor, s0: number, s1: number, pad: number, shade = false): { left: Vec[]; right: Vec[] } {
+function band(net: LaneNet, c: Corridor, s0: number, s1: number, pad: number, shade = false, side?: 1 | -1): { left: Vec[]; right: Vec[] } {
   const left: Vec[] = [];
   const right: Vec[] = [];
   const raised = Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
@@ -163,8 +193,9 @@ function band(net: LaneNet, c: Corridor, s0: number, s1: number, pad: number, sh
     const look = raised ? bridgeLook(deckAlong(net, c, s)) : null;
     const d = look && (shade ? look.shadow : look.lift);
     const up = (p: Vec) => (d ? add(p, d) : p);
-    left.push(up(pointOff(c, s, e[0] - pad)));
-    right.push(up(pointOff(c, s, e[1] + pad)));
+    // side — только половина полотна по эту сторону оси (перестройка «с проездом»: по половине за проход).
+    left.push(up(pointOff(c, s, side === 1 ? 0 : e[0] - pad)));
+    right.push(up(pointOff(c, s, side === -1 ? 0 : e[1] + pad)));
   }
   return { left, right };
 }
@@ -496,12 +527,15 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
     // неё — опоры, балки и плита настила, у тоннеля — выработка щита (structureArt).
     const { earth } = projectLayout(c, cuts);
     const kind = siteKind(net, c);
+    // «С проездом» на узкой (closure.ts, laneWise): этапы — только на перекладываемой половине полотна; во втором
+    // проходе другая половина уже новая — целиком.
+    const side = kind === 'road' && laneWise(c.build) ? workSide(c.build!) : undefined;
     if (kind === 'bridge') {
       const [ca, cb] = cuts.get(c.id) ?? [0, 0];
       drawBridgeFrame(ctx, net, c, earthTo, Math.max(0, ca), c.length - Math.max(0, cb));
     } else if (earth && kind === 'tunnel') drawBore(ctx, net, c, ...earth);
     else if (earth) {
-      const b = band(net, c, ...earth, ROAD_MARGIN + 1.2);
+      const b = band(net, c, ...earth, ROAD_MARGIN + 1.2, false, side);
       ctx.fillStyle = EARTH;
       poly(ctx, [...b.left, ...[...b.right].reverse()]);
       ctx.closePath();
@@ -510,8 +544,10 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
     // Покрытие и разметка — то же полотно, что у готовой дороги, в полосе готового (с запасом на бордюр и парапет).
     const only = (id: number) => id === c.id;
     // Тень — уже нарисована (shadows): в полосе полотна от неё был бы лишь обрывок поверх.
-    if (paveTo > 0.5) clipped(ctx, band(net, c, ...span(paveTo), ROAD_MARGIN + 3), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, marks: false, shadow: 'skip' }));
-    if (marksTo > 0.5) clipped(ctx, band(net, c, ...span(marksTo), ROAD_MARGIN + 3), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
+    // Второй проход (и после него перекрыли целиком) — первая половина уже новая.
+    if (kind === 'road' && c.build!.pass) clipped(ctx, band(net, c, 0, c.length, ROAD_MARGIN + 3, false, -workSide(c.build!) as 1 | -1), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
+    if (paveTo > 0.5) clipped(ctx, band(net, c, ...span(paveTo), ROAD_MARGIN + 3, false, side), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, marks: false, shadow: 'skip' }));
+    if (marksTo > 0.5) clipped(ctx, band(net, c, ...span(marksTo), ROAD_MARGIN + 3, false, side), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
   }
   // Площадки узлов — этапом, дошедшим до них (nodeStage): покрытие — асфальтом площадки (у примыкания к готовой дороге
   // закрывает и её разметку, как у готового перекрёстка), отсыпка — землёй по её контуру, если готовых дорог у узла нет.
@@ -558,7 +594,14 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
  * — красно-белые щиты поперёк закрытых полос (целиком — поперёк всего полотна), по полосам — ещё и ряд конусов по
  * границе открытого и закрытого. cuts — обрезы полотен у перекрёстков (щит — сразу за площадкой узла).
  */
-export function drawClosures(ctx: CanvasRenderingContext2D, net: LaneNet, cuts: Map<number, [number, number]>, zoom: number, view: Box): void {
+export function drawClosures(
+  ctx: CanvasRenderingContext2D,
+  net: LaneNet,
+  cuts: Map<number, [number, number]>,
+  zoom: number,
+  view: Box,
+  lamp: (id: number, flow: 1 | -1) => 'green' | 'red' | null = () => null,
+): void {
   if (zoom < 0.18) return;
   const list = buildingCorridors(net).filter((c) => c.build?.was && seen(projectBox(c), view));
   if (!list.length) return;
@@ -568,6 +611,10 @@ export function drawClosures(ctx: CanvasRenderingContext2D, net: LaneNet, cuts: 
   for (const c of list) {
     const k = closureOf(c.build);
     if (k !== 'part' && k !== 'closed') continue;
+    if (k === 'part' && laneWise(c.build)) {
+      drawReverse(ctx, net, c, px, view, lamp);
+      continue;
+    }
     const w = c.build!.was!;
     const [ca, cb] = cuts.get(c.id) ?? [0, 0];
     const L = c.length;
@@ -625,6 +672,122 @@ export function drawClosures(ctx: CanvasRenderingContext2D, net: LaneNet, cuts: 
     }
   }
   ctx.restore();
+}
+
+/**
+ * Перестройка «с проездом» на узкой (closure.ts, laneWise) на карте: участок под реверсом (reverseZone) — конусы по оси
+ * между открытой и перекладываемой половиной, у концов участка — отгоном (косой линией конусов от края полосы к оси,
+ * где машины съезжают на открытую половину) и щит поперёк перекладываемой половины; на стоп-линиях (reverseStops) —
+ * белая линия поперёк полосы и временный светофор справа по ходу: горит красный или зелёный (lamp, workSignals.ts).
+ */
+function drawReverse(
+  ctx: CanvasRenderingContext2D,
+  net: LaneNet,
+  c: Corridor,
+  px: number,
+  view: Box,
+  lamp: (id: number, flow: 1 | -1) => 'green' | 'red' | null,
+): void {
+  const b = c.build!;
+  const w = b.was!;
+  const L = c.length;
+  const zone = reverseZone(c, b, endCuts(net, c));
+  const stops = reverseStops(c, b, zone);
+  const side = workSide(b);
+  const old = fitLanes(w.lanes, w.len, L);
+  const half = LANE_W / 2;
+  const work = old.filter((l) => l.offset * side > 0.01);
+  if (!work.length) return;
+  // Перекладываемая половина — поперёк от оси до внешней кромки её полос (со знаком стороны).
+  const outer = side * Math.max(...work.map((l) => Math.abs(l.offset) + half));
+  const T = Math.min(taperLen(w.cls) / 2, (zone[1] - zone[0]) / 2);
+  const near = (p: Vec) => p.x > view.x0 - 10 && p.x < view.x1 + 10 && p.y > view.y0 - 10 && p.y < view.y1 + 10;
+  const r = Math.max(0.7, 2.2 * px);
+  const cone = (p: Vec) => {
+    if (!near(p)) return;
+    ctx.fillStyle = '#f08a3c';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  const axis = side * 0.4;
+  // Отгон конусов у концов участка: от внешней кромки (там полоса ещё открыта) к оси.
+  const taper = (from: number, to: number) => {
+    const n = Math.max(2, Math.ceil(Math.abs(to - from) / 4));
+    for (let i = 0; i <= n; i++) {
+      const u = i / n;
+      cone(pointOff(c, from + (to - from) * u, outer - side * 0.8 + (axis - outer + side * 0.8) * u));
+    }
+  };
+  taper(zone[0] - T, zone[0]);
+  taper(zone[1] + T, zone[1]);
+  for (let s = zone[0] + 8; s < zone[1] - 4; s += 10) cone(pointOff(c, s, axis));
+  // Щиты поперёк перекладываемой половины — за отгоном, у концов участка.
+  const bar = Math.max(2, 4 * px);
+  for (const s of [zone[0] + 2, zone[1] - 2]) {
+    const p = pointOff(c, s, axis + side * 0.6);
+    const q = pointOff(c, s, outer - side * 0.4);
+    if (!near(p)) continue;
+    ctx.lineWidth = bar;
+    ctx.setLineDash([]);
+    ctx.strokeStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(q.x, q.y);
+    ctx.stroke();
+    ctx.strokeStyle = '#e8483f';
+    ctx.setLineDash([1.6, 1.6]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Стоп-линии и светофоры: у идущих по оси — у начала участка, справа (смещение больше нуля); против — у конца, слева.
+  for (const flow of [1, -1] as const) {
+    const s = flow > 0 ? stops[0] : stops[1];
+    const lanes = old.filter((l) => l.flow === flow);
+    if (!lanes.length) continue;
+    const lo = Math.min(...lanes.map((l) => l.offset - half));
+    const hi = Math.max(...lanes.map((l) => l.offset + half));
+    const p = pointOff(c, s, lo + 0.3);
+    const q = pointOff(c, s, hi - 0.3);
+    if (!near(p)) continue;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.lineWidth = Math.max(0.5, 1.4 * px);
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(q.x, q.y);
+    ctx.stroke();
+    // Светофор — у правой по ходу кромки, чуть за обочиной: корпус вдоль дороги, сверху — красный, ниже — зелёный.
+    const edge = flow > 0 ? Math.max(hi, ...old.map((l) => l.offset + half)) : Math.min(lo, ...old.map((l) => l.offset - half));
+    const at = pointOff(c, s, edge + flow * (ROAD_MARGIN + 1.6));
+    const t = c.lut.tangentAt(s);
+    const dir = flow > 0 ? t : scale(t, -1);
+    const lit = lamp(c.id, flow);
+    const k = Math.max(1, 1.6 * px);
+    ctx.save();
+    ctx.translate(at.x, at.y);
+    ctx.rotate(Math.atan2(dir.y, dir.x));
+    ctx.fillStyle = '#2b2f36';
+    ctx.strokeStyle = '#f4d03f';
+    ctx.lineWidth = 0.35 * k;
+    ctx.beginPath();
+    ctx.roundRect(-1.5 * k, -0.9 * k, 3 * k, 1.8 * k, 0.5 * k);
+    ctx.fill();
+    ctx.stroke();
+    // Красный — дальше по ходу (как верхняя секция, если смотреть с места водителя), зелёный — ближе.
+    const lampAt = (x: number, color: string, on: boolean) => {
+      ctx.fillStyle = on ? color : 'rgba(255, 255, 255, 0.18)';
+      ctx.beginPath();
+      ctx.arc(x * k, 0, 0.55 * k, 0, Math.PI * 2);
+      ctx.fill();
+    };
+    lampAt(0.75, '#ff4b3e', lit !== 'green');
+    lampAt(-0.75, '#3ddc84', lit === 'green');
+    ctx.restore();
+  }
 }
 
 /** Где на полотне край работ (точка, направление стройки, этап) — нет, если участок ещё не начат. */

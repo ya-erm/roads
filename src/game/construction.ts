@@ -38,7 +38,7 @@
 import { dist, dot, sub, type Vec } from '../core/vec';
 import { nodeCuts } from '../lanes/geometry';
 import { corridorLayer } from '../lanes/speedDisplay';
-import { closed, partLanes } from '../lanes/closure';
+import { closed, endCuts, laneDone, laneWise, partLanes, reverseZone, reversible } from '../lanes/closure';
 import type { Corridor, CorridorBuild, CorridorWas, LaneNet } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import type { Network, Segment } from '../world/network';
@@ -178,6 +178,11 @@ export interface RebuildInfo {
   closed: number;
   /** Полос прежней дороги открыто при перекрытии по полосам — сколько из скольких; по полосам нет — null. */
   open: [number, number] | null;
+  /**
+   * Сколько полотен узкие (1+1, 2+1 — closure.ts, reversible): их «◐ с проездом» — по половине полотна, реверс по
+   * другой со светофорами и одна бригада, а не половина полос в каждую сторону.
+   */
+  narrow: number;
 }
 
 /** Из чего проект: метров по видам (вода — мост над ней), насыпь и выемка — высота и глубина, м. */
@@ -1049,7 +1054,10 @@ export class Construction {
         // по долям этапов (stageWork): за метр — та же цена, за участок — та же сумма.
         const moved = advanceStages(spansOf(b, L), L, speed, left);
         const complete = moved.spans[2] >= L - 1e-6;
-        const done = complete ? L : Math.max(b.done, stageWork(moved.spans, L));
+        // «С проездом» на узкой (closure.ts, laneWise): два прохода по половине полотна, каждый — половина готового.
+        const lane = !rail && laneWise(b);
+        const made = complete ? L : stageWork(moved.spans, L);
+        const done = lane ? Math.max(b.done, laneDone(!!b.pass, made, L)) : complete ? L : Math.max(b.done, made);
         const cost = paidFor(full, done, L) - paidFor(full, b.done, L);
         // Сперва — из резерва проекта, остальное — из свободного бюджета (до кредитного предела: резерв его не обходит).
         const fromReserve = Math.min(cost, p.reserve ?? 0);
@@ -1073,6 +1081,22 @@ export class Construction {
           p.spent += cost;
         }
         left -= moved.used;
+        if (complete && lane && !b.pass) {
+          // Первая половина готова — бригада разворачивается у конца и идёт назад по второй половине (своей стороной по
+          // ходу): участок не открывается, реверс теперь — по новой половине.
+          const end = b.fromB ? c.a : c.b;
+          const next: CorridorBuild = { ...b, done, stages: [0, 0, 0], pass: 2 };
+          if (b.fromB) delete next.fromB;
+          else next.fromB = true;
+          c.build = next;
+          this.touchPiece(p.id, c);
+          this.host.networkChanged();
+          for (const o of crews) {
+            o.front = { corridor: c.id, fromB: !!next.fromB };
+            this.crews.relocate(o, end);
+          }
+          continue;
+        }
         if (complete) {
           // Следующий участок фронта — до открытия этого (пока он ещё «свой», continuation его не считает чужим).
           const next = this.continuation(p.id, c, !!b.fromB);
@@ -1099,6 +1123,15 @@ export class Construction {
           if (!rail && b.was && !b.was.moved && b.done <= 0 && done > 0) {
             this.touchPiece(p.id, c);
             this.host.networkChanged();
+          } else if (lane && b.done > 0) {
+            // Реверс переехал на следующий кусок участка (reverseZone) — светофоры и полосы на новом месте.
+            const cuts = endCuts(net, c as Corridor);
+            const was = reverseZone(c as Corridor, b, cuts);
+            const now = reverseZone(c as Corridor, c.build, cuts);
+            if (Math.abs(was[0] - now[0]) > 0.01 || Math.abs(was[1] - now[1]) > 0.01) {
+              this.touchPiece(p.id, c);
+              this.host.networkChanged();
+            }
           }
         }
       }
@@ -1151,11 +1184,14 @@ export class Construction {
       const b = c.build!;
       const { full, rate } = this.priceOf(id, c);
       const sp = spansOf(b, c.length);
-      for (let i = 0; i < 3; i++) stages[i] += sp[i];
+      // «С проездом» на узкой — два прохода по половине полотна: этап первого — половина, второй ещё весь впереди.
+      const lane = !rail && laneWise(b);
+      for (let i = 0; i < 3; i++) stages[i] += lane ? laneDone(!!b.pass, sp[i], c.length) : sp[i];
       length += c.length;
       ready += b.done;
       // Участок готов, когда разметка дошла до конца: каждый этап — не раньше, чем через convoyGap после предыдущего.
       seconds += stageSeconds(sp, c.length, rate * k);
+      if (lane && !b.pass) seconds += stageSeconds([0, 0, 0], c.length, rate * k);
       left += full - paidFor(full, b.done, c.length);
       const m = c.lut.pointAt(c.length / 2);
       mid = { x: mid.x + m.x * c.length, y: mid.y + m.y * c.length };
@@ -1272,13 +1308,14 @@ export class Construction {
     if (this.isRail(id)) return null;
     const list = this.corridorsOf(id).filter((c) => c.build?.was);
     if (!list.length) return null;
-    const out: RebuildInfo = { count: list.length, length: 0, moved: 0, part: 0, closed: 0, open: null };
+    const out: RebuildInfo = { count: list.length, length: 0, moved: 0, part: 0, closed: 0, open: null, narrow: 0 };
     let longest = -1;
     for (const c of list) {
       const w = c.build!.was!;
       out.length += c.length;
       if (w.moved) out.moved++;
       if (w.part) out.part++;
+      if (!w.moved && reversible(w.lanes)) out.narrow++;
       if (closed(c.build)) out.closed++;
       if (w.part && c.length > longest) {
         longest = c.length;

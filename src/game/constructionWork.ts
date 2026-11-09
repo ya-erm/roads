@@ -5,6 +5,7 @@
 import { CONSTRUCTION } from '../config';
 import type { CurveLUT } from '../core/bezier';
 import type { Vec } from '../core/vec';
+import { laneWise } from '../lanes/closure';
 import type { Corridor, CorridorBuild, LaneNet } from '../lanes/model';
 import type { Network, Segment } from '../world/network';
 
@@ -27,9 +28,12 @@ export interface Piece {
  * Сколько бригад встанет на проект с недостроенными полотнами cs: есть полотно в одну полосу (съезд, заезд,
  * односторонняя) — не больше brigade.perNarrow (столько рядов техники помещается на нём бок о бок), иначе perProject.
  * По самому узкому полотну проекта, а не по участку у края работ: предел не скачет, пока колонна идёт по проекту.
+ * Перестройка «с проездом» на узкой (closure.ts, laneWise) — одна бригада: она занимает половину полотна, по другой
+ * идёт поток, второй ряд техники не встанет.
  */
 export function crewCap(cs: readonly Corridor[]): number {
   const { perProject, perNarrow } = CONSTRUCTION.brigade;
+  if (cs.some((c) => laneWise(c.build))) return 1;
   return cs.some((c) => c.lanes.length <= 1) ? Math.min(perProject, perNarrow) : perProject;
 }
 
@@ -67,11 +71,15 @@ export function buildRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: 
 /**
  * Темп стройки полотна, м/с на ×1 у одной бригады: новая дорога — buildRate; перестройка готовой (CorridorBuild.was,
  * rebuild.ts) — быстрее на долю work (на месте часть работы уже сделана), а по полосам (part) — в partial раз дольше.
+ * «С проездом» на узкой (laneWise) — темп одного прохода (их два, по половине полотна): каждый — pass от времени
+ * перестройки целиком.
  */
 export function pieceRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean): number {
   const w = c.build?.was;
   const rate = buildRate(net, c, isWater);
-  return w ? rate / (Math.max(0.05, w.work) * (w.part ? CONSTRUCTION.rebuild.partial : 1)) : rate;
+  if (!w) return rate;
+  const K = CONSTRUCTION.rebuild;
+  return rate / (Math.max(0.05, w.work) * (laneWise(c.build) ? K.pass : w.part ? K.partial : 1));
 }
 
 /** Во сколько раз метр ж/д пути строится дольше метра обычной дороги: класс «rail» и мосты, эстакады, тоннели по высоте. */

@@ -127,6 +127,10 @@ export interface Barrier {
   s: number;
   closed: boolean;
   busy: boolean;
+  /** Только для этого направления (по оси — 1, против — −1); нет — для обоих (шлагбаум переезда). */
+  flow?: 1 | -1;
+  /** Стоп-линия — на столько раньше s по ходу; нет — BARRIER_STOP (у переезда). Светофор реверса — 0: s и есть стоп-линия. */
+  stop?: number;
 }
 
 /** Стоп-линия — на столько раньше шлагбаума (полпути и запас). */
@@ -266,6 +270,11 @@ export class LaneTraffic {
   totalTripTime = 0;
   /** Шлагбаумы по полотнам. */
   barriers = new Map<number, Barrier[]>();
+  /**
+   * Временные светофоры реверса на перестройке «с проездом» (src/game/workSignals.ts) по полотнам: красный — закрытая
+   * стоп-линия своего направления (Barrier.flow, stop 0). Задаёт игра каждый такт, до движения.
+   */
+  signals = new Map<number, Barrier[]>();
   /**
    * Стоп-линии перед закрытыми шлагбаумами — на такт (barrierAhead): по связям, по оси полотна. За такт движения
    * шлагбаумы не меняются — их закрывает и открывает ж/д после него (rail.step), а переезды заново ищутся при правке
@@ -971,6 +980,7 @@ export class LaneTraffic {
 
   private anyBarrierClosed(): boolean {
     for (const list of this.barriers.values()) for (const b of list) if (b.closed) return true;
+    for (const list of this.signals.values()) for (const b of list) if (b.closed) return true;
     return false;
   }
 
@@ -981,9 +991,10 @@ export class LaneTraffic {
     if (!stops) {
       stops = [];
       const link = this.graph.links.get(linkId);
-      for (const b of (link && this.barriers.get(link.corridor)) ?? []) {
-        if (!b.closed) continue;
-        const stop = b.s - link!.flow * BARRIER_STOP;
+      const list = link ? [...(this.barriers.get(link.corridor) ?? []), ...(this.signals.get(link.corridor) ?? [])] : [];
+      for (const b of list) {
+        if (!b.closed || (b.flow !== undefined && b.flow !== link!.flow)) continue;
+        const stop = b.s - link!.flow * (b.stop ?? BARRIER_STOP);
         if (stop >= link!.s0 - 0.01 && stop <= link!.s1 + 0.01) stops.push(stop);
       }
       this.closedStops.set(linkId, stops);

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
 import type { Vec } from '../core/vec';
-import { closureOf, keptLanes } from '../lanes/closure';
+import { closureOf, endCuts, keptLanes, reverseZone } from '../lanes/closure';
 import { splitBuild } from '../lanes/edit';
 import { type Corridor, type CorridorWas, oneWay, twoWay } from '../lanes/model';
 import type { BuildBase } from '../world/entities';
@@ -183,7 +183,7 @@ describe('Перестройка: «Со строительством»', () => 
     expect(game.construction.info(p.id)?.rebuild?.count).toBe(1);
   });
 
-  it('работы идут по полосам: открыта одна полоса на 30 км/ч; целиком — дороги нет; достроили — проспект, заплачено по цене', () => {
+  it('работы идут «с проездом»: на участке у бригады одна полоса в обе стороны, 30 км/ч; целиком — дороги нет; достроили — проспект, заплачено по цене', () => {
     const { game, c } = scene('build');
     let paid = 0;
     const spend = game.spend.bind(game);
@@ -200,10 +200,18 @@ describe('Перестройка: «Со строительством»', () => 
       t += 0.5;
     }
     expect(live(game, c.id).build?.done).toBeGreaterThan(0);
-    // По полосам: прежняя улица 1+1 — одна полоса (по ходу оси), скорость зоны работ.
+    // «С проездом» на 1+1: на участке под реверсом — одна полоса (открытая половина) в обе стороны, вне его — обе
+    // стороны на своих местах; скорость зоны работ.
     expect(closureOf(live(game, c.id).build)).toBe('part');
     const o = opened(game, c.id)!;
-    expect(o.lanes.length).toBe(1);
+    const zone = reverseZone(live(game, c.id), live(game, c.id).build!, endCuts(game.roads.net, live(game, c.id)));
+    const mid = (zone[0] + zone[1]) / 2;
+    const inZone = o.lanes.filter((l) => l.from <= mid && l.to >= mid);
+    expect(inZone.map((l) => l.flow).sort()).toEqual([-1, 1]);
+    expect(new Set(inZone.map((l) => l.offset)).size).toBe(1);
+    const before = o.lanes.filter((l) => l.from <= 1);
+    expect(before.map((l) => l.flow).sort()).toEqual([-1, 1]);
+    expect(new Set(before.map((l) => l.offset)).size).toBe(2);
     expect(o.limit).toBe(K.zone);
     expect(game.construction.rebuildOf(id)?.open).toEqual([1, 2]);
     // Перекрыть целиком — полотна в сети движения нет, стройка быстрее.
@@ -279,10 +287,11 @@ describe('Перестройка: «Со строительством»', () => 
     expect(fromB).toBe(true);
     expect(live(game, c.id).build?.done).toBeGreaterThan(0);
     expect(live(game, c.id).build?.was?.cls).toBe('street');
-    // По полосам на 1+1 — одна полоса по ходу оси (с востока): туда маршрут едет, обратно объезда нет — нет пути.
+    // «С проездом» на 1+1 — реверс по одной полосе: маршрут есть в обе стороны (по очереди, по светофорам).
     expect(closureOf(live(game, c.id).build)).toBe('part');
     expect(game.roads.route(far, gate)).toBeTruthy();
-    expect(game.roads.route(gate, far)).toBeNull();
+    expect(game.roads.route(gate, far)).toBeTruthy();
+    expect(game.workSignals.list.has(c.id)).toBe(true);
     // Целиком — объезда нет: нет пути ни туда, ни обратно.
     game.setProjectClosure(live(game, c.id).build!.project, false);
     expect(game.roads.route(far, gate)).toBeNull();
@@ -340,5 +349,90 @@ describe('Перестройка: прежняя дорога не теряет�
     expect(closureOf(k.build)).toBe('old');
     expect(back.roads.route(gate, far)).toBeTruthy();
     expect(back.roads.route(far, gate)).toBeTruthy();
+  });
+});
+
+describe('Перестройка «с проездом» узкой дороги: по половине полотна, реверс со светофорами', () => {
+  const reach = CONSTRUCTION.reach;
+  beforeEach(() => {
+    CONSTRUCTION.reach = 1e12;
+  });
+  afterEach(() => {
+    CONSTRUCTION.reach = reach;
+  });
+  const CAR = { kind: 'car' as const, length: 7, width: 4, maxSpeed: 60, accel: 10, color: '#fff' };
+
+  it('одна бригада, два прохода навстречу друг другу, машины проходят в обе стороны по очереди; заплачено по цене', () => {
+    const { game, c, at, base } = scene('build');
+    // Вторая бригада на базе: на узкой «с проездом» её не возьмут.
+    game.construction.crews.hire(base!.id);
+    const gate = nodeAt(game, { x: at.x - 90, y: at.y })!;
+    const far = nodeAt(game, { x: at.x + 690, y: at.y })!;
+    let paid = 0;
+    const spend = game.spend.bind(game);
+    game.spend = (amount, kind) => {
+      if (kind !== 'purchases') paid += amount;
+      spend(amount, kind);
+    };
+    expect(game.roadBuilder.apply(game.roadBuilder.rebuild(c.id, { cls: AVENUE.cls, lanes: AVENUE.lanes }))).toBe(true);
+    const id = live(game, c.id).build!.project;
+    const price = live(game, c.id).build!.was!.price;
+    expect(game.construction.crews.cap(id)).toBe(1);
+    // Срок: «с проездом» — два прохода по pass от перестройки целиком; ⛔ целиком той же бригадой — быстрее во столько раз.
+    const slow = game.construction.info(id)!.seconds;
+    game.setProjectClosure(id, false);
+    const fast = game.construction.info(id)!.seconds;
+    expect(game.construction.crews.cap(id)).toBeGreaterThan(1);
+    game.setProjectClosure(id, true);
+    expect(slow / fast).toBeCloseTo(2 * K.pass, 1);
+    // Машины в обе стороны, пока идёт первый проход.
+    const sent: { id: number; west: boolean }[] = [];
+    const spawn = () => {
+      const g = game.roads.graph;
+      for (const [from, to, west] of [
+        [gate, far, false],
+        [far, gate, true],
+      ] as const) {
+        const route = game.roads.route(from, to);
+        const v = route && game.traffic.spawn({ ...CAR, targetNode: to, route });
+        if (v) sent.push({ id: v.id, west });
+        expect(g).toBe(game.roads.graph);
+      }
+    };
+    const fromB0 = { value: undefined as boolean | undefined };
+    const greens = new Set<number>();
+    let t = 0;
+    for (; t < 400 && !live(game, c.id).build?.pass; t += 0.5) {
+      runSeconds(game, 0.5);
+      const b = live(game, c.id).build!;
+      if (b.done > 0 && fromB0.value === undefined) fromB0.value = !!b.fromB;
+      if (b.done > 0 && Math.round(t * 2) % 6 === 0) spawn();
+      const sig = game.workSignals.list.get(c.id);
+      if (sig) greens.add(sig.state.go);
+      // Бригада одна, хоть свободная и есть.
+      expect(game.construction.crews.assigned(id).length).toBeLessThanOrEqual(1);
+    }
+    // Первый проход кончился: готова половина, второй — навстречу.
+    const b2 = live(game, c.id).build!;
+    expect(b2.pass).toBe(2);
+    expect(!!b2.fromB).toBe(!fromB0.value);
+    expect(b2.done).toBeCloseTo(c.length / 2, 0);
+    expect(closureOf(b2)).toBe('part');
+    // Светофоры пропускали обе стороны по очереди.
+    expect(greens.has(1) && greens.has(-1) && greens.has(0)).toBe(true);
+    // Машины доехали в обе стороны, никто не застрял.
+    for (let i = 0; i < 300 && sent.some((s) => game.traffic.vehicles.has(s.id)); i++) runSeconds(game, 1);
+    expect(sent.filter((s) => s.west).length).toBeGreaterThan(3);
+    expect(sent.filter((s) => !s.west).length).toBeGreaterThan(3);
+    expect(sent.filter((s) => game.traffic.vehicles.has(s.id))).toEqual([]);
+    // Достроили — проспект, светофоров нет, заплачено ровно по цене.
+    for (let i = 0; i < 600 && live(game, c.id).build; i++) runSeconds(game, 1);
+    expect(live(game, c.id).build).toBeUndefined();
+    runSeconds(game, 0.2);
+    expect(game.workSignals.list.size).toBe(0);
+    expect(game.traffic.signals.size).toBe(0);
+    expect(opened(game, c.id)?.cls).toBe('avenue');
+    expect(paid).toBeGreaterThan(price - 2);
+    expect(paid).toBeLessThan(price + 2);
   });
 });
