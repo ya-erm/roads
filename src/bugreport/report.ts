@@ -44,6 +44,38 @@ export class UploadError extends Error {
   }
 }
 
+/** Ошибка «доска молчит»: запрос оборван по BUG_REPORT.stallMs. */
+export function stalled(ms: number): UploadError {
+  return new UploadError(`Доска не отвечает дольше ${Math.round(ms / 1000)} с`);
+}
+
+/**
+ * Запрос не дольше ms: не уложился — сигнал обрывает его, промис отклоняется ошибкой stalled. Таймер — сам по
+ * себе, а не только через signal: подделка fetch в тестах (и зависший браузерный запрос) сигнал может не слушать.
+ */
+export function withDeadline<T>(ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const ctl = new AbortController();
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(stalled(ms));
+      ctl.abort();
+    }, ms);
+    const stop = () => clearTimeout(timer);
+    Promise.resolve()
+      .then(() => run(ctl.signal))
+      .then(
+        (v) => {
+          stop();
+          resolve(v);
+        },
+        (e: unknown) => {
+          stop();
+          reject(e);
+        },
+      );
+  });
+}
+
 /** Имена файлов отчёта: латиницей и по времени, чтобы отчёты не путались и не ломались на доске. */
 export function attachmentNames(at: Date): Record<AttachKind, string> {
   const stem = reportStem(at);
@@ -118,6 +150,11 @@ export interface UploadOptions {
   onProgress?: (done: number, total: number) => void;
   /** Прогресс каждого файла: 0 — пошёл, 1 — загрузчик принял и вернул ссылку. */
   onFile?: (kind: AttachKind, fraction: number) => void;
+  /**
+   * Сколько ждать ответа на запрос через fetch (создание пакета, файл без post), мс; по умолчанию —
+   * BUG_REPORT.stallMs. У post свой счёт — от последнего ушедшего байта (xhrPost).
+   */
+  stallMs?: number;
 }
 
 /** Ответ XMLHttpRequest как Response: дальше он разбирается так же, как ответ fetch. */
@@ -129,23 +166,59 @@ export function xhrResponse(status: number, text: string): Response {
 /**
  * Отправка файла через XMLHttpRequest — ради upload.onprogress. Как у fetch с credentials: 'omit' — без кук
  * (withCredentials выключен); сеть или CORS не пустили — TypeError, как бросил бы fetch.
+ *
+ * Промис завершается всегда: stallMs без признаков жизни (ни байтов отправки, ни ответа) — запрос обрывается
+ * с ошибкой stalled; ошибка внутри обработчика или loadend без load/error — тоже отказ, а не вечное ожидание.
  */
-export function xhrPost(Xhr: { new (): XMLHttpRequest } = XMLHttpRequest): PostFile {
+export function xhrPost(Xhr: { new (): XMLHttpRequest } = XMLHttpRequest, stallMs = BUG_REPORT.stallMs): PostFile {
   return (url, body, sent) =>
     new Promise<Response>((resolve, reject) => {
       const xhr = new Xhr();
-      xhr.open('POST', url);
-      xhr.withCredentials = false;
-      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-      xhr.upload.onprogress = (e) => {
-        const total = e.lengthComputable && e.total > 0 ? e.total : body.size;
-        if (total > 0) sent(Math.min(1, e.loaded / total));
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (done: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        done();
       };
-      xhr.onload = () => resolve(xhrResponse(xhr.status, xhr.responseText));
-      xhr.onerror = () => reject(new TypeError('Сеть не пустила файл'));
-      xhr.ontimeout = () => reject(new TypeError('Загрузка файла не дождалась ответа'));
-      xhr.onabort = () => reject(new TypeError('Загрузка файла прервана'));
-      xhr.send(body);
+      const fail = (e: unknown) => settle(() => reject(e));
+      // Каждый признак жизни откладывает обрыв: медленная, но идущая загрузка не обрывается.
+      const alive = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          fail(stalled(stallMs));
+          xhr.abort();
+        }, stallMs);
+      };
+      try {
+        xhr.open('POST', url);
+        xhr.withCredentials = false;
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.upload.onprogress = (e) => {
+          alive();
+          const total = e.lengthComputable && e.total > 0 ? e.total : body.size;
+          if (total > 0) sent(Math.min(1, e.loaded / total));
+        };
+        xhr.onprogress = alive;
+        xhr.onload = () => {
+          try {
+            const r = xhrResponse(xhr.status, xhr.responseText);
+            settle(() => resolve(r));
+          } catch (e) {
+            fail(e);
+          }
+        };
+        xhr.onerror = () => fail(new TypeError('Сеть не пустила файл'));
+        xhr.ontimeout = () => fail(stalled(stallMs));
+        xhr.onabort = () => fail(new TypeError('Загрузка файла прервана'));
+        // Конец запроса без load и error (так не должно быть, но тогда промис висел бы вечно).
+        xhr.onloadend = () => fail(new TypeError('Загрузка файла оборвалась'));
+        alive();
+        xhr.send(body);
+      } catch (e) {
+        fail(e);
+      }
     });
 }
 
@@ -158,14 +231,18 @@ export async function uploadAttachments(files: Attachment[], opts: UploadOptions
   const api = `${base}${opts.path ?? BUG_REPORT.uploadPath}`;
   const big = files.find((f) => f.data.size > BUG_REPORT.maxFileBytes);
   if (big) throw new UploadError(`Файл ${big.name} больше ${Math.round(BUG_REPORT.maxFileBytes / 2 ** 20)} МБ`);
+  const stallMs = opts.stallMs ?? BUG_REPORT.stallMs;
   // Куки доски загрузчику не нужны: он анонимный.
-  const created = await readJson(
-    await opts.fetch(`${api}?action=create`, {
-      method: 'POST',
-      credentials: 'omit',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(uploadManifest(files.map((f) => ({ name: f.name, size: f.data.size })))),
-    }),
+  const created = await withDeadline(stallMs, async (signal) =>
+    readJson(
+      await opts.fetch(`${api}?action=create`, {
+        method: 'POST',
+        credentials: 'omit',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(uploadManifest(files.map((f) => ({ name: f.name, size: f.data.size })))),
+        signal,
+      }),
+    ),
   );
   const batch = batchId(created);
   const out: Uploaded[] = [];
@@ -174,16 +251,20 @@ export async function uploadAttachments(files: Attachment[], opts: UploadOptions
     const f = files[i];
     const url = `${api}?batch=${encodeURIComponent(batch)}&file=${i}`;
     opts.onFile?.(f.kind, 0);
-    const json = await readJson(
-      opts.post
-        ? await opts.post(url, f.data, (p) => opts.onFile?.(f.kind, p * UPLOAD_SENT_SHARE))
-        : await opts.fetch(url, {
-            method: 'POST',
-            credentials: 'omit',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: f.data,
-          }),
-    );
+    const post = opts.post;
+    const json = post
+      ? await readJson(await post(url, f.data, (p) => opts.onFile?.(f.kind, p * UPLOAD_SENT_SHARE)))
+      : await withDeadline(stallMs, async (signal) =>
+          readJson(
+            await opts.fetch(url, {
+              method: 'POST',
+              credentials: 'omit',
+              headers: { 'Content-Type': 'application/octet-stream' },
+              body: f.data,
+              signal,
+            }),
+          ),
+        );
     out.push({ kind: f.kind, name: f.name, ...parseUploaded(json) });
     opts.onFile?.(f.kind, 1);
     opts.onProgress?.(i + 1, files.length);
@@ -412,19 +493,23 @@ export function parseReceipt(json: Json): Receipt {
 
 /**
  * Создаёт карточку отчёта на доске — без токена и кук. Частые отправки доска ограничивает (429 с Retry-After),
- * выключенная публичная отправка — отказ с её объяснением; сеть недоступна — fetch бросает TypeError.
+ * выключенная публичная отправка — отказ с её объяснением; сеть недоступна — fetch бросает TypeError; доска
+ * молчит дольше stallMs (по умолчанию BUG_REPORT.stallMs) — запрос обрывается ошибкой stalled.
  */
-export async function submitReport(report: BoardReport, opts: { fetch: typeof fetch; url?: string }): Promise<Receipt> {
-  const r = await opts.fetch(opts.url ?? submitUrl(), {
-    method: 'POST',
-    credentials: 'omit',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(report),
+export async function submitReport(report: BoardReport, opts: { fetch: typeof fetch; url?: string; stallMs?: number }): Promise<Receipt> {
+  return withDeadline(opts.stallMs ?? BUG_REPORT.stallMs, async (signal) => {
+    const r = await opts.fetch(opts.url ?? submitUrl(), {
+      method: 'POST',
+      credentials: 'omit',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(report),
+      signal,
+    });
+    if (r.status === 429) {
+      const wait = Number(r.headers.get('Retry-After'));
+      throw new UploadError(wait > 0 ? `слишком много отчётов подряд — попробуйте через ${Math.ceil(wait)} с` : 'слишком много отчётов подряд — попробуйте позже', 429);
+    }
+    if (r.status === 413) throw new UploadError('отчёт слишком большой', 413);
+    return parseReceipt(await readJson(r));
   });
-  if (r.status === 429) {
-    const wait = Number(r.headers.get('Retry-After'));
-    throw new UploadError(wait > 0 ? `слишком много отчётов подряд — попробуйте через ${Math.ceil(wait)} с` : 'слишком много отчётов подряд — попробуйте позже', 429);
-  }
-  if (r.status === 413) throw new UploadError('отчёт слишком большой', 413);
-  return parseReceipt(await readJson(r));
 }

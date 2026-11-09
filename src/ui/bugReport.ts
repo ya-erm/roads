@@ -87,10 +87,12 @@ import {
   submitReport,
   uploadAttachments,
   UploadError,
+  withDeadline,
   xhrPost,
   type Receipt,
   type Attachment,
   type AttachKind,
+  type ReportFile,
   type ReportInfo,
   type Uploaded,
 } from '../bugreport/report';
@@ -234,6 +236,82 @@ export interface Sent {
   uploaded: Uploaded[] | null;
   uploadError: string;
   copied: boolean;
+}
+
+/** Шаги отправки отчёта — снаружи: в окне настоящие, в тестах подделки. */
+export interface SendSteps {
+  /** Окно в состоянии «отправляю» (кнопка «Отправить» гаснет) — и обратно. */
+  busy: (on: boolean) => void;
+  /** Строка о том, что идёт сейчас. */
+  status: (text: string) => void;
+  /** Файлы отчёта (снимок с пометками собирается здесь). */
+  files: () => Promise<Attachment[]>;
+  upload: (files: Attachment[]) => Promise<Uploaded[]>;
+  /** Карточка на доске по файлам (без ссылки — не загрузились). */
+  submit: (refs: ReportFile[]) => Promise<Receipt>;
+  /** Текст отчёта с файлами «приложенными» — для буфера и архива. */
+  text: (refs: ReportFile[]) => string;
+  copy: (text: string) => Promise<boolean>;
+}
+
+/** Сколько ждать буфер обмена: браузер может спросить разрешение и не ответить. */
+const COPY_WAIT_MS = 3000;
+
+/**
+ * Отправка отчёта: файлы → загрузчик → карточка на доске; не дошло — текст в буфер. Не бросает и всегда
+ * заканчивается: что бы ни сломалось и ни зависло (загрузчик и доска обрываются по BUG_REPORT.stallMs),
+ * busy(false) вызывается, и кнопка «Отправить» снова активна — можно повторить.
+ */
+export async function deliverReport(steps: SendSteps): Promise<Sent> {
+  steps.busy(true);
+  let files: Attachment[] = [];
+  let uploaded: Uploaded[] | null = null;
+  let uploadError = '';
+  let receipt: Receipt | null = null;
+  let error = '';
+  try {
+    steps.status('Готовлю файлы…');
+    files = await steps.files();
+    // Сначала файлы — в публичный загрузчик (ссылки на них войдут в карточку); не принял — карточка всё равно
+    // уйдёт, с пометкой, каких файлов в ней нет.
+    if (files.length) {
+      steps.status('Загружаю файлы…');
+      try {
+        uploaded = await steps.upload(files);
+      } catch (e) {
+        // Сеть не пустила (fetch бросает TypeError) — без подробностей.
+        uploadError = e instanceof UploadError ? e.message : 'нет связи с загрузчиком доски';
+        console.warn('Баг-репорт: файлы не загрузились', e);
+      }
+    } else uploaded = [];
+    // Затем карточка — публичная отправка доски, без токена.
+    steps.status('Отправляю отчёт на доску…');
+    try {
+      receipt = await steps.submit(refsOf(files, uploaded));
+    } catch (e) {
+      error = e instanceof UploadError ? e.message : 'нет связи с доской задач';
+      console.warn('Баг-репорт: отчёт не отправился', e);
+    }
+  } catch (e) {
+    // Файлы не собрались (снимок, сохранение) — отчёт не ушёл, но окно не висит.
+    error = 'не удалось собрать файлы отчёта';
+    console.warn('Баг-репорт: отчёт не собрался', e);
+  }
+  const refs = refsOf(files, uploaded);
+  let text = '';
+  let copied = false;
+  try {
+    text = steps.text(refs);
+    copied = receipt ? false : await withDeadline(COPY_WAIT_MS, () => steps.copy(text)).catch(() => false);
+  } catch (e) {
+    console.warn('Баг-репорт: текст отчёта не собрался', e);
+  }
+  steps.busy(false);
+  return { text, receipt, error, uploaded, uploadError, copied };
+}
+
+function refsOf(files: Attachment[], uploaded: Uploaded[] | null): ReportFile[] {
+  return files.map((f) => ({ kind: f.kind, name: f.name, url: uploaded?.find((u) => u.kind === f.kind)?.url }));
 }
 
 /** Ставит кнопку баг-репорта. Вызывать раньше панелей игры: клавиши открытого редактора не должны доходить до карты. */
@@ -1242,59 +1320,46 @@ class BugReport {
     this.commitEdit();
     this.selected = null;
     this.redraw();
-    this.sending = true;
-    this.syncControls();
-    this.status('Готовлю файлы…');
+    // Прежний отказ — уже не про эту попытку. Иначе правка описания во время отправки (changed) убирала
+    // строку «Загружаю файлы…», и окно оставалось с бледной кнопкой без единого слова.
+    this.sent = null;
     const m = this.moment;
+    const fetch = window.fetch.bind(window);
+    const sent = await deliverReport({
+      busy: (on) => {
+        this.sending = on;
+        this.syncControls();
+        if (!on) this.fileProgress(null);
+      },
+      status: (text) => this.status(text),
+      files: () => this.attachments(m),
+      upload: (files) => {
+        // Сколько ушло — полоской на фоне строки каждого файла; общая строка — только что идёт загрузка.
+        for (const f of files) this.fileProgress(f.kind, 0);
+        return uploadAttachments(files, { fetch, post: xhrPost(), onFile: (kind, p) => this.fileProgress(kind, p) });
+      },
+      submit: (refs) => submitReport(boardReport(this.info(), refs, this.reportKey), { fetch }),
+      // Текст с файлами «приложенными» — для буфера и архива: пригодится, если что-то не дошло.
+      text: (refs) => reportMarkdown(this.info(), refs),
+      copy: copyText,
+    });
+    // Окно закрыли, пока шла отправка, — итог уже некуда показывать.
+    if (this.moment !== m) return;
+    this.sent = sent;
+    if (sent.receipt) this.reportKey = newReportKey();
+    this.renderResult();
+  }
+
+  /** Файлы отчёта; снимок не приложен — не загружается и в отчёт не попадает. */
+  private async attachments(m: Moment): Promise<Attachment[]> {
     const names = attachmentNames(m.at);
     const files: Attachment[] = [];
-    // Снимок не приложен — не загружается и в отчёт не попадает.
     if (this.include.shot) files.push({ kind: 'shot', name: names.shot, type: 'image/png', data: await this.renderPng() });
     if (this.include.journal) files.push({ kind: 'journal', name: names.journal, type: 'application/x-ndjson', data: new Blob([m.journal], { type: 'application/x-ndjson' }) });
     if (this.include.save) files.push({ kind: 'save', name: names.save, type: 'application/json', data: new Blob([this.saveWithSpot()], { type: 'application/json' }) });
     const scheme = this.schemeFile();
     if (scheme) files.push({ kind: 'area', name: names.area, type: 'application/json', data: new Blob([scheme.text], { type: 'application/json' }) });
-    // Сначала файлы — в публичный загрузчик (ссылки на них войдут в карточку); не принял — карточка всё равно
-    // уйдёт, с пометкой, каких файлов в ней нет.
-    let uploaded: Uploaded[] | null = null;
-    let uploadError = '';
-    if (files.length) {
-      // Сколько ушло — полоской на фоне строки каждого файла; общая строка — только что идёт загрузка.
-      this.status('Загружаю файлы…');
-      for (const f of files) this.fileProgress(f.kind, 0);
-      try {
-        uploaded = await uploadAttachments(files, {
-          fetch: window.fetch.bind(window),
-          post: xhrPost(),
-          onFile: (kind, p) => this.fileProgress(kind, p),
-        });
-      } catch (e) {
-        // Сеть или загрузчик не пускает файлы с этого сайта (fetch бросает TypeError) — без подробностей.
-        uploadError = e instanceof UploadError ? e.message : 'загрузчик доски не принимает файлы с сайта игры';
-        console.warn('Баг-репорт: файлы не загрузились', e);
-      }
-    } else uploaded = [];
-    const info = this.info();
-    const refs = files.map((f) => ({ kind: f.kind, name: f.name, url: uploaded?.find((u) => u.kind === f.kind)?.url }));
-    // Затем карточка — публичная отправка доски, без токена.
-    this.status('Отправляю отчёт на доску…');
-    let receipt: Receipt | null = null;
-    let error = '';
-    try {
-      receipt = await submitReport(boardReport(info, refs, this.reportKey), { fetch: window.fetch.bind(window) });
-    } catch (e) {
-      error = e instanceof UploadError ? e.message : 'нет связи с доской задач';
-      console.warn('Баг-репорт: отчёт не отправился', e);
-    }
-    // Текст с файлами «приложенными» — для буфера и архива: пригодится, если что-то не дошло.
-    const text = reportMarkdown(info, refs);
-    const copied = receipt ? false : await copyText(text);
-    this.sent = { text, receipt, error, uploaded, uploadError, copied };
-    if (receipt) this.reportKey = newReportKey();
-    this.sending = false;
-    this.fileProgress(null);
-    this.renderResult();
-    this.syncControls();
+    return files;
   }
 
   private info(): ReportInfo {

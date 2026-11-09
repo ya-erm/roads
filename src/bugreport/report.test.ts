@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BUG_REPORT } from '../config';
 import {
   attachmentNames,
@@ -22,6 +22,7 @@ import {
   uploadManifest,
   UploadError,
   UPLOAD_SENT_SHARE,
+  withDeadline,
   xhrPost,
   xhrResponse,
   type Attachment,
@@ -175,6 +176,106 @@ describe('Загрузка файлов отчёта на доску', () => {
     const failed = post('https://board/up', body, () => {});
     FakeXhr.last.onerror!();
     await expect(failed).rejects.toBeInstanceOf(TypeError);
+  });
+
+  describe('отправка всегда заканчивается: отказ сети и молчание доски', () => {
+    /** Подделка XMLHttpRequest: события вызывает тест, как их вызвал бы браузер. */
+    class StubXhr {
+      static last: StubXhr;
+      aborted = false;
+      status = 0;
+      responseText = '';
+      upload: { onprogress?: (e: { lengthComputable: boolean; loaded: number; total: number }) => void } = {};
+      onprogress?: () => void;
+      onload?: () => void;
+      onerror?: () => void;
+      onabort?: () => void;
+      onloadend?: () => void;
+      constructor() {
+        StubXhr.last = this;
+      }
+      open() {}
+      setRequestHeader() {}
+      send() {}
+      abort() {
+        this.aborted = true;
+        this.onabort?.();
+        this.onloadend?.();
+      }
+    }
+    const Xhr = StubXhr as unknown as { new (): XMLHttpRequest };
+    const body = new Blob([new Uint8Array(100)]);
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('preflight CORS не прошёл — браузер шлёт error и loadend со статусом 0: отказ TypeError, а не ожидание', async () => {
+      const reply = xhrPost(Xhr, 60_000)('https://board/up?batch=b&file=0', body, () => {});
+      const x = StubXhr.last;
+      x.onerror!();
+      x.onloadend!();
+      await expect(reply).rejects.toBeInstanceOf(TypeError);
+    });
+
+    it('конец запроса без load и error (только loadend) и сбой разбора ответа — тоже отказ', async () => {
+      const lost = xhrPost(Xhr, 60_000)('https://board/up', body, () => {});
+      StubXhr.last.onloadend!();
+      await expect(lost).rejects.toThrow('оборвалась');
+      // Статус, с которым Response не строится (браузер так не отвечает, но промис не должен повиснуть).
+      const odd = xhrPost(Xhr, 60_000)('https://board/up', body, () => {});
+      StubXhr.last.status = 0;
+      StubXhr.last.onload!();
+      await expect(odd).rejects.toBeInstanceOf(RangeError);
+    });
+
+    it('xhrPost: stallMs без прогресса — запрос обрывается ошибкой «не отвечает»; идущий прогресс обрыв откладывает', async () => {
+      vi.useFakeTimers();
+      const reply = xhrPost(Xhr, 60_000)('https://board/up', body, () => {});
+      const x = StubXhr.last;
+      const result = reply.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(50_000);
+      x.upload.onprogress!({ lengthComputable: true, loaded: 50, total: 100 });
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(x.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(x.aborted).toBe(true);
+      const e = await result;
+      expect(e).toBeInstanceOf(UploadError);
+      expect((e as Error).message).toBe('Доска не отвечает дольше 60 с');
+    });
+
+    it('загрузчик молчит на создании пакета — uploadAttachments отказывает через stallMs и обрывает запрос', async () => {
+      vi.useFakeTimers();
+      let signal: AbortSignal | undefined;
+      const silent = ((_url: string, init: RequestInit) => {
+        signal = init.signal ?? undefined;
+        return new Promise<Response>(() => {});
+      }) as unknown as typeof fetch;
+      const result = uploadAttachments(files(), { fetch: silent, post: xhrPost(Xhr), stallMs: 60_000 }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await result).toMatchObject({ name: 'UploadError', message: 'Доска не отвечает дольше 60 с' });
+      expect(signal?.aborted).toBe(true);
+    });
+
+    it('доска молчит на публичной отправке — submitReport отказывает через stallMs (по умолчанию BUG_REPORT.stallMs)', async () => {
+      vi.useFakeTimers();
+      const silent = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+      const result = submitReport({ description: 'x', sourceKey: 'k' }, { fetch: silent }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(BUG_REPORT.stallMs);
+      expect(await result).toBeInstanceOf(UploadError);
+    });
+
+    it('withDeadline: успел — значение, ошибка run — она же, а не «не отвечает»', async () => {
+      await expect(withDeadline(1000, async () => 7)).resolves.toBe(7);
+      await expect(
+        withDeadline(1000, () => {
+          throw new TypeError('сеть');
+        }),
+      ).rejects.toThrow('сеть');
+    });
   });
 
   it('ответ XMLHttpRequest без тела (204) не ломает Response', () => {
