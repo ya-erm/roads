@@ -175,8 +175,17 @@ describe('Бригада: от подъезда к работе без скач�
     let earthAlone = false;
     let paveBehind = false;
     let settled = false;
+    // Откуда и когда сошла каждая машина (from и t — пока она не тронулась дальше: на повороте съезда, ожидая своего
+    // места, машина трогается оттуда, где ждала, — CrewLane.slow).
+    const boarded = [...lane.from!];
+    const when = [...(lane.t ?? [lane.t0!])];
     for (let t = 0; t < 60 && !settled; t += 0.1) {
       runSeconds(game, 0.1);
+      const n = boarded.length;
+      if (lane.from!.length > n) {
+        boarded.push(...lane.from!.slice(n));
+        when.push(...lane.t!.slice(n));
+      }
       const [e, p, m] = spansOf(c.build, L);
       const placed = crews.placed(b);
       // Этап, чья машина не на месте, стоит.
@@ -198,9 +207,9 @@ describe('Бригада: от подъезда к работе без скач�
     expect(settled).toBe(true);
     expect(laneCars(lane)).toBe(3);
     // Сошедшие следом — на ту же полосу, друг за другом.
-    const from = lane.from!;
-    expect(lane.t![1]).toBeGreaterThan(lane.t![0]);
-    expect(lane.t![2]).toBeGreaterThan(lane.t![1]);
+    const from = boarded;
+    expect(when[1]).toBeGreaterThan(when[0]);
+    expect(when[2]).toBeGreaterThan(when[1]);
     expect(Math.abs(from[1] - from[0])).toBeLessThan(8);
     // Колонна этапов — на оси участка: начало заполнения — на полосе у перекрёстка, к нему и съехали.
     expect(dist(lanePose(lane, lane.legs[0].at + 30).pos, c.lut.pointAt(c.build!.fromB ? L - 30 : 30))).toBeLessThan(0.5);

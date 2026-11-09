@@ -163,6 +163,7 @@ export class CrewCarry {
       prev = g;
     }
     if (lane.shifts) lane.shifts = lane.shifts.map((sh) => ({ ...sh, at: arc(sh.at) }));
+    if (lane.slow !== undefined) lane.slow = arc(lane.slow);
     if (!now || !lane.from) return;
     // Сошедшая вбок от полосы машина ещё выходит на неё — остаток сдвига, дальше выходит с нового места.
     const side = now.map((s, k) => {

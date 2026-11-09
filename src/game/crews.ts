@@ -1116,6 +1116,7 @@ function copyLane(l: CrewLane): CrewLane {
     ...(l.t ? { t: [...l.t] } : {}),
     ...(l.side ? { side: [...l.side] } : {}),
     ...(l.shifts?.length ? { shifts: l.shifts.map((sh) => ({ at: sh.at, to: sh.to })) } : {}),
+    ...(typeof l.slow === 'number' ? { slow: l.slow } : {}),
     ...(l.turn && Array.isArray(l.turn.path) && l.turn.path.length > 1
       ? {
           turn: {

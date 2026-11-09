@@ -52,6 +52,7 @@ import {
   crewSpacing,
   fillet,
   halfRow,
+  holdOnCurve,
   lanePose,
   laneRow,
   laneShift,
@@ -62,6 +63,7 @@ import {
   stageSlots,
   TURN_TAIL,
   turnAhead,
+  turnIn,
   turning,
   turnRoom,
   U_TURN,
@@ -612,12 +614,17 @@ export class Construction {
     const onward = this.continuation(id, c, fromB, by ?? null);
     if (onward) alongCorridor(body, onward.c, onward.fromB ? onward.c.length : 0, onward.fromB ? 0 : onward.c.length, 5);
     let pts: Vec[];
+    let curve: Vec | undefined;
     if (cars?.length) {
       // Машины — от хвоста к голове: по курсу головной (кто дальше по ходу, тот впереди).
       const lead = cars[0];
       const order = [...cars].sort((p, q) => dot(sub(p.pos, lead.pos), lead.dir) - dot(sub(q.pos, lead.pos), lead.dir));
       const head = order[order.length - 1];
-      pts = [...order.map((m) => ({ ...m.pos })), ...turnIn(head.pos, head.dir, body)];
+      // Съезд выносит машину за ось проекта не дальше, чем позволяет ширина его полотна у начала (где оно уже всего).
+      const k = net.corridors.get(c.id);
+      const entry = turnIn(head.pos, head.dir, body, k ? Math.max(1.5, roomAlong(k, fromB, 0, 30)) : undefined);
+      curve = entry.end;
+      pts = [...order.map((m) => ({ ...m.pos })), ...entry.pts];
     } else {
       // Без колонны (старое сохранение, бригада уже на месте): позади начала — прямо по оси участка.
       const t = c.lut.tangentAt(fromB ? c.length : 0);
@@ -646,6 +653,8 @@ export class Construction {
       out.from = cars.map((m) => polyProject(path, m.pos));
       out.t0 = this.host.time;
     }
+    // Съезд с поворотом — машины проходят его медленно, пока и задняя ось не выйдет с дуги.
+    if (curve) out.slow = polyProject(path, curve) + TURN_TAIL;
     return out;
   }
 
@@ -853,6 +862,7 @@ export class Construction {
       const f = slots && this.frontFor(b.project, b);
       if (f) {
         this.crews.keepSpots(b);
+        holdOnCurve(b.lane, slots, this.host.time);
         const flip = this.turnFlip(b, f.c, f.fromB);
         const turn = b.lane.turn;
         if (turn && (flip || turning(b.lane, slots, this.host.time))) {
@@ -1689,35 +1699,6 @@ export function railLabel(net: Network, segs: readonly Segment[]): string {
   if (segs.some((s) => level(s).some((l) => l > 0))) parts.push('мост');
   if (segs.some((s) => level(s).some((l) => l < 0))) parts.push('тоннель');
   return parts.join(' · ');
-}
-
-/**
- * Съезд колонны с дороги на стройку: головная стоит в своей полосе у узла (p, курс d), дальше путь body — от центра
- * узла по оси проекта. Поворот — там, где линия полосы пересекает ось проекта (как машина и повернула бы, не заезжая к
- * центру узла и не виляя); прямо (ось — почти продолжение полосы) — плавно с полосы на ось на 25 м пути. Ответ — точки
- * пути после p (скругляет их fillet).
- */
-function turnIn(p: Vec, d: Vec, body: readonly Vec[]): Vec[] {
-  const c = body[0];
-  // Ось проекта у узла: от центра узла к точке метрах в 12 дальше.
-  const far = body.find((q) => dist(q, c) >= 12) ?? body[body.length - 1];
-  const len = dist(far, c);
-  if (len < 1) return [...body];
-  const o = { x: (far.x - c.x) / len, y: (far.y - c.y) / len };
-  const den = d.x * o.y - d.y * o.x;
-  if (Math.abs(den) > 0.25) {
-    // p + a·d = c + b·o.
-    const w = sub(c, p);
-    const a = (w.x * o.y - w.y * o.x) / den;
-    const b = (w.x * d.y - w.y * d.x) / den;
-    if (a > 0.5 && a < 40 && b > -15 && b < 15) {
-      const x = { x: p.x + d.x * a, y: p.y + d.y * a };
-      // Дальше — по оси: точки за точкой поворота, не ближе 10 м к ней (место на скругление).
-      return [x, ...body.filter((q) => dot(sub(q, c), o) > b + 10)];
-    }
-  }
-  // Почти прямо: с полосы на ось — плавно, без поворота у центра узла.
-  return body.filter((q) => dot(sub(q, p), d) > 25 || dist(q, p) > 25);
 }
 
 /**

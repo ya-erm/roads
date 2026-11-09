@@ -46,6 +46,14 @@ export const crewSpacing = (k: number): number => CREW_UNITS[Math.min(k, CREW_UN
 
 /** Радиус скругления поворотов полосы, м. */
 const TURN_R = 9;
+/**
+ * Съезд с дороги на стройку (turnIn): насколько дуга может вынести машину за ось проекта, если ширина полотна
+ * неизвестна, м, и не короче скольких метров пути она возвращается на ось.
+ */
+const ENTRY_OVER = 3;
+const ENTRY_RAMP = 20;
+/** Скорость машин бригады на съезде с дороги на стройку (до конца поворота, CrewLane.slow), м/с игры (~22 км/ч). */
+export const ENTRY_SPEED = 6;
 /** За столько метров пути вдоль полосы машина перестраивается в ряд своей бригады. */
 export const ROW_RAMP = 30;
 
@@ -88,6 +96,11 @@ export interface CrewLane {
   shifts?: LaneShift[];
   /** Разворот колонны перед полосой (planTurn); нет — полоса начинается сразу. */
   turn?: LaneTurn;
+  /**
+   * Съезд с дороги на стройку с поворотом (turnIn): до этого места (м от начала полосы; конец поворота и ещё TURN_TAIL,
+   * пока задняя ось длинной машины на дуге) машины едут медленно — ENTRY_SPEED. Нет — поворота нет.
+   */
+  slow?: number;
 }
 
 /**
@@ -510,18 +523,95 @@ export function fillet(p: readonly Vec[], r = TURN_R, keep = 0): Vec[] {
     const t = Math.max(0, Math.min(r * Math.tan(Math.min(th, 2.6) / 2), run - used, angle(i + 1) >= 0.07 ? l2 / 2 : l2 * 0.95));
     used = t;
     const p1 = sub(b, scale(d1, t));
-    const p2 = add(b, scale(d2, t));
     // Дуга начинается раньше предыдущих точек на той же прямой — их уже нет.
     while (out.length > 1 && dot(sub(out[out.length - 1], p1), d1) > -1e-9) out.pop();
-    const n = Math.max(3, Math.ceil(th / 0.12));
-    for (let k = 0; k <= n; k++) {
-      const u = k / n;
-      // Безье p1 → b → p2: касательные на концах — по соседним отрезкам.
-      out.push(add(add(scale(p1, (1 - u) * (1 - u)), scale(b, 2 * u * (1 - u))), scale(p2, u * u)));
-    }
+    // Дуга окружности p1 → p2 (касательные на концах — по соседним отрезкам): кривизна по всей дуге одна, без
+    // крутой середины, как у параболы.
+    if (t < 1e-6) out.push(b);
+    else out.push(...arcPoints(p1, d1, t / Math.tan(th / 2), d1.x * d2.y - d1.y * d2.x > 0 ? th : -th));
   }
   out.push(pts[pts.length - 1]);
   return out;
+}
+
+/**
+ * Точки дуги окружности радиуса r от p с курсом d на угол turn (рад; больше 0 — в сторону (-d.y, d.x), меньше — в
+ * другую), с началом и концом. Шаг — не круче 2,5°: на дуге курс машины меняется плавно.
+ */
+export function arcPoints(p: Vec, d: Vec, r: number, turn: number): Vec[] {
+  const sign = turn >= 0 ? 1 : -1;
+  const th = Math.abs(turn);
+  const c = { x: p.x - d.y * r * sign, y: p.y + d.x * r * sign };
+  const v = sub(p, c);
+  const n = Math.max(2, Math.ceil(th / 0.044));
+  const out: Vec[] = [];
+  for (let k = 0; k <= n; k++) {
+    const a = (sign * th * k) / n;
+    const cs = Math.cos(a);
+    const sn = Math.sin(a);
+    out.push({ x: c.x + v.x * cs - v.y * sn, y: c.y + v.x * sn + v.y * cs });
+  }
+  return out;
+}
+
+/**
+ * Съезд колонны с дороги на стройку: головная стоит в своей полосе у узла (p, курс d), дальше путь body — от центра
+ * узла по оси проекта. Поворот — там, где линия полосы пересекает ось проекта (как машина и повернула бы, не заезжая к
+ * центру узла и не виляя), — дугой окружности радиуса TURN_R. Машина стоит к оси ближе, чем нужно такой дуге (у
+ * стоп-линии перед самым перекрёстком или в самом узле), — дуга начинается прямо от неё, а не сжимается в разворот на
+ * месте: машину выносит за ось не дальше over (сколько позволяет ширина полотна проекта, turnRoom), и не короче чем за
+ * ENTRY_RAMP метров она плавно выходит на ось. Прямо (ось — почти продолжение полосы) — плавно с полосы на ось на 25 м
+ * пути (скругляет fillet). Ответ — точки пути после p и где кончается дуга поворота (end; нет — поворота нет): до неё
+ * машины едут медленно (CrewLane.slow).
+ */
+export function turnIn(p: Vec, d: Vec, body: readonly Vec[], over = ENTRY_OVER): { pts: Vec[]; end?: Vec } {
+  const c = body[0];
+  // Ось проекта у узла: от центра узла к точке метрах в 12 дальше.
+  const far = body.find((q) => dist(q, c) >= 12) ?? body[body.length - 1];
+  const len = dist(far, c);
+  if (len < 1) return { pts: [...body] };
+  const o = { x: (far.x - c.x) / len, y: (far.y - c.y) / len };
+  const den = d.x * o.y - d.y * o.x;
+  if (Math.abs(den) > 0.25) {
+    // p + a·d = c + b·o.
+    const w = sub(c, p);
+    const a = (w.x * o.y - w.y * o.x) / den;
+    const b = (w.x * d.y - w.y * d.x) / den;
+    // Машина и в самом узле (почти на оси или чуть за ней) — тоже дугой, а не изломом с места.
+    const reach = over / Math.max(0.25, Math.sin(Math.acos(Math.max(-1, Math.min(1, dot(d, o))))));
+    if (a > 1 - reach && a < 40 && b > -15 && b < 15) {
+      const x = add(p, scale(d, a));
+      const th = Math.acos(Math.max(-1, Math.min(1, dot(d, o))));
+      const tan = Math.tan(th / 2);
+      // Вынос за ось — (t − a)·sin θ: радиус — TURN_R, а если машине так не уложиться — сколько позволяет вынос.
+      const r = Math.min(TURN_R, (a + reach) / tan);
+      const t = r * tan;
+      const arc = arcPoints(t < a ? sub(x, scale(d, t)) : p, d, r, den > 0 ? th : -th);
+      const end = arc[arc.length - 1];
+      // Дальше — по оси: точки оси за концом дуги; вынесло за ось — сначала плавно на неё.
+      const cum = [0];
+      for (let i = 1; i < body.length; i++) cum.push(cum[i - 1] + dist(body[i - 1], body[i]));
+      const uE = polyProject(body, end);
+      const at = polyAt(body, uE);
+      const off = dot(sub(end, at.pos), rightNormal(at.dir));
+      const pts = [...arc];
+      let past = uE;
+      if (Math.abs(off) > 0.05) {
+        // Длиннее с большим выносом: наклон корпуса при выходе на ось — не круче ~14°.
+        const ramp = Math.max(ENTRY_RAMP, 6 * Math.abs(off));
+        const n = Math.ceil(ramp);
+        for (let i = 1; i <= n; i++) {
+          const q = polyAt(body, uE + (ramp * i) / n);
+          pts.push(add(q.pos, scale(rightNormal(q.dir), off * (1 - smoothstep(i / n)))));
+        }
+        past = uE + ramp;
+      }
+      pts.push(...body.filter((_, i) => cum[i] > past + 1));
+      return { pts, end };
+    }
+  }
+  // Почти прямо: с полосы на ось — плавно, без поворота у центра узла.
+  return { pts: body.filter((q) => dot(sub(q, p), d) > 25 || dist(q, p) > 25) };
 }
 
 /** Как ждут своего края машины на участке (stageSlots). */
@@ -711,24 +801,69 @@ export function laneArcs(lane: CrewLane, target: readonly number[], time: number
   const t0 = lane.t0;
   if (!from || t0 === undefined) return [...target];
   const turn = lane.turn;
+  const zones = slowZones(lane);
   return target.map((x, k) => {
     const s0 = from[k] ?? x;
     // Ждут разворота — стоят, где стояли.
     if (turn?.wait) return s0;
     const dt = Math.max(0, time - (lane.t?.[k] ?? t0));
-    return Math.min(advance(s0, dt, turn?.end), Math.max(x, s0));
+    return Math.min(advance(s0, dt, zones), Math.max(x, s0));
   });
 }
 
 /**
- * Откуда s0 за dt секунд: до конца разворота end и ещё TURN_TAIL за ним (пока задняя ось машины выходит из
- * разворота) — медленно (TURN_SPEED), дальше — LANE_SPEED.
+ * На съезде с поворотом (CrewLane.slow) машина, что стоит у своего места (догнала его или ждёт, пока оно не уйдёт
+ * вперёд), трогается оттуда, где стоит, — со скоростью съезда, а не следом за местом с его скоростью: на дуге курс
+ * не крутится быстрее, чем у машины, что едет по ней сама. Каждый такт (Construction.trackCrews): у такой машины
+ * откуда (from) и когда (t) — здесь и сейчас; не вышедшая ещё вбок на полосу (side) — дальше с оставшегося сдвига.
  */
-function advance(s0: number, dt: number, turnEnd: number | undefined): number {
-  const end = turnEnd === undefined ? undefined : turnEnd + TURN_TAIL;
-  if (end === undefined || s0 >= end) return s0 + dt * LANE_SPEED;
-  const slow = (end - s0) / TURN_SPEED;
-  return dt <= slow ? s0 + dt * TURN_SPEED : end + (dt - slow) * LANE_SPEED;
+export function holdOnCurve(lane: CrewLane, target: readonly number[], time: number): void {
+  const from = lane.from;
+  const t0 = lane.t0;
+  if (lane.slow === undefined || !from || t0 === undefined || lane.turn?.wait) return;
+  const zones = slowZones(lane);
+  const now = laneArcs(lane, target, time);
+  for (let k = 0; k < laneCars(lane); k++) {
+    const s0 = from[k];
+    const s = now[k];
+    if (s0 === undefined || s >= lane.slow) continue;
+    const t = lane.t?.[k] ?? t0;
+    // Едет сама — не держит место.
+    if (s >= advance(s0, Math.max(0, time - t), zones) - 1e-9) continue;
+    if (s === s0 && t === time) continue;
+    const off = lane.side?.[k];
+    if (lane.side && off) lane.side[k] = off * (1 - smoothstep(Math.max(0, Math.min(1, (s - s0) / ROW_RAMP))));
+    from[k] = s;
+    lane.t = from.map((_, i) => lane.t?.[i] ?? t0);
+    lane.t[k] = time;
+  }
+}
+
+/** Где машины на полосе едут медленно: до конца разворота и ещё TURN_TAIL — TURN_SPEED, до конца съезда (slow) — ENTRY_SPEED. */
+function slowZones(lane: CrewLane): { end: number; v: number }[] {
+  const out: { end: number; v: number }[] = [];
+  if (lane.turn) out.push({ end: lane.turn.end + TURN_TAIL, v: TURN_SPEED });
+  if (lane.slow !== undefined) out.push({ end: lane.slow, v: ENTRY_SPEED });
+  return out;
+}
+
+/**
+ * Откуда s0 за dt секунд: до конца каждой медленной зоны (slowZones; пока задняя ось машины ещё на развороте или на
+ * повороте съезда) — со скоростью самой медленной из тех, что ещё впереди, дальше — LANE_SPEED.
+ */
+function advance(s0: number, dt: number, zones: readonly { end: number; v: number }[]): number {
+  let s = s0;
+  let left = dt;
+  const ends = zones.map((z) => z.end).filter((e) => e > s0).sort((a, b) => a - b);
+  for (const e of ends) {
+    if (e <= s) continue;
+    const v = Math.min(LANE_SPEED, ...zones.filter((z) => z.end > s).map((z) => z.v));
+    const need = (e - s) / v;
+    if (left <= need) return s + left * v;
+    left -= need;
+    s = e;
+  }
+  return s + left * LANE_SPEED;
 }
 
 /** Сколько машин колонны уже на полосе (сошли с дороги по порядку): from короче колонны — только первые. */
