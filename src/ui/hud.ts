@@ -2005,10 +2005,10 @@ export class Hud {
   }
 
   /** Переключатель режима — большие карточки с картинками. */
-  /** grid — компактно: кнопки в две колонки, значок слева от названия. */
+  /** grid — компактно, значок слева от названия, в две колонки (3 — в три: панель ниже, на узком экране — в две). */
   /** key — горячая клавиша режима, видна на карточке: в сетке — справа, в большой карточке — рядом с названием, а не лишней строкой. */
-  private kindSwitch(title: string, action: string, current: string, items: { id: string; name: string; svg: string; hint: string; key?: string }[], grid = false): string {
-    return `<div class="opt-group"><div class="opt-title">${title}</div><div class="cards ${grid ? 'grid2' : ''}">${items
+  private kindSwitch(title: string, action: string, current: string, items: { id: string; name: string; svg: string; hint: string; key?: string }[], grid: boolean | 3 = false): string {
+    return `<div class="opt-group"><div class="opt-title">${title}</div><div class="cards ${grid === 3 ? 'grid2 grid3' : grid ? 'grid2' : ''}">${items
       .map((it) => {
         const kbd = it.key ? `<kbd>${it.key}</kbd>` : '';
         return `<button class="card ${grid ? 'row' : ''} ${current === it.id ? 'active' : ''}" data-action="${action}" data-id="${it.id}" data-tip="${it.key ? `${it.hint} (${it.key})` : it.hint}">
@@ -2497,17 +2497,17 @@ export class Hud {
         { id: 'rail', name: 'Ж/д станция', svg: stationSvg('rail', 34), hint: 'Вокзал с платформами: на пути или в чистом поле (как в инструменте «Ж/д»)' },
         ...base,
       ],
-      true,
+      // Виды — в три колонки, «Как ставить» — шире, цена — в его заголовке: панель низкая (на узком экране — в две).
+      3,
     );
     if (c.placingBase) {
       const tip = `База встаёт у дороги со стороны курсора, ворота — на ближайший узел. С неё бригады едут строить: сами — на стройки ближе ${distText(CONSTRUCTION.serviceRadius)} (круг на карте). Дома под площадкой снесём (красные) — за доплату.`;
-      return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
+      return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
         <div class="base-prices">${basePriceHtml(g)}</div></div></div>`;
     }
     if (c.stationMode === 'stop') {
       const tip = `Остановка встаёт у края улицы со стороны курсора: автобусы останавливаются прямо в полосе. Только пассажиры, охват ${STOP.catchment} м, ${STOP.bays} места для автобусов. Не ближе ${STOP.gap} м к перекрёстку. В маршруте её можно смешивать с автовокзалами.`;
-      return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
-        <div class="price">${money(STOP.cost)}</div></div></div>`;
+      return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">Как ставить <span class="price-tag">${money(STOP.cost)}</span></div><p class="muted">${tip}</p></div></div>`;
     }
     if (c.stationMode === 'rail') return this.railStationOptionsHtml(sw);
     const pax = c.stationMode === 'pax';
@@ -2519,20 +2519,20 @@ export class Hud {
     ]
       .map((k) => `<button class="${side === k.on ? 'active' : ''}" data-action="st-side" data-v="${k.on ? 1 : 0}" data-tip="${k.hint}">${k.svg}</button>`)
       .join('')}</span>`;
-    // Длина выезда — счётчиком «− схема N м +», как длина платформ у ж/д станции.
+    // Длина выезда — счётчиком «− схема N м +», как длина платформ у ж/д станции; в заголовке, за схемами «как
+    // ставить», а не отдельной строкой: панель ниже (узкая — счётчик переносится под заголовок).
     const R = STATION.drivewayRange;
     const L = c.stationDriveway;
     const length = side
       ? ''
-      : `<div class="st-params"><span class="lbl3">Выезд</span><span class="stepper bays tracks" data-tip="Длина выезда от кромки дороги: ${L} м · [ и ] — короче и длиннее">
+      : `<span class="st-params st-drive"><span class="stepper bays tracks" data-tip="Длина выезда от кромки дороги: ${L} м · [ и ] — короче и длиннее">
       <button data-action="st-driveway" data-d="-1" ${L > R.min ? '' : 'disabled'} data-tip="Короче на ${R.step} м · [">−</button><b>${drivewaySvg(L, R.max)}<span>${L} м</span></b><button
-        data-action="st-driveway" data-d="1" ${L < R.max ? '' : 'disabled'} data-tip="Длиннее на ${R.step} м · ]">+</button></span></div>`;
+        data-action="st-driveway" data-d="1" ${L < R.max ? '' : 'disabled'} data-tip="Длиннее на ${R.step} м · ]">+</button></span></span>`;
     const where = side
       ? `вдоль улицы со стороны курсора, не у перекрёстка; у края — карман`
       : `у дороги, прямо у перекрёстка или вплотную к ${pax ? 'городу' : 'предприятию'} — с той стороны, где курсор`;
     const tip = `${pax ? 'Автовокзал' : 'Автостанция'} ${where}. Дома под ней снесём (красные). Охват ${STATION.catchment} м, ${pax ? 'перроны' : 'посты'} добавляются в карточке.`;
-    return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как ставить${how}</div>${length}<p class="muted">${tip}</p>
-      <div class="price">${money(COST.station)}</div></div></div>`;
+    return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">Как ставить <span class="price-tag">${money(COST.station)}</span>${how}${length}</div><p class="muted">${tip}</p></div></div>`;
   }
 
   private roadOptionsHtml(): string {

@@ -1057,6 +1057,53 @@ button.icon.menu-back {
   gap: 4px;
 }
 
+/*
+ * Панель «Станция» — низкая и широкая: виды в три колонки (пять — в две строки), «Как ставить» — до 440 px (текст в
+ * 3–4 строки, а не в 6), цена и длина выезда — в его заголовке. Шире 790 px не бывает; по центру над панелью
+ * инструментов, но правым краем не заходит на версию и кнопку «ошибка» у миникарты (≈ 370 px от правого края окна) —
+ * тогда сдвигается влево, левым краем не дальше 14 px от края окна. В окне уже ~1050 px виды — снова в две колонки,
+ * текст рядом сужается; на телефоне «Как ставить» уходит под виды.
+ */
+.cards.grid3 {
+  grid-template-columns: repeat(3, auto);
+}
+
+@media (max-width: 1050px) {
+  .cards.grid3 {
+    grid-template-columns: repeat(2, auto);
+  }
+}
+
+.options:has(.st-how) {
+  max-width: min(790px, max(min(calc(100vw - 40px), 560px), calc(100vw - 400px)));
+  transform: translateX(max(calc(14px - 50vw), min(-50%, calc(50vw - 370px - 100%))));
+}
+
+.opt-group.st-how {
+  flex: 1 1 240px;
+  max-width: 440px;
+}
+
+/* Заголовок: цена, справа — схемы «как ставить» и длина выезда; не влезает — выезд второй строкой, слева. */
+.st-how .opt-title {
+  flex-wrap: wrap;
+  gap: 14px 6px;
+}
+
+.st-how .muted {
+  margin: 0;
+}
+
+.st-params.st-drive {
+  display: inline-flex;
+  align-items: center;
+  /* Выше строки заголовка — заходит в отступы, как схемы «как ставить» рядом: панель не растёт. */
+  margin: -5px 0;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
 .card.row {
   flex-direction: row;
   justify-content: flex-start;
