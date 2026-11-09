@@ -2778,22 +2778,47 @@ export class Renderer {
       const s = end.end === 'a' ? 0 : c.length;
       const ed = edgesAt(c, s) ?? [-LANE_W / 2, LANE_W / 2];
       if (st.side) {
-        // Станция вдоль дороги: асфальт от фасада до кромки кармана во всю ширину площадки — посты прямо на карман.
-        const Y = Math.min(...ed.map((o) => local(pointOff(c, s, o)).y)) + 0.6;
+        // Станция вдоль дороги: асфальт от фасада до дублёра во всю ширину площадки — посты выходят прямо на него, и
+        // там, где к нему примыкает площадка, нет ни бордюра, ни краевой линии. Дублёр к краям площадки чуть изгибается —
+        // край асфальта идёт по его кромке (по обеим половинам у узла), заходя за краевую линию.
+        const halves = node.corridors.map((id) => net.corridors.get(id)).filter((x): x is Corridor => !!x);
+        const edgeY = (x: number): number => {
+          const p = add(fp.center, add(scale(u, x), scale(v, hh)));
+          let best = Infinity;
+          let y = hh;
+          for (const h of halves) {
+            const hit = h.lut.closest(p);
+            if (hit.d >= best) continue;
+            const e = edgesAt(h, hit.s) ?? [-LANE_W / 2, LANE_W / 2];
+            best = hit.d;
+            y = Math.min(...e.map((o) => local(pointOff(h, hit.s, o)).y));
+          }
+          // Краевая линия — по кромке полосы, шириной около метра (издалека — не тоньше пикселя): закрываем с запасом.
+          return y + 0.9 + 1.5 / Math.max(this.camera.zoom, 0.5);
+        };
+        const xs: number[] = [];
+        for (let x = -fp.w / 2; x < fp.w / 2; x += 2) xs.push(x);
+        xs.push(fp.w / 2);
+        const ys = xs.map(edgeY);
         ctx.save();
         ctx.translate(fp.center.x, fp.center.y);
         ctx.rotate(fp.angle);
         ctx.scale(1, front);
         ctx.fillStyle = C.road;
-        ctx.fillRect(-fp.w / 2, hh - 1.5, fp.w, Y - hh + 1.5);
-        // Бордюр по бокам — от угла площадки до кармана.
+        ctx.beginPath();
+        ctx.moveTo(-fp.w / 2, hh - 1.5);
+        xs.forEach((x, i) => ctx.lineTo(x, ys[i]));
+        ctx.lineTo(fp.w / 2, hh - 1.5);
+        ctx.closePath();
+        ctx.fill();
+        // Бордюр по бокам — от угла площадки до дублёра.
         ctx.strokeStyle = C.roadEdge;
         ctx.lineWidth = 1.4;
         ctx.beginPath();
-        for (const x of [-fp.w / 2, fp.w / 2]) {
-          ctx.moveTo(x, hh - 1.5);
-          ctx.lineTo(x, Y - 0.6);
-        }
+        ctx.moveTo(-fp.w / 2, hh - 1.5);
+        ctx.lineTo(-fp.w / 2, ys[0] - 1.6);
+        ctx.moveTo(fp.w / 2, hh - 1.5);
+        ctx.lineTo(fp.w / 2, ys[ys.length - 1] - 1.6);
         ctx.stroke();
         if (this.camera.zoom >= 0.35) this.drawBayMarks(game, st, hh);
         ctx.restore();
