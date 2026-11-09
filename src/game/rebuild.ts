@@ -176,6 +176,46 @@ export function revertRebuild(net: LaneNet, ids: readonly number[]): void {
   if (ends.length) taperDeadLanes(net, ends);
 }
 
+/**
+ * Починка сохранений: до исправления бригада, выбрав конец не начатого участка перестройки, записывала стройку заново
+ * без was — полотно становилось новой дорогой, прежнюю закрывали сразу, и маршруты по ней вставали («Нет дороги»).
+ * Такое полотно (не начато, проект из ids — перестройка) снова получает прежнюю дорогу — как у соседнего
+ * перестраиваемого полотна (класс, полосы, скорость, перекрытие; цена — по длине). Соседа с was нет — остаётся как
+ * есть. Ответ — сколько полотен починено.
+ */
+export function healLostWas(net: LaneNet, ids: ReadonlySet<number>): number {
+  const lost = [...net.corridors.values()].filter((c) => c.build && !c.build.was && c.build.done <= 0 && ids.has(c.build.project));
+  let healed = 0;
+  for (let progress = true; progress && lost.length; ) {
+    progress = false;
+    for (let i = lost.length - 1; i >= 0; i--) {
+      const c = lost[i];
+      const donor = [c.a, c.b]
+        .flatMap((n) => net.nodes.get(n)?.corridors ?? [])
+        .map((id) => net.corridors.get(id))
+        .find((d) => d && d.id !== c.id && d.build?.was && !d.build.was.moved);
+      if (!donor) continue;
+      const w = donor.build!.was!;
+      // Сосед, что продолжает полотно (его конец — наше начало или наоборот), смотрит туда же; иначе — навстречу.
+      const flip = donor.b !== c.a && donor.a !== c.b;
+      const mid = w.len / 2;
+      const lanes = w.lanes
+        .filter((l) => l.from <= mid && l.to >= mid)
+        .map((l) => ({ ...l, from: 0, to: c.length, ...(flip ? { offset: -l.offset, flow: -l.flow as 1 | -1 } : {}) }));
+      const k = donor.length > 0 ? c.length / donor.length : 1;
+      const was: CorridorWas = { cls: w.cls, lanes, len: c.length, value: Math.round(w.value * k), price: Math.round(w.price * k), work: w.work };
+      if (w.limit !== undefined) was.limit = w.limit;
+      if (w.part) was.part = true;
+      c.build = { ...c.build!, was };
+      net.touch(c);
+      lost.splice(i, 1);
+      healed++;
+      progress = true;
+    }
+  }
+  return healed;
+}
+
 /** Полотно в стройке — перестройка готовой дороги (а не новая дорога). */
 export function isRebuild(c: Corridor): boolean {
   return !!c.build?.was;

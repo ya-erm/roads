@@ -2,9 +2,10 @@ import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, splitBezier, str
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { CONSTRUCTION } from '../config';
 import { LANE_W, RoadClass } from '../world/roadTypes';
+import { fitLanes } from './closure';
 import { nodeDeck } from './deck';
 import { edgesAt, laneBand, pointOff } from './geometry';
-import { Corridor, CorridorBuild, CorridorEnd, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot, taperLen } from './model';
+import { Corridor, CorridorBuild, CorridorEnd, CorridorWas, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot, taperLen } from './model';
 
 /** Начало или конец новой дороги: узел (тупик или перекрёсток), место на полотне или чистое поле. */
 export type Anchor =
@@ -166,9 +167,43 @@ export function splitCorridor(net: LaneNet, c: Corridor, s: number, kind: NodeKi
 /**
  * Стройка полотна длиной L, разрезанного так, что первый кусок — длиной s: готовое (done метров от конца a или,
  * с fromB, от b) делится между кусками. Готовый целиком кусок остаётся стройкой с done = длина — его откроет
- * стройка в следующий такт (и засчитает в проект).
+ * стройка в следующий такт (и засчитает в проект). Перестройка (was) — у каждого куска своя часть прежней дороги
+ * (splitWas): иначе кусок стал бы новой дорогой и прежнюю под ним закрыли бы ещё до начала работ.
  */
 export function splitBuild(b: CorridorBuild, L: number, s: number): [CorridorBuild, CorridorBuild] {
+  const pair = splitDone(b, L, s);
+  if (!b.was) return pair;
+  const was = splitWas(b.was, L, s);
+  return [
+    { ...pair[0], was: was[0] },
+    { ...pair[1], was: was[1] },
+  ];
+}
+
+/**
+ * Прежняя дорога перестраиваемого полотна длиной L, разрезанного так, что первый кусок — длиной s: полосы — по месту
+ * разреза, цена и стоимость — по долям длины. Перенесённая (moved) остаётся перенесённой, но прежнюю ось и узлы кускам
+ * не вернуть — отмена оставит их на новом месте.
+ */
+export function splitWas(w: CorridorWas, L: number, s: number): [CorridorWas, CorridorWas] {
+  const rest = Math.max(0, L - s);
+  const lanes = fitLanes(w.lanes, w.len, L);
+  const lanes1 = lanes.filter((l) => l.from < s - 0.5).map((l) => ({ ...l, to: Math.min(l.to, s) }));
+  const lanes2 = lanes.filter((l) => l.to > s + 0.5).map((l) => ({ ...l, from: Math.max(0, l.from - s), to: l.to - s }));
+  const k = L > 0 ? s / L : 0.5;
+  const part = (ls: LaneSlot[], len: number, f: number): CorridorWas => {
+    const o: CorridorWas = { ...w, lanes: ls, len, value: Math.round(w.value * f), price: Math.round(w.price * f) };
+    delete o.curve;
+    delete o.portA;
+    delete o.portB;
+    delete o.nodes;
+    return o;
+  };
+  return [part(lanes1, s, k), part(lanes2, rest, 1 - k)];
+}
+
+/** Готовое стройки полотна длиной L — по кускам длиной s и L − s (splitBuild). */
+function splitDone(b: CorridorBuild, L: number, s: number): [CorridorBuild, CorridorBuild] {
   const rest = Math.max(0, L - s);
   // Отсчёт от a: первый кусок получает готовое первым; от b — второй.
   const near = b.fromB ? rest : s;

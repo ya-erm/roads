@@ -39,7 +39,7 @@ import { dist, dot, sub, type Vec } from '../core/vec';
 import { nodeCuts } from '../lanes/geometry';
 import { corridorLayer } from '../lanes/speedDisplay';
 import { closed, partLanes } from '../lanes/closure';
-import type { Corridor, CorridorWas, LaneNet } from '../lanes/model';
+import type { Corridor, CorridorBuild, CorridorWas, LaneNet } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import type { Network, Segment } from '../world/network';
 import { ROAD_CLASSES } from '../world/roadTypes';
@@ -49,6 +49,7 @@ import { type CrewLane, crewRows, fillet, laneRow, polyLength, polyProject, stag
 import { CrewCarry } from './crewCarry';
 import { type Brigade, type CrewSave, Crews, type Site } from './crews';
 import type { CrewStep } from './crewRoads';
+import { healLostWas } from './rebuild';
 import { corridorProfile, fullCorridorCost } from './roadbuild';
 import type { RailSim } from '../sim/rail';
 import { type WorkTrainSave, WorkTrains } from './workTrains';
@@ -503,7 +504,7 @@ export class Construction {
     }
     b.front = { corridor: f.c.id, fromB: f.fromB };
     const k = f.c.build!;
-    if (k.done <= 0 && !!k.fromB !== f.fromB) f.c.build = f.fromB ? { project: id, done: 0, fromB: true } : { project: id, done: 0 };
+    if (k.done <= 0 && !!k.fromB !== f.fromB) f.c.build = unstarted(id, f.fromB, k);
   }
 
   /**
@@ -982,7 +983,7 @@ export class Construction {
     const pick = pickSite(this.piecesOf(id), open, (node) => this.pieceAccess(id, node));
     if (!pick) return null;
     const { c, fromB } = pick;
-    if (c.build!.done <= 0 && !!c.build!.fromB !== fromB) c.build = fromB ? { project: id, done: 0, fromB: true } : { project: id, done: 0 };
+    if (c.build!.done <= 0 && !!c.build!.fromB !== fromB) c.build = unstarted(id, fromB, c.build);
     return c;
   }
 
@@ -1085,7 +1086,7 @@ export class Construction {
           // Фронт идёт дальше по продолжению; продолжения нет (встретил другой фронт) — его бригады свободны для других
           // фронтов и проектов (едут туда своим ходом — trackCrews, relocate).
           if (next) {
-            next.c.build = next.fromB ? { project: p.id, done: 0, fromB: true } : { project: p.id, done: 0 };
+            next.c.build = unstarted(p.id, next.fromB, next.c.build);
             for (const o of crews) o.front = { corridor: next.c.id, fromB: next.fromB };
           } else for (const o of crews) delete o.front;
           // Ж/д: поезд перекатывается на готовый участок и строит следующий (или ищет другой участок).
@@ -1426,6 +1427,9 @@ export class Construction {
       });
       this.nextId = Math.max(this.nextId, id + 1);
     }
+    // Перестройка, у не начатых участков которой стройка потеряла прежнюю дорогу (healLostWas), — прежняя снова открыта.
+    const rebuilds = [...this.projects.values()].filter((p) => !p.rail && p.label.startsWith('Перестройка')).map((p) => p.id);
+    if (rebuilds.length) healLostWas(net, new Set(rebuilds));
     // Так же — строящиеся пути без записи ж/д проекта (номер занят дорогой — путь достроен: не стоять же ему вечно).
     const rails = this.host.net;
     const railOrphans = new Map<number, Segment[]>();
@@ -1507,6 +1511,14 @@ function turnIn(p: Vec, d: Vec, body: readonly Vec[]): Vec[] {
   }
   // Почти прямо: с полосы на ось — плавно, без поворота у центра узла.
   return body.filter((q) => dot(sub(q, p), d) > 25 || dist(q, p) > 25);
+}
+
+/**
+ * Не начатый участок проекта project, что заполняется от конца fromB. Перестройка помнит прежнюю дорогу (was из old):
+ * без неё полотно стало бы новой дорогой — прежнюю закрыли бы до начала работ, и маршруты по ней встали бы.
+ */
+export function unstarted(project: number, fromB: boolean, old?: CorridorBuild): CorridorBuild {
+  return { project, done: 0, ...(fromB ? { fromB: true } : {}), ...(old?.was ? { was: old.was } : {}) };
 }
 
 /** Название проекта для показа: своё, если игрок его дал, иначе автоматическое (projectLabel). */

@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
 import type { Vec } from '../core/vec';
 import { closureOf, keptLanes } from '../lanes/closure';
-import { type Corridor, oneWay, twoWay } from '../lanes/model';
+import { splitBuild } from '../lanes/edit';
+import { type Corridor, type CorridorWas, oneWay, twoWay } from '../lanes/model';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import { projectCardHtml } from '../ui/projectCard';
+import { unstarted } from './construction';
 import { Game } from './game';
 import { rebuildCost, rebuildDiff } from './rebuild';
 import { fullCorridorCost } from './roadbuild';
@@ -34,12 +36,14 @@ function freeSpot(game: Game, len: number): Vec {
  * Готовая улица 1+1 от at на восток длиной len, а к ней с запада — подъезд от ворот базы (база своя, одна бригада;
  * бригаду бесплатной базы партии не берём). Ответ — полотно улицы.
  */
-function scene(mode: 'build' | 'instant', len = 600): { game: Game; c: Corridor; at: Vec; base: BuildBase | null } {
+function scene(mode: 'build' | 'instant', len = 600, reverse = false): { game: Game; c: Corridor; at: Vec; base: BuildBase | null } {
   const game = withoutCitizens(new Game({ ...WORLD, ...(mode === 'build' ? { construction: 'build' as const } : {}) }));
   const at = freeSpot(game, len);
   const gate = { x: at.x - 90, y: at.y };
   expect(road(game, { free: gate }, { free: at })).toBe(true);
-  expect(road(game, nodeAt(game, at)!, { free: { x: at.x + len, y: at.y } })).toBe(true);
+  // reverse — улица нарисована с востока: её конец b — у базы, бригада заполняет её от b (fromB).
+  if (reverse) expect(road(game, { free: { x: at.x + len, y: at.y } }, nodeAt(game, at)!)).toBe(true);
+  else expect(road(game, nodeAt(game, at)!, { free: { x: at.x + len, y: at.y } })).toBe(true);
   // За дальним концом — ещё кусок улицы: улица не в тупик (по полосам на ней можно оставить одну сторону).
   if (mode === 'build') expect(road(game, nodeAt(game, { x: at.x + len, y: at.y })!, { free: { x: at.x + len + 90, y: at.y } })).toBe(true);
   let base: BuildBase | null = null;
@@ -253,5 +257,88 @@ describe('Перестройка: «Со строительством»', () => 
     expect(k.build?.was?.price).toBe(w.price);
     expect(back.roads.open.corridors.get(c.id)?.lanes.length).toBe(2);
     expect(back.construction.projects.get(k.build!.project)?.label.startsWith('Перестройка')).toBe(true);
+  });
+
+  it('бригада заходит с конца b: пока не начали — прежняя дорога и маршрут по ней; начали — по открытым полосам', () => {
+    const { game, c, at } = scene('build', 600, true);
+    const gate = nodeAt(game, { x: at.x - 90, y: at.y })!;
+    const far = nodeAt(game, { x: at.x + 690, y: at.y })!;
+    expect(live(game, c.id).b).toBe(nodeAt(game, at));
+    expect(game.roadBuilder.apply(game.roadBuilder.rebuild(c.id, { cls: AVENUE.cls, lanes: AVENUE.lanes }))).toBe(true);
+    let fromB = false;
+    for (let t = 0; t < 200 && (live(game, c.id).build?.done ?? 0) <= 0; t += 0.5) {
+      const b = live(game, c.id).build!;
+      fromB ||= !!b.fromB;
+      // Бригада выбрала конец — стройка по-прежнему помнит прежнюю дорогу: она открыта, маршрут в обе стороны есть.
+      expect(b.was?.cls).toBe('street');
+      expect(closureOf(b)).toBe('old');
+      expect(game.roads.route(gate, far)).toBeTruthy();
+      expect(game.roads.route(far, gate)).toBeTruthy();
+      runSeconds(game, 0.5);
+    }
+    expect(fromB).toBe(true);
+    expect(live(game, c.id).build?.done).toBeGreaterThan(0);
+    expect(live(game, c.id).build?.was?.cls).toBe('street');
+    // По полосам на 1+1 — одна полоса по ходу оси (с востока): туда маршрут едет, обратно объезда нет — нет пути.
+    expect(closureOf(live(game, c.id).build)).toBe('part');
+    expect(game.roads.route(far, gate)).toBeTruthy();
+    expect(game.roads.route(gate, far)).toBeNull();
+    // Целиком — объезда нет: нет пути ни туда, ни обратно.
+    game.setProjectClosure(live(game, c.id).build!.project, false);
+    expect(game.roads.route(far, gate)).toBeNull();
+  });
+});
+
+describe('Перестройка: прежняя дорога не теряется', () => {
+  const was = (): CorridorWas => ({ cls: 'street', lanes: twoWay(1, 1), len: 50, limit: 40, value: 1000, price: 3000, work: 0.6, part: true });
+
+  it('не начатый участок, заполняемый с другого конца, — всё ещё перестройка', () => {
+    const b = unstarted(7, true, { project: 7, done: 0, was: was() });
+    expect(b).toEqual({ project: 7, done: 0, fromB: true, was: was() });
+    expect(closureOf(b)).toBe('old');
+    expect(unstarted(7, false, { project: 7, done: 0, fromB: true })).toEqual({ project: 7, done: 0 });
+  });
+
+  it('разрез перестраиваемого полотна: у кусков — свои части прежней дороги', () => {
+    const [p, q] = splitBuild({ project: 3, done: 0, fromB: true, was: { ...was(), moved: true, nodes: [{ id: 1, pos: { x: 0, y: 0 } }] } }, 100, 40);
+    expect(p.was?.len).toBe(40);
+    expect(q.was?.len).toBe(60);
+    expect(p.was?.lanes.map((l) => [l.flow, l.from, l.to])).toEqual([
+      [-1, 0, 40],
+      [1, 0, 40],
+    ]);
+    expect(q.was?.lanes.map((l) => [l.flow, l.from, l.to])).toEqual([
+      [-1, 0, 60],
+      [1, 0, 60],
+    ]);
+    expect([p.was?.value, q.was?.value]).toEqual([400, 600]);
+    expect([p.was?.price, q.was?.price]).toEqual([1200, 1800]);
+    // Перенос остаётся переносом, но прежние места узлов кускам не вернуть.
+    expect(p.was?.moved).toBe(true);
+    expect(p.was?.nodes).toBeUndefined();
+    expect(closureOf(p)).toBe('closed');
+    // Без перестройки — как было.
+    expect(splitBuild({ project: 3, done: 0 }, 100, 40)[0].was).toBeUndefined();
+  });
+
+  it('сохранение, где участок перестройки потерял прежнюю дорогу, чинится по соседнему участку', () => {
+    const { game, c, at } = scene('build', 600, true);
+    const gate = nodeAt(game, { x: at.x - 90, y: at.y })!;
+    const far = nodeAt(game, { x: at.x + 690, y: at.y })!;
+    // Перестройка улицы и её продолжения на восток — разными проектами (так их закладывает протяжка по участкам).
+    expect(game.roadBuilder.apply(game.roadBuilder.rebuild(c.id, { cls: AVENUE.cls, lanes: AVENUE.lanes }))).toBe(true);
+    const next = [...game.roads.net.corridors.values()].find((k) => k.id !== c.id && (k.a === c.a || k.b === c.a))!;
+    expect(game.roadBuilder.apply(game.roadBuilder.rebuild(next.id, { cls: AVENUE.cls, lanes: AVENUE.lanes }))).toBe(true);
+    const save = JSON.parse(JSON.stringify(game.toSave()));
+    // Как в 0.2.102: стройку участка записали заново без was — полотно стало «новой дорогой», маршрута нет.
+    const lost = save.roads.corridors.find((k: Corridor) => k.id === c.id);
+    lost.build = { project: lost.build.project, done: 0, fromB: true };
+    const back = withoutCitizens(new Game(save.settings, save));
+    const k = back.roads.net.corridors.get(c.id)!;
+    expect(k.build?.was?.cls).toBe('street');
+    expect(k.build?.was?.lanes.length).toBe(2);
+    expect(closureOf(k.build)).toBe('old');
+    expect(back.roads.route(gate, far)).toBeTruthy();
+    expect(back.roads.route(far, gate)).toBeTruthy();
   });
 });

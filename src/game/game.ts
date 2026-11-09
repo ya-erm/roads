@@ -968,6 +968,8 @@ export class Game implements BuildContext {
     this.net.load(save.net);
     this.roads.replace(LaneNet.fromJSON(save.roads));
     this.construction.load(save.construction);
+    // Загрузка стройки могла починить полотна (прежняя дорога у перестройки) — граф движения по ним.
+    this.roads.changed();
     for (const b of this.construction.crews.bases.values()) this.index.add(b);
     // Сохранения, где ворота базы ссылаются на пропавший узел (перенос дороги у базы до исправления), — ворота заново.
     this.healBaseGates();
