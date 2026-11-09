@@ -2,7 +2,8 @@ import { MONTH_LENGTH, MONTH_SCALE, TERM_SCALE } from '../config';
 import { clamp } from '../core/math';
 import { add, cubicBezier, dist, dot, norm, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { TrainSpec } from '../sim/rail';
-import { KMH_PER_UNIT, LANE_W } from '../world/roadTypes';
+import { CURB_GAP } from '../lanes/traffic';
+import { KMH_PER_UNIT } from '../world/roadTypes';
 import type { VehicleSpec } from '../sim/vehicle';
 import type { CargoType } from '../world/cargo';
 import type { PassengerGroup } from '../world/entities';
@@ -460,17 +461,22 @@ export function bayPose(fp: Footprint, bays: number, bay: number, length: number
 }
 
 /**
- * Место i-го из count автобусов на посадке у остановки: вдоль бордюра, в крайней полосе улицы
- * (она — в сторону узла road), носом по ходу (остановка справа). Нет узла — улица с локальной +y.
+ * Место i-го из count автобусов шириной width на посадке у остановки: у бордюра (навес — в STOP_CURB от него, борт —
+ * в CURB_GAP), в крайней полосе улицы (она — в сторону узла road), носом по ходу (остановка справа). Нет узла —
+ * улица с локальной +y.
  */
-export function stopBerth(fp: Footprint, road: Vec | undefined, i: number, count: number): Pose {
+export function stopBerth(fp: Footprint, road: Vec | undefined, i: number, count: number, width = 4.8): Pose {
   const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
   const toRoad = road ? sub(road, fp.center) : { x: -u.y, y: u.x };
   const l = Math.hypot(toRoad.x, toRoad.y) || 1;
   const n = { x: toRoad.x / l, y: toRoad.y / l };
   const along = (i - (count - 1) / 2) * 14;
-  return { pos: add(add(fp.center, scale(u, along)), scale(n, fp.h / 2 + 2 + LANE_W / 2)), dir: dot(rightNormal(u), n) < 0 ? u : scale(u, -1) };
+  const off = fp.h / 2 + STOP_CURB + CURB_GAP + width / 2;
+  return { pos: add(add(fp.center, scale(u, along)), scale(n, off)), dir: dot(rightNormal(u), n) < 0 ? u : scale(u, -1) };
 }
+
+/** Навес остановки — в стольких метрах от бордюра (см. stopPlan). */
+const STOP_CURB = 2;
 
 /** Свободный пост, ближайший к точке p: машина сворачивает к ближнему. Свободных нет — следующий номер за последним. */
 export function nearestBay(fp: Footprint, bays: number, taken: Set<number>, p: Vec): number {

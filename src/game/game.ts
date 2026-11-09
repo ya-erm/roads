@@ -777,6 +777,7 @@ export class Game implements BuildContext {
     this.money = this.settings.money;
     this.roads = new Roads({
       dwell: (v) => this.dwellAt(v),
+      curbStop: (v) => this.curbStop(v),
       canArrive: (v) => this.canArrive(v),
       onArrive: (v) => this.onArrive(v),
       onLost: (v) => this.onLost(v),
@@ -907,7 +908,11 @@ export class Game implements BuildContext {
     const load = v.cargo ? CARGO[v.cargo].color : undefined;
     const sim = this.traffic.place({ ...m.spec, color: line.color, load, tank: this.isTanker(v), targetNode: next.nodeId }, spot.pos, spot.dir, spot.v);
     if (!sim) return null;
-    if (onStop) this.traffic.holdAfter(sim, 0);
+    if (onStop) {
+      this.traffic.holdAfter(sim, 0);
+      // Стоял у бордюра — там же и встаёт.
+      this.traffic.toCurb(sim);
+    }
     sim.tripTime = spot.trip;
     sim.stoppedTime = spot.stopped;
     this.owners.set(sim.id, { type: 'fleet', id: v.id });
@@ -5255,9 +5260,19 @@ export class Game implements BuildContext {
     return owner?.type === 'fleet' ? this.fleet.get(owner.id) : undefined;
   }
 
+  /** Машина едет к своей остановке (а не к автостанции) или стоит у неё: у бордюра — подъезжая, смещается к нему заранее. */
+  private curbStop(sim: Vehicle): boolean {
+    const v = this.fleetOf(sim);
+    const line = v && this.lines.get(v.lineId);
+    const st = line && this.stations.get(line.stops[v.stop]);
+    if (!v || st?.kind !== 'stop') return false;
+    // Стоит у неё (доезжает до места или посадка) — уже с маршрутом дальше; едет к ней — она и есть цель.
+    return v.state === 'loading' || !!v.boarding || (v.state === 'driving' && st.nodeId === sim.targetNode);
+  }
+
   /**
-   * Автобус у остановки — это просто остановка в маршруте: он стоит на дороге (в «кармашке», если есть), его
-   * видно и можно выбрать; высадка и посадка — пока стоит, потом едет дальше оттуда же.
+   * Автобус у остановки — это просто остановка в маршруте: он стоит на дороге (в «кармашке», если есть) у бордюра,
+   * его видно и можно выбрать; высадка и посадка — пока стоит, потом едет дальше оттуда же.
    */
   private dwellAt(sim: Vehicle): boolean {
     const v = this.fleetOf(sim);
@@ -8605,7 +8620,7 @@ export class Game implements BuildContext {
         const box = bayBox(this.bayArea(st), st.bays, bay, gate ? bayFront(st.fp, gate.pos) : 1);
         return { pos: box.center, r: Math.hypot(box.w, box.h) / 2 + 2, box };
       }
-      if (i >= 0) look = stopBerth(st.fp, gate?.pos, i, st.occupied.length);
+      if (i >= 0) look = stopBerth(st.fp, gate?.pos, i, st.occupied.length, m.spec.width);
     }
     if (look && m.mode === 'road') {
       const L = m.spec.length;

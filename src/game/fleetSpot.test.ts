@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import { twoWay } from '../lanes/model';
-import { LANE_W } from '../world/roadTypes';
+import { CURB_GAP } from '../lanes/traffic';
 import { Game } from './game';
 import { connectStations, fieldSpot, road, stationAtIndustry, withoutCitizens } from './testkit';
 import { bayBox, MODELS, stopBerth } from './transport';
@@ -29,7 +29,9 @@ describe('Место автобуса у остановки', () => {
   it('вдоль бордюра со стороны улицы, через 14 по длине навеса, носом вдоль него', () => {
     const a = stopBerth(fp, { x: 0, y: 30 }, 0, 2);
     const b = stopBerth(fp, { x: 0, y: 30 }, 1, 2);
-    expect(a.pos.y).toBeCloseTo(3 + 2 + LANE_W / 2);
+    // Бордюр — в 2 от навеса; борт автобуса шириной 4.8 — в CURB_GAP от бордюра.
+    expect(a.pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 4.8 / 2);
+    expect(stopBerth(fp, { x: 0, y: 30 }, 0, 1, 4.6).pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 4.6 / 2);
     expect(b.pos.y).toBeCloseTo(a.pos.y);
     expect(b.pos.x - a.pos.x).toBeCloseTo(14);
     expect(a.pos.x + b.pos.x).toBeCloseTo(0);

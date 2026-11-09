@@ -1,10 +1,11 @@
 import { buildLaneProfile, gradeFactor, LaneProfile, PROFILE_STEP } from './speedProfile';
 import { IDM, LIGHTS } from '../config';
-import { lerp as lerpNum } from '../core/math';
+import { clamp, lerp as lerpNum } from '../core/math';
 import { rightNormal, scale, add, angleDiff, angleOf, closestOnSegment, dist, dot, type Vec } from '../core/vec';
 import { follow, hitchOf, jointOf, steerBase } from '../sim/body';
 import type { Blinker, Vehicle, VehicleSpec } from '../sim/vehicle';
 import { GLane, GLink, GMove, GNode, LaneGraph, LightPhase } from './graph';
+import { edgesAt } from './geometry';
 import { bodyOnEnds, Corridor, layerOf } from './model';
 import { findLaneRoute } from './routing';
 import { onSolid, solidEnds } from './solid';
@@ -16,6 +17,12 @@ export interface LaneTrafficEvents {
    * полосы, пока её не отправят дальше (continueTo). Спрашивается, пока стоит.
    */
   dwell?(v: Vehicle): boolean;
+  /**
+   * Машина встаёт у бордюра (автобус у своей остановки: едет к ней или стоит у неё): подъезжая, заранее смещается
+   * к нему в крайней правой полосе (см. pullToCurb). Спрашивается на последней связи маршрута ближе CURB_APPROACH
+   * к её концу и пока машина стоит (holdAfter).
+   */
+  curbStop?(v: Vehicle): boolean;
   /** Можно ли машине завершить поездку сейчас. */
   canArrive?(v: Vehicle): boolean;
   onArrive(v: Vehicle): void;
@@ -161,6 +168,16 @@ const PASS_MIN = 0.4;
 const PASS_LOOK = 25;
 /** На сколько поперёк должны разойтись середины машин a и b, чтобы между кузовами остался зазор PASS_GAP. */
 export const passWidth = (a: Pick<Vehicle, 'width'>, b: Pick<Vehicle, 'width'>) => (a.width + b.width) / 2 + PASS_GAP;
+/** Автобус у остановки встаёт у бордюра: между бортом и бордюром (кромкой полотна с обочиной) — столько метров. */
+export const CURB_GAP = 0.4;
+/** К бордюру автобус начинает смещаться за столько метров до конца пути (узла остановки). */
+export const CURB_APPROACH = 35;
+/**
+ * Смещаясь к бордюру и обратно, автобус уходит вбок на CURB_SLOPE метра за метр пути (как рулём, без «краба») и
+ * не быстрее ASIDE_RATE; стоя — едва-едва, на CURB_CREEP м/с (не успел сместиться до остановки — досмещается).
+ */
+const CURB_SLOPE = 0.2;
+const CURB_CREEP = 0.15;
 /** С какой скоростью (м/с) машина смещается вбок внутри полосы. */
 const ASIDE_RATE = 3;
 /**
@@ -713,12 +730,16 @@ export class LaneTraffic {
     return veh;
   }
 
-  /** Где машина для сохранения: на манёвре в узле — уже в начале полосы выезда из него (туда её и поставят). */
+  /**
+   * Где машина для сохранения: на манёвре в узле — уже в начале полосы выезда из него (туда её и поставят); у бордюра
+   * (curb) — посреди своей полосы: к бордюру её снова прижмёт toCurb.
+   */
   spotOf(veh: Vehicle): { pos: Vec; dir: Vec } {
     const m = veh.onMovement ? this.graph.moves.get(veh.onMovement) : undefined;
     const lane = m && this.graph.lanes.get(m.outLane);
     const pose = lane ? this.graph.lanePose(lane, 0) : veh;
-    return { pos: { ...pose.pos }, dir: { ...pose.dir } };
+    const pos = !lane && veh.curb ? add(veh.pos, scale(rightNormal(veh.dir), -veh.curb)) : pose.pos;
+    return { pos: { ...pos }, dir: { ...pose.dir } };
   }
 
   /**
@@ -750,6 +771,49 @@ export class LaneTraffic {
 
   release(veh: Vehicle): void {
     delete veh.holdDist;
+  }
+
+  /** Стоящую у остановки (holdAfter) — сразу к бордюру, без смещения на глазах: автобус из сохранения. */
+  toCurb(veh: Vehicle): void {
+    const lane = this.currentLane(veh);
+    const to = lane && !veh.onMovement ? this.curbReach(veh, lane) : 0;
+    if (!to) return;
+    veh.curb = veh.curbTo = to;
+    delete veh.rear;
+    this.updatePose(veh);
+  }
+
+  /**
+   * Автобус у остановки (events.curbStop) встаёт у бордюра, а не посреди полосы: подъезжая к ней (последняя связь
+   * пути, ближе CURB_APPROACH к её концу) и пока стоит (holdDist), смещается в крайней правой полосе к бордюру — до
+   * зазора CURB_GAP между бортом и бордюром; отпустили — обратно к середине полосы. Смещается плавно, на ходу
+   * (integrate), и встаёт ровно вдоль полосы (updatePose).
+   */
+  private pullToCurb(veh: Vehicle): void {
+    const lane = this.currentLane(veh);
+    let to = 0;
+    if (lane) {
+      const last = veh.routeIndex === veh.route.length - 1;
+      const near = veh.holdDist !== undefined || (last && lane.length - veh.s < CURB_APPROACH);
+      const stopping = near && !!this.events.curbStop?.(veh);
+      if (stopping) to = this.curbReach(veh, lane);
+    }
+    if (to || veh.curb !== undefined) veh.curbTo = to;
+  }
+
+  /**
+   * На сколько машине сместиться от середины полосы вправо, чтобы до бордюра (кромки полотна с обочиной) осталось
+   * CURB_GAP: только в крайней правой полосе; у сужения («кармашек» начинается или кончается) — по ширине под кузовом.
+   */
+  private curbReach(veh: Vehicle, lane: GLane): number {
+    const link = this.graph.links.get(lane.link);
+    const c = link && this.graph.net.corridors.get(link.corridor);
+    if (!link || !c || lane.index !== link.lanes.length - 1) return 0;
+    // Середина кузова (нос — в s), но в пределах своей связи.
+    const e = edgesAt(c, this.graph.axisS(lane, clamp(veh.s - veh.length / 2, 0, lane.length)));
+    if (!e) return 0;
+    const edge = link.flow > 0 ? e[1] - lane.offset : lane.offset - e[0];
+    return Math.max(0, edge + ROAD_MARGIN - veh.width / 2 - CURB_GAP);
   }
 
   /**
@@ -858,8 +922,10 @@ export class LaneTraffic {
     for (const veh of list) {
       if (veh.onMovement) {
         if (veh.asideTo) veh.asideTo = 0;
+        if (veh.curbTo) veh.curbTo = 0;
         continue;
       }
+      this.pullToCurb(veh);
       // Спецмашина позади — уступают ей (перестроились — на этот такт всё).
       if (this.sirenAt ? this.yieldToSiren(veh) : veh.asideTo !== undefined && this.stopYield(veh)) continue;
       this.laneChange(veh, dt);
@@ -1099,7 +1165,8 @@ export class LaneTraffic {
     if (!right && !(oneWay && lane.index === 0)) return -ASIDE;
     const ground = !!c && net.node(c.a).level === 0 && net.node(c.b).level === 0;
     const reach = ground ? ASIDE_CURB : Math.max(ASIDE, LANE_W / 2 + ROAD_MARGIN - veh.width / 2 - CURB_KEEP);
-    return right ? reach : -reach;
+    // Автобус у остановки уже у бордюра (curb) — прижимается только на остаток.
+    return right ? Math.max(PASS_MIN, reach - (veh.curb ?? 0)) : -reach;
   }
 
   /**
@@ -1655,6 +1722,17 @@ export class LaneTraffic {
         delete veh.asideTo;
       } else veh.aside = now;
     }
+    // К бордюру у остановки и обратно — по ходу, как рулём (CURB_SLOPE на метр пути); стоя — едва-едва.
+    if (veh.curb !== undefined || veh.curbTo) {
+      const from = veh.curb ?? 0;
+      const to = veh.curbTo ?? 0;
+      const step = Math.min(ASIDE_RATE, CURB_CREEP + CURB_SLOPE * veh.v) * dt;
+      const now = Math.abs(to - from) <= step ? to : from + Math.sign(to - from) * step;
+      if (now === 0 && !to) {
+        delete veh.curb;
+        delete veh.curbTo;
+      } else veh.curb = now;
+    }
     if (veh.lateral !== 0) {
       // glide — съезжает в полосу на ходу (наклон пути — около 10°), стоя — не сдвигается.
       const step = Math.min(Math.abs(veh.lateral), veh.glide ? veh.v * dt * 0.18 : (6 + veh.v * 0.2) * dt);
@@ -1769,6 +1847,7 @@ export class LaneTraffic {
       if (veh.glide && veh.lateral) veh.pos = add(veh.pos, scale(rightNormal(p.dir), veh.lateral));
       // Не успела вернуться к середине полосы (уступала спецмашине) — возвращается уже в узле.
       if (veh.aside) veh.pos = add(veh.pos, scale(rightNormal(p.dir), veh.aside));
+      if (veh.curb) veh.pos = add(veh.pos, scale(rightNormal(p.dir), veh.curb));
       this.steer(veh, p.dir);
       if (m.node !== null) veh.level = this.graph.net.nodes.get(m.node)?.level ?? veh.level;
       // Корпус ещё (или уже) на полотне въезда или выезда — слой и его: у моста машина не ныряет под край.
@@ -1783,10 +1862,14 @@ export class LaneTraffic {
     const lane = this.currentLane(veh);
     if (!lane) return;
     const pose = this.graph.lanePose(lane, Math.min(veh.s, lane.length));
-    veh.pos = add(pose.pos, scale(rightNormal(pose.dir), veh.lateral + (veh.aside ?? 0)));
+    veh.pos = add(pose.pos, scale(rightNormal(pose.dir), veh.lateral + (veh.aside ?? 0) + (veh.curb ?? 0)));
     if (veh.shift) veh.pos = add(veh.pos, veh.shift);
-    // Прижимаясь к краю (или возвращаясь от него), кузов чуть наискось, а у цели — снова вдоль полосы.
-    const yaw = veh.aside === undefined || veh.lateral ? Infinity : ASIDE_YAW * Math.min(1, Math.abs((veh.asideTo ?? 0) - veh.aside) / ASIDE_STRAIGHT);
+    // Прижимаясь к краю или к бордюру (или возвращаясь), кузов чуть наискось, а у цели — снова вдоль полосы.
+    const left = Math.max(
+      veh.aside === undefined ? 0 : Math.abs((veh.asideTo ?? 0) - veh.aside),
+      veh.curb === undefined ? 0 : Math.abs((veh.curbTo ?? 0) - veh.curb),
+    );
+    const yaw = (veh.aside === undefined && veh.curb === undefined) || veh.lateral ? Infinity : ASIDE_YAW * Math.min(1, left / ASIDE_STRAIGHT);
     this.steer(veh, pose.dir, yaw);
     veh.centerS = this.graph.axisS(lane, veh.s);
     const net = this.graph.net;
