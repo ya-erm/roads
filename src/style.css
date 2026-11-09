@@ -6953,3 +6953,191 @@ span.ind-chip {
 .crew-card .cc-slots.full {
   color: var(--danger);
 }
+
+/* ---------- Предприятия строит игрок (src/ui/enterpriseUi.ts) ---------- */
+
+.ent-opts {
+  align-items: flex-start;
+}
+
+.cards.ent-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 560px;
+}
+
+.card.ent-card {
+  min-width: 78px;
+  padding: 4px 5px 3px;
+  gap: 1px;
+}
+
+.ent-card .ent-recipe {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 22px;
+}
+
+.ent-arrow {
+  color: var(--muted);
+  font-size: 11px;
+  margin: 0 1px;
+}
+
+.ent-card .name {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ent-badges {
+  display: flex;
+  gap: 3px;
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.ent-b {
+  display: inline-flex;
+  align-items: center;
+  color: #4b5563;
+}
+
+.ent-b.harm {
+  color: #b45f1c;
+  letter-spacing: -1px;
+}
+
+.ent-b.none {
+  opacity: 0.4;
+}
+
+.ent-price {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.ent-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.ent-rule {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ent-ic {
+  flex: none;
+  width: 22px;
+  text-align: center;
+  font-size: 15px;
+}
+
+.ent-ic.harm {
+  color: #b45f1c;
+  font-size: 13px;
+  letter-spacing: -2px;
+}
+
+.ent-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
+
+.ent-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.ent-row small {
+  color: var(--muted);
+}
+
+.ent-row.ruin {
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: #f3efe8;
+}
+
+.ent-row.ruin > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.ent-row.hint {
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: #fff6e0;
+}
+
+.ent-row.bad b,
+.ent-row .bad {
+  color: var(--danger);
+}
+
+.ent-row .dots {
+  letter-spacing: 1px;
+}
+
+.ent-bar {
+  flex: none;
+  width: 90px;
+  height: 7px;
+  border-radius: 4px;
+  background: #e3e8ee;
+  overflow: hidden;
+}
+
+.ent-bar i {
+  display: block;
+  height: 100%;
+  background: #2e9d57;
+}
+
+.ent-bar.warn i {
+  background: #e0a526;
+}
+
+.ent-bar.bad i {
+  background: #e5534b;
+}
+
+.ent-slot {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: #eef2f6;
+}
+
+.ent-slot.free {
+  border: 1.5px dashed #9aa6b2;
+  background: none;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.ent-build {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 5px;
+  border-radius: 7px;
+  background: #eef2f6;
+}
+
+.ent-build:hover {
+  background: #e3ecf8;
+}

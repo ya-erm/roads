@@ -9,7 +9,8 @@ import { Rng } from '../core/rng';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
 import { MODELS, newestLike } from '../game/transport';
-import { CARGO, CargoType, TOWN_CARGO } from '../world/cargo';
+import { CARGO, CargoType, type IndustryType, TOWN_CARGO } from '../world/cargo';
+import { buildCost, freeDeposits, harmClass, isRaw } from '../world/enterprise';
 import { TOWN_NEED } from '../world/entities';
 import { townNeed } from '../world/townSupply';
 import type { Industry, Town } from '../world/entities';
@@ -35,7 +36,9 @@ import {
   roadMonths,
   routeCost,
   buildAllowance,
+  buildEffort,
   buildReach,
+  live,
   Supply,
   supplyEffort,
   townPairs,
@@ -217,9 +220,15 @@ function paxPlan(sc: Scenario, months: number, skip?: Set<number>): PaxPlan | nu
 /** Брифинг: регион, капитал, кредит, предел кредита и главное о карте. */
 function describeRegion(sc: Scenario, r: RegionInfo): string[] {
   const game = sc.game;
+  const deposits = game.enterprises.deposits.filter((d) => d.used === undefined).length;
+  const plural = (n: number, one: string, few: string, many: string) =>
+    n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? few : many;
+  const inds = live(game).length;
   const facts = [
     `${r.towns} городов, ${r.population.toLocaleString('ru-RU')} жителей; крупных — ${r.bigTowns}`,
-    `${game.industries.length} предприятий, цепочек с близким сырьём — ${r.compactChains}`,
+    game.enterprises.on
+      ? `${inds} ${plural(inds, 'предприятие', 'предприятия', 'предприятий')} и ${deposits} ${plural(deposits, 'месторождение', 'месторождения', 'месторождений')} ⛏️ — остальное строите сами; цепочек с близким сырьём — ${r.compactChains}`
+      : `${game.industries.length} предприятий, цепочек с близким сырьём — ${r.compactChains}`,
     `Между соседними городами в среднем ${km(r.spacing)}`,
   ];
   const big = bigTowns(game)[0];
@@ -356,6 +365,15 @@ function phaseA(sc: Scenario, term: Term, paxMain: boolean, freight: FreightPlan
       },
     );
   }
+  // «Строит игрок»: построить первое предприятие — завод для добычи без сбыта или добычу для завода без сырья.
+  if (sc.game.enterprises.on) {
+    const target = buildTarget(sc.game);
+    if (target)
+      sc.tryObjective(
+        { kind: 'build', count: 1, what: target.kind.kind, cargo: target.kind.produces, known: liveIds(sc.game) },
+        { role: 'goal', phase: 0, months, fast, why: target.why, reward: { money: roundMoney(buildCost(target.kind) * 0.6), reputation: 2 }, related: target.related },
+      );
+  }
   // Прибыль: половина того, что даст главная линия, когда разгонится.
   const net = Math.max(freight?.net ?? 0, pax?.net ?? 0);
   const amount = Math.max(3000, roundMoney(net * 0.6 * (diff.demand / 0.65), 1000));
@@ -439,8 +457,11 @@ function phaseB(sc: Scenario): void {
   const info = network(game);
   const months = Math.round(PHASES[1].months * diff.time);
   const work = months - RAMP;
-  type Option = { kind: 'industry' | 'chain' | 'pax'; params: ObjectiveParams; why: string; related: ReturnType<typeof refOf>[]; value: number };
+  type Option = { kind: 'industry' | 'chain' | 'pax' | 'build'; params: ObjectiveParams; why: string; related: ReturnType<typeof refOf>[]; value: number };
   const options: Option[] = [];
+  // «Строит игрок»: новая цепочка со своим заводом — постройте и выпустите.
+  const built = game.enterprises.on ? buildChain(sc, months) : null;
+  if (built) options.push({ kind: 'build', ...built });
   // Завод, которому игрок уже возит сырьё, но чего-то не хватает: второго вида сырья или вывоза продукции.
   // Завод, у которого всё налажено, растёт сам (шаг уровня за каждый хороший месяц) — такая цель была бы даром.
   const gets = (i: Industry, c: CargoType) => (s.stats.to[`industry:${i.id}:${c}`] ?? 0) > 0;
@@ -481,7 +502,8 @@ function phaseB(sc: Scenario): void {
   });
   // Стратегия игрока: возил в основном пассажиров — главная цель тоже пассажирская.
   const paxFirst = info.pax > info.freight * 1.5;
-  const order: Option['kind'][] = paxFirst ? ['pax', 'industry', 'chain'] : ['industry', 'chain', 'pax'];
+  // «Строит игрок» — сначала своя новая цепочка: этап B подталкивает строить.
+  const order: Option['kind'][] = paxFirst ? ['pax', 'build', 'industry', 'chain'] : ['build', 'industry', 'chain', 'pax'];
   let mainKind: Option['kind'] | null = null;
   for (const kind of order) {
     const opt = options.find((o) => o.kind === kind);
@@ -511,8 +533,9 @@ function phaseB(sc: Scenario): void {
   const near = [...game.towns].sort((a, b) => distToNetwork(info, a.center) - distToNetwork(info, b.center)).slice(0, 3);
   supplyObjective(sc, served.length ? served : near, { phase: 1, months, inRow: 1 * TERM_SCALE, money: 60_000, growth: true });
   // Вторая цель — другой вид перевозок.
-  if (mainKind === 'pax' && chain) {
-    sc.tryObjective(chain.params, { role: 'goal', phase: 1, months, why: chain.why, reward: { money: roundMoney(chain.value * 0.6) }, related: chain.related });
+  const second = mainKind === 'pax' ? (built ?? chain) : null;
+  if (second) {
+    sc.tryObjective(second.params, { role: 'goal', phase: 1, months, why: second.why, reward: { money: roundMoney(second.value * 0.6) }, related: second.related });
   } else {
     const p = paxPlan(sc, months, info.towns);
     if (p)
@@ -593,7 +616,8 @@ export function extraObjectives(sc: Scenario): void {
   const served = game.towns.filter((t) => info.towns.has(t.id)).sort((a, b) => b.population - a.population);
   supplyObjective(sc, served.slice(0, 3), { ...opts, inRow: 2 * TERM_SCALE, money: 150_000, needs: 'all' });
   connectObjective(sc, 'town', 2, { ...opts, money: 120_000 });
-  connectObjective(sc, 'industry', 4, { ...opts, money: 120_000 });
+  if (game.enterprises.on) buildObjective(sc, 3, { ...opts, money: 120_000 });
+  else connectObjective(sc, 'industry', 4, { ...opts, money: 120_000 });
   const best = Math.max(0, ...sc.state.stats.months.map((m) => m.units));
   if (best > 0) {
     const amount = round10(best * 1.3);
@@ -638,7 +662,9 @@ function phaseC(sc: Scenario): void {
   );
   // Подключить то, до чего сеть ещё не дотянулась: в сети считаются те, что в ней сейчас.
   connectObjective(sc, 'town', hard === 'easy' ? 1 : hard === 'normal' ? 2 : 3, { phase: 2, months, money: 100_000 });
-  connectObjective(sc, 'industry', hard === 'easy' ? 2 : hard === 'normal' ? 3 : 4, { phase: 2, months, money: 100_000 });
+  // «Строит игрок»: предприятий на карте мало — подключать нечего; вместо этого — построить новые.
+  if (game.enterprises.on) buildObjective(sc, hard === 'easy' ? 1 : hard === 'normal' ? 2 : 3, { phase: 2, months, money: 100_000 });
+  else connectObjective(sc, 'industry', hard === 'easy' ? 2 : hard === 'normal' ? 3 : 4, { phase: 2, months, money: 100_000 });
   // Снабжать один из крупных городов сети — тот, где проще закрыть нужную часть потребностей.
   const served = game.towns.filter((t) => info.towns.has(t.id)).sort((a, b) => b.population - a.population);
   supplyObjective(sc, served.length ? served.slice(0, 3) : bigTowns(game).slice(0, 2), { phase: 2, months, inRow: 2 * TERM_SCALE, money: 100_000 });
@@ -693,6 +719,91 @@ function supplyObjective(
       why: `${why}${o.growth ? ' Снабжённый город растёт быстрее.' : ''}`,
       reward: { money: o.money, effects: o.growth ? [{ kind: 'growth', target: t.id, factor: 1.5, months: 8 * TERM_SCALE }] : undefined },
       related: [refOf(t)],
+    },
+  );
+}
+
+// ---------- «Строит игрок»: задания построить ----------
+
+/** Работающие и строящиеся предприятия сейчас — задание «построить» их не засчитывает. */
+const liveIds = (game: Game): number[] => live(game).map((i) => i.id);
+
+/**
+ * Что построить первым (этап A): завод для добычи, которой некуда сбыть сырьё (на одно сырьё, невредный — раньше),
+ * а нет такой — добычу на месторождении для завода, которому сырья никто не добывает.
+ */
+export function buildTarget(game: Game): { kind: IndustryType; why: string; related: Ref[] } | null {
+  const all = live(game);
+  const kinds = game.enterprises.kinds();
+  for (const raw of all.filter((i) => isRaw(i.info))) {
+    const c = raw.info.produces;
+    if (all.some((i) => i.info.accepts.includes(c))) continue;
+    const plant = kinds
+      .filter((k) => k.accepts.includes(c) && k.accepts.every((x) => producible(game, x)) && receivers(game, k.produces).length)
+      .sort((a, b) => a.accepts.length - b.accepts.length || harmClass(a.kind) - harmClass(b.kind))[0];
+    if (plant)
+      return {
+        kind: plant,
+        why: `${raw.name} добывает «${CARGO[c].name}», а перерабатывать негде. Постройте ${plant.name.toLowerCase()} — у города, чтобы хватило рабочих${
+          harmClass(plant.kind) ? ', но не вплотную к домам: он вредный' : ''
+        }.`,
+        related: [refOf(raw)],
+      };
+  }
+  for (const plant of all.filter((i) => !isRaw(i.info))) {
+    for (const c of plant.info.accepts) {
+      if (all.some((i) => i.info.produces === c)) continue;
+      const raw = kinds.find((k) => isRaw(k) && k.produces === c && freeDeposits(game.enterprises.deposits, k.kind).length);
+      if (raw)
+        return {
+          kind: raw,
+          why: `${plant.name} ждёт «${CARGO[c].name}», а его никто не добывает. Месторождения отмечены значком ⛏️ — постройте добычу на ближайшем.`,
+          related: [refOf(plant)],
+        };
+    }
+  }
+  return null;
+}
+
+/**
+ * Этап B: новая цепочка со своим заводом — вид, которого на карте нет, чью продукцию ждут и чьё сырьё можно
+ * получить (по seed — из трёх самых простых). Цель — построить и выпустить.
+ */
+function buildChain(sc: Scenario, months: number): { params: ObjectiveParams; why: string; related: Ref[]; value: number } | null {
+  const game = sc.game;
+  const have = new Set(live(game).map((i) => i.info.kind));
+  const options = game.enterprises
+    .kinds()
+    .filter((k) => !isRaw(k) && !have.has(k.kind) && receivers(game, k.produces).length && k.accepts.every((c) => producible(game, c)))
+    .map((k) => ({ k, effort: k.accepts.reduce((s, c) => s + (live(game).some((i) => i.info.produces === c) ? 1 : buildEffort(game, c)), 0) + harmClass(k.kind) * 0.2 }))
+    .sort((a, b) => a.effort - b.effort)
+    .slice(0, 3);
+  if (!options.length) return null;
+  const { k } = sc.rng.pick(options);
+  const work = months - RAMP - TERM_SCALE - (game.buildMode ? 2 * TERM_SCALE : 0);
+  const amount = round10(Math.max(30, ECONOMY.processRate * 0.5 * Math.max(1, work) * 0.35 * sc.difficulty.demand));
+  const to = receivers(game, k.produces)[0];
+  const inputs = k.accepts.map((c) => CARGO[c].name.toLowerCase()).join(' и ');
+  return {
+    params: { kind: 'build', count: 1, what: k.kind, cargo: k.produces, produce: amount, known: liveIds(game) },
+    why: `Новая цепочка: постройте ${k.name.toLowerCase()} (${inputs} → «${CARGO[k.produces].name}») и наладьте её — сырьё на завод, продукцию${
+      to ? ` — например, ${to.name}` : ' получателям'
+    }. Ставьте у города: рабочие придут сами.`,
+    related: to ? [refOf(to)] : [],
+    value: amount * CARGO[k.produces].rate * 25 + buildCost(k) * 0.5,
+  };
+}
+
+/** Построить count новых предприятий (этап C, после победы): любых — добычу на месторождениях или заводы. */
+function buildObjective(sc: Scenario, count: number, o: { role?: ObjectiveRole; phase: number | null; months: number | null; money: number }): Objective | null {
+  return sc.tryObjective(
+    { kind: 'build', count, known: liveIds(sc.game) },
+    {
+      role: o.role ?? 'goal',
+      phase: o.phase,
+      months: o.months,
+      why: 'Региону нужны новые производства: добыча на свободных месторождениях ⛏️ и заводы у городов — где хватит рабочих и дым не помешает жителям.',
+      reward: { money: o.money },
     },
   );
 }

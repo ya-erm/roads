@@ -2,9 +2,11 @@
  * Система заданий: тексты, прогресс и проверка выполнения — по реальному состоянию симуляции
  * (доставки, производство, население, финансы месяца), а не по факту постройки.
  */
+import { ENTERPRISE } from '../config';
 import type { Game } from '../game/game';
-import { CARGO, type CargoType } from '../world/cargo';
-import type { Town } from '../world/entities';
+import { CARGO, type CargoType, INDUSTRY_TYPES } from '../world/cargo';
+import { isActive, townGap } from '../world/enterprise';
+import type { Industry, Town } from '../world/entities';
 import { monthTownNeed, townNeed } from '../world/townSupply';
 import { connected, industryById, newRoutesCarried, operating, refName, townById } from './analysis';
 import type { MonthStat, Objective, ObjectiveParams, Ref, ScenarioState } from './types';
@@ -36,6 +38,29 @@ function newlyConnected(game: Game, p: Extract<ObjectiveParams, { kind: 'connect
   return n;
 }
 const inRow = (n: number) => (n > 1 ? `, ${monthsText(n)} подряд` : '');
+
+/**
+ * Новые предприятия задания «построить»: не из known, достроенные и работающие, с нужной продукцией и у нужного
+ * города (не дальше, чем доходят рабочие, ENTERPRISE.commute.far от его черты).
+ */
+export function builtFor(game: Game, p: Extract<ObjectiveParams, { kind: 'build' }>): Industry[] {
+  const known = new Set(p.known);
+  const town = p.town !== undefined ? townById(game, p.town) : undefined;
+  return game.industries.filter(
+    (i) =>
+      !known.has(i.id) &&
+      isActive(i) &&
+      (!p.what || i.info.kind === p.what) &&
+      (!p.cargo || i.info.produces === p.cargo) &&
+      (p.town === undefined || (!!town && townGap(town, i.fp) < ENTERPRISE.commute.far)),
+  );
+}
+
+/** Прогресс задания «построить»: сколько новых построено или (produce) сколько они выпустили. */
+function buildProgress(game: Game, p: Extract<ObjectiveParams, { kind: 'build' }>): number {
+  const list = builtFor(game, p);
+  return p.produce ? list.reduce((s, i) => s + (i.made ?? 0), 0) : list.length;
+}
 
 /** Сколько потребностей города надо закрыть: needs, а в старых заданиях — все. */
 export function supplyNeeds(p: Extract<ObjectiveParams, { kind: 'supply' }>, t: Town): number {
@@ -79,6 +104,8 @@ export function targetOf(p: ObjectiveParams): number {
       return p.amount;
     case 'industry':
       return p.level;
+    case 'build':
+      return p.produce ?? p.count;
     default:
       return p.months;
   }
@@ -101,6 +128,8 @@ export function liveProgress(o: Objective, s: ScenarioState, game: Game): number
       return townById(game, p.town)?.population ?? 0;
     case 'connect':
       return newlyConnected(game, p);
+    case 'build':
+      return buildProgress(game, p);
     default:
       return o.streak;
   }
@@ -273,6 +302,20 @@ export function titleOf(p: ObjectiveParams, game: Game): string {
       return `Новые маршруты этапа: перевозить от ${fmt(p.amount)} ед. в месяц${inRow(p.months)}`;
     case 'connect':
       return `Подключить к сети ${newPlaces(p.amount, p.what)}`;
+    case 'build': {
+      // «Построить пищевой комбинат у Берёзовки и выпустить 200 ед. «Продукты»», «Построить 2 новых предприятия».
+      const named = p.what ? INDUSTRY_TYPES[p.what].name.toLowerCase() : null;
+      const what = named
+        ? p.count === 1
+          ? named
+          : `${fmt(p.count)} × ${named}`
+        : p.cargo
+          ? `${newPlaces(p.count, 'industry').replace(/^1 /, '')} с продукцией «${CARGO[p.cargo].name}»`
+          : newPlaces(p.count, 'industry');
+      const where = p.town !== undefined ? ` у города ${townById(game, p.town)?.name ?? '—'}` : '';
+      const made = p.produce && p.cargo ? ` и выпустить ${fmt(p.produce)} ед. «${CARGO[p.cargo].name}»` : '';
+      return `Построить ${what}${where}${made}`;
+    }
   }
 }
 

@@ -3,7 +3,7 @@ import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../co
 import type { Plan, Snap } from '../game/build';
 import { stationNormal } from '../game/railStationEdit';
 import { warningMarks } from '../game/stationWarnings';
-import type { Game, LaneEnd } from '../game/game';
+import type { Game, LaneEnd, Partner } from '../game/game';
 import { bayFront, stopBerth, type FleetVehicle, type Line } from '../game/transport';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { atPortals, type Portal, portalHalf, tunnelPortals } from '../lanes/tunnel';
@@ -20,8 +20,26 @@ import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { trainWagonFills } from '../sim/wagons';
 import { cargoImage } from '../ui/cargoIcons';
 import { BIOMES } from '../world/biomes';
-import { CARGO, CargoType, FREIGHT } from '../world/cargo';
+import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, type IndustryKind } from '../world/cargo';
 import { Annex, Industry, isBusTerminal, Station, TownBuilding } from '../world/entities';
+import type { IndustryPlan } from '../game/enterprises';
+import {
+  depositBox,
+  depositRadius,
+  depositSig,
+  dirtyIndustries,
+  drawDeposit,
+  drawGrime,
+  drawHarmZone,
+  drawRuinOverlay,
+  drawSiteArt,
+  drawSoot,
+  enterpriseReach,
+  enterpriseSig,
+  houseGrime,
+} from './enterpriseArt';
+import { townEdge, townIndustries, townSlots } from '../world/enterprise';
+import { sizeDots } from '../ui/enterpriseUi';
 import { lastTownNeed } from '../world/townSupply';
 import type { Segment } from '../world/network';
 import { halfWidth, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
@@ -165,6 +183,11 @@ export interface ToolOverlay {
   phaseEdit?: { node: number; i: number; states: Map<string, TurnState>; hover: string | null; flash: string[] } | null;
   /** Курсор на варианте главной дороги в карточке перекрёстка: его и показываем (mainPair: null — «Авто», [] — равнозначный). */
   mainHover?: { node: number; mainPair: number[] | null } | null;
+  /**
+   * Инструмент «Предприятие» (режим «Строит игрок»): какой вид ставим и где он встанет (plan — под курсором): участок,
+   * черта городов, кольцо вреда, пунктиры к партнёрам; месторождения этого вида — ярче.
+   */
+  industry?: { kind: IndustryKind | null; plan: IndustryPlan | null } | null;
 }
 
 /** Радиус метки полосы: по ширине полосы, но не меньше нескольких пикселей — чтобы попасть и издалека. */
@@ -418,6 +441,8 @@ export class Renderer {
     /** Строящиеся пути ж/д проектов: чертёж и готовое по этапам (railProjectSig). */
     railProjects: new SceneDiff(),
     industries: new SceneDiff(),
+    /** Месторождения (режим «Строит игрок»): занятое не рисуется — его предприятие на месте. */
+    deposits: new SceneDiff(),
     aprons: new SceneDiff(),
     projects: new SceneDiff(),
     /** Будущие дороги проектов: полотна и узлы по отпечатку их геометрии (`c12`, `n7`). */
@@ -476,7 +501,18 @@ export class Renderer {
   /** Плитки кэша и слепки нарисованного в них — заново. */
   private forgetStill(): void {
     this.tiles.clear();
-    for (const d of [this.diffs.corridors, this.diffs.nodes, this.diffs.rails, this.diffs.railProjects, this.diffs.industries, this.diffs.aprons, this.diffs.projects, this.diffs.bases]) d.clear();
+    for (const d of [
+      this.diffs.corridors,
+      this.diffs.nodes,
+      this.diffs.rails,
+      this.diffs.railProjects,
+      this.diffs.industries,
+      this.diffs.deposits,
+      this.diffs.aprons,
+      this.diffs.projects,
+      this.diffs.bases,
+    ])
+      d.clear();
     this.diffs.projectItems.clear();
     this.diffs.towns.clear();
     this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1, full: null, fullVersion: -1 };
@@ -707,6 +743,8 @@ export class Renderer {
     const ctx = this.ctx;
     ctx.save();
     const groundRails = segs.filter((x) => this.cache.get(x.id)!.maxLevel <= 0.01 && !x.build);
+    // Месторождения и копоть у вредных предприятий — на земле, под путями и дорогами (enterpriseArt).
+    this.drawEnterpriseGround(game, view);
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
     drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
@@ -1013,7 +1051,14 @@ export class Renderer {
     }
     add(
       this.diffs.industries.update((put) => {
-        for (const ind of game.industries) put(ind.id, industrySig(ind), (ind.annexes ?? []).reduce((box, x) => unite(box, fpBox(x.fp)), fpBox(ind.fp)));
+        // Вредное — вместе с копотью вокруг и посеревшими домами в радиусе вреда (enterpriseArt).
+        for (const ind of game.industries)
+          put(ind.id, `${industrySig(ind)}|${enterpriseSig(ind)}`, grow((ind.annexes ?? []).reduce((box, x) => unite(box, fpBox(x.fp)), fpBox(ind.fp)), enterpriseReach(ind)));
+      }),
+    );
+    add(
+      this.diffs.deposits.update((put) => {
+        for (const d of game.enterprises.deposits) put(d.id, depositSig(d), depositBox(d));
       }),
     );
     add(
@@ -2126,15 +2171,30 @@ export class Renderer {
   private drawStill(game: Game, view: Box): void {
     const inView = (fp: Footprint) =>
       fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
+    // Дома в зоне вредных предприятий — посеревшие (enterpriseArt).
+    const dirty = dirtyIndustries(game.industries);
     for (const town of game.towns) {
       if (dist(town.center, { x: (view.x0 + view.x1) / 2, y: (view.y0 + view.y1) / 2 }) > (town.extent ?? town.radius) + (view.x1 - view.x0) * 1.2) continue;
-      for (const b of town.buildings) if (inView(b.fp)) this.drawBuilding(b);
+      for (const b of town.buildings) {
+        if (!inView(b.fp)) continue;
+        this.drawBuilding(b);
+        if (dirty.length && b.kind !== 'landmark' && this.camera.zoom > 0.25) drawGrime(this.ctx, b, houseGrime(b, dirty), this.camera.zoom > 0.5);
+      }
     }
     for (const ind of game.industries) {
       // Пристройка — своё вспомогательное здание предприятия (annexArt).
       for (const a of ind.annexes ?? []) if (inView(a.fp)) this.drawAnnex(ind, a, 'still');
       if (inView(ind.fp)) this.drawIndustry(ind, 'still');
     }
+  }
+
+  /** Месторождения и копоть земли у вредных предприятий — в плитки кэша (режим «Строит игрок»). */
+  private drawEnterpriseGround(game: Game, view: Box): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const seen = (p: Vec, r: number) => p.x > view.x0 - r && p.x < view.x1 + r && p.y > view.y0 - r && p.y < view.y1 + r;
+    for (const ind of game.industries) if (seen(ind.fp.center, 300)) drawSoot(ctx, ind);
+    for (const d of game.enterprises.deposits) if (seen(d.center, 120)) drawDeposit(ctx, d, z);
   }
 
   /** Движущееся у предприятий и пристроек — дым, мерцание огня, качалки (только вблизи), — в каждом кадре. */
@@ -2147,6 +2207,8 @@ export class Renderer {
     for (const ind of game.industries) {
       // Дым, огонь и качалки движутся и на паузе (по часам, а не по времени игры).
       for (const a of ind.annexes ?? []) if (inView(a.fp) && drawAnnexArt(this.ctx, ind, a, z, time, 'motion')) this.moving = true;
+      // Заброшенное и стройка не дымят (кран стройки — в плитке).
+      if (ind.ruin || ind.build) continue;
       if (inView(ind.fp) && drawIndustryArt(this.ctx, ind, z, time, 'motion')) this.moving = true;
     }
   }
@@ -2449,7 +2511,14 @@ export class Renderer {
   private drawIndustry(ind: Industry, layer: ArtLayer): void {
     const fp = ind.fp;
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.16)');
+    // Стройплощадка (режим «Строит игрок», «Со строительством»): здание растёт по готовности.
+    if (ind.build) {
+      if (layer !== 'motion') drawSiteArt(this.ctx, ind, this.camera.zoom, 0);
+      return;
+    }
     drawIndustryArt(this.ctx, ind, this.camera.zoom, performance.now() / 1000, layer);
+    // Заброшенное: ржавчина, выбитые окна, трава.
+    if (ind.ruin && layer !== 'motion') drawRuinOverlay(this.ctx, ind, this.camera.zoom);
   }
 
   /** Пристройка предприятия: участок с лёгкой тенью, вспомогательное здание — в annexArt; layer — ArtLayer. */
@@ -3002,17 +3071,42 @@ export class Renderer {
         }
       });
     }
+    // Месторождения (режим «Строит игрок»): значок ресурса и точки размера ●●○ — подписью; вблизи видно и так.
+    if (z < 0.9) {
+      for (const d of game.enterprises.deposits) {
+        if (d.used !== undefined || !near(d.center, 120)) continue;
+        const s = (z <= 0.3 ? 18 : 15) / z;
+        ctx.globalAlpha = 0.9;
+        this.icon(cargoImage(INDUSTRY_TYPES[d.kind].produces), d.center, s);
+        ctx.globalAlpha = 1;
+        text({ x: d.center.x, y: d.center.y + s * 0.8 }, sizeDots(d.size), 9, '#2b2d31', 'rgba(255,255,255,0.75)');
+      }
+    }
+    const e = game.enterprises;
     for (const ind of game.industries) {
       if (!near(ind.fp.center, 200)) continue;
       if (z <= 0.3) {
-        // Издалека предприятие видно как значок продукции.
+        // Издалека предприятие видно как значок продукции; заброшенное и стройка — бледным.
+        if (ind.ruin || ind.build) ctx.globalAlpha = 0.45;
         this.icon(cargoImage(ind.info.produces), ind.fp.center, 24 / z);
+        ctx.globalAlpha = 1;
         continue;
       }
       // Рецепт — по центру здания, название — под нижним краем.
       const bottom = ind.fp.center.y + Math.max(...footprintCorners(ind.fp).map((p) => p.y - ind.fp.center.y));
       this.drawRecipe(ind, ind.fp.center);
       text({ x: ind.fp.center.x, y: bottom + 14 / z }, ind.info.name, 12, '#3b4652');
+      // Режим «Строит игрок»: стройка, заброшенное, нехватка рабочих — плашкой над зданием.
+      if (!e.on) continue;
+      const top = ind.fp.center.y - Math.max(...footprintCorners(ind.fp).map((p) => ind.fp.center.y - p.y));
+      const badge = ind.build
+        ? `🏗 ${Math.floor(ind.build.done * 100)}%${e.stalls.get(ind.id) === 'base' ? ' · ⛔ нет базы' : e.stalls.get(ind.id) === 'money' ? ' · 💸' : ''}`
+        : ind.ruin
+          ? '🏚 заброшено'
+          : e.staff(ind) < 0.995
+            ? `👷 ${Math.round(e.staff(ind) * 100)}%`
+            : '';
+      if (badge) text({ x: ind.fp.center.x, y: top - 12 / z }, badge, 11, '#ffffff', ind.ruin ? 'rgba(110,100,85,0.85)' : 'rgba(35,45,60,0.82)');
     }
     if (z > 0.22) {
       for (const st of game.stations.values()) {
@@ -3189,6 +3283,7 @@ export class Renderer {
       ctx.stroke();
     }
     this.drawPartners(game, o.selection);
+    if (o.industry) this.drawIndustryPreview(game, o.industry);
     if (o.highlight.length) {
       const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 200);
       ctx.strokeStyle = `rgba(47, 128, 237, ${0.5 + pulse * 0.5})`;
@@ -3964,10 +4059,80 @@ export class Renderer {
     if (!sel || (sel.type !== 'industry' && sel.type !== 'town')) return;
     const target = sel.type === 'industry' ? game.industries.find((i) => i.id === sel.id) : game.towns.find((t) => t.id === sel.id);
     if (!target) return;
+    this.drawPartnerLines('fp' in target ? target.fp.center : target.center, game.partners(target));
+  }
+
+  /**
+   * Предпросмотр инструмента «Предприятие»: месторождения выбранного вида — пульсирующими кольцами, черта городов —
+   * пунктирными кругами (зелёный — есть место, серый — нет), у курсора — участок, зона вреда, пунктиры к партнёрам
+   * и к свободным месторождениям сырья (серым).
+   */
+  private drawIndustryPreview(game: Game, pv: NonNullable<ToolOverlay['industry']>): void {
     const ctx = this.ctx;
     const z = this.camera.zoom;
-    const from = 'fp' in target ? target.fp.center : target.center;
-    for (const p of game.partners(target)) {
+    const kind = pv.kind;
+    const info = kind ? INDUSTRY_TYPES[kind] : null;
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 260);
+    this.moving = true;
+    // Черта городов: где завод станет городским (по местам).
+    for (const t of game.towns) {
+      const free = townSlots(t) > townIndustries(t, game.towns, game.industries).length;
+      ctx.setLineDash([12 / z, 8 / z]);
+      ctx.strokeStyle = free ? 'rgba(46,157,87,0.75)' : 'rgba(110,116,125,0.6)';
+      ctx.lineWidth = 2 / z;
+      ctx.beginPath();
+      ctx.arc(t.center.x, t.center.y, townEdge(t), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // Месторождения выбранной добычи — ярко, кольцом и значком; у завода — его сырьё.
+    const want = info ? (info.accepts.length ? info.accepts : [info.produces]) : [];
+    for (const d of game.enterprises.deposits) {
+      if (d.used !== undefined) continue;
+      const cargo = INDUSTRY_TYPES[d.kind].produces;
+      if (!want.includes(cargo)) continue;
+      const own = info && !info.accepts.length;
+      ctx.strokeStyle = own ? `rgba(47,128,237,${0.55 + 0.45 * pulse})` : 'rgba(110,116,125,0.7)';
+      ctx.lineWidth = (own ? 3 : 2) / z;
+      ctx.beginPath();
+      ctx.arc(d.center.x, d.center.y, depositRadius(d) + 10 / z, 0, Math.PI * 2);
+      ctx.stroke();
+      this.icon(cargoImage(cargo), d.center, Math.max(18, 22 / z));
+    }
+    const plan = pv.plan;
+    if (!plan?.fp || !kind || !info) return;
+    drawHarmZone(ctx, kind, plan.fp, z);
+    this.drawFootprint(plan.fp, plan.ok ? 'rgba(47,128,237,0.35)' : 'rgba(232,72,63,0.35)', plan.ok ? '#2f80ed' : '#e8483f', 2 / z);
+    for (const id of plan.demolish) {
+      const b = game.buildingById(id);
+      if (b) this.drawFootprint(b.fp, 'rgba(232,72,63,0.45)');
+    }
+    // Пунктиры к ближайшим поставщикам сырья и получателям продукции — как у выбранного предприятия.
+    const probe = { type: 'industry', id: -1, info, fp: plan.fp, name: '', stock: {}, output: 0, producedMonth: 0, producedLast: 0, prodAcc: 0 } as Industry;
+    this.drawPartnerLines(plan.fp.center, game.partners(probe, 1));
+    // Сырья нет на карте — к ближайшему свободному месторождению серым пунктиром.
+    for (const c of info.accepts) {
+      if (game.industries.some((i) => !i.ruin && i.info.produces === c)) continue;
+      const near = game.enterprises.deposits
+        .filter((d) => d.used === undefined && INDUSTRY_TYPES[d.kind].produces === c)
+        .sort((a, b) => dist(a.center, plan.fp!.center) - dist(b.center, plan.fp!.center))[0];
+      if (!near) continue;
+      ctx.setLineDash([8 / z, 8 / z]);
+      ctx.strokeStyle = 'rgba(90,96,105,0.75)';
+      ctx.lineWidth = 2.5 / z;
+      ctx.beginPath();
+      ctx.moveTo(near.center.x, near.center.y);
+      ctx.lineTo(plan.fp.center.x, plan.fp.center.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  /** Пунктиры со стрелками от точки from к партнёрам по цепочке (и от поставщиков к ней), с плашкой груза и км. */
+  private drawPartnerLines(from: Vec, list: Partner[]): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    for (const p of list) {
       const color = CARGO[p.cargo].color;
       const [a, b] = p.direction === 'out' ? [from, p.pos] : [p.pos, from];
       const d = { x: b.x - a.x, y: b.y - a.y };

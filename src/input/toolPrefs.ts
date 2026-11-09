@@ -45,7 +45,7 @@ export interface ToolPrefs {
 /** Все значения типа: Record<T, 1> не даст пропустить новое значение (или вписать лишнее). */
 const ids = <T extends string>(all: Record<T, 1>): readonly T[] => Object.keys(all) as T[];
 
-const TOOL_IDS = ids<Tool>({ select: 1, road: 1, rail: 1, lights: 1, roundabout: 1, station: 1, line: 1, bulldoze: 1, terrain: 1 });
+const TOOL_IDS = ids<Tool>({ select: 1, road: 1, rail: 1, lights: 1, roundabout: 1, station: 1, line: 1, bulldoze: 1, terrain: 1, industry: 1 });
 const ROAD_MODES = ids<RoadMode>({ build: 1, lane: 1, upgrade: 1, move: 1 });
 const DRAW_MODES = ids<DrawMode>({ straight: 1, arc: 1, curve: 1 });
 const RAIL_MODES = ids<RailMode>({ track: 1, parallel: 1, station: 1, signal: 1, move: 1 });

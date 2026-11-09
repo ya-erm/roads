@@ -33,6 +33,7 @@ import { durationText } from '../core/timeText';
 import { isOneWay, KMH_PER_UNIT, LEVELS, RAIL_SPEC, ROAD_PRESETS, RoadSpec, SPEED_LIMITS, specCost, specKmh, STRUCTURE } from '../world/roadTypes';
 import {
   DEFAULT_SETTINGS,
+  NEW_GAME_SETTINGS,
   INDUSTRY_DENSITY,
   IndustryDensity,
   MAP_SIZES,
@@ -140,6 +141,8 @@ import { adviceOf, type Advice, type AdviceFix } from '../game/advisor';
 import { stationWarnings } from '../game/stationWarnings';
 import { storageSlots } from '../game/warehouses';
 import { annexHtml } from './annexUi';
+import { INDUSTRY_TOOL_SVG, industryModeRowHtml, industryOptionsHtml, industryRowsHtml, townRowsHtml } from './enterpriseUi';
+import type { IndustryKind } from '../world/cargo';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
 import { lineJamsHtml, stationWarningsHtml } from './jamUi';
 import { phasesHtml, phaseTurns } from './phasesUi';
@@ -222,6 +225,7 @@ const ICONS: Record<Tool, string> = {
     '<svg viewBox="0 0 24 24"><path d="M3 17h11l3-5h-6l-2-4H5z" /><circle cx="6" cy="19" r="2" /><circle cx="13" cy="19" r="2" /><path d="M17 12l4 6" /></svg>',
   // Холм с изолиниями.
   terrain: '<svg viewBox="0 0 24 24"><path d="M2 19l7-11 4 5 3-4 6 10z" /><path d="M6.5 14h5M14 14.5h4" /></svg>',
+  industry: INDUSTRY_TOOL_SVG,
 };
 
 /** «Авто»: дорога по земле, сквозь холм — тоннелем, над лощиной — мостом. */
@@ -447,7 +451,7 @@ export class Hud {
   /** Покупку из карточки маршрута тянут на остановку: какую модель и на какую линию (см. bindBuyDrag). */
   private dragBuy: { line: number; model: ModelId } | null = null;
   /** Черновик параметров нового мира; биом в нём — по seed или выбранный игроком (см. withSeed). */
-  private draft: WorldSettings = withSeed({ ...DEFAULT_SETTINGS, relief: 'hills' }, DEFAULT_SETTINGS.seed);
+  private draft: WorldSettings = withSeed({ ...NEW_GAME_SETTINGS, relief: 'hills' }, DEFAULT_SETTINGS.seed);
   /** Последний выбор сценария на экране новой игры: возвращается, когда снова выбирают «Сценарий». */
   private scenarioOptions: ScenarioSettings = { difficulty: 'normal', challenge: false };
   /** Откуда открыли «Новую игру»: «Отмена» и Esc возвращают туда. */
@@ -1559,6 +1563,17 @@ export class Hud {
         if (problem) g.notify(problem);
         break;
       }
+      case 'ind-kind':
+      case 'ind-build-for':
+        // Инструмент «Предприятие» с этим видом (из панели или «🏗» в карточке города).
+        c.setIndustryKind(d.id as IndustryKind);
+        break;
+      case 'ind-restore': {
+        const ind = g.industries.find((i) => i.id === Number(d.id));
+        const problem = ind ? g.enterprises.restore(ind) : 'Предприятия нет';
+        if (problem) g.notify(problem, '#e5534b');
+        break;
+      }
       case 'ind-annex': {
         // Пристройку ставят на карте — зона вокруг предприятия видна, клик в ней ставит; повторно — отмена.
         const id = Number(d.id);
@@ -1834,7 +1849,11 @@ export class Hud {
   private sync(force = false): void {
     const c = this.controller;
     const g = this.game();
-    this.root.querySelectorAll<HTMLElement>('[data-action="tool"]').forEach((b) => b.classList.toggle('active', b.dataset.id === c.tool));
+    this.root.querySelectorAll<HTMLElement>('[data-action="tool"]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.id === c.tool);
+      // «Предприятие» — только в партиях, где предприятия строит игрок.
+      if (b.dataset.id === 'industry') b.classList.toggle('hidden', !g.enterprises.on);
+    });
     this.root.querySelectorAll<HTMLElement>('[data-action="speed"]').forEach((b) => b.classList.toggle('active', Number(b.dataset.v) === g.speed));
     this.q('[data-action="heatmap"]').classList.toggle('active', c.heatmap);
     this.q('[data-action="speedmap"]').classList.toggle('active', c.speedmap);
@@ -1874,11 +1893,14 @@ export class Hud {
   private renderOptions(): void {
     const c = this.controller;
     const el = this.q('[data-options]');
-    const show = c.tool === 'road' || c.tool === 'rail' || c.tool === 'station' || c.tool === 'roundabout' || c.tool === 'bulldoze' || c.tool === 'terrain';
+    const show =
+      c.tool === 'road' || c.tool === 'rail' || c.tool === 'station' || c.tool === 'roundabout' || c.tool === 'bulldoze' || c.tool === 'terrain' || c.tool === 'industry';
     el.classList.toggle('hidden', !show);
     if (!show) return;
     const html =
-      c.tool === 'station'
+      c.tool === 'industry'
+        ? industryOptionsHtml(this.game(), c.industryKind)
+        : c.tool === 'station'
         ? this.stationOptionsHtml()
         : c.tool === 'rail'
           ? this.railOptionsHtml()
@@ -3259,7 +3281,8 @@ export class Hud {
           <span>Произведено (прош. мес.)</span><b>${ind.producedLast}</b><span>В этом месяце</span><b>${ind.producedMonth}</b></div>
         <div class="level-bar" title="Растёт, если продукцию регулярно вывозят; падает, если предприятие долго не обслуживают">
           <div style="width:${(((ind.level ?? 1) - 1) / 3) * 100}%"></div></div>
-        ${annexHtml(ind, this.controller.placingAnnex === ind.id)}
+        ${industryRowsHtml(g, ind)}
+        ${ind.ruin || ind.build ? '' : annexHtml(ind, this.controller.placingAnnex === ind.id)}
         <p class="tip">Инструментом «Станция» наведите на предприятие: станция встанет вплотную к той стороне, куда указывает курсор, и выезд будет смотреть туда же.</p>
         ${this.partnersHtml(g.partners(ind, 3))}</section>`;
     }
@@ -3337,6 +3360,7 @@ export class Hud {
           <span>🏘️ Строить улицы автоматически</span><span class="switch ${auto ? 'on' : ''}"><i></i></span></button>`;
       return `<section class="detail">${head(t.name, `${t.population} жителей · ${STYLE_NAMES[t.style]}`)}
         ${streets}
+        ${townRowsHtml(g, t)}
         <h4>Что говорят жители</h4>${reviews}
         ${needsHeadHtml(demands, need, this.needsFolded, pax)}${rows}${paxRow}
         ${this.partnersHtml(g.partners(t, 2))}</section>`;
@@ -3756,6 +3780,7 @@ export class Hud {
       )}</div></div>
       ${sc ? '' : capitalRow}
       ${buildModeRowHtml(d.construction)}
+      ${industryModeRowHtml(d.industryMode)}
       <div class="ng-row"><span class="ng-label">Seed</span>
         <input class="ng-seed" data-ng-seed value="${d.seed}" inputmode="numeric" />
         <button class="secondary small" data-action="ng-seed" data-tip="Случайный мир">🎲</button></div>

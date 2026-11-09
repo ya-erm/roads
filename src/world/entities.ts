@@ -1,6 +1,6 @@
 import { MONTH_SCALE } from '../config';
 import type { Vec } from '../core/vec';
-import type { CargoType, IndustryType } from './cargo';
+import type { CargoType, IndustryKind, IndustryType } from './cargo';
 import type { Footprint } from './spatial';
 
 export interface TownBuilding {
@@ -62,6 +62,11 @@ export interface Town {
   autoStreets?: boolean;
   /** Только подпись на карте (участок тестовой сцены без жителей): имя без числа жителей. */
   labelOnly?: boolean;
+  /**
+   * Сколько месяцев подряд в черте города пустует место под предприятие (режим «Строит игрок»): дойдёт до
+   * ENTERPRISE.slots.idleMonths — город строит сам. Нет — 0.
+   */
+  slotIdle?: number;
 }
 
 /** Итоги месяца по снабжению города. */
@@ -110,6 +115,34 @@ export interface Industry {
   piledMonth?: number;
   /** Пристройки рядом (ставит игрок, когда предприятие готово расти дальше): каждая — предел роста +1 (ANNEX). */
   annexes?: Annex[];
+  // Предприятия строит игрок (WorldSettings.industryMode 'player', docs/INDUSTRIES.md); в старых партиях полей нет.
+  /** Богатство месторождения под добычей: множитель добычи (0.75 / 1 / 1.35). Нет — 1. */
+  richness?: number;
+  /** Заброшенное: не работает, рабочих не берёт; восстановить — за долю цены (ENTERPRISE.ruinShare). */
+  ruin?: true;
+  /** Стройка («Со строительством»): доля готового 0…1, цена всей, сколько уже заплачено, секунд на всю. Нет — готово. */
+  build?: { done: number; cost: number; paid: number; time: number };
+  /** Сколько заплачено за постройку (при сносе — доля назад). Нет — стояло на карте с начала. */
+  paid?: number;
+  /** Кто построил: игрок или город сам (на пустующем месте в черте). Нет — стояло на карте с начала. */
+  builtBy?: 'player' | 'town';
+  /** Выпущено всего с постройки — для заданий «построить и выпустить». */
+  made?: number;
+  /** Привезённые автобусом рабочие: каждый довезённый +1, за месяц убывают (game/enterprise.ts). */
+  crew?: number;
+}
+
+/**
+ * Месторождение (режим «Строит игрок»): участок, где можно поставить добычу своего вида (kind) — она встаёт ровно на
+ * центр и поворот участка. size — малое / среднее / богатое (ENTERPRISE.deposits.sizes); used — предприятие на нём.
+ */
+export interface Deposit {
+  id: number;
+  kind: IndustryKind;
+  center: Vec;
+  angle: number;
+  size: 0 | 1 | 2;
+  used?: number;
 }
 
 /** Пристройка предприятия — вспомогательное здание рядом с ним (вид по группе предприятия — render/annexArt). */

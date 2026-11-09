@@ -98,8 +98,19 @@ export function objectiveIcon(o: Objective, size = 24): string {
       return newRouteIcon(size);
     case 'connect':
       return p.what === 'town' ? newTownIcon(size) : newIndustryIcon(size);
+    case 'build':
+      return p.cargo ? cargoIcon(p.cargo, size) : buildIndustryIcon(size);
   }
 }
+
+/** Построить предприятие (режим «Строит игрок»): завод и башенный кран. */
+export const buildIndustryIcon = (size = 24) =>
+  disc(
+    '#b0703a',
+    '<path d="M3.5 19.5v-6.8l3.8 2.3v-2.3l3.8 2.3V9h4.4v10.5z" fill="#fff"/><path d="M17.5 19.5V5.5M13 5.5h8M19.5 5.5v3" stroke="#ffd36b" stroke-width="1.6" fill="none"/>',
+    size,
+    'Построить предприятие',
+  );
 
 const MEDAL_COLORS = {
   gold: ['#f2c94c', '#c9961a', '#fff3c4'],

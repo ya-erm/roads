@@ -18,7 +18,7 @@ import { installBugReport } from './ui/bugReport';
 import { BugSpotFrame } from './ui/bugSpotFrame';
 import { Hud } from './ui/hud';
 import { onPrefs } from './ui/prefs';
-import { DEFAULT_SETTINGS, WorldSettings } from './world/settings';
+import { NEW_GAME_SETTINGS, WorldSettings } from './world/settings';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const hudRoot = document.getElementById('hud') as HTMLElement;
@@ -48,7 +48,7 @@ let game = scene
   ? scene.game
   : saved
     ? new Game(saved.settings, saved)
-    : new Game({ ...DEFAULT_SETTINGS, seed: Number(params.get('seed')) || randomSeed(), ...(quick ? { scenario: quick } : {}) });
+    : new Game({ ...NEW_GAME_SETTINGS, seed: Number(params.get('seed')) || randomSeed(), ...(quick ? { scenario: quick } : {}) });
 // Партия из сохранения: параметры новой игры в адресе уже ни при чём — убираем их, чтобы не путали.
 const startParams = ['seed', 'scenario', 'pick', 'challenge'];
 if (saved && startParams.some((p) => params.has(p))) {

@@ -7,6 +7,7 @@
  *   npm run scenarios -- 100     — 100 seed
  *   npm run scenarios -- 20 -v   — с перечнем заданий
  *   npm run scenarios -- --legacy — старые миры без биома
+ *   npm run scenarios -- --ready — предприятия «Готовые» (по умолчанию — «Строит игрок», как в новой игре)
  *
  * Код выхода 1, если нашлись невыполнимые задания или не хватает денег.
  */
@@ -19,13 +20,15 @@ import { assess } from '../src/scenario/feasibility';
 import type { Scenario } from '../src/scenario/manager';
 import type { ArchetypeId, Difficulty, Objective } from '../src/scenario/types';
 import { BIOME_LIST } from '../src/world/biomes';
-import { DEFAULT_SETTINGS, MapSize } from '../src/world/settings';
+import { DEFAULT_SETTINGS, MapSize, NEW_GAME_SETTINGS } from '../src/world/settings';
 
 const args = process.argv.slice(2);
 const count = Number(args.find((a) => /^\d+$/.test(a)) ?? 30);
 const verbose = args.includes('-v');
 /** --legacy — старые миры без биома (средняя полоса до биомов); иначе биомы по кругу. */
 const legacy = args.includes('--legacy');
+/** --ready — предприятия «Готовые» (как в старых партиях); иначе — как в новой игре, «Строит игрок» (docs/INDUSTRIES.md). */
+const ready = legacy || args.includes('--ready');
 const sizes: MapSize[] = ['small', 'medium', 'large'];
 const difficulties: Difficulty[] = ['easy', 'normal', 'hard'];
 
@@ -84,7 +87,7 @@ for (let i = 0; i < count; i++) {
   // Биомов пять, размеров три: за 15 seed встречается каждое сочетание биома и размера.
   const biome = legacy ? undefined : BIOME_LIST[i % BIOME_LIST.length].id;
   const t0 = performance.now();
-  const game = new Game({ ...DEFAULT_SETTINGS, seed, size, biome, scenario: { difficulty, challenge: false } });
+  const game = new Game({ ...(ready ? DEFAULT_SETTINGS : NEW_GAME_SETTINGS), seed, size, biome, scenario: { difficulty, challenge: false } });
   time += performance.now() - t0;
   const sc = game.scenario!;
   scenarios++;

@@ -5,7 +5,7 @@
 import type { ScenarioSettings } from '../scenario/types';
 import { BIOME_LIST, BIOMES, type BiomeId, biomeForSeed, biomeRaw } from '../world/biomes';
 import { CARGO, type CargoType, INDUSTRY_LIST } from '../world/cargo';
-import { DEFAULT_SETTINGS, type Relief, type WorldSettings } from '../world/settings';
+import { DEFAULT_SETTINGS, NEW_GAME_SETTINGS, type Relief, type WorldSettings } from '../world/settings';
 import { cargoIcon, townIcon } from './cargoIcons';
 import { biomeSvg } from './icons';
 import { diceMapSvg } from './scenarioIcons';
@@ -46,7 +46,8 @@ export function newGameDraft(s: WorldSettings, from: NewGameFrom, remembered: Sc
   }
   // Рельеф в черновике — всегда явный. Без поля мир плоский (так открываются старые сохранения), а окно
   // подсвечивает «Холмы»: партия первого запуска (DEFAULT_SETTINGS, без рельефа) давала плоский сценарий.
-  const own = { ...s, relief: s.relief ?? DEFAULT_RELIEF };
+  // Предприятия — тоже явно: после старой партии (без поля) новая — как новая игра, «Строит игрок».
+  const own = { ...s, relief: s.relief ?? DEFAULT_RELIEF, industryMode: s.industryMode ?? NEW_GAME_SETTINGS.industryMode };
   if (!s.scenario && from === 'menu') return { settings: withSeed(own, seed), scenario };
   // Города, предприятия и капитал сценарий задаёт сам — у песочницы оставляем её прежние, иначе — обычные.
   const base = s.scenario ? scenarioBase(s) : own;
@@ -63,6 +64,8 @@ export const DEFAULT_RELIEF: Relief = 'hills';
 function scenarioBase(s: WorldSettings): WorldSettings {
   return {
     ...DEFAULT_SETTINGS,
+    // Предприятия — как в прежней партии; у старой (без поля) — как в новой игре: строит игрок.
+    industryMode: s.industryMode ?? NEW_GAME_SETTINGS.industryMode,
     size: s.size,
     water: s.water,
     relief: s.relief ?? DEFAULT_RELIEF,

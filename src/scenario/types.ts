@@ -1,4 +1,4 @@
-import type { CargoType } from '../world/cargo';
+import type { CargoType, IndustryKind } from '../world/cargo';
 import type { WorldProfile } from '../world/settings';
 
 export type Difficulty = 'easy' | 'normal' | 'hard';
@@ -22,7 +22,7 @@ export interface Ref {
   id: number;
 }
 
-export type ObjectiveKind = 'deliver' | 'passengers' | 'profit' | 'supply' | 'industry' | 'population' | 'quality' | 'throughput' | 'newRoutes' | 'connect';
+export type ObjectiveKind = 'deliver' | 'passengers' | 'profit' | 'supply' | 'industry' | 'population' | 'quality' | 'throughput' | 'newRoutes' | 'connect' | 'build';
 
 /** Условия выполнения по типам — всё проверяется по реальному состоянию симуляции. */
 export type ObjectiveParams =
@@ -51,7 +51,13 @@ export type ObjectiveParams =
    */
   | { kind: 'newRoutes'; amount: number; since: number; months: number }
   /** Подключить к сети amount новых городов или предприятий: known — те, что были в сети, когда задание появилось. */
-  | { kind: 'connect'; what: 'town' | 'industry'; amount: number; known: number[] };
+  | { kind: 'connect'; what: 'town' | 'industry'; amount: number; known: number[] }
+  /**
+   * Построить count предприятий (режим «Строит игрок», docs/INDUSTRIES.md): вида what или с продукцией cargo, если заданы; у города
+   * town (не дальше, чем доходят рабочие), если задан; produce — и чтобы новые выпустили столько (Industry.made).
+   * known — работающие на момент выдачи: они не в счёт (восстановленное заброшенное — в счёт).
+   */
+  | { kind: 'build'; count: number; cargo?: CargoType; what?: IndustryKind; town?: number; produce?: number; known: number[] };
 
 /**
  * Главная цель этапа, обычная цель этапа, необязательный контракт или дополнительное задание после победы

@@ -6,7 +6,8 @@ import { CONSTRUCTION, COST, ECONOMY, MONTH_LENGTH, STATION, TERM_SCALE } from '
 import { dist, Vec } from '../core/vec';
 import type { Game, MonthRecord } from '../game/game';
 import { MODELS } from '../game/transport';
-import { CargoType, INDUSTRY_LIST } from '../world/cargo';
+import { CargoType, INDUSTRY_LIST, INDUSTRY_TYPES } from '../world/cargo';
+import { obtainable } from '../world/enterprise';
 import type { Industry, Station, Town } from '../world/entities';
 import { specCost } from '../world/roadTypes';
 import type { Ref } from './types';
@@ -32,14 +33,36 @@ export function refName(game: Game, ref: Ref): string {
 export const townById = (game: Game, id: number) => game.towns.find((t) => t.id === id);
 export const industryById = (game: Game, id: number) => game.industries.find((i) => i.id === id);
 
+/** Предприятия, что работают или достроятся: заброшенные (режим «Строит игрок») — не в счёт, пока их не восстановят. */
+export const live = (game: Game): Industry[] => game.industries.filter((i) => !i.ruin);
+
 /**
  * Груз можно получить на этой карте: сырьё кто-то добывает, а для продукта есть завод
- * и всё его сырьё тоже можно получить (по цепочке).
+ * и всё его сырьё тоже можно получить (по цепочке). В режиме «Строит игрок» — и то, что можно построить:
+ * добычу на месторождениях, заводы видов биома.
  */
 export function producible(game: Game, cargo: CargoType, seen: ReadonlySet<CargoType> = new Set()): boolean {
+  if (game.enterprises.on) return obtainable(cargo, [...live(game).map((i) => i.info), ...game.enterprises.kinds()], seen);
   if (seen.has(cargo)) return false;
   const next = new Set(seen).add(cargo);
   return game.industries.some((i) => i.info.produces === cargo && i.info.accepts.every((c) => producible(game, c, next)));
+}
+
+/**
+ * Режим «Строит игрок»: сколько работы — получить груз, которого на карте никто не делает: построить завод (или
+ * добычу на месторождении) — полторы перевозки, плюс сырьё для него. Нельзя — Infinity.
+ */
+export function buildEffort(game: Game, cargo: CargoType, seen: ReadonlySet<CargoType> = new Set()): number {
+  if (!game.enterprises.on || seen.has(cargo) || seen.size > 3) return Infinity;
+  const next = new Set(seen).add(cargo);
+  let best = Infinity;
+  for (const k of game.enterprises.kinds()) {
+    if (k.produces !== cargo) continue;
+    let cost = 1.5;
+    for (const c of k.accepts) cost += live(game).some((i) => i.info.produces === c) ? 1 : buildEffort(game, c, next);
+    best = Math.min(best, cost);
+  }
+  return best;
 }
 
 /** Перевозка дальше полутора километров весит больше одной: дольше строить дорогу, нужно больше машин. */
@@ -55,10 +78,12 @@ export function supplyEffort(game: Game, cargo: CargoType, to: Place, has: (to: 
   if (seen.has(cargo) || seen.size > 3) return Infinity;
   const next = new Set(seen).add(cargo);
   const at = posOf(to);
-  const makers = game.industries
+  const makers = live(game)
     .filter((i) => i.info.produces === cargo)
     .sort((a, b) => dist(a.fp.center, at) - dist(b.fp.center, at))
     .slice(0, 3);
+  // Никто не делает — построить (режим «Строит игрок»).
+  if (!makers.length) return buildEffort(game, cargo);
   let best = Infinity;
   for (const m of makers) {
     let cost = Math.max(1, dist(m.fp.center, at) / LINK_LEN);
@@ -70,7 +95,7 @@ export function supplyEffort(game: Game, cargo: CargoType, to: Place, has: (to: 
 
 /** Кто принимает груз: заводы, которым это сырьё, и города, которым он нужен. */
 export function receivers(game: Game, cargo: CargoType): Place[] {
-  return [...game.industries.filter((i) => i.info.accepts.includes(cargo)), ...game.towns.filter((t) => t.demands.includes(cargo))];
+  return [...live(game).filter((i) => i.info.accepts.includes(cargo)), ...game.towns.filter((t) => t.demands.includes(cargo))];
 }
 
 /** Есть ли кому сбыть продукцию предприятия. */
@@ -221,7 +246,7 @@ export function buildReach(seconds: number): number {
 export function cargoPotential(game: Game, cargo: CargoType, near: Vec, months: number, maxDist = 4200, depth = 0): number {
   const work = Math.max(0, months - RAMP);
   if (work <= 0 || depth > 2) return 0;
-  const makers = game.industries
+  const makers = live(game)
     .filter((i) => i.info.produces === cargo && dist(i.fp.center, near) <= maxDist)
     .sort((a, b) => dist(a.fp.center, near) - dist(b.fp.center, near))
     .slice(0, 2);
@@ -284,9 +309,10 @@ export interface Supply {
 /** Все пары «добытчик → завод» по ближайшему добытчику для каждого сырья каждого завода, короткие — первыми. */
 export function rawSupplies(game: Game): Supply[] {
   const out: Supply[] = [];
-  for (const plant of game.industries) {
+  const all = live(game);
+  for (const plant of all) {
     for (const cargo of plant.info.accepts) {
-      const from = game.industries
+      const from = all
         .filter((i) => i.info.produces === cargo && !i.info.accepts.length)
         .sort((a, b) => dist(a.fp.center, plant.fp.center) - dist(b.fp.center, plant.fp.center))[0];
       if (from) out.push({ cargo, from, to: plant, d: dist(from.fp.center, plant.fp.center) });
@@ -319,12 +345,26 @@ export function region(game: Game): RegionInfo {
     ? game.towns.reduce((s, t) => s + Math.min(...game.towns.filter((o) => o !== t).map((o) => dist(o.center, t.center))), 0) / game.towns.length
     : 0;
   let compactChains = 0;
-  for (const plant of game.industries.filter((i) => i.info.accepts.length)) {
-    const ok = plant.info.accepts.every((c) => game.industries.some((i) => i.info.produces === c && dist(i.fp.center, plant.fp.center) <= 5000));
-    if (ok && hasMarket(game, plant)) compactChains++;
-  }
   const hub = bigTowns(game)[0];
-  const hubIndustries = hub ? game.industries.filter((i) => dist(i.fp.center, hub.center) <= 5000).length : 0;
+  let hubIndustries = hub ? game.industries.filter((i) => dist(i.fp.center, hub.center) <= 5000).length : 0;
+  if (game.enterprises.on) {
+    // «Строит игрок»: заводов почти нет — цепочки считаем по тому, что можно построить у городов: вид завода с
+    // продукцией, нужной кому-то, и сырьём (добыча или месторождение) не дальше 5 км от одного города.
+    const sources = (c: CargoType): Vec[] => [
+      ...live(game).filter((i) => i.info.produces === c).map((i) => i.fp.center),
+      ...game.enterprises.deposits.filter((d) => d.used === undefined && INDUSTRY_TYPES[d.kind].produces === c).map((d) => d.center),
+    ];
+    for (const k of game.enterprises.kinds().filter((x) => x.accepts.length)) {
+      if (!receivers(game, k.produces).length) continue;
+      if (game.towns.some((t) => k.accepts.every((c) => sources(c).some((p) => dist(p, t.center) <= 5000)))) compactChains++;
+    }
+    if (hub) hubIndustries += game.enterprises.deposits.filter((d) => d.used === undefined && dist(d.center, hub.center) <= 5000).length;
+  } else {
+    for (const plant of game.industries.filter((i) => i.info.accepts.length)) {
+      const ok = plant.info.accepts.every((c) => game.industries.some((i) => i.info.produces === c && dist(i.fp.center, plant.fp.center) <= 5000));
+      if (ok && hasMarket(game, plant)) compactChains++;
+    }
+  }
   let closeBigPairs = 0;
   big.forEach((a, i) => big.slice(i + 1).forEach((b) => (dist(a.center, b.center) <= 5800 ? closeBigPairs++ : 0)));
   return {

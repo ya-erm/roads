@@ -3,7 +3,8 @@
  * города и предприятия существуют, объём не больше того, что регион может дать за срок, рост — не быстрее,
  * чем позволяет механика роста. Генератор и события не выдают задания, которые её не проходят.
  */
-import { ECONOMY, MONTH_SCALE, TERM_SCALE } from '../config';
+import { ECONOMY, MONTH_LENGTH, MONTH_SCALE, TERM_SCALE } from '../config';
+import { buildTime, freeDeposits, isRaw } from '../world/enterprise';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
 import { CARGO } from '../world/cargo';
@@ -43,7 +44,7 @@ export function connectable(game: Game, what: 'town' | 'industry', known: Iterab
   const inNet = new Set(known);
   return what === 'town'
     ? game.towns.filter((t) => !inNet.has(t.id)).length
-    : game.industries.filter((i) => !inNet.has(i.id) && hasMarket(game, i) && i.info.accepts.every((c) => producible(game, c))).length;
+    : game.industries.filter((i) => !i.ruin && !inNet.has(i.id) && hasMarket(game, i) && i.info.accepts.every((c) => producible(game, c))).length;
 }
 
 /**
@@ -130,5 +131,27 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
       const free = connectable(game, p.what, p.known);
       return free > p.amount ? yes(free) : no(`вне сети осталось ${free}, а нужно подключить ${p.amount}`, free);
     }
+    case 'build':
+      return assessBuild(game, p, work);
   }
+}
+
+/**
+ * «Построить» (режим «Строит игрок»): вид можно построить и для него есть сырьё (по цепочке), город есть; сколько
+ * выпустит новое — с учётом стройки («Со строительством» — время стройки и дорог) и разгона цепочки.
+ */
+function assessBuild(game: Game, p: Extract<ObjectiveParams, { kind: 'build' }>, work: number): Assessment {
+  if (!game.enterprises.on) return no('в этой партии предприятия не строят');
+  if (p.town !== undefined && !townById(game, p.town)) return no('города нет');
+  const kinds = game.enterprises.kinds().filter((k) => (!p.what || k.kind === p.what) && (!p.cargo || k.produces === p.cargo));
+  const ok = kinds.filter((k) => k.accepts.every((c) => producible(game, c)));
+  if (!ok.length) return no('такое предприятие здесь не построить: нет вида или сырья');
+  if (isRaw(ok[0]) && !freeDeposits(game.enterprises.deposits, ok[0].kind).length) return no('свободных месторождений нет');
+  if (!p.produce) return yes(1);
+  // Стройка и, у завода, ещё звено — привезти сырьё; дальше — с половинной загрузкой.
+  const build = game.buildMode ? buildTime(ok[0]) / MONTH_LENGTH + roadMonths(game, 2500) : 0;
+  const months = Math.max(0, work - build - (isRaw(ok[0]) ? 0 : TERM_SCALE));
+  const rate = isRaw(ok[0]) ? ok[0].rate : ECONOMY.processRate * 0.5;
+  const estimate = rate * months * p.count;
+  return p.produce <= estimate * 0.9 ? yes(estimate) : no(`новое выпустит за срок ≈${Math.round(estimate)}`, estimate);
 }

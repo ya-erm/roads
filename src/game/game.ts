@@ -36,7 +36,7 @@ import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { hitchOf, steerBase } from '../sim/body';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind, isTankCargo } from '../world/cargo';
-import { Annex, type BuildBase, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
+import { Annex, type BuildBase, type Deposit, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
 import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/townSupply';
 import { addTownPax, closeTownPax, PAX_NOWHERE, PAX_PER_THOUSAND } from '../world/townPax';
 import { repaceSave, saveMonthLength } from './monthPace';
@@ -73,6 +73,8 @@ import { paxFare, ridePath } from './fare';
 import { transferable, transferNeighbors } from './transfer';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
+import { Enterprises } from './enterprises';
+import { isActive } from '../world/enterprise';
 import { carryBuild, carryRailBuild, spansOf } from './constructionWork';
 import type { Brigade } from './crews';
 import { CREW_UNITS, laneTrail } from './crewLane';
@@ -491,6 +493,8 @@ export interface SaveData {
   rail?: ReturnType<RailSim['serialize']>;
   /** Проекты стройки (режим «Со строительством»); готовое — в полотнах сети дорог. Нет — проектов нет. */
   construction?: ConstructionSave;
+  /** Месторождения (режим «Строит игрок», enterprises.ts). Нет — старая партия: месторождений нет. */
+  deposits?: Deposit[];
   /** Положение камеры — заполняет интерфейс. */
   view?: { x: number; y: number; zoom: number };
 }
@@ -699,6 +703,8 @@ export class Game implements BuildContext {
   readonly timelapse: TimelapseRecorder;
   /** Стройка дорог (режим «Со строительством», src/game/construction.ts): проекты и их ход. */
   readonly construction: Construction;
+  /** Предприятия строит игрок (режим «Строит игрок», src/game/enterprises.ts): месторождения, постройка, рабочие, вред. */
+  readonly enterprises: Enterprises;
 
   constructor(setup: WorldSettings | number, saved?: SaveData) {
     // Сценарий решает архетип по seed ещё до генерации карты: от него зависят города и предприятия.
@@ -730,6 +736,7 @@ export class Game implements BuildContext {
     this.builder = new Builder(this);
     this.roadBuilder = new RoadBuilder(this);
     this.construction = new Construction(this);
+    this.enterprises = new Enterprises(this);
     // Машины на изгибах и уклонах: профиль скорости полос берёт рельеф отсюда.
     this.roads.traffic.relief = { ground: () => this.ground(), version: () => this.terrain.version };
     if (save) {
@@ -744,10 +751,19 @@ export class Game implements BuildContext {
     const world = generateWorld(this.worldContext(), this.settings);
     this.towns = world.towns;
     this.industries = world.industries;
+    this.enterprises.load(world.deposits);
     this.net.rebuild();
     this.roads.changed();
     const s = this.settings;
-    this.journal.add('game', { seed: s.seed, size: s.size, towns: this.towns.length, industries: this.industries.length, water: s.water, money: this.money });
+    this.journal.add('game', {
+      seed: s.seed,
+      size: s.size,
+      towns: this.towns.length,
+      industries: this.industries.length,
+      deposits: this.enterprises.deposits.length || undefined,
+      water: s.water,
+      money: this.money,
+    });
     if (this.settings.scenario) this.attachScenario(Scenario.create(this));
     // Первый кадр таймлапса — мир до первой дороги игрока.
     this.timelapse.capture(this);
@@ -806,6 +822,7 @@ export class Game implements BuildContext {
       timelapse: this.timelapse.toSave(),
       terraform: this.terrain.edits.length ? this.terrain.edits : undefined,
       construction: this.construction.toSave(),
+      deposits: this.enterprises.deposits.length ? this.enterprises.deposits : undefined,
     };
   }
 
@@ -917,6 +934,7 @@ export class Game implements BuildContext {
     }
     this.industries = save.industries.map(({ kind, ...rest }) => ({ ...rest, type: 'industry', info: INDUSTRY_TYPES[kind] }));
     for (const ind of this.industries) this.index.add(ind);
+    this.enterprises.load(save.deposits);
     for (const s of save.stations) {
       const st = this.stationFromSave(s);
       this.stations.set(st.id, st);
@@ -1021,7 +1039,7 @@ export class Game implements BuildContext {
    * Что стоит на площадке (с запасом margin): дома идут под снос, а ратуша,
    * предприятие или станция мешают — тогда blocker с причиной.
    */
-  private structuresUnder(fp: Footprint, margin: number, skip?: Structure): { houses: number[]; blocker?: string } {
+  structuresUnder(fp: Footprint, margin: number, skip?: Structure): { houses: number[]; blocker?: string } {
     const houses: number[] = [];
     for (const s of this.index.near(fp.center, footprintRadius(fp) + margin + 120)) {
       if (s === skip || !footprintsOverlap(fp, s.fp, margin)) continue;
@@ -1036,7 +1054,7 @@ export class Game implements BuildContext {
   }
 
   /** Сколько стоит снести эти дома. */
-  private demolishTotal(ids: number[]): number {
+  demolishTotal(ids: number[]): number {
     return ids.reduce((sum, id) => sum + this.demolishCost(id), 0);
   }
 
@@ -1044,7 +1062,7 @@ export class Game implements BuildContext {
    * Дорога или путь, задевающие площадку (с запасом pad), — проверяем по сетке точек внутри неё;
    * ответ — чем мешает. Полотна узла skipNode (выезд самой станции) не в счёт.
    */
-  private roadUnder(fp: Footprint, pad: number, skipNode = -1, roads: LaneNet = this.roads.net): string | null {
+  roadUnder(fp: Footprint, pad: number, skipNode = -1, roads: LaneNet = this.roads.net): string | null {
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = { x: -u.y, y: u.x };
     const nx = Math.max(2, Math.ceil(fp.w / 6));
@@ -2008,10 +2026,15 @@ export class Game implements BuildContext {
     return true;
   }
 
-  private refreshCatchmentsNear(p: Vec): void {
+  refreshCatchmentsNear(p: Vec): void {
     for (const st of this.stations.values()) {
       if (dist(st.fp.center, p) < this.catchmentRadius(st) + 60) this.computeCatchment(st);
     }
+  }
+
+  /** Новый номер сущности партии (предприятие, пристройка, база…): тот же счётчик, что пишется в сохранение. */
+  nextId(): number {
+    return this.nextEntityId++;
   }
 
   /** Расход: стройка (по умолчанию) или покупка транспорта — для отчёта о финансах. */
@@ -2993,7 +3016,7 @@ export class Game implements BuildContext {
   }
 
   /** После правок линий старые снимки могли бы сломать маршруты — забываем их. */
-  private forgetUndo(): void {
+  forgetUndo(): void {
     this.undoStack.length = 0;
     this.redoStack.length = 0;
   }
@@ -3442,6 +3465,8 @@ export class Game implements BuildContext {
     this.updateAutoSell();
     this.updateAutoWait();
     this.updateAutoRenew();
+    // Предприятия строит игрок: стройка площадок, рабочие (enterprises.ts); «Готовые» — ничего.
+    this.enterprises.tick(dt);
     this.updateIndustries(dt);
     this.updateStations(dt);
     this.updateTowns(dt);
@@ -5268,12 +5293,22 @@ export class Game implements BuildContext {
       moved += taken;
     } else {
       const stay = [];
+      // Станция у предприятия, которому не хватает рабочих: довезённые — его рабочие, проезд им не оплачивается.
+      const workers = this.enterprises.takesWorkers(st);
+      let crew = 0;
       for (const g of v.passengers) {
         if (g.to !== st.id) {
           stay.push(g);
           continue;
         }
         const from = this.stations.get(g.from);
+        if (workers) {
+          crew += g.count;
+          moved += g.count;
+          line.carriedMonth += g.count;
+          this.scenario?.onPassengers(from?.townIds[0], undefined, g.count, 1);
+          continue;
+        }
         const distance = from ? dist(from.fp.center, st.fp.center) : 0;
         const k = g.at === undefined ? 1 : this.speedFactor(distance, this.time - g.at);
         bonus = Math.max(bonus, k);
@@ -5290,6 +5325,11 @@ export class Game implements BuildContext {
         if (home) addTownPax(home, town?.id ?? PAX_NOWHERE, g.count);
       }
       v.passengers = stay;
+      if (crew > 0) {
+        this.enterprises.addCrew(st, crew);
+        trip.crew = crew;
+        this.floaters.push({ pos: { ...st.fp.center }, text: `👷 +${crew}`, color: '#8a6d1f', age: 0 });
+      }
       this.wagonsUnloaded(v);
       if (moved > 0) Object.assign(trip, { off: moved, x: bonus });
       const boarded = this.boardPassengers(v, st, line);
@@ -5685,11 +5725,13 @@ export class Game implements BuildContext {
 
   private updateIndustries(dt: number): void {
     for (const ind of this.industries) {
+      // Заброшенное и строящееся не работает (режим «Строит игрок»).
+      if (!isActive(ind)) continue;
       // Продукция идёт на станции в маршрутах, даже пока машин на них нет (lineTakes).
       const served = [...this.stations.values()].filter((st) => st.serves.cargo && st.industryIds.includes(ind.id) && this.routed(st));
       const inputs = ind.info.accepts;
-      // Уровень производства и временный множитель событий сценария.
-      const level = (ind.level ?? 1) * this.mods.industry(ind.id);
+      // Уровень производства, временный множитель событий сценария, рабочие и богатство месторождения (enterprises.ts).
+      const level = (ind.level ?? 1) * this.mods.industry(ind.id) * this.enterprises.rateFactor(ind);
       if (!inputs.length) {
         if (served.length) ind.prodAcc += (ind.info.rate * level * dt) / MONTH_LENGTH;
       } else {
@@ -5706,6 +5748,8 @@ export class Game implements BuildContext {
         ind.prodAcc -= whole;
         ind.output += whole;
         ind.producedMonth += whole;
+        // Построенное в партии считает выпуск с постройки — для заданий «построить и выпустить».
+        if (ind.builtBy) ind.made = (ind.made ?? 0) + whole;
       }
       if (ind.output >= 1 && served.length) {
         const per = Math.floor(ind.output / served.length);
@@ -5781,6 +5825,13 @@ export class Game implements BuildContext {
       let waiting = 0;
       for (const c of st.passengers.values()) waiting += c;
       const cap = this.stationCap(st, 'passengers');
+      // Рабочие до станций у предприятий, которым их не хватает (enterprises.ts): сверх обычных пассажиров.
+      for (const [dock, n] of this.enterprises.spawnWorkers(st, dt)) {
+        const k = Math.min(n, cap - waiting);
+        if (k <= 0 || !dests.has(dock)) continue;
+        st.passengers.set(dock, (st.passengers.get(dock) ?? 0) + k);
+        waiting += k;
+      }
       while (st.paxAcc >= 1) {
         st.paxAcc -= 1;
         if (waiting >= cap) continue;
@@ -6014,6 +6065,8 @@ export class Game implements BuildContext {
       ind.producedMonth = 0;
     }
     this.growIndustries();
+    // Пустующие места в черте городов: город строит сам (enterprises.ts).
+    this.enterprises.monthEnd();
     yield;
     // Улицы городов: граф движения по каждой новой улице и переезд на него машин — не сразу внутри стройки,
     // а отдельными шагами после города (roads.quiet, roads.step): те же графы в том же порядке, но по кадрам.
@@ -6080,6 +6133,7 @@ export class Game implements BuildContext {
   private growIndustries(): void {
     const E = ECONOMY;
     for (const ind of this.industries) {
+      if (!isActive(ind)) continue;
       const level = ind.level ?? 1;
       const c = ind.info.produces;
       const stations = [...this.stations.values()].filter((st) => st.serves.cargo && st.industryIds.includes(ind.id) && this.routed(st));
@@ -6111,7 +6165,8 @@ export class Game implements BuildContext {
 
   /** Сколько предприятие производит (или может переработать) в месяц сейчас. */
   industryRate(ind: Industry): number {
-    return Math.round((ind.info.accepts.length ? ECONOMY.processRate : ind.info.rate) * (ind.level ?? 1) * this.mods.industry(ind.id));
+    if (!isActive(ind)) return 0;
+    return Math.round((ind.info.accepts.length ? ECONOMY.processRate : ind.info.rate) * (ind.level ?? 1) * this.mods.industry(ind.id) * this.enterprises.rateFactor(ind));
   }
 
   /**
@@ -6145,6 +6200,14 @@ export class Game implements BuildContext {
     if (!missing.length) out.push({ mood: 'good', text: 'В магазинах всего хватает — город растёт' });
     else if (missing.length < town.demands.length) out.push({ mood: 'ok', text: `Не хватает: ${missing.join(', ')}` });
     else out.push({ mood: 'bad', text: `Пустые полки: нужны ${missing.join(', ')}` });
+    // Предприятия рядом (режим «Строит игрок»): дым от вредных и работа на заводах.
+    if (this.enterprises.on) {
+      const e = this.enterprises.townInfo(town);
+      const worst = e.harm[0];
+      if (worst) out.push({ mood: e.harmTotal >= 0.3 ? 'bad' : 'ok', text: `Дым от «${worst.ind.info.name}» — город растёт медленнее (−${Math.round(Math.min(1, e.harmTotal) * 100)}%)` });
+      if (e.pool > 0 && e.employed / e.pool >= 0.5) out.push({ mood: 'good', text: 'Есть работа на заводах рядом — город растёт быстрее' });
+      else if (e.pool > 0 && e.employed > 0) out.push({ mood: 'ok', text: 'Работы рядом немного: заводу у города нашлись бы рабочие' });
+    }
     return out;
   }
 
@@ -6185,7 +6248,8 @@ export class Game implements BuildContext {
     this.closeTownMonth(town);
     const satisfaction = this.townSatisfaction(town);
     // Рост за месяц — по его длине (MONTH_SCALE): за секунду город растёт так же, как при коротком месяце.
-    town.growthAcc += town.population * (0.003 + 0.025 * satisfaction) * MONTH_SCALE * this.mods.growth(town.id);
+    // Предприятия рядом: вредные тормозят рост, рабочие места — прибавляют (enterprises.ts; «Готовые» — ×1).
+    town.growthAcc += town.population * (0.003 + 0.025 * satisfaction) * MONTH_SCALE * this.mods.growth(town.id) * this.enterprises.growth(town);
     const ctx = this.worldContext();
     const reach = this.townReach(town);
     // Город растёт вдоль любых своих улиц, включая построенные игроком, — ближние к центру раньше.
@@ -7722,13 +7786,16 @@ export class Game implements BuildContext {
    */
   stationServesFor(fp: Footprint, kind: StationKind, industryId: number | undefined, serves: StationServes): StationServes {
     if (kind === 'stop') return { pax: true, cargo: false };
-    if (serves.cargo) return { ...serves };
+    // Предприятию у станции не хватает рабочих (режим «Строит игрок»): станция сразу и для автобусов с рабочими.
+    const ind = industryId !== undefined ? this.industries.find((i) => i.id === industryId) : undefined;
+    const workers = !!ind && this.enterprises.busNeed(ind) > 0;
+    if (serves.cargo) return { pax: serves.pax || workers, cargo: true };
     const R = this.catchmentRadius({ kind });
     const docked = industryId !== undefined;
     if (!docked && !this.industriesNear(fp.center, R).length) return { ...serves };
     const people = this.peopleNear(fp.center, R).pop > 0;
     if (people && !docked) return { ...serves };
-    return { pax: serves.pax && people, cargo: true };
+    return { pax: (serves.pax && people) || workers, cargo: true };
   }
 
   computeCatchment(st: Station): void {
@@ -7778,15 +7845,14 @@ export class Game implements BuildContext {
           }),
         );
     };
+    // Заброшенные — не партнёры, пока их не восстановят; себя (предприятие на месте) не показываем.
+    const live = this.industries.filter((i) => !i.ruin && i !== target);
     if ('fp' in target) {
       const product = target.info.produces;
-      add(product, 'out', [
-        ...this.industries.filter((i) => i.info.accepts.includes(product)),
-        ...this.towns.filter((t) => t.demands.includes(product)),
-      ]);
-      for (const c of target.info.accepts) add(c, 'in', this.industries.filter((i) => i.info.produces === c));
+      add(product, 'out', [...live.filter((i) => i.info.accepts.includes(product)), ...this.towns.filter((t) => t.demands.includes(product))]);
+      for (const c of target.info.accepts) add(c, 'in', live.filter((i) => i.info.produces === c));
     } else {
-      for (const c of target.demands) add(c, 'in', this.industries.filter((i) => i.info.produces === c));
+      for (const c of target.demands) add(c, 'in', live.filter((i) => i.info.produces === c));
     }
     return result;
   }

@@ -35,9 +35,24 @@ export interface WorldSettings {
   construction?: BuildMode;
   /** Стройматериалы: нужны ли стройке (только вместе со строительством). Нет поля — не нужны. */
   materials?: MaterialsMode;
+  /**
+   * Предприятия: «Строит игрок» — на старте несколько, остальные игрок строит сам (добычу — на месторождениях;
+   * рабочие, вред городу, места в черте города — docs/INDUSTRIES.md). Нет поля — «Готовые»: все предприятия уже
+   * на карте, как в старых партиях и в мире по старой раскладке.
+   */
+  industryMode?: IndustryMode;
 }
 
 export type BuildMode = 'instant' | 'build';
+export type IndustryMode = 'ready' | 'player';
+
+export const INDUSTRY_MODES: Record<IndustryMode, { name: string; hint: string }> = {
+  player: { name: 'Строит игрок', hint: 'На старте несколько предприятий, остальные строите сами: добычу — на месторождениях, заводы — у городов' },
+  ready: { name: 'Готовые', hint: 'Все предприятия уже стоят на карте — как в прежних партиях' },
+};
+
+/** Предприятия строит игрок (а не стоят на карте готовыми). */
+export const playerIndustries = (s: Pick<WorldSettings, 'industryMode'>): boolean => s.industryMode === 'player';
 export type MaterialsMode = 'none' | 'needed';
 
 export const BUILD_MODES: Record<BuildMode, { name: string; hint: string }> = {
@@ -117,6 +132,12 @@ export const DEFAULT_SETTINGS: WorldSettings = {
   water: 'normal',
   terrainVersion: TERRAIN_VERSION,
 };
+
+/**
+ * Новая партия — из игры (первый запуск, «?seed=», окно «Новая игра»): предприятия строит игрок. DEFAULT_SETTINGS —
+ * без поля, «Готовые»: по нему мир по seed прежний (на нём держатся тесты старой раскладки).
+ */
+export const NEW_GAME_SETTINGS: WorldSettings = { ...DEFAULT_SETTINGS, industryMode: 'player' };
 
 /** Размеры городов: немного крупных, больше средних, остальные маленькие (доли — по профилю сценария). */
 export function townSizes(count: number, shares: { big: number; mid: number } = { big: 0.2, mid: 0.4 }): number[] {

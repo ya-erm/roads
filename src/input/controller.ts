@@ -47,8 +47,10 @@ import { deckHeight, RoadTools } from './roadtools';
 import { phaseToggle, specOf, turnAt } from '../lanes/lights';
 import { phaseTurns } from '../ui/phasesUi';
 import { basePlaceText, baseRemoveText } from '../ui/constructionUi';
+import type { IndustryKind } from '../world/cargo';
+import { industryPlanText, industryRemoveText } from '../ui/enterpriseUi';
 
-export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain';
+export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain' | 'industry';
 
 /**
  * Каким действием отпускать знак скорости, чтобы браузер его принял: из того, что разрешено. На macOS с зажатым
@@ -73,6 +75,8 @@ export const TOOLS: { id: Tool; key: string; alt?: string; name: string }[] = [
   { id: 'line', key: '7', name: 'Маршрут' },
   { id: 'bulldoze', key: '8', alt: 'B', name: 'Снос' },
   { id: 'terrain', key: '9', name: 'Рельеф' },
+  // Только в партиях «Строит игрок» (кнопка в остальных скрыта, см. Hud).
+  { id: 'industry', key: '0', name: 'Предприятие' },
 ];
 
 /** Кисть рельефа: радиус по размеру. */
@@ -255,6 +259,9 @@ export class Controller {
   placingWarehouse: number | null = null;
   /** Ставим пристройку этого предприятия: клик в зоне вокруг него — пристройка (Esc — отмена). */
   placingAnnex: number | null = null;
+  /** Инструмент «Предприятие» (режим «Строит игрок»): какой вид ставим (null — ещё не выбран) и поворот завода (R). */
+  industryKind: IndustryKind | null = null;
+  industryAngle = 0;
   /**
    * Ставим строительную базу («Со строительством»): инструмент «Станция → База стройки», клик у дороги — база (Esc —
    * отмена). Сбрасывает setTool и выбор другого вида станции.
@@ -378,6 +385,8 @@ export class Controller {
   // ---------- Настройки ----------
 
   setTool(tool: Tool): void {
+    // «Предприятие» — только в партиях, где предприятия строит игрок.
+    if (tool === 'industry' && !this.game().enterprises.on) return;
     this.placingWarehouse = null;
     this.placingAnnex = null;
     this.placingBase = false;
@@ -476,6 +485,14 @@ export class Controller {
     if (this.tool === 'station' && this.stationMode === 'cargo') return { pax: false, cargo: true };
     if (this.tool === 'station' && this.stationMode === 'pax') return { pax: true, cargo: false };
     return this.stationServes;
+  }
+
+  /** Инструмент «Предприятие» с видом kind (из панели инструмента или «🏗 построить» в карточке города). */
+  setIndustryKind(kind: IndustryKind): void {
+    if (this.tool !== 'industry') this.setTool('industry');
+    if (this.tool !== 'industry') return;
+    this.industryKind = kind;
+    this.onChange();
   }
 
   /** Инструмент «Станция»: автостанция для грузов, автовокзал, остановка на улице или ж/д станция. */
@@ -1701,6 +1718,22 @@ export class Controller {
         this.onChange();
         break;
       }
+      case 'industry': {
+        // Предприятие выбранного вида: добыча — на месторождение под курсором, завод — по курсору (R — поворот).
+        // Поставили — его карточка; инструмент остаётся, чтобы ставить дальше.
+        if (!this.industryKind) {
+          this.showError('Выберите, что строить, — в панели снизу');
+          break;
+        }
+        const problem = g.enterprises.build(this.industryKind, p, this.industryAngle);
+        if (problem) this.showError(problem);
+        else {
+          const ind = g.industries[g.industries.length - 1];
+          if (ind) this.select({ type: 'industry', id: ind.id });
+        }
+        this.onChange();
+        break;
+      }
       case 'base': {
         // Строительная база — у дороги под курсором; поставили — режим кончился (следующая уже платная: случайный
         // второй клик не поставит вторую), снова — «Выбор».
@@ -1841,7 +1874,11 @@ export class Controller {
       const problem = g.removeWarehouse(st);
       if (problem) this.showError(problem);
     } else if (st?.type === 'annex') g.removeAnnex(st);
-    else if (st?.type === 'base') {
+    else if (st?.type === 'industry' && g.enterprises.on) {
+      const problem = g.enterprises.remove(st);
+      if (problem) this.showError(problem);
+      else if (this.selection?.type === 'industry' && this.selection.id === st.id) this.selection = null;
+    } else if (st?.type === 'base') {
       const problem = g.removeBase(st.id);
       if (problem) this.showError(problem);
     } else if (!g.builder.bulldoze(p, this.snapRadius * 0.3)) this.roadTools.bulldoze(p, this.snapRadius * 0.3);
@@ -2880,6 +2917,11 @@ export class Controller {
           this.onChange();
         }
         if (this.action === 'paste') this.rotatePaste(e.shiftKey ? -1 : 1);
+        // Поворот завода, который ставим (добыча встаёт по месторождению).
+        if (this.action === 'industry') {
+          this.industryAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
+          this.onChange();
+        }
         break;
       // Режимы дороги: N — строить, U — перестроить, M — двигать (включают инструмент «Дорога»).
       case 'KeyN':
@@ -2990,6 +3032,8 @@ export class Controller {
         o.catchmentR = CONSTRUCTION.serviceRadius;
       }
     }
+    // Инструмент «Предприятие»: месторождения выбранного вида и черта городов видны и без курсора над картой.
+    if (this.tool === 'industry') o.industry = { kind: this.industryKind, plan: null };
     const flash = this.flash && performance.now() < this.flash.until ? this.flash.text : null;
     const p = this.hover;
     // Рамка сноса: пока тянем — по курсору, после — ждёт подтверждения.
@@ -3441,6 +3485,13 @@ export class Controller {
           o.label = { text: baseRemoveText(g, st.id), ok: true };
           break;
         }
+        if (st?.type === 'industry' && g.enterprises.on) {
+          // Предприятие (режим «Строит игрок»): возврат или почему нельзя (станция у него).
+          const plan = g.enterprises.removePlan(st);
+          o.marks.push({ fp: st.fp, ok: false });
+          o.label = { text: industryRemoveText(st, plan), ok: plan.ok };
+          break;
+        }
         if (st?.type === 'station') {
           o.label = { text: `Снести станцию ${st.name}`, ok: true };
           o.station = { fp: st.fp, ok: false };
@@ -3611,6 +3662,13 @@ export class Controller {
         o.label = st
           ? { text: this.lineDraft.length >= 2 && st.id === this.lineDraft[0] ? 'Замкнуть маршрут' : `Добавить: ${st.name}`, ok: true }
           : { text: this.lineDraft.length ? 'Следующая станция · Enter — готово' : 'Выберите первую станцию', ok: true };
+        break;
+      }
+      case 'industry': {
+        // Предприятие: участок синим (красным — что мешает), черта городов рядом, кольцо вреда, пунктиры к партнёрам.
+        const kind = this.industryKind;
+        o.industry = { kind, plan: kind ? g.enterprises.plan(kind, p, this.industryAngle) : null };
+        o.label = kind ? industryPlanText(g, o.industry.plan!) : { text: 'Выберите в панели, что строить', ok: true };
         break;
       }
       case 'base': {

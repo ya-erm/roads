@@ -1,6 +1,22 @@
 import type { CargoType, IndustryKind, IndustryType } from '../world/cargo';
+import { harmClass } from '../world/enterprise';
 import type { Industry } from '../world/entities';
 import type { Footprint } from '../world/spatial';
+
+/** «r,g,b» темнее на долю k — дым вредных производств. Кэш — без новых строк в каждом кадре. */
+const darkCache = new Map<string, string>();
+function darkRgb(rgb: string, k: number): string {
+  const key = `${rgb}|${k}`;
+  let out = darkCache.get(key);
+  if (!out) {
+    out = rgb
+      .split(',')
+      .map((v) => Math.round(Number(v) * (1 - k)))
+      .join(',');
+    darkCache.set(key, out);
+  }
+  return out;
+}
 
 /**
  * Детальная графика предприятий, вид сверху. Рисуем в локальных координатах footprint:
@@ -146,7 +162,11 @@ export class Art {
     this.seed = seed;
     this.level = Math.max(1, Math.floor(ind.level ?? 1));
     this.active = ind.producedMonth > 0 || ind.producedLast > 0;
+    this.harm = harmClass(ind.info.kind);
   }
+
+  /** Класс вредности вида (0–3): дым гуще и темнее. */
+  readonly harm: number;
 
   r(i: number): number {
     return hash(this.seed, i);
@@ -934,12 +954,16 @@ export class Art {
     if (this.pass !== 2 || !this.d || !this.active || this.layer === 'still') return;
     const c = this.m;
     this.moved = true;
-    for (let k = 0; k < 4; k++) {
-      const ph = (this.t * 0.18 + k / 4 + this.r(i * 7 + 99)) % 1;
-      const dist = ph * 26 * s;
+    // Чем вреднее (world/enterprise.ts, HARM), тем гуще, темнее и длиннее шлейф по ветру.
+    const h = this.harm;
+    const puffs = 4 + h;
+    const tone = h ? darkRgb(rgb, 0.12 * h) : rgb;
+    for (let k = 0; k < puffs; k++) {
+      const ph = (this.t * 0.18 + k / puffs + this.r(i * 7 + 99)) % 1;
+      const dist = ph * 26 * s * (1 + 0.35 * h);
       const wob = Math.sin(ph * 6 + k) * 2 * s;
-      c.fillStyle = `rgba(${rgb},${(0.55 * (1 - ph)).toFixed(2)})`;
-      disc(c, x + this.wx * dist - this.wy * wob, y + this.wy * dist + this.wx * wob, (1.6 + ph * 5) * s);
+      c.fillStyle = `rgba(${tone},${((0.55 + 0.07 * h) * (1 - ph)).toFixed(2)})`;
+      disc(c, x + this.wx * dist - this.wy * wob, y + this.wy * dist + this.wx * wob, (1.6 + ph * (5 + h)) * s);
     }
   }
 

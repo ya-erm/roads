@@ -3,12 +3,14 @@ import type { Rng } from '../core/rng';
 import { add, angleOf, dist, dot, lerp, norm, scale, sub, Vec } from '../core/vec';
 import { edgesAt } from '../lanes/geometry';
 import { Corridor, LaneNet, LaneNode, LaneSlot, twoWay } from '../lanes/model';
-import { biomeOf, industryShare, townCargo } from './biomes';
-import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST, IndustryKind } from './cargo';
-import type { Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
+import { biomeOf, townCargo } from './biomes';
+import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST } from './cargo';
+import { placePlayerWorld } from './deposits';
+import type { Deposit, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
-import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, townSizes, WorldProfile, WorldSettings } from './settings';
+import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, playerIndustries, townSizes, WorldProfile, WorldSettings } from './settings';
+import { industryCount, MINING_KINDS, shoreFits, terrainFits } from './sites';
 import { Footprint, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
 import type { Terrain } from './terrain';
@@ -49,50 +51,12 @@ const BLOCK_COLORS: [string, string][] = [
   ['#d9d2c6', '#6f6a66'],
 ];
 
-/** Предприятия хотят относительно ровное место (уклон рельефа, м/м); города — см. townSites. */
-const FLAT_SLOPE = 0.18;
-/** Шахты, рудники и карьеры тяготеют к склонам холмов. */
-const MINING_KINDS = new Set<IndustryKind>(['coalmine', 'ironmine', 'quarry', 'gemmine', 'coppermine', 'goldmine']);
-const HILL_SLOPE = 0.035;
-
-/** Рыбаки — на берегу (до воды не дальше стольких единиц от края участка); остальным «у воды» — до SHORE_FAR. */
-const SHORE_NEAR = 120;
-const SHORE_FAR = 450;
-/** После стольких попыток место у воды не требуется: на сухой карте предприятие всё равно встанет. */
-const SHORE_ATTEMPTS = 90;
-
-/**
- * Предприятию нужно место у воды (рыбаки — всегда, в биоме — его виды «у воды»): берег не дальше reach
- * от края участка. Без требования — всегда да.
- */
-function shoreFits(terrain: Terrain, fp: Footprint, attempt: number, nearWater: ReadonlySet<IndustryKind>, kind: IndustryKind): boolean {
-  if (attempt >= SHORE_ATTEMPTS) return true;
-  if (kind === 'fishery') return terrain.isWater(fp.center, footprintRadius(fp) + SHORE_NEAR);
-  return !nearWater.has(kind) || terrain.isWater(fp.center, footprintRadius(fp) + SHORE_FAR);
-}
-
 /** Попыток найти место предприятию; у мира с биомом после обычных — ещё, с меньшим зазором до соседей. */
 const NORMAL_ATTEMPTS = 120;
 const RELAXED_ATTEMPTS = 200;
 const RELAXED_GAP = 360;
 /** Сверх 160 попыток мира под сценарий. */
 const PROFILED_EXTRA = 80;
-
-/** Сколько предприятий вида поставить: по множителю биома (0 — ни одного), но если вид есть — хотя бы одно. */
-function industryCount(settings: WorldSettings, kind: IndustryKind, base: number): number {
-  const share = industryShare(settings, kind);
-  return share > 0 ? Math.max(1, Math.round(base * share)) : 0;
-}
-
-/** Место для завода — ровное; для шахты, рудника, карьера — на склоне холма.
- *  Без рельефа (старые миры) slopeAt всюду 0 и это условие ничего не отсеивает. Порог мягко
- *  растёт (для равнинных) или падает (для холмистых) с номером попытки — на крутом мире место
- *  всё равно найдётся. */
-function terrainFits(terrain: Terrain, p: Vec, attempt: number, mining = false): boolean {
-  if (!terrain.hasRelief) return true;
-  const slope = terrain.slopeAt(p);
-  return mining ? slope >= HILL_SLOPE * Math.max(0, 1 - attempt / 100) : slope <= FLAT_SLOPE * (1 + attempt / 50);
-}
 
 /** Сколько подходящих мест под город сравнить по рельефу, прежде чем выбрать самое ровное. */
 const TOWN_SITE_POOL = 6;
@@ -202,7 +166,25 @@ export function corridorHalf(c: Corridor): number {
   return h;
 }
 
-export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAULT_SETTINGS): { towns: Town[]; industries: Industry[] } {
+/** Готовый мир: города, предприятия и (режим «Строит игрок») месторождения. */
+export interface World {
+  towns: Town[];
+  industries: Industry[];
+  deposits?: Deposit[];
+}
+
+/**
+ * Режим «Строит игрок» (deposits.ts): месторождения вместо добычи, на старте — несколько предприятий. Радиус городов —
+ * сразу по плотной застройке: от неё меряются черта города, места в ней, рабочие и вред.
+ */
+function playerWorld(ctx: WorldContext, towns: Town[], settings: WorldSettings, profile?: WorldProfile): World {
+  for (const t of towns) measureTown(t);
+  const { industries, deposits } = placePlayerWorld(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), settings, profile);
+  layStartRoads(ctx, towns, industries, settings.seed);
+  return { towns, industries, deposits };
+}
+
+export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAULT_SETTINGS): World {
   const profile = settings.scenario?.profile;
   if (profile) return generateProfiled(ctx, settings, profile);
   const towns: Town[] = [];
@@ -237,6 +219,7 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
     }
   }
   assignDemands(towns, ctx.rng, townCargo(settings));
+  if (playerIndustries(settings)) return playerWorld(ctx, towns, settings);
   const placed = placeIndustries(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), settings);
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   // Места для городов и предприятий выбраны по всем улицам; дальше радиус города — по плотной застройке.
@@ -249,7 +232,7 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
  * Мир под архетип сценария: размеры и скученность городов, число предприятий по видам, заводы ближе к
  * поставщикам или все предприятия вокруг крупнейшего города. Точка притяжения — случайная, но по seed.
  */
-function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: WorldProfile): { towns: Town[]; industries: Industry[] } {
+function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: WorldProfile): World {
   const { rng, terrain } = ctx;
   const towns: Town[] = [];
   const names = [...TOWN_NAMES];
@@ -293,6 +276,7 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
     }
   }
   assignDemands(towns, rng, townCargo(settings));
+  if (playerIndustries(settings)) return playerWorld(ctx, towns, settings, profile);
   const placed = placeProfiled(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), profile, settings);
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   for (const t of towns) measureTown(t);
@@ -856,7 +840,7 @@ function placeLandmark(ctx: WorldContext, town: Town): void {
 }
 
 /** Направление ближайшей улицы — чтобы здание стояло ровно вдоль неё. */
-function streetAngle(ctx: WorldContext, p: Vec): number {
+export function streetAngle(ctx: Pick<WorldContext, 'roads'>, p: Vec): number {
   let best = Infinity;
   let angle = 0;
   for (const seg of ctx.roads.corridorsNear(p, 200)) {
@@ -870,7 +854,7 @@ function streetAngle(ctx: WorldContext, p: Vec): number {
 }
 
 /** Точная проверка по контуру: ни одна точка здания не ближе margin к краю дороги. */
-function clearOfRoads(ctx: WorldContext, fp: Footprint, margin: number): boolean {
+export function clearOfRoads(ctx: Pick<WorldContext, 'roads'>, fp: Footprint, margin: number): boolean {
   const c = Math.cos(fp.angle);
   const s = Math.sin(fp.angle);
   const pts: Vec[] = [];
