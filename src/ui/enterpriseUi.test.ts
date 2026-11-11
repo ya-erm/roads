@@ -5,7 +5,8 @@ import { freshGame, withoutCitizens } from '../game/testkit';
 import { CARGO, INDUSTRY_TYPES } from '../world/cargo';
 import { townEdge, workersNeeded } from '../world/enterprise';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
-import { depositCardHtml, depositPlace } from './enterpriseUi';
+import { depositCardHtml, depositPlace, industryOptionsHtml } from './enterpriseUi';
+import { recipeText } from './industryCard';
 
 const WORLD: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 7, size: 'small', towns: 5, money: 5_000_000, biome: 'temperate', relief: 'plains' };
 
@@ -15,6 +16,14 @@ function freeDeposit(g: Game) {
   if (!d) throw new Error('нет свободного месторождения');
   return d;
 }
+
+describe('панель «Предприятие»', () => {
+  it('в подсказке карточки вида — рецепт словами: что делает и из чего', () => {
+    const g = withoutCitizens(freshGame(WORLD));
+    const html = industryOptionsHtml(g, null);
+    for (const k of g.enterprises.kinds()) expect(html).toContain(`data-tip="${k.name}: ${k.accepts.length ? recipeText(k) : `добывает ${recipeText(k)}`}.`);
+  });
+});
 
 describe('карточка месторождения', () => {
   it('клик по пятну выбирает свободное месторождение; занятое — нет', () => {

@@ -12,8 +12,9 @@ import { dist } from '../core/vec';
 import { buildCost, buildTime, freeDeposits, harmClass, harmTo, isRaw, townFor, townSlots, workersNeeded } from '../world/enterprise';
 import type { Industry, Town } from '../world/entities';
 import { INDUSTRY_MODES, type IndustryMode } from '../world/settings';
-import { cargoIcon, townIcon } from './cargoIcons';
+import { cargoIcon, cargoTip, townIcon } from './cargoIcons';
 import { km as radiusText } from './constructionUi';
+import { recipeText } from './industryCard';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 const pct = (x: number) => `${Math.round(x * 100)}%`;
@@ -62,7 +63,8 @@ export function industryOptionsHtml(g: Game, current: IndustryKind | null): stri
       isRaw(k) ? `<span class="ent-b ${free ? '' : 'none'}" data-tip="Свободных месторождений">⛏️${free}</span>` : '',
       !isRaw(k) && wanted.has(k.produces) ? `<span class="ent-b town" data-tip="Продукция нужна городам">${townIcon(13, false)}</span>` : '',
     ].join('');
-    const tip = `${k.name}: ${isRaw(k) ? 'только на месторождении' : 'на ровном месте'} · ${money(buildCost(k))}`;
+    // Рецепт словами — значки мелкие, по ним одним сырьё не узнать: «Стекольный завод: песок + уголь → стекло».
+    const tip = `${k.name}: ${isRaw(k) ? `добывает ${recipeText(k)}` : recipeText(k)}. ${isRaw(k) ? 'Только на месторождении' : 'На ровном месте'} · ${money(buildCost(k))}`;
     return `<button class="card ent-card ${current === k.kind ? 'active' : ''}" data-action="ind-kind" data-id="${k.kind}" data-tip="${esc(tip)}">
       <span class="ent-recipe">${recipeHtml(k)}</span><span class="name">${esc(k.short)}</span><span class="ent-badges">${badges}</span><span class="ent-price">${money(buildCost(k))}</span></button>`;
   };
@@ -85,7 +87,8 @@ export function industryOptionsHtml(g: Game, current: IndustryKind | null): stri
 export function industryPlanText(g: Game, plan: IndustryPlan): { text: string; ok: boolean; warn?: boolean } {
   const info = INDUSTRY_TYPES[plan.kind];
   if (!plan.ok) return { text: `⛔ ${plan.reason ?? 'Нельзя'}`, ok: false };
-  const parts = [`${plan.timed ? '🏗 ' : ''}${info.short}`, money(plan.cost)];
+  // Что встанет и рецепт словами: «Стекольный: песок + уголь → стекло».
+  const parts = [`${plan.timed ? '🏗 ' : ''}${info.short}: ${recipeText(info)}`, money(plan.cost)];
   if (plan.deposit) parts.push(`⛏️ ${sizeDots(plan.deposit.size)}`);
   const s = plan.staff;
   if (s) parts.push(s.local >= 0.999 ? '👷 100%' : `👷 ${pct(s.local)} · 🚌 ${Math.ceil(s.bus)}/мес`);
@@ -202,7 +205,7 @@ export function depositCardHtml(g: Game, id: number, partners = ''): string {
   if (d.used !== undefined) {
     const ind = g.industries.find((i) => i.id === d.used);
     return `<section class="detail project-card dep-card">${head}<p class="muted">⛏️ ${depositPlace(d.kind)} занято</p>${
-      ind ? `<button class="partner" data-action="focus" data-type="industry" data-id="${ind.id}">${cargoIcon(c, 18)}<span>${esc(ind.name)}</span></button>` : ''
+      ind ? `<button class="partner" data-action="focus" data-type="industry" data-id="${ind.id}">${cargoTip(c, 18)}<span>${esc(ind.name)}</span></button>` : ''
     }</section>`;
   }
   const sizes = ENTERPRISE.deposits.sizes;
@@ -262,7 +265,7 @@ function depositUseHtml(g: Game, c: CargoType): string {
   const wanted = new Set(g.towns.flatMap((t) => t.demands));
   const list = plants
     .map(
-      (k) => `<button class="dep-plant" data-action="ind-build-for" data-id="${k.kind}" data-tip="${esc(`${k.name}: ${money(buildCost(k))} — выбрать и поставить на карте`)}">
+      (k) => `<button class="dep-plant" data-action="ind-build-for" data-id="${k.kind}" data-tip="${esc(`${k.name}: ${recipeText(k)} · ${money(buildCost(k))} — выбрать и поставить на карте`)}">
       <span class="ent-recipe">${recipeHtml(k, 20, 15)}</span>${wanted.has(k.produces) ? `<span class="ent-b town">${townIcon(12, false)}</span>` : ''}</button>`,
     )
     .join('');

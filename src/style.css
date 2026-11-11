@@ -3549,6 +3549,59 @@ button.small.with-ic {
   font-size: 16px;
 }
 
+/* Рецепт в карточке предприятия: под значком — название груза (ui/industryCard.ts). */
+.recipe .rc-item {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 40px;
+}
+
+.recipe .rc-item small {
+  font-size: 11px;
+  color: #4b5563;
+  white-space: nowrap;
+}
+
+/* «Сырьё» / «Продукция»: склад, откуда везут и куда — по маршрутам. */
+.ind-flow .flow-title {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.ind-flow .flow-row {
+  gap: 5px;
+}
+
+.ind-flow .flow-stock {
+  padding: 0 6px;
+  border-radius: 8px;
+  background: #f4f6f8;
+  color: #4b5563;
+}
+
+.ind-flow .flow-dir {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.ind-flow .flow-link {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #eaf1f8;
+  font-size: 12px;
+  color: #2c5f8a;
+}
+
+.ind-flow .flow-link:hover {
+  background: #d9e7f4;
+}
+
 .need {
   display: flex;
   gap: 8px;

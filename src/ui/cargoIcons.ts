@@ -168,6 +168,14 @@ export function cargoIcon(c: CargoType, size = 20, title = true): string {
     <circle cx="12" cy="12" r="12" fill="${color}"/>${glyph(c, color)}</svg>`;
 }
 
+/**
+ * Значок груза с подсказкой-названием (data-tip, без системного title): значки мелкие, по ним одним груз не узнать.
+ * Не ставить внутрь элемента со своей data-tip — подсказка значка её перекроет.
+ */
+export function cargoTip(c: CargoType, size = 20): string {
+  return cargoIcon(c, size, false).replace('<svg ', `<svg data-tip="${CARGO[c].name}" `);
+}
+
 /** Ушли, не дождавшись автобуса: серый кружок с идущим человеком (game/paxPatience.ts). Подсказка — data-tip снаружи. */
 export const WALK_COLOR = '#7b8794';
 const WALK_GLYPH = `<circle cx="13.2" cy="5.4" r="2.1" fill="#fff"/>

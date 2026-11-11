@@ -49,7 +49,7 @@ import { ARCHETYPE_LIST } from '../scenario/content';
 import type { Scenario } from '../scenario/manager';
 import { getBest, saveBest, slotOf } from '../scenario/records';
 import type { ScenarioSettings } from '../scenario/types';
-import { cargoIcon, townIcon, walkIcon } from './cargoIcons';
+import { cargoIcon, cargoTip, townIcon, walkIcon } from './cargoIcons';
 import { paxGone, paxGoneTo, paxPatience } from '../game/paxPatience';
 import { fleetBar, fleetBarRoom } from './fleetBar';
 import { type LineBack, lineBackFrom, lineCloseTarget } from './lineBack';
@@ -145,6 +145,7 @@ import { stationWarnings } from '../game/stationWarnings';
 import { storageSlots } from '../game/warehouses';
 import { annexHtml } from './annexUi';
 import { depositCardHtml, INDUSTRY_TOOL_SVG, industryModeRowHtml, industryOptionsHtml, industryRowsHtml, townRowsHtml } from './enterpriseUi';
+import { industryFlowHtml, recipeBoxHtml } from './industryCard';
 import type { IndustryKind } from '../world/cargo';
 import { adviceBadge, advisorHtml, bulbSvg, depotSvg } from './advisorUi';
 import { bellSvg, newsBadge, newsHtml, newsRowGo, newsTarget, noticeHtml, noticeOpacity } from './newsUi';
@@ -3416,7 +3417,7 @@ export class Hud {
           st.serves.cargo || freightWaiting.length
             ? `<div class="icon-row"><span class="lbl2">Груз ждёт</span>${
                 freightWaiting.length
-                  ? freightWaiting.map(([c, n]) => `<span class="chip-ic">${cargoIcon(c, 18)}<b>${n}</b></span>`).join('')
+                  ? freightWaiting.map(([c, n]) => `<span class="chip-ic">${cargoTip(c, 18)}<b>${n}</b></span>`).join('')
                   : '<span class="muted">ничего</span>'
               }</div>`
             : ''
@@ -3424,10 +3425,10 @@ export class Hud {
         ${this.transferRowHtml(st)}
         ${paxBlock}
         <div class="icon-row"><span class="lbl2">Отправляет</span>${
-          supplies.length ? supplies.map((c) => cargoIcon(c, 20)).join('') : pax || st.catchPop ? cargoIcon('passengers', 20) : '<span class="muted">—</span>'
+          supplies.length ? supplies.map((c) => cargoTip(c, 20)).join('') : pax || st.catchPop ? cargoTip('passengers', 20) : '<span class="muted">—</span>'
         }</div>
         <div class="icon-row"><span class="lbl2">Принимает</span>${
-          st.accepts.size ? [...st.accepts].map((c) => cargoIcon(c, 20)).join('') : '<span class="muted">—</span>'
+          st.accepts.size ? [...st.accepts].map((c) => cargoTip(c, 20)).join('') : '<span class="muted">—</span>'
         }</div>
         <p class="muted">${towns ? `Город: ${esc(towns)} · ` : ''}жителей в охвате ${st.catchPop}</p>
         <div class="actions">${
@@ -3444,16 +3445,9 @@ export class Hud {
       const ind = g.industries.find((i) => i.id === sel.id);
       if (!ind) return '';
       const info = ind.info;
-      const recipe = `${info.accepts.map((c) => cargoIcon(c, 26)).join('<span class="plus">+</span>')}${
-        info.accepts.length ? '<span class="arrow">→</span>' : ''
-      }${cargoIcon(info.produces, 30)}`;
-      const stock = info.accepts.length
-        ? `<div class="icon-row"><span class="lbl2">На складе</span>${info.accepts
-            .map((c) => `<span class="chip-ic">${cargoIcon(c, 18)}<b>${Math.floor(ind.stock[c] ?? 0)}</b></span>`)
-            .join('')}</div>`
-        : '';
+      // Рецепт значками с названиями; ниже — сырьё (склад, откуда везут), продукция (куда), чего не хватает.
       return `<section class="detail">${head(ind.name)}
-        <div class="recipe">${recipe}</div>
+        ${recipeBoxHtml(info)}
         <p class="muted">${
           info.accepts.length > 1
             ? 'Работает, только когда привезли все виды сырья.'
@@ -3461,10 +3455,10 @@ export class Hud {
               ? 'Перерабатывает сырьё, которое ему привозят.'
               : 'Добывает сырьё, когда рядом есть станция с маршрутом.'
         }</p>
-        ${stock}
+        ${industryFlowHtml(g, ind)}
         <div class="kv"><span>Уровень производства</span><b>×${ind.level ?? 1} · до ${g.industryRate(ind)}/мес</b>
           <span>Произведено (прош. мес.)</span><b>${ind.producedLast}</b><span>В этом месяце</span><b>${ind.producedMonth}</b></div>
-        <div class="level-bar" title="Растёт, если продукцию регулярно вывозят; падает, если предприятие долго не обслуживают">
+        <div class="level-bar" data-tip="Уровень производства растёт, если продукцию регулярно вывозят; падает, если предприятие долго не обслуживают">
           <div style="width:${(((ind.level ?? 1) - 1) / 3) * 100}%"></div></div>
         ${industryRowsHtml(g, ind)}
         ${ind.ruin || ind.build ? '' : annexHtml(ind, this.controller.placingAnnex === ind.id)}
@@ -3988,12 +3982,12 @@ export class Hud {
    */
   private partnersHtml(list: Partner[]): string {
     const row = (p: Partner) => `<button class="partner" data-action="focus" data-type="${p.ref.type}" data-id="${p.ref.id}">
-        ${cargoIcon(p.cargo, 18)}${p.ref.type === 'town' ? townIcon(18) : ''}<span>${esc(p.name)}</span><small>${(p.distance * 0.0006).toFixed(1)} км</small></button>`;
+        ${cargoTip(p.cargo, 18)}${p.ref.type === 'town' ? townIcon(18) : ''}<span>${esc(p.name)}</span><small>${(p.distance * 0.0006).toFixed(1)} км</small></button>`;
     const block = (dir: 'out' | 'in', title: string) => {
       const items = list.filter((p) => p.direction === dir);
       if (!items.length) return '';
       const folded = this.partnersFolded.has(dir);
-      const icons = folded ? `<span class="fold-icons">${[...new Set(items.map((p) => p.cargo))].map((c) => cargoIcon(c, 16)).join('')}</span>` : '';
+      const icons = folded ? `<span class="fold-icons">${[...new Set(items.map((p) => p.cargo))].map((c) => cargoTip(c, 16)).join('')}</span>` : '';
       return `<button class="fold-head" data-action="toggle-partners" data-dir="${dir}" title="${folded ? 'Развернуть' : 'Свернуть'} список">
           <h4>${title}</h4><span class="fold-count">${items.length}</span>${icons}<span class="caret ${folded ? 'closed' : ''}">${chevronSvg(10)}</span></button>${
             folded ? '' : items.map(row).join('')
