@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { STATION } from '../config';
+import { MIN_SEGMENT_LEN, STATION } from '../config';
 import { dist } from '../core/vec';
-import { LANE_W } from '../world/roadTypes';
-import { TERRAIN_VERSION } from '../world/settings';
+import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
+import { NEW_GAME_SETTINGS, TERRAIN_VERSION } from '../world/settings';
 import { pointInFootprint } from '../world/spatial';
 import type { Station } from '../world/entities';
 import { clampDriveway, Game, type RoadStationOptions } from './game';
-import { fieldSpot, roadPlan, STREET, withoutCitizens } from './testkit';
+import { fieldSpot, road, roadPlan, STREET, withoutCitizens } from './testkit';
+
+/** Карман станции вдоль дороги от её узла до съезда: половина площадки и съезд. */
+const pocket = STATION.size.w / 2 + STATION.pocketRun + STATION.pocketDiverge;
+/** От конца улицы (тупика) до узла кармана. */
+const pocketHalf = pocket + MIN_SEGMENT_LEN;
+/** Отступ съезда от поперечной улицы под прямым углом: кромка съезда не заходит на её кромку. */
+const crossClear = 2 * (LANE_W + ROAD_MARGIN) - 1 + 0.5;
 
 /** Ровная карта без городов и улица с запада на восток в чистом поле. */
 function scene(length = 600) {
@@ -195,10 +202,12 @@ describe('Автовокзал вдоль дороги, с дублёром', ()
     expect(front(game.stations.get(end.id)!, y)).toBeCloseTo(8.5 + 30 + STATION.gate, 0);
   });
 
-  it('у конца улицы и вплотную к другой станции — нельзя; снос оставляет улицу с дублёром; сохранение открывается', () => {
+  it('у конца улицы — сдвигается от него, вплотную к другой станции — нельзя; снос оставляет улицу с дублёром; сохранение открывается', () => {
     const { game, x, y } = scene();
+    // Курсор у самого конца улицы: площадка отъезжает вдоль неё ровно настолько, чтобы съезд уместился.
     const nearEnd = game.stationPlan({ x: x + 40, y: y + 40 }, 30, 'road', 0, 2, undefined, false, { side: true });
-    expect(nearEnd.ok).toBe(false);
+    expect(nearEnd.ok).toBe(true);
+    expect(nearEnd.nodePos!.x).toBeCloseTo(x + pocketHalf, 0);
     const st = terminal(game, x + 300, y + 40, { side: true });
     expect(game.stationPlan({ x: x + 330, y: y + 40 }, 30, 'road', 0, 2, undefined, false, { side: true }).ok).toBe(false);
     const save = JSON.parse(JSON.stringify(game.toSave()));
@@ -211,5 +220,83 @@ describe('Автовокзал вдоль дороги, с дублёром', ()
     expect(after).toBeCloseTo(length, 0);
     // Дублёр остался дорогой: его снесёт игрок, если не нужен.
     expect(dist(game.roads.net.nodesNear(at, 3)[0]?.pos ?? { x: 0, y: 0 }, at)).toBeLessThan(1);
+  });
+
+  it('между перекрёстками: хватает длины — встаёт и у самого перекрёстка (сдвигается), мало — сколько нужно и сколько есть', () => {
+    const { game, x, y } = scene();
+    // Поперечные улицы: квартал x+100…x+200 (100 м — мало), дальше — x+200…x+600.
+    for (const cx of [x + 100, x + 200]) expect(road(game, { free: { x: cx, y: y - 150 } }, { free: { x: cx, y: y + 150 } })).toBe(true);
+    const short = game.stationPlan({ x: x + 150, y: y + 40 }, 30, 'road', 0, 2, undefined, false, { side: true });
+    expect(short.ok).toBe(false);
+    expect(short.reason).toMatch(new RegExp(`^Мало места вдоль улицы: нужно ${Math.ceil(2 * (pocket + crossClear))} м между перекрёстками, здесь (99|100) м$`));
+    // Силуэт — под курсором, чтобы было видно, где не хватает места.
+    expect(short.fp!.center.x).toBeCloseTo(x + 150, 0);
+    // У перекрёстка x+200 длинного квартала: раньше — «Слишком близко к перекрёстку» где угодно.
+    const near = game.stationPlan({ x: x + 230, y: y + 15 }, 30, 'road', 0, 2, undefined, false, { side: true });
+    expect(near.ok).toBe(true);
+    expect(near.nodePos!.x).toBeCloseTo(x + 200 + pocket + crossClear, 0);
+    const st = terminal(game, x + 230, y + 15, { side: true });
+    expect(game.roads.net.problems()).toEqual([]);
+    // Съезд — с отступом от перекрёстка: кромки не сходятся.
+    const ramps = [...game.roads.net.nodes.values()].filter((nd) => nd.kind === 'junction' && Math.abs(nd.pos.y - y) < 1 && nd.pos.x > x + 200 + 1);
+    expect(ramps).toHaveLength(2);
+    expect(Math.min(...ramps.map((nd) => nd.pos.x)) - (x + 200)).toBeCloseTo(crossClear, 0);
+    expect(st.side).toBe(true);
+  });
+
+  it('стык посреди улицы (улица построена кусками) не мешает: карман ложится на оба куска', () => {
+    const { game, x, y } = scene();
+    // Отдельная улица из двух кусков по 70 м южнее: каждый короче кармана, вместе — длиннее.
+    const y2 = y + 120;
+    expect(road(game, { free: { x: x + 100, y: y2 } }, { free: { x: x + 170, y: y2 } })).toBe(true);
+    expect(road(game, { x: x + 170, y: y2 }, { free: { x: x + 240, y: y2 } })).toBe(true);
+    const net = game.roads.net;
+    const seam = net.nodesNear({ x: x + 170, y: y2 }, 1)[0];
+    expect(seam.kind).toBe('seam');
+    expect(seam.corridors).toHaveLength(2);
+    const plan = game.stationPlan({ x: x + 165, y: y2 + 40 }, 30, 'road', 0, 2, undefined, false, { side: true });
+    expect(plan.ok).toBe(true);
+    expect(plan.nodePos!.x).toBeCloseTo(x + 165, 0);
+    const st = terminal(game, x + 165, y2 + 40, { side: true });
+    expect(game.roads.net.node(st.nodeId).corridors).toHaveLength(2);
+    expect(game.roads.net.problems()).toEqual([]);
+  });
+});
+
+describe('Автовокзал вдоль дороги в городе (seed 309542331, как в отчёте)', () => {
+  it('на улицах между перекрёстками, где хватает длины, встаёт; где мало — пишет, сколько нужно и сколько есть', () => {
+    const game = withoutCitizens(new Game({ ...NEW_GAME_SETTINGS, seed: 309542331, scenario: { difficulty: 'normal', challenge: false } }));
+    game.money = 1e9;
+    const net = game.roads.net;
+    const cam = { x: 4321, y: 4687 };
+    let fit = 0;
+    let placed = 0;
+    let short = 0;
+    for (const c of net.corridorsNear(cam, 600)) {
+      if (c.cls !== 'street' || net.node(c.a).kind !== 'junction' || net.node(c.b).kind !== 'junction') continue;
+      const s = c.length / 2;
+      const t = c.lut.tangentAt(s);
+      const pt = c.lut.pointAt(s);
+      for (const side of [1, -1]) {
+        const p = { x: pt.x - t.y * 20 * side, y: pt.y + t.x * 20 * side };
+        const plan = game.stationPlan(p, 30, 'road', 0, 2, undefined, false, { side: true });
+        const m = plan.reason?.match(/^Мало места вдоль улицы: нужно (\d+) м между перекрёстками, здесь (\d+) м$/);
+        if (m) {
+          short++;
+          expect(Number(m[2])).toBe(Math.floor(c.length));
+          expect(Number(m[2])).toBeLessThan(Number(m[1]));
+          // Мало — только улицам заметно короче кармана; квартал сетки (115 м) — не «мало».
+          expect(c.length).toBeLessThan(2 * pocketHalf + 10);
+          continue;
+        }
+        expect(c.length).toBeGreaterThanOrEqual(2 * pocketHalf);
+        fit++;
+        if (plan.ok) placed++;
+      }
+    }
+    expect(fit).toBeGreaterThan(10);
+    expect(short).toBeGreaterThan(0);
+    // Мешать могут дома, ратуша, соседняя улица — но не перекрёсток сам по себе.
+    expect(placed / fit).toBeGreaterThan(0.8);
   });
 });

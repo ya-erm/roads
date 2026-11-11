@@ -7134,6 +7134,104 @@ export class Game implements BuildContext {
   }
 
   /**
+   * Улица, которой принадлежит полотно c, между перекрёстками: c и соседние полотна за стыками посреди улицы (не
+   * перекрёсток и не тупик), если улица за стыком продолжается почти прямо, того же класса и с теми же полосами.
+   * u — путь вдоль c по a→b (у c.a — 0, кускам до него — меньше нуля); улица — от from до to. at(u) — точка на ней,
+   * касательная по направлению c и края полотна (как edgesAt, справа от этого направления — плюс). clear — сколько
+   * отступить от узла у from и у to, чтобы примкнуть к улице новой дорогой.
+   */
+  private streetLine(c: Corridor): {
+    from: number;
+    to: number;
+    clear: [number, number];
+    at(u: number): { pos: Vec; t: Vec; edges: [number, number] | null };
+  } {
+    const net = this.roads.net;
+    const sig = (x: Corridor, fwd: boolean) =>
+      x.lanes
+        .map((l) => (fwd ? l.flow : -l.flow))
+        .sort()
+        .join(',');
+    const own = sig(c, true);
+    // Касательная полотна x по направлению улицы на его конце (end: 0 — где улица в него входит, 1 — выходит).
+    const tan = (x: Corridor, fwd: boolean, end: 0 | 1) => {
+      const t = x.lut.tangentAt(fwd === (end === 1) ? x.length : 0);
+      return fwd ? t : scale(t, -1);
+    };
+    const pieces: { c: Corridor; u0: number; fwd: boolean }[] = [{ c, u0: 0, fwd: true }];
+    const seen = new Set([c.id]);
+    const next = (cur: Corridor, curFwd: boolean, nodeId: number, ahead: boolean): { c: Corridor; fwd: boolean } | null => {
+      const nd = net.node(nodeId);
+      if (nd.kind !== 'seam' || nd.corridors.length !== 2 || nd.level !== 0) return null;
+      const id = nd.corridors.find((x) => x !== cur.id);
+      if (id === undefined || seen.has(id)) return null;
+      const x = net.corridor(id);
+      if (x.a === x.b || x.cls !== c.cls || x.ring) return null;
+      // Вперёд: x начинается в этом узле, если идёт по улице (a — здесь). Назад: x кончается здесь.
+      const fwd = ahead ? x.a === nodeId : x.b === nodeId;
+      if (sig(x, fwd) !== own) return null;
+      const far = net.node(fwd === ahead ? x.b : x.a);
+      if (far.level !== 0) return null;
+      const bend = ahead ? dot(tan(cur, curFwd, 1), tan(x, fwd, 0)) : dot(tan(cur, curFwd, 0), tan(x, fwd, 1));
+      if (bend < Math.cos((10 * Math.PI) / 180)) return null;
+      seen.add(id);
+      return { c: x, fwd };
+    };
+    let to = c.length;
+    let tail = { piece: pieces[0], node: c.b };
+    while (to < 3000) {
+      const x = next(tail.piece.c, tail.piece.fwd, tail.node, true);
+      if (!x) break;
+      const piece = { ...x, u0: to };
+      pieces.push(piece);
+      to += x.c.length;
+      tail = { piece, node: x.fwd ? x.c.b : x.c.a };
+    }
+    let from = 0;
+    let head = { piece: pieces[0], node: c.a };
+    while (from > -3000) {
+      const x = next(head.piece.c, head.piece.fwd, head.node, false);
+      if (!x) break;
+      from -= x.c.length;
+      const piece = { ...x, u0: from };
+      pieces.unshift(piece);
+      head = { piece, node: x.fwd ? x.c.a : x.c.b };
+    }
+    // Отступ от узла на конце улицы: не меньше MIN_SEGMENT_LEN, а от поперечной дороги — чтобы кромка примыкающей
+    // к улице новой дороги (до полуширины улицы) не заходила на её кромку (как «Слишком близко к другой дороге» у
+    // строителя дорог): их полуширины, под острым углом — длиннее. Дорога, которая продолжает улицу за узлом (почти
+    // по прямой), не в счёт.
+    const clear = (end: { piece: { c: Corridor; fwd: boolean }; node: number }, ahead: boolean): number => {
+      const inward = scale(tan(end.piece.c, end.piece.fwd, ahead ? 1 : 0), ahead ? -1 : 1);
+      let m = MIN_SEGMENT_LEN;
+      for (const id of net.node(end.node).corridors) {
+        if (id === end.piece.c.id) continue;
+        const o = net.corridor(id);
+        const out = o.a === end.node ? o.lut.tangentAt(0) : scale(o.lut.tangentAt(o.length), -1);
+        const cos = dot(out, inward);
+        if (cos < -Math.cos(Math.PI / 6)) continue;
+        const sin = Math.max(0.5, Math.sqrt(Math.max(0, 1 - cos * cos)));
+        m = Math.max(m, (LANE_W + ROAD_MARGIN + halfAtS(o, o.a === end.node ? 0 : o.length) - 1) / sin + 0.5);
+      }
+      return m;
+    };
+    const at = (u: number) => {
+      const q = Math.min(Math.max(u, from), to);
+      const piece = pieces.find((x) => q <= x.u0 + x.c.length) ?? pieces[pieces.length - 1];
+      const L = piece.c.length;
+      const s = Math.min(Math.max(piece.fwd ? q - piece.u0 : L - (q - piece.u0), 0), L);
+      const t = piece.c.lut.tangentAt(s);
+      const e = edgesAt(piece.c, s);
+      return {
+        pos: piece.c.lut.pointAt(s),
+        t: piece.fwd ? t : scale(t, -1),
+        edges: e && (piece.fwd ? e : ([-e[1], -e[0]] as [number, number])),
+      };
+    };
+    return { from, to, clear: [clear(head, false), clear(tail, true)], at };
+  }
+
+  /**
    * Автостанция или автовокзал вдоль дороги: площадка боком к улице со стороны курсора, между ними — дублёр:
    * односторонняя дорога в одну полосу по ходу движения этого края улицы — съезд с улицы, вдоль площадки и обратный
    * въезд на улицу (между улицей и дублёром — островок). Узел станции — стык на дублёре напротив её середины:
@@ -7145,17 +7243,31 @@ export class Game implements BuildContext {
     const hit = this.streetNear(p, Math.max(40, snapRadius));
     if (!hit) return fail('Поставьте вдоль улицы', this.looseFootprint(p, STATION.size));
     const c = hit.seg;
-    const s = hit.s;
-    const t = c.lut.tangentAt(s);
-    const point = c.lut.pointAt(s);
-    const n = normalTowards(c, s, p);
-    // Сторона улицы: 1 — справа от a→b. Дублёр едет туда же, куда полосы у этого края (правостороннее движение).
-    const right = dot(n, rightNormal(t)) > 0 ? 1 : -1;
-    const along = right;
-    const dir = scale(t, along);
-    const edges = edgesAt(c, s) ?? [-LANE_W, LANE_W];
-    const edge = (right > 0 ? edges[1] : -edges[0]) + ROAD_MARGIN;
     const W = STATION.size.w;
+    // Вдоль площадки — run с каждой стороны от узла, съезд и въезд — ещё по div; от перекрёстков и концов улицы — с
+    // отступом (streetLine.clear: не меньше MIN_SEGMENT_LEN, у проспекта — больше). Стыки посреди улицы (продолжение
+    // той же улицы) не мешают — карман ложится и на соседнее полотно. Хватает длины — площадка сама сдвигается вдоль
+    // улицы от перекрёстка, чтобы съезд и въезд уместились.
+    const run = W / 2 + STATION.pocketRun;
+    const div = STATION.pocketDiverge;
+    const line = this.streetLine(c);
+    const lo = line.from + run + div + line.clear[0];
+    const hi = line.to - run - div - line.clear[1];
+    const need = 2 * (run + div) + line.clear[0] + line.clear[1];
+    const have = line.to - line.from;
+    const fits = hi >= lo;
+    const u = fits ? Math.min(Math.max(hit.s, lo), hi) : hit.s;
+    // Сторона улицы — со стороны курсора: 1 — справа от a→b полотна c. Дублёр едет туда же, куда полосы у этого края
+    // (правостороннее движение).
+    const right = dot(normalTowards(c, hit.s, p), rightNormal(c.lut.tangentAt(hit.s))) > 0 ? 1 : -1;
+    const along = right;
+    const here = line.at(u);
+    const t = here.t;
+    const point = here.pos;
+    const n = scale(rightNormal(t), right);
+    const dir = scale(t, along);
+    const edges = here.edges ?? [-LANE_W, LANE_W];
+    const edge = (right > 0 ? edges[1] : -edges[0]) + ROAD_MARGIN;
     const laneHalf = LANE_W / 2 + ROAD_MARGIN;
     // Ось дублёра — за островком; площадка — сразу за его кромкой.
     const d = edge + STATION.pocketIsland + laneHalf;
@@ -7168,12 +7280,7 @@ export class Game implements BuildContext {
     };
     // У края в другую сторону полос нет (односторонняя улица) — дублёр вливался бы навстречу.
     if (!c.lanes.some((l) => l.flow === along)) return fail('Улица здесь — в другую сторону', fp);
-    // Вдоль площадки — run с каждой стороны от узла, съезд и въезд — ещё по div; до узлов улицы — не ближе 12.
-    const run = W / 2 + STATION.pocketRun;
-    const div = STATION.pocketDiverge;
-    const s0 = s - along * (run + div);
-    const s1 = s + along * (run + div);
-    if (Math.min(s0, s1) < 12 || Math.max(s0, s1) > c.length - 12) return fail('Слишком близко к перекрёстку', fp);
+    if (!fits) return fail(`Мало места вдоль улицы: нужно ${Math.ceil(need)} м между перекрёстками, здесь ${Math.floor(have)} м`, fp);
     for (const st of this.stations.values()) {
       if (st.id === this.movingStation || st.kind === 'rail') continue;
       if (dist(st.fp.center, fp.center) < W + STOP.gap) return fail(st.kind === 'stop' ? 'Рядом уже есть остановка' : 'Рядом уже есть станция', fp);
@@ -7184,20 +7291,22 @@ export class Game implements BuildContext {
     if (under.blocker) return fail(under.blocker, fp);
     const road = this.roadUnder(fp, 2);
     if (road) return fail(road, fp);
-    const id = c.id;
-    const P0 = c.lut.pointAt(s0);
-    const P1 = c.lut.pointAt(s1);
+    const P0 = line.at(u - along * (run + div)).pos;
+    const P1 = line.at(u + along * (run + div)).pos;
     // Съезд и въезд отходят от улицы под углом (~30°) и выходят на дублёр уже вдоль неё — плавно, без излома.
     const k = div * 0.5;
     const tilt = 0.58;
     const opts = { cls: 'street' as const, lanes: oneWay(1) };
     const plan = this.roadBuilder.plan((nn) => {
-      const off: Cubic = { p0: P0, p1: add(add(P0, scale(dir, k)), scale(n, k * tilt)), p2: sub(N, scale(dir, run + k)), p3: N };
-      buildRoad(nn, { kind: 'corridor', corridor: id, s: s0, pos: P0 }, { kind: 'free', pos: N }, { ...opts, curve: off });
+      // Съезд — от полотна под P0 (у стыка — от самого стыка: из него выйдет перекрёсток).
+      const from = anchorAt(nn, P0, 3);
+      if (from.kind === 'free') return false;
+      const off: Cubic = { p0: from.pos, p1: add(add(from.pos, scale(dir, k)), scale(n, k * tilt)), p2: sub(N, scale(dir, run + k)), p3: N };
+      buildRoad(nn, from, { kind: 'free', pos: N }, { ...opts, curve: off });
       const node = nn.nodesNear(N, 1)[0];
       const back = anchorAt(nn, P1, 3);
-      if (!node || back.kind !== 'corridor') return false;
-      const on: Cubic = { p0: N, p1: add(N, scale(dir, run + k)), p2: add(sub(P1, scale(dir, k)), scale(n, k * tilt)), p3: P1 };
+      if (!node || back.kind === 'free') return false;
+      const on: Cubic = { p0: N, p1: add(N, scale(dir, run + k)), p2: add(sub(back.pos, scale(dir, k)), scale(n, k * tilt)), p3: back.pos };
       buildRoad(nn, { kind: 'node', node: node.id, pos: N }, back, { ...opts, curve: on });
     });
     const cost = plan.cost + COST.station + this.demolishTotal(under.houses);
