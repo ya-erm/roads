@@ -171,6 +171,37 @@ describe('Бригада, назначенная игроком', () => {
     expect(t.b.convoy?.to).toBe(t.sites.get(to)!.node);
   });
 
+  it('колонна в потоке — сразу к новой цели (Host.redirect); доехавшая до прежней или без пути — едет как ехала', () => {
+    const t = bench();
+    const calls: number[] = [];
+    let ok = true;
+    (t.host as CrewHost & { redirect?: CrewHost['redirect'] }).redirect = (_b, to) => {
+      calls.push(to);
+      return ok;
+    };
+    expect(t.crews.send(t.b, 7)).toBeNull();
+    for (let i = 0; i < 4; i++) t.crews.tick();
+    expect(t.b.convoy?.to).toBe(571);
+    expect(t.b.convoy!.cars.every((c) => 'sim' in c)).toBe(true);
+    // Пути к новой цели нет — едет к прежней.
+    ok = false;
+    expect(t.crews.send(t.b, 8)).toBeNull();
+    expect(calls).toEqual([572]);
+    expect(t.b.convoy!.to).toBe(571);
+    // Есть — сразу туда.
+    ok = true;
+    expect(t.crews.send(t.b, 7)).toBeNull();
+    expect(t.crews.send(t.b, 8)).toBeNull();
+    expect(t.b.convoy!.to).toBe(572);
+    expect(t.b.project).toBe(8);
+    // Головная уже доехала до цели и ждёт остальных — колонна соберётся там.
+    const n = calls.length;
+    t.b.convoy!.cars[0] = { at: { x: -600, y: 0 }, dir: { x: 1, y: 0 } };
+    expect(t.crews.send(t.b, 7)).toBeNull();
+    expect(calls.length).toBe(n);
+    expect(t.b.convoy!.to).toBe(572);
+  });
+
   it('сохранение и загрузка: закрепление остаётся; у свободной бригады из сохранения — снимается; старое — без него', () => {
     const t = bench();
     expect(t.crews.send(t.b, 7)).toBeNull();
@@ -274,6 +305,71 @@ describe('Бригада, назначенная игроком, — в игре
     expect(crewCardHtml(game, b.id, { following: false, picking: false })).toContain('🤖 авто');
     runSeconds(game, 1);
     expect(b.project).toBe(from);
+  });
+
+  it('сменили цель, пока колонна в потоке: сворачивает к ближней стройке сразу, а не петлёй через прежнюю цель', () => {
+    const game = withoutCitizens(new Game(WORLD));
+    const at = field(game, 1500);
+    const X = (dx: number) => at.x + dx;
+    const y = at.y;
+    // Улица 0…1100 с узлами на 150 и 450; база — у её начала. Проект A — от конца улицы дальше на восток, B — от узла
+    // на 450 в сторону (поставлен на паузу, пока колонна не выехала к A).
+    expect(road(game, { free: { x: X(0), y } }, { free: { x: X(150), y } })).toBe(true);
+    expect(road(game, nodeAt(game, { x: X(150), y }), { free: { x: X(450), y } })).toBe(true);
+    expect(road(game, nodeAt(game, { x: X(450), y }), { free: { x: X(1100), y } })).toBe(true);
+    expect(game.buildBase({ x: X(75), y: y - 40 })).toBeNull();
+    const project = (from: Vec, to: Vec) => {
+      const id = game.construction.peekId();
+      const plan = game.roadBuilder.road(anchorOf(game, nodeAt(game, from)), anchorOf(game, { free: to }), STREET, { project: true });
+      expect(plan.ok && game.roadBuilder.apply(plan)).toBe(true);
+      return id;
+    };
+    const a = project({ x: X(1100), y }, { x: X(1500), y });
+    const near = nodeAt(game, { x: X(450), y });
+    let b2 = 0;
+    for (const dy of [250, -250]) {
+      const plan = game.roadBuilder.road(anchorOf(game, near), anchorOf(game, { free: { x: X(450), y: y + dy } }), STREET, { project: true });
+      if (!plan.ok || plan.demolish.length) continue;
+      b2 = game.construction.peekId();
+      expect(game.roadBuilder.apply(plan)).toBe(true);
+      break;
+    }
+    expect(b2).toBeGreaterThan(0);
+    game.construction.setPaused(b2, true);
+    const crews = game.construction.crews;
+    const b = [...crews.brigades.values()][0];
+    // Колонна выехала к A и едет по улице на восток, ещё не доехав до узла на 700.
+    const leadX = () => {
+      const id = crews.lead(b);
+      const v = id !== undefined ? game.traffic.vehicles.get(id) : undefined;
+      return v ? v.pos.x : -Infinity;
+    };
+    for (let t = 0; t < 120 && !(b.project === a && b.convoy && leadX() > X(220)); t += 0.1) runSeconds(game, 0.1);
+    expect(b.project).toBe(a);
+    expect(leadX()).toBeGreaterThan(X(220));
+    expect(leadX()).toBeLessThan(X(400));
+    expect(b.convoy!.cars.some((c) => 'at' in c)).toBe(false);
+
+    game.construction.setPaused(b2, false);
+    expect(game.sendBrigade(b.id, b2)).toBeNull();
+    // Новая цель — сразу: колонна едет к узлу подъезда B, и маршрут на карте ведёт туда, не через конец улицы.
+    expect(b.convoy!.to).toBe(near);
+    const route = game.brigadeRoute(b.id)!;
+    let len = 0;
+    for (let i = 1; i < route.pts.length; i++) len += dist(route.pts[i - 1], route.pts[i]);
+    const direct = X(450) - leadX() + 250;
+    expect(len).toBeLessThan(direct * 1.3 + 60);
+    expect(Math.max(...route.pts.map((p) => p.x))).toBeLessThan(X(510));
+
+    // Ни одна машина колонны не уезжает к прежней цели: дальше узла на 450 — ни шагу, и бригада на работе у B.
+    let farX = -Infinity;
+    for (let t = 0; t < 240 && !(b.state === 'working' && !b.convoy); t += 0.2) {
+      runSeconds(game, 0.2);
+      for (const s of game.crewSpots(b.id)) farX = Math.max(farX, s.pos.x);
+    }
+    expect(b.project).toBe(b2);
+    expect(b.state).toBe('working');
+    expect(farX).toBeLessThan(X(510));
   });
 
   it('отказ понятными словами: на паузе, нет проекта', () => {

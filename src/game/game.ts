@@ -1466,6 +1466,27 @@ export class Game implements BuildContext {
     return sim.id;
   }
 
+  /**
+   * Стройка (crews.ts): машины колонны бригады b, что в потоке, едут к узлу to — сразу, кратчайшим путём оттуда, где
+   * каждая сейчас. Всё или ничего: хоть одной туда по правилам не доехать — false, все едут как ехали.
+   */
+  redirect(b: Brigade, to: number): boolean {
+    const cars: { sim: Vehicle; route: number[] }[] = [];
+    for (const c of b.convoy?.cars ?? []) {
+      if (!('sim' in c)) continue;
+      const sim = this.traffic.vehicles.get(c.sim);
+      const route = sim && this.traffic.routeFrom(sim, to);
+      if (!sim || !route) return false;
+      cars.push({ sim, route });
+    }
+    for (const { sim, route } of cars) {
+      this.traffic.redirect(sim, to, route);
+      // Ждала у прежнего конца пути остальных (crewAssembled) — больше не ждёт: едет дальше.
+      this.crewWaitSince.delete(sim.id);
+    }
+    return true;
+  }
+
   /** Стройка: машина бригады больше не нужна — с дороги долой. */
   park(sim: number): void {
     const v = this.traffic.vehicles.get(sim);

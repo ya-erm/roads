@@ -759,6 +759,38 @@ export class LaneTraffic {
     return true;
   }
 
+  /**
+   * Маршрут машины к узлу targetNode оттуда, где она сейчас: с её связи, а посреди манёвра в узле — со связи выезда
+   * (манёвр она доезжает). Не доехать по правилам — null. Машину не меняет.
+   */
+  routeFrom(veh: Vehicle, targetNode: number): number[] | null {
+    const g = this.graph;
+    if (veh.onMovement) {
+      const m = g.moves.get(veh.onMovement);
+      const out = m && g.links.get(m.outLink);
+      const rest = out && findLaneRoute(g, [out], targetNode);
+      return m && rest ? [m.inLink, ...rest] : null;
+    }
+    const lane = this.currentLane(veh);
+    const link = lane && g.links.get(lane.link);
+    return (link && findLaneRoute(g, [link], targetNode)) || null;
+  }
+
+  /**
+   * Машина в пути едет к другому узлу — сразу, кратчайшим путём оттуда, где она сейчас (route — готовый routeFrom;
+   * нет — посчитается). Не доехать — false, едет как ехала.
+   */
+  redirect(veh: Vehicle, targetNode: number, route: number[] | null = this.routeFrom(veh, targetNode)): boolean {
+    if (!route) return false;
+    veh.targetNode = targetNode;
+    if (veh.onMovement) {
+      veh.route = route;
+      veh.routeIndex = 0;
+    } else this.setRoute(veh, route);
+    veh.stoppedTime = 0;
+    return true;
+  }
+
   /** Остановиться, проехав ещё d метров по маршруту, и стоять, пока не отпустят (release). */
   holdAfter(veh: Vehicle, d: number): void {
     veh.holdDist = Math.max(0, d);

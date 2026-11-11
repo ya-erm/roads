@@ -177,6 +177,11 @@ export interface CrewHost {
    */
   driveFrom?(brigade: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number): number | 'busy' | null;
   /**
+   * Машины колонны бригады, что в потоке, — сразу к узлу to, кратчайшим путём по правилам оттуда, где каждая сейчас
+   * (новая цель). Всё или ничего: хоть одной не доехать — false, едут как ехали. Нет — колонна доезжает до прежней цели.
+   */
+  redirect?(brigade: Brigade, to: number): boolean;
+  /**
    * Полоса бригады на проекте (crewLane.ts): от мест машин cars (нос и курс, по номеру; null — прямо позади начала
    * участка) к началу заполнения и по участку. null — не построить.
    */
@@ -1013,8 +1018,9 @@ export class Crews {
   /**
    * Игрок отправил бригаду b на проект project: null — едет (назначение закреплено, pinned), иначе причина отказа
    * (canGo). Едет обычным путём, без перескока: работала — сперва вдоль своей стройки назад к дороге; ехала вдоль
-   * стройки к краю работ — останавливается и едет назад к дороге; колонна в потоке доезжает до своей цели (машины не
-   * исчезают посреди дороги), а оттуда — к новому проекту (arrive → launch); не выехала — выезжает сразу туда.
+   * стройки к краю работ — останавливается и едет назад к дороге; колонна в потоке сразу сворачивает к новому проекту
+   * оттуда, где сейчас (retarget; машины не исчезают посреди дороги и не доезжают до прежней цели); не выехала —
+   * выезжает сразу туда.
    */
   send(b: Brigade, project: number): string | null {
     const problem = this.canGo(b, project);
@@ -1034,7 +1040,43 @@ export class Crews {
     delete b.front;
     b.state = 'going';
     if (back) this.walk(b, back, true);
+    else this.retarget(b);
     return null;
+  }
+
+  /**
+   * Колонна в потоке, а цель сменилась (игрок отправил бригаду на другой проект или с дороги домой — на стройку):
+   * машины сразу едут к новой цели кратчайшим путём оттуда, где они сейчас (Host.redirect), а не доезжают сперва до
+   * прежней — иначе бригада делает петлю через старую цель. Цель шага — узел подъезда к проекту, а если по правилам
+   * туда не доехать — узел, откуда к нему против движения (Host.step). Ещё не выехавшие машины выедут туда же (от
+   * своих мест или от узла выезда). Кто-то уже доехал до прежней цели и ждёт там остальных или ни к одной новой цели
+   * не доехать по правилам — колонна едет как ехала: соберётся там и оттуда поедет к проекту (arrive → launch).
+   */
+  private retarget(b: Brigade): void {
+    const cv = b.convoy;
+    if (!cv || b.project === undefined || !this.host.redirect) return;
+    if (cv.cars.some((c) => 'at' in c) || !cv.cars.some((c) => 'sim' in c)) return;
+    const s = this.host.site(b.project, b);
+    if (!s || s.node === cv.to) return;
+    const step = this.host.step?.(cv.from, s.node);
+    const goals = [s.node];
+    if (step && 'drive' in step && step.drive !== s.node) goals.push(step.drive);
+    const waiting = cv.cars.some((c) => 'wait' in c);
+    for (const to of goals) {
+      if (to === cv.to) return;
+      // Не выехавшим — выезжать от узла cv.from: туда по правилам должен быть путь (иначе бригаду отпустит, rollOut).
+      if (waiting && (to === cv.from || !this.drives(cv.from, to))) continue;
+      if (!this.host.redirect(b, to)) continue;
+      cv.to = to;
+      return;
+    }
+  }
+
+  /** От узла from до узла to (разные) — по правилам в потоке, без отрезка против движения. */
+  private drives(from: number, to: number): boolean {
+    if (!this.host.step) return this.host.reach(from, to);
+    const st = this.host.step(from, to);
+    return !!st && 'drive' in st && st.drive === to;
   }
 
   /**

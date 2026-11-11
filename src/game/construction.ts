@@ -138,6 +138,8 @@ export interface ConstructionHost {
   drive(brigade: Brigade, from: number, to: number, car: number): number | 'busy' | null;
   /** Машину бригады — в поток прямо с места, где она стоит на готовой дороге (Crews: CrewHost.driveFrom). */
   driveFrom?(brigade: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number): number | 'busy' | null;
+  /** Машины колонны бригады в потоке — сразу к другому узлу, от того места, где они сейчас (Crews: CrewHost.redirect). */
+  redirect?(brigade: Brigade, to: number): boolean;
   park(sim: number): void;
   onRoad(node: number): boolean;
   /**
@@ -276,6 +278,7 @@ export class Construction {
             driveFrom: (b: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number) => host.driveFrom!(b, car, spot, to),
           }
         : {}),
+      ...(host.redirect ? { redirect: (b: Brigade, to: number) => host.redirect!(b, to) } : {}),
       lane: (id, cars, b) => self.crewLane(id, cars, b),
       slots: (b) => self.crewSlots(b),
       stagger: (id, b) => self.stagger(id, b),
