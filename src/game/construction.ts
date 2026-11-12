@@ -155,6 +155,12 @@ export interface ConstructionHost {
    * Нет — разворот сразу.
    */
   turnGate?(corridor: number): boolean;
+  /**
+   * Бригада на полотне corridor («с проездом», реверс) вот-вот расширит участок под реверсом (следующий кусок, начало
+   * работ): build — стройка после шага. true — можно; нет — бригада ждёт (зовёт каждый такт), а въезд на новый кусок
+   * закрыт, пока на нём не останутся машины одного хода (WorkSignals.grow). Нет — расширяется сразу.
+   */
+  zoneGate?(corridor: number, build: CorridorBuild): boolean;
 }
 
 /** Сводка проекта для плашки и советника. */
@@ -722,6 +728,18 @@ export class Construction {
   }
 
   /**
+   * Растит ли шаг этапов до spans участок под реверсом на c («с проездом», laneWise; reverseZone): работы только
+   * начинаются (участка не было) или он заходит на следующий кусок, к концу полотна.
+   */
+  private zoneGrows(c: Corridor, b: CorridorBuild, spans: [number, number, number]): boolean {
+    if (b.done <= 0) return true;
+    const cuts = endCuts(this.host.roads.net, c);
+    const was = reverseZone(c, b, cuts);
+    const now = reverseZone(c, { ...b, stages: spans }, cuts);
+    return now[0] < was[0] - 0.01 || now[1] > was[1] + 0.01;
+  }
+
+  /**
    * Первый проход «с проездом» на узкой (laneWise) — дальше какого места (м по ходу заполнения) головная не заезжает:
    * в конце прохода колонна разворачивается на другую половину, и вся дуга разворота (turnAhead впереди головной) —
    * на участке под реверсом последнего куска, за 3 м до дальней стоп-линии: пока обе стороны на красном, там машин
@@ -1231,6 +1249,9 @@ export class Construction {
         const complete = moved.spans[2] >= L - 1e-6;
         // «С проездом» на узкой (closure.ts, laneWise): два прохода по половине полотна, каждый — половина готового.
         const lane = !rail && laneWise(b);
+        // Шаг растит участок под реверсом — только когда светофоры готовы (Host.zoneGate): иначе машины, ехавшие по новому
+        // куску в обе стороны, оказались бы на одной полосе навстречу друг другу. Не готовы — бригада ждёт.
+        if (lane && this.host.zoneGate && this.zoneGrows(c as Corridor, b, moved.spans) && !this.host.zoneGate(c.id, { ...b, stages: moved.spans })) break;
         const made = complete ? L : stageWork(moved.spans, L);
         const done = lane ? Math.max(b.done, laneDone(!!b.pass, made, L)) : complete ? L : Math.max(b.done, made);
         const cost = paidFor(full, done, L) - paidFor(full, b.done, L);

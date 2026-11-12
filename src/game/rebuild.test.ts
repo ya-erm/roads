@@ -4,6 +4,7 @@ import { dot, rightNormal, sub, type Vec } from '../core/vec';
 import { closureOf, endCuts, keptLanes, reverseZone, workSide } from '../lanes/closure';
 import { type RoadOptions, splitBuild } from '../lanes/edit';
 import { type Corridor, type CorridorWas, oneWay, twoWay } from '../lanes/model';
+import type { Vehicle } from '../sim/vehicle';
 import type { BuildBase } from '../world/entities';
 import { LANE_W } from '../world/roadTypes';
 import type { WorldSettings } from '../world/settings';
@@ -421,7 +422,9 @@ describe('Перестройка «с проездом» узкой дороги
     const b2 = live(game, c.id).build!;
     expect(b2.pass).toBe(2);
     expect(!!b2.fromB).toBe(!fromB0.value);
-    expect(b2.done).toBeCloseTo(c.length / 2, 0);
+    // Второй проход мог начаться ещё в том же шаге цикла (0,5 с) — на метр-другой.
+    expect(b2.done).toBeGreaterThanOrEqual(c.length / 2 - 0.5);
+    expect(b2.done).toBeLessThan(c.length / 2 + 2);
     expect(closureOf(b2)).toBe('part');
     // Светофоры пропускали обе стороны по очереди.
     expect(greens.has(1) && greens.has(-1) && greens.has(0)).toBe(true);
@@ -548,6 +551,84 @@ describe('Перестройка «с проездом»: на разрытую 
     expect(sent.length).toBeGreaterThan(40);
     expect(bad).toEqual([]);
     expect(lost).toEqual([]);
+    expect(sent.filter((id) => game.traffic.vehicles.has(id))).toEqual([]);
+  });
+});
+
+describe('Перестройка «с проездом»: участок под реверсом растёт — машины не проезжают друг сквозь друга (отчёт 0.2.129)', () => {
+  const reach = CONSTRUCTION.reach;
+  beforeEach(() => {
+    CONSTRUCTION.reach = 1e12;
+  });
+  afterEach(() => {
+    CONSTRUCTION.reach = reach;
+  });
+  const CAR = { kind: 'car' as const, length: 4.5, width: 1.9, maxSpeed: 60, accel: 10, color: '#fff' };
+
+  /** Корпуса двух машин (прямоугольники от носа pos назад по dir) пересекаются глубже 0,3 м. */
+  function overlap(a: Vehicle, b: Vehicle): boolean {
+    const box = (v: Vehicle) => ({ c: { x: v.pos.x - (v.dir.x * v.length) / 2, y: v.pos.y - (v.dir.y * v.length) / 2 }, d: v.dir, n: { x: -v.dir.y, y: v.dir.x }, hl: v.length / 2, hw: v.width / 2 });
+    const A = box(a);
+    const B = box(b);
+    const r = (o: ReturnType<typeof box>, ax: Vec) => o.hl * Math.abs(dot(o.d, ax)) + o.hw * Math.abs(dot(o.n, ax));
+    return [A.d, A.n, B.d, B.n].every((ax) => Math.abs(dot(sub(A.c, B.c), ax)) < r(A, ax) + r(B, ax) - 0.3);
+  }
+
+  /**
+   * Перестройка 1+1 «с проездом» от начала до конца, машины в обе стороны каждые 1,2 с: пары машин, проехавших друг
+   * сквозь друга («когда, кто, где»).
+   */
+  function crossings(len: number, from: RoadOptions, into: RoadOptions, reverse: boolean): { hits: string[]; sent: number[]; waited: boolean; game: Game } {
+    const { game, c, at } = scene('build', len, reverse, from);
+    const gate = nodeAt(game, { x: at.x - 90, y: at.y })!;
+    const far = nodeAt(game, { x: at.x + len + 90, y: at.y })!;
+    expect(game.roadBuilder.apply(game.roadBuilder.rebuild(c.id, { cls: into.cls, lanes: into.lanes }))).toBe(true);
+    const sent: number[] = [];
+    const hits: string[] = [];
+    const seen = new Set<string>();
+    let waited = false;
+    const wants = (game.workSignals as unknown as { wants: Map<number, unknown> }).wants;
+    for (let i = 0; i < 9000 && live(game, c.id).build; i++) {
+      runSeconds(game, 0.1);
+      if ((live(game, c.id).build?.done ?? 0) > 0 && i % 12 === 0) {
+        for (const [a, b] of [
+          [gate, far],
+          [far, gate],
+        ]) {
+          const route = game.roads.route(a, b);
+          const v = route && game.traffic.spawn({ ...CAR, targetNode: b, route });
+          if (v) sent.push(v.id);
+        }
+      }
+      if (wants.size) waited = true;
+      const cars = sent.map((id) => game.traffic.vehicles.get(id)).filter((v): v is Vehicle => !!v);
+      for (let p = 0; p < cars.length; p++) {
+        for (let q = p + 1; q < cars.length; q++) {
+          const key = `${cars[p].id}/${cars[q].id}`;
+          if (seen.has(key) || !overlap(cars[p], cars[q])) continue;
+          seen.add(key);
+          hits.push(`t=${game.time.toFixed(1)} машины ${key} на ${c.lut.closest(cars[p].pos).s.toFixed(0)} м`);
+        }
+      }
+    }
+    expect(live(game, c.id).build).toBeUndefined();
+    for (let i = 0; i < 300 && sent.some((id) => game.traffic.vehicles.has(id)); i++) runSeconds(game, 1);
+    return { hits, sent, waited, game };
+  }
+
+  it('грунтовка 1+1 → магистраль 1+1, 470 м с конца b, как в отчёте: участок переходит на следующий кусок, когда на нём едут в одну сторону', () => {
+    const { hits, sent, waited, game } = crossings(470, { cls: 'dirt', lanes: twoWay(1, 1) }, HIGHWAY, true);
+    expect(sent.length).toBeGreaterThan(40);
+    // Бригада ждала, пока светофоры освободят следующий кусок, — и никто ни с кем не пересёкся.
+    expect(waited).toBe(true);
+    expect(hits).toEqual([]);
+    expect(sent.filter((id) => game.traffic.vehicles.has(id))).toEqual([]);
+  });
+
+  it('улица 1+1 → проспект 2+2, 600 м: то же', () => {
+    const { hits, sent, game } = crossings(600, STREET, AVENUE, false);
+    expect(sent.length).toBeGreaterThan(40);
+    expect(hits).toEqual([]);
     expect(sent.filter((id) => game.traffic.vehicles.has(id))).toEqual([]);
   });
 });

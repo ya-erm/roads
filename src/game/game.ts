@@ -28,7 +28,7 @@ import { edgesAt } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { autoMainPair, mainPairOf } from '../lanes/graph';
 import { PhaseSpec, phaseTurnStates, specOf, turnClashes, type TurnState } from '../lanes/lights';
-import { Corridor, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, twoWay } from '../lanes/model';
+import { Corridor, type CorridorBuild, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, twoWay } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
 import type { LaneTraffic } from '../lanes/traffic';
 import { Leaving, RailSim, Train } from '../sim/rail';
@@ -1408,6 +1408,11 @@ export class Game implements BuildContext {
   /** Стройка: бригада разворачивается через обе половины полотна — реверс на красный обеим сторонам (WorkSignals.hold). */
   turnGate(corridor: number): boolean {
     return this.workSignals.hold(corridor);
+  }
+
+  /** Стройка: бригада вот-вот расширит участок под реверсом — можно ли (WorkSignals.grow). */
+  zoneGate(corridor: number, build: CorridorBuild): boolean {
+    return this.workSignals.grow(this.roads.net, this.roads.graph, corridor, build);
   }
 
   /** Машина car колонны бригады b (CREW_CARS): на ж/д стройке — в цвете путейцев (RAIL_CREW_COLOR). */

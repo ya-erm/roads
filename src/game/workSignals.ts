@@ -16,12 +16,18 @@
  * Участок переехал на следующий кусок — светофоры встают на новые места, фазы идут дальше (бригада проходит кусок
  * быстрее, чем светофор делает круг: сброс к очистке отдавал бы зелёный всё время одной стороне). Состояние не
  * сохраняется: после загрузки и у нового участка светофор начинает с очистки.
+ *
+ * Участок растёт (бригада дошла до следующего куска, работы только начались) — не сразу (grow): расширение пересаживает
+ * машины с перекладываемой половины на полосу встречных, и если на новом куске ехали в обе стороны, они проезжали
+ * друг сквозь друга (отчёт 0.2.129). Сначала стоп-линии въезда на новых концах — на красный, бригада ждёт, пока на
+ * будущем участке не останутся машины одного хода (и зелёный — не навстречу им); тогда участок растёт.
  */
 import { CONSTRUCTION } from '../config';
 import { closureOf, laneWise, type ReverseSite, reverseSite, siteS, siteSpot } from '../lanes/closure';
 import type { LaneGraph } from '../lanes/graph';
-import type { LaneNet } from '../lanes/model';
+import type { Corridor, CorridorBuild, LaneNet } from '../lanes/model';
 import type { Barrier } from '../lanes/traffic';
+import type { Vehicle } from '../sim/vehicle';
 import { KMH_PER_UNIT } from '../world/roadTypes';
 
 /** Кому зелёный: идущим по оси полотна (1), против (−1) или никому — очистка участка (0). */
@@ -117,12 +123,72 @@ const QUEUE_LOOK = 150;
 /** Стоп-линия ближе стольких метров к концу полотна — очередь за узлом, её не видно. */
 const BLIND = 40;
 
+/**
+ * Каждая машина на полотне c и на соседях за стыками (reach) — по оси c: ход (как по ней) и место. moves — и машины на
+ * манёврах, въезжающие на эти полотна (в узле перед ними): там, где начинается их полоса.
+ */
+function eachCar(graph: LaneGraph, c: Corridor, reach: ReverseSite['reach'], each: (flow: 1 | -1, s: number, v: Vehicle) => void, moves = false): void {
+  const parts: { id: number; at: (s: number) => number; k: 1 | -1 }[] = [{ id: c.id, at: (s) => s, k: 1 }];
+  reach.forEach((r, i) => r && parts.push({ id: r.corridor.id, at: (s) => siteS(c, r, i ? 'b' : 'a', s), k: r.k }));
+  for (const p of parts) {
+    for (const link of graph.corridorLinks(p.id)) {
+      const flow = (link.flow * p.k) as 1 | -1;
+      for (const lane of link.lanes) {
+        for (const v of lane.vehicles) each(flow, p.at(v.centerS), v);
+        if (!moves) continue;
+        const start = p.at(link.flow > 0 ? link.s0 : link.s1);
+        for (const m of graph.movesInto.get(lane.id) ?? []) for (const v of m.vehicles) each(flow, start, v);
+      }
+    }
+  }
+}
+
+/** Тормозной путь, за который машина ещё встанет у стоп-линии, загоревшейся красным, м (замедление 4 м/с²). */
+const brakeLen = (v: number) => (v * v) / 8;
+
+/**
+ * Можно ли участку стать site (Construction растит его, WorkSignals.grow): между его стоп-линиями (и не успевая встать
+ * перед ними) — машины не больше чем одного хода f, и зелёный — не навстречу им (go — фаза светофора; его ещё нет —
+ * null). Тогда после расширения на общей полосе нет встречных: светофор пустит других, только когда эти уедут.
+ */
+export function canGrow(graph: LaneGraph, c: Corridor, site: ReverseSite, go: Go | null): boolean {
+  const [s0, s1] = site.stops;
+  const flows = new Set<1 | -1>();
+  eachCar(
+    graph,
+    c,
+    site.reach,
+    (flow, s, v) => {
+      const lo = s0 - (flow > 0 ? brakeLen(v.v) + 0.2 : 1);
+      const hi = s1 + (flow < 0 ? brakeLen(v.v) + 0.2 : 1);
+      if (s > lo && s < hi) flows.add(flow);
+    },
+    true,
+  );
+  if (flows.size > 1) return false;
+  const [f] = flows;
+  return f === undefined || go !== -f;
+}
+
+/** Бригада ждёт расширения участка (grow): стоп-линии въезда на его новых концах — красные, пока ждёт. */
+interface Want {
+  barriers: Barrier[];
+  /** Полотна стоп-линий (своё или сосед за стыком). */
+  on: number[];
+  /** Такт WorkSignals.step, когда бригада звала в последний раз. */
+  at: number;
+}
+
 export class WorkSignals {
   list = new Map<number, WorkSignal>();
   private net: LaneNet | null = null;
   private ver = -1;
   /** Где бригада держит красный на этот такт (hold): номера полотен. */
   private holds = new Set<number>();
+  /** Где бригада ждёт расширения участка (grow): номера полотен. */
+  private wants = new Map<number, Want>();
+  /** Такты step — чтобы забыть ожидание, которое бригада больше не зовёт. */
+  private ticks = 0;
 
   /**
    * Такт до движения: участки — заново, если сеть поменялась (стройка ушла на другой кусок, проход сменился, правка);
@@ -130,6 +196,11 @@ export class WorkSignals {
    */
   step(dt: number, net: LaneNet, graph: LaneGraph, traffic: { signals: Map<number, Barrier[]> }): void {
     if (net !== this.net || net.version !== this.ver) this.sync(net, traffic);
+    // Ожидание расширения, которое бригада больше не зовёт (расширила, ушла, стройку сняли), — забыть.
+    this.ticks++;
+    const had = this.wants.size;
+    for (const [id, w] of this.wants) if (w.at < this.ticks - 1) this.wants.delete(id);
+    if (had) this.publish(traffic);
     if (!this.list.size) return;
     for (const sig of this.list.values()) {
       const [s0, s1] = sig.stops;
@@ -137,16 +208,11 @@ export class WorkSignals {
       if (!c) continue;
       const L = c.length;
       // Машины на своём полотне и на соседях за стыками — по оси c (ход — как по ней).
-      const parts: { id: number; at: (s: number) => number; k: 1 | -1 }[] = [{ id: c.id, at: (s) => s, k: 1 }];
-      sig.reach.forEach((r, i) => r && parts.push({ id: r.corridor.id, at: (s) => siteS(c, r, i ? 'b' : 'a', s), k: r.k }));
       const count = (ok: (flow: 1 | -1, s: number) => boolean) => {
         let n = 0;
-        for (const p of parts) {
-          for (const link of graph.corridorLinks(p.id)) {
-            const flow = (link.flow * p.k) as 1 | -1;
-            for (const lane of link.lanes) for (const v of lane.vehicles) if (ok(flow, p.at(v.centerS))) n++;
-          }
-        }
+        eachCar(graph, c, sig.reach, (flow, s) => {
+          if (ok(flow, s)) n++;
+        });
         return n;
       };
       // Видно ли очередь: от стоп-линии назад до начала своего полотна (или соседа за стыком).
@@ -165,7 +231,8 @@ export class WorkSignals {
         sig.clear = false;
         // Очистка — участок, по которому ехали на прошлый зелёный: переехал во время очистки — только общее с ним. Иначе
         // бригада, идущая почти со скоростью машин, всё время «догоняет» уехавших вперёд, и очистка тянется до clearMax;
-        // а ждущие у стоп-линии, переехавшей вперёд, уже не на участке.
+        // а ждущие у стоп-линии, переехавшей вперёд, уже не на участке. Вырос — и новый конец (sync): там уехавшие
+        // вперёд уже на общей полосе, пустить встречных можно, только когда и они уедут.
         if (sig.state.go !== 0 || !sig.clearZone) sig.clearZone = [s0, s1];
         const c0 = Math.max(s0, sig.clearZone[0]);
         const c1 = Math.min(s1, sig.clearZone[1]);
@@ -217,6 +284,10 @@ export class WorkSignals {
       });
       barriers[0].closed = state.go !== 1;
       barriers[1].closed = state.go !== -1;
+      // Очистка идёт, а участок вырос — очищать и новый конец: пустившиеся на прошлый зелёный едут по нему по общей полосе.
+      const cz = old?.clearZone;
+      const clearZone: [number, number] | undefined =
+        old && cz ? [zone[0] < old.zone[0] - 0.01 ? Math.min(cz[0], stops[0]) : cz[0], zone[1] > old.zone[1] + 0.01 ? Math.max(cz[1], stops[1]) : cz[1]] : undefined;
       next.set(c.id, {
         corridor: c.id,
         zone,
@@ -226,13 +297,49 @@ export class WorkSignals {
         barriers,
         on,
         ...(old?.clear ? { clear: true } : {}),
-        ...(old?.clearZone ? { clearZone: old.clearZone } : {}),
+        ...(clearZone ? { clearZone } : {}),
       });
     }
     this.list = next;
+    this.publish(traffic);
+  }
+
+  /** Стоп-линии в движение (LaneTraffic.signals): светофоров участков и красные въезда у ждущих расширения (grow). */
+  private publish(traffic: { signals: Map<number, Barrier[]> }): void {
     const map = new Map<number, Barrier[]>();
-    for (const sig of next.values()) sig.barriers.forEach((b, i) => map.set(sig.on[i], [...(map.get(sig.on[i]) ?? []), b]));
+    const put = (id: number, b: Barrier) => map.set(id, [...(map.get(id) ?? []), b]);
+    for (const sig of this.list.values()) sig.barriers.forEach((b, i) => put(sig.on[i], b));
+    for (const w of this.wants.values()) w.barriers.forEach((b, i) => put(w.on[i], b));
     traffic.signals = map;
+  }
+
+  /**
+   * Бригада вот-вот расширит участок под реверсом на полотне id (Construction, Host.zoneGate; build — стройка после
+   * шага: следующий кусок или начало работ). Расширение пересаживает машины с перекладываемой половины на полосу
+   * встречных: ехали там в обе стороны — проехали бы друг сквозь друга. Поэтому, пока бригада ждёт (зовёт каждый
+   * такт), стоп-линии въезда на новых концах участка — красные (со следующего такта), а расширять можно, когда на
+   * будущем участке машины одного хода и зелёный — не навстречу им (canGrow). true — можно сейчас; нет — ждать.
+   */
+  grow(net: LaneNet, graph: LaneGraph, id: number, build: CorridorBuild): boolean {
+    const c = net.corridors.get(id);
+    if (!c) return true;
+    const site = reverseSite(net, c, build);
+    const sig = this.list.get(id);
+    if (canGrow(graph, c, site, sig ? sig.state.go : null)) {
+      this.wants.delete(id);
+      return true;
+    }
+    // Новые концы: участка ещё нет (работы начинаются) — оба.
+    const ends = sig ? [site.zone[0] < sig.zone[0] - 0.01, site.zone[1] > sig.zone[1] + 0.01] : [true, true];
+    const want: Want = { barriers: [], on: [], at: this.ticks };
+    ([1, -1] as const).forEach((flow, i) => {
+      if (!ends[i]) return;
+      const spot = siteSpot(c, site.reach, site.stops[i]);
+      want.barriers.push({ s: spot.s, closed: true, busy: false, flow: (flow * spot.k) as 1 | -1, stop: 0 });
+      want.on.push(spot.corridor.id);
+    });
+    this.wants.set(id, want);
+    return false;
   }
 
   /** Что горит у стоп-линии направления flow на полотне id: зелёный, жёлтый (очистка) или красный; светофора нет — null. */
