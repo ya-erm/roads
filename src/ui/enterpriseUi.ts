@@ -32,6 +32,19 @@ export const harmIcons = (cls: number): string => '☁'.repeat(cls);
 export const sizeDots = (size: number): string => '●'.repeat(size + 1) + '○'.repeat(2 - size);
 export const SIZE_NAMES = ['малое', 'среднее', 'богатое'];
 
+/**
+ * Масштаб камеры, при котором на карте видны точки размера под значком месторождения: от SIZE_DOTS_ZOOM[1] и ближе —
+ * полностью, к SIZE_DOTS_ZOOM[0] плавно гаснут, а дальше (весь регион в кадре) остаётся только значок ресурса —
+ * десятки «●●○» по всей карте её загромождают. Размер всё равно виден в карточке месторождения.
+ */
+export const SIZE_DOTS_ZOOM: readonly [number, number] = [0.12, 0.2];
+
+/** Насколько видны точки размера месторождения при масштабе камеры zoom: 0 — не видны, 1 — полностью. */
+export function sizeDotsVisibility(zoom: number): number {
+  const u = (zoom - SIZE_DOTS_ZOOM[0]) / (SIZE_DOTS_ZOOM[1] - SIZE_DOTS_ZOOM[0]);
+  return u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u);
+}
+
 /** Строка «Предприятия» в окне новой игры: «Строит игрок» / «Готовые». */
 export function industryModeRowHtml(mode: IndustryMode | undefined): string {
   const cur = mode ?? 'ready';

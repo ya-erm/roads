@@ -5,8 +5,31 @@ import { freshGame, withoutCitizens } from '../game/testkit';
 import { CARGO, INDUSTRY_TYPES } from '../world/cargo';
 import { townEdge, workersNeeded } from '../world/enterprise';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
-import { depositCardHtml, depositPlace, industryOptionsHtml } from './enterpriseUi';
+import { depositCardHtml, depositPlace, industryOptionsHtml, SIZE_DOTS_ZOOM, sizeDotsVisibility } from './enterpriseUi';
 import { recipeText } from './industryCard';
+
+describe('точки размера месторождения на карте', () => {
+  it('издали (весь регион в кадре, как ×0.088 из баг-репорта) не видны, ближе — видны полностью', () => {
+    expect(sizeDotsVisibility(0.05)).toBe(0);
+    expect(sizeDotsVisibility(0.088)).toBe(0);
+    expect(sizeDotsVisibility(SIZE_DOTS_ZOOM[0])).toBe(0);
+    expect(sizeDotsVisibility(SIZE_DOTS_ZOOM[1])).toBe(1);
+    expect(sizeDotsVisibility(0.3)).toBe(1);
+    expect(sizeDotsVisibility(0.6)).toBe(1);
+  });
+
+  it('между порогами гаснут плавно, без скачков', () => {
+    const [lo, hi] = SIZE_DOTS_ZOOM;
+    let prev = 0;
+    for (let i = 1; i <= 20; i++) {
+      const v = sizeDotsVisibility(lo + ((hi - lo) * i) / 20);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      expect(v - prev).toBeLessThan(0.1);
+      prev = v;
+    }
+    expect(sizeDotsVisibility((lo + hi) / 2)).toBeCloseTo(0.5);
+  });
+});
 
 const WORLD: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 7, size: 'small', towns: 5, money: 5_000_000, biome: 'temperate', relief: 'plains' };
 

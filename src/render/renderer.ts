@@ -41,7 +41,7 @@ import {
   houseGrime,
 } from './enterpriseArt';
 import { townEdge, townIndustries, townSlots } from '../world/enterprise';
-import { sizeDots } from '../ui/enterpriseUi';
+import { sizeDots, sizeDotsVisibility } from '../ui/enterpriseUi';
 import { lastTownNeed } from '../world/townSupply';
 import type { Segment } from '../world/network';
 import { halfWidth, isDirt, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
@@ -3163,14 +3163,17 @@ export class Renderer {
       });
     }
     // Месторождения (режим «Строит игрок»): значок ресурса и точки размера ●●○ — подписью; вблизи видно и так.
+    // Издали (весь регион в кадре) точки гаснут — остаётся один значок (sizeDotsVisibility).
     if (z < 0.9) {
+      const dots = sizeDotsVisibility(z);
       for (const d of game.enterprises.deposits) {
         if (d.used !== undefined || !near(d.center, 120)) continue;
         const s = (z <= 0.3 ? 18 : 15) / z;
         ctx.globalAlpha = 0.9;
         this.icon(cargoImage(INDUSTRY_TYPES[d.kind].produces), d.center, s);
+        ctx.globalAlpha = dots;
+        if (dots > 0) text({ x: d.center.x, y: d.center.y + s * 0.8 }, sizeDots(d.size), 9, '#2b2d31', 'rgba(255,255,255,0.75)');
         ctx.globalAlpha = 1;
-        text({ x: d.center.x, y: d.center.y + s * 0.8 }, sizeDots(d.size), 9, '#2b2d31', 'rgba(255,255,255,0.75)');
       }
     }
     const e = game.enterprises;
