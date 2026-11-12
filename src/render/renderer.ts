@@ -34,6 +34,7 @@ import {
   drawHarmZone,
   drawRuinOverlay,
   drawSiteArt,
+  drawSiteCrane,
   drawSoot,
   enterpriseReach,
   enterpriseSig,
@@ -692,6 +693,8 @@ export class Renderer {
     }
     // Светофор перекрёстка под мостом не пропадает под полотном — приглушённым значком поверх.
     this.drawLights(game, 'covered', o.phaseEdit);
+    // Краны строящихся предприятий — высокие: поверх станций, домов, дорог и мостов, под подписями и плашками.
+    this.drawSiteCranes(game, view);
     this.drawConstruction(game, view, o.crewTarget != null ? { type: 'project', id: o.crewTarget } : o.selection);
     this.drawLabels(game, view);
     this.drawOverlay(game, o);
@@ -2221,6 +2224,24 @@ export class Renderer {
       // Заброшенное и стройка не дымят (кран стройки — в плитке).
       if (ind.ruin || ind.build) continue;
       if (inView(ind.fp) && drawIndustryArt(this.ctx, ind, z, time, 'motion')) this.moving = true;
+    }
+  }
+
+  /** Краны стройплощадок предприятий (drawSiteCrane) — в каждом кадре поверх плиток; опора — подальше от своих станций. */
+  private drawSiteCranes(game: Game, view: Box): void {
+    const sites = game.industries.filter(
+      (i) => i.build && i.fp.center.x > view.x0 - 150 && i.fp.center.x < view.x1 + 150 && i.fp.center.y > view.y0 - 150 && i.fp.center.y < view.y1 + 150,
+    );
+    if (!sites.length) return;
+    const stations = [...game.stations.values()];
+    for (const ind of sites) {
+      const own = [...(ind.annexes ?? []).map((a) => a.fp)];
+      for (const st of stations) {
+        if (st.industryId !== ind.id && !st.industryIds.includes(ind.id)) continue;
+        own.push(st.fp);
+        for (const w of st.warehouses ?? []) own.push(w.fp);
+      }
+      drawSiteCrane(this.ctx, ind, this.camera.zoom, 0, own);
     }
   }
 

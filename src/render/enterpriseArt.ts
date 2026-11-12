@@ -2,9 +2,10 @@
  * Графика режима «Строит игрок» (docs/INDUSTRIES.md): месторождения на земле (выходы руды и угля, нефтяные пятна
  * с вышкой, карьерные откосы, поля, лесные делянки, сети рыбаков) — размер по площади и густоте; копоть земли у
  * вредных предприятий; заброшенные (ржавчина, выбитые окна, трава); стройплощадка (котлован, леса, кран, штабеля,
- * здание растёт по готовности). Всё неподвижное рисуется в плитки кэша карты; мелочи — только вблизи.
+ * здание растёт по готовности). Всё неподвижное рисуется в плитки кэша карты, кроме крана стройки (drawSiteCrane:
+ * он высокий — поверх станций и дорог); мелочи — только вблизи.
  */
-import { dist } from '../core/vec';
+import { dist, type Vec } from '../core/vec';
 import { CARGO, INDUSTRY_TYPES, type IndustryKind } from '../world/cargo';
 import { depositRadius, harmClass, harmReach, isActive } from '../world/enterprise';
 import type { Deposit, Industry, TownBuilding } from '../world/entities';
@@ -395,7 +396,7 @@ export const siteStep = (ind: Industry): number => (ind.build ? Math.floor(ind.b
 
 /**
  * Стройплощадка: участок с разметкой, котлован, штабеля стройматериалов, здание по готовности (часть сцены —
- * с запада на восток), строительные леса по краю готового, кран над стройкой.
+ * с запада на восток), строительные леса по краю готового. Кран над стройкой — отдельным слоем (drawSiteCrane).
  */
 export function drawSiteArt(c: CanvasRenderingContext2D, ind: Industry, zoom: number, time: number): void {
   const fp = ind.fp;
@@ -445,18 +446,19 @@ export function drawSiteArt(c: CanvasRenderingContext2D, ind: Industry, zoom: nu
   c.translate(fp.center.x, fp.center.y);
   c.rotate(fp.angle);
   if (near) {
-    // Строительные леса по краю готового: стойки и настилы.
+    // Строительные леса по краю готового: стойки и настилы — в пределах участка (в начале стройки — у его края).
+    const sx = Math.min(W / 2 - 3, Math.max(-W / 2 + 2, edge));
     c.strokeStyle = '#b08a3e';
     c.lineWidth = 0.9;
     c.beginPath();
     for (let y = -H * 0.36; y <= H * 0.36; y += 6) {
-      c.moveTo(edge - 2, y);
-      c.lineTo(edge + 3, y);
+      c.moveTo(sx - 2, y);
+      c.lineTo(sx + 3, y);
     }
-    c.moveTo(edge - 2, -H * 0.36);
-    c.lineTo(edge - 2, H * 0.36);
-    c.moveTo(edge + 3, -H * 0.36);
-    c.lineTo(edge + 3, H * 0.36);
+    c.moveTo(sx - 2, -H * 0.36);
+    c.lineTo(sx - 2, H * 0.36);
+    c.moveTo(sx + 3, -H * 0.36);
+    c.lineTo(sx + 3, H * 0.36);
     c.stroke();
     // Штабеля: доски, кирпич, металл — в углу участка.
     const piles: [string, number][] = [
@@ -472,16 +474,82 @@ export function drawSiteArt(c: CanvasRenderingContext2D, ind: Industry, zoom: nu
       c.strokeRect(W / 2 - 14, -H / 2 + 4 + k * 7, 10, 5);
     }
   }
-  // Башенный кран: опора у края работ, стрела над недостроенным.
-  const base = { x: Math.min(W / 2 - 10, edge + 8), y: H / 2 - 8 };
-  const swing = Math.sin(time * 0.3 + ind.id) * 0.25;
+  c.restore();
+}
+
+/** Опора крана — столько метров от края участка; конец стрелы — не ближе стольких к краю. */
+const CRANE_INSET = 8;
+const JIB_INSET = 4;
+
+/** Точка p мира в осях участка fp (центр — 0, x — вдоль w). */
+function toLocal(fp: Footprint, p: Vec): Vec {
+  const dx = p.x - fp.center.x;
+  const dy = p.y - fp.center.y;
+  const cs = Math.cos(fp.angle);
+  const sn = Math.sin(fp.angle);
+  return { x: dx * cs + dy * sn, y: -dx * sn + dy * cs };
+}
+
+/** Расстояние от точки p мира до участка fp (0 — внутри). */
+function gapTo(fp: Footprint, p: Vec): number {
+  const q = toLocal(fp, p);
+  return Math.hypot(Math.max(0, Math.abs(q.x) - fp.w / 2), Math.max(0, Math.abs(q.y) - fp.h / 2));
+}
+
+/** Башенный кран стройки в осях участка (центр — 0, x — вдоль w): опора и конец стрелы. */
+export interface CraneSpot {
+  base: Vec;
+  tip: Vec;
+}
+
+/**
+ * Где башенный кран стройки предприятия на участке fp при готовности done: опора — у края работ, у длинной стороны
+ * подальше от своего у участка own (станции, грузовые дворы, пристройки); стрела — над недостроенным, с наклоном
+ * swing (±0,25). Кран целиком в пределах участка: на станцию у его края стрела не заходит.
+ */
+export function craneSpot(fp: Footprint, done: number, swing: number, own: readonly Footprint[] = []): CraneSpot {
+  const W = fp.w;
+  const H = fp.h;
+  const edge = -W / 2 + W * Math.max(0, Math.min(1, done));
+  const x = Math.max(-W / 2 + CRANE_INSET, Math.min(W / 2 - CRANE_INSET, edge + CRANE_INSET));
+  const yAbs = Math.max(0, H / 2 - CRANE_INSET);
+  // Сторона опоры: по умолчанию «южная» (+y); северная — если от неё дальше до своего у участка.
+  const room = (y: number) => {
+    const cs = Math.cos(fp.angle);
+    const sn = Math.sin(fp.angle);
+    const p = { x: fp.center.x + x * cs - y * sn, y: fp.center.y + x * sn + y * cs };
+    return own.reduce((m, o) => Math.min(m, gapTo(o, p)), Infinity);
+  };
+  const s = own.length && room(-yAbs) > room(yAbs) + 1 ? -1 : 1;
+  // Стрела — через участок к другой длинной стороне, наклоном к недостроенному (не влезает — к готовому).
+  const a = Math.max(0.2, Math.min(0.7, 0.45 + swing));
+  const sin = Math.sin(a);
+  const cos = Math.cos(a);
+  let len = Math.min(H * 0.95, Math.max(0, H - CRANE_INSET - JIB_INSET) / cos);
+  const east = W / 2 - JIB_INSET - x;
+  const west = x + W / 2 - JIB_INSET;
+  const dir = sin * len <= east || east >= west ? 1 : -1;
+  len = Math.min(len, Math.max(0, dir > 0 ? east : west) / sin);
+  return { base: { x, y: s * yAbs }, tip: { x: x + dir * sin * len, y: s * (yAbs - cos * len) } };
+}
+
+/**
+ * Башенный кран стройки предприятия (craneSpot) — высокий: рисуется поверх станций, домов и дорог (слой выше плиток),
+ * под подписями и плашками. own — своё у участка (станции, пристройки): опора — подальше от них.
+ */
+export function drawSiteCrane(c: CanvasRenderingContext2D, ind: Industry, zoom: number, time: number, own: readonly Footprint[] = []): void {
+  const fp = ind.fp;
+  const near = zoom > 0.3;
+  const { base, tip: jib } = craneSpot(fp, ind.build?.done ?? 1, Math.sin(time * 0.3 + ind.id) * 0.25, own);
+  c.save();
+  c.translate(fp.center.x, fp.center.y);
+  c.rotate(fp.angle);
   c.fillStyle = '#5c5f66';
   c.fillRect(base.x - 3, base.y - 3, 6, 6);
   c.strokeStyle = YELLOW;
   c.lineWidth = near ? 2.2 : 3;
   c.beginPath();
   c.moveTo(base.x, base.y);
-  const jib = { x: base.x + Math.cos(-Math.PI / 2 - 0.3 + swing) * H * 0.95, y: base.y + Math.sin(-Math.PI / 2 - 0.3 + swing) * H * 0.95 };
   c.lineTo(jib.x, jib.y);
   c.stroke();
   if (near) {
