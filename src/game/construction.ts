@@ -38,7 +38,7 @@
 import { add, dist, dot, scale, sub, type Vec } from '../core/vec';
 import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { corridorLayer } from '../lanes/speedDisplay';
-import { closed, endCuts, laneDone, laneWise, partLanes, reverseStops, reverseZone, reversible } from '../lanes/closure';
+import { closed, endCuts, laneDone, laneWise, partLanes, reverseSite, reverseStops, reverseZone, reversible, seamHolder, seamWait } from '../lanes/closure';
 import { type Corridor, type CorridorBuild, type CorridorWas, type LaneNet, taperLen } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import type { Network, Segment } from '../world/network';
@@ -889,7 +889,11 @@ export class Construction {
         if (turn && (flip || turning(b.lane, slots, this.host.time))) {
           // Разворот — через обе половины: когда участок под реверсом пуст и обе стороны на красном (Host.turnGate);
           // светофоры держат красный, пока колонна не развернётся и участок не перейдёт на второй проход.
-          const clear = this.host.turnGate?.(f.c.id) ?? true;
+          // Стык у конца прохода занят соседним куском со своим реверсом (seamHolder) — там у него проезд по обеим
+          // нашим половинам: разворот ждёт, пока сосед не уйдёт от стыка.
+          const kb = f.c.build;
+          const held = turn.wait && flip && !!kb && seamHolder(net, f.c as Corridor, kb, kb.fromB ? 'a' : 'b') !== null;
+          const clear = !held && (this.host.turnGate?.(f.c.id) ?? true);
           if (turn.wait && clear) releaseTurn(b.lane, this.host.time);
         }
         // Ряд разворачивающейся — уже второго прохода (startTurn), а участок ещё на первом.
@@ -962,7 +966,14 @@ export class Construction {
       const f = this.frontFor(id, by);
       const from = this.crews.startOf(by);
       if (!f || from === null) return null;
-      return this.routeTo(id, f.c, f.fromB, this.reachFrom(from));
+      const ok = this.reachFrom(from);
+      const r = this.routeTo(id, f.c, f.fromB, ok);
+      if (r || by.state !== 'working' || by.front?.corridor !== f.c.id || !by.lane) return r;
+      // Бригада уже на своём участке (работает на полосе вдоль него), а подъезда по дорогам к началу заполнения нет —
+      // его перекрыла сама стройка (реверс у стыка, второй проход от узла, куда по дорогам уже не доехать): она не
+      // уезжает, а работает дальше вдоль стройки — иначе стройка встала бы навсегда, а с ней и перекрытие.
+      const start = f.fromB ? f.c.b : f.c.a;
+      return this.routeTo(id, f.c, f.fromB, (n) => n === start || ok(n));
     }
     const c = this.current(id);
     return c ? this.routeTo(id, c, !!c.build!.fromB, (n) => this.accessRank(n) !== null, true) : null;
@@ -1249,11 +1260,15 @@ export class Construction {
         const complete = moved.spans[2] >= L - 1e-6;
         // «С проездом» на узкой (closure.ts, laneWise): два прохода по половине полотна, каждый — половина готового.
         const lane = !rail && laneWise(b);
+        const made = complete ? L : stageWork(moved.spans, L);
+        const done = lane ? Math.max(b.done, laneDone(!!b.pass, made, L)) : complete ? L : Math.max(b.done, made);
+        // Стык с соседним куском под реверсом занят им (closure.ts, seamWait): ближе к стыку не идём, пока его участок
+        // оттуда не уйдёт, — иначе у стыка разрыты обе половины, и проезда нет ни в одну сторону. Раньше zoneGate: ждущая
+        // у стыка бригада не держит красный на въезде.
+        if (lane && seamWait(net, c as Corridor, b, { ...b, done, stages: moved.spans })) break;
         // Шаг растит участок под реверсом — только когда светофоры готовы (Host.zoneGate): иначе машины, ехавшие по новому
         // куску в обе стороны, оказались бы на одной полосе навстречу друг другу. Не готовы — бригада ждёт.
         if (lane && this.host.zoneGate && this.zoneGrows(c as Corridor, b, moved.spans) && !this.host.zoneGate(c.id, { ...b, stages: moved.spans })) break;
-        const made = complete ? L : stageWork(moved.spans, L);
-        const done = lane ? Math.max(b.done, laneDone(!!b.pass, made, L)) : complete ? L : Math.max(b.done, made);
         const cost = paidFor(full, done, L) - paidFor(full, b.done, L);
         // Сперва — из резерва проекта, остальное — из свободного бюджета (до кредитного предела: резерв его не обходит).
         const fromReserve = Math.min(cost, p.reserve ?? 0);
@@ -1316,9 +1331,10 @@ export class Construction {
           } else if (lane && b.done > 0) {
             // Реверс переехал на следующий кусок участка (reverseZone) — светофоры и полосы на новом месте.
             const cuts = endCuts(net, c as Corridor);
-            const was = reverseZone(c as Corridor, b, cuts);
-            const now = reverseZone(c as Corridor, c.build, cuts);
-            if (Math.abs(was[0] - now[0]) > 0.01 || Math.abs(was[1] - now[1]) > 0.01) {
+            // И по своим кускам, и с учётом стыков (seamZone): участок у занятого соседом стыка кончается по разрытому.
+            const was = [...reverseZone(c as Corridor, b, cuts), ...reverseSite(net, c as Corridor, b).zone];
+            const now = [...reverseZone(c as Corridor, c.build, cuts), ...reverseSite(net, c as Corridor, c.build).zone];
+            if (was.some((x, i) => Math.abs(x - now[i]) > 0.01)) {
               this.touchPiece(p.id, c);
               this.host.networkChanged();
             }

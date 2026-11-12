@@ -16,7 +16,7 @@
  */
 import { CONSTRUCTION } from '../config';
 import { nodeCuts } from './geometry';
-import { type Corridor, type CorridorBuild, type End, type LaneNet, type LaneSlot, taperLen } from './model';
+import { type Corridor, type CorridorBuild, type CorridorEnd, type End, type LaneNet, type LaneSlot, taperLen } from './model';
 
 /** Что открыто на полотне в стройке: old — прежняя дорога целиком, part — часть её полос, closed — ничего. */
 export type Closure = 'old' | 'part' | 'closed';
@@ -230,11 +230,31 @@ const reversing = (c: Corridor | undefined) => !!c && closureOf(c.build) === 'pa
 
 /**
  * Сосед за стыком на конце end полотна c, где съезжают на открытую половину перед участком под реверсом, дошедшим до
- * стыка: стык ровно двух полотен (прямое продолжение), сосед открыт для движения (готов или его перестройка не начата)
- * и достаточно длинный (с реверсом и на другом его конце — вдвое). Нет такого — null: съезд и стоп-линия — у самого
- * узла (у стыка с другим соседом это направление на время работ у узла перекрыто — машины объезжают).
+ * стыка: стык ровно двух полотен (прямое продолжение), сосед открыт для движения (готов, его перестройка не начата или
+ * его участок под реверсом не ближе seamGap к стыку) и достаточно длинный (с реверсом и на другом его конце — вдвое).
+ * Нет такого — null: съезд и стоп-линия — у самого узла (у стыка с другим соседом это направление на время работ у
+ * узла перекрыто — машины объезжают).
  */
 export function approachAt(net: LaneNet, c: Corridor, end: End): Approach | null {
+  const p = peerAt(net, c, end);
+  if (!p) return null;
+  const { me, o } = p;
+  const other = o.corridor;
+  // Сосед открыт: готов, перестройка не начата — или у него свой реверс, но его участок отошёл от стыка на seamGap
+  // (там обе его половины под движением, есть где съехать на открытую половину c).
+  if (other.build && closureOf(other.build) !== 'old') {
+    if (!reversing(other)) return null;
+    const z = seamZone(net, other, other.build);
+    if ((o.end === 'a' ? z[0] : other.length - z[1]) < seamGap(other) - 1e-6) return null;
+  }
+  const far = net.nodes.get(o.end === 'a' ? other.b : other.a);
+  const twice = !!far && far.corridors.some((id) => id !== other.id && reversing(net.corridors.get(id)));
+  if (other.length < approachLen(other) * (twice ? 2 : 1)) return null;
+  return { corridor: other, end: o.end, k: (me.along * o.along) as 1 | -1, base: (me.port - o.port) * o.along };
+}
+
+/** Конец end полотна c — стык ровно двух полотен (прямое продолжение): концы c и соседа в нём; иначе null. */
+function peerAt(net: LaneNet, c: Corridor, end: End): { me: CorridorEnd; o: CorridorEnd } | null {
   const n = net.nodes.get(end === 'a' ? c.a : c.b);
   if (!n || n.kind !== 'seam' || net.isDeadEnd(n)) return null;
   const ends = net.ends(n);
@@ -242,12 +262,126 @@ export function approachAt(net: LaneNet, c: Corridor, end: End): Approach | null
   const me = ends.find((e) => e.corridor.id === c.id && e.end === end);
   const o = ends.find((e) => e !== me);
   if (!me || !o || o.corridor.id === c.id || o.side === me.side) return null;
-  const other = o.corridor;
-  if (other.build && closureOf(other.build) !== 'old') return null;
-  const far = net.nodes.get(o.end === 'a' ? other.b : other.a);
-  const twice = !!far && far.corridors.some((id) => id !== other.id && reversing(net.corridors.get(id)));
-  if (other.length < approachLen(other) * (twice ? 2 : 1)) return null;
-  return { corridor: other, end: o.end, k: (me.along * o.along) as 1 | -1, base: (me.port - o.port) * o.along };
+  return { me, o };
+}
+
+// ---------- Стык двух реверсов: соседние перестраиваемые куски узкой дороги ----------
+//
+// Каждый кусок (полотно) перекладывает первым проходом правую по ходу своей бригады половину. Бригады соседних кусков
+// (два проекта или два фронта) заходят с разных концов — и у общего стыка открытые половины разные: у одного под
+// движением северная, у другого южная. Пока участок под реверсом дошёл до стыка только у одного, у другого там обе
+// половины открыты — съезд на открытую половину на нём (approachAt). Дошли оба — полосы в стыке не сходятся ни в одну
+// сторону: дорога перекрыта целиком (отчёт 0.2.131). Поэтому стык — у одного: «занимает» его кусок, чей участок дошёл
+// до стыка первым; второй до него не доходит (бригада ждёт за seamGap, seamWait) и не разворачивается там, а его
+// участок под реверсом у стыка кончается раньше (seamZone) — там обе его половины под движением.
+
+/** Участок под реверсом полотна c со стройкой b, как его считает reverseZone; реверса нет — null. */
+function rawZone(net: LaneNet, c: Corridor, b: CorridorBuild | undefined): [number, number] | null {
+  if (!b || closureOf(b) !== 'part' || !laneWise(b)) return null;
+  return reverseZone(c, b, endCuts(net, c));
+}
+
+/** Участок под реверсом полотна c со стройкой b дошёл до его конца end. */
+function claims(net: LaneNet, c: Corridor, b: CorridorBuild | undefined, end: End): boolean {
+  const z = rawZone(net, c, b);
+  return !!z && (end === 'a' ? z[0] <= 0 : z[1] >= c.length);
+}
+
+/** Насколько разрытое нынешнего прохода (от разметки до отсыпки, с запасом 5 м) отстоит от конца end полотна c, м. */
+function dugFrom(c: Corridor, b: CorridorBuild, end: End): number {
+  const L = c.length;
+  const st = b.stages ?? [0, 0, 0];
+  const along = (x: number) => (b.fromB ? L - Math.max(0, Math.min(L, x)) : Math.max(0, Math.min(L, x)));
+  const t0 = Math.min(along(st[2]), along(st[0]));
+  const t1 = Math.max(along(st[2]), along(st[0]));
+  return (end === 'a' ? t0 : L - t1) - 5;
+}
+
+/**
+ * Сколько места у стыка нужно куску c под реверсом, чтобы сосед, чей участок дошёл до стыка, съезжал на открытую
+ * половину на нём (approachAt): заход участка соседа (REACH), съезд с отгоном (approachLanes — по классу полотна в
+ * стройке), отгон своей перекладываемой половины перед своим участком и место под машину.
+ */
+export function seamGap(c: Corridor): number {
+  return REACH + taperLen(c.cls) / 2 + taperLen(c.build?.was?.cls ?? c.cls) / 2 + 15;
+}
+
+/**
+ * Сосед за стыком на конце end полотна c (со стройкой b), который этот стык занимает: его участок под реверсом дошёл
+ * до стыка, а у c — нет, или дошёл у обоих (старое сохранение) и c уступает: у него готово меньше доли (поровну —
+ * у кого номер больше). Нет такого — null.
+ */
+export function seamHolder(net: LaneNet, c: Corridor, b: CorridorBuild, end: End): Corridor | null {
+  const p = peerAt(net, c, end);
+  const other = p?.o.corridor;
+  if (!p || !other?.build || !claims(net, other, other.build, p.o.end)) return null;
+  if (claims(net, c, b, end)) {
+    const d = other.build.done / other.length - b.done / c.length;
+    if (d < -1e-9 || (Math.abs(d) <= 1e-9 && c.id < other.id)) return null;
+  }
+  return other;
+}
+
+/**
+ * Участок под реверсом полотна c со стройкой b с учётом стыков (reverseZone — по своим кускам): у стыка, который
+ * занял сосед (seamHolder), участок кончается не ближе seamGap к нему (там сосед съезжает на открытую половину c) — но
+ * не поверх разрытого; дошёл и до стыка (старое сохранение) — хотя бы за zoneMargin: обе половины у стыка под
+ * движением, проезд в одну сторону есть всегда. Места на это нет (короткий кусок) — как reverseZone.
+ */
+export function seamZone(net: LaneNet, c: Corridor, b: CorridorBuild): [number, number] {
+  const z = reverseZone(c, b, endCuts(net, c));
+  const L = c.length;
+  const gap = seamGap(c);
+  const m = zoneMargin(b);
+  let [z0, z1] = z;
+  if (seamHolder(net, c, b, 'a')) z0 = Math.max(z0, Math.min(gap, Math.max(m, dugFrom(c, b, 'a'))));
+  if (seamHolder(net, c, b, 'b')) z1 = Math.min(z1, L - Math.min(gap, Math.max(m, dugFrom(c, b, 'b'))));
+  return z1 - z0 >= 10 ? [z0, z1] : z;
+}
+
+/**
+ * Очередь куска k со стройкой b к стыку на его конце end: участок под реверсом дошёл до стыка — [0, −доля готового]
+ * (у кого готово больше — тот первый, как в seamHolder); разрытое ближе seamGap к стыку — [1, сколько до него]; дальше
+ * (или реверса нет) — null: к стыку не подошёл.
+ */
+function seamKey(net: LaneNet, k: Corridor, b: CorridorBuild | undefined, end: End): [number, number] | null {
+  if (!b || closureOf(b) !== 'part' || !laneWise(b)) return null;
+  if (claims(net, k, b, end)) return [0, -b.done / k.length];
+  const d = dugFrom(k, b, end);
+  return d < seamGap(k) ? [1, d] : null;
+}
+
+/** Ключ p (кусок pid) в очереди к стыку раньше q (кусок qid): по ключу, поровну — у кого номер меньше. */
+function ahead(p: [number, number], q: [number, number], pid: number, qid: number): boolean {
+  if (p[0] !== q[0]) return p[0] < q[0];
+  if (Math.abs(p[1] - q[1]) > 1e-9) return p[1] < q[1];
+  return pid < qid;
+}
+
+/**
+ * Бригада на полотне c (реверс) не делает шаг от стройки b к next: у стыка на каком-нибудь конце уже сосед со своим
+ * реверсом (seamKey: его разрытое ближе seamGap к стыку или участок дошёл до стыка) и он в очереди к стыку раньше, а
+ * шаг привёл бы разрытое c ближе seamGap к стыку (или участок — к самому стыку). Подошли к стыку оба разом (старое
+ * сохранение) — ждёт тот, кто в очереди позже. От стыка уходить можно, если участок до него уже не доходит. Так у
+ * стыка разрыт один кусок, а у другого там обе половины под движением — на него съезжают на открытую половину
+ * (approachAt), проезд в обе стороны.
+ */
+export function seamWait(net: LaneNet, c: Corridor, b: CorridorBuild, next: CorridorBuild): boolean {
+  if (!laneWise(next)) return false;
+  for (const end of ['a', 'b'] as const) {
+    const p = peerAt(net, c, end);
+    const other = p?.o.corridor;
+    const ky = p && other ? seamKey(net, other, other.build, p.o.end) : null;
+    if (!ky || !other) continue;
+    const kc = seamKey(net, c, b, end);
+    if (kc && ahead(kc, ky, c.id, other.id)) continue;
+    const at = claims(net, c, next, end);
+    const d1 = dugFrom(c, next, end);
+    if (!at && d1 >= seamGap(c)) continue;
+    const d0 = closureOf(b) === 'part' ? dugFrom(c, b, end) : Infinity;
+    if (at || d1 < d0 - 1e-6) return true;
+  }
+  return false;
 }
 
 /**
@@ -263,7 +397,8 @@ export interface ReverseSite {
 }
 
 export function reverseSite(net: LaneNet, c: Corridor, b: CorridorBuild): ReverseSite {
-  const z = reverseZone(c, b, endCuts(net, c));
+  // У стыка, который занял соседний кусок со своим реверсом, участок кончается раньше (seamZone).
+  const z = seamZone(net, c, b);
   const reach: [Approach | null, Approach | null] = [z[0] <= 0 ? approachAt(net, c, 'a') : null, z[1] >= c.length ? approachAt(net, c, 'b') : null];
   const zone: [number, number] = [reach[0] ? -REACH : z[0], reach[1] ? c.length + REACH : z[1]];
   return { zone, stops: reverseStops(c, b, zone, reach), reach };

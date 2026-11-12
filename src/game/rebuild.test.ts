@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CONSTRUCTION } from '../config';
 import { dot, rightNormal, sub, type Vec } from '../core/vec';
-import { closureOf, endCuts, keptLanes, reverseZone, workSide } from '../lanes/closure';
+import { closureOf, endCuts, keptLanes, reverseSite, reverseZone, seamHolder, workSide } from '../lanes/closure';
 import { type RoadOptions, splitBuild } from '../lanes/edit';
 import { type Corridor, type CorridorWas, oneWay, twoWay } from '../lanes/model';
 import type { Vehicle } from '../sim/vehicle';
@@ -630,5 +630,145 @@ describe('Перестройка «с проездом»: участок под 
     expect(sent.length).toBeGreaterThan(40);
     expect(hits).toEqual([]);
     expect(sent.filter((id) => game.traffic.vehicles.has(id))).toEqual([]);
+  });
+});
+
+describe('Перестройка «с проездом»: два соседних куска, две бригады навстречу (отчёт 0.2.131)', () => {
+  const reach = CONSTRUCTION.reach;
+  beforeEach(() => {
+    CONSTRUCTION.reach = 1e12;
+  });
+  afterEach(() => {
+    CONSTRUCTION.reach = reach;
+  });
+  const CAR = { kind: 'car' as const, length: 5, width: 2, maxSpeed: 60, accel: 10, color: '#fff' };
+
+  /**
+   * Улица 1+1 из двух полотен по 300 м (стык посередине), подъезды с обоих концов, у каждого конца — своя база с одной
+   * бригадой. Ответ — полотна (запад, восток) и узлы подъездов.
+   */
+  function twoPieces(game: Game) {
+    const at = freeSpot(game, 600);
+    const P = (dx: number) => ({ x: at.x + dx, y: at.y });
+    expect(road(game, { free: P(-90) }, { free: P(0) })).toBe(true);
+    expect(road(game, nodeAt(game, P(0))!, { free: P(300) })).toBe(true);
+    expect(road(game, nodeAt(game, P(300))!, { free: P(600) })).toBe(true);
+    expect(road(game, nodeAt(game, P(600))!, { free: P(690) })).toBe(true);
+    const gate = nodeAt(game, P(-90))!;
+    const far = nodeAt(game, P(690))!;
+    const crews = game.construction.crews;
+    for (const [id, node, dy] of [
+      [990_001, gate, 40],
+      [990_002, far, -40],
+    ] as const) {
+      const p = game.roads.net.node(node).pos;
+      crews.bases.set(id, { type: 'base', id, fp: { center: { x: p.x, y: p.y + dy }, w: 36, h: 24, angle: 0 }, nodeId: node });
+      crews.hire(id);
+    }
+    const near = (x: number) => [...game.roads.net.corridors.values()].find((k) => Math.hypot(k.lut.pointAt(k.length / 2).x - x, k.lut.pointAt(k.length / 2).y - at.y) < 2)!;
+    const west = near(at.x + 150);
+    const east = near(at.x + 450);
+    expect(west && east).toBeTruthy();
+    expect(game.roads.net.node(west.b).kind).toBe('seam');
+    expect(west.b).toBe(east.a);
+    return { west, east, gate, far };
+  }
+
+  /** Полотна id — проектами по одному: каждое в проспект 2+2 «с проездом». */
+  function rebuildEach(game: Game, ids: number[]): number[] {
+    return ids.map((id) => {
+      expect(game.roadBuilder.apply(game.roadBuilder.rebuild(id, { cls: AVENUE.cls, lanes: AVENUE.lanes }))).toBe(true);
+      return live(game, id).build!.project;
+    });
+  }
+
+  /**
+   * До конца обеих перестроек: каждые 0,5 с — есть ли путь из конца в конец хоть в одну сторону (moments — когда нет);
+   * машины в обе стороны, где путь есть. both — была ли минута, когда работали обе бригады; met — участки под реверсом
+   * обоих кусков у стыка разом (так и перекрывалось целиком).
+   */
+  function run(game: Game, west: number, east: number, gate: number, far: number) {
+    const blocked: string[] = [];
+    const met: string[] = [];
+    const sent: number[] = [];
+    let both = false;
+    let oneWay = 0;
+    let ticks = 0;
+    for (let t = 0; t < 1500 && (live(game, west).build || live(game, east).build); t += 0.5) {
+      runSeconds(game, 0.5);
+      ticks++;
+      const ab = game.roads.route(gate, far);
+      const ba = game.roads.route(far, gate);
+      if (!ab && !ba) blocked.push(`t=${game.time.toFixed(1)}`);
+      else if (!ab || !ba) oneWay++;
+      const w = live(game, west);
+      const e = live(game, east);
+      if ((w.build?.done ?? 0) > 0 && (e.build?.done ?? 0) > 0 && game.construction.crews.working(w.build!.project).length && game.construction.crews.working(e.build!.project).length) both = true;
+      const zw = w.build && closureOf(w.build) === 'part' ? reverseSite(game.roads.net, w, w.build).zone : null;
+      const ze = e.build && closureOf(e.build) === 'part' ? reverseSite(game.roads.net, e, e.build).zone : null;
+      if (zw && ze && zw[1] >= w.length && ze[0] <= 0) met.push(`t=${game.time.toFixed(1)}`);
+      if (Math.round(t * 2) % 6 === 0) {
+        for (const [to, r] of [
+          [far, ab],
+          [gate, ba],
+        ] as const) {
+          const v = r && game.traffic.spawn({ ...CAR, targetNode: to, route: r });
+          if (v) sent.push(v.id);
+        }
+      }
+    }
+    for (let i = 0; i < 300 && sent.some((id) => game.traffic.vehicles.has(id)); i++) runSeconds(game, 1);
+    return { blocked, met, both, oneWay, ticks, sent };
+  }
+
+  it('бригады идут с разных концов к общему стыку: у стыка — только один реверс, дорога проезжая в каждый момент, обе стройки кончаются', () => {
+    const game = withoutCitizens(new Game({ ...WORLD, construction: 'build' }));
+    const { west, east, gate, far } = twoPieces(game);
+    const [pw, pe] = rebuildEach(game, [west.id, east.id]);
+    expect(pw).not.toBe(pe);
+    const r = run(game, west.id, east.id, gate, far);
+    expect(live(game, west.id).build).toBeUndefined();
+    expect(live(game, east.id).build).toBeUndefined();
+    // Работали обе разом (с разных баз), а не по очереди.
+    expect(r.both).toBe(true);
+    expect(r.met).toEqual([]);
+    expect(r.blocked).toEqual([]);
+    // Проезд в обе стороны — почти всё время: вторая бригада ждёт за seamGap от стыка, на её кусок съезжают на открытую
+    // половину первого.
+    expect(r.oneWay / r.ticks).toBeLessThan(0.05);
+    expect(r.sent.length).toBeGreaterThan(40);
+    expect(r.sent.filter((id) => game.traffic.vehicles.has(id))).toEqual([]);
+  });
+
+  it('сохранение, где оба куска уже разрыты у стыка (вторые проходы навстречу, разные половины): после загрузки проезд есть, стройки доходят до конца', () => {
+    const game = withoutCitizens(new Game({ ...WORLD, construction: 'build' }));
+    const { west, east, gate, far } = twoPieces(game);
+    rebuildEach(game, [west.id, east.id]);
+    // Как в отчёте: первые проходы кончились у стыка, вторые начались от него — у запада перекладывается северная
+    // половина, у востока южная; бригады уехали.
+    const w = live(game, west.id);
+    const e = live(game, east.id);
+    w.build = { ...w.build!, pass: 2, fromB: true, done: w.length / 2 + 2, stages: [10, 0, 0] };
+    e.build = { ...e.build!, pass: 2, done: e.length / 2, stages: [0, 0, 0] };
+    delete e.build.fromB;
+    expect(workSide(w.build)).not.toBe(workSide(e.build));
+    const save = JSON.parse(JSON.stringify(game.toSave()));
+    const loaded = withoutCitizens(new Game(save.settings, save));
+    const lw = live(loaded, west.id);
+    const le = live(loaded, east.id);
+    expect(lw.build?.pass).toBe(2);
+    expect(le.build?.pass).toBe(2);
+    // Стык занят одним: у второго участок под реверсом кончается раньше — там обе его половины под движением.
+    const zw = reverseSite(loaded.roads.net, lw, lw.build!).zone;
+    const ze = reverseSite(loaded.roads.net, le, le.build!).zone;
+    expect(zw[1] >= lw.length && ze[0] <= 0).toBe(false);
+    expect(seamHolder(loaded.roads.net, lw, lw.build!, 'b') ?? seamHolder(loaded.roads.net, le, le.build!, 'a')).toBeTruthy();
+    runSeconds(loaded, 0.5);
+    expect(loaded.roads.route(gate, far) ?? loaded.roads.route(far, gate)).toBeTruthy();
+    const r = run(loaded, west.id, east.id, gate, far);
+    expect(live(loaded, west.id).build).toBeUndefined();
+    expect(live(loaded, east.id).build).toBeUndefined();
+    expect(r.blocked).toEqual([]);
+    expect(r.met).toEqual([]);
   });
 });
