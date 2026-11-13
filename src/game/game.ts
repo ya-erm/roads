@@ -24,11 +24,11 @@ import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier'
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, insideRuns, splitCorridor } from '../lanes/edit';
-import { edgesAt } from '../lanes/geometry';
+import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { autoMainPair, mainPairOf } from '../lanes/graph';
 import { PhaseSpec, phaseTurnStates, specOf, turnClashes, type TurnState } from '../lanes/lights';
-import { Corridor, type CorridorBuild, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, twoWay } from '../lanes/model';
+import { Corridor, type CorridorBuild, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, taperLen, twoWay } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
 import type { LaneTraffic } from '../lanes/traffic';
 import { Leaving, RailSim, Train } from '../sim/rail';
@@ -542,14 +542,53 @@ export interface StationPlan {
   demolish?: number[];
   /** Станция вдоль дороги: узел — стык на улице, вдоль края — карман (Station.side). */
   side?: boolean;
+  /**
+   * Автовокзал у края улицы (Station.curb): сколько мест у перрона, с кармашком ли (хватило улицы), а если без —
+   * сколько улицы ему нужно было (need) и сколько есть (have), м между стоп-линиями перекрёстков.
+   */
+  curb?: { bays: number; pocket: boolean; need: number; have: number };
   /** Длина выезда, м от кромки дороги (у станции в конце выезда, не у грузового двора). */
   drivewayLen?: number;
 }
 
-/** Как ставить автостанцию или автовокзал: длина выезда (м от кромки дороги) или вдоль дороги с карманом. */
+/**
+ * Как ставить автостанцию или автовокзал: длина выезда (м от кромки дороги), вдоль дороги с карманом-дублёром (side)
+ * или у самого края улицы (curb, только автовокзал) — с curbBays местами у перрона.
+ */
 export interface RoadStationOptions {
   driveway?: number;
   side?: boolean;
+  curb?: boolean;
+  curbBays?: number;
+}
+
+/**
+ * Сколько улицы между перекрёстками нужно автовокзалу у края улицы на bays мест (с кармашком или без), если поперечные
+ * улицы — обычные 1+1: их стоп-линии — в полуширине улицы и запасе на скругление угла (~14,5 м) от узла.
+ */
+export function curbNeed(bays: number, pocket: boolean): number {
+  return Math.ceil(2 * curbLayout(bays, taperLen('street'), pocket).half + 2 * (LANE_W + ROAD_MARGIN + 6));
+}
+
+/** Машина стоит у станции прямо на улице (остановка, автовокзал у края улицы), а не заезжает на пост. */
+export const onRoadStop = (st: Pick<Station, 'kind' | 'curb'>) => st.kind === 'stop' || !!st.curb;
+
+/** Мест у перрона автовокзала у края улицы — в границах (1…STATION.curb.maxBays). */
+export function clampCurbBays(n: number): number {
+  return Math.max(1, Math.min(STATION.curb.maxBays, Math.round(n)));
+}
+
+/**
+ * Автовокзал у края улицы вдоль неё (м), отгон кармашка — taper: stand — длина мест (от узла станции до носа
+ * переднего автобуса), half — сколько улицы занято в каждую сторону от их середины, zone — где кармашек на полную
+ * ширину. С кармашком места — и на половинах отгонов (там полоса уже есть), без lead у начала и конца полосы.
+ */
+export function curbLayout(bays: number, taper: number, pocket: boolean): { stand: number; half: number; zone: number } {
+  const C = STATION.curb;
+  const S = clampCurbBays(bays) * C.berth;
+  if (!pocket) return { stand: S, half: S / 2 + C.clear, zone: 0 };
+  const zone = Math.max(4, S - taper + 2 * C.lead);
+  return { stand: zone + taper - 2 * C.lead, half: zone / 2 + taper, zone };
 }
 
 /** Длина выезда — в допустимых границах и с шагом STATION.drivewayRange. */
@@ -901,7 +940,7 @@ export class Game implements BuildContext {
     const to = line && this.stations.get(line.stops[v.stop]);
     // У остановки (стоит или доезжает до места) автобус тоже на дороге — уже за её узлом: цель — следующая
     // остановка, а стоит он там же, где был.
-    const onStop = (v.state === 'loading' || !!v.boarding) && to?.kind === 'stop';
+    const onStop = (v.state === 'loading' || !!v.boarding) && !!to && onRoadStop(to);
     if (m.mode !== 'road' || (v.state !== 'driving' && !onStop) || !line || !to) return null;
     const next = onStop ? this.stations.get(line.stops[(v.stop + 1) % line.stops.length]) : to;
     if (!next) return null;
@@ -4786,7 +4825,7 @@ export class Game implements BuildContext {
     }
     // Автобус у остановки стоит на дороге: ждать интервала — только в «кармашке» (его объезжают), не загораживая полосу.
     const standing = this.fleetSim(v);
-    if (st.kind === 'stop' && standing) return this.traffic.standsAside(standing);
+    if (onRoadStop(st) && standing) return this.traffic.standsAside(standing);
     // Новая машина ещё не на посту — никому не мешает.
     return !v.inBay || st.occupied.length < st.bays;
   }
@@ -4945,6 +4984,7 @@ export class Game implements BuildContext {
           continue;
         }
         this.traffic.release(standing);
+        this.curbSpots.delete(v.id);
         line.problem = null;
         this.recordDeparture(line, v);
         v.state = 'driving';
@@ -5291,7 +5331,7 @@ export class Game implements BuildContext {
     const v = this.fleetOf(sim);
     const line = v && this.lines.get(v.lineId);
     const st = line && this.stations.get(line.stops[v.stop]);
-    if (!v || st?.kind !== 'stop') return false;
+    if (!v || !st || !onRoadStop(st)) return false;
     // Стоит у неё (доезжает до места или посадка) — уже с маршрутом дальше; едет к ней — она и есть цель.
     return v.state === 'loading' || !!v.boarding || (v.state === 'driving' && st.nodeId === sim.targetNode);
   }
@@ -5304,7 +5344,8 @@ export class Game implements BuildContext {
     const v = this.fleetOf(sim);
     const line = v && this.lines.get(v.lineId);
     const st = line && this.stations.get(line.stops[v.stop]);
-    if (!v || !line || st?.kind !== 'stop' || st.nodeId !== sim.targetNode) return false;
+    if (!v || !line || !st || !onRoadStop(st) || st.nodeId !== sim.targetNode) return false;
+    if (st.curb) return this.curbDwell(sim, v, line, st);
     if (v.state === 'driving' && !v.boarding) {
       // Узел остановки — нос автобуса у её середины: проезжает ещё полкорпуса и встаёт центром напротив,
       // уже с маршрутом дальше (посадка начнётся, когда встанет — в updateFleet).
@@ -5318,6 +5359,70 @@ export class Game implements BuildContext {
       v.state = 'loading';
       this.handleStop(v, st, line);
     }
+    return true;
+  }
+
+  /** Куда встал (встаёт) нос автобуса у автовокзала у края улицы: метров от узла станции вдоль мест. */
+  private curbSpots = new Map<number, number>();
+
+  /** Вдоль мест автовокзала у края улицы (от узла станции к переднему месту) и сам узел. */
+  private curbAxis(st: Station): { node: Vec; dir: Vec } | null {
+    const node = this.roads.net.nodes.get(st.nodeId);
+    if (!node) return null;
+    const u = { x: Math.cos(st.fp.angle), y: Math.sin(st.fp.angle) };
+    return { node: node.pos, dir: dot(sub(st.fp.center, node.pos), u) >= 0 ? u : scale(u, -1) };
+  }
+
+  /**
+   * Автобусы у автовокзала у края улицы: кто встал или встаёт к перрону (посадка, доезжает до места) — нос (м от узла
+   * вдоль мест, curbSpots или где он сейчас) и длина.
+   */
+  private curbOccupants(st: Station, except?: number): { id: number; front: number; length: number }[] {
+    const ax = this.curbAxis(st);
+    if (!ax) return [];
+    const out: { id: number; front: number; length: number }[] = [];
+    for (const o of this.fleet.values()) {
+      if (o.id === except || (!o.boarding && o.state !== 'loading')) continue;
+      const line = this.lines.get(o.lineId);
+      const sim = line?.stops[o.stop] === st.id ? this.fleetSim(o) : undefined;
+      if (!sim) continue;
+      out.push({ id: o.id, front: this.curbSpots.get(o.id) ?? dot(sub(sim.pos, ax.node), ax.dir), length: sim.length });
+    }
+    return out;
+  }
+
+  /**
+   * Автобус у узла автовокзала у края улицы (у заднего края мест): есть место у перрона — проезжает к нему, вплотную за
+   * последним из стоящих (первый — к самому переднему месту), уже с маршрутом дальше; посадка — когда встанет
+   * (updateFleet). Мест нет (все bays заняты или за последним автобус не помещается) — ждёт здесь, у узла: за ним —
+   * в крайней полосе улицы, как за автобусом у остановки; у станции — значок «нет мест».
+   */
+  private curbDwell(sim: Vehicle, v: FleetVehicle, line: Line, st: Station): boolean {
+    if (v.state !== 'driving' || v.boarding) return true;
+    const ax = this.curbAxis(st);
+    if (!ax) return true;
+    // Места — вдоль площадки (без её концов): от back до front, м от узла; с кармашком узел — не у самого заднего края.
+    const stand = st.fp.w - 2 * STATION.curb.end;
+    const mid = dot(sub(st.fp.center, ax.node), ax.dir);
+    const back = mid - stand / 2;
+    const occ = this.curbOccupants(st, v.id);
+    const front = Math.min(mid + stand / 2, ...occ.map((o) => o.front - o.length - IDM.minGap));
+    const here = dot(sub(sim.pos, ax.node), ax.dir);
+    // Автобус чуть длиннее места (сочленённый) — может встать, на пару метров заехав за край мест назад.
+    if (occ.length >= st.bays || front < here || front - sim.length < back - 3) {
+      if (!this.bayWaitSince.has(v.id)) this.bayWaitSince.set(v.id, this.time);
+      return true;
+    }
+    this.bayWaitSince.delete(v.id);
+    const next = this.stations.get(line.stops[(v.stop + 1) % line.stops.length]);
+    if (next && next.id !== st.id && this.traffic.continueTo(sim, next.nodeId)) {
+      this.traffic.holdAfter(sim, front - here);
+      this.curbSpots.set(v.id, front);
+      v.boarding = true;
+      return true;
+    }
+    v.state = 'loading';
+    this.handleStop(v, st, line);
     return true;
   }
 
@@ -5436,7 +5541,8 @@ export class Game implements BuildContext {
       const sim = v.state === 'driving' ? this.fleetSim(v) : undefined;
       const st = sim && this.stations.get(line.stops[v.stop]);
       const gate = st && this.roads.net.nodes.get(st.nodeId);
-      if (!sim || !st || st.kind !== 'road' || !gate) continue;
+      // У автовокзала у края улицы автобус, что проезжает к своему месту, уже не ждёт.
+      if (!sim || !st || st.kind !== 'road' || !gate || v.boarding) continue;
       out.push({ station: st.id, line: line.id, blocked: this.bayWait(v) > 0, stopped: sim.v < 0.5, dist: dist(sim.pos, gate.pos) });
     }
     return out;
@@ -5451,7 +5557,13 @@ export class Game implements BuildContext {
     const ids = new Set([...list.map((a) => a.station), ...this.jams.keys()]);
     for (const id of ids) {
       const st = this.stations.get(id);
-      const full = !!st && (st.kind === 'rail' ? st.platforms.every((p) => this.rail.isReserved(p)) : st.occupied.length >= st.bays);
+      const full =
+        !!st &&
+        (st.kind === 'rail'
+          ? st.platforms.every((p) => this.rail.isReserved(p))
+          : st.curb
+            ? list.some((a) => a.station === st.id && a.blocked)
+            : st.occupied.length >= st.bays);
       const jam = nextJam(this.jams.get(id), full, queuedAt(list, id), this.time);
       if (jam) this.jams.set(id, jam);
       else this.jams.delete(id);
@@ -7121,6 +7233,7 @@ export class Game implements BuildContext {
   ): StationPlan {
     if (kind === 'rail') return this.railStationPlan(p, snapRadius, angle, clampRailTracks(tracks), clampRailLength(platform), terminal);
     if (kind === 'stop') return this.stopPlan(p, snapRadius);
+    if (road.curb) return this.curbStationPlan(p, snapRadius, road.curbBays ?? STATION.curb.bays);
     if (road.side) return this.sideStationPlan(p, snapRadius);
     const len = clampDriveway(road.driveway ?? STATION.driveway);
     // Нельзя — силуэт станции всё равно показываем, красным.
@@ -7170,6 +7283,12 @@ export class Game implements BuildContext {
     from: number;
     to: number;
     clear: [number, number];
+    /** От узла на конце улицы до стоп-линии перекрёстка там (у тупика — 0), у from и у to. */
+    stop: [number, number];
+    /** Узлы на концах улицы: у from и у to. */
+    ends: [number, number];
+    /** Полотна улицы по порядку: где начинается (u0), длина и идёт ли по направлению c (fwd). */
+    pieces: { id: number; u0: number; length: number; fwd: boolean }[];
     at(u: number): { pos: Vec; t: Vec; edges: [number, number] | null };
   } {
     const net = this.roads.net;
@@ -7254,7 +7373,23 @@ export class Game implements BuildContext {
         edges: e && (piece.fwd ? e : ([-e[1], -e[0]] as [number, number])),
       };
     };
-    return { from, to, clear: [clear(head, false), clear(tail, true)], at };
+    // Стоп-линия у перекрёстка на конце улицы (nodeCuts): от узла до неё; у тупика и прочих узлов — 0.
+    const stop = (end: { piece: { c: Corridor }; node: number }): number => {
+      const nd = net.node(end.node);
+      if (nd.kind !== 'junction') return 0;
+      const ends = net.ends(nd);
+      const i = ends.findIndex((e) => e.corridor.id === end.piece.c.id && e.node.id === nd.id);
+      return i >= 0 ? (nodeCuts(net, nd, ends)[i] ?? 0) : 0;
+    };
+    return {
+      from,
+      to,
+      clear: [clear(head, false), clear(tail, true)],
+      stop: [stop(head), stop(tail)],
+      ends: [head.node, tail.node],
+      pieces: pieces.map((x) => ({ id: x.c.id, u0: x.u0, length: x.c.length, fwd: x.fwd })),
+      at,
+    };
   }
 
   /**
@@ -7337,6 +7472,130 @@ export class Game implements BuildContext {
     });
     const cost = plan.cost + COST.station + this.demolishTotal(under.houses);
     const done = { cost, fp, driveway: plan, nodePos: N, demolish: under.houses, side: true };
+    if (!plan.ok) return { ...done, ok: false, reason: plan.reason ?? 'Нельзя поставить' };
+    if (cost > this.budget) return { ...done, ok: false, reason: 'Не хватает денег' };
+    return { ...done, ok: true };
+  }
+
+  /**
+   * Автовокзал у края улицы (Station.curb, числа — STATION.curb): перрон с навесом вплотную к бордюру со стороны
+   * курсора, автобусы встают у него прямо на улице, друг за другом носом по ходу движения этого края. Хватает улицы
+   * между стоп-линиями перекрёстков — вдоль мест кармашек (полоса у края с отгонами, curbLayout), нет — места в крайней
+   * полосе, как у остановки. Узел станции — стык на улице у заднего края мест: сюда маршрут ведёт автобус, отсюда он
+   * проезжает к своему месту (curbDwell). Стыки посреди улицы не мешают — кармашек ложится на соседние полотна; курсор
+   * у перекрёстка сдвигает площадку вдоль улицы. Не на односторонней улице против движения и не рядом с другой
+   * станцией или остановкой.
+   */
+  private curbStationPlan(p: Vec, snapRadius: number, bays: number): StationPlan {
+    const C = STATION.curb;
+    const k = clampCurbBays(bays);
+    const cost0 = COST.station + Math.max(0, k - STATION.bays) * STATION.bayCost;
+    const size = { w: k * C.berth + 2 * C.end, h: C.depth };
+    const fail = (reason: string, fp: Footprint | null = null, curb?: StationPlan['curb']): StationPlan => ({ ok: false, reason, cost: cost0, fp, ...(curb ? { curb } : {}) });
+    const hit = this.streetNear(p, Math.max(40, snapRadius));
+    if (!hit) return fail('Поставьте у края улицы', this.looseFootprint(p, size));
+    const c = hit.seg;
+    const net = this.roads.net;
+    const line = this.streetLine(c);
+    const T = taperLen(c.cls);
+    // Отступ от конца улицы: у перекрёстка — до его стоп-линии, у тупика и прочих узлов — MIN_SEGMENT_LEN.
+    const end = (i: 0 | 1) => (net.node(line.ends[i]).kind === 'junction' ? line.stop[i] : MIN_SEGMENT_LEN);
+    const room = line.to - line.from - end(0) - end(1);
+    const have = line.to - line.from;
+    const withPocket = curbLayout(k, T, true);
+    const plain = curbLayout(k, T, false);
+    const pocket = 2 * withPocket.half <= room;
+    const lay = pocket ? withPocket : plain;
+    const curb = { bays: k, pocket, need: Math.ceil(2 * withPocket.half + end(0) + end(1)), have: Math.floor(have) };
+    // Сторона улицы — со стороны курсора: 1 — справа от a→b полотна c; места — по ходу полос у этого края.
+    const right = dot(normalTowards(c, hit.s, p), rightNormal(c.lut.tangentAt(hit.s))) > 0 ? 1 : -1;
+    const along = right;
+    // Середина мест (u вдоль улицы) — у курсора, но не ближе half к концам улицы.
+    const lo = line.from + end(0) + lay.half;
+    const hi = line.to - end(1) - lay.half;
+    const fits = hi >= lo;
+    // Кармашек — на стольких-то полотнах улицы; стык между ними не должен попасть на отгон (там полоса сужается), а
+    // узел станции — вплотную к стыку: сдвигаем середину мест на ближайшее место, где так.
+    const seams = line.pieces.slice(1).map((x) => x.u0);
+    // Узел — у заднего края мест; с кармашком — в начале его полной ширины (стык не режет отгон), задний автобус
+    // встаёт и за узлом, на половине отгона.
+    const back = pocket ? lay.zone / 2 - 1 : lay.stand / 2;
+    const usable = (m: number): boolean => {
+      const uN = m - along * back;
+      if (seams.some((b) => Math.abs(b - uN) < 3)) return false;
+      if (!pocket) return true;
+      const a = m - lay.half;
+      const b = m + lay.half;
+      return !seams.some((x) => (x > a - 1 && x < a + T + 1) || (x > b - T - 1 && x < b + 1));
+    };
+    let u = fits ? Math.min(Math.max(hit.s, lo), hi) : hit.s;
+    if (fits && !usable(u)) {
+      const alt = [...Array(40).keys()].flatMap((i) => [u + (i + 1), u - (i + 1)]).find((m) => m >= lo && m <= hi && usable(m));
+      if (alt !== undefined) u = alt;
+    }
+    const here = line.at(u);
+    const t = here.t;
+    const n = scale(rightNormal(t), right);
+    const edges = here.edges ?? [-LANE_W, LANE_W];
+    const edge = (right > 0 ? edges[1] : -edges[0]) + ROAD_MARGIN;
+    const fp: Footprint = {
+      center: add(here.pos, scale(n, edge + (pocket ? LANE_W : 0) + C.depth / 2)),
+      w: lay.stand + 2 * C.end,
+      h: C.depth,
+      angle: Math.atan2(t.y, t.x),
+    };
+    if (!c.lanes.some((l) => l.flow === along)) return fail('Улица здесь — в другую сторону', fp, curb);
+    if (!fits) return fail(`Мало места вдоль улицы: нужно ${Math.ceil(2 * plain.half + end(0) + end(1))} м между перекрёстками, здесь ${Math.floor(have)} м`, fp, curb);
+    if (!usable(u)) return fail('Мешает стык улицы — сдвиньте вдоль неё', fp, curb);
+    for (const st of this.stations.values()) {
+      if (st.id === this.movingStation || st.kind === 'rail') continue;
+      if (dist(st.fp.center, fp.center) < (fp.w + st.fp.w) / 2 + STOP.gap) return fail(st.kind === 'stop' ? 'Рядом уже есть остановка' : 'Рядом уже есть станция', fp, curb);
+    }
+    if (!this.inBounds(fp.center, 30)) return fail('За краем карты', fp, curb);
+    if (this.isWater(fp.center, footprintRadius(fp))) return fail('Мешает вода', fp, curb);
+    const under = this.structuresUnder(fp, 1);
+    if (under.blocker) return fail(under.blocker, fp, curb);
+    // Площадка вплотную к бордюру своей улицы: её кромку у улицы не проверяем.
+    const road = this.roadUnder({ ...fp, center: add(fp.center, scale(n, 0.75)), h: fp.h - 1.5 }, 0.5);
+    if (road) return fail(road, fp, curb);
+    const uN = u - along * back;
+    const atNode = line.at(uN);
+    const nodePos = atNode.pos;
+    const plan = this.roadBuilder.plan((nn) => {
+      if (pocket) {
+        // Полоса кармашка — у внешней кромки этого края на каждом полотне под ним: полная ширина — между отгонами.
+        const zone = [u - lay.half + T, u + lay.half - T];
+        for (const pc of line.pieces) {
+          const p0 = pc.u0;
+          const p1 = pc.u0 + pc.length;
+          if (p1 <= u - lay.half + 0.5 || p0 >= u + lay.half - 0.5) continue;
+          const x = nn.corridor(pc.id);
+          const sideC = pc.fwd ? right : -right;
+          const flow = (pc.fwd ? along : -along) as 1 | -1;
+          const outer = sideC > 0 ? Math.max(...x.lanes.map((l) => l.offset)) : Math.min(...x.lanes.map((l) => l.offset));
+          const local = (q: number) => (pc.fwd ? q - p0 : pc.length - (q - p0));
+          const a = local(Math.max(zone[0], p0));
+          const b = local(Math.min(zone[1], p1));
+          let from = Math.min(a, b);
+          let to = Math.max(a, b);
+          // Полоса продолжается за стыком — до него без отгона.
+          const atStart = zone[0] <= p0 + 0.01;
+          const atEnd = zone[1] >= p1 - 0.01;
+          if (pc.fwd ? atStart : atEnd) from = 0;
+          if (pc.fwd ? atEnd : atStart) to = Infinity;
+          nn.setLanes(x, [...x.lanes, { offset: outer + sideC * LANE_W, flow, from, to }]);
+        }
+      }
+      // Узел станции — стык у заднего края мест.
+      const pc = line.pieces.find((x) => uN >= x.u0 && uN <= x.u0 + x.length);
+      if (!pc) return false;
+      const s = pc.fwd ? uN - pc.u0 : pc.length - (uN - pc.u0);
+      const { node } = splitCorridor(nn, nn.corridor(pc.id), s, 'seam');
+      // К автовокзалу автобусы подъезжают только по своей половине улицы — к перрону.
+      node.arrive = dot(node.dir, atNode.t) * along > 0 ? 1 : -1;
+    });
+    const cost = plan.cost + cost0 + this.demolishTotal(under.houses.filter((id) => !plan.demolish.includes(id)));
+    const done = { cost, fp, driveway: plan, nodePos, demolish: under.houses.filter((id) => !plan.demolish.includes(id)), curb };
     if (!plan.ok) return { ...done, ok: false, reason: plan.reason ?? 'Нельзя поставить' };
     if (cost > this.budget) return { ...done, ok: false, reason: 'Не хватает денег' };
     return { ...done, ok: true };
@@ -7514,7 +7773,7 @@ export class Game implements BuildContext {
       if (!platforms.length) return null;
       this.spend(plan.cost - (before - this.money));
     } else {
-      if (kind === 'road' && !plan.side && plan.driveway?.net && plan.nodePos) keepMainRoad(plan.driveway.net, plan.nodePos);
+      if (kind === 'road' && !plan.side && !plan.curb && plan.driveway?.net && plan.nodePos) keepMainRoad(plan.driveway.net, plan.nodePos);
       if (!plan.driveway || !plan.nodePos || !this.roadBuilder.apply(plan.driveway)) return null;
       // Узел станции — тупик выезда (у остановки и станции вдоль дороги — стык посреди улицы).
       const node = this.roads.net.nodesNear(plan.nodePos, 2)[0];
@@ -7542,13 +7801,14 @@ export class Game implements BuildContext {
       platforms,
       ...(plan.rail?.terminal ? { terminal: true } : {}),
       ...(plan.side ? { side: true } : {}),
+      ...(plan.curb ? { curb: { pocket: plan.curb.pocket } } : {}),
       ...(plan.drivewayLen !== undefined ? { driveway: plan.drivewayLen } : {}),
       serves: given,
       industryId: ind?.id ?? null,
       cargo: {},
       passengers: new Map(),
       occupied: [],
-      bays: plan.rail ? platforms.length : kind === 'stop' ? STOP.bays : STATION.bays,
+      bays: plan.rail ? platforms.length : kind === 'stop' ? STOP.bays : (plan.curb?.bays ?? STATION.bays),
       townIds: [],
       industryIds: [],
       accepts: new Set(),
@@ -7719,7 +7979,7 @@ export class Game implements BuildContext {
     }
     // Выезд станции сносится вместе с ней; у станции вдоль дороги выезда нет — улица и карман остаются.
     const node = this.roads.net.nodes.get(st.nodeId);
-    if (node?.corridors.length && !st.side) {
+    if (node?.corridors.length && !st.side && !st.curb) {
       const plan = this.roadBuilder.bulldoze([...node.corridors]);
       if (plan.net) this.roadBuilder.apply({ ...plan, ok: true });
     }
@@ -7744,7 +8004,7 @@ export class Game implements BuildContext {
     if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null, refund: 0 };
     if (st.kind === 'rail') return this.railMovePlan(st, p, snapRadius, rail);
     // Как стояла, так и встанет: вдоль дороги или в конце выезда той же длины.
-    const road: RoadStationOptions = st.side ? { side: true } : { driveway: st.driveway ?? STATION.driveway };
+    const road: RoadStationOptions = st.curb ? { curb: true, curbBays: st.bays } : st.side ? { side: true } : { driveway: st.driveway ?? STATION.driveway };
     return this.relocatePlan(st, () => this.stationPlan(p, snapRadius, st.kind, 0, 2, RAIL_STATION.platform, false, road));
   }
 
@@ -7756,7 +8016,7 @@ export class Game implements BuildContext {
     const st = this.stations.get(id);
     const none = (reason: string): StationPlan & { refund: number } => ({ ok: false, reason, cost: 0, fp: st?.fp ?? null, refund: 0 });
     if (!st || st.kind !== 'road') return none('Выезд есть только у автостанции');
-    if (st.side) return none('Станция вдоль дороги — без выезда');
+    if (st.side || st.curb) return none('Станция вдоль дороги — без выезда');
     if (st.industryId !== null) return none('Грузовой двор стоит вплотную к предприятию');
     const net = this.roads.net;
     const node = net.nodes.get(st.nodeId);
@@ -7794,7 +8054,7 @@ export class Game implements BuildContext {
    * без полуширины дороги, к которой он примыкает). Выезда нет (вдоль дороги, грузовой двор) — null.
    */
   stationDrivewayLen(st: Station): number | null {
-    if (st.kind !== 'road' || st.side || st.industryId !== null) return null;
+    if (st.kind !== 'road' || st.side || st.curb || st.industryId !== null) return null;
     if (st.driveway !== undefined) return st.driveway;
     const net = this.roads.net;
     const node = net.nodes.get(st.nodeId);
@@ -7822,7 +8082,7 @@ export class Game implements BuildContext {
    */
   private relocatePlan(st: Station, make: () => StationPlan, keep = false): StationPlan & { refund: number; keep?: boolean } {
     const node = this.roads.net.nodes.get(st.nodeId);
-    const old = st.kind === 'road' && !st.side && node?.corridors.length ? this.roadBuilder.bulldoze([...node.corridors]) : null;
+    const old = st.kind === 'road' && !st.side && !st.curb && node?.corridors.length ? this.roadBuilder.bulldoze([...node.corridors]) : null;
     const base = st.kind === 'stop' ? STOP.cost : COST.station;
     // Возврат: старая станция (без добавленных постов — они переезжают вместе с ней) и её выезд.
     let refund = Math.round((base + (old?.refund ?? 0)) * COST.refundRatio);
@@ -7845,7 +8105,7 @@ export class Game implements BuildContext {
       let fp = plan.fp;
       const demolish = [...(plan.demolish ?? [])];
       // Добавленные посты переезжают вместе со станцией: площадка шире — дома под ней сносим, прочее мешает.
-      const extra = st.kind === 'road' ? (st.bays - STATION.bays) * STATION.bayWidth + (st.depots ?? 0) * STORAGE.width : 0;
+      const extra = st.kind === 'road' && !st.curb ? (st.bays - STATION.bays) * STATION.bayWidth + (st.depots ?? 0) * STORAGE.width : 0;
       if (extra) {
         fp = { ...fp, w: fp.w + extra };
         const own = plan.industryId !== undefined ? this.industries.find((i) => i.id === plan.industryId) : undefined;
@@ -7895,7 +8155,7 @@ export class Game implements BuildContext {
     }
     this.index.remove(st);
     // Новая сеть — без старого выезда, с новым (или со стыком остановки на новой улице); дома под выездом сносит строитель.
-    if (st.kind === 'road' && !plan.side) keepMainRoad(plan.driveway.net, plan.nodePos);
+    if (st.kind === 'road' && !plan.side && !plan.curb) keepMainRoad(plan.driveway.net, plan.nodePos);
     if (!this.roadBuilder.apply(plan.driveway)) {
       this.index.add(st);
       return 'Нельзя перенести';
@@ -7913,6 +8173,7 @@ export class Game implements BuildContext {
     st.fp = plan.fp;
     st.nodeId = node.id;
     st.industryId = plan.industryId ?? null;
+    if (plan.curb) st.curb = { pocket: plan.curb.pocket };
     if (plan.drivewayLen !== undefined) st.driveway = plan.drivewayLen;
     this.index.add(st);
     this.computeCatchment(st);
@@ -8226,6 +8487,7 @@ export class Game implements BuildContext {
     if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null };
     if (st.kind === 'rail') return { ok: false, reason: 'У ж/д станции столько постов, сколько платформ', cost: 0, fp: st.fp };
     if (st.kind === 'stop') return { ok: false, reason: `У остановки ${STOP.bays} места для автобусов`, cost: 0, fp: st.fp };
+    if (st.curb) return { ok: false, reason: `Мест у края улицы — ${st.bays}: их выбирают при постановке (или переставьте вокзал)`, cost: 0, fp: st.fp };
     const n = Math.round(bays);
     const extra = n - st.bays;
     const fp: Footprint = { ...st.fp, w: st.fp.w + extra * STATION.bayWidth };
@@ -8868,7 +9130,8 @@ export class Game implements BuildContext {
    * (том, что окрашен под неё, — bayLayout) носом к зданию, а та, что ещё заезжает, — там, где она на заезде.
    */
   bayLooks(st: Station): VehicleLook[] {
-    if (st.kind !== 'road') return [];
+    // У автовокзала у края улицы автобусы стоят на самой улице — их рисует движение.
+    if (st.kind !== 'road' || st.curb) return [];
     const gate = this.roads.net.nodes.get(st.nodeId);
     const front = gate ? bayFront(st.fp, gate.pos) : 1;
     const area = this.bayArea(st);
@@ -8891,6 +9154,12 @@ export class Game implements BuildContext {
    */
   private bayLayout(st: Station): (number | null)[] {
     const out: (number | null)[] = Array.from({ length: st.bays }, () => null);
+    if (st.curb) {
+      // У края улицы — по порядку от переднего места: кто встал или встаёт к перрону.
+      const occ = this.curbOccupants(st).sort((a, b) => b.front - a.front);
+      occ.slice(0, st.bays).forEach((o, i) => (out[i] = o.id));
+      return out;
+    }
     const rest: number[] = [];
     for (const id of st.occupied) {
       const bay = this.fleet.get(id)?.bay;

@@ -5,7 +5,7 @@ import { CurveLUT, minRadius, offsetCubic, straightCubic } from '../core/bezier'
 import { add, angleOf, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { DrawMode, NetKind, RoadRequest, Snap } from '../game/build';
 import { DEFAULT_RING, type RingOptions, type RingSize } from '../game/roads';
-import { type AreaContents, clampDriveway, type Game, type LaneEnd, type PastePlan, type RoadStationOptions, type StationKind } from '../game/game';
+import { type AreaContents, clampCurbBays, clampDriveway, type Game, type LaneEnd, type PastePlan, type RoadStationOptions, type StationKind } from '../game/game';
 import { snapRails } from '../game/railFragment';
 import { type Beside, besideGhost, besideRun, besideTrack } from '../game/railEdit';
 import type { NetEdit, RoadPlan } from '../game/roadbuild';
@@ -223,6 +223,10 @@ export class Controller {
   stationTerminal = false;
   /** Автостанция и автовокзал — вдоль дороги, с карманом (иначе — в конце выезда). */
   stationSide = false;
+  /** Автовокзал — у самого края улицы, перрон вплотную к бордюру (Station.curb); у автостанции не бывает. */
+  stationCurb = false;
+  /** Сколько мест у перрона нового автовокзала у края улицы ([ и ] — меньше и больше). */
+  curbBays = STATION.curb.bays;
   /** Длина выезда новой автостанции, м от кромки дороги ([ и ] — короче и длиннее). */
   stationDriveway = STATION.driveway;
   /** Шаблон развязки и поворот магистрали, если она строится вместе с развязкой (R). */
@@ -517,17 +521,41 @@ export class Controller {
 
   /** Как ставить новую автостанцию или автовокзал: вдоль дороги с карманом или в конце выезда выбранной длины. */
   get roadStationOptions(): RoadStationOptions {
+    if (this.curbMode) return { curb: true, curbBays: this.curbBays };
     return this.stationSide ? { side: true } : { driveway: this.stationDriveway };
+  }
+
+  /** Ставим автовокзал у края улицы (у автостанции этого способа нет — для неё он «вдоль дороги»). */
+  get curbMode(): boolean {
+    return this.stationCurb && this.stationMode === 'pax';
   }
 
   /** [ и ] меняют длину выезда: ставим автостанцию или автовокзал в конце выезда. */
   private drivewayKeys(code: string): boolean {
-    return code.startsWith('Bracket') && this.tool === 'station' && !this.placingBase && this.stationKind === 'road' && !this.stationSide;
+    return code.startsWith('Bracket') && this.tool === 'station' && !this.placingBase && this.stationKind === 'road' && !this.stationSide && !this.curbMode;
+  }
+
+  /** [ и ] меняют число мест у перрона: ставим автовокзал у края улицы. */
+  private curbKeys(code: string): boolean {
+    return code.startsWith('Bracket') && this.tool === 'station' && !this.placingBase && this.curbMode;
   }
 
   /** Автостанция и автовокзал — вдоль дороги с карманом (true) или в конце выезда. */
   setStationSide(on: boolean): void {
     this.stationSide = on;
+    this.stationCurb = false;
+    this.onChange();
+  }
+
+  /** Автовокзал — у самого края улицы (перрон вплотную к бордюру). */
+  setStationCurb(): void {
+    this.stationCurb = true;
+    this.onChange();
+  }
+
+  /** Мест у перрона нового автовокзала у края улицы — от 1 до STATION.curb.maxBays. */
+  setCurbBays(n: number): void {
+    this.curbBays = clampCurbBays(n);
     this.onChange();
   }
 
@@ -3008,11 +3036,13 @@ export class Controller {
       case 'PageUp':
         // Автостанция в конце выезда — ] длиннее выезд (уровень дороги ей не нужен).
         if (this.drivewayKeys(e.code)) this.setStationDriveway(this.stationDriveway + STATION.drivewayRange.step);
+        else if (this.curbKeys(e.code)) this.setCurbBays(this.curbBays + 1);
         else this.setLevel(this.level + 1);
         break;
       case 'BracketLeft':
       case 'PageDown':
         if (this.drivewayKeys(e.code)) this.setStationDriveway(this.stationDriveway - STATION.drivewayRange.step);
+        else if (this.curbKeys(e.code)) this.setCurbBays(this.curbBays - 1);
         else this.setLevel(this.level - 1);
         break;
       // −/+ — высота конца строящейся дороги относительно начала.
@@ -3706,7 +3736,12 @@ export class Controller {
           if (b) o.marks.push({ fp: b.fp, ok: false });
         }
         // Автостанция в конце выезда: какой длины выезд и как её менять.
-        const free = plan.rail?.main ? ' · R — повернуть' : plan.drivewayLen !== undefined ? ` · выезд ${plan.drivewayLen} м [ ]` : '';
+        // У края улицы: сколько мест у перрона и есть ли кармашек (нет — сколько улицы ему нужно).
+        const cb = plan.curb;
+        const curb = cb
+          ? ` · ${cb.bays} ${cb.bays === 1 ? 'место' : cb.bays < 5 ? 'места' : 'мест'} [ ] · ${cb.pocket ? 'с кармашком' : `без кармашка: ему нужно ${cb.need} м между перекрёстками, здесь ${cb.have}`}`
+          : '';
+        const free = plan.rail?.main ? ' · R — повернуть' : plan.drivewayLen !== undefined ? ` · выезд ${plan.drivewayLen} м [ ]` : curb;
         const raze = razed.length ? ` · снос ${razed.length} зд.` : '';
         // У предприятия станция сама становится грузовой — подпись показывает, какой она получится.
         const serves = plan.fp ? g.stationServesFor(plan.fp, this.stationKind, plan.industryId, this.newStationServes) : this.newStationServes;

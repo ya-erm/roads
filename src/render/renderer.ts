@@ -1,3 +1,4 @@
+import { STATION } from '../config';
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
@@ -248,9 +249,12 @@ function bottomOf(fp: Footprint): number {
   return 2 * fp.center.y - topOf(fp);
 }
 
-/** Остановка, к которой дорога подходит сверху: её название и плашку — под ней, иначе закроют автобус на посадке. */
+/**
+ * Остановка (и автовокзал у края улицы), к которой дорога подходит сверху: её название и плашку — под ней, иначе
+ * закроют автобус на посадке.
+ */
 function labelsBelow(game: Game, st: Station): boolean {
-  if (st.kind !== 'stop') return false;
+  if (st.kind !== 'stop' && !st.curb) return false;
   const node = game.roads.net.nodes.get(st.nodeId);
   return !!node && node.pos.y < st.fp.center.y;
 }
@@ -2257,6 +2261,7 @@ export class Renderer {
       if (!inView(st.fp)) continue;
       if (st.kind === 'rail') this.drawRailStation(game, st, selected);
       else if (st.kind === 'stop') this.drawStop(game, st, selected);
+      else if (st.curb) this.drawCurbTerminal(game, st, selected);
       else if (isBusTerminal(st)) this.drawBusTerminal(game, st, selected);
       else this.drawStation(game, st, selected);
     }
@@ -2784,6 +2789,138 @@ export class Renderer {
     if (buses.length) this.drawVehicles(buses);
   }
 
+  /** Края улицы у автовокзала у края улицы: в каждой точке вдоль площадки — где бордюр (по полотнам у его узла и соседним). */
+  private curbEdge(net: LaneNet, st: Station): ((p: Vec) => Vec | null) | null {
+    const node = net.nodes.get(st.nodeId);
+    if (!node) return null;
+    const near = net.corridorsNear(st.fp.center, st.fp.w / 2 + 60);
+    if (!near.length) return null;
+    return (p: Vec) => {
+      let best: { c: Corridor; s: number; d: number } | null = null;
+      for (const c of near) {
+        const hit = c.lut.closest(p);
+        if (!best || hit.d < best.d) best = { c, s: hit.s, d: hit.d };
+      }
+      if (!best) return null;
+      const e = edgesAt(best.c, best.s);
+      if (!e) return null;
+      const axis = best.c.lut.pointAt(best.s);
+      const side = dot(sub(p, axis), rightNormal(best.c.lut.tangentAt(best.s))) > 0 ? 1 : -1;
+      return pointOff(best.c, best.s, side > 0 ? e[1] + ROAD_MARGIN : e[0] - ROAD_MARGIN);
+    };
+  }
+
+  /**
+   * Разметка мест автовокзала у края улицы — жёлтый зигзаг у бордюра вдоль мест (как у остановки, 1.17): по кромке
+   * кармашка, и на отгонах тоже. Под машинами: автобусы встают прямо на неё.
+   */
+  private drawCurbMarks(net: LaneNet, st: Station): void {
+    const ctx = this.ctx;
+    const fp = st.fp;
+    const curbAt = this.curbEdge(net, st);
+    if (!curbAt) return;
+    const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+    const node = net.node(st.nodeId);
+    // Внутрь улицы от площадки.
+    const n0 = { x: -u.y, y: u.x };
+    const toRoad = dot(sub(node.pos, fp.center), n0) >= 0 ? n0 : scale(n0, -1);
+    const half = fp.w / 2 - STATION.curb.end;
+    const pts: Vec[] = [];
+    const step = 2.2;
+    const count = Math.max(2, Math.round((2 * half) / step));
+    for (let i = 0; i <= count; i++) {
+      const x = -half + (2 * half * i) / count;
+      const probe = add(add(fp.center, scale(u, x)), scale(toRoad, fp.h / 2 + 2));
+      const curb = curbAt(probe);
+      if (!curb) continue;
+      pts.push(add(curb, scale(toRoad, i % 2 ? 2.8 : 0.7)));
+    }
+    if (pts.length < 2) return;
+    ctx.save();
+    ctx.strokeStyle = '#e8c33a';
+    ctx.lineWidth = 0.55;
+    ctx.lineJoin = 'miter';
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * Автовокзал у края улицы: вдоль бордюра — перрон под навесом (синие крыши над каждым местом, опоры), за ним —
+   * павильон-зал ожидания; знак остановки у переднего края мест. Автобусы стоят на улице — их рисует движение.
+   */
+  private drawCurbTerminal(game: Game, st: Station, selected: boolean): void {
+    const ctx = this.ctx;
+    const fp = st.fp;
+    const node = game.roads.net.nodes.get(st.nodeId);
+    const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+    const n0 = { x: -u.y, y: u.x };
+    // Локальная +y — к улице.
+    const front = node && dot(sub(node.pos, fp.center), n0) < 0 ? -1 : 1;
+    // Вдоль мест — от узла к переднему краю.
+    const ahead = node && dot(sub(fp.center, node.pos), u) < 0 ? -1 : 1;
+    const hw = fp.w / 2;
+    const hh = fp.h / 2;
+    const P = 4.6;
+    const yPerron = hh - P;
+    this.drawFootprint({ ...fp, center: { x: fp.center.x + 2, y: fp.center.y + 2.5 } }, 'rgba(30,40,25,0.18)');
+    ctx.save();
+    ctx.translate(fp.center.x, fp.center.y);
+    ctx.rotate(fp.angle);
+    ctx.scale(1, front);
+    // Площадка — плитка тротуара; перрон у бордюра — светлее, с жёлтой полосой по краю.
+    ctx.fillStyle = '#cfcbc2';
+    ctx.fillRect(-hw, -hh, fp.w, fp.h);
+    ctx.fillStyle = '#e1e2e4';
+    ctx.fillRect(-hw, yPerron, fp.w, P);
+    ctx.fillStyle = '#e8c33a';
+    ctx.fillRect(-hw + 0.5, hh - 0.9, fp.w - 1, 0.45);
+    ctx.strokeStyle = selected ? '#2f80ed' : '#8b8f96';
+    ctx.lineWidth = selected ? 2.4 : 0.9;
+    ctx.strokeRect(-hw, -hh, fp.w, fp.h);
+    // Павильон — у дальнего края: светлая крыша, фонарь посередине, синяя кромка навеса по фасаду.
+    const B = fp.h - P - 1.2;
+    const bw = Math.min(fp.w - 4, Math.max(12, fp.w * 0.55));
+    const bx = -bw / 2 - ahead * (fp.w - bw) * 0.18;
+    ctx.fillStyle = 'rgba(30,40,25,0.22)';
+    ctx.fillRect(bx + 1.2, -hh + 0.6 + 1.4, bw, B);
+    ctx.fillStyle = '#f2efe8';
+    ctx.fillRect(bx, -hh + 0.6, bw, B);
+    ctx.strokeStyle = selected ? '#2f80ed' : '#4f5965';
+    ctx.lineWidth = selected ? 1.8 : 0.9;
+    ctx.strokeRect(bx, -hh + 0.6, bw, B);
+    ctx.fillStyle = '#d9d4ca';
+    ctx.fillRect(bx + 2, -hh + 0.6 + B * 0.32, bw - 4, B * 0.3);
+    ctx.fillStyle = '#2f80ed';
+    ctx.fillRect(bx, -hh + 0.6 + B - 1, bw, 1);
+    // Навес над перроном — по крыше над каждым местом (синие), между ними — просвет; опоры у бордюра.
+    const C = STATION.curb;
+    const stand = fp.w - 2 * C.end;
+    const k = Math.max(1, st.bays);
+    const seg = stand / k;
+    for (let i = 0; i < k; i++) {
+      const x0 = -stand / 2 + i * seg + 0.8;
+      ctx.fillStyle = 'rgba(47, 128, 237, 0.85)';
+      ctx.fillRect(x0, yPerron + 0.6, seg - 1.6, P - 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fillRect(x0, yPerron + 0.6, seg - 1.6, 0.5);
+      ctx.fillStyle = '#4f5965';
+      for (const x of [x0 + 0.6, x0 + seg - 2.2]) ctx.fillRect(x, hh - 1.9, 0.7, 0.7);
+    }
+    ctx.restore();
+    // Знак остановки — у переднего края мест, на бордюре.
+    const sign = add(add(fp.center, scale(u, ahead * (stand / 2 + C.end * 0.5))), scale(n0, front * (hh - 1.2)));
+    ctx.fillStyle = '#2f80ed';
+    ctx.beginPath();
+    ctx.arc(sign.x, sign.y, 1.7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(sign.x, sign.y, 0.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   /**
    * Площадка перед воротами автостанций: прямоугольник во всю ширину здания, состыкованный с выездом
    * двумя скруглениями с каждой стороны — вогнутым у кромки улицы и выпуклым на углу площадки;
@@ -2796,6 +2933,10 @@ export class Renderer {
       if (st.kind !== 'road') continue;
       const fp = st.fp;
       if (fp.center.x < view.x0 - 100 || fp.center.x > view.x1 + 100 || fp.center.y < view.y0 - 100 || fp.center.y > view.y1 + 100) continue;
+      if (st.curb) {
+        if (this.camera.zoom >= 0.3) this.drawCurbMarks(net, st);
+        continue;
+      }
       const node = net.nodes.get(st.nodeId);
       const end = node && net.ends(node)[0];
       if (!node || !end) continue;

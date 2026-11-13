@@ -607,9 +607,19 @@ export function tracksSvg(n: number, dashed = false): string {
  * Как ставить автостанцию: end — в конце выезда (улица внизу, от неё вверх — выезд к площадке с постами),
  * side — вдоль дороги (у края улицы — карман со скосами, площадка боком к нему).
  */
-export function stationPlaceSvg(mode: 'end' | 'side', size = 30): string {
+export function stationPlaceSvg(mode: 'end' | 'side' | 'curb', size = 30): string {
   const posts = (x0: number, y: number, n: number, w: number) =>
     Array.from({ length: n + 1 }, (_, i) => `<rect x="${x0 + i * w - 0.6}" y="${y}" width="1.2" height="6" fill="#d7d9dc"/>`).join('');
+  if (mode === 'curb') {
+    // У края улицы: павильон и перрон с навесом вплотную к улице, у перрона — кармашек и два автобуса в нём.
+    return `<svg viewBox="0 0 40 36" width="${(size * 40) / 36}" height="${size}">
+      <rect x="0" y="27" width="40" height="8" fill="#646b76"/><path d="M0 31H40" stroke="#f5f3e6" stroke-width="0.9" stroke-dasharray="3 2"/>
+      <path d="M1 27L6 21H34L39 27Z" fill="#646b76"/><path d="M6 21.4H34" stroke="#f5f3e6" stroke-width="0.6"/>
+      <rect x="7.5" y="22" width="11" height="4.2" rx="1" fill="#3b7dd8"/><rect x="20" y="22" width="11" height="4.2" rx="1" fill="#e07b39"/>
+      <rect x="5" y="16" width="30" height="5" fill="#d7d9dc"/><rect x="6" y="17.6" width="28" height="1.8" fill="#2f80ed"/>
+      <rect x="10" y="6" width="20" height="10" rx="1" fill="#f2efe8" stroke="#4f5965" stroke-width="1"/><rect x="13" y="9" width="14" height="2.4" fill="#d9d4ca"/>
+    </svg>`;
+  }
   if (mode === 'end') {
     return `<svg viewBox="0 0 40 36" width="${(size * 40) / 36}" height="${size}">
       <rect x="0" y="27" width="40" height="8" fill="#646b76"/><path d="M0 31H40" stroke="#f5f3e6" stroke-width="0.9" stroke-dasharray="3 2"/>
@@ -623,6 +633,17 @@ export function stationPlaceSvg(mode: 'end' | 'side', size = 30): string {
     <path d="M2 27L8 22H32L38 27Z" fill="#646b76"/><path d="M8 24.5H32" stroke="#f5f3e6" stroke-width="0.7" stroke-dasharray="2 1.5"/>
     <rect x="8" y="5" width="24" height="17" rx="1" fill="#646b76" stroke="#4b525c" stroke-width="1"/>
     <rect x="8.5" y="5.5" width="23" height="4" fill="#f2efe8"/><rect x="8.5" y="9" width="23" height="1" fill="#2f80ed"/>${posts(11, 10.5, 3, 6)}
+  </svg>`;
+}
+
+/** Места у перрона автовокзала у края улицы: перрон с навесом и n автобусов вдоль него (из max — серыми пустые). */
+export function curbBaysSvg(n: number, max: number): string {
+  const w = 6;
+  const W = max * w + 4;
+  const bus = Array.from({ length: max }, (_, i) => `<rect x="${2 + i * w + 0.5}" y="13" width="${w - 1}" height="4" rx="0.8" fill="${i < n ? '#3b7dd8' : '#c3c7cd'}"/>`).join('');
+  return `<svg viewBox="0 0 ${W} 26" width="${W}" height="26">
+    <rect x="0" y="12" width="${W}" height="14" fill="#646b76"/><path d="M0 21H${W}" stroke="#f5f3e6" stroke-width="0.7" stroke-dasharray="2.5 1.5"/>
+    <rect x="1" y="6" width="${W - 2}" height="5.5" fill="#d7d9dc"/><rect x="2" y="7.6" width="${W - 4}" height="1.6" fill="#2f80ed"/>${bus}
   </svg>`;
 }
 

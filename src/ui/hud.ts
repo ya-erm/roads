@@ -1,6 +1,6 @@
 import { dist } from '../core/vec';
 import type { RingSize } from '../game/roads';
-import { platformCars, railStationFee, SAVE_VERSION, type Game, type Ledger, type Partner } from '../game/game';
+import { curbNeed, platformCars, railStationFee, SAVE_VERSION, type Game, type Ledger, type Partner } from '../game/game';
 import { TEMPLATES } from '../game/interchange';
 import { defaultSaveName, type SaveEntry } from '../game/persist';
 import { saveFileText } from '../game/saveFile';
@@ -95,6 +95,7 @@ import {
   terminalStationSvg,
   throughStationSvg,
   stationPlaceSvg,
+  curbBaysSvg,
   drivewaySvg,
   platformLengthSvg,
   platformsSvg,
@@ -1639,7 +1640,11 @@ export class Hud {
         c.setStationTerminal(d.v === '1');
         break;
       case 'st-side':
-        c.setStationSide(d.v === '1');
+        if (d.v === '2') c.setStationCurb();
+        else c.setStationSide(d.v === '1');
+        break;
+      case 'st-curb-bays':
+        c.setCurbBays(c.curbBays + (Number(d.d) || 0));
         break;
       case 'st-driveway':
         c.setStationDriveway(c.stationDriveway + (Number(d.d) || 0) * STATION.drivewayRange.step);
@@ -2512,27 +2517,49 @@ export class Hud {
     }
     if (c.stationMode === 'rail') return this.railStationOptionsHtml(sw);
     const pax = c.stationMode === 'pax';
-    const side = c.stationSide;
-    // Как ставить — двумя значками-схемами в заголовке: в конце выезда или вдоль дороги с карманом.
+    const curb = c.curbMode;
+    const side = c.stationSide && !curb;
+    const mode = curb ? 2 : side ? 1 : 0;
+    // Как ставить — значками-схемами в заголовке: в конце выезда, вдоль дороги с карманом-дублёром, у автовокзала ещё —
+    // у самого края улицы (перрон вплотную к бордюру).
     const how = `<span class="st-kind">${[
-      { on: false, svg: stationPlaceSvg('end', 30), hint: 'В конце выезда: от дороги к станции — выезд-тупик, его длину выбираете' },
-      { on: true, svg: stationPlaceSvg('side', 30), hint: 'Вдоль дороги: у края улицы — карман, посты выходят прямо на него; машины не разворачиваются, а едут дальше' },
+      { v: 0, svg: stationPlaceSvg('end', 30), hint: 'В конце выезда: от дороги к станции — выезд-тупик, его длину выбираете' },
+      { v: 1, svg: stationPlaceSvg('side', 30), hint: 'Вдоль дороги: у края улицы — карман, посты выходят прямо на него; машины не разворачиваются, а едут дальше' },
+      ...(pax
+        ? [
+            {
+              v: 2,
+              svg: stationPlaceSvg('curb', 30),
+              hint: `У края улицы — компактнее всего: перрон вплотную к бордюру, автобусы встают у него друг за другом. Хватает улицы — с кармашком (на 2 места ~${curbNeed(2, true)} м между перекрёстками), нет — в крайней полосе, как у остановки (~${curbNeed(2, false)} м)`,
+            },
+          ]
+        : []),
     ]
-      .map((k) => `<button class="${side === k.on ? 'active' : ''}" data-action="st-side" data-v="${k.on ? 1 : 0}" data-tip="${k.hint}">${k.svg}</button>`)
+      .map((k) => `<button class="${mode === k.v ? 'active' : ''}" data-action="st-side" data-v="${k.v}" data-tip="${k.hint}">${k.svg}</button>`)
       .join('')}</span>`;
     // Длина выезда — счётчиком «− схема N м +», как длина платформ у ж/д станции; в заголовке, за схемами «как
-    // ставить», а не отдельной строкой: панель ниже (узкая — счётчик переносится под заголовок).
+    // ставить», а не отдельной строкой: панель ниже (узкая — счётчик переносится под заголовок). У края улицы — так же
+    // число мест у перрона.
     const R = STATION.drivewayRange;
     const L = c.stationDriveway;
-    const length = side
-      ? ''
-      : `<span class="st-params st-drive"><span class="stepper bays tracks" data-tip="Длина выезда от кромки дороги: ${L} м · [ и ] — короче и длиннее">
+    const k = c.curbBays;
+    const length = curb
+      ? `<span class="st-params st-drive"><span class="stepper bays tracks" data-tip="Мест у перрона: ${k} — столько автобусов встанет сразу · [ и ] — меньше и больше">
+      <button data-action="st-curb-bays" data-d="-1" ${k > 1 ? '' : 'disabled'} data-tip="Меньше мест · [">−</button><b>${curbBaysSvg(k, STATION.curb.maxBays)}<span>${k}</span></b><button
+        data-action="st-curb-bays" data-d="1" ${k < STATION.curb.maxBays ? '' : 'disabled'} data-tip="Больше мест · ]">+</button></span></span>`
+      : side
+        ? ''
+        : `<span class="st-params st-drive"><span class="stepper bays tracks" data-tip="Длина выезда от кромки дороги: ${L} м · [ и ] — короче и длиннее">
       <button data-action="st-driveway" data-d="-1" ${L > R.min ? '' : 'disabled'} data-tip="Короче на ${R.step} м · [">−</button><b>${drivewaySvg(L, R.max)}<span>${L} м</span></b><button
         data-action="st-driveway" data-d="1" ${L < R.max ? '' : 'disabled'} data-tip="Длиннее на ${R.step} м · ]">+</button></span></span>`;
-    const where = side
-      ? `вдоль улицы со стороны курсора, не у перекрёстка; у края — карман`
-      : `у дороги, прямо у перекрёстка или вплотную к ${pax ? 'городу' : 'предприятию'} — с той стороны, где курсор`;
-    const tip = `${pax ? 'Автовокзал' : 'Автостанция'} ${where}. Дома под ней снесём (красные). Охват ${STATION.catchment} м, ${pax ? 'перроны' : 'посты'} добавляются в карточке.`;
+    const where = curb
+      ? `у края улицы со стороны курсора. Кармашек — если хватает улицы (от ~${curbNeed(k, true)} м между перекрёстками), иначе места в крайней полосе (от ~${curbNeed(k, false)} м)`
+      : side
+        ? `вдоль улицы со стороны курсора, не у перекрёстка; у края — карман`
+        : `у дороги, прямо у перекрёстка или вплотную к ${pax ? 'городу' : 'предприятию'} — с той стороны, где курсор`;
+    const tip = curb
+      ? `Автовокзал ${where}. Охват ${STATION.catchment} м.`
+      : `${pax ? 'Автовокзал' : 'Автостанция'} ${where}. Дома под ней снесём (красные). Охват ${STATION.catchment} м, ${pax ? 'перроны' : 'посты'} добавляются в карточке.`;
     return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">Как ставить <span class="price-tag">${money(COST.station)}</span>${how}${length}</div><p class="muted">${tip}</p></div></div>`;
   }
 
@@ -3350,7 +3377,18 @@ export class Hud {
       // Посты погрузки автостанции: картинка станции с постами, «−» и «+» (с ценой или причиной, почему нельзя).
       // Под картинку держим место на максимум постов: иначе с каждым постом «+» уезжает вправо из-под курсора.
       let baysRow = '';
-      if (st.kind === 'road') {
+      if (st.kind === 'road' && st.curb) {
+        // Автовокзал у края улицы: места у перрона — по длине перрона (и кармашка), их число выбирают при постановке.
+        const pocket = st.curb.pocket;
+        baysRow = `<div class="icon-row"><span class="lbl2">Места у перрона</span>
+          <span class="stepper bays tracks"><b data-tip="Столько автобусов встанет у перрона сразу; число мест выбирают при постановке">${curbBaysSvg(
+            g.stationBays(st).filter(Boolean).length,
+            st.bays,
+          )}<span>${st.bays}</span></b></span></div>
+          <div class="icon-row"><span class="lbl2">Как стоит</span><b class="st-kind" data-tip="${
+            pocket ? 'У края улицы, с кармашком: автобусы встают в нём, не мешая движению' : 'У края улицы, без кармашка: автобусы встают в крайней полосе, как у остановки'
+          }">${stationPlaceSvg('curb', 24)}</b></div>`;
+      } else if (st.kind === 'road') {
         // У автовокзала посты — места у перронов: автобус встаёт между двумя перронами.
         const terminal = isBusTerminal(st);
         const more = g.stationBaysPlan(st.id, st.bays + 1);

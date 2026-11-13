@@ -548,7 +548,8 @@ function stations(game: Game, out: Advice[]): void {
   for (const [sid, e] of queued) {
     const st = stationAt(game, sid);
     if (!st || e.n < 2) continue;
-    const more = st.kind === 'road' && st.bays < STATION.maxBays;
+    // У автовокзала у края улицы мест не прибавить — их число выбирают при постановке.
+    const more = st.kind === 'road' && !st.curb && st.bays < STATION.maxBays;
     out.push({
       key: `queue:${sid}`,
       kind: 'queue',

@@ -1,4 +1,4 @@
-import { dist } from '../core/vec';
+import { dist, dot } from '../core/vec';
 import { KMH_PER_UNIT } from '../world/roadTypes';
 import type { GLink, LaneGraph } from './graph';
 
@@ -28,6 +28,9 @@ export function findLaneRoute(g: LaneGraph, starts: GLink[], goal: number): numb
   if (!target) return null;
   const endOf = (l: GLink) => g.lanePose(l.lanes[0], l.length).pos;
   const h = (l: GLink) => dist(endOf(l), target.pos) / MAX_SPEED;
+  // Цель с одной стороны (LaneNode.arrive) — только связи, что подходят к ней по ходу этой стороны.
+  const side = target.arrive;
+  const arrives = (l: GLink) => !side || dot(g.lanePose(l.lanes[0], l.length).dir, target.dir) * side > 0;
   const cost = new Map<number, number>();
   const prev = new Map<number, number>();
   const open = new Heap<GLink>();
@@ -40,7 +43,7 @@ export function findLaneRoute(g: LaneGraph, starts: GLink[], goal: number): numb
     const link = open.pop()!;
     if (closed.has(link.id)) continue;
     closed.add(link.id);
-    if (link.toNode === goal) {
+    if (link.toNode === goal && arrives(link)) {
       const path = [link.id];
       while (prev.has(path[0])) path.unshift(prev.get(path[0])!);
       return path;

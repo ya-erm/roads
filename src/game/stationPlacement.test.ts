@@ -5,7 +5,8 @@ import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 import { NEW_GAME_SETTINGS, TERRAIN_VERSION } from '../world/settings';
 import { pointInFootprint } from '../world/spatial';
 import type { Station } from '../world/entities';
-import { clampDriveway, Game, type RoadStationOptions } from './game';
+import { CURB_GAP } from '../lanes/traffic';
+import { clampDriveway, curbLayout, curbNeed, Game, type RoadStationOptions } from './game';
 import { fieldSpot, road, roadPlan, STREET, withoutCitizens } from './testkit';
 
 /** Карман станции вдоль дороги от её узла до съезда: половина площадки и съезд. */
@@ -298,5 +299,186 @@ describe('Автовокзал вдоль дороги в городе (seed 309
     expect(short).toBeGreaterThan(0);
     // Мешать могут дома, ратуша, соседняя улица — но не перекрёсток сам по себе.
     expect(placed / fit).toBeGreaterThan(0.8);
+  });
+});
+
+describe('Автовокзал у края улицы (с кармашком или без)', () => {
+  const CURB = { curb: true } as const;
+  /** Полоса кармашка на полотне: та, что дальше всех от оси с этой стороны и не на всю длину. */
+  const pocketLanes = (game: Game, y: number) =>
+    [...game.roads.net.corridors.values()]
+      .filter((c) => Math.abs(c.curve.p0.y - y) < 1 && Math.abs(c.curve.p3.y - y) < 1)
+      .flatMap((c) => c.lanes.filter((l) => Math.abs(l.offset) > LANE_W).map((l) => ({ c, l })));
+
+  it('на длинной улице — с кармашком: перрон вплотную к его бордюру, узел — стык на улице с подъездом только по своей половине', () => {
+    const { game, x, y } = scene();
+    const st = terminal(game, x + 300, y + 20, CURB);
+    expect(st.curb).toEqual({ pocket: true });
+    expect(st.bays).toBe(STATION.curb.bays);
+    const net = game.roads.net;
+    const node = net.node(st.nodeId);
+    expect(node.kind).toBe('seam');
+    expect(node.corridors).toHaveLength(2);
+    // Южный край — по ходу a→b (на восток): подъезжают только с запада.
+    expect(node.arrive! * node.dir.x).toBeGreaterThan(0);
+    // Площадка — вплотную к бордюру кармашка: полоса улицы и полоса кармашка.
+    expect(front(st, y)).toBeCloseTo(2 * LANE_W + ROAD_MARGIN, 1);
+    // Кармашек — полоса у южного края в ту же сторону, по обе стороны от узла (стык режет её на полной ширине).
+    const lanes = pocketLanes(game, y);
+    expect(lanes).toHaveLength(2);
+    for (const { l } of lanes) expect(l.flow).toBe(1);
+    const T = 25;
+    const lay = curbLayout(STATION.curb.bays, T, true);
+    const full = lanes.reduce((s, { c, l }) => s + Math.min(l.to, c.length) - l.from, 0);
+    expect(full).toBeCloseTo(lay.zone, 0);
+    // Места — вдоль всей площадки (без концов): два городских автобуса.
+    expect(lay.stand).toBeGreaterThanOrEqual(2 * 14 + 2);
+    expect(net.problems()).toEqual([]);
+    // Сохранение открывается: станция и подъезд с одной стороны — те же.
+    const save = JSON.parse(JSON.stringify(game.toSave()));
+    const loaded = new Game(save.settings, save);
+    expect(loaded.stations.get(st.id)!.curb).toEqual({ pocket: true });
+    expect(loaded.roads.net.node(st.nodeId).arrive).toBe(node.arrive);
+    // Снос — улица с кармашком остаётся (обычная дорога).
+    const length = [...net.corridors.values()].reduce((s, c) => s + c.length, 0);
+    expect(game.removeStation(st)).toBe(true);
+    expect([...game.roads.net.corridors.values()].reduce((s, c) => s + c.length, 0)).toBeCloseTo(length, 0);
+    expect(pocketLanes(game, y)).toHaveLength(2);
+  });
+
+  it('квартал 75–90 м: без кармашка — места в крайней полосе; кармашку на 2 места — от ~92 м, на одно хватает и 85; короче — сколько нужно', () => {
+    expect(curbNeed(2, false)).toBeLessThanOrEqual(75);
+    expect(curbNeed(2, true)).toBeLessThanOrEqual(95);
+    expect(curbNeed(1, true)).toBeLessThanOrEqual(85);
+    const { game, x, y } = scene(700);
+    // Кварталы: x+100…x+185 (85 м) и x+185…x+245 (60 м); дальше — длинная улица.
+    for (const cx of [x + 100, x + 185, x + 245]) expect(road(game, { free: { x: cx, y: y - 120 } }, { free: { x: cx, y: y + 120 } })).toBe(true);
+    const plain = game.stationPlan({ x: x + 142, y: y + 20 }, 30, 'road', 0, 2, undefined, false, CURB);
+    expect(plain.ok).toBe(true);
+    expect(plain.curb).toMatchObject({ bays: 2, pocket: false });
+    expect(plain.curb!.have).toBeGreaterThanOrEqual(84);
+    expect(plain.curb!.need).toBeGreaterThan(plain.curb!.have);
+    const one = game.stationPlan({ x: x + 142, y: y + 20 }, 30, 'road', 0, 2, undefined, false, { curb: true, curbBays: 1 });
+    expect(one.ok).toBe(true);
+    expect(one.curb).toMatchObject({ bays: 1, pocket: true });
+    const short = game.stationPlan({ x: x + 215, y: y + 20 }, 30, 'road', 0, 2, undefined, false, CURB);
+    expect(short.ok).toBe(false);
+    expect(short.reason).toMatch(/^Мало места вдоль улицы: нужно \d+ м между перекрёстками, здесь (59|60) м$/);
+    // Без кармашка перрон — у бордюра самой улицы; курсор у перекрёстка — площадка отходит от него вдоль улицы.
+    const st = terminal(game, x + 125, y + 14, CURB);
+    expect(st.curb).toEqual({ pocket: false });
+    expect(front(st, y)).toBeCloseTo(LANE_W + ROAD_MARGIN, 1);
+    expect(st.fp.center.x - st.fp.w / 2).toBeGreaterThan(x + 100 + LANE_W + ROAD_MARGIN);
+    expect(st.fp.center.x + st.fp.w / 2).toBeLessThan(x + 185 - LANE_W - ROAD_MARGIN);
+    expect(pocketLanes(game, y)).toHaveLength(0);
+    expect(game.roads.net.problems()).toEqual([]);
+    // Вплотную к другой станции — нельзя.
+    expect(game.stationPlan({ x: x + 150, y: y + 20 }, 30, 'road', 0, 2, undefined, false, CURB).reason).toBe('Рядом уже есть станция');
+  });
+
+  it('в городе (seed 309542331): встаёт и в кварталах 75–90 м, где дублёру мало места; на длинных — с кармашком', () => {
+    const game = withoutCitizens(new Game({ ...NEW_GAME_SETTINGS, seed: 309542331, scenario: { difficulty: 'normal', challenge: false } }));
+    game.money = 1e9;
+    const net = game.roads.net;
+    const tally = { short: 0, shortOk: 0, long: 0, pocket: 0, reasons: new Map<string, number>() };
+    for (const c of net.corridors.values()) {
+      if (c.cls !== 'street' || net.node(c.a).kind !== 'junction' || net.node(c.b).kind !== 'junction' || c.length < 75) continue;
+      const pt = c.lut.pointAt(c.length / 2);
+      const t = c.lut.tangentAt(c.length / 2);
+      for (const side of [1, -1]) {
+        const plan = game.stationPlan({ x: pt.x - t.y * 18 * side, y: pt.y + t.x * 18 * side }, 30, 'road', 0, 2, undefined, false, CURB);
+        if (c.length <= 90) {
+          tally.short++;
+          if (plan.ok) tally.shortOk++;
+          // Дублёру здесь мало места — а у края улицы встаёт без кармашка.
+          expect(game.stationPlan({ x: pt.x - t.y * 18 * side, y: pt.y + t.x * 18 * side }, 30, 'road', 0, 2, undefined, false, { side: true }).ok).toBe(false);
+        } else if (c.length >= 110) {
+          tally.long++;
+          if (plan.ok && plan.curb?.pocket) tally.pocket++;
+        }
+        if (!plan.ok) tally.reasons.set(plan.reason ?? '', (tally.reasons.get(plan.reason ?? '') ?? 0) + 1);
+      }
+    }
+    expect(tally.short, [...tally.reasons].join('; ')).toBeGreaterThan(4);
+    // Мешать могут дома-ориентиры, соседняя улица, другая станция — но не длина квартала.
+    expect(tally.shortOk / tally.short, [...tally.reasons].join('; ')).toBeGreaterThan(0.7);
+    expect(tally.pocket / tally.long, [...tally.reasons].join('; ')).toBeGreaterThan(0.7);
+  });
+
+  it('задний автобус погрузился раньше переднего — объезжает его и уезжает, не дожидаясь', () => {
+    const { game, x, y } = scene(700);
+    const a = terminal(game, x + 300, y + 20, CURB);
+    const b = terminal(game, x + 550, y - 20, CURB);
+    const line = game.createLine([a.id, b.id])!;
+    for (let i = 0; i < 5; i++) expect(game.buyVehicle(line.id, 'bus2')).toBeTruthy();
+    game.speed = 1;
+    // Передний у перрона a «грузится» 40 с: остальные — за ним, и уезжают раньше.
+    const g = game as unknown as { loadingDone(v: { id: number }, l: unknown, dt: number): boolean };
+    const done = g.loadingDone.bind(game);
+    let held: number | null = null;
+    let now = 0;
+    let until = Infinity;
+    g.loadingDone = (v, l, dt) => (v.id === held && now < until ? false : done(v, l, dt));
+    const passed = new Set<number>();
+    for (; now < 300; now += 0.1) {
+      game.update(0.1);
+      const at = [...game.fleet.values()].filter((v) => line.stops[v.stop] === a.id && (v.state === 'loading' || v.boarding) && game.fleetSim(v));
+      if (held === null && at.length === 2) {
+        held = at.reduce((p, q) => (game.fleetSim(p)!.pos.x > game.fleetSim(q)!.pos.x ? p : q)).id;
+        until = now + 40;
+      }
+      if (held === null || now > until) continue;
+      // Уехавшие от a, пока передний стоит, — проехали мимо него.
+      const front = game.fleetSim(game.fleet.get(held)!)!.pos.x;
+      for (const v of game.fleet.values()) {
+        const sim = game.fleetSim(v);
+        if (v.id !== held && sim && line.stops[v.stop] === b.id && sim.pos.x > front + 5 && sim.pos.y > y) passed.add(v.id);
+      }
+    }
+    expect(held).not.toBeNull();
+    expect(passed.size).toBeGreaterThanOrEqual(2);
+  });
+
+  it('автобусы встают у перрона друг за другом у бордюра, носом по ходу; мест не больше, чем у вокзала', () => {
+    const { game, x, y } = scene(700);
+    // Восточная половина — с кармашком (на восток, у южного края), западная — квартал 85 м без него (на запад).
+    for (const cx of [x + 100, x + 185]) expect(road(game, { free: { x: cx, y: y - 120 } }, { free: { x: cx, y: y + 120 } })).toBe(true);
+    const a = terminal(game, x + 400, y + 20, CURB);
+    const b = terminal(game, x + 142, y - 20, CURB);
+    expect(a.curb!.pocket).toBe(true);
+    expect(b.curb!.pocket).toBe(false);
+    const line = game.createLine([a.id, b.id])!;
+    for (const m of ['bus2', 'bus2', 'bus2', 'bus'] as const) expect(game.buyVehicle(line.id, m)).toBeTruthy();
+    game.speed = 1;
+    let most = 0;
+    let stood = 0;
+    let tight = 0;
+    for (let t = 0; t < 400; t += 0.1) {
+      game.update(0.1);
+      for (const st of [a, b]) {
+        const at = [...game.fleet.values()].filter((v) => line.stops[v.stop] === st.id && v.state === 'loading' && game.fleetSim(v));
+        expect(at.length).toBeLessThanOrEqual(st.bays);
+        most = Math.max(most, at.length);
+        const flow = st === a ? 1 : -1;
+        for (const v of at) {
+          const sim = game.fleetSim(v)!;
+          stood++;
+          // У перрона: носом по ходу своей половины улицы, вдоль площадки, у бордюра с зазором CURB_GAP.
+          expect(sim.dir.x * flow).toBeGreaterThan(0.99);
+          expect(Math.abs(sim.pos.x - st.fp.center.x)).toBeLessThan(st.fp.w / 2 + 2);
+          // Задний с кармашком может стоять кормой на половине отгона — там бордюр ближе к оси, а он чуть дальше от перрона.
+          const curb = Math.abs(st.fp.center.y - y) - st.fp.h / 2;
+          const gap = curb - Math.abs(sim.pos.y - y) - sim.width / 2;
+          expect(gap).toBeGreaterThan(CURB_GAP - 0.1);
+          expect(gap).toBeLessThan(2.5);
+          if (Math.abs(gap - CURB_GAP) < 0.05) tight++;
+        }
+      }
+    }
+    expect(stood).toBeGreaterThan(0);
+    expect(tight / stood).toBeGreaterThan(0.5);
+    expect(most).toBe(2);
+    expect(line.problem).toBeNull();
+    expect(line.lap).toBeGreaterThan(0);
   });
 });

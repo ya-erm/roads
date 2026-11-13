@@ -54,7 +54,8 @@ export function stationWarnings(game: Game, st: Station): StationWarning[] {
   const n = game.stationJam(st);
   if (n) {
     const rail = st.kind === 'rail';
-    const more = st.kind === 'road' && st.bays < STATION.maxBays;
+    // У автовокзала у края улицы мест не прибавить — их число выбирают при постановке.
+    const more = st.kind === 'road' && !st.curb && st.bays < STATION.maxBays;
     out.push({
       key: `jam:${st.id}`,
       level: 'warn',
