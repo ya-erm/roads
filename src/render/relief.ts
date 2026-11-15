@@ -1,3 +1,4 @@
+import { GRADE } from '../config';
 import type { Vec } from '../core/vec';
 import { BIOMES } from '../world/biomes';
 import type { Terrain } from '../world/terrain';
@@ -5,7 +6,10 @@ import type { Terrain } from '../world/terrain';
 /**
  * Рельеф на карте: цвет земли по высоте с мягкой отмывкой склонов — в кэше тайлами (растр,
  * растягивается гладко), изолинии — векторно: считаются один раз по сетке высот (marching squares),
- * сглаживаются и рисуются линиями постоянной толщины в пикселях экрана.
+ * сглаживаются и рисуются линиями постоянной толщины в пикселях экрана. При сильном приближении — ещё
+ * промежуточные изолинии (fineContourStep), а с инструментом дороги — подписи высот на линиях и штрихи
+ * склонов круче, чем можно дороге (бергштрихи, steepTicks): видно, почему дорога напрямую не проходит.
+ * Всё это рисуется в плитки кэша карты (src/render/tileCache.ts) — в кадре только копируется.
  */
 
 /** Тайл цвета: мировых единиц по стороне и на пиксель кэша. */
@@ -52,6 +56,22 @@ interface ContourChunk {
   x1: number;
   y1: number;
   major: boolean;
+  /** Промежуточная изолиния (между обычными, видна только вблизи). */
+  fine: boolean;
+  /** Высота линии над уровнем воды, м — для подписи. */
+  alt: number;
+  /** Длина куска, м. */
+  len: number;
+}
+
+/**
+ * Шаг промежуточных изолиний, м: 5, 2 или 1 — не больше четверти шага обычных и делит его нацело (горы 20 → 5,
+ * холмы 10 → 2, равнина 4 → 1). На пределе уклона дороги (10%) соседние линии — в 10 шагах друг от друга:
+ * в горах в 50 м — вблизи это 100–150 пикселей, и подъём, на который дорога не взберётся, виден как частые линии.
+ */
+export function fineContourStep(step: number): number {
+  for (const s of [5, 2, 1]) if (s <= step / 4 + 1e-9 && Math.abs(step / s - Math.round(step / s)) < 1e-9) return s;
+  return step / 4;
 }
 
 /** Изолинии на всей карте — по тайлам (см. contourTile). */
@@ -67,8 +87,9 @@ export function buildContours(terrain: Terrain): ContourChunk[] {
  * Изолинии через step в тайле карты: клетки сетки высот тайла (marching squares), сглаженные полилинии,
  * нарезанные на куски. Линия, уходящая в соседний тайл, кончается ровно на общем ребре сетки — там
  * продолжается линия соседа, и сглаживание концы не сдвигает: правка кистью пересобирает только свои тайлы.
+ * fine — только промежуточные линии (через fineContourStep, без совпадающих с обычными).
  */
-export function contourTile(terrain: Terrain, tx: number, ty: number): ContourChunk[] {
+export function contourTile(terrain: Terrain, tx: number, ty: number, fine = false): ContourChunk[] {
   const g = terrain.heightGrid();
   if (!g) return [];
   const { data, nx, ny, cell } = g;
@@ -78,7 +99,9 @@ export function contourTile(terrain: Terrain, tx: number, ty: number): ContourCh
   const ci1 = Math.min(nx - 1, ci0 + per);
   const cj1 = Math.min(ny - 1, cj0 + per);
   if (ci0 >= ci1 || cj0 >= cj1) return [];
-  const step = terrain.contourStep;
+  const step = fine ? fineContourStep(terrain.contourStep) : terrain.contourStep;
+  // Промежуточная линия через каждые every шагов совпала бы с обычной — её пропускаем.
+  const every = Math.round(terrain.contourStep / step);
   // Уровни — от уровня воды, как высота в подсказке у курсора: линия «20 м» там, где подсказка покажет 20 м.
   const base = terrain.waterLevel;
   let lo = Infinity;
@@ -93,8 +116,9 @@ export function contourTile(terrain: Terrain, tx: number, ty: number): ContourCh
   const chunks: ContourChunk[] = [];
   for (let level = Math.ceil((lo - base) / step); base + level * step <= hi; level++) {
     // Нулевая — сам уровень воды: вдоль берега её заменяет край воды.
-    if (level === 0) continue;
-    const major = level % 5 === 0;
+    if (level === 0 || (fine && level % every === 0)) continue;
+    const major = !fine && level % 5 === 0;
+    const alt = Math.round(level * step * 10) / 10;
     for (const line of isolines(data, nx, cell, base + level * step, ci0, cj0, ci1, cj1)) {
       const pts = chaikin(chaikin(line.pts, line.closed), line.closed);
       for (let p0 = 0; p0 < pts.length - 1; p0 += CHUNK - 1) {
@@ -104,6 +128,7 @@ export function contourTile(terrain: Terrain, tx: number, ty: number): ContourCh
         let y0 = Infinity;
         let x1 = -Infinity;
         let y1 = -Infinity;
+        let len = 0;
         part.forEach(([x, y], q) => {
           flat[q * 2] = x;
           flat[q * 2 + 1] = y;
@@ -111,8 +136,9 @@ export function contourTile(terrain: Terrain, tx: number, ty: number): ContourCh
           y0 = Math.min(y0, y);
           x1 = Math.max(x1, x);
           y1 = Math.max(y1, y);
+          if (q) len += Math.hypot(x - part[q - 1][0], y - part[q - 1][1]);
         });
-        chunks.push({ pts: flat, x0, y0, x1, y1, major });
+        chunks.push({ pts: flat, x0, y0, x1, y1, major, fine, alt, len });
       }
     }
   }
@@ -279,17 +305,146 @@ function chaikin(pts: [number, number][], closed: boolean): [number, number][] {
   return out;
 }
 
+/** Шаг решётки штрихов крутых склонов, м, и длина штриха, м. */
+const TICK_GRID = 8;
+const TICK_LEN = 6;
+/** Классы крутизны штрихов — во сколько раз круче предела: до 1,5, до 2,5 и круче. */
+const TICK_CLASSES = [1.5, 2.5];
+
+/** Псевдослучайное число 0…1 по целым координатам: разброс штрихов одинаков при каждой перерисовке. */
+function jitter(a: number, b: number): number {
+  let h = Math.imul(a, 0x27d4eb2d) ^ Math.imul(b, 0x165667b1);
+  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+  h ^= h >>> 12;
+  return (h >>> 0) / 0x100000000;
+}
+
+/**
+ * Бергштрихи тайла карты: где склон круче limit (м подъёма на м пути), — короткие штрихи вниз по склону (поперёк
+ * изолиний) на решётке через TICK_GRID м, ряды со сдвигом и с небольшим разбросом. Три класса крутизны
+ * (TICK_CLASSES): чем круче, тем штрих толще и темнее. Ответ — отрезки x0,y0,x1,y1 подряд по классам.
+ * Точка решётки принадлежит одному тайлу; штрих выходит за его край не больше чем на TICK_LEN / 2.
+ */
+export function steepTicks(terrain: Terrain, tx: number, ty: number, limit: number): Float32Array[] {
+  const out: number[][] = TICK_CLASSES.map(() => []).concat([[]]);
+  if (terrain.hasRelief) {
+    const d = 4;
+    const h = (x: number, y: number) => terrain.heightAt({ x, y });
+    const x0 = tx * TILE;
+    const y0 = ty * TILE;
+    const x1 = Math.min(terrain.width, x0 + TILE);
+    const y1 = Math.min(terrain.height, y0 + TILE);
+    const n = TILE / TICK_GRID;
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const gi = tx * n + i;
+        const gj = ty * n + j;
+        // Ряды через один сдвинуты на полшага, точка — с разбросом в пределах своей клетки решётки.
+        const x = x0 + (i + 0.25 + (j & 1) * 0.5 + (jitter(gi, gj) - 0.5) * 0.4) * TICK_GRID;
+        const y = y0 + (j + 0.5 + (jitter(gj, gi) - 0.5) * 0.4) * TICK_GRID;
+        if (x >= x1 || y >= y1) continue;
+        const gx = (h(x + d, y) - h(x - d, y)) / (2 * d);
+        const gy = (h(x, y + d) - h(x, y - d)) / (2 * d);
+        const s = Math.hypot(gx, gy);
+        if (s <= limit) continue;
+        let k = 0;
+        while (k < TICK_CLASSES.length && s >= limit * TICK_CLASSES[k]) k++;
+        // Вниз по склону — против градиента.
+        const ux = (-gx / s) * (TICK_LEN / 2);
+        const uy = (-gy / s) * (TICK_LEN / 2);
+        out[k].push(x - ux, y - uy, x + ux, y + uy);
+      }
+    }
+  }
+  return out.map((a) => Float32Array.from(a));
+}
+
+/** Подписи высот на изолиниях — где линия пересекает линии мировой сетки через столько метров. */
+const LABEL_GRID = 200;
+
+/**
+ * Где на куске изолинии подписать высоту: точки пересечения с линиями мировой сетки через LABEL_GRID м —
+ * пологий отрезок (больше вдоль x) с вертикальными x = k·LABEL_GRID, крутой — с горизонтальными. Место зависит
+ * только от самой линии, а не от того, как она нарезана на куски, — после правки рельефа подписи вне правки
+ * остаются на месте (плитки кэша вне правки не перерисовываются). Подписи соседних уровней встают «лесенкой»
+ * вверх по склону, как на топографической карте. Ответ — x, y и угол линии (подпись не вверх ногами).
+ */
+export function labelSpots(pts: Float32Array): { x: number; y: number; angle: number }[] {
+  const out: { x: number; y: number; angle: number }[] = [];
+  for (let q = 0; q + 3 < pts.length; q += 2) {
+    const ax = pts[q];
+    const ay = pts[q + 1];
+    const bx = pts[q + 2];
+    const by = pts[q + 3];
+    const flat = Math.abs(bx - ax) >= Math.abs(by - ay);
+    const a = flat ? ax : ay;
+    const b = flat ? bx : by;
+    // Пересечение — на полуоткрытом [min, max): общий конец соседних отрезков не даёт двух подписей.
+    const k = Math.ceil(Math.min(a, b) / LABEL_GRID) * LABEL_GRID;
+    if (a === b || k >= Math.max(a, b)) continue;
+    const t = (k - a) / (b - a);
+    let angle = Math.atan2(by - ay, bx - ax);
+    if (angle > Math.PI / 2) angle -= Math.PI;
+    else if (angle < -Math.PI / 2) angle += Math.PI;
+    out.push({ x: ax + (bx - ax) * t, y: ay + (by - ay) * t, angle });
+  }
+  return out;
+}
+
+/** «−25» — высота подписи изолинии, со знаком минус, как в подсказке у курсора. */
+export function contourLabel(alt: number): string {
+  const r = Math.round(alt * 10) / 10;
+  return r < 0 ? `−${`${-r}`.replace('.', ',')}` : `${r}`.replace('.', ',');
+}
+
+/**
+ * «Лесенка» на дороге, которую не дают построить из-за уклона: где ось пересекает изолинии через step м (alts — высота
+ * земли над водой в точках оси через ds м). steep — от этой ступеньки до соседней по высоте короче step / limit м, то есть
+ * земля здесь круче предела дороги; ступенька на том же уровне (ось вернулась через ту же изолинию) — не в счёт.
+ */
+export function gradeRungs(alts: ArrayLike<number>, ds: number, step: number, limit: number): { s: number; alt: number; steep: boolean }[] {
+  const rungs: { s: number; alt: number; steep: boolean }[] = [];
+  for (let i = 1; i < alts.length; i++) {
+    const a = alts[i - 1];
+    const b = alts[i];
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a === b) continue;
+    const up = b > a;
+    // Уровни k·step строго между a и b по ходу (на самой точке a — уже учтён на прошлом шаге).
+    const k0 = up ? Math.floor(a / step) + 1 : Math.ceil(a / step) - 1;
+    const k1 = up ? Math.floor(b / step) : Math.ceil(b / step);
+    for (let k = k0; up ? k <= k1 : k >= k1; k += up ? 1 : -1) {
+      const L = k * step;
+      if ((up && L > b) || (!up && L < b)) break;
+      rungs.push({ s: (i - 1 + (L - a) / (b - a)) * ds, alt: L, steep: false });
+    }
+  }
+  const run = step / limit;
+  for (let q = 1; q < rungs.length; q++) {
+    const [p, r] = [rungs[q - 1], rungs[q]];
+    if (p.alt !== r.alt && r.s - p.s < run) p.steep = r.steep = true;
+  }
+  return rungs;
+}
+
+/** Сколько тайлов промежуточных изолиний и штрихов держать: вблизи видно немногие, остальные — заново по надобности. */
+const NEAR_CACHE = 48;
+
 type View = { x0: number; y0: number; x1: number; y1: number };
 
 export class ReliefRenderer {
   private tiles = new Map<string, HTMLCanvasElement>();
   /** Изолинии по тайлам — те же тайлы, что у цвета. */
   private contours = new Map<string, ContourChunk[]>();
+  /** Промежуточные изолинии и штрихи крутых склонов — только вблизи, по тем же тайлам. */
+  private fine = new Map<string, ContourChunk[]>();
+  private ticks = new Map<string, Float32Array[]>();
   private of: Terrain | null = null;
 
   reset(): void {
     this.tiles.clear();
     this.contours.clear();
+    this.fine.clear();
+    this.ticks.clear();
     this.of = null;
   }
 
@@ -316,8 +471,7 @@ export class ReliefRenderer {
       const pad = Math.max(TILE_RES * 2, 16);
       for (let ty = Math.floor((d.y0 - pad) / TILE); ty <= Math.floor((d.y1 + pad) / TILE); ty++) {
         for (let tx = Math.floor((d.x0 - pad) / TILE); tx <= Math.floor((d.x1 + pad) / TILE); tx++) {
-          this.tiles.delete(`${tx}:${ty}`);
-          this.contours.delete(`${tx}:${ty}`);
+          for (const m of [this.tiles, this.contours, this.fine, this.ticks]) m.delete(`${tx}:${ty}`);
         }
       }
       // Вне правки высоты те же — тайл заново даст те же пиксели; отмывка (уклон по соседям) и сглаживание пикселей
@@ -396,40 +550,82 @@ export class ReliefRenderer {
     ctx.restore();
   }
 
+  /** Кэш по тайлам карты, видимым в view: чего нет — считает make; near — кэш «только вблизи», держит немного тайлов. */
+  private perTile<T>(cache: Map<string, T>, terrain: Terrain, view: View, make: (tx: number, ty: number) => T, near = false): T[] {
+    const out: T[] = [];
+    for (const [tx, ty] of this.visibleTiles(terrain, view)) {
+      const key = `${tx}:${ty}`;
+      let v = cache.get(key);
+      if (v === undefined) {
+        if (near && cache.size >= NEAR_CACHE) cache.clear();
+        v = make(tx, ty);
+        cache.set(key, v);
+      }
+      out.push(v);
+    }
+    return out;
+  }
+
   /**
    * Изолинии векторно, толщиной в пикселях экрана. При отдалении сначала гаснут обычные, потом каждая
-   * 5-я; с инструментом дороги (bright) — заметнее.
+   * 5-я; при сильном приближении появляются промежуточные (тоньше и бледнее, через fineContourStep). С инструментом
+   * дороги (bright) — всё заметнее, а вблизи ещё подписи высот на линиях и штрихи склонов круче steep (м/м; по
+   * умолчанию — предел уклона дороги): где штрихи, дорога вверх по склону напрямую не пройдёт.
    */
-  drawContours(ctx: CanvasRenderingContext2D, terrain: Terrain, view: View, zoom: number, bright: boolean): void {
+  drawContours(ctx: CanvasRenderingContext2D, terrain: Terrain, view: View, zoom: number, bright: boolean, steep = GRADE.road): void {
     if (!terrain.hasRelief) return;
     this.bind(terrain);
     const fade = (z0: number, z1: number) => Math.max(0, Math.min(1, (zoom - z0) / (z1 - z0)));
     const boost = bright ? 1.7 : 1;
     const layers = [
-      { major: false, alpha: 0.18 * boost * fade(0.3, 0.6), width: 1 },
-      { major: true, alpha: 0.26 * boost * fade(0.17, 0.4), width: 1.5 },
+      { kind: 'fine', alpha: 0.15 * boost * fade(1, 1.8), width: 0.9 },
+      { kind: 'minor', alpha: 0.18 * boost * fade(0.3, 0.6), width: 1 },
+      { kind: 'major', alpha: 0.26 * boost * fade(0.17, 0.4), width: 1.5 },
     ];
     if (layers.every((l) => l.alpha <= 0)) return;
+    const kindOf = (c: ContourChunk) => (c.fine ? 'fine' : c.major ? 'major' : 'minor');
     const visible: ContourChunk[] = [];
-    for (const [tx, ty] of this.visibleTiles(terrain, view)) {
-      const key = `${tx}:${ty}`;
-      let list = this.contours.get(key);
-      if (!list) {
-        list = contourTile(terrain, tx, ty);
-        this.contours.set(key, list);
-      }
-      for (const c of list) visible.push(c);
+    for (const list of this.perTile(this.contours, terrain, view, (tx, ty) => contourTile(terrain, tx, ty))) for (const c of list) visible.push(c);
+    if (layers[0].alpha > 0) {
+      for (const list of this.perTile(this.fine, terrain, view, (tx, ty) => contourTile(terrain, tx, ty, true), true)) for (const c of list) visible.push(c);
     }
+    const inView = (c: ContourChunk) => !(c.x1 < view.x0 || c.x0 > view.x1 || c.y1 < view.y0 || c.y0 > view.y1);
     // Точки сглаженной линии — через ~4 м; издалека берём каждую k-ю, чтобы между ними было ≥ 3 пикселей.
     const stride = Math.max(1, Math.floor(3 / (CONTOUR_SPACING * zoom))) * 2;
     ctx.save();
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
+    // Штрихи крутых склонов — под изолиниями: линии и подписи читаются поверх.
+    const tickAlpha = bright ? fade(1.1, 1.7) : 0;
+    if (tickAlpha > 0) {
+      const sets = this.perTile(this.ticks, terrain, view, (tx, ty) => steepTicks(terrain, tx, ty, steep), true);
+      const style = [
+        { alpha: 0.3, width: 0.9 },
+        { alpha: 0.42, width: 1.2 },
+        { alpha: 0.55, width: 1.5 },
+      ];
+      style.forEach((st, k) => {
+        ctx.beginPath();
+        for (const set of sets) {
+          const s = set[k];
+          for (let q = 0; q < s.length; q += 4) {
+            const x = s[q];
+            const y = s[q + 1];
+            if (x < view.x0 || x > view.x1 || y < view.y0 || y > view.y1) continue;
+            ctx.moveTo(x, y);
+            ctx.lineTo(s[q + 2], s[q + 3]);
+          }
+        }
+        ctx.strokeStyle = `rgba(128, 66, 34, ${st.alpha * tickAlpha})`;
+        ctx.lineWidth = st.width / zoom;
+        ctx.stroke();
+      });
+    }
     for (const layer of layers) {
       if (layer.alpha <= 0) continue;
       ctx.beginPath();
       for (const c of visible) {
-        if (c.major !== layer.major || c.x1 < view.x0 || c.x0 > view.x1 || c.y1 < view.y0 || c.y0 > view.y1) continue;
+        if (kindOf(c) !== layer.kind || !inView(c)) continue;
         const p = c.pts;
         ctx.moveTo(p[0], p[1]);
         for (let q = stride; q < p.length - 2; q += stride) ctx.lineTo(p[q], p[q + 1]);
@@ -438,6 +634,29 @@ export class ReliefRenderer {
       ctx.strokeStyle = `rgba(92, 78, 52, ${Math.min(0.6, layer.alpha)})`;
       ctx.lineWidth = layer.width / zoom;
       ctx.stroke();
+    }
+    // Подписи высот — на видимых линиях, вблизи и с инструментом дороги: «−25», «−30» лесенкой вверх по склону.
+    const labelAlpha = bright ? fade(1.6, 2.3) : 0;
+    if (labelAlpha > 0) {
+      ctx.font = `600 ${10 / zoom}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 3 / zoom;
+      ctx.strokeStyle = `rgba(255, 255, 255, ${0.75 * labelAlpha})`;
+      ctx.fillStyle = `rgba(78, 64, 40, ${0.9 * labelAlpha})`;
+      for (const c of visible) {
+        if (!inView(c) || layers.find((l) => l.kind === kindOf(c))!.alpha <= 0) continue;
+        const text = contourLabel(c.alt);
+        for (const at of labelSpots(c.pts)) {
+          if (at.x < view.x0 || at.x > view.x1 || at.y < view.y0 || at.y > view.y1) continue;
+          ctx.save();
+          ctx.translate(at.x, at.y);
+          ctx.rotate(at.angle);
+          ctx.strokeText(text, 0, 0);
+          ctx.fillText(text, 0, 0);
+          ctx.restore();
+        }
+      }
     }
     ctx.restore();
   }

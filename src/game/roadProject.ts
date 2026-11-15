@@ -12,7 +12,7 @@ import type { Network } from '../world/network';
 import { isOneWay, isRail, KMH_PER_UNIT, LEVEL_RUN, roadEdges, ROAD_MARGIN, type RoadSpec, specSpeed } from '../world/roadTypes';
 import { Builder, type DrawMode, type NetKind, type Plan, type RoadRequest, type Snap } from './build';
 import type { Game } from './game';
-import { autoLevels, designProfile, PROFILE_STEP } from './grade';
+import { autoLevels, designProfile, PROFILE_STEP, steepText } from './grade';
 import { cloneNetwork } from './railFragment';
 import { type NetEdit, onOldAxis, RoadBuilder, type RoadPlan, shortOfMoney } from './roadbuild';
 
@@ -441,8 +441,11 @@ export function autoLevelsAlong(
   for (let i = 0; i < n; i++) h[i] = ground(lut.pointAt(ds * i));
   const h0 = Number.isNaN(h[0]) ? 0 : h[0];
   const h1 = Number.isNaN(h[n - 1]) ? h0 : h[n - 1];
-  const prof = designProfile(h, ds, GRADE.road, { start: h0 + deckHeight(start.level), end: h1 + deckHeight(end.level) }, GRADE.smooth);
-  if (prof.steep) return { reason: `Подъём круче ${Math.round(GRADE.road * 100)}% — ведите дорогу длиннее` };
+  const z0 = h0 + deckHeight(start.level);
+  const z1 = h1 + deckHeight(end.level);
+  const prof = designProfile(h, ds, GRADE.road, { start: z0, end: z1 }, GRADE.smooth);
+  // С числом, как у обычной стройки: «Слишком крутой подъём: 11% (можно до 10%) — ведите дорогу длиннее».
+  if (prof.steep) return { reason: steepText((z1 - z0) / L, GRADE.road, 'ведите дорогу длиннее') };
   const pts = autoLevels(prof.z, h, ds, GRADE.roadDepth, LEVEL_RUN + 10, { start: start.fixed ? start.level : undefined, end: end.fixed ? end.level : undefined });
   // Отметка полотна по проекту — узлам моста и тоннеля (setDecks), чтобы их уклон был уклоном профиля.
   const zAt = zAlong(Array.from({ length: n }, (_, i) => lut.pointAt(ds * i)), prof.z);

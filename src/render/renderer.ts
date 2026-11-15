@@ -1,4 +1,4 @@
-import { STATION } from '../config';
+import { GRADE, STATION } from '../config';
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
@@ -57,7 +57,7 @@ import { drawHouseArt, hallFountain, houseReach } from './houseArt';
 import { drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
-import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
+import { altitudeText, contourLabel, fineContourStep, gradeRungs, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
 import { baseBox, baseSig, buildingCorridors, drawBases, drawClosures, drawOldRoad, drawMachines, drawParked, drawProjectShadows, drawProjects, drawnSpans, nodeReach, nodeStage, progressBoxes, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
@@ -150,6 +150,11 @@ export interface ToolOverlay {
   speedText?: string | null;
   /** Строим дорогу или путь: изолинии ярче, у курсора подпись высоты. */
   roadTool: boolean;
+  /**
+   * Дорогу не дают построить из-за уклона (подъём, насыпь, выемка): поперёк её превью — «лесенка» изолиний с высотами,
+   * ступеньки, где земля круче предела дороги, — красные (drawGradeRungs).
+   */
+  gradeMarks?: boolean;
   /** На сколько −/+ подняли или опустили конец дороги относительно начала («+14 м») — синим после высоты у курсора. */
   rise?: string | null;
   /** Курсор над мостом: вместо высоты земли — «высота моста 67 м · земля 55 м». */
@@ -720,6 +725,7 @@ export class Renderer {
     this.drawConstruction(game, view, o.crewTarget != null ? { type: 'project', id: o.crewTarget } : o.selection);
     this.drawLabels(game, view);
     this.drawOverlay(game, o);
+    if (o.gradeMarks) this.drawGradeRungs(game, o);
     this.drawStationBadges(game, view, o.selection?.type === 'station' ? o.selection.id : null);
     this.drawWarningMarks(game, view);
     this.drawFloaters(game);
@@ -3978,6 +3984,65 @@ export class Renderer {
       const lb = p.net.node(c.b).level;
       if (Math.max(0, layerOf(Math.min(la, lb), Math.max(la, lb))) === layer) this.tintCorridor(p.net, id, color);
     }
+  }
+
+  /**
+   * «Лесенка» на превью дороги, которой мешает уклон: поперёк полотна — где ось пересекает изолинии (через шаг
+   * промежуточных, fineContourStep), с высотой сбоку; ступеньки чаще, чем можно дороге, — красные. Видно, где и
+   * насколько круто, даже под заливкой превью. Только полотна на земле: у моста и тоннеля земля не в счёт.
+   */
+  private drawGradeRungs(game: Game, o: ToolOverlay): void {
+    const t = game.terrain;
+    if (!t.hasRelief) return;
+    // Оси, где рисовать: полотна превью обычной стройки (на земле) и участки проекта, что не выходят.
+    const axes: { lut: CurveLUT; edges: (s: number) => [number, number] }[] = [];
+    if (o.roads) {
+      const net = o.roads.net;
+      for (const id of o.roads.changed) {
+        const c = net.corridors.get(id);
+        if (c && net.node(c.a).level === 0 && net.node(c.b).level === 0) axes.push({ lut: c.lut, edges: (s) => edgesAt(c, s) ?? [-LANE_W, LANE_W] });
+      }
+    }
+    for (const seg of o.project?.segs ?? []) if (!seg.ok) axes.push({ lut: new CurveLUT(seg.curve), edges: () => [-seg.half, seg.half] });
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const step = fineContourStep(t.contourStep);
+    const ds = 2;
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.font = `600 ${10 / z}px sans-serif`;
+    ctx.textBaseline = 'middle';
+    for (const { lut, edges } of axes) {
+      const n = Math.max(2, Math.ceil(lut.length / ds) + 1);
+      const d = lut.length / (n - 1);
+      const alts = Array.from({ length: n }, (_, i) => t.altitudeAt(lut.pointAt(i * d)));
+      const off = (s: number, by: number) => add(lut.pointAt(s), scale(rightNormal(lut.tangentAt(s)), by));
+      for (const r of gradeRungs(alts, d, step, GRADE.road)) {
+        const e = edges(r.s);
+        const a = off(r.s, e[0] - 2);
+        const b = off(r.s, e[1] + 2);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.lineWidth = (r.steep ? 4.5 : 3.5) / z;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.stroke();
+        ctx.lineWidth = (r.steep ? 2.5 : 1.5) / z;
+        ctx.strokeStyle = r.steep ? '#c62f26' : 'rgba(70, 56, 30, 0.9)';
+        ctx.stroke();
+        // Высота — за правой кромкой, по ходу ступеньки.
+        const q = off(r.s, e[1] + 2 + 4 / z);
+        const text = contourLabel(r.alt);
+        // Подпись — от полотна наружу: кромка левее оси — текст влево от точки.
+        ctx.textAlign = q.x < b.x ? 'right' : 'left';
+        ctx.lineWidth = 3 / z;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.strokeText(text, q.x, q.y);
+        ctx.fillStyle = r.steep ? '#b3261e' : 'rgba(70, 56, 30, 0.95)';
+        ctx.fillText(text, q.x, q.y);
+      }
+    }
+    ctx.restore();
   }
 
   /** Полупрозрачная заливка асфальта полотна. */

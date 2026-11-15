@@ -420,6 +420,7 @@ describe('«Авто» на участке проекта', () => {
     const res = autoLevelsAlong(straightCubic({ x: 0, y: 0 }, { x: 100, y: 0 }), () => 0, { level: 0, fixed: true }, { level: 1, fixed: true });
     expect('reason' in res).toBe(false);
     const steep = autoLevelsAlong(straightCubic({ x: 0, y: 0 }, { x: 100, y: 0 }), (p) => p.x, { level: 0, fixed: true }, { level: 0, fixed: true });
-    expect('reason' in steep && steep.reason).toMatch(/Подъём/);
+    // Земля поднимается на метр за метр — 100%, с числом, как у обычной стройки.
+    expect('reason' in steep && steep.reason).toMatch(/^Слишком крутой подъём: 100% \(можно до 10%\)/);
   });
 });

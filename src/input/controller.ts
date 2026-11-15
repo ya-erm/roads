@@ -99,6 +99,8 @@ export type BrushSize = keyof typeof BRUSH_SIZES;
 const BRUSH_NAMES: Record<TerraformMode, string> = { raise: 'Поднять', lower: 'Опустить', flatten: 'Выровнять' };
 /** Пока кнопка зажата, кисть делает мазок раз в столько секунд. */
 const BRUSH_PERIOD = 0.12;
+/** Отказ стройки дороги из-за уклона: «Слишком крутой подъём», «Подъём круче 10%», «Насыпь 9 м», «Выемка 8 м» — на превью «лесенка». */
+const GRADE_PROBLEM = /подъём|насыпь|выемка/i;
 
 /** Что делает клик: инструмент вместе с его режимом. */
 export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane' | 'parallel' | 'copy' | 'paste' | 'trackMove' | 'base';
@@ -2648,6 +2650,7 @@ export class Controller {
     const price = plan.road?.project ? planPrice({ cost: plan.cost, project: plan.road.project }) : money(plan.cost);
     const total = segs || edits || v.draft || built ? `${price}${segs || v.draft ? ` · ${Math.round(plan.length)} м` : ''}` : '';
     const problem = !plan.ok && plan.reason && (segs || edits || v.draft || built) ? plan.reason : null;
+    o.gradeMarks = s.kind === 'road' && !!problem && GRADE_PROBLEM.test(problem);
     // «Со строительством» проект дороже свободных денег — строится, но подпись жёлтая: стройка пойдёт по мере денег.
     const short = plan.ok && total && plan.road?.project ? projectMoneyWarning({ cost: plan.cost, project: plan.road.project }, g.buildBudget) : null;
     const priced = (text: string): NonNullable<ToolOverlay['label']> =>
@@ -3201,6 +3204,7 @@ export class Controller {
             const from = rt.startLevel ?? 0;
             const levels = !rt.auto && (from !== 0 || this.level !== 0) ? ` · ${levelName(from)} → ${levelName(this.level)}` : '';
             this.showRoadPlan(o, plan, `${auto ? `${auto} · ` : ''}${planPrice(plan)} · ${Math.round(length)} м${rise}${levels}${aligned}${back}`);
+            o.gradeMarks = !plan.ok && GRADE_PROBLEM.test(plan.reason ?? '');
             if (!plan.ok && o.label && rt.auto) o.label.text += `${plan.reason === NO_MONEY ? '' : rise} · −/+ — высота конца`;
             else if (!plan.ok && o.label && /Подъём|Выемка|Насыпь/.test(plan.reason ?? '')) o.label.text += ' · «Авто» — мост или тоннель сам';
           }
