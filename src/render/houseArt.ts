@@ -2,6 +2,7 @@ import type { HouseForm, TownBuilding } from '../world/entities';
 import type { Footprint } from '../world/spatial';
 import { formOf } from '../world/townForms';
 import { Art, disc, METAL } from './industryArt';
+import { bench, flowerbed, fountain, lamp, playground as playArea, sportsBox, statue, trashPad } from './townDecor';
 
 /**
  * Дома городов, вид сверху (типы застройки — world/townForms.ts). Сцена дома рисуется в осях участка: начало — в
@@ -25,7 +26,6 @@ const SPROUTS = 'rgba(92,132,58,0.7)';
 const PAVING = 'rgba(184,176,162,0.62)';
 const GRAVEL = 'rgba(206,192,160,0.85)';
 const ASPHALT = 'rgba(112,114,120,0.62)';
-const SAND = '#e3cf98';
 const PLAZA = '#e6dcc6';
 /** Участок издали (lod 0): цвет застройки. */
 const FAR_LOT = 'rgba(226,212,184,0.8)';
@@ -330,27 +330,6 @@ function parking(a: Art, lot: Lot, x: number, y: number, w: number, h: number, i
   }
 }
 
-/** Детская площадка: песок, резиновое покрытие, горка и качели. */
-function playground(a: Art, lot: Lot, x: number, y: number, s: number): void {
-  if (!a.lod) return;
-  a.patch(x, y, s, s, SAND, 0.8);
-  a.patch(x + s * 0.5, y + s * 0.15, s * 0.4, s * 0.4, 'rgba(204,96,78,0.6)', 0.5);
-  if (!lot.fine || a.pass !== 2) return;
-  const c = a.c;
-  c.fillStyle = '#e04f3c';
-  c.fillRect(x + s * 0.15, y + s * 0.55, s * 0.18, s * 0.32);
-  c.strokeStyle = '#4c5966';
-  c.lineWidth = 0.25;
-  c.beginPath();
-  c.moveTo(x + s * 0.55, y + s * 0.2);
-  c.lineTo(x + s * 0.85, y + s * 0.2);
-  c.moveTo(x + s * 0.55, y + s * 0.5);
-  c.lineTo(x + s * 0.85, y + s * 0.5);
-  c.stroke();
-  c.fillStyle = '#3f74b5';
-  disc(c, x + s * 0.7, y + s * 0.75, s * 0.08);
-}
-
 /** Ряд деревьев вдоль линии (x0, y) → (x1, y), шаг step. */
 function treeRow(a: Art, lot: Lot, x0: number, x1: number, y: number, step: number, r: number, i: number): void {
   for (let x = x0 + step / 2, k = 0; x < x1; x += step, k++) yardTree(a, lot, x, y + (a.r(i + k) - 0.5), r * (0.85 + 0.3 * a.r(i + k + 20)), i + k + 40);
@@ -485,7 +464,80 @@ function courtyard(a: Art, lot: Lot): void {
   }
 }
 
-/** Панельный дом: длинный корпус с плоской крышей и подъездами вдоль улицы, за ним двор — площадка, стоянка, деревья. */
+type YardItem = 'play' | 'box' | 'park' | 'trash';
+/** Наборы двора — какой достанется дому, по хешу: площадка, коробка, стоянка, мусорка в разном порядке. */
+const YARD_SETS: YardItem[][] = [
+  ['play', 'park', 'trash', 'box'],
+  ['play', 'box', 'trash', 'park'],
+  ['park', 'play', 'trash'],
+  ['box', 'play', 'park', 'trash'],
+  ['trash', 'play', 'park', 'box'],
+];
+
+/**
+ * Двор многоэтажки в прямоугольнике (x, y, w, h): вдоль длинной стороны по очереди — детская площадка (песочница,
+ * горка, качели, карусель), спортивная коробка, стоянка, мусорная площадка; что не влезло — нет. Набор и порядок —
+ * по хешу дома, начало — с той или другой стороны. Вдоль дальнего края — деревья, где хватает места.
+ */
+function yardItems(a: Art, lot: Lot, x: number, y: number, w: number, h: number, seed: number): void {
+  const across = h > w;
+  const L = across ? h : w;
+  const D = across ? w : h;
+  if (D < 4.5 || L < 6) return;
+  const set = YARD_SETS[Math.floor(a.r(seed) * YARD_SETS.length)];
+  const flip = a.r(seed + 1) < 0.5;
+  const gap = 1.8;
+  let cur = 0;
+  const taken: [number, number, number][] = [];
+  for (const item of set) {
+    let iw = 0;
+    let ih = 0;
+    if (item === 'play') iw = ih = Math.min(D - 0.6, 10);
+    else if (item === 'box') {
+      ih = Math.min(D - 0.6, 12);
+      iw = Math.min(ih * 1.7, 20);
+      if (ih < 7.5) continue;
+    } else if (item === 'park') {
+      ih = Math.min(5.5, D - 0.4);
+      iw = Math.min(L * 0.4, 22);
+      if (iw < 8) continue;
+    } else {
+      iw = 4.6;
+      ih = 2.6;
+    }
+    if (iw < 4.5 && item === 'play') continue;
+    if (cur + iw > L) continue;
+    const u = flip ? L - cur - iw : cur;
+    // Стоянка и мусорка — у проезда (ближний край), площадки — посередине глубины.
+    const v = item === 'park' || item === 'trash' ? 0.2 : (D - ih) / 2;
+    const [ix, iy, w2, h2] = across ? [x + v, y + u, ih, iw] : [x + u, y + v, iw, ih];
+    if (item === 'play') playArea(a, ix, iy, Math.min(w2, h2), lot.b.id + seed, lot.fine);
+    else if (item === 'box') sportsBox(a, ix, iy, w2, h2, lot.b.id + seed, lot.fine);
+    else if (item === 'park') parking(a, lot, ix, iy, w2, h2, seed + 2);
+    else trashPad(a, ix, iy, w2, h2);
+    taken.push([u, u + iw, v + ih]);
+    cur += iw + gap;
+  }
+  // Деревья по дальнему краю — там, где площадки не доходят до него.
+  for (let u = 3, k = 0; u < L - 2; u += 6.5, k++) {
+    if (taken.some(([u0, u1, end]) => u > u0 - 2.4 && u < u1 + 2.4 && end > D - 4.2)) continue;
+    const r = 2 + a.r(seed + 40 + k) * 0.6;
+    const v = D - r - 0.2;
+    if (across) yardTree(a, lot, x + v, y + u, r, seed + 60 + k);
+    else yardTree(a, lot, x + u, y + v, r, seed + 60 + k);
+  }
+}
+
+/** Проезд к подъездам вдоль корпуса (полоса асфальта) и пятачки у каждого подъезда; n — подъездов, x0..x1 — корпус. */
+function driveway(a: Art, x0: number, x1: number, y: number, n: number): void {
+  if (!a.lod) return;
+  a.patch(x0 - 1, y + 1.2, x1 - x0 + 2, 3.2, ASPHALT, 0.6);
+  if (!a.d) return;
+  const step = (x1 - x0) / n;
+  for (let k = 0; k < n; k++) a.patch(x0 + step * (k + 0.5) - 1, y - 0.2, 2, 1.6, PAVING);
+}
+
+/** Панельный дом: длинный корпус с плоской крышей у улицы, подъезды — во двор; во дворе — проезд, площадки, стоянка, деревья. */
 function slab(a: Art, lot: Lot): void {
   const { W, H, b } = lot;
   const x0 = -W / 2;
@@ -500,24 +552,19 @@ function slab(a: Art, lot: Lot): void {
     const bd = Math.min(D, H - set - 1);
     const by = y0 + set;
     const L = W - 3;
-    const yard = by + bd + 1.5;
-    const depth = H / 2 - 1 - yard;
-    if (depth > 5) {
-      const pw = Math.min(W * 0.35, 22);
-      const left = a.r(1) < 0.5;
-      parking(a, lot, left ? x0 + 1.5 : -x0 - 1.5 - pw, yard + depth - Math.min(depth, 5.5), pw, Math.min(depth, 5.5), 2);
-      const s = Math.min(depth - 1, 9);
-      if (s >= 4) playground(a, lot, left ? -x0 - 2 - s : x0 + 2, yard + 0.5, s);
-      treeRow(a, lot, x0 + (left ? pw + 2 : 1), -x0 - (left ? 1 : pw + 2), H / 2 - 2.6, 7, 2.4, 30);
+    const sections = Math.max(1, Math.round(L / 15));
+    // Г-образный: второй корпус вдоль боковой границы — двор рядом с ним.
+    const ell = H >= 34 && W >= 50 && a.r(3) < 0.35;
+    const right = a.r(4) < 0.5;
+    const yx0 = x0 + 1.5 + (ell && !right ? bd + 1.5 : 0);
+    const yx1 = -x0 - 1.5 - (ell && right ? bd + 1.5 : 0);
+    const top = by + bd;
+    if (H / 2 - top > 4.5) {
+      driveway(a, yx0, yx1, top, sections);
+      yardItems(a, lot, yx0, top + 5.2, yx1 - yx0, H / 2 - 0.6 - top - 5.2, 30);
     }
-    // Г-образный: второй корпус вдоль боковой границы.
-    if (H >= 34 && W >= 50 && a.r(3) < 0.35) {
-      const right = a.r(4) < 0.5;
-      const len = H - set - bd - 3;
-      flat(a, right ? -x0 - 1.5 - bd : x0 + 1.5, by + bd, bd, len, z, b.roof, 15);
-    }
+    if (ell) flat(a, right ? -x0 - 1.5 - bd : x0 + 1.5, by + bd, bd, H - set - bd - 3, z, b.roof, 15);
     flat(a, x0 + 1.5, by, L, bd, z, b.roof, 15);
-    if (a.d && a.pass === 0) for (let k = 0; k < Math.max(1, Math.round(L / 15)); k++) a.patch(x0 + 1.5 + (L / Math.max(1, Math.round(L / 15))) * (k + 0.5) - 0.8, by - Math.min(set, 2.5), 1.6, Math.min(set, 2.5), PAVING);
   } else {
     // Узкий глубокий участок: корпус торцом к улице, двор сбоку.
     const left = a.r(1) < 0.5;
@@ -527,9 +574,8 @@ function slab(a: Art, lot: Lot): void {
     const yw = W - bw - 4.5;
     if (yw > 4) {
       parking(a, lot, yardX, y0 + 2, yw, Math.min(H * 0.35, 14), 2);
-      const s = Math.min(yw - 1, 9);
-      if (s >= 4) playground(a, lot, yardX + (yw - s) / 2, y0 + H * 0.5, s);
-      yardTree(a, lot, yardX + yw / 2, H / 2 - 3, 2.6, 21);
+      const yy = y0 + 2 + Math.min(H * 0.35, 14) + 1.5;
+      yardItems(a, lot, yardX, yy, yw, H / 2 - 1 - yy, 30);
     }
     flat(a, bx, y0 + 2.5, bw, H - 5, z, b.roof, 15);
   }
@@ -555,8 +601,10 @@ function tower(a: Art, lot: Lot): void {
     const pw = Math.min(W * 0.45, 30);
     parking(a, lot, left ? -x0 - 2 - pw : x0 + 2, y0 + 1.5, pw, 5.5, 3);
     parking(a, lot, left ? x0 + 2 : -x0 - 2 - pw, H / 2 - 7, pw, 5.5, 60);
-    const s = Math.min(10, W / 2 - T / 2 - 6);
-    if (s >= 5) playground(a, lot, left ? tx + T / 2 + 3 : tx - T / 2 - 3 - s, -s / 2, s);
+    // Двор с другой стороны от башни — между рядами деревьев: площадки, коробка, мусорка.
+    const cx0 = left ? tx + T / 2 + 3 : x0 + 2;
+    const cx1 = left ? -x0 - 2 : tx - T / 2 - 3;
+    yardItems(a, lot, cx0, y0 + 12.5, cx1 - cx0, H - 25, 50);
     treeRow(a, lot, x0 + 1, -x0 - 1, y0 + 9.5, 7, 2.2, 40);
     treeRow(a, lot, x0 + 1, -x0 - 1, H / 2 - 9.5, 7, 2.2, 80);
   } else {
@@ -567,7 +615,7 @@ function tower(a: Art, lot: Lot): void {
     if (rest > 6) {
       const px = left ? tx + T / 2 + 3 : x0 + 2;
       parking(a, lot, px, y0 + 1.5, rest, Math.min(5.5, H - 3), 3);
-      if (H > 14 && rest > 12) playground(a, lot, px + rest / 2 - 4, y0 + 8, Math.min(8, H - 10));
+      if (H > 14 && rest > 12) playArea(a, px + rest / 2 - 4, y0 + 8, Math.min(8, H - 10), b.id, lot.fine);
       treeRow(a, lot, px, px + rest, H / 2 - 2, 6.5, 2.2, 40);
     }
   }
@@ -852,25 +900,38 @@ function hall(a: Art, lot: Lot): void {
   const y0 = -H / 2;
   a.patch(x0 - 7, y0 - 7, W + 14, H + 14, PLAZA, 2, 'rgba(120,100,70,0.35)');
   if (a.d && a.pass === 0) {
+    // Брусчатка: ряды поперёк фасада, вблизи — швы со сдвигом.
     const c = a.c;
     c.strokeStyle = 'rgba(150,130,100,0.25)';
-    c.lineWidth = 0.2;
+    c.lineWidth = 0.15;
     c.beginPath();
-    for (let x = x0 - 4; x < -x0 + 7; x += 4) (c.moveTo(x, y0 - 6), c.lineTo(x, y0 + H * 0.35));
+    for (let y = y0 - 6; y < H / 2 + 7; y += 1.2) (c.moveTo(x0 - 6.5, y), c.lineTo(-x0 + 6.5, y));
+    if (lot.fine) {
+      let row = 0;
+      for (let y = y0 - 6; y < H / 2 + 6; y += 1.2, row++) for (let x = x0 - 6.5 + (row % 2 ? 0.9 : 0); x < -x0 + 6.5; x += 1.8) (c.moveTo(x, y), c.lineTo(x, y + 1.2));
+    }
     c.stroke();
   }
-  // Фонтан перед входом.
-  if (a.lod && a.pass === 0) {
-    const c = a.c;
-    c.fillStyle = '#c9bea6';
-    disc(c, 0, y0 + H * 0.13, 4.2);
-    c.fillStyle = '#7fb6d9';
-    disc(c, 0, y0 + H * 0.13, 3.4);
-    if (a.d) {
-      c.fillStyle = '#e8f4fa';
-      disc(c, 0, y0 + H * 0.13, 0.9);
-    }
+  // Перед входом — фонтан, по бокам — клумба и памятник; скамейки и фонари вокруг.
+  // Место и размер фонтана — те же, что у hallFountain (рябь на воде вблизи).
+  const fy = y0 + H * 0.13;
+  const fr = Math.min(4.6, W * 0.11);
+  fountain(a, 0, fy, fr, lot.fine);
+  const side = a.r(31) < 0.5 ? 1 : -1;
+  if (W >= 30) {
+    flowerbed(a, -side * W * 0.3, fy, 2.6, 1.6, b.id, lot.fine);
+    statue(a, side * W * 0.3, fy, 1.8);
   }
+  for (const s of [-1, 1]) bench(a, s * (fr + 1.6), fy, 0, 1, s);
+  for (const [lx, ly] of [
+    [-W / 2 - 4.5, y0 - 4.5],
+    [W / 2 + 4.5, y0 - 4.5],
+    [-W * 0.18, y0 - 5],
+    [W * 0.18, y0 - 5],
+    [-W / 2 - 4.5, H / 2 + 4.5],
+    [W / 2 + 4.5, H / 2 + 4.5],
+  ])
+    lamp(a, lx, ly, lot.fine);
   for (const [sx, sy] of [
     [-1, -1],
     [1, -1],
@@ -902,9 +963,24 @@ function hall(a: Art, lot: Lot): void {
   }
 }
 
+/** Фонтан перед ратушей (как в hall): середина в мире и радиус — для ряби на воде вблизи (renderer.drawMotion). */
+export function hallFountain(b: TownBuilding): { x: number; y: number; r: number } | null {
+  if (formOf(b) !== 'hall') return null;
+  const angle = (b.face ?? -1) === 1 ? b.fp.angle + Math.PI : b.fp.angle;
+  const ly = -b.fp.h / 2 + b.fp.h * 0.13;
+  return { x: b.fp.center.x - ly * Math.sin(angle), y: b.fp.center.y + ly * Math.cos(angle), r: Math.min(4.6, b.fp.w * 0.11) };
+}
+
 /** Храм в центре села: церковь на зелёной площади. */
 function temple(a: Art, lot: Lot): void {
-  a.patch(-lot.W / 2 - 6, -lot.H / 2 - 6, lot.W + 12, lot.H + 12, PLAZA, 2, 'rgba(120,100,70,0.3)');
+  const { W, H } = lot;
+  a.patch(-W / 2 - 6, -H / 2 - 6, W + 12, H + 12, PLAZA, 2, 'rgba(120,100,70,0.3)');
+  // Перед оградой — клумбы и скамейки у входа, фонари (памятник села — в сквере рядом, townParks).
+  for (const s of [-1, 1]) {
+    flowerbed(a, s * W * 0.3, -H / 2 - 3, 2.2, 1.3, lot.b.id + s, lot.fine);
+    bench(a, s * W * 0.14, -H / 2 - 3.6, 1, 0, -1);
+    lamp(a, s * (W / 2 + 3), -H / 2 - 3, lot.fine);
+  }
   church(a, lot, 1.15);
 }
 

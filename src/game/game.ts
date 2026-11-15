@@ -58,12 +58,15 @@ import {
   nearHighway,
   normalTowards,
   onRail,
+  parkSite,
   placeable,
   railNear,
   recountPopulation,
   streetFace,
   WorldContext,
 } from '../world/worldgen';
+import { nearPark, placeParks } from '../world/townParks';
+import { townTier } from '../world/townForms';
 import { START_ROADS } from '../world/startRoads';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
 import { prepareSettings } from '../scenario/generator';
@@ -1062,6 +1065,12 @@ export class Game implements BuildContext {
       this.index.add(st);
     }
     this.indexWarehouses();
+    // Старые сохранения без парков: парки и скверы — на пустом месте по сохранённым домам и дорогам (townParks.ts).
+    const towns = this.towns.filter((t) => !t.parks);
+    if (towns.length) {
+      const site = parkSite(this.worldContext());
+      for (const t of towns) placeParks(t, site);
+    }
     for (const line of save.lines) this.lines.set(line.id, line);
     for (const f of save.folders ?? []) this.folders.set(f.id, f);
     // Линия из несуществующей папки возвращается в корень списка.
@@ -6915,8 +6924,11 @@ export class Game implements BuildContext {
       town.growthAcc = Math.max(0, town.growthAcc - added * 20);
     }
     const before = town.population;
+    const tier = townTier(town);
     recountPopulation(town);
     measureTown(town);
+    // Село доросло до города, город — до большого: новые парки и скверы — на том пустом, что осталось.
+    if (townTier(town) !== tier) placeParks(town, parkSite(this.worldContext()));
     if (town.population > before && satisfaction >= 1)
       this.notify(`${town.name} растёт: ${town.population} жителей`, undefined, { kind: 'town', refs: [{ type: 'town', id: town.id }] });
   }
@@ -7002,7 +7014,8 @@ export class Game implements BuildContext {
     const clear = (from: Vec, dir: Vec, t0: number, t1: number, s0: number, s1: number, skip: Set<number>) => {
       for (let t = t0, i = 0; t <= t1; t += 8, i++) {
         const p = add(from, scale(dir, t));
-        if (this.index.at(p, half)) return false;
+        // Через парк и сквер город улицу не ведёт (townParks.ts).
+        if (this.index.at(p, half) || nearPark(this.towns, p, half)) return false;
         if (i % 2) continue;
         if (this.isWater(p, half) || railNear(this.net, p, G.spacing)) return false;
         if (t >= s0 && t <= s1 && nearRoad(p, G.spacing, skip)) return false;
@@ -7019,7 +7032,7 @@ export class Game implements BuildContext {
       let end: Anchor | null = null;
       for (let t = 12; t <= len * 2.5; t += 6) {
         const p = add(from, scale(dir, t));
-        if (this.index.at(p, half)) return null;
+        if (this.index.at(p, half) || nearPark(this.towns, p, half)) return null;
         if (nearRoad(p, 12, skip)) {
           if (t > len * 1.5) return null;
           end = anchorAt(net, p, 28);

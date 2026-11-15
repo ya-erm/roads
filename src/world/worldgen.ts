@@ -11,9 +11,10 @@ import type { Network } from './network';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
 import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, playerIndustries, townSizes, WorldProfile, WorldSettings } from './settings';
 import { industryCount, MINING_KINDS, shoreFits, terrainFits } from './sites';
-import { Footprint, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
+import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
 import { edgeOf, inDistrict, mergeBlocks, mergeTowers, townTier, zoneTown } from './townForms';
+import { onPark, placeParks, type ParkSite } from './townParks';
 import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
 
@@ -183,6 +184,7 @@ function playerWorld(ctx: WorldContext, towns: Town[], settings: WorldSettings, 
   for (const t of towns) measureTown(t);
   const { industries, deposits } = placePlayerWorld(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), settings, profile);
   layStartRoads(ctx, towns, industries, settings.seed);
+  plantTowns(ctx, towns);
   return { towns, industries, deposits };
 }
 
@@ -227,6 +229,7 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   // Места для городов и предприятий выбраны по всем улицам; дальше радиус города — по плотной застройке.
   for (const t of towns) measureTown(t);
   layStartRoads(ctx, towns, industries, settings.seed);
+  plantTowns(ctx, towns);
   return { towns, industries };
 }
 
@@ -283,6 +286,7 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   for (const t of towns) measureTown(t);
   layStartRoads(ctx, towns, industries, settings.seed);
+  plantTowns(ctx, towns);
   return { towns, industries };
 }
 
@@ -870,7 +874,8 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
       const normal = { x: -t.y * side, y: t.x * side };
       const center = add(p, scale(normal, hw + 5 + depth / 2));
       const fp: Footprint = { center, w: width, h: depth, angle: Math.atan2(t.y, t.x) };
-      if (!placeable(ctx, fp, seg.id)) continue;
+      // Парки и скверы (townParks.ts) рост обходит: дом на них не встаёт.
+      if (!placeable(ctx, fp, seg.id) || onPark(town, fp)) continue;
       const kind: 'res' | 'com' = closeness > 0.6 && rng.chance(0.6) ? 'com' : rng.chance(0.1) ? 'com' : 'res';
       const [color, roof] = rng.pick(kind === 'com' ? COM_COLORS : big ? BLOCK_COLORS : RES_COLORS);
       const floors = kind === 'com' ? rng.int(2, 6) : big ? rng.int(3, 6) : rng.int(1, 3);
@@ -899,7 +904,7 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
           h: d2,
           angle: fp.angle,
         };
-        if (placeable(ctx, rear, seg.id)) {
+        if (placeable(ctx, rear, seg.id) && !onPark(town, rear)) {
           const [rc, rr] = rng.pick(RES_COLORS);
           const back: TownBuilding = { ...b, id: ctx.nextId(), fp: rear, kind: 'res', floors: rng.int(1, 3), color: rc, roof: rr };
           ctx.index.add(back);
@@ -1012,6 +1017,92 @@ export function measureTown(town: Town): void {
   town.extent = Math.max(town.radius, far + 10);
   // Типы застройки новым домам (и домам старых сохранений) — по месту в городе нынешнего размера (townForms.ts).
   zoneTown(town);
+}
+
+/** Городская улица для парков: на земле, не магистраль и не съезд. */
+function parkStreet(roads: LaneNet, c: Corridor): boolean {
+  return !isHighway(c) && roads.node(c.a).level === 0 && roads.node(c.b).level === 0;
+}
+
+/** Место для парков по миру партии (townParks.ts): дома и строения из индекса, дороги, вода, пути. */
+export function parkSite(ctx: WorldContext): ParkSite {
+  const { roads, terrain, index } = ctx;
+  const shore = (p: Vec, cap: number) => {
+    if (!terrain.isWater(p, cap)) return cap;
+    let lo = 0;
+    let hi = cap;
+    for (let k = 0; k < 6; k++) {
+      const m = (lo + hi) / 2;
+      if (terrain.isWater(p, m)) hi = m;
+      else lo = m;
+    }
+    return (lo + hi) / 2;
+  };
+  return {
+    fits(fp, nearWater = false) {
+      if (!terrain.inBounds(fp.center, 30) || index.overlaps(fp, 3)) return false;
+      if (nearWater) {
+        if (terrain.isWater(fp.center, 1) || footprintCorners(fp).some((c) => terrain.isWater(c, 1))) return false;
+      } else if (terrain.isWater(fp.center, footprintRadius(fp) + 2)) return false;
+      if (onRail(ctx.rail, fp, RAIL_BUFFER)) return false;
+      // Дороги: точки оси через 3 м не ближе полуширины полотна с запасом — по длине дорог, а не по площади участка
+      // (большой парк — сотни точек контура против десятков точек оси).
+      const R = footprintRadius(fp);
+      for (const seg of roads.corridorsNear(fp.center, R + 40)) {
+        const hw = corridorHalf(seg) + 2;
+        const lut = seg.lut;
+        for (let s = 0; s <= seg.length; s += 3) {
+          const p = lut.pointAt(Math.min(s, seg.length));
+          if (Math.abs(p.x - fp.center.x) > R + hw || Math.abs(p.y - fp.center.y) > R + hw) continue;
+          if (pointInFootprint(p, fp, hw)) return false;
+        }
+      }
+      return !roads.nodesNear(fp.center, R).some((n) => pointInFootprint(n.pos, fp, 6));
+    },
+    corners(center, r) {
+      const out: { pos: Vec; dirs: number[]; half: number }[] = [];
+      for (const n of roads.nodesNear(center, r)) {
+        if (n.level !== 0 || n.corridors.length < 2) continue;
+        const cs = n.corridors.map((id) => roads.corridor(id));
+        if (!cs.every((c) => parkStreet(roads, c))) continue;
+        out.push({ pos: n.pos, dirs: roads.ends(n).map((e) => angleOf(e.away)), half: Math.max(...cs.map(corridorHalf)) });
+      }
+      return out;
+    },
+    curbs(center, r, step) {
+      const out: { p: Vec; t: Vec; half: number }[] = [];
+      for (const seg of roads.corridorsNear(center, r)) {
+        if (!parkStreet(roads, seg)) continue;
+        for (let s = 10; s < seg.length - 10; s += step) {
+          const p = seg.lut.pointAt(s);
+          if (dist(p, center) > r) continue;
+          out.push({ p, t: seg.lut.tangentAt(s), half: halfAtS(seg, s) });
+        }
+      }
+      return out;
+    },
+    angle(p) {
+      // Как streetAngle, но ближе: парк у центра — у своей улицы, а не у дальней.
+      let best = Infinity;
+      let angle = 0;
+      for (const seg of roads.corridorsNear(p, 90)) {
+        const hit = seg.lut.closest(p);
+        if (hit.d < best) {
+          best = hit.d;
+          angle = angleOf(seg.lut.tangentAt(hit.s));
+        }
+      }
+      return angle;
+    },
+    shore,
+    houses: (p, r) => index.near(p, r).filter((s) => s.type === 'building' && dist(s.fp.center, p) < r).length,
+  };
+}
+
+/** Парки и скверы всем городам — когда мир построен (после улиц, домов, предприятий и дорог между городами). */
+function plantTowns(ctx: WorldContext, towns: Town[]): void {
+  const site = parkSite(ctx);
+  for (const t of towns) placeParks(t, site);
 }
 
 function placeIndustries(ctx: WorldContext, towns: Town[], density: number, settings: WorldSettings): Industry[] {

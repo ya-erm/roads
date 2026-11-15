@@ -24,7 +24,7 @@ import { trainWagonFills } from '../sim/wagons';
 import { cargoImage, walkImage } from '../ui/cargoIcons';
 import { BIOMES } from '../world/biomes';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, type IndustryKind } from '../world/cargo';
-import { Annex, Industry, isBusTerminal, Station, TownBuilding } from '../world/entities';
+import { Annex, Industry, isBusTerminal, Station, TownBuilding, TownPark } from '../world/entities';
 import type { IndustryPlan } from '../game/enterprises';
 import {
   depositBox,
@@ -53,7 +53,8 @@ import { drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
 import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
-import { drawHouseArt, houseReach } from './houseArt';
+import { drawHouseArt, hallFountain, houseReach } from './houseArt';
+import { drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
@@ -463,8 +464,12 @@ export class Renderer {
     /** Будущие дороги проектов: полотна и узлы по отпечатку их геометрии (`c12`, `n7`). */
     projectItems: new SceneDiff<string>(),
     bases: new SceneDiff(),
-    towns: new Map<number, { list: TownBuilding[] | null; n: number; diff: SceneDiff }>(),
+    towns: new Map<number, { list: TownBuilding[] | null; n: number; parks: TownPark[] | null; np: number; diff: SceneDiff }>(),
+    /** Аллеи и фонари вдоль улиц городов (parkArt.streetGreen) — по полотну. */
+    alleys: new SceneDiff(),
   };
+  /** Аллеи и фонари: с какими дорогами, строениями и радиусами городов посчитаны. */
+  private alleys = { key: '', things: '', lines: [] as StreetGreen[], cache: new Map<number, { sig: string; line: StreetGreen | null }>() };
   /** Ход работ на строящихся полотнах в плитках (drawnSpans) — при той же форме (projectSig): шаг сбрасывает только край работ. */
   private progress = new Map<number, { sig: string; spans: Spans }>();
   /** С чем сверены слепки: партия, карта, вид, сеть дорог на карте и её подсветка, версия путей. */
@@ -534,6 +539,8 @@ export class Renderer {
       d.clear();
     this.diffs.projectItems.clear();
     this.diffs.towns.clear();
+    this.diffs.alleys.clear();
+    this.alleys = { key: '', things: '', lines: [], cache: new Map() };
     this.progress.clear();
     this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1, full: null, fullVersion: -1 };
   }
@@ -769,6 +776,8 @@ export class Renderer {
     const groundRails = segs.filter((x) => this.cache.get(x.id)!.maxLevel <= 0.01 && !x.build);
     // Месторождения и копоть у вредных предприятий — на земле, под путями и дорогами (enterpriseArt).
     this.drawEnterpriseGround(game, view);
+    // Парки и скверы — под дорогами: дорога игрока через парк ложится поверх (parkArt).
+    this.drawParks(game, view);
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
     drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
@@ -787,6 +796,8 @@ export class Renderer {
     if (o.speedmap) this.drawRailSpeedmap(groundRails);
     if (o.speedmap) this.drawSpeedmap(game, 0, view);
     this.drawCurveSigns(game, view, o.staleSigns, 0);
+    // Аллеи вдоль проспектов и фонари вдоль улиц — поверх дорог (тень на асфальт), под домами.
+    drawStreetGreen(ctx, this.alleys.lines, view, this.camera.zoom, BIOMES[game.terrain.biome].palette.trees);
     this.drawStill(game, view);
     ctx.restore();
   }
@@ -1073,19 +1084,38 @@ export class Renderer {
         }),
       );
     }
-    // Дома города — когда его список заменили или он вырос.
+    // Дома, парки и скверы города — когда их список заменили или он вырос.
     for (const town of game.towns) {
       let rec = this.diffs.towns.get(town.id);
-      if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, diff: new SceneDiff() }));
-      if (rec.list === town.buildings && rec.n === town.buildings.length) continue;
+      if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, parks: null, np: -1, diff: new SceneDiff() }));
+      const parks = town.parks ?? null;
+      if (rec.list === town.buildings && rec.n === town.buildings.length && rec.parks === parks && rec.np === (parks?.length ?? 0)) continue;
       rec.list = town.buildings;
       rec.n = town.buildings.length;
+      rec.parks = parks;
+      rec.np = parks?.length ?? 0;
       add(
         rec.diff.update((put) => {
           // Рамка — с тенью и площадью у ратуши (houseArt): они выходят за контур дома.
           for (const b of town.buildings) put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${b.color}|${b.roof}|${b.form}|${b.face}`, grow(fpBox(b.fp), houseReach(b)));
+          // Парки — отрицательными номерами (id парка — не id сущности).
+          for (const p of parks ?? []) put(-p.id - 1, `${fpSig(p.fp)}|${p.kind}`, grow(fpBox(p.fp), PARK_REACH));
         }),
       );
+    }
+    // Аллеи и фонари: по дорогам, остановкам и строениям у бордюра, черте городов (с шагом 50 м — не каждый месяц).
+    // Полотна, что не менялись, — из кэша (streetGreen); новая станция или предприятие — пересчёт всех.
+    const things = `${game.stations.size}|${game.industries.length}|${game.construction.crews.bases.size}`;
+    const alleyKey = `${game.roads.net.version}|${things}|${game.towns.map((t) => Math.floor(t.radius / 50)).join(',')}`;
+    if (alleyKey !== this.alleys.key) {
+      this.alleys.key = alleyKey;
+      // Кэш — по полотнам; снесённых накопилось много — с чистого листа.
+      if (things !== this.alleys.things || this.alleys.cache.size > game.roads.net.corridors.size * 2 + 200) this.alleys.cache.clear();
+      this.alleys.things = things;
+      const index = game.index;
+      const towns = game.towns.map((t) => ({ center: t.center, radius: Math.floor(t.radius / 50) * 50 }));
+      this.alleys.lines = streetGreen(game.roads.net, towns, (p, r) => index.at(p, r) !== null, this.alleys.cache);
+      add(this.diffs.alleys.update((put) => this.alleys.lines.forEach((l) => put(l.id, l.sig, l.box))));
     }
     add(
       this.diffs.industries.update((put) => {
@@ -2243,6 +2273,18 @@ export class Renderer {
     }
   }
 
+  /** Парки, скверы, сквер с памятником и набережная городов (parkArt) — в плитки кэша, под дорогами. */
+  private drawParks(game: Game, view: Box): void {
+    const trees = BIOMES[game.terrain.biome].palette.trees;
+    for (const town of game.towns) {
+      for (const p of town.parks ?? []) {
+        const r = Math.hypot(p.fp.w, p.fp.h) / 2 + PARK_REACH;
+        if (p.fp.center.x + r < view.x0 || p.fp.center.x - r > view.x1 || p.fp.center.y + r < view.y0 || p.fp.center.y - r > view.y1) continue;
+        drawParkArt(this.ctx, p, this.camera.zoom, trees);
+      }
+    }
+  }
+
   /** Месторождения и копоть земли у вредных предприятий — в плитки кэша (режим «Строит игрок»). */
   private drawEnterpriseGround(game: Game, view: Box): void {
     const ctx = this.ctx;
@@ -2259,6 +2301,24 @@ export class Renderer {
     const inView = (fp: Footprint) =>
       fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
     const time = performance.now() / 1000;
+    // Фонтаны у ратуш и в парках — рябь на воде, только при сильном приближении (дёшево: пара дуг на фонтан).
+    if (z > FOUNTAIN_ZOOM) {
+      const seen = (p: { x: number; y: number }) => p.x > view.x0 - 10 && p.x < view.x1 + 10 && p.y > view.y0 - 10 && p.y < view.y1 + 10;
+      const list: { x: number; y: number; r: number }[] = [];
+      for (const town of game.towns) {
+        if (dist(town.center, { x: (view.x0 + view.x1) / 2, y: (view.y0 + view.y1) / 2 }) > (town.extent ?? town.radius) + (view.x1 - view.x0)) continue;
+        for (const b of town.buildings) {
+          if (b.kind !== 'landmark') continue;
+          const f = hallFountain(b);
+          if (f && seen(f)) list.push(f);
+        }
+        for (const p of town.parks ?? []) for (const f of parkFountains(p)) if (seen(f)) list.push(f);
+      }
+      if (list.length) {
+        drawFountainRipples(this.ctx, list, time);
+        this.ambient = true;
+      }
+    }
     for (const ind of game.industries) {
       // Дым, огонь и качалки движутся и на паузе (по часам, а не по времени игры).
       // Фон: кадры для него — реже (AMBIENT_FPS, src/render/redraw.ts).
