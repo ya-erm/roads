@@ -4081,6 +4081,9 @@ button.pax-dest.off:hover {
   font-weight: 600;
   color: var(--muted);
   text-align: right;
+  /* «Этот месяц» — одной строкой: колонка сумм не уже заголовка, сужается колонка статей. */
+  white-space: nowrap;
+  padding: 0 3px 2px;
 }
 
 .ledger td {
