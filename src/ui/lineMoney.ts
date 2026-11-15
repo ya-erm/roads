@@ -1,10 +1,9 @@
+import { money } from '../core/moneyText';
 import type { Line } from '../game/transport';
 import { chevronSvg } from './icons';
 
 /** Деньги линии, которые показывает карточка маршрута. */
 export type LineMoney = Pick<Line, 'revenueLast' | 'costLast' | 'revenueMonth' | 'revenueTotal'>;
-
-const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
 
 /**
  * Деньги в сводке карточки линии (ячейки сетки .kv): на виду — прибыль за прошлый месяц

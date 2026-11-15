@@ -3,6 +3,7 @@
  * (доставки, производство, население, финансы месяца), а не по факту постройки.
  */
 import { ENTERPRISE } from '../config';
+import { money } from '../core/moneyText';
 import type { Game } from '../game/game';
 import { CARGO, type CargoType, INDUSTRY_TYPES } from '../world/cargo';
 import { isActive, townGap } from '../world/enterprise';
@@ -17,7 +18,7 @@ export const receiverKey = (ref: Ref, cargo: string) => `${ref.type}:${ref.id}:$
 export const makerKey = (industry: number, cargo: string) => `${industry}:${cargo}`;
 
 const fmt = (n: number) => Math.round(n).toLocaleString('ru-RU');
-export const moneyText = (n: number) => `$${fmt(n)}`;
+export const moneyText = money;
 const monthsText = (n: number) => `${n} ${n === 1 ? 'месяц' : n < 5 ? 'месяца' : 'месяцев'}`;
 /** «1 новый город», «2 новых города», «5 новых предприятий». */
 function newPlaces(n: number, what: 'town' | 'industry'): string {

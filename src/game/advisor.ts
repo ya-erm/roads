@@ -6,6 +6,7 @@
  * действие (купить машину, добавить пост, взять кредит). Только чтение: действия выполняет HUD.
  */
 import { CONSTRUCTION, ECONOMY, STATION, STORAGE } from '../config';
+import { money } from '../core/moneyText';
 import type { Vec } from '../core/vec';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
@@ -90,9 +91,7 @@ export const STUCK_SECONDS = 30;
 export const QUEUE_SECONDS = 15;
 
 const LEVEL_ORDER: Record<AdviceLevel, number> = { alert: 0, warn: 1, tip: 2 };
-const fmt = (n: number) => Math.round(n).toLocaleString('ru-RU');
-const money = (n: number) => `${Math.round(n) < 0 ? '−' : ''}$${fmt(Math.abs(n))}`;
-const seconds = (s: number) => (s >= 90 ? `${Math.round(s / 60)} мин` : `${Math.round(s)} с`);
+const fmt = (n: number) => Math.round(n).toLocaleString('ru-RU');const seconds = (s: number) => (s >= 90 ? `${Math.round(s / 60)} мин` : `${Math.round(s)} с`);
 const plural = (n: number, one: string, few: string, many: string) =>
   n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? few : many;
 const cars = (n: number) => `${n} ${plural(n, 'машина', 'машины', 'машин')}`;

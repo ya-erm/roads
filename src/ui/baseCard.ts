@@ -14,14 +14,13 @@
  * Подсказки — data-tip (не системные).
  */
 import { CONSTRUCTION } from '../config';
+import { money } from '../core/moneyText';
 import type { Brigade } from '../game/crews';
 import type { Game } from '../game/game';
 import { baseRemoveText, baseSvg, buildSvg, km, withProjectLink } from './constructionUi';
 import { crewDoing } from './projectCard';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
-
 /** Сколько ближних строек показывать. */
 const NEAR_MAX = 4;
 

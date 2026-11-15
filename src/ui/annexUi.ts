@@ -3,11 +3,10 @@
  * «Пристройка» (значок, цена) — она включает размещение на карте в зоне вокруг предприятия.
  */
 import { ANNEX, ECONOMY, MONTH_LENGTH } from '../config';
+import { money } from '../core/moneyText';
 import { durationText } from '../core/timeText';
 import { annexReady, growthCap } from '../game/annexes';
 import type { Industry } from '../world/entities';
-
-const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
 
 /** Значок пристройки: здание с плюсом. */
 export function annexSvg(size = 20): string {

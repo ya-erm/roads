@@ -4,15 +4,14 @@
  * и сколько секунд осталось, «⏸ Пауза» и «✕ Отмена», клик — к проекту. Подсказки — data-tip (не системные).
  */
 import { CONSTRUCTION } from '../config';
+import { money } from '../core/moneyText';
 import { durationText } from '../core/timeText';
 import { type ProjectInfo, projectName } from '../game/construction';
 import type { Game } from '../game/game';
 import type { WorkTrains } from '../game/workTrains';
 import { BUILD_MODES, type BuildMode } from '../world/settings';
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
-/** Расстояние коротко: «6 км», «2,5 км», «800 м». */
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');/** Расстояние коротко: «6 км», «2,5 км», «800 м». */
 export const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(m % 1000 ? 1 : 0).replace('.', ',')} км` : `${Math.round(m)} м`);
 
 /**

@@ -1,13 +1,12 @@
 /** Подписи у курсора при стройке: цена и что не так. */
+import { money } from '../core/moneyText';
 import { durationText } from '../core/timeText';
+
+/** Деньги в подсказке: «$12 345», в минусе «−$500» (общий формат — core/moneyText). */
+export { money };
 
 /** Причина отказа, когда стройка дороже денег на счету. */
 export const NO_MONEY = 'Не хватает денег';
-
-/** Деньги в подсказке: «$12 345». */
-export function money(n: number): string {
-  return `$${Math.round(n).toLocaleString('ru-RU')}`;
-}
 
 /**
  * Цена стройки дороги у курсора. «Со строительством» новая дорога — проект: «🏗 $8 400 · ⏳ 25 с» — сколько

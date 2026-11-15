@@ -165,7 +165,7 @@ import { crewCardHtml } from './crewCard';
 import { workTrainCardHtml } from './workTrainCard';
 import { carTripHtml } from './carTrip';
 import { SERVICES } from '../game/services';
-import { planPrice, projectMoneyWarning } from '../input/labels';
+import { money, planPrice, projectMoneyWarning } from '../input/labels';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, nextScenarioSettings, rulesHtml, withSeed } from './newGame';
 
@@ -322,8 +322,6 @@ const ruleWaitId = (r: StopRule): WaitId => (r.wait === 'full' ? (r.maxWait === 
 
 /** Вариант главной дороги с кнопки карточки перекрёстка (data-v) — как `mainPair` узла: null — «Авто», [] — равнозначный. */
 const mainChoice = (v: string | undefined): number[] | null => (v === 'auto' || !v ? null : v === 'none' ? [] : v.split(',').map(Number));
-
-const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
 
 /** Столбики «доход / расход» по месяцам — для компании и для линии. */
 function incomeChart(months: { label: string; income: number; expense: number }[], H = 90): string {

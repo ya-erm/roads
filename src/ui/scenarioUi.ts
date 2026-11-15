@@ -4,6 +4,7 @@
  * обрабатывает Hud. Объясняем картинками: значки заданий и грузов, полоски, медали; текст — подписи и title.
  */
 import { ECONOMY, MONTH_LENGTH } from '../config';
+import { money } from '../core/moneyText';
 import { clockText, durationText, leftText } from '../core/timeText';
 import type { Game } from '../game/game';
 import { isIndustry, resolve } from '../scenario/analysis';
@@ -57,9 +58,7 @@ import {
 import { randomCardHtml } from './newGame';
 import { timelapseItemHtml } from './timelapseButton';
 
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
-const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
-const num = (n: number) => Math.round(n).toLocaleString('ru-RU');
+const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);const num = (n: number) => Math.round(n).toLocaleString('ru-RU');
 
 /** «запись / записи / записей» — по числу записей журнала. */
 function entriesWord(n: number): string {

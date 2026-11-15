@@ -11,6 +11,7 @@
  * Подсказки — data-tip (не системные).
  */
 import { CONSTRUCTION } from '../config';
+import { money } from '../core/moneyText';
 import { durationText } from '../core/timeText';
 import { type ProjectInfo, projectName } from '../game/construction';
 import type { Brigade } from '../game/crews';
@@ -18,9 +19,7 @@ import type { Game } from '../game/game';
 import { reverseGreen } from '../game/workSignals';
 import { basePrices, basePriceText, buildSvg, km, railTrainStatus } from './constructionUi';
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const money = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
-const meters = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1).replace('.', ',')} км` : `${Math.round(m)} м`);
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');const meters = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1).replace('.', ',')} км` : `${Math.round(m)} м`);
 const pct = (f: number) => Math.max(0, Math.min(100, Math.floor(f * 100)));
 
 /** Этапы участка: значок-плитка, название, цвет полоски (как на карте: отсыпка, покрытие, разметка). */

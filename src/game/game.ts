@@ -21,6 +21,7 @@ import {
   TOWN_TRAFFIC,
 } from '../config';
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
+import { money as usd } from '../core/moneyText';
 import { Rng } from '../core/rng';
 import { add, angleDiff, angleOf, cross, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, insideRuns, splitCorridor } from '../lanes/edit';
@@ -268,9 +269,6 @@ export interface LaneEnd {
 
 /** Сколько последних строек можно отменить. */
 const UNDO_DEPTH = 30;
-
-/** Деньги в уведомлении: «$12 345». */
-const usd = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
 
 /** Чем ездят к станции: к вокзалу — поезда, к автостанции и остановке — машины. */
 export function stationMode(st: Pick<Station, 'kind'>): LineMode {

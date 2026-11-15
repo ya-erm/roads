@@ -1,3 +1,4 @@
+import { money as moneyText } from '../core/moneyText';
 import type { Camera } from '../render/camera';
 import { testPageName } from '../testpages/route';
 import { Game, SAVE_VERSION, SaveData } from './game';
@@ -173,7 +174,7 @@ export async function listSaves(): Promise<SaveEntry[]> {
 export async function writeSave(game: Game, name: string, camera?: Camera, id?: string, backup?: boolean): Promise<SaveEntry> {
   const data = game.toSave();
   if (camera) data.view = { x: camera.x, y: camera.y, zoom: camera.zoom };
-  const money = `$${Math.round(game.money).toLocaleString('ru-RU')}`;
+  const money = moneyText(game.money);
   const entry: SaveEntry = {
     id: id ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
     name: name.trim() || 'Без имени',

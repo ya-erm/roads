@@ -3,6 +3,7 @@
  * действие), значок с числом на кнопке «Советы». Подсказки — свои (data-tip), не системные.
  */
 import { CONSTRUCTION, STATION, STORAGE } from '../config';
+import { money } from '../core/moneyText';
 import type { Advice, AdviceFix, AdviceKind, AdviceLevel } from '../game/advisor';
 import type { Game } from '../game/game';
 import { MODELS } from '../game/transport';
@@ -11,8 +12,6 @@ import { lineKindSvg } from './icons';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const fmt = (n: number) => Math.round(n).toLocaleString('ru-RU');
-const money = (n: number) => `${Math.round(n) < 0 ? '−' : ''}$${fmt(Math.abs(n))}`;
-
 /** Значок вида совета (кроме тех, где значок — груз). */
 const KIND_GLYPH: Record<AdviceKind, string> = {
   debt: '💸',
