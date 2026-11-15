@@ -624,6 +624,13 @@ export interface SlotOptions {
   ext?: number;
   /** На следующем участке не начатые тоже ждут на нём самом (ahead). */
   extAhead?: boolean;
+  /**
+   * Начало участка — площадка перекрёстка с готовой дорогой (по ней ездят): не начатые (ahead) ждут не ближе стольких
+   * метров от начала — за площадкой, а не посреди перекрёстка.
+   */
+  start?: number;
+  /** То же у начала следующего участка (ext, extAhead): кончившие едут ждать за его площадкой. */
+  extStart?: number;
 }
 
 /**
@@ -635,15 +642,21 @@ export interface SlotOptions {
  * не наезжает на кончившего: если на следующем участке ждут на нём самом (ext, extAhead), кончивший уступает — едет
  * вперёд к своему месту ожидания там; иначе догоняющий встаёт за ним. Всё непрерывно по ходу этапов (at — этапы,
  * spansOf, или по-старому одно done): машина нигде не прыгает и не едет назад, а места у конца участка совпадают с
- * местами ожидания у начала следующего.
+ * местами ожидания у начала следующего. Начало участка — перекрёсток с готовой дорогой (start, extStart): ждут за его
+ * площадкой, а кончивший свой этап на этом участке сразу едет туда, к своему месту ожидания на следующем (место
+ * впереди скачком — машина доезжает до него своим ходом: Construction.trackCrews).
  */
 export function stageSlots(at: number | readonly number[], L: number, o: SlotOptions = {}): [number, number, number] {
   const f = typeof at === 'number' ? stageSpans(at, L) : at;
   const sp = [crewSpacing(0), crewSpacing(1)];
-  const wait = o.ahead ? [sp[0] + sp[1], sp[1], 0] : [0, -sp[0], -sp[0] - sp[1]];
+  const queue = [sp[0] + sp[1], sp[1], 0];
+  const wait = o.ahead ? queue.map((q) => q + (o.start ?? 0)) : [0, -sp[0], -sp[0] - sp[1]];
   const push = (o.ext ?? 0) > 0 && !!o.extAhead;
   const far = push ? L + (o.ext ?? 0) : Math.min(L, o.end ?? L);
   const y = f.map((x, k) => Math.min(Math.max(x, wait[k]), far));
+  // Следующий участок начинается перекрёстком: кончивший — сразу к месту ожидания за его площадкой.
+  const es = o.extStart ?? 0;
+  if (push && es > 0) for (let k = 0; k < 3; k++) if (f[k] >= L - 1e-6) y[k] = Math.min(far, Math.max(y[k], L + es + queue[k]));
   // Дальше на следующем участке ждут на нём — кончивший уступает догоняющему (вперёд); иначе догоняющий встаёт за ним.
   if (push) for (let k = 1; k >= 0; k--) y[k] = Math.min(far, Math.max(y[k], y[k + 1] + sp[k]));
   y[1] = Math.min(y[1], y[0] - sp[0]);
@@ -870,6 +883,39 @@ export function laneArcs(lane: CrewLane, target: readonly number[], time: number
     const dt = Math.max(0, time - (lane.t?.[k] ?? t0));
     return Math.min(advance(s0, dt, zones), Math.max(x, s0));
   });
+}
+
+/**
+ * Место машины ушло вперёд скачком (stageSlots: кончивший этап едет ждать за площадкой перекрёстка на следующем
+ * участке), а машина уже стояла у своего места и шла за ним (laneArcs отдал бы новое место сразу) — она не
+ * перескакивает, а едет туда своим ходом с того места, где была в прошлый такт: откуда (from) и когда (t) — оттуда и
+ * тогда. was — места машин на этой же полосе в прошлый такт и его время (нет — не знаем, скачок не ловим). Каждый такт
+ * (Construction.trackCrews); ответ — места машин сейчас.
+ */
+export function holdJumps(lane: CrewLane, target: readonly number[], was: { time: number; s: readonly number[] } | null, time: number): number[] {
+  const now = laneArcs(lane, target, time);
+  if (!was || lane.turn?.wait) return now;
+  const dt = Math.max(0, time - was.time);
+  const n = Math.min(now.length, was.s.length, laneCars(lane));
+  let held = false;
+  for (let k = 0; k < n; k++) {
+    if (now[k] - was.s[k] <= LANE_SPEED * dt + 0.5) continue;
+    if (!lane.from || lane.t0 === undefined) {
+      // Все были на местах (from нет) — теперь все едут от тех мест; не скакнувшие доедут до своих сразу.
+      lane.from = [...was.s];
+      lane.t0 = was.time;
+      lane.t = was.s.map(() => was.time);
+    }
+    const off = lane.side?.[k];
+    // Ещё выходила вбок на полосу (side) — дальше с оставшегося сдвига (как holdOnCurve).
+    if (lane.side && off) lane.side[k] = off * (1 - smoothstep(Math.max(0, Math.min(1, (was.s[k] - (lane.from[k] ?? was.s[k])) / ROW_RAMP))));
+    const t0 = lane.t0;
+    lane.t = lane.from.map((_, i) => lane.t?.[i] ?? t0);
+    lane.from[k] = was.s[k];
+    lane.t[k] = was.time;
+    held = true;
+  }
+  return held ? laneArcs(lane, target, time) : now;
 }
 
 /**

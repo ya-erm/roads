@@ -55,6 +55,7 @@ import {
   crewSpacing,
   fillet,
   halfRow,
+  holdJumps,
   holdOnCurve,
   lanePose,
   laneRow,
@@ -702,11 +703,16 @@ export class Construction {
     };
     // «С проездом», первый проход: колонна встаёт так, чтобы впереди хватило места развернуться (turnCap).
     const cap = flip ? null : this.turnCap(c);
+    // Начало участка (и следующего) — перекрёсток с готовой дорогой: не начатые ждут за его площадкой, а не посреди
+    // перекрёстка, по которому ездят (headCut).
+    const nextPiece = next && this.piece(project, next.corridor);
     const o = {
       end: Math.max(0, Math.min(c.length - cut, cap ?? Infinity)),
       ahead: ground(c.id),
       ext,
       extAhead: !!next && ground(next.corridor),
+      start: flip ? 0 : this.headCut(project, c, fromB),
+      extStart: nextPiece?.build ? this.headCut(project, nextPiece, next.fromB) : 0,
     };
     const spans: [number, number, number] = flip ? [0, 0, 0] : spansOf(c.build, c.length);
     const y = stageSlots(spans, c.length, o).map((u) => leg.at + u);
@@ -845,17 +851,53 @@ export class Construction {
     // У пути перекрёстков нет: колонна доходит до конца участка.
     if (this.isRail(id)) return 0;
     const c = piece as Corridor;
+    return this.cutAt(c, fromB ? c.a : c.b);
+  }
+
+  /**
+   * Участок c проекта id заполняется от fromB, а его начало — площадка перекрёстка, к которому подходит готовая дорога
+   * (по ней ездят): на сколько метров от начала она тянется (обрез полотна и пара метров запаса) — не начатые этапы
+   * ждут за ней (stageSlots, start), а не посреди перекрёстка. Узел только между участками стройки (там не ездят),
+   * перестройка (у неё свои перекрытия и реверс), путь — 0.
+   */
+  private headCut(id: number, piece: Piece, fromB: boolean): number {
+    if (this.isRail(id) || piece.build?.was) return 0;
+    const c = piece as Corridor;
     const net = this.host.roads.net;
-    const tail = fromB ? c.a : c.b;
-    const node = net.node(tail);
-    const ends = net.ends(node);
-    const cuts = nodeCuts(net, node, ends);
+    const head = fromB ? c.b : c.a;
+    if (!net.node(head).corridors.some((k) => !net.corridors.get(k)?.build)) return 0;
+    return this.cutAt(c, head);
+  }
+
+  /** Обрез полотна c у узла node (площадка перекрёстка) и пара метров запаса; 0 — не обрезано. По сети — запоминается. */
+  private cutAt(c: Corridor, node: number): number {
+    const net = this.host.roads.net;
+    const key = `${c.id}:${node}`;
+    if (this.cutNet !== net || this.cutVersion !== net.version) {
+      this.cutNet = net;
+      this.cutVersion = net.version;
+      this.cutMemo.clear();
+    }
+    const hit = this.cutMemo.get(key);
+    if (hit !== undefined) return hit;
+    const n = net.node(node);
+    const ends = net.ends(n);
+    const cuts = nodeCuts(net, n, ends);
     let cut = 0;
     ends.forEach((e, i) => {
-      if (e.corridor === c && (e.end === 'a') === (c.a === tail) && cuts[i] > 0) cut = Math.max(cut, cuts[i] + 2);
+      if (e.corridor === c && (e.end === 'a') === (c.a === node) && cuts[i] > 0) cut = Math.max(cut, cuts[i] + 2);
     });
+    this.cutMemo.set(key, cut);
     return cut;
   }
+
+  /** cutAt: для какой сети (и её версии) запомнено. */
+  private cutNet: LaneNet | null = null;
+  private cutVersion = -1;
+  private cutMemo = new Map<string, number>();
+
+  /** Где машины бригады (по номеру бригады) были на своей полосе в прошлый такт (holdJumps); не сохраняется. */
+  private arcs = new Map<number, { lane: CrewLane; time: number; s: number[] }>();
 
   /**
    * Машины бригады b могут сходить на стройку проекта id по одной, как доедут (Crews.board, CrewHost.stagger): её фронт
@@ -888,6 +930,10 @@ export class Construction {
       const slots = this.crewSlots(b);
       const f = slots && this.frontFor(b.project, b);
       if (f) {
+        // Место ушло вперёд скачком — машина едет туда своим ходом (holdJumps), а не перескакивает.
+        const was = this.arcs.get(b.id);
+        const s = holdJumps(b.lane, slots, was?.lane === b.lane ? was : null, this.host.time);
+        this.arcs.set(b.id, { lane: b.lane, time: this.host.time, s });
         this.crews.keepSpots(b);
         holdOnCurve(b.lane, slots, this.host.time);
         const flip = this.turnFlip(b, f.c, f.fromB);
@@ -1313,6 +1359,7 @@ export class Construction {
           // Следующий участок фронта — до открытия этого (пока он ещё «свой», continuation его не считает чужим).
           const next = this.continuation(p.id, c, !!b.fromB);
           delete c.build;
+          if (!rail) settlePads(net, [c.a, c.b]);
           this.touchPiece(p.id, c);
           p.builtLen += c.length;
           opened = true;
@@ -1620,6 +1667,9 @@ export class Construction {
   /** Записи без полотен (отмена стройки, Ctrl+Z) — убрать. */
   prune(): void {
     for (const id of [...this.projects.keys()]) if (!this.piecesOf(id).length) this.projects.delete(id);
+    // Проект отменили: у его узлов строящихся больше нет — площадки снова обычные (settlePads).
+    const net = this.host.roads.net;
+    for (const n of net.nodes.values()) if (n.pad && !n.corridors.some((k) => net.corridors.get(k)?.build)) delete n.pad;
     this.stamp++;
   }
 
@@ -1699,6 +1749,21 @@ export class Construction {
       this.nextId = Math.max(this.nextId, id + 1);
     }
     this.prune();
+  }
+}
+
+/**
+ * Площадки узлов ids (LaneNode.pad): у узла есть достроенное полотно, а другие ещё строятся — площадка готова (к ней
+ * дошёл достроенный участок: отрисовка не возвращает её чертежом, пока следующий участок не начат). Строящихся у узла
+ * больше нет — отметка прочь: узел — обычный перекрёсток, а новый проект у него начнётся с чертежа.
+ */
+export function settlePads(net: LaneNet, ids: Iterable<number>): void {
+  for (const id of ids) {
+    const n = net.nodes.get(id);
+    if (!n) continue;
+    const list = n.corridors.map((k) => net.corridors.get(k)).filter((k) => !!k);
+    if (list.some((k) => k.build) && list.some((k) => !k.build)) n.pad = true;
+    else delete n.pad;
   }
 }
 

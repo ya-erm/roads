@@ -147,10 +147,15 @@ export function nodeStage(net: LaneNet, lanes: LaneRenderer, id: number): StageR
   return k === 0 && paved ? -1 : k;
 }
 
-/** Дальний этап, дошедший до узла id по строящимся полотнам (−1 — никакой), без оглядки на готовые дороги у него. */
+/**
+ * Дальний этап, дошедший до узла id по строящимся полотнам (−1 — никакой), без оглядки на готовые дороги у него. К
+ * площадке уже подошёл достроенный участок (LaneNode.pad, Construction: settlePads) — она готова целиком: достроили
+ * участок — площадка не возвращается чертежом, пока следующий участок от неё ещё не начат.
+ */
 export function nodeReach(net: LaneNet, lanes: LaneRenderer, id: number): StageReach {
   const n = net.nodes.get(id);
   if (!n) return -1;
+  if (n.pad && n.corridors.some((cid) => net.corridors.get(cid)?.build)) return 2;
   const cuts = lanes.cutsOf(net);
   let k: StageReach = -1;
   for (const cid of n.corridors) {
