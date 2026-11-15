@@ -27,6 +27,7 @@ import type { TerraformMode } from '../world/terrain';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
 import { isBusTerminal, type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
 import { lastTownNeed, townNeed } from '../world/townSupply';
+import { FORM_NAMES, formOf } from '../world/townForms';
 import { footprintRadius } from '../world/spatial';
 import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
 import { durationText } from '../core/timeText';
@@ -3507,7 +3508,8 @@ export class Hud {
       const b = g.buildingById(sel.id);
       if (!b) return '';
       const town = g.townOf(b);
-      const kind = b.kind === 'landmark' ? 'Ратуша' : b.kind === 'com' ? 'Офисы и магазины' : 'Жилой дом';
+      // Тип застройки (world/townForms.ts): частный дом, пятиэтажка, школа…
+      const kind = FORM_NAMES[formOf(b)];
       const people = b.kind === 'res' ? `${b.floors * 14} жителей` : b.kind === 'com' ? `${b.floors * 4} рабочих мест` : 'центр города';
       const moveCost = Math.round(g.demolishCost(b.id) * 0.6) || 3000;
       return `<section class="detail">${head(kind, `${b.floors} эт. · ${people}`)}

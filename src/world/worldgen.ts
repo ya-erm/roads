@@ -13,6 +13,7 @@ import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, playerIndustries, townS
 import { industryCount, MINING_KINDS, shoreFits, terrainFits } from './sites';
 import { Footprint, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
+import { edgeOf, inDistrict, mergeBlocks, townTier, zoneTown } from './townForms';
 import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
 
@@ -591,7 +592,7 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
     street: (a, b, curve, main) => street(sb, a, b, curve, main ? AVENUE : STREET),
     shape,
   };
-  townStreets(kit, center, size, style);
+  const district = townStreets(kit, center, size, style);
 
   // Оставляем связную часть вокруг центра.
   const created = new Set<number>();
@@ -660,12 +661,81 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
     lastSupplied: {},
     tripAcc: 0,
     growthAcc: 0,
+    ...(district ? { district } : {}),
   };
   placeLandmark(ctx, town);
   for (const s of alive) fillStreet(ctx, town, s, style === 'linear' ? 0.75 : 0.88);
   recountPopulation(town);
+  buildBlocks(ctx, town);
   levelTown(ctx.terrain, town);
   return town;
+}
+
+/**
+ * Панельные дома: в новом районе и у проспектов в среднем кольце большого города соседние участки сливаются в
+ * один дом (townForms.mergeBlocks) — жителей столько же, генератор случайных чисел не тронут (мир по seed тот же).
+ */
+function buildBlocks(ctx: WorldContext, town: Town): void {
+  const city = townTier(town) === 'city';
+  if (!town.district && !city) return;
+  const onAvenue = (p: Vec) => {
+    let best = Infinity;
+    let cls: RoadClass | null = null;
+    for (const c of ctx.roads.corridorsNear(p, 60)) {
+      const d = c.lut.closest(p).d;
+      if (d < best) {
+        best = d;
+        cls = c.cls;
+      }
+    }
+    return cls === 'avenue';
+  };
+  mergeBlocks(town, {
+    eligible: (b) => inDistrict(town.district, b.fp.center) || (city && edgeOf(town, b.fp.center) > 0.3 && edgeOf(town, b.fp.center) < 0.8 && onAvenue(b.fp.center)),
+    fits: (fp) => !ctx.index.overlaps(fp, 1) && !ctx.terrain.isWater(fp.center, footprintRadius(fp)) && !onRail(ctx.rail, fp, RAIL_BUFFER) && clearAlong(ctx, fp, 2),
+    remove: (b) => ctx.index.remove(b),
+    add: (b) => ctx.index.add(b),
+  });
+}
+
+/** Как clearOfRoads, но точки контура — через каждые 4 м: длинный дом не перекроет улицу между редкими точками. */
+function clearAlong(ctx: Pick<WorldContext, 'roads'>, fp: Footprint, margin: number): boolean {
+  const c = Math.cos(fp.angle);
+  const s = Math.sin(fp.angle);
+  const nx = Math.max(2, Math.ceil(fp.w / 4));
+  const ny = Math.max(2, Math.ceil(fp.h / 4));
+  const pts: Vec[] = [];
+  for (let i = 0; i <= nx; i++) {
+    for (let j = 0; j <= ny; j++) {
+      const lx = (i / nx - 0.5) * fp.w;
+      const ly = (j / ny - 0.5) * fp.h;
+      pts.push({ x: fp.center.x + lx * c - ly * s, y: fp.center.y + lx * s + ly * c });
+    }
+  }
+  for (const seg of ctx.roads.corridorsNear(fp.center, footprintRadius(fp) + 60)) {
+    const hw = corridorHalf(seg) + margin;
+    if (pts.some((q) => seg.lut.closest(q).d < hw)) return false;
+  }
+  return !ctx.roads.nodesNear(fp.center, footprintRadius(fp)).some((n) => pointInFootprint(n.pos, fp, margin + 4));
+}
+
+/**
+ * С какой стороны дома улица (TownBuilding.face): по ближайшей улице к его середине, в осях footprint.
+ * Для домов из старых сохранений и перенесённых.
+ */
+export function streetFace(roads: LaneNet, fp: Footprint): 1 | -1 {
+  let best = Infinity;
+  let at: Vec | null = null;
+  for (const c of roads.corridorsNear(fp.center, footprintRadius(fp) + 60)) {
+    const hit = c.lut.closest(fp.center);
+    if (hit.d < best) {
+      best = hit.d;
+      at = hit.point;
+    }
+  }
+  if (!at) return -1;
+  const ly = -(at.x - fp.center.x) * Math.sin(fp.angle) + (at.y - fp.center.y) * Math.cos(fp.angle);
+  return ly > 0 ? 1 : -1;
 }
 
 /** Ратуша или собор в центре города: повёрнута вдоль ближайшей улицы и не задевает дороги. */
@@ -741,6 +811,8 @@ function addLandmark(ctx: WorldContext, town: Town, fp: Footprint): void {
     anchor: anchorFor(ctx.roads, fp.center),
     color: '#efe6d2',
     roof: '#5c7fa3',
+    // Фасадом и фонтаном — к ближайшей улице.
+    face: streetFace(ctx.roads, fp),
   };
   ctx.index.add(b);
   town.buildings.push(b);
@@ -785,6 +857,8 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
         anchor: anchorFor(ctx.roads, p),
         color,
         roof,
+        // Дом стоит по нормали side от улицы: сама улица — с другой стороны, по оси y footprint это −side.
+        face: side === 1 ? -1 : 1,
       };
       ctx.index.add(b);
       town.buildings.push(b);
@@ -909,6 +983,8 @@ export function measureTown(town: Town): void {
   for (const b of town.buildings) far = Math.max(far, dist(b.fp.center, town.center) + footprintRadius(b.fp));
   town.radius = Math.max(100, coreRadius(town) + 30);
   town.extent = Math.max(town.radius, far + 10);
+  // Типы застройки новым домам (и домам старых сохранений) — по месту в городе нынешнего размера (townForms.ts).
+  zoneTown(town);
 }
 
 function placeIndustries(ctx: WorldContext, towns: Town[], density: number, settings: WorldSettings): Industry[] {

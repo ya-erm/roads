@@ -53,6 +53,7 @@ import { drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
 import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
+import { drawHouseArt, houseReach } from './houseArt';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
@@ -1081,7 +1082,8 @@ export class Renderer {
       rec.n = town.buildings.length;
       add(
         rec.diff.update((put) => {
-          for (const b of town.buildings) put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${b.color}|${b.roof}`, fpBox(b.fp));
+          // Рамка — с тенью и площадью у ратуши (houseArt): они выходят за контур дома.
+          for (const b of town.buildings) put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${b.color}|${b.roof}|${b.form}|${b.face}`, grow(fpBox(b.fp), houseReach(b)));
         }),
       );
     }
@@ -2224,11 +2226,13 @@ export class Renderer {
       fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
     // Дома в зоне вредных предприятий — посеревшие (enterpriseArt).
     const dirty = dirtyIndustries(game.industries);
+    const trees = BIOMES[game.terrain.biome].palette.trees;
     for (const town of game.towns) {
       if (dist(town.center, { x: (view.x0 + view.x1) / 2, y: (view.y0 + view.y1) / 2 }) > (town.extent ?? town.radius) + (view.x1 - view.x0) * 1.2) continue;
       for (const b of town.buildings) {
         if (!inView(b.fp)) continue;
-        this.drawBuilding(b);
+        // Тип застройки — двор, забор, огород, панельный дом с площадкой… (houseArt; детали — по зуму).
+        drawHouseArt(this.ctx, b, this.camera.zoom, trees);
         if (dirty.length && b.kind !== 'landmark' && this.camera.zoom > 0.25) drawGrime(this.ctx, b, houseGrime(b, dirty), this.camera.zoom > 0.5);
       }
     }
@@ -2540,42 +2544,6 @@ export class Renderer {
       ctx.lineWidth = lw;
       ctx.stroke();
     }
-  }
-
-  private drawBuilding(b: TownBuilding): void {
-    const detailed = this.camera.zoom > 0.25;
-    const sh = 1.5 + b.floors * 1.4;
-    if (detailed) this.drawFootprint({ ...b.fp, center: { x: b.fp.center.x + sh * 0.6, y: b.fp.center.y + sh } }, 'rgba(30,40,25,0.22)');
-    if (b.kind === 'landmark') {
-      this.drawLandmark(b);
-      return;
-    }
-    this.drawFootprint(b.fp, b.color, detailed ? 'rgba(60,50,40,0.35)' : undefined, 0.8);
-    if (!detailed) return;
-    const roof = { ...b.fp, w: b.fp.w - 5, h: b.fp.h - 5 };
-    this.drawFootprint(roof, b.roof);
-    if (b.kind === 'com' && this.camera.zoom > 0.5) {
-      this.drawFootprint({ ...roof, w: roof.w * 0.5, h: roof.h * 0.4 }, 'rgba(255,255,255,0.25)');
-    } else if (b.floors >= 3 && this.camera.zoom > 0.5) {
-      // Многоэтажка: светлые полосы окон на крыше.
-      this.drawFootprint({ ...roof, w: roof.w * 0.8, h: 2 }, 'rgba(255,255,255,0.3)');
-    }
-  }
-
-  /** Ратуша: площадь, здание с куполом и шпилем. */
-  private drawLandmark(b: TownBuilding): void {
-    const ctx = this.ctx;
-    const fp = b.fp;
-    this.drawFootprint({ ...fp, w: fp.w + 14, h: fp.h + 14 }, '#e6dcc6', 'rgba(120,100,70,0.35)', 1);
-    this.drawFootprint({ ...fp, w: fp.w * 0.8, h: fp.h * 0.6 }, b.color, 'rgba(60,50,40,0.5)', 1);
-    ctx.fillStyle = b.roof;
-    ctx.beginPath();
-    ctx.arc(fp.center.x, fp.center.y, fp.w * 0.22, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#f2c94c';
-    ctx.beginPath();
-    ctx.arc(fp.center.x, fp.center.y, fp.w * 0.07, 0, Math.PI * 2);
-    ctx.fill();
   }
 
   /** Предприятие: участок с лёгкой тенью, постройки — в industryArt (мелочи только вблизи); layer — ArtLayer. */

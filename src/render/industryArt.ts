@@ -1,3 +1,4 @@
+import { hash } from '../core/math';
 import type { CargoType, IndustryKind, IndustryType } from '../world/cargo';
 import { harmClass } from '../world/enterprise';
 import type { Industry } from '../world/entities';
@@ -55,13 +56,8 @@ export function shade(hex: string, k: number): string {
   return v;
 }
 
-/** Детерминированное «случайное» число [0, 1) от зерна и номера. */
-export function hash(seed: number, i: number): number {
-  let h = Math.imul(seed + 0x9e3779b9, 0x85ebca6b) ^ Math.imul(i + 0x632be5ab, 0xc2b2ae35);
-  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
-  h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
-  return ((h ^ (h >>> 15)) >>> 0) / 4294967296;
-}
+/** Детерминированное «случайное» число [0, 1) от зерна и номера (core/math.ts). */
+export { hash };
 
 export function disc(c: CanvasRenderingContext2D, x: number, y: number, r: number): void {
   c.beginPath();
@@ -105,6 +101,16 @@ function blindCtx(real: CanvasRenderingContext2D): CanvasRenderingContext2D {
   return c;
 }
 
+/** Что рисует Art: предприятие или любое строение с контуром (дом города — houseArt.ts: не работает и не вредит). */
+export interface ArtTarget {
+  id: number;
+  fp: Footprint;
+  level?: number;
+  producedMonth?: number;
+  producedLast?: number;
+  info?: { kind: IndustryKind };
+}
+
 /** Общий буфер точек — без выделения памяти в каждом кадре. */
 const P = new Float64Array(32);
 const Q = new Float64Array(16);
@@ -137,7 +143,7 @@ export class Art {
   /** seed — зерно «случайных» раскладок: по умолчанию id предприятия (у пристройки — её id); layer — что рисовать (ArtLayer). */
   constructor(
     real: CanvasRenderingContext2D,
-    ind: Industry,
+    ind: ArtTarget,
     zoom: number,
     readonly t: number,
     seed = ind.id,
@@ -161,8 +167,8 @@ export class Art {
     this.wy = wy / wl;
     this.seed = seed;
     this.level = Math.max(1, Math.floor(ind.level ?? 1));
-    this.active = ind.producedMonth > 0 || ind.producedLast > 0;
-    this.harm = harmClass(ind.info.kind);
+    this.active = (ind.producedMonth ?? 0) > 0 || (ind.producedLast ?? 0) > 0;
+    this.harm = ind.info ? harmClass(ind.info.kind) : 0;
   }
 
   /** Класс вредности вида (0–3): дым гуще и темнее. */
@@ -205,7 +211,8 @@ export class Art {
     this.c.closePath();
   }
 
-  private rectShadow(x: number, y: number, w: number, h: number, z: number): void {
+  /** Контур тени прямоугольной призмы высотой z (в проходе теней; houseArt.ts — для своих крыш). */
+  rectShadow(x: number, y: number, w: number, h: number, z: number): void {
     Q[0] = x;
     Q[1] = y;
     Q[2] = x + w;
@@ -218,7 +225,7 @@ export class Art {
   }
 
   /** Тень цилиндра: круг, протянутый по направлению тени. */
-  private capsule(x: number, y: number, r: number, z: number): void {
+  capsule(x: number, y: number, r: number, z: number): void {
     const c = this.c;
     const dx = x + this.sx * z;
     const dy = y + this.sy * z;

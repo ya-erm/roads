@@ -1,7 +1,7 @@
 import { circleArc, type Cubic, CurveLUT, straightCubic } from '../core/bezier';
 import { add, dist, norm, scale, sub, type Vec } from '../core/vec';
 import type { Corridor, LaneNode } from '../lanes/model';
-import type { TownStyle } from './entities';
+import type { TownDistrict, TownStyle } from './entities';
 import type { TownShape, WorldContext } from './worldgen';
 
 /**
@@ -41,8 +41,13 @@ interface Chain {
   angle: number;
 }
 
-export function townStreets(kit: StreetKit, center: Vec, size: number, style: TownStyle): void {
+/** Запас рамки нового района за крайними улицами сетки: на дома по их внешней стороне, м. */
+const DISTRICT_MARGIN = 32;
+
+/** Строит улицы города; отдаёт рамку нового района (сетки), если он вышел, — там встанут панельные дома (townForms.ts). */
+export function townStreets(kit: StreetKit, center: Vec, size: number, style: TownStyle): TownDistrict | undefined {
   const { rng, terrain, roads } = kit.ctx;
+  let district: TownDistrict | undefined;
   const R = streetsRadius(style, size);
   const radial = style === 'radial';
   const linear = style === 'linear';
@@ -258,6 +263,14 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     for (const n of loose) {
       if (!n.corridors.length) drop(n);
     }
+    // Где он вышел — по узлам сетки с улицами, с запасом на дома по внешней стороне крайних улиц.
+    const built = loose.filter((n) => n.corridors.length);
+    if (built.length >= 4) {
+      const us = built.map((n) => (n.pos.x - center.x) * u.x + (n.pos.y - center.y) * u.y);
+      const vs = built.map((n) => (n.pos.x - center.x) * v.x + (n.pos.y - center.y) * v.y);
+      const m = DISTRICT_MARGIN;
+      district = { x: center.x, y: center.y, angle: tilt, u0: Math.min(...us) - m, u1: Math.max(...us) + m, v0: Math.min(...vs) - m, v1: Math.max(...vs) + m };
+    }
     const edge = loose.filter((n) => n.corridors.length && n.corridors.length < 4).sort((x, y) => dist(x.pos, center) - dist(y.pos, center));
     let joined = 0;
     for (const n of edge) {
@@ -334,6 +347,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
       }
     }
   }
+  return district;
 }
 
 /** Сколько проходов досыпки переулками и с какой вероятностью у узла (у центра) появится новый. */

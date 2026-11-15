@@ -61,6 +61,7 @@ import {
   placeable,
   railNear,
   recountPopulation,
+  streetFace,
   WorldContext,
 } from '../world/worldgen';
 import { START_ROADS } from '../world/startRoads';
@@ -1035,6 +1036,8 @@ export class Game implements BuildContext {
         recountPopulation(t);
       }
       for (const b of t.buildings) this.index.add(b);
+      // Дома старых сохранений: сторона улицы — по ближайшей улице (тип застройки — в measureTown).
+      for (const b of t.buildings) if (b.face === undefined) b.face = streetFace(this.roads.net, b.fp);
       // Радиус старых сохранений — по самому дальнему дому; теперь — по плотной застройке.
       measureTown(t);
     }
@@ -2367,6 +2370,7 @@ export class Game implements BuildContext {
     this.index.remove(b);
     b.fp = plan.fp;
     b.anchor = plan.anchor;
+    b.face = streetFace(this.roads.net, b.fp);
     this.index.add(b);
     this.spend(plan.cost);
     this.refreshCatchmentsNear(from);

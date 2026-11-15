@@ -15,6 +15,57 @@ export interface TownBuilding {
   anchor: number;
   color: string;
   roof: string;
+  /**
+   * Тип застройки — как дом выглядит (world/townForms.ts): частный дом с участком, пятиэтажка, школа… Выбирается
+   * по месту в городе, когда дом появился; у старых сохранений — при загрузке, по сохранённым данным. На жителей
+   * и рабочие места не влияет — они по-прежнему по kind и floors.
+   */
+  form?: HouseForm;
+  /**
+   * С какой стороны улица — в осях footprint: 1 — со стороны +y, -1 — со стороны −y. К ней — фасад, калитка,
+   * витрина; двор — с другой стороны. Нет — как -1.
+   */
+  face?: 1 | -1;
+}
+
+/**
+ * Тип застройки (world/townForms.ts). Жилые: частный дом с участком, дача, дом старого центра вдоль улицы,
+ * квартал с двором-колодцем, панельный дом (5–10 эт.), башня-высотка. Общественные и деловые (kind 'com'): магазин,
+ * сельский магазин или клуб, офис, рынок, школа, больница, церковь, гаражи, склад. Центр города (kind 'landmark'):
+ * ратуша или храм.
+ */
+export type HouseForm =
+  | 'cottage'
+  | 'dacha'
+  | 'townhouse'
+  | 'courtyard'
+  | 'slab'
+  | 'tower'
+  | 'shop'
+  | 'store'
+  | 'office'
+  | 'market'
+  | 'school'
+  | 'hospital'
+  | 'church'
+  | 'garages'
+  | 'warehouse'
+  | 'hall'
+  | 'temple';
+
+/**
+ * Новый район — прямоугольная сетка улиц (townStreets.ts): повёрнутый прямоугольник в осях u (под углом angle)
+ * и v. Вдоль его улиц — панельные дома с дворами (townForms.ts). Нет — у города нового района нет.
+ */
+export interface TownDistrict {
+  x: number;
+  y: number;
+  angle: number;
+  /** Границы по u и по v от точки (x, y), м. */
+  u0: number;
+  u1: number;
+  v0: number;
+  v1: number;
 }
 
 export type TownStyle = 'radial' | 'organic' | 'linear';
@@ -32,6 +83,8 @@ export interface Town {
   style: TownStyle;
   population: number;
   buildings: TownBuilding[];
+  /** Новый район с панельными домами (townForms.ts); нет — у города его нет (и у старых сохранений). */
+  district?: TownDistrict;
   /** Сегменты улиц, построенные при генерации. */
   streets: number[];
   /** Грузы, которые нужны городу для роста. */
