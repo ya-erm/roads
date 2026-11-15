@@ -105,9 +105,12 @@ describe('Терпение пассажиров в игре', { timeout: 120_000
     expect(waitFar).toBeGreaterThan(waitNear);
     // Автобус по-прежнему уходит полным: в ближайший готов сесть каждый.
     expect(line.loadLast ?? 0).toBeGreaterThan(0.9);
-    // Советник: «Пассажиры уходят» с числом ушедших и значком.
-    const advice = advise(game).find((a) => a.kind === 'waiting' && a.station === home.id);
-    expect(advice?.gone).toBeGreaterThan(0);
+    // Советник: «Пассажиры уходят» с числом ушедших и значком — у остановки линии, откуда ушло больше всех. Какая это
+    // из трёх, решает раскладка домов в охвате (с home уходило около порога совета: 27 и 18 при разных раскладках).
+    const gone = line.stops.map((id, i) => ({ id, gone: game.lineGone(line, i) })).sort((x, y) => y.gone - x.gone)[0];
+    expect(gone.gone).toBeGreaterThanOrEqual(20);
+    const advice = advise(game).find((a) => a.kind === 'waiting' && a.station === gone.id);
+    expect(advice?.gone).toBe(gone.gone);
     expect(advice?.title).toBe('Пассажиры уходят');
     expect(adviceTip(advice!)).toContain('🚶');
     // Ушедшие переходят в итог прошлого месяца и сохраняются.

@@ -597,6 +597,11 @@ describe('Стройка дорог: базы и бригады', () => {
     // По дороге едет вся бригада — та же техника, что работает на стройке: отсыпка, покрытие, разметка.
     expect([...bodies].sort()).toEqual(['crewEarth', 'crewMarks', 'crewPave']);
     expect(crews.working(id).length).toBe(1);
+    // Выехала вся колонна — ещё не значит доехала: хвост колонны в пути тем дольше, чем дальше стройка от ворот
+    // (раскладка домов и выбранный узел — от мира). Ждём, пока в пути не останется ни одной машины бригады.
+    const b = [...crews.brigades.values()][0];
+    for (let t = 0; t < 60 && (b.convoy?.cars ?? []).some((car) => 'sim' in car && game.traffic.vehicles.has(car.sim)); t += 0.1) runSeconds(game, 0.1);
+    expect((b.convoy?.cars ?? []).some((car) => 'sim' in car && game.traffic.vehicles.has(car.sim))).toBe(false);
     runSeconds(game, 3);
     expect(game.construction.list()[0].done).toBeGreaterThan(0);
   });

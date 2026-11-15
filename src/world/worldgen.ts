@@ -13,7 +13,7 @@ import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, playerIndustries, townS
 import { industryCount, MINING_KINDS, shoreFits, terrainFits } from './sites';
 import { Footprint, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
-import { edgeOf, inDistrict, mergeBlocks, townTier, zoneTown } from './townForms';
+import { edgeOf, inDistrict, mergeBlocks, mergeTowers, townTier, zoneTown } from './townForms';
 import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
 
@@ -690,12 +690,39 @@ function buildBlocks(ctx: WorldContext, town: Town): void {
     }
     return cls === 'avenue';
   };
+  const ops = {
+    fits: (fp: Footprint) => !ctx.index.overlaps(fp, 1) && !ctx.terrain.isWater(fp.center, footprintRadius(fp)) && !onRail(ctx.rail, fp, RAIL_BUFFER) && clearAlong(ctx, fp, 2),
+    remove: (b: TownBuilding) => ctx.index.remove(b),
+    add: (b: TownBuilding) => ctx.index.add(b),
+  };
   mergeBlocks(town, {
+    ...ops,
     eligible: (b) => inDistrict(town.district, b.fp.center) || (city && edgeOf(town, b.fp.center) > 0.3 && edgeOf(town, b.fp.center) < 0.8 && onAvenue(b.fp.center)),
-    fits: (fp) => !ctx.index.overlaps(fp, 1) && !ctx.terrain.isWater(fp.center, footprintRadius(fp)) && !onRail(ctx.rail, fp, RAIL_BUFFER) && clearAlong(ctx, fp, 2),
-    remove: (b) => ctx.index.remove(b),
-    add: (b) => ctx.index.add(b),
   });
+  // Высотки: два панельных дома квартала спиной к спине — в один участок от улицы до улицы.
+  mergeTowers(town, { ...ops, fronted: (b) => frontedAcross(ctx, b) });
+}
+
+/** Через улицу перед домом b (напротив его фасада, в трёх точках вдоль него) стоит хоть одно здание. */
+function frontedAcross(ctx: WorldContext, b: TownBuilding): boolean {
+  const c = Math.cos(b.fp.angle);
+  const s = Math.sin(b.fp.angle);
+  const face = b.face ?? -1;
+  for (const k of [-1 / 3, 0, 1 / 3]) {
+    const lx = k * b.fp.w;
+    const ly = (face * b.fp.h) / 2;
+    const front = { x: b.fp.center.x + lx * c - ly * s, y: b.fp.center.y + lx * s + ly * c };
+    let best: { point: Vec; d: number } | null = null;
+    for (const seg of ctx.roads.corridorsNear(front, 40)) {
+      const hit = seg.lut.closest(front);
+      if (!best || hit.d < best.d) best = { point: hit.point, d: hit.d };
+    }
+    if (!best || best.d < 0.5) continue;
+    const away = scale(sub(best.point, front), (best.d + 12) / best.d);
+    const across = add(front, away);
+    if (ctx.index.near(across, 25).some((x) => x !== b && x.type === 'building' && dist(x.fp.center, across) < footprintRadius(x.fp) + 14)) return true;
+  }
+  return false;
 }
 
 /** Как clearOfRoads, но точки контура — через каждые 4 м: длинный дом не перекроет улицу между редкими точками. */

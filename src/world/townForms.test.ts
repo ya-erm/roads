@@ -4,7 +4,7 @@ import { freshGame } from '../game/testkit';
 import { Game, type SaveData } from '../game/game';
 import type { HouseForm, Town, TownBuilding } from './entities';
 import { NEW_GAME_SETTINGS } from './settings';
-import { formOf, inDistrict, mergeBlocks, pickPublic, placeForm, townTier, TOWN_TIER, zoneTown } from './townForms';
+import { formOf, inDistrict, mergeBlocks, mergeTowers, pickPublic, placeForm, towerQuota, townTier, TOWN_TIER, zoneTown } from './townForms';
 import { recountPopulation } from './worldgen';
 
 let nextId = 100;
@@ -174,6 +174,43 @@ describe('Панельные дома нового района', () => {
     expect(t.buildings).toContain(across);
     expect(t.buildings.find((x) => x.id === b.id)?.form).toBe('slab');
     expect(t.buildings.find((x) => x.id === b.id)?.floors).toBe(4);
+  });
+});
+
+describe('Высотки: два дома квартала спиной к спине', () => {
+  const district = { x: 0, y: 0, angle: 0, u0: -500, u1: 500, v0: -500, v1: 500 };
+  /** Дом у улицы с юга (y = −30) и дом у улицы с севера (y = 30): задние стороны — друг к другу. */
+  const pair = () => [
+    house(0, -18, { form: 'slab', floors: 5, fp: { center: { x: 0, y: -18 }, w: 60, h: 20, angle: 0 }, face: -1 }),
+    house(5, 18, { form: 'slab', floors: 6, fp: { center: { x: 5, y: 18 }, w: 55, h: 20, angle: 0 }, face: 1 }),
+  ];
+  const ops = (fronted = true, fits = true) => ({ fits: () => fits, fronted: () => fronted, remove: () => {}, add: () => {} });
+
+  it('в новом районе большого города сливаются в одну башню: этажей — сумма, участок — от улицы до улицы', () => {
+    const t = town(9000, pair(), { district, id: 4 });
+    const [a] = t.buildings;
+    expect(mergeTowers(t, ops())).toBe(1);
+    expect(t.buildings).toHaveLength(1);
+    expect(t.buildings[0]).toMatchObject({ id: a.id, form: 'tower', floors: 11, face: -1 });
+    expect(t.buildings[0].fp.h).toBeCloseTo(56);
+  });
+
+  it('не сливаются: улица осталась бы пустой, участок задел бы улицу, дома стоят лицом друг к другу, мало этажей', () => {
+    expect(mergeTowers(town(9000, pair(), { district }), ops(false))).toBe(0);
+    expect(mergeTowers(town(9000, pair(), { district }), ops(true, false))).toBe(0);
+    const facing = pair().map((b) => ({ ...b, face: (b.face === 1 ? -1 : 1) as 1 | -1 }));
+    expect(mergeTowers(town(9000, facing, { district }), ops())).toBe(0);
+    expect(mergeTowers(town(9000, pair().map((b) => ({ ...b, floors: 3 })), { district }), ops())).toBe(0);
+    expect(mergeTowers(town(9000, pair()), ops())).toBe(0);
+  });
+
+  it('сколько на город: у большого 1–3, у города 0–1, у села нет', () => {
+    for (let id = 1; id < 40; id++) {
+      expect(towerQuota({ id, population: 9000, style: 'radial' })).toBeGreaterThanOrEqual(1);
+      expect(towerQuota({ id, population: 9000, style: 'radial' })).toBeLessThanOrEqual(3);
+      expect(towerQuota({ id, population: 4000, style: 'organic' })).toBeLessThanOrEqual(1);
+      expect(towerQuota({ id, population: 2000, style: 'linear' })).toBe(0);
+    }
   });
 });
 

@@ -543,16 +543,33 @@ function tower(a: Art, lot: Lot): void {
   const z = wallZ(b.floors);
   lawn(a, lot);
   // Башня крестом: квадрат с выступами-крыльями, у узкого участка — во всю его глубину.
-  const T = clamp(Math.min(W, H) - 3, 16, 24);
   const left = a.r(1) < 0.5;
-  const tx = left ? x0 + 2 + T / 2 + 2 : -x0 - 2 - T / 2 - 2;
-  const ty = clamp(H / 2 - 1.5 - T, y0 + 1.5, y0 + 6);
-  const rest = W - T - 8;
-  if (rest > 6) {
-    const px = left ? tx + T / 2 + 3 : x0 + 2;
-    parking(a, lot, px, y0 + 1.5, rest, Math.min(5.5, H - 3), 3);
-    if (H > 14 && rest > 12) playground(a, lot, px + rest / 2 - 4, y0 + 8, Math.min(8, H - 10));
-    treeRow(a, lot, px, px + rest, H / 2 - 2, 6.5, 2.2, 40);
+  let T: number;
+  let tx: number;
+  let ty: number;
+  if (H >= 40 && W >= 40) {
+    // Участок квартала от улицы до улицы: башня посреди общего двора, стоянки — у обеих улиц, площадка и деревья — во дворе.
+    T = clamp(Math.min(W, H) * 0.42, 20, 28);
+    tx = (left ? -1 : 1) * Math.min(W / 2 - T / 2 - 4, W * 0.18);
+    ty = -T / 2;
+    const pw = Math.min(W * 0.45, 30);
+    parking(a, lot, left ? -x0 - 2 - pw : x0 + 2, y0 + 1.5, pw, 5.5, 3);
+    parking(a, lot, left ? x0 + 2 : -x0 - 2 - pw, H / 2 - 7, pw, 5.5, 60);
+    const s = Math.min(10, W / 2 - T / 2 - 6);
+    if (s >= 5) playground(a, lot, left ? tx + T / 2 + 3 : tx - T / 2 - 3 - s, -s / 2, s);
+    treeRow(a, lot, x0 + 1, -x0 - 1, y0 + 9.5, 7, 2.2, 40);
+    treeRow(a, lot, x0 + 1, -x0 - 1, H / 2 - 9.5, 7, 2.2, 80);
+  } else {
+    T = clamp(Math.min(W, H) - 3, 16, 24);
+    tx = left ? x0 + 2 + T / 2 + 2 : -x0 - 2 - T / 2 - 2;
+    ty = clamp(H / 2 - 1.5 - T, y0 + 1.5, y0 + 6);
+    const rest = W - T - 8;
+    if (rest > 6) {
+      const px = left ? tx + T / 2 + 3 : x0 + 2;
+      parking(a, lot, px, y0 + 1.5, rest, Math.min(5.5, H - 3), 3);
+      if (H > 14 && rest > 12) playground(a, lot, px + rest / 2 - 4, y0 + 8, Math.min(8, H - 10));
+      treeRow(a, lot, px, px + rest, H / 2 - 2, 6.5, 2.2, 40);
+    }
   }
   const roof = tone(b.roof, 0.18);
   const k = T * 0.22;

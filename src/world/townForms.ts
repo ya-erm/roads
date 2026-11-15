@@ -352,3 +352,80 @@ export function mergeBlocks(town: Town, ops: BlockOps): number {
   town.buildings = town.buildings.filter((b) => !gone.has(b)).map((b) => merged.get(b) ?? b);
   return merged.size;
 }
+
+/** Высоток на город (вместе с теми, что вышли из рядов): у большого — 1–3 по хешу города, у города — 0–1, у села — нет. */
+export function towerQuota(town: Pick<Town, 'id' | 'population' | 'style'>): number {
+  const tier = townTier(town);
+  if (tier === 'city') return 1 + Math.floor(hash(town.id, 21) * 3);
+  if (tier === 'town' && town.population >= TOWN_TIER.town) return hash(town.id, 22) < 0.6 ? 1 : 0;
+  return 0;
+}
+
+/** Этажность высотки из двух панельных домов спиной к спине. */
+const BACK_TO_BACK = { min: 9, max: 13 };
+/** Между задними сторонами двух домов квартала — не дальше стольких метров (дворы, без улицы между ними). */
+const BACK_GAP = 28;
+
+export interface TowerOps extends Pick<BlockOps, 'fits' | 'remove' | 'add'> {
+  /** На другой стороне улицы перед домом есть застройка: улица не останется пустой с обеих сторон. */
+  fronted(b: TownBuilding): boolean;
+}
+
+/**
+ * Высотки нового района: два панельных дома одного квартала, что стоят спиной к спине (участки соседних улиц, между
+ * ними только дворы), сливаются в один участок от улицы до улицы с башней и общим двором. Этажей — сумма двух
+ * (9–13), жителей ровно столько же. Улиц это не трогает: участок не задевает ни одну (fits), а напротив каждого из
+ * двух фасадов, через улицу, есть дома (fronted) — улица не останется пустой. Не больше towerQuota на город.
+ * Возвращает число новых высоток.
+ */
+export function mergeTowers(town: Town, ops: TowerOps): number {
+  let left = towerQuota(town) - town.buildings.filter((b) => b.form === 'tower').length;
+  if (left <= 0 || !town.district) return 0;
+  const slabs = town.buildings.filter((b) => b.form === 'slab' && b.kind === 'res' && inDistrict(town.district, b.fp.center));
+  type Pair = { a: TownBuilding; b: TownBuilding; key: number };
+  const pairs: Pair[] = [];
+  for (let i = 0; i < slabs.length; i++) {
+    for (let j = i + 1; j < slabs.length; j++) {
+      const a = slabs[i];
+      const b = slabs[j];
+      const floors = a.floors + b.floors;
+      if (floors < BACK_TO_BACK.min || floors > BACK_TO_BACK.max) continue;
+      if (Math.abs(Math.cos(a.fp.angle - b.fp.angle)) < 0.99) continue;
+      const q = local(a.fp, b.fp.center);
+      // b — за спиной у a: по другую сторону от улицы a, сразу за его задней границей.
+      const back = -(a.face ?? -1);
+      if (q.y * back <= 0) continue;
+      const gap = Math.abs(q.y) - (a.fp.h + b.fp.h) / 2;
+      if (gap < -1 || gap > BACK_GAP) continue;
+      // Улица b — с его дальней от a стороны: тогда они спиной друг к другу.
+      const bq = local(b.fp, a.fp.center);
+      if (bq.y * (b.face ?? -1) > 0) continue;
+      const overlap = Math.min(a.fp.w / 2, q.x + b.fp.w / 2) - Math.max(-a.fp.w / 2, q.x - b.fp.w / 2);
+      if (overlap < 0.6 * Math.min(a.fp.w, b.fp.w)) continue;
+      pairs.push({ a, b, key: hash(a.id * 7919 + b.id, 23) });
+    }
+  }
+  pairs.sort((x, y) => x.key - y.key);
+  const used = new Set<TownBuilding>();
+  const merged = new Map<TownBuilding, TownBuilding>();
+  for (const { a, b } of pairs) {
+    if (left <= 0) break;
+    if (used.has(a) || used.has(b) || !ops.fronted(a) || !ops.fronted(b)) continue;
+    const fp = union(a.fp, [a, b]);
+    ops.remove(a);
+    ops.remove(b);
+    if (!ops.fits(fp)) {
+      ops.add(a);
+      ops.add(b);
+      continue;
+    }
+    const tower: TownBuilding = { ...a, fp, floors: a.floors + b.floors, form: 'tower' };
+    ops.add(tower);
+    merged.set(a, tower);
+    used.add(a).add(b);
+    left--;
+  }
+  if (!merged.size) return 0;
+  town.buildings = town.buildings.filter((x) => !used.has(x) || merged.has(x)).map((x) => merged.get(x) ?? x);
+  return merged.size;
+}
