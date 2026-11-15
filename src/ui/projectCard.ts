@@ -211,7 +211,10 @@ function moneyHtml(game: Game, info: ProjectInfo): string {
   const reserve = Math.min(p.reserve ?? 0, info.left);
   const total = p.spent + info.left;
   const k = (n: number) => (total > 0 ? (n / total) * 100 : 0);
-  const free = Math.max(0, Math.floor(game.budget));
+  // Свободно для стройки — без запаса на содержание в конце месяца (Game.buildBudget): его стройка не тратит.
+  const upkeep = game.upkeepForecast().total;
+  const free = Math.max(0, Math.floor(game.buildBudget));
+  const held = upkeep > 0 ? `, ещё ${money(upkeep)} отложено на содержание в конце месяца` : '';
   const need = info.left - (p.reserve ?? 0);
   const enough = need <= free;
   const bar = `<div class="pc-money" data-tip="${esc(`Всего ${money(total)}: потрачено ${money(p.spent)}${reserve ? `, в резерве ${money(reserve)}` : ''}, ещё нужно ${money(info.left - reserve)}`)}">
@@ -225,8 +228,8 @@ function moneyHtml(game: Game, info: ProjectInfo): string {
     need <= 0
       ? `<span class="pc-ok" data-tip="Всё, что нужно, отложено: стройка не встанет без денег">🔒 ✓ резерв покрывает всё</span>`
       : enough
-        ? `<span class="pc-ok" data-tip="${esc(`Свободно ${money(free)} — хватает на остаток, если не потратить на другое`)}">✓ денег хватает</span>`
-        : `<span class="pc-bad" data-tip="${esc(`Свободно ${money(free)}, а нужно ещё ${money(need)}: стройка встанет, когда деньги кончатся`)}">💸 не хватает ${money(need - free)}</span>`;
+        ? `<span class="pc-ok" data-tip="${esc(`Свободно ${money(free)}${held} — хватает на остаток, если не потратить на другое`)}">✓ денег хватает</span>`
+        : `<span class="pc-bad" data-tip="${esc(`Свободно ${money(free)}${held}, а нужно ещё ${money(need)}: стройка встанет, когда деньги кончатся`)}">💸 не хватает ${money(need - free)}</span>`;
   const canReserve = need > 0 && free > 0;
   const reserveBtn =
     need > 0

@@ -2,12 +2,12 @@
  * Управление стройкой (режим «Со строительством»): резерв денег на проект, приоритет проекта, снос строительной базы.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CONSTRUCTION, COST, ECONOMY } from '../config';
+import { CONSTRUCTION, COST, ECONOMY, MONTH_LENGTH } from '../config';
 import type { Vec } from '../core/vec';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import { Game } from './game';
-import { anchorOf, clearStrip, type End, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, clearStrip, type End, openSpot, road, runMonths, runSeconds, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
@@ -145,13 +145,17 @@ describe('Стройка: резерв денег на проект', () => {
     expect(game.hireBrigade(base)).toBeNull();
   });
 
-  it('свободных денег мало — откладывается, сколько есть; потом можно доложить', () => {
+  it('свободных денег мало — откладывается, сколько есть, кроме запаса на содержание; потом можно доложить', () => {
     const { game, id } = withProject();
     const left = game.construction.info(id)!.left;
-    game.money = ECONOMY.creditLimit + Math.floor(left / 3);
+    const upkeep = game.upkeepForecast().total;
+    expect(upkeep).toBeGreaterThan(0);
+    game.money = ECONOMY.creditLimit + upkeep + Math.floor(left / 3);
     expect(game.reserveProject(id, true)).toBeNull();
     expect(game.reserved).toBe(Math.floor(left / 3));
-    expect(game.budget).toBe(0);
+    // Запас на содержание в резерв не ушёл: на счёте сверх кредитного предела и резерва — ровно он.
+    expect(game.buildBudget).toBe(0);
+    expect(game.budget).toBe(upkeep);
     expect(game.reserveProject(id, true)).toBe('Не хватает денег');
     game.money += left;
     expect(game.reserveProject(id, true)).toBeNull();
@@ -237,6 +241,105 @@ describe('Стройка: резерв денег на проект', () => {
     const old = withoutCitizens(new Game(save.settings, save));
     expect(old.reserved).toBe(0);
     expect(old.construction.projects.get(id)!.priority).toBeUndefined();
+  });
+});
+
+describe('Стройка: запас на содержание в конце месяца', () => {
+  const reach = CONSTRUCTION.reach;
+  beforeEach(() => {
+    CONSTRUCTION.reach = 1e12;
+  });
+  afterEach(() => {
+    CONSTRUCTION.reach = reach;
+  });
+
+  it('прогноз — ровно то, что спишут итоги месяца: транспорт, бригады, ремонт, проценты', () => {
+    const game = buildGame();
+    expect(game.takeLoan()).toBe(true);
+    const f = game.upkeepForecast();
+    expect(f.crews).toBeGreaterThan(0);
+    expect(f.roads).toBeGreaterThan(0);
+    expect(f.interest).toBeGreaterThan(0);
+    expect(f.total).toBe(f.vehicles + f.crews + f.roads + f.interest);
+    // Ни выручки, ни стройки: за месяц счёт меняется ровно на прогноз (минус — с первого кадра нового месяца).
+    const month = game.monthIndex;
+    let before = game.money;
+    let expected = f.total;
+    runSeconds(game, MONTH_LENGTH + 0.2, () => {
+      if (game.monthIndex === month) {
+        before = game.money;
+        expected = game.upkeepForecast().total;
+      }
+    });
+    expect(game.monthIndex).toBe(month + 1);
+    expect(before - game.money).toBe(expected);
+  });
+
+  it('недостроенный проект и прибыль: выручка идёт в стройку, а итоги месяца не уводят счёт за порог банкротства', async () => {
+    const { advise } = await import('./advisor');
+    const game = withoutCitizens(new Game({ ...WORLD, scenario: { difficulty: 'normal', challenge: false } }));
+    const sc = game.scenario!;
+    expect(sc.running).toBe(true);
+    firstBase(game);
+    const at = freeSpot(game, 2000);
+    crewAt(game, at);
+    expect(project(game, { free: at }, { free: { x: at.x + 2000, y: at.y } })).toBe(true);
+    const id = game.construction.list()[0].project.id;
+    untilWorking(game);
+    const upkeep = game.upkeepForecast().total;
+    // Выручка — в полтора раза больше содержания (операционная прибыль положительная), а проект дороже выручки
+    // за все месяцы теста: без запаса стройка тратила бы её всю, до кредитного предела.
+    const income = upkeep * 1.5;
+    const months = 3;
+    expect(game.construction.info(id)!.left).toBeGreaterThan(income * months * 1.5);
+    // Счёт — у самого кредитного предела: сверх него — запас на содержание и немного.
+    game.money = ECONOMY.creditLimit + upkeep + 100;
+    const spent0 = game.construction.projects.get(id)!.spent;
+    const lows: number[] = [];
+    let month = game.monthIndex;
+    let waited = false;
+    runMonths(game, months, () => {
+      game.money += (income * 0.1) / MONTH_LENGTH;
+      if (game.monthIndex !== month) {
+        month = game.monthIndex;
+        lows.push(game.money);
+      }
+      const a = advise(game).find((x) => x.kind === 'buildMoney');
+      if (a?.title.startsWith('Стройка ждёт:') && a.title.includes('отложено на содержание в конце месяца')) waited = true;
+    });
+    expect(lows.length).toBe(months);
+    // После итогов каждого месяца — не ниже порога банкротства; месяцы в банкротство не засчитаны.
+    for (const m of lows) expect(m).toBeGreaterThanOrEqual(ECONOMY.creditLimit);
+    expect(sc.state.bankrupt).toBe(0);
+    // Стройка шла на выручку: потрачено на неё почти всё, что пришло сверх содержания.
+    const spent = game.construction.projects.get(id)!.spent - spent0;
+    expect(spent).toBeGreaterThan((income - upkeep) * (months - 1));
+    // Ждала из-за запаса — совет так и говорит, в журнале — сколько отложено.
+    expect(waited).toBe(true);
+    const stall = game.journal.entries.find((e) => e.k === 'project-stall');
+    expect(stall).toMatchObject({ id, upkeep: expect.any(Number) });
+  });
+
+  it('разовая покупка игрока может взять запас на содержание — с предупреждением; «Мгновенно» — так же', () => {
+    const game = withoutCitizens(new Game({ ...WORLD, construction: 'instant' }));
+    const at = freeSpot(game, 600);
+    const plan = game.roadBuilder.road(anchorOf(game, { free: at }), anchorOf(game, { free: { x: at.x + 600, y: at.y } }), STREET);
+    expect(plan.ok).toBe(true);
+    const upkeep = game.upkeepForecast().total;
+    expect(upkeep).toBeGreaterThan(0);
+    expect(plan.cost).toBeGreaterThan(upkeep);
+    // Денег — ровно на дорогу до кредитного предела: покупка разрешена, но съедает запас на содержание.
+    game.money = ECONOMY.creditLimit + plan.cost;
+    const warned = () => game.notices.some((n) => n.text.startsWith('💸 Взято из запаса на содержание'));
+    expect(game.roadBuilder.apply(plan)).toBe(true);
+    expect(game.money).toBe(ECONOMY.creditLimit);
+    expect(warned()).toBe(true);
+    // С запасом — без предупреждения.
+    const calm = withoutCitizens(new Game({ ...WORLD, construction: 'instant' }));
+    const again = calm.roadBuilder.road(anchorOf(calm, { free: at }), anchorOf(calm, { free: { x: at.x + 600, y: at.y } }), STREET);
+    calm.money = ECONOMY.creditLimit + calm.upkeepForecast().total + again.cost + 1000;
+    expect(calm.roadBuilder.apply(again)).toBe(true);
+    expect(calm.notices.some((n) => n.text.startsWith('💸 Взято из запаса на содержание'))).toBe(false);
   });
 });
 

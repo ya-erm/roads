@@ -145,7 +145,9 @@ export function industryRowsHtml(g: Game, ind: Industry): string {
         ? `<span class="bad" data-tip="Стройка стоит: поставьте строительную базу ближе ${radiusText(CONSTRUCTION.serviceRadius)}">⛔ нет базы</span>`
         : stall === 'money'
           ? '<span class="bad" data-tip="Стройка стоит: не хватает денег">💸</span>'
-          : `<span class="muted">⏳ ${Math.ceil((1 - ind.build.done) * ind.build.time)} с</span>`;
+          : stall === 'upkeep'
+            ? `<span class="bad" data-tip="${esc(`Стройка ждёт: ${money(g.upkeepForecast().total)} отложено на содержание в конце месяца`)}">💸⏳</span>`
+            : `<span class="muted">⏳ ${Math.ceil((1 - ind.build.done) * ind.build.time)} с</span>`;
     rows.push(`<div class="ent-row"><span class="ent-ic">🏗</span>${bar(ind.build.done)}<b>${Math.floor(ind.build.done * 100)}%</b>${state}</div>`);
   }
   // Рабочие — у работающего (стройка и заброшенное рабочих не берут).

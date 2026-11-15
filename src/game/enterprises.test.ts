@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ENTERPRISE, MONTH_LENGTH } from '../config';
+import { ECONOMY, ENTERPRISE, MONTH_LENGTH } from '../config';
 import { add, dist, type Vec } from '../core/vec';
 import { INDUSTRY_TYPES, type IndustryKind } from '../world/cargo';
 import { buildCost, harmClass, inTown, isRaw, townEdge, townFor, townIndustries, townSlots, workersNeeded } from '../world/enterprise';
@@ -280,6 +280,31 @@ describe('«Со строительством»', () => {
     expect(ind.paid).toBe(buildCost(ind.info));
     // Отмена стройки сносом вернула бы всё заплаченное — построенное возвращает половину.
     expect(g.enterprises.removePlan(ind).refund).toBe(buildCost(ind.info) * ENTERPRISE.refund);
+  });
+
+  it('стройка площадки не тратит запас на содержание в конце месяца: ждёт (upkeep), без денег вовсе — money', () => {
+    const g = player({ construction: 'build' });
+    const d = g.enterprises.deposits.find((x) => x.used === undefined)!;
+    expect(g.enterprises.build(d.kind, d.center)).toBeNull();
+    const ind = g.industries[g.industries.length - 1];
+    const base = { type: 'base' as const, id: g.nextId(), fp: { center: add(ind.fp.center, { x: 300, y: 0 }), w: 36, h: 24, angle: 0 }, nodeId: 0 };
+    g.construction.crews.bases.set(base.id, base);
+    const upkeep = g.upkeepForecast().total;
+    expect(upkeep).toBeGreaterThan(0);
+    // Сверх кредитного предела — ровно запас: площадка ждёт, деньги на месте.
+    g.money = ECONOMY.creditLimit + upkeep;
+    runSeconds(g, 2);
+    expect(g.enterprises.stalls.get(ind.id)).toBe('upkeep');
+    expect(ind.build!.done).toBe(0);
+    expect(g.money).toBe(ECONOMY.creditLimit + upkeep);
+    g.money = ECONOMY.creditLimit;
+    runSeconds(g, 1);
+    expect(g.enterprises.stalls.get(ind.id)).toBe('money');
+    // Деньги пришли — строится.
+    g.money = ECONOMY.creditLimit + upkeep + buildCost(ind.info);
+    runSeconds(g, 2);
+    expect(g.enterprises.stalls.has(ind.id)).toBe(false);
+    expect(ind.build!.done).toBeGreaterThan(0);
   });
 });
 

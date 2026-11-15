@@ -146,6 +146,15 @@ export type StationKind = Station['kind'];
 
 export type TurnKind = 'left' | 'straight' | 'right';
 
+/** Прогноз списаний в конце месяца (Game.upkeepForecast), $: по статьям и всего. */
+export interface UpkeepForecast {
+  vehicles: number;
+  crews: number;
+  roads: number;
+  interest: number;
+  total: number;
+}
+
 /** Что попадёт под снос рамкой: что вернём за дороги и сколько стоит снос домов. */
 export interface AreaContents {
   /** Пути. */
@@ -256,6 +265,9 @@ export interface LaneEnd {
 
 /** Сколько последних строек можно отменить. */
 const UNDO_DEPTH = 30;
+
+/** Деньги в уведомлении: «$12 345». */
+const usd = (n: number) => `$${Math.round(n).toLocaleString('ru-RU')}`;
 
 /** Чем ездят к станции: к вокзалу — поезда, к автостанции и остановке — машины. */
 export function stationMode(st: Pick<Station, 'kind'>): LineMode {
@@ -1221,6 +1233,43 @@ export class Game implements BuildContext {
     return this.money - ECONOMY.creditLimit - this.reserved;
   }
 
+  /**
+   * Бюджет автоматических трат стройки — проектов дорог и путей (construction.ts) и стройки предприятий
+   * (enterprises.ts), что платят сами по готовым метрам: budget без запаса на содержание в конце месяца
+   * (upkeepForecast). Иначе стройка тратила бы выручку до самого кредитного предела, а содержание, списанное
+   * в monthEnd одной суммой, опускало бы счёт ниже порога банкротства. Разовые покупки игрока смотрят на budget.
+   */
+  get buildBudget(): number {
+    return this.budget - this.upkeepForecast().total;
+  }
+
+  /**
+   * Что спишется в конце месяца (monthEnd) одной суммой: содержание транспорта и бригад, ремонт дорог и путей,
+   * проценты по кредиту. Сумма — полная месячная, не доля оставшейся части месяца: monthEnd снимает её целиком,
+   * в какой бы день её ни считали, а выручку до конца месяца не учитываем — она не обещана (стройка перекрывает
+   * дороги, машины встают). Выручка, пришедшая за месяц, сразу идёт в стройку — запас остаётся тем же.
+   */
+  upkeepForecast(): UpkeepForecast {
+    const vehicles = this.fleetRunning();
+    const crews = this.construction.crews.upkeep();
+    const roads = this.roadUpkeep();
+    const interest = this.interestDue();
+    return { vehicles, crews, roads, interest, total: vehicles + crews + roads + interest };
+  }
+
+  /**
+   * Ремонт дорог и путей за месяц. Стоимость сети (roadValueTotal) пересчитывается только с новой версией сети —
+   * она меняется, когда участок открыт или начаты работы, а не на каждом шаге стройки.
+   */
+  private roadUpkeep(): number {
+    return Math.round(this.roadValueTotal() * ECONOMY.roadUpkeepRate * 0.3);
+  }
+
+  /** Проценты по кредиту за месяц. */
+  private interestDue(): number {
+    return this.loan > 0 ? Math.round(this.loan * ECONOMY.loanRate) : 0;
+  }
+
   /** Отложено на проекты стройки (Project.reserve): на счёте, но не для прочих трат. */
   get reserved(): number {
     return this.construction.reserved();
@@ -1306,9 +1355,21 @@ export class Game implements BuildContext {
     } else {
       // Встали сразу несколько — одно уведомление (советник покажет все).
       const others = [...this.construction.projects.values()].some((x) => x !== p && x.stalled !== undefined);
-      if (!others) this.notify('🚧 Стройка стоит: не хватает денег', '#e5534b', { kind: 'build', refs: [{ type: 'project', id: p.id }] });
-      this.journal.add('project-stall', { id: p.id, money: this.money });
+      const upkeep = this.upkeepForecast().total;
+      const text = this.buildWaitsUpkeep
+        ? `🚧 Стройка ждёт: ${usd(upkeep)} отложено на содержание в конце месяца`
+        : '🚧 Стройка стоит: не хватает денег';
+      if (!others) this.notify(text, '#e5534b', { kind: 'build', refs: [{ type: 'project', id: p.id }] });
+      this.journal.add('project-stall', { id: p.id, money: this.money, upkeep });
     }
+  }
+
+  /**
+   * Стройка стоит не потому, что денег нет до кредитного предела, а из-за запаса на содержание в конце месяца
+   * (buildBudget): сверх предела на счёте что-то есть, но не больше, чем спишется в monthEnd.
+   */
+  get buildWaitsUpkeep(): boolean {
+    return this.budget > 0;
   }
 
   /** Пауза проекта (paused) или снова строить. */
@@ -1321,7 +1382,9 @@ export class Game implements BuildContext {
   /**
    * Резерв проекта: on — отложить, сколько ещё стоит достроить (не хватает свободных денег — сколько есть; уже
    * отложено меньше — доложить), off — снять. Отложенное остаётся на счёте, но в бюджет прочих трат не входит, а проект
-   * платит из него (construction.ts). null — сделано, иначе причина.
+   * платит из него (construction.ts). Откладывается из бюджета стройки (buildBudget): запас на содержание в конце
+   * месяца стройка не тратит и из резерва, поэтому отложить его — значит запереть деньги, которые проекту не достанутся.
+   * null — сделано, иначе причина.
    */
   reserveProject(id: number, on: boolean): string | null {
     const p = this.construction.projects.get(id);
@@ -1334,7 +1397,7 @@ export class Game implements BuildContext {
     }
     const left = this.construction.info(id)?.left ?? 0;
     const have = p.reserve ?? 0;
-    const add = Math.min(left - have, Math.floor(this.budget));
+    const add = Math.min(left - have, Math.floor(this.buildBudget));
     if (left - have <= 0) return null;
     if (add <= 0) return 'Не хватает денег';
     this.construction.setReserve(id, have + add);
@@ -2392,9 +2455,28 @@ export class Game implements BuildContext {
   /** Расход: стройка (по умолчанию) или покупка транспорта — для отчёта о финансах. */
   spend(amount: number, kind: 'build' | 'purchases' = 'build'): void {
     const a = Math.round(amount);
+    const before = this.money;
     this.money -= a;
     this.expensesMonth += a;
     this.ledger[kind] += a;
+    if (a > 0) this.warnUpkeep(before);
+  }
+
+  /**
+   * Разовые покупки игрока (машина, станция, дорога «Мгновенно», бригада) ограничены только кредитным пределом
+   * (budget): купить можно и из запаса на содержание, но осознанно — трата, после которой на счёте меньше кредитного
+   * предела + того, что спишется в конце месяца (upkeepForecast), предупреждает. Только при переходе черты, чтобы
+   * не повторять на каждой покупке ниже неё. Автоматическая стройка (buildBudget) эту черту не переходит.
+   */
+  private warnUpkeep(before: number): void {
+    const upkeep = this.upkeepForecast().total;
+    const line = ECONOMY.creditLimit + upkeep;
+    if (before < line || this.money >= line) return;
+    this.notify(
+      `💸 Взято из запаса на содержание: в конце месяца спишется ${usd(upkeep)}, на счёте может стать меньше −${usd(-ECONOMY.creditLimit)} (банкротство)`,
+      '#e5a33b',
+      { kind: 'money' },
+    );
   }
 
   /** Возврат части денег за снесённое. */
@@ -6562,6 +6644,7 @@ export class Game implements BuildContext {
    * в это время стоят — порядок и числа те же, что и целиком.
    */
   private *monthEnd(): Generator<void, void, void> {
+    // Списания — те же, что прогноз upkeepForecast (запас стройки на содержание, buildBudget).
     for (const v of this.fleet.values()) {
       const cost = this.runningCost(v);
       this.money -= cost;
@@ -6578,12 +6661,12 @@ export class Game implements BuildContext {
       this.expensesMonth += crews;
       this.ledger.vehicles += crews;
     }
-    const upkeep = Math.round(this.roadValueTotal() * ECONOMY.roadUpkeepRate * 0.3);
+    const upkeep = this.roadUpkeep();
     this.money -= upkeep;
     this.expensesMonth += upkeep;
     this.ledger.roads += upkeep;
     if (this.loan > 0) {
-      const interest = Math.round(this.loan * ECONOMY.loanRate);
+      const interest = this.interestDue();
       this.money -= interest;
       this.expensesMonth += interest;
       this.ledger.interest += interest;

@@ -168,6 +168,28 @@ function building(game: Game, out: Advice[]): void {
   const need = stalled.reduce((s, i) => s + i.left, 0);
   const canLoan = game.loan < game.loanMax;
   const what = stalled.length === 1 ? `«${projectName(first.project)}»` : `${stalled.length} ${plural(stalled.length, 'проект', 'проекта', 'проектов')}`;
+  // Деньги сверх кредитного предела есть, но стройка их не тратит: запас на содержание в конце месяца (Game.buildBudget).
+  if (game.buildWaitsUpkeep) {
+    const f = game.upkeepForecast();
+    const parts = [
+      f.vehicles && `транспорт ${money(f.vehicles)}`,
+      f.crews && `бригады ${money(f.crews)}`,
+      f.roads && `ремонт ${money(f.roads)}`,
+      f.interest && `проценты ${money(f.interest)}`,
+    ].filter(Boolean);
+    out.push({
+      key: 'buildMoney',
+      kind: 'buildMoney',
+      level: 'warn',
+      title: `Стройка ждёт: ${money(f.total)} отложено на содержание в конце месяца`,
+      detail: `${what}: в конце месяца спишется ${money(f.total)}${parts.length ? ` (${parts.join(', ')})` : ''} — эти деньги стройка не тратит, чтобы итоги месяца не увели счёт ниже ${money(ECONOMY.creditLimit)}. Достроить — ещё ${money(need)}; стройка пойдёт с выручкой.${canLoan ? ' Быстрее — кредит, или поставьте лишнее на паузу.' : ' Быстрее — поставьте лишнее на паузу.'}`,
+      at: first.front ?? first.at,
+      count: stalled.length,
+      fix: canLoan ? { kind: 'loan' } : undefined,
+      funds: { have: Math.max(0, game.money), need },
+    });
+    return;
+  }
   out.push({
     key: 'buildMoney',
     kind: 'buildMoney',

@@ -2218,7 +2218,7 @@ export class Hud {
     // «Со строительством» — цена всего проекта и сколько строить (платится по готовым метрам).
     const price = plan.road?.project ? planPrice({ cost: plan.cost, project: plan.road.project }) : plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
     // Проект дороже свободных денег — строить можно (платится по готовым метрам), но жёлтым: пойдёт по мере денег.
-    const short = plan.ok && plan.road?.project ? projectMoneyWarning({ cost: plan.cost, project: plan.road.project }, this.game().budget) : null;
+    const short = plan.ok && plan.road?.project ? projectMoneyWarning({ cost: plan.cost, project: plan.road.project }, this.game().buildBudget) : null;
     const warn = short ? `<span class="project-short" data-tip="Проект дороже свободных денег: заложить можно — стройка платит за готовые метры и встаёт, пока денег нет">${short}</span>` : '';
     return `<div class="project-bar">${projectSvg(30, 22)}<b>Проект</b><span class="muted">${parts}${raze}</span>
       <b class="project-total ${plan.ok ? (short ? 'warn' : '') : 'bad'}">${price}</b>${why}${warn}

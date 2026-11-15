@@ -3337,7 +3337,7 @@ export class Renderer {
       if (!e.on) continue;
       const top = ind.fp.center.y - Math.max(...footprintCorners(ind.fp).map((p) => ind.fp.center.y - p.y));
       const badge = ind.build
-        ? `🏗 ${Math.floor(ind.build.done * 100)}%${e.stalls.get(ind.id) === 'base' ? ' · ⛔ нет базы' : e.stalls.get(ind.id) === 'money' ? ' · 💸' : ''}`
+        ? `🏗 ${Math.floor(ind.build.done * 100)}%${e.stalls.get(ind.id) === 'base' ? ' · ⛔ нет базы' : e.stalls.get(ind.id) === 'money' || e.stalls.get(ind.id) === 'upkeep' ? ' · 💸' : ''}`
         : ind.ruin
           ? '🏚 заброшено'
           : e.staff(ind) < 0.995

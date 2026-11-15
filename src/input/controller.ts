@@ -2604,7 +2604,7 @@ export class Controller {
     const info = `${okText}${moved ? ` · ${moved}` : ''}${works ? ` · ${works}` : ''}${profileNote(plan.profile)}${curveNote(plan)}${razed}`;
     // Не хватает денег — всё равно видно, сколько стоит и какая выйдет дорога, и сколько есть.
     // «Со строительством» проект дороже свободных денег — закладывается, но жёлтым: стройка пойдёт по мере денег.
-    const short = plan.ok ? projectMoneyWarning(plan, g.budget) : null;
+    const short = plan.ok ? projectMoneyWarning(plan, g.buildBudget) : null;
     if (short) o.label = { text: `${info} · ${short}`, ok: true, warn: true };
     else if (plan.ok) o.label = { text: info, ok: true };
     else if (plan.reason === NO_MONEY) o.label = { text: `${NO_MONEY} · ${info}`, ok: false };
@@ -2649,7 +2649,7 @@ export class Controller {
     const total = segs || edits || v.draft || built ? `${price}${segs || v.draft ? ` · ${Math.round(plan.length)} м` : ''}` : '';
     const problem = !plan.ok && plan.reason && (segs || edits || v.draft || built) ? plan.reason : null;
     // «Со строительством» проект дороже свободных денег — строится, но подпись жёлтая: стройка пойдёт по мере денег.
-    const short = plan.ok && total && plan.road?.project ? projectMoneyWarning({ cost: plan.cost, project: plan.road.project }, g.budget) : null;
+    const short = plan.ok && total && plan.road?.project ? projectMoneyWarning({ cost: plan.cost, project: plan.road.project }, g.buildBudget) : null;
     const priced = (text: string): NonNullable<ToolOverlay['label']> =>
       problem ? { text: `${problem} · ${text}`, ok: false } : short ? { text: `${text} · ${short}`, ok: true, warn: true } : { text, ok: true };
     if (built) {

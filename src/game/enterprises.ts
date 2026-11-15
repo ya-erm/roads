@@ -62,8 +62,11 @@ export interface IndustryPlan {
   timed: boolean;
 }
 
-/** Почему стройка предприятия стоит: нет базы рядом или денег. */
-export type BuildStall = 'base' | 'money';
+/**
+ * Почему стройка предприятия стоит: нет базы рядом, денег (до кредитного предела) или деньги есть, но отложены
+ * на содержание в конце месяца (upkeep, Game.buildBudget).
+ */
+export type BuildStall = 'base' | 'money' | 'upkeep';
 
 /** Добыча ставится на месторождение, если курсор не дальше стольких единиц от его центра. */
 const DEPOSIT_SNAP = 240;
@@ -353,8 +356,9 @@ export class Enterprises {
     }
     const step = Math.min(1 - b.done, dt / b.time);
     const pay = b.cost * step;
-    if (pay > g.budget) {
-      this.stalls.set(ind.id, 'money');
+    // Платит сама, по ходу работ — как проект дороги: с запасом на содержание в конце месяца (Game.buildBudget).
+    if (pay > g.buildBudget) {
+      this.stalls.set(ind.id, pay > g.budget ? 'money' : 'upkeep');
       return;
     }
     this.stalls.delete(ind.id);
