@@ -5,6 +5,7 @@ import type { Plan, Snap } from '../game/build';
 import { stationNormal } from '../game/railStationEdit';
 import { warningMarks } from '../game/stationWarnings';
 import { paxGone } from '../game/paxPatience';
+import type { Spans } from '../game/constructionWork';
 import type { Game, LaneEnd, Partner } from '../game/game';
 import { bayFront, stopBerth, type FleetVehicle, type Line } from '../game/transport';
 import { bridgeLook, deckAlong } from '../lanes/deck';
@@ -50,13 +51,14 @@ import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
 import { prefOn } from '../ui/prefs';
 import { drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
+import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, heightLabel, ReliefRenderer, waterPath } from './relief';
 import { type Box, grow, GROUND, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
-import { baseBox, baseSig, buildingCorridors, drawBases, drawClosures, drawOldRoad, drawMachines, drawParked, drawProjectShadows, drawProjects, nodeReach, nodeStage, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
+import { baseBox, baseSig, buildingCorridors, drawBases, drawClosures, drawOldRoad, drawMachines, drawParked, drawProjectShadows, drawProjects, drawnSpans, nodeReach, nodeStage, progressBoxes, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
 import { drawRailProjects, drawTrackMachines, railProjectSig } from './railProjectArt';
 import { WORK_TRAIN } from '../game/workTrains';
@@ -377,6 +379,8 @@ interface TilePlan {
 
 /** На столько вокруг рамки изменения сбрасываются плитки: тени мостов, знаки у кромки, откосы, деревья. */
 const DIRTY_PAD = 80;
+/** На столько вокруг участка хода работ на строящемся полотне (progressBoxes — уже с запасом на ширину и тень моста). */
+const PROGRESS_PAD = 20;
 /** Запас вокруг плитки, в котором объекты ещё рисуются в неё (как у края экрана, view()). */
 const TILE_MARGIN = 60;
 /** Бюджет кадра на перерисовку плиток, мс: устаревших на экране, недорисованных при смене уровня, про запас вокруг. */
@@ -460,6 +464,8 @@ export class Renderer {
     bases: new SceneDiff(),
     towns: new Map<number, { list: TownBuilding[] | null; n: number; diff: SceneDiff }>(),
   };
+  /** Ход работ на строящихся полотнах в плитках (drawnSpans) — при той же форме (projectSig): шаг сбрасывает только край работ. */
+  private progress = new Map<number, { sig: string; spans: Spans }>();
   /** С чем сверены слепки: партия, карта, вид, сеть дорог на карте и её подсветка, версия путей. */
   private still = {
     game: null as Game | null,
@@ -474,14 +480,16 @@ export class Renderer {
     fullVersion: -1,
   };
   /**
-   * В последнем кадре было то, что меняется само (мигание, дым, пульсация подсветки, всплывающие суммы, значки ещё
-   * грузятся) или плитки кэша не дорисованы: следующий кадр нужен, даже если ничего не трогали (src/render/redraw.ts).
+   * В последнем кадре было то, что меняется само (пульсация подсветки, всплывающие суммы, значки ещё грузятся) или
+   * плитки кэша не дорисованы: следующий кадр нужен, даже если ничего не трогали (src/render/redraw.ts).
    */
   private moving = true;
+  /** В последнем кадре двигался фон — дым, огонь, качалки предприятий, огни закрытого переезда: кадры нужны, но реже. */
+  private ambient = false;
 
-  /** Нужен ли следующий кадр, даже если в игре и камере ничего не поменялось. */
-  get needsFrame(): boolean {
-    return this.moving;
+  /** Что в кадре движется само (src/render/redraw.ts): живое — кадр нужен скоро, только фон — можно реже. */
+  get motion(): Motion {
+    return this.moving ? 'live' : this.ambient ? 'ambient' : 'none';
   }
 
   constructor(
@@ -525,6 +533,7 @@ export class Renderer {
       d.clear();
     this.diffs.projectItems.clear();
     this.diffs.towns.clear();
+    this.progress.clear();
     this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1, full: null, fullVersion: -1 };
   }
 
@@ -579,6 +588,7 @@ export class Renderer {
       o.selection?.type === 'fleet' ||
       !!o.laneEdit?.from ||
       !!o.phaseEdit?.flash.length;
+    this.ambient = false;
     this.refreshCache(game);
     this.hiddenSigns = o.hiddenSigns ?? null;
     this.blinkOn = game.speed === 0 || (game.time * BLINK_HZ) % 1 < 0.5;
@@ -1009,7 +1019,18 @@ export class Renderer {
       );
       add(this.diffs.nodes.update((put) => this.lanes.eachItem(roadNet, (kind, id, sig, box) => kind === 'node' && put(id, sig, box))));
     }
-    // Стройка: чертежи и готовое на них — по шагам (projectSig), с подсветкой правки; рамка — полотна.
+    // Стройка: чертежи — по форме полотна (projectSig), с подсветкой правки; рамка — полотна. Ход работ (шаг этапа) —
+    // только участок у края работ (progressBoxes): иначе шаг колонны перерисовывал плитки под всем полотном.
+    const progress = new Map<number, { sig: string; spans: Spans }>();
+    for (const c of buildingCorridors(s.fullNet)) {
+      const sig = projectSig(c);
+      const spans = drawnSpans(c);
+      const was = this.progress.get(c.id);
+      // Запас — сверх рамки участка (у неё свой, на ширину, мост и его тень): откосы и деревья от хода работ не меняются.
+      if (was && was.sig === sig) for (const b of progressBoxes(c, was.spans, spans, siteKind(s.fullNet, c) === 'bridge')) boxes.push(grow(b, PROGRESS_PAD));
+      progress.set(c.id, { sig, spans });
+    }
+    this.progress = progress;
     add(
       this.diffs.projects.update((put) => {
         for (const c of buildingCorridors(s.fullNet)) put(c.id, `${projectSig(c)}|${tint?.has(c.id) ? tintColor : ''}`, projectBox(c));
@@ -1161,7 +1182,19 @@ export class Renderer {
       if (!seenAt(v.pos, view, 40)) continue;
       const c = v.site !== undefined ? net.corridors.get(v.site) : undefined;
       const kind = c ? siteKind(net, c) : 'road';
-      const draw = v.stage === 0 && kind !== 'road' ? () => drawMachines(ctx, v.pos, v.dir, 0, !!v.beacon, 0, kind, game.time) : () => this.drawVehicles([v]);
+      const draw =
+        v.stage === 0 && kind !== 'road'
+          ? (g: CanvasRenderingContext2D) => drawMachines(g, v.pos, v.dir, 0, !!v.beacon, 0, kind, game.time)
+          : (g: CanvasRenderingContext2D) => {
+              // Призрак рисуется в приглушённый холст (drawInSight): машины — тем же методом, что в потоке.
+              const keep = this.ctx;
+              this.ctx = g;
+              try {
+                this.drawVehicles([v]);
+              } finally {
+                this.ctx = keep;
+              }
+            };
       drawInSight(ctx, tunnelSight(net, v.pos, v.dir, v.length), draw);
     }
     for (const l of lights) drawWorkLights(ctx, l.site, game.time, l.working);
@@ -1746,7 +1779,7 @@ export class Renderer {
       const c = net.corridors.get(x.corridor);
       if (!c) continue;
       // Огни закрытого переезда мигают — и на паузе.
-      if (x.closed) this.moving = true;
+      if (x.closed) this.ambient = true;
       // Два въезда на переезд — с каждой стороны пути; у каждого справа столбик, при поезде — шлагбаум.
       for (const side of [-1, 1]) {
         const cs = Math.max(0, Math.min(c.length, x.s + side * (RAIL_HALF + 4)));
@@ -2224,10 +2257,11 @@ export class Renderer {
     const time = performance.now() / 1000;
     for (const ind of game.industries) {
       // Дым, огонь и качалки движутся и на паузе (по часам, а не по времени игры).
-      for (const a of ind.annexes ?? []) if (inView(a.fp) && drawAnnexArt(this.ctx, ind, a, z, time, 'motion')) this.moving = true;
+      // Фон: кадры для него — реже (AMBIENT_FPS, src/render/redraw.ts).
+      for (const a of ind.annexes ?? []) if (inView(a.fp) && drawAnnexArt(this.ctx, ind, a, z, time, 'motion')) this.ambient = true;
       // Заброшенное и стройка не дымят (кран стройки — в плитке).
       if (ind.ruin || ind.build) continue;
-      if (inView(ind.fp) && drawIndustryArt(this.ctx, ind, z, time, 'motion')) this.moving = true;
+      if (inView(ind.fp) && drawIndustryArt(this.ctx, ind, z, time, 'motion')) this.ambient = true;
     }
   }
 

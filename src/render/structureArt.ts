@@ -9,7 +9,7 @@
  *   полупрозрачными и приглушёнными, ghostly, как машины в готовом тоннеле), у входного портала — проходческое хозяйство (entryPortal,
  *   drawPortalGear), а ход работ виден сквозь землю: пройденная часть — тёмной выработкой с кольцами обделки (в
  *   плитках, constructionArt), у края каждого этапа — огонёк (drawWorkLights), у щита — крупный и мерцающий.
- * Статичное (опоры, балки, настил, выработка) — в плитках кэша карты по шагам drawStep (их подпись — projectSig),
+ * Статичное (опоры, балки, настил, выработка) — в плитках кэша карты по шагам drawStep (сброс плиток — progressBoxes),
  * движущееся (техника, огоньки, хозяйство у портала) — в динамическом проходе кадра.
  */
 import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
@@ -134,8 +134,107 @@ export type Sight = 'show' | 'ghost' | { out: Vec[]; under: Vec[] };
 
 /** Непрозрачность техники под землёй (сквозь землю, поверх выработки) — как у машин в готовом тоннеле. */
 export const GHOST_ALPHA = 0.4;
-/** Под землёй техника ещё и чуть приглушённая: блёклее и темнее (где canvas filter есть). */
-const GHOST_FILTER = 'saturate(0.55) brightness(0.85)';
+/** Под землёй техника ещё и чуть приглушённая: блёклее и темнее — как CSS saturate(0.55) brightness(0.85). */
+const GHOST_SATURATE = 0.55;
+const GHOST_BRIGHTNESS = 0.85;
+
+/** Цвет #rgb, #rgba, #rrggbb, #rrggbbaa или rgb(a)(…) — каналами 0…255 и прозрачностью 0…1; другое — null. */
+function parseColor(c: string): [number, number, number, number] | null {
+  const s = c.trim();
+  if (s[0] === '#') {
+    const h = s.slice(1);
+    if (!/^[0-9a-f]+$/i.test(h)) return null;
+    const long = h.length === 6 || h.length === 8;
+    if (!long && h.length !== 3 && h.length !== 4) return null;
+    const at = (i: number) => (long ? parseInt(h.slice(2 * i, 2 * i + 2), 16) : parseInt(h[i] + h[i], 16));
+    const n = long ? h.length / 2 : h.length;
+    return [at(0), at(1), at(2), n === 4 ? at(3) / 255 : 1];
+  }
+  const m = /^rgba?\(([^)]*)\)$/i.exec(s);
+  if (!m) return null;
+  const parts = m[1].split(/[\s,/]+/).filter(Boolean);
+  if (parts.length < 3 || parts.length > 4) return null;
+  const num = (p: string, scale: number) => (p.endsWith('%') ? (parseFloat(p) / 100) * scale : parseFloat(p));
+  const out = [num(parts[0], 255), num(parts[1], 255), num(parts[2], 255), parts[3] === undefined ? 1 : num(parts[3], 1)];
+  return out.some((x) => !Number.isFinite(x)) ? null : (out as [number, number, number, number]);
+}
+
+const ghostColors = new Map<string, string | null>();
+
+/**
+ * Цвет color приглушённым, как CSS-фильтр saturate(0.55) brightness(0.85) (матрица насыщенности из Filter Effects,
+ * потом умножение яркости); прозрачность та же. Не разобрать цвет — null.
+ */
+export function ghostColor(color: string): string | null {
+  let out = ghostColors.get(color);
+  if (out !== undefined) return out;
+  const rgba = parseColor(color);
+  if (rgba) {
+    const [r, g, b, a] = rgba;
+    const s = GHOST_SATURATE;
+    const k = GHOST_BRIGHTNESS;
+    const ch = (v: number) => Math.round(Math.max(0, Math.min(255, v * k)));
+    const R = ch((0.213 + 0.787 * s) * r + (0.715 - 0.715 * s) * g + (0.072 - 0.072 * s) * b);
+    const G = ch((0.213 - 0.213 * s) * r + (0.715 + 0.285 * s) * g + (0.072 - 0.072 * s) * b);
+    const B = ch((0.213 - 0.213 * s) * r + (0.715 - 0.715 * s) * g + (0.072 + 0.928 * s) * b);
+    out = `rgba(${R}, ${G}, ${B}, ${+a.toFixed(3)})`;
+  } else out = null;
+  if (ghostColors.size > 512) ghostColors.clear();
+  ghostColors.set(color, out);
+  return out;
+}
+
+const muted = new WeakMap<CanvasRenderingContext2D, CanvasRenderingContext2D>();
+
+/**
+ * Холст, что рисует в ctx то же, но приглушённым цветом (ghostColor): цвет заливки, обводки, тени и точек градиентов
+ * пересчитывается, когда его ставят. Вместо ctx.filter — с ним Chrome на каждую фигуру заводит слой во весь холст и
+ * пропускает через фильтр его: полдюжины машин стройки в тоннеле грузили видеокарту на десятки мс в кадр.
+ */
+export function mutedCtx(ctx: CanvasRenderingContext2D): CanvasRenderingContext2D {
+  const hit = muted.get(ctx);
+  if (hit) return hit;
+  const t = ctx as unknown as Record<PropertyKey, unknown>;
+  const tint = (v: unknown): unknown => {
+    if (typeof v !== 'string') return v;
+    const direct = ghostColor(v);
+    if (direct) return direct;
+    // Имя цвета, hsl() и т. п. — как его понял холст (#rrggbb или rgba(…)).
+    const keep = ctx.fillStyle;
+    ctx.fillStyle = v;
+    const norm = ctx.fillStyle;
+    ctx.fillStyle = keep;
+    return (typeof norm === 'string' && ghostColor(norm)) || v;
+  };
+  const fns = new Map<PropertyKey, unknown>();
+  const proxy = new Proxy(ctx, {
+    get(_, p) {
+      const v = t[p];
+      if (typeof v !== 'function') return v;
+      let f = fns.get(p);
+      if (!f) {
+        const bound = (v as (...a: unknown[]) => unknown).bind(ctx);
+        f =
+          p === 'createLinearGradient' || p === 'createRadialGradient' || p === 'createConicGradient'
+            ? (...a: unknown[]) => {
+                const g = bound(...a) as CanvasGradient;
+                const add = g.addColorStop.bind(g);
+                g.addColorStop = (offset: number, color: string) => add(offset, tint(color) as string);
+                return g;
+              }
+            : bound;
+        fns.set(p, f);
+      }
+      return f;
+    },
+    set(_, p, v) {
+      t[p] = p === 'fillStyle' || p === 'strokeStyle' || p === 'shadowColor' ? tint(v) : v;
+      return true;
+    },
+  });
+  muted.set(ctx, proxy);
+  return proxy;
+}
 
 /**
  * Видна ли машина длиной length с носом в nose (смотрит по dir): у портала (на его проезде или обочине рядом, кузов
@@ -158,18 +257,23 @@ export function tunnelSight(net: LaneNet, nose: Vec, dir: Vec, length: number): 
   return buried(net, nose) ? 'ghost' : 'show';
 }
 
-/** Рисует draw призраком: полупрозрачно (GHOST_ALPHA от текущей) и приглушённо — так видно технику сквозь землю. */
-export function ghostly(ctx: CanvasRenderingContext2D, draw: () => void): void {
+/**
+ * Рисует draw призраком: полупрозрачно (GHOST_ALPHA от текущей) и приглушённо (mutedCtx) — так видно технику сквозь
+ * землю. draw рисует в данный ему холст.
+ */
+export function ghostly(ctx: CanvasRenderingContext2D, draw: (g: CanvasRenderingContext2D) => void): void {
   ctx.save();
   ctx.globalAlpha *= GHOST_ALPHA;
-  ctx.filter = GHOST_FILTER;
-  draw();
+  draw(mutedCtx(ctx));
   ctx.restore();
 }
 
-/** Рисует машину стройки draw так, как велит sight (tunnelSight): как есть, призраком или по частям у портала. */
-export function drawInSight(ctx: CanvasRenderingContext2D, sight: Sight, draw: () => void): void {
-  if (sight === 'show') return draw();
+/**
+ * Рисует машину стройки draw так, как велит sight (tunnelSight): как есть, призраком или по частям у портала. draw
+ * рисует в данный ему холст (у призрака — приглушённый, mutedCtx).
+ */
+export function drawInSight(ctx: CanvasRenderingContext2D, sight: Sight, draw: (g: CanvasRenderingContext2D) => void): void {
+  if (sight === 'show') return draw(ctx);
   if (sight === 'ghost') return ghostly(ctx, draw);
   const clipped = (poly: Vec[], fn: () => void) => {
     ctx.save();
@@ -180,7 +284,7 @@ export function drawInSight(ctx: CanvasRenderingContext2D, sight: Sight, draw: (
     fn();
     ctx.restore();
   };
-  clipped(sight.out, draw);
+  clipped(sight.out, () => draw(ctx));
   clipped(sight.under, () => ghostly(ctx, draw));
 }
 

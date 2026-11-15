@@ -9,6 +9,7 @@ import {
   drawInSight,
   entryPortal,
   GHOST_ALPHA,
+  ghostColor,
   PIER_LEAD,
   PIER_STEP,
   type Sight,
@@ -207,6 +208,37 @@ describe('Мост и тоннель сцены «Стройка»', () => {
     expect(ctx.globalAlpha).toBe(1);
     expect(ctx.filter).toBe('none');
     expect(ctx.clipped).toBe(null);
+  });
+
+  it('призрак приглушён цветом, а не фильтром холста: ctx.filter не трогается (с ним кадр грузил видеокарту)', () => {
+    const { portal } = descent();
+    const ctx = Object.assign(fakeCtx(), {
+      fillStyle: '#000' as string | object,
+      strokeStyle: '#000' as string | object,
+      createLinearGradient: () => {
+        const stops: [number, string][] = [];
+        return { stops, addColorStop: (o: number, c: string) => void stops.push([o, c]) };
+      },
+    });
+    const filters: string[] = [];
+    const seen: unknown[] = [];
+    drawInSight(ctx as unknown as CanvasRenderingContext2D, tunnelSight(net, add(portal.pos, scale(portal.dir, 60)), portal.dir, 20), (g) => {
+      filters.push(ctx.filter);
+      g.fillStyle = '#ff0000';
+      seen.push(ctx.fillStyle);
+      g.strokeStyle = 'rgba(128, 128, 128, 0.5)';
+      seen.push(ctx.strokeStyle);
+      const grad = g.createLinearGradient(0, 0, 1, 1) as unknown as { stops: [number, string][] };
+      (grad as unknown as CanvasGradient).addColorStop(0, '#fff');
+      seen.push(grad.stops[0][1]);
+    });
+    expect(filters).toEqual(['none']);
+    // Как CSS saturate(0.55) brightness(0.85): красный блёклый и темнее, серый — только темнее, прозрачность та же.
+    expect(seen).toEqual([ghostColor('#ff0000'), 'rgba(109, 109, 109, 0.5)', 'rgba(217, 217, 217, 1)']);
+    expect(ghostColor('#ff0000')).toBe('rgba(140, 21, 21, 1)');
+    expect(ghostColor('#f00')).toBe(ghostColor('#ff0000'));
+    expect(ghostColor('#ff000080')).toBe('rgba(140, 21, 21, 0.502)');
+    expect(ghostColor('нет такого')).toBeNull();
   });
 
   it('входной портал — позади начала стройки и для глубокого участка тоже; огоньки — у краёв начатых этапов', () => {

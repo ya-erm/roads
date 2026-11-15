@@ -270,7 +270,8 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => persist());
 
-// Кадр без изменений не перерисовывается (src/render/redraw.ts): ввод, окно и настройки — повод рисовать.
+// Кадр без изменений не перерисовывается, а движение рисуется не чаще 60 кадров в секунду (фон — 30), даже на экране
+// 120 Гц (src/render/redraw.ts): ввод, окно и настройки — повод рисовать.
 const gate = new RedrawGate();
 const poke = () => gate.poke(performance.now());
 for (const type of ['pointermove', 'pointerdown', 'pointerup', 'wheel', 'keydown', 'keyup', 'click', 'input', 'change', 'focus', 'blur']) {
@@ -287,15 +288,23 @@ function frame(now: number): void {
   last = now;
   controller.update(dt);
   game.update(dt);
-  // Подпись кадра: камера, партия, ход времени, сеть, деньги, линии, станции, парк, всплывающие суммы; инструмент,
-  // выбор и курсор (их меняют и не вводом — из панелей и скриптов).
-  const key = [
+  // Подпись вида — рисуется сразу: камера, партия, инструмент, выбор и курсор (их меняют и не вводом — из панелей
+  // и скриптов). Подпись состояния — не чаще MAX_FPS: ход времени, сеть, деньги, линии, станции, парк, всплывающие суммы.
+  const view = [
     controller.tool,
     controller.selection,
     controller.selectedLine,
     controller.highlight,
     controller.hover,
     game,
+    camera.x,
+    camera.y,
+    camera.zoom,
+    camera.width,
+    camera.height,
+    camera.dpr,
+  ];
+  const state = [
     game.speed,
     game.time,
     game.net.version,
@@ -305,22 +314,16 @@ function frame(now: number): void {
     game.stations.size,
     game.fleet.size,
     game.floaters.length,
-    camera.x,
-    camera.y,
-    camera.zoom,
-    camera.width,
-    camera.height,
-    camera.dpr,
   ];
-  const moving = game.speed > 0 || game.monthClosing || renderer.needsFrame || controller.timed;
-  if (gate.need(now, key, moving)) renderer.draw(game, controller.overlay());
+  const live = game.speed > 0 || game.monthClosing || controller.timed;
+  if (gate.need(now, view, state, live ? 'live' : renderer.motion)) renderer.draw(game, controller.overlay());
   hud.update(dt);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
 // Для отладки из консоли.
-Object.assign(window, { camera, controller, bugSpot });
+Object.assign(window, { camera, controller, bugSpot, renderer });
 Object.defineProperty(window, 'game', { get: () => game, configurable: true });
 if (scene) {
   // id линий сцены по названиям участков: game.lines.get(scene.lines.bay) и т. п.

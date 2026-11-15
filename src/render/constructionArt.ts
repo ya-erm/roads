@@ -5,7 +5,7 @@
  *   готовые дороги, в плитки кэша карты;
  * - этапы на строящемся участке (CONSTRUCTION.stages, идут колонной): 🟫 отсыпка (у моста — опоры, балки и плита
  *   настила, у тоннеля — выработка щита: src/render/structureArt.ts), ⬛ покрытие, ⬜ разметка — до края
- *   каждого, шагами CONSTRUCTION.drawStep: плитки обновляются по шагу, а не каждый такт (projectSig); отсыпка — не по
+ *   каждого, шагами CONSTRUCTION.drawStep: плитки обновляются по шагу, а не каждый такт, и только у края работ (progressBoxes); отсыпка — не по
  *   площадке перекрёстка (там бывает готовая дорога), площадка — этапом, дошедшим до неё (nodeStage); у расширения
  *   (тот же класс на месте, keepsPavement) отсыпка и покрытие — только на прибавке ширины (wideningBands), прежний
  *   асфальт до разметки — прежней дорогой (drawOldRoad);
@@ -30,7 +30,7 @@ import type { BuildBase } from '../world/entities';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 import { closureOf, fitLanes, keepsPavement, laneWise, partLanes, reverseSite, siteSpot, workSide } from '../lanes/closure';
 import { wasCorridor } from '../game/rebuild';
-import { bridgePiers, drawCraneSet, drawShieldSet, type SiteKind, siteKind, slabTo } from './structureArt';
+import { bridgePiers, drawCraneSet, drawShieldSet, PIER_LEAD, type SiteKind, siteKind, slabTo } from './structureArt';
 import { type Box, grow } from './tileCache';
 
 /** Строящиеся полотна сети — кэш по версии (стройка меняет её, когда закладывает или открывает участок). */
@@ -172,21 +172,57 @@ export function projectNodes(net: LaneNet, lanes: LaneRenderer): { id: number; b
   return out;
 }
 
-/** Подпись строящегося полотна для кэша плиток: форма (ревизия) и сколько готового нарисовано. */
+/**
+ * Подпись строящегося полотна для кэша плиток: форма (ревизия) и откуда заполняют. Ход работ (drawnSpans) — не в ней:
+ * шаг этапа сбрасывает не всё полотно, а только участок у края работ (progressBoxes).
+ */
 export function projectSig(c: Corridor): string {
-  return `${c.rev}|${drawnSpans(c).join(',')}|${c.build?.fromB ? 'b' : 'a'}`;
+  return `${c.rev}|${c.build?.fromB ? 'b' : 'a'}`;
 }
+
+/** Запас рамки полотна (projectBox) и участка хода работ (progressBoxes): ширина, подъём моста и его тень. */
+const PROJECT_PAD = 40;
 
 /** Рамка полотна с запасом на ширину и подъём моста. */
 export function projectBox(c: Corridor): Box {
   const pts = [c.curve.p0, c.curve.p1, c.curve.p2, c.curve.p3];
-  const pad = 40;
+  const pad = PROJECT_PAD;
   return {
     x0: Math.min(...pts.map((p) => p.x)) - pad,
     y0: Math.min(...pts.map((p) => p.y)) - pad,
     x1: Math.max(...pts.map((p) => p.x)) + pad,
     y1: Math.max(...pts.map((p) => p.y)) + pad,
   };
+}
+
+/** Позади края этапа меняется до стольких метров: плита настила отстаёт от балок (slabTo), с запасом. */
+const PROGRESS_BACK = 15;
+/** Впереди края отсыпки моста — опоры и фундаменты (bridgePiers: до 2 × PIER_LEAD), с запасом на шаг опоры. */
+const PROGRESS_AHEAD = 2 * PIER_LEAD + 5;
+
+/**
+ * Где на полотне c поменялся нарисованный ход работ, когда этапы перешли с before на after (drawnSpans): рамки оси
+ * от прежнего края этапа до нового (у отсыпки моста — и опоры впереди; плита позади) с запасом PROJECT_PAD, как у
+ * projectBox. Остальное на полотне от хода работ не зависит — его плитки не сбрасываются.
+ */
+export function progressBoxes(c: Corridor, before: Spans, after: Spans, bridge: boolean): Box[] {
+  const L = c.length;
+  const out: Box[] = [];
+  for (let k = 0; k < 3; k++) {
+    if (Math.abs(before[k] - after[k]) < 1e-6) continue;
+    // u — метры от начала заполнения (fromB — от конца b).
+    const u0 = Math.max(0, Math.min(before[k], after[k]) - PROGRESS_BACK);
+    const u1 = Math.min(L, Math.max(before[k], after[k]) + (k === 0 && bridge ? PROGRESS_AHEAD : 1));
+    const [s0, s1] = c.build?.fromB ? [L - u1, L - u0] : [u0, u1];
+    const n = Math.max(1, Math.ceil((s1 - s0) / 4));
+    let box: Box | null = null;
+    for (let i = 0; i <= n; i++) {
+      const p = c.lut.pointAt(s0 + ((s1 - s0) * i) / n);
+      box = box ? { x0: Math.min(box.x0, p.x), y0: Math.min(box.y0, p.y), x1: Math.max(box.x1, p.x), y1: Math.max(box.y1, p.y) } : { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+    }
+    if (box) out.push(grow(box, PROJECT_PAD));
+  }
+  return out;
 }
 
 const seen = (b: Box, view: Box) => !(b.x1 < view.x0 || b.x0 > view.x1 || b.y1 < view.y0 || b.y0 > view.y1);

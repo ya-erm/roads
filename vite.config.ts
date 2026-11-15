@@ -21,6 +21,7 @@ const ISOLATED_TESTS = [
   'src/game/templates.test.ts',
   'src/game/workTrainSelect.test.ts',
   'src/game/roadEditTraffic.test.ts',
+  'src/render/rendererTiles.test.ts',
 ];
 
 /**
