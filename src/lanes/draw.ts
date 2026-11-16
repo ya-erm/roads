@@ -7,7 +7,7 @@ import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS, layerOf } from 
 import { noseParapet, PARAPET, parapetLine, parapetWidth } from './parapet';
 import { onPrefs, prefOn } from '../ui/prefs';
 import { insidePoly, type JunctionMarks, junctionMarks } from './junctionMarks';
-import { autoSolids, solidLength } from './solid';
+import { autoSolids, centreLine, solidLength } from './solid';
 import { walkGeo, walksOn } from './crosswalk';
 import { junctionRuts } from './dirtRuts';
 
@@ -853,7 +853,6 @@ export class LaneRenderer {
       }
       if (cur && cur.pts.length > 1) marks.push(cur);
     };
-    const L = solidLength(c);
     const order = c.lanes.map((_, i) => i).sort((x, y) => c.lanes[x].offset - c.lanes[y].offset);
     for (let k = 0; k + 1 < order.length; k++) {
       const i = order[k];
@@ -867,15 +866,11 @@ export class LaneRenderer {
         const same = A.flow === B.flow;
         // Сплошная сама — у развилки полос в разные полотна, после вливания и у самого перекрёстка (autoSolids).
         const auto = same ? autoSolids(net, c, i, j, s0, s1) : [];
-        // Осевая между встречными: у проспекта — жёлтая сплошная; у улицы 1+1 — пунктир, но у перекрёстка — сплошная.
-        const jA = !c.ring && net.node(c.a).kind === 'junction';
-        const jB = !c.ring && net.node(c.b).kind === 'junction';
+        // Осевая между встречными (centreLine): у проспекта — жёлтая сплошная; у улицы 1+1 — пунктир, но у перекрёстка —
+        // сплошная. По ней же решается, можно ли повернуть налево через встречку (game/garages.ts).
         runs(mid, (s) => {
           if (!both(s)) return null;
-          if (!same) {
-            if (c.lanes.length > 2) return 'yellow';
-            return (jA && s <= s0 + L) || (jB && s > s1 - L) ? 'solid' : 'dash';
-          }
+          if (!same) return centreLine(net, c, s, s0, s1);
           return A.solid || auto.some(([u, v]) => s >= u - 1e-6 && s <= v + 1e-6) ? 'solid' : 'dash';
         });
       } else if (gap > LANE_W + 0.3) {

@@ -3,6 +3,7 @@ import { add, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { GLane, GLink, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import { findLaneRoute, routeCost } from '../lanes/routing';
+import { centreLine } from '../lanes/solid';
 import type { Barrier, LaneTraffic } from '../lanes/traffic';
 import { steerBase } from '../sim/body';
 import { bezier, legPose, straight, type Leg } from './lotMoves';
@@ -52,9 +53,10 @@ export const GARAGE_TRIPS = {
 };
 
 /**
- * Левый поворот к дому, гаражу, площадке или стоянке через встречку — на улице с движением в обе стороны без
- * разделителя: 1+1 (грунтовка, улица) и 2+2 (проспект) — из крайней левой полосы. На шоссе и магистрали, на дороге с
- * разделителем или сплошной посередине и на односторонней — только направо (GarageSlot.cross). Машина встаёт на своей
+ * Левый поворот к дому, гаражу, площадке или стоянке через встречку — только через прерывистую осевую: на улице и
+ * грунтовке 1+1, не у перекрёстка (lanes/solid.centreLine — по ней же рисуется разметка). Через жёлтую осевую
+ * (проспект 2+2 и шире), белую сплошную у перекрёстка, разделитель, на шоссе и магистрали и на односторонней — только
+ * направо (GarageSlot.cross). Машина встаёт на своей
  * полосе напротив заезда с левым поворотником и ждёт просвета во встречном потоке: встречному должно хватать места
  * спокойно остановиться (LaneTraffic.clearToJoin — 66 м на 50 км/ч), пока она пересекает встречку по дуге (~4 с:
  * встречку на это время закрывает стоп-линия, LaneTraffic.turnStops). Сзади на её полосе ждут — как в жизни. Выезд —
@@ -67,8 +69,6 @@ export const LEFT_TURN = {
   outWait: 20,
   /** Надбавка ко времени пути с левым поворотом, с (ожидание просвета): при почти равных путях — направо. */
   penalty: 4,
-  /** Полос в каждую сторону — не больше стольких (2+2 — из крайней левой). */
-  maxLanes: 2,
   /** Другая машина пересекает встречку ближе стольких метров по оси — ждёт, пока та проедет. */
   apart: 30,
 };
@@ -366,9 +366,9 @@ export class Garages {
   }
 
   /**
-   * Где машина поворачивает к месту налево, через встречку, и выезжает от него налево (LEFT_TURN): крайняя левая полоса
-   * хода от дома на улице с движением в обе стороны без разделителя, не больше 2+2, не шоссе; место поворота — на
-   * радиус поворота раньше заезда. Нельзя — null (только направо, slotOf).
+   * Где машина поворачивает к месту налево, через встречку, и выезжает от него налево (LEFT_TURN): встречная дому
+   * полоса улицы с движением в обе стороны, без разделителя, не шоссе, с пунктиром по оси на всём пути поворота
+   * (centreLine); место поворота — на радиус поворота раньше заезда. Нельзя — null (только направо, slotOf).
    */
   leftSlotOf(home: CarSpot): GarageSlot | null {
     return this.cachedSlot(home, true);
@@ -417,13 +417,11 @@ export class Garages {
     let link = near;
     let lane = curbLane(near);
     if (left) {
-      if (!far || isTrunk(c.cls) || near.lanes.length > LEFT_TURN.maxLanes || far.lanes.length > LEFT_TURN.maxLanes) return null;
+      if (!far || isTrunk(c.cls)) return null;
       lane = far.lanes[0];
       const inner = near.lanes[0];
-      // Между ходами — разделитель (шире полосы) или сплошная: через них налево не поворачивают.
+      // Между ходами — разделитель (шире полосы): через него налево не поворачивают.
       if (Math.abs(lane.offset - inner.offset) > LANE_W + 0.5 || Math.sign(lane.offset) === Math.sign(inner.offset)) return null;
-      const centre = lane.offset < inner.offset ? lane : inner;
-      if (c.lanes[centre.laneIdx]?.solid) return null;
       link = far;
     }
     const L = this.host.car.length;
@@ -441,6 +439,14 @@ export class Garages {
     const p = g.lanePose(lane, mid);
     const slot: GarageSlot = { lane, link, mid, zone, pos: p.pos, f: p.dir };
     if (!left) return slot;
+    // Осевая на всём пути поворота — от места, где машина начинает поворачивать, до заезда (с запасом в полкузова), —
+    // пунктир; жёлтая (проспект) или белая сплошная (у перекрёстка) — налево нельзя. Та же осевая, что нарисована
+    // (centreLine, обрезы у перекрёстков — как у разметки).
+    const [ca, cb] = g.cutOf(c.id) ?? [0, 0];
+    const sTurn = g.axisS(lane, mid);
+    const from = Math.max(0, Math.min(sTurn, at.s) - L / 2);
+    const to = Math.min(c.length, Math.max(sTurn, at.s) + L / 2);
+    for (let s = from; s <= to + 1e-6; s += 1) if (centreLine(net, c, Math.min(s, to), ca, c.length - cb) !== 'dash') return null;
     // Что кузов заметает на встречных полосах, поворачивая к месту (выезжая — тем же путём задом): по точкам дуги —
     // те, что ближе полуширины полосы и полудиагонали кузова к оси полосы, ± полкузова вдоль неё.
     const turn = this.inLegs(home, p.pos, p.dir)[0];

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { SIM_DT } from '../config';
 import { dist, dot, sub, type Vec } from '../core/vec';
 import { twoWay } from '../lanes/model';
+import { centreLine } from '../lanes/solid';
 import type { Vehicle } from '../sim/vehicle';
 import type { Town } from '../world/entities';
 import { MEDIAN } from '../world/roadTypes';
@@ -186,12 +187,6 @@ describe('Левый поворот к дому через встречку', { 
       c.cls = 'highway';
       game.roads.net.touch(c);
     }],
-    ['сплошная посередине', (game: Game, id: number) => {
-      const c = game.roads.net.corridor(id);
-      const lanes = twoWay(1, 1);
-      lanes[0].solid = true;
-      game.roads.net.setLanes(c, lanes);
-    }],
   ])('на дороге %s налево не поворачивает — к дому направо', (_name, edit) => {
     const game = withoutCitizens(freshGame(7));
     const { home, left } = leftHome(game);
@@ -203,23 +198,56 @@ describe('Левый поворот к дому через встречку', { 
     if (way) expect(way.slot.cross).toBeUndefined();
   });
 
-  it('проспект 2+2 без разделителя: налево — из крайней левой полосы, через обе встречные', () => {
+  it('улица 1+1: по оси у дома — белый пунктир (как нарисовано), через него налево можно', () => {
     const game = withoutCitizens(freshGame(7));
-    const { town, home, left } = leftHome(game, 2);
+    const { home, left } = leftHome(game);
+    const c = game.roads.net.corridor(left.link.corridor);
+    const [ca, cb] = game.roads.graph.cutOf(c.id)!;
+    const s = c.lut.closest(home.d.curb).s;
+    expect(c.lanes).toHaveLength(2);
+    expect(centreLine(game.roads.net, c, s, ca, c.length - cb)).toBe('dash');
+    expect(left.cross).toHaveLength(1);
+  });
+
+  it('проспект 2+2 с жёлтой осевой: налево нельзя — машина едет в объезд и сворачивает к дому направо', () => {
+    const game = withoutCitizens(freshGame(7));
     const traffic = game.traffic;
-    expect(game.roads.net.corridor(left.link.corridor).cls).toBe('avenue');
-    expect(left.lane.index).toBe(0);
-    expect(left.cross!.length).toBe(2);
-    const sim = sendHome(game, town, home, left);
-    expect(sim.endLeft).toBe(true);
-    let heldLane = -1;
-    for (let i = 0; i < 30 * 90; i++) {
+    const g = game.roads.graph;
+    // Дом на проспекте, к которому можно свернуть направо, и узел за ним — откуда дом слева, через жёлтую.
+    let found: { town: Town; home: GarageHome; right: GarageSlot } | null = null;
+    for (const town of game.towns)
+      for (const b of town.buildings) {
+        const home: GarageHome | null = !found && b.kind === 'res' ? game.garages.homeOf(b) : null;
+        const right: GarageSlot | null = home && game.garages.slotOf(home);
+        if (!home || !right || g.links.get(right.link.id)!.lanes.length !== 2 || right.link.toNode === null) continue;
+        found = { town, home, right };
+      }
+    expect(found).not.toBeNull();
+    const { town, home, right } = found!;
+    const c = game.roads.net.corridor(right.link.corridor);
+    const [ca, cb] = g.cutOf(c.id)!;
+    expect(c.cls).toBe('avenue');
+    expect(centreLine(game.roads.net, c, c.lut.closest(home.d.curb).s, ca, c.length - cb)).toBe('yellow');
+    expect(game.garages.leftSlotOf(home)).toBeNull();
+    // Едет с той стороны, где дом слева: путь — в объезд, к повороту направо.
+    town.garageAway = [home.b.id];
+    const way = game.garages.wayHome(right.link.toNode!, home)!;
+    expect(way.slot.cross).toBeUndefined();
+    expect(way.slot.link.id).toBe(right.link.id);
+    expect(way.route.length).toBeGreaterThan(1);
+    const sim = traffic.spawn({ ...CAR, color: home.color, targetNode: way.slot.link.toNode!, route: way.route })!;
+    game.citizenCars++;
+    game.garages.homeward(sim, home, town, way.slot);
+    let crossed = false;
+    let blinkedRight = false;
+    for (let i = 0; i < 30 * 240; i++) {
       step(game);
-      if (traffic.vehicles.has(sim.id) && sim.holdDist !== undefined && traffic.held(sim)) heldLane = sim.lane;
+      if (game.garages.moveOf(home.b.id)?.phase === 'cross') crossed = true;
+      if (traffic.vehicles.has(sim.id) && sim.holdDist !== undefined && sim.blinker === 1) blinkedRight = true;
       if (!game.garages.moveOf(home.b.id) && !traffic.vehicles.has(sim.id) && game.garages.homingOf(sim.id) === undefined) break;
     }
-    // Встала в крайней левой полосе и свернула к дому.
-    expect(heldLane).toBe(left.lane.id);
+    expect(crossed).toBe(false);
+    expect(blinkedRight).toBe(true);
     expect(town.garageAway).not.toContain(home.b.id);
   });
 

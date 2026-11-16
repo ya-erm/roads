@@ -323,6 +323,11 @@ export class LaneGraph {
     return link.flow > 0 ? link.s0 + u : link.s1 - u;
   }
 
+  /** Обрезы полотна у перекрёстков, м от конца a и от конца b (как у разметки, junctionCuts); нет полотна — undefined. */
+  cutOf(id: number): [number, number] | undefined {
+    return this.cutsOf.get(id);
+  }
+
   /** Связи полотна (обоих направлений). */
   corridorLinks(id: number): GLink[] {
     return (this.byCorridor.get(id) ?? []).flatMap((g) => g.links);

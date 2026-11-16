@@ -42,6 +42,20 @@ export function autoSolids(net: LaneNet, c: Corridor, i: number, j: number, s0: 
 }
 
 /**
+ * Осевая между соседними встречными полосами (через `LANE_W`, без разделительной) в точке s оси полотна c: у дороги
+ * больше чем в две полосы — жёлтая сплошная; у 1+1 — белый пунктир, но у перекрёстка (после обреза s0 у конца a, до
+ * обреза s1 у конца b, на `solidLength`) — сплошная. По ней рисуется разметка (lanes/draw.ts) и решается, можно ли
+ * повернуть налево через встречку (game/garages.ts): только через пунктир.
+ */
+export function centreLine(net: LaneNet, c: Corridor, s: number, s0: number, s1: number): 'yellow' | 'solid' | 'dash' {
+  if (c.lanes.length > 2) return 'yellow';
+  const L = solidLength(c);
+  const jA = !c.ring && net.node(c.a).kind === 'junction';
+  const jB = !c.ring && net.node(c.b).kind === 'junction';
+  return (jA && s <= s0 + L) || (jB && s > s1 - L) ? 'solid' : 'dash';
+}
+
+/**
  * Машина на полосе — от хвоста (s − length) до места, где она пересечёт линию (s + ahead: перестроение не мгновенное),
  * — рядом со сплошной из zones (отрезки по полосе): перестраиваться через неё нельзя.
  */
