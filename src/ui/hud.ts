@@ -113,6 +113,7 @@ import {
   cornerSvg,
   projectSvg,
   splitNodeSvg,
+  kinkToggleSvg,
   platformPickSvg,
   trackMoveSvg,
   railSvg,
@@ -300,9 +301,9 @@ function lanesLabel(spec: RoadSpec): string {
 }
 
 /** Правила в панели «Ж/д» — по строке: значок и короткая подпись, полное пояснение — в подсказке, чтобы панель была низкой. */
-/** inline — все правила одной строкой (под карточками). */
-function railRules(rules: { svg: string; text: string; hint: string }[], inline = false): string {
-  return `<div class="rules ${inline ? 'inline' : ''}">${rules.map((r) => `<div title="${r.hint}"><span class="rule-ic">${r.svg}</span><span>${r.text}</span></div>`).join('')}</div>`;
+/** inline — все правила одной строкой (под карточками); fit — не шире карточек, лишнее — следующей строкой. */
+function railRules(rules: { svg: string; text: string; hint: string }[], inline = false, fit = false): string {
+  return `<div class="rules ${inline ? 'inline' : ''} ${fit ? 'fit' : ''}">${rules.map((r) => `<div data-tip="${r.hint}"><span class="rule-ic">${r.svg}</span><span>${r.text}</span></div>`).join('')}</div>`;
 }
 
 /** Условие отправления как одна из четырёх кнопок. */
@@ -2654,16 +2655,23 @@ export class Hud {
       return `${this.projectBarHtml()}<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Что тянуть${this.projectChipHtml()}</div><div class="cards">${what}</div></div></div>
         ${railRules(
           [
-            // Подписи — коротко (все четыре в одну строку не шире карточек), полностью — в title.
+            // Подписи — коротко, полностью — в подсказке (data-tip).
             { svg: moveNodeSvg(), text: 'Изгиб — на прямую', hint: 'Изгиб у прямой между соседями встаёт ровно на неё; с зажатым Cmd/Ctrl — нет, узел ровно за курсором' },
             { svg: moveEndSvg(), text: 'Тупик на дороге — примыкает', hint: 'Тупик, отпущенный на другой дороге, примыкает к ней; с зажатым Cmd/Ctrl — нет, остаётся тупиком' },
             { svg: handleSvg(), text: 'Стык — сосед следом, <kbd>Shift</kbd> — излом', hint: 'Перья видны у дороги под курсором; в стыке соседняя дорога поворачивает следом, Shift — излом' },
             {
               svg: splitNodeSvg(),
               text: 'Клик — узел, <kbd>Delete</kbd> — убрать',
-              hint: 'Клик по дороге (без протяжки) — узел в этой точке: форма та же, его можно тянуть и к нему примыкать. Delete у стыка двух дорог — узел прочь, они сольются в одну. Ctrl+Z — вернуть',
+              hint: 'Клик по дороге (без протяжки) — узел в этой точке: форма та же, его можно тянуть и к нему примыкать. Delete у стыка или излома двух дорог — узел прочь, они сольются в одну (излом — плавной кривой). Ctrl+Z — вернуть',
+            },
+            {
+              svg: kinkToggleSvg(),
+              text: 'Двойной клик — излом ↔ гладко',
+              hint: 'Двойной клик по узлу двух дорог: гладкий стык становится изломом (перья тянут порознь), излом — снова гладким (перья обеих дорог встают на одну прямую). Ctrl+Z — вернуть',
             },
           ],
+          true,
+          // Пять правил шире карточек — не тянут панель под миникарту, а переносятся строкой ниже.
           true,
         )}`;
     }

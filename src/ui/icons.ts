@@ -214,6 +214,19 @@ export function splitNodeSvg(w = 48, h = 36): string {
   </svg>`;
 }
 
+/**
+ * Излом ↔ гладкий двойным кликом: дорога изломом, через тот же узел — пунктиром гладкая кривая, у узла — два
+ * штриха «двойной клик».
+ */
+export function kinkToggleSvg(w = 48, h = 36): string {
+  return `<svg viewBox="0 0 48 36" width="${w}" height="${h}">
+    <path d="M4 32L24 12L44 32" stroke="#646b76" stroke-width="6" stroke-linejoin="miter" stroke-linecap="round" fill="none"/>
+    <path d="M4 32Q24 -8 44 32" stroke="#2f80ed" stroke-width="1.8" stroke-dasharray="3 2.4" fill="none"/>
+    <path d="M31 6.5L34.5 3.5M32.8 10.6L37.2 9.6" stroke="#2f80ed" stroke-width="1.6" stroke-linecap="round"/>
+    <rect x="20" y="8" width="8" height="8" fill="#fff" stroke="#2f80ed" stroke-width="1.8"/>
+  </svg>`;
+}
+
 /** Путь в значке: рельсы по краям, щебень и шпалы (пунктиром поперёк). */
 function trackPath(d: string): string {
   return `<path d="${d}" stroke="#4f5965" stroke-width="7" stroke-linecap="butt" fill="none"/>

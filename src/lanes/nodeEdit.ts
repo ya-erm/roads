@@ -1,7 +1,7 @@
-import { bezPoint, Cubic, CurveLUT } from '../core/bezier';
-import { add, dot, scale, sub, Vec } from '../core/vec';
-import { LANE_W } from '../world/roadTypes';
-import { EditError, splitCorridor } from './edit';
+import { bezPoint, Cubic, CurveLUT, minRadius } from '../core/bezier';
+import { add, dot, len, norm, scale, sub, Vec } from '../core/vec';
+import { LANE_W, ROAD_CLASSES } from '../world/roadTypes';
+import { EditError, handlePoints, smoothCorner, splitCorridor } from './edit';
 import { Corridor, CorridorEnd, laneKey, LaneNet, LaneNode, LaneSlot, LAT_EPS, parseLaneKey, renameArm } from './model';
 
 /**
@@ -32,17 +32,20 @@ export function splitRoad(net: LaneNet, id: number, s: number): LaneNode {
   return splitCorridor(net, c, s, 'seam').node;
 }
 
-/** Два полотна стыка, по ходу будущего: первое приходит в узел, второе уходит из него. */
-function mergeEnds(net: LaneNet, n: LaneNode): { first: CorridorEnd; second: CorridorEnd } | string {
+/**
+ * Два полотна узла, по ходу будущего: первое приходит в узел, второе уходит из него. kink — узел — излом двух дорог
+ * (перекрёсток из двух полотен, чьи полосы продолжают друг друга): сольются одной плавной кривой.
+ */
+function mergeEnds(net: LaneNet, n: LaneNode): { first: CorridorEnd; second: CorridorEnd; kink: boolean } | string {
   if ((n.roundabout ?? null) !== null) return 'Узел кольца не убрать';
   const ends = net.ends(n);
-  if (n.kind === 'junction') {
-    return ends.length === 2 ? 'Здесь излом — сначала сделайте узел гладким (перо без Shift)' : 'Перекрёсток не убрать — к нему сходятся дороги';
-  }
+  const kink = n.kind === 'junction';
+  if (kink && ends.length !== 2) return 'Перекрёсток не убрать — к нему сходятся дороги';
   if (net.isDeadEnd(n)) return 'Тупик не убрать — здесь кончается дорога';
   if (ends.length !== 2 || ends.some((e) => Math.abs(e.port) >= LAT_EPS)) return 'Здесь примыкает съезд или полоса — узел нужен';
   const [x, y] = ends;
   if (x.corridor.id === y.corridor.id) return 'Дорога замкнута сама на себя — узел нужен';
+  if (kink && !smoothCorner(net, { corridor: x.corridor.id, end: x.end }, false)) return 'Полосы двух дорог не продолжают друг друга — узел нужен';
   const far = (e: CorridorEnd) => (e.end === 'a' ? e.corridor.b : e.corridor.a);
   if (far(x) === far(y)) return 'Две дороги между одними узлами — узел нужен';
   const A = net.node(far(x));
@@ -51,7 +54,7 @@ function mergeEnds(net: LaneNet, n: LaneNode): { first: CorridorEnd; second: Cor
     return 'Узел пандуса не убрать — здесь меняется высота';
   }
   if (x.corridor.cls !== y.corridor.cls || x.corridor.limit !== y.corridor.limit) return 'Дороги разного типа или скорости — узел нужен';
-  return { first: x, second: y };
+  return { first: x, second: y, kink };
 }
 
 /** Полосы полотна в ходе «к узлу» (forward) или против него: смещение, направление и отрезок — по новому ходу. */
@@ -119,10 +122,10 @@ function fitCubic(p0: Vec, t0: Vec, p3: Vec, t3: Vec, pts: Vec[]): Cubic {
  * касательными на концах; полосы — их общие продолжения (и те, что кончаются раньше узла); настройки
  * перекрёстков на концах — на новое полотно. dev — насколько новая кривая отходит от прежних, м.
  */
-function mergeShape(net: LaneNet, n: LaneNode): { curve: Cubic; dev: number; first: CorridorEnd; second: CorridorEnd } | string {
+function mergeShape(net: LaneNet, n: LaneNode): { curve: Cubic; dev: number; first: CorridorEnd; second: CorridorEnd; kink: boolean } | string {
   const ends = mergeEnds(net, n);
   if (typeof ends === 'string') return ends;
-  const { first, second } = ends;
+  const { first, second, kink } = ends;
   const c1 = first.corridor;
   const c2 = second.corridor;
   // Стройку не сливаем: готовое и не готовое в одном полотне не помещается.
@@ -138,35 +141,80 @@ function mergeShape(net: LaneNet, n: LaneNode): { curve: Cubic; dev: number; fir
   const p3 = pts[pts.length - 1];
   const t0 = first.end === 'b' ? c1.lut.tangentAt(0) : scale(c1.lut.tangentAt(c1.length), -1);
   const t3 = second.end === 'a' ? c2.lut.tangentAt(c2.length) : scale(c2.lut.tangentAt(0), -1);
-  const curve = fitCubic(p0, t0, p3, t3, pts);
+  const old = [c1, c2];
+  const fit = fitCubic(p0, t0, p3, t3, pts);
+  if (!kink) return { curve: fit, dev: deviation(fit, pts, old), first, second, kink };
+  // Излом: кривая срезает угол. Из ближайшей к прежней оси (fit) и кривых с перьями разной длины (доли расстояний
+  // от концов до узла) — ближайшая к прежней оси из тех, где поворот не круче, чем можно этому типу дороги; таких
+  // нет — самая пологая (её отвергнет проверка дороги или mergeProblem — с радиусом).
+  const need = ROAD_CLASSES[c1.cls].minRadius;
+  const L0 = Math.hypot(n.pos.x - p0.x, n.pos.y - p0.y);
+  const L3 = Math.hypot(p3.x - n.pos.x, p3.y - n.pos.y);
+  const cands = [fit];
+  for (const a of KINK_ARMS) for (const b of KINK_ARMS) cands.push({ p0, p1: add(p0, scale(t0, a * L0)), p2: sub(p3, scale(t3, b * L3)), p3 });
+  let best: { curve: Cubic; r: number; dev: number } | null = null;
+  for (const curve of cands) {
+    const r = minRadius(curve);
+    if (r >= need) {
+      const dev = deviation(curve, pts, old);
+      if (!best || best.r < need || dev < best.dev) best = { curve, r, dev };
+    } else if (!best || (best.r < need && r > best.r)) best = { curve, r, dev: Infinity };
+  }
+  const curve = best!.curve;
+  return { curve, dev: Number.isFinite(best!.dev) ? best!.dev : deviation(curve, pts, old), first, second, kink };
+}
+
+/** Доли расстояния от конца до узла излома — длины перьев кривых-кандидатов. */
+const KINK_ARMS = [0.25, 0.4, 0.55, 0.7, 0.85, 1];
+
+/** Насколько кривая отходит от прежней оси (точки pts на ней, полотна old), м. */
+function deviation(curve: Cubic, pts: Vec[], old: Corridor[]): number {
   const lut = new CurveLUT(curve);
   let dev = 0;
   for (const q of pts) dev = Math.max(dev, lut.closest(q).d);
   // И сама кривая не уходит от прежней оси между точками.
-  const old = [c1, c2];
   for (let i = 1; i < 16; i++) {
     const q = bezPoint(curve, i / 16);
     dev = Math.max(dev, Math.min(...old.map((c) => c.lut.closest(q).d)));
   }
-  return { curve, dev, first, second };
+  return dev;
 }
 
-/** Почему стык n нельзя убрать; null — можно (два полотна сольются в одно). */
+/** Почему форма слияния не годится; null — годится. Излом срезается кривой, но не круче, чем можно этому типу дороги. */
+function shapeProblem(shape: { curve: Cubic; dev: number; first: CorridorEnd; kink: boolean }): string | null {
+  if (!shape.kink) return shape.dev > MERGE_TOLERANCE ? 'Одной кривой так не выйдет — узел нужен' : null;
+  const cls = ROAD_CLASSES[shape.first.corridor.cls];
+  // Тот же порог, что у проверки дороги при стройке.
+  const min = cls.minRadius * 0.7;
+  const r = minRadius(shape.curve);
+  return r < min ? `Излом слишком крутой: плавно выйдет поворот радиусом ${Math.floor(r)} м, а типу «${cls.name}» нужно от ${Math.ceil(min)} м` : null;
+}
+
+/** Плавная кривая, которой сольются две дороги у излома id (для подсказки); null — узел не излом или слить нельзя. */
+export function mergePreview(net: LaneNet, id: number): Cubic | null {
+  const n = net.nodes.get(id);
+  if (!n || n.kind !== 'junction') return null;
+  const shape = mergeShape(net, n);
+  return typeof shape === 'string' || shapeProblem(shape) ? null : shape.curve;
+}
+
+/** Почему узел n нельзя убрать; null — можно (два полотна сольются в одно; излом — одной плавной кривой). */
 export function mergeProblem(net: LaneNet, id: number): string | null {
   const n = net.nodes.get(id);
   if (!n) return 'Узла уже нет';
   const shape = mergeShape(net, n);
   if (typeof shape === 'string') return shape;
-  return shape.dev > MERGE_TOLERANCE ? 'Одной кривой так не выйдет — узел нужен' : null;
+  return shapeProblem(shape);
 }
 
-/** Убирает стык id: два полотна — одно той же формы. Нельзя — EditError с причиной. */
+/** Убирает узел id: два полотна — одно той же формы (излом — срезан плавной кривой). Нельзя — EditError с причиной. */
 export function mergeAtNode(net: LaneNet, id: number): Corridor {
   const n = net.nodes.get(id);
   if (!n) throw new EditError('Узла уже нет');
   const shape = mergeShape(net, n);
   if (typeof shape === 'string') throw new EditError(shape);
-  if (shape.dev > MERGE_TOLERANCE) throw new EditError('Одной кривой так не выйдет — узел нужен');
+  const why = shapeProblem(shape);
+  if (why) throw new EditError(why);
   const { first, second, curve } = shape;
   const c1 = first.corridor;
   const c2 = second.corridor;
@@ -233,9 +281,70 @@ export function splitEdit(id: number, s: number): (net: LaneNet) => boolean | vo
   };
 }
 
-/** Правка: убрать стык id. */
+/** Правка: убрать узел id (стык или излом двух дорог). */
 export function mergeEdit(id: number): (net: LaneNet) => boolean | void {
   return (net) => {
     mergeAtNode(net, id);
+  };
+}
+
+// ---------- Излом ↔ гладкий ----------
+
+/**
+ * Узел двух дорог id для двойного клика: 'smooth' — гладкий стык (станет изломом), 'kink' — излом (станет гладким);
+ * иначе — почему не переключить.
+ */
+export function jointOf(net: LaneNet, id: number): 'smooth' | 'kink' | string {
+  const n = net.nodes.get(id);
+  if (!n) return 'Узла уже нет';
+  if ((n.roundabout ?? null) !== null) return 'Узел кольца — излом не сделать';
+  if (net.isDeadEnd(n)) return 'Тупик — здесь кончается дорога';
+  const ends = net.ends(n);
+  if (n.kind === 'junction' && ends.length !== 2) return 'Перекрёсток — к нему сходятся дороги';
+  if (ends.length !== 2 || ends.some((e) => Math.abs(e.port) >= LAT_EPS)) return 'Здесь примыкает съезд или полоса';
+  const [x] = ends;
+  if (x.corridor.id === ends[1].corridor.id) return 'Дорога замкнута сама на себя';
+  if (n.kind === 'seam') return 'smooth';
+  return smoothCorner(net, { corridor: x.corridor.id, end: x.end }, false) ? 'kink' : 'Полосы двух дорог не продолжают друг друга';
+}
+
+/**
+ * Излом двух дорог id — гладкий стык: общая касательная — посередине между прежними (биссектриса угла), перья
+ * обеих дорог поворачивают к ней на равный угол, длины перьев прежние.
+ */
+export function smoothJoint(net: LaneNet, id: number): void {
+  if (jointOf(net, id) !== 'kink') throw new EditError('Узел не излом');
+  const [x, y] = net.ends(net.node(id));
+  const hx = handlePoints(x.corridor, x.end);
+  const hy = handlePoints(y.corridor, y.end);
+  // Перо x смотрит в сторону дороги x, перо y — в сторону y: общая ось — от y через узел к x.
+  const axis = sub(norm(sub(hx.pos, hx.anchor)), norm(sub(hy.pos, hy.anchor)));
+  if (len(axis) < 1e-3) throw new EditError('Дороги сходятся в одну сторону — гладко не выйдет');
+  const d = norm(axis);
+  const cv = { ...x.corridor.curve };
+  const arm = add(hx.anchor, scale(d, Math.max(2, len(sub(hx.pos, hx.anchor)))));
+  if (x.end === 'a') cv.p1 = arm;
+  else cv.p2 = arm;
+  net.setCurve(x.corridor, cv);
+  // Перо y — на одну прямую с x; узел — стык (настройки перекрёстка прочь).
+  smoothCorner(net, { corridor: x.corridor.id, end: x.end });
+}
+
+/** Гладкий стык двух дорог id — излом: перья дорог в нём дальше тянут порознь (форма та же). */
+export function kinkJoint(net: LaneNet, id: number): void {
+  if (jointOf(net, id) !== 'smooth') throw new EditError('Узел не гладкий стык');
+  const n = net.node(id);
+  n.kind = 'junction';
+  // Форма та же, но узел другой: обе дороги — заново в отрисовку.
+  for (const c of n.corridors) net.touch(net.corridor(c));
+}
+
+/** Правка: двойной клик по узлу id — излом ↔ гладкий. Нельзя — EditError с причиной. */
+export function toggleJointEdit(id: number): (net: LaneNet) => boolean | void {
+  return (net) => {
+    const j = jointOf(net, id);
+    if (j === 'smooth') kinkJoint(net, id);
+    else if (j === 'kink') smoothJoint(net, id);
+    else throw new EditError(j);
   };
 }

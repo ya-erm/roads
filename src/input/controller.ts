@@ -50,7 +50,7 @@ import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, projectMo
 import { nodeDeck } from '../lanes/deck';
 import type { MoveProject } from '../game/moveProject';
 import { onOldAxis } from '../game/roadbuild';
-import { mergeEdit, mergeProblem, splitEdit, splitProblem } from '../lanes/nodeEdit';
+import { jointOf, mergeEdit, mergePreview, mergeProblem, splitEdit, splitProblem, toggleJointEdit } from '../lanes/nodeEdit';
 import type { CornerHandle } from '../lanes/corners';
 import { corridorHalf } from '../world/worldgen';
 import { PARK_INFO } from '../world/parkPick';
@@ -80,6 +80,23 @@ export function dropEffectFor(allowed: string): 'copy' | 'move' | 'link' {
   if (a.includes('move')) return 'move';
   if (a.includes('link')) return 'link';
   return 'copy';
+}
+
+/** Клик без протяжки по узлу дороги: какой узел и когда (performance.now()), мс. */
+export interface NodeClick {
+  node: number;
+  at: number;
+}
+
+/** Двойной клик по узлу дороги: дольше — уже два отдельных клика, мс. */
+const NODE_DOUBLE_CLICK = 500;
+
+/**
+ * Клик по узлу node в момент now (detail — номер клика подряд у браузера) — второй клик двойного по тому же
+ * узлу: первый был по нему же (не по дороге, где он только что встал) и недавно.
+ */
+export function isNodeDoubleClick(prev: NodeClick | null, node: number, detail: number, now: number): boolean {
+  return detail >= 2 && prev !== null && prev.node === node && now - prev.at <= NODE_DOUBLE_CLICK;
 }
 
 /** key — цифра инструмента, alt — дополнительная буква (B — снос, как в других стройках). */
@@ -334,6 +351,8 @@ export class Controller {
   private ctrl = false;
   private pan: { sx: number; sy: number; cx: number; cy: number; moved: boolean } | null = null;
   private left: { sx: number; sy: number; createdChain: boolean } | null = null;
+  /** «Двигать»: последний клик (без протяжки) по узлу — второй такой же подряд переключает излом ↔ гладкий. */
+  private nodeClick: NodeClick | null = null;
   private keys = new Set<string>();
   private flash: { text: string; until: number } | null = null;
 
@@ -2457,11 +2476,23 @@ export class Controller {
       // Клик по дороге (без протяжки) — узел на ней в этой точке: дальше его можно тянуть, к нему примыкать.
       const bend = this.roadTools.bend;
       if (!moved && bend !== null) {
+        this.nodeClick = null;
         this.roadTools.moveEnd();
         this.splitRoadAt(bend, this.worldAt(e));
         this.onChange();
         return;
       }
+      // Двойной клик по узлу двух дорог — излом ↔ гладкий.
+      const grabbed = moved ? null : this.roadTools.dragNode;
+      const now = performance.now();
+      if (grabbed !== null && isNodeDoubleClick(this.nodeClick, grabbed, e.detail, now)) {
+        this.nodeClick = null;
+        this.roadTools.moveEnd();
+        this.toggleJoint(grabbed);
+        this.onChange();
+        return;
+      }
+      this.nodeClick = grabbed === null ? null : { node: grabbed, at: now };
       // Проект перемещения: протяжка — ещё одна правка проекта, дорога пока как есть.
       if (this.moveProjectMode) {
         const edit = moved ? this.roadTools.moveEdit(this.worldAt(e), e.shiftKey, this.freeAim) : null;
@@ -3059,11 +3090,41 @@ export class Controller {
       this.showError(plan.reason);
       return true;
     }
-    g.checkpoint('узел убран');
+    const kink = n.kind === 'junction';
+    g.checkpoint(kink ? 'излом убран' : 'узел убран');
     g.roadBuilder.apply(plan);
     g.commit();
-    g.notify('Узел убран: две дороги — одна');
+    g.notify(kink ? 'Излом убран: две дороги — одна плавная' : 'Узел убран: две дороги — одна');
     return true;
+  }
+
+  /**
+   * «Двигать», двойной клик по узлу id двух дорог: гладкий стык — излом (перья дальше тянут порознь), излом — снова
+   * гладкий (перья обеих дорог встают на одну прямую посередине). Одним шагом Ctrl+Z; в проекте перемещения — правкой
+   * проекта. Нельзя — причина у курсора.
+   */
+  private toggleJoint(id: number): void {
+    const g = this.game();
+    const net = this.roadTools.base ?? g.roads.net;
+    const j = jointOf(net, id);
+    const station = [...g.stations.values()].some((st) => st.nodeId === id);
+    if (station) return this.showError('У узла станция — излом не сделать');
+    if (j !== 'smooth' && j !== 'kink') return this.showError(j);
+    const edit = toggleJointEdit(id);
+    if (this.moveProjectMode) {
+      const problem = this.projectTools.addEdit(edit);
+      if (problem) this.showError(problem);
+      this.syncMoveBase();
+      return;
+    }
+    // Излом — форма та же (проверять нечего, только полосы в узле); гладко — перья повернулись, как при протяжке пера.
+    const plan = j === 'smooth' ? g.roadBuilder.plan(edit, { only: () => false }) : g.roadBuilder.plan(edit, { rebuild: true });
+    if (!plan.ok) return this.showError(plan.reason);
+    // Снимок с нажатия пуст — отмена назовёт это своим именем.
+    g.commit();
+    g.checkpoint(j === 'smooth' ? 'излом в узле' : 'узел гладкий');
+    g.roadBuilder.apply(plan);
+    g.commit();
   }
 
   showError(text?: string): void {
@@ -3609,9 +3670,18 @@ export class Controller {
           const dead = net.isDeadEnd(node);
           // Тупик примыкает к дороге, изгиб встаёт на прямую — с Cmd / Ctrl (или Alt) узел идёт ровно за курсором.
           const free = dead || node.corridors.length === 2 ? ' · Cmd/Ctrl — без прилипания' : '';
-          // Стык двух дорог можно убрать — они сольются в одну.
-          const merge = node.kind === 'seam' && !dead && mergeProblem(net, node.id) === null ? ' · Delete или ПКМ — убрать узел' : '';
-          o.label = { text: `${dead ? 'Тяните тупик — продлить, примкнуть' : 'Тяните узел — дороги следом'}${merge}${free}${corners.length ? ' · за угол — скруглить' : ''}`, ok: true };
+          // Стык двух дорог можно убрать — они сольются в одну; излом — одной плавной кривой (видно, какой).
+          const canMerge = !dead && mergeProblem(net, node.id) === null;
+          const smooth = canMerge && node.kind === 'junction' ? mergePreview(net, node.id) : null;
+          if (smooth) {
+            const c = net.corridor(node.corridors[0]);
+            o.project = { segs: [...(o.project?.segs ?? []), { curve: smooth, half: corridorHalf(c), ok: true, fill: true }], nodes: o.project?.nodes ?? [], signs: o.project?.signs };
+          }
+          const merge = canMerge ? ` · Delete или ПКМ — убрать узел${smooth ? ' (излом сгладится)' : ''}` : '';
+          // Узел двух дорог: двойной клик — излом ↔ гладкий.
+          const j = dead ? null : jointOf(net, node.id);
+          const toggle = j === 'smooth' ? ' · двойной клик — излом' : j === 'kink' ? ' · двойной клик — гладко' : '';
+          o.label = { text: `${dead ? 'Тяните тупик — продлить, примкнуть' : 'Тяните узел — дороги следом'}${merge}${toggle}${free}${corners.length ? ' · за угол — скруглить' : ''}`, ok: true };
           o.handles = [...rt.handleMarks(null), ...corners];
           break;
         }
