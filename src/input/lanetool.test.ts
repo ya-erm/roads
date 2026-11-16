@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
 import { Game } from '../game/game';
 import { MoveProject } from '../game/moveProject';
-import { freshGame, road, roadPlan } from '../game/testkit';
+import { minRadius } from '../core/bezier';
+import { fieldSpot, freshGame, road, roadPlan } from '../game/testkit';
+import { LaneGraph } from '../lanes/graph';
 import { type LaneNet, oneWay, twoWay } from '../lanes/model';
+import { findLaneRoute } from '../lanes/routing';
+import { ROAD_CLASSES } from '../world/roadTypes';
 import { RoadTools } from './roadtools';
 
 const STREET = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
@@ -141,6 +145,128 @@ describe('Инструмент «Полоса»: протяжка', () => {
     expect(net().problems()).toEqual([]);
     // А дорога, что просто идёт рядом и ни с чем тут не сходится, по-прежнему слишком близко.
     expect(roadPlan(game, { free: { x: at.x + 330, y: at.y - 14 } }, { free: { x: at.x + 390, y: at.y - 14 } }, HIGHWAY).reason).toBe('Слишком близко к другой дороге');
+  });
+});
+
+describe('Инструмент «Полоса»: въезд и съезд одним путём', () => {
+  const HIGHWAY = { cls: 'highway' as const, lanes: twoWay(1, 1) };
+  /** Магистраль 1+1 с запада на восток в чистом поле: с севера (y−) едут на запад, с юга — на восток. */
+  function scene() {
+    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 50_000_000, water: 'dry' });
+    const o = fieldSpot(game, 800, 200);
+    expect(road(game, { free: o }, { free: { x: o.x + 800, y: o.y } }, HIGHWAY)).toBe(true);
+    const at = (dx: number, dy: number) => ({ x: o.x + dx, y: o.y + dy });
+    // Тупики у магистрали (в игре есть и улицы городов).
+    const ends = () => [...game.roads.net.nodes.values()].filter((n) => game.roads.net.isDeadEnd(n) && Math.abs(n.pos.x - o.x - 400) < 410 && Math.abs(n.pos.y - o.y) < 200);
+    const west = ends().find((n) => n.pos.x < o.x + 1 && Math.abs(n.pos.y - o.y) < 1)!;
+    const east = ends().find((n) => n.pos.x > o.x + 799 && Math.abs(n.pos.y - o.y) < 1)!;
+    return { game, o, at, ends, west, east, net: () => game.roads.net };
+  }
+  const reachable = (net: LaneNet, from: number, to: number) => {
+    const g = new LaneGraph(net);
+    return !!findLaneRoute(g, g.outLinks.get(from) ?? [], to);
+  };
+  /** Пристроенная полоса магистрали с севера (едут на запад): где она на полную ширину, по x. */
+  const northLane = (net: LaneNet, o: Vec) =>
+    [...net.corridors.values()]
+      .filter((c) => !c.portA && !c.portB && c.lanes.length > 2 && [c.a, c.b].every((id) => Math.abs(net.node(id).pos.y - o.y) < 1))
+      .flatMap((c) => c.lanes.filter((l) => Math.abs(l.offset) > 7).map((l) => [c.lut.pointAt(Math.max(0, l.from)).x, c.lut.pointAt(Math.min(c.length, l.to)).x]))
+      .flat();
+
+  it('из поля к краю и вдоль — одной протяжкой: однополосная до примыкания, дальше полоса слияния до конца пути', () => {
+    const { game, o, at, ends, west, net } = scene();
+    const tools = new RoadTools(() => game);
+    // Полого, с севера, на запад: край — у x 470, путь вдоль — до x 250.
+    const path = [at(620, -60), at(560, -40), at(500, -20), at(470, -10.5), at(400, -10.5), at(320, -10.5), at(250, -10.5)];
+    // Как контроллер: снимок для отмены — при нажатии, итог — при отпускании.
+    game.checkpoint('полоса');
+    tools.laneDown(path[0], 14);
+    for (const p of path.slice(1)) tools.laneMove(p, 14);
+    // Предпросмотр и цена — всего пути разом.
+    const preview = tools.lanePlan(STREET)!;
+    expect(preview.what).toBe('Въезд → Полоса');
+    expect(preview.plan.ok).toBe(true);
+    expect(preview.plan.cost).toBeGreaterThan(0);
+    const corridors = net().corridors.size;
+    expect(tools.laneUp(path[path.length - 1], 14, STREET, true)).toBeNull();
+    game.commit();
+    expect(net().problems()).toEqual([]);
+    // Однополосная от первой точки к стыку сбоку; магистраль разрезана стыком.
+    const entry = [...net().corridors.values()].find((c) => c.portB)!;
+    expect(entry).toBeDefined();
+    expect(net().corridors.size).toBe(corridors + 2);
+    // Примыкание — где въезд подходит к краю плавно (не круче радиуса магистрали), полоса слияния — до конца пути.
+    expect(minRadius(entry.curve)).toBeGreaterThan(ROAD_CLASSES.highway.minRadius * 0.95);
+    const xs = northLane(net(), o);
+    expect(Math.min(...xs) - o.x).toBeCloseTo(250, -1);
+    expect(Math.max(...xs) - o.x).toBeLessThanOrEqual(471);
+    // Из поля можно выехать на магистраль на запад.
+    const start = ends().find((n) => n.pos.y < o.y - 50)!;
+    expect(reachable(net(), start.id, west.id)).toBe(true);
+
+    // Отмена — одним шагом: ни въезда, ни полосы.
+    expect(game.undo()).toBe('полоса');
+    expect(net().corridors.size).toBe(corridors);
+    expect(northLane(net(), o)).toEqual([]);
+    expect([...net().corridors.values()].some((c) => c.portA || c.portB)).toBe(false);
+  });
+
+  it('с конца односторонней, что подходит к магистрали вплотную, — въезд в полосу слияния, а не «слишком близко»', () => {
+    const { game, o, at, ends, west, net } = scene();
+    // Односторонняя на запад кончается в 22 м от оси магистрали, глядя полого к ней (как у гостя).
+    expect(road(game, { free: at(700, -60) }, { free: at(560, -22) }, { cls: 'street', lanes: oneWay(1) })).toBe(true);
+    const tip = [...net().nodes.values()].find((n) => net().isDeadEnd(n) && Math.abs(n.pos.x - o.x - 560) < 1)!;
+    const tools = new RoadTools(() => game);
+    const path = [tip.pos, at(545, -17), at(530, -12), ...[480, 420, 360, 300].map((x) => at(x, -10.5))];
+    // Как контроллер: снимок для отмены — при нажатии, итог — при отпускании.
+    game.checkpoint('полоса');
+    tools.laneDown(path[0], 14);
+    for (const p of path.slice(1)) tools.laneMove(p, 14);
+    const preview = tools.lanePlan(STREET)!;
+    expect(preview.plan.reason).toBeUndefined();
+    expect(preview.what).toBe('Въезд → Полоса');
+    expect(tools.laneUp(path[path.length - 1], 14, STREET, true)).toBeNull();
+    game.commit();
+    expect(net().problems()).toEqual([]);
+    // Въезд продолжает одностороннюю из её конца: тупика там больше нет, изгиб — не круче радиуса магистрали.
+    const entry = [...net().corridors.values()].find((c) => c.portB)!;
+    expect(entry.a).toBe(tip.id);
+    expect(net().isDeadEnd(net().node(tip.id))).toBe(false);
+    expect(minRadius(entry.curve)).toBeGreaterThan(ROAD_CLASSES.highway.minRadius * 0.95);
+    expect(Math.min(...northLane(net(), o)) - o.x).toBeCloseTo(300, -1);
+    const start = ends().find((n) => n.pos.x > o.x + 650 && n.pos.y < o.y - 50)!;
+    expect(reachable(net(), start.id, west.id)).toBe(true);
+    expect(game.undo()).toBe('полоса');
+    expect(net().isDeadEnd(net().node(tip.id))).toBe(true);
+  });
+
+  it('вдоль края и в сторону — одной протяжкой: полоса торможения и съезд в поле', () => {
+    const { game, o, at, east, ends, net } = scene();
+    const tools = new RoadTools(() => game);
+    // С юга едут на восток: полоса от x 200 до 400, оттуда — в поле на юго-восток.
+    const path = [at(200, 10.5), at(300, 10.5), at(400, 10.5), at(460, 30), at(520, 70), at(580, 140)];
+    // Как контроллер: снимок для отмены — при нажатии, итог — при отпускании.
+    game.checkpoint('полоса');
+    tools.laneDown(path[0], 14);
+    for (const p of path.slice(1)) tools.laneMove(p, 14);
+    const preview = tools.lanePlan(STREET)!;
+    expect(preview.what).toBe('Полоса → Съезд');
+    expect(preview.plan.ok).toBe(true);
+    const corridors = net().corridors.size;
+    expect(tools.laneUp(path[path.length - 1], 14, STREET, true)).toBeNull();
+    game.commit();
+    expect(net().problems()).toEqual([]);
+    const exit = [...net().corridors.values()].find((c) => c.portA)!;
+    expect(net().node(exit.a).pos.x - o.x).toBeCloseTo(400, -1);
+    // Полоса торможения — от начала пути до съезда.
+    const decel = [...net().corridors.values()].filter((c) => !c.portA && c.lanes.some((l) => l.offset > 7 || l.offset < -7));
+    expect(decel.length).toBeGreaterThan(0);
+    const end = ends().find((n) => n.pos.y > o.y + 100)!;
+    const westStart = ends().find((n) => n.pos.x < o.x + 1 && Math.abs(n.pos.y - o.y) < 1)!;
+    expect(reachable(net(), westStart.id, end.id)).toBe(true);
+    expect(reachable(net(), westStart.id, east.id)).toBe(true);
+    expect(game.undo()).toBe('полоса');
+    expect(net().corridors.size).toBe(corridors);
   });
 });
 

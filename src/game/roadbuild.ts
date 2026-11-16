@@ -151,10 +151,13 @@ export function laneStepEdit(tip: LaneTip, qs: Vec[], cls: RoadClass, radius: nu
     const before = new Set(n.corridors.keys());
     let at = tip;
     const what: string[] = [];
-    for (const q of qs) {
-      const s = laneStep(n, at, q, cls, radius, reverse);
+    for (let i = 0; i < qs.length; i++) {
+      // Въезд, за которым путь идёт вдоль края, берёт и следующую точку: полоса слияния — до неё.
+      const s = laneStep(n, at, qs[i], cls, radius, reverse, qs[i + 1]);
       at = s.tip;
       what.push(s.what);
+      if (s.used) what.push('Полоса');
+      if (s.used) i++;
     }
     // Скорость — не выше потолка класса съезда (знак 120 у полосы от улицы — 80).
     if (limit !== undefined) for (const c of n.corridors.values()) if (!before.has(c.id) && c.lanes.length === 1 && c.lanes[0].offset === 0) c.limit = capLimit(c.cls, limit);

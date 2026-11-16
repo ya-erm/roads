@@ -461,7 +461,8 @@ export class RoadTools {
         d.along = p;
         d.away = null;
       } else d.away = p;
-    } else if (d.tip.kind === 'point' && laneTipAt(this.net, p, r).kind === 'edge') {
+    } else if ((d.tip.kind === 'point' || d.tip.out) && laneTipAt(this.net, p, r).kind === 'edge') {
+      // Из поля или с конца дороги дошли до края — въезд; дальше вдоль края — его полоса слияния.
       if (d.entry) d.along = p;
       else d.entry = p;
     } else if (!d.entry) d.away = p;

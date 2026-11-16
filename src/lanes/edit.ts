@@ -1,7 +1,7 @@
-import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, splitBezier, straightCubic } from '../core/bezier';
+import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, minRadius, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { CONSTRUCTION } from '../config';
-import { LANE_W, RoadClass } from '../world/roadTypes';
+import { LANE_W, ROAD_CLASSES, RoadClass } from '../world/roadTypes';
 import { fitLanes, laneDone, laneWise } from './closure';
 import { nodeDeck } from './deck';
 import { edgesAt, laneBand, pointOff } from './geometry';
@@ -498,6 +498,8 @@ export interface LaneDraft {
   merge: boolean;
   /** Куда уходит съезд после края; null — полоса кончается на краю. */
   depart: Anchor | null;
+  /** Въезд начинается с полосы у конца дороги (место поперёк port в узле node), а не из start: продолжает её. */
+  from?: { node: number; port: number };
   /** Курсор, пока полоса не дошла до края. */
   end: Anchor;
   /** Тянут конец уже пристроенной полосы (её номер на полотне host, какой конец и где он был). */
@@ -649,6 +651,18 @@ export function applyLane(net: LaneNet, d: LaneDraft, cls: RoadClass): boolean {
       const t3 = end.side ? scale(end.node.dir, -end.side) : norm(sub(p3, add(p0, scale(t0, h))));
       const curve = arc ?? { p0, p1: add(p0, scale(t0, h)), p2: sub(p3, scale(t3, h)), p3 };
       net.addCorridor(seam.id, end.node.id, { cls, lanes, portA: port, curve: { ...curve, p0, p3 } });
+    } else if (d.from) {
+      // Въезд продолжает полосу у конца дороги: от её конца по ходу дороги, к стыку — вдоль края, без излома.
+      const n = net.node(d.from.node);
+      const s0 = openSeamSide(net, n);
+      if (s0 === null) throw new EditError('Так не построить');
+      const p0 = net.portPos(n, d.from.port);
+      const p3 = net.portPos(seam, port);
+      const t0 = scale(n.dir, s0);
+      const t3 = scale(seam.dir, -side);
+      const h = dist(p0, p3) / 3;
+      const curve = { p0, p1: add(p0, scale(t0, h)), p2: sub(p3, scale(t3, h)), p3 };
+      net.addCorridor(n.id, seam.id, { cls, lanes, portA: d.from.port, sideA: s0, portB: port, curve });
     } else {
       const p3 = net.portPos(seam, port);
       const t3 = scale(seam.dir, -side);
@@ -838,18 +852,23 @@ export function lanePortsNear(net: LaneNet, p: Vec, radius: number): LanePort[] 
   return res;
 }
 
-/** Однополосная из полосы у конца дороги (как путь от конца пути): дугой по ходу дороги наружу, к q. */
-function fromPort(net: LaneNet, tip: Extract<LaneTip, { kind: 'port' }>, q: Vec, cls: RoadClass, radius: number): LaneTip {
+/** Узел конца дороги у полосы tip и его свободная сторона; полоса, сошедшая на нет у самого конца, снова доходит до него. */
+function reopenPort(net: LaneNet, tip: Extract<LaneTip, { kind: 'port' }>): { n: LaneNode; side: 1 | -1 } {
   const n = net.nodes.get(tip.node);
   const side = n ? openSeamSide(net, n) : null;
   if (!n || side === null) throw new EditError('Так не построить');
-  // Полоса, сошедшая на нет у самого конца, снова доходит до него.
   for (const e of net.ends(n)) {
     if (e.side === side) continue;
     const c = e.corridor;
     const lanes = c.lanes.map((l) => (Math.abs(net.laneAtSeam(e, l).lat - tip.port) < LAT_EPS ? (e.end === 'a' ? { ...l, from: 0 } : { ...l, to: Infinity }) : l));
     if (lanes.some((l, i) => l !== c.lanes[i])) net.setLanes(c, lanes);
   }
+  return { n, side };
+}
+
+/** Однополосная из полосы у конца дороги (как путь от конца пути): дугой по ходу дороги наружу, к q. */
+function fromPort(net: LaneNet, tip: Extract<LaneTip, { kind: 'port' }>, q: Vec, cls: RoadClass, radius: number): LaneTip {
+  const { n, side } = reopenPort(net, tip);
   const t0 = scale(n.dir, side);
   const p0 = net.portPos(n, tip.port);
   const other = anchorAt(net, q, radius);
@@ -925,17 +944,23 @@ export function laneTipPos(net: LaneNet, tip: LaneTip): Vec | null {
  * Возвращает новый конец и что построено (для подписи). Нельзя — EditError.
  * Новая полоса у края едет по ходу движения с этой стороны дороги, куда бы её ни тянули (newLaneFlow);
  * reverse — встречная. У однополосной reverse — навстречу ходу постройки.
+ * next — следующая точка пути: у въезда, если она дальше вдоль края, полоса слияния кончается у неё (used),
+ * а не через ACCEL, — путь из поля к краю и вдоль строится как одна дорога, плавно ставшая полосой.
  */
-export function laneStep(net: LaneNet, tip: LaneTip, q: Vec, cls: RoadClass, radius: number, reverse = false): { tip: LaneTip; what: string } {
+export function laneStep(net: LaneNet, tip: LaneTip, q: Vec, cls: RoadClass, radius: number, reverse = false, next?: Vec): { tip: LaneTip; what: string; used?: boolean } {
   if (tip.kind === 'edge') {
     const c = net.corridor(tip.corridor);
     const t = tip.flow ? tip : { ...tip, flow: newLaneFlow(c, tip.offset, tip.s, reverse) };
     if (laneAlong(net, t, q)) return { tip: alongLane(net, c, t, q), what: 'Полоса' };
     return { tip: exitFrom(net, c, t, q, cls, radius), what: 'Съезд' };
   }
-  if (tip.kind === 'port') return { tip: fromPort(net, tip, q, cls, radius), what: 'Однополосная' };
   const e = edgeAt(net, q);
-  if (e) return { tip: entryTo(net, tip, e, cls), what: 'Въезд' };
+  // С конца дороги к краю другой — въезд, продолжающий её полосу (по ходу наружу); иначе — однополосная.
+  if (tip.kind === 'port') {
+    if (e && tip.out) return { ...entryTo(net, tip, e, cls, next), what: 'Въезд' };
+    return { tip: fromPort(net, tip, q, cls, radius), what: 'Однополосная' };
+  }
+  if (e) return { ...entryTo(net, tip, e, cls, next), what: 'Въезд' };
   const to = anchorAt(net, q, radius);
   const built = buildRoad(net, tip.anchor, to, { cls, lanes: [slot(0, reverse ? -1 : 1)], arc: true });
   if (!built.length) throw new EditError('Так не построить');
@@ -1034,27 +1059,78 @@ function exitFrom(net: LaneNet, c0: Corridor, tip: Extract<LaneTip, { kind: 'edg
   return { kind: 'point', anchor: { kind: 'node', node: n.id, pos: n.pos } };
 }
 
-/** Въезд от конца tip (узел или поле) на край дороги e: стык, дальше — полоса разгона. Новый конец — её конец. */
-function entryTo(net: LaneNet, tip: Extract<LaneTip, { kind: 'point' }>, e: EdgeHit, cls: RoadClass): LaneTip {
+/**
+ * Въезд от конца tip (узел, поле или полоса у конца дороги — её продолжение) на край дороги e: стык, дальше —
+ * полоса разгона (слияния). until — следующая точка пути: дальше вдоль края на этом же полотне — полоса разгона
+ * до неё (used), иначе — ACCEL, а дальше её тянут следующими точками. Новый конец — конец полосы разгона.
+ */
+function entryTo(net: LaneNet, tip: Extract<LaneTip, { kind: 'point' | 'port' }>, e: EdgeHit, cls: RoadClass, until?: Vec): { tip: LaneTip; used: boolean } {
   const c0 = net.corridor(e.corridor);
-  // Едут туда, куда смотрели, подъезжая: по оси — в сторону от точки, откуда пришли.
-  const f0: Flow = dot(sub(e.pos, tip.anchor.pos), c0.lut.tangentAt(e.s)) >= 0 ? 1 : -1;
+  const src = tip.kind === 'port' ? { ...reopenPort(net, tip), port: tip.port } : null;
+  const start: Anchor = src ? { kind: 'node', node: src.n.id, pos: net.portPos(src.n, src.port) } : tip.kind === 'point' ? tip.anchor : { kind: 'free', pos: e.pos };
+  // Едут туда, куда смотрели, подъезжая: по оси — в сторону от точки, откуда пришли; с конца дороги — по её ходу.
+  const toward = src ? scale(src.n.dir, src.side) : sub(e.pos, start.pos);
+  const f0: Flow = dot(toward, c0.lut.tangentAt(e.s)) >= 0 ? 1 : -1;
   // Перед самым стыком — въезд в этот стык, полоса разгона — за ним (как у другого ответвления там же).
-  const { c, s, offset, flow: f } = nearSeam(net, c0, e.s, e.offset, f0, 1) ?? { c: c0, s: e.s, offset: e.offset, flow: f0 };
-  const s1 = Math.max(0, Math.min(c.length, s + f * ACCEL));
-  if (Math.abs(s1 - s) < 20) throw new EditError('Мало места для полосы разгона');
+  const near = nearSeam(net, c0, e.s, e.offset, f0, 1);
+  const { c, offset, flow: f } = near ?? { c: c0, offset: e.offset, flow: f0 };
+  let s = near?.s ?? e.s;
+  let s1 = Math.max(0, Math.min(c.length, s + f * ACCEL));
+  let used = false;
+  if (until) {
+    // Путь дальше идёт вдоль края этого полотна — полоса слияния ровно до его конца; за стыком — до стыка,
+    // дальше её дотянет следующий кусок пути (alongLane).
+    const hit = c.lut.closest(until);
+    const lat = dot(sub(until, hit.point), rightNormal(c.lut.tangentAt(hit.s)));
+    const inside = hit.s > 0.5 && hit.s < c.length - 0.5;
+    const end: End = f > 0 ? 'b' : 'a';
+    const beyond = !inside && (end === 'b' ? hit.s >= c.length - 0.5 : hit.s <= 0.5) && !!continuation(net, c, end, until);
+    const sEnd = inside && Math.abs(lat - offset) < DEPART_LAT ? hit.s : beyond ? (end === 'b' ? c.length : 0) : null;
+    if (sEnd !== null && (sEnd - s) * f >= MERGE_MIN) {
+      used = !beyond;
+      // Где именно примкнуть на этом пути вдоль края — решаем сами: там, откуда въезд подходит к краю плавно.
+      if (!near) s = smoothJoin(c, s, sEnd, f, offset, start.pos, src ? scale(src.n.dir, src.side) : null, Math.max(ROAD_CLASSES[cls].minRadius, ROAD_CLASSES[c.cls].minRadius));
+      s1 = beyond && (sEnd - s) * f > ACCEL ? s + f * ACCEL : sEnd;
+    }
+  }
+  if (Math.abs(s1 - s) < MERGE_MIN) throw new EditError('Мало места для полосы разгона');
   const draft: LaneDraft = {
-    start: tip.anchor,
+    start,
     host: { corridor: c.id, side: offset > 0 ? 1 : -1, offset, s0: s, s1 },
     merge: true,
     depart: null,
-    end: tip.anchor,
+    end: start,
+    from: src ? { node: src.n.id, port: src.port } : undefined,
   };
   if (!applyLane(net, draft, cls)) throw new EditError('Так не построить');
   // Конец полосы разгона — там, где её можно тянуть дальше.
   const at = add(c.lut.pointAt(s1), scale(rightNormal(c.lut.tangentAt(s1)), offset));
   const back = laneTipAt(net, at, 4);
-  return back.kind === 'edge' ? back : { kind: 'point', anchor: anchorAt(net, at, 4) };
+  return { tip: back.kind === 'edge' ? back : { kind: 'point', anchor: anchorAt(net, at, 4) }, used };
+}
+
+/** Полоса разгона не короче (м). */
+const MERGE_MIN = 20;
+
+/**
+ * Где въезду примкнуть к краю полотна c (полоса offset, едут по f), если путь дошёл до края в s и идёт вдоль
+ * до s1: первое место от s, откуда дорога въезда от from (с направлением dir у конца дороги; без него — дугой
+ * окружности, как строит applyLane) подходит к краю без поворота круче радиуса R, и полосе слияния остаётся
+ * хотя бы MERGE_MIN. Нигде так нельзя — самое плавное из возможных.
+ */
+function smoothJoin(c: Corridor, s: number, s1: number, f: Flow, offset: number, from: Vec, dir: Vec | null, R: number): number {
+  let best = { s, r: -1 };
+  for (let x = s; (s1 - x) * f >= MERGE_MIN; x += f * 4) {
+    const p3 = pointOff(c, x, offset);
+    const t3 = scale(c.lut.tangentAt(x), f);
+    const h = dist(from, p3) / 3;
+    const curve = dir ? { p0: from, p1: add(from, scale(dir, h)), p2: sub(p3, scale(t3, h)), p3 } : arcCubic(p3, scale(t3, -1), from);
+    if (!curve) continue;
+    const r = minRadius(curve);
+    if (r >= R) return x;
+    if (r > best.r) best = { s: x, r };
+  }
+  return best.s;
 }
 
 /**

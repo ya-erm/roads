@@ -2632,7 +2632,7 @@ export class Hud {
     const s = c.spec;
     const sw = this.kindSwitch('Действие', 'road-mode', c.roadMode, [
       { id: 'build', name: 'Строить', svg: modeSvg('arc'), hint: 'Новая дорога по точкам', key: 'N' },
-      { id: 'lane', name: 'Полоса', svg: laneSvg(), hint: 'Кликайте по точкам, как путь: от края вдоль дороги — полоса, в сторону — съезд, из поля к краю — въезд; конец полосы можно тянуть. Esc — закончить', key: 'L' },
+      { id: 'lane', name: 'Полоса', svg: laneSvg(), hint: 'Кликайте или тяните, как путь: вдоль края — полоса, в сторону — съезд, из поля или с конца дороги к краю и вдоль — въезд в полосу слияния; конец полосы можно тянуть. Esc — закончить', key: 'L' },
       { id: 'upgrade', name: 'Перестроить', svg: upgradeSvg(), hint: 'Клик по дороге — заменить её выбранным типом, полосами и скоростью', key: 'U' },
       { id: 'move', name: 'Двигать', svg: moveNodeSvg(), hint: 'Тяните узел — дороги следом; середину дороги — выгнуть; конец въезда или съезда у дороги — вдоль неё; угол перекрёстка — наружу, скруглить поворот. Cmd/Ctrl — без прилипания', key: 'M' },
     ], true);
@@ -2690,7 +2690,7 @@ export class Hud {
       // «Проект» — тот же значок в заголовке и плашка над панелью: полосы сначала проектом, потом — разом.
       return `${this.projectBarHtml()}<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Скорость</div><div class="limits">${limits}</div></div>
         <div class="opt-group narrow"><div class="opt-title">Полоса${this.projectChipHtml()}</div>
-        <p class="muted">Кликайте по точкам, как путь: от края вдоль дороги — полоса, в сторону — съезд, из поля к краю — въезд. С точки на конце дороги — однополосная из этой полосы.</p></div></div>`;
+        <p class="muted">Кликайте или тяните, как путь: вдоль края — полоса, в сторону — съезд, из поля или с конца дороги к краю и вдоль — въезд в полосу слияния. С конца дороги в поле — однополосная.</p></div></div>`;
     }
     const presets = ROAD_PRESETS.map(
       (p) => `<button class="card ${c.presetId === p.id ? 'active' : ''}" data-action="preset" data-id="${p.id}"
