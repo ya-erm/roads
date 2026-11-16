@@ -1,14 +1,30 @@
 import { hash } from '../core/math';
 import type { Vec } from '../core/vec';
-import { XWALK } from '../lanes/crosswalk';
+import { PEDESTRIANS_ON, XWALK } from '../lanes/crosswalk';
 import type { GraphWalk, LaneGraph } from '../lanes/graph';
 import type { Barrier, LaneTraffic } from '../lanes/traffic';
+
+export { PEDESTRIANS_ON };
 
 /**
  * Пешеходы на переходах перекрёстков (docs/CROSSWALKS.md): группы приходят к зебре по жителям вокруг, ждут окна (или
  * красного въезду с подъезда на светофоре) и идут; пока идут — зебра закрыта машинам в обе стороны (LaneTraffic.walks).
  * Состояние не сохраняется: после загрузки группы приходят заново, по тому же хешу.
+ * Пока выключены (PEDESTRIANS_ON): вернутся вместе с пешеходами на тротуарах — движение ровно как без них.
  */
+
+/**
+ * Пешеходный светофор у зебры walk: зелёный, когда въезду с подъезда красный (и не жёлтый); перекрёсток без светофора —
+ * null. От пешеходов не зависит — часть перехода на регулируемом перекрёстке.
+ */
+export function pedestrianLight(graph: LaneGraph, walk: Pick<GraphWalk, 'node' | 'inLink'>): boolean | null {
+  const L = graph.nodes.get(walk.node)?.lights;
+  if (!L) return null;
+  if (L.clearing) return false;
+  if (walk.inLink === null) return true;
+  for (const key of L.phases[L.phase].moves) if (graph.moves.get(key)?.inLink === walk.inLink) return false;
+  return true;
+}
 
 /** Переход «сам»: дом города ближе стольких метров к концу зебры (тротуару). */
 export const WALK_HOUSES = 30;
@@ -67,7 +83,11 @@ export class Crosswalks {
   /** Жители вокруг перекрёстка node (кэш до пересчёта раз в месяц). */
   private people = new Map<number, number>();
 
-  constructor(private readonly peopleAt: (p: Vec, r: number) => number) {}
+  /** on — пешеходы ходят (по умолчанию PEDESTRIANS_ON; тесты пешеходов включают их своему экземпляру). */
+  constructor(
+    private readonly peopleAt: (p: Vec, r: number) => number,
+    readonly on = PEDESTRIANS_ON,
+  ) {}
 
   /** Город вырос: жители вокруг переходов — заново. */
   refreshPeople(): void {
@@ -133,11 +153,13 @@ export class Crosswalks {
 
   /** Такт: группы приходят, ждут окна, идут; зебра закрыта, пока идут. */
   step(dt: number, time: number, graph: LaneGraph, traffic: LaneTraffic): void {
+    // Пешеходы выключены: никто не приходит, зебра машинам не закрывается.
+    if (!this.on) return;
     this.sync(graph, time, traffic);
     for (const c of this.list) {
       const seed = seedOf(c.walk);
       const L = graph.nodes.get(c.walk.node)?.lights ?? null;
-      c.signal = L ? this.lightWalk(c, graph) : null;
+      c.signal = pedestrianLight(graph, c.walk);
       if (c.cross) {
         if (time - c.cross.t0 >= c.cross.dur) {
           c.cross = null;
@@ -165,16 +187,6 @@ export class Crosswalks {
       c.barriers[0].closed = c.barriers[1].closed = true;
     }
     void dt;
-  }
-
-  /** Светофор даёт пешеходам идти: въезду с этого подъезда красный (и не жёлтый). */
-  private lightWalk(c: Crossing, graph: LaneGraph): boolean {
-    const L = graph.nodes.get(c.walk.node)?.lights;
-    if (!L) return false;
-    if (L.clearing) return false;
-    if (c.walk.inLink === null) return true;
-    for (const key of L.phases[L.phase].moves) if (graph.moves.get(key)?.inLink === c.walk.inLink) return false;
-    return true;
   }
 
   /**

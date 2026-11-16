@@ -2,7 +2,7 @@ import { CAR_WIDTH, LIGHTS } from '../config';
 import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub, Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
-import { WalkGeo, walkGeo, walksOn, walkTime, XWALK_BACK } from './crosswalk';
+import { PEDESTRIANS_ON, WalkGeo, walkGeo, walksOn, walkTime, XWALK_BACK } from './crosswalk';
 import { filletPath, junctionCuts } from './geometry';
 import { phaseRelations, resolvePhases, SignalHead, signalHeads, turnKey } from './lights';
 import { Corridor, CorridorEnd, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey, taperLen } from './model';
@@ -221,8 +221,13 @@ export class LaneGraph {
   readonly junctionMoves = new Map<number, GMove[]>();
   /** Пешеходные переходы перекрёстков (src/lanes/crosswalk.ts): по узлу — включённые, с зеброй и связями подъезда. */
   readonly crosswalks = new Map<number, GraphWalk[]>();
-  /** Полосы въезда в перекрёсток с переходом: стоп-линия на столько метров раньше конца полосы. */
+  /** Полосы въезда в перекрёсток с переходом: стоп-линия (нарисованная) на столько метров раньше конца полосы. */
   readonly stopBack = new Map<number, number>();
+  /**
+   * Где машины ждут проезда через перекрёсток: на столько метров раньше конца полосы (LaneTraffic.lineBack) — у
+   * стоп-линии перед зеброй на светофоре и когда ходят пешеходы (PEDESTRIANS_ON); иначе — у края перекрёстка (нет в списке).
+   */
+  readonly holdBack = new Map<number, number>();
   /** Обрезы полотен, по которым строится граф (только пока строится). */
   private cutMap: Map<number, [number, number]> | null = null;
   /** Связи каждого полотна по ходу оси. */
@@ -258,11 +263,14 @@ export class LaneGraph {
    * cuts — обрезы у перекрёстков, если уже посчитаны по сети побольше (граф куска сети для предпросмотра).
    * prev — прежний граф той же игры: что не поменялось, узнаётся по нему (linkFromPrev, sameNodes), а конфликты
    * манёвров у прежних перекрёстков берутся готовыми — это почти вся сборка графа.
+   * pedestrians — по переходам ходят пешеходы: зелёный светофора не короче их перехода (LightPhase.walk); по умолчанию —
+   * PEDESTRIANS_ON (пока выключены).
    */
   constructor(
     readonly net: LaneNet,
     cuts: Map<number, [number, number]> = junctionCuts(net),
     prev: LaneGraph | null = null,
+    readonly pedestrians = PEDESTRIANS_ON,
   ) {
     this.prev = prev;
     this.prevSerial = prev?.serial ?? null;
@@ -614,7 +622,14 @@ export class LaneGraph {
       const geo = walkGeo(arm);
       const inLink = ins.find((l) => l.corridor === arm.corridor.id) ?? null;
       const outLink = outs.find((l) => l.corridor === arm.corridor.id) ?? null;
-      for (const lane of inLink?.lanes ?? []) this.stopBack.set(lane.id, Math.max(0, Math.min(XWALK_BACK, lane.length - 2)));
+      for (const lane of inLink?.lanes ?? []) {
+        const back = Math.max(0, Math.min(XWALK_BACK, lane.length - 2));
+        this.stopBack.set(lane.id, back);
+        // Ждут у стоп-линии перед зеброй — на светофоре (красный) и когда по зебре ходят пешеходы; без них на
+        // нерегулируемом подкатываются к краю перекрёстка, как без перехода (иначе каждый трогается с места на 7 м
+        // дальше — на плотных улицах крупных городов это копилось в заторы).
+        if (n.control === 'lights' || this.pedestrians) this.holdBack.set(lane.id, back);
+      }
       list.push({ node: n.id, corridor: arm.corridor.id, end: arm.end, geo, inLink: inLink?.id ?? null, outLink: outLink?.id ?? null, time: walkTime(geo.width) });
     }
     if (list.length) this.crosswalks.set(n.id, list);
@@ -784,7 +799,8 @@ export class LaneGraph {
     }));
     const resolved = resolvePhases(n.phases, approaches, n.greens);
     if (!resolved.length) resolved.push({ go: [], green: LIGHTS.green });
-    const walks = this.crosswalks.get(n.id) ?? [];
+    // Пешеходов нет (PEDESTRIANS_ON) — и пешеходного минимума зелёного нет.
+    const walks = this.pedestrians ? (this.crosswalks.get(n.id) ?? []) : [];
     const phases: LightPhase[] = resolved.map((p) => {
       const go = new Set(p.go);
       const moves = list.filter((m) => go.has(this.turnOf(m)));

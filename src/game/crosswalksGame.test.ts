@@ -72,7 +72,21 @@ describe('Пешеходные переходы в игре', { timeout: 30_000 
     expect(walksOn(game.roads.net, game.roads.net.node(n.id)).length).toBe(game.crosswalkInfo(n.id).filter((x) => !x.arm.ban).length);
   });
 
-  it('пешеходы ходят, машины не теряются', () => {
+  it('пешеходы пока выключены: в партии никто не ходит, зебры машинам не закрываются, зелёный — как задан', () => {
+    const game = freshGame(7);
+    runSeconds(game, 90, () => {
+      for (const list of game.traffic.walks.values()) for (const b of list) expect(b.closed).toBe(false);
+    });
+    expect(game.crosswalks.on).toBe(false);
+    expect(game.crosswalks.list).toHaveLength(0);
+    expect(game.roads.graph.crosswalks.size).toBeGreaterThan(0);
+    for (const n of game.roads.graph.nodes.values()) for (const p of n.lights?.phases ?? []) expect(p.walk).toBeUndefined();
+  });
+
+  // Включённые пешеходы в партии — когда вернутся вместе с пешеходами на тротуарах (PEDESTRIANS_ON): флаг —
+  // константа модуля, а включать его на время теста в проекте `shared` (isolate: false) нельзя — протечёт в соседние файлы.
+  // Поведение пешеходов проверяет src/game/crosswalks.test.ts (своему графу и экземпляру — параметром).
+  it.skip('пешеходы ходят, машины не теряются', () => {
     const game = freshGame(7);
     let crossings = 0;
     runSeconds(game, 90, () => {

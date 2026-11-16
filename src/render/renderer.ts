@@ -2,6 +2,7 @@ import { GRADE, STATION } from '../config';
 import { Cubic, CurveLUT } from '../core/bezier';
 import { hash } from '../core/math';
 import { drawWalkSign } from './walkSign';
+import { pedestrianLight } from '../game/crosswalks';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import { stationNormal } from '../game/railStationEdit';
@@ -4501,28 +4502,35 @@ export class Renderer {
 
   /**
    * Пешеходы на переходах — точками с зума 1,2 (идущие — по зебре, ждущие — у бордюра), пешеходные светофоры у концов
-   * зебры на регулируемом перекрёстке — с 1,5: зелёный, когда въезду с подъезда красный.
+   * зебры на регулируемом перекрёстке — с 1,5: зелёный, когда въезду с подъезда красный (часть перехода: горят и пока
+   * пешеходы выключены, PEDESTRIANS_ON).
    */
   private drawCrosswalkLife(game: Game, view: ReturnType<Renderer['view']>): void {
     const z = this.camera.zoom;
     if (z < 1.2) return;
     const ctx = this.ctx;
     const cw = game.crosswalks;
-    if (!cw.list.length) return;
+    const g = game.roads.graph;
+    if (!g.crosswalks.size) return;
     const seen = (p: Vec) => p.x > view.x0 - 10 && p.x < view.x1 + 10 && p.y > view.y0 - 10 && p.y < view.y1 + 10;
     if (z >= 1.5) {
-      for (const c of cw.list) {
-        if (c.signal === null || !seen(c.walk.geo.ends[0])) continue;
-        for (const p of c.walk.geo.ends) {
-          ctx.fillStyle = '#2a2e33';
-          ctx.fillRect(p.x - 1.1, p.y - 1.1, 2.2, 2.2);
-          ctx.fillStyle = c.signal ? '#3ddc84' : '#ff4a3d';
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, 0.75, 0, Math.PI * 2);
-          ctx.fill();
+      for (const [node, walks] of g.crosswalks) {
+        if (!g.nodes.get(node)?.lights) continue;
+        for (const w of walks) {
+          if (!seen(w.geo.ends[0])) continue;
+          const on = pedestrianLight(g, w);
+          for (const p of w.geo.ends) {
+            ctx.fillStyle = '#2a2e33';
+            ctx.fillRect(p.x - 1.1, p.y - 1.1, 2.2, 2.2);
+            ctx.fillStyle = on ? '#3ddc84' : '#ff4a3d';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 0.75, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
       }
     }
+    if (!cw.list.length) return;
     const COATS = ['#d9534f', '#3a6fb0', '#e8b83a', '#4c9a5b', '#7d5ba6', '#e07b39', '#30343a', '#e6e2d8'];
     ctx.strokeStyle = 'rgba(30, 30, 30, 0.6)';
     ctx.lineWidth = 0.2;

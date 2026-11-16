@@ -5,7 +5,7 @@ import { LaneGraph } from '../lanes/graph';
 import { LaneNet, twoWay } from '../lanes/model';
 import { findLaneRoute } from '../lanes/routing';
 import { LaneTraffic } from '../lanes/traffic';
-import { Crosswalks, groupSize, walkRate } from './crosswalks';
+import { Crosswalks, groupSize, PEDESTRIANS_ON, pedestrianLight, walkRate } from './crosswalks';
 
 function scene(lights = false) {
   const net = new LaneNet();
@@ -20,10 +20,11 @@ function scene(lights = false) {
   const arms = far.map((f) => net.addCorridor(j.id, f.id, { cls: 'street', lanes: twoWay(1, 1) }));
   if (lights) j.control = 'lights';
   syncWalks(net, j, () => true);
-  const graph = new LaneGraph(net);
+  // Пешеходы в игре пока выключены (PEDESTRIANS_ON) — здесь включены своему графу и экземпляру, не глобально.
+  const graph = new LaneGraph(net, undefined, null, true);
   const traffic = new LaneTraffic(graph, { onArrive: () => {}, onLost: () => {} });
   // Центр города: 600 жителей — 1,5 группы в минуту.
-  const walks = new Crosswalks(() => 600);
+  const walks = new Crosswalks(() => 600, true);
   return { net, j, far, arms, graph, traffic, walks };
 }
 
@@ -38,6 +39,20 @@ describe('Пешеходы на переходах', () => {
     expect(groupSize(0)).toBe(1);
     expect(groupSize(300)).toBe(3);
     expect(groupSize(5000)).toBe(6);
+  });
+
+  it('выключены (как в игре сейчас, PEDESTRIANS_ON): никто не приходит, зебра не закрывается, пешеходный светофор горит', () => {
+    expect(PEDESTRIANS_ON).toBe(false);
+    const { net, j, traffic } = scene(true);
+    const graph = new LaneGraph(net);
+    const off = new Crosswalks(() => 600);
+    for (let t = 0; t < 120; t += 1 / 30) off.step(1 / 30, t, graph, traffic);
+    expect(off.list).toHaveLength(0);
+    expect(off.pedestrians(120)).toHaveLength(0);
+    expect(traffic.walks.size).toBe(0);
+    // Пешеходный светофор — часть перехода: красный въезду с подъезда — ему зелёный.
+    const walks = graph.crosswalks.get(j.id)!;
+    expect(walks.map((w) => pedestrianLight(graph, w)).some((x) => x === true)).toBe(true);
   });
 
   it('без машин группа приходит и сразу идут: зебра закрыта в обе стороны на время перехода, потом открыта', () => {

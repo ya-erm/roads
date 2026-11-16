@@ -132,7 +132,10 @@ describe('Пешеходные переходы: геометрия и граф'
     const before = new LaneGraph(net).nodes.get(j.id)!.lights!.phases.map((p) => p.green);
     expect(Math.max(...before)).toBeLessThan(9);
     syncWalks(net, j, () => true);
-    const lit = new LaneGraph(net).nodes.get(j.id)!.lights!;
+    // Пешеходы в игре пока выключены (PEDESTRIANS_ON): граф по умолчанию зелёный не удлиняет.
+    expect(new LaneGraph(net).nodes.get(j.id)!.lights!.phases.map((p) => greenOf(p))).toEqual(before);
+    // С пешеходами (своему графу, параметром) — не короче перехода.
+    const lit = new LaneGraph(net, undefined, null, true).nodes.get(j.id)!.lights!;
     const need = walkTime(31);
     expect(need).toBeCloseTo(9.66, 1);
     for (const p of lit.phases) expect(greenOf(p)).toBeGreaterThanOrEqual(need - 1e-9);
@@ -141,7 +144,7 @@ describe('Пешеходные переходы: геометрия и граф'
     expect(lit.timer).toBeGreaterThanOrEqual(need - 1e-9);
     // Переходы стёрли — снова как было.
     for (const arm of walkArms(net, j)) setWalk(j, arm.corridor.id, false);
-    expect(new LaneGraph(net).nodes.get(j.id)!.lights!.phases.map((p) => greenOf(p))).toEqual(before);
+    expect(new LaneGraph(net, undefined, null, true).nodes.get(j.id)!.lights!.phases.map((p) => greenOf(p))).toEqual(before);
   });
 
   it('машина ждёт проезда у отодвинутой стоп-линии — перед зеброй, а не на ней', () => {
