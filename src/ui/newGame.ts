@@ -5,9 +5,10 @@
 import type { ScenarioSettings } from '../scenario/types';
 import { BIOME_LIST, BIOMES, type BiomeId, biomeForSeed, biomeRaw } from '../world/biomes';
 import { CARGO, type CargoType, INDUSTRY_LIST } from '../world/cargo';
-import { DEFAULT_SETTINGS, MAP_SCALE, NEW_GAME_SETTINGS, type Relief, type WorldSettings } from '../world/settings';
+import { DEFAULT_SETTINGS, MAP_SCALE, type MapSize, mapDims, NEW_GAME_SETTINGS, type Relief, type WorldSettings } from '../world/settings';
+import { KM_PER_UNIT } from '../scenario/analysis';
 import { cargoIcon, townIcon } from './cargoIcons';
-import { biomeSvg } from './icons';
+import { biomeRandomSvg, biomeSvg, diceBadgeSvg } from './icons';
 import { diceMapSvg } from './scenarioIcons';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
@@ -16,22 +17,51 @@ const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 export type NewGameFrom = 'start' | 'menu';
 
 export interface NewGameDraft {
-  /** Параметры нового мира: биом в них всегда есть — по seed. */
+  /**
+   * Параметры нового мира: биом в них всегда есть и уже решён — выбранный или тот, что даёт seed («Случайно»,
+   * biomeBySeed: true). В партию и её сохранение уходит сам биом; метка нужна, чтобы следующая «Новая игра»
+   * снова предложила «Случайно».
+   */
   settings: WorldSettings;
   /** Выбор сценария (сложность, испытание, регион): вернётся, когда снова выберут «Сценарий». */
   scenario: ScenarioSettings;
 }
 
 /**
- * Новый seed в черновике (кубиком, вводом или при открытии окна): биом — тот, что даёт этот seed, даже если
- * до этого его выбирали сами. Выбрать другой можно карточкой биома — он останется до следующей смены seed.
+ * Биом партии выпал «Случайно» (по seed), а не выбран игроком. Метка есть — по ней; у партий без метки (сохранения
+ * версий, где «Случайно» у биома не было, и мир первого запуска) — случайный, если биома нет или он тот, что даёт
+ * seed: так новая игра после них начнётся со «Случайно», а явно выбранный другой биом запомнится.
+ */
+export function biomeIsRandom(s: Pick<WorldSettings, 'seed' | 'biome' | 'biomeBySeed'>): boolean {
+  if (s.biomeBySeed !== undefined) return s.biomeBySeed;
+  return !s.biome || s.biome === biomeForSeed(s.seed);
+}
+
+/**
+ * Новый seed в черновике (кубиком, вводом или при открытии окна). При «Случайно» биом — тот, что даёт новый seed;
+ * выбранный игроком биом остаётся, как и выбранный регион.
  */
 export function withSeed(s: WorldSettings, seed: number): WorldSettings {
+  const random = biomeIsRandom(s);
   // Масштаб карты — всегда нынешний: новая партия после старой (без поля) — на карте нового размера.
-  const next: WorldSettings = { ...s, seed, biome: biomeForSeed(seed), mapScale: MAP_SCALE };
-  // Метка старых версий: «Случайно» у биома больше нет.
-  delete next.biomeBySeed;
-  return next;
+  return { ...s, seed, biome: random ? biomeForSeed(seed) : s.biome, biomeBySeed: random, mapScale: MAP_SCALE };
+}
+
+/** Биом в черновике: карточкой биома — он сам, «Случайно» — тот, что даёт seed черновика. */
+export function withBiome(s: WorldSettings, pick: BiomeId | 'random'): WorldSettings {
+  if (pick === 'random') return { ...s, biome: biomeForSeed(s.seed), biomeBySeed: true };
+  return { ...s, biome: pick, biomeBySeed: false };
+}
+
+/**
+ * Размер карты подписью, км: как его карта и получится — с масштабом новой партии (mapScale), единица карты 0,6 м.
+ * Маленькая новой партии — «5.8 × 3.9 км» (9600 × 6450 ед.).
+ */
+export function mapSizeKm(size: MapSize, mapScale: number | undefined): string {
+  const m = mapDims({ size, mapScale });
+  // До десятых — с округлением половины вверх: 12 750 ед. — 7,65 км → «7.7» (умножение на 0.0006 даёт 7.6499…).
+  const km = (u: number) => (Math.round(u * KM_PER_UNIT * 10 + 1e-6) / 10).toFixed(1);
+  return `${km(m.w)} × ${km(m.h)} км`;
 }
 
 /**
@@ -48,10 +78,13 @@ export function newGameDraft(s: WorldSettings, from: NewGameFrom, remembered: Sc
   // Рельеф в черновике — всегда явный. Без поля мир плоский (так открываются старые сохранения), а окно
   // подсвечивает «Холмы»: партия первого запуска (DEFAULT_SETTINGS, без рельефа) давала плоский сценарий.
   // Предприятия — тоже явно: после старой партии (без поля) новая — как новая игра, «Строит игрок».
-  const own = { ...s, relief: s.relief ?? DEFAULT_RELIEF, industryMode: s.industryMode ?? NEW_GAME_SETTINGS.industryMode };
+  // Биом — выбор игрока в прошлой партии: «Случайно» (и по умолчанию — у мира первого запуска и старых партий)
+  // выпадет заново по новому seed, выбранный сам — останется.
+  const biome: Pick<WorldSettings, 'biome' | 'biomeBySeed'> = biomeIsRandom(s) ? { biomeBySeed: true } : { biome: s.biome, biomeBySeed: false };
+  const own = { ...s, ...biome, relief: s.relief ?? DEFAULT_RELIEF, industryMode: s.industryMode ?? NEW_GAME_SETTINGS.industryMode };
   if (!s.scenario && from === 'menu') return { settings: withSeed(own, seed), scenario };
   // Города, предприятия и капитал сценарий задаёт сам — у песочницы оставляем её прежние, иначе — обычные.
-  const base = s.scenario ? scenarioBase(s) : own;
+  const base = s.scenario ? { ...scenarioBase(s), ...biome } : own;
   return { settings: withSeed({ ...base, scenario: { ...scenario } }, seed), scenario };
 }
 
@@ -105,16 +138,24 @@ export function randomCardHtml(action: string, active: boolean, tip: string): st
 }
 
 /**
- * Строка «Биом»: пять пейзажей, подсвечен биом черновика — тот, что даёт seed, или выбранный сами
- * («Случайно» не нужен: биом и так случайный, по seed). Под ней — строка «Ресурсы» (заголовок в левом
- * столбце, как у остальных): что в этом биоме добывают и что просят города, значками. Подсказки — только
- * у самих значков: вложенные друг в друга всплывали разом и накрывали одна другую.
+ * Строка «Биом»: «Случайно» и пять пейзажей. Подсвечен выбор черновика: «Случайно» — тогда у биома, который выпадет
+ * при этом seed, пунктирная рамка и кость в углу, — или выбранный сами. Под ней — строка «Ресурсы» (заголовок
+ * в левом столбце, как у остальных): что в этом биоме (при «Случайно» — в выпавшем) добывают и что просят города,
+ * значками. Подсказки — только у самих карточек и значков: вложенные друг в друга всплывали разом и накрывали
+ * одна другую.
  */
-export function biomeRowHtml(biome: BiomeId): string {
-  const cards = BIOME_LIST.map(
-    (b) =>
-      `<button class="card region ${biome === b.id ? 'active' : ''}" data-action="ng-biome" data-id="${b.id}" data-tip="${esc(b.pitch)}">${biomeSvg(b.id)}<span class="name">${esc(b.name)}</span></button>`,
-  ).join('');
+export function biomeRowHtml(biome: BiomeId, random = false): string {
+  const dice = `<button class="card region ${random ? 'active' : ''}" data-action="ng-biome" data-id="random" data-tip="${esc(
+    `Один из пяти биомов по seed: тот же seed — тот же биом. Сейчас выпадет: ${BIOMES[biome].name}`,
+  )}">${biomeRandomSvg()}<span class="name">Случайно</span></button>`;
+  const cards = BIOME_LIST.map((b) => {
+    const rolled = random && biome === b.id;
+    const cls = !random && biome === b.id ? 'active' : rolled ? 'rolled' : '';
+    const tip = rolled ? `Выпадет при этом seed. ${b.pitch}` : b.pitch;
+    return `<button class="card region ${cls}" data-action="ng-biome" data-id="${b.id}" data-tip="${esc(tip)}">${biomeSvg(b.id)}${
+      rolled ? diceBadgeSvg() : ''
+    }<span class="name">${esc(b.name)}</span></button>`;
+  }).join('');
   const shown = BIOMES[biome];
   const icon = (c: CargoType) => `<span class="ng-cargo" data-tip="${esc(CARGO[c].name)}">${cargoIcon(c, 20, false)}</span>`;
   const raw = biomeRaw(shown.id, INDUSTRY_LIST).map(icon).join('');
@@ -122,6 +163,6 @@ export function biomeRowHtml(biome: BiomeId): string {
   const strip = `<div class="ng-biome-strip">
     <span class="ng-biome-part"><span class="ng-part-ic" data-tip="Сырьё: что здесь добывают">⛏</span>${raw}</span>
     <span class="ng-biome-part"><span class="ng-part-ic" data-tip="Что просят города">${townIcon(18)}</span>${towns}</span></div>`;
-  return `<div class="ng-row top"><span class="ng-label">Биом</span><div class="ng-region"><div class="cards ng-regions ng-biomes">${cards}</div></div></div>
+  return `<div class="ng-row top"><span class="ng-label">Биом</span><div class="ng-region"><div class="cards ng-regions ng-biomes">${dice}${cards}</div></div></div>
     <div class="ng-row ng-res-row"><span class="ng-label">Ресурсы</span>${strip}</div>`;
 }

@@ -176,7 +176,17 @@ import { money, planPrice, projectMoneyWarning } from '../input/labels';
 import { WALK_BAN_TEXT } from '../lanes/crosswalk';
 import { walkSignSvg } from '../render/walkSign';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
-import { biomeRowHtml, newGameDraft, type NewGameFrom, nextScenarioSettings, rulesHtml, withSeed } from './newGame';
+import {
+  biomeIsRandom,
+  biomeRowHtml,
+  mapSizeKm,
+  newGameDraft,
+  type NewGameFrom,
+  nextScenarioSettings,
+  rulesHtml,
+  withBiome,
+  withSeed,
+} from './newGame';
 import { edgeScrollStep } from './edgeScroll';
 
 /** Управление партией: сохранение и новая игра. */
@@ -1162,8 +1172,9 @@ export class Hud {
         this.renderNewGame();
         break;
       case 'ng-biome': {
-        const biome = BIOME_LIST.find((b) => b.id === d.id)?.id;
-        if (biome) this.draft = { ...this.draft, biome };
+        // «Случайно» — биом по seed черновика; карточка биома — он сам, и смена seed его уже не меняет.
+        const biome = d.id === 'random' ? 'random' : BIOME_LIST.find((b) => b.id === d.id)?.id;
+        if (biome) this.draft = withBiome(this.draft, biome);
         this.renderNewGame();
         break;
       }
@@ -4084,7 +4095,7 @@ export class Hud {
     const sizes = (Object.keys(MAP_SIZES) as MapSize[]).map((k) => {
       // Размер — с масштабом новой партии (WorldSettings.mapScale), как её карта и получится.
       const m = mapDims({ size: k, mapScale: d.mapScale });
-      return { v: k, name: `${mapSvg(m.w, m.h)}${MAP_SIZES[k].name}`, hint: `${((m.w * 0.6) / 1000).toFixed(1)} × ${((m.h * 0.6) / 1000).toFixed(1)} км` };
+      return { v: k, name: `${mapSvg(m.w, m.h)}${MAP_SIZES[k].name}`, hint: mapSizeKm(k, d.mapScale) };
     });
     // В сценарии города, предприятия и капитал задаёт регион — эти строки скрыты.
     const sc = d.scenario;
@@ -4108,7 +4119,7 @@ export class Hud {
       <div class="ng-row"><span class="ng-label">Режим</span>${modeTilesHtml(!!sc)}</div>
       ${sc ? scenarioOptionsHtml(sc) : ''}
       <div class="ng-row"><span class="ng-label">Карта</span><div class="ng-options">${chips('size', d.size, sizes)}</div></div>
-      ${biomeRowHtml(d.biome ?? biomeForSeed(d.seed))}
+      ${biomeRowHtml(d.biome ?? biomeForSeed(d.seed), biomeIsRandom(d))}
       ${sc ? '' : sandboxRows}
       <div class="ng-row"><span class="ng-label">Вода</span><div class="ng-options">${chips(
         'water',

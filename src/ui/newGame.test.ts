@@ -1,11 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import type { ScenarioSettings } from '../scenario/types';
 import { BIOME_LIST, BIOMES, biomeForSeed } from '../world/biomes';
-import { DEFAULT_SETTINGS, type WorldSettings } from '../world/settings';
+import { DEFAULT_SETTINGS, MAP_SCALE, mapDims, type WorldSettings } from '../world/settings';
 import { Rng } from '../core/rng';
 import { prepareSettings } from '../scenario/generator';
 import { Terrain } from '../world/terrain';
-import { biomeRowHtml, DEFAULT_RELIEF, newGameDraft, nextScenarioSettings, rulesHtml, withSeed } from './newGame';
+import {
+  biomeIsRandom,
+  biomeRowHtml,
+  DEFAULT_RELIEF,
+  mapSizeKm,
+  newGameDraft,
+  nextScenarioSettings,
+  rulesHtml,
+  withBiome,
+  withSeed,
+} from './newGame';
 import { scenarioOptionsHtml } from './scenarioUi';
 
 const remembered: ScenarioSettings = { difficulty: 'hard', challenge: true };
@@ -103,12 +113,38 @@ describe('Новая игра: режим по умолчанию', () => {
     expect(picked.settings.scenario).toEqual({ difficulty: 'normal', challenge: true, pick: 'logistics' });
   });
 
-  it('биом — тот, что даёт новый seed, и в песочнице, и в сценарии', () => {
-    for (const s of [sandbox, { ...sandbox, biome: 'desert' as const, biomeBySeed: undefined }, { ...sandbox, biome: undefined }]) {
+  it('«Случайно» по умолчанию: после случайного биома, мира первого запуска и старой партии с биомом seed — биом нового seed', () => {
+    const legacy = [
+      sandbox,
+      // Сохранение без метки, биом тот, что дал seed (seed 5 — пустыня).
+      { ...sandbox, biome: biomeForSeed(5), biomeBySeed: undefined },
+      // Старый мир без биома и мир первого запуска.
+      { ...sandbox, biome: undefined, biomeBySeed: undefined },
+      { ...DEFAULT_SETTINGS },
+    ];
+    for (const s of [...legacy, ...legacy.map((x) => ({ ...x, scenario: remembered }))]) {
       for (const from of ['menu', 'start'] as const) {
         const d = newGameDraft(s, from, remembered, 404409972).settings;
         expect(d.biome).toBe(biomeForSeed(404409972));
-        expect(d.biomeBySeed).toBeUndefined();
+        expect(d.biomeBySeed).toBe(true);
+        expect(biomeIsRandom(d)).toBe(true);
+      }
+    }
+  });
+
+  it('выбранный биом прошлой партии запоминается — и в песочнице, и в сценарии', () => {
+    const manual = BIOME_LIST.find((b) => b.id !== biomeForSeed(404409972))!.id;
+    const legacyPick = BIOME_LIST.find((b) => b.id !== biomeForSeed(5))!.id;
+    for (const s of [
+      { ...sandbox, biome: manual, biomeBySeed: false },
+      { ...sandbox, biome: manual, biomeBySeed: false, scenario: remembered },
+      // Партия без метки, биом не тот, что даёт seed: его выбирали сами.
+      { ...sandbox, biome: legacyPick, biomeBySeed: undefined },
+    ]) {
+      for (const from of ['menu', 'start'] as const) {
+        const d = newGameDraft(s, from, remembered, 404409972).settings;
+        expect(d.biome).toBe(s.biome);
+        expect(d.biomeBySeed).toBe(false);
       }
     }
   });
@@ -133,13 +169,32 @@ describe('Новая игра: кубик и биом', () => {
     expect({ ...next, seed: draft.seed, biome: draft.biome }).toEqual(draft);
   });
 
-  it('биом, выбранный сами, кубик тоже меняет — на биом нового seed', () => {
+  it('биом, выбранный сами, кубик не меняет — как выбранный регион', () => {
     const seed = 5;
     const manual = BIOME_LIST.find((b) => b.id !== biomeForSeed(seed) && b.id !== biomeForSeed(otherSeed(seed)))!.id;
-    const draft = { ...newGameDraft(sandbox, 'menu', remembered, seed).settings, biome: manual };
+    const draft = withBiome(newGameDraft(sandbox, 'menu', remembered, seed).settings, manual);
+    expect(draft.biomeBySeed).toBe(false);
     const next = withSeed(draft, otherSeed(seed));
-    expect(next.biome).toBe(biomeForSeed(otherSeed(seed)));
-    expect(next.biome).not.toBe(manual);
+    expect(next.biome).toBe(manual);
+    expect(next.biomeBySeed).toBe(false);
+  });
+
+  it('«Случайно»: тот же seed — тот же биом, разные seed — разные биомы', () => {
+    const draft = newGameDraft({ ...sandbox, biome: 'mountains', biomeBySeed: false }, 'menu', remembered, 5).settings;
+    expect(draft.biome).toBe('mountains');
+    const random = withBiome(draft, 'random');
+    expect(random.biomeBySeed).toBe(true);
+    expect(random.biome).toBe(biomeForSeed(5));
+    // Тот же seed — тот же биом: заново, кубиком на тот же seed и по сохранённым настройкам.
+    expect(withBiome(withBiome(draft, 'random'), 'random').biome).toBe(random.biome);
+    expect(withSeed(random, 5).biome).toBe(random.biome);
+    expect(newGameDraft(random, 'menu', remembered, 5).settings.biome).toBe(random.biome);
+    // Разные seed — разные биомы: на сотне seed выпадают все пять, и не в одну сторону.
+    const rolled = Array.from({ length: 100 }, (_, i) => withSeed(random, 1000 + i).biome!);
+    expect(new Set(rolled)).toEqual(new Set(BIOME_LIST.map((b) => b.id)));
+    for (const b of BIOME_LIST) expect(rolled.filter((x) => x === b.id).length).toBeGreaterThan(5);
+    // Смена seed при «Случайно» меняет биом.
+    expect(withSeed(random, otherSeed(5)).biome).not.toBe(random.biome);
   });
 
   it('в строке биома подсвечен биом черновика', () => {
@@ -147,7 +202,37 @@ describe('Новая игра: кубик и биом', () => {
       const html = biomeRowHtml(b.id);
       expect(html.match(/class="card region active"/g)).toHaveLength(1);
       expect(html).toContain(`class="card region active" data-action="ng-biome" data-id="${b.id}"`);
+      expect(html).not.toContain('rolled');
     }
+  });
+
+  it('при «Случайно» подсвечена кость, у выпавшего биома — пунктир и кость, «Ресурсы» — его', () => {
+    for (const b of BIOME_LIST) {
+      const html = biomeRowHtml(b.id, true);
+      expect(html.match(/class="card region active"/g)).toHaveLength(1);
+      expect(html).toContain('class="card region active" data-action="ng-biome" data-id="random"');
+      expect(html.match(/class="card region rolled"/g)).toHaveLength(1);
+      expect(html).toContain(`class="card region rolled" data-action="ng-biome" data-id="${b.id}"`);
+      expect(html.match(/ng-dice-badge/g)).toHaveLength(1);
+      expect(html.split('ng-res-row')[1]).toBe(biomeRowHtml(b.id).split('ng-res-row')[1]);
+    }
+  });
+});
+
+describe('Новая игра: размеры карты', () => {
+  it('подписи — по настоящим размерам новой партии (×MAP_SCALE), единица карты 0,6 м', () => {
+    const d = newGameDraft({ ...DEFAULT_SETTINGS }, 'start', remembered, 1).settings;
+    expect(d.mapScale).toBe(MAP_SCALE);
+    expect(mapSizeKm('small', d.mapScale)).toBe('5.8 × 3.9 км');
+    expect(mapSizeKm('medium', d.mapScale)).toBe('8.6 × 5.8 км');
+    expect(mapSizeKm('large', d.mapScale)).toBe('11.5 × 7.7 км');
+    // Подпись считается от той же карты, что строит мир: mapDims × 0,6 м.
+    for (const size of ['small', 'medium', 'large'] as const) {
+      const m = mapDims({ size, mapScale: MAP_SCALE });
+      expect(mapSizeKm(size, MAP_SCALE)).toBe(`${((m.w * 0.6) / 1000).toFixed(1)} × ${((m.h * 0.6) / 1000).toFixed(1)} км`);
+    }
+    // Без масштаба (старые размеры) — в полтора раза меньше.
+    expect(mapSizeKm('small', undefined)).toBe('3.8 × 2.6 км');
   });
 });
 
@@ -171,16 +256,17 @@ describe('Новая игра: регион и биом', () => {
     expect(html).not.toContain('Один из пяти регионов');
   });
 
-  it('биом: только пять пейзажей, без «Случайно»; «Луга» вместо «Средней полосы»; под карточками — «Ресурсы»', () => {
+  it('биом: «Случайно» первым, за ним пять пейзажей; «Луга» вместо «Средней полосы»; под карточками — «Ресурсы»', () => {
     expect(BIOMES.temperate.name).toBe('Луга');
     for (const b of BIOME_LIST) {
       const html = biomeRowHtml(b.id);
-      expect(html.match(/data-action="ng-biome"/g)).toHaveLength(BIOME_LIST.length);
+      expect(html.match(/data-action="ng-biome"/g)).toHaveLength(BIOME_LIST.length + 1);
+      expect(html.match(/data-action="ng-biome" data-id="([a-z]+)"/)![1]).toBe('random');
+      expect(html.match(/<span class="name">Случайно<\/span>/g)).toHaveLength(1);
       expect(html).toContain('<span class="name">Луга</span>');
       // «Ресурсы» — заголовком в левом столбце, как у остальных строк, а не в строке значков.
       expect(html).toContain('<span class="ng-label">Ресурсы</span>');
       expect(html).not.toMatch(/ng-biome-strip">[^]*Ресурсы/);
-      expect(html).not.toContain('Случайно');
       expect(html).not.toContain('По seed');
       expect(html).not.toContain('Средняя полоса');
       expect(html).not.toContain('Этот seed даёт');
@@ -190,9 +276,11 @@ describe('Новая игра: регион и биом', () => {
 
   it('подсказки значков ресурсов не вложены друг в друга — не накрывают соседние', () => {
     for (const b of BIOME_LIST) {
-      const html = biomeRowHtml(b.id);
-      expect(html).toContain('data-tip="Сырьё: что здесь добывают"');
-      expect(nestedTips(html)).toBe(0);
+      for (const random of [false, true]) {
+        const html = biomeRowHtml(b.id, random);
+        expect(html).toContain('data-tip="Сырьё: что здесь добывают"');
+        expect(nestedTips(html)).toBe(0);
+      }
     }
     // Проверка ловит и вложенные подсказки — как было раньше.
     expect(nestedTips('<span data-tip="Сырьё"><span data-tip="Уголь"><svg><path d="M0"/></svg></span></span>')).toBe(1);

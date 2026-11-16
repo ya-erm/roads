@@ -1155,3 +1155,26 @@ export function biomeSvg(id: BiomeId, w = 64, h = 44): string {
   }
   return `<svg class="map-mini" viewBox="0 0 64 44" width="${w}" height="${h}"><clipPath id="bm-${id}"><rect width="64" height="44" rx="6"/></clipPath><g clip-path="url(#bm-${id})">${sky}${body}</g></svg>`;
 }
+
+/** Игральная кость (пятёрка) с центром в (x, y), сторона s, наклон rot°. */
+function dice(x: number, y: number, s: number, rot: number): string {
+  const d = s * 0.25;
+  const dot = (dx: number, dy: number) => `<circle cx="${x + dx}" cy="${y + dy}" r="${s * 0.085}" fill="#1f2933"/>`;
+  return `<g transform="rotate(${rot} ${x} ${y})"><rect x="${x - s / 2}" y="${y - s / 2}" width="${s}" height="${s}" rx="${s * 0.21}" fill="#fff" stroke="#55606e" stroke-width="1.4"/>${dot(-d, -d)}${dot(d, -d)}${dot(0, 0)}${dot(-d, d)}${dot(d, d)}</g>`;
+}
+
+/**
+ * Биом «Случайно» (64×44): земля из пяти полос — цвета лугов, тайги, степи, гор и пустыни, — а на ней игральная
+ * кость, как у «Случайно» в строке «Регион»: выпадет один из пяти.
+ */
+export function biomeRandomSvg(w = 64, h = 44): string {
+  const bands = ['#bcd59a', '#8fb07c', '#e2d79a', '#a39a8f', '#e8cf96']
+    .map((c, i) => `<path d="M${i * 14 - 6} 44L${i * 14 + 4} 28H${i * 14 + 18}L${i * 14 + 8} 44Z" fill="${c}"/>`)
+    .join('');
+  return `<svg class="map-mini" viewBox="0 0 64 44" width="${w}" height="${h}"><clipPath id="bm-random"><rect width="64" height="44" rx="6"/></clipPath><g clip-path="url(#bm-random)"><rect width="64" height="44" fill="#e9f2f6"/><path d="M0 30Q32 25 64 28V44H0Z" fill="#cfe0ae"/>${bands}</g>${dice(32, 18, 22, -8)}</svg>`;
+}
+
+/** Значок «выпадет при этом seed»: маленькая кость в углу карточки биома. */
+export function diceBadgeSvg(size = 16): string {
+  return `<svg class="ng-dice-badge" viewBox="0 0 24 24" width="${size}" height="${size}">${dice(12, 12, 18, -8)}</svg>`;
+}

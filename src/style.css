@@ -6547,9 +6547,26 @@ span.ind-chip {
   text-align: center;
 }
 
-/* Биомы: пять пейзажей в ряд; строкой ниже — «Ресурсы»: сырьё и потребности городов значками. */
+/* Биомы: «Случайно» и пять пейзажей в ряд; строкой ниже — «Ресурсы»: сырьё и потребности городов значками. */
 .cards.ng-biomes {
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
+}
+
+.cards.ng-biomes .card {
+  position: relative;
+}
+
+/* При «Случайно» — биом, который выпадет при этом seed: пунктирная рамка и кость в углу. */
+.cards.ng-biomes .card.rolled {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+.ng-dice-badge {
+  position: absolute;
+  top: 1px;
+  right: 3px;
+  pointer-events: none;
 }
 
 .ng-biome-strip {
