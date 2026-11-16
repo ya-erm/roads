@@ -4,7 +4,7 @@ import { clamp, lerp as lerpNum } from '../core/math';
 import { rightNormal, scale, add, angleDiff, angleOf, closestOnSegment, dist, dot, type Vec } from '../core/vec';
 import { follow, hitchOf, jointOf, steerBase } from '../sim/body';
 import type { Blinker, Vehicle, VehicleSpec } from '../sim/vehicle';
-import { GLane, GLink, GMove, GNode, LaneGraph, LightPhase } from './graph';
+import { GLane, GLink, GMove, GNode, greenOf, LaneGraph, LightPhase } from './graph';
 import { edgesAt } from './geometry';
 import { bodyOnEnds, Corridor, layerOf } from './model';
 import { findLaneRoute } from './routing';
@@ -294,6 +294,11 @@ export class LaneTraffic {
    * стоп-линия своего направления (Barrier.flow, stop 0). Задаёт игра каждый такт, до движения.
    */
   signals = new Map<number, Barrier[]>();
+  /**
+   * Пешеходные переходы (src/game/crosswalks.ts) по полотнам: идут пешеходы — закрытая стоп-линия перед зеброй в своём
+   * направлении (Barrier.flow, stop — до стоп-линии). Задаёт игра каждый такт, до движения.
+   */
+  walks = new Map<number, Barrier[]>();
   /**
    * Стоп-линии перед закрытыми шлагбаумами — на такт (barrierAhead): по связям, по оси полотна. За такт движения
    * шлагбаумы не меняются — их закрывает и открывает ж/д после него (rail.step), а переезды заново ищутся при правке
@@ -1090,7 +1095,18 @@ export class LaneTraffic {
   private anyBarrierClosed(): boolean {
     for (const list of this.barriers.values()) for (const b of list) if (b.closed) return true;
     for (const list of this.signals.values()) for (const b of list) if (b.closed) return true;
+    for (const list of this.walks.values()) for (const b of list) if (b.closed) return true;
     return false;
+  }
+
+  /** На сколько раньше конца полосы въезда её стоп-линия (переход перед перекрёстком); нет перехода — 0. */
+  lineBack(laneId: number): number {
+    return this.graph.stopBack.get(laneId) ?? 0;
+  }
+
+  /** Сколько машине до стоп-линии перед узлом в конце её полосы (не меньше нуля). */
+  private toLine(veh: Vehicle, lane: GLane): number {
+    return Math.max(0, lane.length - this.lineBack(lane.id) - veh.s);
   }
 
   /** До ближайшего закрытого шлагбаума впереди на связи: от оси from (нет — от начала связи); нет — Infinity. */
@@ -1100,7 +1116,7 @@ export class LaneTraffic {
     if (!stops) {
       stops = [];
       const link = this.graph.links.get(linkId);
-      const list = link ? [...(this.barriers.get(link.corridor) ?? []), ...(this.signals.get(link.corridor) ?? [])] : [];
+      const list = link ? [...(this.barriers.get(link.corridor) ?? []), ...(this.signals.get(link.corridor) ?? []), ...(this.walks.get(link.corridor) ?? [])] : [];
       for (const b of list) {
         if (!b.closed || (b.flow !== undefined && b.flow !== link!.flow)) continue;
         const stop = b.s - link!.flow * (b.stop ?? BARRIER_STOP);
@@ -1298,7 +1314,7 @@ export class LaneTraffic {
   private sirenWaits(node: GNode, m: GMove, veh: Vehicle): boolean {
     if (!this.sirenAt || veh.siren) return false;
     const lane = this.currentLane(veh);
-    const ahead = lane ? lane.length - veh.s : 0;
+    const ahead = lane ? this.toLine(veh, lane) : 0;
     if (veh.v > 1 && ahead < (veh.v * veh.v) / (2 * IDM.brake * 0.6) + 1) return false;
     for (const w of node.waiting) {
       if (w === veh || !w.ready || !w.planned || w.waitingAt !== node.id || !this.vehicles.has(w.id) || !(w.siren || this.escorting(w))) continue;
@@ -1315,7 +1331,7 @@ export class LaneTraffic {
   private escorting(veh: Vehicle): boolean {
     if (!this.sirenAt || veh.siren || veh.onMovement) return false;
     const lane = this.currentLane(veh);
-    return !!lane && lane.vehicles[0] === veh && lane.length - veh.s < ASIDE_END && this.sirenBehind(lane.id, veh.s) <= ESCORT;
+    return !!lane && lane.vehicles[0] === veh && this.toLine(veh, lane) < ASIDE_END && this.sirenBehind(lane.id, veh.s) <= ESCORT;
   }
 
   /** Спецмашине можно в узел по m и на красный: никто поперёк не доедет до него раньше чем через SIREN_WINDOW с. */
@@ -1675,13 +1691,15 @@ export class LaneTraffic {
       }
       veh.stuckTimer = 0;
       desired = Math.min(desired, Math.sqrt(m.speed * m.speed + IDM.brake * ahead));
+      // Стоп-линия — у конца полосы, а перед переходом — раньше на зебру (lineBack).
+      const line = Math.max(0, ahead - this.lineBack(cur.id));
       // Проезд просим, только стоя в последней полосе перед узлом и первой в ней (спецмашина, объезжая прижавшихся,
       // ещё за ними); дальше узел — как стоп-линия.
-      if (cur !== lane || idx > 0) return idmAccel(veh.v, desired, ahead + IDM.minGap - 0.5, veh.v, aMax);
-      // Сразу за узлом — красный реверса (участок перестройки у самого перекрёстка, workSignals.ts): ждём перед узлом,
-      // а не на выезде из него, навстречу тем, кому зелёный.
-      if (veh.granted !== m.key && this.barrierAhead(m.outLink, null) < 1) return idmAccel(veh.v, desired, ahead + IDM.minGap - 0.5, veh.v, aMax);
-      if (veh.granted !== m.key && ahead <= this.grantLookahead(veh, m)) this.tryGrant(veh, m);
+      if (cur !== lane || idx > 0) return idmAccel(veh.v, desired, line + IDM.minGap - 0.5, veh.v, aMax);
+      // Сразу за узлом — красный реверса (участок перестройки у самого перекрёстка, workSignals.ts) или пешеходы на
+      // зебре выезда: ждём перед узлом, а не на выезде из него, навстречу тем, кому зелёный.
+      if (veh.granted !== m.key && this.barrierAhead(m.outLink, null) < 1) return idmAccel(veh.v, desired, line + IDM.minGap - 0.5, veh.v, aMax);
+      if (veh.granted !== m.key && line <= this.grantLookahead(veh, m)) this.tryGrant(veh, m);
       let gap: number;
       let leaderV = 0;
       if (veh.granted === m.key) {
@@ -1699,7 +1717,7 @@ export class LaneTraffic {
           }
         }
       } else {
-        gap = ahead + IDM.minGap - 0.5;
+        gap = line + IDM.minGap - 0.5;
       }
       return idmAccel(veh.v, desired, gap, veh.v - leaderV, aMax);
     }
@@ -1988,7 +2006,8 @@ export class LaneTraffic {
             break;
           }
         }
-        L.timer = L.phases[L.phase].green;
+        // Не короче перехода пешеходов этой фазы (greenOf; в настройке — как задано).
+        L.timer = greenOf(L.phases[L.phase]);
       } else if (adaptive && !L.phases.some((p, i) => i !== L.phase && this.phaseDemand(node, p, L.phases[L.phase].moves) > 0)) {
         L.timer = 2;
       } else {
@@ -2007,7 +2026,7 @@ export class LaneTraffic {
     for (const r of [...node.reserved]) {
       if (r.onMovement || !r.granted) continue;
       const lane = this.currentLane(r);
-      const ahead = lane ? lane.length - r.s : 0;
+      const ahead = lane ? this.toLine(r, lane) : 0;
       if (r.v < 1 || ahead > (r.v * r.v) / IDM.brake + 1) this.revokeGrant(r);
     }
   }
@@ -2027,10 +2046,12 @@ export class LaneTraffic {
     // стоят (иначе при плотном встречном потоке не повернуть никогда), — если успевают пересечь её до красного.
     const atLine = () => {
       const lane = this.currentLane(veh);
-      const ahead = lane ? lane.length - veh.s : Infinity;
-      // Когда доедет до линии — с запасом: разгоняется вполсилы (перед поворотом не разгоняются вовсю).
+      const ahead = lane ? this.toLine(veh, lane) : Infinity;
+      // Когда доедет до перекрёстка (перед переходом — и через зебру за стоп-линией) — с запасом: разгоняется вполсилы
+      // (перед поворотом не разгоняются вовсю).
+      const toNode = lane ? Math.max(0, lane.length - veh.s) : Infinity;
       const a = veh.accel / 2;
-      const t = (Math.sqrt(veh.v * veh.v + 2 * a * ahead) - veh.v) / a;
+      const t = (Math.sqrt(veh.v * veh.v + 2 * a * toNode) - veh.v) / a;
       return ahead < LAST_CALL_REACH && t < L!.timer - 0.2;
     };
     const lastCall = !!L && L.clearing && !!phase!.yields.get(m.key)?.size && atLine();
@@ -2123,11 +2144,11 @@ export class LaneTraffic {
     return true;
   }
 
-  /** Сколько секунд машине до конца её полосы (до узла) при нынешней скорости. */
+  /** Сколько секунд машине до стоп-линии в конце её полосы (до узла или перехода перед ним) при нынешней скорости. */
   private etaToNode(v: Vehicle): number {
     const lane = this.currentLane(v);
     if (!lane) return 0;
-    return (lane.length - v.s) / Math.max(v.v, 1);
+    return this.toLine(v, lane) / Math.max(v.v, 1);
   }
 
   /**

@@ -133,7 +133,8 @@ export function isFragment(x: unknown): x is Fragment {
       optional(n.adaptive, (v) => typeof v === 'boolean') &&
       optional(n.roundabout, (v) => v === null || isNum(v)) &&
       optional(n.lanes, isStrs) &&
-      optional(n.corners, (v) => isObj(v) && Object.values(v).every((r) => isNum(r) && r >= 0));
+      optional(n.corners, (v) => isObj(v) && Object.values(v).every((r) => isNum(r) && r >= 0)) &&
+      optional(n.walks, (v) => isObj(v) && Object.values(v).every((w) => isObj(w) && typeof w.on === 'boolean'));
     if (!settings) return false;
     nodes.add(n.id);
   }

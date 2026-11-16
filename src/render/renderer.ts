@@ -1,5 +1,6 @@
 import { GRADE, STATION } from '../config';
 import { Cubic, CurveLUT } from '../core/bezier';
+import { hash } from '../core/math';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import { stationNormal } from '../game/railStationEdit';
@@ -207,6 +208,11 @@ export interface ToolOverlay {
   /** Настройка полос выбранного перекрёстка: метки концов полос, выбранный въезд, метка под курсором. */
   laneEdit: { node: number; ends: LaneEnd[]; from: { seg: number; i: number } | null; hover: LaneEnd | null } | null;
   /**
+   * Пешеходные переходы выбранного перекрёстка в «Перекрёстке»: значок-переключатель у правого бордюра каждого подъезда,
+   * где переход возможен, hover — подъезд под курсором.
+   */
+  walkEdit?: { node: number; toggles: WalkToggle[]; hover: number | null } | null;
+  /**
    * Правка фазы i светофора на карте: проезды перекрёстка цветом по фазе (states — src/lanes/lights.ts, phaseTurnStates),
    * hover — проезд под курсором, flash — отказ дать зелёный (мигают красным). Светофоры перекрёстка — в этой фазе.
    */
@@ -222,6 +228,22 @@ export interface ToolOverlay {
 
 /** Радиус метки полосы: по ширине полосы, но не меньше нескольких пикселей — чтобы попасть и издалека. */
 export const laneMarkRadius = (zoom: number) => Math.max(LANE_W * 0.36, 4 / zoom);
+
+/** Значок-переключатель пешеходного перехода в «Перекрёстке». */
+export interface WalkToggle {
+  corridor: number;
+  pos: Vec;
+  /** Вдоль перехода (поперёк дороги) — так лежат полоски зебры на значке. */
+  dir: Vec;
+  on: boolean;
+  own: boolean;
+  cost: number;
+  /** Перехода нет — где была бы зебра: полоски контуром. */
+  stripes?: Vec[][];
+}
+
+/** Радиус значка перехода (он на самой зебре): 2,8 м — в её ширину, но не меньше 9 пикселей. */
+export const walkBadgeRadius = (zoom: number) => Math.max(2.8, 9 / zoom);
 
 /** Цвета карты; трава, деревья и фон вне карты — по биому (BIOMES[…].palette). */
 const C = {
@@ -701,6 +723,8 @@ export class Renderer {
     this.drawCrossings(game, view);
     this.drawSignals(game, view);
     if (o.heatmap) this.drawHeatmap(game, 0);
+    // Пешеходы на переходах и пешеходные светофоры — вблизи, под машинами (машина, что их пропускает, — перед зеброй).
+    this.drawCrosswalkLife(game, view);
     this.drawVehicles(vehicles.filter((v) => groundBand(v) === 0 && !atPortal.has(v)));
     for (const [v, p] of atPortal) this.drawClipped(portalHalf(p, -1), () => this.drawVehicles([v]));
     this.drawPortals(portals);
@@ -1945,7 +1969,8 @@ export class Renderer {
         const first = link.lanes[0];
         const last = link.lanes[link.lanes.length - 1];
         if (!first || !last) continue;
-        const u = Math.max(0, first.length - STOP_LINE_BACK);
+        // Перед пешеходным переходом — дальше от перекрёстка, на зебру (LaneGraph.stopBack).
+        const u = Math.max(0, first.length - STOP_LINE_BACK - (g.stopBack.get(first.id) ?? 0));
         const l = g.lanePose(first, u);
         const r = g.lanePose(last, u);
         const d = deckLift(net, c, g.axisS(first, u));
@@ -3913,6 +3938,7 @@ export class Renderer {
         game.junctionMain(sel.id, hover ? hover.mainPair : undefined),
         o.phaseEdit?.node === sel.id ? o.phaseEdit : null,
       );
+      if (o.walkEdit?.node === sel.id) this.drawWalkToggles(o.walkEdit);
     }
     const sim = sel?.type === 'vehicle' ? game.traffic.vehicles.get(sel.simId) : undefined;
     if (sim) this.drawVehicleTrip(game, sim.id);
@@ -4437,6 +4463,128 @@ export class Renderer {
         ctx.fillStyle = '#ffffff';
         ctx.fill();
       }
+    }
+  }
+
+  /**
+   * Значки пешеходных переходов в «Перекрёстке»: кружок с человечком на зебре. Переход есть — белый человечек на синем,
+   * нет — серый, перечёркнут красным; «само» (по городу, игрок не трогал) — обводка пунктиром; под курсором — крупнее.
+   */
+  private drawWalkToggles(edit: NonNullable<ToolOverlay['walkEdit']>): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    // Стёртые переходы — контуром полосок зебры (куда ляжет, если нарисовать).
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+    ctx.lineWidth = 1 / z;
+    ctx.setLineDash([2 / z, 2 / z]);
+    ctx.beginPath();
+    for (const t of edit.toggles) {
+      for (const q of t.stripes ?? []) {
+        ctx.moveTo(q[0].x, q[0].y);
+        for (let i = 1; i < q.length; i++) ctx.lineTo(q[i].x, q[i].y);
+        ctx.closePath();
+      }
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (const t of edit.toggles) {
+      const r = walkBadgeRadius(z) * (t.corridor === edit.hover ? 1.2 : 1);
+      const { x, y } = t.pos;
+      ctx.fillStyle = t.on ? '#2f80ed' : '#eceef1';
+      ctx.strokeStyle = t.on ? '#ffffff' : '#7b838d';
+      ctx.lineWidth = 1.6 / z;
+      ctx.setLineDash(t.own ? [] : [2.2 / z, 1.6 / z]);
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Зебра внизу значка: три полоски вдоль перехода.
+      const u = t.dir;
+      const w = { x: -u.y, y: u.x };
+      const fg = t.on ? '#ffffff' : '#7b838d';
+      ctx.fillStyle = fg;
+      for (let i = -1; i <= 1; i++) {
+        const cx = x + u.x * i * r * 0.42 + w.x * r * 0.48;
+        const cy = y + u.y * i * r * 0.42 + w.y * r * 0.48;
+        ctx.beginPath();
+        ctx.moveTo(cx - u.x * r * 0.13 - w.x * r * 0.14, cy - u.y * r * 0.13 - w.y * r * 0.14);
+        ctx.lineTo(cx + u.x * r * 0.13 - w.x * r * 0.14, cy + u.y * r * 0.13 - w.y * r * 0.14);
+        ctx.lineTo(cx + u.x * r * 0.13 + w.x * r * 0.14, cy + u.y * r * 0.13 + w.y * r * 0.14);
+        ctx.lineTo(cx - u.x * r * 0.13 + w.x * r * 0.14, cy - u.y * r * 0.13 + w.y * r * 0.14);
+        ctx.fill();
+      }
+      // Человечек — прямо на экране: голова, туловище, шаг.
+      const k = r * 0.11;
+      ctx.beginPath();
+      ctx.arc(x + k * 0.6, y - k * 4.6, k * 1.25, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = fg;
+      ctx.lineWidth = k * 1.3;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x + k * 0.3, y - k * 3);
+      ctx.lineTo(x - k * 0.3, y + k * 0.6);
+      ctx.moveTo(x - k * 0.3, y + k * 0.6);
+      ctx.lineTo(x - k * 2, y + k * 2.8);
+      ctx.moveTo(x - k * 0.3, y + k * 0.6);
+      ctx.lineTo(x + k * 1.6, y + k * 2.6);
+      ctx.moveTo(x - k * 2.2, y - k * 0.6);
+      ctx.lineTo(x + k * 0.2, y - k * 2.4);
+      ctx.lineTo(x + k * 2.2, y - k * 0.9);
+      ctx.stroke();
+      if (!t.on) {
+        ctx.strokeStyle = '#e8483f';
+        ctx.lineWidth = 2 / z;
+        ctx.beginPath();
+        ctx.moveTo(x - r * 0.68, y + r * 0.68);
+        ctx.lineTo(x + r * 0.68, y - r * 0.68);
+        ctx.stroke();
+      }
+      ctx.lineCap = 'butt';
+    }
+  }
+
+  /**
+   * Пешеходы на переходах — точками с зума 1,2 (идущие — по зебре, ждущие — у бордюра), пешеходные светофоры у концов
+   * зебры на регулируемом перекрёстке — с 1,5: зелёный, когда въезду с подъезда красный.
+   */
+  private drawCrosswalkLife(game: Game, view: ReturnType<Renderer['view']>): void {
+    const z = this.camera.zoom;
+    if (z < 1.2) return;
+    const ctx = this.ctx;
+    const cw = game.crosswalks;
+    if (!cw.list.length) return;
+    const seen = (p: Vec) => p.x > view.x0 - 10 && p.x < view.x1 + 10 && p.y > view.y0 - 10 && p.y < view.y1 + 10;
+    if (z >= 1.5) {
+      for (const c of cw.list) {
+        if (c.signal === null || !seen(c.walk.geo.ends[0])) continue;
+        for (const p of c.walk.geo.ends) {
+          ctx.fillStyle = '#2a2e33';
+          ctx.fillRect(p.x - 1.1, p.y - 1.1, 2.2, 2.2);
+          ctx.fillStyle = c.signal ? '#3ddc84' : '#ff4a3d';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 0.75, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+    const COATS = ['#d9534f', '#3a6fb0', '#e8b83a', '#4c9a5b', '#7d5ba6', '#e07b39', '#30343a', '#e6e2d8'];
+    ctx.strokeStyle = 'rgba(30, 30, 30, 0.6)';
+    ctx.lineWidth = 0.2;
+    for (const p of cw.pedestrians(game.time)) {
+      if (!seen(p.pos)) continue;
+      // Сверху: плечи цветом куртки, вблизи — голова.
+      ctx.fillStyle = COATS[Math.floor(hash(p.seed, 7) * COATS.length)];
+      ctx.beginPath();
+      ctx.arc(p.pos.x, p.pos.y, 1.1, 0, Math.PI * 2);
+      ctx.fill();
+      if (z < 2) continue;
+      ctx.stroke();
+      ctx.fillStyle = hash(p.seed, 9) < 0.3 ? '#4a3626' : '#e9c3a0';
+      ctx.beginPath();
+      ctx.arc(p.pos.x, p.pos.y, 0.5, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 

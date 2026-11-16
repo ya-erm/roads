@@ -166,6 +166,7 @@ import { workTrainCardHtml } from './workTrainCard';
 import { carTripHtml } from './carTrip';
 import { SERVICES } from '../game/services';
 import { money, planPrice, projectMoneyWarning } from '../input/labels';
+import { WALK_BAN_TEXT } from '../lanes/crosswalk';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, nextScenarioSettings, rulesHtml, withSeed } from './newGame';
 
@@ -1865,6 +1866,16 @@ export class Hud {
         // Фаза — править на перекрёстке: кликами по проездам на карте (controller.editPhase); та же ещё раз — готово.
         c.editPhase(Number(d.id), Number(d.i));
         break;
+      case 'jn-walk':
+      case 'jn-walks-all': {
+        // Пешеходные переходы — тоже правка перекрёстка: отменяется Ctrl+Z.
+        const id = Number(d.id);
+        g.checkpoint('пешеходный переход');
+        const problem = d.action === 'jn-walk' ? g.setCrosswalk(id, Number(d.seg)) : g.setCrosswalks(id, d.v === '1');
+        g.commit();
+        if (problem) c.showError(problem);
+        break;
+      }
       case 'jn-lights':
       case 'jn-green':
       case 'jn-adaptive':
@@ -3689,7 +3700,36 @@ export class Hud {
       <p class="muted">${info.approaches.map((a) => `${a.compass.arrow} ${a.compass.name}`).join(' · ')}</p>
       <div class="actions">${toggle}</div>
       ${control}
-      ${lanes}</section>`;
+      ${lanes}
+      ${this.walksHtml(id)}</section>`;
+  }
+
+  /**
+   * Пешеходные переходы перекрёстка (docs/CROSSWALKS.md): значок на каждый подъезд — стрелка стороны света и человечек;
+   * есть переход — подсвечен, нет — бледный, нельзя — неактивен (почему — в подсказке); «все» — включить или стереть все.
+   */
+  private walksHtml(id: number): string {
+    const g = this.game();
+    const list = g.crosswalkInfo(id);
+    if (!list.some((x) => !x.arm.ban)) return '';
+    const info = g.junctionInfo(id);
+    const chips = list
+      .map((x) => {
+        const c = info?.label(x.arm.corridor.id) ?? { arrow: '•', name: '?' };
+        const tip = x.arm.ban
+          ? `${c.name}: перехода нет — ${WALK_BAN_TEXT[x.arm.ban]}`
+          : `${c.name}: ${x.arm.on ? 'переход есть · стереть' : `перехода нет · нарисовать ${money(x.cost)}`}${x.arm.own ? '' : ' · сейчас — как решил город'}`;
+        return `<button class="opt ${x.arm.on ? 'active' : ''}" data-action="jn-walk" data-id="${id}" data-seg="${x.arm.corridor.id}" ${x.arm.ban ? 'disabled' : ''} data-tip="${esc(tip)}">${c.arrow}<span class="walk-ic ${x.arm.on ? '' : 'off'}">🚶</span></button>`;
+      })
+      .join('');
+    const open = list.filter((x) => !x.arm.ban);
+    const allOn = open.every((x) => x.arm.on);
+    const cost = open.filter((x) => !x.arm.on).reduce((s, x) => s + x.cost, 0);
+    const all = allOn
+      ? `<button class="small" data-action="jn-walks-all" data-id="${id}" data-v="0" data-tip="Стереть все переходы: машины быстрее, жителям — дальше до остановок" data-tip-end>🚶 все ✕</button>`
+      : `<button class="small" data-action="jn-walks-all" data-id="${id}" data-v="1" ${cost > g.budget ? 'disabled' : ''} data-tip="Переходы на всех подъездах · ${money(cost)}" data-tip-end>🚶 все ✓</button>`;
+    return `<div class="rule-row"><span class="lbl2" data-tip="Пешеходные переходы на подъездах: клик — нарисовать или стереть (и на карте — значки у бордюров)">🚶 Переходы</span>
+      <div class="opts">${chips}</div>${all}</div>`;
   }
 
   /** Карточка машины или поезда компании: что везёт (значком и словом), куда едет, прибыль. */

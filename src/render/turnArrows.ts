@@ -66,8 +66,8 @@ function placeArrow(g: LaneGraph, lane: GLane): { lane: GLane; u: number } | nul
   const tail = -TAIL * K + 0.5;
   const nose = NOSE * K + 2;
   let cur = lane;
-  /** От конца cur до стоп-линии. */
-  let ahead = 0;
+  /** От конца cur до стоп-линии (перед переходом она раньше конца полосы — stopBack). */
+  let ahead = -(g.stopBack.get(lane.id) ?? 0);
   for (let k = 0; k < 8 && ahead + cur.length < BACK; k++) {
     const prev = before(g, cur);
     if (!prev) break;

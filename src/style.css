@@ -2041,6 +2041,26 @@ button.icon.toggle-spacing {
   background: #e7f0fd;
 }
 
+/* Переход на подъезде в карточке перекрёстка: нет перехода — человечек бледный и перечёркнут. */
+.walk-ic {
+  position: relative;
+  display: inline-block;
+}
+
+.walk-ic.off {
+  opacity: 0.4;
+}
+
+.walk-ic.off::after {
+  content: '';
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  top: 50%;
+  border-top: 1.5px solid #e8483f;
+  transform: rotate(-35deg);
+}
+
 /* Путь ж/д станции для остановки: схема путей с номером под ней. */
 .opt.plat {
   display: inline-flex;

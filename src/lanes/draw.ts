@@ -8,6 +8,7 @@ import { PARAPET, parapetLine, parapetWidth } from './parapet';
 import { onPrefs, prefOn } from '../ui/prefs';
 import { type JunctionMarks, junctionMarks } from './junctionMarks';
 import { autoSolids, solidLength } from './solid';
+import { walkGeo, walksOn } from './crosswalk';
 import { junctionRuts } from './dirtRuts';
 
 export { layerOf };
@@ -143,6 +144,8 @@ interface NodeGeo {
   caps: CapGeo[];
   /** Узел моста: куда от поднятой площадки её тень (bridgeLook — как у концов его полотен). */
   shade: Vec;
+  /** Пешеходные переходы на подъездах (src/lanes/crosswalk.ts): асфальт до стоп-линии и полосы зебры. */
+  walks?: { cover: Vec[]; stripes: Vec[][] }[];
 }
 
 /** Всё у узла моста — выше на экране на d (направление оси островка не меняется). */
@@ -398,8 +401,35 @@ export class LaneRenderer {
       for (const g of gores) if (!g.dirt) this.drawGorePaint(ctx, g);
       for (const n of nodes) if (n.marks) this.drawJunctionMarks(ctx, n.marks);
       this.drawArrows(ctx, corridors);
+      this.drawWalks(ctx, nodes, zoom);
     }
     if (debug) this.drawDebug(ctx, net, zoom);
+  }
+
+  /**
+   * Пешеходные переходы: разметка полос от обреза до стоп-линии стёрта (асфальт поверх), полосы зебры — белым с зума
+   * 0,5 (издали — только сдвинутая стоп-линия); вблизи (с 2) — тонкая кромка полос.
+   */
+  private drawWalks(ctx: CanvasRenderingContext2D, nodes: NodeGeo[], zoom: number): void {
+    const walks = nodes.flatMap((n) => n.walks ?? []);
+    if (!walks.length) return;
+    ctx.fillStyle = C.road;
+    for (const w of walks) this.fill(ctx, w.cover);
+    if (zoom < 0.5) return;
+    ctx.fillStyle = 'rgba(244, 243, 236, 0.92)';
+    ctx.beginPath();
+    for (const w of walks) {
+      for (const q of w.stripes) {
+        ctx.moveTo(q[0].x, q[0].y);
+        for (let i = 1; i < q.length; i++) ctx.lineTo(q[i].x, q[i].y);
+        ctx.closePath();
+      }
+    }
+    ctx.fill();
+    if (zoom < 2) return;
+    ctx.strokeStyle = 'rgba(200, 198, 188, 0.7)';
+    ctx.lineWidth = 0.25;
+    ctx.stroke();
   }
 
   /**
@@ -487,7 +517,9 @@ export class LaneRenderer {
       const corners = n.corners ? Object.entries(n.corners).join(';') : '';
       // Запреты и связи полос меняют траектории — а по ним разметка площадки.
       const turns = `${n.bans?.join(';') ?? ''}|${n.lanes?.join(';') ?? ''}`;
-      sigs.set(n.id, `${n.kind}:${n.level}:${n.deck ?? ''}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}:${corners}:${turns}`);
+      // Пешеходные переходы — зебры на подъездах.
+      const walks = n.walks ? Object.entries(n.walks).map(([k, w]) => `${k}${w.on ? '+' : '-'}`).join() : '';
+      sigs.set(n.id, `${n.kind}:${n.level}:${n.deck ?? ''}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}:${corners}:${turns}:${walks}`);
     }
     const corridors: Cached<CorridorGeo>[] = [];
     for (const c of inScope ?? net.corridors.values()) {
@@ -527,13 +559,16 @@ export class LaneRenderer {
             const m = junctionMarks(net, n, geo.plate.poly, this.cuts);
             geo.marks = m && markGeo(m);
           }
+          // Зебры — только на асфальте (на грунтовке перехода не бывает: walkArms).
+          const walks = geo.plate ? walksOn(net, n, this.cuts).map((arm) => walkGeo(arm)) : [];
+          if (walks.length) geo.walks = walks.map((w) => ({ cover: w.cover, stripes: w.stripes }));
         } else if (net.isDeadEnd(n)) geo.caps = this.inMap && !this.inMap(n.pos) ? [] : net.ends(n).map((e) => this.capGeo(e));
         else geo.gores = this.seamGores(net, n);
         // Узел моста — поднят на свою высоту, как концы его полотен; тень — на земле под ним.
         const look = bridgeLook(n.level > 0 ? nodeDeck(n) : 0);
         if (look.lift.y !== 0) geo = liftNode(geo, look.lift);
         geo.shade = sub(look.shadow, look.lift);
-        const bbox = bboxOf([geo.plate?.poly ?? [], ...geo.caps.map((c) => c.poly), ...geo.gores.map((g) => g.asphalt), [n.pos]]);
+        const bbox = bboxOf([geo.plate?.poly ?? [], ...geo.caps.map((c) => c.poly), ...geo.gores.map((g) => g.asphalt), ...(geo.walks ?? []).map((w) => w.cover), [n.pos]]);
         const layer = layerOf(n.level, n.level);
         const shape = shapeOf(
           [
@@ -543,6 +578,7 @@ export class LaneRenderer {
             ...geo.gores.flatMap((g) => [g.asphalt, g.nose, g.paint, ...g.hatch, [g.start, g.axis]]),
             ...(geo.marks ? [...geo.marks.islands, ...geo.marks.hatch, ...geo.marks.dashes] : []),
             ...(geo.ruts ?? []),
+            ...(geo.walks ?? []).flatMap((w) => [w.cover, ...w.stripes]),
             [geo.shade, n.pos],
           ],
           // Запреты и связи полос — стрелки и стоп-линии перекрёстка.

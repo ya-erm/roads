@@ -83,6 +83,8 @@ import { transferable, transferNeighbors } from './transfer';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
 import { WorkSignals } from './workSignals';
+import { Crosswalks, WALK_HOUSES, WALK_LOSS } from './crosswalks';
+import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises } from './enterprises';
 import { isActive } from '../world/enterprise';
 import { carryBuild, carryRailBuild, paidFor, spansOf } from './constructionWork';
@@ -811,6 +813,8 @@ export class Game implements BuildContext {
   readonly construction: Construction;
   /** Временные светофоры реверса на перестройке «с проездом» узких дорог (src/game/workSignals.ts). */
   readonly workSignals = new WorkSignals();
+  /** Пешеходы на переходах перекрёстков (src/game/crosswalks.ts): жители вокруг — по охвату, как у станций. */
+  readonly crosswalks = new Crosswalks((p, r) => this.peopleNear(p, r).pop);
   /** Предприятия строит игрок (режим «Строит игрок», src/game/enterprises.ts): месторождения, постройка, рабочие, вред. */
   readonly enterprises: Enterprises;
 
@@ -863,6 +867,8 @@ export class Game implements BuildContext {
     this.industries = world.industries;
     this.enterprises.load(world.deposits);
     this.net.rebuild();
+    // Улицы городов — с переходами среди домов.
+    this.syncCrosswalks();
     this.roads.changed();
     const s = this.settings;
     this.journal.add('game', {
@@ -1054,6 +1060,8 @@ export class Game implements BuildContext {
       // Радиус старых сохранений — по самому дальнему дому; теперь — по плотной застройке.
       measureTown(t);
     }
+    // Старые сохранения без переходов (и новые подъезды) — «само» по домам вокруг.
+    if (this.syncCrosswalks()) this.roads.changed();
     this.industries = save.industries.map(({ kind, ...rest }) => ({ ...rest, type: 'industry', info: INDUSTRY_TYPES[kind] }));
     for (const ind of this.industries) this.index.add(ind);
     this.enterprises.load(save.deposits);
@@ -2590,6 +2598,8 @@ export class Game implements BuildContext {
     // Сеть дорог заменили правкой (перенос, изгиб): техника на подвинутых строящихся полотнах — вместе с ними, сразу (и на паузе).
     this.construction.syncNet();
     this.pruneRoundabouts();
+    // Новые подъезды перекрёстков — переходы «сами», до сборки графа (он отодвигает стоп-линии перед ними).
+    this.syncCrosswalks();
     this.roads.changed();
     // Узел ворот базы правка могла убрать (перенос дороги, слияние стыка, снос) — ворота заново.
     this.healBaseGates();
@@ -3191,13 +3201,17 @@ export class Game implements BuildContext {
       const exits = outs.filter((o) => o.corridor !== l.corridor).map((o) => o.corridor);
       l.lanes.forEach((lane, idx) => {
         const i = l.lanes.length - 1 - idx;
-        const pose = g.lanePose(lane, Math.max(0, lane.length - 6));
+        // Перед переходом — у отодвинутой стоп-линии, не на зебре.
+        const pose = g.lanePose(lane, Math.max(0, lane.length - 6 - (g.stopBack.get(lane.id) ?? 0)));
         res.push({ kind: 'in', seg: l.corridor, i, lane: lane.id, pos: pose.pos, dir: pose.dir, custom: custom.has(`${l.corridor}.${i}`), exits });
       });
     }
+    const walked = new Set((g.crosswalks.get(nodeId) ?? []).map((w) => w.outLink));
     for (const l of outs) {
+      // На выезде с переходом — за зеброй.
+      const u = walked.has(l.id) ? 7.5 + XWALK.gap + XWALK.depth : 6;
       l.lanes.forEach((lane, idx) => {
-        const pose = g.lanePose(lane, Math.min(lane.length, 6));
+        const pose = g.lanePose(lane, Math.min(lane.length, u));
         res.push({ kind: 'out', seg: l.corridor, i: l.lanes.length - 1 - idx, lane: lane.id, pos: pose.pos, dir: pose.dir, custom: false, exits: [] });
       });
     }
@@ -3245,6 +3259,103 @@ export class Game implements BuildContext {
     this.roads.net.version++;
     this.networkChanged();
     return null;
+  }
+
+  // ---------- Пешеходные переходы (docs/CROSSWALKS.md) ----------
+
+  /** Переход «сам» по городу: у концов зебры (на тротуарах) ближе WALK_HOUSES стоит дом города. */
+  walkUrban(arm: WalkArm): boolean {
+    const geo = walkGeo(arm);
+    for (const p of geo.ends) {
+      for (const s of this.index.near(p, WALK_HOUSES + 20)) {
+        if (s.type === 'building' && dist(s.fp.center, p) < WALK_HOUSES + Math.max(s.fp.w, s.fp.h) / 2) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Переходы «сами» у перекрёстков сети дорог: у подъездов без настройки (новых, из старого сохранения); all — и у
+   * прежних «само» (город вырос). Выбор игрока не трогает. true — что-то поменялось (версия сети выросла).
+   */
+  syncCrosswalks(all = false): boolean {
+    const net = this.roads.net;
+    let changed = false;
+    for (const n of net.nodes.values()) {
+      if (n.kind !== 'junction' && !n.walks) continue;
+      // Все подъезды уже решены — смотреть нечего (кроме месячного пересчёта).
+      if (!all && n.walks && n.corridors.every((id) => String(id) in n.walks!) && Object.keys(n.walks).length === n.corridors.length) continue;
+      if (syncWalks(net, n, (arm) => this.walkUrban(arm), all)) changed = true;
+    }
+    if (changed) net.version++;
+    return changed;
+  }
+
+  /** Подъезды перекрёстка с переходами: можно ли, есть ли, кто решил, геометрия, «само» и цена разметки. */
+  crosswalkInfo(nodeId: number): { arm: WalkArm; geo: WalkGeo; auto: boolean; cost: number }[] {
+    const n = this.roads.net.nodes.get(nodeId);
+    if (!n || n.kind !== 'junction') return [];
+    return walkArms(this.roads.net, n).map((arm) => {
+      const geo = walkGeo(arm);
+      return { arm, geo, auto: !arm.ban && this.walkUrban(arm), cost: walkCost(geo) };
+    });
+  }
+
+  /**
+   * Переход на подъезде corridor перекрёстка nodeId — включить или выключить (on не задан — наоборот). Разметка — за
+   * деньги, стереть — бесплатно. Ошибка — текстом, null — получилось. Снимок для Ctrl+Z делает вызывающий.
+   */
+  setCrosswalk(nodeId: number, corridor: number, on?: boolean): string | null {
+    const info = this.crosswalkInfo(nodeId).find((x) => x.arm.corridor.id === corridor);
+    if (!info) return 'Нет такого подъезда';
+    if (info.arm.ban) return `Переход нельзя: ${WALK_BAN_TEXT[info.arm.ban]}`;
+    const want = on ?? !info.arm.on;
+    if (want === info.arm.on && info.arm.own) return null;
+    if (want && !info.arm.on && info.cost > this.budget) return 'Не хватает денег';
+    const n = this.roads.net.node(nodeId);
+    setWalk(n, corridor, want);
+    if (want && !info.arm.on) this.spend(info.cost);
+    this.roads.net.version++;
+    this.networkChanged();
+    this.walkCatchment(n.pos);
+    return null;
+  }
+
+  /** Все переходы перекрёстка — включить или выключить (где можно). Сколько стоит включить — crosswalkInfo. */
+  setCrosswalks(nodeId: number, on: boolean): string | null {
+    const arms = this.crosswalkInfo(nodeId).filter((x) => !x.arm.ban && (x.arm.on !== on || !x.arm.own));
+    if (!arms.length) return null;
+    const cost = on ? arms.filter((x) => !x.arm.on).reduce((s, x) => s + x.cost, 0) : 0;
+    if (cost > this.budget) return 'Не хватает денег';
+    const n = this.roads.net.node(nodeId);
+    for (const x of arms) setWalk(n, x.arm.corridor.id, on);
+    if (cost) this.spend(cost);
+    this.roads.net.version++;
+    this.networkChanged();
+    this.walkCatchment(n.pos);
+    return null;
+  }
+
+  /**
+   * Сколько подъездов у точки at в радиусе R, где город хотел бы переход («само» — вкл), а игрок его стёр: жители по ту
+   * сторону улицы к остановке не идут (computeCatchment).
+   */
+  missingCrosswalks(at: Vec, R: number): number {
+    let count = 0;
+    for (const n of this.roads.net.nodesNear(at, R)) {
+      if (n.kind !== 'junction' || !n.walks) continue;
+      for (const [k, w] of Object.entries(n.walks)) {
+        if (w.on || !w.own) continue;
+        const arm = walkArms(this.roads.net, n).find((a) => String(a.corridor.id) === k);
+        if (arm && !arm.ban && this.walkUrban(arm)) count++;
+      }
+    }
+    return count;
+  }
+
+  /** Переход поменялся — охват пассажирских станций рядом заново. */
+  private walkCatchment(at: Vec): void {
+    for (const st of this.stations.values()) if (st.serves.pax && dist(st.fp.center, at) < this.catchmentRadius(st) + 10) this.computeCatchment(st);
   }
 
   /** Возвращает всем полосам перекрёстка автоматические связи. */
@@ -3908,6 +4019,8 @@ export class Game implements BuildContext {
     this.time += dt;
     // Светофоры реверса на перестройке «с проездом» — до движения: красный — стоп-линия своего направления.
     if (this.construction.projects.size || this.workSignals.list.size) this.workSignals.step(dt, this.roads.net, this.roads.graph, this.traffic);
+    // Пешеходы на переходах — тоже до движения: идут — зебра закрыта.
+    if (this.roads.graph.crosswalks.size || this.crosswalks.list.length) this.crosswalks.step(dt, this.time, this.roads.graph, this.traffic);
     this.traffic.step(dt);
     this.gatherCrews();
     this.rail.step(dt);
@@ -6719,6 +6832,9 @@ export class Game implements BuildContext {
     }
     // Город мог слить или убрать узел у ворот базы.
     this.healBaseGates();
+    // Город вырос: переходы «сами» — по новым домам, пешеходов — по новым жителям.
+    if (this.syncCrosswalks(true)) this.roads.changed();
+    this.crosswalks.refreshPeople();
     for (const st of this.stations.values()) this.computeCatchment(st);
 
     this.history.push({ label: this.dateLabel, income: this.incomeMonth, expenses: this.expensesMonth, money: this.money, ledger: { ...this.ledger } });
@@ -8894,8 +9010,10 @@ export class Game implements BuildContext {
     st.industryIds = this.industriesNear(st.fp.center, R).map((i) => i.id);
     const { towns, pop } = this.peopleNear(st.fp.center, R);
     st.townIds = [...towns];
-    // Пассажирская станция собирает жителей, грузовая принимает грузы.
-    st.catchPop = st.serves.pax ? pop : 0;
+    // Пассажирская станция собирает жителей, грузовая принимает грузы. Стёртые переходы, где город хотел бы их, —
+    // −5% жителей за каждый, не больше −20%: с той стороны улицы к остановке не идут (docs/CROSSWALKS.md).
+    const missing = st.serves.pax && pop > 0 ? this.missingCrosswalks(st.fp.center, R) : 0;
+    st.catchPop = st.serves.pax ? Math.round(pop * (1 - Math.min(WALK_LOSS.max, WALK_LOSS.each * missing))) : 0;
     st.accepts = new Set();
     if (!st.serves.cargo) return;
     for (const i of this.industries) if (st.industryIds.includes(i.id)) for (const c of i.info.accepts) st.accepts.add(c);

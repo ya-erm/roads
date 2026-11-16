@@ -16,7 +16,7 @@ export interface JunctionPreview {
 }
 
 /** Настройки перекрёстка, от которых зависят его обрезы и манёвры (при правке объекты заменяются целиком). */
-const SETTINGS = ['corners', 'bans', 'lanes', 'mainPair', 'control', 'roundabout'] as const;
+const SETTINGS = ['corners', 'bans', 'lanes', 'mainPair', 'control', 'roundabout', 'walks'] as const;
 
 /**
  * Перекрёстки сети next (копии before с правкой), у которых поменялись подъезды: узел новый или стал перекрёстком,

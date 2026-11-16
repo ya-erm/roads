@@ -2,6 +2,7 @@ import { Cubic, CurveLUT } from '../core/bezier';
 import { add, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { capLimit, isDivided, LANE_W, MEDIAN, RoadClass, RoadSpec } from '../world/roadTypes';
 import type { PhaseSpec } from './lights';
+import type { WalkSetting } from './crosswalk';
 
 /** Кривая — прямой отрезок: управляющие точки на хорде, между концами. */
 function isStraight(cv: Cubic): boolean {
@@ -166,6 +167,12 @@ export interface LaneNode {
    */
   corners?: Record<string, number>;
   /**
+   * Пешеходные переходы на подъездах (src/lanes/crosswalk.ts): полотно → есть ли переход и задал ли его игрок; без own —
+   * «само», по городу (src/game/crosswalks.ts). Нет записи — ещё не решено (старое сохранение, новый подъезд): игра
+   * ставит «само». Объект заменяется целиком (копии сети делят его).
+   */
+  walks?: Record<string, WalkSetting>;
+  /**
    * Стройка (src/game/construction.ts): площадка узла уже готова — к ней подошёл достроенный участок проекта, а другие
    * полотна у узла ещё строятся. Отрисовка стройки держит площадку готовой (nodeReach), а не возвращает её чертежом,
    * пока к ней не дойдёт этап следующего участка. Нет — площадка по строящимся полотнам у узла.
@@ -227,6 +234,11 @@ export function renameArm(n: LaneNode, from: number, to: number): void {
     const corners = remapCorners(n.corners, swap);
     if (corners) n.corners = corners;
     else delete n.corners;
+  }
+  // Переходы — объект заменяется (копии сети делят прежний).
+  if (n.walks && String(from) in n.walks) {
+    const { [String(from)]: set, ...rest } = n.walks;
+    n.walks = { ...rest, [String(to)]: set };
   }
 }
 

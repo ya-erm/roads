@@ -1,6 +1,7 @@
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, angleDiff, angleOf, dist, rightNormal, scale, sub, Vec } from '../core/vec';
 import { ROAD_CLASS_IDS, RoadClass, RoadSpec } from '../world/roadTypes';
+import { remapWalks } from './crosswalk';
 import { Anchor, bulldozeInside, corridorUnder, insideRuns, joinDeadEnd, splitCorridor } from './edit';
 import { Corridor, LaneNet, LaneNode, LAT_EPS, laneKey, parseLaneKey, remapCorners, remapPhases } from './model';
 
@@ -31,8 +32,8 @@ const MIN = 10;
 /** Тупик вставки примыкает к чужому узлу не дальше этого (срез дороги под рамкой бывает чуть за краем). */
 const JOIN = 12;
 
-type JunctionSettings = Pick<LaneNode, 'control' | 'mainPair' | 'bans' | 'greens' | 'phases' | 'adaptive' | 'lanes' | 'corners'>;
-const SETTINGS = ['control', 'mainPair', 'bans', 'greens', 'phases', 'adaptive', 'lanes', 'corners'] as const;
+type JunctionSettings = Pick<LaneNode, 'control' | 'mainPair' | 'bans' | 'greens' | 'phases' | 'adaptive' | 'lanes' | 'corners' | 'walks'>;
+const SETTINGS = ['control', 'mainPair', 'bans', 'greens', 'phases', 'adaptive', 'lanes', 'corners', 'walks'] as const;
 
 /** Настройки перекрёстка — на новые номера полотен; то, что ссылается на полотна, которых нет, — прочь. */
 function remapArms(n: JunctionSettings, map: (id: number) => number | undefined): void {
@@ -63,6 +64,12 @@ function remapArms(n: JunctionSettings, map: (id: number) => number | undefined)
   }
   // Повороты фаз светофора — на новые номера (своя копия: сеть и кусок не делят массив).
   if (n.phases) n.phases = remapPhases(n.phases, map);
+  // Переходы — на новые номера; у вставки — своя копия.
+  if (n.walks) {
+    const walks = remapWalks(n.walks, map);
+    if (walks) n.walks = walks;
+    else delete n.walks;
+  }
 }
 
 // ---------- Копирование ----------

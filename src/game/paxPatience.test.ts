@@ -95,7 +95,15 @@ describe('Терпение пассажиров в игре', { timeout: 120_000
     const { game, line, home, near, far } = crowdedLine();
     expect(dist(home.fp.center, near.fp.center)).toBeLessThan(dist(home.fp.center, far.fp.center) / 2);
     let most = 0;
-    runSeconds(game, MONTH_LENGTH * 8, () => (most = Math.max(most, waitingAt(home))));
+    // Кто ждёт — по секундам второй половины прогона: в один момент (приход автобуса) очереди бывают и поровну.
+    const waited = { near: 0, far: 0 };
+    runSeconds(game, MONTH_LENGTH * 8, () => {
+      most = Math.max(most, waitingAt(home));
+      if (game.time > MONTH_LENGTH * 4 && Math.round(game.time * 30) % 30 === 0) {
+        waited.near += home.passengers.get(near.id) ?? 0;
+        waited.far += home.passengers.get(far.id) ?? 0;
+      }
+    });
     const cap = game.stationCap(home, 'passengers');
     const q = game.paxQueue(line, home)!;
     expect(q.headway).toBeGreaterThan(0);
@@ -110,8 +118,8 @@ describe('Терпение пассажиров в игре', { timeout: 120_000
     const waitNear = home.passengers.get(near.id) ?? 0;
     const waitFar = home.passengers.get(far.id) ?? 0;
     expect(goneNear / Math.max(1, goneNear + goneFar)).toBeGreaterThan(waitNear / Math.max(1, waitNear + waitFar));
-    // Ждут в основном те, кому ехать в другой город.
-    expect(waitFar).toBeGreaterThan(waitNear);
+    // Ждут в основном те, кому ехать в другой город (за вторую половину прогона — ~2,7 раза больше).
+    expect(waited.far).toBeGreaterThan(waited.near * 2);
     // Автобус по-прежнему уходит полным: в ближайший готов сесть каждый.
     expect(line.loadLast ?? 0).toBeGreaterThan(0.9);
     // Советник: «Пассажиры уходят» с числом ушедших и значком — у остановки линии, откуда ушло больше всех. Какая это

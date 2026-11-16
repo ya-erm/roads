@@ -2,6 +2,7 @@ import { CAR_WIDTH, LIGHTS } from '../config';
 import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub, Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
+import { WalkGeo, walkGeo, walksOn, walkTime, XWALK_BACK } from './crosswalk';
 import { filletPath, junctionCuts } from './geometry';
 import { phaseRelations, resolvePhases, SignalHead, signalHeads, turnKey } from './lights';
 import { Corridor, CorridorEnd, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey, taperLen } from './model';
@@ -130,10 +131,19 @@ export interface LightPhase {
   yields: Map<string, Set<string>>;
   /** Пересекающиеся потоки, которым уступать некому, — так фаза быть не может (едут по очереди). */
   clashes: [string, string][];
+  /** Сколько горит по настройке (игрока или «Авто»). */
   green: number;
+  /**
+   * Пешеходы на переходах этой фазы идут дольше green — горит столько (src/lanes/crosswalk.ts); только при движении,
+   * в настройку и сохранение не попадает. Нет — green.
+   */
+  walk?: number;
   /** Повороты, которых игрок не дал ни в одну фазу, — своя фаза «Авто». */
   extra?: boolean;
 }
+
+/** Сколько на самом деле горит зелёный фазы: по настройке, но не короче перехода пешеходов. */
+export const greenOf = (p: Pick<LightPhase, 'green' | 'walk'>) => Math.max(p.green, p.walk ?? 0);
 
 /** Светофор: фазы по кругу, между ними — жёлтый (clearing); секции светофора у каждого въезда. */
 export interface LightState {
@@ -209,6 +219,12 @@ export class LaneGraph {
   readonly nodes = new Map<number, GNode>();
   /** Манёвры каждого перекрёстка (без продолжений полос). */
   readonly junctionMoves = new Map<number, GMove[]>();
+  /** Пешеходные переходы перекрёстков (src/lanes/crosswalk.ts): по узлу — включённые, с зеброй и связями подъезда. */
+  readonly crosswalks = new Map<number, GraphWalk[]>();
+  /** Полосы въезда в перекрёсток с переходом: стоп-линия на столько метров раньше конца полосы. */
+  readonly stopBack = new Map<number, number>();
+  /** Обрезы полотен, по которым строится граф (только пока строится). */
+  private cutMap: Map<number, [number, number]> | null = null;
   /** Связи каждого полотна по ходу оси. */
   private readonly byCorridor = new Map<number, { flow: Flow; links: GLink[] }[]>();
   private nextId = 1;
@@ -254,8 +270,10 @@ export class LaneGraph {
     for (const n of net.nodes.values()) {
       const { kind, pos, dir } = n;
       const rules = `${n.control ?? ''}|${n.mainPair === undefined ? '-' : n.mainPair === null ? 'null' : n.mainPair.join(',')}`;
-      this.nodeShapes.set(n.id, { kind, corridors: [...n.corridors], pos: [pos.x, pos.y, dir.x, dir.y], rules, lanes: n.lanes && [...n.lanes], bans: n.bans && [...n.bans] });
+      const walks = n.walks ? Object.entries(n.walks).map(([k, w]) => `${k}${w.on ? '+' : '-'}`).join() : '';
+      this.nodeShapes.set(n.id, { kind, corridors: [...n.corridors], pos: [pos.x, pos.y, dir.x, dir.y], rules, lanes: n.lanes && [...n.lanes], bans: n.bans && [...n.bans], walks });
     }
+    this.cutMap = cuts;
     for (const c of net.corridors.values()) {
       const cut = cuts.get(c.id)!;
       const start = this.nextId;
@@ -277,6 +295,7 @@ export class LaneGraph {
     }
     this.buildIndexes();
     this.prev = null;
+    this.cutMap = null;
   }
 
   /** Положение на полосе: u — пройдено от начала полосы по ходу движения. */
@@ -507,7 +526,7 @@ export class LaneGraph {
     };
     return a.phases.every((p, i) => {
       const q = b.phases[i];
-      return p.green === q.green && p.moves.size === q.moves.size && [...p.moves].every((k) => q.moves.has(key(k)));
+      return p.green === q.green && p.walk === q.walk && p.moves.size === q.moves.size && [...p.moves].every((k) => q.moves.has(key(k)));
     });
   }
 
@@ -579,9 +598,26 @@ export class LaneGraph {
   /** Манёвры перекрёстка: полосы въездов распределяются по выездам, как раньше; главная дорога — самая прямая и широкая. */
   private buildJunction(n: LaneNode, ins: GLink[], outs: GLink[]): void {
     const state = this.nodeState(n);
+    if (n.walks) this.junctionWalks(n, ins, outs);
     const copied = this.copyMoves(n, ins, outs);
     const list = copied ?? this.junctionMovesOf(n, ins, outs);
     this.junctionConflicts(n, state, ins, list, !!copied);
+  }
+
+  /**
+   * Переходы перекрёстка: зебра, связи подъезда (въезд и выезд), время перехода; у полос въезда — стоп-линия перед
+   * зеброй (stopBack), не ближе 2 м к началу полосы.
+   */
+  private junctionWalks(n: LaneNode, ins: GLink[], outs: GLink[]): void {
+    const list: GraphWalk[] = [];
+    for (const arm of walksOn(this.net, n, this.cutMap ?? undefined)) {
+      const geo = walkGeo(arm);
+      const inLink = ins.find((l) => l.corridor === arm.corridor.id) ?? null;
+      const outLink = outs.find((l) => l.corridor === arm.corridor.id) ?? null;
+      for (const lane of inLink?.lanes ?? []) this.stopBack.set(lane.id, Math.max(0, Math.min(XWALK_BACK, lane.length - 2)));
+      list.push({ node: n.id, corridor: arm.corridor.id, end: arm.end, geo, inLink: inLink?.id ?? null, outLink: outLink?.id ?? null, time: walkTime(geo.width) });
+    }
+    if (list.length) this.crosswalks.set(n.id, list);
   }
 
   /** Манёвры перекрёстка заново: полосы въездов по выездам (или по связям полос, заданным игроком). */
@@ -694,7 +730,9 @@ export class LaneGraph {
     this.nodeMoves.set(n.id, list);
     if (!(copied && this.copyPriority(n, state))) this.junctionRules(n, state, ins, list);
     const before = same && this.prev!.nodes.get(n.id);
-    if (before && sameList(this.prev!.nodeShapes.get(n.id)?.corridors, n.corridors) && this.sameRules(before, state)) this.sameNodes.add(n.id);
+    const shape = this.prev?.nodeShapes.get(n.id);
+    // Переходы те же — и стоп-линии со стрелками на тех же местах.
+    if (before && sameList(shape?.corridors, n.corridors) && shape?.walks === this.nodeShapes.get(n.id)!.walks && this.sameRules(before, state)) this.sameNodes.add(n.id);
   }
 
   /** Главная дорога перекрёстка или светофор. */
@@ -746,17 +784,30 @@ export class LaneGraph {
     }));
     const resolved = resolvePhases(n.phases, approaches, n.greens);
     if (!resolved.length) resolved.push({ go: [], green: LIGHTS.green });
+    const walks = this.crosswalks.get(n.id) ?? [];
     const phases: LightPhase[] = resolved.map((p) => {
       const go = new Set(p.go);
       const moves = list.filter((m) => go.has(this.turnOf(m)));
       const { yields, clashes } = phaseRelations(moves);
-      return { go: p.go, moves: new Set(moves.map((m) => m.key)), yields, clashes, green: p.green, ...(p.extra ? { extra: true } : {}) };
+      // Пешеходы идут через подъезды, которым в этой фазе красный, — зелёный горит не короче их перехода (walk; заданный
+      // green — как в настройке: в фазы игрока и сохранение удлинение не попадает).
+      const inLinks = new Set(moves.map((m) => m.inLink));
+      const walk = Math.max(0, ...walks.filter((w) => w.inLink === null || !inLinks.has(w.inLink)).map((w) => w.time));
+      return {
+        go: p.go,
+        moves: new Set(moves.map((m) => m.key)),
+        yields,
+        clashes,
+        green: p.green,
+        ...(walk > p.green ? { walk } : {}),
+        ...(p.extra ? { extra: true } : {}),
+      };
     });
     const heads = signalHeads(
       ins.map((l) => ({ link: l.id, moves: list.filter((m) => m.inLink === l.id) })),
       phases,
     );
-    return { phases, phase: 0, timer: phases[0].green, clearing: false, heads };
+    return { phases, phase: 0, timer: greenOf(phases[0]), clearing: false, heads };
   }
 
   /** Тупик: разворот с левой полосы въезда на левую полосу выезда того же полотна. */
@@ -866,6 +917,19 @@ interface NodeShape {
   corridors: number[];
   lanes?: string[];
   bans?: string[];
+  /** Переходы на подъездах — строкой. */
+  walks: string;
+}
+
+/** Переход перекрёстка в графе: зебра, связи подъезда к узлу (въезд) и от него (выезд), сколько секунд идти. */
+export interface GraphWalk {
+  node: number;
+  corridor: number;
+  end: End;
+  geo: WalkGeo;
+  inLink: number | null;
+  outLink: number | null;
+  time: number;
 }
 
 function shapeOfCorridor(net: LaneNet, c: Corridor): CorridorShape {

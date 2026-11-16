@@ -25,7 +25,7 @@ import { GRADE } from '../config';
 import { profileText, type ProfileSummary } from '../game/grade';
 import type { TerraformMode } from '../world/terrain';
 import { altitudeText } from '../render/relief';
-import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay } from '../render/renderer';
+import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay, walkBadgeRadius, type WalkToggle } from '../render/renderer';
 import { badgeAt, projectBadges } from '../render/projectBadges';
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
@@ -1736,6 +1736,8 @@ export class Controller {
         this.pasteDrag = { at: p };
         break;
       case 'lights': {
+        // Значок перехода у бордюра выбранного перекрёстка — включить или выключить переход.
+        if (this.walkClick(p)) break;
         // У выбранного перекрёстка клики по меткам полос соединяют въезды с выездами.
         if (this.laneClick(p)) break;
         // Ручка угла выбранного перекрёстка (у бордюра, не на метках полос) — скруглить поворот, как в «Двигать».
@@ -2091,6 +2093,54 @@ export class Controller {
       o.label = { text: `${name}: нельзя — пересечёт ${what}`, ok: false };
     }
     else o.label = { text: `${name}: ${st && st.look !== 'free' ? 'снять зелёный' : 'дать зелёный'}`, ok: true };
+    return true;
+  }
+
+  // ---------- Пешеходные переходы перекрёстка ----------
+
+  /** Значки переходов выбранного перекрёстка — с инструментом «Перекрёсток», не в правке фазы; только где переход возможен. */
+  walkToggles(): WalkToggle[] {
+    const sel = this.selection;
+    if (this.tool !== 'lights' || sel?.type !== 'junction' || this.livePhase()) return [];
+    // Значок — на самой зебре, посреди проезжей части (у бордюра на остром углу он ложился бы на зебру соседа);
+    // стёртой зебры нет — её место показан контуром.
+    return this.game()
+      .crosswalkInfo(sel.id)
+      .filter((x) => !x.arm.ban)
+      .map((x) => ({
+        corridor: x.arm.corridor.id,
+        pos: { x: (x.geo.ends[0].x + x.geo.ends[1].x) / 2, y: (x.geo.ends[0].y + x.geo.ends[1].y) / 2 },
+        dir: x.geo.out,
+        on: x.arm.on,
+        own: x.arm.own,
+        cost: x.cost,
+        stripes: x.arm.on ? undefined : x.geo.stripes,
+      }));
+  }
+
+  /** Значок перехода под точкой p. */
+  private walkAt(p: Vec, toggles = this.walkToggles()): WalkToggle | null {
+    const r = walkBadgeRadius(this.camera.zoom);
+    let best: WalkToggle | null = null;
+    let bestD = r;
+    for (const t of toggles) {
+      const d = dist(t.pos, p);
+      if (d <= bestD) [bestD, best] = [d, t];
+    }
+    return best;
+  }
+
+  /** Клик по значку перехода: включить или выключить (Ctrl+Z — как остальные правки перекрёстка). true — клик принят. */
+  private walkClick(p: Vec): boolean {
+    const t = this.walkAt(p);
+    const sel = this.selection;
+    if (!t || sel?.type !== 'junction') return false;
+    const g = this.game();
+    g.checkpoint('пешеходный переход');
+    const problem = g.setCrosswalk(sel.id, t.corridor);
+    g.commit();
+    if (problem) this.showError(problem);
+    this.onChange();
     return true;
   }
 
@@ -2909,7 +2959,7 @@ export class Controller {
     return true;
   }
 
-  private showError(text?: string): void {
+  showError(text?: string): void {
     if (text) this.flash = { text, until: performance.now() + 1600 };
   }
 
@@ -3105,6 +3155,9 @@ export class Controller {
       if (this.laneFrom && !this.activeLane(laneEnds)) this.laneFrom = null;
       o.laneEdit = { node: this.selection.id, ends: laneEnds, from: this.laneFrom, hover: null };
     }
+    // …и значки пешеходных переходов на подъездах.
+    const toggles = this.walkToggles();
+    if (toggles.length && this.selection?.type === 'junction') o.walkEdit = { node: this.selection.id, toggles, hover: null };
     // Правка фазы светофора: проезды перекрёстка цветом по фазе, отказ — мигает.
     const pe = this.livePhase();
     const states = pe && g.phaseStates(pe.node, pe.i);
@@ -3626,6 +3679,13 @@ export class Controller {
         const sel = this.selection;
         const corners = sel?.type === 'junction' ? this.roadTools.nodeCornerMarks(sel.id, (HANDLE_PX + 4) / this.camera.zoom) : [];
         o.handles = corners;
+        // Значок перехода под курсором: что сделает клик (и сколько стоит разметка).
+        const walk = o.walkEdit && this.walkAt(p, o.walkEdit.toggles);
+        if (o.walkEdit && walk) {
+          o.walkEdit.hover = walk.corridor;
+          o.label = walk.on ? { text: '🚶 Переход → стереть', ok: true } : { text: `🚶 Переход → нарисовать · ${money(walk.cost)}`, ok: walk.cost <= g.budget };
+          break;
+        }
         const end = edit && this.laneAt(p, edit.ends);
         if (edit && end) {
           edit.hover = end;
