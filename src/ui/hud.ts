@@ -170,6 +170,7 @@ import { crewCardHtml } from './crewCard';
 import { workTrainCardHtml } from './workTrainCard';
 import { carTripHtml } from './carTrip';
 import { SERVICES } from '../game/services';
+import { incomeChart, monthTick } from './incomeChart';
 import { money, planPrice, projectMoneyWarning } from '../input/labels';
 import { WALK_BAN_TEXT } from '../lanes/crosswalk';
 import { walkSignSvg } from '../render/walkSign';
@@ -330,29 +331,6 @@ const ruleWaitId = (r: StopRule): WaitId => (r.wait === 'full' ? (r.maxWait === 
 
 /** Вариант главной дороги с кнопки карточки перекрёстка (data-v) — как `mainPair` узла: null — «Авто», [] — равнозначный. */
 const mainChoice = (v: string | undefined): number[] | null => (v === 'auto' || !v ? null : v === 'none' ? [] : v.split(',').map(Number));
-
-/** Столбики «доход / расход» по месяцам — для компании и для линии. */
-function incomeChart(months: { label: string; income: number; expense: number }[], H = 90): string {
-  if (!months.length) return '<p class="muted">График появится после первого месяца.</p>';
-  const max = Math.max(1, ...months.map((m) => Math.max(m.income, m.expense)));
-  const W = 300;
-  const bw = W / Math.max(12, months.length);
-  const bars = months
-    .map((m, i) => {
-      const x = i * bw;
-      const hi = (m.income / max) * (H - 14);
-      const he = (m.expense / max) * (H - 14);
-      return `<rect x="${x + 2}" y="${H - 12 - hi}" width="${bw / 2 - 2}" height="${hi}" rx="1.5" fill="#3fae6a"><title>${m.label}: доход ${money(m.income)}</title></rect>
-        <rect x="${x + bw / 2}" y="${H - 12 - he}" width="${bw / 2 - 2}" height="${he}" rx="1.5" fill="#e5534b"><title>${m.label}: расход ${money(m.expense)}</title></rect>
-        ${monthTick(x + bw / 2, H, m.label)}`;
-    })
-    .join('');
-  return `<svg class="fin-chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${bars}</svg>`;
-}
-
-/** Подпись месяца под столбиком графика: «Май» из «Май 1962». */
-const monthTick = (x: number, H: number, label: string) =>
-  `<text x="${x}" y="${H - 2}" text-anchor="middle" font-size="8" fill="#7b8794">${label.split(' ')[0]}</text>`;
 
 /**
  * Снабжение города одним грузом по месяцам: столбик цветом груза — сколько привезли (снизу штриховкой —
