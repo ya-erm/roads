@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
+import { residentsOf } from '../world/townForms';
 import { FIRST_RUN, firstRunWaits } from './firstRun';
 import { Game } from './game';
 import { connectStations, HIGHWAY, townStreets, withoutCitizens } from './testkit';
@@ -37,9 +38,13 @@ describe('Первый рейс маршрута: ждать ли пассажи
  */
 function stationIn(game: Game, townId: number, toward: { x: number; y: number }): Station {
   const mid = (c: ReturnType<typeof townStreets>[number]) => c.lut.pointAt(c.length / 2);
-  const houses = (c: ReturnType<typeof townStreets>[number]) => game.index.near(mid(c), 200).filter((s) => s.type === 'building' && dist(s.fp.center, mid(c)) < 200).length;
+  // Застроенная — по жителям вокруг, а не по числу домов: в частном доме живёт 3–6 человек, в панельном — сотни.
+  const folk = (c: ReturnType<typeof townStreets>[number]) =>
+    game.index
+      .near(mid(c), 200)
+      .reduce((n, s) => n + (s.type === 'building' && dist(s.fp.center, mid(c)) < 200 ? residentsOf(s) : 0), 0);
   const all = townStreets(game, townId);
-  const built = all.filter((c) => houses(c) >= 25);
+  const built = all.filter((c) => folk(c) >= 25 * 28);
   const streets = (built.length ? built : all).sort((a, b) => dist(mid(a), toward) - dist(mid(b), toward));
   for (const seg of streets) {
     const p = mid(seg);

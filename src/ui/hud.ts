@@ -27,7 +27,7 @@ import type { TerraformMode } from '../world/terrain';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
 import { isBusTerminal, type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
 import { lastTownNeed, townNeed } from '../world/townSupply';
-import { FORM_NAMES, formOf } from '../world/townForms';
+import { flatsOf, FORM_NAMES, formOf, JOBS_PER_FLOOR, residentsOf, storeysOf } from '../world/townForms';
 import { footprintRadius } from '../world/spatial';
 import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
 import { durationText } from '../core/timeText';
@@ -3508,9 +3508,17 @@ export class Hud {
       const town = g.townOf(b);
       // Тип застройки (world/townForms.ts): частный дом, пятиэтажка, школа…
       const kind = FORM_NAMES[formOf(b)];
-      const people = b.kind === 'res' ? `${b.floors * 14} жителей` : b.kind === 'com' ? `${b.floors * 4} рабочих мест` : 'центр города';
+      // Жилой: этажей и квартир — по жильцам (townForms.storeysOf, flatsOf); в частном доме — одна семья.
+      const folk = residentsOf(b);
+      const flats = flatsOf(b);
+      const people =
+        b.kind === 'res'
+          ? `${flats > 1 ? `${flats} ${plural(flats, 'квартира', 'квартиры', 'квартир')} · ` : ''}${folk} ${plural(folk, 'житель', 'жителя', 'жителей')}`
+          : b.kind === 'com'
+            ? `${b.floors * JOBS_PER_FLOOR} рабочих мест`
+            : 'центр города';
       const moveCost = Math.round(g.demolishCost(b.id) * 0.6) || 3000;
-      return `<section class="detail">${head(kind, `${b.floors} эт. · ${people}`)}
+      return `<section class="detail">${head(kind, `${storeysOf(b)} эт. · ${people}`)}
         ${town ? `<button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>` : ''}
         <div class="actions">
           <button class="small" data-action="move" data-id="${b.id}">Перенести · ${money(moveCost)}</button>

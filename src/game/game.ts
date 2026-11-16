@@ -67,7 +67,7 @@ import {
   WorldContext,
 } from '../world/worldgen';
 import { nearPark, placeParks } from '../world/townParks';
-import { townTier } from '../world/townForms';
+import { residentsOf, townTier } from '../world/townForms';
 import { START_ROADS } from '../world/startRoads';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
 import { prepareSettings } from '../scenario/generator';
@@ -8861,7 +8861,7 @@ export class Game implements BuildContext {
       for (const b of town.buildings) {
         if (dist(b.fp.center, at) > R) continue;
         towns.add(town.id);
-        pop += b.kind === 'res' ? b.floors * 14 : b.floors * 6;
+        pop += b.kind === 'res' ? residentsOf(b) : b.floors * 6;
       }
     }
     return { towns, pop };

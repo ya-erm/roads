@@ -3,7 +3,7 @@ import { dist, type Vec } from '../core/vec';
 import type { Corridor, LaneNet } from '../lanes/model';
 import type { Town, TownPark } from '../world/entities';
 import { ROAD_MARGIN } from '../world/roadTypes';
-import type { Footprint } from '../world/spatial';
+import { type Footprint, pointInFootprint } from '../world/spatial';
 import { corridorHalf, halfAtS } from '../world/worldgen';
 import { Art, disc } from './industryArt';
 import { type Box, grow } from './tileCache';
@@ -14,6 +14,7 @@ import {
   flowerbed,
   fountain,
   lamp,
+  LAMPS_ON,
   loop,
   obelisk,
   PAVING,
@@ -393,15 +394,45 @@ function layoutOf(p: TownPark): Layout {
   return layout;
 }
 
+/**
+ * Входы парка или сквера: концы его дорожек у края участка — точка в мире и направление наружу (по нормали к ближней
+ * стороне). От них дорожки ведут к тротуару ближней улицы (render/townWalks.ts). У площади и набережной входов нет —
+ * они сами у тротуара.
+ */
+export function parkGates(p: TownPark): { x: number; y: number; ux: number; uy: number }[] {
+  if (p.kind === 'plaza' || p.kind === 'embankment') return [];
+  const { w: W, h: H } = p.fp;
+  const c = Math.cos(p.fp.angle);
+  const s = Math.sin(p.fp.angle);
+  const out: { x: number; y: number; ux: number; uy: number }[] = [];
+  for (const path of layoutOf(p).paths) {
+    for (const i of [0, path.length - 2]) {
+      const x = path[i];
+      const y = path[i + 1];
+      const dx = W / 2 - Math.abs(x);
+      const dy = H / 2 - Math.abs(y);
+      if (Math.min(dx, dy) > 2.5) continue;
+      // Наружу — к ближней стороне.
+      const [nx, ny] = dx < dy ? [Math.sign(x), 0] : [0, Math.sign(y)];
+      out.push({ x: p.fp.center.x + x * c - y * s, y: p.fp.center.y + x * s + y * c, ux: nx * c - ny * s, uy: nx * s + ny * c });
+    }
+  }
+  return out;
+}
+
 // ---------- Аллеи вдоль проспектов и фонари вдоль улиц ----------
 
-/** Деревья и фонари вдоль одного полотна города: точки по очереди и рамка (для кэша карты). */
+/** Деревья, фонари и тротуары вдоль одного полотна города: точки по очереди и рамка (для кэша карты). */
 export interface StreetGreen {
   id: number;
   /** x, y, r — по очереди. */
   trees: number[];
-  /** x, y — по очереди. */
+  /** x, y — по очереди (пока фонари выключены — LAMPS_ON, — пусто). */
   lamps: number[];
+  /** Тротуары: ломаные (x, y по очереди) по оси тротуара вдоль краёв полотна — там, где рядом дома. */
+  walks: number[][];
+  /** Мощёный тротуар города или тропинка села. */
+  paved: boolean;
   box: Box;
   /** Подпись для кэша карты: поменялась — плитки под полотном перерисовать. */
   sig: string;
@@ -409,44 +440,82 @@ export interface StreetGreen {
 
 /** Фонари вдоль улиц — только при сильном приближении. */
 export const LAMP_ZOOM = 1.4;
-const ALLEY = { step: 9, end: 14, off: 2.1 };
+/** Деревья аллеи — между тротуаром и участками домов (дома — в 5 м от края полотна): кроны над краем тротуара. */
+const ALLEY = { step: 9, end: 14, off: 3.9 };
 const LAMPS = { step: 27, off: 0.9 };
+/**
+ * Тротуар: от края полотна (from) шириной w, м. Город — мощёный, 2,8 м у самого бордюра; село — утоптанная тропинка
+ * 1,6 м чуть в стороне от дороги. Между тротуаром и участками домов — газон.
+ */
+export const SIDEWALK = { paved: { from: 0.3, w: 2.8 }, path: { from: 1.1, w: 1.6 } } as const;
+/** Тротуар — где ближе стольких метров к нему стоит дом города; короче min — не рисуется, разрывы короче gap — сшиваются. */
+const WALK = { step: 2.5, houses: 24, min: 8, gap: 6 };
+
+/** Строения вокруг полотна: участки домов города и прочих (станции, предприятия, базы, склады). */
+export type Around = { houses: Footprint[]; others: Footprint[] };
+
+/** Где тротуары (streetGreen): дома рядом, вода, строения не-дома, в каком городе точка. */
+export interface WalkSite {
+  /**
+   * Строения ближе r к точке (один запрос к индексу на полотно): дома города (тротуар — где они рядом) и прочее —
+   * станции, предприятия, базы, склады (под ними тротуар не идёт).
+   */
+  around(p: Vec, r: number): Around;
+  /** Точка в воде. */
+  wet(p: Vec): boolean;
+  /** Город, в застройке которого точка: мощёный ли тротуар (город) и подпись его застройки (для кэша). */
+  townAt(p: Vec): { paved: boolean; key: string } | null;
+}
 
 /**
- * Аллеи и фонари городов: вдоль проспектов в черте города — ряд деревьев по обе стороны на полосе между бордюром и
- * участками домов (дома стоят в 5 м от края полотна), вдоль улиц и проспектов — фонари в шахматном порядке.
- * Не у перекрёстков, не на других полотнах, не на остановках и строениях (busy), не на мостах и в тоннелях.
+ * Аллеи, фонари и тротуары городов: вдоль проспектов в черте города — ряд деревьев по обе стороны между тротуаром и
+ * участками домов, вдоль улиц и проспектов — фонари в шахматном порядке (пока выключены, LAMPS_ON) и тротуары по
+ * обеим сторонам там, где рядом дома (site; без site — без тротуаров). Не у перекрёстков, не на других полотнах, не на
+ * остановках и строениях (busy), не на мостах и в тоннелях. Тротуары — только картинка: на дороги, движение и стройку
+ * не влияют, рисуются под дорогами (drawSidewalks), так что у перекрёстков их закрывает полотно.
  */
 export function streetGreen(
   roads: LaneNet,
   towns: readonly Pick<Town, 'center' | 'radius'>[],
   busy: (p: Vec, r: number) => boolean,
   cache?: Map<number, { sig: string; line: StreetGreen | null }>,
+  site?: WalkSite,
 ): StreetGreen[] {
   const out: StreetGreen[] = [];
   for (const c of roads.corridors.values()) {
-    if (c.build || c.ring || (c.cls !== 'avenue' && c.cls !== 'street')) continue;
+    if (c.build || c.ring || (c.cls !== 'avenue' && c.cls !== 'street' && c.cls !== 'dirt')) continue;
     const na = roads.node(c.a);
     const nb = roads.node(c.b);
     if (na.level !== 0 || nb.level !== 0) continue;
     const mid = c.lut.pointAt(c.length / 2);
-    if (!towns.some((t) => dist(mid, t.center) < t.radius)) continue;
-    // Полотно то же и у его узлов те же примыкания — аллея та же (cache — между пересчётами).
-    const key = `${c.rev}|${na.corridors.length}|${nb.corridors.length}`;
+    const inside = c.cls !== 'dirt' && towns.some((t) => dist(mid, t.center) < t.radius);
+    const town = site?.townAt(mid) ?? null;
+    if (!inside && !town) continue;
+    // Строения вокруг полотна — для тротуаров (один запрос к индексу на полотно).
+    const near = town && site ? site.around(mid, c.length / 2 + WALK.houses + 40) : null;
+    // Полотно то же, у его узлов те же примыкания, город и строения вокруг те же — аллея та же (cache — между
+    // пересчётами): вырос город — пересчёт только у полотен, где встали новые дома.
+    const key = `${c.rev}|${na.corridors.length}|${nb.corridors.length}|${inside}|${town?.key ?? ''}|${near ? `${near.houses.length}:${near.others.length}` : ''}`;
     const had = cache?.get(c.id);
     if (had?.sig === key) {
       if (had.line) out.push(had.line);
       continue;
     }
-    const line = alleyOf(roads, c, busy);
+    const line = alleyOf(roads, c, busy, inside, town && site && near ? { site, near, paved: town.paved } : null);
     cache?.set(c.id, { sig: key, line });
     if (line) out.push(line);
   }
   return out;
 }
 
-/** Аллея и фонари одного полотна (streetGreen). */
-function alleyOf(roads: LaneNet, c: Corridor, busy: (p: Vec, r: number) => boolean): StreetGreen | null {
+/** Аллея, фонари и тротуары одного полотна (streetGreen). */
+function alleyOf(
+  roads: LaneNet,
+  c: Corridor,
+  busy: (p: Vec, r: number) => boolean,
+  inside: boolean,
+  walk: { site: WalkSite; near: Around; paved: boolean } | null,
+): StreetGreen | null {
   // Другие полотна на одном уровне подходят близко только у узлов (пересекаются улицы в узле) — там и проверяем.
   const free = (p: Vec, r: number, s: number) => {
     if (busy(p, r)) return false;
@@ -456,7 +525,7 @@ function alleyOf(roads: LaneNet, c: Corridor, busy: (p: Vec, r: number) => boole
   };
   const trees: number[] = [];
   const lamps: number[] = [];
-  if (c.cls === 'avenue') {
+  if (inside && c.cls === 'avenue') {
     for (let s = ALLEY.end; s <= c.length - ALLEY.end; s += ALLEY.step) {
       const p = c.lut.pointAt(s);
       const t = c.lut.tangentAt(s);
@@ -468,20 +537,96 @@ function alleyOf(roads: LaneNet, c: Corridor, busy: (p: Vec, r: number) => boole
       }
     }
   }
-  for (let s = LAMPS.step / 2, k = 0; s <= c.length - 8; s += LAMPS.step, k++) {
-    const p = c.lut.pointAt(s);
-    const t = c.lut.tangentAt(s);
-    const side = k % 2 ? 1 : -1;
-    const off = halfAtS(c, s) + LAMPS.off - ROAD_MARGIN;
-    const q = { x: p.x - t.y * side * off, y: p.y + t.x * side * off };
-    if (free(q, 0.4, s)) lamps.push(q.x, q.y);
+  if (inside && LAMPS_ON) {
+    for (let s = LAMPS.step / 2, k = 0; s <= c.length - 8; s += LAMPS.step, k++) {
+      const p = c.lut.pointAt(s);
+      const t = c.lut.tangentAt(s);
+      const side = k % 2 ? 1 : -1;
+      const off = halfAtS(c, s) + LAMPS.off - ROAD_MARGIN;
+      const q = { x: p.x - t.y * side * off, y: p.y + t.x * side * off };
+      if (free(q, 0.4, s)) lamps.push(q.x, q.y);
+    }
   }
-  if (!trees.length && !lamps.length) return null;
+  const walks = walk ? sidewalks(c, walk.site, walk.paved, walk.near) : [];
+  if (!trees.length && !lamps.length && !walks.length) return null;
   let box: Box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
-  for (let i = 0; i < trees.length; i += 3) box = { x0: Math.min(box.x0, trees[i]), y0: Math.min(box.y0, trees[i + 1]), x1: Math.max(box.x1, trees[i]), y1: Math.max(box.y1, trees[i + 1]) };
-  for (let i = 0; i < lamps.length; i += 2) box = { x0: Math.min(box.x0, lamps[i]), y0: Math.min(box.y0, lamps[i + 1]), x1: Math.max(box.x1, lamps[i]), y1: Math.max(box.y1, lamps[i + 1]) };
-  const sig = `${trees.map((v) => v.toFixed(1)).join(',')}|${lamps.map((v) => v.toFixed(1)).join(',')}`;
-  return { id: c.id, trees, lamps, box: grow(box, 6), sig };
+  const take = (x: number, y: number) => (box = { x0: Math.min(box.x0, x), y0: Math.min(box.y0, y), x1: Math.max(box.x1, x), y1: Math.max(box.y1, y) });
+  for (let i = 0; i < trees.length; i += 3) take(trees[i], trees[i + 1]);
+  for (let i = 0; i < lamps.length; i += 2) take(lamps[i], lamps[i + 1]);
+  for (const w of walks) for (let i = 0; i < w.length; i += 2) take(w[i], w[i + 1]);
+  const sig = `${trees.map((v) => v.toFixed(1)).join(',')}|${lamps.map((v) => v.toFixed(1)).join(',')}|${walk?.paved}|${walks.map((w) => w.map((v) => v.toFixed(1)).join(',')).join(';')}`;
+  return { id: c.id, trees, lamps, walks, paved: !!walk?.paved, box: grow(box, 6), sig };
+}
+
+/**
+ * Тротуары вдоль полотна c: по обеим сторонам — точки оси тротуара через WALK.step, где рядом дома, не вода и не
+ * станция или предприятие; короткие разрывы сшиваются, короткие куски выбрасываются. До самых концов полотна: у
+ * перекрёстка конец уходит под соседнее полотно (тротуары рисуются под дорогами).
+ */
+export function sidewalks(c: Corridor, site: WalkSite, paved: boolean, near?: Around): number[][] {
+  const spec = paved ? SIDEWALK.paved : SIDEWALK.path;
+  const out: number[][] = [];
+  const n = Math.max(2, Math.ceil(c.length / WALK.step));
+  // Строения вокруг полотна — одним запросом, дальше — проверки по списку.
+  const { houses, others } = near ?? site.around(c.lut.pointAt(c.length / 2), c.length / 2 + WALK.houses + 40);
+  const housed = (q: Vec) => houses.some((f) => Math.hypot(f.center.x - q.x, f.center.y - q.y) < WALK.houses + Math.max(f.w, f.h) / 2);
+  const blocked = (q: Vec) => others.some((f) => pointInFootprint(q, f, spec.w / 2));
+  for (const side of [1, -1]) {
+    const pts: { x: number; y: number; ok: boolean }[] = [];
+    for (let i = 0; i <= n; i++) {
+      const s = (c.length * i) / n;
+      const p = c.lut.pointAt(s);
+      const t = c.lut.tangentAt(s);
+      const off = halfAtS(c, s) + spec.from + spec.w / 2;
+      const q = { x: p.x - t.y * side * off, y: p.y + t.x * side * off };
+      const ok = housed(q) && !blocked(q) && !site.wet(q);
+      pts.push({ ...q, ok });
+    }
+    // Короткие разрывы — сшить.
+    const gapN = Math.round(WALK.gap / (c.length / n));
+    for (let i = 0; i < pts.length; ) {
+      if (pts[i].ok) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j < pts.length && !pts[j].ok) j++;
+      if (i > 0 && j < pts.length && j - i <= gapN && pts.slice(i, j).every((p) => !site.wet(p))) for (let k = i; k < j; k++) pts[k].ok = true;
+      i = j;
+    }
+    let run: number[] = [];
+    const flush = () => {
+      if (run.length >= 4 && (run.length / 2 - 1) * (c.length / n) >= WALK.min) out.push(run);
+      run = [];
+    };
+    for (const p of pts) {
+      if (p.ok) run.push(p.x, p.y);
+      else flush();
+    }
+    flush();
+  }
+  return out;
+}
+
+const SIDEWALK_PAVED = '#e2ddd3';
+const SIDEWALK_EDGE = 'rgba(138,130,116,0.75)';
+const FOOTPATH = 'rgba(200,184,148,0.85)';
+const FOOTPATH_EDGE = 'rgba(160,146,116,0.35)';
+
+/**
+ * Тротуары вдоль улиц (streetGreen) в рамке view — под дорогами, в плитки кэша: одна ломаная — одна обводка; кромка —
+ * вблизи. Издали (lod 0) тротуаров не видно.
+ */
+export function drawSidewalks(ctx: CanvasRenderingContext2D, lines: readonly StreetGreen[], view: Box, zoom: number): void {
+  const a = new Art(ctx, { id: 0, fp: { center: { x: 0, y: 0 }, w: 1, h: 1, angle: 0 } }, zoom, 0, 0, 'still');
+  if (!a.lod) return;
+  a.pass = 0;
+  for (const paved of [false, true]) {
+    const list = lines.filter((l) => l.paved === paved && l.walks.length && l.box.x1 >= view.x0 && l.box.x0 <= view.x1 && l.box.y1 >= view.y0 && l.box.y0 <= view.y1).flatMap((l) => l.walks);
+    if (!list.length) continue;
+    const spec = paved ? SIDEWALK.paved : SIDEWALK.path;
+    paths(a, list, spec.w, paved ? SIDEWALK_PAVED : FOOTPATH, paved ? SIDEWALK_EDGE : FOOTPATH_EDGE);
+  }
 }
 
 /** Аллеи и фонари в рамке view — поверх дорог, под домами; тени — одной заливкой. */

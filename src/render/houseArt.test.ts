@@ -35,7 +35,7 @@ function building(form: HouseForm, o: Partial<TownBuilding> = {}): TownBuilding 
     id: 41,
     townId: 1,
     fp: { center: { x: 300, y: 200 }, w: form === 'slab' || form === 'tower' ? 70 : big ? 32 : 20, h: big ? 26 : 18, angle: 0.4 },
-    kind: form === 'hall' || form === 'temple' ? 'landmark' : ['cottage', 'dacha', 'townhouse', 'courtyard', 'slab', 'tower'].includes(form) ? 'res' : 'com',
+    kind: form === 'hall' || form === 'temple' ? 'landmark' : ['cottage', 'dacha', 'walkup', 'townhouse', 'courtyard', 'slab', 'tower'].includes(form) ? 'res' : 'com',
     floors: form === 'tower' ? 12 : form === 'slab' ? 5 : 2,
     anchor: 0,
     color: '#efe3cf',
@@ -88,8 +88,10 @@ describe('Дома городов — рисунок по типу застро�
   });
 
   it('рамка в кэше карты — с тенью: у высотки дальше, у ратуши — ещё и площадь', () => {
-    expect(houseReach({ floors: 16, kind: 'res' })).toBeGreaterThan(houseReach({ floors: 2, kind: 'res' }) + 20);
-    expect(houseReach({ floors: 4, kind: 'landmark' })).toBeGreaterThan(14);
+    expect(houseReach(building('tower', { floors: 16 }))).toBeGreaterThan(houseReach(building('cottage')) + 20);
+    expect(houseReach(building('hall', { floors: 4 }))).toBeGreaterThan(14);
+    // Дорожка к крыльцу и съезд доходят до тротуара — за 5 м от участка.
+    expect(houseReach(building('cottage'))).toBeGreaterThanOrEqual(5);
   });
 
   it('тон цвета — снова #rrggbb: его можно тонировать ещё раз', () => {

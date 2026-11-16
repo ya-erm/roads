@@ -13,7 +13,7 @@ import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, playerIndustries, townS
 import { industryCount, MINING_KINDS, shoreFits, terrainFits } from './sites';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
-import { edgeOf, inDistrict, mergeBlocks, mergeTowers, townTier, zoneTown } from './townForms';
+import { edgeOf, inDistrict, JOBS_PER_FLOOR, mergeBlocks, mergeTowers, residentsOf, townTier, zoneTown } from './townForms';
 import { onPark, placeParks, type ParkSite } from './townParks';
 import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
@@ -979,8 +979,9 @@ export function placeable(ctx: WorldContext, fp: Footprint, ownSeg: number): boo
   return true;
 }
 
+/** Жители города: жильцы домов (townForms.residentsOf) и рабочие места деловых — по 4 на этаж. */
 export function recountPopulation(town: Town): void {
-  town.population = town.buildings.reduce((sum, b) => sum + (b.kind === 'res' ? b.floors * 14 : b.kind === 'com' ? b.floors * 4 : 0), 0);
+  town.population = town.buildings.reduce((sum, b) => sum + (b.kind === 'res' ? residentsOf(b) : b.kind === 'com' ? b.floors * JOBS_PER_FLOOR : 0), 0);
 }
 
 /**

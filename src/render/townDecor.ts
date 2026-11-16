@@ -129,9 +129,15 @@ export function bench(a: Art, x: number, y: number, ux: number, uy: number, side
   c.stroke();
 }
 
+/**
+ * Фонари пока выключены: освещение вернётся вместе с ночным режимом (тогда — и свет от них). Места под фонари в
+ * раскладке парков, площадей и улиц остаются.
+ */
+export const LAMPS_ON = false;
+
 /** Фонарь: столб с тенью и светлым плафоном — только совсем вблизи (fine). */
 export function lamp(a: Art, x: number, y: number, fine: boolean): void {
-  if (!fine) return;
+  if (!fine || !LAMPS_ON) return;
   if (a.pass === 1) return a.capsule(x, y, 0.13, 4.5);
   if (a.pass !== 2) return;
   const c = a.c;

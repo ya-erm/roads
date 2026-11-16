@@ -54,7 +54,18 @@ import { Camera } from './camera';
 import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
 import { drawHouseArt, hallFountain, houseReach } from './houseArt';
-import { drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
+import {
+  drawFountainRipples,
+  drawParkArt,
+  drawSidewalks,
+  drawStreetGreen,
+  FOUNTAIN_ZOOM,
+  PARK_REACH,
+  parkFountains,
+  streetGreen,
+  type StreetGreen,
+  type WalkSite,
+} from './parkArt';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, contourLabel, fineContourStep, gradeRungs, heightLabel, ReliefRenderer, waterPath } from './relief';
@@ -66,7 +77,9 @@ import { drawRailProjects, drawTrackMachines, railProjectSig } from './railProje
 import { WORK_TRAIN } from '../game/workTrains';
 import { SERVICES } from '../game/services';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
-import { corridorHalf } from '../world/worldgen';
+import { corridorHalf, halfAtS } from '../world/worldgen';
+import { storeysOf, townTier } from '../world/townForms';
+import { drawTownWalks, type TownWalks, townWalks } from './townWalks';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, flashSpot, frontLength, sirenVisibility } from './vehicleArt';
@@ -74,6 +87,9 @@ import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
 import { type Hiders, TreeCover } from './treeCover';
 import { carLayers, railSegLayer } from './trainLayer';
 import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
+
+/** Дорожки кварталов города в его записи кэша карты — под этим номером (id домов и парков — другие). */
+const WALKS_KEY = -1e9;
 
 export type Selection =
   | { type: 'station'; id: number }
@@ -473,8 +489,10 @@ export class Renderer {
     /** Аллеи и фонари вдоль улиц городов (parkArt.streetGreen) — по полотну. */
     alleys: new SceneDiff(),
   };
-  /** Аллеи и фонари: с какими дорогами, строениями и радиусами городов посчитаны. */
+  /** Аллеи и тротуары: с какими дорогами, строениями, радиусами и застройкой городов посчитаны. */
   private alleys = { key: '', things: '', lines: [] as StreetGreen[], cache: new Map<number, { sig: string; line: StreetGreen | null }>() };
+  /** Дорожки кварталов по городам (townWalks): считаются, когда меняется список домов или парков города. */
+  private walks = new Map<number, TownWalks>();
   /** Ход работ на строящихся полотнах в плитках (drawnSpans) — при той же форме (projectSig): шаг сбрасывает только край работ. */
   private progress = new Map<number, { sig: string; spans: Spans }>();
   /** С чем сверены слепки: партия, карта, вид, сеть дорог на карте и её подсветка, версия путей. */
@@ -546,6 +564,7 @@ export class Renderer {
     this.diffs.towns.clear();
     this.diffs.alleys.clear();
     this.alleys = { key: '', things: '', lines: [], cache: new Map() };
+    this.walks.clear();
     this.progress.clear();
     this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1, full: null, fullVersion: -1 };
   }
@@ -784,6 +803,9 @@ export class Renderer {
     this.drawEnterpriseGround(game, view);
     // Парки и скверы — под дорогами: дорога игрока через парк ложится поверх (parkArt).
     this.drawParks(game, view);
+    // Тротуары вдоль улиц и дорожки кварталов — тоже под дорогами: у перекрёстков их закрывает полотно (townWalks).
+    drawSidewalks(ctx, this.alleys.lines, view, this.camera.zoom);
+    drawTownWalks(ctx, [...this.walks.values()], view, this.camera.zoom);
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
     drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
@@ -1100,27 +1122,62 @@ export class Renderer {
       rec.n = town.buildings.length;
       rec.parks = parks;
       rec.np = parks?.length ?? 0;
+      // Дорожки кварталов (townWalks) — по домам и паркам города: раз на их список, а не в каждой плитке.
+      const net = game.roads.net;
+      const walks = townWalks(town, (p) => {
+        let best = Infinity;
+        for (const c of net.corridorsNear(p, 30)) {
+          if (c.build) continue;
+          const hit = c.lut.closest(p);
+          best = Math.min(best, hit.d - halfAtS(c, hit.s));
+        }
+        return best;
+      });
+      if (walks) this.walks.set(town.id, walks);
+      else this.walks.delete(town.id);
       add(
         rec.diff.update((put) => {
-          // Рамка — с тенью и площадью у ратуши (houseArt): они выходят за контур дома.
-          for (const b of town.buildings) put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${b.color}|${b.roof}|${b.form}|${b.face}`, grow(fpBox(b.fp), houseReach(b)));
+          // Рамка — с тенью и площадью у ратуши (houseArt): они выходят за контур дома. Этажи жилого — по жильцам.
+          for (const b of town.buildings)
+            put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}`, grow(fpBox(b.fp), houseReach(b)));
           // Парки — отрицательными номерами (id парка — не id сущности).
           for (const p of parks ?? []) put(-p.id - 1, `${fpSig(p.fp)}|${p.kind}`, grow(fpBox(p.fp), PARK_REACH));
+          if (walks) put(WALKS_KEY, walks.sig, walks.box);
         }),
       );
     }
-    // Аллеи и фонари: по дорогам, остановкам и строениям у бордюра, черте городов (с шагом 50 м — не каждый месяц).
-    // Полотна, что не менялись, — из кэша (streetGreen); новая станция или предприятие — пересчёт всех.
+    // Аллеи и тротуары: по дорогам, остановкам и строениям у бордюра, черте городов (с шагом 50 м — не каждый месяц) и
+    // их застройке (тротуар — где рядом дома). Полотна, что не менялись, — из кэша (streetGreen); новая станция или
+    // предприятие — пересчёт всех; вырос город — пересчёт его полотен.
     const things = `${game.stations.size}|${game.industries.length}|${game.construction.crews.bases.size}`;
-    const alleyKey = `${game.roads.net.version}|${things}|${game.towns.map((t) => Math.floor(t.radius / 50)).join(',')}`;
+    const alleyKey = `${game.roads.net.version}|${things}|${game.towns.map((t) => `${Math.floor(t.radius / 50)}:${t.buildings.length}`).join(',')}`;
     if (alleyKey !== this.alleys.key) {
       this.alleys.key = alleyKey;
       // Кэш — по полотнам; снесённых накопилось много — с чистого листа.
       if (things !== this.alleys.things || this.alleys.cache.size > game.roads.net.corridors.size * 2 + 200) this.alleys.cache.clear();
       this.alleys.things = things;
       const index = game.index;
+      const terrain = game.terrain;
       const towns = game.towns.map((t) => ({ center: t.center, radius: Math.floor(t.radius / 50) * 50 }));
-      this.alleys.lines = streetGreen(game.roads.net, towns, (p, r) => index.at(p, r) !== null, this.alleys.cache);
+      const site: WalkSite = {
+        around: (p, r) => {
+          const houses: Footprint[] = [];
+          const others: Footprint[] = [];
+          for (const s of index.near(p, r)) {
+            if (s.type === 'building' && s.kind === 'landmark') continue;
+            (s.type === 'building' ? houses : others).push(s.fp);
+          }
+          return { houses, others };
+        },
+        wet: (p) => terrain.isWater(p, 0.6),
+        townAt: (p) => {
+          const t = game.towns.find((x) => dist(p, x.center) < (x.extent ?? x.radius) + 20);
+          if (!t) return null;
+          const tier = townTier(t);
+          return { paved: tier !== 'village', key: `${t.id}:${tier}` };
+        },
+      };
+      this.alleys.lines = streetGreen(game.roads.net, towns, (p, r) => index.at(p, r) !== null, this.alleys.cache, site);
       add(this.diffs.alleys.update((put) => this.alleys.lines.forEach((l) => put(l.id, l.sig, l.box))));
     }
     add(

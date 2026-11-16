@@ -6,11 +6,14 @@ import type { Footprint } from './spatial';
 /**
  * Типы застройки: как выглядит дом города — по месту в городе (см. docs/DESIGN.md, «Застройка городов»).
  *
- * Жители и рабочие места по-прежнему считаются по kind и floors (recountPopulation): тип — только вид дома.
+ * Жители города — те же, что по этажам генерации (14 на «этаж» floors, рост приносит столько же), но по домам они
+ * раскладываются правдоподобно (settlePeople): в частном доме — 3–6 человек, в даче — 2–4, а остальные — в
+ * многоквартирных домах того же города, и этажей у такого дома столько, сколько нужно его жильцам (storeysOf).
  * Выбор детерминирован: место в городе, размер города и хеш от id дома, без генератора случайных чисел партии —
- * поэтому мир по seed тот же, что был, а старые сохранения получают типы при загрузке по своим же данным.
+ * поэтому мир по seed тот же, что был, а старые сохранения получают типы и жильцов при загрузке по своим же данным.
  *
- * - Село: частные дома с участками; магазин, склад на краю, храм в центре.
+ * - Село: по краю — частные дома с участками, ближе к центру — двух-трёхэтажные многоквартирные дома (жителей села
+ *   больше, чем вместили бы одни частные дома); магазин, склад на краю, храм в центре.
  * - Город: у центра — дома старого центра вдоль улиц и кварталы с дворами-колодцами; дальше — частный сектор,
  *   на самом краю — дачи; гаражи и склады у края; ратуша на площади, школа, больница, рынок.
  * - Новый район (сетка улиц, Town.district): панельные дома с дворами — соседние участки вдоль улицы при
@@ -57,9 +60,10 @@ export function formOf(b: Pick<TownBuilding, 'form' | 'kind' | 'floors' | 'fp'>)
 export const FORM_NAMES: Record<HouseForm, string> = {
   cottage: 'Частный дом',
   dacha: 'Дача',
-  townhouse: 'Малоэтажный дом',
+  walkup: 'Многоквартирный дом',
+  townhouse: 'Дом старого центра',
   courtyard: 'Квартал с двором',
-  slab: 'Многоэтажный дом',
+  slab: 'Панельный дом',
   tower: 'Высотка',
   shop: 'Магазин',
   store: 'Сельский магазин',
@@ -104,7 +108,7 @@ export function placeForm(town: Pick<Town, 'center' | 'radius' | 'population' | 
   if (edge > 0.95 && b.floors === 1 && k < 0.45) return 'dacha';
   const core = tier === 'city' ? 0.5 : 0.38;
   if (edge < core) return 'townhouse';
-  if (edge < core + 0.2) return b.floors >= 2 && k < 0.7 ? 'townhouse' : 'cottage';
+  if (edge < core + 0.2) return b.floors >= 2 ? (k < 0.45 ? 'townhouse' : 'walkup') : 'cottage';
   return 'cottage';
 }
 
@@ -154,10 +158,162 @@ export function pickPublic(town: Town): void {
   }
 }
 
-/** Типы домам города, у которых их ещё нет (новые и из старых сохранений), и общественные здания по размеру города. */
+/**
+ * Типы домам города, у которых их ещё нет (новые и из старых сохранений), общественные здания по размеру города и
+ * жильцы новым домам (settlePeople).
+ */
 export function zoneTown(town: Town): void {
   for (const b of town.buildings) if (!b.form) b.form = placeForm(town, b);
   pickPublic(town);
+  settlePeople(town);
+}
+
+// ---------- Жители по домам ----------
+
+/** Жителей на «этаж» дома генерации (TownBuilding.floors): столько дом приносит городу, когда появляется. */
+export const RES_PER_FLOOR = 14;
+/** Рабочих мест на этаж делового дома. */
+export const JOBS_PER_FLOOR = 4;
+
+/** Жители жилого дома: свои (people) или, пока их не разложили, — по этажам генерации; у прочих — 0. */
+export function residentsOf(b: Pick<TownBuilding, 'kind' | 'floors' | 'people'>): number {
+  return b.kind === 'res' ? (b.people ?? b.floors * RES_PER_FLOOR) : 0;
+}
+
+/** Сколько живёт в частном доме и на даче: от и до (по хешу дома). */
+const PRIVATE: Partial<Record<HouseForm, readonly [number, number]>> = { cottage: [3, 6], dacha: [2, 4] };
+
+/**
+ * Многоквартирные дома: сколько жильцов на этаж (по размеру участка — сколько подъездов и квартир на площадке
+ * поместится в корпус, что рисует houseArt), сколько этажей у дома по проекту (из этажей генерации) и до скольких
+ * его можно надстроить в селе, городе и большом городе. Выше «проектных» этажей дом растёт, только когда жильцов
+ * больше, чем на них помещается.
+ */
+interface Stack {
+  per: (fp: Footprint) => number;
+  design: (floors: number) => number;
+  max: Record<TownTier, number>;
+}
+
+const clampInt = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(x)));
+/** Длина корпуса панельного дома: вдоль улицы или (узкий глубокий участок) вглубь. */
+const slabLength = (fp: Footprint) => (fp.w >= fp.h * 0.8 || fp.h < 30 ? fp.w - 3 : fp.h - 5);
+
+const STACKS: Partial<Record<HouseForm, Stack>> = {
+  // Двух-трёхэтажный дом на 2–3 подъезда: квартиры по 2–3 на площадке.
+  walkup: { per: (fp) => clampInt(fp.w * 0.75, 10, 30), design: () => 2, max: { village: 3, town: 4, city: 4 } },
+  townhouse: { per: (fp) => clampInt(fp.w * 0.8, 10, 30), design: (f) => clampInt(f + 1, 2, 4), max: { village: 3, town: 4, city: 5 } },
+  courtyard: { per: (fp) => clampInt((fp.w + fp.h) * 0.6, 20, 60), design: (f) => clampInt(f, 3, 5), max: { village: 4, town: 5, city: 6 } },
+  slab: { per: (fp) => clampInt(slabLength(fp) * 0.55, 12, 90), design: (f) => clampInt(f, 5, 12), max: { village: 5, town: 9, city: 14 } },
+  tower: { per: () => 18, design: (f) => clampInt(f, 9, 16), max: { village: 9, town: 16, city: 24 } },
+};
+/** Выше стольких этажей дом не рисуется, сколько бы в нём ни жило (на случай старых и тестовых данных). */
+const TOP: Partial<Record<HouseForm, number>> = { walkup: 4, townhouse: 5, courtyard: 6, slab: 16, tower: 25 };
+
+/**
+ * Этажей у жилого дома — по его жильцам и типу: у частного дома 1 или 2 (мансарда у семьи побольше), у дачи 1, у
+ * многоквартирного — сколько нужно жильцам, но не ниже проекта. У деловых и ратуши — этажи генерации.
+ */
+export function storeysOf(b: Pick<TownBuilding, 'id' | 'kind' | 'floors' | 'people' | 'form' | 'fp'>): number {
+  if (b.kind !== 'res') return b.floors;
+  const form = formOf(b);
+  const people = residentsOf(b);
+  if (form === 'cottage') return people >= 5 || (people >= 4 && hash(b.id, 33) < 0.4) ? 2 : 1;
+  if (form === 'dacha') return 1;
+  const s = STACKS[form];
+  if (!s) return b.floors;
+  return Math.max(s.design(b.floors), Math.min(TOP[form] ?? 25, Math.ceil(people / s.per(b.fp) - 0.15)));
+}
+
+/** Квартир в жилом доме: в частном и на даче — одна семья, в многоквартирном — по 2,6 человека на квартиру. */
+export function flatsOf(b: Pick<TownBuilding, 'kind' | 'floors' | 'people' | 'form' | 'fp'>): number {
+  if (b.kind !== 'res' || PRIVATE[formOf(b)]) return 1;
+  return Math.max(2, Math.round(residentsOf(b) / 2.6));
+}
+
+/** Сколько живёт в частном доме или на даче (по хешу дома). */
+function privateFolk(b: TownBuilding): number {
+  const [lo, hi] = PRIVATE[formOf(b)]!;
+  return lo + Math.floor(hash(b.id, 31) * (hi - lo + 1));
+}
+
+/** Вместимость многоквартирного дома: по проектным этажам (design) или до предела надстройки города (max). */
+function capacity(b: TownBuilding, tier: TownTier, upTo: 'design' | 'max'): number {
+  const s = STACKS[formOf(b)]!;
+  const floors = upTo === 'design' ? s.design(b.floors) : Math.max(s.design(b.floors), s.max[tier]);
+  return s.per(b.fp) * floors;
+}
+
+/** Многоквартирные дома не забиваются под самую крышу: частных домов меньше, если иначе жильцов некуда деть. */
+const FILL = 0.85;
+
+/**
+ * Раскладывает amount жильцов по домам list пропорционально свободному месту room(b) (не больше него), целыми:
+ * остаток — тем, у кого дробная часть больше. Возвращает, сколько не влезло.
+ */
+function pour(list: readonly TownBuilding[], amount: number, room: (b: TownBuilding) => number): number {
+  const rooms = list.map((b) => Math.max(0, Math.floor(room(b))));
+  const total = rooms.reduce((s, r) => s + r, 0);
+  if (amount <= 0 || total <= 0) return amount;
+  const give = Math.min(amount, total);
+  const parts = rooms.map((r) => (give * r) / total);
+  let rest = give;
+  list.forEach((b, i) => {
+    const n = Math.floor(parts[i]);
+    b.people = residentsOf(b) + n;
+    rest -= n;
+  });
+  const order = parts.map((p, i) => [p - Math.floor(p), i] as const).sort((x, y) => y[0] - x[0] || x[1] - y[1]);
+  for (const [, i] of order) {
+    if (rest <= 0) break;
+    if (rooms[i] > Math.floor(parts[i])) {
+      list[i].people = residentsOf(list[i]) + 1;
+      rest--;
+    }
+  }
+  return amount - give + rest;
+}
+
+/**
+ * Жильцы новым жилым домам города (и всем — у старых сохранений и при генерации), так что жителей города ровно
+ * столько же, сколько по этажам генерации (14 на этаж). В частном доме и на даче живёт по-настоящему мало — 3–6 и
+ * 2–4 человека; остальные из них переезжают в многоквартирные дома того же города (старого центра, кварталы,
+ * панельные, высотки, двух-трёхэтажки) — сперва до их проектных этажей, потом с надстройкой до предела города,
+ * пропорционально свободному месту. Если места не хватает (село — почти одни частные дома), ближние к центру новые
+ * частные дома сами становятся многоквартирными, пока многоквартирные не заполнятся не больше чем на FILL.
+ * Уже расселённые дома не меняют тип, но могут принять жильцов (город уплотняется). Детерминировано.
+ */
+export function settlePeople(town: Town): void {
+  const fresh = town.buildings.filter((b) => b.kind === 'res' && b.people === undefined);
+  if (!fresh.length) return;
+  const tier = townTier(town);
+  const priv = fresh.filter((b) => PRIVATE[formOf(b)]);
+  const extra = (b: TownBuilding) => b.floors * RES_PER_FLOOR - privateFolk(b);
+  let need = priv.reduce((s, b) => s + extra(b), 0);
+  const stacks = town.buildings.filter((b) => b.kind === 'res' && STACKS[formOf(b)]);
+  const room = (b: TownBuilding) => Math.max(0, capacity(b, tier, 'max') - residentsOf(b));
+  let free = stacks.reduce((s, b) => s + room(b), 0);
+  // Ближние к центру частные дома — многоквартирными, пока остальным частным не хватает места; из соседних — сперва
+  // на участке побольше (у улицы, а не во втором ряду): многоквартирному дому нужен корпус подлиннее.
+  const rank = (b: TownBuilding) => edgeOf(town, b.fp.center) - (b.fp.w * b.fp.h) / 600;
+  const order = [...priv].sort((x, y) => rank(x) - rank(y) || x.id - y.id);
+  for (let i = 0; i < order.length && need > free * FILL; i++) {
+    const b = order[i];
+    need -= extra(b);
+    b.form = 'walkup';
+    stacks.push(b);
+    free += room(b);
+  }
+  for (const b of priv) if (PRIVATE[formOf(b)]) b.people = privateFolk(b);
+  for (const b of fresh) if (b.people === undefined) b.people = b.floors * RES_PER_FLOOR;
+  // Сперва — до проектных этажей, потом — с надстройкой.
+  need = pour(stacks, need, (b) => capacity(b, tier, 'design') - residentsOf(b));
+  need = pour(stacks, need, room);
+  // Не влезло (почти не бывает: только округление) — в самый большой многоквартирный дом, иначе обратно в частные.
+  if (need > 0) {
+    const host = stacks.length ? stacks.reduce((x, y) => (capacity(y, tier, 'max') > capacity(x, tier, 'max') ? y : x)) : priv[0];
+    if (host) host.people = residentsOf(host) + need;
+  }
 }
 
 // ---------- Новый район: соседние участки — в один панельный дом ----------

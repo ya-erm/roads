@@ -50,13 +50,24 @@ describe('Пассажиры и груз копятся, как только е�
     expect(waitingPax(sA)).toBeGreaterThan(0);
     expect([...sA.passengers.keys()]).toEqual([sB.id]);
     expect(game.lineWaiting(line!, 0, 'passengers')).toBe(waitingPax(sA));
-    // Без машин — не больше предела станции; со временем упираются в него и не растут.
-    runSeconds(game, 60);
-    expect(waitingPax(sA)).toBe(game.stationCap(sA, 'passengers'));
+    // Без машин — не больше предела станции; со временем упираются в него и не растут. Как скоро — по жителям в охвате
+    // станции (в частных домах окраины их немного): ждём кусками по 5 с, но не дольше 10 минут.
+    const cap = game.stationCap(sA, 'passengers');
+    let steps = 0;
+    while (waitingPax(sA) < cap && steps < 120) {
+      runSeconds(game, 5);
+      steps++;
+      expect(waitingPax(sA)).toBeLessThanOrEqual(cap);
+    }
+    expect(waitingPax(sA)).toBe(cap);
+    runSeconds(game, 30);
+    expect(waitingPax(sA)).toBe(cap);
 
     // Детерминизм: те же действия — те же пассажиры.
     const again = twoTowns(true);
-    runSeconds(again.game, 75);
+    runSeconds(again.game, 15);
+    for (let k = 0; k < steps; k++) runSeconds(again.game, 5);
+    runSeconds(again.game, 30);
     expect([...again.sA.passengers]).toEqual([...sA.passengers]);
     expect([...again.sB.passengers]).toEqual([...sB.passengers]);
   });
