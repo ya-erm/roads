@@ -3,6 +3,7 @@ import type { Footprint } from '../world/spatial';
 import { CAR_SIZE, cottagePlan, LOT_SETBACK } from '../world/houseAccess';
 import { formOf, storeysOf } from '../world/townForms';
 import { Art, disc, METAL } from './industryArt';
+import { WALK_LOOK } from './sidewalks';
 import { bench, flowerbed, fountain, lamp, playground as playArea, sportsBox, statue, trashPad } from './townDecor';
 
 /**
@@ -316,10 +317,12 @@ function fence(a: Art, lot: Lot, kind: number, gate: number, gate2?: number, gw 
 
 /**
  * Дорожка к крыльцу: у x шириной w, в участке — от его края до y. Дальше, через газон до тротуара, — под дорогами
- * (houseAccess). Земля (проход 0).
+ * (houseAccess). Цветом тротуара (WALK_LOOK), непрозрачная: в участке и за ним — одно покрытие с тротуаром. Земля
+ * (проход 0).
  */
-function frontPath(a: Art, lot: Lot, x: number, y: number, w = 1.4, color = GRAVEL): void {
+function frontPath(a: Art, lot: Lot, x: number, y: number, w = 1.4): void {
   if (a.pass !== 0 || !a.lod) return;
+  const color = WALK_LOOK.paved.fill;
   accessSink?.push({ kind: 'path', x, w, side: -1, color });
   const y0 = -lot.H / 2;
   if (y > y0) a.patch(x - w / 2, y0, w, y - y0, color);
@@ -553,7 +556,7 @@ function walkup(a: Art, lot: Lot): void {
   const step = bw / sections;
   const roof = b.roof;
   // Подъезды: дорожки от тротуара к каждому.
-  for (let k = 0; k < sections; k++) frontPath(a, lot, bx + step * (k + 0.5), by, 1.6, PAVING);
+  for (let k = 0; k < sections; k++) frontPath(a, lot, bx + step * (k + 0.5), by, 1.6);
   // Двор: сараи вдоль задней границы, на широком — ещё грядки и палисадники, лавочка, дерево.
   const yard = by + bd + 0.8;
   const yEnd = H / 2 - 0.6;
@@ -599,7 +602,7 @@ function townhouse(a: Art, lot: Lot): void {
   const rest = H / 2 - back - 0.6;
   // Вход с улицы — дорожка через газон к двери, во двор — проезд-арка (въезд с улицы).
   const door = (a.r(9) - 0.5) * W * 0.4;
-  frontPath(a, lot, door, y0 + 0.6, 1.8, PAVING);
+  frontPath(a, lot, door, y0 + 0.6, 1.8);
   if (rest > 4) {
     const fw = clamp(W * 0.38, 5.5, 9);
     const left = a.r(1) < 0.5;
@@ -785,7 +788,7 @@ function slab(a: Art, lot: Lot): void {
       const yy = y0 + 2 + ph + 1.5;
       yardItems(a, lot, yardX, yy, yw, H / 2 - 1 - yy, 30);
     }
-    frontPath(a, lot, bx + bw / 2, y0 + 2.6, 1.8, PAVING);
+    frontPath(a, lot, bx + bw / 2, y0 + 2.6, 1.8);
     flat(a, bx, y0 + 2.5, bw, H - 5, z, b.roof, 15);
   }
 }
@@ -821,7 +824,7 @@ function tower(a: Art, lot: Lot): void {
     yardItems(a, lot, cx0, y0 + 13.5, cx1 - cx0, H - 27, 50);
     treeRow(a, lot, x0 + 1, -x0 - 1, y0 + 10.4, 7, 2.2, 40);
     treeRow(a, lot, x0 + 1, -x0 - 1, H / 2 - 10.4, 7, 2.2, 80);
-    frontPath(a, lot, tx, ty, 2, PAVING);
+    frontPath(a, lot, tx, ty, 2);
   } else {
     T = clamp(Math.min(W, H) - 3, 16, 24);
     tx = left ? x0 + 2 + T / 2 + 2 : -x0 - 2 - T / 2 - 2;
@@ -834,7 +837,7 @@ function tower(a: Art, lot: Lot): void {
       if (H > 18 && rest > 12) playArea(a, px + rest / 2 - 4, y0 + 9, Math.min(8, H - 11), b.id, lot.fine);
       treeRow(a, lot, px, px + rest, H / 2 - 2, 6.5, 2.2, 40);
     }
-    frontPath(a, lot, tx, ty, 2, PAVING);
+    frontPath(a, lot, tx, ty, 2);
   }
   const roof = tone(b.roof, 0.18);
   const k = T * 0.22;
@@ -860,7 +863,7 @@ function shop(a: Art, lot: Lot): void {
   const by = y0 + 2.2;
   lawn(a, lot);
   a.patch(x0 + 0.4, y0 + 0.4, W - 0.8, Math.min(H - 0.8, d + 3.4), PAVING, 0.5);
-  frontPath(a, lot, bx + w / 2, by, 2.4, PAVING);
+  frontPath(a, lot, bx + w / 2, by, 2.4);
   if (H - d > 9) yardTree(a, lot, left ? x0 + 3 : -x0 - 3, H / 2 - 2.6, 2.2, 9);
   // Стоянка покупателей — сбоку (съезд прямо к ней) или за магазином (съезд вдоль торца).
   if (!big && W - w > 7) {
@@ -925,7 +928,7 @@ function office(a: Art, lot: Lot): void {
   const roof = glass ? '#9fb4c4' : tone(b.roof, 0.1);
   const w = W - 2.4;
   const d = H - 3.4;
-  frontPath(a, lot, (a.r(3) - 0.5) * w * 0.5, y0 + 1.4, 2.6, PAVING);
+  frontPath(a, lot, (a.r(3) - 0.5) * w * 0.5, y0 + 1.4, 2.6);
   if (b.floors >= 3 && a.r(2) < 0.6) {
     flat(a, x0 + 1.2, y0 + 1.2, w, d, z * 0.65, tone(roof, 0.12));
     flat(a, x0 + 1.2 + w * 0.12, y0 + 1.2 + d * 0.1, w * 0.76, d * 0.62, z, roof);
@@ -945,7 +948,7 @@ function market(a: Art, lot: Lot): void {
   const y0 = -H / 2;
   a.patch(x0 + 0.3, y0 + 0.3, W - 0.6, H - 0.6, PAVING, 0.5);
   // Рынок открыт к улице: мощение — через газон до тротуара.
-  frontPath(a, lot, 0, y0 + 0.5, W * 0.6, PAVING);
+  frontPath(a, lot, 0, y0 + 0.5, W * 0.6);
   const hd = clamp(H * 0.34, 6, 10);
   pitched(a, x0 + 1.5, H / 2 - 1.2 - hd, W - 3, hd, 4.5, '#8fa3ad', true, 0, true);
   const rows = Math.max(1, Math.floor((H - hd - 4) / 5));
@@ -996,7 +999,7 @@ function school(a: Art, lot: Lot): void {
   }
   const z = wallZ(Math.min(b.floors, 4));
   const roof = '#c9b79a';
-  frontPath(a, lot, 0, by, 3.2, PAVING);
+  frontPath(a, lot, 0, by, 3.2);
   flat(a, x0 + 1.5, by + d, d, wingL - d, z, roof);
   flat(a, -x0 - 1.5 - d, by + d, d, wingL - d, z, roof);
   flat(a, x0 + 1.5, by, W - 3, d, z, roof);

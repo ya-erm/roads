@@ -58,7 +58,7 @@ import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
 import { drawHouseArt, hallFountain, houseReach } from './houseArt';
 import { drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
-import { drawSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, type WalkSite } from './sidewalks';
+import { type SidewalkCache, type SidewalkNet, sidewalkNet, type WalkSite } from './sidewalks';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, contourLabel, fineContourStep, gradeRungs, heightLabel, ReliefRenderer, waterPath } from './relief';
@@ -828,9 +828,9 @@ export class Renderer {
     this.drawEnterpriseGround(game, view);
     // Парки и скверы — под дорогами: дорога игрока через парк ложится поверх (parkArt).
     this.drawParks(game, view);
-    // Тротуары вдоль улиц и дорожки кварталов — тоже под дорогами: у перекрёстков их закрывает полотно (townWalks).
-    drawSidewalks(ctx, this.sidewalks.lines, view, this.camera.zoom);
-    drawTownWalks(ctx, [...this.walks.values()], view, this.camera.zoom);
+    // Тротуары вдоль улиц и дорожки кварталов — тоже под дорогами: у перекрёстков их закрывает полотно; дорожки —
+    // слоем под тротуаром, одним с ним покрытием (townWalks).
+    drawTownWalks(ctx, [...this.walks.values()], view, this.camera.zoom, this.sidewalks.lines);
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
     drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);

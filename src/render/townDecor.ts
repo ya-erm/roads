@@ -68,24 +68,29 @@ function trace(c: CanvasRenderingContext2D, p: Path): void {
   for (let i = 2; i < p.length; i += 2) c.lineTo(p[i], p[i + 1]);
 }
 
-/** Дорожки (проход земли): ближе — с тёмной кромкой; издали (lod 0) — только у широких. */
-export function paths(a: Art, list: readonly Path[], w: number, color = GRAVEL, edge = GRAVEL_EDGE): void {
+/**
+ * Дорожки (проход земли): ближе — с тёмной кромкой; издали (lod 0) — только у широких. part — только кромка или только
+ * заливка: чтобы у тротуаров и дорожек кварталов сначала легли все кромки, потом заливки (стык — одним покрытием).
+ */
+export function paths(a: Art, list: readonly Path[], w: number, color = GRAVEL, edge = GRAVEL_EDGE, part: 'edge' | 'fill' | 'both' = 'both'): void {
   if (a.pass !== 0 || (!a.lod && w < 3)) return;
   const c = a.c;
   c.lineCap = 'round';
   c.lineJoin = 'round';
-  if (a.d) {
+  if (a.d && part !== 'fill') {
     c.strokeStyle = edge;
     c.lineWidth = w + 0.7;
     c.beginPath();
     for (const p of list) trace(c, p);
     c.stroke();
   }
-  c.strokeStyle = color;
-  c.lineWidth = w;
-  c.beginPath();
-  for (const p of list) trace(c, p);
-  c.stroke();
+  if (part !== 'edge') {
+    c.strokeStyle = color;
+    c.lineWidth = w;
+    c.beginPath();
+    for (const p of list) trace(c, p);
+    c.stroke();
+  }
   c.lineCap = 'butt';
   c.lineJoin = 'miter';
 }

@@ -1,17 +1,20 @@
-import type { Vec } from '../core/vec';
+import { add, cross, norm, sub, type Vec } from '../core/vec';
+import { edgesAt, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
 import type { Corridor, CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
+import { ROAD_MARGIN } from '../world/roadTypes';
 import { type Footprint, pointInFootprint } from '../world/spatial';
-import { halfAtS } from '../world/worldgen';
 import { Art } from './industryArt';
 import { type Box, grow } from './tileCache';
 import { paths } from './townDecor';
 
 /**
  * Тротуары вдоль улиц городов — только картинка: дорог, узлов, движения и стройки не меняют; рисуются под дорогами
- * (drawSidewalks), в плитки кэша карты. Вдоль полотна — по обеим сторонам, где рядом дома; у перекрёстка тротуары
- * соседних улиц сходятся скруглением по углу квартала (радиус бордюра CURB), на повороте улицы и у тупика — дугой
- * вокруг узла. Концы тротуаров у узла (SidewalkEnd) — там, где тротуар улицы переходит в скругление угла: от конца
- * до конца через улицу ляжет пешеходный переход.
+ * (drawSidewalks), в плитки кэша карты. Полоса постоянной ширины вплотную к краю асфальта — по той же геометрии, что
+ * асфальт (lanes/geometry: края полос edgesAt + ROAD_MARGIN, обрезы junctionCuts, площадка plateOutline): вдоль
+ * полотна — по обеим сторонам, где рядом дома, по его кривой; у перекрёстка тротуары соседних улиц сходятся по
+ * бордюру угла площадки (концентрично ему); у стыка (развилка) — скруглением радиуса CURB, на повороте улицы и у
+ * тупика — дугой вокруг узла (у тупика — вокруг центра разворота). Концы тротуаров у узла (SidewalkEnd) — там, где
+ * тротуар улицы переходит в скругление угла: от конца до конца через улицу ляжет пешеходный переход.
  */
 
 /** Тротуар: от края полотна (from) шириной w, м. Город — мощёный у самого бордюра, село — утоптанная тропинка. */
@@ -75,6 +78,18 @@ export function sidewalkEnds(net: SidewalkNet, node: number): SidewalkEnd[] {
 
 const rot = (v: Vec): Vec => ({ x: -v.y, y: v.x });
 
+/**
+ * Ось тротуара стороны side полотна c на s — смещение от оси полотна (как pointOff): от края асфальта этой стороны
+ * (кромка крайней полосы + ROAD_MARGIN, как рисуется полотно) на from + w/2 — у несимметричного полотна тоже вплотную.
+ */
+function walkOff(c: Corridor, s: number, side: 1 | -1, paved: boolean): number {
+  const spec = paved ? SIDEWALK.paved : SIDEWALK.path;
+  const d = ROAD_MARGIN + spec.from + spec.w / 2;
+  const e = edgesAt(c, s);
+  if (!e) return side * d;
+  return side === 1 ? e[1] + d : e[0] - d;
+}
+
 /** Полотно с тротуаром: улица, проспект или грунтовка на земле, не строящаяся и не кольцо площади. */
 function walkable(roads: LaneNet, c: Corridor): boolean {
   if (c.build || c.ring || (c.cls !== 'avenue' && c.cls !== 'street' && c.cls !== 'dirt')) return false;
@@ -95,12 +110,44 @@ interface Trim {
 interface Corner {
   via: Vec | null;
   center: Vec;
+  /** У перекрёстка — бордюр угла площадки (plateOutline): тротуар идёт вдоль него. */
+  curb?: Vec[];
   from: { c: number; end: 'a' | 'b'; side: 1 | -1 };
   to: { c: number; end: 'a' | 'b'; side: 1 | -1 };
 }
 
+/**
+ * Тротуар вдоль бордюра curb (от края одного подъезда к краю другого) — от конца тротуара A до конца B: каждая точка
+ * бордюра сдвинута наружу (в сторону A) на столько же, на сколько A от начала бордюра, — по биссектрисе соседних
+ * отрезков, поэтому дуга угла — концентрична бордюру. Где бордюр круче радиуса сдвига (внутренний угол), точки,
+ * что пошли бы назад, пропускаются — без петли.
+ */
+function curbPts(curb: Vec[], A: Vec, B: Vec): number[] {
+  const n = curb.length;
+  const out: Vec[] = [A];
+  const d = Math.hypot(A.x - curb[0].x, A.y - curb[0].y);
+  const sgn = Math.sign(cross(sub(curb[1], curb[0]), sub(A, curb[0]))) || 1;
+  const ahead = (q: Vec, i: number) => {
+    const last = out[out.length - 1];
+    const t = sub(curb[i], curb[i - 1]);
+    return (q.x - last.x) * t.x + (q.y - last.y) * t.y > 1e-3;
+  };
+  for (let i = 1; i < n - 1; i++) {
+    const u = norm(sub(curb[i], curb[i - 1]));
+    const v = norm(sub(curb[i + 1], curb[i]));
+    const t = norm(add(u, v));
+    const k = d / Math.max(0.5, t.x * u.x + t.y * u.y);
+    const q = { x: curb[i].x - t.y * sgn * k, y: curb[i].y + t.x * sgn * k };
+    if (ahead(q, i)) out.push(q);
+  }
+  while (out.length > 1 && !ahead(B, n - 1)) out.pop();
+  out.push(B);
+  return out.flatMap((p) => [p.x, p.y]);
+}
+
 /** Точки скругления от конца тротуара A до конца B. */
 function cornerPts(k: Corner, A: Vec, B: Vec): number[] {
+  if (k.curb) return curbPts(k.curb, A, B);
   const pts: number[] = [];
   if (k.via) {
     const C = k.via;
@@ -133,8 +180,17 @@ const leftSide = (end: 'a' | 'b'): 1 | -1 => (end === 'a' ? 1 : -1);
 /**
  * Узел: концы полотен по кругу (против часовой), между соседними — угол квартала: обрезка тротуаров у узла и
  * скругление. Только между полотнами с тротуаром; соседнее без него (шоссе) — обрезка до пересечения, без дуги.
+ * Перекрёсток — по площадке асфальта (plateOutline): тротуары улиц доходят до обрезов полотен, между ними — вдоль
+ * бордюра угла. dOf — от узла до оси тротуара конца e со стороны side.
  */
-function nodeCorners(roads: LaneNet, node: LaneNode, dOf: (e: CorridorEnd) => number, ok: (c: Corridor) => boolean, trims: Map<number, Trim>): Corner[] {
+function nodeCorners(
+  roads: LaneNet,
+  node: LaneNode,
+  dOf: (e: CorridorEnd, side: 1 | -1) => number,
+  ok: (c: Corridor) => boolean,
+  trims: Map<number, Trim>,
+  cuts: Map<number, [number, number]>,
+): Corner[] {
   const ends = roads.ends(node).sort((x, y) => Math.atan2(x.away.y, x.away.x) - Math.atan2(y.away.y, y.away.x));
   const out: Corner[] = [];
   const setTrim = (e: CorridorEnd, side: 1 | -1, t: number) => {
@@ -142,6 +198,31 @@ function nodeCorners(roads: LaneNet, node: LaneNode, dOf: (e: CorridorEnd) => nu
     if (!tr) trims.set(e.corridor.id, (tr = { a: {}, b: {} }));
     tr[e.end][side] = Math.max(tr[e.end][side] ?? 0, t);
   };
+  if (node.kind === 'junction' && ends.length >= 2) {
+    const plate = plateOutline(roads, node, cuts);
+    const cut = (e: CorridorEnd) => cuts.get(e.corridor.id)?.[e.end === 'a' ? 0 : 1] ?? 0;
+    for (const k of plate?.curbs ?? []) {
+      const si = leftSide(k.from.end);
+      const sj = (-leftSide(k.to.end)) as 1 | -1;
+      const okI = ok(k.from.corridor);
+      const okJ = ok(k.to.corridor);
+      if (okI) setTrim(k.from, si, cut(k.from));
+      if (okJ) setTrim(k.to, sj, cut(k.to));
+      if (!okI || !okJ || k.pts.length < 2) continue;
+      out.push({ via: null, center: node.pos, curb: k.pts, from: { c: k.from.corridor.id, end: k.from.end, side: si }, to: { c: k.to.corridor.id, end: k.to.end, side: sj } });
+    }
+    return out;
+  }
+  // Тупик: дуга — вокруг центра разворота (середины полотна на конце), как асфальт.
+  if (ends.length === 1) {
+    const e = ends[0];
+    const s = e.end === 'a' ? 0 : e.corridor.length;
+    const ed = edgesAt(e.corridor, s);
+    const center = ed ? pointOff(e.corridor, s, (ed[0] + ed[1]) / 2) : node.pos;
+    if (!ok(e.corridor)) return out;
+    const si = leftSide(e.end);
+    return [{ via: null, center, from: { c: e.corridor.id, end: e.end, side: si }, to: { c: e.corridor.id, end: e.end, side: (-si) as 1 | -1 } }];
+  }
   for (let i = 0; i < ends.length; i++) {
     const ei = ends[i];
     const ej = ends[(i + 1) % ends.length];
@@ -154,8 +235,8 @@ function nodeCorners(roads: LaneNet, node: LaneNode, dOf: (e: CorridorEnd) => nu
     const sj = (-leftSide(ej.end)) as 1 | -1;
     const ni = rot(ei.away);
     const mj = { x: -rot(ej.away).x, y: -rot(ej.away).y };
-    const di = dOf(ei);
-    const dj = dOf(ej);
+    const di = dOf(ei, si);
+    const dj = dOf(ej, sj);
     const Pi = { x: ei.pos.x + ni.x * di, y: ei.pos.y + ni.y * di };
     const Pj = { x: ej.pos.x + mj.x * dj, y: ej.pos.y + mj.y * dj };
     if (theta < STRAIGHT) {
@@ -208,10 +289,7 @@ function corridorRun(c: Corridor, site: WalkSite, paved: boolean, near: Around, 
     const pts: { x: number; y: number; ok: boolean }[] = [];
     for (let i = 0; i <= n; i++) {
       const s = s0 + ((s1 - s0) * i) / n;
-      const p = c.lut.pointAt(s);
-      const t = c.lut.tangentAt(s);
-      const off = halfAtS(c, s) + spec.from + spec.w / 2;
-      const q = { x: p.x - t.y * side * off, y: p.y + t.x * side * off };
+      const q = pointOff(c, s, walkOff(c, s, side, paved));
       pts.push({ ...q, ok: housed(q) && !blocked(q) && !site.wet(q) });
     }
     // Короткие разрывы — сшить.
@@ -279,10 +357,10 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
     if (town) eligible.set(c.id, { paved: town.paved, townKey: town.key });
   }
   const ok = (c: Corridor) => eligible.has(c.id);
-  const dOf = (e: CorridorEnd) => {
-    const spec = eligible.get(e.corridor.id)?.paved === false ? SIDEWALK.path : SIDEWALK.paved;
-    return halfAtS(e.corridor, e.end === 'a' ? 0 : e.corridor.length) + spec.from + spec.w / 2;
-  };
+  const dOf = (e: CorridorEnd, side: 1 | -1) =>
+    Math.abs(walkOff(e.corridor, e.end === 'a' ? 0 : e.corridor.length, side, eligible.get(e.corridor.id)?.paved !== false));
+  // Обрезы полотен у перекрёстков — как у асфальта (lanes/draw.ts): тротуар улицы доходит до площадки.
+  const cuts = junctionCuts(roads);
   // Углы кварталов у узлов: обрезка тротуаров и скругления.
   const trims = new Map<number, Trim>();
   const corners = new Map<number, Corner[]>();
@@ -291,7 +369,7 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
     const c = roads.corridor(id);
     nodes.add(c.a).add(c.b);
   }
-  for (const nid of nodes) corners.set(nid, nodeCorners(roads, roads.node(nid), dOf, ok, trims));
+  for (const nid of nodes) corners.set(nid, nodeCorners(roads, roads.node(nid), dOf, ok, trims, cuts));
   // Тротуары полотен.
   const runs = new Map<number, Run>();
   const lines: Sidewalk[] = [];
@@ -333,16 +411,23 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
   return { lines, ends };
 }
 
-const SIDEWALK_PAVED = '#d2cbbf';
-const SIDEWALK_EDGE = 'rgba(118,110,96,0.8)';
-const FOOTPATH = 'rgba(192,174,136,0.9)';
-const FOOTPATH_EDGE = 'rgba(150,134,102,0.4)';
+/**
+ * Цвета тротуаров и всех пешеходных дорожек города (дорожки кварталов, к крыльцам — render/townWalks.ts, houseArt):
+ * мощёные (город) и утоптанные (село) — заливка и кромка. Непрозрачные: где дорожка и тротуар сходятся или лежат друг
+ * на друге, не темнеет и не просвечивает — одно покрытие.
+ */
+export const WALK_LOOK = {
+  paved: { fill: '#d2cbbf', edge: '#857f6c' },
+  path: { fill: '#c1b28b', edge: '#ab9d78' },
+} as const;
 
 /**
  * Тротуары в рамке view — под дорогами, в плитки кэша: мощёные и тропинки — по одной обводке на вид; кромка — вблизи.
- * Издали (lod 0) тротуаров не видно.
+ * part — только кромки или только заливка (drawTownWalks кладёт дорожки кварталов между ними). Издали (lod 0)
+ * тротуаров не видно.
  */
-export function drawSidewalks(ctx: CanvasRenderingContext2D, lines: readonly Sidewalk[], view: Box, zoom: number): void {
+export function drawSidewalks(ctx: CanvasRenderingContext2D, lines: readonly Sidewalk[], view: Box, zoom: number, part: 'edge' | 'fill' | 'both' = 'both'): void {
+  if (!lines.length) return;
   const a = new Art(ctx, { id: 0, fp: { center: { x: 0, y: 0 }, w: 1, h: 1, angle: 0 } }, zoom, 0, 0, 'still');
   if (!a.lod) return;
   a.pass = 0;
@@ -350,6 +435,7 @@ export function drawSidewalks(ctx: CanvasRenderingContext2D, lines: readonly Sid
     const list = lines.filter((l) => l.paved === paved && l.box.x1 >= view.x0 && l.box.x0 <= view.x1 && l.box.y1 >= view.y0 && l.box.y0 <= view.y1).flatMap((l) => l.paths);
     if (!list.length) continue;
     const spec = paved ? SIDEWALK.paved : SIDEWALK.path;
-    paths(a, list, spec.w, paved ? SIDEWALK_PAVED : FOOTPATH, paved ? SIDEWALK_EDGE : FOOTPATH_EDGE);
+    const look = paved ? WALK_LOOK.paved : WALK_LOOK.path;
+    paths(a, list, spec.w, look.fill, look.edge, part);
   }
 }

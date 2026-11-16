@@ -7,7 +7,7 @@ import { townTier } from '../world/townForms';
 import { houseAccess } from './houseArt';
 import { Art } from './industryArt';
 import { parkGates } from './parkArt';
-import { SIDEWALK } from './sidewalks';
+import { drawSidewalks, SIDEWALK, type Sidewalk, WALK_LOOK } from './sidewalks';
 import { type Box, grow } from './tileCache';
 import { paths } from './townDecor';
 
@@ -20,6 +20,7 @@ import { paths } from './townDecor';
  * - от входов парка или сквера — до тротуара ближней улицы;
  * - от участка через газон и тротуар до полотна — дорожки к крыльцам и съезды к стоянкам и гаражам (houseArt.houseAccess):
  *   край у полотна закрывает асфальт дороги, а не съезд ложится поверх неё.
+ * Дорожки — непрозрачные, цветом тротуара (sidewalks.WALK_LOOK), и слоем под ним (drawTownWalks).
  * Считается раз на список домов и парков города (renderer), а не в каждой плитке.
  */
 
@@ -27,8 +28,8 @@ export interface TownWalks {
   townId: number;
   /** Ломаные дорожек (x, y по очереди). */
   paths: number[][];
-  /** Дорожки к крыльцам от участка до тротуара: отрезок (x0, y0, x1, y1), ширина и цвет. */
-  fronts: { pts: number[]; w: number; color: string }[];
+  /** Дорожки к крыльцам от участка до тротуара: отрезок (x0, y0, x1, y1) и ширина; цвет — тротуара города. */
+  fronts: { pts: number[]; w: number }[];
   /** Съезды от участка до полотна: многоугольник (x, y по очереди) и цвет. */
   drives: { pts: number[]; color: string }[];
   /** Мощёные (город) или утоптанные (село). */
@@ -67,7 +68,7 @@ function accessOf(b: TownBuilding, reach: number, fronts: TownWalks['fronts'], d
   for (const a of houseAccess(b)) {
     const edge = a.side * (b.fp.h / 2);
     if (a.kind === 'path') {
-      fronts.push({ pts: [...toWorld(f, a.x, edge), ...toWorld(f, a.x, edge + a.side * reach)], w: a.w, color: a.color });
+      fronts.push({ pts: [...toWorld(f, a.x, edge), ...toWorld(f, a.x, edge + a.side * reach)], w: a.w });
       continue;
     }
     // Съезд — до полотна и чуть под него; у бордюра — раструб на метр шире с каждой стороны.
@@ -184,33 +185,44 @@ export function townWalks(town: Town, curb: (p: Vec) => number): TownWalks | nul
   return { townId: town.id, paths: out, fronts, drives, paved, box: grow(box, 2), sig };
 }
 
-const WALK_PAVED = 'rgba(214,208,196,0.95)';
-const WALK_PAVED_EDGE = 'rgba(150,142,128,0.5)';
-const WALK_EARTH = 'rgba(204,188,150,0.85)';
-const WALK_EARTH_EDGE = 'rgba(160,146,116,0.3)';
-
 /**
- * Дорожки кварталов, дорожки к крыльцам и съезды в рамке view — под дорогами (после тротуаров: съезд пересекает
- * тротуар) и домами; издали (lod 0) их не видно.
+ * Тротуары (sidewalks — render/sidewalks.ts), дорожки кварталов, дорожки к крыльцам и съезды в рамке view — под
+ * дорогами и домами; издали (lod 0) их не видно. Дорожки — цветом тротуара (WALK_LOOK) и слоем под ним: сначала все
+ * кромки (дорожек, потом тротуаров), потом заливки дорожек, поверх — заливка тротуаров. Скруглённый конец и кромка
+ * дорожки не ложатся на тротуар, а его кромку на стыке закрывает заливка дорожки — одно покрытие. Съезды (асфальт) —
+ * поверх тротуара: пересекают его.
  */
-export function drawTownWalks(ctx: CanvasRenderingContext2D, list: readonly TownWalks[], view: Box, zoom: number): void {
+export function drawTownWalks(ctx: CanvasRenderingContext2D, list: readonly TownWalks[], view: Box, zoom: number, sidewalks: readonly Sidewalk[] = []): void {
   const a = new Art(ctx, { id: 0, fp: { center: { x: 0, y: 0 }, w: 1, h: 1, angle: 0 } }, zoom, 0, 0, 'still');
   if (!a.lod) return;
   a.pass = 0;
   const c = ctx;
-  for (const w of list) {
-    if (w.box.x1 < view.x0 || w.box.x0 > view.x1 || w.box.y1 < view.y0 || w.box.y0 > view.y1) continue;
-    const width = w.paved ? WALK_W.paved : WALK_W.path;
-    paths(a, w.paths, width, w.paved ? WALK_PAVED : WALK_EARTH, w.paved ? WALK_PAVED_EDGE : WALK_EARTH_EDGE);
-    c.lineCap = 'butt';
+  const seen = list.filter((w) => !(w.box.x1 < view.x0 || w.box.x0 > view.x1 || w.box.y1 < view.y0 || w.box.y0 > view.y1));
+  // Ломаные дорожек всех городов — одной обводкой на вид (мощёные, утоптанные).
+  const kinds = ([true, false] as const).map((paved) => ({ paved, list: seen.filter((w) => w.paved === paved).flatMap((w) => w.paths) })).filter((k) => k.list.length);
+  const walkPaths = (part: 'edge' | 'fill') => {
+    for (const k of kinds) {
+      const look = k.paved ? WALK_LOOK.paved : WALK_LOOK.path;
+      paths(a, k.list, k.paved ? WALK_W.paved : WALK_W.path, look.fill, look.edge, part);
+    }
+  };
+  walkPaths('edge');
+  drawSidewalks(ctx, sidewalks, view, zoom, 'edge');
+  walkPaths('fill');
+  c.lineCap = 'butt';
+  for (const w of seen) {
+    // За участком — цветом тротуара города (в селе — утоптанная), а не дорожки в участке: с тротуаром одно покрытие.
+    c.strokeStyle = w.paved ? WALK_LOOK.paved.fill : WALK_LOOK.path.fill;
     for (const f of w.fronts) {
-      c.strokeStyle = f.color;
       c.lineWidth = f.w;
       c.beginPath();
       c.moveTo(f.pts[0], f.pts[1]);
       c.lineTo(f.pts[2], f.pts[3]);
       c.stroke();
     }
+  }
+  drawSidewalks(ctx, sidewalks, view, zoom, 'fill');
+  for (const w of seen) {
     for (const d of w.drives) {
       c.fillStyle = d.color;
       c.beginPath();

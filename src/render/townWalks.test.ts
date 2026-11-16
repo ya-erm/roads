@@ -4,7 +4,8 @@ import type { Town, TownBuilding } from '../world/entities';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import { halfAtS } from '../world/worldgen';
 import { parkGates } from './parkArt';
-import { drawTownWalks, townWalks } from './townWalks';
+import { SIDEWALK, type Sidewalk, WALK_LOOK } from './sidewalks';
+import { drawTownWalks, type TownWalks, townWalks, WALK_W } from './townWalks';
 
 let nextId = 500;
 const house = (x: number, y: number, o: Partial<TownBuilding> = {}): TownBuilding => ({
@@ -85,6 +86,31 @@ describe('Дорожки кварталов', () => {
     expect(calls.stroke ?? 0).toBe(0);
     drawTownWalks(ctx, [w], all, 0.8);
     expect(calls.stroke).toBeGreaterThan(0);
+  });
+
+  it('дорожки — непрозрачные, цветом тротуара и слоем под ним: кромки, заливка дорожек, поверх — заливка тротуара, съезды', () => {
+    const box = { x0: -30, y0: -30, x1: 30, y1: 30 };
+    const w: TownWalks = { townId: 1, paths: [[0, 0, 0, 20]], fronts: [{ pts: [6, 4, 6, 0.5], w: 1.4 }], drives: [{ pts: [9, 4, 12, 4, 12, 0, 9, 0], color: '#646b76' }], paved: true, box, sig: '' };
+    const side: Sidewalk = { key: 'c1', paths: [[-20, 0, 20, 0]], paved: true, box, sig: '' };
+    const log: string[] = [];
+    const props: Record<string | symbol, unknown> = {};
+    const ctx = new Proxy(props, {
+      get: (t, k) => (k in t ? t[k] : () => void (k === 'stroke' ? log.push(`${props.strokeStyle}@${props.lineWidth}`) : k === 'fill' ? log.push(`fill ${props.fillStyle}`) : 0)),
+      set: (t, k, v) => ((t[k] = v), true),
+    }) as unknown as CanvasRenderingContext2D;
+    drawTownWalks(ctx, [w], box, 2, [side]);
+    const { fill, edge } = WALK_LOOK.paved;
+    // Цвета — непрозрачные (#rrggbb), одни на тротуар и дорожки.
+    expect(fill).toMatch(/^#[0-9a-f]{6}$/);
+    expect(edge).toMatch(/^#[0-9a-f]{6}$/);
+    expect(log).toEqual([
+      `${edge}@${WALK_W.paved + 0.7}`,
+      `${edge}@${SIDEWALK.paved.w + 0.7}`,
+      `${fill}@${WALK_W.paved}`,
+      `${fill}@1.4`,
+      `${fill}@${SIDEWALK.paved.w}`,
+      'fill #646b76',
+    ]);
   });
 
   it('мир по seed: у входов в парки — дорожки до тротуара; дорожки не уходят на проезжую часть дальше тротуара', { timeout: 30_000 }, () => {

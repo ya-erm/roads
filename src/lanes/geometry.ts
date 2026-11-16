@@ -309,6 +309,55 @@ export function cornerCurb(aR: Vec, ea: Vec, bL: Vec, eb: Vec, reflex = false): 
   return { pts, mid: add(scale(add(aR, bL), 0.25), scale(x, 0.5)) };
 }
 
+/** Бордюр площадки перекрёстка между соседними подъездами from и to (по кругу): от правого края from до левого края to. */
+export interface PlateCurb {
+  from: CorridorEnd;
+  to: CorridorEnd;
+  /** [правый край from у обреза, …скругление угла, левый край to у обреза] — так, как рисуется асфальт. */
+  pts: Vec[];
+}
+
+/**
+ * Контур асфальта площадки перекрёстка n (по обрезам cuts — junctionCuts): края подъездов у обрезов и бордюры углов
+ * между соседними подъездами. Одна геометрия на асфальт (lanes/draw.ts) и тротуары вдоль бордюра (render/sidewalks.ts).
+ * Меньше двух подъездов — null.
+ */
+export function plateOutline(net: LaneNet, n: LaneNode, cuts: Map<number, [number, number]>): { poly: Vec[]; curbs: PlateCurb[] } | null {
+  const arms = net
+    .ends(n)
+    .map((e) => {
+      const c = e.corridor;
+      const r = cuts.get(c.id)?.[e.end === 'a' ? 0 : 1] ?? 0;
+      const s = sFrom(c, e.end, r);
+      const ed = edgesAt(c, s) ?? [0, 0];
+      const sign = awaySign(e.end);
+      // Края подъезда: слева и справа, если смотреть от перекрёстка.
+      const lOff = sign > 0 ? ed[0] - ROAD_MARGIN : -(ed[1] + ROAD_MARGIN);
+      const rOff = sign > 0 ? ed[1] + ROAD_MARGIN : -(ed[0] - ROAD_MARGIN);
+      const p = c.lut.pointAt(s);
+      const away = awayAt(c, e.end, r);
+      const nr = rightNormal(away);
+      return { e, angle: Math.atan2(away.y, away.x), away, L: add(p, scale(nr, lOff)), R: add(p, scale(nr, rOff)) };
+    })
+    .sort((x, y) => x.angle - y.angle);
+  if (arms.length < 2) return null;
+  const poly: Vec[] = [];
+  const curbs: PlateCurb[] = [];
+  arms.forEach((a, i) => {
+    const b = arms[(i + 1) % arms.length];
+    poly.push(a.L, a.R);
+    // Угол между подъездами: дуга, касательная к их краям, до ближнего обреза (почти прямые — просто отрезок).
+    // Повороты вдоль угла идут по дуге с тем же центром (`cornerCurb`, `filletPath`) — с асфальта не съезжают.
+    // Внешняя сторона излома (больше развёрнутого) — плавная кривая.
+    let gap = b.angle - a.angle;
+    if (gap <= 0) gap += Math.PI * 2;
+    const corner = cornerCurb(a.R, a.away, b.L, b.away, arms.length === 2 && gap > Math.PI).pts;
+    poly.push(...corner);
+    curbs.push({ from: a.e, to: b.e, pts: [a.R, ...corner, b.L] });
+  });
+  return { poly, curbs };
+}
+
 /**
  * Траектория «прямо — дуга — прямо» от точки a (по направлению a.dir) к точке b (выезжает по b.dir): самая плавная
  * дуга окружности, что помещается между продолжениями полос, — касается той, до схода с которой ближе. r — её радиус,

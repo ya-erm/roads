@@ -2,7 +2,7 @@ import { add, cubicBezier, dist, norm, rightNormal, scale, sub, Vec } from '../c
 import { isDirt, LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 import { arrowAt, arrowShape } from './arrowShape';
 import { bridgeLook, deckAlong, nodeDeck } from './deck';
-import { awayAt, awaySign, cornerCurb, edgesAt, junctionCuts, laneShare, paintedEdges, pointOff, sFrom, stations } from './geometry';
+import { awayAt, awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, plateOutline, pointOff, sFrom, stations } from './geometry';
 import { Corridor, CorridorEnd, LaneNet, LaneNode, LAT_EPS, layerOf } from './model';
 import { PARAPET, parapetLine, parapetWidth } from './parapet';
 import { onPrefs, prefOn } from '../ui/prefs';
@@ -868,39 +868,12 @@ export class LaneRenderer {
 
   /** Площадка перекрёстка: края подъездов, между соседними — плавный угол. */
   private plateGeo(net: LaneNet, n: LaneNode): PlateGeo | null {
-    const arms = net
-      .ends(n)
-      .map((e) => {
-        const c = e.corridor;
-        const r = this.cuts.get(c.id)![e.end === 'a' ? 0 : 1];
-        const s = sFrom(c, e.end, r);
-        const ed = edgesAt(c, s) ?? [0, 0];
-        const sign = awaySign(e.end);
-        // Края подъезда: слева и справа, если смотреть от перекрёстка.
-        const lOff = sign > 0 ? ed[0] - ROAD_MARGIN : -(ed[1] + ROAD_MARGIN);
-        const rOff = sign > 0 ? ed[1] + ROAD_MARGIN : -(ed[0] - ROAD_MARGIN);
-        const p = c.lut.pointAt(s);
-        const away = awayAt(c, e.end, r);
-        const nr = rightNormal(away);
-        return { angle: Math.atan2(away.y, away.x), away, L: add(p, scale(nr, lOff)), R: add(p, scale(nr, rOff)) };
-      })
-      .sort((x, y) => x.angle - y.angle);
-    if (arms.length < 2) return null;
+    // Контур — общий с тротуарами вдоль бордюра (plateOutline).
+    const plate = plateOutline(net, n, this.cuts);
+    if (!plate) return null;
     const dirt = net.ends(n).every((e) => isDirt(e.corridor.cls));
-    const poly: Vec[] = [];
-    const curbs: Vec[][] = [];
-    arms.forEach((a, i) => {
-      const b = arms[(i + 1) % arms.length];
-      poly.push(a.L, a.R);
-      // Угол между подъездами: дуга, касательная к их краям, до ближнего обреза (почти прямые — просто отрезок).
-      // Повороты вдоль угла идут по дуге с тем же центром (`cornerCurb`, `filletPath`) — с асфальта не съезжают.
-      // Внешняя сторона излома (больше развёрнутого) — плавная кривая.
-      let gap = b.angle - a.angle;
-      if (gap <= 0) gap += Math.PI * 2;
-      const corner = cornerCurb(a.R, a.away, b.L, b.away, arms.length === 2 && gap > Math.PI).pts;
-      poly.push(...corner);
-      curbs.push([a.R, ...corner, b.L]);
-    });
+    const poly = plate.poly;
+    const curbs = plate.curbs.map((k) => k.pts);
     return dirt ? { poly, curbs, dirt } : { poly, curbs };
   }
 

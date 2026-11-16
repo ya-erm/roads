@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import type { Vec } from '../core/vec';
 import { freshGame } from '../game/testkit';
+import { edgesAt, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
+import { ROAD_MARGIN } from '../world/roadTypes';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import { townTier } from '../world/townForms';
 import { halfAtS } from '../world/worldgen';
-import { drawSidewalks, sidewalkEnds, sidewalkNet, type WalkSite } from './sidewalks';
+import { drawSidewalks, SIDEWALK, sidewalkEnds, sidewalkNet, type WalkSite } from './sidewalks';
 
 function stub() {
   const calls: Record<string, number> = {};
@@ -86,6 +89,62 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
       byStreet.get(k)!.add(e.side);
     }
     expect([...byStreet.values()].filter((s) => s.size === 2).length).toBeGreaterThan(50);
+  });
+
+  it('вплотную к асфальту по его контуру: вдоль полотна и по бордюру угла площадки — на одном расстоянии (без клина травы)', () => {
+    const roads = g.roads.net;
+    const cuts = junctionCuts(roads);
+    const toSeg = (p: Vec, a: Vec, b: Vec) => {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const l2 = dx * dx + dy * dy;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+      return Math.hypot(p.x - a.x - dx * t, p.y - a.y - dy * t);
+    };
+    const toLine = (p: Vec, pts: Vec[]) => {
+      let best = Infinity;
+      for (let i = 0; i + 1 < pts.length; i++) best = Math.min(best, toSeg(p, pts[i], pts[i + 1]));
+      return best;
+    };
+    let inside = 0;
+    let all = 0;
+    let corners = 0;
+    for (const l of net.lines) {
+      const spec = l.paved ? SIDEWALK.paved : SIDEWALK.path;
+      const want = spec.from + spec.w / 2;
+      // Край асфальта рядом: у полотна — его кромки (как рисуются), у перекрёстка — бордюры площадки.
+      const edges: Vec[][] = [];
+      if (l.key.startsWith('c')) {
+        const c = roads.corridor(Number(l.key.slice(1)));
+        const [ca, cb] = cuts.get(c.id)!;
+        const n = 400;
+        for (const side of [0, 1] as const) {
+          const pts: Vec[] = [];
+          for (let i = 0; i <= n; i++) {
+            const s = ca + ((c.length - ca - cb) * i) / n;
+            const e = edgesAt(c, s);
+            if (e) pts.push(pointOff(c, s, side ? e[1] + ROAD_MARGIN : e[0] - ROAD_MARGIN));
+          }
+          edges.push(pts);
+        }
+      } else {
+        const node = roads.node(Number(l.key.slice(1)));
+        if (node.kind !== 'junction') continue;
+        edges.push(...plateOutline(roads, node, cuts)!.curbs.map((k) => k.pts));
+        corners += l.paths.length;
+      }
+      for (const w of l.paths) {
+        for (let i = 0; i < w.length; i += 2) {
+          const d = Math.min(...edges.map((e) => toLine({ x: w[i], y: w[i + 1] }, e)));
+          all++;
+          if (Math.abs(d - want) < 0.3) inside++;
+        }
+      }
+    }
+    expect(all).toBeGreaterThan(3000);
+    expect(corners).toBeGreaterThan(50);
+    // Почти все точки — ровно на полширины тротуара от края; мимо — лишь у самых острых углов (бордюр круче тротуара).
+    expect(inside / all).toBeGreaterThan(0.99);
   });
 
   it('издали не видны, ближе — одна обводка на вид, без фильтров; кэш по полотнам — то же без пересчёта', () => {
