@@ -43,6 +43,8 @@ export interface WalkSite {
   around(p: Vec, r: number): Around;
   /** Точка в воде. */
   wet(p: Vec): boolean;
+  /** Ни одна точка ближе r к p не в воде (wet) — один запрос вместо запроса на каждую точку; нет — спрашивать по точкам. */
+  dry?(p: Vec, r: number): boolean;
   /** Город, в застройке которого точка: мощёный ли тротуар (город) и подпись его застройки (для кэша). */
   townAt(p: Vec): { paved: boolean; key: string } | null;
 }
@@ -64,6 +66,8 @@ export function walkSite(game: Pick<Game, 'index' | 'terrain' | 'towns'>): WalkS
       return { houses, others };
     },
     wet: (p) => game.terrain.isWater(p, 0.6),
+    // Расстояние до воды по сетке рельефа — сглаженное (наклон до √2 на метр): запас в полтора раза и 2 м.
+    dry: (p, r) => !game.terrain.isWater(p, 0.6 + r * 1.5 + 2),
     townAt: (p) => {
       const t = game.towns.find((x) => dist(p, x.center) < (x.extent ?? x.radius) + 20);
       if (!t) return null;
@@ -353,15 +357,34 @@ interface Run {
   spans: SidewalkSpan[];
 }
 
+/** Точка оси тротуара стороны полотна: рядом дома (ok), под станцией или предприятием (blk), в воде (wet — по запросу). */
+interface Spot {
+  x: number;
+  y: number;
+  ok: boolean;
+  blk: boolean;
+  wet?: boolean;
+}
+
+/** Точки оси тротуара одной стороны полотна (от обрезки s0 до s1, n шагов) — до сшивки разрывов и дотягивания. */
+interface SideSpots {
+  side: 1 | -1;
+  s0: number;
+  s1: number;
+  n: number;
+  short: boolean;
+  pts: Spot[];
+}
+
 /**
- * Тротуары полотна c. pull — концы сторон (`a1`, `b-1`…), что тянутся к углу, куда тротуар дошёл с другой улицы: их
- * не дошедший конец дотягивается до узла и с WALK.pull м.
+ * Точки тротуаров полотна c по сторонам: где рядом дома, где станция или предприятие; вода — по запросу, раз на точку
+ * (wetOf). Не зависят от дотягивания — тротуар полотна как есть и с дотянутыми концами считается по одним точкам.
  */
-function corridorRun(c: Corridor, site: WalkSite, paved: boolean, near: Around, trim: Trim | undefined, pull?: ReadonlySet<string>): Run {
+function corridorSpots(c: Corridor, site: WalkSite, paved: boolean, near: Around, trim: Trim | undefined): SideSpots[] {
   const spec = paved ? SIDEWALK.paved : SIDEWALK.path;
-  const run: Run = { paths: [], reach: new Set(), ends: [], spans: [] };
-  const housed = (q: Vec) => near.houses.some((f) => toLot(q, f) < WALK.houses);
+  const out: SideSpots[] = [];
   const blocked = (q: Vec) => near.others.some((f) => pointInFootprint(q, f, spec.w / 2));
+  const wetOf = (p: Spot) => (p.wet ??= site.wet(p));
   for (const side of [1, -1] as const) {
     const s0 = trim?.a[side] ?? 0;
     const s1 = c.length - (trim?.b[side] ?? 0);
@@ -370,16 +393,49 @@ function corridorRun(c: Corridor, site: WalkSite, paved: boolean, near: Around, 
     const short = s1 - s0 < WALK.min;
     if (s1 - s0 < 0.5) continue;
     const n = Math.max(2, Math.ceil((s1 - s0) / WALK.step));
-    const pts: { x: number; y: number; ok: boolean }[] = [];
+    const pts: Spot[] = [];
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
     for (let i = 0; i <= n; i++) {
       const s = s0 + ((s1 - s0) * i) / n;
       const q = pointOff(c, s, walkOff(c, s, side, paved));
-      pts.push({ ...q, ok: housed(q) && !blocked(q) && !site.wet(q) });
+      pts.push({ x: q.x, y: q.y, ok: false, blk: blocked(q) });
+      x0 = Math.min(x0, q.x);
+      y0 = Math.min(y0, q.y);
+      x1 = Math.max(x1, q.x);
+      y1 = Math.max(y1, q.y);
     }
+    // Вся сторона далеко от воды — точки не спрашиваем; дома — только те, до которых от рамки стороны ближе WALK.houses
+    // (до участка не ближе, чем до его центра без полудиагонали).
+    const mid = { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+    const half = Math.hypot(x1 - x0, y1 - y0) / 2;
+    if (site.dry?.(mid, half)) for (const p of pts) p.wet = false;
+    const houses = near.houses.filter((f) => dist(mid, f.center) - Math.hypot(f.w, f.h) / 2 - half < WALK.houses);
+    for (const p of pts) p.ok = houses.some((f) => toLot(p, f) < WALK.houses) && !p.blk && !wetOf(p);
     if (short) {
-      if (!pts.some((p) => p.ok) || pts.some((p) => site.wet(p) || blocked(p))) continue;
+      if (!pts.some((p) => p.ok) || pts.some((p) => wetOf(p) || p.blk)) continue;
       for (const p of pts) p.ok = true;
     }
+    out.push({ side, s0, s1, n, short, pts });
+  }
+  return out;
+}
+
+/**
+ * Тротуары полотна c по его точкам (corridorSpots). pull — концы сторон (`a1`, `b-1`…), что тянутся к углу, куда
+ * тротуар дошёл с другой улицы: их не дошедший конец дотягивается до узла и с WALK.pull м.
+ */
+function corridorRun(c: Corridor, site: WalkSite, spots: readonly SideSpots[], pull?: ReadonlySet<string>): Run {
+  const run: Run = { paths: [], reach: new Set(), ends: [], spans: [] };
+  const wetOf = (p: Spot) => (p.wet ??= site.wet(p));
+  for (const sp of spots) {
+    const { side, s0, s1, n, short } = sp;
+    // Свои отметки: сшивка и дотягивание меняют их, а точки — общие для тротуара как есть и с дотягиванием.
+    const pts = sp.pts.map((p) => ({ x: p.x, y: p.y, ok: p.ok, blk: p.blk, src: p }));
+    const wet = (p: (typeof pts)[number]) => wetOf(p.src);
+    const blocked = (p: (typeof pts)[number]) => p.blk;
     // Короткие разрывы — сшить; не дошёл до конца полотна чуть-чуть — дотянуть: у угла его подхватит скругление.
     const gapN = Math.round(WALK.gap / ((s1 - s0) / n));
     const endN = Math.round(WALK.end / ((s1 - s0) / n));
@@ -393,9 +449,9 @@ function corridorRun(c: Corridor, site: WalkSite, paved: boolean, near: Around, 
       let j = i;
       while (j < pts.length && !pts[j].ok) j++;
       // Разрыв посреди улицы — сшить: короткий — всегда, длиной с участок — если там не станция и не предприятие.
-      const inner = i > 0 && j < pts.length && (j - i <= gapN || (j - i <= holeN && pts.slice(i, j).every((p) => !blocked(p)))) && pts.slice(i, j).every((p) => !site.wet(p));
+      const inner = i > 0 && j < pts.length && (j - i <= gapN || (j - i <= holeN && pts.slice(i, j).every((p) => !blocked(p)))) && pts.slice(i, j).every((p) => !wet(p));
       const lim = pull?.has(`${i === 0 ? 'a' : 'b'}${side}`) ? Math.max(endN, pullN) : endN;
-      const edge = (i === 0) !== (j === pts.length) && j - i <= lim && pts.slice(i, j).every((p) => !site.wet(p) && !blocked(p));
+      const edge = (i === 0) !== (j === pts.length) && j - i <= lim && pts.slice(i, j).every((p) => !wet(p) && !blocked(p));
       if (inner || edge) for (let k = i; k < j; k++) pts[k].ok = true;
       i = j;
     }
@@ -442,15 +498,59 @@ function boxOf(list: readonly number[][]): Box {
   return grow(box, 4);
 }
 
-const sigOf = (list: readonly number[][]) => list.map((p) => p.map((v) => v.toFixed(1)).join(',')).join(';');
+/** Подпись ломаных для слепка плиток: с точностью 0,1 м (целыми — быстрее toFixed: на протяжке считается каждый кадр). */
+const sigOf = (list: readonly number[][]) => list.map((p) => p.map((v) => Math.round(v * 10)).join(',')).join(';');
+
+/**
+ * Часть сети тротуаров (sidewalkNet с scope): тротуары полотен corridors (`c<id>`, их концы и spans) и скругления у узлов
+ * nodes (`n<id>`) — те же, что дал бы полный пересчёт. Номера, которых в сети нет, пропускаются.
+ */
+export interface SidewalkScope {
+  corridors: ReadonlySet<number>;
+  nodes: ReadonlySet<number>;
+}
+
+/** Полотна у узлов ids. */
+function atNodes(roads: LaneNet, ids: Iterable<number>, into = new Set<number>()): Set<number> {
+  for (const id of ids) for (const c of roads.nodes.get(id)?.corridors ?? []) into.add(c);
+  return into;
+}
+
+/** Концы полотен ids. */
+function endsOf(roads: LaneNet, ids: Iterable<number>, into = new Set<number>()): Set<number> {
+  for (const id of ids) {
+    const c = roads.corridors.get(id);
+    if (c) into.add(c.a).add(c.b);
+  }
+  return into;
+}
 
 /**
  * Тротуары всех улиц городов: по полотнам (где рядом дома) и скругления углов у узлов. cache — между пересчётами:
  * полотно с той же формой, обрезкой у узлов и строениями вокруг считается заново только при их изменении.
+ * scope — только эта часть (предпросмотр правки, sidewalkScope): тротуары полотна зависят от углов у его концов
+ * (обрезка) и от тротуаров соседей у них (дотягивание), скругление узла — от тротуаров его полотен с дотягиванием;
+ * поэтому считается окрестность в два узла вокруг, а в ответ идёт только scope.
  */
-export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCache): SidewalkNet {
+export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCache, scope?: SidewalkScope): SidewalkNet {
+  // В области: out — полотна в ответе, pulled — полотна, чьи тротуары нужны с дотягиванием (ответ и узлы ответа),
+  // runs — чьи нужны как есть (соседи у их концов), cornerAt — узлы, где нужны углы (обрезка всех этих полотен).
+  let out: Set<number> | null = null;
+  let outNodes: Set<number> | null = null;
+  let pulledIds: Set<number> | null = null;
+  let pullAt: Set<number> | null = null;
+  let cornerAt: Set<number> | null = null;
+  let candidates: Iterable<Corridor> = roads.corridors.values();
+  if (scope) {
+    out = new Set([...scope.corridors].filter((id) => roads.corridors.has(id)));
+    outNodes = new Set([...scope.nodes].filter((id) => roads.nodes.has(id)));
+    pulledIds = atNodes(roads, outNodes, new Set(out));
+    pullAt = endsOf(roads, pulledIds);
+    cornerAt = endsOf(roads, atNodes(roads, pullAt));
+    candidates = [...atNodes(roads, cornerAt)].map((id) => roads.corridor(id));
+  }
   const eligible = new Map<number, { paved: boolean; townKey: string }>();
-  for (const c of roads.corridors.values()) {
+  for (const c of candidates) {
     if (!walkable(roads, c)) continue;
     const town = site.townAt(c.lut.pointAt(c.length / 2));
     if (town) eligible.set(c.id, { paved: town.paved, townKey: town.key });
@@ -458,19 +558,29 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
   const ok = (c: Corridor) => eligible.has(c.id);
   const dOf = (e: CorridorEnd, side: 1 | -1) =>
     Math.abs(walkOff(e.corridor, e.end === 'a' ? 0 : e.corridor.length, side, eligible.get(e.corridor.id)?.paved !== false));
-  // Обрезы полотен у перекрёстков — как у асфальта (lanes/draw.ts): тротуар улицы доходит до площадки.
-  const cuts = junctionCuts(roads);
+  // Обрезы полотен у перекрёстков — как у асфальта (lanes/draw.ts): тротуар улицы доходит до площадки. Обрез конца
+  // зависит только от его узла — в области хватит её узлов.
+  const cuts = cornerAt
+    ? junctionCuts(
+        roads,
+        candidates,
+        [...cornerAt].map((id) => roads.node(id)),
+      )
+    : junctionCuts(roads);
   // Углы кварталов у узлов: обрезка тротуаров и скругления.
   const trims = new Map<number, Trim>();
   const corners = new Map<number, Corner[]>();
   const nodes = new Set<number>();
   for (const id of eligible.keys()) {
     const c = roads.corridor(id);
-    nodes.add(c.a).add(c.b);
+    if (!cornerAt || cornerAt.has(c.a)) nodes.add(c.a);
+    if (!cornerAt || cornerAt.has(c.b)) nodes.add(c.b);
   }
   for (const nid of nodes) corners.set(nid, nodeCorners(roads, roads.node(nid), dOf, ok, trims, cuts));
   // Тротуары полотен; pull — концы сторон, что дотягиваются к углу (ниже).
   const near = new Map<number, Around>();
+  // Точки тротуаров полотна — одни на тротуар как есть и с дотягиванием (в этом пересчёте).
+  const spotsBy = new Map<number, SideSpots[]>();
   const runOf = (id: number, pull = ''): Run => {
     const { paved, townKey } = eligible.get(id)!;
     const c = roads.corridor(id);
@@ -483,23 +593,31 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
       had = { sig: key, run: null, paved };
       cache?.set(id, had);
     }
-    if (!pull) return (had.run ??= corridorRun(c, site, paved, around, tr));
-    if (had.pulled?.pull !== pull) had.pulled = { pull, run: corridorRun(c, site, paved, around, tr, new Set(pull.split(','))) };
+    const spotsOf = () => {
+      let s = spotsBy.get(id);
+      if (!s) spotsBy.set(id, (s = corridorSpots(c, site, paved, around, tr)));
+      return s;
+    };
+    if (!pull) return (had.run ??= corridorRun(c, site, spotsOf()));
+    if (had.pulled?.pull !== pull) had.pulled = { pull, run: corridorRun(c, site, spotsOf(), new Set(pull.split(','))) };
     return had.pulled.run;
   };
   const runs = new Map<number, Run>();
-  for (const id of eligible.keys()) runs.set(id, runOf(id));
+  const plain = pullAt ? atNodes(roads, pullAt) : eligible.keys();
+  for (const id of plain) if (eligible.has(id)) runs.set(id, runOf(id));
   const endOf = (r: { c: number; end: 'a' | 'b'; side: 1 | -1 }) => runs.get(r.c)?.ends.find((e) => e.end === r.end && e.side === r.side) ?? null;
   // Угол, куда тротуар не дошёл, хотя у той улицы с этой стороны он есть, но кончился раньше: дотягивается до угла —
   // без обрыва тротуара у самого перекрёстка. У перекрёстка — с любой стороны угла; на повороте улицы и на шве — если
   // по другую сторону узла тротуар до него дошёл (иначе два дотягивания сшили бы пустырь).
   const pulls = new Map<number, Set<string>>();
-  for (const list of corners.values()) {
+  for (const [nid, list] of corners) {
+    if (pullAt && !pullAt.has(nid)) continue;
     for (const k of list) {
       for (const [r, other] of [
         [k.from, k.to],
         [k.to, k.from],
       ] as const) {
+        if (pulledIds && !pulledIds.has(r.c)) continue;
         if (endOf(r) || (!k.curb && !endOf(other)) || !runs.get(r.c)?.spans.some((s) => s.side === r.side)) continue;
         let set = pulls.get(r.c);
         if (!set) pulls.set(r.c, (set = new Set()));
@@ -512,6 +630,7 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
   const ends: SidewalkEnd[] = [];
   const spans = new Map<number, SidewalkSpan[]>();
   for (const [id, run] of runs) {
+    if (out && !out.has(id)) continue;
     const c = roads.corridor(id);
     const paved = eligible.get(id)!.paved;
     for (const e of run.ends) ends.push({ node: e.end === 'a' ? c.a : c.b, corridor: id, side: e.side, x: e.x, y: e.y, ux: e.ux, uy: e.uy, w: (paved ? SIDEWALK.paved : SIDEWALK.path).w });
@@ -521,6 +640,7 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
   // Скругления — где оба тротуара дошли до угла; у перекрёстка — где дошёл хотя бы один: угол обходится по всему
   // бордюру (curbPts).
   for (const [nid, list] of corners) {
+    if (outNodes && !outNodes.has(nid)) continue;
     const p: number[][] = [];
     let paved: boolean | null = null;
     for (const k of list) {
@@ -538,8 +658,73 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
     if (!p.length) continue;
     lines.push({ key: `n${nid}`, paths: p, paved: paved ?? true, box: boxOf(p), sig: `${paved}|${sigOf(p)}` });
   }
-  if (cache && cache.size > eligible.size * 2 + 200) for (const id of [...cache.keys()]) if (!eligible.has(id)) cache.delete(id);
+  // Чистка кэша — только при полном пересчёте: в части сети «нет» — значит, не в области.
+  if (!scope && cache && cache.size > eligible.size * 2 + 200) for (const id of [...cache.keys()]) if (!eligible.has(id)) cache.delete(id);
   return { lines, ends, spans };
+}
+
+/** Узел той же формы: место, вид, уровень, полотна и настройки (правка копии заменяет их объекты целиком). */
+function sameNode(a: LaneNode, b: LaneNode): boolean {
+  if (a.pos.x !== b.pos.x || a.pos.y !== b.pos.y || a.dir.x !== b.dir.x || a.dir.y !== b.dir.y) return false;
+  if (a.corridors.length !== b.corridors.length) return false;
+  for (let i = 0; i < a.corridors.length; i++) if (a.corridors[i] !== b.corridors[i]) return false;
+  // Прочие поля (вид, уровень, скругления углов, переходы…) — по ссылке, иначе по содержимому; и тех же полей.
+  let n = 0;
+  for (const k in a) {
+    n++;
+    const key = k as keyof LaneNode;
+    if (key === 'pos' || key === 'dir' || key === 'corridors' || a[key] === b[key]) continue;
+    if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) return false;
+  }
+  for (const _ in b) n--;
+  return n === 0;
+}
+
+/**
+ * Какие тротуары правка (сеть next — копия before с правкой) может поменять: те, что надо пересчитать по next, а
+ * прежние (по before) — спрятать. Узлы, что сдвинулись или поменялись, и концы полотен новой формы — там другие углы;
+ * у полотен этих узлов — другая обрезка; у полотен на их концах — другое дотягивание (от соседей); скругления — у
+ * концов всех таких полотен. Снесённые полотна и узлы — тоже в ответе (их тротуары прячутся). null — правки нет.
+ */
+export function sidewalkScope(before: LaneNet, next: LaneNet): SidewalkScope | null {
+  if (before === next) return null;
+  const nodes0 = new Set<number>();
+  const gone = new Set<number>();
+  for (const n of next.nodes.values()) {
+    const old = before.nodes.get(n.id);
+    if (!old || !sameNode(old, n)) nodes0.add(n.id);
+  }
+  for (const id of before.nodes.keys()) if (!next.nodes.has(id)) nodes0.add(id);
+  const changed = new Set<number>();
+  for (const c of next.corridors.values()) if (before.corridors.get(c.id)?.rev !== c.rev) changed.add(c.id);
+  for (const id of before.corridors.keys()) if (!next.corridors.has(id)) gone.add(id);
+  if (!nodes0.size && !changed.size && !gone.size) return null;
+  // Узлы с другими углами: правленые и концы полотен новой формы (и до правки, и после).
+  const cornered = new Set(nodes0);
+  endsOf(next, changed, cornered);
+  endsOf(before, changed, cornered);
+  endsOf(before, gone, cornered);
+  const trimmed = atNodes(next, cornered);
+  const corridors = atNodes(next, endsOf(next, trimmed), new Set([...changed, ...gone]));
+  const nodes = endsOf(next, corridors, new Set(cornered));
+  endsOf(before, gone, nodes);
+  return { corridors, nodes };
+}
+
+/**
+ * Тротуары сети с правкой поверх тротуаров base (полный пересчёт по сети до правки): в scope — часть, посчитанная
+ * по сети с правкой (sidewalkNet с scope), остальное — из base как есть.
+ */
+export function mergeSidewalks(base: SidewalkNet, part: SidewalkNet, scope: SidewalkScope): SidewalkNet {
+  const hidden = (key: string) => (key[0] === 'c' ? scope.corridors : scope.nodes).has(Number(key.slice(1)));
+  const spans = new Map(base.spans);
+  for (const id of scope.corridors) spans.delete(id);
+  for (const [id, s] of part.spans) spans.set(id, s);
+  return {
+    lines: [...base.lines.filter((l) => !hidden(l.key)), ...part.lines],
+    ends: [...base.ends.filter((e) => !scope.corridors.has(e.corridor)), ...part.ends],
+    spans,
+  };
 }
 
 /**

@@ -58,7 +58,7 @@ import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
-import { type SidewalkCache, type SidewalkNet, sidewalkNet, walkSite } from './sidewalks';
+import { type Around, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, contourLabel, fineContourStep, gradeRungs, heightLabel, ReliefRenderer, waterPath } from './relief';
@@ -432,6 +432,8 @@ interface TilePlan {
 
 /** На столько вокруг рамки изменения сбрасываются плитки: тени мостов, знаки у кромки, откосы, деревья. */
 const DIRTY_PAD = 80;
+/** То же для тротуаров на протяжке (их рамка — уже с запасом на ширину): откосы у их концов — в пределах улицы. */
+const WALK_PAD = 30;
 /** На столько вокруг участка хода работ на строящемся полотне (progressBoxes — уже с запасом на ширину и тень моста). */
 const PROGRESS_PAD = 20;
 /** Запас вокруг плитки, в котором объекты ещё рисуются в неё (как у края экрана, view()). */
@@ -525,6 +527,12 @@ export class Renderer {
   private alleys = { key: '', things: '', lines: [] as StreetGreen[], cache: new Map<number, { sig: string; line: StreetGreen | null }>() };
   /** Тротуары городов и их кэш по полотнам (пересчёт — вместе с аллеями). */
   private sidewalks: SidewalkNet = { lines: [], ends: [], spans: new Map() };
+  /** Тротуары по сети игры (без правки в предпросмотре); sidewalks — что на карте: с правкой — поверх них. */
+  private walkBase: SidewalkNet = this.sidewalks;
+  /** Тротуары сети с правкой (liveSidewalks): на какую сеть, её версию и тротуары без правки посчитаны. */
+  private walkLive: { net: LaneNet; version: number; base: SidewalkNet; shown: SidewalkNet } | null = null;
+  /** Где тротуары для протяжки (liveSite): строения вокруг полотен — запомненные, пока тротуары без правки те же. */
+  private walkSite: { game: Game; base: SidewalkNet; memo: Map<string, Around>; site: WalkSite } | null = null;
   private sidewalkCache: SidewalkCache = new Map();
   /** Дорожки кварталов по городам (townWalks): считаются, когда меняется список домов или парков города. */
   private walks = new Map<number, TownWalks>();
@@ -600,7 +608,9 @@ export class Renderer {
     this.diffs.alleys.clear();
     this.diffs.sidewalks.clear();
     this.alleys = { key: '', things: '', lines: [], cache: new Map() };
-    this.sidewalks = { lines: [], ends: [], spans: new Map() };
+    this.sidewalks = this.walkBase = { lines: [], ends: [], spans: new Map() };
+    this.walkLive = null;
+    this.walkSite = null;
     this.sidewalkCache.clear();
     this.walks.clear();
     this.progress.clear();
@@ -1204,8 +1214,18 @@ export class Renderer {
       this.alleys.lines = streetGreen(game.roads.net, towns, (p, r) => index.at(p, r) !== null, this.alleys.cache);
       add(this.diffs.alleys.update((put) => this.alleys.lines.forEach((l) => put(l.id, l.sig, l.box))));
       // Тротуары и скругления углов кварталов (render/sidewalks.ts).
-      this.sidewalks = sidewalkNet(game.roads.net, walkSite(game), this.sidewalkCache);
-      add(this.diffs.sidewalks.update((put) => this.sidewalks.lines.forEach((l) => put(l.key, l.sig, l.box))));
+      this.walkBase = sidewalkNet(game.roads.net, walkSite(game), this.sidewalkCache);
+    }
+    // Правка дорог в предпросмотре (тянут узел или дорогу, крутят угол перекрёстка, ведут новую): тротуары, что она
+    // меняет, — по сети с правкой, прямо во время протяжки; прежние — прочь. Слепок по ключам (`c<id>`, `n<id>`)
+    // сбрасывает плитки только под ними — без двойных тротуаров и дыр; отпустили или отменили — снова по сети игры.
+    const shown = this.liveSidewalks(game, s.fullNet);
+    if (shown !== this.sidewalks) {
+      this.sidewalks = shown;
+      // На протяжке (каждый кадр) запас — меньше DIRTY_PAD: тротуар не отбрасывает тени и не прячет деревья, а откосы у
+      // концов тротуаров (spans) — у самой улицы, её плитки и так сбрасывает асфальт; лишние плитки — лишние миллисекунды.
+      const pad = this.walkLive ? WALK_PAD : DIRTY_PAD;
+      for (const b of this.diffs.sidewalks.update((put) => shown.lines.forEach((l) => put(l.key, l.sig, l.box)))) boxes.push(grow(b, pad));
     }
     add(
       this.diffs.industries.update((put) => {
@@ -1990,6 +2010,47 @@ export class Renderer {
         ctx.stroke();
       }
     }
+  }
+
+  /**
+   * Тротуары на карте при сети net (с правкой в предпросмотре или сама сеть игры): без правки — по сети игры
+   * (walkBase), с правкой — только затронутые ею (sidewalkScope) заново по сети с правкой, остальные — прежние. Раз на
+   * версию сети с правкой.
+   */
+  private liveSidewalks(game: Game, net: LaneNet): SidewalkNet {
+    const base = this.walkBase;
+    if (net === game.roads.net) {
+      this.walkLive = null;
+      return base;
+    }
+    const c = this.walkLive;
+    if (c && c.net === net && c.version === net.version && c.base === base) return c.shown;
+    const scope = sidewalkScope(game.roads.net, net);
+    const shown = scope ? mergeSidewalks(base, sidewalkNet(net, this.liveSite(game, base), this.sidewalkCache, scope), scope) : base;
+    this.walkLive = { net, version: net.version, base, shown };
+    return shown;
+  }
+
+  /**
+   * Где тротуары (walkSite) для протяжки: строения вокруг полотна — с запоминанием, пока тротуары без правки те же (их
+   * пересчитывают и стройка, и рост городов): у полотен, что правка не трогала, запрос к индексу — раз на протяжку.
+   */
+  private liveSite(game: Game, base: SidewalkNet): WalkSite {
+    const had = this.walkSite;
+    if (had && had.base === base && had.game === game && had.memo.size < 4000) return had.site;
+    const raw = walkSite(game);
+    const memo = new Map<string, Around>();
+    const site: WalkSite = {
+      ...raw,
+      around: (p, r) => {
+        const k = `${p.x},${p.y},${r}`;
+        let a = memo.get(k);
+        if (!a) memo.set(k, (a = raw.around(p, r)));
+        return a;
+      },
+    };
+    this.walkSite = { game, base, memo, site };
+    return site;
   }
 
   /** Предпросмотр сети net (с правкой) поверх сети игры base — один раз на её версию: перекрёстки, что правка меняет. */

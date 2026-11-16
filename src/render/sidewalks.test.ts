@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
 import { freshGame } from '../game/testkit';
-import { edgesAt, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
+import { setCornerRadius } from '../lanes/corners';
+import { edgesAt, junctionCorners, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
 import { ROAD_MARGIN } from '../world/roadTypes';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import { type Footprint, pointInFootprint } from '../world/spatial';
 import { halfAtS } from '../world/worldgen';
-import { drawSidewalks, SIDEWALK, sidewalkEnds, sidewalkNet, walkSite } from './sidewalks';
+import { drawSidewalks, mergeSidewalks, SIDEWALK, type SidewalkNet, sidewalkEnds, sidewalkNet, sidewalkScope, walkSite } from './sidewalks';
 
 function stub() {
   const calls: Record<string, number> = {};
@@ -368,5 +369,67 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
     const b = sidewalkNet(g.roads.net, site, cache);
     expect(b.lines.map((l) => l.sig)).toEqual(a.lines.map((l) => l.sig));
     expect(a.lines.map((l) => l.sig)).toEqual(net.lines.map((l) => l.sig));
+  });
+
+  describe('во время правки — только затронутые, по сети с правкой', () => {
+    const before = g.roads.net;
+    const byKey = (n: SidewalkNet) => new Map(n.lines.map((l) => [l.key, l.sig]));
+    const endsKey = (n: SidewalkNet) => n.ends.map((e) => `${e.node}|${e.corridor}|${e.side}|${e.x.toFixed(2)},${e.y.toFixed(2)}`).sort();
+    const spansKey = (n: SidewalkNet) => [...n.spans].sort((a, b) => a[0] - b[0]).map(([id, s]) => `${id}:${JSON.stringify(s)}`);
+    // Перекрёсток в городе, где у всех улиц тротуары: скругления у него есть.
+    const hub = [...before.nodes.values()].find(
+      (n) => n.kind === 'junction' && n.corridors.length >= 3 && net.lines.some((l) => l.key === `n${n.id}`) && n.corridors.every((id) => net.spans.has(id)),
+    )!;
+
+    /** Часть по scope совпадает с полным пересчётом сети с правкой; поверх прежних — ровно он же (ничего не забыто). */
+    const check = (next: typeof before) => {
+      const scope = sidewalkScope(before, next)!;
+      expect(scope).not.toBeNull();
+      const full = sidewalkNet(next, site);
+      const part = sidewalkNet(next, site, new Map(), scope);
+      const fullKeys = byKey(full);
+      const partKeys = byKey(part);
+      for (const [k, sig] of partKeys) expect(sig, k).toBe(fullKeys.get(k));
+      for (const [k, sig] of fullKeys) if ((k[0] === 'c' ? scope.corridors : scope.nodes).has(Number(k.slice(1)))) expect(partKeys.get(k), k).toBe(sig);
+      const merged = mergeSidewalks(net, part, scope);
+      expect(byKey(merged)).toEqual(fullKeys);
+      expect(endsKey(merged)).toEqual(endsKey(full));
+      expect(spansKey(merged)).toEqual(spansKey(full));
+      return { scope, part };
+    };
+
+    it('сдвинули перекрёсток: полотна у него, их соседи по углам и дотягиванию — заново; остальное — прежнее', () => {
+      expect(hub).toBeDefined();
+      const next = before.clone();
+      next.moveNode(hub.id, { x: hub.pos.x + 6, y: hub.pos.y + 4 });
+      const { scope, part } = check(next);
+      // Затронуты полотна узла и полотна у их дальних концов — не вся сеть.
+      for (const id of hub.corridors) expect(scope.corridors.has(id)).toBe(true);
+      expect(scope.nodes.has(hub.id)).toBe(true);
+      expect(scope.corridors.size).toBeLessThan(before.corridors.size / 5);
+      // Тротуары полотен узла — уже по новому месту.
+      const was = byKey(net);
+      expect(hub.corridors.some((id) => part.lines.find((l) => l.key === `c${id}`)?.sig !== was.get(`c${id}`))).toBe(true);
+    });
+
+    it('скруглили угол перекрёстка: заново — его скругления и тротуары его улиц', () => {
+      const next = before.clone();
+      const k = junctionCorners(next, next.node(hub.id))[0];
+      setCornerRadius(next, hub.id, k.key, 20);
+      const { scope, part } = check(next);
+      expect(scope.nodes.has(hub.id)).toBe(true);
+      expect(part.lines.find((l) => l.key === `n${hub.id}`)?.sig).not.toBe(byKey(net).get(`n${hub.id}`));
+    });
+
+    it('снесли улицу у перекрёстка: её тротуары прочь, у соседей — как при полном пересчёте', () => {
+      const next = before.clone();
+      next.removeCorridor(hub.corridors[0]);
+      expect(check(next).scope.corridors.has(hub.corridors[0])).toBe(true);
+    });
+
+    it('та же сеть — правки нет', () => {
+      expect(sidewalkScope(before, before)).toBeNull();
+      expect(sidewalkScope(before, before.clone())).toBeNull();
+    });
   });
 });
