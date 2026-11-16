@@ -1,6 +1,7 @@
 import { GRADE, STATION } from '../config';
 import { Cubic, CurveLUT } from '../core/bezier';
 import { hash } from '../core/math';
+import { drawWalkSign } from './walkSign';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import { stationNormal } from '../game/railStationEdit';
@@ -232,9 +233,8 @@ export const laneMarkRadius = (zoom: number) => Math.max(LANE_W * 0.36, 4 / zoom
 /** Значок-переключатель пешеходного перехода в «Перекрёстке». */
 export interface WalkToggle {
   corridor: number;
+  /** Центр знака — у бордюра на конце зебры (наполовину на тротуаре): зебра под ним видна. */
   pos: Vec;
-  /** Вдоль перехода (поперёк дороги) — так лежат полоски зебры на значке. */
-  dir: Vec;
   on: boolean;
   own: boolean;
   cost: number;
@@ -242,8 +242,8 @@ export interface WalkToggle {
   stripes?: Vec[][];
 }
 
-/** Радиус значка перехода (он на самой зебре): 2,8 м — в её ширину, но не меньше 9 пикселей. */
-export const walkBadgeRadius = (zoom: number) => Math.max(2.8, 9 / zoom);
+/** Сторона знака перехода: 4,4 м (почти в глубину зебры), но не меньше 18 пикселей — читается и издалека. */
+export const walkSignSize = (zoom: number) => Math.max(4.4, 18 / zoom);
 
 /** Цвета карты; трава, деревья и фон вне карты — по биому (BIOMES[…].palette). */
 const C = {
@@ -4467,8 +4467,8 @@ export class Renderer {
   }
 
   /**
-   * Значки пешеходных переходов в «Перекрёстке»: кружок с человечком на зебре. Переход есть — белый человечек на синем,
-   * нет — серый, перечёркнут красным; «само» (по городу, игрок не трогал) — обводка пунктиром; под курсором — крупнее.
+   * Значки пешеходных переходов в «Перекрёстке» — знак 5.19: переход есть — как есть, нет — серый, перечёркнут красным,
+   * а где ляжет зебра — контуром полосок; «само» (по городу, игрок не трогал) — пунктир вокруг; под курсором — крупнее.
    */
   private drawWalkToggles(edit: NonNullable<ToolOverlay['walkEdit']>): void {
     const ctx = this.ctx;
@@ -4487,62 +4487,8 @@ export class Renderer {
     }
     ctx.stroke();
     ctx.setLineDash([]);
-    for (const t of edit.toggles) {
-      const r = walkBadgeRadius(z) * (t.corridor === edit.hover ? 1.2 : 1);
-      const { x, y } = t.pos;
-      ctx.fillStyle = t.on ? '#2f80ed' : '#eceef1';
-      ctx.strokeStyle = t.on ? '#ffffff' : '#7b838d';
-      ctx.lineWidth = 1.6 / z;
-      ctx.setLineDash(t.own ? [] : [2.2 / z, 1.6 / z]);
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.setLineDash([]);
-      // Зебра внизу значка: три полоски вдоль перехода.
-      const u = t.dir;
-      const w = { x: -u.y, y: u.x };
-      const fg = t.on ? '#ffffff' : '#7b838d';
-      ctx.fillStyle = fg;
-      for (let i = -1; i <= 1; i++) {
-        const cx = x + u.x * i * r * 0.42 + w.x * r * 0.48;
-        const cy = y + u.y * i * r * 0.42 + w.y * r * 0.48;
-        ctx.beginPath();
-        ctx.moveTo(cx - u.x * r * 0.13 - w.x * r * 0.14, cy - u.y * r * 0.13 - w.y * r * 0.14);
-        ctx.lineTo(cx + u.x * r * 0.13 - w.x * r * 0.14, cy + u.y * r * 0.13 - w.y * r * 0.14);
-        ctx.lineTo(cx + u.x * r * 0.13 + w.x * r * 0.14, cy + u.y * r * 0.13 + w.y * r * 0.14);
-        ctx.lineTo(cx - u.x * r * 0.13 + w.x * r * 0.14, cy - u.y * r * 0.13 + w.y * r * 0.14);
-        ctx.fill();
-      }
-      // Человечек — прямо на экране: голова, туловище, шаг.
-      const k = r * 0.11;
-      ctx.beginPath();
-      ctx.arc(x + k * 0.6, y - k * 4.6, k * 1.25, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = fg;
-      ctx.lineWidth = k * 1.3;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(x + k * 0.3, y - k * 3);
-      ctx.lineTo(x - k * 0.3, y + k * 0.6);
-      ctx.moveTo(x - k * 0.3, y + k * 0.6);
-      ctx.lineTo(x - k * 2, y + k * 2.8);
-      ctx.moveTo(x - k * 0.3, y + k * 0.6);
-      ctx.lineTo(x + k * 1.6, y + k * 2.6);
-      ctx.moveTo(x - k * 2.2, y - k * 0.6);
-      ctx.lineTo(x + k * 0.2, y - k * 2.4);
-      ctx.lineTo(x + k * 2.2, y - k * 0.9);
-      ctx.stroke();
-      if (!t.on) {
-        ctx.strokeStyle = '#e8483f';
-        ctx.lineWidth = 2 / z;
-        ctx.beginPath();
-        ctx.moveTo(x - r * 0.68, y + r * 0.68);
-        ctx.lineTo(x + r * 0.68, y - r * 0.68);
-        ctx.stroke();
-      }
-      ctx.lineCap = 'butt';
-    }
+    // Знак «Пешеходный переход» у бордюра на конце зебры, ровно на экране (src/render/walkSign.ts).
+    for (const t of edit.toggles) drawWalkSign(ctx, t.pos, walkSignSize(z) * (t.corridor === edit.hover ? 1.15 : 1), t, z);
   }
 
   /**

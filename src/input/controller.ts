@@ -25,7 +25,7 @@ import { GRADE } from '../config';
 import { profileText, type ProfileSummary } from '../game/grade';
 import type { TerraformMode } from '../world/terrain';
 import { altitudeText } from '../render/relief';
-import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay, walkBadgeRadius, type WalkToggle } from '../render/renderer';
+import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay, walkSignSize, type WalkToggle } from '../render/renderer';
 import { badgeAt, projectBadges } from '../render/projectBadges';
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
 import type { RoadNode } from '../world/network';
@@ -2102,30 +2102,35 @@ export class Controller {
   walkToggles(): WalkToggle[] {
     const sel = this.selection;
     if (this.tool !== 'lights' || sel?.type !== 'junction' || this.livePhase()) return [];
-    // Значок — на самой зебре, посреди проезжей части (у бордюра на остром углу он ложился бы на зебру соседа);
-    // стёртой зебры нет — её место показан контуром.
-    return this.game()
-      .crosswalkInfo(sel.id)
+    // Знак — у бордюра на конце зебры (наполовину на тротуаре: сама зебра видна), у того бордюра, где соседний подъезд
+    // дальше (на остром углу знак не ляжет на зебру соседа); стёртой зебры нет — её место показано контуром.
+    const list = this.game().crosswalkInfo(sel.id);
+    const aways = list.map((x) => x.arm.e.away);
+    return list
       .filter((x) => !x.arm.ban)
-      .map((x) => ({
-        corridor: x.arm.corridor.id,
-        pos: { x: (x.geo.ends[0].x + x.geo.ends[1].x) / 2, y: (x.geo.ends[0].y + x.geo.ends[1].y) / 2 },
-        dir: x.geo.out,
-        on: x.arm.on,
-        own: x.arm.own,
-        cost: x.cost,
-        stripes: x.arm.on ? undefined : x.geo.stripes,
-      }));
+      .map((x) => {
+        const room = (out: Vec) => Math.min(Math.PI, ...aways.filter((a) => a !== x.arm.e.away).map((a) => Math.acos(Math.max(-1, Math.min(1, dot(a, out))))));
+        const left = room(x.geo.outL) > room(x.geo.out) + 0.2;
+        return {
+          corridor: x.arm.corridor.id,
+          pos: left ? x.geo.curbL : x.geo.curb,
+          on: x.arm.on,
+          own: x.arm.own,
+          cost: x.cost,
+          stripes: x.arm.on ? undefined : x.geo.stripes,
+        };
+      });
   }
 
-  /** Значок перехода под точкой p. */
+  /** Знак перехода под точкой p (квадрат знака, ровный на экране). */
   private walkAt(p: Vec, toggles = this.walkToggles()): WalkToggle | null {
-    const r = walkBadgeRadius(this.camera.zoom);
+    const h = walkSignSize(this.camera.zoom) / 2;
     let best: WalkToggle | null = null;
-    let bestD = r;
+    let bestD = Infinity;
     for (const t of toggles) {
+      if (Math.abs(p.x - t.pos.x) > h || Math.abs(p.y - t.pos.y) > h) continue;
       const d = dist(t.pos, p);
-      if (d <= bestD) [bestD, best] = [d, t];
+      if (d < bestD) [bestD, best] = [d, t];
     }
     return best;
   }

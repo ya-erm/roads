@@ -101,9 +101,16 @@ describe('Пешеходные переходы: геометрия и граф'
     const xs = geo.stripes.flatMap((q) => q.map((p) => p.x));
     expect(Math.min(...xs)).toBeCloseTo(arm.cut + XWALK.gap, 3);
     expect(Math.max(...xs)).toBeCloseTo(arm.cut + XWALK.gap + XWALK.depth, 3);
-    // Улица 1+1: полосы 14 м, асфальт 17 м; полос зебры — по шагу 2,6 без 0,5 у бордюров.
+    // Улица 1+1: полосы 14 м, асфальт 17 м; зебра — от бордюра до бордюра (крайние полосы в 0,3 м от края), 7 полос.
     expect(geo.width).toBeCloseTo(17, 3);
-    expect(geo.stripes.length).toBe(5);
+    expect(geo.stripes.length).toBe(7);
+    const ys = geo.stripes.flatMap((q) => q.map((p) => p.y));
+    expect(Math.max(...ys) - Math.min(...ys)).toBeCloseTo(17 - 2 * XWALK.curbPad, 3);
+    // Проспект с разделительной — тоже во всю ширину.
+    const wide = cross(['avenue', 'avenue', 'avenue', 'avenue']);
+    const av = walkGeo(walkArms(wide.net, wide.j)[0]);
+    const ay = av.stripes.flatMap((q) => q.map((p) => p.y));
+    expect(Math.max(...ay) - Math.min(...ay)).toBeCloseTo(av.width - 2 * XWALK.curbPad, 3);
     expect(geo.lanes).toBe(2);
     expect(walkTime(geo.width)).toBeCloseTo(17 / XWALK.speed + XWALK.start, 5);
     const g = new LaneGraph(net);

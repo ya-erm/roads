@@ -167,6 +167,7 @@ import { carTripHtml } from './carTrip';
 import { SERVICES } from '../game/services';
 import { money, planPrice, projectMoneyWarning } from '../input/labels';
 import { WALK_BAN_TEXT } from '../lanes/crosswalk';
+import { walkSignSvg } from '../render/walkSign';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, nextScenarioSettings, rulesHtml, withSeed } from './newGame';
 
@@ -3719,16 +3720,18 @@ export class Hud {
         const tip = x.arm.ban
           ? `${c.name}: перехода нет — ${WALK_BAN_TEXT[x.arm.ban]}`
           : `${c.name}: ${x.arm.on ? 'переход есть · стереть' : `перехода нет · нарисовать ${money(x.cost)}`}${x.arm.own ? '' : ' · сейчас — как решил город'}`;
-        return `<button class="opt ${x.arm.on ? 'active' : ''}" data-action="jn-walk" data-id="${id}" data-seg="${x.arm.corridor.id}" ${x.arm.ban ? 'disabled' : ''} data-tip="${esc(tip)}">${c.arrow}<span class="walk-ic ${x.arm.on ? '' : 'off'}">🚶</span></button>`;
+        // Тот же знак, что на карте (walkSign.ts): есть — как есть, нет — серый и перечёркнут, «само» — пунктир вокруг.
+        return `<button class="walk-opt" data-action="jn-walk" data-id="${id}" data-seg="${x.arm.corridor.id}" ${x.arm.ban ? 'disabled' : ''} data-tip="${esc(tip)}"><span class="walk-dir">${c.arrow}</span>${walkSignSvg({ on: x.arm.on, own: x.arm.own || !!x.arm.ban }, 20)}</button>`;
       })
       .join('');
     const open = list.filter((x) => !x.arm.ban);
     const allOn = open.every((x) => x.arm.on);
     const cost = open.filter((x) => !x.arm.on).reduce((s, x) => s + x.cost, 0);
+    const sign = (on: boolean) => walkSignSvg({ on, own: true }, 14);
     const all = allOn
-      ? `<button class="small" data-action="jn-walks-all" data-id="${id}" data-v="0" data-tip="Стереть все переходы: машины быстрее, жителям — дальше до остановок" data-tip-end>🚶 все ✕</button>`
-      : `<button class="small" data-action="jn-walks-all" data-id="${id}" data-v="1" ${cost > g.budget ? 'disabled' : ''} data-tip="Переходы на всех подъездах · ${money(cost)}" data-tip-end>🚶 все ✓</button>`;
-    return `<div class="rule-row"><span class="lbl2" data-tip="Пешеходные переходы на подъездах: клик — нарисовать или стереть (и на карте — значки у бордюров)">🚶 Переходы</span>
+      ? `<button class="small" data-action="jn-walks-all" data-id="${id}" data-v="0" data-tip="Стереть все переходы: машины быстрее, жителям — дальше до остановок" data-tip-end>${sign(false)} все</button>`
+      : `<button class="small" data-action="jn-walks-all" data-id="${id}" data-v="1" ${cost > g.budget ? 'disabled' : ''} data-tip="Переходы на всех подъездах · ${money(cost)}" data-tip-end>${sign(true)} все</button>`;
+    return `<div class="rule-row"><span class="lbl2" data-tip="Пешеходные переходы на подъездах: клик — нарисовать или стереть (и на карте — знаки у зебр)">Переходы</span>
       <div class="opts">${chips}</div>${all}</div>`;
   }
 

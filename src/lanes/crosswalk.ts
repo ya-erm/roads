@@ -13,10 +13,13 @@ export const XWALK = {
   gap: 0.5,
   depth: 5,
   stopGap: 1.5,
-  /** Полосы зебры — вдоль движения: ширина и шаг поперёк дороги; у бордюров — без полосы. */
+  /**
+   * Полосы зебры — вдоль движения: ширина и шаг поперёк дороги (шаг подгоняется, чтобы крайние полосы легли у самых
+   * бордюров — в curbPad от края асфальта).
+   */
   stripe: 1.3,
   period: 2.6,
-  curbPad: 0.5,
+  curbPad: 0.3,
   /** Сверх двух переходов между обрезами полотна — хотя бы столько дороги. */
   minFree: 6,
   /** Пешеходы, м/с игры, и сколько секунд им сойти с бордюра. */
@@ -191,21 +194,26 @@ export function walkGeo(arm: WalkArm): WalkGeo {
     pointOff(c, at(db), x1),
     pointOff(c, at(da), x1),
   ];
-  // Полосы зебры — посередине проезжей части, без полосы у самых бордюров.
-  const room = hi - lo - 2 * XWALK.curbPad;
-  const n = Math.max(1, Math.floor((room + XWALK.period - XWALK.stripe) / XWALK.period));
-  const span = n * XWALK.period - (XWALK.period - XWALK.stripe);
-  const x0 = (lo + hi) / 2 - span / 2;
+  // Полосы зебры — по всей ширине асфальта, от бордюра до бордюра (и через разделительную): крайние — в curbPad от края,
+  // шаг подогнан под ширину (не уже промежутка 0,9 м).
+  const left = lo - ROAD_MARGIN + XWALK.curbPad;
+  const room = hi - lo + 2 * ROAD_MARGIN - 2 * XWALK.curbPad;
+  let n = Math.max(2, Math.round((room - XWALK.stripe) / XWALK.period) + 1);
+  while (n > 2 && (room - XWALK.stripe) / (n - 1) - XWALK.stripe < 0.9) n--;
+  const step = (room - XWALK.stripe) / (n - 1);
   const stripes: Vec[][] = [];
-  for (let i = 0; i < n; i++) stripes.push(quad(d0, d1, x0 + i * XWALK.period, x0 + i * XWALK.period + XWALK.stripe));
+  for (let i = 0; i < n; i++) stripes.push(quad(d0, d1, left + i * step, left + i * step + XWALK.stripe));
   const dc = arm.cut + XWALK_BACK;
+  // Разметка полос стёрта до самых бордюров (и краской нарисованные кромки у магистралей и односторонних).
+  const cl = lo - ROAD_MARGIN + 0.15;
+  const ch = hi + ROAD_MARGIN - 0.15;
   const cover = [
-    pointOff(c, at(arm.cut - 0.2), lo - 0.3),
-    pointOff(c, at((arm.cut + dc) / 2), lo - 0.3),
-    pointOff(c, at(dc), lo - 0.3),
-    pointOff(c, at(dc), hi + 0.3),
-    pointOff(c, at((arm.cut + dc) / 2), hi + 0.3),
-    pointOff(c, at(arm.cut - 0.2), hi + 0.3),
+    pointOff(c, at(arm.cut - 0.2), cl),
+    pointOff(c, at((arm.cut + dc) / 2), cl),
+    pointOff(c, at(dc), cl),
+    pointOff(c, at(dc), ch),
+    pointOff(c, at((arm.cut + dc) / 2), ch),
+    pointOff(c, at(arm.cut - 0.2), ch),
   ];
   const lanes = c.lanes.filter((l) => laneBand(c, l, sMid)).length;
   // Правый бордюр, если смотреть от перекрёстка: у конца a — сторона hi (вправо по a→b), у конца b — lo.
