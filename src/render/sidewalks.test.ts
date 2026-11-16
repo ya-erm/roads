@@ -65,22 +65,26 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
     expect(points).toBeGreaterThan(2000);
   });
 
-  it('у узлов тротуары сходятся скруглением угла: дуга начинается и кончается у концов тротуаров улиц; концы — по узлу', () => {
+  it('у узлов тротуары сходятся скруглением угла: дуга начинается у конца тротуара улицы, кончается у другого (или за скруглением); концы — по узлу', () => {
     const corners = net.lines.filter((l) => l.key.startsWith('n'));
     expect(corners.length).toBeGreaterThan(30);
     let joined = 0;
+    let both = 0;
     for (const l of corners) {
       const node = Number(l.key.slice(1));
       const ends = sidewalkEnds(net, node);
-      expect(ends.length).toBeGreaterThanOrEqual(2);
+      expect(ends.length).toBeGreaterThanOrEqual(1);
       for (const arc of l.paths) {
         const near = (x: number, y: number) => ends.some((e) => Math.hypot(e.x - x, e.y - y) < 0.6);
-        expect(near(arc[0], arc[1])).toBe(true);
-        expect(near(arc[arc.length - 2], arc[arc.length - 1])).toBe(true);
+        const a = near(arc[0], arc[1]);
+        const b = near(arc[arc.length - 2], arc[arc.length - 1]);
+        expect(a || b).toBe(true);
+        if (a && b) both++;
         joined++;
       }
     }
     expect(joined).toBeGreaterThan(50);
+    expect(both / joined).toBeGreaterThan(0.8);
     // Концы — по обе стороны улицы у узла: между ними ляжет переход.
     const byStreet = new Map<string, Set<number>>();
     for (const e of net.ends) {
@@ -145,6 +149,57 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
     expect(corners).toBeGreaterThan(50);
     // Почти все точки — ровно на полширины тротуара от края; мимо — лишь у самых острых углов (бордюр круче тротуара).
     expect(inside / all).toBeGreaterThan(0.99);
+  });
+
+  it('на углу перекрёстка — непрерывная полоса вдоль всего бордюра: от тротуара одной улицы до другой (или до прямого края улицы без тротуара)', () => {
+    const roads = g.roads.net;
+    const cuts = junctionCuts(roads);
+    let curbs = 0;
+    let single = 0;
+    for (const n of roads.nodes.values()) {
+      if (n.kind !== 'junction') continue;
+      const ends = sidewalkEnds(net, n.id);
+      if (!ends.length) continue;
+      const line = net.lines.find((l) => l.key === `n${n.id}`);
+      const spec = line?.paved === false ? SIDEWALK.path : SIDEWALK.paved;
+      const d = spec.from + spec.w / 2;
+      for (const k of plateOutline(roads, n, cuts)?.curbs ?? []) {
+        const si = k.from.end === 'a' ? 1 : -1;
+        const sj = k.to.end === 'a' ? -1 : 1;
+        const A = ends.find((e) => e.corridor === k.from.corridor.id && e.side === si);
+        const B = ends.find((e) => e.corridor === k.to.corridor.id && e.side === sj);
+        if (!A && !B) continue;
+        // Дуга над водой не рисуется.
+        const pts = k.pts;
+        if (g.terrain.isWater(pts[Math.floor(pts.length / 2)], 0.6)) continue;
+        curbs++;
+        if (!A || !B) single++;
+        const first = pts[0];
+        const last = pts[pts.length - 1];
+        const at = (p: number[], i: number) => ({ x: p[i], y: p[i + 1] });
+        // Полоса, что начинается у начала бордюра и кончается у его конца — на d от края асфальта.
+        const arc = line?.paths.find((p) => Math.abs(Math.hypot(p[0] - first.x, p[1] - first.y) - d) < 0.3 && Math.abs(Math.hypot(p[p.length - 2] - last.x, p[p.length - 1] - last.y) - d) < 0.3);
+        expect(arc, `угол у узла ${n.id}: ${k.from.corridor.id} → ${k.to.corridor.id}`).toBeTruthy();
+        if (!arc) continue;
+        // Без разрывов и клиньев: у каждой точки бордюра полоса — на d от него (по касательной, а не срезом).
+        for (const q of pts) {
+          let best = Infinity;
+          for (let i = 0; i + 3 < arc.length; i += 2) {
+            const a = at(arc, i);
+            const b = at(arc, i + 2);
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const l2 = dx * dx + dy * dy;
+            const t = l2 > 0 ? Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.y - a.y) * dy) / l2)) : 0;
+            best = Math.min(best, Math.hypot(q.x - a.x - dx * t, q.y - a.y - dy * t));
+          }
+          expect(best).toBeLessThan(d + 0.3);
+        }
+      }
+    }
+    expect(curbs).toBeGreaterThan(100);
+    // Есть и углы, где тротуар только у одной улицы: их тоже обходит полоса.
+    expect(single).toBeGreaterThan(0);
   });
 
   it('издали не видны, ближе — одна обводка на вид, без фильтров; кэш по полотнам — то же без пересчёта', () => {

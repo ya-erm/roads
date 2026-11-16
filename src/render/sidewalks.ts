@@ -12,15 +12,19 @@ import { paths } from './townDecor';
  * (drawSidewalks), в плитки кэша карты. Полоса постоянной ширины вплотную к краю асфальта — по той же геометрии, что
  * асфальт (lanes/geometry: края полос edgesAt + ROAD_MARGIN, обрезы junctionCuts, площадка plateOutline): вдоль
  * полотна — по обеим сторонам, где рядом дома, по его кривой; у перекрёстка тротуары соседних улиц сходятся по
- * бордюру угла площадки (концентрично ему); у стыка (развилка) — скруглением радиуса CURB, на повороте улицы и у
+ * всему бордюру угла площадки (концентрично ему; есть тротуар хотя бы у одной из двух улиц — угол обходится целиком, до
+ * прямого края другой); у стыка (развилка) — скруглением радиуса CURB, на повороте улицы и у
  * тупика — дугой вокруг узла (у тупика — вокруг центра разворота). Концы тротуаров у узла (SidewalkEnd) — там, где
  * тротуар улицы переходит в скругление угла: от конца до конца через улицу ляжет пешеходный переход.
  */
 
 /** Тротуар: от края полотна (from) шириной w, м. Город — мощёный у самого бордюра, село — утоптанная тропинка. */
 export const SIDEWALK = { paved: { from: 0.2, w: 3.4 }, path: { from: 0.9, w: 2 } } as const;
-/** Точки оси — через step м; тротуар — где ближе houses м есть дом города; короче min — нет; разрывы короче gap — сшить. */
-const WALK = { step: 2.5, houses: 40, min: 8, gap: 8 };
+/**
+ * Точки оси — через step м; тротуар — где ближе houses м есть дом города; короче min — нет; разрывы короче gap — сшить;
+ * не дошёл до конца полотна меньше end м — дотянуть до конца (до угла перекрёстка, где его подхватит скругление).
+ */
+const WALK = { step: 2.5, houses: 40, min: 8, gap: 8, end: 25 };
 /** Радиус скругления тротуара на углу квартала, м; угол острее straight — скругление, тупее — дуга вокруг узла. */
 const CURB = 5;
 const STRAIGHT = (165 / 180) * Math.PI;
@@ -117,16 +121,31 @@ interface Corner {
 }
 
 /**
- * Тротуар вдоль бордюра curb (от края одного подъезда к краю другого) — от конца тротуара A до конца B: каждая точка
- * бордюра сдвинута наружу (в сторону A) на столько же, на сколько A от начала бордюра, — по биссектрисе соседних
- * отрезков, поэтому дуга угла — концентрична бордюру. Где бордюр круче радиуса сдвига (внутренний угол), точки,
+ * Тротуар вдоль всего бордюра curb (от края одного подъезда к краю другого) — от конца тротуара A до конца B: каждая
+ * точка бордюра сдвинута наружу на d (ось тротуара от края асфальта) по биссектрисе соседних отрезков, поэтому дуга
+ * угла — концентрична бордюру. Нет тротуара у одной из улиц (A или B — null) — дуга всё равно обходит весь угол и
+ * кончается на прямом краю той улицы, сразу за скруглением. Где бордюр круче радиуса сдвига (внутренний угол), точки,
  * что пошли бы назад, пропускаются — без петли.
  */
-function curbPts(curb: Vec[], A: Vec, B: Vec): number[] {
+function curbPts(raw: Vec[], A: Vec | null, B: Vec | null, d: number): number[] {
+  // Совпадающие соседние точки (скругление кончается там же, где край подъезда) — одной: у отрезка нулевой длины нет
+  // направления.
+  const curb = raw.filter((p, i) => i === 0 || Math.hypot(p.x - raw[i - 1].x, p.y - raw[i - 1].y) > 1e-3);
+  if (curb.length < 2) return [];
   const n = curb.length;
-  const out: Vec[] = [A];
-  const d = Math.hypot(A.x - curb[0].x, A.y - curb[0].y);
-  const sgn = Math.sign(cross(sub(curb[1], curb[0]), sub(A, curb[0]))) || 1;
+  // Наружу — в сторону тротуара улицы (от площадки).
+  const sgn = A
+    ? Math.sign(cross(sub(curb[1], curb[0]), sub(A, curb[0]))) || 1
+    : B
+      ? Math.sign(cross(sub(curb[n - 1], curb[n - 2]), sub(B, curb[n - 1]))) || 1
+      : 1;
+  const off = (p: Vec, a: Vec, b: Vec): Vec => {
+    const t = norm(sub(b, a));
+    return { x: p.x - t.y * sgn * d, y: p.y + t.x * sgn * d };
+  };
+  const start = A ?? off(curb[0], curb[0], curb[1]);
+  const end = B ?? off(curb[n - 1], curb[n - 2], curb[n - 1]);
+  const out: Vec[] = [start];
   const ahead = (q: Vec, i: number) => {
     const last = out[out.length - 1];
     const t = sub(curb[i], curb[i - 1]);
@@ -140,14 +159,13 @@ function curbPts(curb: Vec[], A: Vec, B: Vec): number[] {
     const q = { x: curb[i].x - t.y * sgn * k, y: curb[i].y + t.x * sgn * k };
     if (ahead(q, i)) out.push(q);
   }
-  while (out.length > 1 && !ahead(B, n - 1)) out.pop();
-  out.push(B);
+  while (out.length > 1 && !ahead(end, n - 1)) out.pop();
+  out.push(end);
   return out.flatMap((p) => [p.x, p.y]);
 }
 
 /** Точки скругления от конца тротуара A до конца B. */
 function cornerPts(k: Corner, A: Vec, B: Vec): number[] {
-  if (k.curb) return curbPts(k.curb, A, B);
   const pts: number[] = [];
   if (k.via) {
     const C = k.via;
@@ -208,7 +226,8 @@ function nodeCorners(
       const okJ = ok(k.to.corridor);
       if (okI) setTrim(k.from, si, cut(k.from));
       if (okJ) setTrim(k.to, sj, cut(k.to));
-      if (!okI || !okJ || k.pts.length < 2) continue;
+      // Угол обходится, если тротуар может быть хотя бы у одной из двух улиц (нет у обеих — сборка его пропустит).
+      if ((!okI && !okJ) || k.pts.length < 2) continue;
       out.push({ via: null, center: node.pos, curb: k.pts, from: { c: k.from.corridor.id, end: k.from.end, side: si }, to: { c: k.to.corridor.id, end: k.to.end, side: sj } });
     }
     return out;
@@ -292,8 +311,9 @@ function corridorRun(c: Corridor, site: WalkSite, paved: boolean, near: Around, 
       const q = pointOff(c, s, walkOff(c, s, side, paved));
       pts.push({ ...q, ok: housed(q) && !blocked(q) && !site.wet(q) });
     }
-    // Короткие разрывы — сшить.
+    // Короткие разрывы — сшить; не дошёл до конца полотна чуть-чуть — дотянуть: у угла его подхватит скругление.
     const gapN = Math.round(WALK.gap / ((s1 - s0) / n));
+    const endN = Math.round(WALK.end / ((s1 - s0) / n));
     for (let i = 0; i < pts.length; ) {
       if (pts[i].ok) {
         i++;
@@ -301,7 +321,9 @@ function corridorRun(c: Corridor, site: WalkSite, paved: boolean, near: Around, 
       }
       let j = i;
       while (j < pts.length && !pts[j].ok) j++;
-      if (i > 0 && j < pts.length && j - i <= gapN && pts.slice(i, j).every((p) => !site.wet(p))) for (let k = i; k < j; k++) pts[k].ok = true;
+      const inner = i > 0 && j < pts.length && j - i <= gapN && pts.slice(i, j).every((p) => !site.wet(p));
+      const edge = (i === 0) !== (j === pts.length) && j - i <= endN && pts.slice(i, j).every((p) => !site.wet(p) && !blocked(p));
+      if (inner || edge) for (let k = i; k < j; k++) pts[k].ok = true;
       i = j;
     }
     let cur: number[] = [];
@@ -391,21 +413,26 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
     for (const e of run.ends) ends.push({ node: e.end === 'a' ? c.a : c.b, corridor: id, side: e.side, x: e.x, y: e.y, ux: e.ux, uy: e.uy, w: (paved ? SIDEWALK.paved : SIDEWALK.path).w });
     if (run.paths.length) lines.push({ key: `c${id}`, paths: run.paths, paved, box: boxOf(run.paths), sig: `${paved}|${sigOf(run.paths)}` });
   }
-  // Скругления — где оба тротуара дошли до угла.
+  // Скругления — где оба тротуара дошли до угла; у перекрёстка — где дошёл хотя бы один: угол обходится по всему
+  // бордюру (curbPts).
   const endOf = (r: { c: number; end: 'a' | 'b'; side: 1 | -1 }) => runs.get(r.c)?.ends.find((e) => e.end === r.end && e.side === r.side) ?? null;
   for (const [nid, list] of corners) {
     const p: number[][] = [];
+    let paved: boolean | null = null;
     for (const k of list) {
       const A = endOf(k.from);
       const B = endOf(k.to);
-      if (!A || !B) continue;
-      const pts = cornerPts(k, A, B);
+      if (!A && !B) continue;
+      if (!k.curb && (!A || !B)) continue;
+      const pv = eligible.get((A ? k.from : k.to).c)?.paved ?? true;
+      paved ??= pv;
+      const spec = pv ? SIDEWALK.paved : SIDEWALK.path;
+      const pts = k.curb ? curbPts(k.curb, A, B, spec.from + spec.w / 2) : cornerPts(k, A!, B!);
       const i = Math.floor(pts.length / 4) * 2;
-      if (!site.wet({ x: pts[i], y: pts[i + 1] })) p.push(pts);
+      if (pts.length >= 4 && !site.wet({ x: pts[i], y: pts[i + 1] })) p.push(pts);
     }
     if (!p.length) continue;
-    const paved = eligible.get(list[0].from.c)?.paved ?? true;
-    lines.push({ key: `n${nid}`, paths: p, paved, box: boxOf(p), sig: `${paved}|${sigOf(p)}` });
+    lines.push({ key: `n${nid}`, paths: p, paved: paved ?? true, box: boxOf(p), sig: `${paved}|${sigOf(p)}` });
   }
   if (cache && cache.size > eligible.size * 2 + 200) for (const id of [...cache.keys()]) if (!eligible.has(id)) cache.delete(id);
   return { lines, ends };
