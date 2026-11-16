@@ -8,7 +8,8 @@ export class Camera {
   height = 1;
   dpr = 1;
   readonly minZoom = 0.08;
-  readonly maxZoom = 3;
+  /** Вблизи — до ×5: разглядеть дома, дворы, технику. */
+  readonly maxZoom = 5;
   /** Игрок двигал камеру вручную — тогда не перестраиваем вид при ресайзе. */
   touched = false;
 
