@@ -69,7 +69,7 @@ import {
   leftTab,
   type LeftTab,
   modeTilesHtml,
-  offerBannerHtml,
+  OfferBannerView,
   recordRowHtml,
   RecordView,
   resultsHtml,
@@ -4450,15 +4450,14 @@ export class Hud {
     }
   }
 
-  private lastOfferBanner = '';
+  private readonly offerBanner = new OfferBannerView();
 
   /** Плашка предложения вверху — напоминает о предложениях на вкладке «События»; пока она есть, уведомления опускаются под неё. */
   private renderOfferBanner(): void {
     if (this.pressing) return;
+    const html = this.offerBanner.next(this.game());
+    if (html === null) return;
     const el = this.q('[data-offer-banner]');
-    const html = offerBannerHtml(this.game());
-    if (html === this.lastOfferBanner) return;
-    this.lastOfferBanner = html;
     el.innerHTML = html;
     el.classList.toggle('hidden', !html);
     this.root.classList.toggle('has-offer-banner', !!html);
@@ -4661,7 +4660,8 @@ export class Hud {
   reset(): void {
     this.lastPanel = '';
     this.lastScenario = '';
-    this.lastOfferBanner = '';
+    // Плашку — заново по новой партии: в песочнице её нет, и прежняя не должна остаться (с замершим таймером).
+    this.offerBanner.reset();
     this.whyOpen.clear();
     this.confirmAdvance = false;
     this.hiddenAdvice.clear();

@@ -4,7 +4,7 @@ import { clockText, durationText } from '../core/timeText';
 import { Game } from '../game/game';
 import { freightRoute, freshGame, withoutCitizens } from '../game/testkit';
 import { DEFAULT_SETTINGS } from '../world/settings';
-import { briefHtml, isFolded, leftPanelHtml, leftTab, leftTabs, objectiveHtml, offerBannerHtml, offersSectionHtml, toggleFold, type PanelView } from './scenarioUi';
+import { briefHtml, isFolded, leftPanelHtml, leftTab, leftTabs, objectiveHtml, OfferBannerView, offerBannerHtml, offersSectionHtml, toggleFold, type PanelView } from './scenarioUi';
 
 /** Партия-сценарий со стартовым предложением контракта и ещё одним — посрочнее. */
 function scenarioWithOffers() {
@@ -159,6 +159,22 @@ describe('Плашка предложения вверху', () => {
     expect(offerBannerHtml(game)).not.toContain('ob-more');
     sc.accept(extra.id);
     expect(offerBannerHtml(game)).toBe('');
+  });
+
+  it('после новой игры или загрузки песочницы плашки прежнего сценария нет', () => {
+    const { game } = scenarioWithOffers();
+    const sandbox = freshGame({ ...DEFAULT_SETTINGS, seed: 8 });
+    expect(sandbox.scenario).toBeNull();
+    const loaded = new Game(sandbox.settings, JSON.parse(JSON.stringify(sandbox.toSave())));
+    for (const next of [sandbox, loaded]) {
+      const banner = new OfferBannerView();
+      expect(banner.next(game)).toContain('offer-banner-in');
+      expect(banner.next(game)).toBeNull();
+      // Смена партии (Hud.reset): плашку перерисовать — пустой, то есть спрятать.
+      banner.reset();
+      expect(banner.next(next)).toBe('');
+      expect(banner.next(next)).toBeNull();
+    }
   });
 });
 
