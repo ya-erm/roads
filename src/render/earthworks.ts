@@ -6,6 +6,7 @@ import type { Corridor, LaneNet } from '../lanes/model';
 import type { Network, Segment } from '../world/network';
 import { halfWidth } from '../world/roadTypes';
 import { halfAtS } from '../world/worldgen';
+import type { SidewalkSpan } from './sidewalks';
 
 /** Глубже этого насыпь или выемка видна штрихами. */
 const MIN_DEPTH = 0.7;
@@ -13,32 +14,46 @@ const MIN_DEPTH = 0.7;
 const SLOPE_RUN = 2;
 const MAX_SLOPE = 16;
 
-/** Штрихи откосов полотна: отрезки x0,y0,x1,y1 подряд — отдельно насыпи и выемки. */
+/**
+ * Штрихи откосов полотна: отрезки x0,y0,x1,y1 подряд — отдельно насыпи и выемки; у каждого штриха (fillAt, cutAt) —
+ * место на оси s (> 0) со знаком стороны: + справа, − слева (как pointOff и SidewalkSpan.side).
+ */
 interface Ticks {
   key: string;
   fill: Float32Array;
   cut: Float32Array;
+  fillAt: Float32Array;
+  cutAt: Float32Array;
 }
 
 function ticksOf(prof: GroundProfile & { ds: number }, at: (s: number) => { p: Vec; t: Vec; half: number }): Omit<Ticks, 'key'> {
   const fill: number[] = [];
   const cut: number[] = [];
+  const fillAt: number[] = [];
+  const cutAt: number[] = [];
   for (let i = 1; i < prof.z.length - 1; i++) {
     const h = prof.h[i];
     if (Number.isNaN(h)) continue;
     const d = prof.z[i] - h;
     if (Math.abs(d) < MIN_DEPTH) continue;
-    const { p, t, half } = at(i * prof.ds);
+    const s = i * prof.ds;
+    const { p, t, half } = at(s);
     const w = Math.min(MAX_SLOPE, Math.abs(d) * SLOPE_RUN) + 1.5;
     const out = d > 0 ? fill : cut;
     for (const side of [1, -1]) {
       const nx = -t.y * side;
       const ny = t.x * side;
       out.push(p.x + nx * half, p.y + ny * half, p.x + nx * (half + w), p.y + ny * (half + w));
+      (d > 0 ? fillAt : cutAt).push(side * s);
     }
   }
-  return { fill: Float32Array.from(fill), cut: Float32Array.from(cut) };
+  return { fill: Float32Array.from(fill), cut: Float32Array.from(cut), fillAt: Float32Array.from(fillAt), cutAt: Float32Array.from(cutAt) };
 }
+
+const none = (): Omit<Ticks, 'key'> => ({ fill: new Float32Array(), cut: new Float32Array(), fillAt: new Float32Array(), cutAt: new Float32Array() });
+
+/** Штрих откоса у места s стороны side скрыт тротуаром (и на шаг штрихов за его концом): улица в городе спланирована. */
+const underWalk = (spans: readonly SidewalkSpan[], s: number, side: number) => spans.some((w) => w.side === side && s >= w.s0 - 3 && s <= w.s1 + 3);
 
 const curveKey = (c: { curve: { p0: Vec; p1: Vec; p2: Vec; p3: Vec } }, extra: string) => {
   const { p0, p1, p2, p3 } = c.curve;
@@ -67,7 +82,7 @@ export class EarthworkCache {
     let t = this.roads.get(c.id);
     if (t?.key !== key) {
       const prof = corridorProfile(net, c, ground);
-      const ticks = prof ? ticksOf(prof, (s) => ({ p: c.lut.pointAt(s), t: c.lut.tangentAt(s), half: halfAtS(c, s) })) : { fill: new Float32Array(), cut: new Float32Array() };
+      const ticks = prof ? ticksOf(prof, (s) => ({ p: c.lut.pointAt(s), t: c.lut.tangentAt(s), half: halfAtS(c, s) })) : none();
       t = { key, ...ticks };
       this.roads.set(c.id, t);
     }
@@ -82,14 +97,18 @@ export class EarthworkCache {
     if (t?.key !== key) {
       const prof = trackProfile(s.lut, la, lb, ground);
       const half = halfWidth(s.spec);
-      const ticks = prof ? ticksOf(prof, (at) => ({ p: s.lut.pointAt(at), t: s.lut.tangentAt(at), half })) : { fill: new Float32Array(), cut: new Float32Array() };
+      const ticks = prof ? ticksOf(prof, (at) => ({ p: s.lut.pointAt(at), t: s.lut.tangentAt(at), half })) : none();
       t = { key, ...ticks };
       this.rails.set(s.id, t);
     }
     return t;
   }
 
-  /** Штрихи откосов в рамке view; only — из дорог только эти полотна (например, проекты стройки). */
+  /**
+   * Штрихи откосов в рамке view; only — из дорог только эти полотна (например, проекты стройки). walks — тротуары по
+   * полотнам (sidewalkNet.spans): вдоль них штрихов нет — городская улица спланирована вровень с участками, а штрихи
+   * под тротуаром торчали бы на газон тёмными чёрточками.
+   */
   draw(
     ctx: CanvasRenderingContext2D,
     ground: ((p: Vec) => number) | null,
@@ -100,15 +119,16 @@ export class EarthworkCache {
     zoom: number,
     version: number,
     only?: (c: Corridor) => boolean,
+    walks?: ReadonlyMap<number, readonly SidewalkSpan[]>,
   ): void {
     if (!ground || zoom < 0.3) return;
     this.version = version;
     // Предпросмотры оставляют в кэше чужие формы — время от времени чистим.
     if (this.roads.size > roads.corridors.size + 500) this.roads.clear();
     if (this.rails.size > rails.segments.size + 500) this.rails.clear();
-    const all: Ticks[] = [];
-    for (const c of roads.corridorsInBox(view.x0, view.y0, view.x1, view.y1)) if (!only || only(c)) all.push(this.road(roads, c, ground));
-    for (const s of segs) if (s.platform === undefined) all.push(this.rail(rails, s, ground));
+    const all: { t: Ticks; walks?: readonly SidewalkSpan[] }[] = [];
+    for (const c of roads.corridorsInBox(view.x0, view.y0, view.x1, view.y1)) if (!only || only(c)) all.push({ t: this.road(roads, c, ground), walks: walks?.get(c.id) });
+    for (const s of segs) if (s.platform === undefined) all.push({ t: this.rail(rails, s, ground) });
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineWidth = Math.max(1.2, 1.6 / zoom);
@@ -117,9 +137,11 @@ export class EarthworkCache {
       ['cut', 'rgba(84, 90, 100, 0.75)'],
     ] as const) {
       ctx.beginPath();
-      for (const t of all) {
+      for (const { t, walks } of all) {
         const a = t[kind];
+        const at = kind === 'fill' ? t.fillAt : t.cutAt;
         for (let i = 0; i < a.length; i += 4) {
+          if (walks && underWalk(walks, Math.abs(at[i / 4]), Math.sign(at[i / 4]))) continue;
           ctx.moveTo(a[i], a[i + 1]);
           ctx.lineTo(a[i + 2], a[i + 3]);
         }

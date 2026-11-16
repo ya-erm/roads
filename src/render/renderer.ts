@@ -57,7 +57,7 @@ import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
-import { type SidewalkCache, type SidewalkNet, sidewalkNet, type WalkSite } from './sidewalks';
+import { type SidewalkCache, type SidewalkNet, sidewalkNet, walkSite } from './sidewalks';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, contourLabel, fineContourStep, gradeRungs, heightLabel, ReliefRenderer, waterPath } from './relief';
@@ -70,7 +70,7 @@ import { WORK_TRAIN } from '../game/workTrains';
 import { SERVICES } from '../game/services';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
 import { corridorHalf, halfAtS } from '../world/worldgen';
-import { storeysOf, townTier } from '../world/townForms';
+import { storeysOf } from '../world/townForms';
 import { drawTownWalks, type TownWalks, townWalks } from './townWalks';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
@@ -508,7 +508,7 @@ export class Renderer {
   /** Аллеи и тротуары: с какими дорогами, строениями, радиусами и застройкой городов посчитаны. */
   private alleys = { key: '', things: '', lines: [] as StreetGreen[], cache: new Map<number, { sig: string; line: StreetGreen | null }>() };
   /** Тротуары городов и их кэш по полотнам (пересчёт — вместе с аллеями). */
-  private sidewalks: SidewalkNet = { lines: [], ends: [] };
+  private sidewalks: SidewalkNet = { lines: [], ends: [], spans: new Map() };
   private sidewalkCache: SidewalkCache = new Map();
   /** Дорожки кварталов по городам (townWalks): считаются, когда меняется список домов или парков города. */
   private walks = new Map<number, TownWalks>();
@@ -584,7 +584,7 @@ export class Renderer {
     this.diffs.alleys.clear();
     this.diffs.sidewalks.clear();
     this.alleys = { key: '', things: '', lines: [], cache: new Map() };
-    this.sidewalks = { lines: [], ends: [] };
+    this.sidewalks = { lines: [], ends: [], spans: new Map() };
     this.sidewalkCache.clear();
     this.walks.clear();
     this.progress.clear();
@@ -806,7 +806,8 @@ export class Renderer {
     const built = planned.length ? segs.filter((x) => !x.build) : segs;
     this.drawTunnels(built);
     const ground = s.game.ground();
-    this.earthworks.draw(ctx, ground, s.roadNet, s.game.net, built, view, this.camera.zoom, s.game.terrain.version);
+    // Вдоль тротуаров откосов нет: улица в городе спланирована (render/sidewalks.ts, spans).
+    this.earthworks.draw(ctx, ground, s.roadNet, s.game.net, built, view, this.camera.zoom, s.game.terrain.version, undefined, this.sidewalks.spans);
     // Откосы проектов стройки — бледнее: насыпи и выемки ещё будут.
     if (buildingCorridors(s.fullNet).length || planned.length) {
       ctx.globalAlpha = 0.55;
@@ -1182,30 +1183,11 @@ export class Renderer {
       if (things !== this.alleys.things || this.alleys.cache.size > game.roads.net.corridors.size * 2 + 200) this.alleys.cache.clear();
       this.alleys.things = things;
       const index = game.index;
-      const terrain = game.terrain;
       const towns = game.towns.map((t) => ({ center: t.center, radius: Math.floor(t.radius / 50) * 50 }));
-      const site: WalkSite = {
-        around: (p, r) => {
-          const houses: Footprint[] = [];
-          const others: Footprint[] = [];
-          for (const s of index.near(p, r)) {
-            if (s.type === 'building' && s.kind === 'landmark') continue;
-            (s.type === 'building' ? houses : others).push(s.fp);
-          }
-          return { houses, others };
-        },
-        wet: (p) => terrain.isWater(p, 0.6),
-        townAt: (p) => {
-          const t = game.towns.find((x) => dist(p, x.center) < (x.extent ?? x.radius) + 20);
-          if (!t) return null;
-          const tier = townTier(t);
-          return { paved: tier !== 'village', key: `${t.id}:${tier}` };
-        },
-      };
       this.alleys.lines = streetGreen(game.roads.net, towns, (p, r) => index.at(p, r) !== null, this.alleys.cache);
       add(this.diffs.alleys.update((put) => this.alleys.lines.forEach((l) => put(l.id, l.sig, l.box))));
       // Тротуары и скругления углов кварталов (render/sidewalks.ts).
-      this.sidewalks = sidewalkNet(game.roads.net, site, this.sidewalkCache);
+      this.sidewalks = sidewalkNet(game.roads.net, walkSite(game), this.sidewalkCache);
       add(this.diffs.sidewalks.update((put) => this.sidewalks.lines.forEach((l) => put(l.key, l.sig, l.box))));
     }
     add(

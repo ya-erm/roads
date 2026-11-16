@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { freshGame } from '../game/testkit';
 import type { Town, TownBuilding } from '../world/entities';
 import { NEW_GAME_SETTINGS } from '../world/settings';
+import type { Footprint } from '../world/spatial';
 import { halfAtS } from '../world/worldgen';
 import { parkGates } from './parkArt';
 import { SIDEWALK, type Sidewalk, WALK_LOOK } from './sidewalks';
@@ -154,5 +155,56 @@ describe('Дорожки кварталов', () => {
     expect(toParks).toBeGreaterThan(5);
     expect(drives).toBeGreaterThan(100);
     expect(curbed / drives).toBeGreaterThan(0.9);
+  });
+
+  it('мир по seed: ни одной дорожки в никуда — каждая ведёт к дому города или к парку', { timeout: 30_000 }, () => {
+    const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 1 });
+    const net = g.roads.net;
+    const edge = (p: { x: number; y: number }) => {
+      let best = Infinity;
+      for (const c of net.corridorsNear(p, 30)) {
+        const hit = c.lut.closest(p);
+        best = Math.min(best, hit.d - halfAtS(c, hit.s));
+      }
+      return best;
+    };
+    /** От точки до участка f, м (внутри — 0). */
+    const toLot = (p: { x: number; y: number }, f: Footprint) => {
+      const dx = p.x - f.center.x;
+      const dy = p.y - f.center.y;
+      const lx = Math.abs(dx * Math.cos(f.angle) + dy * Math.sin(f.angle)) - f.w / 2;
+      const ly = Math.abs(-dx * Math.sin(f.angle) + dy * Math.cos(f.angle)) - f.h / 2;
+      return Math.hypot(Math.max(0, lx), Math.max(0, ly));
+    };
+    let fronts = 0;
+    let drives = 0;
+    let paths = 0;
+    const lost: string[] = [];
+    for (const t of g.towns) {
+      const w = townWalks(t, edge);
+      if (!w) continue;
+      const houses = t.buildings.map((b) => b.fp);
+      const lots = [...houses, ...(t.parks ?? []).map((k) => k.fp)];
+      const at = (x: number, y: number, list: Footprint[], d: number) => list.some((f) => toLot({ x, y }, f) < d);
+      // К крыльцу и съезд — от края участка дома.
+      for (const f of w.fronts) {
+        fronts++;
+        if (!at(f.pts[0], f.pts[1], houses, 0.05)) lost.push(`к крыльцу ${f.pts.map((v) => v.toFixed(0)).join(',')}`);
+      }
+      for (const d of w.drives) {
+        drives++;
+        if (!at(d.pts[0], d.pts[1], houses, 0.05) || !at(d.pts[2], d.pts[3], houses, 0.05)) lost.push(`съезд ${d.pts.slice(0, 4).map((v) => v.toFixed(0)).join(',')}`);
+      }
+      // Дорожки кварталов: один конец — у дома (вход дома второго ряда, промежуток между домами) или у входа в парк.
+      for (const p of w.paths) {
+        paths++;
+        const n = p.length;
+        if (!at(p[0], p[1], lots, 6) && !at(p[n - 2], p[n - 1], lots, 6)) lost.push(`дорожка ${p.map((v) => v.toFixed(0)).join(',')}`);
+      }
+    }
+    expect(fronts).toBeGreaterThan(200);
+    expect(drives).toBeGreaterThan(100);
+    expect(paths).toBeGreaterThan(100);
+    expect(lost).toEqual([]);
   });
 });

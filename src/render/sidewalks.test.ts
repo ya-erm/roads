@@ -4,9 +4,9 @@ import { freshGame } from '../game/testkit';
 import { edgesAt, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
 import { ROAD_MARGIN } from '../world/roadTypes';
 import { NEW_GAME_SETTINGS } from '../world/settings';
-import { townTier } from '../world/townForms';
+import { type Footprint, pointInFootprint } from '../world/spatial';
 import { halfAtS } from '../world/worldgen';
-import { drawSidewalks, SIDEWALK, sidewalkEnds, sidewalkNet, type WalkSite } from './sidewalks';
+import { drawSidewalks, SIDEWALK, sidewalkEnds, sidewalkNet, walkSite } from './sidewalks';
 
 function stub() {
   const calls: Record<string, number> = {};
@@ -32,17 +32,8 @@ const total = (c: Record<string, number>) => Object.values(c).reduce((s, n) => s
 
 describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
   const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 1 });
-  const site: WalkSite = {
-    around: (p, r) => {
-      const near = g.index.near(p, r);
-      return { houses: near.filter((s) => s.type === 'building').map((s) => s.fp), others: near.filter((s) => s.type !== 'building').map((s) => s.fp) };
-    },
-    wet: (p) => g.terrain.isWater(p, 0.6),
-    townAt: (p) => {
-      const t = g.towns.find((x) => Math.hypot(p.x - x.center.x, p.y - x.center.y) < (x.extent ?? x.radius) + 20);
-      return t ? { paved: townTier(t) !== 'village', key: `${t.id}` } : null;
-    },
-  };
+  // Как в игре (renderer): дома, ратуша, парки и скверы городов.
+  const site = walkSite(g);
   const net = sidewalkNet(g.roads.net, site);
 
   it('по обе стороны улиц, где рядом дома: в городе мощёные, в селе тропинки; у бордюра, не на проезжей части', () => {
@@ -200,6 +191,167 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
     expect(curbs).toBeGreaterThan(100);
     // Есть и углы, где тротуар только у одной улицы: их тоже обходит полоса.
     expect(single).toBeGreaterThan(0);
+  });
+
+  // Улицы с тротуарами по правилам sidewalkNet: улица, проспект или грунтовка на земле в черте города.
+  const roads = g.roads.net;
+  const cuts = junctionCuts(roads);
+  const streets = [...roads.corridors.values()].filter(
+    (c) => !c.build && !c.ring && ['street', 'avenue', 'dirt'].includes(c.cls) && roads.node(c.a).level === 0 && roads.node(c.b).level === 0 && site.townAt(c.lut.pointAt(c.length / 2)),
+  );
+  const toSeg = (p: Vec, a: Vec, b: Vec) => {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    const t = l2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+    return Math.hypot(p.x - a.x - dx * t, p.y - a.y - dy * t);
+  };
+  const onPath = (q: Vec, list: readonly number[][] | undefined, d: number) =>
+    !!list?.some((p) => {
+      for (let i = 0; i + 3 < p.length; i += 2) if (toSeg(q, { x: p[i], y: p[i + 1] }, { x: p[i + 2], y: p[i + 3] }) < d) return true;
+      return false;
+    });
+  /** Ось тротуара стороны side полотна c на s (как sidewalks.walkOff). */
+  const axis = (c: (typeof streets)[number], s: number, side: 1 | -1) => {
+    const spec = site.townAt(c.lut.pointAt(c.length / 2))!.paved ? SIDEWALK.paved : SIDEWALK.path;
+    const d = ROAD_MARGIN + spec.from + spec.w / 2;
+    const e = edgesAt(c, s)!;
+    return pointOff(c, s, side === 1 ? e[1] + d : e[0] - d);
+  };
+  /** Там тротуара не бывает: вода, станция, предприятие, база. */
+  const off = (q: Vec) => site.wet(q) || g.index.near(q, 10).some((x) => x.type !== 'building' && pointInFootprint(q, x.fp, SIDEWALK.paved.w / 2 + 1));
+  const lots: Footprint[] = g.towns.flatMap((t) => [...t.buildings.map((b) => b.fp), ...(t.parks ?? []).map((k) => k.fp)]);
+  const toLot = (q: Vec, f: Footprint) => {
+    const dx = q.x - f.center.x;
+    const dy = q.y - f.center.y;
+    const lx = Math.abs(dx * Math.cos(f.angle) + dy * Math.sin(f.angle)) - f.w / 2;
+    const ly = Math.abs(-dx * Math.sin(f.angle) + dy * Math.cos(f.angle)) - f.h / 2;
+    return Math.hypot(Math.max(0, lx), Math.max(0, ly));
+  };
+
+  it('вдоль застроенной улицы — сплошной: у участков (дома, ратуша, парки) тротуар есть везде, разрывы — не короче участка', () => {
+    let checked = 0;
+    const miss: string[] = [];
+    const holes: string[] = [];
+    for (const c of streets) {
+      const own = net.lines.find((l) => l.key === `c${c.id}`)?.paths;
+      const [ca, cb] = cuts.get(c.id)!;
+      for (const side of [1, -1] as const) {
+        // Участок ближе 25 м к оси тротуара — тротуар есть.
+        for (let s = ca + 2; s <= c.length - cb - 2; s += 2) {
+          const q = axis(c, s, side);
+          if (off(q) || !lots.some((f) => Math.abs(f.center.x - q.x) < 160 && Math.abs(f.center.y - q.y) < 160 && toLot(q, f) < 25)) continue;
+          checked++;
+          if (!onPath(q, own, 1)) miss.push(`${c.id}/${side} s=${s.toFixed(0)}`);
+        }
+        // Куски одной стороны: между ними — не меньше пустого участка (WALK.hole, 50 м), если там не вода и не станция.
+        const parts = (own ?? [])
+          .map((p) => {
+            const a = c.lut.closest({ x: p[0], y: p[1] });
+            const b = c.lut.closest({ x: p[p.length - 2], y: p[p.length - 1] });
+            const t = c.lut.tangentAt(a.s);
+            const sd = t.x * (p[1] - a.point.y) - t.y * (p[0] - a.point.x) >= 0 ? 1 : -1;
+            return { s0: Math.min(a.s, b.s), s1: Math.max(a.s, b.s), sd };
+          })
+          .filter((x) => x.sd === side)
+          .sort((x, y) => x.s0 - y.s0);
+        for (let i = 1; i < parts.length; i++) {
+          const gap = parts[i].s0 - parts[i - 1].s1;
+          if (gap >= 47) continue;
+          let free = true;
+          for (let s = parts[i - 1].s1; s <= parts[i].s0; s += 1) if (off(axis(c, s, side))) free = false;
+          if (free) holes.push(`${c.id}/${side} ${gap.toFixed(0)} м`);
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(3000);
+    expect(miss).toEqual([]);
+    expect(holes).toEqual([]);
+  });
+
+  it('тротуар, что подходит к перекрёстку ближе 60 м, доходит до угла; угол обходится дугой от тротуара улицы до тротуара другой', () => {
+    let corners = 0;
+    let both = 0;
+    const short: string[] = [];
+    const missing: string[] = [];
+    for (const n of roads.nodes.values()) {
+      if (n.kind !== 'junction') continue;
+      const ends = sidewalkEnds(net, n.id);
+      const arcs = net.lines.find((l) => l.key === `n${n.id}`)?.paths ?? [];
+      for (const k of plateOutline(roads, n, cuts)?.curbs ?? []) {
+        // Стороны улиц, что смотрят на угол (как в sidewalkNet): у начала бордюра — левая от узла, у конца — правая.
+        const sides = [
+          { e: k.from, side: (k.from.end === 'a' ? 1 : -1) as 1 | -1 },
+          { e: k.to, side: (k.to.end === 'a' ? -1 : 1) as 1 | -1 },
+        ];
+        let near = 0;
+        let reached = 0;
+        for (const { e, side } of sides) {
+          const c = e.corridor;
+          const spans = net.spans.get(c.id)?.filter((w) => w.side === side) ?? [];
+          const [ca, cb] = cuts.get(c.id)!;
+          // Тротуар этой стороны подходит к узлу ближе 60 м (от обреза площадки)?
+          const close = e.end === 'a' ? spans.some((w) => w.s0 <= ca + 60) : spans.some((w) => w.s1 >= c.length - cb - 60);
+          if (!close) continue;
+          near++;
+          const end = ends.find((x) => x.corridor === c.id && x.side === side);
+          if (end) {
+            reached++;
+            continue;
+          }
+          // Не дошёл — только если путь к углу перекрыт (вода, станция).
+          let free = true;
+          for (let d = 0; d <= 60; d += 1) {
+            const s = e.end === 'a' ? ca + d : c.length - cb - d;
+            if (s < 0 || s > c.length) break;
+            if (off(axis(c, s, side))) free = false;
+          }
+          if (free) short.push(`${n.id}: ${c.id}/${side}`);
+        }
+        if (!near) continue;
+        if (!reached || g.terrain.isWater(k.pts[Math.floor(k.pts.length / 2)], 0.6)) continue;
+        corners++;
+        if (reached === 2) both++;
+        // Дуга вдоль бордюра — от его начала до конца.
+        const pts = k.pts;
+        const mid = pts[Math.floor(pts.length / 2)];
+        if (!onPath(mid, arcs, SIDEWALK.paved.from + SIDEWALK.paved.w / 2 + 0.6)) missing.push(`${n.id}: ${k.from.corridor.id} → ${k.to.corridor.id}`);
+      }
+    }
+    expect(short).toEqual([]);
+    expect(missing).toEqual([]);
+    expect(corners).toBeGreaterThan(100);
+    expect(both / corners).toBeGreaterThan(0.85);
+    // Шов и поворот улицы (узел двух улиц): тротуар, дошедший до узла по одной, продолжен по другой, если у неё с этой
+    // стороны тротуар подходит ближе 60 м.
+    const ids = new Set(streets.map((c) => c.id));
+    let seams = 0;
+    const broken: string[] = [];
+    for (const n of roads.nodes.values()) {
+      const two = roads.ends(n);
+      if (two.length !== 2 || !two.every((e) => ids.has(e.corridor.id))) continue;
+      const ends = sidewalkEnds(net, n.id);
+      for (const [x, y] of [two, [two[1], two[0]]]) {
+        // Левая (от узла) сторона одной улицы продолжается правой стороной другой.
+        const sx = (x.end === 'a' ? 1 : -1) as 1 | -1;
+        const sy = (y.end === 'a' ? -1 : 1) as 1 | -1;
+        if (!ends.some((e) => e.corridor === x.corridor.id && e.side === sx)) continue;
+        const c = y.corridor;
+        const [ca, cb] = cuts.get(c.id)!;
+        const spans = net.spans.get(c.id)?.filter((w) => w.side === sy) ?? [];
+        if (!(y.end === 'a' ? spans.some((w) => w.s0 <= ca + 60) : spans.some((w) => w.s1 >= c.length - cb - 60))) continue;
+        seams++;
+        if (ends.some((e) => e.corridor === c.id && e.side === sy)) continue;
+        let free = true;
+        for (let d = 0; d <= 60; d += 1) {
+          const s = y.end === 'a' ? ca + d : c.length - cb - d;
+          if (s >= 0 && s <= c.length && off(axis(c, s, sy))) free = false;
+        }
+        if (free) broken.push(`${n.id}: ${x.corridor.id} → ${c.id}/${sy}`);
+      }
+    }
+    expect(seams).toBeGreaterThan(50);
+    expect(broken).toEqual([]);
   });
 
   it('издали не видны, ближе — одна обводка на вид, без фильтров; кэш по полотнам — то же без пересчёта', () => {
