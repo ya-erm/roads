@@ -100,10 +100,20 @@ describe('Дорожки кварталов', () => {
     };
     let total = 0;
     let toParks = 0;
+    let drives = 0;
+    let curbed = 0;
     for (const t of g.towns) {
       const w = townWalks(t, edge);
       if (!w) continue;
       total += w.paths.length;
+      // Съезды — от участка до полотна: дальний край (раструб у бордюра) — у края полотна или под ним.
+      for (const d of w.drives) {
+        drives++;
+        const outer = [6, 8].map((i) => edge({ x: d.pts[i], y: d.pts[i + 1] }));
+        if (outer.every((e) => e < 1)) curbed++;
+      }
+      // Дорожки к крыльцам доходят до тротуара.
+      for (const f of w.fronts) expect(edge({ x: f.pts[2], y: f.pts[3] })).toBeLessThan(4.5);
       // Концы дорожек у улицы — на тротуаре или на газоне, но не на полотне.
       for (const p of w.paths) for (let i = 0; i < p.length; i += 2) expect(edge({ x: p[i], y: p[i + 1] })).toBeGreaterThan(-0.5);
       // От входа в парк — до тротуара: начало дорожки — у входа, конец — у края полотна.
@@ -116,5 +126,7 @@ describe('Дорожки кварталов', () => {
     }
     expect(total).toBeGreaterThan(200);
     expect(toParks).toBeGreaterThan(5);
+    expect(drives).toBeGreaterThan(100);
+    expect(curbed / drives).toBeGreaterThan(0.9);
   });
 });

@@ -35,12 +35,13 @@ export interface ParkSite {
 }
 
 /** Сколько зелени нужно городу его размера. */
-export function parkQuota(town: Pick<Town, 'population' | 'style'>): Record<ParkKind, number> {
+export function parkQuota(town: Pick<Town, 'population' | 'style' | 'tier'>): Record<ParkKind, number> {
   const tier = townTier(town);
   const pop = town.population;
-  if (tier === 'village') return { park: 0, square: pop >= 1500 ? 1 : 0, plaza: 0, memorial: 1, embankment: 0 };
-  if (tier === 'town') return { park: 1, square: Math.min(4, 2 + Math.floor(pop / 3000)), plaza: 1, memorial: 0, embankment: 8 };
-  return { park: pop >= 14000 ? 2 : 1, square: Math.min(8, 3 + Math.floor(pop / 4000)), plaza: 1, memorial: 0, embankment: 14 };
+  // Население — по жильцам домов: село — 300–800, город — 1500–5000, большой город — от ~6500.
+  if (tier === 'village') return { park: 0, square: pop >= 500 ? 1 : 0, plaza: 0, memorial: 1, embankment: 0 };
+  if (tier === 'town') return { park: 1, square: Math.min(4, 2 + Math.floor(pop / 2500)), plaza: 1, memorial: 0, embankment: 8 };
+  return { park: pop >= 12000 ? 2 : 1, square: Math.min(8, 3 + Math.floor(pop / 3500)), plaza: 1, memorial: 0, embankment: 14 };
 }
 
 /** Размеры большого парка, крупные — первыми: большой город, город. */

@@ -104,7 +104,8 @@ describe('Модернизация в авто-парке', { timeout: 30_000 },
     game.setLineAuto(line.id, { renew: true });
     expect(line.auto!.renew).toBeUndefined();
     expect(game.autoModel(line)).toBe('truck2');
-    runSeconds(game, 30);
+    // Меняет машину, когда та на стоянке у станции, — как скоро, решает длина рейса (мир по seed): ждём до 2 минут.
+    for (let s = 0; s < 120 && !models(game, line).includes('truck2'); s += 10) runSeconds(game, 10);
     expect(models(game, line)).toContain('truck2');
   });
 

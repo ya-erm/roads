@@ -13,7 +13,7 @@ import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, playerIndustries, townS
 import { industryCount, MINING_KINDS, shoreFits, terrainFits } from './sites';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
-import { edgeOf, inDistrict, JOBS_PER_FLOOR, mergeBlocks, mergeTowers, residentsOf, townTier, zoneTown } from './townForms';
+import { edgeOf, growTier, inDistrict, JOBS_PER_FLOOR, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, zoneTown } from './townForms';
 import { onPark, placeParks, type ParkSite } from './townParks';
 import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
@@ -364,7 +364,8 @@ function assignDemands(towns: Town[], rng: Rng, cargo: { base: CargoType[]; extr
   const used = new Map<CargoType, number>(cargo.base.map((c) => [c, 0]));
   const order = [...towns].sort((a, b) => b.population - a.population);
   for (const t of order) {
-    const count = t.population > 2000 ? 3 : 2;
+    // Город просит три груза, село — два.
+    const count = townTier(t) !== 'village' ? 3 : 2;
     const pool = [...cargo.base].sort((a, b) => used.get(a)! - used.get(b)! + rng.range(-0.5, 0.5));
     t.demands = pool.slice(0, count);
     for (const c of t.demands) used.set(c, used.get(c)! + 1);
@@ -408,7 +409,7 @@ function settleChains(ctx: WorldContext, towns: Town[], industries: Industry[]):
 }
 
 /** Сколько жителей нужно городу, чтобы он просил ещё и продукцию новых цепочек (стекло, мебель). */
-export const EXTRA_DEMAND_POPULATION = 4000;
+export const EXTRA_DEMAND_POPULATION = 3500;
 
 /**
  * Города покрупнее просят ещё одно из EXTRA_TOWN_CARGO — поровну между грузами; каждый такой груз нужен
@@ -657,6 +658,9 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
     radius: radius + 30,
     top: top - 30,
     style,
+    // Ярус — по размеру генерации: от него — типы домов, панельные дома и высотки, парки (townForms.ts).
+    tier: tierOfSize(size, style),
+    settled: SETTLE_RULE,
     population: 0,
     buildings: [],
     streets: alive.map((s) => s.id),
@@ -669,8 +673,10 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
   };
   placeLandmark(ctx, town);
   for (const s of alive) fillStreet(ctx, town, s, style === 'linear' ? 0.75 : 0.88);
-  recountPopulation(town);
   buildBlocks(ctx, town);
+  // Типы домов и жильцы — сразу: население города (для потребностей, мест под предприятия) — уже по жильцам.
+  zoneTown(town);
+  recountPopulation(town);
   levelTown(ctx.terrain, town);
   return town;
 }
@@ -748,6 +754,23 @@ function clearAlong(ctx: Pick<WorldContext, 'roads'>, fp: Footprint, margin: num
     if (pts.some((q) => seg.lut.closest(q).d < hw)) return false;
   }
   return !ctx.roads.nodesNear(fp.center, footprintRadius(fp)).some((n) => pointInFootprint(n.pos, fp, margin + 4));
+}
+
+/**
+ * Дом второго ряда (TownBuilding.rear) у старых сохранений: от середины его стороны к улице до края ближайшего полотна
+ * дальше, чем помещаются тротуар и газон (у дома у улицы — 5 м).
+ */
+export function rearByGap(roads: LaneNet, b: Pick<TownBuilding, 'fp' | 'face'>): boolean {
+  const c = Math.cos(b.fp.angle);
+  const s = Math.sin(b.fp.angle);
+  const ly = ((b.face ?? -1) * b.fp.h) / 2;
+  const p = { x: b.fp.center.x - ly * s, y: b.fp.center.y + ly * c };
+  let gap = Infinity;
+  for (const k of roads.corridorsNear(p, 40)) {
+    const hit = k.lut.closest(p);
+    gap = Math.min(gap, hit.d - halfAtS(k, hit.s));
+  }
+  return gap > 9;
 }
 
 /**
@@ -853,6 +876,9 @@ function addLandmark(ctx: WorldContext, town: Town, fp: Footprint): void {
  * Застраивает улицу домами по обеим сторонам. density — доля занятых мест;
  * reach — дальше этого от центра города домов не ставим.
  */
+/** Обычный участок дома: по улице и вглубь, м (большой у центра — 32–44 × 28–34). */
+export const LOT = { w: [22, 30], h: [22, 30] } as const;
+
 export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density: number, limit = Infinity, reach = Infinity): number {
   const { rng } = ctx;
   const hw = corridorHalf(seg);
@@ -862,12 +888,13 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
     while (s < seg.length - 26 && added < limit) {
       const p0 = seg.lut.pointAt(s);
       const closeness = 1 - Math.min(1, dist(p0, town.center) / Math.max(1, town.radius));
+      // Участки — в масштабе дорог (полоса 7 м): дом с двором 22–30 м по улице, большой участок у центра — 32–44.
       const big = closeness > 0.55 && rng.chance(0.55);
-      const width = big ? rng.range(26, 36) : rng.range(16, 24);
-      const depth = big ? rng.range(22, 28) : rng.range(15, 22);
+      const width = big ? rng.range(32, 44) : rng.range(LOT.w[0], LOT.w[1]);
+      const depth = big ? rng.range(28, 34) : rng.range(LOT.h[0], LOT.h[1]);
       const at = s + width / 2;
       if (at + width / 2 > seg.length - 22) break;
-      s += width + rng.range(3, 7);
+      s += width + rng.range(2, 5);
       if (rng.next() > density || dist(p0, town.center) > reach) continue;
       const p = seg.lut.pointAt(at);
       const t = seg.lut.tangentAt(at);
@@ -896,17 +923,17 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
       town.buildings.push(b);
       added++;
       // Второй ряд домов в глубине квартала — чаще ближе к центру.
-      if (added < limit && rng.chance(0.2 + 0.5 * closeness)) {
-        const d2 = rng.range(15, 22);
+      if (added < limit && rng.chance(0.15 + 0.4 * closeness)) {
+        const d2 = rng.range(20, 26);
         const rear: Footprint = {
-          center: add(p, scale(normal, hw + 5 + depth + 5 + d2 / 2)),
-          w: width * rng.range(0.75, 1),
+          center: add(p, scale(normal, hw + 5 + depth + 4 + d2 / 2)),
+          w: width * rng.range(0.85, 1),
           h: d2,
           angle: fp.angle,
         };
         if (placeable(ctx, rear, seg.id) && !onPark(town, rear)) {
           const [rc, rr] = rng.pick(RES_COLORS);
-          const back: TownBuilding = { ...b, id: ctx.nextId(), fp: rear, kind: 'res', floors: rng.int(1, 3), color: rc, roof: rr };
+          const back: TownBuilding = { ...b, id: ctx.nextId(), fp: rear, kind: 'res', floors: rng.int(1, 3), color: rc, roof: rr, rear: true };
           ctx.index.add(back);
           town.buildings.push(back);
           added++;
@@ -1016,8 +1043,11 @@ export function measureTown(town: Town): void {
   for (const b of town.buildings) far = Math.max(far, dist(b.fp.center, town.center) + footprintRadius(b.fp));
   town.radius = Math.max(100, coreRadius(town) + 30);
   town.extent = Math.max(town.radius, far + 10);
-  // Типы застройки новым домам (и домам старых сохранений) — по месту в городе нынешнего размера (townForms.ts).
+  // Типы застройки и жильцы новым домам (и домам старых сохранений) — по месту в городе нынешнего размера
+  // (townForms.ts); население — по жильцам; дорос — ярус выше.
   zoneTown(town);
+  recountPopulation(town);
+  growTier(town);
 }
 
 /** Городская улица для парков: на земле, не магистраль и не съезд. */

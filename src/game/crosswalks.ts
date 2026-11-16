@@ -18,8 +18,15 @@ export const WALK_LOSS = { each: 0.05, max: 0.2 };
 export const WALK_REACH = 120;
 /** Групп на переход в минуту: P / PER_GROUP, не больше MAX_RATE; людей в группе — 1 + P / PER_PERSON, до 6. */
 export const WALK_FLOW = { perGroup: 400, maxRate: 1.5, perPerson: 150, maxGroup: 6 };
-/** Подъезжающий должен успеть остановиться до стоп-линии с таким торможением (м/с²); прождав patience с — с hard. */
-export const WALK_YIELD = { soft: 5, hard: 9, patience: 10, margin: 1 };
+/**
+ * Нерегулируемый переход: пешеходы идут в просвет — подъезжающий должен спокойно остановиться до стоп-линии с
+ * торможением soft (м/с²) и ещё margin м в запасе (50 км/ч — ~47 м до стоп-линии); прождав patience с — и при
+ * торможении hard. Прежде (5 м/с², 1 м, через 10 с — 9 м/с²) группы вклинивались в плотный поток каждые полминуты на
+ * каждом подъезде — на загруженных улицах крупных кварталов это копилось в пробки (машины мира 7 за 9 месяцев:
+ * прибытия −40 %, стоящих — вдвое больше; теперь −15 % и не растёт). На светофоре — свой терпёж lightPatience: идут на
+ * свой «зелёный», даже если до конца фазы не успеют.
+ */
+export const WALK_YIELD = { soft: 2.5, hard: 4, patience: 90, margin: 8, lightPatience: 10 };
 
 /** Групп на переход в минуту по жителям вокруг. */
 export const walkRate = (people: number) => Math.min(WALK_FLOW.maxRate, people / WALK_FLOW.perGroup);
@@ -149,8 +156,8 @@ export class Crosswalks {
       const waited = time - c.since;
       let go: boolean;
       // На светофоре — только на свой «зелёный» и если успеют до конца фазы («умный» светофор без машин держит фазу
-      // короткими продлениями — прождав patience, идут и так: въезд с подъезда подождёт их у стоп-линии).
-      if (L) go = !!c.signal && (L.timer >= c.walk.time || waited > WALK_YIELD.patience) && this.clear(c, graph, traffic, false, 0);
+      // короткими продлениями — прождав lightPatience, идут и так: въезд с подъезда подождёт их у стоп-линии).
+      if (L) go = !!c.signal && (L.timer >= c.walk.time || waited > WALK_YIELD.lightPatience) && this.clear(c, graph, traffic, false, 0);
       else go = this.clear(c, graph, traffic, true, waited > WALK_YIELD.patience ? WALK_YIELD.hard : WALK_YIELD.soft);
       if (!go) continue;
       c.cross = { t0: time, dur: c.walk.time, n: c.waiting, from: c.from };

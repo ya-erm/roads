@@ -98,7 +98,8 @@ describe('Настройка перекрёстка', { timeout: 20_000 }, () =>
     let entered = 0;
     let onRed = 0;
     game.speed = 1;
-    for (let t = 0; t < 40; t += 0.1) {
+    // Полторы минуты: первые машины жителей доезжают до этого перекрёстка (окраина мира 7) только к ~40-й секунде.
+    for (let t = 0; t < 90; t += 0.1) {
       game.update(0.1);
       const lights = L();
       seen.add(lights.phase);
@@ -112,7 +113,7 @@ describe('Настройка перекрёстка', { timeout: 20_000 }, () =>
         prev.set(v.id, v.onMovement);
       }
     }
-    // За 40 секунд по таймеру светофор обходит все фазы, даже пустые.
+    // За полторы минуты по таймеру светофор обходит все фазы, даже пустые.
     expect(seen.size).toBe(phases);
     expect(entered).toBeGreaterThan(0);
     expect(onRed).toBe(0);

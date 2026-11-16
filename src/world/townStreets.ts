@@ -32,8 +32,14 @@ export function streetsRadius(style: TownStyle, size: number): number {
   return (2 + size) * 165 * 0.75;
 }
 
-/** Ближе стольких метров к чужой улице новая не идёт: между ними — дома с обеих сторон. */
-const GAP = 52;
+/**
+ * Во сколько раз кварталы крупнее прежних: шаг узлов главных улиц, длины боковых и переулков, клетка нового района —
+ * ×BLOCK. Участки домов тоже крупнее (worldgen.fillStreet), и мелкая сетка улиц не пронизывает город.
+ */
+const BLOCK = 1.3;
+
+/** Ближе стольких метров к чужой улице новая не идёт: между ними — участки домов с обеих сторон (до 35 м вглубь). */
+const GAP = 70;
 
 interface Chain {
   /** Узлы главной улицы от центра наружу. */
@@ -42,7 +48,7 @@ interface Chain {
 }
 
 /** Запас рамки нового района за крайними улицами сетки: на дома по их внешней стороне, м. */
-const DISTRICT_MARGIN = 32;
+const DISTRICT_MARGIN = 42;
 
 /** Строит улицы города; отдаёт рамку нового района (сетки), если он вышел, — там встанут панельные дома (townForms.ts). */
 export function townStreets(kit: StreetKit, center: Vec, size: number, style: TownStyle): TownDistrict | undefined {
@@ -156,7 +162,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     let h = target;
     let p = start.pos;
     while (dist(p, center) < len) {
-      const step = rng.range(120, 165);
+      const step = rng.range(120, 165) * BLOCK;
       h += rng.range(-0.16, 0.16) + wrap(target - h) * 0.25;
       // Обходим воду и край карты, на склоне — идём вдоль горизонталей.
       let best: Vec | null = null;
@@ -236,8 +242,8 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     const tilt = gapAt + rng.range(-0.15, 0.15);
     const u = { x: Math.cos(tilt), y: Math.sin(tilt) };
     const v = { x: -u.y, y: u.x };
-    const w = rng.range(130, 170);
-    const hgt = rng.range(95, 125);
+    const w = rng.range(130, 170) * BLOCK;
+    const hgt = rng.range(95, 125) * BLOCK;
     const reach = R * kit.shape(gapAt);
     const from = Math.max(radial ? 200 : 120, reach * 0.3);
     const ni = Math.max(2, Math.round((reach * 1.05 - from) / w));
@@ -303,7 +309,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
         const t = norm(sub(fwd, back));
         const turn = rng.range(-0.25, 0.25);
         const dir = rotate({ x: -t.y * side, y: t.x * side }, turn);
-        const l1 = rng.range(95, 175) * (1 - 0.25 * Math.min(1, nearEdge));
+        const l1 = rng.range(95, 175) * BLOCK * (1 - 0.25 * Math.min(1, nearEdge));
         const e1 = link(n, add(n.pos, scale(dir, l1)), null, false, 45);
         if (!e1) {
           prev = null;
@@ -312,15 +318,15 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
         // Улица идёт дальше — второй квартал вглубь (чаще у центра).
         let e2: LaneNode | null = null;
         if (rng.chance(0.55 - 0.3 * Math.min(1, nearEdge)) && dist(e1.pos, center) < reachAt(e1.pos)) {
-          e2 = link(e1, add(e1.pos, scale(rotate(dir, rng.range(-0.2, 0.2)), rng.range(85, 150))), null, false, 45);
+          e2 = link(e1, add(e1.pos, scale(rotate(dir, rng.range(-0.2, 0.2)), rng.range(85, 150) * BLOCK)), null, false, 45);
         }
         // Задние улицы: соседние боковые сходятся в квартал (Т-перекрёстки), иначе — тупики.
         if (prev && rng.chance(0.68)) {
           const span = dist(prev.e1.pos, e1.pos);
-          if (span > 70 && span < 280) link(prev.e1, e1);
+          if (span > 70 * BLOCK && span < 280 * BLOCK) link(prev.e1, e1);
           if (prev.e2 && e2 && rng.chance(0.6)) {
             const s2 = dist(prev.e2.pos, e2.pos);
-            if (s2 > 70 && s2 < 300) link(prev.e2, e2);
+            if (s2 > 70 * BLOCK && s2 < 300 * BLOCK) link(prev.e2, e2);
           }
         }
         prev = { e1, e2 };
@@ -341,7 +347,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
       if (ends.length === 1) dirs.push(scale(ends[0].away, -1), scale(ends[0].away, -1));
       for (let k = 0; k < 3; k++) {
         const dir = rotate(dirs[rng.int(0, dirs.length)], rng.range(-0.2, 0.2));
-        const to = add(n.pos, scale(dir, rng.range(90, 165)));
+        const to = add(n.pos, scale(dir, rng.range(90, 165) * BLOCK));
         if (dist(to, center) > reachAt(to) * 1.05) continue;
         if (link(n, to, null, false, 55)) break;
       }

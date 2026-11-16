@@ -62,17 +62,19 @@ import {
   parkSite,
   placeable,
   railNear,
+  rearByGap,
   recountPopulation,
   streetFace,
   WorldContext,
 } from '../world/worldgen';
 import { nearPark, placeParks } from '../world/townParks';
-import { residentsOf, townTier } from '../world/townForms';
+import { residentsOf, SETTLE_RULE, townTier, zoneTown } from '../world/townForms';
 import { START_ROADS } from '../world/startRoads';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
 import { prepareSettings } from '../scenario/generator';
 import { Ideas, type IdeasState } from '../scenario/ideas';
 import { Scenario } from '../scenario/manager';
+import { rescalePopulation } from '../scenario/objectives';
 import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
@@ -482,6 +484,12 @@ export interface SaveData {
   /** Время партии, секунд игры. */
   time: number;
   /**
+   * Улицы, которые город застроил до отказа: [id полотна, месяц, когда выяснилось] (Game.fullStreets). Без них после
+   * загрузки город пробовал бы застроить их снова и рос бы иначе, чем в той же партии без сохранения. Нет — старое
+   * сохранение: пробует все.
+   */
+  fullStreets?: [number, number][];
+  /**
    * Длина месяца партии, секунд (MONTH_LENGTH на момент сохранения). Нет — старое сохранение: 120 с (или 40 с);
    * при загрузке партия пересчитывается под нынешний месяц с той же датой (monthPace.ts).
    */
@@ -667,6 +675,13 @@ function keepMainRoad(net: LaneNet, nodePos: Vec): void {
   const without = autoMainPair(ends.filter((e) => e.corridor.id !== drive.id));
   if (without) join.mainPair = without;
 }
+
+/**
+ * Рост города (growTown): накопитель роста расходуется по жильцам новых домов — perPerson за жителя (или рабочее
+ * место), но не меньше min за дом; unit — сколько накопить на дом, чтобы строить по несколько за раз. Прежде дом
+ * стоил 20 при ~27 жителях в среднем — по доле город растёт так же.
+ */
+const GROW = { perPerson: 0.75, min: 2, unit: 20 };
 
 /** Легковушка жителя: до ≈130 км/ч на автомагистрали. */
 const CAR_SPEC = { kind: 'car' as const, length: 7, width: 4, maxSpeed: 60, accel: 10 };
@@ -924,6 +939,7 @@ export class Game implements BuildContext {
       net: this.net.serialize(),
       roads: this.roads.net.toJSON(),
       towns: this.towns,
+      fullStreets: this.fullStreets.size ? [...this.fullStreets] : undefined,
       industries: this.industries.map(({ info, type: _t, ...rest }) => ({ ...rest, kind: info.kind })),
       stations: [...this.stations.values()].map((s) => this.stationToSave(s)),
       lines: [...this.lines.values()],
@@ -1047,7 +1063,11 @@ export class Game implements BuildContext {
     // Сохранения, где ворота базы ссылаются на пропавший узел (перенос дороги у базы до исправления), — ворота заново.
     this.healBaseGates();
     this.towns = save.towns;
+    /** Население городов, чьи жильцы разложены заново: до пересчёта (для целей сценария). */
+    const was = new Map<number, number>();
     for (const t of this.towns) {
+      // Ярус старого сохранения — по его населению и прежним порогам, пока жильцы не разложены заново.
+      if (!t.tier) t.tier = townTier(t);
       // Дома, которые город по прежним правилам поставил прямо на пути, сносим.
       const clear = t.buildings.filter((b) => b.kind === 'landmark' || !onRail(this.net, b.fp, 0));
       if (clear.length < t.buildings.length) {
@@ -1057,9 +1077,21 @@ export class Game implements BuildContext {
       for (const b of t.buildings) this.index.add(b);
       // Дома старых сохранений: сторона улицы — по ближайшей улице (тип застройки — в measureTown).
       for (const b of t.buildings) if (b.face === undefined) b.face = streetFace(this.roads.net, b.fp);
+      // Дома второго ряда (без заезда и гаража) — у старых сохранений по расстоянию до улицы.
+      if (t.settled !== SETTLE_RULE) for (const b of t.buildings) if (b.kind === 'res' && b.rear === undefined && rearByGap(this.roads.net, b)) b.rear = true;
+      // Жильцы по прежнему правилу (14 на этаж или с переездом лишних в многоквартирные) — заново, по нынешнему:
+      // в частном доме 3–6 человек, в селе — 1–3 многоквартирных дома (townForms.settlePeople).
+      if (t.settled !== SETTLE_RULE) {
+        was.set(t.id, t.population);
+        for (const b of t.buildings) if (b.kind === 'res') delete b.people;
+        t.settled = SETTLE_RULE;
+      }
       // Радиус старых сохранений — по самому дальнему дому; теперь — по плотной застройке.
       measureTown(t);
     }
+    if (save.scenario && was.size) rescalePopulation(save.scenario, this.towns, was);
+    // Застроенные до отказа улицы — как в партии до сохранения: рост города после загрузки тот же.
+    for (const [id, month] of save.fullStreets ?? []) this.fullStreets.set(id, month);
     // Старые сохранения без переходов (и новые подъезды) — «само» по домам вокруг.
     if (this.syncCrosswalks()) this.roads.changed();
     this.industries = save.industries.map(({ kind, ...rest }) => ({ ...rest, type: 'industry', info: INDUSTRY_TYPES[kind] }));
@@ -7023,25 +7055,38 @@ export class Game implements BuildContext {
       .filter(({ hit }) => hit.d <= reach && this.ownedBy(town, hit.point))
       .map(({ s, hit }) => ({ s, d: hit.d + this.rng.range(0, 80) }))
       .sort((a, b) => a.d - b.d);
+    // Новые дома расселяются сразу, а рост расходуется по жильцам (GROW.perPerson за жителя или рабочее место):
+    // частный дом на 4 жителя дешевле панельного на сотню — село растёт в домах так же быстро по доле, как город.
+    recountPopulation(town);
+    const before = town.population;
+    const tier = townTier(town);
+    const spend = (added: number) => {
+      if (!added) return;
+      const was = town.population;
+      zoneTown(town);
+      recountPopulation(town);
+      town.growthAcc -= Math.max(added * GROW.min, (town.population - was) * GROW.perPerson);
+    };
+    const limit = () => Math.min(3, Math.max(1, Math.floor(town.growthAcc / GROW.unit)));
     let tries = 0;
     for (const { s } of streets) {
-      if (town.growthAcc < 20 || tries++ >= 12 * MONTH_SCALE) break;
-      const added = fillStreet(ctx, town, s, 1, Math.min(3, Math.floor(town.growthAcc / 20)), reach);
-      if (added) town.growthAcc -= added * 20;
+      if (town.growthAcc < GROW.min || tries++ >= 12 * MONTH_SCALE) break;
+      const added = fillStreet(ctx, town, s, 1, limit(), reach);
+      if (added) spend(added);
       else this.fullStreets.set(s.id, this.month);
     }
     // Мест вдоль улиц не хватает — город сам прокладывает новую улицу и застраивает её (если игрок не запретил);
     // не больше одной улицы на каждые прежние 40 секунд: за месяц — MONTH_SCALE (дробное — по очереди, 1 и 2 при 1.5).
-    const newStreets = Math.floor((this.month + 1) * MONTH_SCALE) - Math.floor(this.month * MONTH_SCALE);
-    for (let k = 0; k < newStreets && town.growthAcc >= 40 && town.autoStreets !== false; k++) {
+    // Накопилось на десяток домов (частный сектор берёт много места на жителя) — улиц вдвое больше.
+    const base = Math.floor((this.month + 1) * MONTH_SCALE) - Math.floor(this.month * MONTH_SCALE);
+    const newStreets = town.growthAcc >= 10 * GROW.unit ? 2 * base : base;
+    for (let k = 0; k < newStreets && town.growthAcc >= 2 * GROW.unit && town.autoStreets !== false; k++) {
       const seg = this.growStreet(town, reach);
       if (!seg) break;
       // Сеть после стройки — новая: дома ставим уже по ней.
-      const added = fillStreet(this.worldContext(), town, seg, 0.8, Math.floor(town.growthAcc / 20), reach);
-      town.growthAcc = Math.max(0, town.growthAcc - added * 20);
+      spend(fillStreet(this.worldContext(), town, seg, 0.8, Math.max(1, Math.floor(town.growthAcc / GROW.unit)), reach));
+      town.growthAcc = Math.max(0, town.growthAcc);
     }
-    const before = town.population;
-    const tier = townTier(town);
     recountPopulation(town);
     measureTown(town);
     // Село доросло до города, город — до большого: новые парки и скверы — на том пустом, что осталось.

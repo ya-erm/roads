@@ -3,6 +3,7 @@ import { MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import { adviceTip } from './stationWarnings';
 import type { Station } from '../world/entities';
+import { townTier } from '../world/townForms';
 import { advise } from './advisor';
 import { Game } from './game';
 import { PAX_WAIT, paxGone, paxGoneTo, paxLeaving, paxPatience, paxStayShare, paxTolerance } from './paxPatience';
@@ -65,8 +66,13 @@ function stationIn(game: Game, townId: number, toward: { x: number; y: number },
   throw new Error(`Не поставить станцию в городе ${townId}`);
 }
 const MIN_POP = 0;
-/** Охват станции, где копится очередь: столько жителей и больше (у окраинной улицы мира 7 — около 400). */
-const HOME_POP = 1000;
+/**
+ * Охват станции, где копится очередь: столько жителей и больше (у окраинной улицы частного сектора мира 7 — около
+ * 200; ближе к центру — 400–700).
+ */
+const HOME_POP = 550;
+/** Охват станции в соседнем городе: у крайних частных домов (~100 жителей) пассажиров туда почти не набирается. */
+const FAR_POP = 400;
 
 /**
  * Большой город мира 7: станция home, соседняя в том же городе near (сотни метров) и far в соседнем городе (км),
@@ -77,11 +83,12 @@ function crowdedLine(buses = 2) {
   game.money = 5_000_000;
   const [a, ...rest] = [...game.towns].filter((t) => !t.labelOnly).sort((x, y) => y.population - x.population);
   // Соседний город за 2.5 км и дальше: туда ждут дольше, чем идёт автобус.
-  const b = rest.filter((t) => dist(t.center, a.center) > 2500).sort((x, y) => dist(x.center, a.center) - dist(y.center, a.center))[0];
-  // Дома у станции — с очередью: в охвате не меньше тысячи жителей.
+  const b = rest.filter((t) => dist(t.center, a.center) > 2500 && townTier(t) !== 'village').sort((x, y) => dist(x.center, a.center) - dist(y.center, a.center))[0];
+  // Дома у станции — с очередью: в охвате не меньше HOME_POP жителей.
   const home = stationIn(game, a.id, b.center, [], HOME_POP);
   const near = stationIn(game, a.id, home.fp.center, [home]);
-  const far = stationIn(game, b.id, a.center);
+  // И в соседнем городе — среди жителей, а не у крайних частных домов: туда едут, как и раньше, многие.
+  const far = stationIn(game, b.id, a.center, [], FAR_POP);
   expect(connectStations(game, home, far, HIGHWAY)).toBe(true);
   const line = game.createLine([home.id, near.id, far.id])!;
   for (let i = 0; i < buses; i++) expect(game.buyVehicle(line.id, 'bus')).not.toBeNull();

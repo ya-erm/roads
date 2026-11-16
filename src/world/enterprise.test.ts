@@ -109,10 +109,10 @@ describe('черта города, места и вред', () => {
     expect(townFor([t], outside.fp)).toBeNull();
   });
 
-  it('мест в черте: с 2500 жителей одно, дальше каждые 4500 ещё одно, не больше четырёх', () => {
-    expect(townSlots({ population: 2000 })).toBe(0);
-    expect(townSlots({ population: 2500 })).toBe(1);
-    expect(townSlots({ population: 7000 })).toBe(2);
+  it('мест в черте: с 1500 жителей одно (село — без мест), дальше каждые 5000 ещё одно, не больше четырёх', () => {
+    expect(townSlots({ population: 900 })).toBe(0);
+    expect(townSlots({ population: 1500 })).toBe(1);
+    expect(townSlots({ population: 6500 })).toBe(2);
     expect(townSlots({ population: 11500 })).toBe(3);
     expect(townSlots({ population: 99000 })).toBe(ENTERPRISE.slots.max);
   });

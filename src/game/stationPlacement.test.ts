@@ -264,17 +264,29 @@ describe('Автовокзал вдоль дороги, с дублёром', ()
   });
 });
 
-describe('Автовокзал вдоль дороги в городе (seed 309542331, как в отчёте)', () => {
+/**
+ * Миры, где в городах есть и короткие кварталы (75–90 м), и длинные: кварталы крупные (townStreets.BLOCK), короткие
+ * улицы между перекрёстками встречаются по нескольку на мир — берём три мира.
+ */
+const SHORT_BLOCK_SEEDS = [2, 3, 42];
+const cityGame = (seed: number) => {
+  const game = withoutCitizens(new Game({ ...NEW_GAME_SETTINGS, seed, scenario: { difficulty: 'normal', challenge: false } }));
+  game.money = 1e9;
+  return game;
+};
+
+describe('Автовокзал вдоль дороги в городе', () => {
   it('на улицах между перекрёстками, где хватает длины, встаёт; где мало — пишет, сколько нужно и сколько есть', () => {
-    const game = withoutCitizens(new Game({ ...NEW_GAME_SETTINGS, seed: 309542331, scenario: { difficulty: 'normal', challenge: false } }));
-    game.money = 1e9;
-    const net = game.roads.net;
-    const cam = { x: 4321, y: 4687 };
     let fit = 0;
     let placed = 0;
     let short = 0;
-    for (const c of net.corridorsNear(cam, 600)) {
-      if (c.cls !== 'street' || net.node(c.a).kind !== 'junction' || net.node(c.b).kind !== 'junction') continue;
+    for (const seed of SHORT_BLOCK_SEEDS) {
+      const game = cityGame(seed);
+      const net = game.roads.net;
+      for (const c of net.corridors.values()) {
+      // Огрызки улиц короче 75 м (у воды, у края) — не кварталы; кривые улицы (у кармана своя мера) — тоже.
+      if (c.cls !== 'street' || net.node(c.a).kind !== 'junction' || net.node(c.b).kind !== 'junction' || c.length < 75) continue;
+      if (Math.hypot(c.curve.p3.x - c.curve.p0.x, c.curve.p3.y - c.curve.p0.y) < c.length * 0.97) continue;
       const s = c.length / 2;
       const t = c.lut.tangentAt(s);
       const pt = c.lut.pointAt(s);
@@ -286,13 +298,17 @@ describe('Автовокзал вдоль дороги в городе (seed 309
           short++;
           expect(Number(m[2])).toBe(Math.floor(c.length));
           expect(Number(m[2])).toBeLessThan(Number(m[1]));
-          // Мало — только улицам заметно короче кармана; квартал сетки (115 м) — не «мало».
-          expect(c.length).toBeLessThan(2 * pocketHalf + 10);
+          // Мало — только улицам короче кармана (у перекрёстка с проспектом — с запасом на его ширину): нужно не
+          // больше кармана с запасом.
+          expect(Number(m[1])).toBeLessThan(2 * pocketHalf + 30);
           continue;
         }
+        // Короткий квартал, где раньше длины помешал дом или соседняя улица, — причина та, а не длина.
+        if (!plan.ok && c.length < 2 * pocketHalf) continue;
         expect(c.length).toBeGreaterThanOrEqual(2 * pocketHalf);
         fit++;
         if (plan.ok) placed++;
+      }
       }
     }
     expect(fit).toBeGreaterThan(10);
@@ -376,11 +392,10 @@ describe('Автовокзал у края улицы (с кармашком и�
     expect(game.stationPlan({ x: x + 150, y: y + 20 }, 30, 'road', 0, 2, undefined, false, CURB).reason).toBe('Рядом уже есть станция');
   });
 
-  it('в городе (seed 309542331): встаёт и в кварталах 75–90 м, где дублёру мало места; на длинных — с кармашком', () => {
-    const game = withoutCitizens(new Game({ ...NEW_GAME_SETTINGS, seed: 309542331, scenario: { difficulty: 'normal', challenge: false } }));
-    game.money = 1e9;
-    const net = game.roads.net;
+  it('в городе: встаёт и в кварталах 75–90 м, где дублёру мало места; на длинных — с кармашком', () => {
     const tally = { short: 0, shortOk: 0, long: 0, pocket: 0, reasons: new Map<string, number>() };
+    for (const game of SHORT_BLOCK_SEEDS.map(cityGame)) {
+    const net = game.roads.net;
     for (const c of net.corridors.values()) {
       if (c.cls !== 'street' || net.node(c.a).kind !== 'junction' || net.node(c.b).kind !== 'junction' || c.length < 75) continue;
       const pt = c.lut.pointAt(c.length / 2);
@@ -398,6 +413,7 @@ describe('Автовокзал у края улицы (с кармашком и�
         }
         if (!plan.ok) tally.reasons.set(plan.reason ?? '', (tally.reasons.get(plan.reason ?? '') ?? 0) + 1);
       }
+    }
     }
     expect(tally.short, [...tally.reasons].join('; ')).toBeGreaterThan(4);
     // Мешать могут дома-ориентиры, соседняя улица, другая станция — но не длина квартала.

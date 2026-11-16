@@ -69,7 +69,8 @@ describe('Очертания города', () => {
 describe('Города в мире — не круги', { timeout: 60_000 }, () => {
   it('кольцевые города вытянуты: застройка по одной оси заметно шире, чем по другой', () => {
     const ratios: number[] = [];
-    for (const seed of [1, 2]) {
+    // Четыре мира: кольцевых городов в каждом 1–3, средняя по десятку — устойчивее.
+    for (const seed of [1, 2, 3, 4]) {
       const game = new Game({ ...DEFAULT_SETTINGS, seed });
       for (const t of game.towns.filter((x) => x.style === 'radial')) {
         // Главные оси застройки — по ковариации домов.

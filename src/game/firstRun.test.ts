@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
-import { residentsOf } from '../world/townForms';
+import { townTier } from '../world/townForms';
 import { FIRST_RUN, firstRunWaits } from './firstRun';
 import { Game } from './game';
 import { connectStations, HIGHWAY, townStreets, withoutCitizens } from './testkit';
@@ -33,19 +33,12 @@ describe('Первый рейс маршрута: ждать ли пассажи
 });
 
 /**
- * Станция у улицы города — на той, что ближе к соседнему городу toward, среди застроенных: на окраинной улице-ветке
- * жителей вокруг мало, и первые пассажиры подходят дольше предела ожидания.
+ * Станция у улицы города — на той, что ближе к соседнему городу toward, среди застроенных: в охвате не меньше minPop
+ * жителей (на окраинной улице частного сектора их мало, и первые пассажиры подходят дольше предела ожидания).
  */
-function stationIn(game: Game, townId: number, toward: { x: number; y: number }): Station {
+function stationIn(game: Game, townId: number, toward: { x: number; y: number }, minPop = MIN_POP): Station {
   const mid = (c: ReturnType<typeof townStreets>[number]) => c.lut.pointAt(c.length / 2);
-  // Застроенная — по жителям вокруг, а не по числу домов: в частном доме живёт 3–6 человек, в панельном — сотни.
-  const folk = (c: ReturnType<typeof townStreets>[number]) =>
-    game.index
-      .near(mid(c), 200)
-      .reduce((n, s) => n + (s.type === 'building' && dist(s.fp.center, mid(c)) < 200 ? residentsOf(s) : 0), 0);
-  const all = townStreets(game, townId);
-  const built = all.filter((c) => folk(c) >= 25 * 28);
-  const streets = (built.length ? built : all).sort((a, b) => dist(mid(a), toward) - dist(mid(b), toward));
+  const streets = townStreets(game, townId).sort((a, b) => dist(mid(a), toward) - dist(mid(b), toward));
   for (const seg of streets) {
     const p = mid(seg);
     const t = seg.lut.tangentAt(seg.length / 2);
@@ -53,18 +46,23 @@ function stationIn(game: Game, townId: number, toward: { x: number; y: number })
     const away = (toward.x - p.x) * t.y - (toward.y - p.y) * t.x > 0 ? 1 : -1;
     for (const side of [away, -away]) {
       const st = game.placeStation({ x: p.x - t.y * side * 40, y: p.y + t.x * side * 40 }, 14);
-      if (st) return st;
+      if (!st) continue;
+      if (st.catchPop >= minPop) return st;
+      game.removeStation(st);
     }
   }
   throw new Error(`Не поставить станцию в городе ${townId}`);
 }
+/** Жителей в охвате станции, откуда первый автобус успевает набрать половину мест. */
+const MIN_POP = 500;
 
 /** Автобусная линия между двумя ближними большими городами мира 7: станции в обоих, шоссе между ними. */
 function intercityLine() {
   const game = withoutCitizens(new Game(7));
   game.money = 5_000_000;
   const [a, ...rest] = [...game.towns].sort((x, y) => y.population - x.population);
-  const b = rest.sort((x, y) => dist(x.center, a.center) - dist(y.center, a.center))[0];
+  // Соседний город — не село.
+  const b = rest.filter((t) => townTier(t) !== 'village').sort((x, y) => dist(x.center, a.center) - dist(y.center, a.center))[0];
   const sA = stationIn(game, a.id, b.center);
   const sB = stationIn(game, b.id, a.center);
   expect(connectStations(game, sA, sB, HIGHWAY)).toBe(true);

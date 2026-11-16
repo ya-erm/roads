@@ -275,7 +275,8 @@ describe('Рельеф', () => {
         rp.begin(a, 10);
         rp.rise = 10;
         const plan = rp.buildPlan(b, spec, 'straight', 10, false);
-        if (!plan?.ok) continue;
+        // Место, где «Авто» и не понадобилось (план без подбора уровней), — дальше.
+        if (!plan?.ok || !rp.autoInfo) continue;
         raised = true;
         expect(rp.autoInfo!.endLevel).toBe(1);
       }

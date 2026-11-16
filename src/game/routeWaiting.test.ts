@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
+import { townTier } from '../world/townForms';
 import { Game } from './game';
 import { connectStations, freightRoute, freshGame, HIGHWAY, nearestPair, runSeconds, stationAtIndustry, townStreets, withoutCitizens } from './testkit';
 
-/** Станция у улицы города — на той, что ближе к соседнему городу toward. */
-function stationIn(game: Game, townId: number, toward: { x: number; y: number }): Station {
+/**
+ * Станция у улицы города — на той, что ближе к соседнему городу toward, с жителями в охвате (на окраине частного
+ * сектора их мало — пассажиры подходят редко).
+ */
+function stationIn(game: Game, townId: number, toward: { x: number; y: number }, minPop = 500): Station {
   const mid = (c: ReturnType<typeof townStreets>[number]) => c.lut.pointAt(c.length / 2);
   const streets = townStreets(game, townId).sort((a, b) => dist(mid(a), toward) - dist(mid(b), toward));
   for (const seg of streets) {
@@ -16,7 +20,9 @@ function stationIn(game: Game, townId: number, toward: { x: number; y: number })
     const away = (toward.x - p.x) * t.y - (toward.y - p.y) * t.x > 0 ? 1 : -1;
     for (const side of [away, -away]) {
       const st = game.placeStation({ x: p.x - t.y * side * 40, y: p.y + t.x * side * 40 }, 14);
-      if (st) return st;
+      if (!st) continue;
+      if (st.catchPop >= minPop) return st;
+      game.removeStation(st);
     }
   }
   throw new Error(`Не поставить станцию в городе ${townId}`);
@@ -27,7 +33,8 @@ function twoTowns(line: boolean) {
   const game = withoutCitizens(freshGame(7));
   game.money = 5_000_000;
   const [a, ...rest] = [...game.towns].sort((x, y) => y.population - x.population);
-  const b = rest.sort((x, y) => dist(x.center, a.center) - dist(y.center, a.center))[0];
+  // Соседний город — не село.
+  const b = rest.filter((t) => townTier(t) !== 'village').sort((x, y) => dist(x.center, a.center) - dist(y.center, a.center))[0];
   const sA = stationIn(game, a.id, b.center);
   const sB = stationIn(game, b.id, a.center);
   expect(connectStations(game, sA, sB, HIGHWAY)).toBe(true);

@@ -1,5 +1,6 @@
 import type { HouseForm, TownBuilding } from '../world/entities';
 import type { Footprint } from '../world/spatial';
+import { CAR_SIZE, cottagePlan, LOT_SETBACK } from '../world/houseAccess';
 import { formOf, storeysOf } from '../world/townForms';
 import { Art, disc, METAL } from './industryArt';
 import { bench, flowerbed, fountain, lamp, playground as playArea, sportsBox, statue, trashPad } from './townDecor';
@@ -25,7 +26,7 @@ const BEDS = 'rgba(132,100,66,0.42)';
 const SPROUTS = 'rgba(92,132,58,0.7)';
 const PAVING = 'rgba(184,176,162,0.62)';
 const GRAVEL = 'rgba(206,192,160,0.85)';
-const ASPHALT = 'rgba(112,114,120,0.62)';
+const ASPHALT = 'rgba(100,107,118,0.9)';
 const PLAZA = '#e6dcc6';
 /** Участок издали (lod 0): цвет застройки. */
 const FAR_LOT = 'rgba(226,212,184,0.8)';
@@ -56,18 +57,31 @@ interface Lot {
 /**
  * Масштаб — как у дорог (полоса 7 м, легковая машина 7 × 4): дом занимает почти весь участок, а не его треть, машины
  * во дворах — как на улице. Участок стоит в SETBACK м от края полотна (worldgen.fillStreet): у бордюра — тротуар
- * (parkArt.SIDEWALK), между ним и участком — газон шириной ~VERGE; дорожки к крыльцу и съезды к стоянкам пересекают
- * газон и тротуар.
+ * (render/sidewalks.ts), между ним и участком — газон. Дорожки к крыльцу и съезды к стоянкам за пределами участка
+ * (через газон и тротуар до полотна) рисуются не здесь, а под дорогами (houseAccess → render/townWalks.ts): их край у
+ * полотна закрывает асфальт дороги, а не наоборот.
  */
-const SETBACK = 5;
-const VERGE = 2.4;
-/** Легковая во дворе: длина и ширина, м. */
-const CAR = { l: 6.2, w: 3 };
+const SETBACK = LOT_SETBACK;
+/** Легковая во дворе: длина и ширина, м (как машина на улице). */
+const CAR = { l: CAR_SIZE.l, w: CAR_SIZE.w - 0.4 };
 /** Место на стоянке: шаг и глубина, м. */
-const STALL = { w: 3.6, d: 6.6 };
-/** Съезд — асфальт цветом дороги (lanes/draw.ts), чтобы читался как её продолжение во двор. */
-const DRIVE = '#6e747e';
-const DRIVE_EDGE = 'rgba(220,214,203,0.9)';
+const STALL = { w: 4.2, d: 7.4 };
+/** Съезд и стоянки — асфальт цветом дороги (lanes/draw.ts): продолжение дороги во двор. */
+export const DRIVE = '#646b76';
+const DRIVE_EDGE = 'rgba(70,74,82,0.6)';
+
+/** Выход дома к улице за пределами участка: дорожка к крыльцу или съезд — x и ширина в осях участка, сторона улицы. */
+export interface HouseAccess {
+  kind: 'path' | 'drive';
+  x: number;
+  w: number;
+  /** −1 — улица со стороны −y (как у всех), 1 — у участка от улицы до улицы, с задней. */
+  side: 1 | -1;
+  color: string;
+}
+
+/** Куда складывать выходы к улице (houseAccess): пока не null — frontPath и curbCut записывают их сюда. */
+let accessSink: HouseAccess[] | null = null;
 
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
 
@@ -301,46 +315,63 @@ function fence(a: Art, lot: Lot, kind: number, gate: number, gate2?: number, gw 
 }
 
 /**
- * Дорожка от тротуара через газон к крыльцу: у x шириной w, от края участка до y (в участке). Земля (проход 0),
- * вблизи — с кромкой.
+ * Дорожка к крыльцу: у x шириной w, в участке — от его края до y. Дальше, через газон до тротуара, — под дорогами
+ * (houseAccess). Земля (проход 0).
  */
 function frontPath(a: Art, lot: Lot, x: number, y: number, w = 1.4, color = GRAVEL): void {
   if (a.pass !== 0 || !a.lod) return;
-  const y0 = -lot.H / 2 - VERGE;
-  a.patch(x - w / 2, y0, w, y - y0, color);
+  accessSink?.push({ kind: 'path', x, w, side: -1, color });
+  const y0 = -lot.H / 2;
+  if (y > y0) a.patch(x - w / 2, y0, w, y - y0, color);
 }
 
 /**
- * Съезд с улицы во двор или на стоянку: асфальт от края полотна (поперёк газона и тротуара, с пониженным бордюром) до
- * y в участке, у x шириной w. Только картинка: дорог и узлов не добавляет.
+ * Съезд с улицы во двор или на стоянку: асфальт у x шириной w, в участке — от его края до y; через газон и тротуар
+ * до полотна (с пониженным бордюром) — под дорогами (houseAccess). Только картинка: дорог и узлов не добавляет.
+ * side — с какой стороны участка улица: −1 — как у всех (−y), 1 — у участка от улицы до улицы, с задней.
  */
 function curbCut(a: Art, lot: Lot, x: number, w: number, y: number, color = DRIVE, side: 1 | -1 = -1): void {
   if (a.pass !== 0 || !a.lod) return;
-  // side — с какой стороны участка улица: −1 — как у всех (−y), 1 — у участка от улицы до улицы, с задней.
-  const y0 = side * (lot.H / 2 + SETBACK - 0.15);
-  const k = -side * 1.6;
+  accessSink?.push({ kind: 'drive', x, w, side, color });
+  const y0 = side * (lot.H / 2);
+  if ((y - y0) * -side <= 0) return;
   const c = a.c;
   c.fillStyle = color;
-  c.beginPath();
-  // Раструб у бордюра — шире на метр с каждой стороны.
-  c.moveTo(x - w / 2 - 1, y0);
-  c.lineTo(x + w / 2 + 1, y0);
-  c.lineTo(x + w / 2, y0 + k);
-  c.lineTo(x + w / 2, y);
-  c.lineTo(x - w / 2, y);
-  c.lineTo(x - w / 2, y0 + k);
-  c.closePath();
-  c.fill();
+  c.fillRect(x - w / 2, Math.min(y0, y), w, Math.abs(y - y0));
   if (!a.d) return;
   c.strokeStyle = DRIVE_EDGE;
   c.lineWidth = 0.25;
   c.beginPath();
-  c.moveTo(x - w / 2, y0 + k);
+  c.moveTo(x - w / 2, y0);
   c.lineTo(x - w / 2, y);
-  c.moveTo(x + w / 2, y0 + k);
+  c.moveTo(x + w / 2, y0);
   c.lineTo(x + w / 2, y);
   c.stroke();
 }
+
+/**
+ * Выходы дома к улице за пределами участка — дорожки к крыльцу и съезды (их рисует render/townWalks.ts под дорогами).
+ * Сцена дома проигрывается вхолостую (холст-заглушка), а frontPath и curbCut записывают, что нарисовали бы.
+ */
+export function houseAccess(b: TownBuilding): HouseAccess[] {
+  const out: HouseAccess[] = [];
+  const angle = (b.face ?? -1) === 1 ? b.fp.angle + Math.PI : b.fp.angle;
+  const a = new Art(BLIND, { id: b.id, fp: { center: b.fp.center, w: b.fp.w, h: b.fp.h, angle } }, 1, 0, b.id, 'still');
+  a.pass = 0;
+  accessSink = out;
+  try {
+    SCENES[formOf(b)](a, { b, W: b.fp.w, H: b.fp.h, storeys: storeysOf(b), fine: false, trees: TREES });
+  } finally {
+    accessSink = null;
+  }
+  return out;
+}
+
+/** Холст, который ничего не рисует: для холостого прохода сцены (houseAccess). */
+const BLIND = new Proxy({} as Record<string | symbol, unknown>, {
+  get: (t, k) => (k in t ? t[k] : () => undefined),
+  set: (t, k, v) => ((t[k] = v), true),
+}) as unknown as CanvasRenderingContext2D;
 
 /** Грядки огорода: земля и ряды всходов поперёк. */
 function beds(a: Art, x: number, y: number, w: number, h: number, vertical: boolean): void {
@@ -421,23 +452,18 @@ const lawn = (a: Art, lot: Lot, color = LAWN) => a.patch(-lot.W / 2 + 0.3, -lot.
 
 /**
  * Частный дом с участком: крупный дом у улицы почти во всю ширину участка (крыльцо — к калитке), за ним огород,
- * сарай, теплица, плодовые деревья; забор с калиткой; у части домов — заезд с воротами и машина во дворе.
+ * сарай, теплица, плодовые деревья; забор с калиткой; у половины домов — гараж под машину с асфальтовым заездом от
+ * улицы и машиной перед воротами. Раскладка (дом, гараж, заезд) — world/houseAccess.cottagePlan: её же видит игра.
  */
 function cottage(a: Art, lot: Lot): void {
   const { W, H, b } = lot;
   const x0 = -W / 2;
-  const y0 = -H / 2;
+  const plan = cottagePlan(b);
   lawn(a, lot);
   const two = lot.storeys >= 2;
-  // Заезд сбоку от дома — если участок шире дома с запасом под машину.
-  const drive = a.r(17) < 0.5 && W >= 17;
-  const room = drive ? CAR.w + 2.4 : 0;
-  const hw = clamp(W * (0.62 + 0.14 * a.r(1)) - room * 0.6, 9.5, Math.min(17, W - 2.4 - room));
-  const hd = clamp(H * (0.5 + 0.1 * a.r(2)), 8.5, Math.min(13, H - 4)) + (two ? 0.6 : 0);
-  const left = a.r(4) < 0.5;
-  const hx = left ? x0 + 1.2 + a.r(5) * 0.8 : -x0 - 1.2 - hw - a.r(5) * 0.8;
-  const hy = y0 + 1.8 + a.r(3) * 1.2;
-  const back = hy + hd + 1.2;
+  const { x: hx, y: hy, w: hw, h: hd } = plan.house;
+  const left = plan.left;
+  const back = Math.max(hy + hd, plan.garage ? plan.garage.y + plan.garage.h : -Infinity) + 1.2;
   const yEnd = H / 2 - 1;
   // Огород — в глубине, со стороны дома или напротив; сарай — в другом углу.
   if (yEnd - back > 2.6) {
@@ -449,16 +475,24 @@ function cottage(a: Art, lot: Lot): void {
     if (a.r(10) < 0.4 && W > 15 && yEnd - back > 4.5) greenhouse(a, gx + gw / 2 - 1.4, back + 0.8, 2.8, Math.min(5.5, yEnd - back - 1.4));
     yardTree(a, lot, sx + (sx < 0 ? 7 : -2.8), yEnd - 1.6 - a.r(11) * 1.5, 2.3 + a.r(12), 13);
   }
-  // Заезд: щебёнка от улицы через тротуар к воротам, машина у дома.
-  const dx = left ? hx + hw + 1.2 + (CAR.w + 1) / 2 : hx - 1.2 - (CAR.w + 1) / 2;
-  if (drive) {
-    curbCut(a, lot, dx, CAR.w + 1, hy + CAR.l + 1, GRAVEL);
-    if (a.r(18) < 0.7) car(a, lot, dx, hy + CAR.l / 2 + 0.6, true, 18);
+  // Заезд: асфальт от улицы до ворот гаража, перед воротами — машина (не у всех: днём она в разъездах).
+  const drive = plan.drive;
+  const g = plan.garage;
+  if (drive && g) {
+    curbCut(a, lot, drive.x, drive.w, drive.y1 + 0.3);
+    if (a.r(18) < 0.6) car(a, lot, drive.x, drive.y1 - CAR.l / 2 - 0.4, true, 18);
+    // Гараж под машину: ворота — к улице.
+    const groof = a.r(27) < 0.5 ? METAL_ROOFS[Math.floor(a.r(28) * METAL_ROOFS.length)] : tone(b.roof, -0.1);
+    pitched(a, g.x, g.y, g.w, g.h, 2.8, groof, false, 0, a.r(27) < 0.5);
+    if (a.pass === 2 && a.lod) {
+      a.c.fillStyle = '#5a5f66';
+      a.c.fillRect(g.x + 0.5, g.y - 0.35, g.w - 1, 0.5);
+    }
   } else if (a.r(14) < 0.6) yardTree(a, lot, left ? -x0 - 3 : x0 + 3, hy + hd * 0.6, 2 + a.r(15) * 1.2, 16);
   // Дорожка от тротуара через калитку к крыльцу.
   const gate = hx + hw * (0.3 + 0.4 * a.r(26));
   frontPath(a, lot, gate, hy + 0.4);
-  fence(a, lot, a.r(19), gate, drive ? dx : undefined, CAR.w + 1);
+  fence(a, lot, a.r(19), gate, drive ? drive.x : undefined, drive ? drive.w + 0.4 : 0);
   const metal = a.r(20) < 0.25;
   const roof = metal ? METAL_ROOFS[Math.floor(a.r(21) * METAL_ROOFS.length)] : b.roof;
   const z = wallZ(lot.storeys);
@@ -731,7 +765,7 @@ function slab(a: Art, lot: Lot): void {
     const yx0 = x0 + 1.5 + (ell && !right ? bd + 1.5 : 0);
     const yx1 = -x0 - 1.5 - (ell && right ? bd + 1.5 : 0);
     if (yard) {
-      if (pass) curbCut(a, lot, passLeft ? x0 + 1.5 + PASS / 2 : -x0 - 1.5 - PASS / 2, 4.6, top + 4.4);
+      if (pass) curbCut(a, lot, passLeft ? x0 + 1.5 + PASS / 2 : -x0 - 1.5 - PASS / 2, 5.2, top + 4.4);
       driveway(a, Math.max(yx0, bx), Math.min(yx1, bx + L), top, sections, pass ? (passLeft ? x0 + 1.5 : -x0 - 1.5) : undefined);
       yardItems(a, lot, yx0, top + 5.2, yx1 - yx0, H / 2 - 0.6 - top - 5.2, 30);
     }
@@ -746,7 +780,7 @@ function slab(a: Art, lot: Lot): void {
     const yw = W - bw - 4.5;
     if (yw > 4) {
       const ph = Math.min(H * 0.35, 14);
-      curbCut(a, lot, yardX + yw / 2, Math.min(4.6, yw - 1), y0 + 2.5);
+      curbCut(a, lot, yardX + yw / 2, Math.min(5.2, yw - 1), y0 + 2.5);
       parking(a, lot, yardX, y0 + 2, yw, ph, 2);
       const yy = y0 + 2 + ph + 1.5;
       yardItems(a, lot, yardX, yy, yw, H / 2 - 1 - yy, 30);
@@ -777,8 +811,8 @@ function tower(a: Art, lot: Lot): void {
     const pw = Math.min(W * 0.45, 30);
     const fx = left ? -x0 - 2 - pw : x0 + 2;
     const rx = left ? x0 + 2 : -x0 - 2 - pw;
-    curbCut(a, lot, fx + pw / 2, 4.6, y0 + 1.6);
-    curbCut(a, lot, rx + pw / 2, 4.6, H / 2 - 1.6, DRIVE, 1);
+    curbCut(a, lot, fx + pw / 2, 5.2, y0 + 1.6);
+    curbCut(a, lot, rx + pw / 2, 5.2, H / 2 - 1.6, DRIVE, 1);
     parking(a, lot, fx, y0 + 1.2, pw, STALL.d, 3);
     parking(a, lot, rx, H / 2 - 1.2 - STALL.d, pw, STALL.d, 60);
     // Двор с другой стороны от башни — между рядами деревьев: площадки, коробка, мусорка.
@@ -795,7 +829,7 @@ function tower(a: Art, lot: Lot): void {
     const rest = W - T - 8;
     if (rest > 6) {
       const px = left ? tx + T / 2 + 3 : x0 + 2;
-      curbCut(a, lot, px + rest / 2, Math.min(4.6, rest - 1), y0 + 1.6);
+      curbCut(a, lot, px + rest / 2, Math.min(5.2, rest - 1), y0 + 1.6);
       parking(a, lot, px, y0 + 1.2, rest, Math.min(STALL.d, H - 3), 3);
       if (H > 18 && rest > 12) playArea(a, px + rest / 2 - 4, y0 + 9, Math.min(8, H - 11), b.id, lot.fine);
       treeRow(a, lot, px, px + rest, H / 2 - 2, 6.5, 2.2, 40);
@@ -832,7 +866,7 @@ function shop(a: Art, lot: Lot): void {
   if (!big && W - w > 7) {
     const px = left ? bx + w + 1 : x0 + 1;
     const pw = W - w - 3.5;
-    curbCut(a, lot, px + pw / 2, Math.min(4.6, pw - 0.6), y0 + 1.6);
+    curbCut(a, lot, px + pw / 2, Math.min(5.2, pw - 0.6), y0 + 1.6);
     parking(a, lot, px, y0 + 1.2, pw, Math.min(H - 2.4, 13), 4);
   } else if (H - d > 7) {
     curbCut(a, lot, left ? -x0 - 1.3 : x0 + 1.3, 2.4, by + d + 1);
@@ -861,7 +895,7 @@ function store(a: Art, lot: Lot): void {
   const by = y0 + 3.2;
   // Утоптанная площадка перед крыльцом — до самой дороги: к магазину подъезжают прямо с улицы.
   a.patch(x0 + 0.5, y0 + 0.4, W - 1, 3.6, GRAVEL, 0.5);
-  curbCut(a, lot, bx + w / 2, Math.min(W - 2, w), y0 + 0.6, GRAVEL);
+  curbCut(a, lot, bx + w / 2, Math.min(W - 2, w), y0 + 0.6);
   if (H - d > 9) {
     yardTree(a, lot, bx < 0 ? -x0 - 3 : x0 + 3, by + d + 2.5, 2.4 + a.r(2), 3);
     pitched(a, bx < 0 ? x0 + 1.5 : -x0 - 5.5, H / 2 - 4.5, 4, 3.2, 2.3, '#8d7a66', true);
@@ -985,7 +1019,7 @@ function hospital(a: Art, lot: Lot): void {
   const t = clamp(Math.min(W, H) * 0.24, 5.5, 8);
   const L = H - 4;
   // Подъезд к приёмному покою — съезд с улицы между крыльями «Н», к перемычке.
-  curbCut(a, lot, 0, 4.6, -t / 2 + 0.2);
+  curbCut(a, lot, 0, 5.2, -t / 2 + 0.2);
   flat(a, x0 + 2, y0 + 2, t, L, z, roof);
   flat(a, -x0 - 2 - t, y0 + 2, t, L, z, roof);
   flat(a, x0 + 2 + t, -t / 2, W - 4 - 2 * t, t, z * 0.85, roof);

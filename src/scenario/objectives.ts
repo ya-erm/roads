@@ -100,6 +100,30 @@ export function countPassengers(s: ScenarioStats, from: number | undefined, to: 
 }
 
 /**
+ * Население городов пересчитано при загрузке старого сохранения (жильцы по домам — townForms.settlePeople; was —
+ * население этих городов до пересчёта): цели «население города» и отметка роста мира на старте сценария — в той же
+ * доле, чтобы прогресс не обнулился и цель не стала недостижимой или выполненной сама собой.
+ */
+export function rescalePopulation(state: ScenarioState, towns: readonly Pick<Town, 'id' | 'population'>[], was: ReadonlyMap<number, number>): void {
+  const k = (id: number) => {
+    const before = was.get(id);
+    const now = towns.find((t) => t.id === id)?.population;
+    return before && now !== undefined ? now / before : 1;
+  };
+  const before = towns.reduce((s, t) => s + (was.get(t.id) ?? t.population), 0);
+  const after = towns.reduce((s, t) => s + t.population, 0);
+  if (state.start.population > 0 && before > 0) state.start.population = Math.round((state.start.population * after) / before);
+  for (const o of state.objectives) {
+    if (o.params.kind !== 'population') continue;
+    const f = k(o.params.town);
+    o.params = { ...o.params, amount: Math.max(1, Math.round(o.params.amount * f)) };
+    o.base = Math.round(o.base * f);
+    o.target = Math.max(1, Math.round(o.target * f));
+    o.progress = Math.round(o.progress * f);
+  }
+}
+
+/**
  * Отметка на старте задания: накопительный счётчик (доставки, пассажиры), население города для роста;
  * у остальных — 0.
  */

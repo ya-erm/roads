@@ -7,17 +7,22 @@ import { NEW_GAME_SETTINGS } from './settings';
 import {
   flatsOf,
   formOf,
+  growTier,
   inDistrict,
+  LEGACY_TIER,
   mergeBlocks,
   mergeTowers,
   pickPublic,
   placeForm,
   RES_PER_FLOOR,
   residentsOf,
+  SETTLE_RULE,
   storeysOf,
+  tierOfSize,
   towerQuota,
   townTier,
   TOWN_TIER,
+  villageFlats,
   zoneTown,
 } from './townForms';
 import { recountPopulation } from './worldgen';
@@ -63,11 +68,29 @@ function town(population: number, buildings: TownBuilding[] = [], o: Partial<Tow
 const at = (p: Vec, o: Partial<TownBuilding> = {}) => house(p.x, p.y, o);
 
 describe('Типы застройки по месту в городе', () => {
-  it('село, город, большой город — по населению; кольцевой город — не село', () => {
+  it('ярус — свой у города: новый — по размеру генерации, растёт по населению и не убывает; без него — по прежним порогам', () => {
+    // Старое сохранение и тестовые сцены без яруса — по населению и прежним порогам; кольцевой город — не село.
     expect(townTier({ population: 1500, style: 'linear' })).toBe('village');
-    expect(townTier({ population: TOWN_TIER.town, style: 'organic' })).toBe('town');
+    expect(townTier({ population: LEGACY_TIER.town, style: 'organic' })).toBe('town');
     expect(townTier({ population: 1500, style: 'radial' })).toBe('town');
-    expect(townTier({ population: TOWN_TIER.city, style: 'organic' })).toBe('city');
+    expect(townTier({ population: LEGACY_TIER.city, style: 'organic' })).toBe('city');
+    // Новый город — по размеру генерации.
+    expect([1, 2, 3].map((s) => tierOfSize(s, 'organic'))).toEqual(['village', 'town', 'city']);
+    expect(tierOfSize(1, 'radial')).toBe('town');
+    // Свой ярус — важнее населения; дорос — выше, убыло — не ниже.
+    expect(townTier({ population: 100, style: 'organic', tier: 'town' })).toBe('town');
+    const t = town(TOWN_TIER.town - 1, [], { tier: 'village' });
+    growTier(t);
+    expect(t.tier).toBe('village');
+    t.population = TOWN_TIER.town;
+    growTier(t);
+    expect(t.tier).toBe('town');
+    t.population = TOWN_TIER.city;
+    growTier(t);
+    expect(t.tier).toBe('city');
+    t.population = 10;
+    growTier(t);
+    expect(t.tier).toBe('city');
   });
 
   it('в селе — частные дома с участками и сельский магазин, в центре — храм', () => {
@@ -81,7 +104,7 @@ describe('Типы застройки по месту в городе', () => {
   it('в городе: у центра — старый центр, на краю — частный сектор, гаражи и склады; ратуша', () => {
     const t = town(4000);
     expect(placeForm(t, at({ x: 60, y: 0 }))).toBe('townhouse');
-    expect(placeForm(t, at({ x: 60, y: 0 }, { fp: { center: { x: 60, y: 0 }, w: 30, h: 25, angle: 0 }, floors: 4 }))).toBe('courtyard');
+    expect(placeForm(t, at({ x: 60, y: 0 }, { fp: { center: { x: 60, y: 0 }, w: 36, h: 30, angle: 0 }, floors: 4 }))).toBe('courtyard');
     expect(placeForm(t, at({ x: 300, y: 0 }))).toBe('cottage');
     expect(['garages', 'warehouse']).toContain(placeForm(t, at({ x: 330, y: 0 }, { kind: 'com' })));
     expect(placeForm(t, at({ x: 0, y: 0 }, { kind: 'landmark' }))).toBe('hall');
@@ -97,7 +120,7 @@ describe('Типы застройки по месту в городе', () => {
     const p = { x: Math.cos(0.4) * 250, y: Math.sin(0.4) * 250 };
     expect(inDistrict(district, p)).toBe(true);
     expect(inDistrict(district, { x: 0, y: 0 })).toBe(false);
-    expect(placeForm(t, at(p, { fp: { center: p, w: 30, h: 25, angle: 0 }, floors: 4 }))).toBe('slab');
+    expect(placeForm(t, at(p, { fp: { center: p, w: 36, h: 30, angle: 0 }, floors: 4 }))).toBe('slab');
     expect(placeForm(t, at(p, { kind: 'com' }))).toBe('shop');
     // У села рамка нового района не в счёт.
     expect(placeForm(town(1500, [], { district, style: 'linear' }), at(p))).toBe('cottage');
@@ -106,7 +129,7 @@ describe('Типы застройки по месту в городе', () => {
   it('без выбранного типа — по виду и размеру (тестовые сцены)', () => {
     expect(formOf(house(0, 0))).toBe('cottage');
     expect(formOf(house(0, 0, { floors: 3 }))).toBe('townhouse');
-    expect(formOf(house(0, 0, { fp: { center: { x: 0, y: 0 }, w: 30, h: 24, angle: 0 } }))).toBe('courtyard');
+    expect(formOf(house(0, 0, { fp: { center: { x: 0, y: 0 }, w: 36, h: 30, angle: 0 } }))).toBe('courtyard');
     expect(formOf(house(0, 0, { kind: 'com' }))).toBe('shop');
     expect(formOf(house(0, 0, { kind: 'landmark' }))).toBe('hall');
     expect(formOf(house(0, 0, { form: 'school' }))).toBe('school');
@@ -140,56 +163,77 @@ describe('Общественные здания', () => {
 });
 
 describe('Жители по домам', () => {
-  /** Село: улица вдоль оси x, дома по обе стороны, у каждого — 1–3 этажа генерации. */
+  /** Село: улица вдоль оси x, дома по обе стороны (участки 26 × 24), у каждого — 1–3 этажа генерации. */
   function village(n: number): Town {
     const list: TownBuilding[] = [];
-    for (let i = 0; i < n; i++) list.push(house(-n * 12 + i * 24, i % 2 ? 20 : -20, { floors: 1 + (i % 3), face: i % 2 ? -1 : 1 }));
-    const t = town(0, list, { style: 'linear', radius: n * 12 });
+    for (let i = 0; i < n; i++)
+      list.push(house(-n * 15 + i * 30, i % 2 ? 22 : -22, { floors: 1 + (i % 3), face: i % 2 ? -1 : 1, fp: { center: { x: -n * 15 + i * 30, y: i % 2 ? 22 : -22 }, w: 26, h: 24, angle: 0 } }));
+    const t = town(0, list, { style: 'linear', radius: n * 15, tier: 'village' });
     recountPopulation(t);
     return t;
   }
 
-  it('частный дом — на 3–6 человек, дача — на 2–4; жителей города — ровно столько же, сколько по этажам генерации', () => {
+  it('село — частные дома на 3–6 человек и у большого села 1–3 двухэтажных многоквартирных у центра; жители — сумма по домам', () => {
+    expect([20, 40, 60, 90].map(villageFlats)).toEqual([0, 1, 2, 3]);
     const t = village(60);
-    const before = t.population;
-    expect(before).toBe(t.buildings.reduce((s, b) => s + b.floors * RES_PER_FLOOR, 0));
     zoneTown(t);
     recountPopulation(t);
-    expect(t.population).toBe(before);
     expect(t.buildings.every((b) => b.people !== undefined)).toBe(true);
-    for (const b of t.buildings) {
-      if (b.form === 'cottage') expect(residentsOf(b)).toBeGreaterThanOrEqual(3);
-      if (b.form === 'cottage') expect(residentsOf(b)).toBeLessThanOrEqual(6);
-      if (b.form === 'cottage') expect(storeysOf(b)).toBeLessThanOrEqual(2);
-      if (b.form === 'walkup') expect(residentsOf(b)).toBeGreaterThan(14);
-    }
-    // Частных домов в селе — не меньше трети, многоквартирные — двух-трёхэтажные, ближе к центру, чем частные.
+    expect(t.population).toBe(t.buildings.reduce((s, b) => s + residentsOf(b), 0));
     const cottages = t.buildings.filter((b) => b.form === 'cottage');
     const flats = t.buildings.filter((b) => b.form === 'walkup');
-    expect(cottages.length).toBeGreaterThan(t.buildings.length / 3);
-    expect(flats.length).toBeGreaterThan(0);
-    expect(flats.every((b) => storeysOf(b) >= 2 && storeysOf(b) <= 3)).toBe(true);
-    const mean = (l: TownBuilding[]) => l.reduce((s, b) => s + Math.abs(b.fp.center.x), 0) / l.length;
-    expect(mean(flats)).toBeLessThan(mean(cottages));
+    expect(flats.length).toBe(villageFlats(60));
+    expect(cottages.length).toBe(60 - flats.length);
+    for (const b of cottages) {
+      expect(residentsOf(b)).toBeGreaterThanOrEqual(3);
+      expect(residentsOf(b)).toBeLessThanOrEqual(6);
+      expect(storeysOf(b)).toBeLessThanOrEqual(2);
+    }
+    for (const b of flats) {
+      expect(storeysOf(b)).toBe(2);
+      expect(residentsOf(b)).toBeGreaterThan(14);
+      expect(residentsOf(b)).toBeLessThan(60);
+      // У самого центра.
+      expect(Math.abs(b.fp.center.x)).toBeLessThan(t.radius * 0.45);
+    }
     // Квартир — по жильцам, у частного дома — одна семья.
     expect(flatsOf(cottages[0])).toBe(1);
     expect(flatsOf(flats[0])).toBeGreaterThan(4);
+    // Сельчан — по жильцам: в разы меньше прежних 14 на этаж генерации.
+    expect(t.population * 3).toBeLessThan(t.buildings.reduce((s, b) => s + b.floors * RES_PER_FLOOR, 0));
   });
 
-  it('новые дома: лишние жители частного дома — в многоквартирные, расселённые дома тип не меняют; жителей столько же', () => {
+  it('старое сохранение: многоквартирные дома села сверх 1–3 — снова частные; новые дома растущего села — частные; расселённые не меняются', () => {
     const t = village(40);
+    for (const b of t.buildings.slice(10, 30)) b.form = 'walkup';
     zoneTown(t);
     recountPopulation(t);
-    const forms = new Map(t.buildings.map((b) => [b.id, b.form]));
+    expect(t.buildings.filter((b) => b.form === 'walkup').length).toBe(villageFlats(40));
+    const forms = new Map(t.buildings.map((b) => [b.id, `${b.form}|${b.people}`]));
     const pop = t.population;
-    // Город растёт: два дома на краю (по 2 этажа генерации — 28 жителей).
-    const fresh = [house(600, 20, { floors: 2 }), house(624, 20, { floors: 2 })];
+    const fresh = [house(700, 22, { floors: 2 }), house(730, 22, { floors: 2 })];
     t.buildings.push(...fresh);
     zoneTown(t);
     recountPopulation(t);
-    expect(t.population).toBe(pop + 2 * 2 * RES_PER_FLOOR);
     expect(fresh.every((b) => b.form === 'cottage' && residentsOf(b) <= 6)).toBe(true);
-    for (const b of t.buildings) if (forms.has(b.id)) expect(b.form).toBe(forms.get(b.id));
+    expect(t.population).toBe(pop + fresh.reduce((s, b) => s + residentsOf(b), 0));
+    for (const b of t.buildings) if (forms.has(b.id)) expect(`${b.form}|${b.people}`).toBe(forms.get(b.id));
+  });
+
+  it('город: многоквартирный дом — по вместимости корпуса на проектных этажах; тесный участок — не многоквартирный', () => {
+    const t = town(4000, [], { tier: 'town' });
+    const big = house(0, 0, { form: 'walkup', floors: 2, fp: { center: { x: 0, y: 0 }, w: 28, h: 26, angle: 0 } });
+    const small = house(0, 0, { form: 'walkup', floors: 2, fp: { center: { x: 0, y: 0 }, w: 28, h: 26, angle: 0 } });
+    t.buildings.push(big, small);
+    zoneTown(t);
+    expect(residentsOf(big)).toBeGreaterThan(20);
+    expect(residentsOf(big)).toBeLessThan(40);
+    // В среднем кольце узкий участок (второй ряд) — частный дом, а не тесный многоквартирный.
+    const mid = { x: 0.48 * t.radius, y: 0 };
+    const narrow = house(mid.x, mid.y, { floors: 2, fp: { center: mid, w: 18, h: 20, angle: 0 } });
+    const forms = Array.from({ length: 30 }, (_, i) => placeForm(t, { ...narrow, id: 5000 + i }));
+    expect(forms).not.toContain('walkup');
+    expect(SETTLE_RULE).toBeGreaterThan(1);
   });
 
   it('этажи многоквартирного дома — по жильцам, но не ниже проекта; у старых и тестовых домов без жильцов — по этажам генерации', () => {
@@ -198,7 +242,7 @@ describe('Жители по домам', () => {
     expect(storeysOf(slab)).toBe(5);
     expect(storeysOf({ ...slab, people: 1000 })).toBeGreaterThan(5);
     expect(storeysOf({ ...slab, people: 100_000 })).toBeLessThanOrEqual(16);
-    expect(storeysOf(house(0, 0, { form: 'walkup', people: 20 }))).toBe(2);
+    expect(storeysOf(house(0, 0, { form: 'walkup', floors: 2, people: 20 }))).toBe(2);
     expect(residentsOf(house(0, 0, { kind: 'com', floors: 3 }))).toBe(0);
   });
 });
@@ -294,7 +338,7 @@ describe('Высотки: два дома квартала спиной к сп�
 });
 
 describe('Застройка в партии', () => {
-  it('мир по seed: у всех домов есть тип и сторона улицы, жители по домам — правдоподобно, а всего — как по этажам генерации; панельные дома — в новом районе', () => {
+  it('мир по seed: у всех домов есть тип, сторона улицы и жильцы; ярусы — по размеру; сёла — частные дома, в городах — панельные', () => {
     const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 1 });
     const all = g.towns.flatMap((t) => t.buildings);
     expect(all.every((b) => b.form && b.face)).toBe(true);
@@ -302,8 +346,13 @@ describe('Застройка в партии', () => {
       const pop = t.population;
       recountPopulation(t);
       expect(t.population).toBe(pop);
-      const byFloors = t.buildings.reduce((s, b) => s + (b.kind === 'res' ? b.floors * RES_PER_FLOOR : b.kind === 'com' ? b.floors * 4 : 0), 0);
-      expect(t.population).toBe(byFloors);
+      expect(t.tier).toBeTruthy();
+      expect(t.settled).toBe(SETTLE_RULE);
+      // Село — частные дома, многоквартирных — не больше трёх; сельчан — меньше порога города.
+      if (t.tier === 'village') {
+        expect(t.buildings.filter((b) => b.form === 'walkup').length).toBeLessThanOrEqual(3);
+        expect(t.population).toBeLessThan(TOWN_TIER.town);
+      }
     }
     const res = all.filter((b) => b.kind === 'res');
     expect(res.every((b) => b.people !== undefined)).toBe(true);
@@ -316,20 +365,38 @@ describe('Застройка в партии', () => {
     expect(withDistrict).toBeTruthy();
   });
 
-  it('старое сохранение без типов и жильцов: типы, стороны улиц и жильцы — при загрузке, жителей столько же', () => {
+  it('старое сохранение без яруса, типов и жильцов: всё — при загрузке; население — по жильцам, ярус — по прежнему населению', () => {
     const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 2 });
     const save = JSON.parse(JSON.stringify(g.toSave())) as SaveData;
-    const pop = save.towns.map((t) => t.population);
+    const tiers = g.towns.map((t) => t.tier);
     for (const t of save.towns) {
       delete t.district;
+      delete t.tier;
+      delete t.settled;
       for (const b of t.buildings) {
         delete b.form;
         delete b.face;
         delete b.people;
+        delete b.rear;
       }
+      // Население старого сохранения — прежнее, по 14 жителей на этаж каждого дома.
+      t.population = t.buildings.reduce((s, b) => s + (b.kind === 'res' ? b.floors * RES_PER_FLOOR : b.kind === 'com' ? b.floors * 4 : 0), 0);
     }
+    const old = save.towns.map((t) => t.population);
     const loaded = new Game(structuredClone(g.settings), save);
-    expect(loaded.towns.map((t) => t.population)).toEqual(pop);
+    for (const [i, t] of loaded.towns.entries()) {
+      expect(t.population).toBe(t.buildings.reduce((s, b) => s + (b.kind === 'res' ? residentsOf(b) : b.kind === 'com' ? b.floors * 4 : 0), 0));
+      // Сельчан — в разы меньше прежнего (в частном доме 3–6 человек, а не 14 на этаж).
+      if (t.tier === 'village') expect(t.population).toBeLessThan(old[i] * 0.6);
+      expect(t.settled).toBe(SETTLE_RULE);
+      expect(t.tier).toBe(townTier({ population: old[i], style: t.style }));
+    }
+    // Ярус по прежнему населению — как у генератора (кроме городов на границе порогов).
+    expect(loaded.towns.filter((t, i) => t.tier === tiers[i]).length).toBeGreaterThanOrEqual(8);
+    // Дома второго ряда — узнаны по расстоянию до улицы.
+    const rear = new Set(g.towns.flatMap((t) => t.buildings).filter((b) => b.rear).map((b) => b.id));
+    const found = loaded.towns.flatMap((t) => t.buildings).filter((b) => rear.has(b.id) && b.rear).length;
+    expect(found / Math.max(1, rear.size)).toBeGreaterThan(0.8);
     const all = loaded.towns.flatMap((t) => t.buildings);
     expect(all.every((b) => b.form && (b.face === 1 || b.face === -1))).toBe(true);
     expect(all.filter((b) => b.kind === 'res').every((b) => b.people !== undefined)).toBe(true);

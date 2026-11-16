@@ -9,10 +9,12 @@ import { townTier } from './townForms';
 
 describe('Парки и скверы городов', { timeout: 60_000 }, () => {
   it('сколько: в селе — сквер с памятником, в городе — парк, площадь и скверы, в большом — больше', () => {
-    expect(parkQuota({ population: 1200, style: 'linear' })).toMatchObject({ park: 0, memorial: 1, plaza: 0, square: 0 });
-    expect(parkQuota({ population: 3000, style: 'organic' })).toMatchObject({ park: 1, memorial: 0, plaza: 1 });
-    expect(parkQuota({ population: 9000, style: 'radial' }).square).toBeGreaterThan(parkQuota({ population: 3000, style: 'organic' }).square);
-    expect(parkQuota({ population: 15000, style: 'radial' }).park).toBe(2);
+    // Ярус — свой (Town.tier); население — по жильцам домов (село — 300–800).
+    expect(parkQuota({ population: 400, style: 'linear', tier: 'village' })).toMatchObject({ park: 0, memorial: 1, plaza: 0, square: 0 });
+    expect(parkQuota({ population: 700, style: 'linear', tier: 'village' })).toMatchObject({ park: 0, memorial: 1, plaza: 0, square: 1 });
+    expect(parkQuota({ population: 3000, style: 'organic', tier: 'town' })).toMatchObject({ park: 1, memorial: 0, plaza: 1 });
+    expect(parkQuota({ population: 9000, style: 'radial', tier: 'city' }).square).toBeGreaterThan(parkQuota({ population: 3000, style: 'organic', tier: 'town' }).square);
+    expect(parkQuota({ population: 13000, style: 'radial', tier: 'city' }).park).toBe(2);
   });
 
   it('мир по seed: зелень — только на пустом месте (не на домах, строениях, дорогах и в воде), жителей столько же', () => {

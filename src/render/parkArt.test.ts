@@ -2,9 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { freshGame } from '../game/testkit';
 import type { ParkKind, TownPark } from '../world/entities';
 import { NEW_GAME_SETTINGS } from '../world/settings';
-import { townTier } from '../world/townForms';
-import { corridorHalf, halfAtS } from '../world/worldgen';
-import { drawParkArt, drawSidewalks, drawStreetGreen, streetGreen, type WalkSite } from './parkArt';
+import { corridorHalf } from '../world/worldgen';
+import { drawParkArt, drawStreetGreen, streetGreen } from './parkArt';
 import { LAMPS_ON } from './townDecor';
 
 /** Холст-заглушка: сколько раз позван каждый метод и какие свойства выставлялись. */
@@ -62,7 +61,7 @@ describe('Парки и скверы — рисунок', () => {
   });
 });
 
-describe('Аллеи, фонари и тротуары вдоль улиц', { timeout: 30_000 }, () => {
+describe('Аллеи и фонари вдоль улиц', { timeout: 30_000 }, () => {
   it('деревья — вдоль проспектов, у тротуара, не на полотнах; фонари пока выключены', () => {
     const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 1 });
     const lines = streetGreen(g.roads.net, g.towns, (p, r) => g.index.at(p, r) !== null);
@@ -71,8 +70,6 @@ describe('Аллеи, фонари и тротуары вдоль улиц', { t
     expect(trees).toBeGreaterThan(50);
     // Освещение вернётся вместе с ночным режимом (LAMPS_ON).
     expect(lamps).toBe(LAMPS_ON ? lamps : 0);
-    // Без застройки рядом (site) — без тротуаров.
-    expect(lines.every((l) => !l.walks.length)).toBe(true);
     for (const l of lines) {
       const own = g.roads.net.corridor(l.id);
       if (l.trees.length) expect(own.cls).toBe('avenue');
@@ -88,48 +85,5 @@ describe('Аллеи, фонари и тротуары вдоль улиц', { t
     const near = stub();
     drawStreetGreen(near.ctx, lines, { x0: -1e6, y0: -1e6, x1: 1e6, y1: 1e6 }, 2);
     expect(total(near.calls)).toBeGreaterThan(total(far.calls));
-  });
-
-  it('тротуары — по обе стороны улиц, где рядом дома: в городе мощёные, в селе тропинки; не на полотнах и не в воде', () => {
-    const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 1 });
-    const site: WalkSite = {
-      around: (p, r) => {
-        const near = g.index.near(p, r);
-        return { houses: near.filter((s) => s.type === 'building').map((s) => s.fp), others: near.filter((s) => s.type !== 'building').map((s) => s.fp) };
-      },
-      wet: (p) => g.terrain.isWater(p, 0.6),
-      townAt: (p) => {
-        const t = g.towns.find((x) => Math.hypot(p.x - x.center.x, p.y - x.center.y) < (x.extent ?? x.radius) + 20);
-        return t ? { paved: townTier(t) !== 'village', key: `${t.id}` } : null;
-      },
-    };
-    const lines = streetGreen(g.roads.net, g.towns, (p, r) => g.index.at(p, r) !== null, undefined, site);
-    const walked = lines.filter((l) => l.walks.length);
-    expect(walked.filter((l) => l.paved).length).toBeGreaterThan(100);
-    expect(walked.filter((l) => !l.paved).length).toBeGreaterThan(5);
-    let points = 0;
-    for (const l of walked) {
-      const own = g.roads.net.corridor(l.id);
-      for (const w of l.walks) {
-        for (let i = 0; i < w.length; i += 2) {
-          const p = { x: w[i], y: w[i + 1] };
-          points++;
-          // Ось тротуара — за краем своего полотна (тротуар у бордюра, а не на проезжей части).
-          const hit = own.lut.closest(p);
-          expect(hit.d, `тротуар на полотне ${own.id}`).toBeGreaterThan(halfAtS(own, hit.s) + 0.5);
-          expect(hit.d).toBeLessThan(halfAtS(own, hit.s) + 4);
-        }
-      }
-    }
-    expect(points).toBeGreaterThan(2000);
-    // Тротуары — только вблизи: издали их не видно, ближе — одна обводка на вид (мощёные и тропинки).
-    const all = { x0: -1e6, y0: -1e6, x1: 1e6, y1: 1e6 };
-    const far = stub();
-    drawSidewalks(far.ctx, lines, all, 0.15);
-    expect(total(far.calls)).toBe(0);
-    const near = stub();
-    drawSidewalks(near.ctx, lines, all, 0.8);
-    expect(near.calls.stroke).toBe(4);
-    expect(near.set.has('filter')).toBe(false);
   });
 });

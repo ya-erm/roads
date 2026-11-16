@@ -1,27 +1,36 @@
 import { hash } from '../core/math';
 import type { Vec } from '../core/vec';
 import type { Town, TownBuilding } from '../world/entities';
+import { LOT_SETBACK } from '../world/houseAccess';
 import type { Footprint } from '../world/spatial';
 import { townTier } from '../world/townForms';
+import { houseAccess } from './houseArt';
 import { Art } from './industryArt';
-import { parkGates, SIDEWALK } from './parkArt';
+import { parkGates } from './parkArt';
+import { SIDEWALK } from './sidewalks';
 import { type Box, grow } from './tileCache';
 import { paths } from './townDecor';
 
 /**
- * Пешеходные дорожки внутри кварталов города — только картинка (на дороги, движение и стройку не влияют), рисуются
- * под дорогами и домами, в плитки кэша карты:
+ * Пешеходные дорожки и съезды города вне участков домов — только картинка (на дороги, движение и стройку не
+ * влияют), рисуются под дорогами и домами, в плитки кэша карты:
  * - между соседними домами одного ряда — по промежутку от тротуара в глубину квартала (к дворам, огородам, домам
  *   второго ряда; где позади ничего нет — у части промежутков, по хешу);
  * - к дому второго ряда — от тротуара по промежутку рядом с передним домом и вдоль его задней стороны к крыльцу;
- * - от входов парка или сквера — до тротуара ближней улицы.
+ * - от входов парка или сквера — до тротуара ближней улицы;
+ * - от участка через газон и тротуар до полотна — дорожки к крыльцам и съезды к стоянкам и гаражам (houseArt.houseAccess):
+ *   край у полотна закрывает асфальт дороги, а не съезд ложится поверх неё.
  * Считается раз на список домов и парков города (renderer), а не в каждой плитке.
  */
 
 export interface TownWalks {
   townId: number;
-  /** Ломаные (x, y по очереди). */
+  /** Ломаные дорожек (x, y по очереди). */
   paths: number[][];
+  /** Дорожки к крыльцам от участка до тротуара: отрезок (x0, y0, x1, y1), ширина и цвет. */
+  fronts: { pts: number[]; w: number; color: string }[];
+  /** Съезды от участка до полотна: многоугольник (x, y по очереди) и цвет. */
+  drives: { pts: number[]; color: string }[];
   /** Мощёные (город) или утоптанные (село). */
   paved: boolean;
   box: Box;
@@ -30,8 +39,6 @@ export interface TownWalks {
 
 /** Ширина дорожки, м. */
 export const WALK_W = { paved: 1.6, path: 1.2 } as const;
-/** Дома стоят в 5 м от края полотна (worldgen.fillStreet): дорожка от участка доходит до тротуара. */
-const SETBACK = 5;
 /** Промежуток между домами ряда, в который помещается дорожка, м. */
 const GAP = { min: 2.2, max: 11 };
 
@@ -52,20 +59,51 @@ function toWorld(f: Footprint, x: number, y: number): [number, number] {
 const parallel = (a: Footprint, b: Footprint) => Math.cos(a.angle - b.angle) > 0.997;
 const rowHouse = (b: TownBuilding) => b.kind !== 'landmark' && b.form !== 'tower';
 
+/** Выходы дома к улице (дорожки к крыльцам, съезды) — в мире, от края участка через газон и тротуар. */
+function accessOf(b: TownBuilding, reach: number, fronts: TownWalks['fronts'], drives: TownWalks['drives']): void {
+  // Оси сцены дома: дом с face = 1 повёрнут на пол-оборота (как в houseArt).
+  const angle = (b.face ?? -1) === 1 ? b.fp.angle + Math.PI : b.fp.angle;
+  const f: Footprint = { center: b.fp.center, w: b.fp.w, h: b.fp.h, angle };
+  for (const a of houseAccess(b)) {
+    const edge = a.side * (b.fp.h / 2);
+    if (a.kind === 'path') {
+      fronts.push({ pts: [...toWorld(f, a.x, edge), ...toWorld(f, a.x, edge + a.side * reach)], w: a.w, color: a.color });
+      continue;
+    }
+    // Съезд — до полотна и чуть под него; у бордюра — раструб на метр шире с каждой стороны.
+    const curb = a.side * (b.fp.h / 2 + LOT_SETBACK + 0.6);
+    const flare = a.side * (b.fp.h / 2 + LOT_SETBACK - 1.6);
+    const hw = a.w / 2;
+    const pts = [
+      [a.x - hw, edge],
+      [a.x + hw, edge],
+      [a.x + hw, flare],
+      [a.x + hw + 1.2, curb],
+      [a.x - hw - 1.2, curb],
+      [a.x - hw, flare],
+    ].flatMap(([x, y]) => toWorld(f, x, y));
+    drives.push({ pts, color: a.color });
+  }
+}
+
 /**
- * Дорожки города town. curb — сколько метров от точки до края ближнего полотна (∞ — далеко): по нему дорожка от входа
- * в парк доходит до тротуара.
+ * Дорожки и съезды города town. curb — сколько метров от точки до края ближнего полотна (∞ — далеко): по нему
+ * дорожка от входа в парк доходит до тротуара.
  */
 export function townWalks(town: Town, curb: (p: Vec) => number): TownWalks | null {
   const paved = townTier(town) !== 'village';
   const side = paved ? SIDEWALK.paved : SIDEWALK.path;
-  // До тротуара от участка: SETBACK − (from + w) — газон; дорожка заходит на тротуар на полметра.
-  const reach = SETBACK - side.from - side.w + 0.5;
+  // До тротуара от участка: LOT_SETBACK − (from + w) — газон; дорожка заходит на тротуар на полметра.
+  const reach = LOT_SETBACK - side.from - side.w + 0.5;
   const out: number[][] = [];
+  const fronts: TownWalks['fronts'] = [];
+  const drives: TownWalks['drives'] = [];
   const list = town.buildings.filter(rowHouse);
+  // Дом второго ряда выходит к улице дорожкой в обход переднего (ниже), не напрямую.
+  for (const b of town.buildings) if (b.kind !== 'landmark' && !b.rear) accessOf(b, reach, fronts, drives);
   const near = (a: TownBuilding, b: TownBuilding, d: number) => Math.abs(a.fp.center.x - b.fp.center.x) < d && Math.abs(a.fp.center.y - b.fp.center.y) < d;
   // Соседи — по клеткам сетки CELL м: не каждый дом с каждым.
-  const CELL = 60;
+  const CELL = 70;
   const grid = new Map<string, TownBuilding[]>();
   const cellOf = (x: number, y: number) => `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`;
   for (const b of list) {
@@ -138,11 +176,12 @@ export function townWalks(town: Town, curb: (p: Vec) => number): TownWalks | nul
       }
     }
   }
-  if (!out.length) return null;
+  if (!out.length && !fronts.length && !drives.length) return null;
   let box: Box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
-  for (const p of out) for (let i = 0; i < p.length; i += 2) box = { x0: Math.min(box.x0, p[i]), y0: Math.min(box.y0, p[i + 1]), x1: Math.max(box.x1, p[i]), y1: Math.max(box.y1, p[i + 1]) };
-  const sig = `${paved}|${out.map((p) => p.map((v) => v.toFixed(1)).join(',')).join(';')}`;
-  return { townId: town.id, paths: out, paved, box: grow(box, 2), sig };
+  const all = [...out, ...fronts.map((f) => f.pts), ...drives.map((d) => d.pts)];
+  for (const p of all) for (let i = 0; i < p.length; i += 2) box = { x0: Math.min(box.x0, p[i]), y0: Math.min(box.y0, p[i + 1]), x1: Math.max(box.x1, p[i]), y1: Math.max(box.y1, p[i + 1]) };
+  const sig = `${paved}|${all.map((p) => p.map((v) => v.toFixed(1)).join(',')).join(';')}`;
+  return { townId: town.id, paths: out, fronts, drives, paved, box: grow(box, 2), sig };
 }
 
 const WALK_PAVED = 'rgba(214,208,196,0.95)';
@@ -150,14 +189,35 @@ const WALK_PAVED_EDGE = 'rgba(150,142,128,0.5)';
 const WALK_EARTH = 'rgba(204,188,150,0.85)';
 const WALK_EARTH_EDGE = 'rgba(160,146,116,0.3)';
 
-/** Дорожки кварталов в рамке view — под дорогами и домами; издали (lod 0) их не видно. */
+/**
+ * Дорожки кварталов, дорожки к крыльцам и съезды в рамке view — под дорогами (после тротуаров: съезд пересекает
+ * тротуар) и домами; издали (lod 0) их не видно.
+ */
 export function drawTownWalks(ctx: CanvasRenderingContext2D, list: readonly TownWalks[], view: Box, zoom: number): void {
   const a = new Art(ctx, { id: 0, fp: { center: { x: 0, y: 0 }, w: 1, h: 1, angle: 0 } }, zoom, 0, 0, 'still');
   if (!a.lod) return;
   a.pass = 0;
+  const c = ctx;
   for (const w of list) {
     if (w.box.x1 < view.x0 || w.box.x0 > view.x1 || w.box.y1 < view.y0 || w.box.y0 > view.y1) continue;
     const width = w.paved ? WALK_W.paved : WALK_W.path;
     paths(a, w.paths, width, w.paved ? WALK_PAVED : WALK_EARTH, w.paved ? WALK_PAVED_EDGE : WALK_EARTH_EDGE);
+    c.lineCap = 'butt';
+    for (const f of w.fronts) {
+      c.strokeStyle = f.color;
+      c.lineWidth = f.w;
+      c.beginPath();
+      c.moveTo(f.pts[0], f.pts[1]);
+      c.lineTo(f.pts[2], f.pts[3]);
+      c.stroke();
+    }
+    for (const d of w.drives) {
+      c.fillStyle = d.color;
+      c.beginPath();
+      c.moveTo(d.pts[0], d.pts[1]);
+      for (let i = 2; i < d.pts.length; i += 2) c.lineTo(d.pts[i], d.pts[i + 1]);
+      c.closePath();
+      c.fill();
+    }
   }
 }

@@ -340,7 +340,8 @@ export interface RegionInfo {
 }
 
 export function region(game: Game): RegionInfo {
-  const big = game.towns.filter((t) => t.population >= 5000);
+  // Крупный — от 4500 жителей (население — по жильцам домов: большие города от ~6500, крупные города — от ~4500).
+  const big = game.towns.filter((t) => t.population >= 4500);
   const spacing = game.towns.length
     ? game.towns.reduce((s, t) => s + Math.min(...game.towns.filter((o) => o !== t).map((o) => dist(o.center, t.center))), 0) / game.towns.length
     : 0;

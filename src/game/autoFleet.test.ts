@@ -134,7 +134,9 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
     game.setLineAuto(line.id, { on: true, min: 2, max: 5 });
     expect(line.vehicles).toHaveLength(3);
     let least = 3;
-    runMonths(game, 4, () => (least = Math.min(least, line.vehicles.length)));
+    // Продаёт по одной, по окну оценки — его длина по длине рейса (мир по seed: путь фермы — от 1 до 2 окон за 4 месяца).
+    for (let m = 0; m < 8 && line.vehicles.length > 2; m++) runMonths(game, 1, () => (least = Math.min(least, line.vehicles.length)));
+    runMonths(game, 2, () => (least = Math.min(least, line.vehicles.length)));
     expect(line.vehicles).toHaveLength(2);
     expect(least).toBe(2);
     // Минимум выше, чем машин, — докупает сразу; максимум ниже — продаёт сразу.

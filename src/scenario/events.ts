@@ -369,10 +369,11 @@ const grant: Template = {
   candidates: ({ game, info }) => {
     if (!info.towns.size) return [];
     return game.towns
-      .filter((t) => !info.towns.has(t.id) && t.population >= 1200)
+      // От большого села (население — по жильцам домов: село — 300–800 жителей).
+      .filter((t) => !info.towns.has(t.id) && t.population >= 450)
       .map((t) => ({ t, d: Math.min(...[...info.towns].map((id) => dist(townById(game, id)!.center, t.center))) }))
       .filter(({ d }) => d <= 7000)
-      .map(({ t }) => ({ subject: refOf(t), weight: t.population / 2000 }));
+      .map(({ t }) => ({ subject: refOf(t), weight: t.population / 1500 }));
   },
   fire(ctx, c, parent) {
     const { game, sc, info } = ctx;

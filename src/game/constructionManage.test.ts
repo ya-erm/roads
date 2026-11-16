@@ -486,8 +486,9 @@ describe('Стройка: снос строительной базы', () => {
       expect(crew.state).toBe('back');
       const save = JSON.parse(JSON.stringify(game.toSave()));
       const loaded = withoutCitizens(new Game(save.settings, save));
-      for (const g of [game, loaded]) runSeconds(g, 120);
+      // Доезжает до первой базы — как скоро, решает дорога между базами (мир по seed): до 6 минут.
       const after = loaded.construction.crews.brigades.get(crew.id)!;
+      for (let s = 0; s < 360 && (crew.state !== 'idle' || after.state !== 'idle'); s += 20) for (const g of [game, loaded]) runSeconds(g, 20);
       expect(crew.state).toBe('idle');
       expect(after.state).toBe('idle');
       expect(after.base).toBe(first.id);
