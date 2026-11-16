@@ -41,6 +41,11 @@ export interface WorldSettings {
    * на карте, как в старых партиях и в мире по старой раскладке.
    */
   industryMode?: IndustryMode;
+  /**
+   * Масштаб карты к базовым размерам MAP_SIZES (по стороне): у новой партии — MAP_SCALE, и во столько же раз больше
+   * зазор между городами. Нет поля — 1: старое сохранение открывается на карте прежнего размера, с той же водой и лесом.
+   */
+  mapScale?: number;
 }
 
 export type BuildMode = 'instant' | 'build';
@@ -99,11 +104,20 @@ export const RELIEF: Record<Relief, { name: string; amplitude: number; contour: 
   mountains: { name: 'Горы', amplitude: 150, contour: 20 },
 };
 
+/** Базовые размеры карт, м — у партий без масштаба (WorldSettings.mapScale); новая — в MAP_SCALE раз больше по стороне. */
 export const MAP_SIZES: Record<MapSize, { name: string; w: number; h: number }> = {
   small: { name: 'Маленькая', w: 6400, h: 4300 },
   medium: { name: 'Средняя', w: 9600, h: 6400 },
   large: { name: 'Большая', w: 12800, h: 8500 },
 };
+
+/**
+ * Масштаб карт новой партии (WorldSettings.mapScale). Застройка выросла в TOWN_SCALE раз, и на прежних картах города
+ * почти сомкнулись: на средней между краями соседних городов ~100 м, у ближайших пар застройка заходит друг на друга.
+ * ×1,5 по стороне — маленькая 9600 × 6450, средняя 14 400 × 9600, большая 19 200 × 12 750 — и зазор городов
+ * во столько же раз больше: между соседними городами — поле, где видна междугородняя трасса.
+ */
+export const MAP_SCALE = 1.5;
 
 export const INDUSTRY_DENSITY: Record<IndustryDensity, { name: string; k: number }> = {
   few: { name: 'Мало', k: 0.6 },
@@ -137,7 +151,7 @@ export const DEFAULT_SETTINGS: WorldSettings = {
  * Новая партия — из игры (первый запуск, «?seed=», окно «Новая игра»): предприятия строит игрок. DEFAULT_SETTINGS —
  * без поля, «Готовые»: по нему мир по seed прежний (на нём держатся тесты старой раскладки).
  */
-export const NEW_GAME_SETTINGS: WorldSettings = { ...DEFAULT_SETTINGS, industryMode: 'player' };
+export const NEW_GAME_SETTINGS: WorldSettings = { ...DEFAULT_SETTINGS, industryMode: 'player', mapScale: MAP_SCALE };
 
 /** Размеры городов: немного крупных, больше средних, остальные маленькие (доли — по профилю сценария). */
 export function townSizes(count: number, shares: { big: number; mid: number } = { big: 0.2, mid: 0.4 }): number[] {
@@ -146,8 +160,32 @@ export function townSizes(count: number, shares: { big: number; mid: number } = 
   return Array.from({ length: count }, (_, i) => (i < big ? 3 : i < big + mid ? 2 : 1));
 }
 
-/** Во сколько раз площадь карты больше средней — чтобы масштабировать леса и предприятия. */
-export function areaFactor(s: WorldSettings): number {
+/** Масштаб карты партии (WorldSettings.mapScale): нет поля — 1, старое сохранение. */
+export const mapScaleOf = (s: Pick<WorldSettings, 'mapScale'>): number => s.mapScale ?? 1;
+
+/** Размер карты партии, м: базовый по MAP_SIZES, умноженный на её масштаб. */
+export function mapDims(s: Pick<WorldSettings, 'size' | 'mapScale'>): { w: number; h: number } {
   const m = MAP_SIZES[s.size];
+  const k = mapScaleOf(s);
+  return { w: Math.round(m.w * k), h: Math.round(m.h * k) };
+}
+
+/**
+ * Во сколько раз площадь карты больше базовой средней — чтобы масштабировать воду, леса и деревья: их на гектар
+ * столько же на карте любого масштаба.
+ */
+export function areaFactor(s: WorldSettings): number {
+  const m = mapDims(s);
   return (m.w * m.h) / (MAP_SIZES.medium.w * MAP_SIZES.medium.h);
+}
+
+/**
+ * Множитель числа предприятий (и месторождений) по размеру карты: базовая площадь, а масштаб — по стороне, не по
+ * площади. Городов на крупной карте столько же, расстояния между ними — в mapScale раз больше; предприятий —
+ * в mapScale раз больше, и они реже: соседние — в √mapScale раз дальше (×1,22 при 1,5). Цепочки длиннее, но
+ * выбор у игрока шире, а грузовиков на линию не вдвое больше.
+ */
+export function industryFactor(s: WorldSettings): number {
+  const m = MAP_SIZES[s.size];
+  return ((m.w * m.h) / (MAP_SIZES.medium.w * MAP_SIZES.medium.h)) * mapScaleOf(s);
 }

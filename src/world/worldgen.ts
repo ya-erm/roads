@@ -10,7 +10,7 @@ import { placePlayerWorld } from './deposits';
 import type { Deposit, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
-import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, playerIndustries, townSizes, WorldProfile, WorldSettings } from './settings';
+import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerIndustries, townSizes, WorldProfile, WorldSettings } from './settings';
 import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
@@ -186,7 +186,7 @@ export interface World {
  */
 function playerWorld(ctx: WorldContext, towns: Town[], settings: WorldSettings, profile?: WorldProfile): World {
   for (const t of towns) measureTown(t);
-  const { industries, deposits } = placePlayerWorld(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), settings, profile);
+  const { industries, deposits } = placePlayerWorld(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * industryFactor(settings), settings, profile);
   layStartRoads(ctx, towns, industries, settings.seed);
   plantTowns(ctx, towns);
   return { towns, industries, deposits };
@@ -252,8 +252,8 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   if (profile) return generateProfiled(ctx, settings, profile);
   const towns: Town[] = [];
   const names = [...TOWN_NAMES];
-  // На тесной карте города ставим ближе друг к другу.
-  const gap = settings.size === 'small' ? 600 : 900;
+  // На тесной карте города ставим ближе друг к другу; на крупной карте (mapScale) зазор во столько же раз больше.
+  const gap = (settings.size === 'small' ? 600 : 900) * mapScaleOf(settings);
   for (const size of townSizes(settings.towns)) {
     const reach = townReach(size);
     placeTown(ctx, towns, names, size, 80, gap, (_attempt, g) => {
@@ -268,7 +268,7 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   }
   assignDemands(towns, ctx.rng, townCargo(settings));
   if (playerIndustries(settings)) return playerWorld(ctx, towns, settings);
-  const placed = placeIndustries(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), settings);
+  const placed = placeIndustries(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * industryFactor(settings), settings);
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   // Места для городов и предприятий выбраны по всем улицам; дальше радиус города — по плотной застройке.
   for (const t of towns) measureTown(t);
@@ -298,10 +298,12 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
   }
   // Чем сильнее тяга, тем ближе к центру скопления ищем место; не нашлось — по всей карте.
   // Города крупнее (TOWN_SCALE) — и пятно скопления шире.
-  const spread = Math.max(W, H) * (1 - profile.cluster) + 1600 * TOWN_SCALE * profile.cluster;
+  // Крупная карта (mapScale) — и зазор, и пятно скопления во столько же раз больше.
+  const k = mapScaleOf(settings);
+  const spread = Math.max(W, H) * (1 - profile.cluster) + 1600 * TOWN_SCALE * k * profile.cluster;
   for (const size of townSizes(settings.towns, profile)) {
     const reach = townReach(size);
-    placeTown(ctx, towns, names, size, 120, profile.gap, (attempt, g) => {
+    placeTown(ctx, towns, names, size, 120, profile.gap * k, (attempt, g) => {
       const free = attempt >= 80 || profile.cluster <= 0;
       const a = rng.range(0, Math.PI * 2);
       const r = rng.range(0, spread * (1 + attempt / 40));
@@ -316,7 +318,7 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
   }
   assignDemands(towns, rng, townCargo(settings));
   if (playerIndustries(settings)) return playerWorld(ctx, towns, settings, profile);
-  const placed = placeProfiled(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * areaFactor(settings), profile, settings);
+  const placed = placeProfiled(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * industryFactor(settings), profile, settings);
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   for (const t of towns) measureTown(t);
   layStartRoads(ctx, towns, industries, settings.seed);
@@ -332,7 +334,7 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
   const { rng, terrain, index } = ctx;
   const result: Industry[] = [];
   const hub = [...towns].sort((a, b) => b.population - a.population)[0];
-  const hubSpread = Math.max(terrain.width, terrain.height) * (1 - profile.hub) + 2400 * profile.hub;
+  const hubSpread = Math.max(terrain.width, terrain.height) * (1 - profile.hub) + 2400 * mapScaleOf(settings) * profile.hub;
   const nearWater = new Set(biomeOf(settings).nearWater);
   const clear = townClearance(ctx, towns);
   for (const info of INDUSTRY_LIST) {

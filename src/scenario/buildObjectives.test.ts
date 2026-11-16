@@ -47,7 +47,8 @@ describe('сценарий «Строит игрок»', () => {
       expect(assess(game, goal.params, 10).ok).toBe(true);
     }
     expect(seen).toBeGreaterThan(0);
-  });
+    // Три мира со сценарием на картах нового масштаба — под нагрузкой полного прогона дольше 15 с.
+  }, 60_000);
 
   it('груз «можно получить», если его можно построить: месторождения и заводы биома', () => {
     const game = withoutCitizens(freshGame(scenario(7)));

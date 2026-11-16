@@ -328,6 +328,17 @@ describe('Бригады в игре: нет подъезда', () => {
   });
 
   it('сохранение, пока вторая бригада едет по стройке к ушедшему вперёд краю: после загрузки — там же, и дальше всё одинаково', () => {
+    // Городским темпом: в чистом поле (CONSTRUCTION.field) 600 м улицы готовы раньше, чем вторая бригада доедет.
+    const field = CONSTRUCTION.field;
+    CONSTRUCTION.field = 1;
+    try {
+      saveWhileDriving();
+    } finally {
+      CONSTRUCTION.field = field;
+    }
+  });
+
+  function saveWhileDriving(): void {
     const game = withoutCitizens(new Game(WORLD));
     const at = field(game, 900);
     expect(road(game, { free: at }, { free: { x: at.x + 300, y: at.y } })).toBe(true);
@@ -361,5 +372,5 @@ describe('Бригады в игре: нет подъезда', () => {
     expect(loaded.construction.crews.toSave()).toEqual(game.construction.crews.toSave());
     expect(loaded.money).toBe(game.money);
     expect(JSON.stringify(loaded.roads.net.toJSON())).toBe(JSON.stringify(game.roads.net.toJSON()));
-  });
+  }
 });

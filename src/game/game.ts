@@ -1150,6 +1150,9 @@ export class Game implements BuildContext {
     // Сохранения до ступеней: в сценарии открыто столько, сколько этапов пройдено.
     this.modelTier = save.modelTier ?? (save.scenario ? (Math.min(3, save.scenario.phase + 1) as ModelTier) : 1);
     this.journal.add('load', { date: this.dateLabel, money: this.money, lines: this.lines.size, fleet: this.fleet.size });
+    // Темп участков стройки зависит от застройки рядом (чистое поле): то, что посчитано по ходу загрузки, пока дома
+    // и предприятия ещё не на месте, — заново.
+    this.construction.forgetPrices();
     // Сохранение без таймлапса: запись начинается отсюда, с сети на момент загрузки.
     if (!this.timelapse.frames.length) this.timelapse.capture(this);
   }
@@ -2175,6 +2178,15 @@ export class Game implements BuildContext {
 
   isWater(p: Vec, margin = 0): boolean {
     return this.terrain.isWater(p, margin);
+  }
+
+  /**
+   * Застройка у точки: дом, предприятие, станция или склад ближе CONSTRUCTION.fieldClear. Нет — чистое поле, стройка
+   * там быстрее (CONSTRUCTION.field). Строительная база — не застройка: это площадка самой стройки.
+   */
+  builtNear(p: Vec): boolean {
+    const r = CONSTRUCTION.fieldClear;
+    return this.index.near(p, r).some((s) => s.type !== 'base' && pointInFootprint(p, s.fp, r));
   }
 
   inBounds(p: Vec, margin = 0): boolean {

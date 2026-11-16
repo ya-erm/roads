@@ -149,6 +149,8 @@ export interface ConstructionHost {
   readonly buildBudget: number;
   readonly time: number;
   isWater(p: Vec, margin?: number): boolean;
+  /** Застройка у точки (constructionWork.BuiltNear): нет — чистое поле, стройка быстрее. Не задано — всюду застройка. */
+  builtNear?(p: Vec): boolean;
   ground(): ((p: Vec) => number) | null;
   spend(amount: number): void;
   /** Открыт участок: граф движения заново. */
@@ -277,6 +279,8 @@ export class Construction {
   readonly trains: WorkTrains | null;
   /** Цена и темп полотна по ревизии: ревизия меняется с формой, полосами и классом. */
   private readonly prices = new Map<string, { full: number; rate: number }>();
+  /** Застройка у точки — для темпа (чистое поле быстрее, CONSTRUCTION.field); без неё в хосте — всюду застройка. */
+  private readonly built = (p: Vec): boolean => this.host.builtNear?.(p) ?? true;
   /** Из чего полотно (мост, тоннель, насыпь) по ревизии — для карточки проекта. */
   private readonly partsCache = new Map<string, ProjectParts>();
   /** Базы и бригады: проект строится, пока на нём работает бригада. */
@@ -1257,10 +1261,15 @@ export class Construction {
     let hit = this.prices.get(key);
     if (!hit) {
       if (this.prices.size > 4000) this.prices.clear();
-      hit = { full: Math.round(this.host.railCost?.(s) ?? 0), rate: railBuildRate(rails, s, (p, m) => this.host.isWater(p, m)) };
+      hit = { full: Math.round(this.host.railCost?.(s) ?? 0), rate: railBuildRate(rails, s, (p, m) => this.host.isWater(p, m), this.built) };
       this.prices.set(key, hit);
     }
     return hit;
+  }
+
+  /** Цены и темп участков — заново при следующем обращении (после загрузки: застройка вокруг на месте). */
+  forgetPrices(): void {
+    this.prices.clear();
   }
 
   private price(net: LaneNet, c: Corridor): { full: number; rate: number } {
@@ -1273,7 +1282,7 @@ export class Construction {
       const w = c.build?.was;
       hit = {
         full: w ? w.price : fullCorridorCost(net, c, water, this.host.ground()),
-        rate: pieceRate(net, c, water),
+        rate: pieceRate(net, c, water, this.built),
       };
       this.prices.set(key, hit);
     }

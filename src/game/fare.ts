@@ -39,6 +39,6 @@ export function paxDistance(straight: number, path: number | null): number {
  * на пару остановок, и малая — на междугородней линии.
  */
 export function paxFare(count: number, straight: number, path: number | null, k: number): number {
-  const distance = (CARGO.passengers.rate * ECONOMY.tariff * paxDistance(straight, path) * k) / 100;
+  const distance = (CARGO.passengers.rate * ECONOMY.tariff * ECONOMY.paxDistance * paxDistance(straight, path) * k) / 100;
   return count * (ECONOMY.paxBoarding + distance);
 }

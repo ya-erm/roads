@@ -19,6 +19,8 @@ export interface RoadContext {
   readonly roads: Roads;
   readonly budget: number;
   isWater(p: Vec, margin?: number): boolean;
+  /** Застройка у точки (constructionWork.BuiltNear): нет — чистое поле, стройка быстрее. Не задано — всюду застройка. */
+  builtNear?(p: Vec): boolean;
   inBounds(p: Vec, margin?: number): boolean;
   /** Отметка земли в точке (вода — NaN); без рельефа (старые миры) — null: профиль не считаем. */
   ground(): ((p: Vec) => number) | null;
@@ -285,6 +287,9 @@ export function fullCorridorCost(net: LaneNet, c: Corridor, isWater: (p: Vec, ma
 export class RoadBuilder {
   constructor(private readonly ctx: RoadContext) {}
 
+  /** Застройка у точки — для темпа стройки (чистое поле быстрее); игра без неё — всюду застройка. */
+  private readonly built = (p: Vec): boolean => this.ctx.builtNear?.(p) ?? true;
+
   get net(): LaneNet {
     return this.ctx.roads.net;
   }
@@ -391,7 +396,7 @@ export class RoadBuilder {
       c.build = { project: pid, done: 0 };
       res.corridors.push(c.id);
       res.cost += fullCorridorCost(next, c, water, ground);
-      res.seconds += c.length / buildRate(next, c, water);
+      res.seconds += c.length / buildRate(next, c, water, this.built);
       res.length += c.length;
     }
     return res.corridors.length ? res : undefined;
@@ -471,7 +476,7 @@ export class RoadBuilder {
       w.value = prev ? fullCorridorCost(before, prev, water, ground) : fullCorridorCost(next, wasCorridor(c, w), water, ground);
       Object.assign(w, rebuildCost(full, w.value, d, c.length));
       c.build = { project: pid, done: 0, was: w };
-      const seconds = c.length / pieceRate(next, c, water);
+      const seconds = c.length / pieceRate(next, c, water, this.built);
       res.corridors.push(c.id);
       res.cost += w.price;
       res.seconds += seconds;

@@ -12,8 +12,8 @@ function ring(n: number, r: number) {
   return { stops, pos: (id: number) => at.get(id) };
 }
 
-/** Тариф только за расстояние — как платили до билета и объезда. */
-const byDistance = (d: number, k = 1) => (CARGO.passengers.rate * ECONOMY.tariff * d * k) / 100;
+/** Тариф только за расстояние (пассажирский — ECONOMY.paxDistance от грузового) — как платили до билета и объезда. */
+const byDistance = (d: number, k = 1) => (CARGO.passengers.rate * ECONOMY.tariff * ECONOMY.paxDistance * d * k) / 100;
 
 describe('Плата пассажиров', () => {
   it('путь по линии — перегоны от посадки до высадки по ходу линии, через конец круга тоже', () => {
@@ -73,7 +73,25 @@ describe('Плата пассажиров', () => {
     expect((before / rides) * perMonth).toBeLessThan(running);
     expect((paid / rides) * perMonth).toBeGreaterThan(running);
     expect((paid / rides) * perMonth).toBeLessThan(running * 1.5);
-    // Междугородний пассажир за 1300 м: билет и объезд (его нет) — не больше 6% к плате.
-    expect(paxFare(1, 1300, 1300, 1) / byDistance(1300)).toBeLessThan(1.06);
+    // Междугородний пассажир — между центрами соседних городов крупной карты (~3,1 км, WorldSettings.mapScale): билет
+    // и объезд (его нет) — меньше десятой части платы.
+    expect(paxFare(1, 3100, 3100, 1) / byDistance(3100)).toBeLessThan(1.1);
+  });
+
+  it('пассажиру метр дешевле, чем грузу той же ставки, а поездка по городу на ~650 м — как до крупных карт', () => {
+    expect(ECONOMY.paxDistance).toBeGreaterThan(0.5);
+    expect(ECONOMY.paxDistance).toBeLessThan(1);
+    // До крупных карт: билет $20 и полный тариф за метр.
+    const old = (d: number, k: number) => 20 + (CARGO.passengers.rate * ECONOMY.tariff * d * k) / 100;
+    const k = 0.9;
+    expect(paxFare(1, 650, null, k) / old(650, k)).toBeGreaterThan(0.95);
+    expect(paxFare(1, 650, null, k) / old(650, k)).toBeLessThan(1.05);
+    // Короче — дороже, но не вдвое; длиннее (через весь город) — дешевле, но не меньше 80%.
+    expect(paxFare(1, 250, null, k) / old(250, k)).toBeLessThan(1.4);
+    expect(paxFare(1, 1200, null, k) / old(1200, k)).toBeGreaterThan(0.8);
+    // Междугородняя: на прежней карте ~2,1 км, на крупной ~3,1 км — пассажир платит больше, но не в полтора раза.
+    const ratio = paxFare(1, 3100, null, 1.1) / old(2100, 1);
+    expect(ratio).toBeGreaterThan(1.1);
+    expect(ratio).toBeLessThan(1.4);
   });
 });

@@ -38,6 +38,7 @@ import {
   INDUSTRY_DENSITY,
   IndustryDensity,
   MAP_SIZES,
+  mapDims,
   MapSize,
   MONEY_OPTIONS,
   RELIEF,
@@ -4020,8 +4021,9 @@ export class Hud {
         )
         .join('');
     const sizes = (Object.keys(MAP_SIZES) as MapSize[]).map((k) => {
-      const m = MAP_SIZES[k];
-      return { v: k, name: `${mapSvg(m.w, m.h)}${m.name}`, hint: `${((m.w * 0.6) / 1000).toFixed(1)} × ${((m.h * 0.6) / 1000).toFixed(1)} км` };
+      // Размер — с масштабом новой партии (WorldSettings.mapScale), как её карта и получится.
+      const m = mapDims({ size: k, mapScale: d.mapScale });
+      return { v: k, name: `${mapSvg(m.w, m.h)}${MAP_SIZES[k].name}`, hint: `${((m.w * 0.6) / 1000).toFixed(1)} × ${((m.h * 0.6) / 1000).toFixed(1)} км` };
     });
     // В сценарии города, предприятия и капитал задаёт регион — эти строки скрыты.
     const sc = d.scenario;

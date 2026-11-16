@@ -46,26 +46,37 @@ export function structureWork(h: number, water: boolean): number {
 }
 
 /**
- * Во сколько раз метр полотна строится дольше метра обычной дороги (улица 1+1 на земле): класс, полосы сверх двух,
- * мосты, эстакады и тоннели — по высоте вдоль оси (пандус — по промежуточной).
+ * Застройка у точки оси: дом, предприятие или станция ближе CONSTRUCTION.fieldClear — стройка здесь идёт городским
+ * темпом, иначе это чистое поле (CONSTRUCTION.field). Не задано (проверки без игры) — всюду застройка, как раньше.
  */
-export function workFactor(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean): number {
+export type BuiltNear = (p: Vec) => boolean;
+
+/** Во сколько раз метр в этой точке дольше из-за места: в чистом поле — CONSTRUCTION.field, у застройки — 1. */
+const siteWork = (p: Vec, built?: BuiltNear): number => (!built || built(p) ? 1 : CONSTRUCTION.field);
+
+/**
+ * Во сколько раз метр полотна строится дольше метра обычной дороги (улица 1+1 на земле): класс, полосы сверх двух,
+ * мосты, эстакады и тоннели — по высоте вдоль оси (пандус — по промежуточной), и место — в чистом поле быстрее
+ * (built, CONSTRUCTION.field).
+ */
+export function workFactor(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean, built?: BuiltNear): number {
   const K = CONSTRUCTION;
   const n = Math.max(2, Math.ceil(c.length / 24));
   let struct = 0;
   for (let i = 0; i < n; i++) {
     const s = (c.length * (i + 0.5)) / n;
     const h = net.heightAt(c, s);
+    const p = c.lut.pointAt(s);
     // Вода важна только для моста над ней: на земле дорога через воду не идёт.
-    struct += structureWork(h, h > 0.25 && isWater(c.lut.pointAt(s), 2));
+    struct += structureWork(h, h > 0.25 && isWater(p, 2)) * siteWork(p, built);
   }
   struct /= n;
   return K.cls[c.cls] * (1 + K.lane * Math.max(0, c.lanes.length - 2)) * struct;
 }
 
 /** Метров в секунду игры на скорости ×1 для этого полотна. */
-export function buildRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean): number {
-  return CONSTRUCTION.speed / workFactor(net, c, isWater);
+export function buildRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean, built?: BuiltNear): number {
+  return CONSTRUCTION.speed / workFactor(net, c, isWater, built);
 }
 
 /**
@@ -74,29 +85,34 @@ export function buildRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: 
  * «С проездом» на узкой (laneWise) — темп одного прохода (их два, по половине полотна): каждый — pass от времени
  * перестройки целиком.
  */
-export function pieceRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean): number {
+export function pieceRate(net: LaneNet, c: Corridor, isWater: (p: Vec, margin?: number) => boolean, built?: BuiltNear): number {
   const w = c.build?.was;
-  const rate = buildRate(net, c, isWater);
+  // Перестройка — на дороге, по которой ездят (или рядом с ней): чистого поля у неё нет, темп — прежний.
+  const rate = buildRate(net, c, isWater, w ? undefined : built);
   if (!w) return rate;
   const K = CONSTRUCTION.rebuild;
   return rate / (Math.max(0.05, w.work) * (laneWise(c.build) ? K.pass : w.part ? K.partial : 1));
 }
 
-/** Во сколько раз метр ж/д пути строится дольше метра обычной дороги: класс «rail» и мосты, эстакады, тоннели по высоте. */
-export function railWorkFactor(net: Network, s: Segment, isWater: (p: Vec, margin?: number) => boolean): number {
+/**
+ * Во сколько раз метр ж/д пути строится дольше метра обычной дороги: класс «rail» и мосты, эстакады, тоннели по высоте;
+ * в чистом поле (built) — быстрее, как у дороги.
+ */
+export function railWorkFactor(net: Network, s: Segment, isWater: (p: Vec, margin?: number) => boolean, built?: BuiltNear): number {
   const n = Math.max(2, Math.ceil(s.length / 24));
   let struct = 0;
   for (let i = 0; i < n; i++) {
     const at = (s.length * (i + 0.5)) / n;
     const h = net.levelAt(s, at);
-    struct += structureWork(h, h > 0.25 && isWater(s.lut.pointAt(at), 2));
+    const p = s.lut.pointAt(at);
+    struct += structureWork(h, h > 0.25 && isWater(p, 2)) * siteWork(p, built);
   }
   return CONSTRUCTION.cls.rail * (struct / n);
 }
 
 /** Метров ж/д пути в секунду игры на скорости ×1 у одной бригады. */
-export function railBuildRate(net: Network, s: Segment, isWater: (p: Vec, margin?: number) => boolean): number {
-  return CONSTRUCTION.speed / railWorkFactor(net, s, isWater);
+export function railBuildRate(net: Network, s: Segment, isWater: (p: Vec, margin?: number) => boolean, built?: BuiltNear): number {
+  return CONSTRUCTION.speed / railWorkFactor(net, s, isWater, built);
 }
 
 /** На сколько метров этап колонны отстаёт от предыдущего на участке длиной L. */

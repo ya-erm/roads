@@ -5,7 +5,7 @@
 import type { ScenarioSettings } from '../scenario/types';
 import { BIOME_LIST, BIOMES, type BiomeId, biomeForSeed, biomeRaw } from '../world/biomes';
 import { CARGO, type CargoType, INDUSTRY_LIST } from '../world/cargo';
-import { DEFAULT_SETTINGS, NEW_GAME_SETTINGS, type Relief, type WorldSettings } from '../world/settings';
+import { DEFAULT_SETTINGS, MAP_SCALE, NEW_GAME_SETTINGS, type Relief, type WorldSettings } from '../world/settings';
 import { cargoIcon, townIcon } from './cargoIcons';
 import { biomeSvg } from './icons';
 import { diceMapSvg } from './scenarioIcons';
@@ -27,7 +27,8 @@ export interface NewGameDraft {
  * до этого его выбирали сами. Выбрать другой можно карточкой биома — он останется до следующей смены seed.
  */
 export function withSeed(s: WorldSettings, seed: number): WorldSettings {
-  const next: WorldSettings = { ...s, seed, biome: biomeForSeed(seed) };
+  // Масштаб карты — всегда нынешний: новая партия после старой (без поля) — на карте нового размера.
+  const next: WorldSettings = { ...s, seed, biome: biomeForSeed(seed), mapScale: MAP_SCALE };
   // Метка старых версий: «Случайно» у биома больше нет.
   delete next.biomeBySeed;
   return next;

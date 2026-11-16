@@ -183,13 +183,16 @@ describe('Стройка дорог: режим «Мгновенно»', () => {
 });
 
 describe('Стройка дорог: «Со строительством»', () => {
-  // Темп без поправки на расстояние до базы: ровно CONSTRUCTION.speed (её проверяет отдельный тест).
+  // Темп без поправки на расстояние до базы и на чистое поле: ровно CONSTRUCTION.speed (их проверяют отдельные тесты).
   const reach = CONSTRUCTION.reach;
+  const field = CONSTRUCTION.field;
   beforeEach(() => {
     CONSTRUCTION.reach = 1e12;
+    CONSTRUCTION.field = 1;
   });
   afterEach(() => {
     CONSTRUCTION.reach = reach;
+    CONSTRUCTION.field = field;
   });
 
   it('дорога — проект: денег сразу не берут, по ней не ездят, каждый этап идёт 1 км за 90 с, платится по метрам', () => {
@@ -635,9 +638,11 @@ describe('Стройка дорог: базы и бригады', () => {
       return { done: game.construction.list()[0].done - done0, advice: advise(game) };
     };
     // Колонны бригад выезжают с ворот по одной машине — когда на месте все, край уже ушёл от базы на разное
-    // расстояние: доли бригад сравниваем без поправки на расстояние.
-    const reach = CONSTRUCTION.reach;
+    // расстояние: доли бригад сравниваем без поправки на расстояние. И без чистого поля: там улица двумя бригадами
+    // уже упирается в скорость машин бригады вдоль стройки (crewLane.LANE_SPEED) — доли не видны.
+    const { reach, field } = CONSTRUCTION;
     CONSTRUCTION.reach = 1e12;
+    CONSTRUCTION.field = 1;
     const [one, two, three] = [1, 2, 3].map((n) => pace(n, 0));
     CONSTRUCTION.reach = reach;
     // Вторая бригада прибавляет долю crewShare[1], третья — crewShare[2]: вместе мешают друг другу.
@@ -647,6 +652,7 @@ describe('Стройка дорог: базы и бригады', () => {
     expect(three.done).toBeGreaterThan(one.done * (1 + s2 + s3) * 0.93);
     expect(three.done).toBeLessThan(one.done * 3 * 0.8);
     const far = pace(1, CONSTRUCTION.reach * 1.5);
+    CONSTRUCTION.field = field;
     expect(far.done).toBeLessThan(one.done * 0.5);
     expect(far.advice.some((a) => a.kind === 'buildFar' && a.title === 'Бригада далеко от базы')).toBe(true);
     expect(one.advice.some((a) => a.kind === 'buildFar')).toBe(false);

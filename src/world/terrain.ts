@@ -1,7 +1,7 @@
 import { makeWave, Rng } from '../core/rng';
 import { add, closestOnSegment, dist, norm, scale, sub, Vec } from '../core/vec';
 import { BiomeId, biomeOf } from './biomes';
-import { areaFactor, DEFAULT_SETTINGS, MAP_SIZES, RELIEF, WATER, WorldSettings } from './settings';
+import { areaFactor, DEFAULT_SETTINGS, mapDims, RELIEF, WATER, WorldSettings } from './settings';
 
 /** Хэш целых координат клетки шума в [0, 1) — детерминированно по seed. */
 function hash2(ix: number, iy: number, seed: number): number {
@@ -314,8 +314,10 @@ export class Terrain {
   }
 
   constructor(rng: Rng, settings: WorldSettings = DEFAULT_SETTINGS) {
-    this.width = MAP_SIZES[settings.size].w;
-    this.height = MAP_SIZES[settings.size].h;
+    // Размер — по настройкам партии (их хранит сохранение): у старой без масштаба — прежний.
+    const dims = mapDims(settings);
+    this.width = dims.w;
+    this.height = dims.h;
     // Биом добавляет к выбранным воде и рельефу своё: в тайге больше озёр и леса, в степи ровнее и суше,
     // в горах выше. У средней полосы все множители 1 — мир по seed тот же, что и до биомов.
     const biome = biomeOf(settings);

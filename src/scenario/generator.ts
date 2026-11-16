@@ -7,6 +7,7 @@
 import { CONSTRUCTION, ECONOMY, MONTH_LENGTH, MONTH_SCALE, TERM_SCALE } from '../config';
 import { Rng } from '../core/rng';
 import { dist, type Vec } from '../core/vec';
+import { paxFare } from '../game/fare';
 import type { Game } from '../game/game';
 import { MODELS, newestLike } from '../game/transport';
 import { CARGO, CargoType, type IndustryType, TOWN_CARGO } from '../world/cargo';
@@ -213,7 +214,8 @@ function paxPlan(sc: Scenario, months: number, skip?: Set<number>): PaxPlan | nu
   const fleet = Math.max(2, START_FLEET[sc.state.settings.difficulty] - 2);
   const perMonth = perVehicleMonth(p.d, MODELS.bus.capacity, true);
   const can = Math.min(fleet * perMonth, paxPerMonth(p.a, p.b)) * work;
-  const income = Math.min(fleet * perMonth, paxPerMonth(p.a, p.b)) * CARGO.passengers.rate * 2 * (p.d / 100);
+  // Плата пассажиров — как в игре (game/fare.ts): билет и метр по пассажирскому тарифу, без надбавки за скорость.
+  const income = paxFare(Math.min(fleet * perMonth, paxPerMonth(p.a, p.b)), p.d, null, 1);
   return { a: p.a, b: p.b, d: p.d, amount: round10(can * diff.demand), fleet, cost: routeCost(p.d, fleet, 'bus'), net: income - fleet * MODELS.bus.running };
 }
 
@@ -316,7 +318,7 @@ function baseSpots(game: Game, freight: FreightPlan | null, pax: PaxPlan | null)
   return spots;
 }
 
-/** Радиус обслуживания базы — как в её карточке: «2,5 км». */
+/** Радиус обслуживания базы — как в её карточке: «3,75 км». */
 const baseRadiusText = (): string => `${String(CONSTRUCTION.serviceRadius / 1000).replace('.', ',')} км`;
 
 /** Есть место spot, из радиуса обслуживания базы в котором достаётся хотя бы одна точка каждой группы. */
