@@ -3,6 +3,7 @@ import { SIM_DT } from '../config';
 import { angleDiff, angleOf, dist, dot, sub, type Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
 import type { Town } from '../world/entities';
+import { formOf } from '../world/townForms';
 import { Game } from './game';
 import type { GarageHome, GarageSlot } from './garages';
 import { freshGame, runSeconds, withoutCitizens } from './testkit';
@@ -85,8 +86,8 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     const { town, home, slot } = garageHome(game, (h) => h.parks);
     const traffic = game.traffic;
     const target = slot.link.toNode!;
-    // Машины у гаражей вблизи: эта стоит у ворот.
-    const near = () => game.garageLooks(WORLD, true).filter((l) => dist(l.look.pos, home.spot) < home.d.width + 4);
+    // Машины у гаражей вблизи (рисунок самих гаражей — по их учёту, Town.garageAway): эта стоит у ворот.
+    const near = () => game.garages.looks(game.towns, WORLD, true).filter((l) => dist(l.look.pos, home.spot) < home.d.width + 4);
     expect(near().length).toBe(1);
     game.garages.leave(home, town, target, { from: home.b, to: home.b });
     const w = watch(game, home.b.id);
@@ -221,7 +222,7 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     const { town, home, slot } = garageHome(game, (h) => h.kind === 'pad');
     expect(home.parks).toBe(true);
     expect(home.d.garage).toBe(false);
-    const near = () => game.garageLooks(WORLD, true).filter((l) => dist(l.look.pos, home.spot) < 8);
+    const near = () => game.garages.looks(game.towns, WORLD, true).filter((l) => dist(l.look.pos, home.spot) < 8);
     // Дома: машина на площадке, носом от улицы, без ворот.
     expect(near().length).toBe(1);
     expect(near()[0].gate).toBeUndefined();
@@ -239,7 +240,9 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     expect(near().length).toBe(0);
   });
 
-  it('частота: на улице из 12 домов с машиной за 30 с — хотя бы один выезд или въезд (в среднем больше)', { timeout: 120_000 }, () => {
+  it('частота: на улице из 12 домов с машиной за минуту — хотя бы один выезд или въезд у гаража или площадки', { timeout: 120_000 }, () => {
+    // Поездки — по весу машин дома (game/carHomes.ts): у частных домов — пятая часть машин города (seed 7: ~520 из
+    // ~2600), у многоквартирных — остальные. На частный дом — выезд или въезд раз в ~3 минуты.
     const game = freshGame(7);
     let homes = 0;
     for (const t of game.towns)
@@ -253,57 +256,51 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     const T = 90;
     runSeconds(game, T, () => {
       for (const m of game.garages.moves) {
-        if (seen.has(m) || m.home.key < 0) continue;
+        const form = formOf(m.home.b);
+        if (seen.has(m) || m.home.b.kind !== 'res' || (form !== 'cottage' && form !== 'dacha')) continue;
         seen.add(m);
         events++;
       }
     });
-    // Выезд или въезд на дом — раз в столько секунд; на 12 домах за 30 с — столько.
+    // Выезд или въезд на дом — раз в столько секунд; на 12 домах за минуту — столько.
     const perHome = T / (events / homes);
-    const per30on12 = (30 * 12) / perHome;
-    // Хотя бы один (seed 7 — 1,14: у магазинов с проездом к рампе мест на стоянке меньше, больше машин жителей в
-    // потоке у их предела, и поездок из гаражей чуть меньше; до проезда было 1,25).
-    expect(per30on12).toBeGreaterThan(1);
+    const per60on12 = (60 * 12) / perHome;
+    expect(per60on12).toBeGreaterThan(0.6);
   });
 
   it('по seed: одна и та же партия — те же выезды и возвращения; сохранение несёт уехавшие машины', () => {
     const a = freshGame(7);
     let outs = 0;
     let ins = 0;
-    const seen = new Set<number>();
+    const seen = new Set<object>();
     let counted = true;
-    runSeconds(a, 100, () => {
+    // Возвращения — после срока у цели и дороги обратно: первые на своих местах ко второй минуте.
+    runSeconds(a, 150, () => {
       // Машина во дворе — ещё не в потоке и не в счёте машин жителей.
       counted &&= a.citizenCars + a.serviceCars === a.traffic.vehicles.size;
-      for (const t of a.towns)
-        for (const id of t.garageAway ?? []) {
-          const m = a.garages.moveOf(id);
-          if (m && !seen.has(id * 2 + (m.kind === 'in' ? 1 : 0))) {
-            seen.add(id * 2 + (m.kind === 'in' ? 1 : 0));
-            if (m.kind === 'in') ins++;
-            else outs++;
-          }
-        }
+      for (const m of a.garages.moves) {
+        if (seen.has(m) || m.home.b.kind !== 'res') continue;
+        seen.add(m);
+        if (m.kind === 'in') ins++;
+        else outs++;
+      }
     });
-    const state = (g: Game) => g.towns.map((t) => [t.garageTrips ?? 0, [...(t.garageAway ?? [])]]);
-    // За полторы минуты из гаражей выезжали и в них возвращались (первые возвращения — к концу первой минуты).
+    const state = (g: Game) => g.towns.map((t) => [t.carTrips ?? 0, JSON.stringify(t.cars ?? [])]);
+    // За две с половиной минуты со своих мест у домов выезжали и на них возвращались.
     expect(counted).toBe(true);
     expect(outs).toBeGreaterThan(5);
     expect(ins).toBeGreaterThan(0);
-    // Сохранение: уехавшие — те же, у ворот стоят ровно машины домов, чья машина дома.
+    // Сохранение: не дома — те же, на виду — ровно машины, что дома (в пути — после загрузки у цели).
     const save = JSON.stringify(a.toSave());
     const c = new Game(structuredClone(a.settings), JSON.parse(save));
     const d = new Game(structuredClone(a.settings), JSON.parse(save));
     expect(state(c)).toEqual(state(a));
     let want = 0;
     for (const t of c.towns) {
-      const out = new Set(t.garageAway ?? []);
-      for (const h of t.buildings) {
-        const home = h.kind === 'res' ? c.garages.homeOf(h) : null;
-        if (home?.parks && !out.has(h.id)) want++;
-      }
+      const out = new Set((t.cars ?? []).map((x) => x.car));
+      for (const car of c.carHomes.fleet(t).cars) if (car.place?.look && !out.has(car.key)) want++;
     }
-    expect(c.garages.looks(c.towns, WORLD, true).length).toBe(want);
+    expect(c.carHomes.looks(WORLD).length).toBe(want);
     // Две загрузки одного сохранения дальше идут одинаково.
     runSeconds(c, 20);
     runSeconds(d, 20);

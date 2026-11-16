@@ -20,11 +20,18 @@ describe('Поездка машины жителя и спецмашины', { t
       // Едут из жилого дома (или со стоянки магазина — домой) — туда, где цель маршрута; к месту у дома или на
       // стоянку — к концу связи у него (garages.homingOf), и на манёвре у места (выезжает со двора к стоянке, ждёт
       // просвета, чтобы свернуть налево, — garages.aheadOf).
-      expect(trip.from.kind === 'res' || (trip.to.kind === 'res' && !!game.shops.lotOf(trip.from))).toBe(true);
-      if (game.garages.homingOf(v.id) === undefined && !game.garages.aheadOf(v.id)) expect(v.targetNode).toBe(trip.to.anchor);
+      // Машина парка жителей (carHomes.ts), что едет от цели на своё место, — к дому места (у бокса — к гаражам).
+      const home = game.carHomes.carOfSim(v.id)?.home;
+      expect(home || trip.from.kind === 'res' || (trip.to.kind === 'res' && !!game.shops.lotOf(trip.from))).toBe(true);
+      if (!home && game.garages.homingOf(v.id) === undefined && !game.garages.aheadOf(v.id)) expect(v.targetNode).toBe(trip.to.anchor);
       expect(game.towns.some((t) => t.id === trip.from.townId)).toBe(true);
     }
-    const v = cars.find((c) => game.vehicleAhead(c.id) && game.traffic.routeLeft(c) > 100 && game.garages.homingOf(c.id) === undefined)!;
+    // Машина к цели, чей узел у самого дома (у крупного участка узел бывает и за сотню метров — у перекрёстка).
+    const nearAnchor = (c: (typeof cars)[number]) => {
+      const to = game.tripOf(c.id)!.to;
+      return dist(game.roads.net.node(to.anchor).pos, to.fp.center) < 90;
+    };
+    const v = cars.find((c) => game.vehicleAhead(c.id) && game.traffic.routeLeft(c) > 100 && game.garages.homingOf(c.id) === undefined && !game.carHomes.carOfSim(c.id)?.home && nearAnchor(c))!;
     expect(v).toBeDefined();
     const ahead = game.vehicleAhead(v.id)!;
     expect(ahead.pts[0]).toEqual(v.pos);

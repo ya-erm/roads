@@ -329,6 +329,8 @@ export class Controller {
   mainHover: { node: number; mainPair: number[] | null } | null = null;
   heatmap = false;
   speedmap = false;
+  /** Слой «🅿️»: занятость мест для машин по клеткам (game/parkingLayer.ts). */
+  parkmap = false;
   /** Точка маршрута под курсором на графике скорости в карточке линии — карта показывает её. */
   chartPoint: { pos: Vec; color: string; kmh: number } | null = null;
   /** Машина компании под курсором в списке открытого маршрута — карта подсвечивает её. */
@@ -1151,6 +1153,12 @@ export class Controller {
   toggleSpeedmap(): void {
     this.speedmap = !this.speedmap;
     if (this.speedmap) this.heatmap = false;
+    this.onChange();
+  }
+
+  /** Слой «🅿️»: где места для машин (дворы, гаражные боксы, стоянки магазинов) заняты, а где свободны. */
+  toggleParkmap(): void {
+    this.parkmap = !this.parkmap;
     this.onChange();
   }
 
@@ -3347,6 +3355,7 @@ export class Controller {
       label: null,
       heatmap: this.heatmap,
       speedmap: this.speedmap,
+      parkmap: this.parkmap,
       chartPoint: this.selectedLine !== null ? this.chartPoint : null,
       fleetHover: this.selectedLine !== null ? this.fleetHover : null,
       laneEdit: null,

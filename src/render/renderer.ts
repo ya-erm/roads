@@ -84,6 +84,7 @@ import { type Hiders, TreeCover } from './treeCover';
 import { carLayers, railSegLayer } from './trainLayer';
 import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
 import { BUY_DOT_PX } from '../input/buyDrop';
+import { parkingLevel, type ParkingCell, type ParkingLevel } from '../game/parkingLayer';
 
 /** Дорожки кварталов города в его записи кэша карты — под этим номером (id домов и парков — другие). */
 const WALKS_KEY = -1e9;
@@ -165,6 +166,8 @@ export interface ToolOverlay {
   heatmap: boolean;
   /** Карта скоростей: цвет дороги — разрешённая скорость, на поворотах — сниженная. */
   speedmap?: boolean;
+  /** Слой «🅿️»: занятость мест для машин по клеткам (game/parkingLayer.ts). */
+  parkmap?: boolean;
   /** Карта скоростей в «Выборе»: скорость дороги под курсором — подписью, как высота («90 км/ч», «80 / 90 км/ч»). */
   speedText?: string | null;
   /** Строим дорогу или путь: изолинии ярче, у курсора подпись высоты. */
@@ -804,6 +807,7 @@ export class Renderer {
     // Краны строящихся предприятий — высокие: поверх станций, домов, дорог и мостов, под подписями и плашками.
     this.drawSiteCranes(game, view);
     this.drawConstruction(game, view, o.crewTarget != null ? { type: 'project', id: o.crewTarget } : o.selection);
+    if (o.parkmap) this.drawParkmap(game, view);
     this.drawLabels(game, view);
     this.drawReceivers(game, view, o);
     this.drawOverlay(game, o);
@@ -2083,6 +2087,51 @@ export class Renderer {
    * Карта пробок: каждая связь графа движения — цветом загрузки (зелёный — свободно, красный — стоят). pass — слой
    * высоты, как у карты скоростей: мосты, эстакады и съезды на них — в своём слое, поверх полотна и поднятые с ним.
    */
+  /** Клетки слоя «🅿️» — считаются раз в секунду игры (game.parkingLayer обходит все места). */
+  private parkCells: { at: number; game: Game; cells: ParkingCell[] } | null = null;
+
+  /**
+   * Слой «🅿️» (game/parkingLayer.ts): клетки ≈ 100 м, где есть места для машин — дворы, гаражные боксы, стоянки
+   * магазинов, — цветом занятости: зелёный — меньше 70 %, жёлтый — 70–90 %, красный — больше 90 %. Посередине — значок
+   * «P» того же цвета, ближе — сколько мест занято из скольких.
+   */
+  private drawParkmap(game: Game, view: ReturnType<Renderer['view']>): void {
+    const now = Math.floor(game.time);
+    if (!this.parkCells || this.parkCells.game !== game || this.parkCells.at !== now) this.parkCells = { at: now, game, cells: game.parkingLayer() };
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const COLORS: Record<ParkingLevel, string> = { free: '46,170,90', busy: '230,180,40', full: '220,60,50' };
+    for (const c of this.parkCells.cells) {
+      if (c.x > view.x1 || c.x + c.size < view.x0 || c.y > view.y1 || c.y + c.size < view.y0) continue;
+      const rgb = COLORS[parkingLevel(c)];
+      ctx.fillStyle = `rgba(${rgb},0.26)`;
+      ctx.fillRect(c.x, c.y, c.size, c.size);
+      ctx.strokeStyle = `rgba(${rgb},0.75)`;
+      ctx.lineWidth = 1.5 / z;
+      ctx.strokeRect(c.x + 0.75 / z, c.y + 0.75 / z, c.size - 1.5 / z, c.size - 1.5 / z);
+      const cx = c.x + c.size / 2;
+      const cy = c.y + c.size / 2;
+      const r = 9 / z;
+      ctx.fillStyle = `rgb(${rgb})`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `bold ${12 / z}px system-ui, sans-serif`;
+      ctx.fillText('P', cx, cy + 0.5 / z);
+      if (c.size * z < 90) continue;
+      ctx.font = `${11 / z}px system-ui, sans-serif`;
+      ctx.lineWidth = 3 / z;
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+      const text = `${c.used}/${c.total}`;
+      ctx.strokeText(text, cx, cy + r + 8 / z);
+      ctx.fillStyle = '#333';
+      ctx.fillText(text, cx, cy + r + 8 / z);
+    }
+  }
+
   private drawHeatmap(game: Game, pass: number): void {
     const ctx = this.ctx;
     const g = game.roads.graph;

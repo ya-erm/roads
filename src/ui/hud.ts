@@ -599,6 +599,12 @@ export class Hud {
     heat.title = 'Карта загрузки дорог (H)';
     heat.dataset.action = 'heatmap';
     speed.appendChild(heat);
+    // Слой «🅿️»: занятость мест для машин по клеткам — значок и цвета в подсказке (без текста на кнопке).
+    const park = document.createElement('button');
+    park.textContent = '🅿️';
+    park.dataset.tip = 'Места для машин: дворы, гаражные боксы, стоянки магазинов. 🟩 занято меньше 70 % · 🟨 70–90 % · 🟥 больше 90 %';
+    park.dataset.action = 'parkmap';
+    speed.appendChild(park);
     const limits = document.createElement('button');
     limits.textContent = 'Скорости';
     limits.dataset.tip = 'Разрешённая скорость на дорогах и ж/д путях и где её снижают повороты (V)';
@@ -1204,6 +1210,9 @@ export class Hud {
         break;
       case 'speedmap':
         c.toggleSpeedmap();
+        break;
+      case 'parkmap':
+        c.toggleParkmap();
         break;
       case 'chains':
         this.toggleChains();
@@ -2059,6 +2068,7 @@ export class Hud {
     this.root.querySelectorAll<HTMLElement>('[data-action="speed"]').forEach((b) => b.classList.toggle('active', Number(b.dataset.v) === g.speed));
     this.q('[data-action="heatmap"]').classList.toggle('active', c.heatmap);
     this.q('[data-action="speedmap"]').classList.toggle('active', c.speedmap);
+    this.q('[data-action="parkmap"]').classList.toggle('active', c.parkmap);
     this.q('[data-action="chains"]').classList.toggle('active', !this.q('[data-chains]').classList.contains('hidden'));
     this.syncPause();
     this.renderOptions();

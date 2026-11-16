@@ -49,6 +49,28 @@ export interface ShopHost {
   canDrive(): boolean;
   /** У дома грузовик на манёвре во дворе (game/docks.ts): двор общий — машинам покупателей ждать. */
   yardBusy?(b: number): boolean;
+  /**
+   * Машина парка жителей (ShopCar.car) уезжает со стоянки магазина from — на своё место (game/carHomes.ts): к какому
+   * месту, путь к нему (slot), дом машины и что сделать, когда встала в поток и когда тронулась по полосе. Нет своего
+   * места или к нему не подъехать — null: едет к случайному дому, как прочие.
+   */
+  backHome?(town: Town, car: ShopCar, from: TownBuilding): FleetBack | null;
+}
+
+/** Куда машине парка жителей со стоянки магазина (ShopHost.backHome). */
+export interface FleetBack {
+  /** Куда — для карточки машины: дом места (у бокса — гаражи). */
+  home: TownBuilding;
+  to: CarSpot;
+  slot: GarageSlot;
+  joined(sim: Vehicle): void;
+  then(sim: Vehicle): void;
+}
+
+/** Машина парка жителей едет на стоянку: её ключ и что сделать, когда встала на место (ключ места). */
+export interface FleetVisit {
+  car: number;
+  parked(spot: number): void;
 }
 
 /** Стоянка магазина: места (в мире) и их группы (соседи — в одной группе через одно). */
@@ -183,8 +205,11 @@ export class ShopParking {
     return { town, lot, planned: mid.s, slot: mid.slot!, n };
   }
 
-  /** Машина в потоке sim едет на стоянку visit (маршрут — к связи у неё, Garages.routeHome). */
-  start(sim: Vehicle, v: ShopVisit): void {
+  /**
+   * Машина в потоке sim едет на стоянку visit (маршрут — к связи у неё, Garages.routeHome); fleet — это машина парка
+   * жителей (уезжая, поедет на своё место).
+   */
+  start(sim: Vehicle, v: ShopVisit, fleet?: FleetVisit): void {
     const { town, lot } = v;
     const stay = stayOf(hash(visitSeed(this.host.seed, town.id, v.n), 2));
     const color = sim.color;
@@ -192,7 +217,11 @@ export class ShopParking {
       arrived: (spot) => {
         const k = lot.spots.indexOf(spot);
         // Стоянку перестроили, пока заезжала, — машина «уехала» незаметно.
-        if (k >= 0 && this.lots.get(lot.b.id) === lot) (town.shopParked ??= []).push({ b: lot.b.id, k, color, until: this.host.time + stay });
+        if (k < 0 || this.lots.get(lot.b.id) !== lot) return;
+        const car: ShopCar = { b: lot.b.id, k, color, until: this.host.time + stay };
+        if (fleet) car.car = fleet.car;
+        (town.shopParked ??= []).push(car);
+        fleet?.parked(spot.key);
       },
     };
     // Какое место занять, решает Garages у стоянки (ближнее свободное, до которого успеть остановиться).
@@ -226,6 +255,27 @@ export class ShopParking {
         }
         const spot = lot.spots[car.k];
         if (this.garages.isBusy(spot.key)) continue;
+        // Машина парка жителей — на своё место (game/carHomes.ts), как машина со двора едет к стоянке.
+        const back = car.car !== undefined ? (this.host.backHome?.(town, car, b) ?? null) : null;
+        if (back) {
+          if (!this.garages.slotOf(spot) || this.neighbourBusy(lot, car.k) || this.host.yardBusy?.(lot.b.id) || !this.host.canDrive()) {
+            car.until = now + SHOP_PARKING.retry;
+            continue;
+          }
+          const hooks: MoveHooks = {
+            joined: (sim) => {
+              const at = town.shopParked?.indexOf(car) ?? -1;
+              if (at >= 0) town.shopParked!.splice(at, 1);
+              back.joined(sim);
+            },
+            stayed: () => {
+              car.until = this.host.time + SHOP_PARKING.retry;
+            },
+          };
+          const trip = { from: b, to: back.home };
+          this.garages.leave(spot, town, back.slot.link.toNode!, trip, { color: car.color, hooks, endLink: back.slot.link.id, to: back.to, then: back.then });
+          continue;
+        }
         const homes = town.buildings.filter((x) => x.kind === 'res');
         const n = (town.shopVisits = (town.shopVisits ?? 0) + 1);
         const home = homes.length ? homes[Math.floor(hash(visitSeed(this.host.seed, town.id, n), 3) * homes.length)] : null;

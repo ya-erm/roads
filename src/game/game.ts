@@ -96,6 +96,8 @@ import { ShopParking, type ShopHost } from './shopParking';
 import { Docks, type DockHost } from './docks';
 import { acceptAt, legacyCargo, maxTruck, pickReceivers, RETAIL, type Receiver, receiverOf, stockFill, unloadTime } from '../world/retail';
 import { CAR_SIZE } from '../world/houseAccess';
+import { CarHomes, type CarHomesHost } from './carHomes';
+import { parkingCells, type ParkingCell } from './parkingLayer';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises } from './enterprises';
 import { isActive } from '../world/enterprise';
@@ -892,6 +894,11 @@ export class Game implements BuildContext {
   readonly shops = new ShopParking(this.shopHost(), this.garages);
   /** Дворы получателей грузов (src/game/docks.ts): грузовик заезжает к рампе магазина, выгружается и выезжает. */
   readonly docks = new Docks(this.dockHost());
+  /**
+   * Парк машин жителей (src/game/carHomes.ts): у каждой машины своё место ночёвки — гараж, площадка, двор, бокс;
+   * поездки начинаются с него и кончаются на нём.
+   */
+  readonly carHomes = new CarHomes(this.carHomesHost(), this.garages);
   /** Предприятия строит игрок (режим «Строит игрок», src/game/enterprises.ts): месторождения, постройка, рабочие, вред. */
   readonly enterprises: Enterprises;
 
@@ -1258,6 +1265,8 @@ export class Game implements BuildContext {
     // Восстановленный счёт старой партии мог уже дойти до порога — модель открывается сразу, с заметкой.
     this.modelsReached(this.unlocks.reached());
     this.journal.add('load', { date: this.dateLabel, money: this.money, lines: this.lines.size, fleet: this.fleet.size });
+    // Парк машин жителей: старое сохранение (прежний учёт гаражей) — переносится, остальные машины дома.
+    this.carHomes.load(this.towns);
     // Старые сохранения (без машин на стоянках магазинов) — машины на стоянках, как в начале партии.
     this.shops.seed(this.towns);
     // Получатели грузов: у партии с ними — как сохранены (у города без них — подбор заново); станции у получателей —
@@ -4495,6 +4504,8 @@ export class Game implements BuildContext {
     this.garages.step(dt);
     this.shops.step(dt, this.towns);
     this.docks.step(dt);
+    // Парк машин жителей: стоящие — только данные, в такт — куча отъездов (у кого срок у цели вышел).
+    this.carHomes.step();
     this.gatherCrews();
     this.rail.step(dt);
     this.updateFleet(dt);
@@ -6326,6 +6337,7 @@ export class Game implements BuildContext {
     if (owner?.type === 'citizen') {
       this.citizenCars--;
       this.garages.forget(sim.id);
+      this.carHomes.arrived(sim.id);
       return;
     }
     if (owner?.type === 'service') {
@@ -6394,6 +6406,7 @@ export class Game implements BuildContext {
     if (owner?.type === 'citizen') {
       this.citizenCars--;
       this.garages.forget(sim.id);
+      this.carHomes.arrived(sim.id);
       return;
     }
     if (owner?.type === 'service') {
@@ -7587,7 +7600,12 @@ export class Game implements BuildContext {
   private spawnCitizenTrip(town: Town): void {
     const homes = town.buildings.filter((b) => b.kind === 'res');
     if (!homes.length) return;
-    const origin = this.rng.pick(homes);
+    // Одно число общего генератора — дом с равным весом, как прежде (от него, как прежде, — цель и сколько ещё чисел
+    // вытянуть: генератор тянет ровно те же числа, рост городов и мир по seed — те же), и дом поездки по весу числа
+    // машин (CarHomes.pickHome).
+    const u = this.rng.next();
+    const first = homes[Math.floor(u * homes.length)];
+    const origin = this.carHomes.pickHome(town, homes, u);
     let dest: TownBuilding | undefined;
     let route: number[] | null = null;
     if (this.towns.length > 1 && this.rng.chance(TOWN_TRAFFIC.intercityShare)) {
@@ -7599,43 +7617,51 @@ export class Game implements BuildContext {
       const other = this.rng.pick(others);
       const targets = other.buildings.filter((b) => b.kind !== 'landmark');
       dest = this.rng.pick(targets);
-      route = this.roads.route(origin.anchor, dest.anchor);
+      route = this.roads.route(first.anchor, dest.anchor);
     }
     if (!route) {
       const jobs = town.buildings.filter((b) => b.kind === 'com');
       dest = this.rng.pick(jobs.length ? jobs : homes);
-      if (dest.anchor === origin.anchor) return;
-      route = this.roads.route(origin.anchor, dest.anchor);
+      if (dest.anchor === first.anchor) return;
+      route = this.roads.route(first.anchor, dest.anchor);
     }
     if (!route || !dest) return;
     const color = this.rng.pick(CAR_COLORS);
-    // Машины частных домов (garages.ts) — по хешу, общий генератор не трогают: выезд из гаража или с площадки дома
-    // (origin или другого дома с машиной) или возвращение домой машины, что уехала раньше (едет от узла origin).
-    const garage = this.garages.trip(town, origin);
+    // Дальше — без общего генератора. Парк машин жителей (carHomes.ts) — по хешу: выезд машины дома со своего места
+    // (гараж, площадка, двор, бокс) или возвращение на своё место машины, отстоявшей у чужой цели.
+    if (origin !== first) {
+      if (dest.anchor === origin.anchor) return;
+      route = null;
+    }
+    const fleet = this.carHomes.trip(town, origin);
     // Стоянка магазина (shopParking.ts) — тоже по хешу: часть поездок к магазину кончается на его стоянке.
     const to = dest;
     const destTown = to.townId === town.id ? town : this.towns.find((t) => t.id === to.townId);
-    const visit = destTown && garage?.kind !== 'back' ? this.shops.visit(destTown, to) : null;
-    if (garage?.kind === 'out') {
+    const visit = destTown && fleet?.kind !== 'back' ? this.shops.visit(destTown, to) : null;
+    if (fleet?.kind === 'out') {
       // Машиной в потоке (и в счёте citizenCars) станет, когда встанет на полосу (GarageHost.own); едет к магазину —
-      // с полосы у дома сразу к стоянке (поворотом направо или налево — что ближе, решится на полосе).
-      const trip = { from: garage.home.b, to: dest };
-      if (visit)
-        this.garages.leave(garage.home, town, visit.slot.link.toNode!, trip, { endLink: visit.slot.link.id, to: visit.planned, then: (sim) => this.shops.start(sim, visit) });
-      else this.garages.leave(garage.home, town, dest.anchor, trip);
+      // с полосы у места сразу к стоянке (поворотом направо или налево — что ближе, решится на полосе).
+      if (visit) {
+        const then = (sim: Vehicle) => this.shops.start(sim, visit, this.carHomes.visit(fleet.car, fleet.town));
+        this.carHomes.depart(fleet, dest, { target: visit.slot.link.toNode!, endLink: visit.slot.link.id, to: visit.planned, then });
+      } else this.carHomes.depart(fleet, dest);
       return;
     }
-    // К дому и к стоянке — с поворотом направо или налево через встречку, что ближе (Garages.wayHome).
-    if (garage?.kind === 'back') {
-      const way = this.garages.wayHome(origin.anchor, garage.home);
-      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color: garage.home.color, targetNode: way.slot.link.toNode!, route: way.route });
+    // К своему месту и к стоянке — с поворотом направо или налево через встречку, что ближе (Garages.wayHome).
+    if (fleet?.kind === 'back') {
+      const from = fleet.from ?? origin;
+      const way = this.garages.wayHome(from.anchor, fleet.car.place!.spot);
+      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color: fleet.car.color, targetNode: way.slot.link.toNode!, route: way.route });
       if (sim) {
-        this.owners.set(sim.id, { type: 'citizen', trip: { from: origin, to: garage.home.b } });
-        this.garages.homeward(sim, garage.home, town, way.slot);
+        // Куда — дом места (у бокса — гаражи): туда и ведёт линия маршрута.
+        this.owners.set(sim.id, { type: 'citizen', trip: { from, to: fleet.car.place!.at } });
+        this.carHomes.homeward(sim, fleet, way.slot);
         this.citizenCars++;
         return;
       }
     }
+    route ??= this.roads.route(origin.anchor, dest.anchor);
+    if (!route) return;
     if (visit) {
       const way = this.garages.wayHome(origin.anchor, visit.planned);
       const sim = way && this.traffic.spawn({ ...CAR_SPEC, color, targetNode: way.slot.link.toNode!, route: way.route });
@@ -7668,6 +7694,25 @@ export class Game implements BuildContext {
       colors: CAR_COLORS,
       canDrive: () => this.citizenCars < TOWN_TRAFFIC.maxCars,
       yardBusy: (b) => this.docks.yardBusy(b),
+      backHome: (_town, car) => this.carHomes.backHome(car),
+    };
+  }
+
+  /** Что парку машин жителей (carHomes.ts) нужно от игры. */
+  private carHomesHost(): CarHomesHost {
+    const game = this;
+    return {
+      get seed() {
+        return game.seed;
+      },
+      get time() {
+        return game.time;
+      },
+      get towns() {
+        return game.towns;
+      },
+      car: CAR_SPEC,
+      colors: CAR_COLORS,
     };
   }
 
@@ -7696,18 +7741,36 @@ export class Game implements BuildContext {
       gone: (sim) => {
         this.owners.delete(sim.id);
         this.citizenCars--;
+        this.carHomes.gone(sim.id);
       },
     };
   }
 
   /**
-   * Машины у гаражей и площадок частных домов и на стоянках магазинов в кадре: стоящие (вблизи, parked) и на манёвре
-   * во дворе (garages.ts, shopParking.ts).
+   * Машины у гаражей и площадок частных домов, во дворах и на стоянках магазинов в кадре: стоящие дома и на местах
+   * (вблизи, parked — carHomes.ts, shopParking.ts) и на манёвре во дворе (garages.ts).
    */
   garageLooks(box: [number, number, number, number], parked: boolean): GarageLook[] {
-    const out = this.garages.looks(this.towns, box, parked);
-    if (parked) out.push(...this.shops.looks(this.towns, box, parked));
+    const out = this.garages.looks(this.towns, box, false);
+    if (parked) out.push(...this.carHomes.looks(box), ...this.shops.looks(this.towns, box, parked));
     return out;
+  }
+
+  /**
+   * Слой «🅿️»: занятость мест — дворов, гаражных боксов и стоянок магазинов — по клеткам (parkingLayer.ts): сколько
+   * мест и сколько занято.
+   */
+  parkingLayer(): ParkingCell[] {
+    const pts = this.carHomes.occupancy();
+    for (const town of this.towns) {
+      for (const b of town.buildings) {
+        const lot = b.kind === 'com' ? this.shops.lotOf(b) : null;
+        if (!lot) continue;
+        const used = lot.spots.filter((s, k) => this.garages.isBusy(s.key) || town.shopParked?.some((c) => c.b === b.id && c.k === k)).length;
+        pts.push({ pos: b.fp.center, total: lot.spots.length, used });
+      }
+    }
+    return parkingCells(pts);
   }
 
   /** Откуда и куда едет машина жителя или спецмашина (здания и их города); не знаем (после загрузки, чужая) — null. */
