@@ -3333,6 +3333,21 @@ button.small.with-ic {
   color: #d97a00;
 }
 
+/* Название в одну строку: «II»/«III» не отрываются; длинное уменьшается по ширине карточки, а не вылезает. */
+.buy-card {
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.buy-card > span {
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.buy-card > span.buy-name-long {
+  font-size: clamp(8px, calc(100cqw / 10.8), 12px);
+}
+
 .buy-card .model-art {
   max-width: 100%;
   height: auto;

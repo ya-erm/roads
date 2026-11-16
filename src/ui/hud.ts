@@ -395,6 +395,9 @@ function supplyChart(months: { label: string; got: number; carried?: number; nee
   return `<svg class="fin-chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${defs}
     <line x1="${L}" x2="${W}" y1="${base}" y2="${base}" stroke="#dfe4ea"/>${bars}${norm}${label}</svg>`;
 }
+/** Длинное название модели в карточке покупки: в одну строку, шрифт подгоняется под ширину карточки. */
+const buyNameCls = (name: string): string => (name.length > 10 ? ' class="buy-name-long"' : '');
+
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
 /** Скачивает текст файлом name (как «Сохранить в файл» у партии). */
@@ -3116,7 +3119,7 @@ export class Hud {
           (m) => `<button class="buy-card${gap ? ' no-road' : ''}" data-action="buy" data-line="${line.id}" data-model="${m}" draggable="true" data-drag-buy="${m}" data-tip="${
             gap ? `⚠ ${esc(gap)} — купленная машина будет ждать на станции · ` : ''
           }Вместимость ${MODELS[m].capacity} · содержание ${money(MODELS[m].running)}/мес · перетащите на остановку ▶ — выедет с неё">
-            ${gap ? '<i class="buy-warn">⚠</i>' : ''}${modelSvg(m, line.color, undefined, undefined, tank)}<span>+ ${modelName(m, tank)}</span><small>${MODELS[m].capacity} мест · ${money(
+            ${gap ? '<i class="buy-warn">⚠</i>' : ''}${modelSvg(m, line.color, undefined, undefined, tank)}<span${buyNameCls(modelName(m, tank))}>+ ${modelName(m, tank)}</span><small>${MODELS[m].capacity} мест · ${money(
               MODELS[m].price,
             )}</small></button>`,
         )
@@ -3151,7 +3154,7 @@ export class Hud {
     const tip = g.scenario?.running ? `Откроется на этапе ${'ABC'[m.tier - 1]} сценария` : `Появится в продаже в ${g.modelYear(next)} году`;
     // Карточка последняя в ряду, у края панели — подсказка выровнена по правому краю.
     return `<div class="buy-card locked" data-tip-end data-tip="${tip} · вместимость ${m.capacity} · ${money(m.price)}">
-      ${modelSvg(next, '#aab3bc', undefined, undefined, tank)}<span>🔒 ${modelName(next, tank)}</span><small>${when}</small></div>`;
+      ${modelSvg(next, '#aab3bc', undefined, undefined, tank)}<span${buyNameCls(modelName(next, tank))}>🔒 ${modelName(next, tank)}</span><small>${when}</small></div>`;
   }
 
   /**
