@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TOWN_SCALE } from '../config';
 import { Rng } from '../core/rng';
 import { dist, type Vec } from '../core/vec';
 import { Game } from '../game/game';
@@ -88,7 +89,7 @@ describe('Города в мире — не круги', { timeout: 60_000 }, ()
         const d = Math.sqrt((tr * tr) / 4 - (xx * yy - xy * xy));
         ratios.push(Math.sqrt((tr / 2 + d) / (tr / 2 - d)));
         // Дома — у своего города, не дальше выездов.
-        for (const b of t.buildings) expect(dist(b.fp.center, t.center)).toBeLessThan(1400);
+        for (const b of t.buildings) expect(dist(b.fp.center, t.center)).toBeLessThan(1400 * TOWN_SCALE);
       }
     }
     expect(ratios.length).toBeGreaterThan(0);

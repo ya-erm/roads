@@ -2,6 +2,7 @@
  * Правила места под предприятие при генерации мира: рельеф, берег, сколько предприятий вида в биоме. Общие для
  * готовых предприятий (worldgen.ts) и месторождений режима «Строит игрок» (deposits.ts).
  */
+import type { Rng } from '../core/rng';
 import type { Vec } from '../core/vec';
 import { industryShare } from './biomes';
 import type { IndustryKind } from './cargo';
@@ -29,6 +30,37 @@ export function shoreFits(terrain: Terrain, fp: Footprint, attempt: number, near
   if (attempt >= SHORE_ATTEMPTS) return true;
   if (kind === 'fishery') return terrain.isWater(fp.center, footprintRadius(fp) + SHORE_NEAR);
   return !nearWater.has(kind) || terrain.isWater(fp.center, footprintRadius(fp) + SHORE_FAR);
+}
+
+/**
+ * Место рыбакам: каждая вторая попытка, пока берег обязателен (shoreFits), — не наугад по карте, а рядом со случайной
+ * точкой реки или берега озера: в стороне от воды на радиус участка r и ещё 20–100 м. Города крупнее (TOWN_SCALE) и
+ * стоят на реках — наугад свободный берег находился редко, рыбаки вставали в поле. Остальные попытки и сухая карта —
+ * null: место наугад, как прежде.
+ */
+export function shoreSpot(terrain: Terrain, rng: Rng, kind: IndustryKind, attempt: number, r: number): Vec | null {
+  if (kind !== 'fishery' || attempt >= SHORE_ATTEMPTS || attempt % 2 === 0) return null;
+  const { rivers, lakes } = terrain;
+  if (!rivers.length && !lakes.length) return null;
+  const k = rng.int(0, rivers.length + lakes.length);
+  let p: Vec;
+  let a: number;
+  let off: number;
+  if (k < rivers.length) {
+    const river = rivers[k];
+    p = river.points[rng.int(0, river.points.length)];
+    a = rng.range(0, Math.PI * 2);
+    off = river.width / 2;
+  } else {
+    // От края озера — наружу.
+    const lake = lakes[k - rivers.length];
+    a = rng.range(0, Math.PI * 2);
+    p = { x: lake.center.x + Math.cos(a) * lake.radius, y: lake.center.y + Math.sin(a) * lake.radius };
+    off = 0;
+  }
+  const d = off + r + rng.range(20, 100);
+  const clampTo = (v: number, size: number) => Math.max(300, Math.min(size - 300, v));
+  return { x: clampTo(p.x + Math.cos(a) * d, terrain.width), y: clampTo(p.y + Math.sin(a) * d, terrain.height) };
 }
 
 /** Сколько предприятий вида поставить: по множителю биома (0 — ни одного), но если вид есть — хотя бы одно. */

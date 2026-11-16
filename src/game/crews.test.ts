@@ -215,7 +215,8 @@ describe('Бригады: только по дорогам и вдоль стр�
 });
 
 describe('Бригады в игре: нет подъезда', () => {
-  const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
+  // Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
+  const WORLD: WorldSettings = { seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
   /** Первая база — у улиц самого большого города. */
   function townBase(game: Game): void {

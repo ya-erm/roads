@@ -1,3 +1,4 @@
+import { TOWN_SCALE } from '../config';
 import { hash } from '../core/math';
 import type { Vec } from '../core/vec';
 import type { Town, TownBuilding } from '../world/entities';
@@ -103,8 +104,8 @@ export function townWalks(town: Town, curb: (p: Vec) => number): TownWalks | nul
   // Дом второго ряда выходит к улице дорожкой в обход переднего (ниже), не напрямую.
   for (const b of town.buildings) if (b.kind !== 'landmark' && !b.rear) accessOf(b, reach, fronts, drives);
   const near = (a: TownBuilding, b: TownBuilding, d: number) => Math.abs(a.fp.center.x - b.fp.center.x) < d && Math.abs(a.fp.center.y - b.fp.center.y) < d;
-  // Соседи — по клеткам сетки CELL м: не каждый дом с каждым.
-  const CELL = 70;
+  // Соседи — по клеткам сетки CELL м (в масштабе участков, TOWN_SCALE): не каждый дом с каждым.
+  const CELL = 70 * TOWN_SCALE;
   const grid = new Map<string, TownBuilding[]>();
   const cellOf = (x: number, y: number) => `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`;
   for (const b of list) {

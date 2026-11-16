@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TOWN_SCALE } from '../config';
 import { RoadTools } from '../input/roadtools';
 import { oneWay } from '../lanes/model';
 import type { RoadSpec } from '../world/roadTypes';
@@ -13,12 +14,13 @@ describe('Перестройка дороги', () => {
     const game = freshGame(7);
     game.money = 5_000_000;
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
-    // Улица города с домами вдоль неё.
+    // Улица города с домами вдоль неё (расстояния — в масштабе участков, TOWN_SCALE).
+    const S = TOWN_SCALE;
     const seg = townStreets(game, town.id).find(
-      (s) => s.cls === 'street' && s.length > 120 && town.buildings.filter((b) => s.lut.closest(b.fp.center).d < 30).length >= 3,
+      (s) => s.cls === 'street' && s.length > 120 * S && town.buildings.filter((b) => s.lut.closest(b.fp.center).d < 30 * S).length >= 3,
     )!;
     expect(seg).toBeDefined();
-    const near = town.buildings.filter((b) => seg.lut.closest(b.fp.center).d < 40 && b.kind !== 'landmark');
+    const near = town.buildings.filter((b) => seg.lut.closest(b.fp.center).d < 40 * S && b.kind !== 'landmark');
     const houses = town.buildings.length;
     const tools = new RoadTools(() => game);
     expect(tools.upgrade(seg.lut.pointAt(seg.length / 2), AVENUE, 4)).toBeNull();

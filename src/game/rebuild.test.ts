@@ -16,7 +16,8 @@ import { rebuildCost, rebuildDiff } from './rebuild';
 import { fullCorridorCost } from './roadbuild';
 import { anchorOf, AVENUE, clearStrip, HIGHWAY, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
-const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' };
+// Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
+const WORLD: WorldSettings = { seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' };
 const K = CONSTRUCTION.rebuild;
 
 function nodeAt(game: Game, p: Vec): number | null {

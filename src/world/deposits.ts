@@ -10,7 +10,7 @@ import { type CargoType, INDUSTRY_LIST, type IndustryType } from './cargo';
 import { buildableKinds, depositFootprint, depositRichness, harmClass, isRaw, obtainable, townEdge, townFor, townGap, townSlots } from './enterprise';
 import type { Deposit, Industry, Town } from './entities';
 import type { WorldProfile, WorldSettings } from './settings';
-import { industryCount, MINING_KINDS, shoreFits, terrainFits } from './sites';
+import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
 import { type Footprint, footprintRadius, footprintsOverlap } from './spatial';
 import { clearOfRoads, type WorldContext } from './worldgen';
 
@@ -59,7 +59,7 @@ export function placeDeposits(ctx: WorldContext, towns: Town[], density: number,
           const r = rng.range(townEdge(hub) + 300, townEdge(hub) + 300 + hubSpread * (1 + attempt / 60));
           center = { x: hub.center.x + Math.cos(a) * r, y: hub.center.y + Math.sin(a) * r };
           if (center.x < 300 || center.y < 300 || center.x > terrain.width - 300 || center.y > terrain.height - 300) continue;
-        }
+        } else center = shoreSpot(terrain, rng, info.kind, attempt, Math.hypot(info.w, info.h) / 2) ?? center;
         const fp: Footprint = { center, w: info.w, h: info.h, angle: rng.range(-0.6, 0.6) };
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
         if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;

@@ -392,21 +392,24 @@ describe('Автовокзал у края улицы (с кармашком и�
     expect(game.stationPlan({ x: x + 150, y: y + 20 }, 30, 'road', 0, 2, undefined, false, CURB).reason).toBe('Рядом уже есть станция');
   });
 
-  it('в городе: встаёт и в кварталах 75–90 м, где дублёру мало места; на длинных — с кармашком', () => {
+  it('в городе: встаёт и в коротких кварталах, где дублёру мало места; на длинных — с кармашком', () => {
     const tally = { short: 0, shortOk: 0, long: 0, pocket: 0, reasons: new Map<string, number>() };
-    for (const game of SHORT_BLOCK_SEEDS.map(cityGame)) {
+    // Коротких кварталов у крупной застройки меньше — миров больше.
+    for (const game of [...SHORT_BLOCK_SEEDS, 5, 7, 8, 9].map(cityGame)) {
     const net = game.roads.net;
     for (const c of net.corridors.values()) {
       if (c.cls !== 'street' || net.node(c.a).kind !== 'junction' || net.node(c.b).kind !== 'junction' || c.length < 75) continue;
       const pt = c.lut.pointAt(c.length / 2);
       const t = c.lut.tangentAt(c.length / 2);
       for (const side of [1, -1]) {
-        const plan = game.stationPlan({ x: pt.x - t.y * 18 * side, y: pt.y + t.x * 18 * side }, 30, 'road', 0, 2, undefined, false, CURB);
-        if (c.length <= 90) {
+        const at = { x: pt.x - t.y * 18 * side, y: pt.y + t.x * 18 * side };
+        const plan = game.stationPlan(at, 30, 'road', 0, 2, undefined, false, CURB);
+        // Короткий квартал — где дублёру мало места вдоль улицы (кварталы крупной застройки, TOWN_SCALE, — от ~96 м).
+        const dub = game.stationPlan(at, 30, 'road', 0, 2, undefined, false, { side: true });
+        if (c.length < 110 && dub.reason?.startsWith('Мало места вдоль улицы')) {
           tally.short++;
-          if (plan.ok) tally.shortOk++;
           // Дублёру здесь мало места — а у края улицы встаёт без кармашка.
-          expect(game.stationPlan({ x: pt.x - t.y * 18 * side, y: pt.y + t.x * 18 * side }, 30, 'road', 0, 2, undefined, false, { side: true }).ok).toBe(false);
+          if (plan.ok) tally.shortOk++;
         } else if (c.length >= 110) {
           tally.long++;
           if (plan.ok && plan.curb?.pocket) tally.pocket++;

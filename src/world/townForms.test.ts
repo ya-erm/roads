@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TOWN_SCALE } from '../config';
 import type { Vec } from '../core/vec';
 import { freshGame } from '../game/testkit';
 import { Game, type SaveData } from '../game/game';
@@ -28,13 +29,17 @@ import {
 import { recountPopulation } from './worldgen';
 
 let nextId = 100;
+/** Размеры участков в тесте — в прежних метрах, умноженных на масштаб застройки (config.TOWN_SCALE). */
+const S = TOWN_SCALE;
+/** Участок w × h (прежние метры) с серединой в p. */
+const lot = (p: Vec, w: number, h: number) => ({ center: p, w: w * S, h: h * S, angle: 0 });
 
 function house(x: number, y: number, o: Partial<TownBuilding> = {}): TownBuilding {
   return {
     type: 'building',
     id: nextId++,
     townId: 1,
-    fp: { center: { x, y }, w: 20, h: 18, angle: 0 },
+    fp: lot({ x, y }, 20, 18),
     kind: 'res',
     floors: 2,
     anchor: 0,
@@ -104,7 +109,7 @@ describe('Типы застройки по месту в городе', () => {
   it('в городе: у центра — старый центр, на краю — частный сектор, гаражи и склады; ратуша', () => {
     const t = town(4000);
     expect(placeForm(t, at({ x: 60, y: 0 }))).toBe('townhouse');
-    expect(placeForm(t, at({ x: 60, y: 0 }, { fp: { center: { x: 60, y: 0 }, w: 36, h: 30, angle: 0 }, floors: 4 }))).toBe('courtyard');
+    expect(placeForm(t, at({ x: 60, y: 0 }, { fp: lot({ x: 60, y: 0 }, 36, 30), floors: 4 }))).toBe('courtyard');
     expect(placeForm(t, at({ x: 300, y: 0 }))).toBe('cottage');
     expect(['garages', 'warehouse']).toContain(placeForm(t, at({ x: 330, y: 0 }, { kind: 'com' })));
     expect(placeForm(t, at({ x: 0, y: 0 }, { kind: 'landmark' }))).toBe('hall');
@@ -120,7 +125,7 @@ describe('Типы застройки по месту в городе', () => {
     const p = { x: Math.cos(0.4) * 250, y: Math.sin(0.4) * 250 };
     expect(inDistrict(district, p)).toBe(true);
     expect(inDistrict(district, { x: 0, y: 0 })).toBe(false);
-    expect(placeForm(t, at(p, { fp: { center: p, w: 36, h: 30, angle: 0 }, floors: 4 }))).toBe('slab');
+    expect(placeForm(t, at(p, { fp: lot(p, 36, 30), floors: 4 }))).toBe('slab');
     expect(placeForm(t, at(p, { kind: 'com' }))).toBe('shop');
     // У села рамка нового района не в счёт.
     expect(placeForm(town(1500, [], { district, style: 'linear' }), at(p))).toBe('cottage');
@@ -129,8 +134,7 @@ describe('Типы застройки по месту в городе', () => {
   it('без выбранного типа — по виду и размеру (тестовые сцены)', () => {
     expect(formOf(house(0, 0))).toBe('cottage');
     expect(formOf(house(0, 0, { floors: 3 }))).toBe('townhouse');
-    expect(formOf(house(0, 0, { fp: { center: { x: 0, y: 0 }, w: 36, h: 30, angle: 0 } }))).toBe('courtyard');
-    expect(formOf(house(0, 0, { kind: 'com' }))).toBe('shop');
+    expect(formOf(house(0, 0, { fp: lot({ x: 0, y: 0 }, 36, 30) }))).toBe('courtyard');    expect(formOf(house(0, 0, { kind: 'com' }))).toBe('shop');
     expect(formOf(house(0, 0, { kind: 'landmark' }))).toBe('hall');
     expect(formOf(house(0, 0, { form: 'school' }))).toBe('school');
   });
@@ -163,12 +167,14 @@ describe('Общественные здания', () => {
 });
 
 describe('Жители по домам', () => {
-  /** Село: улица вдоль оси x, дома по обе стороны (участки 26 × 24), у каждого — 1–3 этажа генерации. */
+  /** Село: улица вдоль оси x, дома по обе стороны (участки 26 × 24 прежних метров), у каждого — 1–3 этажа генерации. */
   function village(n: number): Town {
     const list: TownBuilding[] = [];
-    for (let i = 0; i < n; i++)
-      list.push(house(-n * 15 + i * 30, i % 2 ? 22 : -22, { floors: 1 + (i % 3), face: i % 2 ? -1 : 1, fp: { center: { x: -n * 15 + i * 30, y: i % 2 ? 22 : -22 }, w: 26, h: 24, angle: 0 } }));
-    const t = town(0, list, { style: 'linear', radius: n * 15, tier: 'village' });
+    for (let i = 0; i < n; i++) {
+      const p = { x: (-n * 15 + i * 30) * S, y: (i % 2 ? 22 : -22) * S };
+      list.push(house(p.x, p.y, { floors: 1 + (i % 3), face: i % 2 ? -1 : 1, fp: lot(p, 26, 24) }));
+    }
+    const t = town(0, list, { style: 'linear', radius: n * 15 * S, tier: 'village' });
     recountPopulation(t);
     return t;
   }
@@ -211,7 +217,7 @@ describe('Жители по домам', () => {
     expect(t.buildings.filter((b) => b.form === 'walkup').length).toBe(villageFlats(40));
     const forms = new Map(t.buildings.map((b) => [b.id, `${b.form}|${b.people}`]));
     const pop = t.population;
-    const fresh = [house(700, 22, { floors: 2 }), house(730, 22, { floors: 2 })];
+    const fresh = [house(700 * S, 22 * S, { floors: 2 }), house(730 * S, 22 * S, { floors: 2 })];
     t.buildings.push(...fresh);
     zoneTown(t);
     recountPopulation(t);
@@ -222,22 +228,22 @@ describe('Жители по домам', () => {
 
   it('город: многоквартирный дом — по вместимости корпуса на проектных этажах; тесный участок — не многоквартирный', () => {
     const t = town(4000, [], { tier: 'town' });
-    const big = house(0, 0, { form: 'walkup', floors: 2, fp: { center: { x: 0, y: 0 }, w: 28, h: 26, angle: 0 } });
-    const small = house(0, 0, { form: 'walkup', floors: 2, fp: { center: { x: 0, y: 0 }, w: 28, h: 26, angle: 0 } });
+    const big = house(0, 0, { form: 'walkup', floors: 2, fp: lot({ x: 0, y: 0 }, 28, 26) });
+    const small = house(0, 0, { form: 'walkup', floors: 2, fp: lot({ x: 0, y: 0 }, 28, 26) });
     t.buildings.push(big, small);
     zoneTown(t);
     expect(residentsOf(big)).toBeGreaterThan(20);
     expect(residentsOf(big)).toBeLessThan(40);
     // В среднем кольце узкий участок (второй ряд) — частный дом, а не тесный многоквартирный.
     const mid = { x: 0.48 * t.radius, y: 0 };
-    const narrow = house(mid.x, mid.y, { floors: 2, fp: { center: mid, w: 18, h: 20, angle: 0 } });
+    const narrow = house(mid.x, mid.y, { floors: 2, fp: lot(mid, 18, 20) });
     const forms = Array.from({ length: 30 }, (_, i) => placeForm(t, { ...narrow, id: 5000 + i }));
     expect(forms).not.toContain('walkup');
     expect(SETTLE_RULE).toBeGreaterThan(1);
   });
 
   it('этажи многоквартирного дома — по жильцам, но не ниже проекта; у старых и тестовых домов без жильцов — по этажам генерации', () => {
-    const slab = house(0, 0, { form: 'slab', floors: 5, fp: { center: { x: 0, y: 0 }, w: 80, h: 30, angle: 0 } });
+    const slab = house(0, 0, { form: 'slab', floors: 5, fp: lot({ x: 0, y: 0 }, 80, 30) });
     expect(residentsOf(slab)).toBe(5 * RES_PER_FLOOR);
     expect(storeysOf(slab)).toBe(5);
     expect(storeysOf({ ...slab, people: 1000 })).toBeGreaterThan(5);
@@ -252,8 +258,8 @@ describe('Панельные дома нового района', () => {
   function row(n: number, floors = 2): TownBuilding[] {
     const out: TownBuilding[] = [];
     for (let i = 0; i < n; i++) {
-      out.push(house(i * 25, 0, { floors }));
-      if (i % 2) out.push(house(i * 25, 24, { floors: 1, fp: { center: { x: i * 25, y: 24 }, w: 18, h: 16, angle: 0 } }));
+      out.push(house(i * 25 * S, 0, { floors }));
+      if (i % 2) out.push(house(i * 25 * S, 24 * S, { floors: 1, fp: lot({ x: i * 25 * S, y: 24 * S }, 18, 16) }));
     }
     return out;
   }
@@ -286,10 +292,10 @@ describe('Панельные дома нового района', () => {
 
   it('офис посреди ряда его разрывает; дома на другой стороне улицы — отдельный ряд', () => {
     const a = house(0, 0);
-    const shop = house(25, 0, { kind: 'com', floors: 3 });
-    const b = house(50, 0);
-    const c = house(75, 0);
-    const across = house(0, -40, { face: 1 });
+    const shop = house(25 * S, 0, { kind: 'com', floors: 3 });
+    const b = house(50 * S, 0);
+    const c = house(75 * S, 0);
+    const across = house(0, -40 * S, { face: 1 });
     const t = town(0, [a, shop, b, c, across]);
     mergeBlocks(t, ops());
     expect(t.buildings).toContain(shop);
@@ -304,8 +310,8 @@ describe('Высотки: два дома квартала спиной к сп�
   const district = { x: 0, y: 0, angle: 0, u0: -500, u1: 500, v0: -500, v1: 500 };
   /** Дом у улицы с юга (y = −30) и дом у улицы с севера (y = 30): задние стороны — друг к другу. */
   const pair = () => [
-    house(0, -18, { form: 'slab', floors: 5, fp: { center: { x: 0, y: -18 }, w: 60, h: 20, angle: 0 }, face: -1 }),
-    house(5, 18, { form: 'slab', floors: 6, fp: { center: { x: 5, y: 18 }, w: 55, h: 20, angle: 0 }, face: 1 }),
+    house(0, -18 * S, { form: 'slab', floors: 5, fp: lot({ x: 0, y: -18 * S }, 60, 20), face: -1 }),
+    house(5 * S, 18 * S, { form: 'slab', floors: 6, fp: lot({ x: 5 * S, y: 18 * S }, 55, 20), face: 1 }),
   ];
   const ops = (fronted = true, fits = true) => ({ fits: () => fits, fronted: () => fronted, remove: () => {}, add: () => {} });
 
@@ -315,7 +321,7 @@ describe('Высотки: два дома квартала спиной к сп�
     expect(mergeTowers(t, ops())).toBe(1);
     expect(t.buildings).toHaveLength(1);
     expect(t.buildings[0]).toMatchObject({ id: a.id, form: 'tower', floors: 11, face: -1 });
-    expect(t.buildings[0].fp.h).toBeCloseTo(56);
+    expect(t.buildings[0].fp.h).toBeCloseTo(56 * S);
   });
 
   it('не сливаются: улица осталась бы пустой, участок задел бы улицу, дома стоят лицом друг к другу, мало этажей', () => {

@@ -9,7 +9,8 @@ import type { WorldSettings } from '../world/settings';
 import { Game } from './game';
 import { anchorOf, clearStrip, type End, openSpot, road, runMonths, runSeconds, STREET, withoutCitizens } from './testkit';
 
-const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
+// Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
+const WORLD: WorldSettings = { seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
 /** Первая база — у улиц самого большого города, первое место по кругу без сноса домов. */
 function firstBase(game: Game): BuildBase {

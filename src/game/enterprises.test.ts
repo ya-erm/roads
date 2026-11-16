@@ -9,11 +9,12 @@ import { footprintRadius } from '../world/spatial';
 import { Game } from './game';
 import { connectNodes, freshGame, runMonths, runSeconds, STREET, stationAtIndustry, stationExit, townStreets, withoutCitizens } from './testkit';
 
-const WORLD: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 7, size: 'small', towns: 5, money: 5_000_000, biome: 'temperate', relief: 'plains' };
+// Средняя карта: пять крупных городов (TOWN_SCALE) на маленькой не оставляют места заводам у их края.
+const WORLD: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 7, size: 'medium', towns: 5, money: 5_000_000, biome: 'temperate', relief: 'plains' };
 
 const player = (extra: Partial<WorldSettings> = {}) => withoutCitizens(freshGame({ ...WORLD, ...extra }));
 /** Просторная карта с редкими городами: есть места, куда рабочие сами не дойдут. */
-const SPARSE: Partial<WorldSettings> = { size: 'medium', towns: 4 };
+const SPARSE: Partial<WorldSettings> = { size: 'large', towns: 4 };
 
 /** Место у города t на зазоре от gap до gap+200 от его черты, где завод kind можно поставить. */
 function spotNear(g: Game, kind: IndustryKind, t: Town, gap: number): Vec {
@@ -207,12 +208,17 @@ describe('постройка', () => {
       .filter((n) => n.corridors.length === 1)
       .sort((a, b) => dist(a.pos, ind.fp.center) - dist(b.pos, ind.fp.center));
     let st: Station | null = null;
-    for (const end of ends.slice(0, 6)) {
+    for (const end of ends.slice(0, 12)) {
       const street = net.corridor(end.corridors[0]);
       const mid = street.lut.pointAt(street.length / 2);
       const t = street.lut.tangentAt(street.length / 2);
       const placed = [-1, 1].map((side) => g.placeStation({ x: mid.x - t.y * side * 40, y: mid.y + t.x * side * 40 }, 14, 'road', { pax: true, cargo: false })).find(Boolean);
       if (!placed) continue;
+      // Рабочие едут только со станции, у которой в охвате есть жители (у тупика на окраине их может и не быть).
+      if (placed.catchPop <= 0) {
+        g.removeStation(placed);
+        continue;
+      }
       // Узел на месте тупика (улицу станция могла разрезать — берём ближайший к его месту).
       const tip = net.nodesNear(end.pos, 2)[0] ?? end;
       if (connectNodes(g, tip, stationExit(g, dock.nodeId), STREET)) {
@@ -224,8 +230,9 @@ describe('постройка', () => {
     const line = g.createLine([st!.id, dock.id])!;
     for (let i = 0; i < 3; i++) g.buyVehicle(line.id, 'bus');
     const money = g.money;
-    // Завод далеко (дальше дальней поездки на работу): первый автобус доезжает за пару месяцев.
-    for (let m = 0; m < 10 && (ind.crew ?? 0) <= 1; m++) runMonths(g, 0.5);
+    // Завод далеко (дальше дальней поездки на работу): первый автобус доезжает за несколько месяцев (от тупика на
+    // окраине крупного города — TOWN_SCALE — путь длиннее).
+    for (let m = 0; m < 20 && (ind.crew ?? 0) <= 1; m++) runMonths(g, 0.5);
     expect(ind.crew ?? 0).toBeGreaterThan(1);
     expect(g.enterprises.staff(ind)).toBeGreaterThan(0.05);
     // Рабочие проезд не оплачивают: у линии в один конец выручки нет, только содержание.

@@ -180,7 +180,7 @@ function bigLayout(W: number, H: number, seed: number): Layout {
   L.pw = 2.6;
   const px = (hash(seed, 1) - 0.5) * W * 0.12;
   const py = (hash(seed, 2) - 0.5) * H * 0.12;
-  const pr = Math.max(5, Math.min(9, Math.min(W, H) * 0.12));
+  const pr = Math.max(5, Math.min(12, Math.min(W, H) * 0.1));
   L.plazas.push({ x: px, y: py, r: pr });
   const ring = loop(px, py, (W / 2 - pr - 6) * 0.72 + pr * 0.4, (H / 2 - pr - 6) * 0.72 + pr * 0.4, 0.07, seed);
   L.paths.push(ring);
@@ -306,8 +306,8 @@ function squareLayout(W: number, H: number, seed: number): Layout {
 function memorialLayout(W: number, H: number, seed: number): Layout {
   const L = emptyLayout();
   L.pw = 2;
-  const pw = Math.min(W * 0.46, 11);
-  const ph = Math.min(H * 0.5, 9);
+  const pw = Math.min(W * 0.4, 15);
+  const ph = Math.min(H * 0.42, 12);
   L.pads.push({ x: -pw / 2, y: -ph / 2, w: pw, h: ph, color: PAVING });
   L.paths.push([0, -H / 2, 0, -ph / 2], [0, ph / 2, 0, H / 2]);
   L.obelisk = { x: 0, y: 0.6 };
@@ -335,14 +335,14 @@ function plazaLayout(W: number, H: number, seed: number): Layout {
   L.paved = true;
   L.pw = 0;
   const long = W >= H;
-  const cr = Math.max(2.2, Math.min(4, Math.min(W, H) * 0.14));
+  const cr = Math.max(2.2, Math.min(5.5, Math.min(W, H) * 0.12));
   L.beds.push({ x: 0, y: 0, rx: cr, ry: cr, rot: 0 });
   L.statues.push({ x: 0, y: 0, s: Math.min(2.4, cr * 0.7) });
   const span = (long ? W : H) / 2;
   if (span > 14) {
     for (const s of [-1, 1]) {
       const d = Math.min(span - 5, Math.max(cr + 6, span * 0.55));
-      const rx = Math.min(5, span * 0.18);
+      const rx = Math.min(7, span * 0.18);
       const ry = Math.min(1.8, (long ? H : W) * 0.09);
       L.beds.push(long ? { x: s * d, y: 0, rx, ry, rot: 0 } : { x: 0, y: s * d, rx, ry, rot: Math.PI / 2 });
     }

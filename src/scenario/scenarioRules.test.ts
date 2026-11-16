@@ -97,6 +97,8 @@ describe('Дефицит сырья', () => {
     const game = scenarioGame();
     const sc = game.scenario!;
     const { plant } = farmLine(game);
+    // Начинаем без заданий на этот завод: генератор сценария мог сам дать доставку на него (зависит от раскладки мира).
+    sc.state.objectives = sc.state.objectives.filter((o) => !(o.params.kind === 'deliver' && o.params.to?.type === 'industry' && o.params.to.id === plant.id));
     sc.state.watch[plant.id] = { low: 2, idle: 0, active: true };
     const isCandidate = () => eventCandidates(sc, 'shortage').some((c) => c.subject?.type === 'industry' && c.subject.id === plant.id);
     expect(isCandidate()).toBe(true);

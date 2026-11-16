@@ -86,8 +86,11 @@ describe('Грунтовая в инструменте «Дорога»', { time
     const game = new Game(1);
     const streetLike = (id: number) => (game as unknown as { streetLike(c: unknown): boolean }).streetLike(game.roads.net.corridor(id));
     const town = [...game.towns].sort((x, y) => y.population - x.population)[0];
-    // Просёлки мира к предприятиям уходят из города в поле — вдоль них город не растёт.
-    const field = [...game.roads.net.corridors.values()].filter((c) => c.cls === 'dirt');
+    // Просёлки мира к предприятиям уходят из города в поле — вдоль них город не растёт. Кусок просёлка, что начался
+    // между улицами внутри города (оба конца в круге плотной застройки), — уже городская грунтовка (ниже).
+    const net = game.roads.net;
+    const inTown = (c: { a: number; b: number }) => game.towns.some((t) => [c.a, c.b].every((id) => Math.hypot(net.node(id).pos.x - t.center.x, net.node(id).pos.y - t.center.y) <= t.radius));
+    const field = [...net.corridors.values()].filter((c) => c.cls === 'dirt' && !inTown(c));
     expect(field.length).toBeGreaterThan(0);
     for (const c of field) expect(streetLike(c.id)).toBe(false);
     // Улица в центре города, перестроенная игроком в грунтовку, — по-прежнему улица.

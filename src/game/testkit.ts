@@ -173,13 +173,14 @@ export function connectStations(game: Game, sA: Station, sB: Station, profile: R
 export function connectNodes(game: Game, A: LaneNode, B: LaneNode, profile: RoadOptions): boolean {
   const d = { x: B.pos.x - A.pos.x, y: B.pos.y - A.pos.y };
   const n = { x: -d.y / Math.hypot(d.x, d.y), y: d.x / Math.hypot(d.x, d.y) };
-  // Дальние сдвиги — в обход города или предприятия, что стоит между ними.
-  for (const off of [0, 150, -150, 300, -300, 450, -450, 600, -600, 800, -800, 1000, -1000]) {
+  // Дальние сдвиги — в обход города или предприятия, что стоит между ними (большой город — шириной до 3 км).
+  for (const off of [0, 150, -150, 300, -300, 450, -450, 600, -600, 800, -800, 1000, -1000, 1300, -1300, 1600, -1600]) {
     const M = { x: (A.pos.x + B.pos.x) / 2 + n.x * off, y: (A.pos.y + B.pos.y) / 2 + n.y * off };
     // Второй кусок проверяем заранее: иначе первый остался бы висеть тупиком и мешал следующим попыткам.
     if (!roadPlan(game, A.id, { free: M }, profile).ok || !roadPlan(game, { free: M }, B.id, profile).ok) continue;
     road(game, A.id, { free: M }, profile);
-    if (road(game, M, B.id, profile)) return true;
+    // Плавно из середины не выходит (сдвиг велик против расстояния) — изломом: середина становится перекрёстком.
+    if (road(game, M, B.id, profile) || road(game, M, B.id, { ...profile, kink: true })) return true;
   }
   return false;
 }

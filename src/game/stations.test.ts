@@ -5,7 +5,7 @@ import { twoWay, type Corridor, type LaneNode } from '../lanes/model';
 import { RoadTools } from '../input/roadtools';
 import type { Station, TownBuilding } from '../world/entities';
 import { ROAD_PRESETS, specKmh, type RoadSpec } from '../world/roadTypes';
-import type { Footprint } from '../world/spatial';
+import { type Footprint, footprintRadius } from '../world/spatial';
 import { fillStreet, nearHighway, type WorldContext } from '../world/worldgen';
 import { DEFAULT_RULE } from './transport';
 import { Game } from './game';
@@ -269,13 +269,13 @@ describe('Станции', () => {
       expect(nearHighway(net, c, ctx.driveways)).toBe(false);
       expect(streetLike(c)).toBe(true);
     }
-    // Дома встают и в паре десятков метров от выезда (от магистрали — не ближе 50 м от края).
+    // Дома встают и в паре десятков метров от выезда (от магистрали — не ближе 50 м от края): край участка — ближе 50 м.
     const town = game.towns[0];
     const before = new Set(town.buildings.map((b) => b.id));
     for (const c of halves) fillStreet(ctx, town, c, 1);
     const added = town.buildings.filter((b) => !before.has(b.id));
     expect(added.length).toBeGreaterThan(0);
-    expect(Math.min(...added.map((b) => driveway.lut.closest(b.fp.center).d))).toBeLessThan(50);
+    expect(Math.min(...added.map((b) => driveway.lut.closest(b.fp.center).d - footprintRadius(b.fp)))).toBeLessThan(50);
   });
 
   it('курсор у самого перекрёстка вдоль дороги — тоже примыкание к узлу, а не отказ', () => {

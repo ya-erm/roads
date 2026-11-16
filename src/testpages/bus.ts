@@ -78,7 +78,8 @@ export function buildBusScene(): TestScene {
   // ---------- Кармашек: полоса вдоль края у остановки, до и после навеса ----------
   sc.section('Кармашек', { x: 2450, y: 2700 }, 'linear', () => {
     const y = 2700;
-    sc.road({ free: { x: 2000, y } }, { free: { x: 2900, y } }, STREET);
+    // До 3000: у тупика участков нет, а крайней остановке (2800) нужны дома в охвате.
+    sc.road({ free: { x: 2000, y } }, { free: { x: 3000, y } }, STREET);
     // Остановки ставим сначала: протяжка «Полосы» мимо навеса отодвигает его к новому бордюру.
     const bayEast = sc.stop(south(2300, y));
     const plainEast = sc.stop(south(2800, y));

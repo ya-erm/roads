@@ -1,3 +1,4 @@
+import { TOWN_SCALE } from '../config';
 import { circleArc, type Cubic, CurveLUT, straightCubic } from '../core/bezier';
 import { add, dist, norm, scale, sub, type Vec } from '../core/vec';
 import type { Corridor, LaneNode } from '../lanes/model';
@@ -24,22 +25,29 @@ export interface StreetKit {
   shape: TownShape;
 }
 
+/**
+ * Все размеры улиц города — в масштабе застройки (TOWN_SCALE, config.ts): участки домов во столько же раз крупнее,
+ * улицы и кварталы — тоже, и город тот же по seed, только крупнее (домов на улице столько же).
+ */
+const S = TOWN_SCALE;
+
 /** Обычный радиус города по стилю и размеру, м (как у прежних колец и сеток: от него — площадь и население). */
 export function streetsRadius(style: TownStyle, size: number): number {
   // Множители подобраны так, чтобы население в среднем было как у прежних колец, сеток и улиц-линий.
-  if (style === 'radial') return (110 + (size >= 3 ? 3 : 2) * 140) * 1.3;
-  if (style === 'organic') return (size + 0.5) * 150 * 0.94;
-  return (2 + size) * 165 * 0.75;
+  if (style === 'radial') return (110 + (size >= 3 ? 3 : 2) * 140) * 1.3 * S;
+  if (style === 'organic') return (size + 0.5) * 150 * 0.94 * S;
+  return (2 + size) * 165 * 0.75 * S;
 }
 
 /**
- * Во сколько раз кварталы крупнее прежних: шаг узлов главных улиц, длины боковых и переулков, клетка нового района —
- * ×BLOCK. Участки домов тоже крупнее (worldgen.fillStreet), и мелкая сетка улиц не пронизывает город.
+ * Во сколько раз кварталы крупнее самых первых: шаг узлов главных улиц, длины боковых и переулков, клетка нового
+ * района — ×BLOCK (×1,3 к первым и ещё масштаб застройки). Участки домов тоже крупнее (worldgen.fillStreet), и мелкая
+ * сетка улиц не пронизывает город.
  */
-const BLOCK = 1.3;
+const BLOCK = 1.3 * S;
 
-/** Ближе стольких метров к чужой улице новая не идёт: между ними — участки домов с обеих сторон (до 35 м вглубь). */
-const GAP = 70;
+/** Ближе стольких метров к чужой улице новая не идёт: между ними — участки домов с обеих сторон (до 56 м вглубь). */
+const GAP = 70 * S;
 
 interface Chain {
   /** Узлы главной улицы от центра наружу. */
@@ -48,7 +56,7 @@ interface Chain {
 }
 
 /** Запас рамки нового района за крайними улицами сетки: на дома по их внешней стороне, м. */
-const DISTRICT_MARGIN = 42;
+const DISTRICT_MARGIN = 42 * S;
 
 /** Строит улицы города; отдаёт рамку нового района (сетки), если он вышел, — там встанут панельные дома (townForms.ts). */
 export function townStreets(kit: StreetKit, center: Vec, size: number, style: TownStyle): TownDistrict | undefined {
@@ -82,7 +90,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
   const roomy = (a: LaneNode, b: LaneNode, curve: Cubic | null): boolean => {
     const c = curve ? { ...curve, p0: a.pos, p3: b.pos } : straightCubic(a.pos, b.pos);
     const lut = new CurveLUT(c);
-    if (lut.length < 60) return false;
+    if (lut.length < 60 * S) return false;
     const own = new Set([...a.corridors, ...b.corridors]);
     for (let i = 1; i < 8; i++) {
       const p = lut.pointAt((lut.length * i) / 8);
@@ -119,7 +127,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
   };
   /** Узлы улиц этого города — от них растут переулки. */
   const mine = new Set<LaneNode>();
-  const ok = (p: Vec, margin = 45) => terrain.inBounds(p, 100) && !terrain.isWater(p, margin);
+  const ok = (p: Vec, margin = 45 * S) => terrain.inBounds(p, 100 * S) && !terrain.isWater(p, margin);
 
   // ---------- Главные улицы-выезды ----------
   const count = radial ? (size >= 3 ? rng.int(5, 7) : 5) : linear ? 2 : rng.int(3, 5);
@@ -136,7 +144,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
   // Центр: площадь с кольцом (кольцевой город) или перекрёсток главных улиц.
   const starts: (LaneNode | null)[] = [];
   if (radial) {
-    const rc = rng.range(95, 115);
+    const rc = rng.range(95, 115) * S;
     const sorted = angles.map((a, i) => ({ a: ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2), i })).sort((x, y) => x.a - y.a);
     const ring = sorted.map(({ a }) => nodeNear(add(center, { x: Math.cos(a) * rc, y: Math.sin(a) * rc })));
     for (let k = 0; k < sorted.length; k++) {
@@ -157,7 +165,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     const cross = linear && i >= 2;
     const target = angles[i];
     // Длина — до края очертаний и дальше выездом из города (не у всех).
-    const len = (cross ? R * 0.45 : R * kit.shape(target) * rng.range(0.9, 1.05)) + (rng.chance(radial ? 0.5 : 0.35) ? rng.range(60, 150) : 0);
+    const len = (cross ? R * 0.45 : R * kit.shape(target) * rng.range(0.9, 1.05)) + (rng.chance(radial ? 0.5 : 0.35) ? rng.range(60, 150) * S : 0);
     const pts: Vec[] = [start.pos];
     let h = target;
     let p = start.pos;
@@ -177,7 +185,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
           best = q;
         }
       }
-      if (!best || dist(best, center) <= dist(p, center) + 40) break;
+      if (!best || dist(best, center) <= dist(p, center) + 40 * S) break;
       h = Math.atan2(best.y - p.y, best.x - p.x);
       pts.push(best);
       p = best;
@@ -202,7 +210,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     let last = -2;
     let fromFirst = false;
     for (let k = 0; k < byAngle.length && boulevards < 2; k++) {
-      const rb = rng.range(240, 360);
+      const rb = rng.range(240, 360) * S;
       if (k - last < 2 || (k === byAngle.length - 1 && fromFirst) || !rng.chance(0.4)) continue;
       const c1 = byAngle[k];
       const c2 = byAngle[(k + 1) % byAngle.length];
@@ -245,7 +253,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     const w = rng.range(130, 170) * BLOCK;
     const hgt = rng.range(95, 125) * BLOCK;
     const reach = R * kit.shape(gapAt);
-    const from = Math.max(radial ? 200 : 120, reach * 0.3);
+    const from = Math.max((radial ? 200 : 120) * S, reach * 0.3);
     const ni = Math.max(2, Math.round((reach * 1.05 - from) / w));
     const nj = Math.max(1, Math.round(Math.min(reach * Math.sin(Math.min(gap / 2, 1.2)), 2.5 * hgt) / hgt));
     const grid = new Map<string, LaneNode | null>();
@@ -283,7 +291,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
       if (joined >= 3) break;
       const target = chains
         .flatMap((c) => c.nodes)
-        .filter((m) => m !== n && dist(m.pos, n.pos) < 240)
+        .filter((m) => m !== n && dist(m.pos, n.pos) < 240 * S)
         .sort((x, y) => dist(x.pos, n.pos) - dist(y.pos, n.pos))[0];
       if (target && link(n, target)) joined++;
     }
@@ -300,7 +308,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
         const nearEdge = d / Math.max(1, reachAt(n.pos));
         // С другой стороны от этого узла улица уже есть — чаще сдвигаемся к следующему: Т-перекрёстки, а не крест.
         const cross = n.corridors.length >= 3 ? 0.4 : 1;
-        if (d < (radial ? 170 : 90) || nearEdge > 1.15 || !rng.chance((dense - 0.3 * Math.min(1, nearEdge)) * cross)) {
+        if (d < (radial ? 170 : 90) * S || nearEdge > 1.15 || !rng.chance((dense - 0.3 * Math.min(1, nearEdge)) * cross)) {
           prev = null;
           continue;
         }
@@ -310,7 +318,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
         const turn = rng.range(-0.25, 0.25);
         const dir = rotate({ x: -t.y * side, y: t.x * side }, turn);
         const l1 = rng.range(95, 175) * BLOCK * (1 - 0.25 * Math.min(1, nearEdge));
-        const e1 = link(n, add(n.pos, scale(dir, l1)), null, false, 45);
+        const e1 = link(n, add(n.pos, scale(dir, l1)), null, false, 45 * S);
         if (!e1) {
           prev = null;
           continue;
@@ -318,7 +326,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
         // Улица идёт дальше — второй квартал вглубь (чаще у центра).
         let e2: LaneNode | null = null;
         if (rng.chance(0.55 - 0.3 * Math.min(1, nearEdge)) && dist(e1.pos, center) < reachAt(e1.pos)) {
-          e2 = link(e1, add(e1.pos, scale(rotate(dir, rng.range(-0.2, 0.2)), rng.range(85, 150) * BLOCK)), null, false, 45);
+          e2 = link(e1, add(e1.pos, scale(rotate(dir, rng.range(-0.2, 0.2)), rng.range(85, 150) * BLOCK)), null, false, 45 * S);
         }
         // Задние улицы: соседние боковые сходятся в квартал (Т-перекрёстки), иначе — тупики.
         if (prev && rng.chance(0.68)) {
@@ -349,7 +357,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
         const dir = rotate(dirs[rng.int(0, dirs.length)], rng.range(-0.2, 0.2));
         const to = add(n.pos, scale(dir, rng.range(90, 165) * BLOCK));
         if (dist(to, center) > reachAt(to) * 1.05) continue;
-        if (link(n, to, null, false, 55)) break;
+        if (link(n, to, null, false, 55 * S)) break;
       }
     }
   }

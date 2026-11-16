@@ -1,3 +1,4 @@
+import { TOWN_SCALE } from '../config';
 import { hash } from '../core/math';
 import { angleDiff, dist, type Vec } from '../core/vec';
 import type { ParkKind, Town, TownPark } from './entities';
@@ -44,34 +45,38 @@ export function parkQuota(town: Pick<Town, 'population' | 'style' | 'tier'>): Re
   return { park: pop >= 12000 ? 2 : 1, square: Math.min(8, 3 + Math.floor(pop / 3500)), plaza: 1, memorial: 0, embankment: 14 };
 }
 
+/** Масштаб застройки (config.TOWN_SCALE): кварталы крупнее — и парки, скверы, расстояния между ними тоже. */
+const S = TOWN_SCALE;
+const scaled = (list: [number, number][]): [number, number][] => list.map(([w, h]) => [w * S, h * S]);
+
 /** Размеры большого парка, крупные — первыми: большой город, город. */
 const PARK_SIZES: Record<'town' | 'city', [number, number][]> = {
-  city: [
+  city: scaled([
     [120, 84],
     [100, 72],
     [84, 62],
     [70, 52],
     [58, 46],
-  ],
-  town: [
+  ]),
+  town: scaled([
     [86, 62],
     [72, 54],
     [60, 46],
     [50, 40],
-  ],
+  ]),
 };
-const SQUARE_SIZES: [number, number][] = [
+const SQUARE_SIZES = scaled([
   [32, 24],
   [26, 20],
   [20, 16],
-];
-const MEMORIAL_SIZES: [number, number][] = [
+]);
+const MEMORIAL_SIZES = scaled([
   [26, 20],
   [22, 17],
   [18, 15],
-];
-/** Набережная: отрезок бульвара вдоль берега — длина и ширина. */
-const EMBANK = { w: 34, h: 13 };
+]);
+/** Набережная: отрезок бульвара вдоль берега — длина и ширина (ширина — прогулочная, в масштабе дорог). */
+const EMBANK = { w: 34 * S, h: 13 };
 /** Ратуша и храм: площадь вокруг них шире участка (houseArt) — парк не ближе. */
 const LANDMARK_PAD = 9;
 
@@ -100,13 +105,16 @@ function bigPark(town: Town, site: ParkSite, list: TownPark[], marks: readonly F
   const sizes = PARK_SIZES[tier];
   const turn = hash(town.id, 31) * Math.PI * 2;
   // Второй парк большого города — подальше от первого.
-  const gap = list.some((p) => p.kind === 'park') ? R * 0.35 : 30;
+  const gap = list.some((p) => p.kind === 'park') ? R * 0.35 : 30 * S;
   const last = sizes.length - 1;
+  // Шаг поиска и надбавка за размер мельче — в масштабе застройки.
+  const step = 28 * S;
+  const worse = 30 * S;
   let best: { fp: Footprint; score: number } | null = null;
-  for (let r = 0; r <= R * 0.7; r += 28) {
+  for (let r = 0; r <= R * 0.7; r += step) {
     // Дальше лучшего найденного (с поправкой на его размер) искать нет смысла.
     if (best && r >= best.score) break;
-    const n = r === 0 ? 1 : Math.max(8, Math.round((Math.PI * 2 * r) / 34));
+    const n = r === 0 ? 1 : Math.max(8, Math.round((Math.PI * 2 * r) / (34 * S)));
     for (let k = 0; k < n; k++) {
       const a = turn + (k / n) * Math.PI * 2;
       const c = { x: town.center.x + Math.cos(a) * r, y: town.center.y + Math.sin(a) * r };
@@ -117,9 +125,9 @@ function bigPark(town: Town, site: ParkSite, list: TownPark[], marks: readonly F
         // Размеры вложены друг в друга: не встал самый маленький — не встанет и крупнее.
         if ((best && r >= best.score) || !ok(last)) continue;
         let i = 0;
-        while (i < last && !(best && r + i * 30 >= best.score) && !ok(i)) i++;
-        if (best && r + i * 30 >= best.score) continue;
-        best = { fp: make(i), score: r + i * 30 };
+        while (i < last && !(best && r + i * worse >= best.score) && !ok(i)) i++;
+        if (best && r + i * worse >= best.score) continue;
+        best = { fp: make(i), score: r + i * worse };
       }
     }
   }
@@ -156,7 +164,7 @@ function squareSpots(site: ParkSite, center: Vec, r: number, sizes: [number, num
       for (let k = 0; k < 3; k++) {
         for (let s = 0; s < sizes.length; s++) {
           const [w, h] = sizes[s];
-          const off = n.half + 3 + k * 5;
+          const off = n.half + 3 + k * 5 * S;
           const c = at(n.pos, a, off + w / 2, off + h / 2);
           if (Math.abs(angleDiff(Math.atan2(c.y - n.pos.y, c.x - n.pos.x), a + gap / 2)) > gap / 2) continue;
           const fp = rect(c, w, h, a);
@@ -165,7 +173,7 @@ function squareSpots(site: ParkSite, center: Vec, r: number, sizes: [number, num
       }
     }
   }
-  for (const q of site.curbs(center, r, 14)) {
+  for (const q of site.curbs(center, r, 14 * S)) {
     for (const side of [1, -1]) {
       place++;
       for (let s = 0; s < sizes.length; s++) {
@@ -209,7 +217,7 @@ function plazaBy(hall: Footprint, site: ParkSite, list: TownPark[]): Footprint |
     for (const width of [side + 16, side, side * 0.7]) {
       // Узкая площадь — посередине стороны или ближе к одному из углов.
       for (const shift of width < side ? [0, -(side - width) / 2, (side - width) / 2] : [0]) {
-        for (const depth of [36, 28, 20, 14]) {
+        for (const depth of [36 * S, 28 * S, 20 * S, 14 * S]) {
           const u = along ? shift : ux * (half + 3.5 + depth / 2);
           const v = along ? uy * (half + 3.5 + depth / 2) : shift;
           const c = at(hall.center, hall.angle, u, v);
@@ -270,7 +278,7 @@ function embankments(town: Town, site: ParkSite, list: TownPark[], marks: readon
   };
   // Соседние отрезки цепочки заходят друг на друга на полметра — набережная без щелей.
   const ok = (fp: Footprint, houses: number) =>
-    !out.some((f) => footprintsOverlap(f, fp, -1.2)) && !clashes(marks, list, fp, -60) && site.houses(fp.center, 90) >= houses && site.fits(fp, true);
+    !out.some((f) => footprintsOverlap(f, fp, -1.2)) && !clashes(marks, list, fp, -60) && site.houses(fp.center, 90 * S) >= houses && site.fits(fp, true);
   for (const { p } of pts) {
     if (out.length >= want) break;
     if (out.some((f) => dist(f.center, p) < EMBANK.w)) continue;
@@ -322,14 +330,14 @@ export function placeParks(town: Town, site: ParkSite): number {
   }
   if (have('memorial') < quota.memorial) {
     const c = landmark?.fp.center ?? town.center;
-    const spots = squareSpots(site, c, 170, MEMORIAL_SIZES, (p) => dist(p, c) / 170, town.id);
+    const spots = squareSpots(site, c, 170 * S, MEMORIAL_SIZES, (p) => dist(p, c) / (170 * S), town.id);
     take(spots, site, 1, (fp) => !clashes(marks, list, fp, 20), (fp) => push('memorial', fp));
   }
   const left = quota.square - have('square');
   if (left > 0) {
     // Скверы — по всему городу, кроме самого края; не теснее друг к другу, чем на ~0,3 радиуса.
     const spots = squareSpots(site, town.center, R * 0.9, SQUARE_SIZES, (p) => edgeOf(town, p) * 0.8, town.id + 7);
-    const gap = Math.max(70, R * 0.3);
+    const gap = Math.max(70 * S, R * 0.3);
     // Каждый новый сквер сразу в списке: следующий проверяется и против него.
     take(spots, site, left, (fp) => !clashes(marks, list, fp, gap), (fp) => push('square', fp));
   }

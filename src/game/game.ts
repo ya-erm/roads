@@ -7116,7 +7116,7 @@ export class Game implements BuildContext {
       .filter((s) => this.streetLike(s) && !this.streetFull(s.id))
       .map((s) => ({ s, hit: s.lut.closest(town.center) }))
       .filter(({ hit }) => hit.d <= reach && this.ownedBy(town, hit.point))
-      .map(({ s, hit }) => ({ s, d: hit.d + this.rng.range(0, 80) }))
+      .map(({ s, hit }) => ({ s, d: hit.d + this.rng.range(0, TOWN_GROWTH.jitter) }))
       .sort((a, b) => a.d - b.d);
     // Новые дома расселяются сразу, а рост расходуется по жильцам (GROW.perPerson за жителя или рабочее место):
     // частный дом на 4 жителя дешевле панельного на сотню — село растёт в домах так же быстро по доле, как город.
@@ -7272,7 +7272,7 @@ export class Game implements BuildContext {
         if (stationNodes.has(end.node)) return null;
         for (const id of net.node(end.node).corridors) touches.add(id);
       }
-      if (end && (end.kind === 'free' || stop < 60)) return null;
+      if (end && (end.kind === 'free' || stop < G.minStreet)) return null;
       // Примыкаем только к городским улицам, и не к той, от которой начали.
       for (const id of touches) if (skip.has(id) || !this.streetLike(net.corridor(id))) return null;
       const target = end?.pos ?? add(from, scale(dir, len));
@@ -7333,25 +7333,25 @@ export class Game implements BuildContext {
       // Перемычка к соседнему тупику, смотрящему туда же, — концы параллельных переулков.
       for (const m of ends) {
         const d = dist(m.pos, n.pos);
-        if (m.id <= n.id || d < 60 || d > step * 1.6 || m.corridors[0] === n.corridors[0] || !fits(m.pos)) continue;
+        if (m.id <= n.id || d < G.minStreet || d > step * 1.6 || m.corridors[0] === n.corridors[0] || !fits(m.pos)) continue;
         const chord = scale(sub(m.pos, n.pos), 1 / d);
         if (dot(out, scale(net.ends(m)[0].away, -1)) < 0.5 || Math.abs(dot(chord, out)) > 0.5) continue;
         if (clear(n.pos, chord, 12, d - 12, 25, d - 25, new Set([...n.corridors, ...m.corridors]))) push(start, { kind: 'node', node: m.id, pos: m.pos }, true);
       }
       // Продолжение — только у тупика, вдоль которого уже стоят дома: без «отростков» в чистом поле.
-      if (this.housesNear(town, n.pos, 80) < G.builtUp) continue;
+      if (this.housesNear(town, n.pos, G.builtUpRadius) < G.builtUp) continue;
       const a = angleOf(out) + rng.range(-bend, bend);
       push(start, cast(n.pos, { x: Math.cos(a), y: Math.sin(a) }, rng.range(0.7, 1) * step, skip), false);
     }
     // Переулки поперёк улиц — в просветах между домами.
-    const streets = net.corridorsNear(center, reach).filter((s) => this.streetLike(s) && s.length > 100 && s.lut.closest(center).d <= reach);
+    const streets = net.corridorsNear(center, reach).filter((s) => this.streetLike(s) && s.length > G.corner * 2.5 && s.lut.closest(center).d <= reach);
     for (let k = 0; k < 24 && streets.length; k++) {
       const s = rng.pick(streets);
       const side = rng.chance(0.5) ? 1 : -1;
-      const span = s.length - 80;
+      const span = s.length - 2 * G.corner;
       const off = rng.range(0, span);
       for (let i = 0; i < span; i += 8) {
-        const at = 40 + ((off + i) % span);
+        const at = G.corner + ((off + i) % span);
         const p = s.lut.pointAt(at);
         const t = s.lut.tangentAt(at);
         const dir = { x: -t.y * side, y: t.x * side };

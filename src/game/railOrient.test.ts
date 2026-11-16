@@ -19,7 +19,7 @@ function runSeconds(game: Game, seconds: number, each?: () => void) {
 const SERVES = { pax: true, cargo: true };
 const NO_WAIT = { wait: 'none' as const, maxWait: null, load: 'auto' as const, unload: 'auto' as const };
 
-const world = () => withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
+const world = () => withoutCitizens(new Game({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
 
 /** Прямой путь вдоль x длиной len (оба конца — тупики) в свободном месте, где у концов встают конечные. */
 function layTrack(game: Game, len: number): (s: number, side?: number) => Vec {

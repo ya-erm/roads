@@ -1,3 +1,4 @@
+import { TOWN_SCALE } from '../config';
 import { hash } from '../core/math';
 import { dist, type Vec } from '../core/vec';
 import type { HouseForm, Town, TownBuilding, TownDistrict } from './entities';
@@ -67,8 +68,11 @@ export function inDistrict(d: TownDistrict | undefined, p: Vec, margin = 0): boo
   return u >= d.u0 - margin && u <= d.u1 + margin && v >= d.v0 - margin && v <= d.v1 + margin;
 }
 
-/** Широкий участок — «большой» дом генерации (32–44 м по улице; обычный — 22–30). */
-const BIG_W = 31;
+/** Масштаб застройки (config.TOWN_SCALE): участки во столько раз крупнее прежних 22–30 м. */
+const S = TOWN_SCALE;
+
+/** Широкий участок — «большой» дом генерации (51–70 м по улице; обычный — 35–48). */
+const BIG_W = 31 * S;
 
 /** Тип без места в городе — для домов, которым его не выбрали (тестовые сцены, недозагруженные сохранения). */
 export function formOf(b: Pick<TownBuilding, 'form' | 'kind' | 'floors' | 'fp'>): HouseForm {
@@ -217,21 +221,25 @@ interface Stack {
 
 const clampInt = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(x)));
 /** Длина корпуса панельного дома: вдоль улицы или (узкий глубокий участок) вглубь. */
-const slabLength = (fp: Footprint) => (fp.w >= fp.h * 0.8 || fp.h < 30 ? fp.w - 3 : fp.h - 5);
+const slabLength = (fp: Footprint) => (fp.w >= fp.h * 0.8 || fp.h < 30 * S ? fp.w - 3 : fp.h - 5);
 
+/**
+ * Вместимость — по участку в прежнем масштабе (÷ TOWN_SCALE): участки крупнее, а квартир на этаже и жителей в доме —
+ * столько же, сколько было (дома просторнее, а не многолюднее).
+ */
 const STACKS: Partial<Record<HouseForm, Stack>> = {
   // Двух-трёхэтажный дом на 1–3 подъезда: квартиры по 2–3 на площадке.
-  walkup: { per: (fp) => clampInt(fp.w * 0.6, 8, 24), design: (f) => (f >= 3 ? 3 : 2) },
-  townhouse: { per: (fp) => clampInt(fp.w * 0.6, 8, 24), design: (f) => clampInt(f + 1, 2, 4) },
-  courtyard: { per: (fp) => clampInt((fp.w + fp.h) * 0.45, 16, 50), design: (f) => clampInt(f, 3, 5) },
-  slab: { per: (fp) => clampInt(slabLength(fp) * 0.55, 12, 90), design: (f) => clampInt(f, 5, 12) },
+  walkup: { per: (fp) => clampInt((fp.w / S) * 0.6, 8, 24), design: (f) => (f >= 3 ? 3 : 2) },
+  townhouse: { per: (fp) => clampInt((fp.w / S) * 0.6, 8, 24), design: (f) => clampInt(f + 1, 2, 4) },
+  courtyard: { per: (fp) => clampInt(((fp.w + fp.h) / S) * 0.45, 16, 50), design: (f) => clampInt(f, 3, 5) },
+  slab: { per: (fp) => clampInt((slabLength(fp) / S) * 0.55, 12, 90), design: (f) => clampInt(f, 5, 12) },
   tower: { per: () => 18, design: (f) => clampInt(f, 9, 16) },
 };
 /** Выше стольких этажей дом не рисуется, сколько бы в нём ни жило (на случай старых и тестовых данных). */
 const TOP: Partial<Record<HouseForm, number>> = { walkup: 4, townhouse: 5, courtyard: 6, slab: 16, tower: 25 };
 
 /** Участок, где встанет многоквартирный дом, а не тесная двухэтажка на 36 жителей: широкий и не мелкий. */
-export const roomyLot = (fp: Footprint) => fp.w >= 22 && fp.w * fp.h >= 480;
+export const roomyLot = (fp: Footprint) => fp.w >= 22 * S && fp.w * fp.h >= 480 * S * S;
 
 /**
  * Этажей у жилого дома — по его жильцам и типу: у частного дома 1 или 2 (мансарда у семьи побольше), у дачи 1, у
@@ -323,13 +331,13 @@ const PANEL_COLORS: [string, string][] = [
 ];
 
 /** Длиннее стольких метров один дом не сливается. */
-const SLAB_MAX = 140;
+const SLAB_MAX = 140 * S;
 /** Девятиэтажка на участке короче этого — башня (точечный дом), а не длинный корпус. */
-const TOWER_SHORT = 45;
+const TOWER_SHORT = 45 * S;
 /** Башня — от стольких этажей. */
 const TOWER_FLOORS = 8;
 /** Между соседними участками по улице не больше стольких метров — они в одном ряду (пропущенный узкий участок — тоже). */
-const ROW_GAP = 24;
+const ROW_GAP = 24 * S;
 
 export interface BlockOps {
   /** Дом может войти в панельный (жилой, в новом районе или у проспекта большого города). */
@@ -516,7 +524,7 @@ export function towerQuota(town: Pick<Town, 'id' | 'population' | 'style'> & { t
 /** Этажность высотки из двух панельных домов спиной к спине. */
 const BACK_TO_BACK = { min: 9, max: 13 };
 /** Между задними сторонами двух домов квартала — не дальше стольких метров (дворы, без улицы между ними). */
-const BACK_GAP = 28;
+const BACK_GAP = 28 * S;
 
 export interface TowerOps extends Pick<BlockOps, 'fits' | 'remove' | 'add'> {
   /** На другой стороне улицы перед домом есть застройка: улица не останется пустой с обеих сторон. */

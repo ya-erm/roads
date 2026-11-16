@@ -218,7 +218,8 @@ describe('Бригада, назначенная игроком', () => {
 });
 
 describe('Бригада, назначенная игроком, — в игре', { timeout: 60_000 }, () => {
-  const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 50_000_000, water: 'dry', construction: 'build' };
+  // Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
+  const WORLD: WorldSettings = { seed: 11, size: 'medium', towns: 2, industries: 'few', money: 50_000_000, water: 'dry', construction: 'build' };
   const nodeAt = (game: Game, p: Vec) => [...game.roads.net.nodes.values()].find((n) => dist(n.pos, p) < 1)!.id;
 
   /** Место в поле, далеко от городов: ровная полоса в len метров вдоль x. */

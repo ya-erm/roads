@@ -12,7 +12,8 @@ import { anchorOf, freshGame, road, runSeconds, STREET, withoutCitizens } from '
  * карточках — ссылкой к ней; одинаковые названия строек различает место (Game.projectTitle).
  */
 describe('Маршрут бригады и названия строек', () => {
-  const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 50_000_000, water: 'dry', construction: 'build' };
+  // Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
+  const WORLD: WorldSettings = { seed: 11, size: 'medium', towns: 2, industries: 'few', money: 50_000_000, water: 'dry', construction: 'build' };
   const nodeAt = (game: Game, p: Vec) => [...game.roads.net.nodes.values()].find((n) => dist(n.pos, p) < 1)!.id;
   const length = (pts: readonly Vec[]) => pts.reduce((s, p, i) => (i ? s + dist(pts[i - 1], p) : 0), 0);
 

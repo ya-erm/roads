@@ -91,7 +91,7 @@ function expectHeadBuilding(game: Game, st: Station): void {
 }
 
 describe('Конечная ж/д станция', { timeout: 60_000 }, () => {
-  const world = () => withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
+  const world = () => withoutCitizens(new Game({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
 
   it('в чистом поле: пути от горловины кончаются упорами, у каждой платформы — свой', () => {
     const game = world();

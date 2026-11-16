@@ -1,16 +1,17 @@
+import { TOWN_SCALE } from '../config';
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import type { Rng } from '../core/rng';
 import { add, angleOf, dist, dot, lerp, norm, scale, sub, Vec } from '../core/vec';
 import { edgesAt } from '../lanes/geometry';
 import { Corridor, LaneNet, LaneNode, LaneSlot, twoWay } from '../lanes/model';
 import { biomeOf, townCargo } from './biomes';
-import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST } from './cargo';
+import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST, type IndustryKind } from './cargo';
 import { placePlayerWorld } from './deposits';
 import type { Deposit, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
 import { areaFactor, DEFAULT_SETTINGS, INDUSTRY_DENSITY, playerIndustries, townSizes, WorldProfile, WorldSettings } from './settings';
-import { industryCount, MINING_KINDS, shoreFits, terrainFits } from './sites';
+import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
 import { edgeOf, growTier, inDistrict, JOBS_PER_FLOOR, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, zoneTown } from './townForms';
@@ -106,8 +107,11 @@ export function* townSites(terrain: Terrain, reach: number, attempts: number, pr
   }
 }
 
-/** Какую долю перепада высот под городом срезает площадка: остальное — рельеф, по которому идут улицы. */
-const TOWN_LEVEL = 0.7;
+/**
+ * Какую долю перепада высот под городом срезает площадка: остальное — рельеф, по которому идут улицы. Города крупнее
+ * (TOWN_SCALE) и захватывают больше склонов — срезается чуть больше прежних 0,7.
+ */
+const TOWN_LEVEL = 0.76;
 
 /**
  * Площадка под город: земля под улицами плавно тянется к средней высоте (на TOWN_LEVEL), за городом кисть
@@ -116,7 +120,7 @@ const TOWN_LEVEL = 0.7;
  */
 function levelTown(terrain: Terrain, town: Town): void {
   if (!terrain.hasRelief) return;
-  const r = town.radius * 1.3 + 100;
+  const r = town.radius * 1.3 + 100 * TOWN_SCALE;
   const { mean } = townRelief(terrain, town.center, town.radius);
   terrain.terraform({
     x: town.center.x,
@@ -188,6 +192,61 @@ function playerWorld(ctx: WorldContext, towns: Town[], settings: WorldSettings, 
   return { towns, industries, deposits };
 }
 
+/** Размах будущего города размера size, м — в масштабе застройки (TOWN_SCALE): от него — место на карте. */
+const townReach = (size: number) => (size + 1.5) * 110 * TOWN_SCALE;
+
+/**
+ * Зазор между городами по очереди — доли обычного: сперва полный, а не встал город ни в одно место — меньше, и так
+ * пока не встанет. Города крупнее прежних (TOWN_SCALE ×1,6 — площадь ×2,6), и с прежним зазором на среднюю карту
+ * вставали 5–8 городов из 10; сжимается зазор только у тех, кому не хватило места.
+ */
+const TOWN_GAP_STEPS = [1, 0.78, 0.56, 0.39, 0.28];
+
+/**
+ * Карта занята городами: доля её (без полосы у края) ближе radius + INDUSTRY_TOWN_GAP к центрам городов — больше —
+ * новых городов не ставим, чтобы предприятиям осталось место. На средней и большой карте до этого почти не доходит
+ * (перед десятым городом — до 69 %), на маленькой крупные города (TOWN_SCALE) иначе не оставляли места для цепочек:
+ * там 3–4 города вместо 5–8.
+ */
+const TOWN_COVER_MAX = 0.7;
+
+/** Доля карты ближе radius + INDUSTRY_TOWN_GAP к центру какого-нибудь города — по сетке 100 м. */
+function townCover(terrain: Terrain, towns: readonly Town[]): number {
+  if (!towns.length) return 0;
+  let hit = 0;
+  let n = 0;
+  for (let x = 300; x < terrain.width - 300; x += 100) {
+    for (let y = 300; y < terrain.height - 300; y += 100) {
+      n++;
+      if (towns.some((t) => Math.hypot(t.center.x - x, t.center.y - y) < t.radius + INDUSTRY_TOWN_GAP)) hit++;
+    }
+  }
+  return n ? hit / n : 0;
+}
+
+/**
+ * Ставит город размера size: места — от propose(попытка, зазор) по townSites (attempts попыток на каждый зазор из
+ * TOWN_GAP_STEPS · gap). Не встал ни при каком зазоре — города нет.
+ */
+function placeTown(ctx: WorldContext, towns: Town[], names: string[], size: number, attempts: number, gap: number, propose: (attempt: number, gap: number) => Vec | null): void {
+  const { rng } = ctx;
+  if (townCover(ctx.terrain, towns) >= TOWN_COVER_MAX) return;
+  const reach = townReach(size);
+  for (const k of TOWN_GAP_STEPS) {
+    for (const c of townSites(ctx.terrain, reach, attempts, (attempt) => propose(attempt, gap * k))) {
+      const name = names.splice(rng.int(0, names.length), 1)[0];
+      const style: TownStyle =
+        size === 3 ? 'radial' : size === 2 ? rng.pick(['radial', 'organic', 'organic', 'organic'] as const) : rng.pick(['linear', 'linear', 'organic'] as const);
+      const town = buildTown(ctx, towns.length + 1, c, name, size, style);
+      if (town) {
+        towns.push(town);
+        return;
+      }
+      names.push(name);
+    }
+  }
+}
+
 export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAULT_SETTINGS): World {
   const profile = settings.scenario?.profile;
   if (profile) return generateProfiled(ctx, settings, profile);
@@ -196,31 +255,16 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   // На тесной карте города ставим ближе друг к другу.
   const gap = settings.size === 'small' ? 600 : 900;
   for (const size of townSizes(settings.towns)) {
-    const reach = (size + 1.5) * 110;
-    const propose = () => {
+    const reach = townReach(size);
+    placeTown(ctx, towns, names, size, 80, gap, (_attempt, g) => {
       const c = {
         x: ctx.rng.range(reach + 300, ctx.terrain.width - reach - 300),
         y: ctx.rng.range(reach + 300, ctx.terrain.height - reach - 300),
       };
       if (ctx.terrain.isWater(c, 200)) return null;
-      if (towns.some((t) => dist(t.center, c) < t.radius + reach + gap)) return null;
+      if (towns.some((t) => dist(t.center, c) < t.radius + reach + g)) return null;
       return c;
-    };
-    for (const c of townSites(ctx.terrain, reach, 80, propose)) {
-      const name = names.splice(ctx.rng.int(0, names.length), 1)[0];
-      const style: TownStyle =
-        size === 3
-          ? 'radial'
-          : size === 2
-            ? ctx.rng.pick(['radial', 'organic', 'organic', 'organic'] as const)
-            : ctx.rng.pick(['linear', 'linear', 'organic'] as const);
-      const town = buildTown(ctx, towns.length + 1, c, name, size, style);
-      if (town) {
-        towns.push(town);
-        break;
-      }
-      names.push(name);
-    }
+    });
   }
   assignDemands(towns, ctx.rng, townCargo(settings));
   if (playerIndustries(settings)) return playerWorld(ctx, towns, settings);
@@ -253,10 +297,11 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
     }
   }
   // Чем сильнее тяга, тем ближе к центру скопления ищем место; не нашлось — по всей карте.
-  const spread = Math.max(W, H) * (1 - profile.cluster) + 1600 * profile.cluster;
+  // Города крупнее (TOWN_SCALE) — и пятно скопления шире.
+  const spread = Math.max(W, H) * (1 - profile.cluster) + 1600 * TOWN_SCALE * profile.cluster;
   for (const size of townSizes(settings.towns, profile)) {
-    const reach = (size + 1.5) * 110;
-    const propose = (attempt: number) => {
+    const reach = townReach(size);
+    placeTown(ctx, towns, names, size, 120, profile.gap, (attempt, g) => {
       const free = attempt >= 80 || profile.cluster <= 0;
       const a = rng.range(0, Math.PI * 2);
       const r = rng.range(0, spread * (1 + attempt / 40));
@@ -265,20 +310,9 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
         : { x: focus.x + Math.cos(a) * r, y: focus.y + Math.sin(a) * r };
       const c = { x: Math.max(reach + 300, Math.min(W - reach - 300, raw.x)), y: Math.max(reach + 300, Math.min(H - reach - 300, raw.y)) };
       if (terrain.isWater(c, 200)) return null;
-      if (towns.some((t) => dist(t.center, c) < t.radius + reach + profile.gap)) return null;
+      if (towns.some((t) => dist(t.center, c) < t.radius + reach + g)) return null;
       return c;
-    };
-    for (const c of townSites(terrain, reach, 120, propose)) {
-      const name = names.splice(rng.int(0, names.length), 1)[0];
-      const style: TownStyle =
-        size === 3 ? 'radial' : size === 2 ? rng.pick(['radial', 'organic', 'organic', 'organic'] as const) : rng.pick(['linear', 'linear', 'organic'] as const);
-      const town = buildTown(ctx, towns.length + 1, c, name, size, style);
-      if (town) {
-        towns.push(town);
-        break;
-      }
-      names.push(name);
-    }
+    });
   }
   assignDemands(towns, rng, townCargo(settings));
   if (playerIndustries(settings)) return playerWorld(ctx, towns, settings, profile);
@@ -300,6 +334,7 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
   const hub = [...towns].sort((a, b) => b.population - a.population)[0];
   const hubSpread = Math.max(terrain.width, terrain.height) * (1 - profile.hub) + 2400 * profile.hub;
   const nearWater = new Set(biomeOf(settings).nearWater);
+  const clear = townClearance(ctx, towns);
   for (const info of INDUSTRY_LIST) {
     const plant = info.accepts.length > 0;
     const count = industryCount(settings, info.kind, info.count * density * (plant ? profile.plants : profile.raw));
@@ -322,12 +357,12 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
           const r = rng.range(hub.radius + 300, hub.radius + 300 + hubSpread * (1 + attempt / 60));
           center = { x: hub.center.x + Math.cos(a) * r, y: hub.center.y + Math.sin(a) * r };
           if (center.x < 300 || center.y < 300 || center.x > terrain.width - 300 || center.y > terrain.height - 300) continue;
-        }
+        } else center = shoreSpot(terrain, rng, info.kind, attempt, Math.hypot(info.w, info.h) / 2) ?? center;
         const fp: Footprint = { center, w: info.w, h: info.h, angle: rng.range(-0.6, 0.6) };
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
         if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;
         if (!relaxed && !terrainFits(terrain, center, attempt, MINING_KINDS.has(info.kind))) continue;
-        if (towns.some((t) => dist(t.center, center) < t.radius + 280)) continue;
+        if (!clear(center, info.kind)) continue;
         if (result.some((i) => dist(i.fp.center, center) < (relaxed ? RELAXED_GAP : 520))) continue;
         if (found.some((f) => dist(f.fp.center, center) < 520)) continue;
         if (index.overlaps(fp, 20)) continue;
@@ -655,8 +690,8 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
     id,
     name,
     center,
-    radius: radius + 30,
-    top: top - 30,
+    radius: radius + 30 * TOWN_SCALE,
+    top: top - 30 * TOWN_SCALE,
     style,
     // Ярус — по размеру генерации: от него — типы домов, панельные дома и высотки, парки (townForms.ts).
     tier: tierOfSize(size, style),
@@ -794,8 +829,8 @@ export function streetFace(roads: LaneNet, fp: Footprint): 1 | -1 {
 
 /** Ратуша или собор в центре города: повёрнута вдоль ближайшей улицы и не задевает дороги. */
 function placeLandmark(ctx: WorldContext, town: Town): void {
-  for (const size of [44, 34]) {
-    for (let r = 0; r < 240; r += 12) {
+  for (const size of [44 * TOWN_SCALE, 34 * TOWN_SCALE]) {
+    for (let r = 0; r < 240 * TOWN_SCALE; r += 12) {
       for (let k = 0; k < 16; k++) {
         const a = (k / 16) * Math.PI * 2;
         const center = add(town.center, { x: Math.cos(a) * r, y: Math.sin(a) * r });
@@ -876,33 +911,41 @@ function addLandmark(ctx: WorldContext, town: Town, fp: Footprint): void {
  * Застраивает улицу домами по обеим сторонам. density — доля занятых мест;
  * reach — дальше этого от центра города домов не ставим.
  */
-/** Обычный участок дома: по улице и вглубь, м (большой у центра — 32–44 × 28–34). */
-export const LOT = { w: [22, 30], h: [22, 30] } as const;
+/**
+ * Обычный участок дома: по улице и вглубь, м (большой у центра — 51–70 × 45–54). Прежние 22–30 (и 32–44 × 28–34) —
+ * в масштабе застройки TOWN_SCALE.
+ */
+export const LOT = { w: [22 * TOWN_SCALE, 30 * TOWN_SCALE], h: [22 * TOWN_SCALE, 30 * TOWN_SCALE] } as const;
+const BIG_LOT = { w: [32 * TOWN_SCALE, 44 * TOWN_SCALE], h: [28 * TOWN_SCALE, 34 * TOWN_SCALE] } as const;
+/** Дом второго ряда: глубина участка и зазор до переднего, м. */
+const REAR_LOT = { h: [20 * TOWN_SCALE, 26 * TOWN_SCALE], gap: 4 * TOWN_SCALE } as const;
+/** От концов улицы (перекрёсток, тупик) до первого участка, м: угол квартала — участкам поперечной улицы. */
+const STREET_END = { start: 26 * TOWN_SCALE, end: 22 * TOWN_SCALE } as const;
 
 export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density: number, limit = Infinity, reach = Infinity): number {
   const { rng } = ctx;
   const hw = corridorHalf(seg);
   let added = 0;
   for (const side of [-1, 1]) {
-    let s = 26;
-    while (s < seg.length - 26 && added < limit) {
+    let s = STREET_END.start;
+    while (s < seg.length - STREET_END.start && added < limit) {
       const p0 = seg.lut.pointAt(s);
       const closeness = 1 - Math.min(1, dist(p0, town.center) / Math.max(1, town.radius));
-      // Участки — в масштабе дорог (полоса 7 м): дом с двором 22–30 м по улице, большой участок у центра — 32–44.
+      // Участки — в масштабе дорог (полоса 7 м, машина 7 × 4): дом с двором 35–48 м по улице, большой у центра — 51–70.
       const big = closeness > 0.55 && rng.chance(0.55);
-      const width = big ? rng.range(32, 44) : rng.range(LOT.w[0], LOT.w[1]);
-      const depth = big ? rng.range(28, 34) : rng.range(LOT.h[0], LOT.h[1]);
+      const width = big ? rng.range(BIG_LOT.w[0], BIG_LOT.w[1]) : rng.range(LOT.w[0], LOT.w[1]);
+      const depth = big ? rng.range(BIG_LOT.h[0], BIG_LOT.h[1]) : rng.range(LOT.h[0], LOT.h[1]);
       const at = s + width / 2;
-      if (at + width / 2 > seg.length - 22) break;
-      s += width + rng.range(2, 5);
+      if (at + width / 2 > seg.length - STREET_END.end) break;
+      s += width + rng.range(2, 5) * TOWN_SCALE;
       if (rng.next() > density || dist(p0, town.center) > reach) continue;
       const p = seg.lut.pointAt(at);
       const t = seg.lut.tangentAt(at);
       const normal = { x: -t.y * side, y: t.x * side };
       const center = add(p, scale(normal, hw + 5 + depth / 2));
       const fp: Footprint = { center, w: width, h: depth, angle: Math.atan2(t.y, t.x) };
-      // Парки и скверы (townParks.ts) рост обходит: дом на них не встаёт.
-      if (!placeable(ctx, fp, seg.id) || onPark(town, fp)) continue;
+      // Парки и скверы (townParks.ts) рост обходит: дом на них не встаёт; к домам соседнего города — тоже.
+      if (!placeable(ctx, fp, seg.id) || onPark(town, fp) || foreignNear(ctx, town, fp)) continue;
       const kind: 'res' | 'com' = closeness > 0.6 && rng.chance(0.6) ? 'com' : rng.chance(0.1) ? 'com' : 'res';
       const [color, roof] = rng.pick(kind === 'com' ? COM_COLORS : big ? BLOCK_COLORS : RES_COLORS);
       const floors = kind === 'com' ? rng.int(2, 6) : big ? rng.int(3, 6) : rng.int(1, 3);
@@ -924,14 +967,14 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
       added++;
       // Второй ряд домов в глубине квартала — чаще ближе к центру.
       if (added < limit && rng.chance(0.15 + 0.4 * closeness)) {
-        const d2 = rng.range(20, 26);
+        const d2 = rng.range(REAR_LOT.h[0], REAR_LOT.h[1]);
         const rear: Footprint = {
-          center: add(p, scale(normal, hw + 5 + depth + 4 + d2 / 2)),
+          center: add(p, scale(normal, hw + 5 + depth + REAR_LOT.gap + d2 / 2)),
           w: width * rng.range(0.85, 1),
           h: d2,
           angle: fp.angle,
         };
-        if (placeable(ctx, rear, seg.id) && !onPark(town, rear)) {
+        if (placeable(ctx, rear, seg.id) && !onPark(town, rear) && !foreignNear(ctx, town, rear)) {
           const [rc, rr] = rng.pick(RES_COLORS);
           const back: TownBuilding = { ...b, id: ctx.nextId(), fp: rear, kind: 'res', floors: rng.int(1, 3), color: rc, roof: rr, rear: true };
           ctx.index.add(back);
@@ -942,6 +985,18 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
     }
   }
   return added;
+}
+
+/**
+ * Между участками разных городов — поле не уже стольких метров: города крупнее (TOWN_SCALE) и стоят теснее, но не
+ * срастаются в один ни при генерации, ни при росте.
+ */
+const TOWN_SEAM = 40 * TOWN_SCALE;
+
+/** Участок fp ближе TOWN_SEAM к дому другого города. */
+function foreignNear(ctx: WorldContext, town: Town, fp: Footprint): boolean {
+  const r = footprintRadius(fp) + TOWN_SEAM;
+  return ctx.index.near(fp.center, r + 120).some((x) => x.type === 'building' && x.townId !== town.id && dist(x.fp.center, fp.center) < r + footprintRadius(x.fp));
 }
 
 /** Магистраль или съезд развязки: город к ним не пристраивается. */
@@ -1018,8 +1073,9 @@ export function recountPopulation(town: Town): void {
 export function coreRadius(town: Town): number {
   const ds = town.buildings.map((b) => dist(b.fp.center, town.center)).sort((a, b) => a - b);
   if (!ds.length) return 0;
-  const W = 80;
-  let r = Math.max(60, ds[Math.floor(ds.length / 2)]);
+  // Кольцо и шаг — в масштабе застройки: домов в кольце столько же, сколько при прежних участках.
+  const W = 80 * TOWN_SCALE;
+  let r = Math.max(60 * TOWN_SCALE, ds[Math.floor(ds.length / 2)]);
   let i = 0;
   while (i < ds.length && ds[i] <= r) i++;
   const core = i / (Math.PI * r * r);
@@ -1027,7 +1083,7 @@ export function coreRadius(town: Town): number {
   for (;;) {
     while (j < ds.length && ds[j] <= r + W) j++;
     if (j - i < core * 0.2 * Math.PI * ((r + W) ** 2 - r ** 2)) break;
-    r += 20;
+    r += 20 * TOWN_SCALE;
     while (i < ds.length && ds[i] <= r) i++;
   }
   return Math.min(ds[ds.length - 1], r + W / 2);
@@ -1041,7 +1097,7 @@ export function measureTown(town: Town): void {
   if (!town.buildings.length) return;
   let far = 0;
   for (const b of town.buildings) far = Math.max(far, dist(b.fp.center, town.center) + footprintRadius(b.fp));
-  town.radius = Math.max(100, coreRadius(town) + 30);
+  town.radius = Math.max(100 * TOWN_SCALE, coreRadius(town) + 30 * TOWN_SCALE);
   town.extent = Math.max(town.radius, far + 10);
   // Типы застройки и жильцы новым домам (и домам старых сохранений) — по месту в городе нынешнего размера
   // (townForms.ts); население — по жильцам; дорос — ярус выше.
@@ -1136,25 +1192,50 @@ function plantTowns(ctx: WorldContext, towns: Town[]): void {
   for (const t of towns) placeParks(t, site);
 }
 
+/** Предприятие при генерации — не ближе стольких метров к краю застройки города. */
+const INDUSTRY_TOWN_GAP = 280;
+
+/**
+ * Точка далеко от городов — место под предприятие: дальше INDUSTRY_TOWN_GAP от плотной застройки (по coreRadius, как
+ * у measureTown, а не по концам улиц-выездов: города крупнее — TOWN_SCALE, и круг по выездам закрывал полкарты,
+ * с берегами для рыбаков) и не ближе 200 м к любому дому за ней.
+ */
+function townClearance(ctx: WorldContext, towns: Town[]): (p: Vec, kind: IndustryKind) => boolean {
+  const edge = new Map(towns.map((t) => [t, Math.max(100 * TOWN_SCALE, coreRadius(t) + 30 * TOWN_SCALE)]));
+  return (p, kind) => {
+    // Рыбаки — на берегу, а берега рек — в городах: им можно ближе к городу (рыбацкая слобода у окраины).
+    const gap = kind === 'fishery' ? FISHERY_TOWN_GAP : INDUSTRY_TOWN_GAP;
+    const houseGap = Math.min(200, gap);
+    return (
+      !towns.some((t) => dist(t.center, p) < edge.get(t)! + gap) &&
+      !ctx.index.near(p, houseGap + 60).some((x) => x.type === 'building' && dist(x.fp.center, p) < houseGap + footprintRadius(x.fp))
+    );
+  };
+}
+/** Рыбаки — не ближе стольких метров к краю застройки (остальные — INDUSTRY_TOWN_GAP). */
+const FISHERY_TOWN_GAP = 100;
+
 function placeIndustries(ctx: WorldContext, towns: Town[], density: number, settings: WorldSettings): Industry[] {
   const { rng, terrain, index } = ctx;
   const result: Industry[] = [];
   const nearWater = new Set(biomeOf(settings).nearWater);
-  // У мира с биомом цепочек меньше и каждое звено на счету: не нашлось места за обычные попытки — ищем ещё,
-  // ближе к соседям и на любом склоне. Старый мир — ровно как раньше (те же попытки и та же раскладка).
-  const attempts = settings.biome ? RELAXED_ATTEMPTS : NORMAL_ATTEMPTS;
+  const clear = townClearance(ctx, towns);
+  // Каждое звено цепочки на счету: не нашлось места за обычные попытки — ищем ещё, ближе к соседям и на любом склоне.
+  // Прежде так — только у мира с биомом; города крупнее (TOWN_SCALE), и старому миру без биома тоже не хватало места.
+  const attempts = RELAXED_ATTEMPTS;
   for (const info of INDUSTRY_LIST) {
     // Каждого вида биома хотя бы одно, чтобы все цепочки были замкнуты; видов не из биома — ни одного.
     const count = industryCount(settings, info.kind, info.count * density);
     for (let n = 0; n < count; n++) {
       for (let attempt = 0; attempt < attempts; attempt++) {
         const relaxed = attempt >= NORMAL_ATTEMPTS;
-        const center = { x: rng.range(300, terrain.width - 300), y: rng.range(300, terrain.height - 300) };
+        const random = { x: rng.range(300, terrain.width - 300), y: rng.range(300, terrain.height - 300) };
+        const center = shoreSpot(terrain, rng, info.kind, attempt, Math.hypot(info.w, info.h) / 2) ?? random;
         const fp: Footprint = { center, w: info.w, h: info.h, angle: rng.range(-0.6, 0.6) };
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
         if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;
         if (!relaxed && !terrainFits(terrain, center, attempt, MINING_KINDS.has(info.kind))) continue;
-        if (towns.some((t) => dist(t.center, center) < t.radius + 280)) continue;
+        if (!clear(center, info.kind)) continue;
         if (result.some((i) => dist(i.fp.center, center) < (relaxed ? RELAXED_GAP : 520))) continue;
         if (index.overlaps(fp, 20)) continue;
         const nearest = towns.reduce<Town | null>((best, t) => (!best || dist(t.center, center) < dist(best.center, center) ? t : best), null);

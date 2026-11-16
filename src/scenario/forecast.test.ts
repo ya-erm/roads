@@ -124,9 +124,9 @@ describe('Прогноз к сроку', () => {
 });
 
 describe('Расписание по линиям игры', () => {
-  /** Сценарий с грузовым маршрутом ферма → пищекомбинат (на этой карте они рядом — маршрут строится). */
+  /** Сценарий с грузовым маршрутом ферма → пищекомбинат (на этой карте они рядом, ~640 м — маршрут строится). */
   function route() {
-    const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 5, scenario: { difficulty: 'easy', challenge: false } }));
+    const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 7, scenario: { difficulty: 'easy', challenge: false } }));
     const r = freightRoute(game);
     expect(r.built).toBe(true);
     const haul: Haul = { kind: 'cargo', cargo: r.from.info.produces, to: refOf(r.to) };

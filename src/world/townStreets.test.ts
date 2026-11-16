@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TOWN_SCALE } from '../config';
 import { dist } from '../core/vec';
 import { Game } from '../game/game';
 import type { Town } from './entities';
@@ -29,11 +30,11 @@ describe('Улицы города — как у настоящего', { timeout
     const radial = towns.filter(({ town }) => town.style === 'radial');
     expect(radial.length).toBeGreaterThan(0);
     for (const { game, town } of radial) {
-      // Площадь: дуги вокруг ратуши ближе 130 м от центра.
-      const square = town.streets.map((id) => game.roads.net.corridor(id)).filter((c) => [c.curve.p0, c.curve.p3].every((p) => dist(p, town.center) < 130));
+      // Площадь: дуги вокруг ратуши ближе 130 м от центра (в масштабе застройки — TOWN_SCALE).
+      const square = town.streets.map((id) => game.roads.net.corridor(id)).filter((c) => [c.curve.p0, c.curve.p3].every((p) => dist(p, town.center) < 130 * TOWN_SCALE));
       expect(square.length).toBeGreaterThanOrEqual(3);
       // Из центра — главные улицы-выезды: узлов дальше полутора сотен метров больше, чем у площади.
-      const far = [...degrees(game, town).keys()].filter((id) => dist(game.roads.net.node(id).pos, town.center) > 400);
+      const far = [...degrees(game, town).keys()].filter((id) => dist(game.roads.net.node(id).pos, town.center) > 400 * TOWN_SCALE);
       expect(far.length).toBeGreaterThan(10);
     }
   });

@@ -81,7 +81,8 @@ describe('Биомы: генерация мира', () => {
   for (const b of BIOME_LIST) {
     it(`${b.name}: мир генерируется, все цепочки и потребности выполнимы`, () => {
       const g = world(b.id);
-      expect(g.towns.length).toBeGreaterThan(3);
+      // Маленькая карта: крупных городов (TOWN_SCALE) встаёт 3–4 — остальное место у цепочек предприятий.
+      expect(g.towns.length).toBeGreaterThanOrEqual(3);
       const kinds = kindsOf(b.id);
       for (const i of g.industries) {
         expect(kinds.has(i.info.kind), `${i.info.kind} не из биома`).toBe(true);

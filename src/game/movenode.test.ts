@@ -13,7 +13,8 @@ function runSeconds(game: Game, seconds: number) {
 }
 
 function dryGame(): Game {
-  return new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  // Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
+  return new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
 }
 
 /** Строит цепочку прямых улиц через точки, если всё помещается. Возвращает узлы по порядку. */

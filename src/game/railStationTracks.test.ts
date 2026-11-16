@@ -58,7 +58,7 @@ describe('Вокзал на один путь', { timeout: 30_000 }, () => {
   });
 
   it('в чистом поле: платформа на главном пути, без обгонного — дешевле, чем на два', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = new Game({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' });
     let st: Station | null = null;
     for (let y = 600; y < game.terrain.height - 600 && !st; y += 300) {
       for (let x = 600; x < game.terrain.width - 600 && !st; x += 300) {
@@ -89,7 +89,7 @@ describe('Вокзал на один путь', { timeout: 30_000 }, () => {
 
   it('поезд ходит между вокзалами на один путь', () => {
     // Путь в чистом поле: машины жителей сюда не доезжают — без них счёт в разы быстрее.
-    const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' }));
+    const game = withoutCitizens(new Game({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' }));
     const len = 2400;
     const { from, dir, n } = layTrack(game, len);
     const a = game.placeStation(add(add(from, scale(dir, 400)), scale(n, 40)), 14, 'rail', { pax: true, cargo: true }, 0, 1)!;
@@ -111,7 +111,7 @@ describe('Вокзал на один путь', { timeout: 30_000 }, () => {
 
 describe('Длина вокзала', { timeout: 40_000 }, () => {
   // Вокзалы в чистом поле, без машин жителей (сюда они не доезжают, а счёт отнимают).
-  const world = () => withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
+  const world = () => withoutCitizens(new Game({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
   /** Вокзал с платформами длиной length на пути: в точке dist от начала, со стороны n. */
   const station = (game: Game, at: Vec, length: number, tracks = 2): Station => {
     const st = game.placeStation(at, 14, 'rail', { pax: true, cargo: true }, 0, tracks, length);
