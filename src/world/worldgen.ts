@@ -10,7 +10,7 @@ import { placePlayerWorld } from './deposits';
 import type { Deposit, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
-import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerIndustries, townSizes, WorldProfile, WorldSettings } from './settings';
+import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerIndustries, townCount, townSizes, WorldProfile, WorldSettings } from './settings';
 import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
@@ -206,7 +206,8 @@ const TOWN_GAP_STEPS = [1, 0.78, 0.56, 0.39, 0.28];
  * Карта занята городами: доля её (без полосы у края) ближе radius + INDUSTRY_TOWN_GAP к центрам городов — больше —
  * новых городов не ставим, чтобы предприятиям осталось место. На средней и большой карте до этого почти не доходит
  * (перед десятым городом — до 69 %), на маленькой крупные города (TOWN_SCALE) иначе не оставляли места для цепочек:
- * там 3–4 города вместо 5–8.
+ * там 3–4 города вместо 5–8. На картах новой партии (mapScale, площадь ×2,25) занятость почти не мешает — пустила бы
+ * 9–10 городов и на маленькую; там число задаёт размер карты (TOWN_RANGE, townCount).
  */
 const TOWN_COVER_MAX = 0.7;
 
@@ -254,7 +255,8 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   const names = [...TOWN_NAMES];
   // На тесной карте города ставим ближе друг к другу; на крупной карте (mapScale) зазор во столько же раз больше.
   const gap = (settings.size === 'small' ? 600 : 900) * mapScaleOf(settings);
-  for (const size of townSizes(settings.towns)) {
+  // Число — по размеру карты (TOWN_RANGE), у старой партии — как в настройках.
+  for (const size of townSizes(townCount(settings))) {
     const reach = townReach(size);
     placeTown(ctx, towns, names, size, 80, gap, (_attempt, g) => {
       const c = {
@@ -301,7 +303,7 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
   // Крупная карта (mapScale) — и зазор, и пятно скопления во столько же раз больше.
   const k = mapScaleOf(settings);
   const spread = Math.max(W, H) * (1 - profile.cluster) + 1600 * TOWN_SCALE * k * profile.cluster;
-  for (const size of townSizes(settings.towns, profile)) {
+  for (const size of townSizes(townCount(settings), profile)) {
     const reach = townReach(size);
     placeTown(ctx, towns, names, size, 120, profile.gap * k, (attempt, g) => {
       const free = attempt >= 80 || profile.cluster <= 0;

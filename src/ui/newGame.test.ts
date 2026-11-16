@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ScenarioSettings } from '../scenario/types';
 import { BIOME_LIST, BIOMES, biomeForSeed } from '../world/biomes';
-import { DEFAULT_SETTINGS, MAP_SCALE, mapDims, type WorldSettings } from '../world/settings';
+import { DEFAULT_SETTINGS, MAP_SCALE, mapDims, TOWN_RANGE, type WorldSettings } from '../world/settings';
 import { Rng } from '../core/rng';
 import { prepareSettings } from '../scenario/generator';
 import { Terrain } from '../world/terrain';
@@ -19,7 +19,8 @@ import {
 import { scenarioOptionsHtml } from './scenarioUi';
 
 const remembered: ScenarioSettings = { difficulty: 'hard', challenge: true };
-const sandbox: WorldSettings = { ...DEFAULT_SETTINGS, seed: 5, towns: 14, money: 1_000_000, biome: 'taiga', biomeBySeed: true };
+// Городов — в пределах средней карты (TOWN_RANGE): больше черновик ужмёт (townRange.test.ts).
+const sandbox: WorldSettings = { ...DEFAULT_SETTINGS, seed: 5, towns: 7, money: 1_000_000, biome: 'taiga', biomeBySeed: true };
 
 /** Элементы с data-tip, внутри которых есть ещё элемент с data-tip: их подсказки всплывают разом и накрывают друг друга. */
 function nestedTips(html: string): number {
@@ -85,7 +86,7 @@ describe('Новая игра: режим по умолчанию', () => {
     expect(d.settings.scenario).toEqual(remembered);
     expect(d.settings.seed).toBe(77);
     // Переключат на «Песочницу» — города и капитал прежние.
-    expect(d.settings.towns).toBe(14);
+    expect(d.settings.towns).toBe(7);
     expect(d.settings.money).toBe(1_000_000);
     expect(d.scenario).toEqual(remembered);
   });
@@ -107,7 +108,7 @@ describe('Новая игра: режим по умолчанию', () => {
       const d = newGameDraft(played, from, remembered, 11);
       expect(d.settings.scenario).toEqual({ difficulty: 'easy', challenge: false });
       expect(d.scenario).toEqual({ difficulty: 'easy', challenge: false });
-      expect(d.settings.towns).toBe(DEFAULT_SETTINGS.towns);
+      expect(d.settings.towns).toBe(TOWN_RANGE.medium.base);
     }
     const picked = newGameDraft({ ...played, scenario: { difficulty: 'normal', challenge: true, pick: 'logistics' } }, 'menu', remembered, 1);
     expect(picked.settings.scenario).toEqual({ difficulty: 'normal', challenge: true, pick: 'logistics' });

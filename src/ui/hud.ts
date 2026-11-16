@@ -184,8 +184,10 @@ import {
   type NewGameFrom,
   nextScenarioSettings,
   rulesHtml,
+  stepTowns,
   withBiome,
   withSeed,
+  withSize,
 } from './newGame';
 import { edgeScrollStep } from './edgeScroll';
 
@@ -1159,11 +1161,12 @@ export class Hud {
         break;
       }
       case 'ng-set':
-        this.draft = { ...this.draft, [d.key!]: d.key === 'money' ? Number(d.v) : d.v };
+        // Другой размер карты — и число городов в его пределах (TOWN_RANGE).
+        this.draft = d.key === 'size' ? withSize(this.draft, d.v as MapSize) : { ...this.draft, [d.key!]: d.key === 'money' ? Number(d.v) : d.v };
         this.renderNewGame();
         break;
       case 'ng-towns':
-        this.draft = { ...this.draft, towns: Math.max(4, Math.min(20, this.draft.towns + Number(d.d))) };
+        this.draft = stepTowns(this.draft, Number(d.d));
         this.renderNewGame();
         break;
       case 'ng-seed':

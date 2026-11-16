@@ -267,9 +267,10 @@ describe('Автовокзал вдоль дороги, с дублёром', ()
 /**
  * Миры, где в городах есть и короткие кварталы (75–90 м), и длинные: кварталы крупные (townStreets.BLOCK), короткие
  * улицы между перекрёстками встречаются по нескольку на мир — берём три мира (на карте нового масштаба, mapScale:
- * города там стоят иначе, и короткие кварталы — в других мирах).
+ * города там стоят иначе, и короткие кварталы — в других мирах; городов по размеру карты, TOWN_RANGE, — в мире 2
+ * коротких не осталось).
  */
-const SHORT_BLOCK_SEEDS = [8, 10, 2];
+const SHORT_BLOCK_SEEDS = [8, 10, 4];
 const cityGame = (seed: number) => {
   const game = withoutCitizens(new Game({ ...NEW_GAME_SETTINGS, seed, scenario: { difficulty: 'normal', challenge: false } }));
   game.money = 1e9;

@@ -5,8 +5,20 @@
 import type { ScenarioSettings } from '../scenario/types';
 import { BIOME_LIST, BIOMES, type BiomeId, biomeForSeed, biomeRaw } from '../world/biomes';
 import { CARGO, type CargoType, INDUSTRY_LIST } from '../world/cargo';
-import { DEFAULT_SETTINGS, MAP_SCALE, type MapSize, mapDims, NEW_GAME_SETTINGS, type Relief, type WorldSettings } from '../world/settings';
 import { KM_PER_UNIT } from '../scenario/analysis';
+import {
+  DEFAULT_SETTINGS,
+  MAP_SCALE,
+  type MapSize,
+  mapDims,
+  mapScaleOf,
+  NEW_GAME_SETTINGS,
+  type Relief,
+  TOWN_RANGE,
+  townCount,
+  townLimits,
+  type WorldSettings,
+} from '../world/settings';
 import { cargoIcon, townIcon } from './cargoIcons';
 import { biomeRandomSvg, biomeSvg, diceBadgeSvg } from './icons';
 import { diceMapSvg } from './scenarioIcons';
@@ -44,7 +56,9 @@ export function biomeIsRandom(s: Pick<WorldSettings, 'seed' | 'biome' | 'biomeBy
 export function withSeed(s: WorldSettings, seed: number): WorldSettings {
   const random = biomeIsRandom(s);
   // Масштаб карты — всегда нынешний: новая партия после старой (без поля) — на карте нового размера.
-  return { ...s, seed, biome: random ? biomeForSeed(seed) : s.biome, biomeBySeed: random, mapScale: MAP_SCALE };
+  const next: WorldSettings = { ...s, seed, biome: random ? biomeForSeed(seed) : s.biome, biomeBySeed: random, mapScale: MAP_SCALE };
+  // Городов — в пределах размера карты (после старой партии на 14 городов средняя — 9).
+  return { ...next, towns: townCount(next) };
 }
 
 /** Биом в черновике: карточкой биома — он сам, «Случайно» — тот, что даёт seed черновика. */
@@ -62,6 +76,22 @@ export function mapSizeKm(size: MapSize, mapScale: number | undefined): string {
   // До десятых — с округлением половины вверх: 12 750 ед. — 7,65 км → «7.7» (умножение на 0.0006 даёт 7.6499…).
   const km = (u: number) => (Math.round(u * KM_PER_UNIT * 10 + 1e-6) / 10).toFixed(1);
   return `${km(m.w)} × ${km(m.h)} км`;
+}
+
+/**
+ * Другой размер карты в черновике: городов — в его пределах (TOWN_RANGE); было обычное число прежнего размера —
+ * обычное и у нового (средняя 8 → маленькая 5), выбранное игроком — ближайшее допустимое.
+ */
+export function withSize(s: WorldSettings, size: MapSize): WorldSettings {
+  const usual = mapScaleOf(s) > 1 && s.towns === TOWN_RANGE[s.size].base;
+  const next = { ...s, size };
+  return { ...next, towns: usual ? TOWN_RANGE[size].base : townCount(next) };
+}
+
+/** «−» / «+» у числа городов: на шаг, в пределах размера карты (townLimits). */
+export function stepTowns(s: WorldSettings, d: number): WorldSettings {
+  const { min, max } = townLimits(s);
+  return { ...s, towns: Math.max(min, Math.min(max, s.towns + d)) };
 }
 
 /**
@@ -98,6 +128,8 @@ export const DEFAULT_RELIEF: Relief = 'hills';
 function scenarioBase(s: WorldSettings): WorldSettings {
   return {
     ...DEFAULT_SETTINGS,
+    // Городов — обычное число для размера карты (переключат на «Песочницу» — столько и будет).
+    towns: TOWN_RANGE[s.size].base,
     // Предприятия — как в прежней партии; у старой (без поля) — как в новой игре: строит игрок.
     industryMode: s.industryMode ?? NEW_GAME_SETTINGS.industryMode,
     size: s.size,

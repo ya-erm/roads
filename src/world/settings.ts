@@ -153,9 +153,10 @@ export const DEFAULT_SETTINGS: WorldSettings = {
 
 /**
  * Новая партия — из игры (первый запуск, «?seed=», окно «Новая игра»): предприятия строит игрок. DEFAULT_SETTINGS —
- * без поля, «Готовые»: по нему мир по seed прежний (на нём держатся тесты старой раскладки).
+ * без поля, «Готовые»: по нему мир по seed прежний (на нём держатся тесты старой раскладки). Городов — обычное
+ * число для средней карты (TOWN_RANGE.medium.base).
  */
-export const NEW_GAME_SETTINGS: WorldSettings = { ...DEFAULT_SETTINGS, industryMode: 'player', mapScale: MAP_SCALE };
+export const NEW_GAME_SETTINGS: WorldSettings = { ...DEFAULT_SETTINGS, towns: 8, industryMode: 'player', mapScale: MAP_SCALE };
 
 /** Размеры городов: немного крупных, больше средних, остальные маленькие (доли — по профилю сценария). */
 export function townSizes(count: number, shares: { big: number; mid: number } = { big: 0.2, mid: 0.4 }): number[] {
@@ -166,6 +167,36 @@ export function townSizes(count: number, shares: { big: number; mid: number } = 
 
 /** Масштаб карты партии (WorldSettings.mapScale): нет поля — 1, старое сохранение. */
 export const mapScaleOf = (s: Pick<WorldSettings, 'mapScale'>): number => s.mapScale ?? 1;
+
+/**
+ * Сколько городов на карте новой партии (с mapScale), по размеру: наименьшее, обычное (base) и наибольшее число.
+ * Раньше число ограничивала только занятость карты (TOWN_COVER_MAX в worldgen): на прежней маленькой карте
+ * (6400 × 4300 м, 27,5 млн м²) вставали 3–4 города из 10. Карта ×1,5 по стороне — площадь ×2,25, города того же
+ * размера, и при той же занятости вставало 9–10 городов (маленькая 9600 × 6450 — 62 млн м², ~6,5 млн м² на город).
+ * Здесь число растёт с площадью, но медленнее неё: на маленькой ~12 млн м² на город (5), на средней 14 400 × 9600
+ * (138 млн м²) ~17 (8), на большой 19 200 × 12 750 (245 млн м²) ~22 (11). Чем больше карта, тем реже города:
+ * между ними поле и длинные трассы. Сценарий умножает обычное число на долю архетипа и не выходит за пределы.
+ */
+export const TOWN_RANGE: Record<MapSize, { min: number; base: number; max: number }> = {
+  small: { min: 4, base: 5, max: 6 },
+  medium: { min: 6, base: 8, max: 9 },
+  large: { min: 9, base: 11, max: 13 },
+};
+
+/** Пределы числа городов в настройках: у новой партии (mapScale) — по TOWN_RANGE, у старой — прежние 4…20. */
+export function townLimits(s: Pick<WorldSettings, 'size' | 'mapScale'>): { min: number; max: number } {
+  return mapScaleOf(s) > 1 ? TOWN_RANGE[s.size] : { min: 4, max: 20 };
+}
+
+/**
+ * Сколько городов ставит генератор. У новой партии (mapScale) — в пределах TOWN_RANGE по размеру карты, что бы ни
+ * просили настройки или сценарий; у старой (без масштаба) — как в настройках, и мир по seed прежний.
+ */
+export function townCount(s: Pick<WorldSettings, 'towns' | 'size' | 'mapScale'>): number {
+  if (mapScaleOf(s) <= 1) return s.towns;
+  const r = TOWN_RANGE[s.size];
+  return Math.max(r.min, Math.min(r.max, s.towns));
+}
 
 /** Размер карты партии, м: базовый по MAP_SIZES, умноженный на её масштаб. */
 export function mapDims(s: Pick<WorldSettings, 'size' | 'mapScale'>): { w: number; h: number } {
@@ -185,7 +216,7 @@ export function areaFactor(s: WorldSettings): number {
 
 /**
  * Множитель числа предприятий (и месторождений) по размеру карты: базовая площадь, а масштаб — по стороне, не по
- * площади. Городов на крупной карте столько же, расстояния между ними — в mapScale раз больше; предприятий —
+ * площади. Городов — по размеру карты (TOWN_RANGE), расстояния между ними — в mapScale раз больше; предприятий —
  * в mapScale раз больше, и они реже: соседние — в √mapScale раз дальше (×1,22 при 1,5). Цепочки длиннее, но
  * выбор у игрока шире, а грузовиков на линию не вдвое больше.
  */

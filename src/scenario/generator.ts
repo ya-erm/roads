@@ -15,7 +15,7 @@ import { buildCost, freeDeposits, harmClass, isRaw } from '../world/enterprise';
 import { TOWN_NEED } from '../world/entities';
 import { townNeed } from '../world/townSupply';
 import type { Industry, Town } from '../world/entities';
-import type { WorldSettings } from '../world/settings';
+import { mapDims, mapScaleOf, TOWN_RANGE, type WorldSettings } from '../world/settings';
 import {
   bigTowns,
   cargoPotential,
@@ -121,8 +121,17 @@ export function prepareSettings(settings: WorldSettings): WorldSettings {
   const rng = new Rng(mixSeed(settings.seed, ARCHETYPE_SALT));
   const id = sc.pick ?? pickWeighted(rng, ARCHETYPE_LIST.map((a) => ({ v: a.id, w: a.weight })));
   const a = ARCHETYPES[id];
-  const towns = Math.max(4, Math.min(20, Math.round(BASE_TOWNS[settings.size] * a.towns)));
-  return { ...settings, towns, industries: a.industries, scenario: { ...sc, archetype: id, profile: a.profile } };
+  return { ...settings, towns: scenarioTowns(settings, a.towns), industries: a.industries, scenario: { ...sc, archetype: id, profile: a.profile } };
+}
+
+/**
+ * Сколько городов просит архетип (доля share от обычного числа). Новая партия (mapScale) — от обычного числа для
+ * размера карты и в его пределах (TOWN_RANGE): «Разрозненные поселения» на маленькой — 6, а не 9; старая — как было.
+ */
+export function scenarioTowns(settings: Pick<WorldSettings, 'size' | 'mapScale'>, share: number): number {
+  if (mapScaleOf(settings) <= 1) return Math.max(4, Math.min(20, Math.round(BASE_TOWNS[settings.size] * share)));
+  const r = TOWN_RANGE[settings.size];
+  return Math.max(r.min, Math.min(r.max, Math.round(r.base * share)));
 }
 
 export function pickWeighted<T>(rng: Rng, items: { v: T; w: number }[]): T {
@@ -135,15 +144,25 @@ export function pickWeighted<T>(rng: Rng, items: { v: T; w: number }[]): T {
   return items[items.length - 1].v;
 }
 
-/** Подходит ли готовая карта под архетип: из этого правда получится такая игра. */
-export function fits(id: ArchetypeId, r: RegionInfo): boolean {
+/**
+ * Подходит ли готовая карта под архетип: из этого правда получится такая игра. «Разрозненные поселения» на карте
+ * новой партии (mapScale) — городов почти сколько можно для её размера (TOWN_RANGE) и они далеко друг от друга по
+ * меркам её площади; на старой — как было.
+ */
+export function fits(id: ArchetypeId, r: RegionInfo, settings: Pick<WorldSettings, 'size' | 'mapScale'>): boolean {
   switch (id) {
     case 'industrial':
       return r.compactChains >= 3;
     case 'agglomeration':
       return r.bigTowns >= 2 && r.closeBigPairs >= 1;
-    case 'scattered':
-      return r.towns >= 7 && r.spacing >= 2000;
+    case 'scattered': {
+      if (mapScaleOf(settings) <= 1) return r.towns >= 7 && r.spacing >= 2000;
+      // До ближайшего соседа в среднем — не меньше 0,75 стороны квадрата, что приходится на город: на маленькой при
+      // 6 городах ~2,4 км, на средней при 9 — ~2,9, на большой при 13 — ~3,3 (у «Разрозненных» по 20 seed —
+      // 2,6–3,3 / 3,2–3,9 / 3,3–3,9 км: подходят все; в песочнице на маленькой с теми же 6 городами — от 2,2 км).
+      const m = mapDims(settings);
+      return r.towns >= TOWN_RANGE[settings.size].max - 1 && r.spacing >= 0.75 * Math.sqrt((m.w * m.h) / r.towns);
+    }
     case 'logistics':
       return r.hubIndustries >= 8;
     case 'mixed':
@@ -247,8 +266,8 @@ export function startScenario(sc: Scenario): void {
   const s = sc.state;
   const r = region(game);
   const planned = s.settings.archetype ?? 'mixed';
-  if (!fits(planned, r)) {
-    const ok = ARCHETYPE_LIST.filter((a) => a.id !== planned && a.id !== 'mixed' && fits(a.id, r));
+  if (!fits(planned, r, game.settings)) {
+    const ok = ARCHETYPE_LIST.filter((a) => a.id !== planned && a.id !== 'mixed' && fits(a.id, r, game.settings));
     s.archetype = ok.length ? pickWeighted(sc.rng, ok.map((a) => ({ v: a.id, w: a.weight }))) : 'mixed';
   } else s.archetype = planned;
   const arch = ARCHETYPES[s.archetype];
