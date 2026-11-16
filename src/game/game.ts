@@ -89,6 +89,7 @@ import { Construction, type ConstructionSave, type Project, projectName } from '
 import { WorkSignals } from './workSignals';
 import { Crosswalks, WALK_HOUSES, WALK_LOSS } from './crosswalks';
 import { Garages, type GarageHost, type GarageLook } from './garages';
+import { ShopParking, type ShopHost } from './shopParking';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises } from './enterprises';
 import { isActive } from '../world/enterprise';
@@ -837,6 +838,8 @@ export class Game implements BuildContext {
   readonly crosswalks = new Crosswalks((p, r) => this.peopleNear(p, r).pop);
   /** Гаражи частных домов (src/game/garages.ts): машины жителей выезжают из них и возвращаются в них. */
   readonly garages = new Garages(this.garageHost());
+  /** Стоянки магазинов и рынков (src/game/shopParking.ts): машины горожан заезжают на свободное место и уезжают. */
+  readonly shops = new ShopParking(this.shopHost(), this.garages);
   /** Предприятия строит игрок (режим «Строит игрок», src/game/enterprises.ts): месторождения, постройка, рабочие, вред. */
   readonly enterprises: Enterprises;
 
@@ -892,6 +895,8 @@ export class Game implements BuildContext {
     // Улицы городов — с переходами среди домов.
     this.syncCrosswalks();
     this.roads.changed();
+    // На стоянках магазинов уже стоят машины (по хешу).
+    this.shops.seed(this.towns);
     const s = this.settings;
     this.journal.add('game', {
       seed: s.seed,
@@ -1166,6 +1171,8 @@ export class Game implements BuildContext {
     // Сохранения до ступеней: в сценарии открыто столько, сколько этапов пройдено.
     this.modelTier = save.modelTier ?? (save.scenario ? (Math.min(3, save.scenario.phase + 1) as ModelTier) : 1);
     this.journal.add('load', { date: this.dateLabel, money: this.money, lines: this.lines.size, fleet: this.fleet.size });
+    // Старые сохранения (без машин на стоянках магазинов) — машины на стоянках, как в начале партии.
+    this.shops.seed(this.towns);
     // Темп участков стройки зависит от застройки рядом (чистое поле): то, что посчитано по ходу загрузки, пока дома
     // и предприятия ещё не на месте, — заново.
     this.construction.forgetPrices();
@@ -4093,8 +4100,10 @@ export class Game implements BuildContext {
     // Пешеходы на переходах — тоже до движения: идут — зебра закрыта.
     if (this.roads.graph.crosswalks.size || this.crosswalks.list.length) this.crosswalks.step(dt, this.time, this.roads.graph, this.traffic);
     this.traffic.step(dt);
-    // Машины у гаражей частных домов — сразу после движения: на манёвре их рисуют там, где они на нём.
+    // Машины у гаражей частных домов и на стоянках магазинов — сразу после движения: на манёвре их рисуют там, где
+    // они на нём.
     this.garages.step(dt);
+    this.shops.step(dt, this.towns);
     this.gatherCrews();
     this.rail.step(dt);
     this.updateFleet(dt);
@@ -6837,12 +6846,19 @@ export class Game implements BuildContext {
     }
     if (!route || !dest) return;
     const color = this.rng.pick(CAR_COLORS);
-    // Гаражи частных домов (garages.ts) — по хешу, общий генератор не трогают: выезд из гаража дома origin или
-    // возвращение в гараж машины, что уехала раньше (едет от узла origin).
+    // Машины частных домов (garages.ts) — по хешу, общий генератор не трогают: выезд из гаража или с площадки дома
+    // (origin или другого дома с машиной) или возвращение домой машины, что уехала раньше (едет от узла origin).
     const garage = this.garages.trip(town, origin);
+    // Стоянка магазина (shopParking.ts) — тоже по хешу: часть поездок к магазину кончается на его стоянке.
+    const to = dest;
+    const destTown = to.townId === town.id ? town : this.towns.find((t) => t.id === to.townId);
+    const visit = destTown && garage?.kind !== 'back' ? this.shops.visit(destTown, to) : null;
     if (garage?.kind === 'out') {
-      // Машиной в потоке (и в счёте citizenCars) станет, когда встанет на полосу (GarageHost.own).
-      this.garages.leave(garage.home, town, dest.anchor, { from: origin, to: dest });
+      // Машиной в потоке (и в счёте citizenCars) станет, когда встанет на полосу (GarageHost.own); едет к магазину —
+      // с полосы у дома сразу к стоянке.
+      const trip = { from: garage.home.b, to: dest };
+      if (visit) this.garages.leave(garage.home, town, visit.slot.link.toNode!, trip, { endLink: visit.slot.link.id, then: (sim) => this.shops.start(sim, visit) });
+      else this.garages.leave(garage.home, town, dest.anchor, trip);
       return;
     }
     if (garage?.kind === 'back') {
@@ -6855,11 +6871,37 @@ export class Game implements BuildContext {
         return;
       }
     }
+    if (visit) {
+      const way = this.garages.routeHome(origin.anchor, visit.slot);
+      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color, targetNode: visit.slot.link.toNode!, route: way });
+      if (sim) {
+        this.owners.set(sim.id, { type: 'citizen', trip: { from: origin, to } });
+        this.shops.start(sim, visit);
+        this.citizenCars++;
+        return;
+      }
+    }
     const sim = this.traffic.spawn({ ...CAR_SPEC, color, targetNode: dest.anchor, route });
     if (!sim) return;
     // Откуда и куда — уже выбранные дом и цель (без новых случайных чисел): для карточки машины.
     this.owners.set(sim.id, { type: 'citizen', trip: { from: origin, to: dest } });
     this.citizenCars++;
+  }
+
+  /** Что стоянкам магазинов (shopParking.ts) нужно от игры. */
+  private shopHost(): ShopHost {
+    const game = this;
+    return {
+      get seed() {
+        return game.seed;
+      },
+      get time() {
+        return game.time;
+      },
+      car: CAR_SPEC,
+      colors: CAR_COLORS,
+      canDrive: () => this.citizenCars < TOWN_TRAFFIC.maxCars,
+    };
   }
 
   /** Что гаражам частных домов (garages.ts) нужно от игры. */
@@ -6891,9 +6933,14 @@ export class Game implements BuildContext {
     };
   }
 
-  /** Машины у гаражей частных домов в кадре: у ворот (вблизи, parked) и на манёвре во дворе (garages.ts). */
+  /**
+   * Машины у гаражей и площадок частных домов и на стоянках магазинов в кадре: стоящие (вблизи, parked) и на манёвре
+   * во дворе (garages.ts, shopParking.ts).
+   */
   garageLooks(box: [number, number, number, number], parked: boolean): GarageLook[] {
-    return this.garages.looks(this.towns, box, parked);
+    const out = this.garages.looks(this.towns, box, parked);
+    if (parked) out.push(...this.shops.looks(this.towns, box, parked));
+    return out;
   }
 
   /** Откуда и куда едет машина жителя или спецмашина (здания и их города); не знаем (после загрузки, чужая) — null. */
@@ -6912,7 +6959,17 @@ export class Game implements BuildContext {
    */
   vehicleAhead(simId: number): { pts: Vec[]; left: number; eta: number; goal: Vec } | null {
     const v = this.traffic.vehicles.get(simId);
-    if (!v || v.routeIndex >= v.route.length) return null;
+    if (!v) return null;
+    // У места (гараж, площадка, стоянка магазина, garages.aheadOf): линия — до самого места, а не до конца полосы.
+    const spot = this.garages.aheadOf(simId);
+    const length = (pts: Vec[]) => pts.reduce((s, p, i) => (i ? s + dist(pts[i - 1], p) : 0), 0);
+    if (spot?.only) {
+      const pts = spot.tail!;
+      const left = length(pts);
+      const trip = this.tripOf(simId);
+      return pts.length < 2 ? null : { pts, left, eta: left / 4, goal: trip ? trip.to.fp.center : pts[pts.length - 1] };
+    }
+    if (v.routeIndex >= v.route.length) return null;
     const g = this.roads.graph;
     let c = this.aheadCache;
     if (!c || c.sim !== simId || c.route !== v.route || c.index !== v.routeIndex || c.graph !== g) {
@@ -6920,23 +6977,46 @@ export class Game implements BuildContext {
       this.aheadCache = c;
     }
     if (c.pts.length < 2) return null;
-    // Линия идёт от начала текущей связи — обрезаем её у машины: с ближайшей точки первой связи.
+    // Линия идёт от начала текущей связи — обрезаем её у машины: с ближайшей точки первой связи (выезжающая задним
+    // ходом — от места, где она встанет на полосу).
     const first = g.links.get(v.route[v.routeIndex]);
     const reach = (first?.length ?? 0) + 30;
+    const from = spot?.anchor ?? v.pos;
     let best = 0;
     let bestD = Infinity;
     let run = 0;
     for (let i = 0; i < c.pts.length && run <= reach; i++) {
       if (i) run += dist(c.pts[i - 1], c.pts[i]);
-      const d = dist(c.pts[i], v.pos);
+      const d = dist(c.pts[i], from);
       if (d < bestD) {
         bestD = d;
         best = i;
       }
     }
-    const pts = [v.pos, ...c.pts.slice(best + 1)];
+    let pts = [...(spot?.head ?? [v.pos]), ...c.pts.slice(best + 1)];
+    if (spot?.tail?.length) {
+      // Едет к месту: по полосам — до точки поворота (ближайшей к ней на последней связи), дальше — поворот и заезд.
+      const turn = spot.tail[0];
+      const last = g.links.get(v.route[v.route.length - 1]);
+      const back = (last?.length ?? 0) + 30;
+      let cut = 1;
+      let cutD = Infinity;
+      for (let i = pts.length - 1, run = 0; i >= 1 && run <= back; i--) {
+        run += dist(pts[i - 1], pts[i]);
+        const d = dist(pts[i], turn);
+        if (d < cutD) {
+          cutD = d;
+          cut = i;
+        }
+      }
+      // Ближайшая точка ещё до поворота — она остаётся; машина уже у точки поворота — сразу поворот.
+      if (cut < pts.length - 1 && dot(sub(turn, pts[cut]), sub(pts[cut + 1], pts[cut])) > 0) cut++;
+      if (dist(pts[0], turn) <= cutD) cut = 1;
+      pts = [...pts.slice(0, cut), ...spot.tail];
+    }
     if (pts.length < 2) return null;
-    const left = this.traffic.routeLeft(v);
+    const route = this.traffic.routeLeft(v);
+    const left = spot ? length(pts) : route;
     // Время: остаток текущей связи и все следующие — каждая на своей скорости, не быстрее машины.
     const speed = (l: { speed: number } | undefined) => Math.max(1, Math.min(l?.speed ?? v.maxSpeed, v.maxSpeed));
     let rest = 0;
@@ -6946,7 +7026,9 @@ export class Game implements BuildContext {
       rest += l?.length ?? 0;
       eta += (l?.length ?? 0) / speed(l);
     }
-    eta += Math.max(0, left - rest) / speed(first);
+    eta += Math.max(0, route - rest) / speed(first);
+    // У места линия не та же, что маршрут по полосам, — время по ней же, в той же пропорции.
+    if (spot && route > 1) eta *= left / route;
     const trip = this.tripOf(simId);
     return { pts, left, eta, goal: trip ? trip.to.fp.center : pts[pts.length - 1] };
   }

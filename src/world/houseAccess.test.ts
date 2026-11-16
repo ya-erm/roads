@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { freshGame } from '../game/testkit';
 import type { TownBuilding } from './entities';
-import { CAR_SIZE, cottagePlan, drivewayLink, drivewayOf, GARAGE, LOT_SETBACK } from './houseAccess';
+import { CAR_PLACE, CAR_SIZE, cottagePlan, dachaPlan, drivewayLink, drivewayOf, GARAGE, LOT_SETBACK } from './houseAccess';
 import { NEW_GAME_SETTINGS } from './settings';
 import { pointInFootprint } from './spatial';
 
@@ -45,6 +45,36 @@ describe('Заезды частных домов', () => {
     }
     // Узкий участок — без гаража.
     expect(Array.from({ length: 20 }, () => cottagePlan(cottage({ fp: { center: { x: 0, y: 0 }, w: 18, h: 20, angle: 0 } }))).every((p) => !p.garage)).toBe(true);
+  });
+
+  it('у дома без гаража — часто площадка под машину 5,2 × 8,4 м от края участка; доли: гараж ~45 %, площадка ~35 %, ничего ~20 %', () => {
+    const list = Array.from({ length: 400 }, () => cottage({ fp: { center: { x: 0, y: 0 }, w: 40, h: 44, angle: 0 } }));
+    const plans = list.map((b) => cottagePlan(b));
+    const share = (f: (p: (typeof plans)[0]) => boolean) => plans.filter(f).length / plans.length;
+    expect(share((p) => !!p.garage)).toBeCloseTo(CAR_PLACE.garage, 1);
+    expect(share((p) => !!p.pad)).toBeCloseTo(CAR_PLACE.pad, 1);
+    expect(share((p) => !p.garage && !p.pad)).toBeCloseTo(1 - CAR_PLACE.garage - CAR_PLACE.pad, 1);
+    for (const [i, p] of plans.entries()) {
+      if (!p.pad) continue;
+      const b = list[i];
+      expect(p.garage).toBeNull();
+      // Под машину 7 × 4 с запасом; от края участка, не на доме.
+      expect(p.pad.w).toBeGreaterThanOrEqual(CAR_SIZE.w + 1);
+      expect(p.pad.h).toBeGreaterThanOrEqual(CAR_SIZE.l + 1);
+      expect(p.pad.y).toBeCloseTo(-b.fp.h / 2);
+      const h = p.house;
+      expect(p.pad.x >= h.x + h.w || p.pad.x + p.pad.w <= h.x).toBe(true);
+      expect(p.drive!.x).toBeCloseTo(p.pad.x + p.pad.w / 2);
+      const d = drivewayOf(b)!;
+      expect(d.garage).toBe(false);
+      expect(pointInFootprint(d.spot, b.fp, 0.1)).toBe(true);
+    }
+    // Дача: площадка у 40 %, у второго ряда — нет.
+    const dachas = Array.from({ length: 300 }, () => cottage({ form: 'dacha', fp: { center: { x: 0, y: 0 }, w: 40, h: 44, angle: 0 } }));
+    const pads = dachas.filter((b) => dachaPlan(b).pad);
+    expect(pads.length / dachas.length).toBeCloseTo(CAR_PLACE.dachaPad, 1);
+    for (const b of pads) expect(drivewayOf(b)).not.toBeNull();
+    expect(dachas.every((b) => !dachaPlan({ ...b, rear: true }).pad)).toBe(true);
   });
 
   it('в мире: от бордюра улицы к воротам — внутрь участка, длиной не меньше отступа и машины; дом с другой стороны улицы — повёрнут', () => {

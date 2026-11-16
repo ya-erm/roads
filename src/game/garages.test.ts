@@ -170,6 +170,100 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     expect(atHome.length).toBe(parks ? 1 : 0);
   });
 
+  it('въезд в гараж: линия маршрута — до ворот, машина проезжает в открытые ворота и пропадает, ворота закрыты', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { town, home, slot } = garageHome(game, (h) => h.kind === 'garage' && !h.parks);
+    const traffic = game.traffic;
+    // Дома машины не видно: она в гараже.
+    const near = () => game.garageLooks(WORLD, true).filter((l) => dist(l.look.pos, home.d.gate) < 12);
+    expect(near().length).toBe(0);
+    town.garageAway = [home.b.id];
+    const route = game.garages.routeHome(slot.link.fromNode!, slot)!;
+    const sim = traffic.spawn({ ...CAR, color: home.color, targetNode: slot.link.toNode!, route })!;
+    game.citizenCars++;
+    game.garages.homeward(sim, home, town, slot);
+    // Маршрут выбранной машины кончается у ворот (носом в гараже), а не на улице в конце полосы у дома.
+    const g = game.roads.graph;
+    const laneEnd = g.lanePose(slot.lane, slot.lane.length).pos;
+    const end = (pts: Vec[]) => pts[pts.length - 1];
+    let ahead = game.vehicleAhead(sim.id)!;
+    expect(dist(end(ahead.pts), home.d.gate)).toBeLessThan(CAR.length + 1);
+    expect(dist(end(ahead.pts), laneEnd)).toBeGreaterThan(15);
+    expect(ahead.left).toBeLessThan(traffic.routeLeft(sim) + 40);
+    let gateSeen = false;
+    let lastPos: Vec | null = null;
+    let turning = false;
+    for (let i = 0; i < 30 * 60; i++) {
+      step(game);
+      if (traffic.vehicles.has(sim.id) && game.garages.moveOf(home.b.id)?.sim) {
+        // Уже сворачивает: линия — только поворот и заезд, тоже до ворот.
+        ahead = game.vehicleAhead(sim.id)!;
+        expect(dist(end(ahead.pts), home.d.gate)).toBeLessThan(CAR.length + 1);
+        turning = true;
+      }
+      const look = near()[0];
+      if (look?.gate) {
+        gateSeen = true;
+        lastPos = look.look.pos;
+      }
+      if (!game.garages.moveOf(home.b.id) && !traffic.vehicles.has(sim.id) && game.garages.homingOf(sim.id) === undefined) break;
+    }
+    expect(turning).toBe(true);
+    // Во дворе — с открытыми воротами (их рисует renderer поверх гаража), последней — уже за ними.
+    expect(gateSeen).toBe(true);
+    expect(dot(sub(lastPos!, home.d.gate), home.d.dir)).toBeGreaterThan(CAR.length / 2);
+    expect(near().length).toBe(0);
+    expect(town.garageAway).not.toContain(home.b.id);
+  });
+
+  it('дом с площадкой: машина стоит на площадке, выезжает с неё задним ходом и возвращается на неё', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { town, home, slot } = garageHome(game, (h) => h.kind === 'pad');
+    expect(home.parks).toBe(true);
+    expect(home.d.garage).toBe(false);
+    const near = () => game.garageLooks(WORLD, true).filter((l) => dist(l.look.pos, home.spot) < 8);
+    // Дома: машина на площадке, носом от улицы, без ворот.
+    expect(near().length).toBe(1);
+    expect(near()[0].gate).toBeUndefined();
+    expect(dot(near()[0].look.dir, home.d.dir)).toBeGreaterThan(0.99);
+    game.garages.leave(home, town, slot.link.toNode!, { from: home.b, to: home.b });
+    let backed = false;
+    for (let i = 0; i < 30 * 60 && !(town.garageAway?.includes(home.b.id) && !game.garages.moveOf(home.b.id)); i++) {
+      step(game);
+      const m = game.garages.moveOf(home.b.id);
+      // Задним ходом: нос смотрит во двор, а едет к улице.
+      if (m?.phase === 'yard' && dot(m.dir, home.d.dir) > 0.95) backed = true;
+    }
+    expect(backed).toBe(true);
+    expect(town.garageAway).toContain(home.b.id);
+    expect(near().length).toBe(0);
+  });
+
+  it('частота: на улице из 12 домов с машиной за 30 с — хотя бы один выезд или въезд (в среднем больше)', { timeout: 120_000 }, () => {
+    const game = freshGame(7);
+    let homes = 0;
+    for (const t of game.towns)
+      for (const b of t.buildings) {
+        const h = b.kind === 'res' ? game.garages.homeOf(b) : null;
+        if (h && game.garages.slotOf(h)) homes++;
+      }
+    runSeconds(game, 60);
+    const seen = new Set<object>();
+    let events = 0;
+    const T = 90;
+    runSeconds(game, T, () => {
+      for (const m of game.garages.moves) {
+        if (seen.has(m) || m.home.key < 0) continue;
+        seen.add(m);
+        events++;
+      }
+    });
+    // Выезд или въезд на дом — раз в столько секунд; на 12 домах за 30 с — столько.
+    const perHome = T / (events / homes);
+    const per30on12 = (30 * 12) / perHome;
+    expect(per30on12).toBeGreaterThan(1.2);
+  });
+
   it('по seed: одна и та же партия — те же выезды и возвращения; сохранение несёт уехавшие машины', () => {
     const a = freshGame(7);
     let outs = 0;
@@ -207,7 +301,7 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
         if (home?.parks && !out.has(h.id)) want++;
       }
     }
-    expect(c.garageLooks(WORLD, true).length).toBe(want);
+    expect(c.garages.looks(c.towns, WORLD, true).length).toBe(want);
     // Две загрузки одного сохранения дальше идут одинаково.
     runSeconds(c, 20);
     runSeconds(d, 20);

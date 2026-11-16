@@ -1,7 +1,8 @@
 import { TOWN_SCALE } from '../config';
 import type { HouseForm, TownBuilding } from '../world/entities';
 import type { Footprint } from '../world/spatial';
-import { CAR_SIZE, cottagePlan, GARAGE, LOT_SETBACK } from '../world/houseAccess';
+import { CAR_SIZE, cottagePlan, dachaPlan, GARAGE, LOT_SETBACK, type LotRect } from '../world/houseAccess';
+import { shopLotOf, STALL_ROW_DEPTH, type ShopLot } from '../world/shopLots';
 import { formOf, storeysOf } from '../world/townForms';
 import { Art, disc, METAL } from './industryArt';
 import { WALK_LOOK } from './sidewalks';
@@ -79,6 +80,13 @@ const GREENHOUSE = { w: 3.8, d: 7.5 } as const;
 /** Съезд и стоянки — асфальт цветом дороги (lanes/draw.ts): продолжение дороги во двор. */
 export const DRIVE = '#646b76';
 const DRIVE_EDGE = 'rgba(70,74,82,0.6)';
+/** Съезд к гравийной стоянке сельского магазина. */
+const GRAVEL_DRIVE = '#cdbf9c';
+/** Разметка мест на стоянке. */
+const STALL_LINE = 'rgba(246,246,240,0.85)';
+/** Площадка под машину у дома без гаража — бетонная плитка, светлее асфальта. */
+const PAD_COLOR = '#a9a59b';
+const PAD_JOINT = 'rgba(120,116,108,0.55)';
 
 /** Выход дома к улице за пределами участка: дорожка к крыльцу или съезд — x и ширина в осях участка, сторона улицы. */
 export interface HouseAccess {
@@ -489,6 +497,23 @@ function treeRow(a: Art, lot: Lot, x0: number, x1: number, y: number, step: numb
   for (let x = x0 + step / 2, k = 0; x < x1; x += step, k++) yardTree(a, lot, x, y + (a.r(i + k) - 0.5), r * (0.85 + 0.3 * a.r(i + k + 20)), i + k + 40);
 }
 
+/**
+ * Открытая площадка под машину у дома без гаража (world/houseAccess: cottagePlan, dachaPlan): бетонная плитка от
+ * края участка, съезд к ней — через газон и тротуар. Машину на ней рисует движение (game/garages.ts).
+ */
+function carPad(a: Art, lot: Lot, p: LotRect): void {
+  curbCut(a, lot, p.x + p.w / 2, p.w, p.y + p.h, PAD_COLOR);
+  if (a.pass !== 0 || !a.d) return;
+  const c = a.c;
+  c.strokeStyle = PAD_JOINT;
+  c.lineWidth = 0.1;
+  c.beginPath();
+  for (let y = p.y + 1.4; y < p.y + p.h - 0.3; y += 1.4) (c.moveTo(p.x, y), c.lineTo(p.x + p.w, y));
+  c.moveTo(p.x + p.w / 2, p.y);
+  c.lineTo(p.x + p.w / 2, p.y + p.h);
+  c.stroke();
+}
+
 /** Пятно газона на весь участок. */
 const lawn = (a: Art, lot: Lot, color = LAWN) => a.patch(-lot.W / 2 + 0.3, -lot.H / 2 + 0.3, lot.W - 0.6, lot.H - 0.6, color, 0.8);
 
@@ -496,9 +521,9 @@ const lawn = (a: Art, lot: Lot, color = LAWN) => a.patch(-lot.W / 2 + 0.3, -lot.
 
 /**
  * Частный дом с участком: крупный дом у улицы почти во всю ширину участка (крыльцо — к калитке), за ним огород,
- * сарай, теплица, плодовые деревья; забор с калиткой; у половины домов — гараж под машину с асфальтовым заездом от
- * улицы (машину перед воротами рисует движение). Раскладка (дом, гараж, заезд) — world/houseAccess.cottagePlan: её же
- * видит игра.
+ * сарай, теплица, плодовые деревья; забор с калиткой; у 45 % домов — гараж под машину с асфальтовым заездом от
+ * улицы, у 35 % — открытая площадка под машину (машину в гараж, перед воротами и на площадке рисует движение).
+ * Раскладка (дом, гараж или площадка, заезд) — world/houseAccess.cottagePlan: её же видит игра.
  */
 function cottage(a: Art, lot: Lot): void {
   const { W, H, b } = lot;
@@ -530,8 +555,8 @@ function cottage(a: Art, lot: Lot): void {
     if (a.r(10) < 0.4 && W > 15 && yEnd - back > 4.5) greenhouse(a, gx + gw / 2 - GREENHOUSE.w / 2, back + 0.8, GREENHOUSE.w, Math.min(GREENHOUSE.d, yEnd - back - 1.4));
     yardTree(a, lot, sx + (sx < 0 ? shed.w + 2.8 : -2.8), yEnd - 1.6 - a.r(11) * 1.5, 2.3 + a.r(12), 13);
   }
-  // Заезд: асфальт от улицы до ворот гаража. Машину перед воротами (у 60 % таких домов, остальные — в гараже) рисует
-  // не участок, а движение (game/garages.ts): она уезжает из гаража и возвращается.
+  // Заезд: асфальт от улицы до ворот гаража. Машину рисует не участок, а движение (game/garages.ts): дома она в гараже
+  // (ворота закрыты), выезжает из него и возвращается; у части домов вторая стоит перед воротами.
   const drive = plan.drive;
   const g = plan.garage;
   if (drive && g) {
@@ -543,7 +568,11 @@ function cottage(a: Art, lot: Lot): void {
       a.c.fillStyle = '#5a5f66';
       a.c.fillRect(g.x + 0.5, g.y - 0.35, g.w - 1, 0.5);
     }
-  } else if (a.r(14) < 0.6) yardTree(a, lot, left ? -x0 - 3 : x0 + 3, hy + hd * 0.6, 2 + a.r(15) * 1.2, 16);
+  } else {
+    // Площадка под машину (у дома без гаража) — машину на ней тоже рисует движение.
+    if (plan.pad) carPad(a, lot, plan.pad);
+    if (a.r(14) < 0.6) yardTree(a, lot, left ? -x0 - 3 : x0 + 3, hy + hd * 0.6, 2 + a.r(15) * 1.2, 16);
+  }
   // Дорожка от тротуара через калитку к крыльцу.
   const gate = hx + hw * (0.3 + 0.4 * a.r(26));
   frontPath(a, lot, gate, hy + 0.4);
@@ -570,23 +599,25 @@ function dacha(a: Art, lot: Lot): void {
   const x0 = -W / 2;
   const y0 = -H / 2;
   lawn(a, lot, LAWN_DACHA);
-  const left = a.r(1) < 0.5;
-  // Домик — в масштабе дома (TOWN_SCALE), а не машины.
-  const hw = clamp(W * 0.36, 7, 9.5 * S);
-  const hd = clamp(H * 0.3, 6, 8 * S);
-  const hx = left ? x0 + 1.6 : -x0 - 1.6 - hw;
-  const hy = y0 + 1.8 + a.r(4) * 1.5 * S;
-  // Грядки — полосой с другой стороны и в глубине.
+  // Домик — в масштабе дома (TOWN_SCALE), а не машины; у части дач рядом с ним — площадка под машину.
+  const { house, left, pad } = dachaPlan(lot.b);
+  const { x: hx, y: hy, w: hw, h: hd } = house;
+  // Грядки — полосой с другой стороны (за площадкой) и в глубине.
   const bx = left ? hx + hw + 1.4 : x0 + 1.4;
   const bw = W - hw - 4.4;
-  beds(a, bx, y0 + 2, bw, H * 0.5, true);
+  if (pad) {
+    // Площадка — у домика, грядки — рядом с ней.
+    carPad(a, lot, pad);
+    const room = pad.w + 1.2;
+    beds(a, left ? bx + room : bx, y0 + 2, bw - room, H * 0.5, true);
+  } else beds(a, bx, y0 + 2, bw, H * 0.5, true);
   beds(a, x0 + 1.4, hy + hd + 1.4, W - 2.8, H / 2 - hy - hd - 2.6, false);
   const gw = Math.min(GREENHOUSE.w, W * 0.12);
   const gd = Math.min(GREENHOUSE.d, H * 0.24);
   greenhouse(a, left ? -x0 - 1.6 - gw : x0 + 1.6, H / 2 - 1.5 - gd, gw, gd);
   for (let k = 0; k < 3; k++) yardTree(a, lot, x0 + W * (0.25 + 0.25 * k), H / 2 - 2.2 - a.r(5 + k) * 3, 1.6 + a.r(8 + k) * 0.8, 11 + k);
   frontPath(a, lot, hx + hw / 2, hy + 0.4, 1.2);
-  fence(a, lot, 0.1 + a.r(14) * 0.3, hx + hw / 2);
+  fence(a, lot, 0.1 + a.r(14) * 0.3, hx + hw / 2, pad ? pad.x + pad.w / 2 : undefined, pad ? pad.w + 0.4 : 0);
   const roof = a.r(15) < 0.5 ? METAL_ROOFS[Math.floor(a.r(16) * METAL_ROOFS.length)] : lot.b.roof;
   pitched(a, hx, hy, hw, hd, 3.6, roof, hw >= hd, a.r(17) < 0.5 ? Math.min(hw, hd) / 2 : 0, true);
 }
@@ -906,31 +937,60 @@ function tower(a: Art, lot: Lot): void {
 
 // ---------- Общественные и деловые ----------
 
-/** Магазин: здание у тротуара с цветным козырьком, сбоку стоянка покупателей. */
+/**
+ * Стоянка покупателей (world/shopLots.ts): асфальт (у сельского магазина — гравий) ровно под места, съезд с улицы во
+ * всю ширину группы. Вблизи — разметка: белые линии между местами и по краям, черта-упор у дальнего края (у
+ * сельского — бревно-упор у каждого места). Машины на местах рисует не участок, а движение (game/shopParking.ts):
+ * они приезжают и уезжают.
+ */
+function stallGroups(a: Art, lot: Lot, plan: ShopLot): void {
+  for (const g of plan.groups) {
+    const p = g.pad;
+    curbCut(a, lot, g.cut.x, g.cut.w, p.y + 0.6, plan.gravel ? GRAVEL_DRIVE : DRIVE);
+    a.patch(p.x, p.y, p.w, p.h, plan.gravel ? GRAVEL : ASPHALT, 0.5);
+    if (!a.d) continue;
+    const c = a.c;
+    if (plan.gravel) {
+      if (a.pass !== 2) continue;
+      c.fillStyle = WOOD;
+      for (const s of g.stalls) c.fillRect(s.x - s.w / 2 + 0.9, s.y1 - 0.75, s.w - 1.8, 0.45);
+      continue;
+    }
+    if (a.pass !== 0) continue;
+    c.strokeStyle = STALL_LINE;
+    c.lineWidth = 0.16;
+    c.beginPath();
+    for (const s of g.stalls) {
+      for (const x of [s.x - s.w / 2, s.x + s.w / 2]) (c.moveTo(x, s.y0 + 0.4), c.lineTo(x, s.y1));
+      c.moveTo(s.x - s.w / 2, s.y1);
+      c.lineTo(s.x + s.w / 2, s.y1);
+    }
+    c.stroke();
+  }
+}
+
+/**
+ * Магазин: здание с цветным козырьком над входом; стоянка покупателей (world/shopLots.ts) — сбоку от небольшого
+ * магазина или перед универмагом (от 4 этажей) во всю ширину, с проходом ко входу посередине.
+ */
 function shop(a: Art, lot: Lot): void {
   const { W, H, b } = lot;
   const x0 = -W / 2;
   const y0 = -H / 2;
-  const big = b.floors >= 4;
-  const left = a.r(1) < 0.5;
-  const w = big ? W - 3 : clamp(W * 0.55, 9, 20 * S);
-  const d = big ? H - 4 : clamp(H * 0.5, 8, 14 * S);
-  const bx = left ? x0 + 1.5 : -x0 - 1.5 - w;
-  const by = y0 + 2.2;
+  const plan = shopLotOf(b)!;
+  const { x: bx, y: by, w, h: d } = plan.building!;
+  const left = bx + w / 2 < 0;
   lawn(a, lot);
-  a.patch(x0 + 0.4, y0 + 0.4, W - 0.8, Math.min(H - 0.8, d + 3.4), PAVING, 0.5);
-  frontPath(a, lot, bx + w / 2, by, 2.4);
-  if (H - d > 9) yardTree(a, lot, left ? x0 + 3 : -x0 - 3, H / 2 - 2.6, 2.2, 9);
-  // Стоянка покупателей — сбоку (съезд прямо к ней) или за магазином (съезд вдоль торца).
-  if (!big && W - w > 7) {
-    const px = left ? bx + w + 1 : x0 + 1;
-    const pw = W - w - 3.5;
-    curbCut(a, lot, px + pw / 2, Math.min(5.2, pw - 0.6), y0 + 1.6);
-    parking(a, lot, px, y0 + 1.2, pw, Math.min(H - 2.4, 13), 4);
-  } else if (H - d > 7) {
-    curbCut(a, lot, left ? -x0 - 1.3 : x0 + 1.3, 2.4, by + d + 1);
-    parking(a, lot, x0 + 1.5, by + d + 0.8, W - 3, H / 2 - by - d - 1.6, 4);
+  if (plan.walk) {
+    // Универмаг: мощёная полоса вдоль фасада и проход к нему между группами мест.
+    a.patch(x0 + 0.4, by - 1.8, W - 0.8, 2, PAVING, 0.5);
+    frontPath(a, lot, plan.walk.x, by - 1, plan.walk.w);
+  } else {
+    a.patch(bx - 0.6, y0 + 0.4, w + 1.2, Math.min(H - 0.8, d + 3.4), PAVING, 0.5);
+    frontPath(a, lot, bx + w / 2, by, 2.4);
   }
+  if (H / 2 - by - d > 5) yardTree(a, lot, left ? -x0 - 3 : x0 + 3, H / 2 - 2.6, 2.2, 9);
+  stallGroups(a, lot, plan);
   const z = wallZ(b.floors);
   flat(a, bx, by, w, d, z, tone(b.roof, 0.25));
   // Козырёк над входом — цветом вывески.
@@ -942,20 +1002,21 @@ function shop(a: Art, lot: Lot): void {
   roofBit(a, bx + w * 0.62, by + d * 0.4, 1.6, 1.2, 1, '#b4b9be');
 }
 
-/** Сельский магазин или клуб: дом под скатной крышей с вывеской и крыльцом, перед ним — утоптанная площадка, скамейка. */
+/**
+ * Сельский магазин или клуб: дом под скатной крышей с вывеской и крыльцом у одной стороны участка, перед крыльцом —
+ * утоптанная площадка, рядом с домом — гравийная стоянка на 1–4 машины (world/shopLots.ts).
+ */
 function store(a: Art, lot: Lot): void {
-  const { W, H } = lot;
+  const { W, H, b } = lot;
   const x0 = -W / 2;
   const y0 = -H / 2;
   lawn(a, lot);
-  const w = clamp(W * 0.55, 10, 17 * S);
-  const d = clamp(H * 0.45, 8.5, 12 * S);
-  const bx = -w / 2 + (a.r(1) - 0.5) * (W - w - 3);
-  const by = y0 + 3.2;
-  // Утоптанная площадка перед крыльцом — до самой дороги: к магазину подъезжают прямо с улицы.
-  a.patch(x0 + 0.5, y0 + 0.4, W - 1, 3.6, GRAVEL, 0.5);
-  curbCut(a, lot, bx + w / 2, Math.min(W - 2, w), y0 + 0.6);
-  if (H - d > 9) {
+  const plan = shopLotOf(b)!;
+  const { x: bx, y: by, w, h: d } = plan.building!;
+  a.patch(bx - 0.5, y0 + 0.4, w + 1, by - y0 - 0.2, GRAVEL, 0.5);
+  frontPath(a, lot, bx + w / 2, y0 + 0.6, 2.4);
+  stallGroups(a, lot, plan);
+  if (H / 2 - by - d > 6) {
     yardTree(a, lot, bx < 0 ? -x0 - 3 : x0 + 3, by + d + 2.5, 2.4 + a.r(2), 3);
     pitched(a, bx < 0 ? x0 + 1.5 : -x0 - 1.5 - SHED.w, H / 2 - 1.3 - SHED.d, SHED.w, SHED.d, 2.6, '#8d7a66', true);
   }
@@ -967,8 +1028,9 @@ function store(a: Art, lot: Lot): void {
     c.fillStyle = AWNINGS[Math.floor(a.r(6) * AWNINGS.length)];
     c.fillRect(bx + w / 2 - 2.2, by - 0.9, 4.4, 0.9);
     if (lot.fine) {
+      // Скамейка у крыльца — с той стороны, где нет стоянки.
       c.fillStyle = WOOD;
-      c.fillRect(bx + w + 0.8, by - 2.2, 2.4, 0.6);
+      c.fillRect(plan.groups[0] && plan.groups[0].pad.x < bx ? bx + w - 3.2 : bx + 0.8, by - 2.2, 2.4, 0.6);
     }
   }
 }
@@ -997,22 +1059,28 @@ function office(a: Art, lot: Lot): void {
   if (H > 22 * S) yardTree(a, lot, x0 + 3, H / 2 - 2.5, 2.2, 7);
 }
 
-/** Рынок: ряды цветных навесов на мощёной площадке и крытый павильон в глубине. */
+/**
+ * Рынок: ряды цветных навесов на мощёной площадке и крытый павильон в глубине; у улицы — стоянка покупателей
+ * (world/shopLots.ts) двумя группами, между ними — широкий проход к рядам.
+ */
 function market(a: Art, lot: Lot): void {
-  const { W, H } = lot;
+  const { W, H, b } = lot;
   const x0 = -W / 2;
   const y0 = -H / 2;
+  const plan = shopLotOf(b)!;
   a.patch(x0 + 0.3, y0 + 0.3, W - 0.6, H - 0.6, PAVING, 0.5);
-  // Рынок открыт к улице: мощение — через газон до тротуара.
-  frontPath(a, lot, 0, y0 + 0.5, W * 0.6);
+  // Рынок открыт к улице: мощение прохода — через газон до тротуара.
+  frontPath(a, lot, 0, y0 + 0.5, plan.walk!.w);
+  stallGroups(a, lot, plan);
   const hd = clamp(H * 0.3, 6, 10 * S);
   pitched(a, x0 + 1.5, H / 2 - 1.2 - hd, W - 3, hd, 4.5 * S, '#8fa3ad', true, 0, true);
-  // Навесы — под прилавок и покупателя, крупнее прежних (TOWN_SCALE), но мельче домов.
+  // Навесы — под прилавок и покупателя, крупнее прежних (TOWN_SCALE), но мельче домов; за стоянкой.
   const row = 6.5;
   const pitch = 4.2;
-  const rows = Math.max(1, Math.floor((H - hd - 4) / row));
+  const top = y0 + (plan.groups.length ? STALL_ROW_DEPTH + 1.8 : 1.8);
+  const rows = Math.max(1, Math.floor((H / 2 - 1.2 - hd - top) / row));
   for (let r = 0; r < rows; r++) {
-    const y = y0 + 1.8 + r * row;
+    const y = top + r * row;
     const n = Math.floor((W - 3) / pitch);
     for (let k = 0; k < n; k++) {
       const color = STALLS[Math.floor(a.r(r * 31 + k) * STALLS.length)];

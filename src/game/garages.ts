@@ -10,12 +10,16 @@ import type { Town, TownBuilding } from '../world/entities';
 import { drivewayLink, drivewayOf, type Driveway } from '../world/houseAccess';
 
 /**
- * Гаражи частных домов: часть поездок жителей начинается в гараже или кончается в нём (docs/DESIGN.md, «Машины
- * жителей»). Выезд: машина задним ходом по заезду до бордюра, ждёт настоящего просвета на ближней полосе
- * (LaneTraffic.clearToJoin), задним ходом с поворотом встаёт на полосу носом по ходу и уезжает. Въезд: маршрут
- * кончается связью у дома (Vehicle.endLink), машина останавливается напротив заезда (holdAfter), с поворотником
- * поворачивает в заезд передом и доезжает до места перед воротами или в гараж. Пока кузов над полосой — машина в
- * потоке (стоит, её объезжают и ждут, как стоящую), её рисуют там, где она на манёвре; во дворе — только рисунок.
+ * Машины частных домов — в гараже или на площадке у дома: часть поездок жителей начинается там или кончается там
+ * (docs/DESIGN.md, «Машины жителей»). Выезд: машина задним ходом из гаража (ворота открыты) или с площадки по заезду
+ * до бордюра, ждёт настоящего просвета на ближней полосе (LaneTraffic.clearToJoin), задним ходом с поворотом встаёт
+ * на полосу носом по ходу и уезжает. Въезд: маршрут кончается связью у дома (Vehicle.endLink), машина
+ * останавливается напротив заезда (holdAfter), с поворотником поворачивает в заезд передом и въезжает в гараж (за
+ * воротами её не видно, ворота закрываются) или встаёт на площадку. Пока кузов над полосой — машина в потоке (стоит,
+ * её объезжают и ждут, как стоящую), её рисуют там, где она на манёвре; во дворе — только рисунок.
+ *
+ * Тот же манёвр — у стоянок магазинов (game/shopParking.ts): место стоянки — такое же «место машины» (CarSpot), а
+ * что делать, когда машина встала в поток или доехала до места, говорят крючки манёвра (MoveHooks).
  *
  * Всё решается без генератора случайных чисел партии: выезд ли это или возвращение — по seed, номеру поездки города
  * и хешу (Town.garageTrips), какая машина стоит у ворот и какого цвета — по хешу id дома. Дома с уехавшей машиной —
@@ -23,22 +27,26 @@ import { drivewayLink, drivewayOf, type Driveway } from '../world/houseAccess';
  */
 export const GARAGE_TRIPS = {
   /**
-   * Доля поездок из дома с гаражом (машина дома, к заезду можно подъехать — slotOf), что начинаются в гараже. Гараж —
-   * у трети домов села, у 30 % домов города и 20 % большого (seed 7: 329 из 1306 жилых домов), подъехать можно к 91 %
-   * (в большом городе кварталы короче — к половине). Поездки начинаются в доме наугад, поэтому из гаража — ~4 % всех
-   * поездок жителей (в сёлах — больше), и столько же — возвращений.
+   * Доля поездок из дома с машиной (машина дома, к заезду можно подъехать — slotOf), что начинаются в гараже или на
+   * площадке: поездка из такого дома — почти всегда на своей машине. Гараж — у 45 % частных домов, площадка — у 35 %,
+   * у дач — площадка у 40 % (world/houseAccess.CAR_PLACE); seed 7 — ~470 домов с машиной из 1294 жилых, подъехать
+   * можно к ~90 %. Поездки начинаются в доме наугад: из гаража или с площадки — ~20 % всех поездок жителей, и
+   * столько же — возвращений. На доме — выезд или въезд раз в ~2 минуты, на улице из 12 таких домов — раз в 10 с.
    */
-  outShare: 0.3,
+  outShare: 0.5,
   /**
-   * Поездка — возвращение в гараж с вероятностью away / (away + backK · гаражей города): чем больше машин в разъездах,
-   * тем чаще они возвращаются. Равновесие (seed 7, после 5 минут) — около 19 % машин гаражей в разъездах, возвращений
-   * столько же, сколько выездов: вместе ~8 % поездок жителей — у гаража.
+   * Поездка — возвращение домой с вероятностью away / (away + backK · домов с машиной в городе): чем больше машин в
+   * разъездах, тем чаще они возвращаются. Равновесие (seed 7) — около трети машин в разъездах, возвращений столько
+   * же, сколько выездов.
    */
-  backK: 2,
+  backK: 0.2,
   /** Сколько машина ждёт просвета у бордюра, с: не дождалась — передумала и заезжает обратно. */
   maxWait: 40,
-  /** Доля домов с гаражом, где машина стоит перед воротами, а не в гараже (как и на прежнем рисунке участка). */
-  parkShare: 0.6,
+  /**
+   * Доля домов с гаражом, где перед воротами стоит вторая машина: ездит она (стоит первой), а та, что в гараже, —
+   * нет. У остальных машина въезжает в гараж и дома её не видно.
+   */
+  secondCar: 0.2,
 };
 
 /**
@@ -59,17 +67,64 @@ function garageSeed(seed: number, town: number, n: number): number {
   return (Math.imul(seed >>> 0, 0x27d4eb2f) ^ Math.imul(town + 1, 0x165667b1) ^ Math.imul(n, 0x9e3779b1)) >>> 0;
 }
 
-/** Дом с гаражом: заезд и где стоит машина. Центры кузова — у машины носом к воротам. */
-export interface GarageHome {
+/**
+ * Место машины у здания: заезд и где она стоит — у дома (гараж, площадка) или на стоянке магазина. Центры кузова — у
+ * машины носом к воротам (к дальнему краю места).
+ */
+export interface CarSpot {
+  /** Ключ места: у дома — id дома, у места стоянки — отрицательный (shopParking.stallKey). */
+  key: number;
   b: TownBuilding;
   d: Driveway;
-  /** Машина стоит перед воротами (иначе — в гараже). */
+  /** Машина стоит на виду — перед воротами, на площадке, на месте стоянки (иначе — в гараже, за воротами). */
   parks: boolean;
   color: string;
-  /** Центр машины перед воротами, в гараже и у бордюра (кузов в заезде, корма у края полотна). */
+  /** Центр машины на месте (перед воротами, на площадке), в гараже и у бордюра (кузов в заезде, корма у полотна). */
   spot: Vec;
   inside: Vec;
   curbSide: Vec;
+}
+
+/** Дом с машиной: гараж (машина в нём или вторая — перед воротами) или открытая площадка. */
+export interface GarageHome extends CarSpot {
+  kind: 'garage' | 'pad';
+}
+
+/** Место машины по заезду: центры кузова на месте, в гараже и у бордюра. */
+export function carSpot(key: number, b: TownBuilding, d: Driveway, parks: boolean, color: string, L: number): CarSpot {
+  return {
+    key,
+    b,
+    d,
+    parks,
+    color,
+    spot: d.spot,
+    inside: d.garage ? add(d.gate, scale(d.dir, L / 2 + 0.3)) : d.spot,
+    curbSide: add(d.curb, scale(d.dir, L / 2 + 0.3)),
+  };
+}
+
+/**
+ * Что делать, когда манёвр дошёл до своей вехи: машина встала в поток (выезд), доехала до места (въезд), не
+ * дождалась просвета и вернулась на место (выезд), не свернула к месту (проехала мимо, дорогу поменяли).
+ */
+export interface MoveHooks {
+  joined?(sim: Vehicle): void;
+  /** spot — место, куда встала (у стоянки — выбранное из свободных). */
+  arrived?(spot: CarSpot): void;
+  stayed?(): void;
+  missed?(): void;
+}
+
+/** Машина в потоке едет к месту: куда (spot — пока не выбрано, — примерное, у стоянки), и можно ли выбрать другое. */
+interface Homing {
+  spot: CarSpot;
+  town: Town;
+  hooks: MoveHooks;
+  /** Место занято за ней (busy). */
+  reserved: boolean;
+  /** Стоянка: свободные сейчас места — какое выбрать, решается, когда машина на полосе у них (нет — проезжает мимо). */
+  choices?: () => CarSpot[];
 }
 
 /** Где машина встаёт на полосу (выезд) или с неё поворачивает (въезд) — на нынешнем графе. */
@@ -97,10 +152,12 @@ interface Leg {
 
 type Phase = 'yard' | 'wait' | 'road' | 'pause' | 'home';
 
-/** Машина на манёвре у гаража. */
+/** Машина на манёвре у гаража, площадки или места стоянки. */
 interface Move {
-  home: GarageHome;
+  home: CarSpot;
   town: Town;
+  color: string;
+  hooks: MoveHooks;
   kind: 'out' | 'in';
   phase: Phase;
   leg: Leg | null;
@@ -115,6 +172,9 @@ interface Move {
   blink?: -1 | 1;
   /** Выезд: куда едет и для карточки — откуда куда. */
   target?: number;
+  /** Выезд: последняя связь маршрута (едет на стоянку магазина) и что делать, когда тронулась по полосе. */
+  endLink?: number;
+  then?: (sim: Vehicle) => void;
   trip?: { from: TownBuilding; to: TownBuilding };
 }
 
@@ -138,6 +198,18 @@ export interface GarageHost {
 
 /** Что решено о поездке жителя. */
 export type GarageTrip = { kind: 'out'; home: GarageHome } | { kind: 'back'; home: GarageHome; slot: GarageSlot };
+
+/**
+ * Поправка к линии маршрута выбранной машины (Game.vehicleAhead) у места: head — начало вместо машины (выезд: от неё
+ * задним ходом до полосы), anchor — откуда по полосам (иначе — от машины), tail — конец после полос (въезд: поворот
+ * в заезд и до места), only — вся линия (машина уже сворачивает: полос впереди нет).
+ */
+export interface SpotAhead {
+  head?: Vec[];
+  anchor?: Vec;
+  tail?: Vec[];
+  only?: boolean;
+}
 
 /** Как нарисовать машину у гаража: кузов и, если она проезжает в ворота, — ворота (за ними её не видно, они открыты). */
 export interface GarageLook {
@@ -193,42 +265,43 @@ export function legPose(leg: Leg, s: number): { c: Vec; h: Vec } {
 }
 
 export class Garages {
-  /** Дом → его гараж (геометрия не меняется; null — гаража нет). */
+  /** Дом → его гараж или площадка (геометрия не меняется; null — места для машины нет). */
   private homes = new Map<number, GarageHome | null>();
-  /** Гаражи города — для рисунка машин у ворот и счёта: по массиву домов города. */
+  /** Дома с машиной в городе — для рисунка машин у ворот и счёта: по массиву домов города. */
   private towns = new Map<number, { of: TownBuilding[]; n: number; list: GarageHome[]; byId: Map<number, GarageHome>; box: [number, number, number, number] }>();
-  /** Где машина встаёт на полосу — по нынешнему графу (сменился — заново, по мере надобности). */
+  /** Где машина встаёт на полосу — по ключу места, по нынешнему графу (сменился — заново, по мере надобности). */
   private slots = new Map<number, GarageSlot | null>();
   private slotGraph: LaneGraph | null = null;
-  /** Машины на манёвре и те, что едут к своему гаражу (id машины в потоке → дом). */
+  /** Машины на манёвре и те, что едут к своему месту (id машины в потоке → место). */
   readonly moves: Move[] = [];
-  private homing = new Map<number, { home: GarageHome; town: Town }>();
-  /** Дома, чья машина сейчас на манёвре или едет домой. */
+  private homing = new Map<number, Homing>();
+  /** Места (ключи), чья машина сейчас на манёвре или едет к ним. */
   private busy = new Set<number>();
 
   constructor(private host: GarageHost) {}
 
-  /** Гараж дома: заезд, стоит ли машина у ворот и её цвет. Нет гаража (не частный дом, второй ряд) — null. */
+  /**
+   * Место машины дома: гараж (машина въезжает в него; у части домов вторая — перед воротами) или площадка, её цвет.
+   * Нет ни того ни другого (не частный дом или дача, второй ряд, без машины) — null.
+   */
   homeOf(b: TownBuilding): GarageHome | null {
     let h = this.homes.get(b.id);
     if (h !== undefined) return h;
     const d = drivewayOf(b);
     h = null;
     if (d) {
-      const L = this.host.car.length;
       const colors = this.host.colors;
-      h = {
-        b,
-        d,
-        parks: hash(b.id, 18) < GARAGE_TRIPS.parkShare,
-        color: colors[Math.floor(hash(b.id, 29) * colors.length)],
-        spot: d.spot,
-        inside: add(d.gate, scale(d.dir, L / 2 + 0.3)),
-        curbSide: add(d.curb, scale(d.dir, L / 2 + 0.3)),
-      };
+      const parks = !d.garage || hash(b.id, 18) < GARAGE_TRIPS.secondCar;
+      const spot = carSpot(b.id, b, d, parks, colors[Math.floor(hash(b.id, 29) * colors.length)], this.host.car.length);
+      h = { ...spot, kind: d.garage ? 'garage' : 'pad' };
     }
     this.homes.set(b.id, h);
     return h;
+  }
+
+  /** Занято ли место: его машина на манёвре или едет к нему. */
+  isBusy(key: number): boolean {
+    return this.busy.has(key);
   }
 
   /** Гаражи города (по его домам; дома прибавились или убавились — заново). */
@@ -261,20 +334,20 @@ export class Garages {
    * у бордюра со стороны дома (на односторонней с домом слева — нет), место поворота — на радиус поворота раньше
    * заезда, не ближе END_ROOM к концам полосы. Нельзя (дорогу снесли, заезд у перекрёстка, полоса дальше 25 м) — null.
    */
-  slotOf(home: GarageHome): GarageSlot | null {
+  slotOf(home: CarSpot): GarageSlot | null {
     const g = this.host.graph;
     if (this.slotGraph !== g) {
       this.slots.clear();
       this.slotGraph = g;
     }
-    let s = this.slots.get(home.b.id);
+    let s = this.slots.get(home.key);
     if (s !== undefined) return s;
     s = this.computeSlot(home, g);
-    this.slots.set(home.b.id, s);
+    this.slots.set(home.key, s);
     return s;
   }
 
-  private computeSlot(home: GarageHome, g: LaneGraph): GarageSlot | null {
+  private computeSlot(home: CarSpot, g: LaneGraph): GarageSlot | null {
     const net = this.host.net;
     const at = drivewayLink(net, home.d);
     const c = at && net.corridors.get(at.corridor);
@@ -307,8 +380,9 @@ export class Garages {
   }
 
   /**
-   * Поездка жителя из дома origin города town: возвращение машины в гараж (дом из уехавших), выезд из гаража origin
-   * или обычная (null). Номер поездки — в городе (Town.garageTrips), решение — по хешу от него и seed партии.
+   * Поездка жителя из дома origin города town: возвращение машины домой (дом из уехавших), выезд из гаража или с
+   * площадки (дома origin, если там машина, иначе — другого дома города с машиной на месте) или обычная (null). Номер
+   * поездки — в городе (Town.garageTrips), решение — по хешу от него и seed партии.
    */
   trip(town: Town, origin: TownBuilding): GarageTrip | null {
     const n = (town.garageTrips = (town.garageTrips ?? 0) + 1);
@@ -327,21 +401,58 @@ export class Garages {
         town.garageAway = away.filter((x) => x !== id);
       }
     }
-    const home = origin.kind === 'res' ? this.homeOf(origin) : null;
-    if (!home || this.busy.has(home.b.id) || away?.includes(home.b.id) || r(3) >= GARAGE_TRIPS.outShare) return null;
-    return this.slotOf(home) ? { kind: 'out', home } : null;
+    if (r(3) >= GARAGE_TRIPS.outShare || !homes.list.length) return null;
+    const out = town.garageAway?.length ? new Set(town.garageAway) : null;
+    const ready = (h: GarageHome | null): h is GarageHome => !!h && !this.busy.has(h.key) && !out?.has(h.b.id) && !!this.slotOf(h);
+    const own = origin.kind === 'res' ? this.homeOf(origin) : null;
+    if (ready(own)) return { kind: 'out', home: own };
+    // Из дома без машины (или она в разъездах) — едет машина другого дома города: несколько попыток по хешу.
+    for (let i = 0; i < 4; i++) {
+      const h = homes.list[Math.floor(r(4 + i) * homes.list.length)];
+      if (ready(h)) return { kind: 'out', home: h };
+    }
+    return null;
+  }
+
+  /** Геометрия места сменилась (магазин перестроили): где вставать на полосу — заново. */
+  forgetSlot(key: number): void {
+    this.slots.delete(key);
+  }
+
+  /** Крючки манёвра машины дома: уехала — в разъездах (Town.garageAway), вернулась — дома. */
+  private homeHooks(home: CarSpot, town: Town): MoveHooks {
+    return {
+      joined: () => {
+        const away = (town.garageAway ??= []);
+        if (!away.includes(home.b.id)) away.push(home.b.id);
+      },
+      arrived: () => {
+        const away = town.garageAway;
+        if (away) town.garageAway = away.filter((id) => id !== home.b.id);
+      },
+    };
   }
 
   /**
-   * Машина дома выезжает из гаража (или от ворот) к узлу target: задним ходом к бордюру, там ждёт просвета.
-   * trip — откуда куда (для карточки).
+   * Машина выезжает из гаража (или от ворот, с площадки, с места стоянки — home) к узлу target: задним ходом к
+   * бордюру, там ждёт просвета. trip — откуда куда (для карточки). opt: color и hooks — у места стоянки (у дома —
+   * свои); endLink — маршрут кончается этой связью (едет на стоянку магазина), then — встала на полосу и поехала.
    */
-  leave(home: GarageHome, town: Town, target: number, trip: { from: TownBuilding; to: TownBuilding }): void {
+  leave(
+    home: CarSpot,
+    town: Town,
+    target: number,
+    trip: { from: TownBuilding; to: TownBuilding },
+    opt: { color?: string; hooks?: MoveHooks; endLink?: number; then?: (sim: Vehicle) => void } = {},
+  ): void {
     const start = home.parks ? home.spot : home.inside;
-    this.busy.add(home.b.id);
+    this.busy.add(home.key);
     this.moves.push({
       home,
       town,
+      color: opt.color ?? home.color,
+      hooks: opt.hooks ?? this.homeHooks(home, town),
+      then: opt.then,
       kind: 'out',
       phase: 'yard',
       leg: straight(start, home.curbSide, true, SPEED.yardBack),
@@ -350,6 +461,7 @@ export class Garages {
       v: 0,
       wait: 0,
       target,
+      endLink: opt.endLink,
       trip,
     });
   }
@@ -361,23 +473,33 @@ export class Garages {
   }
 
   /** Машина в потоке sim везёт машину дома домой: маршрут уже к связи у дома (routeHome). */
-  homeward(sim: Vehicle, home: GarageHome, town: Town, slot: GarageSlot): void {
+  homeward(sim: Vehicle, home: CarSpot, town: Town, slot: GarageSlot): void {
     sim.endLink = slot.link.id;
-    this.homing.set(sim.id, { home, town });
-    this.busy.add(home.b.id);
+    this.homing.set(sim.id, { spot: home, town, hooks: this.homeHooks(home, town), reserved: true });
+    this.busy.add(home.key);
   }
 
-  /** Едет ли машина к своему гаражу и уже встаёт напротив заезда — тогда прижимается к бордюру (events.curbStop). */
+  /**
+   * Машина в потоке sim едет на стоянку: маршрут — к связи у места planned (routeHome); какое место из свободных
+   * (choices) занять, решается на полосе у стоянки — нет свободного, проезжает мимо (hooks.missed).
+   */
+  toStall(sim: Vehicle, planned: CarSpot, town: Town, slot: GarageSlot, hooks: MoveHooks, choices: () => CarSpot[]): void {
+    sim.endLink = slot.link.id;
+    this.homing.set(sim.id, { spot: planned, town, hooks, reserved: false, choices });
+  }
+
+  /** Едет ли машина к своему месту и уже встаёт напротив заезда — тогда прижимается к бордюру (events.curbStop). */
   pulls(sim: Vehicle): boolean {
     return sim.holdDist !== undefined && this.homing.has(sim.id);
   }
 
-  /** Машина в потоке кончила поездку или потерялась (не у гаража): дом её больше не ждёт. */
+  /** Машина в потоке кончила поездку или потерялась (не у места): место её больше не ждёт. */
   forget(simId: number): void {
     const h = this.homing.get(simId);
     if (!h) return;
     this.homing.delete(simId);
-    this.busy.delete(h.home.b.id);
+    if (h.reserved) this.busy.delete(h.spot.key);
+    h.hooks.missed?.();
   }
 
   /** Такт — после движения (traffic.step): машины на манёвре — туда, где они на нём. */
@@ -389,7 +511,7 @@ export class Garages {
     }
   }
 
-  /** Подъезжающие к своему гаражу: напротив заезда — остановиться, остановились — повернуть в него. */
+  /** Подъезжающие к своему месту: напротив заезда — остановиться, остановились — повернуть в него. */
   private stepHoming(): void {
     const traffic = this.host.traffic;
     for (const [id, h] of [...this.homing]) {
@@ -398,8 +520,8 @@ export class Garages {
         this.forget(id);
         continue;
       }
-      const slot = this.slotOf(h.home);
-      // Дорогу поменяли — связи у дома больше нет: едет просто к узлу (её endLink уже снят или не тот).
+      const slot = this.slotOf(h.spot);
+      // Дорогу поменяли — связи у места больше нет: едет просто к узлу (её endLink уже снят или не тот).
       if (!slot || sim.endLink !== slot.link.id) {
         this.cancelHoming(sim);
         continue;
@@ -407,14 +529,38 @@ export class Garages {
       if (sim.holdDist === undefined) {
         const lane = sim.onMovement ? undefined : traffic.currentLane(sim);
         if (!lane || lane.link !== slot.link.id) continue;
-        const d = slot.mid + sim.length / 2 - sim.s;
         // Поздно останавливаться — проехала мимо: поездка кончится у узла.
-        if (d < (sim.v * sim.v) / (2 * HOLD_BRAKE) + 0.5) this.cancelHoming(sim);
-        else traffic.holdAfter(sim, d);
+        const late = (s: GarageSlot) => s.mid + sim.length / 2 - sim.s < (sim.v * sim.v) / (2 * HOLD_BRAKE) + 0.5;
+        // Не в крайней полосе (широкая улица) — сначала перестроится к бордюру (на последней связи пути машина сама
+        // держится правее), а остановка (holdAfter) запретила бы ей перестраиваться.
+        if (lane.id !== slot.lane.id) {
+          if (late(slot)) this.cancelHoming(sim);
+          continue;
+        }
+        if (h.choices) {
+          // Стоянка: ближнее из свободных мест, до которого ещё успеть остановиться; нет — мимо.
+          let best: { spot: CarSpot; slot: GarageSlot } | null = null;
+          for (const c of h.choices()) {
+            const s = this.slotOf(c);
+            if (!s || s.lane.id !== slot.lane.id || this.busy.has(c.key) || late(s)) continue;
+            if (!best || s.mid < best.slot.mid) best = { spot: c, slot: s };
+          }
+          if (!best) {
+            this.cancelHoming(sim);
+            continue;
+          }
+          h.spot = best.spot;
+          h.reserved = true;
+          this.busy.add(best.spot.key);
+          traffic.holdAfter(sim, best.slot.mid + sim.length / 2 - sim.s);
+          continue;
+        }
+        if (late(slot)) this.cancelHoming(sim);
+        else traffic.holdAfter(sim, slot.mid + sim.length / 2 - sim.s);
         continue;
       }
       // Встаёт напротив заезда — с поворотником к нему.
-      const blink = dot(h.home.d.dir, rightNormal(slot.f)) > 0 ? 1 : -1;
+      const blink = dot(h.spot.d.dir, rightNormal(slot.f)) > 0 ? 1 : -1;
       sim.blinker = blink;
       if (!traffic.held(sim)) continue;
       if (sim.lane !== slot.lane.id) {
@@ -423,16 +569,17 @@ export class Garages {
       }
       this.homing.delete(id);
       const c0 = sub(sim.pos, scale(sim.dir, sim.length / 2));
-      const end = h.home.curbSide;
-      const k = 0.55 * Math.max(2, Math.abs(dot(sub(end, c0), rightNormal(sim.dir))));
+      const legs = this.inLegs(h.spot, c0, sim.dir);
       sim.lcCooldown = 1e9;
       this.moves.push({
-        home: h.home,
+        home: h.spot,
         town: h.town,
+        color: sim.color,
+        hooks: h.hooks,
         kind: 'in',
         phase: 'road',
-        leg: bezier(c0, add(c0, scale(sim.dir, k)), sub(end, scale(h.home.d.dir, k)), end, false, SPEED.roadIn),
-        next: straight(end, h.home.parks ? h.home.spot : h.home.inside, false, SPEED.yardIn),
+        leg: legs[0],
+        next: legs[1],
         s: 0,
         v: 0,
         sim,
@@ -442,7 +589,17 @@ export class Garages {
     }
   }
 
-  /** Едет домой, но в гараж не свернёт (дорогу поменяли, проехала мимо): поездка кончается у узла, как у всех. */
+  /** Въезд с полосы: поворот от центра кузова c0 (курс f) к бордюру и по заезду до места или в гараж. */
+  private inLegs(home: CarSpot, c0: Vec, f: Vec): [Leg, Leg] {
+    const end = home.curbSide;
+    const k = 0.55 * Math.max(2, Math.abs(dot(sub(end, c0), rightNormal(f))));
+    return [
+      bezier(c0, add(c0, scale(f, k)), sub(end, scale(home.d.dir, k)), end, false, SPEED.roadIn),
+      straight(end, home.parks ? home.spot : home.inside, false, SPEED.yardIn),
+    ];
+  }
+
+  /** Едет к месту, но к нему не свернёт (дорогу поменяли, проехала мимо): поездка кончается у узла, как у всех. */
   private cancelHoming(sim: Vehicle): void {
     delete sim.endLink;
     if (sim.holdDist !== undefined) this.host.traffic.release(sim);
@@ -463,6 +620,7 @@ export class Garages {
       const sim = m.sim!;
       traffic.release(sim);
       sim.lcCooldown = 0.5;
+      m.then?.(sim);
       return this.done(m);
     }
     const leg = m.leg!;
@@ -508,11 +666,9 @@ export class Garages {
       m.next = null;
       return true;
     }
-    // Доехала до места (въезд) или передумала и вернулась (выезд): машина дома.
-    if (m.kind === 'in') {
-      const away = m.town.garageAway;
-      if (away) m.town.garageAway = away.filter((id) => id !== m.home.b.id);
-    }
+    // Доехала до места (въезд) или передумала и вернулась (выезд): машина на месте.
+    if (m.kind === 'in') m.hooks.arrived?.(m.home);
+    else m.hooks.stayed?.();
     return false;
   }
 
@@ -523,9 +679,9 @@ export class Garages {
     const giveUp = !slot || m.wait > GARAGE_TRIPS.maxWait;
     if (!giveUp && (m.wait < LOOK || !this.host.traffic.clearToJoin(slot.lane.id, slot.zone[0], slot.zone[1]))) return true;
     const L = this.host.car.length;
-    const sim = giveUp ? null : this.host.traffic.placeOnLane({ ...this.host.car, color: m.home.color, targetNode: m.target! }, slot.lane.id, slot.mid + L / 2);
+    const sim = giveUp ? null : this.host.traffic.placeOnLane({ ...this.host.car, color: m.color, targetNode: m.target!, endLink: m.endLink }, slot.lane.id, slot.mid + L / 2);
     if (!sim || !slot) {
-      // Не дождалась (или ехать некуда) — обратно к воротам.
+      // Не дождалась (или ехать некуда) — обратно на место.
       m.phase = 'home';
       m.leg = straight(m.home.curbSide, m.home.parks ? m.home.spot : m.home.inside, false, SPEED.yardIn);
       m.s = 0;
@@ -534,10 +690,12 @@ export class Garages {
     }
     const traffic = this.host.traffic;
     traffic.holdAfter(sim, 0);
+    // Едет на стоянку магазина: путь кончается связью у неё — сразу, а не когда тронется (иначе, пересчитав путь на
+    // манёвре, она поехала бы просто к узлу, а связь у стоянки разошлась бы с концом пути).
+    if (m.endLink !== undefined) sim.endLink = m.endLink;
     sim.lcCooldown = 1e9;
     this.host.own(sim, m.trip!);
-    const away = (m.town.garageAway ??= []);
-    if (!away.includes(m.home.b.id)) away.push(m.home.b.id);
+    m.hooks.joined?.(sim);
     const start = m.home.curbSide;
     const k = 0.55 * Math.max(2, Math.abs(dot(sub(start, slot.pos), rightNormal(slot.f))));
     m.sim = sim;
@@ -550,7 +708,7 @@ export class Garages {
   }
 
   private done(m: Move): false {
-    this.busy.delete(m.home.b.id);
+    this.busy.delete(m.home.key);
     return false;
   }
 
@@ -568,19 +726,52 @@ export class Garages {
   }
 
   /**
-   * Машина дома на манёвре у гаража: нос, курс, фаза и машина в потоке (пока кузов над полосой). Нет манёвра — null.
+   * Машина места key (у дома — id дома) на манёвре: нос, курс, фаза и машина в потоке (пока кузов над полосой). Нет
+   * манёвра — null.
    */
-  moveOf(building: number): { pos: Vec; dir: Vec; phase: Phase; kind: 'out' | 'in'; sim?: Vehicle } | null {
-    const m = this.moves.find((x) => x.home.b.id === building);
+  moveOf(key: number): { pos: Vec; dir: Vec; phase: Phase; kind: 'out' | 'in'; sim?: Vehicle } | null {
+    const m = this.moves.find((x) => x.home.key === key);
     if (!m) return null;
     if (m.sim) return { pos: m.sim.pos, dir: m.sim.dir, phase: m.phase, kind: m.kind, sim: m.sim };
     const { c, h } = legPose(m.leg!, m.s);
     return { pos: add(c, scale(h, this.host.car.length / 2)), dir: h, phase: m.phase, kind: m.kind };
   }
 
-  /** Едет ли машина в потоке к своему гаражу (и какому дому). */
+  /** Едет ли машина в потоке к своему месту (и какому: у дома — id дома). */
   homingOf(simId: number): number | undefined {
-    return this.homing.get(simId)?.home.b.id;
+    return this.homing.get(simId)?.spot.key;
+  }
+
+  /**
+   * Линия маршрута выбранной машины у места (SpotAhead): едет к месту — по полосам до поворота и дальше поворот,
+   * заезд и место (нос машины); уже сворачивает — только это; выезжает задним ходом — от неё до полосы и дальше по
+   * маршруту. Ни то ни другое — null.
+   */
+  aheadOf(simId: number): SpotAhead | null {
+    const L = this.host.car.length;
+    const nose = (leg: Leg, from: number): Vec[] => {
+      const out: Vec[] = [];
+      for (let i = 0; i < leg.cum.length; i++) {
+        if (leg.cum[i] <= from) continue;
+        const { c, h } = legPose(leg, leg.cum[i]);
+        out.push(add(c, scale(h, L / 2)));
+      }
+      return out;
+    };
+    const m = this.moves.find((x) => x.sim?.id === simId);
+    if (m) {
+      const sim = m.sim!;
+      if (m.kind === 'in') return { only: true, tail: [sim.pos, ...nose(m.leg!, m.s), ...(m.next ? nose(m.next, 0) : [])] };
+      const slot = this.slotOf(m.home);
+      if (!slot) return null;
+      const anchor = add(slot.pos, scale(slot.f, L / 2));
+      return { head: [sim.pos, anchor], anchor };
+    }
+    const h = this.homing.get(simId);
+    const slot = h && this.slotOf(h.spot);
+    if (!h || !slot) return null;
+    const [turn, yard] = this.inLegs(h.spot, slot.pos, slot.f);
+    return { tail: [add(slot.pos, scale(slot.f, L / 2)), ...nose(turn, 0), ...nose(yard, 0)] };
   }
 
   /**
@@ -598,7 +789,7 @@ export class Garages {
         if (!t.list.length || b[2] < box[0] - 10 || b[0] > box[2] + 10 || b[3] < box[1] - 10 || b[1] > box[3] + 10) continue;
         const away = town.garageAway?.length ? new Set(town.garageAway) : null;
         for (const h of t.list) {
-          if (!h.parks || this.busy.has(h.b.id) || away?.has(h.b.id) || !inBox(h.spot, 10)) continue;
+          if (!h.parks || this.busy.has(h.key) || away?.has(h.b.id) || !inBox(h.spot, 10)) continue;
           out.push({ look: { ...spec, color: h.color, pos: add(h.spot, scale(h.d.dir, spec.length / 2)), dir: h.d.dir } });
         }
       }
@@ -607,7 +798,7 @@ export class Garages {
       if (m.sim || !m.leg) continue;
       const { c, h } = legPose(m.leg, m.s);
       if (!inBox(c, 10)) continue;
-      const look: VehicleLook = { ...spec, color: m.home.color, pos: add(c, scale(h, spec.length / 2)), dir: h };
+      const look: VehicleLook = { ...spec, color: m.color, pos: add(c, scale(h, spec.length / 2)), dir: h };
       out.push(m.home.parks ? { look } : { look, gate: { pos: m.home.d.gate, dir: m.home.d.dir, width: m.home.d.width } });
     }
     return out;

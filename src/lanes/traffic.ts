@@ -756,14 +756,15 @@ export class LaneTraffic {
   }
 
   /**
-   * Ставит машину на полосу laneId носом в u (выехала со двора, game/garages.ts) с маршрутом от её связи к targetNode.
-   * Полосы нет или не доехать — null. Место — заранее проверить (clearToJoin).
+   * Ставит машину на полосу laneId носом в u (выехала со двора, game/garages.ts) с маршрутом от её связи к targetNode
+   * (endLink — последней связью маршрута: едет к месту у дома или магазина). Полосы нет или не доехать — null.
+   * Место — заранее проверить (clearToJoin).
    */
-  placeOnLane(opts: VehicleSpec & { targetNode: number }, laneId: number, u: number): Vehicle | null {
+  placeOnLane(opts: VehicleSpec & { targetNode: number; endLink?: number }, laneId: number, u: number): Vehicle | null {
     const lane = this.graph.lanes.get(laneId);
-    const route = lane && findLaneRoute(this.graph, [this.graph.links.get(lane.link)!], opts.targetNode);
+    const route = lane && findLaneRoute(this.graph, [this.graph.links.get(lane.link)!], opts.targetNode, opts.endLink);
     if (!lane || !route || u < 0 || u > lane.length) return null;
-    const { targetNode, ...spec } = opts;
+    const { targetNode, endLink: _end, ...spec } = opts;
     const veh = this.create(spec, targetNode, route, lane, u, 0);
     insertSorted(lane.vehicles, veh);
     return veh;
