@@ -56,7 +56,7 @@ import { drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
 import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
-import { drawHouseArt, hallFountain, houseReach } from './houseArt';
+import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
 import { type SidewalkCache, type SidewalkNet, sidewalkNet, type WalkSite } from './sidewalks';
 import { iconRaster } from './iconRaster';
@@ -726,6 +726,7 @@ export class Renderer {
     if (o.heatmap) this.drawHeatmap(game, 0);
     // Пешеходы на переходах и пешеходные светофоры — вблизи, под машинами (машина, что их пропускает, — перед зеброй).
     this.drawCrosswalkLife(game, view);
+    this.drawGarageCars(game, view);
     this.drawVehicles(vehicles.filter((v) => groundBand(v) === 0 && !atPortal.has(v)));
     for (const [v, p] of atPortal) this.drawClipped(portalHalf(p, -1), () => this.drawVehicles([v]));
     this.drawPortals(portals);
@@ -2276,6 +2277,31 @@ export class Renderer {
   }
 
   // ---------- Машины ----------
+
+  /**
+   * Машины у гаражей частных домов (game/garages.ts): вблизи (как машины во дворах, FINE_ZOOM) — стоящие перед
+   * воротами, и всегда — на манёвре во дворе. Проезжая в ворота, машина видна только до них (дальше — под крышей
+   * гаража), а ворота открыты — тёмный проём.
+   */
+  private drawGarageCars(game: Game, view: Box): void {
+    const list = game.garageLooks([view.x0, view.y0, view.x1, view.y1], this.camera.zoom >= FINE_ZOOM);
+    const ctx = this.ctx;
+    for (const { look, gate } of list) {
+      if (!gate) {
+        this.drawVehicles([look]);
+        continue;
+      }
+      const side = scale(rightNormal(gate.dir), gate.width / 2);
+      const deep = scale(gate.dir, 1.2);
+      ctx.fillStyle = 'rgba(36,38,44,0.92)';
+      this.polyline([add(gate.pos, side), sub(gate.pos, side), add(sub(gate.pos, side), deep), add(add(gate.pos, side), deep)]);
+      ctx.closePath();
+      ctx.fill();
+      const far = scale(rightNormal(gate.dir), 40);
+      const back = scale(gate.dir, -40);
+      this.drawClipped([add(gate.pos, far), sub(gate.pos, far), add(sub(gate.pos, far), back), add(add(gate.pos, far), back)], () => this.drawVehicles([look]));
+    }
+  }
 
   /** halo — белая обводка, чтобы машины линии читались поверх её маршрута. */
   private drawVehicles(list: VehicleLook[], halo = false): void {

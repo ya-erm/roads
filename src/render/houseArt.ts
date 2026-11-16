@@ -18,8 +18,8 @@ import { bench, flowerbed, fountain, lamp, playground as playArea, sportsBox, st
  */
 
 const SHADOW = 'rgba(30,40,25,0.2)';
-/** Совсем вблизи — машины во дворах, штакетник, качели. */
-const FINE_ZOOM = 1.1;
+/** Совсем вблизи — машины во дворах, штакетник, качели (и машины перед гаражами — их рисует движение, renderer). */
+export const FINE_ZOOM = 1.1;
 
 const LAWN = 'rgba(128,170,88,0.2)';
 const LAWN_DACHA = 'rgba(140,182,92,0.26)';
@@ -456,7 +456,8 @@ const lawn = (a: Art, lot: Lot, color = LAWN) => a.patch(-lot.W / 2 + 0.3, -lot.
 /**
  * Частный дом с участком: крупный дом у улицы почти во всю ширину участка (крыльцо — к калитке), за ним огород,
  * сарай, теплица, плодовые деревья; забор с калиткой; у половины домов — гараж под машину с асфальтовым заездом от
- * улицы и машиной перед воротами. Раскладка (дом, гараж, заезд) — world/houseAccess.cottagePlan: её же видит игра.
+ * улицы (машину перед воротами рисует движение). Раскладка (дом, гараж, заезд) — world/houseAccess.cottagePlan: её же
+ * видит игра.
  */
 function cottage(a: Art, lot: Lot): void {
   const { W, H, b } = lot;
@@ -478,12 +479,12 @@ function cottage(a: Art, lot: Lot): void {
     if (a.r(10) < 0.4 && W > 15 && yEnd - back > 4.5) greenhouse(a, gx + gw / 2 - 1.4, back + 0.8, 2.8, Math.min(5.5, yEnd - back - 1.4));
     yardTree(a, lot, sx + (sx < 0 ? 7 : -2.8), yEnd - 1.6 - a.r(11) * 1.5, 2.3 + a.r(12), 13);
   }
-  // Заезд: асфальт от улицы до ворот гаража, перед воротами — машина (не у всех: днём она в разъездах).
+  // Заезд: асфальт от улицы до ворот гаража. Машину перед воротами (у 60 % таких домов, остальные — в гараже) рисует
+  // не участок, а движение (game/garages.ts): она уезжает из гаража и возвращается.
   const drive = plan.drive;
   const g = plan.garage;
   if (drive && g) {
     curbCut(a, lot, drive.x, drive.w, drive.y1 + 0.3);
-    if (a.r(18) < 0.6) car(a, lot, drive.x, drive.y1 - CAR.l / 2 - 0.4, true, 18);
     // Гараж под машину: ворота — к улице.
     const groof = a.r(27) < 0.5 ? METAL_ROOFS[Math.floor(a.r(28) * METAL_ROOFS.length)] : tone(b.roof, -0.1);
     pitched(a, g.x, g.y, g.w, g.h, 2.8, groof, false, 0, a.r(27) < 0.5);

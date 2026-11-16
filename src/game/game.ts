@@ -87,6 +87,7 @@ import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, short
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
 import { WorkSignals } from './workSignals';
 import { Crosswalks, WALK_HOUSES, WALK_LOSS } from './crosswalks';
+import { Garages, type GarageHost, type GarageLook } from './garages';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises } from './enterprises';
 import { isActive } from '../world/enterprise';
@@ -831,6 +832,8 @@ export class Game implements BuildContext {
   readonly workSignals = new WorkSignals();
   /** Пешеходы на переходах перекрёстков (src/game/crosswalks.ts): жители вокруг — по охвату, как у станций. */
   readonly crosswalks = new Crosswalks((p, r) => this.peopleNear(p, r).pop);
+  /** Гаражи частных домов (src/game/garages.ts): машины жителей выезжают из них и возвращаются в них. */
+  readonly garages = new Garages(this.garageHost());
   /** Предприятия строит игрок (режим «Строит игрок», src/game/enterprises.ts): месторождения, постройка, рабочие, вред. */
   readonly enterprises: Enterprises;
 
@@ -4055,6 +4058,8 @@ export class Game implements BuildContext {
     // Пешеходы на переходах — тоже до движения: идут — зебра закрыта.
     if (this.roads.graph.crosswalks.size || this.crosswalks.list.length) this.crosswalks.step(dt, this.time, this.roads.graph, this.traffic);
     this.traffic.step(dt);
+    // Машины у гаражей частных домов — сразу после движения: на манёвре их рисуют там, где они на нём.
+    this.garages.step(dt);
     this.gatherCrews();
     this.rail.step(dt);
     this.updateFleet(dt);
@@ -5570,6 +5575,8 @@ export class Game implements BuildContext {
 
   /** Машина едет к своей остановке (а не к автостанции) или стоит у неё: у бордюра — подъезжая, смещается к нему заранее. */
   private curbStop(sim: Vehicle): boolean {
+    // Машина жителя встаёт напротив заезда к своему гаражу — у бордюра, как перед поворотом во двор.
+    if (this.garages.pulls(sim)) return true;
     const v = this.fleetOf(sim);
     const line = v && this.lines.get(v.lineId);
     const st = line && this.stations.get(line.stops[v.stop]);
@@ -5833,6 +5840,7 @@ export class Game implements BuildContext {
     this.owners.delete(sim.id);
     if (owner?.type === 'citizen') {
       this.citizenCars--;
+      this.garages.forget(sim.id);
       return;
     }
     if (owner?.type === 'service') {
@@ -5895,6 +5903,7 @@ export class Game implements BuildContext {
     this.owners.delete(sim.id);
     if (owner?.type === 'citizen') {
       this.citizenCars--;
+      this.garages.forget(sim.id);
       return;
     }
     if (owner?.type === 'service') {
@@ -6695,11 +6704,64 @@ export class Game implements BuildContext {
       route = this.roads.route(origin.anchor, dest.anchor);
     }
     if (!route || !dest) return;
-    const sim = this.traffic.spawn({ ...CAR_SPEC, color: this.rng.pick(CAR_COLORS), targetNode: dest.anchor, route });
+    const color = this.rng.pick(CAR_COLORS);
+    // Гаражи частных домов (garages.ts) — по хешу, общий генератор не трогают: выезд из гаража дома origin или
+    // возвращение в гараж машины, что уехала раньше (едет от узла origin).
+    const garage = this.garages.trip(town, origin);
+    if (garage?.kind === 'out') {
+      // Машиной в потоке (и в счёте citizenCars) станет, когда встанет на полосу (GarageHost.own).
+      this.garages.leave(garage.home, town, dest.anchor, { from: origin, to: dest });
+      return;
+    }
+    if (garage?.kind === 'back') {
+      const way = this.garages.routeHome(origin.anchor, garage.slot);
+      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color: garage.home.color, targetNode: garage.slot.link.toNode!, route: way });
+      if (sim) {
+        this.owners.set(sim.id, { type: 'citizen', trip: { from: origin, to: garage.home.b } });
+        this.garages.homeward(sim, garage.home, town, garage.slot);
+        this.citizenCars++;
+        return;
+      }
+    }
+    const sim = this.traffic.spawn({ ...CAR_SPEC, color, targetNode: dest.anchor, route });
     if (!sim) return;
     // Откуда и куда — уже выбранные дом и цель (без новых случайных чисел): для карточки машины.
     this.owners.set(sim.id, { type: 'citizen', trip: { from: origin, to: dest } });
     this.citizenCars++;
+  }
+
+  /** Что гаражам частных домов (garages.ts) нужно от игры. */
+  private garageHost(): GarageHost {
+    const game = this;
+    return {
+      get seed() {
+        return game.seed;
+      },
+      get traffic() {
+        return game.traffic;
+      },
+      get graph() {
+        return game.roads.graph;
+      },
+      get net() {
+        return game.roads.net;
+      },
+      car: CAR_SPEC,
+      colors: CAR_COLORS,
+      own: (sim, trip) => {
+        this.owners.set(sim.id, { type: 'citizen', trip });
+        this.citizenCars++;
+      },
+      gone: (sim) => {
+        this.owners.delete(sim.id);
+        this.citizenCars--;
+      },
+    };
+  }
+
+  /** Машины у гаражей частных домов в кадре: у ворот (вблизи, parked) и на манёвре во дворе (garages.ts). */
+  garageLooks(box: [number, number, number, number], parked: boolean): GarageLook[] {
+    return this.garages.looks(this.towns, box, parked);
   }
 
   /** Откуда и куда едет машина жителя или спецмашина (здания и их города); не знаем (после загрузки, чужая) — null. */

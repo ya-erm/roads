@@ -22,15 +22,20 @@ export function transitionCost(g: LaneGraph, from: GLink, to: GLink): number {
   return best;
 }
 
-/** A* по связям: список id связей от одной из стартовых до узла goal. */
-export function findLaneRoute(g: LaneGraph, starts: GLink[], goal: number): number[] | null {
+/**
+ * A* по связям: список id связей от одной из стартовых до узла goal. endLink — путь кончается этой связью (машина
+ * жителя заезжает в гараж посреди улицы, Vehicle.endLink); такой связи в графе нет — как без неё, до узла.
+ */
+export function findLaneRoute(g: LaneGraph, starts: GLink[], goal: number, endLink?: number): number[] | null {
   const target = g.net.nodes.get(goal);
   if (!target) return null;
   const endOf = (l: GLink) => g.lanePose(l.lanes[0], l.length).pos;
-  const h = (l: GLink) => dist(endOf(l), target.pos) / MAX_SPEED;
+  const last = endLink !== undefined ? g.links.get(endLink) : undefined;
+  const goalPos = last ? endOf(last) : target.pos;
+  const h = (l: GLink) => dist(endOf(l), goalPos) / MAX_SPEED;
   // Цель с одной стороны (LaneNode.arrive) — только связи, что подходят к ней по ходу этой стороны.
   const side = target.arrive;
-  const arrives = (l: GLink) => !side || dot(g.lanePose(l.lanes[0], l.length).dir, target.dir) * side > 0;
+  const arrives = (l: GLink) => (last ? l === last : !side || dot(g.lanePose(l.lanes[0], l.length).dir, target.dir) * side > 0);
   const cost = new Map<number, number>();
   const prev = new Map<number, number>();
   const open = new Heap<GLink>();
@@ -43,7 +48,7 @@ export function findLaneRoute(g: LaneGraph, starts: GLink[], goal: number): numb
     const link = open.pop()!;
     if (closed.has(link.id)) continue;
     closed.add(link.id);
-    if (link.toNode === goal && arrives(link)) {
+    if ((last || link.toNode === goal) && arrives(link)) {
       const path = [link.id];
       while (prev.has(path[0])) path.unshift(prev.get(path[0])!);
       return path;

@@ -29,6 +29,11 @@ export interface Vehicle extends VehicleSpec {
   /** Маршрут — список id связей графа полос. */
   route: number[];
   routeIndex: number;
+  /**
+   * Маршрут кончается этой связью, а не любой, что приходит в targetNode (её конец): машина жителя едет к гаражу
+   * посреди улицы (game/garages.ts) — по ней и пересчитывают маршрут. Нет — до узла targetNode как обычно.
+   */
+  endLink?: number;
   /** Текущая полоса (на манёвре — полоса, с которой въехали). */
   lane: number;
   /**

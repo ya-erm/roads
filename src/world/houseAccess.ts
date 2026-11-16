@@ -121,7 +121,8 @@ export function drivewayOf(b: TownBuilding): Driveway | null {
 
 /**
  * К какому полотну примыкает заезд: ближайшее к его точке у бордюра (ось — не дальше 25 м), место на оси s и
- * сторона (1 — слева по направлению a→b, −1 — справа). Нет полотна рядом (дорогу снесли) — null.
+ * сторона (1 — справа по направлению a→b, как полосы с offset > 0, GLane.offset; −1 — слева). Нет полотна рядом
+ * (дорогу снесли) — null.
  */
 export function drivewayLink(roads: LaneNet, d: Driveway): { corridor: number; s: number; side: 1 | -1 } | null {
   let best: { corridor: number; s: number; side: 1 | -1; d: number } | null = null;

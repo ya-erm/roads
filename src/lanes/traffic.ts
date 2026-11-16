@@ -35,6 +35,16 @@ export interface LaneSpawn extends VehicleSpec {
   route: number[];
 }
 
+/**
+ * Просвет для выезда со двора на полосу (clearToJoin): подъезжающему сзади нужно minGap + JOIN_HEADWAY с его скорости
+ * + путь до остановки с замедлением JOIN_BRAKE — вдвое мягче IDM.brake, без резкого торможения. На 50 км/ч (22,7 м/с
+ * игры, KMH_PER_UNIT) — 66 м, девять длин машины; на 30 км/ч — 32 м. Дальше JOIN_LOOK м до начала полосы не
+ * смотрим: столько не нужно и на 90 км/ч.
+ */
+export const JOIN_HEADWAY = 1.5;
+export const JOIN_BRAKE = IDM.brake / 2;
+const JOIN_LOOK = 160;
+
 /** Сколько машина смотрит вперёд через продолжения полос в поисках лидера. */
 const LOOKAHEAD = 250;
 /** Насколько вперёд по маршруту машина выбирает полосу: к съезду и повороту перестраивается заранее. */
@@ -367,6 +377,12 @@ export class LaneTraffic {
     const cut: Vehicle[] = [];
     const placed: Vehicle[] = [];
     for (const veh of [...this.vehicles.values()]) {
+      // Связь, которой кончается путь (к гаражу), — та же в новом графе; нет её — едет просто к узлу.
+      if (veh.endLink !== undefined) {
+        const end = keyed ? graph.linkFromPrev.get(veh.endLink) : undefined;
+        if (end === undefined) delete veh.endLink;
+        else veh.endLink = end;
+      }
       const c = keyed ? this.carryOver(old, veh) : null;
       if (c === null) placed.push(veh);
       else {
@@ -400,7 +416,7 @@ export class LaneTraffic {
       // Своей полосы рядом нет (её закрыли — перекрытие на перестройке, реверс переехал дальше): на соседнюю попутную,
       // через полосу (съезжает плавно, glide), а не с дороги долой.
       const spot = this.laneAt(veh.pos, veh.dir) ?? exit ?? this.laneAt(veh.pos, veh.dir, LANE_W + 1.5);
-      const route = spot && findLaneRoute(graph, [graph.links.get(spot.lane.link)!], veh.targetNode);
+      const route = spot && findLaneRoute(graph, [graph.links.get(spot.lane.link)!], veh.targetNode, veh.endLink);
       if (!spot || !route) {
         this.vehicles.delete(veh.id);
         this.events.onLost(veh);
@@ -461,7 +477,8 @@ export class LaneTraffic {
       veh.waitingAt = null;
       veh.ready = false;
     }
-    return broken || this.cuts.has(veh) || g.links.get(route[route.length - 1])!.toNode !== veh.targetNode;
+    const end = route[route.length - 1];
+    return broken || this.cuts.has(veh) || (veh.endLink !== undefined ? end !== veh.endLink : g.links.get(end)!.toNode !== veh.targetNode);
   }
 
   /**
@@ -485,7 +502,7 @@ export class LaneTraffic {
     const to = spot(m.outLane, g.outLinks.get(m.node));
     const node = g.nodes.get(m.node);
     const nm = from?.lane && to?.lane ? g.moves.get(`${from.lane.id}>${to.lane.id}`) : undefined;
-    const rest = nm && findLaneRoute(g, [to!.link], veh.targetNode);
+    const rest = nm && findLaneRoute(g, [to!.link], veh.targetNode, veh.endLink);
     if (!nm || !node || !rest) return false;
     // Где на новой кривой машина: ближайшая к ней точка (проекция, а не та же доля пути).
     let best = Infinity;
@@ -624,7 +641,7 @@ export class LaneTraffic {
     if (veh.onMovement) {
       const m = g.moves.get(veh.onMovement);
       const out = m && g.links.get(m.outLink);
-      const rest = out && findLaneRoute(g, [out], veh.targetNode);
+      const rest = out && findLaneRoute(g, [out], veh.targetNode, veh.endLink);
       if (!m || !rest) return this.lose(veh);
       veh.route = [m.inLink, ...rest];
       veh.routeIndex = 0;
@@ -632,7 +649,7 @@ export class LaneTraffic {
     }
     const lane = this.currentLane(veh);
     const link = lane && g.links.get(lane.link);
-    const route = link && findLaneRoute(g, [link], veh.targetNode);
+    const route = link && findLaneRoute(g, [link], veh.targetNode, veh.endLink);
     if (!route) return this.lose(veh);
     this.setRoute(veh, route);
   }
@@ -736,6 +753,43 @@ export class LaneTraffic {
     const veh = this.create(spec, targetNode, route, spot.lane, spot.u, v);
     insertSorted(spot.lane.vehicles, veh);
     return veh;
+  }
+
+  /**
+   * Ставит машину на полосу laneId носом в u (выехала со двора, game/garages.ts) с маршрутом от её связи к targetNode.
+   * Полосы нет или не доехать — null. Место — заранее проверить (clearToJoin).
+   */
+  placeOnLane(opts: VehicleSpec & { targetNode: number }, laneId: number, u: number): Vehicle | null {
+    const lane = this.graph.lanes.get(laneId);
+    const route = lane && findLaneRoute(this.graph, [this.graph.links.get(lane.link)!], opts.targetNode);
+    if (!lane || !route || u < 0 || u > lane.length) return null;
+    const { targetNode, ...spec } = opts;
+    const veh = this.create(spec, targetNode, route, lane, u, 0);
+    insertSorted(lane.vehicles, veh);
+    return veh;
+  }
+
+  /**
+   * Настоящий просвет на полосе laneId для машины, что встаёт на неё со двора (выезжает из гаража задним ходом):
+   * на [u0, u1] полосы (вместе с тем, что кузов заметает на развороте) и в IDM.minGap от него — никого, а у тех, кто
+   * подъезжает сзади (по этой полосе и по манёврам и полосам до неё), хватает места спокойно остановиться за ней:
+   * minGap + JOIN_HEADWAY с их скорости + тормозной путь при JOIN_BRAKE. Впереди за u1 — неважно, кто: уезжают от неё.
+   */
+  clearToJoin(laneId: number, u0: number, u1: number): boolean {
+    const lane = this.graph.lanes.get(laneId);
+    if (!lane) return false;
+    const need = (o: Vehicle) => IDM.minGap + o.v * JOIN_HEADWAY + (o.v * o.v) / (2 * JOIN_BRAKE);
+    for (const o of lane.vehicles) {
+      if (o.s > u0 - IDM.minGap) {
+        if (o.s - o.length < u1 + IDM.minGap) return false;
+      } else if (u0 - o.s < need(o)) return false;
+    }
+    // До начала полосы — по манёврам в неё и полосам до них (upstream меряет до конца полосы).
+    for (const { veh, distance } of this.upstream(laneId, lane.length + JOIN_LOOK)) {
+      if (veh.lane === laneId && !veh.onMovement) continue;
+      if (distance - lane.length + u0 < need(veh)) return false;
+    }
+    return true;
   }
 
   /**
@@ -1749,7 +1803,7 @@ export class LaneTraffic {
     const exits = new Set<number>();
     for (const m of this.graph.movesFrom.get(lane.id) ?? []) exits.add(m.outLink);
     const starts = [...exits].map((id) => this.graph.links.get(id)!).filter(Boolean);
-    const rest = findLaneRoute(this.graph, starts, veh.targetNode);
+    const rest = findLaneRoute(this.graph, starts, veh.targetNode, veh.endLink);
     if (rest) this.setRoute(veh, [lane.link, ...rest]);
     else this.lose(veh);
   }
@@ -2229,7 +2283,7 @@ export class LaneTraffic {
     const lane = this.currentLane(veh);
     const link = lane && this.graph.links.get(lane.link);
     if (!link) return;
-    const route = findLaneRoute(this.graph, [link], veh.targetNode);
+    const route = findLaneRoute(this.graph, [link], veh.targetNode, veh.endLink);
     if (route) this.setRoute(veh, route);
   }
 
