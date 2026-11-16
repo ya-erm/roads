@@ -3,7 +3,7 @@ import { freshGame } from '../game/testkit';
 import type { TownBuilding } from './entities';
 import { CAR_SIZE, drivewayLink, LOT_SETBACK } from './houseAccess';
 import { NEW_GAME_SETTINGS } from './settings';
-import { APRON, shopLotOf, STALL, stallDriveways, stallFit, type ShopLot } from './shopLots';
+import { APRON, DOCK_TRUCK, dockYardOf, SERVICE_DRIVE, shopLotOf, STALL, stallDriveways, stallFit, YARD_DEPTH, type ShopLot } from './shopLots';
 import { pointInFootprint } from './spatial';
 
 let nextId = 5000;
@@ -68,10 +68,10 @@ describe('Стоянки магазинов', () => {
     expect(stallFit(13.7)).toEqual({ n: 2, w: 5 });
   });
 
-  it('небольшой магазин: стоянка сбоку на 2–4 места, здание — во весь остаток ширины', () => {
+  it('небольшой магазин: стоянка сбоку на 2–4 места, с другой стороны — проезд к рампе, здание — во весь остаток ширины', () => {
     for (const [W, n] of [
       [35, 2],
-      [40, 3],
+      [40, 2],
       [47, 3],
       [57, 4],
     ] as const) {
@@ -80,18 +80,63 @@ describe('Стоянки магазинов', () => {
       expect(plan.groups.length).toBe(1);
       expect(plan.groups[0].stalls.length).toBe(n);
       checkLot(b, plan);
-      // Площадка подогнана под места: от края участка до здания — места и зазоры, без пустого асфальта.
+      // Площадка подогнана под места: от края участка до здания — проезд, места и зазоры, без пустого асфальта.
       const g = plan.groups[0];
       const used = plan.building!.w + g.pad.w - 0.8;
-      expect(used).toBeCloseTo(W - 3.5);
+      expect(used).toBeCloseTo(W - 3.5 - SERVICE_DRIVE);
     }
+  });
+
+  it('двор с рампой: проезд у торца не задевает здание и места, грузовик разворачивается в участке; мелкий двор — рампа у торца', () => {
+    const cases: Partial<TownBuilding>[] = [];
+    for (const W of [35, 40, 47, 57])
+      for (const H of [36, 41, 52]) {
+        const fp = { center: { x: 0, y: 0 }, w: W, h: H, angle: 0 };
+        cases.push({ fp }, { floors: 5, fp }, { form: 'store', fp }, { form: 'office', fp }, { form: 'warehouse', fp });
+        cases.push({ form: 'market', fp: { ...fp, w: W + 10, h: H + 6 } });
+      }
+    let turns = 0;
+    for (const o of cases) {
+      for (const id of [1, 2, 3]) {
+        const b = lot({ ...o, id });
+        const y = dockYardOf(b)!;
+        expect(y).not.toBeNull();
+        const W = b.fp.w;
+        const H = b.fp.h;
+        const drive = { x: y.drive.x - y.drive.w / 2, y: -H / 2, w: y.drive.w, h: y.drive.y1 + H / 2 };
+        expect(drive.x).toBeGreaterThanOrEqual(-W / 2);
+        expect(drive.x + drive.w).toBeLessThanOrEqual(W / 2);
+        for (const p of y.pad) {
+          expect(p.x).toBeGreaterThanOrEqual(-W / 2 - 1e-6);
+          expect(p.x + p.w).toBeLessThanOrEqual(W / 2 + 1e-6);
+          expect(p.y + p.h).toBeLessThanOrEqual(H / 2 + 1e-6);
+        }
+        const plan = shopLotOf(b);
+        if (plan?.building) expect(overlaps(drive, plan.building)).toBe(false);
+        for (const s of plan?.groups.flatMap((g) => g.stalls) ?? []) expect(overlaps(drive, { x: s.x - s.w / 2, y: s.y0, w: s.w, h: s.y1 - s.y0 })).toBe(false);
+        if (y.kind !== 'turn') continue;
+        turns++;
+        // Разворот: кузов у рампы, поворот и вылет кузова за рампу — в участке.
+        const far = y.rx - y.side * (DOCK_TRUCK.r + DOCK_TRUCK.l / 2);
+        expect(Math.abs(far)).toBeLessThanOrEqual(W / 2);
+        expect(H / 2 - y.wall).toBeGreaterThanOrEqual(YARD_DEPTH - 1e-6);
+        expect(Math.abs(y.drive.x - y.rx)).toBeGreaterThanOrEqual(6 - 1e-6);
+        if (plan?.building) {
+          expect(y.rx).toBeGreaterThan(plan.building.x);
+          expect(y.rx).toBeLessThan(plan.building.x + plan.building.w);
+          expect(y.wall).toBeCloseTo(plan.building.y + plan.building.h);
+        }
+      }
+    }
+    // Небольшие и сельские магазины — с разворотом за зданием (их треть случаев и ещё часть универмагов).
+    expect(turns).toBeGreaterThan(cases.length);
   });
 
   it('универмаг (от 4 этажей) — стоянка во всю ширину перед ним, проход ко входу посередине; рынок — так же', () => {
     const big = lot({ floors: 5, fp: { center: { x: 0, y: 0 }, w: 43, h: 44, angle: 0 } });
     const plan = shopLotOf(big)!;
     expect(plan.groups.length).toBe(2);
-    expect(plan.groups.reduce((s, g) => s + g.stalls.length, 0)).toBe(8);
+    expect(plan.groups.reduce((s, g) => s + g.stalls.length, 0)).toBe(6);
     expect(plan.walk!.w).toBeGreaterThanOrEqual(3);
     checkLot(big, plan);
     // Здание — за стоянкой.
@@ -121,7 +166,7 @@ describe('Стоянки магазинов', () => {
     const b = lot();
     for (const face of [-1, 1] as const) {
       const drives = stallDriveways({ ...b, face });
-      expect(drives.length).toBe(3);
+      expect(drives.length).toBe(2);
       for (const d of drives) {
         expect(pointInFootprint(d.curb, b.fp)).toBe(false);
         expect(pointInFootprint(d.gate, b.fp, 0.1)).toBe(true);

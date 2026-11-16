@@ -1,10 +1,11 @@
 import { hash } from '../core/math';
-import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
+import { add, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { GLane, GLink, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import { findLaneRoute, routeCost } from '../lanes/routing';
 import type { Barrier, LaneTraffic } from '../lanes/traffic';
 import { steerBase } from '../sim/body';
+import { bezier, legPose, straight, type Leg } from './lotMoves';
 import type { Vehicle, VehicleLook, VehicleSpec } from '../sim/vehicle';
 import type { Town, TownBuilding } from '../world/entities';
 import { drivewayLink, drivewayOf, type Driveway } from '../world/houseAccess';
@@ -173,16 +174,6 @@ export interface GarageSlot {
   stop?: { corridor: number; s: number; flow: 1 | -1 };
 }
 
-/** Отрезок пути манёвра: точки центра кузова, касательные, задним ходом ли. */
-interface Leg {
-  pts: Vec[];
-  tan: Vec[];
-  cum: number[];
-  len: number;
-  back: boolean;
-  vmax: number;
-}
-
 /** cross — въезд налево: стоит на своей полосе с поворотником и ждёт просвета во встречном потоке. */
 type Phase = 'yard' | 'wait' | 'cross' | 'road' | 'pause' | 'home';
 
@@ -260,51 +251,42 @@ export interface GarageLook {
   gate?: { pos: Vec; dir: Vec; width: number };
 }
 
-function bezier(p0: Vec, p1: Vec, p2: Vec, p3: Vec, back: boolean, vmax: number, n = 18): Leg {
-  const pts: Vec[] = [];
-  const tan: Vec[] = [];
-  for (let i = 0; i <= n; i++) {
-    const t = i / n;
-    const u = 1 - t;
-    pts.push({
-      x: u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
-      y: u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
-    });
-    const d = {
-      x: 3 * u * u * (p1.x - p0.x) + 6 * u * t * (p2.x - p1.x) + 3 * t * t * (p3.x - p2.x),
-      y: 3 * u * u * (p1.y - p0.y) + 6 * u * t * (p2.y - p1.y) + 3 * t * t * (p3.y - p2.y),
-    };
-    const l = Math.hypot(d.x, d.y) || 1;
-    tan.push({ x: d.x / l, y: d.y / l });
+export { legPose };
+
+/**
+ * Где машина длиной L и шириной W встаёт на полосу и с неё сворачивает к заезду d (curbSide — середина кузова у
+ * бордюра, кузов в заезде) — на графе g: крайняя правая полоса своего хода у бордюра со стороны заезда (на односторонней
+ * с ним слева — нет), место поворота — на радиус поворота раньше заезда (mid), не ближе END_ROOM к концам полосы.
+ * Нельзя (дорогу снесли, заезд у перекрёстка, полоса дальше 25 м, заезд не поперёк) — null. Общее для гаражей и
+ * грузовиков у рамп (game/docks.ts).
+ */
+export function laneSlot(g: LaneGraph, net: LaneNet, d: Driveway, curbSide: Vec, L: number, W: number): GarageSlot | null {
+  const at = drivewayLink(net, d);
+  const c = at && net.corridors.get(at.corridor);
+  if (!at || !c) return null;
+  const { point, tangent } = c.lut.frameAt(at.s);
+  const lat = dot(sub(d.curb, point), rightNormal(tangent));
+  let best: { lane: GLane; link: GLink } | null = null;
+  for (const link of g.corridorLinks(at.corridor)) {
+    if (at.s < link.s0 || at.s > link.s1 || link.toNode === null) continue;
+    const lane = link.lanes[link.lanes.length - 1];
+    if (!lane || Math.sign(lane.offset) !== Math.sign(lat) || Math.abs(lane.offset) >= Math.abs(lat)) continue;
+    if (!best || Math.abs(lane.offset) > Math.abs(best.lane.offset)) best = { lane, link };
   }
-  return finish(pts, tan, back, vmax);
-}
-
-function straight(a: Vec, b: Vec, back: boolean, vmax: number): Leg {
-  const l = dist(a, b) || 1;
-  const t = { x: (b.x - a.x) / l, y: (b.y - a.y) / l };
-  return finish([a, b], [t, t], back, vmax);
-}
-
-function finish(pts: Vec[], tan: Vec[], back: boolean, vmax: number): Leg {
-  const cum = [0];
-  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));
-  return { pts, tan, cum, len: cum[cum.length - 1], back, vmax };
-}
-
-/** Центр кузова и курс (нос) на отрезке в s от его начала: задним ходом нос смотрит против хода. */
-export function legPose(leg: Leg, s: number): { c: Vec; h: Vec } {
-  const { pts, tan, cum } = leg;
-  let i = 1;
-  while (i < cum.length - 1 && cum[i] < s) i++;
-  const span = cum[i] - cum[i - 1];
-  const t = span > 1e-9 ? Math.max(0, Math.min(1, (s - cum[i - 1]) / span)) : 1;
-  const c = { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t };
-  const hx = tan[i - 1].x + (tan[i].x - tan[i - 1].x) * t;
-  const hy = tan[i - 1].y + (tan[i].y - tan[i - 1].y) * t;
-  const l = Math.hypot(hx, hy) || 1;
-  const k = leg.back ? -1 / l : 1 / l;
-  return { c, h: { x: hx * k, y: hy * k } };
+  if (!best) return null;
+  const { lane, link } = best;
+  const uc = link.flow > 0 ? at.s - link.s0 : link.s1 - at.s;
+  const q = g.lanePose(lane, uc);
+  // Заезд почти поперёк полосы — иначе поворот в него не по дуге.
+  if (Math.abs(dot(d.dir, q.dir)) > 0.5) return null;
+  const rel = sub(curbSide, q.pos);
+  const lon = dot(rel, q.dir);
+  const a = Math.abs(dot(rel, rightNormal(q.dir)));
+  const mid = uc + lon - a;
+  const zone: [number, number] = [mid - L / 2 - 0.5, uc + lon + W / 2 + 1];
+  if (zone[0] < END_ROOM || zone[1] > lane.length - END_ROOM) return null;
+  const p = g.lanePose(lane, mid);
+  return { lane, link, mid, zone, pos: p.pos, f: p.dir };
 }
 
 export class Garages {

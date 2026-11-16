@@ -4336,6 +4336,44 @@ button.pax-dest.off:hover {
   text-align: center;
 }
 
+/* Склад получателя в карточке магазина (world/retail.ts): полоска наполненности. */
+.stock-bar {
+  display: inline-block;
+  width: 44px;
+  height: 6px;
+  border-radius: 3px;
+  background: #e3e7ec;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.stock-bar i {
+  display: block;
+  height: 100%;
+}
+
+/* Груз с получателями в городах (world/retail.ts): клик — его магазины пульсируют на карте. */
+button.cargo-cell {
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  padding: 2px 4px;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+button.cargo-cell:hover {
+  background: #f4f6f8;
+}
+
+button.cargo-cell.on {
+  border-color: #2f80ed;
+  background: #eaf2fd;
+}
+
 .cargo-cell::before {
   content: '→';
   position: absolute;

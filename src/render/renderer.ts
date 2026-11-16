@@ -48,6 +48,9 @@ import {
 import { townEdge, townIndustries, townSlots } from '../world/enterprise';
 import { sizeDots, sizeDotsVisibility } from '../ui/enterpriseUi';
 import { lastTownNeed } from '../world/townSupply';
+import { maxTruck, stockedCount, stockFill } from '../world/retail';
+import { lotFrame } from '../world/houseAccess';
+import { roofCenter } from '../world/shopLots';
 import type { Segment } from '../world/network';
 import { halfWidth, isDirt, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
@@ -145,6 +148,8 @@ export interface ToolOverlay {
   selection: Selection | null;
   /** Предприятия, подсвеченные из панели цепочек. */
   highlight: number[];
+  /** Груз, выбранный в «Цепочках»: его получатели в городах пульсируют (world/retail.ts). */
+  cargoFocus?: CargoType | null;
   /** Место, на которое показали из карточки (пульсирующее кольцо на пару секунд). */
   ping: { pos: Vec; r: number } | null;
   /** Точка маршрута под курсором на графике скорости линии: где она и какая там скорость. */
@@ -284,6 +289,10 @@ const STOP_LINE_INSET = 0.8;
 const STOP_NAMES_ZOOM = 0.75;
 /** Плашки ожидающих у автостанций и вокзалов — начиная с этого приближения (у остановок — всегда). */
 const STATION_BADGES_ZOOM = 0.3;
+/** Значки получателей грузов над магазинами — вблизи, с этого приближения (выбран их груз — видно и издали). */
+const RECEIVER_ZOOM = 0.55;
+/** Линии от грузовой станции к получателям в её охвате — с этого приближения. */
+const STATION_LINKS_ZOOM = 0.35;
 /**
  * Над станцией — столбик: внизу плашка ожидающих (её центр — на BADGE_RISE экранных пикселей выше здания),
  * над ней название (плашка 18 пикселей, название — 16,5, между ними зазор ≈ 3).
@@ -796,6 +805,7 @@ export class Renderer {
     this.drawSiteCranes(game, view);
     this.drawConstruction(game, view, o.crewTarget != null ? { type: 'project', id: o.crewTarget } : o.selection);
     this.drawLabels(game, view);
+    this.drawReceivers(game, view, o);
     this.drawOverlay(game, o);
     if (o.gradeMarks) this.drawGradeRungs(game, o);
     this.drawStationBadges(game, view, o.selection?.type === 'station' ? o.selection.id : null);
@@ -2545,6 +2555,8 @@ export class Renderer {
       const selected = (sel?.type === 'station' && sel.id === st.id) || st === mate || o.lineStops.includes(st.id);
       for (const w of st.warehouses ?? []) if (inView(w.fp)) this.drawWarehouse(w.fp, selected);
       if (!inView(st.fp)) continue;
+      // Станция у получателя невидима: на карте сам магазин, в маршруте — его обводка (drawReceivers).
+      if (st.kind === 'dock') continue;
       if (st.kind === 'rail') this.drawRailStation(game, st, selected);
       else if (st.kind === 'stop') this.drawStop(game, st, selected);
       else if (st.curb) this.drawCurbTerminal(game, st, selected);
@@ -3456,6 +3468,7 @@ export class Renderer {
     const ctx = this.ctx;
     for (const st of game.stations.values()) {
       const fp = st.fp;
+      if (st.kind === 'dock') continue;
       if (fp.center.x < view.x0 || fp.center.x > view.x1 || fp.center.y < view.y0 || fp.center.y > view.y1) continue;
       const stop = st.kind === 'stop';
       if (!stop && z < STATION_BADGES_ZOOM) continue;
@@ -3579,8 +3592,10 @@ export class Renderer {
       // Потребности города: яркий значок — привозили достаточно в прошлом месяце.
       const n = t.demands.length;
       const need = lastTownNeed(t);
+      // С получателями под каждым значком — точки «●●○»: значки чуть реже, чтобы ряды точек не сливались.
+      const gap = game.retail ? 30 : 24;
       t.demands.forEach((c, i) => {
-        const p = { x: t.center.x + ((i - (n - 1) / 2) * 24) / z, y: top.y + 20 / z };
+        const p = { x: t.center.x + ((i - (n - 1) / 2) * gap) / z, y: top.y + 20 / z };
         const ok = (t.lastSupplied[c] ?? 0) >= need;
         ctx.globalAlpha = ok ? 1 : 0.55;
         this.icon(cargoImage(c), p, 20 / z);
@@ -3592,6 +3607,8 @@ export class Renderer {
           ctx.arc(p.x, p.y, 11.5 / z, 0, Math.PI * 2);
           ctx.stroke();
         }
+        // Получатели (world/retail.ts): под значком точки «●●○» — сколько магазинов этого груза снабжено из всех.
+        if (game.retail) this.drawStockDots(stockedCount(t, c, game.time), { x: p.x, y: p.y + 15 / z });
       });
     }
     // Месторождения (режим «Строит игрок»): значок ресурса и точки размера ●●○ — подписью; вблизи видно и так.
@@ -3636,7 +3653,7 @@ export class Renderer {
     }
     if (z > 0.22) {
       for (const st of game.stations.values()) {
-        if (st.industryId !== null) continue;
+        if (st.industryId !== null || st.kind === 'dock') continue;
         // Остановок в городе много: издалека — только значок автобуса на плашке ожидающих, название — вблизи.
         if (st.kind === 'stop' && z < STOP_NAMES_ZOOM) continue;
         // Сверху вниз: название, плашка ожидающих, станция. Место плашки держим и пустым,
@@ -3647,6 +3664,161 @@ export class Renderer {
         // У половины пары название общее — со стрелкой, куда отсюда едут автобусы.
         const heading = st.kind === 'stop' ? game.stopHeading(st) : null;
         text({ x: st.fp.center.x, y }, heading ? `${st.name} ${headingArrow(heading)}` : st.name, 11, '#ffffff', 'rgba(35,45,60,0.82)');
+      }
+    }
+  }
+
+  /** Точки «●●○» под значком потребности: заполненные — снабжённые получатели, пустые — нет (не больше 6). */
+  private drawStockDots(n: { stocked: number; total: number }, at: Vec): void {
+    if (!n.total) return;
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const k = Math.min(6, n.total);
+    const step = 4.6 / z;
+    const r = 1.9 / z;
+    for (let i = 0; i < k; i++) {
+      const x = at.x + (i - (k - 1) / 2) * step;
+      ctx.beginPath();
+      ctx.arc(x, at.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = i < n.stocked ? '#2e9d57' : 'rgba(255,255,255,0.9)';
+      ctx.fill();
+      ctx.lineWidth = 1 / z;
+      ctx.strokeStyle = i < n.stocked ? '#1f6f3d' : '#7b8794';
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * Грузы, чьих получателей подсветить: продукция выбранного предприятия, груз выбранной машины (пустой — грузы её
+   * маршрута), грузы выбранного маршрута, груз, выбранный в «Цепочках».
+   */
+  private focusCargo(game: Game, o: ToolOverlay): Set<CargoType> {
+    const out = new Set<CargoType>();
+    if (o.cargoFocus) out.add(o.cargoFocus);
+    const sel = o.selection;
+    if (sel?.type === 'industry') {
+      const ind = game.industries.find((i) => i.id === sel.id);
+      if (ind) out.add(ind.info.produces);
+    }
+    const lineOf = (id: number | null) => (id === null ? undefined : game.lines.get(id));
+    if (sel?.type === 'fleet') {
+      const v = game.fleet.get(sel.id);
+      if (v?.cargo) out.add(v.cargo);
+      else for (const c of (v && lineOf(v.lineId) && game.lineFreight(lineOf(v.lineId)!)) || []) out.add(c);
+    }
+    const line = lineOf(o.selectedLine);
+    if (line) for (const c of game.lineFreight(line)) out.add(c);
+    return out;
+  }
+
+  /**
+   * Получатели грузов (world/retail.ts) вблизи: над домом — значок груза в кружке, кольцо — насколько полон склад
+   * (зелёное, жёлтое, красное мигающее); к двору не подъехать — серый кружок с ⛔. Выбран груз (предприятие, маршрут,
+   * машина, «Цепочки») — его получатели пульсируют и видны издали, остальные приглушены. От грузовой станции к
+   * получателям в её охвате — тонкие линии со значком груза: что она здесь сдаёт.
+   */
+  private drawReceivers(game: Game, view: Box, o: ToolOverlay): void {
+    if (!game.retail) return;
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const focus = this.focusCargo(game, o);
+    const close = z >= RECEIVER_ZOOM;
+    if (!close && !focus.size) return;
+    const inView = (p: Vec, pad: number) => p.x > view.x0 - pad && p.x < view.x1 + pad && p.y > view.y0 - pad && p.y < view.y1 + pad;
+    const pulse = 0.5 + 0.5 * Math.sin((performance.now() / 1000) * 5);
+    // От станции — к её получателям: линии под значками.
+    if (z >= STATION_LINKS_ZOOM) {
+      for (const st of game.stations.values()) {
+        if (st.kind === 'dock' || !st.serves.cargo || !inView(st.fp.center, 300)) continue;
+        for (const { b, r } of game.stationReceivers(st)) {
+          const c = r.cargo.find((x) => focus.has(x)) ?? r.cargo[0];
+          const a = st.fp.center;
+          const rc = roofCenter(b);
+          const e = lotFrame(b)(rc.x, rc.y);
+          ctx.save();
+          ctx.globalAlpha = focus.size && !focus.has(c) ? 0.3 : 0.85;
+          ctx.strokeStyle = CARGO[c].color;
+          ctx.lineWidth = 1.6 / z;
+          ctx.setLineDash([6 / z, 4 / z]);
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(e.x, e.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          const m = { x: a.x + (e.x - a.x) * 0.4, y: a.y + (e.y - a.y) * 0.4 };
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(m.x, m.y, 7.5 / z, 0, Math.PI * 2);
+          ctx.fill();
+          this.icon(cargoImage(c), m, 13 / z);
+          ctx.restore();
+        }
+      }
+    }
+    for (const town of game.towns) {
+      if (!town.receivers?.length || !inView(town.center, (town.extent ?? town.radius) + 200)) continue;
+      const byId = new Map(town.buildings.map((b) => [b.id, b]));
+      for (const r of town.receivers) {
+        const b = byId.get(r.b);
+        if (!b || !inView(b.fp.center, 40)) continue;
+        const hot = r.cargo.some((c) => focus.has(c));
+        if (!close && !hot) continue;
+        const list = hot ? r.cargo.filter((c) => focus.has(c)) : r.cargo;
+        const reach = game.docks.reachable(b, maxTruck(b));
+        const size = (hot ? 24 : 19) / z;
+        // Над крышей здания (не над двором, где грузовик); несколько грузов — в ряд вдоль улицы.
+        const at = lotFrame(b);
+        const roof = roofCenter(b);
+        ctx.save();
+        ctx.globalAlpha = focus.size && !hot ? 0.35 : 1;
+        list.forEach((c, i) => {
+          const o0 = at(roof.x, roof.y);
+          const p = { x: o0.x + (i - (list.length - 1) / 2) * size * 1.25, y: o0.y };
+          if (hot) {
+            // Пульс: кольцо расходится от значка.
+            ctx.strokeStyle = CARGO[c].color;
+            ctx.lineWidth = 2.5 / z;
+            ctx.globalAlpha = 0.35 + 0.5 * (1 - pulse);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, size * (0.75 + 0.35 * pulse), 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+          }
+          ctx.fillStyle = reach ? '#ffffff' : '#c9cdd3';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, size / 2, 0, Math.PI * 2);
+          ctx.fill();
+          if (!reach) ctx.globalAlpha *= 0.55;
+          this.icon(cargoImage(c), p, size * 0.72);
+          ctx.globalAlpha = focus.size && !hot ? 0.35 : 1;
+          // Кольцо — наполненность склада: по часовой от верха.
+          const fill = stockFill(town, r, c, game.time);
+          const color = fill >= 0.5 ? '#2e9d57' : fill >= 0.2 ? '#e0a800' : '#d64545';
+          ctx.lineWidth = 2.6 / z;
+          ctx.strokeStyle = 'rgba(60,66,76,0.35)';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, size / 2 + 1.2 / z, 0, Math.PI * 2);
+          ctx.stroke();
+          if (reach && (fill >= 0.2 || this.blinkOn)) {
+            ctx.strokeStyle = color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, size / 2 + 1.2 / z, -Math.PI / 2, -Math.PI / 2 + Math.max(0.08, fill) * Math.PI * 2);
+            ctx.stroke();
+          }
+          if (fill < 0.2) this.moving = true;
+          if (!reach) {
+            // Не подъехать: ⛔ у кружка.
+            const q = { x: p.x + size * 0.38, y: p.y - size * 0.38 };
+            ctx.fillStyle = '#d64545';
+            ctx.beginPath();
+            ctx.arc(q.x, q.y, size * 0.22, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(q.x - size * 0.13, q.y - size * 0.04, size * 0.26, size * 0.08);
+          }
+        });
+        ctx.restore();
+        if (hot) this.moving = true;
       }
     }
   }

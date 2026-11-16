@@ -1,6 +1,7 @@
 import { MONTH_SCALE } from '../config';
 import type { Vec } from '../core/vec';
 import type { CargoType, IndustryKind, IndustryType } from './cargo';
+import type { Receiver } from './retail';
 import type { Footprint } from './spatial';
 
 export interface TownBuilding {
@@ -175,6 +176,11 @@ export interface Town {
    */
   shopVisits?: number;
   shopParked?: ShopCar[];
+  /**
+   * Получатели грузов (world/retail.ts, WorldSettings.retail): магазины, рынок, конторы, склады — что принимают, их
+   * склады. Подбираются в начале партии и в конце каждого месяца. Нет — старая модель (станция в охвате принимает всё).
+   */
+  receivers?: Receiver[];
   growthAcc: number;
   /** Город сам прокладывает новые улицы, когда вдоль старых тесно. По умолчанию да. */
   autoStreets?: boolean;
@@ -301,8 +307,16 @@ export const isBusTerminal = (st: Pick<Station, 'kind' | 'serves'>) => st.kind =
 export interface Station {
   type: 'station';
   id: number;
-  /** Автостанция у дороги, автобусная остановка прямо на улице или вокзал на путях. */
-  kind: 'road' | 'stop' | 'rail';
+  /**
+   * Автостанция у дороги, автобусная остановка прямо на улице, вокзал на путях или невидимая станция у получателя
+   * грузов (dock, world/retail.ts): магазин в маршруте — грузовик заезжает к нему во двор и выгружается у рампы.
+   */
+  kind: 'road' | 'stop' | 'rail' | 'dock';
+  /**
+   * Станция у получателя (kind 'dock'): город и дом. Ставится, когда игрок кликает по магазину в инструменте «Маршрут»;
+   * уходит из последней линии — удаляется. nodeId — узел за ним по ходу полосы, с которой грузовик сворачивает во двор.
+   */
+  dock?: { town: number; b: number };
   name: string;
   fp: Footprint;
   /** Узел подъезда; у вокзала его нет (−1). */

@@ -8,6 +8,7 @@ import { buildTime, freeDeposits, isRaw } from '../world/enterprise';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
 import { CARGO } from '../world/cargo';
+import { townRoom } from '../world/retail';
 import {
   cargoPotential,
   hasMarket,
@@ -77,7 +78,13 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
       }
       // Сколько можно привезти: к получателю или (куда угодно) от лучших производителей.
       const targets = to ? [posOf(to)] : receivers(game, p.cargo).map(posOf);
-      const estimate = Math.max(0, ...targets.slice(0, 6).map((pos) => cargoPotential(game, p.cargo, pos, months)));
+      let estimate = Math.max(0, ...targets.slice(0, 6).map((pos) => cargoPotential(game, p.cargo, pos, months)));
+      // Город с получателями (world/retail.ts) примет не больше, чем расходуют его магазины за срок, и свободного места.
+      if (to && !('info' in to) && game.retail) {
+        const room = townRoom(to, p.cargo, game.time, work);
+        if (room !== null && p.amount > room * 0.9) return no(`магазины ${to.name} примут за срок ≈${Math.round(room)}`, Math.min(estimate, room));
+        if (room !== null) estimate = Math.min(estimate, room);
+      }
       return p.amount <= estimate * 0.9 ? yes(estimate) : no(`регион даст ≈${Math.round(estimate)} ед. за срок, а нужно ${p.amount}`, estimate);
     }
     case 'passengers': {

@@ -47,6 +47,8 @@ export interface ShopHost {
   readonly colors: readonly string[];
   /** Можно ли сейчас ещё одной машине жителя в поток (TOWN_TRAFFIC.maxCars). */
   canDrive(): boolean;
+  /** У дома грузовик на манёвре во дворе (game/docks.ts): двор общий — машинам покупателей ждать. */
+  yardBusy?(b: number): boolean;
 }
 
 /** Стоянка магазина: места (в мире) и их группы (соседи — в одной группе через одно). */
@@ -118,9 +120,17 @@ export class ShopParking {
     return (town.shopParked ?? []).filter((c) => c.b === b);
   }
 
-  /** Место свободно: на нём не стоит машина и к нему никто не едет и не выезжает с него. */
+  /** Место свободно: на нём не стоит машина и к нему никто не едет и не выезжает с него; двор не занят грузовиком. */
   private free(town: Town, lot: Lot, k: number): boolean {
-    return !this.garages.isBusy(lot.spots[k].key) && !town.shopParked?.some((c) => c.b === lot.b.id && c.k === k);
+    return !this.garages.isBusy(lot.spots[k].key) && !town.shopParked?.some((c) => c.b === lot.b.id && c.k === k) && !this.host.yardBusy?.(lot.b.id);
+  }
+
+  /** У дома b машина покупателя на манёвре — заезжает на место или выезжает с него (двор занят для грузовика). */
+  lotBusy(b: number): boolean {
+    const lot = this.lots.get(b);
+    if (!lot) return false;
+    for (const s of lot.spots) if (this.garages.moveOf(s.key)) return true;
+    return false;
   }
 
   /** Соседнее место (в той же группе) — на манёвре: заезжать или выезжать рядом нельзя, кузова заденут друг друга. */
@@ -219,7 +229,7 @@ export class ShopParking {
         const homes = town.buildings.filter((x) => x.kind === 'res');
         const n = (town.shopVisits = (town.shopVisits ?? 0) + 1);
         const home = homes.length ? homes[Math.floor(hash(visitSeed(this.host.seed, town.id, n), 3) * homes.length)] : null;
-        if (!home || !this.garages.slotOf(spot) || this.neighbourBusy(lot, car.k) || !this.host.canDrive()) {
+        if (!home || !this.garages.slotOf(spot) || this.neighbourBusy(lot, car.k) || this.host.yardBusy?.(lot.b.id) || !this.host.canDrive()) {
           car.until = now + SHOP_PARKING.retry;
           continue;
         }

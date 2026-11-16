@@ -12,7 +12,8 @@ import { footprintRadius, footprintsOverlap } from '../world/spatial';
 
 /** Соседи для перевалки: обе станции работают с грузом и стоят край к краю не дальше TRANSFER.reach. */
 export function transferNear(a: Station, b: Station): boolean {
-  if (a.id === b.id || !a.serves.cargo || !b.serves.cargo || a.kind === 'stop' || b.kind === 'stop') return false;
+  // Станция у получателя (dock) — двор магазина: склада для перевалки у неё нет.
+  if (a.id === b.id || !a.serves.cargo || !b.serves.cargo || a.kind === 'stop' || b.kind === 'stop' || a.kind === 'dock' || b.kind === 'dock') return false;
   if (dist(a.fp.center, b.fp.center) > footprintRadius(a.fp) + footprintRadius(b.fp) + TRANSFER.reach) return false;
   return footprintsOverlap(a.fp, b.fp, TRANSFER.reach) || footprintsOverlap(b.fp, a.fp, TRANSFER.reach);
 }

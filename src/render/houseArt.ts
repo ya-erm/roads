@@ -2,7 +2,7 @@ import { TOWN_SCALE } from '../config';
 import type { HouseForm, TownBuilding } from '../world/entities';
 import type { Footprint } from '../world/spatial';
 import { CAR_SIZE, cottagePlan, dachaPlan, GARAGE, LOT_SETBACK, type LotRect } from '../world/houseAccess';
-import { shopLotOf, STALL_ROW_DEPTH, type ShopLot } from '../world/shopLots';
+import { marketHall, officeLot, shopLotOf, STALL_ROW_DEPTH, warehouseLot, type DockYard, type ShopLot } from '../world/shopLots';
 import { formOf, LANDMARK_YARD, storeysOf } from '../world/townForms';
 import { Art, disc, METAL } from './industryArt';
 import { WALK_LOOK } from './sidewalks';
@@ -937,6 +937,30 @@ function tower(a: Art, lot: Lot): void {
 
 // ---------- Общественные и деловые ----------
 
+/** Бетон рампы и её тёмная кромка-отбойник. */
+const RAMP = '#c2bcae';
+const RAMP_EDGE = '#3e4147';
+
+/**
+ * Двор с рампой для грузовика (world/shopLots.DockYard): съезд с улицы, асфальт проезда и двора (у сельского
+ * магазина — гравий), вблизи — бетонная рампа у стены с тёмным отбойником. Грузовик во дворе рисует движение
+ * (game/docks.ts).
+ */
+function serviceYard(a: Art, lot: Lot, y: DockYard, gravel = false): void {
+  curbCut(a, lot, y.drive.x, y.drive.w, -lot.H / 2 + 0.6, gravel ? GRAVEL_DRIVE : DRIVE);
+  for (const p of y.pad) a.patch(p.x, p.y, p.w, p.h, gravel ? GRAVEL : ASPHALT, 0.4);
+  if (a.pass !== 2 || !a.lod) return;
+  const c = a.c;
+  const r = y.ramp;
+  c.fillStyle = RAMP;
+  c.fillRect(r.x, r.y, r.w, r.h);
+  if (!a.d) return;
+  c.fillStyle = RAMP_EDGE;
+  // Отбойник — по кромке, к которой встаёт грузовик.
+  if (r.w >= r.h) c.fillRect(r.x, y.kind === 'turn' ? r.y + r.h - 0.18 : r.y, r.w, 0.18);
+  else c.fillRect(y.side === 1 ? r.x + r.w - 0.18 : r.x, r.y, 0.18, r.h);
+}
+
 /**
  * Стоянка покупателей (world/shopLots.ts): асфальт (у сельского магазина — гравий) ровно под места, съезд с улицы во
  * всю ширину группы. Вблизи — разметка: белые линии между местами и по краям, черта-упор у дальнего края (у
@@ -989,7 +1013,8 @@ function shop(a: Art, lot: Lot): void {
     a.patch(bx - 0.6, y0 + 0.4, w + 1.2, Math.min(H - 0.8, d + 3.4), PAVING, 0.5);
     frontPath(a, lot, bx + w / 2, by, 2.4);
   }
-  if (H / 2 - by - d > 5) yardTree(a, lot, left ? -x0 - 3 : x0 + 3, H / 2 - 2.6, 2.2, 9);
+  if (plan.yard) serviceYard(a, lot, plan.yard);
+  else if (H / 2 - by - d > 5) yardTree(a, lot, left ? -x0 - 3 : x0 + 3, H / 2 - 2.6, 2.2, 9);
   stallGroups(a, lot, plan);
   const z = wallZ(b.floors);
   flat(a, bx, by, w, d, z, tone(b.roof, 0.25));
@@ -1016,7 +1041,8 @@ function store(a: Art, lot: Lot): void {
   a.patch(bx - 0.5, y0 + 0.4, w + 1, by - y0 - 0.2, GRAVEL, 0.5);
   frontPath(a, lot, bx + w / 2, y0 + 0.6, 2.4);
   stallGroups(a, lot, plan);
-  if (H / 2 - by - d > 6) {
+  if (plan.yard) serviceYard(a, lot, plan.yard, true);
+  else if (H / 2 - by - d > 6) {
     yardTree(a, lot, bx < 0 ? -x0 - 3 : x0 + 3, by + d + 2.5, 2.4 + a.r(2), 3);
     pitched(a, bx < 0 ? x0 + 1.5 : -x0 - 1.5 - SHED.w, H / 2 - 1.3 - SHED.d, SHED.w, SHED.d, 2.6, '#8d7a66', true);
   }
@@ -1044,19 +1070,20 @@ function office(a: Art, lot: Lot): void {
   const z = wallZ(b.floors);
   const glass = a.r(1) < 0.3;
   const roof = glass ? '#9fb4c4' : tone(b.roof, 0.1);
-  const w = W - 2.4;
-  const d = H - 3.4;
-  frontPath(a, lot, (a.r(3) - 0.5) * w * 0.5, y0 + 1.4, 2.6);
+  // Здание — почти во весь участок; у одного края — проезд к рампе у торца (world/shopLots.officeLot).
+  const plan = officeLot(b);
+  const { x: bx, y: by, w, h: d } = plan.building;
+  serviceYard(a, lot, plan.yard);
+  frontPath(a, lot, bx + w / 2 + (a.r(3) - 0.5) * w * 0.5, y0 + 1.4, 2.6);
   if (b.floors >= 3 && a.r(2) < 0.6) {
-    flat(a, x0 + 1.2, y0 + 1.2, w, d, z * 0.65, tone(roof, 0.12));
-    flat(a, x0 + 1.2 + w * 0.12, y0 + 1.2 + d * 0.1, w * 0.76, d * 0.62, z, roof);
-  } else flat(a, x0 + 1.2, y0 + 1.2, w, d, z, roof);
+    flat(a, bx, by, w, d, z * 0.65, tone(roof, 0.12));
+    flat(a, bx + w * 0.12, by + d * 0.1, w * 0.76, d * 0.62, z, roof);
+  } else flat(a, bx, by, w, d, z, roof);
   if (a.pass === 2 && a.d) {
     a.c.fillStyle = 'rgba(176,214,232,0.85)';
-    a.c.fillRect(x0 + 1.2 + w * 0.3, y0 + 1.2 + d * 0.3, w * 0.4, 1.4);
+    a.c.fillRect(bx + w * 0.3, by + d * 0.3, w * 0.4, 1.4);
   }
-  roofBit(a, x0 + w * 0.7, y0 + d * 0.55, 2, 1.6, 1.2, '#b4b9be');
-  if (H > 22 * S) yardTree(a, lot, x0 + 3, H / 2 - 2.5, 2.2, 7);
+  roofBit(a, bx + w * 0.7, by + d * 0.55, 2, 1.6, 1.2, '#b4b9be');
 }
 
 /**
@@ -1070,10 +1097,14 @@ function market(a: Art, lot: Lot): void {
   const plan = shopLotOf(b)!;
   a.patch(x0 + 0.3, y0 + 0.3, W - 0.6, H - 0.6, PAVING, 0.5);
   // Рынок открыт к улице: мощение прохода — через газон до тротуара.
-  frontPath(a, lot, 0, y0 + 0.5, plan.walk!.w);
+  frontPath(a, lot, plan.walk!.x, y0 + 0.5, plan.walk!.w);
   stallGroups(a, lot, plan);
-  const hd = clamp(H * 0.3, 6, 10 * S);
-  pitched(a, x0 + 1.5, H / 2 - 1.2 - hd, W - 3, hd, 4.5 * S, '#8fa3ad', true, 0, true);
+  if (plan.yard) serviceYard(a, lot, plan.yard);
+  // Ряды и павильон — между краем участка и проездом к рампе у торца павильона.
+  const xa = plan.yard ? (plan.yard.side === -1 ? plan.yard.drive.x + plan.yard.drive.w / 2 + 0.9 : x0 + 1.5) : x0 + 1.5;
+  const xb = plan.yard ? (plan.yard.side === -1 ? -x0 - 1.5 : plan.yard.drive.x - plan.yard.drive.w / 2 - 0.9) : -x0 - 1.5;
+  const hd = marketHall(H);
+  pitched(a, xa, H / 2 - 1.2 - hd, xb - xa, hd, 4.5 * S, '#8fa3ad', true, 0, true);
   // Навесы — под прилавок и покупателя, крупнее прежних (TOWN_SCALE), но мельче домов; за стоянкой.
   const row = 6.5;
   const pitch = 4.2;
@@ -1081,10 +1112,10 @@ function market(a: Art, lot: Lot): void {
   const rows = Math.max(1, Math.floor((H / 2 - 1.2 - hd - top) / row));
   for (let r = 0; r < rows; r++) {
     const y = top + r * row;
-    const n = Math.floor((W - 3) / pitch);
+    const n = Math.floor((xb - xa) / pitch);
     for (let k = 0; k < n; k++) {
       const color = STALLS[Math.floor(a.r(r * 31 + k) * STALLS.length)];
-      pitched(a, x0 + 1.5 + k * pitch, y, pitch - 0.4, 3.4, 2.2, color, false, 0);
+      pitched(a, xa + k * pitch, y, pitch - 0.4, 3.4, 2.2, color, false, 0);
     }
   }
 }
@@ -1249,20 +1280,20 @@ function warehouse(a: Art, lot: Lot): void {
   const x0 = -W / 2;
   const y0 = -H / 2;
   a.patch(x0 + 0.3, y0 + 0.3, W - 0.6, H - 0.6, 'rgba(150,148,140,0.6)', 0.5);
-  // Въезд для грузовиков — во всю площадку перед рампой.
-  curbCut(a, lot, (a.r(4) - 0.5) * (W - 10), 5.5, y0 + 1);
-  const d = clamp(H * 0.62, 8, H - 5);
+  // Въезд для грузовиков — от улицы прямо к рампе на стене ангара (world/shopLots.warehouseLot).
+  const plan = warehouseLot(lot.b);
+  const h = plan.hangar;
+  serviceYard(a, lot, plan.yard);
   const roof = a.r(1) < 0.6 ? METAL : '#a56a4b';
-  pitched(a, x0 + 1.2, H / 2 - 1.2 - d, W - 2.4, d, 6, roof, true, 0, true);
+  pitched(a, h.x, h.y, h.w, h.h, 6, roof, true, 0, true);
   const docks = Math.floor((W - 4) / 5);
   for (let k = 0; k < docks; k++) {
     if (a.pass === 2 && a.d) {
       a.c.fillStyle = '#4a4d52';
-      a.c.fillRect(x0 + 2.5 + k * 5, H / 2 - 1.2 - d - 0.8, 3, 0.8);
+      a.c.fillRect(x0 + 2.5 + k * 5, h.y - 0.8, 3, 0.8);
     }
   }
   for (let k = 0; k < 3; k++) roofBit(a, x0 + 2 + k * 2.2 + a.r(5) * 4, y0 + 1.5 + a.r(6 + k) * 2, 1.6, 1.6, 1, '#c9a46a');
-  if (lot.fine && a.r(9) < 0.6) a.truck(x0 + W * 0.6, y0 + 3.2, false, '#c94f43', '#d8d8d2');
 }
 
 /** Ратуша на площади: площадь шире участка, здание с часовой башней, фонтан, деревья по углам. */

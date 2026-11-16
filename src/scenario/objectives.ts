@@ -9,6 +9,7 @@ import { CARGO, type CargoType, INDUSTRY_TYPES } from '../world/cargo';
 import { isActive, townGap } from '../world/enterprise';
 import type { Industry, Town } from '../world/entities';
 import { monthTownNeed, townNeed } from '../world/townSupply';
+import { formOf } from '../world/townForms';
 import { connected, industryById, newRoutesCarried, operating, refName, townById } from './analysis';
 import type { MonthStat, Objective, ObjectiveParams, Ref, ScenarioState, ScenarioStats } from './types';
 
@@ -318,6 +319,26 @@ export function monthNow(game: Game, s: ScenarioState, p: ObjectiveParams): Mont
   return now;
 }
 
+/**
+ * Куда в городе везти груз — для названия задания: у получателей (world/retail.ts) — «в магазины», «в конторы», «на
+ * склады»; потребность без получателей и старая модель — «в город».
+ */
+function townPlaces(game: Game, townId: number, cargo: CargoType): string {
+  const t = townById(game, townId);
+  const forms = new Set(
+    (t?.receivers ?? [])
+      .filter((r) => r.cargo.includes(cargo))
+      .map((r) => {
+        const b = t!.buildings.find((x) => x.id === r.b);
+        return b ? formOf(b) : null;
+      }),
+  );
+  if (!forms.size) return 'в город';
+  if ([...forms].every((f) => f === 'warehouse')) return 'на склады';
+  if ([...forms].every((f) => f === 'office')) return 'в конторы';
+  return 'в магазины';
+}
+
 /** Название задания для игрока. */
 export function titleOf(p: ObjectiveParams, game: Game): string {
   switch (p.kind) {
@@ -325,7 +346,8 @@ export function titleOf(p: ObjectiveParams, game: Game): string {
       const what = `${fmt(p.amount)} ед. «${CARGO[p.cargo].name}»`;
       if (!p.to && p.from !== undefined) return `Вывезти ${what}: ${industryById(game, p.from)?.name ?? '—'} → получателям`;
       if (!p.to) return `Доставить ${what} получателям`;
-      return p.to.type === 'town' ? `Привезти ${what} в город ${refName(game, p.to)}` : `Доставить ${what}: ${refName(game, p.to)}`;
+      if (p.to.type !== 'town') return `Доставить ${what}: ${refName(game, p.to)}`;
+      return `Привезти ${what} ${townPlaces(game, p.to.id, p.cargo)} ${refName(game, p.to)}`;
     }
     case 'passengers':
       return p.towns

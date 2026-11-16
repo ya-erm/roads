@@ -109,6 +109,7 @@ export function warningMarks(game: Game, zoom: number): WarningMark[] {
   };
   const seen = new Set<string>();
   for (const st of game.stations.values()) {
+    if (st.kind === 'dock') continue;
     const list = stationWarnings(game, st);
     const jam = list.find((w) => !w.advice);
     if (jam) {

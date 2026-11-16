@@ -167,6 +167,8 @@ export class Minimap {
     ctx.fillStyle = '#fff';
     ctx.strokeStyle = '#2f80ed';
     for (const st of g.stations.values()) {
+      // Станция у получателя невидима — на карте сам магазин.
+      if (st.kind === 'dock') continue;
       ctx.beginPath();
       ctx.arc(st.fp.center.x * k, st.fp.center.y * k, 2.2, 0, Math.PI * 2);
       ctx.fill();

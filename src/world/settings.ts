@@ -50,7 +50,16 @@ export interface WorldSettings {
    * зазор между городами. Нет поля — 1: старое сохранение открывается на карте прежнего размера, с той же водой и лесом.
    */
   mapScale?: number;
+  /**
+   * Получатели грузов в городе (world/retail.ts, docs/RETAIL.md): город принимает груз через магазины, рынок, конторы
+   * и склады — у каждого свой склад; грузовик заезжает к ним во двор. Нет поля — старая партия: любая грузовая станция
+   * с домами города в охвате принимает всё, что городу нужно.
+   */
+  retail?: boolean;
 }
+
+/** Город принимает груз через получателей (WorldSettings.retail). */
+export const retailOn = (s: Pick<WorldSettings, 'retail'>): boolean => s.retail === true;
 
 export type BuildMode = 'instant' | 'build';
 export type IndustryMode = 'ready' | 'player';
@@ -154,9 +163,9 @@ export const DEFAULT_SETTINGS: WorldSettings = {
 /**
  * Новая партия — из игры (первый запуск, «?seed=», окно «Новая игра»): предприятия строит игрок. DEFAULT_SETTINGS —
  * без поля, «Готовые»: по нему мир по seed прежний (на нём держатся тесты старой раскладки). Городов — обычное
- * число для средней карты (TOWN_RANGE.medium.base).
+ * число для средней карты (TOWN_RANGE.medium.base). Город принимает груз через получателей (retail).
  */
-export const NEW_GAME_SETTINGS: WorldSettings = { ...DEFAULT_SETTINGS, towns: 8, industryMode: 'player', mapScale: MAP_SCALE };
+export const NEW_GAME_SETTINGS: WorldSettings = { ...DEFAULT_SETTINGS, towns: 8, industryMode: 'player', mapScale: MAP_SCALE, retail: true };
 
 /** Размеры городов: немного крупных, больше средних, остальные маленькие (доли — по профилю сценария). */
 export function townSizes(count: number, shares: { big: number; mid: number } = { big: 0.2, mid: 0.4 }): number[] {

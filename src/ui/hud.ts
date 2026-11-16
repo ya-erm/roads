@@ -29,6 +29,7 @@ import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/ca
 import { isBusTerminal, type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
 import { lastTownNeed, townNeed } from '../world/townSupply';
 import { flatsOf, FORM_NAMES, formOf, JOBS_PER_FLOOR, residentsOf, storeysOf } from '../world/townForms';
+import { maxTruck, receiverOf, stockAt, stockCap, stockFill } from '../world/retail';
 import { footprintRadius } from '../world/spatial';
 import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
 import { durationText } from '../core/timeText';
@@ -1510,6 +1511,13 @@ export class Hud {
         const dir = d.dir === 'out' ? 'out' : 'in';
         if (!this.partnersFolded.delete(dir)) this.partnersFolded.add(dir);
         localStorage.setItem('roads.partnersFolded', [...this.partnersFolded].join(','));
+        break;
+      }
+      case 'chain-cargo': {
+        // Груз в «Цепочках»: его получатели в городах пульсируют на карте (повторный клик — снять).
+        const cargo = d.cargo as CargoType;
+        c.cargoFocus = c.cargoFocus === cargo ? null : cargo;
+        this.refreshLeft();
         break;
       }
       case 'chain-kind': {
@@ -3619,8 +3627,22 @@ export class Hud {
       // Ратуша — вместе со своей площадью (Game.movePlan): значок площади на кнопке, цена — за обе.
       const { cost: moveCost, plaza } = g.buildingMove(b);
       const moveTip = plaza ? `${PARK_INFO.plaza.icon} Площадь у ратуши едет вместе с ней · 🛣 встанет вдоль улицы, за тротуаром` : '🛣 Встанет вдоль улицы, за тротуаром';
+      // Получатель грузов (world/retail.ts): что принимает и насколько полон склад — значками; не подъехать — ⛔.
+      const rcv = town && receiverOf(town, b.id);
+      const reach = rcv ? g.docks.reachable(b, maxTruck(b)) : false;
+      const stock = rcv
+        ? `<div class="icon-row store-row">${rcv.cargo
+            .map((c) => {
+              const fill = stockFill(town!, rcv, c, g.time);
+              const n = Math.floor(stockAt(town!, rcv, c, g.time));
+              const cap = stockCap(town!, rcv, c);
+              return `<span class="lbl2" data-tip="${esc(`${CARGO[c].name}: 📦 ${n} / ${cap}`)}">${cargoIcon(c, 18, false)} <span class="stock-bar"><i style="width:${Math.round(fill * 100)}%;background:${fill >= 0.5 ? '#2e9d57' : fill >= 0.2 ? '#e0a800' : '#d64545'}"></i></span></span>`;
+            })
+            .join('')}<span data-tip="${esc(reach ? `🚚 ≤ ${maxTruck(b)} м` : '⛔ 🚚')}">${reach ? `🚚≤${maxTruck(b)}` : '⛔🚚'}</span></div>`
+        : '';
       return `<section class="detail">${head(kind, `${storeysOf(b)} эт. · ${people}`)}
         ${town ? `<button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>` : ''}
+        ${stock}
         <div class="actions">
           <button class="small" data-action="move" data-id="${b.id}" data-tip="${esc(moveTip)}">Перенести${plaza ? ` ${PARK_INFO.plaza.icon}` : ''} · ${money(moveCost)}</button>
           ${b.kind !== 'landmark' ? `<button class="small danger" data-action="demolish" data-id="${b.id}">Снести · ${money(g.demolishCost(b.id))}</button>` : ''}
@@ -4396,7 +4418,11 @@ export class Hud {
         .filter((t) => t.demands.includes(c))
         .map((t) => `<button class="ind-chip town" data-action="focus" data-type="town" data-id="${t.id}">${townIcon(18)}${esc(t.name)}</button>`);
       return `<div class="chain-row"><div class="cell">${producers}</div>
-        <div class="cargo-cell">${cargoIcon(c, 28)}<span>${CARGO[c].name}</span></div>
+        ${
+          g.retail && g.towns.some((t) => t.receivers?.some((r) => r.cargo.includes(c)))
+            ? `<button class="cargo-cell${this.controller.cargoFocus === c ? ' on' : ''}" data-action="chain-cargo" data-cargo="${c}" data-tip="${esc(`🏪 ${CARGO[c].name}: где принимают`)}">${cargoIcon(c, 28)}<span>${CARGO[c].name} 🏪</span></button>`
+            : `<div class="cargo-cell">${cargoIcon(c, 28)}<span>${CARGO[c].name}</span></div>`
+        }
         <div class="cell">${[...consumers, ...towns].join('') || '<span class="muted">—</span>'}</div></div>`;
     }).join('');
     const biome = BIOMES[g.terrain.biome];

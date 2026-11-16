@@ -55,6 +55,7 @@ import type { CornerHandle } from '../lanes/corners';
 import { corridorHalf } from '../world/worldgen';
 import { PARK_INFO } from '../world/parkPick';
 import { yardOf } from '../world/townForms';
+import { maxTruck } from '../world/retail';
 import { corridorCurveSigns, freshSignCorridors, staleSignCorridors } from '../game/roadProject';
 import { type DrawSettings, type ProjectTools, sharedRoadProject } from './projecttools';
 import { RailTools } from './railtools';
@@ -63,7 +64,7 @@ import { deckHeight, LIMIT_DROP_HINT, RoadTools } from './roadtools';
 import { phaseToggle, specOf, turnAt } from '../lanes/lights';
 import { phaseTurns } from '../ui/phasesUi';
 import { basePlaceText, baseRemoveText } from '../ui/constructionUi';
-import type { IndustryKind } from '../world/cargo';
+import type { CargoType, IndustryKind } from '../world/cargo';
 import { industryPlanText, industryRemoveText } from '../ui/enterpriseUi';
 import { MODELS, type ModelId } from '../game/transport';
 import { footprintRadius } from '../world/spatial';
@@ -290,6 +291,8 @@ export class Controller {
   selectedLine: number | null = null;
   /** Предприятия, подсвеченные из панели цепочек. */
   highlight: number[] = [];
+  /** Груз, выбранный в панели цепочек: его получатели в городах пульсируют на карте (world/retail.ts). */
+  cargoFocus: CargoType | null = null;
   ping: { pos: Vec; r: number; until: number } | null = null;
   /** Здание, которое игрок переносит (следует за курсором). */
   moving: TownBuilding | null = null;
@@ -465,7 +468,10 @@ export class Controller {
     this.placingAnnex = null;
     this.placingBase = false;
     this.sendingCrew = null;
-    if (this.tool === 'line' && tool !== 'line') this.lineDraft = [];
+    if (this.tool === 'line' && tool !== 'line') {
+      this.lineDraft = [];
+      this.game().pruneDocks();
+    }
     if (tool !== 'line') this.addStopTo = null;
     // Новая линия собирается с чистого листа: прежняя выбранная линия и объект не мешают.
     if (tool === 'line' && this.tool !== 'line') {
@@ -1244,6 +1250,9 @@ export class Controller {
 
   select(sel: Selection | null): void {
     this.returnTo = null;
+    // Станция у получателя невидима — выбирается сам магазин (его карточка).
+    const dock = sel?.type === 'station' ? this.game().stations.get(sel.id) : undefined;
+    if (dock?.kind === 'dock' && dock.dock) sel = { type: 'building', id: dock.dock.b };
     this.selection = sel;
     // Выбрали станцию, предприятие, машину — панель переключается на них, открытый маршрут закрывается.
     if (sel) this.selectedLine = null;
@@ -1359,8 +1368,11 @@ export class Controller {
     else if (this.control) this.control = null;
     else if (this.chain) this.chain = null;
     else if (this.lineDraft.length) {
-      if (step) this.lineDraft.pop();
-      else this.cancelLine();
+      if (step) {
+        this.lineDraft.pop();
+        // Убрали из черновика магазин — его невидимая станция больше не нужна.
+        this.game().pruneDocks(this.lineDraft);
+      } else this.cancelLine();
     } else if (this.laneFrom) this.clearLane();
     else if (this.tool !== 'select') this.setTool('select');
     else if (this.selection || this.selectedLine !== null || this.following) {
@@ -1395,6 +1407,7 @@ export class Controller {
   finishLine(): void {
     const line = this.game().createLine(this.lineDraft);
     this.lineDraft = [];
+    this.game().pruneDocks();
     if (line) {
       this.selectedLine = line.id;
       this.tool = 'select';
@@ -1406,6 +1419,7 @@ export class Controller {
 
   cancelLine(): void {
     this.lineDraft = [];
+    this.game().pruneDocks();
     this.onChange();
   }
 
@@ -1907,7 +1921,9 @@ export class Controller {
         break;
       }
       case 'line': {
-        const st = g.stationNear(p, this.camera.zoom);
+        // Станция — или магазин (рынок, контора, склад), что принимает груз: под ним невидимая станция у его двора.
+        const shop = g.stationNear(p, this.camera.zoom) ? null : g.receiverAt(p);
+        const st = shop ? g.dockFor(shop.b) : g.stationNear(p, this.camera.zoom);
         if (!st) {
           this.showError(g.industryAt(p, this.camera.zoom) ? 'У предприятия нет станции — поставьте её инструментом «Станция»' : 'Кликните по станции');
           break;
@@ -3090,7 +3106,7 @@ export class Controller {
     const net = this.roadTools.base ?? g.roads.net;
     const n = net.nodesNear(p, this.snapRadius).sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0];
     if (!n) return false;
-    const station = [...g.stations.values()].some((st) => st.nodeId === n.id);
+    const station = [...g.stations.values()].some((st) => st.kind !== 'dock' && st.nodeId === n.id);
     const why = station ? 'У узла станция — его не убрать' : mergeProblem(net, n.id);
     if (why) {
       this.showError(why);
@@ -3127,7 +3143,7 @@ export class Controller {
     const g = this.game();
     const net = this.roadTools.base ?? g.roads.net;
     const j = jointOf(net, id);
-    const station = [...g.stations.values()].some((st) => st.nodeId === id);
+    const station = [...g.stations.values()].some((st) => st.kind !== 'dock' && st.nodeId === id);
     if (station) return this.showError('У узла станция — излом не сделать');
     if (j !== 'smooth' && j !== 'kink') return this.showError(j);
     const edit = toggleJointEdit(id);
@@ -3323,6 +3339,7 @@ export class Controller {
       selectedLine: this.selectedLine,
       selection: this.selection,
       highlight: this.highlight,
+      cargoFocus: this.cargoFocus,
       ping: this.ping && performance.now() < this.ping.until ? this.ping : null,
       area: null,
       marks: [],
@@ -4025,8 +4042,12 @@ export class Controller {
         break;
       }
       case 'line': {
-        const st = g.stationNear(p, this.camera.zoom);
-        if (st) o.marks.push({ fp: st.fp, ok: true });
+        // Магазин, что принимает груз, — тоже остановка (станция у его двора появится по клику).
+        const real = g.stationNear(p, this.camera.zoom);
+        const shop = real ? null : g.receiverAt(p);
+        const dock = shop && [...g.stations.values()].find((s) => s.dock?.b === shop.b.id);
+        const st = real ?? (shop ? { id: dock?.id ?? -1, name: dock?.name ?? g.dockName(shop.b), fp: shop.b.fp } : null);
+        if (st) o.marks.push({ fp: st.fp, ok: !shop || g.docks.reachable(shop.b, maxTruck(shop.b)) });
         if (this.addStopTo !== null) {
           o.selectedLine = this.addStopTo;
           o.label = st ? { text: `В маршрут: ${st.name}`, ok: true } : { text: 'Кликните по станции · Esc — готово', ok: true };

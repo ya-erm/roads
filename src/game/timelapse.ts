@@ -130,6 +130,8 @@ function snapshot(game: Game): Record<TlLayer, Map<number, TlRec>> {
   for (const s of game.net.segments.values()) t.set(s.id, curveRec(s.id, s.platform !== undefined ? 1 : 0, s.curve));
   const s = new Map<number, TlRec>();
   for (const st of game.stations.values()) {
+    // Станция у получателя невидима — в таймлапсе её нет (маршрут к ней виден по линии).
+    if (st.kind === 'dock') continue;
     s.set(st.id, [st.id, Math.max(0, STATION_KINDS.indexOf(st.kind)), q(st.fp.center.x), q(st.fp.center.y), st.industryId !== null ? 1 : 0]);
   }
   const l = new Map<number, TlRec>();

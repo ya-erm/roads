@@ -687,7 +687,8 @@ export class RoadTools {
   }
 
   private stationNodes(): Set<number> {
-    return new Set([...this.game().stations.values()].map((s) => s.nodeId));
+    // Узел станции у получателя — обычный перекрёсток за его двором (меняется вместе с сетью): его можно править.
+    return new Set([...this.game().stations.values()].filter((s) => s.kind !== 'dock').map((s) => s.nodeId));
   }
 
   /**
