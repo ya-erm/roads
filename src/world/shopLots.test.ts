@@ -34,7 +34,7 @@ function checkLot(b: TownBuilding, plan: ShopLot): void {
     const n = g.stalls.length;
     expect(n).toBeGreaterThan(0);
     for (const s of g.stalls) {
-      // Под машину 7 × 4: ширина 4,6–5 м, глубина 8.
+      // Под машину 7,5 × 3: ширина 4,6–5 м, глубина 8,5.
       expect(s.w).toBeGreaterThanOrEqual(STALL.min - 1e-9);
       expect(s.w).toBeLessThanOrEqual(STALL.max + 1e-9);
       expect(s.w - CAR_SIZE.w).toBeGreaterThanOrEqual(0.6 - 1e-9);

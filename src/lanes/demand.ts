@@ -47,7 +47,7 @@ export class LaneDemand {
   private spec(): VehicleSpec {
     const color = CAR_COLORS[Math.floor(this.rng() * CAR_COLORS.length)];
     return this.rng() < 0.15
-      ? { kind: 'truck', length: 12, width: 4.6, maxSpeed: 38, accel: 6, color, load: '#c9b28f' }
-      : { kind: 'car', length: 7, width: 4, maxSpeed: 55 + this.rng() * 10, accel: 10, color };
+      ? { kind: 'truck', length: 12, width: 4.2, maxSpeed: 38, accel: 6, color, load: '#c9b28f' }
+      : { kind: 'car', length: 7.5, width: 3, maxSpeed: 55 + this.rng() * 10, accel: 10, color };
   }
 }

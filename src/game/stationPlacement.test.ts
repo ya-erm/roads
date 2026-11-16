@@ -364,9 +364,10 @@ describe('Автовокзал у края улицы (с кармашком и�
     expect(pocketLanes(game, y)).toHaveLength(2);
   });
 
-  it('квартал 75–90 м: без кармашка — места в крайней полосе; кармашку на 2 места — от ~92 м, на одно хватает и 85; короче — сколько нужно', () => {
+  it('квартал 75–90 м: без кармашка — места в крайней полосе; кармашку на 2 места — от ~96 м, на одно хватает и 85; короче — сколько нужно', () => {
     expect(curbNeed(2, false)).toBeLessThanOrEqual(75);
-    expect(curbNeed(2, true)).toBeLessThanOrEqual(95);
+    // Место — городской автобус 16 м и зазор (STATION.curb.berth 18; было 16 под автобус 14): кармашек на 2 места — 96 м.
+    expect(curbNeed(2, true)).toBeLessThanOrEqual(96);
     expect(curbNeed(1, true)).toBeLessThanOrEqual(85);
     const { game, x, y } = scene(700);
     // Кварталы: x+100…x+185 (85 м) и x+185…x+245 (60 м); дальше — длинная улица.

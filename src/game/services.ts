@@ -20,28 +20,32 @@ export interface ServiceInfo {
   spec: VehicleSpec;
 }
 
-/** Кузова — по виду (vehicleArt): белая скорая с красной полосой, белая полиция с синей, красная пожарная с лестницей. */
+/**
+ * Кузова — по виду (vehicleArt): белая скорая с красной полосой, белая полиция с синей, красная пожарная с лестницей.
+ * Размеры — как у машин компании (docs/DESIGN.md, «Размеры машин»): полиция — легковая, скорая — фургон, пожарная — как
+ * Грузовик.
+ */
 export const SERVICES: Record<ServiceKind, ServiceInfo> = {
   ambulance: {
     name: 'Скорая помощь',
     icon: '🚑',
     weight: 0.45,
     color: '#e5484d',
-    spec: { kind: 'car', body: 'ambulance', length: 8, width: 4.2, maxSpeed: 58, accel: 9, color: '#f4f5f2' },
+    spec: { kind: 'car', body: 'ambulance', length: 9, width: 3.5, maxSpeed: 58, accel: 9, color: '#f4f5f2' },
   },
   police: {
     name: 'Полиция',
     icon: '🚓',
     weight: 0.4,
     color: '#2346b8',
-    spec: { kind: 'car', body: 'police', length: 7, width: 4, maxSpeed: 62, accel: 11, color: '#f2f4f7' },
+    spec: { kind: 'car', body: 'police', length: 7.5, width: 3, maxSpeed: 62, accel: 11, color: '#f2f4f7' },
   },
   fire: {
     name: 'Пожарная охрана',
     icon: '🚒',
     weight: 0.15,
     color: '#b3261e',
-    spec: { kind: 'truck', body: 'fire', length: 11, width: 4.6, maxSpeed: 48, accel: 6, color: '#c8312b' },
+    spec: { kind: 'truck', body: 'fire', length: 12, width: 4.2, maxSpeed: 48, accel: 6, color: '#c8312b' },
   },
 };
 

@@ -95,6 +95,7 @@ import { Garages, type GarageHost, type GarageLook } from './garages';
 import { ShopParking, type ShopHost } from './shopParking';
 import { Docks, type DockHost } from './docks';
 import { acceptAt, legacyCargo, maxTruck, pickReceivers, RETAIL, type Receiver, receiverOf, stockFill, unloadTime } from '../world/retail';
+import { CAR_SIZE } from '../world/houseAccess';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises } from './enterprises';
 import { isActive } from '../world/enterprise';
@@ -695,6 +696,8 @@ const MONTHS = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'И�
 const DRIVEWAY = { cls: 'highway' as const, lanes: twoWay(1, 1) };
 /** Выезд грузового двора кончается на столько от стены предприятия; там же — тупик стартового просёлка. */
 const INDUSTRY_EXIT = START_ROADS.industryExit;
+/** Грузовой двор у стены предприятия — столько вглубь, м (industryStationPlan). */
+const INDUSTRY_DOCK = 23;
 /** Выезд станции из перекрёстка — не ближе этого угла (рад) к соседним дорогам. */
 const STATION_JOIN_GAP = 0.5;
 
@@ -722,8 +725,8 @@ function keepMainRoad(net: LaneNet, nodePos: Vec): void {
  */
 const GROW = { perPerson: 0.75, min: 2, unit: 20 };
 
-/** Легковушка жителя: до ≈130 км/ч на автомагистрали. */
-const CAR_SPEC = { kind: 'car' as const, length: 7, width: 4, maxSpeed: 60, accel: 10 };
+/** Легковушка жителя: до ≈130 км/ч на автомагистрали; 7,5 × 3 (4,5 × 1,8 м) — world/houseAccess.CAR_SIZE. */
+const CAR_SPEC = { kind: 'car' as const, length: CAR_SIZE.l, width: CAR_SIZE.w, maxSpeed: 60, accel: 10 };
 /** Сквозной путь ж/д вокзала (первая платформа), если у него есть боковые пути; у конечной сквозного нет. */
 const throughOf = (st: Station): number | undefined => (st.platforms.length > 1 && !st.terminal ? st.platforms[0] : undefined);
 /** Платформы вокзала: боковые первыми, сквозной путь — последним (у конечной все тупики равны). */
@@ -1298,7 +1301,9 @@ export class Game implements BuildContext {
       break;
     }
     const at = (k: number) => add(add(fp.center, scale(axis, slide)), scale(n, half + k));
-    const dock: Footprint = { center: at(12), w: dockW, h: 18, angle: Math.atan2(n.x, -n.y) };
+    // Площадка — в 3 м от стены, вглубь — фура (21 м) целиком на посту (bayPose: метр у стены, полметра до края) с
+    // запасом; ворота — в 5 м за её краем. Старые дворы — 18 м вглубь (под фуру 18 м), фура там чуть выступает.
+    const dock: Footprint = { center: at(3 + INDUSTRY_DOCK / 2), w: dockW, h: INDUSTRY_DOCK, angle: Math.atan2(n.x, -n.y) };
     const fail = (reason: string, cost = COST.station, driveway?: RoadPlan): StationPlan => ({
       ok: false,
       reason,
@@ -1307,7 +1312,7 @@ export class Game implements BuildContext {
       industryId: ind.id,
       driveway,
     });
-    const gate = at(26);
+    const gate = at(3 + INDUSTRY_DOCK + 5);
     const exit = at(INDUSTRY_EXIT);
     if ([dock.center, gate, exit].some((q) => this.isWater(q, 10) || !this.inBounds(q, 40))) return fail('Мешает вода');
     // Дома на месте площадки сносим за доплату; другое предприятие или станция мешают.
@@ -6135,8 +6140,10 @@ export class Game implements BuildContext {
     const occ = this.curbOccupants(st, v.id);
     const front = Math.min(mid + stand / 2, ...occ.map((o) => o.front - o.length - IDM.minGap));
     const here = dot(sub(sim.pos, ax.node), ax.dir);
-    // Автобус чуть длиннее места (сочленённый) — может встать, на пару метров заехав за край мест назад.
-    if (occ.length >= st.bays || front < here || front - sim.length < back - 3) {
+    // Автобус длиннее места (сочленённый, 22 м на месте в 18) — может встать, заехав за край мест назад на свой лишек и
+    // ещё метр (не меньше 3 м).
+    const over = Math.max(3, sim.length - STATION.curb.berth + 1);
+    if (occ.length >= st.bays || front < here || front - sim.length < back - over) {
       if (!this.bayWaitSince.has(v.id)) this.bayWaitSince.set(v.id, this.time);
       return true;
     }
@@ -8974,7 +8981,7 @@ export class Game implements BuildContext {
       h: STOP.size.h,
       angle: Math.atan2(t.y, t.x),
     };
-    if ((s < STOP.gap && near('a')) || (c.length - s < STOP.gap && near('b'))) return fail('Слишком близко к перекрёстку', fp);
+    if ((s < STOP.corner && near('a')) || (c.length - s < STOP.corner && near('b'))) return fail('Слишком близко к перекрёстку', fp);
     if (s < 10 || c.length - s < 10) return fail('Слишком близко к узлу', fp);
     // Пара — на улице в обе стороны: у каждой половины свои автобусы, в одну сторону вторая половина пустовала бы.
     if (mate && !(c.lanes.some((l) => l.flow === 1) && c.lanes.some((l) => l.flow === -1))) return fail('Улица в одну сторону — пары не будет', fp);
@@ -10680,7 +10687,7 @@ export class Game implements BuildContext {
         const box = bayBox(this.bayArea(st), st.bays, bay, gate ? bayFront(st.fp, gate.pos) : 1);
         return { pos: box.center, r: Math.hypot(box.w, box.h) / 2 + 2, box };
       }
-      if (i >= 0) look = stopBerth(st.fp, gate?.pos, i, st.occupied.length, m.spec.width);
+      if (i >= 0) look = this.stopBerthAt(st, i);
     }
     if (look && m.mode === 'road') {
       const L = m.spec.length;
@@ -10688,6 +10695,21 @@ export class Game implements BuildContext {
     }
     // В пути, но не на дороге (потерялась, ждёт выезда) — не показываем; на станции — её саму.
     return st && v.state !== 'driving' ? { pos: st.fp.center, r: footprintRadius(st.fp), station: true } : null;
+  }
+
+  /**
+   * Место i-го автобуса на посадке у остановки (stopBerth, по st.occupied): своей ширины, носы — через самый длинный
+   * из стоящих и зазор IDM.minGap, друг на друга не заходят.
+   */
+  stopBerthAt(st: Station, i: number): Pose {
+    const spec = (id: number | undefined) => {
+      const v = id !== undefined ? this.fleet.get(id) : undefined;
+      const m = v && MODELS[v.model];
+      return m?.mode === 'road' ? m.spec : undefined;
+    };
+    const longest = Math.max(12, ...st.occupied.map((id) => spec(id)?.length ?? 0));
+    const gate = this.roads.net.nodes.get(st.nodeId);
+    return stopBerth(st.fp, gate?.pos, i, st.occupied.length, spec(st.occupied[i])?.width, longest + IDM.minGap);
   }
 
   /**

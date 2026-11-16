@@ -1,6 +1,6 @@
 import { GRADE, STATION } from '../config';
 import { Cubic, CurveLUT } from '../core/bezier';
-import { hash } from '../core/math';
+import { clamp, hash } from '../core/math';
 import { drawWalkSign } from './walkSign';
 import { pedestrianLight } from '../game/crosswalks';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
@@ -11,7 +11,7 @@ import { paxGone } from '../game/paxPatience';
 import { headingArrow } from '../game/stopPairs';
 import type { Spans } from '../game/constructionWork';
 import type { Game, LaneEnd, Partner } from '../game/game';
-import { bayFront, stopBerth, type FleetVehicle, type Line } from '../game/transport';
+import { bayFront, LONGEST_BUS, type FleetVehicle, type Line } from '../game/transport';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { atPortals, type Portal, portalHalf, tunnelPortals } from '../lanes/tunnel';
 import { LaneRenderer, layerOf } from '../lanes/draw';
@@ -2868,7 +2868,7 @@ export class Renderer {
     // Автобусы на посадке — сами автобусы вдоль бордюра, в крайней полосе, носом по ходу (остановка справа).
     const buses: VehicleLook[] = [];
     for (let i = 0; i < st.occupied.length; i++) {
-      const berth = stopBerth(fp, node?.pos, i, st.occupied.length);
+      const berth = game.stopBerthAt(st, i);
       const look = game.fleetLookAt(st.occupied[i], berth.pos, berth.dir);
       if (look) buses.push(look);
       else this.drawFootprint({ center: berth.pos, w: 12, h: 4.6, angle: fp.angle }, '#e07b39', '#8a4a22', 0.8);
@@ -3027,8 +3027,9 @@ export class Renderer {
     const area = game.bayArea(st);
     const bw = (area.w - 10) / st.bays;
     // Здание — у задней стены (сочленённый автобус встаёт носом к самому фасаду), галерея — вдоль фасада,
-    // перроны — от неё почти до края площадки.
-    const B = Math.min(6.5, fp.h * 0.25);
+    // перроны — от неё почти до края площадки. Здание — 6,5 м, а у старой станции (26 м вглубь, под автобус 18 м) —
+    // сколько остаётся за самым длинным автобусом на посту (bayPose: полметра до края площадки), не меньше 2,5.
+    const B = clamp(fp.h - 1.5 - LONGEST_BUS, 2.5, 6.5);
     const yHall = -hh + 1;
     const yGallery = yHall + B;
     const yEnd = hh - 2.5;

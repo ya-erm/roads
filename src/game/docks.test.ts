@@ -7,7 +7,10 @@ import { pickReceivers, receiverOf, RETAIL, stockAt, stockCap } from '../world/r
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { Game, type SaveData } from './game';
 import { freshGame, runSeconds } from './testkit';
-import type { FleetVehicle, Line } from './transport';
+import { type FleetVehicle, type Line, MODELS, type RoadModel } from './transport';
+
+/** Кузов Грузовика (фургон): длина и ширина. */
+const TRUCK = (MODELS.truck as RoadModel).spec;
 
 /** Партия с получателями (WorldSettings.retail) по миру seed 7. */
 const RETAIL_WORLD = { ...DEFAULT_SETTINGS, seed: 7, retail: true };
@@ -103,7 +106,7 @@ describe('Получатели грузов в партии', { timeout: 240_000
     v.amount = 10;
     v.loadedAt = sa.id;
     v.fromStore = true;
-    const geo = game.docks.geoOf(b, 11, 4.6)!;
+    const geo = game.docks.geoOf(b, TRUCK.length, TRUCK.width)!;
     expect(geo.yard.kind).toBe('turn');
     // Пока сворачивает с полосы — в потоке и стоит (его держит манёвр); дальше — во дворе, без машины в потоке.
     let turning = false;
@@ -118,7 +121,7 @@ describe('Получатели грузов в партии', { timeout: 240_000
     expect(v.simId).toBeNull();
     // У рампы: корма у стены, нос — от неё.
     const pose = game.docks.poseOf(v.id)!;
-    const center = add(pose.pos, scale(pose.dir, -5.5));
+    const center = add(pose.pos, scale(pose.dir, -TRUCK.length / 2));
     expect(dist(center, geo.ramp.c)).toBeLessThan(0.5);
     expect(dot(pose.dir, geo.d.dir)).toBeGreaterThan(0.99);
     // Выгрузил: в магазин B (продукты везли «со» станции A).
@@ -260,7 +263,7 @@ describe('Получатели грузов в партии', { timeout: 240_000
     // Первый стоит у рампы магазина B, второй готов уехать с A.
     v.stop = 1;
     v.state = 'loading';
-    expect(game.docks.stand(v.id, b, 11, 4.6)).toBe(true);
+    expect(game.docks.stand(v.id, b, TRUCK.length, TRUCK.width)).toBe(true);
     expect(game.docks.rampBusy(b.id, w.id)).toBe(true);
     expect(game.docks.rampBusy(b.id, v.id)).toBe(false);
     w.stop = 0;
@@ -277,11 +280,15 @@ describe('Получатели грузов в партии', { timeout: 240_000
     expect(inner(game).nextStop(w, line)).toBe(1);
   });
 
-  it('длинный грузовик (18 м) к магазину не едет — во двор не влезет', () => {
+  it('Фура (21 м) к магазину не едет — во двор не влезет; Грузовик II (15 м) — едет', () => {
     const game = freshGame(RETAIL_WORLD);
+    game.openModelTier(3, true);
     const { line } = shopLine(game);
-    const long = game.buyVehicle(line.id, 'truck3');
-    if (!long) return;
+    const semi = game.buyVehicle(line.id, 'truck2')!;
+    semi.stop = 0;
+    semi.state = 'departing';
+    expect(inner(game).nextStop(semi, line)).toBe(1);
+    const long = game.buyVehicle(line.id, 'truck3')!;
     long.stop = 0;
     long.state = 'departing';
     expect(inner(game).nextStop(long, line)).toBeNull();

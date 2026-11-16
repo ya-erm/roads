@@ -47,7 +47,7 @@ describe('Заезды частных домов', () => {
     expect(Array.from({ length: 20 }, () => cottagePlan(cottage({ fp: { center: { x: 0, y: 0 }, w: 18, h: 20, angle: 0 } }))).every((p) => !p.garage)).toBe(true);
   });
 
-  it('у дома без гаража — часто площадка под машину 5,2 × 8,4 м от края участка; доли: гараж ~45 %, площадка ~35 %, ничего ~20 %', () => {
+  it('у дома без гаража — часто площадка под машину 5,2 × 8,9 м от края участка; доли: гараж ~45 %, площадка ~35 %, ничего ~20 %', () => {
     const list = Array.from({ length: 400 }, () => cottage({ fp: { center: { x: 0, y: 0 }, w: 40, h: 44, angle: 0 } }));
     const plans = list.map((b) => cottagePlan(b));
     const share = (f: (p: (typeof plans)[0]) => boolean) => plans.filter(f).length / plans.length;
@@ -58,7 +58,7 @@ describe('Заезды частных домов', () => {
       if (!p.pad) continue;
       const b = list[i];
       expect(p.garage).toBeNull();
-      // Под машину 7 × 4 с запасом; от края участка, не на доме.
+      // Под машину 7,5 × 3 с запасом; от края участка, не на доме.
       expect(p.pad.w).toBeGreaterThanOrEqual(CAR_SIZE.w + 1);
       expect(p.pad.h).toBeGreaterThanOrEqual(CAR_SIZE.l + 1);
       expect(p.pad.y).toBeCloseTo(-b.fp.h / 2);

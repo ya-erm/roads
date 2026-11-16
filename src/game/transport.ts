@@ -69,6 +69,10 @@ export type VehicleModel = RoadModel | RailModel;
 /**
  * Модели по эпохам: со временем появляются вместительнее и выгоднее в содержании
  * (на единицу груза). Скорость грузовиков — ≈90 км/ч, автобусов — ≈100 км/ч.
+ * Размеры кузова (spec.length × width) — в единицах карты (0,6 м), ближе к настоящим, но фуры и автобусы чуть короче
+ * жизни (docs/DESIGN.md, «Размеры машин»): Грузовик 12 × 4,2 (7,2 × 2,5 м), Грузовик II 15 × 4,2, Фура 21 × 4,25,
+ * Автобус 11 × 3,7, Автобус II 16 × 4,25, Автобус III 22 × 4,25. От длины — посты станций (STATION.size), места
+ * автовокзала у края улицы (STATION.curb.berth), дворы магазинов (world/retail.RETAIL.maxLength).
  */
 export const MODELS: Record<ModelId, VehicleModel> = {
   truck: {
@@ -81,7 +85,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     running: 1_100 * MONTH_SCALE,
     debut: 0,
     tier: 1,
-    spec: { kind: 'truck', body: 'van', length: 11, width: 4.6, maxSpeed: 41, accel: 6, color: '#e07b39' },
+    spec: { kind: 'truck', body: 'van', length: 12, width: 4.2, maxSpeed: 41, accel: 6, color: '#e07b39' },
   },
   truck2: {
     id: 'truck2',
@@ -94,7 +98,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     debut: later(12),
     tier: 2,
     // Тягач с полуприцепом: на поворотах гнётся в седле (sim/body).
-    spec: { kind: 'truck', body: 'semi', length: 12.5, width: 4.8, maxSpeed: 41, accel: 6.5, color: '#e07b39' },
+    spec: { kind: 'truck', body: 'semi', length: 15, width: 4.2, maxSpeed: 41, accel: 6.5, color: '#e07b39' },
   },
   truck3: {
     id: 'truck3',
@@ -106,7 +110,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     running: 1_900 * MONTH_SCALE,
     debut: later(26),
     tier: 3,
-    spec: { kind: 'truck', body: 'longSemi', length: 18, width: 5, maxSpeed: 41, accel: 6, color: '#e07b39' },
+    spec: { kind: 'truck', body: 'longSemi', length: 21, width: 4.25, maxSpeed: 41, accel: 6, color: '#e07b39' },
   },
   bus: {
     id: 'bus',
@@ -118,7 +122,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     running: 1_300 * MONTH_SCALE,
     debut: 0,
     tier: 1,
-    spec: { kind: 'bus', body: 'microbus', length: 10.5, width: 4.6, maxSpeed: 45, accel: 6, color: '#3b7dd8' },
+    spec: { kind: 'bus', body: 'microbus', length: 11, width: 3.7, maxSpeed: 45, accel: 6, color: '#3b7dd8' },
   },
   bus2: {
     id: 'bus2',
@@ -130,7 +134,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     running: 1_500 * MONTH_SCALE,
     debut: later(14),
     tier: 2,
-    spec: { kind: 'bus', body: 'cityBus', length: 14, width: 4.8, maxSpeed: 45, accel: 6.5, color: '#3b7dd8' },
+    spec: { kind: 'bus', body: 'cityBus', length: 16, width: 4.25, maxSpeed: 45, accel: 6.5, color: '#3b7dd8' },
   },
   bus3: {
     id: 'bus3',
@@ -143,7 +147,7 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     debut: later(28),
     tier: 3,
     // Сочленённый: две секции с гармошкой, гнётся посередине (sim/body).
-    spec: { kind: 'bus', body: 'articBus', length: 18, width: 4.8, maxSpeed: 45, accel: 5.5, color: '#3b7dd8' },
+    spec: { kind: 'bus', body: 'articBus', length: 22, width: 4.25, maxSpeed: 45, accel: 5.5, color: '#3b7dd8' },
   },
   freightTrain: {
     id: 'freightTrain',
@@ -195,6 +199,9 @@ export const MODELS: Record<ModelId, VehicleModel> = {
     train: { kind: 'passenger', cars: 6, carLength: 20, maxSpeed: 120 / KMH_PER_UNIT, accel: 3.2, brake: 4.5 },
   },
 };
+
+/** Самый длинный автобус (сочленённый), м: под него — глубина автовокзала и здание за местами (drawBusTerminal). */
+export const LONGEST_BUS = Math.max(...Object.values(MODELS).flatMap((m) => (m.mode === 'road' && m.carries === 'passengers' ? [m.spec.length] : [])));
 
 /**
  * Грузовики с наливным грузом (нефть, топливо, газ) — автоцистерны: та же модель (цена, вместимость, скорость),
@@ -472,14 +479,14 @@ export function bayPose(fp: Footprint, bays: number, bay: number, length: number
 /**
  * Место i-го из count автобусов шириной width на посадке у остановки: у бордюра (навес — в STOP_CURB от него, борт —
  * в CURB_GAP), в крайней полосе улицы (она — в сторону узла road), носом по ходу (остановка справа). Нет узла —
- * улица с локальной +y.
+ * улица с локальной +y. Носы — через step (самый длинный из автобусов и зазор: друг на друга не заходят).
  */
-export function stopBerth(fp: Footprint, road: Vec | undefined, i: number, count: number, width = 4.8): Pose {
+export function stopBerth(fp: Footprint, road: Vec | undefined, i: number, count: number, width = 4.25, step = 18): Pose {
   const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
   const toRoad = road ? sub(road, fp.center) : { x: -u.y, y: u.x };
   const l = Math.hypot(toRoad.x, toRoad.y) || 1;
   const n = { x: toRoad.x / l, y: toRoad.y / l };
-  const along = (i - (count - 1) / 2) * 14;
+  const along = (i - (count - 1) / 2) * step;
   const off = fp.h / 2 + STOP_CURB + CURB_GAP + width / 2;
   return { pos: add(add(fp.center, scale(u, along)), scale(n, off)), dir: dot(rightNormal(u), n) < 0 ? u : scale(u, -1) };
 }

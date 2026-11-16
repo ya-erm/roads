@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { MONTH_LENGTH } from '../config';
+import { MONTH_LENGTH, STATION } from '../config';
 import { dist } from '../core/vec';
 import { twoWay } from '../lanes/model';
 import { CURB_GAP } from '../lanes/traffic';
 import { Game } from './game';
 import { connectStations, fieldSpot, road, stationAtIndustry, withoutCitizens } from './testkit';
-import { bayBox, MODELS, stopBerth } from './transport';
+import { bayBox, bayPose, LONGEST_BUS, MODELS, stopBerth } from './transport';
 
 describe('Бокс поста автостанции', () => {
   it('боксы идут подряд вдоль здания, от середины к воротам — как на рисунке станции', () => {
@@ -21,19 +21,35 @@ describe('Бокс поста автостанции', () => {
     expect(boxes[0].center.y).toBeCloseTo(50 + 4.5);
     expect(bayBox(fp, 3, 0, -1).center.y).toBeCloseTo(50 - 4.5);
   });
+
+  it('на посту новой станции любая машина — целиком на площадке; нос сочленённого — у фасада вокзала', () => {
+    const fp = { center: { x: 0, y: 0 }, w: STATION.size.w, h: STATION.size.h, angle: 0 };
+    for (const m of Object.values(MODELS)) {
+      if (m.mode !== 'road') continue;
+      // Нос — к задней стене (−y), корма — к воротам (+y).
+      const p = bayPose(fp, STATION.bays, 1, m.spec.length);
+      expect(p.dir.y, m.id).toBeCloseTo(-1);
+      expect(p.pos.y, m.id).toBeGreaterThanOrEqual(-fp.h / 2 + 1 - 1e-9);
+      expect(p.pos.y + m.spec.length, m.id).toBeLessThanOrEqual(fp.h / 2);
+    }
+    // Здание автовокзала 6,5 м у задней стены (метр от неё) — за самым длинным автобусом.
+    expect(bayPose(fp, STATION.bays, 1, LONGEST_BUS).pos.y).toBeCloseTo(-fp.h / 2 + 1 + 6.5);
+  });
 });
 
 describe('Место автобуса у остановки', () => {
   const fp = { center: { x: 0, y: 0 }, w: 20, h: 6, angle: 0 };
 
-  it('вдоль бордюра со стороны улицы, через 14 по длине навеса, носом вдоль него', () => {
+  it('вдоль бордюра со стороны улицы, носы — через длину автобуса и зазор (по умолчанию 18), носом вдоль него', () => {
     const a = stopBerth(fp, { x: 0, y: 30 }, 0, 2);
     const b = stopBerth(fp, { x: 0, y: 30 }, 1, 2);
-    // Бордюр — в 2 от навеса; борт автобуса шириной 4.8 — в CURB_GAP от бордюра.
-    expect(a.pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 4.8 / 2);
-    expect(stopBerth(fp, { x: 0, y: 30 }, 0, 1, 4.6).pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 4.6 / 2);
+    // Бордюр — в 2 от навеса; борт автобуса шириной 4.25 — в CURB_GAP от бордюра.
+    expect(a.pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 4.25 / 2);
+    expect(stopBerth(fp, { x: 0, y: 30 }, 0, 1, 3.7).pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 3.7 / 2);
     expect(b.pos.y).toBeCloseTo(a.pos.y);
-    expect(b.pos.x - a.pos.x).toBeCloseTo(14);
+    expect(b.pos.x - a.pos.x).toBeCloseTo(18);
+    // Сочленённые (22 м) — через 24: друг на друга не заходят.
+    expect(stopBerth(fp, { x: 0, y: 30 }, 1, 2, 4.25, 24).pos.x - stopBerth(fp, { x: 0, y: 30 }, 0, 2, 4.25, 24).pos.x).toBeCloseTo(24);
     expect(a.pos.x + b.pos.x).toBeCloseTo(0);
     expect(Math.abs(a.dir.x)).toBeCloseTo(1);
     expect(a.dir).toEqual(b.dir);
