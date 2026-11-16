@@ -25,17 +25,15 @@ import type { TestScene } from './index';
  *    и едут дальше;
  *  - «У края улицы» — два автовокзала с перроном вплотную к бордюру: у южного на длинной улице — кармашек, у
  *    северного в квартале 85 м — без него (места в крайней полосе); автобусы встают у перрона друг за другом;
+ *  - «Пары» — улица 1+1, две пары остановок друг напротив друга (Station.pair): маршрут через пары туда и обратно,
+ *    автобус встаёт у той половины, что справа по ходу;
  *  - «Кварталы» — четыре квартала с перекрёстками и односторонней улицей посередине: один маршрут
  *    поворачивает налево, другой направо, общая остановка — на односторонней.
  * Экран: y вниз, движение правостороннее — на улице с запада на восток едут у южного края, остановки
  * у каждого маршрута стоят справа по ходу.
  */
 export function buildBusScene(): TestScene {
-  const game = new Game({ seed: 1, size: 'small', towns: 0, industries: 'few', money: 1_000_000_000, water: 'dry', terrainVersion: TERRAIN_VERSION });
-  clearMap(game);
-  // Все модели сразу: у автовокзалов — автобусы разной длины.
-  game.modelTier = 3;
-  const sc = new SceneBuilder(game);
+  const { game, sc } = sceneStart();
 
   // Слева столбиком улицы, справа кварталы; правый верхний угол пуст — там панель маршрутов.
 
@@ -156,11 +154,53 @@ export function buildBusScene(): TestScene {
     sc.line('block2', 'Кварталы: направо', [l1, oneway, l2, l3], 1);
   });
 
-  // Стройка сцены — не расходы игрока: месяц начинается с чистого счёта.
+  // Под кварталами.
+  pairsSection(sc, 3700, 3050);
+  return sceneEnd(game, sc);
+}
+
+/**
+ * Только участок «Пары» (как на /test/bus): для быстрых проверок пар остановок. pairs — их половины по порядку:
+ * западная пара (южная, северная), восточная пара (южная, северная).
+ */
+export function buildPairScene(): TestScene & { pairs: Station[] } {
+  const { game, sc } = sceneStart();
+  const pairs = pairsSection(sc, 2450, 1500);
+  return { ...sceneEnd(game, sc), pairs };
+}
+
+/** Ровная пустая карта со всеми моделями (у автовокзалов — автобусы разной длины) и стройщик сцены. */
+function sceneStart(): { game: Game; sc: SceneBuilder } {
+  const game = new Game({ seed: 1, size: 'small', towns: 0, industries: 'few', money: 1_000_000_000, water: 'dry', terrainVersion: TERRAIN_VERSION });
+  clearMap(game);
+  game.modelTier = 3;
+  return { game, sc: new SceneBuilder(game) };
+}
+
+/** Стройка сцены — не расходы игрока: месяц начинается с чистого счёта. */
+function sceneEnd(game: Game, sc: SceneBuilder): TestScene {
   game.money = game.settings.money;
   game.incomeMonth = game.expensesMonth = 0;
   game.ledger = emptyLedger();
   return { game, view: sc.view(), lines: sc.lines, errors: sc.errors };
+}
+
+/**
+ * «Пары»: улица 1+1 с тупиками, две пары остановок друг напротив друга. У западной второй навес поставлен ровно
+ * напротив — встаёт со сдвигом STOP.pair.shift; у восточной — на 20 м дальше по оси. Маршрут кликами по южным
+ * половинам: запад, восток, восток, запад — пара одна точка, автобус сам встаёт у половины справа по ходу.
+ * Улица — 900 м с серединой в (x, y), пары — в 200 м от середины.
+ */
+function pairsSection(sc: SceneBuilder, x: number, y: number): Station[] {
+  const out: Station[] = [];
+  sc.section('Пары', { x, y }, 'linear', () => {
+    sc.road({ free: { x: x - 450, y } }, { free: { x: x + 450, y } }, STREET);
+    out.push(sc.stop(south(x - 200, y)), sc.stop(north(x - 200, y)), sc.stop(south(x + 200, y)), sc.stop(north(x + 220, y)));
+    sc.houses();
+    const [west, , east] = out;
+    sc.line('pair', 'Пары', [west, east, east, west], 2);
+  });
+  return out;
 }
 
 /** От оси улицы до точки, у которой ставим остановку: навес встаёт с этой стороны улицы. */

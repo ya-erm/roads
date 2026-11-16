@@ -13,12 +13,13 @@ describe('Тестовая страница /test/bus', { timeout: 60_000 }, () 
     const scene = buildBusScene();
     expect(scene.errors).toEqual([]);
     const { game } = scene;
-    expect(Object.keys(scene.lines).sort()).toEqual(['avenue', 'bay', 'block', 'block2', 'both', 'curb', 'side', 'straight', 'terminal']);
+    expect(Object.keys(scene.lines).sort()).toEqual(['avenue', 'bay', 'block', 'block2', 'both', 'curb', 'pair', 'side', 'straight', 'terminal']);
     expect(game.terrain.rivers).toHaveLength(0);
     expect(game.terrain.lakes).toHaveLength(0);
     expect(game.industries).toHaveLength(0);
     expect(game.roads.net.problems()).toEqual([]);
-    for (const st of game.stations.values()) expect(st.catchPop, st.name).toBeGreaterThan(0);
+    // У пары остановок жители делятся по ближней половине — есть у пары в целом.
+    for (const st of game.stations.values()) expect(game.paxPop(st), st.name).toBeGreaterThan(0);
     const visited = new Map<number, Set<number>>();
     // Зазоры у стоящих на посадке автобусов «Кармашка» (улица идёт с запада на восток: поперёк неё — по y):
     // до бордюра справа и до разметки (или оси улицы) слева; у остановок с «кармашком» и без.

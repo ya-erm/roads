@@ -82,6 +82,7 @@ import { Journal, JournalEntry } from './journal';
 import { News, NOTICE_AFTER_PAUSE, NOTICE_LIFE, type NewsKind, type NewsRef, type NewsSave } from './news';
 import { serviceCall, serviceTick, SERVICE_TRAFFIC, SERVICES, type ServiceKind } from './services';
 import { paxFare, ridePath } from './fare';
+import { curbHeading, mergeStops, nearerHalf, rideAhead } from './stopPairs';
 import { transferable, transferNeighbors } from './transfer';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
@@ -575,6 +576,8 @@ export interface StationPlan {
   curb?: { bays: number; pocket: boolean; need: number; have: number };
   /** Длина выезда, м от кромки дороги (у станции в конце выезда, не у грузового двора). */
   drivewayLen?: number;
+  /** Остановка встанет парой к этой — напротив, на другой стороне той же улицы (Station.pair). */
+  pair?: number;
 }
 
 /**
@@ -1013,6 +1016,18 @@ export class Game implements BuildContext {
     };
   }
 
+  /**
+   * Пары остановок после загрузки: вторая половина есть и считает парой эту — иначе остановка обычная. Сторона узла
+   * (LaneNode.arrive) сохраняется с дорогами; у пары она ставится заново — по навесу.
+   */
+  private checkPairs(): void {
+    for (const st of this.stations.values()) {
+      if (st.pair === undefined) continue;
+      if (this.pairOf(st)) this.setStopSide(st, true);
+      else delete st.pair;
+    }
+  }
+
   private stationToSave(s: Station): SaveData['stations'][number] {
     return { ...s, passengers: [...s.passengers], accepts: [...s.accepts], occupied: [] };
   }
@@ -1106,6 +1121,7 @@ export class Game implements BuildContext {
       this.stations.set(st.id, st);
       this.index.add(st);
     }
+    this.checkPairs();
     this.indexWarehouses();
     // Старые сохранения без парков: парки и скверы — на пустом месте по сохранённым домам и дорогам (townParks.ts).
     const towns = this.towns.filter((t) => !t.parks);
@@ -3758,12 +3774,19 @@ export class Game implements BuildContext {
         }
         // Склады-здания — как были до действия (в индекс — ниже, все разом).
         live.warehouses = s.warehouses;
+        // Пара остановок (перенос её сложил или разорвал) — как была, с прежним названием.
+        if (live.pair !== s.pair) {
+          if (s.pair !== undefined) live.pair = s.pair;
+          else delete live.pair;
+          live.name = s.name;
+        }
         continue;
       }
       const st = this.stationFromSave(s);
       this.stations.set(st.id, st);
       this.index.add(st);
     }
+    this.checkPairs();
     // Строительные базы — на места до действия (перенос, отодвинутая расширением улицы); свободные бригады едут к
     // прежним воротам по дорогам, как при переносе.
     for (const s of snap.bases ?? []) {
@@ -4240,7 +4263,7 @@ export class Game implements BuildContext {
     const sts = line.stops.map((id) => this.stations.get(id)).filter((s): s is Station => !!s);
     if (sts.some((s) => s.kind === 'stop') || sts.every((s) => !s.serves.cargo)) return 'passengers';
     if (sts.every((s) => !s.serves.pax)) return 'freight';
-    const people = sts.filter((s) => s.serves.pax && s.catchPop > 0).length;
+    const people = sts.filter((s) => s.serves.pax && this.paxPop(s) > 0).length;
     if (this.freightFlow(sts)) return people >= 2 ? null : 'freight';
     return people ? 'passengers' : null;
   }
@@ -4281,7 +4304,9 @@ export class Game implements BuildContext {
   }
 
   createLine(stops: number[]): Line | null {
-    const clean = stops.filter((id, i) => this.stations.has(id) && id !== stops[i - 1]);
+    // Пара остановок — одна точка: автобус встанет у той половины, к которой подъедет по своей полосе.
+    const known = this.pairRoute(stops.filter((id) => this.stations.has(id)));
+    const clean = known.filter((id, i) => id !== known[i - 1]);
     if (clean.length > 1 && clean[0] === clean[clean.length - 1]) clean.pop();
     if (clean.length < 2 || this.lineProblem(clean)) return null;
     this.forgetUndo();
@@ -4432,9 +4457,11 @@ export class Game implements BuildContext {
    * Новый маршрут линии. Машины, чья станция (где стоят или куда едут) осталась
    * в маршруте, продолжают как ни в чём не бывало; остальные начинают с первой станции.
    */
-  setLineRoute(id: number, stops: number[], rules: (StopRule | null)[]): string | null {
+  setLineRoute(id: number, given: number[], rules: (StopRule | null)[]): string | null {
     const line = this.lines.get(id);
     if (!line) return 'Нет маршрута';
+    // Пара остановок — одна точка: у каждой пары — половина по ходу автобуса от предыдущей остановки.
+    const stops = this.pairRoute(given);
     const clean: number[] = [];
     const cleanRules: (StopRule | null)[] = [];
     stops.forEach((sid, i) => {
@@ -4470,6 +4497,13 @@ export class Game implements BuildContext {
       const index = clean.indexOf(at);
       if (index >= 0) {
         v.stop = index;
+        continue;
+      }
+      // Вместо половины пары в маршруте — другая: машина едет к ней (стоит у прежней — уезжает оттуда).
+      const was = this.stations.get(at);
+      const mate = this.pairOf(was);
+      if (was && mate && clean.includes(mate.id)) {
+        this.remapLineVehicle(v, line, was, clean.indexOf(mate.id));
         continue;
       }
       // Станции больше нет в маршруте: машина возвращается к началу маршрута.
@@ -4894,7 +4928,7 @@ export class Game implements BuildContext {
           perLap += (monthly * lap) / MONTH_LENGTH / (others.length + 1);
         }
       }
-      if (model.carries === 'passengers' && st.serves.pax && st.catchPop > 0) {
+      if (model.carries === 'passengers' && st.serves.pax && this.paxPop(st) > 0) {
         const share = this.paxShare(line, sid);
         if (share) perLap += this.paxArrivals(st, lap) * share;
       }
@@ -6512,11 +6546,13 @@ export class Game implements BuildContext {
   paxRoutes(st: Station): Map<number, Line[]> {
     const out = new Map<number, Line[]>();
     if (!st.serves.pax) return out;
+    // Между половинами одной пары никто не ездит: это одна остановка через улицу.
+    const mate = st.pair !== undefined ? this.pairOf(st)?.id : undefined;
     for (const line of this.lines.values()) {
       if (!line.stops.includes(st.id) || !this.lineTakes(line, 'passengers')) continue;
       for (const sid of line.stops) {
         // Пассажиры едут только на станции, которые работают с пассажирами.
-        if (sid === st.id || !this.stations.get(sid)?.serves.pax) continue;
+        if (sid === st.id || sid === mate || !this.stations.get(sid)?.serves.pax) continue;
         const list = out.get(sid) ?? [];
         if (!list.includes(line)) list.push(line);
         out.set(sid, list);
@@ -6527,64 +6563,148 @@ export class Game implements BuildContext {
 
   /** Сколько пассажиров появляется на станции за dt секунд (когда им есть куда ехать). */
   private paxArrivals(st: Station, dt: number): number {
-    return (st.catchPop / 1000) * PAX_PER_THOUSAND * dt * (st.townIds.length ? this.mods.pax(st.townIds[0]) : 1);
+    // У пары — жители обеих половин: поток один на пару (updateStations — у первой по номеру).
+    const town = st.townIds.length ? st.townIds[0] : this.pairOf(st)?.townIds[0];
+    return (this.paxPop(st) / 1000) * PAX_PER_THOUSAND * dt * (town !== undefined ? this.mods.pax(town) : 1);
   }
 
-  /** Насколько охотно пассажиры едут на эту станцию: по жителям в её охвате. */
+  /** Насколько охотно пассажиры едут на эту станцию: по жителям в её охвате (у пары — у обеих половин). */
   private paxWeight(sid: number): number {
-    return (this.stations.get(sid)?.catchPop ?? 0) + 60;
+    const st = this.stations.get(sid);
+    return (st ? this.paxPop(st) : 0) + 60;
+  }
+
+  /** Станция назначения как направление: у пары остановок — одно на обе половины (по меньшему номеру). */
+  private paxKey(sid: number): number {
+    const mate = this.pairOf(this.stations.get(sid));
+    return mate ? Math.min(sid, mate.id) : sid;
   }
 
   /**
-   * Какая доля пассажиров, что появляются на станции sid, поедет до других остановок линии (по весу направлений,
-   * как их выбирает updateStations); у линии без автобусов — сколько поехало бы, будь они.
+   * Куда едут пассажиры, что появляются у станции st: по направлению (paxKey) — станция, где выйдут, где ждут
+   * автобуса (at) и вес направления. У пары остановок (и до пары) из двух половин — та, откуда ехать по линии
+   * ближе (rideAhead): кто едет на восток, ждёт у навеса, где встают автобусы на восток. Без пар — те же станции,
+   * в том же порядке и с тем же весом, что paxRoutes.
+   */
+  private paxDests(st: Station, routes?: Map<number, Line[]>): Map<number, { dest: number; at: Station; w: number; ride: number }> {
+    const out = new Map<number, { dest: number; at: Station; w: number; ride: number }>();
+    const mate = this.pairOf(st);
+    const halves = mate ? [st, mate].sort((a, b) => a.id - b.id) : [st];
+    const pos = (id: number) => this.stations.get(id)?.fp.center;
+    for (const at of halves) {
+      // routes — уже посчитанные paxRoutes(st): каждый кадр для каждой станции заново их не считаем.
+      for (const [sid, lines] of at === st && routes ? routes : this.paxRoutes(at)) {
+        const key = this.paxKey(sid);
+        const was = out.get(key);
+        // Выбирать есть из чего — только у пар: сколько ехать по линии от половины до половины.
+        const ride = mate || key !== sid || this.pairOf(this.stations.get(sid)) ? Math.min(...lines.map((l) => rideAhead(l.stops, pos, at.id, sid))) : 0;
+        if (!was) out.set(key, { dest: sid, at, w: this.paxWeight(sid), ride });
+        else if (ride < was.ride - 0.5) Object.assign(was, { dest: sid, at, ride });
+      }
+    }
+    return out;
+  }
+
+  /** До каких станций пассажиры ждут у этой (у половины пары — только те, кому отсюда ехать ближе, чем от второй). */
+  paxWaitsFor(st: Station): Set<number> {
+    const out = new Set<number>();
+    for (const e of this.paxDests(st).values()) if (e.at === st) out.add(e.dest);
+    return out;
+  }
+
+  /**
+   * Какая доля пассажиров, что появляются на станции sid (у пары — на обеих половинах), сядет здесь на эту линию
+   * (по весу направлений, как их выбирает updateStations); у линии без автобусов — сколько поехало бы, будь они.
    */
   private paxShare(line: Line, sid: number): number {
     const st = this.stations.get(sid);
     if (!st) return 0;
-    const ours = new Set(line.stops.filter((o) => o !== sid && this.stations.get(o)?.serves.pax));
-    const weigh = (ids: Iterable<number>) => [...ids].reduce((s, o) => s + this.paxWeight(o), 0);
-    const mine = weigh(ours);
-    const rest = weigh([...this.paxRoutes(st).keys()].filter((o) => !ours.has(o)));
-    return mine ? mine / (mine + rest) : 0;
+    const mate = this.pairOf(st);
+    const dests = this.paxDests(st);
+    const ours = new Set(line.stops.filter((o) => o !== sid && o !== mate?.id && this.stations.get(o)?.serves.pax).map((o) => this.paxKey(o)));
+    let mine = 0;
+    let all = 0;
+    for (const k of ours) {
+      const e = dests.get(k);
+      const w = e?.w ?? this.paxWeight(k);
+      all += w;
+      // У пары — только те, кто ждёт на этой половине.
+      if (!e || e.at.id === sid) mine += w;
+    }
+    let rest = 0;
+    for (const [k, e] of dests) if (!ours.has(k)) rest += e.w;
+    return mine ? mine / (all + rest) : 0;
   }
 
   private updateStations(dt: number): void {
     for (const st of this.stations.values()) {
       const routes = this.paxRoutes(st);
-      // Кому больше не на чем уехать (линию убрали или на ней теперь только грузовики) — расходятся.
-      for (const [sid, n] of st.passengers) if (n <= 0 || !routes.has(sid)) st.passengers.delete(sid);
+      const mate = this.pairOf(st);
+      // Кому больше не на чем уехать (линию убрали или на ней теперь только грузовики) — расходятся; у пары — переходят
+      // через улицу, если оттуда уехать можно.
+      let mateRoutes: Map<number, Line[]> | undefined;
+      for (const [sid, n] of st.passengers) {
+        if (n > 0 && routes.has(sid)) continue;
+        if (n > 0 && mate && (mateRoutes ??= this.paxRoutes(mate)).has(sid)) mate.passengers.set(sid, (mate.passengers.get(sid) ?? 0) + n);
+        st.passengers.delete(sid);
+      }
+      if (mate) {
+        // Пара: пассажиры появляются один раз на обе половины — у первой по номеру, уходят с каждой по своей очереди.
+        if (st.id < mate.id && this.paxPop(st) > 0) this.paxArrive(st, [st, mate], dt, routes);
+        this.paxWalkOff(st, routes, dt);
+        continue;
+      }
       if (st.catchPop <= 0) continue;
-      const dests = new Map<number, number>();
-      for (const sid of routes.keys()) dests.set(sid, this.paxWeight(sid));
-      if (!dests.size) continue;
-      st.paxAcc += this.paxArrivals(st, dt);
-      let waiting = 0;
-      for (const c of st.passengers.values()) waiting += c;
-      const cap = this.stationCap(st, 'passengers');
-      // Рабочие до станций у предприятий, которым их не хватает (enterprises.ts): сверх обычных пассажиров.
-      for (const [dock, n] of this.enterprises.spawnWorkers(st, dt)) {
-        const k = Math.min(n, cap - waiting);
-        if (k <= 0 || !dests.has(dock)) continue;
-        st.passengers.set(dock, (st.passengers.get(dock) ?? 0) + k);
-        waiting += k;
-      }
-      while (st.paxAcc >= 1) {
-        st.paxAcc -= 1;
-        if (waiting >= cap) continue;
-        const total = [...dests.values()].reduce((a, b) => a + b, 0);
-        let r = this.rng.range(0, total);
-        for (const [sid, w] of dests) {
-          r -= w;
-          if (r <= 0) {
-            st.passengers.set(sid, (st.passengers.get(sid) ?? 0) + 1);
-            waiting++;
-            break;
-          }
-        }
-      }
+      if (!this.paxArrive(st, [st], dt, routes)) continue;
       this.paxWalkOff(st, routes, dt);
     }
+  }
+
+  /**
+   * Новые пассажиры станции st (у пары — halves, обе половины): каждый — в своё направление по весу (paxDests) и
+   * ждёт там, откуда поедет; очередь каждой половины — не больше её предела (stationCap). Ехать некуда — false.
+   */
+  private paxArrive(st: Station, halves: Station[], dt: number, routes: Map<number, Line[]>): boolean {
+    const dests = this.paxDests(st, routes);
+    if (!dests.size) return false;
+    st.paxAcc += this.paxArrivals(st, dt);
+    const waiting = new Map<number, number>();
+    const cap = new Map<number, number>();
+    for (const h of halves) {
+      let w = 0;
+      for (const c of h.passengers.values()) w += c;
+      waiting.set(h.id, w);
+      cap.set(h.id, this.stationCap(h, 'passengers'));
+    }
+    const room = (h: Station) => cap.get(h.id)! - waiting.get(h.id)!;
+    const put = (h: Station, dest: number, k: number) => {
+      h.passengers.set(dest, (h.passengers.get(dest) ?? 0) + k);
+      waiting.set(h.id, waiting.get(h.id)! + k);
+    };
+    // Рабочие до станций у предприятий, которым их не хватает (enterprises.ts): сверх обычных пассажиров.
+    for (const h of halves) {
+      for (const [dock, n] of this.enterprises.spawnWorkers(h, dt)) {
+        const e = dests.get(this.paxKey(dock));
+        if (!e || e.dest !== dock) continue;
+        const k = Math.min(n, room(e.at));
+        if (k > 0) put(e.at, dock, k);
+      }
+    }
+    while (st.paxAcc >= 1) {
+      st.paxAcc -= 1;
+      if (halves.every((h) => room(h) <= 0)) continue;
+      let total = 0;
+      for (const e of dests.values()) total += e.w;
+      let r = this.rng.range(0, total);
+      for (const e of dests.values()) {
+        r -= e.w;
+        if (r <= 0) {
+          if (room(e.at) > 0) put(e.at, e.dest, 1);
+          break;
+        }
+      }
+    }
+    return true;
   }
 
   /**
@@ -7940,7 +8060,8 @@ export class Game implements BuildContext {
 
   /**
    * Автобусная остановка: навес у края улицы со стороны курсора, улица в этом месте режется стыком —
-   * это узел остановки: автобусы встают у неё прямо в полосе. Не у перекрёстка и не рядом с другой остановкой.
+   * это узел остановки: автобусы встают у неё прямо в полосе. Не у перекрёстка и не рядом с другой остановкой —
+   * кроме остановки напротив (stopMate): с ней новая встаёт парой (Station.pair), узлом не ближе STOP.pair.shift.
    */
   private stopPlan(p: Vec, snapRadius: number): StationPlan {
     const fail = (reason: string, fp: Footprint | null = null): StationPlan => ({ ok: false, reason, cost: STOP.cost, fp });
@@ -7953,21 +8074,27 @@ export class Game implements BuildContext {
       const n = net.node(end === 'a' ? c.a : c.b);
       return n.kind === 'junction' || net.isDeadEnd(n);
     };
-    const s = hit.s;
-    const t = c.lut.tangentAt(s);
-    const point = c.lut.pointAt(s);
-    const side = normalTowards(c, s, p);
+    const side = normalTowards(c, hit.s, p);
+    const mate = this.stopMate(c, hit.s, side);
+    // Напротив остановки узел ближе shift не встанет (кусок улицы между стыками — не короче 10 м): сдвигаем в сторону
+    // курсора от её узла (d — от курсора до него вдоль c).
+    const shift = STOP.pair.shift;
+    const s = !mate || Math.abs(mate.d) >= shift ? hit.s : mate.d >= 0 ? hit.s + mate.d - shift : hit.s + mate.d + shift;
+    const t = c.lut.tangentAt(Math.min(Math.max(s, 0), c.length));
+    const point = c.lut.pointAt(Math.min(Math.max(s, 0), c.length));
     const fp: Footprint = {
-      center: add(point, scale(side, halfAtS(c, s) + 2 + STOP.size.h / 2)),
+      center: add(point, scale(side, halfAtS(c, Math.min(Math.max(s, 0), c.length)) + 2 + STOP.size.h / 2)),
       w: STOP.size.w,
       h: STOP.size.h,
       angle: Math.atan2(t.y, t.x),
     };
     if ((s < STOP.gap && near('a')) || (c.length - s < STOP.gap && near('b'))) return fail('Слишком близко к перекрёстку', fp);
     if (s < 10 || c.length - s < 10) return fail('Слишком близко к узлу', fp);
-    // Другие остановки и станции рядом на этой же улице (переносимая — не в счёт).
+    // Пара — на улице в обе стороны: у каждой половины свои автобусы, в одну сторону вторая половина пустовала бы.
+    if (mate && !(c.lanes.some((l) => l.flow === 1) && c.lanes.some((l) => l.flow === -1))) return fail('Улица в одну сторону — пары не будет', fp);
+    // Другие остановки и станции рядом на этой же улице (переносимая и та, к которой встаём парой, — не в счёт).
     for (const st of this.stations.values()) {
-      if (st.id === this.movingStation) continue;
+      if (st.id === this.movingStation || st.id === mate?.st.id) continue;
       if (st.kind !== 'stop' && dist(st.fp.center, fp.center) > STOP.gap) continue;
       if (dist(st.fp.center, fp.center) < (st.kind === 'stop' ? STOP.gap * 2 : STOP.gap)) return fail('Рядом уже есть остановка', fp);
     }
@@ -7981,7 +8108,210 @@ export class Game implements BuildContext {
     const cost = STOP.cost + this.demolishTotal(under.houses);
     if (!plan.ok) return { ...fail(plan.reason ?? 'Нельзя поставить', fp), cost };
     if (cost > this.budget) return { ...fail('Не хватает денег', fp), cost };
-    return { ok: true, cost, fp, driveway: plan, nodePos: point, demolish: under.houses };
+    return { ok: true, cost, fp, driveway: plan, nodePos: point, demolish: under.houses, ...(mate ? { pair: mate.st.id } : {}) };
+  }
+
+  /**
+   * Остановка напротив точки s улицы c (side — сторона, где встанет новая): на этой же улице (через стыки), узлом не
+   * дальше STOP.pair.reach вдоль оси, навесом на другой стороне и ещё без пары (переносимая не в счёт, её собственная
+   * пара — можно: она снова встанет парой к ней). d — от s до её узла вдоль c (к концу b — плюс). Нет — null.
+   */
+  private stopMate(c: Corridor, s: number, side: Vec): { st: Station; d: number } | null {
+    const net = this.roads.net;
+    const byNode = new Map<number, Station>();
+    for (const st of this.stations.values()) if (st.kind === 'stop' && st.id !== this.movingStation) byNode.set(st.nodeId, st);
+    let best: { st: Station; d: number } | null = null;
+    for (const dir of [1, -1] as const) {
+      let node = dir > 0 ? c.b : c.a;
+      let d = dir > 0 ? c.length - s : s;
+      let from = c.id;
+      while (d <= STOP.pair.reach) {
+        const st = byNode.get(node);
+        if (st) {
+          const at = net.node(node).pos;
+          const free = st.pair === undefined || st.pair === this.movingStation || !this.pairOf(st);
+          if (free && dot(sub(st.fp.center, at), side) < 0 && (!best || d < Math.abs(best.d))) best = { st, d: d * dir };
+          break;
+        }
+        const n = net.nodes.get(node);
+        const next = n && n.kind === 'seam' && n.corridors.length === 2 ? net.corridors.get(n.corridors[0] === from ? n.corridors[1] : n.corridors[0]) : undefined;
+        if (!next) break;
+        d += next.length;
+        from = next.id;
+        node = next.a === node ? next.b : next.a;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Предпросмотр пары: остановка по плану встанет парой к той, что напротив, — навесы обеих (сначала новая) и куда у
+   * каждой поедут автобусы; name — общее название. Не пара — null.
+   */
+  pairPreview(plan: StationPlan): { name: string; halves: { fp: Footprint; dir: Vec }[] } | null {
+    const mate = plan.pair !== undefined ? this.stations.get(plan.pair) : undefined;
+    const node = mate && this.roads.net.nodes.get(mate.nodeId);
+    if (!plan.ok || !plan.fp || !plan.nodePos || !mate || !node) return null;
+    return {
+      name: mate.name,
+      halves: [
+        { fp: plan.fp, dir: curbHeading(plan.fp.center, plan.nodePos) },
+        { fp: mate.fp, dir: curbHeading(mate.fp.center, node.pos) },
+      ],
+    };
+  }
+
+  /** Вторая половина пары остановок (Station.pair); нет пары (или вторая уже не считает её своей) — undefined. */
+  pairOf(st: Station | undefined): Station | undefined {
+    if (st?.pair === undefined) return undefined;
+    const mate = this.stations.get(st.pair);
+    return mate?.pair === st.id ? mate : undefined;
+  }
+
+  /** Жители у остановки — у пары на обе половины (каждый дом — у ближней, без двойного счёта; computeCatchment). */
+  paxPop(st: Station): number {
+    return st.catchPop + (this.pairOf(st)?.catchPop ?? 0);
+  }
+
+  /** Куда едут автобусы, что встают у половины пары: навес справа по ходу (как LaneNode.arrive). Не пара — null. */
+  stopHeading(st: Station): Vec | null {
+    const node = this.pairOf(st) && this.roads.net.nodes.get(st.nodeId);
+    return node ? curbHeading(st.fp.center, node.pos) : null;
+  }
+
+  /**
+   * Узел остановки — цель только с её стороны (правостороннее движение: навес справа по ходу), on = false — с любой.
+   */
+  private setStopSide(st: Station, on: boolean): void {
+    const node = this.roads.net.nodes.get(st.nodeId);
+    if (!node) return;
+    if (!on) {
+      delete node.arrive;
+      return;
+    }
+    node.arrive = dot(sub(st.fp.center, node.pos), rightNormal(node.dir)) > 0 ? 1 : -1;
+  }
+
+  /**
+   * Две остановки напротив — пара: у каждой узел только для своей стороны, жители делятся по ближней половине,
+   * маршруты через них встают у той половины, к которой подъезжают по своей полосе (pairRoute), машины в пути
+   * пересчитывают дорогу к ней.
+   */
+  private pairStops(a: Station, b: Station): void {
+    a.pair = b.id;
+    b.pair = a.id;
+    this.setStopSide(a, true);
+    this.setStopSide(b, true);
+    this.computeCatchment(a);
+    this.computeCatchment(b);
+    this.legCache.clear();
+    for (const line of this.lines.values()) if (line.stops.includes(a.id) || line.stops.includes(b.id)) this.remapLine(line, this.pairRoute(line.stops));
+    this.rerouteTo([a, b]);
+    this.journal.add('pair', { a: a.id, b: b.id, name: a.name });
+  }
+
+  /**
+   * Пара распалась (половину снесли или увезли дальше STOP.pair.reach): у обеих узел снова с любой стороны, жители —
+   * каждой свои. Возвращает вторую половину.
+   */
+  private unpairStop(st: Station): Station | undefined {
+    const mate = this.pairOf(st);
+    delete st.pair;
+    if (!mate) return undefined;
+    delete mate.pair;
+    this.setStopSide(st, false);
+    this.setStopSide(mate, false);
+    this.computeCatchment(st);
+    this.computeCatchment(mate);
+    this.legCache.clear();
+    this.rerouteTo([st, mate]);
+    this.journal.add('pair-', { a: st.id, b: mate.id });
+    return mate;
+  }
+
+  /** Машины, что едут к этим остановкам, заново ищут к ним дорогу: к узлу — уже с нужной стороны (или с любой). */
+  private rerouteTo(sts: Station[]): void {
+    const nodes = new Set(sts.map((s) => s.nodeId));
+    for (const v of this.fleet.values()) {
+      const sim = this.fleetSim(v);
+      if (sim && v.state === 'driving' && !v.boarding && nodes.has(sim.targetNode)) this.traffic.redirect(sim, sim.targetNode);
+    }
+  }
+
+  /**
+   * Пары остановок в маршруте stops: пара — одна точка, автобус встаёт у той половины, к которой подъезжает от
+   * предыдущей остановки по своей полосе, без разворота (до неё короче). Пара дважды подряд (конечная: приехал и
+   * уехал обратно) — обе половины по очереди: сначала та, к которой подъехал, потом напротив. Длина — та же.
+   */
+  pairRoute(stops: readonly number[]): number[] {
+    const out = [...stops];
+    const n = out.length;
+    if (n < 2 || !out.some((id) => this.pairOf(this.stations.get(id)))) return out;
+    const len = (from: Station, to: Station) => {
+      const r = this.roads.route(from.nodeId, to.nodeId);
+      return r ? this.roads.routeLength(r) : Infinity;
+    };
+    // Два прохода: первая остановка смотрит на последнюю, а та могла смениться.
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < n; i++) {
+        const st = this.stations.get(out[i]);
+        const mate = this.pairOf(st);
+        const prev = this.stations.get(out[(i - 1 + n) % n]);
+        if (!st || !mate || !prev || prev.id === mate.id || prev.kind === 'rail') continue;
+        if (prev.id === st.id) {
+          if (n > 2) out[i] = mate.id;
+          continue;
+        }
+        if (len(prev, mate) < len(prev, st) - 1) out[i] = mate.id;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Маршрут line по остановкам stops — той же длины, где половина пары заменена другой (пара сложилась или
+   * распалась): соседние одинаковые склеиваются, машины едут к той же по счёту остановке — уже к её новой половине
+   * (стоящая у прежней уезжает оттуда, её место у остановки — за новой). Короче двух остановок — false, ничего не меняется.
+   */
+  private remapLine(line: Line, stops: readonly number[]): boolean {
+    const merged = mergeStops(stops);
+    if (!merged) return false;
+    const before = line.stops;
+    if (merged.stops.length === before.length && merged.stops.every((id, i) => id === before[i])) return true;
+    const rules = line.rules;
+    const keep = merged.index.map((to, from) => (merged.index.indexOf(to) === from ? from : -1)).filter((i) => i >= 0);
+    line.stops = merged.stops;
+    if (rules) line.rules = keep.map((i) => rules[i] ?? null);
+    delete line.lap;
+    delete line.departedAt;
+    this.lapGuess.delete(line.id);
+    for (const vid of line.vehicles) {
+      const v = this.fleet.get(vid);
+      if (!v) continue;
+      this.forgetLap(v);
+      const was = this.stations.get(before[v.stop]);
+      if (was) this.remapLineVehicle(v, line, was, merged.index[v.stop] ?? 0);
+      else v.stop = merged.index[v.stop] ?? 0;
+    }
+    this.journal.add('route', { id: line.id, stops: line.stops, was: before });
+    return true;
+  }
+
+  /**
+   * Машина v линии line ехала к остановке was (или стояла у неё), теперь это остановка номер index — другая половина
+   * той же пары: место у остановки — за новой, а едет она уже к новой.
+   */
+  private remapLineVehicle(v: FleetVehicle, line: Line, was: Station, index: number): void {
+    v.stop = index;
+    const now = this.stations.get(line.stops[index]);
+    if (!now || now.id === was.id) return;
+    const i = was.occupied.indexOf(v.id);
+    if (i >= 0) {
+      was.occupied.splice(i, 1);
+      now.occupied.push(v.id);
+    }
+    const sim = this.fleetSim(v);
+    if (sim && v.state === 'driving' && !v.boarding && sim.targetNode === was.nodeId) this.traffic.redirect(sim, now.nodeId);
   }
 
   /** К узлу можно примкнуть выезд станции: перекрёсток или тупик обычных дорог на земле (не выезд другой станции). */
@@ -8153,9 +8483,12 @@ export class Game implements BuildContext {
       paxAcc: 0,
     };
     this.computeCatchment(st);
-    st.name = this.stationName(st, ind);
+    // Половина пары — под тем же названием, что и остановка напротив.
+    const mate = plan.pair !== undefined ? this.stations.get(plan.pair) : undefined;
+    st.name = mate ? mate.name : this.stationName(st, ind);
     this.stations.set(id, st);
     this.index.add(st);
+    if (mate) this.pairStops(st, mate);
     this.journal.add('station', {
       id,
       name: st.name,
@@ -8201,8 +8534,10 @@ export class Game implements BuildContext {
     const st = this.stations.get(id);
     const clean = name.trim().slice(0, 40);
     if (!st || !clean || clean === st.name) return;
-    const auto = [...this.lines.values()].filter((l) => l.stops.includes(id) && l.name === this.defaultLineName(l.stops));
-    st.name = clean;
+    // У пары остановок название одно на обе половины.
+    const halves = [st, ...[this.pairOf(st)].filter((s): s is Station => !!s)];
+    const auto = [...this.lines.values()].filter((l) => halves.some((h) => l.stops.includes(h.id)) && l.name === this.defaultLineName(l.stops));
+    for (const h of halves) h.name = clean;
     for (const line of auto) line.name = this.defaultLineName(line.stops);
   }
 
@@ -8296,6 +8631,17 @@ export class Game implements BuildContext {
   }
 
   removeStation(st: Station): boolean {
+    // Половина пары: маршруты через неё встают у второй половины — она остаётся обычной остановкой.
+    const mate = this.pairOf(st);
+    if (mate) {
+      const lines = this.stationLines(st.id);
+      const swapped = lines.map((l) => l.stops.map((id) => (id === st.id ? mate.id : id)));
+      if (swapped.every((s) => mergeStops(s))) {
+        this.unpairStop(st);
+        lines.forEach((l, i) => this.remapLine(l, swapped[i]));
+        this.handPax(st, mate);
+      }
+    }
     if (this.stationLines(st.id).length) {
       this.notify('Станцию используют маршруты — сначала удалите их');
       return false;
@@ -8325,6 +8671,27 @@ export class Game implements BuildContext {
     this.refund(COST.station + Math.max(0, st.bays - STATION.bays) * STATION.bayCost + storageSlots(st) * STORAGE.cost);
     this.networkChanged();
     return true;
+  }
+
+  /**
+   * Сносят половину пары from: пассажиры, что ждали на ней, переходят на оставшуюся to, а кто ехал или ждал до неё —
+   * едут до оставшейся (между половинами одной пары никто не ездит).
+   */
+  private handPax(from: Station, to: Station): void {
+    for (const [sid, n] of from.passengers) if (sid !== to.id) to.passengers.set(sid, (to.passengers.get(sid) ?? 0) + n);
+    from.passengers.clear();
+    for (const st of this.stations.values()) {
+      const n = st.passengers.get(from.id);
+      if (n === undefined) continue;
+      st.passengers.delete(from.id);
+      if (st.id !== to.id) st.passengers.set(to.id, (st.passengers.get(to.id) ?? 0) + n);
+    }
+    for (const v of this.fleet.values()) {
+      for (const g of v.passengers) {
+        if (g.to === from.id) g.to = to.id;
+        if (g.from === from.id) g.from = to.id;
+      }
+    }
   }
 
   /** Станция, которую сейчас примеряют на новое место: её саму при проверках места не считаем. */
@@ -8485,6 +8852,7 @@ export class Game implements BuildContext {
     // Узел на новом месте уже есть в сети плана: машины к станции едут туда (иначе потеряли бы дорогу).
     const node = plan.driveway.net.nodesNear(plan.nodePos, 2)[0];
     if (!node) return 'Нельзя перенести';
+    const oldNode = st.nodeId;
     for (const v of this.fleet.values()) {
       const line = this.lines.get(v.lineId);
       const sim = this.fleetSim(v);
@@ -8514,8 +8882,28 @@ export class Game implements BuildContext {
     if (plan.drivewayLen !== undefined) st.driveway = plan.drivewayLen;
     this.index.add(st);
     this.computeCatchment(st);
+    if (st.kind === 'stop') this.pairAfterMove(st, oldNode, plan.pair);
     if (checkpoint) this.commit();
     return null;
+  }
+
+  /**
+   * Остановку st перенесли (прежний узел — oldNode): уехала от своей пары дальше STOP.pair.reach — пара распалась,
+   * у перенесённой — своё название; встала напротив другой (или снова своей) — пара с ней, название — её.
+   */
+  private pairAfterMove(st: Station, oldNode: number, pair: number | undefined): void {
+    // Прежний стык остаётся на улице — уже не цель с одной стороны.
+    const old = this.roads.net.nodes.get(oldNode);
+    if (old) delete old.arrive;
+    const was = this.pairOf(st);
+    const mate = pair !== undefined ? this.stations.get(pair) : undefined;
+    if (was && was !== mate) {
+      this.unpairStop(st);
+      if (st.name === was.name) this.renameStation(st.id, this.stationName({ ...st, name: '' }, undefined));
+    }
+    if (!mate) return;
+    if (mate !== was) this.renameStation(st.id, mate.name);
+    this.pairStops(st, mate);
   }
 
   /** Пути без вокзала st (копия сети) — для примерки переноса; пересчитываются, только когда сеть поменялась. */
@@ -9092,13 +9480,13 @@ export class Game implements BuildContext {
   }
 
   /** Жители в охвате радиусом R вокруг точки at: какие города и сколько людей. */
-  private peopleNear(at: Vec, R: number): { towns: Set<number>; pop: number } {
+  private peopleNear(at: Vec, R: number, mine: (p: Vec) => boolean = () => true): { towns: Set<number>; pop: number } {
     const towns = new Set<number>();
     let pop = 0;
     for (const town of this.towns) {
       if (dist(town.center, at) > (town.extent ?? town.radius) + R + 50) continue;
       for (const b of town.buildings) {
-        if (dist(b.fp.center, at) > R) continue;
+        if (dist(b.fp.center, at) > R || !mine(b.fp.center)) continue;
         towns.add(town.id);
         pop += b.kind === 'res' ? residentsOf(b) : b.floors * 6;
       }
@@ -9128,7 +9516,9 @@ export class Game implements BuildContext {
   computeCatchment(st: Station): void {
     const R = this.catchmentRadius(st);
     st.industryIds = this.industriesNear(st.fp.center, R).map((i) => i.id);
-    const { towns, pop } = this.peopleNear(st.fp.center, R);
+    // Пара остановок: дом в охвате обеих половин — у ближней, жители пары не удваиваются.
+    const mate = this.pairOf(st);
+    const { towns, pop } = this.peopleNear(st.fp.center, R, mate ? (p) => nearerHalf(p, st, mate) === st.id : undefined);
     st.townIds = [...towns];
     // Пассажирская станция собирает жителей, грузовая принимает грузы. Стёртые переходы, где город хотел бы их, —
     // −5% жителей за каждый, не больше −20%: с той стороны улицы к остановке не идут (docs/CROSSWALKS.md).

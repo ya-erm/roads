@@ -436,7 +436,8 @@ export class Enterprises {
    * охвате не хватает рабочих. Довезённые сюда пассажиры — рабочие (без билета).
    */
   takesWorkers(st: Station): boolean {
-    if (!this.on || !st.serves.pax || st.catchPop > 0) return false;
+    // У пары остановок жители — на обеих половинах: половина без своих домов — не станция для рабочих.
+    if (!this.on || !st.serves.pax || this.game.paxPop(st) > 0) return false;
     return st.industryIds.some((id) => {
       const ind = this.game.industries.find((i) => i.id === id);
       return !!ind && isActive(ind) && this.busNeed(ind) > 0;
@@ -465,7 +466,7 @@ export class Enterprises {
     for (const ind of g.industries) {
       const need = isActive(ind) ? this.busNeed(ind) : 0;
       if (need <= 0.5) continue;
-      const sts = [...g.stations.values()].filter((st) => st.serves.pax && st.catchPop <= 0 && st.industryIds.includes(ind.id));
+      const sts = [...g.stations.values()].filter((st) => st.serves.pax && g.paxPop(st) <= 0 && st.industryIds.includes(ind.id));
       for (const st of sts) docks.set(st.id, (docks.get(st.id) ?? 0) + need / sts.length / MONTH_LENGTH);
     }
     if (!docks.size) return out;

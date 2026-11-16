@@ -2359,6 +2359,22 @@ button.icon.toggle-spacing {
   color: var(--ink);
 }
 
+/* Пара остановок в карточке: схема двух навесов, стрелка хода этой половины и кнопка «⇄ напротив». */
+.pair-row .st-kind {
+  margin: 0;
+  line-height: 0;
+}
+
+.pair-dir {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.pair-row button.small {
+  margin-left: auto;
+}
+
 /* Пути и длина нового вокзала — два счётчика друг под другом, подписи слева. */
 .st-params {
   display: grid;

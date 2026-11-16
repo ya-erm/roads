@@ -8,6 +8,7 @@ import type { Plan, Snap } from '../game/build';
 import { stationNormal } from '../game/railStationEdit';
 import { warningMarks } from '../game/stationWarnings';
 import { paxGone } from '../game/paxPatience';
+import { headingArrow } from '../game/stopPairs';
 import type { Spans } from '../game/constructionWork';
 import type { Game, LaneEnd, Partner } from '../game/game';
 import { bayFront, stopBerth, type FleetVehicle, type Line } from '../game/transport';
@@ -125,6 +126,8 @@ export interface ToolOverlay {
   highlightSeg: number | null;
   highlightNode: { pos: Vec; ok: boolean; radius: number } | null;
   station: { fp: Footprint; ok: boolean } | null;
+  /** Остановка встанет парой к той, что напротив (Game.pairPreview): навесы обеих и куда у каждой едут автобусы. */
+  stopPair?: { fp: Footprint; dir: Vec }[] | null;
   catchmentAt: Vec | null;
   /** Радиус охвата: у вокзала больше. */
   catchmentR: number;
@@ -2452,8 +2455,12 @@ export class Renderer {
     const inView = (fp: Footprint) =>
       fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
     const sel = o.selection;
+    // Выбрана половина пары остановок — выделена и вторая, между ними — пунктир через улицу.
+    const picked = sel?.type === 'station' ? game.stations.get(sel.id) : undefined;
+    const mate = game.pairOf(picked);
+    if (picked && mate && inView(picked.fp)) this.drawPairLink(picked.fp.center, mate.fp.center, 'rgba(47,128,237,0.9)');
     for (const st of game.stations.values()) {
-      const selected = (sel?.type === 'station' && sel.id === st.id) || o.lineStops.includes(st.id);
+      const selected = (sel?.type === 'station' && sel.id === st.id) || st === mate || o.lineStops.includes(st.id);
       for (const w of st.warehouses ?? []) if (inView(w.fp)) this.drawWarehouse(w.fp, selected);
       if (!inView(st.fp)) continue;
       if (st.kind === 'rail') this.drawRailStation(game, st, selected);
@@ -2783,6 +2790,9 @@ export class Renderer {
     const back = dot(n, { x: -u.y, y: u.x }) > 0 ? -1 : 1;
     ctx.fillRect(-fp.w / 2 + 1.5, back > 0 ? fp.h / 2 - 2.6 : -fp.h / 2 + 1, fp.w - 3, 1.6);
     ctx.restore();
+    // Половина пары: на навесе — стрелка, куда едут автобусы, что встают у неё.
+    const heading = game.stopHeading(st);
+    if (heading) this.drawPairArrow(add(fp.center, scale(n, 0.6)), heading, '#2f80ed', 1);
     // Знак остановки на краю навеса.
     const sign = add(fp.center, scale(u, fp.w / 2 + 2.5));
     ctx.fillStyle = '#2f80ed';
@@ -2793,6 +2803,44 @@ export class Renderer {
     ctx.beginPath();
     ctx.arc(sign.x, sign.y, 1, 0, Math.PI * 2);
     ctx.fill();
+  }
+
+  /** Стрелка хода автобусов у половины пары остановок: по центру at, вдоль dir; k — во сколько раз крупнее навеса. */
+  private drawPairArrow(at: Vec, dir: Vec, color: string, k: number): void {
+    const ctx = this.ctx;
+    const a = add(at, scale(dir, -5.5 * k));
+    const b = add(at, scale(dir, 3 * k));
+    const side = { x: -dir.y, y: dir.x };
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 1.1 * k;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    const tip = add(at, scale(dir, 6 * k));
+    ctx.beginPath();
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(b.x + side.x * 2 * k, b.y + side.y * 2 * k);
+    ctx.lineTo(b.x - side.x * 2 * k, b.y - side.y * 2 * k);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  /** Пара остановок: пунктир через улицу от навеса к навесу — одна остановка на обе стороны. */
+  private drawPairLink(a: Vec, b: Vec, color: string): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 / z;
+    ctx.setLineDash([5 / z, 4 / z]);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    ctx.restore();
   }
 
   /**
@@ -3514,7 +3562,9 @@ export class Renderer {
         const rise = st.kind === 'stop' || z >= STATION_BADGES_ZOOM ? NAME_RISE : BADGE_RISE;
         // Дорога сверху — столбик под остановкой: сначала название, под ним плашка.
         const y = labelsBelow(game, st) ? bottomOf(st.fp) + BADGE_RISE / z : topOf(st.fp) - rise / z;
-        text({ x: st.fp.center.x, y }, st.name, 11, '#ffffff', 'rgba(35,45,60,0.82)');
+        // У половины пары название общее — со стрелкой, куда отсюда едут автобусы.
+        const heading = st.kind === 'stop' ? game.stopHeading(st) : null;
+        text({ x: st.fp.center.x, y }, heading ? `${st.name} ${headingArrow(heading)}` : st.name, 11, '#ffffff', 'rgba(35,45,60,0.82)');
       }
     }
   }
@@ -3846,6 +3896,13 @@ export class Renderer {
           ctx.stroke();
         }
       }
+    }
+    // Встанет парой к остановке напротив: обе обведены, пунктир через улицу, на каждой — куда едут её автобусы.
+    if (o.stopPair) {
+      const [a, b] = o.stopPair;
+      this.drawPairLink(a.fp.center, b.fp.center, 'rgba(47,128,237,0.95)');
+      this.drawFootprint(b.fp, 'rgba(207,227,255,0.55)', '#2f80ed', 2);
+      for (const h of o.stopPair) this.drawPairArrow(h.fp.center, h.dir, '#2f80ed', 1.25);
     }
     for (const p of [o.plan, ...(o.plans ?? [])]) {
       if (!p?.lut) continue;

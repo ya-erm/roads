@@ -3820,7 +3820,11 @@ export class Controller {
         const serves = plan.fp ? g.stationServesFor(plan.fp, this.stationKind, plan.industryId, this.newStationServes) : this.newStationServes;
         const what =
           this.stationKind === 'rail' ? (this.stationTerminal ? 'Конечная станция' : 'Ж/д станция') : this.stationKind === 'stop' ? 'Остановка' : stationTitle(serves);
-        o.label = plan.ok ? { text: `${what} · ${money(plan.cost)}${raze}${free}`, ok: true } : { text: failText(plan.reason, plan.cost, ''), ok: false };
+        // Напротив другой остановки — пара: на карте стрелки хода у обоих навесов, у курсора — ⇄ и общее название.
+        const pair = g.pairPreview(plan);
+        o.stopPair = pair?.halves ?? null;
+        const named = pair ? ` ⇄ ${pair.name}` : '';
+        o.label = plan.ok ? { text: `${what}${named} · ${money(plan.cost)}${raze}${free}`, ok: true } : { text: failText(plan.reason, plan.cost, ''), ok: false };
         break;
       }
       case 'line': {
@@ -3946,8 +3950,11 @@ export class Controller {
           const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
           const what = moving.kind !== 'rail' ? '' : (this.moveTerminal ?? !!moving.terminal) ? ' конечной' : ' проходной';
           const turn = plan.rail?.main ? ' · R — повернуть' : '';
+          // Остановка встанет напротив другой — парой к ней (стрелки хода у обоих навесов, ⇄ и общее название).
+          const pair = g.pairPreview(plan);
+          o.stopPair = pair?.halves ?? null;
           o.label = plan.ok
-            ? { text: `Перенести сюда${what} · ${price}${turn} · Esc — отмена`, ok: true }
+            ? { text: `Перенести сюда${what}${pair ? ` ⇄ ${pair.name}` : ''} · ${price}${turn} · Esc — отмена`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }

@@ -636,6 +636,23 @@ export function stationPlaceSvg(mode: 'end' | 'side' | 'curb', size = 30): strin
   </svg>`;
 }
 
+/**
+ * Пара остановок напротив: улица, навесы по обе стороны со сдвигом, пунктир между ними, в каждой полосе — стрелка
+ * хода автобусов (у нижнего навеса — вправо, у верхнего — влево: движение правостороннее). mine — выделить нижний
+ * навес (эта половина в карточке), иначе оба одинаковые.
+ */
+export function stopPairSvg(size = 30, mine = false): string {
+  const own = mine ? 'fill="#cfe3ff" stroke="#2f80ed"' : 'fill="#f2efe8" stroke="#4f5965"';
+  return `<svg viewBox="0 0 40 36" width="${(size * 40) / 36}" height="${size}">
+    <rect x="0" y="12" width="40" height="12" fill="#646b76"/><path d="M0 18H40" stroke="#f5f3e6" stroke-width="0.8" stroke-dasharray="3 2"/>
+    <rect x="5" y="4" width="16" height="6" rx="1" fill="#f2efe8" stroke="#4f5965" stroke-width="1"/>
+    <rect x="19" y="26" width="16" height="6" rx="1" ${own} stroke-width="1.2"/>
+    <path d="M13 10L27 26" stroke="#2f80ed" stroke-width="1" stroke-dasharray="2 1.5"/>
+    <path d="M31 15H12" stroke="#ffffff" stroke-width="1.4"/><path d="M8 15L12.5 12.6V17.4Z" fill="#ffffff"/>
+    <path d="M9 21H28" stroke="#ffffff" stroke-width="1.4"/><path d="M32 21L27.5 18.6V23.4Z" fill="#ffffff"/>
+  </svg>`;
+}
+
 /** Места у перрона автовокзала у края улицы: перрон с навесом и n автобусов вдоль него (из max — серыми пустые). */
 export function curbBaysSvg(n: number, max: number): string {
   const w = 6;

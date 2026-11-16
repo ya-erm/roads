@@ -53,6 +53,7 @@ import { getBest, saveBest, slotOf } from '../scenario/records';
 import type { ScenarioSettings } from '../scenario/types';
 import { cargoIcon, cargoTip, townIcon, walkIcon } from './cargoIcons';
 import { paxGone, paxGoneTo, paxPatience } from '../game/paxPatience';
+import { headingArrow } from '../game/stopPairs';
 import { fleetBar, fleetBarRoom } from './fleetBar';
 import { type LineBack, lineBackFrom, lineCloseTarget } from './lineBack';
 import { lineMoneyHtml } from './lineMoney';
@@ -97,6 +98,7 @@ import {
   terminalStationSvg,
   throughStationSvg,
   stationPlaceSvg,
+  stopPairSvg,
   curbBaysSvg,
   drivewaySvg,
   platformLengthSvg,
@@ -1536,6 +1538,11 @@ export class Hud {
         if (st) c.showPlace(st.fp.center, footprintRadius(st.fp));
         break;
       }
+      case 'pair-half': {
+        // Вторая половина пары остановок — её карточка (через улицу).
+        if (g.stations.has(Number(d.id))) c.select({ type: 'station', id: Number(d.id) });
+        break;
+      }
       case 'preset':
         c.setPreset(d.id!);
         break;
@@ -2533,8 +2540,12 @@ export class Hud {
         <div class="base-prices">${basePriceHtml(g)}</div></div></div>`;
     }
     if (c.stationMode === 'stop') {
-      const tip = `Остановка встаёт у края улицы со стороны курсора: автобусы останавливаются прямо в полосе. Только пассажиры, охват ${STOP.catchment} м, ${STOP.bays} места для автобусов. Не ближе ${STOP.gap} м к перекрёстку. В маршруте её можно смешивать с автовокзалами.`;
-      return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">Как ставить <span class="price-tag">${money(STOP.cost)}</span></div><p class="muted">${tip}</p></div></div>`;
+      const tip = `Остановка встаёт у края улицы со стороны курсора: автобусы останавливаются прямо в полосе. Только пассажиры, охват ${STOP.catchment} м, ${STOP.bays} места для автобусов. Не ближе ${STOP.gap} м к перекрёстку. Напротив другой — пара ⇄. В маршруте её можно смешивать с автовокзалами.`;
+      // Пара — картинкой у заголовка: два навеса через улицу, у каждого свои автобусы.
+      const pair = `<span class="st-kind" data-tip="Напротив другой остановки (до ${STOP.pair.reach} м вдоль улицы) — пара: одна остановка на обе стороны. Автобус встаёт у навеса справа по ходу, пассажиры ждут там, откуда им ехать в свою сторону, жители — одни на обе. В маршруте пара — одна точка">${stopPairSvg(
+        26,
+      )}</span>`;
+      return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">Как ставить ${pair} <span class="price-tag">${money(STOP.cost)}</span></div><p class="muted">${tip}</p></div></div>`;
     }
     if (c.stationMode === 'rail') return this.railStationOptionsHtml(sw);
     const pax = c.stationMode === 'pax';
@@ -2942,8 +2953,11 @@ export class Hud {
         // Номер и название — показать станцию на карте; плашка со стрелкой и остальная строка раскрывают
         // настройку остановки и повторным кликом сворачивают.
         const fold = open ? 'Свернуть настройку остановки' : 'Настроить остановку';
+        // Половина пары остановок — со стрелкой хода: у какого навеса из двух встаёт автобус.
+        const heading = st ? g.stopHeading(st) : null;
+        const pairMark = heading ? ` <span class="pair-dir">${headingArrow(heading)}</span>` : '';
         return `<div class="stop ${open ? 'open' : ''}" data-action="stop-open" data-line="${line.id}" data-i="${i}" title="${fold}">
-          ${stopPlaceHtml(i, st?.id ?? null, st ? (st.kind === 'rail' ? '🚉 ' : '') + esc(st.name) : '?')}${warn}
+          ${stopPlaceHtml(i, st?.id ?? null, st ? (st.kind === 'rail' ? '🚉 ' : '') + esc(st.name) + pairMark : '?')}${warn}
           <button class="rule-chip" data-action="stop-open" data-line="${line.id}" data-i="${i}" title="${fold}">${WAIT_LABELS[ruleWaitId(rule)]}${platIcon}${loadIcons}${unloadIcons}${stopFoldHtml(open)}</button>
           ${btn('stop-up', '↑', 'Раньше', i === 0)}${btn('stop-down', '↓', 'Позже', i === n - 1)}${btn('stop-del', '✕', 'Убрать из маршрута', n <= 2)}
         </div>${open ? this.stopRuleHtml(line, i, rule) : ''}`;
@@ -3332,6 +3346,10 @@ export class Hud {
     if (sel.type === 'station') {
       const st = g.stations.get(sel.id);
       if (!st) return '';
+      // Половина пары остановок: вторая — через улицу, у каждой — свои автобусы (стрелка хода) и свои пассажиры.
+      const mate = g.pairOf(st);
+      const heading = g.stopHeading(st);
+      const mateHeading = mate ? g.stopHeading(mate) : null;
       let pax = 0;
       for (const n of st.passengers.values()) pax += n;
       const waiting = [
@@ -3339,7 +3357,19 @@ export class Hud {
         ...(pax ? [['passengers', pax] as const] : []),
       ];
       const suppliesAll = [...new Set(g.industries.filter((i) => st.industryIds.includes(i.id)).map((i) => i.info.produces))];
-      const towns = st.townIds.map((id) => g.towns.find((t) => t.id === id)?.name).filter(Boolean).join(', ');
+      const towns = [...new Set([...st.townIds, ...(mate?.townIds ?? [])])]
+        .map((id) => g.towns.find((t) => t.id === id)?.name)
+        .filter(Boolean)
+        .join(', ');
+      const people = g.paxPop(st);
+      const pairRow =
+        mate && heading && mateHeading
+          ? `<div class="icon-row pair-row"><span class="lbl2">Пара</span><b class="st-kind" data-tip="Пара остановок через улицу: автобус встаёт у той, что справа по ходу. Здесь ждут те, кому ехать ${headingArrow(
+              heading,
+            )}; жители — одни на обе">${stopPairSvg(34, true)}</b><b class="pair-dir">${headingArrow(heading)}</b><button class="small" data-action="pair-half" data-id="${
+              mate.id
+            }" data-tip="Остановка напротив: там ждут те, кому ехать ${headingArrow(mateHeading)}">⇄ ${headingArrow(mateHeading)}</button></div>`
+          : '';
       const kind =
         st.industryId !== null
           ? 'Станция предприятия · '
@@ -3359,9 +3389,11 @@ export class Hud {
       const supplies = st.serves.cargo ? suppliesAll : [];
       // Куда едут пассажиры: станция назначения (клик — показать), сколько ждут и какие линии туда ходят.
       const routes = g.paxRoutes(st);
+      // У половины пары — только те направления, куда отсюда ехать ближе (остальные ждут через улицу).
+      const here = mate ? g.paxWaitsFor(st) : null;
       const dests = [...new Set([...routes.keys(), ...st.passengers.keys()])]
         .map((sid) => ({ sid, n: Math.floor(st.passengers.get(sid) ?? 0), lines: routes.get(sid) ?? [] }))
-        .filter((d) => g.stations.has(d.sid))
+        .filter((d) => g.stations.has(d.sid) && (!here || here.has(d.sid) || d.n > 0))
         .sort((a, b) => b.n - a.n);
       const most = Math.max(1, ...dests.map((d) => d.n));
       const paxRows = dests
@@ -3392,7 +3424,7 @@ export class Hud {
       const paxBlock =
         st.serves.pax && (pax || dests.length)
           ? `<div class="rule-row"><span class="lbl2">${cargoIcon('passengers', 16)} Куда едут пассажиры ${goneHead}</span>${paxRows}</div>`
-          : st.serves.pax && st.catchPop > 0
+          : st.serves.pax && people > 0
             ? `<p class="muted">${cargoIcon('passengers', 14)} Пассажиры появятся, когда отсюда пойдёт автобус или пассажирский поезд.</p>`
             : '';
       const freightWaiting = waiting.filter(([c]) => c !== 'passengers');
@@ -3465,11 +3497,14 @@ export class Hud {
       const title =
         this.renamingStation === st.id
           ? `<input class="line-name station-name" data-station-name="${st.id}" value="${esc(st.name)}" maxlength="40" />`
-          : `<h3 class="station-title" data-action="rename-station" data-id="${st.id}" title="Нажмите, чтобы переименовать">${esc(st.name)}</h3>
+          : `<h3 class="station-title" data-action="rename-station" data-id="${st.id}" title="Нажмите, чтобы переименовать">${esc(st.name)}${
+              heading ? ` ${headingArrow(heading)}` : ''
+            }</h3>
             <button class="icon pencil" data-action="rename-station" data-id="${st.id}" title="Переименовать">✎</button>`;
       return `<section class="detail"><header class="station-head">${title}<button class="icon" data-action="close-sel">✕</button></header>
         <p class="muted">${kind}${busy}</p>
         ${stationWarningsHtml(g, st.id, stationWarnings(g, st), this.controller.warnFocusOn(st.id))}
+        ${pairRow}
         ${servesRow}
         ${baysRow}
         ${storageRow}
@@ -3485,12 +3520,16 @@ export class Hud {
         ${this.transferRowHtml(st)}
         ${paxBlock}
         <div class="icon-row"><span class="lbl2">Отправляет</span>${
-          supplies.length ? supplies.map((c) => cargoTip(c, 20)).join('') : pax || st.catchPop ? cargoTip('passengers', 20) : '<span class="muted">—</span>'
+          supplies.length ? supplies.map((c) => cargoTip(c, 20)).join('') : pax || people ? cargoTip('passengers', 20) : '<span class="muted">—</span>'
         }</div>
         <div class="icon-row"><span class="lbl2">Принимает</span>${
           st.accepts.size ? [...st.accepts].map((c) => cargoTip(c, 20)).join('') : '<span class="muted">—</span>'
         }</div>
-        <p class="muted">${towns ? `Город: ${esc(towns)} · ` : ''}жителей в охвате ${st.catchPop}</p>
+        <p class="muted">${towns ? `Город: ${esc(towns)} · ` : ''}${
+          mate
+            ? `<span data-tip="Жители у обеих половин пары, каждый дом — у ближней: здесь ${st.catchPop}, напротив ${mate.catchPop}">жителей в охвате пары ${people}</span>`
+            : `жителей в охвате ${st.catchPop}`
+        }</p>
         <div class="actions">${
           st.kind === 'rail'
             ? `<button class="small" data-action="move-station" data-id="${st.id}" data-tip="Станция встанет на другой путь с теми же путями и платформами; маршруты через неё сохранятся">Переместить</button><button
