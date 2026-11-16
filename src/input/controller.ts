@@ -82,21 +82,17 @@ export function dropEffectFor(allowed: string): 'copy' | 'move' | 'link' {
   return 'copy';
 }
 
-/** Клик без протяжки по узлу дороги: какой узел и когда (performance.now()), мс. */
-export interface NodeClick {
-  node: number;
-  at: number;
-}
-
-/** Двойной клик по узлу дороги: дольше — уже два отдельных клика, мс. */
-const NODE_DOUBLE_CLICK = 500;
+/** Сдвиг мыши, px, до которого нажатие — ещё клик, а не протяжка. */
+const CLICK_SLOP = 8;
 
 /**
- * Клик по узлу node в момент now (detail — номер клика подряд у браузера) — второй клик двойного по тому же
- * узлу: первый был по нему же (не по дороге, где он только что встал) и недавно.
+ * Клик по узлу node (detail — номер клика подряд у браузера) — второй клик двойного по тому же узлу: прежний клик
+ * (prev — его узел, null — не по узлу) был по нему же, а не по дороге, где узел только что встал. Быстро ли
+ * кликнули — решает браузер (detail — по системной скорости двойного клика): свой порог по времени не нужен — с
+ * ним медленный двойной клик, который система считает двойным, игра не замечала.
  */
-export function isNodeDoubleClick(prev: NodeClick | null, node: number, detail: number, now: number): boolean {
-  return detail >= 2 && prev !== null && prev.node === node && now - prev.at <= NODE_DOUBLE_CLICK;
+export function isNodeDoubleClick(prev: number | null, node: number, detail: number): boolean {
+  return detail >= 2 && prev === node;
 }
 
 /** key — цифра инструмента, alt — дополнительная буква (B — снос, как в других стройках). */
@@ -351,8 +347,8 @@ export class Controller {
   private ctrl = false;
   private pan: { sx: number; sy: number; cx: number; cy: number; moved: boolean } | null = null;
   private left: { sx: number; sy: number; createdChain: boolean } | null = null;
-  /** «Двигать»: последний клик (без протяжки) по узлу — второй такой же подряд переключает излом ↔ гладкий. */
-  private nodeClick: NodeClick | null = null;
+  /** «Двигать»: узел последнего клика (без протяжки; null — не по узлу) — второй такой же подряд переключает излом ↔ гладкий. */
+  private nodeClick: number | null = null;
   private keys = new Set<string>();
   private flash: { text: string; until: number } | null = null;
 
@@ -2430,7 +2426,7 @@ export class Controller {
       this.onChange();
       return;
     }
-    const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > 8;
+    const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > CLICK_SLOP;
     if (this.projectMode) {
       // Протянули построенную дорогу — её правка в проект (дорога пока как есть).
       if (this.builtDrag) {
@@ -2484,15 +2480,14 @@ export class Controller {
       }
       // Двойной клик по узлу двух дорог — излом ↔ гладкий.
       const grabbed = moved ? null : this.roadTools.dragNode;
-      const now = performance.now();
-      if (grabbed !== null && isNodeDoubleClick(this.nodeClick, grabbed, e.detail, now)) {
+      if (grabbed !== null && isNodeDoubleClick(this.nodeClick, grabbed, e.detail)) {
         this.nodeClick = null;
         this.roadTools.moveEnd();
         this.toggleJoint(grabbed);
         this.onChange();
         return;
       }
-      this.nodeClick = grabbed === null ? null : { node: grabbed, at: now };
+      this.nodeClick = grabbed;
       // Проект перемещения: протяжка — ещё одна правка проекта, дорога пока как есть.
       if (this.moveProjectMode) {
         const edit = moved ? this.roadTools.moveEdit(this.worldAt(e), e.shiftKey, this.freeAim) : null;
@@ -3631,7 +3626,10 @@ export class Controller {
         // Проект перемещения: тянут от сети с ним, дорога на карте — как есть, новое положение — проектом.
         const project = this.moveProjectMode;
         const net = rt.base ?? g.roads.net;
-        if (rt.dragging) {
+        // Нажали и не сдвинули дальше клика — отпустят, и ничего не изменится (клик, двойной клик): предпросмотр
+        // переноса не показываем, иначе узел на миг прыгал к курсору и «возвращался» сам.
+        const still = this.left !== null && Math.hypot(this.mouse.x - this.left.sx, this.mouse.y - this.left.sy) <= CLICK_SLOP;
+        if (rt.dragging && !still) {
           this.moveDragOverlay(o, p, project);
           break;
         }
