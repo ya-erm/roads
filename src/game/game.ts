@@ -104,7 +104,7 @@ import { Motion, SpeedChart, speedChart, TrackPiece } from './speedChart';
 import { BuildContext, Builder, Plan, type RailProjectStart, RoadRequest, Snap } from './build';
 import { diamondPlan, TemplateOptions, templatePlan, TemplatePlan } from './interchange';
 import { cloneNetwork, copyRails, RailPaste } from './railFragment';
-import { chainCoords, chainOffset, trackChain } from './railEdit';
+import { chainCoords, chainOffset, parallelLevelProblem, trackChain } from './railEdit';
 import {
   extendGeom,
   type ExtraTrack,
@@ -2954,9 +2954,8 @@ export class Game implements BuildContext {
     if (!hit) return fail('Зажмите на пути и протяните вдоль него');
     // Цепочка участков по порядку: от участка под курсором в обе стороны, пока узел — не стрелка.
     const chain = trackChain(net, hit.seg);
-    if (chain.some((x) => !net.isFlat(x.seg) || net.node(x.seg.a).level !== 0)) return fail('Пристроить путь — только на земле');
     // Координата вдоль цепочки.
-    const along = chainCoords(chain).at;
+    const { starts, at: along } = chainCoords(chain);
     const uA = along(chain.findIndex((x) => x.seg.id === hit.seg.id), hit.s);
     let best = { i: 0, s: 0, d: Infinity, point: b };
     chain.forEach((x, i) => {
@@ -2970,6 +2969,9 @@ export class Game implements BuildContext {
     const tB = scale(segB.seg.lut.tangentAt(best.s), segB.forward ? 1 : -1);
     const side = dot(sub(b, best.point), { x: -tB.y, y: tB.x }) >= 0 ? 1 : -1;
     const [u0, u1] = uA < uB ? [uA, uB] : [uB, uA];
+    // Высота — только там, где ляжет новый путь: мост или тоннель дальше по той же цепочке не мешает.
+    const levelProblem = parallelLevelProblem(net, chain, starts, u0, u1);
+    if (levelProblem) return fail(levelProblem);
     // Копия цепочки сбоку — параллелью по всей длине (длинные и S-образные кривые — несколькими кусками).
     const reqs: RoadRequest[] = chainOffset(chain, u0, u1, side * TRACK_GAP).map((curve) => ({
       start: { kind: 'free', pos: curve.p0, level: 0 },

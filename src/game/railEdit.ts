@@ -371,6 +371,23 @@ export function chainCoords(chain: ChainLink[]): { starts: number[]; length: num
 }
 
 /**
+ * Почему рядом с цепочкой от u0 до u1 не пристроить путь по высоте: смотрим только участки, вдоль которых
+ * ляжет новый путь (мост или тоннель дальше по той же цепочке не мешает). null — всё на земле.
+ */
+export function parallelLevelProblem(net: Network, chain: ChainLink[], starts: number[], u0: number, u1: number): string | null {
+  const [lo, hi] = u0 < u1 ? [u0, u1] : [u1, u0];
+  const along = chain.filter((x, i) => starts[i] < hi && starts[i] + x.seg.length > lo);
+  for (const x of along) {
+    const la = net.node(x.seg.a).level;
+    const lb = net.node(x.seg.b).level;
+    if (la === 0 && lb === 0) continue;
+    if (la !== lb) return Math.max(la, lb) > 0 ? 'Пристроить путь нельзя на подъёме к мосту' : 'Пристроить путь нельзя на спуске в тоннель';
+    return la > 0 ? 'Пристроить путь — только на земле' : 'Пристроить путь нельзя в тоннеле';
+  }
+  return null;
+}
+
+/**
  * Копия цепочки сбоку: от координаты u0 до u1 вдоль неё, на расстоянии off по нормали к ходу от u0 к u1
  * (rightNormal). Кривые — параллелью по всей длине (где надо — несколькими кусками), а не только у концов.
  * Куски — по порядку от u0 к u1, соседние стыкуются концами; куски короче minLen сливаются с соседними.
