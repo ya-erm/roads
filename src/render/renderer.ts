@@ -80,6 +80,7 @@ import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
 import { type Hiders, TreeCover } from './treeCover';
 import { carLayers, railSegLayer } from './trainLayer';
 import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
+import { BUY_DOT_PX } from '../input/buyDrop';
 
 /** Дорожки кварталов города в его записи кэша карты — под этим номером (id домов и парков — другие). */
 const WALKS_KEY = -1e9;
@@ -220,6 +221,18 @@ export interface ToolOverlay {
    * черта городов, кольцо вреда, пунктиры к партнёрам; месторождения этого вида — ярче.
    */
   industry?: { kind: IndustryKind | null; plan: IndustryPlan | null } | null;
+  /**
+   * Покупку из карточки маршрута тянут на карту: остановки линии — кружками с номерами цвета линии (hot — куда
+   * отпустится), пары остановок — пунктиром через улицу (бросок на любую половину); у курсора — значок машины и
+   * номер остановки target (мимо — null).
+   */
+  buyDrop?: {
+    color: string;
+    kind: 'truck' | 'bus' | 'freight' | 'passenger';
+    spots: { at: Vec; n: number; hot: boolean }[];
+    pairs: [Vec, Vec][];
+    target: number | null;
+  } | null;
 }
 
 /** Радиус метки полосы: по ширине полосы, но не меньше нескольких пикселей — чтобы попасть и издалека. */
@@ -776,6 +789,7 @@ export class Renderer {
     this.drawStationBadges(game, view, o.selection?.type === 'station' ? o.selection.id : null);
     this.drawWarningMarks(game, view);
     this.drawFloaters(game);
+    if (o.buyDrop) this.drawBuyDrop(o.buyDrop, o.hover);
     if (o.label && o.hover) this.drawTooltip(o.hover, o.label.text, o.label.ok, o.label.warn);
     if (o.brush) this.drawBrush(o.brush);
     if (o.speedmap) this.drawSpeedLegend();
@@ -5087,6 +5101,87 @@ export class Renderer {
     if (shape === 'square') ctx.rect(p.x - 4 / z, p.y - 4 / z, 8 / z, 8 / z);
     else ctx.arc(p.x, p.y, (shape === 'ring' ? 8 : 5) / z, 0, Math.PI * 2);
     ctx.stroke();
+  }
+
+  /**
+   * Тянут покупку на карту (ToolOverlay.buyDrop): у остановок линии — кружки с номерами, как в списке остановок;
+   * куда отпустится — залит цветом линии и пульсирует. У курсора — значок машины, над остановкой — со стрелкой
+   * отправления и номером, как над строкой списка.
+   */
+  private drawBuyDrop(d: NonNullable<ToolOverlay['buyDrop']>, cursor: Vec | null): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    for (const [a, b] of d.pairs) {
+      this.drawPairLink(a, b, d.color);
+      this.dropDot(b, null, d.color, false, 5);
+    }
+    const r = BUY_DOT_PX;
+    for (const s of d.spots) if (!s.hot) this.dropDot(s.at, s.n, d.color, false, r);
+    for (const s of d.spots) {
+      if (!s.hot) continue;
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 200);
+      ctx.strokeStyle = d.color;
+      ctx.lineWidth = 3 / z;
+      ctx.beginPath();
+      ctx.arc(s.at.x, s.at.y, (r + 6 + pulse * 5) / z, 0, Math.PI * 2);
+      ctx.stroke();
+      this.dropDot(s.at, s.n, d.color, true, r + 2);
+    }
+    if (!cursor) return;
+    // Значок у курсора — правее и ниже острия, чтобы не прятался под ним и под картинкой перетаскивания.
+    const c = this.camera.toScreen(cursor);
+    const at = (dx: number, dy: number) => this.camera.toWorld(c.x + dx, c.y + dy);
+    // Мимо остановок — бледный значок без номера: отпустить здесь нельзя.
+    const alpha = d.target === null ? 0.6 : 1;
+    ctx.save();
+    ctx.translate(cursor.x, cursor.y);
+    ctx.scale(1 / z, 1 / z);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(255,255,255,0.96)';
+    ctx.strokeStyle = d.color;
+    ctx.lineWidth = 2;
+    rr(ctx, 16, 12, d.target === null ? 40 : 72, 28, 9);
+    ctx.fill();
+    ctx.stroke();
+    if (d.target !== null) {
+      ctx.fillStyle = d.color;
+      ctx.beginPath();
+      ctx.moveTo(51, 21);
+      ctx.lineTo(59, 26);
+      ctx.lineTo(51, 31);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    this.markGlyph({ pos: at(36, 26), dir: { x: 1, y: 0 }, r: 14 / z, cargo: null, kind: d.kind, color: d.color }, 14 / z);
+    ctx.restore();
+    if (d.target !== null) this.dropDot(at(73, 26), d.target, d.color, true, 10);
+  }
+
+  /** Кружок остановки экранного радиуса r пикселей с номером n: hot — залит цветом линии, иначе белый с обводкой. */
+  private dropDot(at: Vec, n: number | null, color: string, hot: boolean, r: number): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    ctx.save();
+    ctx.translate(at.x, at.y);
+    ctx.scale(1 / z, 1 / z);
+    ctx.fillStyle = hot ? color : '#fff';
+    ctx.strokeStyle = hot ? '#fff' : color;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (n !== null) {
+      ctx.fillStyle = hot ? '#fff' : color;
+      ctx.font = `800 ${n > 9 ? Math.round(r * 0.95) : Math.round(r * 1.15)}px system-ui, -apple-system, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(n), 0, 1);
+    }
+    ctx.restore();
   }
 
   private drawTooltip(at: Vec, text: string, ok: boolean, warn = false): void {

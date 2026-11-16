@@ -174,6 +174,7 @@ import { WALK_BAN_TEXT } from '../lanes/crosswalk';
 import { walkSignSvg } from '../render/walkSign';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import { biomeRowHtml, newGameDraft, type NewGameFrom, nextScenarioSettings, rulesHtml, withSeed } from './newGame';
+import { edgeScrollStep } from './edgeScroll';
 
 /** Управление партией: сохранение и новая игра. */
 export interface HudSession {
@@ -470,8 +471,6 @@ export class Hud {
   private renamingProject: number | null = null;
   /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
   private dragLine: number | null = null;
-  /** Покупку из карточки маршрута тянут на остановку: какую модель и на какую линию (см. bindBuyDrag). */
-  private dragBuy: { line: number; model: ModelId } | null = null;
   /** Черновик параметров нового мира; биом в нём — по seed или выбранный игроком (см. withSeed). */
   private draft: WorldSettings = withSeed({ ...NEW_GAME_SETTINGS, relief: 'hills' }, DEFAULT_SETTINGS.seed);
   /** Последний выбор сценария на экране новой игры: возвращается, когда снова выбирают «Сценарий». */
@@ -939,18 +938,54 @@ export class Hud {
       this.controller.endLimitDrag();
     });
     this.bindBuyDrag(side);
+    this.bindEdgeScroll(side);
   }
 
   /**
-   * Карточку покупки в карточке маршрута можно перетащить на остановку в списке: машина начнёт работу
-   * с неё, сразу. Пока тянем — силуэт машины под курсором, остановки маршрута обведены, а над той,
-   * куда отпустится, — тот же силуэт со стрелкой отправления.
+   * Тянут что-то из боковой панели (покупку, линию в папку): у верхнего и нижнего края панели (и чуть за ним) она
+   * прокручивается сама — к остановкам и строкам, что ушли за край (edgeScrollStep). Курсор стоит — едет дальше:
+   * шаг по кадрам, а не по dragover.
+   */
+  private bindEdgeScroll(side: HTMLElement): void {
+    let active = false;
+    let y: number | null = null;
+    let raf = 0;
+    const tick = () => {
+      raf = 0;
+      if (!active || y === null) return;
+      const r = side.getBoundingClientRect();
+      const step = edgeScrollStep(y, r.top, r.bottom);
+      const before = side.scrollTop;
+      if (step) side.scrollTop += step;
+      if (side.scrollTop !== before) raf = requestAnimationFrame(tick);
+    };
+    side.addEventListener('dragstart', () => (active = true));
+    document.addEventListener('dragover', (e) => {
+      if (!active) return;
+      const r = side.getBoundingClientRect();
+      y = e.clientX >= r.left && e.clientX <= r.right ? e.clientY : null;
+      if (y !== null && !raf) raf = requestAnimationFrame(tick);
+    });
+    side.addEventListener('dragend', () => {
+      active = false;
+      y = null;
+      cancelAnimationFrame(raf);
+      raf = 0;
+    });
+  }
+
+  /**
+   * Карточку покупки в карточке маршрута можно перетащить на остановку в списке или на карте (Controller.dragBuy):
+   * машина начнёт работу с неё, сразу. Пока тянем — силуэт машины под курсором, остановки маршрута обведены
+   * (на карте — кружки с номерами), а над той, куда отпустится, — тот же силуэт со стрелкой отправления.
    */
   private bindBuyDrag(side: HTMLElement): void {
     let mark: HTMLElement | null = null;
+    const drag = () => this.controller.dragBuy;
     const stopOf = (e: DragEvent) => {
       const row = (e.target as HTMLElement).closest<HTMLElement>('.route .stop[data-i]');
-      return row && this.dragBuy && Number(row.dataset.line) === this.dragBuy.line ? row : null;
+      const d = drag();
+      return row && d && Number(row.dataset.line) === d.line ? row : null;
     };
     const clear = () => {
       side.querySelectorAll('.buy-over').forEach((el) => el.classList.remove('buy-over'));
@@ -961,7 +996,7 @@ export class Hud {
       const line = card && this.game().lines.get(Number(card.dataset.line));
       if (!card || !line || !e.dataTransfer) return;
       const model = card.dataset.dragBuy as ModelId;
-      this.dragBuy = { line: line.id, model };
+      this.controller.startBuyDrag(line.id, model);
       // Панель не перерисовываем, пока тянем (pointerup после перетаскивания не придёт — снимаем в dragend).
       this.pressing = true;
       e.dataTransfer.effectAllowed = 'copy';
@@ -976,7 +1011,7 @@ export class Hud {
     });
     // Подсветка — по dragover (он идёт и над вложенными элементами строки): не над остановкой — снимаем.
     side.addEventListener('dragover', (e) => {
-      if (!this.dragBuy) return;
+      if (!drag()) return;
       const row = stopOf(e);
       if (!row) return clear();
       e.preventDefault();
@@ -987,20 +1022,17 @@ export class Hud {
       if (mark) row.append(mark);
     });
     side.addEventListener('dragleave', (e) => {
-      if (this.dragBuy && !side.contains(e.relatedTarget as Node | null)) clear();
+      if (drag() && !side.contains(e.relatedTarget as Node | null)) clear();
     });
     side.addEventListener('drop', (e) => {
       const row = stopOf(e);
-      if (!row || !this.dragBuy) return;
+      if (!row) return;
       e.preventDefault();
-      const g = this.game();
-      const v = g.buyVehicle(this.dragBuy.line, this.dragBuy.model, false, Number(row.dataset.i));
-      if (!v) g.notify('Не хватает денег');
-      else g.fitAutoRange(v.lineId);
+      this.controller.buyDropped(Number(row.dataset.i));
     });
     side.addEventListener('dragend', () => {
-      if (!this.dragBuy) return;
-      this.dragBuy = null;
+      if (!drag()) return;
+      this.controller.endBuyDrag();
       this.pressing = false;
       clear();
       mark = null;

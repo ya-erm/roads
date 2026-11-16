@@ -64,6 +64,9 @@ import { phaseTurns } from '../ui/phasesUi';
 import { basePlaceText, baseRemoveText } from '../ui/constructionUi';
 import type { IndustryKind } from '../world/cargo';
 import { industryPlanText, industryRemoveText } from '../ui/enterpriseUi';
+import { MODELS, type ModelId } from '../game/transport';
+import { footprintRadius } from '../world/spatial';
+import { BUY_DOT_PX, dropSpots, pickDropStop } from './buyDrop';
 
 export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain' | 'industry';
 
@@ -315,6 +318,11 @@ export class Controller {
   hover: Vec | null = null;
   /** Знак скорости (км/ч), который тянут из панели на дорогу. */
   dragLimit: number | null = null;
+  /**
+   * Покупку из карточки маршрута тянут (Hud.bindBuyDrag): какую модель и на какую линию. На карте остановки линии —
+   * кружками с номерами, отпустили на остановке — машина начинает работу с неё (buyDropped).
+   */
+  dragBuy: { line: number; model: ModelId } | null = null;
   onChange: () => void = () => {};
   /** Esc, когда отменять нечего: открыть меню игры (ставит интерфейс). */
   onMenu: () => void = () => {};
@@ -360,6 +368,16 @@ export class Controller {
     canvas.addEventListener('mouseleave', () => (this.hover = null));
     // Знак скорости, который тянут из панели: над дорогой — предпросмотр, отпустили — ограничение на ней.
     canvas.addEventListener('dragover', (e) => {
+      // Покупку тянут на карту: остановка под курсором подсвечена; мимо остановок отпустить нельзя (drop не придёт).
+      if (this.dragBuy) {
+        this.hover = this.worldAt(e);
+        if (this.buyDropStop(this.hover) !== null) {
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+        }
+        this.onChange();
+        return;
+      }
       if (this.dragLimit === null) return;
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = dropEffectFor(e.dataTransfer.effectAllowed);
@@ -370,8 +388,19 @@ export class Controller {
     });
     canvas.addEventListener('dragleave', () => {
       if (this.dragLimit !== null) this.hover = null;
+      if (this.dragBuy) {
+        this.hover = null;
+        this.onChange();
+      }
     });
     canvas.addEventListener('drop', (e) => {
+      if (this.dragBuy) {
+        const stop = this.buyDropStop(this.worldAt(e));
+        if (stop === null) return;
+        e.preventDefault();
+        this.buyDropped(stop);
+        return;
+      }
       if (this.dragLimit === null) return;
       e.preventDefault();
       const g = this.game();
@@ -1095,6 +1124,75 @@ export class Controller {
   endLimitDrag(): void {
     this.dragLimit = null;
     this.onChange();
+  }
+
+  /** Взяли покупку model из карточки линии line: остановки линии на карте — кружками с номерами. */
+  startBuyDrag(line: number, model: ModelId): void {
+    this.dragBuy = { line, model };
+    this.hover = null;
+    this.onChange();
+  }
+
+  /** Покупку отпустили (на остановке или мимо) — кружки убираем. */
+  endBuyDrag(): void {
+    if (!this.dragBuy) return;
+    this.dragBuy = null;
+    this.hover = null;
+    this.onChange();
+  }
+
+  /** Покупку отпустили на остановке stop (номер в маршруте, в списке или на карте): машина начинает работу с неё. */
+  buyDropped(stop: number): void {
+    const d = this.dragBuy;
+    if (!d) return;
+    const g = this.game();
+    const v = g.buyVehicle(d.line, d.model, false, stop);
+    if (!v) g.notify('Не хватает денег');
+    else g.fitAutoRange(v.lineId);
+  }
+
+  /** Кружки остановок тянутой покупки — экранного размера: читаются при любом масштабе. */
+  private buySpots() {
+    const g = this.game();
+    const line = this.dragBuy && g.lines.get(this.dragBuy.line);
+    if (!line) return [];
+    return dropSpots(line.stops, (id) => g.stations.get(id)?.fp.center, (BUY_DOT_PX * 2.2) / this.camera.zoom);
+  }
+
+  /** На какую остановку линии (номер в маршруте) упадёт тянутая покупка в точке p карты; мимо — null. */
+  private buyDropStop(p: Vec): number | null {
+    const g = this.game();
+    const z = this.camera.zoom;
+    return pickDropStop(this.buySpots(), p, {
+      dot: (BUY_DOT_PX + 3) / z,
+      center: (id) => g.stations.get(id)?.fp.center,
+      // Участок станции и запас на промах — по экрану: издалека станция в несколько пикселей.
+      reach: (id) => {
+        const st = g.stations.get(id);
+        return st ? footprintRadius(st.fp) + 10 / z : 0;
+      },
+      mate: (id) => g.pairOf(g.stations.get(id))?.id,
+    });
+  }
+
+  /** Кружки остановок тянутой покупки, пунктиры пар и какая остановка под курсором — для карты (ToolOverlay.buyDrop). */
+  private buyDropOverlay(): ToolOverlay['buyDrop'] {
+    const g = this.game();
+    const d = this.dragBuy;
+    const line = d && g.lines.get(d.line);
+    if (!d || !line) return null;
+    const m = MODELS[d.model];
+    const kind = m.mode === 'rail' ? (m.carries === 'passengers' ? 'passenger' : 'freight') : m.carries === 'passengers' ? 'bus' : 'truck';
+    const target = this.hover ? this.buyDropStop(this.hover) : null;
+    const pairs: [Vec, Vec][] = [];
+    for (const id of new Set(line.stops)) {
+      const st = g.stations.get(id);
+      const mate = g.pairOf(st);
+      // Обе половины в маршруте — пунктир один.
+      if (st && mate && !(mate.id < id && line.stops.includes(mate.id))) pairs.push([st.fp.center, mate.fp.center]);
+    }
+    const spots = this.buySpots().map((s) => ({ at: s.at, n: s.i + 1, hot: s.i === target }));
+    return { color: line.color, kind, spots, pairs, target: target === null ? null : target + 1 };
   }
 
   /**
@@ -3156,6 +3254,12 @@ export class Controller {
       mainHover: this.mainHover,
       roadTool: this.action === 'road' || this.tool === 'terrain',
     };
+    // Тянут покупку из карточки маршрута: на карте — только куда её можно отпустить, подсказки инструмента не нужны.
+    if (this.dragBuy) {
+      o.roadTool = false;
+      o.buyDrop = this.buyDropOverlay();
+      return o;
+    }
     // Над мостом и тоннелем высота у курсора — и полотна, и земли под или над ним.
     if (o.roadTool && this.hover) o.heightText = this.structureHeightAt(this.hover);
     // Инструмент «Перекрёсток» у выбранного перекрёстка: метки полос для настройки связей.
