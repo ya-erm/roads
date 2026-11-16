@@ -162,14 +162,21 @@ function strokeRecorder() {
   return { ctx: ctx as unknown as CanvasRenderingContext2D, strokes };
 }
 
-/** Где ломаные a и b пересекаются не у своих концов (дальше near от концов обеих) — крест, а не стык. */
+/**
+ * Где ломаные a и b пересекаются не у своих концов (дальше near от концов обеих) — крест, а не стык. Касание почти
+ * вдоль (угол меньше 3°: две кромки у самой вершины пологой «V» лежат в сантиметрах друг от друга) — не крест.
+ */
 function crossings(a: Vec[], b: Vec[], near = 1): Vec[] {
   const ends = [a[0], a[a.length - 1], b[0], b[b.length - 1]];
   const res: Vec[] = [];
   for (let i = 0; i + 1 < a.length; i++) {
     for (let j = 0; j + 1 < b.length; j++) {
       const hit = segmentIntersection(a[i], a[i + 1], b[j], b[j + 1]);
-      if (hit && ends.every((e) => dist(e, hit.point) > near)) res.push(hit.point);
+      if (!hit || !ends.every((e) => dist(e, hit.point) > near)) continue;
+      const u = sub(a[i + 1], a[i]);
+      const w = sub(b[j + 1], b[j]);
+      const sin = Math.abs(u.x * w.y - u.y * w.x) / (Math.hypot(u.x, u.y) * Math.hypot(w.x, w.y));
+      if (sin > Math.sin((3 * Math.PI) / 180)) res.push(hit.point);
     }
   }
   return res;
@@ -244,5 +251,69 @@ describe('Петля клеверного листа: съезд с эстака
         }
       }
     }
+  });
+});
+
+// ---------- Пологий съезд с эстакады (баг-репорт «Мост не отображается при съезде») ----------
+
+/**
+ * Участок из отчёта: шоссе 1+1 с полосой торможения справа спускается с эстакады; в стыке на высоте (уровень 0,4)
+ * с полосы уходит пологий съезд, а шоссе за стыком — короткое полотно (18,5 м) до узла на уровне 0,32 и дальше на
+ * землю. Кромки съезда и шоссе расходятся на 9 м только через ~55 м — уже за коротким полотном.
+ */
+function gentleExit() {
+  const net = new LaneNet();
+  const seam = (pos: P, dir: P, level = 0) => net.addSeam(v(pos), v(dir), level);
+  const road = (a: number, b: number, lanes: LaneSlot[], c: [P, P, P, P], ports: P = [0, 0]) =>
+    net.addCorridor(a, b, { cls: 'highway', lanes, portA: ports[0], portB: ports[1], curve: { p0: v(c[0]), p1: v(c[1]), p2: v(c[2]), p3: v(c[3]) } });
+  const east = seam([120.5, -0.715], [-0.9929, 0.1188], 0.7132);
+  const fork = seam([44.076, 10.778], [-0.9837, 0.1798], 0.3989);
+  const mid = seam([25.853, 14.239], [-0.9812, 0.1931], 0.3234);
+  const west = seam([-49.436, 39.851], [-0.925, 0.3799]);
+  const exitEnd = seam([-74.445, -20.648], [-0.7313, -0.682]);
+  road(east.id, fork.id, [lane(-3.5, -1), lane(3.5, 1), lane(10.5, 1, 17.3)], [[120.5, -0.715], [93.578, 2.507], [69.308, 6.165], [44.076, 10.778]]);
+  const short = road(fork.id, mid.id, [lane(-3.5, -1), lane(3.5, 1)], [[44.076, 10.778], [38.072, 11.875], [32.014, 13.027], [25.853, 14.239]]);
+  road(mid.id, west.id, [lane(-3.5, -1), lane(3.5, 1)], [[25.853, 14.239], [2.463, 18.843], [-21.489, 28.373], [-49.436, 39.851]]);
+  road(fork.id, exitEnd.id, [lane(0, 1)], [[42.188, 0.449], [21.201, 4.286], [-32.837, 18.153], [-74.445, -20.648]], [10.5, 0]);
+  return { net, fork, short };
+}
+
+describe('Пологий съезд с эстакады за коротким полотном', () => {
+  it('островок с носом есть: кромки ведутся и по следующему за стыком полотну, нос — там, где разошлись', () => {
+    const { net, fork, short } = gentleExit();
+    const gores = new LaneRenderer().seamGores(net, fork);
+    expect(gores).toHaveLength(1);
+    expect(gores[0].diverge).toBe(true);
+    // Нос — дальше конца короткого полотна (раньше островок искали только на нём и не находили).
+    expect(gores[0].length).toBeGreaterThan(short.length + 20);
+  });
+
+  it('стенки ограждения съезда и шоссе не перекрещиваются над общим асфальтом, нос обведён стенкой', () => {
+    const { net } = gentleExit();
+    const { ctx, strokes } = strokeRecorder();
+    new LaneRenderer().draw(ctx, net, 1, false, undefined, 1);
+    const walls = strokes.filter((s) => s.style === '#8c877c').map((s) => s.pts);
+    expect(walls.length).toBeGreaterThan(4);
+    for (let i = 0; i < walls.length; i++) for (let j = i + 1; j < walls.length; j++) expect(crossings(walls[i], walls[j])).toEqual([]);
+    // Стенка носа: её концы сходятся с концами стенок полотен — со съездом и с шоссе за коротким полотном.
+    const ends = walls.flatMap((w) => [w[0], w[w.length - 1]]);
+    const nose = walls.find((w) => dist(w[0], w[w.length - 1]) < 12 && w.length >= 10)!;
+    expect(nose).toBeDefined();
+    for (const p of [nose[0], nose[nose.length - 1]]) {
+      const others = ends.filter((q) => q !== nose[0] && q !== nose[nose.length - 1]);
+      expect(Math.min(...others.map((q) => dist(p, q)))).toBeLessThan(0.3);
+    }
+  });
+
+  it('линии кромок расходятся от стыка буквой V — не крест-накрест и не одна по другой', () => {
+    const { net, fork } = gentleExit();
+    const { ctx, strokes } = strokeRecorder();
+    new LaneRenderer().draw(ctx, net, 10, false, undefined, 1);
+    const lines = strokes
+      .filter((s) => s.style === 'rgba(245, 243, 230, 0.85)' && s.width === 1 && s.pts.length > 1)
+      .map((s) => s.pts)
+      .filter((pts) => pts.some((p) => dist(p, fork.pos) < 80));
+    expect(lines.length).toBeGreaterThan(4);
+    for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) expect(crossings(lines[i], lines[j])).toEqual([]);
   });
 });

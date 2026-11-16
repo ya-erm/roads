@@ -2,8 +2,8 @@ import { add, closestOnSegment, cubicBezier, dist, norm, rightNormal, scale, sub
 import { isDirt, LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 import { arrowAt, arrowShape } from './arrowShape';
 import { bridgeLook, deckAlong, nodeDeck } from './deck';
-import { awayAt, awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, plateOutline, pointOff, sFrom, stations } from './geometry';
-import { Corridor, CorridorEnd, LaneNet, LaneNode, LAT_EPS, layerOf } from './model';
+import { awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, plateOutline, pointOff, sFrom, stations } from './geometry';
+import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS, layerOf } from './model';
 import { noseParapet, PARAPET, parapetLine, parapetWidth } from './parapet';
 import { onPrefs, prefOn } from '../ui/prefs';
 import { insidePoly, type JunctionMarks, junctionMarks } from './junctionMarks';
@@ -89,7 +89,7 @@ export interface GoreGeo {
    * Что из контура рисуется линией: нос и кромки, которые полотно не красит само (paintedEdges) — иначе по кромке
    * односторонней петли или магистрали шли бы две линии одна на другой, ярче и толще кромки другого полотна.
    */
-  lines: Vec[];
+  lines: Vec[][];
   /**
    * «Ёлочка»: штрихи (рисуются в клипе по контуру). Вершины — на средней линии островка между кромками, шаг —
    * вдоль неё, плечи — под 60° к её касательной в этой точке: на изогнутом стыке ёлочка идёт по дуге, а не по хорде.
@@ -134,22 +134,90 @@ const HATCH_MIN_W = 2.5;
 type Lift = (c: Corridor, s: number) => Vec;
 const NO_LIFT: Lift = () => ({ x: 0, y: 0 });
 
-/** Кромка полотна у конца e в d м от стыка (без подъёма): sign > 0 — правая по оси полотна, иначе левая; extra — наружу. */
-function facingEdge(e: CorridorEnd, sign: number, d: number, extra: number): Vec {
-  const s = sFrom(e.corridor, e.end, d);
-  const ed = edgesAt(e.corridor, s) ?? [0, 0];
-  return pointOff(e.corridor, s, sign > 0 ? ed[1] + extra : ed[0] - extra);
+/** Кусок цепочки кромки: полотно c от конца end, на расстояниях [d0, d0 + c.length] от стыка островка. */
+interface EdgeRun {
+  c: Corridor;
+  end: End;
+  d0: number;
 }
 
 /**
- * Нос островка между соседними в стыке X (левее) и Y (правее) на стороне side: в скольких метрах от стыка их
- * обращённые друг к другу кромки разошлись на NOSE_GAP (или NOSE_MAX); -1 — так и не разошлись.
+ * Кромка островка от стыка — по цепочке полотен: от конца e и дальше через простые стыки (одно полотно сзади, одно
+ * спереди, кромка продолжается без ступеньки). Пологий съезд расходится с дорогой дольше, чем длится короткое
+ * полотно у стыка (эстакада, разрезанная узлом уровня), — островок и нос ложатся на следующее.
+ * side — кромка справа (1) или слева (−1) от направления «от стыка».
  */
-function noseAt(X: CorridorEnd, Y: CorridorEnd, side: 1 | -1): number {
-  const sx = side * awaySign(X.end);
-  const sy = -side * awaySign(Y.end);
-  const maxD = Math.min(X.corridor.length, Y.corridor.length) * 0.9;
-  for (let d = 2; d <= maxD; d += 2) if (dist(facingEdge(X, sx, d, 0), facingEdge(Y, sy, d, 0)) >= NOSE_GAP || d >= NOSE_MAX) return d;
+class EdgeChain {
+  readonly runs: EdgeRun[];
+  readonly total: number;
+  constructor(
+    net: LaneNet,
+    e: CorridorEnd,
+    readonly side: number,
+  ) {
+    const runs: EdgeRun[] = [{ c: e.corridor, end: e.end, d0: 0 }];
+    let total = e.corridor.length;
+    while (total < NOSE_MAX / 0.9 && runs.length < 8) {
+      const last = runs[runs.length - 1];
+      const far = net.node(last.end === 'a' ? last.c.b : last.c.a);
+      if (far.kind !== 'seam' || net.isDeadEnd(far)) break;
+      const ends = net.ends(far);
+      if (ends.length !== 2) break;
+      const next = ends.find((x) => x.corridor !== last.c);
+      if (!next || runs.some((r) => r.c === next.corridor)) break;
+      // Кромка продолжается тем же краем, без ступеньки (иначе это уже другой стык — развилка, сужение).
+      const run: EdgeRun = { c: next.corridor, end: next.end, d0: total };
+      if (dist(this.edgeOn(last, last.c.length, 0), this.edgeOn(run, 0, 0)) > 0.3) break;
+      runs.push(run);
+      total += next.corridor.length;
+    }
+    this.runs = runs;
+    this.total = total;
+  }
+
+  /** Кусок цепочки и s на нём в d м от стыка (за концом цепочки — последний кусок, s у его дальнего конца). */
+  at(d: number): { run: EdgeRun; s: number } {
+    let run = this.runs[0];
+    for (const r of this.runs) if (d >= r.d0) run = r;
+    return { run, s: sFrom(run.c, run.end, Math.max(0, Math.min(run.c.length, d - run.d0))) };
+  }
+
+  private edgeOn(run: EdgeRun, x: number, extra: number): Vec {
+    const s = sFrom(run.c, run.end, x);
+    const ed = edgesAt(run.c, s) ?? [0, 0];
+    return pointOff(run.c, s, this.side * awaySign(run.end) > 0 ? ed[1] + extra : ed[0] - extra);
+  }
+
+  /** Точка кромки в d м от стыка (без подъёма); extra — наружу от полотна. */
+  edge(d: number, extra = 0): Vec {
+    const { run } = this.at(d);
+    return this.edgeOn(run, Math.max(0, Math.min(run.c.length, d - run.d0)), extra);
+  }
+
+  /** Направление «от стыка» вдоль цепочки в d м от него. */
+  tangent(d: number): Vec {
+    const { run, s } = this.at(d);
+    return scale(run.c.lut.tangentAt(s), awaySign(run.end));
+  }
+}
+
+/** Соседние в стыке полотна с общей кромкой: X левее, Y правее (на стороне side), их обращённые кромки, нос. */
+interface SharedEdge {
+  X: CorridorEnd;
+  Y: CorridorEnd;
+  side: 1 | -1;
+  cx: EdgeChain;
+  cy: EdgeChain;
+  d: number;
+}
+
+/**
+ * Нос островка между цепочками кромок X и Y: в скольких метрах от стыка они разошлись на NOSE_GAP (или NOSE_MAX);
+ * -1 — так и не разошлись.
+ */
+function noseAt(X: EdgeChain, Y: EdgeChain): number {
+  const maxD = Math.min(X.total, Y.total) * 0.9;
+  for (let d = 2; d <= maxD; d += 2) if (dist(X.edge(d), Y.edge(d)) >= NOSE_GAP || d >= NOSE_MAX) return d;
   return -1;
 }
 
@@ -292,6 +360,8 @@ export class LaneRenderer {
   private net: LaneNet | null = null;
   private version = -1;
   private cuts = new Map<number, [number, number]>();
+  /** Где у полотен нет ограждения моста — общая с соседом по стыку кромка до носа островка (bareEdges). */
+  private bare = new Map<number, [[number, number], [number, number]]>();
   private corridorCache = new Map<number, Cached<CorridorGeo>>();
   private nodeCache = new Map<number, Cached<NodeGeo>>();
   private corridors: Cached<CorridorGeo>[] = [];
@@ -577,9 +647,13 @@ export class LaneRenderer {
       const walks = n.walks ? Object.entries(n.walks).map(([k, w]) => `${k}${w.on ? '+' : '-'}`).join() : '';
       sigs.set(n.id, `${n.kind}:${n.level}:${n.deck ?? ''}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}:${corners}:${turns}:${walks}`);
     }
+    // Островки стыков: где у полотен нет ограждения (и через простые стыки дальше — EdgeChain), из каких полотен
+    // островок у каждого стыка — по ним и пересчёт геометрии, даже если полотно не у самого узла.
+    const { bare, chains } = this.bareEdges(net, nodeList);
+    this.bare = bare;
     const corridors: Cached<CorridorGeo>[] = [];
     for (const c of inScope ?? net.corridors.values()) {
-      const key = `${c.rev}|${this.cuts.get(c.id)?.join('/')}|${sigs.get(c.a)}|${sigs.get(c.b)}`;
+      const key = `${c.rev}|${this.cuts.get(c.id)?.join('/')}|${sigs.get(c.a)}|${sigs.get(c.b)}|${bare.get(c.id)?.join(';') ?? ''}`;
       let item = this.corridorCache.get(c.id);
       if (!item || item.key !== key) {
         const geo = this.corridorGeo(net, c);
@@ -602,7 +676,7 @@ export class LaneRenderer {
     for (const id of this.corridorCache.keys()) if (!liveC.has(id)) this.corridorCache.delete(id);
     const nodes: Cached<NodeGeo>[] = [];
     for (const n of nodeList) {
-      const key = sigs.get(n.id)!;
+      const key = `${sigs.get(n.id)!}|${chains.get(n.id) ?? ''}`;
       let item = this.nodeCache.get(n.id);
       if (!item || item.key !== key) {
         let geo: NodeGeo = { gores: [], plate: null, caps: [], shade: { x: 0, y: 0 } };
@@ -632,7 +706,7 @@ export class LaneRenderer {
             geo.plate?.poly ?? [],
             ...(geo.plate?.curbs ?? []),
             ...geo.caps.flatMap((c) => [c.poly, c.arc]),
-            ...geo.gores.flatMap((g) => [g.asphalt, g.nose, g.paint, g.lines, ...g.hatch, [g.start, g.axis]]),
+            ...geo.gores.flatMap((g) => [g.asphalt, g.nose, g.paint, ...g.lines, ...g.hatch, [g.start, g.axis]]),
             ...(geo.marks ? [...geo.marks.islands, ...geo.marks.hatch, ...geo.marks.dashes] : []),
             ...(geo.ruts ?? []),
             ...(geo.walks ?? []).flatMap((w) => [w.cover, ...w.stripes]),
@@ -663,7 +737,7 @@ export class LaneRenderer {
     // Мост и пандус к нему: сколько под полотном высоты в каждой точке — на столько оно поднято на экране.
     const raised = Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
     // Ограждение моста — не по кромке, общей с соседом по стыку: начинается у носа островка, там и точка.
-    const bare = raised ? this.bareEdges(net, c) : null;
+    const bare = raised ? this.bare.get(c.id) : undefined;
     if (bare) for (const [fromA, fromB] of bare) for (const x of [fromA, c.length - fromB]) if (x > s0 && x < s1) ss.push(x);
     ss.sort((x, y) => x - y);
     const memo = new Map<number, ReturnType<typeof bridgeLook>>();
@@ -845,8 +919,8 @@ export class LaneRenderer {
    * Соседние полотна стыка с общей кромкой (между ними островок): с каждой стороны — те, чьи кромки в стыке
    * совпадают; X левее в стыке, Y правее, d — где их кромки разошлись на NOSE_GAP (нос островка, -1 — не разошлись).
    */
-  private sharedEdges(net: LaneNet, n: LaneNode): { X: CorridorEnd; Y: CorridorEnd; side: 1 | -1; d: number }[] {
-    const res: { X: CorridorEnd; Y: CorridorEnd; side: 1 | -1; d: number }[] = [];
+  private sharedEdges(net: LaneNet, n: LaneNode): SharedEdge[] {
+    const res: SharedEdge[] = [];
     for (const side of [1, -1] as const) {
       const list = net
         .ends(n)
@@ -861,7 +935,10 @@ export class LaneRenderer {
         if (Math.abs(list[k].hi - list[k + 1].lo) > LAT_EPS) continue;
         const X = list[k].e;
         const Y = list[k + 1].e;
-        res.push({ X, Y, side, d: noseAt(X, Y, side) });
+        // Обращённые друг к другу кромки: у X — правая по `dir` стыка, у Y — левая; от стыка — side и −side.
+        const cx = new EdgeChain(net, X, side);
+        const cy = new EdgeChain(net, Y, -side);
+        res.push({ X, Y, side, cx, cy, d: noseAt(cx, cy) });
       }
     }
     return res;
@@ -873,73 +950,102 @@ export class LaneRenderer {
    */
   seamGores(net: LaneNet, n: LaneNode, lift: Lift = NO_LIFT): GoreGeo[] {
     const res: GoreGeo[] = [];
-    for (const { X, Y, side, d } of this.sharedEdges(net, n)) {
-      const g = this.goreGeo(net, X, Y, side, d, lift);
-      if (g) res.push(isDirt(X.corridor.cls) && isDirt(Y.corridor.cls) ? { ...g, dirt: true } : g);
+    for (const pair of this.sharedEdges(net, n)) {
+      const g = this.goreGeo(net, pair, lift);
+      if (g) res.push(isDirt(pair.X.corridor.cls) && isDirt(pair.Y.corridor.cls) ? { ...g, dirt: true } : g);
     }
     return res;
   }
 
   /**
-   * Где по кромкам полотна c нет ограждения моста: [левая, правая] × [от конца a, от конца b], м. У конца в стыке
-   * кромка, общая с соседним полотном той же стороны, — внутри асфальта: от стыка до носа островка между ними
+   * Где по кромкам полотен нет ограждения моста: id полотна → [левая, правая] × [от конца a, от конца b], м. Кромка,
+   * общая с соседним полотном той же стороны стыка, — внутри асфальта: от стыка до носа островка между ними
    * сплошное полотно, и стенки обоих легли бы на него крест-накрест. Ограждение начинается у носа (его обводит
-   * стенка островка — GoreGeo.nose).
+   * стенка островка — GoreGeo.nose); короткое полотно у стыка — по цепочке кромки и на следующих (EdgeChain).
+   * chains — какие полотна (с ревизиями) у каждого стыка ушли в его островки: от них зависит его геометрия.
    */
-  bareEdges(net: LaneNet, c: Corridor): [[number, number], [number, number]] {
-    const res: [[number, number], [number, number]] = [
-      [0, 0],
-      [0, 0],
-    ];
-    for (const end of ['a', 'b'] as const) {
-      const n = net.node(c[end]);
-      if (n.kind !== 'seam' || net.isDeadEnd(n)) continue;
-      for (const { X, Y, side, d } of this.sharedEdges(net, n)) {
-        const len = d > 0 ? d : Math.min(X.corridor.length, Y.corridor.length) * 0.9;
-        for (const [e, sign] of [
-          [X, side * awaySign(X.end)],
-          [Y, -side * awaySign(Y.end)],
+  private bareEdges(net: LaneNet, nodes: LaneNode[]): { bare: Map<number, [[number, number], [number, number]]>; chains: Map<number, string> } {
+    const bare = new Map<number, [[number, number], [number, number]]>();
+    const chains = new Map<number, string>();
+    for (const n of nodes) {
+      if (n.kind !== 'seam' || net.isDeadEnd(n) || n.corridors.length < 3) continue;
+      const pairs = this.sharedEdges(net, n);
+      if (!pairs.length) continue;
+      const used: string[] = [];
+      for (const { cx, cy, d } of pairs) {
+        const len = d > 0 ? d : Math.min(cx.total, cy.total) * 0.9;
+        for (const [chain, away] of [
+          [cx, cx.side],
+          [cy, cy.side],
         ] as const) {
-          if (e.corridor !== c || e.end !== end) continue;
-          const k = sign > 0 ? 1 : 0;
-          const at = end === 'a' ? 0 : 1;
-          res[k][at] = Math.max(res[k][at], len);
+          for (const r of chain.runs) {
+            used.push(`${r.c.id}.${r.c.rev}`);
+            if (r.d0 >= len) continue;
+            const k = away * awaySign(r.end) > 0 ? 1 : 0;
+            const at = r.end === 'a' ? 0 : 1;
+            const res = bare.get(r.c.id) ?? [
+              [0, 0],
+              [0, 0],
+            ];
+            res[k][at] = Math.max(res[k][at], Math.min(r.c.length, len - r.d0));
+            bare.set(r.c.id, res);
+          }
         }
       }
+      chains.set(n.id, used.join(','));
     }
-    return res;
+    return { bare, chains };
   }
 
   /**
-   * Островок между X (левее в стыке) и Y (правее) на стороне side: их кромки в стыке совпадают,
-   * дальше расходятся; нос — где разошлись на NOSE_GAP (d1, noseAt).
+   * Островок между X (левее в стыке) и Y (правее) на стороне side: их кромки (по цепочкам cx, cy) в стыке совпадают,
+   * дальше расходятся; нос — где разошлись на NOSE_GAP (d, noseAt).
    */
-  private goreGeo(net: LaneNet, X: CorridorEnd, Y: CorridorEnd, side: 1 | -1, d1: number, lift: Lift): GoreGeo | null {
-    // Обращённые друг к другу кромки: у X — правая по `dir` стыка, у Y — левая. В смещениях полотна:
-    const sx = side * awaySign(X.end);
-    const sy = -side * awaySign(Y.end);
+  private goreGeo(net: LaneNet, { X, side, cx, cy, d: d1 }: SharedEdge, lift: Lift): GoreGeo | null {
     // Точка кромки — поднята, как полотно в этом месте (на пандусе подъём меняется вдоль островка).
-    const edge = (e: CorridorEnd, sign: number, d: number, extra: number): Vec =>
-      add(facingEdge(e, sign, d, extra), lift(e.corridor, sFrom(e.corridor, e.end, d)));
+    const edge = (chain: EdgeChain, d: number, extra: number): Vec => {
+      const { run, s } = chain.at(d);
+      return add(chain.edge(d, extra), lift(run.c, s));
+    };
     if (d1 < 12) return null;
-    const axisAt = (d: number) => norm(add(awayAt(X.corridor, X.end, d), awayAt(Y.corridor, Y.end, d)));
+    const axisAt = (d: number) => norm(add(cx.tangent(d), cy.tangent(d)));
     /** Контур: вдоль кромки X от стыка, «U» носом к стыку, обратно вдоль кромки Y. */
     const outline = (extra: number, end: number) => {
       const steps = Math.max(4, Math.ceil(end / 3));
-      const px = Array.from({ length: steps + 1 }, (_, i) => edge(X, sx, (end * i) / steps, extra));
-      const py = Array.from({ length: steps + 1 }, (_, i) => edge(Y, sy, (end * i) / steps, extra));
+      const ds = Array.from({ length: steps + 1 }, (_, i) => (end * i) / steps);
+      const px = ds.map((d) => edge(cx, d, extra));
+      const py = ds.map((d) => edge(cy, d, extra));
       const e1 = px[px.length - 1];
       const e2 = py[py.length - 1];
       const w = dist(e1, e2);
       // От каждой кромки нос уходит назад вдоль неё самой: по общей оси островка у носа на крутом съезде (кромки
       // там уже под углом) дуга от кромки X загибалась крючком за неё и перечёркивала её.
-      const c1 = sub(e1, scale(awayAt(X.corridor, X.end, end), w * 0.6));
-      const c2 = sub(e2, scale(awayAt(Y.corridor, Y.end, end), w * 0.6));
+      const c1 = sub(e1, scale(cx.tangent(end), w * 0.6));
+      const c2 = sub(e2, scale(cy.tangent(end), w * 0.6));
       const nose: Vec[] = [];
       for (let i = 0; i <= 12; i++) nose.push(cubicBezier(e1, c1, c2, e2, i / 12));
       const back = [...py].reverse();
-      // Линией — нос и кромки, которые полотно не красит само.
-      const lines = [...(paintedEdges(X.corridor) ? [] : px.slice(0, -1)), ...nose, ...(paintedEdges(Y.corridor) ? [] : back.slice(1))];
+      // Линией — нос и кромки, которые полотно не красит само (по цепочке — у каждого куска своё).
+      const own = (chain: EdgeChain, d: number) => paintedEdges(chain.at(d).run.c);
+      const open: { p: Vec; keep: boolean }[] = [
+        ...px.slice(0, -1).map((p, i) => ({ p, keep: !own(cx, ds[i]) })),
+        ...nose.map((p) => ({ p, keep: true })),
+        ...back.slice(1).map((p, i) => ({ p, keep: !own(cy, ds[steps - 1 - i]) })),
+      ];
+      const lines: Vec[][] = [];
+      let cur: Vec[] = [];
+      for (let i = 0; i < open.length; i++) {
+        // Отрезок рисуется, если оба его конца — не на кромке, которую красит само полотно.
+        const seg = i + 1 < open.length && open[i].keep && open[i + 1].keep;
+        if (seg) {
+          if (!cur.length) cur.push(open[i].p);
+          cur.push(open[i + 1].p);
+        } else if (cur.length) {
+          lines.push(cur);
+          cur = [];
+        }
+      }
+      if (cur.length > 1) lines.push(cur);
       return { pts: [...px, ...nose.slice(1, -1), ...back], nose, lines };
     };
     const asphalt = outline(ROAD_MARGIN, d1);
@@ -950,10 +1056,10 @@ export class LaneRenderer {
       .reduce((a, b) => (net.laneAtSeam(X, b).lat > net.laneAtSeam(X, a).lat ? b : a));
     const forward = net.laneAtSeam(X, facing).forward;
     const diverge = (forward ? 1 : -1) * side > 0;
-    const armLen = dist(edge(X, sx, d1, 0), edge(Y, sy, d1, 0)) + 4;
+    const armLen = dist(edge(cx, d1, 0), edge(cy, d1, 0)) + 4;
     // «Ёлочка» по средней линии островка (посередине между кромками): вершины — с шагом вдоль неё, плечи — под 60° к
     // её касательной в этой точке; за стыком и за носом линия продолжается по касательной (там штрихи срежет контур).
-    const mid = (d: number) => scale(add(edge(X, sx, d, 0), edge(Y, sy, d, 0)), 0.5);
+    const mid = (d: number) => scale(add(edge(cx, d, 0), edge(cy, d, 0)), 0.5);
     const back = diverge ? 1 : -1;
     const hatch: Vec[][] = [];
     for (let t = -4; t <= d1 + 8; t += 5) {
@@ -963,7 +1069,7 @@ export class LaneRenderer {
       // Вершина у самого носа или за ним: плечи легли бы на контур носа или пересекли соседние галочки — «крест»;
       // там, где островок уже HATCH_MIN_W, от галочки остаётся излом поперёк линий контура.
       if (t > 0 && (!insidePoly(apex, paint.pts) || nearLine(apex, paint.nose, HATCH_NOSE_CLEAR))) continue;
-      if (t > 0 && dist(edge(X, sx, d, 0), edge(Y, sy, d, 0)) < HATCH_MIN_W) continue;
+      if (t > 0 && dist(edge(cx, d, 0), edge(cy, d, 0)) < HATCH_MIN_W) continue;
       const v = rightNormal(tan);
       for (const k of [1, -1]) hatch.push([apex, add(apex, scale(add(scale(tan, back * 0.5), scale(v, k * 0.87)), armLen))]);
     }
@@ -974,7 +1080,7 @@ export class LaneRenderer {
       lines: paint.lines,
       hatch,
       // Точка стыка, где кромки X и Y совпадают.
-      start: add(net.portPos(X.node, net.laneAtSeam(X, facing).lat + LANE_W / 2), lift(X.corridor, sFrom(X.corridor, X.end, 0))),
+      start: add(net.portPos(X.node, net.laneAtSeam(X, facing).lat + LANE_W / 2), lift(X.corridor, cx.at(0).s)),
       axis: axisAt(0),
       armLen,
       length: d1,
@@ -1061,7 +1167,7 @@ export class LaneRenderer {
     ctx.restore();
     ctx.strokeStyle = C.dash;
     ctx.lineWidth = 1;
-    this.stroke(ctx, g.lines);
+    for (const pts of g.lines) this.stroke(ctx, pts);
   }
 
   /**
