@@ -53,6 +53,7 @@ import { onOldAxis } from '../game/roadbuild';
 import { mergeEdit, mergeProblem, splitEdit, splitProblem } from '../lanes/nodeEdit';
 import type { CornerHandle } from '../lanes/corners';
 import { corridorHalf } from '../world/worldgen';
+import { PARK_INFO } from '../world/parkPick';
 import { corridorCurveSigns, freshSignCorridors, staleSignCorridors } from '../game/roadProject';
 import { type DrawSettings, type ProjectTools, sharedRoadProject } from './projecttools';
 import { RailTools } from './railtools';
@@ -2241,6 +2242,9 @@ export class Controller {
     // Свободное месторождение — по пятну или значку над ним: что за сырьё и что на нём строить.
     const dep = g.enterprises.depositAt(p, 12 / this.camera.zoom);
     if (dep) return { type: 'deposit', id: dep.id };
+    // Парк, сквер, площадь у ратуши, набережная — после зданий и всего выше; дорога поверх парка — не парк (Game.parkAt).
+    const park = g.parkAt(p);
+    if (park) return { type: 'park', id: park.park.id };
     const town = g.townAt(p);
     if (town) return { type: 'town', id: town.id };
     return null;
@@ -3963,6 +3967,7 @@ export class Controller {
           break;
         }
         const st = g.structureAt(p);
+        const park = st ? null : g.parkAt(p);
         if (st?.type === 'station') o.label = { text: st.name, ok: true };
         else if (st?.type === 'warehouse') o.label = { text: `Склад: ${g.stations.get(st.stationId)?.name ?? ''}`, ok: true };
         else if (st?.type === 'base') o.label = { text: `База «${g.baseName(st.id)}» · 🚚 ${g.construction.crews.of(st.id).length}`, ok: true };
@@ -3971,6 +3976,10 @@ export class Controller {
         else if (st?.type === 'building') {
           const t = g.townOf(st);
           if (t) o.label = { text: t.name, ok: true };
+        } else if (park) {
+          // Парк под курсором (не под дорогой — над ней подпись скорости ниже): что это и чей.
+          const info = PARK_INFO[park.park.kind];
+          o.label = { text: `${info.icon} ${info.name} · ${park.town.name}`, ok: true };
         }
         // Карта скоростей включена: дорога или путь под курсором — скорость подписью у курсора, как высота.
         else if (this.speedmap) o.speedText = speedText(mapSpeedsUnder(g.net, p, speedsUnder(g.roads.graph, (lane) => g.traffic.profile(lane), p)));

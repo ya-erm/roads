@@ -90,6 +90,8 @@ export type Selection =
   | { type: 'deposit'; id: number }
   | { type: 'town'; id: number }
   | { type: 'building'; id: number }
+  /** Парк, сквер, площадь у ратуши, сквер с памятником или набережная города (Town.parks) — по TownPark.id. */
+  | { type: 'park'; id: number }
   /** Машина жителя — по её id в симуляции. */
   | { type: 'vehicle'; simId: number }
   /** Машина или поезд компании: выбор сохраняется на остановках и после отправления. */
@@ -3773,6 +3775,11 @@ export class Renderer {
     if (o.selection?.type === 'building') {
       const b = game.buildingById(o.selection.id);
       if (b) this.drawFootprint({ ...b.fp, w: b.fp.w + 6, h: b.fp.h + 6 }, 'rgba(47,128,237,0.12)', '#2f80ed', 2.5 / this.camera.zoom);
+    }
+    if (o.selection?.type === 'park') {
+      // Парк — тот же контур, что у выбранного здания, но заливка слабее: зелень под ней видна.
+      const fp = game.parkById(o.selection.id)?.fp;
+      if (fp) this.drawFootprint({ ...fp, w: fp.w + 4, h: fp.h + 4 }, 'rgba(47,128,237,0.07)', '#2f80ed', 2.5 / this.camera.zoom);
     }
     if (o.template) {
       // Предпросмотр развязки: все дороги и съезды полупрозрачной полосой.

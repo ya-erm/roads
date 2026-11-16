@@ -394,6 +394,43 @@ function layoutOf(p: TownPark): Layout {
   return layout;
 }
 
+/** Что есть в парке — по той же раскладке, что рисуется на карте (карточка парка, ui/parkCard.ts). */
+export interface ParkContents {
+  fountains: number;
+  ponds: number;
+  /** Памятники и бюсты на постаменте. */
+  statues: number;
+  /** Обелиск с вечным огнём (сквер с памятником). */
+  obelisk: boolean;
+  playgrounds: number;
+  beds: number;
+  trees: number;
+  benches: number;
+  lamps: number;
+  /** Прогулочная полоса с парапетом у воды (набережная). */
+  promenade: boolean;
+  /** Весь участок мощёный (площадь). */
+  paved: boolean;
+}
+
+export function parkContents(p: TownPark): ParkContents {
+  const L = layoutOf(p);
+  return {
+    fountains: L.fountains.length,
+    ponds: L.ponds.length,
+    statues: L.statues.length,
+    obelisk: !!L.obelisk,
+    playgrounds: L.playgrounds.length,
+    beds: L.beds.length,
+    trees: L.trees.length,
+    benches: L.benches.length,
+    // Фонари пока не рисуются (LAMPS_ON) — и в карточке их нет.
+    lamps: LAMPS_ON ? L.lamps.length : 0,
+    promenade: L.promenade,
+    paved: L.paved,
+  };
+}
+
 /**
  * Входы парка или сквера: концы его дорожек у края участка — точка в мире и направление наружу (по нормали к ближней
  * стороне). От них дорожки ведут к тротуару ближней улицы (render/townWalks.ts). У площади и набережной входов нет —

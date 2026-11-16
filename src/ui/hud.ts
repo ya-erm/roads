@@ -161,6 +161,7 @@ import { basePriceHtml, baseSvg, buildModeRowHtml, km as distText } from './cons
 import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
+import { parkCardHtml } from './parkCard';
 import { crewCardHtml } from './crewCard';
 import { workTrainCardHtml } from './workTrainCard';
 import { carTripHtml } from './carTrip';
@@ -1337,6 +1338,11 @@ export class Hud {
       case 'deposit-show': {
         const dep = g.enterprises.deposit(Number(d.id));
         if (dep) this.controller.showPlace(dep.center, 120);
+        break;
+      }
+      case 'park-show': {
+        const park = g.parkById(Number(d.id));
+        if (park) this.controller.showPlace(park.fp.center, Math.max(park.fp.w, park.fp.h) + 60);
         break;
       }
       case 'dep-build': {
@@ -3313,6 +3319,7 @@ export class Hud {
     if (sel.type === 'base') return baseCardHtml(g, sel.id, this.renamingBase === sel.id, this.confirmRemoveBase === sel.id);
     if (sel.type === 'crew') return crewCardHtml(g, sel.id, { following: this.controller.following, picking: this.controller.sendingCrew === sel.id });
     if (sel.type === 'workTrain') return workTrainCardHtml(g, sel.id, { following: this.controller.following });
+    if (sel.type === 'park') return parkCardHtml(g, sel.id);
     if (sel.type === 'deposit') {
       const d = g.enterprises.deposit(sel.id);
       const partners = d && d.used === undefined ? this.partnersHtml(g.partners(g.enterprises.depositProbe(d), 3)) : '';

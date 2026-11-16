@@ -68,6 +68,7 @@ import {
   WorldContext,
 } from '../world/worldgen';
 import { nearPark, placeParks } from '../world/townParks';
+import { type ParkEntry, ParkIndex } from '../world/parkPick';
 import { residentsOf, SETTLE_RULE, townTier, zoneTown } from '../world/townForms';
 import { START_ROADS } from '../world/startRoads';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
@@ -9191,6 +9192,30 @@ export class Game implements BuildContext {
   townAt(p: Vec): Town | null {
     for (const t of this.towns) if (dist(t.center, p) < t.radius) return t;
     return null;
+  }
+
+  /** Сетка парков для выбора мышью (world/parkPick.ts): пересобирается, только когда у городов сменились парки. */
+  private readonly parkIndex = new ParkIndex();
+
+  /**
+   * Парк, сквер, площадь или набережная под курсором — для «Выбора». Дорога или путь поверх парка (полотно игрока
+   * ложится поверх зелени) — не парк: клик по ним парк не выбирает. Здания, станции и прочее проверяет вызывающий
+   * раньше (structureAt) — они главнее.
+   */
+  parkAt(p: Vec): ParkEntry | null {
+    const hit = this.parkIndex.at(this.towns, p);
+    if (!hit) return null;
+    for (const c of this.roads.net.corridorsNear(p, 40)) {
+      const q = c.lut.closest(p);
+      if (q.d < halfAtS(c, q.s)) return null;
+    }
+    for (const s of this.net.segmentsNear(p, 20)) if (s.lut.closest(p).d < halfWidth(s.spec)) return null;
+    return hit;
+  }
+
+  /** Парк по id (TownPark.id): для карточки и обводки выбранного. */
+  parkById(id: number): ParkEntry | null {
+    return this.parkIndex.get(this.towns, id);
   }
 
   vehicleAt(p: Vec): { sim: Vehicle; fleet?: FleetVehicle } | null {

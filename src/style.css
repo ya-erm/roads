@@ -7656,6 +7656,38 @@ span.ind-chip {
   letter-spacing: 1px;
 }
 
+/* Карточка парка, сквера, площади (ui/parkCard.ts): что внутри и чем это игроку — значками. */
+.park-card .pc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.park-card .park-items .pc-chip {
+  background: #eef6e8;
+  font-size: 15px;
+}
+
+.park-card .park-items .pc-chip b {
+  font-size: 12px;
+}
+
+.park-card .park-uses {
+  padding-top: 8px;
+  border-top: 1px dashed #e3e7ec;
+}
+
+.park-card .park-use {
+  font-size: 15px;
+}
+
+.park-card .park-use i {
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
 /* Карточка месторождения (enterpriseUi.depositCardHtml). */
 .dep-card .pc-chip {
   display: inline-flex;
