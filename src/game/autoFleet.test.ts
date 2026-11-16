@@ -159,9 +159,12 @@ describe('Авто-парк и равномерный выпуск', { timeout: 
 
   it('минимум 0: авто-парк убирает последнюю машину, пока она не нужна, и возвращает, когда появляется груз', () => {
     const { game, line } = farmRoute();
-    // Пустой линии по умолчанию — от одной машины: включённый авто-парк сразу её покупает.
+    // Пустой линии по умолчанию — от нуля: включённый авто-парк сразу ничего не покупает.
     game.setLineAuto(line.id, { on: true });
-    expect(line.auto!.min).toBe(1);
+    expect(line.auto).toMatchObject({ min: 0, max: 10 });
+    expect(line.vehicles).toHaveLength(0);
+    // Минимум 1 — докупает сразу.
+    game.setLineAuto(line.id, { min: 1 });
     expect(line.vehicles).toHaveLength(1);
     // Минимум опускается до 0, но не ниже; максимум — не ниже 1.
     game.setLineAuto(line.id, { min: -1 });

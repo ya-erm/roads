@@ -4815,9 +4815,10 @@ export class Game implements BuildContext {
   // ---------- Авто-парк ----------
 
   /**
-   * Настройки авто-парка линии. Впервые — от нынешнего числа машин (пустой линии — от одной) до 10 (машин
-   * больше — до их числа). Минимум можно опустить до 0: тогда ненужные машины уйдут все, а вернутся, когда
-   * появится спрос (idleDemand). Включённый сразу докупает до минимума (если хватает денег) и продаёт сверх максимума.
+   * Настройки авто-парка линии. Впервые — от нынешнего числа машин (пустой линии — от нуля: первая машина
+   * придёт, когда появится спрос) до 10 (машин больше — до их числа). Минимум можно опустить до 0: тогда ненужные
+   * машины уйдут все, а вернутся, когда появится спрос (idleDemand). Включённый сразу докупает до минимума (если
+   * хватает денег) и продаёт сверх максимума.
    */
   setLineAuto(id: number, patch: Partial<Pick<LineAuto, 'on' | 'min' | 'max' | 'renew'>>): void {
     const line = this.lines.get(id);
@@ -4826,7 +4827,7 @@ export class Game implements BuildContext {
     const top = AUTO_FLEET.maxVehicles;
     const auto = (line.auto ??= {
       on: false,
-      min: Math.max(1, Math.min(top, n)),
+      min: Math.min(top, n),
       max: Math.min(top, Math.max(AUTO_FLEET.defaultMax, n)),
     });
     if (patch.on !== undefined) auto.on = patch.on;
