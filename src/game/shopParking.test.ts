@@ -121,9 +121,12 @@ describe('Стоянки магазинов', { timeout: 120_000 }, () => {
     for (let i = 0; i < 30 * 30 && game.garages.moveOf(spot.key); i++) step(game);
     expect(game.garages.moveOf(spot.key)).toBeNull();
     expect(game.garages.isBusy(stallKey(b.id, car.k))).toBe(false);
-    // Тронулась по полосе носом по ходу.
+    // Тронулась по полосе носом по ходу — направо или налево, через встречку (домой может быть ближе туда).
     const out = game.traffic.vehicles.get(joined!)!;
-    expect(dot(out.dir, visit.slot.f)).toBeGreaterThan(0.95);
+    const link = game.roads.graph.lanes.get(out.lane)!.link;
+    const via = [game.garages.slotOf(spot), game.garages.leftSlotOf(spot)].find((s) => s?.link.id === link)!;
+    expect(via).toBeDefined();
+    expect(dot(out.dir, via.f)).toBeGreaterThan(0.95);
   });
 
   it('встаёт между двумя стоящими, не задевая их: в заезде и на месте кузов — в своём месте', () => {

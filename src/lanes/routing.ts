@@ -22,6 +22,19 @@ export function transitionCost(g: LaneGraph, from: GLink, to: GLink): number {
   return best;
 }
 
+/** Время пути по связям route, с (как его считает findLaneRoute): связи целиком и переходы между ними. */
+export function routeCost(g: LaneGraph, route: number[]): number {
+  let cost = 0;
+  let prev: GLink | undefined;
+  for (const id of route) {
+    const link = g.links.get(id);
+    if (!link) return Infinity;
+    cost += linkCost(link) + (prev ? transitionCost(g, prev, link) : 0);
+    prev = link;
+  }
+  return cost;
+}
+
 /**
  * A* по связям: список id связей от одной из стартовых до узла goal. endLink — путь кончается этой связью (машина
  * жителя заезжает в гараж посреди улицы, Vehicle.endLink); такой связи в графе нет — как без неё, до узла.

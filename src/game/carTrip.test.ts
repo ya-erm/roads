@@ -18,9 +18,10 @@ describe('Поездка машины жителя и спецмашины', { t
     for (const v of cars) {
       const trip = game.tripOf(v.id)!;
       // Едут из жилого дома (или со стоянки магазина — домой) — туда, где цель маршрута; к месту у дома или на
-      // стоянку — к концу связи у него (garages.homingOf).
+      // стоянку — к концу связи у него (garages.homingOf), и на манёвре у места (выезжает со двора к стоянке, ждёт
+      // просвета, чтобы свернуть налево, — garages.aheadOf).
       expect(trip.from.kind === 'res' || (trip.to.kind === 'res' && !!game.shops.lotOf(trip.from))).toBe(true);
-      if (game.garages.homingOf(v.id) === undefined) expect(v.targetNode).toBe(trip.to.anchor);
+      if (game.garages.homingOf(v.id) === undefined && !game.garages.aheadOf(v.id)) expect(v.targetNode).toBe(trip.to.anchor);
       expect(game.towns.some((t) => t.id === trip.from.townId)).toBe(true);
     }
     const v = cars.find((c) => game.vehicleAhead(c.id) && game.traffic.routeLeft(c) > 100 && game.garages.homingOf(c.id) === undefined)!;

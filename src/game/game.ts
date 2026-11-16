@@ -7174,27 +7174,30 @@ export class Game implements BuildContext {
     const visit = destTown && garage?.kind !== 'back' ? this.shops.visit(destTown, to) : null;
     if (garage?.kind === 'out') {
       // Машиной в потоке (и в счёте citizenCars) станет, когда встанет на полосу (GarageHost.own); едет к магазину —
-      // с полосы у дома сразу к стоянке.
+      // с полосы у дома сразу к стоянке (поворотом направо или налево — что ближе, решится на полосе).
       const trip = { from: garage.home.b, to: dest };
-      if (visit) this.garages.leave(garage.home, town, visit.slot.link.toNode!, trip, { endLink: visit.slot.link.id, then: (sim) => this.shops.start(sim, visit) });
+      if (visit)
+        this.garages.leave(garage.home, town, visit.slot.link.toNode!, trip, { endLink: visit.slot.link.id, to: visit.planned, then: (sim) => this.shops.start(sim, visit) });
       else this.garages.leave(garage.home, town, dest.anchor, trip);
       return;
     }
+    // К дому и к стоянке — с поворотом направо или налево через встречку, что ближе (Garages.wayHome).
     if (garage?.kind === 'back') {
-      const way = this.garages.routeHome(origin.anchor, garage.slot);
-      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color: garage.home.color, targetNode: garage.slot.link.toNode!, route: way });
+      const way = this.garages.wayHome(origin.anchor, garage.home);
+      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color: garage.home.color, targetNode: way.slot.link.toNode!, route: way.route });
       if (sim) {
         this.owners.set(sim.id, { type: 'citizen', trip: { from: origin, to: garage.home.b } });
-        this.garages.homeward(sim, garage.home, town, garage.slot);
+        this.garages.homeward(sim, garage.home, town, way.slot);
         this.citizenCars++;
         return;
       }
     }
     if (visit) {
-      const way = this.garages.routeHome(origin.anchor, visit.slot);
-      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color, targetNode: visit.slot.link.toNode!, route: way });
+      const way = this.garages.wayHome(origin.anchor, visit.planned);
+      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color, targetNode: way.slot.link.toNode!, route: way.route });
       if (sim) {
         this.owners.set(sim.id, { type: 'citizen', trip: { from: origin, to } });
+        visit.slot = way.slot;
         this.shops.start(sim, visit);
         this.citizenCars++;
         return;

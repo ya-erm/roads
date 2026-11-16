@@ -310,6 +310,12 @@ export class LaneTraffic {
    */
   walks = new Map<number, Barrier[]>();
   /**
+   * Машина жителя пересекает встречку, сворачивая налево к дому или стоянке (src/game/garages.ts): закрытая стоп-линия
+   * встречного направления перед местом, где её кузов над встречными полосами (Barrier.flow, stop 0). Ставят и снимают
+   * гаражи, по одной на машину.
+   */
+  turnStops = new Map<number, Barrier[]>();
+  /**
    * Стоп-линии перед закрытыми шлагбаумами — на такт (barrierAhead): по связям, по оси полотна. За такт движения
    * шлагбаумы не меняются — их закрывает и открывает ж/д после него (rail.step), а переезды заново ищутся при правке
    * сети, вне такта. null — закрытых нет.
@@ -1151,6 +1157,7 @@ export class LaneTraffic {
     for (const list of this.barriers.values()) for (const b of list) if (b.closed) return true;
     for (const list of this.signals.values()) for (const b of list) if (b.closed) return true;
     for (const list of this.walks.values()) for (const b of list) if (b.closed) return true;
+    for (const list of this.turnStops.values()) for (const b of list) if (b.closed) return true;
     return false;
   }
 
@@ -1174,7 +1181,14 @@ export class LaneTraffic {
     if (!stops) {
       stops = [];
       const link = this.graph.links.get(linkId);
-      const list = link ? [...(this.barriers.get(link.corridor) ?? []), ...(this.signals.get(link.corridor) ?? []), ...(this.walks.get(link.corridor) ?? [])] : [];
+      const list = link
+        ? [
+            ...(this.barriers.get(link.corridor) ?? []),
+            ...(this.signals.get(link.corridor) ?? []),
+            ...(this.walks.get(link.corridor) ?? []),
+            ...(this.turnStops.get(link.corridor) ?? []),
+          ]
+        : [];
       for (const b of list) {
         if (!b.closed || (b.flow !== undefined && b.flow !== link!.flow)) continue;
         const stop = b.s - link!.flow * (b.stop ?? BARRIER_STOP);
@@ -1429,7 +1443,8 @@ export class LaneTraffic {
       for (const l of link.lanes) {
         let v = Infinity;
         // К цели (остановка, пост, дом) — к бордюру: в крайнюю правую полосу, в «кармашек» у остановки, если он есть.
-        if (next === undefined) v = (link.lanes.length - 1 - l.index) * CURB_PULL;
+        // Сворачивает к дому налево, через встречку (Vehicle.endLeft), — в крайнюю левую.
+        if (next === undefined) v = (veh.endLeft ? l.index : link.lanes.length - 1 - l.index) * CURB_PULL;
         else if (k === links.length - 1) v = this.hasTransition(l, next) ? 0 : Infinity;
         else for (const m of this.graph.movesFrom.get(l.id) ?? []) if (m.outLink === next) v = Math.min(v, plan[k + 1].cost.get(m.outLane) ?? Infinity);
         // Автобус держится правее (как и линия маршрута на карте).

@@ -2,12 +2,13 @@ import { hash } from '../core/math';
 import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { GLane, GLink, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
-import { findLaneRoute } from '../lanes/routing';
-import type { LaneTraffic } from '../lanes/traffic';
+import { findLaneRoute, routeCost } from '../lanes/routing';
+import type { Barrier, LaneTraffic } from '../lanes/traffic';
 import { steerBase } from '../sim/body';
 import type { Vehicle, VehicleLook, VehicleSpec } from '../sim/vehicle';
 import type { Town, TownBuilding } from '../world/entities';
 import { drivewayLink, drivewayOf, type Driveway } from '../world/houseAccess';
+import { isTrunk, LANE_W } from '../world/roadTypes';
 
 /**
  * Машины частных домов — в гараже или на площадке у дома: часть поездок жителей начинается там или кончается там
@@ -47,6 +48,28 @@ export const GARAGE_TRIPS = {
    * нет. У остальных машина въезжает в гараж и дома её не видно.
    */
   secondCar: 0.2,
+};
+
+/**
+ * Левый поворот к дому, гаражу, площадке или стоянке через встречку — на улице с движением в обе стороны без
+ * разделителя: 1+1 (грунтовка, улица) и 2+2 (проспект) — из крайней левой полосы. На шоссе и магистрали, на дороге с
+ * разделителем или сплошной посередине и на односторонней — только направо (GarageSlot.cross). Машина встаёт на своей
+ * полосе напротив заезда с левым поворотником и ждёт просвета во встречном потоке: встречному должно хватать места
+ * спокойно остановиться (LaneTraffic.clearToJoin — 66 м на 50 км/ч), пока она пересекает встречку по дуге (~4 с:
+ * встречку на это время закрывает стоп-линия, LaneTraffic.turnStops). Сзади на её полосе ждут — как в жизни. Выезд —
+ * так же: задним ходом через ближнюю полосу в дальнюю, когда просвет в обеих.
+ */
+export const LEFT_TURN = {
+  /** Сколько машина ждёт просвета, чтобы свернуть налево к месту, с: не дождалась — в объезд, к повороту направо. */
+  maxWait: 25,
+  /** Сколько машина у бордюра ждёт просвета в обеих полосах, чтобы выехать налево, с: дальше — выезжает направо. */
+  outWait: 20,
+  /** Надбавка ко времени пути с левым поворотом, с (ожидание просвета): при почти равных путях — направо. */
+  penalty: 4,
+  /** Полос в каждую сторону — не больше стольких (2+2 — из крайней левой). */
+  maxLanes: 2,
+  /** Другая машина пересекает встречку ближе стольких метров по оси — ждёт, пока та проедет. */
+  apart: 30,
 };
 
 /**
@@ -125,6 +148,8 @@ interface Homing {
   reserved: boolean;
   /** Стоянка: свободные сейчас места — какое выбрать, решается, когда машина на полосе у них (нет — проезжает мимо). */
   choices?: () => CarSpot[];
+  /** Свернёт к месту налево, через встречку (Garages.leftSlotOf); нет — направо. */
+  left?: boolean;
 }
 
 /** Где машина встаёт на полосу (выезд) или с неё поворачивает (въезд) — на нынешнем графе. */
@@ -138,6 +163,14 @@ export interface GarageSlot {
   /** Центр машины в mid и ход полосы. */
   pos: Vec;
   f: Vec;
+  /**
+   * Левый поворот (полоса — крайняя левая встречного месту хода): полосы встречного потока, через которые машина
+   * поворачивает к месту (и выезжает задним ходом), и что кузов на них заметает — [от, до] по ходу каждой. Нет —
+   * поворот направо, с ближней к месту полосы.
+   */
+  cross?: { lane: GLane; zone: [number, number] }[];
+  /** Левый поворот: стоп-линия встречного потока на время пересечения — полотно, место на оси и ход встречки. */
+  stop?: { corridor: number; s: number; flow: 1 | -1 };
 }
 
 /** Отрезок пути манёвра: точки центра кузова, касательные, задним ходом ли. */
@@ -150,7 +183,8 @@ interface Leg {
   vmax: number;
 }
 
-type Phase = 'yard' | 'wait' | 'road' | 'pause' | 'home';
+/** cross — въезд налево: стоит на своей полосе с поворотником и ждёт просвета во встречном потоке. */
+type Phase = 'yard' | 'wait' | 'cross' | 'road' | 'pause' | 'home';
 
 /** Машина на манёвре у гаража, площадки или места стоянки. */
 interface Move {
@@ -176,6 +210,15 @@ interface Move {
   endLink?: number;
   then?: (sim: Vehicle) => void;
   trip?: { from: TownBuilding; to: TownBuilding };
+  /** Выезд к месту (стоянке магазина): путь к нему — направо или налево, что быстрее, решается на полосе. */
+  to?: CarSpot;
+  /** Выезд: налево ли (через ближнюю полосу в дальнюю) — решается у бордюра; и с какой полосы поехала. */
+  left?: boolean;
+  via?: GarageSlot;
+  /** Въезд налево: как машина ехала к месту — не дождалась просвета, поедет так же, но к повороту направо. */
+  homing?: Homing;
+  /** Стоп-линия встречки, пока машина её пересекает (LaneTraffic.turnStops). */
+  block?: { corridor: number; b: Barrier };
 }
 
 /** Что игра даёт гаражам. */
@@ -271,6 +314,8 @@ export class Garages {
   private towns = new Map<number, { of: TownBuilding[]; n: number; list: GarageHome[]; byId: Map<number, GarageHome>; box: [number, number, number, number] }>();
   /** Где машина встаёт на полосу — по ключу места, по нынешнему графу (сменился — заново, по мере надобности). */
   private slots = new Map<number, GarageSlot | null>();
+  /** Где машина поворачивает к месту налево (и выезжает налево) — так же, по ключу места. */
+  private lefts = new Map<number, GarageSlot | null>();
   private slotGraph: LaneGraph | null = null;
   /** Машины на манёвре и те, что едут к своему месту (id машины в потоке → место). */
   readonly moves: Move[] = [];
@@ -335,34 +380,70 @@ export class Garages {
    * заезда, не ближе END_ROOM к концам полосы. Нельзя (дорогу снесли, заезд у перекрёстка, полоса дальше 25 м) — null.
    */
   slotOf(home: CarSpot): GarageSlot | null {
+    return this.cachedSlot(home, false);
+  }
+
+  /**
+   * Где машина поворачивает к месту налево, через встречку, и выезжает от него налево (LEFT_TURN): крайняя левая полоса
+   * хода от дома на улице с движением в обе стороны без разделителя, не больше 2+2, не шоссе; место поворота — на
+   * радиус поворота раньше заезда. Нельзя — null (только направо, slotOf).
+   */
+  leftSlotOf(home: CarSpot): GarageSlot | null {
+    return this.cachedSlot(home, true);
+  }
+
+  /** Направо или налево — смотря куда машина едет. */
+  private slotFor(home: CarSpot, left: boolean | undefined): GarageSlot | null {
+    return left ? this.leftSlotOf(home) : this.slotOf(home);
+  }
+
+  private cachedSlot(home: CarSpot, left: boolean): GarageSlot | null {
     const g = this.host.graph;
     if (this.slotGraph !== g) {
       this.slots.clear();
+      this.lefts.clear();
       this.slotGraph = g;
     }
-    let s = this.slots.get(home.key);
+    const cache = left ? this.lefts : this.slots;
+    let s = cache.get(home.key);
     if (s !== undefined) return s;
-    s = this.computeSlot(home, g);
-    this.slots.set(home.key, s);
+    s = this.computeSlot(home, g, left);
+    cache.set(home.key, s);
     return s;
   }
 
-  private computeSlot(home: CarSpot, g: LaneGraph): GarageSlot | null {
+  private computeSlot(home: CarSpot, g: LaneGraph, left: boolean): GarageSlot | null {
     const net = this.host.net;
     const at = drivewayLink(net, home.d);
     const c = at && net.corridors.get(at.corridor);
     if (!at || !c) return null;
     const { point, tangent } = c.lut.frameAt(at.s);
     const lat = dot(sub(home.d.curb, point), rightNormal(tangent));
-    let best: { lane: GLane; link: GLink } | null = null;
+    // Ход со стороны дома (крайняя правая — у его бордюра) и встречный ему.
+    let near: GLink | null = null;
+    let far: GLink | null = null;
+    const curbLane = (l: GLink) => l.lanes[l.lanes.length - 1];
     for (const link of g.corridorLinks(at.corridor)) {
       if (at.s < link.s0 || at.s > link.s1 || link.toNode === null) continue;
-      const lane = link.lanes[link.lanes.length - 1];
-      if (!lane || Math.sign(lane.offset) !== Math.sign(lat) || Math.abs(lane.offset) >= Math.abs(lat)) continue;
-      if (!best || Math.abs(lane.offset) > Math.abs(best.lane.offset)) best = { lane, link };
+      const lane = curbLane(link);
+      if (!lane) continue;
+      if (Math.sign(lane.offset) === Math.sign(lat)) {
+        if (Math.abs(lane.offset) < Math.abs(lat) && (!near || Math.abs(lane.offset) > Math.abs(curbLane(near).offset))) near = link;
+      } else if (!far || Math.abs(lane.offset) < Math.abs(curbLane(far).offset)) far = link;
     }
-    if (!best) return null;
-    const { lane, link } = best;
+    if (!near) return null;
+    let link = near;
+    let lane = curbLane(near);
+    if (left) {
+      if (!far || isTrunk(c.cls) || near.lanes.length > LEFT_TURN.maxLanes || far.lanes.length > LEFT_TURN.maxLanes) return null;
+      lane = far.lanes[0];
+      const inner = near.lanes[0];
+      // Между ходами — разделитель (шире полосы) или сплошная: через них налево не поворачивают.
+      if (Math.abs(lane.offset - inner.offset) > LANE_W + 0.5 || Math.sign(lane.offset) === Math.sign(inner.offset)) return null;
+      const centre = lane.offset < inner.offset ? lane : inner;
+      if (c.lanes[centre.laneIdx]?.solid) return null;
+      link = far;
+    }
     const L = this.host.car.length;
     const W = this.host.car.width;
     const uc = link.flow > 0 ? at.s - link.s0 : link.s1 - at.s;
@@ -376,7 +457,60 @@ export class Garages {
     const zone: [number, number] = [mid - L / 2 - 0.5, uc + lon + W / 2 + 1];
     if (zone[0] < END_ROOM || zone[1] > lane.length - END_ROOM) return null;
     const p = g.lanePose(lane, mid);
-    return { lane, link, mid, zone, pos: p.pos, f: p.dir };
+    const slot: GarageSlot = { lane, link, mid, zone, pos: p.pos, f: p.dir };
+    if (!left) return slot;
+    // Что кузов заметает на встречных полосах, поворачивая к месту (выезжая — тем же путём задом): по точкам дуги —
+    // те, что ближе полуширины полосы и полудиагонали кузова к оси полосы, ± полкузова вдоль неё.
+    const turn = this.inLegs(home, p.pos, p.dir)[0];
+    const reach = LANE_W / 2 + Math.hypot(L, W) / 2;
+    const cross: { lane: GLane; zone: [number, number] }[] = [];
+    let stop = near.flow > 0 ? Infinity : -Infinity;
+    for (const l of near.lanes) {
+      const ul = near.flow > 0 ? at.s - near.s0 : near.s1 - at.s;
+      const o = g.lanePose(l, ul);
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const pt of turn.pts) {
+        const r = sub(pt, o.pos);
+        if (Math.abs(dot(r, rightNormal(o.dir))) > reach) continue;
+        const u = ul + dot(r, o.dir);
+        lo = Math.min(lo, u);
+        hi = Math.max(hi, u);
+      }
+      if (lo > hi) continue;
+      const z: [number, number] = [lo - L / 2 - 0.5, hi + L / 2 + 0.5];
+      // У самого перекрёстка (встречный выезжает из него на заезд) — нельзя.
+      if (z[0] < 2 || z[1] > l.length - 2) return null;
+      cross.push({ lane: l, zone: z });
+      const s = g.axisS(l, z[0] - 1);
+      stop = near.flow > 0 ? Math.min(stop, s) : Math.max(stop, s);
+    }
+    if (!cross.length) return null;
+    return { ...slot, cross, stop: { corridor: c.id, s: stop, flow: near.flow } };
+  }
+
+  /**
+   * Лучший путь к месту spot со связей starts (машина — в u на первой): к повороту направо или налево (через
+   * встречку — с надбавкой LEFT_TURN.penalty), что быстрее; время — без уже пройденного по первой связи и без
+   * остатка последней за местом. Не доехать — null.
+   */
+  wayFrom(starts: GLink[], spot: CarSpot, u = 0): { route: number[]; slot: GarageSlot; cost: number } | null {
+    const g = this.host.graph;
+    let best: { route: number[]; slot: GarageSlot; cost: number } | null = null;
+    for (const slot of [this.slotOf(spot), this.leftSlotOf(spot)]) {
+      if (!slot) continue;
+      const route = findLaneRoute(g, starts, slot.link.toNode!, slot.link.id);
+      if (!route) continue;
+      const first = g.links.get(route[0])!;
+      const cost = routeCost(g, route) - u / first.speed - (slot.lane.length - slot.mid) / slot.link.speed + (slot.cross ? LEFT_TURN.penalty : 0);
+      if (!best || cost < best.cost) best = { route, slot, cost };
+    }
+    return best;
+  }
+
+  /** Путь к месту spot от узла from — направо или налево, что быстрее (wayFrom). Не доехать — null. */
+  wayHome(from: number, spot: CarSpot): { route: number[]; slot: GarageSlot } | null {
+    return this.wayFrom(this.host.graph.outLinks.get(from) ?? [], spot);
   }
 
   /**
@@ -417,6 +551,7 @@ export class Garages {
   /** Геометрия места сменилась (магазин перестроили): где вставать на полосу — заново. */
   forgetSlot(key: number): void {
     this.slots.delete(key);
+    this.lefts.delete(key);
   }
 
   /** Крючки манёвра машины дома: уехала — в разъездах (Town.garageAway), вернулась — дома. */
@@ -443,7 +578,7 @@ export class Garages {
     town: Town,
     target: number,
     trip: { from: TownBuilding; to: TownBuilding },
-    opt: { color?: string; hooks?: MoveHooks; endLink?: number; then?: (sim: Vehicle) => void } = {},
+    opt: { color?: string; hooks?: MoveHooks; endLink?: number; to?: CarSpot; then?: (sim: Vehicle) => void } = {},
   ): void {
     const start = home.parks ? home.spot : home.inside;
     this.busy.add(home.key);
@@ -462,35 +597,57 @@ export class Garages {
       wait: 0,
       target,
       endLink: opt.endLink,
+      to: opt.to,
       trip,
     });
   }
 
-  /** Маршрут к гаражу: от узла from, последней — связь у дома (Vehicle.endLink). Не доехать — null. */
+  /**
+   * Маршрут к гаражу: от узла from, последней — связь у дома (Vehicle.endLink) — с поворотом к нему, как в slot (направо
+   * или налево). Не доехать — null. Какой поворот ближе — wayHome.
+   */
   routeHome(from: number, slot: GarageSlot): number[] | null {
     const g = this.host.graph;
     return findLaneRoute(g, g.outLinks.get(from) ?? [], slot.link.toNode!, slot.link.id);
   }
 
-  /** Машина в потоке sim везёт машину дома домой: маршрут уже к связи у дома (routeHome). */
+  /**
+   * Машина в потоке sim везёт машину дома домой: маршрут уже к связи у дома (routeHome, wayHome) — slot, к повороту
+   * направо или налево (slot.cross).
+   */
   homeward(sim: Vehicle, home: CarSpot, town: Town, slot: GarageSlot): void {
-    sim.endLink = slot.link.id;
-    this.homing.set(sim.id, { spot: home, town, hooks: this.homeHooks(home, town), reserved: true });
+    this.aim(sim, slot);
+    this.homing.set(sim.id, { spot: home, town, hooks: this.homeHooks(home, town), reserved: true, left: !!slot.cross });
     this.busy.add(home.key);
   }
 
   /**
-   * Машина в потоке sim едет на стоянку: маршрут — к связи у места planned (routeHome); какое место из свободных
-   * (choices) занять, решается на полосе у стоянки — нет свободного, проезжает мимо (hooks.missed).
+   * Машина в потоке sim едет на стоянку: маршрут — к связи у места planned (routeHome, wayHome; выехала со двора —
+   * к той, что выбрана там, sim.endLink); какое место из свободных (choices) занять, решается на полосе у стоянки —
+   * нет свободного, проезжает мимо (hooks.missed).
    */
   toStall(sim: Vehicle, planned: CarSpot, town: Town, slot: GarageSlot, hooks: MoveHooks, choices: () => CarSpot[]): void {
-    sim.endLink = slot.link.id;
-    this.homing.set(sim.id, { spot: planned, town, hooks, reserved: false, choices });
+    const left = this.leftSlotOf(planned);
+    const use = left && sim.endLink === left.link.id ? left : slot;
+    this.aim(sim, use);
+    this.homing.set(sim.id, { spot: planned, town, hooks, reserved: false, choices, left: !!use.cross });
   }
 
-  /** Едет ли машина к своему месту и уже встаёт напротив заезда — тогда прижимается к бордюру (events.curbStop). */
+  /** Маршрут машины кончается связью у места: налево — держится левее (Vehicle.endLeft). */
+  private aim(sim: Vehicle, slot: GarageSlot): void {
+    sim.endLink = slot.link.id;
+    if (slot.cross) sim.endLeft = true;
+    else delete sim.endLeft;
+  }
+
+  /**
+   * Едет ли машина к своему месту направо и уже встаёт напротив заезда — тогда прижимается к бордюру
+   * (events.curbStop). Налево — встаёт посреди своей полосы.
+   */
   pulls(sim: Vehicle): boolean {
-    return sim.holdDist !== undefined && this.homing.has(sim.id);
+    if (sim.holdDist === undefined) return false;
+    const h = this.homing.get(sim.id);
+    return !!h && !h.left;
   }
 
   /** Машина в потоке кончила поездку или потерялась (не у места): место её больше не ждёт. */
@@ -520,7 +677,7 @@ export class Garages {
         this.forget(id);
         continue;
       }
-      const slot = this.slotOf(h.spot);
+      const slot = this.slotFor(h.spot, h.left);
       // Дорогу поменяли — связи у места больше нет: едет просто к узлу (её endLink уже снят или не тот).
       if (!slot || sim.endLink !== slot.link.id) {
         this.cancelHoming(sim);
@@ -529,19 +686,19 @@ export class Garages {
       if (sim.holdDist === undefined) {
         const lane = sim.onMovement ? undefined : traffic.currentLane(sim);
         if (!lane || lane.link !== slot.link.id) continue;
-        // Поздно останавливаться — проехала мимо: поездка кончится у узла.
+        // Поздно останавливаться — проехала мимо: поездка кончится у узла (налево — в объезд, к повороту направо).
         const late = (s: GarageSlot) => s.mid + sim.length / 2 - sim.s < (sim.v * sim.v) / (2 * HOLD_BRAKE) + 0.5;
         // Не в крайней полосе (широкая улица) — сначала перестроится к бордюру (на последней связи пути машина сама
-        // держится правее), а остановка (holdAfter) запретила бы ей перестраиваться.
+        // держится правее; налево — левее), а остановка (holdAfter) запретила бы ей перестраиваться.
         if (lane.id !== slot.lane.id) {
-          if (late(slot)) this.cancelHoming(sim);
+          if (late(slot)) this.miss(sim, h);
           continue;
         }
         if (h.choices) {
           // Стоянка: ближнее из свободных мест, до которого ещё успеть остановиться; нет — мимо.
           let best: { spot: CarSpot; slot: GarageSlot } | null = null;
           for (const c of h.choices()) {
-            const s = this.slotOf(c);
+            const s = this.slotFor(c, h.left);
             if (!s || s.lane.id !== slot.lane.id || this.busy.has(c.key) || late(s)) continue;
             if (!best || s.mid < best.slot.mid) best = { spot: c, slot: s };
           }
@@ -555,7 +712,7 @@ export class Garages {
           traffic.holdAfter(sim, best.slot.mid + sim.length / 2 - sim.s);
           continue;
         }
-        if (late(slot)) this.cancelHoming(sim);
+        if (late(slot)) this.miss(sim, h);
         else traffic.holdAfter(sim, slot.mid + sim.length / 2 - sim.s);
         continue;
       }
@@ -571,13 +728,14 @@ export class Garages {
       const c0 = sub(sim.pos, scale(sim.dir, sim.length / 2));
       const legs = this.inLegs(h.spot, c0, sim.dir);
       sim.lcCooldown = 1e9;
+      // Налево — сначала ждёт просвета во встречном потоке (stepCross).
       this.moves.push({
         home: h.spot,
         town: h.town,
         color: sim.color,
         hooks: h.hooks,
         kind: 'in',
-        phase: 'road',
+        phase: h.left ? 'cross' : 'road',
         leg: legs[0],
         next: legs[1],
         s: 0,
@@ -585,8 +743,106 @@ export class Garages {
         sim,
         wait: 0,
         blink,
+        homing: h,
       });
     }
+  }
+
+  /** Не успела свернуть к месту: налево — в объезд, к повороту направо; направо — поездка кончится у узла. */
+  private miss(sim: Vehicle, h: Homing): void {
+    if (h.left) this.toRight(sim, h);
+    else this.cancelHoming(sim);
+  }
+
+  /**
+   * Налево не вышло (не дождалась просвета, не успела в левую полосу или остановиться): в объезд — к повороту направо,
+   * как без левого. Не доехать — поездка кончится у узла.
+   */
+  private toRight(sim: Vehicle, h: Homing): void {
+    const traffic = this.host.traffic;
+    const g = this.host.graph;
+    if (sim.holdDist !== undefined) traffic.release(sim);
+    delete sim.endLeft;
+    this.homing.delete(sim.id);
+    // Стоянка: место, к которому сворачивала, освобождается — у стоянки выберет заново.
+    const next: Homing = { ...h, left: false };
+    if (h.choices && h.reserved) {
+      this.busy.delete(h.spot.key);
+      next.reserved = false;
+    }
+    const right = this.slotOf(h.spot);
+    const lane = sim.onMovement ? undefined : traffic.currentLane(sim);
+    const link = lane && g.links.get(lane.link);
+    const route = right && link && findLaneRoute(g, [link], right.link.toNode!, right.link.id);
+    if (!right || !route) {
+      delete sim.endLink;
+      if (next.reserved) this.busy.delete(h.spot.key);
+      h.hooks.missed?.();
+      return;
+    }
+    sim.endLink = right.link.id;
+    traffic.redirect(sim, right.link.toNode!, route);
+    this.homing.set(sim.id, next);
+  }
+
+  /** Встречные полосы свободны для левого поворота: всем подъезжающим хватит места остановиться, никто не пересекает рядом. */
+  private crossClear(slot: GarageSlot): boolean {
+    const traffic = this.host.traffic;
+    const stop = slot.stop!;
+    for (const b of traffic.turnStops.get(stop.corridor) ?? []) if (Math.abs(b.s - stop.s) < LEFT_TURN.apart) return false;
+    return slot.cross!.every((x) => traffic.clearToJoin(x.lane.id, x.zone[0], x.zone[1]));
+  }
+
+  /** Пересекает встречку: стоп-линия встречного потока перед местом, пока кузов над ним. */
+  private block(m: Move, slot: GarageSlot): void {
+    const stop = slot.stop!;
+    const b: Barrier = { s: stop.s, closed: true, busy: false, flow: stop.flow, stop: 0 };
+    const map = this.host.traffic.turnStops;
+    const list = map.get(stop.corridor);
+    if (list) list.push(b);
+    else map.set(stop.corridor, [b]);
+    m.block = { corridor: stop.corridor, b };
+  }
+
+  private unblock(m: Move): void {
+    if (!m.block) return;
+    const map = this.host.traffic.turnStops;
+    const list = map.get(m.block.corridor)?.filter((b) => b !== m.block!.b);
+    if (list?.length) map.set(m.block.corridor, list);
+    else map.delete(m.block.corridor);
+    m.block = undefined;
+  }
+
+  /**
+   * Въезд налево: стоит на своей полосе с левым поворотником, пока во встречном потоке нет просвета (crossClear), —
+   * дождалась: закрывает встречку и поворачивает; ждёт дольше LEFT_TURN.maxWait — едет в объезд (toRight).
+   */
+  private stepCross(m: Move, dt: number): boolean {
+    const traffic = this.host.traffic;
+    const sim = m.sim!;
+    m.wait += dt;
+    sim.blinker = m.blink ?? 0;
+    const slot = this.leftSlotOf(m.home);
+    if (!slot || sim.onMovement || sim.lane !== slot.lane.id) {
+      // Дорогу поменяли — поездка кончится у узла.
+      traffic.release(sim);
+      delete sim.endLink;
+      delete sim.endLeft;
+      sim.lcCooldown = 0.5;
+      m.hooks.missed?.();
+      return this.done(m);
+    }
+    if (m.wait > LEFT_TURN.maxWait) {
+      sim.lcCooldown = 0.5;
+      this.toRight(sim, m.homing!);
+      return false;
+    }
+    if (m.wait < LOOK || !this.crossClear(slot)) return true;
+    this.block(m, slot);
+    m.phase = 'road';
+    m.wait = 0;
+    this.pose(m);
+    return true;
   }
 
   /** Въезд с полосы: поворот от центра кузова c0 (курс f) к бордюру и по заезду до места или в гараж. */
@@ -602,6 +858,7 @@ export class Garages {
   /** Едет к месту, но к нему не свернёт (дорогу поменяли, проехала мимо): поездка кончается у узла, как у всех. */
   private cancelHoming(sim: Vehicle): void {
     delete sim.endLink;
+    delete sim.endLeft;
     if (sim.holdDist !== undefined) this.host.traffic.release(sim);
     this.forget(sim.id);
   }
@@ -612,6 +869,7 @@ export class Garages {
     // Машину в потоке сняли (потерялась при правке сети) — и манёвра больше нет.
     if (m.sim && !traffic.vehicles.has(m.sim.id)) return this.done(m);
     if (m.phase === 'wait') return this.stepWait(m, dt);
+    if (m.phase === 'cross') return this.stepCross(m, dt);
     if (m.phase === 'pause') {
       m.wait += dt;
       this.pose(m);
@@ -647,6 +905,8 @@ export class Garages {
       return true;
     }
     if (m.kind === 'out' && m.phase === 'road') {
+      // Встала на дальнюю полосу (выезд налево) — встречка снова открыта.
+      this.unblock(m);
       m.phase = 'pause';
       m.wait = 0;
       m.v = 0;
@@ -656,6 +916,7 @@ export class Garages {
       // Кузов ушёл с полосы в заезд — поездка в потоке кончилась.
       const sim = m.sim!;
       const traffic = this.host.traffic;
+      this.unblock(m);
       traffic.remove(sim);
       traffic.arrivals++;
       traffic.totalTripTime += sim.tripTime;
@@ -675,11 +936,24 @@ export class Garages {
   /** Ждёт у бордюра просвета; дождалась — встаёт в поток (стоит, пока выезжает). */
   private stepWait(m: Move, dt: number): boolean {
     m.wait += dt;
-    const slot = this.slotOf(m.home);
+    const traffic = this.host.traffic;
+    const right = this.slotOf(m.home);
+    // Налево (задним ходом через ближнюю полосу в дальнюю) — если так быстрее; решается раз, у бордюра. Не дождалась
+    // просвета в обеих полосах за LEFT_TURN.outWait — выезжает направо.
+    m.left ??= this.exitLeft(m, right);
+    const left = m.left && m.wait <= LEFT_TURN.outWait ? this.leftSlotOf(m.home) : null;
+    const slot = left ?? right;
     const giveUp = !slot || m.wait > GARAGE_TRIPS.maxWait;
-    if (!giveUp && (m.wait < LOOK || !this.host.traffic.clearToJoin(slot.lane.id, slot.zone[0], slot.zone[1]))) return true;
+    const clear = (s: GarageSlot) => traffic.clearToJoin(s.lane.id, s.zone[0], s.zone[1]) && (!s.cross || this.crossClear(s));
+    if (!giveUp && (m.wait < LOOK || !clear(slot))) return true;
     const L = this.host.car.length;
-    const sim = giveUp ? null : this.host.traffic.placeOnLane({ ...this.host.car, color: m.color, targetNode: m.target!, endLink: m.endLink }, slot.lane.id, slot.mid + L / 2);
+    // Едет к месту (стоянке магазина) — к повороту направо или налево, что быстрее отсюда.
+    const way = !giveUp && m.to ? this.wayFrom([slot.link], m.to, slot.mid) : null;
+    if (way) {
+      m.target = way.slot.link.toNode!;
+      m.endLink = way.slot.link.id;
+    }
+    const sim = giveUp ? null : traffic.placeOnLane({ ...this.host.car, color: m.color, targetNode: m.target!, endLink: m.endLink }, slot.lane.id, slot.mid + L / 2);
     if (!sim || !slot) {
       // Не дождалась (или ехать некуда) — обратно на место.
       m.phase = 'home';
@@ -688,7 +962,6 @@ export class Garages {
       m.v = 0;
       return true;
     }
-    const traffic = this.host.traffic;
     traffic.holdAfter(sim, 0);
     // Едет на стоянку магазина: путь кончается связью у неё — сразу, а не когда тронется (иначе, пересчитав путь на
     // манёвре, она поехала бы просто к узлу, а связь у стоянки разошлась бы с концом пути).
@@ -699,6 +972,9 @@ export class Garages {
     const start = m.home.curbSide;
     const k = 0.55 * Math.max(2, Math.abs(dot(sub(start, slot.pos), rightNormal(slot.f))));
     m.sim = sim;
+    m.via = slot;
+    // Налево — задним ходом через ближнюю полосу: встречка закрыта, пока кузов над ней.
+    if (slot.cross) this.block(m, slot);
     m.phase = 'road';
     m.leg = bezier(start, sub(start, scale(m.home.d.dir, k)), add(slot.pos, scale(slot.f, k)), slot.pos, true, SPEED.roadBack);
     m.s = 0;
@@ -707,7 +983,24 @@ export class Garages {
     return true;
   }
 
+  /**
+   * Выезжать ли налево: можно (leftSlotOf) и путь с дальней полосы к цели (узлу или месту) хотя бы на
+   * LEFT_TURN.penalty быстрее, чем с ближней.
+   */
+  private exitLeft(m: Move, right: GarageSlot | null): boolean {
+    const left = this.leftSlotOf(m.home);
+    if (!left || !right) return false;
+    const g = this.host.graph;
+    const cost = (s: GarageSlot): number => {
+      if (m.to) return this.wayFrom([s.link], m.to, s.mid)?.cost ?? Infinity;
+      const route = findLaneRoute(g, [s.link], m.target!, m.endLink);
+      return route ? routeCost(g, route) - s.mid / s.link.speed : Infinity;
+    };
+    return cost(left) + LEFT_TURN.penalty < cost(right);
+  }
+
   private done(m: Move): false {
+    this.unblock(m);
     this.busy.delete(m.home.key);
     return false;
   }
@@ -762,13 +1055,13 @@ export class Garages {
     if (m) {
       const sim = m.sim!;
       if (m.kind === 'in') return { only: true, tail: [sim.pos, ...nose(m.leg!, m.s), ...(m.next ? nose(m.next, 0) : [])] };
-      const slot = this.slotOf(m.home);
+      const slot = m.via ?? this.slotOf(m.home);
       if (!slot) return null;
       const anchor = add(slot.pos, scale(slot.f, L / 2));
       return { head: [sim.pos, anchor], anchor };
     }
     const h = this.homing.get(simId);
-    const slot = h && this.slotOf(h.spot);
+    const slot = h && this.slotFor(h.spot, h.left);
     if (!h || !slot) return null;
     const [turn, yard] = this.inLegs(h.spot, slot.pos, slot.f);
     return { tail: [add(slot.pos, scale(slot.f, L / 2)), ...nose(turn, 0), ...nose(yard, 0)] };
