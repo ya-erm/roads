@@ -10,7 +10,7 @@
  * - «⬆ Приоритет», «⏸ Пауза» / «▶ Дальше», «✕ Отмена».
  * Подсказки — data-tip (не системные).
  */
-import { CONSTRUCTION } from '../config';
+import { CONSTRUCTION, ECONOMY } from '../config';
 import { money } from '../core/moneyText';
 import { durationText } from '../core/timeText';
 import { type ProjectInfo, projectName } from '../game/construction';
@@ -210,10 +210,10 @@ function moneyHtml(game: Game, info: ProjectInfo): string {
   const reserve = Math.min(p.reserve ?? 0, info.left);
   const total = p.spent + info.left;
   const k = (n: number) => (total > 0 ? (n / total) * 100 : 0);
-  // Свободно для стройки — без запаса на содержание в конце месяца (Game.buildBudget): его стройка не тратит.
-  const upkeep = game.upkeepForecast().total;
+  // Свободно для стройки — без запаса на содержание за полмесяца вперёд (Game.buildBudget): его стройка не тратит.
+  const upkeep = game.upkeepReserve;
   const free = Math.max(0, Math.floor(game.buildBudget));
-  const held = upkeep > 0 ? `, ещё ${money(upkeep)} отложено на содержание в конце месяца` : '';
+  const held = upkeep > 0 ? `, ещё ${money(upkeep)} отложено на содержание на ${durationText(ECONOMY.upkeepReserve)} вперёд` : '';
   const need = info.left - (p.reserve ?? 0);
   const enough = need <= free;
   const bar = `<div class="pc-money" data-tip="${esc(`Всего ${money(total)}: потрачено ${money(p.spent)}${reserve ? `, в резерве ${money(reserve)}` : ''}, ещё нужно ${money(info.left - reserve)}`)}">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ECONOMY, STATION } from '../config';
+import { ECONOMY, MONTH_LENGTH, STATION } from '../config';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { advise, adviceOf, QUEUE_SECONDS, STUCK_SECONDS } from './advisor';
 import { Game } from './game';
@@ -50,7 +50,7 @@ describe('Советник', () => {
     expect(f.reserve).toBeGreaterThan(0);
     expect(a).toMatchObject({ level: 'warn', line: line.id, fix: { kind: 'loan' }, funds: { have: 10_000, need: f.need } });
     expect(a.detail).toContain(`нужно $${f.need.toLocaleString('ru-RU')}`);
-    expect(a.detail).toContain('на содержание транспорта в конце месяца');
+    expect(a.detail).toContain('на содержание транспорта на 30 с вперёд');
     expect(a.detail).toContain('а на счёте $10');
     // Маршрут окупает содержание — запас не нужен, не хватает только на саму машину.
     line.revenueLast = 1_000_000;
@@ -60,9 +60,17 @@ describe('Советник', () => {
     expect(b.detail).toMatch(/^«.+» ждёт машину: машина стоит \$22.000, а на счёте −\$5.000\. Кредит — ещё до/);
     game.money = 22_000;
     expect(find(game, 'noMoney')).toHaveLength(0);
-    game.money = ECONOMY.creditLimit * 0.9;
+    // Грань банкротства — по счёту и темпу содержания: над кредитным пределом — на 20 с содержания — ещё нет, на 10 с — да.
+    const perSecond = game.upkeepForecast().total / MONTH_LENGTH;
+    game.money = ECONOMY.creditLimit + perSecond * 20;
+    expect(find(game, 'debt')).toHaveLength(0);
+    game.money = ECONOMY.creditLimit + perSecond * 10;
     const list = advise(game);
     expect(list[0]).toMatchObject({ kind: 'debt', level: 'alert', fix: { kind: 'loan' } });
+    expect(list[0].detail).toContain('без выручки через 10 с станет меньше −$200');
+    // Ниже предела — уже банкротство.
+    game.money = ECONOMY.creditLimit - 1;
+    expect(find(game, 'debt')[0].detail).toMatch(/^На счёте −\$200.001, ниже −\$200.000 — банкротство\./);
     // Кредит на пределе — брать нечего.
     game.loan = game.loanMax;
     expect(find(game, 'debt')[0].fix).toBeUndefined();

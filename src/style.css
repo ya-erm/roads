@@ -4174,6 +4174,17 @@ button.pax-dest.off:hover {
   padding-top: 5px;
 }
 
+/* Темп содержания под отчётом: «⏱ −$9 000 в месяц» (списывается каждую секунду). */
+.finance .upkeep-rate {
+  margin-top: 6px;
+  font-size: 12.5px;
+  text-align: right;
+}
+
+.finance .upkeep-rate .neg {
+  color: #d64541;
+}
+
 .ledger .pos,
 .finance small.pos {
   color: #2e9d57;

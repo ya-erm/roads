@@ -7,6 +7,7 @@
  */
 import { CONSTRUCTION, ECONOMY, STATION, STORAGE } from '../config';
 import { money } from '../core/moneyText';
+import { durationText } from '../core/timeText';
 import type { Vec } from '../core/vec';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
@@ -127,13 +128,20 @@ export function adviceOf(game: Game): Advice[] {
 
 function money_(game: Game, out: Advice[]): void {
   const canLoan = game.loan < game.loanMax;
-  if (game.money < ECONOMY.creditLimit * 0.8) {
+  // Грань — по счёту и темпу содержания (Game.nearBankrupt): оно списывается каждую секунду.
+  if (game.nearBankrupt) {
+    const runway = game.upkeepRunway;
+    const rate = game.upkeepForecast().total;
+    const state =
+      runway > 0
+        ? `На счёте ${money(game.money)}, содержание — ${money(rate)} в месяц: без выручки через ${durationText(runway)} станет меньше ${money(ECONOMY.creditLimit)} — банкротство.`
+        : `На счёте ${money(game.money)}, ниже ${money(ECONOMY.creditLimit)} — банкротство.`;
     out.push({
       key: 'debt',
       kind: 'debt',
       level: 'alert',
       title: 'На грани банкротства',
-      detail: `На счёте ${money(game.money)}, ниже ${money(ECONOMY.creditLimit)} — банкротство.${canLoan ? ' Возьмите кредит или продайте лишние машины.' : ' Продайте лишние машины или убыточные маршруты.'}`,
+      detail: `${state}${canLoan ? ' Возьмите кредит или продайте лишние машины.' : ' Продайте лишние машины или убыточные маршруты.'}`,
       fix: canLoan ? { kind: 'loan' } : undefined,
     });
   }
@@ -167,9 +175,12 @@ function building(game: Game, out: Advice[]): void {
   const need = stalled.reduce((s, i) => s + i.left, 0);
   const canLoan = game.loan < game.loanMax;
   const what = stalled.length === 1 ? `«${projectName(first.project)}»` : `${stalled.length} ${plural(stalled.length, 'проект', 'проекта', 'проектов')}`;
-  // Деньги сверх кредитного предела есть, но стройка их не тратит: запас на содержание в конце месяца (Game.buildBudget).
+  // Деньги сверх кредитного предела есть, но стройка их не тратит: запас на содержание (Game.buildBudget,
+  // upkeepReserve) — что спишется за ближайшие полмесяца.
   if (game.buildWaitsUpkeep) {
     const f = game.upkeepForecast();
+    const reserve = game.upkeepReserve;
+    const ahead = durationText(ECONOMY.upkeepReserve);
     const parts = [
       f.vehicles && `транспорт ${money(f.vehicles)}`,
       f.crews && `бригады ${money(f.crews)}`,
@@ -180,8 +191,8 @@ function building(game: Game, out: Advice[]): void {
       key: 'buildMoney',
       kind: 'buildMoney',
       level: 'warn',
-      title: `Стройка ждёт: ${money(f.total)} отложено на содержание в конце месяца`,
-      detail: `${what}: в конце месяца спишется ${money(f.total)}${parts.length ? ` (${parts.join(', ')})` : ''} — эти деньги стройка не тратит, чтобы итоги месяца не увели счёт ниже ${money(ECONOMY.creditLimit)}. Достроить — ещё ${money(need)}; стройка пойдёт с выручкой.${canLoan ? ' Быстрее — кредит, или поставьте лишнее на паузу.' : ' Быстрее — поставьте лишнее на паузу.'}`,
+      title: `Стройка ждёт: ${money(reserve)} отложено на содержание на ${ahead} вперёд`,
+      detail: `${what}: содержание списывается каждую секунду — ${money(f.total)} в месяц${parts.length ? ` (${parts.join(', ')})` : ''}. Что уйдёт за ${ahead}, ${money(reserve)}, стройка не тратит, чтобы счёт не ушёл ниже ${money(ECONOMY.creditLimit)}. Достроить — ещё ${money(need)}; стройка пойдёт с выручкой.${canLoan ? ' Быстрее — кредит, или поставьте лишнее на паузу.' : ' Быстрее — поставьте лишнее на паузу.'}`,
       at: first.front ?? first.at,
       count: stalled.length,
       fix: canLoan ? { kind: 'loan' } : undefined,
@@ -333,7 +344,7 @@ function crews(game: Game, out: Advice[]): void {
 export function noMoneyText(name: string | null, lines: number, f: AutoFunds): string {
   const who = name ? `«${name}» ждёт машину` : `${lines} ${plural(lines, 'маршрут ждёт', 'маршрута ждут', 'маршрутов ждут')} машины`;
   const need = f.reserve
-    ? `нужно ${money(f.need)} — машина ${money(f.price)} и ${money(f.reserve)} на содержание транспорта в конце месяца (выручка его не покроет)`
+    ? `нужно ${money(f.need)} — машина ${money(f.price)} и ${money(f.reserve)} на содержание транспорта на ${durationText(ECONOMY.upkeepReserve)} вперёд (выручка его не покроет)`
     : `машина стоит ${money(f.price)}`;
   return `${who}: ${need}, а на счёте ${money(f.have)}.`;
 }

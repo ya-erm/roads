@@ -142,6 +142,7 @@ import {
   biomeSvg,
 } from './icons';
 import { Minimap } from './minimap';
+import { upkeepRates, upkeepRateText, upkeepTip } from './upkeepText';
 import { closeTimelapse, openTimelapse } from './timelapse';
 import { syncTimelapseItem, timelapseSvg } from './timelapseButton';
 import { type Pref, prefOn, setPref } from './prefs';
@@ -492,9 +493,9 @@ export class Hud {
     private readonly session: HudSession,
   ) {
     root.innerHTML = `
-      <div class="panel stats" data-action="finance" title="Финансы: доходы и расходы по статьям">
+      <div class="panel stats" data-action="finance" data-tip="Финансы: доходы и расходы по статьям">
         <div class="stat"><span class="label">Деньги <span class="money-reserve hidden" data-reserve data-tip="В резерве стройки: деньги на счёте, но отложены на проекты — другие траты их не возьмут"></span></span><span class="value" data-money></span></div>
-        <div class="stat"><span class="label">За месяц</span><span class="value small" data-balance></span></div>
+        <div class="stat" data-balance-stat><span class="label">За месяц</span><span class="value small" data-balance></span></div>
         <div class="stat"><span class="label">Парк</span><span class="value small" data-fleet></span></div>
         <div class="stat day"><span class="label" data-date></span><div class="bar"><div data-month></div></div></div>
         <button class="advisor-btn" data-action="advisor" title="" data-tip="Советник: что мешает сети работать">${bulbSvg(22)}<b class="advice-badge hidden" data-advice-badge></b></button>
@@ -4402,6 +4403,10 @@ export class Hud {
     const bal = this.q('[data-balance]');
     bal.textContent = `${balance >= 0 ? '+' : ''}${money(balance)}`;
     bal.classList.toggle('negative', balance < 0);
+    // Подсказка «За месяц»: содержание идёт каждую секунду — его темп в месяц по статьям.
+    const balTip = upkeepTip(g.upkeepForecast());
+    const balStat = this.q('[data-balance-stat]');
+    if (balStat.dataset.tip !== balTip) balStat.dataset.tip = balTip;
     this.q('[data-fleet]').textContent = `${g.fleet.size} / жит. ${g.citizenCars}`;
     this.q('[data-date]').textContent = g.dateLabel;
     this.q('[data-month]').style.width = `${g.monthProgress * 100}%`;
@@ -4600,8 +4605,15 @@ export class Hud {
     ];
     const cell = (v: number | undefined, sign: number) =>
       v === undefined ? '<td class="muted">—</td>' : `<td class="${v === 0 ? 'muted' : sign > 0 ? 'pos' : 'neg'}">${v === 0 ? '0' : `${sign > 0 ? '+' : '−'}${money(v).replace('$', '$')}`}</td>`;
+    // Содержание, ремонт и проценты списываются каждую секунду: у их статей — темп в месяц сейчас (в подсказке строки).
+    const forecast = g.upkeepForecast();
+    const rates = upkeepRates(forecast);
     const table = rows
-      .map((r) => `<tr><td class="ic">${ledgerIcon(r.kind, 20)}</td><td>${r.name}</td>${cell(g.ledger[r.kind], r.sign)}${cell(last?.ledger?.[r.kind], r.sign)}</tr>`)
+      .map((r) => {
+        const rate = rates[r.kind];
+        const tip = rate ? ` data-tip="${esc(`Списывается каждую секунду: сейчас −${money(rate)} в месяц`)}"` : '';
+        return `<tr${tip}><td class="ic">${ledgerIcon(r.kind, 20)}</td><td>${r.name}</td>${cell(g.ledger[r.kind], r.sign)}${cell(last?.ledger?.[r.kind], r.sign)}</tr>`;
+      })
       .join('');
     const netNow = g.incomeMonth - g.expensesMonth;
     const netLast = last ? last.income - last.expenses : undefined;
@@ -4618,6 +4630,11 @@ export class Hud {
     return `<header><h3>Финансы</h3><button class="icon" data-action="finance">✕</button></header>
       <table class="ledger"><tr><th></th><th></th><th>Этот месяц</th><th>Прошлый</th></tr>${table}
         <tr class="sum"><td></td><td>Итого</td>${total(netNow)}${total(netLast)}</tr></table>
+      ${
+        forecast.total > 0
+          ? `<div class="upkeep-rate" data-tip="${esc(upkeepRateText(forecast))}">⏱ <b class="neg">−${money(forecast.total)}</b> в месяц <span class="muted">содержание сейчас</span></div>`
+          : ''
+      }
       <h4>Кредит</h4>
       <div class="loan"><div><b>${money(g.loan)}</b> <span class="muted">из ${money(g.loanMax)} · ${Math.round(ECONOMY.loanRate * 100)}% в месяц = ${money(
         g.loan * ECONOMY.loanRate,

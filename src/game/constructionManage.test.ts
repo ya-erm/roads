@@ -149,7 +149,7 @@ describe('Стройка: резерв денег на проект', () => {
   it('свободных денег мало — откладывается, сколько есть, кроме запаса на содержание; потом можно доложить', () => {
     const { game, id } = withProject();
     const left = game.construction.info(id)!.left;
-    const upkeep = game.upkeepForecast().total;
+    const upkeep = game.upkeepReserve;
     expect(upkeep).toBeGreaterThan(0);
     game.money = ECONOMY.creditLimit + upkeep + Math.floor(left / 3);
     expect(game.reserveProject(id, true)).toBeNull();
@@ -174,9 +174,11 @@ describe('Стройка: резерв денег на проект', () => {
       const m0 = game.money;
       // Отсыпку головная машина начала, ещё пока подъезжали остальные: считаем готовое с этого места.
       const d0 = game.construction.info(id)!.done;
+      const s0 = game.construction.projects.get(id)!.spent;
       runSeconds(game, 10);
       const p = game.construction.projects.get(id)!;
-      return { game, p, paid: m0 - game.money, used: r0 - game.reserved, done: game.construction.info(id)!.done - d0 };
+      // Со счёта уходит и содержание (каждую секунду) — стройкой заплачено то, что записано в проект.
+      return { game, p, paid: p.spent - s0, upkeep: m0 - game.money - (p.spent - s0), used: r0 - game.reserved, done: game.construction.info(id)!.done - d0 };
     };
     const without = run(false);
     expect(without.p.stalled).toBeDefined();
@@ -184,10 +186,13 @@ describe('Стройка: резерв денег на проект', () => {
     const withRes = run(true);
     expect(withRes.p.stalled).toBeUndefined();
     expect(withRes.done).toBeGreaterThan(0.1);
-    // Заплачено ровно из резерва: бюджет прочих трат так и ноль.
+    // Заплачено ровно из резерва: бюджет прочих трат стройка не тронула — он меньше нуля только на содержание за эти
+    // 10 с (оно списывается каждую секунду).
     expect(withRes.paid).toBeGreaterThan(0);
     expect(withRes.used).toBe(withRes.paid);
-    expect(withRes.game.budget).toBe(0);
+    expect(withRes.upkeep).toBeGreaterThan(0);
+    expect(withRes.upkeep).toBeLessThanOrEqual(Math.ceil((withRes.game.upkeepForecast().total * 10.2) / MONTH_LENGTH) + 5);
+    expect(withRes.game.budget).toBe(-withRes.upkeep);
   });
 
   it('резерв не обходит кредитный предел: деньги ушли в долг (содержание) — стройка встаёт и с резервом', () => {
@@ -245,7 +250,7 @@ describe('Стройка: резерв денег на проект', () => {
   });
 });
 
-describe('Стройка: запас на содержание в конце месяца', () => {
+describe('Стройка: запас на содержание', () => {
   const reach = CONSTRUCTION.reach;
   beforeEach(() => {
     CONSTRUCTION.reach = 1e12;
@@ -254,7 +259,7 @@ describe('Стройка: запас на содержание в конце м�
     CONSTRUCTION.reach = reach;
   });
 
-  it('прогноз — ровно то, что спишут итоги месяца: транспорт, бригады, ремонт, проценты', () => {
+  it('темп — ровно то, что спишется за полный месяц: транспорт, бригады, ремонт, проценты', () => {
     const game = buildGame();
     expect(game.takeLoan()).toBe(true);
     const f = game.upkeepForecast();
@@ -262,18 +267,17 @@ describe('Стройка: запас на содержание в конце м�
     expect(f.roads).toBeGreaterThan(0);
     expect(f.interest).toBeGreaterThan(0);
     expect(f.total).toBe(f.vehicles + f.crews + f.roads + f.interest);
-    // Ни выручки, ни стройки: за месяц счёт меняется ровно на прогноз (минус — с первого кадра нового месяца).
+    // Запас стройки — на полмесяца вперёд.
+    expect(game.upkeepReserve).toBe(Math.ceil((f.total * ECONOMY.upkeepReserve) / MONTH_LENGTH));
+    // Ни выручки, ни стройки: за полный месяц (от итогов до итогов) счёт меняется ровно на темп.
     const month = game.monthIndex;
-    let before = game.money;
-    let expected = f.total;
-    runSeconds(game, MONTH_LENGTH + 0.2, () => {
-      if (game.monthIndex === month) {
-        before = game.money;
-        expected = game.upkeepForecast().total;
-      }
-    });
-    expect(game.monthIndex).toBe(month + 1);
-    expect(before - game.money).toBe(expected);
+    runSeconds(game, 2 * MONTH_LENGTH + 0.2);
+    expect(game.monthIndex).toBe(month + 2);
+    const [prev, last] = game.history.slice(-2);
+    expect(game.upkeepForecast()).toEqual(f);
+    expect(last.expenses).toBe(f.total);
+    expect(last.ledger).toMatchObject({ vehicles: f.vehicles + f.crews, roads: f.roads, interest: f.interest });
+    expect(prev.money - last.money).toBe(f.total);
   });
 
   it('недостроенный проект и прибыль: выручка идёт в стройку, а итоги месяца не уводят счёт за порог банкротства', async () => {
@@ -293,24 +297,29 @@ describe('Стройка: запас на содержание в конце м�
     const income = upkeep * 1.5;
     const months = 3;
     expect(game.construction.info(id)!.left).toBeGreaterThan(income * months * 1.5);
-    // Счёт — у самого кредитного предела: сверх него — запас на содержание и немного.
-    game.money = ECONOMY.creditLimit + upkeep + 100;
+    // Счёт — у самого кредитного предела: сверх него — запас на содержание (на полмесяца) и немного.
+    game.money = ECONOMY.creditLimit + game.upkeepReserve + 100;
+    let lowest = Infinity;
     const spent0 = game.construction.projects.get(id)!.spent;
     const lows: number[] = [];
     let month = game.monthIndex;
     let waited = false;
     runMonths(game, months, () => {
       game.money += (income * 0.1) / MONTH_LENGTH;
+      lowest = Math.min(lowest, game.money);
       if (game.monthIndex !== month) {
         month = game.monthIndex;
         lows.push(game.money);
       }
       const a = advise(game).find((x) => x.kind === 'buildMoney');
-      if (a?.title.startsWith('Стройка ждёт:') && a.title.includes('отложено на содержание в конце месяца')) waited = true;
+      if (a?.title.startsWith('Стройка ждёт:') && a.title.includes('отложено на содержание')) waited = true;
+      // Стройка, что держит запас, грани банкротства не касается.
+      expect(advise(game).some((x) => x.kind === 'debt')).toBe(false);
     });
     expect(lows.length).toBe(months);
-    // После итогов каждого месяца — не ниже порога банкротства; месяцы в банкротство не засчитаны.
+    // После итогов каждого месяца и в любой миг — не ниже порога банкротства; месяцы в банкротство не засчитаны.
     for (const m of lows) expect(m).toBeGreaterThanOrEqual(ECONOMY.creditLimit);
+    expect(lowest).toBeGreaterThanOrEqual(ECONOMY.creditLimit);
     expect(sc.state.bankrupt).toBe(0);
     // Стройка шла на выручку: потрачено на неё почти всё, что пришло сверх содержания.
     const spent = game.construction.projects.get(id)!.spent - spent0;
@@ -326,7 +335,7 @@ describe('Стройка: запас на содержание в конце м�
     const at = freeSpot(game, 600);
     const plan = game.roadBuilder.road(anchorOf(game, { free: at }), anchorOf(game, { free: { x: at.x + 600, y: at.y } }), STREET);
     expect(plan.ok).toBe(true);
-    const upkeep = game.upkeepForecast().total;
+    const upkeep = game.upkeepReserve;
     expect(upkeep).toBeGreaterThan(0);
     expect(plan.cost).toBeGreaterThan(upkeep);
     // Денег — ровно на дорогу до кредитного предела: покупка разрешена, но съедает запас на содержание.
@@ -338,7 +347,7 @@ describe('Стройка: запас на содержание в конце м�
     // С запасом — без предупреждения.
     const calm = withoutCitizens(new Game({ ...WORLD, construction: 'instant' }));
     const again = calm.roadBuilder.road(anchorOf(calm, { free: at }), anchorOf(calm, { free: { x: at.x + 600, y: at.y } }), STREET);
-    calm.money = ECONOMY.creditLimit + calm.upkeepForecast().total + again.cost + 1000;
+    calm.money = ECONOMY.creditLimit + calm.upkeepReserve + again.cost + 1000;
     expect(calm.roadBuilder.apply(again)).toBe(true);
     expect(calm.notices.some((n) => n.text.startsWith('💸 Взято из запаса на содержание'))).toBe(false);
   });

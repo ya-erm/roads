@@ -53,13 +53,21 @@ export function repaceSave(save: SaveData): SaveData {
   s.time = time;
   // Реального времени прошло больше, чем месяцев нынешнего темпа в календаре: модели выходят по реальному времени.
   s.paceShift = Math.max(0, Math.round(((save.paceShift ?? 0) * r + (save.time / from) * (r - 1)) * 100) / 100) || undefined;
-  // Выручка перевозок месяца — за месяц вдвое короче; стройка, покупки, продажи, награды — разовые, как были
-  // (содержание, ремонт и проценты списываются в конце месяца — в идущем месяце их ещё нет).
+  // Выручка перевозок месяца — за месяц вдвое короче; стройка, покупки, продажи, награды — разовые, как были.
+  // Содержание, ремонт и проценты списываются непрерывно (Game.accrueUpkeep), за секунду — столько же при любой
+  // длине месяца (MONTH_SCALE): списанное и начисленное в идущем месяце — тоже в k раз (в сохранениях до
+  // непрерывного списания там ноль).
   if (s.ledger) {
     const transport = s.ledger.transport;
     s.ledger.transport = sum(transport);
     s.incomeMonth -= transport - s.ledger.transport;
+    const costs = s.ledger.vehicles + s.ledger.roads + s.ledger.interest;
+    s.ledger.vehicles = sum(s.ledger.vehicles);
+    s.ledger.roads = sum(s.ledger.roads);
+    s.ledger.interest = sum(s.ledger.interest);
+    s.expensesMonth -= costs - (s.ledger.vehicles + s.ledger.roads + s.ledger.interest);
   }
+  if (s.upkeep) s.upkeep = { at: at(s.upkeep.at)!, crews: sum(s.upkeep.crews), roads: sum(s.upkeep.roads), interest: sum(s.upkeep.interest) };
   for (const line of s.lines) {
     line.revenueMonth = sum(line.revenueMonth);
     line.costMonth = sum(line.costMonth);
@@ -79,6 +87,7 @@ export function repaceSave(save: SaveData): SaveData {
     for (const g of v.passengers) g.at = at(g.at);
     v.profitMonth = sum(v.profitMonth);
     v.profitLast = sum(v.profitLast);
+    if (v.upkeepDue !== undefined) v.upkeepDue = sum(v.upkeepDue);
   }
   for (const ind of s.industries) {
     ind.producedMonth = Math.round(sum(ind.producedMonth));

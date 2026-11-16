@@ -64,7 +64,7 @@ export interface IndustryPlan {
 
 /**
  * Почему стройка предприятия стоит: нет базы рядом, денег (до кредитного предела) или деньги есть, но отложены
- * на содержание в конце месяца (upkeep, Game.buildBudget).
+ * на содержание за полмесяца вперёд (upkeep, Game.buildBudget, Game.upkeepReserve).
  */
 export type BuildStall = 'base' | 'money' | 'upkeep';
 
@@ -356,7 +356,7 @@ export class Enterprises {
     }
     const step = Math.min(1 - b.done, dt / b.time);
     const pay = b.cost * step;
-    // Платит сама, по ходу работ — как проект дороги: с запасом на содержание в конце месяца (Game.buildBudget).
+    // Платит сама, по ходу работ — как проект дороги: с запасом на содержание за полмесяца вперёд (Game.buildBudget).
     if (pay > g.buildBudget) {
       this.stalls.set(ind.id, pay > g.budget ? 'money' : 'upkeep');
       return;

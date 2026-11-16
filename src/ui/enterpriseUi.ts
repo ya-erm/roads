@@ -3,7 +3,7 @@
  * строки в карточках предприятия и города, строка «Предприятия» в окне новой игры. Объясняет значками:
  * 👷 рабочие, 🚌 подвоз, ☁ вред, 🏙 место в черте города, ⛏️ месторождение, 🏚 заброшенное, 🏗 стройка.
  */
-import { CONSTRUCTION, ENTERPRISE } from '../config';
+import { CONSTRUCTION, ECONOMY, ENTERPRISE } from '../config';
 import type { Game } from '../game/game';
 import type { IndustryPlan } from '../game/enterprises';
 import { money } from '../input/labels';
@@ -146,7 +146,7 @@ export function industryRowsHtml(g: Game, ind: Industry): string {
         : stall === 'money'
           ? '<span class="bad" data-tip="Стройка стоит: не хватает денег">💸</span>'
           : stall === 'upkeep'
-            ? `<span class="bad" data-tip="${esc(`Стройка ждёт: ${money(g.upkeepForecast().total)} отложено на содержание в конце месяца`)}">💸⏳</span>`
+            ? `<span class="bad" data-tip="${esc(`Стройка ждёт: ${money(g.upkeepReserve)} отложено на содержание на ${ECONOMY.upkeepReserve} с вперёд`)}">💸⏳</span>`
             : `<span class="muted">⏳ ${Math.ceil((1 - ind.build.done) * ind.build.time)} с</span>`;
     rows.push(`<div class="ent-row"><span class="ent-ic">🏗</span>${bar(ind.build.done)}<b>${Math.floor(ind.build.done * 100)}%</b>${state}</div>`);
   }

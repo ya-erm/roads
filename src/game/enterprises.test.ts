@@ -289,21 +289,25 @@ describe('«Со строительством»', () => {
     expect(g.enterprises.removePlan(ind).refund).toBe(buildCost(ind.info) * ENTERPRISE.refund);
   });
 
-  it('стройка площадки не тратит запас на содержание в конце месяца: ждёт (upkeep), без денег вовсе — money', () => {
+  it('стройка площадки не тратит запас на содержание: ждёт (upkeep), без денег вовсе — money', () => {
     const g = player({ construction: 'build' });
     const d = g.enterprises.deposits.find((x) => x.used === undefined)!;
     expect(g.enterprises.build(d.kind, d.center)).toBeNull();
     const ind = g.industries[g.industries.length - 1];
     const base = { type: 'base' as const, id: g.nextId(), fp: { center: add(ind.fp.center, { x: 300, y: 0 }), w: 36, h: 24, angle: 0 }, nodeId: 0 };
     g.construction.crews.bases.set(base.id, base);
-    const upkeep = g.upkeepForecast().total;
+    const upkeep = g.upkeepReserve;
     expect(upkeep).toBeGreaterThan(0);
-    // Сверх кредитного предела — ровно запас: площадка ждёт, деньги на месте.
+    // Сверх кредитного предела — ровно запас (содержание на полмесяца вперёд): площадка ждёт, со счёта уходит только
+    // содержание этих секунд.
     g.money = ECONOMY.creditLimit + upkeep;
+    const build0 = g.ledger.build;
     runSeconds(g, 2);
     expect(g.enterprises.stalls.get(ind.id)).toBe('upkeep');
     expect(ind.build!.done).toBe(0);
-    expect(g.money).toBe(ECONOMY.creditLimit + upkeep);
+    expect(g.ledger.build).toBe(build0);
+    expect(g.money).toBeLessThan(ECONOMY.creditLimit + upkeep);
+    expect(g.money).toBeGreaterThan(ECONOMY.creditLimit + upkeep - (g.upkeepForecast().total * 2.2) / MONTH_LENGTH - 5);
     g.money = ECONOMY.creditLimit;
     runSeconds(g, 1);
     expect(g.enterprises.stalls.get(ind.id)).toBe('money');

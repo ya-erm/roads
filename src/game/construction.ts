@@ -25,8 +25,9 @@
  * - Резерв (Project.reserve): деньги на счёте, отложенные на проект, — в бюджет прочих трат не входят (Game.budget),
  *   проект платит за метры сперва из них, поэтому без денег не встаёт; кредитный предел резерв не обходит.
  * - Запас на содержание (Game.buildBudget): стройка — и из резерва тоже — не тратит последние деньги до кредитного
- *   предела, а оставляет на счёте то, что спишется в конце месяца (содержание транспорта и бригад, ремонт, проценты):
- *   иначе итоги месяца опускали бы счёт ниже порога банкротства.
+ *   предела, а оставляет на счёте то, что спишется за ближайшие полмесяца (Game.upkeepReserve: содержание транспорта
+ *   и бригад, ремонт, проценты — они списываются каждую секунду): иначе содержание тут же опускало бы счёт ниже
+ *   порога банкротства.
  *   Проект кончился или отменён — запись уходит вместе с остатком резерва, он снова свободен.
  * - Приоритет (Project.priority): бригады — сначала к нему, не хватает — переходят с обычных проектов (crews.ts).
  *
@@ -144,7 +145,7 @@ export interface ConstructionHost {
   railDepots?(): { id: number; pos: Vec; platforms: number[] }[];
   /**
    * Сколько стройка может потратить: до кредитного предела без резервов проектов и без запаса на содержание
-   * в конце месяца (Game.buildBudget, upkeepForecast).
+   * за полмесяца вперёд (Game.buildBudget, upkeepReserve).
    */
   readonly buildBudget: number;
   readonly time: number;
@@ -1394,7 +1395,7 @@ export class Construction {
         if (lane && this.host.zoneGate && this.zoneGrows(c as Corridor, b, moved.spans) && !this.host.zoneGate(c.id, { ...b, stages: moved.spans })) break;
         const cost = paidFor(full, done, L) - paidFor(full, b.done, L);
         // Сперва — из резерва проекта, остальное — из свободного бюджета (до кредитного предела без запаса на содержание
-        // в конце месяца: резерв не обходит ни то, ни другое).
+        // за полмесяца: резерв не обходит ни то, ни другое).
         const fromReserve = Math.min(cost, p.reserve ?? 0);
         const free = this.host.buildBudget;
         if (cost > 0 && (cost - fromReserve > Math.max(0, free) || cost > free + this.reserved())) {
