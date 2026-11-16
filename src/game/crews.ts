@@ -1158,8 +1158,9 @@ function copyLane(l: CrewLane): CrewLane {
     ...(l.t0 !== undefined ? { t0: l.t0 } : {}),
     ...(l.t ? { t: [...l.t] } : {}),
     ...(l.side ? { side: [...l.side] } : {}),
-    ...(l.shifts?.length ? { shifts: l.shifts.map((sh) => ({ at: sh.at, to: sh.to })) } : {}),
+    ...(l.shifts?.length ? { shifts: l.shifts.map((sh) => ({ at: sh.at, to: sh.to, ...(typeof sh.len === 'number' ? { len: sh.len } : {}) })) } : {}),
     ...(typeof l.slow === 'number' ? { slow: l.slow } : {}),
+    ...(typeof l.room === 'number' ? { room: l.room } : {}),
     ...(l.turn && Array.isArray(l.turn.path) && l.turn.path.length > 1
       ? {
           turn: {

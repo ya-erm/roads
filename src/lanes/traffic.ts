@@ -127,6 +127,8 @@ function jitter(x: number): number {
 export const REROUTE_BATCH = 24;
 /** Подъезжающую к разрыву маршрута ближе стольких метров (и ещё 2 с пути) перестраивают сразу, вне очереди. */
 export const REROUTE_NEAR = 30;
+/** Машина, поставленная в поток рядом со своей полосой (Vehicle.glide), съезжает в неё на ходу: метров вбок на метр пути (~10°). */
+export const GLIDE_SLOPE = 0.18;
 
 /** Шлагбаум посреди полотна (переезд): закрыт — машины ждут перед ним; занят — на нём машина. */
 export interface Barrier {
@@ -718,10 +720,11 @@ export class LaneTraffic {
 
   /**
    * Ставит машину на попутную полосу у точки pos с курсом dir (как при перестройке сети) и прокладывает
-   * маршрут к targetNode — так машины из сохранения едут дальше. Некуда поставить или не доехать — null.
+   * маршрут к targetNode — так машины из сохранения едут дальше. Некуда поставить или не доехать — null. reach — не
+   * дальше скольких метров вбок от точки полоса (машина бригады в ряду у другой кромки — дальше обычного).
    */
-  place(opts: VehicleSpec & { targetNode: number }, pos: Vec, dir: Vec, v = 0): Vehicle | null {
-    const spot = this.laneAt(pos, dir);
+  place(opts: VehicleSpec & { targetNode: number }, pos: Vec, dir: Vec, v = 0, reach = 6): Vehicle | null {
+    const spot = this.laneAt(pos, dir, reach);
     const route = spot && findLaneRoute(this.graph, [this.graph.links.get(spot.lane.link)!], opts.targetNode);
     if (!spot || !route) return null;
     const { targetNode, ...spec } = opts;
@@ -1767,7 +1770,7 @@ export class LaneTraffic {
     }
     if (veh.lateral !== 0) {
       // glide — съезжает в полосу на ходу (наклон пути — около 10°), стоя — не сдвигается.
-      const step = Math.min(Math.abs(veh.lateral), veh.glide ? veh.v * dt * 0.18 : (6 + veh.v * 0.2) * dt);
+      const step = Math.min(Math.abs(veh.lateral), veh.glide ? veh.v * dt * GLIDE_SLOPE : (6 + veh.v * 0.2) * dt);
       veh.lateral -= Math.sign(veh.lateral) * step;
       if (veh.lateral === 0) delete veh.glide;
     } else if (veh.glide) delete veh.glide;

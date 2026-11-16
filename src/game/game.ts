@@ -1561,12 +1561,15 @@ export class Game implements BuildContext {
       const prev = 'sim' in c ? this.traffic.vehicles.get(c.sim) : undefined;
       if (prev && dist(prev.pos, spot.pos) < prev.length + 14) return 'busy';
     }
-    const sim = this.traffic.place({ ...spec, targetNode: to }, spot.pos, spot.dir);
+    // Попутная полоса — и через полосу: бригада, работавшая в ряду у другой кромки (несколько бригад на 1+1), стоит
+    // над встречной; иначе её машина выезжала от узла — у тупика скачком к его торцу и сразу носом назад.
+    const reach = 2 * LANE_W;
+    const sim = this.traffic.place({ ...spec, targetNode: to }, spot.pos, spot.dir, 0, reach);
     if (!sim) return null;
     // Полоса нашлась далеко (машина не на ней, а рядом — за концом дороги): не перескакиваем — выедет от узла.
     const off = sub(spot.pos, sim.pos);
     const lat = dot(off, rightNormal(sim.dir));
-    if (Math.abs(lat) > 4 || Math.abs(dot(off, sim.dir)) > 1.5 || dot(sim.dir, spot.dir) < 0.9) {
+    if (Math.abs(lat) > reach || Math.abs(dot(off, sim.dir)) > 1.5 || dot(sim.dir, spot.dir) < 0.9) {
       this.traffic.remove(sim);
       return null;
     }

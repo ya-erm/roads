@@ -72,6 +72,8 @@ export interface LaneLeg {
 export interface LaneShift {
   at: number;
   to: number;
+  /** На скольких метрах пути, если длиннее ROW_RAMP (далёкий ряд — плавнее, без рывка вбок); нет — ROW_RAMP. */
+  len?: number;
 }
 
 /** Полоса бригады (сохраняется вместе с бригадой). */
@@ -101,6 +103,12 @@ export interface CrewLane {
    * пока задняя ось длинной машины на дуге) машины едут медленно — ENTRY_SPEED. Нет — поворота нет.
    */
   slow?: number;
+  /**
+   * Следом на этот участок съедет другая бригада (была в пути, когда эта съехала): не начатые на первом участке полосы
+   * ждут не ближе стольких метров от его начала (Construction.crewSlots) — уже в своём ряду и не на её пути. Нет — у
+   * самого начала: никто за ними не съезжает, а отсыпке незачем уезжать далеко вперёд от края, с которого она начнёт.
+   */
+  room?: number;
 }
 
 /**
@@ -359,10 +367,11 @@ export function laneShift(lane: CrewLane, s: number): { lat: number; slope: numb
   let slope = 0;
   let was = 0;
   for (const sh of lane.shifts ?? []) {
-    const u = (s - sh.at) / ROW_RAMP;
+    const len = sh.len ?? ROW_RAMP;
+    const u = (s - sh.at) / len;
     const d = sh.to - was;
     lat += d * smoothstep(u);
-    if (u > 0 && u < 1) slope += (d * 6 * u * (1 - u)) / ROW_RAMP;
+    if (u > 0 && u < 1) slope += (d * 6 * u * (1 - u)) / len;
     was = sh.to;
   }
   return { lat, slope };

@@ -38,9 +38,10 @@
  *
  * Состояние: готовое — в полотнах сети (сохраняется вместе с ней), записи проектов — здесь (toSave / load).
  */
-import { add, dist, dot, scale, sub, type Vec } from '../core/vec';
+import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { corridorLayer } from '../lanes/speedDisplay';
+import { GLIDE_SLOPE } from '../lanes/traffic';
 import { closed, endCuts, laneDone, laneWise, partLanes, reverseSite, reverseStops, reverseZone, reversible, seamHolder, seamWait } from '../lanes/closure';
 import { type Corridor, type CorridorBuild, type CorridorWas, type LaneNet, taperLen } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
@@ -64,6 +65,7 @@ import {
   polyLength,
   polyProject,
   releaseTurn,
+  ROW_RAMP,
   stageSlots,
   TURN_TAIL,
   turnAhead,
@@ -79,6 +81,18 @@ import { healLostWas } from './rebuild';
 import { corridorProfile, fullCorridorCost } from './roadbuild';
 import type { RailSim } from '../sim/rail';
 import { type WorkTrainSave, WorkTrains } from './workTrains';
+
+/**
+ * Первый участок полосы бригады (сюда машины съезжают с дороги), а следом съедет другая бригада (CrewLane.room): не
+ * начатые этапы ждут не ближе стольких метров от его начала (stageSlots, start) — разметка целиком на стройке и уже
+ * перестроилась в ряд своей бригады (ROW_RAMP), а не стоит на пути следующей, что съезжает туда же и уходит в свой
+ * ряд. Одна бригада (или последняя из едущих) ждёт у самого начала: отсыпка не уезжает далеко от края, с которого
+ * начнёт, и берётся за работу сразу.
+ */
+const ENTRY_ROOM = ROW_RAMP;
+
+/** Перестроение в ряд (layRows) — не короче стольких метров пути на метр сдвига вбок (наклон не круче ~1:4 в середине). */
+const ROW_SLOPE = 6;
 
 export interface Project {
   id: number;
@@ -671,6 +685,10 @@ export class Construction {
     }
     // Съезд с поворотом — машины проходят его медленно, пока и задняя ось не выйдет с дуги.
     if (curve) out.slow = polyProject(path, curve) + TURN_TAIL;
+    // Съезжает с дороги, а к этому же участку едет ещё бригада — съедет следом: не начатые ждут подальше (ENTRY_ROOM).
+    // Решено раз, при съезде: места ожидания потом не прыгают назад, когда та уже приехала.
+    if (cars?.length && by && [...this.crews.brigades.values()].some((o) => o !== by && o.project === id && o.state === 'going' && !o.lane && o.front?.corridor === c.id))
+      out.room = ENTRY_ROOM;
     return out;
   }
 
@@ -694,7 +712,9 @@ export class Construction {
     const project = b.project;
     const i = b.lane.legs.indexOf(leg);
     const next = b.lane.legs[i + 1];
-    const cut = next ? 0 : this.tailCut(project, c, fromB);
+    // Тупик в конце — колонна встаёт так, чтобы, выехав в поток, успеть съехать в попутную полосу до разворота
+    // (deadEndRoom).
+    const cut = next ? 0 : Math.max(this.tailCut(project, c, fromB), this.deadEndRoom(project, c, fromB, laneRow(b.lane)));
     const ext = next ? Math.max(0, polyLength(b.lane.path) - (leg.at + c.length)) : 0;
     // Обычная дорога — не начатые этапы ждут на ней самой; мост и тоннель — позади начала.
     const ground = (id: number) => {
@@ -711,7 +731,9 @@ export class Construction {
       ahead: ground(c.id),
       ext,
       extAhead: !!next && ground(next.corridor),
-      start: flip ? 0 : this.headCut(project, c, fromB),
+      // Первый участок полосы — сюда съезжают с дороги: следом съедет другая бригада (CrewLane.room) — не начатые ждут
+      // дальше от начала, уже в своём ряду и не на её пути (та съезжает туда же и уходит в свой ряд).
+      start: flip ? 0 : Math.max(this.headCut(project, c, fromB), i === 0 && !c.build.was ? (b.lane.room ?? 0) : 0),
       extStart: nextPiece?.build ? this.headCut(project, nextPiece, next.fromB) : 0,
     };
     const spans: [number, number, number] = flip ? [0, 0, 0] : spansOf(c.build, c.length);
@@ -855,6 +877,26 @@ export class Construction {
   }
 
   /**
+   * Участок c проекта id (заполняется от fromB) кончается тупиком — других полотен у дальнего узла нет. Достроили —
+   * машины бригады выезжают в поток с мест (Game.driveFrom): в попутную полосу съезжают на ходу (glide, GLIDE_SLOPE) и
+   * разворачиваются в тупике, как все машины. Бригада в ряду над встречной (несколько бригад на полотне) не успела бы
+   * съехать до разворота — дуга сжималась бы до волчка: её колонна встаёт на столько метров раньше конца, сколько
+   * нужно, чтобы съехать (этапы доходят до конца и так — их машины на своих местах). Ряд row — вправо по ходу
+   * заполнения; уже над попутной (или перестройка, путь) — 0.
+   */
+  private deadEndRoom(id: number, piece: Piece, fromB: boolean, row: number): number {
+    if (this.isRail(id) || piece.build?.was) return 0;
+    const c = piece as Corridor;
+    const net = this.host.roads.net;
+    if (net.node(fromB ? c.a : c.b).corridors.length !== 1) return 0;
+    const sign = fromB ? -1 : 1;
+    let lat = Infinity;
+    for (const l of c.lanes) if (l.flow * sign > 0) lat = Math.min(lat, Math.abs(l.offset * sign - row));
+    if (!Number.isFinite(lat) || lat < 1.5) return 0;
+    return lat / GLIDE_SLOPE + 5;
+  }
+
+  /**
    * Участок c проекта id заполняется от fromB, а его начало — площадка перекрёстка, к которому подходит готовая дорога
    * (по ней ездят): на сколько метров от начала она тянется (обрез полотна и пара метров запаса) — не начатые этапы
    * ждут за ней (stageSlots, start), а не посреди перекрёстка. Узел только между участками стройки (там не ездят),
@@ -966,7 +1008,13 @@ export class Construction {
       }
       if (node !== null) this.crews.relocate(b, node);
     }
-    for (const [c, at] of onSite) this.layRows(at.project, c, at.list);
+    // Ряды — на все бригады фронта, и на те, что ещё едут к нему: приедет вторая — первая уже в своём ряду, а не стоит
+    // по оси на её пути (едущие встанут в ряды правее — съезжают на стройку из правой полосы).
+    for (const [c, at] of onSite) {
+      let coming = 0;
+      for (const o of this.crews.brigades.values()) if (o.project === at.project && o.state === 'going' && !o.lane && o.front?.corridor === c.id) coming++;
+      this.layRows(at.project, c, at.list, coming);
+    }
   }
 
   /** Фронт (участок) проекта id по номеру участка — если он ещё строится. */
@@ -980,20 +1028,34 @@ export class Construction {
    * Раскладка сменилась (бригада приехала или уехала, участок другой ширины) — бригада перестраивается в свой ряд
    * плавно, с места, где сейчас её головная машина (а только что приехавшая — с начала участка): каждая машина
    * сворачивает, проезжая это место, — стоящая ждёт в своём ряду (LaneShift). Порядок рядов — как стоят сейчас.
+   * Ширина делится и на coming бригад, что ещё едут к этому фронту: приехавшие раньше — в правых рядах (съезжают на
+   * стройку из правой полосы — им почти не перестраиваться), следующие встают левее, проезжая мимо стоящих справа, а
+   * не сквозь них; из двух в одном ряду (только что съехавшая — по оси) левее та, что съехала позже.
    */
-  private layRows(project: number, piece: Piece, list: Brigade[]): void {
+  private layRows(project: number, piece: Piece, list: Brigade[], coming = 0): void {
     const c = this.pieceById(project, piece.id);
     if (!c) return;
-    const rows = crewRows(c as Corridor, list.length);
-    const order = [...list].sort((p, q) => laneRow(p.lane!) - laneRow(q.lane!) || p.id - q.id);
+    const rows = crewRows(c as Corridor, list.length + coming);
+    const since = (b: Brigade) => b.lane!.t0 ?? -Infinity;
+    const order = [...list].sort((p, q) => laneRow(p.lane!) - laneRow(q.lane!) || since(q) - since(p) || q.id - p.id);
     order.forEach((b, k) => {
       const lane = b.lane!;
-      const want = rows[k] ?? 0;
+      const want = rows[coming + k] ?? 0;
       if (Math.abs(laneRow(lane) - want) < 0.05) return;
       const lead = this.crews.carsAt(b)[0]?.s ?? lane.legs[0].at;
       const at = Math.max(lead, lane.legs[0].at);
       const shifts = (lane.shifts ?? []).filter((sh) => sh.at < at - 1e-6);
-      shifts.push({ at, to: want });
+      // Откуда перестраиваться: только что съехавшая — от полосы дороги, с которой съехала (её путь сходится к оси
+      // там же, где начинается перестроение, — сдвиги складываются), остальные — из своего ряда. Далеко — плавнее.
+      let from = laneRow(lane);
+      if (lead < lane.legs[0].at) {
+        const fromB = lane.legs[0].fromB;
+        const start = c.lut.pointAt(fromB ? c.length : 0);
+        const t = c.lut.tangentAt(fromB ? c.length : 0);
+        from = dot(sub(lane.path[0], start), rightNormal(fromB ? scale(t, -1) : t));
+      }
+      const len = Math.max(ROW_RAMP, ROW_SLOPE * Math.abs(want - from));
+      shifts.push(len > ROW_RAMP ? { at, to: want, len } : { at, to: want });
       lane.shifts = shifts;
     });
   }
