@@ -35,7 +35,6 @@ import {
   depositSig,
   dirtyIndustries,
   drawDeposit,
-  drawGrime,
   drawHarmZone,
   drawRuinOverlay,
   drawSiteArt,
@@ -2372,7 +2371,7 @@ export class Renderer {
   private drawStill(game: Game, view: Box): void {
     const inView = (fp: Footprint) =>
       fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
-    // Дома в зоне вредных предприятий — посеревшие (enterpriseArt).
+    // Дома в зоне вредных предприятий — с посеревшими крышами (enterpriseArt.houseGrime → houseArt.grimy).
     const dirty = dirtyIndustries(game.industries);
     const trees = BIOMES[game.terrain.biome].palette.trees;
     for (const town of game.towns) {
@@ -2380,8 +2379,8 @@ export class Renderer {
       for (const b of town.buildings) {
         if (!inView(b.fp)) continue;
         // Тип застройки — двор, забор, огород, панельный дом с площадкой… (houseArt; детали — по зуму).
-        drawHouseArt(this.ctx, b, this.camera.zoom, trees);
-        if (dirty.length && b.kind !== 'landmark' && this.camera.zoom > 0.25) drawGrime(this.ctx, b, houseGrime(b, dirty), this.camera.zoom > 0.5);
+        const grime = dirty.length && b.kind !== 'landmark' ? houseGrime(b, dirty) : 0;
+        drawHouseArt(this.ctx, b, this.camera.zoom, trees, grime);
       }
     }
     for (const ind of game.industries) {

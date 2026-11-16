@@ -112,6 +112,36 @@ export function tone(hex: string, k: number): string {
   return v;
 }
 
+/** Налёт у дома вплотную к вредному заводу (grime = 1): насколько крыша теряет цвет и насколько темнеет. */
+export const GRIME_LOOK = { fade: 0.7, dark: 0.06 } as const;
+
+/**
+ * Крыша в налёте от вредных предприятий (grime 0…1, enterpriseArt.houseGrime): блёкнет к серому той же яркости и лишь
+ * чуть темнеет — дом в зоне вреда серый, но не тёмный пятном. Налёт — шагами по 0.1 (кэш tone).
+ */
+export function grimy(hex: string, grime: number): string {
+  const g = Math.round(clamp(grime, 0, 1) * 10) / 10;
+  if (!g) return hex;
+  const key = `${hex}|g${g}`;
+  let v = tones.get(key);
+  if (v === undefined) {
+    const n = parseInt(hex.slice(1), 16);
+    const r = (n >> 16) & 255;
+    const gr = (n >> 8) & 255;
+    const b = n & 255;
+    const y = 0.299 * r + 0.587 * gr + 0.114 * b;
+    const s = GRIME_LOOK.fade * g;
+    const d = 1 - GRIME_LOOK.dark * g;
+    const f = (c: number) => Math.max(0, Math.min(255, Math.round((c + (y - c) * s) * d)));
+    v = `#${((1 << 24) | (f(r) << 16) | (f(gr) << 8) | f(b)).toString(16).slice(1)}`;
+    tones.set(key, v);
+  }
+  return v;
+}
+
+/** Налёт рисуемого сейчас дома (drawHouseArt): им тонируются его крыши — pitched и flat (мелочи на них — нет). */
+let soot = 0;
+
 /** Высота стен по этажам, м: от неё — длина тени. */
 const wallZ = (floors: number) => 1 + floors * 3;
 
@@ -148,6 +178,7 @@ function pitched(a: Art, x: number, y: number, w: number, h: number, z: number, 
   if (a.pass === 1) return a.rectShadow(x, y, w, h, z + Math.min(w, h) * 0.3);
   if (a.pass !== 2) return;
   const c = a.c;
+  color = grimy(color, soot);
   if (!a.lod) {
     c.fillStyle = color;
     c.fillRect(x, y, w, h);
@@ -240,6 +271,7 @@ function flat(a: Art, x: number, y: number, w: number, h: number, z: number, col
   if (a.pass === 1) return a.rectShadow(x, y, w, h, z);
   if (a.pass !== 2) return;
   const c = a.c;
+  color = grimy(color, soot);
   c.fillStyle = color;
   c.fillRect(x, y, w, h);
   if (!a.lod) return;
@@ -1282,9 +1314,18 @@ const SCENES: Record<HouseForm, (a: Art, lot: Lot) => void> = {
 
 /**
  * Дом города: сцена его типа в осях участка (улица — к −y), три прохода (земля, тени, крыши). trees — цвета
- * деревьев биома.
+ * деревьев биома; grime — налёт от вредных предприятий (enterpriseArt.houseGrime): крыши блёкнут (grimy).
  */
-export function drawHouseArt(ctx: CanvasRenderingContext2D, b: TownBuilding, zoom: number, trees: readonly string[] = TREES): void {
+export function drawHouseArt(ctx: CanvasRenderingContext2D, b: TownBuilding, zoom: number, trees: readonly string[] = TREES, grime = 0): void {
+  soot = grime;
+  try {
+    drawScene(ctx, b, zoom, trees);
+  } finally {
+    soot = 0;
+  }
+}
+
+function drawScene(ctx: CanvasRenderingContext2D, b: TownBuilding, zoom: number, trees: readonly string[]): void {
   const form = formOf(b);
   const angle = (b.face ?? -1) === 1 ? b.fp.angle + Math.PI : b.fp.angle;
   const fp: Footprint = { center: b.fp.center, w: b.fp.w, h: b.fp.h, angle };

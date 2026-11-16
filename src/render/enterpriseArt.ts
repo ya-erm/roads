@@ -314,7 +314,11 @@ export function drawSoot(c: CanvasRenderingContext2D, ind: Industry): void {
 /** Вредные работающие предприятия: от них сереют дома (houseGrime). */
 export const dirtyIndustries = (list: readonly Industry[]): Industry[] => list.filter((i) => harmClass(i.info.kind) && isActive(i));
 
-/** Насколько посерел дом от вредных предприятий рядом: 0…1 (по ближайшему, класс 3 вплотную — 1). */
+/**
+ * Насколько посерел дом от вредных предприятий рядом: 0…1 (по ближайшему, класс 3 вплотную — 1). Спад к краю зоны
+ * вреда — линейный, как у вреда росту города (enterprise.harmTo): в километре от завода дом почти не серый. Серость
+ * рисует сам дом — крыши блёкнут, почти не темнея (houseArt.grimy), а не тёмное пятно на весь участок.
+ */
 export function houseGrime(b: TownBuilding, dirty: readonly Industry[]): number {
   let g = 0;
   for (const ind of dirty) {
@@ -322,27 +326,9 @@ export function houseGrime(b: TownBuilding, dirty: readonly Industry[]): number 
     const gap = dist(b.fp.center, ind.fp.center) - footprintRadius(ind.fp) / 2;
     const reach = harmReach(cls);
     if (gap >= reach) continue;
-    g = Math.max(g, Math.min(1, (cls / 2.5) * (1 - Math.max(0, gap) / reach) ** 0.6));
+    g = Math.max(g, Math.min(1, (cls / 2.5) * (1 - Math.max(0, gap) / reach)));
   }
   return g;
-}
-
-/** Серый налёт на крыше дома в зоне вреда и пара тёмных подтёков. */
-export function drawGrime(c: CanvasRenderingContext2D, b: TownBuilding, grime: number, near: boolean): void {
-  if (grime < 0.05) return;
-  const fp = b.fp;
-  c.save();
-  c.translate(fp.center.x, fp.center.y);
-  c.rotate(fp.angle);
-  c.fillStyle = `rgba(78,74,66,${(0.55 * grime).toFixed(3)})`;
-  c.fillRect(-fp.w / 2, -fp.h / 2, fp.w, fp.h);
-  if (near && grime > 0.3) {
-    c.fillStyle = `rgba(50,46,40,${(0.35 * grime).toFixed(3)})`;
-    const k = hash(b.id, 1);
-    c.fillRect(-fp.w / 2 + fp.w * k * 0.6, -fp.h / 2, 1.4, fp.h * 0.6);
-    c.fillRect(-fp.w / 2 + fp.w * (0.3 + k * 0.5), -fp.h / 2, 1, fp.h * 0.4);
-  }
-  c.restore();
 }
 
 // ---------- Заброшенное и стройка ----------

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { INDUSTRY_TYPES } from '../world/cargo';
+import type { Industry, TownBuilding } from '../world/entities';
 import type { Footprint } from '../world/spatial';
-import { craneSpot } from './enterpriseArt';
+import { craneSpot, dirtyIndustries, houseGrime } from './enterpriseArt';
 
 /** Ферма из баг-репорта: участок 110×80 под углом, автостанция — вплотную к его западному краю. */
 const farm: Footprint = { center: { x: 6976.5, y: 6114.5 }, w: 110, h: 80, angle: -0.343 };
@@ -45,5 +47,25 @@ describe('Кран стройки предприятия', () => {
     // Стрела — к другой стороне: от опоры через участок.
     const north = craneSpot(farm, 0.3, 0, [beside(farm, 0, 1)]);
     expect(north.tip.y).toBeGreaterThan(north.base.y);
+  });
+});
+
+describe('Налёт на домах у вредных предприятий', () => {
+  const plant = (kind: 'steelmill' | 'claypit', x: number) =>
+    ({ id: 1, info: INDUSTRY_TYPES[kind], fp: { center: { x, y: 0 }, w: 120, h: 80, angle: 0 } }) as unknown as Industry;
+  const house = (x: number) => ({ id: 2, fp: { center: { x, y: 0 }, w: 150, h: 80, angle: 0 } }) as unknown as TownBuilding;
+
+  it('вплотную к металлургическому — серый дом, к краю зоны вреда налёт сходит на нет линейно', () => {
+    const dirty = dirtyIndustries([plant('steelmill', 0)]);
+    expect(houseGrime(house(80), dirty)).toBe(1);
+    const g = [300, 600, 900, 1200].map((x) => houseGrime(house(x), dirty));
+    for (let i = 1; i < g.length; i++) expect(g[i]).toBeLessThan(g[i - 1]);
+    expect(houseGrime(house(2000), dirty)).toBe(0);
+  });
+
+  it('дома из баг-репорта — в километре от завода и в 700 м от глиняного карьера — почти без налёта', () => {
+    // Было: налёт 0.56–0.72 и тёмная пелена на весь участок — панельные дома почти чёрные.
+    expect(houseGrime(house(980), dirtyIndustries([plant('steelmill', 0)]))).toBeLessThan(0.4);
+    expect(houseGrime(house(714), dirtyIndustries([plant('claypit', 0)]))).toBeLessThan(0.2);
   });
 });
