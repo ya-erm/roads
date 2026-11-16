@@ -15,10 +15,12 @@ import {
   loopArea,
   resample,
   TurnPath,
+  turnPaths,
   wantsMarks,
 } from './junctionMarks';
 import { LaneNet, LaneSlot, twoWay } from './model';
 import { LaneRenderer } from './draw';
+import { localGraph } from './preview';
 
 const STREET = { cls: 'street' as const, lanes: twoWay(1, 1) };
 const AVENUE = { cls: 'avenue' as const, lanes: twoWay(2, 2) };
@@ -183,5 +185,52 @@ describe('Разметка перекрёстка целиком', () => {
     expect(m.islands.reduce((s, l) => s + Math.abs(loopArea(l)), 0)).toBeGreaterThan(200);
     // Прямо — по одной границе попутных полос на каждом из четырёх подъездов.
     expect(m.guides.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('Y с острым углом между ветками: крутой поворот с ветки на ветку (круче 150°) не заштрихован — островки обходят все повороты, кроме разворотов', () => {
+    // Развязка из баг-репорта: шоссе 2+2 с запада расходится на две ветки — на северо-восток и на восток — под острым
+    // углом; полосы через узел связаны вручную, из северо-восточной ветки можно налево на восточную.
+    const net = new LaneNet();
+    const j = net.addJunction(P(-8.321, 13.391));
+    const ne = net.addSeam(P(124.795, -109.999), P(-0.619, 0.785));
+    const w = net.addSeam(P(-134.5, 66.884), P(-0.964, 0.265));
+    const e = net.addSeam(P(134.5, -25.517), P(0.946, -0.323));
+    const lane = (offset: number, flow: 1 | -1, from = 0, to = Infinity): LaneSlot => ({ offset, flow, from, to });
+    const curve = (p0: Vec, p1: Vec, p2: Vec, p3: Vec) => ({ p0, p1, p2, p3 });
+    const fromNE = net.addCorridor(ne.id, j.id, {
+      cls: 'highway',
+      lanes: [lane(-3.5, -1), lane(3.5, 1), lane(10.5, 1, 57.2)],
+      curve: curve(P(124.795, -109.999), P(87.197, -62.324), P(42.319, -20.66), P(-8.321, 13.391)),
+    });
+    const toW = net.addCorridor(j.id, w.id, {
+      cls: 'highway',
+      lanes: [lane(-3.5, -1), lane(3.5, 1), lane(10.5, 1, 0, 57.6), lane(-10.5, -1, 0, 100.3)],
+      curve: curve(P(-8.321, 13.391), P(-48.307, 35.473), P(-90.504, 54.816), P(-134.5, 66.884)),
+    });
+    const toE = net.addCorridor(j.id, e.id, {
+      cls: 'highway',
+      lanes: [lane(-3.5, -1), lane(3.5, 1), lane(10.5, 1)],
+      curve: curve(P(-8.321, 13.391), P(39.127, -0.051), P(87.877, -9.61), P(134.5, -25.517)),
+    });
+    const y = { net, node: net.node(j.id) };
+    y.node.lanes = [`${toW.id}.1>${fromNE.id}.0`, `${fromNE.id}.1>${toE.id}.1`, `${fromNE.id}.1>${toW.id}.0`, `${toE.id}.0>${toW.id}.1`];
+    setCornerRadius(net, j.id, cornerKey(fromNE.id, toE.id), 10);
+    const cuts = junctionCuts(y.net);
+    const m = junctionMarks(y.net, y.node, plateOf(y.net, y.node.id), cuts)!;
+    expect(m).not.toBeNull();
+    expect(m.islands.length).toBeGreaterThan(0);
+    const g = localGraph(y.net, new Set([y.node.id]), cuts);
+    const paths = turnPaths(g, y.node.id);
+    const corridor = (link: number) => g.links.get(link)?.corridor;
+    const drives = paths.filter((p) => corridor(p.inLink) !== corridor(p.outLink));
+    // Есть поворот с ветки на ветку круче 150° — раньше его считали разворотом и штриховали асфальт под ним.
+    expect(drives.some((p) => Math.abs(p.theta) > 2.6)).toBe(true);
+    const inIsland = (q: Vec) => m.islands.filter((l) => insidePoly(q, l)).length % 2 === 1;
+    for (const p of drives) {
+      expect(p.kind).not.toBe('uturn');
+      // Ни одна точка траектории — не на штриховке, и штриховка не ближе полполосы к ней.
+      expect(resample(p.points, 100).filter(inIsland)).toEqual([]);
+      expect(nearest(m.islands, p.points)).toBeGreaterThan(LANE_W / 2);
+    }
   });
 });

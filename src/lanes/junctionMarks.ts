@@ -105,7 +105,9 @@ export function turnPaths(g: LaneGraph, node: number): TurnPath[] {
   const index = new Map(moves.map((m, i) => [m.key, i]));
   return moves.map((m) => {
     const t = theta(m);
-    const uturn = Math.abs(t) > 2.6 || g.links.get(m.outLink)?.corridor === g.links.get(m.inLink)?.corridor;
+    // Разворот — только назад в ту же дорогу. Крутой поворот на другую ветку (на Y с острым углом между ветками —
+    // круче 150°) — обычный поворот: по нему ездят, островок его асфальт не штрихует (линий у него нет — SHARP_TURN).
+    const uturn = g.links.get(m.outLink)?.corridor === g.links.get(m.inLink)?.corridor;
     const kind: TurnKind = uturn ? 'uturn' : straight.get(m.inLink) === m.outLink ? 'straight' : t > 0 ? 'right' : 'left';
     const crosses = [...m.conflicts].filter(([, k]) => k === 'cross').map(([key]) => index.get(key)).filter((i): i is number => i !== undefined);
     return {
