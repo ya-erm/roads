@@ -56,6 +56,7 @@ import { corridorHalf } from '../world/worldgen';
 import { PARK_INFO } from '../world/parkPick';
 import { yardOf } from '../world/townForms';
 import { maxTruck } from '../world/retail';
+import { STREET_BAN_MARK } from '../world/streetBans';
 import { corridorCurveSigns, freshSignCorridors, staleSignCorridors } from '../game/roadProject';
 import { type DrawSettings, type ProjectTools, sharedRoadProject } from './projecttools';
 import { RailTools } from './railtools';
@@ -3402,7 +3403,8 @@ export class Controller {
       const c = area.contents;
       o.area = { a: area.a, b: area.b, segs: c.segs, corridors: c.corridors, fps: [...c.buildings.map((x) => x.fp), ...c.stations.map((x) => x.fp)] };
       if (!this.pendingArea) {
-        o.label = { text: `${areaSummary(c)} · +${money(c.refund)}${c.cost ? ` −${money(c.cost)}` : ''}`, ok: true };
+        const ban = c.corridors.some((id) => g.streetBanAt(id)) ? ` · ${STREET_BAN_MARK}` : '';
+        o.label = { text: `${areaSummary(c)} · +${money(c.refund)}${c.cost ? ` −${money(c.cost)}` : ''}${ban}`, ok: true };
         return o;
       }
     }
@@ -3812,7 +3814,7 @@ export class Controller {
         if (this.spanStart) {
           const plan = this.spanPlan(p);
           const c = g.roads.net.corridors.get(this.spanStart.corridor);
-          if (plan) this.showRoadPlan(o, plan, `Снести кусок · +${money(-plan.cost)}`);
+          if (plan) this.showRoadPlan(o, plan, `Снести кусок · +${money(-plan.cost)}${g.streetBanAt(this.spanStart.corridor) ? ` · ${STREET_BAN_MARK}` : ''}`);
           if (c) o.points = [this.spanStart.s, c.lut.closest(p).s].map((s) => ({ pos: c.lut.pointAt(s), color: '#e8483f', r: 5 }));
           break;
         }
@@ -3887,7 +3889,7 @@ export class Controller {
         const road = this.roadTools.bulldozePlan(p, this.snapRadius * 0.3);
         if (road) {
           o.corridor = { id: road.corridor.id, color: 'red' };
-          o.label = { text: `+${money(-road.plan.cost)}`, ok: true };
+          o.label = { text: `+${money(-road.plan.cost)}${g.streetBanAt(road.corridor.id) ? ` · ${STREET_BAN_MARK}` : ''}`, ok: true };
         }
         break;
       }

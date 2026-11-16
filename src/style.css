@@ -726,6 +726,24 @@ button.icon.menu-back {
   font-size: 18px;
 }
 
+/* Снос городской улицы: значок «город здесь больше не строит» (как у цены сноса на карте) и что он значит. */
+.ban-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.ban-mark {
+  flex: none;
+  padding: 1px 6px;
+  background: #fde7e5;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #c0392b;
+  cursor: help;
+}
+
 .modal.confirm .menu-buttons {
   flex-direction: row;
   justify-content: center;

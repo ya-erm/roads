@@ -73,6 +73,7 @@ import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
 import { type ParkEntry, ParkIndex } from '../world/parkPick';
 import { FORM_NAMES, formOf, residentsOf, SETTLE_RULE, townTier, yardOf, zoneTown } from '../world/townForms';
 import { START_ROADS } from '../world/startRoads';
+import { alongBan, banCovered, STREET_BAN, uncoveredRuns } from '../world/streetBans';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
 import { prepareSettings } from '../scenario/generator';
 import { Ideas, type IdeasState } from '../scenario/ideas';
@@ -337,6 +338,8 @@ interface UndoSnapshot {
   terraformRedo?: TerraformEdit[];
   /** Снимок для повтора: дома, которые вернула отмена (действие их снесло), — снести снова. */
   dropBuildings?: { townId: number; ids: number[] }[];
+  /** Запреты улиц городов до действия (снос их ставит, дорога игрока снимает): отмена возвращает как было. */
+  streetBans?: { townId: number; list: Vec[][] }[];
 }
 
 /** База стоит там же (площадка и ворота), что и в снимке s. */
@@ -3903,6 +3906,8 @@ export class Game implements BuildContext {
       spent: 0,
       projects: this.construction.projects.size ? this.construction.snapshot() : undefined,
       bases: this.construction.crews.bases.size ? [...this.construction.crews.bases.values()].map((b) => ({ id: b.id, fp: structuredClone(b.fp), nodeId: b.nodeId })) : undefined,
+      // Оси запретов не меняются — списки копируем, точки общие.
+      streetBans: this.towns.filter((t) => t.streetBans?.length).map((t) => ({ townId: t.id, list: [...t.streetBans!] })),
     };
   }
 
@@ -3927,6 +3932,11 @@ export class Game implements BuildContext {
     else {
       top.spent = top.moneyBefore - this.money;
       this.journalBuild(top);
+      // Дорога игрока на месте снесённой улицы — запрет снят; снесённые городские улицы город больше не строит.
+      if (top.roadsVersion !== this.roads.net.version) {
+        this.liftStreetBans();
+        this.banStreets(top.roads);
+      }
       // Новое действие после отмены — отменённое больше не повторить.
       this.redoStack.length = 0;
     }
@@ -4062,6 +4072,14 @@ export class Game implements BuildContext {
     carryBuild(this.roads.net, roads);
     this.roads.replace(roads);
     this.construction.restore(snap.projects ?? []);
+    // Запреты улиц — как были: отмена сноса улицы снимает её запрет, повтор — ставит снова.
+    if (snap.streetBans) {
+      for (const t of this.towns) {
+        const list = snap.streetBans.find((b) => b.townId === t.id)?.list;
+        if (list?.length) t.streetBans = [...list];
+        else delete t.streetBans;
+      }
+    }
 
     // Станции: живые остаются (со своими грузами и пассажирами), лишние уходят, снесённые возвращаются.
     const keep = new Set(snap.stations.map((s) => s.id));
@@ -8103,6 +8121,68 @@ export class Game implements BuildContext {
   }
 
   /**
+   * Город, чьи улицы здесь (world/streetBans.ts): точка ближе к его центру, чем к другим, и не дальше, чем он может
+   * дорасти улицами (townReach — не дальше края застройки и edgeMax; с запасом — город растёт). null — точка вне
+   * городов. Без townReach: подпись сноса спрашивает каждый кадр, а он сортирует все дома.
+   */
+  private streetTownAt(p: Vec): Town | null {
+    for (const t of this.towns) {
+      if (dist(p, t.center) <= Math.max(t.radius + TOWN_GROWTH.edgeMax, t.extent ?? t.radius) + 150 && this.ownedBy(t, p)) return t;
+    }
+    return null;
+  }
+
+  /**
+   * Снос полотна id запретит городу улицу на этом месте: на земле, не кольцо и не строящийся проект, в городе
+   * (подсказка 🏘✕ при сносе — controller.ts).
+   */
+  streetBanAt(id: number): boolean {
+    const net = this.roads.net;
+    const c = net.corridors.get(id);
+    if (!c || c.build || c.ring || net.node(c.a).level !== 0 || net.node(c.b).level !== 0) return false;
+    return !!this.streetTownAt(c.lut.pointAt(c.length / 2));
+  }
+
+  /** Точка под дорогой: ближе STREET_BAN.near к оси какого-нибудь полотна. */
+  private underRoad(p: Vec): boolean {
+    return this.roads.net.corridorsNear(p, STREET_BAN.near + 30).some((c) => c.lut.closest(p).d < STREET_BAN.near);
+  }
+
+  /**
+   * После действия игрока: городские улицы, которых больше нет (сравнение с сетью before до действия), — в запреты
+   * городов. Куски, оставшиеся под дорогами (слияние полотен, сдвиг, смена полос), — не снос.
+   */
+  private banStreets(before: LaneNet): void {
+    const net = this.roads.net;
+    for (const c of before.corridors.values()) {
+      const now = net.corridors.get(c.id);
+      if (now && now.curve.p0.x === c.curve.p0.x && now.curve.p0.y === c.curve.p0.y && now.curve.p3.x === c.curve.p3.x && now.curve.p3.y === c.curve.p3.y) continue;
+      if (c.build || c.ring || before.node(c.a).level !== 0 || before.node(c.b).level !== 0) continue;
+      for (const run of uncoveredRuns(c, (p) => this.underRoad(p))) {
+        const town = this.streetTownAt(run[Math.floor(run.length / 2)]);
+        if (!town) continue;
+        town.streetBans = [...(town.streetBans ?? []), run].slice(-STREET_BAN.max);
+      }
+    }
+  }
+
+  /** Запреты, на месте которых теперь дорога (её проложил игрок), сняты. */
+  private liftStreetBans(): void {
+    for (const t of this.towns) {
+      if (!t.streetBans?.length) continue;
+      const keep = t.streetBans.filter((ban) => !banCovered(ban, (p) => this.underRoad(p)));
+      if (keep.length === t.streetBans.length) continue;
+      if (keep.length) t.streetBans = keep;
+      else delete t.streetBans;
+    }
+  }
+
+  /** Новая улица города идёт вдоль улицы, снесённой игроком: так город не строит. */
+  private streetBanned(c: Corridor): boolean {
+    return this.towns.some((t) => t.streetBans?.some((ban) => alongBan(c, ban)));
+  }
+
+  /**
    * Как далеко от центра город может строить: чуть дальше края плотной застройки,
    * но не дальше предела по населению (если только застройка уже не дошла до него).
    */
@@ -8307,6 +8387,8 @@ export class Game implements BuildContext {
       const fresh = [...plan.net.nodes.keys()].filter((id) => !net.nodes.has(id)).length;
       if (fresh > (c.start.kind === 'corridor' ? 1 : 0) + (c.end.kind === 'node' ? 0 : 1)) continue;
       const added = plan.changed.map((id) => plan.net!.corridor(id)).filter((x) => !net.corridors.has(x.id));
+      // Вдоль улицы, снесённой игроком, город не строит (world/streetBans.ts).
+      if (added.some((x) => this.streetBanned(x))) continue;
       // История Ctrl+Z не сбрасывается: отмена уберёт и эту улицу, и дома вдоль неё.
       this.roadBuilder.apply(plan);
       // Новая улица — та, что соединяет оба конца (а не куски разрезанной ею).

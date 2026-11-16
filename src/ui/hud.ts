@@ -28,6 +28,7 @@ import type { TerraformMode } from '../world/terrain';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
 import { isBusTerminal, type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
 import { lastTownNeed, townNeed } from '../world/townSupply';
+import { STREET_BAN_MARK, STREET_BAN_TIP } from '../world/streetBans';
 import { flatsOf, FORM_NAMES, formOf, JOBS_PER_FLOOR, residentsOf, storeysOf } from '../world/townForms';
 import { maxTruck, receiverOf, stockAt, stockCap, stockFill } from '../world/retail';
 import { footprintRadius } from '../world/spatial';
@@ -2158,7 +2159,9 @@ export class Hud {
         : c.bulldozeMode === 'lane'
           ? 'Клик по крайней полосе дороги — она уберётся (вместе с продолжениями через стыки); съезд или въезд, куда она уходит, снесётся целиком. Shift и протяжка вдоль — только кусок полосы. Ctrl+Z — вернуть.'
           : 'Клик — снести дорогу, дом, станцию или базу стройки. Зажмите и ведите — сносится всё под курсором. Shift и протяжка вдоль дороги — только кусок между точками. Ctrl+Z — вернуть.';
-    return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как сносить</div><p class="muted">${tip}</p></div></div>`;
+    // Значок у цены сноса городской улицы (controller.ts): что он значит — здесь, подробности — в подсказке.
+    const ban = c.bulldozeMode === 'lane' ? '' : `<p class="muted ban-legend"><span class="ban-mark" data-tip="${STREET_BAN_TIP}">${STREET_BAN_MARK}</span> город здесь больше не строит</p>`;
+    return `<div class="opt-row">${sw}<div class="opt-group narrow"><div class="opt-title">Как сносить</div><p class="muted">${tip}</p>${ban}</div></div>`;
   }
 
   /** Окно «точно снести?» для большой рамки или «удалить шаблон?». */
@@ -2200,6 +2203,7 @@ export class Hud {
           ${chip(roadSvg({ cls: 'street', lanesF: 1, lanesB: 1 }, 40, 18), c.segs.length, 'Участки дорог и путей')}
           ${chip('🏠', c.buildings.length, 'Дома')}
           ${chip(stationSvg('road', 24), c.stations.length, 'Станции')}
+          ${c.corridors.some((id) => this.game().streetBanAt(id)) ? `<span class="confirm-chip" data-tip="${STREET_BAN_TIP}">${STREET_BAN_MARK}</span>` : ''}
         </div>
         <p class="muted">Вернём за дороги ${money(c.refund)}${c.cost ? `, снос домов стоит ${money(c.cost)}` : ''}. Отменить можно Ctrl+Z.</p>
         <div class="menu-buttons">
