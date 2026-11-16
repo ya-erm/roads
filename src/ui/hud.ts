@@ -22,6 +22,7 @@ import {
   vehicleCapacity,
   vehicleLoad,
 } from '../game/transport';
+import { unlockProgressHtml, unlockTip } from './unlockCard';
 import { BRUSH_SIZES, BrushSize, Controller, DRAW_MODES, Tool, TOOLS } from '../input/controller';
 import type { TerraformMode } from '../world/terrain';
 import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/cargo';
@@ -3187,8 +3188,8 @@ export class Hud {
   }
 
   /**
-   * Следующая модель, которой ещё нет в продаже, — серой карточкой с замком: когда откроется (в сценарии —
-   * на каком этапе, в песочнице — с какого года).
+   * Следующая модель, которой ещё нет в продаже, — серой карточкой с замком: полоска пути до порога и счёт
+   * перевезённого её семейством (game/unlocks.ts) — «👤 1 240 / 2 000».
    */
   private nextModelHtml(mode: LineMode, carries: 'freight' | 'passengers', tank = false): string {
     const g = this.game();
@@ -3196,12 +3197,10 @@ export class Hud {
       .filter((id) => MODELS[id].mode === mode && MODELS[id].carries === carries && !g.modelOpen(id))
       .sort((a, b) => MODELS[a].tier - MODELS[b].tier)[0];
     if (!next) return '';
-    const m = MODELS[next];
-    const when = g.scenario?.running ? `этап ${'ABC'[m.tier - 1]}` : `с ${g.modelYear(next)} г.`;
-    const tip = g.scenario?.running ? `Откроется на этапе ${'ABC'[m.tier - 1]} сценария` : `Появится в продаже в ${g.modelYear(next)} году`;
+    const p = g.unlocks.progress(next);
     // Карточка последняя в ряду, у края панели — подсказка выровнена по правому краю.
-    return `<div class="buy-card locked" data-tip-end data-tip="${tip} · вместимость ${m.capacity} · ${money(m.price)}">
-      ${modelSvg(next, '#aab3bc', undefined, undefined, tank)}<span${buyNameCls(modelName(next, tank))}>🔒 ${modelName(next, tank)}</span><small>${when}</small></div>`;
+    return `<div class="buy-card locked" data-model-lock="${next}" data-tip-end data-tip="${esc(unlockTip(next, p, tank))}">
+      ${modelSvg(next, '#aab3bc', undefined, undefined, tank)}<span${buyNameCls(modelName(next, tank))}>🔒 ${modelName(next, tank)}</span>${unlockProgressHtml(p)}</div>`;
   }
 
   /**

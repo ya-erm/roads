@@ -123,6 +123,7 @@ import { annexFootprint, annexReady, growthCap, inAnnexZone } from './annexes';
 import { type AutoFunds, autoFunds } from './autoFunds';
 import { RENEW_GAP, type RenewCar, renewStep } from './autoRenew';
 import { firstRunWaits } from './firstRun';
+import { familyOf, legacyCarried, ModelUnlocks, type UnlocksSave } from './unlocks';
 import {
   AUTO_FLEET,
   DEFAULT_RULE,
@@ -542,7 +543,13 @@ export interface SaveData {
   scenario?: ScenarioState;
   /** Задания без сроков в песочнице и после сценария (scenario/ideas.ts); нет — ещё не включались. */
   ideas?: IdeasState;
-  /** Открытая ступень моделей (в старых сохранениях нет — по этапу сценария). */
+  /**
+   * Открытие моделей по объёму перевозок (unlocks.ts): перевезённое по семействам и открытые модели II и III. Нет —
+   * сохранение до этого: открытое по прежним правилам (год, ступень) остаётся открытым, счёт — по журналу и доходу
+   * нынешних линий (legacyCarried).
+   */
+  unlocks?: UnlocksSave;
+  /** Прежняя ступень моделей сценария — только в старых сохранениях (до unlocks); нет — по этапу сценария. */
   modelTier?: ModelTier;
   /** Журнал партии (в старых сохранениях нет). */
   journal?: JournalEntry[];
@@ -831,13 +838,16 @@ export class Game implements BuildContext {
   /** Множители экономики от событий сценария; в песочнице все равны 1. */
   mods: EconomyMods = NO_MODS;
   /**
-   * Открытая ступень моделей транспорта: в сценарии её поднимают этапы (B — вторая, C — третья), и она
-   * остаётся открытой, если после сценария играть дальше в песочнице. Помимо неё модели выходят по годам.
+   * Модели II и III открываются по объёму перевозок своего семейства (unlocks.ts, MODEL_UNLOCK) — в сценарии
+   * и в песочнице одинаково, без этапов и годов.
    */
-  modelTier: ModelTier = 1;
+  unlocks = new ModelUnlocks();
   /** Год начала партии: у новой — START_YEAR, у загруженной — из сохранения (в старых нет — LEGACY_START_YEAR). */
   readonly startYear: number;
-  /** На сколько месяцев модели выходят раньше по календарю — у старой партии с месяцем длиннее (SaveData.paceShift). */
+  /**
+   * На сколько месяцев модели выходили раньше по календарю — у старой партии с месяцем длиннее (SaveData.paceShift):
+   * по нему старое сохранение узнаёт, что уже вышло по прежнему календарю (Game.modelYear).
+   */
   readonly paceShift: number;
 
   readonly settings: WorldSettings;
@@ -980,7 +990,7 @@ export class Game implements BuildContext {
       rail: this.rail.serialize(),
       scenario: this.scenario?.toSave(),
       ideas: this.ideas.toSave(),
-      modelTier: this.modelTier,
+      unlocks: this.unlocks.toSave(),
       journal: this.journal.entries,
       news: this.news.toSave(),
       timelapse: this.timelapse.toSave(),
@@ -1190,8 +1200,9 @@ export class Game implements BuildContext {
     this.rng.seedState = save.rng;
     if (save.scenario) this.attachScenario(Scenario.restore(this, save.scenario));
     if (save.ideas) this.ideas = new Ideas(this, save.ideas);
-    // Сохранения до ступеней: в сценарии открыто столько, сколько этапов пройдено.
-    this.modelTier = save.modelTier ?? (save.scenario ? (Math.min(3, save.scenario.phase + 1) as ModelTier) : 1);
+    this.unlocks = save.unlocks ? new ModelUnlocks(save.unlocks) : this.legacyUnlocks(save);
+    // Восстановленный счёт старой партии мог уже дойти до порога — модель открывается сразу, с заметкой.
+    this.modelsReached(this.unlocks.reached());
     this.journal.add('load', { date: this.dateLabel, money: this.money, lines: this.lines.size, fleet: this.fleet.size });
     // Старые сохранения (без машин на стоянках магазинов) — машины на стоянках, как в начале партии.
     this.shops.seed(this.towns);
@@ -4001,9 +4012,10 @@ export class Game implements BuildContext {
   }
 
   /**
-   * В каком году партии модель появляется в продаже (без учёта ступеней сценария): через debut лет от начала, а у
-   * старой партии с месяцем длиннее — по реальному времени, раньше на paceShift месяцев (с января того года, когда
-   * это время прошло): вышедшее до пересчёта остаётся в продаже (с точностью до округления лет у моделей).
+   * В каком году партии модель выходила в продажу по прежнему календарю (до открытия по объёму перевозок): через
+   * debut лет от начала, а у старой партии с месяцем длиннее — по реальному времени, раньше на paceShift месяцев
+   * (с января того года, когда это время прошло). Нужен только старым сохранениям (legacyUnlocks): что к их дате уже
+   * вышло, остаётся в продаже.
    */
   modelYear(id: ModelId): number {
     return this.startYear + Math.max(0, Math.ceil((12 * MODELS[id].debut - this.paceShift) / 12 - 1e-9));
@@ -4073,21 +4085,53 @@ export class Game implements BuildContext {
     return Math.round(MODELS[v.model].price * 0.6);
   }
 
-  /** Продаётся ли модель: вышла по году или её ступень уже открыта (в сценарии — этапом). */
-  readonly modelOpen = (id: ModelId): boolean => this.modelYear(id) <= this.year || MODELS[id].tier <= this.modelTier;
+  /** Продаётся ли модель: первого поколения — с начала, II и III — когда их семейство перевезло свой порог (unlocks.ts). */
+  readonly modelOpen = (id: ModelId): boolean => this.unlocks.isOpen(id);
 
   /**
-   * Открывает ступень моделей (сценарий — с новым этапом): заметка о каждой новой модели, которая ещё
-   * не вышла по году, и запись в журнале.
+   * Машина довезла count единиц (груз получателю, пассажиров до их остановки) — в «Перевезено» маршрута и в счёт
+   * семейства её модели; дошло до порога — модель открывается.
    */
-  openModelTier(tier: ModelTier): void {
-    if (tier <= this.modelTier) return;
-    const fresh = (Object.keys(MODELS) as ModelId[]).filter((id) => !this.modelOpen(id) && MODELS[id].tier <= tier);
-    this.modelTier = tier;
+  private carried(line: Line, v: FleetVehicle, count: number): void {
+    line.carriedMonth += count;
+    this.modelsReached(this.unlocks.add(v.model, count));
+  }
+
+  /** Модели открылись: запись в журнале и заметка о каждой — «Открыт Автобус II». */
+  private modelsReached(fresh: ModelId[]): void {
     if (!fresh.length) return;
-    this.journal.add('models', { tier, open: fresh });
+    this.journal.add('models', { open: fresh, carried: fresh.map((id) => Math.floor(this.unlocks.carried[familyOf(id)])) });
     for (const id of fresh)
-      this.notify(`Новая модель: ${MODELS[id].name} — ${MODELS[id].capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7', { kind: 'fleet' });
+      this.notify(`🔓 Открыт ${MODELS[id].name} — ${MODELS[id].capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7', { kind: 'fleet' });
+  }
+
+  /**
+   * Открывает сразу все модели до ступени tier (тестовые страницы и тесты — без перевозок): с заметками, как по
+   * порогу; quiet — без них.
+   */
+  openModelTier(tier: ModelTier, quiet = false): void {
+    const fresh = this.unlocks.unlock((Object.keys(MODELS) as ModelId[]).filter((id) => MODELS[id].tier <= tier));
+    if (!quiet) this.modelsReached(fresh);
+  }
+
+  /**
+   * Сохранение до счёта перевозок: модели, открытые по прежним правилам — вышедшие по году (modelYear) или открытые
+   * ступенью сценария (SaveData.modelTier; совсем старое — по этапу), — остаются в продаже; перевезённое по
+   * семействам — по журналу и доходу нынешних линий (legacyCarried).
+   */
+  private legacyUnlocks(save: SaveData): ModelUnlocks {
+    const tier = save.modelTier ?? (save.scenario ? Math.min(3, save.scenario.phase + 1) : 1);
+    const open = (Object.keys(MODELS) as ModelId[]).filter((id) => MODELS[id].tier > 1 && (this.modelYear(id) <= this.year || MODELS[id].tier <= tier));
+    const months = this.journal.entries
+      .filter((e) => e.k === 'month' && Array.isArray(e.lines))
+      .map((e) => (e.lines as unknown[][]).map((r) => [Number(r[0]), Number(r[3]) || 0] as [number, number]));
+    const lines = [...this.lines.values()].map((l) => {
+      const mode = this.lineMode(l);
+      const pax = this.lineCarries(l) === 'passengers';
+      const family = mode === 'rail' ? (pax ? 'paxRail' : 'freightRail') : pax ? 'bus' : 'truck';
+      return { ...l, family } as const;
+    });
+    return new ModelUnlocks({ carried: legacyCarried(lines, months), open });
   }
 
   /** Модель новее того же рода, если уже продаётся. */
@@ -4263,15 +4307,7 @@ export class Game implements BuildContext {
   /** Итоги месяца и переход на следующий; yield — где их можно прервать до следующего кадра. */
   private *closeMonth(month: number): Generator<void, void, void> {
     yield* this.monthEnd();
-    const yearBefore = this.year;
     this.month = month;
-    // Новый год — новые модели в продаже.
-    if (this.year !== yearBefore) {
-      for (const m of Object.values(MODELS)) {
-        if (this.modelYear(m.id) === this.year && m.tier > this.modelTier)
-          this.notify(`Новая модель: ${m.name} — ${m.capacity} мест. Старый транспорт можно заменить в карточке маршрута`, '#4a8fe7', { kind: 'fleet' });
-      }
-    }
   }
 
   // ---------- Транспортная компания ----------
@@ -6150,7 +6186,7 @@ export class Game implements BuildContext {
         this.ideas.onDelivered(v.cargo, v.amount, receiver, k, maker);
         Object.assign(trip, { drop: { [v.cargo]: v.amount }, to: receiver ? `${receiver.type}:${receiver.id}` : 'никому', from: v.loadedAt, x: k });
         moved += v.amount;
-        line.carriedMonth += v.amount;
+        this.carried(line, v, v.amount);
         v.dropped = v.cargo;
         v.cargo = null;
         v.amount = 0;
@@ -6194,7 +6230,7 @@ export class Game implements BuildContext {
         if (workers) {
           crew += g.count;
           moved += g.count;
-          line.carriedMonth += g.count;
+          this.carried(line, v, g.count);
           this.scenario?.onPassengers(from?.townIds[0], undefined, g.count, 1);
           this.ideas.onPassengers(from?.townIds[0], undefined, g.count, 1);
           continue;
@@ -6206,7 +6242,7 @@ export class Game implements BuildContext {
         const path = line.stops[v.stop] === st.id ? ridePath(line.stops, (id) => this.stations.get(id)?.fp.center, g.from, v.stop) : null;
         revenue += Math.round(paxFare(g.count, distance, path, k) * this.mods.price('passengers'));
         moved += g.count;
-        line.carriedMonth += g.count;
+        this.carried(line, v, g.count);
         this.scenario?.onPassengers(from?.townIds[0], st.townIds[0], g.count, k);
         this.ideas.onPassengers(from?.townIds[0], st.townIds[0], g.count, k);
         const town = st.townIds.length ? this.towns.find((t) => t.id === st.townIds[0]) : undefined;

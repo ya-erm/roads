@@ -29,8 +29,8 @@ import type { TestScene } from './index';
 export function buildVehiclesScene(): TestScene {
   const game = new Game({ seed: 1, size: 'small', towns: 0, industries: 'few', money: 1_000_000_000, water: 'dry', terrainVersion: TERRAIN_VERSION });
   clearMap(game);
-  // Все модели сразу — как на последнем этапе сценария.
-  game.modelTier = 3;
+  // Все модели сразу, без перевозок.
+  game.openModelTier(3, true);
   const sc = new Builder(game);
 
   const X = [2000, 2350, 2700, 3050];

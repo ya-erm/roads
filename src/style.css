@@ -3399,6 +3399,30 @@ button.small.with-ic {
   opacity: 0.4;
 }
 
+/* Путь до открытия модели (game/unlocks.ts): полоска и счёт перевезённого семейством — «👤 1 240 / 2 000». */
+.buy-card .unlock-bar {
+  display: block;
+  width: 86%;
+  height: 4px;
+  margin-top: 2px;
+  border-radius: 2px;
+  background: #dde3e9;
+  overflow: hidden;
+}
+
+.buy-card .unlock-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.buy-card small.unlock-count {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(8px, calc(100cqw / 9.5), 11px);
+}
+
 /* Покупку можно перетащить на остановку маршрута: карточка «берётся» рукой, взятая — бледнеет. */
 .buy-card[draggable='true'] {
   cursor: grab;

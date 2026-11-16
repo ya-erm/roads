@@ -18,10 +18,11 @@ describe('Календарь партии', () => {
     expect(game.dateAt(0)).toBe('Янв 2000');
   });
 
-  it('в 2000 году продаётся только первое поколение, следующие выходят по годам от начала партии', () => {
+  it('в 2000 году продаётся только первое поколение; прежний календарь моделей (для старых сохранений) — по годам от начала', () => {
     const game = withoutCitizens(freshGame(7));
     expect(modelsFor('road', game.modelOpen)).toEqual(['truck', 'bus']);
     expect(modelsFor('rail', game.modelOpen)).toEqual(['freightTrain', 'passengerTrain']);
+    // Новые модели открывает объём перевозок (unlocks.test.ts), год — только у старых сохранений (legacyUnlocks).
     const years = Object.fromEntries((Object.keys(MODELS) as ModelId[]).map((id) => [id, game.modelYear(id)]));
     expect(years).toEqual({
       truck: 2000,
@@ -57,7 +58,8 @@ describe('Календарь партии', () => {
     expect(LEGACY_START_YEAR).toBe(1960);
     const game = withoutCitizens(freshGame(7));
     setMonth(game, 8 * 12 + 2);
-    const { startYear: _drop, ...old } = JSON.parse(JSON.stringify(game.toSave()));
+    // Старое сохранение — и без счёта перевозок: модели открыты по прежнему календарю.
+    const { startYear: _drop, unlocks: _u, ...old } = JSON.parse(JSON.stringify(game.toSave()));
     const legacy = new Game(old.settings, old);
     expect(legacy.startYear).toBe(1960);
     expect(legacy.dateLabel).toBe('Мар 1968');
@@ -71,7 +73,7 @@ describe('Календарь партии', () => {
 
   it('совсем старое сохранение (с 1960 года, месяц 2 минуты): та же дата, и что вышло по реальному времени — в продаже', () => {
     const game = withoutCitizens(freshGame(7));
-    const { startYear: _drop, monthLength: _len, ...old } = JSON.parse(JSON.stringify(game.toSave()));
+    const { startYear: _drop, monthLength: _len, unlocks: _u, ...old } = JSON.parse(JSON.stringify(game.toSave()));
     // Март 1964-го при месяце в 2 минуты: прошло 4 года 2,5 месяца — 101 минута игры.
     old.month = 4 * 12 + 2;
     old.time = (4 * 12 + 2.5) * 120;

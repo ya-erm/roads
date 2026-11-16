@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ECONOMY, MONTH_LENGTH } from '../config';
+import { ECONOMY, MODEL_UNLOCK, MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import type { IndustryKind } from '../world/cargo';
 import type { Station } from '../world/entities';
@@ -115,25 +115,20 @@ describe('Экономика', { timeout: 60_000 }, () => {
     expect(line.revenueTotal - r0).toBeGreaterThan(cost);
   });
 
-  it('модели по эпохам: новые появляются со временем, старые меняются на новые', () => {
+  it('модели новее открываются перевезённым, старые меняются на новые', () => {
     const r = freightLine(7, 'farm', 'foodplant', 1, 0);
     const game = r.game;
     const line = [...game.lines.values()][0];
     const v = game.fleet.get(line.vehicles[0])!;
-    expect(game.year).toBe(2000);
     expect(modelsFor('road', game.modelOpen)).toEqual(['truck', 'bus']);
     expect(game.buyVehicle(line.id, 'truck3')).toBeNull();
     expect(game.replacementFor(v)).toBeNull();
-    // Эпохи — по длине месяца (месяц в полтора раза длиннее первого, 40-секундного): «Грузовик II» — через 8 лет
-    // после начала, «Фура» — через 17.
-    expect(game.modelYear('truck2')).toBe(2008);
-    expect(game.modelYear('truck3')).toBe(2017);
-    (game as unknown as { month: number }).month = 8 * 12;
+    // Грузовики перевезли порог «Грузовика II» (unlocks.ts) — его предлагают взамен.
+    game.unlocks.add('truck', MODEL_UNLOCK.truck2);
     expect(modelsFor('road', game.modelOpen)).toContain('truck2');
     expect(game.replacementFor(v)).toBe('truck2');
-    // Прошло 17 лет: есть «Фура» — её предлагают взамен, содержание старого не растёт.
-    (game as unknown as { month: number }).month = 17 * 12;
-    expect(game.year).toBe(2017);
+    // И порог «Фуры» — её предлагают взамен, содержание старого не растёт.
+    game.unlocks.add('truck', MODEL_UNLOCK.truck3);
     expect(modelsFor('road', game.modelOpen)).toContain('truck3');
     expect(game.runningCost(v)).toBe(MODELS.truck.running);
     expect(game.replacementFor(v)).toBe('truck3');

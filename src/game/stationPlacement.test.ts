@@ -21,7 +21,7 @@ function scene(length = 600) {
   const game = withoutCitizens(
     new Game({ seed: 1, size: 'small', towns: 0, industries: 'few', money: 50_000_000, water: 'dry', terrainVersion: TERRAIN_VERSION }),
   );
-  game.modelTier = 3;
+  game.openModelTier(3, true);
   const a = fieldSpot(game, length);
   const plan = roadPlan(game, { free: a }, { free: { x: a.x + length, y: a.y } }, STREET);
   if (!plan.ok || !game.roadBuilder.apply(plan)) throw new Error(plan.reason ?? 'улица не построилась');

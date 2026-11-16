@@ -7,7 +7,6 @@ import { ECONOMY, MONTH_LENGTH, TERM_SCALE } from '../config';
 import { Rng } from '../core/rng';
 import { durationText } from '../core/timeText';
 import type { Game } from '../game/game';
-import type { ModelTier } from '../game/transport';
 import type { CargoType } from '../world/cargo';
 import { industryById, levelCap, network, operating } from './analysis';
 import { CHALLENGE_BONUS, DIFFICULTY, EVENT_RULES, FAST, LATE, PHASES, POINTS, REPUTATION } from './content';
@@ -750,8 +749,7 @@ export class Scenario {
     generatePhase(this, s.phase);
     this.log('phase', `Этап ${'ABC'[s.phase]}: ${PHASES[s.phase].name}`);
     this.game.notify(`Новый этап: ${PHASES[s.phase].name}. ${PHASES[s.phase].hint}`, '#7a5cc4', { kind: 'goal' });
-    // Каждый этап открывает следующую ступень транспорта: B — Грузовик II и Автобус II, C — Фура и Автобус III.
-    this.game.openModelTier(Math.min(3, s.phase + 1) as ModelTier);
+    // Модели этап не открывает: и в сценарии они открываются по объёму перевозок своего семейства (game/unlocks.ts).
   }
 
   private win(): void {

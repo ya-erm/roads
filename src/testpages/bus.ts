@@ -173,7 +173,7 @@ export function buildPairScene(): TestScene & { pairs: Station[] } {
 function sceneStart(): { game: Game; sc: SceneBuilder } {
   const game = new Game({ seed: 1, size: 'small', towns: 0, industries: 'few', money: 1_000_000_000, water: 'dry', terrainVersion: TERRAIN_VERSION });
   clearMap(game);
-  game.modelTier = 3;
+  game.openModelTier(3, true);
   return { game, sc: new SceneBuilder(game) };
 }
 
