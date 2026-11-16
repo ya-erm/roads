@@ -2,7 +2,7 @@ import { add, cross, dist, norm, sub, type Vec } from '../core/vec';
 import type { Game } from '../game/game';
 import { edgesAt, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
 import type { Corridor, CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
-import { ROAD_MARGIN } from '../world/roadTypes';
+import { ROAD_MARGIN, SIDEWALK } from '../world/roadTypes';
 import { type Footprint, footprintRadius, pointInFootprint } from '../world/spatial';
 import { townTier } from '../world/townForms';
 import { Art } from './industryArt';
@@ -20,8 +20,8 @@ import { paths } from './townDecor';
  * тротуар улицы переходит в скругление угла: от конца до конца через улицу ляжет пешеходный переход.
  */
 
-/** Тротуар: от края полотна (from) шириной w, м. Город — мощёный у самого бордюра, село — утоптанная тропинка. */
-export const SIDEWALK = { paved: { from: 0.2, w: 3.4 }, path: { from: 0.9, w: 2 } } as const;
+/** Тротуар: от края полотна (from) шириной w, м — общий с переносом зданий и парков (world/roadTypes.SIDEWALK). */
+export { SIDEWALK };
 /**
  * Точки оси — через step м; тротуар — где ближе houses м есть участок дома, парка или сквера города (до его края, а не
  * до середины: участки в масштабе застройки, TOWN_SCALE, длинные и глубокие); короче min — нет; разрывы короче gap —

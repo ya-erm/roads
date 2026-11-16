@@ -3,7 +3,7 @@ import type { HouseForm, TownBuilding } from '../world/entities';
 import type { Footprint } from '../world/spatial';
 import { CAR_SIZE, cottagePlan, dachaPlan, GARAGE, LOT_SETBACK, type LotRect } from '../world/houseAccess';
 import { shopLotOf, STALL_ROW_DEPTH, type ShopLot } from '../world/shopLots';
-import { formOf, storeysOf } from '../world/townForms';
+import { formOf, LANDMARK_YARD, storeysOf } from '../world/townForms';
 import { Art, disc, METAL } from './industryArt';
 import { WALK_LOOK } from './sidewalks';
 import { bench, flowerbed, fountain, lamp, playground as playArea, sportsBox, statue, trashPad } from './townDecor';
@@ -1270,7 +1270,9 @@ function hall(a: Art, lot: Lot): void {
   const { W, H, b } = lot;
   const x0 = -W / 2;
   const y0 = -H / 2;
-  a.patch(x0 - 7, y0 - 7, W + 14, H + 14, PLAZA, 2, 'rgba(120,100,70,0.35)');
+  // Площадь — шире участка на LANDMARK_YARD.hall (её же обходит перенос ратуши: Game.movePlan).
+  const yard = LANDMARK_YARD.hall;
+  a.patch(x0 - yard, y0 - yard, W + yard * 2, H + yard * 2, PLAZA, 2, 'rgba(120,100,70,0.35)');
   if (a.d && a.pass === 0) {
     // Брусчатка: ряды поперёк фасада, вблизи — швы со сдвигом.
     const c = a.c;
@@ -1349,7 +1351,8 @@ export function hallFountain(b: TownBuilding): { x: number; y: number; r: number
 /** Храм в центре села: церковь на зелёной площади. */
 function temple(a: Art, lot: Lot): void {
   const { W, H } = lot;
-  a.patch(-W / 2 - 6, -H / 2 - 6, W + 12, H + 12, PLAZA, 2, 'rgba(120,100,70,0.3)');
+  const yard = LANDMARK_YARD.temple;
+  a.patch(-W / 2 - yard, -H / 2 - yard, W + yard * 2, H + yard * 2, PLAZA, 2, 'rgba(120,100,70,0.3)');
   // Перед оградой — клумбы и скамейки у входа, фонари (памятник села — в сквере рядом, townParks).
   for (const s of [-1, 1]) {
     flowerbed(a, s * W * 0.3, -H / 2 - 3, 2.2, 1.3, lot.b.id + s, lot.fine);

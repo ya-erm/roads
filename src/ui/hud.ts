@@ -168,6 +168,7 @@ import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
 import { parkCardHtml } from './parkCard';
+import { PARK_INFO } from '../world/parkPick';
 import { crewCardHtml } from './crewCard';
 import { workTrainCardHtml } from './workTrainCard';
 import { carTripHtml } from './carTrip';
@@ -1378,6 +1379,10 @@ export class Hud {
         if (park) this.controller.showPlace(park.fp.center, Math.max(park.fp.w, park.fp.h) + 60);
         break;
       }
+      case 'park-move':
+        // Перенос парка: участок за курсором, у улицы — вдоль неё; клик — туда (Esc — отмена).
+        this.controller.startParkMove(Number(d.id));
+        break;
       case 'dep-build': {
         // Добыча на месторождение из его карточки — как кликом инструментом «Предприятие»; поставили — её карточка.
         const dep = g.enterprises.deposit(Number(d.id));
@@ -3611,11 +3616,13 @@ export class Hud {
           : b.kind === 'com'
             ? `${b.floors * JOBS_PER_FLOOR} рабочих мест`
             : 'центр города';
-      const moveCost = Math.round(g.demolishCost(b.id) * 0.6) || 3000;
+      // Ратуша — вместе со своей площадью (Game.movePlan): значок площади на кнопке, цена — за обе.
+      const { cost: moveCost, plaza } = g.buildingMove(b);
+      const moveTip = plaza ? `${PARK_INFO.plaza.icon} Площадь у ратуши едет вместе с ней · 🛣 встанет вдоль улицы, за тротуаром` : '🛣 Встанет вдоль улицы, за тротуаром';
       return `<section class="detail">${head(kind, `${storeysOf(b)} эт. · ${people}`)}
         ${town ? `<button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>` : ''}
         <div class="actions">
-          <button class="small" data-action="move" data-id="${b.id}">Перенести · ${money(moveCost)}</button>
+          <button class="small" data-action="move" data-id="${b.id}" data-tip="${esc(moveTip)}">Перенести${plaza ? ` ${PARK_INFO.plaza.icon}` : ''} · ${money(moveCost)}</button>
           ${b.kind !== 'landmark' ? `<button class="small danger" data-action="demolish" data-id="${b.id}">Снести · ${money(g.demolishCost(b.id))}</button>` : ''}
         </div>
         <p class="muted">Перенесённое здание встанет вдоль ближайшей улицы. Дорога, проложенная через дома, снесёт их сама.</p></section>`;

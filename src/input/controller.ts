@@ -54,6 +54,7 @@ import { jointOf, mergeEdit, mergePreview, mergeProblem, splitEdit, splitProblem
 import type { CornerHandle } from '../lanes/corners';
 import { corridorHalf } from '../world/worldgen';
 import { PARK_INFO } from '../world/parkPick';
+import { yardOf } from '../world/townForms';
 import { corridorCurveSigns, freshSignCorridors, staleSignCorridors } from '../game/roadProject';
 import { type DrawSettings, type ProjectTools, sharedRoadProject } from './projecttools';
 import { RailTools } from './railtools';
@@ -292,6 +293,8 @@ export class Controller {
   ping: { pos: Vec; r: number; until: number } | null = null;
   /** Здание, которое игрок переносит (следует за курсором). */
   moving: TownBuilding | null = null;
+  /** Парк, сквер, площадь или сквер с памятником, который игрок переносит (TownPark.id): участок за курсором до клика. */
+  movingPark: number | null = null;
   /** Станция, которую игрок переносит: силуэт прилипает к дорогам, как при постройке. */
   movingStation: number | null = null;
   /** Ж/д станция при переносе станет конечной (true) или проходной (false); null — какой была. */
@@ -474,6 +477,7 @@ export class Controller {
     this.chain = null;
     this.control = null;
     this.moving = null;
+    this.movingPark = null;
     this.movingStation = null;
     this.movingBase = null;
     this.roadTools.clear();
@@ -487,6 +491,14 @@ export class Controller {
   startMove(b: TownBuilding): void {
     this.setTool('select');
     this.moving = b;
+    this.onChange();
+  }
+
+  /** Начать перенос парка (сквера, площади): участок следует за курсором и встаёт вдоль улицы до клика (Esc — отмена). */
+  startParkMove(id: number): void {
+    this.setTool('select');
+    this.select({ type: 'park', id });
+    this.movingPark = id;
     this.onChange();
   }
 
@@ -1325,6 +1337,7 @@ export class Controller {
     else if (this.areaStart) this.areaStart = null;
     else if (this.spanStart) this.spanStart = null;
     else if (this.moving) this.moving = null;
+    else if (this.movingPark !== null) this.movingPark = null;
     else if (this.movingStation !== null) this.movingStation = null;
     else if (this.movingBase !== null) this.movingBase = null;
     else if (this.placingWarehouse !== null) this.placingWarehouse = null;
@@ -1741,13 +1754,15 @@ export class Controller {
     const corner = this.action === 'move' && !this.roadTools.handleAt(p, (HANDLE_PX + 4) / this.camera.zoom) && this.roadTools.cornerAt(p, (HANDLE_PX + 4) / this.camera.zoom);
     const label = this.moving
       ? 'перенос здания'
-      : this.movingStation !== null
-        ? 'перенос станции'
-        : this.movingBase !== null && this.action === 'select'
-          ? 'перенос базы'
-          : corner
-            ? 'скругление угла'
-            : UNDO_LABELS[this.action];
+      : this.movingPark !== null
+        ? 'перенос парка'
+        : this.movingStation !== null
+          ? 'перенос станции'
+          : this.movingBase !== null && this.action === 'select'
+            ? 'перенос базы'
+            : corner
+              ? 'скругление угла'
+              : UNDO_LABELS[this.action];
     if (label) g.checkpoint(this.action === 'road' && this.netKind === 'rail' ? 'путь' : label);
     switch (this.action) {
       case 'road':
@@ -2010,6 +2025,16 @@ export class Controller {
           } else {
             this.showError(plan.reason);
           }
+          break;
+        }
+        if (this.movingPark !== null) {
+          // Перенос парка: участок — на новое место со всем, что внутри; перенесли — снова его карточка.
+          const id = this.movingPark;
+          const plan = g.parkMovePlan(id, p);
+          if (g.movePark(id, p)) {
+            this.movingPark = null;
+            this.select({ type: 'park', id });
+          } else this.showError(plan.reason);
           break;
         }
         // Значок предупреждения — карточка станции (предприятия), где объяснение и что сделать; блок подсвечен.
@@ -4131,11 +4156,29 @@ export class Controller {
           break;
         }
         if (this.moving) {
-          const plan = g.movePlan(this.moving, p);
-          o.marks.push({ fp: this.moving.fp, ok: false });
+          // Старое место — красным, новое — участком с площадью вокруг ратуши (её край — за тротуаром) и площадью у
+          // ратуши, что едет с ней.
+          const b = this.moving;
+          const plan = g.movePlan(b, p);
+          const yard = yardOf(b);
+          o.marks.push({ fp: { ...b.fp, w: b.fp.w + yard * 2, h: b.fp.h + yard * 2 }, ok: false });
+          if (plan.plaza) o.marks.push({ fp: plan.plaza.park.fp, ok: false });
+          if (plan.fp) o.marks.push({ fp: plan.lot ?? plan.fp, ok: plan.ok });
+          if (plan.plaza) o.marks.push({ fp: plan.plaza.fp, ok: plan.ok });
+          const with_ = plan.plaza ? ` ${PARK_INFO.plaza.icon} с площадью` : '';
+          o.label = plan.ok
+            ? { text: `Перенести сюда${with_} · ${money(plan.cost)} · Esc — отмена`, ok: true }
+            : { text: failText(plan.reason, plan.cost, ''), ok: false };
+          break;
+        }
+        const carried = this.movingPark !== null ? g.parkById(this.movingPark) : null;
+        if (carried) {
+          // Перенос парка: старое место — красным, новое — у улицы под курсором (красным, если нельзя).
+          const plan = g.parkMovePlan(carried.park.id, p);
+          o.marks.push({ fp: carried.park.fp, ok: false });
           if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
           o.label = plan.ok
-            ? { text: `Перенести сюда · ${money(plan.cost)} · Esc — отмена`, ok: true }
+            ? { text: `${PARK_INFO[carried.park.kind].icon} Перенести сюда · ${money(plan.cost)} · Esc — отмена`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }

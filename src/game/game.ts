@@ -39,13 +39,13 @@ import type { Vehicle, VehicleLook } from '../sim/vehicle';
 import { hitchOf, steerBase } from '../sim/body';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind, isTankCargo } from '../world/cargo';
-import { Annex, type BuildBase, type Deposit, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, TownSupplyMonth, Warehouse } from '../world/entities';
+import { Annex, type BuildBase, type Deposit, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, type TownPark, TownSupplyMonth, Warehouse } from '../world/entities';
 import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/townSupply';
 import { addTownPax, closeTownPax, PAX_NOWHERE, PAX_PER_THOUSAND } from '../world/townPax';
 import { repaceSave, saveMonthLength } from './monthPace';
 import { PAX_WAIT, paxLeaving, paxPatience, paxStayShare, paxTolerance } from './paxPatience';
 import { Network, NetworkSave, Segment } from '../world/network';
-import { halfWidth, isDirt, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, ROAD_MARGIN, specCost, TRACK_GAP } from '../world/roadTypes';
+import { halfWidth, isDirt, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, ROAD_MARGIN, specCost, TRACK_GAP, WALK_EDGE } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
 import { DEFAULT_SETTINGS, WorldSettings } from '../world/settings';
 import { Terrain, TerraformEdit, TerraformMode } from '../world/terrain';
@@ -68,9 +68,10 @@ import {
   streetFace,
   WorldContext,
 } from '../world/worldgen';
-import { nearPark, placeParks } from '../world/townParks';
+import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placeParks, plazaAttached, plazaBy } from '../world/townParks';
+import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
 import { type ParkEntry, ParkIndex } from '../world/parkPick';
-import { residentsOf, SETTLE_RULE, townTier, zoneTown } from '../world/townForms';
+import { residentsOf, SETTLE_RULE, townTier, yardOf, zoneTown } from '../world/townForms';
 import { START_ROADS } from '../world/startRoads';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
 import { prepareSettings } from '../scenario/generator';
@@ -282,6 +283,8 @@ export interface LaneEnd {
 
 /** Сколько последних строек можно отменить. */
 const UNDO_DEPTH = 30;
+/** Перенесённый дом: от края асфальта до участка, м — как у домов улиц при застройке (worldgen.fillStreet: hw + 5), за тротуаром. */
+const MOVE_SETBACK = 5;
 
 /** Чем ездят к станции: к вокзалу — поезда, к автостанции и остановке — машины. */
 export function stationMode(st: Pick<Station, 'kind'>): LineMode {
@@ -313,6 +316,8 @@ interface UndoSnapshot {
   roadsVersion: number;
   stations: SaveData['stations'];
   buildings: { townId: number; list: TownBuilding[] }[];
+  /** Места парков городов (перенос парка, площадь, что уехала с ратушей); нет в старых снимках. */
+  parks?: { townId: number; list: Pick<TownPark, 'id' | 'fp' | 'moved'>[] }[];
   /** Пристройки предприятий и уровень, который они дали (нет в старых снимках). */
   industries?: { id: number; level?: number; streak?: number; annexes?: Annex[] }[];
   roundabouts: [number, Vec][];
@@ -335,6 +340,11 @@ interface UndoSnapshot {
 /** База стоит там же (площадка и ворота), что и в снимке s. */
 function sameBasePlace(b: BuildBase, s: { fp: Footprint; nodeId: number }): boolean {
   return b.nodeId === s.nodeId && b.fp.center.x === s.fp.center.x && b.fp.center.y === s.fp.center.y && b.fp.angle === s.fp.angle;
+}
+
+/** Участки совпадают: место, размер и поворот. */
+function sameFootprint(a: Footprint, b: Footprint): boolean {
+  return a.center.x === b.center.x && a.center.y === b.center.y && a.w === b.w && a.h === b.h && a.angle === b.angle;
 }
 
 /** По умолчанию станция работает и с пассажирами, и с грузом. */
@@ -748,6 +758,11 @@ export class Game implements BuildContext {
   /** Дороги: сеть полос, граф движения и машины. */
   readonly roads: Roads;
   readonly index = new FootprintIndex<Structure>();
+  /**
+   * Раскладка застройки: растёт, когда дом или парк переносят (и когда отмена или повтор возвращает их): тротуары и
+   * аллеи у улиц (renderer) — заново, хоть число домов и парков то же.
+   */
+  layoutRev = 0;
   readonly rail: RailSim;
   /** Строитель путей (старая сеть). */
   readonly builder: Builder;
@@ -2637,23 +2652,62 @@ export class Game implements BuildContext {
     return best;
   }
 
-  /** Куда встанет здание при переносе: вдоль ближайшей улицы. */
-  movePlan(b: TownBuilding, p: Vec): { ok: boolean; reason?: string; fp: Footprint | null; cost: number; anchor: number } {
-    const cost = Math.round(this.demolishCost(b.id) * 0.6) || 3000;
-    const hit = this.streetNear(p, 60);
+  /** Перенос здания: цена (60 % сноса, у ратуши — и перенос её площади) и площадь у ратуши, что едет вместе с ней. */
+  buildingMove(b: TownBuilding): { cost: number; plaza: TownPark | null } {
+    const town = this.townOf(b);
+    const plaza = b.kind === 'landmark' && town ? hallPlaza(town, b.fp) : null;
+    return { cost: (Math.round(this.demolishCost(b.id) * 0.6) || 3000) + (plaza ? parkMoveCost(plaza) : 0), plaza };
+  }
+
+  /**
+   * Куда встанет здание при переносе: вдоль ближайшей улицы, участок — в MOVE_SETBACK от фактического края асфальта,
+   * как дома улиц при застройке (fillStreet), а площадь вокруг ратуши и храма (townForms.yardOf) — ещё дальше на свою
+   * ширину: не на тротуаре и не на полотне, ни у этой улицы, ни у соседних, ни на площадке перекрёстка
+   * (lotClearOfRoads). Ратуша — вместе со своей площадью (townParks.hallPlaza): с той же стороны фасада; там тесно
+   * или площадь осталась на старом месте после прежнего переноса — у той стороны, где шире (plazaBy); места нет и
+   * так — отказ. plaza — куда встанет площадь; lot — участок с площадью вокруг здания (для подсветки).
+   */
+  movePlan(
+    b: TownBuilding,
+    p: Vec,
+  ): { ok: boolean; reason?: string; fp: Footprint | null; cost: number; anchor: number; face?: 1 | -1; lot?: Footprint; plaza?: { park: TownPark; fp: Footprint } } {
+    const town = this.townOf(b);
+    const { cost, plaza: own } = this.buildingMove(b);
+    const yard = yardOf(b);
+    const hit = this.streetNear(p, 60 + yard);
     if (!hit) return { ok: false, reason: 'Поставьте рядом с улицей', fp: null, cost, anchor: 0 };
     const seg = hit.seg;
+    const net = this.roads.net;
     const n = normalTowards(seg, hit.s, p);
     const t = seg.lut.tangentAt(hit.s);
-    const center = add(seg.lut.pointAt(hit.s), scale(n, halfAtS(seg, hit.s) + 5 + b.fp.h / 2));
+    const center = add(seg.lut.pointAt(hit.s), scale(n, halfAtS(seg, hit.s) + MOVE_SETBACK + yard + b.fp.h / 2));
     const fp: Footprint = { center, w: b.fp.w, h: b.fp.h, angle: Math.atan2(t.y, t.x) };
-    const anchor = anchorFor(this.roads.net, center);
+    const lot: Footprint = { ...fp, w: fp.w + yard * 2, h: fp.h + yard * 2 };
+    const face = streetFace(net, fp);
+    const anchor = anchorFor(net, center);
+    const fail = (reason: string) => ({ ok: false, reason, fp, cost, anchor, face, lot });
     this.index.remove(b);
-    const ok = placeable(this.worldContext(), fp, seg.id);
-    this.index.add(b);
-    if (!ok) return { ok: false, reason: 'Здесь мало места', fp, cost, anchor };
-    if (cost > this.budget) return { ok: false, reason: 'Не хватает денег', fp, cost, anchor };
-    return { ok: true, fp, cost, anchor };
+    try {
+      if (!placeable(this.worldContext(), lot, seg.id)) return fail('Здесь мало места');
+      if (!lotClearOfRoads(net, lot, WALK_EDGE)) return fail('Мешает дорога');
+      if (this.parkUnder(lot, own)) return fail('Мешает парк');
+      let plaza: { park: TownPark; fp: Footprint } | undefined;
+      if (own && town) {
+        const others = (town.parks ?? []).filter((k) => k !== own);
+        const site = parkSite(this.worldContext());
+        // Площадь — как перенесённый парк: не на дороге с тротуаром, не на домах и других парках, не в воде.
+        const fits = (f: Footprint, shore?: boolean) => site.fits(f, shore) && lotClearOfRoads(net, f, WALK_EDGE) && !this.parkUnder(f, own);
+        const drawn = (f: Footprint, side: number) => (side === 1 ? f.angle + Math.PI : f.angle);
+        const same = plazaAttached(b.fp, own.fp) ? carryFootprint(own.fp, b.fp, drawn(b.fp, b.face ?? -1), fp, drawn(fp, face)) : null;
+        const to = same && fits(same) ? same : plazaBy(fp, { ...site, fits }, others);
+        if (!to) return fail('Площади у ратуши мало места');
+        plaza = { park: own, fp: to };
+      }
+      if (cost > this.budget) return fail('Не хватает денег');
+      return { ok: true, fp, cost, anchor, face, lot, plaza };
+    } finally {
+      this.index.add(b);
+    }
   }
 
   moveBuilding(b: TownBuilding, p: Vec): boolean {
@@ -2663,11 +2717,85 @@ export class Game implements BuildContext {
     this.index.remove(b);
     b.fp = plan.fp;
     b.anchor = plan.anchor;
-    b.face = streetFace(this.roads.net, b.fp);
+    b.face = plan.face ?? streetFace(this.roads.net, b.fp);
     this.index.add(b);
+    const town = this.townOf(b);
+    // Площадь у ратуши — следом: тот же парк (раскладка дорожек, деревьев и клумб — его же), на новом месте.
+    if (plan.plaza && town) plan.plaza.park.fp = plan.plaza.fp;
+    // Новый список — карта перерисует дома и парки города (renderer: по ссылке на список), выбор парков — тоже.
+    if (town) {
+      town.buildings = [...town.buildings];
+      if (town.parks) town.parks = [...town.parks];
+    }
+    this.layoutRev++;
     this.spend(plan.cost);
     this.refreshCatchmentsNear(from);
     this.refreshCatchmentsNear(b.fp.center);
+    return true;
+  }
+
+  /** Участок f задевает парк какого-нибудь города (кроме skip): с запасом 2 м. */
+  private parkUnder(f: Footprint, skip: TownPark | null): boolean {
+    const r = footprintRadius(f);
+    for (const t of this.towns) {
+      if (dist(t.center, f.center) > (t.extent ?? t.radius) + r + 400) continue;
+      for (const k of t.parks ?? []) {
+        if (k === skip || dist(k.fp.center, f.center) > r + footprintRadius(k.fp) + 2) continue;
+        if (footprintsOverlap(f, k.fp, 2)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Куда встанет парк, сквер, площадь или сквер с памятником при переносе («Перенести» в карточке парка): у улицы
+   * (ближний край — не дальше половины глубины и 30 м от неё) — вдоль неё, ближней длинной стороной за тротуаром
+   * (WALK_EDGE + 1 м от края асфальта), как перенесённый дом; дальше от улиц — серединой под курсор, с прежним
+   * поворотом. Не на дорогу и тротуар, не на дома, станции и предприятия, не на площадь у ратуши, не на другой парк,
+   * не в воду. Деревья, дорожки, фонтан — его же (раскладка — по id и размеру парка, parkArt), едут вместе с ним.
+   */
+  parkMovePlan(id: number, p: Vec): { ok: boolean; reason?: string; fp: Footprint | null; cost: number } {
+    const hit = this.parkById(id);
+    if (!hit || !movablePark(hit.park)) return { ok: false, reason: 'Это не перенести', fp: null, cost: 0 };
+    const park = hit.park;
+    const cost = parkMoveCost(park);
+    const net = this.roads.net;
+    const street = this.streetNear(p, park.fp.h / 2 + 30);
+    let fp: Footprint;
+    if (street) {
+      const n = normalTowards(street.seg, street.s, p);
+      const t = street.seg.lut.tangentAt(street.s);
+      const center = add(street.seg.lut.pointAt(street.s), scale(n, halfAtS(street.seg, street.s) + WALK_EDGE + 1 + park.fp.h / 2));
+      fp = { center, w: park.fp.w, h: park.fp.h, angle: Math.atan2(t.y, t.x) };
+    } else fp = { ...park.fp, center: { ...p } };
+    const fail = (reason: string) => ({ ok: false, reason, fp, cost });
+    if (!this.inBounds(fp.center, 30)) return fail('За краем карты');
+    // Вода — по сетке через 8 м и по контуру: озерцо посреди парка тоже в счёт.
+    const wet = lotOutline(fp, 6).some((q) => this.isWater(q, 1)) || lotGrid(fp, 8).some((q) => this.isWater(q, 1));
+    if (wet) return fail('Мешает вода');
+    if (!lotClearOfRoads(net, fp, WALK_EDGE)) return fail('Мешает дорога');
+    if (onRail(this.net, fp, 4)) return fail('Мешает железная дорога');
+    // Площадь вокруг ратуши и храма — тоже их (сама площадь у ратуши с ней сливается: ей можно вплотную к зданию).
+    const under = this.index
+      .near(fp.center, footprintRadius(fp) + 200)
+      .find((s) => footprintsOverlap(fp, s.fp, 3 + (s.type === 'building' && park.kind !== 'plaza' ? yardOf(s) : 0)));
+    if (under) return fail(under.type === 'building' ? 'Мешают дома' : 'Здесь занято');
+    if (this.parkUnder(fp, park)) return fail('Мешает другой парк');
+    if (cost > this.budget) return fail('Не хватает денег');
+    return { ok: true, fp, cost };
+  }
+
+  /** Переносит парк (parkMovePlan): участок — на новое место, раскладка внутри — та же. false — нельзя. */
+  movePark(id: number, p: Vec): boolean {
+    const plan = this.parkMovePlan(id, p);
+    const hit = this.parkById(id);
+    if (!plan.ok || !plan.fp || !hit) return false;
+    hit.park.fp = plan.fp;
+    hit.park.moved = true;
+    // Новый список — карта перерисует парки города, выбор мышью пересоберёт сетку (ParkIndex — по ссылке на список).
+    hit.town.parks = [...(hit.town.parks ?? [])];
+    this.layoutRev++;
+    this.spend(plan.cost);
     return true;
   }
 
@@ -3726,6 +3854,7 @@ export class Game implements BuildContext {
       version: this.net.version,
       stations: [...this.stations.values()].map((s) => structuredClone(this.stationToSave(s))),
       buildings: this.towns.map((t) => ({ townId: t.id, list: t.buildings.map((b) => structuredClone(b)) })),
+      parks: this.towns.filter((t) => t.parks?.length).map((t) => ({ townId: t.id, list: t.parks!.map((k) => ({ id: k.id, fp: structuredClone(k.fp), moved: k.moved })) })),
       industries: this.industries.map((i) => ({ id: i.id, level: i.level, streak: i.streak, annexes: i.annexes && structuredClone(i.annexes) })),
       roundabouts: [...this.roundaboutCenters].map(([id, c]) => [id, { ...c }]),
       terraform: this.terrain.edits.length,
@@ -3977,6 +4106,22 @@ export class Game implements BuildContext {
       });
       recountPopulation(town);
     }
+    // Парки — на места до действия (перенос парка, площадь, что уехала с ратушей); новый список — карте и выбору.
+    for (const { townId, list } of snap.parks ?? []) {
+      const town = this.towns.find((t) => t.id === townId);
+      if (!town?.parks) continue;
+      let moved = false;
+      for (const s of list) {
+        const live = town.parks.find((k) => k.id === s.id);
+        if (!live || (sameFootprint(live.fp, s.fp) && live.moved === s.moved)) continue;
+        live.fp = structuredClone(s.fp);
+        if (s.moved) live.moved = true;
+        else delete live.moved;
+        moved = true;
+      }
+      if (moved) town.parks = [...town.parks];
+    }
+    this.layoutRev++;
     this.terrain.truncateEdits(snap.terraform);
     this.roundaboutCenters.clear();
     for (const [id, c] of snap.roundabouts) this.roundaboutCenters.set(id, c);

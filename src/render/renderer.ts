@@ -534,6 +534,8 @@ export class Renderer {
   /** Где тротуары для протяжки (liveSite): строения вокруг полотен — запомненные, пока тротуары без правки те же. */
   private walkSite: { game: Game; base: SidewalkNet; memo: Map<string, Around>; site: WalkSite } | null = null;
   private sidewalkCache: SidewalkCache = new Map();
+  /** Раскладка застройки (Game.layoutRev), по которой посчитан кэш тротуаров: перенесли дом или парк — кэш прочь. */
+  private layoutSeen = 0;
   /** Дорожки кварталов по городам (townWalks): считаются, когда меняется список домов или парков города. */
   private walks = new Map<number, TownWalks>();
   /** Ход работ на строящихся полотнах в плитках (drawnSpans) — при той же форме (projectSig): шаг сбрасывает только край работ. */
@@ -1201,13 +1203,18 @@ export class Renderer {
     }
     // Аллеи и тротуары: по дорогам, остановкам и строениям у бордюра, черте городов (с шагом 50 м — не каждый месяц) и
     // их застройке (тротуар — где рядом дома). Полотна, что не менялись, — из кэша (streetGreen); новая станция или
-    // предприятие — пересчёт всех; вырос город — пересчёт его полотен.
-    const things = `${game.stations.size}|${game.industries.length}|${game.construction.crews.bases.size}`;
+    // предприятие — пересчёт всех; вырос город — пересчёт его полотен. Перенесли дом или парк (Game.layoutRev) — тоже всех:
+    // число домов и парков у полотна (подпись кэша тротуаров) то же, а стоят они уже не там.
+    const things = `${game.stations.size}|${game.industries.length}|${game.construction.crews.bases.size}|${game.layoutRev}`;
     const alleyKey = `${game.roads.net.version}|${things}|${game.towns.map((t) => `${Math.floor(t.radius / 50)}:${t.buildings.length}`).join(',')}`;
     if (alleyKey !== this.alleys.key) {
       this.alleys.key = alleyKey;
       // Кэш — по полотнам; снесённых накопилось много — с чистого листа.
       if (things !== this.alleys.things || this.alleys.cache.size > game.roads.net.corridors.size * 2 + 200) this.alleys.cache.clear();
+      if (game.layoutRev !== this.layoutSeen) {
+        this.layoutSeen = game.layoutRev;
+        this.sidewalkCache.clear();
+      }
       this.alleys.things = things;
       const index = game.index;
       const towns = game.towns.map((t) => ({ center: t.center, radius: Math.floor(t.radius / 50) * 50 }));

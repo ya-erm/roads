@@ -83,6 +83,15 @@ export function formOf(b: Pick<TownBuilding, 'form' | 'kind' | 'floors' | 'fp'>)
   return b.floors >= 3 ? 'townhouse' : 'cottage';
 }
 
+/** Мощёная площадь вокруг ратуши и храма (render/houseArt: hall, temple) — шире участка на столько метров с каждой стороны. */
+export const LANDMARK_YARD = { hall: 7, temple: 6 } as const;
+
+/** Насколько рисунок участка дома выходит за его контур, м: площадь у ратуши и храма; у прочих — нет. */
+export function yardOf(b: Pick<TownBuilding, 'form' | 'kind' | 'floors' | 'fp'>): number {
+  const form = formOf(b);
+  return form === 'hall' || form === 'temple' ? LANDMARK_YARD[form] : 0;
+}
+
 /** Название типа — для карточки дома. */
 export const FORM_NAMES: Record<HouseForm, string> = {
   cottage: 'Частный дом',

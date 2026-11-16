@@ -13,7 +13,8 @@ import { edgeOf, townTier } from './townForms';
  * загрузке по своим же данным.
  *
  * Рост города обходит парки: новый дом и новая улица на парк не встают (fillStreet, growStreet). Дорога игрока
- * может пройти через парк — полотно ложится поверх, парк остаётся вокруг.
+ * может пройти через парк — полотно ложится поверх, парк остаётся вокруг. Парк, сквер, площадь и сквер с памятником
+ * игрок может перенести (Game.movePark), площадь у ратуши едет и вместе с ратушей (hallPlaza).
  */
 
 /** Что знает о месте расстановка: дома, дороги, вода (worldgen.parkSite — по миру партии). */
@@ -202,7 +203,7 @@ function take(spots: Spot[], site: ParkSite, want: number, ok: (fp: Footprint) =
  * Площадь у ратуши: мощёный прямоугольник вплотную к одной из сторон её участка — перед фасадом, по бокам или за
  * ней, где шире всего (на участке ратуши своя площадь в 7 м — houseArt, они сливаются).
  */
-function plazaBy(hall: Footprint, site: ParkSite, list: TownPark[]): Footprint | null {
+export function plazaBy(hall: Footprint, site: ParkSite, list: readonly TownPark[]): Footprint | null {
   let best: { fp: Footprint; area: number } | null = null;
   const sides: [number, number][] = [
     [0, -1],
@@ -345,6 +346,38 @@ export function placeParks(town: Town, site: ParkSite): number {
   if (banks > 0) for (const fp of embankments(town, site, list, marks, banks)) push('embankment', fp);
   town.parks = list;
   return list.length - before;
+}
+
+/** Что можно перенести «Перенести» в карточке (Game.movePark): всё, кроме набережной — она у воды по своей природе. */
+export const movablePark = (p: Pick<TownPark, 'kind'>) => p.kind !== 'embankment';
+
+/** Перенос парка: $0,6 за м² участка (пересадить деревья, переложить дорожки), не меньше $1 000 — сквер ~$1 200, парк ~$8 000. */
+export const parkMoveCost = (p: Pick<TownPark, 'fp'>) => Math.max(1000, Math.round((p.fp.w * p.fp.h * 0.6) / 10) * 10);
+
+/**
+ * Площадь у ратуши, которая едет вместе с ней (Game.movePlan): площадь города (она у него одна, plazaBy), если она
+ * примыкает к участку ратуши (plazaBy ставит её в 3,5 м от него) или игрок её не переносил сам (её оставил на старом
+ * месте прежний перенос ратуши — вернётся к ней).
+ */
+export function hallPlaza(town: Pick<Town, 'parks'>, hall: Footprint): TownPark | null {
+  const plaza = town.parks?.find((p) => p.kind === 'plaza');
+  if (!plaza) return null;
+  return plazaAttached(hall, plaza.fp) || !plaza.moved ? plaza : null;
+}
+
+/** Площадь примыкает к участку ратуши: между ними не больше 6 м. */
+export const plazaAttached = (hall: Footprint, plaza: Footprint) => footprintsOverlap(hall, plaza, 6);
+
+/**
+ * Участок fp, что был при from, — при to (from и to — участки с поворотом их рисунка fromAngle и toAngle): сдвиг и
+ * поворот те же, что у них, — площадь у ратуши с той же стороны фасада и в том же месте вдоль него.
+ */
+export function carryFootprint(fp: Footprint, from: Footprint, fromAngle: number, to: Footprint, toAngle: number): Footprint {
+  const dx = fp.center.x - from.center.x;
+  const dy = fp.center.y - from.center.y;
+  const u = dx * Math.cos(fromAngle) + dy * Math.sin(fromAngle);
+  const v = -dx * Math.sin(fromAngle) + dy * Math.cos(fromAngle);
+  return { center: at(to.center, toAngle, u, v), w: fp.w, h: fp.h, angle: fp.angle + toAngle - fromAngle };
 }
 
 /** Участок задевает парк города (с запасом margin): рост города сюда дом не ставит. */

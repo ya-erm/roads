@@ -125,6 +125,13 @@ export const defaultPreset = (): RoadPreset => ROAD_PRESETS.find((p) => p.id ===
 export const MAX_LANES = 4;
 export const LANE_W = 7;
 export const ROAD_MARGIN = 1.5;
+/**
+ * Тротуар вдоль полотна (render/sidewalks.ts): от края асфальта (from) шириной w, м. Город — мощёный у самого бордюра,
+ * село — утоптанная тропинка.
+ */
+export const SIDEWALK = { paved: { from: 0.2, w: 3.4 }, path: { from: 0.9, w: 2 } } as const;
+/** Дальний край тротуара от края асфальта, м: участок перенесённого здания и парка — не ближе. */
+export const WALK_EDGE = Math.max(SIDEWALK.paved.from + SIDEWALK.paved.w, SIDEWALK.path.from + SIDEWALK.path.w);
 /** Горизонтальная длина, нужная для подъёма на один уровень. */
 export const LEVEL_RUN = 70;
 

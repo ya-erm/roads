@@ -14,7 +14,9 @@
 import type { Game } from '../game/game';
 import { parkContents, type ParkContents } from '../render/parkArt';
 import type { ParkKind, TownPark } from '../world/entities';
+import { money } from '../core/moneyText';
 import { PARK_INFO } from '../world/parkPick';
+import { movablePark, parkMoveCost } from '../world/townParks';
 import { townIcon } from './cargoIcons';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -76,5 +78,16 @@ export function parkCardHtml(g: Game, id: number): string {
     <button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>
     <div class="pc-chips"><span class="pc-chip" data-tip="${esc(`Площадь участка · ${size}`)}">📐 <b>${parkAreaText(park)}</b></span></div>
     ${items ? `<div class="pc-chips park-items">${items}</div>` : ''}
-    <div class="pc-chips park-uses">${use}</div></section>`;
+    <div class="pc-chips park-uses">${use}</div>${parkMoveHtml(park)}</section>`;
+}
+
+/**
+ * «Перенести» в карточке парка (Game.movePark): цена — от площади участка (parkMoveCost); в подсказке значками — что
+ * едет вместе (деревья, дорожки, фонтан — всё внутри) и куда встанет (вдоль улицы, за тротуаром; не на дорогу, дома и
+ * воду). Набережной нет: она у воды по своей природе.
+ */
+export function parkMoveHtml(park: TownPark): string {
+  if (!movablePark(park)) return '';
+  const tip = '🌳⛲🪑 всё внутри — вместе с ним · 🛣 встанет вдоль ближайшей улицы, за тротуаром · 🚫 не на дорогу, дома и воду';
+  return `<div class="actions"><button class="small" data-action="park-move" data-id="${park.id}" data-tip="${esc(tip)}">🚚 Перенести · ${money(parkMoveCost(park))}</button></div>`;
 }
