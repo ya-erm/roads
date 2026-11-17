@@ -131,6 +131,7 @@ import {
   lotDepth,
   lotGateDriveway,
   lotGateNode,
+  lotIsBig,
   lotLocal,
   lotRows,
   type LotRows,
@@ -3105,13 +3106,17 @@ export class Game implements BuildContext {
     return [...ids];
   }
 
-  /** Ворота на шаге сетки, внутри ширины, не друг на друге (у большой — не ближе LOT.corner + ширины ворот). */
+  /**
+   * Ворота на шаге сетки, внутри ширины, не друг на друге (у большой — не ближе LOT.corner + ширины ворот; тупик-выезд с
+   * кромкой — весь на площадке, не у её бокового края).
+   */
   private fitGates(w: number, gates: readonly LotGate[], big: boolean): LotGate[] {
     const out: LotGate[] = [];
-    const lim = w / 2 - LOT.gateW / 2;
+    const lim = w / 2 - (big ? LOT.stubEdge + 1 : LOT.gateW / 2);
     const gap = big ? LOT.corner + LOT.gateW : LOT.gateW;
     for (const g of gates) {
-      const x = snapGate(w, Math.max(-lim, Math.min(lim, g.x)));
+      let x = snapGate(w, Math.max(-lim, Math.min(lim, g.x)));
+      if (Math.abs(x) > lim + 0.01) x -= Math.sign(x) * LOT.stall.w;
       if (out.some((o) => Math.abs(o.x - x) < gap - 0.01)) continue;
       out.push({ x, mode: g.mode });
     }
@@ -3148,11 +3153,11 @@ export class Game implements BuildContext {
     const ref = skip !== undefined ? this.lots.get(skip) : undefined;
     const old = ref?.lot;
     const W = fp.w;
-    const big0 = lotStallCount({ fp, gates: gatesIn.length ? [gatesIn[0]] : defaultGates(W) }) > LOT.big;
+    const big0 = lotIsBig({ fp, gates: gatesIn.length ? [gatesIn[0]] : defaultGates(W) });
     const gates = this.fitGates(W, gatesIn, big0);
     const shape = { id: skip ?? -1, fp, gates };
     const stalls = lotStallCount(shape);
-    const big = stalls > LOT.big;
+    const big = lotIsBig(shape);
     const town = ref?.town ?? this.lotTown(fp.center);
     const paid = (old?.owner ?? owner) === 'player';
     const price = paid ? lotCost(shape) : 0;

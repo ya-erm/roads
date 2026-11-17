@@ -2,6 +2,7 @@ import type { Vec } from '../core/vec';
 import type { LotGate, LotGateMode, ParkingLot } from './entities';
 import { LOT_SETBACK, lotFrame, type Driveway, type LotRect } from './houseAccess';
 import { STALL_STOP } from './shopLots';
+import { LANE_W, ROAD_MARGIN } from './roadTypes';
 import type { Footprint } from './spatial';
 import { YARD_AISLE, YARD_GATE, YARD_STALL } from './yardLots';
 
@@ -14,12 +15,14 @@ import { YARD_AISLE, YARD_GATE, YARD_STALL } from './yardLots';
  * 7 ед. (≈ 4,2 м). Глубина — модулем: 1 ряд с проездом (проезд у улицы), 2 ряда с проездом между ними, 4 ряда с двумя
  * проездами. Ширина — шагом места: 7 + n · 4,6, где 7 — поперечный проезд у главных ворот (первых): через него от ворот
  * к проездам; мест в ряду — ⌊(W − 7)/4,6⌋ = n. Прочие ворота срезают места переднего ряда (у 2 и 4 рядов).
+ * Больше LOT.big мест — ворота через узел: тупик-выезд заходит на площадку до первого проезда, и места переднего ряда
+ * под его полосами (LOT.stubHalf от оси ворот) убраны — там проезд площадки её покрытием.
  *
  *   глубина   | ширина | мест
  *   15,5 (1)  | 30,0   | 5
  *   24 (2)    | 34,6   | 12
- *   24 (2)    | 66,8   | 26 — больше LOT.big: ворота — через узел
- *   48 (4)    | 53,0   | 40
+ *   24 (2)    | 66,8   | 24 — 26 больше LOT.big: ворота — через узел, 2 места под тупиком-выездом
+ *   48 (4)    | 53,0   | 38 — 40 без 2 под тупиком-выездом
  */
 export const LOT = {
   stall: YARD_STALL,
@@ -30,6 +33,12 @@ export const LOT = {
   corner: 17,
   /** Больше стольких мест — ворота примкнуты к дорогам (тупик-выезд, логика узлов); иначе заезд, как во двор. */
   big: 24,
+  /**
+   * Тупик-выезд большой площадки — 2 полосы по LANE_W: полосы — по столько ед. от оси ворот (под ними на площадке до
+   * узла мест нет); асфальт с кромкой — до stubEdge (на столько у края площадки нет бордюра).
+   */
+  stubHalf: LANE_W,
+  stubEdge: LANE_W + ROAD_MARGIN,
   /** Мест в ряду: от и до. */
   cols: { min: 2, max: 30 },
   /** Цена: за ворота и за место, $; содержание — доля цены в месяц. */
@@ -105,6 +114,8 @@ export interface LotLayout {
   cross: LotRect | null;
   /** Где у ворот тупик-выезд упирается в проезд (ось участка: y), если ворота через узел. */
   nodeY: number;
+  /** Ворота через узел: мест больше LOT.big (до вычета тех, что под тупиками-выездами, — они убраны из stalls). */
+  big: boolean;
 }
 
 type Shape = Pick<ParkingLot, 'fp' | 'gates'>;
@@ -183,7 +194,11 @@ function computeLayout(lot: Shape): LotLayout {
   });
   const aisles = b.aisles.map((y) => ({ x: -W / 2, y, w: W, h: LOT.aisle }));
   const cross = rows === 1 ? null : { x: cx0, y: -H / 2, w: LOT.aisle, h: H };
-  return { stalls, aisles, cross, nodeY: b.aisles[0] + LOT.aisle / 2 };
+  const nodeY = b.aisles[0] + LOT.aisle / 2;
+  const big = stalls.length > LOT.big;
+  // Большая: тупик-выезд от края до узла в первом проезде — под его полосами мест нет (машины едут по ним).
+  const under = (r: LotRect) => r.y < nodeY - 0.05 && lot.gates.some((g) => r.x + r.w > g.x - LOT.stubHalf + 0.05 && r.x < g.x + LOT.stubHalf - 0.05);
+  return { stalls: big ? stalls.filter((s) => !under(s.rect)) : stalls, aisles, cross, nodeY, big };
 }
 
 /** Мест на площадке. */
@@ -191,9 +206,9 @@ export function lotStallCount(lot: Shape): number {
   return lotLayout(lot).stalls.length;
 }
 
-/** Ворота через узел графа (больше LOT.big мест). */
+/** Ворота через узел графа (больше LOT.big мест — считая и те, что потом убраны под тупики-выезды). */
 export function lotIsBig(lot: Shape): boolean {
-  return lotStallCount(lot) > LOT.big;
+  return lotLayout(lot).big;
 }
 
 /** Цена площадки: ворота и места, $. */
@@ -221,6 +236,13 @@ export function lotGateDriveway(lot: Pick<ParkingLot, 'id' | 'fp'>, gate: Pick<L
 export function lotGateNode(lot: Pick<ParkingLot, 'fp' | 'gates'>, gate: Pick<LotGate, 'x'>): { node: Vec; curb: Vec } {
   const at = lotFrame({ fp: lot.fp });
   return { node: at(gate.x, lotLayout(lot).nodeY), curb: at(gate.x, -lot.fp.h / 2 - LOT.setback) };
+}
+
+/** Узлы ворот больших площадок (концы тупиков-выездов) всех городов — без разворота на карте: дальше проезд площадки. */
+export function lotGateNodes(towns: readonly { lots?: readonly ParkingLot[] }[]): Set<number> {
+  const ids = new Set<number>();
+  for (const t of towns) for (const l of t.lots ?? []) if (!l.removed) for (const n of l.nodes ?? []) if (n >= 0) ids.add(n);
+  return ids;
 }
 
 /** Можно ли через ворота въехать / выехать. */

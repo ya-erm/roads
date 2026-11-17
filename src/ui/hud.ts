@@ -174,7 +174,7 @@ import { baseCardHtml } from './baseCard';
 import { MOVE_TURN_TIP, parkCardHtml } from './parkCard';
 import { turnableBuilding, turnText } from '../world/moveTurn';
 import { lotCardHtml } from './lotCard';
-import { LOT, lotCols, lotDepth, lotGateDriveway, lotRows, lotWidth } from '../world/parkingLots';
+import { defaultGates, LOT, lotCols, lotDepth, lotGateDriveway, lotRows, lotStallCount, lotWidth } from '../world/parkingLots';
 import { PARK_INFO } from '../world/parkPick';
 import { crewCardHtml } from './crewCard';
 import { workTrainCardHtml } from './workTrainCard';
@@ -2179,7 +2179,9 @@ export class Hud {
   private lotOptionsHtml(sw: string): string {
     const c = this.controller;
     const cols = c.lotCols;
-    const n = cols * c.lotRows;
+    // Мест — по раскладке: у большой под тупиком-выездом мест нет.
+    const W = lotWidth(cols);
+    const n = lotStallCount({ fp: { center: { x: 0, y: 0 }, w: W, h: lotDepth(c.lotRows), angle: 0 }, gates: defaultGates(W) });
     const price = LOT.gateCost + n * LOT.stallCost;
     const rows = ([1, 2, 4] as const)
       .map(

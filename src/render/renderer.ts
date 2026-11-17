@@ -88,6 +88,7 @@ import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, stro
 import { BUY_DOT_PX } from '../input/buyDrop';
 import { parkingLevel, type ParkingCell, type ParkingLevel } from '../game/parkingLayer';
 import { drawLotArt, drawLotPreview } from './lotArt';
+import { lotGateNodes } from '../world/parkingLots';
 import type { LotGate } from '../world/entities';
 import type { LotRect } from '../world/houseAccess';
 
@@ -758,6 +759,10 @@ export class Renderer {
       // Дорога, уходящая за край карты, обрывается краем — без разворота на конце.
       this.lanes.inMap = this.projectLanes.inMap = (p) => terrain.inBounds(p, 1);
     }
+    // Тупик-выезд большой площадки обрывается у её узла без разворота: дальше — проезд площадки (drawLots поверх).
+    const gates = lotGateNodes(game.towns);
+    this.lanes.setOpenEnds(gates);
+    this.projectLanes.setOpenEnds(gates);
     // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты; над рекой на земле — мостом.
     // Строящееся («Со строительством») — чертежом по всей сети (fullNet), дороги — по открытой для движения.
     const fullNet = o.roads?.net ?? game.roads.net;
@@ -939,6 +944,8 @@ export class Renderer {
     this.drawRailBeds(groundRails, false);
     drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0, this.openRoads(s));
+    // Большие площадки — поверх своих тупиков-выездов: дорога видна до края площадки.
+    this.drawLots(game, view, true);
     this.drawStationAprons(game, roadNet, view);
     // Проекты стройки — будущей дорогой с готовым до края работ (поверх земли, под подсветкой правки); базы стройки.
     drawProjects(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
@@ -2658,10 +2665,21 @@ export class Renderer {
         if (p.fp.center.x + r < view.x0 || p.fp.center.x - r > view.x1 || p.fp.center.y + r < view.y0 || p.fp.center.y - r > view.y1) continue;
         drawParkArt(this.ctx, p, this.camera.zoom, trees);
       }
-      // Площадки-стоянки — тоже под дорогами: тупик-выезд большой ложится поверх.
+    }
+    // Площадки-стоянки — тоже под дорогами; большая с тупиком-выездом — поверх сети (drawLots после неё).
+    this.drawLots(game, view, false);
+  }
+
+  /**
+   * Площадки-стоянки: over — большие с тупиком-выездом (после сети: он виден до края площадки, а на ней — проезд её
+   * покрытием, без кромки и разметки дороги), иначе — прочие (под сетью).
+   */
+  private drawLots(game: Game, view: Box, over: boolean): void {
+    for (const town of game.towns) {
       for (const l of town.lots ?? []) {
+        if (l.removed || !!l.nodes?.length !== over) continue;
         const r = Math.hypot(l.fp.w, l.fp.h) / 2 + LOT_REACH;
-        if (l.removed || l.fp.center.x + r < view.x0 || l.fp.center.x - r > view.x1 || l.fp.center.y + r < view.y0 || l.fp.center.y - r > view.y1) continue;
+        if (l.fp.center.x + r < view.x0 || l.fp.center.x - r > view.x1 || l.fp.center.y + r < view.y0 || l.fp.center.y - r > view.y1) continue;
         drawLotArt(this.ctx, l, this.camera.zoom);
       }
     }

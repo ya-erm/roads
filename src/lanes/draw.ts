@@ -370,6 +370,9 @@ export class LaneRenderer {
   water: ((p: Vec) => boolean) | null = null;
   /** Точка внутри карты; тупик на краю (дорога уходит за край карты) — без разворота. Нет — всё внутри. */
   inMap: ((p: Vec) => boolean) | null = null;
+  /** Тупик без разворота (узел ворот большой площадки: дальше — её проезд, setOpenEnds). Нет — у всех разворот. */
+  private openEnd: ((id: number) => boolean) | null = null;
+  private openSig = '';
   /** Настройку «Разметка перекрёстков» переключили — геометрию узлов заново, чтобы было видно сразу. Вызов — отписка. */
   readonly unprefs = onPrefs(() => {
     this.net = null;
@@ -377,10 +380,25 @@ export class LaneRenderer {
     this.nodeCache.clear();
   });
 
+  /**
+   * Тупики без разворота — узлы ids (ворота больших площадок: тупик-выезд обрывается, дальше — проезд площадки).
+   * Сменился набор — геометрия узлов заново (у кого он сменился).
+   */
+  setOpenEnds(ids: ReadonlySet<number>): void {
+    const sig = [...ids].sort((a, b) => a - b).join(',');
+    if (sig === this.openSig) return;
+    this.openSig = sig;
+    this.openEnd = ids.size ? (id) => ids.has(id) : null;
+    this.net = null;
+    this.version = -1;
+  }
+
   /** Новая карта: кэш геометрии (в нём и куски над водой) — заново, и вода — уже другой карты. */
   reset(): void {
     this.water = null;
     this.inMap = null;
+    this.openEnd = null;
+    this.openSig = '';
     this.net = null;
     this.version = -1;
     this.corridorCache.clear();
@@ -645,7 +663,8 @@ export class LaneRenderer {
       const turns = `${n.bans?.join(';') ?? ''}|${n.lanes?.join(';') ?? ''}`;
       // Пешеходные переходы — зебры на подъездах.
       const walks = n.walks ? Object.entries(n.walks).map(([k, w]) => `${k}${w.on ? '+' : '-'}`).join() : '';
-      sigs.set(n.id, `${n.kind}:${n.level}:${n.deck ?? ''}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}:${corners}:${turns}:${walks}`);
+      const open = this.openEnd?.(n.id) ? 'o' : '';
+      sigs.set(n.id, `${n.kind}:${n.level}:${n.deck ?? ''}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}:${corners}:${turns}:${walks}:${open}`);
     }
     // Островки стыков: где у полотен нет ограждения (и через простые стыки дальше — EdgeChain), из каких полотен
     // островок у каждого стыка — по ним и пересчёт геометрии, даже если полотно не у самого узла.
@@ -692,7 +711,7 @@ export class LaneRenderer {
           // Зебры — только на асфальте (на грунтовке перехода не бывает: walkArms).
           const walks = geo.plate ? walksOn(net, n, this.cuts).map((arm) => walkGeo(arm)) : [];
           if (walks.length) geo.walks = walks.map((w) => ({ cover: w.cover, stripes: w.stripes }));
-        } else if (net.isDeadEnd(n)) geo.caps = this.inMap && !this.inMap(n.pos) ? [] : net.ends(n).map((e) => this.capGeo(e));
+        } else if (net.isDeadEnd(n)) geo.caps = (this.inMap && !this.inMap(n.pos)) || this.openEnd?.(n.id) ? [] : net.ends(n).map((e) => this.capGeo(e));
         // Островок на мосту или пандусе — поднят по точкам, как кромки полотен, у которых лежит (liftNode его не трогает).
         else geo.gores = this.seamGores(net, n, (c, s) => (Math.max(net.node(c.a).level, net.node(c.b).level) > 0 ? bridgeLook(deckAlong(net, c, s)).lift : { x: 0, y: 0 }));
         // Узел моста — поднят на свою высоту, как концы его полотен; тень — на земле под ним.

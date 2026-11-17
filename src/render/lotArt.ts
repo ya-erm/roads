@@ -6,9 +6,12 @@ import type { Footprint } from '../world/spatial';
 /**
  * Площадка-стоянка на карте (docs/PARKING.md, этап 3; раскладка — world/parkingLots.ts): асфальт, бордюр по краю,
  * белые линии мест, проезды, ворота у края к улице (значок хода: ⬌ — в обе стороны, ⇥ — въезд, ↤ — выезд) и заезд от
- * бордюра до ворот через тротуар; у большой площадки — тупик-выезд (его рисует сеть). Вдали — асфальт и «P».
+ * бордюра до ворот через тротуар; у большой площадки — тупик-выезд (его рисует сеть, без разворота на конце). Большая
+ * рисуется поверх сети: тупик-выезд виден до края площадки, дальше — проезд её покрытием (мест под ним нет, lotLayout),
+ * без бордюра в воротах. Вдали — асфальт и «P».
  */
-const ASPHALT = 'rgba(96,102,112,0.95)';
+// Непрозрачный: кромка и разметка тупика-выезда под большой площадкой не должны просвечивать.
+const ASPHALT = 'rgb(96,102,112)';
 const CURB = 'rgba(200,200,196,0.95)';
 const PAINT = 'rgba(245,245,240,0.9)';
 const SIGN = '#2f6fd0';
@@ -49,7 +52,8 @@ function drawGates(ctx: CanvasRenderingContext2D, fp: Footprint, gates: readonly
     }
     ctx.strokeStyle = bad?.includes(i) ? '#e0473c' : PAINT;
     ctx.lineWidth = Math.max(0.4, 1.4 / zoom);
-    const y = -H / 2 - LOT.setback / 2;
+    // У большой за краем — тупик-выезд со своей разметкой: стрелки хода — на проезде площадки, у края.
+    const y = big ? -H / 2 + 3 : -H / 2 - LOT.setback / 2;
     if (g.mode !== 'out') arrow(ctx, g.x - (g.mode === 'both' ? 1.6 : 0), y, 1, 2);
     if (g.mode !== 'in') arrow(ctx, g.x + (g.mode === 'both' ? 1.6 : 0), y, -1, 2);
   });
@@ -69,6 +73,35 @@ function drawStalls(ctx: CanvasRenderingContext2D, stalls: readonly LotRect[], z
   ctx.stroke();
 }
 
+/** Бордюр по краю участка; в проёмах gaps (от и до по x на краю у улицы) его нет — там въезд тупика-выезда. */
+function drawCurb(ctx: CanvasRenderingContext2D, W: number, H: number, gaps: readonly (readonly [number, number])[]): void {
+  ctx.strokeStyle = CURB;
+  ctx.lineWidth = 0.7;
+  const x0 = -W / 2 + 0.35;
+  const x1 = W / 2 - 0.35;
+  const y0 = -H / 2 + 0.35;
+  const y1 = H / 2 - 0.35;
+  if (!gaps.length) {
+    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+    return;
+  }
+  // Кругом от первого проёма до последнего по краю у улицы, между проёмами — кусками.
+  const cuts = [...gaps].sort((a, b) => a[0] - b[0]);
+  ctx.beginPath();
+  ctx.moveTo(Math.max(x0, cuts[0][0]), y0);
+  ctx.lineTo(x0, y0);
+  ctx.lineTo(x0, y1);
+  ctx.lineTo(x1, y1);
+  ctx.lineTo(x1, y0);
+  ctx.lineTo(Math.min(x1, cuts[cuts.length - 1][1]), y0);
+  for (let k = 0; k + 1 < cuts.length; k++) {
+    if (cuts[k + 1][0] <= cuts[k][1]) continue;
+    ctx.moveTo(cuts[k][1], y0);
+    ctx.lineTo(cuts[k + 1][0], y0);
+  }
+  ctx.stroke();
+}
+
 /** Площадка в плитки кэша (под машинами; машины на местах рисует движение). */
 export function drawLotArt(ctx: CanvasRenderingContext2D, lot: ParkingLot, zoom: number): void {
   const { fp } = lot;
@@ -76,14 +109,13 @@ export function drawLotArt(ctx: CanvasRenderingContext2D, lot: ParkingLot, zoom:
   const H = fp.h;
   ctx.save();
   frame(ctx, fp);
+  const big = !!lot.nodes?.length;
   ctx.fillStyle = ASPHALT;
   ctx.fillRect(-W / 2, -H / 2, W, H);
-  ctx.strokeStyle = CURB;
-  ctx.lineWidth = 0.7;
-  ctx.strokeRect(-W / 2 + 0.35, -H / 2 + 0.35, W - 0.7, H - 0.7);
+  drawCurb(ctx, W, H, big ? lot.gates.map((g) => [g.x - LOT.stubEdge, g.x + LOT.stubEdge] as const) : []);
   if (zoom >= FINE) {
     drawStalls(ctx, lotLayout(lot).stalls.map((s) => s.rect), zoom);
-    drawGates(ctx, fp, lot.gates, zoom, !!lot.nodes?.length);
+    drawGates(ctx, fp, lot.gates, zoom, big);
   }
   // Знак «P» у края к улице, вдали — посередине.
   const r = zoom >= FINE ? 2.6 : Math.min(W, H) * 0.25;
