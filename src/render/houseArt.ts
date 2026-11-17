@@ -1,10 +1,10 @@
 import { TOWN_SCALE } from '../config';
 import type { HouseForm, TownBuilding } from '../world/entities';
 import type { Footprint } from '../world/spatial';
-import { CAR_SIZE, cottagePlan, dachaPlan, LOT_SETBACK, type LotRect } from '../world/houseAccess';
+import { cottagePlan, dachaPlan, LOT_SETBACK, type LotRect } from '../world/houseAccess';
 import { depotLot, fuelLot, marketHall, officeLot, shopLotOf, STALL_ROW_DEPTH, warehouseLot, type DockYard, type ShopLot } from '../world/shopLots';
 import { formOf, LANDMARK_YARD, storeysOf } from '../world/townForms';
-import { courtyardPlan, garagesPlan, slabPlan, towerPlan, townhousePlan, type YardPlan, type YardRow } from '../world/yardLots';
+import { courtyardPlan, garagesPlan, hospitalPlan, slabPlan, towerPlan, townhousePlan, type YardPlan, type YardRow } from '../world/yardLots';
 import { Art, disc, METAL } from './industryArt';
 import { WALK_LOOK } from './sidewalks';
 import { bench, flowerbed, fountain, lamp, playground as playArea, sportsBox, statue, trashPad } from './townDecor';
@@ -65,8 +65,6 @@ interface Lot {
  * полотна закрывает асфальт дороги, а не наоборот.
  */
 const SETBACK = LOT_SETBACK;
-/** Легковая у дома: длина и ширина, ед. (как машина на улице). */
-const CAR = { l: CAR_SIZE.l, w: CAR_SIZE.w };
 /**
  * Масштаб построек к прежнему (config.TOWN_SCALE): участки и дома крупнее во столько раз, а машины, места на стоянках,
  * скамейки и площадки — те же, в масштабе дорог.
@@ -1095,7 +1093,12 @@ function school(a: Art, lot: Lot): void {
   treeRow(a, lot, x0, -x0, y0 + 0.9, 6, 1.5, 70);
 }
 
-/** Больница: корпус буквой «Н» с красным крестом на крыше, вокруг — сквер. */
+/**
+ * Больница: корпус буквой «Н» с красным крестом на крыше, вокруг — сквер. Между крыльями у улицы — стоянка скорых
+ * (world/yardLots.hospitalPlan): места с заездом прямо с полосы, съезд во всю ширину ряда через тротуар; у перемычки —
+ * асфальт к приёмному покою и козырёк над входом. Скорые на местах рисует не участок, а движение
+ * (game/serviceDepots.ts): на месте — ровно те, что сейчас не на вызове.
+ */
 function hospital(a: Art, lot: Lot): void {
   const { W, H, b } = lot;
   const x0 = -W / 2;
@@ -1103,22 +1106,46 @@ function hospital(a: Art, lot: Lot): void {
   lawn(a, lot);
   const z = wallZ(b.floors);
   const roof = '#eceeea';
-  const t = clamp(Math.min(W, H) * 0.24, 5.5, 8 * S);
-  const L = H - 4;
-  // Подъезд к приёмному покою — съезд с улицы между крыльями «Н», к перемычке.
-  curbCut(a, lot, 0, 5.2, -t / 2 + 0.2);
+  const p = hospitalPlan(b);
+  const { t, L, bar, row, canopy } = p;
+  if (row && canopy) {
+    curbCut(a, lot, row.pad.x + row.pad.w / 2, row.pad.w, row.pad.y + 0.3);
+    parking(a, row);
+    // От мест до входа — асфальт под козырьком.
+    const end = row.pad.y + row.pad.h;
+    if (bar > end) a.patch(canopy.x, end, canopy.w, bar - end, ASPHALT, 0.5);
+    if (a.pass === 0 && a.d) {
+      // Места скорых — красный крест у дальнего края каждого.
+      const c = a.c;
+      c.fillStyle = 'rgba(214,69,65,0.8)';
+      for (const s of row.stalls) {
+        const cx = s.x + s.w / 2;
+        const cy = s.y + s.h - 1.8;
+        c.fillRect(cx - 0.9, cy - 0.3, 1.8, 0.6);
+        c.fillRect(cx - 0.3, cy - 0.9, 0.6, 1.8);
+      }
+    }
+  } else curbCut(a, lot, 0, 5.2, bar + 0.2);
   flat(a, x0 + 2, y0 + 2, t, L, z, roof);
   flat(a, -x0 - 2 - t, y0 + 2, t, L, z, roof);
-  flat(a, x0 + 2 + t, -t / 2, W - 4 - 2 * t, t, z * 0.85, roof);
+  flat(a, x0 + 2 + t, bar, W - 4 - 2 * t, t, z * 0.85, roof);
+  if (canopy) {
+    // Козырёк приёмного покоя: низкий, белый, с красной полосой по краю.
+    flat(a, canopy.x, canopy.y, canopy.w, canopy.h, wallZ(1) * 0.7, '#f6f6f2');
+    if (a.pass === 2 && a.lod) {
+      a.c.fillStyle = '#d64541';
+      a.c.fillRect(canopy.x, canopy.y, canopy.w, 0.6);
+    }
+  }
   if (a.pass === 2 && a.lod) {
     const c = a.c;
     c.fillStyle = '#d64541';
     const s = t * 0.42;
-    c.fillRect(-s / 2, -s * 0.16, s, s * 0.32);
-    c.fillRect(-s * 0.16, -s / 2, s * 0.32, s);
+    const cy = bar + t / 2;
+    c.fillRect(-s / 2, cy - s * 0.16, s, s * 0.32);
+    c.fillRect(-s * 0.16, cy - s / 2, s * 0.32, s);
   }
-  yardTree(a, lot, 0, H / 2 - 3, 2.6, 4);
-  if (lot.fine) a.vehicle(2.2, -t / 2 - 4, CAR.w + 0.3, CAR.l + 1, '#f4f4f0');
+  if (bar + t < H / 2 - 5) yardTree(a, lot, 0, H / 2 - 3, 2.6, 4);
 }
 
 /** Храм: неф поперёк улицы, апсида в глубине, колокольня у входа, луковичная глава; вокруг — ограда и деревья. */

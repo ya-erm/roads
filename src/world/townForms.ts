@@ -170,7 +170,8 @@ const CONVERTIBLE: ReadonlySet<HouseForm> = new Set(['shop', 'office', 'store'])
 
 /**
  * Школа, больница, рынок, церковь — нужное число на город по его размеру: из магазинов и контор (kind 'com':
- * рабочие места те же), что ближе к своему кольцу, — предпочтительно на большом участке. Уже стоящие — в счёт.
+ * рабочие места те же), что ближе к своему кольцу, — предпочтительно на большом участке (больнице — где влезают места
+ * скорых: hospitalFit). Уже стоящие — в счёт.
  */
 export function pickPublic(town: Town): void {
   const tier = townTier(town);
@@ -178,12 +179,15 @@ export function pickPublic(town: Town): void {
   for (const need of PUBLIC) {
     let have = town.buildings.reduce((n, b) => n + (b.form === need.form ? 1 : 0), 0);
     const want = need.count(tier, town.population, town.id);
+    // Больнице — участок, где между крыльями влезают места скорых, сколько нужно городу (hospitalBays).
+    const bays = need.form === 'hospital' ? hospitalBays(town) : 0;
     while (have < want && pool.length) {
       let best = 0;
       let score = Infinity;
       for (let i = 0; i < pool.length; i++) {
         const b = pool[i];
-        const s = Math.abs(edgeOf(town, b.fp.center) - need.at) - (b.fp.w >= BIG_W ? 0.2 : 0) + hash(b.id, 5) * 0.05;
+        const fits = bays > 0 && hospitalFit(b.fp.w, b.fp.h) >= bays;
+        const s = Math.abs(edgeOf(town, b.fp.center) - need.at) - (b.fp.w >= BIG_W ? 0.2 : 0) - (fits ? 0.15 : 0) + hash(b.id, 5) * 0.05;
         if (s < score) {
           score = s;
           best = i;
@@ -204,6 +208,44 @@ export function zoneTown(town: Town): void {
   for (const b of town.buildings) if (!b.form) b.form = placeForm(town, b);
   pickPublic(town);
   settlePeople(town);
+  // Мест скорой у больницы — по нынешнему размеру города: вырос — больше (меньше не становится).
+  const bays = hospitalBays(town);
+  for (const b of town.buildings) if (b.form === 'hospital' && (b.bays ?? 0) < bays) b.bays = bays;
+}
+
+/** Город от стольких жителей — 3 места скорой у больницы (hospitalBays). */
+export const HOSPITAL_POP = 3000;
+
+/**
+ * Стоянка скорой у больницы (раскладка — yardLots.hospitalPlan): место под фургон скорой (9 × 4 ед.) — шире и глубже
+ * места легковой (yardLots.YARD_STALL); мест — от и до (TownBuilding.bays, hospitalBays); глубина места — не меньше
+ * minD (фургон и полметра); козырёк приёмного покоя — такой глубины.
+ */
+export const HOSPITAL_BAY = { w: 5.6, d: 10.5, minD: 9.6, min: 2, max: 4, canopy: 3.2 } as const;
+
+/** Толщина крыльев больницы буквой «Н» на участке W × H. */
+export const hospitalWing = (W: number, H: number) => Math.max(5.5, Math.min(8 * S, Math.min(W, H) * 0.24));
+
+/** Сколько мест скорой влезает между крыльями больницы на участке шириной W (глубина — H). */
+export function hospitalFit(W: number, H: number): number {
+  const t = hospitalWing(W, H);
+  return Math.floor((W - 4 - 2 * t - 1.2) / HOSPITAL_BAY.w + 1e-9);
+}
+
+/** Ширина участка больницы глубиной H, на которой между крыльями влезает n мест (не уже w). */
+export function hospitalWidth(n: number, H: number, w = 0): number {
+  let W = Math.max(w, 1);
+  for (let i = 0; i < 40 && hospitalFit(W, H) < n; i++) W += 0.5;
+  return W;
+}
+
+/**
+ * Мест скорой у больницы — по размеру города: у города — 2, у города от HOSPITAL_POP жителей — 3, у большого — 4
+ * (сколько влезает на участок — yardLots.hospitalPlan).
+ */
+export function hospitalBays(town: Pick<Town, 'population' | 'style'> & { tier?: TownTier }): number {
+  const tier = townTier(town);
+  return tier === 'city' ? 4 : tier === 'town' && town.population >= HOSPITAL_POP ? 3 : 2;
 }
 
 // ---------- Жители по домам ----------

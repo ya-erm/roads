@@ -93,6 +93,7 @@ import { Construction, type ConstructionSave, type Project, projectName } from '
 import { WorkSignals } from './workSignals';
 import { Crosswalks, WALK_HOUSES, WALK_LOSS } from './crosswalks';
 import { Garages, type GarageHost, type GarageLook } from './garages';
+import { ServiceDepots, type DepotHost } from './serviceDepots';
 import { ShopParking, type ShopHost } from './shopParking';
 import { Docks, type DockHost } from './docks';
 import { type BodyLook, type CrewLoopHost, CrewLoops, LOOP } from './crewLoop';
@@ -1017,6 +1018,11 @@ export class Game implements BuildContext {
   readonly carHomes = new CarHomes(this.carHomesHost(), this.garages, this.curb, this.lots);
   /** Поиск места у цели (src/game/parkSearch.ts): полосы, площадки, до трёх попыток, иначе домой. */
   readonly parkSearch = new ParkSearch(this.searchHost(), this.curb, this.lots, this.garages, this.carHomes);
+  /**
+   * Станции служб (src/game/serviceDepots.ts): скорые больницы стоят на её стоянке, выезжают оттуда на вызовы и
+   * возвращаются на свои места.
+   */
+  readonly depots = new ServiceDepots(this.depotHost());
   /** Предприятия строит игрок (режим «Строит игрок», src/game/enterprises.ts): месторождения, постройка, рабочие, вред. */
   readonly enterprises: Enterprises;
 
@@ -5171,6 +5177,8 @@ export class Game implements BuildContext {
     // Машины у гаражей частных домов и на стоянках магазинов — сразу после движения: на манёвре их рисуют там, где
     // они на нём.
     this.garages.step(dt);
+    // Скорые у больниц: манёвры у мест и возвращение с вызовов.
+    this.depots.step(dt);
     this.curb.step(dt);
     // Выезды с больших площадок (через узел ворот) и поиск места у целей.
     if (this.lots.exits.length) this.lots.step(dt);
@@ -6749,7 +6757,7 @@ export class Game implements BuildContext {
   /** Машина едет к своей остановке (а не к автостанции) или стоит у неё: у бордюра — подъезжая, смещается к нему заранее. */
   private curbStop(sim: Vehicle): boolean {
     // Машина жителя встаёт напротив заезда к своему гаражу — у бордюра, как перед поворотом во двор.
-    if (this.garages.pulls(sim)) return true;
+    if (this.garages.pulls(sim) || this.depots.pulls(sim)) return true;
     const v = this.fleetOf(sim);
     const line = v && this.lines.get(v.lineId);
     const st = line && this.stations.get(line.stops[v.stop]);
@@ -7025,6 +7033,9 @@ export class Game implements BuildContext {
     }
     if (owner?.type === 'service') {
       this.serviceCars--;
+      // Скорая больницы: доехала до вызова — стоит у него; не свернула на своё место — заедет ещё раз.
+      this.depots.forget(sim.id);
+      this.depots.arrived(sim);
       return;
     }
     if (owner?.type === 'crew') {
@@ -7097,6 +7108,8 @@ export class Game implements BuildContext {
     }
     if (owner?.type === 'service') {
       this.serviceCars--;
+      this.depots.forget(sim.id);
+      this.depots.arrived(sim);
       return;
     }
     if (owner?.type === 'crew') {
@@ -8575,12 +8588,52 @@ export class Game implements BuildContext {
     }
   }
 
-  /** Выезды спецтранспорта города за dt — по seed партии (services.ts), общий генератор не трогают. */
+  /**
+   * Выезды спецтранспорта города за dt — по seed партии (services.ts), общий генератор не трогают. Скорая — со своей
+   * больницы или ближней в другом городе (serviceDepots.ts): с места на её стоянке к дому вызова и обратно; все на
+   * вызовах — вызов не принят. Службы без здания (полиция, пожарная) и города, куда ни от одной больницы не доехать, —
+   * как прежде: из здания в здание города.
+   */
   private serviceTrips(town: Town, dt: number): void {
     for (const n of serviceTick(town, dt)) {
-      const call = this.serviceCars < SERVICE_TRAFFIC.maxCars ? serviceCall(this.seed, town, n) : null;
-      if (call) this.spawnService(call.kind, call.siren, call.from.anchor, call.to.anchor, { from: call.from, to: call.to });
+      const call = serviceCall(this.seed, town, n);
+      if (!call || this.depots.dispatch(call.kind, town, call.to, call.siren) !== 'none') continue;
+      if (this.serviceCars < SERVICE_TRAFFIC.maxCars) this.spawnService(call.kind, call.siren, call.from.anchor, call.to.anchor, { from: call.from, to: call.to });
     }
+  }
+
+  /** Что станциям служб (serviceDepots.ts) нужно от игры. */
+  private depotHost(): DepotHost {
+    const game = this;
+    return {
+      get seed() {
+        return game.seed;
+      },
+      get time() {
+        return game.time;
+      },
+      get towns() {
+        return game.towns;
+      },
+      get traffic() {
+        return game.traffic;
+      },
+      get graph() {
+        return game.roads.graph;
+      },
+      get net() {
+        return game.roads.net;
+      },
+      own: (sim, kind, trip) => {
+        this.owners.set(sim.id, { type: 'service', kind, trip });
+        this.serviceCars++;
+      },
+      gone: (sim) => {
+        this.owners.delete(sim.id);
+        this.serviceCars--;
+      },
+      reaches: (from, to) => from === to || !!this.roads.route(from, to),
+    };
   }
 
   /**
@@ -8904,6 +8957,8 @@ export class Game implements BuildContext {
     const out = this.garages.looks(this.towns, box, false);
     // Манёвры у бордюра на полосах стоянки (вне потока) — всегда, как манёвры во дворах.
     out.push(...this.curb.looks(box));
+    // Скорые у больниц: на манёвре — всегда, на местах — вблизи.
+    out.push(...this.depots.looks(box, parked));
     if (parked) out.push(...this.carHomes.looks(box), ...this.shops.looks(this.towns, box, parked));
     return out;
   }
@@ -8947,7 +9002,7 @@ export class Game implements BuildContext {
     const v = this.traffic.vehicles.get(simId);
     if (!v) return null;
     // У места (гараж, площадка, стоянка магазина, garages.aheadOf): линия — до самого места, а не до конца полосы.
-    const spot = this.garages.aheadOf(simId);
+    const spot = this.garages.aheadOf(simId) ?? this.depots.aheadOf(simId);
     const length = (pts: Vec[]) => pts.reduce((s, p, i) => (i ? s + dist(pts[i - 1], p) : 0), 0);
     if (spot?.only) {
       const pts = spot.tail!;

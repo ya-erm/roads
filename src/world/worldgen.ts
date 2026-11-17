@@ -15,7 +15,7 @@ import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerI
 import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
-import { edgeOf, growTier, inDistrict, JOBS_PER_FLOOR, LANDMARK_YARD, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, yardOf, zoneTown } from './townForms';
+import { edgeOf, growTier, hospitalBays, hospitalWidth, inDistrict, JOBS_PER_FLOOR, LANDMARK_YARD, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, yardOf, zoneTown } from './townForms';
 import { onPark, placeParks, type ParkSite } from './townParks';
 import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
@@ -745,8 +745,34 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
   // Типы домов и жильцы — сразу: население города (для потребностей, мест под предприятия) — уже по жильцам.
   zoneTown(town);
   recountPopulation(town);
+  widenHospitals(ctx, town);
   levelTown(ctx.terrain, town);
   return town;
+}
+
+/**
+ * Больница со стоянкой скорых (yardLots.hospitalPlan): места — между крыльями, у улицы. Участок, где столько мест, сколько
+ * нужно городу (hospitalBays — по населению, уже посчитанному), не влезает, — шире вдоль улицы: поровну в обе стороны,
+ * в одну или в другую, где не задевает соседей, улицы, воду и пути. Нигде — какой есть (мест меньше). Без ГСЧ.
+ */
+function widenHospitals(ctx: WorldContext, town: Town): void {
+  const bays = hospitalBays(town);
+  for (const b of town.buildings) {
+    if (b.form !== 'hospital') continue;
+    b.bays = Math.max(b.bays ?? 0, bays);
+    const W = hospitalWidth(bays, b.fp.h, b.fp.w);
+    if (W <= b.fp.w + 1e-6) continue;
+    const grow = W - b.fp.w;
+    const along = { x: Math.cos(b.fp.angle), y: Math.sin(b.fp.angle) };
+    ctx.index.remove(b);
+    for (const k of [0, 0.5, -0.5]) {
+      const fp: Footprint = { ...b.fp, w: W, center: add(b.fp.center, scale(along, k * grow)) };
+      if (ctx.index.overlaps(fp, 1) || ctx.terrain.isWater(fp.center, footprintRadius(fp)) || onRail(ctx.rail, fp, RAIL_BUFFER) || !clearAlong(ctx, fp, 2)) continue;
+      b.fp = fp;
+      break;
+    }
+    ctx.index.add(b);
+  }
 }
 
 /**

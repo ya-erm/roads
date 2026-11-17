@@ -38,7 +38,14 @@ export function carTripHtml(game: Game, simId: number): string {
   if (trip && service) {
     // Вызов спецмашины — в своём городе: город один раз, дальше — откуда и куда.
     const same = trip.from.townId === trip.to.townId;
-    row = `<span class="ct-kind" data-tip="${esc(`Вызов: ${SERVICES[service].name.toLowerCase()} едет из здания в здание`)}">${SERVICES[service].icon}</span>${town(trip.from)}${
+    // Скорая больницы (game/serviceDepots.ts): с места на её стоянке к дому вызова и обратно.
+    const tip =
+      trip.from.form === 'hospital'
+        ? `${SERVICES[service].name}: из больницы на вызов`
+        : trip.to.form === 'hospital'
+          ? `${SERVICES[service].name}: с вызова на своё место у больницы`
+          : `Вызов: ${SERVICES[service].name.toLowerCase()} едет из здания в здание`;
+    row = `<span class="ct-kind" data-tip="${esc(tip)}">${SERVICES[service].icon}</span>${town(trip.from)}${
       same ? `${kind(trip.from, 'Откуда')}${arrow}${kind(trip.to, 'Куда')}` : `${kind(trip.from, 'Откуда')}${arrow}${kind(trip.to, 'Куда')}${town(trip.to)}`
     }`;
   } else if (trip) row = `${kind(trip.from, 'Откуда')}${town(trip.from)}${arrow}${kind(trip.to, 'Куда')}${town(trip.to)}`;

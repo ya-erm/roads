@@ -1393,9 +1393,10 @@ export class Renderer {
       else this.walks.delete(town.id);
       add(
         rec.diff.update((put) => {
-          // Рамка — с тенью и площадью у ратуши (houseArt): они выходят за контур дома. Этажи жилого — по жильцам.
+          // Рамка — с тенью и площадью у ратуши (houseArt): они выходят за контур дома. Этажи жилого — по жильцам; мест
+          // скорой у больницы — по размеру города.
           for (const b of town.buildings)
-            put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}`, grow(fpBox(b.fp), houseReach(b)));
+            put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}|${b.bays ?? ''}`, grow(fpBox(b.fp), houseReach(b)));
           // Парки — отрицательными номерами (id парка — не id сущности).
           for (const p of parks ?? []) put(-p.id - 1, `${fpSig(p.fp)}|${p.kind}`, grow(fpBox(p.fp), PARK_REACH));
           // Площадки-стоянки — своими номерами (id сущности, со сдвигом от парков); снесённых нет.

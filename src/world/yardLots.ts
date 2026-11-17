@@ -4,7 +4,7 @@ import type { Vec } from '../core/vec';
 import type { TownBuilding } from './entities';
 import { CAR_SIZE, LOT_SETBACK, lotFrame, type Driveway, type LotRect } from './houseAccess';
 import { STALL_STOP } from './shopLots';
-import { flatsOf, formOf, stackFolk, storeysOf } from './townForms';
+import { flatsOf, formOf, HOSPITAL_BAY, hospitalFit, hospitalWing, stackFolk, storeysOf } from './townForms';
 
 /**
  * Дворовые стоянки многоквартирных домов и гаражные боксы (docs/PARKING.md, этап 1): раскладка участка, общая для
@@ -510,6 +510,42 @@ export function townhousePlan(b: Pick<TownBuilding, 'id' | 'fp' | 'kind' | 'floo
   return { d, back, rest, door, bx: bodyX, bw, wing, tree: { x: left ? -x0 - 3.2 : x0 + 3.2, y: back + rest * 0.55 }, row: park };
 }
 
+/**
+ * Больница: корпус буквой «Н» — крылья у боковых границ участка (толщина t, от y0 + 2 вглубь), перемычка между ними.
+ * Между крыльями у улицы — стоянка скорых: ряд мест с заездом прямо с полосы (как карман панельки), носом к перемычке;
+ * у перемычки над входом приёмного покоя — козырёк (canopy) во всю ширину ряда. Перемычка — посередине участка или
+ * глубже, чтобы места и козырёк поместились. Мест — TownBuilding.bays (нет — HOSPITAL_BAY.min), сколько влезает
+ * между крыльями; ни одного — стоянки нет, вход — дорожкой к перемычке.
+ */
+export interface HospitalPlan {
+  t: number;
+  /** Длина крыльев. */
+  L: number;
+  /** Передняя грань перемычки (y); её толщина — t. */
+  bar: number;
+  row: YardRow | null;
+  canopy: LotRect | null;
+}
+
+export function hospitalPlan(b: Pick<TownBuilding, 'fp' | 'bays'>): HospitalPlan {
+  const W = b.fp.w;
+  const H = b.fp.h;
+  const y0 = -H / 2;
+  const t = hospitalWing(W, H);
+  const L = H - 4;
+  const back = H / 2 - 2 - t;
+  const n = Math.min(b.bays ?? HOSPITAL_BAY.min, HOSPITAL_BAY.max, hospitalFit(W, H));
+  // Места — от края участка у улицы; глубина — сколько есть до перемычки (сдвинутой как можно глубже), не мельче фургона.
+  const d = Math.min(HOSPITAL_BAY.d, back - HOSPITAL_BAY.canopy - (y0 + 0.6));
+  if (n < 1 || d < HOSPITAL_BAY.minD) return { t, L, bar: -t / 2, row: null, canopy: null };
+  const end = y0 + 0.6 + d;
+  const bar = Math.min(back, Math.max(-t / 2, end + HOSPITAL_BAY.canopy));
+  const w = n * HOSPITAL_BAY.w;
+  const stalls: LotRect[] = Array.from({ length: n }, (_, k) => ({ x: -w / 2 + k * HOSPITAL_BAY.w, y: y0 + 0.6, w: HOSPITAL_BAY.w, h: d }));
+  const row: YardRow = { pad: { x: -w / 2, y: y0 + 0.6, w, h: d }, stalls, open: 'y-', direct: true, side: -1 };
+  return { t, L, bar, row, canopy: { x: -w / 2 - 0.6, y: bar - HOSPITAL_BAY.canopy, w: w + 1.2, h: HOSPITAL_BAY.canopy } };
+}
+
 /** Гаражные боксы: ряды (y и какие места есть — x левого края), бокс — ширина и глубина; въезд — с торца участка. */
 export interface GaragesPlan {
   bw: number;
@@ -546,7 +582,10 @@ export function garagesPlan(b: Pick<TownBuilding, 'id' | 'fp'>): GaragesPlan {
   return { bw, bd, rows, gate: { x: gx, w: GATE_W } };
 }
 
-/** Двор дома (места и ворота) — у панельки, высотки и гаражей; у прочих — null. */
+/**
+ * Двор дома (места и ворота) — у многоэтажек, гаражей и больницы (стоянка скорых: game/serviceDepots.ts); у прочих —
+ * null.
+ */
 export function yardLotOf(b: TownBuilding): YardLot | null {
   const form = formOf(b);
   if (form === 'slab' && b.kind === 'res') {
@@ -564,6 +603,11 @@ export function yardLotOf(b: TownBuilding): YardLot | null {
     // Места у торца, с заездом с улицы: ворот двора нет.
     const p = townhousePlan(b);
     return p.row?.stalls.length ? { rows: [p.row], gate: null, boxes: false } : null;
+  }
+  if (form === 'hospital') {
+    // Стоянка скорых между крыльями — с заездом с улицы: ворот нет.
+    const p = hospitalPlan(b);
+    return p.row ? { rows: [p.row], gate: null, boxes: false } : null;
   }
   if (form === 'courtyard' && b.kind === 'res') {
     const p = courtyardPlan(b);
