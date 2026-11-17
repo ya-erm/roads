@@ -40,8 +40,9 @@ export const LOOP = {
   accel: 2,
   /** Разворот в тупике ближе стольких метров по маршруту — петлёй. */
   look: 250,
-  /** Место петли ищется от тупика назад к машине шагом step, м. */
+  /** Место петли ищется от тупика назад к машине шагом step, м, — не ближе end к концу полосы. */
   step: 5,
+  end: 3,
   /** На столько метров за конец петли машина ещё идёт прямо (кузов ложится вдоль полосы). */
   run: 2,
   /** Конец петли (нос) — не дальше стольких метров позади носа в начале. */
@@ -387,6 +388,8 @@ interface Turn {
   v: number;
   /** С какого времени в этой фазе. */
   since: number;
+  /** Когда последний раз ехала (подъезд к месту петли). */
+  moved?: number;
 }
 
 export class CrewLoops {
@@ -478,10 +481,11 @@ export class CrewLoops {
     if (this.skip.get(veh.id) === u.node) return;
     // Место — ближе всего к тупику, где есть где развернуться (как развернулись бы и там, в конце дороги): позади в
     // колонне — следующие машины, им нужен путь, чтобы съехать с оси дороги в свою полосу, пока эта, развернувшись, не
-    // поедет мимо. Не ближе, чем она успеет мягко остановиться.
+    // поедет мимо. Не ближе, чем она успеет мягко остановиться, и не у самого конца полосы: доехав туда, машина уже
+    // заезжала бы на разворот тупика (манёвр в узле) — и разворачивалась там, как все.
     const d0 = (veh.v * veh.v) / (2 * LOOP.brake) + (veh.v > 0.5 ? 1 : 0);
     const allow = this.own(ahead.pts);
-    for (let d = u.d; d >= d0 - 1e-6; d = d - LOOP.step < d0 && d > d0 ? d0 : d - LOOP.step) {
+    for (let d = u.d - LOOP.end; d >= d0 - 1e-6; d = d - LOOP.step < d0 && d > d0 ? d0 : d - LOOP.step) {
       const at = d < 0.5 ? { pos: veh.pos, dir: veh.dir, lane: graph.lanes.get(veh.lane), u: veh.s } : pointAt(ahead.pts, d);
       if (!at?.lane || at.u === undefined) continue;
       const start: LoopStart = d < 0.5 ? { pos: veh.pos, dir: veh.dir, trail: veh.trail } : { pos: at.pos, dir: at.dir };
@@ -571,6 +575,9 @@ export class CrewLoops {
     // Маршрут сменился (бригаду послали в другое место) — разворот там не нужен.
     const ahead = routeAhead(this.host.graph, veh, Math.max(t.remain, 0) + LOOP.look, 2);
     if (ahead.uturn?.node !== t.node) return this.drop(t, veh, false);
+    // Стоит на подъезде дольше, чем ждут начала петли (кто-то не уезжает с места разворота), — как все, в тупике.
+    if (veh.v > 0.3) t.moved = this.host.time;
+    else if (this.host.time - (t.moved ?? t.since) > LOOP.startWait) return this.drop(t, veh, true);
     if (t.remain > 0.6 || veh.v > 0.3) return;
     const lane = this.host.graph.lanes.get(veh.lane);
     const allow = this.own(ahead.pts);
@@ -712,6 +719,13 @@ export class CrewLoops {
     return veh ? bodyBoxes(veh, LOOP.margin) : [];
   }
 
+  /** Полосы, по которым машина veh проедет ближайшие d м (с её нынешней). */
+  private wayOf(veh: Vehicle, d: number): Set<number> {
+    const out = new Set<number>([veh.lane]);
+    for (const p of routeAhead(this.host.graph, veh, Math.max(0, d) + 1, 2).pts) if (p.lane) out.add(p.lane.id);
+    return out;
+  }
+
   /** Машины в потоке рядом с местом c (в стольких метрах, сколько регулировщик смотрит вперёд, и ещё на петлю). */
   private near(c: Vec): Vehicle[] {
     const r = LOOP.flag + LOOP.r * 2 + 30;
@@ -790,9 +804,13 @@ export class CrewLoops {
       const all = this.zoneOf(t);
       if (!all.length) continue;
       const own = this.nowOf(t);
+      // Полосы, по которым она едет к месту петли: кто на них впереди неё — едет дальше (держать его — держать и её).
+      const veh = t.phase === 'approach' ? traffic.vehicles.get(t.sim) : undefined;
+      const way = veh ? this.wayOf(veh, t.remain) : null;
       for (const o of this.near(all[0].c)) {
         const ot = this.turns.get(o.id);
         if (o.id === t.sim || (ot && ot.phase !== 'approach')) continue;
+        if (veh && way && way.has(o.lane) && !o.onMovement && (o.lane !== veh.lane || o.s > veh.s)) continue;
         // Место петли той, что ещё только подъезжает к нему, держат для встречных; машинам колонны, что едут к своим
         // местам (по очереди их разводит ready), мешает только её корпус.
         const zone = ot && t.phase === 'approach' ? own : all;
