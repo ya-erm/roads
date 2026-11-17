@@ -17,6 +17,14 @@ describe('«Перенести» в карточке парка', () => {
     expect(parkMoveHtml(park('memorial', 20, 15))).toMatch(/\$1\s000/);
   });
 
+  it('поворот — в подсказке значками, повёрнутый — угол на кнопке', () => {
+    const plain = parkMoveHtml(park('square', 51.2, 38.4));
+    expect(plain).toContain('↻ R / ⇧R');
+    expect(plain).toContain('↺ ручка');
+    expect(plain).not.toMatch(/Перенести · ↻/);
+    expect(parkMoveHtml({ ...park('square', 51.2, 38.4), turn: Math.PI / 4 })).toContain('🚚 Перенести · ↻ 45° ·');
+  });
+
   it('набережную не перенести: она у воды', () => {
     expect(parkMoveHtml(park('embankment', 54, 13))).toBe('');
   });

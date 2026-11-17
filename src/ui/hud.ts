@@ -171,7 +171,8 @@ import { basePriceHtml, baseSvg, buildModeRowHtml, km as distText } from './cons
 import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
-import { parkCardHtml } from './parkCard';
+import { MOVE_TURN_TIP, parkCardHtml } from './parkCard';
+import { turnableBuilding, turnText } from '../world/moveTurn';
 import { lotCardHtml } from './lotCard';
 import { LOT, lotCols, lotDepth, lotGateDriveway, lotRows, lotWidth } from '../world/parkingLots';
 import { PARK_INFO } from '../world/parkPick';
@@ -3766,7 +3767,11 @@ export class Hud {
             : 'центр города';
       // Ратуша — вместе со своей площадью (Game.movePlan): значок площади на кнопке, цена — за обе.
       const { cost: moveCost, plaza } = g.buildingMove(b);
-      const moveTip = plaza ? `${PARK_INFO.plaza.icon} Площадь у ратуши едет вместе с ней · 🛣 встанет вдоль улицы, за тротуаром` : '🛣 Встанет вдоль улицы, за тротуаром';
+      // Ратуша и храм поворачиваются (world/moveTurn.ts): клавиши при переносе и ручка ↺ на карте; повёрнута — угол на кнопке.
+      const turns = turnableBuilding(b);
+      const placeTip = `${plaza ? `${PARK_INFO.plaza.icon} Площадь у ратуши едет вместе с ней · 🛣 встанет вдоль улицы, за тротуаром` : '🛣 Встанет вдоль улицы, за тротуаром'}`;
+      const moveTip = turns ? `${placeTip} · ${MOVE_TURN_TIP}` : placeTip;
+      const turned = turns ? turnText(b.turn ?? 0) : '';
       // Получатель грузов (world/retail.ts): что принимает и насколько полон склад — значками; не подъехать — ⛔.
       const rcv = town && receiverOf(town, b.id);
       const reach = rcv ? g.docks.reachable(b, maxTruck(b)) : false;
@@ -3794,7 +3799,7 @@ export class Hud {
         ${town ? `<button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>` : ''}
         ${stock}
         <div class="actions">
-          <button class="small" data-action="move" data-id="${b.id}" data-tip="${esc(moveTip)}">Перенести${plaza ? ` ${PARK_INFO.plaza.icon}` : ''} · ${money(moveCost)}</button>
+          <button class="small" data-action="move" data-id="${b.id}" data-tip="${esc(moveTip)}">Перенести${plaza ? ` ${PARK_INFO.plaza.icon}` : ''}${turned ? ` · ${turned}` : ''} · ${money(moveCost)}</button>
           ${b.kind !== 'landmark' ? `<button class="small danger" data-action="demolish" data-id="${b.id}">Снести · ${money(g.demolishCost(b.id))}</button>` : ''}
         </div>
         <p class="muted">Перенесённое здание встанет вдоль ближайшей улицы. Дорога, проложенная через дома, снесёт их сама.</p></section>`;

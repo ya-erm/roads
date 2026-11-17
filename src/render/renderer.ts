@@ -185,6 +185,13 @@ export interface ToolOverlay {
   area: { a: Vec; b: Vec; segs: number[]; corridors: number[]; fps: Footprint[] } | null;
   /** Отметки зданий: снос (bad) или место для переноса (ok/bad). */
   marks: { fp: Footprint; ok: boolean; /** Жёлтым: участок ужмётся (полоса стоянки, world/curbSqueeze.ts). */ warn?: boolean }[];
+  /**
+   * Перенос и поворот ратуши, парка, сквера (Game.movePlan, parkMovePlan): как они встанут — их же рисунком поверх
+   * отметки места, с поворотом (нельзя — под красной заливкой).
+   */
+  ghosts?: { building?: TownBuilding; park?: TownPark; ok: boolean }[] | null;
+  /** Ручка поворота ↺ (world/moveTurn.ts): где она, вокруг какой точки, тянут ли её сейчас. */
+  turnHandle?: { pos: Vec; pivot: Vec; active: boolean } | null;
   /** Подпись у курсора: ok — тёмная, иначе красный отказ; warn — жёлтая (можно, но с оговоркой: проект дороже денег). */
   label: { text: string; ok: boolean; warn?: boolean } | null;
   heatmap: boolean;
@@ -4155,6 +4162,50 @@ export class Renderer {
     ctx.restore();
   }
 
+  /** Ратуша, площадь, парк на новом месте (перенос, поворот): их рисунком, полупрозрачно; нельзя — красной заливкой. */
+  private drawGhosts(list: NonNullable<ToolOverlay['ghosts']>, trees: readonly string[]): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    for (const g of list) {
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      if (g.park) drawParkArt(ctx, g.park, z, trees);
+      if (g.building) drawHouseArt(ctx, g.building, z, trees);
+      ctx.restore();
+      const fp = g.park?.fp ?? g.building?.fp;
+      if (fp && !g.ok) this.drawFootprint(fp, 'rgba(232, 72, 63, 0.35)', '#e8483f', 2 / z);
+    }
+  }
+
+  /** Ручка поворота ↺ — кружок за дальним краем, тонкая линия к середине (тянут — линия ярче). */
+  private drawTurnHandle(h: NonNullable<ToolOverlay['turnHandle']>): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const hr = HANDLE_PX / z;
+    ctx.save();
+    ctx.strokeStyle = h.active ? '#2f80ed' : 'rgba(47,128,237,0.6)';
+    ctx.lineWidth = 1.5 / z;
+    ctx.setLineDash([4 / z, 3 / z]);
+    ctx.beginPath();
+    ctx.moveTo(h.pivot.x, h.pivot.y);
+    ctx.lineTo(h.pos.x, h.pos.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = h.active ? '#2f80ed' : '#fff';
+    ctx.strokeStyle = '#2f80ed';
+    ctx.lineWidth = 2 / z;
+    ctx.beginPath();
+    ctx.arc(h.pos.x, h.pos.y, hr, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = h.active ? '#fff' : '#2f80ed';
+    ctx.font = `bold ${hr * 1.6}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('↺', h.pos.x, h.pos.y + hr * 0.08);
+    ctx.restore();
+  }
+
   /** Площадка-стоянка: прежнее место (перенос) пунктиром, новое — с местами и воротами, ручки углов и поворота. */
   private drawLotOverlay(o: LotOverlay): void {
     const ctx = this.ctx;
@@ -4316,6 +4367,7 @@ export class Renderer {
       else this.drawFootprint(m.fp, m.ok ? '#cfe3ff' : 'rgba(232, 72, 63, 0.45)', m.ok ? '#2f80ed' : '#e8483f', 2 / this.camera.zoom);
       ctx.globalAlpha = 1;
     }
+    if (o.ghosts?.length) this.drawGhosts(o.ghosts, BIOMES[game.terrain.biome].palette.trees);
     if (o.selection?.type === 'building') {
       const b = game.buildingById(o.selection.id);
       if (b) this.drawFootprint({ ...b.fp, w: b.fp.w + 6, h: b.fp.h + 6 }, 'rgba(47,128,237,0.12)', '#2f80ed', 2.5 / this.camera.zoom);
@@ -4325,6 +4377,7 @@ export class Renderer {
       const fp = game.parkById(o.selection.id)?.fp;
       if (fp) this.drawFootprint({ ...fp, w: fp.w + 4, h: fp.h + 4 }, 'rgba(47,128,237,0.07)', '#2f80ed', 2.5 / this.camera.zoom);
     }
+    if (o.turnHandle) this.drawTurnHandle(o.turnHandle);
     if (o.template) {
       // Предпросмотр развязки: все дороги и съезды полупрозрачной полосой.
       ctx.lineCap = 'round';

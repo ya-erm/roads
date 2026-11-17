@@ -17,6 +17,7 @@ import type { ParkKind, TownPark } from '../world/entities';
 import { money } from '../core/moneyText';
 import { PARK_INFO } from '../world/parkPick';
 import { movablePark, parkMoveCost } from '../world/townParks';
+import { turnText } from '../world/moveTurn';
 import { townIcon } from './cargoIcons';
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -84,10 +85,15 @@ export function parkCardHtml(g: Game, id: number): string {
 /**
  * «Перенести» в карточке парка (Game.movePark): цена — от площади участка (parkMoveCost); в подсказке значками — что
  * едет вместе (деревья, дорожки, фонтан — всё внутри) и куда встанет (вдоль улицы, за тротуаром; не на дорогу, дома и
- * воду). Набережной нет: она у воды по своей природе.
+ * воду), как повернуть (R / Shift+R при переносе, ручка ↺ на карте — на месте; world/moveTurn.ts). Повёрнут — угол
+ * на кнопке. Набережной нет: она у воды по своей природе.
  */
 export function parkMoveHtml(park: TownPark): string {
   if (!movablePark(park)) return '';
-  const tip = '🌳⛲🪑 всё внутри — вместе с ним · 🛣 встанет вдоль ближайшей улицы, за тротуаром · 🚫 не на дорогу, дома и воду';
-  return `<div class="actions"><button class="small" data-action="park-move" data-id="${park.id}" data-tip="${esc(tip)}">🚚 Перенести · ${money(parkMoveCost(park))}</button></div>`;
+  const tip = `🌳⛲🪑 всё внутри — вместе с ним · 🛣 встанет вдоль ближайшей улицы, за тротуаром · ${MOVE_TURN_TIP} · 🚫 не на дорогу, дома и воду`;
+  const turn = turnText(park.turn ?? 0);
+  return `<div class="actions"><button class="small" data-action="park-move" data-id="${park.id}" data-tip="${esc(tip)}">🚚 Перенести${turn ? ` · ${turn}` : ''} · ${money(parkMoveCost(park))}</button></div>`;
 }
+
+/** Подсказка о повороте при переносе — значками: клавиши и ручка на карте. */
+export const MOVE_TURN_TIP = '↻ R / ⇧R — поворот по 15° · ↺ ручка на карте — повернуть на месте';

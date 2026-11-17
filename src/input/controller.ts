@@ -52,9 +52,11 @@ import type { MoveProject } from '../game/moveProject';
 import { onOldAxis } from '../game/roadbuild';
 import { jointOf, mergeEdit, mergePreview, mergeProblem, splitEdit, splitProblem, toggleJointEdit } from '../lanes/nodeEdit';
 import type { CornerHandle } from '../lanes/corners';
-import { corridorHalf } from '../world/worldgen';
+import { corridorHalf, streetFace } from '../world/worldgen';
 import { PARK_INFO } from '../world/parkPick';
 import { yardOf } from '../world/townForms';
+import { movablePark, parkMoveCost } from '../world/townParks';
+import { snapTurn, TURN_STEP, turnableBuilding, turnFromHandle, turnHandlePos, turnLabel, turnText } from '../world/moveTurn';
 import { maxTruck } from '../world/retail';
 import { STREET_BAN_MARK } from '../world/streetBans';
 import { corridorCurveSigns, freshSignCorridors, staleSignCorridors } from '../game/roadProject';
@@ -302,6 +304,16 @@ export class Controller {
   moving: TownBuilding | null = null;
   /** Парк, сквер, площадь или сквер с памятником, который игрок переносит (TownPark.id): участок за курсором до клика. */
   movingPark: number | null = null;
+  /**
+   * Поворот от улицы переносимой ратуши (храма) или парка (world/moveTurn.ts): R / Shift+R — шаг 15°; в начале
+   * переноса — какой был (TownBuilding.turn, TownPark.turn).
+   */
+  moveTurn = 0;
+  /**
+   * Тянут ручку поворота ↺ выбранной ратуши (храма) или парка: вокруг середины pivot, ручка — на стороне side рисунка,
+   * base — угол без поворота у улицы. Отпустили — поворот на месте (Ctrl+Z).
+   */
+  turnDrag: { kind: 'park' | 'building'; id: number; pivot: Vec; base: number; side: 1 | -1 } | null = null;
   /** Станция, которую игрок переносит: силуэт прилипает к дорогам, как при постройке. */
   movingStation: number | null = null;
   /**
@@ -499,6 +511,7 @@ export class Controller {
     this.control = null;
     this.moving = null;
     this.movingPark = null;
+    this.turnDrag = null;
     this.movingStation = null;
     this.movingBase = null;
     this.movingLot = null;
@@ -543,6 +556,8 @@ export class Controller {
   startMove(b: TownBuilding): void {
     this.setTool('select');
     this.moving = b;
+    // Ратуша и храм — с прежним поворотом от улицы (R / Shift+R — ещё на 15°).
+    this.moveTurn = turnableBuilding(b) ? (b.turn ?? 0) : 0;
     this.onChange();
   }
 
@@ -551,7 +566,112 @@ export class Controller {
     this.setTool('select');
     this.select({ type: 'park', id });
     this.movingPark = id;
+    this.moveTurn = this.game().parkById(id)?.park.turn ?? 0;
     this.onChange();
+  }
+
+  /** Поворот на месте ручкой ↺ (turnDrag): тот же перенос, но к той же улице; нельзя — причина у курсора. */
+  applyTurn(drag: NonNullable<Controller['turnDrag']>, turn: number): boolean {
+    const g = this.game();
+    const b = drag.kind === 'building' ? g.buildingById(drag.id) : undefined;
+    if (drag.kind === 'building' && !b) return false;
+    const plan = b ? g.movePlan(b, drag.pivot, turn) : g.parkMovePlan(drag.id, drag.pivot, turn);
+    if (!plan.ok) {
+      this.showError(plan.reason);
+      return false;
+    }
+    g.checkpoint(b ? 'поворот здания' : 'поворот парка');
+    const ok = b ? g.moveBuilding(b, drag.pivot, turn) : g.movePark(drag.id, drag.pivot, turn);
+    g.commit();
+    return ok;
+  }
+
+  /** Повернуть переносимую ратушу (храм) или парк на шаг 15° (dir −1 — против часовой); нечего вертеть — false. */
+  turnMoving(dir: 1 | -1): boolean {
+    if (!(this.moving && turnableBuilding(this.moving)) && this.movingPark === null) return false;
+    this.moveTurn = snapTurn(this.moveTurn + dir * TURN_STEP);
+    this.onChange();
+    return true;
+  }
+
+  /** Рисунок ратуши (храма) с площадью и площади у неё — как встанут по плану переноса (или поворота на месте). */
+  private hallGhosts(b: TownBuilding, plan: ReturnType<Game['movePlan']>): NonNullable<ToolOverlay['ghosts']> {
+    if (!plan.fp) return [];
+    const out: NonNullable<ToolOverlay['ghosts']> = [{ building: { ...b, fp: plan.fp, face: plan.face }, ok: plan.ok }];
+    if (plan.plaza) out.push({ park: { ...plan.plaza.park, fp: plan.plaza.fp }, ok: plan.ok });
+    return out;
+  }
+
+  /** Ручка поворота здания: за тыльной стороной (фасад — к улице), за площадью вокруг него. */
+  private buildingHandle(b: Pick<TownBuilding, 'fp' | 'face' | 'form' | 'kind' | 'floors'>): Vec {
+    const angle = (b.face ?? -1) === 1 ? b.fp.angle + Math.PI : b.fp.angle;
+    return turnHandlePos(b.fp.center, angle, b.fp.h / 2 + yardOf(b));
+  }
+
+  /**
+   * Выбранная в «Выборе» ратуша (храм) или парк, сквер, площадь, которые можно повернуть ручкой ↺: где ручка,
+   * вокруг чего вертеть и с какой стороны рисунка она (у парка — дальней от улицы). Переносят что-то — нет.
+   */
+  private turnTarget(): { kind: 'park' | 'building'; id: number; pivot: Vec; pos: Vec; side: 1 | -1 } | null {
+    if (this.action !== 'select' || this.moving || this.movingPark !== null || this.movingStation !== null || this.movingLot !== null || !this.selection) return null;
+    const g = this.game();
+    if (this.selection.type === 'park') {
+      const park = g.parkById(this.selection.id)?.park;
+      if (!park || !movablePark(park)) return null;
+      const side = streetFace(g.roads.net, park.fp) === 1 ? -1 : 1;
+      return { kind: 'park', id: park.id, pivot: park.fp.center, pos: turnHandlePos(park.fp.center, park.fp.angle, park.fp.h / 2, side), side };
+    }
+    if (this.selection.type === 'building') {
+      const b = g.buildingById(this.selection.id);
+      if (!b || !turnableBuilding(b)) return null;
+      return { kind: 'building', id: b.id, pivot: b.fp.center, pos: this.buildingHandle(b), side: 1 };
+    }
+    return null;
+  }
+
+  /**
+   * Ручка поворота на карте. Тянут — как встанет на месте (рисунком, с ценой и углом в подписи); курсор над ручкой —
+   * подсказка. true — подпись своя, прочие подписи «Выбора» не нужны.
+   */
+  private turnOverlay(o: ToolOverlay, p: Vec): boolean {
+    const g = this.game();
+    const drag = this.turnDrag;
+    if (drag) {
+      const turn = turnFromHandle(drag.pivot, p, drag.base, drag.side);
+      if (drag.kind === 'park') {
+        const hit = g.parkById(drag.id);
+        if (!hit) return false;
+        const plan = g.parkMovePlan(drag.id, drag.pivot, turn);
+        if (plan.fp) {
+          o.marks.push({ fp: plan.fp, ok: plan.ok });
+          o.ghosts = [{ park: { ...hit.park, fp: plan.fp }, ok: plan.ok }];
+          // Ручка — вокруг той же середины, что считает угол (turnFromHandle), с той стороны, за которую взяли: шагает
+          // за курсором по 15°, пока участок отступает от улицы.
+          o.turnHandle = { pos: turnHandlePos(drag.pivot, plan.fp.angle, plan.fp.h / 2, drag.side), pivot: drag.pivot, active: true };
+        }
+        o.label = plan.ok ? { text: `${PARK_INFO[hit.park.kind].icon} ${turnText(turn) || '↺ 0°'} · ${money(plan.cost)}`, ok: true } : { text: failText(plan.reason, plan.cost, ''), ok: false };
+        return true;
+      }
+      const b = g.buildingById(drag.id);
+      if (!b) return false;
+      const plan = g.movePlan(b, drag.pivot, turn);
+      if (plan.fp) {
+        o.marks.push({ fp: plan.lot ?? plan.fp, ok: plan.ok });
+        if (plan.plaza) o.marks.push({ fp: plan.plaza.fp, ok: plan.ok });
+        o.ghosts = this.hallGhosts(b, plan);
+        o.turnHandle = { pos: this.buildingHandle({ ...b, fp: { ...plan.fp, center: drag.pivot }, face: plan.face }), pivot: drag.pivot, active: true };
+      }
+      const with_ = plan.plaza ? ` ${PARK_INFO.plaza.icon}` : '';
+      o.label = plan.ok ? { text: `🏛${with_} ${turnText(turn) || '↺ 0°'} · ${money(plan.cost)}`, ok: true } : { text: failText(plan.reason, plan.cost, ''), ok: false };
+      return true;
+    }
+    const t = this.turnTarget();
+    if (!t || dist(p, t.pos) > (HANDLE_PX + 4) / this.camera.zoom) return false;
+    const b = t.kind === 'building' ? g.buildingById(t.id) : undefined;
+    const park = t.kind === 'park' ? g.parkById(t.id)?.park : undefined;
+    const cost = b ? g.buildingMove(b).cost : park ? parkMoveCost(park) : 0;
+    o.label = { text: `↺ тянуть · 15° · ${money(cost)}`, ok: true };
+    return true;
   }
 
   /**
@@ -1411,6 +1531,7 @@ export class Controller {
     if (this.pendingArea) this.cancelArea();
     else if (this.areaStart) this.areaStart = null;
     else if (this.spanStart) this.spanStart = null;
+    else if (this.turnDrag) this.turnDrag = null;
     else if (this.moving) this.moving = null;
     else if (this.movingPark !== null) this.movingPark = null;
     else if (this.movingStation !== null) this.movingStation = null;
@@ -1840,6 +1961,16 @@ export class Controller {
         return;
       }
     }
+    // Выбранная ратуша (храм) или парк: ручка поворота ↺ — тянуть (отпустили — поворот на месте, Ctrl+Z).
+    const turn = this.turnTarget();
+    if (turn && dist(p, turn.pos) <= (HANDLE_PX + 4) / this.camera.zoom) {
+      const b = turn.kind === 'building' ? g.buildingById(turn.id) : undefined;
+      const plan = b ? g.movePlan(b, turn.pivot) : g.parkMovePlan(turn.id, turn.pivot);
+      if (plan.base === undefined) this.showError(plan.reason);
+      else this.turnDrag = { kind: turn.kind, id: turn.id, pivot: turn.pivot, base: plan.base, side: turn.side };
+      this.onChange();
+      return;
+    }
     // Всё, что строит или сносит, можно отменить (Ctrl+Z): снимок до действия, итог — при отпускании кнопки.
     const corner = this.action === 'move' && !this.roadTools.handleAt(p, (HANDLE_PX + 4) / this.camera.zoom) && this.roadTools.cornerAt(p, (HANDLE_PX + 4) / this.camera.zoom);
     const label = this.moving
@@ -2117,8 +2248,8 @@ export class Controller {
         }
         if (this.moving) {
           // Перенос здания: ставим на новое место.
-          const plan = g.movePlan(this.moving, p);
-          if (g.moveBuilding(this.moving, p)) {
+          const plan = g.movePlan(this.moving, p, this.moveTurn);
+          if (g.moveBuilding(this.moving, p, this.moveTurn)) {
             this.select({ type: 'building', id: this.moving.id });
             this.moving = null;
           } else {
@@ -2129,8 +2260,8 @@ export class Controller {
         if (this.movingPark !== null) {
           // Перенос парка: участок — на новое место со всем, что внутри; перенесли — снова его карточка.
           const id = this.movingPark;
-          const plan = g.parkMovePlan(id, p);
-          if (g.movePark(id, p)) {
+          const plan = g.parkMovePlan(id, p, this.moveTurn);
+          if (g.movePark(id, p, this.moveTurn)) {
             this.movingPark = null;
             this.select({ type: 'park', id });
           } else this.showError(plan.reason);
@@ -2557,6 +2688,14 @@ export class Controller {
   }
 
   private finishLeft(e: MouseEvent, left: { sx: number; sy: number; createdChain: boolean }): void {
+    if (this.turnDrag) {
+      // Отпустили ручку поворота: ратуша (с площадью) или парк — на том же месте с новым поворотом, одним шагом Ctrl+Z.
+      const drag = this.turnDrag;
+      this.turnDrag = null;
+      if (Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > CLICK_SLOP) this.applyTurn(drag, turnFromHandle(drag.pivot, this.worldAt(e), drag.base, drag.side));
+      this.onChange();
+      return;
+    }
     if (this.lotDrag) {
       // Отпустили ручку площадки: новый размер или поворот — одним шагом Ctrl+Z.
       const drag = this.lotDrag;
@@ -3411,6 +3550,8 @@ export class Controller {
           this.lotAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
           this.onChange();
         }
+        // Поворот переносимой ратуши (храма), парка, сквера, площади от улицы — шагом 15°.
+        this.turnMoving(e.shiftKey ? -1 : 1);
         break;
       // Режимы дороги: N — строить, U — перестроить, M — двигать (включают инструмент «Дорога»).
       case 'KeyN':
@@ -3551,6 +3692,9 @@ export class Controller {
       return o;
     }
     if (lot.label) o.label = lot.label;
+    // Выбранная ратуша (храм) или парк — ручка поворота ↺ видна и без курсора над картой (тянут — turnOverlay).
+    const turnSel = this.turnDrag ? null : this.turnTarget();
+    if (turnSel) o.turnHandle = { pos: turnSel.pos, pivot: turnSel.pivot, active: false };
     // Рамка сноса: пока тянем — по курсору, после — ждёт подтверждения.
     const area = this.pendingArea ?? (this.areaStart && p ? { a: this.areaStart, b: p, contents: g.areaContents(this.areaStart, p) } : null);
     if (area) {
@@ -4353,29 +4497,40 @@ export class Controller {
           // Старое место — красным, новое — участком с площадью вокруг ратуши (её край — за тротуаром) и площадью у
           // ратуши, что едет с ней.
           const b = this.moving;
-          const plan = g.movePlan(b, p);
+          const turns = turnableBuilding(b);
+          const plan = g.movePlan(b, p, this.moveTurn);
           const yard = yardOf(b);
           o.marks.push({ fp: { ...b.fp, w: b.fp.w + yard * 2, h: b.fp.h + yard * 2 }, ok: false });
           if (plan.plaza) o.marks.push({ fp: plan.plaza.park.fp, ok: false });
           if (plan.fp) o.marks.push({ fp: plan.lot ?? plan.fp, ok: plan.ok });
           if (plan.plaza) o.marks.push({ fp: plan.plaza.fp, ok: plan.ok });
+          // Ратуша и площадь — их рисунком, как встанут (с поворотом), и ручка ↺ за фасадом-тылом: куда повёрнута.
+          if (plan.fp) o.ghosts = this.hallGhosts(b, plan);
+          if (plan.fp && turns) o.turnHandle = { pos: this.buildingHandle({ ...b, fp: plan.fp, face: plan.face }), pivot: plan.fp.center, active: false };
           const with_ = plan.plaza ? ` ${PARK_INFO.plaza.icon} с площадью` : '';
           o.label = plan.ok
-            ? { text: `Перенести сюда${with_} · ${money(plan.cost)} · Esc — отмена`, ok: true }
+            ? { text: `Перенести сюда${with_}${turnLabel(plan.turn, turns)} · ${money(plan.cost)} · Esc — отмена`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
         const carried = this.movingPark !== null ? g.parkById(this.movingPark) : null;
         if (carried) {
-          // Перенос парка: старое место — красным, новое — у улицы под курсором (красным, если нельзя).
-          const plan = g.parkMovePlan(carried.park.id, p);
+          // Перенос парка: старое место — красным, новое — у улицы под курсором (красным, если нельзя), его же рисунком
+          // с поворотом; ручка ↺ — за дальним от улицы краем.
+          const plan = g.parkMovePlan(carried.park.id, p, this.moveTurn);
           o.marks.push({ fp: carried.park.fp, ok: false });
-          if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
+          if (plan.fp) {
+            o.marks.push({ fp: plan.fp, ok: plan.ok });
+            o.ghosts = [{ park: { ...carried.park, fp: plan.fp }, ok: plan.ok }];
+            o.turnHandle = { pos: turnHandlePos(plan.fp.center, plan.fp.angle, plan.fp.h / 2), pivot: plan.fp.center, active: false };
+          }
           o.label = plan.ok
-            ? { text: `${PARK_INFO[carried.park.kind].icon} Перенести сюда · ${money(plan.cost)} · Esc — отмена`, ok: true }
+            ? { text: `${PARK_INFO[carried.park.kind].icon} Перенести сюда${turnLabel(plan.turn, true)} · ${money(plan.cost)} · Esc — отмена`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
+        // Выбранная ратуша (храм) или парк: ручка поворота ↺ за дальним краем; тянут — поворот на месте.
+        if (this.turnOverlay(o, p)) break;
         // Значок предупреждения — причина одной строкой (клик — карточка с объяснением).
         const mark = this.markUnder(p);
         if (mark) {

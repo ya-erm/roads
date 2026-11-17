@@ -70,6 +70,7 @@ import {
 } from '../world/worldgen';
 import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placeParks, plazaAttached, plazaBy } from '../world/townParks';
 import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
+import { streetBase, turnableBuilding, turnReach, wrapTurn } from '../world/moveTurn';
 import { type ParkEntry, ParkIndex } from '../world/parkPick';
 import { edgeOf, FORM_NAMES, formOf, residentsOf, SETTLE_RULE, townTier, yardOf, zoneTown } from '../world/townForms';
 import { START_ROADS } from '../world/startRoads';
@@ -399,7 +400,7 @@ interface UndoSnapshot {
   stations: SaveData['stations'];
   buildings: { townId: number; list: TownBuilding[] }[];
   /** Места парков городов (перенос парка, площадь, что уехала с ратушей); нет в старых снимках. */
-  parks?: { townId: number; list: Pick<TownPark, 'id' | 'fp' | 'moved'>[] }[];
+  parks?: { townId: number; list: Pick<TownPark, 'id' | 'fp' | 'moved' | 'turn'>[] }[];
   /** Пристройки предприятий и уровень, который они дали (нет в старых снимках). */
   industries?: { id: number; level?: number; streak?: number; annexes?: Annex[] }[];
   roundabouts: [number, Vec][];
@@ -2886,26 +2887,49 @@ export class Game implements BuildContext {
    * (lotClearOfRoads). Ратуша — вместе со своей площадью (townParks.hallPlaza): с той же стороны фасада; там тесно
    * или площадь осталась на старом месте после прежнего переноса — у той стороны, где шире (plazaBy); места нет и
    * так — отказ. plaza — куда встанет площадь; lot — участок с площадью вокруг здания (для подсветки).
+   *
+   * turn — поворот ратуши и храма от улицы (world/moveTurn.ts, R и ручка ↺): участок с площадью вокруг поворачивается
+   * вокруг середины и отступает от улицы так, чтобы ближний угол остался в MOVE_SETBACK от асфальта; фасад — куда
+   * повернули (face = −1, угол рисунка — в fp.angle). base — угол рисунка без поворота у этой улицы. Дома не
+   * поворачиваются (turnableBuilding).
    */
   movePlan(
     b: TownBuilding,
     p: Vec,
-  ): { ok: boolean; reason?: string; fp: Footprint | null; cost: number; anchor: number; face?: 1 | -1; lot?: Footprint; plaza?: { park: TownPark; fp: Footprint } } {
+    turn = 0,
+  ): {
+    ok: boolean;
+    reason?: string;
+    fp: Footprint | null;
+    cost: number;
+    anchor: number;
+    face?: 1 | -1;
+    lot?: Footprint;
+    plaza?: { park: TownPark; fp: Footprint };
+    base?: number;
+    turn: number;
+  } {
     const town = this.townOf(b);
     const { cost, plaza: own } = this.buildingMove(b);
     const yard = yardOf(b);
-    const hit = this.streetNear(p, 60 + yard);
-    if (!hit) return { ok: false, reason: 'Поставьте рядом с улицей', fp: null, cost, anchor: 0 };
+    const turns = turnableBuilding(b);
+    const tn = turns ? wrapTurn(turn) : 0;
+    const reach = turns ? turnReach(b.fp.w + yard * 2, b.fp.h + yard * 2, tn) : yard + b.fp.h / 2;
+    // Улица — ближе 60 м и площади (повёрнутая ратуша середкой дальше от улицы — и искать дальше).
+    const hit = this.streetNear(p, Math.max(60 + yard, MOVE_SETBACK + reach + 30));
+    if (!hit) return { ok: false, reason: 'Поставьте рядом с улицей', fp: null, cost, anchor: 0, turn: tn };
     const seg = hit.seg;
     const net = this.roads.net;
     const n = normalTowards(seg, hit.s, p);
     const t = seg.lut.tangentAt(hit.s);
-    const center = add(seg.lut.pointAt(hit.s), scale(n, halfAtS(seg, hit.s) + MOVE_SETBACK + yard + b.fp.h / 2));
-    const fp: Footprint = { center, w: b.fp.w, h: b.fp.h, angle: Math.atan2(t.y, t.x) };
+    const base = streetBase(n);
+    const center = add(seg.lut.pointAt(hit.s), scale(n, halfAtS(seg, hit.s) + MOVE_SETBACK + reach));
+    const fp: Footprint = { center, w: b.fp.w, h: b.fp.h, angle: turns ? wrapTurn(base + tn) : Math.atan2(t.y, t.x) };
     const lot: Footprint = { ...fp, w: fp.w + yard * 2, h: fp.h + yard * 2 };
-    const face = streetFace(net, fp);
+    // Ратуша и храм — угол рисунка прямо в fp.angle (фасад — к −y): поворот любой, а не только «лицом к улице».
+    const face = turns ? -1 : streetFace(net, fp);
     const anchor = anchorFor(net, center);
-    const fail = (reason: string) => ({ ok: false, reason, fp, cost, anchor, face, lot });
+    const fail = (reason: string) => ({ ok: false, reason, fp, cost, anchor, face, lot, base, turn: tn });
     this.index.remove(b);
     try {
       if (!placeable(this.worldContext(), lot, seg.id)) return fail('Здесь мало места');
@@ -2924,24 +2948,31 @@ export class Game implements BuildContext {
         plaza = { park: own, fp: to };
       }
       if (cost > this.budget) return fail('Не хватает денег');
-      return { ok: true, fp, cost, anchor, face, lot, plaza };
+      return { ok: true, fp, cost, anchor, face, lot, plaza, base, turn: tn };
     } finally {
       this.index.add(b);
     }
   }
 
-  moveBuilding(b: TownBuilding, p: Vec): boolean {
-    const plan = this.movePlan(b, p);
+  /** Переносит здание (movePlan; turn — поворот ратуши и храма от улицы). false — нельзя. */
+  moveBuilding(b: TownBuilding, p: Vec, turn = 0): boolean {
+    const plan = this.movePlan(b, p, turn);
     if (!plan.ok || !plan.fp) return false;
     const from = b.fp.center;
     this.index.remove(b);
     b.fp = plan.fp;
     b.anchor = plan.anchor;
     b.face = plan.face ?? streetFace(this.roads.net, b.fp);
+    if (plan.turn) b.turn = plan.turn;
+    else delete b.turn;
     this.index.add(b);
     const town = this.townOf(b);
     // Площадь у ратуши — следом: тот же парк (раскладка дорожек, деревьев и клумб — его же), на новом месте.
-    if (plan.plaza && town) plan.plaza.park.fp = plan.plaza.fp;
+    if (plan.plaza && town) {
+      plan.plaza.park.fp = plan.plaza.fp;
+      // Повернулась вместе с ратушей — свой прежний поворот от улицы уже не тот.
+      delete plan.plaza.park.turn;
+    }
     // Новый список — карта перерисует дома и парки города (renderer: по ссылке на список), выбор парков — тоже.
     if (town) {
       town.buildings = [...town.buildings];
@@ -2973,22 +3004,32 @@ export class Game implements BuildContext {
    * (WALK_EDGE + 1 м от края асфальта), как перенесённый дом; дальше от улиц — серединой под курсор, с прежним
    * поворотом. Не на дорогу и тротуар, не на дома, станции и предприятия, не на площадь у ратуши, не на другой парк,
    * не в воду. Деревья, дорожки, фонтан — его же (раскладка — по id и размеру парка, parkArt), едут вместе с ним.
+   *
+   * turn — поворот от улицы (world/moveTurn.ts, R и ручка ↺): участок поворачивается вокруг середины и отступает так,
+   * чтобы ближний к улице угол остался за тротуаром; вдали от улиц — от прежнего угла без его поворота (TownPark.turn).
+   * base — угол без поворота на этом месте. Проверки — те же, по повёрнутому участку.
    */
-  parkMovePlan(id: number, p: Vec): { ok: boolean; reason?: string; fp: Footprint | null; cost: number } {
+  parkMovePlan(id: number, p: Vec, turn = 0): { ok: boolean; reason?: string; fp: Footprint | null; cost: number; base?: number; turn: number } {
+    const tn = wrapTurn(turn);
     const hit = this.parkById(id);
-    if (!hit || !movablePark(hit.park)) return { ok: false, reason: 'Это не перенести', fp: null, cost: 0 };
+    if (!hit || !movablePark(hit.park)) return { ok: false, reason: 'Это не перенести', fp: null, cost: 0, turn: tn };
     const park = hit.park;
     const cost = parkMoveCost(park);
     const net = this.roads.net;
-    const street = this.streetNear(p, park.fp.h / 2 + 30);
+    const reach = turnReach(park.fp.w, park.fp.h, tn);
+    const street = this.streetNear(p, reach + 30);
     let fp: Footprint;
+    let base: number;
     if (street) {
       const n = normalTowards(street.seg, street.s, p);
-      const t = street.seg.lut.tangentAt(street.s);
-      const center = add(street.seg.lut.pointAt(street.s), scale(n, halfAtS(street.seg, street.s) + WALK_EDGE + 1 + park.fp.h / 2));
-      fp = { center, w: park.fp.w, h: park.fp.h, angle: Math.atan2(t.y, t.x) };
-    } else fp = { ...park.fp, center: { ...p } };
-    const fail = (reason: string) => ({ ok: false, reason, fp, cost });
+      base = streetBase(n);
+      const center = add(street.seg.lut.pointAt(street.s), scale(n, halfAtS(street.seg, street.s) + WALK_EDGE + 1 + reach));
+      fp = { center, w: park.fp.w, h: park.fp.h, angle: wrapTurn(base + tn) };
+    } else {
+      base = wrapTurn(park.fp.angle - (park.turn ?? 0));
+      fp = { ...park.fp, center: { ...p }, angle: wrapTurn(base + tn) };
+    }
+    const fail = (reason: string) => ({ ok: false, reason, fp, cost, base, turn: tn });
     if (!this.inBounds(fp.center, 30)) return fail('За краем карты');
     // Вода — по сетке через 8 м и по контуру: озерцо посреди парка тоже в счёт.
     const wet = lotOutline(fp, 6).some((q) => this.isWater(q, 1)) || lotGrid(fp, 8).some((q) => this.isWater(q, 1));
@@ -3002,16 +3043,18 @@ export class Game implements BuildContext {
     if (under) return fail(under.type === 'building' ? 'Мешают дома' : 'Здесь занято');
     if (this.parkUnder(fp, park)) return fail('Мешает другой парк');
     if (cost > this.budget) return fail('Не хватает денег');
-    return { ok: true, fp, cost };
+    return { ok: true, fp, cost, base, turn: tn };
   }
 
-  /** Переносит парк (parkMovePlan): участок — на новое место, раскладка внутри — та же. false — нельзя. */
-  movePark(id: number, p: Vec): boolean {
-    const plan = this.parkMovePlan(id, p);
+  /** Переносит парк (parkMovePlan; turn — поворот от улицы): участок — на новое место, раскладка внутри — та же. false — нельзя. */
+  movePark(id: number, p: Vec, turn = 0): boolean {
+    const plan = this.parkMovePlan(id, p, turn);
     const hit = this.parkById(id);
     if (!plan.ok || !plan.fp || !hit) return false;
     hit.park.fp = plan.fp;
     hit.park.moved = true;
+    if (plan.turn) hit.park.turn = plan.turn;
+    else delete hit.park.turn;
     // Новый список — карта перерисует парки города, выбор мышью пересоберёт сетку (ParkIndex — по ссылке на список).
     hit.town.parks = [...(hit.town.parks ?? [])];
     this.layoutRev++;
@@ -4454,7 +4497,7 @@ export class Game implements BuildContext {
       version: this.net.version,
       stations: [...this.stations.values()].map((s) => structuredClone(this.stationToSave(s))),
       buildings: this.towns.map((t) => ({ townId: t.id, list: t.buildings.map((b) => structuredClone(b)) })),
-      parks: this.towns.filter((t) => t.parks?.length).map((t) => ({ townId: t.id, list: t.parks!.map((k) => ({ id: k.id, fp: structuredClone(k.fp), moved: k.moved })) })),
+      parks: this.towns.filter((t) => t.parks?.length).map((t) => ({ townId: t.id, list: t.parks!.map((k) => ({ id: k.id, fp: structuredClone(k.fp), moved: k.moved, turn: k.turn })) })),
       industries: this.industries.map((i) => ({ id: i.id, level: i.level, streak: i.streak, annexes: i.annexes && structuredClone(i.annexes) })),
       roundabouts: [...this.roundaboutCenters].map(([id, c]) => [id, { ...c }]),
       terraform: this.terrain.edits.length,
@@ -4759,10 +4802,12 @@ export class Game implements BuildContext {
       let moved = false;
       for (const s of list) {
         const live = town.parks.find((k) => k.id === s.id);
-        if (!live || (sameFootprint(live.fp, s.fp) && live.moved === s.moved)) continue;
+        if (!live || (sameFootprint(live.fp, s.fp) && live.moved === s.moved && live.turn === s.turn)) continue;
         live.fp = structuredClone(s.fp);
         if (s.moved) live.moved = true;
         else delete live.moved;
+        if (s.turn) live.turn = s.turn;
+        else delete live.turn;
         moved = true;
       }
       if (moved) town.parks = [...town.parks];

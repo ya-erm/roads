@@ -194,6 +194,134 @@ describe('перенос парка', () => {
   });
 });
 
+describe('поворот при переносе', () => {
+  const deg = (d: number) => (d * Math.PI) / 180;
+  function square(game: Game): TownPark {
+    for (const t of [...game.towns].sort((a, b) => b.population - a.population)) {
+      const p = t.parks?.find((k) => k.kind === 'square' && k.fp.w - k.fp.h > 6);
+      if (p) return p;
+    }
+    throw new Error('Нет сквера');
+  }
+
+  it('сквер на 45°: ближний угол — за тротуаром, поворот сохраняется в партии, Ctrl+Z возвращает', () => {
+    const game = freshGame(42);
+    game.money = 10_000_000;
+    const park = square(game);
+    const was = structuredClone(park.fp);
+    const street = fieldStreet(game);
+    const plan = game.parkMovePlan(park.id, street.beside(40), deg(45));
+    expect(plan.ok, plan.reason).toBe(true);
+    // Улица — с запада на восток, сквер южнее: без поворота угол 0, с поворотом — 45°.
+    expect(plan.base).toBe(0);
+    expect(plan.fp!.angle).toBeCloseTo(deg(45), 9);
+    game.checkpoint('перенос парка');
+    expect(game.movePark(park.id, street.beside(40), deg(45))).toBe(true);
+    game.commit();
+    expect(park.turn).toBeCloseTo(deg(45), 9);
+    // Ближний к улице угол — за тротуаром, как длинная сторона без поворота.
+    expect(asphaltGap(game, park.fp)).toBeGreaterThanOrEqual(WALK_EDGE);
+    expect(asphaltGap(game, park.fp)).toBeLessThan(WALK_EDGE + 2);
+    expect(game.parkAt(park.fp.center)?.park).toBe(park);
+    // Сохранение: угол и поворот — те же.
+    const save = JSON.parse(JSON.stringify(game.toSave())) as SaveData;
+    const again = new Game(save.settings, save).parkById(park.id)!.park;
+    expect(again.fp).toEqual(park.fp);
+    expect(again.turn).toBeCloseTo(deg(45), 9);
+    // Отмена — на прежнем месте, без поворота.
+    expect(game.undo()).toBeTruthy();
+    const back = game.parkById(park.id)!.park;
+    expect(back.fp).toEqual(was);
+    expect(back.turn).toBeUndefined();
+  });
+
+  it('поворот на месте (ручка ↺): у той же улицы, середина отступает, угол — к улице', () => {
+    const game = freshGame(42);
+    game.money = 10_000_000;
+    const park = square(game);
+    const street = fieldStreet(game);
+    expect(game.movePark(park.id, street.beside(40))).toBe(true);
+    const pivot = { ...park.fp.center };
+    // Как controller.applyTurn: перенос в свою же середину с поворотом.
+    expect(game.parkMovePlan(park.id, pivot).base).toBe(0);
+    expect(game.movePark(park.id, pivot, deg(90))).toBe(true);
+    expect(park.fp.angle).toBeCloseTo(deg(90), 9);
+    expect(park.fp.center.x).toBeCloseTo(pivot.x, 6);
+    expect(park.fp.center.y - pivot.y).toBeCloseTo((park.fp.w - park.fp.h) / 2, 6);
+    expect(asphaltGap(game, park.fp)).toBeGreaterThanOrEqual(WALK_EDGE);
+    expect(asphaltGap(game, park.fp)).toBeLessThan(WALK_EDGE + 2);
+  });
+
+  it('повёрнутый сквер не втиснуть между близкими улицами, без поворота — встаёт', () => {
+    const game = freshGame(42);
+    game.money = 10_000_000;
+    const park = square(game);
+    const street = fieldStreet(game);
+    const c = game.roads.net.corridorsNear(street.beside(0), 5)[0];
+    const hw = halfAtS(c, c.lut.closest(street.beside(0)).s);
+    // Вторая улица — так, что между тротуарами помещается глубина сквера (h + 3 м), но не его длина.
+    const gapY = 2 * hw + 2 * (WALK_EDGE + 1) + park.fp.h + 3;
+    expect(road(game, { free: add(street.from, { x: 0, y: gapY }) }, { free: add(street.to, { x: 0, y: gapY }) })).toBe(true);
+    const at = street.beside(hw + 8);
+    expect(game.parkMovePlan(park.id, at).ok).toBe(true);
+    expect(game.parkMovePlan(park.id, at, deg(90))).toMatchObject({ ok: false, reason: 'Мешает дорога' });
+    expect(game.movePark(park.id, at, deg(90))).toBe(false);
+  });
+
+  it('ратуша на 90° и 45°: площадь вокруг — в 5 м от асфальта ближним углом, фасад — куда повернули, площадь — следом', () => {
+    for (const turn of [deg(90), deg(-45)]) {
+      const game = freshGame(42);
+      game.money = 10_000_000;
+      const { hall, plaza } = hallTown(game);
+      const street = fieldStreet(game);
+      const was = structuredClone(hall.fp);
+      const plan = game.movePlan(hall, street.beside(60), turn);
+      expect(plan.ok, plan.reason).toBe(true);
+      game.checkpoint('перенос здания');
+      expect(game.moveBuilding(hall, street.beside(60), turn)).toBe(true);
+      game.commit();
+      expect(hall.turn).toBeCloseTo(turn, 9);
+      // Угол рисунка — прямо в fp.angle (фасад к −y): без поворота у этой улицы — 0.
+      expect(hall.face).toBe(-1);
+      expect(hall.fp.angle).toBeCloseTo(turn, 9);
+      const yard = yardOf(hall);
+      const lot = { ...hall.fp, w: hall.fp.w + yard * 2, h: hall.fp.h + yard * 2 };
+      expect(lotClearOfRoads(game.roads.net, lot, WALK_EDGE)).toBe(true);
+      expect(asphaltGap(game, lot)).toBeCloseTo(5, 0);
+      expect(plazaAttached(hall.fp, plaza.fp)).toBe(true);
+      expect(lotClearOfRoads(game.roads.net, plaza.fp, WALK_EDGE)).toBe(true);
+      // Сохранение — с поворотом; отмена — прежнее место и без поворота.
+      const save = JSON.parse(JSON.stringify(game.toSave())) as SaveData;
+      expect(new Game(save.settings, save).buildingById(hall.id)!.turn).toBeCloseTo(turn, 9);
+      expect(game.undo()).toBeTruthy();
+      const back = game.buildingById(hall.id)!;
+      expect(back.fp).toEqual(was);
+      expect(back.turn).toBeUndefined();
+    }
+  });
+
+  it('дома не поворачиваются; старое сохранение — без поворота (0)', () => {
+    const game = freshGame(42);
+    game.money = 10_000_000;
+    const street = fieldStreet(game);
+    const house = game.towns.flatMap((t) => t.buildings).find((b) => b.kind === 'res')!;
+    const plain = game.movePlan(house, street.beside(30));
+    const turned = game.movePlan(house, street.beside(30), deg(45));
+    expect(turned.turn).toBe(0);
+    expect(turned.fp).toEqual(plain.fp);
+    const save = JSON.parse(JSON.stringify(game.toSave())) as SaveData;
+    for (const t of save.towns) {
+      for (const b of t.buildings) expect(b.turn).toBeUndefined();
+      for (const k of t.parks ?? []) expect(k.turn).toBeUndefined();
+    }
+    const loaded = new Game(save.settings, save);
+    const park = square(loaded);
+    const plan = loaded.parkMovePlan(park.id, street.beside(40));
+    expect(plan.turn).toBe(0);
+    expect(plan.fp!.angle).toBe(0);
+  });
+});
+
 /** Точка на воде: круг r вокруг неё весь в воде и улиц рядом нет. */
 function waterSpot(game: Game, r: number): Vec {
   const { width, height } = game.terrain;
