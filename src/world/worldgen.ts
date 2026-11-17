@@ -18,6 +18,7 @@ import { edgeOf, growTier, inDistrict, JOBS_PER_FLOOR, mergeBlocks, mergeTowers,
 import { onPark, placeParks, type ParkSite } from './townParks';
 import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
+import { curbTown } from './curbStreets';
 
 const TOWN_NAMES = [
   'Берёзовка',
@@ -168,6 +169,20 @@ export function halfAtS(c: Corridor, s: number): number {
   return e ? Math.max(-e[0], e[1]) + ROAD_MARGIN : ROAD_MARGIN;
 }
 
+/** Полуширина асфальта с одной стороны оси в s (side > 0 — справа по a→b), с обочиной: полоса стоянки бывает с одной. */
+export function sideHalfAt(c: Corridor, s: number, side: number): number {
+  const e = edgesAt(c, s);
+  return (e ? Math.max(0, side > 0 ? e[1] : -e[0]) : 0) + ROAD_MARGIN;
+}
+
+/** От точки p до кромки асфальта полотна c с той стороны, где точка (меньше нуля — на асфальте). */
+export function curbGap(c: Corridor, p: Vec): number {
+  const hit = c.lut.closest(p);
+  const t = c.lut.tangentAt(hit.s);
+  const side = (p.y - hit.point.y) * t.x - (p.x - hit.point.x) * t.y >= 0 ? 1 : -1;
+  return hit.d - sideHalfAt(c, hit.s, side);
+}
+
 /** Полуширина полотна по всей длине (по самому широкому месту). */
 export function corridorHalf(c: Corridor): number {
   let h = 0;
@@ -190,8 +205,15 @@ function playerWorld(ctx: WorldContext, towns: Town[], settings: WorldSettings, 
   for (const t of towns) measureTown(t);
   const { industries, deposits } = placePlayerWorld(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * industryFactor(settings), settings, profile);
   layStartRoads(ctx, towns, industries, settings.seed);
+  // Полосы стоянки — до парков и скверов: зелень встаёт уже у новой кромки.
+  curbTowns(ctx, towns, settings);
   plantTowns(ctx, towns);
   return { towns, industries, deposits };
+}
+
+/** Новая партия (WorldSettings.parking): полосы стоянки на улицах городов (world/curbStreets.ts) — последними, без ГСЧ. */
+function curbTowns(ctx: WorldContext, towns: Town[], settings: WorldSettings): void {
+  if (settings.parking) for (const t of towns) curbTown(ctx, t);
 }
 
 /** Размах будущего города размера size, м — в масштабе застройки (TOWN_SCALE): от него — место на карте. */
@@ -277,6 +299,8 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   // Места для городов и предприятий выбраны по всем улицам; дальше радиус города — по плотной застройке.
   for (const t of towns) measureTown(t);
   layStartRoads(ctx, towns, industries, settings.seed);
+  // Полосы стоянки — до парков и скверов: зелень встаёт уже у новой кромки.
+  curbTowns(ctx, towns, settings);
   plantTowns(ctx, towns);
   return { towns, industries };
 }
@@ -326,6 +350,8 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   for (const t of towns) measureTown(t);
   layStartRoads(ctx, towns, industries, settings.seed);
+  // Полосы стоянки — до парков и скверов: зелень встаёт уже у новой кромки.
+  curbTowns(ctx, towns, settings);
   plantTowns(ctx, towns);
   return { towns, industries };
 }

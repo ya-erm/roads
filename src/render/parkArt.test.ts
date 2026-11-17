@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { freshGame } from '../game/testkit';
 import type { ParkKind, TownPark } from '../world/entities';
 import { NEW_GAME_SETTINGS } from '../world/settings';
-import { corridorHalf } from '../world/worldgen';
+import { curbGap } from '../world/worldgen';
 import { drawParkArt, drawStreetGreen, streetGreen } from './parkArt';
 import { LAMPS_ON } from './townDecor';
 
@@ -75,7 +75,8 @@ describe('Аллеи и фонари вдоль улиц', { timeout: 30_000 }, 
       if (l.trees.length) expect(own.cls).toBe('avenue');
       for (let i = 0; i < l.trees.length; i += 3) {
         const p = { x: l.trees[i], y: l.trees[i + 1] };
-        for (const c of g.roads.net.corridorsNear(p, 40)) expect(c.lut.closest(p).d, `дерево на полотне ${c.id}`).toBeGreaterThan(corridorHalf(c) - 0.5);
+        // Кромка — со своей стороны: полоса стоянки бывает только с одной стороны улицы.
+        for (const c of g.roads.net.corridorsNear(p, 40)) expect(curbGap(c, p), `дерево на полотне ${c.id}`).toBeGreaterThan(-0.5);
         expect(g.index.at(p, 0)).toBeNull();
       }
     }

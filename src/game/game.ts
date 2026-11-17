@@ -47,7 +47,7 @@ import { PAX_WAIT, paxLeaving, paxPatience, paxStayShare, paxTolerance } from '.
 import { Network, NetworkSave, Segment } from '../world/network';
 import { halfWidth, isDirt, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, ROAD_MARGIN, specCost, TRACK_GAP, WALK_EDGE } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
-import { DEFAULT_SETTINGS, retailOn, WorldSettings } from '../world/settings';
+import { DEFAULT_SETTINGS, parkingOn, retailOn, WorldSettings } from '../world/settings';
 import { Terrain, TerraformEdit, TerraformMode } from '../world/terrain';
 import {
   anchorFor,
@@ -109,10 +109,15 @@ import {
   unloadTime,
   zoneRetail,
 } from '../world/retail';
-import { CAR_SIZE, LOT_SETBACK, lotFrame } from '../world/houseAccess';
+import { CAR_SIZE, drivewayLink, drivewayOf, type Driveway, LOT_SETBACK, lotFrame } from '../world/houseAccess';
 import { DEPOT_MIN_W, roofCenter } from '../world/shopLots';
+import { yardLotOf, yardSpots } from '../world/yardLots';
 import { CarHomes, type CarHomesHost } from './carHomes';
 import { parkingCells, type ParkingCell } from './parkingLayer';
+import { curbSqueeze, type Squeeze } from '../world/curbSqueeze';
+import { CurbParking, type CurbHost } from './curbParking';
+import { CURB } from '../lanes/curb';
+import { CURB_GROW, frontage, withCurb } from '../world/curbStreets';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises } from './enterprises';
 import { isActive } from '../world/enterprise';
@@ -906,16 +911,22 @@ export class Game implements BuildContext {
   /** Пешеходы на переходах перекрёстков (src/game/crosswalks.ts): жители вокруг — по охвату, как у станций. */
   readonly crosswalks = new Crosswalks((p, r) => this.peopleNear(p, r).pop);
   /** Гаражи частных домов (src/game/garages.ts): машины жителей выезжают из них и возвращаются в них. */
-  readonly garages = new Garages(this.garageHost());
+  private readonly gHost = this.garageHost();
+  readonly garages = new Garages(this.gHost);
   /** Стоянки магазинов и рынков (src/game/shopParking.ts): машины горожан заезжают на свободное место и уезжают. */
   readonly shops = new ShopParking(this.shopHost(), this.garages);
   /** Дворы получателей грузов (src/game/docks.ts): грузовик заезжает к рампе магазина, выгружается и выезжает. */
   readonly docks = new Docks(this.dockHost());
   /**
-   * Парк машин жителей (src/game/carHomes.ts): у каждой машины своё место ночёвки — гараж, площадка, двор, бокс;
-   * поездки начинаются с него и кончаются на нём.
+   * Полосы стоянки вдоль бордюра (src/game/curbParking.ts, docs/PARKING.md, этап 2): места ночёвки и места у целей,
+   * манёвры передом и задом у бордюра.
    */
-  readonly carHomes = new CarHomes(this.carHomesHost(), this.garages);
+  readonly curb = new CurbParking(this.curbHost());
+  /**
+   * Парк машин жителей (src/game/carHomes.ts): у каждой машины своё место ночёвки — гараж, площадка, двор, полоса
+   * стоянки, бокс; поездки начинаются с него и кончаются на нём.
+   */
+  readonly carHomes = new CarHomes(this.carHomesHost(), this.garages, this.curb);
   /** Предприятия строит игрок (режим «Строит игрок», src/game/enterprises.ts): месторождения, постройка, рабочие, вред. */
   readonly enterprises: Enterprises;
 
@@ -2570,6 +2581,60 @@ export class Game implements BuildContext {
     return typeof stops === 'string' ? stops : [...stops, ...bases];
   }
 
+  /**
+   * Полоса стоянки у домов (world/curbSqueeze.ts): что станет с домами у полотен corridors сети net — ужать участок или
+   * снести. Дома — из индекса игры.
+   */
+  private curbSqueezes(net: LaneNet, corridors: Corridor[]): Squeeze[] {
+    const ctx = { ...this.worldContext(), roads: net };
+    const out: Squeeze[] = [];
+    const seen = new Set<number>();
+    for (const c of corridors) {
+      const houses = this.index
+        .near(c.lut.pointAt(c.length / 2), c.length / 2 + 80)
+        .filter((s): s is TownBuilding => s.type === 'building' && s.kind !== 'landmark' && !seen.has(s.id));
+      for (const x of curbSqueeze(ctx, c, houses)) {
+        seen.add(x.b.id);
+        out.push(x);
+      }
+    }
+    return out;
+  }
+
+  /** План со стоянкой (RoadContext.curbSqueeze): не ужать — под снос (в цену), ответ — новые контуры ужатых домов. */
+  curbSqueeze(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[] {
+    const out: Footprint[] = [];
+    for (const x of this.curbSqueezes(net, changed)) {
+      if (demolish.has(x.b.id)) continue;
+      if (x.fp) out.push(x.fp);
+      else demolish.add(x.b.id);
+    }
+    return out;
+  }
+
+  /**
+   * Полосу стоянки построили (план уже снёс дома, что не ужать): участки у полотен ids ужимаются — фасад отступает от
+   * новой кромки, задняя граница — вглубь не дальше SQUEEZE.back. Что не ужать и план не снёс (правка не через план) —
+   * сносится за счёт города.
+   */
+  applyCurbSqueeze(ids: number[]): void {
+    const net = this.roads.net;
+    const cs = ids.map((id) => net.corridors.get(id)).filter((c): c is Corridor => !!c && c.lanes.some((l) => l.park));
+    if (!cs.length) return;
+    const razed: number[] = [];
+    for (const x of this.curbSqueezes(net, cs)) {
+      if (!x.fp) {
+        razed.push(x.b.id);
+        continue;
+      }
+      this.index.remove(x.b);
+      x.b.fp = x.fp;
+      this.index.add(x.b);
+    }
+    if (razed.length) this.demolish(razed);
+    for (const c of cs) this.refreshCatchmentsNear(c.lut.pointAt(c.length / 2));
+  }
+
   /** Навесы остановок у изменённых полотен — к новому бордюру (shoveStops). */
   private shoveStopsOnly(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[] | string {
     const moved: Footprint[] = [];
@@ -2926,7 +2991,7 @@ export class Game implements BuildContext {
    * по перпендикуляру. Если сзади стоит другой дом — фасад отступает (дом становится
    * мельче в глубину). Совсем нет места — дом сносится (за счёт города, игроку бесплатно).
    */
-  roadWidened(segId: number): void {
+  roadWidened(segId: number, houses = true): void {
     const seg = this.roads.net.corridors.get(segId);
     if (!seg) return;
     // Остановки — к новому бордюру (сначала они: дома потом отодвигаются, не налезая на навес).
@@ -2952,6 +3017,8 @@ export class Game implements BuildContext {
       this.relocateBase(base, res.fp, res.nodeId);
       this.journal.add('base>', { id: base.id, name: this.baseName(base.id), from, pos: [Math.round(res.fp.center.x), Math.round(res.fp.center.y)], shove: true });
     }
+    // Полотно со стоянкой: дома уже ужали участки по своей стороне (applyCurbSqueeze) — не двигать по самой широкой.
+    if (!houses) return;
     const edge = corridorHalf(seg) + 3;
     const ctx = this.worldContext();
     const razed: number[] = [];
@@ -4521,6 +4588,7 @@ export class Game implements BuildContext {
     // Машины у гаражей частных домов и на стоянках магазинов — сразу после движения: на манёвре их рисуют там, где
     // они на нём.
     this.garages.step(dt);
+    this.curb.step(dt);
     this.shops.step(dt, this.towns);
     this.docks.step(dt);
     // Парк машин жителей: стоящие — только данные, в такт — куча отъездов (у кого срок у цели вышел).
@@ -6356,6 +6424,7 @@ export class Game implements BuildContext {
     if (owner?.type === 'citizen') {
       this.citizenCars--;
       this.garages.forget(sim.id);
+      this.curb.forget(sim.id);
       this.carHomes.arrived(sim.id);
       return;
     }
@@ -6425,6 +6494,7 @@ export class Game implements BuildContext {
     if (owner?.type === 'citizen') {
       this.citizenCars--;
       this.garages.forget(sim.id);
+      this.curb.forget(sim.id);
       this.carHomes.arrived(sim.id);
       return;
     }
@@ -7834,17 +7904,25 @@ export class Game implements BuildContext {
     if (fleet?.kind === 'out') {
       // Машиной в потоке (и в счёте citizenCars) станет, когда встанет на полосу (GarageHost.own); едет к магазину —
       // с полосы у места сразу к стоянке (поворотом направо или налево — что ближе, решится на полосе).
+      // Иначе — на полосу стоянки у цели (curbParking.ts), если там есть свободные места; нет — к узлу цели, как раньше.
+      const curb = visit ? null : this.carHomes.curbVisit(dest, origin.anchor);
+      if (!visit) this.noteCurb(destTown, dest, !!curb);
       if (visit) {
         const then = (sim: Vehicle) => this.shops.start(sim, visit, this.carHomes.visit(fleet.car, fleet.town));
         this.carHomes.depart(fleet, dest, { target: visit.slot.link.toNode!, endLink: visit.slot.link.id, to: visit.planned, then });
+      } else if (curb) {
+        const then = (sim: Vehicle) => this.carHomes.toCurbVisit(sim, fleet, curb);
+        this.carHomes.depart(fleet, dest, { target: curb.link.toNode!, endLink: curb.link.id, then });
       } else this.carHomes.depart(fleet, dest);
       return;
     }
-    // К своему месту и к стоянке — с поворотом направо или налево через встречку, что ближе (Garages.wayHome).
+    // К своему месту и к стоянке — с поворотом направо или налево через встречку, что ближе (Garages.wayHome); стоит
+    // у цели на полосе стоянки — выезжает с места (CarHomes.leaveCurb).
     if (fleet?.kind === 'back') {
       const from = fleet.from ?? origin;
-      const way = this.garages.wayHome(from.anchor, fleet.car.place!.spot);
-      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color: fleet.car.color, targetNode: way.slot.link.toNode!, route: way.route });
+      if (fleet.curb && this.carHomes.leaveCurb(fleet)) return;
+      const way = this.carHomes.homeWay(from.anchor, fleet.car);
+      const sim = way && this.traffic.spawn({ ...CAR_SPEC, color: fleet.car.color, targetNode: way.toNode, route: way.route });
       if (sim) {
         // Куда — дом места (у бокса — гаражи): туда и ведёт линия маршрута.
         this.owners.set(sim.id, { type: 'citizen', trip: { from, to: fleet.car.place!.at } });
@@ -7909,6 +7987,91 @@ export class Game implements BuildContext {
     };
   }
 
+  /** Что полосам стоянки (curbParking.ts) нужно от игры: поток, сеть, кузов, учёт машин жителей, где мест нет. */
+  private curbHost(): CurbHost {
+    const game = this;
+    return {
+      get traffic() {
+        return game.traffic;
+      },
+      get graph() {
+        return game.roads.graph;
+      },
+      get net() {
+        return game.roads.net;
+      },
+      car: CAR_SPEC,
+      // Тот же учёт, что у гаражей (и замер «из ниоткуда», carFlow.ts, — по нему же).
+      own: (sim, trip) => this.gHost.own(sim, trip),
+      gone: (sim) => this.gHost.gone(sim),
+      curbSkips: () => this.curbSkips(),
+      lights: (id) => this.roads.net.nodes.get(id)?.control === 'lights',
+    };
+  }
+
+  /** Где на полосах стоянки мест нет — по `${полотно}:${сторона}`; пересчёт — когда сменились дома или остановки. */
+  private curbSkipCache: { sig: string; graph: object; skips: Map<string, [number, number][]> } | null = null;
+
+  /**
+   * Заезды во дворы, гаражи, на площадки и стоянки магазинов (ширина заезда и по CURB.drivePad с каждой стороны) и
+   * остановки (±CURB.stopRoom от узла остановки, с обеих сторон улицы): там мест на полосе стоянки нет.
+   */
+  private curbSkips(): { sig: string; skips: Map<string, [number, number][]> } {
+    const sig = `${this.towns.map((t) => t.buildings.length).join(',')}|${this.stations.size}`;
+    const graph = this.roads.graph;
+    const hit = this.curbSkipCache;
+    if (hit && hit.sig === sig && hit.graph === graph) return hit;
+    const net = this.roads.net;
+    const skips = new Map<string, [number, number][]>();
+    const push = (key: string, a: number, b: number) => {
+      const list = skips.get(key);
+      if (list) list.push([a, b]);
+      else skips.set(key, [[a, b]]);
+    };
+    // Только у полотен со стоянкой: прочие места не нужны.
+    const parked = new Set([...net.corridors.values()].filter((c) => c.lanes.some((l) => l.park)).map((c) => c.id));
+    const drive = (d: Driveway | null | undefined) => {
+      const at = d && drivewayLink(net, d);
+      if (!at || !parked.has(at.corridor)) return;
+      const w = d.width / 2 + CURB.drivePad;
+      push(`${at.corridor}:${at.side}`, at.s - w, at.s + w);
+    };
+    if (parked.size) {
+      const L = CAR_SPEC.length;
+      for (const town of this.towns) {
+        for (const b of town.buildings) {
+          const form = formOf(b);
+          if (form === 'cottage' || form === 'dacha') drive(drivewayOf(b));
+          const lot = b.kind !== 'landmark' ? yardLotOf(b) : null;
+          if (lot) {
+            const ys = yardSpots(b, lot, L);
+            drive(ys.gate);
+            for (const s of ys.spots) drive(s.drive);
+          }
+          if (b.kind === 'com') for (const s of this.shops.lotOf(b)?.spots ?? []) drive(s.d);
+        }
+      }
+      for (const st of this.stations.values()) {
+        if (st.kind !== 'stop') continue;
+        const n = net.nodes.get(st.nodeId);
+        if (!n) continue;
+        for (const id of n.corridors) {
+          if (!parked.has(id)) continue;
+          const c = net.corridor(id);
+          const s = c.a === n.id ? 0 : c.length;
+          for (const side of [1, -1]) push(`${id}:${side}`, s - CURB.stopRoom, s + CURB.stopRoom);
+        }
+      }
+    }
+    this.curbSkipCache = { sig, graph, skips };
+    return this.curbSkipCache;
+  }
+
+  /** Границы мест на полосах стоянки в кадре (рисунок разметки, вблизи). */
+  curbMarks(box: [number, number, number, number]): [Vec, Vec][] {
+    return this.curb.marks(box);
+  }
+
   /** Что гаражам частных домов (garages.ts) нужно от игры. */
   private garageHost(): GarageHost {
     const game = this;
@@ -7945,6 +8108,8 @@ export class Game implements BuildContext {
    */
   garageLooks(box: [number, number, number, number], parked: boolean): GarageLook[] {
     const out = this.garages.looks(this.towns, box, false);
+    // Манёвры у бордюра на полосах стоянки (вне потока) — всегда, как манёвры во дворах.
+    out.push(...this.curb.looks(box));
     if (parked) out.push(...this.carHomes.looks(box), ...this.shops.looks(this.towns, box, parked));
     return out;
   }
@@ -7954,7 +8119,8 @@ export class Game implements BuildContext {
    * мест и сколько занято.
    */
   parkingLayer(): ParkingCell[] {
-    const pts = this.carHomes.occupancy();
+    // Места полос стоянки — каждое своей точкой (занято: стоит гость или хозяин дома, к нему едут, на нём манёвр).
+    const pts = [...this.carHomes.occupancy(), ...this.curb.occupancy()];
     for (const town of this.towns) {
       for (const b of town.buildings) {
         const lot = b.kind === 'com' ? this.shops.lotOf(b) : null;
@@ -8135,7 +8301,11 @@ export class Game implements BuildContext {
     // а отдельными шагами после города (roads.quiet, roads.step): те же графы в том же порядке, но по кадрам.
     // Подряд, в одном кадре, несколько улиц подвешивали смену месяца на сотни миллисекунд.
     for (const town of this.towns) {
-      this.roads.quiet(() => this.growTown(town));
+      this.roads.quiet(() => {
+        this.growTown(town);
+        // Полосы стоянки там, где у целей не хватало мест (новые партии).
+        this.curbGrow(town);
+      });
       yield;
       while (this.roads.step()) yield;
     }
@@ -8492,6 +8662,51 @@ export class Game implements BuildContext {
   private ownedBy(town: Town, p: Vec): boolean {
     const d = dist(p, town.center);
     return this.towns.every((t) => t === town || dist(p, t.center) > d);
+  }
+
+  /**
+   * Машина парка поехала к цели dest в городе town (не на стоянку магазина): ok — нашлось свободное место на полосе
+   * стоянки рядом. По улице у цели — сколько просили и скольким не хватило (Town.curbAsk; рост — curbGrow).
+   */
+  private noteCurb(town: Town | undefined, dest: TownBuilding, ok: boolean): void {
+    if (!town || !parkingOn(this.settings)) return;
+    const c = this.roads.net.corridorNear(dest.fp.center, 80);
+    if (!c) return;
+    const ask = (town.curbAsk ??= {});
+    const was = ask[c.id] ?? [0, 0];
+    ask[c.id] = [was[0] + 1, was[1] + (ok ? 0 : 1)];
+  }
+
+  /**
+   * Рост полос стоянки (новые партии, WorldSettings.parking; только при «Город строит улицы сам»): раз в месяц — одна
+   * полоса на улице города, где за месяц не хватило мест больше CURB_GROW.short просивших (не меньше CURB_GROW.ask), со
+   * стороны деловых домов (нет их — справа, потом слева). Только без сноса: участки домов могут ужаться. Счёт — заново.
+   */
+  private curbGrow(town: Town): void {
+    const ask = town.curbAsk;
+    delete town.curbAsk;
+    if (!ask || !parkingOn(this.settings) || town.autoStreets === false) return;
+    const net = this.roads.net;
+    const list = Object.entries(ask)
+      .map(([id, [n, miss]]) => ({ c: net.corridors.get(Number(id)), n, miss }))
+      .filter((x): x is { c: Corridor; n: number; miss: number } => !!x.c && x.n >= CURB_GROW.ask && x.miss / x.n > CURB_GROW.short)
+      .sort((x, y) => y.miss - x.miss || x.c.id - y.c.id);
+    for (const { c } of list) {
+      if (!this.streetLike(c) || !this.ownedBy(town, c.lut.pointAt(c.length / 2))) continue;
+      const front = frontage(town, c);
+      const com = (side: 1 | -1) => front.get(side)!.filter((b) => b.kind === 'com').length;
+      const sides: (1 | -1)[] = com(1) >= com(-1) ? [1, -1] : [-1, 1];
+      for (const side of sides) {
+        const lanes = withCurb(c, side);
+        if (!lanes) continue;
+        const id = c.id;
+        const plan = this.roadBuilder.plan((n) => n.setLanes(n.corridor(id), lanes), { free: true, shove: true });
+        if (!plan.ok || plan.demolish.length || !plan.net) continue;
+        this.roadBuilder.apply(plan);
+        this.applyCurbSqueeze(plan.changed);
+        return;
+      }
+    }
   }
 
   /** Сколько домов города стоит ближе r к точке. */

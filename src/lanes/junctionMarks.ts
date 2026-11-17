@@ -37,7 +37,9 @@ export const LONG_LEFT = 50;
 export const SKEW_ANGLE = 1.13;
 
 /** Полос в одну сторону у полотна — больше из двух направлений. */
-function lanesPerSide(lanes: { flow: number }[]): number {
+function lanesPerSide(all: { flow: number; park?: true }[]): number {
+  // Полосы стоянки — не полосы движения.
+  const lanes = all.filter((l) => !l.park);
   const f = lanes.filter((l) => l.flow > 0).length;
   return Math.max(f, lanes.length - f);
 }

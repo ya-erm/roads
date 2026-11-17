@@ -1655,6 +1655,9 @@ export class Hud {
       case 'limit':
         c.setLimit(Number(d.v));
         break;
+      case 'lane-park':
+        c.setLanePark(d.v === '1');
+        break;
       case 'ring-lanes':
         c.setRingLanes(Number(d.v));
         break;
@@ -2727,9 +2730,18 @@ export class Hud {
     if (c.roadMode === 'lane') {
       // Полоса — всегда одна, ширина и класс — как у дороги, от которой её ведут: выбирать нечего, кроме скорости.
       // «Проект» — тот же значок в заголовке и плашка над панелью: полосы сначала проектом, потом — разом.
+      // 🅿️ — полоса стоянки (docs/PARKING.md): вдоль края — новая, клик по крайней — под парковку или вернуть движению.
+      const park = c.lanePark;
+      const kinds = `<div class="icons lane-kinds">
+          <button class="${park ? '' : 'active'}" data-action="lane-park" data-v="0" data-tip="Полоса движения: вдоль края — полоса, в сторону — съезд">🛣️</button>
+          <button class="${park ? 'active' : ''}" data-action="lane-park" data-v="1" data-tip="🅿️ Стоянка вдоль бордюра: тяните вдоль края · клик по крайней полосе — 🅿️ под парковку или ↺ вернуть движению · цена 0,8 полосы · 🟢 помещается, 🟡 участки ужмутся, 🔴 снос">🅿️</button>
+        </div>`;
+      const hint = park
+        ? '<p class="muted">🅿️ ⟷ вдоль края · 👆 крайняя полоса → 🅿️ / ↺ · 🟢 🟡 🔴</p>'
+        : '<p class="muted">Кликайте или тяните, как путь: вдоль края — полоса, в сторону — съезд, из поля или с конца дороги к краю и вдоль — въезд в полосу слияния. С конца дороги в поле — однополосная.</p>';
       return `${this.projectBarHtml()}<div class="opt-row">${sw}<div class="opt-group"><div class="opt-title">Скорость</div><div class="limits">${limits}</div></div>
-        <div class="opt-group narrow"><div class="opt-title">Полоса${this.projectChipHtml()}</div>
-        <p class="muted">Кликайте или тяните, как путь: вдоль края — полоса, в сторону — съезд, из поля или с конца дороги к краю и вдоль — въезд в полосу слияния. С конца дороги в поле — однополосная.</p></div></div>`;
+        <div class="opt-group narrow"><div class="opt-title">Полоса${this.projectChipHtml()}</div>${kinds}
+        ${hint}</div></div>`;
     }
     const presets = ROAD_PRESETS.map(
       (p) => `<button class="card ${c.presetId === p.id ? 'active' : ''}" data-action="preset" data-id="${p.id}"

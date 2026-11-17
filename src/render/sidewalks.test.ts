@@ -6,7 +6,7 @@ import { edgesAt, junctionCorners, junctionCuts, plateOutline, pointOff } from '
 import { ROAD_MARGIN } from '../world/roadTypes';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import { type Footprint, pointInFootprint } from '../world/spatial';
-import { halfAtS } from '../world/worldgen';
+import { curbGap } from '../world/worldgen';
 import { drawSidewalks, mergeSidewalks, SIDEWALK, type SidewalkNet, sidewalkEnds, sidewalkNet, sidewalkScope, walkSite } from './sidewalks';
 
 function stub() {
@@ -48,9 +48,10 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
         for (let i = 0; i < w.length; i += 2) {
           const p = { x: w[i], y: w[i + 1] };
           points++;
-          const hit = own.lut.closest(p);
-          expect(hit.d, `тротуар на полотне ${own.id}`).toBeGreaterThan(halfAtS(own, hit.s) + 0.5);
-          expect(hit.d).toBeLessThan(halfAtS(own, hit.s) + 4);
+          // От кромки своей стороны: полоса стоянки бывает только с одной стороны улицы.
+          const gap = curbGap(own, p);
+          expect(gap, `тротуар на полотне ${own.id}`).toBeGreaterThan(0.5);
+          expect(gap).toBeLessThan(4);
         }
       }
     }

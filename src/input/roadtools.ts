@@ -27,6 +27,8 @@ import {
   startLane,
   buildRoad,
   RoadOptions,
+  toggleParkLane,
+  EditError,
 } from '../lanes/edit';
 import { levelDeck, nodeDeck, setDecks, zAlong } from '../lanes/deck';
 import { branchSeam, slidePorts, slideSeam, slideTarget, slideTrack } from '../lanes/slide';
@@ -98,6 +100,8 @@ export class RoadTools {
   laneDrag: { tip: LaneTip; entry: Vec | null; along: Vec | null; away: Vec | null; r: number } | null = null;
   /** Односторонняя — навстречу ходу постройки, новая полоса у края — встречная (Alt переключает). */
   reverse = false;
+  /** «Полоса» с 🅿️: ведут полосу стоянки вдоль края; клик по крайней полосе — под парковку или вернуть движению. */
+  park = false;
   /** Узел, который тянут. */
   dragNode: number | null = null;
   /** Примыкание (стык въезда или съезда посреди дороги), которое тянут вдоль дороги. */
@@ -519,8 +523,27 @@ export class RoadTools {
     return { plan: res.plan, what: res.step?.what ?? '', edit: res.edit, step: res.step };
   }
 
+  /**
+   * 🅿️ клик по полосе p: «🅿️ под парковку» (крайняя полосы движения справа по ходу, не на 1+1 и не на магистрали) или
+   * «↺ вернуть движению» (полоса стоянки). План (после правок проекта), правка и что выйдет; не на полосе — null.
+   */
+  parkTogglePlan(p: Vec): { corridor: number; lane: number; to: 'park' | 'drive'; plan: RoadPlan; edit: NetEdit } | null {
+    const hit = laneUnder(this.net, p);
+    if (!hit) return null;
+    const id = hit.corridor.id;
+    const lane = hit.lane;
+    const to: 'park' | 'drive' = hit.corridor.lanes[lane]?.park ? 'drive' : 'park';
+    const edit: NetEdit = (n) => {
+      const c = n.corridors.get(id);
+      if (!c) throw new EditError('Наведите на полосу');
+      toggleParkLane(n, c, lane);
+    };
+    return { corridor: id, lane, to, plan: this.lanePlanOf(edit), edit };
+  }
+
   /** Ведут новую полосу от края дороги: её направление — по ходу движения с этой стороны, Alt разворачивает. */
   get laneFlips(): boolean {
+    if (this.park) return false;
     const tip = this.laneDrag?.tip ?? this.laneTip;
     return tip?.kind === 'edge' && tip.flow === undefined;
   }
@@ -528,7 +551,7 @@ export class RoadTools {
   /** «Полоса по точкам» от tip через qs: правка, её план (после правок проекта) и новый конец. */
   private laneSteps(tip: LaneTip, qs: Vec[], cls: RoadClass, r: number, spec: RoadSpec): { plan: RoadPlan; step: LaneStepOut['step']; edit: NetEdit } {
     const out: LaneStepOut = { step: null };
-    const edit = laneStepEdit(tip, qs, cls, r, spec.limit, this.reverse, out);
+    const edit = laneStepEdit(tip, qs, cls, r, spec.limit, this.reverse, out, this.park);
     const plan = this.lanePlanOf(edit);
     const step = this.laneFits(plan) ? out.step : null;
     // Полотно под концом полосы могли разрезать под стройку пристройки — конец на его куске.
@@ -576,6 +599,12 @@ export class RoadTools {
     if (!moved) {
       this.lane = null;
       this.laneDrag = null;
+      // 🅿️: клик по полосе — под парковку или вернуть движению.
+      const toggle = this.park ? this.parkTogglePlan(p) : null;
+      if (toggle) {
+        if (!toggle.plan.ok) return toggle.plan.reason ?? 'Нельзя';
+        return this.commitLane(toggle.plan, toggle.edit);
+      }
       this.laneTip = laneTipAt(this.net, p, r);
       return null;
     }
@@ -613,8 +642,9 @@ export class RoadTools {
   private applyLanePlan(plan: RoadPlan): void {
     const g = this.game();
     g.roadBuilder.apply(plan);
-    // Дома, на которые налезла новая полоса или съезд, отодвигаются.
-    for (const id of plan.changed) g.roadWidened(id);
+    // Дома, на которые налезла новая полоса или съезд, отодвигаются; у полосы стоянки — ужимают участки (curbSqueeze).
+    g.applyCurbSqueeze(plan.changed);
+    for (const id of plan.changed) g.roadWidened(id, !g.roads.net.corridors.get(id)?.lanes.some((l) => l.park));
   }
 
   // ---------- Перестроить ----------

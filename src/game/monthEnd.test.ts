@@ -13,7 +13,7 @@ import { road } from './testkit';
  * к гаражам, площадкам и стоянкам магазинов: другая машина оказалась у такого перекрёстка). Целиком и по шагам — до бита
  * и в seed 8: разница только с «как было».
  */
-const world = () => new Game({ seed: 9, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' });
+const world = (parking = false) => new Game({ seed: 9, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry', parking });
 
 /** Сохранение без отметки времени записи — для сравнения партий. */
 const saveText = (g: Game) => JSON.stringify({ ...g.toSave(), savedAt: 0 });
@@ -26,8 +26,8 @@ const carsText = (g: Game) =>
  * чего расти: они прокладывают несколько улиц, и машины жителей переезжают на новый граф не раз.
  * budget — Game.monthBudget; immediate — как было: граф после каждой улицы сразу, внутри стройки.
  */
-function play(budget: number, immediate = false) {
-  const g = world();
+function play(budget: number, immediate = false, parking = false) {
+  const g = world(parking);
   g.monthBudget = budget;
   if (immediate) (g.roads as unknown as { quiet: (fn: () => unknown) => unknown }).quiet = (fn) => fn();
   const traffic = g.roads.traffic;
@@ -70,6 +70,17 @@ describe('Итоги месяца по кадрам', { timeout: 120_000 }, () =
     expect(whole.closingFrames).toBe(0);
     expect(sliced.closingFrames).toBeGreaterThan(5);
     expect(sliced.maxRebinds).toBe(1);
+  });
+
+  it('мир с полосами стоянки (parking): целиком и по шагам — до бита, машины встают у бордюра', () => {
+    const whole = play(Infinity, false, true);
+    const sliced = play(0, false, true);
+    expect(whole.month).toBe(2);
+    const save = JSON.parse(whole.save) as SaveData;
+    expect(save.roads.corridors.some((c) => c.lanes.some((l) => l.park))).toBe(true);
+    expect(save.towns.some((t) => t.cars?.some((c) => c.curb !== undefined))).toBe(true);
+    expect(sliced.save).toBe(whole.save);
+    expect(sliced.cars).toBe(whole.cars);
   });
 
   it('пока итоги идут, время партии стоит; сохранение подводит их до конца, и после загрузки они не повторяются', () => {

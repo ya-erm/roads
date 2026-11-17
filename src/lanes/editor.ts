@@ -14,6 +14,7 @@ import {
   laneUnder,
   removeLane,
   startLane,
+  toggleParkLane,
   toggleSolid,
 } from './edit';
 import { edgesAt, laneBand, pointOff, stations } from './geometry';
@@ -106,13 +107,20 @@ export class LabEditor {
   }
 
   /** Правка выбранной полосы из панели. */
-  laneAction(action: 'flip' | 'remove' | 'solid' | 'solidLeft' | 'bulldoze'): void {
+  laneAction(action: 'flip' | 'remove' | 'solid' | 'solidLeft' | 'bulldoze' | 'park'): void {
     const sel = this.selected;
     if (!sel) return;
     this.commit((n) => {
       const c = n.corridors.get(sel.corridor);
       if (!c) return false;
-      if (action === 'flip') flipLane(n, c, sel.lane);
+      // 🅿️ под парковку / ↺ вернуть движению (крайняя полоса; на 1+1 и магистрали — нельзя).
+      if (action === 'park') {
+        try {
+          toggleParkLane(n, c, sel.lane);
+        } catch {
+          return false;
+        }
+      } else if (action === 'flip') flipLane(n, c, sel.lane);
       else if (action === 'remove') removeLane(n, c, sel.lane);
       else if (action === 'bulldoze') bulldoze(n, c.id);
       else {

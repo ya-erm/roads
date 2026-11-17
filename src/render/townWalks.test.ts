@@ -3,7 +3,7 @@ import { freshGame } from '../game/testkit';
 import type { Town, TownBuilding } from '../world/entities';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import type { Footprint } from '../world/spatial';
-import { halfAtS } from '../world/worldgen';
+import { curbGap } from '../world/worldgen';
 import { parkGates } from './parkArt';
 import { SIDEWALK, type Sidewalk, WALK_LOOK } from './sidewalks';
 import { drawTownWalks, type TownWalks, townWalks, WALK_W } from './townWalks';
@@ -120,8 +120,8 @@ describe('Дорожки кварталов', () => {
     const edge = (p: { x: number; y: number }) => {
       let best = Infinity;
       for (const c of net.corridorsNear(p, 30)) {
-        const hit = c.lut.closest(p);
-        best = Math.min(best, hit.d - halfAtS(c, hit.s));
+        // Кромка — со своей стороны (как в игре, renderer): полоса стоянки бывает только с одной.
+        best = Math.min(best, curbGap(c, p));
       }
       return best;
     };
@@ -163,8 +163,8 @@ describe('Дорожки кварталов', () => {
     const edge = (p: { x: number; y: number }) => {
       let best = Infinity;
       for (const c of net.corridorsNear(p, 30)) {
-        const hit = c.lut.closest(p);
-        best = Math.min(best, hit.d - halfAtS(c, hit.s));
+        // Кромка — со своей стороны (как в игре, renderer): полоса стоянки бывает только с одной.
+        best = Math.min(best, curbGap(c, p));
       }
       return best;
     };

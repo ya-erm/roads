@@ -698,7 +698,8 @@ export function buildProject(g: Game, kind: NetKind, p: Project, edits: NetEdit[
     if (!plan.ok) return plan.reason ?? 'Так не построить';
     g.checkpoint('проект дороги');
     g.roadBuilder.apply(plan);
-    if (shove) for (const id of plan.changed) g.roadWidened(id);
+    g.applyCurbSqueeze(plan.changed);
+    if (shove) for (const id of plan.changed) g.roadWidened(id, !g.roads.net.corridors.get(id)?.lanes.some((l) => l.park));
     g.commit();
     return null;
   }

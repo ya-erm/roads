@@ -4,7 +4,7 @@ import type { Corridor, LaneNet } from '../lanes/model';
 import type { Town, TownPark } from '../world/entities';
 import { ROAD_MARGIN } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
-import { corridorHalf, halfAtS } from '../world/worldgen';
+import { corridorHalf, curbGap, halfAtS } from '../world/worldgen';
 import { Art, disc } from './industryArt';
 import { type Box, grow } from './tileCache';
 import {
@@ -515,12 +515,16 @@ export function streetGreen(
 
 /** Аллея и фонари одного полотна (streetGreen). */
 function alleyOf(roads: LaneNet, c: Corridor, busy: (p: Vec, r: number) => boolean): StreetGreen | null {
-  // Другие полотна на одном уровне подходят близко только у узлов (пересекаются улицы в узле) — там и проверяем.
+  // Другие полотна подходят близко у узлов (пересекаются улицы в узле), а под острым углом к узлу — и дальше от него:
+  // там полоса стоянки соседней улицы (с одной стороны — curbGap) доходит до аллеи.
   const free = (p: Vec, r: number, s: number) => {
     if (busy(p, r)) return false;
-    if (s > 45 && s < c.length - 45) return true;
-    for (const o of roads.corridorsNear(p, 30)) if (o !== c && o.lut.closest(p).d < corridorHalf(o) + r + 0.5) return false;
-    return !roads.nodesNear(p, 4 + r).length;
+    const mid = s > 45 && s < c.length - 45;
+    for (const o of roads.corridorsNear(p, 30)) {
+      if (o === c) continue;
+      if (mid ? curbGap(o, p) < r + 0.5 : o.lut.closest(p).d < corridorHalf(o) + r + 0.5) return false;
+    }
+    return mid || !roads.nodesNear(p, 4 + r).length;
   };
   const trees: number[] = [];
   const lamps: number[] = [];

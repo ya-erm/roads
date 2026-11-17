@@ -56,8 +56,9 @@ export function biomeIsRandom(s: Pick<WorldSettings, 'seed' | 'biome' | 'biomeBy
 export function withSeed(s: WorldSettings, seed: number): WorldSettings {
   const random = biomeIsRandom(s);
   // Масштаб карты — всегда нынешний: новая партия после старой (без поля) — на карте нового размера. Город — всегда
-  // с получателями грузов (world/retail.ts): старая модель — только у старых сохранений.
-  const next: WorldSettings = { ...s, seed, biome: random ? biomeForSeed(seed) : s.biome, biomeBySeed: random, mapScale: MAP_SCALE, retail: true };
+  // с получателями грузов (world/retail.ts): старая модель — только у старых сохранений. И с полосами стоянки, что
+  // город ставит сам (world/curbStreets.ts).
+  const next: WorldSettings = { ...s, seed, biome: random ? biomeForSeed(seed) : s.biome, biomeBySeed: random, mapScale: MAP_SCALE, retail: true, parking: true };
   // Городов — в пределах размера карты (после старой партии на 14 городов средняя — 9).
   return { ...next, towns: townCount(next) };
 }

@@ -7,6 +7,9 @@ import { flatsOf, formOf } from '../world/townForms';
 import { yardLotOf, yardSpots } from '../world/yardLots';
 import { carSpot, GARAGE_TRIPS, type CarSpot, type GarageLook, type Garages, type GarageSlot, type MoveHooks } from './garages';
 import { stallKey, type FleetBack, type FleetVisit } from './shopParking';
+import type { CurbStall } from '../lanes/curb';
+import type { GLink } from '../lanes/graph';
+import { CURB_TRIPS, type CurbHooks, type CurbParking } from './curbParking';
 
 /**
  * Парк машин жителей: где машина ночует и куда едет (docs/PARKING.md, этап 1). У каждой машины жителя — свой дом и
@@ -63,10 +66,15 @@ export const carHomeOf = (key: number): number => Math.floor(key / 64);
 const APRON = 62;
 const GATE = 63;
 
-export type PlaceKind = 'garage' | 'pad' | 'apron' | 'stall' | 'yard' | 'box';
+export type PlaceKind = 'garage' | 'pad' | 'apron' | 'stall' | 'yard' | 'box' | 'curb';
 
 /** Место ночёвки машины. */
 export interface Place {
+  /**
+   * Место на полосе стоянки у улицы (kind 'curb', game/curbParking.ts): выезд и въезд — манёвром у бордюра, а не через
+   * заезд (spot у такого места — только для ключа и рисунка).
+   */
+  curb?: CurbStall;
   /**
    * Место манёвра у Garages: заезд, где встаёт машина. У ворот двора и гаражных боксов — одно на все их машины (одна
    * машина в воротах за раз), у остальных — своё.
@@ -106,6 +114,8 @@ interface Fleet {
   lots: { b: TownBuilding; total: number }[];
   /** Где места — рамка (рисунок: город в кадре). */
   box: [number, number, number, number];
+  /** По какой раскладке мест на полосах стоянки назначены места ночёвки (CurbParking.version). */
+  curbVer: number;
 }
 
 /** Не дома — по городу: что сохраняется (Town.cars), по ключу машины, куча отъездов по сроку и кто его отстоял. */
@@ -117,7 +127,10 @@ interface Away {
 }
 
 /** Что решено о поездке жителя: возвращение машины на её место (от дома from) или выезд с места. */
-export type FleetTrip = { kind: 'back'; car: FleetCar; town: Town; from: TownBuilding | null } | { kind: 'out'; car: FleetCar; town: Town };
+export type FleetTrip =
+  /** curb — машина стоит у цели на полосе стоянки: уезжает с этого места (CarHomes.leaveCurb). */
+  | { kind: 'back'; car: FleetCar; town: Town; from: TownBuilding | null; curb?: CurbStall }
+  | { kind: 'out'; car: FleetCar; town: Town };
 
 /** Что парку нужно от игры. */
 export interface CarHomesHost {
@@ -191,15 +204,39 @@ export class CarHomes {
   /** Машина в потоке (id) → машина парка; home — едет на своё место. */
   private driving = new Map<number, { car: number; town: Town; home: boolean }>();
 
+  /** По какой раскладке мест полос стоянки сверены машины у целей (TownCar.curb). */
+  private curbSeen = -1;
+  private curbLists: (TownCar[] | undefined)[] = [];
+  /** Машины парка (ключи), что встают на полосу стоянки у цели: свернув с полосы, ещё на манёвре — не «у цели». */
+  private curbIn = new Set<number>();
+  /** Место ночёвки на полосе стоянки → чья машина (город и ключ). */
+  private curbOwner = new Map<string, { town: Town; car: number }>();
+
   constructor(
     private host: CarHomesHost,
     private garages: Garages,
-  ) {}
+    private curb: CurbParking | null = null,
+  ) {
+    if (curb) {
+      curb.homeAt = (key) => {
+        const o = this.curbOwner.get(key);
+        return !!o && this.isHome(o.town, o.car);
+      };
+    }
+  }
+
+  /** Нынешняя раскладка мест на полосах стоянки (сеть поправили — номер другой). */
+  private curbVer(): number {
+    if (!this.curb) return 0;
+    this.curb.stalls();
+    return this.curb.version;
+  }
 
   /** Парк города: машины домов и их места. */
   fleet(town: Town): Fleet {
     const hit = this.fleets.get(town.id);
-    if (hit && hit.of === town.buildings && hit.n === town.buildings.length) return hit;
+    const ver = this.curbVer();
+    if (hit && hit.of === town.buildings && hit.n === town.buildings.length && hit.curbVer === ver) return hit;
     const f = this.build(town);
     this.fleets.set(town.id, f);
     return f;
@@ -222,6 +259,33 @@ export class CarHomes {
       boxes.push({ b, spot: carSpot(stallKey(b.id, GATE), b, ys.gate, false, '#888888', L), free: ys.spots.length });
       lots.push({ b, total: ys.spots.length });
     }
+    // Полосы стоянки: сколько мест на каждой и сколько из них уже чьи-то места ночёвки (этого города и прочих).
+    const curb = this.curb;
+    const mine = new Set<string>();
+    const laneTotal = new Map<string, number>();
+    const laneUsed = new Map<string, number>();
+    const laneOf = (st: CurbStall) => `${st.corridor}:${st.lane}`;
+    if (curb) {
+      for (const st of curb.stalls()) {
+        laneTotal.set(laneOf(st), (laneTotal.get(laneOf(st)) ?? 0) + 1);
+        if (curb.assignedElsewhere(st.key, town.id)) laneUsed.set(laneOf(st), (laneUsed.get(laneOf(st)) ?? 0) + 1);
+      }
+    }
+    const curbHome = (b: TownBuilding, color: string): Place | null => {
+      if (!curb) return null;
+      let best: CurbStall | null = null;
+      for (const st of curb.near(b.fp.center, CURB_TRIPS.homeRange)) {
+        if (mine.has(st.key) || curb.assignedElsewhere(st.key, town.id) || !curb.slotOf(st)) continue;
+        if ((laneUsed.get(laneOf(st)) ?? 0) + 1 > CURB_TRIPS.homeShare * (laneTotal.get(laneOf(st)) ?? 0)) continue;
+        const d = dist(st.pos, b.fp.center);
+        if (!best || d < dist(best.pos, b.fp.center) || (d === dist(best.pos, b.fp.center) && st.key < best.key)) best = st;
+      }
+      if (!best) return null;
+      mine.add(best.key);
+      laneUsed.set(laneOf(best), (laneUsed.get(laneOf(best)) ?? 0) + 1);
+      const d: Driveway = { building: b.id, curb: best.pos, gate: best.pos, dir: best.dir, width: 4.6, spot: best.pos, garage: false };
+      return { curb: best, spot: carSpot(NaN, b, d, true, color, L), kind: 'curb', look: { pos: add(best.pos, scale(best.dir, L / 2)), dir: best.dir }, near: [], at: b };
+    };
     const byHome = new Map<number, FleetCar[]>();
     // Боксы — по порядку id домов: новый дом не отбирает бокс у старого.
     for (const b of [...homes].sort((x, y) => x.id - y.id)) {
@@ -260,8 +324,10 @@ export class CarHomes {
               place = { spot: carSpot(stallKey(b.id, i), b, s.drive, true, colorOf(carKey(b.id, k)), L), kind: 'stall', look, near, at: b };
             } else if (gate) place = { spot: gate, kind: 'yard', look, near: [], at: b };
           }
+          // Двор полон (или его нет) — место на полосе стоянки рядом (не больше CURB_TRIPS.homeShare мест полосы).
+          if (!place) place = curbHome(b, colorOf(carKey(b.id, k)));
           if (!place) {
-            // Двор полон (или его нет) — бокс в ближних гаражах.
+            // И там нет — бокс в ближних гаражах.
             let best: (typeof boxes)[number] | null = null;
             let bestD = CAR_HOMES.boxRange;
             for (const x of boxes) {
@@ -298,7 +364,10 @@ export class CarHomes {
       box[2] = Math.max(box[2], p.x);
       box[3] = Math.max(box[3], p.y);
     }
-    return { of: town.buildings, n: town.buildings.length, cars, byKey: new Map(cars.map((c) => [c.key, c])), byHome, byId, homes, cum, placed, lots, box };
+    curb?.setAssigned(town.id, mine);
+    for (const [k, o] of this.curbOwner) if (o.town.id === town.id) this.curbOwner.delete(k);
+    for (const c of cars) if (c.place?.curb) this.curbOwner.set(c.place.curb.key, { town, car: c.key });
+    return { of: town.buildings, n: town.buildings.length, cars, byKey: new Map(cars.map((c) => [c.key, c])), byHome, byId, homes, cum, placed, lots, box, curbVer: this.curbVer() };
   }
 
   /** Не дома — по городу (из Town.cars; первый раз — разложить по куче и отстоявшим). */
@@ -328,6 +397,8 @@ export class CarHomes {
     this.aways.clear();
     this.moving.clear();
     this.driving.clear();
+    this.curbIn.clear();
+    this.curbOwner.clear();
     const now = this.host.time;
     for (const town of towns) {
       if (town.carTrips === undefined && town.garageTrips !== undefined) town.carTrips = town.garageTrips;
@@ -343,6 +414,42 @@ export class CarHomes {
       delete town.garageTrips;
       delete town.garageAway;
     }
+    this.curb?.clear();
+    this.curbSeen = -1;
+    this.syncCurb();
+  }
+
+  /**
+   * Машины у целей на полосах стоянки (TownCar.curb) — по нынешней раскладке мест: место с тем же ключом там же, а нет —
+   * ближнее к прежнему положению (TownCar.cp) не дальше 3 ед.; не нашлось — машина просто у цели («в разъездах»).
+   */
+  private syncCurb(): void {
+    const curb = this.curb;
+    if (!curb) return;
+    const ver = this.curbVer();
+    // Списки машин не дома те же (не загрузка, не Ctrl+Z) и места те же — сверять нечего.
+    const lists = this.host.towns.map((t) => t.cars);
+    if (ver === this.curbSeen && lists.length === this.curbLists.length && lists.every((x, i) => x === this.curbLists[i])) return;
+    this.curbSeen = ver;
+    this.curbLists = lists;
+    const list: { key: string; car: number }[] = [];
+    const taken = new Set<string>();
+    for (const town of this.host.towns) {
+      for (const e of town.cars ?? []) {
+        if (e.curb === undefined) continue;
+        const st = curb.find(e.curb, e.cp ? { x: e.cp[0], y: e.cp[1] } : undefined);
+        if (!st || taken.has(st.key)) {
+          delete e.curb;
+          delete e.cp;
+          continue;
+        }
+        e.curb = st.key;
+        e.cp = [Math.round(st.pos.x * 10) / 10, Math.round(st.pos.y * 10) / 10];
+        taken.add(st.key);
+        list.push({ key: st.key, car: e.car });
+      }
+    }
+    curb.setParked(list);
   }
 
   /** Машина дома (не в Town.cars и не в пути)? */
@@ -365,6 +472,7 @@ export class CarHomes {
     const a = this.away(town);
     const old = a.byCar.get(e.car);
     if (old) a.list.splice(a.list.indexOf(old), 1);
+    if (old?.curb !== undefined && old.curb !== e.curb) this.curb?.unpark(old.curb, old.car);
     a.list.push(e);
     a.byCar.set(e.car, e);
     if ((e.until ?? 0) > this.host.time) heapPush(a.heap, e);
@@ -377,6 +485,8 @@ export class CarHomes {
     const a = this.away(town);
     const e = a.byCar.get(key);
     if (!e) return;
+    // Стояла у цели на полосе стоянки — место свободно.
+    if (e.curb !== undefined) this.curb?.unpark(e.curb, e.car);
     a.byCar.delete(key);
     const i = a.list.indexOf(e);
     if (i >= 0) a.list.splice(i, 1);
@@ -385,6 +495,8 @@ export class CarHomes {
   /** Такт: у кого срок у цели вышел — в отстоявшие (куча — по сроку, потом по ключу машины). */
   step(): void {
     const now = this.host.time;
+    // Сеть поправили — машины у целей на полосах стоянки ищут свои места заново.
+    this.syncCurb();
     for (const town of this.host.towns) {
       const a = this.aways.get(town.id);
       if (!a || a.list !== town.cars) continue;
@@ -421,6 +533,8 @@ export class CarHomes {
   /** Место занято чужим манёвром (своё, соседнее; гараж — пока машина перед воротами дома). */
   private blocked(town: Town, car: FleetCar): boolean {
     const p = car.place!;
+    // Место на полосе стоянки: там манёвр или к нему кто-то едет.
+    if (p.curb) return !this.curb || this.curb.isTaken(p.curb.key);
     if (this.garages.isBusy(p.spot.key) || p.near.some((k) => this.garages.isBusy(k))) return true;
     if (p.kind !== 'garage') return false;
     const apron = carKey(car.home.id, 1);
@@ -429,7 +543,13 @@ export class CarHomes {
 
   /** Можно ли сейчас машине со своего места в поток: дома, место не занято, к полосе у него можно подъехать. */
   private canLeave(town: Town, car: FleetCar): boolean {
-    return !!car.place && this.isHome(town, car.key) && !this.blocked(town, car) && !!this.garages.slotOf(car.place.spot);
+    return !!car.place && this.isHome(town, car.key) && !this.blocked(town, car) && this.reachable(car.place);
+  }
+
+  /** К месту можно подъехать (и выехать от него): к заезду — slotOf, к месту на полосе стоянки — её полоса движения. */
+  private reachable(p: Place, left = false): boolean {
+    if (p.curb) return !!this.curb?.slotOf(p.curb);
+    return !!this.garages.slotOf(p.spot) || (left && !!this.garages.leftSlotOf(p.spot));
   }
 
   /** Отстоявшие у цели и не в пути — кто может ехать домой (на стоянке магазина — нет: уедет сама, по сроку). */
@@ -463,11 +583,14 @@ export class CarHomes {
     // Возвращение машины e (отстояла у цели), если к её месту можно подъехать; нет — вернулась незаметно.
     const back = (e: TownCar): FleetTrip | null => {
       const car = f.byKey.get(e.car);
-      if (car?.place && !this.blocked(town, car) && (this.garages.slotOf(car.place.spot) || this.garages.leftSlotOf(car.place.spot))) {
-        return { kind: 'back', car, town, from: e.at !== undefined ? this.building(e.at) : null };
+      if (car?.place && !this.blocked(town, car) && this.reachable(car.place, true)) {
+        // Стоит у цели на полосе стоянки — уедет с места (выехать нельзя — подождёт другой поездки).
+        const st = e.curb !== undefined ? this.curb?.stall(e.curb) : undefined;
+        if (st && !this.curb!.canLeave(st)) return null;
+        return { kind: 'back', car, town, from: e.at !== undefined ? this.building(e.at) : null, ...(st ? { curb: st } : {}) };
       }
       // Машины больше нет (дом снесли) или к её месту не подъехать — вернулась незаметно.
-      if (!car?.place || !this.garages.slotOf(car.place.spot)) this.settle(town, e.car);
+      if (!car?.place || !this.reachable(car.place)) this.settle(town, e.car);
       return null;
     };
     if (ready.length && r(1) < ready.length / (ready.length + CAR_HOMES.backK * f.placed)) {
@@ -538,7 +661,92 @@ export class CarHomes {
       stayed: () => this.moving.delete(car.key),
     };
     const { target, ...rest } = opt;
-    this.garages.leave(car.place!.spot, town, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks, ...rest });
+    const st = car.place!.curb;
+    // Место ночёвки на полосе стоянки — выезд передом от бордюра (CurbParking.leave).
+    const curbHooks: CurbHooks = { joined: hooks.joined, stayed: hooks.stayed };
+    if (st && this.curb) this.curb.leave(st, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks: curbHooks, endLink: opt.endLink, then: opt.then });
+    else this.garages.leave(car.place!.spot, town, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks, ...rest });
+  }
+
+  /**
+   * Места у цели на полосах стоянки (её улица и соседние, CurbParking.visitTarget): к какой связи ехать и из чего выбрать.
+   * Полос стоянки рядом нет или все места заняты — null (поездка кончится у узла цели).
+   */
+  curbVisit(dest: TownBuilding, from?: number): { link: GLink; choices: () => CurbStall[] } | null {
+    return this.curb?.visitTarget(dest.fp.center, from) ?? null;
+  }
+
+  /**
+   * Машина парка в потоке (выехала к цели trip.car) встаёт на полосу стоянки у цели: место — ближнее свободное на
+   * подъезде (CurbParking.toCurb); встала — TownCar.curb. Мест не осталось — едет к узлу цели, как раньше.
+   */
+  toCurbVisit(sim: Vehicle, trip: Extract<FleetTrip, { kind: 'out' }>, v: { link: GLink; choices: () => CurbStall[] }): void {
+    const { car, town } = trip;
+    const curb = this.curb;
+    if (!curb) return;
+    this.curbIn.add(car.key);
+    curb.toCurb(sim, v.link.id, v.choices, {
+      arrived: (st) => {
+        this.curbIn.delete(car.key);
+        this.moving.delete(car.key);
+        const e = this.away(town).byCar.get(car.key);
+        if (!e) return;
+        e.curb = st.key;
+        e.cp = [Math.round(st.pos.x * 10) / 10, Math.round(st.pos.y * 10) / 10];
+        curb.park(st.key, car.key);
+      },
+      missed: () => this.curbIn.delete(car.key),
+    });
+  }
+
+  /**
+   * Путь машины парка домой от узла from: к заезду её места (Garages.wayHome — направо или налево) или к месту на полосе
+   * стоянки (CurbParking.wayTo). Не доехать — null.
+   */
+  homeWay(from: number, car: FleetCar): { route: number[]; toNode: number; slot?: GarageSlot } | null {
+    const p = car.place;
+    if (!p) return null;
+    if (p.curb) {
+      const w = this.curb?.wayTo(from, p.curb);
+      return w ? { route: w.route, toNode: w.link.toNode! } : null;
+    }
+    const w = this.garages.wayHome(from, p.spot);
+    return w ? { route: w.route, toNode: w.slot.link.toNode!, slot: w.slot } : null;
+  }
+
+  /**
+   * Возвращение машины, что стоит у цели на полосе стоянки (trip.curb): выезжает с места к своему месту ночёвки — к
+   * связи у его заезда (направо или налево) или у места на полосе стоянки. Не подъехать — false.
+   */
+  leaveCurb(trip: Extract<FleetTrip, { kind: 'back' }>): boolean {
+    const { car, town, curb: st } = trip;
+    const curb = this.curb;
+    const p = car.place;
+    if (!curb || !st || !p) return false;
+    const home = p.curb ? curb.slotOf(p.curb) : null;
+    const slot = p.curb ? null : (this.garages.slotOf(p.spot) ?? this.garages.leftSlotOf(p.spot));
+    const link = home?.link ?? slot?.link;
+    if (!link) return false;
+    this.moving.add(car.key);
+    const from = trip.from ?? car.home;
+    curb.leave(st, link.toNode!, { from, to: p.at }, {
+      color: car.color,
+      endLink: link.id,
+      hooks: {
+        joined: (sim) => {
+          const e = this.away(town).byCar.get(car.key);
+          if (e?.curb !== undefined) {
+            curb.unpark(e.curb, car.key);
+            delete e.curb;
+            delete e.cp;
+          }
+          this.driving.set(sim.id, { car: car.key, town, home: true });
+        },
+        stayed: () => this.moving.delete(car.key),
+      },
+      then: (sim) => this.homeward(sim, trip, slot ?? undefined),
+    });
+    return true;
   }
 
   /** Машина парка едет на стоянку магазина (ShopParking.start): встала на место — отмечена там (TownCar.spot). */
@@ -566,11 +774,21 @@ export class CarHomes {
    * Машина в потоке sim везёт машину парка на её место: маршрут — к связи у места (Garages.wayHome), slot — поворот к
    * нему (направо или налево). Не успеет свернуть — поездка кончится у узла, машина «вернётся незаметно».
    */
-  homeward(sim: Vehicle, trip: Extract<FleetTrip, { kind: 'back' }>, slot: GarageSlot): void {
+  homeward(sim: Vehicle, trip: Extract<FleetTrip, { kind: 'back' }>, slot?: GarageSlot): void {
     const { car, town } = trip;
     this.moving.add(car.key);
     this.driving.set(sim.id, { car: car.key, town, home: true });
-    this.garages.toStall(sim, car.place!.spot, town, slot, this.homeHooks(town, car), this.choices(town, car));
+    const st = car.place!.curb;
+    if (st && this.curb) {
+      // Своё место на полосе стоянки: на полосе у него — только оно, если не занято.
+      const link = this.curb.slotOf(st)?.link.id;
+      if (link === undefined) return;
+      const curb = this.curb;
+      curb.toCurb(sim, link, () => (curb.isTaken(st.key) ? [] : [st]), { arrived: () => this.settle(town, car.key) });
+      return;
+    }
+    const s = slot ?? this.garages.slotOf(car.place!.spot) ?? this.garages.leftSlotOf(car.place!.spot);
+    if (s) this.garages.toStall(sim, car.place!.spot, town, s, this.homeHooks(town, car), this.choices(town, car));
   }
 
   /**
@@ -582,6 +800,29 @@ export class CarHomes {
     if (!hit?.car.place || this.moving.has(hit.car.key)) return null;
     const { town, car } = hit;
     const spot = car.place!.spot;
+    const st = car.place!.curb;
+    if (st) {
+      // Место ночёвки на полосе стоянки: со стоянки магазина — к связи у него, там встанет на место (homeward).
+      const cs = this.curb?.slotOf(st);
+      if (!cs || this.blocked(town, car)) return null;
+      const g = this.curb!;
+      const pose = { pos: st.pos, f: st.dir };
+      const slot: GarageSlot = { lane: cs.lane, link: cs.link, mid: cs.u, zone: [cs.u - 5, cs.u + 5], ...pose };
+      return {
+        home: car.place!.at,
+        to: spot,
+        slot,
+        joined: (sim) => {
+          const e = this.away(town).byCar.get(car.key);
+          if (e) delete e.spot;
+          this.moving.add(car.key);
+          this.driving.set(sim.id, { car: car.key, town, home: true });
+        },
+        then: (sim) => {
+          if (g.slotOf(st)) this.homeward(sim, { kind: 'back', car, town, from: null });
+        },
+      };
+    }
     const slot = this.garages.slotOf(spot) ?? this.garages.leftSlotOf(spot);
     if (!slot || this.blocked(town, car)) return null;
     return {
@@ -606,6 +847,7 @@ export class CarHomes {
     const d = this.driving.get(simId);
     if (!d) return;
     this.driving.delete(simId);
+    this.curbIn.delete(d.car);
     if (d.home) this.settle(d.town, d.car);
     else this.moving.delete(d.car);
   }
@@ -615,7 +857,8 @@ export class CarHomes {
     const d = this.driving.get(simId);
     if (!d) return;
     this.driving.delete(simId);
-    if (!d.home) this.moving.delete(d.car);
+    // Встаёт на полосу стоянки у цели — у цели, когда встанет на место (toCurbVisit).
+    if (!d.home && !this.curbIn.has(d.car)) this.moving.delete(d.car);
   }
 
   /** Машина парка, что едет в потоке (id машины в потоке) — ключ и едет ли на своё место. */
@@ -643,6 +886,22 @@ export class CarHomes {
         const p = look.pos;
         if (p.x < box[0] - pad || p.x > box[2] + pad || p.y < box[1] - pad || p.y > box[3] + pad) continue;
         out.push({ look: { ...spec, color: c.color, pos: p, dir: look.dir } });
+      }
+    }
+    // Машины у целей на полосах стоянки (TownCar.curb), кроме тех, что уже выезжают.
+    const curb = this.curb;
+    if (curb) {
+      for (const town of this.host.towns) {
+        const f = this.fleet(town);
+        for (const e of town.cars ?? []) {
+          if (e.curb === undefined || this.moving.has(e.car)) continue;
+          const st = curb.stall(e.curb);
+          const c = st && f.byKey.get(e.car);
+          if (!st || !c || curb.moving(st.key)) continue;
+          const p = add(st.pos, scale(st.dir, spec.length / 2));
+          if (p.x < box[0] - pad || p.x > box[2] + pad || p.y < box[1] - pad || p.y > box[3] + pad) continue;
+          out.push({ look: { ...spec, color: c.color, pos: p, dir: st.dir } });
+        }
       }
     }
     return out;

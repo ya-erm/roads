@@ -103,6 +103,18 @@ export function townWalks(town: Town, curb: (p: Vec) => number): TownWalks | nul
   const list = town.buildings.filter(rowHouse);
   // Дом второго ряда выходит к улице дорожкой в обход переднего (ниже), не напрямую.
   for (const b of town.buildings) if (b.kind !== 'landmark' && !b.rear) accessOf(b, reach, fronts, drives);
+  // Участок отступил от улицы дальше обычного (полоса стоянки ужала его — world/curbSqueeze.ts, угловой — с двух
+  // улиц): дорожка к крыльцу тянется дальше, до тротуара.
+  const onWalk = side.from + side.w - 0.5;
+  for (const f of fronts) {
+    const gap = curb({ x: f.pts[2], y: f.pts[3] });
+    if (!(gap > onWalk + 0.5 && gap < 15)) continue;
+    const dx = f.pts[2] - f.pts[0];
+    const dy = f.pts[3] - f.pts[1];
+    const l = Math.hypot(dx, dy) || 1;
+    f.pts[2] += (dx / l) * (gap - onWalk);
+    f.pts[3] += (dy / l) * (gap - onWalk);
+  }
   const near = (a: TownBuilding, b: TownBuilding, d: number) => Math.abs(a.fp.center.x - b.fp.center.x) < d && Math.abs(a.fp.center.y - b.fp.center.y) < d;
   // Соседи — по клеткам сетки CELL м (в масштабе участков, TOWN_SCALE): не каждый дом с каждым.
   const CELL = 70 * TOWN_SCALE;

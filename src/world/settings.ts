@@ -56,7 +56,15 @@ export interface WorldSettings {
    * с домами города в охвате принимает всё, что городу нужно.
    */
   retail?: boolean;
+  /**
+   * Полосы стоянки вдоль улиц (docs/PARKING.md, этап 2): город ставит их сам — при генерации (world/curbStreets.ts) и
+   * при росте, где мест не хватает. Нет поля — старая партия: город полос стоянки не ставит (игрок — может).
+   */
+  parking?: boolean;
 }
+
+/** Город сам ставит полосы стоянки (WorldSettings.parking). */
+export const parkingOn = (s: Pick<WorldSettings, 'parking'>): boolean => s.parking === true;
 
 /** Город принимает груз через получателей (WorldSettings.retail). */
 export const retailOn = (s: Pick<WorldSettings, 'retail'>): boolean => s.retail === true;
@@ -163,9 +171,10 @@ export const DEFAULT_SETTINGS: WorldSettings = {
 /**
  * Новая партия — из игры (первый запуск, «?seed=», окно «Новая игра»): предприятия строит игрок. DEFAULT_SETTINGS —
  * без поля, «Готовые»: по нему мир по seed прежний (на нём держатся тесты старой раскладки). Городов — обычное
- * число для средней карты (TOWN_RANGE.medium.base). Город принимает груз через получателей (retail).
+ * число для средней карты (TOWN_RANGE.medium.base). Город принимает груз через получателей (retail) и сам ставит полосы
+ * стоянки (parking).
  */
-export const NEW_GAME_SETTINGS: WorldSettings = { ...DEFAULT_SETTINGS, towns: 8, industryMode: 'player', mapScale: MAP_SCALE, retail: true };
+export const NEW_GAME_SETTINGS: WorldSettings = { ...DEFAULT_SETTINGS, towns: 8, industryMode: 'player', mapScale: MAP_SCALE, retail: true, parking: true };
 
 /** Размеры городов: немного крупных, больше средних, остальные маленькие (доли — по профилю сценария). */
 export function townSizes(count: number, shares: { big: number; mid: number } = { big: 0.2, mid: 0.4 }): number[] {

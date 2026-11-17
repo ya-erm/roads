@@ -10,6 +10,7 @@ import { insidePoly, type JunctionMarks, junctionMarks } from './junctionMarks';
 import { autoSolids, centreLine, solidLength } from './solid';
 import { walkGeo, walksOn } from './crosswalk';
 import { junctionRuts } from './dirtRuts';
+import { CURB } from './curb';
 
 export { layerOf };
 
@@ -34,6 +35,9 @@ const DIRT_SOFT: [string, number][] = [
 ];
 /** Ширина колеи, м. */
 const RUT_W = 1.6;
+/** Полоса стоянки: буфер со штриховкой между движением и местами, шаг штрихов. */
+const CURB_BUFFER = CURB.buffer;
+const CURB_HATCH = CURB.hatch;
 
 type LineStyle = 'dash' | 'solid' | 'yellow' | 'barrier' | 'rut';
 interface Mark {
@@ -862,6 +866,23 @@ export class LaneRenderer {
       const both = (s: number) => laneShare(c, A, s) > 0.02 && laneShare(c, B, s) > 0.02;
       const gap = B.offset - A.offset;
       const mid = (A.offset + B.offset) / 2;
+      if (A.park !== B.park && Math.abs(gap - LANE_W) < 0.3) {
+        // Полоса стоянки у полосы движения: сплошная по краю движения, за ней буфер со штриховкой, дальше — места у
+        // бордюра (их границы рисует игра: места знают заезды и остановки, game/curbParking.ts).
+        const P = A.park ? A : B;
+        const out = A.park ? -1 : 1;
+        const inner = P.offset - out * (LANE_W / 2 - CURB_BUFFER);
+        const full = (s: number) => laneShare(c, P, s) > 0.98 && laneShare(c, A.park ? B : A, s) > 0.02;
+        runs(mid, (s) => (both(s) ? 'solid' : null));
+        runs(inner, (s) => (full(s) ? 'solid' : null));
+        const lo = Math.max(s0, P.from);
+        const hi = Math.min(s1, P.to);
+        for (let s = lo + 2; s + CURB_BUFFER < hi; s += CURB_HATCH) {
+          if (!full(s) || !full(s + CURB_BUFFER)) continue;
+          marks.push({ pts: [at(s, mid), at(s + CURB_BUFFER, inner)], style: 'solid' });
+        }
+        continue;
+      }
       if (Math.abs(gap - LANE_W) < 0.3) {
         const same = A.flow === B.flow;
         // Сплошная сама — у развилки полос в разные полотна, после вливания и у самого перекрёстка (autoSolids).
@@ -899,6 +920,7 @@ export class LaneRenderer {
     if (!c.lanes.length || !c.lanes.every((l) => l.flow === c.lanes[0].flow)) return [];
     const res: Vec[][] = [];
     for (const l of c.lanes) {
+      if (l.park) continue;
       const a = Math.max(l.from, s0 + 8);
       const b = Math.min(l.to, s1 - 8);
       if (b - a < 40) continue;

@@ -1,5 +1,5 @@
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
-import { Corridor, End, LaneNet } from './model';
+import { Corridor, driveLanes, End, LaneNet } from './model';
 
 /** Сплошная сама — на столько секунд пути по дороге (на быстрой длиннее), но не короче и не длиннее этого, м. */
 const SOLID_TIME = 0.3;
@@ -48,7 +48,8 @@ export function autoSolids(net: LaneNet, c: Corridor, i: number, j: number, s0: 
  * повернуть налево через встречку (game/garages.ts): только через пунктир.
  */
 export function centreLine(net: LaneNet, c: Corridor, s: number, s0: number, s1: number): 'yellow' | 'solid' | 'dash' {
-  if (c.lanes.length > 2) return 'yellow';
+  // Полосы стоянки — не в счёт: улица 1+1 со стоянками остаётся улицей с пунктиром по оси.
+  if (driveLanes(c).length > 2) return 'yellow';
   const L = solidLength(c);
   const jA = !c.ring && net.node(c.a).kind === 'junction';
   const jB = !c.ring && net.node(c.b).kind === 'junction';

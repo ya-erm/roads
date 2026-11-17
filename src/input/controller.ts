@@ -653,6 +653,18 @@ export class Controller {
     this.onChange();
   }
 
+  /** «Полоса» с 🅿️: ведут полосу стоянки, клик по крайней полосе — под парковку или вернуть движению. */
+  get lanePark(): boolean {
+    return this.roadTools.park;
+  }
+
+  setLanePark(on: boolean): void {
+    if (this.tool !== 'road' || this.roadMode !== 'lane') this.setRoadMode('lane');
+    this.roadTools.clear();
+    this.roadTools.park = on;
+    this.onChange();
+  }
+
   setJunctionMode(mode: JunctionMode): void {
     if (this.tool !== 'roundabout') this.setTool('roundabout');
     this.junctionMode = mode;
@@ -2823,6 +2835,25 @@ export class Controller {
     if (!plan.ok && o.label) o.label = { ...o.label, text: `${o.label.text} · Alt — развернуть` };
   }
 
+  /**
+   * Предпросмотр полосы стоянки (🅿️): полосы стоянки изменённых полотен — зелёным (всё помещается), жёлтым (участки
+   * домов ужмутся — их новые контуры жёлтым) или красным (снос, нельзя); у подписи — тот же значок.
+   */
+  private showParkPlan(o: ToolOverlay, plan: RoadPlan, okText: string): void {
+    const squeezed = plan.squeeze?.length ?? 0;
+    const color = !plan.ok || plan.demolish.length ? 'red' : squeezed ? 'yellow' : 'green';
+    const dot = { green: '🟢', yellow: '🟡', red: '🔴' }[color];
+    this.showRoadPlan(o, plan, `${dot} ${okText}${squeezed ? ` · ↧ ${squeezed} уч.` : ''}`);
+    const net = plan.net;
+    if (net) {
+      o.curbLanes = plan.changed.flatMap((id) => {
+        const c = net.corridors.get(id);
+        return c ? c.lanes.flatMap((l, i) => (l.park ? [{ corridor: id, lane: i, color }] : [])) : [];
+      });
+    }
+    if (plan.ok) for (const fp of plan.squeeze ?? []) o.marks.push({ fp, ok: true, warn: true });
+  }
+
   private showRoadPlan(o: ToolOverlay, plan: RoadPlan, okText: string): void {
     const g = this.game();
     if (plan.net) o.roads = { net: plan.net, ok: plan.ok, changed: plan.changed };
@@ -3618,7 +3649,9 @@ export class Controller {
           // По точкам: следующий кусок до курсора — как построенный; кружок — где сейчас конец полосы.
           const res = rt.laneStepPlan(p, this.spec, this.snapRadius);
           if (res) {
-            this.showLanePlan(o, res.plan, `${res.step?.what ?? ''} · ${lanesProject ? 'проект ' : ''}${money(res.plan.cost)}`, res.step?.tip);
+            const text = `${res.step?.what ?? ''} · ${lanesProject ? 'проект ' : ''}${money(res.plan.cost)}`;
+            if (rt.park) this.showParkPlan(o, res.plan, text);
+            else this.showLanePlan(o, res.plan, text, res.step?.tip);
             if (lanesProject) this.showLaneProject(o, this.projectWith(res.edit, res.plan) ?? res.plan);
             const next = res.step && res.plan.net ? laneTipPos(res.plan.net, res.step.tip) : null;
             o.points = [{ pos: tipAt, color: '#27ae60', r: 6 }, ...(next ? [{ pos: next, color: '#27ae60', r: 4 }] : [])];
@@ -3648,6 +3681,19 @@ export class Controller {
             o.label = { text: 'Тяните конец — длиннее или короче · клик — продолжить по точкам', ok: true };
             break;
           }
+          // 🅿️: курсор на полосе — клик сделает её стоянкой или вернёт движению; у края — тянуть новую стоянку.
+          if (rt.park) {
+            const t = rt.parkTogglePlan(p);
+            if (t) {
+              this.showParkPlan(o, t.plan, `${t.to === 'park' ? '🅿️ под парковку' : '↺ вернуть движению'} · ${money(t.plan.cost)}`);
+              if (!t.plan.ok) o.curbLanes = [{ corridor: t.corridor, lane: t.lane, color: 'red' }];
+              break;
+            }
+            const pe = edgeAt(net, p);
+            o.points = [...(o.points ?? []), ...(pe ? [{ pos: pe.pos, color: '#27ae60', r: 5 }] : [])];
+            o.label = { text: pe ? '🅿️ ⟷ тяните вдоль края — стоянка' : '🅿️ у края дороги — тянуть · на полосе — клик', ok: true };
+            break;
+          }
           // Где встанет полоса: у края дороги — зелёный кружок.
           const e = edgeAt(net, p);
           o.points = [...(o.points ?? []), ...(e ? [{ pos: e.pos, color: '#27ae60', r: 5 }] : [])];
@@ -3663,7 +3709,9 @@ export class Controller {
         // Тянут: что построится (вдоль, съезд, въезд — и через стыки), возврат — если полоса короче.
         const res = rt.lanePlan(this.spec);
         if (res) {
-          this.showLanePlan(o, res.plan, `${res.what} · ${lanesProject ? 'проект ' : ''}${res.plan.cost < 0 ? `+${money(-res.plan.cost)}` : money(res.plan.cost)}`, res.step?.tip);
+          const text = `${res.what} · ${lanesProject ? 'проект ' : ''}${res.plan.cost < 0 ? `+${money(-res.plan.cost)}` : money(res.plan.cost)}`;
+          if (rt.park) this.showParkPlan(o, res.plan, text);
+          else this.showLanePlan(o, res.plan, text, res.step?.tip);
           if (lanesProject) this.showLaneProject(o, this.projectWith(res.edit, res.plan) ?? res.plan);
         }
         break;

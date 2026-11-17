@@ -31,7 +31,18 @@ export interface LaneSlot {
   to: number;
   /** Линия к соседней полосе с бо́льшим смещением — сплошная: через неё не перестраиваются. */
   solid?: boolean;
+  /**
+   * Полоса стоянки вдоль бордюра (docs/PARKING.md, этап 2): асфальт, тротуар, отступ домов, цена и стройка — как у
+   * полосы, но движения по ней нет — граф её не видит (isDrive). flow — ход соседней полосы движения: места справа от неё.
+   */
+  park?: true;
 }
+
+/** Полоса движения (не стоянка): по ней строит граф, её считают пропускная способность, осевая и разметка. */
+export const isDrive = (l: LaneSlot): boolean => !l.park;
+
+/** Полосы движения полотна — без полос стоянки. */
+export const driveLanes = (c: { lanes: LaneSlot[] }): LaneSlot[] => (c.lanes.some((l) => l.park) ? c.lanes.filter(isDrive) : c.lanes);
 
 /** Полотно: ось между двумя узлами и полосы вдоль неё. */
 export interface Corridor {
@@ -731,7 +742,8 @@ export class LaneNet {
       if (o.side === e.side) continue;
       const oc = o.corridor;
       for (let i = 0; i < oc.lanes.length; i++) {
-        if (!this.reaches(oc, oc.lanes[i], o.end)) continue;
+        // Стоянка продолжается только стоянкой, полоса движения — полосой движения.
+        if (!this.reaches(oc, oc.lanes[i], o.end) || !oc.lanes[i].park !== !lane.park) continue;
         const it = this.laneAtSeam(o, oc.lanes[i]);
         if (it.forward === me.forward && Math.abs(it.lat - me.lat) < LAT_EPS) return { corridor: oc, lane: i, end: o.end };
       }

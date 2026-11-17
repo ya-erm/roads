@@ -6,6 +6,7 @@ import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, joinTaperedLanes, LaneDraft, laneStep, LaneTip, RoadOptions, taperDeadLanes } from '../lanes/edit';
 import { cornerCost, cornerHandles } from '../lanes/corners';
 import { edgesAt, laneShare } from '../lanes/geometry';
+import { CURB } from '../lanes/curb';
 import { Corridor, type CorridorWas, Flow, LaneNet, type LaneNode, LaneSlot, LAT_EPS } from '../lanes/model';
 import { capLimit, LEVEL_RUN, limitAllowed, limitCapText, RoadClass, ROAD_CLASSES, ROAD_MARGIN, structureFactor } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
@@ -35,6 +36,11 @@ export interface RoadContext {
    * базы — от новой кромки. Дома на новых местах — в demolish; ответ — новые места навесов и баз или чем мешает.
    */
   shoveStops?(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[] | string;
+  /**
+   * Полоса стоянки на застроенной улице (world/curbSqueeze.ts): дома, на которые налезла новая кромка изменённых полотен
+   * со стоянкой (в сети net), ужимают участки; не ужать — в demolish. Ответ — новые контуры домов, что ужмутся.
+   */
+  curbSqueeze?(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[];
   demolishCost(id: number): number;
   demolish(ids: number[]): void;
   spend(amount: number): void;
@@ -97,6 +103,8 @@ export interface RoadPlan {
    * его куски по порядку (номер и где кусок начинался на прежнем). Конец полосы по точкам на таком полотне — splitTip.
    */
   split?: Map<number, { id: number; s0: number }[]>;
+  /** Полоса стоянки на застроенной улице: новые контуры домов, что ужмут участки (снос — в demolish; curbSqueeze). */
+  squeeze?: Footprint[];
 }
 
 /** Конец полосы по точкам (в сети до плана) — в сети плана, где полотно под ним могли разрезать (RoadPlan.split). */
@@ -146,14 +154,15 @@ export interface LaneStepOut {
  * Правка «Полоса по точкам»: куски от конца tip через qs (каждая точка — как следующий клик); out.step — новый
  * конец (в сети правки) и что построено. limit — скорость новых однополосных дорог (съездов, въездов).
  */
-export function laneStepEdit(tip: LaneTip, qs: Vec[], cls: RoadClass, radius: number, limit: number | undefined, reverse: boolean, out: LaneStepOut): NetEdit {
+export function laneStepEdit(tip: LaneTip, qs: Vec[], cls: RoadClass, radius: number, limit: number | undefined, reverse: boolean, out: LaneStepOut, park = false): NetEdit {
   return (n) => {
     const before = new Set(n.corridors.keys());
     let at = tip;
     const what: string[] = [];
     for (let i = 0; i < qs.length; i++) {
-      // Въезд, за которым путь идёт вдоль края, берёт и следующую точку: полоса слияния — до неё.
-      const s = laneStep(n, at, qs[i], cls, radius, reverse, qs[i + 1]);
+      // Въезд, за которым путь идёт вдоль края, берёт и следующую точку: полоса слияния — до неё. Стоянка (park) —
+      // только вдоль края.
+      const s = laneStep(n, at, qs[i], cls, radius, reverse, qs[i + 1], park);
       at = s.tip;
       what.push(s.what);
       if (s.used) what.push('Полоса');
@@ -271,7 +280,8 @@ export function fullCorridorCost(net: LaneNet, c: Corridor, isWater: (p: Vec, ma
     const s = (c.length * (i + 0.5)) / n;
     const p = c.lut.pointAt(s);
     // Полосы — сколько их здесь на самом деле: пристроенная на кусок дороги стоит по своей длине (отгон — по ширине).
-    const lanes = c.lanes.reduce((k, l) => k + laneShare(c, l, s), 0);
+    // Полоса стоянки — CURB.cost цены полосы того же класса.
+    const lanes = c.lanes.reduce((k, l) => k + laneShare(c, l, s) * (l.park ? CURB.cost : 1), 0);
     let earth = 1;
     if (prof) {
       const k = Math.min(prof.z.length - 1, Math.round(s / prof.ds));
@@ -360,6 +370,10 @@ export class RoadBuilder {
       if (typeof res === 'string') reason = res;
       else if (res.length) moved = res;
     }
+    // Полоса стоянки у домов: участки ужимаются, не ужать — снос (в цену).
+    let squeeze: Footprint[] = [];
+    const curbs = opts.raze ? [] : checked.filter((c) => c.lanes.some((l) => l.park));
+    if (!reason && curbs.length && this.ctx.curbSqueeze) squeeze = this.ctx.curbSqueeze(next, curbs, demolish);
     // Новые беды сети (оборванные полосы и т. п.) — только те, что появились от этой правки.
     if (!reason && !opts.raze) {
       const old = new Set(before.problems());
@@ -374,6 +388,7 @@ export class RoadBuilder {
     if (!reason && shortOfMoney(cost, this.ctx.budget, project)) reason = 'Не хватает денег';
     const plan: RoadPlan = { ok: !reason, reason, cost, spend, refund, demolish: razed, net: next, changed: changed.map((c) => c.id) };
     if (moved) plan.moved = moved;
+    if (squeeze.length) plan.squeeze = squeeze;
     if (project) plan.project = project;
     if (re && re.shift > 0.5) plan.shift = re.shift;
     if (re?.split) plan.split = re.split;

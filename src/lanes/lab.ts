@@ -171,6 +171,7 @@ function renderUi(): void {
       <button data-lane="flip">⇄ Развернуть</button>
       ${lower ? `<button data-lane="solidLeft">${line(lower.solid, lowerSide)}</button>` : ''}
       ${upper ? `<button data-lane="solid">${line(lane.solid, upperSide)}</button>` : ''}
+      <button data-lane="park">${lane.park ? '↺ Вернуть движению' : '🅿️ Под парковку'}</button>
       <button data-lane="remove">✕ Убрать полосу</button>
       <button data-lane="bulldoze" class="danger">Снести дорогу</button>`;
   }

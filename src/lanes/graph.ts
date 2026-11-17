@@ -5,7 +5,7 @@ import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
 import { PEDESTRIANS_ON, WalkGeo, walkGeo, walksOn, walkTime, XWALK_BACK } from './crosswalk';
 import { filletPath, junctionCuts } from './geometry';
 import { phaseRelations, resolvePhases, SignalHead, signalHeads, turnKey } from './lights';
-import { Corridor, CorridorEnd, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey, taperLen } from './model';
+import { Corridor, CorridorEnd, driveLanes, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey, taperLen } from './model';
 import { autoSolids } from './solid';
 
 /**
@@ -181,7 +181,7 @@ export function autoMainPair(ends: CorridorEnd[]): [number, number] | null {
     for (let j = i + 1; j < ends.length; j++) {
       const deviation = Math.PI - Math.acos(Math.max(-1, Math.min(1, dot(ends[i].away, ends[j].away))));
       if (deviation > 0.6) continue;
-      const cap = (c: Corridor) => c.lanes.length * laneSpeed(c);
+      const cap = (c: Corridor) => driveLanes(c).length * laneSpeed(c);
       const score = cap(ends[i].corridor) + cap(ends[j].corridor) - deviation * 40;
       if (score > bestScore) {
         bestScore = score;
@@ -371,7 +371,10 @@ export class LaneGraph {
       to: l.to < c.length - 0.5 ? Math.min(c.length, l.to + half) : l.to,
     }));
     const marks = [s0, s1];
-    for (const l of spans) for (const x of [l.from, l.to]) if (x > s0 + 0.5 && x < s1 - 0.5) marks.push(x);
+    // Полоса стоянки (park) — не полоса движения: связей не режет и в них не входит.
+    spans.forEach((l, i) => {
+      if (!c.lanes[i].park) for (const x of [l.from, l.to]) if (x > s0 + 0.5 && x < s1 - 0.5) marks.push(x);
+    });
     marks.sort((x, y) => x - y);
     const cuts = marks.filter((x, i) => i === 0 || x - marks[i - 1] > 0.5);
     const speed = laneSpeed(c);
@@ -380,7 +383,7 @@ export class LaneGraph {
       const links: GLink[] = [];
       for (let k = 0; k + 1 < cuts.length; k++) {
         const [a, b] = [cuts[k], cuts[k + 1]];
-        const present = c.lanes.map((l, i) => ({ l, i })).filter(({ l, i }) => l.flow === flow && spans[i].from <= a + 0.5 && spans[i].to >= b - 0.5);
+        const present = c.lanes.map((l, i) => ({ l, i })).filter(({ l, i }) => !l.park && l.flow === flow && spans[i].from <= a + 0.5 && spans[i].to >= b - 0.5);
         const first = k === 0;
         const last = k + 2 === cuts.length;
         const link: GLink = {
@@ -957,7 +960,7 @@ function shapeOfCorridor(net: LaneNet, c: Corridor): CorridorShape {
   const { p0, p1, p2, p3 } = c.curve;
   const s: CorridorShape = [c.a, c.b, c.portA, c.portB, c.length, c.cls, c.limit ?? -1, c.ring ? 1 : 0, p0.x, p0.y, p1.x, p1.y, p2.x, p2.y, p3.x, p3.y];
   s.push(net.nodes.get(c.a)?.level ?? NaN, net.nodes.get(c.b)?.level ?? NaN);
-  for (const l of c.lanes) s.push(l.offset, l.flow, l.from, l.to, l.solid ? 1 : 0);
+  for (const l of c.lanes) s.push(l.offset, l.flow, l.from, l.to, l.solid ? 1 : 0, l.park ? 1 : 0);
   return s;
 }
 

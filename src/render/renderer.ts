@@ -73,7 +73,7 @@ import { drawRailProjects, drawTrackMachines, railProjectSig } from './railProje
 import { WORK_TRAIN } from '../game/workTrains';
 import { SERVICES } from '../game/services';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
-import { corridorHalf, halfAtS } from '../world/worldgen';
+import { corridorHalf, curbGap } from '../world/worldgen';
 import { storeysOf } from '../world/townForms';
 import { drawTownWalks, type TownWalks, townWalks } from './townWalks';
 import { openNet } from '../lanes/open';
@@ -160,7 +160,7 @@ export interface ToolOverlay {
   /** Рамка сноса и что под неё попадёт. */
   area: { a: Vec; b: Vec; segs: number[]; corridors: number[]; fps: Footprint[] } | null;
   /** Отметки зданий: снос (bad) или место для переноса (ok/bad). */
-  marks: { fp: Footprint; ok: boolean }[];
+  marks: { fp: Footprint; ok: boolean; /** Жёлтым: участок ужмётся (полоса стоянки, world/curbSqueeze.ts). */ warn?: boolean }[];
   /** Подпись у курсора: ok — тёмная, иначе красный отказ; warn — жёлтая (можно, но с оговоркой: проект дороже денег). */
   label: { text: string; ok: boolean; warn?: boolean } | null;
   heatmap: boolean;
@@ -207,6 +207,11 @@ export interface ToolOverlay {
   corridor?: { id: number; color: 'red' | 'blue' | 'green' } | null;
   /** Полоса под курсором, которую снесут, — красным. */
   lane?: { corridor: number; lane: number } | null;
+  /**
+   * Полосы стоянки в предпросмотре «Полосы» с 🅿️ (в сети o.roads): зелёный — всё помещается, жёлтый — участки домов
+   * ужмутся, красный — снос или нельзя.
+   */
+  curbLanes?: { corridor: number; lane: number; color: 'green' | 'yellow' | 'red' }[] | null;
   /** Кружки: начало дороги, куда примкнёт, узел под курсором. */
   /** node — узел, за который тянут («Двигать»): рисуется квадратом узла, а не кружком. */
   points?: { pos: Vec; color: string; r?: number; node?: boolean }[];
@@ -1197,8 +1202,8 @@ export class Renderer {
         let best = Infinity;
         for (const c of net.corridorsNear(p, 30)) {
           if (c.build) continue;
-          const hit = c.lut.closest(p);
-          best = Math.min(best, hit.d - halfAtS(c, hit.s));
+          // Кромка — со своей стороны полотна: полоса стоянки бывает только с одной.
+          best = Math.min(best, curbGap(c, p));
         }
         return best;
       });
@@ -2409,8 +2414,22 @@ export class Renderer {
    * гаража), а ворота открыты — тёмный проём.
    */
   private drawGarageCars(game: Game, view: Box): void {
-    const list = game.garageLooks([view.x0, view.y0, view.x1, view.y1], this.camera.zoom >= FINE_ZOOM);
     const ctx = this.ctx;
+    // Границы мест на полосах стоянки (game/curbParking.ts) — под машинами, когда разметка уже читается.
+    if (this.camera.zoom >= 0.6) {
+      const marks = game.curbMarks([view.x0, view.y0, view.x1, view.y1]);
+      if (marks.length) {
+        ctx.strokeStyle = 'rgba(245, 243, 230, 0.85)';
+        ctx.lineWidth = 0.6;
+        ctx.beginPath();
+        for (const [a, b] of marks) {
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+        }
+        ctx.stroke();
+      }
+    }
+    const list = game.garageLooks([view.x0, view.y0, view.x1, view.y1], this.camera.zoom >= FINE_ZOOM);
     for (const { look, gate } of list) {
       if (!gate) {
         this.drawVehicles([look]);
@@ -4036,6 +4055,8 @@ export class Renderer {
     }
     // Полоса — в той сети, что на карте (в проекте полос — в сети с ним).
     if (o.lane) this.tintLane(o.roads?.net ?? game.roads.net, o.lane.corridor, o.lane.lane, 'rgba(232,72,63,0.55)');
+    const curbTint = { green: 'rgba(46,157,87,0.55)', yellow: 'rgba(229,163,59,0.6)', red: 'rgba(232,72,63,0.55)' };
+    for (const x of o.curbLanes ?? []) this.tintLane(o.roads?.net ?? game.roads.net, x.corridor, x.lane, curbTint[x.color]);
     for (const pt of o.points ?? []) {
       // Узлы, за которые тянут, — квадратом (как у проекта), поверх перьев: ниже, после них.
       if (pt.node) continue;
@@ -4147,7 +4168,8 @@ export class Renderer {
     if (o.lineStops.length > 1) this.drawStopsRoute(game, o.lineStops, game.newLineColor(o.lineStops), false);
     for (const m of o.marks) {
       ctx.globalAlpha = 0.8;
-      this.drawFootprint(m.fp, m.ok ? '#cfe3ff' : 'rgba(232, 72, 63, 0.45)', m.ok ? '#2f80ed' : '#e8483f', 2 / this.camera.zoom);
+      if (m.warn) this.drawFootprint(m.fp, 'rgba(229, 163, 59, 0.4)', '#e5a33b', 2 / this.camera.zoom);
+      else this.drawFootprint(m.fp, m.ok ? '#cfe3ff' : 'rgba(232, 72, 63, 0.45)', m.ok ? '#2f80ed' : '#e8483f', 2 / this.camera.zoom);
       ctx.globalAlpha = 1;
     }
     if (o.selection?.type === 'building') {
