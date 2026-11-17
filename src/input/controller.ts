@@ -12,7 +12,7 @@ import type { NetEdit, RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
 import { deleteTemplate, getTemplate, saveTemplate } from '../game/templates';
 import { anchorAt, corridorUnder, edgeAt, handlePoints, laneEndAt, lanePortsNear, type LaneTip, laneTipAt, laneTipPos, laneUnder, newLaneFlow } from '../lanes/edit';
-import type { LaneNet } from '../lanes/model';
+import type { LaneNet, LaneSlot } from '../lanes/model';
 import { pointOff } from '../lanes/geometry';
 import { taperLen } from '../lanes/model';
 import { type Fragment, fragmentCurves, frameOf, snapPaste } from '../lanes/fragment';
@@ -3934,6 +3934,25 @@ export class Controller {
           }
           break;
         }
+        // 🅿️: тянут вдоль полосы — участок станет полосой движения (поворота) или снова стоянкой.
+        if (rt.parkSpan) {
+          const res = this.afford(this.memo('parkSpan', () => rt.parkSpanPlan()));
+          if (res && res.length >= 5) {
+            const what = res.to === 'drive' ? '🅿️ → 🚗' : '🚗 → 🅿️';
+            this.showParkPlan(o, res.plan, `${what} · ${res.plan.cost < 0 ? `+${money(-res.plan.cost)}` : money(res.plan.cost)}`);
+            // Подсвечена новая полоса движения (поворота), а не оставшаяся стоянка.
+            const after = res.plan.net;
+            if (res.to === 'drive' && after && o.curbLanes?.length) {
+              const color = o.curbLanes[0].color;
+              o.curbLanes = res.plan.changed.flatMap((id) => {
+                const was = net.corridors.get(id)?.lanes ?? [];
+                const fresh = (l: LaneSlot) => !l.park && !was.some((w) => !w.park && Math.abs(w.offset - l.offset) < 0.01 && Math.abs(w.from - l.from) < 0.01);
+                return (after.corridors.get(id)?.lanes ?? []).flatMap((l, lane) => (fresh(l) ? [{ corridor: id, lane, color }] : []));
+              });
+            }
+          } else o.label = { text: '⟷ тяните вдоль полосы — участок · клик — вся полоса', ok: true };
+          break;
+        }
         if (!rt.laneDrag) {
           // У конца дороги — её полосы точками, как концы путей: с любой начинается своя однополосная.
           const ports = lanePortsNear(net, p, 30);
@@ -3961,7 +3980,9 @@ export class Controller {
           if (rt.park) {
             const t = this.afford(this.memo('parkToggle', () => rt.parkTogglePlan(p)));
             if (t) {
-              this.showParkPlan(o, t.plan, `${t.to === 'park' ? '🅿️ под парковку' : '↺ вернуть движению'} · ${money(t.plan.cost)}`);
+              // Полосу, участок которой можно сделать другой (стоянка ↔ полоса поворота), ещё и тянут.
+              const span = rt.parkSpanAt(p) ? ' · ⟷ участок' : '';
+              this.showParkPlan(o, t.plan, `${t.to === 'park' ? '🅿️ под парковку' : '↺ вернуть движению'} · ${money(t.plan.cost)}${span}`);
               if (!t.plan.ok) o.curbLanes = [{ corridor: t.corridor, lane: t.lane, color: 'red' }];
               break;
             }

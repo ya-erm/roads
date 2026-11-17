@@ -1,5 +1,5 @@
 import type { Cubic } from '../core/bezier';
-import { add, angleOf, dist, dot, len, norm, scale, sub, Vec } from '../core/vec';
+import { add, angleOf, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { DrawMode } from '../game/build';
 import type { Game } from '../game/game';
 import type { LaneStepOut, NetEdit, RoadPlan } from '../game/roadbuild';
@@ -28,6 +28,7 @@ import {
   buildRoad,
   RoadOptions,
   toggleParkLane,
+  retypeLaneSpan,
   EditError,
 } from '../lanes/edit';
 import { levelDeck, nodeDeck, setDecks, zAlong } from '../lanes/deck';
@@ -38,7 +39,7 @@ import { GRADE } from '../config';
 import { aimAlong, roadDirs } from './aim';
 import { autoLevels, designProfile, PROFILE_STEP, steepText } from '../game/grade';
 import { laneEdit, laneStepEdit, moveNodeEdit, onOldAxis, reshapeEdit, splitTip } from '../game/roadbuild';
-import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, profileOf } from '../lanes/model';
+import { Corridor, Flow, LaneNet, LaneNode, LaneSlot, laneWidth, LAT_EPS, profileOf } from '../lanes/model';
 import { isOneWay, LANE_W, LEVEL_RUN, ROAD_CLASSES, ROAD_MARGIN, type RoadClass, type RoadSpec } from '../world/roadTypes';
 
 export { profileOf, type RoadProfile } from '../lanes/model';
@@ -102,6 +103,11 @@ export class RoadTools {
   reverse = false;
   /** «Полоса» с 🅿️: ведут полосу стоянки вдоль края; клик по крайней полосе — под парковку или вернуть движению. */
   park = false;
+  /**
+   * 🅿️: тянут вдоль полосы стоянки (или крайней полосы движения) от s0 до s1 по оси — участок станет другой полосой
+   * (retypeLaneSpan: стоянка у перекрёстка → полоса поворота и обратно).
+   */
+  parkSpan: { corridor: number; lane: number; s0: number; s1: number } | null = null;
   /** Узел, который тянут. */
   dragNode: number | null = null;
   /** Примыкание (стык въезда или съезда посреди дороги), которое тянут вдоль дороги. */
@@ -445,7 +451,14 @@ export class RoadTools {
     if (this.laneTip && !this.validTip(this.laneTip)) this.laneTip = null;
     this.lane = null;
     this.laneDrag = null;
+    this.parkSpan = null;
     if (this.laneTip) return;
+    // 🅿️ на полосе стоянки или крайней справа полосе движения — тянут участок (отпустили на месте — клик, вся полоса).
+    const span = this.park ? this.parkSpanAt(p) : null;
+    if (span) {
+      this.parkSpan = span;
+      return;
+    }
     const tip = laneTipAt(this.net, p, r);
     const d = startLane(this.net, p, r);
     if (d.grab && tip.kind !== 'port') this.lane = d;
@@ -457,6 +470,12 @@ export class RoadTools {
    * вернулись к линии полосы — она тянется дальше. Из поля — до края дороги (въезд), потом вдоль неё.
    */
   laneMove(p: Vec, r: number): void {
+    const span = this.parkSpan;
+    if (span) {
+      const c = this.net.corridors.get(span.corridor);
+      if (c) span.s1 = c.lut.closest(p).s;
+      return;
+    }
     if (this.lane) this.lane = dragLane(this.net, this.lane, p, r);
     const d = this.laneDrag;
     if (!d) return;
@@ -533,12 +552,45 @@ export class RoadTools {
     const id = hit.corridor.id;
     const lane = hit.lane;
     const to: 'park' | 'drive' = hit.corridor.lanes[lane]?.park ? 'drive' : 'park';
+    // Полоса движения на участке стоянки (полоса поворота) — снова стоянкой и вместе с соседней стоянкой одной полосой.
+    const piece = to === 'park' && !!this.parkSpanAt(p);
     const edit: NetEdit = (n) => {
       const c = n.corridors.get(id);
       if (!c) throw new EditError('Наведите на полосу');
-      toggleParkLane(n, c, lane);
+      if (piece) retypeLaneSpan(n, c, lane, -Infinity, Infinity);
+      else toggleParkLane(n, c, lane);
     };
     return { corridor: id, lane, to, plan: this.lanePlanOf(edit), edit };
+  }
+
+  /**
+   * 🅿️: полоса под курсором, участок которой можно сделать другой полосой: стоянка или крайняя справа по ходу полоса
+   * движения (курсор — на ней самой, а не у края дороги, где тянут новую стоянку). Нет — null.
+   */
+  parkSpanAt(p: Vec): { corridor: number; lane: number; s0: number; s1: number } | null {
+    const hit = laneUnder(this.net, p);
+    if (!hit) return null;
+    const c = hit.corridor;
+    const l = c.lanes[hit.lane];
+    const at = c.lut.closest(p);
+    const d = dot(sub(p, at.point), rightNormal(c.lut.tangentAt(at.s)));
+    if (Math.abs(d - l.offset) > laneWidth(l) / 2) return null;
+    const outer = !c.lanes.some((o) => o !== l && o.offset * l.offset > 0 && Math.abs(o.offset) > Math.abs(l.offset) && !o.park && o.from < l.to && l.from < o.to);
+    if (!l.park && !(outer && l.offset * l.flow > 0 && c.lanes.some((o) => o.park && o.offset * l.offset > 0))) return null;
+    return { corridor: c.id, lane: hit.lane, s0: hit.s, s1: hit.s };
+  }
+
+  /** 🅿️: что станет с протянутым участком (parkSpan) — план (после правок проекта), правка и чем станет; не тянут — null. */
+  parkSpanPlan(): { plan: RoadPlan; edit: NetEdit; to: 'park' | 'drive'; length: number } | null {
+    const span = this.parkSpan;
+    const c = span && this.net.corridors.get(span.corridor);
+    const l = c && c.lanes[span.lane];
+    if (!span || !l) return null;
+    const { corridor, lane, s0, s1 } = span;
+    const edit: NetEdit = (n) => {
+      retypeLaneSpan(n, n.corridor(corridor), lane, s0, s1);
+    };
+    return { plan: this.lanePlanOf(edit), edit, to: l.park ? 'drive' : 'park', length: Math.abs(s1 - s0) };
   }
 
   /** Ведут новую полосу от края дороги: её направление — по ходу движения с этой стороны, Alt разворачивает. */
@@ -594,6 +646,18 @@ export class RoadTools {
       if (problem) return problem;
       this.laneTip = res.step.tip;
       return null;
+    }
+    if (this.parkSpan) {
+      if (moved) this.laneMove(p, r);
+      const span = this.parkSpan;
+      const res = moved && Math.abs(span.s1 - span.s0) >= 5 ? this.parkSpanPlan() : null;
+      this.parkSpan = null;
+      if (res) return res.plan.ok ? this.commitLane(res.plan, res.edit) : (res.plan.reason ?? 'Нельзя');
+      // Клик (или едва сдвинули) — вся полоса: под парковку или вернуть движению.
+      const toggle = this.parkTogglePlan(p);
+      if (!toggle) return null;
+      if (!toggle.plan.ok) return toggle.plan.reason ?? 'Нельзя';
+      return this.commitLane(toggle.plan, toggle.edit);
     }
     if (!this.laneDrag) return null;
     if (!moved) {

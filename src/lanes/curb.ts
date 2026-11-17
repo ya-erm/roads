@@ -1,7 +1,7 @@
 import { add, rightNormal, scale, type Vec } from '../core/vec';
 import { isDirt, isTrunk, PARK_W, ROAD_MARGIN } from '../world/roadTypes';
 import { laneShare } from './geometry';
-import { besideOffset, type Corridor, type LaneNet, type LaneSlot } from './model';
+import { besideOffset, type Corridor, type LaneNet, type LaneSlot, laneWidth, taperLen } from './model';
 
 /**
  * Полосы стоянки вдоль бордюра (LaneSlot.park, docs/PARKING.md, этап 2): размеры мест и где они на полосе. Одна полоса
@@ -128,11 +128,14 @@ export function curbStalls(net: LaneNet, c: Corridor, laneIdx: number, cut: [num
   const lat = P.offset + side * (PARK_W / 2 + ROAD_MARGIN - CURB.stallDepth / 2);
   const out: CurbStall[] = [];
   const L = CURB.stallLen;
+  // Где на полосе стоянки другая полоса (полоса поворота на участке стоянки — retypeLaneSpan) с её отгонами — мест нет.
+  const T = taperLen(c.cls);
+  const taken = c.lanes.filter((o) => o !== P && Math.abs(o.offset - P.offset) < (laneWidth(o) + PARK_W) / 2 - 0.01).map((o): [number, number] => [o.from - T, o.to + T]);
   for (let idx = Math.max(0, Math.ceil((lo - start) / L - 1e-6)); start + (idx + 1) * L <= hi + 1e-6; idx++) {
     const a = start + idx * L;
     const b = a + L;
     if (laneShare(c, P, a) < 0.98 || laneShare(c, P, b) < 0.98) continue;
-    if (skip.some(([u, v]) => u < b && v > a)) continue;
+    if (skip.some(([u, v]) => u < b && v > a) || taken.some(([u, v]) => u < b - 1e-6 && v > a + 1e-6)) continue;
     const s = (a + b) / 2;
     const { point, tangent } = c.lut.frameAt(s);
     const dir = scale(tangent, P.flow);

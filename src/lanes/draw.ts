@@ -826,7 +826,13 @@ export class LaneRenderer {
       }
       if (cur && cur.pts.length > 1) marks.push(cur);
     };
-    const order = c.lanes.map((_, i) => i).sort((x, y) => c.lanes[x].offset - c.lanes[y].offset);
+    // Полосы стоянки — без линий: между ней и полосой движения линии нет, места размечены буквой «Т» от края движения до
+    // бордюра (их рисует игра: места знают заезды и остановки, game/curbParking.ts). Полоса движения на участке стоянки
+    // (полоса поворота — retypeLaneSpan) — соседка полосы изнутри, через стоянку на том же месте.
+    const order = c.lanes
+      .map((_, i) => i)
+      .filter((i) => !c.lanes[i].park)
+      .sort((x, y) => c.lanes[x].offset - c.lanes[y].offset);
     for (let k = 0; k + 1 < order.length; k++) {
       const i = order[k];
       const j = order[k + 1];
@@ -835,9 +841,6 @@ export class LaneRenderer {
       const both = (s: number) => laneShare(c, A, s) > 0.02 && laneShare(c, B, s) > 0.02;
       const gap = B.offset - A.offset;
       const mid = (A.offset + B.offset) / 2;
-      // Полоса стоянки у полосы движения: линии между ними нет — места размечены буквой «Т» от края движения до бордюра
-      // (их рисует игра: места знают заезды и остановки, game/curbParking.ts).
-      if (A.park || B.park) continue;
       if (Math.abs(gap - LANE_W) < 0.3) {
         const same = A.flow === B.flow;
         // Сплошная сама — у развилки полос в разные полотна, после вливания и у самого перекрёстка (autoSolids).

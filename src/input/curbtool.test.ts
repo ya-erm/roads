@@ -93,4 +93,50 @@ describe('«Полоса» с 🅿️', () => {
     game.undo();
     expect(along(game, av.y)[0].lanes.some((l) => l.park)).toBe(false);
   });
+
+  it('тянут вдоль стоянки от конца улицы — там полоса движения до узла, места до границы; Ctrl+Z и обратная протяжка', () => {
+    const game = freshGame(WORLD);
+    const av = fieldRoad(game, { cls: 'avenue', lanes: twoWay(2, 2) });
+    const tools = new RoadTools(() => game);
+    tools.park = true;
+    expect(click(tools, { x: av.x + 250, y: av.y + 10.5 })).toBeNull();
+    const c0 = along(game, av.y)[0];
+    const L = c0.length;
+    const lanes0 = JSON.stringify(c0.lanes);
+    const stalls0 = game.curb.stalls().filter((s) => s.corridor === c0.id);
+    // От конца улицы по стоянке (y + 8,75) назад на 80.
+    const pts = [
+      { x: av.x + 498, y: av.y + 8.75 },
+      { x: av.x + 460, y: av.y + 8.75 },
+      { x: av.x + 420, y: av.y + 8.75 },
+    ];
+    tools.laneDown(pts[0], 14);
+    for (const p of pts.slice(1)) tools.laneMove(p, 14);
+    const res = tools.parkSpanPlan()!;
+    expect(res.to).toBe('drive');
+    expect(res.plan.ok).toBe(true);
+    expect(res.plan.cost).toBeGreaterThan(0);
+    game.checkpoint('полоса');
+    expect(tools.laneUp(pts[2], 14, STREET, true)).toBeNull();
+    const c = along(game, av.y)[0];
+    const D = c.lanes.find((l) => !l.park && Math.abs(l.offset - 10.5) < 0.01)!;
+    expect(D.to).toBeCloseTo(L, 6);
+    expect(c.lanes.find((l) => l.park)!.to).toBeCloseTo(D.from, 6);
+    // Места — до границы участка (420 от начала), на нём — нет.
+    const stalls = game.curb.stalls().filter((s) => s.corridor === c.id);
+    expect(Math.max(...stalls.map((s) => s.s + 4.75))).toBeLessThanOrEqual(420 + 1e-6);
+    expect(stalls.length).toBeLessThan(stalls0.length);
+    // Ctrl+Z — как было.
+    game.undo();
+    expect(JSON.stringify(along(game, av.y)[0].lanes)).toBe(lanes0);
+    // Снова — и обратной протяжкой вдоль полосы поворота: как было.
+    expect(drag(tools, pts)).toBeNull();
+    const k = along(game, av.y)[0];
+    const turn = k.lanes.find((l) => !l.park && Math.abs(l.offset - 10.5) < 0.01)!;
+    expect(drag(tools, [{ x: av.x + 498, y: av.y + 10.5 }, { x: av.x + turn.from - 2, y: av.y + 10.5 }])).toBeNull();
+    const back = along(game, av.y)[0].lanes;
+    expect(back.filter((l) => l.park)).toHaveLength(1);
+    expect(back.find((l) => l.park)).toMatchObject(JSON.parse(lanes0).find((l: { park?: boolean }) => l.park));
+    expect(game.curb.stalls().filter((s) => s.corridor === k.id)).toHaveLength(stalls0.length);
+  });
 });

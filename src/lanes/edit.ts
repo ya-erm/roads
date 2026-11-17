@@ -997,6 +997,69 @@ function joinEnds(net: LaneNet, c: Corridor, i: number): void {
   if (next !== l) net.setLanes(c, c.lanes.map((x, j) => (j === i ? next : x)));
 }
 
+/**
+ * Участок [a, b] крайней полосы i полотна c (по оси) — другой полосой (docs/PARKING.md): стоянка → полоса движения
+ * шириной LANE_W вплотную к той же соседней (полоса поворота у перекрёстка), полоса движения → стоянка (вернуть участок).
+ * Протянули почти до конца полосы (ближе отгона) — до самого конца: от перекрёстка — до стоп-линии.
+ * Полоса движения на месте стоянки начинается отгоном внутри участка: стоянка там ещё во всю ширину (бордюр плавно
+ * расходится, без «талии»), но мест на отгоне нет (curbStalls). Соседние куски того же вида впритык — одна полоса:
+ * вернули весь участок — как было. Ответ — чем стал участок; нельзя — EditError.
+ */
+export function retypeLaneSpan(net: LaneNet, c: Corridor, i: number, a: number, b: number): 'park' | 'drive' {
+  const l = c.lanes[i];
+  if (!l) throw new EditError('Наведите на полосу');
+  if (!curbAllowed(c)) throw new EditError(c.cls === 'dirt' ? 'На грунтовке стоянки нет' : 'На магистрали стоянки нет');
+  const T = taperLen(c.cls);
+  const lo = Math.max(0, l.from);
+  const hi = Math.min(c.length, l.to);
+  let u = Math.max(lo, Math.min(a, b));
+  let v = Math.min(hi, Math.max(a, b));
+  // У перекрёстка (стоянка кончается чуть раньше узла или до него) — до самого узла: полоса поворота — до стоп-линии.
+  const toNode = (end: End, gap: number) => net.node(end === 'a' ? c.a : c.b).kind === 'junction' && gap < T + PARK_REACH;
+  if (u - lo < T) u = toNode('a', lo) ? 0 : lo;
+  if (hi - v < T) v = toNode('b', c.length - hi) ? c.length : hi;
+  const out = Math.sign(l.offset) || 1;
+  const mid = (u + v) / 2;
+  const to = l.park ? 'drive' : 'park';
+  let lane: LaneSlot;
+  if (l.park) {
+    const inner = insideLane(c, l.offset, mid, PARK_W);
+    if (!inner || inner.park) throw new EditError('Стоянку ведут вдоль полосы движения');
+    // Отгон новой полосы — внутри участка: у его границ посреди полосы она во всю ширину на отгон дальше.
+    lane = { offset: besideOffset(inner, out, LANE_W), flow: l.flow, from: u > lo ? u + T : u, to: v < hi ? v - T : v };
+  } else {
+    if (!isEdgeLane(c, l) || Math.abs(l.offset) < 0.01) throw new EditError('Под стоянку — только крайняя полоса');
+    const inner = insideLane(c, l.offset, mid);
+    if (!inner || inner.park || inner.flow !== l.flow || l.offset * l.flow < 0) throw new EditError('Под стоянку — только крайняя справа по ходу');
+    if (driveLanes(c).filter((o) => o.flow === l.flow && o.from <= mid && o.to >= mid).length < 2) throw new EditError('Последняя полоса в эту сторону — на 1+1 нельзя');
+    lane = { offset: besideOffset(inner, out, PARK_W), flow: l.flow, from: u, to: v, park: true };
+  }
+  if (lane.to - lane.from < 5) throw new EditError('Протяните вдоль полосы подальше');
+  // Остатки прежней полосы — до границ участка (у стоянки — и под отгоном новой полосы).
+  const rest = [
+    { ...l, to: l.park && u > lo ? lane.from : u },
+    { ...l, from: l.park && v < hi ? lane.to : v },
+  ].filter((x) => Math.min(c.length, x.to) - Math.max(0, x.from) >= 5);
+  const lanes = [...c.lanes.filter((_, k) => k !== i), ...rest];
+  // Тот же вид на том же месте впритык — одна полоса.
+  let merged = lane;
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (let k = lanes.length - 1; k >= 0; k--) {
+      const o = lanes[k];
+      if (Math.abs(o.offset - merged.offset) > 0.01 || o.flow !== merged.flow || !o.park !== !merged.park) continue;
+      if (Math.abs(Math.min(c.length, o.to) - merged.from) > 0.5 && Math.abs(Math.max(0, o.from) - merged.to) > 0.5) continue;
+      merged = { ...merged, from: Math.min(merged.from, o.from), to: Math.max(merged.to, o.to) };
+      lanes.splice(k, 1);
+      grew = true;
+    }
+  }
+  net.setLanes(c, [...lanes, merged]);
+  joinTaperedLanes(net, [c.a, c.b]);
+  taperDeadLanes(net, [c.a, c.b]);
+  return to;
+}
+
 /** Крайняя ли полоса полотна (снаружи на её отрезке других нет). */
 function isEdgeLane(c: Corridor, l: LaneSlot): boolean {
   return c.lanes.every((o) => o === l || o.to <= l.from || o.from >= l.to || (l.offset > 0 ? o.offset < l.offset : o.offset > l.offset));
