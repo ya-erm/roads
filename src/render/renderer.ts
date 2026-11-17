@@ -230,6 +230,11 @@ export interface ToolOverlay {
     nodes: { pos: Vec; tip: boolean; hot: boolean }[];
     /** Знаки скорости перед поворотами (как у построенной дороги): на оси, по ходу, до кромки справа, км/ч. */
     signs?: { pos: Vec; dir: Vec; side: number; kmh: number }[];
+    /**
+     * Площадки перекрёстков, которые проект меняет (скругление угла, перенос узла): заливкой, бордюры углов —
+     * пунктиром, обрезы подъездов (где встанут стоп-линии) — сплошной чертой; что не выходит — красным.
+     */
+    plates?: { poly: Vec[]; curbs: Vec[][]; cuts: [Vec, Vec][]; ok: boolean }[];
   } | null;
   /** Полотна построенной сети, что в проекте уходят или меняют форму: их знаки на поворотах — бледно (старые). */
   staleSigns?: Set<number> | null;
@@ -5066,6 +5071,27 @@ export class Renderer {
     const z = this.camera.zoom;
     ctx.lineCap = 'butt';
     ctx.lineJoin = 'round';
+    // Площадки перекрёстков — под участками: асфальт со скруглёнными углами, бордюры углов пунктиром, как кромки
+    // участков, обрезы подъездов (стоп-линии) — сплошной чертой.
+    for (const pl of p.plates ?? []) {
+      ctx.fillStyle = pl.ok ? 'rgba(47,128,237,0.18)' : 'rgba(232,72,63,0.35)';
+      this.polyline(pl.poly);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = pl.ok ? '#2f80ed' : '#e8483f';
+      ctx.lineWidth = (pl.ok ? 1.6 : 2.4) / z;
+      ctx.setLineDash([7 / z, 5 / z]);
+      for (const curb of pl.curbs) {
+        this.polyline(curb);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.lineWidth = 2.4 / z;
+      for (const [a, b] of pl.cuts) {
+        this.polyline([a, b]);
+        ctx.stroke();
+      }
+    }
     for (const s of p.segs) {
       const lut = new CurveLUT(s.curve);
       const blue = s.draft ? 'rgba(47,128,237,0.6)' : '#2f80ed';

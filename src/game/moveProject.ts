@@ -1,6 +1,65 @@
+import type { Vec } from '../core/vec';
+import { junctionCuts, plateOutline } from '../lanes/geometry';
 import type { LaneNet } from '../lanes/model';
 import type { Game } from './game';
 import type { NetEdit, RoadPlan } from './roadbuild';
+
+/**
+ * Площадка перекрёстка в проекте: контур асфальта (со скруглениями углов), бордюры углов между подъездами и обрезы
+ * подъездов — где у них встанут стоп-линии.
+ */
+export interface ProjectPlate {
+  poly: Vec[];
+  curbs: Vec[][];
+  cuts: [Vec, Vec][];
+}
+
+const plateMemo = new WeakMap<LaneNet, { key: string; before: LaneNet; plates: ProjectPlate[] }>();
+
+/**
+ * Площадки перекрёстков сети с проектом net, которые проект меняет против построенной before: скруглён угол, сдвинут
+ * узел, у подъезда новая форма или полотно (changed), перекрёсток новый. Проект перемещения рисует их поверх
+ * построенного, как и свои полотна: видно, какой станет площадка, — и пока тянут угол, и после. Кэш — по обеим сетям и их версиям.
+ */
+export function projectPlates(before: LaneNet, net: LaneNet, changed: readonly number[]): ProjectPlate[] {
+  const hit = plateMemo.get(net);
+  const key = `${net.version}|${before.version}|${changed.join()}`;
+  if (hit && hit.key === key && hit.before === before) return hit.plates;
+  const touched = new Set<number>();
+  for (const id of changed) {
+    const c = net.corridors.get(id);
+    if (c) touched.add(c.a).add(c.b);
+  }
+  for (const n of net.nodes.values()) {
+    if (n.kind !== 'junction' || touched.has(n.id)) continue;
+    const old = before.nodes.get(n.id);
+    // Настройки углов при правке заменяются целиком (setCornerRadius): тот же объект — угол не трогали.
+    if (!old || old.kind !== n.kind || old.corners !== n.corners || old.pos.x !== n.pos.x || old.pos.y !== n.pos.y || old.corridors.length !== n.corridors.length) touched.add(n.id);
+  }
+  const plates: ProjectPlate[] = [];
+  for (const id of touched) {
+    const n = net.nodes.get(id);
+    if (n?.kind !== 'junction') continue;
+    const ends = net.ends(n);
+    if (ends.length < 2) continue;
+    const plate = plateOutline(
+      net,
+      n,
+      junctionCuts(
+        net,
+        ends.map((e) => e.corridor),
+        [n],
+      ),
+    );
+    if (!plate || plate.poly.length < 3) continue;
+    const curbs = plate.curbs.map((c) => c.pts);
+    // Бордюр i — от правого края подъезда i до левого края следующего: обрез подъезда i — от конца бордюра i − 1.
+    const cuts = curbs.map((pts, i): [Vec, Vec] => [curbs[(i + curbs.length - 1) % curbs.length].at(-1)!, pts[0]]);
+    plates.push({ poly: plate.poly, curbs, cuts });
+  }
+  plateMemo.set(net, { key, before, plates });
+  return plates;
+}
 
 /** Ид объекта для ключа кэша: после стройки сеть — новый объект. */
 const ids = new WeakMap<object, number>();

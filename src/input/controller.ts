@@ -48,7 +48,7 @@ import {
 import { aimAlong, railDirs } from './aim';
 import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, projectMoneyWarning, rebuildPrice, riseLabel, shiftLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
-import type { MoveProject } from '../game/moveProject';
+import { projectPlates, type MoveProject } from '../game/moveProject';
 import { onOldAxis, shortOfMoney } from '../game/roadbuild';
 import { jointOf, mergeEdit, mergePreview, mergeProblem, splitEdit, splitProblem, toggleJointEdit } from '../lanes/nodeEdit';
 import type { CornerHandle } from '../lanes/corners';
@@ -3292,8 +3292,9 @@ export class Controller {
 
   /**
    * Проект перемещения на карте: дороги в новом положении — проектом поверх того, что построено (заливка и пунктир
-   * по кромкам; не проходит проверку — красным), знаки скорости на их поворотах, дома под снос. text — подпись
-   * (что тянут и цена); null — подпись задаёт то, что под курсором.
+   * по кромкам; не проходит проверку — красным), площадки перекрёстков, что меняются (скругление угла — прямо во
+   * время протяжки), знаки скорости на поворотах, дома под снос. text — подпись (что тянут и цена); null — подпись
+   * задаёт то, что под курсором.
    */
   private showMoveProject(o: ToolOverlay, plan: RoadPlan, text: string | null): void {
     const g = this.game();
@@ -3310,6 +3311,7 @@ export class Controller {
         }),
         nodes: [],
         signs,
+        plates: projectPlates(g.roads.net, net, ids).map((p) => ({ ...p, ok: plan.ok })),
       };
     }
     for (const id of plan.demolish) {
@@ -3588,6 +3590,8 @@ export class Controller {
       JSON.stringify(rt.control),
       rt.rise,
       `${+rt.auto}${+rt.reverse}${+rt.park}`,
+      // Какой угол перекрёстка тянут: другой угол под тем же курсором — другой план (и в проекте перемещения).
+      rt.corner ? `${rt.corner.node}:${rt.corner.corner.key}` : '',
       this.dragLimit,
       this.camera.zoom,
       this.inputs,
@@ -4046,7 +4050,7 @@ export class Controller {
           const smooth = canMerge && node.kind === 'junction' ? mergePreview(net, node.id) : null;
           if (smooth) {
             const c = net.corridor(node.corridors[0]);
-            o.project = { segs: [...(o.project?.segs ?? []), { curve: smooth, half: corridorHalf(c), ok: true, fill: true }], nodes: o.project?.nodes ?? [], signs: o.project?.signs };
+            o.project = { ...o.project, segs: [...(o.project?.segs ?? []), { curve: smooth, half: corridorHalf(c), ok: true, fill: true }], nodes: o.project?.nodes ?? [] };
           }
           const merge = canMerge ? ` · Delete или ПКМ — убрать узел${smooth ? ' (излом сгладится)' : ''}` : '';
           // Узел двух дорог: двойной клик — излом ↔ гладкий.
@@ -4070,12 +4074,12 @@ export class Controller {
           // У дороги под курсором видны перья — они остаются, пока курсор идёт к ним.
           rt.editCorridor = c.id;
           // В проекте дорога под курсором — в новом положении: подсветка — её проектом.
-          if (project) o.project = { segs: [...(o.project?.segs ?? []), { curve: c.curve, half: corridorHalf(c), ok: true, fill: true }], nodes: o.project?.nodes ?? [], signs: o.project?.signs };
+          if (project) o.project = { ...o.project, segs: [...(o.project?.segs ?? []), { curve: c.curve, half: corridorHalf(c), ok: true, fill: true }], nodes: o.project?.nodes ?? [] };
           else o.corridor = { id: c.id, color: 'blue' };
           // Клик (без протяжки) — узел в этой точке дороги: квадратик, как у узла проекта.
           const at = c.lut.closest(p);
           const split = splitProblem(net, c, at.s) === null;
-          if (split) o.project = { segs: o.project?.segs ?? [], nodes: [...(o.project?.nodes ?? []), { pos: at.point, tip: false, hot: true }], signs: o.project?.signs };
+          if (split) o.project = { ...o.project, segs: o.project?.segs ?? [], nodes: [...(o.project?.nodes ?? []), { pos: at.point, tip: false, hot: true }] };
           o.label = { text: `Тяните — изогнуть дорогу${split ? ' · клик — узел на дороге' : ''}`, ok: true };
         }
         o.handles = [...rt.handleMarks(null), ...corners];

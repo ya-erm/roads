@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { add, dot, Vec } from '../core/vec';
+import { add, dot, scale, Vec } from '../core/vec';
 import { Game } from '../game/game';
 import { freshGame, road, roadPlan, STREET } from '../game/testkit';
+import { cornerHandles, type CornerHandle } from '../lanes/corners';
+import { filletDepth } from '../lanes/geometry';
+import { junctionPlate } from '../world/lotClear';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import { LOT, lotGateDriveway, lotStallCount, lotWidth } from '../world/parkingLots';
 import { lotHandles } from './lotTool';
@@ -207,6 +210,80 @@ describe('Превью инструмента у курсора — из кэш�
     move(add(o, { x: 220, y: 100 }));
     c.overlay();
     expect(plans).toBe(2);
+  });
+});
+
+/** Площадь многоугольника, м². */
+const area = (poly: Vec[]) => Math.abs(poly.reduce((s, p, i) => s + p.x * poly[(i + 1) % poly.length].y - poly[(i + 1) % poly.length].x * p.y, 0)) / 2;
+
+/** Косой перекрёсток двух улиц (острый угол 0,6 рад): игра, id узла и ручка его острого угла. */
+function skewGame(): { game: Game; node: number; h: CornerHandle } {
+  const game = new Game({ seed: 11, size: 'small', towns: 0, industries: 'few', money: 5_000_000, water: 'dry' });
+  const d = { x: Math.cos(-0.6), y: Math.sin(-0.6) };
+  for (let y = 500; y < game.terrain.height - 500; y += 150) {
+    for (let x = 500; x < game.terrain.width - 500; x += 200) {
+      if (!road(game, { free: { x: x - 300, y } }, { free: { x: x + 300, y } })) continue;
+      if (!road(game, { free: add({ x, y }, scale(d, -300)) }, { free: add({ x, y }, scale(d, 300)) })) continue;
+      const n = game.roads.net.nodesNear({ x, y }, 3).find((m) => m.kind === 'junction');
+      const h = n && cornerHandles(game.roads.net, n).find((k) => Math.abs(k.corner.theta - 0.6) < 0.01);
+      if (n && h) return { game, node: n.id, h };
+    }
+  }
+  throw new Error('Нет места');
+}
+
+describe('«Двигать» с «Проектом»: скругление угла перекрёстка — предпросмотром', () => {
+  /** Куда дотянуть ручку h, чтобы вышел радиус r. */
+  const pull = (h: CornerHandle, r: number) => add(h.corner.apex, scale(h.corner.out, filletDepth(r, h.corner.theta)));
+  /** Площадка узла в превью проекта (null — её там нет). */
+  const plate = (o: ReturnType<Controller['overlay']>) => o.project?.plates?.[0]?.poly ?? null;
+
+  it('пока тянут угол — площадка проекта со скруглением, растёт вслед за курсором; отпустили — в проекте, Esc — отмена', () => {
+    const { game, node, h } = skewGame();
+    const { c, canvas, mouse, move, key } = play(game);
+    key('KeyP');
+    expect(c.moveProjectMode).toBe(true);
+    const built = junctionPlate(game.roads.net, game.roads.net.node(node))!;
+    // Курсор у ручки — проекта ещё нет: площадки в превью нет.
+    move(h.pos);
+    expect(plate(c.overlay())).toBeNull();
+    canvas.fire('mousedown', mouse(h.pos));
+    move(pull(h, 15));
+    const o15 = c.overlay();
+    expect(o15.label?.text).toMatch(/радиус 15 м/);
+    const p15 = plate(o15)!;
+    // Площадка проекта — не та, что построена: угол скруглён, асфальта больше; обрезы у всех четырёх подъездов.
+    expect(p15).not.toBeNull();
+    expect(area(p15)).toBeGreaterThan(area(built) + 20);
+    expect(o15.project!.plates![0].cuts).toHaveLength(4);
+    // Кэш превью не залипает: курсор дальше — радиус больше, площадка шире; тот же курсор — та же площадка из кэша.
+    move(pull(h, 30));
+    const o30 = c.overlay();
+    expect(o30.label?.text).toMatch(/радиус 30 м/);
+    const p30 = plate(o30)!;
+    expect(area(p30)).toBeGreaterThan(area(p15) + 20);
+    expect(plate(c.overlay())).toBe(p30);
+    move(pull(h, 15));
+    expect(area(plate(c.overlay())!)).toBeCloseTo(area(p15), 6);
+    move(pull(h, 30));
+    // Отпустили — правка проекта: построенная дорога как была, площадка со скруглением видна и без протяжки.
+    win.fire('mouseup', mouse(pull(h, 30)));
+    expect(game.roads.net.node(node).corners).toBeUndefined();
+    expect(c.moveProject.net()!.node(node).corners).toEqual({ [h.corner.key]: 30 });
+    move(add(h.pos, { x: 200, y: 200 }));
+    expect(area(plate(c.overlay())!)).toBeCloseTo(area(p30), 6);
+    // Снова тянут тот же угол (от сети с проектом) — и Esc: превью — как в проекте, правка не добавилась.
+    const net = c.moveProject.net()!;
+    const again = cornerHandles(net, net.node(node)).find((k) => k.corner.key === h.corner.key)!;
+    move(again.pos);
+    canvas.fire('mousedown', mouse(again.pos));
+    move(pull(h, 36));
+    expect(area(plate(c.overlay())!)).toBeGreaterThan(area(p30) + 20);
+    key('Escape');
+    expect(area(plate(c.overlay())!)).toBeCloseTo(area(p30), 6);
+    win.fire('mouseup', mouse(pull(h, 36)));
+    expect(c.moveProject.edits).toHaveLength(1);
+    expect(c.moveProject.net()!.node(node).corners).toEqual({ [h.corner.key]: 30 });
   });
 });
 
