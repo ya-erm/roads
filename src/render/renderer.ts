@@ -79,7 +79,7 @@ import { storeysOf } from '../world/townForms';
 import { drawDriveMouths, drawTownWalks, type TownWalks, townWalks } from './townWalks';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
-import { drawVehicleArt, flashSpot, frontLength, sirenVisibility } from './vehicleArt';
+import { drawVehicleArt, flashSpot, type Frame, frontLength, resetFrame, setFrame, sirenVisibility, type VehicleDrawOptions } from './vehicleArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
 import { type Hiders, polygonHiders, TreeCover } from './treeCover';
 import { junctionPlate } from '../world/lotClear';
@@ -2689,32 +2689,44 @@ export class Renderer {
    * halo — белая обводка, чтобы машины линии читались поверх её маршрута; lifted — машины на мосту: подняты вместе с
    * полотном под ними (Vehicle.lift — из движения).
    */
-  private drawVehicles(list: (VehicleLook & { lift?: number })[], halo = false, lifted = false): void {
+  private drawVehicles(list: readonly (VehicleLook & { lift?: number })[], halo = false, lifted = false): void {
+    if (!list.length) return;
     const ctx = this.ctx;
     const detailed = this.camera.zoom > 0.5;
     const ring = halo ? Math.max(1.2, 1.6 / this.camera.zoom) : 0;
     // Издали мигалки бледнее и меньше, а совсем издали не горят вовсе.
     const siren = sirenVisibility(this.camera.zoom);
     const flash = siren > 0 ? this.flash : undefined;
+    // Части кузова и поворотники — setTransform поверх преобразования холста (base), без save/restore на каждую;
+    // стиль холста после всех машин — прежний.
+    const m = ctx.getTransform();
+    const base: Frame = { a: m.a, b: m.b, c: m.c, d: m.d, e: m.e, f: m.f };
+    const up: Frame = { ...base };
+    const o: VehicleDrawOptions = { detailed, halo: ring, flash, frame: base };
+    ctx.save();
     for (const v of list) {
+      // На мосту — поднята вместе с полотном: всё, что у машины, — сдвинутым на подъём холстом.
       const lift = lifted ? (v.lift ?? 0) : 0;
+      const frame = lift ? up : base;
       if (lift) {
-        ctx.save();
-        ctx.translate(0, lift);
+        up.e = base.e + base.c * lift;
+        up.f = base.f + base.d * lift;
+        resetFrame(ctx, up);
       }
+      o.frame = frame;
       // Кузов по модели (фургон, тягач с полуприцепом, автобусы), у машин из двух частей — с изгибом в шарнире.
-      drawVehicleArt(ctx, v, { detailed, halo: ring, flash });
+      drawVehicleArt(ctx, v, o);
       if (v.siren && siren > 0) this.drawSirenGlow(v, siren);
       if (v.blinker && this.blinkOn && v.width * this.camera.zoom >= BLINKER_MIN_PX) {
         // Поворотники — на первой части кузова (у тягача, у передней секции).
-        ctx.save();
-        ctx.translate(v.pos.x, v.pos.y);
-        ctx.rotate(Math.atan2(v.dir.y, v.dir.x));
+        const l = Math.hypot(v.dir.x, v.dir.y);
+        setFrame(ctx, frame, v.pos.x, v.pos.y, l > 0 ? v.dir.x / l : 1, l > 0 ? v.dir.y / l : 0);
         this.drawBlinker(frontLength(v), v.width, v.blinker);
-        ctx.restore();
+        resetFrame(ctx, frame);
       }
-      if (lift) ctx.restore();
+      if (lift) resetFrame(ctx, base);
     }
+    ctx.restore();
   }
 
   /**
@@ -3106,14 +3118,18 @@ export class Renderer {
   }
 
   private drawTrains(cars: TrainCar[], halo = false): void {
+    if (!cars.length) return;
     const ctx = this.ctx;
     const detailed = this.camera.zoom > 0.5;
+    // Вагон — setTransform поверх преобразования холста (base), без save/restore на каждый; стиль после — прежний.
+    const m = ctx.getTransform();
+    const base: Frame = { a: m.a, b: m.b, c: m.c, d: m.d, e: m.e, f: m.f };
+    ctx.save();
     for (const c of cars) {
       const L = c.length - 1.6;
       const W = 6.6;
-      ctx.save();
-      ctx.translate(c.pos.x, c.pos.y);
-      ctx.rotate(Math.atan2(c.dir.y, c.dir.x));
+      const l = Math.hypot(c.dir.x, c.dir.y);
+      setFrame(ctx, base, c.pos.x, c.pos.y, l > 0 ? c.dir.x / l : 1, l > 0 ? c.dir.y / l : 0);
       if (halo) {
         const h = Math.max(1.2, 1.6 / this.camera.zoom);
         ctx.fillStyle = '#ffffff';
@@ -3170,8 +3186,8 @@ export class Renderer {
           ctx.fillRect(L / 2 - 1.2 - w * f, -W / 2 + 1.2, w * f, W - 2.4);
         }
       }
-      ctx.restore();
     }
+    ctx.restore();
   }
 
   private drawFootprint(fp: Footprint, fill: string, stroke?: string, lw = 1): void {

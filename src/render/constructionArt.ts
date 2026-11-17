@@ -1039,7 +1039,10 @@ export function drawMachines(ctx: CanvasRenderingContext2D, at: Vec, dir: Vec, s
   if (stage !== 0 || kind === 'road') {
     const u = CREW_UNITS[stage];
     const pos = shift ? add(at, scale({ x: -dir.y, y: dir.x }, shift)) : at;
+    // Стиль холста после машины — прежний (сама она его не возвращает).
+    ctx.save();
     drawVehicleArt(ctx, { kind: 'truck', body: u.body, length: u.length, width: u.width, color: '#f2b81d', pos, dir, beacon: light }, { detailed: true, halo: 0 });
+    ctx.restore();
     return;
   }
   ctx.save();

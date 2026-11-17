@@ -22,6 +22,36 @@ export interface VehicleDrawOptions {
   halo: number;
   /** Какая половина мигалки спецмашины горит сейчас (мигалка включена — VehicleLook.siren): −1 левая, 1 правая. */
   flash?: -1 | 1;
+  /**
+   * Преобразование холста из мира (как у setTransform), поверх которого рисуется машина; холст после неё — с ним же.
+   * Нет — нынешнее преобразование холста (getTransform): дороже, на каждую машину.
+   */
+  frame?: Frame;
+}
+
+/** Преобразование холста: a, b, c, d, e, f — как у setTransform. */
+export interface Frame {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
+}
+
+const IDENTITY: Frame = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+
+/**
+ * Холст — в систему с началом (ox, oy) и курсом (cos, sin) поверх m (без save/translate/rotate/restore): нос машины в
+ * начале, кузов — по −x.
+ */
+export function setFrame(ctx: CanvasRenderingContext2D, m: Frame, ox: number, oy: number, cos: number, sin: number): void {
+  ctx.setTransform(m.a * cos + m.c * sin, m.b * cos + m.d * sin, m.c * cos - m.a * sin, m.d * cos - m.b * sin, m.a * ox + m.c * oy + m.e, m.b * ox + m.d * oy + m.f);
+}
+
+/** Холст — снова m. */
+export function resetFrame(ctx: CanvasRenderingContext2D, m: Frame): void {
+  ctx.setTransform(m.a, m.b, m.c, m.d, m.e, m.f);
 }
 
 /**
@@ -49,20 +79,42 @@ export function sirenVisibility(zoom: number): number {
   return u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u);
 }
 
+/** Что за часть кузова (paintPart): у каждой — свой рисунок. */
+type PartKind = 'rigid' | 'crewFront' | 'crewRear' | 'busFront' | 'busRear' | 'bellows' | 'chassis' | 'trailer' | 'cab';
+
 /**
- * Часть кузова: прямоугольник от x0 до x1 (x1 — ближе к носу) в системе с началом origin и курсом dir.
+ * Часть кузова: прямоугольник от x0 до x1 (x1 — ближе к носу) в системе с началом (ox, oy) и курсом (cos, sin).
  * link — перемычка между частями (гармошка): рисуется в координатах мира, без обводки и тени.
  */
 interface Part {
-  origin: Vec;
-  dir: Vec;
+  kind: PartKind;
+  ox: number;
+  oy: number;
+  cos: number;
+  sin: number;
   x0: number;
   x1: number;
-  paint: (ctx: CanvasRenderingContext2D) => void;
-  link?: boolean;
+  link: boolean;
 }
 
-const WORLD: Pick<Part, 'origin' | 'dir'> = { origin: { x: 0, y: 0 }, dir: { x: 1, y: 0 } };
+/** Части кузова машины, что рисуется сейчас (partsOf), — одни на все машины: без выделения памяти на каждую. */
+const PARTS: Part[] = [0, 1, 2].map(() => ({ kind: 'rigid', ox: 0, oy: 0, cos: 1, sin: 0, x0: 0, x1: 0, link: false }));
+/** Шарнир машины из двух частей (у гармошки — её середина), что рисуется сейчас. */
+let JOINT: Vec = { x: 0, y: 0 };
+
+/** Часть k кузова: kind от x0 до x1 в системе с началом o и курсом dir (не обязательно единичным). */
+function part(k: number, kind: PartKind, o: Vec, dir: Vec, x0: number, x1: number, link = false): void {
+  const p = PARTS[k];
+  const l = Math.hypot(dir.x, dir.y);
+  p.kind = kind;
+  p.ox = o.x;
+  p.oy = o.y;
+  p.cos = l > 0 ? dir.x / l : 1;
+  p.sin = l > 0 ? dir.y / l : 0;
+  p.x0 = x0;
+  p.x1 = x1;
+  p.link = link;
+}
 
 /**
  * Техника строительной бригады (crewLane.CREW_UNITS) — один рисунок в потоке, вдоль стройки и на месте работ:
@@ -172,74 +224,108 @@ function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: n
   ctx.roundRect(x, y, w, h, r);
 }
 
-function inFrame(ctx: CanvasRenderingContext2D, origin: Vec, dir: Vec, fn: () => void): void {
-  ctx.save();
-  ctx.translate(origin.x, origin.y);
-  ctx.rotate(Math.atan2(dir.y, dir.x));
-  fn();
-  ctx.restore();
-}
-
 /** Длина первой части от носа (у цельной машины — вся длина): по ней ставятся поворотники. */
 export function frontLength(v: Pick<VehicleLook, 'body' | 'length'>): number {
   const h = hitchOf(v.body);
   return h ? h.front * v.length : v.length;
 }
 
-/** Машина целиком: обводка, тени, части кузова по порядку снизу вверх. */
+/**
+ * Машина целиком: обводка, тени, части кузова по порядку снизу вверх. Каждая часть — в своей системе через
+ * setTransform поверх o.frame (без save/restore и замыканий на каждую машину); холст после машины — снова с o.frame.
+ */
 export function drawVehicleArt(ctx: CanvasRenderingContext2D, v: VehicleLook, o: VehicleDrawOptions): void {
-  const parts = partsOf(v, o.detailed, o.flash);
-  const shells = parts.filter((p) => !p.link);
+  const m = o.frame ?? ctx.getTransform?.() ?? IDENTITY;
+  const n = partsOf(v);
   const W = v.width;
   if (o.halo > 0) {
     ctx.fillStyle = '#ffffff';
-    for (const p of shells) {
-      inFrame(ctx, p.origin, p.dir, () => {
-        rr(ctx, p.x0 - o.halo, -W / 2 - o.halo, p.x1 - p.x0 + 2 * o.halo, W + 2 * o.halo, 1.3 + o.halo);
-        ctx.fill();
-      });
+    for (let k = 0; k < n; k++) {
+      const p = PARTS[k];
+      if (p.link) continue;
+      setFrame(ctx, m, p.ox, p.oy, p.cos, p.sin);
+      rr(ctx, p.x0 - o.halo, -W / 2 - o.halo, p.x1 - p.x0 + 2 * o.halo, W + 2 * o.halo, 1.3 + o.halo);
+      ctx.fill();
     }
   }
   if (o.detailed) {
     ctx.fillStyle = 'rgba(0,0,0,0.22)';
-    for (const p of shells) {
-      inFrame(ctx, p.origin, p.dir, () => {
-        rr(ctx, p.x0 + 0.8, -W / 2 + 0.9, p.x1 - p.x0, W, 1.2);
-        ctx.fill();
-      });
+    for (let k = 0; k < n; k++) {
+      const p = PARTS[k];
+      if (p.link) continue;
+      setFrame(ctx, m, p.ox, p.oy, p.cos, p.sin);
+      rr(ctx, p.x0 + 0.8, -W / 2 + 0.9, p.x1 - p.x0, W, 1.2);
+      ctx.fill();
     }
   }
-  for (const p of parts) inFrame(ctx, p.origin, p.dir, () => p.paint(ctx));
+  for (let k = 0; k < n; k++) {
+    const p = PARTS[k];
+    setFrame(ctx, m, p.ox, p.oy, p.cos, p.sin);
+    paintPart(ctx, p, v, o.detailed, o.flash);
+  }
+  resetFrame(ctx, m);
 }
 
-/** Части кузова в порядке отрисовки (снизу вверх). */
-function partsOf(v: VehicleLook, detailed: boolean, flash?: -1 | 1): Part[] {
+/** Рисунок части p машины v в её системе. */
+function paintPart(ctx: CanvasRenderingContext2D, p: Part, v: VehicleLook, detailed: boolean, flash?: -1 | 1): void {
+  switch (p.kind) {
+    case 'rigid':
+      return rigidArt(ctx, v, detailed, flash);
+    case 'crewRear':
+      return crewRearArt(ctx, v, p.x0, p.x1);
+    case 'crewFront':
+      return crewFrontArt(ctx, v, p.x0, detailed);
+    case 'busRear':
+      return busSection(ctx, v, p.x0, p.x1, detailed, 'rear');
+    case 'busFront':
+      return busSection(ctx, v, p.x0, 0, detailed, 'front');
+    case 'bellows':
+      return bellowsArt(ctx, v, hitchOf(v.body)!, JOINT);
+    case 'chassis':
+      return chassisArt(ctx, p.x0, p.x1, v.width);
+    case 'trailer':
+      return trailerArt(ctx, v, p.x0, p.x1, detailed);
+    case 'cab':
+      return cabArt(ctx, v.color, p.x0, v.width, detailed);
+  }
+}
+
+/** Система мира — у перемычки (гармошки): она рисуется в координатах мира. */
+const EAST: Vec = { x: 1, y: 0 };
+const ORIGIN: Vec = { x: 0, y: 0 };
+
+/** Части кузова в порядке отрисовки (снизу вверх) — в PARTS; ответ — сколько их. */
+function partsOf(v: VehicleLook): number {
   const L = v.length;
-  const W = v.width;
   const h = hitchOf(v.body);
-  if (!h) return [{ origin: v.pos, dir: v.dir, x0: -L, x1: 0, paint: (ctx) => rigidArt(ctx, v, detailed, flash) }];
+  if (!h) {
+    part(0, 'rigid', v.pos, v.dir, -L, 0);
+    return 1;
+  }
   const joint = jointOf(v.pos, v.dir, L, h);
+  JOINT = joint;
   const td = trailDir(joint, v.trail, v.dir);
   // Вторая часть — от back (от носа прямой машины) до хвоста, в системе шарнира.
-  const back = { x0: -(1 - h.joint) * L, x1: (h.joint - h.back) * L };
+  const b0 = -(1 - h.joint) * L;
+  const b1 = (h.joint - h.back) * L;
   if (isCrewPair(v.body)) {
-    const rear: Part = { origin: joint, dir: td, ...back, paint: (ctx) => crewRearArt(ctx, v, back.x0, back.x1) };
-    const front: Part = { origin: v.pos, dir: v.dir, x0: -h.front * L, x1: 0, paint: (ctx) => crewFrontArt(ctx, v, -h.front * L, detailed) };
-    return [rear, front];
+    part(0, 'crewRear', joint, td, b0, b1);
+    part(1, 'crewFront', v.pos, v.dir, -h.front * L, 0);
+    return 2;
   }
   if (v.body === 'articBus') {
-    const rear: Part = { origin: joint, dir: td, ...back, paint: (ctx) => busSection(ctx, v, back.x0, back.x1, detailed, 'rear') };
-    const front: Part = { origin: v.pos, dir: v.dir, x0: -h.front * L, x1: 0, paint: (ctx) => busSection(ctx, v, -h.front * L, 0, detailed, 'front') };
     // Гармошка — чёрный резиновый круг под обеими секциями: снаружи изгиба виден дугой, без разрыва.
-    const bellows: Part = { ...WORLD, x0: 0, x1: 0, link: true, paint: (ctx) => bellowsArt(ctx, v, h, joint) };
-    return [bellows, rear, front];
+    part(0, 'bellows', ORIGIN, EAST, 0, 0, true);
+    part(1, 'busRear', joint, td, b0, b1);
+    part(2, 'busFront', v.pos, v.dir, -h.front * L, 0);
+    return 3;
   }
   // Тягач с полуприцепом: рама тягача — под полуприцепом, кабина — над ним.
   const cab = (h.cab ?? 0.2) * L;
-  const chassis: Part = { origin: v.pos, dir: v.dir, x0: -h.front * L, x1: -cab + 0.5, paint: (ctx) => chassisArt(ctx, -h.front * L, -cab + 0.5, W) };
-  const trailer: Part = { origin: joint, dir: td, ...back, paint: (ctx) => trailerArt(ctx, v, back.x0, back.x1, detailed) };
-  const tractor: Part = { origin: v.pos, dir: v.dir, x0: -cab, x1: 0, paint: (ctx) => cabArt(ctx, v.color, -cab, W, detailed) };
-  return [chassis, trailer, tractor];
+  part(0, 'chassis', v.pos, v.dir, -h.front * L, -cab + 0.5);
+  part(1, 'trailer', joint, td, b0, b1);
+  part(2, 'cab', v.pos, v.dir, -cab, 0);
+  return 3;
 }
 
 /** Цельный кузов: машина жителя как раньше, фургон, микроавтобус, городской автобус и спецмашины. */
@@ -376,10 +462,11 @@ function windshield(ctx: CanvasRenderingContext2D, x1: number, W: number, color:
 function sideWindows(ctx: CanvasRenderingContext2D, x0: number, x1: number, W: number, color: string): void {
   if (x1 - x0 < 1) return;
   ctx.fillStyle = glassFor(color);
-  ctx.globalAlpha *= 0.85;
+  const alpha = ctx.globalAlpha;
+  ctx.globalAlpha = alpha * 0.85;
   ctx.fillRect(x0, -W / 2 + 0.35, x1 - x0, 0.6);
   ctx.fillRect(x0, W / 2 - 0.95, x1 - x0, 0.6);
-  ctx.globalAlpha /= 0.85;
+  ctx.globalAlpha = alpha;
 }
 
 /** Микроавтобус: короткий капот, высокая светлая крыша, окна по бортам. */
