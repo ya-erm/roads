@@ -762,6 +762,41 @@ export class LaneTraffic {
   }
 
   /**
+   * Та же машина (тот же id) — на попутную полосу у точки pos с курсом dir, стоя, с маршрутом оттуда к её цели: техника
+   * бригады, разворачиваясь петлёй у дороги (game/crewLoop.ts), в потоке уже во встречной полосе. Некуда поставить или
+   * оттуда не доехать — false, машина где была.
+   */
+  relocate(veh: Vehicle, pos: Vec, dir: Vec, reach = 6): boolean {
+    const spot = this.laneAt(pos, dir, reach);
+    const route = spot && findLaneRoute(this.graph, [this.graph.links.get(spot.lane.link)!], veh.targetNode, veh.endLink);
+    if (!spot || !route || !this.vehicles.has(veh.id)) return false;
+    const lane = this.currentLane(veh);
+    if (lane) queueRemove(lane.vehicles, veh);
+    if (veh.onMovement) {
+      const m = this.graph.moves.get(veh.onMovement);
+      if (m) queueRemove(m.vehicles, veh);
+    }
+    this.revokeGrant(veh);
+    this.releaseNode(veh);
+    this.cuts.delete(veh);
+    veh.onMovement = null;
+    veh.planned = null;
+    veh.ready = false;
+    veh.lane = spot.lane.id;
+    veh.s = spot.u;
+    veh.v = 0;
+    veh.route = route;
+    veh.routeIndex = 0;
+    veh.lateral = 0;
+    delete veh.glide;
+    delete veh.shift;
+    veh.stuckTimer = 0;
+    insertSorted(spot.lane.vehicles, veh);
+    this.updatePose(veh);
+    return true;
+  }
+
+  /**
    * Ставит машину на полосу laneId носом в u (выехала со двора, game/garages.ts) с маршрутом от её связи к targetNode
    * (endLink — последней связью маршрута: едет к месту у дома или магазина). Полосы нет или не доехать — null.
    * Место — заранее проверить (clearToJoin).

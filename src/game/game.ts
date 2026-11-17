@@ -95,6 +95,7 @@ import { Crosswalks, WALK_HOUSES, WALK_LOSS } from './crosswalks';
 import { Garages, type GarageHost, type GarageLook } from './garages';
 import { ShopParking, type ShopHost } from './shopParking';
 import { Docks, type DockHost } from './docks';
+import { type BodyLook, type CrewLoopHost, CrewLoops, LOOP } from './crewLoop';
 import {
   acceptAt,
   legacyCargo,
@@ -985,6 +986,11 @@ export class Game implements BuildContext {
   readonly shops = new ShopParking(this.shopHost(), this.garages);
   /** Дворы получателей грузов (src/game/docks.ts): грузовик заезжает к рампе магазина, выгружается и выезжает. */
   readonly docks = new Docks(this.dockHost());
+  /**
+   * Разворот техники бригад петлёй у дороги вместо разворота в тупике (src/game/crewLoop.ts): у станции в конце выезда,
+   * в конце проекта-тупика.
+   */
+  readonly crewLoops = new CrewLoops(this.crewLoopHost());
   /**
    * Полосы стоянки вдоль бордюра (src/game/curbParking.ts, docs/PARKING.md, этап 2): места ночёвки и места у целей,
    * манёвры передом и задом у бордюра.
@@ -1954,10 +1960,12 @@ export class Game implements BuildContext {
   driveFrom(b: Brigade, car: number, spot: { pos: Vec; dir: Vec }, to: number): number | 'busy' | null {
     const spec = this.crewCar(b, car);
     // Выезжают по одной: следующая трогается, когда предыдущая отъехала на свою длину с запасом (у тупика та
-    // разворачивается и проезжает мимо — не задевая стоящую).
+    // разворачивается и проезжает мимо — не задевая стоящую). Та, что развернётся петлёй у дороги (crewLoop.ts), — не
+    // помеха: следующая выезжает за ней и съезжает в свою полосу, а их по очереди разводят развороты (регулировщик не
+    // пустит её туда, где та развернётся, — и та не поедет мимо, пока эта не в своей полосе).
     for (const c of b.convoy?.cars.slice(0, car) ?? []) {
       const prev = 'sim' in c ? this.traffic.vehicles.get(c.sim) : undefined;
-      if (prev && dist(prev.pos, spot.pos) < prev.length + 14) return 'busy';
+      if (prev && !this.crewLoops.turning(prev.id) && dist(prev.pos, spot.pos) < prev.length + 14) return 'busy';
     }
     // Попутная полоса — и через полосу: бригада, работавшая в ряду у другой кромки (несколько бригад на 1+1), стоит
     // над встречной; иначе её машина выезжала от узла — у тупика скачком к его торцу и сразу носом назад.
@@ -5126,6 +5134,8 @@ export class Game implements BuildContext {
     // Пешеходы на переходах — тоже до движения: идут — зебра закрыта.
     if (this.roads.graph.crosswalks.size || this.crosswalks.list.length) this.crosswalks.step(dt, this.time, this.roads.graph, this.traffic);
     this.traffic.step(dt);
+    // Техника бригад разворачивается петлёй — сразу после движения: на петле её рисуют там, где она на ней.
+    if (this.construction.crews.brigades.size || !this.crewLoops.idle) this.crewLoops.step(dt);
     // Машины у гаражей частных домов и на стоянках магазинов — сразу после движения: на манёвре их рисуют там, где
     // они на нём.
     this.garages.step(dt);
@@ -6366,6 +6376,12 @@ export class Game implements BuildContext {
       if (!route) {
         line.problem = `Нет дороги: ${from.name} → ${to.name}`;
         v.timer = 2;
+        continue;
+      }
+      // У выезда разворачивается техника бригады (crewLoop.ts) — ждёт, как остановленные регулировщиком.
+      const gate = this.roads.net.nodes.get(from.nodeId)?.pos;
+      if (gate && !this.crewLoops.idle && this.crewLoops.busyAt(gate, model.spec.length)) {
+        v.timer = 0.4;
         continue;
       }
       const sim = this.traffic.spawn({
@@ -7662,6 +7678,53 @@ export class Game implements BuildContext {
   private dockExit = new Map<number, number>();
   /** Сколько раз грузовик проехал мимо двора и заезжает снова (не больше двух — дальше пропускает получателя). */
   private dockTries = new Map<number, number>();
+
+  /** Что разворотам техники бригад петлёй (crewLoop.ts) нужно от игры. */
+  private crewLoopHost(): CrewLoopHost {
+    const game = this;
+    return {
+      get traffic() {
+        return game.traffic;
+      },
+      get graph() {
+        return game.roads.graph;
+      },
+      get time() {
+        return game.time;
+      },
+      crewSims: () => {
+        const out: Vehicle[] = [];
+        for (const b of this.construction.crews.brigades.values()) {
+          for (const c of b.convoy?.cars ?? []) {
+            const v = 'sim' in c ? this.traffic.vehicles.get(c.sim) : undefined;
+            if (v) out.push(v);
+          }
+        }
+        return out;
+      },
+      parked: () => {
+        const crews = this.construction.crews;
+        const out: BodyLook[] = [];
+        for (const b of crews.brigades.values()) for (const m of crews.carsAt(b)) out.push({ ...this.crewCar(b, m.car), pos: m.pos, dir: m.dir });
+        return out;
+      },
+      area: (center, r) => {
+        const near = this.index.near(center, r + 80);
+        const rails = this.net.segmentsNear(center, r + 20);
+        return {
+          roads: this.roads.net.corridorsNear(center, r + 30),
+          blocked: (fp) => {
+            const corners = footprintCorners(fp);
+            if (!this.inBounds(fp.center, 5) || this.isWater(fp.center, 0.5) || corners.some((q) => this.isWater(q, 0.5))) return true;
+            // Станция — с площадкой перед постами (въезд, разворотная «шляпка» тупика у ворот): там заезжают на посты.
+            if (near.some((s) => footprintsOverlap(fp, s.fp, s.type === 'station' ? LOOP.yard : 0.5))) return true;
+            if (this.lotUnder(fp, 0.5) || this.parkUnder(fp, null)) return true;
+            return rails.some((s) => [fp.center, ...corners].some((q) => s.lut.closest(q).d < halfWidth(s.spec) + 0.5));
+          },
+        };
+      },
+    };
+  }
 
   /** Что дворам получателей (docks.ts) нужно от игры. */
   private dockHost(): DockHost {

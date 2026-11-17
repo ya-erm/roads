@@ -92,6 +92,12 @@ import { type WorkTrainSave, WorkTrains } from './workTrains';
  */
 const ENTRY_ROOM = ROW_RAMP;
 
+/**
+ * Проект кончается у готового отростка до тупика не длиннее стольких метров (выезд станции ~33 м) — как будто тупиком
+ * (deadEndRoom): разворачиваться технике — там же, у тупика.
+ */
+const STUB = 80;
+
 /** Перестроение в ряд (layRows) — не короче стольких метров пути на метр сдвига вбок (наклон не круче ~1:4 в середине). */
 const ROW_SLOPE = 6;
 
@@ -882,23 +888,43 @@ export class Construction {
   }
 
   /**
-   * Участок c проекта id (заполняется от fromB) кончается тупиком — других полотен у дальнего узла нет. Достроили —
-   * машины бригады выезжают в поток с мест (Game.driveFrom): в попутную полосу съезжают на ходу (glide, GLIDE_SLOPE) и
-   * разворачиваются в тупике, как все машины. Бригада в ряду над встречной (несколько бригад на полотне) не успела бы
-   * съехать до разворота — дуга сжималась бы до волчка: её колонна встаёт на столько метров раньше конца, сколько
-   * нужно, чтобы съехать (этапы доходят до конца и так — их машины на своих местах). Ряд row — вправо по ходу
-   * заполнения; уже над попутной (или перестройка, путь) — 0.
+   * Участок c проекта id (заполняется от fromB) кончается тупиком — других полотен у дальнего узла нет, или за ним
+   * только короткий отросток до тупика (выезд станции, кусок готовой дороги без перекрёстков). Достроили — машины
+   * бригады выезжают в поток с мест (Game.driveFrom): в попутную полосу съезжают на ходу (glide, GLIDE_SLOPE) и
+   * разворачиваются петлёй у дороги (crewLoop.ts) по одной, а следующие ждут своей очереди уже в своей полосе. Бригада
+   * на оси полотна или в ряду над встречной не успела бы съехать, пока впереди место разворота: её колонна встаёт на
+   * столько метров раньше конца, сколько нужно, чтобы съехать (этапы доходят до конца и так — их машины на своих
+   * местах). Ряд row — вправо по ходу заполнения; уже над попутной (или перестройка, путь) — 0.
    */
   private deadEndRoom(id: number, piece: Piece, fromB: boolean, row: number): number {
     if (this.isRail(id) || piece.build?.was) return 0;
     const c = piece as Corridor;
     const net = this.host.roads.net;
-    if (net.node(fromB ? c.a : c.b).corridors.length !== 1) return 0;
+    if (!this.stubAhead(net, c, fromB ? c.a : c.b)) return 0;
     const sign = fromB ? -1 : 1;
     let lat = Infinity;
     for (const l of c.lanes) if (l.flow * sign > 0) lat = Math.min(lat, Math.abs(l.offset * sign - row));
     if (!Number.isFinite(lat) || lat < 1.5) return 0;
     return lat / GLIDE_SLOPE + 5;
+  }
+
+  /**
+   * За узлом end (конец полотна c) — тупик: у узла других полотен нет или дальше только готовые полотна через стыки
+   * (без перекрёстков и развилок), не длиннее STUB м, до тупика — разворачиваться всё равно там же, у тупика.
+   */
+  private stubAhead(net: LaneNet, c: Corridor, end: number): boolean {
+    let from = c;
+    let node = net.node(end);
+    let len = 0;
+    while (node.corridors.length === 2 && node.kind === 'seam') {
+      const k = net.corridors.get(node.corridors[0] === from.id ? node.corridors[1] : node.corridors[0]);
+      if (!k || k.build) return false;
+      len += k.length;
+      if (len > STUB) return false;
+      node = net.node(k.a === node.id ? k.b : k.a);
+      from = k;
+    }
+    return node.corridors.length === 1;
   }
 
   /**
