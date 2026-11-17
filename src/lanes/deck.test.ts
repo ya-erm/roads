@@ -3,7 +3,10 @@ import { GRADE } from '../config';
 import { angleOf, dist, sub, type Vec } from '../core/vec';
 import { bridgeLook, deckAlong, levelDeck, MAX_LOOK, nodeDeck } from './deck';
 import { LaneRenderer } from './draw';
+import { LaneGraph } from './graph';
 import { LaneNet, twoWay } from './model';
+import { findLaneRoute } from './routing';
+import { LaneTraffic } from './traffic';
 
 /** Прямое полотно на 100 м с запада на восток между узлами на уровнях la и lb (с высотами моста da, db). */
 function span(la: number, lb: number, da?: number, db?: number) {
@@ -207,5 +210,37 @@ describe('Тень длинного изогнутого моста из кус�
       for (let i = 0; i < left.length; i++) expect(dist(sub(shadow[i], left[i]), d0)).toBeLessThan(1e-6);
       expect(dist(d0, { x: 0, y: 0 })).toBeCloseTo(dist(bridgeLook(2 * GRADE.bridgeDeck).shadow, bridgeLook(2 * GRADE.bridgeDeck).lift), 6);
     }
+  });
+});
+
+describe('Машина на мосту поднята вместе с полотном', () => {
+  it('подъём — из движения: на земле ноль, на пандусе — как полотно в этом месте, на мосту — высота моста', () => {
+    // С запада на восток: земля до x = 100, пандус на мост до x = 200, мост до x = 300.
+    const net = new LaneNet();
+    const east = { x: 1, y: 0 };
+    const a = net.addSeam({ x: 0, y: 0 }, east, 0);
+    const b = net.addSeam({ x: 100, y: 0 }, east, 0);
+    const c = net.addSeam({ x: 200, y: 0 }, east, 1);
+    const d = net.addSeam({ x: 300, y: 0 }, east, 1);
+    net.addCorridor(a.id, b.id, { cls: 'street', lanes: twoWay(1, 1) });
+    const ramp = net.addCorridor(b.id, c.id, { cls: 'street', lanes: twoWay(1, 1) });
+    const bridge = net.addCorridor(c.id, d.id, { cls: 'street', lanes: twoWay(1, 1) });
+    const graph = new LaneGraph(net);
+    const traffic = new LaneTraffic(graph, { onArrive: () => {}, onLost: () => {} });
+    const route = findLaneRoute(graph, graph.outLinks.get(a.id)!, d.id)!;
+    const car = traffic.spawn({ kind: 'car', length: 4.5, width: 2, maxSpeed: 14, accel: 3, color: '#fff', targetNode: d.id, route })!;
+    const seen = new Set<string>();
+    for (let t = 0; t < 40 && traffic.vehicles.has(car.id); t += 1 / 30) {
+      traffic.step(1 / 30);
+      if (car.onMovement || !traffic.vehicles.has(car.id)) continue;
+      const on = net.corridor(graph.links.get(graph.lanes.get(car.lane)!.link)!.corridor);
+      const want = on === ramp || on === bridge ? bridgeLook(deckAlong(net, on, car.centerS)).lift.y : 0;
+      expect(car.lift ?? 0).toBeCloseTo(want, 9);
+      seen.add(on === ramp ? 'ramp' : on === bridge ? 'bridge' : 'ground');
+    }
+    expect([...seen].sort()).toEqual(['bridge', 'ground', 'ramp']);
+    // На мосту — на высоту моста, как его полотно; на земле — не поднята.
+    expect(bridgeLook(nodeDeck(c)).lift.y).toBeLessThan(0);
+    expect(bridgeLook(deckAlong(net, bridge, 50)).lift.y).toBeCloseTo(bridgeLook(nodeDeck(c)).lift.y, 6);
   });
 });

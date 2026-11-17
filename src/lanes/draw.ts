@@ -51,9 +51,6 @@ interface CorridorGeo {
    * меняется плавно, поэтому тень — та же кривая, что кромки.
    */
   shade: Vec[];
-  /** Ось на земле (без подъёма) в тех же точках и подъём полотна там — чтобы поднять и машины на мосту. */
-  axis: Vec[];
-  lifts: Vec[];
   /** Куски над водой на земле [i0, i1] (индексы точек left/right): рисуются мостом. */
   wet: [number, number][];
   /**
@@ -584,26 +581,6 @@ export class LaneRenderer {
     return [...l, ...r.reverse()];
   }
 
-  /**
-   * На сколько поднят на экране мост в точке p (машина на нём едет вместе с полотном): ближайшая точка оси
-   * моста или пандуса не дальше 15 м; не на мосту — ноль.
-   */
-  liftAt(net: LaneNet, p: Vec): Vec {
-    this.refresh(net);
-    let best: Vec = { x: 0, y: 0 };
-    let bd = 15 * 15;
-    for (const x of this.corridors) {
-      const b = x.bbox;
-      if (x.layer < 1 || p.x < b.x0 - 15 || p.x > b.x1 + 15 || p.y < b.y0 - 15 || p.y > b.y1 + 15) continue;
-      const { axis, lifts } = x.geo;
-      for (let i = 0; i < axis.length; i++) {
-        const d = (axis[i].x - p.x) ** 2 + (axis[i].y - p.y) ** 2;
-        if (d < bd) [bd, best] = [d, lifts[i]];
-      }
-    }
-    return best;
-  }
-
   /** Обрыв полотен у перекрёстков — для движения и подсказок. */
   cutsOf(net: LaneNet): Map<number, [number, number]> {
     this.refresh(net);
@@ -664,7 +641,7 @@ export class LaneRenderer {
         const layer = layerOf(Math.min(la, lb), Math.max(la, lb));
         // Отпечаток: всё, что рисуется, и то, от чего зависят знаки и скорости (класс, полосы, ограничение).
         const shape = shapeOf(
-          [geo.poly, geo.left, geo.right, geo.shade, geo.lifts, ...geo.marks.map((m) => m.pts), ...geo.arrows],
+          [geo.poly, geo.left, geo.right, geo.shade, ...geo.marks.map((m) => m.pts), ...geo.arrows],
           `${layer}|${la}|${lb}|${geo.marks.map((m) => m.style).join(',')}|${geo.wet.join(';')}|${geo.walls.join(';')}|${c.cls}|${c.limit ?? ''}|${c.ring ?? ''}|${JSON.stringify(c.lanes)}`,
         );
         item = { id: c.id, key, geo, bbox: bboxOf([geo.poly]), layer, shape };
@@ -752,8 +729,6 @@ export class LaneRenderer {
     const left: Vec[] = [];
     const right: Vec[] = [];
     const shade: Vec[] = [];
-    const axis: Vec[] = [];
-    const lifts: Vec[] = [];
     const at: number[] = [];
     const over: boolean[] = [];
     for (const s of ss) {
@@ -763,8 +738,6 @@ export class LaneRenderer {
       right.push(up(s, e[1] + ROAD_MARGIN));
       const v = look(s);
       shade.push(sub(v.shadow, v.lift));
-      axis.push(pointOff(c, s, 0));
-      lifts.push(v.lift);
       const h = net.heightAt(c, s);
       at.push(s);
       over.push(Math.abs(h) < 0.25 && !!this.water?.(pointOff(c, s, (e[0] + e[1]) / 2)));
@@ -808,8 +781,6 @@ export class LaneRenderer {
       left,
       right,
       shade,
-      axis,
-      lifts,
       wet,
       walls: bare ? [wallOf(bare[0]), wallOf(bare[1])] : [
         [0, left.length - 1],

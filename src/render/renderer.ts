@@ -891,14 +891,11 @@ export class Renderer {
       else this.drawBridges(scene, view, segs, level);
       // Пробки на мосту и съезде с него — поверх его полотна (с земли их закрыло бы полотно).
       if (roads && o.heatmap) this.drawHeatmap(game, level);
-      // Машины на мосту — вместе с поднятым полотном.
+      // Машины на мосту — вместе с поднятым полотном (подъём — из движения: Vehicle.lift).
       this.drawVehicles(
-        vehicles
-          .filter((v) => band(v) === level)
-          .map((v) => {
-            const d = this.lanes.liftAt(roadNet, v.pos);
-            return d.y ? { ...v, pos: add(v.pos, d), trail: v.trail && add(v.trail, d) } : v;
-          }),
+        vehicles.filter((v) => band(v) === level),
+        false,
+        true,
       );
       // Светофоры у спуска с моста и на эстакаде — поверх её полотна и подняты вместе с ним.
       if (roads) this.drawLights(game, level, o.phaseEdit);
@@ -2688,8 +2685,11 @@ export class Renderer {
     }
   }
 
-  /** halo — белая обводка, чтобы машины линии читались поверх её маршрута. */
-  private drawVehicles(list: VehicleLook[], halo = false): void {
+  /**
+   * halo — белая обводка, чтобы машины линии читались поверх её маршрута; lifted — машины на мосту: подняты вместе с
+   * полотном под ними (Vehicle.lift — из движения).
+   */
+  private drawVehicles(list: (VehicleLook & { lift?: number })[], halo = false, lifted = false): void {
     const ctx = this.ctx;
     const detailed = this.camera.zoom > 0.5;
     const ring = halo ? Math.max(1.2, 1.6 / this.camera.zoom) : 0;
@@ -2697,16 +2697,23 @@ export class Renderer {
     const siren = sirenVisibility(this.camera.zoom);
     const flash = siren > 0 ? this.flash : undefined;
     for (const v of list) {
+      const lift = lifted ? (v.lift ?? 0) : 0;
+      if (lift) {
+        ctx.save();
+        ctx.translate(0, lift);
+      }
       // Кузов по модели (фургон, тягач с полуприцепом, автобусы), у машин из двух частей — с изгибом в шарнире.
       drawVehicleArt(ctx, v, { detailed, halo: ring, flash });
       if (v.siren && siren > 0) this.drawSirenGlow(v, siren);
-      if (!v.blinker || !this.blinkOn || v.width * this.camera.zoom < BLINKER_MIN_PX) continue;
-      // Поворотники — на первой части кузова (у тягача, у передней секции).
-      ctx.save();
-      ctx.translate(v.pos.x, v.pos.y);
-      ctx.rotate(Math.atan2(v.dir.y, v.dir.x));
-      this.drawBlinker(frontLength(v), v.width, v.blinker);
-      ctx.restore();
+      if (v.blinker && this.blinkOn && v.width * this.camera.zoom >= BLINKER_MIN_PX) {
+        // Поворотники — на первой части кузова (у тягача, у передней секции).
+        ctx.save();
+        ctx.translate(v.pos.x, v.pos.y);
+        ctx.rotate(Math.atan2(v.dir.y, v.dir.x));
+        this.drawBlinker(frontLength(v), v.width, v.blinker);
+        ctx.restore();
+      }
+      if (lift) ctx.restore();
     }
   }
 

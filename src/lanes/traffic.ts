@@ -5,6 +5,7 @@ import { rightNormal, scale, add, angleDiff, angleOf, closestOnSegment, dist, do
 import { follow, hitchOf, jointOf, steerBase } from '../sim/body';
 import type { Blinker, Vehicle, VehicleSpec } from '../sim/vehicle';
 import { GLane, GLink, GMove, GNode, greenOf, LaneGraph, LightPhase } from './graph';
+import { bridgeLook, deckAlong, nodeDeck } from './deck';
 import { edgesAt } from './geometry';
 import { bodyOnEnds, Corridor, layerOf } from './model';
 import { findLaneRoute } from './routing';
@@ -2010,7 +2011,12 @@ export class LaneTraffic {
       if (veh.aside) veh.pos = add(veh.pos, scale(rightNormal(p.dir), veh.aside));
       if (veh.curb) veh.pos = add(veh.pos, scale(rightNormal(p.dir), veh.curb));
       this.steer(veh, p.dir);
-      if (m.node !== null) veh.level = this.graph.net.nodes.get(m.node)?.level ?? veh.level;
+      if (m.node !== null) {
+        const n = this.graph.net.nodes.get(m.node);
+        veh.level = n?.level ?? veh.level;
+        // В узле моста — поднята вместе с его площадкой (как её рисуют); на продолжении полосы — как была.
+        if (n) veh.lift = n.level > 0 ? bridgeLook(nodeDeck(n)).lift.y : 0;
+      }
       // Корпус ещё (или уже) на полотне въезда или выезда — слой и его: у моста машина не ныряет под край.
       // Хвост — на целую длину позади носа.
       const half = veh.length / 2 + 1;
@@ -2038,6 +2044,8 @@ export class LaneTraffic {
     const c = net.corridors.get(link.corridor);
     if (c) {
       veh.level = net.heightAt(c, veh.centerS);
+      // На мосту и пандусе — поднята вместе с полотном в этом месте (как его рисуют: lanes/draw.ts, corridorGeo).
+      veh.lift = Math.max(net.node(c.a).level, net.node(c.b).level) > 0 ? bridgeLook(deckAlong(net, c, veh.centerS)).lift.y : 0;
       // На пандусе — в слое всего полотна (как его рисуют), иначе у начала моста машина ныряет под него.
       let layer = this.corridorLayer(c);
       // Корпус у стыка с мостом заходит на него — рисуем со слоем моста, а не под его краем (весь кузов, до хвоста).
