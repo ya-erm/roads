@@ -5,7 +5,7 @@ import type { WorldSettings } from '../world/settings';
 import { CREW_UNITS } from './crewLane';
 import type { Brigade } from './crews';
 import { Game } from './game';
-import { anchorOf, HIGHWAY, openSpot, road, runSeconds, withoutCitizens } from './testkit';
+import { anchorOf, freshGame, HIGHWAY, openSpot, road, runSeconds, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 50_000_000, water: 'dry', construction: 'build' };
 
@@ -51,7 +51,7 @@ function overlap(a: ReturnType<typeof box>, b: ReturnType<typeof box>): boolean 
  * начала съезжают на стройку по очереди.
  */
 function scene(n: number) {
-  const game = withoutCitizens(new Game(WORLD));
+  const game = withoutCitizens(freshGame(WORLD));
   const at = openSpot(game, [[{ x: -250, y: 0 }, { x: 700, y: 0 }, 150]]);
   expect(road(game, { free: { x: at.x - 250, y: at.y } }, { free: at }, HIGHWAY)).toBe(true);
   expect(game.buildBase({ x: at.x - 200, y: at.y - 40 })).toBeNull();

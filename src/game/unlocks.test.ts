@@ -151,7 +151,7 @@ describe('Открытие моделей в партии', { timeout: 60_000 },
   });
 
   it('сценарий: этап модели не открывает — только объём', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42, scenario: { difficulty: 'normal', challenge: false } });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42, scenario: { difficulty: 'normal', challenge: false } });
     const sc = game.scenario!;
     const main = sc.state.objectives.filter((o) => o.phase === sc.state.phase && o.role === 'main').pop()!;
     main.status = 'done';
@@ -183,7 +183,7 @@ describe('Старые сохранения (без счёта перевозо�
   });
 
   it('открытое ступенью сценария (modelTier, а совсем старое — по этапу) остаётся в продаже', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42, scenario: { difficulty: 'normal', challenge: false } });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42, scenario: { difficulty: 'normal', challenge: false } });
     const tier3 = new Game(game.settings, legacy(game, { modelTier: 3 }));
     for (const id of ['truck2', 'bus2', 'freightTrain2', 'truck3', 'bus3', 'passengerTrain2'] as const) expect(tier3.modelOpen(id)).toBe(true);
     const save = legacy(game);

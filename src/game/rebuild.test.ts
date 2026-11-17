@@ -14,7 +14,7 @@ import { spansOf } from './constructionWork';
 import { Game } from './game';
 import { rebuildCost, rebuildDiff } from './rebuild';
 import { fullCorridorCost } from './roadbuild';
-import { anchorOf, AVENUE, clearStrip, HIGHWAY, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, AVENUE, clearStrip, freshGame, HIGHWAY, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 // Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
 const WORLD: WorldSettings = { seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' };
@@ -41,7 +41,7 @@ function freeSpot(game: Game, len: number, profile: RoadOptions = STREET): Vec {
  * своя, одна бригада; бригаду бесплатной базы партии не берём). Ответ — полотно улицы.
  */
 function scene(mode: 'build' | 'instant', len = 600, reverse = false, profile: RoadOptions = STREET): { game: Game; c: Corridor; at: Vec; base: BuildBase | null } {
-  const game = withoutCitizens(new Game({ ...WORLD, ...(mode === 'build' ? { construction: 'build' as const } : {}) }));
+  const game = withoutCitizens(freshGame({ ...WORLD, ...(mode === 'build' ? { construction: 'build' as const } : {}) }));
   const at = freeSpot(game, len, profile);
   const gate = { x: at.x - 90, y: at.y };
   expect(road(game, { free: gate }, { free: at }, profile)).toBe(true);
@@ -723,7 +723,7 @@ describe('Перестройка «с проездом»: два соседни�
   }
 
   it('бригады идут с разных концов к общему стыку: у стыка — только один реверс, дорога проезжая в каждый момент, обе стройки кончаются', () => {
-    const game = withoutCitizens(new Game({ ...WORLD, construction: 'build' }));
+    const game = withoutCitizens(freshGame({ ...WORLD, construction: 'build' }));
     const { west, east, gate, far } = twoPieces(game);
     const [pw, pe] = rebuildEach(game, [west.id, east.id]);
     expect(pw).not.toBe(pe);
@@ -742,7 +742,7 @@ describe('Перестройка «с проездом»: два соседни�
   });
 
   it('сохранение, где оба куска уже разрыты у стыка (вторые проходы навстречу, разные половины): после загрузки проезд есть, стройки доходят до конца', () => {
-    const game = withoutCitizens(new Game({ ...WORLD, construction: 'build' }));
+    const game = withoutCitizens(freshGame({ ...WORLD, construction: 'build' }));
     const { west, east, gate, far } = twoPieces(game);
     rebuildEach(game, [west.id, east.id]);
     // Как в отчёте: первые проходы кончились у стыка, вторые начались от него — у запада перекладывается северная

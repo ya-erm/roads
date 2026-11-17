@@ -50,7 +50,8 @@ function placeStations(game: Game, count: number, minDistance: number) {
 describe('Игра', { timeout: 30_000 }, () => {
   for (const seed of [1, 42, 2024]) {
     it(`мир ${seed}: города, предприятия и жители`, () => {
-      const game = new Game(seed);
+      // freshGame: мир 42 нужен и тестам ниже — генерируется один раз (первый вызов отдаёт саму сгенерированную).
+      const game = freshGame(seed);
       expect(game.towns.length).toBeGreaterThanOrEqual(3);
       expect(game.industries.length).toBeGreaterThanOrEqual(6);
       for (const t of game.towns) expect(t.population).toBeGreaterThan(0);
@@ -222,7 +223,8 @@ describe('Игра', { timeout: 30_000 }, () => {
   });
 
   it('сохранение и загрузка восстанавливают партию', () => {
-    const game = freshGame(7);
+    // Машины жителей не сохраняются и тут ни при чём: без них полтора месяца партии — в разы быстрее.
+    const game = withoutCitizens(freshGame(7));
     const stations = placeStations(game, 2, 220);
     const line = game.createLine(stations.map((s) => s.id))!;
     game.renameLine(line.id, 'Кольцевая');

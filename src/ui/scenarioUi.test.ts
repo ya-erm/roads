@@ -259,7 +259,7 @@ describe('Шкала месячной цели в панели сценария'
 describe('Прогноз к сроку на шкале задания', () => {
   /** Сценарий с грузовым маршрутом ферма → пищекомбинат и контракт на amount ед. груза пищекомбинату за months мин. */
   function contract(amount: number, months = 8) {
-    const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 5, scenario: { difficulty: 'easy', challenge: false } }));
+    const game = withoutCitizens(freshGame({ ...DEFAULT_SETTINGS, seed: 5, scenario: { difficulty: 'easy', challenge: false } }));
     const sc = game.scenario!;
     const route = freightRoute(game);
     const o = sc.addObjective(

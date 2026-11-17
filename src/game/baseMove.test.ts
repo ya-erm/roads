@@ -11,14 +11,14 @@ import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import { halfAtS } from '../world/worldgen';
 import { Game } from './game';
-import { anchorOf, openSpot, road, roadPlan, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, freshGame, openSpot, road, roadPlan, runSeconds, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 const AVENUE = { cls: 'avenue' as const, lanesF: 2, lanesB: 2 };
 
 /** Улица с запада на восток в чистом поле и база у её середины с севера (−y). */
 function setup(): { game: Game; at: Vec; base: BuildBase } {
-  const game = withoutCitizens(new Game({ ...WORLD }));
+  const game = withoutCitizens(freshGame({ ...WORLD }));
   // Чистое поле вдоль улицы и на 500 м к югу от её конца: там вторая улица (withSecondStreet).
   const at = openSpot(game, [
     [{ x: 0, y: 0 }, { x: 600, y: 0 }, 150],

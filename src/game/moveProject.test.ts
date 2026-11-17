@@ -5,12 +5,12 @@ import { Game } from './game';
 import { MoveProject } from './moveProject';
 import { moveNodeEdit, reshapeEdit } from './roadbuild';
 import { corridorCurveSigns, freshSignCorridors, staleSignCorridors } from './roadProject';
-import { roadPlan, STREET } from './testkit';
+import { freshGame, roadPlan, STREET } from './testkit';
 
 const KINKED = { ...STREET, kink: true };
 
 function dryGame(): Game {
-  return new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  return freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
 }
 
 /** Г-образный изгиб A–B–C из двух прямых улиц в свободном месте: узлы и угол. */

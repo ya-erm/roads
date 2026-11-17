@@ -58,9 +58,10 @@ function skipPhase(sc: Scenario): void {
 describe('Сценарий: генерация', { timeout: 120_000 }, () => {
   it('создаётся на разных случайных картах и сложностях: архетип, капитал, цели этапа A, брифинг', () => {
     const archetypes = new Set<string>();
+    // Все сложности — на двух картах, остальные — на обычной: каждая партия — своя генерация мира.
     for (const seed of [3, 11, 25, 58, 101, 777]) {
       for (const difficulty of ['easy', 'normal', 'hard'] as const) {
-        if (difficulty !== 'normal' && seed > 25) continue;
+        if (difficulty !== 'normal' && seed > 11) continue;
         const game = new Game(scenario(seed, difficulty));
         const sc = game.scenario!;
         expect(sc).toBeTruthy();

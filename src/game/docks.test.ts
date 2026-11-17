@@ -6,7 +6,7 @@ import type { Station, Town, TownBuilding } from '../world/entities';
 import { legacyCargo, pickReceivers, receiverOf, RETAIL, stockAt, stockCap } from '../world/retail';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { Game, type SaveData } from './game';
-import { freshGame, runSeconds } from './testkit';
+import { freshGame, runSeconds, withoutCitizens } from './testkit';
 import { type FleetVehicle, type Line, MODELS, type RoadModel } from './transport';
 
 /** Кузов Грузовика (фургон): длина и ширина. */
@@ -362,14 +362,15 @@ describe('Получатели грузов в партии', { timeout: 240_000
   });
 
   it('сохранение: получатели, их склады и станции у магазинов — как были; грузовик во дворе — у рампы', () => {
-    const game = freshGame(RETAIL_WORLD);
+    // Машины жителей тут ни при чём (проверяется сохранение): без них езда до двора — в разы быстрее.
+    const game = withoutCitizens(freshGame(RETAIL_WORLD));
     const { sb, v, line } = shopLine(game);
     v.cargo = 'food';
     v.amount = 4;
     v.fromStore = true;
     expect(until(game, 200, () => v.stop === 1 && v.state === 'loading' && !game.docks.entering(v.id))).toBe(true);
     const save = JSON.parse(JSON.stringify(game.toSave())) as SaveData;
-    const copy = new Game(RETAIL_WORLD, save);
+    const copy = withoutCitizens(new Game(RETAIL_WORLD, save));
     expect(copy.retail).toBe(true);
     expect(copy.towns.map((t) => t.receivers)).toEqual(game.towns.map((t) => t.receivers));
     const dock = copy.stations.get(sb.id)!;

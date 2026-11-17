@@ -7,7 +7,7 @@ import type { Vec } from '../core/vec';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import { Game } from './game';
-import { anchorOf, clearStrip, type End, openSpot, road, runMonths, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, clearStrip, type End, freshGame, openSpot, road, runMonths, runSeconds, STREET, withoutCitizens } from './testkit';
 
 // Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
 const WORLD: WorldSettings = { seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
@@ -27,7 +27,7 @@ function firstBase(game: Game): BuildBase {
 }
 
 function newGame(): Game {
-  return withoutCitizens(new Game({ ...WORLD }));
+  return withoutCitizens(freshGame({ ...WORLD }));
 }
 
 function buildGame(): Game {
@@ -282,7 +282,7 @@ describe('Стройка: запас на содержание', () => {
 
   it('недостроенный проект и прибыль: выручка идёт в стройку, а итоги месяца не уводят счёт за порог банкротства', async () => {
     const { advise } = await import('./advisor');
-    const game = withoutCitizens(new Game({ ...WORLD, scenario: { difficulty: 'normal', challenge: false } }));
+    const game = withoutCitizens(freshGame({ ...WORLD, scenario: { difficulty: 'normal', challenge: false } }));
     const sc = game.scenario!;
     expect(sc.running).toBe(true);
     firstBase(game);
@@ -331,7 +331,7 @@ describe('Стройка: запас на содержание', () => {
   });
 
   it('разовая покупка игрока может взять запас на содержание — с предупреждением; «Мгновенно» — так же', () => {
-    const game = withoutCitizens(new Game({ ...WORLD, construction: 'instant' }));
+    const game = withoutCitizens(freshGame({ ...WORLD, construction: 'instant' }));
     const at = freeSpot(game, 600);
     const plan = game.roadBuilder.road(anchorOf(game, { free: at }), anchorOf(game, { free: { x: at.x + 600, y: at.y } }), STREET);
     expect(plan.ok).toBe(true);
@@ -345,7 +345,7 @@ describe('Стройка: запас на содержание', () => {
     expect(game.money).toBe(ECONOMY.creditLimit);
     expect(warned()).toBe(true);
     // С запасом — без предупреждения.
-    const calm = withoutCitizens(new Game({ ...WORLD, construction: 'instant' }));
+    const calm = withoutCitizens(freshGame({ ...WORLD, construction: 'instant' }));
     const again = calm.roadBuilder.road(anchorOf(calm, { free: at }), anchorOf(calm, { free: { x: at.x + 600, y: at.y } }), STREET);
     calm.money = ECONOMY.creditLimit + calm.upkeepReserve + again.cost + 1000;
     expect(calm.roadBuilder.apply(again)).toBe(true);

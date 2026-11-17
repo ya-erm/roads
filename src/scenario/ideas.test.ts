@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Game } from '../game/game';
-import { runMonths, stationAtIndustry, withoutCitizens } from '../game/testkit';
+import { freshGame, runMonths, stationAtIndustry, withoutCitizens } from '../game/testkit';
 import { DEFAULT_SETTINGS, NEW_GAME_SETTINGS } from '../world/settings';
 import { assess } from './feasibility';
 import { IDEAS, ideaCandidates, ideaMoney } from './ideas';
@@ -12,7 +12,7 @@ import { leftPanelHtml, leftTabs } from '../ui/scenarioUi';
  * (как в советнике). Склад заводов пуст — каждый «ждёт сырьё».
  */
 function sandbox(plants = 1, settings = { ...DEFAULT_SETTINGS, seed: 42 }) {
-  const game = withoutCitizens(new Game(settings));
+  const game = withoutCitizens(freshGame(settings));
   game.money = 5_000_000;
   const list = game.industries.filter((i) => i.info.accepts.length === 1).slice(0, plants);
   for (const plant of list) {
@@ -197,7 +197,7 @@ describe('Задания без сроков («Идеи»)', () => {
   });
 
   it('кандидаты — только по сети игрока: без маршрутов предлагать нечего', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     for (const kind of ['input', 'export', 'town', 'link', 'supply'] as const) expect(ideaCandidates(game, kind)).toHaveLength(0);
     expect(ideaMoney(1000, 'goods')).toBe(IDEAS.money.max);
     expect(ideaMoney(1, 'grain')).toBe(IDEAS.money.min);

@@ -32,7 +32,8 @@ describe('Спецтранспорт городов', { timeout: 60_000 }, () =>
 
   it('в партии спецмашины выезжают сами, по городу; партия повторяется точь-в-точь, общий генератор не сбит', () => {
     const play = () => {
-      const game = new Game(7);
+      // Мир 7 — один на поток (freshGame): обе партии — копии одной свежей, генерация тут ни при чём.
+      const game = freshGame(7);
       const seen = new Map<number, string>();
       runSeconds(game, 90, () => {
         for (const v of game.traffic.vehicles.values()) {

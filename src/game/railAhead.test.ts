@@ -4,7 +4,7 @@ import type { Train } from '../sim/rail';
 import type { Station } from '../world/entities';
 import { RAIL_SPEC } from '../world/roadTypes';
 import { Game } from './game';
-import { runSeconds, withoutCitizens } from './testkit';
+import { freshGame, runSeconds, withoutCitizens } from './testkit';
 import type { StopRule } from './transport';
 
 /**
@@ -13,7 +13,7 @@ import type { StopRule } from './transport';
  */
 function railLine(along: number[], signals: number[] = []): { game: Game; stations: Station[] } {
   const len = 2800;
-  const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
+  const game = withoutCitizens(freshGame({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
   for (let y = 400; y < game.terrain.height - 400; y += 170) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 230) {
       for (const angle of [0, 0.3, -0.3]) {

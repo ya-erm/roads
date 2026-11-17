@@ -10,7 +10,7 @@ import { Game, type LotShape, type SaveData } from './game';
 import type { ParkChoice } from './parkSearch';
 import { PARK_SEARCH } from './parkSearch';
 import { PARKING_LAYER } from './parkingLayer';
-import { freshGame, runSeconds } from './testkit';
+import { freshGame, runSeconds, runUntil } from './testkit';
 
 /** Новая партия — с парковками (WorldSettings.parking): город ставит площадки у рынка и ратуши. */
 const PARK: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 1, size: 'medium' };
@@ -131,7 +131,9 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
     const g = freshGame(PARK);
     let left = 0;
     const wasOn = new Map<number, number>();
-    runSeconds(g, 200, () => {
+    // До 200 с — пока не уехал хоть один и всего гостей площадок больше трёх (обычно — за первые десятки секунд).
+    const onLots = () => g.towns.reduce((n, t) => n + (t.cars ?? []).filter((e) => e.lot !== undefined).length, 0);
+    runUntil(g, 200, () => left > 0 && onLots() + left > 3, () => {
       for (const t of g.towns) {
         for (const e of t.cars ?? []) if (e.lot !== undefined) wasOn.set(e.car, e.lot);
       }
@@ -214,7 +216,7 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
     g.carHomes.depart(trip, dest, { target: way!.node, then: (sim) => g.parkSearch.start(sim, trip, dest, choice) });
     let parked: TownCar | undefined;
     let counted = 0;
-    runSeconds(g, 240, () => {
+    runUntil(g, 240, () => !!parked, () => {
       const e = away(town, car.key);
       if (!parked && e?.lot === lot.id) {
         parked = { ...e };
@@ -229,7 +231,7 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
       expect(g.carHomes.leaveLot({ kind: 'back', car, town, from: dest, lot: { ref, stall: e.ls! } })).toBe(true);
       let home = false;
       let left = 0;
-      runSeconds(g, 240, () => {
+      runUntil(g, 240, () => home && left > 0, () => {
         left = Math.max(left, lot.month?.left ?? 0);
         home ||= g.carHomes.isHome(town, car.key);
       });
@@ -275,7 +277,7 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
     let refused = false;
     // Клетка цели на слое 🅿️ (счёт отказов — за месяц, Town.parkRefused).
     const cell = `${Math.floor(dest.fp.center.x / PARKING_LAYER.cell)}:${Math.floor(dest.fp.center.y / PARKING_LAYER.cell)}`;
-    runSeconds(g, 300, () => {
+    runUntil(g, 300, () => home && refused && badge, () => {
       block();
       const s = g.parkSearch.of(simId);
       if (s) tries = Math.max(tries, s.tries);

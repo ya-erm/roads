@@ -3,7 +3,7 @@ import { ECONOMY, MODEL_UNLOCK, MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import type { IndustryKind } from '../world/cargo';
 import type { Station } from '../world/entities';
-import { freightRoute, freshGame, runMonths, townStreets, withoutCitizens } from './testkit';
+import { breathe, freightRoute, freshGame, runMonths, townStreets, withoutCitizens } from './testkit';
 import { MODELS, modelsFor } from './transport';
 
 /**
@@ -86,7 +86,8 @@ describe('Экономика', { timeout: 60_000 }, () => {
     expect(v.bay).toBeUndefined();
   });
 
-  it('автобусы в городе окупаются', () => {
+  // async и паузы между месяцами (breathe): пять месяцев города с машинами жителей — под нагрузкой дольше минуты.
+  it('автобусы в городе окупаются', async () => {
     // Машины жителей здесь нужны: автобусы делят с ними улицы.
     const game = freshGame(7);
     game.money = 5_000_000;
@@ -106,6 +107,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
     game.buyVehicle(line.id, 'bus');
     game.buyVehicle(line.id, 'bus');
     runMonths(game, 1);
+    await breathe();
     const r0 = line.revenueTotal;
     let cost = 0;
     // Четыре месяца, а не два: рейс между остановками — около 50 с, месяц — минута, и за два месяца в счёт попадает то
@@ -114,6 +116,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
     for (let m = 0; m < 4; m++) {
       runMonths(game, 1);
       cost += line.costLast;
+      await breathe();
     }
     expect(line.revenueTotal - r0).toBeGreaterThan(cost);
   });

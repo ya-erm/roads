@@ -8,13 +8,13 @@ import { dist } from '../core/vec';
 import { mergeEdit, splitEdit } from '../lanes/nodeEdit';
 import type { WorldSettings } from '../world/settings';
 import { Game } from './game';
-import { anchorOf, openSpot, road, STREET, withoutCitizens } from './testkit';
+import { anchorOf, freshGame, openSpot, road, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
 /** Улица с запада на восток, стык посередине, база у стыка (его ворота — этот стык) и проект улицы на юг от восточного конца. */
 function setup() {
-  const game = withoutCitizens(new Game({ ...WORLD }));
+  const game = withoutCitizens(freshGame({ ...WORLD }));
   const at = openSpot(game, [
     [{ x: 0, y: 0 }, { x: 600, y: 0 }, 150],
     [{ x: 600, y: 0 }, { x: 600, y: 400 }, 120],

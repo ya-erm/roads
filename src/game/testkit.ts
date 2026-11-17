@@ -25,6 +25,27 @@ export function runSeconds(game: Game, seconds: number, each?: () => void): void
 }
 
 /**
+ * Пауза до следующего круга событий — внутри долгого (на десятки секунд) теста, между его кусками: в паузах поток
+ * тестов отвечает vitest, а без них дольше 60 с — «Timeout calling "onTaskUpdate"» (src/testSetup.ts). Тест — async.
+ * Не для тестов с vi.useFakeTimers: setTimeout там подменён.
+ */
+export const breathe = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Игра вперёд кадрами по 0.1 с (как runSeconds), пока не выполнится done, но не дольше seconds игровых секунд;
+ * each — после каждого кадра, до проверки done. true — дождались. Для тестов «ждать события, а не срок».
+ */
+export function runUntil(game: Game, seconds: number, done: () => boolean, each?: () => void): boolean {
+  game.speed = 1;
+  for (let t = 0; t < seconds; t += 0.1) {
+    game.update(0.1);
+    each?.();
+    if (done()) return true;
+  }
+  return false;
+}
+
+/**
  * Игра вперёд на months игровых месяцев (как runSeconds) — и ещё кадр: время партии копится шагами по 1/30 с,
  * и ровно months · MONTH_LENGTH секунд кадрами по 0.1 с может не дотянуть до границы месяца на доли наносекунды.
  */
@@ -56,6 +77,9 @@ const freshSaves = new Map<string, { settings: WorldSettings; save: string }>();
  * вызов отдаёт саму сгенерированную партию, следующие — её копию из сохранения, снятого сразу после генерации
  * (загрузка в несколько раз быстрее генерации). Копия — та же партия: то же сохранение и та же симуляция до бита,
  * с машинами жителей тоже; запись журнала о загрузке убрана. Партии друг от друга не зависят — каждую можно менять.
+ * Исключение: рост городов на смене месяца у сгенерированной партии и у её копии из сохранения идёт по-разному
+ * (seed 9, monthEnd.test.ts: другой генератор и номера улиц к концу второго месяца) — где сравнивают партии до бита
+ * с первой сгенерированной, нужен new Game.
  */
 export function freshGame(setup: WorldSettings | number): Game {
   const key = JSON.stringify(setup);

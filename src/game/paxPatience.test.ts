@@ -7,7 +7,7 @@ import { townTier } from '../world/townForms';
 import { advise } from './advisor';
 import { Game } from './game';
 import { PAX_WAIT, paxGone, paxGoneTo, paxLeaving, paxPatience, paxStayShare, paxTolerance } from './paxPatience';
-import { connectStations, HIGHWAY, runSeconds, townStreets, withoutCitizens } from './testkit';
+import { connectStations, freshGame, HIGHWAY, runSeconds, townStreets, withoutCitizens } from './testkit';
 
 describe('Терпение пассажиров: правило', () => {
   it('ждать готовы тем дольше, чем дальше ехать: 300 м — около минуты, 3 км — 6 мин, дальше 10 км — не дольше 20 мин', () => {
@@ -79,7 +79,7 @@ const FAR_POP = 400;
  * маршрут home → near → far с одним автобусом — машин мало, пассажиров много.
  */
 function crowdedLine(buses = 2) {
-  const game = withoutCitizens(new Game(7));
+  const game = withoutCitizens(freshGame(7));
   game.money = 5_000_000;
   const [a, ...rest] = [...game.towns].filter((t) => !t.labelOnly).sort((x, y) => y.population - x.population);
   // Соседний город за 2.5 км и дальше: туда ждут дольше, чем идёт автобус.

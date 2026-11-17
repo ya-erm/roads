@@ -4,8 +4,8 @@ import { add, dist, rightNormal, scale } from '../core/vec';
 import { RAIL_SPEC } from '../world/roadTypes';
 import type { Station } from '../world/entities';
 import type { RoadRequest } from './build';
-import { Game } from './game';
-import { freightRoute, runSeconds, withoutCitizens } from './testkit';
+import type { Game } from './game';
+import { freightRoute, freshGame, runSeconds, withoutCitizens } from './testkit';
 import { MODELS, type FleetVehicle, type ModelId, type RailModel, type RoadModel } from './transport';
 
 const road = (id: ModelId) => MODELS[id] as RoadModel;
@@ -13,7 +13,7 @@ const rail = (id: ModelId) => MODELS[id] as RailModel;
 
 /** Ферма → пищекомбинат по своей трассе, без машин жителей; грузовик на линии. */
 function truckRoute() {
-  const game = withoutCitizens(new Game(7));
+  const game = withoutCitizens(freshGame(7));
   const { built, line } = freightRoute(game);
   expect(built).toBe(true);
   const truck = game.buyVehicle(line.id, 'truck')!;
@@ -113,7 +113,7 @@ describe('Замена транспорта на модель новее', { tim
 
 /** Длинный путь в чистом поле с вокзалами у концов (как в railmove.test.ts), без машин жителей. */
 function railWorld(): { game: Game; a: Station; b: Station } {
-  const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' }));
+  const game = withoutCitizens(freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' }));
   const len = 2400;
   for (let y = 400; y < game.terrain.height - 400; y += 170) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 230) {

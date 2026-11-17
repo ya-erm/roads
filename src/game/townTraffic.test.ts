@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Game } from './game';
-import { runMonths } from './testkit';
+import { breathe, freshGame, runMonths } from './testkit';
 
 /**
  * Движение в городах не должно вставать со временем — иначе линии постепенно уходят в минус.
@@ -8,14 +7,17 @@ import { runMonths } from './testkit';
  * файлом, чтобы шёл параллельно с остальной экономикой (economy.test.ts).
  */
 describe('Экономика', { timeout: 120_000 }, () => {
-  it('движение в городах не встаёт со временем', () => {
-    const game = new Game(7);
+  // async и пауза после каждого месяца (breathe): тест идёт десятки секунд, под нагрузкой — дольше минуты.
+  it('движение в городах не встаёт со временем', async () => {
+    const game = freshGame(7);
     // Разгон: в первые месяцы машины жителей только разъезжаются по городу (во втором — пик прибытий), дальше — ровно.
     runMonths(game, 2);
+    await breathe();
     const arrivals: number[] = [];
     let last = game.traffic.arrivals;
     for (let m = 0; m < 6; m++) {
       runMonths(game, 1);
+      await breathe();
       arrivals.push(game.traffic.arrivals - last);
       last = game.traffic.arrivals;
     }

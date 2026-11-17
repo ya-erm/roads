@@ -9,7 +9,7 @@ import { openNet } from '../lanes/open';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import { Game } from './game';
-import { anchorOf, clearStrip, HIGHWAY, road, runSeconds, withoutCitizens } from './testkit';
+import { anchorOf, clearStrip, freshGame, HIGHWAY, road, runSeconds, withoutCitizens } from './testkit';
 
 /**
  * Шоссе 1+1, нарисованное кусками (стыки между ними), перестраивают в магистраль 2+2 по куску за раз (отчёт
@@ -39,7 +39,7 @@ function freeSpot(game: Game, len: number): Vec {
  * Ответ — игра, начало и id кусков по xs.
  */
 function scene(mode: 'build' | 'instant', xs: number[], profile: typeof HIGHWAY = HIGHWAY): { game: Game; at: Vec; pieces: number[] } {
-  const game = withoutCitizens(new Game({ ...WORLD, ...(mode === 'build' ? { construction: 'build' as const } : {}) }));
+  const game = withoutCitizens(freshGame({ ...WORLD, ...(mode === 'build' ? { construction: 'build' as const } : {}) }));
   const len = xs[xs.length - 1];
   const at = freeSpot(game, len);
   const gate = { x: at.x - 90, y: at.y };

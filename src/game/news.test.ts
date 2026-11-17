@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { Game } from './game';
 import { News, NEWS_LIMIT, NEWS_MONTHS, NOTICE_AFTER_PAUSE, NOTICE_LIFE } from './news';
+import { freshGame } from './testkit';
 
 describe('История событий', () => {
   it('хранит записи за последние NEWS_MONTHS месяцев, старые уходят', () => {
@@ -44,7 +45,7 @@ describe('История событий', () => {
   });
 
   it('в историю идут события партии (с видом), а не подсказки на действия игрока', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     const ind = game.industries[0];
     game.notify('Не хватает денег');
     game.notify(`${ind.name}: производство выросло`, '#2e9d57', { kind: 'industry', refs: [{ type: 'industry', id: ind.id }] });
@@ -55,7 +56,7 @@ describe('История событий', () => {
   });
 
   it('история и отметка «прочитано» сохраняются в партии', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     const town = game.towns[0];
     game.notify(`${town.name} растёт`, undefined, { kind: 'town', refs: [{ type: 'town', id: town.id }] });
     game.news.markRead();
@@ -67,7 +68,7 @@ describe('История событий', () => {
   });
 
   it('старое сохранение без истории открывается с пустой', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     const save = JSON.parse(JSON.stringify(game.toSave()));
     delete save.news;
     const loaded = new Game(game.settings, save);
@@ -76,7 +77,7 @@ describe('История событий', () => {
   });
 
   it('клик по плашке — запись прочитана, на колокольчике её нет; отметка сохраняется до открытия окна', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     const town = game.towns[0];
     game.notify('a', undefined, { kind: 'town', refs: [{ type: 'town', id: town.id }] });
     game.notify('b', undefined, { kind: 'goal' });
@@ -94,7 +95,7 @@ describe('История событий', () => {
   });
 
   it('крестик убирает только плашку — запись в истории остаётся непрочитанной', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     game.notify('Задание выполнено', undefined, { kind: 'goal' });
     game.closeNotice(game.notices[0].id);
     expect(game.notices).toHaveLength(0);
@@ -103,7 +104,7 @@ describe('История событий', () => {
   });
 
   it('на паузе плашки не гаснут; после паузы уходят по реальному времени', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     game.notify('Стройка закончена', undefined, { kind: 'build' });
     game.notify('Не хватает денег');
     game.update(5); // первое уже гаснет
@@ -122,7 +123,7 @@ describe('История событий', () => {
   });
 
   it('то же уведомление, пока прежнее на экране, — не второе, а прежнее заново внизу', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     game.notify('Не хватает денег');
     game.notify('Игра сохранена');
     game.notices[0].age = 4;

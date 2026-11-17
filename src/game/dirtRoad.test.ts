@@ -3,13 +3,13 @@ import { laneTipAt } from '../lanes/edit';
 import { twoWay } from '../lanes/model';
 import { DEFAULT_PRESET_ID, ROAD_CLASSES, ROAD_PRESETS, specCost, specKmh } from '../world/roadTypes';
 import { Game } from './game';
-import { fieldSpot, roadPlan, STREET, withoutCitizens } from './testkit';
+import { fieldSpot, freshGame, roadPlan, STREET, withoutCitizens } from './testkit';
 
 const DIRT = { cls: 'dirt' as const, lanes: twoWay(1, 1) };
 
 /** Ровная карта без городов и прямая дорога профиля profile с запада на восток в чистом поле. */
 function scene(profile = DIRT, extra: object = {}) {
-  const game = withoutCitizens(new Game({ seed: 1, size: 'small', towns: 0, industries: 'few', money: 5_000_000, water: 'dry', ...extra }));
+  const game = withoutCitizens(freshGame({ seed: 1, size: 'small', towns: 0, industries: 'few', money: 5_000_000, water: 'dry', ...extra }));
   const a = fieldSpot(game, 600);
   const plan = roadPlan(game, { free: a }, { free: { x: a.x + 600, y: a.y } }, profile);
   return { game, a, plan };

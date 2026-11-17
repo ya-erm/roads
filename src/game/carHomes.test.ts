@@ -193,10 +193,37 @@ describe('Парк машин жителей', { timeout: 120_000 }, () => {
     expect(seen(game, car)).toBe(true);
   });
 
-  it('«из ниоткуда»: машин, что появляются у узла, — меньше пятой части (было ~60 %), без своего места — ещё меньше', () => {
+  /**
+   * Партия seed 7 с машинами жителей на две минуты — одна на оба теста ниже (та же свежая партия, считается один раз,
+   * а не дважды): поток машин за всё время и снимок на первой минуте — сохранение и кто не дома.
+   */
+  type AtMinute = { away: number; shopCar: boolean; save: SaveData; settings: Game['settings']; towns: { carTrips?: number; cars?: unknown }[] };
+  let run: { flow: ReturnType<typeof watchCarFlow>['flow']; minute: AtMinute } | undefined;
+  const cityRun = () => {
+    if (run) return run;
     const game = freshGame(7);
     const w = watchCarFlow(game);
-    runSeconds(game, 120, () => w.frame());
+    let t = 0;
+    let minute: AtMinute | undefined;
+    runSeconds(game, 120, () => {
+      w.frame();
+      t += 0.1;
+      if (minute || t < 60) return;
+      minute = {
+        away: game.towns.reduce((s, x) => s + (x.cars?.length ?? 0), 0),
+        // Машины парка на стоянках магазинов — тоже с меткой машины.
+        shopCar: game.towns.some((x) => x.shopParked?.some((c) => c.car !== undefined)),
+        save: JSON.parse(JSON.stringify(game.toSave())) as SaveData,
+        settings: structuredClone(game.settings),
+        towns: structuredClone(game.towns.map((x) => ({ carTrips: x.carTrips, cars: x.cars }))),
+      };
+    });
+    run = { flow: w.flow, minute: minute! };
+    return run;
+  };
+
+  it('«из ниоткуда»: машин, что появляются у узла, — меньше пятой части (было ~60 %), без своего места — ещё меньше', () => {
+    const w = cityRun();
     const s = nowhereShare(w.flow);
     expect(w.flow.placeIn).toBeGreaterThan(300);
     expect(s.appear).toBeLessThan(0.25);
@@ -206,14 +233,11 @@ describe('Парк машин жителей', { timeout: 120_000 }, () => {
   });
 
   it('сохранение: кто не дома и номер поездки — с городом; после загрузки на местах ровно машины, что дома', () => {
-    const a = freshGame(7);
-    runSeconds(a, 60);
-    const away = a.towns.reduce((s, t) => s + (t.cars?.length ?? 0), 0);
-    expect(away).toBeGreaterThan(20);
-    // Машины парка на стоянках магазинов — тоже с меткой машины.
-    expect(a.towns.some((t) => t.shopParked?.some((c) => c.car !== undefined))).toBe(true);
-    const save = JSON.parse(JSON.stringify(a.toSave())) as SaveData;
-    const b = new Game(structuredClone(a.settings), save);
+    // Партия на первой минуте (cityRun): сохранение и что было в игре в тот кадр.
+    const a = cityRun().minute;
+    expect(a.away).toBeGreaterThan(20);
+    expect(a.shopCar).toBe(true);
+    const b = new Game(structuredClone(a.settings), structuredClone(a.save));
     for (const [i, t] of b.towns.entries()) {
       expect(t.carTrips).toBe(a.towns[i].carTrips);
       expect(t.cars).toEqual(a.towns[i].cars);

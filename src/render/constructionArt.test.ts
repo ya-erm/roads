@@ -5,7 +5,7 @@ import type { Vec } from '../core/vec';
 import { nextSite, pickSite } from '../game/constructionWork';
 import { Game } from '../game/game';
 import { wasCorridor } from '../game/rebuild';
-import { anchorOf, AVENUE, clearStrip, HIGHWAY, road, STREET, withoutCitizens } from '../game/testkit';
+import { anchorOf, AVENUE, clearStrip, freshGame, HIGHWAY, road, STREET, withoutCitizens } from '../game/testkit';
 import { closureOf, keepsPavement } from '../lanes/closure';
 import { type RoadOptions, splitCorridor } from '../lanes/edit';
 import { edgesAt } from '../lanes/geometry';
@@ -16,7 +16,7 @@ import { buildingCorridors, crewConvoy, crewRows, wideningBands } from './constr
 
 /** Прямой проект улицы вдоль x длиной len в чистом поле, разрезанный стыком посередине: два участка подряд. */
 function straightProject(len: number): { game: Game; y: number } {
-  const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
+  const game = withoutCitizens(freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
   for (let y = 400; y < game.terrain.height - 400; y += 120) {
     for (let x = 300; x < game.terrain.width - len - 300; x += 160) {
       const plan = game.roadBuilder.road(anchorOf(game, { free: { x, y } }), anchorOf(game, { free: { x: x + len, y } }), STREET, { project: true });
@@ -73,7 +73,7 @@ describe('Колонна техники стройки', () => {
   });
 
   it('ряды бригад — поровну по ширине полотна, каждая посередине своей полосы; на однополосном — бок о бок в пределах полотна', () => {
-    const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
+    const game = withoutCitizens(freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
     /** Полотно проекта профилем lanes вдоль x в поле, заполняется от конца fromB. */
     const site = (lanes: RoadOptions['lanes'], fromB: boolean): Corridor => {
       for (let y = 400; y < game.terrain.height - 400; y += 120) {
@@ -164,7 +164,7 @@ describe('Расширение дороги: прежний асфальт ос�
    * part — «◐ с проездом», иначе «⛔ целиком»; работы начаты (этапы stages от a).
    */
   function widened(to: RoadOptions, from: RoadOptions = HIGHWAY, part = true, stages: [number, number, number] = [260, 180, 100]): { game: Game; c: Corridor; y: number } {
-    const game = withoutCitizens(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
+    const game = withoutCitizens(freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
     for (let y = 400; y < game.terrain.height - 400; y += 120) {
       for (let x = 400; x < game.terrain.width - 900; x += 160) {
         if (!clearStrip(game, { x: x - 140, y }, { x: x + 540, y }, 200)) continue;

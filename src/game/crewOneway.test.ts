@@ -7,7 +7,7 @@ import type { WorldSettings } from '../world/settings';
 import type { RoadClass } from '../world/roadTypes';
 import { advise } from './advisor';
 import { Game } from './game';
-import { anchorOf, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, freshGame, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 /**
  * Подъезд к стройке без учёта направления полос: проект между двумя односторонними съездами (въезд к проекту и выезд
@@ -41,7 +41,7 @@ describe('Стройка: подъезд без учёта односторон�
    * x+1500; проект — от конца въезда до начала выезда. База — у улицы, у въезда (side: 'in') или у выезда ('out').
    */
   function scene(side: 'in' | 'out') {
-    const game = withoutCitizens(new Game(WORLD));
+    const game = withoutCitizens(freshGame(WORLD));
     const at = field(game, 1800);
     expect(road(game, { free: at }, { free: { x: at.x + 1800, y: at.y } })).toBe(true);
     const e1 = { x: at.x + 500, y: at.y + 250 };

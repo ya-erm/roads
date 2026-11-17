@@ -29,13 +29,13 @@ import {
   splitSeg,
   staleSignCorridors,
 } from './roadProject';
-import { road } from './testkit';
+import { freshGame, road } from './testkit';
 
 const STREET_SPEC: RoadSpec = { cls: 'street', lanesF: 1, lanesB: 1 };
 
 function dryGame(): Game {
   // Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
-  return new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  return freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
 }
 
 /** Цепочка проекта через точки: первый участок прямой, следующие — дугой, продолжая предыдущий. */

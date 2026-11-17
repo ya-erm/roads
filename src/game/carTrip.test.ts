@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import { carTripHtml } from '../ui/carTrip';
-import { Game } from './game';
 import { SERVICES } from './services';
-import { runSeconds } from './testkit';
+import { freshGame, runSeconds } from './testkit';
 
 /** Куда едет машина жителя и спецмашина: откуда и куда (здания и города), маршрут до цели, сколько ещё. */
 
@@ -11,7 +10,7 @@ const WORLD = { seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_0
 
 describe('Поездка машины жителя и спецмашины', { timeout: 60_000 }, () => {
   it('машина жителя знает, из какого дома и куда едет; маршрут — от неё до цели, сколько ещё — по маршруту', () => {
-    const game = new Game(WORLD);
+    const game = freshGame(WORLD);
     runSeconds(game, 15);
     const cars = [...game.traffic.vehicles.values()].filter((v) => game.tripOf(v.id) && !game.serviceOfSim(v.id));
     expect(cars.length).toBeGreaterThan(0);
@@ -62,7 +61,7 @@ describe('Поездка машины жителя и спецмашины', { t
   });
 
   it('спецмашина: вызов откуда и куда в своём городе, маршрут — её цветом в карточке и на карте', () => {
-    const game = new Game(WORLD);
+    const game = freshGame(WORLD);
     const town = game.towns.find((t) => t.buildings.filter((b) => b.kind === 'res').length > 5)!;
     const homes = town.buildings.filter((b) => b.kind === 'res');
     const from = homes[0];
@@ -87,7 +86,7 @@ describe('Поездка машины жителя и спецмашины', { t
   });
 
   it('выезды спецмашин сами запоминают вызов: откуда и куда', () => {
-    const game = new Game(WORLD);
+    const game = freshGame(WORLD);
     let seen = 0;
     runSeconds(game, 120, () => {
       for (const v of game.traffic.vehicles.values()) {

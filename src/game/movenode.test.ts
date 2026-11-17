@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { add, dist, dot, scale, Vec } from '../core/vec';
 import { alignNode, dragHandle, smoothCorner } from '../lanes/edit';
 import { Game } from './game';
-import { AVENUE, roadPlan, STREET } from './testkit';
+import { AVENUE, freshGame, roadPlan, STREET } from './testkit';
 
 /** Цепочка прямых улиц: на поворотах — излом (перекрёсток из двух дорог), а не плавная дуга. */
 const KINKED = { ...STREET, kink: true };
@@ -14,7 +14,7 @@ function runSeconds(game: Game, seconds: number) {
 
 function dryGame(): Game {
   // Средняя карта: два крупных города (TOWN_SCALE) на маленькой не оставляют поля под отдельные дороги.
-  return new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  return freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
 }
 
 /** Строит цепочку прямых улиц через точки, если всё помещается. Возвращает узлы по порядку. */
@@ -235,7 +235,7 @@ describe('Перенос узла', () => {
   });
 
   it('в городе: перекрёсток двигается, машины продолжают ездить', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     runSeconds(game, 10);
     const net = game.roads.net;
     // Сначала перекрёстки, у которых на дорогах больше всего машин.

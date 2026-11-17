@@ -3,9 +3,9 @@ import { GRADE } from '../config';
 import type { Vec } from '../core/vec';
 import { RoadTools } from '../input/roadtools';
 import { RAIL_SPEC } from '../world/roadTypes';
-import { Game } from './game';
+import type { Game } from './game';
 import { steepText, structureGradeProblem } from './grade';
-import { roadPlan } from './testkit';
+import { freshGame, roadPlan } from './testkit';
 
 const SPEC = { cls: 'highway' as const, lanesF: 1, lanesB: 1 };
 
@@ -35,7 +35,7 @@ describe('Уклон моста, эстакады и тоннеля', () => {
 describe('Стройка моста по склону', () => {
   /** Чистое место и склон: земля поднимается на slope м на метр к востоку от x0. */
   function slope(k: number) {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 500_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 500_000_000, water: 'dry' });
     let from: Vec | null = null;
     for (let y = 400; y < game.terrain.height - 400 && !from; y += 120) {
       for (let x = 300; x < game.terrain.width - 700 && !from; x += 160) {

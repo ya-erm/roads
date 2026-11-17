@@ -48,7 +48,14 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
     expect([...old.roads.net.corridors.values()].some((c) => c.lanes.some((l) => l.park))).toBe(false);
   });
 
-  it('машина встаёт у цели на место и потом уезжает с него; манёвр держит полосу недолго, на полосе — не больше одного на 30 ед.', () => {
+  /**
+   * Партия PARK с машинами жителей на две с половиной минуты — одна на оба теста ниже (та же свежая партия, считается
+   * один раз, а не дважды): манёвры у бордюра за всё время и снимок через полторы минуты — сохранение и кто у бордюра.
+   */
+  type AtNinety = { before: (string | number | undefined)[][]; save: SaveData; settings: WorldSettings };
+  let run: { g: Game; started: Map<MoveView, number>; inFlow: { fwd: number; rev: number }; crowded: number; left: number; at90: AtNinety } | undefined;
+  const cityRun = () => {
+    if (run) return run;
     const g = freshGame(PARK);
     const moves = (g.curb as unknown as { moves: MoveView[] }).moves;
     const started = new Map<MoveView, number>();
@@ -56,6 +63,8 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
     let crowded = 0;
     const seen = new Set<number>();
     let left = 0;
+    let elapsed = 0;
+    let at90: AtNinety | undefined;
     runSeconds(g, 150, () => {
       for (const m of moves) {
         if (m.kind !== 'in') continue;
@@ -79,7 +88,21 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
       for (const k of seen) if (!now.has(k)) left++;
       for (const k of now) seen.add(k);
       for (const k of [...seen]) if (!now.has(k)) seen.delete(k);
+      elapsed += 0.1;
+      if (!at90 && elapsed >= 90) {
+        at90 = {
+          before: atCurb(g).map((c) => [c.car, c.curb]),
+          save: JSON.parse(JSON.stringify(g.toSave())) as SaveData,
+          settings: structuredClone(g.settings),
+        };
+      }
     });
+    run = { g, started, inFlow, crowded, left, at90: at90! };
+    return run;
+  };
+
+  it('машина встаёт у цели на место и потом уезжает с него; манёвр держит полосу недолго, на полосе — не больше одного на 30 ед.', () => {
+    const { g, started, inFlow, crowded, left } = cityRun();
     expect(started.size).toBeGreaterThan(50);
     expect(atCurb(g).length).toBeGreaterThan(30);
     // Отстоявшие у цели уезжают с места.
@@ -97,12 +120,10 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
   });
 
   it('сохранение: машины у целей — на тех же местах; после правки сети место ищется по положению (3 ед.)', () => {
-    const g = freshGame(PARK);
-    runSeconds(g, 90);
-    const before = atCurb(g).map((c) => [c.car, c.curb]);
+    // Партия через полторы минуты (cityRun): сохранение и кто тогда стоял у бордюра.
+    const { before, save, settings } = cityRun().at90;
     expect(before.length).toBeGreaterThan(10);
-    const save = JSON.parse(JSON.stringify(g.toSave())) as SaveData;
-    const h = new Game(structuredClone(g.settings), save);
+    const h = new Game(structuredClone(settings), structuredClone(save));
     expect(atCurb(h).map((c) => [c.car, c.curb])).toEqual(before);
     expect(h.curb.isTaken(before[0][1] as string)).toBe(true);
     runSeconds(h, 1);

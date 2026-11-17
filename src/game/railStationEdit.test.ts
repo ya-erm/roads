@@ -6,10 +6,10 @@ import type { Station } from '../world/entities';
 import { RAIL_SPEC } from '../world/roadTypes';
 import { Game, railStationFee } from './game';
 import { joinCubics, stationShape, switchLenFor } from './railStationEdit';
-import { clearStrip, runSeconds, withoutCitizens } from './testkit';
+import { clearStrip, freshGame, runSeconds, withoutCitizens } from './testkit';
 
 const SERVES = { pax: true, cargo: true };
-const world = () => withoutCitizens(new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
+const world = () => withoutCitizens(freshGame({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
 
 /** Прямой путь длиной len (оба конца — тупики) в свободном месте; at(s, side) — точка вдоль него и сбоку. */
 function layTrack(game: Game, len: number): { at: (s: number, side?: number) => Vec } {

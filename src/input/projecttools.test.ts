@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { add, dist, dot, norm, sub, Vec } from '../core/vec';
-import { Game } from '../game/game';
+import type { Game } from '../game/game';
 import { handleOf, nodeAt, smoothPair } from '../game/roadProject';
-import { road } from '../game/testkit';
+import { freshGame, road } from '../game/testkit';
 import { type RoadSpec } from '../world/roadTypes';
 import { DrawSettings, ProjectTools } from './projecttools';
 
@@ -11,7 +11,7 @@ const R = 14;
 const HR = 10;
 
 function setup(): { game: Game; tools: ProjectTools; at: (x: number, y: number) => Vec; draw: DrawSettings } {
-  const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
   // Пустое место: рядом ни дорог, ни путей.
   let origin: Vec | null = null;
   for (let y = 500; y < game.terrain.height - 600 && !origin; y += 150) {

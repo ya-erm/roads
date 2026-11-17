@@ -7,7 +7,7 @@ import { pointInFootprint } from '../world/spatial';
 import type { Station } from '../world/entities';
 import { CURB_GAP } from '../lanes/traffic';
 import { clampDriveway, curbLayout, curbNeed, Game, type RoadStationOptions } from './game';
-import { fieldSpot, road, roadPlan, STREET, withoutCitizens } from './testkit';
+import { fieldSpot, freshGame, road, roadPlan, STREET, withoutCitizens } from './testkit';
 
 /** Карман станции вдоль дороги от её узла до съезда: половина площадки и съезд. */
 const pocket = STATION.size.w / 2 + STATION.pocketRun + STATION.pocketDiverge;
@@ -271,8 +271,9 @@ describe('Автовокзал вдоль дороги, с дублёром', ()
  * коротких не осталось).
  */
 const SHORT_BLOCK_SEEDS = [8, 10, 4];
+// freshGame: миры SHORT_BLOCK_SEEDS нужны обоим тестам ниже — генерируются один раз.
 const cityGame = (seed: number) => {
-  const game = withoutCitizens(new Game({ ...NEW_GAME_SETTINGS, seed, scenario: { difficulty: 'normal', challenge: false } }));
+  const game = withoutCitizens(freshGame({ ...NEW_GAME_SETTINGS, seed, scenario: { difficulty: 'normal', challenge: false } }));
   game.money = 1e9;
   return game;
 };

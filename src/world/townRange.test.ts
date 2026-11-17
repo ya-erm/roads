@@ -77,11 +77,13 @@ describe('Число городов по размеру карты (TOWN_RANGE)'
     expect(withSeed({ ...DEFAULT_SETTINGS, towns: 14 }, 7).towns).toBe(TOWN_RANGE.medium.max);
   });
 
-  // Мир по seed: песочница с наибольшим запросом и два крайних архетипа — самый густой и самый редкий.
+  // Мир по seed: песочница с наибольшим запросом и два крайних архетипа — самый густой и самый редкий. Маленькая
+  // карта — на двух seed, средняя и большая (генерация в разы дольше) — на одном, у каждой свой: seed всё равно разные.
+  const SEEDS: Record<MapSize, number[]> = { small: [3, 11], medium: [11], large: [3] };
   for (const size of SIZES) {
     it(`мир «${size}»: городов ${TOWN_RANGE[size].min}–${TOWN_RANGE[size].max} на разных seed, в песочнице и сценариях`, () => {
       const counts: string[] = [];
-      for (const seed of [3, 11]) {
+      for (const seed of SEEDS[size]) {
         const worlds: [string, WorldSettings][] = [
           ['песочница 20', { ...NEW_GAME_SETTINGS, size, seed, towns: 20, relief: 'hills' }],
           ['разрозненные', scenario(size, seed, 'scattered')],

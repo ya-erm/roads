@@ -3,8 +3,8 @@ import { dist } from '../core/vec';
 import type { Station } from '../world/entities';
 import { townTier } from '../world/townForms';
 import { FIRST_RUN, firstRunWaits } from './firstRun';
-import { Game } from './game';
-import { connectStations, HIGHWAY, townStreets, withoutCitizens } from './testkit';
+import type { Game } from './game';
+import { connectStations, freshGame, HIGHWAY, townStreets, withoutCitizens } from './testkit';
 import { DEFAULT_RULE, type FleetVehicle, vehicleLoad } from './transport';
 
 describe('Первый рейс маршрута: ждать ли пассажиров', () => {
@@ -62,7 +62,7 @@ const MIN_POP = 800;
 
 /** Автобусная линия между двумя ближними большими городами мира 7: станции в обоих, шоссе между ними. */
 function intercityLine() {
-  const game = withoutCitizens(new Game(7));
+  const game = withoutCitizens(freshGame(7));
   game.money = 5_000_000;
   const [a, ...rest] = [...game.towns].sort((x, y) => y.population - x.population);
   // Соседний город — не село.

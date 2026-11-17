@@ -7,13 +7,13 @@ import type { WorldSettings } from '../world/settings';
 import { projectName } from './construction';
 import { convoyGap, frontOf, spansOf, stageSpans } from './constructionWork';
 import { Game } from './game';
-import { anchorOf, clearStrip, type End, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, clearStrip, type End, freshGame, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' };
 
 /** «Со строительством», баз нет — первую игрок ставит сам. */
 function bareGame(extra: Partial<WorldSettings> = {}): Game {
-  return withoutCitizens(new Game({ ...WORLD, construction: 'build', ...extra }));
+  return withoutCitizens(freshGame({ ...WORLD, construction: 'build', ...extra }));
 }
 
 /**
@@ -170,7 +170,7 @@ describe('Стройка дорог: части', () => {
 
 describe('Стройка дорог: режим «Мгновенно»', () => {
   it('дорога строится сразу, проектов и баз нет', () => {
-    const game = withoutCitizens(new Game(WORLD));
+    const game = withoutCitizens(freshGame(WORLD));
     const at = freeSpot(game, 600);
     const money = game.money;
     expect(project(game, { free: at }, { free: { x: at.x + 600, y: at.y } })).toBe(true);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { add, dist, Vec } from '../core/vec';
 import { Game } from './game';
-import { clearStrip, road, roadPlan } from './testkit';
+import { clearStrip, freshGame, road, roadPlan } from './testkit';
 
 const RING = { lanes: 1, size: 'medium' as const };
 
@@ -35,7 +35,7 @@ function crossroads(game: Game): { c: Vec; arms: Vec[] } {
 
 describe('Кольцо', () => {
   it('кольцо на месте перекрёстка: по нему проезжают со всех сторон, Ctrl+Z возвращает перекрёсток', () => {
-    const game = new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     const { c, arms } = crossroads(game);
     const net = () => game.roads.net;
     const junction = net().nodesNear(c, 1)[0];

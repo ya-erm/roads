@@ -7,7 +7,7 @@ import { RAIL_SPEC, RoadSpec } from '../world/roadTypes';
 import type { RoadRequest, Snap } from './build';
 import { Game } from './game';
 import { snapRails } from './railFragment';
-import { clearStrip, road, roadPlan, STREET as STREET_LANES, withoutCitizens } from './testkit';
+import { clearStrip, freshGame, road, roadPlan, STREET as STREET_LANES, withoutCitizens } from './testkit';
 import { carsOf, vehicleCapacity } from './transport';
 import { wagonFills } from '../sim/wagons';
 import { CARGO } from '../world/cargo';
@@ -113,7 +113,7 @@ function junctionYard(game: Game, far: Vec[], withRoad = false): Vec {
 
 /** Путь с вокзалами в чистом поле — вдали от городов: без машин жителей (они не доезжают сюда, а счёт отнимают). */
 function railWorld(): { game: Game; a: Station; b: Station; from: Vec; dir: Vec } {
-  const game = withoutCitizens(new Game({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' }));
+  const game = withoutCitizens(freshGame({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' }));
   const len = 2400;
   const { from, dir } = layTrack(game, len);
   const n = { x: -dir.y, y: dir.x };
@@ -224,7 +224,7 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
   });
 
   it('станция на 4 пути и длина состава', () => {
-    const game = new Game({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' });
     // Две станции на 4 пути в чистом поле.
     const placed: Station[] = [];
     for (let y = 600; y < game.terrain.height - 600 && placed.length < 2; y += 300) {
@@ -258,7 +258,7 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
   });
 
   it('путь, пересекающий другой под пологим углом, пристыковывается к нему стрелкой', () => {
-    const game = new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
     const { from, dir } = layTrack(game, 1600);
     const n = { x: -dir.y, y: dir.x };
     // Под углом ~11°: раньше — «пересекаются слишком остро».
@@ -276,7 +276,7 @@ describe('Железная дорога', { timeout: 30_000 }, () => {
   });
 
   it('путь рядом: вдоль прямой и дуги, на расстоянии между путями, со стороны курсора', () => {
-    const game = new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
     const { from, dir } = layTrack(game, 1200);
     const n = { x: -dir.y, y: dir.x };
     const before = game.net.segments.size;
@@ -417,7 +417,7 @@ describe('Копирование и вставка путей', { timeout: 60_00
   const yardBox = (o: Vec): [Vec, Vec] => [add(o, { x: 50, y: -70 }), add(o, { x: 450, y: 70 })];
 
   it('стрелка с сигналом копируется рамкой и встаёт в чистом поле повёрнутой: по ней можно проехать', () => {
-    const game = new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
     const o = junctionYard(game, []);
     const frag = game.copyArea(...yardBox(o))!;
     expect(frag.corridors).toHaveLength(0);
@@ -492,7 +492,7 @@ describe('Копирование и вставка путей', { timeout: 60_00
   });
 
   it('путь с переездом копируется вместе с улицей и встаёт целиком: и дорога, и путь, и переезд', () => {
-    const game = new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
     const o = junctionYard(game, [], true);
     expect(game.levelCrossings).toHaveLength(1);
     const frag = game.copyArea(...yardBox(o))!;
@@ -507,7 +507,7 @@ describe('Копирование и вставка путей', { timeout: 60_00
   });
 
   it('мост копируется с высотой: пандусы и пролёт встают так же', () => {
-    const game = new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
+    const game = freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 9_000_000, water: 'dry' });
     // Пандус 200 м на мост, пролёт 120 м, пандус вниз.
     const xs = [0, 200, 320, 520];
     const levels = [0, 1, 1, 0];

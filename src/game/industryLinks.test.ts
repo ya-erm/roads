@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS } from '../world/settings';
-import { Game } from './game';
+import type { Game } from './game';
 import { industryFlow, type FlowWorld } from './industryLinks';
-import { freightRoute, nearestPair, withoutCitizens } from './testkit';
+import { freightRoute, freshGame, nearestPair, withoutCitizens } from './testkit';
 
 const world = (g: Game): FlowWorld => ({
   lines: g.lines.values(),
@@ -14,7 +14,7 @@ const world = (g: Game): FlowWorld => ({
 
 describe('откуда везут сырьё и куда продукцию — по маршрутам', () => {
   it('без маршрута сырьё никто не везёт и продукцию не вывозят', () => {
-    const g = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 5 }));
+    const g = withoutCitizens(freshGame({ ...DEFAULT_SETTINGS, seed: 5 }));
     const { b: plant } = nearestPair(g, 'farm', 'foodplant');
     const flow = industryFlow(plant, world(g));
     expect(flow.routed).toBe(false);
@@ -23,7 +23,7 @@ describe('откуда везут сырьё и куда продукцию — 
   });
 
   it('маршрут ферма → комбинат: у комбината зерно с фермы, у фермы зерно на комбинат', () => {
-    const g = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 5 }));
+    const g = withoutCitizens(freshGame({ ...DEFAULT_SETTINGS, seed: 5 }));
     const { from: farm, to: plant } = freightRoute(g);
     const p = industryFlow(plant, world(g));
     expect(p.routed).toBe(true);
@@ -37,7 +37,7 @@ describe('откуда везут сырьё и куда продукцию — 
   });
 
   it('пассажирский маршрут груз не возит — не в счёт', () => {
-    const g = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 5 }));
+    const g = withoutCitizens(freshGame({ ...DEFAULT_SETTINGS, seed: 5 }));
     const { to: plant } = freightRoute(g);
     const flow = industryFlow(plant, { ...world(g), freight: () => false });
     expect(flow.routed).toBe(false);

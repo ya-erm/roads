@@ -11,8 +11,8 @@ import { LaneGraph } from '../lanes/graph';
 import { findLaneRoute } from '../lanes/routing';
 import { queueMismatches, REROUTE_BATCH } from '../lanes/traffic';
 import type { Vehicle } from '../sim/vehicle';
-import { Game } from './game';
-import { runSeconds, STREET } from './testkit';
+import type { Game } from './game';
+import { freshGame, runSeconds, STREET } from './testkit';
 
 const searches = vi.mocked(findLaneRoute);
 
@@ -45,7 +45,7 @@ function where(game: Game, v: Vehicle) {
 
 /** Город с машинами жителей: партия по seed 7 после разгона. */
 function busyGame(): Game {
-  const game = new Game(7);
+  const game = freshGame(7);
   game.money = 1e9;
   runSeconds(game, 40);
   return game;
@@ -231,7 +231,7 @@ describe('Стройка и снос дорог: машины на новом г
   });
 
   it('граф, собранный с прежним (готовые манёвры и конфликты у узлов, что не менялись), — тот же, что заново', () => {
-    const game = new Game(7);
+    const game = freshGame(7);
     game.money = 1e9;
     const dump = (g: LaneGraph) =>
       JSON.stringify([

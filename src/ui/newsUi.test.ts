@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { Game } from '../game/game';
+import { freshGame } from '../game/testkit';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { newsBadge, newsHtml, newsRowGo, newsTarget, noticeHtml, noticeOpacity, noticeTextHtml } from './newsUi';
 
 describe('Окно «События»', () => {
   const setup = () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     const ind = game.industries[0];
     const town = game.towns[0];
     game.news.add(2, { kind: 'town', text: `${town.name} растёт`, refs: [{ type: 'town', id: town.id }] });
@@ -39,7 +39,7 @@ describe('Окно «События»', () => {
   });
 
   it('пусто — колокольчик и «Пока тихо»', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     expect(newsHtml(game, { kinds: new Set(), unread: new Set() })).toContain('Пока тихо');
   });
 
@@ -100,7 +100,7 @@ describe('Окно «События»', () => {
 
 describe('Всплывающее уведомление', () => {
   it('с местом — кнопка к нему, без значка-булавки; справа крестик с подсказкой data-tip', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     const ind = game.industries[0];
     game.notify('🚧 Стройка закончена: Перенос', '#3f9d5a', { kind: 'build', at: { pos: { x: 10, y: 20 }, r: 80 } });
     game.notify(`${ind.name}: выросло`, undefined, { kind: 'industry', refs: [{ type: 'industry', id: ind.id }] });
@@ -117,7 +117,7 @@ describe('Всплывающее уведомление', () => {
   });
 
   it('о предприятии — значки сырья и продукции перед его названием, с подсказками data-tip; в истории — так же', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     const name = 'стекольный завод';
     game.notify(`🏭 Открытие в городе Берёзовка: ${name}`, '#2e9d57', { kind: 'industry', recipe: { in: ['sand', 'coal'], out: 'glass', name } });
     const html = noticeHtml(game, game.notices[0]);
@@ -135,7 +135,7 @@ describe('Всплывающее уведомление', () => {
   });
 
   it('гаснет последние полторы секунды жизни', () => {
-    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
     game.notify('Игра сохранена');
     const n = game.notices[0];
     expect(noticeOpacity(n)).toBe(1);

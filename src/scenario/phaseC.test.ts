@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { Game } from '../game/game';
-import { stationAtIndustry } from '../game/testkit';
+import type { Game } from '../game/game';
+import { freshGame, stationAtIndustry } from '../game/testkit';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { connected, newRoutesCarried } from './analysis';
 import { PHASES } from './content';
@@ -8,7 +8,7 @@ import { assess } from './feasibility';
 import { liveProgress, makerKey, monthOk, titleOf } from './objectives';
 import type { Objective } from './types';
 
-const scenarioGame = (seed = 42) => new Game({ ...DEFAULT_SETTINGS, seed, scenario: { difficulty: 'normal', challenge: false } });
+const scenarioGame = (seed = 42) => freshGame({ ...DEFAULT_SETTINGS, seed, scenario: { difficulty: 'normal', challenge: false } });
 
 /** Главная цель текущего этапа выполнена — переходим на следующий. */
 function advance(game: Game): void {

@@ -4,7 +4,7 @@ import { Network } from '../world/network';
 import { RAIL_SPEC } from '../world/roadTypes';
 import type { RoadRequest } from './build';
 import { Game } from './game';
-import { RAIL_WORLD as WORLD, railProjectScene as railProject, railTrack as track, runSeconds, withoutCitizens } from './testkit';
+import { freshGame, RAIL_WORLD as WORLD, railProjectScene as railProject, railTrack as track, runSeconds, withoutCitizens } from './testkit';
 
 const building = (game: Game) => [...game.net.segments.values()].filter((s) => s.build);
 
@@ -96,7 +96,7 @@ describe('Стройка ж/д путей: «Со строительством»
   });
 
   it('нет вокзала — «нет вокзала»; путь не связан с вокзалом — «нет пути к стройке»: поезд не едет', () => {
-    const game = withoutCitizens(new Game(WORLD));
+    const game = withoutCitizens(freshGame(WORLD));
     let at: Vec | null = null;
     for (let y = 500; y < game.terrain.height - 500 && !at; y += 170) {
       for (let x = 300; x < game.terrain.width - 900 && !at; x += 230) {

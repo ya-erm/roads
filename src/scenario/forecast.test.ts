@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
-import { Game } from '../game/game';
-import { freightRoute, runSeconds, withoutCitizens } from '../game/testkit';
+import { freightRoute, freshGame, runSeconds, withoutCitizens } from '../game/testkit';
 import { MODELS } from '../game/transport';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { refOf } from './analysis';
@@ -126,7 +125,7 @@ describe('Прогноз к сроку', () => {
 describe('Расписание по линиям игры', () => {
   /** Сценарий с грузовым маршрутом ферма → пищекомбинат (на этой карте они рядом, ~640 м — маршрут строится). */
   function route() {
-    const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 7, scenario: { difficulty: 'easy', challenge: false } }));
+    const game = withoutCitizens(freshGame({ ...DEFAULT_SETTINGS, seed: 7, scenario: { difficulty: 'easy', challenge: false } }));
     const r = freightRoute(game);
     expect(r.built).toBe(true);
     const haul: Haul = { kind: 'cargo', cargo: r.from.info.produces, to: refOf(r.to) };

@@ -4,7 +4,7 @@ import type { Train } from '../sim/rail';
 import type { Station } from '../world/entities';
 import { RAIL_SPEC } from '../world/roadTypes';
 import { Game } from './game';
-import { withoutCitizens } from './testkit';
+import { freshGame, withoutCitizens } from './testkit';
 
 /** Поезд на стоянке уже стоит локомотивом к выезду — к следующей остановке линии (RailSim.orient). */
 
@@ -19,7 +19,7 @@ function runSeconds(game: Game, seconds: number, each?: () => void) {
 const SERVES = { pax: true, cargo: true };
 const NO_WAIT = { wait: 'none' as const, maxWait: null, load: 'auto' as const, unload: 'auto' as const };
 
-const world = () => withoutCitizens(new Game({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
+const world = () => withoutCitizens(freshGame({ seed: 11, size: 'medium', towns: 3, industries: 'few', money: 9_000_000, water: 'dry' }));
 
 /** Прямой путь вдоль x длиной len (оба конца — тупики) в свободном месте, где у концов встают конечные. */
 function layTrack(game: Game, len: number): (s: number, side?: number) => Vec {

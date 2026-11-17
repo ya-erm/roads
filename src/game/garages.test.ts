@@ -240,9 +240,13 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     expect(near().length).toBe(0);
   });
 
-  it('частота: на улице из 12 домов с машиной за минуту — хотя бы один выезд или въезд у гаража или площадки', { timeout: 120_000 }, () => {
-    // Поездки — по весу машин дома (game/carHomes.ts): у частных домов — пятая часть машин города (seed 7: ~520 из
-    // ~2600), у многоквартирных — остальные. На частный дом — выезд или въезд раз в ~3 минуты.
+  /**
+   * Партия seed 7 с машинами жителей на две с половиной минуты — одна на оба теста ниже (та же свежая партия,
+   * считается один раз, а не дважды): выезды и въезды у домов за всё время и у частных домов — после первой минуты.
+   */
+  let run: { game: Game; homes: number; late: number; T: number; outs: number; ins: number; counted: boolean } | undefined;
+  const cityRun = () => {
+    if (run) return run;
     const game = freshGame(7);
     let homes = 0;
     for (const t of game.towns)
@@ -250,41 +254,50 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
         const h = b.kind === 'res' ? game.garages.homeOf(b) : null;
         if (h && game.garages.slotOf(h)) homes++;
       }
-    runSeconds(game, 60);
     const seen = new Set<object>();
-    let events = 0;
-    const T = 90;
-    runSeconds(game, T, () => {
+    const seenLate = new Set<object>();
+    let outs = 0;
+    let ins = 0;
+    let late = 0;
+    let counted = true;
+    let t = 0;
+    const WARM = 60;
+    runSeconds(game, 150, () => {
+      t += 0.1;
+      // Машина во дворе — ещё не в потоке и не в счёте машин жителей.
+      counted &&= game.citizenCars + game.serviceCars === game.traffic.vehicles.size;
       for (const m of game.garages.moves) {
+        if (m.home.b.kind !== 'res') continue;
+        if (!seen.has(m)) {
+          seen.add(m);
+          if (m.kind === 'in') ins++;
+          else outs++;
+        }
         const form = formOf(m.home.b);
-        if (seen.has(m) || m.home.b.kind !== 'res' || (form !== 'cottage' && form !== 'dacha')) continue;
-        seen.add(m);
-        events++;
+        if (t > WARM && !seenLate.has(m) && (form === 'cottage' || form === 'dacha')) {
+          seenLate.add(m);
+          late++;
+        }
       }
     });
+    run = { game, homes, late, T: 150 - WARM, outs, ins, counted };
+    return run;
+  };
+
+  it('частота: на улице из 12 домов с машиной за минуту — хотя бы один выезд или въезд у гаража или площадки', { timeout: 120_000 }, () => {
+    // Поездки — по весу машин дома (game/carHomes.ts): у частных домов — пятая часть машин города (seed 7: ~520 из
+    // ~2600), у многоквартирных — остальные. На частный дом — выезд или въезд раз в ~3 минуты. Счёт — после минуты
+    // разгона, за T секунд.
+    const { homes, late: events, T } = cityRun();
     // Выезд или въезд на дом — раз в столько секунд; на 12 домах за минуту — столько.
     const perHome = T / (events / homes);
     const per60on12 = (60 * 12) / perHome;
     expect(per60on12).toBeGreaterThan(0.6);
   });
 
-  it('по seed: одна и та же партия — те же выезды и возвращения; сохранение несёт уехавшие машины', () => {
-    const a = freshGame(7);
-    let outs = 0;
-    let ins = 0;
-    const seen = new Set<object>();
-    let counted = true;
+  it('по seed: одна и та же партия — те же выезды и возвращения; сохранение несёт уехавшие машины', { timeout: 120_000 }, () => {
     // Возвращения — после срока у цели и дороги обратно: первые на своих местах ко второй минуте.
-    runSeconds(a, 150, () => {
-      // Машина во дворе — ещё не в потоке и не в счёте машин жителей.
-      counted &&= a.citizenCars + a.serviceCars === a.traffic.vehicles.size;
-      for (const m of a.garages.moves) {
-        if (seen.has(m) || m.home.b.kind !== 'res') continue;
-        seen.add(m);
-        if (m.kind === 'in') ins++;
-        else outs++;
-      }
-    });
+    const { game: a, outs, ins, counted } = cityRun();
     const state = (g: Game) => g.towns.map((t) => [t.carTrips ?? 0, JSON.stringify(t.cars ?? [])]);
     // За две с половиной минуты со своих мест у домов выезжали и на них возвращались.
     expect(counted).toBe(true);

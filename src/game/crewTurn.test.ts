@@ -9,7 +9,7 @@ import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
 import { CREW_UNITS, type CrewLane, crewSpacing, lanePose, laneCarPose, laneTrail, planTurn, TURN_SPEED, turnRoom, U_TURN } from './crewLane';
 import { Game } from './game';
-import { anchorOf, AVENUE, clearStrip, road, runSeconds, STREET, withoutCitizens } from './testkit';
+import { anchorOf, AVENUE, clearStrip, freshGame, road, runSeconds, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' };
 
@@ -26,7 +26,7 @@ function nodeAt(game: Game, p: Vec): number | null {
 
 /** Готовая улица 1+1 длиной len на восток с подъездом от базы с запада и куском улицы за дальним концом (как в rebuild.test.ts). */
 function scene(len = 600): { game: Game; c: Corridor; at: Vec; base: BuildBase } {
-  const game = withoutCitizens(new Game(WORLD));
+  const game = withoutCitizens(freshGame(WORLD));
   let at: Vec | null = null;
   for (let y = 400; y < game.terrain.height - 400 && !at; y += 120) {
     for (let x = 300; x < game.terrain.width - len - 300 && !at; x += 160) {

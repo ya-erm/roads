@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { bezPoint, minRadius } from '../core/bezier';
 import { add, dot, norm, scale, sub, Vec } from '../core/vec';
-import { Game } from '../game/game';
-import { HIGHWAY, road, roadPlan, STREET } from '../game/testkit';
+import type { Game } from '../game/game';
+import { freshGame, HIGHWAY, road, roadPlan, STREET } from '../game/testkit';
 import { ROAD_CLASSES } from '../world/roadTypes';
 import type { Corridor, LaneNet } from './model';
 import { jointOf, mergeEdit, mergePreview, mergeProblem, splitEdit, splitProblem, toggleJointEdit } from './nodeEdit';
 
 function dryGame(): Game {
-  return new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  return freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
 }
 
 /** Свободное место, где дорога от o до o+d (и вокруг) строится. */

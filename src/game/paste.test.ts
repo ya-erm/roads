@@ -5,11 +5,11 @@ import { profileOf } from '../lanes/model';
 import type { RoadSpec } from '../world/roadTypes';
 import { DEFAULT_RING } from './roads';
 import { Game } from './game';
-import { AVENUE, road, roadPlan } from './testkit';
+import { AVENUE, freshGame, road, roadPlan } from './testkit';
 
 const MOTORWAY: RoadSpec = { cls: 'motorway', lanesF: 2, lanesB: 2 };
 
-const newGame = () => new Game({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 50_000_000, water: 'dry' });
+const newGame = () => freshGame({ seed: 11, size: 'medium', towns: 2, industries: 'few', money: 50_000_000, water: 'dry' });
 
 /** Первое место сетки, где получилось. */
 function somewhere(game: Game, step: number, margin: number, tryAt: (p: Vec) => boolean): Vec {
