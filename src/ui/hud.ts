@@ -1,3 +1,4 @@
+import { flag, readText, writeText } from '../core/store';
 import { dist } from '../core/vec';
 import type { RingSize } from '../game/roads';
 import { curbNeed, platformCars, railStationFee, SAVE_VERSION, type Game, type Ledger, type Partner } from '../game/game';
@@ -402,6 +403,9 @@ function supplyChart(months: { label: string; got: number; carried?: number; nee
 /** Длинное название модели в карточке покупки: в одну строку, шрифт подгоняется под ширину карточки. */
 const buyNameCls = (name: string): string => (name.length > 10 ? ' class="buy-name-long"' : '');
 
+/** Выбранная вкладка левой панели — в хранилище браузера. */
+const LEFT_TAB_KEY = 'roads.leftTab';
+
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
 /** Скачивает текст файлом name (как «Сохранить в файл» у партии). */
@@ -430,13 +434,13 @@ export class Hud {
   /** Свой шаблон, который игрок собрался удалить: ждёт подтверждения в окне. */
   private deletingTemplate: string | null = null;
   /** Список линий свёрнут до заголовка (запоминается в браузере). */
-  private linesCollapsed = localStorage.getItem('roads.linesCollapsed') === '1';
+  private readonly linesCollapsed = flag('roads.linesCollapsed');
   /** График скорости в карточке линии раскрыт (для всех линий). */
-  private speedChartOpen = localStorage.getItem('roads.speedChart') === '1';
+  private readonly speedChartOpen = flag('roads.speedChart');
   /** clientX курсора над графиком скорости (null — курсор не на графике): после перерисовки панели — подсказка там же. */
   private speedHoverX: number | null = null;
   /** Деньги в карточке линии раскрыты: под прибылью — доход / расходы, этот месяц, всего (для всех линий). */
-  private lineMoneyOpen = localStorage.getItem('roads.lineMoney') === '1';
+  private readonly lineMoneyOpen = flag('roads.lineMoney');
   private readonly minimap: Minimap;
   private lastOptions = '';
   private panelTimer = 0;
@@ -453,9 +457,9 @@ export class Hud {
   /** Потребности городов, раскрытые в диаграмму по месяцам: `город:груз`. */
   private readonly needsOpen = new Set<string>();
   /** Блок «Что нужно городу» свёрнут до одной строки — у всех городов (запоминается в браузере). */
-  private needsFolded = localStorage.getItem('roads.needsFolded') === '1';
+  private readonly needsFolded = flag('roads.needsFolded');
   /** Свёрнутые списки «Куда везти» (out) и «Откуда везти» (in) — у всех городов и предприятий (запоминается в браузере). */
-  private readonly partnersFolded = new Set((localStorage.getItem('roads.partnersFolded') ?? '').split(',').filter(Boolean));
+  private readonly partnersFolded = new Set((readText('roads.partnersFolded') ?? '').split(',').filter(Boolean));
   /** Карточка маршрута открыта из панели города: крестик вернёт к нему. Сбрасывается, как только карточка закрылась. */
   private lineBack: LineBack | null = null;
   /** Папка, у которой сейчас открыто поле названия. */
@@ -483,13 +487,9 @@ export class Hud {
   /** Новая игра уже создаётся (текущая партия сохраняется): повторные нажатия не в счёт. */
   private starting = false;
   /** Панель сценария свёрнута до заголовка (запоминается в браузере). */
-  private scenarioCollapsed = localStorage.getItem('roads.scenarioCollapsed') === '1';
-  /**
-   * Выбранная вкладка левой панели (запоминается в браузере); её нет в партии — показывается первая. Прежняя
-   * вкладка «Идеи» — теперь «События».
-   */
-  private leftTab: LeftTab =
-    (['scenario', 'events', 'build'] as const).find((t) => t === localStorage.getItem('roads.leftTab')?.replace(/^ideas$/, 'events')) ?? 'scenario';
+  private readonly scenarioCollapsed = flag('roads.scenarioCollapsed');
+  /** Выбранная вкладка левой панели (запоминается в браузере); её нет в партии — показывается первая. */
+  private leftTab: LeftTab = (['scenario', 'events', 'build'] as const).find((t) => t === readText(LEFT_TAB_KEY)) ?? 'scenario';
   /** Задания, у которых в панели раскрыто «почему». */
   private readonly whyOpen = new Set<string>();
   /** «Следующий этап» нажат один раз: второе нажатие переводит этап. */
@@ -742,7 +742,7 @@ export class Hud {
     this.bindStationName(root);
     this.bindBaseName(root);
     this.bindProjectName(root);
-    controller.onChange = () => this.sync(true);
+    controller.listen(() => this.sync(true));
     // Esc, когда на карте отменять нечего, — меню; поверх другого окна (правила, брифинг) — нет.
     controller.onMenu = () => {
       if (!this.anyScreen()) this.openMenu();
@@ -1321,7 +1321,7 @@ export class Hud {
         // Вкладка левой панели; в свёрнутой — ещё и развернуть, чтобы было видно, что на ней.
         const tab = d.id as LeftTab;
         this.openLeftTab(tab);
-        if (this.scenarioCollapsed) this.setLeftCollapsed(false);
+        if (this.scenarioCollapsed.on) this.setLeftCollapsed(false);
         this.refreshLeft();
         break;
       }
@@ -1452,7 +1452,7 @@ export class Hud {
         this.lastFinance = '';
         break;
       case 'sc-toggle':
-        this.setLeftCollapsed(!this.scenarioCollapsed);
+        this.setLeftCollapsed(!this.scenarioCollapsed.on);
         this.refreshLeft();
         break;
       case 'sc-why':
@@ -1529,8 +1529,7 @@ export class Hud {
       }
       case 'toggle-needs':
         // «Что нужно городу» сворачивается до одной строки: значки грузов в кольцах заполнения.
-        this.needsFolded = !this.needsFolded;
-        localStorage.setItem('roads.needsFolded', this.needsFolded ? '1' : '0');
+        this.needsFolded.on = !this.needsFolded.on;
         break;
       case 'hint':
         // «?» в заголовке только показывает подсказку (data-tip): клик по нему блок не сворачивает.
@@ -1539,7 +1538,7 @@ export class Hud {
         // «Куда везти» / «Откуда везти» сворачиваются до заголовка со значками грузов.
         const dir = d.dir === 'out' ? 'out' : 'in';
         if (!this.partnersFolded.delete(dir)) this.partnersFolded.add(dir);
-        localStorage.setItem('roads.partnersFolded', [...this.partnersFolded].join(','));
+        writeText('roads.partnersFolded', [...this.partnersFolded].join(','));
         break;
       }
       case 'chain-cargo': {
@@ -1578,16 +1577,13 @@ export class Hud {
         break;
       }
       case 'toggle-speed-chart':
-        this.speedChartOpen = !this.speedChartOpen;
-        localStorage.setItem('roads.speedChart', this.speedChartOpen ? '1' : '0');
+        this.speedChartOpen.on = !this.speedChartOpen.on;
         break;
       case 'toggle-line-money':
-        this.lineMoneyOpen = !this.lineMoneyOpen;
-        localStorage.setItem('roads.lineMoney', this.lineMoneyOpen ? '1' : '0');
+        this.lineMoneyOpen.on = !this.lineMoneyOpen.on;
         break;
       case 'toggle-lines':
-        this.linesCollapsed = !this.linesCollapsed;
-        localStorage.setItem('roads.linesCollapsed', this.linesCollapsed ? '1' : '0');
+        this.linesCollapsed.on = !this.linesCollapsed.on;
         break;
       case 'terrain-mode':
         c.setTerrainMode(d.id === 'lower' || d.id === 'flatten' ? d.id : 'raise');
@@ -2939,7 +2935,7 @@ export class Hud {
       ? ''
       : `<button class="small with-ic" data-action="new-folder" title="Папка для маршрутов: перетащите в неё строки маршрутов">${folderSvg(15)}Папка</button>`;
     // Заголовок сворачивает весь список; кнопки — рядом с ним, наверху.
-    const collapsed = this.linesCollapsed;
+    const collapsed = this.linesCollapsed.on;
     const head = `<header class="lines-head">
         <button class="lines-toggle" data-action="toggle-lines" title="${collapsed ? 'Развернуть' : 'Свернуть'} список">
           <span class="caret ${collapsed ? 'closed' : ''}">${chevronSvg()}</span><h3>${title}</h3>${list.length ? `<span class="muted">${list.length}</span>` : ''}</button>
@@ -3296,7 +3292,7 @@ export class Hud {
         .lineAdvice(line)
         .map((a) => `<p class="tip">${esc(a)}</p>`)
         .join('')}
-      <div class="kv">${lineMoneyHtml(line, this.lineMoneyOpen)}
+      <div class="kv">${lineMoneyHtml(line, this.lineMoneyOpen.on)}
         <span>Перевезено</span><b>${line.carriedLast}</b>
         ${linePaceHtml(g, line)}
         <span>Загрузка рейсов</span><b>${line.loadLast === undefined || line.loadLast === null ? '—' : `${Math.round(line.loadLast * 100)}%`}</b>
@@ -3421,7 +3417,7 @@ export class Hud {
     const g = this.game();
     const chart = g.lineSpeedChart(line);
     if (!chart) return null;
-    const open = this.speedChartOpen;
+    const open = this.speedChartOpen.on;
     const kmh = Math.round(chart.avg * KMH_PER_UNIT);
     const tip = `${open ? 'Свернуть' : 'Развернуть'} график скорости по маршруту: ограничения, повороты, подъёмы и спуски`;
     const row = `<span>Средняя скорость</span><b><button class="speed-toggle" data-action="toggle-speed-chart" title="${tip}">${kmh} км/ч<span class="caret ${
@@ -3820,7 +3816,7 @@ export class Hud {
         lastNeed,
       }));
       // Свёрнутый блок — одной строкой в заголовке (needsHeadHtml), строки потребностей не нужны.
-      const rows = this.needsFolded
+      const rows = this.needsFolded.on
         ? ''
         : demands
             .map(({ cargo: c, now, carried, last }) => {
@@ -3854,7 +3850,7 @@ export class Hud {
           linked: d.lines.length > 0 || d.now > 0,
         })),
       };
-      const paxRow = this.needsFolded ? '' : paxNeedHtml(pax);
+      const paxRow = this.needsFolded.on ? '' : paxNeedHtml(pax);
       const faces = { good: '😊', ok: '😐', bad: '😠' };
       const reviews = g
         .townReviews(t)
@@ -3867,7 +3863,7 @@ export class Hud {
         ${streets}
         ${townRowsHtml(g, t)}
         <h4>Что говорят жители</h4>${reviews}
-        ${needsHeadHtml(demands, need, this.needsFolded, pax)}${rows}${paxRow}
+        ${needsHeadHtml(demands, need, this.needsFolded.on, pax)}${rows}${paxRow}
         ${this.partnersHtml(g.partners(t, 2))}</section>`;
     }
     if (sel.type === 'junction') return this.junctionHtml(sel.id);
@@ -4715,7 +4711,7 @@ export class Hud {
    */
   private openLeftTab(tab: LeftTab, reveal = false): void {
     this.leftTab = tab;
-    localStorage.setItem('roads.leftTab', tab);
+    writeText(LEFT_TAB_KEY, tab);
     if (reveal) {
       this.q('[data-finance]').classList.add('hidden');
       this.q('[data-advisor]').classList.add('hidden');
@@ -4725,8 +4721,7 @@ export class Hud {
 
   /** Свернуть левую панель до заголовка, вкладок и компактной строки (запоминается). */
   private setLeftCollapsed(on: boolean): void {
-    this.scenarioCollapsed = on;
-    localStorage.setItem('roads.scenarioCollapsed', on ? '1' : '0');
+    this.scenarioCollapsed.on = on;
   }
 
   toggleFinance(): void {
@@ -4761,7 +4756,7 @@ export class Hud {
     if (!show || this.pressing) return;
     const sel = this.controller.selection;
     const html = leftPanelHtml(g, {
-      collapsed: this.scenarioCollapsed,
+      collapsed: this.scenarioCollapsed.on,
       open: this.whyOpen,
       confirmAdvance: this.confirmAdvance,
       tab,

@@ -1,35 +1,23 @@
 /**
- * Имя в баг-репорте: поле «Ваше имя» запоминается в браузере, чтобы не вводить его каждый раз.
- * Хранилище передаётся снаружи (localStorage или подделка в тестах); недоступное хранилище — просто без памяти.
+ * Имя в баг-репорте: поле «Ваше имя» запоминается в браузере (core/store), чтобы не вводить его каждый раз;
+ * недоступное хранилище — просто без памяти.
  */
+import { readText, writeText } from '../core/store';
 
 export const AUTHOR_KEY = 'roads.bugReportName';
 /** Столько символов имени принимает публичная отправка доски. */
 export const AUTHOR_MAX = 32;
-
-type Read = Pick<Storage, 'getItem'>;
-type Write = Pick<Storage, 'setItem' | 'removeItem'>;
 
 /** Имя без лишних пробелов и не длиннее AUTHOR_MAX. */
 export function cleanAuthor(name: string): string {
   return name.replace(/\s+/g, ' ').trim().slice(0, AUTHOR_MAX).trim();
 }
 
-export function loadAuthor(storage: Read | null): string {
-  try {
-    return cleanAuthor(storage?.getItem(AUTHOR_KEY) ?? '');
-  } catch {
-    return '';
-  }
+export function loadAuthor(): string {
+  return cleanAuthor(readText(AUTHOR_KEY) ?? '');
 }
 
 /** Запоминает имя; пустое — забывает. */
-export function saveAuthor(storage: Write | null, name: string): void {
-  const v = cleanAuthor(name);
-  try {
-    if (v) storage?.setItem(AUTHOR_KEY, v);
-    else storage?.removeItem(AUTHOR_KEY);
-  } catch {
-    // Хранилище закрыто (приватный режим, запрет) — имя просто не запомнится.
-  }
+export function saveAuthor(name: string): void {
+  writeText(AUTHOR_KEY, cleanAuthor(name) || null);
 }

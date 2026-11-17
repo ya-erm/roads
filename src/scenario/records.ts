@@ -1,9 +1,10 @@
 /**
- * Личные рекорды сценариев — в браузере (localStorage): лучший итог для каждой карты и условий.
+ * Личные рекорды сценариев — в браузере (core/store): лучший итог для каждой карты и условий.
  * Ключ — seed, сложность, испытание и архетип, под который генерируется карта (по seed или выбранный
- * игроком): при тех же условиях получаются тот же мир и тот же сценарий. Без localStorage (тесты,
+ * игроком): при тех же условиях получаются тот же мир и тот же сценарий. Без хранилища (тесты,
  * приватный режим, переполненное хранилище) рекордов просто нет — ошибок не бывает.
  */
+import { asRecord, readJson, writeJson } from '../core/store';
 import type { WorldSettings } from '../world/settings';
 import { prepareSettings } from './generator';
 import type { ArchetypeId, Difficulty, ScoreResult } from './types';
@@ -46,22 +47,8 @@ export function slotOf(settings: WorldSettings): RecordSlot | null {
 
 const slotKey = (s: RecordSlot) => `${s.seed}:${s.difficulty}:${s.challenge ? 'c' : 'p'}:${s.archetype}`;
 
-function storage(): Storage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage;
-  } catch {
-    return null;
-  }
-}
-
 function readAll(): Record<string, ScenarioRecord> {
-  try {
-    const raw = storage()?.getItem(KEY);
-    const data: unknown = raw ? JSON.parse(raw) : null;
-    return data && typeof data === 'object' && !Array.isArray(data) ? (data as Record<string, ScenarioRecord>) : {};
-  } catch {
-    return {};
-  }
+  return asRecord(readJson(KEY)) as Record<string, ScenarioRecord>;
 }
 
 const valid = (r: ScenarioRecord | undefined): r is ScenarioRecord => !!r && typeof r.total === 'number' && Number.isFinite(r.total);
@@ -86,10 +73,7 @@ export function saveBest(slot: RecordSlot, score: ScoreResult, now = Date.now())
     const old = keys.sort((a, b) => (all[a]?.at ?? 0) - (all[b]?.at ?? 0)).slice(0, keys.length - LIMIT);
     for (const k of old) delete all[k];
   }
-  try {
-    storage()?.setItem(KEY, JSON.stringify(all));
-  } catch {
-    // Места нет — рекорд останется только на экране.
-  }
+  // Места нет — рекорд останется только на экране.
+  writeJson(KEY, all);
   return { best, previous, isNew };
 }

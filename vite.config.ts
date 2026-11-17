@@ -12,6 +12,9 @@ import { defaultExclude } from 'vitest/config';
  */
 const ISOLATED_TESTS = [
   'src/core/idle.test.ts',
+  'src/core/store.test.ts',
+  'src/bugreport/author.test.ts',
+  'src/input/toolPrefs.test.ts',
   'src/ui/prefs.test.ts',
   'src/ui/settingsMenu.test.ts',
   'src/input/baseTool.test.ts',

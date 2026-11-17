@@ -383,7 +383,16 @@ export class Controller {
    * кружками с номерами, отпустили на остановке — машина начинает работу с неё (buyDropped).
    */
   dragBuy: { line: number; model: ModelId } | null = null;
-  onChange: () => void = () => {};
+  private readonly listeners = new Set<() => void>();
+  /** Подписка на смену инструмента, режима, выбора, начатого (интерфейс, запоминание инструментов); ответ — отписка. */
+  listen(fn: () => void): () => void {
+    this.listeners.add(fn);
+    return () => void this.listeners.delete(fn);
+  }
+  /** Что-то поменялось — подписчикам. */
+  onChange(): void {
+    for (const fn of this.listeners) fn();
+  }
   /** Esc, когда отменять нечего: открыть меню игры (ставит интерфейс). */
   onMenu: () => void = () => {};
   private mouse = { x: 0, y: 0 };

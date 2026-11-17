@@ -5,6 +5,7 @@
  * раздел меню (src/ui/settingsMenu.ts) покажет её сам. Ни от чего в игре не зависит (кроме «Задания без сроков»:
  * её Hud передаёт в `game.ideas`); без браузера (тесты) и с битым хранилищем — всё как по умолчанию.
  */
+import { asRecord, readJson, writeJson } from '../core/store';
 
 export type Pref = 'junctionMarks' | 'mapCache' | 'ideas';
 
@@ -85,49 +86,27 @@ export const PREFS: readonly PrefInfo[] = [
 ];
 
 const KEY = 'roads.prefs';
-/** Прежнее хранилище (его писал только переключатель тестовой страницы): не читаем, при записи убираем. */
-const LEGACY_KEY = 'roads.flags';
 
 const isPref = (s: string): s is Pref => PREFS.some((p) => p.id === s);
 
-/** Хранилище браузера или null (тесты в node, запрещённое хранилище). */
-function storage(): Storage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage;
-  } catch {
-    return null;
-  }
-}
-
 /** Что игрок выбрал и сохранил; битое или чужое значение — ничего. */
-function readStored(): Partial<Record<Pref, boolean>> {
+function readChosen(): Partial<Record<Pref, boolean>> {
   const out: Partial<Record<Pref, boolean>> = {};
-  try {
-    const raw = storage()?.getItem(KEY);
-    const obj: unknown = raw ? JSON.parse(raw) : null;
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return out;
-    for (const [k, v] of Object.entries(obj)) if (isPref(k) && typeof v === 'boolean') out[k] = v;
-  } catch {
-    // Битое значение — как будто не выбирали.
-  }
+  for (const [k, v] of Object.entries(asRecord(readJson(KEY)))) if (isPref(k) && typeof v === 'boolean') out[k] = v;
   return out;
 }
 
+/**
+ * Выбор игрока: из хранилища — при загрузке и при смене в другой вкладке; setPref — сюда и в хранилище (не вышло
+ * записать — выбор действует до перезагрузки). Настройку спрашивают каждый кадр: хранилище каждый раз не читаем.
+ */
+let chosen = readChosen();
 /** Только на этой странице (`overridePref`): главнее всего. */
 const overrides = new Map<Pref, boolean>();
-/** Выбор `setPref` в этой загрузке — на случай, если хранилище недоступно: сохранённое (и из других вкладок) главнее. */
-const session = new Map<Pref, boolean>();
-/** Итог; null — пересчитать (настройку спрашивают каждый кадр — читать хранилище каждый раз незачем). */
-let state: Map<Pref, boolean> | null = null;
+const defaults = new Map(PREFS.map((p) => [p.id, p.default]));
 const listeners = new Set<() => void>();
 
-function compute(): Map<Pref, boolean> {
-  const stored = readStored();
-  return new Map(PREFS.map((p) => [p.id, overrides.get(p.id) ?? stored[p.id] ?? session.get(p.id) ?? p.default]));
-}
-
 function changed(): void {
-  state = null;
   for (const fn of [...listeners]) {
     try {
       fn();
@@ -139,8 +118,7 @@ function changed(): void {
 
 /** Настройка включена: выбор игрока (сохранённый или в этой загрузке), иначе — как по умолчанию. */
 export function prefOn(name: Pref): boolean {
-  state ??= compute();
-  return state.get(name) ?? false;
+  return overrides.get(name) ?? chosen[name] ?? defaults.get(name) ?? false;
 }
 
 /**
@@ -149,16 +127,8 @@ export function prefOn(name: Pref): boolean {
  */
 export function setPref(name: Pref, on: boolean): void {
   overrides.delete(name);
-  session.set(name, on);
-  const stored = readStored();
-  stored[name] = on;
-  try {
-    const s = storage();
-    s?.setItem(KEY, JSON.stringify(stored));
-    s?.removeItem(LEGACY_KEY);
-  } catch {
-    // Хранилище недоступно или переполнено — настройка всё равно переключена до перезагрузки.
-  }
+  chosen = { ...chosen, [name]: on };
+  writeJson(KEY, chosen);
   changed();
 }
 
@@ -181,7 +151,9 @@ export function onPrefs(fn: () => void): () => void {
 try {
   if (typeof window !== 'undefined') {
     window.addEventListener('storage', (e) => {
-      if (e.key === KEY || e.key === null) changed();
+      if (e.key !== KEY && e.key !== null) return;
+      chosen = readChosen();
+      changed();
     });
   }
 } catch {

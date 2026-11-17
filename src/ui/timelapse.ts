@@ -10,6 +10,7 @@
 
 import './timelapse.css';
 import { splitBezier, type Cubic } from '../core/bezier';
+import { flag } from '../core/store';
 import type { Game } from '../game/game';
 import { buildTimeline, recCurve, timelapseOf, TL_LAYERS, TL_STEP, tlLayers, type Timeline, type TimelapseSource, type TlItem, type TlLayer } from '../game/timelapse';
 import { ReliefRenderer, waterPath } from '../render/relief';
@@ -85,21 +86,6 @@ function linesSvg(on: boolean, size = 18): string {
   return `<svg viewBox="0 0 22 16" width="${Math.round((size * 22) / 16)}" height="${size}">${line}${stations}${slash}</svg>`;
 }
 
-function storedLines(): boolean {
-  try {
-    return localStorage.getItem(LINES_KEY) !== '0';
-  } catch {
-    return true;
-  }
-}
-
-function storeLines(on: boolean): void {
-  try {
-    localStorage.setItem(LINES_KEY, on ? '1' : '0');
-  } catch {
-    // Хранилище запрещено — просто не запомним.
-  }
-}
 
 /** Значки SVG без <title>: та всплывает системной подсказкой. */
 const noTitle = (svg: string) => svg.replace(/<title>[^<]*<\/title>/g, '');
@@ -178,7 +164,7 @@ class TimelapsePlayer {
   private playing = false;
   private speed = 1;
   /** Линии маршрутов по прямой между станциями: показаны или скрыты (и в видео так же). */
-  private lines = storedLines();
+  private readonly lines = flag(LINES_KEY, true);
   private scrubbing = false;
   /** Пауза перед стартом (и в видео — на первом кадре), с. */
   private hold = 0.4;
@@ -477,8 +463,7 @@ class TimelapsePlayer {
   /** Скрыть или показать линии маршрутов (во время записи — нельзя: видео пишется как выбрано). */
   private toggleLines(): void {
     if (this.recorder) return;
-    this.lines = !this.lines;
-    storeLines(this.lines);
+    this.lines.on = !this.lines.on;
   }
 
   /** Перемотка по шкале: нажать и тянуть. */
@@ -606,13 +591,14 @@ class TimelapsePlayer {
     }
     for (const b of this.root.querySelectorAll<HTMLElement>('[data-tl="speed"]')) b.classList.toggle('active', Number(b.dataset.v) === this.speed);
     const lines = this.q('.tl-lines');
-    const shown = this.lines ? 'on' : 'off';
+    const on = this.lines.on;
+    const shown = on ? 'on' : 'off';
     if (lines.dataset.state !== shown) {
       lines.dataset.state = shown;
-      lines.innerHTML = linesSvg(this.lines);
-      lines.classList.toggle('off', !this.lines);
-      lines.setAttribute('aria-pressed', String(this.lines));
-      lines.dataset.tip = this.lines ? 'Скрыть линии маршрутов · L' : 'Показать линии маршрутов · L';
+      lines.innerHTML = linesSvg(on);
+      lines.classList.toggle('off', !on);
+      lines.setAttribute('aria-pressed', String(on));
+      lines.dataset.tip = on ? 'Скрыть линии маршрутов · L' : 'Показать линии маршрутов · L';
     }
     const video = this.root.querySelector<HTMLElement>('.tl-video');
     if (video) {
@@ -736,7 +722,7 @@ class TimelapsePlayer {
     this.strokeChanging(s, 't', u);
 
     // Маршруты — цветной линией по остановкам (если не скрыты); новый прочерчивается.
-    if (this.lines) {
+    if (this.lines.on) {
       ctx.lineWidth = LINE_WIDTH * px;
       for (const item of s.stable.l) this.drawLine(item, 1, 1);
       for (const item of s.appear.l) this.drawLine(item, ease(u), Math.min(1, u * 2));

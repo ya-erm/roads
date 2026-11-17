@@ -103,15 +103,6 @@ import { APP_VERSION } from '../version';
 /** Сборка игры — хеш файла сборки (на локальном сервере — dev): в отчёт и сведения архива. */
 const BUILD = buildLabel(import.meta.url);
 
-/** Хранилище браузера для имени; закрыто (приватный режим, запрет) — без памяти. */
-function storage(): Storage | null {
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
 export interface BugReportDeps {
   /** Холст карты. */
   canvas: HTMLCanvasElement;
@@ -574,7 +565,7 @@ class BugReport {
     this.drag = null;
     this.sent = null;
     this.desc.value = '';
-    this.nameInput.value = loadAuthor(storage());
+    this.nameInput.value = loadAuthor();
     this.include.shot = this.include.journal = this.include.save = this.include.area = true;
     this.scheme = null;
     this.thanks.classList.add('hidden');
@@ -745,7 +736,7 @@ class BugReport {
     if (t === this.textEdit) return this.onEditInput();
     if (t === this.desc) return this.changed();
     if (t === this.nameInput) {
-      saveAuthor(storage(), this.nameInput.value);
+      saveAuthor(this.nameInput.value);
       return this.changed();
     }
     if (t instanceof HTMLInputElement && t.dataset.bugCustom !== undefined) {

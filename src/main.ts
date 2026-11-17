@@ -83,7 +83,7 @@ const hud = new Hud(hudRoot, controller, () => game, {
 // Инструмент и его режимы — как до перезагрузки. Тестовая сцена всегда начинает с «Выбора» и выбор в ней
 // не запоминается: снимки сцены не зависят от того, что выбрано в обычной игре, и наоборот.
 // В первой партии «Дорога» — сразу с «Проектом» (toolPrefs: defaultToolPrefs).
-if (!scene) rememberTools(controller, { played: saved !== null });
+if (!scene) rememberTools(controller);
 
 function persist(manual = false): void {
   if (scene && !manual) return;

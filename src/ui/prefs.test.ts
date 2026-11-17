@@ -37,15 +37,13 @@ describe('Настройки интерфейса', () => {
   });
 
   it('setPref сохраняет в localStorage roads.prefs и сообщает подписчикам; после перезагрузки — как выбрали', async () => {
-    // В прежнем хранилище флагов разметка была выключена (пустой список) — оно не читается.
-    const { prefs, store } = await load(memoryStorage({ 'roads.flags': '[]' }));
+    const { prefs, store } = await load();
     expect(prefs.prefOn('junctionMarks')).toBe(true);
     const seen: boolean[] = [];
     const off = prefs.onPrefs(() => seen.push(prefs.prefOn('junctionMarks')));
     prefs.setPref('junctionMarks', false);
     expect(prefs.prefOn('junctionMarks')).toBe(false);
     expect(JSON.parse(store!.getItem('roads.prefs')!)).toEqual({ junctionMarks: false });
-    expect(store!.getItem('roads.flags')).toBeNull();
     off();
     prefs.setPref('junctionMarks', true);
     expect(seen).toEqual([false]);
