@@ -1,7 +1,9 @@
 import { hash } from '../core/math';
 import { dist, type Vec } from '../core/vec';
-import type { Corridor, LaneNet } from '../lanes/model';
+import { CORNER_CUT_MAX } from '../lanes/geometry';
+import type { Corridor, LaneNet, LaneNode } from '../lanes/model';
 import type { Town, TownPark } from '../world/entities';
+import { inPolygon, junctionPlate, polyDist } from '../world/lotClear';
 import { ROAD_MARGIN } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
 import { corridorHalf, curbGap, halfAtS } from '../world/worldgen';
@@ -479,50 +481,146 @@ export const LAMP_ZOOM = 1.4;
  */
 const ALLEY = { step: 9, end: 14, off: 4.4 };
 const LAMPS = { step: 27, off: 0.9 };
+/**
+ * Не ближе стольких метров к площадке перекрёстка (асфальт со скруглениями углов): дерево — за тротуаром, как вдоль
+ * полотна (ALLEY.off от края, с запасом), фонарь — у самого бордюра.
+ */
+const PLATE_CLEAR = { tree: ALLEY.off - 0.6, lamp: 0.4 };
+/** Аллея полотна зависит от полотен не дальше стольких метров от его оси (деревья — в ~10 м от неё, соседи — в 30 м). */
+const ALLEY_REACH = 50;
+
+/** Площадка перекрёстка для проверки деревьев: контур и его рамка. */
+interface Plate {
+  poly: Vec[];
+  box: Box;
+}
+
+/** Рамка оси полотна — по точкам таблицы длин (она общая у копий сети: на протяжке — тот же объект). */
+const axisBoxes = new WeakMap<object, Box>();
+function axisBox(c: Corridor): Box {
+  let b = axisBoxes.get(c.lut);
+  if (!b) {
+    b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    for (const p of c.lut.points) b = { x0: Math.min(b.x0, p.x), y0: Math.min(b.y0, p.y), x1: Math.max(b.x1, p.x), y1: Math.max(b.y1, p.y) };
+    axisBoxes.set(c.lut, b);
+  }
+  return b;
+}
+
+/** Подпись узла для кэша аллей: всё, от чего его площадка, — вид, уровень, скругления углов и формы его полотен. */
+function nodeSig(roads: LaneNet, n: LaneNode): string {
+  let s = `${n.id}:${n.kind}:${n.level}:${n.roundabout ?? ''}:`;
+  if (n.corners) for (const k of Object.keys(n.corners).sort()) s += `${k}=${n.corners[k]},`;
+  for (const id of n.corridors) s += `${roads.corridors.get(id)?.rev ?? 0},`;
+  return s;
+}
 
 /**
  * Аллеи и фонари городов: вдоль проспектов в черте города — ряд деревьев по обе стороны между тротуаром и участками
- * домов, вдоль улиц и проспектов — фонари в шахматном порядке (пока выключены, LAMPS_ON). Не у перекрёстков, не на
- * других полотнах, не на остановках и строениях (busy), не на мостах и в тоннелях. Тротуары — render/sidewalks.ts.
+ * домов, вдоль улиц и проспектов — фонари в шахматном порядке (пока выключены, LAMPS_ON). Не у перекрёстков и не на
+ * их площадках (со скруглёнными игроком углами — тоже), не на других полотнах, не на остановках и строениях (busy), не
+ * на мостах и в тоннелях. Тротуары — render/sidewalks.ts.
+ *
+ * cache — между пересчётами (и на протяжке правки — по сети с правкой): аллея полотна берётся оттуда, пока те же его
+ * форма, узлы на концах (скругления углов, примыкания), полотна рядом и перекрёстки со скруглёнными углами в досягаемости.
+ * Поменялось что-то из них — сдвинули или повернули узел, скруглили угол, перестроили соседнюю дорогу — считается заново.
+ * only — только эти полотна (на протяжке — alleyScope): остальные аллеи правка не меняет.
  */
 export function streetGreen(
   roads: LaneNet,
   towns: readonly Pick<Town, 'center' | 'radius'>[],
   busy: (p: Vec, r: number) => boolean,
   cache?: Map<number, { sig: string; line: StreetGreen | null }>,
+  only?: ReadonlySet<number>,
 ): StreetGreen[] {
   const out: StreetGreen[] = [];
-  for (const c of roads.corridors.values()) {
+  const list = only ? [...only].flatMap((id) => roads.corridors.get(id) ?? []) : roads.corridors.values();
+  // Скруглённые игроком углы: дуга бордюра уходит от узла до обрезов подъездов (до CORNER_CUT_MAX) — далеко за «у узла».
+  const rounded: LaneNode[] = [];
+  for (const n of roads.nodes.values()) if (n.corners && n.kind === 'junction') rounded.push(n);
+  const plates = new Map<number, Plate | null>();
+  const plateOf = (n: LaneNode): Plate | null => {
+    let p = plates.get(n.id);
+    if (p === undefined) {
+      const poly = n.level === 0 ? junctionPlate(roads, n) : null;
+      let box: Box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+      for (const q of poly ?? []) box = { x0: Math.min(box.x0, q.x), y0: Math.min(box.y0, q.y), x1: Math.max(box.x1, q.x), y1: Math.max(box.y1, q.y) };
+      plates.set(n.id, (p = poly ? { poly, box } : null));
+    }
+    return p;
+  };
+  for (const c of list) {
     if (c.build || c.ring || (c.cls !== 'avenue' && c.cls !== 'street')) continue;
     const na = roads.node(c.a);
     const nb = roads.node(c.b);
     if (na.level !== 0 || nb.level !== 0) continue;
     const mid = c.lut.pointAt(c.length / 2);
     if (!towns.some((t) => dist(mid, t.center) < t.radius)) continue;
-    // Полотно то же и у его узлов те же примыкания — аллея та же (cache — между пересчётами).
-    const key = `${c.rev}|${na.corridors.length}|${nb.corridors.length}`;
+    const box = axisBox(c);
+    const near = roads.corridorsInBox(box.x0 - ALLEY_REACH, box.y0 - ALLEY_REACH, box.x1 + ALLEY_REACH, box.y1 + ALLEY_REACH);
+    near.sort((p, q) => p.id - q.id);
+    const reach = CORNER_CUT_MAX + ALLEY_REACH;
+    const far = rounded.filter(
+      (n) => n !== na && n !== nb && n.pos.x > box.x0 - reach && n.pos.x < box.x1 + reach && n.pos.y > box.y0 - reach && n.pos.y < box.y1 + reach,
+    );
+    let key = `${c.rev}|${nodeSig(roads, na)}|${nodeSig(roads, nb)}|`;
+    for (const o of near) if (o !== c) key += `${o.id}:${o.rev},`;
+    for (const n of far) key += `|${nodeSig(roads, n)}`;
     const had = cache?.get(c.id);
     if (had?.sig === key) {
       if (had.line) out.push(had.line);
       continue;
     }
-    const line = alleyOf(roads, c, busy);
+    const around: Plate[] = [];
+    for (const n of [na, nb, ...far]) {
+      const p = plateOf(n);
+      if (p && !around.includes(p)) around.push(p);
+    }
+    const line = alleyOf(roads, c, busy, around);
     cache?.set(c.id, { sig: key, line });
     if (line) out.push(line);
   }
   return out;
 }
 
-/** Аллея и фонари одного полотна (streetGreen). */
-function alleyOf(roads: LaneNet, c: Corridor, busy: (p: Vec, r: number) => boolean): StreetGreen | null {
+/**
+ * Полотна сети next (копия before с правкой), чьи аллеи правка может поменять: changed — полотна и узлы правки (как
+ * sidewalkScope). Аллея полотна зависит от полотен в ALLEY_REACH от него (до и после правки) и от скруглённых углов
+ * перекрёстков дальше — до CORNER_CUT_MAX (там кончается дуга бордюра).
+ */
+export function alleyScope(before: LaneNet, next: LaneNet, changed: { corridors: ReadonlySet<number>; nodes: ReadonlySet<number> }): Set<number> {
+  const out = new Set<number>(changed.corridors);
+  const take = (b: Box, pad: number) => {
+    for (const c of next.corridorsInBox(b.x0 - pad, b.y0 - pad, b.x1 + pad, b.y1 + pad)) out.add(c.id);
+  };
+  for (const net of [before, next]) {
+    for (const id of changed.corridors) {
+      const c = net.corridors.get(id);
+      if (c) take(axisBox(c), ALLEY_REACH);
+    }
+    for (const id of changed.nodes) {
+      const n = net.nodes.get(id);
+      if (n) take({ x0: n.pos.x, y0: n.pos.y, x1: n.pos.x, y1: n.pos.y }, ALLEY_REACH + (n.corners ? CORNER_CUT_MAX : 0));
+    }
+  }
+  return out;
+}
+
+/** Аллея и фонари одного полотна (streetGreen); plates — площадки перекрёстков, куда не сажать. */
+function alleyOf(roads: LaneNet, c: Corridor, busy: (p: Vec, r: number) => boolean, plates: readonly Plate[]): StreetGreen | null {
   // Другие полотна подходят близко у узлов (пересекаются улицы в узле), а под острым углом к узлу — и дальше от него:
-  // там полоса стоянки соседней улицы (с одной стороны — curbGap) доходит до аллеи.
-  const free = (p: Vec, r: number, s: number) => {
+  // там полоса стоянки соседней улицы (с одной стороны — curbGap) доходит до аллеи. Площадка перекрёстка со
+  // скруглённым углом выходит далеко за края полотен: дуга бордюра срезает угол квартала.
+  const free = (p: Vec, r: number, s: number, clear: number) => {
     if (busy(p, r)) return false;
     const mid = s > 45 && s < c.length - 45;
     for (const o of roads.corridorsNear(p, 30)) {
       if (o === c) continue;
       if (mid ? curbGap(o, p) < r + 0.5 : o.lut.closest(p).d < corridorHalf(o) + r + 0.5) return false;
+    }
+    for (const { poly, box } of plates) {
+      if (p.x < box.x0 - clear || p.x > box.x1 + clear || p.y < box.y0 - clear || p.y > box.y1 + clear) continue;
+      if (inPolygon(p, poly) || polyDist(p, poly) < clear) return false;
     }
     return mid || !roads.nodesNear(p, 4 + r).length;
   };
@@ -536,7 +634,7 @@ function alleyOf(roads: LaneNet, c: Corridor, busy: (p: Vec, r: number) => boole
       for (const side of [1, -1]) {
         const r = 1.8 + hash(c.id * 31 + side, Math.round(s)) * 0.6;
         const q = { x: p.x - t.y * side * (hw + ALLEY.off), y: p.y + t.x * side * (hw + ALLEY.off) };
-        if (free(q, r, s)) trees.push(q.x, q.y, r);
+        if (free(q, r, s, PLATE_CLEAR.tree)) trees.push(q.x, q.y, r);
       }
     }
   }
@@ -547,7 +645,7 @@ function alleyOf(roads: LaneNet, c: Corridor, busy: (p: Vec, r: number) => boole
       const side = k % 2 ? 1 : -1;
       const off = halfAtS(c, s) + LAMPS.off - ROAD_MARGIN;
       const q = { x: p.x - t.y * side * off, y: p.y + t.x * side * off };
-      if (free(q, 0.4, s)) lamps.push(q.x, q.y);
+      if (free(q, 0.4, s, PLATE_CLEAR.lamp)) lamps.push(q.x, q.y);
     }
   }
   if (!trees.length && !lamps.length) return null;

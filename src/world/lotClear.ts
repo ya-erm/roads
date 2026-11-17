@@ -1,6 +1,6 @@
 import { closestOnSegment, type Vec } from '../core/vec';
 import { junctionCuts, plateOutline } from '../lanes/geometry';
-import type { LaneNet } from '../lanes/model';
+import type { LaneNet, LaneNode } from '../lanes/model';
 import { type Footprint, footprintRadius, pointInFootprint } from './spatial';
 import { halfAtS } from './worldgen';
 
@@ -25,22 +25,33 @@ export function lotClearOfRoads(net: LaneNet, fp: Footprint, edge: number): bool
     for (let s = 0; s <= c.length; s += 3) if (pointInFootprint(c.lut.pointAt(Math.min(s, c.length)), fp, edge)) return false;
   }
   for (const n of net.nodesNear(fp.center, R + edge + 40)) {
-    if (n.level < 0 || n.kind !== 'junction' || net.ends(n).length < 2) continue;
-    const ends = net.ends(n);
-    const plate = plateOutline(
-      net,
-      n,
-      junctionCuts(
-        net,
-        ends.map((e) => e.corridor),
-        [n],
-      ),
-    )?.poly;
-    if (!plate || plate.length < 3) continue;
+    if (n.level < 0) continue;
+    const plate = junctionPlate(net, n);
+    if (!plate) continue;
     for (const q of plate) if (pointInFootprint(q, fp, edge)) return false;
     for (const q of pts) if (inPolygon(q, plate) || polyDist(q, plate) < edge) return false;
   }
   return true;
+}
+
+/**
+ * Асфальт площадки перекрёстка n — контур со скруглениями углов (plateOutline по обрезам только его подъездов), как
+ * он рисуется. Не перекрёсток или меньше двух подъездов — null.
+ */
+export function junctionPlate(net: LaneNet, n: LaneNode): Vec[] | null {
+  if (n.kind !== 'junction') return null;
+  const ends = net.ends(n);
+  if (ends.length < 2) return null;
+  const plate = plateOutline(
+    net,
+    n,
+    junctionCuts(
+      net,
+      ends.map((e) => e.corridor),
+      [n],
+    ),
+  )?.poly;
+  return plate && plate.length >= 3 ? plate : null;
 }
 
 /** Точки контура участка через step м (и углы). */
@@ -81,7 +92,8 @@ export function lotGrid(fp: Footprint, step: number): Vec[] {
   return out;
 }
 
-function inPolygon(p: Vec, poly: readonly Vec[]): boolean {
+/** Точка внутри многоугольника (чётно-нечётно). */
+export function inPolygon(p: Vec, poly: readonly Vec[]): boolean {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
     const a = poly[i];
@@ -91,7 +103,8 @@ function inPolygon(p: Vec, poly: readonly Vec[]): boolean {
   return inside;
 }
 
-function polyDist(p: Vec, poly: readonly Vec[]): number {
+/** Расстояние от точки до контура многоугольника. */
+export function polyDist(p: Vec, poly: readonly Vec[]): number {
   let best = Infinity;
   for (let i = 0; i < poly.length; i++) best = Math.min(best, closestOnSegment(p, poly[i], poly[(i + 1) % poly.length]).d);
   return best;

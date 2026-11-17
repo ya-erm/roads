@@ -1,4 +1,5 @@
 import type { Vec } from '../core/vec';
+import { inPolygon, polyDist } from '../world/lotClear';
 
 /** Дерево карты: где стоит и спрятано ли (под дорогой, путями, строением). */
 export interface CoverTree {
@@ -8,6 +9,27 @@ export interface CoverTree {
 
 /** Кто прячет деревья: кружки x, y, r подряд. Ключ — что угодно, по чему его узнать в следующий раз. */
 export type Hiders = Map<unknown, number[]>;
+
+/**
+ * Кружки, что прячут деревья на многоугольнике poly и в pad м вокруг (площадка перекрёстка со скруглёнными углами):
+ * сеткой через step м — точки внутри и у самого контура, радиусом на пол-диагонали клетки больше pad.
+ */
+export function polygonHiders(poly: readonly Vec[], pad: number, step = 5): number[] {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const p of poly) [x0, y0, x1, y1] = [Math.min(x0, p.x), Math.min(y0, p.y), Math.max(x1, p.x), Math.max(y1, p.y)];
+  const out: number[] = [];
+  const half = step * Math.SQRT1_2;
+  for (let x = x0 + step / 2; x < x1 + step / 2; x += step) {
+    for (let y = y0 + step / 2; y < y1 + step / 2; y += step) {
+      const p = { x, y };
+      if (inPolygon(p, poly) || polyDist(p, poly) < half) out.push(x, y, pad + half);
+    }
+  }
+  return out;
+}
 
 /** Клетка сетки деревьев, м. */
 const CELL = 60;

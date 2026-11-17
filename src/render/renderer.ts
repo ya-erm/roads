@@ -61,7 +61,7 @@ import { Camera } from './camera';
 import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
-import { drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
+import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
 import { type Around, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
@@ -81,7 +81,8 @@ import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, flashSpot, frontLength, sirenVisibility } from './vehicleArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
-import { type Hiders, TreeCover } from './treeCover';
+import { type Hiders, polygonHiders, TreeCover } from './treeCover';
+import { junctionPlate } from '../world/lotClear';
 import { carLayers, railSegLayer } from './trainLayer';
 import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
 import { BUY_DOT_PX } from '../input/buyDrop';
@@ -523,6 +524,11 @@ export class Renderer {
   private treeItems = new WeakMap<object, { pts: number[]; w: number; h: number }>();
   /** Где полотно прячет деревья: кружки x, y, r вдоль оси — пока у полотна та же форма и высоты концов. */
   private treeCuts = new Map<number, { key: string; pts: number[] }>();
+  /**
+   * Где площадка перекрёстка со скруглёнными игроком углами прячет деревья (дуга бордюра срезает угол квартала далеко
+   * от полотен): кружки сеткой — пока те же скругления и формы его полотен.
+   */
+  private treePlates = new Map<number, { key: string; pts: number[] }>();
   /** Горят ли поворотники в этом кадре: мигают по игровому времени, на паузе — горят ровно. */
   private blinkOn = false;
   /** Какая половина мигалок спецмашин горит в этом кадре (по игровому времени). */
@@ -574,7 +580,22 @@ export class Renderer {
     sidewalks: new SceneDiff<string>(),
   };
   /** Аллеи и тротуары: с какими дорогами, строениями, радиусами и застройкой городов посчитаны. */
-  private alleys = { key: '', things: '', lines: [] as StreetGreen[], cache: new Map<number, { sig: string; line: StreetGreen | null }>() };
+  private alleys = Renderer.noAlleys();
+  /**
+   * Аллеи: lines — по сети игры, shown — что на карте (с правкой в предпросмотре — по сети с правкой, liveAlleys), towns —
+   * черта городов, по которой посчитаны; live — на какую сеть с правкой, её версию и аллеи без правки посчитаны shown.
+   */
+  private static noAlleys() {
+    return {
+      key: '',
+      things: '',
+      lines: [] as StreetGreen[],
+      shown: [] as StreetGreen[],
+      towns: [] as { center: Vec; radius: number }[],
+      live: null as { net: LaneNet; version: number; base: StreetGreen[] } | null,
+      cache: new Map<number, { sig: string; line: StreetGreen | null }>(),
+    };
+  }
   /** Тротуары городов и их кэш по полотнам (пересчёт — вместе с аллеями). */
   private sidewalks: SidewalkNet = { lines: [], ends: [], spans: new Map() };
   /** Тротуары по сети игры (без правки в предпросмотре); sidewalks — что на карте: с правкой — поверх них. */
@@ -632,6 +653,7 @@ export class Renderer {
     this.treeVersion = '';
     this.treeCover = new TreeCover();
     this.treeCuts.clear();
+    this.treePlates.clear();
     this.lanes.reset();
     this.projectLanes.reset();
     this.projectPortalCache = null;
@@ -659,7 +681,7 @@ export class Renderer {
     this.diffs.towns.clear();
     this.diffs.alleys.clear();
     this.diffs.sidewalks.clear();
-    this.alleys = { key: '', things: '', lines: [], cache: new Map() };
+    this.alleys = Renderer.noAlleys();
     this.sidewalks = this.walkBase = { lines: [], ends: [], spans: new Map() };
     this.walkLive = null;
     this.walkSite = null;
@@ -932,7 +954,7 @@ export class Renderer {
     if (o.speedmap) this.drawSpeedmap(game, 0, view);
     this.drawCurveSigns(game, view, o.staleSigns, 0);
     // Аллеи вдоль проспектов и фонари вдоль улиц — поверх дорог (тень на асфальт), под домами.
-    drawStreetGreen(ctx, this.alleys.lines, view, this.camera.zoom, BIOMES[game.terrain.biome].palette.trees);
+    drawStreetGreen(ctx, this.alleys.shown, view, this.camera.zoom, BIOMES[game.terrain.biome].palette.trees);
     this.drawStill(game, view);
     ctx.restore();
   }
@@ -1272,11 +1294,18 @@ export class Renderer {
       }
       this.alleys.things = things;
       const index = game.index;
-      const towns = game.towns.map((t) => ({ center: t.center, radius: Math.floor(t.radius / 50) * 50 }));
-      this.alleys.lines = streetGreen(game.roads.net, towns, (p, r) => index.at(p, r) !== null, this.alleys.cache);
-      add(this.diffs.alleys.update((put) => this.alleys.lines.forEach((l) => put(l.id, l.sig, l.box))));
+      this.alleys.towns = game.towns.map((t) => ({ center: t.center, radius: Math.floor(t.radius / 50) * 50 }));
+      this.alleys.lines = streetGreen(game.roads.net, this.alleys.towns, (p, r) => index.at(p, r) !== null, this.alleys.cache);
       // Тротуары и скругления углов кварталов (render/sidewalks.ts).
       this.walkBase = sidewalkNet(game.roads.net, walkSite(game), this.sidewalkCache);
+    }
+    // Аллеи — так же: на протяжке правки — по сети с правкой (деревья не остаются на сдвинутом полотне и на скруглённом
+    // углу), отпустили или отменили — снова по сети игры. Слепок по полотнам сбрасывает плитки только там, где аллея другая.
+    const trees = this.liveAlleys(game, s.fullNet);
+    if (trees !== this.alleys.shown) {
+      this.alleys.shown = trees;
+      const pad = this.alleys.live ? WALK_PAD : DIRTY_PAD;
+      for (const b of this.diffs.alleys.update((put) => trees.forEach((l) => put(l.id, l.sig, l.box)))) boxes.push(grow(b, pad));
     }
     // Правка дорог в предпросмотре (тянут узел или дорогу, крутят угол перекрёстка, ведут новую): тротуары, что она
     // меняет, — по сети с правкой, прямо во время протяжки; прежние — прочь. Слепок по ключам (`c<id>`, `n<id>`)
@@ -1678,6 +1707,17 @@ export class Renderer {
       hiders.set(`c${c.id}`, cut.pts);
     }
     if (this.treeCuts.size > roads.corridors.size + 500) for (const id of [...this.treeCuts.keys()]) if (!roads.corridors.has(id)) this.treeCuts.delete(id);
+    for (const n of roads.nodes.values()) {
+      if (!n.corners || n.kind !== 'junction' || n.level < -0.6) continue;
+      const pk = `${Object.entries(n.corners).join(';')}|${n.corridors.map((id) => roads.corridors.get(id)?.rev).join(',')}`;
+      let cut = this.treePlates.get(n.id);
+      if (cut?.key !== pk) {
+        const plate = junctionPlate(roads, n);
+        this.treePlates.set(n.id, (cut = { key: pk, pts: plate ? polygonHiders(plate, 6) : [] }));
+      }
+      hiders.set(`j${n.id}`, cut.pts);
+    }
+    for (const id of [...this.treePlates.keys()]) if (!roads.nodes.get(id)?.corners) this.treePlates.delete(id);
     for (const it of game.index.items) {
       // Кружок строения — прежним массивом, пока оно на месте (тогда сверка с прошлым разом — сразу).
       const { center, w, h } = it.fp;
@@ -2091,6 +2131,27 @@ export class Renderer {
     const shown = scope ? mergeSidewalks(base, sidewalkNet(net, this.liveSite(game, base), this.sidewalkCache, scope), scope) : base;
     this.walkLive = { net, version: net.version, base, shown };
     return shown;
+  }
+
+  /**
+   * Аллеи на карте при сети net: без правки — по сети игры (alleys.lines), с правкой — аллеи полотен, что правка может
+   * задеть (alleyScope), заново по сети с правкой, остальные — прежние. Раз на версию сети с правкой.
+   */
+  private liveAlleys(game: Game, net: LaneNet): StreetGreen[] {
+    const a = this.alleys;
+    if (net === game.roads.net) {
+      a.live = null;
+      return a.lines;
+    }
+    const c = a.live;
+    if (c && c.net === net && c.version === net.version && c.base === a.lines) return a.shown;
+    a.live = { net, version: net.version, base: a.lines };
+    const scope = sidewalkScope(game.roads.net, net);
+    if (!scope) return a.lines;
+    const touched = alleyScope(game.roads.net, net, scope);
+    const index = game.index;
+    const part = streetGreen(net, a.towns, (p, r) => index.at(p, r) !== null, a.cache, touched);
+    return [...a.lines.filter((l) => !touched.has(l.id) && net.corridors.has(l.id)), ...part];
   }
 
   /**
