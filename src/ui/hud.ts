@@ -608,9 +608,9 @@ export class Hud {
     heat.title = 'Карта загрузки дорог (H)';
     heat.dataset.action = 'heatmap';
     speed.appendChild(heat);
-    // Слой «🅿️»: занятость мест для машин по клеткам — значок и цвета в подсказке (без текста на кнопке).
+    // Слой «Парковки»: занятость мест для машин по клеткам — цвета в подсказке.
     const park = document.createElement('button');
-    park.textContent = '🅿️';
+    park.textContent = 'Парковки';
     park.dataset.tip = 'Места для машин: дворы, гаражные боксы, стоянки магазинов. 🟩 занято меньше 70 % · 🟨 70–90 % · 🟥 больше 90 %';
     park.dataset.action = 'parkmap';
     speed.appendChild(park);
@@ -2901,8 +2901,18 @@ export class Hud {
     const g = this.game();
     const sel = this.controller.selection;
     // У машины жителя линий нет, а у машины компании её линия уже есть в карточке. У проекта стройки и базы маршрутов
-    // нет — список всех маршрутов под их карточкой только отвлекает.
-    if (sel?.type === 'vehicle' || sel?.type === 'fleet' || sel?.type === 'project' || sel?.type === 'base' || sel?.type === 'crew' || sel?.type === 'workTrain' || sel?.type === 'deposit') return '';
+    // нет — список всех маршрутов под их карточкой только отвлекает. Так же у площадки-стоянки.
+    if (
+      sel?.type === 'vehicle' ||
+      sel?.type === 'fleet' ||
+      sel?.type === 'project' ||
+      sel?.type === 'base' ||
+      sel?.type === 'crew' ||
+      sel?.type === 'workTrain' ||
+      sel?.type === 'deposit' ||
+      sel?.type === 'lot'
+    )
+      return '';
     // Выбрана станция, предприятие или город — только их маршруты, без папок.
     const station = sel?.type === 'station' ? g.stations.get(sel.id) : undefined;
     const industry = sel?.type === 'industry' ? g.industries.find((i) => i.id === sel.id) : undefined;
