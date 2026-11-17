@@ -47,7 +47,7 @@ import { closed, endCuts, laneDone, laneWise, partLanes, reverseSite, reverseSto
 import { type Corridor, type CorridorBuild, type CorridorWas, type LaneNet, taperLen } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import type { Network, Segment } from '../world/network';
-import { ROAD_CLASSES } from '../world/roadTypes';
+import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
 import { trackProfile } from './build';
 import { advanceStages, crewCap, frontOf, paidFor, type Piece, pickSite, pieceRate, railBuildRate, spansOf, stageSeconds, stageWork } from './constructionWork';
 import {
@@ -57,6 +57,7 @@ import {
   crewSpacing,
   fillet,
   halfRow,
+  catchUp,
   holdJumps,
   holdOnCurve,
   lanePose,
@@ -319,6 +320,7 @@ export class Construction {
       ...(host.redirect ? { redirect: (b: Brigade, to: number) => host.redirect!(b, to) } : {}),
       lane: (id, cars, b) => self.crewLane(id, cars, b),
       slots: (b) => self.crewSlots(b),
+      edges: (b) => self.crewEdges(b),
       stagger: (id, b) => self.stagger(id, b),
       park: (sim) => host.park(sim),
       onRoad: (node) => host.onRoad(node),
@@ -631,13 +633,19 @@ export class Construction {
     return { node: entry, pos, path };
   }
 
+  /** Предел скорости техники вдоль стройки участка c, м/с игры: как на этой дороге в потоке (ограничение полотна). */
+  private crewLimit(c: Piece): number {
+    const k = c as Partial<Corridor>;
+    return (k.limit ?? (k.cls ? ROAD_CLASSES[k.cls].limit : ROAD_CLASSES.rail.limit)) / KMH_PER_UNIT;
+  }
+
   /**
    * Полоса бригады на проекте id (crewLane.ts): от мест машин колонны cars (нос; нет — прямо позади начала заполнения
    * участка, по его оси) через узел подъезда и вдоль стройки к началу заполнения, по участку и дальше по следующему,
    * если тот продолжает его от конца (nextSite). Ряд бригады на участке — в такте (trackCrews). Путь вдоль стройки
    * входит в участок не с начала заполнения (там уже строят от другого конца) — null.
    */
-  crewLane(id: number, cars: readonly { pos: Vec; dir: Vec }[] | null, by?: Brigade): CrewLane | null {
+  crewLane(id: number, cars: readonly { pos: Vec; dir: Vec; v?: number }[] | null, by?: Brigade): CrewLane | null {
     const r = this.route(id, by);
     if (!r) return null;
     const { c, legs, entry, end } = r;
@@ -682,6 +690,8 @@ export class Construction {
     const out: CrewLane = {
       path,
       legs: [{ corridor: c.id, fromB, at: legAt(c, fromB) }],
+      // Вдоль стройки — не быстрее, чем по этой дороге в потоке (и не быстрее самой машины, laneCruise).
+      limit: this.crewLimit(c),
     };
     // Начало следующего — ровно за концом этого по полосе: места колонны на стыке совпадают (без скачка при смене участка).
     if (onward)
@@ -693,6 +703,8 @@ export class Construction {
     if (cars?.length) {
       out.from = cars.map((m) => polyProject(path, m.pos));
       out.t0 = this.host.time;
+      // Трогаются с той скоростью, с какой сошли с дороги (стояли — с места), и разгоняются.
+      out.v0 = cars.map((m) => m.v ?? 0);
     }
     // Съезд с поворотом — машины проходят его медленно, пока и задняя ось не выйдет с дуги.
     if (curve) out.slow = polyProject(path, curve) + TURN_TAIL;
@@ -707,6 +719,22 @@ export class Construction {
    * Места машин бригады b на её полосе (м от начала полосы, по номеру машины): у краёв этапов участка, что строится
    * (stageSlots), — если он на её полосе; иначе null.
    */
+  /**
+   * Края этапов участка, что строит бригада b, на её полосе (м от начала полосы, по номеру этапа): машине этапа, чтобы
+   * вести его, хватает доехать до края, — к месту ожидания впереди (stageSlots) она едет уже за работой: отсыпка не
+   * ждёт, пока подъедут остальные. Разворот на второй проход — не раньше, чем машина с него сошла (как и места,
+   * crewSlots); пока он не кончился (turnFlip) — null.
+   */
+  crewEdges(b: Brigade): number[] | null {
+    if (!b.lane || b.project === undefined) return null;
+    const f = this.frontFor(b.project, b);
+    const c = f?.c;
+    if (!f || !c?.build || this.turnFlip(b, c, f.fromB)) return null;
+    const leg = b.lane.legs.find((g) => g.corridor === c.id && g.fromB === f.fromB);
+    const floor = b.lane.turn ? b.lane.turn.end + TURN_TAIL : -Infinity;
+    return leg ? spansOf(c.build, c.length).map((u) => Math.max(leg.at + u, floor)) : null;
+  }
+
   crewSlots(b: Brigade): number[] | null {
     if (!b.lane || b.project === undefined) return null;
     const f = this.frontFor(b.project, b);
@@ -836,7 +864,7 @@ export class Construction {
     const onward = this.continuation(id, c, fromB, o);
     if (onward) alongCorridor(path, onward.c, onward.fromB ? onward.c.length : 0, onward.fromB ? 0 : onward.c.length, 5);
     // Ряд — сразу ряд второго прохода (layRows его не меняет): на полосе после разворота машины уже в нём.
-    const lane: CrewLane = { path, legs: [{ corridor: c.id, fromB, at: 80 }], shifts: [{ at: -1e4, to: halfRow(c as Corridor, next) }] };
+    const lane: CrewLane = { path, legs: [{ corridor: c.id, fromB, at: 80 }], shifts: [{ at: -1e4, to: halfRow(c as Corridor, next) }], limit: this.crewLimit(c) };
     if (onward) lane.legs.push({ corridor: onward.c.id, fromB: onward.fromB, at: 80 + L });
     const s = cars.map((m) => m.s!);
     const head = Math.max(...s);
@@ -849,6 +877,8 @@ export class Construction {
     lane.from = plan.from;
     lane.t0 = now;
     lane.t = plan.from.map(() => now);
+    // Стоят у конца первого прохода — трогаются на разворот с места.
+    lane.v0 = plan.from.map(() => 0);
     o.lane = lane;
     return true;
   }
@@ -1009,6 +1039,8 @@ export class Construction {
         this.arcs.set(b.id, { lane: b.lane, time: this.host.time, s });
         this.crews.keepSpots(b);
         holdOnCurve(b.lane, slots, this.host.time);
+        // Доехавшая до своего места дальше идёт с ним шагом работ.
+        catchUp(b.lane, slots, this.host.time);
         const flip = this.turnFlip(b, f.c, f.fromB);
         const turn = b.lane.turn;
         if (turn && (flip || turning(b.lane, slots, this.host.time))) {

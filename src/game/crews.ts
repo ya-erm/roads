@@ -38,7 +38,7 @@
 import { CONSTRUCTION } from '../config';
 import { dist, type Vec } from '../core/vec';
 import type { BuildBase } from '../world/entities';
-import { CREW_CARS, type CrewLane, crewSpacing, laneArcs, laneCarPose, laneCars, laneEntry, polyAt } from './crewLane';
+import { CREW_CARS, type CrewLane, crewSpacing, laneArcs, laneCarPose, laneCars, laneEntry, polyAt, setStart } from './crewLane';
 
 export type BrigadeState = 'idle' | 'going' | 'working' | 'back';
 
@@ -98,9 +98,9 @@ export function convoyOffset(car: number): number {
 
 /**
  * Машина колонны: ещё не выехала (ждёт места на выезде), в потоке (id в симуляции) или доехала (стоит, где встала;
- * home — уже на базе, её не видно).
+ * v — с какой скоростью сошла с дороги, на стройку поедет с неё; home — уже на базе, её не видно).
  */
-export type ConvoyCar = { wait: true } | { sim: number } | { at: Vec; dir: Vec; home?: true };
+export type ConvoyCar = { wait: true } | { sim: number } | { at: Vec; dir: Vec; v?: number; home?: true };
 
 /**
  * Колонна бригады в пути по дорогам: от узла from к узлу to. Машины выезжают по одной (следующая — когда на выезде
@@ -185,12 +185,17 @@ export interface CrewHost {
    * Полоса бригады на проекте (crewLane.ts): от мест машин cars (нос и курс, по номеру; null — прямо позади начала
    * участка) к началу заполнения и по участку. null — не построить.
    */
-  lane?(project: number, cars: readonly { pos: Vec; dir: Vec }[] | null, brigade: Brigade): CrewLane | null;
+  lane?(project: number, cars: readonly { pos: Vec; dir: Vec; v?: number }[] | null, brigade: Brigade): CrewLane | null;
   /**
    * Места машин бригады на её полосе (м от начала полосы, по номеру машины) — у краёв этапов участка, что строится;
    * null — полоса не идёт по этому участку (участок сменился — бригаде туда своим ходом, relocate).
    */
   slots?(brigade: Brigade): number[] | null;
+  /**
+   * Края этапов участка на полосе бригады (м от начала полосы, по номеру этапа): машина, доехавшая до края своего
+   * этапа, уже ведёт его, пока едет дальше к своему месту (placed). Нет или null — только на месте.
+   */
+  edges?(brigade: Brigade): number[] | null;
   /**
    * Машины бригады, доехав до узла подъезда, могут сходить на стройку по одной, не дожидаясь остальных (Crews.board):
    * участок у подъезда — на земле, и места этапов — впереди начала заполнения (там, где их ждут, хватает места всей
@@ -378,9 +383,11 @@ export class Crews {
 
   /**
    * Чьи машины бригады b на месте работ — по этапам (отсыпка, покрытие, разметка): машина этапа сошла на полосу и
-   * доехала до своего места в колонне этапов (Host.slots). Темп этапа — только от бригад, чья машина этого этапа на
-   * месте (Construction.advance): первая машина начинает отсыпку, не дожидаясь остальных. Бригада не на работе — ничья;
-   * без полосы (старое сохранение, проверки без игры) или участок не на её полосе — все на месте, как раньше.
+   * доехала до края своего этапа (Host.edges) или до своего места в колонне этапов (Host.slots). Темп этапа — только от
+   * бригад, чья машина этого этапа на месте (Construction.advance): первая машина начинает отсыпку, как доехала до
+   * начала участка, не дожидаясь остальных, — и ведёт её, пока едет дальше к своему месту ожидания впереди; край её
+   * обогнал (машина ещё на медленном съезде) — этап ждёт её. Бригада не на работе — ничья; без полосы (старое
+   * сохранение, проверки без игры) или участок не на её полосе — все на месте, как раньше.
    */
   placed(b: Brigade): [boolean, boolean, boolean] {
     if (b.state !== 'working') return [false, false, false];
@@ -388,7 +395,8 @@ export class Crews {
     if (!b.lane || !slots) return [true, true, true];
     const n = laneCars(b.lane);
     const s = laneArcs(b.lane, slots, this.host.time);
-    return [0, 1, 2].map((k) => k < n && s[k] >= slots[k] - 0.5) as [boolean, boolean, boolean];
+    const edges = this.host.edges?.(b);
+    return [0, 1, 2].map((k) => k < n && s[k] >= Math.min(slots[k], edges?.[k] ?? Infinity) - 0.5) as [boolean, boolean, boolean];
   }
 
   /** Сколько бригад едут к проекту или работают на нём. */
@@ -806,7 +814,7 @@ export class Crews {
         if (!s) return false;
         b.at = s.node;
         this.host.claim?.(b.project, b);
-        const lane = this.host.lane?.(b.project, [{ pos: car.at, dir: car.dir }], b) ?? null;
+        const lane = this.host.lane?.(b.project, [{ pos: car.at, dir: car.dir, v: car.v ?? 0 }], b) ?? null;
         if (!lane) return false;
         b.lane = lane;
         b.state = 'working';
@@ -818,6 +826,8 @@ export class Crews {
         lane.from = [...(lane.from ?? []), e.s];
         lane.t = [...(lane.t ?? lane.from.slice(0, -1).map(() => t0)), this.host.time];
         if (Math.abs(e.side) > 0.05 || lane.side) lane.side = [...(lane.side ?? lane.from.slice(0, -1).map(() => 0)), Math.abs(e.side) > 0.05 ? e.side : 0];
+        // Едет дальше с той скоростью, с какой сошла с дороги, — не рывком.
+        if (lane.limit !== undefined) setStart(lane, n, car.v ?? 0);
       }
       n++;
     }
@@ -942,7 +952,7 @@ export class Crews {
    * сразу вся колонна). К стройке — дальше вдоль неё к краю работ (узел подъезда за время пути сменился — по дорогам
    * дальше, launch); домой — на базе (ехала к воротам снесённой базы — дальше к новой, launchHome в такте).
    */
-  arrive(b: Brigade, at?: { node: number; pos: Vec; dir?: Vec }, sim?: number): void {
+  arrive(b: Brigade, at?: { node: number; pos: Vec; dir?: Vec; v?: number }, sim?: number): void {
     const cv = b.convoy;
     const base = this.bases.get(b.base);
     if (cv && sim !== undefined && at) {
@@ -952,7 +962,7 @@ export class Crews {
       // К стройке по одной (boarding): доехавшая машина сходит на полосу бригады, как только впереди по колонне все
       // уже там, и едет к своему месту — остальных не ждёт.
       const one = !home && i >= 0 && this.boarding(b, at.node);
-      if (i >= 0) cv.cars[i] = { at: { ...at.pos }, dir: { ...(at.dir ?? { x: 1, y: 0 }) }, ...(home ? { home: true as const } : {}) };
+      if (i >= 0) cv.cars[i] = { at: { ...at.pos }, dir: { ...(at.dir ?? { x: 1, y: 0 }) }, ...(at.v ? { v: at.v } : {}), ...(home ? { home: true as const } : {}) };
       if (one && this.board(b)) return;
       if (cv.cars.some((c) => !('at' in c))) return;
       // Собрались: дальше машины едут оттуда, где встали (по стройке — по полосе бригады, по дорогам — с мест).
@@ -1161,6 +1171,9 @@ function copyLane(l: CrewLane): CrewLane {
     ...(l.shifts?.length ? { shifts: l.shifts.map((sh) => ({ at: sh.at, to: sh.to, ...(typeof sh.len === 'number' ? { len: sh.len } : {}) })) } : {}),
     ...(typeof l.slow === 'number' ? { slow: l.slow } : {}),
     ...(typeof l.room === 'number' ? { room: l.room } : {}),
+    ...(typeof l.limit === 'number' ? { limit: l.limit } : {}),
+    ...(Array.isArray(l.v0) ? { v0: l.v0.map((v) => (typeof v === 'number' ? v : null)) } : {}),
+    ...(Array.isArray(l.on) ? { on: l.on.map(Boolean) } : {}),
     ...(l.turn && Array.isArray(l.turn.path) && l.turn.path.length > 1
       ? {
           turn: {

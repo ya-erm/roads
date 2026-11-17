@@ -378,7 +378,8 @@ describe('Стройка дорог: «Со строительством»', () 
     // База — препятствие и после загрузки: на её место дорогу не построить.
     const base = [...loaded.construction.crews.bases.values()][0];
     expect(loaded.structureAt(base.fp.center)?.type).toBe('base');
-    for (const g of [game, loaded]) runSeconds(g, 900 / CONSTRUCTION.speed + 10);
+    // Бригада после паузы едет к краю работ своим ходом, как по дороге (crewLane.laneCruise), а не 25 м/с — запас 20 с.
+    for (const g of [game, loaded]) runSeconds(g, 900 / CONSTRUCTION.speed + 20);
     expect(loaded.money).toBe(game.money);
     expect(building(loaded)).toEqual([]);
     expect(JSON.stringify(loaded.roads.net.toJSON())).toBe(JSON.stringify(game.roads.net.toJSON()));

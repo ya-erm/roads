@@ -18,12 +18,14 @@ import { frontOf, spansOf, stageSpans } from './constructionWork';
 /**
  * Машины бригады, от головной, — они же техника этапов на стройке (одна и та же машина в потоке, вдоль стройки и на
  * месте работ): отсыпка — грейдер и самосвал с грунтом, покрытие — асфальтоукладчик и каток, разметка — машина
- * разметки. Длина — от носа до хвоста, м; ширина — по самому широкому (нож грейдера, брус укладчика).
+ * разметки. Длина — от носа до хвоста, м; ширина — по самому широкому (нож грейдера, брус укладчика). Предел скорости
+ * (м/с игры) и разгон (м/с²) — одни и те же в потоке (Game.crewCar) и вдоль стройки (laneArcs): тяжёлая техника
+ * тихоходнее.
  */
 export const CREW_UNITS = [
-  { body: 'crewEarth', length: 22, width: 4.6 },
-  { body: 'crewPave', length: 18, width: 4.8 },
-  { body: 'crewMarks', length: 7, width: 3.6 },
+  { body: 'crewEarth', length: 22, width: 4.6, maxSpeed: 24, accel: 3.5 },
+  { body: 'crewPave', length: 18, width: 4.8, maxSpeed: 22, accel: 3 },
+  { body: 'crewMarks', length: 7, width: 3.6, maxSpeed: 28, accel: 4.5 },
 ] as const;
 
 /** Машин в колонне бригады. */
@@ -109,6 +111,22 @@ export interface CrewLane {
    * самого начала: никто за ними не съезжает, а отсыпке незачем уезжать далеко вперёд от края, с которого она начнёт.
    */
   room?: number;
+  /**
+   * Предел скорости вдоль стройки, м/с игры, — как на этой дороге в потоке (ограничение полотна проекта): машина едет
+   * не быстрее его и не быстрее себя (CREW_UNITS.maxSpeed). Нет (старое сохранение) — LANE_SPEED.
+   */
+  limit?: number;
+  /**
+   * С какой скоростью машина тронулась от from (м/с игры, по номеру): сошла с дороги на ходу — с той, что ехала, стояла —
+   * с нуля, дальше разгоняется (CREW_UNITS.accel). Нет (null) — сразу своим ходом (уже ехала за своим местом, старое
+   * сохранение).
+   */
+  v0?: (number | null)[];
+  /**
+   * Машина доехала до своего места и идёт с ним — за краем своего этапа его шагом, каким бы он ни был (по номеру;
+   * catchUp). Место ушло вперёд скачком — снова едет к нему своим ходом (holdJumps). Нет — едет к месту.
+   */
+  on?: boolean[];
 }
 
 /**
@@ -875,9 +893,9 @@ export function laneEntry(lane: CrewLane, p: Vec): { s: number; side: number } {
 }
 
 /**
- * Где на полосе (м от начала) машины колонны: идут от мест from со скоростью LANE_SPEED к целям target (местам
- * этапов), не дальше цели и не назад; каждая — со своего времени (CrewLane.t). Нет from — уже на местах; машины, что
- * ещё не сошли на полосу (from короче), — сразу у цели (их на полосе не видно — Crews.carsAt).
+ * Где на полосе (м от начала) машины колонны: идут от мест from своим ходом (laneCruise, разгон с CrewLane.v0) к
+ * целям target (местам этапов), не дальше цели и не назад; каждая — со своего времени (CrewLane.t). Нет from — уже на
+ * местах; машины, что ещё не сошли на полосу (from короче), — сразу у цели (их на полосе не видно — Crews.carsAt).
  */
 export function laneArcs(lane: CrewLane, target: readonly number[], time: number): number[] {
   const from = lane.from;
@@ -890,9 +908,25 @@ export function laneArcs(lane: CrewLane, target: readonly number[], time: number
     // Ждут разворота — стоят, где стояли.
     if (turn?.wait) return s0;
     const dt = Math.max(0, time - (lane.t?.[k] ?? t0));
-    return Math.min(advance(s0, dt, zones), Math.max(x, s0));
+    // Уже на месте — идёт с ним шагом работ (сколь бы быстро ни уходил край этапа, не отстаёт); иначе — своим ходом.
+    const on = !!lane.on?.[k];
+    const cruise = on ? Math.max(LANE_SPEED, laneCruise(lane, k)) : laneCruise(lane, k);
+    return Math.min(advance(s0, dt, zones, cruise, on ? null : lane.v0?.[k], LANE_ACCEL), Math.max(x, s0));
   });
 }
+
+/**
+ * Ход колонны вдоль стройки, м/с игры: не быстрее самой тихоходной её машины и дороги (CrewLane.limit) — машины одна
+ * за другой едут одинаково и не нагоняют друг друга; старое сохранение — LANE_SPEED. k — номер машины (ход общий).
+ */
+export function laneCruise(lane: CrewLane, _k?: number): number {
+  if (lane.limit === undefined) return LANE_SPEED;
+  return Math.min(LANE_CRUISE, lane.limit);
+}
+
+/** Самая тихоходная машина колонны: её предел скорости и разгон — ход колонны вдоль стройки (laneCruise). */
+const LANE_CRUISE = Math.min(...CREW_UNITS.map((u) => u.maxSpeed));
+const LANE_ACCEL = Math.min(...CREW_UNITS.map((u) => u.accel));
 
 /**
  * Место машины ушло вперёд скачком (stageSlots: кончивший этап едет ждать за площадкой перекрёстка на следующем
@@ -922,6 +956,9 @@ export function holdJumps(lane: CrewLane, target: readonly number[], was: { time
     lane.t = lane.from.map((_, i) => lane.t?.[i] ?? t0);
     lane.from[k] = was.s[k];
     lane.t[k] = was.time;
+    // Стояла у своего места (или шла за ним шагом работ) — к новому трогается с места и разгоняется.
+    if (lane.limit !== undefined) setStart(lane, k, 0);
+    if (lane.on) lane.on[k] = false;
     held = true;
   }
   return held ? laneArcs(lane, target, time) : now;
@@ -945,12 +982,36 @@ export function holdOnCurve(lane: CrewLane, target: readonly number[], time: num
     if (s0 === undefined || s >= lane.slow) continue;
     const t = lane.t?.[k] ?? t0;
     // Едет сама — не держит место.
-    if (s >= advance(s0, Math.max(0, time - t), zones) - 1e-9) continue;
+    if (s >= advance(s0, Math.max(0, time - t), zones, laneCruise(lane, k), lane.v0?.[k], LANE_ACCEL) - 1e-9) continue;
     if (s === s0 && t === time) continue;
     const off = lane.side?.[k];
     if (lane.side && off) lane.side[k] = off * (1 - smoothstep(Math.max(0, Math.min(1, (s - s0) / ROW_RAMP))));
     from[k] = s;
     lane.t = from.map((_, i) => lane.t?.[i] ?? t0);
+    lane.t[k] = time;
+    // Стоит у своего места или идёт за ним шагом работ — дальше сразу ходом съезда (он медленный), без разгона с
+    // нуля: иначе отставала бы от края своего этапа, и этап вставал.
+    if (lane.v0) lane.v0[k] = null;
+  }
+}
+
+/**
+ * Машина, доехавшая до своего места (target), дальше идёт с ним (CrewLane.on): край её этапа может уходить вперёд и
+ * быстрее, чем она едет по дороге (стройка в поле), — работа идёт её шагом. На съезде и развороте (медленные зоны) —
+ * нет: там она едет своим медленным ходом (holdOnCurve). Каждый такт (Construction.trackCrews).
+ */
+export function catchUp(lane: CrewLane, target: readonly number[], time: number): void {
+  if (!lane.from || lane.t0 === undefined || lane.turn?.wait) return;
+  const now = laneArcs(lane, target, time);
+  const zones = slowZones(lane);
+  for (let k = 0; k < laneCars(lane); k++) {
+    // У места — не дальше, чем считается «на месте» (Crews.placed), и ещё шаг такта: край этапа мог уйти вперёд.
+    if (lane.on?.[k] || now[k] < target[k] - 1.5 || zones.some((z) => now[k] < z.end)) continue;
+    lane.on = Array.from({ length: Math.max(lane.on?.length ?? 0, k + 1) }, (_, i) => i === k || !!lane.on?.[i]);
+    // Дальше — отсюда и сейчас, без скачка.
+    const t0 = lane.t0;
+    lane.t = lane.from.map((_, i) => lane.t?.[i] ?? t0);
+    lane.from[k] = now[k];
     lane.t[k] = time;
   }
 }
@@ -965,21 +1026,48 @@ function slowZones(lane: CrewLane): { end: number; v: number }[] {
 
 /**
  * Откуда s0 за dt секунд: до конца каждой медленной зоны (slowZones; пока задняя ось машины ещё на развороте или на
- * повороте съезда) — со скоростью самой медленной из тех, что ещё впереди, дальше — LANE_SPEED.
+ * повороте съезда) — не быстрее самой медленной из тех, что ещё впереди, дальше — не быстрее cruise (свой ход машины).
+ * Тронулась со скоростью v0 и разгоняется с ускорением accel; v0 нет (старое сохранение) — сразу своим ходом.
  */
-function advance(s0: number, dt: number, zones: readonly { end: number; v: number }[]): number {
+function advance(s0: number, dt: number, zones: readonly { end: number; v: number }[], cruise = LANE_SPEED, v0?: number | null, accel = 3): number {
   let s = s0;
   let left = dt;
-  const ends = zones.map((z) => z.end).filter((e) => e > s0).sort((a, b) => a - b);
+  const ends = [...zones.map((z) => z.end).filter((e) => e > s0).sort((a, b) => a - b), Infinity];
+  const cap = (at: number) => Math.min(cruise, ...zones.filter((z) => z.end > at).map((z) => z.v));
+  let v = Math.min(v0 == null ? Infinity : Math.max(0, v0), cap(s0));
   for (const e of ends) {
     if (e <= s) continue;
-    const v = Math.min(LANE_SPEED, ...zones.filter((z) => z.end > s).map((z) => z.v));
-    const need = (e - s) / v;
-    if (left <= need) return s + left * v;
+    const c = cap(s);
+    v = Math.min(v, c);
+    if (v < c) {
+      // Разгон до хода этого отрезка (или до его конца, если не успеет).
+      const ta = (c - v) / accel;
+      const da = ((v + c) / 2) * ta;
+      if (s + da >= e) {
+        const te = (-v + Math.sqrt(v * v + 2 * accel * (e - s))) / accel;
+        if (left <= te) return s + v * left + (accel * left * left) / 2;
+        left -= te;
+        v += accel * te;
+        s = e;
+        continue;
+      }
+      if (left <= ta) return s + v * left + (accel * left * left) / 2;
+      left -= ta;
+      s += da;
+      v = c;
+    }
+    const need = (e - s) / c;
+    if (left <= need) return s + left * c;
     left -= need;
     s = e;
   }
-  return s + left * LANE_SPEED;
+  return s;
+}
+
+/** Машина k трогается от from с места (или на ходу со скоростью v): у неё разгон с v (CrewLane.v0). */
+export function setStart(lane: CrewLane, k: number, v: number): void {
+  const n = Math.max(lane.from?.length ?? 0, k + 1);
+  lane.v0 = Array.from({ length: n }, (_, i) => (i === k ? v : (lane.v0?.[i] ?? null)));
 }
 
 /** Сколько машин колонны уже на полосе (сошли с дороги по порядку): from короче колонны — только первые. */

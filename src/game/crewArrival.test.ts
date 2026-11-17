@@ -3,7 +3,7 @@ import { dist, dot, scale, sub, type Vec } from '../core/vec';
 import { hitchOf } from '../sim/body';
 import type { WorldSettings } from '../world/settings';
 import { convoyGap, spansOf, stageSpans } from './constructionWork';
-import { CREW_UNITS, laneCars, lanePose, laneTrail } from './crewLane';
+import { CREW_UNITS, laneCars, laneCruise, lanePose, laneTrail } from './crewLane';
 import type { Brigade } from './crews';
 import { Game } from './game';
 import { anchorOf, openSpot, road, runSeconds, STREET, withoutCitizens } from './testkit';
@@ -173,7 +173,10 @@ describe('Бригада: от подъезда к работе без скач�
     const L = c.length;
     const gap = convoyGap(L);
     let earthAlone = false;
+    let earthEarly = false;
     let paveBehind = false;
+    const lastS = new Map<number, number>();
+    let fastest = 0;
     let settled = false;
     // Откуда и когда сошла каждая машина (from и t — пока она не тронулась дальше: на повороте съезда, ожидая своего
     // места, машина трогается оттуда, где ждала, — CrewLane.slow).
@@ -188,9 +191,24 @@ describe('Бригада: от подъезда к работе без скач�
       }
       const [e, p, m] = spansOf(c.build, L);
       const placed = crews.placed(b);
-      // Этап, чья машина не на месте, стоит.
-      if (!placed[1]) expect(p).toBe(0);
-      if (!placed[2]) expect(m).toBe(0);
+      const n2 = laneCars(lane);
+      // Этап, чья машина ещё не на стройке, стоит; отсыпка идёт, ещё пока последняя машина в пути.
+      if (n2 < 2) expect(p).toBe(0);
+      if (n2 < 3) expect(m).toBe(0);
+      if (e > 0 && n2 < 3) earthEarly = true;
+      // Край этапа — не впереди своей машины (больше чем на шаг такта): работу ведёт она, там, где она.
+      const s = crews.carsAt(b).filter((x) => x.s !== undefined);
+      // К своему месту машина едет своим ходом — не быстрее, чем по этой дороге в потоке, и не быстрее самой себя (и
+      // разгоняется, а не срывается с места): никакой «подтяжки» колонны. Уже на месте — идёт шагом работ.
+      for (const x of s) {
+        const was = lastS.get(x.car);
+        lastS.set(x.car, x.s!);
+        if (was === undefined || lane.on?.[x.car]) continue;
+        const v = (x.s! - was) / 0.1;
+        expect(v, `машина ${x.car}`).toBeLessThanOrEqual(Math.min(laneCruise(lane), CREW_UNITS[x.car].maxSpeed, 40 / 2.2) + 0.3);
+        fastest = Math.max(fastest, v);
+      }
+      for (const x of s) if ([e, p, m][x.car] > 0) expect(lane.legs[0].at + [e, p, m][x.car], `этап ${x.car}`).toBeLessThanOrEqual(x.s! + 1.5);
       if (placed[0] && !placed[1] && e > 0) earthAlone = true;
       // Покрытие — за отсыпкой, не ближе интервала колонны; разметка — так же за покрытием.
       if (p > 0) {
@@ -203,6 +221,9 @@ describe('Бригада: от подъезда к работе без скач�
       settled = !b.convoy && !!slots && m > 0 && crews.carsAt(b).every((x, k) => Math.abs(x.s! - slots[k]) < 1e-6);
     }
     expect(earthAlone).toBe(true);
+    expect(earthEarly).toBe(true);
+    // Ехали (не стояли всё время) — своим ходом.
+    expect(fastest).toBeGreaterThan(5);
     expect(paveBehind).toBe(true);
     expect(settled).toBe(true);
     expect(laneCars(lane)).toBe(3);
@@ -225,7 +246,8 @@ describe('Бригада: от подъезда к работе без скач�
       spend(x, kind);
     };
     // Головная уже ведёт отсыпку, остальные ещё в пути.
-    for (let t = 0; t < 120 && !(b.lane && crews(game).placed(b)[0] && b.convoy); t += 0.1) runSeconds(game, 0.1);
+    const earth = () => (game.construction.current(id)?.build?.stages?.[0] ?? 0) > 0;
+    for (let t = 0; t < 120 && !(b.lane && earth() && b.convoy); t += 0.1) runSeconds(game, 0.1);
     expect(b.convoy).toBeDefined();
     const save = JSON.parse(JSON.stringify(game.toSave()));
     // Этапы — в сохранении (у каждого свой ход).

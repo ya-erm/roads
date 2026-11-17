@@ -481,13 +481,13 @@ export interface CarTrip {
  * ширина (crewLane.CREW_UNITS, vehicleArt.crewUnitArt): головная — грейдер с самосвалом грунта, за ней асфальтоукладчик
  * с катком, последней — машина разметки. Тяжёлая техника тихоходнее.
  */
-const CREW_CARS = CREW_UNITS.map((u, k) => ({
+const CREW_CARS = CREW_UNITS.map((u) => ({
   kind: 'truck' as const,
   body: u.body,
   length: u.length,
   width: u.width,
-  maxSpeed: [24, 22, 28][k],
-  accel: [3.5, 3, 4.5][k],
+  maxSpeed: u.maxSpeed,
+  accel: u.accel,
   color: '#f2b81d',
 }));
 
@@ -6906,7 +6906,7 @@ export class Game implements BuildContext {
       const owner = this.owners.get(id);
       const b = owner?.type === 'crew' ? this.construction.crews.brigades.get(owner.id) : undefined;
       if (!sim || !b || !b.convoy || !this.construction.crews.owns(b, id)) continue;
-      const at = { node: b.convoy.to, pos: { ...sim.pos }, dir: { ...sim.dir } };
+      const at = { node: b.convoy.to, pos: { ...sim.pos }, dir: { ...sim.dir }, v: sim.v };
       this.park(id);
       this.construction.crews.arrive(b, at, id);
     }
@@ -7029,7 +7029,7 @@ export class Game implements BuildContext {
     }
     if (owner?.type === 'crew') {
       const crew = this.construction.crews.brigades.get(owner.id);
-      if (crew && this.construction.crews.owns(crew, sim.id)) this.construction.crews.arrive(crew, { node: sim.targetNode, pos: sim.pos, dir: sim.dir }, sim.id);
+      if (crew && this.construction.crews.owns(crew, sim.id)) this.construction.crews.arrive(crew, { node: sim.targetNode, pos: sim.pos, dir: sim.dir, v: sim.v }, sim.id);
       return;
     }
     const v = owner && this.fleet.get(owner.id);
