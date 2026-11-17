@@ -124,6 +124,34 @@ describe('Кэш карты плитками: без изменений плит
     expect([...set.tiles.values()].every((t) => t.ready && !t.dirty)).toBe(true);
   });
 
+  it('на паузе слепки не сверяются: подписи предприятий, стройки, домов и станций — только после их правки', () => {
+    const { game, renderer, frame, settle } = setup();
+    settle();
+    // Сколько раз сверялся каждый слепок (SceneDiff.update).
+    const diffs = (renderer as unknown as { diffs: Record<string, { update: (...a: unknown[]) => unknown }> }).diffs;
+    const calls: Record<string, number> = {};
+    for (const name of ['industries', 'deposits', 'aprons', 'stations', 'projects', 'bases', 'railProjects', 'corridors', 'nodes']) {
+      const d = diffs[name];
+      const own = d.update.bind(d);
+      d.update = (...a: unknown[]) => {
+        calls[name] = (calls[name] ?? 0) + 1;
+        return own(...a);
+      };
+    }
+    for (let i = 0; i < 10; i++) frame();
+    expect(calls).toEqual({});
+    // Правка предприятий (запасы, выпуск…) — сверка предприятий, и только раз.
+    game.industryRev++;
+    for (let i = 0; i < 5; i++) frame();
+    expect(calls).toEqual({ industries: 1, deposits: 1 });
+    // Правка станций — площадки автостанций и неподвижное станций; такт стройки — стройка.
+    game.stationRev++;
+    game.construction.stamp++;
+    for (let i = 0; i < 5; i++) frame();
+    expect(calls).toMatchObject({ industries: 1, aprons: 1, stations: 1, projects: 1, bases: 1, railProjects: 1 });
+    expect(calls.corridors).toBeUndefined();
+  });
+
   it('шаг стройки сбрасывает только плитки у края работ, а не все под полотном', () => {
     const { game, frame, settle, rendered, tiles, camera } = setup();
     const net = game.roads.net;
