@@ -11,7 +11,7 @@ import { frontage, withCurb } from '../world/curbStreets';
 import type { WorldContext } from '../world/worldgen';
 import { CURB_TRIPS } from './curbParking';
 import { Game, type SaveData } from './game';
-import { legPose, type Leg } from './lotMoves';
+import { runPose, type Run } from './lotMoves';
 import { freshGame, runSeconds, runUntil, withoutCitizens } from './testkit';
 
 /** Новая партия — с полосами стоянки (WorldSettings.parking). */
@@ -38,7 +38,12 @@ function doubled(g: Game): [string, string[]][] {
 /** Кузов машины spec серединой в c, курсом d. */
 const body = (spec: Pick<VehicleSpec, 'length' | 'width'>, c: Vec, d: Vec): Box => ({ c, d, hl: spec.length / 2, hw: spec.width / 2 });
 
-type MoveView = { kind: 'in' | 'out'; sim?: { id: number }; leg: { back: boolean } | null; stall: { key: string; corridor: number; lane: number; s: number } };
+type MoveView = {
+  kind: 'in' | 'out';
+  sim?: { id: number };
+  run: { legs: { back: boolean }[]; i: number; v: number } | null;
+  stall: { key: string; corridor: number; lane: number; s: number };
+};
 
 describe('Полосы стоянки в партии', { timeout: 240_000 }, () => {
   it('генерация: в центре — стоянки с обеих сторон напротив деловых домов, у рынка и ратуши; старая партия — без них', () => {
@@ -72,12 +77,15 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
    * один раз, а не дважды): манёвры у бордюра за всё время и снимок через полторы минуты — сохранение и кто у бордюра.
    */
   type AtNinety = { before: (string | number | undefined)[][]; save: SaveData; settings: WorldSettings };
-  let run: { g: Game; started: Map<MoveView, number>; inFlow: { fwd: number; rev: number }; crowded: number; left: number; at90: AtNinety; stacked: Set<string> } | undefined;
+  let run:
+    | { g: Game; started: Map<MoveView, number>; fwdStart: number[]; inFlow: { fwd: number; rev: number }; crowded: number; left: number; at90: AtNinety; stacked: Set<string> }
+    | undefined;
   const cityRun = () => {
     if (run) return run;
     const g = freshGame(PARK);
     const moves = (g.curb as unknown as { moves: MoveView[] }).moves;
     const started = new Map<MoveView, number>();
+    const fwdStart: number[] = [];
     const inFlow = { fwd: 0, rev: 0 };
     let crowded = 0;
     const seen = new Set<number>();
@@ -88,10 +96,14 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
     runSeconds(g, 150, () => {
       for (const m of moves) {
         if (m.kind !== 'in') continue;
-        if (!started.has(m)) started.set(m, g.time);
+        if (!started.has(m)) {
+          started.set(m, g.time);
+          // Передом — с ходу (скорость в начале манёвра; встала за впереди стоящей — с места).
+          if (m.run && !m.run.legs[0].back) fwdStart.push(m.run.v);
+        }
         if (m.sim) {
           const t = g.time - started.get(m)!;
-          if (m.leg?.back) inFlow.rev = Math.max(inFlow.rev, t);
+          if (m.run?.legs[m.run.i].back) inFlow.rev = Math.max(inFlow.rev, t);
           else inFlow.fwd = Math.max(inFlow.fwd, t);
         }
       }
@@ -119,13 +131,16 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
         };
       }
     });
-    run = { g, started, inFlow, crowded, left, at90: at90!, stacked };
+    run = { g, started, fwdStart, inFlow, crowded, left, at90: at90!, stacked };
     return run;
   };
 
   it('машина встаёт у цели на место и потом уезжает с него; манёвр держит полосу недолго, на полосе — не больше одного на 30 ед.', () => {
-    const { g, started, inFlow, crowded, left, stacked } = cityRun();
+    const { g, started, fwdStart, inFlow, crowded, left, stacked } = cityRun();
     expect(started.size).toBeGreaterThan(50);
+    // Передом встают с ходу: почти все начинают манёвр на скорости, а не с места.
+    expect(fwdStart.length).toBeGreaterThan(10);
+    expect(fwdStart.filter((v) => v > 2.5).length).toBeGreaterThan(0.8 * fwdStart.length);
     // Две машины на одном месте не стояли ни разу.
     expect([...stacked]).toEqual([]);
     expect(atCurb(g).length).toBeGreaterThan(30);
@@ -245,7 +260,7 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
 describe('Одно место — одна машина', { timeout: 120_000 }, () => {
   type CurbView = {
     host: { car: VehicleSpec };
-    moves: { kind: 'in' | 'out'; stall: CurbStall; leg: Leg | null; s: number }[];
+    moves: { kind: 'in' | 'out'; stall: CurbStall; run: Run | null }[];
     homing: Map<number, { stall?: CurbStall }>;
   };
 
@@ -304,7 +319,7 @@ describe('Одно место — одна машина', { timeout: 120_000 }, 
       () => arrived || missed,
       () => {
         const out = view.moves.find((m) => m.kind === 'out' && m.stall.key === st.key);
-        const pose = out?.leg ? legPose(out.leg, out.s) : null;
+        const pose = out?.run ? runPose(out.run) : null;
         const inside = !!out && (!pose || boxesOverlap(box, body(spec, pose.c, pose.h)));
         if (!inside) return;
         // Кузов первой ещё в габарите места: бронь — её выезда, второй ни брони, ни манёвра на это место.

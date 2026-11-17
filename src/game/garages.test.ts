@@ -3,6 +3,7 @@ import { SIM_DT } from '../config';
 import { angleDiff, angleOf, dist, dot, sub, type Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
 import type { Town } from '../world/entities';
+import { CAR_SIZE } from '../world/houseAccess';
 import { formOf } from '../world/townForms';
 import { Game } from './game';
 import type { GarageHome, GarageSlot } from './garages';
@@ -41,6 +42,9 @@ function overlap(a: { pos: Vec; dir: Vec; length: number; width: number }, b: { 
 
 /** Один такт игры (update копит время — на всякий случай допускаем и два такта за вызов). */
 const step = (game: Game) => game.update(SIM_DT);
+
+/** Середина кузова машины на манёвре (moveOf: нос и курс). */
+const centre = (m: { pos: Vec; dir: Vec }): Vec => ({ x: m.pos.x - (m.dir.x * CAR_SIZE.l) / 2, y: m.pos.y - (m.dir.y * CAR_SIZE.l) / 2 });
 
 /**
  * Следит за машиной дома на манёвре (а после — за её машиной в потоке, simId): нос не прыгает (за такт — не больше,
@@ -98,15 +102,14 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     for (let i = 0; i < 30 * 40 && !(sim && !game.garages.moveOf(home.b.id) && sim.v > 5); i++) {
       step(game);
       const m = game.garages.moveOf(home.b.id);
-      if (m?.phase === 'wait') {
-        waited += SIM_DT;
-        // Доехала до бордюра — а сзади по полосе подъезжает машина: ей не хватило бы места спокойно остановиться.
-        if (!other) {
-          other = traffic.placeOnLane({ ...CAR, targetNode: target }, slot.lane.id, Math.max(0, slot.zone[0] - 30))!;
-          other.v = 15;
-          expect(traffic.clearToJoin(slot.lane.id, slot.zone[0], slot.zone[1])).toBe(false);
-        }
+      // Подъезжает задним ходом к бордюру — а сзади по полосе подъезжает машина: ей не хватило бы места спокойно
+      // остановиться.
+      if (m?.phase === 'yard' && !other && dist(centre(m), home.curbSide) < 4) {
+        other = traffic.placeOnLane({ ...CAR, targetNode: target }, slot.lane.id, Math.max(0, slot.zone[0] - 30))!;
+        other.v = 15;
+        expect(traffic.clearToJoin(slot.lane.id, slot.zone[0], slot.zone[1])).toBe(false);
       }
+      if (m?.phase === 'wait') waited += SIM_DT;
       if (m?.sim && !sim) {
         sim = m.sim;
         // Встаёт в поток, только когда подъезжавшая уже проехала заезд.
@@ -117,7 +120,8 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     }
     expect(sim).toBeDefined();
     expect(joinedAfter).toBeGreaterThan(0);
-    expect(waited).toBeGreaterThan(1.5);
+    // Встала у бордюра и ждала (с ходу на полосу — нельзя).
+    expect(waited).toBeGreaterThan(0.5);
     expect(w.maxJump).toBeLessThanOrEqual(1);
     expect(w.maxTurn).toBeLessThan(0.15);
     expect(w.overlaps).toBe(0);
@@ -131,10 +135,36 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     expect(near().length).toBe(0);
   });
 
+  it('выезд в пустой поток: задним ходом со двора на полосу без остановки у бордюра, встав — переключает ход и уезжает', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { town, home, slot } = garageHome(game, (h) => h.parks);
+    game.garages.leave(home, town, slot.link.toNode!, { from: home.b, to: home.b });
+    let waited = false;
+    let paused = false;
+    let sim: Vehicle | undefined;
+    let atCurb = Infinity;
+    for (let i = 0; i < 30 * 40; i++) {
+      step(game);
+      const m = game.garages.moveOf(home.b.id);
+      if (!m) break;
+      if (m.phase === 'wait') waited = true;
+      if (m.phase === 'pause') paused = true;
+      sim ??= m.sim;
+      // Кузов проходит бордюр (середина — у бордюра): скорость — как задним ходом по двору.
+      if (dist(centre(m), home.curbSide) < 1) atCurb = Math.min(atCurb, m.v);
+    }
+    expect(waited).toBe(false);
+    expect(atCurb).toBeGreaterThan(1.5);
+    // Встала на полосу задним ходом — пауза на переключение хода — и поехала вперёд.
+    expect(paused).toBe(true);
+    expect(sim && game.traffic.vehicles.has(sim.id)).toBe(true);
+    expect(dot(sim!.dir, slot.f)).toBeGreaterThan(0.95);
+  });
+
   it.each([
     ['перед воротами', true],
     ['в гараж', false],
-  ])('въезд %s: встаёт напротив заезда с поворотником, сворачивает передом, едущая следом ждёт', (_name, parks) => {
+  ])('въезд %s: с поворотником сворачивает в заезд передом, едущая следом ждёт', (_name, parks) => {
     const game = withoutCitizens(freshGame(7));
     const { town, home, slot } = garageHome(game, (h) => h.parks === parks);
     const traffic = game.traffic;
@@ -169,6 +199,54 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     expect(town.garageAway).not.toContain(home.b.id);
     const atHome = game.garageLooks(WORLD, true).filter((l) => dist(l.look.pos, home.spot) < home.d.width + 4);
     expect(atHome.length).toBe(parks ? 1 : 0);
+  });
+
+  it.each([
+    ['в гараж', (h: GarageHome) => h.kind === 'garage' && !h.parks],
+    ['на площадку', (h: GarageHome) => h.kind === 'pad'],
+  ])('въезд %s без помех — с ходу: заранее сбрасывает скорость до скорости поворота и проходит дугу, не останавливаясь', (_name, kind) => {
+    const game = withoutCitizens(freshGame(7));
+    // Улица до дома — длинная: машина успевает разогнаться.
+    const { town, home, slot } = garageHome(game, (h) => kind(h) && (game.garages.slotOf(h)?.mid ?? 0) > 70);
+    const traffic = game.traffic;
+    town.garageAway = [home.b.id];
+    const route = game.garages.routeHome(slot.link.fromNode!, slot)!;
+    const sim = traffic.spawn({ ...CAR, color: home.color, targetNode: slot.link.toNode!, route })!;
+    game.citizenCars++;
+    game.garages.homeward(sim, home, town, slot);
+    let vTurn = 0;
+    let vStreet = 0;
+    let minApproach = Infinity;
+    let minArc = Infinity;
+    let atTurn = -1;
+    let done = false;
+    for (let i = 0; i < 30 * 60 && !done; i++) {
+      step(game);
+      const m = game.garages.moveOf(home.b.id);
+      if (!m && traffic.vehicles.has(sim.id)) {
+        vStreet = Math.max(vStreet, sim.v);
+        // Скорость поворота — та, до которой машина тормозит (LaneTraffic.slowTo): по радиусу дуги заезда.
+        if (sim.holdV !== undefined) {
+          vTurn = sim.holdV;
+          if (sim.holdDist! < 30) minApproach = Math.min(minApproach, sim.v);
+        }
+      }
+      // Дуга: пока нос не ушёл за бордюр в заезд.
+      if (m?.kind === 'in' && dot(sub(m.pos, home.d.curb), home.d.dir) < 0) {
+        if (atTurn < 0) atTurn = m.v;
+        minArc = Math.min(minArc, m.v);
+      }
+      done = !game.garages.moveOf(home.b.id) && !traffic.vehicles.has(sim.id) && !game.garages.homingOf(sim.id);
+    }
+    expect(done).toBe(true);
+    // ~15 км/ч (1 м/с игры — 2,2 км/ч) — с ~50 км/ч на улице.
+    expect(vStreet).toBeGreaterThan(15);
+    expect(vTurn).toBeGreaterThan(4.5);
+    expect(vTurn).toBeLessThanOrEqual(7);
+    expect(minApproach).toBeGreaterThan(0.6 * vTurn);
+    expect(atTurn).toBeGreaterThan(0.9 * vTurn);
+    expect(minArc).toBeGreaterThan(0.6 * vTurn);
+    expect(town.garageAway).not.toContain(home.b.id);
   });
 
   it('въезд в гараж: линия маршрута — до ворот, машина проезжает в открытые ворота и пропадает, ворота закрыты', () => {

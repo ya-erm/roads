@@ -147,6 +147,50 @@ describe('Получатели грузов в партии', { timeout: 240_000
     expect(game.docks.count).toBe(0);
   });
 
+  it.each([
+    ['двор свободен — сворачивает с ходу', false],
+    ['у стоянки машина покупателя на манёвре — встаёт напротив проезда и ждёт', true],
+  ])('въезд во двор: %s', (_name, busy) => {
+    const game = withoutCitizens(freshGame(RETAIL_WORLD));
+    const { b, sa, v } = shopLine(game);
+    v.cargo = 'food';
+    v.amount = 10;
+    v.loadedAt = sa.id;
+    v.fromStore = true;
+    // Двор занят покупателем, пока грузовик не постоит у проезда 2 с.
+    let lotBusy = busy;
+    (game.shops as unknown as { lotBusy(id: number): boolean }).lotBusy = (id) => lotBusy && id === b.id;
+    const moves = (game.docks as unknown as { moves: Map<number, { kind: string; run: { v: number } }> }).moves;
+    let vTurn = 0;
+    let minApproach = Infinity;
+    let stoppedFor = 0;
+    let startV = -1;
+    expect(
+      until(game, 200, () => {
+        const sim = game.fleetSim(v);
+        if (sim && game.docks.homingOf(sim.id) === v.id && sim.holdDist !== undefined) {
+          if (sim.holdV !== undefined) vTurn = sim.holdV;
+          if (sim.holdDist < 20) minApproach = Math.min(minApproach, sim.v);
+          if (sim.v < 0.3) stoppedFor += 0.1;
+          if (stoppedFor > 2) lotBusy = false;
+        }
+        const m = moves.get(v.id);
+        if (m?.kind === 'in' && startV < 0) startV = m.run.v;
+        return game.docks.inYard(v.id) && !game.docks.entering(v.id);
+      }),
+    ).toBe(true);
+    expect(vTurn).toBeGreaterThan(3);
+    if (busy) {
+      // Встал напротив проезда, дождался — свернул с места.
+      expect(stoppedFor).toBeGreaterThan(2);
+      expect(startV).toBeLessThan(1);
+    } else {
+      expect(stoppedFor).toBe(0);
+      expect(minApproach).toBeGreaterThan(0.6 * vTurn);
+      expect(startV).toBeGreaterThan(0.8 * vTurn);
+    }
+  });
+
   it('линия маршрута между магазинами — без разрывов у узлов станций и по тем связям, по которым едет грузовик', () => {
     const game = freshGame(RETAIL_WORLD);
     const { a, b, line, v } = shopLine(game);

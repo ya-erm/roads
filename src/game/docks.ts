@@ -3,21 +3,22 @@ import type { GLane, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import { findLaneRoute } from '../lanes/routing';
 import type { LaneTraffic } from '../lanes/traffic';
-import { steerBase } from '../sim/body';
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
 import type { TownBuilding } from '../world/entities';
 import { lotFrame, type Driveway } from '../world/houseAccess';
 import { DOCK_TRUCK, dockDriveway, dockYardsOf, exitDriveway, RAMP_GAP, THROUGH_R, type DockYard } from '../world/shopLots';
 import { laneSlot, type GarageSlot } from './garages';
-import { bezier, legPose, straight, type Leg } from './lotMoves';
+import { advance, bezier, decideNow, entrySpeed, handOff, joinLane, poseSim, runOf, runPose, straight, type Leg, type Run } from './lotMoves';
 
 /**
  * Грузовик у получателя (docs/RETAIL.md, «Заезд во двор»; world/retail.ts): маршрут кончается связью у его двора
- * (Vehicle.endLink), грузовик замедляется, с поворотником встаёт напротив проезда (holdAfter) и сворачивает в него
- * передом — пока кузов над полосой, он в потоке (стоит, его объезжают), дальше — во дворе, только рисунок. Двор
- * 'turn' (world/shopLots.DockYard): по проезду за здание, поворот, задом к рампе на задней стене; выгрузка; разворот к
- * проезду, передом к бордюру, ждёт настоящего просвета (LaneTraffic.clearToJoin) и выезжает направо в поток. Двор
- * 'back' (мелкий, рампа у торца, склад): передом по проезду до рампы, выезд задним ходом на полосу, как из гаража.
+ * (Vehicle.endLink), грузовик замедляется, с поворотником подъезжает к проезду на скорости поворота в него
+ * (LaneTraffic.slowTo, lotMoves.entrySpeed) и сворачивает с ходу, передом; двор занят машиной покупателя на манёвре —
+ * встаёт напротив проезда (holdAfter) и ждёт. Пока кузов над полосой, он в потоке (стоит, его объезжают), дальше — во
+ * дворе, только рисунок. Двор 'turn' (world/shopLots.DockYard): по проезду за здание, поворот, задом к рампе на
+ * задней стене; выгрузка; разворот к проезду, передом к бордюру и, если на полосе настоящий просвет
+ * (LaneTraffic.clearToJoin), не останавливаясь, направо в поток; нет просвета — ждёт его у бордюра. Двор 'back'
+ * (мелкий, рампа у торца, склад): передом по проезду до рампы, выезд задним ходом на полосу, как из гаража.
  * Двор 'through' (АЗС, оптовая база): въезд в съезд, к которому полоса подходит первой, проезд вдоль улицы до рампы,
  * выезд из другого съезда передом направо — без заднего хода.
  *
@@ -35,14 +36,17 @@ export const DOCK = {
    * по двору ~10 км/ч, задом ~6,5: при 3 и 2 ед./с заезд и выезд шли по 20 с, визит к магазину — почти месяц (60 с).
    */
   speed: { roadIn: 5.5, yardIn: 4.5, yardBack: 3, roadOut: 5, accel: 3.5, brake: 4.5 },
-  /** За столько метров до проезда грузовик сбрасывает скорость до slow (м/с игры) — остановится напротив. */
+  /** За столько метров до проезда грузовик сбрасывает скорость до slow (м/с игры) — скоро поворачивать. */
   slowAt: 80,
   slow: 7,
   /** Поворотник — за столько метров. */
   blinkAt: 50,
   /** Мягкое торможение к проезду, м/с² игры: позже уже не остановиться — проезжает мимо. */
   hold: 6,
-  /** У бордюра перед выездом — смотрит по сторонам хотя бы столько, с; встав на полосу — столько до того, как тронуться. */
+  /**
+   * Ждущий просвета у бордюра смотрит по сторонам хотя бы столько, с; встав на полосу задним ходом (двор 'back') —
+   * столько до того, как тронуться вперёд.
+   */
   look: 0.8,
   pause: 0.5,
 } as const;
@@ -111,18 +115,18 @@ interface Homing {
   k: number;
   /** Уже у проезда (сбросил скорость): рампа — за ним, другому грузовику туда не сворачивать. */
   close?: boolean;
+  /** Двор был свободен — сворачивает с ходу, двор уже за ним (yardBusy): покупателям туда не заезжать. */
+  roll?: boolean;
 }
 
-/** Грузовик на манёвре: отрезки по порядку, где на них, машина в потоке (пока кузов над полосой). */
+/** Грузовик на манёвре: отрезки по порядку и где на них (run), машина в потоке (пока кузов над полосой). */
 interface Move {
   id: number;
   geo: DockGeo;
   kind: 'in' | 'out';
+  /** legs — по двору; wait — у бордюра ждёт просвета; join — встаёт на полосу; pause — встал задом, сейчас тронется. */
   phase: 'legs' | 'wait' | 'join' | 'pause';
-  legs: Leg[];
-  i: number;
-  s: number;
-  v: number;
+  run: Run;
   wait: number;
   sim?: Vehicle;
   /** Въезд: отрезок на полосе — первый; дошёл до конца его — сошёл с полосы. */
@@ -361,9 +365,10 @@ export class Docks {
     return this.freeRamp(b, except, L, W) === null;
   }
 
-  /** У дома b грузовик на манёвре (не стоит у рампы): машинам покупателей во дворе ждать. */
+  /** У дома b грузовик на манёвре (не стоит у рампы) или сворачивает к нему с ходу: машинам покупателей во дворе ждать. */
   yardBusy(b: number): boolean {
     for (const m of this.moves.values()) if (m.geo.b.id === b && m.phase !== 'pause') return true;
+    for (const h of this.homing.values()) if (h.roll && h.b.id === b) return true;
     return false;
   }
 
@@ -382,7 +387,7 @@ export class Docks {
     if (b) geo = this.geoOf(b, spec.length, spec.width, geo?.k ?? 0) ?? geo;
     if (!geo?.out) return false;
     this.parked.delete(id);
-    this.moves.set(id, { id, geo, kind: 'out', phase: 'legs', legs: geo.outLegs, i: 0, s: 0, v: 0, wait: 0, road: false, spec, target, endLink, blink: 0 });
+    this.moves.set(id, { id, geo, kind: 'out', phase: 'legs', run: runOf([...geo.outLegs]), wait: 0, road: false, spec, target, endLink, blink: 0 });
     return true;
   }
 
@@ -464,25 +469,37 @@ export class Docks {
           continue;
         }
         if (late) this.cancel(sim, h);
-        else traffic.holdAfter(sim, room);
+        else traffic.slowTo(sim, room, entrySpeed([this.turnLeg(geo, slot.pos, slot.f), ...geo.inLegs], DOCK.speed.brake));
         continue;
+      }
+      // Двор общий с покупателями: за тормозной путь до проезда смотрит, не на манёвре ли машина у стоянки, — нет:
+      // сворачивает с ходу (двор уже за ним, yardBusy); да — встаёт напротив проезда и ждёт.
+      if (!h.roll && sim.holdV !== undefined && sim.holdDist <= (sim.v * sim.v) / (2 * DOCK.hold) + 1) {
+        if (this.host.lotBusy(h.b.id)) traffic.holdAfter(sim, sim.holdDist);
+        else h.roll = true;
       }
       if (!traffic.held(sim)) continue;
       if (sim.lane !== slot.lane.id) {
         this.cancel(sim, h);
         continue;
       }
-      // Двор общий с покупателями: машина на манёвре у стоянки — подождать.
-      if (this.host.lotBusy(h.b.id)) continue;
+      if (!h.roll && this.host.lotBusy(h.b.id)) continue;
       this.homing.delete(simId);
       sim.maxSpeed = h.maxSpeed;
       const c0 = sub(sim.pos, scale(sim.dir, L / 2));
-      const k = 0.55 * Math.max(2, Math.abs(dot(sub(geo.curbSide, c0), rightNormal(sim.dir))));
-      const turn = bezier(c0, add(c0, scale(sim.dir, k)), sub(geo.curbSide, scale(geo.d.dir, k)), geo.curbSide, false, DOCK.speed.roadIn);
+      // С ходу — с той скоростью, с какой подъехал; ждал — с места.
+      const v0 = sim.holdV !== undefined ? sim.v : 0;
+      traffic.holdAfter(sim, 0);
       sim.lcCooldown = 1e9;
       const blink = dot(geo.d.dir, rightNormal(slot.f)) > 0 ? 1 : -1;
-      this.moves.set(h.id, { id: h.id, geo, kind: 'in', phase: 'legs', legs: [turn, ...geo.inLegs], i: 0, s: 0, v: 0, wait: 0, sim, road: true, blink });
+      this.moves.set(h.id, { id: h.id, geo, kind: 'in', phase: 'legs', run: runOf([this.turnLeg(geo, c0, sim.dir), ...geo.inLegs], v0), wait: 0, sim, road: true, blink });
     }
+  }
+
+  /** Поворот с полосы в проезд: от середины кузова c0 (курс f) до бордюра, кузов — в проезде. */
+  private turnLeg(geo: DockGeo, c0: Vec, f: Vec): Leg {
+    const k = 0.55 * Math.max(2, Math.abs(dot(sub(geo.curbSide, c0), rightNormal(f))));
+    return bezier(c0, add(c0, scale(f, k)), sub(geo.curbSide, scale(geo.d.dir, k)), geo.curbSide, false, DOCK.speed.roadIn);
   }
 
   /** Шаг манёвра; false — кончился. */
@@ -494,68 +511,64 @@ export class Docks {
       m.wait += dt;
       this.pose(m);
       if (m.wait < DOCK.pause) return true;
-      // Встал на полосу носом по ходу — поехал.
-      traffic.release(m.sim!);
-      m.sim!.lcCooldown = 0.5;
+      // Встал на полосу задним ходом, носом по ходу — поехал.
+      handOff(traffic, m.sim!);
       return false;
     }
-    const leg = m.legs[m.i];
-    const next = m.legs[m.i + 1];
-    // Тем же ходом дальше — не тормозить в конце отрезка; сменить ход — встать.
-    const ahead = leg.len - m.s + (next && next.back === leg.back ? next.len : 0);
-    const sp = DOCK.speed;
-    m.v = Math.max(0.3, Math.min(leg.vmax, m.v + sp.accel * dt, Math.sqrt(2 * sp.brake * Math.max(0, ahead))));
-    m.s += m.v * dt;
-    while (m.s >= m.legs[m.i].len) {
-      const over = m.s - m.legs[m.i].len;
-      const was = m.legs[m.i];
-      if (m.kind === 'in' && m.road && m.i === 0) {
-        // Кузов ушёл с полосы в проезд — в потоке грузовика больше нет.
-        const sim = m.sim!;
-        traffic.remove(sim);
-        m.sim = undefined;
-        m.road = false;
-        this.host.gone(m.id, sim);
-      }
-      m.i++;
-      if (m.i >= m.legs.length) return this.legsDone(m);
-      const now = m.legs[m.i];
-      m.s = now.back === was.back ? Math.min(over, now.len) : 0;
-      if (now.back !== was.back) m.v = 0;
-    }
+    const r = m.run;
+    // Выезд: подъезжая к бордюру, смотрит, есть ли просвет: есть — встаёт в поток с ходу.
+    if (m.kind === 'out' && m.phase === 'legs' && r.i === r.legs.length - 1 && decideNow(r, DOCK.speed.brake)) this.join(m, true);
+    // Встаёт на полосу передом — дальше едет с той же скоростью.
+    const last = r.legs[r.legs.length - 1];
+    const end = m.phase === 'join' && !last.back ? last.vmax : 0;
+    const over = advance(r, dt, DOCK.speed, end, (i) => {
+      if (m.kind !== 'in' || !m.road || i !== 0) return;
+      // Кузов ушёл с полосы в проезд — в потоке грузовика больше нет.
+      const sim = m.sim!;
+      traffic.remove(sim);
+      m.sim = undefined;
+      m.road = false;
+      this.host.gone(m.id, sim);
+    });
     this.pose(m);
-    return true;
+    return over ? this.legsDone(m) : true;
   }
 
-  /** Все отрезки пройдены: въехал — у рампы; выехал со двора — к бордюру ждать; встал на полосу — пауза. */
+  /** Все отрезки пройдены: въехал — у рампы; выехал со двора — к бордюру ждать; встал на полосу — дальше сам (задом — после паузы). */
   private legsDone(m: Move): boolean {
-    m.i = m.legs.length - 1;
-    m.s = m.legs[m.i].len;
-    m.v = 0;
     if (m.kind === 'in') {
       this.parked.set(m.id, m.geo);
       this.host.arrived(m.id);
       return false;
     }
+    if (m.phase === 'join' && !m.run.legs[m.run.i].back) {
+      handOff(this.host.traffic, m.sim!, m.run.v);
+      return false;
+    }
+    m.run.v = 0;
     m.wait = 0;
     m.phase = m.phase === 'join' ? 'pause' : 'wait';
-    this.pose(m);
     return true;
   }
 
   /** У бордюра: настоящий просвет и двор свободен — в поток (стоит, пока выезжает на полосу). */
   private stepWait(m: Move, dt: number): boolean {
     m.wait += dt;
+    if (m.wait >= DOCK.look) this.join(m, false);
+    return true;
+  }
+
+  /**
+   * Встаёт в поток, если на полосе выезда настоящий просвет и двор свободен: грузовик в потоке (стоит, пока выезжает)
+   * и путь от бордюра на полосу. rolling — ещё подъезжает к бордюру: путь на полосу продолжает его ход. Нельзя — false.
+   */
+  private join(m: Move, rolling: boolean): boolean {
     const geo = this.geoOf(m.geo.b, m.geo.L, m.geo.W, m.geo.k) ?? m.geo;
     const out = geo.out;
     const traffic = this.host.traffic;
-    if (!out || m.wait < DOCK.look || this.host.lotBusy(geo.b.id) || !traffic.clearToJoin(out.lane.id, out.zone[0], out.zone[1])) return true;
-    const L = geo.L;
-    const sim = traffic.placeOnLane({ ...m.spec!, targetNode: m.target!, endLink: m.endLink }, out.lane.id, out.mid + L / 2);
-    if (!sim) return true;
-    traffic.holdAfter(sim, 0);
-    if (m.endLink !== undefined) sim.endLink = m.endLink;
-    sim.lcCooldown = 1e9;
+    if (!out || this.host.lotBusy(geo.b.id) || !traffic.clearToJoin(out.lane.id, out.zone[0], out.zone[1])) return false;
+    const sim = joinLane(traffic, m.spec!, out.lane.id, out.mid + geo.L / 2, m.target!, m.endLink);
+    if (!sim) return false;
     // Сквозной двор — из второго проезда.
     const start = geo.exitSide ?? geo.curbSide;
     const dir = (geo.exitD ?? geo.d).dir;
@@ -568,10 +581,8 @@ export class Docks {
     m.geo = geo;
     m.sim = sim;
     m.phase = 'join';
-    m.legs = [leg];
-    m.i = 0;
-    m.s = 0;
-    m.v = 0;
+    if (rolling) m.run.legs.push(leg);
+    else m.run = runOf([leg]);
     m.blink = back ? 0 : dot(out.f, rightNormal(scale(dir, -1))) > 0 ? 1 : -1;
     this.pose(m);
     this.host.joined(m.id, sim);
@@ -580,15 +591,7 @@ export class Docks {
 
   /** Машина в потоке на манёвре — там, где она на нём (поток держит её на месте: holdAfter). */
   private pose(m: Move): void {
-    const sim = m.sim;
-    if (!sim) return;
-    const { c, h } = legPose(m.legs[m.i], m.s);
-    const nose = add(c, scale(h, sim.length / 2));
-    sim.pos = nose;
-    sim.dir = h;
-    sim.rear = sub(nose, scale(h, steerBase(sim.body) * sim.length));
-    sim.v = 0;
-    sim.blinker = m.blink;
+    if (m.sim) poseSim(m.sim, m.run, m.blink);
   }
 
   /**
@@ -599,7 +602,7 @@ export class Docks {
     const m = this.moves.get(id);
     if (m) {
       if (m.sim) return null;
-      const { c, h } = legPose(m.legs[m.i], m.s);
+      const { c, h } = runPose(m.run);
       return { pos: add(c, scale(h, m.geo.L / 2)), dir: h };
     }
     const geo = this.parked.get(id);

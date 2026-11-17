@@ -49,13 +49,19 @@ const step = (game: Game) => game.update(SIM_DT);
 
 /**
  * Стоп-линии встречки, что остались без машины, пересекающей её: должно быть 0 (машины со стоянок магазинов выезжают
- * и без поездок жителей — их стоп-линии на месте, пока они на манёвре).
+ * и без поездок жителей — их стоп-линии на месте, пока они на манёвре или вот-вот повернут с ходу).
  */
 function strayStops(game: Game): number {
   let n = 0;
   for (const list of game.traffic.turnStops.values()) n += list.length;
-  return n - game.garages.moves.filter((m) => m.block).length;
+  return n - game.garages.blocks;
 }
+
+/**
+ * Подъезжает к повороту налево и вот-вот посмотрит на встречку (за тормозной путь до поворота): тут встречку и
+ * занимают.
+ */
+const nearTurn = (sim: Vehicle) => sim.holdDist !== undefined && sim.holdDist < 15;
 
 /** Машина возвращается домой от начала улицы, где дом слева: путь — к повороту налево (wayHome). */
 function sendHome(game: Game, town: Town, home: GarageHome, left: GarageSlot): Vehicle {
@@ -70,7 +76,7 @@ function sendHome(game: Game, town: Town, home: GarageHome, left: GarageSlot): V
 }
 
 describe('Левый поворот к дому через встречку', { timeout: 60_000 }, () => {
-  it('машина к дому слева поворачивает налево с поворотником, а не едет в объезд; линия маршрута — до места', () => {
+  it('машина к дому слева поворачивает налево с поворотником, а не едет в объезд; встречка свободна — с ходу; линия маршрута — до места', () => {
     const game = withoutCitizens(freshGame(7));
     const { town, home, left, right } = leftHome(game);
     const traffic = game.traffic;
@@ -82,23 +88,40 @@ describe('Левый поворот к дому через встречку', { 
     expect(ahead.left).toBeLessThan(traffic.routeLeft(sim) + 40);
     const arrivals = traffic.arrivals;
     let blinkedLeft = false;
-    let crossed = false;
+    let stopped = false;
+    let blocked = false;
+    let vTurn = 0;
+    let minV = Infinity;
     let wrongWay = false;
     let overlaps = 0;
     for (let i = 0; i < 30 * 90; i++) {
       step(game);
+      const m = game.garages.moveOf(home.b.id);
       if (traffic.vehicles.has(sim.id)) {
         if (sim.route.includes(right.link.id)) wrongWay = true;
         if (sim.holdDist !== undefined && sim.blinker === -1) blinkedLeft = true;
-        // Не прижимается к бордюру — стоит посреди своей полосы.
+        // Не прижимается к бордюру — едет посреди своей полосы.
         expect(sim.curb ?? 0).toBe(0);
         for (const o of traffic.vehicles.values()) if (o !== sim && overlap(sim, o)) overlaps++;
+        // Подъезжая к повороту — не медленнее скорости поворота (сбросила до неё, не до нуля).
+        if (!m && sim.holdV !== undefined) {
+          vTurn = sim.holdV;
+          if (sim.holdDist! < 20) minV = Math.min(minV, sim.v);
+        }
       }
-      if (game.garages.moveOf(home.b.id)?.phase === 'cross') crossed = true;
+      // Пересекая встречку, закрывает её стоп-линией.
+      if (m?.phase === 'road' && game.garages.blocks > 0) blocked = true;
+      // Дуга — пока нос не ушёл за бордюр в заезд.
+      if (m?.phase === 'road' && dot(sub(m.pos, home.d.curb), home.d.dir) < 0) minV = Math.min(minV, m.v);
+      if (m?.phase === 'cross') stopped = true;
       if (!game.garages.moveOf(home.b.id) && !traffic.vehicles.has(sim.id) && game.garages.homingOf(sim.id) === undefined) break;
     }
     expect(blinkedLeft).toBe(true);
-    expect(crossed).toBe(true);
+    // Встречка свободна — поворачивает с ходу, не вставая напротив заезда.
+    expect(stopped).toBe(false);
+    expect(blocked).toBe(true);
+    expect(vTurn).toBeGreaterThan(4);
+    expect(minV).toBeGreaterThan(0.6 * vTurn);
     expect(wrongWay).toBe(false);
     expect(overlaps).toBe(0);
     expect(traffic.arrivals).toBe(arrivals + 1);
@@ -106,7 +129,7 @@ describe('Левый поворот к дому через встречку', { 
     expect(strayStops(game)).toBe(0);
   });
 
-  it('ждёт встречную машину: поворачивает, когда та проехала заезд, и та не тормозит резко', () => {
+  it('ждёт встречную машину: встаёт напротив заезда, поворачивает, когда та проехала заезд, и та не тормозит резко', () => {
     const game = withoutCitizens(freshGame(7));
     const { town, home, left } = leftHome(game);
     const traffic = game.traffic;
@@ -117,16 +140,19 @@ describe('Левый поворот к дому через встречку', { 
     let worstBrake = 0;
     let prevV = 0;
     let overlaps = 0;
+    let stoppedAt = -1;
     for (let i = 0; i < 30 * 90; i++) {
       step(game);
       const m = game.garages.moveOf(home.b.id);
-      if (m?.phase === 'cross' && !other) {
-        // Встала с поворотником — а по встречке подъезжает машина: ей не хватило бы места спокойно остановиться.
+      if (!m && traffic.vehicles.has(sim.id) && nearTurn(sim) && !other) {
+        // Подъезжает с поворотником — а по встречке едет машина: ей не хватило бы места спокойно остановиться.
         other = traffic.placeOnLane({ ...CAR, targetNode: game.roads.graph.links.get(cross.lane.link)!.toNode! }, cross.lane.id, Math.max(1, cross.zone[0] - 35))!;
         other.v = 15;
         prevV = other.v;
         expect(traffic.clearToJoin(cross.lane.id, cross.zone[0], cross.zone[1])).toBe(false);
       }
+      // Встала напротив заезда и ждёт.
+      if (m?.phase === 'cross' && stoppedAt < 0) stoppedAt = sim.v;
       if (other && traffic.vehicles.has(other.id)) {
         worstBrake = Math.max(worstBrake, (prevV - other.v) / SIM_DT);
         prevV = other.v;
@@ -139,6 +165,8 @@ describe('Левый поворот к дому через встречку', { 
       if (!m && !traffic.vehicles.has(sim.id) && game.garages.homingOf(sim.id) === undefined) break;
     }
     expect(other).not.toBeNull();
+    expect(stoppedAt).toBeGreaterThanOrEqual(0);
+    expect(stoppedAt).toBeLessThan(0.3);
     expect(passedBefore).toBeGreaterThan(0);
     expect(overlaps).toBe(0);
     // Встречная не тормозила (тормоз IDM — 18 м/с² игры).
@@ -160,12 +188,13 @@ describe('Левый поворот к дому через встречку', { 
       step(game);
       t += SIM_DT;
       const m = game.garages.moveOf(home.b.id);
-      if (m?.phase === 'cross' && !blocker) {
+      if (!blocker && traffic.vehicles.has(sim.id) && nearTurn(sim)) {
         // Во встречной полосе на заезде стоит машина (пробка) — просвета нет.
         blocker = traffic.placeOnLane({ ...CAR, targetNode: game.roads.graph.links.get(cross.lane.link)!.toNode! }, cross.lane.id, (cross.zone[0] + cross.zone[1]) / 2 + CAR.length / 2)!;
         traffic.holdAfter(blocker, 0);
-        since = t;
       }
+      // Встала напротив заезда — ждёт.
+      if (m?.phase === 'cross' && !since) since = t;
       if (blocker && detourAfter < 0 && sim.endLink === right.link.id) {
         detourAfter = t - since;
         // Пробка рассосалась.

@@ -4,20 +4,21 @@ import type { GLane, GLink, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import { findLaneRoute, routeCost } from '../lanes/routing';
 import type { LaneTraffic } from '../lanes/traffic';
-import { steerBase } from '../sim/body';
 import type { Vehicle, VehicleLook, VehicleSpec } from '../sim/vehicle';
 import type { TownBuilding } from '../world/entities';
 import type { GarageLook } from './garages';
-import { bezier, legPose, type Leg } from './lotMoves';
+import { advance, bezier, entrySpeed, handOff, joinLane, leaveFlow, poseSim, runOf, runPose, type Leg, type Run } from './lotMoves';
 
 /**
  * Машины на полосах стоянки вдоль бордюра (docs/PARKING.md, этап 2; места — lanes/curb.ts). Места — и места ночёвки
  * (CarHomes: свой гараж или площадка → двор → полоса в CURB_TRIPS.homeRange → бокс), и места у цели поездки: машина
  * едет к связи у цели и на полосе у мест выбирает ближнее свободное — как на стоянке магазина.
  *
- * Манёвры (lotMoves.ts): впереди два свободных места — встаёт передом (S-образно, в потоке ~2 с); иначе проезжает место и
- * встаёт параллельно задом (~6 с) — всё это время держит полосу (holdAfter). Выезд — передом, когда на полосе настоящий
- * просвет (LaneTraffic.clearToJoin). На одной полосе стоянки одновременно — не больше одного манёвра на CURB_TRIPS.apart.
+ * Манёвры (lotMoves.ts): впереди два свободных места — встаёт передом с ходу (заранее сбросив скорость до скорости
+ * S-образной дуги: LaneTraffic.slowTo, lotMoves.entrySpeed; в потоке ~2 с); иначе проезжает место, встаёт и
+ * параллельно сдаёт задом (~6 с) — всё это время держит полосу (holdAfter). Выезд — передом, когда на полосе настоящий
+ * просвет (LaneTraffic.clearToJoin), и, встав на полосу, едет дальше, не останавливаясь. На одной полосе стоянки
+ * одновременно — не больше одного манёвра на CURB_TRIPS.apart.
  * Пока кузов над полосой движения, машина — в потоке (стоит, её ждут и объезжают); у места — только рисунок.
  *
  * Кто где стоит — данные: места ночёвки — у CarHomes (по геометрии), машины у цели — Town.cars (TownCar.curb, ключ
@@ -51,15 +52,15 @@ export const CURB_TRIPS = {
   exitRun: 12,
 };
 
-/** Скорости манёвра, ед./с игры: передом с полосы на место, задом на место, передом с места; разгон и торможение. */
-const SPEED = { fwdIn: 4, revIn: 2.2, out: 3.5, accel: 3, brake: 4 };
-/** Перед выездом машина стоит хотя бы столько (смотрит по сторонам), с; и столько — встав на полосу. */
+/**
+ * Скорости манёвра, ед./с игры: передом с полосы на место (не быстрее ~13 км/ч, а на дуге — √(LATERAL·R): lotMoves),
+ * задом на место, передом с места; разгон и торможение.
+ */
+const SPEED = { fwdIn: 6, revIn: 2.2, out: 5, accel: 3, brake: 4 };
+/** Перед выездом с места машина стоит хотя бы столько (смотрит по сторонам), с. */
 const LOOK = 0.8;
-const PAUSE = 0.5;
 /** Мягкое торможение: подъезжая к месту, позже этого не остановиться — проезжает мимо. */
 const HOLD_BRAKE = 9;
-/** Передом машина сворачивает с ходу: тормозит к точке на столько ед. дальше начала манёвра и сворачивает раньше. */
-const FWD_ROLL = 5;
 
 /** Что делать, когда манёвр дошёл до вехи: встала в поток (выезд), встала на место, не выехала, не нашла места. */
 export interface CurbHooks {
@@ -125,15 +126,14 @@ interface Homing {
   car?: number;
 }
 
-type Phase = 'wait' | 'road' | 'yard' | 'pause';
+type Phase = 'wait' | 'road' | 'yard';
 
 interface Move {
   stall: CurbStall;
   kind: 'in' | 'out';
   phase: Phase;
-  leg: Leg | null;
-  s: number;
-  v: number;
+  /** Путь манёвра и где машина на нём; выезд, пока ждёт просвета, — ещё нет. */
+  run: Run | null;
   wait: number;
   color: string;
   hooks: CurbHooks;
@@ -454,7 +454,7 @@ export class CurbParking {
     opt: { color: string; hooks?: CurbHooks; endLink?: number; then?: (sim: Vehicle) => void; car?: number },
   ): boolean {
     if (this.reserved.has(st.key)) return false;
-    const m: Move = { stall: st, kind: 'out', phase: 'wait', leg: null, s: 0, v: 0, wait: 0, color: opt.color, hooks: opt.hooks ?? {}, target, endLink: opt.endLink, then: opt.then, trip, car: opt.car };
+    const m: Move = { stall: st, kind: 'out', phase: 'wait', run: null, wait: 0, color: opt.color, hooks: opt.hooks ?? {}, target, endLink: opt.endLink, then: opt.then, trip, car: opt.car };
     // Бронь выезжающей — пока кузов не вышел из габарита места (stepMove: vacate).
     this.reserved.set(st.key, m);
     this.moves.push(m);
@@ -545,14 +545,16 @@ export class CurbParking {
         h.stall = best.st;
         h.mode = best.mode;
         h.nose = best.nose;
-        // Передом — сворачивает с ходу (тормозит к точке чуть дальше начала манёвра), задом — встаёт у соседнего места.
-        traffic.holdAfter(sim, best.nose + (best.mode === 'fwd' ? FWD_ROLL : 0) - sim.s);
+        // Передом — сворачивает с ходу (сбросив скорость до скорости дуги), задом — встаёт у соседнего места.
+        if (best.mode === 'fwd') {
+          const c0 = this.host.graph.lanePose(lane, best.nose - L / 2).pos;
+          traffic.slowTo(sim, best.nose - sim.s, entrySpeed([this.fwdLeg(c0, best.st)], SPEED.brake));
+        } else traffic.holdAfter(sim, best.nose - sim.s);
         sim.lcCooldown = 1e9;
         continue;
       }
       sim.blinker = 1;
-      const rolling = h.mode === 'fwd' && !sim.onMovement && sim.s >= (h.nose ?? Infinity) - 0.3;
-      if (!rolling && !traffic.held(sim)) continue;
+      if (!traffic.held(sim)) continue;
       const slot = this.slotOf(h.stall);
       if (!slot || sim.lane !== slot.lane.id) {
         this.cancel(sim);
@@ -566,14 +568,13 @@ export class CurbParking {
       }
       this.homing.delete(id);
       const c0 = sub(sim.pos, scale(sim.dir, L / 2));
-      const k = 0.42 * dist(c0, st.pos);
       const fwd = h.mode === 'fwd';
-      const leg = fwd
-        ? bezier(c0, add(c0, scale(st.dir, k)), sub(st.pos, scale(st.dir, k)), st.pos, false, SPEED.fwdIn)
-        : bezier(c0, sub(c0, scale(st.dir, k)), add(st.pos, scale(st.dir, k)), st.pos, true, SPEED.revIn);
+      const k = 0.42 * dist(c0, st.pos);
+      const leg = fwd ? this.fwdLeg(c0, st) : bezier(c0, sub(c0, scale(st.dir, k)), add(st.pos, scale(st.dir, k)), st.pos, true, SPEED.revIn);
+      // Передом — с той скоростью, с какой подъехала; задом — с места.
+      const v0 = fwd ? sim.v : 0;
       traffic.holdAfter(sim, 0);
-      const v0 = fwd ? Math.min(sim.v, SPEED.fwdIn) : 0;
-      const m: Move = { stall: st, kind: 'in', phase: 'road', leg, s: 0, v: v0, wait: 0, color: sim.color, hooks: h.hooks, sim, dropAt: fwd ? leg.len * 0.55 : leg.len, car: h.car };
+      const m: Move = { stall: st, kind: 'in', phase: 'road', run: runOf([leg], v0), wait: 0, color: sim.color, hooks: h.hooks, sim, dropAt: fwd ? leg.len * 0.55 : leg.len, car: h.car };
       // Бронь переходит к манёвру: место занято, пока машина не встанет на него (done).
       this.reserved.set(st.key, m);
       this.moves.push(m);
@@ -599,41 +600,36 @@ export class CurbParking {
     return this.host.net.corridors.get(st.corridor)?.lanes[st.lane]?.flow ?? 1;
   }
 
+  /** Передом с полосы на место st: S-образно от середины кузова c0 (на полосе) до места. */
+  private fwdLeg(c0: Vec, st: CurbStall): Leg {
+    const k = 0.42 * dist(c0, st.pos);
+    return bezier(c0, add(c0, scale(st.dir, k)), sub(st.pos, scale(st.dir, k)), st.pos, false, SPEED.fwdIn);
+  }
+
   private stepMove(m: Move, dt: number): boolean {
     const traffic = this.host.traffic;
     if (m.sim && !traffic.vehicles.has(m.sim.id)) return this.done(m);
     if (m.phase === 'wait') return this.stepWait(m, dt);
-    if (m.phase === 'pause') {
-      m.wait += dt;
-      this.pose(m);
-      if (m.wait < PAUSE) return true;
-      const sim = m.sim!;
-      traffic.release(sim);
-      sim.lcCooldown = 0.5;
-      sim.blinker = 0;
-      m.then?.(sim);
-      return this.done(m);
-    }
-    const leg = m.leg!;
-    m.v = Math.max(0.3, Math.min(leg.vmax, m.v + SPEED.accel * dt, Math.sqrt(2 * SPEED.brake * Math.max(0, leg.len - m.s))));
-    m.s = Math.min(leg.len, m.s + m.v * dt);
-    if (m.kind === 'in' && m.sim && m.s >= (m.dropAt ?? leg.len) - 1e-6) {
+    const r = m.run!;
+    // Выезд передом — встав на полосу, едет дальше с той же скоростью; въезд — до места.
+    const end = advance(r, dt, SPEED, m.kind === 'out' ? r.legs[0].vmax : 0);
+    if (m.kind === 'in' && m.sim && r.s >= (m.dropAt ?? r.legs[0].len) - 1e-6) {
       // Кузов ушёл с полосы движения — поездка в потоке кончилась, дальше — только рисунок.
       const sim = m.sim;
-      traffic.remove(sim);
-      traffic.arrivals++;
-      traffic.totalTripTime += sim.tripTime;
+      leaveFlow(traffic, sim);
       this.host.gone(sim);
       m.sim = undefined;
       m.phase = 'yard';
     }
     this.pose(m);
     if (m.kind === 'out') this.vacate(m);
-    if (m.s < leg.len) return true;
+    if (!end) return true;
     if (m.kind === 'out') {
-      m.phase = 'pause';
-      m.wait = 0;
-      return true;
+      const sim = m.sim!;
+      handOff(traffic, sim, r.v);
+      sim.blinker = 0;
+      m.then?.(sim);
+      return this.done(m);
     }
     m.hooks.arrived?.(m.stall);
     return this.done(m);
@@ -652,14 +648,11 @@ export class CurbParking {
       return this.done(m);
     }
     if (m.wait < LOOK || this.crowded(m.stall, m) || !traffic.clearToJoin(slot!.lane.id, slot!.u - L / 2 - 1, uEnd + L / 2 + 1)) return true;
-    const sim = traffic.placeOnLane({ ...this.host.car, color: m.color, targetNode: m.target!, endLink: m.endLink }, slot!.lane.id, uEnd + L / 2);
+    const sim = joinLane(traffic, { ...this.host.car, color: m.color }, slot!.lane.id, uEnd + L / 2, m.target!, m.endLink);
     if (!sim) {
       m.hooks.stayed?.();
       return this.done(m);
     }
-    traffic.holdAfter(sim, 0);
-    if (m.endLink !== undefined) sim.endLink = m.endLink;
-    sim.lcCooldown = 1e9;
     this.host.own(sim, m.trip!);
     m.hooks.joined?.(sim);
     const end = this.host.graph.lanePose(slot!.lane, uEnd);
@@ -667,9 +660,7 @@ export class CurbParking {
     const k = 0.42 * dist(c0, end.pos);
     m.sim = sim;
     m.phase = 'road';
-    m.leg = bezier(c0, add(c0, scale(m.stall.dir, k)), sub(end.pos, scale(end.dir, k)), end.pos, false, SPEED.out);
-    m.s = 0;
-    m.v = 0;
+    m.run = runOf([bezier(c0, add(c0, scale(m.stall.dir, k)), sub(end.pos, scale(end.dir, k)), end.pos, false, SPEED.out)]);
     this.pose(m);
     return true;
   }
@@ -681,23 +672,15 @@ export class CurbParking {
 
   /** Выезд: кузов вышел из габарита места — бронь снята, на место можно вставать (манёвр ещё идёт). */
   private vacate(m: Move): void {
-    if (!m.leg || this.reserved.get(m.stall.key) !== m) return;
-    const { c, h } = legPose(m.leg, m.s);
+    if (!m.run || this.reserved.get(m.stall.key) !== m) return;
+    const { c, h } = runPose(m.run);
     const spec = this.host.car;
     if (!boxesOverlap(stallBox(m.stall), { c, d: h, hl: spec.length / 2, hw: spec.width / 2 })) this.release(m.stall.key, m);
   }
 
   /** Машина в потоке на манёвре — там, где она на нём (поток держит её на месте: holdAfter). */
   private pose(m: Move): void {
-    const sim = m.sim;
-    if (!sim || !m.leg) return;
-    const { c, h } = legPose(m.leg, m.s);
-    const nose = add(c, scale(h, sim.length / 2));
-    sim.pos = nose;
-    sim.dir = h;
-    sim.rear = sub(nose, scale(h, steerBase(sim.body) * sim.length));
-    sim.v = 0;
-    sim.blinker = m.kind === 'in' ? 1 : -1;
+    if (m.sim && m.run) poseSim(m.sim, m.run, m.kind === 'in' ? 1 : -1);
   }
 
   /**
@@ -726,8 +709,8 @@ export class CurbParking {
       if (m.sim) continue;
       let pos: Vec;
       let dir: Vec;
-      if (m.leg) {
-        const { c, h } = legPose(m.leg, m.s);
+      if (m.run) {
+        const { c, h } = runPose(m.run);
         pos = add(c, scale(h, spec.length / 2));
         dir = h;
       } else {

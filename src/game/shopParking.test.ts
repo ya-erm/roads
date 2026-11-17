@@ -69,7 +69,7 @@ describe('Стоянки магазинов', { timeout: 120_000 }, () => {
     expect(spot.d.width - CAR_SIZE.w).toBeGreaterThanOrEqual(0.6 - 1e-9);
   });
 
-  it('машина подъезжает, с поворотником сворачивает на свободное место передом, стоит 1–4 минуты, выезжает задним ходом и уезжает', () => {
+  it('машина подъезжает, с поворотником сворачивает на свободное место передом, стоит 1–4 минуты, выезжает задним ходом в просвет с ходу и уезжает', () => {
     const game = withoutCitizens(freshGame(7));
     const { town, b, visit } = shopLot(game);
     const sim = drive(game, visit);
@@ -98,7 +98,7 @@ describe('Стоянки магазинов', { timeout: 120_000 }, () => {
     // Стоит на своём месте, вблизи её видно.
     const spot = visit.lot.spots[car.k];
     expect(game.shops.looks(game.towns, WORLD, true).some((l) => dist(l.look.pos, spot.d.gate) < CAR_SIZE.l)).toBe(true);
-    // Пора — выезжает задним ходом к бордюру, ждёт просвета, встаёт в поток.
+    // Пора — выезжает задним ходом к бордюру и, улица пуста, встаёт в поток с ходу, не останавливаясь у бордюра.
     car.until = game.time;
     let backed = false;
     let waited = false;
@@ -111,7 +111,7 @@ describe('Стоянки магазинов', { timeout: 120_000 }, () => {
       if (m?.sim && !game.shops.parkedAt(town, b.id).length) joined = m.sim.id;
     }
     expect(backed).toBe(true);
-    expect(waited).toBe(true);
+    expect(waited).toBe(false);
     expect(joined).not.toBeNull();
     // Уезжает домой — в жилой дом города; место свободно.
     const trip = game.tripOf(joined!)!;

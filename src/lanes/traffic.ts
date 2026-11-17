@@ -45,6 +45,11 @@ export interface LaneSpawn extends VehicleSpec {
 export const JOIN_HEADWAY = 1.5;
 export const JOIN_BRAKE = IDM.brake / 2;
 const JOIN_LOOK = 160;
+/**
+ * Торможение перед поворотом с ходу во двор, на стоянку (slowTo), м/с² игры: втрое мягче IDM.brake — с 50 км/ч до
+ * скорости поворота (~15 км/ч) за ~40 м игры.
+ */
+export const ROLL_BRAKE = IDM.brake / 3;
 
 /** Сколько машина смотрит вперёд через продолжения полос в поисках лидера. */
 const LOOKAHEAD = 250;
@@ -899,15 +904,27 @@ export class LaneTraffic {
   /** Остановиться, проехав ещё d метров по маршруту, и стоять, пока не отпустят (release). */
   holdAfter(veh: Vehicle, d: number): void {
     veh.holdDist = Math.max(0, d);
+    delete veh.holdV;
   }
 
-  /** Доехала до места остановки (holdAfter) и стоит. */
+  /**
+   * Сбросить скорость до v к месту через d метров по маршруту и быть там не быстрее v (свернуть с ходу во двор, на
+   * стоянку): тормозит заранее, мягко (ROLL_BRAKE), а начав поздно — сколько нужно. Дальше машину ведёт манёвр (held —
+   * уже там); не повёл — встаёт, где доехала.
+   */
+  slowTo(veh: Vehicle, d: number, v: number): void {
+    veh.holdDist = Math.max(0, d);
+    veh.holdV = v;
+  }
+
+  /** Доехала до места остановки (holdAfter) и стоит — или до места поворота с ходу (slowTo), не быстрее, чем там можно. */
   held(veh: Vehicle): boolean {
-    return veh.holdDist !== undefined && veh.holdDist < 0.5 && veh.v < 0.3;
+    return veh.holdDist !== undefined && veh.holdDist < 0.5 && veh.v < (veh.holdV ?? 0) + 0.3;
   }
 
   release(veh: Vehicle): void {
     delete veh.holdDist;
+    delete veh.holdV;
   }
 
   /** Стоящую у остановки (holdAfter) — сразу к бордюру, без смещения на глазах: автобус из сохранения. */
@@ -1862,11 +1879,21 @@ export class LaneTraffic {
 
   private integrate(veh: Vehicle, a: number, dt: number): void {
     veh.tripTime += dt;
-    // Остановка через holdDist метров — как стоящая впереди машина.
-    if (veh.holdDist !== undefined) a = Math.min(a, idmAccel(veh.v, veh.maxSpeed, veh.holdDist + IDM.minGap, veh.v, veh.accel));
+    // Сворачивала с ходу (slowTo), доехала, а манёвр её не повёл — встаёт, где есть.
+    if (veh.holdV !== undefined && veh.holdDist !== undefined && veh.holdDist <= 0) delete veh.holdV;
+    if (veh.holdDist !== undefined && veh.holdV !== undefined) {
+      // К месту поворота — не быстрее holdV: по кривой мягкого торможения, а начав поздно — сколько нужно.
+      const vt = veh.holdV;
+      const need = (veh.v * veh.v - vt * vt) / (2 * Math.max(0.1, veh.holdDist));
+      const cap = Math.sqrt(vt * vt + 2 * ROLL_BRAKE * Math.max(0, veh.holdDist - veh.v * dt));
+      a = Math.min(a, need > ROLL_BRAKE ? -need : (cap - veh.v) / dt);
+    } else if (veh.holdDist !== undefined) {
+      // Остановка через holdDist метров — как стоящая впереди машина.
+      a = Math.min(a, idmAccel(veh.v, veh.maxSpeed, veh.holdDist + IDM.minGap, veh.v, veh.accel));
+    }
     veh.v = Math.max(0, Math.min(veh.maxSpeed * 1.05, veh.v + a * dt));
     if (veh.holdDist !== undefined) {
-      veh.v = Math.min(veh.v, veh.holdDist / dt);
+      if (veh.holdV === undefined) veh.v = Math.min(veh.v, veh.holdDist / dt);
       veh.holdDist = Math.max(0, veh.holdDist - veh.v * dt);
     }
     if (veh.v < 0.5) veh.stoppedTime += dt;
