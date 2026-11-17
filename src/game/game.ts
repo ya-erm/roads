@@ -864,6 +864,16 @@ export class Game implements BuildContext {
    * аллеи у улиц (renderer) — заново, хоть число домов и парков то же.
    */
   layoutRev = 0;
+  /**
+   * Номера правок нарисованного в плитках кэша карты (renderer.syncStill): растут при любой правке своего вида —
+   * отрисовка сверяет подписи объектов, только когда номер сменился, а в покое не делает ничего. Предприятия: список,
+   * место, уровень, пристройки, запасы, выпуск, стройка, руины, месторождения.
+   */
+  industryRev = 0;
+  /** Застройка городов: дома, парки, черта города (номер правок — как industryRev). */
+  townRev = 0;
+  /** Станции: список, место, посты, узел, платформы, склады, пары остановок (номер правок — как industryRev). */
+  stationRev = 0;
   readonly rail: RailSim;
   /** Строитель путей (старая сеть). */
   readonly builder: Builder;
@@ -1207,6 +1217,7 @@ export class Game implements BuildContext {
       if (this.pairOf(st)) this.setStopSide(st, true);
       else delete st.pair;
     }
+    this.stationRev++;
   }
 
   /**
@@ -2726,6 +2737,7 @@ export class Game implements BuildContext {
       this.index.remove(x.b);
       x.b.fp = x.fp;
       this.index.add(x.b);
+      this.townRev++;
     }
     if (razed.length) this.demolish(razed);
     for (const c of cs) this.refreshCatchmentsNear(c.lut.pointAt(c.length / 2));
@@ -2776,6 +2788,7 @@ export class Game implements BuildContext {
       if (!b || !town || b.kind === 'landmark') continue;
       this.index.remove(b);
       town.buildings = town.buildings.filter((x) => x !== b);
+      this.townRev++;
       touched.add(town);
       this.refreshCatchmentsNear(b.fp.center);
     }
@@ -2994,6 +3007,7 @@ export class Game implements BuildContext {
       if (town.parks) town.parks = [...town.parks];
     }
     this.layoutRev++;
+    this.townRev++;
     this.spend(plan.cost);
     this.refreshCatchmentsNear(from);
     this.refreshCatchmentsNear(b.fp.center);
@@ -3073,6 +3087,7 @@ export class Game implements BuildContext {
     // Новый список — карта перерисует парки города, выбор мышью пересоберёт сетку (ParkIndex — по ссылке на список).
     hit.town.parks = [...(hit.town.parks ?? [])];
     this.layoutRev++;
+    this.townRev++;
     this.spend(plan.cost);
     return true;
   }
@@ -3518,6 +3533,7 @@ export class Game implements BuildContext {
       if (dist(fp.center, st.fp.center) < 0.3) continue;
       this.index.remove(st);
       st.fp = fp;
+      this.stationRev++;
       this.index.add(st);
       const under = this.index.near(fp.center, footprintRadius(fp) + 120).filter((s) => s !== st && s.type === 'building' && s.kind !== 'landmark' && footprintsOverlap(fp, s.fp, 1));
       if (under.length) this.demolish(under.map((s) => s.id));
@@ -3568,6 +3584,7 @@ export class Game implements BuildContext {
       this.index.add(s);
     }
     if (razed.length) this.demolish(razed);
+    if (moved) this.townRev++;
     if (moved + razed.length) this.refreshCatchmentsNear(seg.lut.pointAt(seg.length / 2));
   }
 
@@ -4555,10 +4572,23 @@ export class Game implements BuildContext {
     return now !== JSON.stringify(snap.lots ?? []);
   }
 
+  /**
+   * Нарисованное в плитках могло поменяться всё (действие игрока, отмена, повтор): номера правок всех видов — вперёд
+   * (стройка — Construction.stamp).
+   */
+  private touchBuilt(): void {
+    this.industryRev++;
+    this.townRev++;
+    this.stationRev++;
+    this.construction.stamp++;
+  }
+
   /** Действие закончено: если ничего не построили и не снесли, снимок не нужен. */
   commit(): void {
     if (!this.undoPending) return;
     this.undoPending = false;
+    // Действие игрока могло поменять что угодно из нарисованного — отрисовка сверит всё (сверх правок на местах).
+    this.touchBuilt();
     const top = this.undoStack[this.undoStack.length - 1];
     if (!top) return;
     const changed =
@@ -4832,6 +4862,7 @@ export class Game implements BuildContext {
       if (moved) town.parks = [...town.parks];
     }
     this.layoutRev++;
+    this.touchBuilt();
     this.terrain.truncateEdits(snap.terraform);
     this.roundaboutCenters.clear();
     for (const [id, c] of snap.roundabouts) this.roundaboutCenters.set(id, c);
@@ -7604,6 +7635,7 @@ export class Game implements BuildContext {
     const ind = st.kind === 'dock' ? undefined : this.industries.find((i) => st.industryIds.includes(i.id) && i.info.accepts.includes(cargo));
     if (ind) {
       ind.stock[cargo] = (ind.stock[cargo] ?? 0) + amount;
+      this.industryRev++;
       return [{ to: { type: 'industry', id: ind.id }, amount }];
     }
     if (!this.retail) {
@@ -8268,6 +8300,7 @@ export class Game implements BuildContext {
         if (conv > 0) {
           for (const c of inputs) ind.stock[c] = (ind.stock[c] ?? 0) - conv;
           ind.prodAcc += conv;
+          this.industryRev++;
         }
       }
       const whole = Math.floor(ind.prodAcc);
@@ -8275,6 +8308,7 @@ export class Game implements BuildContext {
         ind.prodAcc -= whole;
         ind.output += whole;
         ind.producedMonth += whole;
+        this.industryRev++;
         // Построенное в партии считает выпуск с постройки — для заданий «построить и выпустить».
         if (ind.builtBy) ind.made = (ind.made ?? 0) + whole;
       }
@@ -9049,6 +9083,7 @@ export class Game implements BuildContext {
       ind.producedLast = ind.producedMonth;
       ind.producedMonth = 0;
     }
+    this.industryRev++;
     // Ушедшие, не дождавшись автобуса (paxPatience.ts): итог месяца.
     for (const st of this.stations.values()) {
       if (st.paxGone) st.paxGoneLast = st.paxGone;
@@ -9173,6 +9208,7 @@ export class Game implements BuildContext {
       }
       ind.streak = streak;
     }
+    this.industryRev++;
   }
 
   /** Сколько предприятие производит (или может переработать) в месяц сейчас. */
@@ -9326,6 +9362,7 @@ export class Game implements BuildContext {
     // жителей — больше магазинов, их доли нормы меньше).
     if (this.retail) this.zoneRetailTown(town, new Set(town.buildings.filter((b) => b.kind === 'com' && !hadIds.has(b.id)).map((b) => b.id)));
     this.refreshReceivers(town);
+    this.townRev++;
     if (town.population > before && satisfaction >= 1)
       this.notify(`${town.name} растёт: ${town.population} жителей`, undefined, { kind: 'town', refs: [{ type: 'town', id: town.id }] });
   }
@@ -10375,6 +10412,7 @@ export class Game implements BuildContext {
   private pairStops(a: Station, b: Station): void {
     a.pair = b.id;
     b.pair = a.id;
+    this.stationRev++;
     this.setStopSide(a, true);
     this.setStopSide(b, true);
     this.computeCatchment(a);
@@ -10392,6 +10430,7 @@ export class Game implements BuildContext {
   private unpairStop(st: Station): Station | undefined {
     const mate = this.pairOf(st);
     delete st.pair;
+    this.stationRev++;
     if (!mate) return undefined;
     delete mate.pair;
     this.setStopSide(st, false);
@@ -10662,6 +10701,7 @@ export class Game implements BuildContext {
     const mate = plan.pair !== undefined ? this.stations.get(plan.pair) : undefined;
     st.name = mate ? mate.name : this.stationName(st, ind);
     this.stations.set(id, st);
+    this.stationRev++;
     this.index.add(st);
     if (mate) this.pairStops(st, mate);
     this.journal.add('station', {
@@ -10824,6 +10864,7 @@ export class Game implements BuildContext {
     this.journal.add('station-', { id: st.id, name: st.name });
     this.index.remove(st);
     this.stations.delete(st.id);
+    this.stationRev++;
     // Станция у получателя невидима и ничего не стоила: улица и двор магазина остаются.
     if (st.kind === 'dock') return true;
     if (st.kind === 'rail') {
@@ -11054,6 +11095,7 @@ export class Game implements BuildContext {
     this.ledger.sales += plan.refund;
     st.fp = plan.fp;
     st.nodeId = node.id;
+    this.stationRev++;
     st.industryId = plan.industryId ?? null;
     if (plan.curb) st.curb = { pocket: plan.curb.pocket };
     if (plan.drivewayLen !== undefined) st.driveway = plan.drivewayLen;
@@ -11173,6 +11215,7 @@ export class Game implements BuildContext {
     if (plan.rail?.terminal) st.terminal = true;
     else delete st.terminal;
     st.bays = platforms.length;
+    this.stationRev++;
     this.index.add(st);
     this.computeCatchment(st);
     this.railMoveBase = null;
@@ -11371,6 +11414,7 @@ export class Game implements BuildContext {
     this.index.remove(st);
     st.platforms = [...st.platforms, seg.id];
     st.bays = st.platforms.length;
+    this.stationRev++;
     st.fp = plan.fp;
     this.index.add(st);
     this.computeCatchment(st);

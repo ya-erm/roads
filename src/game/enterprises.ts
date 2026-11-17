@@ -105,10 +105,11 @@ export class Enterprises {
     this.changed();
   }
 
-  /** Что-то построили, снесли или город вырос: обеспеченность и потоки — заново. */
+  /** Что-то построили, снесли или город вырос: обеспеченность и потоки — заново, предприятия на карте — тоже. */
   changed(): void {
     this.force = null;
     this.clock = 0;
+    this.game.industryRev++;
   }
 
   /** Виды предприятий биома этой партии, которые можно построить (добычу — если есть её месторождения). */
@@ -375,6 +376,8 @@ export class Enterprises {
     g.spend(pay);
     b.paid += pay;
     b.done += step;
+    // Стройплощадка растёт по готовности (enterpriseSig — шаг стройки) — на карте тоже.
+    g.industryRev++;
     if (b.done >= 1 - 1e-9) {
       ind.paid = (ind.paid ?? 0) + Math.round(b.paid);
       delete ind.build;

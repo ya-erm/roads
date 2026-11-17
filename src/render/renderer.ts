@@ -495,6 +495,16 @@ const DIRTY_MS = 8;
 const FILL_MS = 4;
 const AHEAD_MS = 2;
 
+/** Цвет подсветки правки в подписи полотна: по (проект ? 2 : 0) + (можно ? 1 : 0). */
+const TINT_KEYS = ['bad', 'ok', 'pbad', 'pok'] as const;
+
+/** Те же ли номера: набор was и next (нет — пусто). */
+function sameIds(was: ReadonlySet<number>, next: ReadonlySet<number> | null): boolean {
+  if (was.size !== (next?.size ?? 0)) return false;
+  for (const id of next ?? []) if (!was.has(id)) return false;
+  return true;
+}
+
 /** Подпись рамки здания или участка — где и какой формы. */
 const fpSig = (fp: Footprint) => `${fp.center.x},${fp.center.y},${fp.w},${fp.h},${fp.angle}`;
 /** Рамка контура (повёрнутого прямоугольника) в мире. */
@@ -585,11 +595,18 @@ export class Renderer {
   /**
    * Аллеи: lines — по сети игры, shown — что на карте (с правкой в предпросмотре — по сети с правкой, liveAlleys), towns —
    * черта городов, по которой посчитаны; live — на какую сеть с правкой, её версию и аллеи без правки посчитаны shown.
+   * С чем посчитаны: версия сети, число станций, предприятий и баз, раскладка застройки (layoutRev); черта и число домов
+   * городов (townKey: по паре чисел на город) — сверяется, только когда сменился Game.townRev.
    */
   private static noAlleys() {
     return {
-      key: '',
-      things: '',
+      net: -1,
+      stations: -1,
+      industries: -1,
+      bases: -1,
+      layout: -1,
+      townRev: -1,
+      townKey: [] as number[],
       lines: [] as StreetGreen[],
       shown: [] as StreetGreen[],
       towns: [] as { center: Vec; radius: number }[],
@@ -612,19 +629,45 @@ export class Renderer {
   private walks = new Map<number, TownWalks>();
   /** Ход работ на строящихся полотнах в плитках (drawnSpans) — при той же форме (projectSig): шаг сбрасывает только край работ. */
   private progress = new Map<number, { sig: string; spans: Spans }>();
-  /** С чем сверены слепки: партия, карта, вид, сеть дорог на карте и её подсветка, версия путей. */
-  private still = {
-    game: null as Game | null,
-    terrain: null as unknown,
-    look: '',
-    net: null as LaneNet | null,
-    version: -1,
-    marks: '',
-    rails: -1,
-    /** Вся сеть с проектами стройки и её версия — по ним геометрия будущих дорог. */
-    full: null as LaneNet | null,
-    fullVersion: -1,
-  };
+  /** С чем сверены слепки: партия, карта, вид, сеть дорог на карте и её подсветка, номера правок (Game.*Rev). */
+  private still = Renderer.noStill();
+
+  private static noStill() {
+    return {
+      game: null as Game | null,
+      terrain: null as unknown,
+      /** Вид: биом, изолинии (дорожный инструмент на рельефе), карта скоростей, разметка перекрёстков. */
+      biome: '' as string,
+      relief: false,
+      speedmap: false,
+      junctionMarks: false,
+      net: null as LaneNet | null,
+      version: -1,
+      /** Подсветка правки (o.roads.changed — ссылкой и набором), её цвет, бледные и спрятанные знаки (наборами). */
+      changedSrc: null as readonly number[] | null,
+      tint: new Set<number>(),
+      tintColor: '',
+      staleSrc: null as ReadonlySet<number> | null,
+      stale: new Set<number>(),
+      hiddenSrc: null as ReadonlySet<number> | null,
+      hidden: new Set<number>(),
+      rails: -1,
+      /** Вся сеть с проектами стройки и её версия — по ним геометрия будущих дорог. */
+      full: null as LaneNet | null,
+      fullVersion: -1,
+      /** Стройка (Construction.stamp), предприятия, застройка, площадки, станции — номера правок, с которыми сверены. */
+      stamp: -1,
+      projectsFull: null as LaneNet | null,
+      projectsVersion: -1,
+      railsStamp: -1,
+      railsVersion: -1,
+      industries: -1,
+      towns: -1,
+      lots: -1,
+      layout: -1,
+      stations: -1,
+    };
+  }
   /**
    * В последнем кадре было то, что меняется само (пульсация подсветки, всплывающие суммы, значки ещё грузятся) или
    * плитки кэша не дорисованы: следующий кадр нужен, даже если ничего не трогали (src/render/redraw.ts).
@@ -689,7 +732,7 @@ export class Renderer {
     this.sidewalkCache.clear();
     this.walks.clear();
     this.progress.clear();
-    this.still = { game: null, terrain: null, look: '', net: null, version: -1, marks: '', rails: -1, full: null, fullVersion: -1 };
+    this.still = Renderer.noStill();
   }
 
   resize(): void {
@@ -1157,35 +1200,62 @@ export class Renderer {
   private syncStill(s: StillScene): void {
     const { game, o, roadNet } = s;
     const t = game.terrain;
-    const st = this.still;
-    const look = `${t.biome}|${o.roadTool && t.hasRelief ? 1 : 0}|${o.speedmap ? 1 : 0}|${prefOn('junctionMarks') ? 1 : 0}`;
-    if (st.game !== game || st.terrain !== t) {
+    let cur = this.still;
+    const relief = !!o.roadTool && t.hasRelief;
+    const speedmap = !!o.speedmap;
+    const junctionMarks = prefOn('junctionMarks');
+    if (cur.game !== game || cur.terrain !== t) {
       this.forgetStill();
-      this.still.game = game;
-      this.still.terrain = t;
-      this.still.look = look;
-    } else if (st.look !== look) {
-      this.tiles.invalidateAll();
-      st.look = look;
-    }
+      cur = this.still;
+      cur.game = game;
+      cur.terrain = t;
+    } else if (cur.biome !== t.biome || cur.relief !== relief || cur.speedmap !== speedmap || cur.junctionMarks !== junctionMarks) this.tiles.invalidateAll();
+    cur.biome = t.biome;
+    cur.relief = relief;
+    cur.speedmap = speedmap;
+    cur.junctionMarks = junctionMarks;
     const boxes: Box[] = [];
     const add = (list: Box[]) => {
       for (const b of list) boxes.push(grow(b, DIRTY_PAD));
     };
-    const relief = this.relief.sync(t);
-    if (relief === 'all') this.tiles.invalidateAll();
-    else if (relief) boxes.push(grow(relief, DIRTY_PAD + 40));
+    const reliefBox = this.relief.sync(t);
+    if (reliefBox === 'all') this.tiles.invalidateAll();
+    else if (reliefBox) boxes.push(grow(reliefBox, DIRTY_PAD + 40));
     // Дороги на карте: полотна и узлы по подписи геометрии; у полотна — ещё подсветка стройки и бледные/спрятанные знаки.
-    const tint = o.roads ? new Set(o.roads.changed) : null;
-    const tintColor = o.roads ? `${o.roads.project ? 'p' : ''}${o.roads.ok ? 'ok' : 'bad'}` : '';
-    const ids = (x: Set<number> | null | undefined) => (x?.size ? [...x].sort((p, q) => p - q).join(',') : '');
-    const marks = `${ids(tint)}:${tintColor}|${ids(o.staleSigns)}|${ids(o.hiddenSigns)}`;
-    const cur = this.still;
-    if (cur.net !== roadNet || cur.version !== roadNet.version || cur.marks !== marks) {
+    // Подсветка и знаки сверяются наборами (тот же массив или набор, что в прошлом кадре, — без сверки), без строк.
+    const tintColor = o.roads ? TINT_KEYS[(o.roads.project ? 2 : 0) + (o.roads.ok ? 1 : 0)] : '';
+    let marksChanged = tintColor !== cur.tintColor;
+    cur.tintColor = tintColor;
+    const changed = o.roads?.changed ?? null;
+    if (changed !== cur.changedSrc) {
+      cur.changedSrc = changed;
+      const next = new Set(changed);
+      if (!sameIds(cur.tint, next)) {
+        cur.tint = next;
+        marksChanged = true;
+      }
+    }
+    const stale = o.staleSigns ?? null;
+    if (stale !== cur.staleSrc) {
+      cur.staleSrc = stale;
+      if (!sameIds(cur.stale, stale)) {
+        cur.stale = new Set(stale);
+        marksChanged = true;
+      }
+    }
+    const hidden = o.hiddenSigns ?? null;
+    if (hidden !== cur.hiddenSrc) {
+      cur.hiddenSrc = hidden;
+      if (!sameIds(cur.hidden, hidden)) {
+        cur.hidden = new Set(hidden);
+        marksChanged = true;
+      }
+    }
+    const tint = cur.tint;
+    if (cur.net !== roadNet || cur.version !== roadNet.version || marksChanged) {
       cur.net = roadNet;
       cur.version = roadNet.version;
-      cur.marks = marks;
-      const flag = (id: number) => (tint?.has(id) ? `t${tintColor}` : '') + (o.staleSigns?.has(id) ? 's' : '') + (o.hiddenSigns?.has(id) ? 'h' : '');
+      const flag = (id: number) => (tint.has(id) ? `t${tintColor}` : '') + (cur.stale.has(id) ? 's' : '') + (cur.hidden.has(id) ? 'h' : '');
       add(
         this.diffs.corridors.update((put) =>
           this.lanes.eachItem(roadNet, (kind, id, sig, box) => {
@@ -1197,48 +1267,62 @@ export class Renderer {
       );
       add(this.diffs.nodes.update((put) => this.lanes.eachItem(roadNet, (kind, id, sig, box) => kind === 'node' && put(id, sig, box))));
     }
-    // Стройка: чертежи — по форме полотна (projectSig), с подсветкой правки; рамка — полотна. Ход работ (шаг этапа) —
-    // только участок у края работ (progressBoxes): иначе шаг колонны перерисовывал плитки под всем полотном.
-    const progress = new Map<number, { sig: string; spans: Spans }>();
-    for (const c of buildingCorridors(s.fullNet)) {
-      const sig = projectSig(c);
-      const spans = drawnSpans(c);
-      const was = this.progress.get(c.id);
-      // Запас — сверх рамки участка (у неё свой, на ширину, мост и его тень): откосы и деревья от хода работ не меняются.
-      if (was && was.sig === sig) for (const b of progressBoxes(c, was.spans, spans, siteKind(s.fullNet, c) === 'bridge')) boxes.push(grow(b, PROGRESS_PAD));
-      progress.set(c.id, { sig, spans });
+    // Стройка (Construction.stamp: ход работ, площадки узлов, базы) или сеть с проектами поменялись — слепки стройки.
+    const stamp = game.construction.stamp;
+    if (cur.stamp !== stamp || cur.projectsFull !== s.fullNet || cur.projectsVersion !== s.fullNet.version || marksChanged) {
+      cur.projectsFull = s.fullNet;
+      cur.projectsVersion = s.fullNet.version;
+      // Стройка: чертежи — по форме полотна (projectSig), с подсветкой правки; рамка — полотна. Ход работ (шаг этапа) —
+      // только участок у края работ (progressBoxes): иначе шаг колонны перерисовывал плитки под всем полотном.
+      const building = buildingCorridors(s.fullNet);
+      const progress = new Map<number, { sig: string; spans: Spans }>();
+      for (const c of building) {
+        const sig = projectSig(c);
+        const spans = drawnSpans(c);
+        const was = this.progress.get(c.id);
+        // Запас — сверх рамки участка (у неё свой, на ширину, мост и его тень): откосы и деревья от хода работ не меняются.
+        if (was && was.sig === sig) for (const b of progressBoxes(c, was.spans, spans, siteKind(s.fullNet, c) === 'bridge')) boxes.push(grow(b, PROGRESS_PAD));
+        progress.set(c.id, { sig, spans });
+      }
+      this.progress = progress;
+      add(
+        this.diffs.projects.update((put) => {
+          for (const c of building) put(c.id, `${projectSig(c)}|${tint.has(c.id) ? tintColor : ''}`, projectBox(c));
+          // Площадки узлов проектов — по дошедшему до них этапу, в своей рамке (шире рамки полотна); номера — отрицательные.
+          for (const n of projectNodes(s.fullNet, this.projectLanes)) put(-n.id, `n${nodeStage(s.fullNet, this.projectLanes, n.id)}|${nodeReach(s.fullNet, this.projectLanes, n.id)}`, n.box);
+        }),
+      );
     }
-    this.progress = progress;
-    add(
-      this.diffs.projects.update((put) => {
-        for (const c of buildingCorridors(s.fullNet)) put(c.id, `${projectSig(c)}|${tint?.has(c.id) ? tintColor : ''}`, projectBox(c));
-        // Площадки узлов проектов — по дошедшему до них этапу, в своей рамке (шире рамки полотна); номера — отрицательные.
-        for (const n of projectNodes(s.fullNet, this.projectLanes)) put(-n.id, `n${nodeStage(s.fullNet, this.projectLanes, n.id)}|${nodeReach(s.fullNet, this.projectLanes, n.id)}`, n.box);
-      }),
-    );
     // Будущие дороги проектов — по отпечатку геометрии полотен и узлов (площадки перекрёстков шире рамки полотна).
     if (cur.full !== s.fullNet || cur.fullVersion !== s.fullNet.version) {
       cur.full = s.fullNet;
       cur.fullVersion = s.fullNet.version;
       add(this.diffs.projectItems.update((put) => this.projectLanes.eachItem(s.fullNet, (kind, id, sig, box) => put(`${kind[0]}${id}`, sig, box))));
     }
-    add(
-      this.diffs.bases.update((put) => {
-        for (const b of game.construction.crews.bases.values()) put(b.id, baseSig(b), baseBox(b));
-      }),
-    );
-    // Ж/д проекты: чертёж и готовое по шагам (railProjectSig) — каждый кадр, только строящиеся пути.
-    add(
-      this.diffs.railProjects.update((put) => {
-        for (const p of game.construction.projects.values()) {
-          if (!p.rail) continue;
-          for (const seg of game.construction.segmentsOf(p.id)) {
-            const c = this.cache.get(seg.id);
-            if (c) put(seg.id, railProjectSig(seg), c.bbox);
+    if (cur.stamp !== stamp) {
+      add(
+        this.diffs.bases.update((put) => {
+          for (const b of game.construction.crews.bases.values()) put(b.id, baseSig(b), baseBox(b));
+        }),
+      );
+    }
+    cur.stamp = stamp;
+    // Ж/д проекты: чертёж и готовое по шагам (railProjectSig) — только строящиеся пути, когда стройка или пути менялись.
+    if (cur.railsStamp !== stamp || cur.railsVersion !== game.net.version) {
+      cur.railsStamp = stamp;
+      cur.railsVersion = game.net.version;
+      add(
+        this.diffs.railProjects.update((put) => {
+          for (const p of game.construction.projects.values()) {
+            if (!p.rail) continue;
+            for (const seg of game.construction.segmentsOf(p.id)) {
+              const c = this.cache.get(seg.id);
+              if (c) put(seg.id, railProjectSig(seg), c.bbox);
+            }
           }
-        }
-      }),
-    );
+        }),
+      );
+    }
     if (cur.rails !== game.net.version) {
       cur.rails = game.net.version;
       add(
@@ -1250,8 +1334,13 @@ export class Renderer {
         }),
       );
     }
-    // Дома, парки и скверы города — когда их список заменили или он вырос.
-    for (const town of game.towns) {
+    // Дома, парки и скверы города — когда их список заменили или он вырос (сверка — только после правки застройки,
+    // площадок или раскладки: Game.townRev, lotRev, layoutRev).
+    const townsTouched = cur.towns !== game.townRev || cur.lots !== game.lotRev || cur.layout !== game.layoutRev;
+    cur.towns = game.townRev;
+    cur.lots = game.lotRev;
+    cur.layout = game.layoutRev;
+    for (const town of townsTouched ? game.towns : []) {
       let rec = this.diffs.towns.get(town.id);
       if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, parks: null, np: -1, lots: null, diff: new SceneDiff() }));
       const parks = town.parks ?? null;
@@ -1300,17 +1389,34 @@ export class Renderer {
     // их застройке (тротуар — где рядом дома). Полотна, что не менялись, — из кэша (streetGreen); новая станция или
     // предприятие — пересчёт всех; вырос город — пересчёт его полотен. Перенесли дом или парк (Game.layoutRev) — тоже всех:
     // число домов и парков у полотна (подпись кэша тротуаров) то же, а стоят они уже не там.
-    const things = `${game.stations.size}|${game.industries.length}|${game.construction.crews.bases.size}|${game.layoutRev}`;
-    const alleyKey = `${game.roads.net.version}|${things}|${game.towns.map((t) => `${Math.floor(t.radius / 50)}:${t.buildings.length}`).join(',')}`;
-    if (alleyKey !== this.alleys.key) {
-      this.alleys.key = alleyKey;
+    const al = this.alleys;
+    const things =
+      al.stations !== game.stations.size || al.industries !== game.industries.length || al.bases !== game.construction.crews.bases.size || al.layout !== game.layoutRev;
+    let grown = false;
+    if (al.townRev !== game.townRev) {
+      al.townRev = game.townRev;
+      const key = al.townKey;
+      grown = key.length !== game.towns.length * 2;
+      key.length = game.towns.length * 2;
+      game.towns.forEach((t, i) => {
+        const r = Math.floor(t.radius / 50);
+        if (key[2 * i] !== r || key[2 * i + 1] !== t.buildings.length) grown = true;
+        key[2 * i] = r;
+        key[2 * i + 1] = t.buildings.length;
+      });
+    }
+    if (things || grown || al.net !== game.roads.net.version) {
+      al.net = game.roads.net.version;
       // Кэш — по полотнам; снесённых накопилось много — с чистого листа.
-      if (things !== this.alleys.things || this.alleys.cache.size > game.roads.net.corridors.size * 2 + 200) this.alleys.cache.clear();
+      if (things || al.cache.size > game.roads.net.corridors.size * 2 + 200) al.cache.clear();
       if (game.layoutRev !== this.layoutSeen) {
         this.layoutSeen = game.layoutRev;
         this.sidewalkCache.clear();
       }
-      this.alleys.things = things;
+      al.stations = game.stations.size;
+      al.industries = game.industries.length;
+      al.bases = game.construction.crews.bases.size;
+      al.layout = game.layoutRev;
       const index = game.index;
       this.alleys.towns = game.towns.map((t) => ({ center: t.center, radius: Math.floor(t.radius / 50) * 50 }));
       this.alleys.lines = streetGreen(game.roads.net, this.alleys.towns, (p, r) => index.at(p, r) !== null, this.alleys.cache);
@@ -1336,23 +1442,31 @@ export class Renderer {
       const pad = this.walkLive ? WALK_PAD : DIRTY_PAD;
       for (const b of this.diffs.sidewalks.update((put) => shown.lines.forEach((l) => put(l.key, l.sig, l.box)))) boxes.push(grow(b, pad));
     }
-    add(
-      this.diffs.industries.update((put) => {
-        // Вредное — вместе с копотью вокруг и посеревшими домами в радиусе вреда (enterpriseArt).
-        for (const ind of game.industries)
-          put(ind.id, `${industrySig(ind)}|${enterpriseSig(ind)}`, grow((ind.annexes ?? []).reduce((box, x) => unite(box, fpBox(x.fp)), fpBox(ind.fp)), enterpriseReach(ind)));
-      }),
-    );
-    add(
-      this.diffs.deposits.update((put) => {
-        for (const d of game.enterprises.deposits) put(d.id, depositSig(d), depositBox(d));
-      }),
-    );
-    add(
-      this.diffs.aprons.update((put) => {
-        for (const x of game.stations.values()) if (x.kind === 'road') put(x.id, `${fpSig(x.fp)}|${x.bays}|${x.nodeId}`, fpBox(x.fp));
-      }),
-    );
+    // Предприятия и месторождения — только после их правки (Game.industryRev: запасы, выпуск, уровень, стройка…).
+    if (cur.industries !== game.industryRev) {
+      cur.industries = game.industryRev;
+      add(
+        this.diffs.industries.update((put) => {
+          // Вредное — вместе с копотью вокруг и посеревшими домами в радиусе вреда (enterpriseArt).
+          for (const ind of game.industries)
+            put(ind.id, `${industrySig(ind)}|${enterpriseSig(ind)}`, grow((ind.annexes ?? []).reduce((box, x) => unite(box, fpBox(x.fp)), fpBox(ind.fp)), enterpriseReach(ind)));
+        }),
+      );
+      add(
+        this.diffs.deposits.update((put) => {
+          for (const d of game.enterprises.deposits) put(d.id, depositSig(d), depositBox(d));
+        }),
+      );
+    }
+    // Площадки автостанций — после правки станций (Game.stationRev).
+    if (cur.stations !== game.stationRev) {
+      cur.stations = game.stationRev;
+      add(
+        this.diffs.aprons.update((put) => {
+          for (const x of game.stations.values()) if (x.kind === 'road') put(x.id, `${fpSig(x.fp)}|${x.bays}|${x.nodeId}`, fpBox(x.fp));
+        }),
+      );
+    }
     if (boxes.length) this.tiles.invalidate(boxes);
   }
 

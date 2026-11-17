@@ -258,6 +258,7 @@ const decline: Template = {
     );
     sc.apply({ effects }, rec.id);
     ind.level = Math.max(1, (ind.level ?? 1) - 0.5);
+    game.industryRev++;
     // Восстановить поставки: тот же завод, его самое редкое сырьё — спад прекращается.
     if (ind.info.accepts.length) {
       const cargo = scarcest(ind);

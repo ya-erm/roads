@@ -650,6 +650,7 @@ export class Scenario {
       if (ind) {
         ind.cap = Math.min(6, Math.max(levelCap(ind), (ind.level ?? 1) + r.level.by));
         ind.level = Math.min(levelCap(ind), (ind.level ?? 1) + r.level.by);
+        this.game.industryRev++;
       }
     }
     if (r.clear) this.state.effects = this.state.effects.filter((e) => e.source !== r.clear);

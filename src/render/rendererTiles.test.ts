@@ -145,6 +145,8 @@ describe('Кэш карты плитками: без изменений плит
     const before = drawnSpans(c);
     const [earth, pave, marks] = spansOf(c.build, c.length);
     c.build = { ...c.build!, stages: [Math.min(c.length / 2, earth + CONSTRUCTION.drawStep * 3), pave, marks] };
+    // Как такт стройки: номер правок стройки — вперёд (отрисовка сверяет стройку только по нему).
+    game.construction.stamp++;
     const after = drawnSpans(c);
     expect(after).not.toEqual(before);
     // Рамки сброса — у края работ: меньше рамки полотна.
