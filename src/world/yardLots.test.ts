@@ -3,7 +3,7 @@ import { freshGame } from '../game/testkit';
 import type { TownBuilding } from './entities';
 import { NEW_GAME_SETTINGS } from './settings';
 import { formOf } from './townForms';
-import { homeCars, SLAB_FRONT, slabPlan, YARD_STALL, yardLotOf, yardSpots, type SlabAlong } from './yardLots';
+import { homeCars, SLAB_FRONT, slabPlan, TOWNHOUSE_END, townhousePlan, YARD_STALL, yardLotOf, yardSpots, type SlabAlong } from './yardLots';
 
 let nextId = 7000;
 const slab = (w: number, h: number, people = 140): TownBuilding => ({
@@ -80,10 +80,46 @@ describe('Стоянки панелек — у улицы', () => {
     expect(ends).toBe(30);
   });
 
+  it('дом старого центра: места у торца, у улицы, с заездом с улицы; корпус — рядом, не на них; флигель — с другой стороны', () => {
+    for (let i = 0; i < 40; i++) {
+      const b: TownBuilding = { ...slab(34 + (i % 14), 30 + (i % 9), 30), form: 'townhouse', floors: 2 };
+      const p = townhousePlan(b);
+      const r = p.row!;
+      expect(r).toBeTruthy();
+      expect(r.direct).toBe(true);
+      expect(r.side).toBe(-1);
+      expect(r.stalls.length).toBeGreaterThanOrEqual(TOWNHOUSE_END.stalls[0]);
+      expect(r.stalls.length).toBeLessThanOrEqual(TOWNHOUSE_END.stalls[1]);
+      for (const s of r.stalls) {
+        expect(s.y).toBeCloseTo(-b.fp.h / 2 + 0.6);
+        expect(s.x + s.w <= p.bx + 1e-6 || s.x >= p.bx + p.bw - 1e-6).toBe(true);
+        expect(Math.abs(s.x + s.w / 2)).toBeLessThan(b.fp.w / 2);
+        if (p.wing) expect(s.x + s.w <= p.wing.x || s.x >= p.wing.x + p.wing.w).toBe(true);
+      }
+      expect(p.bw).toBeGreaterThanOrEqual(TOWNHOUSE_END.minBody);
+      expect(p.door).toBeGreaterThan(p.bx);
+      expect(p.door).toBeLessThan(p.bx + p.bw);
+      const lot = yardLotOf(b)!;
+      expect(lot.gate).toBeNull();
+      expect(yardSpots(b, lot, 7.5).spots.every((s) => !!s.drive)).toBe(true);
+    }
+    // Узкий участок — корпус во всю ширину, мест нет.
+    const narrow: TownBuilding = { ...slab(26, 30, 30), form: 'townhouse', floors: 2 };
+    expect(townhousePlan(narrow).row).toBeNull();
+    expect(yardLotOf(narrow)).toBeNull();
+  });
+
   it('мир по seed: у панелек мест во дворе за воротами нет — у большинства карман у улицы, места не выходят за участок', { timeout: 30_000 }, () => {
     const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 1 });
     let along = 0;
     let front = 0;
+    // Места за воротами двора — только за настоящей аркой квартала и у гаражных боксов; у прочих — заезд с улицы.
+    for (const t of g.towns)
+      for (const b of t.buildings) {
+        const lot = b.kind !== 'landmark' ? yardLotOf(b) : null;
+        if (lot?.gate) expect(['courtyard', 'garages']).toContain(formOf(b));
+        else for (const r of lot?.rows ?? []) expect(r.direct).toBe(true);
+      }
     for (const t of g.towns)
       for (const b of t.buildings) {
         if (formOf(b) !== 'slab' || b.kind !== 'res') continue;

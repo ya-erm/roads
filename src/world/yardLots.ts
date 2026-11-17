@@ -458,20 +458,27 @@ export function courtyardPlan(b: Pick<TownBuilding, 'id' | 'fp'>): CourtyardPlan
   return { x0, y0, x1, y1, d, closed, leftWing, rightWing, arch, lawn, row: park };
 }
 
+/** Дом старого центра: места у торца — от и до (по машинам дома); корпус рядом — не уже стольких ед. */
+export const TOWNHOUSE_END = { stalls: [2, 3] as const, minBody: 18 } as const;
+
 /**
- * Дом старого центра (townhouse): корпус во всю ширину участка у тротуара (глубина d), за ним — мощёный двор с
- * флигелем у одной боковой границы (wing; нет — двор мелкий). У глубокого двора с другой стороны — ряд мест у задней
- * границы, въезд — аркой в корпусе (там ворота двора); иначе там дерево.
+ * Дом старого центра (townhouse): корпус у тротуара (глубина d), за ним — мощёный двор с флигелем у одной боковой
+ * границы (wing; нет — двор мелкий) и деревом у другой. Места — у торца корпуса, у улицы, с той стороны, где нет
+ * флигеля: ряд с заездом прямо с полосы (как карман панельки), корпус — в остаток ширины (bx, bw). Узкий участок —
+ * корпус во всю ширину, мест нет. Места во дворе за аркой были невидимы с улицы: проезда к ним не видно.
  */
 export interface TownhousePlan {
   d: number;
   back: number;
   rest: number;
   door: number;
+  /** Корпус: левый край и ширина. */
+  bx: number;
+  bw: number;
   wing: { x: number; y: number; w: number; h: number } | null;
   tree: { x: number; y: number } | null;
+  /** Места у торца с заездом с улицы. */
   row: YardRow | null;
-  arch: { x: number; w: number } | null;
 }
 
 export function townhousePlan(b: Pick<TownBuilding, 'id' | 'fp' | 'kind' | 'floors' | 'people' | 'form'>): TownhousePlan {
@@ -483,22 +490,24 @@ export function townhousePlan(b: Pick<TownBuilding, 'id' | 'fp' | 'kind' | 'floo
   const d = clamp(H * 0.5 + s * 0.6, 9, Math.min(14.5 * S, H - 2));
   const back = y0 + 0.5 + d;
   const rest = H / 2 - back - 0.6;
-  const door = (r(b, 9) - 0.5) * W * 0.4;
-  if (rest <= 4) return { d, back, rest, door, wing: null, tree: null, row: null, arch: null };
-  const fw = clamp(W * 0.3, 5.5, 9 * S);
   const left = r(b, 1) < 0.5;
+  // Места у торца — с другой стороны от флигеля, от края участка у улицы.
+  const cars = homeCars(b);
+  const cols = clamp(cars, TOWNHOUSE_END.stalls[0], TOWNHOUSE_END.stalls[1]);
+  const E = cols * YARD_STALL.w + 1.6;
+  const end = cars > 0 && W - 0.8 - E >= TOWNHOUSE_END.minBody && H >= STALL_MIN_D + 1.2;
+  // Флигель слева — места справа, корпус от левого края; флигель справа — места слева, корпус за ними.
+  const bodyX = x0 + 0.4 + (end && !left ? E : 0);
+  const bw = W - 0.8 - (end ? E : 0);
+  const park = end ? row(left ? -x0 - 0.6 - cols * YARD_STALL.w : x0 + 0.6, y0 + 0.6, cols * YARD_STALL.w, Math.min(YARD_STALL.d, H - 1.2), 'y-', true, -1) : null;
+  // Дверь — на корпусе, не у его края.
+  const door = clamp(bodyX + bw / 2 + (r(b, 9) - 0.5) * W * 0.4, bodyX + 2, bodyX + bw - 2);
+  if (rest <= 4) return { d, back, rest, door, bx: bodyX, bw, wing: null, tree: null, row: park };
+  const fw = clamp(W * 0.3, 5.5, 9 * S);
   const fx = left ? x0 + 0.6 : -x0 - 0.6 - fw;
   const fd = Math.min(rest - 0.6, (6 + r(b, 2) * 2) * S);
   const wing = { x: fx, y: H / 2 - 0.6 - fd, w: fw, h: fd };
-  // Места — с другой стороны от флигеля, у задней границы; арка — у той же боковой границы, подальше от двери.
-  const sx0 = left ? fx + fw + 1 : x0 + 1;
-  const sx1 = left ? -x0 - 1 : fx - 1;
-  const park = rest >= YARD_STALL.d + 1 ? row(sx0, H / 2 - 0.6 - YARD_STALL.d, sx1 - sx0, YARD_STALL.d, 'y-', false) : null;
-  const ax = left ? -x0 - 1.2 - YARD_STALL.w / 2 : x0 + 1.2 + YARD_STALL.w / 2;
-  if (park?.stalls.length && Math.abs(ax - door) > YARD_STALL.w / 2 + 1.6) {
-    return { d, back, rest, door, wing, tree: null, row: park, arch: { x: ax, w: YARD_STALL.w } };
-  }
-  return { d, back, rest, door, wing, tree: { x: left ? -x0 - 3.2 : x0 + 3.2, y: back + rest * 0.55 }, row: null, arch: null };
+  return { d, back, rest, door, bx: bodyX, bw, wing, tree: { x: left ? -x0 - 3.2 : x0 + 3.2, y: back + rest * 0.55 }, row: park };
 }
 
 /** Гаражные боксы: ряды (y и какие места есть — x левого края), бокс — ширина и глубина; въезд — с торца участка. */
@@ -552,8 +561,9 @@ export function yardLotOf(b: TownBuilding): YardLot | null {
     return rows.length ? { rows, gate: null, boxes: false } : null;
   }
   if (form === 'townhouse' && b.kind === 'res') {
+    // Места у торца, с заездом с улицы: ворот двора нет.
     const p = townhousePlan(b);
-    return p.row && p.arch ? { rows: [p.row], gate: p.arch, boxes: false } : null;
+    return p.row?.stalls.length ? { rows: [p.row], gate: null, boxes: false } : null;
   }
   if (form === 'courtyard' && b.kind === 'res') {
     const p = courtyardPlan(b);

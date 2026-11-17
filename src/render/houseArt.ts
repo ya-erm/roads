@@ -665,8 +665,8 @@ function walkup(a: Art, lot: Lot): void {
 }
 
 /**
- * Дом старого центра: вплотную к тротуару во всю ширину участка, за ним — мощёный двор с флигелем и деревом; у
- * глубокого двора вместо дерева — места у задней границы, въезд — аркой в корпусе (world/yardLots.townhousePlan).
+ * Дом старого центра: вплотную к тротуару, за ним — мощёный двор с флигелем и деревом; у торца — места с заездом
+ * прямо с улицы, корпус — в остаток ширины (world/yardLots.townhousePlan); узкий участок — корпус во всю ширину.
  */
 function townhouse(a: Art, lot: Lot): void {
   const { W, H, b } = lot;
@@ -675,27 +675,23 @@ function townhouse(a: Art, lot: Lot): void {
   a.patch(x0 + 0.4, y0 + 0.4, W - 0.8, H - 0.8, PAVING, 0.5);
   const s = lot.storeys;
   const p = townhousePlan(b);
-  const { d, door } = p;
-  const w = W - 0.8;
+  const { d, door, bx, bw } = p;
   const z = wallZ(s);
-  // Вход с улицы — дорожка через газон к двери, во двор — проезд-арка (въезд с улицы).
+  // Вход с улицы — дорожка через газон к двери; места у торца — съезд во всю ширину ряда через тротуар.
   frontPath(a, lot, door, y0 + 0.6, 1.8);
-  if (p.arch) curbCut(a, lot, p.arch.x, p.arch.w, y0 + 0.5 + d + 1.5, PAVING);
-  if (p.row) parking(a, p.row);
+  if (p.row) {
+    curbCut(a, lot, p.row.pad.x + p.row.pad.w / 2, p.row.pad.w, p.row.pad.y + 0.3);
+    parking(a, p.row);
+  }
   if (p.wing) pitched(a, p.wing.x, p.wing.y, p.wing.w, p.wing.h, wallZ(1), tone(b.roof, -0.08), p.wing.w < p.wing.h);
   if (p.tree) yardTree(a, lot, p.tree.x, p.tree.y, 2.2 + a.r(3), 4);
-  if (s >= 3 && a.r(5) < 0.3) flat(a, x0 + 0.4, y0 + 0.5, w, d, z, tone(b.roof, 0.18));
-  else pitched(a, x0 + 0.4, y0 + 0.5, w, d, z, b.roof, true, a.r(6) < 0.4 ? d * 0.45 : 0);
+  if (s >= 3 && a.r(5) < 0.3) flat(a, bx, y0 + 0.5, bw, d, z, tone(b.roof, 0.18));
+  else pitched(a, bx, y0 + 0.5, bw, d, z, b.roof, true, a.r(6) < 0.4 ? d * 0.45 : 0);
   if (a.pass === 2 && a.lod) {
     a.c.fillStyle = tone(b.roof, -0.25);
     a.c.fillRect(door - 1.2, y0 - 0.5, 2.4, 1);
-    if (p.arch) {
-      // Арка во двор — тёмный проём у фасада.
-      a.c.fillStyle = 'rgba(60,56,50,0.75)';
-      a.c.fillRect(p.arch.x - p.arch.w / 2, y0 + 0.5, p.arch.w, 0.9);
-    }
   }
-  if (a.d) for (let k = 0; k < (W > 18 * S ? 2 : 1); k++) roofBit(a, x0 + W * (0.25 + 0.5 * k) - 0.45, y0 + 0.5 + d * 0.28, 1, 1, 1.2, '#8a5a48');
+  if (a.d) for (let k = 0; k < (bw > 18 * S ? 2 : 1); k++) roofBit(a, bx + bw * (bw > 18 * S ? 0.25 + 0.5 * k : 0.5) - 0.45, y0 + 0.5 + d * 0.28, 1, 1, 1.2, '#8a5a48');
 }
 
 /** Квартал старого центра: дома по периметру участка (П или замкнутый «колодец»), во дворе — мощение и деревья. */
@@ -729,9 +725,10 @@ function courtyard(a: Art, lot: Lot): void {
   if (closed) wing(x0, y1 - d, x1 - x0, d);
   wing(x0, y0, x1 - x0, d);
   if (a.pass === 2 && a.lod) {
-    // Арка в лицевом корпусе — тёмный проём у фасада.
+    // Арка в лицевом корпусе — тёмный проём у фасада и со двора: проезд к местам во дворе виден насквозь.
     a.c.fillStyle = 'rgba(60,56,50,0.75)';
     a.c.fillRect(arch - p.arch.w / 2, y0, p.arch.w, 0.9);
+    a.c.fillRect(arch - p.arch.w / 2, y0 + d - 0.9, p.arch.w, 0.9);
   }
   if (!roofFlat && a.d) {
     for (let k = 0; k < Math.floor((x1 - x0) / (9 * S)); k++) roofBit(a, x0 + 4 + k * 9 * S, y0 + d * 0.25, 1.2, 1.2, 1.2, '#8a5a48');
