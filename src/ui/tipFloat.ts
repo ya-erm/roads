@@ -25,7 +25,10 @@ export function installTips(doc: Document = document): HTMLElement {
     anchor = null;
     el.hidden = true;
   };
-  /** Текст и место — каждый кадр, пока видна: панели перерисовываются под курсором, текст подсказки меняется. */
+  /**
+   * Текст и место плашки — когда что-то могло их сменить: курсор сдвинулся, панель прокрутили или перерисовали под
+   * курсором (элемента подсказки уже нет, у него новый текст или место), — не чаще кадра и не каждый кадр.
+   */
   const update = () => {
     frame = 0;
     if (!anchor) return;
@@ -64,7 +67,9 @@ export function installTips(doc: Document = document): HTMLElement {
     const view = doc.defaultView!;
     const { x, y } = tipPlacement(anchor.getBoundingClientRect(), el.offsetWidth, el.offsetHeight, view.innerWidth, view.innerHeight, anchor.hasAttribute('data-tip-end'));
     el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-    frame = view.requestAnimationFrame(update);
+  };
+  const schedule = () => {
+    if (anchor && !frame) frame = doc.defaultView!.requestAnimationFrame(update);
   };
 
   doc.addEventListener('pointerover', (e) => {
@@ -75,7 +80,19 @@ export function installTips(doc: Document = document): HTMLElement {
     anchor = a;
     if (!frame) update();
   });
-  doc.addEventListener('pointermove', (e) => (pointer = { x: e.clientX, y: e.clientY }), { passive: true });
+  doc.addEventListener(
+    'pointermove',
+    (e) => {
+      pointer = { x: e.clientX, y: e.clientY };
+      schedule();
+    },
+    { passive: true },
+  );
+  doc.addEventListener('scroll', schedule, { capture: true, passive: true });
+  // Панели перерисовали (разметка, текст, подсказка, видимость) — но не сама плашка.
+  new MutationObserver((records) => {
+    if (records.some((r) => !el.contains(r.target))) schedule();
+  }).observe(doc.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-tip', 'data-tip-keys', 'data-tip-marks', 'class', 'hidden'] });
   // Курсор ушёл из окна.
   doc.addEventListener('pointerout', (e) => {
     if (!e.relatedTarget) hide();
