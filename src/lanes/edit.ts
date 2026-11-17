@@ -1,12 +1,31 @@
 import { arcCubic, circleArc, Cubic, CurveLUT, intersectCurves, minRadius, splitBezier, straightCubic } from '../core/bezier';
 import { add, cross, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { CONSTRUCTION } from '../config';
-import { LANE_W, ROAD_CLASSES, RoadClass } from '../world/roadTypes';
+import { LANE_W, PARK_W, ROAD_CLASSES, RoadClass } from '../world/roadTypes';
 import { fitLanes, laneDone, laneWise } from './closure';
 import { nodeDeck } from './deck';
 import { edgesAt, laneBand, pointOff } from './geometry';
-import { Corridor, CorridorBuild, CorridorEnd, CorridorWas, driveLanes, End, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, NodeKind, oneWay, renameArm, slot, taperLen } from './model';
-import { curbAllowed } from './curb';
+import {
+  besideOffset,
+  Corridor,
+  CorridorBuild,
+  CorridorEnd,
+  CorridorWas,
+  driveLanes,
+  End,
+  Flow,
+  LaneNet,
+  LaneNode,
+  LaneSlot,
+  laneWidth,
+  LAT_EPS,
+  NodeKind,
+  oneWay,
+  renameArm,
+  slot,
+  taperLen,
+} from './model';
+import { curbAllowed, curbEndRoom } from './curb';
 
 /** Начало или конец новой дороги: узел (тупик или перекрёсток), место на полотне или чистое поле. */
 export type Anchor =
@@ -106,7 +125,7 @@ export function laneUnder(net: LaneNet, p: Vec): { corridor: Corridor; lane: num
   c.lanes.forEach((l, i) => {
     if (!laneBand(c, l, hit.s)) return;
     // По всей ширине полосы — и на отгоне, где сама она уже узкая (иначе в её кончик не попасть).
-    const off = Math.max(0, Math.abs(d - l.offset) - LANE_W / 2);
+    const off = Math.max(0, Math.abs(d - l.offset) - laneWidth(l) / 2);
     if (off < bestD) {
       bestD = off;
       best = i;
@@ -888,11 +907,11 @@ function fromPort(net: LaneNet, tip: Extract<LaneTip, { kind: 'port' }>, q: Vec,
   return { kind: 'point', anchor: { kind: 'node', node: end.node.id, pos: end.node.pos } };
 }
 
-/** Полоса полотна на месте offset − 1 полоса к оси (вплотную изнутри) в s; нет — null. */
-function insideLane(c: Corridor, offset: number, s: number): LaneSlot | null {
+/** Полоса полотна вплотную изнутри (ближе к оси) к слоту шириной w на месте offset в s; нет — null. */
+function insideLane(c: Corridor, offset: number, s: number, w = LANE_W): LaneSlot | null {
   const out = Math.sign(offset) || 1;
   const T = taperLen(c.cls);
-  return c.lanes.find((l) => Math.abs(l.offset - (offset - out * LANE_W)) < 0.5 && s >= l.from - T && s <= l.to + T) ?? null;
+  return c.lanes.find((l) => Math.abs(besideOffset(l, out, w) - offset) < 0.5 && s >= l.from - T && s <= l.to + T) ?? null;
 }
 
 /** Изнутри к месту offset прилегает полоса стоянки. */
@@ -906,7 +925,7 @@ function insideIsPark(c: Corridor, offset: number, s: number): boolean {
  */
 function parkFits(c: Corridor, offset: number, flow: Flow, s: number): void {
   if (!curbAllowed(c)) throw new EditError(c.cls === 'dirt' ? 'На грунтовке стоянки нет' : 'На магистрали стоянки нет');
-  const inner = insideLane(c, offset, s);
+  const inner = insideLane(c, offset, s, PARK_W);
   if (!inner) throw new EditError('Стоянку ведут вдоль полосы движения');
   if (inner.park) throw new EditError('Здесь уже стоянка');
   if (inner.flow !== flow || offset * flow < 0) throw new EditError('Стоянка — только справа по ходу');
@@ -925,7 +944,14 @@ export function toggleParkLane(net: LaneNet, c: Corridor, i: number): 'park' | '
   const T = taperLen(c.cls);
   const lanes = [...c.lanes];
   if (l.park) {
+    // Полоса движения шире стоянки: встаёт вплотную к соседней изнутри; у перекрёстка — снова до него.
     const { park: _p, ...drive } = l;
+    const out = Math.sign(l.offset) || 1;
+    const inside = insideLane(c, l.offset, (Math.max(0, l.from) + Math.min(c.length, l.to)) / 2, PARK_W);
+    drive.offset = inside ? besideOffset(inside, out, LANE_W) : l.offset + (out * (LANE_W - PARK_W)) / 2;
+    const [lo, hi] = curbEndRoom(net, c);
+    if (drive.from <= lo + 0.5) drive.from = 0;
+    if (drive.to >= hi - 0.5) drive.to = Infinity;
     lanes[i] = drive;
     net.setLanes(c, lanes);
     joinEnds(net, c, i);
@@ -942,10 +968,15 @@ export function toggleParkLane(net: LaneNet, c: Corridor, i: number): 'park' | '
     const n = net.node(end === 'a' ? c.a : c.b);
     return n.kind === 'seam' && !net.isDeadEnd(n) && net.reaches(c, l, end) && net.across(c, i, end);
   };
-  const next: LaneSlot = { ...l, park: true };
+  // Стоянка уже полосы движения (PARK_W): встаёт вплотную к соседней полосе, бордюр — ближе к оси.
+  const next: LaneSlot = { ...l, park: true, offset: besideOffset(inner, Math.sign(l.offset), PARK_W) };
   delete next.solid;
   if (room('a')) next.from = Math.max(next.from, T);
   if (room('b')) next.to = Math.min(next.to, c.length - T);
+  // У перекрёстка — не до площадки: за ней отгоном (fitCurbEnds).
+  const [lo, hi] = curbEndRoom(net, c);
+  next.from = Math.max(next.from, lo);
+  next.to = Math.min(next.to, hi);
   if (next.to - next.from < 10) throw new EditError('Слишком коротко для стоянки');
   lanes[i] = next;
   net.setLanes(c, lanes);
@@ -1030,7 +1061,12 @@ export function laneStep(net: LaneNet, tip: LaneTip, q: Vec, cls: RoadClass, rad
     // Полоса стоянки (🅿️) — только вдоль края дороги, как полоса торможения: ход — как у соседней полосы движения.
     if (tip.kind !== 'edge') throw new EditError('Стоянку ведут от края дороги');
     const c = net.corridor(tip.corridor);
-    const t = { ...tip, flow: tip.flow ?? newLaneFlow(c, tip.offset, tip.s) };
+    // Край дороги (edgeAt) — место полосы движения шириной LANE_W; стоянка уже — вплотную к той же полосе изнутри.
+    // Конец уже начатой стоянки (прошлый шаг пути, её конец) — как есть.
+    const inner = insideLane(c, tip.offset, tip.s);
+    if (inner?.park) throw new EditError('Здесь уже стоянка');
+    const offset = inner ? besideOffset(inner, Math.sign(tip.offset) || 1, PARK_W) : tip.offset;
+    const t = { ...tip, offset, flow: tip.flow ?? newLaneFlow(c, offset, tip.s) };
     if (!laneAlong(net, t, q)) throw new EditError('Стоянка — только вдоль дороги');
     return { tip: alongLane(net, c, t, q, true), what: '🅿️ Стоянка' };
   }
@@ -1870,7 +1906,7 @@ function extended(c: Corridor, i: number, end: End): LaneSlot | null {
   const l = c.lanes[i];
   const [lo, hi] = end === 'a' ? [0, l.from] : [l.to, c.length];
   if (hi - lo <= 0.01) return null;
-  if (c.lanes.some((o, k) => k !== i && Math.abs(o.offset - l.offset) < LANE_W - 0.01 && o.from < hi && lo < o.to)) return null;
+  if (c.lanes.some((o, k) => k !== i && Math.abs(o.offset - l.offset) < (laneWidth(o) + laneWidth(l)) / 2 - 0.01 && o.from < hi && lo < o.to)) return null;
   return end === 'a' ? { ...l, from: 0 } : { ...l, to: c.length };
 }
 

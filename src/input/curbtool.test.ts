@@ -54,7 +54,8 @@ describe('«Полоса» с 🅿️', () => {
     expect(tools.laneUp(pts[2], 14, STREET, true)).toBeNull();
     const [c] = along(game, at.y);
     const l = c.lanes.find((x) => x.park)!;
-    expect(l).toMatchObject({ offset: 10.5, flow: 1 });
+    // Стоянка уже полосы движения: вплотную к ней (3,5 + (7 + 3,5) / 2), кромка — на 10,5.
+    expect(l).toMatchObject({ offset: 8.75, flow: 1 });
     // По стоянке не едут: в графе в ту сторону — одна полоса.
     expect(game.roads.graph.corridorLinks(c.id).filter((k) => k.flow === 1).every((k) => k.lanes.length === 1)).toBe(true);
     expect(game.curb.stalls().filter((s) => s.corridor === c.id).length).toBeGreaterThan(10);
@@ -69,11 +70,14 @@ describe('«Полоса» с 🅿️', () => {
     expect(tools.parkTogglePlan(p)?.to).toBe('park');
     expect(click(tools, p)).toBeNull();
     const c = along(game, av.y)[0];
-    expect(c.lanes.find((l) => Math.abs(l.offset - 10.5) < 0.01)?.park).toBe(true);
+    // Крайняя полоса стала стоянкой — уже, вплотную к соседней полосе движения.
+    expect(c.lanes.find((l) => Math.abs(l.offset - 8.75) < 0.01)?.park).toBe(true);
     expect(game.roads.graph.corridorLinks(c.id).filter((k) => k.flow === 1).some((k) => k.lanes.length === 1)).toBe(true);
     expect(tools.parkTogglePlan(p)?.to).toBe('drive');
     expect(click(tools, p)).toBeNull();
     expect(along(game, av.y)[0].lanes.some((l) => l.park)).toBe(false);
+    // Снова полоса движения — на прежнем месте, во всю длину.
+    expect(along(game, av.y)[0].lanes.filter((l) => l.flow === 1).map((l) => l.offset).sort((x, y) => x - y)).toEqual([3.5, 10.5]);
     // 1+1: последняя полоса в эту сторону.
     const st = fieldRoad(game, { cls: 'street', lanes: twoWay(1, 1) });
     expect(click(tools, { x: st.x + 250, y: st.y + 3.5 })).toMatch(/1\+1/);

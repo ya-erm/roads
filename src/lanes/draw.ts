@@ -3,7 +3,7 @@ import { isDirt, LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 import { arrowAt, arrowShape } from './arrowShape';
 import { bridgeLook, deckAlong, nodeDeck } from './deck';
 import { awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, plateOutline, pointOff, sFrom, stations } from './geometry';
-import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS, layerOf } from './model';
+import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS, laneWidth, layerOf } from './model';
 import { noseParapet, PARAPET, parapetLine, parapetWidth } from './parapet';
 import { onPrefs, prefOn } from '../ui/prefs';
 import { insidePoly, type JunctionMarks, junctionMarks } from './junctionMarks';
@@ -862,12 +862,9 @@ export class LaneRenderer {
       const both = (s: number) => laneShare(c, A, s) > 0.02 && laneShare(c, B, s) > 0.02;
       const gap = B.offset - A.offset;
       const mid = (A.offset + B.offset) / 2;
-      if (A.park !== B.park && Math.abs(gap - LANE_W) < 0.3) {
-        // Полоса стоянки у полосы движения: сплошная по краю движения, за ней — размеченные места на всю ширину полосы
-        // (их границы рисует игра: места знают заезды и остановки, game/curbParking.ts).
-        runs(mid, (s) => (both(s) ? 'solid' : null));
-        continue;
-      }
+      // Полоса стоянки у полосы движения: линии между ними нет — места размечены буквой «Т» от края движения до бордюра
+      // (их рисует игра: места знают заезды и остановки, game/curbParking.ts).
+      if (A.park || B.park) continue;
       if (Math.abs(gap - LANE_W) < 0.3) {
         const same = A.flow === B.flow;
         // Сплошная сама — у развилки полос в разные полотна, после вливания и у самого перекрёстка (autoSolids).
@@ -887,14 +884,19 @@ export class LaneRenderer {
       }
     }
     if (paintedEdges(c)) {
-      // Кромки — по краю крайних полос, на отгоне идут по скосу.
+      // Кромки — по краю крайних полос, на отгоне идут по скосу. Вдоль полосы стоянки кромки нет: там машины у бордюра.
       for (const side of [0, 1] as const) {
-        const pts: Vec[] = [];
+        let pts: Vec[] = [];
+        const flush = () => {
+          if (pts.length > 1) marks.push({ pts, style: 'solid' });
+          pts = [];
+        };
         for (const s of ss) {
           const e = edgesAt(c, s);
-          if (e) pts.push(at(s, e[side]));
+          if (c.lanes.some((l) => l.park && (side ? l.offset > 0 : l.offset < 0) && laneShare(c, l, s) > 0.02)) flush();
+          else if (e) pts.push(at(s, e[side]));
         }
-        if (pts.length > 1) marks.push({ pts, style: 'solid' });
+        flush();
       }
     }
     return marks.flatMap((m) => (m.style === 'dash' ? cutDashes(m.pts).map((pts) => ({ pts, style: m.style })) : [m]));
@@ -928,8 +930,9 @@ export class LaneRenderer {
         .ends(n)
         .filter((e) => e.side === side)
         .map((e) => {
-          const lats = e.corridor.lanes.filter((l) => net.reaches(e.corridor, l, e.end)).map((l) => net.laneAtSeam(e, l).lat);
-          return { e, lo: Math.min(...lats) - LANE_W / 2, hi: Math.max(...lats) + LANE_W / 2 };
+          const reach = e.corridor.lanes.filter((l) => net.reaches(e.corridor, l, e.end));
+          const lats = reach.map((l) => net.laneAtSeam(e, l).lat);
+          return { e, lo: Math.min(...lats.map((x, i) => x - laneWidth(reach[i]) / 2)), hi: Math.max(...lats.map((x, i) => x + laneWidth(reach[i]) / 2)) };
         })
         .filter((x) => Number.isFinite(x.lo))
         .sort((x, y) => x.lo - y.lo);
@@ -1082,7 +1085,7 @@ export class LaneRenderer {
       lines: paint.lines,
       hatch,
       // Точка стыка, где кромки X и Y совпадают.
-      start: add(net.portPos(X.node, net.laneAtSeam(X, facing).lat + LANE_W / 2), lift(X.corridor, cx.at(0).s)),
+      start: add(net.portPos(X.node, net.laneAtSeam(X, facing).lat + laneWidth(facing) / 2), lift(X.corridor, cx.at(0).s)),
       axis: axisAt(0),
       armLen,
       length: d1,

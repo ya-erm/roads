@@ -187,11 +187,12 @@ describe('«🅿️ Площадка» (в «Станции»)', { timeout: 120_
     const { c, canvas, mouse, move, click, key } = play(game);
     c.setStationMode('lot');
     expect(c.action).toBe('lot');
-    // Точка у улицы большого города, где площадка 6 × 2 встаёт без сноса.
+    // Точка у улицы большого города, где площадка 6 × 2 встаёт без сноса, — подальше от перекрёстков: и вторые ворота
+    // (дальше по краю, у площадки шире) не ближе LOT.corner к обрезу перекрёстка.
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
     let p: Vec | null = null;
     for (const cor of game.roads.net.corridorsNear(town.center, town.radius).sort((a, b) => a.id - b.id)) {
-      for (let s = 25; !p && s < cor.length - 25; s += 8) {
+      for (let s = 65; !p && s < cor.length - 65; s += 8) {
         const t = cor.lut.tangentAt(s);
         const q = add(cor.lut.pointAt(s), { x: -t.y * 25, y: t.x * 25 });
         const plan = game.lotPlan(q, { cols: c.lotCols, rows: c.lotRows });

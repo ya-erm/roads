@@ -5,7 +5,8 @@ import { curveProfile } from '../game/grade';
 import type { GLane, LaneGraph } from './graph';
 import { CURB } from './curb';
 import { laneShare } from './geometry';
-import { LANE_W } from '../world/roadTypes';
+import { besideOffset } from './model';
+import { PARK_W } from '../world/roadTypes';
 
 /**
  * Профиль скорости по полосе: на изгибе дороги машина едет не быстрее √(LATERAL·R) и тормозит
@@ -55,7 +56,7 @@ export function buildLaneProfile(graph: LaneGraph, lane: GLane, ground: ((p: Vec
   const curve = v.slice();
   // Рядом с полосой стоянки справа (машины встают на места и выезжают) — медленнее (CURB.slow); знаки — по изгибу.
   const slot = c.lanes[lane.laneIdx];
-  const park = slot && c.lanes.find((l) => l.park && l.flow === link.flow && Math.abs(l.offset - (slot.offset + link.flow * LANE_W)) < 0.3);
+  const park = slot && c.lanes.find((l) => l.park && l.flow === link.flow && Math.abs(l.offset - besideOffset(slot, link.flow, PARK_W)) < 0.3);
   if (park) for (let k = 0; k < n; k++) if (laneShare(c, park, at(k)) > 0.5) v[k] = Math.min(v[k], lane.speed * CURB.slow);
   // Тормозим заранее: к изгибу подъезжаем уже с его скоростью.
   for (let k = n - 2; k >= 0; k--) v[k] = Math.min(v[k], Math.sqrt(v[k + 1] * v[k + 1] + IDM.brake * PROFILE_STEP));

@@ -30,7 +30,7 @@ import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { autoMainPair, mainPairOf } from '../lanes/graph';
 import { PhaseSpec, phaseTurnStates, specOf, turnClashes, type TurnState } from '../lanes/lights';
-import { Corridor, type CorridorBuild, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, taperLen, twoWay } from '../lanes/model';
+import { besideOffset, Corridor, type CorridorBuild, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, taperLen, twoWay } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
 import type { LaneTraffic } from '../lanes/traffic';
 import { Leaving, RailSim, Train } from '../sim/rail';
@@ -141,7 +141,7 @@ import {
 } from '../world/parkingLots';
 import type { LotGate, ParkingLot } from '../world/entities';
 import { laneSlot } from './garages';
-import { CURB } from '../lanes/curb';
+import { CURB, fitCurbNet } from '../lanes/curb';
 import { CURB_GROW, frontage, withCurb } from '../world/curbStreets';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises, industryRecipe } from './enterprises';
@@ -1272,7 +1272,10 @@ export class Game implements BuildContext {
     for (const f of save.extraForests) this.terrain.addForest(f.c, f.r, this.rng);
     for (const e of save.terraform ?? []) this.terrain.terraform(e);
     this.net.load(save.net);
-    this.roads.replace(LaneNet.fromJSON(save.roads));
+    // Полосы стоянки старых сохранений: уже (LaneNet.fromJSON, fitParkOffsets) и у перекрёстков — не до площадки.
+    const roads = LaneNet.fromJSON(save.roads);
+    fitCurbNet(roads);
+    this.roads.replace(roads);
     this.construction.load(save.construction);
     // Загрузка стройки могла починить полотна (прежняя дорога у перестройки) — граф движения по ним.
     this.roads.changed();
@@ -9402,7 +9405,7 @@ export class Game implements BuildContext {
       const com = (side: 1 | -1) => front.get(side)!.filter((b) => b.kind === 'com').length;
       const sides: (1 | -1)[] = com(1) >= com(-1) ? [1, -1] : [-1, 1];
       for (const side of sides) {
-        const lanes = withCurb(c, side);
+        const lanes = withCurb(net, c, side);
         if (!lanes) continue;
         const id = c.id;
         const plan = this.roadBuilder.plan((n) => n.setLanes(n.corridor(id), lanes), { free: true, shove: true });
@@ -10131,7 +10134,9 @@ export class Game implements BuildContext {
           const x = nn.corridor(pc.id);
           const sideC = pc.fwd ? right : -right;
           const flow = (pc.fwd ? along : -along) as 1 | -1;
-          const outer = sideC > 0 ? Math.max(...x.lanes.map((l) => l.offset)) : Math.min(...x.lanes.map((l) => l.offset));
+          const edge = x.lanes.reduce((m, l) => (l.offset * sideC > m.offset * sideC ? l : m));
+          // Вплотную снаружи крайней полосы (полоса стоянки уже полосы движения).
+          const outer = besideOffset(edge, sideC, LANE_W) - sideC * LANE_W;
           const local = (q: number) => (pc.fwd ? q - p0 : pc.length - (q - p0));
           const a = local(Math.max(zone[0], p0));
           const b = local(Math.min(zone[1], p1));

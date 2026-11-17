@@ -1,9 +1,9 @@
 import { dot, rightNormal, sub } from '../core/vec';
-import { CURB, curbAllowed } from '../lanes/curb';
-import { type Corridor, type LaneSlot, taperLen } from '../lanes/model';
+import { CURB, curbAllowed, curbEndRoom } from '../lanes/curb';
+import { besideOffset, type Corridor, type LaneNet, type LaneSlot, taperLen } from '../lanes/model';
 import { curbSqueeze } from './curbSqueeze';
 import type { Town, TownBuilding } from './entities';
-import { LANE_W } from './roadTypes';
+import { PARK_W } from './roadTypes';
 import { edgeOf, formOf, inDistrict } from './townForms';
 import type { WorldContext } from './worldgen';
 
@@ -66,19 +66,20 @@ export function curbSides(town: Town, seg: Corridor): (1 | -1)[] {
 
 /**
  * Профиль полотна c с полосой стоянки со стороны side: снаружи крайней полосы движения этой стороны, ход — её же (места
- * справа по ходу), на всём полотне с отгонами внутри него. Нельзя (магистраль, грунтовка, коротко, там уже стоянка,
- * сторона слева по ходу) — null.
+ * справа по ходу), на всём полотне с отгонами внутри него — у перекрёстка за его площадкой (curbEndRoom). Нельзя
+ * (магистраль, грунтовка, коротко, там уже стоянка, сторона слева по ходу) — null.
  */
-export function withCurb(c: Corridor, side: 1 | -1): LaneSlot[] | null {
+export function withCurb(net: LaneNet, c: Corridor, side: 1 | -1): LaneSlot[] | null {
   if (!curbAllowed(c) || c.build) return null;
   const T = taperLen(c.cls);
   const outer = c.lanes.reduce<LaneSlot | null>((best, l) => (l.offset * side > 0 && (!best || l.offset * side > best.offset * side) ? l : best), null);
   if (!outer || outer.park || outer.offset * outer.flow < 0) return null;
   if (outer.from > 0.5 || outer.to < c.length - 0.5) return null;
-  const from = T;
-  const to = c.length - T;
+  const [lo, hi] = curbEndRoom(net, c);
+  const from = Math.max(T, lo);
+  const to = Math.min(c.length - T, hi);
   if (to - from < 2 * CURB.stallLen + 2 * CURB.nodeRoom) return null;
-  return [...c.lanes, { offset: outer.offset + side * LANE_W, flow: outer.flow, from, to, park: true }];
+  return [...c.lanes, { offset: besideOffset(outer, side, PARK_W), flow: outer.flow, from, to, park: true }];
 }
 
 /**
@@ -91,7 +92,7 @@ export function curbTown(ctx: WorldContext, town: Town): number {
     const c = ctx.roads.corridors.get(id);
     if (!c) continue;
     for (const side of curbSides(town, c)) {
-      const lanes = withCurb(c, side);
+      const lanes = withCurb(ctx.roads, c, side);
       if (!lanes) continue;
       const was = c.lanes;
       ctx.roads.setLanes(c, lanes);

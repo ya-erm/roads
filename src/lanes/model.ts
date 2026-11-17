@@ -1,6 +1,6 @@
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { capLimit, isDivided, LANE_W, MEDIAN, RoadClass, RoadSpec } from '../world/roadTypes';
+import { capLimit, isDivided, LANE_W, MEDIAN, PARK_W, RoadClass, RoadSpec } from '../world/roadTypes';
 import type { PhaseSpec } from './lights';
 import type { WalkSetting } from './crosswalk';
 
@@ -33,7 +33,8 @@ export interface LaneSlot {
   solid?: boolean;
   /**
    * Полоса стоянки вдоль бордюра (docs/PARKING.md, этап 2): асфальт, тротуар, отступ домов, цена и стройка — как у
-   * полосы, но движения по ней нет — граф её не видит (isDrive). flow — ход соседней полосы движения: места справа от неё.
+   * полосы, но уже (PARK_W, laneWidth: смещение — на (LANE_W + PARK_W) / 2 от соседней полосы движения) и движения по
+   * ней нет — граф её не видит (isDrive). flow — ход соседней полосы движения: места справа от неё.
    */
   park?: true;
 }
@@ -43,6 +44,25 @@ export const isDrive = (l: LaneSlot): boolean => !l.park;
 
 /** Полосы движения полотна — без полос стоянки. */
 export const driveLanes = (c: { lanes: LaneSlot[] }): LaneSlot[] => (c.lanes.some((l) => l.park) ? c.lanes.filter(isDrive) : c.lanes);
+
+/** Ширина слота: полоса движения — LANE_W, полоса стоянки — PARK_W (уже: машина стоит, а не едет). */
+export const laneWidth = (l: { park?: true }): number => (l.park ? PARK_W : LANE_W);
+
+/** Смещение слота шириной w вплотную к полосе l снаружи от неё (out — знак: 1 — бо́льшие смещения, −1 — меньшие). */
+export const besideOffset = (l: LaneSlot, out: number, w: number): number => l.offset + (out * (laneWidth(l) + w)) / 2;
+
+/**
+ * Полосы стоянки старых сохранений — слоты шириной LANE_W (на LANE_W от соседней полосы движения): встают вплотную к
+ * ней по нынешней ширине PARK_W. Прочие полосы — как были (копии).
+ */
+export function fitParkOffsets(lanes: readonly LaneSlot[]): LaneSlot[] {
+  return lanes.map((l) => {
+    if (!l.park) return { ...l };
+    const out = Math.sign(l.offset) || 1;
+    const D = lanes.find((d) => !d.park && Math.abs(besideOffset(d, out, LANE_W) - l.offset) < 0.3 && d.from < l.to && l.from < d.to);
+    return D ? { ...l, offset: besideOffset(D, out, PARK_W) } : { ...l };
+  });
+}
 
 /** Полотно: ось между двумя узлами и полосы вдоль неё. */
 export interface Corridor {
@@ -660,7 +680,7 @@ export class LaneNet {
     }
     for (const c of data.corridors) {
       const lut = new CurveLUT(c.curve);
-      const corridor: Corridor = { ...c, curve: { ...c.curve }, lut, length: lut.length, lanes: c.lanes.map((l) => ({ ...l })), rev: nextRev() };
+      const corridor: Corridor = { ...c, curve: { ...c.curve }, lut, length: lut.length, lanes: fitParkOffsets(c.lanes), rev: nextRev() };
       capCorridorLimit(corridor);
       net.corridors.set(c.id, corridor);
       net.indexCorridor(corridor, true);
@@ -792,7 +812,7 @@ export class LaneNet {
         for (let j = i + 1; j < c.lanes.length; j++) {
           const a = c.lanes[i];
           const b = c.lanes[j];
-          if (Math.abs(a.offset - b.offset) < LANE_W - 0.01 && a.from < b.to && b.from < a.to) res.push(`Полосы полотна ${c.id} налезают друг на друга`);
+          if (Math.abs(a.offset - b.offset) < (laneWidth(a) + laneWidth(b)) / 2 - 0.01 && a.from < b.to && b.from < a.to) res.push(`Полосы полотна ${c.id} налезают друг на друга`);
         }
       }
     }

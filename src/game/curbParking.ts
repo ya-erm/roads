@@ -1,5 +1,5 @@
 import { add, dist, scale, sub, type Vec } from '../core/vec';
-import { curbDrive, curbStalls, stallCorners, type CurbStall } from '../lanes/curb';
+import { CURB, curbDrive, curbStalls, stallTee, type CurbStall } from '../lanes/curb';
 import type { GLane, GLink, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import { findLaneRoute, routeCost } from '../lanes/routing';
@@ -669,16 +669,25 @@ export class CurbParking {
     return out;
   }
 
-  /** Границы мест в кадре: поперечные штрихи между местами (у каждого места — оба края). */
+  /**
+   * Границы мест в кадре — буквой «Т» (stallTee): у каждого места — оба края, у соседних мест граница общая и в ответе
+   * одна. Отрезки: поперечная линия и засечка.
+   */
   marks(box: [number, number, number, number]): [Vec, Vec][] {
     const out: [Vec, Vec][] = [];
     const net = this.host.net;
+    const seen = new Set<string>();
     for (const st of this.lay().all) {
       if (st.pos.x < box[0] - 10 || st.pos.x > box[2] + 10 || st.pos.y < box[1] - 10 || st.pos.y > box[3] + 10) continue;
       const c = net.corridors.get(st.corridor);
-      if (!c) continue;
-      const [a, b, cc, d] = stallCorners(c, st);
-      out.push([a, b], [d, cc]);
+      const P = c?.lanes[st.lane];
+      if (!c || !P) continue;
+      for (const k of [0, 1]) {
+        const key = `${laneKey(st)}:${st.idx + k}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(...stallTee(c, P, st.s + (k - 0.5) * CURB.stallLen));
+      }
     }
     return out;
   }

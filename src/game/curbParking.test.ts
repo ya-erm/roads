@@ -139,7 +139,7 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
         const c = net.corridors.get(id);
         if (!c) continue;
         for (const side of [1, -1] as const) {
-          const lanes = withCurb(c, side);
+          const lanes = withCurb(net, c, side);
           if (!lanes) continue;
           const plan = g.roadBuilder.plan((n) => n.setLanes(n.corridor(id), lanes), { shove: true });
           if (plan.ok && plan.squeeze?.length && !plan.demolish.length) found ??= { id, side };
@@ -148,7 +148,7 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
     }
     expect(found).not.toBeNull();
     const { id, side } = found!;
-    const lanes = withCurb(net.corridor(id), side)!;
+    const lanes = withCurb(net, net.corridor(id), side)!;
     const plan = g.roadBuilder.plan((n) => n.setLanes(n.corridor(id), lanes), { shove: true });
     const squeezed = plan.squeeze!;
     // Цена — 0,8 полосы улицы на её длине.

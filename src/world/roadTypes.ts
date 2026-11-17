@@ -124,6 +124,11 @@ export const defaultPreset = (): RoadPreset => ROAD_PRESETS.find((p) => p.id ===
 
 export const MAX_LANES = 4;
 export const LANE_W = 7;
+/**
+ * Ширина слота полосы стоянки вдоль бордюра (LaneSlot.park, lanes/curb.ts): 3,5 ед. (≈ 2,1 м). С обочиной ROAD_MARGIN
+ * от края движения до бордюра — 5 ед. (≈ 3 м, 0,7 полосы движения): машина 3,6 стоит у бордюра с зазором.
+ */
+export const PARK_W = 3.5;
 export const ROAD_MARGIN = 1.5;
 /**
  * Тротуар вдоль полотна (render/sidewalks.ts): от края асфальта (from) шириной w, м. Город — мощёный у самого бордюра,

@@ -1,6 +1,6 @@
 import { add, angleOf, cross, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { isTrunk, LANE_W, ROAD_MARGIN } from '../world/roadTypes';
-import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LaneSlot, taperLen } from './model';
+import { isTrunk, ROAD_MARGIN } from '../world/roadTypes';
+import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LaneSlot, laneWidth, taperLen } from './model';
 
 export const smooth = (u: number) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
 
@@ -17,9 +17,10 @@ export function laneShare(c: Corridor, l: LaneSlot, s: number): number {
  * На отгоне полоса сужается к оси полотна: у правой неподвижна левая кромка, у левой — правая.
  */
 export function laneBand(c: Corridor, l: LaneSlot, s: number): [number, number] | null {
-  const w = laneShare(c, l, s) * LANE_W;
+  const full = laneWidth(l);
+  const w = laneShare(c, l, s) * full;
   if (w < 0.05) return null;
-  const h = LANE_W / 2;
+  const h = full / 2;
   if (l.offset > 0.01) return [l.offset - h, l.offset - h + w];
   if (l.offset < -0.01) return [l.offset + h - w, l.offset + h];
   return [-w / 2, w / 2];
