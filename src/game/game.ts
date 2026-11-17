@@ -143,8 +143,8 @@ import {
 } from '../world/parkingLots';
 import type { LotGate, ParkingLot } from '../world/entities';
 import { laneSlot } from './garages';
-import { CURB, fitCurbNet } from '../lanes/curb';
-import { CURB_GROW, frontage, withCurb } from '../world/curbStreets';
+import { CURB } from '../lanes/curb';
+import { addCurb, CURB_GROW, frontage, withCurb } from '../world/curbStreets';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises, industryRecipe } from './enterprises';
 import { isActive } from '../world/enterprise';
@@ -1290,10 +1290,7 @@ export class Game implements BuildContext {
     for (const f of save.extraForests) this.terrain.addForest(f.c, f.r, this.rng);
     for (const e of save.terraform ?? []) this.terrain.terraform(e);
     this.net.load(save.net);
-    // Полосы стоянки старых сохранений: уже (LaneNet.fromJSON, fitParkOffsets) и у перекрёстков — не до площадки.
-    const roads = LaneNet.fromJSON(save.roads);
-    fitCurbNet(roads);
-    this.roads.replace(roads);
+    this.roads.replace(LaneNet.fromJSON(save.roads));
     this.construction.load(save.construction);
     // Загрузка стройки могла починить полотна (прежняя дорога у перестройки) — граф движения по ним.
     this.roads.changed();
@@ -9514,10 +9511,9 @@ export class Game implements BuildContext {
       const com = (side: 1 | -1) => front.get(side)!.filter((b) => b.kind === 'com').length;
       const sides: (1 | -1)[] = com(1) >= com(-1) ? [1, -1] : [-1, 1];
       for (const side of sides) {
-        const lanes = withCurb(net, c, side);
-        if (!lanes) continue;
+        if (!withCurb(net, c, side)) continue;
         const id = c.id;
-        const plan = this.roadBuilder.plan((n) => n.setLanes(n.corridor(id), lanes), { free: true, shove: true });
+        const plan = this.roadBuilder.plan((n) => addCurb(n, n.corridor(id), side), { free: true, shove: true });
         if (!plan.ok || plan.demolish.length || !plan.net) continue;
         this.roadBuilder.apply(plan);
         this.applyCurbSqueeze(plan.changed);

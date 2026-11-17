@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MIN_SEGMENT_LEN, STATION } from '../config';
 import { dist } from '../core/vec';
+import { junctionCuts } from '../lanes/geometry';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 import { NEW_GAME_SETTINGS, TERRAIN_VERSION } from '../world/settings';
 import { pointInFootprint } from '../world/spatial';
@@ -286,6 +287,7 @@ describe('Автовокзал вдоль дороги в городе', () => {
     for (const seed of SHORT_BLOCK_SEEDS) {
       const game = cityGame(seed);
       const net = game.roads.net;
+      const cuts = junctionCuts(net);
       for (const c of net.corridors.values()) {
       // Огрызки улиц короче 75 м (у воды, у края) — не кварталы; кривые улицы (у кармана своя мера) — тоже.
       if (c.cls !== 'street' || net.node(c.a).kind !== 'junction' || net.node(c.b).kind !== 'junction' || c.length < 75) continue;
@@ -301,9 +303,10 @@ describe('Автовокзал вдоль дороги в городе', () => {
           short++;
           expect(Number(m[2])).toBe(Math.floor(c.length));
           expect(Number(m[2])).toBeLessThan(Number(m[1]));
-          // Мало — только улицам короче кармана (у перекрёстка с проспектом — с запасом на его ширину): нужно не
-          // больше кармана с запасом.
-          expect(Number(m[1])).toBeLessThan(2 * pocketHalf + 30);
+          // Мало — только улицам короче кармана: нужно не больше кармана и стоп-линий её перекрёстков (поперечная
+          // шире — проспект, улица со стоянками до самого узла — стоп-линия дальше от узла).
+          const [ca, cb] = cuts.get(c.id)!;
+          expect(Number(m[1])).toBeLessThanOrEqual(Math.ceil(2 * pocketHalf + ca + cb));
           continue;
         }
         // Короткий квартал, где раньше длины помешал дом или соседняя улица, — причина та, а не длина.

@@ -1,6 +1,7 @@
 import { dot, rightNormal, sub } from '../core/vec';
-import { CURB, curbAllowed, curbEndRoom } from '../lanes/curb';
-import { besideOffset, type Corridor, type LaneNet, type LaneSlot, taperLen } from '../lanes/model';
+import { CURB, curbAllowed } from '../lanes/curb';
+import { joinTaperedLanes } from '../lanes/edit';
+import { besideOffset, type Corridor, type End, LAT_EPS, type LaneNet, type LaneSlot, taperLen } from '../lanes/model';
 import { curbSqueeze } from './curbSqueeze';
 import type { Town, TownBuilding } from './entities';
 import { PARK_W } from './roadTypes';
@@ -76,8 +77,9 @@ export function curbSides(town: Town, seg: Corridor): (1 | -1)[] {
 
 /**
  * Профиль полотна c с полосой стоянки со стороны side: снаружи крайней полосы движения этой стороны, ход — её же (места
- * справа по ходу), на всём полотне с отгонами внутри него — у перекрёстка за его площадкой (curbEndRoom). Нельзя
- * (магистраль, грунтовка, коротко, там уже стоянка, сторона слева по ходу) — null.
+ * справа по ходу), во всю длину полотна: у перекрёстка и тупика — до самого узла (бордюр прямой до угла, мест у узла нет —
+ * curbStalls), у стыка — до него, если за ним уже стоянка (её отгон дотянет addCurb), иначе сходит на нет отгоном.
+ * Нельзя (магистраль, грунтовка, коротко, там уже стоянка, сторона слева по ходу) — null.
  */
 export function withCurb(net: LaneNet, c: Corridor, side: 1 | -1): LaneSlot[] | null {
   if (!curbAllowed(c) || c.build) return null;
@@ -85,11 +87,30 @@ export function withCurb(net: LaneNet, c: Corridor, side: 1 | -1): LaneSlot[] | 
   const outer = c.lanes.reduce<LaneSlot | null>((best, l) => (l.offset * side > 0 && (!best || l.offset * side > best.offset * side) ? l : best), null);
   if (!outer || outer.park || outer.offset * outer.flow < 0) return null;
   if (outer.from > 0.5 || outer.to < c.length - 0.5) return null;
-  const [lo, hi] = curbEndRoom(net, c);
-  const from = Math.max(T, lo);
-  const to = Math.min(c.length - T, hi);
-  if (to - from < 2 * CURB.stallLen + 2 * CURB.nodeRoom) return null;
-  return [...c.lanes, { offset: besideOffset(outer, side, PARK_W), flow: outer.flow, from, to, park: true }];
+  const P: LaneSlot = { offset: besideOffset(outer, side, PARK_W), flow: outer.flow, from: 0, to: c.length, park: true };
+  const reach = (end: End) => {
+    const n = net.node(end === 'a' ? c.a : c.b);
+    if (n.kind !== 'seam' || net.isDeadEnd(n)) return true;
+    const e = net.end(c, end);
+    const lat = net.laneAtSeam(e, P).lat;
+    return net.ends(n).some((o) => o.side !== e.side && o.corridor.lanes.some((l) => l.park && Math.abs(net.laneAtSeam(o, l).lat - lat) < LAT_EPS));
+  };
+  if (!reach('a')) P.from = T;
+  if (!reach('b')) P.to = c.length - T;
+  if (P.to - P.from < 2 * CURB.stallLen + 2 * CURB.nodeRoom) return null;
+  return [...c.lanes, P];
+}
+
+/**
+ * Стоянка со стороны side на полотне c (withCurb): нельзя — false. Стоянка за стыком, что сходила там на нет, — снова до
+ * стыка (joinTaperedLanes): улица из нескольких полотен — без «талии» на стыках.
+ */
+export function addCurb(net: LaneNet, c: Corridor, side: 1 | -1): boolean {
+  const lanes = withCurb(net, c, side);
+  if (!lanes) return false;
+  net.setLanes(c, lanes);
+  joinTaperedLanes(net, [c.a, c.b]);
+  return true;
 }
 
 /**
@@ -104,14 +125,13 @@ export function curbTown(ctx: WorldContext, town: Town): number {
     const c = ctx.roads.corridors.get(id);
     if (!c) continue;
     for (const side of curbSides(town, c)) {
-      const lanes = withCurb(ctx.roads, c, side);
-      if (!lanes) continue;
-      const was = c.lanes;
-      ctx.roads.setLanes(c, lanes);
-      const houses = frontage(town, c).get(side)!;
-      const res = curbSqueeze(ctx, c, houses);
+      // Прежние полосы этого полотна и соседей по стыкам (addCurb дотягивает их стоянки до стыка): не вышло — назад.
+      const near = new Set([c, ...[c.a, c.b].flatMap((n) => ctx.roads.ends(ctx.roads.node(n)).map((e) => e.corridor))]);
+      const was = new Map([...near].map((k) => [k, k.lanes]));
+      if (!addCurb(ctx.roads, c, side)) continue;
+      const res = [...near].flatMap((k) => (k.lanes === was.get(k) ? [] : curbSqueeze(ctx, k, k === c ? frontage(town, c).get(side)! : [...frontage(town, k).values()].flat())));
       if (res.some((x) => !x.fp) || (hall && !landmarkClear(ctx.roads, hall))) {
-        ctx.roads.setLanes(c, was);
+        for (const [k, lanes] of was) if (k.lanes !== lanes) ctx.roads.setLanes(k, lanes);
         continue;
       }
       for (const x of res) {

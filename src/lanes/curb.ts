@@ -1,7 +1,7 @@
 import { add, rightNormal, scale, type Vec } from '../core/vec';
 import { isDirt, isTrunk, PARK_W, ROAD_MARGIN } from '../world/roadTypes';
-import { junctionCuts, laneShare } from './geometry';
-import { besideOffset, type Corridor, type LaneNet, type LaneSlot, taperLen } from './model';
+import { laneShare } from './geometry';
+import { besideOffset, type Corridor, type LaneNet, type LaneSlot } from './model';
 
 /**
  * Полосы стоянки вдоль бордюра (LaneSlot.park, docs/PARKING.md, этап 2): размеры мест и где они на полосе. Одна полоса
@@ -19,9 +19,12 @@ export const CURB = {
   stallDepth: 4.4,
   /** Засечка «Т» у края движения — по стольку ед. вдоль полосы в каждую сторону от границы мест. */
   tee: 1.1,
-  /** Мест нет: ближе стольких ед. к узлу (и к стоп-линии — ещё на 3), у светофора — ближе lightRoom. */
+  /**
+   * Мест нет: ближе стольких ед. к узлу, у перекрёстка — к его стоп-линии (≈ 9 м), у светофора — ближе lightRoom (≈ 15 м).
+   * Сама полоса там есть — пустой асфальт у бордюра.
+   */
   nodeRoom: 15,
-  lightRoom: 30,
+  lightRoom: 25,
   /** У остановки — ±stopRoom от её места на оси; у заезда во двор, гараж — его ширина и по drivePad с каждой стороны. */
   stopRoom: 28,
   drivePad: 1,
@@ -115,11 +118,8 @@ export function curbUsable(c: Corridor, P: LaneSlot): boolean {
 export function curbStalls(net: LaneNet, c: Corridor, laneIdx: number, cut: [number, number], lights: [boolean, boolean], skip: readonly [number, number][]): CurbStall[] {
   const P = c.lanes[laneIdx];
   if (!P?.park || !curbAllowed(c) || !curbUsable(c, P)) return [];
-  const room = (k: 0 | 1) => {
-    const n = net.nodes.get(k ? c.b : c.a);
-    const base = n?.kind === 'junction' ? Math.max(CURB.nodeRoom, cut[k] + 3) : CURB.nodeRoom;
-    return lights[k] ? Math.max(base, CURB.lightRoom) : base;
-  };
+  // Полоса доходит до перекрёстка, а места — нет: у перекрёстка отсчёт от стоп-линии (обреза).
+  const room = (k: 0 | 1) => (net.nodes.get(k ? c.b : c.a)?.kind === 'junction' ? cut[k] : 0) + (lights[k] ? CURB.lightRoom : CURB.nodeRoom);
   const lo = Math.max(P.from, room(0));
   const hi = Math.min(P.to, c.length - room(1));
   const start = P.from;
@@ -157,47 +157,4 @@ export function stallTee(c: Corridor, P: LaneSlot, s: number): [Vec, Vec][] {
     [at(s, inner), at(s, curb)],
     [at(s - CURB.tee, inner), at(s + CURB.tee, inner)],
   ];
-}
-
-/**
- * Где на полотне c может начаться и кончиться полоса стоянки на полную ширину: у перекрёстка — за его обрезом и отгоном
- * (fitCurbEnds); у стыков и тупиков — без ограничения (±Infinity).
- */
-export function curbEndRoom(net: LaneNet, c: Corridor): [number, number] {
-  const ends = [net.node(c.a), net.node(c.b)];
-  const junctions = ends.filter((n) => n.kind === 'junction');
-  if (!junctions.length) return [-Infinity, Infinity];
-  const cut = junctionCuts(net, [c], junctions).get(c.id) ?? [0, 0];
-  const T = taperLen(c.cls);
-  return [ends[0].kind === 'junction' ? cut[0] + T : -Infinity, ends[1].kind === 'junction' ? c.length - cut[1] - T : Infinity];
-}
-
-/**
- * Полоса стоянки у перекрёстка — не до его площадки: на полную ширину она начинается за обрезом (как стоп-линия) и
- * отгоном taperLen от него — бордюр идёт плавным клином, как у кармашка остановки, а угол перекрёстка скругляется по
- * полотну без стоянки. Полосы стоянки полотна c, что заходят ближе, укорачиваются (короче места — убираются); у стыков и
- * тупиков — как были. Ответ — поменялись ли полосы.
- */
-export function fitCurbEnds(net: LaneNet, c: Corridor): boolean {
-  if (!c.lanes.some((l) => l.park)) return false;
-  const [lo, hi] = curbEndRoom(net, c);
-  if (lo === -Infinity && hi === Infinity) return false;
-  let changed = false;
-  const lanes: LaneSlot[] = [];
-  for (const l of c.lanes) {
-    if (!l.park || (l.from >= lo - 0.01 && l.to <= hi + 0.01)) {
-      lanes.push(l);
-      continue;
-    }
-    changed = true;
-    const fit = { ...l, from: Math.max(l.from, lo), to: Math.min(l.to, hi) };
-    if (fit.to - fit.from >= CURB.stallLen) lanes.push(fit);
-  }
-  if (changed) net.setLanes(c, lanes);
-  return changed;
-}
-
-/** fitCurbEnds по всем полотнам сети со стоянкой (перекрёсток мог стать шире: новая дорога, скругление угла). */
-export function fitCurbNet(net: LaneNet): void {
-  for (const c of [...net.corridors.values()]) fitCurbEnds(net, c);
 }

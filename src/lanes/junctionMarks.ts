@@ -1,5 +1,5 @@
 import { add, angleDiff, angleOf, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { LANE_W } from '../world/roadTypes';
+import { LANE_W, PARK_W, ROAD_MARGIN } from '../world/roadTypes';
 import { edgePoint } from './geometry';
 import type { LaneGraph } from './graph';
 import { LaneNet, LaneNode } from './model';
@@ -549,9 +549,13 @@ export function junctionMarks(net: LaneNet, n: LaneNode, plate: Vec[], cuts: Map
   const g = localGraph(net, new Set([n.id]), cuts);
   const paths = turnPaths(g, n.id);
   if (!paths.length) return null;
+  // Стоянка доходит до перекрёстка: полоса у бордюра шириной стоянки — её продолжение за угол, а не островок (иначе у
+  // каждого угла — штрихованный серп).
+  const park = ends.some((e) => e.corridor.lanes.some((l) => l.park && net.reaches(e.corridor, l, e.end)));
   const islands = freeIslands(
     plate,
     paths.filter((p) => p.kind !== 'uturn').map((p) => p.points),
+    park ? { curb: 0.8 + PARK_W + ROAD_MARGIN } : {},
   );
   // Пунктир — только по асфальту площадки и не вдоль бордюра (там поворот ведёт сам бордюр).
   const cutLines = ends.map((e, i): [Vec, Vec] => [edgePoint(e, mine[i], -1).p, edgePoint(e, mine[i], 1).p]);

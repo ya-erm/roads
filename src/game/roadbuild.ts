@@ -6,7 +6,7 @@ import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, joinTaperedLanes, LaneDraft, laneStep, LaneTip, RoadOptions, taperDeadLanes } from '../lanes/edit';
 import { cornerCost, cornerHandles } from '../lanes/corners';
 import { edgesAt, laneShare } from '../lanes/geometry';
-import { CURB, fitCurbNet } from '../lanes/curb';
+import { CURB } from '../lanes/curb';
 import { Corridor, type CorridorWas, Flow, LaneNet, type LaneNode, LaneSlot, LAT_EPS } from '../lanes/model';
 import { capLimit, LEVEL_RUN, limitAllowed, limitCapText, RoadClass, ROAD_CLASSES, ROAD_MARGIN, structureFactor } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
@@ -322,8 +322,6 @@ export class RoadBuilder {
     } catch (e) {
       return fail(e instanceof EditError ? e.message : 'Так не построить');
     }
-    // Перекрёсток стал шире (новая дорога, скругление угла) — полосы стоянки у него кончаются отгоном за площадкой.
-    fitCurbNet(next);
     // «Со строительством»: новые дороги (не куски прежних, разрезанных ими) — проект, платить за них — по готовым метрам.
     // Правка готовых дорог (rebuild, и проект с правками) — существенная перестройка тоже проект (rebuild.ts).
     const pid = (opts.project || opts.rebuild) && !opts.free && !opts.raze ? (this.ctx.projectId?.() ?? null) : null;

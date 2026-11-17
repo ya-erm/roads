@@ -25,7 +25,7 @@ import {
   slot,
   taperLen,
 } from './model';
-import { curbAllowed, curbEndRoom } from './curb';
+import { curbAllowed } from './curb';
 
 /** Начало или конец новой дороги: узел (тупик или перекрёсток), место на полотне или чистое поле. */
 export type Anchor =
@@ -750,16 +750,23 @@ function moveLaneEnd(net: LaneNet, c: Corridor, grab: NonNullable<LaneDraft['gra
   return true;
 }
 
+/** Стоянка, что кончается ближе стольких ед. (сверх отгона) к перекрёстку, — до самого узла (площадка — до 80 ед.). */
+const PARK_REACH = 40;
+
 /**
  * Новая полоса вдоль края: рядом с такой же (то же смещение и направление) — сливается с ней в одну (так полосу
  * продолжают); у стыка, за которым такая же полоса продолжается или кончается рядом, — доходит до стыка
- * без отгона и стыкуется с ней.
+ * без отгона и стыкуется с ней. Стоянку, доведённую почти до перекрёстка (до его площадки с отгоном), — до самого узла:
+ * бордюр прямой до угла (места у узла не размечаются — curbStalls).
  */
 function placeLane(net: LaneNet, c: Corridor, lane: LaneSlot): void {
   const T = taperLen(c.cls);
   let l = { ...lane };
+  const toJunction = (end: End) => !!l.park && net.node(end === 'a' ? c.a : c.b).kind === 'junction';
   if (l.from > 0.01 && l.from < T + 15 && joinAcross(net, c, l, 'a')) l = { ...l, from: 0 };
   if (l.to < c.length - 0.01 && l.to > c.length - T - 15 && joinAcross(net, c, l, 'b')) l = { ...l, to: Infinity };
+  if (toJunction('a') && l.from < T + PARK_REACH) l = { ...l, from: 0 };
+  if (toJunction('b') && l.to > c.length - T - PARK_REACH) l = { ...l, to: Infinity };
   mergeLane(net, c, l);
 }
 
@@ -944,14 +951,11 @@ export function toggleParkLane(net: LaneNet, c: Corridor, i: number): 'park' | '
   const T = taperLen(c.cls);
   const lanes = [...c.lanes];
   if (l.park) {
-    // Полоса движения шире стоянки: встаёт вплотную к соседней изнутри; у перекрёстка — снова до него.
+    // Полоса движения шире стоянки: встаёт вплотную к соседней изнутри.
     const { park: _p, ...drive } = l;
     const out = Math.sign(l.offset) || 1;
     const inside = insideLane(c, l.offset, (Math.max(0, l.from) + Math.min(c.length, l.to)) / 2, PARK_W);
     drive.offset = inside ? besideOffset(inside, out, LANE_W) : l.offset + (out * (LANE_W - PARK_W)) / 2;
-    const [lo, hi] = curbEndRoom(net, c);
-    if (drive.from <= lo + 0.5) drive.from = 0;
-    if (drive.to >= hi - 0.5) drive.to = Infinity;
     lanes[i] = drive;
     net.setLanes(c, lanes);
     joinEnds(net, c, i);
@@ -973,14 +977,12 @@ export function toggleParkLane(net: LaneNet, c: Corridor, i: number): 'park' | '
   delete next.solid;
   if (room('a')) next.from = Math.max(next.from, T);
   if (room('b')) next.to = Math.min(next.to, c.length - T);
-  // У перекрёстка — не до площадки: за ней отгоном (fitCurbEnds).
-  const [lo, hi] = curbEndRoom(net, c);
-  next.from = Math.max(next.from, lo);
-  next.to = Math.min(next.to, hi);
   if (next.to - next.from < 10) throw new EditError('Слишком коротко для стоянки');
   lanes[i] = next;
   net.setLanes(c, lanes);
-  // Полоса за стыком, что продолжала эту, теперь там начинается (кончается) отгоном.
+  // Стоянка за стыком (отданная под парковку раньше и сходившая там на нет) — снова до стыка, без «талии»; полоса
+  // движения за стыком, что продолжала эту, теперь там начинается (кончается) отгоном.
+  joinTaperedLanes(net, [c.a, c.b]);
   taperDeadLanes(net, [c.a, c.b]);
   return 'park';
 }

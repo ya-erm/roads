@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { PARK_W, ROAD_MARGIN } from '../world/roadTypes';
-import { CURB, curbDrive, curbEndRoom, curbStalls, fitCurbEnds, stallTee } from './curb';
+import { addCurb } from '../world/curbStreets';
+import { CURB, curbDrive, curbStalls, stallTee } from './curb';
 import { EditError, laneStep, toggleParkLane } from './edit';
-import { edgesAt, junctionCuts } from './geometry';
+import { edgesAt, halfAt, junctionCuts } from './geometry';
 import { LaneGraph } from './graph';
 import { driveLanes, fitParkOffsets, LaneNet, taperLen, twoWay } from './model';
 import { centreLine } from './solid';
@@ -115,36 +116,35 @@ describe('Полоса стоянки (LaneSlot.park)', () => {
     expect(bar[1].y).toBeCloseTo(7, 6);
   });
 
-  it('у перекрёстка стоянка — не до площадки: отгон начинается за обрезом (fitCurbEnds), угол — как у полотна без неё', () => {
+  it('стоянка улицы — до самого перекрёстка постоянной ширины (без «талии»), мест у узла нет; на стыке — без сужения', () => {
+    // Перекрёсток A (три улицы), от него на восток — улица из двух полотен через стык M.
     const net = new LaneNet();
     const A = net.addJunction({ x: 0, y: 0 });
-    const B = net.addJunction({ x: 300, y: 0 });
-    const S = net.addJunction({ x: 0, y: 200 });
-    const N = net.addJunction({ x: 0, y: -200 });
-    const c = net.addCorridor(A.id, B.id, { cls: 'street', lanes: twoWay(1, 1) });
-    net.addCorridor(A.id, S.id, { cls: 'street', lanes: twoWay(1, 1) });
-    net.addCorridor(A.id, N.id, { cls: 'street', lanes: twoWay(1, 1) });
-    // Старый вид: отгон от самого узла — у обреза асфальт уже почти на всю ширину стоянки.
-    net.setLanes(c, [...c.lanes, { offset: 8.75, flow: 1, from: 25, to: 275, park: true }]);
-    const cut = junctionCuts(net).get(c.id)![0];
-    expect(cut).toBeGreaterThan(10);
-    expect(curbEndRoom(net, net.corridor(c.id))[0]).toBeCloseTo(cut + taperLen('street'), 6);
-    expect(fitCurbEnds(net, net.corridor(c.id))).toBe(true);
-    const k = net.corridor(c.id);
-    const P = k.lanes.find((l) => l.park)!;
-    expect(P.from).toBeCloseTo(cut + taperLen('street'), 6);
-    // До обреза и на нём — полотно без стоянки; дальше — плавно шире, без ступеньки.
-    expect(edgesAt(k, cut)![1]).toBeCloseTo(7, 6);
-    let prev = 7;
-    for (let s = cut; s <= P.from; s += 1) {
-      const e = edgesAt(k, s)![1];
-      expect(e).toBeGreaterThanOrEqual(prev - 1e-9);
-      expect(e - prev).toBeLessThan(0.25);
-      prev = e;
+    const M = net.addSeam({ x: 200, y: 0 }, { x: 1, y: 0 });
+    const B = net.addJunction({ x: 400, y: 0 });
+    const c = net.addCorridor(A.id, M.id, { cls: 'street', lanes: twoWay(1, 1) });
+    const d = net.addCorridor(M.id, B.id, { cls: 'street', lanes: twoWay(1, 1) });
+    net.addCorridor(A.id, net.addJunction({ x: 0, y: 200 }).id, { cls: 'street', lanes: twoWay(1, 1) });
+    net.addCorridor(A.id, net.addJunction({ x: 0, y: -200 }).id, { cls: 'street', lanes: twoWay(1, 1) });
+    expect(addCurb(net, net.corridor(c.id), 1)).toBe(true);
+    // Первое полотно: за стыком стоянки ещё нет — там сходит на нет отгоном; у перекрёстка — до самого узла.
+    expect(net.corridor(c.id).lanes.find((l) => l.park)).toMatchObject({ from: 0, to: 200 - taperLen('street') });
+    expect(addCurb(net, net.corridor(d.id), 1)).toBe(true);
+    expect(net.problems()).toEqual([]);
+    for (const k of [net.corridor(c.id), net.corridor(d.id)]) {
+      expect(k.lanes.find((l) => l.park)).toMatchObject({ offset: 8.75, from: 0, to: k.length });
+      // Кромка прямая по всей длине — и у перекрёстка, и у стыка.
+      for (let s = 0; s <= k.length; s += 5) expect(edgesAt(k, s)![1]).toBeCloseTo(10.5, 6);
     }
-    expect(prev).toBeCloseTo(10.5, 6);
-    // Второй раз — уже на месте.
-    expect(fitCurbEnds(net, k)).toBe(false);
+    // Площадка перекрёстка — по полной ширине полотна со стоянкой.
+    const k = net.corridor(c.id);
+    const cut = junctionCuts(net).get(k.id)![0];
+    expect(halfAt(k, 'a')).toBeCloseTo(10.5 + ROAD_MARGIN, 6);
+    // Мест у перекрёстка нет: первое — не ближе nodeRoom к стоп-линии (обрезу).
+    const i = k.lanes.findIndex((l) => l.park);
+    const all = curbStalls(net, k, i, [cut, 0], [false, false], []);
+    expect(all.length).toBeGreaterThan(5);
+    expect(Math.min(...all.map((s) => s.s - CURB.stallLen / 2))).toBeGreaterThanOrEqual(cut + CURB.nodeRoom - 1e-6);
   });
 
   it('старое сохранение: полоса стоянки шириной полосы (на 7 от полосы движения) встаёт вплотную по нынешней ширине', () => {
