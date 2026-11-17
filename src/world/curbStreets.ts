@@ -5,7 +5,7 @@ import { curbSqueeze } from './curbSqueeze';
 import type { Town, TownBuilding } from './entities';
 import { PARK_W } from './roadTypes';
 import { edgeOf, formOf, inDistrict } from './townForms';
-import type { WorldContext } from './worldgen';
+import { landmarkClear, type WorldContext } from './worldgen';
 
 /**
  * Полосы стоянки на улицах городов сами (docs/PARKING.md, этап 2; WorldSettings.parking — только новые партии): при
@@ -84,10 +84,12 @@ export function withCurb(net: LaneNet, c: Corridor, side: 1 | -1): LaneSlot[] | 
 
 /**
  * Полосы стоянки на улицах города town при генерации (curbSides): по каждой улице и стороне — профиль со стоянкой,
- * дома у новой кромки ужимают участки; кого пришлось бы снести — стоянки с этой стороны нет. Ответ — сколько полос.
+ * дома у новой кромки ужимают участки; кого пришлось бы снести — стоянки с этой стороны нет. Площадь вокруг ратуши
+ * (landmarkClear) кромка не задевает: задела бы — стоянки с этой стороны тоже нет. Ответ — сколько полос.
  */
 export function curbTown(ctx: WorldContext, town: Town): number {
   let added = 0;
+  const hall = town.buildings.find((b) => b.kind === 'landmark');
   for (const id of town.streets) {
     const c = ctx.roads.corridors.get(id);
     if (!c) continue;
@@ -98,7 +100,7 @@ export function curbTown(ctx: WorldContext, town: Town): number {
       ctx.roads.setLanes(c, lanes);
       const houses = frontage(town, c).get(side)!;
       const res = curbSqueeze(ctx, c, houses);
-      if (res.some((x) => !x.fp)) {
+      if (res.some((x) => !x.fp) || (hall && !landmarkClear(ctx.roads, hall))) {
         ctx.roads.setLanes(c, was);
         continue;
       }

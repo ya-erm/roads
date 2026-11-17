@@ -97,8 +97,11 @@ describe('Дефицит сырья', () => {
     const game = scenarioGame();
     const sc = game.scenario!;
     const { plant } = farmLine(game);
-    // Начинаем без заданий на этот завод: генератор сценария мог сам дать доставку на него (зависит от раскладки мира).
-    sc.state.objectives = sc.state.objectives.filter((o) => !(o.params.kind === 'deliver' && o.params.to?.type === 'industry' && o.params.to.id === plant.id));
+    // Начинаем без заданий и контрактов про этот завод: генератор сценария мог сам дать доставку на него или контракт
+    // на его продукцию (зависит от раскладки мира).
+    const about = (o: Objective) =>
+      (o.params.kind === 'deliver' && o.params.to?.type === 'industry' && o.params.to.id === plant.id) || o.related.some((r) => r.type === 'industry' && r.id === plant.id);
+    sc.state.objectives = sc.state.objectives.filter((o) => !about(o));
     sc.state.watch[plant.id] = { low: 2, idle: 0, active: true };
     const isCandidate = () => eventCandidates(sc, 'shortage').some((c) => c.subject?.type === 'industry' && c.subject.id === plant.id);
     expect(isCandidate()).toBe(true);
@@ -237,15 +240,17 @@ describe('Быстрый срок', () => {
   });
 
   it('успели к быстрому сроку — надбавка к награде и очки; не успели — только обычная награда', () => {
-    // Карта, где у заданий старта есть доставка получателю с быстрым сроком.
-    const seed = [42, 7, 11, 23, 295499027].find((s) =>
-      scenarioGame(s).scenario!.state.objectives.some((x) => x.fast !== undefined && x.params.kind === 'deliver' && x.params.to),
-    );
-    expect(seed).toBeDefined();
+    // Цель этапа — доставка зерна на пищекомбинат с быстрым сроком через 6 месяцев (какие задания даст генератор на
+    // старте — зависит от карты, здесь нужна именно доставка получателю).
     const run = (late: boolean) => {
-      const game = scenarioGame(seed);
+      const game = scenarioGame();
       const sc = game.scenario!;
-      const o = sc.state.objectives.find((x) => x.fast !== undefined && x.params.kind === 'deliver' && x.params.to) as Objective;
+      const plant = game.industries.find((i) => i.info.accepts.includes('grain'))!;
+      const o = sc.addObjective(
+        { kind: 'deliver', cargo: 'grain', amount: 100, to: refOf(plant) },
+        { role: 'goal', phase: sc.state.phase, months: 12, fast: 6, why: '', reward: { money: 50_000 } },
+      );
+      expect(o.fast).toBeDefined();
       if (o.params.kind !== 'deliver' || !o.params.to) throw new Error('не доставка');
       if (late) game.time = o.fast! * MONTH_LENGTH + 1;
       const money = game.money;

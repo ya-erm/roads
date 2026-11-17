@@ -30,12 +30,15 @@ function motorway(game: Game, len: number): { from: Vec; dir: Vec } {
   throw new Error('нет места');
 }
 
-/** Тупики рядом с центром: концы магистрали и поперечной дороги (стартовые дороги мира — просёлки и шоссе за край — не в счёт). */
-function deadEnds(game: Game, center: Vec, radius: number): number[] {
+/**
+ * Тупики рядом с центром: концы магистрали и поперечной дороги (стартовые дороги мира — просёлки и шоссе за край — не в
+ * счёт). old — узлы сети до стройки: тупики улиц города рядом — тоже не в счёт.
+ */
+function deadEnds(game: Game, center: Vec, radius: number, old?: ReadonlySet<number>): number[] {
   const net = game.roads.net;
   const dirt = (n: { corridors: number[] }) => n.corridors.every((id) => net.corridor(id).cls === 'dirt');
   return [...net.nodes.values()]
-    .filter((n) => net.isDeadEnd(n) && !dirt(n) && game.terrain.inBounds(n.pos, 1) && Math.hypot(n.pos.x - center.x, n.pos.y - center.y) < radius)
+    .filter((n) => net.isDeadEnd(n) && !dirt(n) && !old?.has(n.id) && game.terrain.inBounds(n.pos, 1) && Math.hypot(n.pos.x - center.x, n.pos.y - center.y) < radius)
     .map((n) => n.id);
 }
 
@@ -77,6 +80,7 @@ function placeOn(game: Game, kind: TemplateKind, len: number): Vec {
 describe('Шаблоны развязок', { timeout: 60_000 }, () => {
   it('«ромб»: мост над автомагистралью и четыре съезда по полосам, проезд в обе стороны', () => {
     const game = new Game({ seed: 11, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry' });
+    const old = new Set(game.roads.net.nodes.keys());
     const { from, dir } = motorway(game, 1600);
     const center = add(from, scale(dir, 800));
     const plan = game.diamondPlan(center, 14);
@@ -92,7 +96,7 @@ describe('Шаблоны развязок', { timeout: 60_000 }, () => {
     noTrunkJunctions(game);
     expect([...net.corridors.values()].filter((c) => c.portA || c.portB).length).toBe(4);
     // Тупики поперечной дороги — по обе стороны магистрали; оттуда — на оба конца магистрали и обратно.
-    const ends = deadEnds(game, center, 1000);
+    const ends = deadEnds(game, center, 1000, old);
     expect(ends).toHaveLength(4);
     allRoutes(game, ends);
     // Отмена убирает развязку целиком.

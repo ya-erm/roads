@@ -271,10 +271,15 @@ describe('Таймлапс партии: запись кадров', { timeout: 
     const save = JSON.stringify(game.toSave()).length;
     const frames = JSON.stringify(game.timelapse.toSave()).length;
     expect(game.timelapse.frames).toHaveLength(13);
-    // Первый кадр — все улицы городов; помесячные — по сотне символов.
+    // Первый кадр — все улицы городов; помесячные — дата, деньги и жители (по сотне символов) и только новые и снесённые
+    // за месяц улицы: сколько их — как вырос город, каждая — одной короткой записью, без лишнего.
     expect(frames / save).toBeLessThan(0.1);
-    const monthly = game.timelapse.frames.slice(2).map((f) => JSON.stringify(f).length);
-    expect(Math.max(...monthly)).toBeLessThan(600);
+    for (const f of game.timelapse.frames.slice(2)) {
+      const { r, rd, ...rest } = f;
+      expect(JSON.stringify(rest).length).toBeLessThan(150);
+      for (const rec of r ?? []) expect(JSON.stringify(rec).length).toBeLessThan(60);
+      expect((r?.length ?? 0) + (rd?.length ?? 0)).toBeLessThan(40);
+    }
   });
 });
 

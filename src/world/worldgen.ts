@@ -9,12 +9,13 @@ import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST, type Indus
 import { placePlayerWorld } from './deposits';
 import type { Deposit, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
-import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN } from './roadTypes';
+import { lotClearOfRoads } from './lotClear';
+import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN, WALK_EDGE } from './roadTypes';
 import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerIndustries, townCount, townSizes, WorldProfile, WorldSettings } from './settings';
 import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
-import { edgeOf, growTier, inDistrict, JOBS_PER_FLOOR, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, zoneTown } from './townForms';
+import { edgeOf, growTier, inDistrict, JOBS_PER_FLOOR, LANDMARK_YARD, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, yardOf, zoneTown } from './townForms';
 import { onPark, placeParks, type ParkSite } from './townParks';
 import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
@@ -859,15 +860,24 @@ export function streetFace(roads: LaneNet, fp: Footprint): 1 | -1 {
   return ly > 0 ? 1 : -1;
 }
 
-/** Ратуша или собор в центре города: повёрнута вдоль ближайшей улицы и не задевает дороги. */
+/**
+ * Участок ратуши или храма с мощёной площадью вокруг (yard, townForms.yardOf) — за тротуаром, как при переносе
+ * (Game.movePlan): не ближе WALK_EDGE к краю асфальта полотен и площадок перекрёстков со скруглёнными углами.
+ */
+export function landmarkClear(roads: LaneNet, b: Pick<TownBuilding, 'fp' | 'form' | 'kind' | 'floors'>, yard = yardOf(b)): boolean {
+  return lotClearOfRoads(roads, { ...b.fp, w: b.fp.w + yard * 2, h: b.fp.h + yard * 2 }, WALK_EDGE);
+}
+
+/** Ратуша или собор в центре города: повёрнута вдоль ближайшей улицы, с площадью вокруг — за тротуаром (landmarkClear). */
 function placeLandmark(ctx: WorldContext, town: Town): void {
+  const yard = LANDMARK_YARD[townTier(town) === 'village' ? 'temple' : 'hall'];
   for (const size of [44 * TOWN_SCALE, 34 * TOWN_SCALE]) {
     for (let r = 0; r < 240 * TOWN_SCALE; r += 12) {
       for (let k = 0; k < 16; k++) {
         const a = (k / 16) * Math.PI * 2;
         const center = add(town.center, { x: Math.cos(a) * r, y: Math.sin(a) * r });
         const fp: Footprint = { center, w: size, h: size, angle: streetAngle(ctx, center) };
-        if (placeable(ctx, fp, -1) && clearOfRoads(ctx, fp, 3)) {
+        if (placeable(ctx, fp, -1) && landmarkClear(ctx.roads, { fp, kind: 'landmark', floors: 4 }, yard)) {
           addLandmark(ctx, town, fp);
           return;
         }

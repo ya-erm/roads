@@ -32,7 +32,10 @@ describe('Стройка ж/д путей: «Со строительством»
     const { game, id, from, dir } = railProject();
     const end = add(from, scale(dir, 2400));
     const before = game.construction.projects.size;
-    expect(game.builder.build(track(game, end, add(end, { x: 300, y: 0 })))).not.toBeNull();
+    // Продолжение на 300 м — прямо или чуть вбок, куда путь ложится (дальше может быть город или лес).
+    const to = [0, 0.3, -0.3, 0.6, -0.6].map((a) => add(end, { x: 300 * Math.cos(a), y: 300 * Math.sin(a) })).find((p) => game.builder.plan(track(game, end, p)).ok);
+    expect(to).toBeDefined();
+    expect(game.builder.build(track(game, end, to!))).not.toBeNull();
     expect(game.construction.projects.size).toBe(before);
     expect(building(game).filter((s) => s.build!.project === id).length).toBeGreaterThan(0);
     const money = game.money;
