@@ -66,7 +66,7 @@ import { type Around, mergeSidewalks, type SidewalkCache, type SidewalkNet, side
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, contourLabel, fineContourStep, gradeRungs, heightLabel, ReliefRenderer, waterPath } from './relief';
-import { type Box, grow, GROUND, SceneDiff, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
+import { type Box, grow, GROUND, SceneDiff, STATIONS, type Tile, TILE_CANVAS, TILE_PAD, TILE_PX, tileBox, TileCache, tileRect, type TileSet, UNDER, unite } from './tileCache';
 import { drawTurnArrows } from './turnArrows';
 import { baseBox, baseSig, buildingCorridors, drawBases, drawClosures, drawOldRoad, drawMachines, drawParked, drawProjectShadows, drawProjects, drawnSpans, nodeReach, nodeStage, progressBoxes, projectBox, projectJoints, projectNodes, projectSig } from './constructionArt';
 import { projectBadges } from './projectBadges';
@@ -335,6 +335,10 @@ const STATION_BADGES_ZOOM = 0.3;
 const RECEIVER_ZOOM = 0.55;
 /** Линии от грузовой станции к получателям в её охвате — с этого приближения. */
 const STATION_LINKS_ZOOM = 0.35;
+/** Платформы вокзала — не дальше стольких метров от оси своего пути (островные и боковая, с краем). */
+const STATION_TRACK_PAD = 15;
+/** Тень здания автовокзала. */
+const BUS_HALL_SHADOW = 'rgba(30,40,25,0.22)';
 /**
  * Над станцией — столбик: внизу плашка ожидающих (её центр — на BADGE_RISE экранных пикселей выше здания),
  * над ней название (плашка 18 пикселей, название — 16,5, между ними зазор ≈ 3).
@@ -579,6 +583,8 @@ export class Renderer {
     /** Месторождения (режим «Строит игрок»): занятое не рисуется — его предприятие на месте. */
     deposits: new SceneDiff(),
     aprons: new SceneDiff(),
+    /** Неподвижное станций (слой STATIONS): здания, платформы, склады, выбранные — по stationSig. */
+    stations: new SceneDiff(),
     projects: new SceneDiff(),
     /** Будущие дороги проектов: полотна и узлы по отпечатку их геометрии (`c12`, `n7`). */
     projectItems: new SceneDiff<string>(),
@@ -665,6 +671,13 @@ export class Renderer {
       lots: -1,
       layout: -1,
       stations: -1,
+      /** Неподвижное станций: с какими правками станций, дорог и путей и с каким выбором сверено. */
+      stationsStill: -1,
+      stationRoads: -1,
+      stationRails: -1,
+      picked: null as number | null,
+      lineStopsSrc: null as readonly number[] | null,
+      lineStops: [] as number[],
     };
   }
   /**
@@ -716,6 +729,7 @@ export class Renderer {
       this.diffs.industries,
       this.diffs.deposits,
       this.diffs.aprons,
+      this.diffs.stations,
       this.diffs.projects,
       this.diffs.bases,
     ])
@@ -883,7 +897,12 @@ export class Renderer {
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
     this.drawLights(game, 0, o.phaseEdit);
     this.drawMotion(game, view);
-    this.drawStations(game, view, o);
+    // Станции со складами: здания и платформы — неподвижным слоем (плитки кэша), под ним — автобусы у остановок,
+    // поверх — посты цветом машин в них, ящики складов и автобусы на местах автовокзала.
+    this.drawStationsUnder(game, view, o);
+    if (plan) this.blitTiles(plan, STATIONS);
+    else this.drawStationsStill(game, view, o);
+    this.drawStationsOver(game, view);
     this.drawTrains(trains.filter((t) => t.layer === 0));
     for (const level of levels) {
       const roads = this.lanes.hasLayer(roadNet, level);
@@ -1104,6 +1123,7 @@ export class Renderer {
     ctx.setTransform(plan.k, 0, 0, plan.k, plan.tx, plan.ty);
     if (layer === UNDER) this.drawUnder(s, plan.liveView, plan.liveSegs);
     else if (layer === GROUND) this.drawGround(s, plan.liveView, plan.liveSegs);
+    else if (layer === STATIONS) this.drawStationsStill(s.game, plan.liveView, s.o);
     else this.drawBridges(s, plan.liveView, plan.liveSegs, layer - GROUND);
     ctx.restore();
   }
@@ -1176,6 +1196,9 @@ export class Renderer {
         this.drawGround(s, view, segs);
       });
       for (const level of [1, 2]) paint(GROUND + level, bridge(level) ? false : null, () => this.drawBridges(s, view, segs, level));
+      // Станции — своим слоем (над машинами на земле), только где они есть.
+      const stations = [...s.game.stations.values()].some((st) => (st.kind !== 'dock' && this.stationSeen(st, view)) || st.warehouses?.some((w) => seenAt(w.fp.center, view, 100)));
+      paint(STATIONS, stations ? false : null, () => this.drawStationsStill(s.game, view, s.o));
     } finally {
       this.ctx = screen;
       this.camera.zoom = zoom;
@@ -1458,6 +1481,28 @@ export class Renderer {
           for (const x of game.stations.values()) if (x.kind === 'road') put(x.id, `${fpSig(x.fp)}|${x.bays}|${x.nodeId}`, fpBox(x.fp));
         }),
       );
+    }
+    // Неподвижное станций (слой STATIONS) — после правки станций, дорог (узел выезда) или путей (платформы вокзала) и
+    // когда сменился выбор (выбранная станция, её пара, остановки выбранной линии — синей обводкой).
+    const sel = o.selection?.type === 'station' ? o.selection.id : null;
+    let picked = sel !== cur.picked;
+    if (o.lineStops !== cur.lineStopsSrc) {
+      cur.lineStopsSrc = o.lineStops;
+      if (o.lineStops.length !== cur.lineStops.length || o.lineStops.some((id, i) => id !== cur.lineStops[i])) {
+        cur.lineStops = [...o.lineStops];
+        picked = true;
+      }
+    }
+    if (picked || cur.stationsStill !== game.stationRev || cur.stationRoads !== game.roads.net.version || cur.stationRails !== game.net.version) {
+      cur.picked = sel;
+      cur.stationsStill = game.stationRev;
+      cur.stationRoads = game.roads.net.version;
+      cur.stationRails = game.net.version;
+      const isPicked = this.stationPicked(game, o);
+      for (const b of this.diffs.stations.update((put) => {
+        for (const x of game.stations.values()) if (x.kind !== 'dock' || x.warehouses?.length) put(x.id, this.stationSig(game, x, isPicked(x)), this.stationBox(x));
+      }))
+        boxes.push(grow(b, 10));
     }
     if (boxes.length) this.tiles.invalidate(boxes);
   }
@@ -2935,22 +2980,51 @@ export class Renderer {
     }
   }
 
-  /** Станции со складами: выбранная — синей обводкой, посты — цветом машин в них, у остановок — автобусы на посадке. */
-  private drawStations(game: Game, view: Box, o: ToolOverlay): void {
-    const ctx = this.ctx;
-    const inView = (fp: Footprint) =>
-      fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
+  /** Станция в рамке view: здание (центр — с запасом 100), у вокзала — и его платформы вдоль путей. */
+  private stationSeen(st: Station, view: Box): boolean {
+    const c = st.fp.center;
+    if (c.x > view.x0 - 100 && c.x < view.x1 + 100 && c.y > view.y0 - 100 && c.y < view.y1 + 100) return true;
+    if (st.kind !== 'rail') return false;
+    for (const id of st.platforms) {
+      const seg = this.cache.get(id);
+      if (seg && this.visible(grow(seg.bbox, STATION_TRACK_PAD), view)) return true;
+    }
+    return false;
+  }
+
+  /** Выбрана ли станция st: сама, вторая половина выбранной пары остановок или остановка выбранной линии. */
+  private stationPicked(game: Game, o: ToolOverlay): (st: Station) => boolean {
+    const sel = o.selection;
+    const mate = game.pairOf(sel?.type === 'station' ? game.stations.get(sel.id) : undefined);
+    return (st) => (sel?.type === 'station' && sel.id === st.id) || st === mate || o.lineStops.includes(st.id);
+  }
+
+  /**
+   * Станции — под их неподвижной частью (в кадре): пунктир через улицу у выбранной пары остановок и автобусы на посадке
+   * у остановок (навес — поверх них).
+   */
+  private drawStationsUnder(game: Game, view: Box, o: ToolOverlay): void {
     const sel = o.selection;
     // Выбрана половина пары остановок — выделена и вторая, между ними — пунктир через улицу.
     const picked = sel?.type === 'station' ? game.stations.get(sel.id) : undefined;
     const mate = game.pairOf(picked);
-    if (picked && mate && inView(picked.fp)) this.drawPairLink(picked.fp.center, mate.fp.center, 'rgba(47,128,237,0.9)');
+    if (picked && mate && this.stationSeen(picked, view)) this.drawPairLink(picked.fp.center, mate.fp.center, 'rgba(47,128,237,0.9)');
+    for (const st of game.stations.values()) if (st.kind === 'stop' && this.stationSeen(st, view)) this.drawStopBuses(game, st);
+  }
+
+  /**
+   * Станции со складами — неподвижное (в плитках кэша, слой STATIONS, — над машинами на земле): здания, площадки,
+   * платформы, склады; выбранная — синей обводкой. Что меняется само (посты цветом машин в них, ящики складов, автобусы)
+   * — drawStationsUnder и drawStationsOver.
+   */
+  private drawStationsStill(game: Game, view: Box, o: ToolOverlay): void {
+    const ctx = this.ctx;
+    const picked = this.stationPicked(game, o);
     for (const st of game.stations.values()) {
-      const selected = (sel?.type === 'station' && sel.id === st.id) || st === mate || o.lineStops.includes(st.id);
-      for (const w of st.warehouses ?? []) if (inView(w.fp)) this.drawWarehouse(w.fp, selected);
-      if (!inView(st.fp)) continue;
+      const selected = picked(st);
+      for (const w of st.warehouses ?? []) if (seenAt(w.fp.center, view, 100)) this.drawWarehouse(w.fp, selected);
       // Станция у получателя невидима: на карте сам магазин, в маршруте — его обводка (drawReceivers).
-      if (st.kind === 'dock') continue;
+      if (st.kind === 'dock' || !this.stationSeen(st, view)) continue;
       if (st.kind === 'rail') this.drawRailStation(game, st, selected);
       else if (st.kind === 'stop') this.drawStop(game, st, selected);
       else if (st.curb) this.drawCurbTerminal(game, st, selected);
@@ -2958,6 +3032,50 @@ export class Renderer {
       else this.drawStation(game, st, selected);
     }
     ctx.globalAlpha = 1;
+  }
+
+  /** Станции — поверх неподвижного (в кадре): посты автостанций цветом машин в них, ящики складов, автобусы на местах. */
+  private drawStationsOver(game: Game, view: Box): void {
+    for (const st of game.stations.values()) {
+      if (st.kind !== 'road' || st.curb || !this.stationSeen(st, view)) continue;
+      if (isBusTerminal(st)) this.drawBusTerminalLive(game, st);
+      else this.drawStationBays(game, st);
+    }
+    this.ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Подпись неподвижной части станции для кэша плиток (drawStationsStill): место и размер, посты и склады, узел выезда
+   * и где он, пара остановок, пути вокзала (и их тупики), выбрана ли.
+   */
+  private stationSig(game: Game, st: Station, selected: boolean): string {
+    const node = game.roads.net.nodes.get(st.nodeId);
+    const at = node ? `${node.pos.x},${node.pos.y}` : '';
+    const rails =
+      st.kind === 'rail'
+        ? st.platforms
+            .map((id) => {
+              const s = game.net.segments.get(id);
+              return s ? `${s.rev}:${game.net.nodes.get(s.a)?.segments.length}:${game.net.nodes.get(s.b)?.segments.length}` : '-';
+            })
+            .join(',')
+        : '';
+    const sheds = (st.warehouses ?? []).map((w) => fpSig(w.fp)).join(';');
+    const look = `${st.curb ? 'c' : ''}${st.terminal ? 't' : ''}${isBusTerminal(st) ? 'b' : ''}`;
+    return `${fpSig(st.fp)}|${st.kind}|${st.bays}|${st.depots ?? 0}|${at}|${look}|${game.pairOf(st)?.id ?? ''}|${rails}|${sheds}|${selected ? 1 : 0}`;
+  }
+
+  /** Рамка неподвижной части станции: здание с тенью и знаками, склады, платформы вокзала вдоль путей. */
+  private stationBox(st: Station): Box {
+    let box = grow(fpBox(st.fp), 10);
+    for (const w of st.warehouses ?? []) box = unite(box, grow(fpBox(w.fp), 6));
+    if (st.kind === 'rail') {
+      for (const id of st.platforms) {
+        const seg = this.cache.get(id);
+        if (seg) box = unite(box, grow(seg.bbox, STATION_TRACK_PAD));
+      }
+    }
+    return box;
   }
 
   /** Склад станции: ангар с двускатной крышей (конёк вдоль), тенью и воротами с торца; у выбранной станции — синей обводкой. */
@@ -3253,7 +3371,20 @@ export class Renderer {
     this.ctx.drawImage(iconRaster(img, size * Math.hypot(m.a, m.b)), p.x - size / 2, p.y - size / 2, size, size);
   }
 
-  /** Остановка: навес у края улицы, знак «А», у бордюра — автобусы на посадке. */
+  /** Автобусы на посадке у остановки — сами автобусы вдоль бордюра, в крайней полосе, носом по ходу (остановка справа). */
+  private drawStopBuses(game: Game, st: Station): void {
+    if (!st.occupied.length) return;
+    const buses: VehicleLook[] = [];
+    for (let i = 0; i < st.occupied.length; i++) {
+      const berth = game.stopBerthAt(st, i);
+      const look = game.fleetLookAt(st.occupied[i], berth.pos, berth.dir);
+      if (look) buses.push(look);
+      else this.drawFootprint({ center: berth.pos, w: 12, h: 4.6, angle: st.fp.angle }, '#e07b39', '#8a4a22', 0.8);
+    }
+    this.drawVehicles(buses);
+  }
+
+  /** Остановка: навес у края улицы, знак «А» (автобусы на посадке у бордюра — drawStopBuses, под навесом). */
   private drawStop(game: Game, st: Station, selected: boolean): void {
     const ctx = this.ctx;
     const fp = st.fp;
@@ -3263,15 +3394,6 @@ export class Renderer {
     const toRoad = node ? sub(node.pos, fp.center) : { x: -u.y, y: u.x };
     const l = Math.hypot(toRoad.x, toRoad.y) || 1;
     const n = { x: toRoad.x / l, y: toRoad.y / l };
-    // Автобусы на посадке — сами автобусы вдоль бордюра, в крайней полосе, носом по ходу (остановка справа).
-    const buses: VehicleLook[] = [];
-    for (let i = 0; i < st.occupied.length; i++) {
-      const berth = game.stopBerthAt(st, i);
-      const look = game.fleetLookAt(st.occupied[i], berth.pos, berth.dir);
-      if (look) buses.push(look);
-      else this.drawFootprint({ center: berth.pos, w: 12, h: 4.6, angle: fp.angle }, '#e07b39', '#8a4a22', 0.8);
-    }
-    if (buses.length) this.drawVehicles(buses);
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 1.5, y: fp.center.y + 2 } }, 'rgba(30,40,25,0.2)');
     this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 2.4 : 1.2);
     // Крыша навеса — тёмная полоса со стороны тротуара.
@@ -3335,26 +3457,44 @@ export class Renderer {
     ctx.restore();
   }
 
-  /**
-   * Автостанция — боксы-посты под одной крышей: задняя стена, у каждого бокса открытые ворота к выезду
-   * (площадку перед ними рисует drawStationAprons). Занятый бокс — цвета линии машины, что в нём стоит.
-   */
-  private drawStation(game: Game, st: Station, selected: boolean): void {
+  /** Холст — в координаты площадки станции: начало в центре, x вдоль постов, +y — к воротам (bayFront). */
+  private intoStation(game: Game, st: Station): void {
     const ctx = this.ctx;
     const fp = st.fp;
     const gate = game.roads.net.nodes.get(st.nodeId);
-    this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.22)');
-    this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 3 : 1.4);
-    ctx.save();
     ctx.translate(fp.center.x, fp.center.y);
     ctx.rotate(fp.angle);
     // Локальная +y — к воротам (у грузового двора предприятия площадка повёрнута наоборот).
     ctx.scale(1, gate ? bayFront(fp, gate.pos) : 1);
+  }
+
+  /**
+   * Автостанция — боксы-посты под одной крышей: задняя стена, у каждого бокса открытые ворота к выезду
+   * (площадку перед ними рисует drawStationAprons). Неподвижное (в плитках); посты цветом машин — drawStationBays.
+   */
+  private drawStation(game: Game, st: Station, selected: boolean): void {
+    const ctx = this.ctx;
+    const fp = st.fp;
+    this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.22)');
+    this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 3 : 1.4);
+    ctx.save();
+    this.intoStation(game, st);
     const hh = fp.h / 2;
     ctx.fillStyle = '#5c6470';
     ctx.fillRect(-fp.w / 2 + 3, -hh + 3, fp.w - 6, 4);
+    this.drawDepotSides(st, game.bayArea(st));
+    ctx.restore();
+  }
+
+  /** Посты автостанции (в кадре, поверх здания): занятый бокс — цвета линии машины, что в нём стоит; ящики складов. */
+  private drawStationBays(game: Game, st: Station): void {
+    const ctx = this.ctx;
+    const fp = st.fp;
+    ctx.save();
+    this.intoStation(game, st);
+    const hh = fp.h / 2;
     const area = game.bayArea(st);
-    this.drawDepotSides(game, st, area);
+    this.drawDepotBoxes(game, st, area);
     const bw = (area.w - 10) / st.bays;
     const doors = this.camera.zoom > 0.35;
     game.stationBays(st).forEach((color, i) => {
@@ -3370,17 +3510,13 @@ export class Renderer {
     ctx.restore();
   }
 
-  /**
-   * Пристройки-склады — по концам площадки (рисуется в её координатах, +y — к воротам): ангары с двускатной крышей,
-   * заполнение склада — ящиками.
-   */
-  private drawDepotSides(game: Game, st: Station, area: Footprint): void {
+  /** Пристройки-склады — по концам площадки (рисуется в её координатах, +y — к воротам): ангары с двускатной крышей. */
+  private drawDepotSides(st: Station, area: Footprint): void {
     const ctx = this.ctx;
     const fp = st.fp;
     const hh = fp.h / 2;
     const side = (fp.w - area.w) / 2;
     if (side <= 0) return;
-    const fill = Math.min(1, game.stationStored(st) / game.stationStorage(st));
     for (const k of [-1, 1]) {
       const x0 = k < 0 ? -fp.w / 2 + 1.5 : area.w / 2 + 0.5;
       const w = side - 2;
@@ -3398,12 +3534,29 @@ export class Renderer {
         ctx.lineTo(x0 + w - 1, y);
       }
       ctx.stroke();
-      // Сколько занято: ящики у ворот растут вместе с заполнением.
-      if (fill > 0.02) {
-        ctx.fillStyle = '#e2b866';
-        ctx.fillRect(x0 + 1.5, hh - 1.5 - (fp.h - 4) * fill, Math.min(4, w / 3), (fp.h - 4) * fill);
-      }
     }
+  }
+
+  /**
+   * Заполнение складов-пристроек (в кадре, поверх ангаров drawDepotSides): ящики у ворот растут вместе с ним. Ответ —
+   * где ящики (x, y, w, h в координатах площадки).
+   */
+  private drawDepotBoxes(game: Game, st: Station, area: Footprint): [number, number, number, number][] {
+    const fp = st.fp;
+    const side = (fp.w - area.w) / 2;
+    if (side <= 0) return [];
+    const fill = Math.min(1, game.stationStored(st) / game.stationStorage(st));
+    if (fill <= 0.02) return [];
+    const hh = fp.h / 2;
+    const out: [number, number, number, number][] = [];
+    this.ctx.fillStyle = '#e2b866';
+    for (const k of [-1, 1]) {
+      const x0 = k < 0 ? -fp.w / 2 + 1.5 : area.w / 2 + 0.5;
+      const box: [number, number, number, number] = [x0 + 1.5, hh - 1.5 - (fp.h - 4) * fill, Math.min(4, (side - 2) / 3), (fp.h - 4) * fill];
+      this.ctx.fillRect(...box);
+      out.push(box);
+    }
+    return out;
   }
 
   /**
@@ -3415,29 +3568,11 @@ export class Renderer {
   private drawBusTerminal(game: Game, st: Station, selected: boolean): void {
     const ctx = this.ctx;
     const fp = st.fp;
-    const gate = game.roads.net.nodes.get(st.nodeId);
-    const front = gate ? bayFront(fp, gate.pos) : 1;
-    const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
-    // Локальная +y в мире — к воротам (у грузового двора предприятия площадка повёрнута наоборот).
-    const n = { x: -u.y * front, y: u.x * front };
     const hw = fp.w / 2;
     const hh = fp.h / 2;
-    const area = game.bayArea(st);
-    const bw = (area.w - 10) / st.bays;
-    // Здание — у задней стены (сочленённый автобус встаёт носом к самому фасаду), галерея — вдоль фасада,
-    // перроны — от неё почти до края площадки. Здание — 6,5 м, а у старой станции (26 м вглубь, под автобус 18 м) —
-    // сколько остаётся за самым длинным автобусом на посту (bayPose: полметра до края площадки), не меньше 2,5.
-    const B = clamp(fp.h - 1.5 - LONGEST_BUS, 2.5, 6.5);
-    const yHall = -hh + 1;
-    const yGallery = yHall + B;
-    const yEnd = hh - 2.5;
-    // Перрон — сколько остаётся между автобусами (они шириной ~5), но не уже 1.4 и не шире 3.
-    const pw = Math.min(3, Math.max(1.4, bw - 7.4));
-    const x0 = -area.w / 2 + 1;
+    const { area, bw, B, yHall, yGallery, yEnd, pw, x0, shade } = this.busTerminalLayout(game, st);
     ctx.save();
-    ctx.translate(fp.center.x, fp.center.y);
-    ctx.rotate(fp.angle);
-    ctx.scale(1, front);
+    this.intoStation(game, st);
     // Асфальт мест — заодно с площадкой перед ними; бордюр — по бокам и сзади, к выезду открыто.
     ctx.fillStyle = C.road;
     ctx.fillRect(-hw, -hh, fp.w, fp.h);
@@ -3451,11 +3586,10 @@ export class Renderer {
     ctx.lineTo(hw, -hh);
     ctx.lineTo(hw, hh);
     ctx.stroke();
-    this.drawDepotSides(game, st, area);
+    this.drawDepotSides(st, area);
     // Тень здания — туда же, куда у остальных зданий (в мире: вправо-вниз).
-    const shadow = { x: 2.5, y: 3 };
-    ctx.fillStyle = 'rgba(30,40,25,0.22)';
-    ctx.fillRect(x0 + dot(shadow, u), yHall + dot(shadow, n), area.w - 2, B);
+    ctx.fillStyle = BUS_HALL_SHADOW;
+    ctx.fillRect(...shade);
     // Здание вокзала: светлая крыша со световым фонарём, по фасаду — синяя кромка навеса.
     ctx.fillStyle = '#f2efe8';
     ctx.fillRect(x0, yHall, area.w - 2, B);
@@ -3486,9 +3620,55 @@ export class Renderer {
       ctx.fillRect(cx - pw * 0.22, yGallery - 0.2, pw * 0.44, yEnd - yGallery - pw * 0.9);
     }
     ctx.restore();
-    // Автобусы на местах и на заезде — поверх асфальта (под площадкой их не прячем, как грузовики в боксах).
-    const buses = game.bayLooks(st);
-    if (buses.length) this.drawVehicles(buses);
+  }
+
+  /**
+   * Автовокзал — в кадре, поверх неподвижного (drawBusTerminal): ящики складов-пристроек (тень здания, что ложится на
+   * них, — снова поверх, как была) и автобусы на местах и на заезде — поверх асфальта (под площадкой их не прячем, как
+   * грузовики в боксах).
+   */
+  private drawBusTerminalLive(game: Game, st: Station): void {
+    const ctx = this.ctx;
+    const { area, shade } = this.busTerminalLayout(game, st);
+    ctx.save();
+    this.intoStation(game, st);
+    const boxes = this.drawDepotBoxes(game, st, area);
+    if (boxes.length) {
+      ctx.beginPath();
+      for (const b of boxes) ctx.rect(...b);
+      ctx.clip();
+      ctx.fillStyle = BUS_HALL_SHADOW;
+      ctx.fillRect(...shade);
+    }
+    ctx.restore();
+    this.drawVehicles(game.bayLooks(st));
+  }
+
+  /** Раскладка автовокзала в координатах площадки (intoStation): места, здание, галерея, перроны, тень здания. */
+  private busTerminalLayout(game: Game, st: Station) {
+    const fp = st.fp;
+    const gate = game.roads.net.nodes.get(st.nodeId);
+    const front = gate ? bayFront(fp, gate.pos) : 1;
+    const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+    // Локальная +y в мире — к воротам (у грузового двора предприятия площадка повёрнута наоборот).
+    const n = { x: -u.y * front, y: u.x * front };
+    const hh = fp.h / 2;
+    const area = game.bayArea(st);
+    const bw = (area.w - 10) / st.bays;
+    // Здание — у задней стены (сочленённый автобус встаёт носом к самому фасаду), галерея — вдоль фасада,
+    // перроны — от неё почти до края площадки. Здание — 6,5 м, а у старой станции (26 м вглубь, под автобус 18 м) —
+    // сколько остаётся за самым длинным автобусом на посту (bayPose: полметра до края площадки), не меньше 2,5.
+    const B = clamp(fp.h - 1.5 - LONGEST_BUS, 2.5, 6.5);
+    const yHall = -hh + 1;
+    const yGallery = yHall + B;
+    const yEnd = hh - 2.5;
+    // Перрон — сколько остаётся между автобусами (они шириной ~5), но не уже 1.4 и не шире 3.
+    const pw = Math.min(3, Math.max(1.4, bw - 7.4));
+    const x0 = -area.w / 2 + 1;
+    // Тень здания — туда же, куда у остальных зданий (в мире: вправо-вниз).
+    const shadow = { x: 2.5, y: 3 };
+    const shade: [number, number, number, number] = [x0 + dot(shadow, u), yHall + dot(shadow, n), area.w - 2, B];
+    return { area, bw, B, yHall, yGallery, yEnd, pw, x0, shade };
   }
 
   /** Края улицы у автовокзала у края улицы: в каждой точке вдоль площадки — где бордюр (по полотнам у его узла и соседним). */

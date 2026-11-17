@@ -11777,6 +11777,8 @@ export class Game implements BuildContext {
     const st = this.stations.get(id);
     if (!st || (!serves.pax && !serves.cargo)) return;
     st.serves = { ...serves };
+    // Только пассажиры — автовокзал, а не грузовая станция: на карте — другое здание.
+    this.stationRev++;
     if (!serves.pax) st.passengers.clear();
     if (!serves.cargo) st.cargo = {};
     this.computeCatchment(st);
