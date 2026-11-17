@@ -30,7 +30,7 @@ import { isBusTerminal, type Station, StationServes, stationTitle, TOWN_HISTORY,
 import { lastTownNeed, townNeed } from '../world/townSupply';
 import { STREET_BAN_MARK, STREET_BAN_TIP } from '../world/streetBans';
 import { flatsOf, FORM_NAMES, formOf, JOBS_PER_FLOOR, residentsOf, storeysOf } from '../world/townForms';
-import { maxTruck, receiverOf, stockAt, stockCap, stockFill } from '../world/retail';
+import { maxTruck, receiverOf, RETAIL, stockAt, stockCap, stockFill } from '../world/retail';
 import { footprintRadius } from '../world/spatial';
 import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
 import { durationText } from '../core/timeText';
@@ -1541,7 +1541,12 @@ export class Hud {
       }
       case 'focus': {
         const id = Number(d.id);
-        if (d.type === 'town') {
+        const shop = d.b !== undefined ? g.towns.find((x) => x.id === id)?.buildings.find((x) => x.id === Number(d.b)) : undefined;
+        if (shop) {
+          // Магазин города («Куда везти» с получателями): к нему вблизи — видно двор и склад.
+          c.focus(shop.fp.center, 1.2);
+          c.select({ type: 'building', id: shop.id });
+        } else if (d.type === 'town') {
           const t = g.towns.find((x) => x.id === id);
           if (t) c.focus(t.center, 0.35);
           c.select({ type: 'town', id });
@@ -2016,6 +2021,18 @@ export class Hud {
       case 'stop-add':
         c.startAddStop(Number(d.line));
         break;
+      case 'stop-add-shops': {
+        // «🛒 все магазины с этим грузом»: станции у магазинов — в конец маршрута.
+        const line = g.lines.get(Number(d.line));
+        if (line && !g.addShopStops(line.stops, line).length) c.showError('Магазины не добавились');
+        break;
+      }
+      case 'draft-add-shops': {
+        // То же для прокладываемого маршрута: станции у магазинов — в черновик.
+        for (const id of g.addShopStops(c.lineDraft)) if (!g.lineProblem([...c.lineDraft, id]) && c.lineDraft[c.lineDraft.length - 1] !== id) c.lineDraft.push(id);
+        c.onChange();
+        break;
+      }
       case 'stop-add-done':
         c.stopAddStop();
         break;
@@ -2782,7 +2799,7 @@ export class Hud {
       parts.push(`<section><h3>Новый маршрут</h3>
         <p class="muted">${names.length ? names.join(' → ') : 'Кликните по станциям в порядке следования.'}</p>
         <div class="actions"><button class="primary small" data-action="finish-line" ${names.length < 2 ? 'disabled' : ''}>Готово</button>
-        <button class="small" data-action="cancel-line">Отмена</button></div></section>`);
+        ${this.shopsButtonHtml(c.lineDraft)}<button class="small" data-action="cancel-line">Отмена</button></div></section>`);
       return parts.join('');
     }
     const line = c.selectedLine !== null ? g.lines.get(c.selectedLine) : undefined;
@@ -3025,9 +3042,27 @@ export class Hud {
       })
       .join('');
     return `<div class="route"><div class="route-head"><span class="lbl2">Остановки</span>
-      <button class="small ${adding ? 'primary' : ''}" data-action="${adding ? 'stop-add-done' : 'stop-add'}" data-line="${line.id}">${adding ? 'Готово' : '+ Станция'}</button></div>
+      ${this.shopsButtonHtml(line.stops, line)}<button class="small ${adding ? 'primary' : ''}" data-action="${adding ? 'stop-add-done' : 'stop-add'}" data-line="${line.id}">${adding ? 'Готово' : '+ Станция'}</button></div>
       ${adding ? '<p class="tip">Кликайте по станциям на карте — они добавятся в конец маршрута.</p>' : ''}
       ${rows}</div>`;
+  }
+
+  /**
+   * «🛒 все магазины с этим грузом» (партии с получателями): значок груза маршрута и сколько магазинов добавится —
+   * по порядку ближайшего соседа от последней остановки (Game.shopTargets). Добавлять нечего — без кнопки.
+   */
+  private shopsButtonHtml(stops: readonly number[], line?: Line): string {
+    const g = this.game();
+    if (!g.retail || !stops.length) return '';
+    const cargo = g.shopCargo(stops);
+    if (!cargo) return '';
+    const n = g.shopTargets(stops, cargo, line ? g.lineTruckLength(line) : undefined).length;
+    if (!n) return '';
+    const action = line ? `data-action="stop-add-shops" data-line="${line.id}"` : 'data-action="draft-add-shops"';
+    return `<button class="small shops-add" ${action} data-tip-end data-tip="Все магазины с этим грузом: ${n} — в конец маршрута, от последней остановки к ближайшему">🛒${cargoIcon(
+      cargo,
+      14,
+    )}+${n}</button>`;
   }
 
   /** Настройка остановки: отправление, погрузка, выгрузка — кнопками и значками грузов. */
@@ -3644,7 +3679,17 @@ export class Hud {
       // Получатель грузов (world/retail.ts): что принимает и насколько полон склад — значками; не подъехать — ⛔.
       const rcv = town && receiverOf(town, b.id);
       const reach = rcv ? g.docks.reachable(b, maxTruck(b)) : false;
-      const stock = rcv
+      const truckTip = `<span data-tip="${esc(reach ? `🚚 ≤ ${maxTruck(b)} м` : '⛔ 🚚')}">${reach ? `🚚≤${maxTruck(b)}` : '⛔🚚'}</span>`;
+      // Оптовая база: склад-пересадка — сколько лежит на её складе, по грузам и всего.
+      const depot = rcv?.depot ? g.depotStock(b.id) : null;
+      const stock = depot
+        ? `<div class="icon-row store-row"><span class="lbl2" data-tip="${esc(
+            `⇄ Склад-пересадка: фура сдаёт сюда всё, что просит город, развозка забирает к магазинам; платят, когда груз довезут до магазина · 📦 ${Math.floor(depot.stored)} / ${RETAIL.depotStock}`,
+          )}">⇄ <span class="stock-bar"><i style="width:${Math.round(depot.fill * 100)}%;background:#3f74b5"></i></span></span>${rcv!.cargo
+            .filter((c) => (depot.cargo[c] ?? 0) >= 1)
+            .map((c) => `<span class="lbl2" data-tip="${esc(`${CARGO[c].name}: 📦 ${Math.floor(depot.cargo[c] ?? 0)}`)}">${cargoIcon(c, 18, false)}${Math.floor(depot.cargo[c] ?? 0)}</span>`)
+            .join('')}${truckTip}</div>`
+        : rcv
         ? `<div class="icon-row store-row">${rcv.cargo
             .map((c) => {
               const fill = stockFill(town!, rcv, c, g.time);
@@ -3652,7 +3697,7 @@ export class Hud {
               const cap = stockCap(town!, rcv, c);
               return `<span class="lbl2" data-tip="${esc(`${CARGO[c].name}: 📦 ${n} / ${cap}`)}">${cargoIcon(c, 18, false)} <span class="stock-bar"><i style="width:${Math.round(fill * 100)}%;background:${fill >= 0.5 ? '#2e9d57' : fill >= 0.2 ? '#e0a800' : '#d64545'}"></i></span></span>`;
             })
-            .join('')}<span data-tip="${esc(reach ? `🚚 ≤ ${maxTruck(b)} м` : '⛔ 🚚')}">${reach ? `🚚≤${maxTruck(b)}` : '⛔🚚'}</span></div>`
+            .join('')}${truckTip}</div>`
         : '';
       return `<section class="detail">${head(kind, `${storeysOf(b)} эт. · ${people}`)}
         ${town ? `<button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>` : ''}
@@ -4196,8 +4241,9 @@ export class Hud {
    * у свёрнутого — число партнёров и значки их грузов.
    */
   private partnersHtml(list: Partner[]): string {
-    const row = (p: Partner) => `<button class="partner" data-action="focus" data-type="${p.ref.type}" data-id="${p.ref.id}">
-        ${cargoTip(p.cargo, 18)}${p.ref.type === 'town' ? townIcon(18) : ''}<span>${esc(p.name)}</span><small>${(p.distance * 0.0006).toFixed(1)} км</small></button>`;
+    // Магазин города (получатель груза) — значком 🛒 вместо значка города.
+    const row = (p: Partner) => `<button class="partner" data-action="focus" data-type="${p.ref.type}" data-id="${p.ref.id}"${p.b !== undefined ? ` data-b="${p.b}"` : ''}>
+        ${cargoTip(p.cargo, 18)}${p.b !== undefined ? '<span class="shop-ic">🛒</span>' : p.ref.type === 'town' ? townIcon(18) : ''}<span>${esc(p.name)}</span><small>${(p.distance * 0.0006).toFixed(1)} км</small></button>`;
     const block = (dir: 'out' | 'in', title: string) => {
       const items = list.filter((p) => p.direction === dir);
       if (!items.length) return '';

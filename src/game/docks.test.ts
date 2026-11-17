@@ -3,7 +3,7 @@ import { ECONOMY } from '../config';
 import { add, dist, dot, scale } from '../core/vec';
 import { CARGO } from '../world/cargo';
 import type { Station, Town, TownBuilding } from '../world/entities';
-import { pickReceivers, receiverOf, RETAIL, stockAt, stockCap } from '../world/retail';
+import { legacyCargo, pickReceivers, receiverOf, RETAIL, stockAt, stockCap } from '../world/retail';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { Game, type SaveData } from './game';
 import { freshGame, runSeconds } from './testkit';
@@ -26,7 +26,8 @@ const inner = (g: Game) => g as unknown as Inner;
 function twoFood(game: Game): { town: Town; a: TownBuilding; b: TownBuilding } {
   for (const town of game.towns) {
     const list = (town.receivers ?? [])
-      .filter((r) => r.cargo.includes('food'))
+      // Оптовая база — не магазин (склад-пересадка).
+      .filter((r) => r.cargo.includes('food') && !r.depot)
       .map((r) => town.buildings.find((x) => x.id === r.b)!)
       .filter((b) => game.docks.reachable(b));
     if (list.length >= 2) return { town, a: list[0], b: list[1] };
@@ -141,7 +142,8 @@ describe('Получатели грузов в партии', { timeout: 240_000
     expect(dot(joinDir!, geo.d.dir)).toBeLessThan(-0.6);
     expect(v.stop).toBe(0);
     const sim = game.fleetSim(v)!;
-    expect(sim.lane).toBe(geo.out!.lane.id);
+    // Граф движения мог смениться (город вырос в конце месяца) — полоса выезда по нынешнему графу.
+    expect(sim.lane).toBe(game.docks.geoOf(b, TRUCK.length, TRUCK.width)!.out!.lane.id);
     expect(game.docks.count).toBe(0);
   });
 
@@ -222,7 +224,7 @@ describe('Получатели грузов в партии', { timeout: 240_000
     far.forEach((r, i) => expect(stockAt(town, r, 'food', game.time)).toBeCloseTo(farStock[i]));
   });
 
-  it('станция завода в городе без получателей рядом городской груз не принимает (кроме топлива — до АЗС)', () => {
+  it('станция завода в городе без получателей рядом городской груз не принимает (кроме потребностей без получателей)', () => {
     const game = freshGame(RETAIL_WORLD);
     const town = game.towns.find((t) => t.demands.includes('fuel') && t.receivers?.length)!;
     const edge = town.buildings.filter((b) => b.kind === 'res').sort((p, q) => dist(q.fp.center, town.center) - dist(p.fp.center, town.center))[0];
@@ -250,8 +252,10 @@ describe('Получатели грузов в партии', { timeout: 240_000
     game.computeCatchment(st);
     expect(st.townIds).toContain(town.id);
     const rec = new Set(game.stationReceivers(st).flatMap((x) => x.r.cargo));
+    // Потребность без получателей (топливо в городе без АЗС) — по-старому: принимает любая станция.
+    const legacy = legacyCargo(town);
     for (const c of town.demands) {
-      if (c === 'fuel') expect(st.accepts.has(c)).toBe(true);
+      if (legacy.includes(c)) expect(st.accepts.has(c)).toBe(true);
       else expect(st.accepts.has(c)).toBe(rec.has(c));
     }
   });
@@ -264,8 +268,10 @@ describe('Получатели грузов в партии', { timeout: 240_000
     v.stop = 1;
     v.state = 'loading';
     expect(game.docks.stand(v.id, b, TRUCK.length, TRUCK.width)).toBe(true);
-    expect(game.docks.rampBusy(b.id, w.id)).toBe(true);
-    expect(game.docks.rampBusy(b.id, v.id)).toBe(false);
+    // У рынка рамп две: вторую занимает ещё один грузовик (id вне парка — только место у рампы).
+    if (game.docks.rampCount(b, TRUCK.length, TRUCK.width) > 1) expect(game.docks.stand(-77, b, TRUCK.length, TRUCK.width)).toBe(true);
+    expect(game.docks.rampBusy(b, w.id)).toBe(true);
+    if (game.docks.rampCount(b, TRUCK.length, TRUCK.width) === 1) expect(game.docks.rampBusy(b, v.id)).toBe(false);
     w.stop = 0;
     w.state = 'departing';
     expect(inner(game).nextStop(w, line)).toBeNull();

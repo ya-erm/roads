@@ -158,6 +158,8 @@ export interface WorldContext {
   rail?: Network;
   /** Выезды автостанций: они шоссе, но город застраивается у них, как у улиц, — не магистраль. */
   driveways?: ReadonlySet<number>;
+  /** Здесь дома при росте не прибавляются (у магазина, пустого два месяца: world/retail.ts, game.retailGrowth). */
+  blocked?: (p: Vec) => boolean;
 }
 
 /** Полуширина асфальта полотна в точке s (по большей стороне). */
@@ -949,7 +951,7 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
       const center = add(p, scale(normal, hw + 5 + depth / 2));
       const fp: Footprint = { center, w: width, h: depth, angle: Math.atan2(t.y, t.x) };
       // Парки и скверы (townParks.ts) рост обходит: дом на них не встаёт; к домам соседнего города — тоже.
-      if (!placeable(ctx, fp, seg.id) || onPark(town, fp) || foreignNear(ctx, town, fp)) continue;
+      if (!placeable(ctx, fp, seg.id) || onPark(town, fp) || foreignNear(ctx, town, fp) || ctx.blocked?.(fp.center)) continue;
       const kind: 'res' | 'com' = closeness > 0.6 && rng.chance(0.6) ? 'com' : rng.chance(0.1) ? 'com' : 'res';
       const [color, roof] = rng.pick(kind === 'com' ? COM_COLORS : big ? BLOCK_COLORS : RES_COLORS);
       const floors = kind === 'com' ? rng.int(2, 6) : big ? rng.int(3, 6) : rng.int(1, 3);
@@ -978,7 +980,7 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
           h: d2,
           angle: fp.angle,
         };
-        if (placeable(ctx, rear, seg.id) && !onPark(town, rear) && !foreignNear(ctx, town, rear)) {
+        if (placeable(ctx, rear, seg.id) && !onPark(town, rear) && !foreignNear(ctx, town, rear) && !ctx.blocked?.(rear.center)) {
           const [rc, rr] = rng.pick(RES_COLORS);
           const back: TownBuilding = { ...b, id: ctx.nextId(), fp: rear, kind: 'res', floors: rng.int(1, 3), color: rc, roof: rr, rear: true };
           ctx.index.add(back);

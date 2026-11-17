@@ -2,16 +2,27 @@
  * Откуда предприятию сейчас везут сырьё и куда увозят продукцию — по маршрутам, а не по расстоянию (как
  * Game.partners): маршрут, который может возить груз, проходит через грузовую станцию предприятия и через грузовую
  * станцию поставщика (предприятие, что делает это сырьё) или получателя (предприятие, которому нужна продукция, или
- * город, которому она нужна). Только расчёт — для карточки предприятия (ui/industryCard.ts).
+ * город, которому она нужна). С получателями грузов (world/retail.ts) город — это его магазины на маршруте: станция у
+ * магазина или магазины в охвате станции (FlowWorld.shops). Только расчёт — для карточки предприятия
+ * (ui/industryCard.ts).
  */
 import type { CargoType } from '../world/cargo';
 import type { Industry, Station, Town } from '../world/entities';
 import type { Line } from './transport';
 
-/** Партнёр по маршруту: предприятие или город. */
+/** Партнёр по маршруту: предприятие, город или магазин города (b — его дом). */
 export interface FlowLink {
   ref: { type: 'industry' | 'town'; id: number };
   name: string;
+  b?: number;
+}
+
+/** Магазин (получатель груза), которому сдаёт станция: город, дом, название, что принимает. */
+export interface FlowShop {
+  town: number;
+  b: number;
+  name: string;
+  cargo: readonly CargoType[];
 }
 
 export interface IndustryFlow {
@@ -30,6 +41,8 @@ export interface FlowWorld {
   towns: readonly Town[];
   /** Маршрут может возить груз (Game.lineTakes(line, 'freight')). */
   freight: (line: Line) => boolean;
+  /** Магазины, которым сдаёт станция (Game.stationReceivers); нет — города целиком (старая модель). */
+  shops?: (st: Station) => FlowShop[];
 }
 
 /** Станция работает с грузом предприятия id: его грузовой двор или предприятие в её охвате. */
@@ -56,10 +69,15 @@ export function industryFlow(ind: Industry, w: FlowWorld): IndustryFlow {
   const inputs = ind.info.accepts.map((cargo) => ({ cargo, from: live.filter((i) => i.info.produces === cargo).map(link) }));
   const product = ind.info.produces;
   const townIds = new Set(stations.flatMap((st) => st.townIds));
+  // Магазины на маршруте, что примут продукцию; у города, где их нет (потребность без получателей), — город целиком.
+  const shops = new Map<number, FlowShop>();
+  if (w.shops) for (const st of stations) for (const s of w.shops(st)) if (s.cargo.includes(product)) shops.set(s.b, s);
+  const shopTowns = new Set([...shops.values()].map((s) => s.town));
   const to = [
     ...live.filter((i) => i.info.accepts.includes(product)).map(link),
+    ...[...shops.values()].sort((a, b) => a.b - b.b).map((s): FlowLink => ({ ref: { type: 'town', id: s.town }, name: s.name, b: s.b })),
     ...w.towns
-      .filter((t) => townIds.has(t.id) && t.demands.includes(product))
+      .filter((t) => townIds.has(t.id) && t.demands.includes(product) && !shopTowns.has(t.id))
       .map((t): FlowLink => ({ ref: { type: 'town', id: t.id }, name: t.name })),
   ];
   return { routed, inputs, output: { cargo: product, to } };

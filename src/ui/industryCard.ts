@@ -26,7 +26,12 @@ export function recipeBoxHtml(info: Pick<IndustryType, 'accepts' | 'produces'>):
 
 /** Партнёры ссылками (клик — к нему на карте): первые три, остальные — «+N». */
 function linksHtml(list: FlowLink[]): string {
-  const shown = list.slice(0, 3).map((l) => `<button class="flow-link" data-action="focus" data-type="${l.ref.type}" data-id="${l.ref.id}">${esc(l.name)}</button>`);
+  const shown = list
+    .slice(0, 3)
+    .map(
+      (l) =>
+        `<button class="flow-link" data-action="focus" data-type="${l.ref.type}" data-id="${l.ref.id}"${l.b !== undefined ? ` data-b="${l.b}"` : ''}>${l.b !== undefined ? '🛒 ' : ''}${esc(l.name)}</button>`,
+    );
   const more = list.length > 3 ? `<small data-tip="${esc(list.slice(3).map((l) => l.name).join(', '))}">+${list.length - 3}</small>` : '';
   return shown.join('') + more;
 }
@@ -42,6 +47,7 @@ export function industryFlowHtml(g: Game, ind: Industry): string {
     industries: g.industries,
     towns: g.towns,
     freight: (l) => g.lineTakes(l, 'freight'),
+    shops: g.retail ? (st) => g.stationReceivers(st).map(({ town, r, b }) => ({ town: town.id, b: b.id, name: g.dockName(b), cargo: r.cargo })) : undefined,
   });
   const rows: string[] = [];
   const noRoute = flow.inputs.filter((i) => !i.from.length).map((i) => i.cargo);

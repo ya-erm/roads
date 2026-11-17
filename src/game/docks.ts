@@ -7,7 +7,7 @@ import { steerBase } from '../sim/body';
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
 import type { TownBuilding } from '../world/entities';
 import { lotFrame, type Driveway } from '../world/houseAccess';
-import { DOCK_TRUCK, dockDriveway, dockYardOf, RAMP_GAP, type DockYard } from '../world/shopLots';
+import { DOCK_TRUCK, dockDriveway, dockYardsOf, exitDriveway, RAMP_GAP, THROUGH_R, type DockYard } from '../world/shopLots';
 import { laneSlot, type GarageSlot } from './garages';
 import { bezier, legPose, straight, type Leg } from './lotMoves';
 
@@ -18,8 +18,11 @@ import { bezier, legPose, straight, type Leg } from './lotMoves';
  * 'turn' (world/shopLots.DockYard): по проезду за здание, поворот, задом к рампе на задней стене; выгрузка; разворот к
  * проезду, передом к бордюру, ждёт настоящего просвета (LaneTraffic.clearToJoin) и выезжает направо в поток. Двор
  * 'back' (мелкий, рампа у торца, склад): передом по проезду до рампы, выезд задним ходом на полосу, как из гаража.
+ * Двор 'through' (АЗС, оптовая база): въезд в съезд, к которому полоса подходит первой, проезд вдоль улицы до рампы,
+ * выезд из другого съезда передом направо — без заднего хода.
  *
- * Рампа одна: второй грузовик к ней не едет (game.ts: ждёт на прошлой остановке, потом пропускает получателя). Двор
+ * Рампа занята — второй грузовик к ней не едет (game.ts: ждёт на прошлой остановке, потом пропускает получателя); у
+ * рынка рамп две (world/shopLots.dockYardsOf) — к свободной (freeRamp), вторая — только с той же связи улицы. Двор
  * общий с машинами покупателей на стоянке (game/shopParking.ts): пока одна из них на манёвре, грузовик не начинает
  * свой, а пока грузовик на манёвре во дворе — они ждут (DockHost.lotBusy, Docks.yardBusy).
  *
@@ -61,10 +64,18 @@ export interface DockGeo {
   d: Driveway;
   L: number;
   W: number;
+  /** Какая рампа дома (world/shopLots.dockYardsOf): у рынка их две. */
+  k: number;
   /** Середина кузова у бордюра: корма у полотна (въехал передом) или нос у полотна (ждёт выезда). */
   curbSide: Vec;
+  /** Сквозной двор ('through'): второй проезд — выезд, и середина кузова у бордюра перед выездом (нос к улице). */
+  exitD?: Driveway;
+  exitSide?: Vec;
   in: GarageSlot | null;
-  /** Выезд на полосу: 'turn' — передом направо дальше по ходу; 'back' — задом, как въезжал (то же место, что in). */
+  /**
+   * Выезд на полосу: 'turn' — передом направо дальше по ходу; 'back' — задом, как въезжал (то же место, что in);
+   * 'through' — передом направо из второго проезда, дальше по ходу.
+   */
   out: OutSlot | null;
   /** Середина кузова и курс у рампы. */
   ramp: { c: Vec; h: Vec };
@@ -93,6 +104,8 @@ interface Homing {
   id: number;
   b: TownBuilding;
   maxSpeed: number;
+  /** К какой рампе дома (у рынка их две): выбирает свободную, пока не у проезда. */
+  k: number;
   /** Уже у проезда (сбросил скорость): рампа — за ним, другому грузовику туда не сворачивать. */
   close?: boolean;
 }
@@ -128,19 +141,61 @@ export class Docks {
 
   constructor(private host: DockHost) {}
 
-  /** Двор дома b для грузовика длины L и ширины W на нынешнем графе; двора нет или к нему не подъехать — null. */
-  geoOf(b: TownBuilding, L: number = DOCK_TRUCK.l, W: number = DOCK_TRUCK.w): DockGeo | null {
+  /**
+   * Двор дома b (рампа k, у рынка их две) для грузовика длины L и ширины W на нынешнем графе; двора нет или к нему не
+   * подъехать — null.
+   */
+  geoOf(b: TownBuilding, L: number = DOCK_TRUCK.l, W: number = DOCK_TRUCK.w, k = 0): DockGeo | null {
     const g = this.host.graph;
     if (this.geoGraph !== g) {
       this.geos.clear();
       this.geoGraph = g;
     }
-    const key = `${b.id}:${L}:${W}`;
+    const key = `${b.id}:${L}:${W}:${k}`;
     const hit = this.geos.get(key);
     if (hit !== undefined && (hit === null || (hit.b === b && hit.fp === b.fp))) return hit;
-    const geo = this.compute(b, L, W, g);
+    const geo = this.compute(b, L, W, g, k);
     this.geos.set(key, geo);
     return geo;
+  }
+
+  /** Рампы дома b, занятые другими грузовиками (не except): на манёвре, у рампы или уже сворачивают к ней. */
+  private rampsTaken(b: number, except?: number): Set<number> {
+    const out = new Set<number>();
+    for (const m of this.moves.values()) if (m.id !== except && m.geo.b.id === b) out.add(m.geo.k);
+    for (const [id, geo] of this.parked) if (id !== except && geo.b.id === b) out.add(geo.k);
+    for (const h of this.homing.values()) if (h.id !== except && h.b.id === b && h.close) out.add(h.k);
+    return out;
+  }
+
+  /**
+   * Свободная рампа дома b для грузовика except длины L: первая не занятая другими, к которой подъехать; вторая (у
+   * рынка) — только с той же связи, что и первая (путь к двору кончается ею). Все заняты — null.
+   */
+  freeRamp(b: TownBuilding, except?: number, L: number = DOCK_TRUCK.l, W: number = DOCK_TRUCK.w): number | null {
+    const taken = this.rampsTaken(b.id, except);
+    const n = dockYardsOf(b).length;
+    const first = this.geoOf(b, L, W, 0);
+    for (let k = 0; k < n; k++) {
+      if (taken.has(k)) continue;
+      const geo = k === 0 ? first : this.geoOf(b, L, W, k);
+      if (!geo?.in || !geo.out) continue;
+      if (k > 0 && (!first?.in || geo.in.link.id !== first.in.link.id)) continue;
+      return k;
+    }
+    return null;
+  }
+
+  /** Сколько рамп у дома b, к которым грузовик длины L подъедет (у рынка — до двух). */
+  rampCount(b: TownBuilding, L: number = DOCK_TRUCK.l, W: number = DOCK_TRUCK.w): number {
+    const first = this.geoOf(b, L, W, 0);
+    if (!first?.in || !first.out) return 0;
+    let n = 1;
+    for (let k = 1; k < dockYardsOf(b).length; k++) {
+      const geo = this.geoOf(b, L, W, k);
+      if (geo?.in && geo.out && geo.in.link.id === first.in.link.id) n++;
+    }
+    return n;
   }
 
   /** Можно ли грузовику длины L заехать во двор и выехать. */
@@ -149,22 +204,69 @@ export class Docks {
     return !!geo?.in && !!geo.out;
   }
 
-  private compute(b: TownBuilding, L: number, W: number, g: LaneGraph): DockGeo | null {
-    const yard = dockYardOf(b);
-    const d = dockDriveway(b);
+  private compute(b: TownBuilding, L: number, W: number, g: LaneGraph, k: number): DockGeo | null {
+    const yard = dockYardsOf(b)[k] ?? null;
+    let d = dockDriveway(b, yard);
     if (!yard || !d) return null;
     const at = lotFrame(b);
     const o = at(0, 0);
     const X = sub(at(1, 0), o);
     const Y = d.dir;
-    const curbSide = add(d.curb, scale(Y, L / 2 + 0.3));
-    const slot = laneSlot(g, this.host.net, d, curbSide, L, W);
+    let curbSide = add(d.curb, scale(Y, L / 2 + 0.3));
+    let slot = laneSlot(g, this.host.net, d, curbSide, L, W);
     const sp = DOCK.speed;
     let ramp: { c: Vec; h: Vec };
     let inLegs: Leg[];
     let outLegs: Leg[];
     let out: OutSlot | null = null;
-    if (yard.kind === 'turn') {
+    let exitD: Driveway | undefined;
+    let exitSide: Vec | undefined;
+    /** Выезд направо передом в sideAt (середина кузова у бордюра), дальше по ходу полосы въезда: зеркально повороту с неё. */
+    const rightOut = (sideAt: Vec): OutSlot | null => {
+      if (!slot) return null;
+      const rel = sub(sideAt, slot.pos);
+      const along = dot(rel, slot.f);
+      const lat = Math.abs(dot(rel, rightNormal(slot.f)));
+      const mid = slot.mid + along + lat;
+      const zone: [number, number] = [slot.mid + along - W / 2 - 1, mid + L / 2 + 0.5];
+      if (zone[0] < END_ROOM || zone[1] > slot.lane.length - END_ROOM) return null;
+      const p = g.lanePose(slot.lane, mid);
+      return { lane: slot.lane, mid, zone, pos: p.pos, f: p.dir };
+    };
+    if (yard.kind === 'through') {
+      // Сквозной двор: въезд — тот проезд, к которому полоса подходит первой (участок симметричен), выезд — другой.
+      const other = exitDriveway(b, yard);
+      if (!other) return null;
+      const sgn = slot && dot(slot.f, X) < 0 ? -1 : 1;
+      if (sgn === -1) {
+        exitD = d;
+        d = other;
+        curbSide = add(d.curb, scale(Y, L / 2 + 0.3));
+        slot = laneSlot(g, this.host.net, d, curbSide, L, W);
+      } else exitD = other;
+      exitSide = add(exitD.curb, scale(Y, L / 2 + 0.3));
+      const xi = sgn === 1 ? yard.drive.x : yard.exit!.x;
+      const xo = sgn === 1 ? yard.exit!.x : yard.drive.x;
+      const R = THROUGH_R;
+      const kk = 0.55 * R;
+      const Xs = scale(X, sgn);
+      const lane = yard.wall;
+      const E = at(xi, lane - R);
+      const P = at(xi + sgn * R, lane);
+      const F = at(yard.rx, lane);
+      const Q = at(xo - sgn * R, lane);
+      const G = at(xo, lane - R);
+      ramp = { c: F, h: Xs };
+      inLegs = [];
+      if (dist(curbSide, E) > 0.3) inLegs.push(straight(curbSide, E, false, sp.yardIn));
+      inLegs.push(bezier(E, add(E, scale(Y, kk)), sub(P, scale(Xs, kk)), P, false, sp.yardIn));
+      if (dist(P, F) > 0.3) inLegs.push(straight(P, F, false, sp.yardIn));
+      outLegs = [];
+      if (dist(F, Q) > 0.3) outLegs.push(straight(F, Q, false, sp.yardIn));
+      outLegs.push(bezier(Q, add(Q, scale(Xs, kk)), add(G, scale(Y, kk)), G, false, sp.yardIn));
+      if (dist(G, exitSide) > 0.3) outLegs.push(straight(G, exitSide, false, sp.yardIn));
+      out = rightOut(exitSide);
+    } else if (yard.kind === 'turn') {
       const s = yard.side;
       const R = DOCK_TRUCK.r;
       const k = 0.55 * R;
@@ -180,18 +282,7 @@ export class Docks {
       // Разворот от рампы к проезду: петля в глубине двора, не за забор.
       const ku = Math.max(2, (b.fp.h / 2 - 0.6 - W / 2 - fy) / 0.75);
       outLegs = [bezier(F, add(F, scale(Y, ku)), add(E, scale(Y, ku)), E, false, sp.yardIn), straight(E, curbSide, false, sp.yardIn)];
-      if (slot) {
-        // Выезд направо, дальше по ходу полосы: зеркально повороту с неё.
-        const rel = sub(curbSide, slot.pos);
-        const along = dot(rel, slot.f);
-        const lat = Math.abs(dot(rel, rightNormal(slot.f)));
-        const mid = slot.mid + along + lat;
-        const zone: [number, number] = [slot.mid + along - W / 2 - 1, mid + L / 2 + 0.5];
-        if (zone[0] >= END_ROOM && zone[1] <= slot.lane.length - END_ROOM) {
-          const p = g.lanePose(slot.lane, mid);
-          out = { lane: slot.lane, mid, zone, pos: p.pos, f: p.dir };
-        }
-      }
+      out = rightOut(curbSide);
     } else {
       const F = at(yard.drive.x, yard.drive.y1 - L / 2 - 0.4);
       ramp = { c: F, h: Y };
@@ -199,7 +290,7 @@ export class Docks {
       outLegs = [straight(F, curbSide, true, sp.yardBack)];
       if (slot) out = { lane: slot.lane, mid: slot.mid, zone: slot.zone, pos: slot.pos, f: slot.f };
     }
-    return { b, fp: b.fp, yard, d, L, W, curbSide, in: slot, out, ramp, inLegs, outLegs };
+    return { b, fp: b.fp, yard, d, L, W, k, curbSide, exitD, exitSide, in: slot, out, ramp, inLegs, outLegs };
   }
 
   /** Узел, к которому ведёт маршрут ко двору (за ним по ходу полосы); не подъехать — null. */
@@ -230,10 +321,11 @@ export class Docks {
 
   /** Грузовик id в потоке (sim) едет ко двору дома b: маршрут уже кончается связью у него (route). */
   approach(sim: Vehicle, id: number, b: TownBuilding): boolean {
-    const geo = this.geoOf(b, sim.length, sim.width);
+    const k = this.freeRamp(b, id, sim.length, sim.width) ?? 0;
+    const geo = this.geoOf(b, sim.length, sim.width, k);
     if (!geo?.in || !geo.out) return false;
     sim.endLink = geo.in.link.id;
-    this.homing.set(sim.id, { id, b, maxSpeed: sim.maxSpeed });
+    this.homing.set(sim.id, { id, b, maxSpeed: sim.maxSpeed, k });
     return true;
   }
 
@@ -258,14 +350,12 @@ export class Docks {
   }
 
   /**
-   * Рампа дома b занята другим грузовиком (не except): он во дворе — заезжает, стоит у рампы, выезжает — или уже
-   * сбросил скорость перед проездом и сейчас свернёт.
+   * Все рампы дома b (у рынка их две) заняты другими грузовиками (не except): они во дворе — заезжают, стоят у рампы,
+   * выезжают — или уже сбросили скорость перед проездом и сейчас свернут. L, W — грузовик, которому ехать.
    */
-  rampBusy(b: number, except?: number): boolean {
-    for (const m of this.moves.values()) if (m.id !== except && m.geo.b.id === b) return true;
-    for (const [id, geo] of this.parked) if (id !== except && geo.b.id === b) return true;
-    for (const h of this.homing.values()) if (h.id !== except && h.b.id === b && h.close) return true;
-    return false;
+  rampBusy(b: TownBuilding, except?: number, L: number = DOCK_TRUCK.l, W: number = DOCK_TRUCK.w): boolean {
+    if (!this.rampsTaken(b.id, except).size) return false;
+    return this.freeRamp(b, except, L, W) === null;
   }
 
   /** У дома b грузовик на манёвре (не стоит у рампы): машинам покупателей во дворе ждать. */
@@ -286,7 +376,7 @@ export class Docks {
   leave(id: number, spec: VehicleSpec, target: number, endLink: number | undefined, b?: TownBuilding): boolean {
     if (this.moves.get(id)?.kind === 'out') return true;
     let geo = this.parked.get(id) ?? null;
-    if (b) geo = this.geoOf(b, spec.length, spec.width) ?? geo;
+    if (b) geo = this.geoOf(b, spec.length, spec.width, geo?.k ?? 0) ?? geo;
     if (!geo?.out) return false;
     this.parked.delete(id);
     this.moves.set(id, { id, geo, kind: 'out', phase: 'legs', legs: geo.outLegs, i: 0, s: 0, v: 0, wait: 0, road: false, spec, target, endLink, blink: 0 });
@@ -295,7 +385,9 @@ export class Docks {
 
   /** Грузовик id встаёт к рампе дома b сразу (из сохранения: стоял у неё или был во дворе). */
   stand(id: number, b: TownBuilding, L: number, W: number): boolean {
-    const geo = this.geoOf(b, L, W);
+    this.moves.delete(id);
+    this.parked.delete(id);
+    const geo = this.geoOf(b, L, W, this.freeRamp(b, id, L, W) ?? 0);
     if (!geo) return false;
     this.moves.delete(id);
     this.parked.set(id, geo);
@@ -335,7 +427,12 @@ export class Docks {
       }
       // Ещё выезжает со двора прошлого получателя (стоит, его держит манёвр) — к следующему поедет, когда тронется.
       if (this.moves.get(h.id)?.sim === sim) continue;
-      const geo = this.geoOf(h.b, sim.length, sim.width);
+      if (!h.close) {
+        // Пока не у проезда — к свободной рампе (у рынка их две; вторая — с той же связи, что и первая).
+        const free = this.freeRamp(h.b, h.id, sim.length, sim.width);
+        if (free !== null) h.k = free;
+      }
+      const geo = this.geoOf(h.b, sim.length, sim.width, h.k);
       const slot = geo?.out ? geo.in : null;
       if (!geo || !slot || sim.endLink !== slot.link.id) {
         this.cancel(sim, h);
@@ -344,8 +441,8 @@ export class Docks {
       const L = sim.length;
       // Сколько ещё до места, откуда сворачивать (середина кузова — в mid).
       const left = traffic.routeLeft(sim) - (slot.lane.length - (slot.mid + L / 2));
-      // Рампа занята другим грузовиком — не сворачивает, проезжает мимо (игра: объезд квартала и снова, потом — дальше).
-      if (!h.close && this.rampBusy(h.b.id, h.id)) {
+      // Рампы заняты другими грузовиками — не сворачивает, проезжает мимо (игра: объезд квартала и снова, потом — дальше).
+      if (!h.close && this.rampBusy(h.b, h.id, sim.length, sim.width)) {
         if (left < DOCK.slowAt) this.cancel(sim, h);
         continue;
       }
@@ -446,7 +543,7 @@ export class Docks {
   /** У бордюра: настоящий просвет и двор свободен — в поток (стоит, пока выезжает на полосу). */
   private stepWait(m: Move, dt: number): boolean {
     m.wait += dt;
-    const geo = this.geoOf(m.geo.b, m.geo.L, m.geo.W) ?? m.geo;
+    const geo = this.geoOf(m.geo.b, m.geo.L, m.geo.W, m.geo.k) ?? m.geo;
     const out = geo.out;
     const traffic = this.host.traffic;
     if (!out || m.wait < DOCK.look || this.host.lotBusy(geo.b.id) || !traffic.clearToJoin(out.lane.id, out.zone[0], out.zone[1])) return true;
@@ -456,13 +553,15 @@ export class Docks {
     traffic.holdAfter(sim, 0);
     if (m.endLink !== undefined) sim.endLink = m.endLink;
     sim.lcCooldown = 1e9;
-    const start = geo.curbSide;
+    // Сквозной двор — из второго проезда.
+    const start = geo.exitSide ?? geo.curbSide;
+    const dir = (geo.exitD ?? geo.d).dir;
     const k = 0.55 * Math.max(2, Math.abs(dot(sub(start, out.pos), rightNormal(out.f))));
     const back = geo.yard.kind === 'back';
-    // 'turn' — передом направо, 'back' — задом, как из гаража (нос по ходу полосы в конце).
+    // 'turn' и 'through' — передом направо, 'back' — задом, как из гаража (нос по ходу полосы в конце).
     const leg = back
-      ? bezier(start, sub(start, scale(geo.d.dir, k)), add(out.pos, scale(out.f, k)), out.pos, true, DOCK.speed.roadOut)
-      : bezier(start, sub(start, scale(geo.d.dir, k)), sub(out.pos, scale(out.f, k)), out.pos, false, DOCK.speed.roadOut);
+      ? bezier(start, sub(start, scale(dir, k)), add(out.pos, scale(out.f, k)), out.pos, true, DOCK.speed.roadOut)
+      : bezier(start, sub(start, scale(dir, k)), sub(out.pos, scale(out.f, k)), out.pos, false, DOCK.speed.roadOut);
     m.geo = geo;
     m.sim = sim;
     m.phase = 'join';
@@ -470,7 +569,7 @@ export class Docks {
     m.i = 0;
     m.s = 0;
     m.v = 0;
-    m.blink = back ? 0 : dot(out.f, rightNormal(scale(geo.d.dir, -1))) > 0 ? 1 : -1;
+    m.blink = back ? 0 : dot(out.f, rightNormal(scale(dir, -1))) > 0 ? 1 : -1;
     this.pose(m);
     this.host.joined(m.id, sim);
     return true;

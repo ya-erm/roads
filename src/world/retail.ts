@@ -7,10 +7,12 @@ import { formOf } from './townForms';
 import { townNeed } from './townSupply';
 
 /**
- * Получатели грузов в городе (docs/RETAIL.md, этапы 1–2): город потребляет товары не «станцией в охвате», а через
- * конкретные дома — магазины, сельские магазины, рынок, конторы, склады-стройдворы. У каждого — склад: он пустеет
+ * Получатели грузов в городе (docs/RETAIL.md, этапы 1–3): город потребляет товары не «станцией в охвате», а через
+ * конкретные дома — магазины, сельские магазины, рынок, конторы, склады-стройдворы, АЗС. У каждого — склад: он пустеет
  * со временем (расход — доля нормы города), принимает за раз, сколько влезает. Принятое идёт в Town.supplied — рост,
- * задания и закрытие месяца (townSupply.closeSupply) считают его как раньше.
+ * задания и закрытие месяца (townSupply.closeSupply) считают его как раньше. Рынок принимает и сырую рыбу с рыбаков —
+ * в счёт продуктов, не больше трети нормы за месяц. Оптовая база — не потребитель, а склад-пересадка (Receiver.depot):
+ * фура сдаёт на базу всё, что просит город, развозка забирает оттуда к магазинам.
  *
  * Только партии с WorldSettings.retail; старые — по прежней модели (станция в охвате принимает всё). Подбор — без
  * генератора случайных чисел партии: по месту в городе и хешу id дома. Склад считается при обращении (stockAt): запас
@@ -51,7 +53,32 @@ export const RETAIL = {
   maxLength: { shop: 15, yard: 21 } as const,
   /** Получатель «снабжён» (точка ● под названием города), если склад полон хотя бы на эту долю. */
   stocked: 0.25,
+  /** АЗС: 1 + ⌊жителей / perFuel⌋, не больше maxFuel — в городах, которым нужно топливо. */
+  perFuel: 6000,
+  maxFuel: 3,
+  /** Оптовая база — одна, в городе от depotPop жителей; её склад (станции у базы) — depotStock единиц всех грузов. */
+  depotPop: 2500,
+  depotStock: 150,
+  /** Рыба на рынке — в счёт продуктов, не больше этой доли нормы за месяц. */
+  fishShare: 1 / 3,
+  /**
+   * Рост к магазинам: улицы не дальше pull от получателя с грузом на складе застраиваются раньше (в очереди роста —
+   * ближе к центру на pullBonus); у получателя, пустого dryMonths месяцев подряд, дома ближе block не прибавляются.
+   */
+  pull: 500,
+  pullBonus: 80,
+  block: 330,
+  dryMonths: 2,
 } as const;
+
+/** Сколько АЗС нужно городу: 1 + ⌊жителей / 6000⌋, не больше трёх; топливо городу не нужно — ни одной. */
+export function fuelCount(town: Pick<Town, 'population' | 'demands'>): number {
+  if (!town.demands.includes('fuel')) return 0;
+  return Math.min(RETAIL.maxFuel, 1 + Math.floor(town.population / RETAIL.perFuel));
+}
+
+/** Оптовых баз у города: одна от RETAIL.depotPop жителей. */
+export const depotCount = (town: Pick<Town, 'population'>): number => (town.population >= RETAIL.depotPop ? 1 : 0);
 
 /** Получатель: дом города, что он принимает, его вес в доле нормы и склад. */
 export interface Receiver {
@@ -65,6 +92,17 @@ export interface Receiver {
   stock: Partial<Record<CargoType, number>>;
   /** Время партии, на которое посчитан запас, с. */
   at: number;
+  /**
+   * Оптовая база: принимает всё, что просит город, но не в счёт снабжения — на склад своей станции (RETAIL.depotStock),
+   * откуда груз забирает развозка; в доле нормы не участвует (w = 0). Нет — обычный получатель.
+   */
+  depot?: true;
+  /** Сколько месяцев подряд склад был пуст в конце месяца (markDry); нет — не пуст. */
+  dry?: number;
+  /** Рыбы принято на рынке за этот месяц (не больше трети нормы продуктов). */
+  fish?: number;
+  /** Хоть раз принимал груз от игрока: город снабжают — пустые магазины тормозят рост рядом (game.retailGrowth). */
+  fed?: true;
 }
 
 /** Широкий участок — «большой» дом генерации (как townForms.BIG_W). */
@@ -83,7 +121,7 @@ const big = (b: TownBuilding) => b.floors >= 4;
 
 /**
  * Кто что принимает. pick — пригодность дома (0 — не подходит; больше — лучше: из лучших подбираются, пока их хватает).
- * АЗС (топливо) — этап 3: такого дома в городе пока нет — топливо город принимает по-старому (legacyCargo).
+ * Топливо — АЗС; в городе, где АЗС ещё нет (партии этапов 1–2 до роста), — по-старому (legacyCargo).
  */
 const GROUPS: Group[] = [
   // Продукты: рынок — обязательно, дальше продуктовые (небольшие магазины) и сельские магазины.
@@ -98,6 +136,8 @@ const GROUPS: Group[] = [
   { cargo: ['paper'], pick: (_b, f) => (f === 'office' ? 1 : 0), count: (pop) => (pop >= RETAIL.bigTown ? 2 : 1) },
   // Стройматериалы и стекло: склад-стройдвор.
   { cargo: ['construction', 'glass'], pick: (_b, f) => (f === 'warehouse' ? 1 : 0), count: (pop) => 1 + Math.floor(pop / RETAIL.perYard) },
+  // Топливо: АЗС (zoneRetail) — все, что есть.
+  { cargo: ['fuel'], pick: (_b, f) => (f === 'fuel' ? 1 : 0), count: () => RETAIL.maxFuel },
 ];
 
 /** Вес получателя в доле нормы: рынок — 2, большой магазин — 1,5, прочие — 1. */
@@ -108,20 +148,88 @@ export function receiverWeight(b: Pick<TownBuilding, 'form' | 'kind' | 'floors' 
   return RETAIL.weight.other;
 }
 
-/** Может ли дом вообще быть получателем (магазин, сельский магазин, рынок, контора, склад). */
+/** Может ли дом вообще быть получателем (магазин, сельский магазин, рынок, контора, склад, АЗС, оптовая база). */
 export function receiverForm(b: Pick<TownBuilding, 'form' | 'kind' | 'floors' | 'fp'>): boolean {
   if (b.kind !== 'com') return false;
   const f = formOf(b);
-  return f === 'shop' || f === 'store' || f === 'market' || f === 'office' || f === 'warehouse';
+  return f === 'shop' || f === 'store' || f === 'market' || f === 'office' || f === 'warehouse' || f === 'fuel' || f === 'depot';
+}
+
+/** Что можно отдать под АЗС и оптовую базу: обычные магазины, конторы, склады (не рынок, не гаражи — там машины жителей). */
+const SITE_FORMS: ReadonlySet<HouseForm> = new Set(['shop', 'store', 'office', 'warehouse']);
+
+/** Где город ставит АЗС и оптовую базу (zoneRetail): что знает о месте только игра — улица перед домом, трасса рядом. */
+export interface RetailSites {
+  /** Пригодность дома под АЗС или базу: больше — лучше; null — не подходит (база — на узком участке). */
+  score(b: TownBuilding, kind: 'fuel' | 'depot'): number | null;
+  /** Дома, которые не трогать: получатели, к которым ездят маршруты. */
+  keep: ReadonlySet<number>;
+  /** Только эти дома можно отдать (новые при росте); нет — любые (начало новой партии). */
+  fresh?: ReadonlySet<number>;
+}
+
+/**
+ * АЗС и оптовая база города (только партии с получателями): сколько нужно (fuelCount, depotCount) — из обычных
+ * магазинов, контор и складов, лучших по месту (sites.score: у выездов, у больших улиц и трассы), АЗС — вдали друг от
+ * друга. Каждого вида домов остаётся столько, сколько нужно получателям этого вида (продуктовых — по населению,
+ * контор, стройдворов); уже стоящие — в счёт, обратно не превращаются. Детерминировано (место и хеш дома).
+ * Возвращает число новых.
+ */
+export function zoneRetail(town: Town, sites: RetailSites): number {
+  const pop = town.population;
+  const count = (forms: HouseForm[]) => town.buildings.filter((b) => b.kind === 'com' && forms.includes(formOf(b))).length;
+  // Сколько домов каждого вида оставить получателям.
+  const reserve = (f: HouseForm): [HouseForm[], number] => {
+    if (f === 'shop' || f === 'store') return [['shop', 'store'], shops(pop) + 1];
+    if (f === 'office') return [['office'], pop >= RETAIL.bigTown ? 2 : 1];
+    return [['warehouse'], town.demands.includes('construction') || town.demands.includes('glass') ? 1 + Math.floor(pop / RETAIL.perYard) : 0];
+  };
+  let made = 0;
+  const pick = (kind: 'fuel' | 'depot', want: number) => {
+    let have = count([kind]);
+    while (have < want) {
+      const placed = town.buildings.filter((b) => b.kind === 'com' && formOf(b) === kind);
+      let best: TownBuilding | null = null;
+      let bestScore = -Infinity;
+      for (const b of town.buildings) {
+        if (b.kind !== 'com' || !SITE_FORMS.has(formOf(b)) || sites.keep.has(b.id) || (sites.fresh && !sites.fresh.has(b.id))) continue;
+        const [forms, need] = reserve(formOf(b));
+        if (count(forms) - 1 < need) continue;
+        const q = sites.score(b, kind);
+        if (q === null) continue;
+        // АЗС — вдали друг от друга: ближе полрадиуса к другой — хуже.
+        const near = placed.some((o) => dist(o.fp.center, b.fp.center) < Math.max(150, town.radius * 0.5));
+        const s = q - (near ? 5 : 0) + hash(b.id, 43) * 0.01;
+        if (s > bestScore) {
+          bestScore = s;
+          best = b;
+        }
+      }
+      if (!best) return;
+      best.form = kind;
+      have++;
+      made++;
+    }
+  };
+  pick('depot', depotCount(town));
+  pick('fuel', fuelCount(town));
+  return made;
 }
 
 /**
  * Подбор получателей города: по каждой группе (продукты, товары, мебель…) из потребностей города — сколько нужно по
  * населению, из подходящих домов, вдали друг от друга (ближайший к центру — первым, дальше — самый далёкий от уже
  * выбранных). Те, что стоят в линии (keep), и прежние получатели остаются; reach — к дому можно подъехать (такие —
- * первыми). Запас прежних получателей сохраняется, новые — наполовину полны. time — время партии.
+ * первыми). Запас прежних получателей сохраняется, новые — наполовину полны. time — время партии. fish — на карте
+ * есть рыбаки: рынок принимает и рыбу. Оптовая база (дом 'depot', zoneRetail) — получатель всех потребностей города.
  */
-export function pickReceivers(town: Town, time: number, keep: ReadonlySet<number> = new Set(), reach: (b: TownBuilding) => boolean = () => true): Receiver[] {
+export function pickReceivers(
+  town: Town,
+  time: number,
+  keep: ReadonlySet<number> = new Set(),
+  reach: (b: TownBuilding) => boolean = () => true,
+  opts: { fish?: boolean } = {},
+): Receiver[] {
   const prev = new Map((town.receivers ?? []).map((r) => [r.b, r]));
   const out = new Map<number, Receiver>();
   const byId = new Map(town.buildings.map((b) => [b.id, b]));
@@ -185,11 +293,28 @@ export function pickReceivers(town: Town, time: number, keep: ReadonlySet<number
       out.set(b.id, { b: b.id, cargo: [...cargo], w: receiverWeight(b), stock: {}, at: time });
     }
   }
+  // Рынок — и рыбу с рыбаков (в счёт продуктов, ≤ ⅓ нормы).
+  if (opts.fish) {
+    for (const r of out.values()) {
+      const b = byId.get(r.b);
+      if (b && formOf(b) === 'market' && r.cargo.includes('food') && !r.cargo.includes('fish')) r.cargo.push('fish');
+    }
+  }
+  // Оптовая база — всё, что просит город (одна: первая по id; склад у неё — на станции у базы).
+  if (town.demands.length) {
+    const depot = town.buildings.filter((b) => b.kind === 'com' && formOf(b) === 'depot').sort((a, b) => a.id - b.id)[0];
+    if (depot && !out.has(depot.id)) out.set(depot.id, { b: depot.id, cargo: [...town.demands], w: 0, stock: {}, at: time, depot: true });
+  }
   // Склад: прежний запас (досчитанный до сейчас) — у прежних, у новых — наполовину.
   const list = [...out.values()].filter((r) => byId.has(r.b)).sort((a, b) => a.b - b.b);
   const draft: Town = { ...town, receivers: list };
   for (const r of list) {
     const was = prev.get(r.b);
+    if (was?.dry) r.dry = was.dry;
+    if (was?.fish) r.fish = was.fish;
+    if (was?.fed) r.fed = true;
+    r.at = time;
+    if (r.depot) continue;
     for (const c of r.cargo) {
       const cap = stockCap(draft, r, c);
       const old = was && was.cargo.includes(c) ? stockAt(town, was, c, time) : undefined;
@@ -207,8 +332,10 @@ function weightOf(town: Pick<Town, 'receivers'>, c: CargoType): number {
   return w;
 }
 
-/** Расход получателя r по грузу c за месяц: его доля нормы города — townNeed · w / Σw. */
+/** Расход получателя r по грузу c за месяц: его доля нормы города — townNeed · w / Σw; рыба на рынке — треть нормы. */
 export function receiverNeed(town: Pick<Town, 'receivers' | 'population'>, r: Receiver, c: CargoType): number {
+  if (r.depot) return 0;
+  if (c === 'fish') return r.cargo.includes('fish') ? townNeed(town.population) * RETAIL.fishShare : 0;
   const w = weightOf(town, c);
   return w > 0 && r.cargo.includes(c) ? (townNeed(town.population) * r.w) / w : 0;
 }
@@ -241,30 +368,68 @@ export function settleStock(town: Pick<Town, 'receivers' | 'population'>, r: Rec
   r.at = time;
 }
 
-/** Сколько получатель примет груза c сейчас: целые единицы свободного места на складе. */
+/**
+ * Сколько получатель примет груза c сейчас: целые единицы свободного места на складе; рыбы — ещё и не больше трети
+ * нормы продуктов за месяц. Оптовая база — 0: её склад — на станции (game.ts).
+ */
 export function roomFor(town: Pick<Town, 'receivers' | 'population'>, r: Receiver, c: CargoType, time: number): number {
-  if (!r.cargo.includes(c)) return 0;
-  return Math.max(0, Math.floor(stockCap(town, r, c) - stockAt(town, r, c, time) + 1e-9));
+  if (!r.cargo.includes(c) || r.depot) return 0;
+  const room = Math.max(0, Math.floor(stockCap(town, r, c) - stockAt(town, r, c, time) + 1e-9));
+  if (c !== 'fish') return room;
+  return Math.max(0, Math.min(room, Math.floor(townNeed(town.population) * RETAIL.fishShare + 1e-9) - (r.fish ?? 0)));
 }
 
-/** Получатель принимает до amount единиц груза c: сколько влезло (целые), запас — на складе; в Town.supplied — тоже. */
+/**
+ * Получатель принимает до amount единиц груза c: сколько влезло (целые), запас — на складе; в Town.supplied — тоже
+ * (рыба на рынке — в счёт продуктов).
+ */
 export function acceptAt(town: Town, r: Receiver, c: CargoType, amount: number, time: number): number {
   settleStock(town, r, time);
   const take = Math.min(Math.floor(amount), roomFor(town, r, c, time));
   if (take <= 0) return 0;
   r.stock[c] = (r.stock[c] ?? 0) + take;
-  town.supplied[c] = (town.supplied[c] ?? 0) + take;
+  r.fed = true;
+  const as: CargoType = c === 'fish' ? 'food' : c;
+  if (c === 'fish') r.fish = (r.fish ?? 0) + take;
+  town.supplied[as] = (town.supplied[as] ?? 0) + take;
   return take;
 }
 
 /**
- * Потребности города без получателей: такого дома в городе нет (топливо — до АЗС этапа 3; стройматериалы в селе без
- * склада). Их город принимает по-старому — любой грузовой станцией с домами города в охвате, — иначе задание
- * «привезти в город» было бы невыполнимым.
+ * Конец месяца у получателей города: сколько месяцев подряд склад пуст (Receiver.dry — у пустого 2 месяца дома рядом
+ * не прибавляются), счёт рыбы за месяц — с нуля. Оптовая база — без счёта.
+ */
+export function markDry(town: Town, time: number): void {
+  for (const r of town.receivers ?? []) {
+    delete r.fish;
+    if (r.depot) continue;
+    const empty = r.cargo.every((c) => c === 'fish' || stockAt(town, r, c, time) < 1);
+    if (empty) r.dry = (r.dry ?? 0) + 1;
+    else delete r.dry;
+  }
+}
+
+/** Получатель с грузом на складе (хотя бы единица чего-то, кроме рыбы): улицы рядом застраиваются раньше. */
+export function receiverStocked(town: Pick<Town, 'receivers' | 'population'>, r: Receiver, time: number): boolean {
+  return !r.depot && r.cargo.some((c) => c !== 'fish' && stockAt(town, r, c, time) >= 1);
+}
+
+/** Получатель пуст RETAIL.dryMonths месяцев подряд: дома рядом не прибавляются. */
+export const receiverDry = (r: Receiver): boolean => !r.depot && (r.dry ?? 0) >= RETAIL.dryMonths;
+
+/**
+ * Потребности города без получателей: такого дома в городе нет (топливо — пока нет АЗС: партии этапов 1–2 до роста;
+ * стройматериалы в селе без склада). Их город принимает по-старому — любой грузовой станцией с домами города в
+ * охвате, — иначе задание «привезти в город» было бы невыполнимым. Оптовая база — не в счёт: она не потребитель.
  */
 export function legacyCargo(town: Pick<Town, 'demands' | 'receivers'>): CargoType[] {
-  const list = town.receivers ?? [];
+  const list = (town.receivers ?? []).filter((r) => !r.depot);
   return town.demands.filter((c) => !list.some((r) => r.cargo.includes(c)));
+}
+
+/** Оптовая база города (её запись получателя); нет — undefined. */
+export function depotOf(town: Pick<Town, 'receivers'>): Receiver | undefined {
+  return town.receivers?.find((r) => r.depot);
 }
 
 /** Получатель-дом города: запись получателя по id дома. */
@@ -277,7 +442,7 @@ export function stockedCount(town: Pick<Town, 'receivers' | 'population'>, c: Ca
   let stocked = 0;
   let total = 0;
   for (const r of town.receivers ?? []) {
-    if (!r.cargo.includes(c)) continue;
+    if (!r.cargo.includes(c) || r.depot) continue;
     total++;
     if (stockFill(town, r, c, time) >= RETAIL.stocked) stocked++;
   }
@@ -289,7 +454,7 @@ export function stockedCount(town: Pick<Town, 'receivers' | 'population'>, c: Ca
  * и свободное место на складах сейчас; получателей этого груза нет — null (принимает по-старому, без предела).
  */
 export function townRoom(town: Pick<Town, 'receivers' | 'population'>, c: CargoType, time: number, months: number): number | null {
-  const list = (town.receivers ?? []).filter((r) => r.cargo.includes(c));
+  const list = (town.receivers ?? []).filter((r) => r.cargo.includes(c) && !r.depot);
   if (!list.length) return null;
   let free = 0;
   for (const r of list) free += stockCap(town, r, c) - stockAt(town, r, c, time);
@@ -301,7 +466,8 @@ export function unloadTime(amount: number): number {
   return RETAIL.unloadBase + RETAIL.unloadPer * Math.max(0, amount);
 }
 
-/** Самый длинный грузовик, что заедет во двор получателя: к складу — длиннее. */
+/** Самый длинный грузовик, что заедет во двор получателя: к складу, АЗС и оптовой базе — длиннее (Фура). */
 export function maxTruck(b: Pick<TownBuilding, 'form' | 'kind' | 'floors' | 'fp'>): number {
-  return formOf(b) === 'warehouse' ? RETAIL.maxLength.yard : RETAIL.maxLength.shop;
+  const f = formOf(b);
+  return f === 'warehouse' || f === 'fuel' || f === 'depot' ? RETAIL.maxLength.yard : RETAIL.maxLength.shop;
 }

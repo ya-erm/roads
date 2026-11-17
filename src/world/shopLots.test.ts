@@ -3,7 +3,23 @@ import { freshGame } from '../game/testkit';
 import type { TownBuilding } from './entities';
 import { CAR_SIZE, drivewayLink, LOT_SETBACK } from './houseAccess';
 import { NEW_GAME_SETTINGS } from './settings';
-import { APRON, DOCK_TRUCK, dockYardOf, SERVICE_DRIVE, shopLotOf, STALL, stallDriveways, stallFit, YARD_DEPTH, type ShopLot } from './shopLots';
+import {
+  APRON,
+  DEPOT_MIN_W,
+  depotLot,
+  DOCK_TRUCK,
+  dockYardOf,
+  dockYardsOf,
+  fuelLot,
+  SERVICE_DRIVE,
+  shopLotOf,
+  STALL,
+  stallDriveways,
+  stallFit,
+  THROUGH_R,
+  YARD_DEPTH,
+  type ShopLot,
+} from './shopLots';
 import { pointInFootprint } from './spatial';
 
 let nextId = 5000;
@@ -185,5 +201,56 @@ describe('Стоянки магазинов', () => {
     expect(drives.length).toBeGreaterThan(shops.length * 2);
     const linked = drives.filter((d) => drivewayLink(g.roads.net, d)).length;
     expect(linked / drives.length).toBeGreaterThan(0.9);
+  });
+
+  it('АЗС и оптовая база: сквозной проезд — съезды у обоих краёв, проезд вдоль улицы глубже навеса, рампа — у него', () => {
+    for (const W of [35.2, 40, 48])
+      for (const H of [35.2, 42, 48]) {
+        const fp = { center: { x: 0, y: 0 }, w: W, h: H, angle: 0 };
+        const f = lot({ form: 'fuel', fp });
+        const plan = fuelLot(f);
+        const y = plan.yard;
+        expect(y.kind).toBe('through');
+        expect(dockYardsOf(f)).toEqual([y]);
+        expect(y.drive.x).toBeCloseTo(-y.exit!.x);
+        expect(y.drive.x - y.drive.w / 2).toBeGreaterThanOrEqual(-W / 2);
+        expect(y.exit!.x + y.exit!.w / 2).toBeLessThanOrEqual(W / 2);
+        // Поворот с проезда у края на проезд вдоль улицы — дальше, чем встаёт кузов Фуры (21) сразу с улицы.
+        expect(y.wall - THROUGH_R).toBeGreaterThan(-H / 2 - LOT_SETBACK + 21 / 2);
+        // Навес и островки — между съездами и перед проездом бензовоза; магазинчик и люки — за ним, в участке.
+        expect(plan.canopy.x).toBeGreaterThan(y.drive.x + y.drive.w / 2);
+        expect(plan.canopy.x + plan.canopy.w).toBeLessThan(y.exit!.x - y.exit!.w / 2);
+        expect(plan.canopy.y + plan.canopy.h).toBeLessThan(y.wall - DOCK_TRUCK.w / 2);
+        expect(plan.islands.length).toBeGreaterThan(0);
+        expect(plan.tanks.y).toBeGreaterThan(y.wall + DOCK_TRUCK.w / 2);
+        expect(plan.building.y).toBeGreaterThan(plan.tanks.y + plan.tanks.h);
+        expect(plan.building.y + plan.building.h).toBeLessThanOrEqual(H / 2);
+        expect(Math.abs(plan.building.x)).toBeLessThanOrEqual(W / 2);
+        expect(y.ramp).toBe(plan.tanks);
+        if (W < DEPOT_MIN_W) continue;
+        const d = depotLot(lot({ form: 'depot', fp }));
+        expect(d.yard.kind).toBe('through');
+        // Фура у рампы — на прямом проезде между поворотами к краям.
+        expect(d.yard.exit!.x - THROUGH_R - (d.yard.drive.x + THROUGH_R)).toBeGreaterThanOrEqual(21 - 1e-6);
+        expect(d.hangar.y).toBeGreaterThan(d.yard.wall + DOCK_TRUCK.w / 2);
+        expect(d.yard.ramp.y + d.yard.ramp.h).toBeCloseTo(d.hangar.y);
+      }
+  });
+
+  it('у рынка две рампы: проезды у обоих краёв, ряды и стоянка — между ними', () => {
+    for (const W of [45, 57, 70])
+      for (const id of [1, 2]) {
+        const b = lot({ id, form: 'market', fp: { center: { x: 0, y: 0 }, w: W, h: 48, angle: 0 } });
+        const yards = dockYardsOf(b);
+        expect(yards.length).toBe(2);
+        expect(yards[0].side).toBe(-yards[1].side);
+        expect(yards[0].drive.x).toBeCloseTo(-yards[1].drive.x);
+        const plan = shopLotOf(b)!;
+        for (const y of yards) {
+          const drive = { x: y.drive.x - y.drive.w / 2, y: -24, w: y.drive.w, h: y.drive.y1 + 24 };
+          for (const s of plan.groups.flatMap((g) => g.stalls)) expect(overlaps(drive, { x: s.x - s.w / 2, y: s.y0, w: s.w, h: s.y1 - s.y0 })).toBe(false);
+        }
+        expect(plan.groups.flatMap((g) => g.stalls).length).toBeGreaterThanOrEqual(2);
+      }
   });
 });

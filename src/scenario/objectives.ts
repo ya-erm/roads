@@ -327,7 +327,8 @@ function townPlaces(game: Game, townId: number, cargo: CargoType): string {
   const t = townById(game, townId);
   const forms = new Set(
     (t?.receivers ?? [])
-      .filter((r) => r.cargo.includes(cargo))
+      // Оптовая база — не потребитель: в счёт города не идёт.
+      .filter((r) => r.cargo.includes(cargo) && !r.depot)
       .map((r) => {
         const b = t!.buildings.find((x) => x.id === r.b);
         return b ? formOf(b) : null;
@@ -336,6 +337,7 @@ function townPlaces(game: Game, townId: number, cargo: CargoType): string {
   if (!forms.size) return 'в город';
   if ([...forms].every((f) => f === 'warehouse')) return 'на склады';
   if ([...forms].every((f) => f === 'office')) return 'в конторы';
+  if ([...forms].every((f) => f === 'fuel')) return 'на АЗС';
   return 'в магазины';
 }
 

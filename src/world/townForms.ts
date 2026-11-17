@@ -110,6 +110,8 @@ export const FORM_NAMES: Record<HouseForm, string> = {
   church: 'Церковь',
   garages: 'Гаражи',
   warehouse: 'Склад',
+  fuel: 'АЗС',
+  depot: 'Оптовая база',
   hall: 'Ратуша',
   temple: 'Храм',
 };

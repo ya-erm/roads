@@ -2,7 +2,7 @@ import { TOWN_SCALE } from '../config';
 import type { HouseForm, TownBuilding } from '../world/entities';
 import type { Footprint } from '../world/spatial';
 import { CAR_SIZE, cottagePlan, dachaPlan, LOT_SETBACK, type LotRect } from '../world/houseAccess';
-import { marketHall, officeLot, shopLotOf, STALL_ROW_DEPTH, warehouseLot, type DockYard, type ShopLot } from '../world/shopLots';
+import { depotLot, fuelLot, marketHall, officeLot, shopLotOf, STALL_ROW_DEPTH, warehouseLot, type DockYard, type ShopLot } from '../world/shopLots';
 import { formOf, LANDMARK_YARD, storeysOf } from '../world/townForms';
 import { courtyardPlan, garagesPlan, slabPlan, towerPlan, townhousePlan, type YardPlan, type YardRow } from '../world/yardLots';
 import { Art, disc, METAL } from './industryArt';
@@ -862,6 +862,8 @@ const RAMP_EDGE = '#3e4147';
  */
 function serviceYard(a: Art, lot: Lot, y: DockYard, gravel = false): void {
   curbCut(a, lot, y.drive.x, y.drive.w, -lot.H / 2 + 0.6, gravel ? GRAVEL_DRIVE : DRIVE);
+  // Сквозной двор (АЗС, оптовая база) — второй съезд, у другого края.
+  if (y.exit) curbCut(a, lot, y.exit.x, y.exit.w, -lot.H / 2 + 0.6, DRIVE);
   for (const p of y.pad) a.patch(p.x, p.y, p.w, p.h, gravel ? GRAVEL : ASPHALT, 0.4);
   if (a.pass !== 2 || !a.lod) return;
   const c = a.c;
@@ -1013,10 +1015,14 @@ function market(a: Art, lot: Lot): void {
   // Рынок открыт к улице: мощение прохода — через газон до тротуара.
   frontPath(a, lot, plan.walk!.x, y0 + 0.5, plan.walk!.w);
   stallGroups(a, lot, plan);
-  if (plan.yard) serviceYard(a, lot, plan.yard);
-  // Ряды и павильон — между краем участка и проездом к рампе у торца павильона.
-  const xa = plan.yard ? (plan.yard.side === -1 ? plan.yard.drive.x + plan.yard.drive.w / 2 + 0.9 : x0 + 1.5) : x0 + 1.5;
-  const xb = plan.yard ? (plan.yard.side === -1 ? -x0 - 1.5 : plan.yard.drive.x - plan.yard.drive.w / 2 - 0.9) : -x0 - 1.5;
+  // Две рампы — у обоих торцов павильона, к каждой свой проезд у края участка.
+  const yards = [plan.yard, plan.yard2].filter((y): y is DockYard => !!y);
+  for (const y of yards) serviceYard(a, lot, y);
+  // Ряды и павильон — между краями участка и проездами к рампам у торцов павильона.
+  const left = yards.find((y) => y.side === -1);
+  const right = yards.find((y) => y.side === 1);
+  const xa = left ? left.drive.x + left.drive.w / 2 + 0.9 : x0 + 1.5;
+  const xb = right ? right.drive.x - right.drive.w / 2 - 0.9 : -x0 - 1.5;
   const hd = marketHall(H);
   pitched(a, xa, H / 2 - 1.2 - hd, xb - xa, hd, 4.5 * S, '#8fa3ad', true, 0, true);
   // Навесы — под прилавок и покупателя, крупнее прежних (TOWN_SCALE), но мельче домов; за стоянкой.
@@ -1207,6 +1213,94 @@ function warehouse(a: Art, lot: Lot): void {
   for (let k = 0; k < 3; k++) roofBit(a, x0 + 2 + k * 2.2 + a.r(5) * 4, y0 + 1.5 + a.r(6 + k) * 2, 1.6, 1.6, 1, '#c9a46a');
 }
 
+/** Цвета сетей АЗС: фриз навеса, стела и вывеска магазинчика. */
+const FUEL_BRANDS = ['#d64541', '#2f7d4f', '#e08a2e', '#2f63b5'];
+
+/**
+ * АЗС (world/shopLots.fuelLot): асфальт во всю ширину, два съезда — сквозной проезд бензовоза у краёв участка; у улицы
+ * — навес на столбах (полупрозрачный: под ним видно островки с колонками), за ним — проезд бензовоза и бетонная
+ * площадка с люками подземных ёмкостей; в глубине — магазинчик с вывеской, у съезда — стела с ценами.
+ */
+function fuel(a: Art, lot: Lot): void {
+  const { H, b } = lot;
+  const plan = fuelLot(b);
+  const brand = FUEL_BRANDS[Math.floor(a.r(3) * FUEL_BRANDS.length)];
+  lawn(a, lot);
+  serviceYard(a, lot, plan.yard);
+  const { canopy: cp, building: bd, tanks } = plan;
+  // Островки с колонками — на земле, под навесом.
+  for (const p of plan.islands) {
+    a.patch(p.x, p.y, p.w, p.h, '#cfcabe', 0.3);
+    if (a.pass === 0 && a.d) {
+      a.c.fillStyle = '#4c5158';
+      for (const t of [0.28, 0.72]) a.c.fillRect(p.x + 0.25, p.y + p.h * t - 0.45, p.w - 0.5, 0.9);
+    }
+  }
+  if (a.pass === 2 && a.d) {
+    // Люки подземных ёмкостей: круглые крышки на бетоне, у каждой — цвет марки топлива.
+    const c = a.c;
+    const n = 3;
+    for (let k = 0; k < n; k++) {
+      const x = tanks.x + (tanks.w * (k + 0.5)) / n;
+      c.fillStyle = '#5a5f66';
+      disc(c, x, tanks.y + tanks.h / 2, 0.42);
+      c.fillStyle = ['#e0a800', '#2e9d57', '#3f74b5'][k];
+      disc(c, x, tanks.y + tanks.h / 2, 0.2);
+    }
+  }
+  // Магазинчик с вывеской цветом сети.
+  flat(a, bd.x, bd.y, bd.w, bd.h, wallZ(1), tone(b.roof, 0.3));
+  if (a.pass === 2 && a.lod) {
+    a.c.fillStyle = brand;
+    a.c.fillRect(bd.x + 0.6, bd.y - 0.7, bd.w - 1.2, 0.9);
+  }
+  // Навес: тень, полупрозрачная крыша и фриз цветом сети; столбы — по углам островков.
+  const z = wallZ(1) + 1.2;
+  if (a.pass === 1) a.rectShadow(cp.x, cp.y, cp.w, cp.h, z);
+  if (a.pass === 2) {
+    const c = a.c;
+    c.fillStyle = 'rgba(246,246,242,0.72)';
+    c.fillRect(cp.x, cp.y, cp.w, cp.h);
+    c.strokeStyle = brand;
+    c.lineWidth = a.lod ? 0.7 : 0.4;
+    c.strokeRect(cp.x + 0.35, cp.y + 0.35, cp.w - 0.7, cp.h - 0.7);
+    if (a.d) {
+      c.fillStyle = '#8a8f96';
+      for (const p of plan.islands) for (const y of [p.y + 0.2, p.y + p.h - 0.6]) c.fillRect(p.x + p.w / 2 - 0.2, y, 0.4, 0.4);
+    }
+  }
+  // Стела с ценами у съезда, на газоне у улицы.
+  const sx = (plan.yard.drive.x + cp.x) / 2;
+  roofBit(a, sx - 0.5, -H / 2 + 0.6, 1, 2.2, 4, brand);
+}
+
+/**
+ * Оптовая база (world/shopLots.depotLot): ангар во всю ширину в глубине участка, вдоль его стены — рампа; перед
+ * ангаром — сквозной проезд для фуры (въезд и выезд у краёв участка), у улицы — поддоны и контейнеры.
+ */
+function depot(a: Art, lot: Lot): void {
+  const { W, H } = lot;
+  const x0 = -W / 2;
+  const y0 = -H / 2;
+  a.patch(x0 + 0.3, y0 + 0.3, W - 0.6, H - 0.6, 'rgba(150,148,140,0.6)', 0.5);
+  const plan = depotLot(lot.b);
+  const h = plan.hangar;
+  serviceYard(a, lot, plan.yard);
+  pitched(a, h.x, h.y, h.w, h.h, 7, a.r(1) < 0.5 ? '#5f7f9f' : METAL, true, 0, true);
+  // Ворота вдоль рампы.
+  if (a.pass === 2 && a.d) {
+    a.c.fillStyle = '#4a4d52';
+    for (let k = 0; k < 3; k++) a.c.fillRect(plan.yard.ramp.x + 0.8 + k * 4.4, h.y - 0.2, 3.2, 0.5);
+  }
+  // У улицы, между съездами, — контейнеры и поддоны.
+  const inner = W / 2 - 8.5;
+  const colors = ['#b5523b', '#3f74b5', '#5d8a4e', '#d0a23a'];
+  for (let k = 0; k < Math.max(1, Math.floor((inner * 2) / 7.5)); k++) {
+    const x = -inner + k * 7.5;
+    flat(a, x, y0 + 2, 6.4, 2.6, 3, colors[Math.floor(a.r(10 + k) * colors.length)]);
+  }
+}
+
 /** Ратуша на площади: площадь шире участка, здание с часовой башней, фонтан, деревья по углам. */
 function hall(a: Art, lot: Lot): void {
   const { W, H, b } = lot;
@@ -1321,6 +1415,8 @@ const SCENES: Record<HouseForm, (a: Art, lot: Lot) => void> = {
   church,
   garages,
   warehouse,
+  fuel,
+  depot,
   hall,
   temple,
 };

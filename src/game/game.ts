@@ -71,7 +71,7 @@ import {
 import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placeParks, plazaAttached, plazaBy } from '../world/townParks';
 import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
 import { type ParkEntry, ParkIndex } from '../world/parkPick';
-import { FORM_NAMES, formOf, residentsOf, SETTLE_RULE, townTier, yardOf, zoneTown } from '../world/townForms';
+import { edgeOf, FORM_NAMES, formOf, residentsOf, SETTLE_RULE, townTier, yardOf, zoneTown } from '../world/townForms';
 import { START_ROADS } from '../world/startRoads';
 import { alongBan, banCovered, STREET_BAN, uncoveredRuns } from '../world/streetBans';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
@@ -94,8 +94,23 @@ import { Crosswalks, WALK_HOUSES, WALK_LOSS } from './crosswalks';
 import { Garages, type GarageHost, type GarageLook } from './garages';
 import { ShopParking, type ShopHost } from './shopParking';
 import { Docks, type DockHost } from './docks';
-import { acceptAt, legacyCargo, maxTruck, pickReceivers, RETAIL, type Receiver, receiverOf, stockFill, unloadTime } from '../world/retail';
-import { CAR_SIZE } from '../world/houseAccess';
+import {
+  acceptAt,
+  legacyCargo,
+  markDry,
+  maxTruck,
+  pickReceivers,
+  RETAIL,
+  type Receiver,
+  receiverDry,
+  receiverOf,
+  receiverStocked,
+  stockFill,
+  unloadTime,
+  zoneRetail,
+} from '../world/retail';
+import { CAR_SIZE, LOT_SETBACK, lotFrame } from '../world/houseAccess';
+import { DEPOT_MIN_W, roofCenter } from '../world/shopLots';
 import { CarHomes, type CarHomesHost } from './carHomes';
 import { parkingCells, type ParkingCell } from './parkingLayer';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
@@ -488,6 +503,8 @@ export interface Partner {
   pos: Vec;
   name: string;
   ref: { type: 'industry' | 'town'; id: number };
+  /** Получатель в городе (world/retail.ts) — дом магазина: pos — у него, а не в центре города. */
+  b?: number;
   distance: number;
 }
 
@@ -954,6 +971,8 @@ export class Game implements BuildContext {
     // Улицы городов — с переходами среди домов.
     this.syncCrosswalks();
     this.roads.changed();
+    // АЗС и оптовые базы (новые партии с получателями) — до машин на стоянках: под них отдаются и магазины.
+    for (const t of this.towns) this.zoneRetailTown(t);
     // На стоянках магазинов уже стоят машины (по хешу).
     this.shops.seed(this.towns);
     // Получатели грузов в городах (новые партии, world/retail.ts): склады наполовину полны.
@@ -6828,6 +6847,8 @@ export class Game implements BuildContext {
     if (!st.serves.cargo) return null;
     const rule = this.stopRule(line, index);
     const listed = rule.unload === 'all' || (Array.isArray(rule.unload) && rule.unload.includes(cargo));
+    // Оптовая база — склад-пересадка: всё, что просит город, — на её склад (платят, когда развозка довезёт до магазина).
+    if (st.kind === 'dock' && this.isDepotDock(st)) return st.accepts.has(cargo) && (rule.unload === 'auto' || listed) ? 'store' : null;
     if (st.accepts.has(cargo) && (rule.unload === 'auto' || listed)) return 'deliver';
     return listed ? 'store' : null;
   }
@@ -6948,7 +6969,7 @@ export class Game implements BuildContext {
       return [...by].map(([id, n]) => ({ to: { type: 'town', id }, amount: n }));
     }
     if (st.kind === 'dock') return [];
-    // Потребность без получателей (топливо — до АЗС, этап 3): по-старому, любая станция с домами города в охвате.
+    // Потребность без получателей (топливо в городе, где АЗС ещё нет): по-старому, любая станция с домами города в охвате.
     const town = this.towns.find((t) => st.townIds.includes(t.id) && legacyCargo(t).includes(cargo));
     if (!town) return [];
     town.supplied[cargo] = (town.supplied[cargo] ?? 0) + amount;
@@ -7032,10 +7053,59 @@ export class Game implements BuildContext {
    */
   refreshReceivers(town: Town): void {
     if (!this.retail) return;
+    const keep = this.routedReceivers(town);
+    const fish = this.industries.some((i) => !i.ruin && i.info.produces === 'fish');
+    town.receivers = pickReceivers(town, this.time, keep, (b) => this.docks.reachable(b, maxTruck(b)), { fish });
+    for (const st of this.stations.values()) if (st.townIds.includes(town.id) || st.dock?.town === town.id) this.computeCatchment(st);
+  }
+
+  /** Дома-получатели города, к которым ездят маршруты (их станции у двора — в линиях). */
+  private routedReceivers(town: Town): Set<number> {
     const keep = new Set<number>();
     for (const st of this.stations.values()) if (st.kind === 'dock' && st.dock?.town === town.id && this.stationLines(st.id).length) keep.add(st.dock.b);
-    town.receivers = pickReceivers(town, this.time, keep, (b) => this.docks.reachable(b, maxTruck(b)));
-    for (const st of this.stations.values()) if (st.townIds.includes(town.id) || st.dock?.town === town.id) this.computeCatchment(st);
+    return keep;
+  }
+
+  /**
+   * АЗС и оптовая база в городе (world/retail.zoneRetail; только партии с получателями): в начале новой партии — из
+   * любых подходящих домов, при росте — только из новых (fresh). Получателей в маршрутах не трогает.
+   */
+  private zoneRetailTown(town: Town, fresh?: ReadonlySet<number>): void {
+    if (!this.retail) return;
+    if (fresh && !fresh.size) return;
+    zoneRetail(town, { score: (b, kind) => this.retailSiteScore(town, b, kind), keep: this.routedReceivers(town), fresh });
+  }
+
+  /**
+   * Пригодность дома под АЗС или оптовую базу: к сквозному двору подъедет Фура (21 м); АЗС — на улице, что уводит за
+   * город (выезд) или к трассе, на проспекте, у края застройки; база — у магистрали (ближе к ней — лучше), на участке не
+   * уже DEPOT_MIN_W. Не подходит — null.
+   */
+  private retailSiteScore(town: Town, b: TownBuilding, kind: 'fuel' | 'depot'): number | null {
+    if (kind === 'depot' && b.fp.w < DEPOT_MIN_W) return null;
+    const probe: TownBuilding = { ...b, form: kind };
+    if (!this.docks.reachable(probe, RETAIL.maxLength.yard)) return null;
+    const net = this.roads.net;
+    const front = lotFrame(b)(0, -b.fp.h / 2 - LOT_SETBACK);
+    let street: Corridor | null = null;
+    let sd = Infinity;
+    for (const c of net.corridorsNear(front, 40)) {
+      const d = c.lut.closest(front).d;
+      if (d < sd) {
+        sd = d;
+        street = c;
+      }
+    }
+    if (!street) return null;
+    const big = (c: Corridor) => c.cls === 'highway' || c.cls === 'motorway';
+    const wide = street.cls === 'avenue' || big(street);
+    const far = Math.max(dist(net.node(street.a).pos, town.center), dist(net.node(street.b).pos, town.center));
+    const exit = far > town.radius * 1.05 || nearHighway(net, street, this.drivewayIds());
+    const edge = edgeOf(town, b.fp.center);
+    if (kind === 'fuel') return (exit ? 3 : 0) + (wide ? 2 : 0) - Math.abs(edge - 0.85);
+    let hw = 400;
+    for (const c of net.corridorsNear(b.fp.center, 400)) if (big(c) || !this.streetLike(c)) hw = Math.min(hw, c.lut.closest(b.fp.center).d);
+    return (exit ? 2 : 0) + (wide ? 1 : 0) - hw / 100 - Math.abs(edge - 0.9);
   }
 
   /** Получатели в охвате станции (у станции у получателя — он сам): город, запись получателя, дом. */
@@ -7055,11 +7125,34 @@ export class Game implements BuildContext {
       if (!st.townIds.includes(town.id) || !town.receivers?.length) continue;
       const byId = new Map(town.buildings.map((b) => [b.id, b]));
       for (const r of town.receivers) {
+        // Оптовая база — склад-пересадка, а не потребитель: станция рядом ей не сдаёт.
+        if (r.depot) continue;
         const b = byId.get(r.b);
         if (b && dist(b.fp.center, st.fp.center) <= R) out.push({ town, r, b });
       }
     }
     return out;
+  }
+
+  /**
+   * Склад оптовой базы (дом b): насколько полон (0…1 от RETAIL.depotStock) и какого груза больше всего; станции у
+   * базы ещё нет — пусто.
+   */
+  depotStock(b: number): { fill: number; top: CargoType | null; stored: number; cargo: Partial<Record<CargoType, number>> } {
+    for (const st of this.stations.values()) {
+      if (st.kind !== 'dock' || st.dock?.b !== b) continue;
+      const stored = this.stationStored(st);
+      const top = FREIGHT.filter((c) => (st.cargo[c] ?? 0) >= 1).sort((x, y) => (st.cargo[y] ?? 0) - (st.cargo[x] ?? 0))[0] ?? null;
+      return { fill: Math.min(1, stored / RETAIL.depotStock), top, stored, cargo: st.cargo };
+    }
+    return { fill: 0, top: null, stored: 0, cargo: {} };
+  }
+
+  /** Станция у оптовой базы (склад-пересадка, world/retail.Receiver.depot). */
+  isDepotDock(st: Station): boolean {
+    if (st.kind !== 'dock' || !st.dock) return false;
+    const town = this.towns.find((t) => t.id === st.dock!.town);
+    return !!(town && receiverOf(town, st.dock.b)?.depot);
   }
 
   /** Получатель под точкой p (дом-магазин, рынок, контора, склад из подобранных): город, запись, дом. */
@@ -7123,13 +7216,111 @@ export class Game implements BuildContext {
     return st;
   }
 
-  /** Станции у получателей, которых нет ни в одном маршруте (кроме keep — их ещё прокладывают): убрать. */
+  /**
+   * Станции у получателей, которых нет ни в одном маршруте (кроме keep — их ещё прокладывают): убрать. Станция у
+   * оптовой базы с грузом на складе остаётся: груз не пропадает, пока маршрут к базе прокладывают заново.
+   */
   pruneDocks(keep: readonly number[] = []): void {
     for (const st of [...this.stations.values()]) {
       if (st.kind !== 'dock' || keep.includes(st.id) || this.stationLines(st.id).length) continue;
+      if (this.stationStored(st) >= 1 && this.isDepotDock(st)) continue;
       this.stations.delete(st.id);
       this.journal.add('dock-', { st: st.id });
     }
+  }
+
+  /**
+   * Что везёт маршрут по станциям stops — для «🛒 все магазины с этим грузом»: продукция предприятий у его станций,
+   * которую принимают магазины, иначе груз на складе оптовой базы маршрута, иначе то, что берёт уже стоящий в нём
+   * магазин. Ничего — null.
+   */
+  shopCargo(stops: readonly number[]): CargoType | null {
+    if (!this.retail) return null;
+    const sts = stops.map((id) => this.stations.get(id)).filter((s): s is Station => !!s);
+    const taken = (c: CargoType) => this.towns.some((t) => t.receivers?.some((r) => !r.depot && r.cargo.includes(c)));
+    for (const st of sts) if (st.serves.cargo && st.kind !== 'dock') for (const ind of this.stationIndustries(st)) if (taken(ind.info.produces)) return ind.info.produces;
+    for (const st of sts) {
+      if (!this.isDepotDock(st)) continue;
+      const c = FREIGHT.filter((x) => (st.cargo[x] ?? 0) >= 1 && taken(x)).sort((a, b) => (st.cargo[b] ?? 0) - (st.cargo[a] ?? 0))[0];
+      if (c) return c;
+    }
+    for (const st of sts) for (const { r } of this.stationReceivers(st)) if (!r.depot && r.cargo[0]) return r.cargo[0];
+    return null;
+  }
+
+  /**
+   * «🛒 все магазины с этим грузом» (редактор маршрута): получатели груза cargo одного города, которых ещё нет среди
+   * stops, — по порядку ближайшего соседа от последней остановки. Город — тот, чей магазин уже в маршруте, иначе —
+   * ближайший к последней остановке. Грузовику длины L (самый длинный на маршруте) не влезть во двор или не подъехать —
+   * мимо. Только расчёт: станции у них ставит addShopStops.
+   */
+  shopTargets(stops: readonly number[], cargo: CargoType, L?: number): TownBuilding[] {
+    if (!this.retail) return [];
+    const sts = stops.map((id) => this.stations.get(id)).filter((s): s is Station => !!s);
+    const inLine = new Set(sts.filter((s) => s.kind === 'dock').map((s) => s.dock!.b));
+    const last = sts[sts.length - 1]?.fp.center;
+    if (!last) return [];
+    const shopsOf = (t: Town) =>
+      (t.receivers ?? [])
+        .filter((r) => !r.depot && r.cargo.includes(cargo) && !inLine.has(r.b))
+        .map((r) => t.buildings.find((x) => x.id === r.b))
+        // Узел станции у двора — по самому длинному грузовику, что туда заезжает (dockFor): к нему тоже подъехать.
+        .filter(
+          (b): b is TownBuilding =>
+            !!b && this.docks.reachable(b, maxTruck(b)) && (L === undefined || (L <= maxTruck(b) + 1e-6 && this.docks.reachable(b, L))),
+        );
+    // Город, чей магазин с этим грузом уже в маршруте, — он (все его магазины уже в нём — добавлять нечего).
+    const docked = this.towns.find(
+      (t) => sts.some((s) => s.kind === 'dock' && s.dock!.town === t.id) && t.receivers?.some((r) => !r.depot && r.cargo.includes(cargo) && inLine.has(r.b)),
+    );
+    const towns = docked ? [docked] : this.towns.filter((t) => shopsOf(t).length);
+    if (!towns.length) return [];
+    const near = (t: Town) => Math.min(...shopsOf(t).map((b) => dist(b.fp.center, last)));
+    const town = docked ?? towns.sort((a, b) => near(a) - near(b) || a.id - b.id)[0];
+    const left = shopsOf(town);
+    const out: TownBuilding[] = [];
+    let at = last;
+    while (left.length) {
+      let k = 0;
+      for (let i = 1; i < left.length; i++) if (dist(left[i].fp.center, at) < dist(left[k].fp.center, at) - 1e-9) k = i;
+      const b = left.splice(k, 1)[0];
+      out.push(b);
+      at = b.fp.center;
+    }
+    return out;
+  }
+
+  /** Самый длинный грузовик маршрута (у ещё не купленных — нет): по нему — какие дворы годятся. */
+  lineTruckLength(line: Line): number | undefined {
+    let L: number | undefined;
+    for (const id of line.vehicles) {
+      const m = MODELS[this.fleet.get(id)?.model ?? 'truck'];
+      if (m.mode === 'road' && m.carries === 'freight') L = Math.max(L ?? 0, m.spec.length);
+    }
+    return L;
+  }
+
+  /**
+   * «🛒 все магазины с этим грузом» в маршрут line (или в прокладываемый — stops без line): станции у магазинов
+   * (shopTargets) — в конец, по порядку. Возвращает id станций; маршрут не принял — пусто.
+   */
+  addShopStops(stops: readonly number[], line?: Line): number[] {
+    const cargo = this.shopCargo(stops);
+    if (!cargo) return [];
+    const ids: number[] = [];
+    for (const b of this.shopTargets(stops, cargo, line ? this.lineTruckLength(line) : undefined)) {
+      const st = this.dockFor(b);
+      if (st) ids.push(st.id);
+    }
+    if (!line || !ids.length) return ids;
+    const rules = line.rules ?? line.stops.map(() => null);
+    const problem = this.setLineRoute(line.id, [...line.stops, ...ids], [...rules, ...ids.map(() => null)]);
+    if (problem) {
+      this.pruneDocks();
+      return [];
+    }
+    this.journal.add('shops+', { l: line.id, c: cargo, st: ids });
+    return ids;
   }
 
   /** Узел станции у получателя — по нынешней сети (за двором по ходу полосы); не подъехать — −1. */
@@ -7172,8 +7363,8 @@ export class Game implements BuildContext {
     if (!b) return 'reach';
     if (m.spec.length > maxTruck(b) + 1e-6) return 'long';
     if (!this.docks.reachable(b, m.spec.length, m.spec.width)) return 'reach';
-    // Рампа одна: занята, пока другой грузовик во дворе или уже сворачивает к нему (docks.rampBusy).
-    if (this.docks.rampBusy(b.id, v.id)) return 'busy';
+    // Рампы (у рынка две) заняты, пока другие грузовики во дворе или уже сворачивают к ним (docks.rampBusy).
+    if (this.docks.rampBusy(b, v.id, m.spec.length, m.spec.width)) return 'busy';
     return null;
   }
 
@@ -7259,6 +7450,8 @@ export class Game implements BuildContext {
   /** Склад станции: сколько груза всех видов может на ней лежать — база, пристройки и склады-здания (STORAGE). */
   stationStorage(st: Station): number {
     if (st.kind === 'rail') return STORAGE.rail;
+    // Оптовая база: её склад — RETAIL.depotStock.
+    if (st.kind === 'dock' && this.isDepotDock(st)) return RETAIL.depotStock;
     return STORAGE.base + storageSlots(st) * STORAGE.per;
   }
 
@@ -8129,16 +8322,23 @@ export class Game implements BuildContext {
     // Рост за месяц — по его длине (MONTH_SCALE): за секунду город растёт так же, как при коротком месяце.
     // Предприятия рядом: вредные тормозят рост, рабочие места — прибавляют (enterprises.ts; «Готовые» — ×1).
     town.growthAcc += town.population * (0.003 + 0.025 * satisfaction) * MONTH_SCALE * this.mods.growth(town.id) * this.enterprises.growth(town);
-    const ctx = this.worldContext();
+    // Рост к снабжённым магазинам (docs/RETAIL.md): улицы у получателя с грузом на складе — раньше в очереди, у пустого
+    // RETAIL.dryMonths месяцев — дома не прибавляются (только когда город уже снабжают: иначе он не рос бы совсем).
+    const { pulls, blocks } = this.retailGrowth(town);
+    const blocked = blocks.length ? (p: Vec) => blocks.some((q) => dist(p, q) < RETAIL.block) : undefined;
+    const growCtx = (): WorldContext => ({ ...this.worldContext(), blocked });
+    const ctx = growCtx();
     const reach = this.townReach(town);
+    const hadIds = new Set(town.buildings.map((b) => b.id));
     // Город растёт вдоль любых своих улиц, включая построенные игроком, — ближние к центру раньше.
     // Кроме магистралей, съездов и дорог развязок — к ним город не пристраивается.
+    const pulled = (s: Corridor) => pulls.some((p) => dist(p, s.lut.closest(p).point) <= RETAIL.pull);
     const streets = this.roads.net
       .corridorsNear(town.center, reach)
       .filter((s) => this.streetLike(s) && !this.streetFull(s.id))
       .map((s) => ({ s, hit: s.lut.closest(town.center) }))
       .filter(({ hit }) => hit.d <= reach && this.ownedBy(town, hit.point))
-      .map(({ s, hit }) => ({ s, d: hit.d + this.rng.range(0, TOWN_GROWTH.jitter) }))
+      .map(({ s, hit }) => ({ s, d: hit.d + this.rng.range(0, TOWN_GROWTH.jitter) - (pulls.length && pulled(s) ? RETAIL.pullBonus : 0) }))
       .sort((a, b) => a.d - b.d);
     // Новые дома расселяются сразу, а рост расходуется по жильцам (GROW.perPerson за жителя или рабочее место):
     // частный дом на 4 жителя дешевле панельного на сотню — село растёт в домах так же быстро по доле, как город.
@@ -8169,17 +8369,43 @@ export class Game implements BuildContext {
       const seg = this.growStreet(town, reach);
       if (!seg) break;
       // Сеть после стройки — новая: дома ставим уже по ней.
-      spend(fillStreet(this.worldContext(), town, seg, 0.8, Math.max(1, Math.floor(town.growthAcc / GROW.unit)), reach));
+      spend(fillStreet(growCtx(), town, seg, 0.8, Math.max(1, Math.floor(town.growthAcc / GROW.unit)), reach));
       town.growthAcc = Math.max(0, town.growthAcc);
     }
     recountPopulation(town);
     measureTown(town);
     // Село доросло до города, город — до большого: новые парки и скверы — на том пустом, что осталось.
     if (townTier(town) !== tier) placeParks(town, parkSite(this.worldContext()));
-    // Получатели — по новому населению (больше жителей — больше магазинов, их доли нормы меньше).
+    // АЗС и оптовая база — из новых деловых домов (партии с получателями); получатели — по новому населению (больше
+    // жителей — больше магазинов, их доли нормы меньше).
+    if (this.retail) this.zoneRetailTown(town, new Set(town.buildings.filter((b) => b.kind === 'com' && !hadIds.has(b.id)).map((b) => b.id)));
     this.refreshReceivers(town);
     if (town.population > before && satisfaction >= 1)
       this.notify(`${town.name} растёт: ${town.population} жителей`, undefined, { kind: 'town', refs: [{ type: 'town', id: town.id }] });
+  }
+
+  /**
+   * Рост к снабжённым магазинам (партии с получателями; в конце месяца, перед ростом): пустые месяц подряд — в счёт
+   * (world/retail.markDry); pulls — здания получателей с грузом на складе (улицы у них — раньше), blocks — пустых
+   * RETAIL.dryMonths месяцев (дома рядом не прибавляются), но только если город уже снабжают (хоть один получатель
+   * принимал груз): неснабжённый город растёт, как прежде.
+   */
+  private retailGrowth(town: Town): { pulls: Vec[]; blocks: Vec[] } {
+    if (!this.retail || !town.receivers?.length) return { pulls: [], blocks: [] };
+    markDry(town, this.time);
+    const byId = new Map(town.buildings.map((b) => [b.id, b]));
+    const pulls: Vec[] = [];
+    const blocks: Vec[] = [];
+    const fed = town.receivers.some((r) => r.fed);
+    for (const r of town.receivers) {
+      const b = byId.get(r.b);
+      if (!b) continue;
+      const rc = roofCenter(b);
+      const p = lotFrame(b)(rc.x, rc.y);
+      if (receiverStocked(town, r, this.time)) pulls.push(p);
+      else if (fed && receiverDry(r)) blocks.push(p);
+    }
+    return { pulls, blocks };
   }
 
   private streetFull(id: number): boolean {
@@ -10500,7 +10726,7 @@ export class Game implements BuildContext {
       return;
     }
     // С получателями (world/retail.ts): город принимает только то, что берут получатели в охвате станции, и
-    // потребности без получателей (топливо — до АЗС).
+    // потребности без получателей (топливо в городе без АЗС).
     for (const { r } of this.stationReceivers(st)) for (const c of r.cargo) st.accepts.add(c);
     for (const t of this.towns) if (towns.has(t.id)) for (const c of legacyCargo(t)) st.accepts.add(c);
   }
@@ -10518,32 +10744,40 @@ export class Game implements BuildContext {
 
   /**
    * Подсказки «что с чем соединять»: ближайшие потребители продукции и поставщики сырья.
-   * direction 'out' — куда везти отсюда, 'in' — откуда везти сюда.
+   * direction 'out' — куда везти отсюда, 'in' — откуда везти сюда. Город с получателями груза (world/retail.ts) —
+   * его магазины (рынок, АЗС…) по отдельности, у каждого — своё место и расстояние: везти — к ближайшим, а не в центр.
    */
   partners(target: Industry | Town, perCargo = 2): Partner[] {
     const result: Partner[] = [];
     const from = 'fp' in target ? target.fp.center : target.center;
+    type Place = Omit<Partner, 'cargo' | 'direction' | 'distance'>;
+    const places = (cargo: CargoType, c: Industry | Town): Place[] => {
+      if ('fp' in c) return [{ pos: c.fp.center, name: c.info.name, ref: { type: 'industry', id: c.id } }];
+      const shops = this.retail ? (c.receivers ?? []).filter((r) => !r.depot && r.cargo.includes(cargo)) : [];
+      const out: Place[] = [];
+      for (const r of shops) {
+        const b = c.buildings.find((x) => x.id === r.b);
+        if (!b) continue;
+        const rc = roofCenter(b);
+        out.push({ pos: lotFrame(b)(rc.x, rc.y), name: this.dockName(b), ref: { type: 'town', id: c.id }, b: b.id });
+      }
+      return out.length ? out : [{ pos: c.center, name: c.name, ref: { type: 'town', id: c.id } }];
+    };
     const add = (cargo: CargoType, direction: 'in' | 'out', candidates: (Industry | Town)[]) => {
       candidates
-        .map((c) => ({ c, d: dist(from, 'fp' in c ? c.fp.center : c.center) }))
+        .flatMap((c) => places(cargo, c))
+        .map((p) => ({ p, d: dist(from, p.pos) }))
         .sort((a, b) => a.d - b.d)
         .slice(0, perCargo)
-        .forEach(({ c, d }) =>
-          result.push({
-            cargo,
-            direction,
-            pos: 'fp' in c ? c.fp.center : c.center,
-            name: 'fp' in c ? c.info.name : c.name,
-            ref: 'fp' in c ? { type: 'industry', id: c.id } : { type: 'town', id: c.id },
-            distance: d,
-          }),
-        );
+        .forEach(({ p, d }) => result.push({ cargo, direction, ...p, distance: d }));
     };
     // Заброшенные — не партнёры, пока их не восстановят; себя (предприятие на месте) не показываем.
     const live = this.industries.filter((i) => !i.ruin && i !== target);
     if ('fp' in target) {
       const product = target.info.produces;
-      add(product, 'out', [...live.filter((i) => i.info.accepts.includes(product)), ...this.towns.filter((t) => t.demands.includes(product))]);
+      // Город — если просит груз или его принимает получатель (рыбу — рынок).
+      const towns = this.towns.filter((t) => t.demands.includes(product) || (this.retail && t.receivers?.some((r) => !r.depot && r.cargo.includes(product))));
+      add(product, 'out', [...live.filter((i) => i.info.accepts.includes(product)), ...towns]);
       for (const c of target.info.accepts) add(c, 'in', live.filter((i) => i.info.produces === c));
     } else {
       for (const c of target.demands) add(c, 'in', live.filter((i) => i.info.produces === c));

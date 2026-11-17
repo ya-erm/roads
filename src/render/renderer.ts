@@ -3813,7 +3813,9 @@ export class Renderer {
         if (!b || !inView(b.fp.center, 40)) continue;
         const hot = r.cargo.some((c) => focus.has(c));
         if (!close && !hot) continue;
-        const list = hot ? r.cargo.filter((c) => focus.has(c)) : r.cargo;
+        // Оптовая база — один значок (выбранный груз или больше всего лежащий на её складе), кольцо — склад базы.
+        const depot = r.depot ? game.depotStock(r.b) : null;
+        const list = hot ? r.cargo.filter((c) => focus.has(c)).slice(0, depot ? 1 : undefined) : depot ? [depot.top ?? r.cargo[0]] : r.cargo;
         const reach = game.docks.reachable(b, maxTruck(b));
         const size = (hot ? 24 : 19) / z;
         // Над крышей здания (не над двором, где грузовик); несколько грузов — в ряд вдоль улицы.
@@ -3841,21 +3843,35 @@ export class Renderer {
           if (!reach) ctx.globalAlpha *= 0.55;
           this.icon(cargoImage(c), p, size * 0.72);
           ctx.globalAlpha = focus.size && !hot ? 0.35 : 1;
-          // Кольцо — наполненность склада: по часовой от верха.
-          const fill = stockFill(town, r, c, game.time);
-          const color = fill >= 0.5 ? '#2e9d57' : fill >= 0.2 ? '#e0a800' : '#d64545';
+          // Кольцо — наполненность склада: по часовой от верха. У оптовой базы — синее, без мигания: пустая база —
+          // не беда, это склад-пересадка.
+          const fill = depot ? depot.fill : stockFill(town, r, c, game.time);
+          const color = depot ? '#3f74b5' : fill >= 0.5 ? '#2e9d57' : fill >= 0.2 ? '#e0a800' : '#d64545';
           ctx.lineWidth = 2.6 / z;
           ctx.strokeStyle = 'rgba(60,66,76,0.35)';
           ctx.beginPath();
           ctx.arc(p.x, p.y, size / 2 + 1.2 / z, 0, Math.PI * 2);
           ctx.stroke();
-          if (reach && (fill >= 0.2 || this.blinkOn)) {
+          if (reach && (depot ? fill > 0 : fill >= 0.2 || this.blinkOn)) {
             ctx.strokeStyle = color;
             ctx.beginPath();
             ctx.arc(p.x, p.y, size / 2 + 1.2 / z, -Math.PI / 2, -Math.PI / 2 + Math.max(0.08, fill) * Math.PI * 2);
             ctx.stroke();
           }
-          if (fill < 0.2) this.moving = true;
+          if (!depot && fill < 0.2) this.moving = true;
+          if (depot) {
+            // Значок пересадки «⇄» — база, а не магазин.
+            const q = { x: p.x - size * 0.4, y: p.y - size * 0.4 };
+            ctx.fillStyle = '#3f74b5';
+            ctx.beginPath();
+            ctx.arc(q.x, q.y, size * 0.24, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `${size * 0.34}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('⇄', q.x, q.y);
+          }
           if (!reach) {
             // Не подъехать: ⛔ у кружка.
             const q = { x: p.x + size * 0.38, y: p.y - size * 0.38 };
