@@ -1227,6 +1227,15 @@ button.icon.menu-back {
   display: none;
 }
 
+/* Метка строки подсказки (data-tip-marks) — квадратик того же вида, что в легенде графика (.legend i). */
+.tip-float .tip-mark {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 5px;
+}
+
 /* Горячая клавиша в подсказке (data-tip-keys) — светлым значком на тёмной плашке. */
 .tip-float kbd {
   display: inline-block;

@@ -179,7 +179,7 @@ import { crewCardHtml } from './crewCard';
 import { workTrainCardHtml } from './workTrainCard';
 import { carTripHtml } from './carTrip';
 import { SERVICES } from '../game/services';
-import { incomeChart, monthTick } from './incomeChart';
+import { incomeChart, incomeLegend, monthTick } from './incomeChart';
 import { money, planPrice, projectMoneyWarning } from '../input/labels';
 import { WALK_BAN_TEXT } from '../lanes/crosswalk';
 import { walkSignSvg } from '../render/walkSign';
@@ -4845,7 +4845,7 @@ export class Hud {
         <button class="small" data-action="loan-repay" ${g.loan <= 0 || g.freeMoney < Math.min(ECONOMY.loanStep, g.loan) ? 'disabled' : ''}>Погасить ${money(
           Math.min(ECONOMY.loanStep, g.loan || ECONOMY.loanStep),
         )}</button></div></div>
-      <h4>За год <span class="legend"><i style="background:#3fae6a"></i>доход <i style="background:#e5534b"></i>расход</span></h4>${chart}
+      <h4>За год ${incomeLegend()}</h4>${chart}
       <h4>Маршруты по прибыли за прошлый месяц</h4>${lines || '<p class="muted">Маршрутов пока нет.</p>'}`;
   }
 

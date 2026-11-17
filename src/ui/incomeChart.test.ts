@@ -1,28 +1,41 @@
 import { describe, expect, it } from 'vitest';
-import { incomeChart, monthTip } from './incomeChart';
+import { EXPENSE_COLOR, INCOME_COLOR, incomeChart, incomeLegend, MONTH_TIP_MARKS, monthTip } from './incomeChart';
 
 describe('График доход / расход по месяцам', () => {
   const months = [
     { label: 'Сен 2004', income: 12_500, expense: 4_000 },
     { label: 'Окт 2004', income: 0, expense: 1_200 },
   ];
+  // Разряды toLocaleString — неразрывным пробелом.
+  const nb = (s: string) => s.replace(/[  ]/g, ' ');
 
-  it('каждая колонка месяца несёт data-tip с месяцем, доходом, расходом и прибылью', () => {
+  it('подсказка — три строки: доход, расход, прибыль, без месяца', () => {
+    expect(nb(monthTip(months[0])).split('\n')).toEqual(['доход $12 500', 'расход $4 000', 'прибыль +$8 500']);
+  });
+
+  it('в минусе — «убыток» без лишнего знака, нули настоящие', () => {
+    expect(nb(monthTip(months[1])).split('\n')).toEqual(['доход $0', 'расход $1 200', 'убыток $1 200']);
+    expect(monthTip({ label: 'Ноя 2004', income: 500, expense: 500 }).split('\n')[2]).toBe('прибыль +$0');
+  });
+
+  it('каждая колонка месяца несёт data-tip со строками и метки цветов легенды', () => {
     const html = incomeChart(months);
     const tips = [...html.matchAll(/data-tip="([^"]*)"/g)].map((m) => m[1]);
     expect(tips).toHaveLength(2);
-    expect(tips[0]).toContain('Сен 2004');
-    expect(tips[0]).toContain('доход $12');
-    expect(tips[0]).toContain('расход $4');
-    expect(tips[0]).toContain('прибыль +$8');
+    // Перевод строки в атрибуте — ссылкой &#10;: SVG-разбор не схлопнет его в пробел.
+    expect(tips[0].split('&#10;')).toHaveLength(3);
+    expect(tips[0]).not.toContain('Сен');
+    expect(html.match(/data-tip-marks="([^"]*)"/)?.[1]).toBe(MONTH_TIP_MARKS);
+    expect(MONTH_TIP_MARKS.split('|')).toEqual([INCOME_COLOR, EXPENSE_COLOR, '']);
     expect(html).not.toContain('<title>');
   });
 
-  it('в нулевой месяц подсказка показывает настоящие нули и убыток', () => {
-    const tip = monthTip(months[1]);
-    expect(tip).toContain('доход $0');
-    expect(tip).toContain('расход $1');
-    expect(tip).toContain('прибыль −$1');
+  it('квадратики легенды — тех же цветов, что столбики', () => {
+    const html = incomeChart(months);
+    expect(html).toContain(`fill="${INCOME_COLOR}"`);
+    expect(html).toContain(`fill="${EXPENSE_COLOR}"`);
+    expect(incomeLegend()).toContain(`background:${INCOME_COLOR}`);
+    expect(incomeLegend()).toContain(`background:${EXPENSE_COLOR}`);
   });
 
   it('колонка ловит наведение по всей высоте', () => {

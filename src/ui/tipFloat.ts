@@ -3,7 +3,8 @@
  * появляется с задержкой). Одна на всю страницу, в body и с position: fixed — её не обрезает прокрутка панели; у краёв
  * экрана она сдвигается внутрь, нет места сверху — встаёт под элементом (tipPlacement). Длинный текст переносится
  * (max-width в CSS). data-tip-end — по правому краю элемента. data-tip-keys — горячие клавиши через «|», они
- * встают после текста значками <kbd>.
+ * встают после текста значками <kbd>. data-tip-marks — цвета через «|»: текст по «\n» встаёт строками, у каждой —
+ * квадратик своего цвета (пустой — без квадратика, строка выровнена с остальными).
  */
 import { tipPlacement } from '../render/tooltipLayout';
 
@@ -17,7 +18,7 @@ export function installTips(doc: Document = document): HTMLElement {
   let anchor: HTMLElement | SVGElement | null = null;
   let pointer = { x: -1, y: -1 };
   let frame = 0;
-  /** Что сейчас на плашке: текст и клавиши. */
+  /** Что сейчас на плашке: текст, клавиши и метки строк. */
   let shown = '';
 
   const hide = () => {
@@ -33,9 +34,23 @@ export function installTips(doc: Document = document): HTMLElement {
     const text = anchor?.dataset.tip;
     if (!anchor || !text) return hide();
     const keys = anchor.dataset.tipKeys ?? '';
-    if (shown !== `${text}\n${keys}`) {
-      shown = `${text}\n${keys}`;
-      el.textContent = text;
+    const marks = anchor.dataset.tipMarks;
+    if (shown !== `${text}\n${keys}\n${marks}`) {
+      shown = `${text}\n${keys}\n${marks}`;
+      if (marks === undefined) el.textContent = text;
+      else {
+        // Строки с цветными квадратиками, как у легенды графика: цвет — по порядку строк, пустой — без метки.
+        const colors = marks.split('|');
+        el.textContent = '';
+        text.split('\n').forEach((line, i) => {
+          const row = el.appendChild(doc.createElement('div'));
+          const mark = row.appendChild(doc.createElement('i'));
+          mark.className = 'tip-mark';
+          if (colors[i]) mark.style.background = colors[i];
+          else mark.style.visibility = 'hidden';
+          row.append(line);
+        });
+      }
       // Горячие клавиши — значками <kbd> после текста: «` или ⌘⇧B».
       keys
         .split('|')
