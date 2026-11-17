@@ -49,7 +49,7 @@ import { aimAlong, railDirs } from './aim';
 import { dirArrow, failText, laneFlowText, money, NO_MONEY, planPrice, projectMoneyWarning, rebuildPrice, riseLabel, shiftLabel, signedMetres, structureHeightText } from './labels';
 import { nodeDeck } from '../lanes/deck';
 import type { MoveProject } from '../game/moveProject';
-import { onOldAxis } from '../game/roadbuild';
+import { onOldAxis, shortOfMoney } from '../game/roadbuild';
 import { jointOf, mergeEdit, mergePreview, mergeProblem, splitEdit, splitProblem, toggleJointEdit } from '../lanes/nodeEdit';
 import type { CornerHandle } from '../lanes/corners';
 import { corridorHalf, streetFace } from '../world/worldgen';
@@ -194,6 +194,16 @@ function levelName(level: number): string {
   return (LEVELS.find((l) => l.level === level)?.name ?? 'земля').toLowerCase();
 }
 
+/**
+ * План из кэша превью — с деньгами сейчас: денег в ключе кэша нет, а «Не хватает денег» — последняя проверка плана
+ * (с ней все прочие пройдены), так что её можно пересчитать отдельно.
+ */
+export function withBudget<P extends { ok: boolean; reason?: string; cost: number; project?: unknown }>(plan: P, budget: number): P {
+  if (plan.reason !== undefined && plan.reason !== NO_MONEY) return plan;
+  const short = shortOfMoney(plan.cost, budget, plan.project);
+  return short === !plan.ok ? plan : { ...plan, ok: !short, reason: short ? NO_MONEY : undefined };
+}
+
 /** Профиль стройки в подсказке: уклон вдоль полотна, насыпь и выемка. */
 function profileNote(p?: ProfileSummary): string {
   return p && (Math.max(p.grade, Math.abs(p.slope ?? 0)) >= 0.005 || Math.max(p.cut, p.fill) >= 0.5) ? ` · ${profileText(p)}` : '';
@@ -271,6 +281,14 @@ export class Controller {
   private pasteDrag: { at: Vec } | null = null;
   private copyCache: { key: string; frag: Fragment | null } | null = null;
   private pasteCache: { frag: Fragment; key: string; plan: PastePlan } | null = null;
+  /**
+   * Превью инструментов у курсора — планы стройки, сноса, содержимое рамки: overlay() зовут каждый кадр, а пока игра
+   * идёт, кадров много и без ввода. Пока ключ тот же (previewKey), каждый план считается один раз (memo). Денег в
+   * ключе нет — их проверяет withBudget.
+   */
+  private preview: { game: Game | null; key: string; plans: Map<string, unknown> } = { game: null, key: '', plans: new Map() };
+  /** Счётчик ввода (мышь, клавиши): нажатие и отпускание меняют начатое в инструменте, не сдвигая курсор. */
+  private inputs = 0;
   /** Снос: по одному объекту (можно вести мышью), рамкой или пристроенную полосу. */
   bulldozeMode: 'point' | 'area' | 'lane' = 'point';
   /** Кисть рельефа: что делает и какого размера. */
@@ -408,6 +426,10 @@ export class Controller {
     const shared = sharedRoadProject(game);
     this.projectTools = shared.tools;
     this.moveProject = shared.edits;
+    // Любой ввод — новый ключ превью (memo): нажатие, отпускание и клавиши меняют начатое, не сдвигая курсор.
+    const input = () => void this.inputs++;
+    for (const type of ['mousedown', 'wheel', 'dragover', 'drop'] as const) canvas.addEventListener(type, input);
+    for (const type of ['mousemove', 'mouseup', 'keydown', 'keyup', 'blur'] as const) window.addEventListener(type, input);
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('mousedown', (e) => this.onDown(e));
     window.addEventListener('mousemove', (e) => this.onMove(e));
@@ -3019,8 +3041,9 @@ export class Controller {
   private moveDragOverlay(o: ToolOverlay, p: Vec, project: boolean): void {
     const g = this.game();
     const rt = this.roadTools;
-    const plan = project ? this.projectWith(rt.moveEdit(p, this.shift, this.freeAim)) : rt.movePlan(p, this.shift, [], this.freeAim);
-    if (!plan) return;
+    const moved = this.memo('move', () => (project ? this.projectWith(rt.moveEdit(p, this.shift, this.freeAim)) : rt.movePlan(p, this.shift, [], this.freeAim)));
+    if (!moved) return;
+    const plan = withBudget(moved, g.budget);
     const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
     const what = rt.handle ? 'Перо · ' : rt.corner ? 'Угол · ' : rt.bend !== null ? 'Изогнуть · ' : rt.slide !== null ? 'Примыкание · ' : '';
     const turn = rt.corner && plan.net ? rt.cornerSign(plan.net) : null;
@@ -3602,9 +3625,51 @@ export class Controller {
 
   // ---------- Оверлей ----------
 
+  /** От чего зависят планы превью: курсор, инструмент с режимом и типом дороги, клавиши, начатое, ввод и сеть. */
+  private previewKey(): string {
+    const g = this.game();
+    const rt = this.roadTools;
+    const h = this.hover;
+    return [
+      h ? `${h.x},${h.y}` : '',
+      this.action,
+      this.roadMode,
+      this.bulldozeMode,
+      this.drawMode,
+      this.level,
+      JSON.stringify(this.spec),
+      `${+this.shift}${+this.alt}${+this.ctrl}`,
+      JSON.stringify(rt.start),
+      JSON.stringify(rt.control),
+      rt.rise,
+      `${+rt.auto}${+rt.reverse}${+rt.park}`,
+      this.dragLimit,
+      this.camera.zoom,
+      this.inputs,
+      g.net.version,
+      g.roads.net.version,
+      g.terrain.version,
+      this.moveProject.stamp,
+    ].join('|');
+  }
+
+  /** План превью what: при том же ключе (previewKey) — из кэша. */
+  private memo<T>(what: string, compute: () => T): T {
+    const plans = this.preview.plans;
+    if (!plans.has(what)) plans.set(what, compute());
+    return plans.get(what) as T;
+  }
+
+  /** План превью из кэша — с деньгами сейчас. */
+  private afford<P extends { plan: RoadPlan }>(res: P | null): P | null {
+    return res && { ...res, plan: withBudget(res.plan, this.game().budget) };
+  }
+
   overlay(): ToolOverlay {
     const g = this.game();
     this.syncMoveBase();
+    const key = this.previewKey();
+    if (this.preview.game !== g || this.preview.key !== key) this.preview = { game: g, key, plans: new Map() };
     if (this.chain?.kind === 'node' && !g.net.nodes.has(this.chain.nodeId)) this.chain = null;
     if (this.chain?.kind === 'split' && !g.net.segments.has(this.chain.segId)) this.chain = null;
     this.lineDraft = this.lineDraft.filter((id) => g.stations.has(id));
@@ -3696,7 +3761,8 @@ export class Controller {
     const turnSel = this.turnDrag ? null : this.turnTarget();
     if (turnSel) o.turnHandle = { pos: turnSel.pos, pivot: turnSel.pivot, active: false };
     // Рамка сноса: пока тянем — по курсору, после — ждёт подтверждения.
-    const area = this.pendingArea ?? (this.areaStart && p ? { a: this.areaStart, b: p, contents: g.areaContents(this.areaStart, p) } : null);
+    const from = this.areaStart;
+    const area = this.pendingArea ?? (from && p ? { a: from, b: p, contents: this.memo('area', () => g.areaContents(from, p)) } : null);
     if (area) {
       const c = area.contents;
       o.area = { a: area.a, b: area.b, segs: c.segs, corridors: c.corridors, fps: [...c.buildings.map((x) => x.fp), ...c.stations.map((x) => x.fp)] };
@@ -3714,8 +3780,9 @@ export class Controller {
       return o;
     }
     // Тянут знак скорости: дорога под ним (до перекрёстков, с Cmd / Ctrl — один участок) — как будет, подпись — новая скорость.
-    if (this.dragLimit !== null) {
-      const res = this.roadTools.limitPlan(p, this.dragLimit, this.snapRadius * 0.3, this.ctrl);
+    const limit = this.dragLimit;
+    if (limit !== null) {
+      const res = this.afford(this.memo('limit', () => this.roadTools.limitPlan(p, limit, this.snapRadius * 0.3, this.ctrl)));
       const part = res && res.parts > 1 ? (this.ctrl ? ' · только этот участок' : ' · Cmd/Ctrl — только этот участок') : '';
       if (res) this.showRoadPlan(o, res.plan, `${res.was} → ${this.dragLimit} км/ч${part}`);
       else o.label = { text: `${this.dragLimit} км/ч — отпустите на дороге`, ok: true };
@@ -3750,7 +3817,8 @@ export class Controller {
             o.label = { text: 'Укажите изгиб кривой', ok: true };
             break;
           }
-          const plan = rt.buildPlan(p, this.spec, this.drawMode, this.snapRadius, this.shift, this.freeAim);
+          const built = this.memo('road', () => rt.buildPlan(p, this.spec, this.drawMode, this.snapRadius, this.shift, this.freeAim));
+          const plan = built && withBudget(built, g.budget);
           if (plan) {
             const length = plan.net ? plan.changed.reduce((s, id) => s + (plan.net!.corridors.get(id)?.length ?? 0), 0) : 0;
             const aligned = rt.hint ? ` · ${rt.hint}` : '';
@@ -3881,7 +3949,8 @@ export class Controller {
         if (lanesProject && this.moveProject.hasWork && !rt.laneDrag && !rt.dragging) this.showLaneProject(o, this.moveProject.plan());
         // Тянут узел или перо нового съезда: дорога с этой правкой — проектом, перья — в новой форме.
         if (lanesProject && rt.dragging) {
-          const plan = this.projectWith(rt.moveEdit(p, this.shift, this.freeAim));
+          const moved = this.memo('laneMove', () => this.projectWith(rt.moveEdit(p, this.shift, this.freeAim)));
+          const plan = moved && withBudget(moved, g.budget);
           if (plan) {
             this.showLaneProject(o, plan);
             const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
@@ -3905,7 +3974,7 @@ export class Controller {
         const tipAt = rt.laneTipPos();
         if (tipAt) {
           // По точкам: следующий кусок до курсора — как построенный; кружок — где сейчас конец полосы.
-          const res = rt.laneStepPlan(p, this.spec, this.snapRadius);
+          const res = this.afford(this.memo('laneStep', () => rt.laneStepPlan(p, this.spec, this.snapRadius)));
           if (res) {
             const text = `${res.step?.what ?? ''} · ${lanesProject ? 'проект ' : ''}${money(res.plan.cost)}`;
             if (rt.park) this.showParkPlan(o, res.plan, text);
@@ -3941,7 +4010,7 @@ export class Controller {
           }
           // 🅿️: курсор на полосе — клик сделает её стоянкой или вернёт движению; у края — тянуть новую стоянку.
           if (rt.park) {
-            const t = rt.parkTogglePlan(p);
+            const t = this.afford(this.memo('parkToggle', () => rt.parkTogglePlan(p)));
             if (t) {
               this.showParkPlan(o, t.plan, `${t.to === 'park' ? '🅿️ под парковку' : '↺ вернуть движению'} · ${money(t.plan.cost)}`);
               if (!t.plan.ok) o.curbLanes = [{ corridor: t.corridor, lane: t.lane, color: 'red' }];
@@ -3965,7 +4034,7 @@ export class Controller {
           break;
         }
         // Тянут: что построится (вдоль, съезд, въезд — и через стыки), возврат — если полоса короче.
-        const res = rt.lanePlan(this.spec);
+        const res = this.afford(this.memo('lane', () => rt.lanePlan(this.spec)));
         if (res) {
           const text = `${res.what} · ${lanesProject ? 'проект ' : ''}${res.plan.cost < 0 ? `+${money(-res.plan.cost)}` : money(res.plan.cost)}`;
           if (rt.park) this.showParkPlan(o, res.plan, text);
@@ -3976,7 +4045,7 @@ export class Controller {
       }
       case 'upgrade': {
         // Будущая дорога на месте полотна (ширина, полосы, направление); нельзя — красным.
-        const res = this.roadTools.upgradePlan(p, this.spec, this.snapRadius * 0.3);
+        const res = this.afford(this.memo('upgrade', () => this.roadTools.upgradePlan(p, this.spec, this.snapRadius * 0.3)));
         if (res) this.showRoadPlan(o, res.plan, res.plan.cost ? money(res.plan.cost) : 'Перестроить');
         break;
       }
@@ -4127,7 +4196,7 @@ export class Controller {
       case 'bulldoze': {
         // Снос куска: как будет после — сеть без него, края куска — красными точками, подпись — возврат или причина.
         if (this.spanStart) {
-          const plan = this.spanPlan(p);
+          const plan = this.memo('span', () => this.spanPlan(p));
           const c = g.roads.net.corridors.get(this.spanStart.corridor);
           if (plan) this.showRoadPlan(o, plan, `Снести кусок · +${money(-plan.cost)}${g.streetBanAt(this.spanStart.corridor) ? ` · ${STREET_BAN_MARK}` : ''}`);
           if (c) o.points = [this.spanStart.s, c.lut.closest(p).s].map((s) => ({ pos: c.lut.pointAt(s), color: '#e8483f', r: 5 }));
@@ -4146,7 +4215,7 @@ export class Controller {
         }
         if (this.bulldozeMode === 'lane') {
           // Участок полосы под курсором (до ближайших стыков, как участок пути) — красным.
-          const res = this.roadTools.laneBulldozePlan(p);
+          const res = this.memo('laneBulldoze', () => this.roadTools.laneBulldozePlan(p));
           if (!res) {
             o.label = { text: 'Наведите на полосу', ok: true };
             break;
@@ -4201,7 +4270,7 @@ export class Controller {
           o.label = { text: `+${money(g.builder.segmentCost(seg) * 0.5)}`, ok: true };
           break;
         }
-        const road = this.roadTools.bulldozePlan(p, this.snapRadius * 0.3);
+        const road = this.memo('bulldoze', () => this.roadTools.bulldozePlan(p, this.snapRadius * 0.3));
         if (road) {
           o.corridor = { id: road.corridor.id, color: 'red' };
           o.label = { text: `+${money(-road.plan.cost)}${g.streetBanAt(road.corridor.id) ? ` · ${STREET_BAN_MARK}` : ''}`, ok: true };

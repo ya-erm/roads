@@ -181,6 +181,35 @@ describe('«Двигать»: двойной клик по узлу — изло
   });
 });
 
+describe('Превью инструмента у курсора — из кэша', () => {
+  it('курсор и сеть те же — план дороги считается раз; деньги — отдельно, без пересчёта; сдвинули курсор — заново', () => {
+    const { game, o } = kinkGame();
+    const { c, move } = play(game);
+    c.setRoadMode('build');
+    c.projectTools.on.road = false;
+    const rt = c.roadTools;
+    let plans = 0;
+    const buildPlan = rt.buildPlan.bind(rt);
+    rt.buildPlan = (...args) => (plans++, buildPlan(...args));
+    rt.begin(add(o, { x: 0, y: 100 }), 12);
+    move(add(o, { x: 200, y: 100 }));
+    const label = c.overlay().label?.text;
+    expect(label).toMatch(/\d+ м/);
+    for (let i = 0; i < 5; i++) expect(c.overlay().label?.text).toBe(label);
+    expect(plans).toBe(1);
+    // Денег не стало — подпись «Не хватает денег» сразу, план тот же.
+    const money = game.money;
+    game.money = -1e9;
+    expect(c.overlay().label).toMatchObject({ ok: false, text: expect.stringMatching(/Не хватает денег/) });
+    game.money = money;
+    expect(c.overlay().label).toMatchObject({ ok: true, text: label });
+    expect(plans).toBe(1);
+    move(add(o, { x: 220, y: 100 }));
+    c.overlay();
+    expect(plans).toBe(2);
+  });
+});
+
 describe('«🅿️ Площадка» (в «Станции»)', { timeout: 120_000 }, () => {
   it('клик у улицы ставит площадку и выбирает её; ручка угла — шире; клик по краю у улицы — ворота; Ctrl+Z — назад', () => {
     const game = freshGame({ ...NEW_GAME_SETTINGS, seed: 1, size: 'medium' });
