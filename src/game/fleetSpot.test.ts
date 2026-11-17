@@ -43,13 +43,13 @@ describe('Место автобуса у остановки', () => {
   it('вдоль бордюра со стороны улицы, носы — через длину автобуса и зазор (по умолчанию 18), носом вдоль него', () => {
     const a = stopBerth(fp, { x: 0, y: 30 }, 0, 2);
     const b = stopBerth(fp, { x: 0, y: 30 }, 1, 2);
-    // Бордюр — в 2 от навеса; борт автобуса шириной 4.25 — в CURB_GAP от бордюра.
-    expect(a.pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 4.25 / 2);
-    expect(stopBerth(fp, { x: 0, y: 30 }, 0, 1, 3.7).pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 3.7 / 2);
+    // Бордюр — в 2 от навеса; борт автобуса шириной 4.8 (по умолчанию) — в CURB_GAP от бордюра.
+    expect(a.pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 4.8 / 2);
+    expect(stopBerth(fp, { x: 0, y: 30 }, 0, 1, 4.2).pos.y).toBeCloseTo(3 + 2 + CURB_GAP + 4.2 / 2);
     expect(b.pos.y).toBeCloseTo(a.pos.y);
     expect(b.pos.x - a.pos.x).toBeCloseTo(18);
     // Сочленённые (22 м) — через 24: друг на друга не заходят.
-    expect(stopBerth(fp, { x: 0, y: 30 }, 1, 2, 4.25, 24).pos.x - stopBerth(fp, { x: 0, y: 30 }, 0, 2, 4.25, 24).pos.x).toBeCloseTo(24);
+    expect(stopBerth(fp, { x: 0, y: 30 }, 1, 2, 4.8, 24).pos.x - stopBerth(fp, { x: 0, y: 30 }, 0, 2, 4.8, 24).pos.x).toBeCloseTo(24);
     expect(a.pos.x + b.pos.x).toBeCloseTo(0);
     expect(Math.abs(a.dir.x)).toBeCloseTo(1);
     expect(a.dir).toEqual(b.dir);

@@ -812,7 +812,7 @@ function keepMainRoad(net: LaneNet, nodePos: Vec): void {
  */
 const GROW = { perPerson: 0.75, min: 2, unit: 20 };
 
-/** Легковушка жителя: до ≈130 км/ч на автомагистрали; 7,5 × 3 (4,5 × 1,8 м) — world/houseAccess.CAR_SIZE. */
+/** Легковушка жителя: до ≈130 км/ч на автомагистрали; 7,5 × 3,6 (4,5 × 2,2 м) — world/houseAccess.CAR_SIZE. */
 const CAR_SPEC = { kind: 'car' as const, length: CAR_SIZE.l, width: CAR_SIZE.w, maxSpeed: 60, accel: 10 };
 /** Сквозной путь ж/д вокзала (первая платформа), если у него есть боковые пути; у конечной сквозного нет. */
 const throughOf = (st: Station): number | undefined => (st.platforms.length > 1 && !st.terminal ? st.platforms[0] : undefined);
