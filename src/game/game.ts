@@ -105,6 +105,8 @@ import {
   receiverDry,
   receiverOf,
   receiverStocked,
+  roomFor,
+  stockCap,
   stockFill,
   unloadTime,
   zoneRetail,
@@ -6590,7 +6592,10 @@ export class Game implements BuildContext {
         }
       }
       // Груз остался в кузове: здесь его не принимают — видно, если маршрут настроен не так.
-      if (v.cargo && v.amount > 0) trip.keep = { [v.cargo]: v.amount };
+      if (v.cargo && v.amount > 0) {
+        trip.keep = { [v.cargo]: v.amount };
+        this.noteKept(v, st, line, what);
+      } else if (st.kind !== 'dock' && !v.dropped) this.retailNotes.back.delete(line.id);
       this.wagonsUnloaded(v);
       const taken = this.loadFreight(v, st, line, v.dropped);
       if (taken > 0 && v.cargo) trip.take = { [v.cargo]: taken };
@@ -7053,6 +7058,36 @@ export class Game implements BuildContext {
     return retailOn(this.settings);
   }
 
+  /**
+   * Для советника (advisor.ts), только партии с получателями; не сохраняется. kept — маршрут привёз груз на станцию в
+   * городе, которому он нужен, а там его не принимают (в охвате нет магазинов с ним): последний раз — где, что, когда.
+   * back — грузовик вернулся на станцию погрузки с грузом, не сдав его: все магазины маршрута полны (сколько раз подряд).
+   */
+  readonly retailNotes = {
+    kept: new Map<number, { st: number; cargo: CargoType; amount: number; at: number }>(),
+    back: new Map<number, { cargo: CargoType; n: number; at: number }>(),
+  };
+
+  /** Груз остался в кузове на остановке st (what — что с ним делали здесь): отметки для советника (retailNotes). */
+  private noteKept(v: FleetVehicle, st: Station, line: Line, what: 'deliver' | 'store' | null): void {
+    if (!this.retail || !v.cargo || what !== null || st.kind === 'dock' || !st.serves.cargo) return;
+    const cargo = v.cargo;
+    if (v.loadedAt !== st.id) {
+      // Город просит этот груз, а станция его не берёт: возят «в город», как раньше, — надо в магазины.
+      if (this.towns.some((t) => st.townIds.includes(t.id) && t.demands.includes(cargo)))
+        this.retailNotes.kept.set(line.id, { st: st.id, cargo, amount: v.amount, at: this.time });
+      return;
+    }
+    // Вернулся туда, где грузили, почти полным, а на маршруте есть кому сдать: магазины полны — машин больше, чем надо.
+    const sells = line.stops.some((id) => this.stations.get(id)?.accepts.has(cargo));
+    if (!sells || v.amount < vehicleCapacity(v) * 0.5) {
+      this.retailNotes.back.delete(line.id);
+      return;
+    }
+    const was = this.retailNotes.back.get(line.id);
+    this.retailNotes.back.set(line.id, { cargo, n: (was?.n ?? 0) + 1, at: this.time });
+  }
+
   /** Грузовик у рампы получателя ждёт на прошлой остановке, пока она не освободится: с какого времени. */
   private rampWaitSince = new Map<number, number>();
   /** Грузовик выезжает со двора получателя: к какой остановке маршрута поедет. */
@@ -7444,12 +7479,19 @@ export class Game implements BuildContext {
    */
   private nextStop(v: FleetVehicle, line: Line): number | null {
     const n = line.stops.length;
+    // Первый получатель, которому везти нечего (кузов пуст, склад полон), — на случай, если дальше заехать некуда.
+    let idle: number | null = null;
     for (let k = 1; k < n; k++) {
       const i = (v.stop + k) % n;
       const st = this.stations.get(line.stops[i]);
       if (!st || st.kind !== 'dock') {
         this.rampWaitSince.delete(v.id);
         return i;
+      }
+      if (this.dockIdle(v, line, i, st)) {
+        // Магазину везти нечего — мимо, не заезжая во двор (заезд — с полминуты): развозка по тем, где есть место.
+        if (!this.dockRefusal(v, st)) idle ??= i;
+        continue;
       }
       const why = this.dockRefusal(v, st);
       if (!why) {
@@ -7468,7 +7510,42 @@ export class Game implements BuildContext {
       }
       this.rampWaitSince.delete(v.id);
     }
-    return null;
+    // Везти некуда, кроме получателей, которым сейчас нечего везти, — к первому из них, по порядку маршрута.
+    if (idle !== null) this.rampWaitSince.delete(v.id);
+    return idle;
+  }
+
+  /**
+   * Грузовику v на остановке i (станция у получателя st) везти нечего: кузов пуст, в нём то, чего получатель не берёт,
+   * или на складе места меньше RETAIL.worthVisit склада (и весь остаток кузова не влезет) — заезд во двор дольше, чем
+   * стоят крохи. Оптовая база — не мимо (там и грузят), и остановка с правилом выгрузки или погрузки — тоже: так её
+   * настроил игрок.
+   */
+  private dockIdle(v: FleetVehicle, line: Line, i: number, st: Station): boolean {
+    if (!this.retail || this.isDepotDock(st)) return false;
+    const rule = this.stopRule(line, i);
+    if (rule.unload !== 'auto' || rule.load !== 'auto') return false;
+    // В кузове крохи — сперва догрузиться: заезд ради одной-двух единиц дольше, чем они того стоят.
+    if (!v.cargo || v.amount < Math.max(1, vehicleCapacity(v) * RETAIL.crumbs)) return true;
+    const at = this.stationReceivers(st)[0];
+    if (!at) return true;
+    // Место на складе — за вычетом того, что уже везут туда другие грузовики (едут к этому магазину).
+    const room = roomFor(at.town, at.r, v.cargo, this.time) - this.dockIncoming(st, v);
+    if (room < 1) return true;
+    return room < Math.floor(v.amount) && room < stockCap(at.town, at.r, v.cargo) * RETAIL.worthVisit;
+  }
+
+  /** Сколько груза уже везут к получателю st другие грузовики (едут к нему или заезжают во двор, ещё не сдав). */
+  private dockIncoming(st: Station, except: FleetVehicle): number {
+    let n = 0;
+    for (const w of this.fleet.values()) {
+      if (w === except || !w.cargo || w.amount <= 0 || w.state === 'departing') continue;
+      if (this.lines.get(w.lineId)?.stops[w.stop] !== st.id) continue;
+      // Уже у рампы и сдал — не в счёт (state 'loading' после выгрузки: кузов уже легче).
+      if (w.state === 'loading' && this.docks.inYard(w.id) && !this.docks.entering(w.id)) continue;
+      n += w.amount;
+    }
+    return n;
   }
 
   /**
@@ -8453,12 +8530,18 @@ export class Game implements BuildContext {
     return out;
   }
 
-  /** Доля закрытых потребностей города за прошлый месяц (0…1) — по норме того месяца (растёт с населением). */
+  /**
+   * Доля закрытых потребностей города за прошлый месяц (0…1) — по норме того месяца (растёт с населением). С
+   * получателями (retail) — по доле привезённого: норму закрывают все магазины вместе, и линия к половине из них
+   * даёт половину прибавки к росту, а не ничего (docs/RETAIL.md, этап 4).
+   */
   townSatisfaction(town: Town, month: 'last' | 'current' = 'last'): number {
     const src = month === 'last' ? town.lastSupplied : town.supplied;
     const need = monthTownNeed(town, month);
+    if (!town.demands.length) return 0;
+    if (this.retail) return town.demands.reduce((s, c) => s + Math.min(1, (src[c] ?? 0) / Math.max(1, need)), 0) / town.demands.length;
     const ok = town.demands.filter((c) => (src[c] ?? 0) >= need).length;
-    return town.demands.length ? ok / town.demands.length : 0;
+    return ok / town.demands.length;
   }
 
   /**

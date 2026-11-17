@@ -15,7 +15,7 @@ import { TERM_SCALE } from '../src/config';
 import { dist } from '../src/core/vec';
 import { Game } from '../src/game/game';
 import { MODELS } from '../src/game/transport';
-import { posOf, resolve, routeCost, townById } from '../src/scenario/analysis';
+import { posOf, resolve, RETAIL_TRIP, routeCost, shopDelivery, townById } from '../src/scenario/analysis';
 import { assess } from '../src/scenario/feasibility';
 import type { Scenario } from '../src/scenario/manager';
 import type { ArchetypeId, Difficulty, Objective } from '../src/scenario/types';
@@ -58,7 +58,9 @@ function mainCost(game: Game, o: Objective): number | null {
     const to = resolve(game, p.to);
     if (!to) return null;
     const from = game.industries.filter((i) => i.info.produces === p.cargo).sort((x, y) => dist(x.fp.center, posOf(to)) - dist(y.fp.center, posOf(to)))[0];
-    return from ? routeCost(dist(from.fp.center, posOf(to)), 3, 'truck') : null;
+    // В магазины — развозка: на машину больше.
+    const extra = shopDelivery(game, to, p.cargo) ? RETAIL_TRIP.extra : 0;
+    return from ? routeCost(dist(from.fp.center, posOf(to)), 3 + extra, 'truck') : null;
   }
   return MODELS.bus.price * 2;
 }

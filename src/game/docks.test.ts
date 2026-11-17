@@ -274,6 +274,9 @@ describe('Получатели грузов в партии', { timeout: 240_000
     if (game.docks.rampCount(b, TRUCK.length, TRUCK.width) === 1) expect(game.docks.rampBusy(b, v.id)).toBe(false);
     w.stop = 0;
     w.state = 'departing';
+    // С грузом для B (пустой в магазин и не поехал бы — этап 4).
+    w.cargo = 'food';
+    w.amount = 10;
     expect(inner(game).nextStop(w, line)).toBeNull();
     (game as unknown as { time: number }).time += RETAIL.rampWait - 1;
     expect(inner(game).nextStop(w, line)).toBeNull();
@@ -290,13 +293,18 @@ describe('Получатели грузов в партии', { timeout: 240_000
     const game = freshGame(RETAIL_WORLD);
     game.openModelTier(3, true);
     const { line } = shopLine(game);
+    // С грузом для магазина B: пустой туда и не поехал бы (этап 4).
     const semi = game.buyVehicle(line.id, 'truck2')!;
     semi.stop = 0;
     semi.state = 'departing';
+    semi.cargo = 'food';
+    semi.amount = 10;
     expect(inner(game).nextStop(semi, line)).toBe(1);
     const long = game.buyVehicle(line.id, 'truck3')!;
     long.stop = 0;
     long.state = 'departing';
+    long.cargo = 'food';
+    long.amount = 10;
     expect(inner(game).nextStop(long, line)).toBeNull();
     expect(line.problem).toMatch(/не влезет/);
   });

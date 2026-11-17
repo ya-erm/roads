@@ -9,6 +9,7 @@ import {
   legacyCargo,
   markDry,
   maxTruck,
+  needClosable,
   pickReceivers,
   RETAIL,
   type RetailSites,
@@ -325,5 +326,34 @@ describe('Получатели грузов, этап 3: АЗС, оптовая 
     r.dry = 2;
     const next = pickReceivers(t, 0);
     expect(receiverOf({ receivers: next }, r.b)).toMatchObject({ dry: 2, fed: true });
+  });
+});
+
+describe('Получатели грузов: баланс (этап 4)', () => {
+  it('к кому не подъехать — не получатель, пока есть досягаемые; нет ни одного досягаемого — как прежде', () => {
+    const t = city(4000, ['food']);
+    const market = t.buildings[0];
+    const shop = t.buildings[1];
+    // Досягаемы только рынок и один магазин, а нужно трое: третьего (недосягаемого) не берут — норма на двоих.
+    const list = pickReceivers(t, 0, new Set(), (b) => b === market || b === shop).filter((r) => r.cargo.includes('food'));
+    expect(list.map((r) => r.b).sort()).toEqual([market.id, shop.id].sort());
+    t.receivers = list;
+    expect(receiverNeed(t, list[0], 'food') + receiverNeed(t, list[1], 'food')).toBeCloseTo(townNeed(4000));
+    // Не подъехать ни к кому — подбор как прежде (на карте значок ⛔ «не подъехать»).
+    expect(pickReceivers(t, 0, new Set(), () => false).filter((r) => r.cargo.includes('food')).length).toBe(3);
+  });
+
+  it('норму можно закрыть, если досягаемые получатели примут её за месяц (расход с запасом ×1,35)', () => {
+    const t = city(4000, ['food']);
+    t.receivers = pickReceivers(t, 0);
+    const food = t.receivers.filter((r) => r.cargo.includes('food'));
+    expect(food.length).toBe(3);
+    const market = food.find((r) => r.w === RETAIL.weight.market)!;
+    expect(needClosable(t, 'food', () => true)).toBe(true);
+    // Рынок (половина веса) один нормы не примет; рынок и магазин (¾) — примут: 0,75 × 1,35 ≥ 1.
+    expect(needClosable(t, 'food', (r) => r === market)).toBe(false);
+    expect(needClosable(t, 'food', (r) => r === market || r === food.find((x) => x !== market))).toBe(true);
+    // Груза без получателей — по-старому: можно.
+    expect(needClosable(t, 'goods', () => false)).toBe(true);
   });
 });

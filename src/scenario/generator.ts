@@ -14,7 +14,8 @@ import { CARGO, CargoType, type IndustryType, TOWN_CARGO } from '../world/cargo'
 import { buildCost, freeDeposits, harmClass, isRaw } from '../world/enterprise';
 import { TOWN_NEED } from '../world/entities';
 import { townNeed } from '../world/townSupply';
-import type { Industry, Town } from '../world/entities';
+import type { Industry, Town, TownBuilding } from '../world/entities';
+import { maxTruck, type Receiver, receiverUse, stockAt, stockCap } from '../world/retail';
 import { mapDims, mapScaleOf, TOWN_RANGE, type WorldSettings } from '../world/settings';
 import {
   bigTowns,
@@ -40,6 +41,8 @@ import {
   buildEffort,
   buildReach,
   live,
+  RETAIL_TRIP,
+  shopDelivery,
   Supply,
   supplyEffort,
   townPairs,
@@ -93,7 +96,9 @@ export function fastMonths(game: Game, p: ObjectiveParams, months: number, diffi
     d = dist(src.fp.center, at);
     model = newestLike('truck', game.modelOpen);
     const made = src.info.accepts.length ? src.producedLast : rawOutput(src, 1);
-    rate = Math.min(fleet * perVehicleMonth(d, MODELS[model].capacity), made);
+    // В магазины — развозка: круг длиннее (RETAIL_TRIP.round).
+    const round = shopDelivery(game, to, p.cargo) ? RETAIL_TRIP.round : 1;
+    rate = Math.min((fleet * perVehicleMonth(d, MODELS[model].capacity)) / round, made);
   } else if (p.kind === 'passengers' && p.towns) {
     const [a, b] = p.towns.map((id) => game.towns.find((t) => t.id === id));
     if (!a || !b) return null;
@@ -424,6 +429,8 @@ function phaseA(sc: Scenario, term: Term, paxMain: boolean, freight: FreightPlan
       },
     );
   }
+  // Получатели грузов: продукцию завода первой грузовой линии — по двум магазинам ближнего города.
+  if (freight) shopsGoal(sc, freight, term);
   // «Строит игрок»: построить первое предприятие — завод для добычи без сбыта или добычу для завода без сырья.
   if (sc.game.enterprises.on) {
     const target = buildTarget(sc.game);
@@ -449,6 +456,55 @@ function phaseA(sc: Scenario, term: Term, paxMain: boolean, freight: FreightPlan
   );
 }
 
+/** Город для «Развезите по двум магазинам» — не дальше этого от завода (≈2,1 км). */
+const SHOPS_GOAL_RANGE = 3500;
+
+/**
+ * Этап A, партия с получателями (docs/RETAIL.md): завод первой грузовой линии (сырьё → завод) делает то, что берут
+ * магазины ближнего города, — цель развезти его по двум ближним к заводу магазинам, к которым подъехать. Они
+ * подсвечены на карте со стрелкой (params.shops). Объём — не больше, чем примут эти два за срок (расход и свободное
+ * место), и не больше трети того, что даст цепочка.
+ */
+function shopsGoal(sc: Scenario, freight: FreightPlan, term: Term): void {
+  const game = sc.game;
+  if (!game.retail) return;
+  const plant = freight.supply.to;
+  const cargo = plant.info.produces;
+  const towns = game.towns
+    .filter((t) => shopDelivery(game, t, cargo))
+    .map((t) => ({ t, d: dist(t.center, plant.fp.center) }))
+    .filter((x) => x.d <= SHOPS_GOAL_RANGE)
+    .sort((a, b) => a.d - b.d);
+  // Сначала сырьё на завод — продукция пойдёт на звено позже.
+  const work = Math.max(0, term.months - RAMP - TERM_SCALE);
+  for (const { t, d } of towns) {
+    const shops = (t.receivers ?? [])
+      .filter((r) => !r.depot && r.cargo.includes(cargo))
+      .map((r) => ({ r, b: t.buildings.find((x) => x.id === r.b) }))
+      .filter((x): x is { r: Receiver; b: TownBuilding } => !!x.b && game.docks.reachable(x.b, maxTruck(x.b)))
+      .sort((a, b) => dist(a.b.fp.center, plant.fp.center) - dist(b.b.fp.center, plant.fp.center))
+      .slice(0, 2);
+    if (shops.length < 2) continue;
+    const room = shops.reduce((s, x) => s + receiverUse(t, x.r, cargo) * work + stockCap(t, x.r, cargo) - stockAt(t, x.r, cargo, game.time), 0);
+    const amount = round10(Math.min(cargoPotential(game, cargo, t.center, term.months) / 3, room * 0.8) * sc.difficulty.demand);
+    if (amount < 20) continue;
+    const o = sc.tryObjective(
+      { kind: 'deliver', cargo, amount, to: refOf(t), shops: shops.map((x) => x.b.id) },
+      {
+        role: 'goal',
+        phase: 0,
+        months: term.months,
+        fast: term.fast,
+        why: `${plant.name} будет делать «${CARGO[cargo].name}» — их ждут магазины города ${t.name} (${km(d)}). Развезите по двум подсвеченным 🛒: в «Маршруте» кликните по магазину — грузовик заедет во двор к рампе.`,
+        // Вдвое меньше стартового контракта за единицу: линия короткая, по городу (с развозкой — ×RETAIL_TRIP.round).
+        reward: { money: roundMoney(amount * CARGO[cargo].rate * 15 * RETAIL_TRIP.round * sc.rewardFactor) },
+        related: [refOf(plant), refOf(t)],
+      },
+    );
+    if (o) return;
+  }
+}
+
 /** Стартовый контракт: продукт городу, которому он нужен, — если всю цепочку можно собрать на карте. */
 function startContract(sc: Scenario): void {
   const game = sc.game;
@@ -471,6 +527,8 @@ function startContract(sc: Scenario): void {
   const build = buildAllowance(game, raw ? [raw.d, o.d] : [o.d]);
   // Не меньше базовой нормы города за прежние три месяца (6 мин) — без роста с населением: объём контракта прежний.
   const amount = round10(Math.max(TOWN_NEED * 3 * TERM_SCALE, Math.min(cargoPotential(game, o.cargo, o.town.center, months) * 0.25, 160) * sc.difficulty.demand));
+  // В магазины — развозка (круг ×RETAIL_TRIP.round): и награда больше во столько же.
+  const shops = shopDelivery(game, o.town, o.cargo);
   sc.tryObjective(
     { kind: 'deliver', cargo: o.cargo, amount, to: refOf(o.town) },
     {
@@ -479,8 +537,10 @@ function startContract(sc: Scenario): void {
       months: months + build,
       fast: build ? months : undefined,
       offer: true,
-      why: `Торговая сеть города ${o.town.name} ищет перевозчика: нужны «${CARGO[o.cargo].name}». Их делает ${o.plant.name} (${km(o.d)}) — из сырья, которое ещё нужно туда привезти.`,
-      reward: { money: roundMoney(amount * CARGO[o.cargo].rate * 30 * sc.rewardFactor), reputation: 4 },
+      why: `Торговая сеть города ${o.town.name} ищет перевозчика: нужны «${CARGO[o.cargo].name}». Их делает ${o.plant.name} (${km(o.d)}) — из сырья, которое ещё нужно туда привезти.${
+        shops ? ` ${shopsHint(o.town, o.cargo, o.d)}` : ''
+      }`,
+      reward: { money: roundMoney(amount * CARGO[o.cargo].rate * 30 * sc.rewardFactor * (shops ? RETAIL_TRIP.round : 1)), reputation: 4 },
       fail: { reputation: -6 },
       related: [refOf(o.town), refOf(o.plant)],
     },
@@ -729,6 +789,19 @@ function phaseC(sc: Scenario): void {
   supplyObjective(sc, served.length ? served.slice(0, 3) : bigTowns(game).slice(0, 2), { phase: 2, months, inRow: 2 * TERM_SCALE, money: 100_000 });
 }
 
+/** Подвоз дальше этого (по прямой) — подсказка про оптовую базу: фурой на неё, оттуда — развозка (≈2,1 км). */
+const DEPOT_HINT = 3500;
+
+/**
+ * Подсказка к заданию в город с получателями (docs/RETAIL.md): груз берут магазины, развезти по всем — кнопкой
+ * «🛒 все магазины»; издалека (d) и есть оптовая база — фурой на неё.
+ */
+export function shopsHint(town: Town, cargo?: CargoType, d = 0): string {
+  const depot = town.receivers?.some((r) => r.depot && (!cargo || r.cargo.includes(cargo)));
+  const far = depot && d >= DEPOT_HINT ? ' Далеко — фурой на оптовую базу ⇄, оттуда Грузовиками по магазинам.' : '';
+  return `Груз берут магазины 🛒 — развезите по всем: «🛒 все магазины» в маршруте.${far}`;
+}
+
 /** Какую часть потребностей города просить закрыть: доля по сложности, не меньше одной. */
 const SUPPLY_SHARE: Record<string, number> = { easy: 0.5, normal: 0.6, hard: 0.75 };
 
@@ -769,13 +842,15 @@ function supplyObjective(
   const why = all
     ? `${t.name} ждёт всё, что ему нужно: ${list(t.demands)} — ${per}.`
     : `${t.name} нужны ${list(t.demands)}. Закройте любые ${needs} — ${per}; проще всего: ${list(easiest.map((x) => x.c))}.`;
+  // С получателями — норму закрывают магазины вместе: подсказка, куда везти.
+  const shops = easiest.some((x) => shopDelivery(game, t, x.c)) ? ` ${shopsHint(t)}` : '';
   return sc.tryObjective(
     { kind: 'supply', town: t.id, months: o.inRow, needs },
     {
       role: o.role ?? 'goal',
       phase: o.phase,
       months: o.months,
-      why: `${why}${o.growth ? ' Снабжённый город растёт быстрее.' : ''}`,
+      why: `${why}${shops}${o.growth ? ' Снабжённый город растёт быстрее.' : ''}`,
       reward: { money: o.money, effects: o.growth ? [{ kind: 'growth', target: t.id, factor: 1.5, months: 8 * TERM_SCALE }] : undefined },
       related: [refOf(t)],
     },

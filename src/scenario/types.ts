@@ -26,8 +26,12 @@ export type ObjectiveKind = 'deliver' | 'passengers' | 'profit' | 'supply' | 'in
 
 /** Условия выполнения по типам — всё проверяется по реальному состоянию симуляции. */
 export type ObjectiveParams =
-  /** Доставить груз: конкретному получателю или куда угодно (to = null); from — только продукцию этого предприятия. */
-  | { kind: 'deliver'; cargo: CargoType; amount: number; to: Ref | null; from?: number }
+  /**
+   * Доставить груз: конкретному получателю или куда угодно (to = null); from — только продукцию этого предприятия.
+   * shops — дома-магазины города to, куда развезти (docs/RETAIL.md, этап A): подсвечены на карте со стрелкой; в
+   * счёт — всё, что приняли магазины города.
+   */
+  | { kind: 'deliver'; cargo: CargoType; amount: number; to: Ref | null; from?: number; shops?: number[] }
   /** Перевезти пассажиров: между двумя городами (в любую сторону) или всего. */
   | { kind: 'passengers'; amount: number; towns: [number, number] | null }
   /** Операционная прибыль не меньше amount в месяц, months месяцев подряд. */

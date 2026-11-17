@@ -40,13 +40,24 @@ export const RETAIL = {
   /**
    * Расход получателя — его доля нормы × consume: с запасом, чтобы снабжая все магазины город закрывал месяц не впритык
    * (приём — целыми единицами, грузовик приходит не к концу месяца), а излишек переносился (townSupply.supplyCarry).
+   * Было 1,15 — при ровной развозке (одна линия «все магазины», 4 Грузовика, норма 20) выходило 18 / 22 / 15 за месяц:
+   * магазины полны к началу месяца, и приём упирается в расход. С 1,35 норма закрывается и тогда, когда грузовик к
+   * одному магазину опоздал, а снабжая получателей с ¾ веса нормы (рынок и магазин из трёх: 0,75 × 1,35 ≥ 1) — тоже
+   * (docs/RETAIL.md, этап 4).
    */
-  consume: 1.15,
+  consume: 1.35,
   /** У рампы: столько секунд и ещё perUnit за каждую единицу. */
   unloadBase: 6,
   unloadPer: 0.4,
   /** Рампа занята — следующий грузовик ждёт на прошлой остановке до стольких секунд, потом пропускает получателя. */
   rampWait: 20,
+  /**
+   * Грузовик заезжает к получателю, только если на складе есть место хотя бы на эту долю (или на весь остаток кузова):
+   * заезд во двор и выезд — ~45 с, почти месяц; за крохами — мимо, к следующему (game.dockIdle, docs/RETAIL.md, этап 4).
+   */
+  worthVisit: 0.3,
+  /** В кузове меньше этой доли вместимости — к магазинам не заезжает, сперва догрузиться (крохи не стоят заезда). */
+  crumbs: 0.2,
   /**
    * Грузовик длиннее — во двор не заедет: к магазинам — Грузовик (12 м) и Грузовик II (15 м), к складам — и Фура (21 м).
    */
@@ -284,6 +295,10 @@ export function pickReceivers(
       take(pool[best].b);
       pool.splice(best, 1);
     }
+    // К кому не подъехать — не получатель, пока есть досягаемые (и не стоит в линии): иначе его доля нормы не закрылась
+    // бы никогда (закрыть норму — значит снабдить почти всех: расход — с запасом всего ×RETAIL.consume).
+    const near = chosen.filter((b) => keep.has(b.id) || reach(b));
+    if (near.length && near.length < chosen.length) chosen.splice(0, chosen.length, ...near);
     for (const b of chosen) {
       const r = out.get(b.id);
       if (r) {
@@ -459,6 +474,17 @@ export function townRoom(town: Pick<Town, 'receivers' | 'population'>, c: CargoT
   let free = 0;
   for (const r of list) free += stockCap(town, r, c) - stockAt(town, r, c, time);
   return townNeed(town.population) * RETAIL.consume * Math.max(0, months) + free;
+}
+
+/**
+ * Норму груза c можно закрыть: получатели, к которым подъехать (ok), примут за месяц не меньше нормы — их расход с
+ * запасом RETAIL.consume. Получателей груза нет — принимает по-старому: можно.
+ */
+export function needClosable(town: Pick<Town, 'receivers' | 'population'>, c: CargoType, ok: (r: Receiver) => boolean): boolean {
+  const list = (town.receivers ?? []).filter((r) => !r.depot && r.cargo.includes(c));
+  if (!list.length) return true;
+  const take = list.filter(ok).reduce((s, r) => s + receiverUse(town, r, c), 0);
+  return take >= townNeed(town.population) - 1e-9;
 }
 
 /** Секунд у рампы на выгрузку amount единиц. */

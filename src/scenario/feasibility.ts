@@ -8,7 +8,7 @@ import { buildTime, freeDeposits, isRaw } from '../world/enterprise';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
 import { CARGO } from '../world/cargo';
-import { townRoom } from '../world/retail';
+import { maxTruck, needClosable, type Receiver, townRoom } from '../world/retail';
 import {
   cargoPotential,
   hasMarket,
@@ -116,9 +116,18 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
     case 'supply': {
       const t = townById(game, p.town);
       if (!t) return no('города нет');
-      const can = t.demands.filter((c) => producible(game, c)).length;
+      const made = t.demands.filter((c) => producible(game, c));
       const need = Math.min(p.needs ?? t.demands.length, t.demands.length);
-      if (!need || can < need) return no(`из нужных городу грузов можно получить ${can}, а закрыть надо ${need}`);
+      if (!need || made.length < need) return no(`из нужных городу грузов можно получить ${made.length}, а закрыть надо ${need}`);
+      // С получателями норму закрывают магазины вместе: к тем, что примут норму, должно быть не подъехать не слишком многим.
+      if (game.retail) {
+        const reach = (r: Receiver) => {
+          const b = t.buildings.find((x) => x.id === r.b);
+          return !!b && game.docks.reachable(b, maxTruck(b));
+        };
+        const can = made.filter((c) => needClosable(t, c, reach)).length;
+        if (can < need) return no(`к магазинам ${t.name} не подъехать: закрыть можно ${can} из ${need}`);
+      }
       // На доставку первой партии — ещё 2 мин сверх разгона.
       return p.months <= work - TERM_SCALE ? yes() : no('слишком короткий срок для снабжения подряд');
     }

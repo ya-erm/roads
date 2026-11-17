@@ -69,9 +69,33 @@ export function buildEffort(game: Game, cargo: CargoType, seen: ReadonlySet<Carg
 const LINK_LEN = 2500;
 
 /**
+ * Развозка по магазинам (docs/RETAIL.md, этап 4): город с получателями принимает груз только в магазинах — круг
+ * грузовика длиннее (заезды во дворы ~45 с, объезд), замер scripts/retail-balance.ts — ×1,28–1,31 у городов на 2–10
+ * тыс. жителей; и машин на одну больше — на объезд. Оптовая база — путь для дальних фур: подвоз без заездов к магазинам
+ * и короткая развозка по городу (depotLink — её доля перевозки).
+ */
+export const RETAIL_TRIP = { round: 1.3, extra: 1, depotLink: 0.5 } as const;
+
+/** Груз cargo в город to принимают магазины (партия с получателями): развозка — дольше круг и на машину больше. */
+export function shopDelivery(game: Pick<Game, 'retail'>, to: Place, cargo: CargoType): boolean {
+  return game.retail && !isIndustry(to) && !!to.receivers?.some((r) => !r.depot && r.cargo.includes(cargo));
+}
+
+/**
+ * Перевозка от производителя на d в получателя to: обычная — 1 (дальше LINK_LEN — больше). В магазины города — круг
+ * ×RETAIL_TRIP.round; есть оптовая база — может выйти легче: подвоз на базу и короткая развозка оттуда.
+ */
+export function linkEffort(game: Pick<Game, 'retail'>, d: number, to: Place, cargo: CargoType): number {
+  const base = Math.max(1, d / LINK_LEN);
+  if (!shopDelivery(game, to, cargo)) return base;
+  const viaDepot = !isIndustry(to) && to.receivers?.some((r) => r.depot && r.cargo.includes(cargo)) ? base + RETAIL_TRIP.depotLink : Infinity;
+  return Math.min(base * RETAIL_TRIP.round, viaDepot);
+}
+
+/**
  * Сколько работы — наладить поставки груза получателю to: перевозки самой лёгкой цепочки (сырьё → завод → …
- * → получатель), длинная весит больше одной; уже налаженные (has — туда этот груз уже возили) не в счёт.
- * Получить нельзя — Infinity.
+ * → получатель), длинная весит больше одной; в магазины — с развозкой (linkEffort); уже налаженные (has — туда этот
+ * груз уже возили) не в счёт. Получить нельзя — Infinity.
  */
 export function supplyEffort(game: Game, cargo: CargoType, to: Place, has: (to: Ref, cargo: CargoType) => boolean, seen: ReadonlySet<CargoType> = new Set()): number {
   if (has(refOf(to), cargo)) return 0;
@@ -82,11 +106,14 @@ export function supplyEffort(game: Game, cargo: CargoType, to: Place, has: (to: 
     .filter((i) => i.info.produces === cargo)
     .sort((a, b) => dist(a.fp.center, at) - dist(b.fp.center, at))
     .slice(0, 3);
-  // Никто не делает — построить (режим «Строит игрок»).
-  if (!makers.length) return buildEffort(game, cargo);
+  // Никто не делает — построить (режим «Строит игрок»); в магазины — ещё и развозка.
+  if (!makers.length) {
+    const build = buildEffort(game, cargo);
+    return shopDelivery(game, to, cargo) ? build + RETAIL_TRIP.round - 1 : build;
+  }
   let best = Infinity;
   for (const m of makers) {
-    let cost = Math.max(1, dist(m.fp.center, at) / LINK_LEN);
+    let cost = linkEffort(game, dist(m.fp.center, at), to, cargo);
     for (const c of m.info.accepts) cost += supplyEffort(game, c, m, has, next);
     best = Math.min(best, cost);
   }

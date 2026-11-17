@@ -5,12 +5,13 @@
  * Каждый совет — что случилось, где (маршрут, станция, предприятие, точка на карте) и, если можно, быстрое
  * действие (купить машину, добавить пост, взять кредит). Только чтение: действия выполняет HUD.
  */
-import { CONSTRUCTION, ECONOMY, STATION, STORAGE } from '../config';
+import { CONSTRUCTION, ECONOMY, MONTH_LENGTH, STATION, STORAGE } from '../config';
 import { money } from '../core/moneyText';
 import { durationText } from '../core/timeText';
 import type { Vec } from '../core/vec';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
+import { depotOf, maxTruck, receiverDry } from '../world/retail';
 import type { AutoFunds } from './autoFunds';
 import { projectName } from './construction';
 import type { Game } from './game';
@@ -41,7 +42,15 @@ export type AdviceKind =
   /** Бригада работает далеко от своей базы — вдвое медленнее и хуже. */
   | 'buildFar'
   /** «Со строительством» базы ещё нет: первую — бесплатно, где удобно игроку. */
-  | 'noBase';
+  | 'noBase'
+  /** Получатели грузов (docs/RETAIL.md): груз привезли на станцию в городе, а там его не принимают — везти в магазины. */
+  | 'kept'
+  /** Грузовики возвращаются с грузом: все магазины маршрута полны — машин больше, чем город съедает. */
+  | 'shopsFull'
+  /** Магазин пустует месяцами — рядом с ним город не растёт. */
+  | 'shopDry'
+  /** Фура к магазинам не заезжает (двор до 15 м) — ей на оптовую базу. */
+  | 'semiShop';
 
 /** Важность: alert — что-то стоит, warn — теряете деньги или рост, tip — можно лучше. */
 export type AdviceLevel = 'alert' | 'warn' | 'tip';
@@ -57,7 +66,9 @@ export type AdviceFix =
   | { kind: 'route'; station: number }
   | { kind: 'loan' }
   /** Поставить строительную базу: режим размещения на карте. */
-  | { kind: 'base' };
+  | { kind: 'base' }
+  /** «🛒 все магазины с этим грузом» — в конец маршрута. */
+  | { kind: 'shops'; line: number };
 
 export interface Advice {
   /** Устойчивый ключ: вид и предмет — чтобы совет можно было скрыть и узнать снова. */
@@ -106,6 +117,7 @@ export function advise(game: Game): Advice[] {
   routes(game, out);
   stations(game, out);
   industries(game, out);
+  retail(game, out);
   return out.sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] || (b.count ?? 0) - (a.count ?? 0));
 }
 
@@ -645,4 +657,112 @@ function industries(game: Game, out: Advice[]): void {
       }
     }
   }
+}
+
+// ---------- Получатели грузов (docs/RETAIL.md) ----------
+
+/** Длина в единицах игры — в метрах (1 ед. = 0,6 м), с десятыми: «12,6». */
+const meters = (u: number) => String(Math.round(u * 6) / 10).replace('.', ',');
+
+/** Отметка советника о рейсе свежая: не старше полутора месяцев. */
+const fresh = (game: Game, at: number) => game.time - at <= MONTH_LENGTH * 1.5;
+
+/**
+ * Получатели грузов: груз возят на станцию в городе, а принимают его только магазины (kept); магазины полны, а
+ * грузовиков много (shopsFull); магазин пустует месяцами — город рядом не растёт (shopDry); Фура на маршруте к
+ * магазинам — во двор не влезет (semiShop).
+ */
+function retail(game: Game, out: Advice[]): void {
+  if (!game.retail) return;
+  for (const [id, k] of game.retailNotes.kept) {
+    const line = game.lines.get(id);
+    const st = game.stations.get(k.st);
+    if (!line || !st || !line.stops.includes(st.id) || !line.vehicles.length || !fresh(game, k.at)) continue;
+    const more = game.shopTargets(line.stops, k.cargo, game.lineTruckLength(line)).length > 0;
+    out.push({
+      key: `kept:${id}`,
+      kind: 'kept',
+      level: 'warn',
+      title: 'Груз остался в кузове',
+      detail: `«${st.name}»: здесь «${CARGO[k.cargo].name}» не принимают — город берёт его только в магазинах 🛒.${more ? ' Добавьте их в маршрут.' : ''}`,
+      line: id,
+      station: st.id,
+      at: st.fp.center,
+      cargo: k.cargo,
+      count: k.amount,
+      reason: 'Груз здесь не принимают — везите в магазины 🛒',
+      fix: more ? { kind: 'shops', line: id } : undefined,
+    });
+  }
+  for (const [id, b] of game.retailNotes.back) {
+    const line = game.lines.get(id);
+    if (!line || b.n < 2 || line.vehicles.length < 2 || line.auto?.on || !fresh(game, b.at)) continue;
+    const first = game.stations.get(line.stops[0]);
+    out.push({
+      key: `shopsFull:${id}`,
+      kind: 'shopsFull',
+      level: 'tip',
+      title: 'Магазины полны — лишняя машина',
+      detail: `«${line.name}»: грузовики возвращаются с «${CARGO[b.cargo].name}» — город столько не съедает. Продайте одну или добавьте магазины 🛒.`,
+      line: id,
+      at: first?.fp.center,
+      cargo: b.cargo,
+      count: line.vehicles.length,
+      fix: { kind: 'sell', line: id },
+    });
+  }
+  for (const town of game.towns) {
+    const list = town.receivers ?? [];
+    // Пока город никто не снабжает, пустые магазины рост не тормозят (game.retailGrowth) — и совета нет.
+    if (!list.some((r) => r.fed)) continue;
+    const dry = list.filter(receiverDry).sort((a, b) => (b.dry ?? 0) - (a.dry ?? 0));
+    const r = dry[0];
+    const b = r && town.buildings.find((x) => x.id === r.b);
+    if (!r || !b) continue;
+    const what = r.cargo
+      .filter((c) => c !== 'fish')
+      .map((c) => `«${CARGO[c].name}»`)
+      .join(', ');
+    out.push({
+      key: `shopDry:${town.id}`,
+      kind: 'shopDry',
+      level: 'tip',
+      title: `${game.dockName(b)} пустует ${r.dry} мес.`,
+      detail: `Город там не растёт: у пустого магазина дома не строятся.${dry.length > 1 ? ` Таких в городе — ${dry.length}.` : ''} Везите туда ${what} 🛒.`,
+      at: b.fp.center,
+      cargo: r.cargo[0],
+      count: dry.length,
+    });
+  }
+  for (const line of game.lines.values()) {
+    const long = semiAtShop(game, line);
+    if (!long) continue;
+    const town = game.towns.find((t) => t.id === long.st.dock?.town);
+    const depot = town && depotOf(town);
+    out.push({
+      key: `semiShop:${line.id}`,
+      kind: 'semiShop',
+      level: 'warn',
+      title: 'Фура не заезжает к магазинам',
+      detail: `«${line.name}»: во двор «${long.st.name}» влезет грузовик до ${meters(long.max)} м, а фура — ${meters(long.L)} м. ${
+        depot ? 'Везите фурой на оптовую базу ⇄, оттуда — развозка Грузовиками.' : 'Возьмите на маршрут Грузовик или Грузовик II.'
+      }`,
+      line: line.id,
+      station: long.st.id,
+      at: long.st.fp.center,
+    });
+  }
+}
+
+/** Магазин маршрута, во двор которого не влезет его самый длинный грузовик (оптовая база — не магазин): где и насколько. */
+function semiAtShop(game: Game, line: Line): { st: Station; L: number; max: number } | null {
+  const L = game.lineTruckLength(line);
+  if (L === undefined) return null;
+  for (const sid of line.stops) {
+    const st = game.stations.get(sid);
+    if (!st || st.kind !== 'dock' || game.isDepotDock(st)) continue;
+    const b = game.dockBuilding(st);
+    if (b && L > maxTruck(b) + 1e-6) return { st, L, max: maxTruck(b) };
+  }
+  return null;
 }

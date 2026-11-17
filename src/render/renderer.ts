@@ -48,7 +48,8 @@ import {
 import { townEdge, townIndustries, townSlots } from '../world/enterprise';
 import { sizeDots, sizeDotsVisibility } from '../ui/enterpriseUi';
 import { lastTownNeed } from '../world/townSupply';
-import { maxTruck, stockedCount, stockFill } from '../world/retail';
+import { maxTruck, roomFor, stockedCount, stockFill } from '../world/retail';
+import { goalShops } from '../scenario/objectives';
 import { lotFrame } from '../world/houseAccess';
 import { roofCenter } from '../world/shopLots';
 import type { Segment } from '../world/network';
@@ -3791,8 +3792,10 @@ export class Renderer {
     const ctx = this.ctx;
     const z = this.camera.zoom;
     const focus = this.focusCargo(game, o);
+    // Магазины задания «Развезти по двум магазинам» (этап A): подсвечены и со стрелкой, пока задание не выполнено.
+    const goal = goalShops(game);
     const close = z >= RECEIVER_ZOOM;
-    if (!close && !focus.size) return;
+    if (!close && !focus.size && !goal.size) return;
     const inView = (p: Vec, pad: number) => p.x > view.x0 - pad && p.x < view.x1 + pad && p.y > view.y0 - pad && p.y < view.y1 + pad;
     const pulse = 0.5 + 0.5 * Math.sin((performance.now() / 1000) * 5);
     // От станции — к её получателям: линии под значками.
@@ -3830,11 +3833,18 @@ export class Renderer {
       for (const r of town.receivers) {
         const b = byId.get(r.b);
         if (!b || !inView(b.fp.center, 40)) continue;
-        const hot = r.cargo.some((c) => focus.has(c));
+        const target = goal.get(r.b);
+        const hot = r.cargo.some((c) => focus.has(c)) || !!target;
         if (!close && !hot) continue;
         // Оптовая база — один значок (выбранный груз или больше всего лежащий на её складе), кольцо — склад базы.
         const depot = r.depot ? game.depotStock(r.b) : null;
-        const list = hot ? r.cargo.filter((c) => focus.has(c)).slice(0, depot ? 1 : undefined) : depot ? [depot.top ?? r.cargo[0]] : r.cargo;
+        const list = target
+          ? [target]
+          : hot
+            ? r.cargo.filter((c) => focus.has(c)).slice(0, depot ? 1 : undefined)
+            : depot
+              ? [depot.top ?? r.cargo[0]]
+              : r.cargo;
         const reach = game.docks.reachable(b, maxTruck(b));
         const size = (hot ? 24 : 19) / z;
         // Над крышей здания (не над двором, где грузовик); несколько грузов — в ряд вдоль улицы.
@@ -3842,6 +3852,11 @@ export class Renderer {
         const roof = roofCenter(b);
         ctx.save();
         ctx.globalAlpha = focus.size && !hot ? 0.35 : 1;
+        if (target) {
+          // Задание: стрелка над магазином покачивается — «сюда».
+          const o0 = at(roof.x, roof.y);
+          this.goalArrow({ x: o0.x, y: o0.y - size * (1.05 + 0.25 * pulse) }, size);
+        }
         list.forEach((c, i) => {
           const o0 = at(roof.x, roof.y);
           const p = { x: o0.x + (i - (list.length - 1) / 2) * size * 1.25, y: o0.y };
@@ -3901,11 +3916,53 @@ export class Renderer {
             ctx.fillStyle = '#ffffff';
             ctx.fillRect(q.x - size * 0.13, q.y - size * 0.04, size * 0.26, size * 0.08);
           }
+          // Выбран груз (маршрут, машина, предприятие, задание): под значком — сколько магазин примет сейчас, «+7».
+          const room = hot && reach && !depot ? roomFor(town, r, c, game.time) : 0;
+          if (room >= 1) {
+            const text = `+${room}`;
+            const fs = size * 0.46;
+            ctx.font = `bold ${fs}px sans-serif`;
+            const w = ctx.measureText(text).width + fs * 0.7;
+            const q = { x: p.x, y: p.y + size * 0.78 };
+            ctx.fillStyle = '#2e9d57';
+            ctx.beginPath();
+            ctx.roundRect(q.x - w / 2, q.y - fs * 0.62, w, fs * 1.24, fs * 0.62);
+            ctx.fill();
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, q.x, q.y + fs * 0.04);
+          }
         });
         ctx.restore();
         if (hot) this.moving = true;
       }
     }
+  }
+
+  /** Стрелка задания вниз, к значку магазина: остриё — в точке tip, size — размер значка под ней. */
+  private goalArrow(tip: Vec, size: number): void {
+    const ctx = this.ctx;
+    const w = size * 0.5;
+    const h = size * 0.75;
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#ff8a1f';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = size * 0.08;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(tip.x - w, tip.y - h * 0.55);
+    ctx.lineTo(tip.x - w * 0.42, tip.y - h * 0.55);
+    ctx.lineTo(tip.x - w * 0.42, tip.y - h);
+    ctx.lineTo(tip.x + w * 0.42, tip.y - h);
+    ctx.lineTo(tip.x + w * 0.42, tip.y - h * 0.55);
+    ctx.lineTo(tip.x + w, tip.y - h * 0.55);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.fill();
+    ctx.restore();
   }
 
   /** Значок остановки: синий силуэт автобуса (вид сбоку, нос вправо) для белой плашки; size — квадрат 24×24 значка. */

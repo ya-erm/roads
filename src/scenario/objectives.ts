@@ -341,6 +341,19 @@ function townPlaces(game: Game, townId: number, cargo: CargoType): string {
   return 'в магазины';
 }
 
+/**
+ * Магазины активных заданий «Развезти по магазинам» (params.shops, этап A): дом → груз — их подсвечивает карта со
+ * стрелкой. Выполненные и проваленные — нет.
+ */
+export function goalShops(game: Pick<Game, 'scenario'>): Map<number, CargoType> {
+  const out = new Map<number, CargoType>();
+  for (const o of game.scenario?.state.objectives ?? []) {
+    if (o.status !== 'active' || o.params.kind !== 'deliver' || !o.params.shops) continue;
+    for (const b of o.params.shops) out.set(b, o.params.cargo);
+  }
+  return out;
+}
+
 /** Название задания для игрока. */
 export function titleOf(p: ObjectiveParams, game: Game): string {
   switch (p.kind) {
@@ -349,6 +362,7 @@ export function titleOf(p: ObjectiveParams, game: Game): string {
       if (!p.to && p.from !== undefined) return `Вывезти ${what}: ${industryById(game, p.from)?.name ?? '—'} → получателям`;
       if (!p.to) return `Доставить ${what} получателям`;
       if (p.to.type !== 'town') return `Доставить ${what}: ${refName(game, p.to)}`;
+      if (p.shops?.length) return `Развезти ${what} по ${p.shops.length} ${p.shops.length === 1 ? 'магазину' : 'магазинам'} ${refName(game, p.to)}`;
       return `Привезти ${what} ${townPlaces(game, p.to.id, p.cargo)} ${refName(game, p.to)}`;
     }
     case 'passengers':

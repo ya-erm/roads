@@ -32,6 +32,10 @@ const KIND_GLYPH: Record<AdviceKind, string> = {
   buildNoBase: '⛔',
   buildFar: '🚚',
   noBase: '🏗',
+  kept: '🛒',
+  shopsFull: '🛒',
+  shopDry: '🏪',
+  semiShop: '⇄',
 };
 
 const LEVEL_TIP: Record<AdviceLevel, string> = {
@@ -47,7 +51,7 @@ export function adviceIcon(a: Advice, size = 28): string {
       ? depotSvg(size - 10)
       : a.gone
         ? walkIcon(size - 8)
-        : a.cargo && (a.kind === 'waiting' || a.kind === 'unsold' || a.kind === 'missingInput')
+        : a.cargo && (a.kind === 'waiting' || a.kind === 'unsold' || a.kind === 'missingInput' || a.kind === 'kept' || a.kind === 'shopDry')
           ? cargoIcon(a.cargo, size - 8, false)
           : `<span class="adv-glyph">${KIND_GLYPH[a.kind]}</span>`;
   // Пассажиры уходят — число ушедших за месяц, а не ждущих.
@@ -97,6 +101,8 @@ export function fixLabel(g: Game, fix: AdviceFix): string {
       return 'Взять кредит';
     case 'base':
       return g.firstBase ? '＋ База · бесплатно' : `＋ База · $${fmt(CONSTRUCTION.base.cost)}`;
+    case 'shops':
+      return '🛒 + все магазины';
   }
 }
 

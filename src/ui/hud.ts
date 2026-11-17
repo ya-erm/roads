@@ -4465,6 +4465,12 @@ export class Hud {
         this.openLeftTab('build', true);
         this.refreshLeft();
         break;
+      case 'shops': {
+        // «🛒 все магазины» советника — как кнопка в «Остановках» маршрута.
+        const line = g.lines.get(fix.line);
+        if (line && !g.addShopStops(line.stops, line).length) g.notify('Магазинов с этим грузом не найти');
+        break;
+      }
     }
     this.lastAdvisor = '';
   }
