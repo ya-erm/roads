@@ -28,7 +28,7 @@ import { trainWagonFills } from '../sim/wagons';
 import { cargoImage, walkImage } from '../ui/cargoIcons';
 import { BIOMES } from '../world/biomes';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, type IndustryKind } from '../world/cargo';
-import { Annex, Industry, isBusTerminal, Station, TownBuilding, TownPark } from '../world/entities';
+import { Annex, Industry, isBusTerminal, Station, Town, TownBuilding, TownPark } from '../world/entities';
 import type { IndustryPlan } from '../game/enterprises';
 import {
   depositBox,
@@ -346,10 +346,10 @@ const BUS_HALL_SHADOW = 'rgba(30,40,25,0.22)';
 const BADGE_RISE = 14;
 const NAME_RISE = BADGE_RISE + 20;
 
-/** Верхний край здания на карте — по углам повёрнутого прямоугольника, а не по его высоте. */
 /** Точка p в рамке view с запасом pad. */
 const seenAt = (p: Vec, view: Box, pad: number) => p.x > view.x0 - pad && p.x < view.x1 + pad && p.y > view.y0 - pad && p.y < view.y1 + pad;
 
+/** Верхний край здания на карте — по углам повёрнутого прямоугольника, а не по его высоте. */
 function topOf(fp: Footprint): number {
   return fp.center.y - (Math.abs(Math.sin(fp.angle)) * fp.w + Math.abs(Math.cos(fp.angle)) * fp.h) / 2;
 }
@@ -2547,9 +2547,7 @@ export class Renderer {
     const g = game.roads.graph;
     const r = Math.max(3.2, 9 / z);
     ctx.save();
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `700 ${r * 0.95}px sans-serif`;
+    this.signText(r);
     for (const link of g.links.values()) {
       const c = g.net.corridors.get(link.corridor);
       if (!c || !link.lanes.length || c.ring || !inPass(corridorLayer(g.net, c), pass)) continue;
@@ -2580,12 +2578,10 @@ export class Renderer {
    * в проекте уйдёт или поменяет форму); project — знак проекта: синий пунктир по ободу, полупрозрачный, как сам проект.
    */
   private limitSign(p: Vec, r: number, kmh: number, style: 'road' | 'stale' | 'project' = 'road'): void {
+    // Шрифт и выравнивание числа — раз на все знаки (signText), без save/restore на каждый.
     const ctx = this.ctx;
-    ctx.save();
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `700 ${r * 0.95}px sans-serif`;
-    if (style === 'stale') ctx.globalAlpha *= 0.3;
+    const alpha = ctx.globalAlpha;
+    if (style === 'stale') ctx.globalAlpha = alpha * 0.3;
     ctx.fillStyle = style === 'project' ? 'rgba(231,240,253,0.9)' : '#fff';
     ctx.strokeStyle = style === 'project' ? '#2f80ed' : '#d93a30';
     ctx.lineWidth = r * (style === 'project' ? 0.24 : 0.28);
@@ -2594,10 +2590,18 @@ export class Renderer {
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-    ctx.setLineDash([]);
+    if (style === 'project') ctx.setLineDash([]);
     ctx.fillStyle = style === 'project' ? '#1f5fbf' : '#1d2026';
     ctx.fillText(String(kmh), p.x, p.y + r * 0.05);
-    ctx.restore();
+    ctx.globalAlpha = alpha;
+  }
+
+  /** Знаки скорости радиуса r: шрифт и выравнивание числа на них — раз на все (limitSign их не ставит). */
+  private signText(r: number): void {
+    const ctx = this.ctx;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `700 ${r * 0.95}px sans-serif`;
   }
 
   /**
@@ -4045,6 +4049,7 @@ export class Renderer {
     const z = this.camera.zoom;
     if (z <= 0.22) return;
     const ctx = this.ctx;
+    let styled = false;
     for (const st of game.stations.values()) {
       const fp = st.fp;
       if (st.kind === 'dock') continue;
@@ -4060,9 +4065,13 @@ export class Renderer {
       const gone = st.id === selected ? paxGone(st) : 0;
       if (gone > 0) waiting.push(['walk', gone]);
       if (!waiting.length && !stop) continue;
-      ctx.font = `700 ${11 / z}px system-ui, sans-serif`;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
+      // Шрифт и выравнивание — одни на все плашки: раз, перед первой.
+      if (!styled) {
+        styled = true;
+        ctx.font = `700 ${11 / z}px system-ui, sans-serif`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+      }
       /** Место под значок автобуса в начале плашки. */
       const lead = stop ? 18 / z : 0;
       const widths = waiting.length ? waiting.map(([, n], i) => (i ? 0 : lead) + 22 / z + ctx.measureText(String(n)).width + 6 / z) : [18 / z];
@@ -4101,12 +4110,17 @@ export class Renderer {
   private drawWarningMarks(game: Game, view: ReturnType<Renderer['view']>): void {
     const z = this.camera.zoom;
     const ctx = this.ctx;
+    let styled = false;
     for (const m of warningMarks(game, z)) {
       if (m.x + m.hw < view.x0 || m.x - m.hw > view.x1 || m.y + m.hh < view.y0 || m.y - m.hh > view.y1) continue;
-      ctx.lineWidth = 2 / z;
-      ctx.strokeStyle = '#fff';
-      ctx.font = `800 ${12 / z}px system-ui, sans-serif`;
-      ctx.textBaseline = 'middle';
+      // Кромка, шрифт и выравнивание — одни на все значки: раз, перед первым.
+      if (!styled) {
+        styled = true;
+        ctx.lineWidth = 2 / z;
+        ctx.strokeStyle = '#fff';
+        ctx.font = `800 ${12 / z}px system-ui, sans-serif`;
+        ctx.textBaseline = 'middle';
+      }
       if (m.shape === 'dot') {
         ctx.beginPath();
         ctx.arc(m.x, m.y, m.hw, 0, Math.PI * 2);
@@ -4215,12 +4229,12 @@ export class Renderer {
         continue;
       }
       // Рецепт — по центру здания, название — под нижним краем.
-      const bottom = ind.fp.center.y + Math.max(...footprintCorners(ind.fp).map((p) => p.y - ind.fp.center.y));
+      const bottom = bottomOf(ind.fp);
       this.drawRecipe(ind, ind.fp.center);
       text({ x: ind.fp.center.x, y: bottom + 14 / z }, ind.info.name, 12, '#3b4652');
       // Режим «Строит игрок»: стройка, заброшенное, нехватка рабочих — плашкой над зданием.
       if (!e.on) continue;
-      const top = ind.fp.center.y - Math.max(...footprintCorners(ind.fp).map((p) => ind.fp.center.y - p.y));
+      const top = topOf(ind.fp);
       const badge = ind.build
         ? `🏗 ${Math.floor(ind.build.done * 100)}%${e.stalls.get(ind.id) === 'base' ? ' · ⛔ нет базы' : e.stalls.get(ind.id) === 'money' || e.stalls.get(ind.id) === 'upkeep' ? ' · 💸' : ''}`
         : ind.ruin
@@ -4338,7 +4352,7 @@ export class Renderer {
     }
     for (const town of game.towns) {
       if (!town.receivers?.length || !inView(town.center, (town.extent ?? town.radius) + 200)) continue;
-      const byId = new Map(town.buildings.map((b) => [b.id, b]));
+      const byId = this.buildingsOf(town);
       for (const r of town.receivers) {
         const b = byId.get(r.b);
         if (!b || !inView(b.fp.center, 40)) continue;
@@ -4447,6 +4461,18 @@ export class Renderer {
         if (hot) this.moving = true;
       }
     }
+  }
+
+  /** Дома города по id — для значков получателей (drawReceivers): пересчёт, когда список домов заменили или он вырос. */
+  private readonly townIndex = new WeakMap<Town, { list: TownBuilding[]; n: number; byId: Map<number, TownBuilding> }>();
+
+  private buildingsOf(town: Town): Map<number, TownBuilding> {
+    let had = this.townIndex.get(town);
+    if (!had || had.list !== town.buildings || had.n !== town.buildings.length) {
+      had = { list: town.buildings, n: town.buildings.length, byId: new Map(town.buildings.map((b) => [b.id, b])) };
+      this.townIndex.set(town, had);
+    }
+    return had.byId;
   }
 
   /** Стрелка задания вниз, к значку магазина: остриё — в точке tip, size — размер значка под ней. */
@@ -4925,7 +4951,10 @@ export class Renderer {
     if (o.liveSigns?.length && this.camera.zoom >= 0.45) {
       // Знаки поворотов дороги, которую тянут, — по её форме прямо сейчас, как у построенной.
       const r = Math.max(3.2, 9 / this.camera.zoom);
+      ctx.save();
+      this.signText(r);
       for (const s of o.liveSigns) this.limitSign(add(s.pos, scale(rightNormal(s.dir), s.side - ROAD_MARGIN + 3 + r)), r, s.kmh);
+      ctx.restore();
     }
     if (o.control && o.chainStart) {
       ctx.strokeStyle = 'rgba(47,128,237,0.7)';
@@ -5093,7 +5122,10 @@ export class Renderer {
     // Знаки скорости перед поворотами — как у построенной дороги: справа по ходу, у кромки.
     if (z >= 0.45) {
       const r = Math.max(3.2, 9 / z);
+      ctx.save();
+      this.signText(r);
       for (const s of p.signs ?? []) this.limitSign(add(s.pos, scale(rightNormal(s.dir), s.side - ROAD_MARGIN + 3 + r)), r, s.kmh, 'project');
+      ctx.restore();
     }
     // Узлы проекта — после перьев (drawOverlay), чтобы линии перьев их не перечёркивали.
   }

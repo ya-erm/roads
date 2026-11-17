@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GROUND, pickLevel, SceneDiff, SETTLE_MS, SHRINK_MAX, STRETCH_MAX, TILE_PX, tileBox, TileCache, tileRange, tileRect, tileWorld, UNDER } from './tileCache';
+import { GROUND, pickLevel, SceneDiff, SETTLE_MS, SHRINK_MAX, STRETCH_MAX, TILE_PX, tileBox, TileCache, tileKey, tileRange, tileRect, tileWorld, UNDER } from './tileCache';
 
 /** Холст-заглушка: только вид и номер — чтобы видеть, что холсты возвращаются в запас и выдаются снова. */
 let made = 0;
@@ -198,7 +198,14 @@ describe('Плитки кэша', () => {
     cache.tile(set, 9, 0);
     cache.trim(4);
     expect(set.tiles.size).toBe(4);
-    expect(set.tiles.has('9:0')).toBe(true);
+    expect(set.tiles.has(tileKey(9, 0))).toBe(true);
     expect(cache.canvases).toBe(4);
+  });
+
+  it('ключ плитки — число, разное у разных (i, j), и за краем карты (отрицательные номера) тоже', () => {
+    const seen = new Set<number>();
+    for (let i = -40; i <= 40; i++) for (let j = -40; j <= 40; j++) seen.add(tileKey(i, j));
+    expect(seen.size).toBe(81 * 81);
+    expect(Number.isSafeInteger(tileKey(1 << 19, -(1 << 19)))).toBe(true);
   });
 });

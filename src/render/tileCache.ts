@@ -156,8 +156,16 @@ export interface TileSet<C> {
   dpr: number;
   /** Мировой размер стороны плитки. */
   world: number;
-  tiles: Map<string, Tile<C>>;
+  /** Плитки по номеру (tileKey). */
+  tiles: Map<number, Tile<C>>;
 }
+
+/** Сдвиг номеров плиток: (i, j) — и отрицательные (за краем карты) — в неотрицательные до 2^21. */
+const KEY_OFF = 1 << 20;
+const KEY_STRIDE = 1 << 21;
+
+/** Числовой ключ плитки (i, j) — без строки на каждый поиск. */
+export const tileKey = (i: number, j: number): number => (i + KEY_OFF) * KEY_STRIDE + (j + KEY_OFF);
 
 /** Что делать с плиткой в этом кадре: must — рисовать сейчас (иначе дыра), dirty — устарела, ahead — про запас. */
 export interface TileJob<C> {
@@ -219,7 +227,7 @@ export class TileCache<C extends TileCanvas> {
 
   /** Плитка уровня (новая — пустая, не готова). */
   tile(set: TileSet<C>, i: number, j: number): Tile<C> {
-    const key = `${i}:${j}`;
+    const key = tileKey(i, j);
     let t = set.tiles.get(key);
     if (!t) {
       t = { i, j, layers: new Array<C | null>(LAYERS).fill(null), ready: false, dirty: false, used: 0 };
@@ -243,7 +251,7 @@ export class TileCache<C extends TileCanvas> {
     const out: Tile<C>[] = [];
     for (let j = r.j0; j <= r.j1; j++) {
       for (let i = r.i0; i <= r.i1; i++) {
-        const t = set.tiles.get(`${i}:${j}`);
+        const t = set.tiles.get(tileKey(i, j));
         if (t?.ready) {
           t.used = this.frameNo;
           out.push(t);
@@ -263,7 +271,7 @@ export class TileCache<C extends TileCanvas> {
       const r = tileRange(grow(box, -fb.world * 1e-6), fb.world);
       for (let j = r.j0; j <= r.j1; j++) {
         for (let i = r.i0; i <= r.i1; i++) {
-          const t = fb.tiles.get(`${i}:${j}`);
+          const t = fb.tiles.get(tileKey(i, j));
           if (!t?.ready || (clean && t.dirty)) return false;
         }
       }
@@ -383,7 +391,7 @@ export class TileCache<C extends TileCanvas> {
    * Запас холстов — не больше spare.
    */
   trim(limit: number, spare = 8): void {
-    const all: [TileSet<C>, string, Tile<C>][] = [];
+    const all: [TileSet<C>, number, Tile<C>][] = [];
     for (const set of this.sets) for (const [k, t] of set.tiles) all.push([set, k, t]);
     if (all.length > limit) {
       all.sort((a, b) => a[2].used - b[2].used);
@@ -402,7 +410,7 @@ export class TileCache<C extends TileCanvas> {
     this.free = [];
   }
 
-  private dropTile(set: TileSet<C>, key: string, t: Tile<C>): void {
+  private dropTile(set: TileSet<C>, key: number, t: Tile<C>): void {
     for (const c of t.layers) if (c) this.release(c);
     t.layers.fill(null);
     set.tiles.delete(key);

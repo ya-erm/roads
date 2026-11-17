@@ -96,7 +96,7 @@ function setup() {
   camera.touched = true;
   const controller = new Controller(canvas, camera, () => game);
   // Сколько раз плитки перерисовывались (renderTile) — по плитке за вызов.
-  const r = renderer as unknown as { renderTile: (...a: unknown[]) => void; tiles: { sets: { world: number; tiles: Map<string, { ready: boolean; dirty: boolean }> }[] } };
+  const r = renderer as unknown as { renderTile: (...a: unknown[]) => void; tiles: { sets: { world: number; tiles: Map<number, { i: number; j: number; ready: boolean; dirty: boolean }> }[] } };
   const own = r.renderTile.bind(renderer);
   const rendered: string[] = [];
   r.renderTile = (...a: unknown[]) => {
@@ -155,10 +155,7 @@ describe('Кэш карты плитками: без изменений плит
     for (const b of boxes) expect((b.x1 - b.x0) * (b.y1 - b.y0)).toBeLessThan(((projectBox(c).x1 - projectBox(c).x0) * (projectBox(c).y1 - projectBox(c).y0)) / 2);
     // Готовые плитки под полотном (с запасом сброса) — их перерисовал бы сброс всего полотна.
     const set = tiles.sets[0];
-    const under = [...set.tiles.entries()].filter(([k, t]) => {
-      const [i, j] = k.split(':').map(Number);
-      return t.ready && meets(tileBox(i, j, set.world), grow(projectBox(c), 80));
-    }).length;
+    const under = [...set.tiles.values()].filter((t) => t.ready && meets(tileBox(t.i, t.j, set.world), grow(projectBox(c), 80))).length;
     rendered.length = 0;
     frame();
     settle();
