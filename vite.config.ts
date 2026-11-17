@@ -80,11 +80,15 @@ export default defineConfig(({ command }) => ({
   },
   test: {
     // По умолчанию vitest занимает все ядра, и на полном прогоне машина «встаёт». Половины хватает:
-    // общее время задают самые долгие файлы, а не число процессов.
+    // общее время задают самые долгие файлы, а не число процессов. Пул — forks (по умолчанию в vitest 3): процесс на
+    // поток, как и раньше.
     maxWorkers: '50%',
     // Тесты со сценариями и генерацией мира идут по 2–3 с, а под нагрузкой (параллельные прогоны, dev-серверы)
     // переваливали за 5 с по умолчанию — и падали по таймауту то один, то другой.
     testTimeout: 15_000,
+    // Пауза после каждого теста: без неё долгий файл синхронных тестов не отвечал vitest больше 60 с —
+    // «Timeout calling "onTaskUpdate"» (src/testSetup.ts).
+    setupFiles: ['src/testSetup.ts'],
     projects: [
       { extends: true, test: { name: 'shared', isolate: false, exclude: [...defaultExclude, ...ISOLATED_TESTS] } },
       { extends: true, test: { name: 'isolated', include: ISOLATED_TESTS } },
