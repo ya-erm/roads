@@ -4,7 +4,7 @@ import type { Vehicle, VehicleSpec } from '../sim/vehicle';
 import type { ShopCar, Town, TownBuilding, TownCar } from '../world/entities';
 import { drivewayOf, type Driveway } from '../world/houseAccess';
 import { flatsOf, formOf } from '../world/townForms';
-import { yardLotOf, yardSpots } from '../world/yardLots';
+import { CARS_PER_FLAT, yardLotOf, yardSpots } from '../world/yardLots';
 import { carSpot, GARAGE_TRIPS, type CarSpot, type GarageLook, type Garages, type GarageSlot, type MoveHooks } from './garages';
 import { stallKey, type FleetBack, type FleetVisit } from './shopParking';
 import type { CurbStall } from '../lanes/curb';
@@ -37,7 +37,7 @@ import { lotLayout } from '../world/parkingLots';
  */
 export const CAR_HOMES = {
   /** Машин на квартиру многоквартирного дома. */
-  perFlat: 0.15,
+  perFlat: CARS_PER_FLAT,
   /** Бокс — не дальше стольких ед. от дома (≈ 420 м; единица карты — 0,6 м). */
   boxRange: 700,
   /** Возвращение — с вероятностью ready / (ready + backK · машин с местом): чем больше отстояли у цели, тем чаще. */
@@ -789,9 +789,13 @@ export class CarHomes {
         this.moving.delete(car.key);
         const e = this.away(town).byCar.get(car.key);
         if (!e) return;
-        e.curb = st.key;
-        e.cp = [Math.round(st.pos.x * 10) / 10, Math.round(st.pos.y * 10) / 10];
-        curb.park(st.key, car.key);
+        // Пока машина вставала, раскладку мест могли пересчитать (сеть поправили, город вырос в итогах месяца): место —
+        // по нынешней, там же (как при загрузке, syncCurb); его нет или там же уже стоят — машина просто у цели.
+        const at = curb.find(st.key, st.pos);
+        if (!at || (at.key !== st.key && curb.occupied(at.key))) return;
+        e.curb = at.key;
+        e.cp = [Math.round(at.pos.x * 10) / 10, Math.round(at.pos.y * 10) / 10];
+        curb.park(at.key, car.key);
       },
       missed: () => {
         this.curbIn.delete(car.key);

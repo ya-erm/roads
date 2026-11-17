@@ -283,7 +283,7 @@ function privateFolk(b: TownBuilding): number {
  * Жильцы многоквартирного дома: вместимость проектных этажей, заселённая на 80–95 % (по хешу дома). Неизвестный
  * тип — по прежним 14 на этаж генерации.
  */
-function stackFolk(b: TownBuilding): number {
+export function stackFolk(b: Pick<TownBuilding, 'id' | 'form' | 'kind' | 'floors' | 'fp'>): number {
   const s = STACKS[formOf(b)];
   if (!s) return b.floors * RES_PER_FLOOR;
   return Math.max(4, Math.round(s.per(b.fp) * s.design(b.floors) * (0.8 + 0.15 * hash(b.id, 35))));

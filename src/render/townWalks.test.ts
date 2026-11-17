@@ -3,6 +3,7 @@ import { freshGame } from '../game/testkit';
 import type { Town, TownBuilding } from '../world/entities';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import type { Footprint } from '../world/spatial';
+import { LOT } from '../world/parkingLots';
 import { curbGap } from '../world/worldgen';
 import { parkGates } from './parkArt';
 import { SIDEWALK, type Sidewalk, WALK_LOOK } from './sidewalks';
@@ -114,6 +115,27 @@ describe('Дорожки кварталов', () => {
     ]);
   });
 
+  it('съезды и заезды к воротам площадок — до кромки полотна, даже если участок отступил дальше; у кромки — понижение бордюра поверх полотна', () => {
+    // Улица по y = −14, край полотна — на y = −5. Площадка отступила от улицы на 4 м дальше обычного (край — y = 4).
+    const lot = { id: 900, fp: { center: { x: 0, y: 16 }, w: 40, h: 24, angle: 0 }, gates: [{ x: 3, mode: 'both' as const }], owner: 'town' as const, tariff: 0 };
+    const big = { ...lot, id: 901, fp: { ...lot.fp, center: { x: 100, y: 16 } }, nodes: [7] };
+    const t = { ...town([house(-60, 0, { fp: { center: { x: -60, y: 13 }, w: 26, h: 26, angle: 0 } })]), lots: [lot, big] };
+    const w = townWalks(t, curb)!;
+    const gate = w.drives.find((d) => Math.abs(d.pts[0] - (3 - LOT.gateW / 2)) < 1e-6)!;
+    expect(gate).toBeTruthy();
+    // От края площадки (y = 4) — до полотна и чуть под него.
+    expect(gate.pts[1]).toBeCloseTo(4);
+    expect(Math.min(...gate.pts.filter((_, i) => i % 2 === 1))).toBeLessThan(-5);
+    // Понижение бордюра: поверх кромки полотна (y = −5), от раструба до асфальта.
+    const ys = gate.mouth!.filter((_, i) => i % 2 === 1);
+    expect(Math.max(...ys)).toBeGreaterThan(-5 + 1.25);
+    expect(Math.min(...ys)).toBeLessThan(-5);
+    // У большой площадки заезд — сама дорога (тупик-выезд): своего съезда нет.
+    expect(w.drives.some((d) => d.pts[0] > 60)).toBe(false);
+    // Грунтовка — без бордюра: понижения нет.
+    expect(townWalks(t, curb, () => false)!.drives.every((d) => !d.mouth)).toBe(true);
+  });
+
   it('мир по seed: у входов в парки — дорожки до тротуара; дорожки не уходят на проезжую часть дальше тротуара', { timeout: 30_000 }, () => {
     const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 1 });
     const net = g.roads.net;
@@ -193,7 +215,9 @@ describe('Дорожки кварталов', () => {
       }
       for (const d of w.drives) {
         drives++;
-        if (!at(d.pts[0], d.pts[1], houses, 0.05) || !at(d.pts[2], d.pts[3], houses, 0.05)) lost.push(`съезд ${d.pts.slice(0, 4).map((v) => v.toFixed(0)).join(',')}`);
+        // Съезд — от края участка дома или площадки-стоянки (заезд к её воротам).
+        const yards = [...houses, ...(t.lots ?? []).filter((l) => !l.removed).map((l) => l.fp)];
+        if (!at(d.pts[0], d.pts[1], yards, 0.05) || !at(d.pts[2], d.pts[3], yards, 0.05)) lost.push(`съезд ${d.pts.slice(0, 4).map((v) => v.toFixed(0)).join(',')}`);
       }
       // Дорожки кварталов: один конец — у дома (вход дома второго ряда, промежуток между домами) или у входа в парк.
       for (const p of w.paths) {

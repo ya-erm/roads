@@ -740,8 +740,8 @@ function courtyard(a: Art, lot: Lot): void {
 
 /**
  * Двор многоэтажки (раскладка — world/yardLots.yardPlan, в прямоугольнике x, y): вдоль длинной стороны по очереди —
- * детская площадка (песочница, горка, качели, карусель), спортивная коробка, стоянка, мусорная площадка; что не
- * влезло — нет. Вдоль дальнего края — деревья, где хватает места.
+ * детская площадка (песочница, горка, качели, карусель), спортивная коробка, мусорная площадка; что не влезло — нет.
+ * Вдоль дальнего края — деревья, где хватает места.
  */
 function yardItems(a: Art, lot: Lot, plan: YardPlan | null, x: number, y: number, seed: number): void {
   if (!plan) return;
@@ -750,7 +750,6 @@ function yardItems(a: Art, lot: Lot, plan: YardPlan | null, x: number, y: number
     const { x: ix, y: iy, w: w2, h: h2 } = p.rect;
     if (p.item === 'play') playArea(a, ix, iy, Math.min(w2, h2), lot.b.id + seed, lot.fine);
     else if (p.item === 'box') sportsBox(a, ix, iy, w2, h2, lot.b.id + seed, lot.fine);
-    else if (p.item === 'park') parking(a, p.row!);
     else trashPad(a, ix, iy, w2, h2);
   }
   const taken = plan.pieces.map((p) => [p.u0, p.u1, p.end]);
@@ -764,16 +763,13 @@ function yardItems(a: Art, lot: Lot, plan: YardPlan | null, x: number, y: number
   }
 }
 
-/** Проезд к подъездам вдоль корпуса (полоса асфальта) и пятачки у каждого подъезда; n — подъездов, x0..x1 — корпус. */
-function driveway(a: Art, x0: number, x1: number, y: number, n: number, from?: number): void {
-  if (!a.lod) return;
-  // От проезда с улицы (from — край участка у торца) — до дальнего конца корпуса.
-  const l = from === undefined ? x0 - 1 : Math.min(from, x0 - 1);
-  const r = from === undefined ? x1 + 1 : Math.max(from, x1 + 1);
-  a.patch(l, y + 1.2, r - l, 3.2, ASPHALT, 0.6);
-  if (!a.d) return;
-  const step = (x1 - x0) / n;
-  for (let k = 0; k < n; k++) a.patch(x0 + step * (k + 0.5) - 1, y - 0.2, 2, 1.6, PAVING);
+/**
+ * Крыльца подъездов — пятачки посередине каждой секции у стены y корпуса (x — от, длиной len; n — подъездов); out —
+ * куда от стены: −1 — к улице, 1 — во двор.
+ */
+function entrances(a: Art, x: number, len: number, y: number, n: number, out: 1 | -1): void {
+  const step = len / n;
+  for (let k = 0; k < n; k++) a.patch(x + step * (k + 0.5) - 1.2, out < 0 ? y - 1.5 : y - 0.1, 2.4, 1.6, PAVING);
 }
 
 /** Панельный дом: длинный корпус с плоской крышей у улицы, подъезды — во двор; во дворе — проезд, площадки, стоянка, деревья. */
@@ -785,22 +781,35 @@ function slab(a: Art, lot: Lot): void {
   lawn(a, lot);
   const p = slabPlan(b);
   if (p.kind === 'along') {
-    // Вдоль улицы: корпус у тротуара, двор — за ним; у длинного дома с одного торца — проезд с улицы во двор, у
-    // короткого — арка в корпусе (world/yardLots.slabPlan: там ворота двора, машины въезжают в них).
+    // Вдоль улицы (world/yardLots.slabPlan): карман у улицы — места с заездом прямо с полосы через тротуар, за ними
+    // тротуар у фасада с подъездами, корпус, за ним двор с площадками; на мелком участке — корпус у тротуара, подъезды
+    // во двор, места у торца.
     const { bx, by, L, bd, top, yx0, yx1, ell, right } = p;
+    for (const row of p.front) {
+      curbCut(a, lot, row.pad.x + row.pad.w / 2, row.pad.w, row.pad.y + 0.3);
+      parking(a, row);
+    }
+    const walkColor = WALK_LOOK.paved.fill;
+    if (p.walk) {
+      // Тротуар вдоль фасада, к нему — дорожки от улицы между кусками кармана; у подъездов — крыльца.
+      for (const x of p.paths) frontPath(a, lot, x, p.walk.y + 0.4, 1.6);
+      if (a.lod) a.patch(bx - 1, p.walk.y, L + 2, p.walk.h, walkColor, 0.4);
+      if (a.d) entrances(a, bx, L, by, p.sections, -1);
+    } else {
+      for (const x of p.paths) frontPath(a, lot, x, p.yy - 0.6, 1.4);
+    }
     if (p.yard) {
-      if (p.pass) curbCut(a, lot, p.pass.x, p.pass.w, top + 4.4);
-      if (p.arch) curbCut(a, lot, p.arch.x, p.arch.w, by + 0.4);
-      driveway(a, Math.max(yx0, bx), Math.min(yx1, bx + L), top, p.sections, p.pass?.edge);
-      yardItems(a, lot, p.plan, yx0, top + 5.2, 30);
+      // Двор — без машин: дорожка вдоль корпуса (к подъездам, если они во двор) и площадки.
+      if (a.lod) {
+        const l = Math.min(yx0, bx) + 0.4;
+        const r = Math.max(yx1, bx + L) - 0.4;
+        a.patch(l, top + 0.4, r - l, p.doors === 'back' ? 2 : 1.2, walkColor, 0.4);
+      }
+      if (p.doors === 'back' && a.d) entrances(a, Math.max(yx0, bx), Math.min(yx1, bx + L) - Math.max(yx0, bx), top, p.sections, 1);
+      yardItems(a, lot, p.plan, yx0, p.yy, 30);
     }
     if (ell) flat(a, right ? -x0 - 1.5 - bd : x0 + 1.5, by + bd, bd, H - (by - y0) - bd - 3, z, b.roof, 15 * S);
     flat(a, bx, by, L, bd, z, b.roof, 15 * S);
-    if (p.arch && a.pass === 2 && a.lod) {
-      // Арка во двор — тёмный проём у фасада.
-      a.c.fillStyle = 'rgba(60,56,50,0.75)';
-      a.c.fillRect(p.arch.x - p.arch.w / 2, by, p.arch.w, 0.9);
-    }
   } else {
     // Узкий глубокий участок: корпус торцом к улице, двор сбоку, стоянка у улицы — со съездом во всю её ширину.
     const { bx, bw } = p;

@@ -3,6 +3,8 @@ import { hash } from '../core/math';
 import type { Vec } from '../core/vec';
 import type { Town, TownBuilding } from '../world/entities';
 import { LOT_SETBACK } from '../world/houseAccess';
+import { LOT } from '../world/parkingLots';
+import { LOT_ASPHALT } from './lotArt';
 import type { Footprint } from '../world/spatial';
 import { townTier } from '../world/townForms';
 import { houseAccess } from './houseArt';
@@ -31,8 +33,11 @@ export interface TownWalks {
   paths: number[][];
   /** Дорожки к крыльцам от участка до тротуара: отрезок (x0, y0, x1, y1) и ширина; цвет — тротуара города. */
   fronts: { pts: number[]; w: number }[];
-  /** Съезды от участка до полотна: многоугольник (x, y по очереди) и цвет. */
-  drives: { pts: number[]; color: string }[];
+  /**
+   * Съезды от участка до полотна: многоугольник (x, y по очереди) и цвет; mouth — понижение бордюра: раструб у кромки,
+   * рисуется поверх полотна (drawDriveMouths).
+   */
+  drives: { pts: number[]; color: string; mouth?: number[] }[];
   /** Мощёные (город) или утоптанные (село). */
   paved: boolean;
   box: Box;
@@ -61,8 +66,61 @@ function toWorld(f: Footprint, x: number, y: number): [number, number] {
 const parallel = (a: Footprint, b: Footprint) => Math.cos(a.angle - b.angle) > 0.997;
 const rowHouse = (b: TownBuilding) => b.kind !== 'landmark' && b.form !== 'tower';
 
+/** Как далеко от точки до кромки полотна (curbGap) и есть ли там бордюр (не грунтовка). */
+export interface WalkRoads {
+  gap(p: Vec): number;
+  kerb(p: Vec): boolean;
+}
+
+/**
+ * Раструб съезда у полотна: начинается за столько метров до кромки и шире съезда на столько с каждой стороны; у
+ * широкого съезда (ряд мест с улицы, карман) — уже: между соседними кусками кармана остаётся проход к дорожке.
+ */
+const FLARE = { from: 1.6, wide: 1.2, row: 0.4, rowFrom: 10 };
+/** Съезд заходит под асфальт полотна на столько; понижение бордюра — на столько в асфальт поверх его кромки. */
+const UNDER = 0.6;
+const LIP = 0.4;
+
+/**
+ * Съезд в осях участка f (x — середина, w — ширина) с края участка edge к улице со стороны side — через газон и тротуар
+ * до кромки полотна (по roads: и тогда, когда участок отступил от улицы дальше LOT_SETBACK — ужат полосой стоянки,
+ * поставлен дальше тротуара); у кромки — раструб и понижение бордюра (mouth — поверх полотна, его бордюр закрыт
+ * асфальтом съезда: машина выезжает на улицу по съезду, а не из-под бордюра).
+ */
+function driveTo(f: Footprint, x: number, w: number, edge: number, side: 1 | -1, color: string, roads: WalkRoads, drives: TownWalks['drives']): void {
+  const [ex, ey] = toWorld(f, x, edge);
+  const gap = roads.gap({ x: ex, y: ey });
+  // Полотна рядом нет (снесли) — съезд обычной длины, без понижения бордюра.
+  const near = gap > 0.5 && gap < 15;
+  const road = edge + side * (near ? gap : LOT_SETBACK);
+  const hw = w / 2;
+  const at = (pts: number[][]) => pts.flatMap(([px, py]) => toWorld(f, px, py));
+  const flare = road - side * FLARE.from;
+  const fw = hw + (w >= FLARE.rowFrom ? FLARE.row : FLARE.wide);
+  const pts = at([
+    [x - hw, edge],
+    [x + hw, edge],
+    [x + hw, flare],
+    [x + fw, road + side * UNDER],
+    [x - fw, road + side * UNDER],
+    [x - hw, flare],
+  ]);
+  const drive: TownWalks['drives'][number] = { pts, color };
+  if (near && roads.kerb({ x: ex, y: ey })) {
+    drive.mouth = at([
+      [x - hw, flare],
+      [x + hw, flare],
+      [x + fw, road],
+      [x + fw, road + side * LIP],
+      [x - fw, road + side * LIP],
+      [x - fw, road],
+    ]);
+  }
+  drives.push(drive);
+}
+
 /** Выходы дома к улице (дорожки к крыльцам, съезды) — в мире, от края участка через газон и тротуар. */
-function accessOf(b: TownBuilding, reach: number, fronts: TownWalks['fronts'], drives: TownWalks['drives']): void {
+function accessOf(b: TownBuilding, reach: number, fronts: TownWalks['fronts'], drives: TownWalks['drives'], roads: WalkRoads): void {
   // Оси сцены дома: дом с face = 1 повёрнут на пол-оборота (как в houseArt).
   const angle = (b.face ?? -1) === 1 ? b.fp.angle + Math.PI : b.fp.angle;
   const f: Footprint = { center: b.fp.center, w: b.fp.w, h: b.fp.h, angle };
@@ -72,27 +130,24 @@ function accessOf(b: TownBuilding, reach: number, fronts: TownWalks['fronts'], d
       fronts.push({ pts: [...toWorld(f, a.x, edge), ...toWorld(f, a.x, edge + a.side * reach)], w: a.w });
       continue;
     }
-    // Съезд — до полотна и чуть под него; у бордюра — раструб на метр шире с каждой стороны.
-    const curb = a.side * (b.fp.h / 2 + LOT_SETBACK + 0.6);
-    const flare = a.side * (b.fp.h / 2 + LOT_SETBACK - 1.6);
-    const hw = a.w / 2;
-    const pts = [
-      [a.x - hw, edge],
-      [a.x + hw, edge],
-      [a.x + hw, flare],
-      [a.x + hw + 1.2, curb],
-      [a.x - hw - 1.2, curb],
-      [a.x - hw, flare],
-    ].flatMap(([x, y]) => toWorld(f, x, y));
-    drives.push({ pts, color: a.color });
+    driveTo(f, a.x, a.w, edge, a.side, a.color, roads, drives);
+  }
+}
+
+/** Заезды к воротам площадок-стоянок без тупика-выезда (у большой заезд — сама дорога): от края площадки до полотна. */
+function lotAccess(town: Town, roads: WalkRoads, drives: TownWalks['drives']): void {
+  for (const l of town.lots ?? []) {
+    if (l.removed || l.nodes?.length) continue;
+    for (const g of l.gates) driveTo(l.fp, g.x, LOT.gateW, -l.fp.h / 2, -1, LOT_ASPHALT, roads, drives);
   }
 }
 
 /**
  * Дорожки и съезды города town. curb — сколько метров от точки до края ближнего полотна (∞ — далеко): по нему
- * дорожка от входа в парк доходит до тротуара.
+ * дорожка от входа в парк доходит до тротуара, а съезд — до полотна; kerb — у полотна там бордюр (не грунтовка):
+ * у съезда — понижение бордюра.
  */
-export function townWalks(town: Town, curb: (p: Vec) => number): TownWalks | null {
+export function townWalks(town: Town, curb: (p: Vec) => number, kerb: (p: Vec) => boolean = () => true): TownWalks | null {
   const paved = townTier(town) !== 'village';
   const side = paved ? SIDEWALK.paved : SIDEWALK.path;
   // До тротуара от участка: LOT_SETBACK − (from + w) — газон; дорожка заходит на тротуар на полметра.
@@ -101,8 +156,10 @@ export function townWalks(town: Town, curb: (p: Vec) => number): TownWalks | nul
   const fronts: TownWalks['fronts'] = [];
   const drives: TownWalks['drives'] = [];
   const list = town.buildings.filter(rowHouse);
+  const roads: WalkRoads = { gap: curb, kerb };
   // Дом второго ряда выходит к улице дорожкой в обход переднего (ниже), не напрямую.
-  for (const b of town.buildings) if (b.kind !== 'landmark' && !b.rear) accessOf(b, reach, fronts, drives);
+  for (const b of town.buildings) if (b.kind !== 'landmark' && !b.rear) accessOf(b, reach, fronts, drives, roads);
+  lotAccess(town, roads, drives);
   // Участок отступил от улицы дальше обычного (полоса стоянки ужала его — world/curbSqueeze.ts, угловой — с двух
   // улиц): дорожка к крыльцу тянется дальше, до тротуара.
   const onWalk = side.from + side.w - 0.5;
@@ -192,7 +249,7 @@ export function townWalks(town: Town, curb: (p: Vec) => number): TownWalks | nul
   }
   if (!out.length && !fronts.length && !drives.length) return null;
   let box: Box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
-  const all = [...out, ...fronts.map((f) => f.pts), ...drives.map((d) => d.pts)];
+  const all = [...out, ...fronts.map((f) => f.pts), ...drives.flatMap((d) => (d.mouth ? [d.pts, d.mouth] : [d.pts]))];
   for (const p of all) for (let i = 0; i < p.length; i += 2) box = { x0: Math.min(box.x0, p[i]), y0: Math.min(box.y0, p[i + 1]), x1: Math.max(box.x1, p[i]), y1: Math.max(box.y1, p[i + 1]) };
   const sig = `${paved}|${all.map((p) => p.map((v) => v.toFixed(1)).join(',')).join(';')}`;
   return { townId: town.id, paths: out, fronts, drives, paved, box: grow(box, 2), sig };
@@ -238,11 +295,45 @@ export function drawTownWalks(ctx: CanvasRenderingContext2D, list: readonly Town
   for (const w of seen) {
     for (const d of w.drives) {
       c.fillStyle = d.color;
-      c.beginPath();
-      c.moveTo(d.pts[0], d.pts[1]);
-      for (let i = 2; i < d.pts.length; i += 2) c.lineTo(d.pts[i], d.pts[i + 1]);
-      c.closePath();
+      poly(c, d.pts);
       c.fill();
+    }
+  }
+}
+
+function poly(c: CanvasRenderingContext2D, pts: readonly number[]): void {
+  c.beginPath();
+  c.moveTo(pts[0], pts[1]);
+  for (let i = 2; i < pts.length; i += 2) c.lineTo(pts[i], pts[i + 1]);
+  c.closePath();
+}
+
+/** Цвет понижения бордюра у съезда: светлая черта бетона по кромке полотна поперёк съезда. */
+const LOWERED = 'rgba(196,194,186,0.55)';
+
+/**
+ * Понижение бордюра у съездов в рамке view — поверх полотен (после сети, LaneRenderer): бордюр полотна лежит снаружи
+ * его асфальта, и без этого съезд упирался бы в него, а машина выезжала бы из-под него. Асфальт съезда — до кромки
+ * асфальта полотна, по ней — светлая черта понижения.
+ */
+export function drawDriveMouths(ctx: CanvasRenderingContext2D, list: readonly TownWalks[], view: Box, zoom: number): void {
+  const a = new Art(ctx, { id: 0, fp: { center: { x: 0, y: 0 }, w: 1, h: 1, angle: 0 } }, zoom, 0, 0, 'still');
+  if (!a.lod) return;
+  for (const w of list) {
+    if (w.box.x1 < view.x0 || w.box.x0 > view.x1 || w.box.y1 < view.y0 || w.box.y0 > view.y1) continue;
+    for (const d of w.drives) {
+      const m = d.mouth;
+      if (!m) continue;
+      ctx.fillStyle = d.color;
+      poly(ctx, m);
+      ctx.fill();
+      // Черта понижения — по кромке асфальта полотна (точки 2 и 5 раструба — у кромки).
+      ctx.strokeStyle = LOWERED;
+      ctx.lineWidth = 0.35;
+      ctx.beginPath();
+      ctx.moveTo(m[4], m[5]);
+      ctx.lineTo(m[10], m[11]);
+      ctx.stroke();
     }
   }
 }

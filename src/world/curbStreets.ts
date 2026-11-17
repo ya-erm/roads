@@ -6,6 +6,7 @@ import type { Town, TownBuilding } from './entities';
 import { PARK_W } from './roadTypes';
 import { edgeOf, formOf, inDistrict } from './townForms';
 import { landmarkClear, type WorldContext } from './worldgen';
+import { slabPlan } from './yardLots';
 
 /**
  * Полосы стоянки на улицах городов сами (docs/PARKING.md, этап 2; WorldSettings.parking — только новые партии): при
@@ -44,6 +45,13 @@ export function frontage(town: Town, seg: Corridor): Map<1 | -1, TownBuilding[]>
   return out;
 }
 
+/** Панелька с карманом у улицы перед фасадом. */
+function pocketed(b: TownBuilding): boolean {
+  if (b.kind !== 'res') return false;
+  const p = slabPlan(b);
+  return p.kind === 'along' && p.doors === 'front';
+}
+
 /** С каких сторон улицы seg город при генерации ставит стоянку: центр, новый район, рынок и ратуша. */
 export function curbSides(town: Town, seg: Corridor): (1 | -1)[] {
   const mid = seg.lut.pointAt(seg.length / 2);
@@ -55,8 +63,10 @@ export function curbSides(town: Town, seg: Corridor): (1 | -1)[] {
     else if (edgeOf(town, mid) < CURB_TOWN.centre && has(side, (b) => b.kind === 'com')) out.push(side);
   }
   if (!out.length && inDistrict(town.district, mid)) {
-    // Новый район — одна сторона: где панелек больше (поровну — справа).
-    const slabs = (side: 1 | -1) => front.get(side)!.filter((b) => formOf(b) === 'slab' || formOf(b) === 'tower').length;
+    // Новый район — одна сторона: где панелек больше (поровну — справа). Панелька с карманом у улицы (места перед
+    // фасадом, заезд с полосы прямо на место — world/yardLots.slabPlan) не в счёт: её машинам полоса не нужна, а вдоль
+    // кармана на полосе и мест бы не было — у каждого заезда их нет (Game.curbSkips).
+    const slabs = (side: 1 | -1) => front.get(side)!.filter((b) => formOf(b) === 'tower' || (formOf(b) === 'slab' && !pocketed(b))).length;
     const r = slabs(1);
     const l = slabs(-1);
     if (r || l) out.push(r >= l ? 1 : -1);

@@ -11,7 +11,8 @@ import type { Footprint } from '../world/spatial';
  * без бордюра в воротах. Вдали — асфальт и «P».
  */
 // Непрозрачный: кромка и разметка тупика-выезда под большой площадкой не должны просвечивать.
-const ASPHALT = 'rgb(96,102,112)';
+export const LOT_ASPHALT = 'rgb(96,102,112)';
+const ASPHALT = LOT_ASPHALT;
 const CURB = 'rgba(200,200,196,0.95)';
 const PAINT = 'rgba(245,245,240,0.9)';
 const SIGN = '#2f6fd0';
@@ -41,19 +42,17 @@ function arrow(ctx: CanvasRenderingContext2D, x: number, y: number, dir: 1 | -1,
   ctx.stroke();
 }
 
-/** Ворота площадки: заезд от бордюра через тротуар и стрелки хода. */
-function drawGates(ctx: CanvasRenderingContext2D, fp: Footprint, gates: readonly LotGate[], zoom: number, big: boolean, bad?: readonly number[]): void {
+/**
+ * Ворота площадки: стрелки хода на проезде у края. Заезд от ворот через газон и тротуар до полотна рисуют дорожки
+ * кварталов поверх тротуара (render/townWalks.ts, с понижением бордюра), в предпросмотре — подсветка ворот.
+ */
+function drawGates(ctx: CanvasRenderingContext2D, fp: Footprint, gates: readonly LotGate[], zoom: number, bad?: readonly number[]): void {
   const H = fp.h;
   gates.forEach((g, i) => {
-    const w = LOT.gateW;
-    if (!big) {
-      ctx.fillStyle = ASPHALT;
-      ctx.fillRect(g.x - w / 2, -H / 2 - LOT.setback, w, LOT.setback + 0.5);
-    }
     ctx.strokeStyle = bad?.includes(i) ? '#e0473c' : PAINT;
     ctx.lineWidth = Math.max(0.4, 1.4 / zoom);
-    // У большой за краем — тупик-выезд со своей разметкой: стрелки хода — на проезде площадки, у края.
-    const y = big ? -H / 2 + 3 : -H / 2 - LOT.setback / 2;
+    // Стрелки хода — на проезде площадки у края (у большой за краем — тупик-выезд со своей разметкой).
+    const y = -H / 2 + 3;
     if (g.mode !== 'out') arrow(ctx, g.x - (g.mode === 'both' ? 1.6 : 0), y, 1, 2);
     if (g.mode !== 'in') arrow(ctx, g.x + (g.mode === 'both' ? 1.6 : 0), y, -1, 2);
   });
@@ -112,10 +111,12 @@ export function drawLotArt(ctx: CanvasRenderingContext2D, lot: ParkingLot, zoom:
   const big = !!lot.nodes?.length;
   ctx.fillStyle = ASPHALT;
   ctx.fillRect(-W / 2, -H / 2, W, H);
-  drawCurb(ctx, W, H, big ? lot.gates.map((g) => [g.x - LOT.stubEdge, g.x + LOT.stubEdge] as const) : []);
+  // В воротах бордюра нет: у большой — во всю ширину тупика-выезда, у маленькой — заезда.
+  const half = big ? LOT.stubEdge : LOT.gateW / 2;
+  drawCurb(ctx, W, H, lot.gates.map((g) => [g.x - half, g.x + half] as const));
   if (zoom >= FINE) {
     drawStalls(ctx, lotLayout(lot).stalls.map((s) => s.rect), zoom);
-    drawGates(ctx, fp, lot.gates, zoom, big);
+    drawGates(ctx, fp, lot.gates, zoom);
   }
   // Знак «P» у края к улице, вдали — посередине.
   const r = zoom >= FINE ? 2.6 : Math.min(W, H) * 0.25;
@@ -162,6 +163,6 @@ export function drawLotPreview(
     ctx.fillStyle = o.bad?.includes(i) ? 'rgba(224,71,60,0.7)' : `${tint}0.55)`;
     ctx.fillRect(g.x - LOT.gateW / 2, -fp.h / 2 - LOT.setback, LOT.gateW, LOT.setback + 1);
   }
-  drawGates(ctx, fp, o.gates, zoom, false, o.bad);
+  drawGates(ctx, fp, o.gates, zoom, o.bad);
   ctx.restore();
 }

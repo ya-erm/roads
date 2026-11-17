@@ -4,7 +4,7 @@ import type { Vec } from '../core/vec';
 import type { TownBuilding } from './entities';
 import { CAR_SIZE, LOT_SETBACK, lotFrame, type Driveway, type LotRect } from './houseAccess';
 import { STALL_STOP } from './shopLots';
-import { formOf, storeysOf } from './townForms';
+import { flatsOf, formOf, stackFolk, storeysOf } from './townForms';
 
 /**
  * Дворовые стоянки многоквартирных домов и гаражные боксы (docs/PARKING.md, этап 1): раскладка участка, общая для
@@ -13,11 +13,47 @@ import { formOf, storeysOf } from './townForms';
  *
  * Оси участка — как у рисунка дома: начало — в середине участка, x — вдоль улицы, улица — со стороны −y.
  * Места — перпендикулярные, 4,6 × 8,5 ед. (≈ 2,8 × 5,1 м; единица карты — 0,6 м), проезд — 7 ед. (≈ 4,2 м).
- * Ряд мест прямо у улицы (у высотки, у торца узкой панельки) — «с улицы»: у каждого места свой заезд, машина
- * сворачивает с полосы прямо на него, как на стоянку магазина. Остальные места — во дворе, за воротами двора: машина
- * въезжает в ворота, как в гараж, и дальше «пропадает во дворе» — видна уже на своём месте. Боксы — за воротами
- * гаражного кооператива, машин в них не видно.
+ * Ряд мест прямо у улицы (карман перед панелькой, у её торца, у высотки) — «с улицы»: у каждого места свой заезд,
+ * машина сворачивает с полосы прямо на него, как на стоянку магазина, и выезжает с него задним ходом через тротуар —
+ * всё время на виду. У панелек мест во дворе нет: двор — под детскую и спортивную площадки. Места во дворе за аркой
+ * (квартал, дом старого центра) — за воротами двора: машина въезжает в арку, как в гараж, и дальше «пропадает во
+ * дворе» — видна уже на своём месте. Боксы — за воротами гаражного кооператива, машин в них не видно.
  */
+
+/** Машин на квартиру многоквартирного дома (game/carHomes.ts, CAR_HOMES.perFlat). */
+export const CARS_PER_FLAT = 0.15;
+
+/**
+ * Карман перед панелькой вдоль улицы: ряд мест у края участка (заезд с улицы прямо на место), за ним — тротуар вдоль
+ * фасада с подъездами, дальше корпус, за корпусом — двор. Ед. (единица — 0,6 м).
+ */
+export const SLAB_FRONT = {
+  /** Места — от края участка на столько. */
+  edge: 0.6,
+  /** Тротуар вдоль фасада между местами и корпусом (≈ 1,8 м). */
+  walk: 3,
+  /** Двор за корпусом — не мельче стольких (детская площадка), иначе — места у торца. */
+  yard: 6,
+  /** Мест в куске кармана — не больше; между кусками — проход от улицы к подъездам. */
+  seg: 6,
+  /** Проход между кусками, ед. */
+  gap: 2.4,
+  /** Мест — с запасом сверх машин дома: доля и не меньше стольких. */
+  spare: 0.25,
+  spareMin: 2,
+  /** Места у торца (участок мелкий для кармана): мест — от и до. */
+  end: [2, 4] as const,
+} as const;
+
+/**
+ * Машин у многоквартирного дома — для раскладки мест: как в парке машин жителей (game/carHomes.ts), но по жильцам
+ * проекта (townForms.stackFolk — их же дом получает при заселении), а не по TownBuilding.people: раскладка — только по
+ * участку и этажам, одна и та же и до заселения (генерация, загрузка сохранения), и после.
+ */
+export function homeCars(b: Pick<TownBuilding, 'id' | 'kind' | 'floors' | 'form' | 'fp'>): number {
+  const flats = flatsOf({ ...b, people: stackFolk(b) });
+  return Math.min(62, Math.round(flats * CARS_PER_FLAT));
+}
 
 /** Место: ширина и глубина, ед. (≈ 2,8 × 5,1 м). */
 export const YARD_STALL = { w: 4.6, d: 8.5 } as const;
@@ -87,14 +123,17 @@ function streetRow(x: number, y: number, w: number, h: number, side: 1 | -1): Ya
   return row(x, y, w, h, 'x-', false, side);
 }
 
-export type YardItem = 'play' | 'box' | 'park' | 'trash';
-/** Наборы двора — какой достанется дому, по хешу: площадка, коробка, стоянка, мусорка в разном порядке. */
+export type YardItem = 'play' | 'box' | 'trash';
+/**
+ * Наборы двора — какой достанется дому, по хешу: площадка, коробка, мусорка в разном порядке. Стоянки во дворе нет:
+ * места многоэтажек — у улицы (карман, ряд у торца, у высотки).
+ */
 const YARD_SETS: YardItem[][] = [
-  ['play', 'park', 'trash', 'box'],
-  ['play', 'box', 'trash', 'park'],
-  ['park', 'play', 'trash'],
-  ['box', 'play', 'park', 'trash'],
-  ['trash', 'play', 'park', 'box'],
+  ['play', 'trash', 'box'],
+  ['play', 'box', 'trash'],
+  ['play', 'trash'],
+  ['box', 'play', 'trash'],
+  ['trash', 'play', 'box'],
 ];
 
 /** Что во дворе: предмет, его прямоугольник; u0…u1 — вдоль двора, end — до какой глубины (для деревьев по краю). */
@@ -104,8 +143,6 @@ export interface YardPiece {
   u0: number;
   u1: number;
   end: number;
-  /** Стоянка — её ряд мест (въезд — с ближнего к проезду края двора). */
-  row?: YardRow;
 }
 
 /** Раскладка двора многоэтажки (x, y, w, h): вдоль длинной стороны, что влезает; across — двор поперёк (h > w). */
@@ -118,11 +155,10 @@ export interface YardPlan {
 
 /**
  * Двор многоэтажки в прямоугольнике (x, y, w, h): вдоль длинной стороны по очереди — детская площадка, спортивная
- * коробка, стоянка, мусорная площадка; что не влезло — нет. Набор и порядок — по хешу дома (seed), начало — с той
- * или другой стороны. Стоянка — только там, где к ней есть проезд (park): у панельки вдоль улицы — от проезда у
- * подъездов, ворота двора — у торца или в арке.
+ * коробка, мусорная площадка; что не влезло — нет. Набор и порядок — по хешу дома (seed), начало — с той или другой
+ * стороны.
  */
-export function yardPlan(b: Pick<TownBuilding, 'id'>, x: number, y: number, w: number, h: number, seed: number, park: boolean): YardPlan | null {
+export function yardPlan(b: Pick<TownBuilding, 'id'>, x: number, y: number, w: number, h: number, seed: number): YardPlan | null {
   const across = h > w;
   const L = across ? h : w;
   const D = across ? w : h;
@@ -140,11 +176,6 @@ export function yardPlan(b: Pick<TownBuilding, 'id'>, x: number, y: number, w: n
       ih = Math.min(D - 0.6, 12);
       iw = Math.min(ih * 1.7, 20);
       if (ih < 7.5) continue;
-    } else if (item === 'park') {
-      if (!park) continue;
-      ih = Math.min(YARD_STALL.d, D - 0.4);
-      iw = Math.min(L * 0.5, 46);
-      if (iw < 8) continue;
     } else {
       iw = 4.6;
       ih = 2.6;
@@ -152,18 +183,20 @@ export function yardPlan(b: Pick<TownBuilding, 'id'>, x: number, y: number, w: n
     if (iw < 4.5 && item === 'play') continue;
     if (cur + iw > L) continue;
     const u = flip ? L - cur - iw : cur;
-    // Стоянка и мусорка — у проезда (ближний край), площадки — посередине глубины.
-    const v = item === 'park' || item === 'trash' ? 0.2 : (D - ih) / 2;
+    // Мусорка — у дорожки (ближний край), площадки — посередине глубины.
+    const v = item === 'trash' ? 0.2 : (D - ih) / 2;
     const [ix, iy, w2, h2] = across ? [x + v, y + u, ih, iw] : [x + u, y + v, iw, ih];
-    const piece: YardPiece = { item, rect: { x: ix, y: iy, w: w2, h: h2 }, u0: u, u1: u + iw, end: v + ih };
-    if (item === 'park') piece.row = row(ix, iy, w2, h2, across ? 'x-' : 'y-', false);
-    pieces.push(piece);
+    pieces.push({ item, rect: { x: ix, y: iy, w: w2, h: h2 }, u0: u, u1: u + iw, end: v + ih });
     cur += iw + gap;
   }
   return { across, L, D, pieces };
 }
 
-/** Панельный дом вдоль улицы: корпус у тротуара, двор за ним (проезд у подъездов, ворота — у торца или в арке). */
+/**
+ * Панельный дом вдоль улицы. Где участок позволяет — карман у улицы: ряд мест с заездом прямо с полосы, за ним тротуар
+ * вдоль фасада с подъездами, корпус, за корпусом — двор с площадками (doors — 'front'). Мелкий участок — корпус у
+ * тротуара, подъезды — во двор (doors — 'back'), места — у торца, тоже с заездом с улицы (если влезают).
+ */
 export interface SlabAlong {
   kind: 'along';
   /** Корпус: x, y, длина, глубина; секций (подъездов). */
@@ -180,9 +213,16 @@ export interface SlabAlong {
   yx0: number;
   yx1: number;
   top: number;
-  /** Проезд с улицы во двор у торца (pass) или арка в корпусе (arch) — середина и ширина. */
-  pass: { x: number; w: number; edge: number } | null;
-  arch: { x: number; w: number } | null;
+  /** Где площадки двора (yardPlan) — начало по y. */
+  yy: number;
+  /** Подъезды — к улице (за карманом) или во двор. */
+  doors: 'front' | 'back';
+  /** Места у улицы (карман перед корпусом или у торца): куски ряда, заезд — с улицы на каждое место. */
+  front: YardRow[];
+  /** Дорожки от улицы к тротуару у фасада — x (между кусками кармана и по его краям). */
+  paths: number[];
+  /** Тротуар вдоль фасада (между карманом и корпусом): y и глубина; нет — подъезды во двор. */
+  walk: { y: number; h: number } | null;
   plan: YardPlan | null;
 }
 
@@ -213,26 +253,57 @@ export function slabPlan(b: Pick<TownBuilding, 'id' | 'fp' | 'kind' | 'floors' |
   const y0 = -H / 2;
   const D = slabDepth(storeysOf(b));
   if (W >= H * 0.8 || H < 30 * S) {
+    // Мест — по машинам дома с запасом (гостям и на вырост).
+    const cars = homeCars(b);
+    const want = cars ? cars + Math.max(SLAB_FRONT.spareMin, Math.ceil(cars * SLAB_FRONT.spare)) : 0;
+    const ell = H >= 34 * S && W >= 50 * S && r(b, 3) < 0.35;
+    const sections = (L: number) => Math.max(1, Math.round(L / (15 * S)));
+    // Карман у улицы: места от края участка, тротуар у фасада, корпус отступает за них; двор за корпусом не мельче
+    // SLAB_FRONT.yard. Люди — по участку (townForms.STACKS), не по корпусу: жителей столько же.
+    const fy = y0 + SLAB_FRONT.edge;
+    const fby = fy + YARD_STALL.d + SLAB_FRONT.walk;
+    if (want && H / 2 - 0.6 - (fby + D) >= SLAB_FRONT.yard) {
+      const bx = x0 + 1.5;
+      const L = W - 3;
+      const pocket = pocketRows(bx, L, fy, want);
+      if (pocket.rows.length) {
+        const right = r(b, 4) < 0.5;
+        const top = fby + D;
+        const yx0 = x0 + 1.5 + (ell && !right ? D + 1.5 : 0);
+        const yx1 = -x0 - 1.5 - (ell && right ? D + 1.5 : 0);
+        const yy = top + 1.6;
+        const plan = yardPlan(b, yx0, yy, yx1 - yx0, H / 2 - 0.6 - yy, 30);
+        const walk = { y: fy + YARD_STALL.d, h: SLAB_FRONT.walk };
+        return { kind: 'along', bx, by: fby, L, bd: D, sections: sections(L), ell, right, yard: true, yx0, yx1, top, yy, doors: 'front', front: pocket.rows, paths: pocket.paths, walk, plan };
+      }
+    }
+    // Мелкий участок: корпус у тротуара, подъезды — во двор (к нему — дорожкой), места — у торца с заезда с улицы.
     const set = clamp(H - D - 4, 1, 4);
     const bd = Math.min(D, H - set - 1);
     const by = y0 + set;
     const top = by + bd;
     const yard = H / 2 - top > 4.5;
-    const wide = yard && W >= 36 * S;
-    const passLeft = r(b, 9) < 0.5;
-    const PASS = 6.5;
-    const bx = x0 + 1.5 + (wide && passLeft ? PASS : 0);
-    const L = W - 3 - (wide ? PASS : 0);
-    const sections = Math.max(1, Math.round(L / (15 * S)));
-    const ell = H >= 34 * S && W >= 50 * S && r(b, 3) < 0.35;
-    const right = wide ? passLeft : r(b, 4) < 0.5;
+    const cols = clamp(want, SLAB_FRONT.end[0], SLAB_FRONT.end[1]);
+    const E = cols * YARD_STALL.w + 1.6;
+    const end = want > 0 && W - 3 - E >= 24 * S;
+    const endLeft = r(b, 9) < 0.5;
+    const bx = x0 + 1.5 + (end && endLeft ? E : 0);
+    const L = W - 3 - (end ? E : 0);
+    // Второй корпус (Г) — у другого торца, не у мест.
+    const right = end ? endLeft : r(b, 4) < 0.5;
     const yx0 = x0 + 1.5 + (ell && !right ? bd + 1.5 : 0);
     const yx1 = -x0 - 1.5 - (ell && right ? bd + 1.5 : 0);
-    const pass = wide ? { x: passLeft ? x0 + 1.5 + PASS / 2 : -x0 - 1.5 - PASS / 2, w: GATE_W, edge: passLeft ? x0 + 1.5 : -x0 - 1.5 } : null;
-    // Без проезда у торца — арка в корпусе у того края двора, где нет второго корпуса.
-    const arch = yard && !pass ? { x: right ? Math.max(bx, yx0) + 5 : Math.min(bx + L, yx1) - 5, w: 4.4 } : null;
-    const plan = yard ? yardPlan(b, yx0, top + 5.2, yx1 - yx0, H / 2 - 0.6 - top - 5.2, 30, true) : null;
-    return { kind: 'along', bx, by, L, bd, sections, ell, right, yard, yx0, yx1, top, pass, arch, plan };
+    const front: YardRow[] = [];
+    const paths: number[] = [];
+    if (end) {
+      const rx = endLeft ? x0 + 1.5 : -x0 - 1.5 - cols * YARD_STALL.w;
+      front.push(row(rx, y0 + SLAB_FRONT.edge, cols * YARD_STALL.w, Math.min(YARD_STALL.d, H - 2), 'y-', true, -1));
+      // Дорожка во двор — между местами и торцом.
+      if (yard) paths.push(endLeft ? bx - 0.8 : bx + L + 0.8);
+    }
+    const yy = top + 3.2;
+    const plan = yard ? yardPlan(b, yx0, yy, yx1 - yx0, H / 2 - 0.6 - yy, 30) : null;
+    return { kind: 'along', bx, by, L, bd, sections: sections(L), ell, right, yard, yx0, yx1, top, yy, doors: 'back', front, paths, walk: null, plan };
   }
   const left = r(b, 1) < 0.5;
   const bw = Math.min(D, W - 6);
@@ -245,7 +316,37 @@ export function slabPlan(b: Pick<TownBuilding, 'id' | 'fp' | 'kind' | 'floors' |
   const cut = lot.direct && lot.stalls.length ? spanOf(lot.stalls) : { x: yardX + yw / 2, w: Math.min(GATE_W, yw - 1) };
   const yy = y0 + 2 + ph + 1.5;
   // Двор за стоянкой — без стоянки: проехать к нему можно только через места у улицы.
-  return { kind: 'deep', bx, bw, yardX, yw, lot, cut, yy, plan: yardPlan(b, yardX, yy, yw, H / 2 - 1 - yy, 30, false) };
+  return { kind: 'deep', bx, bw, yardX, yw, lot, cut, yy, plan: yardPlan(b, yardX, yy, yw, H / 2 - 1 - yy, 30) };
+}
+
+/**
+ * Карман у улицы вдоль фасада (от x длиной len, места от y вглубь): want мест или сколько влезает, кусками не длиннее
+ * SLAB_FRONT.seg мест, между кусками — проход SLAB_FRONT.gap; всё — посередине фасада. paths — дорожки от улицы к
+ * фасаду: в проходах и по краям кармана (если там есть место).
+ */
+export function pocketRows(x: number, len: number, y: number, want: number): { rows: YardRow[]; paths: number[] } {
+  const { seg, gap } = SLAB_FRONT;
+  const w = YARD_STALL.w;
+  const width = (k: number) => k * w + (Math.ceil(k / seg) - 1) * gap;
+  let n = Math.floor(want);
+  while (n > 0 && width(n) > len - 2) n--;
+  if (n < 1) return { rows: [], paths: [] };
+  const segs = Math.ceil(n / seg);
+  let cx = x + (len - width(n)) / 2;
+  const rows: YardRow[] = [];
+  const paths: number[] = [];
+  if (cx - x >= 2) paths.push(cx - 1.2);
+  for (let i = 0; i < segs; i++) {
+    const k = Math.floor(n / segs) + (i < n % segs ? 1 : 0);
+    rows.push(row(cx, y, k * w, YARD_STALL.d, 'y-', true, -1));
+    cx += k * w;
+    if (i < segs - 1) {
+      paths.push(cx + gap / 2);
+      cx += gap;
+    }
+  }
+  if (x + len - cx >= 2) paths.push(cx + 1.2);
+  return { rows, paths };
 }
 
 /** Середина и ширина ряда мест вдоль x — съезд с улицы во всю его ширину. */
@@ -292,7 +393,7 @@ export function towerPlan(b: Pick<TownBuilding, 'id' | 'fp'>): TowerPlan {
     const cx1 = left ? -x0 - 2 : tx - T / 2 - 3;
     const yard = { x: cx0, y: y0 + 14.5, w: cx1 - cx0, h: H - 29 };
     // Двор посреди квартала — без стоянки: проезда к нему нет (стоянки — у улиц).
-    const plan = yardPlan(b, yard.x, yard.y, yard.w, yard.h, 50, false);
+    const plan = yardPlan(b, yard.x, yard.y, yard.w, yard.h, 50);
     return { block: true, T, tx, ty: -T / 2, left, rows: [front, back], cuts, yard, plan, px: 0, rest: 0 };
   }
   const T = clamp(Math.min(W, H) * 0.7 + 4, 16, 24 * S);
@@ -440,21 +541,15 @@ export function garagesPlan(b: Pick<TownBuilding, 'id' | 'fp'>): GaragesPlan {
 export function yardLotOf(b: TownBuilding): YardLot | null {
   const form = formOf(b);
   if (form === 'slab' && b.kind === 'res') {
+    // Места панельки — только у улицы, с заездом прямо на место: ворот двора у неё нет.
     const p = slabPlan(b);
-    if (p.kind === 'along') {
-      const rows = p.plan?.pieces.flatMap((x) => (x.row?.stalls.length ? [x.row] : [])) ?? [];
-      const gate = p.pass ?? p.arch;
-      return rows.length && gate ? { rows, gate: { x: gate.x, w: gate.w }, boxes: false } : null;
-    }
-    if (!p.lot?.stalls.length) return null;
-    return { rows: [p.lot], gate: p.lot.direct ? null : p.cut, boxes: false };
+    const rows = (p.kind === 'along' ? p.front : p.lot ? [p.lot] : []).filter((x) => x.direct && x.stalls.length);
+    return rows.length ? { rows, gate: null, boxes: false } : null;
   }
   if (form === 'tower' && b.kind === 'res') {
-    const p = towerPlan(b);
-    const rows = p.rows.filter((x) => x.stalls.length);
-    if (!rows.length) return null;
-    const inner = rows.find((x) => !x.direct);
-    return { rows, gate: inner ? p.cuts[p.rows.indexOf(inner)] : null, boxes: false };
+    // Стоянки высотки — у улиц, с заездом на место (узкий участок, где ряд поперёк, — без мест: ворот там нет).
+    const rows = towerPlan(b).rows.filter((x) => x.direct && x.stalls.length);
+    return rows.length ? { rows, gate: null, boxes: false } : null;
   }
   if (form === 'townhouse' && b.kind === 'res') {
     const p = townhousePlan(b);

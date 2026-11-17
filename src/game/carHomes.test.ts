@@ -160,6 +160,35 @@ describe('Парк машин жителей', { timeout: 120_000 }, () => {
     expect(seen(game, car)).toBe(true);
   });
 
+  it('машина панельки ночует в кармане у улицы и выезжает с места на виду: задним ходом через тротуар на полосу, без ворот', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { town, car } = fleetCar(game, (c) => formOf(c.home) === 'slab' && c.place!.kind === 'stall');
+    const place = car.place!;
+    expect(place.spot.d.garage).toBe(false);
+    expect(seen(game, car)).toBe(true);
+    game.carHomes.depart({ kind: 'out', car, town }, jobOf(town));
+    // Кузов — от места до полосы без скачков и без проёма ворот: видна всё время, пока не встала в поток.
+    let last = place.look!.pos;
+    let jump = 0;
+    let frames = 0;
+    let simId: number | undefined;
+    for (let i = 0; i < 30 * 60 && simId === undefined; i++) {
+      step(game);
+      const m = game.garages.moveOf(place.spot.key);
+      if (m?.sim) simId = m.sim.id;
+      const looks = game.garageLooks(WORLD, true).filter((l) => l.look.color === car.color && dist(l.look.pos, place.spot.d.curb) < 20);
+      expect(looks.some((l) => l.gate)).toBe(false);
+      const near = looks.sort((p, q) => dist(p.look.pos, last) - dist(q.look.pos, last))[0];
+      if (!near || simId !== undefined) continue;
+      frames++;
+      jump = Math.max(jump, dist(near.look.pos, last));
+      last = near.look.pos;
+    }
+    expect(simId).toBeDefined();
+    expect(frames).toBeGreaterThan(30);
+    expect(jump).toBeLessThan(1);
+  });
+
   it('со стоянки магазина машина парка едет на своё место, а не к случайному дому', () => {
     const game = withoutCitizens(freshGame(7));
     const { town, car } = fleetCar(game, (c) => c.place!.kind === 'pad' || c.place!.kind === 'stall');

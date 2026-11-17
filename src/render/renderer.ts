@@ -76,7 +76,7 @@ import { SERVICES } from '../game/services';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
 import { corridorHalf, curbGap } from '../world/worldgen';
 import { storeysOf } from '../world/townForms';
-import { drawTownWalks, type TownWalks, townWalks } from './townWalks';
+import { drawDriveMouths, drawTownWalks, type TownWalks, townWalks } from './townWalks';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, flashSpot, frontLength, sirenVisibility } from './vehicleArt';
@@ -574,7 +574,7 @@ export class Renderer {
     /** Будущие дороги проектов: полотна и узлы по отпечатку их геометрии (`c12`, `n7`). */
     projectItems: new SceneDiff<string>(),
     bases: new SceneDiff(),
-    towns: new Map<number, { list: TownBuilding[] | null; n: number; parks: TownPark[] | null; np: number; diff: SceneDiff }>(),
+    towns: new Map<number, { list: TownBuilding[] | null; n: number; parks: TownPark[] | null; np: number; lots: unknown; diff: SceneDiff }>(),
     /** Аллеи и фонари вдоль улиц городов (parkArt.streetGreen) — по полотну. */
     alleys: new SceneDiff(),
     /** Тротуары (render/sidewalks.ts): по полотну (`c<id>`) и скругления у узла (`n<id>`). */
@@ -944,6 +944,8 @@ export class Renderer {
     this.drawRailBeds(groundRails, false);
     drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
     this.lanes.draw(ctx, roadNet, this.camera.zoom, false, view, 0, this.openRoads(s));
+    // Съезды к дворам, гаражам, стоянкам и площадкам — понижением бордюра поверх кромки полотна (townWalks).
+    drawDriveMouths(ctx, [...this.walks.values()], view, this.camera.zoom);
     // Большие площадки — поверх своих тупиков-выездов: дорога видна до края площадки.
     this.drawLots(game, view, true);
     this.drawStationAprons(game, roadNet, view);
@@ -1251,24 +1253,33 @@ export class Renderer {
     // Дома, парки и скверы города — когда их список заменили или он вырос.
     for (const town of game.towns) {
       let rec = this.diffs.towns.get(town.id);
-      if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, parks: null, np: -1, diff: new SceneDiff() }));
+      if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, parks: null, np: -1, lots: null, diff: new SceneDiff() }));
       const parks = town.parks ?? null;
-      if (rec.list === town.buildings && rec.n === town.buildings.length && rec.parks === parks && rec.np === (parks?.length ?? 0)) continue;
+      // Площадки-стоянки: правка заменяет список (Game.lotRev) — заезды к их воротам (townWalks) тоже заново.
+      const lots = town.lots ?? null;
+      if (rec.list === town.buildings && rec.n === town.buildings.length && rec.parks === parks && rec.np === (parks?.length ?? 0) && rec.lots === lots) continue;
       rec.list = town.buildings;
       rec.n = town.buildings.length;
       rec.parks = parks;
       rec.np = parks?.length ?? 0;
+      rec.lots = lots;
       // Дорожки кварталов (townWalks) — по домам и паркам города: раз на их список, а не в каждой плитке.
       const net = game.roads.net;
-      const walks = townWalks(town, (p) => {
-        let best = Infinity;
+      // Ближнее готовое полотно: от точки до его кромки (со своей стороны: полоса стоянки бывает только с одной).
+      const nearest = (p: Vec) => {
+        let best: { gap: number; dirt: boolean } = { gap: Infinity, dirt: false };
         for (const c of net.corridorsNear(p, 30)) {
           if (c.build) continue;
-          // Кромка — со своей стороны полотна: полоса стоянки бывает только с одной.
-          best = Math.min(best, curbGap(c, p));
+          const gap = curbGap(c, p);
+          if (gap < best.gap) best = { gap, dirt: isDirt(c.cls) };
         }
         return best;
-      });
+      };
+      const walks = townWalks(
+        town,
+        (p) => nearest(p).gap,
+        (p) => !nearest(p).dirt,
+      );
       if (walks) this.walks.set(town.id, walks);
       else this.walks.delete(town.id);
       add(

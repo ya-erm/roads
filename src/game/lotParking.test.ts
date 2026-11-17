@@ -277,7 +277,9 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
     let refused = false;
     // Клетка цели на слое 🅿️ (счёт отказов — за месяц, Town.parkRefused).
     const cell = `${Math.floor(dest.fp.center.x / PARKING_LAYER.cell)}:${Math.floor(dest.fp.center.y / PARKING_LAYER.cell)}`;
-    runUntil(g, 300, () => home && refused && badge, () => {
+    // Предел — с запасом: машина из кармана панельки у проспекта возвращается на место только поворотом направо —
+    // кругом по кварталу (~2 мин после поиска).
+    runUntil(g, 600, () => home && refused && badge, () => {
       block();
       const s = g.parkSearch.of(simId);
       if (s) tries = Math.max(tries, s.tries);
