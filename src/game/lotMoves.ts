@@ -44,6 +44,51 @@ export function straight(a: Vec, b: Vec, back: boolean, vmax: number): Leg {
   return finish([a, b], [t, t], back, vmax);
 }
 
+/**
+ * Ломаная pts середины кузова (по ходу: от первой точки к последней) со скруглёнными углами радиуса до r (не больше
+ * половины соседних отрезков; у первого и последнего угла — до всего крайнего отрезка): проезд по площадке от ворот до
+ * места. back — задним ходом по ней же (pts — тоже по ходу: нос смотрит против хода).
+ */
+export function path(pts: Vec[], r: number, back: boolean, vmax: number): Leg {
+  const p = pts.filter((q, i) => i === 0 || dist(q, pts[i - 1]) > 1e-6);
+  if (p.length < 2) return straight(p[0] ?? { x: 0, y: 0 }, p[0] ?? { x: 0, y: 0 }, back, vmax);
+  const out: Vec[] = [p[0]];
+  for (let i = 1; i < p.length - 1; i++) {
+    const a = p[i - 1];
+    const c = p[i];
+    const b = p[i + 1];
+    const lin = dist(a, c);
+    const lout = dist(c, b);
+    const k = Math.min(r, i === 1 ? lin : lin / 2, i === p.length - 2 ? lout : lout / 2);
+    const u = { x: (c.x - a.x) / lin, y: (c.y - a.y) / lin };
+    const v = { x: (b.x - c.x) / lout, y: (b.y - c.y) / lout };
+    const s = { x: c.x - u.x * k, y: c.y - u.y * k };
+    const e = { x: c.x + v.x * k, y: c.y + v.y * k };
+    // Угол — квадратичной кривой s → c → e.
+    for (let j = 0; j <= 8; j++) {
+      const t = j / 8;
+      const w = 1 - t;
+      out.push({ x: w * w * s.x + 2 * w * t * c.x + t * t * e.x, y: w * w * s.y + 2 * w * t * c.y + t * t * e.y });
+    }
+  }
+  out.push(p[p.length - 1]);
+  const q = out.filter((x, i) => i === 0 || dist(x, out[i - 1]) > 1e-6);
+  const tan = q.map((_, i) => {
+    const a = q[Math.max(0, i - 1)];
+    const b = q[Math.min(q.length - 1, i + 1)];
+    const l = dist(a, b) || 1;
+    return { x: (b.x - a.x) / l, y: (b.y - a.y) / l };
+  });
+  return finish(q, tan, back, vmax);
+}
+
+/** Тот же путь в обратную сторону: обратный порядок точек, касательные — по новому ходу. */
+export function reversed(leg: Leg, back: boolean, vmax: number): Leg {
+  const pts = [...leg.pts].reverse();
+  const tan = [...leg.tan].reverse().map((t) => ({ x: -t.x, y: -t.y }));
+  return finish(pts, tan, back, vmax);
+}
+
 function finish(pts: Vec[], tan: Vec[], back: boolean, vmax: number): Leg {
   const cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + dist(pts[i - 1], pts[i]));

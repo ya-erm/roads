@@ -4,7 +4,7 @@ import { findLaneRoute } from '../lanes/routing';
 import type { LaneTraffic } from '../lanes/traffic';
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
 import type { LotStats, ParkingLot, Town, TownBuilding, TownCar } from '../world/entities';
-import { gateIn, gateOut, LOT, lotGateDriveway, lotIsBig, lotLayout, type LotLayout } from '../world/parkingLots';
+import { gateIn, gateOut, LOT, lotGateDriveway, lotIsBig, lotLayout, lotRoute, type LotLayout } from '../world/parkingLots';
 import { carSpot, type CarSpot } from './garages';
 import { stallKey } from './shopParking';
 import type { Driveway } from '../world/houseAccess';
@@ -13,8 +13,9 @@ import { yardLotOf, yardSpots } from '../world/yardLots';
 
 /**
  * Площадки-стоянки в игре (docs/PARKING.md, этап 3; раскладка — world/parkingLots.ts): кто где стоит, ворота, заезд и
- * выезд, счёт за месяц. Маленькая площадка (до LOT.big мест) — как двор: ворота — место манёвра у Garages (CarSpot с
- * garage), машина въезжает в них и «пропадает» — видна уже на месте; одна машина в воротах за раз. Большая — ворота
+ * выезд, счёт за месяц. Маленькая площадка (до LOT.big мест) — въезд — место манёвра у Garages (CarSpot, open — ворот на
+ * деле нет): с полосы через тротуар и дальше по проездам до места, на виду (route; место — за машиной, когда она
+ * сворачивает к въезду, hold), выезд — тем же путём задним ходом до бордюра; одна машина во въезде за раз. Большая — ворота
  * примкнуты к дорогам тупиком-выездом (ParkingLot.nodes): машина едет к узлу ворот через перекрёсток (очереди и повороты —
  * логика узлов), у узла встаёт на место; выезжает — встаёт в поток у узла.
  *
@@ -96,6 +97,11 @@ export class LotParking {
   private homesOf = new Map<number, { lot: number; stall: number; car: number }[]>();
   /** Машины в потоке, что едут на площадку: id машины → площадка (занимают место в счёте свободных). */
   private incoming = new Map<number, number>();
+  /**
+   * Место за машиной, что уже сворачивает к воротам и едет к нему по проездам (hold): другим не достаётся, но ещё не
+   * занято (в счёте и сохранении — с park, когда встала).
+   */
+  private held = new Map<number, Map<number, number>>();
   /** Едут к узлу ворот большой площадки: id машины → площадка и крючки. */
   private bigHoming = new Map<number, { lot: number; hooks: LotHooks }>();
   readonly exits: Exit[] = [];
@@ -179,9 +185,22 @@ export class LotParking {
     let s = this.spots.get(lot.id);
     if (s) return s;
     const L = this.host.car.length;
-    s = lot.gates.map((g, i) => carSpot(stallKey(lot.id, GATE_KEY + i), lotBuilding(lot), lotGateDriveway(lot, g), false, '#888888', L));
+    // Ворот на деле нет — открытый въезд: машина на манёвре видна всё время (CarSpot.open).
+    s = lot.gates.map((g, i) => ({ ...carSpot(stallKey(lot.id, GATE_KEY + i), lotBuilding(lot), lotGateDriveway(lot, g), false, '#888888', L), open: true }));
     this.spots.set(lot.id, s);
     return s;
+  }
+
+  /**
+   * Путь середины кузова по маленькой площадке: от бордюра у ворот spot (CarSpot.curbSide — его Garages ставит первой
+   * точкой) по проездам до места stall (world/parkingLots.lotRoute); въезд — по нему передом, выезд — тем же путём
+   * задним ходом. Нет такого — null.
+   */
+  route(spot: CarSpot, stall: number): Vec[] | null {
+    const lot = this.lotOfSpot(spot.key);
+    const gate = lot?.gates[-spot.key - 1 - lot.id * 64 - GATE_KEY];
+    if (!lot || !gate || !lotLayout(lot).stalls[stall]) return null;
+    return lotRoute(lot, gate.x, stall, this.host.car.length);
   }
 
   /** Ворота маленькой площадки, куда можно въехать (или выехать): по порядку — сперва в обе стороны. */
@@ -251,7 +270,7 @@ export class LotParking {
   /** Свободно для гостя: не чьё-то место ночёвки и никто не стоит. */
   freeStall(lot: number, stall: number): boolean {
     this.sync();
-    return !this.isHome(lot, stall) && !this.parked.get(lot)?.has(stall);
+    return !this.isHome(lot, stall) && !this.parked.get(lot)?.has(stall) && !this.held.get(lot)?.has(stall);
   }
 
   /** Сколько мест свободно для гостей — за вычетом тех, кто уже едет сюда. */
@@ -281,7 +300,19 @@ export class LotParking {
 
   /** Гость car встал на место stall (TownCar.lot, ls). */
   park(lot: number, stall: number, car: number): void {
+    this.release(lot, stall, car);
     this.mapOf(this.parked, lot).set(stall, car);
+  }
+
+  /** Место stall — за машиной car, что едет к нему по проездам (свернула к воротам): другим не достанется. */
+  hold(lot: number, stall: number, car: number): void {
+    this.mapOf(this.held, lot).set(stall, car);
+  }
+
+  /** Снять hold (встала — park, не доехала — сама). */
+  release(lot: number, stall: number, car: number): void {
+    const m = this.held.get(lot);
+    if (m?.get(stall) === car) m.delete(stall);
   }
 
   unpark(lot: number, stall: number, car?: number): void {
@@ -298,6 +329,7 @@ export class LotParking {
   /** Кто стоит у целей — заново (после загрузки). */
   clear(): void {
     this.parked.clear();
+    this.held.clear();
     this.incoming.clear();
     this.incomingYard.clear();
     this.yardSpots.clear();

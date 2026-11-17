@@ -232,6 +232,32 @@ export function lotGateDriveway(lot: Pick<ParkingLot, 'id' | 'fp'>, gate: Pick<L
   return { building: lot.id, curb, gate: g, dir, width: LOT.gateW, spot: at(gate.x, y0 + LOT.aisle / 2), garage: true };
 }
 
+/**
+ * Путь середины кузова машины длиной L по маленькой площадке — в мире, от ворот (x по оси участка) до места stall, без
+ * начальной точки у бордюра: прямо от ворот до первого проезда (у одного ряда он у улицы, у двух и четырёх — за
+ * передним рядом: через поперечный проезд у главных ворот или через срезанный передний ряд у прочих), по проезду до
+ * места, в место — до центра стоящей машины (нос — у упора, как её рисует движение). У четырёх рядов к дальнему
+ * проезду — по поперечному. Углы скругляет тот, кто строит отрезок (lotMoves.path).
+ */
+export function lotRoute(lot: Shape, gx: number, stall: number, L: number): Vec[] {
+  const lay = lotLayout(lot);
+  const st = lay.stalls[stall];
+  if (!st) return [];
+  const H = lot.fp.h;
+  const at = lotFrame({ fp: lot.fp });
+  const mid = bands(H, lotRows(H)).aisles.map((y) => y + LOT.aisle / 2);
+  const far = mid.length > 1 && st.row >= 2;
+  const cx = st.rect.x + st.rect.w / 2;
+  const pts: Vec[] = [at(gx, mid[0])];
+  if (far && lay.cross) {
+    const kx = lay.cross.x + lay.cross.w / 2;
+    pts.push(at(kx, mid[0]), at(kx, mid[1]));
+  }
+  pts.push(at(cx, far ? mid[1] : mid[0]));
+  pts.push({ x: st.nose.x - (st.dir.x * L) / 2, y: st.nose.y - (st.dir.y * L) / 2 });
+  return pts;
+}
+
 /** Где у ворот gate кончается тупик-выезд (узел) и где он начинается у улицы — в мире. */
 export function lotGateNode(lot: Pick<ParkingLot, 'fp' | 'gates'>, gate: Pick<LotGate, 'x'>): { node: Vec; curb: Vec } {
   const at = lotFrame({ fp: lot.fp });

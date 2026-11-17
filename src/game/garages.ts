@@ -6,7 +6,7 @@ import { findLaneRoute, routeCost } from '../lanes/routing';
 import { centreLine } from '../lanes/solid';
 import type { Barrier, LaneTraffic } from '../lanes/traffic';
 import { steerBase } from '../sim/body';
-import { bezier, legPose, straight, type Leg } from './lotMoves';
+import { bezier, legPose, path, reversed, straight, type Leg } from './lotMoves';
 import type { Vehicle, VehicleLook, VehicleSpec } from '../sim/vehicle';
 import type { Town, TownBuilding } from '../world/entities';
 import { drivewayLink, drivewayOf, type Driveway } from '../world/houseAccess';
@@ -66,6 +66,10 @@ export const LEFT_TURN = {
  * двору; разгон и торможение — мягкие, без рывка.
  */
 const SPEED = { yardBack: 2.5, roadBack: 3.5, roadIn: 5, yardIn: 3, accel: 3, brake: 4 };
+/** Радиус поворотов по проездам открытой площадки, м игры (машина 7,5: в проезде 7 разворачивается в место). */
+const YARD_TURN = 4.5;
+/** Скорость по проездам открытой площадки, м/с игры: передом и задним ходом (путь — десятки метров, не заезд). */
+const LOT_SPEED = { in: 4, back: 3.2 };
 /** Место манёвра на полосе — не ближе стольких метров к её концам: там перекрёсток, стоп-линия, зебра. */
 const END_ROOM = 10;
 /** Перед выездом с бордюра машина стоит хотя бы столько, с (смотрит по сторонам), и столько — перед тем как тронуться. */
@@ -90,6 +94,11 @@ export interface CarSpot {
   spot: Vec;
   inside: Vec;
   curbSide: Vec;
+  /**
+   * Ворот на деле нет — въезд на открытую площадку-стоянку (game/lotParking.ts): машина на манёвре видна всё время, без
+   * тёмного проёма и не прячется за ним; путь по площадке до места — Homing.yard / leave(opt.via).
+   */
+  open?: boolean;
 }
 
 /** Дом с машиной: гараж (машина в нём или вторая — перед воротами) или открытая площадка. */
@@ -134,6 +143,11 @@ interface Homing {
   choices?: () => CarSpot[];
   /** Свернёт к месту налево, через встречку (Garages.leftSlotOf); нет — направо. */
   left?: boolean;
+  /**
+   * Открытая площадка: путь середины кузова от бордюра (curbSide) по проездам до места — спрашивается, когда машина
+   * сворачивает к воротам (место выбирается тогда же); нет — до места за воротами по прямой.
+   */
+  yard?: () => Vec[] | null;
 }
 
 /** Где машина встаёт на полосу (выезд) или с неё поворачивает (въезд) — на нынешнем графе. */
@@ -193,6 +207,8 @@ interface Move {
   homing?: Homing;
   /** Стоп-линия встречки, пока машина её пересекает (LaneTraffic.turnStops). */
   block?: { corridor: number; b: Barrier };
+  /** Выезд с места на открытой площадке: путь от бордюра до места (не дождалась просвета — по нему же обратно). */
+  yard?: Leg;
 }
 
 /** Что игра даёт гаражам. */
@@ -511,10 +527,13 @@ export class Garages {
     town: Town,
     target: number,
     trip: { from: TownBuilding; to: TownBuilding },
-    opt: { color?: string; hooks?: MoveHooks; endLink?: number; to?: CarSpot; then?: (sim: Vehicle) => void } = {},
+    opt: { color?: string; hooks?: MoveHooks; endLink?: number; to?: CarSpot; then?: (sim: Vehicle) => void; via?: Vec[] | null } = {},
   ): void {
     const start = home.parks ? home.spot : home.inside;
     this.busy.add(home.key);
+    // Открытая площадка: от места по проездам к воротам и через них к бордюру — задним ходом, тем же путём, каким
+    // въезжают (via — от бордюра до места).
+    const yard = opt.via && opt.via.length > 1 ? path([home.curbSide, ...opt.via], YARD_TURN, false, LOT_SPEED.in) : undefined;
     this.moves.push({
       home,
       town,
@@ -523,7 +542,8 @@ export class Garages {
       then: opt.then,
       kind: 'out',
       phase: 'yard',
-      leg: straight(start, home.curbSide, true, SPEED.yardBack),
+      leg: yard ? reversed(yard, true, LOT_SPEED.back) : straight(start, home.curbSide, true, SPEED.yardBack),
+      yard,
       next: null,
       s: 0,
       v: 0,
@@ -559,11 +579,11 @@ export class Garages {
    * к той, что выбрана там, sim.endLink); какое место из свободных (choices) занять, решается на полосе у стоянки —
    * нет свободного, проезжает мимо (hooks.missed).
    */
-  toStall(sim: Vehicle, planned: CarSpot, town: Town, slot: GarageSlot, hooks: MoveHooks, choices: () => CarSpot[]): void {
+  toStall(sim: Vehicle, planned: CarSpot, town: Town, slot: GarageSlot, hooks: MoveHooks, choices: () => CarSpot[], yard?: () => Vec[] | null): void {
     const left = this.leftSlotOf(planned);
     const use = left && sim.endLink === left.link.id ? left : slot;
     this.aim(sim, use);
-    this.homing.set(sim.id, { spot: planned, town, hooks, reserved: false, choices, left: !!use.cross });
+    this.homing.set(sim.id, { spot: planned, town, hooks, reserved: false, choices, left: !!use.cross, yard });
   }
 
   /** Маршрут машины кончается связью у места: налево — держится левее (Vehicle.endLeft). */
@@ -660,6 +680,9 @@ export class Garages {
       this.homing.delete(id);
       const c0 = sub(sim.pos, scale(sim.dir, sim.length / 2));
       const legs = this.inLegs(h.spot, c0, sim.dir);
+      // Открытая площадка: от бордюра — по проездам до места, на виду (место выбирается сейчас).
+      const via = h.yard?.();
+      if (via && via.length > 1) legs[1] = path([h.spot.curbSide, ...via], YARD_TURN, false, LOT_SPEED.in);
       sim.lcCooldown = 1e9;
       // Налево — сначала ждёт просвета во встречном потоке (stepCross).
       this.moves.push({
@@ -890,7 +913,7 @@ export class Garages {
     if (!sim || !slot) {
       // Не дождалась (или ехать некуда) — обратно на место.
       m.phase = 'home';
-      m.leg = straight(m.home.curbSide, m.home.parks ? m.home.spot : m.home.inside, false, SPEED.yardIn);
+      m.leg = m.yard ?? straight(m.home.curbSide, m.home.parks ? m.home.spot : m.home.inside, false, SPEED.yardIn);
       m.s = 0;
       m.v = 0;
       return true;
@@ -1025,7 +1048,8 @@ export class Garages {
       const { c, h } = legPose(m.leg, m.s);
       if (!inBox(c, 10)) continue;
       const look: VehicleLook = { ...spec, color: m.color, pos: add(c, scale(h, spec.length / 2)), dir: h };
-      out.push(m.home.parks ? { look } : { look, gate: { pos: m.home.d.gate, dir: m.home.d.dir, width: m.home.d.width } });
+      // Проём ворот и машина за ним спрятана — только у настоящих ворот (гараж, арка, боксы), у открытой площадки — нет.
+      out.push(m.home.parks || m.home.open ? { look } : { look, gate: { pos: m.home.d.gate, dir: m.home.d.dir, width: m.home.d.width } });
     }
     return out;
   }

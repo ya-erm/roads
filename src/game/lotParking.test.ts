@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { add, dist, scale, type Vec } from '../core/vec';
 import type { ParkingLot, Town, TownBuilding, TownCar } from '../world/entities';
 import { footprintsOverlap } from '../world/spatial';
-import { LOT, lotGateDriveway, lotStallCount } from '../world/parkingLots';
+import { CAR_SIZE } from '../world/houseAccess';
+import { LOT, lotGateDriveway, lotLayout, lotStallCount } from '../world/parkingLots';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
 import { formOf } from '../world/townForms';
 import type { FleetCar, FleetTrip } from './carHomes';
@@ -10,7 +11,7 @@ import { Game, type LotShape, type SaveData } from './game';
 import type { ParkChoice } from './parkSearch';
 import { PARK_SEARCH } from './parkSearch';
 import { PARKING_LAYER } from './parkingLayer';
-import { freshGame, runSeconds, runUntil } from './testkit';
+import { freshGame, runSeconds, runUntil, withoutCitizens } from './testkit';
 
 /** Новая партия — с парковками (WorldSettings.parking): город ставит площадки у рынка и ратуши. */
 const PARK: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 1, size: 'medium' };
@@ -167,6 +168,46 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
     expect(lotsOf(h)).toEqual(lotsOf(g));
     const onH = h.towns.flatMap((t) => (t.cars ?? []).filter((e) => e.lot !== undefined).map((e) => [e.car, e.lot, e.ls]));
     expect(onH).toEqual(on.map((e) => [e.car, e.lot, e.ls]));
+  });
+
+  it('маленькая площадка — без ворот: путь по проездам к каждому месту; машина выезжает с места на виду, до улицы без скачков и проёма', () => {
+    const g = withoutCitizens(freshGame(PARK));
+    const WORLD: [number, number, number, number] = [-1e6, -1e6, 1e6, 1e6];
+    // Путь по площадке: от бордюра у ворот до места — у каждого места, кончается там, где машина стоит.
+    const small = g.lots.all().find((x) => !g.lots.big(x.lot) && g.lots.spotFor(x.lot, true).some((s) => g.garages.slotOf(s)))!;
+    expect(small).toBeDefined();
+    const gate = g.lots.spotFor(small.lot, true).find((s) => g.garages.slotOf(s))!;
+    expect(gate.open).toBe(true);
+    const stalls = lotLayout(small.lot).stalls;
+    for (let k = 0; k < stalls.length; k++) {
+      const pts = g.lots.route(gate, k)!;
+      expect(pts.length).toBeGreaterThan(1);
+      const end = pts[pts.length - 1];
+      expect(dist(add(end, scale(stalls[k].dir, CAR_SIZE.l / 2)), stalls[k].nose)).toBeLessThan(0.01);
+    }
+    // Гость на дальнем от ворот месте уезжает домой: виден всё время, без проёма ворот, шаг — не больше метра.
+    const town = g.towns.find((t) => (t.lots ?? []).includes(small.lot))!;
+    const car = g.carHomes.fleet(town).cars.find((c) => c.place && !c.place.lot && c.place.kind !== 'box' && g.carHomes.isHome(town, c.key) && g.garages.slotOf(c.place.spot))!;
+    const k = stalls.map((_, i) => i).sort((a, b) => dist(stalls[b].pos, gate.d.gate) - dist(stalls[a].pos, gate.d.gate))[0];
+    town.cars = [...(town.cars ?? []), { car: car.key, at: car.home.id, until: g.time, lot: small.lot.id, ls: k }];
+    g.lots.park(small.lot.id, k, car.key);
+    expect(g.carHomes.leaveLot({ kind: 'back', car, town, from: car.home, lot: { ref: small, stall: k } })).toBe(true);
+    let last = stalls[k].nose;
+    let jump = 0;
+    let frames = 0;
+    let gateSeen = false;
+    runUntil(g, 60, () => !!g.garages.moveOf(gate.key)?.sim, () => {
+      const looks = g.garageLooks(WORLD, false).filter((l) => l.look.color === car.color);
+      if (looks.some((l) => l.gate)) gateSeen = true;
+      const near = looks.sort((p, q) => dist(p.look.pos, last) - dist(q.look.pos, last))[0];
+      if (!near || g.garages.moveOf(gate.key)?.sim) return;
+      frames++;
+      jump = Math.max(jump, dist(near.look.pos, last));
+      last = near.look.pos;
+    });
+    expect(gateSeen).toBe(false);
+    expect(frames).toBeGreaterThan(30);
+    expect(jump).toBeLessThan(1);
   });
 
   it('старое сохранение (без площадок) открывается: площадок нет, поездки идут', () => {

@@ -763,7 +763,13 @@ export class CarHomes {
     if (st && this.curb) {
       // Место забронировал кто-то другой — не выезжает (осталась дома).
       if (!this.curb.leave(st, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks: curbHooks, endLink: opt.endLink, then: opt.then, car: car.key })) hooks.stayed?.();
-    } else this.garages.leave(car.place!.spot, town, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks, ...rest });
+    } else this.garages.leave(car.place!.spot, town, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks, ...rest, via: this.lotRoute(car) });
+  }
+
+  /** Машина ночует на маленькой площадке: путь по ней от бордюра у ворот до своего места (въезд и выезд — на виду). */
+  private lotRoute(car: FleetCar): Vec[] | null {
+    const l = car.place?.lot;
+    return l && this.lots ? this.lots.route(car.place!.spot, l.stall) : null;
   }
 
   /**
@@ -899,6 +905,17 @@ export class CarHomes {
     const slot = spot && (this.garages.slotOf(spot) ?? way.slot);
     if (!spot || !slot) return;
     lots.expect(sim.id, lot.id);
+    // Место — когда сворачивает к воротам: за ней (hold), и к нему — по проездам на виду (LotParking.route).
+    let chosen = -1;
+    const yard = () => {
+      if (chosen < 0) {
+        chosen = lots.pick(lot, spot.d.gate);
+        if (chosen < 0) return null;
+        lots.expect(sim.id, null);
+        lots.hold(lot.id, chosen, car.key);
+      }
+      return lots.route(spot, chosen);
+    };
     this.garages.toStall(
       sim,
       spot,
@@ -907,20 +924,22 @@ export class CarHomes {
       {
         arrived: () => {
           lots.expect(sim.id, null);
-          const k = lots.pick(lot, spot.d.gate);
+          const k = chosen >= 0 ? chosen : lots.pick(lot, spot.d.gate);
           if (k >= 0) settle(k);
           else {
-            // Место заняли, пока въезжала: стоит у цели, как прежде (за воротами её не видно).
+            // Место заняли, пока въезжала: стоит у цели, как прежде.
             this.curbIn.delete(car.key);
             this.moving.delete(car.key);
           }
         },
         missed: () => {
           lots.expect(sim.id, null);
+          if (chosen >= 0) lots.release(lot.id, chosen, car.key);
           missed();
         },
       },
-      () => (lots.pick(lot, spot.d.gate) >= 0 ? [spot] : []),
+      () => (chosen >= 0 || lots.pick(lot, spot.d.gate) >= 0 ? [spot] : []),
+      yard,
     );
   }
 
@@ -960,7 +979,9 @@ export class CarHomes {
     const gate = lots.spotFor(lot, true).find((s) => !this.garages.isBusy(s.key) && !!this.garages.slotOf(s));
     if (!gate) return false;
     this.moving.add(car.key);
-    this.garages.leave(gate, town, link.toNode!, { from, to: p.at }, { color: car.color, endLink: link.id, ...(p.curb ? {} : { to: p.spot }), hooks: { joined, stayed }, then });
+    // С места — по проездам к воротам на виду (задним ходом, как въезжала).
+    const via = lots.route(gate, at.stall);
+    this.garages.leave(gate, town, link.toNode!, { from, to: p.at }, { color: car.color, endLink: link.id, ...(p.curb ? {} : { to: p.spot }), hooks: { joined, stayed }, then, via });
     return true;
   }
 
@@ -1129,7 +1150,7 @@ export class CarHomes {
       return;
     }
     const s = slot ?? this.garages.slotOf(car.place!.spot) ?? this.garages.leftSlotOf(car.place!.spot);
-    if (s) this.garages.toStall(sim, car.place!.spot, town, s, this.homeHooks(town, car), this.choices(town, car));
+    if (s) this.garages.toStall(sim, car.place!.spot, town, s, this.homeHooks(town, car), this.choices(town, car), () => this.lotRoute(car));
   }
 
   /**
@@ -1176,7 +1197,7 @@ export class CarHomes {
         this.moving.add(car.key);
         this.driving.set(sim.id, { car: car.key, town, home: true });
       },
-      then: (sim) => this.garages.toStall(sim, spot, town, this.garages.slotOf(spot) ?? slot, this.homeHooks(town, car), this.choices(town, car)),
+      then: (sim) => this.garages.toStall(sim, spot, town, this.garages.slotOf(spot) ?? slot, this.homeHooks(town, car), this.choices(town, car), () => this.lotRoute(car)),
     };
   }
 
