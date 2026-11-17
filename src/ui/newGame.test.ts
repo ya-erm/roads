@@ -207,16 +207,33 @@ describe('Новая игра: кубик и биом', () => {
     }
   });
 
-  it('при «Случайно» подсвечена кость, у выпавшего биома — пунктир и кость, «Ресурсы» — его', () => {
-    for (const b of BIOME_LIST) {
-      const html = biomeRowHtml(b.id, true);
-      expect(html.match(/class="card region active"/g)).toHaveLength(1);
-      expect(html).toContain('class="card region active" data-action="ng-biome" data-id="random"');
-      expect(html.match(/class="card region rolled"/g)).toHaveLength(1);
-      expect(html).toContain(`class="card region rolled" data-action="ng-biome" data-id="${b.id}"`);
-      expect(html.match(/ng-dice-badge/g)).toHaveLength(1);
-      expect(html.split('ng-res-row')[1]).toBe(biomeRowHtml(b.id).split('ng-res-row')[1]);
+  it('при «Случайно» подсвечена только кость; какой биом выпадет — сюрприз, «Ресурсы» — знаки вопроса', () => {
+    const html = biomeRowHtml('random');
+    expect(html.match(/class="card region active"/g)).toHaveLength(1);
+    expect(html).toContain('class="card region active" data-action="ng-biome" data-id="random"');
+    // Ни пунктира, ни кости у выпадающего биома, ни его названия в подсказке «Случайно».
+    expect(html).not.toContain('rolled');
+    expect(html).not.toContain('ng-dice-badge');
+    expect(html).not.toMatch(/выпадет:/i);
+    for (const b of BIOME_LIST) expect(html).toContain(`class="card region " data-action="ng-biome" data-id="${b.id}"`);
+    // В «Ресурсах» — ни одного груза: только знаки вопроса у сырья и у потребностей городов.
+    const res = html.split('ng-res-row')[1];
+    expect(res).not.toContain('class="ng-cargo"');
+    expect(res.match(/class="ng-cargo ng-unknown"/g)!.length).toBeGreaterThan(0);
+    for (const b of BIOME_LIST) expect(res).not.toBe(biomeRowHtml(b.id).split('ng-res-row')[1]);
+  });
+
+  it('при «Случайно» экран новой игры один и тот же при любом seed — биом не выдаётся', () => {
+    const draft = newGameDraft(sandbox, 'menu', remembered, 5).settings;
+    const rows = new Set<string>();
+    const biomes = new Set<string>();
+    for (let seed = 1; seed <= 60; seed++) {
+      const d = withSeed(withBiome(draft, 'random'), seed);
+      biomes.add(d.biome!);
+      rows.add(biomeRowHtml(biomeIsRandom(d) ? 'random' : d.biome!));
     }
+    expect(biomes.size).toBe(BIOME_LIST.length);
+    expect(rows.size).toBe(1);
   });
 });
 
@@ -259,8 +276,8 @@ describe('Новая игра: регион и биом', () => {
 
   it('биом: «Случайно» первым, за ним пять пейзажей; «Луга» вместо «Средней полосы»; под карточками — «Ресурсы»', () => {
     expect(BIOMES.temperate.name).toBe('Луга');
-    for (const b of BIOME_LIST) {
-      const html = biomeRowHtml(b.id);
+    for (const pick of ['random' as const, ...BIOME_LIST.map((b) => b.id)]) {
+      const html = biomeRowHtml(pick);
       expect(html.match(/data-action="ng-biome"/g)).toHaveLength(BIOME_LIST.length + 1);
       expect(html.match(/data-action="ng-biome" data-id="([a-z]+)"/)![1]).toBe('random');
       expect(html.match(/<span class="name">Случайно<\/span>/g)).toHaveLength(1);
@@ -276,12 +293,10 @@ describe('Новая игра: регион и биом', () => {
   });
 
   it('подсказки значков ресурсов не вложены друг в друга — не накрывают соседние', () => {
-    for (const b of BIOME_LIST) {
-      for (const random of [false, true]) {
-        const html = biomeRowHtml(b.id, random);
-        expect(html).toContain('data-tip="Сырьё: что здесь добывают"');
-        expect(nestedTips(html)).toBe(0);
-      }
+    for (const pick of ['random' as const, ...BIOME_LIST.map((b) => b.id)]) {
+      const html = biomeRowHtml(pick);
+      expect(html).toContain('data-tip="Сырьё: что здесь добывают"');
+      expect(nestedTips(html)).toBe(0);
     }
     // Проверка ловит и вложенные подсказки — как было раньше.
     expect(nestedTips('<span data-tip="Сырьё"><span data-tip="Уголь"><svg><path d="M0"/></svg></span></span>')).toBe(1);

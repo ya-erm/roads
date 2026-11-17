@@ -20,7 +20,7 @@ import {
   type WorldSettings,
 } from '../world/settings';
 import { cargoIcon, townIcon } from './cargoIcons';
-import { biomeRandomSvg, biomeSvg, diceBadgeSvg } from './icons';
+import { biomeRandomSvg, biomeSvg } from './icons';
 import { diceMapSvg } from './scenarioIcons';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
@@ -172,28 +172,27 @@ export function randomCardHtml(action: string, active: boolean, tip: string): st
 }
 
 /**
- * Строка «Биом»: «Случайно» и пять пейзажей. Подсвечен выбор черновика: «Случайно» — тогда у биома, который выпадет
- * при этом seed, пунктирная рамка и кость в углу, — или выбранный сами. Под ней — строка «Ресурсы» (заголовок
- * в левом столбце, как у остальных): что в этом биоме (при «Случайно» — в выпавшем) добывают и что просят города,
- * значками. Подсказки — только у самих карточек и значков: вложенные друг в друга всплывали разом и накрывали
- * одна другую.
+ * Строка «Биом»: «Случайно» и пять пейзажей. Подсвечен выбор черновика: «Случайно» или выбранный сами. Под ней —
+ * строка «Ресурсы» (заголовок в левом столбце, как у остальных): что в этом биоме добывают и что просят города,
+ * значками. При «Случайно» биом — сюрприз: какой выпадет по seed, строка не знает и не выдаёт ни карточками,
+ * ни подсказками, а в «Ресурсах» вместо значков — знаки вопроса; биом раскроется уже в партии. Подсказки — только
+ * у самих карточек и значков: вложенные друг в друга всплывали разом и накрывали одна другую.
  */
-export function biomeRowHtml(biome: BiomeId, random = false): string {
+export function biomeRowHtml(pick: BiomeId | 'random'): string {
+  const random = pick === 'random';
   const dice = `<button class="card region ${random ? 'active' : ''}" data-action="ng-biome" data-id="random" data-tip="${esc(
-    `Один из пяти биомов по seed: тот же seed — тот же биом. Сейчас выпадет: ${BIOMES[biome].name}`,
+    'Один из пяти биомов — сюрприз: какой выпал, увидите в партии. Тот же seed — тот же биом',
   )}">${biomeRandomSvg()}<span class="name">Случайно</span></button>`;
-  const cards = BIOME_LIST.map((b) => {
-    const rolled = random && biome === b.id;
-    const cls = !random && biome === b.id ? 'active' : rolled ? 'rolled' : '';
-    const tip = rolled ? `Выпадет при этом seed. ${b.pitch}` : b.pitch;
-    return `<button class="card region ${cls}" data-action="ng-biome" data-id="${b.id}" data-tip="${esc(tip)}">${biomeSvg(b.id)}${
-      rolled ? diceBadgeSvg() : ''
-    }<span class="name">${esc(b.name)}</span></button>`;
-  }).join('');
-  const shown = BIOMES[biome];
+  const cards = BIOME_LIST.map(
+    (b) =>
+      `<button class="card region ${pick === b.id ? 'active' : ''}" data-action="ng-biome" data-id="${b.id}" data-tip="${esc(b.pitch)}">${biomeSvg(
+        b.id,
+      )}<span class="name">${esc(b.name)}</span></button>`,
+  ).join('');
   const icon = (c: CargoType) => `<span class="ng-cargo" data-tip="${esc(CARGO[c].name)}">${cargoIcon(c, 20, false)}</span>`;
-  const raw = biomeRaw(shown.id, INDUSTRY_LIST).map(icon).join('');
-  const towns = [...shown.towns, ...shown.extra].map(icon).join('');
+  const unknown = (tip: string) => `<span class="ng-cargo ng-unknown" data-tip="${esc(tip)}">?</span>`.repeat(3);
+  const raw = random ? unknown('Сырьё выпавшего биома — увидите в партии') : biomeRaw(pick, INDUSTRY_LIST).map(icon).join('');
+  const towns = random ? unknown('Потребности городов выпавшего биома — увидите в партии') : [...BIOMES[pick].towns, ...BIOMES[pick].extra].map(icon).join('');
   const strip = `<div class="ng-biome-strip">
     <span class="ng-biome-part"><span class="ng-part-ic" data-tip="Сырьё: что здесь добывают">⛏</span>${raw}</span>
     <span class="ng-biome-part"><span class="ng-part-ic" data-tip="Что просят города">${townIcon(18)}</span>${towns}</span></div>`;

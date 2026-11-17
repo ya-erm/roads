@@ -6644,23 +6644,6 @@ span.ind-chip {
   grid-template-columns: repeat(6, 1fr);
 }
 
-.cards.ng-biomes .card {
-  position: relative;
-}
-
-/* При «Случайно» — биом, который выпадет при этом seed: пунктирная рамка и кость в углу. */
-.cards.ng-biomes .card.rolled {
-  border-color: var(--accent);
-  border-style: dashed;
-}
-
-.ng-dice-badge {
-  position: absolute;
-  top: 1px;
-  right: 3px;
-  pointer-events: none;
-}
-
 .ng-biome-strip {
   flex: 1;
   min-width: 0;
@@ -6689,6 +6672,21 @@ span.ind-chip {
 
 .ng-cargo {
   display: inline-flex;
+}
+
+/* При «Случайно» биом — сюрприз: вместо значков грузов — знаки вопроса в пунктирных кружках. */
+.ng-cargo.ng-unknown {
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px dashed #9aa5b1;
+  border-radius: 50%;
+  color: #7b8794;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  box-sizing: border-box;
 }
 
 /* Кнопки окна «Новая игра» — справа: «Отмена», за ней главная. */

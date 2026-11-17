@@ -4300,7 +4300,7 @@ export class Hud {
       <div class="ng-row"><span class="ng-label">Режим</span>${modeTilesHtml(!!sc)}</div>
       ${sc ? scenarioOptionsHtml(sc) : ''}
       <div class="ng-row"><span class="ng-label">Карта</span><div class="ng-options">${chips('size', d.size, sizes)}</div></div>
-      ${biomeRowHtml(d.biome ?? biomeForSeed(d.seed), biomeIsRandom(d))}
+      ${biomeRowHtml(biomeIsRandom(d) ? 'random' : (d.biome ?? biomeForSeed(d.seed)))}
       ${sc ? '' : sandboxRows}
       <div class="ng-row"><span class="ng-label">Вода</span><div class="ng-options">${chips(
         'water',
