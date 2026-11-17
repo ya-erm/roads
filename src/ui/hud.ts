@@ -151,7 +151,8 @@ import { Minimap } from './minimap';
 import { upkeepRates, upkeepRateText, upkeepTip } from './upkeepText';
 import { closeTimelapse, openTimelapse } from './timelapse';
 import { syncTimelapseItem, timelapseSvg } from './timelapseButton';
-import { type Pref, prefOn, setPref } from './prefs';
+import { onPrefs, type Pref, prefOn, setPref } from './prefs';
+import { invalidate, setHtml, setText } from './setHtml';
 import { settingsHtml, settingsSvg } from './settingsMenu';
 import { adviceOf, type Advice, type AdviceFix } from '../game/advisor';
 import { stationWarnings } from '../game/stationWarnings';
@@ -417,32 +418,70 @@ function downloadText(name: string, text: string): void {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+/** Состояние панелей, что относится к партии: номера в нём — её линий, станций, баз; новая партия — с чистого. */
+function freshUi() {
+  return {
+    /** Линия, у которой открыта палитра цвета. */
+    colorsOpen: null as number | null,
+    /** Остановка, у которой раскрыты условия. */
+    stopOpen: null as { line: number; i: number } | null,
+    /** Потребности городов, раскрытые в диаграмму по месяцам: `город:груз`. */
+    needsOpen: new Set<string>(),
+    /** Карточка маршрута открыта из панели города: крестик вернёт к нему. Сбрасывается, как только карточка закрылась. */
+    lineBack: null as LineBack | null,
+    /** Папка, у которой сейчас открыто поле названия. */
+    renamingFolder: null as number | null,
+    /** Линия, для которой в карточке открыто поле названия новой папки. */
+    addingFolderLine: null as number | null,
+    /** Линия, для которой в карточке раскрыт выпадающий список папок. */
+    folderPickOpen: null as number | null,
+    /** Станция, база стройки, проект стройки, у которых в карточке открыто поле названия. */
+    renamingStation: null as number | null,
+    renamingBase: null as number | null,
+    renamingProject: null as number | null,
+    /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
+    dragLine: null as number | null,
+    /** clientX курсора над графиком скорости (null — курсор не на графике): после перерисовки панели — подсказка там же. */
+    speedHoverX: null as number | null,
+    /** Свой шаблон, который игрок собрался удалить: ждёт подтверждения в окне. */
+    deletingTemplate: null as string | null,
+    /** Записи «Событий», новые на момент открытия окна. */
+    newsUnread: new Set<number>() as ReadonlySet<number>,
+    /** Задания, у которых в панели раскрыто «почему». */
+    whyOpen: new Set<string>(),
+    /** «Следующий этап» нажат один раз: второе нажатие переводит этап. */
+    confirmAdvance: false,
+    /** «🚜 Снести базу» в карточке базы нажат один раз (id базы): второе нажатие сносит. */
+    confirmRemoveBase: null as number | null,
+    /** Советник: подсказки, скрытые игроком. */
+    hiddenAdvice: new Set<string>(),
+    /** Рекорд уже записан для этого сценария (итоговый экран можно открыть снова). */
+    recordFor: null as Scenario | null,
+    record: { best: null, previous: null, isNew: false } as RecordView,
+    /** Сколько магазинов добавит «🛒» маршруту (shopsButtonHtml) — по ключу сети и маршрута. */
+    shops: { key: '', n: 0 },
+  };
+}
+
 export class Hud {
   private readonly q: <T extends HTMLElement>(sel: string) => T;
-  private lastPanel = '';
+  /** Что в панелях относится к партии (раскрыто, правится, ждёт подтверждения): новая партия — с чистого (reset). */
+  private ui = freshUi();
   /** Кнопка мыши зажата над панелью: не перерисовываем, иначе клик потеряется. */
   private pressing = false;
   /** Скорость игры до открытия меню — к ней вернёмся по «Продолжить». */
   private speedBeforeMenu = 1;
-  /** Окно «События»: скорость до него (вернётся при закрытии), фильтры по видам, какие записи — новые, разметка. */
+  /** Окно «События»: скорость до него (вернётся при закрытии) и фильтры по видам. */
   private speedBeforeNews = 1;
   private readonly newsKinds = new Set<NewsKind>();
-  private newsUnread: ReadonlySet<number> = new Set();
-  private lastNews = '';
   private lastNewsBadge = '';
-  private lastConfirm = '';
-  /** Свой шаблон, который игрок собрался удалить: ждёт подтверждения в окне. */
-  private deletingTemplate: string | null = null;
   /** Список линий свёрнут до заголовка (запоминается в браузере). */
   private readonly linesCollapsed = flag('roads.linesCollapsed');
   /** График скорости в карточке линии раскрыт (для всех линий). */
   private readonly speedChartOpen = flag('roads.speedChart');
-  /** clientX курсора над графиком скорости (null — курсор не на графике): после перерисовки панели — подсказка там же. */
-  private speedHoverX: number | null = null;
   /** Деньги в карточке линии раскрыты: под прибылью — доход / расходы, этот месяц, всего (для всех линий). */
   private readonly lineMoneyOpen = flag('roads.lineMoney');
   private readonly minimap: Minimap;
-  private lastOptions = '';
   private panelTimer = 0;
 
   private confirmNew = false;
@@ -450,32 +489,10 @@ export class Hud {
   private saves: SaveEntry[] = [];
   /** Ждём второго нажатия: `load:id` — загрузить без сохранения текущей, `del:id` — удалить. */
   private confirmSave: string | null = null;
-  /** Линия, у которой открыта палитра цвета. */
-  private colorsOpen: number | null = null;
-  /** Остановка, у которой раскрыты условия. */
-  private stopOpen: { line: number; i: number } | null = null;
-  /** Потребности городов, раскрытые в диаграмму по месяцам: `город:груз`. */
-  private readonly needsOpen = new Set<string>();
   /** Блок «Что нужно городу» свёрнут до одной строки — у всех городов (запоминается в браузере). */
   private readonly needsFolded = flag('roads.needsFolded');
   /** Свёрнутые списки «Куда везти» (out) и «Откуда везти» (in) — у всех городов и предприятий (запоминается в браузере). */
   private readonly partnersFolded = new Set((readText('roads.partnersFolded') ?? '').split(',').filter(Boolean));
-  /** Карточка маршрута открыта из панели города: крестик вернёт к нему. Сбрасывается, как только карточка закрылась. */
-  private lineBack: LineBack | null = null;
-  /** Папка, у которой сейчас открыто поле названия. */
-  private renamingFolder: number | null = null;
-  /** Линия, для которой в карточке открыто поле названия новой папки. */
-  private addingFolderLine: number | null = null;
-  /** Линия, для которой в карточке раскрыт выпадающий список папок. */
-  private folderPickOpen: number | null = null;
-  /** Станция, у которой в карточке открыто поле названия. */
-  private renamingStation: number | null = null;
-  /** База стройки, название которой правят в её карточке. */
-  private renamingBase: number | null = null;
-  /** Проект стройки, название которого правят в его карточке. */
-  private renamingProject: number | null = null;
-  /** Линия, которую тянут мышью на папку: пока тянем, панель не перерисовываем. */
-  private dragLine: number | null = null;
   /** Черновик параметров нового мира; биом в нём — по seed или выбранный игроком (см. withSeed). */
   private draft: WorldSettings = withSeed({ ...NEW_GAME_SETTINGS, relief: 'hills' }, DEFAULT_SETTINGS.seed);
   /** Последний выбор сценария на экране новой игры: возвращается, когда снова выбирают «Сценарий». */
@@ -490,22 +507,9 @@ export class Hud {
   private readonly scenarioCollapsed = flag('roads.scenarioCollapsed');
   /** Выбранная вкладка левой панели (запоминается в браузере); её нет в партии — показывается первая. */
   private leftTab: LeftTab = (['scenario', 'events', 'build'] as const).find((t) => t === readText(LEFT_TAB_KEY)) ?? 'scenario';
-  /** Задания, у которых в панели раскрыто «почему». */
-  private readonly whyOpen = new Set<string>();
-  /** «Следующий этап» нажат один раз: второе нажатие переводит этап. */
-  private confirmAdvance = false;
-  /** «🚜 Снести базу» в карточке базы нажат один раз (id базы): второе нажатие сносит. */
-  private confirmRemoveBase: number | null = null;
-  private lastScenario = '';
-  /** Советник: скрытые игроком подсказки (до новой партии) и последняя разметка панели. */
-  private readonly hiddenAdvice = new Set<string>();
-  private lastAdvisor = '';
   private lastAdviceBadge = '';
   /** Скорость до итогового экрана — к ней вернёмся по «Продолжить». */
   private speedBeforeResults = 1;
-  /** Рекорд уже записан для этого сценария (итоговый экран можно открыть снова). */
-  private recordFor: Scenario | null = null;
-  private record: RecordView = { best: null, previous: null, isNew: false };
 
   constructor(
     private readonly root: HTMLElement,
@@ -667,7 +671,7 @@ export class Hud {
     }
     this.q('[data-confirm]').addEventListener('click', (e) => {
       if (e.target !== e.currentTarget) return;
-      if (this.deletingTemplate) this.closeModal();
+      if (this.ui.deletingTemplate) this.closeModal();
       else this.controller.cancelArea();
     });
     root.addEventListener('click', (e) => this.onClick(e));
@@ -688,7 +692,7 @@ export class Hud {
     root.addEventListener('pointermove', (e) => {
       const svg = speedSvg(e.target);
       if (svg) this.speedHover(svg, e.clientX);
-      else if (this.speedHoverX !== null || controller.chartPoint) this.speedHoverEnd(root.querySelector<SVGSVGElement>('[data-speed-line] svg'));
+      else if (this.ui.speedHoverX !== null || controller.chartPoint) this.speedHoverEnd(root.querySelector<SVGSVGElement>('[data-speed-line] svg'));
     });
     root.addEventListener('pointerout', (e) => {
       const svg = speedSvg(e.target);
@@ -743,6 +747,8 @@ export class Hud {
     this.bindBaseName(root);
     this.bindProjectName(root);
     controller.listen(() => this.sync(true));
+    this.applyPrefs();
+    onPrefs(() => this.applyPrefs());
     // Esc, когда на карте отменять нечего, — меню; поверх другого окна (правила, брифинг) — нет.
     controller.onMenu = () => {
       if (!this.anyScreen()) this.openMenu();
@@ -762,8 +768,8 @@ export class Hud {
       const input = e.target as HTMLInputElement;
       if (!input.dataset?.baseName) return;
       this.game().renameBase(Number(input.dataset.baseName), input.value);
-      this.renamingBase = null;
-      this.lastScenario = '';
+      this.ui.renamingBase = null;
+      this.redraw('[data-scenario]');
       // Пока идёт focusout, поле ещё считается активным — перерисуем карточку и строку базы следом.
       setTimeout(() => this.sync(true));
     });
@@ -788,8 +794,8 @@ export class Hud {
       const input = e.target as HTMLInputElement;
       if (!input.dataset?.projectName) return;
       this.game().renameProject(Number(input.dataset.projectName), input.value);
-      this.renamingProject = null;
-      this.lastScenario = '';
+      this.ui.renamingProject = null;
+      this.redraw('[data-scenario]');
       // Пока идёт focusout, поле ещё считается активным — перерисуем карточку и строку проекта следом.
       setTimeout(() => this.sync(true));
     });
@@ -810,7 +816,7 @@ export class Hud {
       const input = e.target as HTMLInputElement;
       if (!input.dataset?.stationName) return;
       this.game().renameStation(Number(input.dataset.stationName), input.value);
-      this.renamingStation = null;
+      this.ui.renamingStation = null;
       // Пока идёт focusout, поле ещё считается активным — перерисуем панель следом.
       setTimeout(() => this.sync(true));
     });
@@ -839,7 +845,7 @@ export class Hud {
       if (input.dataset?.newFolderLine !== undefined) {
         const lineId = Number(input.dataset.newFolderLine);
         const name = input.value.trim();
-        this.addingFolderLine = null;
+        this.ui.addingFolderLine = null;
         if (name) {
           const folder = this.game().createFolder(name);
           this.game().setLineFolder(lineId, folder.id);
@@ -849,14 +855,14 @@ export class Hud {
       }
       if (!input.dataset?.folderName) return;
       this.game().renameFolder(Number(input.dataset.folderName), input.value);
-      this.renamingFolder = null;
+      this.ui.renamingFolder = null;
       // Пока идёт focusout, поле ещё считается активным — перерисуем панель следом.
       setTimeout(() => this.sync(true));
     });
     side.addEventListener('dblclick', (e) => {
       const title = (e.target as HTMLElement).closest<HTMLElement>('[data-folder-title]');
       if (!title) return;
-      this.renamingFolder = Number(title.dataset.folderTitle);
+      this.ui.renamingFolder = Number(title.dataset.folderTitle);
       this.sync(true);
     });
     const marks = ['drop-over', 'drop-before', 'drop-after', 'dragged'];
@@ -869,7 +875,7 @@ export class Hud {
     const targetOf = (e: DragEvent) => {
       const el = e.target as HTMLElement;
       const zone = el.closest<HTMLElement>('[data-folder-drop]');
-      if (this.dragLine === null || !zone) return null;
+      if (this.ui.dragLine === null || !zone) return null;
       const folder = zone.dataset.folderDrop === 'root' ? null : Number(zone.dataset.folderDrop);
       const row = el.closest<HTMLElement>('[data-drag-line]');
       if (!row) return { folder, before: null, mark: zone, cls: 'drop-over' };
@@ -883,7 +889,7 @@ export class Hud {
     side.addEventListener('dragstart', (e) => {
       const row = (e.target as HTMLElement).closest<HTMLElement>('[data-drag-line]');
       if (!row || !e.dataTransfer) return;
-      this.dragLine = Number(row.dataset.dragLine);
+      this.ui.dragLine = Number(row.dataset.dragLine);
       e.dataTransfer.effectAllowed = 'move';
       e.dataTransfer.setData('text/plain', row.dataset.dragLine!);
       side.classList.add('dragging-line');
@@ -906,11 +912,11 @@ export class Hud {
       const t = targetOf(e);
       if (!t) return;
       e.preventDefault();
-      this.game().moveLine(this.dragLine!, t.folder, t.before);
+      this.game().moveLine(this.ui.dragLine!, t.folder, t.before);
     });
     // После перетаскивания pointerup не приходит — снимаем «зажатую кнопку» сами.
     side.addEventListener('dragend', () => {
-      this.dragLine = null;
+      this.ui.dragLine = null;
       this.pressing = false;
       side.classList.remove('dragging-line');
       clearOver();
@@ -1051,8 +1057,8 @@ export class Hud {
   private onClick(e: MouseEvent): void {
     const el = (e.target as HTMLElement).closest<HTMLElement>('[data-action]');
     // Клик мимо выпадающего списка папок закрывает его (сам выбор — отдельным действием ниже).
-    if (this.folderPickOpen !== null && !(e.target as HTMLElement).closest('.folder-pick')) {
-      this.folderPickOpen = null;
+    if (this.ui.folderPickOpen !== null && !(e.target as HTMLElement).closest('.folder-pick')) {
+      this.ui.folderPickOpen = null;
       this.sync(true);
     }
     if (!el) return;
@@ -1060,8 +1066,8 @@ export class Hud {
     const g = this.game();
     const d = el.dataset;
     if (d.action !== 'ng-create') this.confirmNew = false;
-    if (d.action !== 'sc-advance') this.confirmAdvance = false;
-    if (d.action !== 'base-remove') this.confirmRemoveBase = null;
+    if (d.action !== 'sc-advance') this.ui.confirmAdvance = false;
+    if (d.action !== 'base-remove') this.ui.confirmRemoveBase = null;
     switch (d.action) {
       case 'begin':
         this.hideScreens();
@@ -1258,10 +1264,10 @@ export class Hud {
         if (newsRowGo(g, e)) {
           this.closeNews();
           this.goTo(e.refs ?? [], e.at);
-        } else if (this.newsUnread.has(e.n)) {
-          const unread = new Set(this.newsUnread);
+        } else if (this.ui.newsUnread.has(e.n)) {
+          const unread = new Set(this.ui.newsUnread);
           unread.delete(e.n);
-          this.newsUnread = unread;
+          this.ui.newsUnread = unread;
           this.renderNews();
         }
         break;
@@ -1308,7 +1314,7 @@ export class Hud {
         break;
       case 'project-rename':
         // Название — в карточке проекта: поле сразу (кнопку уже отпустили), иначе первые нажатия ушли бы карте.
-        this.renamingProject = Number(d.id);
+        this.ui.renamingProject = Number(d.id);
         this.pressing = false;
         break;
       case 'base-place':
@@ -1338,11 +1344,11 @@ export class Hud {
       case 'base-remove': {
         // Снос базы из её карточки — со второго нажатия (первое спрашивает «Точно? +$N, бригады → «…»»), как «Сносом».
         const id = Number(d.id);
-        if (this.confirmRemoveBase !== id) {
-          this.confirmRemoveBase = id;
+        if (this.ui.confirmRemoveBase !== id) {
+          this.ui.confirmRemoveBase = id;
           break;
         }
-        this.confirmRemoveBase = null;
+        this.ui.confirmRemoveBase = null;
         const problem = g.removeBase(id);
         if (problem) g.notify(problem, '#e5534b');
         else c.select(null);
@@ -1351,7 +1357,7 @@ export class Hud {
       }
       case 'base-rename':
         // Название — в карточке базы: поле сразу (кнопку уже отпустили), иначе первые нажатия ушли бы карте.
-        this.renamingBase = Number(d.id);
+        this.ui.renamingBase = Number(d.id);
         this.pressing = false;
         break;
       case 'crew-show': {
@@ -1440,23 +1446,23 @@ export class Hud {
         this.fixWarning(Number(d.id), d.key!);
         break;
       case 'advice-hide':
-        this.hiddenAdvice.add(d.key!);
-        this.lastAdvisor = '';
+        this.ui.hiddenAdvice.add(d.key!);
+        this.redraw('[data-advisor]');
         break;
       case 'loan-take':
         g.takeLoan();
-        this.lastFinance = '';
+        this.redraw('[data-finance]');
         break;
       case 'loan-repay':
         g.repayLoan();
-        this.lastFinance = '';
+        this.redraw('[data-finance]');
         break;
       case 'sc-toggle':
         this.setLeftCollapsed(!this.scenarioCollapsed.on);
         this.refreshLeft();
         break;
       case 'sc-why':
-        if (!this.whyOpen.delete(d.id!)) this.whyOpen.add(d.id!);
+        if (!this.ui.whyOpen.delete(d.id!)) this.ui.whyOpen.add(d.id!);
         break;
       case 'sc-fold': {
         // Выбор хранится в задании — сохраняется с партией и переживает перезагрузку страницы.
@@ -1469,7 +1475,7 @@ export class Hud {
         break;
       case 'sc-past': {
         const key = `ev:${d.id}`;
-        if (!this.whyOpen.delete(key)) this.whyOpen.add(key);
+        if (!this.ui.whyOpen.delete(key)) this.ui.whyOpen.add(key);
         break;
       }
       case 'sc-accept':
@@ -1495,10 +1501,10 @@ export class Hud {
       }
       case 'sc-advance':
         // Незакрытые цели этапа засчитаются как невыполненные — переходим со второго нажатия.
-        if (this.confirmAdvance) {
-          this.confirmAdvance = false;
+        if (this.ui.confirmAdvance) {
+          this.ui.confirmAdvance = false;
           g.scenario?.advancePhase();
-        } else this.confirmAdvance = true;
+        } else this.ui.confirmAdvance = true;
         break;
       case 'sc-results':
         this.showResults();
@@ -1524,7 +1530,7 @@ export class Hud {
       case 'town-need': {
         // Строка потребности города раскрывается в диаграмму по месяцам и сворачивается обратно.
         const key = `${d.id}:${d.c}`;
-        if (!this.needsOpen.delete(key)) this.needsOpen.add(key);
+        if (!this.ui.needsOpen.delete(key)) this.ui.needsOpen.add(key);
         break;
       }
       case 'toggle-needs':
@@ -1627,7 +1633,7 @@ export class Hud {
         break;
       case 'user-template-del':
         // Спрашиваем своим окном: схема шаблона, имя, «Отмена» и «Удалить».
-        this.deletingTemplate = d.id ?? null;
+        this.ui.deletingTemplate = d.id ?? null;
         break;
       case 'user-template-dl': {
         const t = getTemplate(d.id ?? '');
@@ -1640,11 +1646,11 @@ export class Hud {
         break;
       }
       case 'tpl-del-yes':
-        if (this.deletingTemplate) c.removeUserTemplate(this.deletingTemplate);
-        this.deletingTemplate = null;
+        if (this.ui.deletingTemplate) c.removeUserTemplate(this.ui.deletingTemplate);
+        this.ui.deletingTemplate = null;
         break;
       case 'tpl-del-no':
-        this.deletingTemplate = null;
+        this.ui.deletingTemplate = null;
         break;
       case 'paste-rotate':
         c.rotateActive(Number(d.v) < 0 ? -1 : 1);
@@ -1710,13 +1716,13 @@ export class Hud {
         break;
       case 'select-line':
         // Из панели города крестик карточки вернёт к ней, из других мест — просто закроет карточку.
-        this.lineBack = lineBackFrom(c.selection, Number(d.id));
+        this.ui.lineBack = lineBackFrom(c.selection, Number(d.id));
         c.selectLine(Number(d.id));
         c.select(null);
         break;
       case 'close-line': {
-        const back = lineCloseTarget(this.lineBack, c.selectedLine, g.towns);
-        this.lineBack = null;
+        const back = lineCloseTarget(this.ui.lineBack, c.selectedLine, g.towns);
+        this.ui.lineBack = null;
         c.selectLine(null);
         if (back) c.select(back);
         break;
@@ -1804,11 +1810,11 @@ export class Hud {
         break;
       }
       case 'toggle-colors':
-        this.colorsOpen = this.colorsOpen === Number(d.id) ? null : Number(d.id);
+        this.ui.colorsOpen = this.ui.colorsOpen === Number(d.id) ? null : Number(d.id);
         break;
       case 'line-color':
         g.setLineColor(Number(d.id), d.color!);
-        this.colorsOpen = null;
+        this.ui.colorsOpen = null;
         break;
       case 'delete-line':
         g.deleteLine(Number(d.id));
@@ -1816,38 +1822,38 @@ export class Hud {
         break;
       case 'new-folder':
         // Новая папка сразу открывается для ввода названия.
-        this.renamingFolder = g.createFolder().id;
+        this.ui.renamingFolder = g.createFolder().id;
         break;
       case 'toggle-folder':
         g.toggleFolder(Number(d.id));
         break;
       case 'rename-folder':
-        this.renamingFolder = Number(d.id);
+        this.ui.renamingFolder = Number(d.id);
         break;
       case 'rename-station':
-        this.renamingStation = Number(d.id);
+        this.ui.renamingStation = Number(d.id);
         // Кнопку уже отпустили: поле — сразу (sync ниже), иначе первые нажатия успели бы уйти карте.
         this.pressing = false;
         break;
       case 'delete-folder':
         g.deleteFolder(Number(d.id));
-        if (this.renamingFolder === Number(d.id)) this.renamingFolder = null;
+        if (this.ui.renamingFolder === Number(d.id)) this.ui.renamingFolder = null;
         break;
       case 'folder-pick-toggle': {
         const line = Number(d.line);
-        this.folderPickOpen = this.folderPickOpen === line ? null : line;
+        this.ui.folderPickOpen = this.ui.folderPickOpen === line ? null : line;
         break;
       }
       case 'line-folder': {
         // В другую папку линия встаёт последней; повторный клик по своей папке порядок не меняет.
         const to = d.folder ? Number(d.folder) : null;
         if ((g.lines.get(Number(d.line))?.folder ?? null) !== to) g.moveLine(Number(d.line), to);
-        this.folderPickOpen = null;
+        this.ui.folderPickOpen = null;
         break;
       }
       case 'line-folder-new': {
-        this.addingFolderLine = Number(d.line);
-        this.folderPickOpen = null;
+        this.ui.addingFolderLine = Number(d.line);
+        this.ui.folderPickOpen = null;
         break;
       }
       case 'buy': {
@@ -2018,7 +2024,7 @@ export class Hud {
         break;
       }
       case 'stop-open':
-        this.stopOpen = toggleStop(this.stopOpen, { line: Number(d.line), i: Number(d.i) });
+        this.ui.stopOpen = toggleStop(this.ui.stopOpen, { line: Number(d.line), i: Number(d.i) });
         // Кнопку уже отпустили: раскрываем и сворачиваем сразу (sync ниже), а не со следующей перерисовкой панели.
         this.pressing = false;
         break;
@@ -2027,13 +2033,13 @@ export class Hud {
         const i = Number(d.i);
         const problem = g.moveLineStop(Number(d.line), i, d.action === 'stop-up' ? -1 : 1);
         if (problem) g.notify(problem);
-        this.stopOpen = null;
+        this.ui.stopOpen = null;
         break;
       }
       case 'stop-del': {
         const problem = g.removeLineStop(Number(d.line), Number(d.i));
         if (problem) g.notify(problem);
-        this.stopOpen = null;
+        this.ui.stopOpen = null;
         break;
       }
       case 'stop-add':
@@ -2158,11 +2164,9 @@ export class Hud {
               : c.tool === 'terrain'
                 ? this.terrainOptionsHtml()
                 : this.roadOptionsHtml();
-    if (html !== this.lastOptions) {
-      // Прокрученная вбок полоса карточек (data-hscroll) остаётся на месте, когда выбрали другую карточку.
-      const scroll = el.querySelector<HTMLElement>('[data-hscroll]')?.scrollLeft ?? 0;
-      el.innerHTML = html;
-      this.lastOptions = html;
+    // Прокрученная вбок полоса карточек (data-hscroll) остаётся на месте, когда выбрали другую карточку.
+    const scroll = el.querySelector<HTMLElement>('[data-hscroll]')?.scrollLeft ?? 0;
+    if (setHtml(el, html)) {
       const strip = el.querySelector<HTMLElement>('[data-hscroll]');
       if (strip) strip.scrollLeft = scroll;
     }
@@ -2272,8 +2276,8 @@ export class Hud {
   /** Окно «точно снести?» для большой рамки или «удалить шаблон?». */
   private renderConfirm(): void {
     const el = this.q('[data-confirm]');
-    const tpl = this.deletingTemplate ? listTemplates().find((t) => t.id === this.deletingTemplate) : undefined;
-    if (this.deletingTemplate && !tpl) this.deletingTemplate = null;
+    const tpl = this.ui.deletingTemplate ? listTemplates().find((t) => t.id === this.ui.deletingTemplate) : undefined;
+    if (this.ui.deletingTemplate && !tpl) this.ui.deletingTemplate = null;
     if (tpl) {
       el.classList.remove('hidden');
       const html = `<div class="modal menu confirm">
@@ -2286,18 +2290,12 @@ export class Hud {
             <button class="primary danger-fill" data-action="tpl-del-yes">Удалить</button>
           </div>
         </div>`;
-      if (html !== this.lastConfirm) {
-        el.innerHTML = html;
-        this.lastConfirm = html;
-      }
+      setHtml(el, html);
       return;
     }
     const p = this.controller.pendingArea;
     el.classList.toggle('hidden', !p);
-    if (!p) {
-      this.lastConfirm = '';
-      return;
-    }
+    if (!p) return;
     const c = p.contents;
     const chip = (icon: string, n: number, title: string) =>
       n ? `<span class="confirm-chip" title="${title}">${icon}<b>${n}</b></span>` : '';
@@ -2316,10 +2314,7 @@ export class Hud {
           <button class="primary danger-fill" data-action="area-confirm">Снести</button>
         </div>
       </div>`;
-    if (html !== this.lastConfirm) {
-      el.innerHTML = html;
-      this.lastConfirm = html;
-    }
+    setHtml(el, html);
   }
 
   /** Форма и высота — общие для дорог и путей. */
@@ -2848,22 +2843,20 @@ export class Hud {
   private renderSide(): void {
     // Пока игрок вводит название линии, не перерисовываем панель.
     if (document.activeElement instanceof HTMLInputElement && this.q('[data-side]').contains(document.activeElement)) return;
-    if (this.pressing || this.dragLine !== null) return;
+    if (this.pressing || this.ui.dragLine !== null) return;
     const html = this.sideHtml();
     // Карточку станции закрыли раньше, чем открылось поле, — при следующем выборе станции оно не нужно.
-    if (this.renamingStation !== null && !html.includes('data-station-name')) this.renamingStation = null;
-    if (this.renamingBase !== null && !html.includes('data-base-name')) this.renamingBase = null;
+    if (this.ui.renamingStation !== null && !html.includes('data-station-name')) this.ui.renamingStation = null;
+    if (this.ui.renamingBase !== null && !html.includes('data-base-name')) this.ui.renamingBase = null;
     // Карточку базы закрыли (или выбрали другое кликом по карте), не подтвердив снос, — вопрос снимается.
-    if (this.confirmRemoveBase !== null && !html.includes('bc-remove confirm')) this.confirmRemoveBase = null;
-    if (this.renamingProject !== null && !html.includes('data-project-name')) this.renamingProject = null;
-    if (html !== this.lastPanel) {
-      const side = this.q('[data-side]');
-      side.innerHTML = html;
-      this.lastPanel = html;
+    if (this.ui.confirmRemoveBase !== null && !html.includes('bc-remove confirm')) this.ui.confirmRemoveBase = null;
+    if (this.ui.renamingProject !== null && !html.includes('data-project-name')) this.ui.renamingProject = null;
+    const side = this.q('[data-side]');
+    if (setHtml(side, html)) {
       // Курсор стоит на графике скорости: на новом рисунке черта и подсказка — там же (pointerout не придёт).
-      if (this.speedHoverX !== null) {
+      if (this.ui.speedHoverX !== null) {
         const svg = side.querySelector<SVGSVGElement>('[data-speed-line] svg');
-        if (svg) this.speedHover(svg, this.speedHoverX);
+        if (svg) this.speedHover(svg, this.ui.speedHoverX);
         else this.speedHoverEnd(null);
       }
       // Открыли кликом по значку предупреждения — блок с объяснением на виду.
@@ -2880,7 +2873,7 @@ export class Hud {
     const g = this.game();
     const parts: string[] = [];
     // Карточку закрыли не крестиком (выбрали другое, Esc, удалили маршрут) — к городу больше не возвращаемся.
-    if (this.lineBack && c.selectedLine !== this.lineBack.line) this.lineBack = null;
+    if (this.ui.lineBack && c.selectedLine !== this.ui.lineBack.line) this.ui.lineBack = null;
     // Дополнение маршрута: показываем карточку этой линии, клики по станциям добавляют их.
     if (c.tool === 'line' && c.addStopTo !== null && g.lines.has(c.addStopTo)) return this.lineHtml(c.addStopTo);
     if (c.tool === 'line') {
@@ -2949,7 +2942,7 @@ export class Hud {
   private folderHtml(f: LineFolder): string {
     const lines = this.game().folderLines(f.id);
     const profit = lines.reduce((s, l) => s + l.revenueLast - l.costLast, 0);
-    const renaming = this.renamingFolder === f.id;
+    const renaming = this.ui.renamingFolder === f.id;
     const name = renaming
       ? `<input class="line-name folder-name" data-folder-name="${f.id}" value="${esc(f.name)}" maxlength="40" />`
       : `<span class="folder-title" data-folder-title="${f.id}" title="Двойной клик — переименовать">${esc(f.name)}</span>`;
@@ -3068,7 +3061,7 @@ export class Hud {
    * остальных папок и «+ Новая папка» — последним пунктом, который даёт ввести название.
    */
   private folderPickHtml(line: Line): string {
-    if (this.addingFolderLine === line.id) {
+    if (this.ui.addingFolderLine === line.id) {
       return `<div class="folder-pick" title="Папка в списке маршрутов"><div class="folder-pick-row">${folderSvg(16)}
         <input class="line-name folder-name" data-new-folder-line="${line.id}" placeholder="Название папки" maxlength="40" /></div></div>`;
     }
@@ -3078,7 +3071,7 @@ export class Hud {
     const toggle = `<button class="folder-pick-current" data-action="folder-pick-toggle" data-line="${line.id}">${
       current ? this.folderMetaHtml(current) : noneBody
     }${chevronSvg(10)}</button>`;
-    if (this.folderPickOpen !== line.id) return `<div class="folder-pick" title="Папка в списке маршрутов">${toggle}</div>`;
+    if (this.ui.folderPickOpen !== line.id) return `<div class="folder-pick" title="Папка в списке маршрутов">${toggle}</div>`;
     const option = (id: number | null, body: string) =>
       `<button class="folder-pick-opt ${(line.folder ?? null) === id ? 'active' : ''}" data-action="line-folder" data-line="${line.id}" data-folder="${id ?? ''}">${body}</button>`;
     const options = option(null, noneBody) + [...g.folders.values()].map((f) => option(f.id, this.folderMetaHtml(f))).join('');
@@ -3099,7 +3092,7 @@ export class Hud {
       .map((sid, i) => {
         const st = g.stations.get(sid);
         const rule = g.stopRule(line, i);
-        const open = this.stopOpen?.line === line.id && this.stopOpen.i === i;
+        const open = this.ui.stopOpen?.line === line.id && this.ui.stopOpen.i === i;
         const loadIcons = rule.load === 'auto' ? '' : `<span class="rl">⬆${rule.load.length ? rule.load.map((c) => cargoIcon(c, 14)).join('') : '✕'}</span>`;
         const unloadIcons =
           rule.unload === 'auto' ? '' : rule.unload === 'all' ? '<span class="rl">⬇ склад</span>' : `<span class="rl">⬇${rule.unload.map((c) => cargoIcon(c, 14)).join('')}</span>`;
@@ -3145,7 +3138,11 @@ export class Hud {
     if (!g.retail || !stops.length) return '';
     const cargo = g.shopCargo(stops);
     if (!cargo) return '';
-    const n = g.shopTargets(stops, cargo, line ? g.lineTruckLength(line) : undefined).length;
+    // Поиск магазинов по сети — не на каждую перерисовку панели: пока сеть и маршрут те же, число то же.
+    const L = line ? g.lineTruckLength(line) : undefined;
+    const key = `${g.roads.net.version}|${g.net.version}|${stops.join(',')}|${cargo}|${L}`;
+    if (this.ui.shops.key !== key) this.ui.shops = { key, n: g.shopTargets(stops, cargo, L).length };
+    const n = this.ui.shops.n;
     if (!n) return '';
     const action = line ? `data-action="stop-add-shops" data-line="${line.id}"` : 'data-action="draft-add-shops"';
     return `<button class="small shops-add" ${action} data-tip-end data-tip="Все магазины с этим грузом: ${n} — в конец маршрута, от последней остановки к ближайшему">🛒${cargoIcon(
@@ -3198,7 +3195,7 @@ export class Hud {
   /** Подсказка крестика карточки маршрута: открыта из панели города — крестик вернёт к нему. */
   private closeLineTitle(lineId: number): string {
     const g = this.game();
-    const back = lineCloseTarget(this.lineBack, lineId, g.towns);
+    const back = lineCloseTarget(this.ui.lineBack, lineId, g.towns);
     const town = back?.type === 'town' ? g.towns.find((t) => t.id === back.id) : undefined;
     return town ? ` title="Назад к городу «${esc(town.name)}»"` : ' title="Закрыть"';
   }
@@ -3259,7 +3256,7 @@ export class Hud {
       )
       .join('');
     const palette =
-      this.colorsOpen === line.id
+      this.ui.colorsOpen === line.id
         ? `<div class="swatches" title="Цвет маршрута">${LINE_COLORS.map(
             (c) => `<button class="swatch ${c === line.color ? 'active' : ''}" style="background:${c}" data-action="line-color" data-id="${line.id}" data-color="${c}"></button>`,
           ).join('')}<label class="swatch custom" title="Свой цвет"><input type="color" data-line-color="${line.id}" value="${line.color}" /></label></div>
@@ -3372,7 +3369,7 @@ export class Hud {
       this.speedHoverEnd(svg);
       return;
     }
-    this.speedHoverX = clientX;
+    this.ui.speedHoverX = clientX;
     const vb = svg.viewBox.baseVal;
     const h = chartHoverAt(chart, (clientX - rect.left) / rect.width, vb.width, vb.height);
     const cx = h.x.toFixed(1);
@@ -3404,7 +3401,7 @@ export class Hud {
 
   /** Курсор ушёл с графика скорости: прячем черту, точку и подсказку, а на карте — точку маршрута. */
   private speedHoverEnd(svg: SVGSVGElement | null): void {
-    this.speedHoverX = null;
+    this.ui.speedHoverX = null;
     this.controller.chartPoint = null;
     if (!svg) return;
     svg.querySelector('.speed-cursor')?.setAttribute('visibility', 'hidden');
@@ -3516,8 +3513,8 @@ export class Hud {
     const sel = this.controller.selection!;
     const head = (title: string, sub = '') =>
       `<header><h3>${esc(title)}</h3><button class="icon" data-action="close-sel">✕</button></header>${sub ? `<p class="muted">${sub}</p>` : ''}`;
-    if (sel.type === 'project') return projectCardHtml(g, sel.id, this.renamingProject === sel.id);
-    if (sel.type === 'base') return baseCardHtml(g, sel.id, this.renamingBase === sel.id, this.confirmRemoveBase === sel.id);
+    if (sel.type === 'project') return projectCardHtml(g, sel.id, this.ui.renamingProject === sel.id);
+    if (sel.type === 'base') return baseCardHtml(g, sel.id, this.ui.renamingBase === sel.id, this.ui.confirmRemoveBase === sel.id);
     if (sel.type === 'crew') return crewCardHtml(g, sel.id, { following: this.controller.following, picking: this.controller.pendingOf('crew')?.id === sel.id });
     if (sel.type === 'workTrain') return workTrainCardHtml(g, sel.id, { following: this.controller.following });
     if (sel.type === 'park') return parkCardHtml(g, sel.id);
@@ -3679,7 +3676,7 @@ export class Hud {
       const servesRow = st.kind === 'stop' ? '' : `<div class="serves-row"><span class="lbl2">Работает с</span>${this.servesHtml(st.serves, 'st-serves', String(st.id))}</div>`;
       // Название — переименовать: клик по нему или по ✎ за ним открывает поле ввода.
       const title =
-        this.renamingStation === st.id
+        this.ui.renamingStation === st.id
           ? `<input class="line-name station-name" data-station-name="${st.id}" value="${esc(st.name)}" maxlength="40" />`
           : `<h3 class="station-title" data-action="rename-station" data-id="${st.id}" title="Нажмите, чтобы переименовать">${esc(st.name)}${
               heading ? ` ${headingArrow(heading)}` : ''
@@ -3820,7 +3817,7 @@ export class Hud {
         ? ''
         : demands
             .map(({ cargo: c, now, carried, last }) => {
-              const open = this.needsOpen.has(`${t.id}:${c}`);
+              const open = this.ui.needsOpen.has(`${t.id}:${c}`);
               // Закрытые месяцы и текущий — последним, всего не больше 12 столбиков.
               const months = [
                 ...(t.supplyHistory ?? [])
@@ -4055,8 +4052,8 @@ export class Hud {
   private closeModal(): boolean {
     // Таймлапс — поверх итогов и меню: Esc закрывает сначала его.
     if (closeTimelapse()) return true;
-    if (this.deletingTemplate) {
-      this.deletingTemplate = null;
+    if (this.ui.deletingTemplate) {
+      this.ui.deletingTemplate = null;
       this.renderConfirm();
       return true;
     }
@@ -4150,17 +4147,17 @@ export class Hud {
     if (!sc?.state.score) return;
     if (this.q('[data-results]').classList.contains('hidden')) this.speedBeforeResults = g.speed || 1;
     this.controller.setSpeed(0, true);
-    if (this.recordFor !== sc) {
-      this.recordFor = sc;
+    if (this.ui.recordFor !== sc) {
+      this.ui.recordFor = sc;
       const slot = slotOf(g.settings);
       // Итоги уже видели (экран открыт снова после перезагрузки) — рекорд только показываем.
-      this.record = !slot
+      this.ui.record = !slot
         ? { best: null, previous: null, isNew: false }
         : sc.state.seen
           ? { best: getBest(slot), previous: null, isNew: false }
           : saveBest(slot, sc.state.score);
     }
-    this.q('[data-results-body]').innerHTML = resultsHtml(g, this.record);
+    this.q('[data-results-body]').innerHTML = resultsHtml(g, this.ui.record);
     this.showScreen('results');
   }
 
@@ -4177,7 +4174,7 @@ export class Hud {
     if (sc && !sc.running) sc.state.seen = true;
     this.hideScreens();
     this.controller.setSpeed(this.speedBeforeResults);
-    this.lastScenario = '';
+    this.redraw('[data-scenario]');
   }
 
   /** Сложность, испытание или регион сценария на экране новой игры. */
@@ -4366,7 +4363,7 @@ export class Hud {
 
   /** Советы, которые игрок не скрыл. */
   private advice(): Advice[] {
-    return adviceOf(this.game()).filter((a) => !this.hiddenAdvice.has(a.key));
+    return adviceOf(this.game()).filter((a) => !this.ui.hiddenAdvice.has(a.key));
   }
 
   /** Окно «События»: пауза на время чтения, всё в нём — прочитано; новое с прошлого раза — подсвечено. */
@@ -4375,7 +4372,7 @@ export class Hud {
     const g = this.game();
     this.speedBeforeNews = g.speed;
     this.controller.setSpeed(0, true);
-    this.newsUnread = g.news.unreadSet();
+    this.ui.newsUnread = g.news.unreadSet();
     this.showScreen('news');
     this.renderNews(true);
   }
@@ -4401,13 +4398,11 @@ export class Hud {
       b.parentElement!.dataset.tip = badge ? `История уведомлений: новых — ${badge}` : 'История уведомлений';
     }
     if (!open) return;
-    const html = newsHtml(g, { kinds: this.newsKinds, unread: this.newsUnread });
-    if (!force && html === this.lastNews) return;
-    this.lastNews = html;
+    const html = newsHtml(g, { kinds: this.newsKinds, unread: this.ui.newsUnread });
     const body = this.q('[data-news-body]');
-    const list = body.querySelector('.news-list');
-    const scroll = list?.scrollTop ?? 0;
-    body.innerHTML = html;
+    if (force) invalidate(body);
+    const scroll = body.querySelector('.news-list')?.scrollTop ?? 0;
+    if (!setHtml(body, html)) return;
     // Перерисовка (новая запись, фильтр) — список остаётся на месте.
     if (!force) body.querySelector('.news-list')!.scrollTop = scroll;
   }
@@ -4443,7 +4438,7 @@ export class Hud {
       this.q('[data-finance]').classList.add('hidden');
       if (!this.q('[data-chains]').classList.contains('hidden')) this.toggleChains();
     }
-    this.lastAdvisor = '';
+    this.redraw('[data-advisor]');
     this.renderAdvisor();
     this.renderScenario();
   }
@@ -4463,11 +4458,7 @@ export class Hud {
     }
     const el = this.q('[data-advisor]');
     if (el.classList.contains('hidden') || this.pressing) return;
-    const html = advisorHtml(this.game(), list);
-    if (html !== this.lastAdvisor) {
-      el.innerHTML = html;
-      this.lastAdvisor = html;
-    }
+    setHtml(el, advisorHtml(this.game(), list));
   }
 
   /** «Показать»: камера к месту совета; маршрут — выбрать, предприятие — выделить. */
@@ -4539,7 +4530,7 @@ export class Hud {
         break;
       case 'loan':
         if (!g.takeLoan()) g.notify('Кредит уже на пределе');
-        this.lastFinance = '';
+        this.redraw('[data-finance]');
         break;
       case 'base':
         // «＋ База» советника: ставим базу, а на месте советника — вкладка «Стройка» с нажатой «＋ База».
@@ -4554,7 +4545,7 @@ export class Hud {
         break;
       }
     }
-    this.lastAdvisor = '';
+    this.redraw('[data-advisor]');
   }
 
   /** Панель цепочек: для каждого груза — кто производит и кому он нужен. */
@@ -4595,8 +4586,9 @@ export class Hud {
   update(realDt: number): void {
     const g = this.game();
     this.minimap.update(realDt);
-    this.q('[data-money]').textContent = money(g.money);
-    this.q('[data-money]').classList.toggle('negative', g.money < 0);
+    const cash = this.q('[data-money]');
+    setText(cash, money(g.money));
+    cash.classList.toggle('negative', g.money < 0);
     // Резерв стройки — рядом с подписью «Деньги»: «🔒 $40 000» (на счёте, но отложено на проекты).
     const reserved = g.reserved;
     const res = this.q('[data-reserve]');
@@ -4607,14 +4599,10 @@ export class Hud {
     }
     const balance = g.incomeMonth - g.expensesMonth;
     const bal = this.q('[data-balance]');
-    bal.textContent = `${balance >= 0 ? '+' : ''}${money(balance)}`;
+    setText(bal, `${balance >= 0 ? '+' : ''}${money(balance)}`);
     bal.classList.toggle('negative', balance < 0);
-    // Подсказка «За месяц»: содержание идёт каждую секунду — его темп в месяц по статьям.
-    const balTip = upkeepTip(g.upkeepForecast());
-    const balStat = this.q('[data-balance-stat]');
-    if (balStat.dataset.tip !== balTip) balStat.dataset.tip = balTip;
-    this.q('[data-fleet]').textContent = `${g.fleet.size} / жит. ${g.citizenCars}`;
-    this.q('[data-date]').textContent = g.dateLabel;
+    setText(this.q('[data-fleet]'), `${g.fleet.size} / жит. ${g.citizenCars}`);
+    setText(this.q('[data-date]'), g.dateLabel);
     this.q('[data-month]').style.width = `${g.monthProgress * 100}%`;
 
     const notices = this.q('[data-notices]');
@@ -4633,6 +4621,10 @@ export class Hud {
     this.panelTimer -= realDt;
     if (this.panelTimer <= 0) {
       this.panelTimer = 0.3;
+      // Подсказка «За месяц»: содержание идёт каждую секунду — его темп в месяц по статьям.
+      const balStat = this.q('[data-balance-stat]');
+      const balTip = upkeepTip(g.upkeepForecast());
+      if (balStat.dataset.tip !== balTip) balStat.dataset.tip = balTip;
       this.renderSide();
       this.renderFinance();
       this.renderAdvisor();
@@ -4686,7 +4678,7 @@ export class Hud {
    */
   private showOffer(id?: string): void {
     this.openLeftTab('events', true);
-    if (id) this.whyOpen.add(id);
+    if (id) this.ui.whyOpen.add(id);
     this.refreshLeft();
     this.renderScenario();
     const panel = this.q('[data-scenario]');
@@ -4702,7 +4694,7 @@ export class Hud {
   /** Левую панель перерисовать сразу: клик уже отпущен, ждать следующего обновления (0,3 с) незачем. */
   private refreshLeft(): void {
     this.pressing = false;
-    this.lastScenario = '';
+    this.redraw('[data-scenario]');
   }
 
   /**
@@ -4728,7 +4720,7 @@ export class Hud {
     const el = this.q('[data-finance]');
     el.classList.toggle('hidden');
     if (!el.classList.contains('hidden')) this.q('[data-advisor]').classList.add('hidden');
-    this.lastFinance = '';
+    this.redraw('[data-finance]');
     this.renderFinance();
     this.renderScenario();
   }
@@ -4744,8 +4736,6 @@ export class Hud {
   private renderScenario(): void {
     const el = this.q('[data-scenario]');
     const g = this.game();
-    // Настройка «Задания без сроков» (Меню → Настройки) — в игру: выключили — идей нет, вкладки тоже.
-    g.ideas.setEnabled(prefOn('ideas'));
     const tab = leftTab(g, this.leftTab);
     const show =
       tab !== null &&
@@ -4757,29 +4747,30 @@ export class Hud {
     const sel = this.controller.selection;
     const html = leftPanelHtml(g, {
       collapsed: this.scenarioCollapsed.on,
-      open: this.whyOpen,
-      confirmAdvance: this.confirmAdvance,
+      open: this.ui.whyOpen,
+      confirmAdvance: this.ui.confirmAdvance,
       tab,
       build: { placing: this.controller.action === 'base', project: sel?.type === 'project' ? sel.id : null, base: sel?.type === 'base' ? sel.id : null },
     });
-    if (html !== this.lastScenario) {
-      el.innerHTML = html;
-      this.lastScenario = html;
+    if (setHtml(el, html)) {
       if (tab !== this.shownTab) el.scrollTop = 0;
       this.shownTab = tab;
     }
   }
 
-  private lastFinance = '';
-
   private renderFinance(): void {
     const el = this.q('[data-finance]');
-    if (el.classList.contains('hidden')) return;
-    const html = this.financeHtml();
-    if (html !== this.lastFinance) {
-      el.innerHTML = html;
-      this.lastFinance = html;
-    }
+    if (!el.classList.contains('hidden')) setHtml(el, this.financeHtml());
+  }
+
+  /** Перерисовать панель sel при следующем обновлении, даже если разметка та же. */
+  private redraw(sel: string): void {
+    invalidate(this.q(sel));
+  }
+
+  /** Настройка «Задания без сроков» (Меню → Настройки) — в игру: выключили — идей нет, вкладки тоже. */
+  private applyPrefs(): void {
+    this.game().ideas.setEnabled(prefOn('ideas'));
   }
 
   /**
@@ -4851,16 +4842,13 @@ export class Hud {
       <h4>Маршруты по прибыли за прошлый месяц</h4>${lines || '<p class="muted">Маршрутов пока нет.</p>'}`;
   }
 
+  /** Новая или загруженная партия: состояние панелей прежней — прочь, панели — заново. */
   reset(): void {
-    this.lastPanel = '';
-    this.lastScenario = '';
+    this.ui = freshUi();
+    for (const sel of ['[data-side]', '[data-scenario]', '[data-advisor]', '[data-finance]', '[data-options]', '[data-confirm]', '[data-news-body]']) this.redraw(sel);
     // Плашку — заново по новой партии: в песочнице её нет, и прежняя не должна остаться (с замершим таймером).
     this.offerBanner.reset();
-    this.whyOpen.clear();
-    this.confirmAdvance = false;
-    this.hiddenAdvice.clear();
-    this.lastAdvisor = '';
-    this.lastAdviceBadge = '';
+    this.applyPrefs();
     this.q('[data-chains]').classList.add('hidden');
     this.q('[data-finance]').classList.add('hidden');
     this.q('[data-advisor]').classList.add('hidden');
