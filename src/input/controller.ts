@@ -128,6 +128,34 @@ const GRADE_PROBLEM = /подъём|насыпь|выемка/i;
 
 /** Что делает клик: инструмент вместе с его режимом. */
 export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane' | 'parallel' | 'copy' | 'paste' | 'trackMove' | 'base' | 'lot';
+/**
+ * Что ждёт клика на карте (Esc — отмена), одно за раз:
+ * - moveBuilding, movePark, moveStation, moveBase, moveLot — переносят здание, парк (сквер, площадь), станцию (ж/д —
+ *   станет конечной или проходной, terminal; null — какой была), строительную базу, площадку-стоянку: за курсором до клика;
+ * - lotHandle — тянут ручку угла (размер) или поворота выбранной площадки;
+ * - turn — тянут ручку поворота ↺ выбранной ратуши (храма) или парка: вокруг середины pivot, ручка — на стороне side
+ *   рисунка, base — угол без поворота у улицы; отпустили — поворот на месте (Ctrl+Z);
+ * - warehouse, annex — ставим склад станции, пристройку предприятия: клик в зоне вокруг них;
+ * - newBase — ставим строительную базу (инструмент «Станция → База стройки»), клик у дороги;
+ * - crew — выбираем стройку для бригады («🎯 На стройку…»): клик по плашке или полотну проекта.
+ */
+export type Pending =
+  | { kind: 'moveBuilding'; b: TownBuilding }
+  | { kind: 'movePark'; id: number }
+  | { kind: 'moveStation'; id: number; terminal: boolean | null }
+  | { kind: 'moveBase'; id: number }
+  | { kind: 'moveLot'; id: number }
+  | { kind: 'lotHandle'; id: number; handle: 'corner' | 'rotate'; side: -1 | 1 }
+  | { kind: 'turn'; target: 'park' | 'building'; id: number; pivot: Vec; base: number; side: 1 | -1 }
+  | { kind: 'warehouse'; id: number }
+  | { kind: 'annex'; id: number }
+  | { kind: 'newBase' }
+  | { kind: 'crew'; id: number };
+export type PendingOf<K extends Pending['kind']> = Extract<Pending, { kind: K }>;
+
+/** Ставят склад, пристройку, выбирают стройку для бригады — из карточки: выбрали другое — режим кончился. */
+const PENDING_CARD: Partial<Record<Pending['kind'], Selection['type']>> = { warehouse: 'station', annex: 'industry', crew: 'crew' };
+
 /** Дорога: строить, вести полосу вдоль края, перестроить под выбранный тип, двигать узел или выгнуть. */
 export type RoadMode = 'build' | 'lane' | 'upgrade' | 'move';
 /** Развязки: кольцо на перекрёстке, шаблон развязки (готовый или свой) или копия куска дорог. */
@@ -159,6 +187,8 @@ const UNDO_LABELS: Partial<Record<Action, string>> = {
   terrain: 'рельеф',
   lot: 'площадка',
 };
+/** Как назовёт Ctrl+Z клик, которым кончается перенос (остальное, что ждёт клика, отменяется по-своему). */
+const PENDING_UNDO: Partial<Record<Pending['kind'], string>> = { moveBuilding: 'перенос здания', movePark: 'перенос парка', moveStation: 'перенос станции', moveBase: 'перенос базы' };
 
 /** «3 дороги, 12 домов, 1 станция» — что снесёт рамка. */
 export function areaSummary(c: AreaContents): string {
@@ -250,8 +280,15 @@ export class Controller {
   following = false;
   /** Линия, в маршрут которой добавляем станции кликами по карте. */
   addStopTo: number | null = null;
-  /** Поворот ж/д станции в чистом поле (R). */
-  stationAngle = 0;
+  /**
+   * Поворот того, что ставим или переносим (R / Shift+R — шаг 15°, rotateActive): ж/д станции в чистом поле,
+   * магистрали, что строится вместе с развязкой, вставки (ещё — протяжкой и Shift+колесом), завода, площадки-стоянки
+   * (свободной постановкой, с Alt). У переносимой ратуши (храма) и парка — поворот от улицы (world/moveTurn.ts), в
+   * начале переноса — какой был. Новый инструмент — с нуля.
+   */
+  angle = 0;
+  /** Что ждёт клика на карте (Esc — отмена; Pending). */
+  pending: Pending | null = null;
   /** Сколько путей с платформами у новой ж/д станции. */
   stationTracks = 2;
   /** Длина её платформ, м: чем длиннее, тем больше вагонов у поезда. */
@@ -266,17 +303,14 @@ export class Controller {
   curbBays = STATION.curb.bays;
   /** Длина выезда новой автостанции, м от кромки дороги ([ и ] — короче и длиннее). */
   stationDriveway = STATION.driveway;
-  /** Шаблон развязки и поворот магистрали, если она строится вместе с развязкой (R). */
+  /** Шаблон развязки (магистраль, если строится вместе с ней, поворачивает angle). */
   templateKind: TemplateKind = 'diamond';
-  templateAngle = 0;
   /** Свой шаблон, выбранный вместо готового (id). */
   userTemplate: string | null = null;
   /** Скопированный кусок дорог: есть — клик его вставляет. */
   clipboard: Fragment | null = null;
   /** Угол рамки копирования, пока тянем. */
   copyStart: Vec | null = null;
-  /** Поворот вставки (R, протяжка). */
-  pasteAngle = 0;
   /** Вставка, которую поворачивают протяжкой: центр — где зажали. */
   private pasteDrag: { at: Vec } | null = null;
   private copyCache: { key: string; frag: Fragment | null } | null = null;
@@ -318,49 +352,11 @@ export class Controller {
   /** Груз, выбранный в панели цепочек: его получатели в городах пульсируют на карте (world/retail.ts). */
   cargoFocus: CargoType | null = null;
   ping: { pos: Vec; r: number; until: number } | null = null;
-  /** Здание, которое игрок переносит (следует за курсором). */
-  moving: TownBuilding | null = null;
-  /** Парк, сквер, площадь или сквер с памятником, который игрок переносит (TownPark.id): участок за курсором до клика. */
-  movingPark: number | null = null;
-  /**
-   * Поворот от улицы переносимой ратуши (храма) или парка (world/moveTurn.ts): R / Shift+R — шаг 15°; в начале
-   * переноса — какой был (TownBuilding.turn, TownPark.turn).
-   */
-  moveTurn = 0;
-  /**
-   * Тянут ручку поворота ↺ выбранной ратуши (храма) или парка: вокруг середины pivot, ручка — на стороне side рисунка,
-   * base — угол без поворота у улицы. Отпустили — поворот на месте (Ctrl+Z).
-   */
-  turnDrag: { kind: 'park' | 'building'; id: number; pivot: Vec; base: number; side: 1 | -1 } | null = null;
-  /** Станция, которую игрок переносит: силуэт прилипает к дорогам, как при постройке. */
-  movingStation: number | null = null;
-  /**
-   * «🅿️ Площадка» (в «Станции»): мест в ряду и рядов (1, 2, 4), поворот свободной постановки (Alt; R — шаг 15°).
-   * movingLot — площадка, которую переносят («✥»); lotDrag — тянут ручку угла (размер) или поворота выбранной.
-   */
+  /** «🅿️ Площадка» (в «Станции»): мест в ряду и рядов (1, 2, 4). */
   lotCols = 6;
   lotRows: LotRows = 2;
-  lotAngle = 0;
-  movingLot: number | null = null;
-  lotDrag: { id: number; kind: 'corner' | 'rotate'; side: -1 | 1 } | null = null;
-  /** Ж/д станция при переносе станет конечной (true) или проходной (false); null — какой была. */
-  moveTerminal: boolean | null = null;
-  /** Ставим склад-здание этой станции: клик в зоне вокруг неё — склад (Esc — отмена). */
-  placingWarehouse: number | null = null;
-  /** Ставим пристройку этого предприятия: клик в зоне вокруг него — пристройка (Esc — отмена). */
-  placingAnnex: number | null = null;
-  /** Инструмент «Предприятие» (режим «Строит игрок»): какой вид ставим (null — ещё не выбран) и поворот завода (R). */
+  /** Инструмент «Предприятие» (режим «Строит игрок»): какой вид ставим (null — ещё не выбран). */
   industryKind: IndustryKind | null = null;
-  industryAngle = 0;
-  /**
-   * Ставим строительную базу («Со строительством»): инструмент «Станция → База стройки», клик у дороги — база (Esc —
-   * отмена). Сбрасывает setTool и выбор другого вида станции.
-   */
-  placingBase = false;
-  /** Переносим строительную базу: площадка у дороги под курсором, клик — база туда (Esc — отмена). */
-  movingBase: number | null = null;
-  /** Выбираем стройку для бригады («🎯 На стройку…»): клик по плашке или полотну проекта — она едет туда (Esc — отмена). */
-  sendingCrew: number | null = null;
   /** Настройка полос выбранного перекрёстка: полоса въезда, которую сейчас соединяем. */
   laneFrom: { seg: number; i: number } | null = null;
   /** Правка фазы светофора на карте: перекрёсток и номер фазы (выбрана в карточке); клик по проезду — его зелёный в ней. */
@@ -513,10 +509,8 @@ export class Controller {
   setTool(tool: Tool): void {
     // «Предприятие» — только в партиях, где предприятия строит игрок.
     if (tool === 'industry' && !this.game().enterprises.on) return;
-    this.placingWarehouse = null;
-    this.placingAnnex = null;
-    this.placingBase = false;
-    this.sendingCrew = null;
+    this.pending = null;
+    this.angle = 0;
     if (this.tool === 'line' && tool !== 'line') {
       this.lineDraft = [];
       this.game().pruneDocks();
@@ -531,13 +525,6 @@ export class Controller {
     this.tool = tool;
     this.chain = null;
     this.control = null;
-    this.moving = null;
-    this.movingPark = null;
-    this.turnDrag = null;
-    this.movingStation = null;
-    this.movingBase = null;
-    this.movingLot = null;
-    this.lotDrag = null;
     this.roadTools.clear();
     this.railTools.clear();
     this.laneFrom = null;
@@ -545,24 +532,36 @@ export class Controller {
     this.onChange();
   }
 
+  /** То, что ждёт клика, если оно вида kind; иначе null. */
+  pendingOf<K extends Pending['kind']>(kind: K): PendingOf<K> | null {
+    return this.pending?.kind === kind ? (this.pending as PendingOf<K>) : null;
+  }
+
+  /** Начать в «Выборе» то, что ждёт клика (Esc — отмена), с карточкой sel; angle — поворот в начале. */
+  private startPending(p: Pending, sel: Selection | null = null, angle = 0): void {
+    this.setTool('select');
+    if (sel) this.select(sel);
+    this.pending = p;
+    this.angle = angle;
+    this.onChange();
+  }
+
   /** Начать перенос площадки-стоянки: участок за курсором, прилипает к улице, как при постановке (Esc — отмена). */
   startLotMove(id: number): void {
-    this.setTool('select');
-    this.select({ type: 'lot', id });
-    this.movingLot = id;
-    this.onChange();
+    this.startPending({ kind: 'moveLot', id }, { type: 'lot', id });
   }
 
   /** Что знает инструмент «🅿️ Площадка» (input/lotTool.ts). */
   private get lotState(): LotToolState {
+    const drag = this.pendingOf('lotHandle');
     return {
       action: this.action,
       selection: this.selection && 'id' in this.selection ? { type: this.selection.type, id: this.selection.id } : this.selection && { type: this.selection.type },
-      movingLot: this.movingLot,
-      lotDrag: this.lotDrag,
+      movingLot: this.pendingOf('moveLot')?.id ?? null,
+      lotDrag: drag && { id: drag.id, kind: drag.handle, side: drag.side },
       lotCols: this.lotCols,
       lotRows: this.lotRows,
-      lotAngle: this.lotAngle,
+      angle: this.angle,
       alt: this.alt,
     };
   }
@@ -576,27 +575,20 @@ export class Controller {
 
   /** Начать перенос здания: оно следует за курсором до клика. */
   startMove(b: TownBuilding): void {
-    this.setTool('select');
-    this.moving = b;
     // Ратуша и храм — с прежним поворотом от улицы (R / Shift+R — ещё на 15°).
-    this.moveTurn = turnableBuilding(b) ? (b.turn ?? 0) : 0;
-    this.onChange();
+    this.startPending({ kind: 'moveBuilding', b }, null, turnableBuilding(b) ? (b.turn ?? 0) : 0);
   }
 
   /** Начать перенос парка (сквера, площади): участок следует за курсором и встаёт вдоль улицы до клика (Esc — отмена). */
   startParkMove(id: number): void {
-    this.setTool('select');
-    this.select({ type: 'park', id });
-    this.movingPark = id;
-    this.moveTurn = this.game().parkById(id)?.park.turn ?? 0;
-    this.onChange();
+    this.startPending({ kind: 'movePark', id }, { type: 'park', id }, this.game().parkById(id)?.park.turn ?? 0);
   }
 
-  /** Поворот на месте ручкой ↺ (turnDrag): тот же перенос, но к той же улице; нельзя — причина у курсора. */
-  applyTurn(drag: NonNullable<Controller['turnDrag']>, turn: number): boolean {
+  /** Поворот на месте ручкой ↺ (Pending turn): тот же перенос, но к той же улице; нельзя — причина у курсора. */
+  applyTurn(drag: PendingOf<'turn'>, turn: number): boolean {
     const g = this.game();
-    const b = drag.kind === 'building' ? g.buildingById(drag.id) : undefined;
-    if (drag.kind === 'building' && !b) return false;
+    const b = drag.target === 'building' ? g.buildingById(drag.id) : undefined;
+    if (drag.target === 'building' && !b) return false;
     const plan = b ? g.movePlan(b, drag.pivot, turn) : g.parkMovePlan(drag.id, drag.pivot, turn);
     if (!plan.ok) {
       this.showError(plan.reason);
@@ -608,10 +600,18 @@ export class Controller {
     return ok;
   }
 
-  /** Повернуть переносимую ратушу (храм) или парк на шаг 15° (dir −1 — против часовой); нечего вертеть — false. */
-  turnMoving(dir: 1 | -1): boolean {
-    if (!(this.moving && turnableBuilding(this.moving)) && this.movingPark === null) return false;
-    this.moveTurn = snapTurn(this.moveTurn + dir * TURN_STEP);
+  /**
+   * R / Shift+R: повернуть то, что ставим или переносим, на шаг 15° (dir −1 — против часовой; angle). Ратуша (храм)
+   * и парк при переносе — от улицы, в пределах поворота (world/moveTurn.ts). Вертеть нечего — false.
+   */
+  rotateActive(dir: 1 | -1): boolean {
+    const p = this.pending;
+    const street = (p?.kind === 'moveBuilding' && turnableBuilding(p.b)) || p?.kind === 'movePark';
+    const free = p
+      ? p.kind === 'moveLot' || (p.kind === 'moveStation' && this.game().stations.get(p.id)?.kind === 'rail')
+      : (this.action === 'station' && this.stationKind === 'rail') || ['template', 'paste', 'industry', 'lot'].includes(this.action);
+    if (!street && !free) return false;
+    this.angle = street ? snapTurn(this.angle + dir * TURN_STEP) : this.angle + dir * TURN_STEP;
     this.onChange();
     return true;
   }
@@ -635,7 +635,7 @@ export class Controller {
    * вокруг чего вертеть и с какой стороны рисунка она (у парка — дальней от улицы). Переносят что-то — нет.
    */
   private turnTarget(): { kind: 'park' | 'building'; id: number; pivot: Vec; pos: Vec; side: 1 | -1 } | null {
-    if (this.action !== 'select' || this.moving || this.movingPark !== null || this.movingStation !== null || this.movingLot !== null || !this.selection) return null;
+    if (this.action !== 'select' || this.pending || !this.selection) return null;
     const g = this.game();
     if (this.selection.type === 'park') {
       const park = g.parkById(this.selection.id)?.park;
@@ -657,10 +657,10 @@ export class Controller {
    */
   private turnOverlay(o: ToolOverlay, p: Vec): boolean {
     const g = this.game();
-    const drag = this.turnDrag;
+    const drag = this.pendingOf('turn');
     if (drag) {
       const turn = turnFromHandle(drag.pivot, p, drag.base, drag.side);
-      if (drag.kind === 'park') {
+      if (drag.target === 'park') {
         const hit = g.parkById(drag.id);
         if (!hit) return false;
         const plan = g.parkMovePlan(drag.id, drag.pivot, turn);
@@ -701,15 +701,12 @@ export class Controller {
    * к путям, как при постановке; terminal — какой она станет на новом месте (не задано — какой была).
    */
   startStationMove(id: number, terminal?: boolean): void {
-    this.setTool('select');
-    this.movingStation = id;
-    this.moveTerminal = terminal ?? null;
-    this.onChange();
+    this.startPending({ kind: 'moveStation', id, terminal: terminal ?? null });
   }
 
   /** Как переносить ж/д станцию: тип на новом месте и поворот в чистом поле (R). */
-  private get railMove(): { terminal?: boolean; angle: number } {
-    return { ...(this.moveTerminal !== null ? { terminal: this.moveTerminal } : {}), angle: this.stationAngle };
+  private railMove(move: PendingOf<'moveStation'>): { terminal?: boolean; angle: number } {
+    return { ...(move.terminal !== null ? { terminal: move.terminal } : {}), angle: this.angle };
   }
 
   /** «Двигать»: под курсором площадка строительной базы, а не перо и не узел дороги, — её номер (её можно перенести). */
@@ -723,10 +720,7 @@ export class Controller {
 
   /** Начать перенос строительной базы: площадка следует за курсором и встаёт у дороги, как при постановке, до клика. */
   startBaseMove(id: number): void {
-    this.setTool('select');
-    this.select({ type: 'base', id });
-    this.movingBase = id;
-    this.onChange();
+    this.startPending({ kind: 'moveBase', id }, { type: 'base', id });
   }
 
   /** Что делает клик с учётом режима инструмента. */
@@ -742,7 +736,7 @@ export class Controller {
       return this.railMode === 'station' ? 'station' : this.railMode === 'signal' ? 'signal' : this.railMode === 'parallel' ? 'parallel' : 'road';
     }
     // База стройки — в инструменте «Станция», но своё действие: в отмену (Ctrl+Z) она не входит, как и раньше.
-    if (this.tool === 'station' && this.placingBase) return 'base';
+    if (this.tool === 'station' && this.pending?.kind === 'newBase') return 'base';
     // Площадка-стоянка — тоже в «Станции» (у улицы, как станции), но не станция: своё действие.
     if (this.tool === 'station' && this.stationMode === 'lot') return 'lot';
     return this.tool;
@@ -787,12 +781,12 @@ export class Controller {
 
   /** [ и ] меняют длину выезда: ставим автостанцию или автовокзал в конце выезда. */
   private drivewayKeys(code: string): boolean {
-    return code.startsWith('Bracket') && this.tool === 'station' && !this.placingBase && this.stationKind === 'road' && !this.stationSide && !this.curbMode;
+    return code.startsWith('Bracket') && this.tool === 'station' && this.action !== 'base' && this.stationKind === 'road' && !this.stationSide && !this.curbMode;
   }
 
   /** [ и ] меняют число мест у перрона: ставим автовокзал у края улицы. */
   private curbKeys(code: string): boolean {
-    return code.startsWith('Bracket') && this.tool === 'station' && !this.placingBase && this.curbMode;
+    return code.startsWith('Bracket') && this.tool === 'station' && this.action !== 'base' && this.curbMode;
   }
 
   /** Автостанция и автовокзал — вдоль дороги с карманом (true) или в конце выезда. */
@@ -824,7 +818,7 @@ export class Controller {
   setStationMode(mode: StationMode): void {
     if (this.tool !== 'station') this.setTool('station');
     this.stationMode = mode;
-    this.placingBase = false;
+    this.pending = null;
     this.onChange();
   }
 
@@ -886,16 +880,11 @@ export class Controller {
     return true;
   }
 
-  rotatePaste(step: number): void {
-    this.pasteAngle += step * (Math.PI / 12);
-    this.onChange();
-  }
-
   setUserTemplate(id: string | null): void {
     if (this.tool !== 'roundabout') this.setTool('roundabout');
     this.junctionMode = 'template';
     this.userTemplate = id;
-    this.pasteAngle = 0;
+    this.angle = 0;
     this.onChange();
   }
 
@@ -928,14 +917,14 @@ export class Controller {
       return;
     }
     this.clipboard = frag;
-    this.pasteAngle = 0;
+    this.angle = 0;
   }
 
   /** Центр и поворот вставки без прилипания: протяжка от места, где зажали, задаёт поворот. */
   private pasteRaw(p: Vec): { at: Vec; angle: number } {
     const d = this.pasteDrag;
     if (d && dist(p, d.at) * this.camera.zoom > 8) return { at: d.at, angle: angleOf(sub(p, d.at)) };
-    return { at: d?.at ?? p, angle: this.pasteAngle };
+    return { at: d?.at ?? p, angle: this.angle };
   }
 
   /**
@@ -1042,7 +1031,7 @@ export class Controller {
   }
 
   private templateOptions(): TemplateOptions {
-    return { kind: this.templateKind, angle: this.templateAngle, trunk: this.spec };
+    return { kind: this.templateKind, angle: this.angle, trunk: this.spec };
   }
 
   setRingLanes(lanes: number): void {
@@ -1470,11 +1459,10 @@ export class Controller {
     if (sel?.type !== 'junction' || sel.id !== this.phaseEdit?.node) this.phaseEdit = null;
     this.mainHover = null;
     this.fleetHover = null;
-    // Выбрали что-то другое — склад этой станции больше не ставим.
-    if (sel?.type !== 'station' || sel.id !== this.placingWarehouse) this.placingWarehouse = null;
-    if (sel?.type !== 'industry' || sel.id !== this.placingAnnex) this.placingAnnex = null;
-    // Выбрали другое — стройку для бригады больше не выбираем.
-    if (sel?.type !== 'crew' || sel.id !== this.sendingCrew) this.sendingCrew = null;
+    // Выбрали что-то другое — склад этой станции (пристройку, стройку для бригады) больше не ставим.
+    const p = this.pending;
+    const card = p && PENDING_CARD[p.kind];
+    if (card && 'id' in p && !(sel?.type === card && 'id' in sel && sel.id === p.id)) this.pending = null;
     this.onChange();
   }
 
@@ -1485,7 +1473,7 @@ export class Controller {
   startCrewSend(id: number, on = true): void {
     if (this.tool !== 'select') this.setTool('select');
     if (this.selection?.type !== 'crew' || this.selection.id !== id) this.select({ type: 'crew', id });
-    this.sendingCrew = on ? id : null;
+    this.pending = on ? { kind: 'crew', id } : null;
     this.onChange();
   }
 
@@ -1518,10 +1506,7 @@ export class Controller {
 
   /** Режим «поставить пристройку» предприятия id: зона вокруг него — на карте, клик в ней ставит пристройку. */
   startAnnex(id: number): void {
-    this.setTool('select');
-    this.select({ type: 'industry', id });
-    this.placingAnnex = id;
-    this.onChange();
+    this.startPending({ kind: 'annex', id }, { type: 'industry', id });
   }
 
   /**
@@ -1532,16 +1517,13 @@ export class Controller {
   startBase(on = true): void {
     const ok = on && this.game().buildMode;
     this.setTool(ok ? 'station' : 'select');
-    this.placingBase = ok;
+    if (ok) this.pending = { kind: 'newBase' };
     this.onChange();
   }
 
   /** Режим «поставить склад» станции id: зона вокруг неё — на карте, клик в ней ставит здание склада. */
   startWarehouse(id: number): void {
-    this.setTool('select');
-    this.select({ type: 'station', id });
-    this.placingWarehouse = id;
-    this.onChange();
+    this.startPending({ kind: 'warehouse', id }, { type: 'station', id });
   }
 
   /**
@@ -1553,17 +1535,9 @@ export class Controller {
     if (this.pendingArea) this.cancelArea();
     else if (this.areaStart) this.areaStart = null;
     else if (this.spanStart) this.spanStart = null;
-    else if (this.turnDrag) this.turnDrag = null;
-    else if (this.moving) this.moving = null;
-    else if (this.movingPark !== null) this.movingPark = null;
-    else if (this.movingStation !== null) this.movingStation = null;
-    else if (this.movingBase !== null) this.movingBase = null;
-    else if (this.lotDrag) this.lotDrag = null;
-    else if (this.movingLot !== null) this.movingLot = null;
-    else if (this.placingWarehouse !== null) this.placingWarehouse = null;
-    else if (this.placingAnnex !== null) this.placingAnnex = null;
-    else if (this.placingBase) this.setTool('select');
-    else if (this.sendingCrew !== null) this.sendingCrew = null;
+    // База стройки — свой режим инструмента «Станция»: отмена — назад к «Выбору».
+    else if (this.pending?.kind === 'newBase') this.setTool('select');
+    else if (this.pending) this.pending = null;
     else if (this.phaseEdit) this.phaseEdit = null;
     else if (this.copyStart) this.copyStart = null;
     else if (this.pasteDrag) this.pasteDrag = null;
@@ -1650,8 +1624,36 @@ export class Controller {
     this.onChange();
   }
 
+  /**
+   * Новая или загруженная партия: начатое, выбранное и подсвеченное в прежней — прочь (номера в ней — чужие).
+   * Инструмент и его настройки остаются.
+   */
   reset(): void {
+    this.pending = null;
+    this.pendingArea = null;
+    this.areaStart = null;
+    this.spanStart = null;
+    this.copyStart = null;
+    this.pasteDrag = null;
+    this.angle = 0;
+    this.addStopTo = null;
+    this.phaseEdit = null;
+    this.phaseFlash = null;
+    this.laneFrom = null;
+    this.mainHover = null;
+    this.fleetHover = null;
+    this.chartPoint = null;
+    this.warnFocus = null;
+    this.cargoFocus = null;
+    this.ping = null;
+    this.flash = null;
+    this.following = false;
+    this.returnTo = null;
+    this.parallelFrom = null;
+    this.pairStart = null;
+    this.besideStart = null;
     this.chain = null;
+    this.chainTangent = null;
     this.control = null;
     this.left = null;
     this.pan = null;
@@ -1660,6 +1662,8 @@ export class Controller {
     this.selectedLine = null;
     this.highlight = [];
     this.lastSpeed = 1;
+    this.roadTools.clear();
+    this.railTools.clear();
     this.projectTools.reset();
     this.moveProject.clear();
     this.roadTools.base = null;
@@ -1976,10 +1980,10 @@ export class Controller {
       return;
     }
     // Выбранная площадка-стоянка: ручка угла или поворота — тянуть (отпустили — новый размер или поворот, Ctrl+Z).
-    if (this.action === 'select' && this.selection?.type === 'lot' && this.movingLot === null) {
+    if (this.action === 'select' && this.selection?.type === 'lot' && !this.pending) {
       const h = lotHandleAt(g, this.selection.id, p, (HANDLE_PX + 4) / this.camera.zoom);
       if (h) {
-        this.lotDrag = { id: this.selection.id, ...h };
+        this.pending = { kind: 'lotHandle', id: this.selection.id, handle: h.kind, side: h.side };
         return;
       }
     }
@@ -1989,23 +1993,13 @@ export class Controller {
       const b = turn.kind === 'building' ? g.buildingById(turn.id) : undefined;
       const plan = b ? g.movePlan(b, turn.pivot) : g.parkMovePlan(turn.id, turn.pivot);
       if (plan.base === undefined) this.showError(plan.reason);
-      else this.turnDrag = { kind: turn.kind, id: turn.id, pivot: turn.pivot, base: plan.base, side: turn.side };
+      else this.pending = { kind: 'turn', target: turn.kind, id: turn.id, pivot: turn.pivot, base: plan.base, side: turn.side };
       this.onChange();
       return;
     }
     // Всё, что строит или сносит, можно отменить (Ctrl+Z): снимок до действия, итог — при отпускании кнопки.
     const corner = this.action === 'move' && !this.roadTools.handleAt(p, (HANDLE_PX + 4) / this.camera.zoom) && this.roadTools.cornerAt(p, (HANDLE_PX + 4) / this.camera.zoom);
-    const label = this.moving
-      ? 'перенос здания'
-      : this.movingPark !== null
-        ? 'перенос парка'
-        : this.movingStation !== null
-          ? 'перенос станции'
-          : this.movingBase !== null && this.action === 'select'
-            ? 'перенос базы'
-            : corner
-              ? 'скругление угла'
-              : UNDO_LABELS[this.action];
+    const label = (this.pending && PENDING_UNDO[this.pending.kind]) ?? (corner ? 'скругление угла' : UNDO_LABELS[this.action]);
     if (label) g.checkpoint(this.action === 'road' && this.netKind === 'rail' ? 'путь' : label);
     switch (this.action) {
       case 'road':
@@ -2133,13 +2127,13 @@ export class Controller {
       }
       case 'station': {
         const road = this.roadStationOptions;
-        const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.stationAngle, this.stationTracks, this.stationLength, this.stationTerminal, road);
+        const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.angle, this.stationTracks, this.stationLength, this.stationTerminal, road);
         const st = g.placeStation(
           p,
           this.snapRadius,
           this.stationKind,
           this.newStationServes,
-          this.stationAngle,
+          this.angle,
           this.stationTracks,
           this.stationLength,
           this.stationTerminal,
@@ -2184,7 +2178,7 @@ export class Controller {
           this.showError('Выберите, что строить, — в панели снизу');
           break;
         }
-        const problem = g.enterprises.build(this.industryKind, p, this.industryAngle);
+        const problem = g.enterprises.build(this.industryKind, p, this.angle);
         if (problem) this.showError(problem);
         else {
           const ind = g.industries[g.industries.length - 1];
@@ -2195,7 +2189,7 @@ export class Controller {
       }
       case 'lot': {
         // Площадка-стоянка у улицы под курсором (Alt — свободно, с поворотом); поставили — её карточка, инструмент остаётся.
-        const res = g.placeLot(p, { cols: this.lotCols, rows: this.lotRows, free: this.alt, angle: this.lotAngle });
+        const res = g.placeLot(p, { cols: this.lotCols, rows: this.lotRows, free: this.alt, angle: this.angle });
         if (typeof res === 'string') this.showError(res);
         else this.select({ type: 'lot', id: res.id });
         break;
@@ -2210,96 +2204,7 @@ export class Controller {
         break;
       }
       case 'select': {
-        if (this.sendingCrew !== null) {
-          // Стройка для бригады: плашка или полотно проекта под курсором — она едет туда; карточка бригады остаётся.
-          const id = this.sendingCrew;
-          const project = this.projectUnder(p);
-          const problem = project === null ? 'Кликните по стройке: плашке «🏗» или полотну проекта' : g.sendBrigade(id, project);
-          if (problem) this.showError(problem);
-          else {
-            this.sendingCrew = null;
-            // Клик по уведомлению — к стройке и её карточке.
-            g.notify(`🚚 Бригада едет на «${g.projectTitle(project!)}» · 📌`, undefined, { refs: [{ type: 'project', id: project! }] });
-          }
-          this.onChange();
-          break;
-        }
-        if (this.placingWarehouse !== null) {
-          // Склад-здание станции — в зоне вокруг неё; поставили — снова её карточка.
-          const id = this.placingWarehouse;
-          const problem = g.buildWarehouse(id, p);
-          if (problem) this.showError(problem);
-          else {
-            this.placingWarehouse = null;
-            this.select({ type: 'station', id });
-          }
-          break;
-        }
-        if (this.placingAnnex !== null) {
-          // Пристройка предприятия — в зоне вокруг него; поставили — снова его карточка.
-          const id = this.placingAnnex;
-          const problem = g.buildAnnex(id, p);
-          if (problem) this.showError(problem);
-          else {
-            this.placingAnnex = null;
-            this.select({ type: 'industry', id });
-          }
-          break;
-        }
-        if (this.movingBase !== null) {
-          // Перенос базы: у дороги под курсором, как постановка, но без платы за базу; перенесли — её карточка.
-          const id = this.movingBase;
-          const problem = g.moveBase(id, p);
-          if (problem) this.showError(problem);
-          else {
-            this.movingBase = null;
-            this.select({ type: 'base', id });
-          }
-          break;
-        }
-        if (this.movingStation !== null) {
-          // Перенос станции: на новое место, с выездом; маршруты идут через неё же.
-          const id = this.movingStation;
-          const problem = g.moveStation(id, p, this.snapRadius, this.railMove);
-          if (problem) this.showError(problem);
-          else {
-            this.movingStation = null;
-            this.select({ type: 'station', id });
-          }
-          break;
-        }
-        if (this.moving) {
-          // Перенос здания: ставим на новое место.
-          const plan = g.movePlan(this.moving, p, this.moveTurn);
-          if (g.moveBuilding(this.moving, p, this.moveTurn)) {
-            this.select({ type: 'building', id: this.moving.id });
-            this.moving = null;
-          } else {
-            this.showError(plan.reason);
-          }
-          break;
-        }
-        if (this.movingPark !== null) {
-          // Перенос парка: участок — на новое место со всем, что внутри; перенесли — снова его карточка.
-          const id = this.movingPark;
-          const plan = g.parkMovePlan(id, p, this.moveTurn);
-          if (g.movePark(id, p, this.moveTurn)) {
-            this.movingPark = null;
-            this.select({ type: 'park', id });
-          } else this.showError(plan.reason);
-          break;
-        }
-        if (this.movingLot !== null) {
-          // Перенос площадки: к улице под курсором (Alt — свободно), ворота — те же; перенесли — снова её карточка.
-          const id = this.movingLot;
-          const problem = g.editLot(id, g.lotMovePlan(id, p, this.alt, this.lotAngle), 'перенос площадки');
-          if (problem) this.showError(problem);
-          else {
-            this.movingLot = null;
-            this.select({ type: 'lot', id });
-          }
-          break;
-        }
+        if (this.clickPending(p)) break;
         // Край выбранной площадки у улицы — ворота: ⬌ → въезд → выезд → убрать; мимо ворот — новые ⬌.
         if (this.selection?.type === 'lot' && lotGateHit(g, this.selection.id, p)) {
           const problem = g.toggleLotGate(this.selection.id, p);
@@ -2330,7 +2235,65 @@ export class Controller {
    * Узлы на концах дороги, которые можно двигать (не станции и не кольца), — кружки для «Двигать». Конец въезда
    * или съезда у примыкания — там, где он подходит к дороге (его тянут вдоль неё), а не на её оси.
    */
-  private nodeMarks(corridorId: number | null): { pos: Vec; color: string; r: number; node: boolean }[] {
+  /**
+   * Клик в «Выборе», когда что-то ждёт клика: переносят, ставят склад или пристройку, выбирают стройку для бригады.
+   * Вышло — режим кончился, снова карточка того, что поставили или перенесли; нет — причина у курсора, режим остаётся.
+   * false — клика ничего не ждёт.
+   */
+  private clickPending(p: Vec): boolean {
+    const g = this.game();
+    const w = this.pending;
+    const done = (problem: string | null, sel: Selection | null): void => {
+      if (problem) return this.showError(problem);
+      this.pending = null;
+      if (sel) this.select(sel);
+    };
+    switch (w?.kind) {
+      case 'crew': {
+        // Стройка для бригады: плашка или полотно проекта под курсором — она едет туда; карточка бригады остаётся.
+        const project = this.projectUnder(p);
+        const problem = project === null ? 'Кликните по стройке: плашке «🏗» или полотну проекта' : g.sendBrigade(w.id, project);
+        done(problem, null);
+        // Клик по уведомлению — к стройке и её карточке.
+        if (!problem) g.notify(`🚚 Бригада едет на «${g.projectTitle(project!)}» · 📌`, undefined, { refs: [{ type: 'project', id: project! }] });
+        this.onChange();
+        return true;
+      }
+      // Склад-здание станции и пристройка предприятия — в зоне вокруг них.
+      case 'warehouse':
+        done(g.buildWarehouse(w.id, p), { type: 'station', id: w.id });
+        return true;
+      case 'annex':
+        done(g.buildAnnex(w.id, p), { type: 'industry', id: w.id });
+        return true;
+      // База — у дороги под курсором, как постановка, но без платы за базу.
+      case 'moveBase':
+        done(g.moveBase(w.id, p), { type: 'base', id: w.id });
+        return true;
+      // Станция — на новое место, с выездом; маршруты идут через неё же.
+      case 'moveStation':
+        done(g.moveStation(w.id, p, this.snapRadius, this.railMove(w)), { type: 'station', id: w.id });
+        return true;
+      case 'moveBuilding': {
+        const plan = g.movePlan(w.b, p, this.angle);
+        done(g.moveBuilding(w.b, p, this.angle) ? null : (plan.reason ?? 'Сюда не перенести'), { type: 'building', id: w.b.id });
+        return true;
+      }
+      // Парк — на новое место со всем, что внутри.
+      case 'movePark': {
+        const plan = g.parkMovePlan(w.id, p, this.angle);
+        done(g.movePark(w.id, p, this.angle) ? null : (plan.reason ?? 'Сюда не перенести'), { type: 'park', id: w.id });
+        return true;
+      }
+      // Площадка — к улице под курсором (Alt — свободно), ворота — те же.
+      case 'moveLot':
+        done(g.editLot(w.id, g.lotMovePlan(w.id, p, this.alt, this.angle), 'перенос площадки'), { type: 'lot', id: w.id });
+        return true;
+    }
+    return false;
+  }
+
+  private nodeMarks(corridorId: number | null):{ pos: Vec; color: string; r: number; node: boolean }[] {
     const net = this.roadTools.base ?? this.game().roads.net;
     const c = corridorId === null ? undefined : net.corridors.get(corridorId);
     if (!c) return [];
@@ -2710,21 +2673,16 @@ export class Controller {
   }
 
   private finishLeft(e: MouseEvent, left: { sx: number; sy: number; createdChain: boolean }): void {
-    if (this.turnDrag) {
-      // Отпустили ручку поворота: ратуша (с площадью) или парк — на том же месте с новым поворотом, одним шагом Ctrl+Z.
-      const drag = this.turnDrag;
-      this.turnDrag = null;
-      if (Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > CLICK_SLOP) this.applyTurn(drag, turnFromHandle(drag.pivot, this.worldAt(e), drag.base, drag.side));
-      this.onChange();
-      return;
-    }
-    if (this.lotDrag) {
-      // Отпустили ручку площадки: новый размер или поворот — одним шагом Ctrl+Z.
-      const drag = this.lotDrag;
-      this.lotDrag = null;
+    const drag = this.pending;
+    if (drag?.kind === 'turn' || drag?.kind === 'lotHandle') {
+      this.pending = null;
       const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > CLICK_SLOP;
-      if (moved) {
-        const problem = this.game().editLot(drag.id, lotDragPlan(this.game(), drag, this.worldAt(e)), drag.kind === 'rotate' ? 'поворот площадки' : 'размер площадки');
+      // Отпустили ручку поворота: ратуша (с площадью) или парк — на том же месте с новым поворотом, одним шагом Ctrl+Z.
+      if (moved && drag.kind === 'turn') this.applyTurn(drag, turnFromHandle(drag.pivot, this.worldAt(e), drag.base, drag.side));
+      // Отпустили ручку площадки: новый размер или поворот — одним шагом Ctrl+Z.
+      if (moved && drag.kind === 'lotHandle') {
+        const plan = lotDragPlan(this.game(), { id: drag.id, kind: drag.handle, side: drag.side }, this.worldAt(e));
+        const problem = this.game().editLot(drag.id, plan, drag.handle === 'rotate' ? 'поворот площадки' : 'размер площадки');
         if (problem) this.showError(problem);
       }
       this.onChange();
@@ -2782,7 +2740,7 @@ export class Controller {
       const p = this.worldAt(e);
       if (frag) {
         const pose = this.pastePose(frag, p);
-        this.pasteAngle = this.pasteRaw(p).angle;
+        this.angle = this.pasteRaw(p).angle;
         const error = this.game().paste(frag, pose.at, pose.angle);
         if (error) this.showError(error);
       }
@@ -3472,7 +3430,7 @@ export class Controller {
     e.preventDefault();
     // Shift+колесо при вставке — плавный поворот на любой угол (на тачпаде Shift превращает прокрутку в боковую).
     if (e.shiftKey && this.action === 'paste') {
-      this.pasteAngle += (e.deltaY || e.deltaX) * 0.0015;
+      this.angle += (e.deltaY || e.deltaX) * 0.0015;
       this.onChange();
       return;
     }
@@ -3552,29 +3510,7 @@ export class Controller {
         this.toggleFollow();
         break;
       case 'KeyR':
-        // Поворот ж/д станции, которая ставится в чистом поле.
-        if ((this.action === 'station' && this.stationKind === 'rail') || (this.movingStation !== null && this.game().stations.get(this.movingStation)?.kind === 'rail')) {
-          this.stationAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
-          this.onChange();
-        }
-        // Поворот магистрали, которая строится вместе с развязкой.
-        if (this.action === 'template') {
-          this.templateAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
-          this.onChange();
-        }
-        if (this.action === 'paste') this.rotatePaste(e.shiftKey ? -1 : 1);
-        // Поворот завода, который ставим (добыча встаёт по месторождению).
-        if (this.action === 'industry') {
-          this.industryAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
-          this.onChange();
-        }
-        // Поворот площадки-стоянки свободной постановкой (с Alt) — шагом 15°.
-        if (this.action === 'lot' || this.movingLot !== null) {
-          this.lotAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
-          this.onChange();
-        }
-        // Поворот переносимой ратуши (храма), парка, сквера, площади от улицы — шагом 15°.
-        this.turnMoving(e.shiftKey ? -1 : 1);
+        this.rotateActive(e.shiftKey ? -1 : 1);
         break;
       // Режимы дороги: N — строить, U — перестроить, M — двигать (включают инструмент «Дорога»).
       case 'KeyN':
@@ -3758,7 +3694,7 @@ export class Controller {
     }
     if (lot.label) o.label = lot.label;
     // Выбранная ратуша (храм) или парк — ручка поворота ↺ видна и без курсора над картой (тянут — turnOverlay).
-    const turnSel = this.turnDrag ? null : this.turnTarget();
+    const turnSel = this.turnTarget();
     if (turnSel) o.turnHandle = { pos: turnSel.pos, pivot: turnSel.pivot, active: false };
     // Рамка сноса: пока тянем — по курсору, после — ждёт подтверждения.
     const from = this.areaStart;
@@ -4388,7 +4324,7 @@ export class Controller {
         break;
       }
       case 'station': {
-        const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.stationAngle, this.stationTracks, this.stationLength, this.stationTerminal, this.roadStationOptions);
+        const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.angle, this.stationTracks, this.stationLength, this.stationTerminal, this.roadStationOptions);
         if (plan.fp) {
           o.station = { fp: plan.fp, ok: plan.ok };
           o.catchmentAt = plan.fp.center;
@@ -4447,7 +4383,7 @@ export class Controller {
       case 'industry': {
         // Предприятие: участок синим (красным — что мешает), черта городов рядом, кольцо вреда, пунктиры к партнёрам.
         const kind = this.industryKind;
-        o.industry = { kind, plan: kind ? g.enterprises.plan(kind, p, this.industryAngle) : null };
+        o.industry = { kind, plan: kind ? g.enterprises.plan(kind, p, this.angle) : null };
         o.label = kind ? industryPlanText(g, o.industry.plan!) : { text: 'Выберите в панели, что строить', ok: true };
         break;
       }
@@ -4464,14 +4400,15 @@ export class Controller {
         break;
       }
       case 'select': {
-        if (this.sendingCrew !== null) {
+        const w = this.pending;
+        if (w?.kind === 'crew') {
           // Стройка для бригады: проект под курсором подсвечен, подпись — поедет ли туда бригада и почему нет.
           const project = this.projectUnder(p);
           o.crewTarget = project;
-          const problem = project !== null ? g.brigadeCanGo(this.sendingCrew, project) : null;
+          const problem = project !== null ? g.brigadeCanGo(w.id, project) : null;
           const info = project !== null ? g.construction.projects.get(project) : undefined;
           // Радиус базы бригады — кругом: вне него отправить можно, но строить она будет медленно.
-          const crew = g.construction.crews.brigades.get(this.sendingCrew);
+          const crew = g.construction.crews.brigades.get(w.id);
           const home = crew && g.construction.crews.bases.get(crew.base);
           if (home) {
             o.catchmentAt = home.fp.center;
@@ -4485,7 +4422,7 @@ export class Controller {
               : { text: `🎯 🚚 → «${g.projectTitle(info.id)}» · 📌 закрепить${far ? ' · ⚠ вне радиуса базы — строить будет медленно' : ''}`, ok: true };
           break;
         }
-        const home = this.placingWarehouse !== null ? g.stations.get(this.placingWarehouse) : undefined;
+        const home = w?.kind === 'warehouse' ? g.stations.get(w.id) : undefined;
         if (home) {
           // Склад-здание: зона вокруг станции — кругом, здание под курсором — синим (красным, если нельзя).
           const plan = g.warehousePlan(home.id, p);
@@ -4497,7 +4434,7 @@ export class Controller {
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
-        const ind = this.placingAnnex !== null ? g.industries.find((i) => i.id === this.placingAnnex) : undefined;
+        const ind = w?.kind === 'annex' ? g.industries.find((i) => i.id === w.id) : undefined;
         if (ind) {
           // Пристройка: зона вокруг предприятия — кругом, пристройка под курсором — синим (красным, если нельзя).
           const plan = g.annexPlan(ind.id, p);
@@ -4509,7 +4446,7 @@ export class Controller {
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
-        const movingBase = this.movingBase !== null ? g.construction.crews.bases.get(this.movingBase) : undefined;
+        const movingBase = w?.kind === 'moveBase' ? g.construction.crews.bases.get(w.id) : undefined;
         if (movingBase) {
           // Перенос базы: старое место — красным, новое — у дороги под курсором (красным, если нельзя), круг — радиус
           // обслуживания на новом месте; платится только снос домов.
@@ -4529,10 +4466,10 @@ export class Controller {
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
-        const moving = this.movingStation !== null ? g.stations.get(this.movingStation) : undefined;
-        if (moving) {
+        const moving = w?.kind === 'moveStation' ? g.stations.get(w.id) : undefined;
+        if (w?.kind === 'moveStation' && moving) {
           // Перенос станции: старое место — красным, новое — силуэтом (красным, если нельзя), с выездом и охватом.
-          const plan = g.stationMovePlan(moving.id, p, this.snapRadius, this.railMove);
+          const plan = g.stationMovePlan(moving.id, p, this.snapRadius, this.railMove(w));
           o.marks.push({ fp: moving.fp, ok: false });
           if (plan.fp) {
             o.station = { fp: plan.fp, ok: plan.ok };
@@ -4552,7 +4489,7 @@ export class Controller {
             if (b) o.marks.push({ fp: b.fp, ok: false });
           }
           const price = plan.cost < 0 ? `+${money(-plan.cost)}` : money(plan.cost);
-          const what = moving.kind !== 'rail' ? '' : (this.moveTerminal ?? !!moving.terminal) ? ' конечной' : ' проходной';
+          const what = moving.kind !== 'rail' ? '' : (w.terminal ?? !!moving.terminal) ? ' конечной' : ' проходной';
           const turn = plan.rail?.main ? ' · R — повернуть' : '';
           // Остановка встанет напротив другой — парой к ней (стрелки хода у обоих навесов, ⇄ и общее название).
           const pair = g.pairPreview(plan);
@@ -4562,12 +4499,12 @@ export class Controller {
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
-        if (this.moving) {
+        if (w?.kind === 'moveBuilding') {
           // Старое место — красным, новое — участком с площадью вокруг ратуши (её край — за тротуаром) и площадью у
           // ратуши, что едет с ней.
-          const b = this.moving;
+          const b = w.b;
           const turns = turnableBuilding(b);
-          const plan = g.movePlan(b, p, this.moveTurn);
+          const plan = g.movePlan(b, p, this.angle);
           const yard = yardOf(b);
           o.marks.push({ fp: { ...b.fp, w: b.fp.w + yard * 2, h: b.fp.h + yard * 2 }, ok: false });
           if (plan.plaza) o.marks.push({ fp: plan.plaza.park.fp, ok: false });
@@ -4582,11 +4519,11 @@ export class Controller {
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
-        const carried = this.movingPark !== null ? g.parkById(this.movingPark) : null;
+        const carried = w?.kind === 'movePark' ? g.parkById(w.id) : null;
         if (carried) {
           // Перенос парка: старое место — красным, новое — у улицы под курсором (красным, если нельзя), его же рисунком
           // с поворотом; ручка ↺ — за дальним от улицы краем.
-          const plan = g.parkMovePlan(carried.park.id, p, this.moveTurn);
+          const plan = g.parkMovePlan(carried.park.id, p, this.angle);
           o.marks.push({ fp: carried.park.fp, ok: false });
           if (plan.fp) {
             o.marks.push({ fp: plan.fp, ok: plan.ok });

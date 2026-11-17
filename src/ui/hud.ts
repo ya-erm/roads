@@ -1313,8 +1313,8 @@ export class Hud {
         break;
       case 'base-place':
         // «＋ База» — и с карточки проекта: ставим базу, а левая панель — на вкладке «Стройка» (кнопка там нажата).
-        this.controller.startBase(!this.controller.placingBase);
-        if (this.controller.placingBase) this.openLeftTab('build');
+        this.controller.startBase(!this.controller.pendingOf('newBase'));
+        if (this.controller.pendingOf('newBase')) this.openLeftTab('build');
         this.refreshLeft();
         break;
       case 'left-tab': {
@@ -1373,7 +1373,7 @@ export class Hud {
         break;
       case 'crew-send':
         // «🎯 На стройку…»: выбор проекта кликом по карте (ещё раз или Esc — отмена).
-        c.startCrewSend(Number(d.id), c.sendingCrew !== Number(d.id));
+        c.startCrewSend(Number(d.id), c.pendingOf('crew')?.id !== Number(d.id));
         break;
       case 'crew-to': {
         // Стройка из списка в карточке бригады: едет туда и закрепляется; нельзя — причина уведомлением.
@@ -1651,7 +1651,7 @@ export class Hud {
         this.deletingTemplate = null;
         break;
       case 'paste-rotate':
-        c.rotatePaste(Number(d.v));
+        c.rotateActive(Number(d.v) < 0 ? -1 : 1);
         break;
       case 'clipboard-clear':
         c.clearClipboard();
@@ -1794,7 +1794,7 @@ export class Hud {
       case 'ind-annex': {
         // Пристройку ставят на карте — зона вокруг предприятия видна, клик в ней ставит; повторно — отмена.
         const id = Number(d.id);
-        if (c.placingAnnex === id) c.placingAnnex = null;
+        if (c.pendingOf('annex')?.id === id) c.pending = null;
         else c.startAnnex(id);
         break;
       }
@@ -1803,7 +1803,7 @@ export class Hud {
         const id = Number(d.id);
         const st = g.stations.get(id);
         if (st && storageSlots(st) >= STORAGE.max) g.notify(`Больше ${STORAGE.max} складов нельзя`);
-        else if (c.placingWarehouse === id) c.placingWarehouse = null;
+        else if (c.pendingOf('warehouse')?.id === id) c.pending = null;
         else c.startWarehouse(id);
         break;
       }
@@ -2676,7 +2676,7 @@ export class Hud {
     const sw = this.kindSwitch(
       'Что ставим',
       'station-mode',
-      c.placingBase ? 'base' : c.stationMode,
+      c.action === 'base' ? 'base' : c.stationMode,
       [
         { id: 'cargo', name: 'Автостанция', svg: stationSvg('cargo', 34), hint: 'Для грузов: грузовики, заезд и посты погрузки' },
         { id: 'pax', name: 'Автовокзал', svg: stationSvg('pax', 34), hint: 'Для пассажиров: междугородние и городские автобусы' },
@@ -2688,8 +2688,8 @@ export class Hud {
       // Виды — в три колонки, «Как ставить» — шире, цена — в его заголовке: панель низкая (на узком экране — в две).
       3,
     );
-    if (c.stationMode === 'lot' && !c.placingBase) return this.lotOptionsHtml(sw);
-    if (c.placingBase) {
+    if (c.action === 'lot') return this.lotOptionsHtml(sw);
+    if (c.action === 'base') {
       const tip = `База встаёт у дороги со стороны курсора, ворота — на ближайший узел. С неё бригады едут строить: сами — на стройки ближе ${distText(CONSTRUCTION.serviceRadius)} (круг на карте). Дома под площадкой снесём (красные) — за доплату.`;
       return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
         <div class="base-prices">${basePriceHtml(g)}</div></div></div>`;
@@ -3005,7 +3005,7 @@ export class Hud {
     if (st.kind !== 'road') return `<div class="icon-row store-row"><span class="lbl2">${depotSvg(16)} Склад</span>${bar}</div>`;
     // «+» — поставить склад-здание рядом (режим размещения на карте), «−» — снести последний (или пристройку старого сохранения).
     const slots = storageSlots(st);
-    const placing = this.controller.placingWarehouse === st.id;
+    const placing = this.controller.pendingOf('warehouse')?.id === st.id;
     const full = slots >= STORAGE.max;
     const plusTip = full ? `Больше ${STORAGE.max} складов нельзя` : placing ? 'Кликните на карте рядом со станцией · Esc — отмена' : `Поставить склад рядом со станцией: +${STORAGE.per} ед. места · ${money(STORAGE.cost)}`;
     const last = st.warehouses?.[st.warehouses.length - 1];
@@ -3522,7 +3522,7 @@ export class Hud {
       `<header><h3>${esc(title)}</h3><button class="icon" data-action="close-sel">✕</button></header>${sub ? `<p class="muted">${sub}</p>` : ''}`;
     if (sel.type === 'project') return projectCardHtml(g, sel.id, this.renamingProject === sel.id);
     if (sel.type === 'base') return baseCardHtml(g, sel.id, this.renamingBase === sel.id, this.confirmRemoveBase === sel.id);
-    if (sel.type === 'crew') return crewCardHtml(g, sel.id, { following: this.controller.following, picking: this.controller.sendingCrew === sel.id });
+    if (sel.type === 'crew') return crewCardHtml(g, sel.id, { following: this.controller.following, picking: this.controller.pendingOf('crew')?.id === sel.id });
     if (sel.type === 'workTrain') return workTrainCardHtml(g, sel.id, { following: this.controller.following });
     if (sel.type === 'park') return parkCardHtml(g, sel.id);
     if (sel.type === 'lot') return lotCardHtml(g, sel.id);
@@ -3748,7 +3748,7 @@ export class Hud {
         <div class="level-bar" data-tip="Уровень производства растёт, если продукцию регулярно вывозят; падает, если предприятие долго не обслуживают">
           <div style="width:${(((ind.level ?? 1) - 1) / 3) * 100}%"></div></div>
         ${industryRowsHtml(g, ind)}
-        ${ind.ruin || ind.build ? '' : annexHtml(ind, this.controller.placingAnnex === ind.id)}
+        ${ind.ruin || ind.build ? '' : annexHtml(ind, this.controller.pendingOf('annex')?.id === ind.id)}
         <p class="tip">Инструментом «Станция» наведите на предприятие: станция встанет вплотную к той стороне, куда указывает курсор, и выезд будет смотреть туда же.</p>
         ${this.partnersHtml(g.partners(ind, 3))}</section>`;
     }
@@ -4765,7 +4765,7 @@ export class Hud {
       open: this.whyOpen,
       confirmAdvance: this.confirmAdvance,
       tab,
-      build: { placing: this.controller.placingBase, project: sel?.type === 'project' ? sel.id : null, base: sel?.type === 'base' ? sel.id : null },
+      build: { placing: this.controller.action === 'base', project: sel?.type === 'project' ? sel.id : null, base: sel?.type === 'base' ? sel.id : null },
     });
     if (html !== this.lastScenario) {
       el.innerHTML = html;

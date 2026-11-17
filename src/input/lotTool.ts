@@ -20,7 +20,8 @@ export interface LotToolState {
   lotDrag: { id: number; kind: 'corner' | 'rotate'; side: -1 | 1 } | null;
   lotCols: number;
   lotRows: LotRows;
-  lotAngle: number;
+  /** Поворот свободной постановки (Alt) и переносимой площадки (Controller.angle). */
+  angle: number;
   alt: boolean;
 }
 
@@ -93,11 +94,11 @@ export function lotOverlay(s: LotToolState, g: Game, p: Vec | null): { lot: LotO
   }
   if (s.movingLot !== null && p) {
     const ref = g.lotById(s.movingLot);
-    const plan = g.lotMovePlan(s.movingLot, p, s.alt, s.lotAngle);
+    const plan = g.lotMovePlan(s.movingLot, p, s.alt, s.angle);
     return { lot: show(plan, ref?.lot.fp), label: plan ? lotPlanText(plan, ' ✥') : null, busy: true };
   }
   if (s.action === 'lot' && p) {
-    const plan = g.lotPlan(p, { cols: s.lotCols, rows: s.lotRows, free: s.alt, angle: s.lotAngle });
+    const plan = g.lotPlan(p, { cols: s.lotCols, rows: s.lotRows, free: s.alt, angle: s.angle });
     const o = show(plan);
     if (o) o.handles = lotHandles(plan.fp).map((h) => ({ pos: h.pos, kind: h.kind }));
     return { lot: o, label: lotPlanText(plan), busy: true };

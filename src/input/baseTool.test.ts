@@ -109,7 +109,7 @@ describe('Цена строительной базы', () => {
     const game = new Game({ ...WORLD, construction: 'instant' });
     const { c } = play(game);
     c.startBase();
-    expect(c.placingBase).toBe(false);
+    expect(c.pending).toBeNull();
     expect(c.tool).toBe('select');
   });
 });
@@ -120,7 +120,7 @@ describe('База стройки в инструменте «Станция»',
     const { c, click, hover } = play(game);
     c.startBase();
     expect(c.tool).toBe('station');
-    expect(c.placingBase).toBe(true);
+    expect(c.pending).toEqual({ kind: 'newBase' });
     expect(c.action).toBe('base');
     // У курсора: эта бесплатно и сколько стоят следующие.
     expect(hover(spots[0])).toMatch(new RegExp(`^База стройки · бесплатно · следующие — \\$${COST.toLocaleString('ru-RU').replace(/\s/g, '\\s')} · `));
@@ -132,7 +132,7 @@ describe('База стройки в инструменте «Станция»',
     // База в отмену не входит (как раньше): клик «Станцией» не делает снимок.
     expect(game.canUndo).toBe(undo);
     expect(c.tool).toBe('select');
-    expect(c.placingBase).toBe(false);
+    expect(c.pending).toBeNull();
     // Вторая — из «Станции», платная: подпись — одна цена, без «следующие».
     c.setStationMode('cargo');
     expect(c.action).toBe('station');
@@ -150,17 +150,17 @@ describe('База стройки в инструменте «Станция»',
     const { c, esc } = play(game);
     c.startBase();
     c.setStationMode('pax');
-    expect(c.placingBase).toBe(false);
+    expect(c.pending).toBeNull();
     expect(c.tool).toBe('station');
     expect(c.action).toBe('station');
     c.startBase();
     esc();
-    expect(c.placingBase).toBe(false);
+    expect(c.pending).toBeNull();
     expect(c.tool).toBe('select');
     // Повторное «＋ База» (кнопка нажата) — выйти.
     c.startBase();
     c.startBase(false);
-    expect(c.placingBase).toBe(false);
+    expect(c.pending).toBeNull();
     expect(c.tool).toBe('select');
   });
 });

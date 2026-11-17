@@ -106,9 +106,9 @@ describe('Esc и меню', () => {
     // База — только «Со строительством»; ставят её инструментом «Станция → База стройки».
     const { c, esc, menus } = setup(new Game({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry', construction: 'build' }));
     c.startBase();
-    expect(c.placingBase).toBe(true);
+    expect(c.pending).toEqual({ kind: 'newBase' });
     esc();
-    expect(c.placingBase).toBe(false);
+    expect(c.pending).toBeNull();
     expect(c.tool).toBe('select');
     expect(menus()).toBe(0);
   });

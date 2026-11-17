@@ -210,6 +210,37 @@ describe('Превью инструмента у курсора — из кэш�
   });
 });
 
+describe('Что ждёт клика (pending) и поворот (R)', () => {
+  it('новая партия: начатое в прежней — прочь, ни одного номера из неё', () => {
+    const { game, o } = kinkGame();
+    const { c } = play(game);
+    const station = [...game.stations.keys()][0] ?? 1;
+    c.startWarehouse(station);
+    expect(c.pending).toEqual({ kind: 'warehouse', id: station });
+    c.pendingArea = { a: o, b: add(o, { x: 50, y: 50 }), contents: game.areaContents(o, add(o, { x: 50, y: 50 })) };
+    c.addStopTo = 3;
+    c.phaseEdit = { node: 1, i: 0 };
+    c.angle = 1;
+    c.reset();
+    expect([c.pending, c.pendingArea, c.addStopTo, c.phaseEdit, c.selection, c.angle]).toEqual([null, null, null, null, null, 0]);
+  });
+
+  it('R — шаг 15° у того, что ставят; нечего вертеть — false; новый инструмент — с нуля', () => {
+    const { game } = kinkGame();
+    const { c, key } = play(game);
+    c.setTool('select');
+    expect(c.rotateActive(1)).toBe(false);
+    c.setTool('roundabout');
+    c.setJunctionMode('template');
+    key('KeyR');
+    key('KeyR');
+    key('KeyR', { shiftKey: true });
+    expect(c.angle).toBeCloseTo(Math.PI / 12);
+    c.setTool('road');
+    expect(c.angle).toBe(0);
+  });
+});
+
 describe('«🅿️ Площадка» (в «Станции»)', { timeout: 120_000 }, () => {
   it('клик у улицы ставит площадку и выбирает её; ручка угла — шире; клик по краю у улицы — ворота; Ctrl+Z — назад', () => {
     const game = freshGame({ ...NEW_GAME_SETTINGS, seed: 1, size: 'medium' });
