@@ -209,6 +209,11 @@ export interface LaneNode {
    * пока к ней не дойдёт этап следующего участка. Нет — площадка по строящимся полотнам у узла.
    */
   pad?: true;
+  /**
+   * Открытый конец: тупик здесь обрывается без разворота — дальше проезд большой площадки-стоянки (узел её ворот).
+   * Ставит и снимает игра, когда площадку ставят, переносят или сносят (LaneNet.setOpen).
+   */
+  open?: true;
 }
 
 /** Переименовывает полотна в ключах скруглений углов («12-15»); map → undefined — угол прочь. */
@@ -569,6 +574,15 @@ export class LaneNet {
     if (!n) return;
     this.indexNode(n, false);
     this.nodes.delete(id);
+    this.version++;
+  }
+
+  /** Открытый конец у узла id (LaneNode.open) — есть или нет; сменился — отрисовке пора пересчитать этот узел. */
+  setOpen(id: number, on: boolean): void {
+    const n = this.nodes.get(id);
+    if (!n || !!n.open === on) return;
+    if (on) n.open = true;
+    else delete n.open;
     this.version++;
   }
 

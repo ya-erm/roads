@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { add, dist, scale, type Vec } from '../core/vec';
 import type { ParkingLot, Town, TownBuilding, TownCar } from '../world/entities';
 import { footprintsOverlap } from '../world/spatial';
-import { LOT, lotGateDriveway, lotGateNodes, lotStallCount } from '../world/parkingLots';
+import { LOT, lotGateDriveway, lotStallCount } from '../world/parkingLots';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
 import { formOf } from '../world/townForms';
 import type { FleetCar, FleetTrip } from './carHomes';
@@ -204,7 +204,8 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
     const node = g.roads.net.nodes.get(lot.nodes![0])!;
     // Узел ворот — тупик выезда, внутри площадки; к нему есть путь по графу; на карте — без разворота.
     expect(node.corridors.length).toBe(1);
-    expect([...lotGateNodes(g.towns)]).toEqual([node.id]);
+    // Открытый конец сети (LaneNode.open) — только он: прочие тупики с разворотом.
+    expect([...g.roads.net.nodes.values()].filter((n) => n.open).map((n) => n.id)).toEqual([node.id]);
     const ref = g.lotById(lot.id)!;
     const town = ref.town;
     const dest = town.buildings.filter((b) => b.kind === 'com').sort((a, b) => dist(a.fp.center, lot.fp.center) - dist(b.fp.center, lot.fp.center))[0];

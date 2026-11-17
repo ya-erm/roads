@@ -238,13 +238,6 @@ export function lotGateNode(lot: Pick<ParkingLot, 'fp' | 'gates'>, gate: Pick<Lo
   return { node: at(gate.x, lotLayout(lot).nodeY), curb: at(gate.x, -lot.fp.h / 2 - LOT.setback) };
 }
 
-/** Узлы ворот больших площадок (концы тупиков-выездов) всех городов — без разворота на карте: дальше проезд площадки. */
-export function lotGateNodes(towns: readonly { lots?: readonly ParkingLot[] }[]): Set<number> {
-  const ids = new Set<number>();
-  for (const t of towns) for (const l of t.lots ?? []) if (!l.removed) for (const n of l.nodes ?? []) if (n >= 0) ids.add(n);
-  return ids;
-}
-
 /** Можно ли через ворота въехать / выехать. */
 export const gateIn = (m: LotGateMode): boolean => m !== 'out';
 export const gateOut = (m: LotGateMode): boolean => m !== 'in';

@@ -3277,8 +3277,11 @@ export class Game implements BuildContext {
     }
     lot.fp = plan.fp;
     lot.gates = plan.gates;
+    // Узлы ворот — открытые концы сети (тупик-выезд без разворота: дальше проезд площадки): прежние — снять, новые — поставить.
+    for (const id of lot.nodes ?? []) this.roads.net.setOpen(id, false);
     if (plan.big && plan.nodes?.length) lot.nodes = plan.nodes.map((p) => this.roads.net.nodesNear(p, 2)[0]?.id ?? -1);
     else delete lot.nodes;
+    for (const id of lot.nodes ?? []) this.roads.net.setOpen(id, true);
     if (add) plan.town.lots = [...(plan.town.lots ?? []), lot];
     else plan.town.lots = [...(plan.town.lots ?? [])];
     this.lotRev++;
@@ -3378,6 +3381,7 @@ export class Game implements BuildContext {
     }
     if (lot.owner === 'player') this.refund(lotCost(lot));
     lot.removed = true;
+    for (const id of lot.nodes ?? []) this.roads.net.setOpen(id, false);
     delete lot.nodes;
     town.lots = [...(town.lots ?? [])];
     this.lotRev++;

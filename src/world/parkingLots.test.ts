@@ -3,7 +3,7 @@ import { LaneRenderer } from '../lanes/draw';
 import { buildRoad } from '../lanes/edit';
 import { LaneNet, twoWay } from '../lanes/model';
 import type { ParkingLot } from './entities';
-import { defaultGates, LOT, lotDepth, lotGateNode, lotGateNodes, lotIsBig, lotLayout, lotLocal, lotStallCount, lotWidth, type LotRows } from './parkingLots';
+import { defaultGates, LOT, lotDepth, lotGateNode, lotIsBig, lotLayout, lotLocal, lotStallCount, lotWidth, type LotRows } from './parkingLots';
 
 /** Площадка cols × rows у улицы по оси x (y = 0): край у улицы — в 20 ед. от оси, ворота посередине. */
 function lotAt(cols: number, rows: LotRows): Pick<ParkingLot, 'id' | 'fp' | 'gates'> {
@@ -68,13 +68,14 @@ describe('Площадка: въезд большой через тупик-вы
     // Обычный тупик — с разворотом во всю ширину полотна.
     const plain = new LaneRenderer();
     expect(box(plain)).toBeGreaterThan(2 * LOT.stubHalf);
-    // Узел ворот большой площадки — без разворота (рамка узла — сама точка), и сразу — у уже нарисованной сети.
-    const nodes = lotGateNodes([{ lots: [{ ...lot, owner: 'player', tariff: 0, nodes: [node.id] }] }]);
-    expect([...nodes]).toEqual([node.id]);
-    plain.setOpenEnds(nodes);
+    // Узел ворот большой площадки — открытый конец сети (LaneNode.open): без разворота (рамка узла — сама точка), и
+    // сразу — у уже нарисованной сети.
+    net.setOpen(node.id, true);
+    expect(node.open).toBe(true);
     expect(box(plain)).toBeLessThan(0.01);
     // Площадку снесли — ворот нет, разворот снова есть.
-    plain.setOpenEnds(lotGateNodes([{ lots: [{ ...lot, owner: 'player', tariff: 0, nodes: [node.id], removed: true }] }]));
+    net.setOpen(node.id, false);
+    expect(node.open).toBeUndefined();
     expect(box(plain)).toBeGreaterThan(2 * LOT.stubHalf);
   });
 });

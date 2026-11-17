@@ -129,8 +129,9 @@ export function copyBox(net: LaneNet, x0: number, y0: number, x1: number, y1: nu
   const nodes = [...nodeIds].map((id) => {
     const { corridors: arms, ...n } = work.node(id);
     const out: Omit<LaneNode, 'corridors'> = { ...n, pos: { ...n.pos }, dir: { ...n.dir } };
-    // Отметка стройки (площадка готова) — не часть развязки.
+    // Отметка стройки (площадка готова) и ворота площадки-стоянки (открытый конец) — не часть развязки.
     delete out.pad;
+    delete out.open;
     const kept = arms.filter((x) => keep.has(x));
     if (n.kind === 'junction') {
       // Без части дорог фазы светофора — уже другие.

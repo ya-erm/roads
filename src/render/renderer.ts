@@ -88,7 +88,6 @@ import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, stro
 import { BUY_DOT_PX } from '../input/buyDrop';
 import { parkingLevel, type ParkingCell, type ParkingLevel } from '../game/parkingLayer';
 import { drawLotArt, drawLotPreview } from './lotArt';
-import { lotGateNodes } from '../world/parkingLots';
 import type { LotGate } from '../world/entities';
 import type { LotRect } from '../world/houseAccess';
 
@@ -802,10 +801,6 @@ export class Renderer {
       // Дорога, уходящая за край карты, обрывается краем — без разворота на конце.
       this.lanes.inMap = this.projectLanes.inMap = (p) => terrain.inBounds(p, 1);
     }
-    // Тупик-выезд большой площадки обрывается у её узла без разворота: дальше — проезд площадки (drawLots поверх).
-    const gates = lotGateNodes(game.towns);
-    this.lanes.setOpenEnds(gates);
-    this.projectLanes.setOpenEnds(gates);
     // Дороги — сеть полос (или её копия с тем, что сейчас строим), по слоям высоты; над рекой на земле — мостом.
     // Строящееся («Со строительством») — чертежом по всей сети (fullNet), дороги — по открытой для движения.
     const fullNet = o.roads?.net ?? game.roads.net;
