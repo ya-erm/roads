@@ -5,7 +5,7 @@ import { LaneGraph } from '../lanes/graph';
 import { LaneNet, twoWay } from '../lanes/model';
 import { findLaneRoute } from '../lanes/routing';
 import { LaneTraffic } from '../lanes/traffic';
-import { Crosswalks, groupSize, PEDESTRIANS_ON, pedestrianLight, walkRate } from './crosswalks';
+import { Crosswalks, groupSize, PEDESTRIANS_ON, walkGreen, walkRate } from './crosswalks';
 
 function scene(lights = false) {
   const net = new LaneNet();
@@ -41,18 +41,15 @@ describe('Пешеходы на переходах', () => {
     expect(groupSize(5000)).toBe(6);
   });
 
-  it('выключены (как в игре сейчас, PEDESTRIANS_ON): никто не приходит, зебра не закрывается, пешеходный светофор горит', () => {
+  it('выключены (как в игре сейчас, PEDESTRIANS_ON): никто не приходит, зебра не закрывается', () => {
     expect(PEDESTRIANS_ON).toBe(false);
-    const { net, j, traffic } = scene(true);
+    const { net, traffic } = scene(true);
     const graph = new LaneGraph(net);
     const off = new Crosswalks(() => 600);
     for (let t = 0; t < 120; t += 1 / 30) off.step(1 / 30, t, graph, traffic);
     expect(off.list).toHaveLength(0);
     expect(off.pedestrians(120)).toHaveLength(0);
     expect(traffic.walks.size).toBe(0);
-    // Пешеходный светофор — часть перехода: красный въезду с подъезда — ему зелёный.
-    const walks = graph.crosswalks.get(j.id)!;
-    expect(walks.map((w) => pedestrianLight(graph, w)).some((x) => x === true)).toBe(true);
   });
 
   it('без машин группа приходит и сразу идут: зебра закрыта в обе стороны на время перехода, потом открыта', () => {
@@ -138,11 +135,11 @@ describe('Пешеходы на переходах', () => {
     east.waiting = 2;
     east.since = 0;
     walks.step(1 / 30, 1, graph, traffic);
-    expect(east.signal).toBe(false);
+    expect(walkGreen(graph, east.walk)).toBe(false);
     expect(east.cross).toBeNull();
     L.phase = red;
     walks.step(1 / 30, 1.1, graph, traffic);
-    expect(east.signal).toBe(true);
+    expect(walkGreen(graph, east.walk)).toBe(true);
     expect(east.cross).not.toBeNull();
   });
 });

@@ -2,7 +2,6 @@ import { GRADE, STATION } from '../config';
 import { Cubic, CurveLUT } from '../core/bezier';
 import { clamp, hash } from '../core/math';
 import { drawWalkSign } from './walkSign';
-import { pedestrianLight } from '../game/crosswalks';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import { stationNormal } from '../game/railStationEdit';
@@ -20,7 +19,7 @@ import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/
 import type { Corridor, CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
 import type { GMove, LaneGraph } from '../lanes/graph';
 import type { TurnLook, TurnState } from '../lanes/lights';
-import { LIGHT_STEP, type LightSpot, lightSpot } from '../lanes/lightSpot';
+import { type LightSpot, lightSpot } from '../lanes/lightSpot';
 import { type JunctionPreview, junctionPreview, previewHides } from '../lanes/preview';
 import { trackKmhExact } from '../sim/railSpeed';
 import type { Vehicle, VehicleLook } from '../sim/vehicle';
@@ -80,6 +79,7 @@ import { drawDriveMouths, drawTownWalks, type TownWalks, townWalks } from './tow
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, flashSpot, type Frame, frontLength, resetFrame, setFrame, sirenVisibility, type VehicleDrawOptions } from './vehicleArt';
+import { drawTrafficLight, type Lamp, lampOf, type LightLook, lightScale } from './trafficLightArt';
 import { curveZones, PROFILE_STEP } from '../lanes/speedProfile';
 import { type Hiders, polygonHiders, TreeCover } from './treeCover';
 import { junctionPlate } from '../world/lotClear';
@@ -880,7 +880,7 @@ export class Renderer {
     this.drawCrossings(game, view);
     this.drawSignals(game, view);
     if (o.heatmap) this.drawHeatmap(game, 0);
-    // Пешеходы на переходах и пешеходные светофоры — вблизи, под машинами (машина, что их пропускает, — перед зеброй).
+    // Пешеходы на переходах — вблизи, под машинами (машина, что их пропускает, — перед зеброй).
     this.drawCrosswalkLife(game, view);
     this.drawGarageCars(game, view);
     this.drawVehicles(vehicles.filter((v) => groundBand(v) === 0 && !atPortal.has(v)));
@@ -895,7 +895,7 @@ export class Renderer {
     }
     // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
-    this.drawLights(game, 0, o.phaseEdit);
+    this.drawLights(game, view, 0, o.phaseEdit);
     this.drawMotion(game, view);
     // Станции со складами: здания и платформы — неподвижным слоем (плитки кэша), под ним — автобусы у остановок,
     // поверх — посты цветом машин в них, ящики складов и автобусы на местах автовокзала.
@@ -917,12 +917,12 @@ export class Renderer {
         true,
       );
       // Светофоры у спуска с моста и на эстакаде — поверх её полотна и подняты вместе с ним.
-      if (roads) this.drawLights(game, level, o.phaseEdit);
+      if (roads) this.drawLights(game, view, level, o.phaseEdit);
       // Поезд на пандусе и заехавший на него краем — над его полотном (пандус целиком в слое моста).
       this.drawTrains(trains.filter((t) => t.layer === level));
     }
     // Светофор перекрёстка под мостом не пропадает под полотном — приглушённым значком поверх.
-    this.drawLights(game, 'covered', o.phaseEdit);
+    this.drawLights(game, view, 'covered', o.phaseEdit);
     // Краны строящихся предприятий — высокие: поверх станций, домов, дорог и мостов, под подписями и плашками.
     this.drawSiteCranes(game, view);
     this.drawConstruction(game, view, o.crewTarget != null ? { type: 'project', id: o.crewTarget } : o.selection);
@@ -2605,92 +2605,61 @@ export class Renderer {
   }
 
   /**
-   * Светофоры: столбик справа от крайней правой полосы каждого въезда. Основная секция — по фазе (зелёный, жёлтый,
-   * красный); рядом, дальше от дороги, — дополнительные со стрелкой, если у поворота есть своя фаза: стрелка
-   * горит зелёным, когда поворот разрешён по ней (src/lanes/lights.ts, signalHeads). pass — слой высоты: светофор
-   * рисуется в слое своего подъезда и поднят вместе с его полотном (спуск с моста, эстакада — src/lanes/lightSpot.ts);
-   * 'covered' — те, что сверху закрыл чужой мост, ещё раз поверх всего, приглушённо. show — фазу, которую правят на
-   * карте: светофоры её перекрёстка горят так, как в ней.
+   * Светофоры: у стоп-линии справа от крайней правой полосы каждого въезда — корпус с тремя секциями вдоль бордюра
+   * и колонка за ним (src/render/trafficLightArt.ts). Основная секция — по фазе (зелёный, жёлтый, красный); рядом,
+   * дальше от дороги, — дополнительные со стрелкой, если у поворота есть своя фаза: стрелка горит, когда поворот
+   * разрешён по ней (src/lanes/lights.ts, signalHeads). pass — слой высоты: светофор рисуется в слое своего подъезда
+   * и поднят вместе с его полотном (спуск с моста, эстакада — src/lanes/lightSpot.ts); 'covered' — те, что сверху
+   * закрыл чужой мост, ещё раз поверх всего, приглушённо. show — фазу, которую правят на карте: светофоры её
+   * перекрёстка горят так, как в ней.
    */
-  private drawLights(game: Game, pass: number | 'covered', show?: { node: number; i: number } | null): void {
-    if (this.camera.zoom < 0.4) return;
+  private drawLights(game: Game, view: Box, pass: number | 'covered', show?: { node: number; i: number } | null): void {
+    const z = this.camera.zoom;
+    if (z < 0.4) return;
     const ctx = this.ctx;
     const g = game.roads.graph;
-    const GREEN = '#3ad16b';
-    const YELLOW = '#f2c230';
-    const STEP = LIGHT_STEP;
     // Где светофоры (слой подъезда, подъём с полотном, закрыт ли мостом сверху) — раз на граф движения.
     if (this.lightSpots?.graph !== g) this.lightSpots = { graph: g, spots: new Map() };
     const spots = this.lightSpots.spots;
+    const k = lightScale(z);
+    const detail = z >= 1;
+    const pad = 12 * k;
+    // Каждый светофор — setFrame поверх преобразования мира; после всех — оно же и прежняя прозрачность.
+    const m = ctx.getTransform();
+    const base: Frame = { a: m.a, b: m.b, c: m.c, d: m.d, e: m.e, f: m.f };
+    const alpha = ctx.globalAlpha;
     // Закрытые сверху (перекрёсток под мостом) — ещё раз поверх всего, приглушённо: как значок.
-    ctx.save();
-    if (pass === 'covered') ctx.globalAlpha = 0.55;
+    if (pass === 'covered') ctx.globalAlpha = alpha * 0.55;
+    let drawn = false;
+    const look: LightLook = { pos: { x: 0, y: 0 }, dir: { x: 1, y: 0 }, main: 'red', arrows: [] };
+    const arrows: { dir: Vec; lamp: Lamp | null }[] = [];
     for (const n of g.nodes.values()) {
       const L = n.lights;
       if (!L) continue;
+      if (n.pos.x < view.x0 - 80 || n.pos.x > view.x1 + 80 || n.pos.y < view.y0 - 80 || n.pos.y > view.y1 + 80) continue;
       const shown = show?.node === n.id && show.i < L.phases.length;
       const phase = shown ? show.i : L.phase;
-      const lit = (on: boolean | undefined) => (on ? (L.clearing && !shown ? YELLOW : GREEN) : null);
+      const amber = L.clearing && !shown;
       for (const head of L.heads) {
         const link = g.links.get(head.link);
         if (!link) continue;
         if (!spots.has(head.link)) spots.set(head.link, lightSpot(g, link, head.arrows.length));
         const spot = spots.get(head.link);
         if (!spot || (pass === 'covered' ? !spot.covered : !inPass(spot.layer, pass))) continue;
-        const N = spot.out;
         const p = spot.pos;
-        const last = add(p, scale(N, STEP * head.arrows.length));
-        // Корпус: основная секция и дополнительные рядом — одной капсулой.
-        ctx.strokeStyle = '#2a2e33';
-        ctx.lineCap = 'round';
-        ctx.lineWidth = 5.6;
-        ctx.beginPath();
-        ctx.moveTo(p.x, p.y);
-        ctx.lineTo(last.x + 0.001, last.y);
-        ctx.stroke();
-        ctx.fillStyle = lit(head.main[phase]) ?? '#e8483f';
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 1.9, 0, Math.PI * 2);
-        ctx.fill();
-        head.arrows.forEach((a, k) => {
-          const q = add(p, scale(N, STEP * (k + 1)));
-          const color = lit(a.on[phase]);
-          ctx.fillStyle = color ? 'rgba(58, 209, 107, 0.25)' : '#1d2024';
-          ctx.beginPath();
-          ctx.arc(q.x, q.y, 2.3, 0, Math.PI * 2);
-          ctx.fill();
-          this.drawTurnArrow(q, spot.dir, a.dir, color ?? '#6b737d');
-        });
+        if (p.x < view.x0 - pad || p.x > view.x1 + pad || p.y < view.y0 - pad || p.y > view.y1 + pad) continue;
+        arrows.length = 0;
+        for (const a of head.arrows) arrows.push({ dir: a.dir, lamp: a.on[phase] ? lampOf(true, amber) : null });
+        look.pos = p;
+        look.dir = spot.dir;
+        look.main = lampOf(head.main[phase], amber);
+        look.arrows = arrows;
+        drawTrafficLight(ctx, base, look, k, detail);
+        drawn = true;
       }
     }
-    ctx.restore();
-  }
-
-  /** Стрелка поворота в секции светофора: от въезда (курс d) с изгибом на выезд (курс e), в круге радиусом ~2. */
-  private drawTurnArrow(c: Vec, d: Vec, e: Vec, color: string): void {
-    const ctx = this.ctx;
-    const at = (kd: number, ke: number) => add(c, add(scale(d, kd), scale(e, ke)));
-    const a = at(-1.3, -0.6);
-    const b = at(0.3, -0.6);
-    const t = at(0.3, 1.25);
-    const w1 = add(t, add(scale(e, -0.95), scale(d, 0.85)));
-    const w2 = add(t, add(scale(e, -0.95), scale(d, -0.85)));
-    ctx.strokeStyle = color;
-    ctx.fillStyle = color;
-    ctx.lineWidth = 0.6;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-    ctx.lineTo(t.x, t.y);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(t.x, t.y);
-    ctx.lineTo(w1.x, w1.y);
-    ctx.lineTo(w2.x, w2.y);
-    ctx.closePath();
-    ctx.fill();
+    if (drawn) resetFrame(ctx, base);
+    ctx.globalAlpha = alpha;
   }
 
   // ---------- Машины ----------
@@ -5586,37 +5555,14 @@ export class Renderer {
     for (const t of edit.toggles) drawWalkSign(ctx, t.pos, walkSignSize(z) * (t.corridor === edit.hover ? 1.15 : 1), t, z);
   }
 
-  /**
-   * Пешеходы на переходах — точками с зума 1,2 (идущие — по зебре, ждущие — у бордюра), пешеходные светофоры у концов
-   * зебры на регулируемом перекрёстке — с 1,5: зелёный, когда въезду с подъезда красный (часть перехода: горят и пока
-   * пешеходы выключены, PEDESTRIANS_ON).
-   */
+  /** Пешеходы на переходах — точками с зума 1,2: идущие — по зебре, ждущие — у бордюра (пока выключены, PEDESTRIANS_ON). */
   private drawCrosswalkLife(game: Game, view: ReturnType<Renderer['view']>): void {
     const z = this.camera.zoom;
     if (z < 1.2) return;
     const ctx = this.ctx;
     const cw = game.crosswalks;
-    const g = game.roads.graph;
-    if (!g.crosswalks.size) return;
-    const seen = (p: Vec) => p.x > view.x0 - 10 && p.x < view.x1 + 10 && p.y > view.y0 - 10 && p.y < view.y1 + 10;
-    if (z >= 1.5) {
-      for (const [node, walks] of g.crosswalks) {
-        if (!g.nodes.get(node)?.lights) continue;
-        for (const w of walks) {
-          if (!seen(w.geo.ends[0])) continue;
-          const on = pedestrianLight(g, w);
-          for (const p of w.geo.ends) {
-            ctx.fillStyle = '#2a2e33';
-            ctx.fillRect(p.x - 1.1, p.y - 1.1, 2.2, 2.2);
-            ctx.fillStyle = on ? '#3ddc84' : '#ff4a3d';
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, 0.75, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-      }
-    }
     if (!cw.list.length) return;
+    const seen = (p: Vec) => p.x > view.x0 - 10 && p.x < view.x1 + 10 && p.y > view.y0 - 10 && p.y < view.y1 + 10;
     const COATS = ['#d9534f', '#3a6fb0', '#e8b83a', '#4c9a5b', '#7d5ba6', '#e07b39', '#30343a', '#e6e2d8'];
     ctx.strokeStyle = 'rgba(30, 30, 30, 0.6)';
     ctx.lineWidth = 0.2;

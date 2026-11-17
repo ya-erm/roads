@@ -14,10 +14,10 @@ export { PEDESTRIANS_ON };
  */
 
 /**
- * Пешеходный светофор у зебры walk: зелёный, когда въезду с подъезда красный (и не жёлтый); перекрёсток без светофора —
- * null. От пешеходов не зависит — часть перехода на регулируемом перекрёстке.
+ * Светофор перекрёстка пускает пешеходов на зебру walk: въезду с подъезда красный (и не жёлтый); перекрёсток без
+ * светофора — null. Своих пешеходных светофоров на карте нет — идут по сигналу машинам.
  */
-export function pedestrianLight(graph: LaneGraph, walk: Pick<GraphWalk, 'node' | 'inLink'>): boolean | null {
+export function walkGreen(graph: LaneGraph, walk: Pick<GraphWalk, 'node' | 'inLink'>): boolean | null {
   const L = graph.nodes.get(walk.node)?.lights;
   if (!L) return null;
   if (L.clearing) return false;
@@ -63,8 +63,6 @@ export interface Crossing {
   from: 0 | 1;
   /** Идут по зебре: с какого времени, сколько секунд. */
   cross: { t0: number; dur: number; n: number; from: 0 | 1 } | null;
-  /** Светофор узла даёт им идти (для пешеходного светофора); у нерегулируемого — null. */
-  signal: boolean | null;
   /** Зебра закрыта машинам: въезд (к узлу) и выезд (от узла). */
   barriers: [Barrier, Barrier];
 }
@@ -122,7 +120,7 @@ export class Crosswalks {
           continue;
         }
         const people = this.peopleNear(walk);
-        const c: Crossing = { key, walk, people, n: 0, next: 0, waiting: 0, since: 0, from: 0, cross: null, signal: null, barriers };
+        const c: Crossing = { key, walk, people, n: 0, next: 0, waiting: 0, since: 0, from: 0, cross: null, barriers };
         c.next = time + gapAfter(c, walkRate(people), seedOf(walk)) * 0.5;
         list.push(c);
       }
@@ -159,7 +157,6 @@ export class Crosswalks {
     for (const c of this.list) {
       const seed = seedOf(c.walk);
       const L = graph.nodes.get(c.walk.node)?.lights ?? null;
-      c.signal = pedestrianLight(graph, c.walk);
       if (c.cross) {
         if (time - c.cross.t0 >= c.cross.dur) {
           c.cross = null;
@@ -179,7 +176,7 @@ export class Crosswalks {
       let go: boolean;
       // На светофоре — только на свой «зелёный» и если успеют до конца фазы («умный» светофор без машин держит фазу
       // короткими продлениями — прождав lightPatience, идут и так: въезд с подъезда подождёт их у стоп-линии).
-      if (L) go = !!c.signal && (L.timer >= c.walk.time || waited > WALK_YIELD.lightPatience) && this.clear(c, graph, traffic, false, 0);
+      if (L) go = !!walkGreen(graph, c.walk) && (L.timer >= c.walk.time || waited > WALK_YIELD.lightPatience) && this.clear(c, graph, traffic, false, 0);
       else go = this.clear(c, graph, traffic, true, waited > WALK_YIELD.patience ? WALK_YIELD.hard : WALK_YIELD.soft);
       if (!go) continue;
       c.cross = { t0: time, dur: c.walk.time, n: c.waiting, from: c.from };

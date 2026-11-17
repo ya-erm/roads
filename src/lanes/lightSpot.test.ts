@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { add, dist, rightNormal, scale, type Vec } from '../core/vec';
 import { LaneGraph } from './graph';
-import { LIGHT_SIDE, lightSpot, underDeck } from './lightSpot';
+import { syncWalks, XWALK_BACK } from './crosswalk';
+import { LIGHT_LEN, LIGHT_SIDE, lightSpot, underDeck } from './lightSpot';
 import { LaneNet, twoWay } from './model';
 import { deckLift } from './speedDisplay';
 
@@ -55,6 +56,20 @@ describe('Светофор и мосты: слой и место', () => {
     const lane = ramp.link.lanes[ramp.link.lanes.length - 1];
     const lift = deckLift(net, arms.e, ramp.g.axisS(lane, lane.length));
     expect(dist(ramp.spot.pos, add(flatSpot(ramp.g, ramp.link), lift))).toBeLessThan(1e-6);
+  });
+
+  it('с переходом — у стоп-линии перед зеброй, а не за ней на скруглении бордюра; корпус — назад вдоль дороги', () => {
+    const { net, j } = junction(0);
+    syncWalks(net, j, () => true);
+    for (const { spot, link, g } of spots(net, j).values()) {
+      const lane = link.lanes[link.lanes.length - 1];
+      expect(g.stopBack.get(lane.id)).toBeCloseTo(XWALK_BACK, 6);
+      const stop = g.lanePose(lane, lane.length - XWALK_BACK);
+      expect(dist(spot.pos, add(stop.pos, scale(rightNormal(stop.dir), LIGHT_SIDE)))).toBeLessThan(1e-6);
+      // Колонка за корпусом — ещё дальше от перекрёстка, чем стоп-линия.
+      const tail = add(spot.pos, scale(spot.dir, -LIGHT_LEN));
+      expect(dist(tail, j.pos)).toBeGreaterThan(dist(spot.pos, j.pos));
+    }
   });
 
   it('перекрёсток на эстакаде: все светофоры в слое моста и подняты вместе с полотном', () => {
