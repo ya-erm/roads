@@ -7373,19 +7373,39 @@ export class Game implements BuildContext {
     return this.roadLegData(line).legs;
   }
 
-  /** Участки дорожного маршрута (roadLegs): связи графа и линия для карты — по версии сети и остановкам. */
+  /**
+   * Участки дорожного маршрута (roadLegs): связи графа и линия для карты — по версии сети, остановкам и дворам
+   * получателей. Как едут грузовики (docks.ts): к получателю — до связи у его двора, от него — со двора на полосу
+   * и дальше по ходу через узел станции. Иначе участок кончался бы в узле станции, а следующий начинался из него,
+   * и поворота в узле не было бы ни в одном — линия на карте рвалась на перекрёстке у магазина.
+   */
   private roadLegData(line: Line): { routes: (number[] | null)[]; legs: (Vec[] | null)[] } {
     const version = this.net.version * 100003 + this.roads.net.version;
     const keepRight = this.lineKind(line) === 'passengers';
-    const key = `${version}|${line.stops.join(',')}|${keepRight}`;
-    const hit = this.legCache.get(line.id);
-    if (hit?.key === key) return hit;
     const n = line.stops.length;
     const stop = (i: number) => this.stations.get(line.stops[((i % n) + n) % n]);
+    // Двор — для грузовика маршрута (как dockEndLink), пока их нет — для того, что купят.
+    const model = this.chartModel(line);
+    const spec = model && MODELS[model].mode === 'road' ? MODELS[model].spec : undefined;
+    const yards = line.stops.map((_, i) => {
+      const st = stop(i);
+      const b = st?.kind === 'dock' ? this.dockBuilding(st) : undefined;
+      const geo = b ? this.docks.geoOf(b, spec?.length, spec?.width) : null;
+      return geo?.in && geo.out && geo.in.link.toNode !== null ? { in: geo.in.link.id, node: geo.in.link.toNode, out: geo.out.lane.link } : null;
+    });
+    const key = `${version}|${line.stops.join(',')}|${keepRight}|${yards.map((y) => (y ? `${y.in}>${y.out}` : '')).join(',')}`;
+    const hit = this.legCache.get(line.id);
+    if (hit?.key === key) return hit;
     const routes = line.stops.map((_, i) => {
       const a = stop(i);
       const b = stop(i + 1);
-      return a && b ? this.roads.route(a.nodeId, b.nodeId) : null;
+      if (!a || !b) return null;
+      const from = yards[i];
+      const to = yards[(i + 1) % n];
+      const starts = from ? [from.out] : (this.roads.graph.outLinks.get(a.nodeId) ?? []).map((l) => l.id);
+      const real = from || to ? this.roads.routeFrom(starts, to ? to.node : b.nodeId, to?.in) : null;
+      // Двора не подъехать — как машина без двора: от узла станции к узлу.
+      return real ?? this.roads.route(a.nodeId, b.nodeId);
     });
     // Два прохода: по кругу первый участок тоже продолжает последний.
     for (let pass = 0; pass < 2; pass++) {
@@ -7393,7 +7413,8 @@ export class Game implements BuildContext {
         const prev = routes[(i - 1 + n) % n];
         const to = stop(i + 1);
         if (stop(i)?.kind !== 'stop' || !to || !prev?.length) continue;
-        const cont = this.roads.continueRoute(prev[prev.length - 1], to.nodeId);
+        const yard = yards[(i + 1) % n];
+        const cont = this.roads.continueRoute(prev[prev.length - 1], yard ? yard.node : to.nodeId, yard?.in);
         if (cont) routes[i] = cont;
       }
     }

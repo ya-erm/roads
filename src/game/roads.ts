@@ -131,17 +131,26 @@ export class Roads {
   }
 
   /**
+   * Маршрут с одной из связей starts (она — первая в пути) до узла to; endLink — последняя связь пути (к двору
+   * получателя — связь у него). Нет пути — null.
+   */
+  routeFrom(starts: number[], to: number, endLink?: number): number[] | null {
+    const g = this.graph;
+    const links = starts.map((id) => g.links.get(id)).filter((l): l is GLink => !!l);
+    return links.length ? findLaneRoute(g, links, to, endLink) : null;
+  }
+
+  /**
    * Маршрут дальше, как едет автобус от остановки: приехал по связи arrived в её узел (стык на улице) —
    * едет за узел в ту же сторону, а не разворачивается в нём. Продолжения нет — null.
    */
-  continueRoute(arrived: number, to: number): number[] | null {
+  continueRoute(arrived: number, to: number, endLink?: number): number[] | null {
     const g = this.graph;
     const link = g.links.get(arrived);
     if (!link) return null;
     const outs = new Set<number>();
     for (const lane of link.lanes) for (const m of g.movesFrom.get(lane.id) ?? []) if (m.cont) outs.add(m.outLink);
-    const starts = [...outs].map((id) => g.links.get(id)).filter((l): l is GLink => !!l);
-    return starts.length ? findLaneRoute(g, starts, to) : null;
+    return this.routeFrom([...outs], to, endLink);
   }
 
   /** Обратная Дейкстра от цели: ближайший узел из candidates и маршрут от него до цели. */

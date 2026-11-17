@@ -147,6 +147,42 @@ describe('Получатели грузов в партии', { timeout: 240_000
     expect(game.docks.count).toBe(0);
   });
 
+  it('линия маршрута между магазинами — без разрывов у узлов станций и по тем связям, по которым едет грузовик', () => {
+    const game = freshGame(RETAIL_WORLD);
+    const { a, b, line, v } = shopLine(game);
+    const legData = () => (game as unknown as { roadLegData(l: Line): { routes: (number[] | null)[] } }).roadLegData(line);
+    const routes = legData().routes;
+    const geos = [a, b].map((x) => game.docks.geoOf(x, TRUCK.length, TRUCK.width)!);
+    for (let i = 0; i < 2; i++) {
+      const j = (i + 1) % 2;
+      const route = routes[i]!;
+      // От магазина — со двора на его полосу, к следующему — до связи у его двора (как docks.route).
+      expect(route[0]).toBe(geos[i].out!.lane.link);
+      expect(route[route.length - 1]).toBe(geos[j].in!.link.id);
+      // Участки сходятся: начало следующего лежит на этом (раньше этот кончался в узле станции, а следующий
+      // начинался из него — поворота в узле не было ни в одном, на карте — разрыв на перекрёстке).
+      const pts = game.linePolyline(line, i)!;
+      const next = game.linePolyline(line, j)!;
+      expect(Math.min(...pts.map((p) => dist(p, next[0])))).toBeLessThan(0.5);
+      for (let k = 1; k < pts.length; k++) expect(dist(pts[k - 1], pts[k])).toBeLessThan(12);
+    }
+    // Грузовик едет от магазина B к A по связям участка B → A.
+    expect(until(game, 400, () => v.stop === 0 && v.state === 'driving' && !!game.fleetSim(v) && !game.docks.inYard(v.id))).toBe(true);
+    const driven = new Set<number>();
+    expect(
+      until(game, 200, () => {
+        const sim = game.fleetSim(v);
+        const lane = sim && game.traffic.currentLane(sim);
+        if (lane) driven.add(lane.link);
+        return v.stop === 0 && game.docks.inYard(v.id);
+      }),
+    ).toBe(true);
+    expect(driven.size).toBeGreaterThan(1);
+    // Граф мог смениться (город вырос в конце месяца) — участок по нынешнему.
+    const back = legData().routes[1]!;
+    for (const link of driven) expect(back).toContain(link);
+  });
+
   it('частичная выгрузка: магазин берёт, сколько влезает на склад, платят только за принятое, остальное — в кузове', () => {
     const game = freshGame(RETAIL_WORLD);
     const { town, b, sa, sb, line, v } = shopLine(game);
