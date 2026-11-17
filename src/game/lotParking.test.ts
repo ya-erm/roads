@@ -153,9 +153,12 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
     // Счёт месяца (месяц — минута: этот и прошлый).
     const stats = g.lots.all().flatMap((x) => [x.lot.month, x.lot.last]);
     expect(stats.reduce((s, m) => s + (m?.cars ?? 0), 0)).toBeGreaterThan(0);
-    // Стоящие гости видны на своих местах (вблизи).
+    // Стоящие гости видны на своих местах (вблизи). Тот, что уже выезжает (задом по проездам, место за ним, пока не
+    // встанет в поток), виден на манёвре, а не на месте.
     const looks = g.garageLooks([-1e6, -1e6, 1e6, 1e6], true);
-    for (const e of on.slice(0, 5)) {
+    const standing = on.filter((e) => !g.carHomes.isMoving(e.car));
+    expect(standing.length).toBeGreaterThan(0);
+    for (const e of standing.slice(0, 5)) {
       const pose = g.lots.poseOf(e)!;
       expect(looks.some((l) => dist(l.look.pos, pose.nose) < 0.01)).toBe(true);
     }
