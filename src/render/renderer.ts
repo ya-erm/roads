@@ -56,10 +56,10 @@ import type { Segment } from '../world/network';
 import { halfWidth, isDirt, KMH_PER_UNIT, LANE_W, RAIL_HALF, ROAD_MARGIN, roadEdges } from '../world/roadTypes';
 import { Footprint, footprintCorners, footprintRadius } from '../world/spatial';
 import { prefOn } from '../ui/prefs';
-import { drawAnnexArt } from './annexArt';
+import { annexMotion, drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
 import type { Motion } from './redraw';
-import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
+import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, type Emitter, industryMotion } from './industryArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
 import { type Around, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
@@ -2821,7 +2821,10 @@ export class Renderer {
     for (const d of game.enterprises.deposits) if (seen(d.center, 120)) drawDeposit(ctx, d, z);
   }
 
-  /** Движущееся у предприятий и пристроек — дым, мерцание огня, качалки (только вблизи), — в каждом кадре. */
+  /**
+   * Движущееся у предприятий и пристроек — дым, мерцание огня, качалки (только вблизи), — в каждом кадре: только их
+   * излучатели (industryMotion), записанные раз; предприятия без движущегося в кадре не трогаются. Фонтаны — так же.
+   */
   private drawMotion(game: Game, view: Box): void {
     const z = this.camera.zoom;
     if (!artMoves(z)) return;
@@ -2831,29 +2834,75 @@ export class Renderer {
     // Фонтаны у ратуш и в парках — рябь на воде, только при сильном приближении (дёшево: пара дуг на фонтан).
     if (z > FOUNTAIN_ZOOM) {
       const seen = (p: { x: number; y: number }) => p.x > view.x0 - 10 && p.x < view.x1 + 10 && p.y > view.y0 - 10 && p.y < view.y1 + 10;
-      const list: { x: number; y: number; r: number }[] = [];
-      for (const town of game.towns) {
-        if (dist(town.center, { x: (view.x0 + view.x1) / 2, y: (view.y0 + view.y1) / 2 }) > (town.extent ?? town.radius) + (view.x1 - view.x0)) continue;
-        for (const b of town.buildings) {
-          if (b.kind !== 'landmark') continue;
-          const f = hallFountain(b);
-          if (f && seen(f)) list.push(f);
-        }
-        for (const p of town.parks ?? []) for (const f of parkFountains(p)) if (seen(f)) list.push(f);
-      }
+      const list = this.fountainsOf(game).filter(seen);
       if (list.length) {
         drawFountainRipples(this.ctx, list, time);
         this.ambient = true;
       }
     }
-    for (const ind of game.industries) {
-      // Дым, огонь и качалки движутся и на паузе (по часам, а не по времени игры).
-      // Фон: кадры для него — реже (AMBIENT_FPS, src/render/redraw.ts).
-      for (const a of ind.annexes ?? []) if (inView(a.fp) && drawAnnexArt(this.ctx, ind, a, z, time, 'motion')) this.ambient = true;
-      // Заброшенное и стройка не дымят (кран стройки — в плитке).
-      if (ind.ruin || ind.build) continue;
-      if (inView(ind.fp) && drawIndustryArt(this.ctx, ind, z, time, 'motion')) this.ambient = true;
+    // Дым, огонь и качалки движутся и на паузе (по часам, а не по времени игры).
+    // Фон: кадры для него — реже (AMBIENT_FPS, src/render/redraw.ts).
+    const ctx = this.ctx;
+    let base: DOMMatrix | null = null;
+    for (const it of this.emittersOf(game)) {
+      if (!inView(it.fp)) continue;
+      if (!base) {
+        base = ctx.getTransform();
+        ctx.save();
+      }
+      drawEmitters(ctx, it.list, time, base);
+      this.ambient = true;
     }
+    if (base) ctx.restore();
+  }
+
+  /** Излучатели предприятий и пристроек (с движущимся) — пересчёт после правки предприятий (Game.industryRev). */
+  private emitting = { game: null as Game | null, rev: -1, list: [] as { fp: Footprint; list: Emitter[] }[] };
+  /** Излучатели предприятия или пристройки — пока у него то же место, уровень, работа и пристройки. */
+  private motionOf = new WeakMap<object, { fp: Footprint; level: number; active: boolean; annexes: unknown; list: Emitter[] }>();
+
+  private emittersOf(game: Game): { fp: Footprint; list: Emitter[] }[] {
+    const m = this.emitting;
+    if (m.game === game && m.rev === game.industryRev) return m.list;
+    m.game = game;
+    m.rev = game.industryRev;
+    m.list = [];
+    const take = (key: Industry | Annex, ind: Industry, make: () => Emitter[]) => {
+      const level = Math.max(1, Math.floor(ind.level ?? 1));
+      const active = ind.producedMonth > 0 || ind.producedLast > 0;
+      let had = this.motionOf.get(key);
+      if (!had || had.fp !== key.fp || had.level !== level || had.active !== active || had.annexes !== ind.annexes) {
+        had = { fp: key.fp, level, active, annexes: ind.annexes, list: make() };
+        this.motionOf.set(key, had);
+      }
+      if (had.list.length) m.list.push({ fp: key.fp, list: had.list });
+    };
+    for (const ind of game.industries) {
+      for (const a of ind.annexes ?? []) take(a, ind, () => annexMotion(ind, a));
+      // Заброшенное и стройка не дымят (кран стройки — в плитке).
+      if (!ind.ruin && !ind.build) take(ind, ind, () => industryMotion(ind));
+    }
+    return m.list;
+  }
+
+  /** Фонтаны у ратуш и в парках всех городов — пересчёт после правки застройки (Game.townRev, layoutRev). */
+  private fountains = { game: null as Game | null, towns: -1, layout: -1, list: [] as { x: number; y: number; r: number }[] };
+
+  private fountainsOf(game: Game): { x: number; y: number; r: number }[] {
+    const f = this.fountains;
+    if (f.game === game && f.towns === game.townRev && f.layout === game.layoutRev) return f.list;
+    f.game = game;
+    f.towns = game.townRev;
+    f.layout = game.layoutRev;
+    f.list = [];
+    for (const town of game.towns) {
+      for (const b of town.buildings) {
+        const h = b.kind === 'landmark' ? hallFountain(b) : null;
+        if (h) f.list.push(h);
+      }
+      for (const p of town.parks ?? []) f.list.push(...parkFountains(p));
+    }
+    return f.list;
   }
 
   /** Краны стройплощадок предприятий (drawSiteCrane) — в каждом кадре поверх плиток; опора — подальше от своих станций. */
@@ -3145,12 +3194,12 @@ export class Renderer {
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.16)');
     // Стройплощадка (режим «Строит игрок», «Со строительством»): здание растёт по готовности.
     if (ind.build) {
-      if (layer !== 'motion') drawSiteArt(this.ctx, ind, this.camera.zoom, 0);
+      drawSiteArt(this.ctx, ind, this.camera.zoom, 0);
       return;
     }
     drawIndustryArt(this.ctx, ind, this.camera.zoom, performance.now() / 1000, layer);
     // Заброшенное: ржавчина, выбитые окна, трава.
-    if (ind.ruin && layer !== 'motion') drawRuinOverlay(this.ctx, ind, this.camera.zoom);
+    if (ind.ruin) drawRuinOverlay(this.ctx, ind, this.camera.zoom);
   }
 
   /** Пристройка предприятия: участок с лёгкой тенью, вспомогательное здание — в annexArt; layer — ArtLayer. */

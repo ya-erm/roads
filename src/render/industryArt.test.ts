@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { INDUSTRY_LIST } from '../world/cargo';
 import type { Industry } from '../world/entities';
-import { drawAnnexArt } from './annexArt';
-import { artMoves, type ArtLayer, drawIndustryArt } from './industryArt';
+import { annexMotion, drawAnnexArt } from './annexArt';
+import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, industryMotion } from './industryArt';
 
 /** Работающее предприятие вида info с пристройкой. */
 function industry(info: (typeof INDUSTRY_LIST)[number]): Industry {
@@ -52,6 +52,14 @@ function paint(ind: Industry, zoom: number, layer: ArtLayer) {
   return s;
 }
 
+/** Движущееся вблизи — излучатели предприятия и пристройки, нарисованные поверх (как в кадре карты). */
+function motion(ind: Industry) {
+  const s = stub();
+  const list = [...industryMotion(ind), ...annexMotion(ind, ind.annexes![0])];
+  drawEmitters(s.ctx, list, 3.7, { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
+  return { ...s, list };
+}
+
 const sum = (a: Record<string, number>, b: Record<string, number>) => {
   const out: Record<string, number> = { ...a };
   for (const [k, v] of Object.entries(b)) out[k] = (out[k] ?? 0) + v;
@@ -65,23 +73,39 @@ describe('Предприятия в кэше карты: неподвижное 
       const ind = industry(info);
       const all = paint(ind, 1, 'all');
       const still = paint(ind, 1, 'still');
-      const motion = paint(ind, 1, 'motion');
-      expect(sum(still.draws, motion.draws), info.kind).toEqual(all.draws);
-      expect(motion.moves.save ?? 0, info.kind).toBe(motion.moves.restore ?? 0);
-      if (Object.keys(motion.draws).length) moving++;
+      const moves = motion(ind);
+      expect(sum(still.draws, moves.draws), info.kind).toEqual(all.draws);
+      // Излучатели — без save/restore: каждый ставит своё преобразование, в конце — прежнее.
+      expect(moves.moves.save ?? 0, info.kind).toBe(0);
+      expect(moves.moves.setTransform ?? 0, info.kind).toBe(moves.list.length + 1);
+      if (moves.list.length) moving++;
     }
     // Дым, огонь или качалки есть не у всех, но у многих.
     expect(moving).toBeGreaterThan(3);
+  });
+
+  it('излучатели — в мире: на участке своего предприятия или пристройки', () => {
+    for (const info of INDUSTRY_LIST) {
+      const ind = industry(info);
+      for (const [fp, list] of [
+        [ind.fp, industryMotion(ind)],
+        [ind.annexes![0].fp, annexMotion(ind, ind.annexes![0])],
+      ] as const) {
+        for (const e of list) {
+          const [a, b, c, d, ex, ey] = e.m;
+          const x = a * e.x + c * e.y + ex;
+          const y = b * e.x + d * e.y + ey;
+          expect(Math.hypot(x - fp.center.x, y - fp.center.y), info.kind).toBeLessThan(Math.hypot(fp.w, fp.h) / 2 + 1);
+        }
+      }
+    }
   });
 
   it('издалека движущегося нет: «неподвижное» — вся сцена', () => {
     expect(artMoves(0.5)).toBe(false);
     for (const info of INDUSTRY_LIST) {
       const ind = industry(info);
-      for (const zoom of [0.2, 0.4]) {
-        expect(paint(ind, zoom, 'motion').draws, info.kind).toEqual({});
-        expect(paint(ind, zoom, 'still').draws, info.kind).toEqual(paint(ind, zoom, 'all').draws);
-      }
+      for (const zoom of [0.2, 0.4]) expect(paint(ind, zoom, 'still').draws, info.kind).toEqual(paint(ind, zoom, 'all').draws);
     }
   });
 

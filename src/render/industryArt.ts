@@ -70,35 +70,159 @@ const fullness = (n: number | undefined) => Math.min(1, (n ?? 0) / 100);
 
 /**
  * Что из сцены рисовать: 'all' — всё; 'still' — без движущегося (дым, мерцание огня, противовесы качалок — вблизи),
- * так её можно держать в кэше карты (src/render/tileCache.ts); 'motion' — только движущееся, поверх 'still' в каждом кадре.
+ * так её можно держать в кэше карты (src/render/tileCache.ts). Движущееся поверх 'still' — излучатели (Emitter):
+ * записываются раз прогоном сцены вхолостую (industryMotion, annexMotion), рисуются в каждом кадре (drawEmitters).
  */
-export type ArtLayer = 'all' | 'still' | 'motion';
+export type ArtLayer = 'all' | 'still';
 
-/** Методы холста, что меняют преобразование: в 'motion' они доходят до холста — движущееся встаёт на своё место. */
+/**
+ * Излучатель — движущееся сцены: дым из трубы, мерцающий огонь, противовесы качалки. m — преобразование из координат
+ * сцены в мир (как у setTransform), x, y — место в них; i — номер (зерно разброса) у дыма и качалки, радиус у огня;
+ * rgb и s — цвет и размер дыма; seed, ветер (wx, wy) и вредность (harm) — как у сцены (Art).
+ */
+export interface Emitter {
+  kind: 'smoke' | 'glow' | 'pump';
+  m: readonly [number, number, number, number, number, number];
+  x: number;
+  y: number;
+  i: number;
+  rgb: string;
+  s: number;
+  seed: number;
+  wx: number;
+  wy: number;
+  harm: number;
+}
+
+/**
+ * Холст записи (Art в слое 'record'): ничего не рисует, только следит за преобразованием — сцена проходит вхолостую,
+ * а излучатели запоминают, где они (Emitter.m).
+ */
+class Track {
+  a = 1;
+  b = 0;
+  c = 0;
+  d = 1;
+  e = 0;
+  f = 0;
+  private stack: number[] = [];
+  save(): void {
+    this.stack.push(this.a, this.b, this.c, this.d, this.e, this.f);
+  }
+  restore(): void {
+    if (this.stack.length < 6) return;
+    [this.a, this.b, this.c, this.d, this.e, this.f] = this.stack.splice(-6);
+  }
+  transform(a: number, b: number, c: number, d: number, e: number, f: number): void {
+    const { a: A, b: B, c: C, d: D, e: E, f: F } = this;
+    this.a = A * a + C * b;
+    this.b = B * a + D * b;
+    this.c = A * c + C * d;
+    this.d = B * c + D * d;
+    this.e = A * e + C * f + E;
+    this.f = B * e + D * f + F;
+  }
+  translate(x: number, y: number): void {
+    this.transform(1, 0, 0, 1, x, y);
+  }
+  scale(x: number, y: number): void {
+    this.transform(x, 0, 0, y, 0, 0);
+  }
+  rotate(r: number): void {
+    const cos = Math.cos(r);
+    const sin = Math.sin(r);
+    this.transform(cos, sin, -sin, cos, 0, 0);
+  }
+  setTransform(a: number, b: number, c: number, d: number, e: number, f: number): void {
+    [this.a, this.b, this.c, this.d, this.e, this.f] = [a, b, c, d, e, f];
+  }
+  resetTransform(): void {
+    this.setTransform(1, 0, 0, 1, 0, 0);
+  }
+}
+
 const TRANSFORMS = new Set(['save', 'restore', 'translate', 'rotate', 'scale', 'transform', 'setTransform', 'resetTransform']);
 const noop = () => undefined;
-const blind = new WeakMap<CanvasRenderingContext2D, CanvasRenderingContext2D>();
 
-/** Холст, который ничего не рисует, но двигает преобразование настоящего: сцена в 'motion' проходит вхолостую. */
-function blindCtx(real: CanvasRenderingContext2D): CanvasRenderingContext2D {
-  let c = blind.get(real);
-  if (!c) {
-    const bound = new Map<string, unknown>();
-    c = new Proxy(real, {
-      get(target, prop) {
-        if (typeof prop === 'string' && TRANSFORMS.has(prop)) {
-          let f = bound.get(prop);
-          if (!f) bound.set(prop, (f = (target[prop as keyof CanvasRenderingContext2D] as (...a: unknown[]) => unknown).bind(target)));
-          return f;
-        }
-        const v = Reflect.get(target, prop, target);
-        return typeof v === 'function' ? noop : v;
-      },
-      set: () => true,
-    });
-    blind.set(real, c);
+/** Холст сцены для записи излучателей: преобразования — в track, остальное — вхолостую. */
+function recordCtx(track: Track): CanvasRenderingContext2D {
+  const props: Record<string | symbol, unknown> = {};
+  return new Proxy(props, {
+    get(target, prop) {
+      if (typeof prop === 'string' && TRANSFORMS.has(prop)) {
+        const f = track[prop as keyof Track] as (...a: number[]) => void;
+        return (...a: number[]) => f.apply(track, a);
+      }
+      return prop in target ? target[prop] : noop;
+    },
+    set: (target, prop, v) => ((target[prop] = v), true),
+  }) as unknown as CanvasRenderingContext2D;
+}
+
+/** Клубы дыма из трубы в (x, y) координат сцены в момент t (Art.smoke). */
+function paintSmoke(c: CanvasRenderingContext2D, e: Omit<Emitter, 'kind' | 'm'>, t: number): void {
+  // Чем вреднее (world/enterprise.ts, HARM), тем гуще, темнее и длиннее шлейф по ветру.
+  const h = e.harm;
+  const s = e.s;
+  const puffs = 4 + h;
+  const tone = h ? darkRgb(e.rgb, 0.12 * h) : e.rgb;
+  for (let k = 0; k < puffs; k++) {
+    const ph = (t * 0.18 + k / puffs + hash(e.seed, e.i * 7 + 99)) % 1;
+    const dist = ph * 26 * s * (1 + 0.35 * h);
+    const wob = Math.sin(ph * 6 + k) * 2 * s;
+    c.fillStyle = `rgba(${tone},${((0.55 + 0.07 * h) * (1 - ph)).toFixed(2)})`;
+    disc(c, e.x + e.wx * dist - e.wy * wob, e.y + e.wy * dist + e.wx * wob, (1.6 + ph * (5 + h)) * s);
   }
-  return c;
+}
+
+/** Раскалённое в (x, y) радиуса r; f — мерцание (1 — ровный огонь). */
+function paintGlow(c: CanvasRenderingContext2D, x: number, y: number, r: number, f: number): void {
+  c.fillStyle = 'rgba(255,140,40,0.35)';
+  disc(c, x, y, r * 1.7 * f);
+  c.fillStyle = '#ffb347';
+  disc(c, x, y, r * f);
+  c.fillStyle = '#fff1b8';
+  disc(c, x, y, r * 0.45 * f);
+}
+
+/** Мерцание огня в (x, ·) в момент t. */
+const flicker = (t: number, x: number) => 0.85 + 0.15 * Math.sin(t * 11 + x) * Math.sin(t * 7.3);
+
+/** Противовесы качалки (в её осях, Art.pumpjack), сдвинутые качанием на sw. */
+function paintPump(c: CanvasRenderingContext2D, sw: number): void {
+  c.fillStyle = '#45484e';
+  c.fillRect(-7.3 + sw, -3.6, 2.6, 1.7);
+  c.fillRect(-7.3 + sw, 1.9, 2.6, 1.7);
+}
+
+/** Качание противовеса качалки номер i у сцены с зерном seed в момент t. */
+const pumpSwing = (t: number, seed: number, i: number) => Math.cos(t * 2.4 + hash(seed, i) * 6.283) * 2.2;
+
+/**
+ * Излучатели list в момент t (часы, а не время игры: движутся и на паузе) — каждый в своём преобразовании поверх base
+ * (преобразование холста из мира: у карты — камера). Холст остаётся с base.
+ */
+export function drawEmitters(
+  ctx: CanvasRenderingContext2D,
+  list: readonly Emitter[],
+  t: number,
+  base: { a: number; b: number; c: number; d: number; e: number; f: number },
+): void {
+  for (const em of list) {
+    const [a, b, c, d, e, f] = em.m;
+    ctx.setTransform(
+      base.a * a + base.c * b,
+      base.b * a + base.d * b,
+      base.a * c + base.c * d,
+      base.b * c + base.d * d,
+      base.a * e + base.c * f + base.e,
+      base.b * e + base.d * f + base.f,
+    );
+    if (em.kind === 'smoke') paintSmoke(ctx, em, t);
+    else if (em.kind === 'glow') paintGlow(ctx, em.x, em.y, em.i, flicker(t, em.x));
+    else paintPump(ctx, pumpSwing(t, em.seed, em.i));
+  }
+  ctx.setTransform(base.a, base.b, base.c, base.d, base.e, base.f);
 }
 
 /** Что рисует Art: предприятие или любое строение с контуром (дом города — houseArt.ts: не работает и не вредит). */
@@ -133,24 +257,32 @@ export class Art {
   readonly level: number;
   /** Предприятие работает — дымят трубы, горит факел. */
   readonly active: boolean;
-  /** Холст сцены; в слое 'motion' — холостой (рисует только движущееся, через m). */
+  /** Холст сцены; при записи излучателей (sink) — холостой, только следит за преобразованием (trace). */
   readonly c: CanvasRenderingContext2D;
-  /** Холст движущегося — всегда настоящий. */
-  readonly m: CanvasRenderingContext2D;
+  /** Запись излучателей: куда (sink) и где сейчас преобразование сцены (trace); нет — сцену рисуют. */
+  private readonly trace: Track | null = null;
+  private readonly sink: Emitter[] | null = null;
   /** Нарисовано движущееся (дым, мерцающий огонь, качалка): картинка меняется сама — нужен следующий кадр. */
   moved = false;
 
-  /** seed — зерно «случайных» раскладок: по умолчанию id предприятия (у пристройки — её id); layer — что рисовать (ArtLayer). */
+  /**
+   * seed — зерно «случайных» раскладок: по умолчанию id предприятия (у пристройки — её id); layer — что рисовать
+   * (ArtLayer); sink — не рисовать, а записать сюда излучатели (движущееся) сцены вблизи (zoom > 0.5), холст real не нужен.
+   */
   constructor(
-    real: CanvasRenderingContext2D,
+    real: CanvasRenderingContext2D | null,
     ind: ArtTarget,
     zoom: number,
     readonly t: number,
     seed = ind.id,
     readonly layer: ArtLayer = 'all',
+    sink?: Emitter[],
   ) {
-    this.c = layer === 'motion' ? blindCtx(real) : real;
-    this.m = real;
+    if (sink || !real) {
+      this.trace = new Track();
+      this.sink = sink ?? [];
+      this.c = recordCtx(this.trace);
+    } else this.c = real;
     this.lod = zoom > 0.5 ? 2 : zoom > 0.25 ? 1 : 0;
     this.d = this.lod === 2;
     const cos = Math.cos(ind.fp.angle);
@@ -853,14 +985,11 @@ export class Art {
     if (this.lod) {
       c.fillStyle = '#6d7076';
       c.fillRect(-10, -1.6, 3, 3.2);
-      // Противовесы вблизи качаются — это движущееся (ArtLayer); ни с чем в сцене они не пересекаются.
-      if (!this.d || this.layer !== 'still') {
-        const k = this.d ? this.m : c;
+      // Противовесы вблизи качаются — это движущееся (излучатель); ни с чем в сцене они не пересекаются.
+      if (this.d && this.sink) this.emit('pump', 0, 0, i);
+      else if (!this.d || this.layer !== 'still') {
         if (this.d) this.moved = true;
-        const sw = this.d ? Math.cos(this.t * 2.4 + this.r(i) * 6.283) * 2.2 : 0;
-        k.fillStyle = '#45484e';
-        k.fillRect(-7.3 + sw, -3.6, 2.6, 1.7);
-        k.fillRect(-7.3 + sw, 1.9, 2.6, 1.7);
+        paintPump(c, this.d ? pumpSwing(this.t, this.seed, i) : 0);
       }
       c.fillStyle = DARK;
       c.fillRect(0.4, -2.4, 2.4, 4.8);
@@ -958,36 +1087,31 @@ export class Art {
 
   /** Дым из трубы: клубы растут и тают по ветру. Только у работающего предприятия и вблизи. */
   smoke(x: number, y: number, i: number, rgb = '236,236,236', s = 1): void {
-    if (this.pass !== 2 || !this.d || !this.active || this.layer === 'still') return;
-    const c = this.m;
+    if (this.pass !== 2 || !this.d || !this.active || (this.layer === 'still' && !this.sink)) return;
+    if (this.sink) return this.emit('smoke', x, y, i, rgb, s);
     this.moved = true;
-    // Чем вреднее (world/enterprise.ts, HARM), тем гуще, темнее и длиннее шлейф по ветру.
-    const h = this.harm;
-    const puffs = 4 + h;
-    const tone = h ? darkRgb(rgb, 0.12 * h) : rgb;
-    for (let k = 0; k < puffs; k++) {
-      const ph = (this.t * 0.18 + k / puffs + this.r(i * 7 + 99)) % 1;
-      const dist = ph * 26 * s * (1 + 0.35 * h);
-      const wob = Math.sin(ph * 6 + k) * 2 * s;
-      c.fillStyle = `rgba(${tone},${((0.55 + 0.07 * h) * (1 - ph)).toFixed(2)})`;
-      disc(c, x + this.wx * dist - this.wy * wob, y + this.wy * dist + this.wx * wob, (1.6 + ph * (5 + h)) * s);
-    }
+    paintSmoke(this.c, { x, y, i, rgb, s, seed: this.seed, wx: this.wx, wy: this.wy, harm: this.harm }, this.t);
   }
 
   /** Раскалённое: чугун в домне, факел. Мерцает, только когда завод работает. */
   glow(x: number, y: number, r: number): void {
     if (this.pass !== 2 || !this.lod || !this.active) return;
-    // Мерцает только вблизи: там это движущееся, издалека — ровный огонь вместе со сценой.
-    if (this.layer === (this.d ? 'still' : 'motion')) return;
-    const c = this.m;
+    // Мерцает только вблизи: там это движущееся (излучатель), издалека — ровный огонь вместе со сценой.
+    if (this.sink) return this.d ? this.emit('glow', x, y, r) : undefined;
+    if (this.d && this.layer === 'still') return;
     if (this.d) this.moved = true;
-    const f = this.d ? 0.85 + 0.15 * Math.sin(this.t * 11 + x) * Math.sin(this.t * 7.3) : 1;
-    c.fillStyle = 'rgba(255,140,40,0.35)';
-    disc(c, x, y, r * 1.7 * f);
-    c.fillStyle = '#ffb347';
-    disc(c, x, y, r * f);
-    c.fillStyle = '#fff1b8';
-    disc(c, x, y, r * 0.45 * f);
+    paintGlow(this.c, x, y, r, this.d ? flicker(this.t, x) : 1);
+  }
+
+  /** Сцена не рисуется, а записывает излучатели (industryMotion, annexMotion). */
+  get recording(): boolean {
+    return this.sink !== null;
+  }
+
+  /** Запись излучателя kind в (x, y) сцены — там, где сейчас её преобразование. */
+  private emit(kind: Emitter['kind'], x: number, y: number, i: number, rgb = '', s = 1): void {
+    const t = this.trace!;
+    this.sink!.push({ kind, m: [t.a, t.b, t.c, t.d, t.e, t.f], x, y, i, rgb, s, seed: this.seed, wx: this.wx, wy: this.wy, harm: this.harm });
   }
 }
 
@@ -2150,6 +2274,18 @@ export function drawIndustryArt(ctx: CanvasRenderingContext2D, ind: Industry, zo
   return a.moved;
 }
 
+/**
+ * Движущееся предприятия вблизи (без пристроек) — излучатели в координатах мира (drawEmitters): сцена проходит вхолостую
+ * раз, пока предприятие то же (место, уровень, работает ли).
+ */
+export function industryMotion(ind: Industry): Emitter[] {
+  const info = ind.info;
+  const sink: Emitter[] = [];
+  const a = new Art(null, ind, 1, 0, ind.id, 'all', sink);
+  paintScene(a.c, a, ind.fp, info.w, info.h, industryGround(info), SCENES[info.kind], ind);
+  return sink;
+}
+
 /** Есть ли у сцены на этом зуме движущееся (ArtLayer): всё оно — только вблизи. */
 export const artMoves = (zoom: number): boolean => zoom > 0.5;
 
@@ -2167,8 +2303,8 @@ export function paintScene<T>(
   scene: (a: Art, arg: T) => void,
   arg: T,
 ): void {
-  // Только движущееся: сцена — вхолостую (холст a.c лишь двигает преобразование), и только проход построек.
-  const motion = a.layer === 'motion';
+  // Запись излучателей: сцена — вхолостую (холст a.c лишь следит за преобразованием), и только проход построек.
+  const motion = a.recording;
   if (motion) ctx = a.c;
   ctx.save();
   ctx.translate(fp.center.x, fp.center.y);

@@ -1,7 +1,7 @@
 import { ANNEX } from '../config';
 import type { IndustryKind } from '../world/cargo';
 import type { Annex, Industry } from '../world/entities';
-import { Art, type ArtLayer, BARK, boat, DARK, disc, hash, herd, industryGround, METAL, paintScene, shade, YELLOW } from './industryArt';
+import { Art, type ArtLayer, BARK, boat, DARK, disc, type Emitter, hash, herd, industryGround, METAL, paintScene, shade, YELLOW } from './industryArt';
 
 /**
  * Пристройки предприятий — свои вспомогательные здания, а не уменьшенная копия предприятия: у фермы — зерносушилка,
@@ -175,14 +175,26 @@ interface Lot {
  * как у предприятия. Ответ — нарисовано ли движущееся.
  */
 export function drawAnnexArt(ctx: CanvasRenderingContext2D, ind: Industry, annex: Annex, zoom: number, time: number, layer: ArtLayer = 'all'): boolean {
+  const a = new Art(ctx, ind, zoom, time, annex.id, layer);
+  paintAnnex(ctx, a, ind, annex);
+  return a.moved;
+}
+
+/** Движущееся пристройки вблизи — излучатели в координатах мира (как industryMotion у предприятия). */
+export function annexMotion(ind: Industry, annex: Annex): Emitter[] {
+  const sink: Emitter[] = [];
+  const a = new Art(null, ind, 1, 0, annex.id, 'all', sink);
+  paintAnnex(a.c, a, ind, annex);
+  return sink;
+}
+
+function paintAnnex(ctx: CanvasRenderingContext2D, a: Art, ind: Industry, annex: Annex): void {
   const info = ind.info;
   // Сцены нарисованы под размер пристройки этого вида; контур из сохранения впишется масштабом.
   const W = info.w * ANNEX.scale;
   const H = info.h * ANNEX.scale;
   const lot: Lot = { ind, kind: info.kind, variant: annexVariant(ind, annex), roof: info.roof, W, H, L: -W / 2, T: -H / 2, R: W / 2, B: H / 2 };
-  const a = new Art(ctx, ind, zoom, time, annex.id, layer);
   paintScene(ctx, a, annex.fp, W, H, industryGround(info), scene, lot);
-  return a.moved;
 }
 
 function scene(a: Art, s: Lot): void {
