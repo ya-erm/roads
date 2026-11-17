@@ -310,7 +310,10 @@ export function townRowsHtml(g: Game, t: Town): string {
   const left = Math.max(0, ENTERPRISE.slots.idleMonths - (t.slotIdle ?? 0));
   const slots = Math.max(0, total - info.inside.length);
   // Город сам не строит второй завод того же рецепта: всё нужное уже есть — место ждёт игрока.
-  const freeTip = slots && e.townPlant(t)
+  // Город уже решил строить (итоги месяца) — откроет в свой момент этого месяца (enterprises.ts).
+  const freeTip = slots && t.slotOpenAt !== undefined
+    ? `Свободно: можно поставить завод, а нет — через ${Math.max(1, Math.ceil(t.slotOpenAt - g.time))} с город построит сам`
+    : slots && e.townPlant(t)
     ? `Свободно: можно поставить завод, а пустует — через ${left} мин город построит сам`
     : 'Свободно: можно поставить завод. Город сам не построит — нужные ему заводы в городе уже есть';
   const free = Array.from({ length: slots }, () => `<span class="ent-slot free" data-tip="${freeTip}">＋</span>`).join('');

@@ -320,13 +320,20 @@ describe('«Со строительством»', () => {
 });
 
 describe('места в черте города', () => {
-  it('пустует 12 мин — город строит сам невредный завод в черте', () => {
+  it('пустует 12 мин — город решает строить и в следующем месяце строит сам невредный завод в черте', () => {
     const g = player({ size: 'medium', towns: 8 });
     const t = g.towns.find((x) => townSlots(x) > townIndustries(x, g.towns, g.industries).length)!;
     const before = townIndustries(t, g.towns, g.industries).length;
     runMonths(g, ENTERPRISE.slots.idleMonths - 1);
     expect(townIndustries(t, g.towns, g.industries).length).toBe(before);
+    expect(t.slotOpenAt).toBeUndefined();
+    // Итоги 12-го месяца: решение принято, момент открытия — в следующем месяце.
     runMonths(g, 1);
+    expect(townIndustries(t, g.towns, g.industries).length).toBe(before);
+    expect(t.slotOpenAt).toBeGreaterThan(g.time);
+    expect(t.slotOpenAt).toBeLessThan(g.time + MONTH_LENGTH);
+    runMonths(g, 1);
+    expect(t.slotOpenAt).toBeUndefined();
     const after = townIndustries(t, g.towns, g.industries);
     expect(after.length).toBe(before + 1);
     const fresh = after.find((i) => i.builtBy === 'town')!;
@@ -368,6 +375,90 @@ describe('места в черте города', () => {
       if (plan.town === t && plan.ok) return;
     }
     throw new Error('второй такой же завод игроку не поставить');
+  });
+});
+
+describe('заводы городов открываются по ходу месяца', () => {
+  /** Партия, где в итогах ближайшего месяца сразу несколько городов решают строить: места есть и пустуют давно. */
+  const crowd = () => {
+    const g = player({ size: 'medium', towns: 8 });
+    for (const t of g.towns) t.slotIdle = ENTERPRISE.slots.idleMonths - 1;
+    runMonths(g, 1);
+    const due = g.towns.filter((t) => t.slotOpenAt !== undefined);
+    return { g, due };
+  };
+  const byTown = (g: Game) => g.industries.filter((i) => i.builtBy === 'town').length;
+
+  it('в итогах месяца — только решение; заводы открываются по одному, в разные моменты месяца', () => {
+    const { g, due } = crowd();
+    expect(due.length).toBeGreaterThanOrEqual(4);
+    const start = g.time;
+    const built0 = byTown(g);
+    // Сразу после итогов месяца ни одного: не шквал в начале месяца.
+    expect(built0).toBe(0);
+    const at: number[] = [];
+    let prev = built0;
+    runSeconds(g, MONTH_LENGTH - 0.2, () => {
+      const now = byTown(g);
+      // Не больше одного открытия за такт.
+      expect(now - prev).toBeLessThanOrEqual(1);
+      if (now > prev) at.push(g.time - start);
+      prev = now;
+    });
+    // Все решённые открылись до конца месяца — за месяц столько же заводов, сколько и прежде разом.
+    expect(g.towns.filter((t) => t.slotOpenAt !== undefined)).toEqual([]);
+    expect(at.length).toBe(due.length);
+    // Растянуты на весь месяц: первое — в первой его половине, последнее — во второй, между соседними — зазор.
+    expect(at[0]).toBeLessThan(MONTH_LENGTH / 2);
+    expect(at[at.length - 1]).toBeGreaterThan(MONTH_LENGTH / 2);
+    for (let i = 1; i < at.length; i++) expect(at[i] - at[i - 1]).toBeGreaterThan(MONTH_LENGTH / due.length / 4);
+    // Уведомления — тоже по одному, со значками рецепта.
+    const notes = g.news.entries.filter((e) => e.text.startsWith('🏭 Открытие в городе'));
+    expect(notes.length).toBe(due.length);
+    for (const e of notes) {
+      expect(e.recipe).toBeTruthy();
+      expect(e.text.endsWith(e.recipe!.name)).toBe(true);
+    }
+  });
+
+  it('моменты открытий — по seed партии; переживают сохранение и загрузку', () => {
+    const a = crowd();
+    const b = crowd();
+    expect(b.due.map((t) => [t.id, t.slotOpenAt])).toEqual(a.due.map((t) => [t.id, t.slotOpenAt]));
+    const { g, due } = a;
+    runSeconds(g, MONTH_LENGTH / 3);
+    const left = due.filter((t) => t.slotOpenAt !== undefined);
+    expect(left.length).toBeGreaterThan(0);
+    const loaded = withoutCitizens(new Game(g.settings, JSON.parse(JSON.stringify(g.toSave()))));
+    for (const t of left) expect(loaded.towns.find((x) => x.id === t.id)!.slotOpenAt).toBe(t.slotOpenAt);
+    const before = byTown(loaded);
+    runSeconds(loaded, MONTH_LENGTH - MONTH_LENGTH / 3 - 0.2);
+    expect(byTown(loaded) - before).toBe(left.length);
+  });
+
+  it('старое сохранение без моментов: город, что давно ждёт, решает в итогах месяца и открывает в следующем', () => {
+    const { g, due } = crowd();
+    const save = JSON.parse(JSON.stringify(g.toSave()));
+    for (const t of save.towns) delete t.slotOpenAt;
+    const old = withoutCitizens(new Game(g.settings, save));
+    expect(old.towns.every((t) => t.slotOpenAt === undefined)).toBe(true);
+    runMonths(old, 1);
+    expect(old.towns.filter((t) => t.slotOpenAt !== undefined).length).toBe(due.length);
+    expect(byTown(old)).toBe(0);
+    runMonths(old, 1);
+    expect(byTown(old)).toBe(due.length);
+  });
+
+  it('место заняли до назначенного момента — город не строит второй', () => {
+    const { g, due } = crowd();
+    const t = due[0];
+    // Место заняли (игрок или сам город раньше срока): все места города заняты.
+    while (townIndustries(t, g.towns, g.industries).length < townSlots(t)) expect(g.enterprises.townBuilds(t)).toBeTruthy();
+    const full = townIndustries(t, g.towns, g.industries).length;
+    runSeconds(g, MONTH_LENGTH - 0.2);
+    expect(townIndustries(t, g.towns, g.industries).length).toBe(full);
+    expect(t.slotOpenAt).toBeUndefined();
+    expect(t.slotIdle).toBeUndefined();
   });
 });
 

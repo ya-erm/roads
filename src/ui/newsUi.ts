@@ -7,9 +7,9 @@
 import type { Vec } from '../core/vec';
 import { projectName } from '../game/construction';
 import type { Game, Notice } from '../game/game';
-import { NEWS_KINDS, NEWS_MONTHS, NOTICE_FADE, NOTICE_LIFE, type NewsEntry, type NewsKind, type NewsRef } from '../game/news';
+import { NEWS_KINDS, NEWS_MONTHS, NOTICE_FADE, NOTICE_LIFE, type NewsEntry, type NewsKind, type NewsRecipe, type NewsRef } from '../game/news';
 import { footprintRadius } from '../world/spatial';
-import { cargoIcon, townIcon } from './cargoIcons';
+import { cargoIcon, cargoTip, townIcon } from './cargoIcons';
 import { baseSvg, buildSvg } from './constructionUi';
 import { lineKindSvg, stationSvg } from './icons';
 
@@ -88,6 +88,20 @@ export function newsTarget(g: Game, ref: NewsRef): NewsTarget | null {
   }
 }
 
+/** Рецепт значками: сырьё → продукция (у добычи — только продукция); у значка — подсказка-название груза (data-tip). */
+export function recipeIconsHtml(r: NewsRecipe, size = 18): string {
+  const inputs = r.in.map((c) => cargoTip(c, size - 2)).join('');
+  return `<span class="notice-recipe">${inputs}${r.in.length ? '<span class="nr-arrow">→</span>' : ''}${cargoTip(r.out, size)}</span>`;
+}
+
+/** Текст уведомления или записи (HTML): перед названием предприятия — значки его рецепта; названия в тексте нет — в начале. */
+export function noticeTextHtml(text: string, recipe?: NewsRecipe): string {
+  if (!recipe) return esc(text);
+  const i = text.lastIndexOf(recipe.name);
+  const icons = recipeIconsHtml(recipe);
+  return i < 0 ? icons + esc(text) : esc(text.slice(0, i)) + icons + esc(text.slice(i));
+}
+
 /** Прозрачность всплывающего уведомления: последние NOTICE_FADE секунд жизни гаснет. */
 export function noticeOpacity(n: Notice): number {
   return Math.max(0, Math.min(1, (NOTICE_LIFE - n.age) / NOTICE_FADE));
@@ -103,7 +117,7 @@ export function noticeHtml(g: Game, n: Notice): string {
   const attrs = go ? `class="notice go" data-action="notice-go" data-tip="Показать на карте"` : `class="notice" data-action="notice-read"`;
   const border = n.color ? `;border-left-color:${n.color}` : '';
   const tip = n.news !== undefined ? 'Скрыть — останется в истории 🔔' : 'Скрыть';
-  return `<div ${attrs} data-id="${n.id}" style="opacity:${noticeOpacity(n)}${border}"><span class="notice-text">${esc(n.text)}</span><button class="notice-x" data-action="notice-close" data-id="${n.id}" data-tip="${tip}">×</button></div>`;
+  return `<div ${attrs} data-id="${n.id}" style="opacity:${noticeOpacity(n)}${border}"><span class="notice-text">${noticeTextHtml(n.text, n.recipe)}</span><button class="notice-x" data-action="notice-close" data-id="${n.id}" data-tip="${tip}">×</button></div>`;
 }
 
 /** Кнопки-места записи: объекты, что ещё есть на карте; нет ни одного, а место известно — «📍 на карте». */
@@ -137,7 +151,7 @@ function rowHtml(g: Game, e: NewsEntry, unread: boolean): string {
   const places = placeButtons(g, e);
   return `<div class="${cls}" data-action="news-row" data-n="${e.n}"${tip} style="border-left-color:${e.color ?? NEWS_KIND_INFO[e.kind].color}">
           ${newsKindIcon(e.kind)}
-          <div class="news-main"><div class="news-text">${esc(e.text)}</div>${places ? `<div class="news-places">${places}</div>` : ''}</div>
+          <div class="news-main"><div class="news-text">${noticeTextHtml(e.text, e.recipe)}</div>${places ? `<div class="news-places">${places}</div>` : ''}</div>
         </div>`;
 }
 

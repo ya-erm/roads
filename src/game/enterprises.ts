@@ -37,6 +37,7 @@ import type { Deposit, Industry, Station, Town } from '../world/entities';
 import { playerIndustries } from '../world/settings';
 import { type Footprint, footprintCorners, footprintRadius } from '../world/spatial';
 import type { Game } from './game';
+import type { NewsRecipe } from './news';
 
 /** Где и как встанет предприятие — для предпросмотра и постройки. */
 export interface IndustryPlan {
@@ -72,6 +73,13 @@ export type BuildStall = 'base' | 'money' | 'upkeep';
 const DEPOSIT_SNAP = 240;
 /** Обеспеченность и потоки рабочих пересчитываются раз в столько секунд (и сразу после постройки или сноса). */
 const REFRESH = 1;
+/** Открытие завода городом — не ближе этой доли своего отрезка месяца к его краям (planOpenings). */
+const OPEN_JITTER = 0.15;
+
+/** Значки рецепта предприятия для уведомления: сырьё → продукция перед его названием в тексте (name). */
+export function industryRecipe(info: IndustryType, name: string): NewsRecipe {
+  return { in: [...info.accepts], out: info.produces, name };
+}
 
 export class Enterprises {
   /** Месторождения мира (в старых партиях нет). */
@@ -293,7 +301,7 @@ export class Enterprises {
     ind.made = 0;
     this.startWork(ind, plan.cost, buildTime(ind.info, true));
     this.game.journal.add('industry~', { id: ind.id, $: plan.cost });
-    if (!ind.build) this.game.notify(`🏭 ${ind.name}: восстановлено`, '#2e9d57');
+    if (!ind.build) this.game.notify(`🏭 ${ind.name}: восстановлено`, '#2e9d57', { recipe: industryRecipe(ind.info, ind.name) });
     return null;
   }
 
@@ -337,6 +345,8 @@ export class Enterprises {
       }
       if (ind.build) this.work(ind, dt);
     }
+    // Заводы, что города решили открыть в итогах месяца, — каждый в свой момент (monthEnd).
+    for (const t of g.towns) if (t.slotOpenAt !== undefined && g.time >= t.slotOpenAt) this.openSlot(t);
     this.clock -= dt;
     if (this.clock <= 0) {
       this.clock = REFRESH;
@@ -369,25 +379,62 @@ export class Enterprises {
       ind.paid = (ind.paid ?? 0) + Math.round(b.paid);
       delete ind.build;
       this.changed();
-      g.notify(`🏭 ${ind.name}: построено`, '#2e9d57', { kind: 'industry', refs: [{ type: 'industry', id: ind.id }] });
+      g.notify(`🏭 ${ind.name}: построено`, '#2e9d57', { kind: 'industry', refs: [{ type: 'industry', id: ind.id }], recipe: industryRecipe(ind.info, ind.name) });
       g.journal.add('industry!', { id: ind.id });
     }
   }
 
-  /** Итоги месяца: пустующие места в черте городов — город строит сам (ENTERPRISE.slots.idleMonths). */
+  /**
+   * Итоги месяца: пустующие места в черте городов — город строит сам (ENTERPRISE.slots.idleMonths). Здесь — только
+   * решение; открываются заводы в течение следующего месяца, каждый в свой момент (planOpenings, tick), — а не все
+   * разом в начале месяца шквалом уведомлений. Сколько заводов за месяц — столько же, что и прежде.
+   */
   monthEnd(): void {
     if (!this.on) return;
     const g = this.game;
+    const due: Town[] = [];
     for (const t of g.towns) {
+      // Не успело открыться за месяц (такты шли мимо) — сейчас, до нового решения.
+      if (t.slotOpenAt !== undefined) this.openSlot(t);
       const free = townSlots(t) - townIndustries(t, g.towns, g.industries).length;
       if (free <= 0) {
         delete t.slotIdle;
         continue;
       }
       t.slotIdle = (t.slotIdle ?? 0) + 1;
-      if (t.slotIdle >= ENTERPRISE.slots.idleMonths && this.townBuilds(t)) delete t.slotIdle;
+      if (t.slotIdle >= ENTERPRISE.slots.idleMonths && this.townPlant(t)) due.push(t);
     }
+    this.planOpenings(due);
     this.changed();
+  }
+
+  /**
+   * Когда в следующем месяце откроется завод каждого из городов due: месяц делится поровну на столько долей,
+   * города — в случайном порядке (по seed партии), каждый — в случайный момент своей доли, не у самого её края.
+   * Два открытия не сходятся в один такт, а между соседними — не меньше трети доли.
+   */
+  private planOpenings(due: Town[]): void {
+    const g = this.game;
+    const order = [...due];
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = g.rng.int(0, i + 1);
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    order.forEach((t, i) => {
+      t.slotOpenAt = g.time + (MONTH_LENGTH * (i + g.rng.range(OPEN_JITTER, 1 - OPEN_JITTER))) / order.length;
+    });
+  }
+
+  /** Пришёл момент, назначенный в итогах месяца: место ещё свободно — город строит; занято (игроком) — не ждёт. */
+  private openSlot(t: Town): void {
+    const g = this.game;
+    delete t.slotOpenAt;
+    if (townSlots(t) - townIndustries(t, g.towns, g.industries).length <= 0) {
+      delete t.slotIdle;
+      return;
+    }
+    // Не вышло (место под завод не нашлось) — slotIdle остаётся: решат снова в итогах месяца.
+    if (this.townBuilds(t)) delete t.slotIdle;
   }
 
   /**
@@ -418,8 +465,11 @@ export class Enterprises {
     });
     if (!fp || g.roadUnder(fp, 2) || g.structuresUnder(fp, 2).blocker || g.structuresUnder(fp, 2).houses.length) return null;
     const ind = this.add(info, fp, { builtBy: 'town', paid: 0 });
-    g.notify(`🏭 В городе ${t.name} открылся ${info.name.toLowerCase()}`, '#2e9d57', {
+    // «Открытие в городе …: суконная фабрика» — без рода у глагола; перед названием — значки сырья и продукции.
+    const name = info.name.toLowerCase();
+    g.notify(`🏭 Открытие в городе ${t.name}: ${name}`, '#2e9d57', {
       kind: 'industry',
+      recipe: industryRecipe(info, name),
       refs: [
         { type: 'industry', id: ind.id },
         { type: 'town', id: t.id },

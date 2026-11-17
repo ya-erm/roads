@@ -11,6 +11,7 @@
  * Хранится в сохранении вместе с отметкой «прочитано до».
  */
 import type { Vec } from '../core/vec';
+import type { CargoType } from '../world/cargo';
 
 /** Вид записи — значок и фильтр в окне. */
 export type NewsKind =
@@ -37,6 +38,16 @@ export interface NewsRef {
   id: number;
 }
 
+/**
+ * Рецепт предприятия значками — перед его названием в тексте уведомления: сырьё → продукция (у добычи — только
+ * продукция). name — название так, как оно стоит в тексте; нет его там — значки в начале.
+ */
+export interface NewsRecipe {
+  in: CargoType[];
+  out: CargoType;
+  name: string;
+}
+
 export interface NewsEntry {
   /** Порядковый номер — по нему считается непрочитанное. */
   n: number;
@@ -47,6 +58,8 @@ export interface NewsEntry {
   color?: string;
   refs?: NewsRef[];
   at?: { pos: Vec; r: number };
+  /** Значки сырья и продукции перед названием предприятия (в старых сохранениях нет). */
+  recipe?: NewsRecipe;
   /** Прочитана кликом по её всплывающему уведомлению (окно с тех пор не открывали). */
   read?: true;
 }
@@ -88,6 +101,7 @@ export class News {
     if (e.color) entry.color = e.color;
     if (e.refs?.length) entry.refs = e.refs.map((r) => ({ type: r.type, id: r.id }));
     if (e.at) entry.at = { pos: { x: Math.round(e.at.pos.x), y: Math.round(e.at.pos.y) }, r: Math.round(e.at.r) };
+    if (e.recipe) entry.recipe = { in: [...e.recipe.in], out: e.recipe.out, name: e.recipe.name };
     this.entries.push(entry);
     this.trim(month);
     return entry;

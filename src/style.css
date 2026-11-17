@@ -386,6 +386,21 @@ button {
   background: #eef4fd;
 }
 
+/* Рецепт предприятия значками перед его названием (в уведомлении и в истории «События»): сырьё → продукция. */
+.notice-recipe {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-right: 4px;
+  vertical-align: -4px;
+}
+
+.notice-recipe .nr-arrow {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0 1px;
+}
+
 /* Крестик справа внутри уведомления: только с экрана, в истории «События» оно остаётся. */
 .notice-x {
   flex: none;

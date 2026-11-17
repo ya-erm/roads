@@ -83,7 +83,7 @@ import { rescalePopulation } from '../scenario/objectives';
 import type { Ref, ScenarioState } from '../scenario/types';
 import { findCrossings, LevelCrossing } from './crossings';
 import { Journal, JournalEntry } from './journal';
-import { News, NOTICE_AFTER_PAUSE, NOTICE_LIFE, type NewsKind, type NewsRef, type NewsSave } from './news';
+import { News, NOTICE_AFTER_PAUSE, NOTICE_LIFE, type NewsKind, type NewsRecipe, type NewsRef, type NewsSave } from './news';
 import { serviceCall, serviceTick, SERVICE_TRAFFIC, SERVICES, type ServiceKind } from './services';
 import { paxFare, ridePath } from './fare';
 import { curbHeading, mergeStops, nearerHalf, rideAhead } from './stopPairs';
@@ -144,7 +144,7 @@ import { laneSlot } from './garages';
 import { CURB } from '../lanes/curb';
 import { CURB_GROW, frontage, withCurb } from '../world/curbStreets';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
-import { Enterprises } from './enterprises';
+import { Enterprises, industryRecipe } from './enterprises';
 import { isActive } from '../world/enterprise';
 import { carryBuild, carryRailBuild, paidFor, spansOf } from './constructionWork';
 import { revertRebuild } from './rebuild';
@@ -517,6 +517,8 @@ export interface Notice {
   at?: { pos: Vec; r: number };
   /** О чём уведомление: клик открывает первое из них (предприятие, город, станция, маршрут…). */
   refs?: NewsRef[];
+  /** Значки сырья и продукции перед названием предприятия в тексте. */
+  recipe?: NewsRecipe;
 }
 
 /** Что ещё знает уведомление: вид (с ним оно попадает в историю «События»), о чём оно и где. */
@@ -524,6 +526,7 @@ export interface NoticeInfo {
   kind?: NewsKind;
   refs?: NewsRef[];
   at?: Notice['at'];
+  recipe?: NewsRecipe;
 }
 
 export interface Floater {
@@ -9067,7 +9070,11 @@ export class Game implements BuildContext {
         ind.level = Math.min(cap, level + E.growthStep);
         streak = 0;
         if (Math.floor(ind.level) > Math.floor(level))
-          this.notify(`${ind.name}: производство выросло до ×${ind.level}`, '#2e9d57', { kind: 'industry', refs: [{ type: 'industry', id: ind.id }] });
+          this.notify(`${ind.name}: производство выросло до ×${ind.level}`, '#2e9d57', {
+            kind: 'industry',
+            refs: [{ type: 'industry', id: ind.id }],
+            recipe: industryRecipe(ind.info, ind.name),
+          });
       } else if (streak <= -E.declineMonths && level > 1) {
         ind.level = Math.max(1, level - E.growthStep);
         streak = 0;
@@ -12073,8 +12080,8 @@ export class Game implements BuildContext {
    * а подсказки на действия игрока («Не хватает денег») — без вида и в историю не идут.
    */
   notify(text: string, color?: string, info: NoticeInfo = {}): void {
-    const { kind, refs, at } = info;
-    const entry = kind ? this.news.add(this.month, { kind, text, color, refs, at }) : undefined;
+    const { kind, refs, at, recipe } = info;
+    const entry = kind ? this.news.add(this.month, { kind, text, color, refs, at, recipe }) : undefined;
     // То же уведомление ещё на экране (на паузе оно не гаснет, а «Не хватает денег» можно получить десять раз
     // подряд) — не второе такое же, а прежнее заново, внизу.
     const same = this.notices.findIndex((n) => n.text === text);
@@ -12087,6 +12094,7 @@ export class Game implements BuildContext {
       ...(entry ? { news: entry.n } : {}),
       ...(at ? { at } : {}),
       ...(refs?.length ? { refs } : {}),
+      ...(recipe ? { recipe } : {}),
     });
     this.journal.add('note', { text });
   }

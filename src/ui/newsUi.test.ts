@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Game } from '../game/game';
 import { DEFAULT_SETTINGS } from '../world/settings';
-import { newsBadge, newsHtml, newsRowGo, newsTarget, noticeHtml, noticeOpacity } from './newsUi';
+import { newsBadge, newsHtml, newsRowGo, newsTarget, noticeHtml, noticeOpacity, noticeTextHtml } from './newsUi';
 
 describe('Окно «События»', () => {
   const setup = () => {
@@ -114,6 +114,24 @@ describe('Всплывающее уведомление', () => {
     expect(hint).toContain('class="notice" data-action="notice-read"');
     expect(hint).toContain('data-tip="Скрыть">×');
     expect([built, grown, hint].join('')).not.toMatch(/title="/);
+  });
+
+  it('о предприятии — значки сырья и продукции перед его названием, с подсказками data-tip; в истории — так же', () => {
+    const game = new Game({ ...DEFAULT_SETTINGS, seed: 42 });
+    const name = 'стекольный завод';
+    game.notify(`🏭 Открытие в городе Берёзовка: ${name}`, '#2e9d57', { kind: 'industry', recipe: { in: ['sand', 'coal'], out: 'glass', name } });
+    const html = noticeHtml(game, game.notices[0]);
+    const icons = html.indexOf('notice-recipe');
+    expect(icons).toBeGreaterThan(html.indexOf('Берёзовка'));
+    expect(icons).toBeLessThan(html.indexOf(name));
+    // Сырьё → продукция: песок и уголь, стрелка, стекло — по порядку.
+    const order = ['data-tip="Песок"', 'data-tip="Уголь"', 'nr-arrow', 'data-tip="Стекло"'].map((s) => html.indexOf(s));
+    expect(order.every((x, i) => x > 0 && (i === 0 || x > order[i - 1]))).toBe(true);
+    expect(html).not.toMatch(/title="|<title>/);
+    expect(newsHtml(game, { kinds: new Set(), unread: new Set() })).toContain('data-tip="Стекло"');
+    // Добыча — только продукция, без стрелки; названия в тексте нет — значки в начале.
+    expect(noticeTextHtml('Ферма: построено', { in: [], out: 'grain', name: 'Ферма' })).not.toContain('nr-arrow');
+    expect(noticeTextHtml('Что-то другое', { in: [], out: 'grain', name: 'Ферма' }).startsWith('<span class="notice-recipe">')).toBe(true);
   });
 
   it('гаснет последние полторы секунды жизни', () => {
