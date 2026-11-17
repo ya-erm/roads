@@ -1,5 +1,5 @@
 import { add, dist, scale, sub, type Vec } from '../core/vec';
-import { CURB, curbDrive, curbStalls, stallTee, type CurbStall } from '../lanes/curb';
+import { boxesOverlap, CURB, curbDrive, curbStalls, stallBox, stallTee, type CurbStall } from '../lanes/curb';
 import type { GLane, GLink, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import { findLaneRoute, routeCost } from '../lanes/routing';
@@ -23,6 +23,11 @@ import { bezier, legPose, type Leg } from './lotMoves';
  * Кто где стоит — данные: места ночёвки — у CarHomes (по геометрии), машины у цели — Town.cars (TownCar.curb, ключ
  * места: полотно, сторона, номер); тут — только кто занял (park), кто едет к месту (homing) и манёвры, без генератора
  * случайных чисел партии.
+ *
+ * Место занято (occupied): стоит гость, стоит дома хозяин места ночёвки или место забронировано. Бронь у места одна и
+ * у одного владельца (подъезжающая машина, потом её манёвр; выезжающая машина) — снимает её только он: въезд — встав на
+ * место, выезд — когда кузов вышел из габарита места (stallBox), а не когда машина тронулась. Выбирая место, машина
+ * смотрит на occupied — занятое пропускает и ищет дальше, как обычно.
  */
 export const CURB_TRIPS = {
   /** Место ночёвки на полосе — не дальше стольких ед. от дома (≈ 150 м). */
@@ -116,6 +121,8 @@ interface Homing {
   /** Где на полосе нос машины в начале манёвра. */
   nose?: number;
   color: string;
+  /** Машина парка (ключ), если это она: её бронь — не помеха ей самой (места ночёвки, CarHomes). */
+  car?: number;
 }
 
 type Phase = 'wait' | 'road' | 'yard' | 'pause';
@@ -138,7 +145,11 @@ interface Move {
   endLink?: number;
   then?: (sim: Vehicle) => void;
   trip?: { from: TownBuilding; to: TownBuilding };
+  car?: number;
 }
+
+/** Чья бронь у места: подъезжающей машины или манёвра. */
+type Holder = Homing | Move;
 
 export class CurbParking {
   private layout: Layout | null = null;
@@ -149,8 +160,8 @@ export class CurbParking {
   private assignedAll = new Set<string>();
   /** Машины у цели на местах: место → ключ машины парка. */
   private parked = new Map<string, number>();
-  /** Места, к которым едут или с которых выезжают (id машины в потоке или −1). */
-  private reserved = new Map<string, number>();
+  /** Бронь: места, к которым едут, на которых манёвр или с которых выезжают (пока кузов в габарите места), — чья. */
+  private reserved = new Map<string, Holder>();
   readonly moves: Move[] = [];
   private homing = new Map<number, Homing>();
 
@@ -303,6 +314,31 @@ export class CurbParking {
     return this.parked.has(key) || this.reserved.has(key);
   }
 
+  /**
+   * Место держит не машина парка car: на нём стоит другой гость или его забронировал кто-то другой. Места ночёвки
+   * (CarHomes.build) таких не берут: иначе хозяин «дома» встал бы на чужую машину.
+   */
+  heldByOther(key: string, car: number): boolean {
+    const p = this.parked.get(key);
+    if (p !== undefined && p !== car) return true;
+    const r = this.reserved.get(key);
+    return !!r && r.car !== car;
+  }
+
+  /** Бронь места key у holder — если места никто не держит (ни стоящий, ни чужая бронь). */
+  private reserve(key: string, holder: Holder): boolean {
+    const r = this.reserved.get(key);
+    if (r === holder) return true;
+    if (r || this.occupied(key)) return false;
+    this.reserved.set(key, holder);
+    return true;
+  }
+
+  /** Снять бронь места key — только свою. */
+  private release(key: string, holder: Holder): void {
+    if (this.reserved.get(key) === holder) this.reserved.delete(key);
+  }
+
   /** Дома ли машина, чьё это место ночёвки (CarHomes): тогда на месте стоит машина. */
   homeAt: (key: string) => boolean = () => false;
 
@@ -408,26 +444,34 @@ export class CurbParking {
 
   /**
    * Машина выезжает с места st к узлу target: ждёт просвета на полосе движения, передом встаёт в поток. opt — цвет,
-   * крючки, endLink (маршрут кончается связью у следующего места), then — встала и поехала. trip — откуда куда.
+   * крючки, endLink (маршрут кончается связью у следующего места), then — встала и поехала, car — машина парка. trip —
+   * откуда куда. Место забронировано кем-то (к нему едут, на нём манёвр) — не выезжает: false.
    */
   leave(
     st: CurbStall,
     target: number,
     trip: { from: TownBuilding; to: TownBuilding },
-    opt: { color: string; hooks?: CurbHooks; endLink?: number; then?: (sim: Vehicle) => void },
-  ): void {
-    this.reserved.set(st.key, -1);
-    this.moves.push({ stall: st, kind: 'out', phase: 'wait', leg: null, s: 0, v: 0, wait: 0, color: opt.color, hooks: opt.hooks ?? {}, target, endLink: opt.endLink, then: opt.then, trip });
+    opt: { color: string; hooks?: CurbHooks; endLink?: number; then?: (sim: Vehicle) => void; car?: number },
+  ): boolean {
+    if (this.reserved.has(st.key)) return false;
+    const m: Move = { stall: st, kind: 'out', phase: 'wait', leg: null, s: 0, v: 0, wait: 0, color: opt.color, hooks: opt.hooks ?? {}, target, endLink: opt.endLink, then: opt.then, trip, car: opt.car };
+    // Бронь выезжающей — пока кузов не вышел из габарита места (stepMove: vacate).
+    this.reserved.set(st.key, m);
+    this.moves.push(m);
+    return true;
   }
 
   /**
    * Машина в потоке sim едет к полосе стоянки: маршрут кончается связью link (Vehicle.endLink); какое из мест choices
    * занять — решается на полосе у них (ближнее, до которого ещё успеть остановиться). Не вышло — hooks.missed.
    */
-  toCurb(sim: Vehicle, link: number, choices: () => CurbStall[], hooks: CurbHooks): void {
+  toCurb(sim: Vehicle, link: number, choices: () => CurbStall[], hooks: CurbHooks, car?: number): void {
+    // Уже ехала к месту (поиск места перенаправил её) — прежняя бронь снимается.
+    const was = this.homing.get(sim.id);
+    if (was?.stall) this.release(was.stall.key, was);
     sim.endLink = link;
     delete sim.endLeft;
-    this.homing.set(sim.id, { link, choices, hooks, color: sim.color });
+    this.homing.set(sim.id, { link, choices, hooks, color: sim.color, car });
   }
 
   /** Едет ли машина в потоке к полосе стоянки. */
@@ -440,7 +484,7 @@ export class CurbParking {
     const h = this.homing.get(simId);
     if (!h) return;
     this.homing.delete(simId);
-    if (h.stall && this.reserved.get(h.stall.key) === simId) this.reserved.delete(h.stall.key);
+    if (h.stall) this.release(h.stall.key, h);
     h.hooks.missed?.();
   }
 
@@ -483,7 +527,8 @@ export class CurbParking {
         let best: { st: CurbStall; mode: 'fwd' | 'rev'; nose: number } | null = null;
         for (const st of h.choices()) {
           const slot = this.slotOf(st);
-          if (!slot || slot.link.id !== lane.link || this.isTaken(st.key) || this.crowded(st, h)) continue;
+          // Занятое (стоит гость или хозяин дома, бронь) — мимо: ищет дальше.
+          if (!slot || slot.link.id !== lane.link || this.occupied(st.key) || this.crowded(st, h)) continue;
           const mode = this.modeOf(st, slot);
           if (!mode) continue;
           const nose = (mode === 'fwd' ? slot.u - CURB_TRIPS.fwdRun : slot.u + CURB_TRIPS.revRun) + L / 2;
@@ -496,11 +541,10 @@ export class CurbParking {
           continue;
         }
         // Не у бордюра (широкая улица) — сперва перестроится вправо: на последней связи пути машина держится правее.
-        if (lane.id !== this.slotOf(best.st)!.lane.id) continue;
+        if (lane.id !== this.slotOf(best.st)!.lane.id || !this.reserve(best.st.key, h)) continue;
         h.stall = best.st;
         h.mode = best.mode;
         h.nose = best.nose;
-        this.reserved.set(best.st.key, id);
         // Передом — сворачивает с ходу (тормозит к точке чуть дальше начала манёвра), задом — встаёт у соседнего места.
         traffic.holdAfter(sim, best.nose + (best.mode === 'fwd' ? FWD_ROLL : 0) - sim.s);
         sim.lcCooldown = 1e9;
@@ -514,9 +558,14 @@ export class CurbParking {
         this.cancel(sim);
         continue;
       }
+      const st = h.stall;
+      // Бронь — её (снять чужую нельзя: clear после загрузки, правка сети); нет — не встаёт, едет дальше.
+      if (this.reserved.get(st.key) !== h) {
+        this.cancel(sim);
+        continue;
+      }
       this.homing.delete(id);
       const c0 = sub(sim.pos, scale(sim.dir, L / 2));
-      const st = h.stall;
       const k = 0.42 * dist(c0, st.pos);
       const fwd = h.mode === 'fwd';
       const leg = fwd
@@ -524,7 +573,10 @@ export class CurbParking {
         : bezier(c0, sub(c0, scale(st.dir, k)), add(st.pos, scale(st.dir, k)), st.pos, true, SPEED.revIn);
       traffic.holdAfter(sim, 0);
       const v0 = fwd ? Math.min(sim.v, SPEED.fwdIn) : 0;
-      this.moves.push({ stall: st, kind: 'in', phase: 'road', leg, s: 0, v: v0, wait: 0, color: sim.color, hooks: h.hooks, sim, dropAt: fwd ? leg.len * 0.55 : leg.len });
+      const m: Move = { stall: st, kind: 'in', phase: 'road', leg, s: 0, v: v0, wait: 0, color: sim.color, hooks: h.hooks, sim, dropAt: fwd ? leg.len * 0.55 : leg.len, car: h.car };
+      // Бронь переходит к манёвру: место занято, пока машина не встанет на него (done).
+      this.reserved.set(st.key, m);
+      this.moves.push(m);
     }
   }
 
@@ -576,6 +628,7 @@ export class CurbParking {
       m.phase = 'yard';
     }
     this.pose(m);
+    if (m.kind === 'out') this.vacate(m);
     if (m.s < leg.len) return true;
     if (m.kind === 'out') {
       m.phase = 'pause';
@@ -622,8 +675,16 @@ export class CurbParking {
   }
 
   private done(m: Move): false {
-    this.reserved.delete(m.stall.key);
+    this.release(m.stall.key, m);
     return false;
+  }
+
+  /** Выезд: кузов вышел из габарита места — бронь снята, на место можно вставать (манёвр ещё идёт). */
+  private vacate(m: Move): void {
+    if (!m.leg || this.reserved.get(m.stall.key) !== m) return;
+    const { c, h } = legPose(m.leg, m.s);
+    const spec = this.host.car;
+    if (!boxesOverlap(stallBox(m.stall), { c, d: h, hl: spec.length / 2, hw: spec.width / 2 })) this.release(m.stall.key, m);
   }
 
   /** Машина в потоке на манёвре — там, где она на нём (поток держит её на месте: holdAfter). */
@@ -639,9 +700,20 @@ export class CurbParking {
     sim.blinker = m.kind === 'in' ? 1 : -1;
   }
 
-  /** Манёвр на месте key (у места — машина видна манёвром, а не стоящей). */
+  /**
+   * Манёвр на месте key (у места — машина видна манёвром, а не стоящей): место ещё за ним (бронь). Выезжающая, чей
+   * кузов уже вне места, — нет: на место мог встать другой.
+   */
   moving(key: string): boolean {
-    return this.moves.some((m) => m.stall.key === key);
+    const r = this.reserved.get(key);
+    return !!r && this.moves.includes(r as Move);
+  }
+
+  /** Бронь места: есть ли и машины ли парка car (подъезд или манёвр). Для проверок. */
+  holder(key: string): { car?: number; kind: 'homing' | 'in' | 'out' } | null {
+    const r = this.reserved.get(key);
+    if (!r) return null;
+    return { car: r.car, kind: 'kind' in r ? r.kind : 'homing' };
   }
 
   // ---------- Рисунок ----------

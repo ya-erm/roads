@@ -297,11 +297,15 @@ export class CarHomes {
         if (curb.assignedElsewhere(st.key, town.id)) laneUsed.set(laneOf(st), (laneUsed.get(laneOf(st)) ?? 0) + 1);
       }
     }
-    const curbHome = (b: TownBuilding, color: string): Place | null => {
+    // Места, где сейчас стоят гости и что забронированы, — по нынешней раскладке (сеть могли поправить).
+    this.syncCurb();
+    const curbHome = (b: TownBuilding, key: number, color: string): Place | null => {
       if (!curb) return null;
       let best: CurbStall | null = null;
       for (const st of curb.near(b.fp.center, CURB_TRIPS.homeRange)) {
-        if (mine.has(st.key) || curb.assignedElsewhere(st.key, town.id) || !curb.slotOf(st)) continue;
+        // Не чужое и не занятое другой машиной (гость встал, пока место было ничьим; к нему едут): хозяин «дома» встал
+        // бы на неё.
+        if (mine.has(st.key) || curb.assignedElsewhere(st.key, town.id) || curb.heldByOther(st.key, key) || !curb.slotOf(st)) continue;
         if ((laneUsed.get(laneOf(st)) ?? 0) + 1 > CURB_TRIPS.homeShare * (laneTotal.get(laneOf(st)) ?? 0)) continue;
         const d = dist(st.pos, b.fp.center);
         if (!best || d < dist(best.pos, b.fp.center) || (d === dist(best.pos, b.fp.center) && st.key < best.key)) best = st;
@@ -385,7 +389,7 @@ export class CarHomes {
             } else if (gate) place = { spot: gate, kind: 'yard', look, near: [], at: b };
           }
           // Двор полон (или его нет) — место на полосе стоянки рядом (не больше CURB_TRIPS.homeShare мест полосы).
-          if (!place) place = curbHome(b, colorOf(carKey(b.id, k)));
+          if (!place) place = curbHome(b, carKey(b.id, k), colorOf(carKey(b.id, k)));
           // И там нет — место на площадке рядом.
           if (!place) place = lotHome(b, carKey(b.id, k));
           if (!place) {
@@ -756,8 +760,10 @@ export class CarHomes {
     const st = car.place!.curb;
     // Место ночёвки на полосе стоянки — выезд передом от бордюра (CurbParking.leave).
     const curbHooks: CurbHooks = { joined: hooks.joined, stayed: hooks.stayed };
-    if (st && this.curb) this.curb.leave(st, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks: curbHooks, endLink: opt.endLink, then: opt.then });
-    else this.garages.leave(car.place!.spot, town, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks, ...rest });
+    if (st && this.curb) {
+      // Место забронировал кто-то другой — не выезжает (осталась дома).
+      if (!this.curb.leave(st, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks: curbHooks, endLink: opt.endLink, then: opt.then, car: car.key })) hooks.stayed?.();
+    } else this.garages.leave(car.place!.spot, town, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks, ...rest });
   }
 
   /**
@@ -791,7 +797,7 @@ export class CarHomes {
         this.curbIn.delete(car.key);
         miss?.();
       },
-    });
+    }, car.key);
   }
 
   /**
@@ -824,8 +830,9 @@ export class CarHomes {
     if (!link) return false;
     this.moving.add(car.key);
     const from = trip.from ?? car.home;
-    curb.leave(st, link.toNode!, { from, to: p.at }, {
+    const ok = curb.leave(st, link.toNode!, { from, to: p.at }, {
       color: car.color,
+      car: car.key,
       endLink: link.id,
       hooks: {
         joined: (sim) => {
@@ -841,7 +848,8 @@ export class CarHomes {
       },
       then: (sim) => this.homeward(sim, trip, slot ?? undefined),
     });
-    return true;
+    if (!ok) this.moving.delete(car.key);
+    return ok;
   }
 
   /** Можно ли сейчас выехать с площадки: ворота с выездом свободны (большая — у узла ворот). */
@@ -1107,11 +1115,13 @@ export class CarHomes {
     this.driving.set(sim.id, { car: car.key, town, home: true });
     const st = car.place!.curb;
     if (st && this.curb) {
-      // Своё место на полосе стоянки: на полосе у него — только оно, если не занято.
+      // Своё место на полосе стоянки: на полосе у него — только оно, если не занято и всё ещё её (места ночёвки
+      // назначаются заново, когда город растёт или правят сеть: не своё — проедет и вернётся незаметно, на новое).
       const link = this.curb.slotOf(st)?.link.id;
       if (link === undefined) return;
       const curb = this.curb;
-      curb.toCurb(sim, link, () => (curb.isTaken(st.key) ? [] : [st]), { arrived: () => this.settle(town, car.key) });
+      const mine = () => this.fleet(town).byKey.get(car.key)?.place?.curb?.key === st.key;
+      curb.toCurb(sim, link, () => (mine() && !curb.occupied(st.key) ? [st] : []), { arrived: () => this.settle(town, car.key) }, car.key);
       return;
     }
     const s = slot ?? this.garages.slotOf(car.place!.spot) ?? this.garages.leftSlotOf(car.place!.spot);

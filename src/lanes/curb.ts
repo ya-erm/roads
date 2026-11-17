@@ -50,6 +50,48 @@ export interface CurbStall {
 
 export const curbKey = (corridor: number, side: number, idx: number): string => `${corridor}:${side > 0 ? 'R' : 'L'}:${idx}`;
 
+/** Прямоугольник на плоскости: середина, единичный курс, полудлина и полуширина. */
+export interface Box {
+  c: Vec;
+  d: Vec;
+  hl: number;
+  hw: number;
+}
+
+/** Габарит места: CURB.stallLen вдоль полосы и CURB.stallDepth поперёк (там, где стоит машина). */
+export const stallBox = (st: CurbStall): Box => ({ c: st.pos, d: st.dir, hl: CURB.stallLen / 2, hw: CURB.stallDepth / 2 });
+
+/** Пересекаются ли прямоугольники (теорема о разделяющей оси; касание — не пересечение). */
+export function boxesOverlap(a: Box, b: Box): boolean {
+  const corners = (x: Box): Vec[] => {
+    const n = rightNormal(x.d);
+    return [
+      [1, 1],
+      [1, -1],
+      [-1, -1],
+      [-1, 1],
+    ].map(([i, j]) => add(x.c, add(scale(x.d, i * x.hl), scale(n, j * x.hw))));
+  };
+  const ca = corners(a);
+  const cb = corners(b);
+  for (const axis of [a.d, rightNormal(a.d), b.d, rightNormal(b.d)]) {
+    const span = (ps: Vec[]) => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const p of ps) {
+        const v = p.x * axis.x + p.y * axis.y;
+        lo = Math.min(lo, v);
+        hi = Math.max(hi, v);
+      }
+      return [lo, hi];
+    };
+    const [a0, a1] = span(ca);
+    const [b0, b1] = span(cb);
+    if (a1 <= b0 + 1e-6 || b1 <= a0 + 1e-6) return false;
+  }
+  return true;
+}
+
 /** Полоса движения, к которой примыкает полоса стоянки P (с той же стороны, ближе к оси); нет — null. */
 export function curbDrive(c: Corridor, P: LaneSlot): LaneSlot | null {
   const out = Math.sign(P.offset) || 1;
