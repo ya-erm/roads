@@ -5,16 +5,14 @@ import type { Corridor, LaneNet, LaneSlot } from './model';
 
 /**
  * Полосы стоянки вдоль бордюра (LaneSlot.park, docs/PARKING.md, этап 2): размеры мест и где они на полосе. Одна полоса
- * стоянки — обычный слот профиля шириной LANE_W (7 ед.): у бордюра — места CURB.stallLen × CURB.stallDepth, между ними
- * и движением — буфер CURB.buffer со штриховкой (её рисует lanes/draw.ts, границы мест — игра). Единица — 0,6 м.
+ * стоянки — обычный слот профиля шириной LANE_W (7 ед.): размеченные места CURB.stallLen на всю ширину полосы, от
+ * сплошной по краю движения (её рисует lanes/draw.ts) до бордюра (границы мест — игра). Машина стоит у бордюра, в
+ * полосе CURB.stallDepth. Единица — 0,6 м.
  */
 export const CURB = {
-  /** Место вдоль бордюра: 9,5 × 4,6 ед. (≈ 5,7 × 2,8 м) — легковая 7,5 × 3 встаёт с запасом на манёвр. */
+  /** Место вдоль бордюра: 9,5 ед. (≈ 5,7 м); машина 7,5 × 3 стоит у бордюра в полосе 4,6 ед. — с запасом на манёвр. */
   stallLen: 9.5,
   stallDepth: 4.6,
-  /** Буфер со штриховкой между местами и полосой движения: LANE_W − глубина места (2,4 ед.), шаг штрихов. */
-  buffer: LANE_W - 4.6,
-  hatch: 6,
   /** Мест нет: ближе стольких ед. к узлу (и к стоп-линии — ещё на 3), у светофора — ближе lightRoom. */
   nodeRoom: 15,
   lightRoom: 30,
@@ -94,13 +92,13 @@ export function curbStalls(net: LaneNet, c: Corridor, laneIdx: number, cut: [num
   return out;
 }
 
-/** Четыре угла места (рисунок разметки): у бордюра и у буфера, по ходу. */
+/** Четыре угла места (рисунок разметки): у края движения и у бордюра, по ходу — место на всю ширину полосы. */
 export function stallCorners(c: Corridor, st: CurbStall): [Vec, Vec, Vec, Vec] {
   const P = c.lanes[st.lane];
   const a = st.s - CURB.stallLen / 2;
   const b = st.s + CURB.stallLen / 2;
   const outer = P.offset + st.side * (LANE_W / 2);
-  const inner = outer - st.side * CURB.stallDepth;
+  const inner = P.offset - st.side * (LANE_W / 2);
   const at = (s: number, off: number) => {
     const { point, tangent } = c.lut.frameAt(s);
     return add(point, scale(rightNormal(tangent), off));
