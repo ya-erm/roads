@@ -79,6 +79,9 @@ describe('Итоги месяца по кадрам', { timeout: 120_000 }, () =
     const save = JSON.parse(whole.save) as SaveData;
     expect(save.roads.corridors.some((c) => c.lanes.some((l) => l.park))).toBe(true);
     expect(save.towns.some((t) => t.cars?.some((c) => c.curb !== undefined))).toBe(true);
+    // Площадки-стоянки (этап 3): город поставил их у рынка и ратуши, счёт месяцев закрыт — тоже до бита.
+    expect(save.towns.some((t) => t.lots?.length)).toBe(true);
+    expect(save.towns.some((t) => t.lots?.some((l) => l.last))).toBe(true);
     expect(sliced.save).toBe(whole.save);
     expect(sliced.cars).toBe(whole.cars);
   });

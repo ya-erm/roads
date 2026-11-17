@@ -55,6 +55,13 @@ export interface ShopHost {
    * места или к нему не подъехать — null: едет к случайному дому, как прочие.
    */
   backHome?(town: Town, car: ShopCar, from: TownBuilding): FleetBack | null;
+  /**
+   * Машина на стоянке в начале партии — машина парка жителей (game/carHomes.ts, CarHomes.adopt): чья (по хешу u),
+   * она не дома — стоит на месте spot у магазина b до until. Нет такой — undefined: машина без парка, как прежде.
+   */
+  adopt?(town: Town, b: TownBuilding, spot: number, until: number, u: number): number | undefined;
+  /** Цвет машины парка жителей по ключу. */
+  colorOf?(car: number): string | undefined;
 }
 
 /** Куда машине парка жителей со стоянки магазина (ShopHost.backHome). */
@@ -179,8 +186,11 @@ export class ShopParking {
           let k = Math.floor(hash(b.id, 72 + i) * lot.spots.length);
           while (taken.has(k)) k = (k + 1) % lot.spots.length;
           taken.add(k);
-          const color = colors[Math.floor(hash(b.id, 75 + i) * colors.length)];
-          list.push({ b: b.id, k, color, until: this.host.time + stayOf(hash(b.id, 78 + i)) * hash(b.id, 81 + i) });
+          const until = this.host.time + stayOf(hash(b.id, 78 + i)) * hash(b.id, 81 + i);
+          // Машина парка жителей (уезжая, — на своё место), иначе — без парка, своего цвета.
+          const car = this.host.adopt?.(town, b, stallKey(b.id, k), until, hash(b.id, 84 + i));
+          const color = car !== undefined ? (this.host.colorOf?.(car) ?? colors[0]) : colors[Math.floor(hash(b.id, 75 + i) * colors.length)];
+          list.push({ b: b.id, k, color, until, ...(car !== undefined ? { car } : {}) });
         }
       }
       town.shopParked = list;

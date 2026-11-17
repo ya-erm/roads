@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { add, dot, Vec } from '../core/vec';
 import { Game } from '../game/game';
-import { road, roadPlan, STREET } from '../game/testkit';
+import { freshGame, road, roadPlan, STREET } from '../game/testkit';
+import { NEW_GAME_SETTINGS } from '../world/settings';
+import { LOT, lotGateDriveway, lotStallCount, lotWidth } from '../world/parkingLots';
+import { lotHandles } from './lotTool';
 import type { LaneNet } from '../lanes/model';
 import { Camera } from '../render/camera';
 import { Controller, dropEffectFor, isNodeDoubleClick } from './controller';
@@ -175,5 +178,59 @@ describe('«Двигать»: двойной клик по узлу — изло
     const planned = c.moveProject.plan().net!;
     expect(planned.node(K).kind).toBe('seam');
     expect(pensOpposite(planned, K)).toBe(true);
+  });
+});
+
+describe('«🅿️ Площадка» (в «Станции»)', { timeout: 120_000 }, () => {
+  it('клик у улицы ставит площадку и выбирает её; ручка угла — шире; клик по краю у улицы — ворота; Ctrl+Z — назад', () => {
+    const game = freshGame({ ...NEW_GAME_SETTINGS, seed: 1, size: 'medium' });
+    const { c, canvas, mouse, move, click, key } = play(game);
+    c.setStationMode('lot');
+    expect(c.action).toBe('lot');
+    // Точка у улицы большого города, где площадка 6 × 2 встаёт без сноса.
+    const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
+    let p: Vec | null = null;
+    for (const cor of game.roads.net.corridorsNear(town.center, town.radius).sort((a, b) => a.id - b.id)) {
+      for (let s = 25; !p && s < cor.length - 25; s += 8) {
+        const t = cor.lut.tangentAt(s);
+        const q = add(cor.lut.pointAt(s), { x: -t.y * 25, y: t.x * 25 });
+        const plan = game.lotPlan(q, { cols: c.lotCols, rows: c.lotRows });
+        if (plan.ok && !plan.demolish.length) p = q;
+      }
+      if (p) break;
+    }
+    expect(p).not.toBeNull();
+    // Предпросмотр у курсора: участок с местами и ручками, подпись — мест и цена.
+    move(p!);
+    const o = c.overlay();
+    expect(o.lot?.ok).toBe(true);
+    expect(o.lot?.stalls.length).toBe(12);
+    expect(o.label?.text).toMatch(/🅿️ 12/);
+    click(p!);
+    expect(c.selection?.type).toBe('lot');
+    const id = (c.selection as { id: number }).id;
+    const cur = () => game.lotById(id)!.lot;
+    expect(lotStallCount(cur())).toBe(12);
+    // «Выбор»: ручка правого дальнего угла — тянем на два места вправо.
+    c.setTool('select');
+    c.select({ type: 'lot', id });
+    const fp = cur().fp;
+    const h = lotHandles(fp).find((x) => x.kind === 'corner' && x.side === 1)!;
+    const to = add(h.pos, { x: Math.cos(fp.angle) * 2 * LOT.stall.w, y: Math.sin(fp.angle) * 2 * LOT.stall.w });
+    move(h.pos);
+    canvas.fire('mousedown', mouse(h.pos));
+    move(to);
+    win.fire('mouseup', mouse(to));
+    expect(cur().fp.w).toBeCloseTo(lotWidth(8), 5);
+    // Клик по краю у улицы мимо ворот — новые ворота ⬌.
+    const g0 = cur().gates[0].x;
+    const edge = lotGateDriveway(cur(), { x: g0 + (g0 > 0 ? -16 : 16) }).gate;
+    click(edge);
+    expect(cur().gates.length).toBe(2);
+    // Ctrl+Z — ворота прочь, ещё раз — прежняя ширина.
+    key('KeyZ', { ctrlKey: true });
+    expect(cur().gates.length).toBe(1);
+    key('KeyZ', { ctrlKey: true });
+    expect(cur().fp.w).toBeCloseTo(lotWidth(6), 5);
   });
 });

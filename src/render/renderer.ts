@@ -86,6 +86,27 @@ import { carLayers, railSegLayer } from './trainLayer';
 import { corridorLayer, deckLift, deckLine, inPass, signSpot, speedStrokes, strokePoint } from '../lanes/speedDisplay';
 import { BUY_DOT_PX } from '../input/buyDrop';
 import { parkingLevel, type ParkingCell, type ParkingLevel } from '../game/parkingLayer';
+import { drawLotArt, drawLotPreview } from './lotArt';
+import type { LotGate } from '../world/entities';
+import type { LotRect } from '../world/houseAccess';
+
+/** Площадка-стоянка рисуется за свой участок на столько ед.: заезд через тротуар к воротам. */
+const LOT_REACH = 8;
+
+/**
+ * Площадка-стоянка в предпросмотре (инструмент «🅿️ Площадка», перенос, ручки) или выбранная: участок, ворота (bad —
+ * что не встали), места; old — прежнее место (перенос); ручки углов и поворота.
+ */
+export interface LotOverlay {
+  fp: Footprint;
+  gates: readonly LotGate[];
+  ok: boolean;
+  bad?: readonly number[];
+  stalls: readonly LotRect[];
+  old?: Footprint;
+  handles: { pos: Vec; kind: 'corner' | 'rotate' }[];
+  selected?: boolean;
+}
 
 /** Дорожки кварталов города в его записи кэша карты — под этим номером (id домов и парков — другие). */
 const WALKS_KEY = -1e9;
@@ -99,6 +120,8 @@ export type Selection =
   | { type: 'building'; id: number }
   /** Парк, сквер, площадь у ратуши, сквер с памятником или набережная города (Town.parks) — по TownPark.id. */
   | { type: 'park'; id: number }
+  /** Площадка-стоянка (Town.lots, docs/PARKING.md, этап 3) — по ParkingLot.id. */
+  | { type: 'lot'; id: number }
   /** Машина жителя — по её id в симуляции. */
   | { type: 'vehicle'; simId: number }
   /** Машина или поезд компании: выбор сохраняется на остановках и после отправления. */
@@ -169,6 +192,8 @@ export interface ToolOverlay {
   speedmap?: boolean;
   /** Слой «🅿️»: занятость мест для машин по клеткам (game/parkingLayer.ts). */
   parkmap?: boolean;
+  /** Площадка-стоянка: предпросмотр (ставим, переносим, тянем ручку) или выбранная — её ручки и ворота. */
+  lot?: LotOverlay | null;
   /** Карта скоростей в «Выборе»: скорость дороги под курсором — подписью, как высота («90 км/ч», «80 / 90 км/ч»). */
   speedText?: string | null;
   /** Строим дорогу или путь: изолинии ярче, у курсора подпись высоты. */
@@ -1217,6 +1242,9 @@ export class Renderer {
             put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}`, grow(fpBox(b.fp), houseReach(b)));
           // Парки — отрицательными номерами (id парка — не id сущности).
           for (const p of parks ?? []) put(-p.id - 1, `${fpSig(p.fp)}|${p.kind}`, grow(fpBox(p.fp), PARK_REACH));
+          // Площадки-стоянки — своими номерами (id сущности, со сдвигом от парков); снесённых нет.
+          for (const l of town.lots ?? [])
+            if (!l.removed) put(-2_000_000_000 + l.id, `${fpSig(l.fp)}|${l.gates.map((g) => `${g.x}${g.mode}`).join(',')}|${l.nodes?.length ?? 0}`, grow(fpBox(l.fp), LOT_REACH));
           if (walks) put(WALKS_KEY, walks.sig, walks.box);
         }),
       );
@@ -2115,6 +2143,23 @@ export class Renderer {
       ctx.strokeStyle = `rgba(${rgb},0.75)`;
       ctx.lineWidth = 1.5 / z;
       ctx.strokeRect(c.x + 0.75 / z, c.y + 0.75 / z, c.size - 1.5 / z, c.size - 1.5 / z);
+      // Кружат в поисках места — косая штриховка красным.
+      if (c.circling) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(c.x, c.y, c.size, c.size);
+        ctx.clip();
+        ctx.strokeStyle = 'rgba(220,60,50,0.55)';
+        ctx.lineWidth = 3 / z;
+        ctx.beginPath();
+        const step = 18 / z;
+        for (let d = -c.size; d < c.size; d += step) {
+          ctx.moveTo(c.x + d, c.y);
+          ctx.lineTo(c.x + d + c.size, c.y + c.size);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
       const cx = c.x + c.size / 2;
       const cy = c.y + c.size / 2;
       const r = 9 / z;
@@ -2544,6 +2589,12 @@ export class Renderer {
         const r = Math.hypot(p.fp.w, p.fp.h) / 2 + PARK_REACH;
         if (p.fp.center.x + r < view.x0 || p.fp.center.x - r > view.x1 || p.fp.center.y + r < view.y0 || p.fp.center.y - r > view.y1) continue;
         drawParkArt(this.ctx, p, this.camera.zoom, trees);
+      }
+      // Площадки-стоянки — тоже под дорогами: тупик-выезд большой ложится поверх.
+      for (const l of town.lots ?? []) {
+        const r = Math.hypot(l.fp.w, l.fp.h) / 2 + LOT_REACH;
+        if (l.removed || l.fp.center.x + r < view.x0 || l.fp.center.x - r > view.x1 || l.fp.center.y + r < view.y0 || l.fp.center.y - r > view.y1) continue;
+        drawLotArt(this.ctx, l, this.camera.zoom);
       }
     }
   }
@@ -4104,8 +4155,44 @@ export class Renderer {
     ctx.restore();
   }
 
+  /** Площадка-стоянка: прежнее место (перенос) пунктиром, новое — с местами и воротами, ручки углов и поворота. */
+  private drawLotOverlay(o: LotOverlay): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    if (o.old) {
+      ctx.save();
+      ctx.translate(o.old.center.x, o.old.center.y);
+      ctx.rotate(o.old.angle);
+      ctx.strokeStyle = 'rgba(224,71,60,0.8)';
+      ctx.setLineDash([5 / z, 4 / z]);
+      ctx.lineWidth = 1.5 / z;
+      ctx.strokeRect(-o.old.w / 2, -o.old.h / 2, o.old.w, o.old.h);
+      ctx.restore();
+    }
+    drawLotPreview(ctx, o, z);
+    const hr = HANDLE_PX / z;
+    for (const h of o.handles) {
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#2f80ed';
+      ctx.lineWidth = 2 / z;
+      ctx.beginPath();
+      if (h.kind === 'rotate') ctx.arc(h.pos.x, h.pos.y, hr, 0, Math.PI * 2);
+      else ctx.rect(h.pos.x - hr, h.pos.y - hr, 2 * hr, 2 * hr);
+      ctx.fill();
+      ctx.stroke();
+      if (h.kind === 'rotate') {
+        ctx.fillStyle = '#2f80ed';
+        ctx.font = `bold ${hr * 1.6}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('↺', h.pos.x, h.pos.y + hr * 0.08);
+      }
+    }
+  }
+
   private drawOverlay(game: Game, o: ToolOverlay): void {
     const ctx = this.ctx;
+    if (o.lot) this.drawLotOverlay(o.lot);
     if (o.corridor) {
       const color = { red: 'rgba(232,72,63,0.5)', blue: 'rgba(47,128,237,0.35)', green: 'rgba(46,157,87,0.4)' }[o.corridor.color];
       this.tintCorridor(o.roads?.net ?? game.roads.net, o.corridor.id, color);
@@ -5609,6 +5696,40 @@ export class Renderer {
       ctx.strokeText(f.text, 0, 0);
       ctx.fillStyle = f.color;
       ctx.fillText(f.text, 0, 0);
+      ctx.restore();
+    }
+    this.drawParkRefusals(game);
+  }
+
+  /** «🅿️✕» над целями, у которых машины кружат в поисках места или недавно уехали ни с чем (только в кадре). */
+  private drawParkRefusals(game: Game): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const view = this.view();
+    for (const p of game.parkSearch.badges()) {
+      if (p.x < view.x0 - 20 || p.x > view.x1 + 20 || p.y < view.y0 - 20 || p.y > view.y1 + 20) continue;
+      ctx.save();
+      ctx.translate(p.x, p.y - 14 / z);
+      ctx.scale(1 / z, 1 / z);
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.strokeStyle = 'rgba(220,60,50,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(-19, -11, 38, 22, 6);
+      ctx.fill();
+      ctx.stroke();
+      // 🅿️ — синий квадрат с белой «P», рядом красный ✕.
+      ctx.fillStyle = '#2f6fd0';
+      ctx.beginPath();
+      ctx.roundRect(-15, -8, 16, 16, 3);
+      ctx.fill();
+      ctx.font = '700 13px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff';
+      ctx.fillText('P', -7, 1);
+      ctx.fillStyle = '#dc3c32';
+      ctx.fillText('✕', 9, 1);
       ctx.restore();
     }
   }

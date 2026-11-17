@@ -40,6 +40,7 @@ type Watched = {
   onLost(sim: Vehicle): void;
   garages: { host: GarageHost };
   carHomes?: CarHomes;
+  lots?: { isHomingBig(simId: number): boolean };
 };
 
 /**
@@ -49,7 +50,8 @@ type Watched = {
 export function watchCarFlow(game: Game): { flow: CarFlow; frame(): void } {
   const g = game as unknown as Watched;
   const flow: CarFlow = { nodeIn: 0, fleetIn: 0, placeIn: 0, nodeOut: 0, fleetOut: 0, lost: 0, placeOut: 0 };
-  const seen = new Set<number>();
+  // Машины, что уже в потоке, когда начали следить (замер после разгона), — не новые: откуда они, не видно.
+  const seen = new Set<number>(game.traffic.vehicles.keys());
   const fromPlace = new Set<number>();
   const host = g.garages.host;
   const own = host.own.bind(host);
@@ -67,7 +69,9 @@ export function watchCarFlow(game: Game): { flow: CarFlow; frame(): void } {
   const lost = g.onLost.bind(g);
   const fleetStays = (sim: Vehicle) => g.carHomes?.carOfSim(sim.id)?.home === false;
   g.onArrive = (sim) => {
-    if (g.owners.get(sim.id)?.type === 'citizen') {
+    // У узла ворот большой площадки машина встаёт на место (game/lotParking.ts) — это «на месте», а не у узла.
+    if (g.lots?.isHomingBig(sim.id)) flow.placeOut++;
+    else if (g.owners.get(sim.id)?.type === 'citizen') {
       flow.nodeOut++;
       if (fleetStays(sim)) flow.fleetOut++;
     }

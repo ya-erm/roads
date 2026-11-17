@@ -24,25 +24,13 @@ import { isTrunk, LANE_W } from '../world/roadTypes';
  * Тот же манёвр — у стоянок магазинов (game/shopParking.ts): место стоянки — такое же «место машины» (CarSpot), а
  * что делать, когда машина встала в поток или доехала до места, говорят крючки манёвра (MoveHooks).
  *
- * Всё решается без генератора случайных чисел партии: выезд ли это или возвращение — по seed, номеру поездки города
- * и хешу (Town.garageTrips), какая машина стоит у ворот и какого цвета — по хешу id дома. Дома с уехавшей машиной —
- * в городе (Town.garageAway), сохраняются с ним; манёвры, как и машины жителей в потоке, не сохраняются.
+ * Здесь — только манёвр: кто когда выезжает и куда возвращается, решает парк машин жителей (game/carHomes.ts:
+ * CarHomes.trip, место ночёвки, Town.cars) — своего учёта поездок (прежние Town.garageTrips, garageAway) у гаражей
+ * больше нет; при загрузке старого сохранения он переносится в парк. Крючки по умолчанию (homeHooks) отмечают дом с
+ * уехавшей машиной в Town.garageAway — только для прямого вызова манёвра (тесты): игра всегда передаёт свои.
+ * Манёвры, как и машины жителей в потоке, не сохраняются.
  */
 export const GARAGE_TRIPS = {
-  /**
-   * Доля поездок из дома с машиной (машина дома, к заезду можно подъехать — slotOf), что начинаются в гараже или на
-   * площадке: поездка из такого дома — почти всегда на своей машине. Гараж — у 45 % частных домов, площадка — у 35 %,
-   * у дач — площадка у 40 % (world/houseAccess.CAR_PLACE); seed 7 — ~470 домов с машиной из 1294 жилых, подъехать
-   * можно к ~90 %. Поездки начинаются в доме наугад: из гаража или с площадки — ~20 % всех поездок жителей, и
-   * столько же — возвращений. На доме — выезд или въезд раз в ~2 минуты, на улице из 12 таких домов — раз в 10 с.
-   */
-  outShare: 0.5,
-  /**
-   * Поездка — возвращение домой с вероятностью away / (away + backK · домов с машиной в городе): чем больше машин в
-   * разъездах, тем чаще они возвращаются. Равновесие (seed 7) — около трети машин в разъездах, возвращений столько
-   * же, сколько выездов.
-   */
-  backK: 0.2,
   /** Сколько машина ждёт просвета у бордюра, с: не дождалась — передумала и заезжает обратно. */
   maxWait: 40,
   /**
@@ -85,11 +73,6 @@ const LOOK = 0.8;
 const PAUSE = 0.5;
 /** Мягкое торможение, м/с² игры: подъезжая к заезду, позже этого уже не остановиться — проезжает мимо. */
 const HOLD_BRAKE = 9;
-
-/** Номер поездки города → зерно хеша: по seed партии, без общего генератора. */
-function garageSeed(seed: number, town: number, n: number): number {
-  return (Math.imul(seed >>> 0, 0x27d4eb2f) ^ Math.imul(town + 1, 0x165667b1) ^ Math.imul(n, 0x9e3779b1)) >>> 0;
-}
 
 /**
  * Место машины у здания: заезд и где она стоит — у дома (гараж, площадка) или на стоянке магазина. Центры кузова — у
@@ -229,9 +212,6 @@ export interface GarageHost {
   /** Машина жителя кончила поездку не у узла: сворачивая в гараж, ушла с полосы — снята с потока. */
   gone(sim: Vehicle): void;
 }
-
-/** Что решено о поездке жителя. */
-export type GarageTrip = { kind: 'out'; home: GarageHome } | { kind: 'back'; home: GarageHome; slot: GarageSlot };
 
 /**
  * Поправка к линии маршрута выбранной машины (Game.vehicleAhead) у места: head — начало вместо машины (выезд: от неё
@@ -499,41 +479,6 @@ export class Garages {
   /** Путь к месту spot от узла from — направо или налево, что быстрее (wayFrom). Не доехать — null. */
   wayHome(from: number, spot: CarSpot): { route: number[]; slot: GarageSlot } | null {
     return this.wayFrom(this.host.graph.outLinks.get(from) ?? [], spot);
-  }
-
-  /**
-   * Поездка жителя из дома origin города town: возвращение машины домой (дом из уехавших), выезд из гаража или с
-   * площадки (дома origin, если там машина, иначе — другого дома города с машиной на месте) или обычная (null). Номер
-   * поездки — в городе (Town.garageTrips), решение — по хешу от него и seed партии.
-   */
-  trip(town: Town, origin: TownBuilding): GarageTrip | null {
-    const n = (town.garageTrips = (town.garageTrips ?? 0) + 1);
-    const seed = garageSeed(this.host.seed, town.id, n);
-    const r = (k: number) => hash(seed, k);
-    const homes = this.townHomes(town);
-    const away = town.garageAway;
-    if (away?.length) {
-      const free = away.filter((id) => !this.busy.has(id));
-      if (free.length && r(1) < free.length / (free.length + GARAGE_TRIPS.backK * Math.max(1, homes.list.length))) {
-        const id = free[Math.floor(r(2) * free.length)];
-        const home = homes.byId.get(id);
-        const slot = home && this.slotOf(home);
-        if (home && slot) return { kind: 'back', home, slot };
-        // Дома нет или к нему не подъехать: машина вернулась незаметно.
-        town.garageAway = away.filter((x) => x !== id);
-      }
-    }
-    if (r(3) >= GARAGE_TRIPS.outShare || !homes.list.length) return null;
-    const out = town.garageAway?.length ? new Set(town.garageAway) : null;
-    const ready = (h: GarageHome | null): h is GarageHome => !!h && !this.busy.has(h.key) && !out?.has(h.b.id) && !!this.slotOf(h);
-    const own = origin.kind === 'res' ? this.homeOf(origin) : null;
-    if (ready(own)) return { kind: 'out', home: own };
-    // Из дома без машины (или она в разъездах) — едет машина другого дома города: несколько попыток по хешу.
-    for (let i = 0; i < 4; i++) {
-      const h = homes.list[Math.floor(r(4 + i) * homes.list.length)];
-      if (ready(h)) return { kind: 'out', home: h };
-    }
-    return null;
   }
 
   /** Геометрия места сменилась (магазин перестроили): где вставать на полосу — заново. */

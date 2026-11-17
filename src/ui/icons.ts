@@ -689,6 +689,36 @@ export function drivewaySvg(len: number, max: number): string {
   </svg>`;
 }
 
+/** Площадка-стоянка (инструмент «🅿️ Площадка»): асфальт с местами, знак «P», ворота к улице снизу. */
+export function lotSvg(size = 40): string {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 40 40" aria-hidden="true">
+    <rect x="0" y="34" width="40" height="6" fill="#9aa2ad"/>
+    <rect x="3" y="6" width="34" height="26" rx="1.5" fill="#60666f"/>
+    <path d="M9 6v9M15 6v9M21 6v9M27 6v9M33 6v9M9 23v9M27 23v9M33 23v9" stroke="#f2f2ee" stroke-width="1"/>
+    <rect x="15" y="31" width="7" height="4" fill="#60666f"/>
+    <rect x="3.5" y="20.5" width="8" height="8" rx="1.5" fill="#2f6fd0"/>
+    <text x="7.5" y="27.2" text-anchor="middle" font-size="7.5" font-weight="700" fill="#fff" font-family="system-ui,sans-serif">P</text>
+  </svg>`;
+}
+
+/** Рядов мест площадки (1, 2, 4) — схемой: ряды мест и проезды, улица снизу. */
+export function lotRowsSvg(rows: 1 | 2 | 4, size = 30): string {
+  const bands: string[] = [];
+  // Сверху вниз: дальний край — вверху, улица — внизу.
+  const parts = rows === 1 ? ['s', 'a'] : rows === 2 ? ['s', 'a', 's'] : ['s', 'a', 's', 's', 'a', 's'];
+  const unit = 30 / parts.reduce((x, p) => x + (p === 's' ? 1.2 : 1), 0);
+  let y = 2;
+  for (const p of parts) {
+    const h = (p === 's' ? 1.2 : 1) * unit;
+    if (p === 's') for (let x = 4; x < 36; x += 5) bands.push(`<rect x="${x}" y="${y.toFixed(1)}" width="4" height="${(h - 0.6).toFixed(1)}" fill="#f2f2ee" opacity="0.85"/>`);
+    y += h;
+  }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 40 40" aria-hidden="true">
+    <rect x="2" y="2" width="36" height="30" fill="#60666f"/>${bands.join('')}
+    <rect x="0" y="34" width="40" height="6" fill="#9aa2ad"/>
+  </svg>`;
+}
+
 export function stationSvg(kind: 'road' | 'rail' | 'stop' | 'cargo' | 'pax', size = 40): string {
   if (kind === 'cargo') {
     // Автостанция для грузов: склад с воротами, ящики и грузовик у рампы.

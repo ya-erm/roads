@@ -328,30 +328,59 @@ export class CurbParking {
    * место — решится на полосе (toCurb, choices). Нет — null.
    */
   visitTarget(pos: Vec, from?: number): { link: GLink; choices: () => CurbStall[] } | null {
+    const g = this.host.graph;
+    return this.visitFrom(pos, from !== undefined ? (g.outLinks.get(from) ?? []) : []);
+  }
+
+  /**
+   * То же со связей starts (машина уже в пути — со связи, где она сейчас), без связей skip (там уже искала места); range —
+   * насколько далеко от цели. cost — время пути с надбавкой за ходьбу (сравнить с площадками, game/parkSearch.ts).
+   */
+  visitFrom(pos: Vec, starts: GLink[], skip?: ReadonlySet<number>, range: number = CURB_TRIPS.destRange): { link: GLink; choices: () => CurbStall[]; cost: number; d: number } | null {
     // Связи с местами — по ближнему свободному месту; едет туда, куда быстрее доехать от from (со стороны своего хода
     // места — без круга по кварталу), с надбавкой за то, сколько идти пешком (CURB_TRIPS.walk с за ед.).
     const links = new Map<number, { link: GLink; d: number }>();
-    for (const st of this.near(pos, CURB_TRIPS.destRange)) {
+    for (const st of this.near(pos, range)) {
       if (!this.isFree(st.key)) continue;
       const slot = this.slotOf(st);
-      if (!slot) continue;
+      if (!slot || skip?.has(slot.link.id)) continue;
       const d = dist(st.pos, pos);
       const was = links.get(slot.link.id);
       if (!was || d < was.d) links.set(slot.link.id, { link: slot.link, d });
     }
     if (!links.size) return null;
     const g = this.host.graph;
-    const starts = from !== undefined ? (g.outLinks.get(from) ?? []) : [];
-    let best: { link: GLink; cost: number } | null = null;
+    let best: { link: GLink; cost: number; d: number } | null = null;
     for (const x of [...links.values()].sort((a, b) => a.d - b.d || a.link.id - b.link.id).slice(0, CURB_TRIPS.tryLinks)) {
       const route = starts.length ? findLaneRoute(g, starts, x.link.toNode!, x.link.id) : null;
       if (starts.length && !route) continue;
       const cost = (route ? routeCost(g, route) : 0) + x.d * CURB_TRIPS.walk;
-      if (!best || cost < best.cost) best = { link: x.link, cost };
+      if (!best || cost < best.cost) best = { link: x.link, cost, d: x.d };
     }
     if (!best) return null;
     const link = best.link;
-    return { link, choices: () => this.near(pos, CURB_TRIPS.destRange).filter((st) => this.isFree(st.key) && this.slotOf(st)?.link.id === link.id) };
+    return { link, cost: best.cost, d: best.d, choices: () => this.near(pos, range).filter((st) => this.isFree(st.key) && this.slotOf(st)?.link.id === link.id) };
+  }
+
+  /**
+   * Мест у цели нет свободных, но они есть (не чьи-то места ночёвки): связь у ближнего — туда машина едет искать (там
+   * и выберет, если кто-то уедет). Без связей skip. Нет мест вовсе — null.
+   */
+  anyLink(pos: Vec, skip?: ReadonlySet<number>, range: number = CURB_TRIPS.destRange): { link: GLink; d: number } | null {
+    let best: { link: GLink; d: number } | null = null;
+    for (const st of this.near(pos, range)) {
+      if (this.assignedAll.has(st.key)) continue;
+      const slot = this.slotOf(st);
+      if (!slot || skip?.has(slot.link.id)) continue;
+      const d = dist(st.pos, pos);
+      if (!best || d < best.d || (d === best.d && slot.link.id < best.link.id)) best = { link: slot.link, d };
+    }
+    return best;
+  }
+
+  /** Места (не чьи-то места ночёвки) на связи link не дальше range от pos — для гостя: свободные. */
+  freeOn(pos: Vec, link: number, range: number = CURB_TRIPS.destRange): CurbStall[] {
+    return this.near(pos, range).filter((st) => this.isFree(st.key) && this.slotOf(st)?.link.id === link);
   }
 
   /** Путь к месту st от узла from: последняя связь — у места. Не доехать — null. */

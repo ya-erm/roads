@@ -117,7 +117,29 @@ import { yardLotOf, yardSpots } from '../world/yardLots';
 import { CarHomes, type CarHomesHost } from './carHomes';
 import { parkingCells, type ParkingCell } from './parkingLayer';
 import { curbSqueeze, type Squeeze } from '../world/curbSqueeze';
-import { CurbParking, type CurbHost } from './curbParking';
+import { CURB_TRIPS, CurbParking, type CurbHost } from './curbParking';
+import { emptyStats, LotParking, type LotHost, type LotRef } from './lotParking';
+import { ParkSearch } from './parkSearch';
+import {
+  defaultGates,
+  gateIn,
+  gateOut,
+  LOT,
+  lotAngle,
+  lotCost,
+  lotDepth,
+  lotGateDriveway,
+  lotGateNode,
+  lotLocal,
+  lotRows,
+  type LotRows,
+  lotStallCount,
+  lotUpkeep,
+  lotWidth,
+  snapGate,
+} from '../world/parkingLots';
+import type { LotGate, ParkingLot } from '../world/entities';
+import { laneSlot } from './garages';
 import { CURB } from '../lanes/curb';
 import { CURB_GROW, frontage, withCurb } from '../world/curbStreets';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
@@ -199,6 +221,38 @@ export interface UpkeepForecast {
   roads: number;
   interest: number;
   total: number;
+}
+
+/** Площадка-стоянка, которую ставят инструментом «🅿️ Площадка»: мест в ряду, рядов, поворот (Alt), ворота. */
+export interface LotShape {
+  cols: number;
+  rows: LotRows;
+  angle?: number;
+  free?: boolean;
+  gates?: readonly LotGate[];
+}
+
+/** Можно ли поставить площадку (Game.lotCheck): участок, ворота, мест, цена, снос, тупики-выезды большой. */
+export interface LotPlan {
+  ok: boolean;
+  reason?: string;
+  fp: Footprint;
+  gates: LotGate[];
+  stalls: number;
+  /** Больше LOT.big мест: ворота — через узел (тупики-выезды в roads). */
+  big: boolean;
+  /** Сколько заплатим всего (минус — сколько вернём): площадка, снос, тупики. */
+  cost: number;
+  /** За саму площадку: сколько платим и сколько вернём (перенос, меньше). */
+  spend: number;
+  back: number;
+  demolish: number[];
+  roads?: RoadPlan;
+  /** Где узлы ворот большой площадки. */
+  nodes?: Vec[];
+  town?: Town;
+  /** Ворота, что не встали (нет улицы рядом, у перекрёстка), — красным. */
+  badGates?: number[];
 }
 
 /** Что попадёт под снос рамкой: что вернём за дороги и сколько стоит снос домов. */
@@ -365,6 +419,13 @@ interface UndoSnapshot {
   dropBuildings?: { townId: number; ids: number[] }[];
   /** Запреты улиц городов до действия (снос их ставит, дорога игрока снимает): отмена возвращает как было. */
   streetBans?: { townId: number; list: Vec[][] }[];
+  /** Площадки-стоянки городов до действия (без счёта за месяц); нет в старых снимках. */
+  lots?: { townId: number; list: ParkingLot[] }[];
+}
+
+/** Площадки города без счёта за месяц — что сравнивать и что возвращать отменой. */
+function lotsShape(list: readonly ParkingLot[] | undefined): ParkingLot[] {
+  return (list ?? []).map(({ month: _m, last: _l, ...rest }) => structuredClone(rest));
 }
 
 /** База стоит там же (площадка и ворота), что и в снимке s. */
@@ -924,11 +985,17 @@ export class Game implements BuildContext {
    * манёвры передом и задом у бордюра.
    */
   readonly curb = new CurbParking(this.curbHost());
+  /** Номер правки площадок-стоянок: поставили, перенесли, ворота, снос, отмена, загрузка (LotParking — заново). */
+  lotRev = 0;
+  /** Площадки-стоянки (src/game/lotParking.ts, docs/PARKING.md, этап 3): кто где стоит, ворота, выезды. */
+  readonly lots = new LotParking(this.lotHost());
   /**
    * Парк машин жителей (src/game/carHomes.ts): у каждой машины своё место ночёвки — гараж, площадка, двор, полоса
    * стоянки, бокс; поездки начинаются с него и кончаются на нём.
    */
-  readonly carHomes = new CarHomes(this.carHomesHost(), this.garages, this.curb);
+  readonly carHomes = new CarHomes(this.carHomesHost(), this.garages, this.curb, this.lots);
+  /** Поиск места у цели (src/game/parkSearch.ts): полосы, площадки, до трёх попыток, иначе домой. */
+  readonly parkSearch = new ParkSearch(this.searchHost(), this.curb, this.lots, this.garages, this.carHomes);
   /** Предприятия строит игрок (режим «Строит игрок», src/game/enterprises.ts): месторождения, постройка, рабочие, вред. */
   readonly enterprises: Enterprises;
 
@@ -986,6 +1053,8 @@ export class Game implements BuildContext {
     this.roads.changed();
     // АЗС и оптовые базы (новые партии с получателями) — до машин на стоянках: под них отдаются и магазины.
     for (const t of this.towns) this.zoneRetailTown(t);
+    // Площадки-стоянки у рынка и ратуши (новые партии с парковками, без сноса и без ГСЧ): по одной на дом, пока встают.
+    for (const t of this.towns) while (this.townLots(t));
     // На стоянках магазинов уже стоят машины (по хешу).
     this.shops.seed(this.towns);
     // Получатели грузов в городах (новые партии, world/retail.ts): склады наполовину полны.
@@ -1297,7 +1366,10 @@ export class Game implements BuildContext {
     // Восстановленный счёт старой партии мог уже дойти до порога — модель открывается сразу, с заметкой.
     this.modelsReached(this.unlocks.reached());
     this.journal.add('load', { date: this.dateLabel, money: this.money, lines: this.lines.size, fleet: this.fleet.size });
-    // Парк машин жителей: старое сохранение (прежний учёт гаражей) — переносится, остальные машины дома.
+    // Парк машин жителей: старое сохранение (прежний учёт гаражей) — переносится, остальные машины дома. Площадки —
+    // по сохранению (Town.lots), машины на них — TownCar.lot, ls; в поиске места никого (в пути машины не сохраняются).
+    this.lotRev++;
+    this.parkSearch.clear();
     this.carHomes.load(this.towns);
     // Старые сохранения (без машин на стоянках магазинов) — машины на стоянках, как в начале партии.
     this.shops.seed(this.towns);
@@ -1372,8 +1444,10 @@ export class Game implements BuildContext {
    * Что стоит на площадке (с запасом margin): дома идут под снос, а ратуша,
    * предприятие или станция мешают — тогда blocker с причиной.
    */
-  structuresUnder(fp: Footprint, margin: number, skip?: Structure): { houses: number[]; blocker?: string } {
+  structuresUnder(fp: Footprint, margin: number, skip?: Structure, lots = true): { houses: number[]; blocker?: string } {
     const houses: number[] = [];
+    // Площадки-стоянки — не в индексе построек: мешают так же, как станция.
+    if (lots && this.lotUnder(fp, margin)) return { houses, blocker: 'Мешает площадка' };
     for (const s of this.index.near(fp.center, footprintRadius(fp) + margin + 120)) {
       if (s === skip || !footprintsOverlap(fp, s.fp, margin)) continue;
       if (s.type === 'building' && s.kind !== 'landmark') houses.push(s.id);
@@ -1395,7 +1469,8 @@ export class Game implements BuildContext {
    * Дорога или путь, задевающие площадку (с запасом pad), — проверяем по сетке точек внутри неё;
    * ответ — чем мешает. Полотна узла skipNode (выезд самой станции) не в счёт.
    */
-  roadUnder(fp: Footprint, pad: number, skipNode = -1, roads: LaneNet = this.roads.net): string | null {
+  roadUnder(fp: Footprint, pad: number, skipNode: number | ReadonlySet<number> = -1, roads: LaneNet = this.roads.net): string | null {
+    const skip = (id: number) => (typeof skipNode === 'number' ? id === skipNode : skipNode.has(id));
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = { x: -u.y, y: u.x };
     const nx = Math.max(2, Math.ceil(fp.w / 6));
@@ -1409,7 +1484,7 @@ export class Game implements BuildContext {
       if (probes.some((q) => s.lut.closest(q).d < reach)) return 'Мешает путь';
     }
     for (const c of roads.corridorsNear(fp.center, footprintRadius(fp) + pad + 40)) {
-      if (c.a === skipNode || c.b === skipNode) continue;
+      if (skip(c.a) || skip(c.b)) continue;
       if (
         probes.some((q) => {
           const hit = c.lut.closest(q);
@@ -1434,6 +1509,8 @@ export class Game implements BuildContext {
       if (st.kind !== 'road' || st.side) continue;
       for (const id of this.roads.net.nodes.get(st.nodeId)?.corridors ?? []) ids.add(id);
     }
+    // Тупики-выезды больших площадок — так же.
+    for (const { lot } of this.lots.all()) for (const id of this.lotStubs(lot)) ids.add(id);
     return ids;
   }
 
@@ -1501,7 +1578,8 @@ export class Game implements BuildContext {
    * она меняется, когда участок открыт или начаты работы, а не на каждом шаге стройки.
    */
   private roadUpkeep(): number {
-    return Math.round(this.roadValueTotal() * ECONOMY.roadUpkeepRate * 0.3);
+    // Площадки игрока — вместе с дорогами: LOT.upkeep их цены в месяц.
+    return Math.round(this.roadValueTotal() * ECONOMY.roadUpkeepRate * 0.3) + this.lotsUpkeep();
   }
 
   /** Проценты по кредиту за месяц — от нынешнего долга. */
@@ -2941,6 +3019,382 @@ export class Game implements BuildContext {
     return true;
   }
 
+  // ---------- Площадки-стоянки (docs/PARKING.md, этап 3; раскладка — world/parkingLots.ts) ----------
+
+  /** Площадка по id и её город (снесённой — нет). */
+  lotById(id: number): LotRef | undefined {
+    return this.lots.get(id);
+  }
+
+  /** Площадка под точкой. */
+  lotAt(p: Vec): LotRef | null {
+    for (const x of this.lots.all()) if (pointInFootprint(p, x.lot.fp, 0.5)) return x;
+    return null;
+  }
+
+  /** Участок f задевает площадку (кроме skip), с запасом margin: дома, станции, другие площадки сюда не встают. */
+  lotUnder(f: Footprint, margin = 1, skip?: number): boolean {
+    const r = footprintRadius(f);
+    return this.lots.all().some((x) => x.lot.id !== skip && dist(x.lot.fp.center, f.center) < r + footprintRadius(x.lot.fp) + margin && footprintsOverlap(f, x.lot.fp, margin));
+  }
+
+  /** Город площадки в точке p: ближний, в чьей черте (с запасом) точка; нет такого — ближний вообще. */
+  private lotTown(p: Vec): Town | undefined {
+    let best: Town | undefined;
+    let bestD = Infinity;
+    for (const t of this.towns) {
+      const d = dist(t.center, p) - (t.extent ?? t.radius);
+      if (d < bestD) [best, bestD] = [t, d];
+    }
+    return best;
+  }
+
+  /** Полотна тупиков-выездов большой площадки (у узлов ворот). */
+  private lotStubs(lot: Pick<ParkingLot, 'nodes'>): number[] {
+    const ids = new Set<number>();
+    for (const n of lot.nodes ?? []) for (const id of this.roads.net.nodes.get(n)?.corridors ?? []) ids.add(id);
+    return [...ids];
+  }
+
+  /** Ворота на шаге сетки, внутри ширины, не друг на друге (у большой — не ближе LOT.corner + ширины ворот). */
+  private fitGates(w: number, gates: readonly LotGate[], big: boolean): LotGate[] {
+    const out: LotGate[] = [];
+    const lim = w / 2 - LOT.gateW / 2;
+    const gap = big ? LOT.corner + LOT.gateW : LOT.gateW;
+    for (const g of gates) {
+      const x = snapGate(w, Math.max(-lim, Math.min(lim, g.x)));
+      if (out.some((o) => Math.abs(o.x - x) < gap - 0.01)) continue;
+      out.push({ x, mode: g.mode });
+    }
+    return out.length ? out : defaultGates(w);
+  }
+
+  /**
+   * Где встанет площадка cols × rows у курсора p («🅿️ Площадка» в «Станции»): у улицы — вдоль неё, краем за тротуаром
+   * (LOT.setback от края полотна), как перенос парка; free (Alt) или вдали от улиц — серединой под курсор, с поворотом
+   * angle. gates — ворота (перенос: те же, по оси участка), нет — одни посередине. skip — переносим эту площадку.
+   */
+  lotPlan(p: Vec, shape: LotShape, skip?: number): LotPlan {
+    const cols = Math.max(LOT.cols.min, Math.min(LOT.cols.max, Math.round(shape.cols)));
+    const W = lotWidth(cols);
+    const H = lotDepth(shape.rows);
+    const street = shape.free ? null : this.streetNear(p, H / 2 + 30);
+    let fp: Footprint;
+    if (street) {
+      const n = normalTowards(street.seg, street.s, p);
+      const center = add(street.seg.lut.pointAt(street.s), scale(n, halfAtS(street.seg, street.s) + LOT.setback + H / 2));
+      fp = { center, w: W, h: H, angle: lotAngle(n) };
+    } else fp = { center: { ...p }, w: W, h: H, angle: shape.angle ?? 0 };
+    return this.lotCheck(fp, shape.gates ?? defaultGates(W), skip, skip !== undefined ? 'move' : 'place');
+  }
+
+  /**
+   * Площадка с участком fp и воротами gates — можно ли и почём: не за краем, не в воде, не на дороге, путях, станции,
+   * предприятии, парке и другой площадке; дома под ней — под снос (цена — в плане). Ворота — к улице (не магистраль),
+   * не ближе LOT.corner к перекрёстку, хотя бы одни — с въездом и с выездом. Больше LOT.big мест — у ворот тупики-выезды
+   * (план дороги roads; старые тупики переносимой — прочь). skip — правим эту площадку: mode — перенос (новая минус
+   * возврат части прежней) или правка размера и ворот (разница: больше — доплата, меньше — возврат части).
+   */
+  lotCheck(fp: Footprint, gatesIn: readonly LotGate[], skip?: number, mode: 'place' | 'move' | 'edit' = 'place', owner: ParkingLot['owner'] = 'player'): LotPlan {
+    const ref = skip !== undefined ? this.lots.get(skip) : undefined;
+    const old = ref?.lot;
+    const W = fp.w;
+    const big0 = lotStallCount({ fp, gates: gatesIn.length ? [gatesIn[0]] : defaultGates(W) }) > LOT.big;
+    const gates = this.fitGates(W, gatesIn, big0);
+    const shape = { id: skip ?? -1, fp, gates };
+    const stalls = lotStallCount(shape);
+    const big = stalls > LOT.big;
+    const town = ref?.town ?? this.lotTown(fp.center);
+    const paid = (old?.owner ?? owner) === 'player';
+    const price = paid ? lotCost(shape) : 0;
+    const was = old && paid ? lotCost(old) : 0;
+    const base = { fp, gates, stalls, big, demolish: [] as number[], town, spend: 0, back: 0 };
+    const fail = (reason: string, extra: Partial<LotPlan> = {}): LotPlan => ({ ...base, ok: false, reason, cost: price, ...extra });
+    if (!town) return fail('Поставьте у города');
+    if (!this.inBounds(fp.center, 30)) return fail('За краем карты');
+    if (lotOutline(fp, 6).some((q) => this.isWater(q, 1)) || lotGrid(fp, 8).some((q) => this.isWater(q, 1))) return fail('Мешает вода');
+    if (onRail(this.net, fp, 2)) return fail('Мешает железная дорога');
+    const own = new Set(old?.nodes ?? []);
+    const road = this.roadUnder(fp, 1, own);
+    if (road) return fail(road);
+    const under = this.structuresUnder(fp, 1, undefined, false);
+    if (under.blocker) return fail(under.blocker);
+    if (this.parkUnder(fp, null)) return fail('Мешает парк');
+    if (this.lotUnder(fp, 1, skip)) return fail('Мешает другая площадка');
+    if (!gates.some((g) => gateOut(g.mode))) return fail('Нужны ворота с выездом');
+    if (!gates.some((g) => gateIn(g.mode))) return fail('Нужны ворота с въездом');
+    // Ворота — к улице, не у перекрёстка; маленькой — чтобы с полосы можно было свернуть в них (как во двор).
+    const net = this.roads.net;
+    const g0 = this.roads.graph;
+    const L = CAR_SPEC.length;
+    const bad: number[] = [];
+    gates.forEach((g, i) => {
+      const d = lotGateDriveway(shape, g);
+      const at = drivewayLink(net, d);
+      const c = at && net.corridors.get(at.corridor);
+      if (!at || !c || c.ring || isTrunk(c.cls) || net.node(c.a).level !== 0 || net.node(c.b).level !== 0) return void bad.push(i);
+      const [ca, cb] = g0.cutOf(c.id) ?? [0, 0];
+      const junction = (id: number) => (net.nodes.get(id)?.corridors.length ?? 0) >= 3;
+      if ((junction(c.a) && at.s - ca < LOT.corner) || (junction(c.b) && c.length - cb - at.s < LOT.corner)) return void bad.push(i);
+      if (!big && !laneSlot(g0, net, d, add(d.curb, scale(d.dir, L / 2 + 0.3)), L, CAR_SPEC.width)) bad.push(i);
+    });
+    if (bad.length) return fail(bad.length === gates.length ? 'Ворота — к улице, не ближе 10 м к перекрёстку' : 'Эти ворота не к улице или у перекрёстка', { badGates: bad });
+    // Тупики-выезды большой площадки (и снос прежних); дома под ними сносит строитель — их цена в плане дороги.
+    let roads: RoadPlan | undefined;
+    const nodes: Vec[] = big ? gates.map((g) => lotGateNode(shape, g).node) : [];
+    const stubs = old ? this.lotStubs(old) : [];
+    if (big || stubs.length) {
+      roads = this.roadBuilder.plan((n) => {
+        for (const id of stubs) if (n.corridors.has(id)) bulldoze(n, id);
+        for (const g of big ? gates : []) {
+          const at = drivewayLink(n, lotGateDriveway(shape, g));
+          const c = at && n.corridors.get(at.corridor);
+          if (!at || !c) return false;
+          buildRoad(n, { kind: 'corridor', corridor: c.id, s: at.s, pos: c.lut.pointAt(at.s) }, { kind: 'free', pos: lotGateNode(shape, g).node }, DRIVEWAY);
+        }
+        return true;
+      });
+      if (!roads.ok) return fail(roads.reason ?? 'Тупик к воротам не построить', { roads });
+    }
+    const demolish = under.houses.filter((id) => !roads?.demolish.includes(id));
+    const razed = this.demolishTotal(demolish);
+    // Деньги за саму площадку: новая; перенос — минус возврат части прежней; правка — разница.
+    let spend = price;
+    let back = 0;
+    if (old && mode === 'move') back = Math.round(was * COST.refundRatio);
+    if (old && mode === 'edit') {
+      spend = Math.max(0, price - was);
+      back = Math.round(Math.max(0, was - price) * COST.refundRatio);
+    }
+    const cost = spend - back + razed + (roads?.cost ?? 0);
+    const plan: LotPlan = { ...base, ok: true, cost, demolish, roads, nodes, spend, back };
+    if (paid && cost > this.budget && cost > 0) return { ...plan, ok: false, reason: 'Не хватает денег' };
+    return plan;
+  }
+
+  /** Ставит площадку игрока (lotPlan); поставили — она, нельзя — причина. */
+  placeLot(p: Vec, shape: LotShape): ParkingLot | string {
+    const plan = this.lotPlan(p, shape);
+    if (!plan.ok || !plan.town) return plan.reason ?? 'Нельзя поставить';
+    const lot: ParkingLot = { id: this.nextEntityId++, fp: plan.fp, gates: plan.gates, owner: 'player', tariff: 0 };
+    return this.applyLot(plan, lot, true) ? lot : 'Нельзя поставить';
+  }
+
+  /** План по месту: дороги (тупики), снос, деньги, участок и ворота — площадке lot (новой — в город плана). */
+  private applyLot(plan: LotPlan, lot: ParkingLot, add: boolean): boolean {
+    if (!plan.ok || !plan.town) return false;
+    if (plan.roads) {
+      for (const pos of plan.nodes ?? []) if (plan.roads.net) keepMainRoad(plan.roads.net, pos);
+      if (!this.roadBuilder.apply(plan.roads)) return false;
+    }
+    if (plan.demolish.length) {
+      const cost = this.demolishTotal(plan.demolish);
+      this.demolish(plan.demolish);
+      this.spend(cost);
+    }
+    if (plan.spend) this.spend(plan.spend);
+    if (plan.back) {
+      this.money += plan.back;
+      this.incomeMonth += plan.back;
+      this.ledger.sales += plan.back;
+    }
+    lot.fp = plan.fp;
+    lot.gates = plan.gates;
+    if (plan.big && plan.nodes?.length) lot.nodes = plan.nodes.map((p) => this.roads.net.nodesNear(p, 2)[0]?.id ?? -1);
+    else delete lot.nodes;
+    if (add) plan.town.lots = [...(plan.town.lots ?? []), lot];
+    else plan.town.lots = [...(plan.town.lots ?? [])];
+    this.lotRev++;
+    this.layoutRev++;
+    return true;
+  }
+
+  /** Перенос площадки к курсору (ворота — те же по оси участка; free — Alt, angle — поворот). */
+  lotMovePlan(id: number, p: Vec, free = false, angle?: number): LotPlan | null {
+    const ref = this.lots.get(id);
+    if (!ref) return null;
+    const { lot } = ref;
+    return this.lotPlan(p, { cols: Math.round((lot.fp.w - LOT.aisle) / LOT.stall.w), rows: lotRows(lot.fp.h), gates: lot.gates, free, angle: angle ?? lot.fp.angle }, id);
+  }
+
+  /**
+   * Новый размер площадки (ручка угла): cols × rows, край у улицы — на месте, двигается край side (−1 — левый, 1 —
+   * правый по оси участка); ворота — там же на улице.
+   */
+  lotResizePlan(id: number, cols: number, rows: LotRows, side: -1 | 1): LotPlan | null {
+    const ref = this.lots.get(id);
+    if (!ref) return null;
+    const { lot } = ref;
+    const W = lotWidth(Math.max(LOT.cols.min, Math.min(LOT.cols.max, cols)));
+    const H = lotDepth(rows);
+    const dx = (side * (W - lot.fp.w)) / 2;
+    const dy = (H - lot.fp.h) / 2;
+    const c = Math.cos(lot.fp.angle);
+    const s = Math.sin(lot.fp.angle);
+    const center = { x: lot.fp.center.x + dx * c - dy * s, y: lot.fp.center.y + dx * s + dy * c };
+    const gates = lot.gates.map((g) => ({ ...g, x: g.x - dx }));
+    return this.lotCheck({ center, w: W, h: H, angle: lot.fp.angle }, gates, id, 'edit');
+  }
+
+  /** Площадка с поворотом angle вокруг середины (ручка поворота, шаг LOT.turn). */
+  lotRotatePlan(id: number, angle: number): LotPlan | null {
+    const ref = this.lots.get(id);
+    if (!ref) return null;
+    const a = Math.round(angle / LOT.turn) * LOT.turn;
+    return this.lotCheck({ ...ref.lot.fp, angle: a }, ref.lot.gates, id, 'edit');
+  }
+
+  /** Правка площадки по плану (перенос, размер, поворот, ворота) — одним шагом Ctrl+Z; нельзя — причина. */
+  editLot(id: number, plan: LotPlan | null, label: string): string | null {
+    const ref = this.lots.get(id);
+    if (!ref || !plan) return 'Площадки нет';
+    if (!plan.ok) return plan.reason ?? 'Нельзя';
+    this.checkpoint(label);
+    const ok = this.applyLot(plan, ref.lot, false);
+    this.commit();
+    return ok ? null : 'Нельзя';
+  }
+
+  /**
+   * Клик по краю площадки у дороги (ворота): по воротам — ⬌ → въезд → выезд → убрать (если остаются и въезд, и выезд);
+   * мимо ворот — новые ворота ⬌ на шаге сетки. Нельзя — причина.
+   */
+  toggleLotGate(id: number, p: Vec): string | null {
+    const ref = this.lots.get(id);
+    if (!ref) return 'Площадки нет';
+    const { lot } = ref;
+    const q = lotLocal(lot.fp, p);
+    const i = lot.gates.findIndex((g) => Math.abs(g.x - q.x) < LOT.gateW / 2 + 0.5);
+    const order: LotGate['mode'][] = ['both', 'in', 'out'];
+    const tries: LotGate[][] = [];
+    if (i < 0) tries.push([...lot.gates, { x: snapGate(lot.fp.w, q.x), mode: 'both' }]);
+    else {
+      // Следующий режим, потом — убрать; что не годится (не останется въезда или выезда) — пропускаем.
+      const k = order.indexOf(lot.gates[i].mode);
+      for (let s = 1; s <= 3; s++) {
+        const next = k + s;
+        if (next < order.length) tries.push(lot.gates.map((g, j) => (j === i ? { ...g, mode: order[next] } : g)));
+        else if (next === order.length && lot.gates.length > 1) tries.push(lot.gates.filter((_, j) => j !== i));
+        else if (next > order.length) tries.push(lot.gates.map((g, j) => (j === i ? { ...g, mode: order[next - order.length - 1] } : g)));
+      }
+    }
+    let reason = 'Нельзя';
+    for (const gates of tries) {
+      if (!gates.some((g) => gateIn(g.mode)) || !gates.some((g) => gateOut(g.mode))) continue;
+      const plan = this.lotCheck(lot.fp, gates, id, 'edit');
+      if (plan.ok) return this.editLot(id, plan, 'ворота площадки');
+      reason = plan.reason ?? reason;
+    }
+    return i >= 0 && lot.gates.length === 1 ? 'Одни ворота — в обе стороны: добавьте ещё, кликнув по краю у улицы' : reason;
+  }
+
+  /** Сносит площадку: тупики-выезды прочь, возврат части цены (у города — бесплатно); стоявшие машины — «в разъездах». */
+  removeLot(id: number): boolean {
+    const ref = this.lots.get(id);
+    if (!ref) return false;
+    const { lot, town } = ref;
+    this.checkpoint('снос площадки');
+    const stubs = this.lotStubs(lot);
+    if (stubs.length) {
+      const plan = this.roadBuilder.bulldoze(stubs);
+      if (plan.net) this.roadBuilder.apply({ ...plan, ok: true });
+    }
+    if (lot.owner === 'player') this.refund(lotCost(lot));
+    lot.removed = true;
+    delete lot.nodes;
+    town.lots = [...(town.lots ?? [])];
+    this.lotRev++;
+    this.layoutRev++;
+    this.commit();
+    return true;
+  }
+
+  /** Содержание площадок игрока, $ в месяц (LOT.upkeep цены). */
+  private lotsUpkeep(): number {
+    let sum = 0;
+    for (const { lot } of this.lots.all()) if (lot.owner === 'player') sum += lotUpkeep(lot);
+    return sum;
+  }
+
+  /**
+   * Город ставит площадку сам (WorldSettings.parking, без сноса и без генератора случайных чисел): у рынка и ратуши —
+   * на 12–20 мест, если рядом есть место; у станции, где рядом нет мест (ни полос стоянки, ни площадок), — на 12
+   * (подготовка к P+R). Одна за раз на город; at — места у этой точки, skip — участок, рядом с которым ставить.
+   */
+  townLots(town: Town): boolean {
+    if (!parkingOn(this.settings)) return false;
+    const lots = (town.lots ?? []).filter((l) => !l.removed);
+    for (const b of town.buildings) {
+      const form = formOf(b);
+      if (form !== 'market' && b.kind !== 'landmark') continue;
+      if (lots.some((l) => l.for === b.id)) continue;
+      const plan = this.autoLotPlan(town, b.fp, [10, 8, 6]);
+      if (plan) return this.addTownLot(plan, { for: b.id });
+    }
+    for (const st of this.stations.values()) {
+      if (st.kind === 'dock' || !this.ownedBy(town, st.fp.center) || dist(st.fp.center, town.center) > (town.extent ?? town.radius) + 150) continue;
+      if (lots.some((l) => l.station === st.id)) continue;
+      if (this.curb.near(st.fp.center, CURB_TRIPS.destRange).length || this.lots.near(st.fp.center, LOT.near / 2).length) continue;
+      const plan = this.autoLotPlan(town, st.fp, [6]);
+      if (plan) return this.addTownLot(plan, { station: st.id });
+    }
+    return false;
+  }
+
+  /** Площадка города у участка near: у ближних улиц, по возрастанию расстояния, первая, что встаёт без сноса. */
+  private autoLotPlan(town: Town, near: Footprint, sizes: number[]): LotPlan | null {
+    const net = this.roads.net;
+    const H = lotDepth(2);
+    const reach = footprintRadius(near) + 90;
+    for (const cols of sizes) {
+      const W = lotWidth(cols);
+      const cands: { fp: Footprint; d: number }[] = [];
+      for (const c of net.corridorsNear(near.center, reach + 40)) {
+        if (c.ring || c.build || isTrunk(c.cls) || net.node(c.a).level !== 0 || net.node(c.b).level !== 0) continue;
+        for (let s = LOT.corner + W / 2; s <= c.length - LOT.corner - W / 2; s += 6) {
+          const pt = c.lut.pointAt(s);
+          const t = c.lut.tangentAt(s);
+          for (const side of [1, -1]) {
+            const n = { x: -t.y * side, y: t.x * side };
+            const center = add(pt, scale(n, halfAtS(c, s) + LOT.setback + H / 2));
+            const d = dist(center, near.center);
+            if (d > reach + W / 2) continue;
+            cands.push({ fp: { center, w: W, h: H, angle: lotAngle(n) }, d });
+          }
+        }
+      }
+      cands.sort((a, b) => a.d - b.d || a.fp.center.x - b.fp.center.x || a.fp.center.y - b.fp.center.y);
+      for (const x of cands) {
+        if (footprintsOverlap(x.fp, near, 2)) continue;
+        const plan = this.lotCheck(x.fp, defaultGates(W), undefined, 'place', 'town');
+        if (plan.ok && !plan.demolish.length && !plan.roads && plan.town === town) return plan;
+      }
+    }
+    return null;
+  }
+
+  private addTownLot(plan: LotPlan, extra: Pick<ParkingLot, 'for' | 'station'>): boolean {
+    const lot: ParkingLot = { id: this.nextEntityId++, fp: plan.fp, gates: plan.gates, owner: 'town', tariff: 0, ...extra };
+    return this.applyLot(plan, lot, true);
+  }
+
+  /** Конец месяца: счёт площадок — в прошлый месяц, снесённые — прочь; отказы клеток — заново. */
+  private closeLots(): void {
+    for (const t of this.towns) {
+      delete t.parkRefused;
+      if (!t.lots?.length) continue;
+      const live = t.lots.filter((l) => !l.removed);
+      for (const l of live) {
+        l.last = l.month ?? emptyStats();
+        delete l.month;
+      }
+      if (live.length !== t.lots.length) {
+        t.lots = live;
+        this.lotRev++;
+      }
+    }
+  }
+
   refreshCatchmentsNear(p: Vec): void {
     for (const st of this.stations.values()) {
       if (dist(st.fp.center, p) < this.catchmentRadius(st) + 60) this.computeCatchment(st);
@@ -4010,7 +4464,33 @@ export class Game implements BuildContext {
       bases: this.construction.crews.bases.size ? [...this.construction.crews.bases.values()].map((b) => ({ id: b.id, fp: structuredClone(b.fp), nodeId: b.nodeId })) : undefined,
       // Оси запретов не меняются — списки копируем, точки общие.
       streetBans: this.towns.filter((t) => t.streetBans?.length).map((t) => ({ townId: t.id, list: [...t.streetBans!] })),
+      lots: this.towns.filter((t) => t.lots?.length).map((t) => ({ townId: t.id, list: lotsShape(t.lots) })),
     };
+  }
+
+  /** Площадки как в снимке (отмена, повтор); счёт за месяц — живой, по id. */
+  private restoreLots(snap: UndoSnapshot): void {
+    if (!snap.lots) return;
+    for (const t of this.towns) {
+      const list = snap.lots.find((x) => x.townId === t.id)?.list;
+      const live = new Map((t.lots ?? []).map((l) => [l.id, l]));
+      if (!list?.length) {
+        if (t.lots?.length) delete t.lots;
+        continue;
+      }
+      t.lots = list.map((l) => {
+        const was = live.get(l.id);
+        return { ...structuredClone(l), ...(was?.month ? { month: was.month } : {}), ...(was?.last ? { last: was.last } : {}) };
+      });
+    }
+    this.lotRev++;
+    this.layoutRev++;
+  }
+
+  /** Площадки изменились с момента снимка. */
+  private lotsChanged(snap: UndoSnapshot): boolean {
+    const now = JSON.stringify(this.towns.filter((t) => t.lots?.length).map((t) => ({ townId: t.id, list: lotsShape(t.lots) })));
+    return now !== JSON.stringify(snap.lots ?? []);
   }
 
   /** Действие закончено: если ничего не построили и не снесли, снимок не нужен. */
@@ -4026,6 +4506,7 @@ export class Game implements BuildContext {
       top.buildings.some((b) => this.towns.find((t) => t.id === b.townId)?.buildings.length !== b.list.length) ||
       top.moneyBefore !== this.money ||
       top.terraform !== this.terrain.edits.length ||
+      this.lotsChanged(top) ||
       (top.bases ?? []).some((s) => {
         const b = this.construction.crews.bases.get(s.id);
         return !!b && !sameBasePlace(b, s);
@@ -4182,6 +4663,8 @@ export class Game implements BuildContext {
         else delete t.streetBans;
       }
     }
+    // Площадки-стоянки — как были (поставленная действием уходит, снесённая и перенесённая — как в снимке).
+    this.restoreLots(snap);
 
     // Станции: живые остаются (со своими грузами и пассажирами), лишние уходят, снесённые возвращаются.
     const keep = new Set(snap.stations.map((s) => s.id));
@@ -4591,6 +5074,9 @@ export class Game implements BuildContext {
     // они на нём.
     this.garages.step(dt);
     this.curb.step(dt);
+    // Выезды с больших площадок (через узел ворот) и поиск места у целей.
+    if (this.lots.exits.length) this.lots.step(dt);
+    this.parkSearch.step();
     this.shops.step(dt, this.towns);
     this.docks.step(dt);
     // Парк машин жителей: стоящие — только данные, в такт — куча отъездов (у кого срок у цели вышел).
@@ -6427,6 +6913,9 @@ export class Game implements BuildContext {
       this.citizenCars--;
       this.garages.forget(sim.id);
       this.curb.forget(sim.id);
+      // Доехала до узла ворот большой площадки — встаёт на место (LotParking.arrive).
+      this.lots.arrive(sim);
+      this.parkSearch.forget(sim.id);
       this.carHomes.arrived(sim.id);
       return;
     }
@@ -6495,8 +6984,10 @@ export class Game implements BuildContext {
     this.owners.delete(sim.id);
     if (owner?.type === 'citizen') {
       this.citizenCars--;
+      this.parkSearch.forget(sim.id);
       this.garages.forget(sim.id);
       this.curb.forget(sim.id);
+      this.lots.forget(sim.id, true);
       this.carHomes.arrived(sim.id);
       return;
     }
@@ -7981,15 +8472,19 @@ export class Game implements BuildContext {
     if (fleet?.kind === 'out') {
       // Машиной в потоке (и в счёте citizenCars) станет, когда встанет на полосу (GarageHost.own); едет к магазину —
       // с полосы у места сразу к стоянке (поворотом направо или налево — что ближе, решится на полосе).
-      // Иначе — на полосу стоянки у цели (curbParking.ts), если там есть свободные места; нет — к узлу цели, как раньше.
-      const curb = visit ? null : this.carHomes.curbVisit(dest, origin.anchor);
-      if (!visit) this.noteCurb(destTown, dest, !!curb);
+      // Иначе — место у цели (parkSearch.ts): полоса стоянки на её улице и соседних или площадка рядом, что ближе;
+      // свободных нет — к ближнему из них искать (до трёх попыток, иначе домой). Мест нет вовсе — к узлу цели, как раньше.
+      const park = visit ? null : this.parkSearch.plan(dest, this.roads.graph.outLinks.get(origin.anchor) ?? []);
+      if (!visit) this.noteCurb(destTown, dest, park?.kind === 'curb' && !park.full);
       if (visit) {
         const then = (sim: Vehicle) => this.shops.start(sim, visit, this.carHomes.visit(fleet.car, fleet.town));
         this.carHomes.depart(fleet, dest, { target: visit.slot.link.toNode!, endLink: visit.slot.link.id, to: visit.planned, then });
-      } else if (curb) {
-        const then = (sim: Vehicle) => this.carHomes.toCurbVisit(sim, fleet, curb);
-        this.carHomes.depart(fleet, dest, { target: curb.link.toNode!, endLink: curb.link.id, then });
+      } else if (park) {
+        const then = (sim: Vehicle) => this.parkSearch.start(sim, fleet, dest, park);
+        if (park.kind === 'curb') this.carHomes.depart(fleet, dest, { target: park.link.toNode!, endLink: park.link.id, then });
+        else if (park.kind === 'yard') this.carHomes.depart(fleet, dest, { target: park.slot.link.toNode!, endLink: park.slot.link.id, to: park.spot, then });
+        else if (park.node !== undefined) this.carHomes.depart(fleet, dest, { target: park.node, then });
+        else this.carHomes.depart(fleet, dest, { target: park.slot!.link.toNode!, endLink: park.slot!.link.id, to: park.spot, then });
       } else this.carHomes.depart(fleet, dest);
       return;
     }
@@ -7998,6 +8493,8 @@ export class Game implements BuildContext {
     if (fleet?.kind === 'back') {
       const from = fleet.from ?? origin;
       if (fleet.curb && this.carHomes.leaveCurb(fleet)) return;
+      if (fleet.lot && this.carHomes.leaveLot(fleet)) return;
+      if (fleet.yard && this.carHomes.leaveYard(fleet)) return;
       const way = this.carHomes.homeWay(from.anchor, fleet.car);
       const sim = way && this.traffic.spawn({ ...CAR_SPEC, color: fleet.car.color, targetNode: way.toNode, route: way.route });
       if (sim) {
@@ -8043,6 +8540,9 @@ export class Game implements BuildContext {
       canDrive: () => this.citizenCars < TOWN_TRAFFIC.maxCars,
       yardBusy: (b) => this.docks.yardBusy(b),
       backHome: (_town, car) => this.carHomes.backHome(car),
+      // Машины на стоянках в начале партии — машины парка (новые партии с парковками): уедут на свои места.
+      adopt: (town, b, spot, until, u) => (parkingOn(this.settings) ? this.carHomes.adopt(town, b, spot, until, u) : undefined),
+      colorOf: (car) => this.carHomes.colorOf(car),
     };
   }
 
@@ -8061,6 +8561,46 @@ export class Game implements BuildContext {
       },
       car: CAR_SPEC,
       colors: CAR_COLORS,
+    };
+  }
+
+  /** Что площадкам-стоянкам (lotParking.ts) нужно от игры. */
+  private lotHost(): LotHost {
+    const game = this;
+    return {
+      get time() {
+        return game.time;
+      },
+      get towns() {
+        return game.towns;
+      },
+      get traffic() {
+        return game.traffic;
+      },
+      get graph() {
+        return game.roads.graph;
+      },
+      car: CAR_SPEC,
+      rev: () => this.lotRev,
+      own: (sim, trip) => this.gHost.own(sim, trip),
+      yardBusy: (b) => this.docks.yardBusy(b),
+    };
+  }
+
+  /** Что поиску места у цели (parkSearch.ts) нужно от игры. */
+  private searchHost() {
+    const game = this;
+    return {
+      get time() {
+        return game.time;
+      },
+      get graph() {
+        return game.roads.graph;
+      },
+      get traffic() {
+        return game.traffic;
+      },
+      townOf: (id: number) => this.towns.find((t) => t.id === id),
     };
   }
 
@@ -8094,7 +8634,7 @@ export class Game implements BuildContext {
    * остановки (±CURB.stopRoom от узла остановки, с обеих сторон улицы): там мест на полосе стоянки нет.
    */
   private curbSkips(): { sig: string; skips: Map<string, [number, number][]> } {
-    const sig = `${this.towns.map((t) => t.buildings.length).join(',')}|${this.stations.size}`;
+    const sig = `${this.towns.map((t) => t.buildings.length).join(',')}|${this.stations.size}|${this.lotRev}`;
     const graph = this.roads.graph;
     const hit = this.curbSkipCache;
     if (hit && hit.sig === sig && hit.graph === graph) return hit;
@@ -8127,6 +8667,8 @@ export class Game implements BuildContext {
           }
           if (b.kind === 'com') for (const s of this.shops.lotOf(b)?.spots ?? []) drive(s.d);
         }
+        // Ворота площадок-стоянок (у большой — тупик-выезд: там перекрёсток, места у него и так нет).
+        for (const lot of town.lots ?? []) if (!lot.removed && !lot.nodes?.length) for (const g of lot.gates) drive(lotGateDriveway(lot, g));
       }
       for (const st of this.stations.values()) {
         if (st.kind !== 'stop') continue;
@@ -8197,7 +8739,7 @@ export class Game implements BuildContext {
    */
   parkingLayer(): ParkingCell[] {
     // Места полос стоянки — каждое своей точкой (занято: стоит гость или хозяин дома, к нему едут, на нём манёвр).
-    const pts = [...this.carHomes.occupancy(), ...this.curb.occupancy()];
+    const pts = [...this.carHomes.occupancy(), ...this.curb.occupancy(), ...this.lots.occupancy()];
     for (const town of this.towns) {
       for (const b of town.buildings) {
         const lot = b.kind === 'com' ? this.shops.lotOf(b) : null;
@@ -8206,7 +8748,10 @@ export class Game implements BuildContext {
         pts.push({ pos: b.fp.center, total: lot.spots.length, used });
       }
     }
-    return parkingCells(pts);
+    // Отказы за месяц (не нашли места у цели — домой) — красным; где кружат сейчас — штриховкой.
+    const refused: Record<string, number> = {};
+    for (const t of this.towns) for (const [k, n] of Object.entries(t.parkRefused ?? {})) refused[k] = (refused[k] ?? 0) + n;
+    return parkingCells(pts, undefined, { refused, circling: this.parkSearch.circling().map((c) => c.dest) });
   }
 
   /** Откуда и куда едет машина жителя или спецмашина (здания и их города); не знаем (после загрузки, чужая) — null. */
@@ -8373,6 +8918,8 @@ export class Game implements BuildContext {
     this.growIndustries();
     // Пустующие места в черте городов: город строит сам (enterprises.ts).
     this.enterprises.monthEnd();
+    // Площадки-стоянки: счёт месяца — в прошлый, отказы клеток — заново.
+    this.closeLots();
     yield;
     // Улицы городов: граф движения по каждой новой улице и переезд на него машин — не сразу внутри стройки,
     // а отдельными шагами после города (roads.quiet, roads.step): те же графы в том же порядке, но по кадрам.
@@ -8382,6 +8929,8 @@ export class Game implements BuildContext {
         this.growTown(town);
         // Полосы стоянки там, где у целей не хватало мест (новые партии).
         this.curbGrow(town);
+        // Площадки у рынка, ратуши и станций без мест рядом (новые партии; без сноса).
+        this.townLots(town);
       });
       yield;
       while (this.roads.step()) yield;

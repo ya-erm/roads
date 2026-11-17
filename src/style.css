@@ -7845,6 +7845,36 @@ span.ind-chip {
   color: var(--muted);
 }
 
+/* Карточка площадки-стоянки (ui/lotCard.ts): места, занятость, кто паркуется, ⏱ 🔄 ✋ и кнопки ✥ ⤡ ↺ ⇄ ⛔ — значками. */
+.lot-card .pc-chip .dots {
+  letter-spacing: 1px;
+  font-size: 11px;
+}
+
+.lot-card .pc-chip.harm {
+  color: #b4321c;
+}
+
+.lot-card .lot-acts {
+  display: flex;
+  gap: 6px;
+}
+
+.lot-card .lot-acts .icon-btn {
+  flex: 1;
+  font-size: 18px;
+  line-height: 1;
+  padding: 6px 0;
+}
+
+/* «🅿️ Площадка» в «Станции»: как ставить — значками в ряд, подробно — в подсказках. */
+.lot-how {
+  display: flex;
+  gap: 8px;
+  font-size: 16px;
+  margin-top: 6px;
+}
+
 /* Карточка месторождения (enterpriseUi.depositCardHtml). */
 .dep-card .pc-chip {
   display: inline-flex;

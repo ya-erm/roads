@@ -8,6 +8,7 @@
 import { durationText } from '../core/timeText';
 import type { Game } from '../game/game';
 import { SERVICES } from '../game/services';
+import { PARK_SEARCH } from '../game/parkSearch';
 import type { TownBuilding } from '../world/entities';
 import { km } from './constructionUi';
 
@@ -44,5 +45,14 @@ export function carTripHtml(game: Game, simId: number): string {
   const left = ahead
     ? `<div class="ct-chips"><span class="ct-chip" data-tip="Сколько ещё ехать по маршруту до цели">📏 <b>${km(ahead.left)}</b></span><span class="ct-chip" data-tip="Примерно сколько ещё ехать на скорости ×1 — по разрешённой скорости дорог (пробки и светофоры задержат)">⏳ ≈ <b>${durationText(ahead.eta)}</b></span></div>`
     : '';
-  return row || left ? `<div class="car-trip">${row ? `<div class="ct-row">${row}</div>` : ''}${left}</div>` : '';
+  // Не нашла места у цели с первого раза — кружит: «ищет место ●●○» (сколько попыток из PARK_SEARCH.tries).
+  const search = game.parkSearch.of(simId);
+  const hunt = search ? `<div class="ct-chips">${parkSearchChip(search.tries)}</div>` : '';
+  return row || left || hunt ? `<div class="car-trip">${row ? `<div class="ct-row">${row}</div>` : ''}${left}${hunt}</div>` : '';
+}
+
+/** «🅿️ ищет место ●●○»: попытки найти место у цели — сделанные закрашены, из PARK_SEARCH.tries. */
+export function parkSearchChip(tries: number): string {
+  const dots = Array.from({ length: PARK_SEARCH.tries }, (_, i) => (i < tries ? '●' : '○')).join('');
+  return `<span class="ct-chip ct-hunt" data-tip="${esc(`Не нашла места у цели и ищет другое рядом: попытка ${Math.min(tries, PARK_SEARCH.tries)} из ${PARK_SEARCH.tries}. Не найдёт — уедет домой (отказ на слое 🅿️)`)}">🅿️ ищет место <b>${dots}</b></span>`;
 }

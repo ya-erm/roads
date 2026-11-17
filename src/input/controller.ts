@@ -70,6 +70,8 @@ import { industryPlanText, industryRemoveText } from '../ui/enterpriseUi';
 import { MODELS, type ModelId } from '../game/transport';
 import { footprintRadius } from '../world/spatial';
 import { BUY_DOT_PX, dropSpots, pickDropStop } from './buyDrop';
+import { lotDragPlan, lotGateHit, lotHandleAt, lotOverlay, type LotToolState } from './lotTool';
+import type { LotRows } from '../world/parkingLots';
 
 export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain' | 'industry';
 
@@ -123,15 +125,15 @@ const BRUSH_PERIOD = 0.12;
 const GRADE_PROBLEM = /подъём|насыпь|выемка/i;
 
 /** Что делает клик: инструмент вместе с его режимом. */
-export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane' | 'parallel' | 'copy' | 'paste' | 'trackMove' | 'base';
+export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'template' | 'lane' | 'parallel' | 'copy' | 'paste' | 'trackMove' | 'base' | 'lot';
 /** Дорога: строить, вести полосу вдоль края, перестроить под выбранный тип, двигать узел или выгнуть. */
 export type RoadMode = 'build' | 'lane' | 'upgrade' | 'move';
 /** Развязки: кольцо на перекрёстке, шаблон развязки (готовый или свой) или копия куска дорог. */
 export type JunctionMode = 'ring' | 'template' | 'copy';
 /** Ж/д: класть путь, пристроить путь рядом с существующим, ставить вокзал или сигнал, двигать узел или перо пути. */
 export type RailMode = 'track' | 'parallel' | 'station' | 'signal' | 'move';
-/** Станции: автостанция для грузов, автовокзал для пассажиров, остановка на улице, ж/д станция. */
-export type StationMode = 'cargo' | 'pax' | 'stop' | 'rail';
+/** Станции: автостанция для грузов, автовокзал для пассажиров, остановка на улице, ж/д станция, площадка-стоянка. */
+export type StationMode = 'cargo' | 'pax' | 'stop' | 'rail' | 'lot';
 
 export const DRAW_MODES: { id: DrawMode; name: string }[] = [
   { id: 'straight', name: 'Прямая' },
@@ -153,6 +155,7 @@ const UNDO_LABELS: Partial<Record<Action, string>> = {
   roundabout: 'кольцо',
   station: 'станция',
   terrain: 'рельеф',
+  lot: 'площадка',
 };
 
 /** «3 дороги, 12 домов, 1 станция» — что снесёт рамка. */
@@ -301,6 +304,15 @@ export class Controller {
   movingPark: number | null = null;
   /** Станция, которую игрок переносит: силуэт прилипает к дорогам, как при постройке. */
   movingStation: number | null = null;
+  /**
+   * «🅿️ Площадка» (в «Станции»): мест в ряду и рядов (1, 2, 4), поворот свободной постановки (Alt; R — шаг 15°).
+   * movingLot — площадка, которую переносят («✥»); lotDrag — тянут ручку угла (размер) или поворота выбранной.
+   */
+  lotCols = 6;
+  lotRows: LotRows = 2;
+  lotAngle = 0;
+  movingLot: number | null = null;
+  lotDrag: { id: number; kind: 'corner' | 'rotate'; side: -1 | 1 } | null = null;
   /** Ж/д станция при переносе станет конечной (true) или проходной (false); null — какой была. */
   moveTerminal: boolean | null = null;
   /** Ставим склад-здание этой станции: клик в зоне вокруг неё — склад (Esc — отмена). */
@@ -489,10 +501,41 @@ export class Controller {
     this.movingPark = null;
     this.movingStation = null;
     this.movingBase = null;
+    this.movingLot = null;
+    this.lotDrag = null;
     this.roadTools.clear();
     this.railTools.clear();
     this.laneFrom = null;
     this.phaseEdit = null;
+    this.onChange();
+  }
+
+  /** Начать перенос площадки-стоянки: участок за курсором, прилипает к улице, как при постановке (Esc — отмена). */
+  startLotMove(id: number): void {
+    this.setTool('select');
+    this.select({ type: 'lot', id });
+    this.movingLot = id;
+    this.onChange();
+  }
+
+  /** Что знает инструмент «🅿️ Площадка» (input/lotTool.ts). */
+  private get lotState(): LotToolState {
+    return {
+      action: this.action,
+      selection: this.selection && 'id' in this.selection ? { type: this.selection.type, id: this.selection.id } : this.selection && { type: this.selection.type },
+      movingLot: this.movingLot,
+      lotDrag: this.lotDrag,
+      lotCols: this.lotCols,
+      lotRows: this.lotRows,
+      lotAngle: this.lotAngle,
+      alt: this.alt,
+    };
+  }
+
+  /** «🅿️ Площадка»: мест в ряду (шаг LOT.stall.w) и рядов. */
+  setLotSize(cols: number, rows: LotRows = this.lotRows): void {
+    this.lotCols = Math.max(2, Math.min(30, Math.round(cols)));
+    this.lotRows = rows;
     this.onChange();
   }
 
@@ -558,6 +601,8 @@ export class Controller {
     }
     // База стройки — в инструменте «Станция», но своё действие: в отмену (Ctrl+Z) она не входит, как и раньше.
     if (this.tool === 'station' && this.placingBase) return 'base';
+    // Площадка-стоянка — тоже в «Станции» (у улицы, как станции), но не станция: своё действие.
+    if (this.tool === 'station' && this.stationMode === 'lot') return 'lot';
     return this.tool;
   }
 
@@ -1370,6 +1415,8 @@ export class Controller {
     else if (this.movingPark !== null) this.movingPark = null;
     else if (this.movingStation !== null) this.movingStation = null;
     else if (this.movingBase !== null) this.movingBase = null;
+    else if (this.lotDrag) this.lotDrag = null;
+    else if (this.movingLot !== null) this.movingLot = null;
     else if (this.placingWarehouse !== null) this.placingWarehouse = null;
     else if (this.placingAnnex !== null) this.placingAnnex = null;
     else if (this.placingBase) this.setTool('select');
@@ -1785,6 +1832,14 @@ export class Controller {
       this.builtDrag = this.netKind === 'road' && this.projectTools.pressedEmpty && this.projectTools.tip === null && this.roadTools.moveDown(p, this.snapRadius, hr, this.freeAim);
       return;
     }
+    // Выбранная площадка-стоянка: ручка угла или поворота — тянуть (отпустили — новый размер или поворот, Ctrl+Z).
+    if (this.action === 'select' && this.selection?.type === 'lot' && this.movingLot === null) {
+      const h = lotHandleAt(g, this.selection.id, p, (HANDLE_PX + 4) / this.camera.zoom);
+      if (h) {
+        this.lotDrag = { id: this.selection.id, ...h };
+        return;
+      }
+    }
     // Всё, что строит или сносит, можно отменить (Ctrl+Z): снимок до действия, итог — при отпускании кнопки.
     const corner = this.action === 'move' && !this.roadTools.handleAt(p, (HANDLE_PX + 4) / this.camera.zoom) && this.roadTools.cornerAt(p, (HANDLE_PX + 4) / this.camera.zoom);
     const label = this.moving
@@ -1985,6 +2040,13 @@ export class Controller {
         this.onChange();
         break;
       }
+      case 'lot': {
+        // Площадка-стоянка у улицы под курсором (Alt — свободно, с поворотом); поставили — её карточка, инструмент остаётся.
+        const res = g.placeLot(p, { cols: this.lotCols, rows: this.lotRows, free: this.alt, angle: this.lotAngle });
+        if (typeof res === 'string') this.showError(res);
+        else this.select({ type: 'lot', id: res.id });
+        break;
+      }
       case 'base': {
         // Строительная база — у дороги под курсором; поставили — режим кончился (следующая уже платная: случайный
         // второй клик не поставит вторую), снова — «Выбор».
@@ -2074,6 +2136,24 @@ export class Controller {
           } else this.showError(plan.reason);
           break;
         }
+        if (this.movingLot !== null) {
+          // Перенос площадки: к улице под курсором (Alt — свободно), ворота — те же; перенесли — снова её карточка.
+          const id = this.movingLot;
+          const problem = g.editLot(id, g.lotMovePlan(id, p, this.alt, this.lotAngle), 'перенос площадки');
+          if (problem) this.showError(problem);
+          else {
+            this.movingLot = null;
+            this.select({ type: 'lot', id });
+          }
+          break;
+        }
+        // Край выбранной площадки у улицы — ворота: ⬌ → въезд → выезд → убрать; мимо ворот — новые ⬌.
+        if (this.selection?.type === 'lot' && lotGateHit(g, this.selection.id, p)) {
+          const problem = g.toggleLotGate(this.selection.id, p);
+          if (problem) this.showError(problem);
+          this.onChange();
+          break;
+        }
         // Значок предупреждения — карточка станции (предприятия), где объяснение и что сделать; блок подсвечен.
         const mark = this.markUnder(p);
         if (mark) {
@@ -2143,7 +2223,11 @@ export class Controller {
     } else if (st?.type === 'base') {
       const problem = g.removeBase(st.id);
       if (problem) this.showError(problem);
-    } else if (!g.builder.bulldoze(p, this.snapRadius * 0.3)) this.roadTools.bulldoze(p, this.snapRadius * 0.3);
+    } else if (!g.builder.bulldoze(p, this.snapRadius * 0.3) && !this.roadTools.bulldoze(p, this.snapRadius * 0.3)) {
+      // Не дорога — площадка-стоянка под курсором.
+      const lot = g.lotAt(p);
+      if (lot) g.removeLot(lot.lot.id);
+    }
   }
 
   /** Перекрёсток у курсора. */
@@ -2420,6 +2504,9 @@ export class Controller {
     // Парк, сквер, площадь у ратуши, набережная — после зданий и всего выше; дорога поверх парка — не парк (Game.parkAt).
     const park = g.parkAt(p);
     if (park) return { type: 'park', id: park.park.id };
+    // Площадка-стоянка — её карточка: места, занятость, кто паркуется, ✥ ⤡ ↺ ⇄ ⛔.
+    const lot = g.lotAt(p);
+    if (lot) return { type: 'lot', id: lot.lot.id };
     const town = g.townAt(p);
     if (town) return { type: 'town', id: town.id };
     return null;
@@ -2470,6 +2557,18 @@ export class Controller {
   }
 
   private finishLeft(e: MouseEvent, left: { sx: number; sy: number; createdChain: boolean }): void {
+    if (this.lotDrag) {
+      // Отпустили ручку площадки: новый размер или поворот — одним шагом Ctrl+Z.
+      const drag = this.lotDrag;
+      this.lotDrag = null;
+      const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > CLICK_SLOP;
+      if (moved) {
+        const problem = this.game().editLot(drag.id, lotDragPlan(this.game(), drag, this.worldAt(e)), drag.kind === 'rotate' ? 'поворот площадки' : 'размер площадки');
+        if (problem) this.showError(problem);
+      }
+      this.onChange();
+      return;
+    }
     if (this.spanStart) {
       const plan = this.spanPlan(this.worldAt(e));
       this.spanStart = null;
@@ -3307,6 +3406,11 @@ export class Controller {
           this.industryAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
           this.onChange();
         }
+        // Поворот площадки-стоянки свободной постановкой (с Alt) — шагом 15°.
+        if (this.action === 'lot' || this.movingLot !== null) {
+          this.lotAngle += (e.shiftKey ? -1 : 1) * (Math.PI / 12);
+          this.onChange();
+        }
         break;
       // Режимы дороги: N — строить, U — перестроить, M — двигать (включают инструмент «Дорога»).
       case 'KeyN':
@@ -3334,12 +3438,14 @@ export class Controller {
         // Автостанция в конце выезда — ] длиннее выезд (уровень дороги ей не нужен).
         if (this.drivewayKeys(e.code)) this.setStationDriveway(this.stationDriveway + STATION.drivewayRange.step);
         else if (this.curbKeys(e.code)) this.setCurbBays(this.curbBays + 1);
+        else if (this.action === 'lot' && e.code.startsWith('Bracket')) this.setLotSize(this.lotCols + 1);
         else this.setLevel(this.level + 1);
         break;
       case 'BracketLeft':
       case 'PageDown':
         if (this.drivewayKeys(e.code)) this.setStationDriveway(this.stationDriveway - STATION.drivewayRange.step);
         else if (this.curbKeys(e.code)) this.setCurbBays(this.curbBays - 1);
+        else if (this.action === 'lot' && e.code.startsWith('Bracket')) this.setLotSize(this.lotCols - 1);
         else this.setLevel(this.level - 1);
         break;
       // −/+ — высота конца строящейся дороги относительно начала.
@@ -3437,6 +3543,14 @@ export class Controller {
     if (this.tool === 'industry') o.industry = { kind: this.industryKind, plan: null };
     const flash = this.flash && performance.now() < this.flash.until ? this.flash.text : null;
     const p = this.hover;
+    // Площадка-стоянка: ставим, переносим, тянем ручку — предпросмотр с местами и воротами; выбрана — ручки и ворота.
+    const lot = lotOverlay(this.lotState, g, p);
+    o.lot = lot.lot;
+    if (lot.busy) {
+      o.label = flash ? { text: flash, ok: false } : lot.label;
+      return o;
+    }
+    if (lot.label) o.label = lot.label;
     // Рамка сноса: пока тянем — по курсору, после — ждёт подтверждения.
     const area = this.pendingArea ?? (this.areaStart && p ? { a: this.areaStart, b: p, contents: g.areaContents(this.areaStart, p) } : null);
     if (area) {

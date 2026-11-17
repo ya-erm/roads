@@ -125,6 +125,8 @@ import {
   speedSign,
   ledgerIcon,
   stationSvg,
+  lotSvg,
+  lotRowsSvg,
   tracksSvg,
   signalSvg,
   oneWaySignalSvg,
@@ -170,6 +172,8 @@ import { projectName } from '../game/construction';
 import { projectCardHtml } from './projectCard';
 import { baseCardHtml } from './baseCard';
 import { parkCardHtml } from './parkCard';
+import { lotCardHtml } from './lotCard';
+import { LOT, lotCols, lotDepth, lotGateDriveway, lotRows, lotWidth } from '../world/parkingLots';
 import { PARK_INFO } from '../world/parkPick';
 import { crewCardHtml } from './crewCard';
 import { workTrainCardHtml } from './workTrainCard';
@@ -1394,6 +1398,20 @@ export class Hud {
         // Перенос парка: участок за курсором, у улицы — вдоль неё; клик — туда (Esc — отмена).
         this.controller.startParkMove(Number(d.id));
         break;
+      case 'lot-show':
+      case 'lot-move':
+      case 'lot-depth':
+      case 'lot-rot':
+      case 'lot-gate':
+      case 'lot-remove':
+        this.lotAction(d.action, Number(d.id));
+        break;
+      case 'lot-cols':
+        this.controller.setLotSize(this.controller.lotCols + Number(d.d));
+        break;
+      case 'lot-rows':
+        this.controller.setLotSize(this.controller.lotCols, Number(d.v) === 1 ? 1 : Number(d.v) === 4 ? 4 : 2);
+        break;
       case 'dep-build': {
         // Добыча на месторождение из его карточки — как кликом инструментом «Предприятие»; поставили — её карточка.
         const dep = g.enterprises.deposit(Number(d.id));
@@ -1740,7 +1758,7 @@ export class Hud {
       case 'station-mode':
         // «База стройки» — тот же режим, что «＋ База» на вкладке «Стройка».
         if (d.id === 'base') c.startBase();
-        else c.setStationMode(d.id === 'stop' || d.id === 'pax' || d.id === 'rail' ? d.id : 'cargo');
+        else c.setStationMode(d.id === 'stop' || d.id === 'pax' || d.id === 'rail' || d.id === 'lot' ? d.id : 'cargo');
         break;
       case 'st-serves': {
         const st = g.stations.get(Number(d.id));
@@ -2151,6 +2169,64 @@ export class Hud {
       const strip = el.querySelector<HTMLElement>('[data-hscroll]');
       if (strip) strip.scrollLeft = scroll;
     }
+  }
+
+  /**
+   * «🅿️ Площадка»: мест в ряду (− схема +) и рядов (1, 2, 4 — схемами), сколько мест и цена; как ставить — значками,
+   * подробно — в подсказках.
+   */
+  private lotOptionsHtml(sw: string): string {
+    const c = this.controller;
+    const cols = c.lotCols;
+    const n = cols * c.lotRows;
+    const price = LOT.gateCost + n * LOT.stallCost;
+    const rows = ([1, 2, 4] as const)
+      .map(
+        (r) =>
+          `<button class="${c.lotRows === r ? 'active' : ''}" data-action="lot-rows" data-v="${r}" data-tip="${r === 1 ? '1 ряд и проезд у улицы' : r === 2 ? '2 ряда, проезд посередине' : '4 ряда, два проезда'} · глубина ${lotDepth(r)} ед.">${lotRowsSvg(r, 30)}</button>`,
+      )
+      .join('');
+    const step = `<span class="st-params st-drive"><span class="stepper bays tracks" data-tip="Мест в ряду: ${cols} · ширина ${Math.round(lotWidth(cols) * 10) / 10} ед. · [ и ] — меньше и больше">
+      <button data-action="lot-cols" data-d="-1" ${cols > LOT.cols.min ? '' : 'disabled'} data-tip="Меньше мест в ряду · [">−</button><b>${lotSvg(22)}<span>${cols}</span></b><button
+        data-action="lot-cols" data-d="1" ${cols < LOT.cols.max ? '' : 'disabled'} data-tip="Больше мест в ряду · ]">+</button></span></span>`;
+    const how = [
+      ['🛣', 'Встаёт вдоль улицы за тротуаром со стороны курсора'],
+      ['⌥', 'Alt — свободно, R — поворот на 15°'],
+      ['🚧', `Ворота ⬌ посередине; ещё ворота и въезд/выезд — клик по краю у улицы (выбранной площадки), не ближе ${Math.round(LOT.corner * 0.6)} м к перекрёстку`],
+      ['⤴', `Больше ${LOT.big} мест — ворота через перекрёсток (тупик-выезд)`],
+      ['🏚', 'Дома под ней — под снос, за доплату (красные)'],
+    ]
+      .map(([icon, tip]) => `<span data-tip="${esc(tip)}">${icon}</span>`)
+      .join('');
+    return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">🅿️ <b>${n}</b> <span class="price-tag" data-tip="${esc(`${money(LOT.gateCost)} за ворота + ${money(LOT.stallCost)} за место; содержание ${Math.round(LOT.upkeep * 100)}% в месяц`)}">${money(price)}</span><span class="st-kind">${rows}</span>${step}</div>
+      <div class="lot-how">${how}</div></div></div>`;
+  }
+
+  /** Кнопки карточки площадки-стоянки (ui/lotCard.ts): показать, перенести, глубже, повернуть, ворота, снести. */
+  private lotAction(action: string, id: number): void {
+    const g = this.game();
+    const c = this.controller;
+    const ref = g.lotById(id);
+    if (!ref) return;
+    const { lot } = ref;
+    if (action === 'lot-show') c.showPlace(lot.fp.center, Math.max(lot.fp.w, lot.fp.h) + 60);
+    else if (action === 'lot-move') c.startLotMove(id);
+    else if (action === 'lot-remove') {
+      if (g.removeLot(id)) c.select(null);
+    } else {
+      let problem: string | null = null;
+      if (action === 'lot-depth') {
+        const rows = lotRows(lot.fp.h);
+        problem = g.editLot(id, g.lotResizePlan(id, lotCols(lot.fp.w), rows === 1 ? 2 : rows === 2 ? 4 : 1, 1), 'размер площадки');
+      } else if (action === 'lot-rot') problem = g.editLot(id, g.lotRotatePlan(id, lot.fp.angle + LOT.turn), 'поворот площадки');
+      else if (action === 'lot-gate') {
+        // Главные ворота — у края к улице: клик по ним — следующий режим.
+        const at = lotGateDriveway(lot, lot.gates[0]).gate;
+        problem = g.toggleLotGate(id, at);
+      }
+      if (problem) c.showError(problem);
+    }
+    c.onChange();
   }
 
   /** Рельеф: поднять, опустить или выровнять кистью; размер кисти. */
@@ -2603,11 +2679,13 @@ export class Hud {
         { id: 'pax', name: 'Автовокзал', svg: stationSvg('pax', 34), hint: 'Для пассажиров: междугородние и городские автобусы' },
         { id: 'stop', name: 'Остановка', svg: stationSvg('stop', 34), hint: 'Автобусная остановка прямо на улице — для маршрутов по городу' },
         { id: 'rail', name: 'Ж/д станция', svg: stationSvg('rail', 34), hint: 'Вокзал с платформами: на пути или в чистом поле (как в инструменте «Ж/д»)' },
+        { id: 'lot', name: 'Площадка', svg: lotSvg(34), hint: '🅿️ Площадка-стоянка у улицы: места для машин жителей у целей и на ночь. Не станция — маршрутов к ней нет' },
         ...base,
       ],
       // Виды — в три колонки, «Как ставить» — шире, цена — в его заголовке: панель низкая (на узком экране — в две).
       3,
     );
+    if (c.stationMode === 'lot' && !c.placingBase) return this.lotOptionsHtml(sw);
     if (c.placingBase) {
       const tip = `База встаёт у дороги со стороны курсора, ворота — на ближайший узел. С неё бригады едут строить: сами — на стройки ближе ${distText(CONSTRUCTION.serviceRadius)} (круг на карте). Дома под площадкой снесём (красные) — за доплату.`;
       return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">Как ставить</div><p class="muted">${tip}</p>
@@ -3444,6 +3522,7 @@ export class Hud {
     if (sel.type === 'crew') return crewCardHtml(g, sel.id, { following: this.controller.following, picking: this.controller.sendingCrew === sel.id });
     if (sel.type === 'workTrain') return workTrainCardHtml(g, sel.id, { following: this.controller.following });
     if (sel.type === 'park') return parkCardHtml(g, sel.id);
+    if (sel.type === 'lot') return lotCardHtml(g, sel.id);
     if (sel.type === 'deposit') {
       const d = g.enterprises.deposit(sel.id);
       const partners = d && d.used === undefined ? this.partnersHtml(g.partners(g.enterprises.depositProbe(d), 3)) : '';

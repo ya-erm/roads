@@ -380,15 +380,15 @@ export function carryFootprint(fp: Footprint, from: Footprint, fromAngle: number
   return { center: at(to.center, toAngle, u, v), w: fp.w, h: fp.h, angle: fp.angle + toAngle - fromAngle };
 }
 
-/** Участок задевает парк города (с запасом margin): рост города сюда дом не ставит. */
-export function onPark(town: Pick<Town, 'parks'>, fp: Footprint, margin = 2): boolean {
-  return !!town.parks?.some((p) => footprintsOverlap(fp, p.fp, margin));
+/** Участок задевает парк или площадку-стоянку города (с запасом margin): рост города сюда дом не ставит. */
+export function onPark(town: Pick<Town, 'parks' | 'lots'>, fp: Footprint, margin = 2): boolean {
+  return !!town.parks?.some((p) => footprintsOverlap(fp, p.fp, margin)) || !!town.lots?.some((l) => !l.removed && footprintsOverlap(fp, l.fp, margin));
 }
 
-/** Точка ближе r к парку какого-нибудь города: новая улица города через парк не идёт. */
-export function nearPark(towns: readonly Pick<Town, 'parks'>[], p: Vec, r: number): boolean {
+/** Точка ближе r к парку или площадке-стоянке какого-нибудь города: новая улица города через них не идёт. */
+export function nearPark(towns: readonly Pick<Town, 'parks' | 'lots'>[], p: Vec, r: number): boolean {
   for (const t of towns) {
-    for (const k of t.parks ?? []) {
+    for (const k of [...(t.parks ?? []), ...(t.lots ?? []).filter((l) => !l.removed)]) {
       if (dist(p, k.fp.center) > footprintRadius(k.fp) + r) continue;
       const c = Math.cos(k.fp.angle);
       const s = Math.sin(k.fp.angle);
