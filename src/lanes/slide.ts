@@ -1,8 +1,8 @@
 import { arcCubic, bezPoint, Cubic, minRadius, reverseCubic, splitBezier } from '../core/bezier';
 import { add, cross, dist, norm, scale, sub, Vec } from '../core/vec';
-import { splitCorridor } from './edit';
+import { EditError, splitCorridor } from './edit';
 import { pointOff } from './geometry';
-import { Corridor, CorridorEnd, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, taperLen } from './model';
+import { Corridor, CorridorEnd, Flow, LaneNet, LaneNode, LaneSlot, LAT_EPS, renameArm, taperLen } from './model';
 
 // ---------- Примыкание вдоль дороги ----------
 
@@ -65,6 +65,25 @@ export function slideTarget(j: BranchSeam, p: Vec): number {
   return Math.max(lo, Math.min(hi, best));
 }
 
+/** Соседнее примыкание на той же дороге: тянут к его узлу или к концу любой из его веток. */
+export function slideJoinTarget(net: LaneNet, j: BranchSeam, p: Vec, radius = SLIDE_GAP): BranchSeam | null {
+  let best: BranchSeam | null = null;
+  let distance = radius;
+  for (const e of [j.back, j.front]) {
+    const target = branchSeam(net, net.node(farNode(e)));
+    if (!target || ![target.back, target.front].some((o) => o.corridor.id === e.corridor.id)) continue;
+    const shared = net.end(e.corridor, e.end === 'a' ? 'b' : 'a');
+    const sign = e.along * shared.along;
+    const spots = [target.node.pos, ...target.branches.map((b) => net.portPos(target.node, b.port)), ...j.branches.map((b) => net.portPos(target.node, b.port * sign))];
+    const d = Math.min(...spots.map((q) => dist(q, p)));
+    if (d < distance) {
+      best = target;
+      distance = d;
+    }
+  }
+  return best;
+}
+
 /** Где ответвления окажутся, если тянуть примыкание к p: их концы (боковые порты) на новом месте. */
 export function slidePorts(j: BranchSeam, p: Vec): Vec[] {
   const u = slideTarget(j, p);
@@ -86,10 +105,15 @@ export function slideTrack(j: BranchSeam, step = 8): Vec[] {
  * (и отгоны у стыка) едут вместе с примыканием той же длины; сквозные полосы дороги остаются как были.
  * false — двигать нечего или некуда.
  */
-export function slideSeam(net: LaneNet, id: number, p: Vec): boolean {
+export function slideSeam(net: LaneNet, id: number, p: Vec, radius = SLIDE_GAP): boolean {
   const n = net.nodes.get(id);
   const j = n ? branchSeam(net, n) : null;
   if (!j) return false;
+  const target = slideJoinTarget(net, j, p, radius);
+  if (target) {
+    mergeSeams(net, j, target);
+    return true;
+  }
   const u = slideTarget(j, p);
   if (Math.abs(u) < 1) return false;
   shiftSeam(net, j, u);
@@ -103,8 +127,111 @@ interface Run {
   lo: number;
   hi: number;
   solid?: boolean;
+  park?: true;
   /** Номера полосы на исходных полотнах — чтобы у полотна полосы шли в прежнем порядке. */
   src: Map<number, number>;
+}
+
+/** Два примыкания становятся одним; короткое полотно между ними не превращается в нулевое. */
+function mergeSeams(net: LaneNet, j: BranchSeam, target: BranchSeam): void {
+  const into = [j.back, j.front].find((e) => farNode(e) === target.node.id)!;
+  const other = into === j.front ? j.back : j.front;
+  const atTarget = net.end(into.corridor, into.end === 'a' ? 'b' : 'a');
+  const beyond = [target.back, target.front].find((e) => e.corridor.id !== into.corridor.id)!;
+  const sign = (into.along * atTarget.along) as 1 | -1;
+  if (j.branches.some((b) => target.branches.some((o) => Math.abs(b.port * sign - o.port) < LAT_EPS))) {
+    throw new EditError('Здесь уже есть примыкание этой полосы');
+  }
+  const u = into.side * into.corridor.length;
+  const uOf = new Map<number, number>([
+    [j.node.id, 0],
+    [target.node.id, u],
+    [farNode(other), other.side * other.corridor.length],
+    [farNode(beyond), u + into.side * beyond.corridor.length],
+  ]);
+  const road = [other.corridor, into.corridor, beyond.corridor];
+  const runs = mergeLaneRuns(net, j, road, uOf, u);
+  for (const b of j.branches) moveBranch(net, b, target.node, sign);
+  const Y = other.corridor;
+  const C = into.corridor;
+  const toS = other.end === 'b' ? Y.curve : reverseCubic(Y.curve);
+  const fromS = into.end === 'a' ? C.curve : reverseCubic(C.curve);
+  const whole = Y.cls === C.cls && Y.limit === C.limit ? joinCubics(toS, fromS) : null;
+  if (whole) {
+    // Настройки целевого узла относятся теперь к объединённому полотну.
+    renameArm(target.node, C.id, Y.id);
+    net.removeCorridor(C.id, true);
+    j.node.corridors = j.node.corridors.filter((id) => id !== Y.id);
+    target.node.corridors.push(Y.id);
+    if (other.end === 'b') Y.b = target.node.id;
+    else Y.a = target.node.id;
+    net.setCurve(Y, other.end === 'b' ? whole : reverseCubic(whole));
+    if (!j.node.corridors.length) net.removeNode(j.node.id);
+  }
+  // Если исходные куски не одна кривая, прежний узел остаётся простым швом дороги.
+  for (const c of road) if (net.corridors.has(c.id)) net.setLanes(c, lanesFor(c, c.id, runs, uOf));
+}
+
+/**
+ * Полосы на трёх полотнах вокруг сливаемых узлов — в общей продольной координате.
+ * Едут только отгоны веток исходного узла; полосы целевого примыкания остаются на месте.
+ */
+function mergeLaneRuns(net: LaneNet, j: BranchSeam, road: Corridor[], uOf: Map<number, number>, delta: number): Run[] {
+  const min = Math.min(...uOf.values());
+  const max = Math.max(...uOf.values());
+  const runs: Run[] = [];
+  for (const c of road) {
+    const ua = uOf.get(c.a)!;
+    const ub = uOf.get(c.b)!;
+    const sign: Flow = ub > ua ? 1 : -1;
+    c.lanes.forEach((l, i) => {
+      const x = ua + sign * l.from;
+      const y = ua + sign * Math.min(l.to, c.length);
+      let lo = Math.min(x, y);
+      let hi = Math.max(x, y);
+      if (lo <= min + 0.01) lo = -Infinity;
+      if (hi >= max - 0.01) hi = Infinity;
+      let run: Run = { lat: l.offset * sign, fwd: l.flow * sign > 0, lo, hi, solid: l.solid, park: l.park, src: new Map([[c.id, i]]) };
+      // Куски одной полосы через соседний узел — одна полоса, включая её конечный отгон за ним.
+      for (let k = runs.length - 1; k >= 0; k--) {
+        const r = runs[k];
+        if (Math.abs(r.lat - run.lat) >= LAT_EPS || r.fwd !== run.fwd || !!r.solid !== !!run.solid || !!r.park !== !!run.park || r.lo > run.hi + 0.5 || run.lo > r.hi + 0.5) continue;
+        run = { ...run, lo: Math.min(r.lo, run.lo), hi: Math.max(r.hi, run.hi), src: new Map([...r.src, ...run.src]) };
+        runs.splice(k, 1);
+      }
+      runs.push(run);
+    });
+  }
+  const owned = j.branches.flatMap((e) => e.corridor.lanes.map((l) => net.laneAtSeam(e, l)));
+  const pending = new Set(runs);
+  for (const r of runs) {
+    if (!pending.delete(r)) continue;
+    const group = [r];
+    let lo = r.lo;
+    let hi = r.hi;
+    // Разные настройки сплошной остаются отдельными кусками, но перемещаются вместе со всей полосой.
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const o of pending) {
+        if (Math.abs(o.lat - r.lat) >= LAT_EPS || o.fwd !== r.fwd || !!o.park !== !!r.park || o.lo > hi + 0.5 || lo > o.hi + 0.5) continue;
+        pending.delete(o);
+        group.push(o);
+        lo = Math.min(lo, o.lo);
+        hi = Math.max(hi, o.hi);
+        grew = true;
+      }
+    }
+    if (!owned.some((o) => Math.abs(o.lat - r.lat) < LAT_EPS && o.forward === r.fwd)) continue;
+    // Сквозная полоса не двигается вместе с ответвлением.
+    if (lo < -0.01 && hi > 0.01) continue;
+    const taper = taperLen(lo >= 0 ? j.front.corridor.cls : j.back.corridor.cls);
+    if (Math.min(Math.abs(lo), Math.abs(hi)) > taper + 2) continue;
+    for (const piece of group) {
+      piece.lo += delta;
+      piece.hi += delta;
+    }
+  }
+  return runs;
 }
 
 function shiftSeam(net: LaneNet, j: BranchSeam, u: number): void {
@@ -178,6 +305,7 @@ function laneRuns(net: LaneNet, j: BranchSeam, u: number): Run[] {
         lo: Math.min(nearU, farU),
         hi: Math.max(nearU, farU),
         solid: l.solid,
+        park: l.park,
         src: new Map([[c.id, i]]),
         side: e.side,
         atSeam,
@@ -187,13 +315,13 @@ function laneRuns(net: LaneNet, j: BranchSeam, u: number): Run[] {
   }
   const runs: Run[] = [];
   const used = new Set<Piece>();
-  const same = (x: Piece, y: Piece) => x.fwd === y.fwd && Math.abs(x.lat - y.lat) < LAT_EPS;
+  const same = (x: Piece, y: Piece) => x.fwd === y.fwd && !!x.park === !!y.park && Math.abs(x.lat - y.lat) < LAT_EPS;
   for (const b of pieces) {
     if (b.side > 0 || !b.atSeam) continue;
     const f = pieces.find((x) => x.side > 0 && x.atSeam && !used.has(x) && same(x, b));
     if (!f) continue;
     used.add(b).add(f);
-    runs.push({ lat: b.lat, fwd: b.fwd, lo: b.lo, hi: f.hi, solid: b.solid, src: new Map([...b.src, ...f.src]) });
+    runs.push({ lat: b.lat, fwd: b.fwd, lo: b.lo, hi: f.hi, solid: b.solid, park: b.park, src: new Map([...b.src, ...f.src]) });
   }
   const LB = j.back.corridor.length;
   const LF = j.front.corridor.length;
@@ -235,6 +363,7 @@ function lanesFor(c: Corridor, parent: number, runs: Run[], uOf: Map<number, num
     const s1 = Math.max(sAt(a), sAt(b));
     const lane: LaneSlot = { offset: r.lat * sgn, flow: (r.fwd ? sgn : -sgn) as Flow, from: atA ? 0 : s0, to: atB ? Infinity : s1 };
     if (r.solid) lane.solid = true;
+    if (r.park) lane.park = true;
     res.push({ lane, order: r.src.get(parent) ?? 1000 + k });
   });
   return res.sort((x, y) => x.order - y.order).map((x) => x.lane);

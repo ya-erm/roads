@@ -32,7 +32,7 @@ import {
   EditError,
 } from '../lanes/edit';
 import { levelDeck, nodeDeck, setDecks, zAlong } from '../lanes/deck';
-import { branchSeam, slidePorts, slideSeam, slideTarget, slideTrack } from '../lanes/slide';
+import { branchSeam, slideJoinTarget, slidePorts, slideSeam, slideTarget, slideTrack } from '../lanes/slide';
 import { CornerHandle, cornerHandleAt, cornerHandles, cornerLimitText, cornerRadiusAt, cornerTurn, setCornerRadius } from '../lanes/corners';
 import { junctionCorners } from '../lanes/geometry';
 import { GRADE } from '../config';
@@ -979,6 +979,13 @@ export class RoadTools {
       const id = this.slide;
       const node = this.net.nodes.get(id);
       const j = node ? branchSeam(this.net, node) : null;
+      const target = j && !free ? slideJoinTarget(this.net, j, p, this.moveSnap) : null;
+      const merge = target && !this.stationNodes().has(target.node.id) ? target : null;
+      if (merge) {
+        this.joinPos = merge.node.pos;
+        this.hint = 'объединятся';
+        return (n) => slideSeam(n, id, p, this.moveSnap);
+      }
       if (j) {
         this.joinPos = slidePorts(j, p)[0] ?? null;
         const u = slideTarget(j, p);
@@ -986,7 +993,7 @@ export class RoadTools {
         const fwd = b.corridor.lanes.length ? this.net.laneAtSeam(b, b.corridor.lanes[0]).forward : true;
         if (Math.abs(u) >= 1) this.hint = `${(fwd ? u : -u) > 0 ? 'позже' : 'раньше'} на ${Math.round(Math.abs(u))} м`;
       }
-      return (n) => slideSeam(n, id, p);
+      return (n) => slideSeam(n, id, p, 0);
     }
     if (this.dragNode !== null) {
       const id = this.dragNode;
