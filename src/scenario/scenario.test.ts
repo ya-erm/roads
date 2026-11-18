@@ -134,7 +134,8 @@ describe('Сценарий: генерация', { timeout: 120_000 }, () => {
     // Население городов seed 1 — генерация песочницы не зависит от сценариев (числа — с крупными кварталами и
     // жителями по домам: в частном доме 3–6 человек, docs/DESIGN.md «Жители по домам»; дома и участки — в масштабе
     // застройки TOWN_SCALE; ратуша с площадью вокруг — за тротуаром, worldgen.landmarkClear).
-    expect(game.towns.map((t) => t.population).sort((x, y) => y - x)).toEqual([11384, 7124, 3190, 2654, 2191, 1503, 622, 500, 393, 376]);
+    // Гаражные боксы не добавляют рабочих мест в население города.
+    expect(game.towns.map((t) => t.population).sort((x, y) => y - x)).toEqual([11300, 7036, 3158, 2638, 2155, 1491, 622, 500, 393, 376]);
     // Прежние 32 предприятия — те же, предприятия новых цепочек расставлены после них.
     expect(game.industries).toHaveLength(41);
     expect(game.industries.slice(32).map((i) => i.info.kind)).toEqual(['ranch', 'ranch', 'ranch', 'sandpit', 'sandpit', 'meatplant', 'glassworks', 'furniture', 'cement']);

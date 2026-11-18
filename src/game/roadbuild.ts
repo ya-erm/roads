@@ -3,7 +3,7 @@ import { curveProfile, earthFactor, earthworkProblem, GroundProfile, type Profil
 import { nodeDeck } from '../lanes/deck';
 import { Cubic, minRadius } from '../core/bezier';
 import { add, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
-import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, joinTaperedLanes, LaneDraft, laneStep, LaneTip, RoadOptions, taperDeadLanes } from '../lanes/edit';
+import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, joinShiftedProfiles, joinTaperedLanes, LaneDraft, laneStep, LaneTip, RoadOptions, taperDeadLanes } from '../lanes/edit';
 import { cornerCost, cornerHandles } from '../lanes/corners';
 import { edgesAt, laneShare } from '../lanes/geometry';
 import { CURB } from '../lanes/curb';
@@ -582,6 +582,8 @@ export class RoadBuilder {
         n.setLanes(c, p.lanes);
         // Сосед того же профиля (дорогу перестраивают по кускам): его отгон к прежнему профилю — снова полосы до стыка.
         joinTaperedLanes(n, [c.a, c.b]);
+        // Например, разделитель автомагистрали смещает сразу все полосы: им нужен плавный переход, а не четыре отгона в ноль.
+        joinShiftedProfiles(n, [c.a, c.b]);
         // В стыке с дорогой другого профиля лишние полосы (у неё или у соседа) сходят на нет отгоном.
         taperDeadLanes(n, [c.a, c.b]);
       },

@@ -1156,7 +1156,7 @@ export function laneStep(net: LaneNet, tip: LaneTip, q: Vec, cls: RoadClass, rad
   return { tip: { kind: 'point', anchor: nodeNear(net, built, to.pos) }, what: 'Однополосная' };
 }
 
-/** q — у линии полосы от конца tip (и дальше, за стыками — по продолжению дороги), а не в стороне от неё. */
+/** q — у линии полосы от конца tip (через стыки и перекрёстки — по продолжению дороги), а не в стороне от неё. */
 export function laneAlong(net: LaneNet, tip: Extract<LaneTip, { kind: 'edge' }>, q: Vec): boolean {
   let c = net.corridors.get(tip.corridor);
   let offset = tip.offset;
@@ -1165,9 +1165,9 @@ export function laneAlong(net: LaneNet, tip: Extract<LaneTip, { kind: 'edge' }>,
     const end: End | null = hit.s >= c.length - 0.5 ? 'b' : hit.s <= 0.5 ? 'a' : null;
     const next = end ? continuation(net, c, end, q) : null;
     if (!end || !next) return Math.abs(dot(sub(q, hit.point), rightNormal(c.lut.tangentAt(hit.s))) - offset) < DEPART_LAT;
-    const me = net.laneAtSeam(net.end(c, end), { offset, flow: 1, from: 0, to: c.length });
+    const lane = laneOnContinuation(net.end(c, end), next, offset, 1);
     c = next.corridor;
-    offset = (me.lat - next.port) * next.along;
+    offset = lane.offset;
   }
   return false;
 }
@@ -1180,7 +1180,7 @@ function nodeNear(net: LaneNet, built: Corridor[], p: Vec): Anchor {
 }
 
 /**
- * Полоса вдоль дороги от конца tip к проекции q; за конец полотна — через стык в продолжающее дорогу полотно
+ * Полоса вдоль дороги от конца tip к проекции q; за конец полотна — через стык или перекрёсток в продолжение дороги
  * (место поперёк то же). Направление — tip.flow или по ходу к q (reverse — навстречу). Возвращает новый конец.
  */
 function alongLane(net: LaneNet, c0: Corridor, tip: Extract<LaneTip, { kind: 'edge' }>, q: Vec, park = false): Extract<LaneTip, { kind: 'edge' }> {
@@ -1191,38 +1191,50 @@ function alongLane(net: LaneNet, c0: Corridor, tip: Extract<LaneTip, { kind: 'ed
   const mark = park ? { park: true as const } : {};
   for (let guard = 0; guard < 12; guard++) {
     const s1 = c.lut.closest(q).s;
-    const dir = Math.sign(s1 - s0) || 1;
     const f = flow;
-    const end: End = dir > 0 ? 'b' : 'a';
-    // Дальше конца полотна — в продолжение дороги за стыком, если q ближе к нему.
-    const next = s1 >= c.length - 0.5 || s1 <= 0.5 ? continuation(net, c, end, q) : null;
+    const end: End | null = s1 >= c.length - 0.5 ? 'b' : s1 <= 0.5 ? 'a' : null;
+    // Дальше конца полотна — в продолжение дороги, если q ближе к нему.
+    const next = end ? continuation(net, c, end, q) : null;
     if (park) parkFits(c, offset, f, (s0 + s1) / 2);
-    if (!next) {
+    if (!end || !next) {
       const lo = Math.min(s0, s1);
       const hi = Math.max(s0, s1);
       if (hi - lo < 5) throw new EditError('Протяните вдоль дороги подальше');
       placeLane(net, c, { offset, flow: f, from: lo, to: hi, ...mark });
       return { kind: 'edge', corridor: c.id, offset, s: s1, flow: f };
     }
-    // До стыка — на полную ширину, за ним — с начала полотна-продолжения.
-    placeLane(net, c, dir > 0 ? { offset, flow: f, from: s0, to: Infinity, ...mark } : { offset, flow: f, from: 0, to: s0, ...mark });
-    const me = net.laneAtSeam(net.end(c, end), { offset, flow: f, from: 0, to: c.length });
+    // До узла — на полную ширину, за ним — с начала полотна-продолжения.
+    placeLane(net, c, end === 'b' ? { offset, flow: f, from: s0, to: Infinity, ...mark } : { offset, flow: f, from: 0, to: s0, ...mark });
+    const lane = laneOnContinuation(net.end(c, end), next, offset, f);
     c = next.corridor;
-    offset = (me.lat - next.port) * next.along;
-    flow = ((me.forward ? 1 : -1) * next.along) as Flow;
+    offset = lane.offset;
+    flow = lane.flow;
     s0 = next.end === 'a' ? 0 : c.length;
   }
   throw new EditError('Слишком далеко');
 }
 
-/** Продолжение дороги за стыком на конце end полотна c (то, что ближе к q); нет стыка или продолжения — null. */
+/** Продолжение дороги за узлом (ближе к q); на перекрёстке — только вперёд, без поворота в боковую улицу. */
 function continuation(net: LaneNet, c: Corridor, end: End, q: Vec): CorridorEnd | null {
   const e = net.end(c, end);
-  if (e.node.kind !== 'seam' || net.isDeadEnd(e.node)) return null;
-  const others = net.ends(e.node).filter((o) => o.side !== e.side && Math.abs(o.port) < LAT_EPS);
+  if (net.isDeadEnd(e.node)) return null;
+  const others = net.ends(e.node).filter((o) =>
+    e.node.kind === 'junction'
+      ? dot(e.away, o.away) < -Math.SQRT1_2
+      : o.side !== e.side && Math.abs(o.port) < LAT_EPS,
+  );
   const best = others.sort((x, y) => x.corridor.lut.closest(q).d - y.corridor.lut.closest(q).d)[0];
   // q ближе к своему полотну, чем к продолжению, — не переходим.
   return best && best.corridor.lut.closest(q).d < c.lut.closest(q).d ? best : null;
+}
+
+/** Место и ход полосы на продолжении: в перекрёстке нет общей оси стыка, ориентируемся по концам полотен. */
+function laneOnContinuation(e: CorridorEnd, next: CorridorEnd, offset: number, flow: Flow): { offset: number; flow: Flow } {
+  if (e.node.kind === 'junction') {
+    const sign = e.end === next.end ? -1 : 1;
+    return { offset: offset * sign, flow: (flow * sign) as Flow };
+  }
+  return { offset: (e.port + offset * e.along - next.port) * next.along, flow: (flow * e.along * next.along) as Flow };
 }
 
 /** Съезд от конца tip к q (по ходу полосы); полосы до этого места нет — с полосой торможения. Новый конец — у q. */
@@ -1946,6 +1958,46 @@ export function joinTaperedLanes(net: LaneNet, nodeIds: number[]): void {
       }
     }
     if (!changed) return;
+  }
+}
+
+/**
+ * Смена разделителя или смещения полос при перестройке: простому стыку нужны совпадающие поперечные координаты.
+ * Если ни одна полоса какого-то сквозного направления не совпадает, вместо обрыва всех полос делаем переход
+ * через площадку узла: полосы соединятся плавными манёврами. Боковые въезды со сдвигом и развилки не меняем.
+ */
+export function joinShiftedProfiles(net: LaneNet, nodeIds: number[]): void {
+  for (const id of new Set(nodeIds)) {
+    const n = net.nodes.get(id);
+    if (!n || n.kind !== 'seam' || n.corridors.length !== 2 || net.isDeadEnd(n)) continue;
+    const ends = net.ends(n);
+    if (ends.length !== 2 || ends[0].side === ends[1].side || ends.some((e) => Math.abs(e.port) > LAT_EPS)) continue;
+    const near = (e: CorridorEnd) => e.corridor.lanes.filter((l) => {
+      const gap = e.end === 'a' ? l.from : e.corridor.length - l.to;
+      return !l.park && gap <= taperLen(e.corridor.cls) + 1;
+    }).map((l) => net.laneAtSeam(e, l));
+    const [a, b] = ends.map(near);
+    const shifted = [true, false].some((forward) => {
+      const mine = a.filter((l) => l.forward === forward);
+      const theirs = b.filter((l) => l.forward === forward);
+      return mine.length && theirs.length && !mine.some((l) => theirs.some((o) => Math.abs(o.lat - l.lat) < LAT_EPS));
+    });
+    if (!shifted) continue;
+    n.kind = 'junction';
+    net.version++;
+    // У уже перестроенного соседа могли остаться отгоны от прежнего несовпадающего профиля.
+    for (const e of ends) {
+      const c = e.corridor;
+      const T = taperLen(c.cls);
+      let restored = false;
+      const lanes = c.lanes.map((l) => {
+        const gap = e.end === 'a' ? l.from : c.length - l.to;
+        if (l.park || gap < 0.01 || Math.abs(gap - T) > 1) return l;
+        restored = true;
+        return e.end === 'a' ? { ...l, from: 0 } : { ...l, to: c.length };
+      });
+      if (restored) net.setLanes(c, lanes);
+    }
   }
 }
 

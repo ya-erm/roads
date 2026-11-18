@@ -10,6 +10,7 @@ import {
   formOf,
   growTier,
   inDistrict,
+  jobsOf,
   LEGACY_TIER,
   mergeBlocks,
   mergeTowers,
@@ -73,6 +74,18 @@ function town(population: number, buildings: TownBuilding[] = [], o: Partial<Tow
 const at = (p: Vec, o: Partial<TownBuilding> = {}) => house(p.x, p.y, o);
 
 describe('Типы застройки по месту в городе', () => {
+  it('гаражи — одноэтажные боксы без рабочих мест, в том числе со старыми этажами генерации', () => {
+    const garage = house(0, 0, { kind: 'com', form: 'garages', floors: 4 });
+    const office = house(0, 0, { kind: 'com', form: 'office', floors: 4 });
+    const home = house(0, 0, { people: 5 });
+    expect(storeysOf(garage)).toBe(1);
+    expect(jobsOf(garage)).toBe(0);
+    expect(jobsOf(office)).toBe(16);
+    const t = town(0, [garage, office, home]);
+    recountPopulation(t);
+    expect(t.population).toBe(21);
+  });
+
   it('ярус — свой у города: новый — по размеру генерации, растёт по населению и не убывает; без него — по прежним порогам', () => {
     // Старое сохранение и тестовые сцены без яруса — по населению и прежним порогам; кольцевой город — не село.
     expect(townTier({ population: 1500, style: 'linear' })).toBe('village');
@@ -391,7 +404,7 @@ describe('Застройка в партии', () => {
     const old = save.towns.map((t) => t.population);
     const loaded = new Game(structuredClone(g.settings), save);
     for (const [i, t] of loaded.towns.entries()) {
-      expect(t.population).toBe(t.buildings.reduce((s, b) => s + (b.kind === 'res' ? residentsOf(b) : b.kind === 'com' ? b.floors * 4 : 0), 0));
+      expect(t.population).toBe(t.buildings.reduce((s, b) => s + residentsOf(b) + jobsOf(b), 0));
       // Сельчан — в разы меньше прежнего (в частном доме 3–6 человек, а не 14 на этаж).
       if (t.tier === 'village') expect(t.population).toBeLessThan(old[i] * 0.6);
       expect(t.settled).toBe(SETTLE_RULE);

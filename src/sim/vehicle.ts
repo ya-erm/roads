@@ -21,6 +21,8 @@ export interface VehicleSpec {
    * ей уступают — перестраиваются или прижимаются к краю полосы (lanes/traffic.ts). Нет — как все.
    */
   siren?: boolean;
+  /** Техника бригады планирует разворот у тупика, чтобы выполнить его петлёй перед автостанцией (crewLoop.ts). */
+  loopTurn?: true;
 }
 
 export interface Vehicle extends VehicleSpec {

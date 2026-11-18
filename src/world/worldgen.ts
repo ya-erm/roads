@@ -15,7 +15,7 @@ import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerI
 import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
 import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
-import { edgeOf, growTier, hospitalBays, hospitalWidth, inDistrict, JOBS_PER_FLOOR, LANDMARK_YARD, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, yardOf, zoneTown } from './townForms';
+import { edgeOf, growTier, hospitalBays, hospitalWidth, inDistrict, jobsOf, LANDMARK_YARD, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, yardOf, zoneTown } from './townForms';
 import { onPark, placeParks, type ParkSite } from './townParks';
 import { type StreetKit, streetsRadius, townStreets } from './townStreets';
 import type { Terrain } from './terrain';
@@ -1131,7 +1131,7 @@ export function placeable(ctx: WorldContext, fp: Footprint, ownSeg: number): boo
 
 /** Жители города: жильцы домов (townForms.residentsOf) и рабочие места деловых — по 4 на этаж. */
 export function recountPopulation(town: Town): void {
-  town.population = town.buildings.reduce((sum, b) => sum + (b.kind === 'res' ? residentsOf(b) : b.kind === 'com' ? b.floors * JOBS_PER_FLOOR : 0), 0);
+  town.population = town.buildings.reduce((sum, b) => sum + residentsOf(b) + jobsOf(b), 0);
 }
 
 /**

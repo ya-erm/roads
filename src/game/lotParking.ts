@@ -9,7 +9,6 @@ import { carSpot, type CarSpot } from './garages';
 import { stallKey } from './shopParking';
 import type { Driveway } from '../world/houseAccess';
 import { dockDriveway } from '../world/shopLots';
-import { yardLotOf, yardSpots } from '../world/yardLots';
 import { planLotExit, type LotExitPlan } from './lotExit';
 import type { Leg } from './lotMoves';
 
@@ -32,7 +31,7 @@ export const LOT_TRIPS = {
   /** Выезд с большой площадки: места в потоке у узла нет — ждёт не дольше стольких с. */
   maxWait: 40,
   /** Свой двор цели — сколько машин работников и гостей в нём встаёт (за воротами их не видно). */
-  yardCap: { garages: 6, warehouse: 5, depot: 6 },
+  yardCap: { warehouse: 5, depot: 6 },
 };
 
 /** Что площадкам нужно от игры. */
@@ -496,7 +495,7 @@ export class LotParking {
     m.stay += Math.max(0, Math.round(stay));
   }
 
-  // ---------- Свой двор цели (склад, оптовая база, гаражи) ----------
+  // ---------- Свой двор цели (склад, оптовая база) ----------
 
   /** Свой двор цели: место манёвра у его ворот (въезд — как во двор, за воротами машин не видно). Нет — null. */
   yardSpot(b: TownBuilding): CarSpot | null {
@@ -505,15 +504,11 @@ export class LotParking {
     const L = this.host.car.length;
     const form = b.form;
     let d: Driveway | null = null;
-    if (form === 'garages') {
-      const lot = yardLotOf(b);
-      d = lot ? yardSpots(b, lot, L).gate : null;
-    } else if (form && form in LOT_TRIPS.yardCap) {
+    if (form && form in LOT_TRIPS.yardCap) {
       const dd = dockDriveway(b);
       d = dd && { ...dd, garage: true };
     }
-    // Ворота гаражей — те же, что у боксов (CarHomes): одна машина в воротах за раз.
-    s = d ? carSpot(stallKey(b.id, form === 'garages' ? 63 : 61), b, d, false, '#888888', L) : null;
+    s = d ? carSpot(stallKey(b.id, 61), b, d, false, '#888888', L) : null;
     this.yardSpots.set(b.id, s);
     return s;
   }

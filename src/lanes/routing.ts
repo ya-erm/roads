@@ -7,6 +7,11 @@ const MAX_SPEED = 120 / KMH_PER_UNIT;
 
 export const linkCost = (l: GLink) => l.length / l.speed;
 
+/** Запрет разворота в тупике: станция остаётся целью рейса, но не промежуточным пунктом для разворота. */
+export function canRouteTransition(g: LaneGraph, from: GLink, to: GLink): boolean {
+  return from.toNode === null || !g.net.nodes.get(from.toNode)?.bans?.includes(`${from.corridor}>${to.corridor}`);
+}
+
 /** Стоимость перехода между связями: продолжение полосы — даром, манёвр — по длине, очереди и узлу. */
 export function transitionCost(g: LaneGraph, from: GLink, to: GLink): number {
   let best = Infinity;
@@ -39,7 +44,7 @@ export function routeCost(g: LaneGraph, route: number[]): number {
  * A* по связям: список id связей от одной из стартовых до узла goal. endLink — путь кончается этой связью (машина
  * жителя заезжает в гараж посреди улицы, Vehicle.endLink); такой связи в графе нет — как без неё, до узла.
  */
-export function findLaneRoute(g: LaneGraph, starts: GLink[], goal: number, endLink?: number): number[] | null {
+export function findLaneRoute(g: LaneGraph, starts: GLink[], goal: number, endLink?: number, loopTurn = false): number[] | null {
   const target = g.net.nodes.get(goal);
   if (!target) return null;
   const endOf = (l: GLink) => g.lanePose(l.lanes[0], l.length).pos;
@@ -70,6 +75,8 @@ export function findLaneRoute(g: LaneGraph, starts: GLink[], goal: number, endLi
     for (const nextId of g.linkNext.get(link.id) ?? []) {
       const next = g.links.get(nextId);
       if (!next || closed.has(nextId)) continue;
+      // Бригада использует этот путь только как ориентир для петли до тупика, не для заезда на станцию.
+      if (!loopTurn && !canRouteTransition(g, link, next)) continue;
       const c = base + transitionCost(g, link, next) + linkCost(next);
       if (c < (cost.get(nextId) ?? Infinity)) {
         cost.set(nextId, c);

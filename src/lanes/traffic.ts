@@ -8,7 +8,7 @@ import { GLane, GLink, GMove, GNode, greenOf, LaneGraph, LightPhase } from './gr
 import { bridgeLook, deckAlong, nodeDeck } from './deck';
 import { edgesAt } from './geometry';
 import { bodyOnEnds, Corridor, layerOf } from './model';
-import { findLaneRoute } from './routing';
+import { canRouteTransition, findLaneRoute } from './routing';
 import { onSolid, solidEnds } from './solid';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 
@@ -438,7 +438,7 @@ export class LaneTraffic {
       // Своей полосы рядом нет (её закрыли — перекрытие на перестройке, реверс переехал дальше): на соседнюю попутную,
       // через полосу (съезжает плавно, glide), а не с дороги долой.
       const spot = this.laneAt(veh.pos, veh.dir) ?? exit ?? this.laneAt(veh.pos, veh.dir, LANE_W + 1.5);
-      const route = spot && findLaneRoute(graph, [graph.links.get(spot.lane.link)!], veh.targetNode, veh.endLink);
+      const route = spot && findLaneRoute(graph, [graph.links.get(spot.lane.link)!], veh.targetNode, veh.endLink, veh.loopTurn);
       if (!spot || !route) {
         this.vehicles.delete(veh.id);
         this.events.onLost(veh);
@@ -491,6 +491,10 @@ export class LaneTraffic {
         broken = true;
         break;
       }
+      if (route.length && !veh.loopTurn && !canRouteTransition(g, g.links.get(route[route.length - 1])!, g.links.get(id)!)) {
+        broken = true;
+        break;
+      }
       route.push(id);
     }
     // Связь под машиной поменялась (или манёвр ведёт за разрыв) — ставим заново.
@@ -533,7 +537,7 @@ export class LaneTraffic {
     const to = spot(m.outLane, g.outLinks.get(m.node));
     const node = g.nodes.get(m.node);
     const nm = from?.lane && to?.lane ? g.moves.get(`${from.lane.id}>${to.lane.id}`) : undefined;
-    const rest = nm && findLaneRoute(g, [to!.link], veh.targetNode, veh.endLink);
+    const rest = nm && findLaneRoute(g, [to!.link], veh.targetNode, veh.endLink, veh.loopTurn);
     if (!nm || !node || !rest) return false;
     // Где на новой кривой машина: ближайшая к ней точка (проекция, а не та же доля пути).
     let best = Infinity;
@@ -672,7 +676,7 @@ export class LaneTraffic {
     if (veh.onMovement) {
       const m = g.moves.get(veh.onMovement);
       const out = m && g.links.get(m.outLink);
-      const rest = out && findLaneRoute(g, [out], veh.targetNode, veh.endLink);
+      const rest = out && findLaneRoute(g, [out], veh.targetNode, veh.endLink, veh.loopTurn);
       if (!m || !rest) return this.lose(veh);
       veh.route = [m.inLink, ...rest];
       veh.routeIndex = 0;
@@ -680,7 +684,7 @@ export class LaneTraffic {
     }
     const lane = this.currentLane(veh);
     const link = lane && g.links.get(lane.link);
-    const route = link && findLaneRoute(g, [link], veh.targetNode, veh.endLink);
+    const route = link && findLaneRoute(g, [link], veh.targetNode, veh.endLink, veh.loopTurn);
     if (!route) return this.lose(veh);
     this.setRoute(veh, route);
   }
@@ -778,7 +782,7 @@ export class LaneTraffic {
    */
   place(opts: VehicleSpec & { targetNode: number }, pos: Vec, dir: Vec, v = 0, reach = 6): Vehicle | null {
     const spot = this.laneAt(pos, dir, reach);
-    const route = spot && findLaneRoute(this.graph, [this.graph.links.get(spot.lane.link)!], opts.targetNode);
+    const route = spot && findLaneRoute(this.graph, [this.graph.links.get(spot.lane.link)!], opts.targetNode, undefined, opts.loopTurn);
     if (!spot || !route) return null;
     const { targetNode, ...spec } = opts;
     const veh = this.create(spec, targetNode, route, spot.lane, spot.u, v);
@@ -793,7 +797,7 @@ export class LaneTraffic {
    */
   relocate(veh: Vehicle, pos: Vec, dir: Vec, reach = 6): boolean {
     const spot = this.laneAt(pos, dir, reach);
-    const route = spot && findLaneRoute(this.graph, [this.graph.links.get(spot.lane.link)!], veh.targetNode, veh.endLink);
+    const route = spot && findLaneRoute(this.graph, [this.graph.links.get(spot.lane.link)!], veh.targetNode, veh.endLink, veh.loopTurn);
     if (!spot || !route || !this.vehicles.has(veh.id)) return false;
     const lane = this.currentLane(veh);
     if (lane) queueRemove(lane.vehicles, veh);
@@ -828,7 +832,7 @@ export class LaneTraffic {
    */
   placeOnLane(opts: VehicleSpec & { targetNode: number; endLink?: number }, laneId: number, u: number): Vehicle | null {
     const lane = this.graph.lanes.get(laneId);
-    const route = lane && findLaneRoute(this.graph, [this.graph.links.get(lane.link)!], opts.targetNode, opts.endLink);
+    const route = lane && findLaneRoute(this.graph, [this.graph.links.get(lane.link)!], opts.targetNode, opts.endLink, opts.loopTurn);
     if (!lane || !route || u < 0 || u > lane.length) return null;
     const { targetNode, endLink: _end, ...spec } = opts;
     const veh = this.create(spec, targetNode, route, lane, u, 0);
@@ -879,7 +883,7 @@ export class LaneTraffic {
     const lane = this.currentLane(veh);
     const link = lane && this.graph.links.get(lane.link);
     if (!link || veh.onMovement) return false;
-    const route = findLaneRoute(this.graph, [link], targetNode);
+    const route = findLaneRoute(this.graph, [link], targetNode, undefined, veh.loopTurn);
     if (!route) return false;
     veh.targetNode = targetNode;
     this.setRoute(veh, route);
@@ -897,12 +901,12 @@ export class LaneTraffic {
     if (veh.onMovement) {
       const m = g.moves.get(veh.onMovement);
       const out = m && g.links.get(m.outLink);
-      const rest = out && findLaneRoute(g, [out], targetNode);
+      const rest = out && findLaneRoute(g, [out], targetNode, undefined, veh.loopTurn);
       return m && rest ? [m.inLink, ...rest] : null;
     }
     const lane = this.currentLane(veh);
     const link = lane && g.links.get(lane.link);
-    return (link && findLaneRoute(g, [link], targetNode)) || null;
+    return (link && findLaneRoute(g, [link], targetNode, undefined, veh.loopTurn)) || null;
   }
 
   /**
@@ -1717,6 +1721,9 @@ export class LaneTraffic {
     if (own && veh.granted) return this.graph.moves.get(veh.granted);
     const next = veh.route[routeIndex + 1];
     if (next === undefined) return undefined;
+    // Маршрут бригады через тупик — ориентир для петли до станции; сам запрещённый разворот не выполняется.
+    const outLink = this.graph.links.get(next);
+    if (!outLink || !canRouteTransition(this.graph, this.graph.links.get(lane.link)!, outLink)) return undefined;
     // Полоса выезда, с которой дальше по маршруту меньше перестраиваться, — лучше.
     const cost = this.lanePlan(veh)[routeIndex - veh.routeIndex + 1]?.cost;
     const outs = (this.graph.movesFrom.get(lane.id) ?? []).filter((m) => m.outLink === next);
@@ -1901,9 +1908,11 @@ export class LaneTraffic {
   private escapeWrongLane(veh: Vehicle, lane: GLane): void {
     veh.stuckTimer = 0;
     const exits = new Set<number>();
-    for (const m of this.graph.movesFrom.get(lane.id) ?? []) exits.add(m.outLink);
+    for (const m of this.graph.movesFrom.get(lane.id) ?? []) {
+      if (veh.loopTurn || canRouteTransition(this.graph, this.graph.links.get(lane.link)!, this.graph.links.get(m.outLink)!)) exits.add(m.outLink);
+    }
     const starts = [...exits].map((id) => this.graph.links.get(id)!).filter(Boolean);
-    const rest = findLaneRoute(this.graph, starts, veh.targetNode, veh.endLink);
+    const rest = findLaneRoute(this.graph, starts, veh.targetNode, veh.endLink, veh.loopTurn);
     if (rest) this.setRoute(veh, [lane.link, ...rest]);
     else this.lose(veh);
   }
@@ -2482,7 +2491,7 @@ export class LaneTraffic {
     if (!link) return;
     // Объезд к месту позади на той же улице нельзя сократить до текущей связи.
     if (veh.endLink === link.id && veh.route.slice(veh.routeIndex + 1).includes(link.id)) return;
-    const route = findLaneRoute(this.graph, [link], veh.targetNode, veh.endLink);
+    const route = findLaneRoute(this.graph, [link], veh.targetNode, veh.endLink, veh.loopTurn);
     if (route) this.setRoute(veh, route);
   }
 

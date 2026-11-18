@@ -3,7 +3,7 @@ import { dist } from '../core/vec';
 import { GLane, GLink, GMove, LaneGraph } from '../lanes/graph';
 import { LaneNet, LaneNode } from '../lanes/model';
 import { openNet } from '../lanes/open';
-import { findLaneRoute, linkCost, transitionCost } from '../lanes/routing';
+import { canRouteTransition, findLaneRoute, linkCost, transitionCost } from '../lanes/routing';
 import { PROFILE_STEP } from '../lanes/speedProfile';
 import { changePenalty, CURB_PULL, keepRightCost, LaneTraffic, LaneTrafficEvents, LATE_CHANGE } from '../lanes/traffic';
 import type { TrackPiece } from './speedChart';
@@ -179,6 +179,7 @@ export class Roads {
       for (const prevId of g.linkPrev.get(link.id) ?? []) {
         const before = g.links.get(prevId);
         if (!before || closed.has(prevId)) continue;
+        if (!canRouteTransition(g, before, link)) continue;
         const nc = c + transitionCost(g, before, link) + linkCost(before);
         if (nc < (cost.get(prevId) ?? Infinity)) {
           cost.set(prevId, nc);

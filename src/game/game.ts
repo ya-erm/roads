@@ -73,7 +73,7 @@ import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placePa
 import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
 import { streetBase, turnableBuilding, turnReach, wrapTurn } from '../world/moveTurn';
 import { type ParkEntry, ParkIndex } from '../world/parkPick';
-import { edgeOf, FORM_NAMES, formOf, residentsOf, SETTLE_RULE, townTier, yardOf, zoneTown } from '../world/townForms';
+import { edgeOf, FORM_NAMES, formOf, jobsOf, residentsOf, SETTLE_RULE, townTier, yardOf, zoneTown } from '../world/townForms';
 import { START_ROADS } from '../world/startRoads';
 import { alongBan, banCovered, STREET_BAN, uncoveredRuns } from '../world/streetBans';
 import { EconomyMods, NO_MODS } from '../scenario/effects';
@@ -485,6 +485,7 @@ export interface CarTrip {
  */
 const CREW_CARS = CREW_UNITS.map((u) => ({
   kind: 'truck' as const,
+  loopTurn: true as const,
   body: u.body,
   length: u.length,
   width: u.width,
@@ -1346,6 +1347,8 @@ export class Game implements BuildContext {
       // Станция у получателя невидима: на карте — сам магазин, по клику выбирается он.
       if (st.kind !== 'dock') this.index.add(st);
     }
+    // Старые сохранения: выезд автостанции больше не служит разворотом для попутных машин.
+    if (this.banStationUTurns()) this.roads.changed();
     this.checkPairs();
     this.indexWarehouses();
     // Старые сохранения без парков: парки и скверы — на пустом месте по сохранённым домам и дорогам (townParks.ts).
@@ -1542,6 +1545,23 @@ export class Game implements BuildContext {
     // Тупики-выезды больших площадок — так же.
     for (const { lot } of this.lots.all()) for (const id of this.lotStubs(lot)) ids.add(id);
     return ids;
+  }
+
+  /** В тупике автостанции можно закончить или начать рейс, но нельзя развернуться ради проезда дальше. */
+  private banStationUTurns(): boolean {
+    const net = this.roads.net;
+    let changed = false;
+    for (const st of this.stations.values()) {
+      if (st.kind !== 'road' || st.side || st.curb) continue;
+      const node = net.nodes.get(st.nodeId);
+      if (!node || node.corridors.length !== 1 || !net.isDeadEnd(node)) continue;
+      const turn = `${node.corridors[0]}>${node.corridors[0]}`;
+      if (node.bans?.includes(turn)) continue;
+      node.bans = [...(node.bans ?? []), turn];
+      changed = true;
+    }
+    if (changed) net.version++;
+    return changed;
   }
 
   // ---------- BuildContext ----------
@@ -3633,6 +3653,7 @@ export class Game implements BuildContext {
     this.pruneRoundabouts();
     // Новые подъезды перекрёстков — переходы «сами», до сборки графа (он отодвигает стоп-линии перед ними).
     this.syncCrosswalks();
+    this.banStationUTurns();
     this.roads.changed();
     // Узел ворот базы правка могла убрать (перенос дороги, слияние стыка, снос) — ворота заново.
     this.healBaseGates();
@@ -5241,7 +5262,7 @@ export class Game implements BuildContext {
   /** Маршруты городского предприятия: только через его собственные грузовые рампы. */
   buildingLines(buildingId: number): Line[] {
     const building = this.buildingById(buildingId);
-    if (!building) return [];
+    if (!building || formOf(building) === 'garages') return [];
     const stations = new Set([...this.stations.values()].filter((s) => s.kind === 'dock' && s.dock?.b === building.id && s.dock.town === building.townId).map((s) => s.id));
     return [...this.lines.values()].filter((l) => l.stops.some((id) => stations.has(id)));
   }
@@ -8715,16 +8736,18 @@ export class Game implements BuildContext {
     if (this.towns.length > 1 && this.rng.chance(TOWN_TRAFFIC.intercityShare)) {
       // Чаще ездят в ближние города.
       const others = this.towns
-        .filter((t) => t !== town && t.buildings.length)
+        .filter((t) => t !== town && t.buildings.some((b) => b.kind !== 'landmark' && formOf(b) !== 'garages'))
         .sort((a, b) => dist(a.center, town.center) - dist(b.center, town.center))
         .slice(0, 3);
-      const other = this.rng.pick(others);
-      const targets = other.buildings.filter((b) => b.kind !== 'landmark');
-      dest = this.rng.pick(targets);
-      route = this.roads.route(first.anchor, dest.anchor);
+      if (others.length) {
+        const other = this.rng.pick(others);
+        const targets = other.buildings.filter((b) => b.kind !== 'landmark' && formOf(b) !== 'garages');
+        dest = this.rng.pick(targets);
+        route = this.roads.route(first.anchor, dest.anchor);
+      }
     }
     if (!route) {
-      const jobs = town.buildings.filter((b) => b.kind === 'com');
+      const jobs = town.buildings.filter((b) => jobsOf(b) > 0);
       dest = this.rng.pick(jobs.length ? jobs : homes);
       if (dest.anchor === first.anchor) return;
       route = this.roads.route(first.anchor, dest.anchor);
@@ -10803,6 +10826,7 @@ export class Game implements BuildContext {
     this.stationRev++;
     this.index.add(st);
     if (mate) this.pairStops(st, mate);
+    if (this.banStationUTurns()) this.roads.changed();
     this.journal.add('station', {
       id,
       name: st.name,
@@ -11201,6 +11225,7 @@ export class Game implements BuildContext {
     this.index.add(st);
     this.computeCatchment(st);
     if (st.kind === 'stop') this.pairAfterMove(st, oldNode, plan.pair);
+    if (this.banStationUTurns()) this.roads.changed();
     if (checkpoint) this.commit();
     return null;
   }
@@ -11807,6 +11832,7 @@ export class Game implements BuildContext {
       if (dist(town.center, at) > (town.extent ?? town.radius) + R + 50) continue;
       for (const b of town.buildings) {
         if (dist(b.fp.center, at) > R || !mine(b.fp.center)) continue;
+        if (formOf(b) === 'garages') continue;
         towns.add(town.id);
         pop += b.kind === 'res' ? residentsOf(b) : b.floors * 6;
       }

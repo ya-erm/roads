@@ -255,6 +255,11 @@ export const RES_PER_FLOOR = 14;
 /** Рабочих мест на этаж делового дома. */
 export const JOBS_PER_FLOOR = 4;
 
+/** Рабочие места делового здания; гаражные боксы — парковка жителей, а не предприятие. */
+export function jobsOf(b: Pick<TownBuilding, 'kind' | 'floors' | 'form'>): number {
+  return b.kind === 'com' && b.form !== 'garages' ? b.floors * JOBS_PER_FLOOR : 0;
+}
+
 /** Жители жилого дома: свои (people) или, пока их не разложили, — по этажам генерации; у прочих — 0. */
 export function residentsOf(b: Pick<TownBuilding, 'kind' | 'floors' | 'people'>): number {
   return b.kind === 'res' ? (b.people ?? b.floors * RES_PER_FLOOR) : 0;
@@ -296,9 +301,10 @@ export const roomyLot = (fp: Footprint) => fp.w >= 22 * S && fp.w * fp.h >= 480 
 
 /**
  * Этажей у жилого дома — по его жильцам и типу: у частного дома 1 или 2 (мансарда у семьи побольше), у дачи 1, у
- * многоквартирного — сколько нужно жильцам, но не ниже проекта. У деловых и ратуши — этажи генерации.
+ * многоквартирного — сколько нужно жильцам, но не ниже проекта. Гаражные боксы — одноэтажные; у деловых и ратуши — этажи генерации.
  */
 export function storeysOf(b: Pick<TownBuilding, 'id' | 'kind' | 'floors' | 'people' | 'form' | 'fp'>): number {
+  if (b.form === 'garages') return 1;
   if (b.kind !== 'res') return b.floors;
   const form = formOf(b);
   const people = residentsOf(b);

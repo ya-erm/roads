@@ -30,7 +30,7 @@ import { CARGO, CargoType, consumersOf, FREIGHT, producersOf } from '../world/ca
 import { isBusTerminal, type Station, StationServes, stationTitle, TOWN_HISTORY, TownStyle } from '../world/entities';
 import { lastTownNeed, townNeed } from '../world/townSupply';
 import { STREET_BAN_MARK, STREET_BAN_TIP } from '../world/streetBans';
-import { flatsOf, FORM_NAMES, formOf, JOBS_PER_FLOOR, residentsOf, storeysOf } from '../world/townForms';
+import { flatsOf, FORM_NAMES, formOf, jobsOf, residentsOf, storeysOf } from '../world/townForms';
 import { maxTruck, receiverOf, RETAIL, stockAt, stockCap, stockFill } from '../world/retail';
 import { footprintRadius } from '../world/spatial';
 import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
@@ -2932,6 +2932,7 @@ export class Hud {
     const station = sel?.type === 'station' ? g.stations.get(sel.id) : undefined;
     const industry = sel?.type === 'industry' ? g.industries.find((i) => i.id === sel.id) : undefined;
     const building = sel?.type === 'building' ? g.buildingById(sel.id) : undefined;
+    if (building && formOf(building) === 'garages') return '';
     const town = sel?.type === 'town' ? g.towns.find((t) => t.id === sel.id) : undefined;
     const own = station ? g.stationLines(station.id) : industry ? g.industryLines(industry.id) : building ? g.buildingLines(building.id) : town ? g.townLines(town.id) : null;
     const list = own ?? [...g.lines.values()];
@@ -3786,7 +3787,9 @@ export class Hud {
       if (!b) return '';
       const town = g.townOf(b);
       // Тип застройки (world/townForms.ts): частный дом, пятиэтажка, школа…
-      const kind = FORM_NAMES[formOf(b)];
+      const form = formOf(b);
+      const kind = FORM_NAMES[form];
+      const parking = form === 'garages' ? g.parkedCars.garageOccupancy(b) : null;
       // Жилой: этажей и квартир — по жильцам (townForms.storeysOf, flatsOf); в частном доме — одна семья.
       const folk = residentsOf(b);
       const flats = flatsOf(b);
@@ -3794,7 +3797,7 @@ export class Hud {
         b.kind === 'res'
           ? `${flats > 1 ? `${flats} ${plural(flats, 'квартира', 'квартиры', 'квартир')} · ` : ''}${folk} ${plural(folk, 'житель', 'жителя', 'жителей')}`
           : b.kind === 'com'
-            ? `${b.floors * JOBS_PER_FLOOR} рабочих мест`
+            ? `${jobsOf(b)} рабочих мест`
             : 'центр города';
       // Ратуша — вместе со своей площадью (Game.movePlan): значок площади на кнопке, цена — за обе.
       const { cost: moveCost, plaza } = g.buildingMove(b);
@@ -3827,7 +3830,10 @@ export class Hud {
             })
             .join('')}${truckTip}</div>`
         : '';
-      return `<section class="detail">${head(kind, `${storeysOf(b)} эт. · ${people}`)}
+      const subtitle = parking
+        ? `${parking.total} ${plural(parking.total, 'бокс', 'бокса', 'боксов')} · занято ${parking.used} из ${parking.total}`
+        : `${storeysOf(b)} эт. · ${people}`;
+      return `<section class="detail">${head(kind, subtitle)}
         ${town ? `<button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>` : ''}
         ${stock}
         ${formOf(b) === 'warehouse' ? `<p>Подъезд грузовиков</p><div class="actions"><button class="small ${(b.dockApproach ?? 'front') === 'front' ? 'primary' : ''}" aria-pressed="${(b.dockApproach ?? 'front') === 'front'}" data-action="dock-approach" data-id="${b.id}" data-v="front">Носом к рампе</button><button class="small ${b.dockApproach === 'parallel' ? 'primary' : ''}" aria-pressed="${b.dockApproach === 'parallel'}" data-action="dock-approach" data-id="${b.id}" data-v="parallel">Вдоль фасада</button></div>` : ''}

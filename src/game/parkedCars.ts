@@ -114,6 +114,26 @@ export class ParkedCars {
 
   register(source: ParkedCarSource): void { this.extras.set(source.id, source); }
 
+  /** Боксы и стоящие в них машины: домашние, гости и размещённые вручную. Машины в пути ещё не занимают бокс. */
+  garageOccupancy(b: TownBuilding): { total: number; used: number } {
+    const boxes = garageBoxes(b);
+    const used = new Set<number>();
+    const g = this.game;
+    for (const town of g.towns) {
+      for (const car of g.carHomes.fleet(town).cars) {
+        const p = car.place;
+        if (p?.at.id === b.id && p.box && g.carHomes.isHome(town, car.key)) used.add(p.box.index);
+      }
+      for (const car of town.cars ?? []) {
+        if (car.garage?.building === b.id && !g.carHomes.isMoving(car.car)) used.add(car.garage.box);
+      }
+    }
+    for (const s of this.extras.values()) {
+      if (s.at.id === b.id && s.box && (!this.commands.has(s.id) || this.queued.has(s.id))) used.add(s.box.index);
+    }
+    return { total: boxes.length, used: boxes.filter((box) => used.has(box.index)).length };
+  }
+
   looks(box: [number, number, number, number]): { look: VehicleLook; parkedCar: string }[] {
     return [...this.extras.values()].filter((s) => (!this.commands.has(s.id) || this.queued.has(s.id)) && s.look.pos.x > box[0] - 20 && s.look.pos.x < box[2] + 20 && s.look.pos.y > box[1] - 20 && s.look.pos.y < box[3] + 20).map((s) => ({ look: s.look, parkedCar: s.id, hidden: !!s.box }));
   }
