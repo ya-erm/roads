@@ -195,7 +195,7 @@ describe('Получатели грузов, этап 3', { timeout: 240_000 }, 
     const food = (town.receivers ?? [])
       .filter((r) => !r.depot && r.cargo.includes('food'))
       .map((r) => town.buildings.find((b) => b.id === r.b)!)
-      .filter((b) => game.docks.reachable(b, maxTruck(b)));
+      .filter((b) => game.docks.reachable(b, TRUCK.length));
     const [a, b] = food;
     const line = game.createLine([game.dockFor(a)!.id, game.dockFor(b)!.id])!;
     game.money = 5_000_000;

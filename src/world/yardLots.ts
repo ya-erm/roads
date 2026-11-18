@@ -15,9 +15,8 @@ import { flatsOf, formOf, HOSPITAL_BAY, hospitalFit, hospitalWing, stackFolk, st
  * Места — перпендикулярные, 4,6 × 8,5 ед. (≈ 2,8 × 5,1 м; единица карты — 0,6 м), проезд — 7 ед. (≈ 4,2 м).
  * Ряд мест прямо у улицы (карман перед панелькой, у её торца, у высотки) — «с улицы»: у каждого места свой заезд,
  * машина сворачивает с полосы прямо на него, как на стоянку магазина, и выезжает с него задним ходом через тротуар —
- * всё время на виду. У панелек мест во дворе нет: двор — под детскую и спортивную площадки. Места во дворе за аркой
- * (квартал, дом старого центра) — за воротами двора: машина въезжает в арку, как в гараж, и дальше «пропадает во
- * дворе» — видна уже на своём месте. Боксы — за воротами гаражного кооператива, машин в них не видно.
+ * всё время на виду. У панелек и кварталов с двором места находятся перед корпусами у улицы: внутренний двор —
+ * для пешеходов и зелени. Боксы — за воротами гаражного кооператива, машин в них не видно.
  */
 
 /** Машин на квартиру многоквартирного дома (game/carHomes.ts, CAR_HOMES.perFlat). */
@@ -409,8 +408,8 @@ export function towerPlan(b: Pick<TownBuilding, 'id' | 'fp'>): TowerPlan {
 
 /**
  * Квартал старого центра (courtyard): корпуса по периметру (x0…x1, y0…y1 — края застройки, d — глубина корпуса), П или
- * замкнутый «колодец» (closed), у части — Г (ell: только одно боковое крыло); арка в лицевом корпусе — въезд во двор
- * (там ворота двора). Во дворе — газон с деревом и, где двор глубже места, проезда и газона, — ряд мест у дальнего края.
+ * замкнутый «колодец» (closed), у части — Г (ell: только одно боковое крыло). Перед лицевым корпусом — места с
+ * прямым заездом с улицы и пешеходный проход к подъезду; внутренний двор — газон с деревом, без машин.
  */
 export interface CourtyardPlan {
   x0: number;
@@ -421,7 +420,7 @@ export interface CourtyardPlan {
   closed: boolean;
   leftWing: boolean;
   rightWing: boolean;
-  arch: { x: number; w: number };
+  entry: { x: number; w: number };
   lawn: { x: number; y: number } | null;
   row: YardRow | null;
 }
@@ -430,32 +429,33 @@ export function courtyardPlan(b: Pick<TownBuilding, 'id' | 'fp'>): CourtyardPlan
   const W = b.fp.w;
   const H = b.fp.h;
   const x0 = -W / 2 + 0.4;
-  const y0 = -H / 2 + 0.5;
+  const front = -H / 2 + 0.5;
   const x1 = W / 2 - 0.4;
   const y1 = H / 2 - 0.5;
   const d = clamp(Math.min(W, H) * 0.28, 7, 10 * S);
-  const closed = H >= 3.1 * d && r(b, 1) < 0.55;
+  const walk = 3;
+  const hasParking = y1 - front >= YARD_STALL.d + walk + d + 4 && W >= 2 * YARD_STALL.w + SLAB_FRONT.gap + 2;
+  const y0 = front + (hasParking ? YARD_STALL.d + walk : 0);
+  const closed = y1 - y0 >= 3.1 * d && r(b, 1) < 0.55;
   const ell = !closed && r(b, 2) < 0.25;
   const yy0 = y0 + d;
   const yy1 = closed ? y1 - d : y1;
   const sideH = yy1 - yy0;
   const leftWing = sideH > 1 && (!ell || r(b, 7) < 0.5);
   const rightWing = sideH > 1 && (!ell || r(b, 7) >= 0.5);
-  const ix0 = leftWing ? x0 + d : x0;
-  const ix1 = rightWing ? x1 - d : x1;
-  // Арка — шире машины (4,6 ед., ≈ 2,8 м).
-  const arch = { x: (r(b, 8) - 0.5) * (x1 - x0) * 0.5, w: YARD_STALL.w };
+  const entry = { x: (r(b, 8) - 0.5) * (x1 - x0) * 0.2, w: SLAB_FRONT.gap };
   const cx = (x0 + x1) / 2;
   let park: YardRow | null = null;
-  let lawn: { x: number; y: number } | null = { x: cx, y: (yy0 + yy1) / 2 };
-  if (sideH >= YARD_STALL.d + YARD_AISLE + 4 && ix1 - ix0 >= 2 * YARD_STALL.w + 2) {
-    const ry = yy1 - 0.4 - YARD_STALL.d;
-    park = row(ix0 + 1, ry, ix1 - ix0 - 2, YARD_STALL.d, 'y-', false);
-    // Газон с деревом — между аркой и проездом к местам; не влезает — без него.
-    const room = ry - YARD_AISLE - yy0;
-    lawn = room >= 3.2 * S + 1 ? { x: cx, y: yy0 + room / 2 } : null;
+  const lawn = sideH >= 3.2 * S + 1 ? { x: cx, y: (yy0 + yy1) / 2 } : null;
+  if (hasParking) {
+    park = row(x0 + 0.6, front, x1 - x0 - 1.2, YARD_STALL.d, 'y-', true);
+    // Разрыв разметки — проход от тротуара к подъезду, ни одно место его не пересекает.
+    park.stalls = [
+      ...stallRow(park.pad.x, front, entry.x - entry.w / 2 - park.pad.x, YARD_STALL.d, 'y-'),
+      ...stallRow(entry.x + entry.w / 2, front, park.pad.x + park.pad.w - entry.x - entry.w / 2, YARD_STALL.d, 'y-'),
+    ];
   }
-  return { x0, y0, x1, y1, d, closed, leftWing, rightWing, arch, lawn, row: park };
+  return { x0, y0, x1, y1, d, closed, leftWing, rightWing, entry, lawn, row: park };
 }
 
 /** Дом старого центра: места у торца — от и до (по машинам дома); корпус рядом — не уже стольких ед. */
@@ -564,10 +564,10 @@ export function garagesPlan(b: Pick<TownBuilding, 'id' | 'fp'>): GaragesPlan {
   const H = b.fp.h;
   const x0 = -W / 2;
   const y0 = -H / 2;
-  const bw = YARD_STALL.w;
-  const bd = Math.min(YARD_STALL.d, H - 2);
+  const bw = 6.2;
+  const bd = Math.min(9.6, H - 2);
   const n = Math.floor((W - 2) / bw);
-  const two = H >= 2 * bd + YARD_AISLE + 2;
+  const two = H >= 2 * bd + 14 + 2;
   const gx = r(b, 3) < 0.5 ? x0 + 3 : -x0 - 3;
   const ys = two ? [y0 + 1, H / 2 - 1 - bd] : [H / 2 - 1 - bd];
   const rows = ys.map((y, i) => {
@@ -611,14 +611,14 @@ export function yardLotOf(b: TownBuilding): YardLot | null {
   }
   if (form === 'courtyard' && b.kind === 'res') {
     const p = courtyardPlan(b);
-    return p.row?.stalls.length ? { rows: [p.row], gate: p.arch, boxes: false } : null;
+    return p.row?.stalls.length ? { rows: [p.row], gate: null, boxes: false } : null;
   }
   if (form === 'garages') {
     const p = garagesPlan(b);
     const rows: YardRow[] = p.rows.map((x) => ({
       pad: { x: -b.fp.w / 2, y: x.y, w: b.fp.w, h: p.bd },
       stalls: x.xs.map((bx) => ({ x: bx, y: x.y, w: p.bw, h: p.bd })),
-      open: 'y-',
+      open: p.rows.length === 2 && x === p.rows[0] ? 'y+' : 'y-',
       direct: false,
       side: -1,
     }));

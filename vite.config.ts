@@ -116,6 +116,8 @@ export default defineConfig(({ command }) => ({
         testVehicles: resolve(__dirname, 'test/vehicles/index.html'),
         testJunctions: resolve(__dirname, 'test/junctions/index.html'),
         testConstruction: resolve(__dirname, 'test/construction/index.html'),
+        testParking: resolve(__dirname, 'test/parking/index.html'),
+        testTrucks: resolve(__dirname, 'test/trucks/index.html'),
       },
     },
   },

@@ -90,6 +90,8 @@ interface LanePlan {
 const COURTESY = 40;
 /** Бронь узла машиной, которой ехать до него дольше, — «мягкая»: её можно перехватить. */
 const SOFT_GRANT = 3.5;
+/** Осторожный въезд до фактической зоны уступания, м/с игры. */
+const YIELD_CREEP_SPEED = 4;
 /**
  * Налево на общий зелёный: встречный ближе стольких секунд до узла — ждём (не меньше SOFT_GRANT: иначе поворачивающий
  * перехватит бронь встречного, и тот затормозит на свой зелёный). Прождав 10 с, а потом 25 с, — соглашаемся на окно
@@ -331,6 +333,9 @@ export class LaneTraffic {
   private plans = new WeakMap<Vehicle, { graph: LaneGraph; route: number[]; from: number; plan: LanePlan[] }>();
   /** Поворотник манёвра (см. turnSignal): у нового графа — новые манёвры. */
   private turns = new WeakMap<GMove, Blinker>();
+  /** Частичное разрешение: можно занять только свободный префикс манёвра, до первой конфликтной зоны. */
+  private creeping = new WeakMap<Vehicle, { move: string; stop: number }>();
+  private entryZones = new WeakMap<GMove, Map<string, [number, number]>>();
   /** Рельеф для уклонов: отметка земли (null — плоский мир) и версия правок рельефа. */
   relief: { ground: () => ((p: Vec) => number) | null; version: () => number } | null = null;
   /** Профили скорости полос (изгибы и уклоны) — по версии рельефа. */
@@ -372,6 +377,11 @@ export class LaneTraffic {
    * у их положения), и прокладывают маршрут сразу. Кому некуда — теряются.
    */
   rebind(graph: LaneGraph): void {
+    const prefixes = [...this.vehicles.values()].flatMap((veh) => {
+      const prefix = this.creeping.get(veh);
+      return prefix ? [{ veh, stop: prefix.stop, progress: veh.onMovement ? veh.s : 0 }] : [];
+    });
+    this.creeping = new WeakMap();
     // Светофоры не сбрасываются: та же фаза и тот же отсчёт, если фаз столько же.
     for (const [id, g] of graph.nodes) {
       const was = this.graph.nodes.get(id)?.lights;
@@ -444,6 +454,15 @@ export class LaneTraffic {
       insertSorted(spot.lane.vehicles, veh);
       this.glide(veh, was);
       veh.blinker = this.blinkerOf(veh);
+    }
+    // Пересборка графа не превращает частичный въезд в разрешение пересечь главную.
+    for (const p of prefixes) {
+      const key = p.veh.onMovement ?? p.veh.granted;
+      const m = key && graph.moves.get(key);
+      if (!m || !this.vehicles.has(p.veh.id)) continue;
+      const progress = p.veh.onMovement ? p.veh.s : 0;
+      const stop = Math.min(m.length - 0.5, Math.max(progress, p.stop - p.progress + progress));
+      this.creeping.set(p.veh, { move: m.key, stop });
     }
   }
 
@@ -1063,6 +1082,7 @@ export class LaneTraffic {
     const node = m?.node !== null && m ? this.graph.nodes.get(m.node) : undefined;
     if (node) node.reserved = node.reserved.filter((x) => x !== veh);
     veh.granted = null;
+    this.creeping.delete(veh);
   }
 
   step(dt: number): void {
@@ -1745,7 +1765,12 @@ export class LaneTraffic {
           leaderV = last.v;
         }
       }
-      return idmAccel(veh.v, Math.min(m.speed, veh.maxSpeed), gap, veh.v - leaderV, aMax);
+      const creep = this.creeping.get(veh);
+      if (creep && !this.tryGrant(veh, m)) {
+        const stopGap = Math.max(0, creep.stop - veh.s) + IDM.minGap;
+        if (stopGap < gap) { gap = stopGap; leaderV = 0; }
+      }
+      return idmAccel(veh.v, Math.min(m.speed, veh.maxSpeed, this.creeping.has(veh) ? YIELD_CREEP_SPEED : Infinity), gap, veh.v - leaderV, aMax);
     }
 
     const lane = this.currentLane(veh)!;
@@ -1825,7 +1850,7 @@ export class LaneTraffic {
       // Сразу за узлом — красный реверса (участок перестройки у самого перекрёстка, workSignals.ts) или пешеходы на
       // зебре выезда: ждём перед узлом, а не на выезде из него, навстречу тем, кому зелёный.
       if (veh.granted !== m.key && this.barrierAhead(m.outLink, null) < 1) return idmAccel(veh.v, desired, line + IDM.minGap - 0.5, veh.v, aMax);
-      if (veh.granted !== m.key && line <= this.grantLookahead(veh, m)) this.tryGrant(veh, m);
+      if (veh.granted !== m.key && line <= this.grantLookahead(veh, m) && !this.tryGrant(veh, m)) this.tryCreep(veh, m);
       let gap: number;
       let leaderV = 0;
       if (veh.granted === m.key) {
@@ -1841,6 +1866,12 @@ export class LaneTraffic {
             gap = ahead + m.length + last.s - last.length;
             leaderV = last.v;
           }
+        }
+        const creep = this.creeping.get(veh);
+        if (creep) {
+          desired = Math.min(desired, YIELD_CREEP_SPEED);
+          const stopGap = ahead + creep.stop + IDM.minGap;
+          if (stopGap < gap) { gap = stopGap; leaderV = 0; }
         }
       } else {
         gap = line + IDM.minGap - 0.5;
@@ -1892,6 +1923,8 @@ export class LaneTraffic {
       a = Math.min(a, idmAccel(veh.v, veh.maxSpeed, veh.holdDist + IDM.minGap, veh.v, veh.accel));
     }
     veh.v = Math.max(0, Math.min(veh.maxSpeed * 1.05, veh.v + a * dt));
+    const creep = veh.onMovement && this.creeping.get(veh);
+    if (creep) veh.v = Math.min(veh.v, Math.max(0, creep.stop - veh.s) / dt);
     if (veh.holdDist !== undefined) {
       if (veh.holdV === undefined) veh.v = Math.min(veh.v, veh.holdDist / dt);
       veh.holdDist = Math.max(0, veh.holdDist - veh.v * dt);
@@ -2176,7 +2209,7 @@ export class LaneTraffic {
 
   private tryGrant(veh: Vehicle, m: GMove): boolean {
     const node = this.graph.nodes.get(m.node!)!;
-    if (veh.waitingAt !== node.id) {
+    if (!veh.onMovement && veh.waitingAt !== node.id) {
       if (veh.waitingAt !== null) this.releaseNode(veh);
       veh.waitingAt = node.id;
       veh.requestTime = this.time;
@@ -2238,6 +2271,13 @@ export class LaneTraffic {
       if (!rKey || rKey === m.key) continue;
       const kind = m.conflicts.get(rKey);
       if (!kind) continue;
+      // Машина на второстепенной заняла лишь свободный край большого узла: траекторию m она ещё не перекрывает.
+      const prefix = this.creeping.get(r);
+      const rm = this.graph.moves.get(rKey);
+      if (prefix && rm && kind !== 'diverge') {
+        const zone = this.conflictRange(rm, m);
+        if (prefix.stop + 1 < zone[0] || (r.onMovement && r.s - r.length > zone[1] + 1)) continue;
+      }
       if (kind === 'diverge' && r.onMovement && r.s > r.length + 3) continue;
       // Пересечение: тот уже целиком проехал общую зону — путь свободен.
       if (kind === 'cross' && r.onMovement) {
@@ -2280,11 +2320,80 @@ export class LaneTraffic {
       return false;
     }
     for (const r of soft) this.revokeGrant(r);
-    veh.granted = m.key;
+    if (veh.onMovement) this.creeping.delete(veh);
+    else veh.granted = m.key;
     node.waiting = node.waiting.filter((x) => x !== veh);
     veh.waitingAt = null;
-    node.reserved.push(veh);
+    if (!node.reserved.includes(veh)) node.reserved.push(veh);
     return true;
+  }
+
+  /** Начало сближения с другой траекторией: ширина двух кузовов и запас, включая срезание угла кормой. */
+  private conflictEntry(m: GMove, other: GMove): number {
+    return this.conflictRange(m, other)[0];
+  }
+
+  private conflictRange(m: GMove, other: GMove): [number, number] {
+    let zones = this.entryZones.get(m);
+    if (!zones) this.entryZones.set(m, (zones = new Map()));
+    const cached = zones.get(other.key);
+    if (cached !== undefined) return cached;
+    let first = m.length;
+    let last = 0;
+    for (let i = 0; i < m.points.length - 1; i++) {
+      const a = m.points[i];
+      const b = m.points[i + 1];
+      const steps = Math.max(1, Math.ceil(m.cum[i + 1] - m.cum[i]));
+      for (let k = 0; k <= steps; k++) {
+        const t = k / steps;
+        const p = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+        if (!other.points.some((q, j) => j > 0 && closestOnSegment(p, other.points[j - 1], q).d < 6)) continue;
+        first = Math.min(first, m.cum[i] + (m.cum[i + 1] - m.cum[i]) * t);
+        last = Math.max(last, m.cum[i] + (m.cum[i + 1] - m.cum[i]) * t);
+      }
+    }
+    const range: [number, number] = [first, Math.max(first, last)];
+    zones.set(other.key, range);
+    return range;
+  }
+
+  private tryCreep(veh: Vehicle, m: GMove): void {
+    const node = this.graph.nodes.get(m.node!)!;
+    // Префикс нужен широким узлам, где удалённая стоп-линия оставляет несколько длин кузова до конфликта.
+    if (m.length < veh.length * 2 + 30) return;
+    // На красный, перед занятым переходом, при отсутствии главной или забитом выезде частичного въезда нет.
+    if (node.lights || !node.priorityLanes.size || node.priorityLanes.has(m.inLane) || !veh.ready || this.sirenWaits(node, m, veh)) return;
+    // Несколько частичных броней навстречу друг другу могли бы запереть друг другу продолжение пути.
+    if (node.reserved.some((r) => this.creeping.has(r))) return;
+    const blockers = new Set<string>();
+    for (const r of node.reserved) if (r !== veh) {
+      const key = r.onMovement ?? r.granted;
+      if (key) blockers.add(key);
+    }
+    for (const r of node.waiting) if (r !== veh && r.ready && r.planned) blockers.add(r.planned);
+    // На широкой площадке до места ожидания едут несколько секунд: смотрим главную дальше обычного окна уступания,
+    // чтобы не начинать продвижение перед машиной, которая вот-вот займёт свободную пока часть узла.
+    const lane = this.currentLane(veh);
+    const window = ((lane ? Math.max(0, lane.length - veh.s) : 0) + m.length) / YIELD_CREEP_SPEED + 3;
+    for (const pl of node.priorityLanes) for (const r of this.upstream(pl, 250)) {
+      if (r.veh.v > 1 && r.distance / r.veh.v > window) continue;
+      for (const key of this.potentialMovements(r.veh, node.id)) blockers.add(key);
+    }
+    let stop = m.length - 3;
+    let found = false;
+    for (const key of blockers) {
+      const kind = m.conflicts.get(key);
+      if (!kind || kind === 'diverge') continue;
+      found = true;
+      stop = Math.min(stop, this.conflictEntry(m, this.graph.moves.get(key)!) - veh.length / 2 - 2);
+    }
+    // Корма целиком освободит въезд и зебру; тесные перекрёстки остаются с прежним ожиданием у стоп-линии.
+    if (!found || stop < veh.length + 6) return;
+    this.creeping.set(veh, { move: m.key, stop });
+    veh.granted = m.key;
+    veh.waitingAt = null;
+    node.waiting = node.waiting.filter((v) => v !== veh);
+    if (!node.reserved.includes(veh)) node.reserved.push(veh);
   }
 
   /** Сколько секунд машине до стоп-линии в конце её полосы (до узла или перехода перед ним) при нынешней скорости. */
@@ -2353,6 +2462,8 @@ export class LaneTraffic {
     if (!out) return false;
     let committed = 0;
     for (const r of node.reserved) {
+      // Частичная бронь держит только свободный край узла, место на выезде она ещё не занимает.
+      if (r === veh || this.creeping.has(r)) continue;
       const rKey = r.onMovement ?? r.granted;
       const rm = rKey ? this.graph.moves.get(rKey) : undefined;
       if (rm && rm.outLane === out.id) committed += r.length + IDM.minGap;
@@ -2369,6 +2480,8 @@ export class LaneTraffic {
     const lane = this.currentLane(veh);
     const link = lane && this.graph.links.get(lane.link);
     if (!link) return;
+    // Объезд к месту позади на той же улице нельзя сократить до текущей связи.
+    if (veh.endLink === link.id && veh.route.slice(veh.routeIndex + 1).includes(link.id)) return;
     const route = findLaneRoute(this.graph, [link], veh.targetNode, veh.endLink);
     if (route) this.setRoute(veh, route);
   }

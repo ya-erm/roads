@@ -1,7 +1,7 @@
 import { TOWN_SCALE } from '../config';
 import { hash } from '../core/math';
 import type { TownBuilding } from './entities';
-import { drivewayAt, type Driveway, type LotRect } from './houseAccess';
+import { CAR_SIZE, drivewayAt, type Driveway, type LotRect } from './houseAccess';
 import { formOf } from './townForms';
 
 /**
@@ -34,8 +34,8 @@ const STORE_MAX = 4;
 /** Проход к входу между двумя группами мест (у большого магазина), м. */
 const WALK = 3.2;
 
-/** Проезд к рампе, м: грузовик 4,25 м шириной и по метру с боков. */
-export const SERVICE_DRIVE = 6.4;
+/** Проезд к рампе с запасом для выноса передка и кормы полуприцепа на повороте. */
+export const SERVICE_DRIVE = 11;
 /**
  * Грузовик у магазина — самый длинный, что заедет во двор (world/retail.RETAIL.maxLength.shop, Грузовик II): длина,
  * ширина; r — радиус поворота середины кузова во дворе, м. По нему — глубина двора и где рампа.
@@ -45,11 +45,11 @@ export const DOCK_TRUCK = { l: 15, w: 4.6, r: 7 } as const;
 export const RAMP_GAP = 0.3;
 /**
  * Двор за зданием, где грузовик разворачивается: от стены — кузов у рампы, радиус поворота, полширины и запас у забора
- * (17,5 м). Двор мельче — грузовик заезжает по проезду передом и выезжает задним ходом (DockYard.kind 'back').
+ * (около 20,3 ед. для полуприцепа). Учитывается диагональный вынос угла кузова на дуге, не только его ось.
+ * Двор мельче — грузовик заезжает по проезду передом и выезжает задним ходом (DockYard.kind 'back').
  */
-export const YARD_DEPTH = DOCK_TRUCK.l / 2 + RAMP_GAP + DOCK_TRUCK.r + DOCK_TRUCK.w / 2 + 0.6;
-/** Разворот во дворе от рампы к проезду: не уже стольких метров между ними. */
-const U_TURN = 6;
+export const YARD_DEPTH = DOCK_TRUCK.l / 2 + RAMP_GAP + Math.hypot(DOCK_TRUCK.r + DOCK_TRUCK.w / 2, DOCK_TRUCK.l / 2) + 0.6;
+/** Разворот во дворе от рампы к проезду: две четверть-дуги радиуса грузовика. */
 
 /**
  * Двор с рампой. 'turn' — грузовик по проезду передом во двор, поворачивает за здание, сдаёт задом к рампе на задней
@@ -142,39 +142,6 @@ function driveAt(W: number, side: 1 | -1): { x: number; inner: number } {
 }
 
 /**
- * Двор 'turn' за зданием b (LotRect) с проездом по x = xd (side — сторона проезда от здания): рампа на задней стене,
- * где грузовик в развороте не выходит за участок; не влезает (узко, мелко) — null.
- */
-function turnYard(W: number, H: number, b: LotRect, xd: number, side: 1 | -1): DockYard | null {
-  const wall = b.y + b.h;
-  if (H / 2 - wall < YARD_DEPTH - 1e-6) return null;
-  const { l, r: R } = DOCK_TRUCK;
-  // Разворачиваясь у рампы, кузов проезжает за неё на R + полдлины в сторону от проезда — не за край участка.
-  const far = W / 2 - 0.5 - R - l / 2;
-  const lo = Math.max(b.x + 2.8, side === 1 ? -far : xd + side * -U_TURN);
-  const hi = Math.min(b.x + b.w - 2.8, side === 1 ? xd - U_TURN : far);
-  if (lo > hi) return null;
-  const rx = clamp(b.x + b.w / 2, lo, hi);
-  const top = H / 2 - 0.4;
-  // Асфальт двора — от проезда до самого дальнего места разворота.
-  const swing = rx - side * (R + l / 2 + 0.3);
-  const xa = Math.max(-W / 2 + 0.3, Math.min(xd - SERVICE_DRIVE / 2, swing, rx - 3.2));
-  const xb = Math.min(W / 2 - 0.3, Math.max(xd + SERVICE_DRIVE / 2, swing, rx + 3.2));
-  return {
-    kind: 'turn',
-    drive: { x: xd, w: SERVICE_DRIVE, y1: wall + l / 2 + RAMP_GAP },
-    wall,
-    rx,
-    side,
-    ramp: { x: rx - 3, y: wall - 0.2, w: 6, h: 0.5 },
-    pad: [
-      { x: xd - SERVICE_DRIVE / 2, y: -H / 2 + 0.3, w: SERVICE_DRIVE, h: wall + H / 2 },
-      { x: xa, y: wall, w: xb - xa, h: top - wall },
-    ],
-  };
-}
-
-/**
  * Двор 'back': проезд по x = xd до y1, рампа — сбоку у торца здания (по x — wallX, со стороны проезда) у кормы
  * стоящего грузовика или впереди него (склад: wallX не задан — рампа на стене y1).
  */
@@ -218,7 +185,7 @@ function shopLot(b: Pick<TownBuilding, 'id' | 'fp' | 'floors'>): ShopLot {
     const d = deep >= 8 ? deep : Math.max(8, H / 2 - 2 - by);
     const building = { x: xa, y: by, w: xb - xa, h: d };
     const groups = split(xa, xb, y0, WALK);
-    const yard = turnYard(W, H, building, dv.x, side) ?? backYard(H, dv.x, H / 2 - 0.8, side, left ? xa : xb);
+    const yard = backYard(H, dv.x, Math.min(H / 2 - 0.8, y0 + 30), side, left ? xa : xb);
     return { building, groups, gravel: false, walk: { x: (xa + xb) / 2, w: WALK }, yard };
   }
   const span = W - 3.5 - SERVICE_DRIVE;
@@ -229,7 +196,7 @@ function shopLot(b: Pick<TownBuilding, 'id' | 'fp' | 'floors'>): ShopLot {
   const bx = left ? dv.inner + 0 : dv.inner - w;
   const building = { x: bx, y: y0 + 2.2, w, h: d };
   const px = left ? bx + w + 1 : x0 + 1;
-  const yard = turnYard(W, H, building, dv.x, side) ?? backYard(H, dv.x, Math.min(H / 2 - 0.8, building.y + d + 1), side, left ? bx : bx + w);
+  const yard = backYard(H, dv.x, Math.min(H / 2 - 0.8, Math.max(building.y + d, y0 + 30)), side, left ? bx : bx + w);
   return { building, groups: f.n ? [group(px, f.n, f.w, y0)] : [], gravel: false, walk: null, yard };
 }
 
@@ -254,7 +221,7 @@ function storeLot(b: Pick<TownBuilding, 'id' | 'fp'>): ShopLot {
   // Места — у здания (к крыльцу ближе), остаток — к краю участка.
   const px = left ? bx + w + 1 : bx - 1 - n * sw;
   const building = { x: bx, y: y0 + 3.2, w, h: d };
-  const yard = turnYard(W, H, building, dv.x, side) ?? backYard(H, dv.x, Math.min(H / 2 - 0.8, building.y + d + 1), side, left ? bx : bx + w);
+  const yard = backYard(H, dv.x, Math.min(H / 2 - 0.8, Math.max(building.y + d, y0 + 30)), side, left ? bx : bx + w);
   return { building, groups: n ? [group(px, n, sw, y0)] : [], gravel: true, walk: null, yard };
 }
 
@@ -287,13 +254,17 @@ function marketLot(b: Pick<TownBuilding, 'id' | 'fp'>): ShopLot {
 export const THROUGH_R = 7;
 /** Ось проезда вдоль улицы — на столько метров от края участка: въехавший с улицы грузовик (21 м) успевает выпрямиться. */
 export const THROUGH_LANE = 15.5;
+/** При повороте фуры 21×4,7 её корма проходит дальше оси проезда, чем половина ширины кузова. */
+export const THROUGH_MARGIN = 8.2;
+/** Запас за поперечным проездом на вынос кормы перед поворотом к выезду. */
+export const THROUGH_SWEEP = 7.5;
 
 /**
  * Сквозной двор (DockYard 'through') на участке W × H: проезды у обоих краёв участка, ось проезда вдоль улицы — в
  * THROUGH_LANE от улицы, середина кузова у рампы — по середине участка (rx = 0); ramp — рисунок рампы.
  */
 function throughYard(W: number, H: number, ramp: LotRect): DockYard {
-  const xe = W / 2 - 0.6 - SERVICE_DRIVE / 2;
+  const xe = W / 2 - THROUGH_MARGIN;
   const lane = -H / 2 + THROUGH_LANE;
   const y0 = -H / 2 + 0.3;
   return {
@@ -304,7 +275,7 @@ function throughYard(W: number, H: number, ramp: LotRect): DockYard {
     rx: 0,
     side: 1,
     ramp,
-    pad: [{ x: -W / 2 + 0.3, y: y0, w: W - 0.6, h: lane + DOCK_TRUCK.w / 2 + 0.9 - y0 }],
+    pad: [{ x: -W / 2 + 0.3, y: y0, w: W - 0.6, h: Math.min(H / 2 - 0.3, lane + THROUGH_SWEEP) - y0 }],
   };
 }
 
@@ -328,31 +299,35 @@ export function fuelLot(b: Pick<TownBuilding, 'id' | 'fp'>): FuelLot {
   const H = b.fp.h;
   const y0 = -H / 2;
   const lane = y0 + THROUGH_LANE;
-  const inner = W / 2 - 0.6 - SERVICE_DRIVE - 1.2;
+  const inner = Math.max(1.5, W / 2 - THROUGH_MARGIN - SERVICE_DRIVE / 2 - 1.2);
   const canopy = { x: -inner, y: y0 + 1.6, w: inner * 2, h: lane - DOCK_TRUCK.w / 2 - 1.4 - (y0 + 1.6) };
   const n = clamp(Math.floor(canopy.w / 7), 1, 4);
   const islands: LotRect[] = [];
   for (let k = 0; k < n; k++) islands.push({ x: canopy.x + (canopy.w * (k + 0.5)) / n - 0.7, y: canopy.y + 1.4, w: 1.4, h: canopy.h - 2.8 });
   const tanks = { x: -3.6, y: lane + DOCK_TRUCK.w / 2 + 0.3, w: 7.2, h: 1.2 };
-  const by = tanks.y + tanks.h + 1.2;
+  const by = Math.max(tanks.y + tanks.h + 1.2, lane + THROUGH_SWEEP + 0.4);
   const bw = clamp(W * 0.45, 10, 16 * S);
   const building = { x: -bw / 2 + (r(b, 2) - 0.5) * (W - bw - 4), y: by, w: bw, h: clamp(H / 2 - 1.4 - by, 6, 9 * S) };
   return { canopy, islands, building, tanks, yard: throughYard(W, H, tanks) };
 }
 
 /** Оптовая база: ангар во всю ширину в глубине, перед ним — сквозной проезд для фуры с рампой вдоль стены ангара. */
-export function depotLot(b: Pick<TownBuilding, 'id' | 'fp'>): { hangar: LotRect; yard: DockYard } {
+export function depotLot(b: Pick<TownBuilding, 'id' | 'fp'>): { hangar: LotRect; yard: DockYard; containers: LotRect[] } {
   const W = b.fp.w;
   const H = b.fp.h;
   const lane = -H / 2 + THROUGH_LANE;
-  const top = lane + DOCK_TRUCK.w / 2 + 1.1;
+  const top = lane + THROUGH_SWEEP + 0.4;
   const hangar = { x: -W / 2 + 1.2, y: top, w: W - 2.4, h: Math.max(8, H / 2 - 1.2 - top) };
   const ramp = { x: -7, y: top - 0.9, w: 14, h: 0.9 };
-  return { hangar, yard: throughYard(W, H, ramp) };
+  // Только центральная часть у улицы: края нужны длинной фуре для поворота и выноса прицепа.
+  const half = Math.max(0, W / 2 - THROUGH_MARGIN - THROUGH_R - 11.5);
+  const count = Math.min(3, Math.floor(half * 2 / 7.5));
+  const containers = Array.from({ length: count }, (_, k) => ({ x: (k - (count - 1) / 2) * 7.5 - 3.2, y: -H / 2 + 2, w: 6.4, h: 2.6 }));
+  return { hangar, yard: throughYard(W, H, ramp), containers };
 }
 
 /** Участок оптовой базы — не уже стольких метров: фура (21) на прямом проезде между поворотами к краям. */
-export const DEPOT_MIN_W = 21 + 2 * THROUGH_R + 2 * (0.6 + SERVICE_DRIVE / 2) + 1;
+export const DEPOT_MIN_W = 21 + 2 * THROUGH_R + 2 * THROUGH_MARGIN + 1;
 
 /** Раскладка участка со стоянкой покупателей — у магазина, сельского магазина и рынка; у прочих — null. */
 export function shopLotOf(b: Pick<TownBuilding, 'id' | 'fp' | 'floors' | 'form' | 'kind'>): ShopLot | null {
@@ -379,9 +354,14 @@ export function officeLot(b: Pick<TownBuilding, 'id' | 'fp'>): { building: LotRe
  * Склад: ангар в глубине участка, перед ним — площадка для грузовиков до 21 м (RETAIL.maxLength.yard, Фура): проезд
  * от улицы прямо к рампе на стене ангара (грузовик — носом к ней, выезд задним ходом). Площадка — Фура и 1,6 м.
  */
-export function warehouseLot(b: Pick<TownBuilding, 'id' | 'fp'>): { hangar: LotRect; yard: DockYard } {
+export function warehouseLot(b: Pick<TownBuilding, 'id' | 'fp' | 'dockApproach'>): { hangar: LotRect; yard: DockYard } {
   const W = b.fp.w;
   const H = b.fp.h;
+  if (b.dockApproach === 'parallel') {
+    const top = -H / 2 + THROUGH_LANE + THROUGH_SWEEP + 0.4;
+    const hangar = { x: -W / 2 + 1.2, y: top, w: W - 2.4, h: Math.max(8, H / 2 - 1.2 - top) };
+    return { hangar, yard: throughYard(W, H, { x: -7, y: top - 0.9, w: 14, h: 0.9 }) };
+  }
   const d = clamp(Math.min(H * 0.62, H - 1.2 - 22.6), 8, H - 5);
   const hangar = { x: -W / 2 + 1.2, y: H / 2 - 1.2 - d, w: W - 2.4, h: d };
   const xd = (r(b, 4) - 0.5) * (W - 10);
@@ -389,12 +369,12 @@ export function warehouseLot(b: Pick<TownBuilding, 'id' | 'fp'>): { hangar: LotR
 }
 
 /** Двор с рампой у дома: магазин, сельский магазин, рынок, контора, склад, АЗС, оптовая база; у прочих — null. */
-export function dockYardOf(b: Pick<TownBuilding, 'id' | 'fp' | 'floors' | 'form' | 'kind'>): DockYard | null {
+export function dockYardOf(b: Pick<TownBuilding, 'id' | 'fp' | 'floors' | 'form' | 'kind' | 'dockApproach'>): DockYard | null {
   return dockYardsOf(b)[0] ?? null;
 }
 
 /** Все рампы дома со своими проездами: у рынка — две, у прочих получателей — одна, у остальных домов — ни одной. */
-export function dockYardsOf(b: Pick<TownBuilding, 'id' | 'fp' | 'floors' | 'form' | 'kind'>): DockYard[] {
+export function dockYardsOf(b: Pick<TownBuilding, 'id' | 'fp' | 'floors' | 'form' | 'kind' | 'dockApproach'>): DockYard[] {
   if (b.kind !== 'com') return [];
   const form = formOf(b);
   if (form === 'office') return [officeLot(b).yard];
@@ -404,6 +384,31 @@ export function dockYardsOf(b: Pick<TownBuilding, 'id' | 'fp' | 'floors' | 'form
   const lot = shopLotOf(b);
   if (!lot?.yard) return [];
   return lot.yard2 ? [lot.yard, lot.yard2] : [lot.yard];
+}
+
+/** Твёрдые препятствия грузового двора в осях участка; навес АЗС не препятствие, его колонками служат островки. */
+export function dockSolidsOf(b: Pick<TownBuilding, 'id' | 'fp' | 'floors' | 'form' | 'kind' | 'dockApproach'>, parkedCars = false): LotRect[] {
+  const form = formOf(b);
+  let solids: LotRect[] = [];
+  if (form === 'fuel') { const p = fuelLot(b); solids = [p.building, ...p.islands]; }
+  else if (form === 'depot') { const p = depotLot(b); solids = [p.hangar, ...p.containers]; }
+  else if (form === 'warehouse') solids = [warehouseLot(b).hangar];
+  else if (form === 'office') solids = [officeLot(b).building];
+  else {
+    const lot = shopLotOf(b);
+    if (lot?.building) solids.push(lot.building);
+    if (form === 'market' && lot?.yard && lot.yard2) {
+      const yards = [lot.yard, lot.yard2];
+      const left = yards.find((y) => y.side === -1)!;
+      const right = yards.find((y) => y.side === 1)!;
+      const xa = left.drive.x + left.drive.w / 2 + 0.9;
+      const xb = right.drive.x - right.drive.w / 2 - 0.9;
+      const hd = marketHall(b.fp.h);
+      solids.push({ x: xa, y: b.fp.h / 2 - 1.2 - hd, w: xb - xa, h: hd });
+    }
+    if (parkedCars && lot) for (const s of lot.groups.flatMap((g) => g.stalls)) solids.push({ x: s.x - CAR_SIZE.w / 2, y: s.y1 - STALL_STOP - CAR_SIZE.l, w: CAR_SIZE.w, h: CAR_SIZE.l });
+  }
+  return solids;
 }
 
 /**

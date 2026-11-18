@@ -47,7 +47,7 @@ import {
 import { townEdge, townIndustries, townSlots } from '../world/enterprise';
 import { sizeDots, sizeDotsVisibility } from '../ui/enterpriseUi';
 import { lastTownNeed } from '../world/townSupply';
-import { maxTruck, roomFor, stockedCount, stockFill } from '../world/retail';
+import { roomFor, stockedCount, stockFill } from '../world/retail';
 import { goalShops } from '../scenario/objectives';
 import { lotFrame } from '../world/houseAccess';
 import { roofCenter } from '../world/shopLots';
@@ -125,6 +125,7 @@ export type Selection =
   | { type: 'lot'; id: number }
   /** Машина жителя — по её id в симуляции. */
   | { type: 'vehicle'; simId: number }
+  | { type: 'parkedCar'; id: string }
   /** Машина или поезд компании: выбор сохраняется на остановках и после отправления. */
   | { type: 'fleet'; id: number }
   /** Перекрёсток: светофор, главная дорога, запреты поворотов. */
@@ -139,6 +140,9 @@ export type Selection =
   | { type: 'workTrain'; id: number };
 
 export interface ToolOverlay {
+  vehicleGhost?: { look: VehicleLook; ok: boolean };
+  parkingTargets?: { pos: Vec; dir: Vec; free: boolean }[];
+  parkingPreview?: { pts: Vec[]; goal: Vec; dir: Vec; ok: boolean };
   /** Выбираем стройку для бригады («🎯 На стройку…»): проект под курсором — подсвечен, как выбранный. */
   crewTarget?: number | null;
   hover: Vec | null;
@@ -1396,7 +1400,7 @@ export class Renderer {
           // Рамка — с тенью и площадью у ратуши (houseArt): они выходят за контур дома. Этажи жилого — по жильцам; мест
           // скорой у больницы — по размеру города.
           for (const b of town.buildings)
-            put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}|${b.bays ?? ''}`, grow(fpBox(b.fp), houseReach(b)));
+            put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}|${b.bays ?? ''}|${b.dockApproach ?? ''}`, grow(fpBox(b.fp), houseReach(b)));
           // Парки — отрицательными номерами (id парка — не id сущности).
           for (const p of parks ?? []) put(-p.id - 1, `${fpSig(p.fp)}|${p.kind}`, grow(fpBox(p.fp), PARK_REACH));
           // Площадки-стоянки — своими номерами (id сущности, со сдвигом от парков); снесённых нет.
@@ -2692,7 +2696,8 @@ export class Renderer {
       }
     }
     const list = game.garageLooks([view.x0, view.y0, view.x1, view.y1], this.camera.zoom >= FINE_ZOOM);
-    for (const { look, gate } of list) {
+    for (const { look, gate, hidden } of list) {
+      if (hidden) continue;
       if (!gate) {
         this.drawVehicles([look]);
         continue;
@@ -4343,7 +4348,7 @@ export class Renderer {
             : depot
               ? [depot.top ?? r.cargo[0]]
               : r.cargo;
-        const reach = game.docks.reachable(b, maxTruck(b));
+        const reach = game.docks.reachable(b, 12);
         const size = (hot ? 24 : 19) / z;
         // Над крышей здания (не над двором, где грузовик); несколько грузов — в ряд вдоль улицы.
         const at = lotFrame(b);
@@ -4695,6 +4700,38 @@ export class Renderer {
 
   private drawOverlay(game: Game, o: ToolOverlay): void {
     const ctx = this.ctx;
+    for (const t of o.parkingTargets ?? []) {
+      ctx.save();
+      ctx.translate(t.pos.x, t.pos.y);
+      ctx.rotate(Math.atan2(t.dir.y, t.dir.x));
+      ctx.fillStyle = t.free ? 'rgba(47,128,237,0.12)' : 'rgba(232,72,63,0.18)';
+      ctx.strokeStyle = t.free ? '#2f80ed' : '#cf4d46';
+      ctx.lineWidth = 1 / this.camera.zoom;
+      ctx.fillRect(-4.5, -2.2, 9, 4.4);
+      ctx.strokeRect(-4.5, -2.2, 9, 4.4);
+      ctx.restore();
+    }
+    if (o.parkingPreview) {
+      const p = o.parkingPreview;
+      this.drawTripAhead(p.pts, p.ok ? '#2f80ed' : '#cf4d46', { pos: p.goal, r: 5 });
+      ctx.save();
+      ctx.translate(p.goal.x, p.goal.y);
+      ctx.rotate(Math.atan2(p.dir.y, p.dir.x));
+      ctx.fillStyle = p.ok ? 'rgba(47,128,237,0.35)' : 'rgba(232,72,63,0.35)';
+      ctx.fillRect(-4.5, -2.2, 9, 4.4);
+      ctx.restore();
+    }
+    if (o.vehicleGhost) {
+      const { look, ok } = o.vehicleGhost;
+      ctx.save(); ctx.globalAlpha = 0.45; this.drawVehicles([look]); ctx.restore();
+      ctx.save();
+      ctx.translate(look.pos.x - look.dir.x * look.length / 2, look.pos.y - look.dir.y * look.length / 2);
+      ctx.rotate(Math.atan2(look.dir.y, look.dir.x));
+      ctx.strokeStyle = ok ? '#299b62' : '#cf4d46';
+      ctx.lineWidth = 2 / this.camera.zoom;
+      ctx.strokeRect(-look.length / 2 - 0.4, -look.width / 2 - 0.4, look.length + 0.8, look.width + 0.8);
+      ctx.restore();
+    }
     if (o.lot) this.drawLotOverlay(o.lot);
     if (o.corridor) {
       const color = { red: 'rgba(232,72,63,0.5)', blue: 'rgba(47,128,237,0.35)', green: 'rgba(46,157,87,0.4)' }[o.corridor.color];
@@ -5008,6 +5045,12 @@ export class Renderer {
       if (o.walkEdit?.node === sel.id) this.drawWalkToggles(o.walkEdit);
     }
     const sim = sel?.type === 'vehicle' ? game.traffic.vehicles.get(sel.simId) : undefined;
+    if (sel?.type === 'parkedCar') {
+      const look = game.parkedCars.get(sel.id)?.look;
+      const trip = game.parkedCars.trip(sel.id);
+      if (trip) this.drawTripAhead(trip.pts, '#2f80ed', { pos: trip.goal, r: 5 });
+      if (look) this.drawSelectRing(look.pos.x - look.dir.x * look.length / 2, look.pos.y - look.dir.y * look.length / 2, look.length * 0.9 + 3);
+    }
     if (sim) this.drawVehicleTrip(game, sim.id);
     if (sim) this.drawSelectRing(sim.pos.x - (sim.dir.x * sim.length) / 2, sim.pos.y - (sim.dir.y * sim.length) / 2, sim.length * 0.9 + 3);
     // Машину компании обводит её линия (drawLinePath), если та на карте.
@@ -6016,6 +6059,8 @@ export class Renderer {
    * выбранной) и цель — кольцом вокруг здания поездки. Спецмашина — цветом своей службы, машина жителя — синим.
    */
   private drawVehicleTrip(game: Game, simId: number): void {
+    const manual = game.parkedCars.trip(simId);
+    if (manual) { this.drawTripAhead(manual.pts, '#2f80ed', { pos: manual.goal, r: 5 }); return; }
     const ahead = game.vehicleAhead(simId);
     if (!ahead) return;
     const service = game.serviceOfSim(simId);

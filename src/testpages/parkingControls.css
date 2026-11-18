@@ -1,0 +1,8 @@
+#parking-debug { position: fixed; z-index: 15; top: 86px; left: 14px; width: min(390px, calc(100vw - 28px)); padding: 10px 12px; font-size: 12px; }
+#parking-debug b { display: block; margin-bottom: 7px; }
+#parking-debug select { width: 100%; margin-bottom: 7px; }
+#parking-debug .parking-playback { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+#parking-debug button { padding: 5px 7px; font-size: 11px; }
+#parking-debug output { margin-left: auto; font-variant-numeric: tabular-nums; }
+#parking-debug small { display: block; color: var(--muted); margin-top: 6px; font-size: 10px; }
+#parking-debug[hidden] { display: none; }

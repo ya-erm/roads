@@ -3,7 +3,7 @@ import { SIM_DT } from '../config';
 import { angleDiff, angleOf, dist, dot, sub, type Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
 import type { Town } from '../world/entities';
-import { CAR_SIZE } from '../world/houseAccess';
+import { CAR_SIZE, drivewaysOf } from '../world/houseAccess';
 import { formOf } from '../world/townForms';
 import { Game } from './game';
 import type { GarageHome, GarageSlot } from './garages';
@@ -16,7 +16,7 @@ const WORLD: [number, number, number, number] = [-1e6, -1e6, 1e6, 1e6];
 function garageHome(game: Game, ok: (h: GarageHome) => boolean): { town: Town; home: GarageHome; slot: GarageSlot } {
   for (const town of game.towns)
     for (const b of town.buildings) {
-      const home = b.kind === 'res' ? game.garages.homeOf(b) : null;
+      const home = b.kind === 'res' && drivewaysOf(b).length === 1 ? game.garages.homeOf(b) : null;
       const slot = home && ok(home) ? game.garages.slotOf(home) : null;
       if (home && slot) return { town, home, slot };
     }
@@ -93,7 +93,7 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     // Машины у гаражей вблизи (рисунок самих гаражей — по их учёту, Town.garageAway): эта стоит у ворот.
     const near = () => game.garages.looks(game.towns, WORLD, true).filter((l) => dist(l.look.pos, home.spot) < home.d.width + 4);
     expect(near().length).toBe(1);
-    game.garages.leave(home, town, target, { from: home.b, to: home.b });
+    game.garages.leave(home, town, target, { from: home.b, to: home.b }, { exit: false });
     const w = watch(game, home.b.id);
     let sim: Vehicle | undefined;
     let other: Vehicle | null = null;
@@ -135,7 +135,7 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     expect(near().length).toBe(0);
   });
 
-  it('выезд в пустой поток: задним ходом со двора на полосу без остановки у бордюра, встав — переключает ход и уезжает', () => {
+  it('выезд в пустой поток: развернувшись на участке, выезжает передом без остановки у бордюра и на полосе', () => {
     const game = withoutCitizens(freshGame(7));
     const { town, home, slot } = garageHome(game, (h) => h.parks);
     game.garages.leave(home, town, slot.link.toNode!, { from: home.b, to: home.b });
@@ -155,8 +155,8 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     }
     expect(waited).toBe(false);
     expect(atCurb).toBeGreaterThan(1.5);
-    // Встала на полосу задним ходом — пауза на переключение хода — и поехала вперёд.
-    expect(paused).toBe(true);
+    // Передом — переключать передачу на полосе уже не нужно.
+    expect(paused).toBe(false);
     expect(sim && game.traffic.vehicles.has(sim.id)).toBe(true);
     expect(dot(sim!.dir, slot.f)).toBeGreaterThan(0.95);
   });
@@ -197,7 +197,7 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     // Поездка засчитана, машина дома.
     expect(traffic.arrivals).toBe(arrivals + 1);
     expect(town.garageAway).not.toContain(home.b.id);
-    const atHome = game.garageLooks(WORLD, true).filter((l) => dist(l.look.pos, home.spot) < home.d.width + 4);
+    const atHome = game.garageLooks(WORLD, true).filter((l) => !l.hidden && dist(l.look.pos, home.spot) < home.d.width + 4);
     expect(atHome.length).toBe(parks ? 1 : 0);
   });
 
@@ -254,7 +254,7 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
     const { town, home, slot } = garageHome(game, (h) => h.kind === 'garage' && !h.parks);
     const traffic = game.traffic;
     // Дома машины не видно: она в гараже.
-    const near = () => game.garageLooks(WORLD, true).filter((l) => dist(l.look.pos, home.d.gate) < 12);
+    const near = () => game.garageLooks(WORLD, true).filter((l) => !l.hidden && dist(l.look.pos, home.d.gate) < 12);
     expect(near().length).toBe(0);
     town.garageAway = [home.b.id];
     const route = game.garages.routeHome(slot.link.fromNode!, slot)!;
@@ -391,7 +391,7 @@ describe('Гаражи частных домов', { timeout: 60_000 }, () => {
       const out = new Set((t.cars ?? []).map((x) => x.car));
       for (const car of c.carHomes.fleet(t).cars) if (car.place?.look && !out.has(car.key)) want++;
     }
-    expect(c.carHomes.looks(WORLD).length).toBe(want);
+    expect(c.carHomes.looks(WORLD).filter((l) => !l.hidden).length).toBe(want);
     // Две загрузки одного сохранения дальше идут одинаково.
     runSeconds(c, 20);
     runSeconds(d, 20);

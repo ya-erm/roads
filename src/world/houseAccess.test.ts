@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { freshGame } from '../game/testkit';
 import type { TownBuilding } from './entities';
-import { CAR_PLACE, CAR_SIZE, cottagePlan, dachaPlan, drivewayLink, drivewayOf, GARAGE, LOT_SETBACK } from './houseAccess';
+import { CAR_PLACE, CAR_SIZE, cottagePlan, dachaPlan, drivewayLink, drivewayOf, drivewaysOf, GARAGE, LOT_SETBACK } from './houseAccess';
 import { NEW_GAME_SETTINGS } from './settings';
 import { pointInFootprint } from './spatial';
 
@@ -52,20 +52,20 @@ describe('Заезды частных домов', () => {
     const plans = list.map((b) => cottagePlan(b));
     const share = (f: (p: (typeof plans)[0]) => boolean) => plans.filter(f).length / plans.length;
     expect(share((p) => !!p.garage)).toBeCloseTo(CAR_PLACE.garage, 1);
-    expect(share((p) => !!p.pad)).toBeCloseTo(CAR_PLACE.pad, 1);
+    expect(share((p) => !!p.pad && !p.garage)).toBeCloseTo(CAR_PLACE.pad, 1);
     expect(share((p) => !p.garage && !p.pad)).toBeCloseTo(1 - CAR_PLACE.garage - CAR_PLACE.pad, 1);
     for (const [i, p] of plans.entries()) {
       if (!p.pad) continue;
       const b = list[i];
-      expect(p.garage).toBeNull();
+      if (p.garage) expect(p.pad.x >= p.garage.x + p.garage.w || p.pad.x + p.pad.w <= p.garage.x).toBe(true);
       // Под машину 7,5 × 3 с запасом; от края участка, не на доме.
       expect(p.pad.w).toBeGreaterThanOrEqual(CAR_SIZE.w + 1);
       expect(p.pad.h).toBeGreaterThanOrEqual(CAR_SIZE.l + 1);
       expect(p.pad.y).toBeCloseTo(-b.fp.h / 2);
       const h = p.house;
       expect(p.pad.x >= h.x + h.w || p.pad.x + p.pad.w <= h.x).toBe(true);
-      expect(p.drive!.x).toBeCloseTo(p.pad.x + p.pad.w / 2);
-      const d = drivewayOf(b)!;
+      if (!p.garage) expect(p.drive!.x).toBeCloseTo(p.pad.x + p.pad.w / 2);
+      const d = drivewaysOf(b).find((d) => !d.garage)!;
       expect(d.garage).toBe(false);
       expect(pointInFootprint(d.spot, b.fp, 0.1)).toBe(true);
     }

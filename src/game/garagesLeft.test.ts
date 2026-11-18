@@ -280,7 +280,7 @@ describe('Левый поворот к дому через встречку', { 
     expect(town.garageAway).not.toContain(home.b.id);
   });
 
-  it('выезд налево: задним ходом через ближнюю полосу в дальнюю, когда туда ближе', () => {
+  it('выезд налево: после разворота на участке передом через ближнюю полосу в дальнюю, когда туда ближе', () => {
     const game = withoutCitizens(freshGame(7));
     const { town, home, left } = leftHome(game);
     const traffic = game.traffic;
@@ -292,7 +292,10 @@ describe('Левый поворот к дому через встречку', { 
       step(game);
       const m = game.garages.moveOf(home.b.id);
       if (m?.sim && !sim) sim = m.sim;
-      if (m?.phase === 'road' && m.kind === 'out' && traffic.turnStops.size) blocked = true;
+      if (m?.phase === 'road' && m.kind === 'out' && traffic.turnStops.size) {
+        expect(game.garages.moves.find((x) => x.home.key === home.key)?.forward).toBe(true);
+        blocked = true;
+      }
     }
     expect(sim).toBeDefined();
     expect(blocked).toBe(true);

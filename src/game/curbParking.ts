@@ -1,4 +1,4 @@
-import { add, dist, scale, sub, type Vec } from '../core/vec';
+import { add, dist, dot, scale, sub, type Vec } from '../core/vec';
 import { boxesOverlap, CURB, curbDrive, curbStalls, stallBox, stallTee, type CurbStall } from '../lanes/curb';
 import type { GLane, GLink, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
@@ -8,6 +8,7 @@ import type { Vehicle, VehicleLook, VehicleSpec } from '../sim/vehicle';
 import type { TownBuilding } from '../world/entities';
 import type { GarageLook } from './garages';
 import { advance, bezier, entrySpeed, handOff, joinLane, leaveFlow, poseSim, runOf, runPose, type Leg, type Run } from './lotMoves';
+import { planCurbEntry, planCurbExit } from './curbManeuver';
 
 /**
  * Машины на полосах стоянки вдоль бордюра (docs/PARKING.md, этап 2; места — lanes/curb.ts). Места — и места ночёвки
@@ -121,6 +122,7 @@ interface Homing {
   mode?: 'fwd' | 'rev';
   /** Где на полосе нос машины в начале манёвра. */
   nose?: number;
+  waitingFor?: string;
   color: string;
   /** Машина парка (ключ), если это она: её бронь — не помеха ей самой (места ночёвки, CarHomes). */
   car?: number;
@@ -282,22 +284,28 @@ export class CurbParking {
   }
 
   /** Машина парка car стоит на месте key у цели (Town.cars, TownCar.curb). */
-  park(key: string, car: number): void {
+  private external = new Map<string, number>();
+
+  park(key: string, car: number, external = false): void {
+    if (external) this.external.set(key, car);
     this.parked.set(key, car);
   }
 
   unpark(key: string, car?: number): void {
     if (car === undefined || this.parked.get(key) === car) this.parked.delete(key);
+    if (car === undefined || this.external.get(key) === car) this.external.delete(key);
   }
 
   /** Кто стоит у целей — заново (из Town.cars: после загрузки, после правки сети). */
   setParked(list: { key: string; car: number }[]): void {
     this.parked.clear();
     for (const x of list) this.parked.set(x.key, x.car);
+    for (const [key, car] of this.external) if (this.stall(key)) this.parked.set(key, car);
   }
 
   /** После загрузки: манёвров и едущих к местам нет (машины в пути не сохраняются). */
   clear(): void {
+    this.external.clear();
     this.parked.clear();
     this.reserved.clear();
     this.homing.clear();
@@ -520,9 +528,14 @@ export class CurbParking {
         this.cancel(sim);
         continue;
       }
+      if (h.waitingFor) {
+        if (this.occupied(h.waitingFor)) { sim.blinker = 1; continue; }
+        traffic.release(sim);
+        delete h.waitingFor;
+      }
       if (!h.stall) {
         const lane = sim.onMovement ? undefined : traffic.currentLane(sim);
-        if (!lane || lane.link !== h.link) continue;
+        if (!lane || lane.link !== h.link || sim.routeIndex !== sim.route.length - 1) continue;
         const stop = (sim.v * sim.v) / (2 * HOLD_BRAKE) + 0.5;
         let best: { st: CurbStall; mode: 'fwd' | 'rev'; nose: number } | null = null;
         for (const st of h.choices()) {
@@ -536,6 +549,15 @@ export class CurbParking {
           if (!best || nose < best.nose) best = { st, mode, nose };
         }
         if (!best) {
+          // Точное место ещё освобождается: ждём перед зоной манёвра, а не проезжаем мимо него.
+          const departing = h.choices().find((st) => this.holder(st.key)?.kind === 'out');
+          const waitSlot = departing && this.slotOf(departing);
+          if (departing && waitSlot) {
+            h.waitingFor = departing.key;
+            traffic.holdAfter(sim, Math.max(0, waitSlot.u - CURB_TRIPS.fwdRun - L / 2 - 1 - sim.s));
+            sim.blinker = 1;
+            continue;
+          }
           // Мест впереди больше нет — едет к узлу, поездка кончится там.
           if (lane.length - sim.s < 40 || !h.choices().length) this.cancel(sim);
           continue;
@@ -566,15 +588,16 @@ export class CurbParking {
         this.cancel(sim);
         continue;
       }
-      this.homing.delete(id);
       const c0 = sub(sim.pos, scale(sim.dir, L / 2));
       const fwd = h.mode === 'fwd';
-      const k = 0.42 * dist(c0, st.pos);
-      const leg = fwd ? this.fwdLeg(c0, st) : bezier(c0, sub(c0, scale(st.dir, k)), add(st.pos, scale(st.dir, k)), st.pos, true, SPEED.revIn);
+      const neighbors = this.laneStalls(st).filter((s) => s.key !== st.key && dist(s.pos, st.pos) < 35 && this.occupied(s.key));
+      const legs = fwd ? [this.fwdLeg(c0, st)] : planCurbEntry(st, { pos: c0, dir: sim.dir }, neighbors, L, sim.width);
+      if (!legs) { this.cancel(sim); continue; }
+      this.homing.delete(id);
       // Передом — с той скоростью, с какой подъехала; задом — с места.
       const v0 = fwd ? sim.v : 0;
       traffic.holdAfter(sim, 0);
-      const m: Move = { stall: st, kind: 'in', phase: 'road', run: runOf([leg], v0), wait: 0, color: sim.color, hooks: h.hooks, sim, dropAt: fwd ? leg.len * 0.55 : leg.len, car: h.car };
+      const m: Move = { stall: st, kind: 'in', phase: 'road', run: runOf(legs, v0), wait: 0, color: sim.color, hooks: h.hooks, sim, dropAt: fwd ? legs[0].len * 0.55 : Infinity, car: h.car };
       // Бронь переходит к манёвру: место занято, пока машина не встанет на него (done).
       this.reserved.set(st.key, m);
       this.moves.push(m);
@@ -591,7 +614,8 @@ export class CurbParking {
     const before = st.idx - (this.flowSign(st) > 0 ? 1 : -1);
     const prev = this.laneStalls(st).find((o) => o.idx === before);
     const room = (u: number) => u - L / 2 >= 1 && u + L / 2 <= slot.lane.length - 1;
-    if (prev && !this.occupied(prev.key) && room(slot.u - CURB_TRIPS.fwdRun)) return 'fwd';
+    const behind = this.laneStalls(st).filter((s) => s.key !== st.key && dot(sub(s.pos, st.pos), st.dir) < 0 && dist(s.pos, st.pos) < CURB_TRIPS.fwdRun + L / 2);
+    if (prev && behind.every((s) => !this.occupied(s.key)) && room(slot.u - CURB_TRIPS.fwdRun)) return 'fwd';
     return room(slot.u + CURB_TRIPS.revRun) ? 'rev' : null;
   }
 
@@ -612,8 +636,8 @@ export class CurbParking {
     if (m.phase === 'wait') return this.stepWait(m, dt);
     const r = m.run!;
     // Выезд передом — встав на полосу, едет дальше с той же скоростью; въезд — до места.
-    const end = advance(r, dt, SPEED, m.kind === 'out' ? r.legs[0].vmax : 0);
-    if (m.kind === 'in' && m.sim && r.s >= (m.dropAt ?? r.legs[0].len) - 1e-6) {
+    const end = advance(r, dt, SPEED, m.kind === 'out' ? r.legs.at(-1)!.vmax : 0);
+    if (m.kind === 'in' && m.sim && (end || r.s >= (m.dropAt ?? r.legs[0].len) - 1e-6)) {
       // Кузов ушёл с полосы движения — поездка в потоке кончилась, дальше — только рисунок.
       const sim = m.sim;
       leaveFlow(traffic, sim);
@@ -647,7 +671,11 @@ export class CurbParking {
       m.hooks.stayed?.();
       return this.done(m);
     }
-    if (m.wait < LOOK || this.crowded(m.stall, m) || !traffic.clearToJoin(slot!.lane.id, slot!.u - L / 2 - 1, uEnd + L / 2 + 1)) return true;
+    if (m.wait < LOOK || this.crowded(m.stall, m) || !traffic.clearToJoin(slot!.lane.id, slot!.u - L / 2 - 4, uEnd + L / 2 + 1)) return true;
+    const end = this.host.graph.lanePose(slot!.lane, uEnd);
+    const neighbors = this.laneStalls(m.stall).filter((s) => s.key !== m.stall.key && dist(s.pos, m.stall.pos) < 35 && this.occupied(s.key));
+    const legs = planCurbExit(m.stall, end, neighbors, L, this.host.car.width);
+    if (!legs) return true;
     const sim = joinLane(traffic, { ...this.host.car, color: m.color }, slot!.lane.id, uEnd + L / 2, m.target!, m.endLink);
     if (!sim) {
       m.hooks.stayed?.();
@@ -655,12 +683,9 @@ export class CurbParking {
     }
     this.host.own(sim, m.trip!);
     m.hooks.joined?.(sim);
-    const end = this.host.graph.lanePose(slot!.lane, uEnd);
-    const c0 = m.stall.pos;
-    const k = 0.42 * dist(c0, end.pos);
     m.sim = sim;
     m.phase = 'road';
-    m.run = runOf([bezier(c0, add(c0, scale(m.stall.dir, k)), sub(end.pos, scale(end.dir, k)), end.pos, false, SPEED.out)]);
+    m.run = runOf([...legs]);
     this.pose(m);
     return true;
   }
@@ -718,7 +743,7 @@ export class CurbParking {
         dir = m.stall.dir;
       }
       if (pos.x < box[0] - 10 || pos.x > box[2] + 10 || pos.y < box[1] - 10 || pos.y > box[3] + 10) continue;
-      const look: VehicleLook = { ...spec, color: m.color, pos, dir };
+      const look: VehicleLook = { ...spec, color: m.color, pos, dir, blinker: m.kind === 'in' ? 1 : -1 };
       out.push({ look });
     }
     return out;

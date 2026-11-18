@@ -103,7 +103,7 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
         }
         if (m.sim) {
           const t = g.time - started.get(m)!;
-          if (m.run?.legs[m.run.i].back) inFlow.rev = Math.max(inFlow.rev, t);
+          if (m.run?.legs[0].back) inFlow.rev = Math.max(inFlow.rev, t);
           else inFlow.fwd = Math.max(inFlow.fwd, t);
         }
       }
@@ -258,6 +258,48 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
 });
 
 describe('Одно место — одна машина', { timeout: 120_000 }, () => {
+  it('добавленные соседи сохраняют занятость: выезд с подачей назад и обратный заезд не задевают их', () => {
+    const g = withoutCitizens(freshGame(PARK));
+    const curb = g.curb;
+    const all = curb.stalls();
+    const index = new Map(all.map((s) => [`${s.corridor}:${s.lane}:${s.idx}`, s]));
+    const st = all.find((s) => {
+      const slot = curb.slotOf(s);
+      return !!slot && slot.u > 80 && slot.u + 80 < slot.lane.length && [-1, 0, 1].every((k) => { const x = index.get(`${s.corridor}:${s.lane}:${s.idx + k}`); return x && curb.isFree(x.key); });
+    })!;
+    expect(st).toBeDefined();
+    const neighbors = [-1, 1].map((k) => index.get(`${st.corridor}:${st.lane}:${st.idx + k}`)!);
+    neighbors.forEach((s, i) => curb.park(s.key, -80 - i, true));
+    curb.setParked([]);
+    expect(neighbors.every((s) => curb.occupied(s.key))).toBe(true);
+    curb.park(st.key, -90, true);
+    const slot = curb.slotOf(st)!;
+    const b = g.towns[0].buildings[0];
+    expect(curb.leave(st, slot.link.toNode!, { from: b, to: b }, { color: '#f00', hooks: { joined: () => curb.unpark(st.key, -90) } })).toBe(true);
+    let backed = false;
+    const inspect = () => {
+      for (const move of curb.moves) {
+        if (!move.run) continue;
+        if (move.kind === 'out') backed ||= move.run.legs[0].back;
+        const { c, h } = runPose(move.run);
+        for (const s of neighbors) expect(boxesOverlap(body({ length: 7.5, width: 3.6 }, c, h), body({ length: 7.5, width: 3.6 }, s.pos, s.dir))).toBe(false);
+      }
+    };
+    runSeconds(g, 25, inspect);
+    expect(backed).toBe(true);
+    expect(curb.moves.some((m) => m.kind === 'out')).toBe(false);
+    const incoming = g.traffic.placeOnLane({ kind: 'car', length: 7.5, width: 3.6, maxSpeed: 60, accel: 10, color: '#00f', targetNode: slot.link.toNode!, endLink: slot.link.id }, slot.lane.id, slot.u - 40)!;
+    expect(incoming).not.toBeNull();
+    let arrived = false, reverseEntry = false;
+    curb.toCurb(incoming, slot.link.id, () => [st], { arrived: () => { arrived = true; } });
+    runUntil(g, 40, () => arrived, () => {
+      inspect();
+      reverseEntry ||= curb.moves.some((m) => m.kind === 'in' && !!m.run?.legs[0].back);
+    });
+    expect(reverseEntry).toBe(true);
+    expect(arrived).toBe(true);
+    expect(neighbors.every((s) => curb.occupied(s.key))).toBe(true);
+  });
   type CurbView = {
     host: { car: VehicleSpec };
     moves: { kind: 'in' | 'out'; stall: CurbStall; run: Run | null }[];

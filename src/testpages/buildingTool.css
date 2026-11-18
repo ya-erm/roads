@@ -1,0 +1,17 @@
+.test-buildings { position: fixed; z-index: 16; left: 50%; transform: translateX(-50%); bottom: 100px; width: min(1000px, calc(100vw - 28px)); padding: 12px; font-size: 12px; }
+.test-buildings[hidden] { display: none; }
+.test-buildings header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
+.test-building-types { display: flex; gap: 5px; overflow-x: auto; padding-bottom: 4px; }
+.test-building-types button { flex: 0 0 106px; display: flex; flex-direction: column; align-items: center; gap: 3px; border: 2px solid transparent; padding: 3px 2px 6px; font-size: 10px; }
+.test-building-types [aria-pressed="true"] { border-color: var(--accent); background: #dbeaff; }
+.test-building-types button:focus-visible { outline-offset: -5px; }
+.test-building-types canvas { width: 100px; height: 72px; }
+.test-building-settings { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; align-items: end; }
+.test-building-settings label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 10px; }
+.test-building-settings [hidden] { display: none; }
+.test-building-settings input[type="number"] { width: 78px; }
+.test-building-settings input[type="color"] { width: 44px; height: 27px; padding: 1px; }
+.test-buildings output { color: var(--muted); display: block; margin-top: 6px; }
+.test-building-toolbar { max-width: calc(100vw - 28px); overflow-x: auto; }
+.test-building-toolbar .tool { flex-shrink: 0; }
+body[data-test-building] #game { cursor: copy !important; }

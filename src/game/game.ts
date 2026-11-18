@@ -20,6 +20,7 @@ import {
   TOWN_GROWTH,
   TOWN_TRAFFIC,
 } from '../config';
+import { ParkedCars } from './parkedCars';
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { money as usd } from '../core/moneyText';
 import { Rng } from '../core/rng';
@@ -114,7 +115,7 @@ import {
   unloadTime,
   zoneRetail,
 } from '../world/retail';
-import { CAR_SIZE, drivewayLink, drivewayOf, type Driveway, LOT_SETBACK, lotFrame } from '../world/houseAccess';
+import { CAR_SIZE, drivewayLink, drivewaysOf, type Driveway, LOT_SETBACK, lotFrame } from '../world/houseAccess';
 import { DEPOT_MIN_W, roofCenter } from '../world/shopLots';
 import { yardLotOf, yardSpots } from '../world/yardLots';
 import { CarHomes, type CarHomesHost } from './carHomes';
@@ -1016,6 +1017,7 @@ export class Game implements BuildContext {
    * стоянки, бокс; поездки начинаются с него и кончаются на нём.
    */
   readonly carHomes = new CarHomes(this.carHomesHost(), this.garages, this.curb, this.lots);
+  readonly parkedCars = new ParkedCars(this);
   /** Поиск места у цели (src/game/parkSearch.ts): полосы, площадки, до трёх попыток, иначе домой. */
   readonly parkSearch = new ParkSearch(this.searchHost(), this.curb, this.lots, this.garages, this.carHomes);
   /**
@@ -4602,7 +4604,10 @@ export class Game implements BuildContext {
       top.version !== this.net.version ||
       top.roadsVersion !== this.roads.net.version ||
       top.stations.length !== this.stations.size ||
-      top.buildings.some((b) => this.towns.find((t) => t.id === b.townId)?.buildings.length !== b.list.length) ||
+      top.buildings.some((b) => {
+        const now = this.towns.find((t) => t.id === b.townId)?.buildings;
+        return now?.length !== b.list.length || b.list.some((old, i) => old.dockApproach !== now?.[i]?.dockApproach);
+      }) ||
       top.moneyBefore !== this.money ||
       top.terraform !== this.terrain.edits.length ||
       this.lotsChanged(top) ||
@@ -5171,6 +5176,7 @@ export class Game implements BuildContext {
     if (this.construction.projects.size || this.workSignals.list.size) this.workSignals.step(dt, this.roads.net, this.roads.graph, this.traffic);
     // Пешеходы на переходах — тоже до движения: идут — зебра закрыта.
     if (this.roads.graph.crosswalks.size || this.crosswalks.list.length) this.crosswalks.step(dt, this.time, this.roads.graph, this.traffic);
+    this.parkedCars.step();
     this.traffic.step(dt);
     // Техника бригад разворачивается петлёй — сразу после движения: на петле её рисуют там, где она на ней.
     if (this.construction.crews.brigades.size || !this.crewLoops.idle) this.crewLoops.step(dt);
@@ -5223,6 +5229,14 @@ export class Game implements BuildContext {
   /** Маршруты предприятия: через станции, которые его обслуживают. */
   industryLines(industryId: number): Line[] {
     const stations = new Set([...this.stations.values()].filter((s) => s.industryId === industryId || s.industryIds.includes(industryId)).map((s) => s.id));
+    return [...this.lines.values()].filter((l) => l.stops.some((id) => stations.has(id)));
+  }
+
+  /** Маршруты городского предприятия: только через его собственные грузовые рампы. */
+  buildingLines(buildingId: number): Line[] {
+    const building = this.buildingById(buildingId);
+    if (!building) return [];
+    const stations = new Set([...this.stations.values()].filter((s) => s.kind === 'dock' && s.dock?.b === building.id && s.dock.town === building.townId).map((s) => s.id));
     return [...this.lines.values()].filter((l) => l.stops.some((id) => stations.has(id)));
   }
 
@@ -7837,7 +7851,7 @@ export class Game implements BuildContext {
     if (!this.retail) return;
     const keep = this.routedReceivers(town);
     const fish = this.industries.some((i) => !i.ruin && i.info.produces === 'fish');
-    town.receivers = pickReceivers(town, this.time, keep, (b) => this.docks.reachable(b, maxTruck(b)), { fish });
+    town.receivers = pickReceivers(town, this.time, keep, (b) => this.docks.reachable(b, 12), { fish });
     for (const st of this.stations.values()) if (st.townIds.includes(town.id) || st.dock?.town === town.id) this.computeCatchment(st);
   }
 
@@ -7859,14 +7873,15 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Пригодность дома под АЗС или оптовую базу: к сквозному двору подъедет Фура (21 м); АЗС — на улице, что уводит за
+   * Пригодность дома под АЗС или оптовую базу: есть подъезд для грузовика; АЗС с местом для фуры (21 м) — в приоритете.
+   * АЗС — на улице, что уводит за
    * город (выезд) или к трассе, на проспекте, у края застройки; база — у магистрали (ближе к ней — лучше), на участке не
    * уже DEPOT_MIN_W. Не подходит — null.
    */
   private retailSiteScore(town: Town, b: TownBuilding, kind: 'fuel' | 'depot'): number | null {
     if (kind === 'depot' && b.fp.w < DEPOT_MIN_W) return null;
     const probe: TownBuilding = { ...b, form: kind };
-    if (!this.docks.reachable(probe, RETAIL.maxLength.yard)) return null;
+    if (!this.docks.reachable(probe, 12)) return null;
     const net = this.roads.net;
     const front = lotFrame(b)(0, -b.fp.h / 2 - LOT_SETBACK);
     let street: Corridor | null = null;
@@ -7884,7 +7899,7 @@ export class Game implements BuildContext {
     const far = Math.max(dist(net.node(street.a).pos, town.center), dist(net.node(street.b).pos, town.center));
     const exit = far > town.radius * 1.05 || nearHighway(net, street, this.drivewayIds());
     const edge = edgeOf(town, b.fp.center);
-    if (kind === 'fuel') return (exit ? 3 : 0) + (wide ? 2 : 0) - Math.abs(edge - 0.85);
+    if (kind === 'fuel') return (this.docks.reachable(probe, RETAIL.maxLength.yard) ? 10 : 0) + (exit ? 3 : 0) + (wide ? 2 : 0) - Math.abs(edge - 0.85);
     let hw = 400;
     for (const c of net.corridorsNear(b.fp.center, 400)) if (big(c) || !this.streetLike(c)) hw = Math.min(hw, c.lut.closest(b.fp.center).d);
     return (exit ? 2 : 0) + (wide ? 1 : 0) - hw / 100 - Math.abs(edge - 0.9);
@@ -7978,7 +7993,7 @@ export class Game implements BuildContext {
       dock: { town: town.id, b: b.id },
       name: this.dockName(b),
       fp: { ...b.fp },
-      nodeId: this.docks.nodeOf(b, maxTruck(b)) ?? -1,
+      nodeId: this.docks.nodeOf(b, 12) ?? -1,
       platforms: [],
       serves: { pax: false, cargo: true },
       industryId: null,
@@ -8049,7 +8064,7 @@ export class Game implements BuildContext {
         // Узел станции у двора — по самому длинному грузовику, что туда заезжает (dockFor): к нему тоже подъехать.
         .filter(
           (b): b is TownBuilding =>
-            !!b && this.docks.reachable(b, maxTruck(b)) && (L === undefined || (L <= maxTruck(b) + 1e-6 && this.docks.reachable(b, L))),
+            !!b && this.docks.reachable(b, 12) && (L === undefined || (L <= maxTruck(b) + 1e-6 && this.docks.reachable(b, L))),
         );
     // Город, чей магазин с этим грузом уже в маршруте, — он (все его магазины уже в нём — добавлять нечего).
     const docked = this.towns.find(
@@ -8109,7 +8124,30 @@ export class Game implements BuildContext {
   private refreshDock(st: Station): void {
     const b = this.dockBuilding(st);
     if (b) st.fp = { ...b.fp };
-    st.nodeId = (b && this.docks.nodeOf(b, maxTruck(b))) ?? -1;
+    st.nodeId = (b && this.docks.nodeOf(b, 12)) ?? -1;
+  }
+
+  /** Перестроить подъезд склада, когда площадка свободна. Маршруты сохраняют свою станцию. */
+  setDockApproach(id: number, approach: 'front' | 'parallel'): string | null {
+    const b = this.buildingById(id);
+    if (!b || formOf(b) !== 'warehouse') return 'Выберите склад';
+    if ((b.dockApproach ?? 'front') === approach) return null;
+    if (this.docks.occupied(id)) return 'Сначала дождитесь освобождения грузовой площадки';
+    const probe = { ...b, dockApproach: approach };
+    if (!this.docks.reachable(probe, 12)) return 'На участке недостаточно места для этого подъезда';
+    for (const line of this.buildingLines(id)) for (const v of line.vehicles) {
+      const vehicle = this.fleet.get(v);
+      const model = vehicle && MODELS[vehicle.model];
+      if (model?.mode === 'road' && !this.docks.reachable(probe, model.spec.length, model.spec.width)) return 'Этот подъезд слишком тесен для грузовика маршрута';
+    }
+    this.checkpoint('тип подъезда склада');
+    b.dockApproach = approach;
+    const town = this.townOf(b);
+    if (town) town.buildings = [...town.buildings];
+    this.layoutRev++;
+    for (const st of this.stations.values()) if (st.dock?.b === id) this.refreshDock(st);
+    this.commit();
+    return null;
   }
 
   /** Последняя связь пути грузовика v к получателю to (с неё он свернёт во двор). */
@@ -8886,7 +8924,7 @@ export class Game implements BuildContext {
       for (const town of this.towns) {
         for (const b of town.buildings) {
           const form = formOf(b);
-          if (form === 'cottage' || form === 'dacha') drive(drivewayOf(b));
+          if (form === 'cottage' || form === 'dacha') for (const d of drivewaysOf(b)) drive(d);
           const lot = b.kind !== 'landmark' ? yardLotOf(b) : null;
           if (lot) {
             const ys = yardSpots(b, lot, L);
@@ -8960,6 +8998,7 @@ export class Game implements BuildContext {
     // Скорые у больниц: на манёвре — всегда, на местах — вблизи.
     out.push(...this.depots.looks(box, parked));
     if (parked) out.push(...this.carHomes.looks(box), ...this.shops.looks(this.towns, box, parked));
+    if (parked) out.push(...this.parkedCars.looks(box));
     return out;
   }
 
@@ -12037,7 +12076,7 @@ export class Game implements BuildContext {
     if (sim) return sim;
     // Во дворе получателя — там, где грузовик на манёвре или у рампы (docks.ts).
     const yard = this.docks.poseOf(v.id);
-    if (yard) return this.fleetLookAt(v.id, yard.pos, yard.dir);
+    if (yard) return this.fleetLookAt(v.id, yard.pos, yard.dir, yard.trail);
     const m = MODELS[v.model];
     const pose = this.bayEntryPose(v);
     if (!pose || m.mode !== 'road') return undefined;
@@ -12046,12 +12085,12 @@ export class Game implements BuildContext {
   }
 
   /** Машина компании, поставленная в точку pos носом по dir (автобус на посадке у остановки). */
-  fleetLookAt(id: number, pos: Vec, dir: Vec): VehicleLook | undefined {
+  fleetLookAt(id: number, pos: Vec, dir: Vec, trail?: Vec): VehicleLook | undefined {
     const v = this.fleet.get(id);
     const m = v && MODELS[v.model];
     if (!v || !m || m.mode !== 'road') return undefined;
     const color = this.lines.get(v.lineId)?.color ?? m.spec.color;
-    return { ...m.spec, color, load: v.cargo ? CARGO[v.cargo].color : undefined, tank: this.isTanker(v), pos, dir };
+    return { ...m.spec, color, load: v.cargo ? CARGO[v.cargo].color : undefined, tank: this.isTanker(v), pos, dir, trail };
   }
 
   /**
@@ -12191,7 +12230,7 @@ export class Game implements BuildContext {
     }
     for (const id of this.docks.yardIds()) {
       const pose = this.docks.poseOf(id);
-      const look = pose && this.fleetLookAt(id, pose.pos, pose.dir);
+      const look = pose && this.fleetLookAt(id, pose.pos, pose.dir, pose.trail);
       if (look) out.push(look);
     }
     return out;

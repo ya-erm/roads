@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { SIM_DT } from '../config';
 import { dist } from '../core/vec';
 import type { Town, TownBuilding } from '../world/entities';
-import { CAR_SIZE } from '../world/houseAccess';
+import { CAR_SIZE, drivewaysOf } from '../world/houseAccess';
 import { flatsOf, formOf } from '../world/townForms';
 import { STALL_MIN_D, yardLotOf } from '../world/yardLots';
 import { nowhereShare, watchCarFlow } from './carFlow';
@@ -37,7 +37,7 @@ const jobOf = (town: Town): TownBuilding => town.buildings.find((b) => b.kind ==
 const seen = (game: Game, car: FleetCar) => game.carHomes.looks(WORLD).some((l) => car.place!.look && dist(l.look.pos, car.place!.look.pos) < 0.01);
 
 describe('Парк машин жителей', { timeout: 120_000 }, () => {
-  it('парк по домам: частный дом — 1 машина у гаража или площадки (вторая — у 20 % с гаражом), многоквартирный — 0,15 на квартиру', () => {
+  it('парк по домам: частный дом — по реальным местам гаража и площадки, многоквартирный — 0,15 на квартиру', () => {
     const game = freshGame(7);
     let cottages = 0;
     let second = 0;
@@ -57,13 +57,18 @@ describe('Парк машин жителей', { timeout: 120_000 }, () => {
             continue;
           }
           cottages++;
-          if (home.kind === 'garage') garaged++;
+          const drives = drivewaysOf(b);
+          if (home.kind === 'garage' && drives.length === 1 && b.homeSpaces === undefined) garaged++;
           expect(cars[0].place!.kind).toBe(home.kind);
-          if (cars.length === 2) {
+          if (drives.length === 1 && cars.length === 2) {
             second++;
             expect(home.kind).toBe('garage');
             expect(cars[1].place!.kind).toBe('apron');
-          } else expect(cars.length).toBe(1);
+          } else {
+            expect(cars.length).toBe(drives.length);
+            expect(new Set(cars.map((c) => c.place!.spot.key)).size).toBe(cars.length);
+            drives.forEach((d, k) => expect(cars[k].place!.kind).toBe(d.garage ? 'garage' : 'pad'));
+          }
         } else expect(cars.length).toBe(Math.min(CAR_HOMES.maxPerHome, Math.round(flatsOf(b) * CAR_HOMES.perFlat)));
       }
     }
@@ -113,25 +118,29 @@ describe('Парк машин жителей', { timeout: 120_000 }, () => {
     expect(box).toBeGreaterThan(20);
   });
 
-  it('машина уезжает со двора через ворота и возвращается на своё место: дома видна на нём, в пути — нет', () => {
+  it('машина квартала с двором выезжает с видимого места перед домом и возвращается без арки и скачков', () => {
     const game = withoutCitizens(freshGame(7));
-    const { town, car } = fleetCar(game, (c) => c.place!.kind === 'yard');
+    const { town, car } = fleetCar(game, (c) => formOf(c.home) === 'courtyard' && c.place!.kind === 'stall');
     const place = car.place!;
     const dest = jobOf(town);
-    expect(place.spot.d.garage).toBe(true);
+    expect(place.spot.d.garage).toBe(false);
     expect(seen(game, car)).toBe(true);
     game.carHomes.depart({ kind: 'out', car, town }, dest);
-    // Сразу не видна на месте: выезжает из ворот (рисунок манёвра — с воротами, за ними её не видно).
+    // На месте уже не рисуется: кузов целиком ведёт настоящий манёвр, без спрятанного отрезка внутри дома.
     expect(seen(game, car)).toBe(false);
     let gate = false;
+    let last = place.look!.pos;
+    let jump = 0;
     let simId: number | undefined;
     for (let i = 0; i < 30 * 60 && simId === undefined; i++) {
       step(game);
       if (game.garageLooks(WORLD, true).some((l) => l.gate && dist(l.gate.pos, place.spot.d.gate) < 0.01)) gate = true;
       const m = game.garages.moveOf(place.spot.key);
+      if (m) { jump = Math.max(jump, dist(m.pos, last)); last = m.pos; }
       if (m?.sim) simId = m.sim.id;
     }
-    expect(gate).toBe(true);
+    expect(gate).toBe(false);
+    expect(jump).toBeLessThan(1);
     expect(simId).toBeDefined();
     expect(game.tripOf(simId!)).toEqual({ from: car.home, to: dest });
     // Встала в поток — не дома: в Town.cars, у цели простоит своё.
@@ -149,12 +158,20 @@ describe('Парк машин жителей', { timeout: 120_000 }, () => {
     (game as unknown as { owners: Map<number, unknown> }).owners.set(sim.id, { type: 'citizen', trip: { from: dest, to: car.home } });
     game.carHomes.homeward(sim, { kind: 'back', car, town, from: dest }, way.slot);
     let entered = false;
+    let lastEntry: NonNullable<typeof place.look> | undefined;
+    let entryJump = 0;
     for (let i = 0; i < 30 * 240 && !game.carHomes.isHome(town, car.key); i++) {
       step(game);
-      if (game.garages.moveOf(place.spot.key)?.kind === 'in') entered = true;
+      const move = game.garages.moveOf(place.spot.key);
+      if (move?.kind === 'in') {
+        entered = true;
+        if (lastEntry) entryJump = Math.max(entryJump, dist(move.pos, lastEntry.pos));
+        lastEntry = { pos: move.pos, dir: move.dir };
+      } else if (lastEntry && game.carHomes.isHome(town, car.key)) entryJump = Math.max(entryJump, dist(lastEntry.pos, place.look!.pos));
     }
-    // Въехала в ворота двора — и видна на своём месте.
+    // Доехала на виду до того же парковочного места.
     expect(entered).toBe(true);
+    expect(entryJump).toBeLessThan(1);
     expect(game.carHomes.isHome(town, car.key)).toBe(true);
     expect(game.carHomes.awayOf(town, car.key)).toBeUndefined();
     expect(seen(game, car)).toBe(true);
@@ -273,7 +290,7 @@ describe('Парк машин жителей', { timeout: 120_000 }, () => {
     }
     let want = 0;
     for (const t of b.towns) for (const c of b.carHomes.fleet(t).cars) if (c.place?.look && b.carHomes.isHome(t, c.key)) want++;
-    expect(b.carHomes.looks(WORLD).length).toBe(want);
+    expect(b.carHomes.looks(WORLD).filter((l) => !l.hidden).length).toBe(want);
     // Ехавшие — у цели: потом едут домой, как прочие.
     runSeconds(b, 60);
     const back = b.towns.reduce((s, t) => s + (t.cars?.length ?? 0), 0);

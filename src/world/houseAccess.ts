@@ -63,6 +63,7 @@ export interface CottagePlan {
   pad: LotRect | null;
   /** Заезд в участке: от края участка (y = −H/2) до ворот гаража или до конца площадки; x — середина. */
   drive: { x: number; w: number; y0: number; y1: number } | null;
+  spaces: { x: number; garage: boolean }[];
 }
 
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
@@ -76,7 +77,7 @@ const r = (b: Pick<TownBuilding, 'id'>, i: number) => hash(b.id, i);
  * дома, от края участка. У дома второго ряда (TownBuilding.rear) улицы рядом нет — ни гаража, ни площадки.
  * Участки старых сохранений (22–30 м) — те же правила: дом почти во всю ширину участка, как прежде.
  */
-export function cottagePlan(b: Pick<TownBuilding, 'id' | 'fp' | 'kind' | 'floors' | 'people' | 'form' | 'rear'>): CottagePlan {
+export function cottagePlan(b: Pick<TownBuilding, 'id' | 'fp' | 'kind' | 'floors' | 'people' | 'form' | 'rear' | 'homeSpaces' | 'garageSpaces'>): CottagePlan {
   const W = b.fp.w;
   const H = b.fp.h;
   const x0 = -W / 2;
@@ -87,7 +88,11 @@ export function cottagePlan(b: Pick<TownBuilding, 'id' | 'fp' | 'kind' | 'floors
   const roll = r(b, 17);
   const garage = !b.rear && roll < CAR_PLACE.garage && W >= 22 && H >= gy - y0 + GARAGE.d + 3;
   const pad = !b.rear && roll >= CAR_PLACE.garage && roll < CAR_PLACE.garage + CAR_PLACE.pad && W >= 22 && H >= PAD.d + 10;
-  const room = garage ? GARAGE.w + 1.6 : pad ? PAD.w + 1.6 : 0;
+  let count = b.homeSpaces ?? (W >= 42 && r(b, 31) < 0.18 ? 3 : W >= 32 && r(b, 32) < 0.4 ? 2 : 1);
+  const inside = () => garage ? Math.min(count, b.garageSpaces ?? (r(b, 33) < 0.35 ? 2 : 1)) : 0;
+  const spaceWidth = () => inside() * GARAGE.w + (count - inside()) * PAD.w + (inside() && count > inside() ? 0.8 : 0);
+  while (count > 1 && spaceWidth() + 15.5 > W) count--;
+  const room = garage || pad ? spaceWidth() + 1.6 : 0;
   // Палисадник перед домом: на крупном участке — шире.
   const front = clamp(H * 0.08, 1.8, 4) + r(b, 3) * clamp(H * 0.04, 1.2, 2);
   // На большом участке (у центра) и дом больше.
@@ -101,17 +106,24 @@ export function cottagePlan(b: Pick<TownBuilding, 'id' | 'fp' | 'kind' | 'floors
   const hy = y0 + front;
   const house = { x: hx, y: hy, w: hw, h: hd };
   if (pad) {
-    const px = left ? hx + hw + 1.4 : hx - 1.4 - PAD.w;
-    return { house, left, garage: null, pad: { x: px, y: y0, w: PAD.w, h: PAD.d }, drive: { x: px + PAD.w / 2, w: PAD.w, y0, y1: y0 + PAD.d } };
+    const width = count * PAD.w;
+    const px = left ? hx + hw + 1.4 : hx - 1.4 - width;
+    return { house, left, garage: null, pad: { x: px, y: y0, w: width, h: PAD.d }, drive: { x: px + width / 2, w: width, y0, y1: y0 + PAD.d }, spaces: Array.from({ length: count }, (_, k) => ({ x: px + PAD.w * (k + 0.5), garage: false })) };
   }
-  if (!garage) return { house, left, garage: null, pad: null, drive: null };
-  const gx = left ? hx + hw + 1.4 : hx - 1.4 - GARAGE.w;
+  if (!garage) return { house, left, garage: null, pad: null, drive: null, spaces: [] };
+  const garages = inside();
+  const outdoor = count - garages;
+  const total = spaceWidth();
+  const base = left ? hx + hw + 1.4 : hx - 1.4 - total;
+  const gx = left ? base : base + (outdoor ? outdoor * PAD.w + 0.8 : 0);
+  const px = left ? gx + garages * GARAGE.w + 0.8 : base;
   return {
     house,
     left,
-    garage: { x: gx, y: gy, w: GARAGE.w, h: GARAGE.d },
-    pad: null,
-    drive: { x: gx + GARAGE.w / 2, w: DRIVE_W, y0, y1: gy },
+    garage: { x: gx, y: gy, w: garages * GARAGE.w, h: GARAGE.d },
+    pad: outdoor ? { x: px, y: y0, w: outdoor * PAD.w, h: PAD.d } : null,
+    drive: { x: base + total / 2, w: total, y0, y1: gy },
+    spaces: [...Array.from({ length: garages }, (_, k) => ({ x: gx + GARAGE.w * (k + 0.5), garage: true })), ...Array.from({ length: outdoor }, (_, k) => ({ x: px + PAD.w * (k + 0.5), garage: false }))],
   };
 }
 
@@ -120,13 +132,14 @@ export interface DachaPlan {
   house: LotRect;
   left: boolean;
   pad: LotRect | null;
+  spaces: { x: number; garage: boolean }[];
 }
 
 /**
  * Раскладка дачи (те же хеши, что у рисунка): домик в масштабе дома, у улицы, с одной стороны участка; площадка под
  * машину — рядом с домиком, от края участка (грядки начинаются за ней). У дачи второго ряда площадки нет.
  */
-export function dachaPlan(b: Pick<TownBuilding, 'id' | 'fp' | 'rear'>): DachaPlan {
+export function dachaPlan(b: Pick<TownBuilding, 'id' | 'fp' | 'rear' | 'homeSpaces'>): DachaPlan {
   const W = b.fp.w;
   const H = b.fp.h;
   const x0 = -W / 2;
@@ -138,9 +151,12 @@ export function dachaPlan(b: Pick<TownBuilding, 'id' | 'fp' | 'rear'>): DachaPla
   const hy = y0 + 1.8 + r(b, 4) * 1.5 * TOWN_SCALE;
   const house = { x: hx, y: hy, w: hw, h: hd };
   const fits = W - hw - 4.4 >= PAD.w + 3 && H >= PAD.d + 12;
-  if (b.rear || !fits || r(b, 30) >= CAR_PLACE.dachaPad) return { house, left, pad: null };
-  const px = left ? hx + hw + 1.4 : hx - 1.4 - PAD.w;
-  return { house, left, pad: { x: px, y: y0, w: PAD.w, h: PAD.d } };
+  if (b.rear || !fits || r(b, 30) >= CAR_PLACE.dachaPad) return { house, left, pad: null, spaces: [] };
+  const requested = b.homeSpaces ?? (W >= 42 && r(b, 31) < 0.25 ? 3 : W >= 32 && r(b, 32) < 0.5 ? 2 : 1);
+  const count = Math.max(1, Math.min(requested, Math.floor((W - hw - 7.4) / PAD.w)));
+  const width = count * PAD.w;
+  const px = left ? hx + hw + 1.4 : hx - 1.4 - width;
+  return { house, left, pad: { x: px, y: y0, w: width, h: PAD.d }, spaces: Array.from({ length: count }, (_, k) => ({ x: px + PAD.w * (k + 0.5), garage: false })) };
 }
 
 /** Заезд в мире: от края полотна до ворот гаража (или до конца площадки, места на стоянке). */
@@ -191,17 +207,22 @@ export function drivewayAt(b: Pick<TownBuilding, 'id' | 'fp' | 'face'>, x: numbe
 
 /** Заезд к гаражу или площадке частного дома (или дачи) в мире; нет ни того ни другого — null. */
 export function drivewayOf(b: TownBuilding): Driveway | null {
-  if (b.kind !== 'res') return null;
+  return drivewaysOf(b)[0] ?? null;
+}
+
+/** По отдельному заезду к каждой параллельной площадке/воротам многоместного гаража. */
+export function drivewaysOf(b: TownBuilding): Driveway[] {
+  if (b.kind !== 'res') return [];
   const form = formOf(b);
   if (form === 'dacha') {
-    const pad = dachaPlan(b).pad;
-    return pad ? drivewayAt(b, pad.x + pad.w / 2, pad.w, pad.y + pad.h, false, 0.6) : null;
+    const plan = dachaPlan(b);
+    return plan.pad ? plan.spaces.map((s) => drivewayAt(b, s.x, DRIVE_W, plan.pad!.y + plan.pad!.h, false, 0.6)) : [];
   }
-  if (form !== 'cottage') return null;
+  if (form !== 'cottage') return [];
   const plan = cottagePlan(b);
   const d = plan.drive;
-  if (!d) return null;
-  return drivewayAt(b, d.x, d.w, d.y1, !!plan.garage, plan.garage ? 0.4 : 0.6);
+  if (!d) return [];
+  return plan.spaces.map((s) => drivewayAt(b, s.x, DRIVE_W, s.garage ? plan.garage!.y : plan.pad!.y + plan.pad!.h, s.garage, s.garage ? 0.4 : 0.6));
 }
 
 /**

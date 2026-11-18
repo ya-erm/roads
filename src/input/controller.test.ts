@@ -93,8 +93,23 @@ function play(game: Game) {
   };
   c.setTool('road');
   c.setRoadMode('move');
-  return { c, canvas, mouse, move, click, dblclick, key };
+  return { c, canvas, camera, mouse, move, click, dblclick, key };
 }
+
+it('размещение автомобиля оставляет доступными правую протяжку карты и масштаб колесом', () => {
+  const { c, canvas, camera, mouse, move } = play(freshGame({ ...NEW_GAME_SETTINGS, seed: 1 }));
+  c.setTool('select');
+  c.testVehiclePlacement = true;
+  camera.x = 1500; camera.y = 1500; camera.zoom = 1;
+  canvas.fire('mousedown', { ...mouse({ x: 100, y: 100 }), button: 2 });
+  move({ x: 140, y: 125 });
+  win.fire('mouseup', { ...mouse({ x: 140, y: 125 }), button: 2 });
+  expect(camera.x).toBe(1460);
+  expect(camera.y).toBe(1475);
+  canvas.fire('wheel', { ...mouse({ x: 140, y: 125 }), deltaY: -100, deltaX: 0 });
+  expect(camera.zoom).toBeGreaterThan(1);
+  expect(c.testVehiclePlacement).toBe(true);
+});
 
 /** Перья двух дорог в узле id смотрят в противоположные стороны — узел гладкий. */
 function pensOpposite(net: LaneNet, id: number): boolean {

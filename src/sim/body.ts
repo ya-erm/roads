@@ -1,4 +1,14 @@
 import type { Vec } from '../core/vec';
+import type { Box } from '../lanes/curb';
+
+/** Реальные контуры двух кузовов: пустой угол между тягачом и прицепом не является препятствием. */
+export function vehicleBoxes(pos: Vec, dir: Vec, length: number, width: number, body?: VehicleBody, trail?: Vec): Box[] {
+  const hitch = hitchOf(body);
+  const box = (p: Vec, d: Vec, a: number, b: number): Box => ({ c: { x: p.x + d.x * (a + b) / 2, y: p.y + d.y * (a + b) / 2 }, d, hl: (b - a) / 2, hw: width / 2 });
+  if (!hitch) return [box(pos, dir, -length, 0)];
+  const joint = jointOf(pos, dir, length, hitch);
+  return [box(pos, dir, -hitch.front * length, 0), box(joint, trailDir(joint, trail, dir), -(1 - hitch.joint) * length, (hitch.joint - hitch.back) * length)];
+}
 
 /**
  * Кузов машины компании — каким его рисовать на карте и гнётся ли он:
@@ -50,11 +60,11 @@ export const RIGID_BASE = 0.7;
  * Тягач поворачивает круто, полуприцеп лежит на седле над его задней осью. Передние углы полуприцепа на
  * повороте описывают дугу вокруг седла и выходят вперёд на a·cos θ + (W/2)·sin θ (a — сколько прицеп
  * выступает перед седлом, W — ширина): чтобы при изгибе до 60° они не заходили на кабину, седло стоит
- * дальше от кабины, чем этот вынос, — между ними видна рама тягача. Доли подбирались под длины 12.5 и 18 при ширине
- * 4,8 и 5; при нынешних 15 × 4,2 и 21 × 4,25 вынос на 60° — ~2,1, а от кабины до седла — ~2,9: запас только больше.
+ * дальше от кабины, чем этот вынос, — между ними видна рама тягача. У Грузовика II передний край прицепа
+ * приближен к кабине: при 15 × 4,6 его вынос до 60° — не больше 2,72, расстояние от седла до кабины — 2,94.
  */
 const HITCHES: Partial<Record<VehicleBody, Hitch>> = {
-  semi: { cab: 0.2, back: 0.364, joint: 0.396, base: 0.42, front: 0.46, tail: 0.452 },
+  semi: { cab: 0.2, back: 0.3, joint: 0.396, base: 0.42, front: 0.46, tail: 0.452 },
   longSemi: { cab: 0.17, back: 0.287, joint: 0.309, base: 0.33, front: 0.37, tail: 0.551 },
   // Сочленённый: передняя секция чуть длиннее задней, между ними — гармошка.
   articBus: { base: 0.46, joint: 0.575, tail: 0.25, front: 0.555, back: 0.595 },

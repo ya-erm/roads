@@ -3,12 +3,15 @@ import type { GLane, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import { findLaneRoute } from '../lanes/routing';
 import type { LaneTraffic } from '../lanes/traffic';
+import { boxesOverlap, type Box } from '../lanes/curb';
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
+import { follow, hitchOf, jointOf, vehicleBoxes, type VehicleBody } from '../sim/body';
 import type { TownBuilding } from '../world/entities';
 import { lotFrame, type Driveway } from '../world/houseAccess';
-import { DOCK_TRUCK, dockDriveway, dockYardsOf, exitDriveway, RAMP_GAP, THROUGH_R, type DockYard } from '../world/shopLots';
+import { DOCK_TRUCK, dockDriveway, dockSolidsOf, dockYardsOf, exitDriveway, RAMP_GAP, THROUGH_R, type DockYard } from '../world/shopLots';
 import { laneSlot, type GarageSlot } from './garages';
-import { advance, bezier, decideNow, entrySpeed, handOff, joinLane, poseSim, runOf, runPose, straight, type Leg, type Run } from './lotMoves';
+import { advance, bezier, decideNow, entrySpeed, handOff, joinLane, legPose, poseSim, reversed, runOf, runPose, straight, type Leg, type Run } from './lotMoves';
+import { dockPathLeg, planDockPath } from './dockPath';
 
 /**
  * Грузовик у получателя (docs/RETAIL.md, «Заезд во двор»; world/retail.ts): маршрут кончается связью у его двора
@@ -89,6 +92,9 @@ export interface DockGeo {
   /** Двор: от бордюра до рампы и от рампы до бордюра (у полотна — нос к улице или корма к ней). */
   inLegs: Leg[];
   outLegs: Leg[];
+  /** Полный путь сцепки: дорожная дуга и двор, с выровненными кузовами у рампы. */
+  entry?: Leg[];
+  departure?: Leg[];
 }
 
 /** Что игра даёт дворам. */
@@ -145,6 +151,8 @@ export class Docks {
   private moves = new Map<number, Move>();
   /** Стоят у рампы (выгружаются): грузовик → двор. */
   private parked = new Map<number, DockGeo>();
+  /** Положение сцепки сохраняется и после снятия машины с дорожного графа. */
+  private bodies = new Map<number, { body?: VehicleBody; trail?: Vec }>();
 
   constructor(private host: DockHost) {}
 
@@ -158,7 +166,7 @@ export class Docks {
       this.geos.clear();
       this.geoGraph = g;
     }
-    const key = `${b.id}:${L}:${W}:${k}`;
+    const key = `${b.id}:${L}:${W}:${k}:${b.form}:${b.floors}:${b.face}:${b.fp.center.x}:${b.fp.center.y}:${b.fp.w}:${b.fp.h}:${b.fp.angle}:${b.dockApproach ?? 'front'}`;
     const hit = this.geos.get(key);
     if (hit !== undefined && (hit === null || (hit.b === b && hit.fp === b.fp))) return hit;
     const geo = this.compute(b, L, W, g, k);
@@ -286,9 +294,12 @@ export class Docks {
       inLegs = [straight(curbSide, E, false, sp.yardIn), bezier(E, add(E, scale(Y, k)), add(P, scale(X, s * k)), P, false, sp.yardIn)];
       if (dist(P, Q) > 0.3) inLegs.push(straight(P, Q, false, sp.yardIn));
       inLegs.push(bezier(Q, add(Q, scale(X, s * k)), add(F, scale(Y, k)), F, true, sp.yardBack));
-      // Разворот от рампы к проезду: петля в глубине двора, не за забор.
-      const ku = Math.max(2, (b.fp.h / 2 - 0.6 - W / 2 - fy) / 0.75);
-      outLegs = [bezier(F, add(F, scale(Y, ku)), add(E, scale(Y, ku)), E, false, sp.yardIn), straight(E, curbSide, false, sp.yardIn)];
+      // Два четверть-круга и прямая между ними: касательные непрерывны, радиус не сжимается до половины узкого зазора.
+      const A = at(yard.rx + s * R, fy + R);
+      const B = at(yard.drive.x - s * R, fy + R);
+      outLegs = [bezier(F, add(F, scale(Y, k)), sub(A, scale(X, s * k)), A, false, sp.yardIn)];
+      if (dist(A, B) > 0.3) outLegs.push(straight(A, B, false, sp.yardIn));
+      outLegs.push(bezier(B, add(B, scale(X, s * k)), add(E, scale(Y, k)), E, false, sp.yardIn), straight(E, curbSide, false, sp.yardIn));
       out = rightOut(curbSide);
     } else {
       const F = at(yard.drive.x, yard.drive.y1 - L / 2 - 0.4);
@@ -297,7 +308,105 @@ export class Docks {
       outLegs = [straight(F, curbSide, true, sp.yardBack)];
       if (slot) out = { lane: slot.lane, mid: slot.mid, zone: slot.zone, pos: slot.pos, f: slot.f };
     }
-    return { b, fp: b.fp, yard, d, L, W, k, curbSide, exitD, exitSide, in: slot, out, ramp, inLegs, outLegs };
+    const geo: DockGeo = { b, fp: b.fp, yard, d, L, W, k, curbSide, exitD, exitSide, in: slot, out, ramp, inLegs, outLegs };
+    return (L > 12 ? this.articulated(geo) : this.fits(geo)) ? geo : null;
+  }
+
+  private articulated(geo: DockGeo): boolean {
+    if (!geo.in || !geo.out) return false;
+    const { b, L, W } = geo;
+    const body = L > 18 ? 'longSemi' : 'semi';
+    const at = lotFrame(b), origin = at(0, 0);
+    const x = sub(at(1, 0), origin), y = sub(at(0, 1), origin);
+    const obstacles = dockSolidsOf(b, true).map((r) => ({ c: at(r.x + r.w / 2, r.y + r.h / 2), d: x, hl: r.w / 2, hw: r.h / 2 }));
+    const clear = (box: Box) => {
+      if (obstacles.some((o) => boxesOverlap(box, o))) return false;
+      for (const a of [-1, 1]) for (const z of [-1, 1]) {
+        const p = sub({ x: box.c.x + a * box.d.x * box.hl - z * box.d.y * box.hw, y: box.c.y + a * box.d.y * box.hl + z * box.d.x * box.hw }, origin);
+        const py = dot(p, y);
+        if (py > b.fp.h / 2 || (py > -b.fp.h / 2 && Math.abs(dot(p, x)) > b.fp.w / 2)) return false;
+        if (py < -b.fp.h / 2 - 26) return false;
+      }
+      return true;
+    };
+    const plan = (start: {c: Vec; h: Vec}, end: {c: Vec; h: Vec}, gate: Vec, heading: Vec) => {
+      const direct = planDockPath(start, end, L, W, body, clear);
+      if (direct || geo.yard.kind !== 'through') return direct;
+      for (const extra of [2, 4, 6, 8]) {
+        const middle = { c: add(gate, scale(geo.d.dir, extra)), h: heading };
+        const a = planDockPath(start, middle, L, W, body, clear);
+        if (!a) continue;
+        const b = planDockPath(middle, end, L, W, body, clear);
+        if (b) return [...a.slice(0, -1), ...b];
+      }
+      return null;
+    };
+    const entry = plan({ c: geo.in.pos, h: geo.in.f }, geo.ramp, geo.curbSide, geo.d.dir);
+    if (!entry) return false;
+    let split = entry.findIndex((p) => dot(sub(p.c, geo.d.curb), geo.d.dir) > L / 2 + 1);
+    split = Math.max(1, Math.min(entry.length - 2, split));
+    geo.entry = [dockPathLeg(entry.slice(0, split + 1), DOCK.speed.roadIn), dockPathLeg(entry.slice(split), DOCK.speed.yardIn)];
+    if (geo.yard.kind === 'back') {
+      geo.departure = [...geo.entry].reverse().map((l) => reversed(l, true, DOCK.speed.yardBack));
+    } else {
+      const out = plan(geo.ramp, { c: geo.out.pos, h: geo.out.f }, geo.exitSide ?? geo.curbSide, scale(geo.d.dir, -1));
+      if (!out) return false;
+      let edge = out.findIndex((p) => dot(sub(p.c, (geo.exitD ?? geo.d).curb), geo.d.dir) < L / 2 + 1);
+      edge = Math.max(1, Math.min(out.length - 2, edge));
+      geo.departure = [dockPathLeg(out.slice(0, edge + 1), DOCK.speed.yardIn), dockPathLeg(out.slice(edge), DOCK.speed.roadOut)];
+    }
+    geo.outLegs = geo.departure.slice(0, -1);
+    // Просвет на полосе — по выносу обеих частей новой траектории, а не только по старой дуге центра кузова.
+    const hitch = hitchOf(body)!;
+    const leg = geo.departure.at(-1)!;
+    for (let i = 0; i < leg.pts.length; i++) {
+      const p = legPose(leg, leg.cum[i]);
+      const nose = add(p.c, scale(p.h, L / 2));
+      const trail = sub(jointOf(nose, p.h, L, hitch), scale(p.th!, L * hitch.tail));
+      for (const box of vehicleBoxes(nose, p.h, L, W, body, trail)) {
+        const mid = geo.out.mid + dot(sub(box.c, geo.out.pos), geo.out.f);
+        const reach = Math.abs(dot(box.d, geo.out.f)) * box.hl + Math.abs(dot(rightNormal(box.d), geo.out.f)) * box.hw + 1;
+        geo.out.zone[0] = Math.min(geo.out.zone[0], mid - reach);
+        geo.out.zone[1] = Math.max(geo.out.zone[1], mid + reach);
+      }
+    }
+    return true;
+  }
+
+  /** Проверяем весь кузов, включая вынос кормы; тесный участок не должен давать формально достижимую рампу. */
+  private fits(geo: DockGeo): boolean {
+    const { b, L, W } = geo;
+    const at = lotFrame(b);
+    const origin = at(0, 0);
+    const x = sub(at(1, 0), origin);
+    const y = sub(at(0, 1), origin);
+    const obstacles: Box[] = dockSolidsOf(b, true).map((r) => ({ c: at(r.x + r.w / 2, r.y + r.h / 2), d: x, hl: r.w / 2, hw: r.h / 2 }));
+    const clear = (leg: Leg, yard: boolean) => {
+      for (let i = 0, n = Math.max(1, Math.ceil(leg.len / 0.3)); i <= n; i++) {
+        const p = legPose(leg, leg.len * i / n);
+        const box = { c: p.c, d: p.h, hl: L / 2 + 0.05, hw: W / 2 + 0.05 };
+        if (obstacles.some((o) => boxesOverlap(box, o))) return false;
+        if (!yard) continue;
+        for (const a of [-1, 1]) for (const z of [-1, 1]) {
+          const q = { x: box.c.x + a * box.d.x * box.hl - z * box.d.y * box.hw, y: box.c.y + a * box.d.y * box.hl + z * box.d.x * box.hw };
+          const rel = sub(q, origin);
+          if (Math.abs(dot(rel, x)) > b.fp.w / 2 + 0.05 || dot(rel, y) > b.fp.h / 2 + 0.05) return false;
+        }
+      }
+      return true;
+    };
+    for (const legs of [geo.inLegs, geo.outLegs]) for (let i = 0; i < legs.length; i++) {
+      if (!clear(legs[i], true)) return false;
+      if (i) {
+        const prev = legPose(legs[i - 1], legs[i - 1].len);
+        const next = legPose(legs[i], 0);
+        if (dist(prev.c, next.c) > 0.05 || dot(prev.h, next.h) < 0.99) return false;
+      }
+    }
+    if (dot(legPose(geo.inLegs[0], 0).h, geo.d.dir) < 0.99) return false;
+    if (geo.in && !clear(this.turnLeg(geo, geo.in.pos, geo.in.f), false)) return false;
+    if (geo.out && !clear(this.outLeg(geo, geo.out), false)) return false;
+    return true;
   }
 
   /** Узел, к которому ведёт маршрут ко двору (за ним по ходу полосы); не подъехать — null. */
@@ -372,6 +481,10 @@ export class Docks {
     return false;
   }
 
+  occupied(b: number): boolean {
+    return this.rampsTaken(b).size > 0;
+  }
+
   /** Сколько грузовиков сейчас во дворах: на манёвре и у рамп. */
   get count(): number {
     return this.moves.size + this.parked.size;
@@ -386,6 +499,7 @@ export class Docks {
     let geo = this.parked.get(id) ?? null;
     if (b) geo = this.geoOf(b, spec.length, spec.width, geo?.k ?? 0) ?? geo;
     if (!geo?.out) return false;
+    if (!this.bodies.has(id)) this.bodies.set(id, { body: spec.body });
     this.parked.delete(id);
     this.moves.set(id, { id, geo, kind: 'out', phase: 'legs', run: runOf([...geo.outLegs]), wait: 0, road: false, spec, target, endLink, blink: 0 });
     return true;
@@ -393,6 +507,7 @@ export class Docks {
 
   /** Грузовик id встаёт к рампе дома b сразу (из сохранения: стоял у неё или был во дворе). */
   stand(id: number, b: TownBuilding, L: number, W: number): boolean {
+    this.bodies.delete(id);
     this.moves.delete(id);
     this.parked.delete(id);
     const geo = this.geoOf(b, L, W, this.freeRamp(b, id, L, W) ?? 0);
@@ -404,6 +519,7 @@ export class Docks {
 
   /** Грузовика id больше нет (продан, маршрут поменяли): ни манёвра, ни места у рампы. Машину в потоке — отпустить. */
   forget(id: number): void {
+    this.bodies.delete(id);
     const m = this.moves.get(id);
     if (m?.sim && this.host.traffic.vehicles.has(m.sim.id)) this.host.traffic.release(m.sim);
     this.moves.delete(id);
@@ -469,7 +585,7 @@ export class Docks {
           continue;
         }
         if (late) this.cancel(sim, h);
-        else traffic.slowTo(sim, room, entrySpeed([this.turnLeg(geo, slot.pos, slot.f), ...geo.inLegs], DOCK.speed.brake));
+        else traffic.slowTo(sim, room, entrySpeed(geo.entry ?? [this.turnLeg(geo, slot.pos, slot.f), ...geo.inLegs], DOCK.speed.brake));
         continue;
       }
       // Двор общий с покупателями: за тормозной путь до проезда смотрит, не на манёвре ли машина у стоянки, — нет:
@@ -492,7 +608,8 @@ export class Docks {
       traffic.holdAfter(sim, 0);
       sim.lcCooldown = 1e9;
       const blink = dot(geo.d.dir, rightNormal(slot.f)) > 0 ? 1 : -1;
-      this.moves.set(h.id, { id: h.id, geo, kind: 'in', phase: 'legs', run: runOf([this.turnLeg(geo, c0, sim.dir), ...geo.inLegs], v0), wait: 0, sim, road: true, blink });
+      this.bodies.set(h.id, { body: sim.body, trail: sim.trail && { ...sim.trail } });
+      this.moves.set(h.id, { id: h.id, geo, kind: 'in', phase: 'legs', run: runOf(geo.entry ? [...geo.entry] : [this.turnLeg(geo, c0, sim.dir), ...geo.inLegs], v0), wait: 0, sim, road: true, blink });
     }
   }
 
@@ -500,6 +617,16 @@ export class Docks {
   private turnLeg(geo: DockGeo, c0: Vec, f: Vec): Leg {
     const k = 0.55 * Math.max(2, Math.abs(dot(sub(geo.curbSide, c0), rightNormal(f))));
     return bezier(c0, add(c0, scale(f, k)), sub(geo.curbSide, scale(geo.d.dir, k)), geo.curbSide, false, DOCK.speed.roadIn);
+  }
+
+  private outLeg(geo: DockGeo, out: OutSlot): Leg {
+    if (geo.departure) return geo.departure[geo.departure.length - 1];
+    const start = geo.exitSide ?? geo.curbSide;
+    const dir = (geo.exitD ?? geo.d).dir;
+    const k = 0.55 * Math.max(2, Math.abs(dot(sub(start, out.pos), rightNormal(out.f))));
+    return geo.yard.kind === 'back'
+      ? bezier(start, sub(start, scale(dir, k)), add(out.pos, scale(out.f, k)), out.pos, true, DOCK.speed.roadOut)
+      : bezier(start, sub(start, scale(dir, k)), sub(out.pos, scale(out.f, k)), out.pos, false, DOCK.speed.roadOut);
   }
 
   /** Шаг манёвра; false — кончился. */
@@ -513,6 +640,7 @@ export class Docks {
       if (m.wait < DOCK.pause) return true;
       // Встал на полосу задним ходом, носом по ходу — поехал.
       handOff(traffic, m.sim!);
+      this.bodies.delete(m.id);
       return false;
     }
     const r = m.run;
@@ -543,6 +671,7 @@ export class Docks {
     }
     if (m.phase === 'join' && !m.run.legs[m.run.i].back) {
       handOff(this.host.traffic, m.sim!, m.run.v);
+      this.bodies.delete(m.id);
       return false;
     }
     m.run.v = 0;
@@ -570,14 +699,10 @@ export class Docks {
     const sim = joinLane(traffic, m.spec!, out.lane.id, out.mid + geo.L / 2, m.target!, m.endLink);
     if (!sim) return false;
     // Сквозной двор — из второго проезда.
-    const start = geo.exitSide ?? geo.curbSide;
     const dir = (geo.exitD ?? geo.d).dir;
-    const k = 0.55 * Math.max(2, Math.abs(dot(sub(start, out.pos), rightNormal(out.f))));
     const back = geo.yard.kind === 'back';
     // 'turn' и 'through' — передом направо, 'back' — задом, как из гаража (нос по ходу полосы в конце).
-    const leg = back
-      ? bezier(start, sub(start, scale(dir, k)), add(out.pos, scale(out.f, k)), out.pos, true, DOCK.speed.roadOut)
-      : bezier(start, sub(start, scale(dir, k)), sub(out.pos, scale(out.f, k)), out.pos, false, DOCK.speed.roadOut);
+    const leg = this.outLeg(geo, out);
     m.geo = geo;
     m.sim = sim;
     m.phase = 'join';
@@ -591,23 +716,35 @@ export class Docks {
 
   /** Машина в потоке на манёвре — там, где она на нём (поток держит её на месте: holdAfter). */
   private pose(m: Move): void {
-    if (m.sim) poseSim(m.sim, m.run, m.blink);
+    const body = this.bodies.get(m.id);
+    const { c, h, th } = runPose(m.run);
+    const nose = add(c, scale(h, m.geo.L / 2));
+    const hitch = body && hitchOf(body.body);
+    if (body && hitch) {
+      const joint = jointOf(nose, h, m.geo.L, hitch);
+      const length = m.geo.L * hitch.tail;
+      body.trail = th ? sub(joint, scale(th, length)) : follow(joint, h, body.trail, length);
+    }
+    if (m.sim) {
+      poseSim(m.sim, m.run, m.blink);
+      if (body?.trail) m.sim.trail = { ...body.trail };
+    }
   }
 
   /**
    * Где грузовик id во дворе (не в потоке): нос и курс — на манёвре или у рампы; в потоке (кузов над полосой) или не
    * во дворе — null.
    */
-  poseOf(id: number): { pos: Vec; dir: Vec } | null {
+  poseOf(id: number): { pos: Vec; dir: Vec; trail?: Vec } | null {
     const m = this.moves.get(id);
     if (m) {
       if (m.sim) return null;
       const { c, h } = runPose(m.run);
-      return { pos: add(c, scale(h, m.geo.L / 2)), dir: h };
+      return { pos: add(c, scale(h, m.geo.L / 2)), dir: h, trail: this.bodies.get(id)?.trail };
     }
     const geo = this.parked.get(id);
     if (!geo) return null;
-    return { pos: add(geo.ramp.c, scale(geo.ramp.h, geo.L / 2)), dir: geo.ramp.h };
+    return { pos: add(geo.ramp.c, scale(geo.ramp.h, geo.L / 2)), dir: geo.ramp.h, trail: this.bodies.get(id)?.trail };
   }
 
   /** Грузовики во дворах (не в потоке): id. */

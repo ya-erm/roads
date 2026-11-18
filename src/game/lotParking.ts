@@ -10,12 +10,14 @@ import { stallKey } from './shopParking';
 import type { Driveway } from '../world/houseAccess';
 import { dockDriveway } from '../world/shopLots';
 import { yardLotOf, yardSpots } from '../world/yardLots';
+import { planLotExit, type LotExitPlan } from './lotExit';
+import type { Leg } from './lotMoves';
 
 /**
  * Площадки-стоянки в игре (docs/PARKING.md, этап 3; раскладка — world/parkingLots.ts): кто где стоит, ворота, заезд и
  * выезд, счёт за месяц. Маленькая площадка (до LOT.big мест) — въезд — место манёвра у Garages (CarSpot, open — ворот на
  * деле нет): с полосы через тротуар и дальше по проездам до места, на виду (route; место — за машиной, когда она
- * сворачивает к въезду, hold), выезд — тем же путём задним ходом до бордюра; одна машина во въезде за раз. Большая — ворота
+ * сворачивает к въезду, hold), выезд — с разворотом внутри передом; в тесноте — задним ходом до ближней полосы. Большая — ворота
  * примкнуты к дорогам тупиком-выездом (ParkingLot.nodes): машина едет к узлу ворот через перекрёсток (очереди и повороты —
  * логика узлов), у узла встаёт на место; выезжает — встаёт в поток у узла.
  *
@@ -92,6 +94,7 @@ export class LotParking {
   version = 0;
   /** Гости у цели: площадка → место → ключ машины. */
   private parked = new Map<number, Map<number, number>>();
+  private external = new Map<number, Map<number, number>>();
   /** Места ночёвки машин парка: площадка → место → ключ машины (по городу — кто назначил). */
   private homes = new Map<number, Map<number, number>>();
   private homesOf = new Map<number, { lot: number; stall: number; car: number }[]>();
@@ -102,6 +105,8 @@ export class LotParking {
    * занято (в счёте и сохранении — с park, когда встала).
    */
   private held = new Map<number, Map<number, number>>();
+  private departing = new Map<number, number>();
+  private exitPlans = new WeakMap<ParkingLot, Map<string, LotExitPlan | null>>();
   /** Едут к узлу ворот большой площадки: id машины → площадка и крючки. */
   private bigHoming = new Map<number, { lot: number; hooks: LotHooks }>();
   readonly exits: Exit[] = [];
@@ -154,6 +159,7 @@ export class LotParking {
         this.mapOf(this.parked, e.lot).set(e.ls, e.car);
       }
     }
+    for (const [id, places] of this.external) if (this.byId.has(id)) for (const [k, car] of places) this.mapOf(this.parked, id).set(k, car);
     this.version++;
   }
 
@@ -201,6 +207,37 @@ export class LotParking {
     const gate = lot?.gates[-spot.key - 1 - lot.id * 64 - GATE_KEY];
     if (!lot || !gate || !lotLayout(lot).stalls[stall]) return null;
     return lotRoute(lot, gate.x, stall, this.host.car.length);
+  }
+
+  /** Пока машина разворачивается, другие не въезжают в её проезды и не занимают заметённые свободные места. */
+  exiting(lot: number, car?: number): boolean {
+    const owner = this.departing.get(lot);
+    return owner !== undefined && owner !== car;
+  }
+
+  exit(spot: CarSpot, stall: number, car: number): { legs: Leg[]; release(): void } | null {
+    const lot = this.lotOfSpot(spot.key);
+    const gate = lot?.gates[-spot.key - 1 - lot.id * 64 - GATE_KEY];
+    if (!lot || !gate || this.exiting(lot.id, car)) return null;
+    const occupied = lotLayout(lot).stalls.map((_, k) => k !== stall && (this.occupied(lot.id, k) || this.held.get(lot.id)?.has(k) === true));
+    const sig = `${JSON.stringify(lot.fp)}:${gate.x}:${stall}:${occupied.map(Number).join('')}`;
+    let cache = this.exitPlans.get(lot);
+    if (!cache) this.exitPlans.set(lot, cache = new Map());
+    if (!cache.has(sig)) {
+      if (cache.size > 32) cache.clear();
+      cache.set(sig, planLotExit(lot, gate.x, stall, spot.curbSide, (k) => occupied[k], this.host.car.length, this.host.car.width));
+    }
+    const plan = cache.get(sig);
+    if (!plan) return null;
+    this.departing.set(lot.id, car);
+    for (const k of plan.swept) this.hold(lot.id, k, car);
+    return {
+      legs: plan.legs,
+      release: () => {
+        if (this.departing.get(lot.id) === car) this.departing.delete(lot.id);
+        for (const k of plan.swept) this.release(lot.id, k, car);
+      },
+    };
   }
 
   /** Ворота маленькой площадки, куда можно въехать (или выехать): по порядку — сперва в обе стороны. */
@@ -289,6 +326,7 @@ export class LotParking {
 
   /** Ближнее к точке p свободное для гостя место; нет — −1. */
   pick(lot: ParkingLot, p: Vec): number {
+    if (this.exiting(lot.id)) return -1;
     const stalls = lotLayout(lot).stalls;
     let best = -1;
     for (let i = 0; i < stalls.length; i++) {
@@ -299,7 +337,8 @@ export class LotParking {
   }
 
   /** Гость car встал на место stall (TownCar.lot, ls). */
-  park(lot: number, stall: number, car: number): void {
+  park(lot: number, stall: number, car: number, external = false): void {
+    if (external) this.mapOf(this.external, lot).set(stall, car);
     this.release(lot, stall, car);
     this.mapOf(this.parked, lot).set(stall, car);
   }
@@ -318,6 +357,8 @@ export class LotParking {
   unpark(lot: number, stall: number, car?: number): void {
     const m = this.parked.get(lot);
     if (m && (car === undefined || m.get(stall) === car)) m.delete(stall);
+    const ext = this.external.get(lot);
+    if (ext && (car === undefined || ext.get(stall) === car)) ext.delete(stall);
   }
 
   /** Машина в потоке едет на площадку (место в счёте свободных — за ней) или уже нет. */
@@ -328,8 +369,11 @@ export class LotParking {
 
   /** Кто стоит у целей — заново (после загрузки). */
   clear(): void {
+    this.external.clear();
     this.parked.clear();
     this.held.clear();
+    this.departing.clear();
+    this.exitPlans = new WeakMap();
     this.incoming.clear();
     this.incomingYard.clear();
     this.yardSpots.clear();

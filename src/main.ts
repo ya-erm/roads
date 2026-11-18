@@ -13,6 +13,13 @@ import { Renderer } from './render/renderer';
 import { ARCHETYPE_LIST } from './scenario/content';
 import type { ScenarioSettings } from './scenario/types';
 import { testScene } from './testpages';
+import { buildParkingScene, type ParkingScene } from './testpages/parking';
+import { installParkingControls } from './testpages/parkingControls';
+import { installVehicleTool } from './testpages/vehicleTool';
+import { installBuildingTool } from './testpages/buildingTool';
+import { installTruckControls } from './testpages/truckControls';
+import type { TruckScene } from './testpages/truckAccess';
+import { SIM_DT } from './config';
 import { savedArea } from './bugreport/spot';
 import { installBugReport } from './ui/bugReport';
 import { BugSpotFrame } from './ui/bugSpotFrame';
@@ -40,7 +47,7 @@ function quickScenario(): ScenarioSettings | undefined {
 
 // Тестовая страница (/test/bus): вместо сохранения — заранее собранная сцена, перезагрузка собирает её заново.
 // Автосохранения там нет, а сохранить вручную можно только в её собственный слот (см. persist).
-const scene = testScene(location.pathname);
+let scene = testScene(location.pathname);
 // Есть сохранение — продолжаем его. Новая игра начинается только по кнопке.
 const saved = scene ? null : loadSave();
 const quick = quickScenario();
@@ -56,7 +63,7 @@ if (saved && startParams.some((p) => params.has(p))) {
   history.replaceState(null, '', `${location.pathname}${params.size ? `?${params}` : ''}`);
 }
 // Сохранённая партия (и сцена) продолжается сразу, новая ждёт кнопку «Начать» в окне правил или в брифинге сценария.
-game.speed = saved || scene ? 1 : 0;
+game.speed = scene ? game.speed : saved ? 1 : 0;
 
 const camera = new Camera();
 const renderer = new Renderer(canvas, camera);
@@ -259,6 +266,43 @@ if (saved?.view) {
   camera.touched = true;
 }
 hookAutosave();
+function focusParking(index: number): void {
+  if (!scene || !('cases' in scene)) return;
+  const view = (scene as ParkingScene).cases[index].view;
+  camera.zoom = Math.max(camera.minZoom, Math.min(camera.maxZoom, (camera.width - 60) / (view.x1 - view.x0), (camera.height - 390) / (view.y1 - view.y0)));
+  camera.x = (view.x0 + view.x1) / 2;
+  camera.y = (view.y0 + view.y1) / 2 - 45 / camera.zoom;
+  camera.touched = true;
+}
+const parkingControls = scene && 'cases' in scene ? installParkingControls({
+  current: () => scene && game === scene.game && 'cases' in scene ? scene as ParkingScene : null,
+  focus: focusParking,
+  overview: () => {
+    scene = buildParkingScene(true);
+    game = scene.game;
+    restart();
+  },
+  step: () => {
+    game.speed = 1;
+    game.settleMonth();
+    game.update(SIM_DT);
+    scene?.tick?.();
+    game.speed = 0;
+  },
+}) : null;
+const vehicleTool = scene ? installVehicleTool({ game: () => game, enabled: () => !!scene && game === scene.game, controller, camera, canvas }) : null;
+const buildingTool = scene ? installBuildingTool({ game: () => game, enabled: () => !!scene && game === scene.game, controller, camera, canvas }) : null;
+const truckControls = scene && 'truckCases' in scene ? installTruckControls({
+  current: () => scene && game === scene.game && 'truckCases' in scene ? scene as TruckScene : null,
+  focus: (index) => {
+    if (!scene || !('truckCases' in scene)) return;
+    const view = (scene as TruckScene).truckCases[index].view;
+    camera.zoom = Math.max(camera.minZoom, Math.min(camera.maxZoom, (camera.width - 60) / (view.x1 - view.x0), (camera.height - 340) / (view.y1 - view.y0)));
+    camera.x = (view.x0 + view.x1) / 2;
+    camera.y = (view.y0 + view.y1) / 2 - 30 / camera.zoom;
+    camera.touched = true;
+  },
+}) : null;
 if (!saved && !scene) {
   persist();
   // Первый запуск: стартовый экран, «Начать» на нём открывает «Новую игру» (сценарий — по умолчанию).
@@ -288,10 +332,14 @@ function frame(now: number): void {
   last = now;
   controller.update(dt);
   game.update(dt);
+  if (scene && game === scene.game && game.speed > 0) scene.tick?.();
   // Подпись вида — рисуется сразу: камера, партия, инструмент, выбор и курсор (их меняют и не вводом — из панелей
   // и скриптов). Подпись состояния — не чаще MAX_FPS: ход времени, сеть, деньги, линии, станции, парк, всплывающие суммы.
   const view = [
     controller.tool,
+    controller.testVehicleSpec,
+    controller.testBuildingPreview,
+    controller.pending,
     controller.selection,
     controller.selectedLine,
     controller.highlight,
@@ -318,6 +366,10 @@ function frame(now: number): void {
   const live = game.speed > 0 || game.monthClosing || controller.timed;
   if (gate.need(now, view, state, live ? 'live' : renderer.motion)) renderer.draw(game, controller.overlay());
   hud.update(dt);
+  parkingControls?.update();
+  vehicleTool?.update();
+  buildingTool?.update();
+  truckControls?.update();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

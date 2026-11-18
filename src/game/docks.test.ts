@@ -100,7 +100,7 @@ describe('Получатели грузов в партии', { timeout: 240_000
     expect(game.dockFor(house)).toBeNull();
   });
 
-  it('грузовик заезжает во двор передом, встаёт задом к рампе, выгружается и выезжает передом в просвет', () => {
+  it('грузовик заезжает передом к боковой рампе, выгружается и выезжает задом в просвет', () => {
     const game = freshGame(RETAIL_WORLD);
     const { b, sa, sb, v } = shopLine(game);
     v.cargo = 'food';
@@ -108,7 +108,7 @@ describe('Получатели грузов в партии', { timeout: 240_000
     v.loadedAt = sa.id;
     v.fromStore = true;
     const geo = game.docks.geoOf(b, TRUCK.length, TRUCK.width)!;
-    expect(geo.yard.kind).toBe('turn');
+    expect(geo.yard.kind).toBe('back');
     // Пока сворачивает с полосы — в потоке и стоит (его держит манёвр); дальше — во дворе, без машины в потоке.
     let turning = false;
     expect(
@@ -139,7 +139,7 @@ describe('Получатели грузов в партии', { timeout: 240_000
       }),
     ).toBe(true);
     // Начинает выезд носом к улице (не задом).
-    expect(dot(joinDir!, geo.d.dir)).toBeLessThan(-0.6);
+    expect(dot(joinDir!, geo.d.dir)).toBeGreaterThan(0.6);
     expect(v.stop).toBe(0);
     const sim = game.fleetSim(v)!;
     // Граф движения мог смениться (город вырос в конце месяца) — полоса выезда по нынешнему графу.
@@ -168,15 +168,18 @@ describe('Получатели грузов в партии', { timeout: 240_000
     expect(
       until(game, 200, () => {
         const sim = game.fleetSim(v);
-        if (sim && game.docks.homingOf(sim.id) === v.id && sim.holdDist !== undefined) {
+        // Выезд с предыдущей остановки (в том числе переключение после заднего хода) — ещё не подъезд к следующей.
+        if (sim && v.stop === 1 && !game.docks.inYard(v.id) && game.docks.homingOf(sim.id) === v.id && sim.holdDist !== undefined) {
           if (sim.holdV !== undefined) vTurn = sim.holdV;
-          if (sim.holdDist < 20) minApproach = Math.min(minApproach, sim.v);
-          if (sim.v < 0.3) stoppedFor += 0.1;
+          if (sim.holdDist < 20) {
+            minApproach = Math.min(minApproach, sim.v);
+            if (sim.v < 0.3) stoppedFor += 0.1;
+          }
           if (stoppedFor > 2) lotBusy = false;
         }
         const m = moves.get(v.id);
-        if (m?.kind === 'in' && startV < 0) startV = m.run.v;
-        return game.docks.inYard(v.id) && !game.docks.entering(v.id);
+        if (v.stop === 1 && m?.kind === 'in' && startV < 0) startV = m.run.v;
+        return v.stop === 1 && game.docks.inYard(v.id) && !game.docks.entering(v.id);
       }),
     ).toBe(true);
     expect(vTurn).toBeGreaterThan(3);
@@ -386,7 +389,7 @@ describe('Получатели грузов в партии', { timeout: 240_000
     long.cargo = 'food';
     long.amount = 10;
     expect(inner(game).nextStop(long, line)).toBeNull();
-    expect(line.problem).toMatch(/не влезет/);
+    expect(line.problem).toMatch(/не влезет|не подъехать/);
   });
 
   it('пока грузовик на манёвре во дворе, машины покупателей на стоянку не заезжают', () => {

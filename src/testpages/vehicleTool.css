@@ -1,0 +1,14 @@
+.test-vehicles { position: fixed; z-index: 16; left: 50%; transform: translateX(-50%); bottom: 100px; width: min(820px, calc(100vw - 28px)); padding: 12px; font-size: 12px; }
+.test-vehicles[hidden] { display: none; }
+.test-vehicles header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.test-vehicle-models { display: flex; gap: 5px; overflow-x: auto; }
+.test-vehicle-models button { flex: 1 0 92px; }
+.test-vehicle-models button { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 62px; gap: 5px; font-size: 11px; }
+.test-vehicle-models button { border: 2px solid transparent; }
+.test-vehicle-models [aria-pressed="true"] { border-color: var(--accent); background: #dbeaff; }
+.test-vehicle-models button:focus-visible { outline-offset: -5px; }
+.test-vehicle-toolbar > .tool:first-child svg { fill: initial; stroke: initial; width: 40px; }
+.test-vehicles p, .test-vehicles output { display: block; margin: 9px 0 0; color: var(--muted); }
+body[data-test-vehicle] #game { cursor: copy !important; }
+.test-vehicle-toolbar { max-width: calc(100vw - 28px); overflow-x: auto; }
+.test-vehicle-toolbar .tool { flex-shrink: 0; }

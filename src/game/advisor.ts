@@ -762,7 +762,7 @@ function semiAtShop(game: Game, line: Line): { st: Station; L: number; max: numb
     const st = game.stations.get(sid);
     if (!st || st.kind !== 'dock' || game.isDepotDock(st)) continue;
     const b = game.dockBuilding(st);
-    if (b && L > maxTruck(b) + 1e-6) return { st, L, max: maxTruck(b) };
+    if (b && (L > maxTruck(b) + 1e-6 || !game.docks.reachable(b, L))) return { st, L, max: [21, 15, 12].find((length) => length <= maxTruck(b) && game.docks.reachable(b, length)) ?? 0 };
   }
   return null;
 }

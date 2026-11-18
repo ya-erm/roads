@@ -2,8 +2,10 @@ import type { Game } from '../game/game';
 import { buildBusScene } from './bus';
 import { buildConstructionScene } from './construction';
 import { buildJunctionsScene } from './junctions';
+import { buildParkingScene } from './parking';
 import { testPageName } from './route';
 import { buildVehiclesScene } from './vehicles';
+import { buildTruckAccessScene } from './truckAccess';
 
 /** Заранее собранная сцена тестовой страницы. */
 export interface TestScene {
@@ -14,6 +16,8 @@ export interface TestScene {
   lines: Record<string, number>;
   /** Что в сцене не построилось: участок и причина. */
   errors: string[];
+  /** Решения сцены после такта игры: например, повторный выезд машин со стоянки. */
+  tick?(): void;
 }
 
 const PAGES: Record<string, () => TestScene> = {
@@ -21,6 +25,8 @@ const PAGES: Record<string, () => TestScene> = {
   vehicles: buildVehiclesScene,
   junctions: buildJunctionsScene,
   construction: buildConstructionScene,
+  parking: () => buildParkingScene(true),
+  trucks: buildTruckAccessScene,
 };
 
 /** Сцена тестовой страницы по адресу (/test/bus); обычная игра — null. */

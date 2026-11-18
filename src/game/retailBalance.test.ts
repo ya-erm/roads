@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import type { Station, Town, TownBuilding } from '../world/entities';
-import { maxTruck, receiverOf, RETAIL, stockCap } from '../world/retail';
+import { receiverOf, RETAIL, stockCap } from '../world/retail';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { townNeed } from '../world/townSupply';
 import { formOf } from '../world/townForms';
@@ -28,7 +28,7 @@ function foodTown(game: Game, min = 3, maxPop = Infinity): { town: Town; shops: 
       (town.receivers ?? [])
         .filter((r) => !r.depot)
         .map((r) => town.buildings.find((b) => b.id === r.b)!)
-        .filter((b) => b && pred(b) && game.docks.reachable(b, maxTruck(b)));
+        .filter((b) => b && pred(b) && game.docks.reachable(b, 12));
     const shops = of((b) => receiverOf(town, b.id)!.cargo.includes('food'));
     const src = of((b) => !receiverOf(town, b.id)!.cargo.includes('food') && formOf(b) !== 'fuel')[0];
     if (shops.length >= min && src) return { town, shops, src };
@@ -186,7 +186,7 @@ describe('Развозка по магазинам: баланс', { timeout: 24
       if (!food.length) continue;
       const reach = food.filter((r) => {
         const b = town.buildings.find((x) => x.id === r.b)!;
-        return game.docks.reachable(b, maxTruck(b));
+        return game.docks.reachable(b, 12);
       });
       // Хоть один досягаем — недосягаемых среди получателей нет.
       if (reach.length) expect(reach.length).toBe(food.length);

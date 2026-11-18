@@ -118,6 +118,7 @@ function stayOf(u: number): number {
 
 export class ShopParking {
   private lots = new Map<number, Lot | null>();
+  private reserved = new Set<number>();
   private acc = 0;
 
   constructor(
@@ -151,7 +152,21 @@ export class ShopParking {
 
   /** Место свободно: на нём не стоит машина и к нему никто не едет и не выезжает с него; двор не занят грузовиком. */
   private free(town: Town, lot: Lot, k: number): boolean {
-    return !this.garages.isBusy(lot.spots[k].key) && !town.shopParked?.some((c) => c.b === lot.b.id && c.k === k) && !this.host.yardBusy?.(lot.b.id);
+    return !this.reserved.has(lot.spots[k].key) && !this.garages.isBusy(lot.spots[k].key) && !town.shopParked?.some((c) => c.b === lot.b.id && c.k === k) && !this.host.yardBusy?.(lot.b.id);
+  }
+
+  freeSpot(town: Town, b: TownBuilding, k: number): boolean {
+    const lot = this.lotOf(b);
+    return !!lot?.spots[k] && this.free(town, lot, k);
+  }
+
+  reserveSpot(key: number): void { this.reserved.add(key); }
+  releaseSpot(key: number): void { this.reserved.delete(key); }
+
+  canDepartSpot(b: TownBuilding, spot: CarSpot): boolean {
+    const lot = this.lotOf(b);
+    const k = lot?.spots.indexOf(spot) ?? -1;
+    return !!lot && k >= 0 && !this.garages.isBusy(spot.key) && !this.neighbourBusy(lot, k) && !this.host.yardBusy?.(b.id);
   }
 
   /** У дома b машина покупателя на манёвре — заезжает на место или выезжает с него (двор занят для грузовика). */
@@ -326,7 +341,7 @@ export class ShopParking {
         if (!spot || this.garages.isBusy(spot.key)) continue;
         const p = spot.spot;
         if (p.x < box[0] - 10 || p.x > box[2] + 10 || p.y < box[1] - 10 || p.y > box[3] + 10) continue;
-        out.push({ look: { ...spec, color: car.color, pos: add(p, scale(spot.d.dir, spec.length / 2)), dir: spot.d.dir } });
+        out.push({ parkedCar: car.car !== undefined ? `car:${car.car}` : `shop:${car.b}:${car.k}`, look: { ...spec, color: car.color, pos: add(p, scale(spot.d.dir, spec.length / 2)), dir: spot.d.dir } });
       }
     }
     return out;

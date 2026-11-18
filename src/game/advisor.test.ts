@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ECONOMY, MONTH_LENGTH, STATION } from '../config';
 import { dist } from '../core/vec';
 import type { Station, Town, TownBuilding } from '../world/entities';
-import { maxTruck, receiverOf } from '../world/retail';
+import { receiverOf } from '../world/retail';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { formOf } from '../world/townForms';
 import { advise, adviceOf, QUEUE_SECONDS, STUCK_SECONDS } from './advisor';
@@ -210,7 +210,7 @@ function foodShop(game: Game, town: Town): TownBuilding {
   return (town.receivers ?? [])
     .filter((r) => !r.depot && r.cargo.includes('food'))
     .map((r) => town.buildings.find((b) => b.id === r.b)!)
-    .find((b) => b && formOf(b) !== 'market' && game.docks.reachable(b, maxTruck(b)))!;
+    .find((b) => b && formOf(b) !== 'market' && game.docks.reachable(b, 15) && !game.docks.reachable(b, 21))!;
 }
 
 describe('Советник: получатели грузов (docs/RETAIL.md)', () => {

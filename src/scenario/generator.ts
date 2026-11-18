@@ -15,7 +15,7 @@ import { buildCost, freeDeposits, harmClass, isRaw } from '../world/enterprise';
 import { TOWN_NEED } from '../world/entities';
 import { townNeed } from '../world/townSupply';
 import type { Industry, Town, TownBuilding } from '../world/entities';
-import { maxTruck, type Receiver, receiverUse, stockAt, stockCap } from '../world/retail';
+import { type Receiver, receiverUse, stockAt, stockCap } from '../world/retail';
 import { mapDims, mapScaleOf, TOWN_RANGE, type WorldSettings } from '../world/settings';
 import {
   bigTowns,
@@ -481,7 +481,7 @@ function shopsGoal(sc: Scenario, freight: FreightPlan, term: Term): void {
     const shops = (t.receivers ?? [])
       .filter((r) => !r.depot && r.cargo.includes(cargo))
       .map((r) => ({ r, b: t.buildings.find((x) => x.id === r.b) }))
-      .filter((x): x is { r: Receiver; b: TownBuilding } => !!x.b && game.docks.reachable(x.b, maxTruck(x.b)))
+      .filter((x): x is { r: Receiver; b: TownBuilding } => !!x.b && game.docks.reachable(x.b, 12))
       .sort((a, b) => dist(a.b.fp.center, plant.fp.center) - dist(b.b.fp.center, plant.fp.center))
       .slice(0, 2);
     if (shops.length < 2) continue;

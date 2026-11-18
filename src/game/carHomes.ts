@@ -2,11 +2,14 @@ import { hash } from '../core/math';
 import { add, dist, scale, type Vec } from '../core/vec';
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
 import type { ShopCar, Town, TownBuilding, TownCar } from '../world/entities';
-import { drivewayOf, type Driveway } from '../world/houseAccess';
+import { drivewaysOf, type Driveway } from '../world/houseAccess';
 import { flatsOf, formOf } from '../world/townForms';
 import { CARS_PER_FLAT, yardLotOf, yardSpots } from '../world/yardLots';
 import { carSpot, GARAGE_TRIPS, type CarSpot, type GarageLook, type Garages, type GarageSlot, type MoveHooks } from './garages';
 import { stallKey, type FleetBack, type FleetVisit } from './shopParking';
+import { pocketExit } from './pocketExit';
+import { homeExit } from './homeExit';
+import { garageBoxes, type GarageBoxAccess } from './garageBoxes';
 import type { CurbStall } from '../lanes/curb';
 import type { GLink } from '../lanes/graph';
 import { CURB_TRIPS, type CurbHooks, type CurbParking } from './curbParking';
@@ -72,6 +75,7 @@ export type PlaceKind = 'garage' | 'pad' | 'apron' | 'stall' | 'yard' | 'box' | 
 
 /** Место ночёвки машины. */
 export interface Place {
+  box?: GarageBoxAccess;
   /**
    * Место на площадке-стоянке (kind 'lot', game/lotParking.ts): какая и номер места. Въезд и выезд — через ворота, как во
    * двор (spot — место манёвра у ворот).
@@ -275,15 +279,14 @@ export class CarHomes {
     const homes = town.buildings.filter((b) => b.kind === 'res');
     const byId = new Map(town.buildings.map((b) => [b.id, b]));
     // Гаражные боксы города: ворота (одно место манёвра на все боксы) и сколько боксов свободно.
-    const boxes: { b: TownBuilding; spot: CarSpot; free: number }[] = [];
+    const boxes: { b: TownBuilding; spaces: GarageBoxAccess[]; free: number }[] = [];
     const lots: Fleet['lots'] = [];
     for (const b of town.buildings) {
       if (formOf(b) !== 'garages') continue;
-      const lot = yardLotOf(b);
-      const ys = lot && yardSpots(b, lot, L);
-      if (!ys?.gate || !ys.spots.length) continue;
-      boxes.push({ b, spot: carSpot(stallKey(b.id, GATE), b, ys.gate, false, '#888888', L), free: ys.spots.length });
-      lots.push({ b, total: ys.spots.length });
+      const spaces = garageBoxes(b);
+      if (!spaces.length) continue;
+      boxes.push({ b, spaces, free: spaces.length });
+      lots.push({ b, total: spaces.length });
     }
     // Полосы стоянки: сколько мест на каждой и сколько из них уже чьи-то места ночёвки (этого города и прочих).
     const curb = this.curb;
@@ -357,15 +360,19 @@ export class CarHomes {
       const car = (k: number, place: Place | null) => list.push({ key: carKey(b.id, k), home: b, color: colorOf(carKey(b.id, k)), place });
       const form = formOf(b);
       if (form === 'cottage' || form === 'dacha') {
-        const d = drivewayOf(b);
-        if (d) {
-          const main: Place = { spot: carSpot(b.id, b, d, !d.garage, colorOf(carKey(b.id, 0)), L), kind: d.garage ? 'garage' : 'pad', look: d.garage ? null : lookAt(d, L), near: [], at: b };
-          car(0, main);
-          if (d.garage && hash(b.id, 18) < GARAGE_TRIPS.secondCar) {
+        const drives = drivewaysOf(b);
+        const keys = drives.map((_, k) => k ? stallKey(b.id, k) : b.id);
+        for (const [k, d] of drives.entries()) {
+          const main: Place = { spot: carSpot(keys[k], b, d, !d.garage, colorOf(carKey(b.id, k)), L), kind: d.garage ? 'garage' : 'pad', look: d.garage ? null : lookAt(d, L), near: keys.filter((key) => key !== keys[k]), at: b };
+          main.spot.groupKeys = main.near;
+          car(k, main);
+          if (drives.length === 1 && b.homeSpaces === undefined && d.garage && hash(b.id, 18) < GARAGE_TRIPS.secondCar) {
             // Вторая — перед воротами: пока она дома, первой из гаража не выехать (и в гараж не въехать).
             const apron = carSpot(stallKey(b.id, APRON), b, d, true, colorOf(carKey(b.id, 1)), L);
+            apron.groupKeys = [b.id];
             car(1, { spot: apron, kind: 'apron', look: lookAt(d, L), near: [b.id], at: b });
             main.near = [apron.key];
+            main.spot.groupKeys = main.near;
           }
         }
       } else {
@@ -401,8 +408,9 @@ export class CarHomes {
               if (x.free > 0 && dd < bestD) [best, bestD] = [x, dd];
             }
             if (best) {
+              const box = best.spaces[best.spaces.length - best.free];
               best.free--;
-              place = { spot: best.spot, kind: 'box', look: null, near: [], at: best.b };
+              place = { box, spot: box.spot, kind: 'box', look: null, near: best.spaces.filter((s) => s !== box).map((s) => s.spot.key), at: best.b };
             }
           }
           car(k, place);
@@ -545,6 +553,29 @@ export class CarHomes {
     return this.moving.has(key);
   }
 
+  /** Ручная поездка использует тот же учёт машины, что и поездки жителей. */
+  manualMoving(key: number, moving: boolean): void {
+    if (moving) this.moving.add(key);
+    else this.moving.delete(key);
+  }
+
+  manualJoined(town: Town, car: FleetCar, dest: TownBuilding, sim: Vehicle): void {
+    this.goAway(town, { car: car.key, at: dest.id, until: this.host.time + 180 });
+    this.driving.set(sim.id, { car: car.key, town, home: false });
+  }
+
+  manualPark(town: Town, car: FleetCar, dest: TownBuilding, place: Partial<TownCar>, home = false): void {
+    if (home) this.settle(town, car.key);
+    else {
+      this.goAway(town, { car: car.key, at: dest.id, until: Infinity, ...place });
+      this.moving.delete(car.key);
+    }
+  }
+
+  canDepart(town: Town, car: FleetCar): boolean {
+    return this.canLeave(town, car);
+  }
+
   /** Запись машины не дома (Town.cars); нет — дома или в пути от дома. */
   awayOf(town: Town, key: number): TownCar | undefined {
     return this.away(town).byCar.get(key);
@@ -620,12 +651,14 @@ export class CarHomes {
   /** Место занято чужим манёвром (своё, соседнее; гараж — пока машина перед воротами дома). */
   private blocked(town: Town, car: FleetCar): boolean {
     const p = car.place!;
+    if (p.lot && this.lots?.exiting(p.lot.id, car.key)) return true;
     // Место на полосе стоянки: там манёвр или к нему кто-то едет.
     if (p.curb) return !this.curb || this.curb.isTaken(p.curb.key);
     if (this.garages.isBusy(p.spot.key) || p.near.some((k) => this.garages.isBusy(k))) return true;
     if (p.kind !== 'garage') return false;
     const apron = carKey(car.home.id, 1);
-    return this.fleet(town).byKey.has(apron) && this.isHome(town, apron);
+    const front = this.fleet(town).byKey.get(apron);
+    return front?.place?.kind === 'apron' && p.near.includes(front.place.spot.key) && this.isHome(town, apron);
   }
 
   /** Можно ли сейчас машине со своего места в поток: дома, место не занято, к полосе у него можно подъехать. */
@@ -744,30 +777,41 @@ export class CarHomes {
    * (Garages.leave). opt — к стоянке магазина (target, endLink, to, then — как у Garages.leave), иначе — к узлу dest.
    * stay — сколько простоит у цели (u — хеш поездки).
    */
-  depart(trip: Extract<FleetTrip, { kind: 'out' }>, dest: TownBuilding, opt: { target?: number; endLink?: number; to?: CarSpot; then?: (sim: Vehicle) => void } = {}): void {
+  depart(trip: Extract<FleetTrip, { kind: 'out' }>, dest: TownBuilding, opt: { target?: number; endLink?: number; to?: CarSpot; then?: (sim: Vehicle) => void; onStayed?: () => void; parked?: { pos: Vec; dir: Vec }[] } = {}): void {
     const { car, town } = trip;
     const n = town.carTrips ?? 0;
     const stay = stayAt(dest, hash(tripSeed(this.host.seed, town.id, n), 5));
+    const homeLot = car.place?.lot;
+    const exit = homeLot ? this.lots?.exit(car.place!.spot, homeLot.stall, car.key) : null;
+    const neighbors = this.fleet(town).cars.filter((c) => c !== car && c.place?.at === car.place?.at);
+    const parked = [...neighbors.filter((c) => this.isHome(town, c.key) && c.place!.look).map((c) => c.place!.look!), ...opt.parked ?? []];
+    const pocket = car.place?.kind === 'stall' && !neighbors.some((c) => this.garages.isBusy(c.place!.spot.key))
+      ? pocketExit(car.place!.spot, parked, this.host.car.length, this.host.car.width)
+      : null;
+    const pad = car.place?.kind === 'pad' || car.place?.kind === 'apron' ? homeExit(car.place.spot, this.host.car.length, this.host.car.width, parked) : null;
     this.moving.add(car.key);
     const hooks: MoveHooks = {
       joined: (sim) => {
+        exit?.release();
         this.goAway(town, { car: car.key, at: dest.id, until: this.host.time + stay });
         this.driving.set(sim.id, { car: car.key, town, home: false });
       },
-      stayed: () => this.moving.delete(car.key),
+      stayed: () => { exit?.release(); this.moving.delete(car.key); opt.onStayed?.(); },
+      finished: () => exit?.release(),
     };
-    const { target, ...rest } = opt;
+    const { target, parked: _parked, onStayed: _onStayed, ...rest } = opt;
     const st = car.place!.curb;
     // Место ночёвки на полосе стоянки — выезд передом от бордюра (CurbParking.leave).
     const curbHooks: CurbHooks = { joined: hooks.joined, stayed: hooks.stayed };
     if (st && this.curb) {
       // Место забронировал кто-то другой — не выезжает (осталась дома).
       if (!this.curb.leave(st, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks: curbHooks, endLink: opt.endLink, then: opt.then, car: car.key })) hooks.stayed?.();
-    } else this.garages.leave(car.place!.spot, town, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks, ...rest, via: this.lotRoute(car) });
+    } else this.garages.leave(car.place!.spot, town, target ?? dest.anchor, { from: car.home, to: dest }, { color: car.color, hooks, ...rest, via: this.lotRoute(car), exit: car.place?.box?.exit ?? exit?.legs ?? pocket ?? pad ?? (car.place?.kind === 'pad' || car.place?.kind === 'apron' ? false : null), locks: pocket || pad ? neighbors.flatMap((c) => c.place ? [c.place.spot.key] : []) : undefined });
   }
 
   /** Машина ночует на маленькой площадке: путь по ней от бордюра у ворот до своего места (въезд и выезд — на виду). */
   private lotRoute(car: FleetCar): Vec[] | null {
+    if (car.place?.box) return car.place.box.via;
     const l = car.place?.lot;
     return l && this.lots ? this.lots.route(car.place!.spot, l.stall) : null;
   }
@@ -865,6 +909,7 @@ export class CarHomes {
   /** Можно ли сейчас выехать с площадки: ворота с выездом свободны (большая — у узла ворот). */
   private canLeaveLot(ref: LotRef): boolean {
     const lots = this.lots!;
+    if (lots.exiting(ref.lot.id)) return false;
     if (lots.big(ref.lot)) return lots.nodesFor(ref.lot, true).length > 0;
     return lots.spotFor(ref.lot, true).some((s) => !this.garages.isBusy(s.key) && !!this.garages.slotOf(s));
   }
@@ -956,8 +1001,11 @@ export class CarHomes {
     if (!way) return false;
     const { link, slot } = way;
     const lot = at.ref.lot;
+    if (lots.exiting(lot.id)) return false;
     const from = trip.from ?? car.home;
+    let exit: ReturnType<typeof lots.exit> = null;
     const joined = (sim: Vehicle) => {
+      exit?.release();
       const e = this.away(town).byCar.get(car.key);
       if (e?.lot !== undefined) {
         lots.unpark(e.lot, e.ls ?? -1, car.key);
@@ -968,7 +1016,7 @@ export class CarHomes {
       }
       this.driving.set(sim.id, { car: car.key, town, home: true });
     };
-    const stayed = () => this.moving.delete(car.key);
+    const stayed = () => { exit?.release(); this.moving.delete(car.key); };
     const then = (sim: Vehicle) => this.homeward(sim, trip, slot ?? undefined);
     if (lots.big(lot)) {
       this.moving.add(car.key);
@@ -979,9 +1027,10 @@ export class CarHomes {
     const gate = lots.spotFor(lot, true).find((s) => !this.garages.isBusy(s.key) && !!this.garages.slotOf(s));
     if (!gate) return false;
     this.moving.add(car.key);
-    // С места — по проездам к воротам на виду (задним ходом, как въезжала).
+    // Разворот внутри площадки и выезд передом; в тесноте — запасной путь задним ходом до ближней полосы.
     const via = lots.route(gate, at.stall);
-    this.garages.leave(gate, town, link.toNode!, { from, to: p.at }, { color: car.color, endLink: link.id, ...(p.curb ? {} : { to: p.spot }), hooks: { joined, stayed }, then, via });
+    exit = lots.exit(gate, at.stall, car.key);
+    this.garages.leave(gate, town, link.toNode!, { from, to: p.at }, { color: car.color, endLink: link.id, ...(p.curb ? {} : { to: p.spot }), hooks: { joined, stayed, finished: () => exit?.release() }, then, via, exit: exit?.legs });
     return true;
   }
 
@@ -1243,11 +1292,13 @@ export class CarHomes {
       if (!f.placed || b[2] < box[0] - pad || b[0] > box[2] + pad || b[3] < box[1] - pad || b[1] > box[3] + pad) continue;
       const a = this.away(town);
       for (const c of f.cars) {
-        const look = c.place?.look;
+        const dir = c.place?.spot.renderGate?.dir ?? c.place?.spot.d.dir;
+        const hidden = !c.place?.look && (c.place?.kind === 'garage' || c.place?.kind === 'box');
+        const look = c.place?.look ?? (hidden && dir ? { pos: add(c.place!.spot.inside, scale(dir, spec.length / 2)), dir } : null);
         if (!look || this.moving.has(c.key) || a.byCar.has(c.key)) continue;
         const p = look.pos;
         if (p.x < box[0] - pad || p.x > box[2] + pad || p.y < box[1] - pad || p.y > box[3] + pad) continue;
-        out.push({ look: { ...spec, color: c.color, pos: p, dir: look.dir } });
+        out.push({ parkedCar: `car:${c.key}`, hidden, look: { ...spec, color: c.color, pos: p, dir: look.dir } });
       }
     }
     // Машины у целей на полосах стоянки (TownCar.curb), кроме тех, что уже выезжают.
@@ -1262,7 +1313,7 @@ export class CarHomes {
           if (!st || !c || curb.moving(st.key)) continue;
           const p = add(st.pos, scale(st.dir, spec.length / 2));
           if (p.x < box[0] - pad || p.x > box[2] + pad || p.y < box[1] - pad || p.y > box[3] + pad) continue;
-          out.push({ look: { ...spec, color: c.color, pos: p, dir: st.dir } });
+          out.push({ parkedCar: `car:${c.key}`, look: { ...spec, color: c.color, pos: p, dir: st.dir } });
         }
       }
     }
@@ -1278,8 +1329,22 @@ export class CarHomes {
           if (!pose || !c) continue;
           const p = pose.nose;
           if (p.x < box[0] - pad || p.x > box[2] + pad || p.y < box[1] - pad || p.y > box[3] + pad) continue;
-          out.push({ look: { ...spec, color: c.color, pos: p, dir: pose.dir } });
+          out.push({ parkedCar: `car:${c.key}`, look: { ...spec, color: c.color, pos: p, dir: pose.dir } });
         }
+      }
+    }
+    // Гости конкретных гаражных боксов: кузов под крышей, но машину можно выбрать через её бокс.
+    for (const town of this.host.towns) {
+      const f = this.fleet(town);
+      for (const e of town.cars ?? []) {
+        if (!e.garage || this.moving.has(e.car)) continue;
+        const b = this.building(e.garage.building);
+        const garage = b && garageBoxes(b)[e.garage.box];
+        const car = f.byKey.get(e.car);
+        if (!garage || !car) continue;
+        const p = add(garage.center, scale(garage.dir, spec.length / 2));
+        if (p.x < box[0] - pad || p.x > box[2] + pad || p.y < box[1] - pad || p.y > box[3] + pad) continue;
+        out.push({ parkedCar: `car:${car.key}`, hidden: true, look: { ...spec, color: car.color, pos: p, dir: garage.dir } });
       }
     }
     return out;

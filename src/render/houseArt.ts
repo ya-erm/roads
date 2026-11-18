@@ -553,8 +553,10 @@ function cottage(a: Art, lot: Lot): void {
     pitched(a, g.x, g.y, g.w, g.h, 2.8, groof, false, 0, a.r(27) < 0.5);
     if (a.pass === 2 && a.lod) {
       a.c.fillStyle = '#5a5f66';
-      a.c.fillRect(g.x + 0.5, g.y - 0.35, g.w - 1, 0.5);
+      const bays = plan.spaces.filter((s) => s.garage);
+      for (const bay of bays) a.c.fillRect(bay.x - g.w / bays.length / 2 + 0.5, g.y - 0.35, g.w / bays.length - 1, 0.5);
     }
+    if (plan.pad) carPad(a, lot, plan.pad);
   } else {
     // Площадка под машину (у дома без гаража) — машину на ней тоже рисует движение.
     if (plan.pad) carPad(a, lot, plan.pad);
@@ -695,17 +697,21 @@ function townhouse(a: Art, lot: Lot): void {
 /** Квартал старого центра: дома по периметру участка (П или замкнутый «колодец»), во дворе — мощение и деревья. */
 function courtyard(a: Art, lot: Lot): void {
   const { b } = lot;
-  // Раскладка — world/yardLots.courtyardPlan: там и арка (ворота двора), и места во дворе.
+  // Раскладка — world/yardLots.courtyardPlan: места перед корпусом у улицы, двор — без автомобильного проезда.
   const p = courtyardPlan(b);
   const { x0, y0, x1, y1, d, closed } = p;
   const roofFlat = a.r(3) < 0.35;
   const z = wallZ(lot.storeys);
   a.patch(x0, y0, x1 - x0, y1 - y0, PAVING, 0.5);
-  // Подъезды — со двора: через арку в лицевом корпусе — проезд от улицы, рядом — дорожка от тротуара.
-  const arch = p.arch.x;
-  curbCut(a, lot, arch, p.arch.w, y0 + d + 2, PAVING);
-  // Двор: дерево, клумба; в просторном — ряд мест у дальнего края (машины на них рисует движение, carHomes.ts).
-  if (p.row) parking(a, p.row);
+  if (p.row) {
+    const walkY = p.row.pad.y + p.row.pad.h;
+    a.patch(x0, walkY, x1 - x0, y0 - walkY, WALK_LOOK.paved.fill);
+    parking(a, p.row);
+    for (const s of p.row.stalls) curbCut(a, lot, s.x + s.w / 2, s.w, s.y + s.h, ASPHALT);
+  }
+  // Дорожка к подъезду через разрыв парковочного ряда; автомобильных ворот в корпусе нет.
+  frontPath(a, lot, p.entry.x, y0, p.entry.w);
+  // Внутренний двор — дерево и клумба. Машины остаются перед домом, на виду со стороны улицы.
   if (p.lawn) {
     const { x: cx, y: cy } = p.lawn;
     if (a.d) a.patch(cx - 2.2 * S, cy - 1.6 * S, 4.4 * S, 3.2 * S, LAWN_DACHA, 1.2);
@@ -723,10 +729,8 @@ function courtyard(a: Art, lot: Lot): void {
   if (closed) wing(x0, y1 - d, x1 - x0, d);
   wing(x0, y0, x1 - x0, d);
   if (a.pass === 2 && a.lod) {
-    // Арка в лицевом корпусе — тёмный проём у фасада и со двора: проезд к местам во дворе виден насквозь.
-    a.c.fillStyle = 'rgba(60,56,50,0.75)';
-    a.c.fillRect(arch - p.arch.w / 2, y0, p.arch.w, 0.9);
-    a.c.fillRect(arch - p.arch.w / 2, y0 + d - 0.9, p.arch.w, 0.9);
+    a.c.fillStyle = '#72513d';
+    a.c.fillRect(p.entry.x - 0.8, y0 - 0.5, 1.6, 0.8);
   }
   if (!roofFlat && a.d) {
     for (let k = 0; k < Math.floor((x1 - x0) / (9 * S)); k++) roofBit(a, x0 + 4 + k * 9 * S, y0 + d * 0.25, 1.2, 1.2, 1.2, '#8a5a48');
@@ -1220,6 +1224,11 @@ function garages(a: Art, lot: Lot): void {
       const t = a.r(r * 50 + k);
       const color = t < 0.5 ? '#8b8f94' : t < 0.7 ? '#9a6b52' : t < 0.85 ? '#6f8798' : '#7d9572';
       flat(a, x, row.y, p.bw, p.bd, 2.8, color);
+      if (a.pass === 2) {
+        const front = p.rows.length === 2 && r === 0;
+        a.c.fillStyle = '#424b54';
+        a.c.fillRect(x + 0.4, (front ? row.y + p.bd : row.y) - 0.3, p.bw - 0.8, 0.6);
+      }
     }
   }
 }
@@ -1243,7 +1252,7 @@ function warehouse(a: Art, lot: Lot): void {
       a.c.fillRect(x0 + 2.5 + k * 5, h.y - 0.8, 3, 0.8);
     }
   }
-  for (let k = 0; k < 3; k++) roofBit(a, x0 + 2 + k * 2.2 + a.r(5) * 4, y0 + 1.5 + a.r(6 + k) * 2, 1.6, 1.6, 1, '#c9a46a');
+  for (let k = 0; k < 3; k++) roofBit(a, lot.b.dockApproach === 'parallel' ? -3 + k * 2.2 : x0 + 2 + k * 2.2 + a.r(5) * 4, y0 + 1.5 + a.r(6 + k) * 2, 1.6, 1.6, 1, '#c9a46a');
 }
 
 /** Цвета сетей АЗС: фриз навеса, стела и вывеска магазинчика. */
@@ -1309,7 +1318,7 @@ function fuel(a: Art, lot: Lot): void {
 
 /**
  * Оптовая база (world/shopLots.depotLot): ангар во всю ширину в глубине участка, вдоль его стены — рампа; перед
- * ангаром — сквозной проезд для фуры (въезд и выезд у краёв участка), у улицы — поддоны и контейнеры.
+ * ангаром — свободный сквозной проезд для фуры (въезд и выезд у краёв участка).
  */
 function depot(a: Art, lot: Lot): void {
   const { W, H } = lot;
@@ -1325,13 +1334,8 @@ function depot(a: Art, lot: Lot): void {
     a.c.fillStyle = '#4a4d52';
     for (let k = 0; k < 3; k++) a.c.fillRect(plan.yard.ramp.x + 0.8 + k * 4.4, h.y - 0.2, 3.2, 0.5);
   }
-  // У улицы, между съездами, — контейнеры и поддоны.
-  const inner = W / 2 - 8.5;
-  const colors = ['#b5523b', '#3f74b5', '#5d8a4e', '#d0a23a'];
-  for (let k = 0; k < Math.max(1, Math.floor((inner * 2) / 7.5)); k++) {
-    const x = -inner + k * 7.5;
-    flat(a, x, y0 + 2, 6.4, 2.6, 3, colors[Math.floor(a.r(10 + k) * colors.length)]);
-  }
+  const colors = ['#5d8a4e', '#d0a23a', '#3f74b5'];
+  for (const [k, c] of plan.containers.entries()) flat(a, c.x, c.y, c.w, c.h, 3, colors[k]);
 }
 
 /** Ратуша на площади: площадь шире участка, здание с часовой башней, фонтан, деревья по углам. */

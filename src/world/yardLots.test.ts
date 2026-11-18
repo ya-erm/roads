@@ -3,7 +3,7 @@ import { freshGame } from '../game/testkit';
 import type { TownBuilding } from './entities';
 import { NEW_GAME_SETTINGS } from './settings';
 import { formOf } from './townForms';
-import { homeCars, SLAB_FRONT, slabPlan, TOWNHOUSE_END, townhousePlan, YARD_STALL, yardLotOf, yardSpots, type SlabAlong } from './yardLots';
+import { courtyardPlan, homeCars, SLAB_FRONT, slabPlan, TOWNHOUSE_END, townhousePlan, YARD_STALL, yardLotOf, yardSpots, type SlabAlong } from './yardLots';
 
 let nextId = 7000;
 const slab = (w: number, h: number, people = 140): TownBuilding => ({
@@ -22,6 +22,48 @@ const slab = (w: number, h: number, people = 140): TownBuilding => ({
 });
 
 const stalls = (b: TownBuilding) => yardLotOf(b)?.rows.reduce((s, r) => s + r.stalls.length, 0) ?? 0;
+
+describe('Квартал с двором — парковки перед фасадом', () => {
+  it('места доступны с улицы и не пересекают корпуса или пешеходный проход; двор остаётся без машин', () => {
+    let closed = 0;
+    let open = 0;
+    for (let i = 0; i < 80; i++) {
+      const b: TownBuilding = { ...slab(32 + i % 12 * 4, 26 + i % 11 * 7), form: 'courtyard', face: i % 2 ? 1 : -1 };
+      const p = courtyardPlan(b);
+      const lot = yardLotOf(b)!;
+      expect(lot).not.toBeNull();
+      expect(lot.gate).toBeNull();
+      p.closed ? closed++ : open++;
+      const row = p.row!;
+      expect(row.direct).toBe(true);
+      expect(row.open).toBe('y-');
+      expect(row.stalls.length).toBeGreaterThan(0);
+      for (const s of row.stalls) {
+        expect(s.y).toBeCloseTo(-b.fp.h / 2 + 0.5);
+        expect(s.y + s.h).toBeLessThanOrEqual(p.y0 - 3 + 1e-6);
+        expect(s.x).toBeGreaterThanOrEqual(-b.fp.w / 2);
+        expect(s.x + s.w).toBeLessThanOrEqual(b.fp.w / 2);
+        expect(s.x + s.w <= p.entry.x - p.entry.w / 2 + 1e-6 || s.x >= p.entry.x + p.entry.w / 2 - 1e-6).toBe(true);
+      }
+      const places = yardSpots(b, lot, 7.5);
+      expect(places.gate).toBeNull();
+      expect(places.spots).toHaveLength(row.stalls.length);
+      expect(places.spots.every((s) => !!s.drive && !s.drive.garage)).toBe(true);
+      if (p.lawn) {
+        expect(p.lawn.y).toBeGreaterThan(p.y0 + p.d);
+        expect(p.lawn.y).toBeLessThan(p.closed ? p.y1 - p.d : p.y1);
+      }
+    }
+    expect(closed).toBeGreaterThan(0);
+    expect(open).toBeGreaterThan(0);
+  });
+
+  it('на слишком мелком участке не рисует непригодные места перед корпусом', () => {
+    const b: TownBuilding = { ...slab(32, 18), form: 'courtyard' };
+    expect(courtyardPlan(b).row).toBeNull();
+    expect(yardLotOf(b)).toBeNull();
+  });
+});
 
 describe('Стоянки панелек — у улицы', () => {
   it('глубокий участок: карман перед фасадом с заездом прямо с улицы, мест — на все машины дома с запасом; двор — без машин', () => {
@@ -113,11 +155,11 @@ describe('Стоянки панелек — у улицы', () => {
     const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 1 });
     let along = 0;
     let front = 0;
-    // Места за воротами двора — только за настоящей аркой квартала и у гаражных боксов; у прочих — заезд с улицы.
+    // За воротами — только гаражные боксы; жилые места доступны прямо с улицы.
     for (const t of g.towns)
       for (const b of t.buildings) {
         const lot = b.kind !== 'landmark' ? yardLotOf(b) : null;
-        if (lot?.gate) expect(['courtyard', 'garages']).toContain(formOf(b));
+        if (lot?.gate) expect(formOf(b)).toBe('garages');
         else for (const r of lot?.rows ?? []) expect(r.direct).toBe(true);
       }
     for (const t of g.towns)

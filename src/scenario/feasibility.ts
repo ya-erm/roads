@@ -8,7 +8,7 @@ import { buildTime, freeDeposits, isRaw } from '../world/enterprise';
 import { dist } from '../core/vec';
 import type { Game } from '../game/game';
 import { CARGO } from '../world/cargo';
-import { maxTruck, needClosable, type Receiver, townRoom } from '../world/retail';
+import { needClosable, type Receiver, townRoom } from '../world/retail';
 import {
   cargoPotential,
   hasMarket,
@@ -123,7 +123,7 @@ export function assess(game: Game, p: ObjectiveParams, months: number): Assessme
       if (game.retail) {
         const reach = (r: Receiver) => {
           const b = t.buildings.find((x) => x.id === r.b);
-          return !!b && game.docks.reachable(b, maxTruck(b));
+          return !!b && game.docks.reachable(b, 12);
         };
         const can = made.filter((c) => needClosable(t, c, reach)).length;
         if (can < need) return no(`к магазинам ${t.name} не подъехать: закрыть можно ${can} из ${need}`);

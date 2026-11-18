@@ -20,6 +20,10 @@ import type { Vehicle, VehicleSpec } from '../sim/vehicle';
 export interface Leg {
   pts: Vec[];
   tan: Vec[];
+  /** При рулении относительно задней оси курс кузова отличается от касательной пути его середины. */
+  heading?: Vec[];
+  /** Курс полуприцепа на запланированном пути его задней оси. */
+  trailerHeading?: Vec[];
   cum: number[];
   len: number;
   back: boolean;
@@ -102,7 +106,30 @@ export function path(pts: Vec[], r: number, back: boolean, vmax: number): Leg {
 export function reversed(leg: Leg, back: boolean, vmax: number): Leg {
   const pts = [...leg.pts].reverse();
   const tan = [...leg.tan].reverse().map((t) => ({ x: -t.x, y: -t.y }));
-  return finish(pts, tan, back, vmax);
+  const result = finish(pts, tan, back, vmax);
+  if (leg.heading) result.heading = [...leg.heading].reverse();
+  if (leg.trailerHeading) result.trailerHeading = [...leg.trailerHeading].reverse();
+  return result;
+}
+
+/** Дуга задней оси с отдельным курсом кузова: при повороте нос выносится наружу, корма остаётся у бордюра. */
+export function steeringLeg(c: Vec, h: Vec, travel: number, steer: number, radius: number, rearOffset: number, vmax: number): Leg {
+  const angle = Math.atan2(h.y, h.x);
+  const axle = sub(c, scale(h, rearOffset));
+  const pts: Vec[] = [], tan: Vec[] = [], heading: Vec[] = [];
+  for (let i = 0; i <= 8; i++) {
+    const s = travel * i / 8;
+    const a = angle + s * steer / radius;
+    const dir = { x: Math.cos(a), y: Math.sin(a) };
+    const rear = steer ? { x: axle.x + (Math.sin(a) - Math.sin(angle)) * radius / steer, y: axle.y + (Math.cos(angle) - Math.cos(a)) * radius / steer } : add(axle, scale(h, s));
+    pts.push(add(rear, scale(dir, rearOffset)));
+    heading.push(dir);
+    const dx = dir.x - dir.y * rearOffset * steer / radius;
+    const dy = dir.y + dir.x * rearOffset * steer / radius;
+    const k = (travel < 0 ? -1 : 1) / Math.hypot(dx, dy);
+    tan.push({ x: dx * k, y: dy * k });
+  }
+  return { ...finish(pts, tan, travel < 0, vmax), heading };
 }
 
 function finish(pts: Vec[], tan: Vec[], back: boolean, vmax: number): Leg {
@@ -119,8 +146,9 @@ function finish(pts: Vec[], tan: Vec[], back: boolean, vmax: number): Leg {
 }
 
 /** Середина кузова и курс (нос) на отрезке в s от его начала: задним ходом нос смотрит против хода. */
-export function legPose(leg: Leg, s: number): { c: Vec; h: Vec } {
-  const { pts, tan, cum } = leg;
+export function legPose(leg: Leg, s: number): { c: Vec; h: Vec; th?: Vec } {
+  const { pts, cum } = leg;
+  const tan = leg.heading ?? leg.tan;
   let i = 1;
   while (i < cum.length - 1 && cum[i] < s) i++;
   const span = cum[i] - cum[i - 1];
@@ -129,8 +157,12 @@ export function legPose(leg: Leg, s: number): { c: Vec; h: Vec } {
   const hx = tan[i - 1].x + (tan[i].x - tan[i - 1].x) * t;
   const hy = tan[i - 1].y + (tan[i].y - tan[i - 1].y) * t;
   const l = Math.hypot(hx, hy) || 1;
-  const k = leg.back ? -1 / l : 1 / l;
-  return { c, h: { x: hx * k, y: hy * k } };
+  const k = leg.back && !leg.heading ? -1 / l : 1 / l;
+  const a = leg.trailerHeading?.[i - 1], b = leg.trailerHeading?.[i];
+  const tx = a && b ? a.x + (b.x - a.x) * t : 0;
+  const ty = a && b ? a.y + (b.y - a.y) * t : 0;
+  const tl = Math.hypot(tx, ty) || 1;
+  return { c, h: { x: hx * k, y: hy * k }, ...(a ? { th: { x: tx / tl, y: ty / tl } } : {}) };
 }
 
 /** Машина на манёвре: отрезки по порядку, на каком она, где на нём и скорость. */
@@ -151,7 +183,7 @@ export interface Drive {
 export const runOf = (legs: Leg[], v = 0): Run => ({ legs, i: 0, s: 0, v });
 
 /** Где машина на прогоне: середина кузова и курс. */
-export const runPose = (r: Run): { c: Vec; h: Vec } => legPose(r.legs[r.i], r.s);
+export const runPose = (r: Run): { c: Vec; h: Vec; th?: Vec } => legPose(r.legs[r.i], r.s);
 
 /**
  * Предел скорости в s на отрезке i: не быстрее vmax его и следующих тем же ходом (к ним — тормозя заранее с brake) и

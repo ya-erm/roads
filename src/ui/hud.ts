@@ -1917,11 +1917,24 @@ export class Hud {
         // Открыта из другой карточки (стройка из карточки базы) — назад к той.
         c.closeSelection();
         break;
+      case 'car-leave': {
+        const problem = g.parkedCars.send(d.id!);
+        if (problem) g.notify(problem);
+        break;
+      }
+      case 'car-destination':
+        c.pending = c.pending?.kind === 'carDestination' ? null : { kind: 'carDestination', id: d.id! };
+        break;
       case 'demolish': {
         const b = g.buildingById(Number(d.id));
         g.checkpoint('снос здания');
         if (b && g.demolishBuilding(b)) c.select(null);
         g.commit();
+        break;
+      }
+      case 'dock-approach': {
+        const problem = g.setDockApproach(Number(d.id), d.v === 'parallel' ? 'parallel' : 'front');
+        if (problem) g.notify(problem);
         break;
       }
       case 'move': {
@@ -2102,11 +2115,10 @@ export class Hud {
     const c = this.controller;
     const g = this.game();
     this.root.querySelectorAll<HTMLElement>('[data-action="tool"]').forEach((b) => {
-      b.classList.toggle('active', b.dataset.id === c.tool);
+      b.classList.toggle('active', b.dataset.id === c.tool && !c.testVehiclePlacement && !c.testBuildingPreview);
       // «Предприятие» — только в партиях, где предприятия строит игрок.
       if (b.dataset.id === 'industry') b.classList.toggle('hidden', !g.enterprises.on);
     });
-    this.root.querySelectorAll<HTMLElement>('[data-action="speed"]').forEach((b) => b.classList.toggle('active', Number(b.dataset.v) === g.speed));
     this.q('[data-action="heatmap"]').classList.toggle('active', c.heatmap);
     this.q('[data-action="speedmap"]').classList.toggle('active', c.speedmap);
     this.q('[data-action="parkmap"]').classList.toggle('active', c.parkmap);
@@ -2122,6 +2134,8 @@ export class Hud {
 
   /** В испытании сценария кнопка паузы неактивна: нажатие только напомнит, что пауза — в меню. */
   private syncPause(): void {
+    // Скорость меняется и из тестовой панели, без события контроллера.
+    this.root.querySelectorAll<HTMLElement>('[data-action="speed"]').forEach((b) => b.classList.toggle('active', Number(b.dataset.v) === this.game().speed));
     const pause = this.q<HTMLButtonElement>('[data-action="speed"][data-v="0"]');
     const lock = !!this.game().scenario?.challenge;
     if (pause.classList.contains('locked') === lock) return;
@@ -2916,15 +2930,18 @@ export class Hud {
     // Выбрана станция, предприятие или город — только их маршруты, без папок.
     const station = sel?.type === 'station' ? g.stations.get(sel.id) : undefined;
     const industry = sel?.type === 'industry' ? g.industries.find((i) => i.id === sel.id) : undefined;
+    const building = sel?.type === 'building' ? g.buildingById(sel.id) : undefined;
     const town = sel?.type === 'town' ? g.towns.find((t) => t.id === sel.id) : undefined;
-    const own = station ? g.stationLines(station.id) : industry ? g.industryLines(industry.id) : town ? g.townLines(town.id) : null;
+    const own = station ? g.stationLines(station.id) : industry ? g.industryLines(industry.id) : building ? g.buildingLines(building.id) : town ? g.townLines(town.id) : null;
     const list = own ?? [...g.lines.values()];
-    const title = station ? 'Маршруты станции' : industry ? 'Маршруты предприятия' : town ? 'Маршруты города' : 'Маршруты';
+    const title = station ? 'Маршруты станции' : industry || building?.kind === 'com' ? 'Маршруты предприятия' : building ? 'Маршруты здания' : town ? 'Маршруты города' : 'Маршруты';
     const empty = station
       ? 'Через эту станцию маршруты не проходят.'
-      : industry
+      : industry || building?.kind === 'com'
         ? 'К этому предприятию маршруты не ходят.'
-        : town
+        : building
+          ? 'К этому зданию маршруты не ходят.'
+          : town
           ? 'Через остановки и станции этого города маршруты не ходят.'
           : 'Пока нет маршрутов. Постройте две станции и соедините их маршрутом.';
     const rows = own
@@ -3529,6 +3546,14 @@ export class Hud {
     if (sel.type === 'workTrain') return workTrainCardHtml(g, sel.id, { following: this.controller.following });
     if (sel.type === 'park') return parkCardHtml(g, sel.id);
     if (sel.type === 'lot') return lotCardHtml(g, sel.id);
+    if (sel.type === 'parkedCar') {
+      const car = g.parkedCars.get(sel.id);
+      const picking = this.controller.pending?.kind === 'carDestination';
+      return `<section class="detail">${head('Автомобиль')}
+        <p>${car ? `${esc(car.state)} · ${esc(car.place)}` : 'Машина покинула место'}</p>
+        ${car?.parked ? `<div class="actions"><button class="small" data-action="car-leave" data-id="${esc(sel.id)}">Уехать</button><button class="small ${picking ? 'primary' : ''}" data-action="car-destination" data-id="${esc(sel.id)}">${picking ? 'Отменить выбор' : 'Поехать в…'}</button></div>` : ''}
+        ${picking ? '<p class="muted">Кликните по нужному парковочному месту или боксу на карте. Esc — отмена.</p>' : ''}</section>`;
+    }
     if (sel.type === 'deposit') {
       const d = g.enterprises.deposit(sel.id);
       const partners = d && d.used === undefined ? this.partnersHtml(g.partners(g.enterprises.depositProbe(d), 3)) : '';
@@ -3779,8 +3804,9 @@ export class Hud {
       const turned = turns ? turnText(b.turn ?? 0) : '';
       // Получатель грузов (world/retail.ts): что принимает и насколько полон склад — значками; не подъехать — ⛔.
       const rcv = town && receiverOf(town, b.id);
-      const reach = rcv ? g.docks.reachable(b, maxTruck(b)) : false;
-      const truckTip = `<span data-tip="${esc(reach ? `🚚 ≤ ${maxTruck(b)} м` : '⛔ 🚚')}">${reach ? `🚚≤${maxTruck(b)}` : '⛔🚚'}</span>`;
+      const truckLength = rcv ? [21, 15, 12].find((length) => length <= maxTruck(b) && g.docks.reachable(b, length)) : undefined;
+      const reach = truckLength !== undefined;
+      const truckTip = `<span data-tip="${esc(reach ? `🚚 ≤ ${truckLength} м` : '⛔ 🚚')}">${reach ? `🚚≤${truckLength}` : '⛔🚚'}</span>`;
       // Оптовая база: склад-пересадка — сколько лежит на её складе, по грузам и всего.
       const depot = rcv?.depot ? g.depotStock(b.id) : null;
       const stock = depot
@@ -3803,6 +3829,7 @@ export class Hud {
       return `<section class="detail">${head(kind, `${storeysOf(b)} эт. · ${people}`)}
         ${town ? `<button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>` : ''}
         ${stock}
+        ${formOf(b) === 'warehouse' ? `<p>Подъезд грузовиков</p><div class="actions"><button class="small ${(b.dockApproach ?? 'front') === 'front' ? 'primary' : ''}" aria-pressed="${(b.dockApproach ?? 'front') === 'front'}" data-action="dock-approach" data-id="${b.id}" data-v="front">Носом к рампе</button><button class="small ${b.dockApproach === 'parallel' ? 'primary' : ''}" aria-pressed="${b.dockApproach === 'parallel'}" data-action="dock-approach" data-id="${b.id}" data-v="parallel">Вдоль фасада</button></div>` : ''}
         <div class="actions">
           <button class="small" data-action="move" data-id="${b.id}" data-tip="${esc(moveTip)}">Перенести${plaza ? ` ${PARK_INFO.plaza.icon}` : ''}${turned ? ` · ${turned}` : ''} · ${money(moveCost)}</button>
           ${b.kind !== 'landmark' ? `<button class="small danger" data-action="demolish" data-id="${b.id}">Снести · ${money(g.demolishCost(b.id))}</button>` : ''}
@@ -3911,7 +3938,7 @@ export class Hud {
     return `<section class="detail">${head('Машина жителя')}
       ${carTripHtml(g, sim.id)}
       <div class="kv near"><span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
-      <div class="actions">${follow}</div></section>`;
+      <div class="actions">${follow}<button class="small" data-action="car-destination" data-id="sim:${sim.id}">Поехать в…</button></div></section>`;
   }
 
   /**

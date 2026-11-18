@@ -492,8 +492,8 @@ export function unloadTime(amount: number): number {
   return RETAIL.unloadBase + RETAIL.unloadPer * Math.max(0, amount);
 }
 
-/** Самый длинный грузовик, что заедет во двор получателя: к складу, АЗС и оптовой базе — длиннее (Фура). */
+/** Верхний предел модели; конкретный двор дополнительно проверяется по траектории и габаритам сцепки. */
 export function maxTruck(b: Pick<TownBuilding, 'form' | 'kind' | 'floors' | 'fp'>): number {
   const f = formOf(b);
-  return f === 'warehouse' || f === 'fuel' || f === 'depot' ? RETAIL.maxLength.yard : RETAIL.maxLength.shop;
+  return ['warehouse', 'fuel', 'depot', 'shop', 'store', 'market', 'office'].includes(f) ? RETAIL.maxLength.yard : RETAIL.maxLength.shop;
 }

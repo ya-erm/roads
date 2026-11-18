@@ -57,7 +57,6 @@ import { PARK_INFO } from '../world/parkPick';
 import { yardOf } from '../world/townForms';
 import { movablePark, parkMoveCost } from '../world/townParks';
 import { snapTurn, TURN_STEP, turnableBuilding, turnFromHandle, turnHandlePos, turnLabel, turnText } from '../world/moveTurn';
-import { maxTruck } from '../world/retail';
 import { STREET_BAN_MARK } from '../world/streetBans';
 import { corridorCurveSigns, freshSignCorridors, staleSignCorridors } from '../game/roadProject';
 import { type DrawSettings, type ProjectTools, sharedRoadProject } from './projecttools';
@@ -70,6 +69,7 @@ import { basePlaceText, baseRemoveText } from '../ui/constructionUi';
 import type { CargoType, IndustryKind } from '../world/cargo';
 import { industryPlanText, industryRemoveText } from '../ui/enterpriseUi';
 import { MODELS, type ModelId } from '../game/transport';
+import type { VehicleSpec } from '../sim/vehicle';
 import { footprintRadius } from '../world/spatial';
 import { BUY_DOT_PX, dropSpots, pickDropStop } from './buyDrop';
 import { lotDragPlan, lotGateHit, lotHandleAt, lotOverlay, type LotToolState } from './lotTool';
@@ -150,7 +150,8 @@ export type Pending =
   | { kind: 'warehouse'; id: number }
   | { kind: 'annex'; id: number }
   | { kind: 'newBase' }
-  | { kind: 'crew'; id: number };
+  | { kind: 'crew'; id: number }
+  | { kind: 'carDestination'; id: string };
 export type PendingOf<K extends Pending['kind']> = Extract<Pending, { kind: K }>;
 
 /** Ставят склад, пристройку, выбирают стройку для бригады — из карточки: выбрали другое — режим кончился. */
@@ -346,6 +347,9 @@ export class Controller {
   control: Vec | null = null;
   lineDraft: number[] = [];
   selection: Selection | null = null;
+  testVehiclePlacement = false;
+  testVehicleSpec: VehicleSpec | null = null;
+  testBuildingPreview: (() => { building: TownBuilding | null; ok: boolean; label: string }) | null = null;
   selectedLine: number | null = null;
   /** Предприятия, подсвеченные из панели цепочек. */
   highlight: number[] = [];
@@ -565,7 +569,7 @@ export class Controller {
     const drag = this.pendingOf('lotHandle');
     return {
       action: this.action,
-      selection: this.selection && 'id' in this.selection ? { type: this.selection.type, id: this.selection.id } : this.selection && { type: this.selection.type },
+      selection: this.selection && 'id' in this.selection && typeof this.selection.id === 'number' ? { type: this.selection.type, id: this.selection.id } : this.selection && { type: this.selection.type },
       movingLot: this.pendingOf('moveLot')?.id ?? null,
       lotDrag: drag && { id: drag.id, kind: drag.handle, side: drag.side },
       lotCols: this.lotCols,
@@ -1471,6 +1475,7 @@ export class Controller {
     // Выбрали что-то другое — склад этой станции (пристройку, стройку для бригады) больше не ставим.
     const p = this.pending;
     const card = p && PENDING_CARD[p.kind];
+    if (p?.kind === 'carDestination' && !(sel?.type === 'parkedCar' && sel.id === p.id) && !(sel?.type === 'vehicle' && `sim:${sel.simId}` === p.id)) this.pending = null;
     if (card && 'id' in p && !(sel?.type === card && 'id' in sel && sel.id === p.id)) this.pending = null;
     this.onChange();
   }
@@ -1679,6 +1684,10 @@ export class Controller {
   }
 
   update(dt: number): void {
+    if (this.selection?.type === 'vehicle') {
+      const id = this.game().parkedCars.arrivedCar(this.selection.simId);
+      if (id) this.select({ type: 'parkedCar', id });
+    }
     if (this.left && this.tool === 'terrain' && this.hover) {
       this.brushTimer += dt;
       if (this.brushTimer >= BRUSH_PERIOD) {
@@ -1718,6 +1727,7 @@ export class Controller {
   private followTarget(): Vec | null {
     const g = this.game();
     const sel = this.selection;
+    if (sel?.type === 'parkedCar') return g.parkedCars.get(sel.id)?.look.pos ?? null;
     if (sel?.type === 'vehicle') return g.traffic.vehicles.get(sel.simId)?.pos ?? null;
     // Бригада — за головной машиной колонны (на стройке — у края работ, на базе — база).
     if (sel?.type === 'crew') return g.brigadeWhere(sel.id)?.pos ?? null;
@@ -2258,6 +2268,10 @@ export class Controller {
       if (sel) this.select(sel);
     };
     switch (w?.kind) {
+      case 'carDestination':
+        done(g.parkedCars.send(w.id, p), null);
+        this.onChange();
+        return true;
       case 'crew': {
         // Стройка для бригады: плашка или полотно проекта под курсором — она едет туда; карточка бригады остаётся.
         const project = this.projectUnder(p);
@@ -2601,6 +2615,8 @@ export class Controller {
 
   private pick(p: Vec): Selection | null {
     const g = this.game();
+    const parked = g.parkedCars.at(p);
+    if (parked) return { type: 'parkedCar', id: parked };
     const train = g.trainAt(p);
     const owner = train && g.trainOwner(train);
     if (owner) return { type: 'fleet', id: owner.id };
@@ -3655,6 +3671,24 @@ export class Controller {
       roadTool: this.action === 'road' || this.tool === 'terrain',
     };
     // Тянут покупку из карточки маршрута: на карте — только куда её можно отпустить, подсказки инструмента не нужны.
+    if (this.testBuildingPreview) {
+      const preview = this.testBuildingPreview();
+      if (preview.building) {
+        o.ghosts = [{ building: preview.building, ok: preview.ok }];
+        o.marks.push({ fp: preview.building.fp, ok: preview.ok });
+      }
+      o.label = { text: preview.label, ok: preview.ok };
+      return o;
+    }
+    if (this.testVehicleSpec) {
+      o.parkingTargets = g.parkedCars.targets();
+      if (this.hover) {
+        const preview = g.parkedCars.placementPreview(this.testVehicleSpec, this.hover);
+        o.vehicleGhost = preview;
+        o.label = { text: preview.label, ok: preview.ok };
+      }
+      return o;
+    }
     if (this.dragBuy) {
       o.roadTool = false;
       o.buyDrop = this.buyDropOverlay();
@@ -4403,7 +4437,8 @@ export class Controller {
         const shop = real ? null : g.receiverAt(p);
         const dock = shop && [...g.stations.values()].find((s) => s.dock?.b === shop.b.id);
         const st = real ?? (shop ? { id: dock?.id ?? -1, name: dock?.name ?? g.dockName(shop.b), fp: shop.b.fp } : null);
-        if (st) o.marks.push({ fp: st.fp, ok: !shop || g.docks.reachable(shop.b, maxTruck(shop.b)) });
+        const line = this.addStopTo === null ? undefined : g.lines.get(this.addStopTo);
+        if (st) o.marks.push({ fp: st.fp, ok: !shop || g.docks.reachable(shop.b, line ? g.lineTruckLength(line) ?? 12 : 12) });
         if (this.addStopTo !== null) {
           o.selectedLine = this.addStopTo;
           o.label = st ? { text: `В маршрут: ${st.name}`, ok: true } : { text: 'Кликните по станции · Esc — готово', ok: true };
@@ -4435,6 +4470,13 @@ export class Controller {
       }
       case 'select': {
         const w = this.pending;
+        if (w?.kind === 'carDestination') {
+          o.label = { text: g.parkedCars.targetLabel(w.id, p), ok: true };
+          o.parkingTargets = g.parkedCars.targets(w.id);
+          o.parkingPreview = g.parkedCars.preview(w.id, p) ?? undefined;
+          if (o.parkingPreview && !o.parkingPreview.ok) o.label.ok = false;
+          break;
+        }
         if (w?.kind === 'crew') {
           // Стройка для бригады: проект под курсором подсвечен, подпись — поедет ли туда бригада и почему нет.
           const project = this.projectUnder(p);
