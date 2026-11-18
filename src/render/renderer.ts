@@ -165,6 +165,8 @@ export interface ToolOverlay {
   catchmentAt: Vec | null;
   /** Радиус охвата: у вокзала больше. */
   catchmentR: number;
+  /** Магазины будущей станции: связи и подсветка до размещения или переноса. */
+  receiverPreview?: { at: Vec; receivers: ReturnType<Game['stationReceivers']> };
   /** Обгонный путь будущего вокзала. */
   railPreview: Cubic[] | null;
   /** Будущий ж/д сигнал: где и для какого направления (или какой снимем). */
@@ -4298,38 +4300,43 @@ export class Renderer {
     // Магазины задания «Развезти по двум магазинам» (этап A): подсвечены и со стрелкой, пока задание не выполнено.
     const goal = goalShops(game);
     const close = z >= RECEIVER_ZOOM;
-    if (!close && !focus.size && !goal.size) return;
+    const preview = o.receiverPreview;
+    const connected = new Set(preview?.receivers.map(({ b }) => b.id));
+    if (!close && !focus.size && !goal.size && !preview) return;
     const inView = (p: Vec, pad: number) => p.x > view.x0 - pad && p.x < view.x1 + pad && p.y > view.y0 - pad && p.y < view.y1 + pad;
     const pulse = 0.5 + 0.5 * Math.sin((performance.now() / 1000) * 5);
     // От станции — к её получателям: линии под значками.
-    if (z >= STATION_LINKS_ZOOM) {
+    const links = (a: Vec, receivers: ReturnType<Game['stationReceivers']>, planned = false) => {
+      for (const { b, r } of receivers) {
+        const c = r.cargo.find((x) => focus.has(x)) ?? r.cargo[0];
+        const rc = roofCenter(b);
+        const e = lotFrame(b)(rc.x, rc.y);
+        ctx.save();
+        ctx.globalAlpha = planned ? 1 : focus.size && !focus.has(c) ? 0.3 : 0.85;
+        ctx.strokeStyle = CARGO[c].color;
+        ctx.lineWidth = (planned ? 2.4 : 1.6) / z;
+        ctx.setLineDash([6 / z, 4 / z]);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(e.x, e.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        const m = { x: a.x + (e.x - a.x) * 0.4, y: a.y + (e.y - a.y) * 0.4 };
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, 7.5 / z, 0, Math.PI * 2);
+        ctx.fill();
+        this.icon(cargoImage(c), m, 13 / z);
+        ctx.restore();
+      }
+    };
+    if (z >= STATION_LINKS_ZOOM && !preview) {
       for (const st of game.stations.values()) {
         if (st.kind === 'dock' || !st.serves.cargo || !inView(st.fp.center, 300)) continue;
-        for (const { b, r } of game.stationReceivers(st)) {
-          const c = r.cargo.find((x) => focus.has(x)) ?? r.cargo[0];
-          const a = st.fp.center;
-          const rc = roofCenter(b);
-          const e = lotFrame(b)(rc.x, rc.y);
-          ctx.save();
-          ctx.globalAlpha = focus.size && !focus.has(c) ? 0.3 : 0.85;
-          ctx.strokeStyle = CARGO[c].color;
-          ctx.lineWidth = 1.6 / z;
-          ctx.setLineDash([6 / z, 4 / z]);
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(e.x, e.y);
-          ctx.stroke();
-          ctx.setLineDash([]);
-          const m = { x: a.x + (e.x - a.x) * 0.4, y: a.y + (e.y - a.y) * 0.4 };
-          ctx.fillStyle = '#ffffff';
-          ctx.beginPath();
-          ctx.arc(m.x, m.y, 7.5 / z, 0, Math.PI * 2);
-          ctx.fill();
-          this.icon(cargoImage(c), m, 13 / z);
-          ctx.restore();
-        }
+        links(st.fp.center, game.stationReceivers(st));
       }
     }
+    if (preview) links(preview.at, preview.receivers, true);
     for (const town of game.towns) {
       if (!town.receivers?.length || !inView(town.center, (town.extent ?? town.radius) + 200)) continue;
       const byId = this.buildingsOf(town);
@@ -4337,13 +4344,15 @@ export class Renderer {
         const b = byId.get(r.b);
         if (!b || !inView(b.fp.center, 40)) continue;
         const target = goal.get(r.b);
-        const hot = r.cargo.some((c) => focus.has(c)) || !!target;
+        const focused = r.cargo.some((c) => focus.has(c));
+        const covered = connected.has(b.id);
+        const hot = focused || !!target || covered;
         if (!close && !hot) continue;
         // Оптовая база — один значок (выбранный груз или больше всего лежащий на её складе), кольцо — склад базы.
         const depot = r.depot ? game.depotStock(r.b) : null;
         const list = target
           ? [target]
-          : hot
+          : focused
             ? r.cargo.filter((c) => focus.has(c)).slice(0, depot ? 1 : undefined)
             : depot
               ? [depot.top ?? r.cargo[0]]
@@ -4354,7 +4363,9 @@ export class Renderer {
         const at = lotFrame(b);
         const roof = roofCenter(b);
         ctx.save();
-        ctx.globalAlpha = focus.size && !hot ? 0.35 : 1;
+        const dim = preview ? !covered : focus.size && !hot;
+        ctx.globalAlpha = dim ? 0.35 : 1;
+        if (covered) this.drawFootprint({ ...b.fp, w: b.fp.w + 4, h: b.fp.h + 4 }, 'rgba(47,128,237,0.12)', '#2f80ed', 2.5 / z);
         if (target) {
           // Задание: стрелка над магазином покачивается — «сюда».
           const o0 = at(roof.x, roof.y);
@@ -4379,7 +4390,7 @@ export class Renderer {
           ctx.fill();
           if (!reach) ctx.globalAlpha *= 0.55;
           this.icon(cargoImage(c), p, size * 0.72);
-          ctx.globalAlpha = focus.size && !hot ? 0.35 : 1;
+          ctx.globalAlpha = dim ? 0.35 : 1;
           // Кольцо — наполненность склада: по часовой от верха. У оптовой базы — синее, без мигания: пустая база —
           // не беда, это склад-пересадка.
           const fill = depot ? depot.fill : stockFill(town, r, c, game.time);

@@ -4393,10 +4393,17 @@ export class Controller {
       }
       case 'station': {
         const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.angle, this.stationTracks, this.stationLength, this.stationTerminal, this.roadStationOptions);
+        const serves = plan.fp ? g.stationServesFor(plan.fp, this.stationKind, plan.industryId, this.newStationServes) : this.newStationServes;
         if (plan.fp) {
           o.station = { fp: plan.fp, ok: plan.ok };
           o.catchmentAt = plan.fp.center;
-          o.catchmentR = g.catchmentRadius({ kind: this.stationKind });
+          o.catchmentR = g.catchmentRadius({ kind: this.stationKind, serves });
+          if (plan.ok && serves.cargo) {
+            o.receiverPreview = {
+              at: plan.fp.center,
+              receivers: g.stationReceivers({ fp: plan.fp, kind: this.stationKind, serves }, [...(plan.driveway?.demolish ?? []), ...(plan.demolish ?? [])]),
+            };
+          }
         }
         // Ж/д станция: показываем обгонный путь, а в чистом поле — и главный.
         if (plan.rail) {
@@ -4421,7 +4428,6 @@ export class Controller {
         const free = plan.rail?.main ? ' · R — повернуть' : plan.drivewayLen !== undefined ? ` · выезд ${plan.drivewayLen} м [ ]` : curb;
         const raze = razed.length ? ` · снос ${razed.length} зд.` : '';
         // У предприятия станция сама становится грузовой — подпись показывает, какой она получится.
-        const serves = plan.fp ? g.stationServesFor(plan.fp, this.stationKind, plan.industryId, this.newStationServes) : this.newStationServes;
         const what =
           this.stationKind === 'rail' ? (this.stationTerminal ? 'Конечная станция' : 'Ж/д станция') : this.stationKind === 'stop' ? 'Остановка' : stationTitle(serves);
         // Напротив другой остановки — пара: на карте стрелки хода у обоих навесов, у курсора — ⇄ и общее название.
@@ -4551,6 +4557,12 @@ export class Controller {
             o.station = { fp: plan.fp, ok: plan.ok };
             o.catchmentAt = plan.fp.center;
             o.catchmentR = g.catchmentRadius(moving);
+            if (plan.ok && moving.serves.cargo) {
+              o.receiverPreview = {
+                at: plan.fp.center,
+                receivers: g.stationReceivers({ ...moving, fp: plan.fp }, [...(plan.driveway?.demolish ?? []), ...(plan.demolish ?? [])]),
+              };
+            }
           }
           // Ж/д станция: боковые пути на новом месте, а в чистом поле — и главный путь.
           if (plan.rail) {

@@ -284,6 +284,8 @@ export const RAIL_STATION = {
 
 export const STATION = {
   catchment: 170,
+  /** Грузовая автостанция развозит груз получателям чуть дальше автовокзала. */
+  cargoCatchment: 200,
   /** Посты погрузки у новой станции; игрок может добавить до maxBays или убрать до minBays. */
   bays: 3,
   minBays: 1,

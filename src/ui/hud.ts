@@ -2749,9 +2749,10 @@ export class Hud {
       : side
         ? `вдоль улицы со стороны курсора, не у перекрёстка; у края — карман`
         : `у дороги, прямо у перекрёстка или вплотную к ${pax ? 'городу' : 'предприятию'} — с той стороны, где курсор`;
+    const catchment = g.catchmentRadius({ kind: 'road', serves: c.newStationServes });
     const tip = curb
       ? `Автовокзал ${where}. Охват ${STATION.catchment} м.`
-      : `${pax ? 'Автовокзал' : 'Автостанция'} ${where}. Дома под ней снесём (красные). Охват ${STATION.catchment} м, ${pax ? 'перроны' : 'посты'} добавляются в карточке.`;
+      : `${pax ? 'Автовокзал' : 'Автостанция'} ${where}. Дома под ней снесём (красные). Охват ${catchment} м, ${pax ? 'перроны' : 'посты'} добавляются в карточке.`;
     return `<div class="opt-row">${sw}<div class="opt-group st-how"><div class="opt-title">Как ставить <span class="price-tag">${money(COST.station)}</span>${how}${length}</div><p class="muted">${tip}</p></div></div>`;
   }
 

@@ -63,7 +63,7 @@ export const specKmh = (s: RoadSpec) => s.limit ?? ROAD_CLASSES[s.cls].limit;
 /** Ограничение скорости в единицах симуляции. */
 export const specSpeed = (s: RoadSpec) => specKmh(s) / KMH_PER_UNIT;
 
-/** Быстрые дороги: вдоль них не строят дома и станции. */
+/** Быстрые дороги: вдоль них не строят дома. */
 export const isTrunk = (cls: RoadClass) => cls === 'highway' || cls === 'motorway';
 
 /**

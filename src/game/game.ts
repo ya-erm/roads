@@ -2891,6 +2891,12 @@ export class Game implements BuildContext {
     return this.roadNear(p, r, (c) => !c.ring && !isTrunk(c.cls) && net.node(c.a).level === 0 && net.node(c.b).level === 0);
   }
 
+  /** Автостанцию можно пристроить и к магистрали: обычным выездом или дублёром. */
+  private stationRoadNear(p: Vec, r: number): { seg: Corridor; s: number } | null {
+    const net = this.roads.net;
+    return this.roadNear(p, r, (c) => !c.ring && c.cls !== 'motorway' && net.node(c.a).level === 0 && net.node(c.b).level === 0);
+  }
+
   /**
    * Ближайшее полотно (из подходящих под ok), до края которого от p не дальше r: у широкой дороги
    * (проспект, магистраль) край дальше от оси — мерить от оси значит не дотянуться до неё вовсе.
@@ -7905,8 +7911,8 @@ export class Game implements BuildContext {
     return (exit ? 2 : 0) + (wide ? 1 : 0) - hw / 100 - Math.abs(edge - 0.9);
   }
 
-  /** Получатели в охвате станции (у станции у получателя — он сам): город, запись получателя, дом. */
-  stationReceivers(st: Station): { town: Town; r: Receiver; b: TownBuilding }[] {
+  /** Получатели в охвате размещённой или будущей станции; exclude — дома под сносом. У станции у получателя — он сам. */
+  stationReceivers(st: Pick<Station, 'kind' | 'fp' | 'serves' | 'dock'>, exclude: readonly number[] = []): { town: Town; r: Receiver; b: TownBuilding }[] {
     const out: { town: Town; r: Receiver; b: TownBuilding }[] = [];
     if (!this.retail) return out;
     if (st.kind === 'dock') {
@@ -7919,11 +7925,12 @@ export class Game implements BuildContext {
     if (!st.serves.cargo) return out;
     const R = this.catchmentRadius(st);
     for (const town of this.towns) {
-      if (!st.townIds.includes(town.id) || !town.receivers?.length) continue;
+      if (!town.receivers?.length) continue;
+      if (dist(town.center, st.fp.center) > (town.extent ?? town.radius) + R + 50) continue;
       const byId = new Map(town.buildings.map((b) => [b.id, b]));
       for (const r of town.receivers) {
         // Оптовая база — склад-пересадка, а не потребитель: станция рядом ей не сдаёт.
-        if (r.depot) continue;
+        if (r.depot || exclude.includes(r.b)) continue;
         const b = byId.get(r.b);
         if (b && dist(b.fp.center, st.fp.center) <= R) out.push({ town, r, b });
       }
@@ -10002,7 +10009,7 @@ export class Game implements BuildContext {
     // Курсор у предприятия — пристраиваем станцию к нему с этой стороны.
     const ind = this.industries.find((i) => pointInFootprint(p, i.fp, 80));
     if (ind) return this.industryStationPlan(ind, p);
-    const hit = this.streetNear(p, Math.max(40, snapRadius));
+    const hit = this.stationRoadNear(p, Math.max(40, snapRadius));
     // У перекрёстка (или у самого конца полотна) выезд примыкает прямо к узлу — станция «примагничивается».
     const edge = MIN_SEGMENT_LEN + 8;
     const endId = hit && (hit.s < edge ? hit.seg.a : hit.seg.length - hit.s < edge ? hit.seg.b : null);
@@ -10020,11 +10027,11 @@ export class Game implements BuildContext {
       .sort((x, y) => dist(x.pos, p) - dist(y.pos, p))[0];
     if (junction) return this.junctionStationPlan(junction, p, len);
     if (!hit) {
-      // Рядом только магистраль: вдоль быстрых дорог станций нет — силуэт всё равно у неё, с понятной причиной.
-      const fast = this.roadNear(p, Math.max(40, snapRadius), (c) => isTrunk(c.cls));
+      // У автомагистрали с разделителем нужен отдельный съезд.
+      const fast = this.roadNear(p, Math.max(40, snapRadius), (c) => c.cls === 'motorway');
       if (fast) {
         const fp = this.drivewayFootprint(fast.seg.lut.pointAt(fast.s), normalTowards(fast.seg, fast.s, p), halfAtS(fast.seg, fast.s), len);
-        return fail('К магистрали станцию не пристроить', fp);
+        return fail('К автомагистрали станцию не пристроить', fp);
       }
       return fail('Поставьте рядом с дорогой', this.looseFootprint(p, STATION.size));
     }
@@ -10162,7 +10169,7 @@ export class Game implements BuildContext {
    */
   private sideStationPlan(p: Vec, snapRadius: number): StationPlan {
     const fail = (reason: string, fp: Footprint | null = null): StationPlan => ({ ok: false, reason, cost: COST.station, fp, side: true });
-    const hit = this.streetNear(p, Math.max(40, snapRadius));
+    const hit = this.stationRoadNear(p, Math.max(40, snapRadius));
     if (!hit) return fail('Поставьте вдоль улицы', this.looseFootprint(p, STATION.size));
     const c = hit.seg;
     const W = STATION.size.w;
@@ -10622,17 +10629,15 @@ export class Game implements BuildContext {
     if (sim && v.state === 'driving' && !v.boarding && sim.targetNode === was.nodeId) this.traffic.redirect(sim, now.nodeId);
   }
 
-  /** К узлу можно примкнуть выезд станции: перекрёсток или тупик обычных дорог на земле (не выезд другой станции). */
+  /** К узлу можно примкнуть выезд станции: перекрёсток или тупик дорог на земле, включая магистраль. */
   private stationJoinable(n: LaneNode): boolean {
     const net = this.roads.net;
     if (n.level !== 0 || (n.roundabout ?? null) !== null || !n.corridors.length) return false;
     if (n.kind !== 'junction' && !net.isDeadEnd(n)) return false;
     if ([...this.stations.values()].some((st) => st.kind !== 'dock' && st.nodeId === n.id)) return false;
-    // Выезд другой станции — шоссе, но к узлу на нём пристроиться можно, как к улице.
-    const driveways = this.drivewayIds();
     return n.corridors.every((sid) => {
       const s = net.corridor(sid);
-      return !s.ring && (!isTrunk(s.cls) || driveways.has(sid));
+      return !s.ring && s.cls !== 'motorway';
     });
   }
 
@@ -11784,9 +11789,9 @@ export class Game implements BuildContext {
     }
   }
 
-  /** Радиус охвата: у вокзала больше, чем у автостанции. */
-  catchmentRadius(st: Pick<Station, 'kind'>): number {
-    return st.kind === 'rail' ? RAIL_STATION.catchment : st.kind === 'stop' ? STOP.catchment : STATION.catchment;
+  /** Радиус охвата: у грузовой автостанции больше, чем у автовокзала. */
+  catchmentRadius(st: Pick<Station, 'kind' | 'serves'>): number {
+    return st.kind === 'rail' ? RAIL_STATION.catchment : st.kind === 'stop' ? STOP.catchment : st.serves.cargo ? STATION.cargoCatchment : STATION.catchment;
   }
 
   /** Предприятия в охвате радиусом R вокруг точки at. */
@@ -11820,7 +11825,7 @@ export class Game implements BuildContext {
     const ind = industryId !== undefined ? this.industries.find((i) => i.id === industryId) : undefined;
     const workers = !!ind && this.enterprises.busNeed(ind) > 0;
     if (serves.cargo) return { pax: serves.pax || workers, cargo: true };
-    const R = this.catchmentRadius({ kind });
+    const R = this.catchmentRadius({ kind, serves });
     const docked = industryId !== undefined;
     if (!docked && !this.industriesNear(fp.center, R).length) return { ...serves };
     const people = this.peopleNear(fp.center, R).pop > 0;

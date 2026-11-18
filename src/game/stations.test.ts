@@ -428,7 +428,7 @@ describe('Станции', () => {
     expect(driveway(st2).cls).toBe('highway');
   });
 
-  it('у широкой дороги станция прилипает: у проспекта ставится, у магистрали — силуэт с понятной причиной', () => {
+  it('у широкой дороги станция прилипает и ставится: у проспекта и у магистрали', () => {
     const game = freshGame(42);
     game.money = 5_000_000;
     // Проспект 2+2: курсор в 45 от оси (≈30 от края) — раньше «Поставьте рядом с дорогой».
@@ -443,18 +443,20 @@ describe('Станции', () => {
     expect(st.fp.center.y).toBeLessThan(a.y - 40);
     const net = game.roads.net;
     expect(stationExit(game, st.nodeId).corridors.map((id) => net.corridor(id).cls)).toContain('avenue');
-    // Магистраль: выезд к ней не пристроить (вдоль быстрых дорог станций нет), но силуэт — у дороги, причина — про магистраль.
+    // Магистраль: такой же выезд от фактического края широкой дороги.
     const b = fieldSpot(game, 400);
     const highway = roadPlan(game, { free: b }, { free: { x: b.x + 400, y: b.y } }, { cls: 'highway', lanes: twoWay(2, 2) });
     expect(highway.ok).toBe(true);
     game.roadBuilder.apply(highway);
     const q = { x: b.x + 200, y: b.y - 45 };
     const plan = game.stationPlan(q, 14);
-    expect(plan.ok).toBe(false);
-    expect(plan.reason).toBe('К магистрали станцию не пристроить');
+    expect(plan.ok).toBe(true);
     expect(Math.abs(plan.fp!.center.x - q.x)).toBeLessThan(2);
     expect(plan.fp!.center.y).toBeLessThan(b.y - 40);
-    expect(game.placeStation(q, 14)).toBeNull();
+    const atHighway = game.placeStation(q, 14)!;
+    expect(atHighway).toBeTruthy();
+    expect(stationExit(game, atHighway.nodeId).corridors.map((id) => game.roads.net.corridor(id).cls)).toContain('highway');
+    expect(game.roads.net.problems()).toEqual([]);
   });
 });
 
