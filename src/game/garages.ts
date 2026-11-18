@@ -4,7 +4,7 @@ import type { GLane, GLink, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import { findLaneRoute, routeCost } from '../lanes/routing';
 import { centreLine } from '../lanes/solid';
-import type { Barrier, LaneTraffic } from '../lanes/traffic';
+import type { Barrier, LaneTraffic, TrafficActivity } from '../lanes/traffic';
 import {
   advance,
   bezier,
@@ -752,7 +752,7 @@ export class Garages {
       // Налево: за тормозной путь до поворота смотрит на встречку — свободна: закрывает её и поворачивает с ходу;
       // занята — встаёт напротив заезда и ждёт просвета (stepCross).
       if (h.left && !h.block && sim.holdV !== undefined && sim.holdDist <= (sim.v * sim.v) / (2 * HOLD_BRAKE) + 1) {
-        if (this.crossClear(slot)) h.block = this.block(slot);
+        if (this.crossClear(slot)) h.block = this.block(slot, sim);
         else traffic.holdAfter(sim, sim.holdDist);
       }
       if (!traffic.held(sim)) continue;
@@ -847,9 +847,9 @@ export class Garages {
   }
 
   /** Пересекает встречку (или вот-вот пересечёт с ходу): стоп-линия встречного потока перед местом, пока кузов над ним. */
-  private block(slot: GarageSlot): Block {
+  private block(slot: GarageSlot, sim: Vehicle): Block {
     const stop = slot.stop!;
-    const b: Barrier = { s: stop.s, closed: true, busy: false, flow: stop.flow, stop: 0 };
+    const b: Barrier = { s: stop.s, closed: true, busy: false, flow: stop.flow, stop: 0, vehicle: sim.id };
     const map = this.host.traffic.turnStops;
     const list = map.get(stop.corridor);
     if (list) list.push(b);
@@ -901,7 +901,7 @@ export class Garages {
       return false;
     }
     if (m.wait < LOOK || !this.crossClear(slot)) return true;
-    m.block = this.block(slot);
+    m.block = this.block(slot, sim);
     m.phase = 'road';
     m.wait = 0;
     this.pose(m);
@@ -1086,7 +1086,7 @@ export class Garages {
     m.sim = sim;
     m.via = slot;
     // Передний поворот налево: встречка закрыта, пока кузов над ней.
-    if (slot.cross) m.block = this.block(slot);
+    if (slot.cross) m.block = this.block(slot, sim);
     const leg = m.forward
       ? bezier(start, sub(start, scale(m.home.d.dir, k)), sub(slot.pos, scale(slot.f, k)), slot.pos, false, SPEED.roadOut)
       : bezier(start, sub(start, scale(m.home.d.dir, k)), add(slot.pos, scale(slot.f, k)), slot.pos, true, SPEED.roadBack);
@@ -1152,6 +1152,22 @@ export class Garages {
   /** Едет ли машина в потоке к своему месту (и какому: у дома — id дома). */
   homingOf(simId: number): number | undefined {
     return this.homing.get(simId)?.spot.key;
+  }
+
+  /** Видимый манёвр выбранной машины и тот, кого она ждёт перед левым поворотом. */
+  activity(sim: Vehicle): TrafficActivity | undefined {
+    const move = this.moves.find((m) => m.sim === sim);
+    if (move?.phase === 'cross') {
+      const slot = this.leftSlotOf(move.home);
+      for (const cross of slot?.cross ?? []) {
+        const other = this.host.traffic.joinBlocker(cross.lane.id, ...cross.zone);
+        if (other) return { kind: 'yield', vehicle: other.id };
+      }
+      return { kind: 'yield' };
+    }
+    if (move) return { kind: 'parking' };
+    if (this.homing.get(sim.id)?.waitingForSpace) return { kind: 'parking-space' };
+    return;
   }
 
   /**

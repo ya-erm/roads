@@ -181,6 +181,7 @@ import { PARK_INFO } from '../world/parkPick';
 import { crewCardHtml } from './crewCard';
 import { workTrainCardHtml } from './workTrainCard';
 import { carTripHtml } from './carTrip';
+import { trafficActivityHtml } from './trafficActivity';
 import { SERVICES } from '../game/services';
 import { incomeChart, incomeLegend, monthTick } from './incomeChart';
 import { money, planPrice, projectMoneyWarning } from '../input/labels';
@@ -1612,6 +1613,14 @@ export class Hud {
       case 'show-station': {
         const st = g.stations.get(Number(d.id));
         if (st) c.showPlace(st.fp.center, footprintRadius(st.fp));
+        break;
+      }
+      case 'show-traffic-vehicle': {
+        const sim = g.traffic.vehicles.get(Number(d.id));
+        if (!sim) break;
+        const fleet = [...g.fleet.values()].find((v) => v.simId === sim.id);
+        c.selectFrom(fleet ? { type: 'fleet', id: fleet.id } : { type: 'vehicle', simId: sim.id });
+        c.focus(sim.pos, 1.2);
         break;
       }
       case 'pair-half': {
@@ -3917,7 +3926,7 @@ export class Hud {
       const fsim = g.fleetSim(fleet);
       const train = g.fleetTrain(fleet);
       const v = fsim?.v ?? train?.v ?? 0;
-      const trip = fsim ? `<span>В пути</span><b>${Math.round(fsim.tripTime)} с, стоял ${Math.round(fsim.stoppedTime)} с</b>` : '';
+      const trip = fsim ? `${trafficActivityHtml(g, fsim)}<span>В пути</span><b>${Math.round(fsim.tripTime)} с, стоял ${Math.round(fsim.stoppedTime)} с</b>` : '';
       return this.fleetCardHtml(fleet, Math.round(v * KMH_PER_UNIT), follow, trip);
     }
     const sim = g.traffic.vehicles.get(sel.simId);
@@ -3930,7 +3939,7 @@ export class Hud {
       const where = g.brigadeWhere(crew);
       const n = b ? g.construction.crews.of(b.base).indexOf(b) + 1 : 0;
       return `<section class="detail">${head(`🚚 Строительная бригада${n ? ` ${n}` : ''}`, b ? `база «${esc(g.baseName(b.base))}»` : undefined)}
-      <div class="kv near"><span>Сейчас</span><b>${esc(where?.text ?? '')}</b><span>Скорость</span><b>${speed} км/ч</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
+      <div class="kv near"><span>Сейчас</span><b>${esc(where?.text ?? '')}</b>${trafficActivityHtml(g, sim)}<span>Скорость</span><b>${speed} км/ч</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
       <div class="actions">${follow}</div></section>`;
     }
     // Спецмашина города: скорая, полиция, пожарная — с мигалкой или без.
@@ -3939,12 +3948,12 @@ export class Hud {
       const info = SERVICES[service];
       return `<section class="detail">${head(`${info.icon} ${info.name}`, sim.siren ? '🚨 С мигалкой — ей уступают дорогу' : 'Без мигалки')}
       ${carTripHtml(g, sim.id)}
-      <div class="kv near"><span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
+      <div class="kv near">${trafficActivityHtml(g, sim)}<span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
       <div class="actions">${follow}</div></section>`;
     }
     return `<section class="detail">${head('Машина жителя')}
       ${carTripHtml(g, sim.id)}
-      <div class="kv near"><span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
+      <div class="kv near">${trafficActivityHtml(g, sim)}<span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
       <div class="actions">${follow}<button class="small" data-action="car-destination" data-id="sim:${sim.id}">Поехать в…</button></div></section>`;
   }
 
