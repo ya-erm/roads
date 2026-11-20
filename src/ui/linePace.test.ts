@@ -7,7 +7,7 @@ import { linePaceHtml } from './linePace';
 
 describe('Темп в карточке маршрута', () => {
   it('по грузу — значок и «N/мин» с подсказкой, что это оценка; пока рейсов не было — первая доставка; машин нет — пусто', { timeout: 60_000 }, () => {
-    const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 5 }));
+    const game = withoutCitizens(new Game({ ...DEFAULT_SETTINGS, seed: 7 }));
     const { line, from, built } = freightRoute(game);
     expect(built).toBe(true);
     expect(linePaceHtml(game, line)).toBe('');

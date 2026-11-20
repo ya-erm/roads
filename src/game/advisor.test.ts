@@ -11,8 +11,8 @@ import { connectStations, freshGame, HIGHWAY, stationAtIndustry } from './testki
 import type { FleetVehicle, Line } from './transport';
 
 /** Песочница с маршрутом сырьё → ближайший завод: станции у обоих и грузовик. */
-function setup() {
-  const game = freshGame({ ...DEFAULT_SETTINGS, seed: 42 });
+function setup(seed = 42) {
+  const game = freshGame({ ...DEFAULT_SETTINGS, seed });
   game.money = 5_000_000;
   const plant = game.industries.find((i) => i.info.accepts.length === 1)!;
   const input = plant.info.accepts[0];
@@ -110,7 +110,7 @@ describe('Советник', () => {
   });
 
   it('маршрут не работает, маршрут без машин, машины ездят полупустыми', () => {
-    const { game, line, a, b, input } = setup();
+    const { game, line, a, b, input } = setup(7);
     line.problem = 'Нет дороги: A → B';
     expect(find(game, 'noRoute')[0]).toMatchObject({ level: 'alert', line: line.id, station: line.stops[0] });
     line.problem = null;

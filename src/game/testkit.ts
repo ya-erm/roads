@@ -147,9 +147,9 @@ export function stationExit(game: Game, nodeId: number): LaneNode {
 /** Станция вплотную к предприятию — со стороны точки toward (или с соседних сторон, если там нельзя). */
 export function stationAtIndustry(game: Game, ind: Industry, toward: Vec): Station | null {
   const base = Math.atan2(toward.y - ind.fp.center.y, toward.x - ind.fp.center.x);
-  for (const k of [0, 1, -1, 2]) {
-    const a = base + (k * Math.PI) / 2;
-    const reach = Math.hypot(ind.fp.w, ind.fp.h) / 2 + 20;
+  const directions = [base, ind.fp.angle].flatMap((angle) => [0, 1, -1, 2].map((side) => angle + side * Math.PI / 2));
+  const reach = Math.hypot(ind.fp.w, ind.fp.h) / 2 + 20;
+  for (const a of directions) {
     const st = game.placeStation({ x: ind.fp.center.x + Math.cos(a) * reach, y: ind.fp.center.y + Math.sin(a) * reach }, 14);
     if (st) return st;
   }
