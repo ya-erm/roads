@@ -36,6 +36,7 @@ import {
 import type { Deposit, Industry, Station, Town } from '../world/entities';
 import { industryFootprint } from '../world/industrySites';
 import { playerIndustries } from '../world/settings';
+import { levelIndustryGround, terrainFits } from '../world/sites';
 import { type Footprint, footprintCorners, footprintRadius } from '../world/spatial';
 import type { Game } from './game';
 import type { NewsRecipe } from './news';
@@ -210,7 +211,7 @@ export class Enterprises {
     }
     if (!isRaw(info) && this.deposits.some((d) => d.used === undefined && dist(d.center, fp.center) < footprintRadius(fp) / 2 + ENTERPRISE.deposits.radius))
       return fail('⛏️ Здесь месторождение — на нём только добыча', extra);
-    if (g.terrain.hasRelief && !deposit && g.terrain.slopeAt(fp.center) > ENTERPRISE.slope) return fail('Слишком круто: нужен ровный участок', extra);
+    if (!deposit && (!terrainFits(g.terrain, fp, 100) || g.terrain.slopeAt(fp.center) > ENTERPRISE.slope)) return fail('Слишком круто: нужен ровный участок', extra);
     const under = g.structuresUnder(fp, 2);
     if (under.blocker) return fail(under.blocker, extra);
     const road = g.roadUnder(fp, 2);
@@ -251,6 +252,10 @@ export class Enterprises {
   /** Новое предприятие на участке fp — в списке, индексе и охвате станций рядом. */
   private add(info: IndustryType, fp: Footprint, extra: Partial<Industry>): Industry {
     const g = this.game;
+    levelIndustryGround(g.terrain, fp, (work) => {
+      const under = g.structuresUnder(work, 0);
+      return !under.blocker && !under.houses.length && !g.roadUnder(work, 0);
+    });
     const nearest = [...g.towns].sort((a, b) => dist(a.center, fp.center) - dist(b.center, fp.center))[0];
     const ind: Industry = {
       type: 'industry',

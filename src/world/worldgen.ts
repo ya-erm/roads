@@ -12,9 +12,9 @@ import type { Network } from './network';
 import { lotClearOfRoads } from './lotClear';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN, WALK_EDGE } from './roadTypes';
 import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerIndustries, townCount, townSizes, WorldProfile, WorldSettings } from './settings';
-import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
+import { industryCount, levelIndustryGround, shoreFits, shoreSpot, terrainFits } from './sites';
 import { compoundOnLand, hasFields, hasPastures, industryFootprint } from './industrySites';
-import { Footprint, footprintAlong, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
+import { Footprint, footprintAlong, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
 import { edgeOf, growTier, hospitalBays, hospitalWidth, inDistrict, jobsOf, LANDMARK_YARD, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, yardOf, zoneTown } from './townForms';
 import { onPark, placeParks, type ParkSite } from './townParks';
@@ -206,11 +206,21 @@ export interface World {
 function playerWorld(ctx: WorldContext, towns: Town[], settings: WorldSettings, profile?: WorldProfile): World {
   for (const t of towns) measureTown(t);
   const { industries, deposits } = placePlayerWorld(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * industryFactor(settings), settings, profile);
+  levelIndustrySites(ctx, industries);
   layStartRoads(ctx, towns, industries, settings.seed);
   // Полосы стоянки — до парков и скверов: зелень встаёт уже у новой кромки.
   curbTowns(ctx, towns, settings);
   plantTowns(ctx, towns);
   return { towns, industries, deposits };
+}
+
+function levelIndustrySites(ctx: WorldContext, industries: readonly Industry[]): void {
+  for (const ind of industries) {
+    levelIndustryGround(ctx.terrain, ind.fp, (work) =>
+      !ctx.index.near(work.center, footprintRadius(work)).some((s) => s !== ind && footprintsOverlap(work, s.fp)) &&
+      clearOfRoads(ctx, work, 3) && !onRail(ctx.rail, work, 3),
+    );
+  }
 }
 
 /** Новая партия (WorldSettings.parking): полосы стоянки на улицах городов (world/curbStreets.ts) — последними, без ГСЧ. */
@@ -300,6 +310,7 @@ export function generateWorld(ctx: WorldContext, settings: WorldSettings = DEFAU
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   // Места для городов и предприятий выбраны по всем улицам; дальше радиус города — по плотной застройке.
   for (const t of towns) measureTown(t);
+  levelIndustrySites(ctx, industries);
   layStartRoads(ctx, towns, industries, settings.seed);
   // Полосы стоянки — до парков и скверов: зелень встаёт уже у новой кромки.
   curbTowns(ctx, towns, settings);
@@ -351,6 +362,7 @@ function generateProfiled(ctx: WorldContext, settings: WorldSettings, profile: W
   const placed = placeProfiled(ctx, towns, INDUSTRY_DENSITY[settings.industries].k * industryFactor(settings), profile, settings);
   const industries = settings.biome ? settleChains(ctx, towns, placed) : placed;
   for (const t of towns) measureTown(t);
+  levelIndustrySites(ctx, industries);
   layStartRoads(ctx, towns, industries, settings.seed);
   // Полосы стоянки — до парков и скверов: зелень встаёт уже у новой кромки.
   curbTowns(ctx, towns, settings);
@@ -395,12 +407,13 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
         const fp: Footprint = { center, w: info.w, h: info.h, angle: rng.range(-0.6, 0.6) };
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
         if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;
-        if (!relaxed && !terrainFits(terrain, center, attempt, MINING_KINDS.has(info.kind))) continue;
         if (!clear(center, info.kind)) continue;
         if (result.some((i) => dist(i.fp.center, center) < (relaxed ? RELAXED_GAP : 520))) continue;
         if (found.some((f) => dist(f.fp.center, center) < 520)) continue;
         if (index.overlaps(fp, 20)) continue;
-        found.push({ fp, score: plant ? supplierDist(center) : 0 });
+        const site = terrain.hasRelief ? compoundAt(ctx, info, fp) : fp;
+        if (!relaxed && !terrainFits(terrain, site, attempt)) continue;
+        found.push({ fp: site, score: plant ? supplierDist(center) : 0 });
       }
       const best = found.sort((a, b) => a.score - b.score)[0];
       if (!best) continue;
@@ -410,7 +423,7 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
         id: ctx.nextId(),
         info,
         name: nearest ? `${info.name} (${nearest.name})` : info.name,
-        fp: compoundAt(ctx, info, best.fp),
+        fp: terrain.hasRelief ? best.fp : compoundAt(ctx, info, best.fp),
         stock: {},
         output: 0,
         producedMonth: 0,
@@ -1316,17 +1329,18 @@ function placeIndustries(ctx: WorldContext, towns: Town[], density: number, sett
         const fp: Footprint = { center, w: info.w, h: info.h, angle: rng.range(-0.6, 0.6) };
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
         if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;
-        if (!relaxed && !terrainFits(terrain, center, attempt, MINING_KINDS.has(info.kind))) continue;
         if (!clear(center, info.kind)) continue;
         if (result.some((i) => dist(i.fp.center, center) < (relaxed ? RELAXED_GAP : 520))) continue;
         if (index.overlaps(fp, 20)) continue;
+        const site = compoundAt(ctx, info, fp);
+        if (!relaxed && !terrainFits(terrain, site, attempt)) continue;
         const nearest = towns.reduce<Town | null>((best, t) => (!best || dist(t.center, center) < dist(best.center, center) ? t : best), null);
         const industry: Industry = {
           type: 'industry',
           id: ctx.nextId(),
           info,
           name: nearest ? `${info.name} (${nearest.name})` : info.name,
-          fp: compoundAt(ctx, info, fp),
+          fp: site,
           stock: {},
           output: 0,
           producedMonth: 0,

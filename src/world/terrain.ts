@@ -254,6 +254,16 @@ export interface TerraformEdit {
    * а к воде — ослабевает по полосе берега, чтобы у реки не вырос обрыв. Нет поля — обычная кисть игрока.
    */
   pad?: number;
+  /** Прямоугольная площадка. r — ширина плавного перехода за её кромкой. */
+  area?: { w: number; h: number; angle: number };
+}
+
+function terraformReach(e: TerraformEdit): Vec {
+  if (!e.area) return { x: e.r, y: e.r };
+  const { w, h, angle } = e.area;
+  const ux = Math.abs(Math.cos(angle));
+  const uy = Math.abs(Math.sin(angle));
+  return { x: e.r + (w * ux + h * uy) / 2, y: e.r + (w * uy + h * ux) / 2 };
 }
 
 /** Ниже уровня воды на столько землю не копаем — иначе котлован затопило бы. */
@@ -785,7 +795,7 @@ export class Terrain {
   }
 
   /**
-   * Мазок кисти: изменение высоты в узлах сетки внутри круга, плавно к краю. write — применить,
+   * Мазок кисти: изменение высоты в узлах сетки, плавно к краю. write — применить,
    * иначе только посчитать. Ответ — объём грунта, м³.
    */
   private brush(e: TerraformEdit, write: boolean): number {
@@ -793,21 +803,29 @@ export class Terrain {
     const near = this.waterNear;
     if (!g || !near) return 0;
     const nx = this.gridW;
-    const i0 = Math.max(0, Math.floor((e.x - e.r) / HEIGHT_CELL));
-    const i1 = Math.min(nx - 1, Math.ceil((e.x + e.r) / HEIGHT_CELL));
-    const j0 = Math.max(0, Math.floor((e.y - e.r) / HEIGHT_CELL));
-    const j1 = Math.min(this.gridH - 1, Math.ceil((e.y + e.r) / HEIGHT_CELL));
+    const reach = terraformReach(e);
+    const i0 = Math.max(0, Math.floor((e.x - reach.x) / HEIGHT_CELL));
+    const i1 = Math.min(nx - 1, Math.ceil((e.x + reach.x) / HEIGHT_CELL));
+    const j0 = Math.max(0, Math.floor((e.y - reach.y) / HEIGHT_CELL));
+    const j1 = Math.min(this.gridH - 1, Math.ceil((e.y + reach.y) / HEIGHT_CELL));
+    const a = e.area;
+    const cos = a ? Math.cos(a.angle) : 1;
+    const sin = a ? Math.sin(a.angle) : 0;
     const floor = this.waterLevel + DIG_ABOVE_WATER;
     let volume = 0;
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
-        const d = Math.hypot(i * HEIGHT_CELL - e.x, j * HEIGHT_CELL - e.y);
+        const x = i * HEIGHT_CELL - e.x;
+        const y = j * HEIGHT_CELL - e.y;
+        const d = a
+          ? Math.hypot(Math.max(0, Math.abs(x * cos + y * sin) - a.w / 2), Math.max(0, Math.abs(-x * sin + y * cos) - a.h / 2))
+          : Math.hypot(x, y);
         const k = j * nx + i;
         if (d >= e.r || near[k] <= 0) continue;
-        const w =
-          e.pad === undefined
-            ? smoothStep(1 - d / e.r)
-            : smoothStep(Math.min(1, (e.r - d) / (e.r * (1 - e.pad)))) * smoothStep(Math.min(1, near[k] / BANK_BAND));
+        const fade = e.pad === undefined ? 1 - d / e.r : Math.min(1, (e.r - d) / (e.r * (1 - e.pad)));
+        const bank = a ? BANK_BAND / 4 : BANK_BAND;
+        const shore = a || e.pad !== undefined ? smoothStep(Math.min(1, near[k] / bank)) : 1;
+        const w = smoothStep(fade) * shore;
         const h = g[k];
         let next = h;
         if (e.mode === 'raise') next = h + e.amount * w;
@@ -831,7 +849,8 @@ export class Terrain {
     const v = this.brush(e, true);
     this.edits.push(e);
     this.version++;
-    this.markDirty(e.x - e.r, e.y - e.r, e.x + e.r, e.y + e.r);
+    const reach = terraformReach(e);
+    this.markDirty(e.x - reach.x, e.y - reach.y, e.x + reach.x, e.y + reach.y);
     return v;
   }
 
@@ -841,7 +860,10 @@ export class Terrain {
     const undone = this.edits.splice(n);
     this.grid.set(this.base);
     for (const e of this.edits) this.brush(e, true);
-    for (const e of undone) this.markDirty(e.x - e.r, e.y - e.r, e.x + e.r, e.y + e.r);
+    for (const e of undone) {
+      const reach = terraformReach(e);
+      this.markDirty(e.x - reach.x, e.y - reach.y, e.x + reach.x, e.y + reach.y);
+    }
     this.version++;
   }
 

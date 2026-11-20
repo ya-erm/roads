@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { Rng } from '../core/rng';
 import type { Vec } from '../core/vec';
 import { Game } from '../game/game';
+import { INDUSTRY_TYPES } from './cargo';
+import { industryFootprint, sitePoint } from './industrySites';
 import { DEFAULT_SETTINGS } from './settings';
-import { Terrain } from './terrain';
+import { levelIndustryGround, terrainFits } from './sites';
+import { footprintCorners, footprintRadius } from './spatial';
+import { HEIGHT_CELL, Terrain } from './terrain';
 import { townRelief, townSites } from './worldgen';
 
 const settings = (relief: 'hills' | 'mountains' | undefined, seed: number) => ({ ...DEFAULT_SETTINGS, seed, size: 'small' as const, relief });
@@ -70,5 +74,56 @@ describe('Города и рельеф', () => {
     for (const d of [0, 100, 190]) expect(t.heightAt({ x: c.x + d, y: c.y })).toBeCloseTo(target, 0);
     const edge = { x: c.x + 399, y: c.y };
     expect(Math.abs(t.heightAt(edge) - raw.heightAt(edge))).toBeLessThan(0.5);
+  });
+});
+
+function spread(terrain: Terrain, points: Vec[]): number {
+  const heights = points.map((p) => terrain.heightAt(p));
+  return Math.max(...heights) - Math.min(...heights);
+}
+
+describe('Рельеф предприятий', () => {
+  it('ровный центр не делает площадку подходящей, если удалённые поля попали на склон', () => {
+    const fp = industryFootprint(INDUSTRY_TYPES.farm, { x: 500, y: 500 }, 0);
+    const terrain = { hasRelief: true, heightAt: (p: Vec) => Math.max(0, 430 - p.x) * 0.35 };
+    expect(terrainFits(terrain, { ...fp, parts: undefined }, 0)).toBe(true);
+    expect(terrainFits(terrain, fp, 0)).toBe(false);
+  });
+
+  it('площадки горной карты становятся ровнее и переживают загрузку', () => {
+    const config = { ...settings('mountains', 7), industryMode: 'player' as const };
+    const game = new Game(config);
+    const save = game.toSave();
+    const graded = save.terraform?.filter((edit) => edit.area) ?? [];
+    expect(graded.length).toBeGreaterThan(0);
+    const before = new Game(config, { ...save, terraform: save.terraform?.filter((edit) => !edit.area) });
+    const loaded = new Game(config, JSON.parse(JSON.stringify(save)));
+    for (const edit of graded) {
+      const area = { ...edit.area!, center: { x: edit.x, y: edit.y } };
+      const points = footprintCorners({ ...area, w: area.w - 2 * HEIGHT_CELL, h: area.h - 2 * HEIGHT_CELL });
+      expect(spread(game.terrain, points)).toBeLessThan(spread(before.terrain, points) * 0.55 + 0.5);
+      for (const p of points) expect(loaded.terrain.heightAt(p)).toBeCloseTo(game.terrain.heightAt(p), 5);
+    }
+  });
+
+  it('срезает перепад под складом и полями, сохраняя высоту за краем выравнивания', () => {
+    const config = { ...settings('mountains', 19), water: 'dry' as const };
+    const terrain = new Terrain(new Rng(config.seed), config);
+    const angle = Math.PI / 5;
+    const site = [{ x: 1200, y: 900 }, { x: 1600, y: 1400 }, { x: 2000, y: 1800 }]
+      .map((p) => industryFootprint(INDUSTRY_TYPES.farm, p, angle))
+      .find((fp) => !terrain.isWater(fp.center, footprintRadius(fp) + 70) && spread(terrain, footprintCorners(fp)) > 10)!;
+    expect(site).toBeDefined();
+    const points = footprintCorners(site);
+    const before = spread(terrain, points);
+    const outside = sitePoint(site, [0, 7]);
+    const untouched = terrain.heightAt(outside);
+    levelIndustryGround(terrain, site, () => false);
+    expect(terrain.edits).toHaveLength(0);
+    levelIndustryGround(terrain, site, () => true);
+    expect(spread(terrain, points)).toBeLessThan(before * 0.1);
+    expect(terrain.heightAt(outside)).toBe(untouched);
+    terrain.truncateEdits(0);
+    expect(spread(terrain, points)).toBe(before);
   });
 });

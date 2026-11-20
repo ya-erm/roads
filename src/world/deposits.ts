@@ -11,7 +11,7 @@ import { buildableKinds, depositFootprint, depositRichness, harmClass, isRaw, ob
 import type { Deposit, Industry, Town } from './entities';
 import { industryFootprint } from './industrySites';
 import type { WorldProfile, WorldSettings } from './settings';
-import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
+import { industryCount, industryReliefSpread, shoreFits, shoreSpot, terrainFits } from './sites';
 import { type Footprint, footprintRadius, footprintsOverlap } from './spatial';
 import { clearOfRoads, type WorldContext } from './worldgen';
 
@@ -52,6 +52,8 @@ export function placeDeposits(ctx: WorldContext, towns: Town[], density: number,
     if (!isRaw(info)) continue;
     const count = industryCount(settings, info.kind, info.count * density * ENTERPRISE.deposits.share * (profile?.raw ?? 1));
     for (let n = 0; n < count; n++) {
+      let best: Footprint | undefined;
+      let bestSpread = Infinity;
       for (let attempt = 0; attempt < RELAXED; attempt++) {
         const relaxed = attempt >= ATTEMPTS;
         let center = { x: rng.range(300, terrain.width - 300), y: rng.range(300, terrain.height - 300) };
@@ -64,16 +66,23 @@ export function placeDeposits(ctx: WorldContext, towns: Town[], density: number,
         const fp = industryFootprint(info, center, rng.range(-0.6, 0.6));
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
         if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;
-        if (!relaxed && !terrainFits(terrain, center, attempt, MINING_KINDS.has(info.kind))) continue;
         if (towns.some((t) => townGap(t, fp) < TOWN_GAP)) continue;
         if (out.some((d) => dist(d.center, center) < (relaxed ? RELAXED_GAP : GAP))) continue;
         if (index.overlaps(fp, 20) || !clearOfRoads(ctx, fp, 8)) continue;
-        const d: Deposit = { id: ctx.nextId(), kind: info.kind, center, angle: fp.angle, size: rollSize(rng.next()), parts: fp.parts, groundParts: fp.groundParts, compound: fp.compound };
-        out.push(d);
-        // Лесной участок — это лес: деревья вокруг, как раньше у лесозаготовки.
-        if (info.kind === 'forest') terrain.addForest(center, 220, rng);
-        break;
+        if (terrainFits(terrain, fp, attempt)) {
+          best = fp;
+          break;
+        }
+        const spread = industryReliefSpread(terrain, fp);
+        if (spread < bestSpread) {
+          best = fp;
+          bestSpread = spread;
+        }
       }
+      if (!best) continue;
+      const { center, angle, parts, groundParts, compound } = best;
+      out.push({ id: ctx.nextId(), kind: info.kind, center, angle, size: rollSize(rng.next()), parts, groundParts, compound });
+      if (info.kind === 'forest') terrain.addForest(center, 220, rng);
     }
   }
   return out;
@@ -124,6 +133,7 @@ export function townSpot(
   const half = Math.hypot(info.w, info.h) / 2;
   // В черте — по кольцу у края застройки; за ней — шагами наружу.
   const rings = opts.inside ? [edge - half * 0.4, edge - half * 0.9, edge - half * 1.5, edge] : range(edge + half / 2 + (opts.from ?? 0), edge + half / 2 + (opts.to ?? 600), 60);
+  let fallback: Footprint | null = null;
   for (const r of rings) {
     if (r <= 40) continue;
     for (let k = 0; k < 32; k++) {
@@ -138,10 +148,11 @@ export function townSpot(
       if (index.overlaps(fp, 6) || !clearOfRoads(ctx, fp, 6)) continue;
       if (ctx.roads.nodesNear(center, half + 12).length) continue;
       if (opts.deposits?.some((d) => dist(d.center, center) < half + ENTERPRISE.deposits.radius)) continue;
-      return fp;
+      if (terrainFits(terrain, fp, k)) return fp;
+      fallback ??= fp;
     }
   }
-  return null;
+  return fallback;
 }
 
 function range(a: number, b: number, step: number): number[] {

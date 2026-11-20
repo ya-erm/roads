@@ -6,15 +6,10 @@ import type { Rng } from '../core/rng';
 import type { Vec } from '../core/vec';
 import { industryShare } from './biomes';
 import type { IndustryKind } from './cargo';
+import { sitePoint } from './industrySites';
 import type { WorldSettings } from './settings';
-import { Footprint, footprintRadius } from './spatial';
-import type { Terrain } from './terrain';
-
-/** Предприятия хотят относительно ровное место (уклон рельефа, м/м); города — см. townSites. */
-export const FLAT_SLOPE = 0.18;
-/** Шахты, рудники и карьеры тяготеют к склонам холмов. */
-export const MINING_KINDS = new Set<IndustryKind>(['coalmine', 'ironmine', 'quarry', 'gemmine', 'coppermine', 'goldmine']);
-const HILL_SLOPE = 0.035;
+import { type Footprint, type Plot, footprintRadius } from './spatial';
+import { HEIGHT_CELL, type Terrain } from './terrain';
 
 /** Рыбаки — на берегу (до воды не дальше стольких единиц от края участка); остальным «у воды» — до SHORE_FAR. */
 const SHORE_NEAR = 120;
@@ -69,12 +64,65 @@ export function industryCount(settings: WorldSettings, kind: IndustryKind, base:
   return share > 0 ? Math.max(1, Math.round(base * share)) : 0;
 }
 
-/** Место для завода — ровное; для шахты, рудника, карьера — на склоне холма.
- *  Без рельефа (старые миры) slopeAt всюду 0 и это условие ничего не отсеивает. Порог мягко
- *  растёт (для равнинных) или падает (для холмистых) с номером попытки — на крутом мире место
- *  всё равно найдётся. */
-export function terrainFits(terrain: Terrain, p: Vec, attempt: number, mining = false): boolean {
+/** Общая площадка под корпусами, полями и внутренними проездами. */
+function industryGround(fp: Footprint): Footprint {
+  if (!fp.parts) return fp;
+  const points = fp.parts.flat();
+  const l = Math.min(...points.map((p) => p.x));
+  const r = Math.max(...points.map((p) => p.x));
+  const t = Math.min(...points.map((p) => p.y));
+  const b = Math.max(...points.map((p) => p.y));
+  return { center: sitePoint(fp, [(l + r) / 2, (t + b) / 2]), angle: fp.angle, w: (r - l) * fp.w, h: (b - t) * fp.h };
+}
+
+function groundHeights(terrain: Pick<Terrain, 'heightAt'>, area: Footprint): { spread: number; mean: number } {
+  const nx = Math.max(2, Math.ceil(area.w / 36));
+  const ny = Math.max(2, Math.ceil(area.h / 36));
+  let lo = Infinity;
+  let hi = -Infinity;
+  let sum = 0;
+  for (let i = 0; i <= nx; i++) {
+    for (let j = 0; j <= ny; j++) {
+      const h = terrain.heightAt(sitePoint(area, [i / nx - 0.5, j / ny - 0.5]));
+      lo = Math.min(lo, h);
+      hi = Math.max(hi, h);
+      sum += h;
+    }
+  }
+  return { spread: hi - lo, mean: sum / ((nx + 1) * (ny + 1)) };
+}
+
+export function industryReliefSpread(terrain: Terrain, fp: Footprint): number {
+  return groundHeights(terrain, industryGround(fp)).spread;
+}
+
+const RECTANGLE: Plot = [{ x: -0.5, y: -0.5 }, { x: 0.5, y: -0.5 }, { x: 0.5, y: 0.5 }, { x: -0.5, y: 0.5 }];
+
+/** Смотрим на перепад по всей территории. Чем дольше ищем, тем больше допустимый перепад. */
+export function terrainFits(terrain: Pick<Terrain, 'hasRelief' | 'heightAt'>, fp: Footprint, attempt: number): boolean {
   if (!terrain.hasRelief) return true;
-  const slope = terrain.slopeAt(p);
-  return mining ? slope >= HILL_SLOPE * Math.max(0, 1 - attempt / 100) : slope <= FLAT_SLOPE * (1 + attempt / 50);
+  const area = industryGround(fp);
+  return groundHeights(terrain, area).spread <= 5 + Math.max(area.w, area.h) * 0.025 + Math.min(18, attempt / 7);
+}
+
+/** Выравниваем уже выбранный участок. Проверка clear бережёт существующие дороги и соседние постройки. */
+export function levelIndustryGround(terrain: Terrain, fp: Footprint, clear: (work: Footprint) => boolean): void {
+  if (!terrain.hasRelief) return;
+  const area = industryGround(fp);
+  const { spread, mean } = groundHeights(terrain, area);
+  if (spread < 3) return;
+  const w = area.w + 2 * HEIGHT_CELL;
+  const h = area.h + 2 * HEIGHT_CELL;
+  const preferred = Math.max(60, spread * 3.5);
+  const short = Math.max(32, spread * 2.5);
+  for (const r of [preferred, short]) {
+    const extent = 2 * (r + HEIGHT_CELL);
+    const work = { ...area, w: w + extent, h: h + extent, parts: [RECTANGLE] };
+    if (!terrain.inBounds(work.center, footprintRadius(work)) || !clear(work)) continue;
+    terrain.terraform({
+      x: area.center.x, y: area.center.y, r, mode: 'flatten', amount: 1.9,
+      target: Math.max(mean, terrain.waterLevel + 1), area: { w, h, angle: area.angle },
+    });
+    return;
+  }
 }
