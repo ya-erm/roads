@@ -4654,8 +4654,18 @@ export class Controller {
           if (plan.fp) o.ghosts = this.hallGhosts(b, plan);
           if (plan.fp && turns) o.turnHandle = { pos: this.buildingHandle({ ...b, fp: plan.fp, face: plan.face }), pivot: plan.fp.center, active: false };
           const with_ = plan.plaza ? ` ${PARK_INFO.plaza.icon} с площадью` : '';
+          let coverage = '';
+          if (plan.ok && plan.fp) {
+            const move = g.receiverMoveStations(b, plan.fp.center);
+            if (move) {
+              const { town, r, stations } = move;
+              o.receiverMovePreview = { receiver: { town, r, b: { ...b, fp: plan.fp, face: plan.face } }, stations };
+              coverage = stations.length === 0 ? ' · Вне охвата грузовых станций'
+                : stations.length === 1 ? ` · В охвате «${stations[0].name}»` : ` · Грузовых станций в охвате — ${stations.length}`;
+            }
+          }
           o.label = plan.ok
-            ? { text: `Перенести сюда${with_}${turnLabel(plan.turn, turns)} · ${money(plan.cost)} · Esc — отмена`, ok: true }
+            ? { text: `Перенести сюда${with_}${turnLabel(plan.turn, turns)} · ${money(plan.cost)}${coverage} · Esc — отмена`, ok: true, warn: o.receiverMovePreview?.stations.length === 0 }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }

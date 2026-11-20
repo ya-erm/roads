@@ -171,6 +171,8 @@ export interface ToolOverlay {
   catchmentR: number;
   /** Магазины будущей станции: связи и подсветка до размещения или переноса. */
   receiverPreview?: { at: Vec; receivers: ReturnType<Game['stationReceivers']> };
+  /** Связи грузополучателя с существующими станциями после переноса. */
+  receiverMovePreview?: { receiver: ReturnType<Game['stationReceivers']>[number]; stations: Station[] };
   /** Обгонный путь будущего вокзала. */
   railPreview: Cubic[] | null;
   /** Будущий ж/д сигнал: где и для какого направления (или какой снимем). */
@@ -4438,8 +4440,9 @@ export class Renderer {
     const goal = goalShops(game);
     const close = z >= RECEIVER_ZOOM;
     const preview = o.receiverPreview;
+    const move = o.receiverMovePreview;
     const connected = new Set(preview?.receivers.map(({ b }) => b.id));
-    if (!close && !focus.size && !goal.size && !preview) return;
+    if (!close && !focus.size && !goal.size && !preview && !move) return;
     const inView = (p: Vec, pad: number) => p.x > view.x0 - pad && p.x < view.x1 + pad && p.y > view.y0 - pad && p.y < view.y1 + pad;
     const pulse = 0.5 + 0.5 * Math.sin((performance.now() / 1000) * 5);
     // От станции — к её получателям: линии под значками.
@@ -4468,12 +4471,14 @@ export class Renderer {
       }
     };
     if (z >= STATION_LINKS_ZOOM && !preview) {
+      const exclude = move ? [move.receiver.b.id] : [];
       for (const st of game.stations.values()) {
         if (st.kind === 'dock' || !st.serves.cargo || !inView(st.fp.center, 300)) continue;
-        links(st.fp.center, game.stationReceivers(st));
+        links(st.fp.center, game.stationReceivers(st, exclude));
       }
     }
     if (preview) links(preview.at, preview.receivers, true);
+    if (move) for (const st of move.stations) links(st.fp.center, [move.receiver], true);
     for (const town of game.towns) {
       if (!town.receivers?.length || !inView(town.center, (town.extent ?? town.radius) + 200)) continue;
       const byId = this.buildingsOf(town);

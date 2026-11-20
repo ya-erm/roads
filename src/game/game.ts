@@ -8383,6 +8383,25 @@ export class Game implements BuildContext {
     return (exit ? 2 : 0) + (wide ? 1 : 0) - hw / 100 - Math.abs(edge - 0.9);
   }
 
+  private receiverCatchment(st: Pick<Station, 'kind' | 'fp' | 'serves'>, town: Town): number {
+    const radius = this.catchmentRadius(st);
+    return dist(town.center, st.fp.center) <= (town.extent ?? town.radius) + radius + 50 ? radius : 0;
+  }
+
+  /** Грузовые станции, которые охватят получателя на новом месте. */
+  receiverMoveStations(b: TownBuilding, at: Vec): { town: Town; r: Receiver; stations: Station[] } | null {
+    if (!this.retail) return null;
+    const town = this.townOf(b);
+    const r = town && receiverOf(town, b.id);
+    if (!town || !r || r.depot) return null;
+    const stations = [...this.stations.values()].filter((st) => {
+      if (st.kind === 'dock' || !st.serves.cargo) return false;
+      const radius = this.receiverCatchment(st, town);
+      return radius > 0 && dist(st.fp.center, at) <= radius;
+    });
+    return { town, r, stations };
+  }
+
   /** Получатели в охвате размещённой или будущей станции; exclude — дома под сносом. У станции у получателя — он сам. */
   stationReceivers(st: Pick<Station, 'kind' | 'fp' | 'serves' | 'dock'>, exclude: readonly number[] = []): { town: Town; r: Receiver; b: TownBuilding }[] {
     const out: { town: Town; r: Receiver; b: TownBuilding }[] = [];
@@ -8395,10 +8414,10 @@ export class Game implements BuildContext {
       return out;
     }
     if (!st.serves.cargo) return out;
-    const R = this.catchmentRadius(st);
     for (const town of this.towns) {
       if (!town.receivers?.length) continue;
-      if (dist(town.center, st.fp.center) > (town.extent ?? town.radius) + R + 50) continue;
+      const R = this.receiverCatchment(st, town);
+      if (!R) continue;
       const byId = new Map(town.buildings.map((b) => [b.id, b]));
       for (const r of town.receivers) {
         // Оптовая база — склад-пересадка, а не потребитель: станция рядом ей не сдаёт.
