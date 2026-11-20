@@ -1,5 +1,5 @@
 import { CARGO, type CargoType } from '../world/cargo';
-import type { CompoundSection, SectionKind } from '../world/industryCompound';
+import type { CompoundSection } from '../world/industryCompound';
 import type { Art } from './industryArt';
 
 const BULK = new Set<CargoType>(['coal', 'ore', 'copperore', 'sand', 'clay', 'stone', 'gold', 'gems']);
@@ -60,17 +60,16 @@ export function paintIndustrySection(
       a.gable(x + 4, y + 3, W - 8, H * (service ? 0.45 : 0.53), service ? 5 : 8, service ? '#7a806f' : roof, true);
       a.patch(x + 4, y + H * 0.60, W - 8, H * 0.34, '#b4b6b1');
       a.rows(x + 5, y + H * 0.64, W - 10, H * 0.24, 6, '#e4e1d5', true, 0.6);
-      a.truck(cx + W * 0.21, y + H * 0.76, false, '#dab657', '#d4d5cb');
       if (!service) a.box(x + W * 0.14, y + H * 0.68, 6, 4, 2.5, '#a3a6a8');
       return;
     }
     case 'warehouse':
     case 'receiving':
-      cargoYard(a, section.kind, section.cargo ?? cargo, x, y, W, H, roof, seed);
+      cargoYard(a, section.cargo ?? cargo, x, y, W, H, roof, seed);
   }
 }
 
-function cargoYard(a: Art, kind: SectionKind, cargo: CargoType, x: number, y: number, w: number, h: number, roof: string, seed: number): void {
+function cargoYard(a: Art, cargo: CargoType, x: number, y: number, w: number, h: number, roof: string, seed: number): void {
   const tone = CARGO[cargo].color;
   a.patch(x + 1, y + 1, w - 2, h - 2, '#bfc0b7', 2);
   if (BULK.has(cargo)) {
@@ -86,5 +85,4 @@ function cargoYard(a: Art, kind: SectionKind, cargo: CargoType, x: number, y: nu
     a.box(x + 5, y + h * 0.51, w - 10, 2, 2, '#9ea5a9');
     for (let k = 0; k < Math.floor((w - 8) / 7); k++) a.box(x + 5 + k * 7, y + h * 0.66, 5.8, h * 0.25, 3, k % 2 ? tone : '#c8a56b', 1.1);
   }
-  if (kind === 'receiving') a.vehicle(x + w * 0.70, y + h * 0.82, 5, 3.6, '#dbb048');
 }

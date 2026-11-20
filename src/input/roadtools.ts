@@ -206,10 +206,14 @@ export class RoadTools {
 
   // ---------- Строить ----------
 
+  roadAnchor(p: Vec, r: number): Anchor {
+    return this.game().roadAnchorAt(p, r, this.level, this.net);
+  }
+
   /** Начать дорогу, если ещё не начата. true — только что начали (ждём второй клик или отпускание). */
   begin(p: Vec, r: number): boolean {
     if (this.start) return false;
-    this.start = anchorAt(this.net, p, r, this.level);
+    this.start = this.roadAnchor(p, r);
     this.control = null;
     return true;
   }
@@ -228,12 +232,12 @@ export class RoadTools {
       const a = base + Math.round((angleOf(d) - base) / step) * step;
       const l = Math.max(10, Math.round(len(d) / 10) * 10);
       const q = add(s.pos, scale({ x: Math.cos(a), y: Math.sin(a) }, l));
-      const near = anchorAt(this.net, q, r * 0.5, this.level);
-      return near.kind === 'node' ? near : { kind: 'free', pos: q, level: this.level };
+      const near = this.roadAnchor(q, r * 0.5);
+      return near.kind === 'node' || (near.kind === 'free' && near.stationGate) ? near : { kind: 'free', pos: q, level: this.level };
     }
-    const a = anchorAt(this.net, p, r, this.level);
+    const a = this.roadAnchor(p, r);
     // Прямая от дороги сама прилипает к её продолжению (180°) или перпендикуляру (90°); с free — нет.
-    if (a.kind === 'free' && s && !free) {
+    if (a.kind === 'free' && !a.stationGate && s && !free) {
       const aim = aimAlong(s.pos, p, this.startDirs());
       if (aim) {
         this.hint = aim.hint;
@@ -245,6 +249,7 @@ export class RoadTools {
 
   /** Направления «прямо» от начала: продолжения дорог узла или вдоль полотна. */
   private startDirs(): Vec[] {
+    if (this.start?.kind === 'free' && this.start.stationGate) return [this.start.stationGate.outward];
     return this.start ? roadDirs(this.net, this.start) : [];
   }
 
@@ -259,9 +264,10 @@ export class RoadTools {
 
   /** Концы дороги: свободные концы — на уровне level (если задан), у узлов — их уровень. */
   private ends(p: Vec, r: number, shift: boolean, free: boolean, level?: number): [Anchor, Anchor] {
-    const start = level !== undefined && this.start!.kind === 'free' ? { ...this.start!, level } : this.start!;
+    const anchor = this.start!;
+    const start = level !== undefined && anchor.kind === 'free' && !anchor.stationGate ? { ...anchor, level } : anchor;
     const end = this.endAnchor(p, r, shift, free);
-    return [start, level !== undefined && end.kind === 'free' ? { ...end, level } : end];
+    return [start, level !== undefined && end.kind === 'free' && !end.stationGate ? { ...end, level } : end];
   }
 
   buildPlan(p: Vec, spec: RoadSpec, mode: DrawMode, r: number, shift: boolean, free = false, level?: number): RoadPlan | null {
@@ -349,7 +355,7 @@ export class RoadTools {
     const groundAt = g.ground();
     if (!groundAt || !ground.net) return null;
     const startLevel = this.anchorLevel(this.net, start);
-    const endFixed = end.kind === 'free' ? undefined : this.anchorLevel(this.net, end);
+    const endFixed = end.kind === 'free' && !end.stationGate ? undefined : this.anchorLevel(this.net, end);
     const plainFail = !ground.ok && /^(Насыпь|Выемка)/.test(ground.reason ?? '');
     if (this.rise === null && !plainFail && startLevel === 0 && (endFixed ?? 0) === 0) return null;
     const path = this.pathOf(ground.net, start.pos);
@@ -365,7 +371,7 @@ export class RoadTools {
     const prof = designProfile(h, ds, GRADE.road, { start: z0, end: z1 }, GRADE.smooth);
     // До цели не дотянуть и мостом: от начала до конца круче, чем можно дороге, — та же ошибка, что у моста.
     if (prof.steep) return { ...ground, ok: false, reason: steepText((z1 - z0) / path.length, GRADE.road) };
-    const pts = autoLevels(prof.z, h, ds, GRADE.roadDepth, LEVEL_RUN + 10, { start: start.kind === 'free' ? undefined : startLevel, end: endFixed });
+    const pts = autoLevels(prof.z, h, ds, GRADE.roadDepth, LEVEL_RUN + 10, { start: start.kind === 'free' && !start.stationGate ? undefined : startLevel, end: endFixed });
     if (pts.every((q) => q.level === 0)) return null;
     // Та же дорога, что нарисовал игрок (прямо, дугой, кривой): смены уровня — стыки на ней, форма в плане не меняется.
     const a: Anchor = start.kind === 'free' ? { ...start, level: pts[0].level } : start;
@@ -441,7 +447,7 @@ export class RoadTools {
   private valid(a: Anchor): boolean {
     if (a.kind === 'node') return this.net.nodes.has(a.node);
     if (a.kind === 'corridor') return this.net.corridors.has(a.corridor);
-    return true;
+    return !a.stationGate || this.game().stations.has(a.stationGate.id);
   }
 
   // ---------- Полоса ----------
@@ -782,7 +788,8 @@ export class RoadTools {
 
   private stationNodes(): Set<number> {
     // Узел станции у получателя — обычный перекрёсток за его двором (меняется вместе с сетью): его можно править.
-    return new Set([...this.game().stations.values()].filter((s) => s.kind !== 'dock').map((s) => s.nodeId));
+    const game = this.game();
+    return new Set([...game.stations.values()].filter((s) => s.kind !== 'dock').flatMap((s) => game.stationRoadNodes(s)));
   }
 
   /**

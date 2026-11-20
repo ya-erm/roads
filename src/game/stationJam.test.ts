@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Game } from './game';
 import { type Approach, JAM_DELAY, JAM_REACH, jamShown, nextJam, queuedAt } from './stationJam';
-import { fieldSpot, road, withoutCitizens } from './testkit';
+import { fieldSpot, freightRoute, freshGame, road, runUntil, withoutCitizens } from './testkit';
 import { DEFAULT_RULE } from './transport';
 
 const at = (station: number, o: Partial<Approach> = {}): Approach => ({ station, line: 1, blocked: false, stopped: false, dist: 50, ...o });
@@ -52,6 +52,34 @@ describe('Очередь на въезд: когда предупреждать'
 });
 
 describe('Очередь на въезд в игре', { timeout: 60_000 }, () => {
+  it('занятый дорожный выезд не блокирует свободные посты, а сам манёвр не считается затором', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { built, line, sA, sB } = freightRoute(game);
+    expect(built).toBe(true);
+    expect(sB.industryId).not.toBeNull();
+    const out = game.roads.route(sB.nodeId, sA.nodeId)![0];
+    const spawnPoint = game.traffic.spawnPoint.bind(game.traffic);
+    let blocked = true;
+    const gap = vi.spyOn(game.traffic, 'spawnPoint').mockImplementation((route, ...args) =>
+      blocked && route[0] === out ? null : spawnPoint(route, ...args),
+    );
+    try {
+      const trucks = [game.buyVehicle(line.id, 'truck')!, game.buyVehicle(line.id, 'truck')!];
+      expect(runUntil(game, 180, () => trucks.every((v) => v.inBay && v.stop === 1 && game.departWait(v) > 0))).toBe(true);
+      expect(sB.occupied).toHaveLength(2);
+      expect(trucks.every((v) => !v.yardExit)).toBe(true);
+
+      blocked = false;
+      expect(runUntil(game, 2, () => trucks.some((v) => !!v.yardExit))).toBe(true);
+      const leaving = trucks.find((v) => !!v.yardExit)!;
+      expect(game.departWait(leaving)).toBe(0);
+      expect(runUntil(game, 45, () => trucks.every((v) => v.state === 'driving' && v.stop === 0))).toBe(true);
+      expect(sB.occupied).toHaveLength(0);
+    } finally {
+      gap.mockRestore();
+    }
+  });
+
   it('все посты заняты автобусами, остальные ждут у въезда — станция и маршрут предупреждают; пост добавили — очередь ушла', () => {
     const game = withoutCitizens(new Game(42));
     game.money = 5_000_000;

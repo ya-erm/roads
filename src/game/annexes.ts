@@ -18,11 +18,20 @@ export function growthCap(ind: Industry): number {
 
 export function moduleEffect(ind: Industry, kind: IndustryModule): string {
   const module = INDUSTRY_MODULES[kind];
-  if (module.storage) return `+${module.storage} ед. запаса продукции`;
+  const logistics = moduleLogisticsEffect(kind);
+  if (module.storage) return `+${module.storage} ед. запаса продукции, ${logistics}`;
   const max = ind.cap ?? ECONOMY.maxLevel;
   const gain = Math.min(1, max - growthCap(ind));
   const rate = `+${Math.round(module.rate * 100)}% к выпуску`;
-  return gain > 0 && kind !== 'service' && kind !== 'receiving' && kind !== 'receivingSecond' ? `${rate}, +${gain} к пределу роста` : rate;
+  if (logistics) return `${rate}, ${logistics}`;
+  return gain > 0 && kind !== 'service' ? `${rate}, +${gain} к пределу роста` : rate;
+}
+
+export function moduleLogisticsEffect(kind: IndustryModule): string {
+  const module = INDUSTRY_MODULES[kind];
+  if ('loading' in module) return `+${Math.round(module.loading * 100)}% к скорости погрузки продукции`;
+  if ('unloading' in module) return `+${Math.round(module.unloading * 100)}% к скорости разгрузки сырья`;
+  return '';
 }
 
 const ROAD_COST_PER_METER = 70;

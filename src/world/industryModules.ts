@@ -1,4 +1,4 @@
-import { CARGO } from './cargo';
+import { CARGO, type CargoType } from './cargo';
 import type { Annex, Industry } from './entities';
 import type { SectionKind } from './industryCompound';
 import { hasFields, hasPastures, isOpenPit } from './industrySites';
@@ -10,10 +10,10 @@ export const INDUSTRY_MODULES = {
   pit: { name: 'Дополнительный забой', cost: 42_000, w: 82, h: 64, rate: 0.30, storage: 0 },
   well: { name: 'Дополнительная скважина', cost: 38_000, w: 46, h: 34, rate: 0.25, storage: 0 },
   workshop: { name: 'Производственный цех', cost: 36_000, w: 58, h: 40, rate: 0.20, storage: 0 },
-  warehouse: { name: 'Склад продукции', cost: 18_000, w: 38, h: 29, rate: 0, storage: 200 },
+  warehouse: { name: 'Склад продукции', cost: 18_000, w: 38, h: 29, rate: 0, storage: 200, loading: 0.25 },
   service: { name: 'Ремонтная мастерская', cost: 16_000, w: 38, h: 27, rate: 0.10, storage: 0 },
-  receiving: { name: 'Двор сырья', cost: 18_000, w: 50, h: 38, rate: 0.08, storage: 0 },
-  receivingSecond: { name: 'Двор сырья', cost: 18_000, w: 50, h: 38, rate: 0.08, storage: 0 },
+  receiving: { name: 'Двор сырья', cost: 18_000, w: 50, h: 38, rate: 0.08, storage: 0, unloading: 0.40 },
+  receivingSecond: { name: 'Двор сырья', cost: 18_000, w: 50, h: 38, rate: 0.08, storage: 0, unloading: 0.40 },
 } as const;
 
 export type IndustryModule = keyof typeof INDUSTRY_MODULES;
@@ -63,4 +63,20 @@ export function industryModuleRate(ind: Industry): number {
 
 export function industryOutputCapacity(ind: Industry): number {
   return 300 + (ind.annexes ?? []).reduce((cap, annex) => cap + (!annex.automatic && annex.module ? INDUSTRY_MODULES[annex.module].storage : 0), 0);
+}
+
+export function industryLoadingRate(ind: Industry): number {
+  const warehouses = ind.annexes?.filter((annex) => !annex.automatic && annex.module === 'warehouse').length ?? 0;
+  return 1 + warehouses * INDUSTRY_MODULES.warehouse.loading;
+}
+
+export function industryUnloadingRate(ind: Industry, cargo: CargoType): number {
+  let rate = 1;
+  for (const annex of ind.annexes ?? []) {
+    const kind = annex.module;
+    if (!annex.automatic && (kind === 'receiving' || kind === 'receivingSecond') && moduleCargo(ind, kind) === cargo) {
+      rate += INDUSTRY_MODULES[kind].unloading;
+    }
+  }
+  return rate;
 }

@@ -12,7 +12,7 @@ import { type Beside, besideGhost, besideRun, besideTrack } from '../game/railEd
 import type { NetEdit, RoadPlan } from '../game/roadbuild';
 import { TEMPLATES, type TemplateKind, type TemplateOptions } from '../game/interchange';
 import { deleteTemplate, getTemplate, saveTemplate } from '../game/templates';
-import { anchorAt, corridorUnder, edgeAt, handlePoints, laneEndAt, lanePortsNear, type LaneTip, laneTipAt, laneTipPos, laneUnder, newLaneFlow } from '../lanes/edit';
+import { corridorUnder, edgeAt, handlePoints, laneEndAt, lanePortsNear, type LaneTip, laneTipAt, laneTipPos, laneUnder, newLaneFlow } from '../lanes/edit';
 import type { LaneNet, LaneSlot } from '../lanes/model';
 import { pointOff } from '../lanes/geometry';
 import { taperLen } from '../lanes/model';
@@ -1233,7 +1233,7 @@ export class Controller {
     const turningOn = !this.projectTools.on[kind];
     const drawing = this.projectAllowed;
     // Что начато: обычная прокладка (начало и точка изгиба) или ветка проекта — переходит в другой режим.
-    const begun = kind === 'road' ? rt.start && { pos: rt.start.pos, level: rt.startLevel ?? 0, attach: rt.start.kind !== 'free', control: rt.control } : this.chain && { pos: this.chain.pos, level: this.chain.level, attach: this.chain.kind !== 'free', control: this.control };
+    const begun = kind === 'road' ? rt.start && { pos: rt.start.pos, level: rt.startLevel ?? 0, attach: rt.start.kind !== 'free' || !!rt.start.stationGate, control: rt.control } : this.chain && { pos: this.chain.pos, level: this.chain.level, attach: this.chain.kind !== 'free', control: this.control };
     const tip = drawing && !turningOn ? this.projectTools.tipPos(kind) : null;
     const tipControl = this.projectTools.control;
     this.projectTools.stop(kind);
@@ -1247,7 +1247,7 @@ export class Controller {
     } else if (drawing && tip) {
       // Выключили «Проект» посреди ветки: проект остаётся (вернётся с «Проектом»), обычная стройка — от того же места.
       if (kind === 'road') {
-        rt.start = anchorAt(g.roads.net, tip.pos, 3, tip.level);
+        rt.start = g.roadAnchorAt(tip.pos, 3, tip.level);
         rt.control = tipControl;
       } else {
         this.chain = g.builder.snap(tip.pos, tip.level, 3);
@@ -3182,6 +3182,9 @@ export class Controller {
     o.points = [];
     if (pt.control) o.points.push({ pos: pt.control, color: '#f2994a', r: 4 });
     if (!p) return;
+    if (s.kind === 'road' && s.level === 0) {
+      for (const gate of g.roadStationAnchors(p, Math.max(55, this.snapRadius * 3))) o.points.push({ pos: gate.pos, color: '#187cbb', r: 5 });
+    }
     const segs = pt.project(s.kind).segs.length;
     const edits = pt.edits(s.kind).length;
     const price = plan.road?.project ? planPrice({ cost: plan.cost, project: plan.road.project }) : money(plan.cost);
@@ -3816,13 +3819,16 @@ export class Controller {
           const rt = this.roadTools;
           // Заданная −/+ высота конца — припиской к высоте у курсора, чтобы не искать её в панели.
           o.rise = rt.auto ? riseLabel(rt.rise) : null;
+          const gates = this.level === 0 ? g.roadStationAnchors(p, Math.max(55, this.snapRadius * 3)).map((a) => ({ pos: a.pos, color: '#187cbb', r: 5 })) : [];
           // Начало — кружком у курсора (узел, дорога или поле), потом — будущая дорога целиком.
           if (!rt.start) {
-            const a = anchorAt(g.roads.net, p, this.snapRadius);
-            o.points = [{ pos: a.pos, color: '#2f80ed', r: a.kind === 'free' ? 3 : 7 }];
+            const a = rt.roadAnchor(p, this.snapRadius);
+            const gate = a.kind === 'free' && a.stationGate;
+            o.points = [...gates, { pos: a.pos, color: '#2f80ed', r: a.kind === 'free' && !gate ? 3 : 7 }];
+            if (gate) o.label = { text: 'Подъезд к станции', ok: true };
             break;
           }
-          o.points = [{ pos: rt.start.pos, color: '#2f80ed', r: 6 }];
+          o.points = [...gates, { pos: rt.start.pos, color: '#2f80ed', r: 6 }];
           o.startHeight = this.startHeight(rt.start.pos, rt.startLevel ?? 0, rt.startDeck);
           if (rt.control) o.points.push({ pos: rt.control, color: '#f2994a', r: 4 });
           if (this.drawMode === 'curve' && !rt.control) {

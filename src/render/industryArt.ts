@@ -803,42 +803,6 @@ export class Art {
     c.strokeRect(x, y, w, h);
   }
 
-  /** Небольшая машина или техника — по центру x, y. */
-  vehicle(x: number, y: number, w: number, h: number, color: string): void {
-    if (this.pass === 1) return this.rectShadow(x - w / 2, y - h / 2, w, h, 2);
-    if (this.pass !== 2) return;
-    const c = this.c;
-    c.fillStyle = color;
-    c.fillRect(x - w / 2, y - h / 2, w, h);
-    if (!this.lod) return;
-    c.strokeStyle = 'rgba(0,0,0,0.35)';
-    c.lineWidth = 0.4;
-    c.strokeRect(x - w / 2, y - h / 2, w, h);
-  }
-
-  /** Грузовик 11×4.4: кабина — к +x (или к +y, если стоит вертикально). */
-  truck(x: number, y: number, vertical: boolean, cab: string, body: string): void {
-    if (!this.d) return;
-    const w = vertical ? 4.4 : 11;
-    const h = vertical ? 11 : 4.4;
-    const x0 = x - w / 2;
-    const y0 = y - h / 2;
-    if (this.pass === 1) return this.rectShadow(x0, y0, w, h, 2.5);
-    if (this.pass !== 2) return;
-    const c = this.c;
-    c.fillStyle = body;
-    c.fillRect(x0, y0, w, h);
-    c.fillStyle = cab;
-    if (vertical) c.fillRect(x0, y0 + h - 3, w, 3);
-    else c.fillRect(x0 + w - 3, y0, 3, h);
-    c.fillStyle = 'rgba(200,230,255,0.85)';
-    if (vertical) c.fillRect(x0 + 0.6, y0 + h - 1.3, w - 1.2, 0.7);
-    else c.fillRect(x0 + w - 1.3, y0 + 0.6, 0.7, h - 1.2);
-    c.strokeStyle = 'rgba(0,0,0,0.35)';
-    c.lineWidth = 0.4;
-    c.strokeRect(x0, y0, w, h);
-  }
-
   /** Вагонетка 6×4 с грузом. */
   cart(x: number, y: number, load: string): void {
     if (this.pass === 1) return this.rectShadow(x - 3, y - 2, 6, 4, 2);
@@ -1276,7 +1240,6 @@ function forest(a: Art, ind: Industry): void {
   ];
   for (let k = 0; k < Math.min(4, 1 + a.level); k++) a.logs(slots[k][0], slots[k][1], 22, 5, k);
   a.gable(20, 24, 24, 16, 6, ind.info.roof, true);
-  a.truck(-6, 33, false, '#c4662f', BARK);
 }
 
 /** Угольная шахта: копёр со шкивами, подъёмная машина, конвейер на чёрный террикон, вагонетки. */
@@ -1398,8 +1361,6 @@ function oilwell(a: Art, ind: Industry): void {
   if (lv >= 3) a.tank(24, 20, 7.5, 8, '#ece8df', ind.info.roof);
   for (let k = 0; k < n; k++) a.pumpjack(xs[k], ys[k], k, ind.info.roof);
   a.box(-3, 29, 11, 9, 4, ind.info.roof);
-  // Пока качалок мало — на свободном месте стоит автоцистерна.
-  if (n < 4) a.truck(-24, 31, false, '#c4662f', '#d9dde0');
 }
 
 /** Пищевой комбинат: красный корпус, ряд зерновых силосов с галереей, холодильник, рефрижераторы. */
@@ -1421,7 +1382,6 @@ function foodplant(a: Art, ind: Industry): void {
   const step = silos === 4 ? 10.5 : 11.8;
   for (let k = 0; k < silos; k++) a.tank(12.5 + k * step, -24, silos === 4 ? 4.9 : 5.6, 18, '#ebe7df', '#b8b2a6');
   a.belt(6, -24, 19, 15 + (silos - 1) * step, -24, 19);
-  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.truck(-39 + k * 10, 18.5, true, roof, '#f4f1ea');
   // Готовая продукция на поддонах у холодильника.
   const crates = ['#e5534b', '#f2c94c', '#e07b39'];
   for (let k = 0; k < Math.min(8, 3 + lv); k++) {
@@ -1450,7 +1410,6 @@ function sawmill(a: Art, ind: Industry): void {
   a.belt(-10, -5, 5, 28, 15, 9);
   for (let k = 0; k < Math.min(6, 2 + lv); k++) a.stack(-46 + (k % 3) * 13, 2 + Math.floor(k / 3) * 15, 11, 12, 3, '#d8b377', '#b8925a', BARK);
   a.heap(34, 20, 9.5, '#e6d29f', 1);
-  if (a.d) a.vehicle(10, 23, 3, 4.4, YELLOW);
 }
 
 /** Металлургический завод: домна с воздухонагревателями, кучи угля и руды, трубы, прокатный цех. */
@@ -1520,8 +1479,6 @@ function refinery(a: Art, ind: Industry): void {
   for (let k = 0; k < tanks; k++) a.tank(slots[k][0], slots[k][1], 7.5, 8, '#ece9e2', roof);
   if (rows < 4) {
     a.box(22, 26, 28, 3, 4, METAL);
-    a.truck(29, 32.5, false, roof, '#d9dde0');
-    a.truck(43, 32.5, false, roof, '#d9dde0');
   }
   a.chimney(4, 22, 1.4, 36, '#8f969e', '#c0392b');
   a.glow(4, 22, 2.4);
@@ -1542,10 +1499,8 @@ function buildmat(a: Art, ind: Industry): void {
   for (let k = 0; k < (lv >= 3 ? 3 : 2); k++) a.tank(2 + k * 12, -25, 5.5, 18, '#d9d6cf', '#b5b0a6');
   a.chimney(16, -8, 2.2, 28, '#b9b4ad', '#9a4a36');
   for (let k = 0; k < Math.min(15, 5 + 2 * lv); k++) a.stack(28 + (k % 3) * 6.5, -14 + Math.floor(k / 3) * 6.5, 5, 5, 2.5, '#c4664a', '#a24e36');
-  if (a.d) a.vehicle(22, 22, 3, 4.4, YELLOW);
   a.heap(-28, 23, 6 + 3 * fullness(ind.stock.stone), '#a9a49c', 1);
   a.belt(-31, 18, 3, -31, -5, 7);
-  a.truck(0, 26, false, ind.info.roof, '#d9d6cf');
   a.smoke(16, -8, 1, '178,172,164');
 }
 
@@ -1563,13 +1518,6 @@ function factory(a: Art, ind: Industry): void {
   a.shed(-56, -34, 64, 44, 8, roof, '#bfe3e4', 8);
   a.box(-56, 16, 26, 20, 5, '#7a8791');
   if (a.d) for (let k = 0; k < 2; k++) a.box(-50 + k * 9, 22, 4, 3, 1.5, '#c9cdd1');
-  const cars = ['#e5534b', '#4a8fe7', '#f2c94c', '#f4f1ea', '#5c6470'];
-  if (a.d) {
-    for (let k = 0; k < 7; k++) {
-      if (a.r(60 + k) < 0.3) continue;
-      a.vehicle(-22.5 + k * 4.5, 31, 2.6, 4.6, cars[Math.floor(a.r(70 + k) * cars.length)]);
-    }
-  }
   a.box(14, -34, 42, 22, 6, '#b9c2c9', 2);
   for (let k = 0; k < 4; k++) a.flat(18 + k * 10, -13.4, 6, 1.4, '#55595f');
   a.chimney(-18, 18.5, 3, 36, '#b5543c', '#e8e2d6');
@@ -1578,7 +1526,6 @@ function factory(a: Art, ind: Industry): void {
     const color = boxes[Math.floor(a.r(40 + k) * boxes.length)];
     a.stack(16 + (k % 3) * 13, -4 + Math.floor(k / 3) * 7, 11, 4.6, 3, color, shade(color, -0.2));
   }
-  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.truck(19 + k * 10, 30, true, roof, '#f4f1ea');
   a.smoke(-18, 18.5, 1, '150,150,156', 1.1);
 }
 
@@ -1655,7 +1602,6 @@ function ranch(a: Art, ind: Industry): void {
     herd(a, -23, -35, 27, 70, Math.min(10, 4 + 2 * lv), 400);
   }
   a.tree(-2, 30, 4.5, '#6e9a52');
-  a.truck(32, 31, false, '#c4662f', '#b7a07a');
 }
 
 /** Песчаный карьер: светлая чаша с затопленным дном, земснаряд с пульповодом, сортировка и кучи песка. */
@@ -1680,7 +1626,6 @@ function sandpit(a: Art, ind: Industry): void {
 
 /** Мясокомбинат: загоны для скота, корпус с холодильником, кормовые силосы, рампа с рефрижераторами. */
 function meatplant(a: Art, ind: Industry): void {
-  const lv = a.level;
   const roof = ind.info.roof;
   a.patch(-52, -32, 26, 38, '#b8a684', 2);
   a.rows(-52, -32, 26, 38, 6.5, 'rgba(110,85,60,0.55)', true, 0.5);
@@ -1698,7 +1643,6 @@ function meatplant(a: Art, ind: Industry): void {
   const silos = 1 + Math.min(2, Math.floor(fullness(ind.stock.grain) * 3));
   for (let k = 0; k < silos; k++) a.tank(28 + k * 10, 0, 4.2, 14, '#ebe7df', '#b8b2a6');
   a.box(-50, 10, 22, 22, 4, '#a88a63', 1.6);
-  for (let k = 0; k < Math.min(5, 1 + lv); k++) a.truck(-18 + k * 9, 22, true, roof, '#f4f1ea');
   a.smoke(-14, -2, 1, '248,248,248');
 }
 
@@ -1725,7 +1669,6 @@ function glassworks(a: Art, ind: Industry): void {
   for (let k = 0; k < Math.min(10, 3 + 2 * lv); k++) {
     a.stack(2 + (k % 5) * 10.5, 6 + Math.floor(k / 5) * 10, 8, 6, 3, '#a9d8ea', 'rgba(255,255,255,0.75)', '#6d7076');
   }
-  for (let k = 0; k < Math.min(3, lv); k++) a.truck(10 + k * 14, 32, false, roof, '#d9e6ec');
   a.smoke(-22, 0, 1, '170,170,176', 1.1);
 }
 
@@ -1747,7 +1690,6 @@ function furniture(a: Art, ind: Industry): void {
   for (let k = 0; k < 4; k++) a.flat(13 + k * 8.5, 23.4, 5, 1.4, '#55595f');
   for (let k = 0; k < Math.min(6, 1 + lv); k++) a.stack(-44 + (k % 3) * 8, 10 + Math.floor(k / 3) * 6, 6.5, 5, 2.5, '#e2cfaa', 'rgba(0,0,0,0.12)');
   a.chimney(-38, 26, 1.8, 18, '#b9b4ad');
-  for (let k = 0; k < Math.min(3, lv); k++) a.truck(-12 + k * 12, 30, false, roof, '#f4f1ea');
   a.smoke(-38, 26, 1, '236,232,224');
 }
 
@@ -1771,7 +1713,6 @@ function cement(a: Art, ind: Industry): void {
   const silos = lv >= 3 ? 4 : 3;
   for (let k = 0; k < silos; k++) a.tank(-40 + k * 13, 22, 5.8, 24, '#e2dfd8', '#b5b0a6');
   a.box(10, 0, 12, 12, 7, '#b4b9be');
-  for (let k = 0; k < Math.min(3, lv); k++) a.truck(40, 18 + k * 7, false, '#c4662f', '#d9dde0');
   a.smoke(-24, 2, 1, '178,172,164');
 }
 
@@ -1885,7 +1826,6 @@ function sheepfarm(a: Art, ind: Industry): void {
     herd(a, -50, 2, 54, 33, Math.min(14, 6 + 2 * lv), 400, true);
   }
   a.tree(4, 30, 4.5, '#6e9a52');
-  a.truck(32, 31, false, '#c4662f', '#efe9da');
 }
 
 /** Лодка у причала: корпус носом вверх, рубка. */
@@ -1954,7 +1894,6 @@ function fishery(a: Art, ind: Industry): void {
     c.stroke();
   }
   for (let k = 0; k < Math.min(6, 2 + lv); k++) a.stack(-16 + (k % 3) * 6.5, -14 + Math.floor(k / 3) * 6, 5, 4.6, 2, '#e9ecef', '#3d8fbf');
-  a.truck(8, -10, false, roof, '#e9ecef');
   a.chimney(-34, -22, 1.6, 12, '#d9d4ca');
   a.smoke(-34, -22, 1, '236,236,236', 0.7);
 }
@@ -1997,7 +1936,6 @@ function goldmine(a: Art, ind: Industry): void {
   a.gable(20, 12, 24, 12, 5, roof);
   for (let k = 0; k < Math.min(3, lv); k++) a.stack(40, -34 + k * 7, 6, 5, 2.5, '#d9b33a', '#a8862a');
   a.excavator(-34, -14, -40, -8);
-  a.truck(36, 31, false, '#5c6470', '#8a8f96');
 }
 
 /** Самоцветные копи: скальный выход со штольней, рельсы с вагонетками, сортировка и отвалы с цветными камнями. */
@@ -2021,7 +1959,6 @@ function gemmine(a: Art, ind: Industry): void {
     const gems = ['#7b4fbf', '#2e9e6e', '#ad1457', '#3d8fbf'];
     for (let k = 0; k < 8; k++) a.flat(31 + a.r(600 + k) * 10, -7 + a.r(700 + k) * 9, 1.1, 1.1, gems[k % gems.length]);
   }
-  a.truck(30, 30, false, '#5c6470', '#a9a49c');
 }
 
 /** Медный рудник: серо-зелёный карьер уступами с бирюзовой водой, дробилка, бурты руды, самосвалы. */
@@ -2042,7 +1979,6 @@ function coppermine(a: Art, ind: Industry): void {
   if (lv >= 2) a.heap(32, 24, 8, ore, 2);
   for (let k = 0; k < Math.min(3, lv); k++) a.cart(24 + k * 7, 41, ore);
   a.excavator(-14, 2, -20, -2);
-  if (a.d) a.vehicle(-2, -24, 4, 5.6, YELLOW);
 }
 
 /** Газовый промысел: устья скважин («ёлки»), шлейфы к установке подготовки, шаровые ёмкости и факел. */
@@ -2078,7 +2014,6 @@ function gasfield(a: Art, ind: Industry): void {
   if (lv >= 3) a.tank(25, 7, 6, 12, '#f0eee8', roof);
   a.chimney(30, 30, 1.3, 30, '#8f969e', '#c0392b');
   a.glow(30, 30, 2.2);
-  a.truck(10, 30, false, roof, '#e9ecef');
 }
 
 /**
@@ -2102,7 +2037,6 @@ function textileMill(a: Art, ind: Industry, raw: CargoType, bale: string, cloth:
     const color = cloth[k % cloth.length];
     a.stack(21 + (k % 4) * 7.5, -6 + Math.floor(k / 4) * 8, 6, 6, 2.5, color, shade(color, -0.22));
   }
-  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.truck(-46 + k * 10, 18.5, true, roof, '#f4f1ea');
   a.box(22, 14, 26, 14, 5, '#b9a58c', 2);
   a.smoke(12, -12, 1, '170,166,160', 1);
 }
@@ -2135,7 +2069,6 @@ function brickworks(a: Art, ind: Industry): void {
   a.gable(-32, -8, 40, 9, 4, '#8a6a4a', true);
   a.gable(-32, 4, 40, 9, 4, '#8a6a4a', true);
   for (let k = 0; k < Math.min(15, 5 + 2 * lv); k++) a.stack(16 + (k % 5) * 7.5, -1 + Math.floor(k / 5) * 7, 5.5, 5, 3, '#c4664a', '#a24e36');
-  a.truck(4, 28, false, roof, '#c4664a');
   a.smoke(30, -26, 1, '170,160,150', 1.2);
 }
 
@@ -2157,7 +2090,6 @@ function cannery(a: Art, ind: Industry): void {
   const crates = 1 + Math.min(5, Math.floor(fullness(ind.stock.fish) * 6));
   for (let k = 0; k < crates; k++) a.stack(4 + (k % 3) * 7, -9 + Math.floor(k / 3) * 7, 5.5, 5, 2, '#e9ecef', '#3d8fbf');
   for (let k = 0; k < Math.min(6, 2 + lv); k++) a.stack(26 + (k % 3) * 7, 0 + Math.floor(k / 3) * 6, 5.5, 5, 2.5, '#c9ced3', '#e5534b');
-  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.truck(-39 + k * 10, 18.5, true, roof, '#f4f1ea');
   a.smoke(-38, -24, 1, '248,248,248');
 }
 
@@ -2181,7 +2113,6 @@ function papermill(a: Art, ind: Industry): void {
   a.box(8, -38, 28, 18, 7, '#b9c2c9', 2);
   a.chimney(44, -30, 3, 46, '#b9b4ad', '#c0392b');
   for (let k = 0; k < Math.min(8, 2 + 2 * lv); k++) a.tank(17 + (k % 4) * 8, 15 + Math.floor(k / 4) * 9, 3.4, 5, '#f4f1ea', '#d9d4ca');
-  a.truck(50, 20, true, roof, '#f4f1ea');
   a.smoke(44, -30, 1, '236,236,236', 1.4);
 }
 
@@ -2211,7 +2142,6 @@ function workshop(a: Art, ind: Industry, stones: boolean): void {
     for (let k = 0; k < 1 + Math.min(3, Math.floor(fullness(ind.stock.gold) * 4)); k++) a.stack(-10 + k * 5, 18, 4, 3, 1.6, '#d9b33a', '#a8862a');
   }
   a.box(0, 26, 6, 6, 3, '#9aa3ab');
-  a.truck(-30, 22, false, '#5c6470', '#8a8f96');
 }
 
 function jeweler(a: Art, ind: Industry): void {
@@ -2237,7 +2167,6 @@ function oilmill(a: Art, ind: Industry): void {
   a.chimney(-8, -8, 2, 18, '#d9d4ca');
   for (let k = 0; k < Math.min(4, 1 + lv); k++) a.tank(14 + (k % 2) * 14, -22 + Math.floor(k / 2) * 15, 6, 10, '#f2d36b', '#c49a1c');
   a.heap(42, 2, 5.5, '#6b5a1e', 1);
-  for (let k = 0; k < Math.min(4, 1 + lv); k++) a.truck(-39 + k * 10, 18.5, true, roof, '#efe2b0');
   a.smoke(-8, -8, 1, '240,236,220');
 }
 
@@ -2279,7 +2208,6 @@ function electro(a: Art, ind: Industry): void {
   a.box(14, -34, 42, 22, 6, '#b9c2c9', 2);
   for (let k = 0; k < 4; k++) a.flat(18 + k * 10, -13.4, 6, 1.4, '#55595f');
   for (let k = 0; k < Math.min(9, 3 + 2 * lv); k++) a.tank(19 + (k % 3) * 12, 0 + Math.floor(k / 3) * 10, 4.2, 3, '#d9824a', '#8a5a3c');
-  for (let k = 0; k < Math.min(3, lv); k++) a.truck(52, 2 + k * 11, false, roof, '#f4f1ea');
 }
 
 /** ГПЗ: колонны осушки, эстакада, компрессорный цех, шаровые газгольдеры, факел и газовозы. */
@@ -2302,7 +2230,6 @@ function gasplant(a: Art, ind: Industry): void {
   for (let k = 0; k < spheres; k++) a.tank(25 + (k % 2) * 18, -25 + Math.floor(k / 2) * 19, 7.6, 14, '#f0eee8', roof);
   a.chimney(4, 24, 1.4, 36, '#8f969e', '#c0392b');
   a.glow(4, 24, 2.4);
-  a.truck(-6, 33, false, roof, '#e9ecef');
 }
 
 const SCENES: Record<IndustryKind, Scene> = {

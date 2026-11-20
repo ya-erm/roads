@@ -3,7 +3,7 @@ import { clamp } from '../core/math';
 import { add, cubicBezier, dist, dot, norm, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { TrainSpec } from '../sim/rail';
 import { CURB_GAP } from '../lanes/traffic';
-import { KMH_PER_UNIT } from '../world/roadTypes';
+import { KMH_PER_UNIT, LANE_W } from '../world/roadTypes';
 import type { VehicleSpec } from '../sim/vehicle';
 import type { CargoType } from '../world/cargo';
 import type { PassengerGroup } from '../world/entities';
@@ -443,19 +443,30 @@ export interface Pose {
   dir: Vec;
 }
 
-/** Середина поста bay по ширине площадки, от её центра (как на рисунке станции). */
-function bayX(fp: Footprint, bays: number, bay: number): number {
-  const bw = (fp.w - 10) / bays;
-  return -fp.w / 2 + 5 + bay * bw + (bw - 2) / 2;
+/** В открытом дворе пост занимает одну полосу, остальное пространство остаётся для манёвров. */
+export function baySlot(width: number, bays: number, bay: number, open = false): { x: number; w: number } {
+  const step = (width - 10) / bays;
+  const w = open ? Math.min(LANE_W, step - 2) : step - 2;
+  return { x: -width / 2 + 4 + (bay + 0.5) * step - w / 2, w };
 }
 
-/** Бокс поста bay на рисунке автостанции: от середины здания до ворот (front — см. bayFront). */
-export function bayBox(fp: Footprint, bays: number, bay: number, front: 1 | -1 = 1): Footprint {
+export const OPEN_BAY_REAR = -2;
+export const openBayEnd = (depth: number): number => Math.min(depth / 2, OPEN_BAY_REAR + LONGEST_BUS + 2);
+
+/** Середина поста bay по ширине площадки, от её центра (как на рисунке станции). */
+function bayX(fp: Footprint, bays: number, bay: number): number {
+  const { x, w } = baySlot(fp.w, bays, bay);
+  return x + w / 2;
+}
+
+/** Границы поста на рисунке станции (front — сторона выезда, см. bayFront). */
+export function bayBox(fp: Footprint, bays: number, bay: number, front: 1 | -1 = 1, open = false): Footprint {
   const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
   const n = { x: -u.y * front, y: u.x * front };
-  const hh = fp.h / 2;
-  const w = (fp.w - 10) / bays - 2;
-  return { center: add(fp.center, add(scale(u, bayX(fp, bays, bay)), scale(n, (hh - 1) / 2))), w, h: hh + 1, angle: fp.angle };
+  const rear = open ? OPEN_BAY_REAR : -1;
+  const end = open ? openBayEnd(fp.h) : fp.h / 2;
+  const { w } = baySlot(fp.w, bays, bay, open);
+  return { center: add(fp.center, add(scale(u, bayX(fp, bays, bay)), scale(n, (end + rear) / 2))), w, h: end - rear, angle: fp.angle };
 }
 
 /**

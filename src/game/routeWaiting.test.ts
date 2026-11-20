@@ -114,4 +114,51 @@ describe('Пассажиры и груз копятся, как только е�
     runSeconds(game, MONTH_LENGTH);
     expect(sA.cargo.grain ?? 0).toBe(had);
   });
+
+  it('местное зерно с неподходящей станции переходит на маршрут вывоза по мере освобождения склада', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { built, line, sA, sB, from, to } = freightRoute(game);
+    expect(built).toBe(true);
+    const old = stationAtIndustry(game, from, to.fp.center)!;
+    expect(old.industryIds).toContain(from.id);
+    const inbound = game.createLine([sB.id, old.id])!;
+    // У этой линии есть грузовые остановки, но она не забирает зерно с old.
+    game.setStopRule(inbound.id, 0, { wait: 'none', maxWait: null, load: 'auto', unload: ['food'] });
+    old.cargo.grain = 30;
+    from.output = 5;
+    const produce = () => (game as unknown as { updateIndustries(dt: number): void }).updateIndustries(0);
+
+    produce();
+    expect(sA.cargo.grain).toBe(20);
+    expect(old.cargo.grain).toBe(10);
+    expect(from.output).toBe(5);
+    const truck = game.buyVehicle(line.id, 'truck')!;
+    expect(truck.cargo).toBe('grain');
+    expect(truck.amount).toBe(16);
+    expect(truck.loadedAt).toBe(sA.id);
+    produce();
+    expect(old.cargo.grain).toBe(0);
+    expect(sA.cargo.grain).toBe(19);
+    expect(from.output).toBe(0);
+
+    // Запас, реально выгруженный другой линией, остаётся на её складе для обычной перевалки.
+    old.cargo.grain = 7;
+    old.cargoOrigin = { grain: sB.id };
+    produce();
+    expect(old.cargo.grain).toBe(7);
+    expect(old.cargoOrigin.grain).toBe(sB.id);
+  });
+
+  it('явная выгрузка зерна на склад остаётся подходящим маршрутом для фермы', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { line, sA, sB, from } = freightRoute(game);
+    sB.accepts.delete('grain');
+    game.setStopRule(line.id, 1, { wait: 'none', maxWait: null, load: 'auto', unload: ['grain'] });
+    from.output = 4;
+
+    (game as unknown as { updateIndustries(dt: number): void }).updateIndustries(0);
+
+    expect(sA.cargo.grain).toBe(4);
+    expect(from.output).toBe(0);
+  });
 });

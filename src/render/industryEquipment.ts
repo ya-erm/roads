@@ -1,5 +1,5 @@
 import { hash } from '../core/math';
-import type { IndustryHaulView } from '../game/industryHaul';
+import type { IndustryHaulTrip } from '../game/industryHaul';
 import { CARGO, type IndustryKind } from '../world/cargo';
 import { cargoShape, type CargoShape } from './industryCargoArt';
 import { industrialRoadPoints } from './industryRoadArt';
@@ -61,13 +61,16 @@ function haulPose(route: Circuit, time: number | undefined, seed: number): reado
   return roadPose(route, 0.5 - Math.cos(phase * Math.PI * 2) * 0.5, phase < 0.5);
 }
 
-export function paintTransferTruck(c: CanvasRenderingContext2D, route: Circuit, trip: IndustryHaulView, producer: IndustryKind): void {
+export function paintTransferTruck(c: CanvasRenderingContext2D, route: Circuit, trip: IndustryHaulTrip, producer: IndustryKind): void {
   const shape = cargoShape(trip.cargo, producer);
   const outbound = trip.direction === 'out';
   const forward = outbound !== (trip.phase === 'returning');
-  const pose = roadPose(route, outbound ? trip.progress : 1 - trip.progress, forward);
-  const truck = { kind: 'haul' as const, route, color: shape === 'bulk' ? '#e9b52f' : '#649392', load: CARGO[trip.cargo].color };
-  paintWorkVehicle(c, truck, pose, { shape, fill: trip.fill });
+  const [x, y, heading] = roadPose(route, outbound ? trip.progress : 1 - trip.progress, forward);
+  const yaw = heading + (trip.phase === 'unloading' ? Math.PI * trip.turn : 0);
+  const pose = [x - Math.sin(yaw) * 1.5, y + Math.cos(yaw) * 1.5, yaw, true] as const;
+  const colors = ['#568e91', '#ad7855', '#788f53', '#d8ac37'];
+  const truck = { kind: 'haul' as const, route, color: shape === 'bulk' ? '#e9b52f' : colors[trip.id % colors.length], load: CARGO[trip.cargo].color };
+  paintWorkVehicle(c, truck, pose, { shape, fill: trip.fill, scale: shape === 'tank' ? 0.68 : 0.64 });
 }
 
 /** Техника видна сверху, кабина и направление движения смотрят вдоль локальной оси +x. */
@@ -126,7 +129,7 @@ function paintWorkVehicle(
   c: CanvasRenderingContext2D,
   equipment: Extract<Equipment, { kind: 'harvester' | 'haul' }>,
   [px, py, yaw, inbound]: readonly [number, number, number, boolean],
-  freight?: { shape: CargoShape; fill: number },
+  freight?: { shape: CargoShape; fill: number; scale?: number },
 ): void {
   const harvest = equipment.kind === 'harvester';
   const length = harvest ? 7.5 : 10;
@@ -134,6 +137,7 @@ function paintWorkVehicle(
   c.save();
   c.translate(px, py);
   c.rotate(yaw);
+  if (freight?.scale) c.scale(freight.scale, freight.scale);
   c.fillStyle = 'rgba(46,40,28,0.20)';
   c.fillRect(-length / 2 + 0.85, -width / 2 + 1.1, length, width);
   c.fillStyle = '#3f4144';

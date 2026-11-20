@@ -738,6 +738,7 @@ export class RoadBuilder {
         for (const o of this.ctx.obstaclesAt(deck, deckHalf + 1)) {
           // Своя станция в торце выезда: широкое полотно у ворот слегка заходит в её контур — так и задумано.
           if (o.gate !== undefined && (o.gate === c.a || o.gate === c.b)) continue;
+          if (o.gate !== undefined && [A, B].some((node) => node.stationGate === o.id && dist(deck, node.pos) <= deckHalf + 2)) continue;
           // Навес остановки и строительная база при расширении улицы отодвинутся от новой кромки (shoveStops).
           if (shove && o.movable) continue;
           if (!o.demolishable) return o.reason ?? 'Мешает здание';

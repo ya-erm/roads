@@ -1,8 +1,8 @@
 import { money } from '../core/moneyText';
-import { growthCap, moduleEffect } from '../game/annexes';
+import { growthCap, moduleEffect, moduleLogisticsEffect } from '../game/annexes';
 import type { Industry } from '../world/entities';
 import { CARGO } from '../world/cargo';
-import { INDUSTRY_MODULES, industryModules, industryOutputCapacity, moduleCargo, moduleLimit, moduleName, type IndustryModule } from '../world/industryModules';
+import { INDUSTRY_MODULES, industryLoadingRate, industryModules, industryOutputCapacity, industryUnloadingRate, moduleCargo, moduleLimit, moduleName, type IndustryModule } from '../world/industryModules';
 
 /** Значок пристройки: здание с плюсом. */
 function annexSvg(size = 20): string {
@@ -45,11 +45,18 @@ export function annexHtml(ind: Industry, placing?: IndustryModule, roadTool = fa
       ${sectionLabel(ind, kind, moduleName(ind, kind), moduleEffect(ind, kind))}<b>${count >= limit ? `${limit} из ${limit}` : money(spec.cost)}</b></button>`;
   }).join('');
   const built = (ind.annexes ?? []).filter((section) => !section.roadOnly).map((section) =>
-    `<button class="small annex-choice" data-action="ind-show-section" data-id="${section.id}">${sectionLabel(ind, section.module, section.module ? moduleName(ind, section.module) : 'Вспомогательная секция')}<small>На карте</small></button>`,
+    `<button class="small annex-choice" data-action="ind-show-section" data-id="${section.id}">${sectionLabel(ind, section.module, section.module ? moduleName(ind, section.module) : 'Вспомогательная секция', section.module && !section.automatic ? moduleLogisticsEffect(section.module) : '')}<small>На карте</small></button>`,
   ).join('');
+  const loading = industryLoadingRate(ind);
+  const speed = (rate: number) => `+${Math.round((rate - 1) * 100)}%`;
+  const unloading = ind.info.accepts.map((cargo) => {
+    const rate = industryUnloadingRate(ind, cargo);
+    return rate > 1 ? `<span>Скорость разгрузки · ${CARGO[cargo].name}</span><b>${speed(rate)}</b>` : '';
+  }).join('');
   return `<div class="annex-row">${annexSvg(19)}<b>План предприятия</b></div>
     ${built ? `<div class="annex-row"><b>Дополнительные постройки</b></div><div class="annex-choices">${built}</div>` : ''}
-    <div class="kv"><span>Предел роста</span><b>×${growthCap(ind)}</b><span>Запас продукции</span><b>${ind.output} / ${industryOutputCapacity(ind)}</b></div>
+    <div class="kv"><span>Предел роста</span><b>×${growthCap(ind)}</b><span>Запас продукции</span><b>${ind.output} / ${industryOutputCapacity(ind)}</b>
+      ${loading > 1 ? `<span>Скорость погрузки продукции</span><b>${speed(loading)}</b>` : ''}${unloading}</div>
     <div class="annex-choices">
       <button class="small annex-choice ${roadTool ? 'active' : ''}" data-action="ind-road" data-id="${ind.id}">${sectionLabel(ind, 'road', 'Технологический проезд', 'От существующей дорожной сети')}</button>
       ${options}

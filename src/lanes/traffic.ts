@@ -781,7 +781,9 @@ export class LaneTraffic {
     return false;
   }
 
-  private spaceAtStart(lane: GLane, need: number): boolean {
+  private spaceAtSpawn(lane: GLane, s: number, length: number): boolean {
+    // Должно хватать места поставить машину и затем освободить створ выезда всей длиной кузова.
+    const need = Math.max(s, length) + IDM.minGap + 1;
     const last = lane.vehicles[lane.vehicles.length - 1];
     if (last && last.s - last.length < need) return false;
     for (const m of this.graph.movesInto.get(lane.id) ?? []) {
@@ -799,18 +801,21 @@ export class LaneTraffic {
     return good.length ? good : rightFirst;
   }
 
-  /** Точка на выездной полосе, до которой доводим манёвр на открытой площадке. */
-  spawnPoint(route: number[], advance: number) {
-    const lane = this.spawnLanes(route)[0];
-    if (!lane) return null;
-    const s = clamp(advance, 0, lane.length / 2);
-    return { lane: lane.id, s, ...this.graph.lanePose(lane, s) };
+  /** У свободной полосы можно начинать манёвр. Начатый доводим до выбранной полосы. */
+  spawnPoint(route: number[], advance: number, length: number, target?: Pick<Vehicle, 'pos' | 'dir'>) {
+    const lanes = this.spawnLanes(route);
+    const points = lanes.map((lane) => {
+      const s = clamp(advance, 0, lane.length / 2);
+      return { lane: lane.id, s, ...this.graph.lanePose(lane, s) };
+    });
+    const chosen = target && points.find((p) => dist(p.pos, target.pos) < 0.1 && dot(p.dir, target.dir) >= 0.999);
+    return chosen ?? points.find(({ s }, i) => this.spaceAtSpawn(lanes[i], s, length)) ?? null;
   }
 
   spawn(opts: LaneSpawn, start?: { lane: number; s: number }): Vehicle | null {
     const s = start?.s ?? 0;
     const lane = this.spawnLanes(opts.route).find((l) =>
-      (!start || start.lane === l.id) && this.spaceAtStart(l, s + opts.length + IDM.minGap + 1),
+      (!start || start.lane === l.id) && this.spaceAtSpawn(l, s, opts.length),
     );
     if (!lane) return null;
     const { targetNode, route, ...spec } = opts;
@@ -1045,7 +1050,7 @@ export class LaneTraffic {
   /**
    * Другой кузов той же машине прямо на ходу (замена модели): нос, полоса, скорость и маршрут — прежние, корма —
    * по новой длине. Длиннее прежней — только вне узла и если сзади до соседа хватает места, как при выезде
-   * на полосу (spaceAtStart); иначе false — кузов не меняется, пусть попробуют позже.
+   * на полосу (spaceAtSpawn); иначе false — кузов не меняется, пусть попробуют позже.
    */
   reshape(veh: Vehicle, body: Omit<VehicleSpec, 'color' | 'load'>): boolean {
     if (body.length > veh.length) {

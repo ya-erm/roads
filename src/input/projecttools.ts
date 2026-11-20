@@ -36,7 +36,6 @@ import {
 } from '../game/roadProject';
 import { MoveProject } from '../game/moveProject';
 import type { NetEdit } from '../game/roadbuild';
-import { anchorAt } from '../lanes/edit';
 import { aimAlong, railDirs, roadDirs } from './aim';
 import type { LaneNet } from '../lanes/model';
 import { halfWidth, type RoadSpec } from '../world/roadTypes';
@@ -243,7 +242,7 @@ export class ProjectTools {
     if (own) return { pos: own.pos, level: own.level, attach: own.attach, dir: () => continuation(this.projects[kind], own.id), node: own.id };
     if (kind === 'road') {
       const net = this.roadNet();
-      const a = anchorAt(net, p, r, level);
+      const a = g.roadAnchorAt(p, r, level, net);
       if (a.kind === 'node') {
         const n = net.node(a.node);
         const ends = net.ends(n);
@@ -253,6 +252,8 @@ export class ProjectTools {
         const c = net.corridor(a.corridor);
         return { pos: a.pos, level: Math.round(net.heightAt(c, a.s)), attach: true, dir: () => null };
       }
+      const gate = a.stationGate;
+      if (gate) return { pos: a.pos, level: 0, attach: true, dir: () => gate.outward };
       return { pos: a.pos, level, attach: false, dir: () => null };
     }
     const s = g.builder.snap(p, level, r);
@@ -302,7 +303,9 @@ export class ProjectTools {
     const near = Math.min(r, 3);
     if (kind === 'road') {
       const net = this.roadNet();
-      return [...dirs, ...roadDirs(net, anchorAt(net, n.pos, near, n.level))];
+      const anchor = this.game().roadAnchorAt(n.pos, near, n.level, net);
+      if (anchor.kind === 'free' && anchor.stationGate) return [...dirs, anchor.stationGate.outward];
+      return [...dirs, ...roadDirs(net, anchor)];
     }
     const g = this.game();
     return [...dirs, ...railDirs(g.net, g.builder.snap(n.pos, n.level, near))];
@@ -684,7 +687,7 @@ export function sharedRoadProject(game: () => Game): { tools: ProjectTools; edit
   const edits: MoveProject = new MoveProject(game, {
     tail: () => {
       const pr = tools.project('road');
-      return pr.segs.length ? { edit: roadProjectEdit(pr, game().ground()), key: JSON.stringify(pr) } : null;
+      return pr.segs.length ? { edit: roadProjectEdit(pr, game()), key: JSON.stringify(pr) } : null;
     },
     built: () => tools.built('road'),
   });

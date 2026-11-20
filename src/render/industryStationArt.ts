@@ -1,23 +1,13 @@
-import { closestOnSegment, dist, type Vec } from '../core/vec';
-import { industryRoadPaths } from '../game/annexes';
+import type { Vec } from '../core/vec';
 import type { IndustryHaulView } from '../game/industryHaul';
+import { stationHaulRoad } from '../game/industryHaulRoutes';
+import { OPEN_BAY_REAR } from '../game/transport';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
-import { moduleCargo } from '../world/industryModules';
-import { sitePoint } from '../world/industrySites';
-import type { Footprint } from '../world/spatial';
 import { Art, shade } from './industryArt';
 import { cargoShape } from './industryCargoArt';
 import { type Circuit, paintTransferTruck } from './industryEquipment';
 import { drawIndustrialGate, drawIndustrialRoads, industryRoadSurface } from './industryRoadArt';
-
-export const OPEN_BAY_REAR = -2;
-
-/** +y — выезд на улицу. Слева от технологического проезда отгрузка, справа приём сырья. */
-function rearRoad(st: Station, side: 1 | -1): Circuit {
-  const depth = st.fp.h / 2;
-  return [[0, -depth + (st.industryAccess ? -5 : 4)], [0, -depth * 0.39], [side * 8, -depth * 0.39]];
-}
 
 export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station, ind?: Industry): void {
   const { w, h } = st.fp;
@@ -31,10 +21,9 @@ export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station, ind?:
     c.fillRect(left, back + 1, -4 - left, 1.1);
     c.fillRect(4, back + 1, right - 4, 1.1);
   } else c.fillRect(left, back + 1, right - left, 1.1);
-  const roads = [rearRoad(st, -1)];
-  if (ind?.info.accepts.length) roads.push(rearRoad(st, 1));
+  const roads = [stationHaulRoad(st, -1)];
+  if (ind?.info.accepts.length) roads.push(stationHaulRoad(st, 1));
   drawIndustrialRoads(c, roads, industryRoadSurface(ind?.info.kind));
-  if (st.industryAccess) drawIndustrialGate(c, 0, back, Math.PI / 2);
 }
 
 interface StorageCell {
@@ -131,65 +120,23 @@ function paintStorageCell(a: Art, cell: StorageCell, ind: Industry, capacity: nu
   }
 }
 
-const transferPaths = new WeakMap<Station, {
-  station: Footprint; plant: Footprint; annexes: Industry['annexes']; front: number; routes: Map<string, Circuit>;
-}>();
-
-/** Путь от ворот нужного участка к выходу из комплекса. Стыки веток лежат на оси проездов. */
-function routeToExit(roads: readonly (readonly Vec[])[], start: Vec): readonly Vec[] {
-  const main = roads[0];
-  const exit = main[main.length - 1];
-  const key = (p: Vec) => `${Math.round(p.x * 1000)},${Math.round(p.y * 1000)}`;
-  const vertices = [...new Map([start, ...roads.flat()].map((p) => [key(p), p])).values()];
-  const segments = roads.flatMap((road) => road.slice(1).map((b, i) => [road[i], b] as const));
-  const queue = [[start]];
-  const known = new Set([key(start)]);
-  for (let i = 0; i < queue.length; i++) {
-    const path = queue[i];
-    const at = path[path.length - 1];
-    if (key(at) === key(exit)) return path;
-    for (const [a, b] of segments) {
-      if (dist(at, closestOnSegment(at, a, b).point) > 0.01) continue;
-      for (const p of vertices) {
-        if (known.has(key(p)) || dist(p, closestOnSegment(p, a, b).point) > 0.01) continue;
-        known.add(key(p));
-        queue.push([...path, p]);
-      }
-    }
-  }
-  return main;
+export function drawIndustryHaulConnection(c: CanvasRenderingContext2D, st: Station, ind: Industry, connection: readonly Vec[]): void {
+  drawIndustrialRoads(c, [connection.map(({ x, y }) => [x, y])], industryRoadSurface(ind.info.kind));
+  const gate = connection[connection.length - 1];
+  drawIndustrialGate(c, gate.x, gate.y, st.fp.angle + Math.PI / 2);
 }
 
-function transferPath(st: Station, ind: Industry, front: 1 | -1, trip: IndustryHaulView): Circuit {
-  let cached = transferPaths.get(st);
-  if (cached?.station !== st.fp || cached.plant !== ind.fp || cached.front !== front || cached.annexes !== ind.annexes) {
-    cached = { station: st.fp, plant: ind.fp, front, annexes: ind.annexes, routes: new Map() };
-    transferPaths.set(st, cached);
-  }
-  const id = `${trip.direction}:${trip.cargo}`;
-  const saved = cached.routes.get(id);
-  if (saved) return saved;
-  const { fp } = st;
-  const rear = rearRoad(st, trip.direction === 'out' ? -1 : 1)
-    .map(([x, y]) => sitePoint(fp, [x / fp.w, y * front / fp.h]));
-  let path = rear;
-  if (st.industryAccess) {
-    const roads = industryRoadPaths(ind);
-    const annex = ind.annexes?.find((part) => part.module && part.connector?.length && (trip.direction === 'out'
-      ? part.module === 'warehouse'
-      : moduleCargo(ind, part.module) === trip.cargo));
-    const section = ind.fp.compound?.sections.find((part) => trip.direction === 'out'
-      ? part.kind === 'warehouse'
-      : part.kind === 'receiving' && part.cargo === trip.cargo);
-    const start = annex?.connector?.at(-1) ?? (section?.gate ? sitePoint(ind.fp, section.gate) : roads[0][0]);
-    path = [...routeToExit(roads, start), ...rear.slice(1)];
-  }
-  const route: Circuit = path.map(({ x, y }) => [x, y]);
-  cached.routes.set(id, route);
-  return route;
-}
+const circuits = new WeakMap<readonly Vec[], Circuit>();
 
 /** Клиенты на улице и техника технологического двора используют разные проезды. */
-export function drawIndustryTransfer(c: CanvasRenderingContext2D, st: Station, ind: Industry, front: 1 | -1, trip: IndustryHaulView): void {
-  paintTransferTruck(c, transferPath(st, ind, front, trip), trip, ind.info.kind);
+export function drawIndustryTransfer(c: CanvasRenderingContext2D, ind: Industry, work: IndustryHaulView): void {
+  for (const trip of work.trips) {
+    if (!trip.path || trip.path.length < 2) continue;
+    let circuit = circuits.get(trip.path);
+    if (!circuit) {
+      circuit = trip.path.map(({ x, y }) => [x, y]);
+      circuits.set(trip.path, circuit);
+    }
+    paintTransferTruck(c, circuit, trip, ind.info.kind);
+  }
 }

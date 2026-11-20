@@ -2,7 +2,7 @@ import { GRADE } from '../config';
 import { arcCubic, Cubic, CurveLUT, quadToCubic, reverseCubic, splitBezier, straightCubic } from '../core/bezier';
 import { add, dist, dot, len, norm, scale, sub, Vec } from '../core/vec';
 import { deckHeight } from '../input/roadtools';
-import { Anchor, anchorAt, buildRoad, EditError } from '../lanes/edit';
+import { Anchor, buildRoad, EditError } from '../lanes/edit';
 import { setDecks, zAlong } from '../lanes/deck';
 import { Flow, LaneNet, profileOf } from '../lanes/model';
 import { edgesAt } from '../lanes/geometry';
@@ -457,15 +457,16 @@ export function autoLevelsAlong(
  * (buildRoad): узлы проекта, примкнувшие к построенному, — к его узлам и дорогам, общие узлы участков — одним
  * узлом сети. Не выходит — EditError с причиной.
  */
-export function layRoadProject(net: LaneNet, p: Project, ground: ((q: Vec) => number) | null, count = p.segs.length): void {
+function layRoadProject(net: LaneNet, p: Project, g: Game, count: number): void {
+  const ground = g.ground();
   const placed = new Map<number, number>();
   const anchor = (n: ProjectNode): Anchor => {
     const id = placed.get(n.id);
     const at = id !== undefined ? net.nodes.get(id) : undefined;
     if (at) return { kind: 'node', node: at.id, pos: at.pos };
     if (n.attach) {
-      const a = anchorAt(net, n.pos, 3, n.level);
-      if (a.kind !== 'free') return a;
+      const a = g.roadAnchorAt(n.pos, 3, n.level, net);
+      if (a.kind !== 'free' || a.stationGate) return a;
     }
     return { kind: 'free', pos: n.pos, level: n.level };
   };
@@ -483,7 +484,7 @@ export function layRoadProject(net: LaneNet, p: Project, ground: ((q: Vec) => nu
     let levels: { at: number; level: number }[] | undefined;
     let zAt: ((p: Vec) => number) | null = null;
     if (s.auto && ground) {
-      const res = autoLevelsAlong(curve, ground, { level: levelOf(A0), fixed: A0.kind !== 'free' }, { level: levelOf(B0), fixed: B0.kind !== 'free' });
+      const res = autoLevelsAlong(curve, ground, { level: levelOf(A0), fixed: A0.kind !== 'free' || !!A0.stationGate }, { level: levelOf(B0), fixed: B0.kind !== 'free' || !!B0.stationGate });
       if ('reason' in res) throw new EditError(res.reason);
       if (A0.kind === 'free') A = { ...A0, level: res.start };
       if (B0.kind === 'free') B = { ...B0, level: res.end };
@@ -600,10 +601,10 @@ function previewRoads(g: Game): RoadBuilder {
  * Проект дорог одной правкой сети: сперва правки построенных дорог (edits — перенос узлов, перья, изгибы, как в
  * «Двигать»), потом первые count участков проекта — уже на сети с этими правками.
  */
-export function roadProjectEdit(p: Project, ground: ((q: Vec) => number) | null, edits: NetEdit[] = [], count = p.segs.length): NetEdit {
+export function roadProjectEdit(p: Project, g: Game, edits: NetEdit[] = [], count = p.segs.length): NetEdit {
   return (net) => {
     for (const e of edits) if (e(net) === false) return false;
-    if (count > 0) layRoadProject(net, p, ground, count);
+    if (count > 0) layRoadProject(net, p, g, count);
     return edits.length > 0 || count > 0;
   };
 }
@@ -611,8 +612,7 @@ export function roadProjectEdit(p: Project, ground: ((q: Vec) => number) | null,
 /** Проект дорог: весь целиком; не выходит — первый участок, на котором ломается (делением пополам). */
 function roadProjectPlan(g: Game, p: Project, length: number, edits: NetEdit[] = [], shove = false): ProjectPlan {
   const b = previewRoads(g);
-  const ground = g.ground();
-  const lay = (count: number) => b.plan(roadProjectEdit(p, ground, edits, count), { shove, project: true });
+  const lay = (count: number) => b.plan(roadProjectEdit(p, g, edits, count), { shove, project: true });
   const full = lay(p.segs.length);
   if (full.ok) {
     // «Со строительством» новые участки — проект: денег должно хватать только на то, что платится сразу (cost).
@@ -693,8 +693,7 @@ export function projectPlan(g: Game, kind: NetKind, p: Project, edits: NetEdit[]
 export function buildProject(g: Game, kind: NetKind, p: Project, edits: NetEdit[] = [], shove = false): string | null {
   if (!p.segs.length && !(kind === 'road' && edits.length)) return 'Проект пуст';
   if (kind === 'road') {
-    const ground = g.ground();
-    const plan = g.roadBuilder.plan(roadProjectEdit(p, ground, edits), { shove, project: true });
+    const plan = g.roadBuilder.plan(roadProjectEdit(p, g, edits), { shove, project: true });
     if (!plan.ok) return plan.reason ?? 'Так не построить';
     g.checkpoint('проект дороги');
     g.roadBuilder.apply(plan);

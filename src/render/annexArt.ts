@@ -312,7 +312,6 @@ function gates(a: Art, x: number, y: number, w: number, n: number): void {
 /** Трактор с кабиной — только вблизи. */
 function tractor(a: Art, x: number, y: number): void {
   if (!a.d) return;
-  a.vehicle(x, y, 3.2, 4.6, '#3f8f4a');
   a.flat(x - 0.9, y - 0.6, 1.8, 1.6, '#2c6b37');
 }
 
@@ -351,7 +350,6 @@ function granary(a: Art, s: Lot): void {
   a.heap(L + 24, B - 9, 4, bale(s), 1);
   a.gable(R - 17, B - 13, 14, 9, 5, s.roof);
   a.flat(R - 11.5, B - 9.5, 3, 2, '#f1e9dc');
-  a.truck(L + 12, B - 8, false, '#c4662f', bale(s));
 }
 
 /** Машинный двор: металлический ангар с воротами, контора, бочка с топливом, трактор и комбайн на площадке. */
@@ -367,7 +365,6 @@ function machineyard(a: Art, s: Lot): void {
   tractor(a, L + 9, B - 9);
   if (a.d) {
     // Комбайн: кузов, бункер и жатка впереди.
-    a.vehicle(L + 21, B - 9, 6, 7, YELLOW);
     a.flat(L + 19.6, B - 10, 2.8, 2.6, '#3d4148');
     a.flat(L + 16.5, B - 13.8, 9, 1.2, DARK);
   }
@@ -389,7 +386,7 @@ function greenhouse(a: Art, s: Lot): void {
 
 /** Хранилище урожая: длинная насыпь с травой и вентиляционными трубами, бетонный портал с воротами, ящики, грузовик. */
 function cellar(a: Art, s: Lot): void {
-  const { L, T, R, B } = s;
+  const { L, T, R } = s;
   yard(a, s, '#d8caa2');
   const w = s.W - 8;
   const h = 15;
@@ -400,7 +397,6 @@ function cellar(a: Art, s: Lot): void {
   a.box(gx - 6, T + 3 + h, 12, 3, 3, '#cdc8bf');
   a.box(gx - 4, T + 6 + h, 8, 1.6, 3.4, s.roof);
   for (let k = 0; k < 6; k++) a.stack(R - 19 + (k % 3) * 5.5, T + h + 9 + Math.floor(k / 3) * 5, 4.5, 4, 2, '#b98e5e', '#8d6a43');
-  a.truck(gx + 3, B - 7, false, '#c4662f', bale(s));
 }
 
 // ---------- Животноводство ----------
@@ -457,7 +453,6 @@ function logyard(a: Art, s: Lot): void {
   a.logs(L + 4, T + 18, 18, 4, 1);
   a.logs(L + 26, T + 4, Math.min(16, R - 4 - (L + 26)), 5, 2);
   a.excavator(R - 8, T + 25, R - 13, T + 21);
-  a.truck(L + 13, B - 6, false, '#c4662f', BARK);
   a.tree(R - 6, B - 6, 4.2, '#6e9a52');
 }
 
@@ -470,14 +465,11 @@ function depot(a: Art, s: Lot): void {
   gates(a, L + 4, T + 18, hw, 3);
   const y = T + 25;
   if (s.kind === 'forest') {
-    a.truck(L + 11, y, false, '#c4662f', BARK);
     if (a.d) {
-      a.vehicle(L + 24, y, 4, 6.4, '#3f8f4a');
       a.flat(L + 22.6, y + 1.4, 2.8, 1.8, '#2c6b37');
     }
   } else {
     a.excavator(L + 9, y, L + 15, y + 4);
-    a.truck(L + 25, y, false, YELLOW, bulk(s));
   }
   a.tank(R - 7, B - 7, 2.8, 4, '#e9ecef', '#c0392b');
 }
@@ -520,18 +512,15 @@ function drykilns(a: Art, s: Lot): void {
 
 /** Склад продукции: длинный навес в цвете крыши, под погрузкой — грузовик, рядом пакеты досок или рулоны бумаги. */
 function lumbershed(a: Art, s: Lot): void {
-  const { L, T, R, B } = s;
+  const { L, T, B } = s;
   yard(a, s, '#d8c8a2');
   a.gable(L + 4, T + 4, s.W - 8, 13, 6, s.roof, true);
   if (s.kind === 'papermill') {
     for (let k = 0; k < 8; k++) a.tank(L + 22 + (k % 4) * 6.4, B - 11.5 + Math.floor(k / 4) * 6.2, 2.8, 4, '#f4f1ea', '#d9d4ca');
-    a.truck(L + 10, B - 7.5, false, s.roof, '#f4f1ea');
     return;
   }
   const [color, line, tie] = goods(s);
   for (let k = 0; k < 2; k++) a.stack(L + 19 + k * 12, B - 12, 10, 8, 3, color, line, tie);
-  a.truck(L + 10, B - 7.5, false, s.roof, color);
-  if (a.d && R - (L + 43) > 5) a.vehicle(R - 6, B - 8, 3, 4.4, YELLOW);
 }
 
 /** Котельная: корпус в цвете крыши, высокая труба, куча топлива (опилки, щепа или уголь) с конвейером, бак воды. */
@@ -559,7 +548,6 @@ function concentrator(a: Art, s: Lot): void {
   a.tank(R - 9, T + 10, 4.4, 0, '#7fa9b8');
   a.heap(L + 12, B - 9, 6.5, bulk(s), 1);
   a.belt(L + 12, B - 13, 4, L + 12, T + 16, 9);
-  a.truck(R - 9, B - 7, false, YELLOW, bulk(s));
 }
 
 /** Вентиляционный (вспомогательный) ствол: копёр со шкивами, подъёмная машина, вентилятор, рельсы с вагонетками. */
@@ -584,10 +572,8 @@ function stockpile(a: Art, s: Lot): void {
   a.heap(L + 24, T + 12, 7.5, c, 1);
   a.heap(R - 7.5, B - 10, 6, tone(c, 0.08), 2);
   if (a.d) {
-    a.vehicle(L + 24, B - 7, 4, 5.6, YELLOW);
     a.flat(L + 22, B - 10.6, 4, 1.2, DARK);
   }
-  a.truck(L + 10, B - 7, false, YELLOW, c);
 }
 
 /** Дробильно-сортировочная установка: дробилка, грохот, конвейеры на три кучи разной фракции, самосвал. */
@@ -604,7 +590,6 @@ function crusher(a: Art, s: Lot): void {
   a.heap(L + 26, T + 9, 6, c, 1);
   a.heap(R - 8, T + 17, 5, tone(c, 0.12), 2);
   a.heap(L + 22, B - 9, 6, tone(c, -0.1), 3);
-  a.truck(L + 10, B - 5.5, false, YELLOW, c);
 }
 
 // ---------- Нефть и газ ----------
@@ -676,7 +661,6 @@ function pumpstation(a: Art, s: Lot): void {
     a.chimney(R - 7, B - 7, 1.2, 24, '#8f969e', '#c0392b');
     a.glow(R - 7, B - 7, 2);
   } else a.tank(R - 7, B - 7.5, 3.4, 8, '#e9ecef', s.roof);
-  a.truck(L + 12, B - 7, false, s.roof, '#d9dde0');
 }
 
 /** Установка переработки: три колонны разной высоты, эстакада, печь с трубой, ёмкости. */
@@ -709,7 +693,6 @@ function loading(a: Art, s: Lot): void {
   a.pipe(R - 8, T + 19, L + 4 + lw, -0.5, '#8f969e', 1);
   for (let k = 0; k < 3; k++) {
     const x = L + 4 + (lw * (k + 0.5)) / 3;
-    if (k === 1 || a.r(30 + k) < 0.75) a.truck(x, 1, true, s.roof, '#e9ecef');
     a.flat(x - 2.6, B - 7, 5.2, 0.6, 'rgba(255,255,255,0.7)');
   }
   a.box(L + 4, -3, lw, 5, 7, s.roof, 1.6);
@@ -730,7 +713,6 @@ function flare(a: Art, s: Lot): void {
   a.tank(L + 30, B - 10, 6, 12, '#f0eee8', s.roof);
   a.chimney(R - 7, B - 8, 1.3, 30, '#8f969e', '#c0392b');
   a.glow(R - 7, B - 8, 2.2);
-  a.truck(L + 12, B - 8, false, s.roof, '#e9ecef');
 }
 
 // ---------- Металлургия ----------
@@ -790,7 +772,6 @@ function metalyard(a: Art, s: Lot): void {
   a.box(cx - 1.6, T + 4, 3.2, s.H - 8, 12, YELLOW);
   a.flat(cx - 2.4, a.r(6) * 10 - 5, 4.8, 3.4, DARK);
   a.box(R - 11, B - 14, 8, 8, 4, s.roof, 1.2);
-  a.truck(R - 7, T + 11, true, s.roof, color);
 }
 
 // ---------- Стройматериалы и стекло ----------
@@ -804,7 +785,6 @@ function silos(a: Art, s: Lot): void {
   for (let k = 0; k < n; k++) a.tank(L + 9 + k * 11.5, y, 5, 20, '#d9d6cf', '#b5b0a6');
   a.belt(L + 4, y, 20, L + 9 + (n - 1) * 11.5, y, 20);
   a.box(L + 4, B - 13, 12, 9, 6, s.roof, 1.6);
-  a.truck(L + 26, B - 8, false, s.roof, '#d9d6cf');
   const [color, line, tie] = goods(s);
   for (let k = 0; k < 4; k++) a.stack(R - 12.5 + (k % 2) * 5.5, B - 13 + Math.floor(k / 2) * 5.5, 4.5, 4.5, 2.5, color, line, tie);
 }
@@ -839,10 +819,8 @@ function pallets(a: Art, s: Lot): void {
     }
   }
   if (a.d) {
-    a.vehicle(L + 10, T + 19, 3, 4.4, YELLOW);
     a.flat(L + 9, T + 16, 2, 1.2, DARK);
   }
-  a.truck(L + 10, B - 6, false, s.roof, color);
 }
 
 // ---------- Пищевые заводы ----------
@@ -858,7 +836,6 @@ function coldstore(a: Art, s: Lot): void {
   for (let k = 0; k < 3; k++) a.flat(L + 7 + k * 9, T + 5.5, 4, 2.4, '#9aa3ab');
   gates(a, L + 4, T + 17, bw, n);
   a.box(R - 10, T + 4, 7, 9, 4, s.roof, 1.2);
-  for (let k = 0; k < n; k++) if (k === 0 || a.r(30 + k) < 0.7) a.truck(L + 4 + (bw * (k + 0.5)) / n, T + 23, true, s.roof, '#f4f1ea');
 }
 
 /** Баки: силосы зерна (у рыбозавода — рассол, у маслозавода — масло), приёмка в цвете крыши, автоцистерна. */
@@ -872,7 +849,6 @@ function tanks(a: Art, s: Lot): void {
   a.pipe(xs[0], 0, L + 28, 0);
   for (const x of xs) for (const y of ys) a.tank(x, y, r, z, body, cap);
   a.box(L + 28, T + 4, R - 4 - (L + 28), 12, 6, s.roof, 1.6);
-  a.truck(R - 9, B - 7, false, s.roof, body);
 }
 
 /** Цех фасовки: корпус в цвете крыши с фонарями и трубой, ящики продукции, фургоны. */
@@ -887,7 +863,6 @@ function packing(a: Art, s: Lot): void {
   for (let k = 0; k < 6; k++) {
     a.stack(R - 12 + (k % 2) * 5, T + 4 + Math.floor(k / 2) * 5.5, 4, 4.5, 2, palette[Math.floor(a.r(80 + k) * palette.length)], 'rgba(0,0,0,0.15)');
   }
-  for (let k = 0; k < 2; k++) a.truck(L + 10 + k * 13, B - 7, false, s.roof, '#f4f1ea');
   a.smoke(L + 8, T + 9, 1, '248,248,248');
 }
 
@@ -901,12 +876,6 @@ function assembly(a: Art, s: Lot): void {
   a.shed(L + 4, T + 4, s.W - 16, s.H - 15, 7, s.roof, GLASS[s.kind] ?? '#e8eef2', 5);
   a.box(R - 10, T + 4, 7, 10, 4, '#7a8791', 1.2);
   a.flat(R - 9, T + 15, 5, 1.2, '#55595f');
-  if (!a.d) return;
-  const cars = ['#e5534b', '#4a8fe7', '#f2c94c', '#f4f1ea', '#5c6470'];
-  for (let k = 0; k < Math.floor((s.W - 10) / 4.5); k++) {
-    if (a.r(60 + k) < 0.35) continue;
-    a.vehicle(L + 6 + k * 4.5, B - 6, 2.6, 4.2, cars[Math.floor(a.r(70 + k) * cars.length)]);
-  }
 }
 
 /** Склад с рампами: корпус, навес в цвете крыши, фуры у ворот, контейнеры (тюки, рулоны) на площадке. */
@@ -915,7 +884,6 @@ function warehouse(a: Art, s: Lot): void {
   a.patch(L + 3, T + 17, s.W - 6, B - 3 - (T + 17), '#d0d5d9', 2);
   a.box(L + 4, T + 4, s.W - 8, 11, 6, '#b9c2c9', 2);
   a.box(L + 4, T + 15, s.W - 8, 2.2, 4.5, s.roof);
-  for (let k = 0; k < 3; k++) a.truck(L + 8 + k * 7.5, T + 23, true, s.roof, '#f4f1ea');
   const palette = crates(s);
   for (let k = 0; k < 2; k++) {
     const color = palette[Math.floor(a.r(40 + k) * palette.length)];
@@ -943,7 +911,6 @@ function vault(a: Art, s: Lot): void {
   a.box(L + 4, T + 4, 16, 13, 5, '#9aa3ab', 1.4);
   a.flat(L + 7, T + 9.5, 10, 2, '#6d7076');
   a.gable(L + 23, T + 4, 11, 8, 4, s.roof);
-  a.truck(L + 12, B - 7, false, '#5c6470', '#8a8f96');
   a.tree(R - 6, B - 6, 4, '#6e9a52');
   a.tree(R - 6, T + 17.5, 3.2, '#7aa55a');
 }
@@ -952,13 +919,12 @@ function vault(a: Art, s: Lot): void {
 
 /** Коптильня: дом в цвете крыши с дымящей трубой, поленница, ящики рыбы, грузовик. */
 function smokehouse(a: Art, s: Lot): void {
-  const { L, T, R, B } = s;
+  const { L, T } = s;
   yard(a, s, '#d9cfb4');
   a.gable(L + 4, T + 4, 18, 12, 6, s.roof);
   a.chimney(L + 19, T + 8, 1.6, 14, '#b9b4ad');
   a.logs(L + 4, T + 20, 13, 3, 0);
   for (let k = 0; k < 6; k++) a.stack(L + 24 + (k % 3) * 4.5, T + 5 + Math.floor(k / 3) * 5.5, 3.8, 4.5, 2, '#e9ecef', '#3d8fbf');
-  a.truck(R - 9, B - 7, false, s.roof, '#e9ecef');
   a.smoke(L + 19, T + 8, 1, '200,200,206', 0.8);
 }
 

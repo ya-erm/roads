@@ -3,6 +3,7 @@ import { MONTH_LENGTH, STATION } from '../config';
 import { dist } from '../core/vec';
 import { twoWay } from '../lanes/model';
 import { CURB_GAP } from '../lanes/traffic';
+import { LANE_W } from '../world/roadTypes';
 import { Game } from './game';
 import { connectStations, fieldSpot, road, runUntil, stationAtIndustry, withoutCitizens } from './testkit';
 import { bayBox, bayPose, LONGEST_BUS, MODELS, stopBerth } from './transport';
@@ -34,6 +35,19 @@ describe('Бокс поста автостанции', () => {
     }
     // Здание автовокзала 6,5 м у задней стены (метр от неё) — за самым длинным автобусом.
     expect(bayPose(fp, STATION.bays, 1, LONGEST_BUS).pos.y).toBeCloseTo(-fp.h / 2 + 1 + 6.5);
+  });
+
+  it('открытые грузовые посты шириной с полосу и вмещают длинную фуру даже на широком дворе', () => {
+    const fp = { center: { x: 100, y: 50 }, w: 126, h: 56, angle: 0 };
+    const length = 21;
+    for (let i = 0; i < 5; i++) {
+      const box = bayBox(fp, 5, i, -1, true);
+      const parked = bayPose(fp, 5, i, length, -1);
+      expect(box.w).toBe(LANE_W);
+      expect(box.center.x).toBeCloseTo(parked.pos.x);
+      expect(parked.pos.y).toBeLessThan(box.center.y + box.h / 2);
+      expect(parked.pos.y - length).toBeGreaterThan(box.center.y - box.h / 2);
+    }
   });
 });
 

@@ -5,12 +5,13 @@ import { drawWalkSign } from './walkSign';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
 import { stationNormal } from '../game/railStationEdit';
+import { additionalStationGates, stationRoadFront } from '../game/stationAccess';
 import { warningMarks } from '../game/stationWarnings';
 import { paxGone } from '../game/paxPatience';
 import { headingArrow } from '../game/stopPairs';
 import type { Spans } from '../game/constructionWork';
 import type { Game, LaneEnd, Partner } from '../game/game';
-import { bayFront, LONGEST_BUS, type FleetVehicle, type Line } from '../game/transport';
+import { bayFront, baySlot, LONGEST_BUS, OPEN_BAY_REAR, openBayEnd, type FleetVehicle, type Line } from '../game/transport';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { atPortals, type Portal, portalHalf, tunnelPortals } from '../lanes/tunnel';
 import { LaneRenderer, layerOf, ROAD_ASPHALT } from '../lanes/draw';
@@ -61,7 +62,7 @@ import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, type Emitter, industryMotion } from './industryArt';
 import { paintIndustrySite, tracePlot } from './industrySite';
 import { drawIndustrialGate, drawIndustrialRoads, industryRoadSurface } from './industryRoadArt';
-import { drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock, OPEN_BAY_REAR } from './industryStationArt';
+import { drawIndustryHaulConnection, drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock } from './industryStationArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
 import { type Around, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
@@ -3027,21 +3028,28 @@ export class Renderer {
   /** Станции — поверх неподвижного: занятость постов, ящики и машины на открытых площадках. */
   private drawStationsOver(game: Game, view: Box): void {
     for (const st of game.stations.values()) {
-      if (st.kind !== 'road' || st.curb || !this.stationSeen(st, view)) continue;
-      if (isBusTerminal(st)) this.drawBusTerminalLive(game, st);
-      else {
-        this.drawStationBays(game, st);
-        if (st.industryId !== null) this.drawVehicles(game.bayLooks(st));
+      if (st.kind !== 'road' || st.curb) continue;
+      const seen = this.stationSeen(st, view);
+      if (isBusTerminal(st)) {
+        if (seen) this.drawBusTerminalLive(game, st);
+      } else {
+        if (seen) {
+          this.drawStationBays(game, st);
+          if (st.industryId !== null) this.drawVehicles(game.bayLooks(st));
+        }
         const industry = st.industryId === null ? undefined : game.industries.find((ind) => ind.id === st.industryId);
-        if (!industry) continue;
-        const trip = game.industryHaul.view(st, game.time);
-        this.ctx.save();
-        this.intoStation(game, st);
-        drawIndustryYardStock(this.ctx, st, industry, this.camera.zoom, game.stationStorage(st), trip);
-        this.ctx.restore();
-        const gate = game.roads.net.nodes.get(st.nodeId);
-        if (gate && trip && this.camera.zoom > 0.5) {
-          drawIndustryTransfer(this.ctx, st, industry, bayFront(st.fp, gate.pos), trip);
+        if (!industry || (!seen && !seenAt(industry.fp.center, view, 400))) continue;
+        const work = game.industryHaul.view(st, game.time);
+        const connection = game.industryHaulRoad(st, industry);
+        if (connection) drawIndustryHaulConnection(this.ctx, st, industry, connection);
+        if (seen) {
+          this.ctx.save();
+          this.intoStation(game, st);
+          drawIndustryYardStock(this.ctx, st, industry, this.camera.zoom, game.stationStorage(st), work);
+          this.ctx.restore();
+        }
+        if (work?.trips.length && this.camera.zoom > 0.5) {
+          drawIndustryTransfer(this.ctx, industry, work);
           if (game.speed > 0) this.ambient = true;
         }
       }
@@ -3494,11 +3502,10 @@ export class Renderer {
   private intoStation(game: Game, st: Station): void {
     const ctx = this.ctx;
     const fp = st.fp;
-    const gate = game.roads.net.nodes.get(st.nodeId);
     ctx.translate(fp.center.x, fp.center.y);
     ctx.rotate(fp.angle);
     // Локальная +y — к воротам (у грузового двора предприятия площадка повёрнута наоборот).
-    ctx.scale(1, gate ? bayFront(fp, gate.pos) : 1);
+    ctx.scale(1, stationRoadFront(st, game.roads.net));
   }
 
   /**
@@ -3525,21 +3532,21 @@ export class Renderer {
     ctx.restore();
   }
 
-  /** Белая разметка отделяет открытые места и соединяется с линиями у въезда. */
-  private drawOpenBayLines(bays: number, width: number, front: number): void {
+  /** Длинные посты открываются в общий проезд, на котором можно маневрировать. */
+  private drawOpenBayLines(game: Game, st: Station): void {
     const c = this.ctx;
-    const left = -width / 2 + 4;
-    const step = (width - 10) / bays;
+    const row = game.bayArea(st);
+    const end = openBayEnd(row.h);
     c.strokeStyle = C.dash;
-    c.lineWidth = 0.8;
+    c.lineWidth = 0.55;
     c.lineCap = 'butt';
     c.beginPath();
-    c.moveTo(left, OPEN_BAY_REAR);
-    c.lineTo(left + bays * step, OPEN_BAY_REAR);
-    for (let i = 0; i <= bays; i++) {
-      const x = left + i * step;
-      c.moveTo(x, OPEN_BAY_REAR);
-      c.lineTo(x, front);
+    for (let i = 0; i < st.bays; i++) {
+      const { x, w } = baySlot(row.w, st.bays, i, true);
+      c.moveTo(x, end);
+      c.lineTo(x, OPEN_BAY_REAR);
+      c.lineTo(x + w, OPEN_BAY_REAR);
+      c.lineTo(x + w, end);
     }
     c.stroke();
   }
@@ -3553,25 +3560,25 @@ export class Renderer {
     const hh = fp.h / 2;
     const area = game.bayArea(st);
     this.drawDepotBoxes(game, st, area);
-    const bw = (area.w - 10) / st.bays;
+    const open = st.industryId !== null;
     const doors = this.camera.zoom > 0.35;
     game.stationBays(st).forEach((color, i) => {
-      const x = -area.w / 2 + 5 + i * bw;
-      if (st.industryId !== null) {
+      const { x, w } = baySlot(area.w, st.bays, i, open);
+      if (open) {
         if (color && doors) {
           ctx.fillStyle = '#46505b';
-          ctx.fillRect(x + 0.1, 2.6, 1.9, 4.9);
+          ctx.fillRect(x - 1.65, 2.6, 1.3, 4.9);
           ctx.fillStyle = color;
-          ctx.fillRect(x + 0.45, 2.95, 1.2, 4.2);
+          ctx.fillRect(x - 1.4, 2.95, 0.8, 4.2);
         }
         return;
       }
       ctx.fillStyle = color ?? '#d5d2c8';
-      ctx.fillRect(x, -1, bw - 2, hh + 1);
+      ctx.fillRect(x, -1, w, hh + 1);
       // Открытые ворота — тёмный проём во всю ширину бокса: контур площадки здесь прерывается.
       if (doors) {
         ctx.fillStyle = '#3d434b';
-        ctx.fillRect(x, hh - 2, bw - 2, 2.8);
+        ctx.fillRect(x, hh - 2, w, 2.8);
       }
     });
     ctx.restore();
@@ -3886,19 +3893,35 @@ export class Renderer {
         this.drawFootprint(fp, C.road);
         ctx.save();
         this.intoStation(game, st);
-        if (this.camera.zoom > 0.35) this.drawOpenBayLines(st.bays, game.bayArea(st).w, fp.h / 2);
+        if (this.camera.zoom > 0.35) this.drawOpenBayLines(game, st);
         ctx.restore();
       }
       if (st.curb) {
         if (this.camera.zoom >= 0.3) this.drawCurbMarks(net, st);
         continue;
       }
+      const front = stationRoadFront(st, net);
+      const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+      const v = scale(rightNormal(u), front);
+      const nearEdge = add(fp.center, scale(v, fp.h / 2 - 1));
+      for (const gate of additionalStationGates(st, net)) {
+        const end = net.ends(gate)[0];
+        if (!end) continue;
+        const road = end.corridor;
+        const s = end.end === 'a' ? 0 : road.length;
+        const [left, right] = edgesAt(road, s) ?? [-LANE_W / 2, LANE_W / 2];
+        const a = add(pointOff(road, s, left - ROAD_MARGIN), scale(end.away, 0.7));
+        const b = add(pointOff(road, s, right + ROAD_MARGIN), scale(end.away, 0.7));
+        const atEdge = (p: Vec) => add(nearEdge, scale(u, clamp(dot(sub(p, fp.center), u), -fp.w / 2 + 1, fp.w / 2 - 1)));
+        ctx.fillStyle = C.road;
+        ctx.beginPath();
+        this.polyline([a, b, atEdge(b), atEdge(a)]);
+        ctx.closePath();
+        ctx.fill();
+      }
       const node = net.nodes.get(st.nodeId);
       const end = node && net.ends(node)[0];
       if (!node || !end) continue;
-      const front = bayFront(fp, node.pos);
-      const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
-      const v = { x: -u.y * front, y: u.x * front };
       // Координаты площадки: x вдоль боксов, y к выезду (здание — до hh).
       const local = (p: Vec) => ({ x: dot(sub(p, fp.center), u), y: dot(sub(p, fp.center), v) });
       const hh = fp.h / 2;
@@ -4006,7 +4029,7 @@ export class Renderer {
       ctx.closePath();
       ctx.fill();
       if (this.camera.zoom >= 0.35) {
-        this.drawBayMarks(game, st, hh);
+        if (st.industryId === null) this.drawBayMarks(game, st, hh);
         // Въезд и выезд: правая по ходу полоса выезда ведёт на площадку, левая — обратно к улице.
         const axis = local(pointOff(c, s, 0)).x;
         const lanes = [ed[0] / 2, ed[1] / 2].map((o) => local(pointOff(c, s, o)).x);

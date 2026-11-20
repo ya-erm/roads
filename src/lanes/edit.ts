@@ -32,7 +32,7 @@ export type Anchor =
   | { kind: 'node'; node: number; pos: Vec }
   | { kind: 'corridor'; corridor: number; s: number; pos: Vec }
   /** level — высота нового узла: −1 тоннель, 0 земля, 1 мост, 2 эстакада. */
-  | { kind: 'free'; pos: Vec; level?: number };
+  | { kind: 'free'; pos: Vec; level?: number; stationGate?: { id: number; outward: Vec } };
 
 /** Правка невозможна — причина для игрока. */
 export class EditError extends Error {}
@@ -306,6 +306,7 @@ export function buildRoad(net: LaneNet, A: Anchor, B: Anchor, o: RoadOptions): C
   // С изломом (kink) дорога из тупика идёт прямо к цели, если та не точно по касательной.
   const chordDir = (x: Anchor, toward: Vec, start: boolean) => norm(start ? sub(toward, x.pos) : sub(x.pos, toward));
   const seamDir = (x: Anchor, start: boolean): Vec | null => {
+    if (x.kind === 'free' && x.stationGate) return scale(x.stationGate.outward, start ? 1 : -1);
     if (x.kind !== 'node') return null;
     const n = net.node(x.node);
     const free = openSeamSide(net, n);
@@ -313,6 +314,7 @@ export function buildRoad(net: LaneNet, A: Anchor, B: Anchor, o: RoadOptions): C
     return scale(n.dir, start ? free : -free);
   };
   const kinked = (x: Anchor, toward: Vec, start: boolean) => {
+    if (x.kind === 'free' && x.stationGate) return false;
     const d = seamDir(x, start);
     return !!o.kink && !!d && dot(d, chordDir(x, toward, start)) < Math.cos(0.05);
   };
@@ -421,7 +423,9 @@ function resolveEnd(net: LaneNet, x: Anchor, dir: Vec, start: boolean, lanes: La
   }
   if (x.kind === 'corridor') return { node: splitCorridor(net, net.corridor(x.corridor), x.s, 'junction').node };
   // Чистое поле — тупик: стык по направлению дороги, полотно у начала спереди, у конца — сзади.
-  return { node: net.addSeam(x.pos, dir, x.level ?? 0), side: start ? 1 : -1 };
+  const node = net.addSeam(x.pos, dir, x.level ?? 0);
+  if (x.stationGate) node.stationGate = x.stationGate.id;
+  return { node, side: start ? 1 : -1 };
 }
 
 /**

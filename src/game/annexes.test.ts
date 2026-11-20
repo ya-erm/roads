@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { ANNEX, COST, MONTH_LENGTH } from '../config';
 import { add, type Vec } from '../core/vec';
 import { annexHtml } from '../ui/annexUi';
-import type { Industry } from '../world/entities';
-import { INDUSTRY_MODULES, industryOutputCapacity, type IndustryModule } from '../world/industryModules';
+import type { Industry, Station } from '../world/entities';
+import { INDUSTRY_MODULES, industryLoadingRate, industryOutputCapacity, industryUnloadingRate, type IndustryModule } from '../world/industryModules';
 import { industryAccess, sitePoint } from '../world/industrySites';
 import { annexZone, growthCap, moduleEffect } from './annexes';
 import { Game } from './game';
-import { freshGame, stationAtIndustry, withoutCitizens } from './testkit';
+import { freightRoute, freshGame, stationAtIndustry, withoutCitizens } from './testkit';
+import type { FleetVehicle, Line } from './transport';
 
 function setup() {
   const game = withoutCitizens(freshGame(7));
@@ -61,6 +62,39 @@ describe('Секции предприятий', () => {
     expect(game.structureAt(p)).toMatchObject({ type: 'annex', industryId: farm.id, module: 'field' });
     farm.cap = ANNEX.base + 1;
     expect(moduleEffect(farm, 'field')).toBe('+25% к выпуску');
+  });
+
+  it('склад ускоряет погрузку, а двор сырья — разгрузку своего материала', () => {
+    const { game } = setup();
+    const { from: farm, to: plant, sA, sB, line, built } = freightRoute(game);
+    expect(built).toBe(true);
+    const v = game.buyVehicle(line.id, 'truck')!;
+    const handling = game as unknown as { handleStop(v: FleetVehicle, st: Station, line: Line): void };
+    const load = () => {
+      v.stop = 0;
+      sA.cargo.grain = 16;
+      handling.handleStop(v, sA, line);
+      expect(v.amount).toBe(16);
+      return v.timer;
+    };
+    const unload = () => {
+      v.stop = 1;
+      handling.handleStop(v, sB, line);
+      expect(v.amount).toBe(0);
+      return v.timer;
+    };
+    const normalLoad = load();
+    const normalUnload = unload();
+
+    expect(game.buildAnnex(farm.id, freeSpot(game, farm, 'warehouse'), 'warehouse')).toBeNull();
+    const receiving = plant.info.accepts[0] === 'grain' ? 'receiving' : 'receivingSecond';
+    expect(game.buildAnnex(plant.id, freeSpot(game, plant, receiving), receiving)).toBeNull();
+    expect(load()).toBeCloseTo(2 + (normalLoad - 2) / industryLoadingRate(farm));
+    expect(unload()).toBeCloseTo(2 + (normalUnload - 2) / industryUnloadingRate(plant, 'grain'));
+    expect(industryLoadingRate(farm)).toBeGreaterThan(1);
+    expect(industryUnloadingRate(plant, 'grain')).toBeGreaterThan(1);
+    expect(industryUnloadingRate(plant, 'livestock')).toBe(1);
+    expect(annexHtml(plant)).toContain('Скорость разгрузки · Зерно');
   });
 
   it('не даёт построить секцию неподходящего типа, вдали и поверх фермы', () => {
