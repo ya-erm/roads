@@ -423,6 +423,9 @@ export interface Deposit {
   center: Vec;
   angle: number;
   size: 0 | 1 | 2;
+  /** Контуры будущего предприятия, проверенные при генерации месторождения. */
+  parts?: Footprint['parts'];
+  groundParts?: number;
   used?: number;
 }
 
@@ -432,6 +435,10 @@ export interface Annex {
   id: number;
   industryId: number;
   fp: Footprint;
+  /** Вспомогательная секция, появившаяся с ростом производства. */
+  automatic?: true;
+  /** Конец технологической ветки, от которой проложен въезд в секцию. */
+  access?: Vec;
 }
 
 export interface PassengerGroup {
@@ -497,6 +504,8 @@ export interface Station {
   serves: StationServes;
   /** Грузовой двор предприятия: обслуживает только его, снести нельзя. */
   industryId: number | null;
+  /** Задние ворота грузового двора совмещены с технологическим проездом. */
+  industryAccess?: true;
   cargo: Partial<Record<CargoType, number>>;
   /**
    * Откуда изначально груз, выгруженный сюда на склад (пересадка).

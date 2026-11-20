@@ -1,5 +1,5 @@
 import type { IndustryType } from '../world/cargo';
-import type { Footprint } from '../world/spatial';
+import type { Footprint, Plot } from '../world/spatial';
 
 type Point = readonly [number, number];
 
@@ -34,7 +34,17 @@ const WORKS: readonly Point[] = [
 ];
 
 /** Контур покрытия, в локальных координатах площадки. */
-export function industrySitePath(c: CanvasRenderingContext2D, info: IndustryType, w: number, h: number): void {
+export function industrySitePath(c: CanvasRenderingContext2D, info: IndustryType, w: number, h: number, parts?: readonly Plot[]): void {
+  if (parts) {
+    c.beginPath();
+    for (const part of parts) tracePlot(c, part, w, h);
+    return;
+  }
+  if (info.accepts.length) {
+    c.beginPath();
+    c.roundRect(-w / 2, -h / 2, w, h, 3);
+    return;
+  }
   let points: readonly Point[];
   switch (info.kind) {
     case 'farm': case 'flaxfarm': case 'sunflower': case 'cottonfarm': case 'ranch': case 'sheepfarm':
@@ -59,11 +69,25 @@ export function industrySitePath(c: CanvasRenderingContext2D, info: IndustryType
       points = WORKS;
   }
   c.beginPath();
-  c.moveTo(points[0][0] * w, points[0][1] * h);
-  for (let i = 1; i < points.length; i++) {
-    const [x, y] = points[i];
-    c.lineTo(x * w, y * h);
+  const soft = points === FIELDS || points === WOODLAND;
+  if (soft) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    c.moveTo((first[0] + last[0]) * w / 2, (first[1] + last[1]) * h / 2);
+    points.forEach(([x, y], i) => {
+      const [nx, ny] = points[(i + 1) % points.length];
+      c.quadraticCurveTo(x * w, y * h, (x + nx) * w / 2, (y + ny) * h / 2);
+    });
+  } else {
+    c.moveTo(points[0][0] * w, points[0][1] * h);
+    for (let i = 1; i < points.length; i++) c.lineTo(points[i][0] * w, points[i][1] * h);
   }
+  c.closePath();
+}
+
+export function tracePlot(c: CanvasRenderingContext2D, plot: Plot, w: number, h: number): void {
+  c.moveTo(plot[0].x * w, plot[0].y * h);
+  for (let i = 1; i < plot.length; i++) c.lineTo(plot[i].x * w, plot[i].y * h);
   c.closePath();
 }
 
@@ -73,7 +97,7 @@ export function paintIndustrySite(
   c.save();
   c.translate(fp.center.x, fp.center.y);
   c.rotate(fp.angle);
-  industrySitePath(c, info, fp.w, fp.h);
+  industrySitePath(c, info, fp.w, fp.h, fp.parts);
   c.fillStyle = fill;
   c.fill();
   if (stroke) {

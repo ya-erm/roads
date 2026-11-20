@@ -25,7 +25,7 @@ import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier'
 import { money as usd } from '../core/moneyText';
 import { Rng } from '../core/rng';
 import { durationText } from '../core/timeText';
-import { add, angleDiff, angleOf, cross, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
+import { add, angleDiff, angleOf, cross, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, insideRuns, splitCorridor } from '../lanes/edit';
 import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
@@ -47,7 +47,7 @@ import { repaceSave, saveMonthLength } from './monthPace';
 import { PAX_WAIT, paxLeaving, paxPatience, paxStayShare, paxTolerance } from './paxPatience';
 import { Network, NetworkSave, Segment } from '../world/network';
 import { halfWidth, isDirt, isRail, isTrunk, KMH_PER_UNIT, LANE_W, RAIL_HALF, RAIL_SPEC, ROAD_MARGIN, specCost, TRACK_GAP, WALK_EDGE } from '../world/roadTypes';
-import { Footprint, footprintCorners, footprintRadius, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
+import { Footprint, footprintAlong, footprintCorners, footprintRadius, footprintSide, FootprintIndex, footprintsOverlap, pointInFootprint } from '../world/spatial';
 import { DEFAULT_SETTINGS, parkingOn, retailOn, WorldSettings } from '../world/settings';
 import { Terrain, TerraformEdit, TerraformMode } from '../world/terrain';
 import {
@@ -149,7 +149,8 @@ import { CURB } from '../lanes/curb';
 import { addCurb, CURB_GROW, frontage, withCurb } from '../world/curbStreets';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises, industryRecipe } from './enterprises';
-import { isActive } from '../world/enterprise';
+import { depositRadius, isActive } from '../world/enterprise';
+import { industryAccess, industryServiceRoads, sitePoint } from '../world/industrySites';
 import { carryBuild, carryRailBuild, paidFor, spansOf } from './constructionWork';
 import { revertRebuild } from './rebuild';
 import type { Brigade } from './crews';
@@ -688,6 +689,7 @@ export interface StationPlan {
   fp: Footprint | null;
   /** Станция пристроена к этому предприятию. */
   industryId?: number;
+  industryAccess?: true;
   /** Для вокзала: как разрезать путь и где пройдёт второй путь. */
   rail?: RailStationGeom;
   /** Выезд автостанции: план дороги (сеть с выездом — для предпросмотра, даже если поставить нельзя). */
@@ -696,6 +698,8 @@ export interface StationPlan {
   from?: Anchor;
   /** Тупик выезда — узел станции. */
   nodePos?: Vec;
+  /** Старый тупик уже у ворот грузового двора. */
+  existingGate?: number;
   /** Дома под самой станцией: снесём за доплату (их цена уже в cost). Дома под выездом — в driveway.demolish. */
   demolish?: number[];
   /** Станция вдоль дороги: узел — стык на улице, вдоль края — карман (Station.side). */
@@ -792,6 +796,7 @@ const MONTHS = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'И�
 const DRIVEWAY = { cls: 'highway' as const, lanes: twoWay(1, 1) };
 /** Выезд грузового двора кончается на столько от стены предприятия; там же — тупик стартового просёлка. */
 const INDUSTRY_EXIT = START_ROADS.industryExit;
+const OLD_INDUSTRY_EXIT = 64;
 /** Грузовой двор у стены предприятия — столько вглубь, м (industryStationPlan). */
 const INDUSTRY_DOCK = 23;
 /** Выезд станции из перекрёстка — не ближе этого угла (рад) к соседним дорогам. */
@@ -1421,56 +1426,75 @@ export class Game implements BuildContext {
    * Станция вплотную к предприятию: площадка у стены со стороны курсора, ворота и короткий выезд.
    * Если рядом с концом выезда есть дорога, выезд сразу к ней подключается.
    */
-  private industryStationPlan(ind: Industry, p: Vec): StationPlan {
+  private industryStationPlan(ind: Industry, p: Vec, forceLink?: boolean): StationPlan {
     const fp = ind.fp;
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = { x: -u.y, y: u.x };
     const d = sub(p, fp.center);
     const lx = dot(d, u);
     const ly = dot(d, v);
-    const alongX = Math.abs(lx) / (fp.w / 2) > Math.abs(ly) / (fp.h / 2);
-    const n = alongX ? scale(u, Math.sign(lx) || 1) : scale(v, Math.sign(ly) || 1);
-    const half = alongX ? fp.w / 2 : fp.h / 2;
+    const linked = forceLink ?? (!!fp.groundParts && lx / fp.w >= Math.abs(ly / fp.h));
+    const access = linked ? sub(industryAccess(fp, ind.info.kind), fp.center) : undefined;
+    const alongX = linked || Math.abs(lx) / (fp.w / 2) > Math.abs(ly) / (fp.h / 2);
+    const n = linked ? u : alongX ? scale(u, Math.sign(lx) || 1) : scale(v, Math.sign(ly) || 1);
+    const half = access ? dot(access, n) + 1.4 : fp.parts ? footprintSide(fp, n) : (alongX ? fp.w : fp.h) / 2;
     const along = alongX ? fp.h : fp.w;
     const axis = alongX ? v : u;
-    const dockW = Math.min(64, along * 0.7);
-    const room = along / 2 - dockW / 2;
-    let slide = Math.max(-room, Math.min(room, alongX ? ly : lx));
+    const compact = Math.min(64, along * 0.7);
+    const room = (along - compact) / 2;
+    let slide = access ? dot(access, axis) : Math.max(-room, Math.min(room, alongX ? ly : lx));
     // К этой стене уже подходит дорога и кончается тупиком у места выезда (стартовый просёлок): двор встаёт напротив
     // неё, где бы вдоль стены ни был курсор, — выезд продолжает дорогу, а не упирается ей в бок.
     const net = this.roads.net;
-    for (const node of net.nodesNear(add(fp.center, scale(n, half + INDUSTRY_EXIT)), along / 2 + 10)) {
+    let exitDistance = INDUSTRY_EXIT;
+    let approach: LaneNode | undefined;
+    const search = add(add(fp.center, scale(axis, slide)), scale(n, half + INDUSTRY_EXIT));
+    for (const node of net.nodesNear(search, along / 2 + 24)) {
       const off = sub(node.pos, fp.center);
       const s = dot(off, axis);
-      if (!net.isDeadEnd(node) || Math.abs(dot(off, n) - half - INDUSTRY_EXIT) > 6 || Math.abs(s) > room) continue;
+      const distance = dot(off, n) - half;
+      if (!net.isDeadEnd(node) || Math.min(Math.abs(distance - INDUSTRY_EXIT), Math.abs(distance - OLD_INDUSTRY_EXIT)) > 6) continue;
+      if (linked ? Math.abs(s - slide) > 2 : Math.abs(s) > room) continue;
+      if ([...this.stations.values()].some((st) => st.nodeId === node.id)) continue;
       slide = s;
+      exitDistance = distance;
+      approach = node;
       break;
     }
     const at = (k: number) => add(add(fp.center, scale(axis, slide)), scale(n, half + k));
-    // Площадка — в 3 м от стены, вглубь — фура (21 м) целиком на посту (bayPose: метр у стены, полметра до края) с
-    // запасом; ворота — в 5 м за её краем. Старые дворы — 18 м вглубь (под фуру 18 м), фура там чуть выступает.
-    const dock: Footprint = { center: at(3 + INDUSTRY_DOCK / 2), w: dockW, h: INDUSTRY_DOCK, angle: Math.atan2(n.x, -n.y) };
-    const fail = (reason: string, cost = COST.station, driveway?: RoadPlan): StationPlan => ({
-      ok: false,
-      reason,
-      cost,
-      fp: dock,
-      industryId: ind.id,
-      driveway,
-    });
-    const gate = at(3 + INDUSTRY_DOCK + 5);
-    const exit = at(INDUSTRY_EXIT);
-    if ([dock.center, gate, exit].some((q) => this.isWater(q, 10) || !this.inBounds(q, 40))) return fail('Мешает вода');
-    // Дома на месте площадки сносим за доплату; другое предприятие или станция мешают.
-    const under = this.structuresUnder(dock, 0);
-    if (under.blocker) return fail(under.blocker);
-    // Выезд — от дороги (если она рядом) к воротам: тупик у ворот и есть узел станции.
-    const plan = this.roadBuilder.road(anchorAt(this.roads.net, exit, 16), { kind: 'free', pos: gate }, DRIVEWAY);
-    const demolish = under.houses.filter((id) => !plan.demolish.includes(id));
-    const cost = plan.cost + COST.station + this.demolishTotal(demolish);
-    if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', cost, plan);
-    if (cost > this.budget) return fail('Не хватает денег', cost, plan);
-    return { ok: true, cost, fp: dock, industryId: ind.id, driveway: plan, nodePos: gate, demolish };
+    const exit = at(exitDistance);
+    const industryAccessFlag = linked ? { industryAccess: true as const } : {};
+    const tryYard = (w: number, h: number, expanded: boolean): StationPlan => {
+      const dock: Footprint = { center: at(3 + h / 2), w, h, angle: Math.atan2(n.x, -n.y) };
+      const fail = (reason: string, cost = COST.station, driveway?: RoadPlan): StationPlan => ({ ok: false, reason, cost, fp: dock, industryId: ind.id, driveway });
+      const gate = at(3 + h + 5);
+      if ([...footprintCorners(dock), dock.center, gate, exit].some((q) => this.isWater(q, 3) || !this.inBounds(q, 20))) return fail('Мешает вода');
+      const under = this.structuresUnder(dock, 0);
+      if (under.blocker) return fail(under.blocker);
+      // Большой двор занимает только свободную территорию. В тесном месте остаётся компактный вариант со сносом домов.
+      if (expanded && under.houses.length) return fail('Мешают дома');
+      const existingGate = approach && dist(approach.pos, gate) < 2 ? approach : undefined;
+      const obstruction = this.roadUnder(dock, 1, existingGate?.id);
+      if (obstruction) return fail(obstruction);
+      if (existingGate) {
+        const cost = COST.station + this.demolishTotal(under.houses);
+        if (cost > this.budget) return fail('Не хватает денег', cost);
+        return { ok: true, cost, fp: dock, industryId: ind.id, ...industryAccessFlag, existingGate: existingGate.id, nodePos: existingGate.pos, demolish: under.houses };
+      }
+      const plan = this.roadBuilder.road(anchorAt(net, exit, 16), { kind: 'free', pos: gate }, DRIVEWAY);
+      const demolish = under.houses.filter((id) => !plan.demolish.includes(id));
+      const cost = plan.cost + COST.station + this.demolishTotal(demolish);
+      if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', cost, plan);
+      if (cost > this.budget) return fail('Не хватает денег', cost, plan);
+      return { ok: true, cost, fp: dock, industryId: ind.id, ...industryAccessFlag, driveway: plan, nodePos: gate, demolish };
+    };
+    const wide = Math.min(104, Math.max(72, along * 0.96));
+    const large = tryYard(wide, 56, true);
+    if (large.ok) return large;
+    const medium = tryYard(Math.min(wide, 72), 39, true);
+    if (medium.ok) return medium;
+    const small = tryYard(compact, INDUSTRY_DOCK, false);
+    return small.ok || !linked ? small : this.industryStationPlan(ind, p, false);
   }
 
   /**
@@ -1504,6 +1528,16 @@ export class Game implements BuildContext {
    */
   roadUnder(fp: Footprint, pad: number, skipNode: number | ReadonlySet<number> = -1, roads: LaneNet = this.roads.net): string | null {
     const skip = (id: number) => (typeof skipNode === 'number' ? id === skipNode : skipNode.has(id));
+    if (fp.parts) {
+      const r = footprintRadius(fp);
+      for (const s of this.net.segmentsNear(fp.center, r + pad + 10)) {
+        if (footprintAlong(fp, s.lut, () => halfWidth(s.spec) + pad)) return 'Мешает путь';
+      }
+      for (const c of roads.corridorsNear(fp.center, r + pad + 40)) {
+        if (!skip(c.a) && !skip(c.b) && footprintAlong(fp, c.lut, (s) => halfAtS(c, s) + pad)) return 'Мешает дорога';
+      }
+      return null;
+    }
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = { x: -u.y, y: u.x };
     const nx = Math.max(2, Math.ceil(fp.w / 6));
@@ -4853,7 +4887,10 @@ export class Game implements BuildContext {
     // Пристройки предприятий: поставленную или снесённую действием — как было, с уровнем, который она дала.
     for (const s of snap.industries ?? []) {
       const ind = this.industries.find((i) => i.id === s.id);
-      if (!ind || (ind.annexes?.length ?? 0) === (s.annexes?.length ?? 0)) continue;
+      if (!ind) continue;
+      const before = s.annexes ?? [];
+      const live = ind.annexes ?? [];
+      if (before.length === live.length && before.every((a, i) => a.id === live[i].id)) continue;
       ind.annexes = s.annexes;
       ind.level = s.level;
       ind.streak = s.streak;
@@ -8342,7 +8379,8 @@ export class Game implements BuildContext {
     if (st.kind === 'rail') return STORAGE.rail;
     // Оптовая база: её склад — RETAIL.depotStock.
     if (st.kind === 'dock' && this.isDepotDock(st)) return RETAIL.depotStock;
-    return STORAGE.base + storageSlots(st) * STORAGE.per;
+    const yardStorage = st.industryId !== null && st.fp.h >= 48 ? STORAGE.per : 0;
+    return STORAGE.base + storageSlots(st) * STORAGE.per + yardStorage;
   }
 
   /** Сколько груза всех видов лежит на станции. */
@@ -9321,12 +9359,14 @@ export class Game implements BuildContext {
       if (streak >= E.growthMonths && level < cap) {
         ind.level = Math.min(cap, level + E.growthStep);
         streak = 0;
-        if (Math.floor(ind.level) > Math.floor(level))
+        if (Math.floor(ind.level) > Math.floor(level)) {
+          this.expandIndustry(ind);
           this.notify(`${ind.name}: производство выросло до ×${ind.level}`, '#2e9d57', {
             kind: 'industry',
             refs: [{ type: 'industry', id: ind.id }],
             recipe: industryRecipe(ind.info, ind.name),
           });
+        }
       } else if (streak <= -E.declineMonths && level > 1) {
         ind.level = Math.max(1, level - E.growthStep);
         streak = 0;
@@ -9334,6 +9374,38 @@ export class Game implements BuildContext {
       ind.streak = streak;
     }
     this.industryRev++;
+  }
+
+  /** При росте производства рядом появляется свободная вспомогательная секция. */
+  private expandIndustry(ind: Industry): void {
+    if ((ind.annexes ?? []).filter((a) => a.automatic).length >= Math.floor(ind.level ?? 1) - 1) return;
+    const center = ind.fp.center;
+    const annex = annexFootprint(ind, center);
+    const addSection = (p: Vec, access?: Vec): boolean => {
+      const fp = { ...annex, center: p };
+      if (this.lotUnder(fp, 2) || this.outbuildingProblem(fp)) return false;
+      if (this.enterprises.deposits.some((d) => d.used === undefined && dist(d.center, p) < depositRadius(d) + footprintRadius(fp))) return false;
+      const part: Annex = { type: 'annex', id: this.nextEntityId++, industryId: ind.id, fp, automatic: true, ...(access && { access }) };
+      ind.annexes = [...(ind.annexes ?? []), part];
+      this.index.add(part);
+      return true;
+    };
+    if (ind.fp.groundParts) {
+      for (const route of industryServiceRoads(ind.info.kind).branches) {
+        const p = sitePoint(ind.fp, route[route.length - 1]);
+        const prev = sitePoint(ind.fp, route[route.length - 2]);
+        const n = norm(sub(p, prev));
+        const reach = footprintSide(annex, scale(n, -1)) + 6;
+        if (addSection(add(p, scale(n, reach)), p)) return;
+      }
+    }
+    const start = ind.fp.angle + ((ind.id % 12) * Math.PI) / 6;
+    for (let i = 0; i < 12; i++) {
+      const angle = start + (i * Math.PI) / 6;
+      const n = { x: Math.cos(angle), y: Math.sin(angle) };
+      const reach = footprintSide(ind.fp, n) + footprintSide(annex, scale(n, -1)) + 7;
+      if (addSection(add(center, scale(n, reach)))) return;
+    }
   }
 
   /** Сколько предприятие производит (или может переработать) в месяц сейчас. */
@@ -10777,9 +10849,9 @@ export class Game implements BuildContext {
       this.spend(plan.cost - (before - this.money));
     } else {
       if (kind === 'road' && !plan.side && !plan.curb && plan.driveway?.net && plan.nodePos) keepMainRoad(plan.driveway.net, plan.nodePos);
-      if (!plan.driveway || !plan.nodePos || !this.roadBuilder.apply(plan.driveway)) return null;
+      if (!plan.nodePos || (plan.existingGate === undefined && (!plan.driveway || !this.roadBuilder.apply(plan.driveway)))) return null;
       // Узел станции — тупик выезда (у остановки и станции вдоль дороги — стык посреди улицы).
-      const node = this.roads.net.nodesNear(plan.nodePos, 2)[0];
+      const node = plan.existingGate === undefined ? this.roads.net.nodesNear(plan.nodePos, 2)[0] : this.roads.net.nodes.get(plan.existingGate);
       if (!node) return null;
       nodeId = node.id;
       this.spend(kind === 'stop' ? STOP.cost : COST.station);
@@ -10808,6 +10880,7 @@ export class Game implements BuildContext {
       ...(plan.drivewayLen !== undefined ? { driveway: plan.drivewayLen } : {}),
       serves: given,
       industryId: ind?.id ?? null,
+      ...(plan.industryAccess ? { industryAccess: true } : {}),
       cargo: {},
       passengers: new Map(),
       occupied: [],
@@ -11721,7 +11794,7 @@ export class Game implements BuildContext {
       ind.level = Math.min(ind.level ?? 1, Math.max(1, growthCap(ind)));
     }
     this.index.remove(a);
-    this.refund(ANNEX.cost);
+    if (!a.automatic) this.refund(ANNEX.cost);
     this.commit();
   }
 

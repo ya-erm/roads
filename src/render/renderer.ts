@@ -60,6 +60,7 @@ import { Camera } from './camera';
 import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, type Emitter, industryMotion } from './industryArt';
 import { paintIndustrySite } from './industrySite';
+import { drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock } from './industryStationArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
 import { type Around, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
@@ -363,11 +364,13 @@ const seenAt = (p: Vec, view: Box, pad: number) => p.x > view.x0 - pad && p.x < 
 
 /** Верхний край здания на карте — по углам повёрнутого прямоугольника, а не по его высоте. */
 function topOf(fp: Footprint): number {
+  if (fp.parts) return Math.min(...footprintCorners(fp).map((p) => p.y));
   return fp.center.y - (Math.abs(Math.sin(fp.angle)) * fp.w + Math.abs(Math.cos(fp.angle)) * fp.h) / 2;
 }
 
 /** Нижний край здания на карте. */
 function bottomOf(fp: Footprint): number {
+  if (fp.parts) return Math.max(...footprintCorners(fp).map((p) => p.y));
   return 2 * fp.center.y - topOf(fp);
 }
 
@@ -524,7 +527,7 @@ function sameIds(was: ReadonlySet<number>, next: ReadonlySet<number> | null): bo
 const fpSig = (fp: Footprint) => `${fp.center.x},${fp.center.y},${fp.w},${fp.h},${fp.angle}`;
 /** Рамка контура (повёрнутого прямоугольника) в мире. */
 function fpBox(fp: Footprint): Box {
-  const r = Math.hypot(fp.w, fp.h) / 2;
+  const r = footprintRadius(fp);
   return { x0: fp.center.x - r, y0: fp.center.y - r, x1: fp.center.x + r, y1: fp.center.y + r };
 }
 
@@ -2823,7 +2826,7 @@ export class Renderer {
     for (const ind of game.industries) {
       // Пристройка — своё вспомогательное здание предприятия (annexArt).
       for (const a of ind.annexes ?? []) if (inView(a.fp)) this.drawAnnex(ind, a, 'still');
-      if (inView(ind.fp)) this.drawIndustry(ind, 'still');
+      if (seenAt(ind.fp.center, view, Math.max(100, footprintRadius(ind.fp) + 30))) this.drawIndustry(ind, 'still');
     }
   }
 
@@ -2872,8 +2875,7 @@ export class Renderer {
   private drawMotion(game: Game, view: Box): void {
     const z = this.camera.zoom;
     if (!artMoves(z)) return;
-    const inView = (fp: Footprint) =>
-      fp.center.x > view.x0 - 100 && fp.center.x < view.x1 + 100 && fp.center.y > view.y0 - 100 && fp.center.y < view.y1 + 100;
+    const inView = (fp: Footprint) => seenAt(fp.center, view, Math.max(100, footprintRadius(fp) + 30));
     const time = performance.now() / 1000;
     // Фонтаны у ратуш и в парках — рябь на воде, только при сильном приближении (дёшево: пара дуг на фонтан).
     if (z > FOUNTAIN_ZOOM) {
@@ -3023,10 +3025,21 @@ export class Renderer {
 
   /** Станции — поверх неподвижного (в кадре): посты автостанций цветом машин в них, ящики складов, автобусы на местах. */
   private drawStationsOver(game: Game, view: Box): void {
+    const time = performance.now() / 1000;
     for (const st of game.stations.values()) {
       if (st.kind !== 'road' || st.curb || !this.stationSeen(st, view)) continue;
       if (isBusTerminal(st)) this.drawBusTerminalLive(game, st);
-      else this.drawStationBays(game, st);
+      else {
+        this.drawStationBays(game, st);
+        const industry = st.industryId === null ? undefined : game.industries.find((ind) => ind.id === st.industryId);
+        if (!industry) continue;
+        this.ctx.save();
+        this.intoStation(game, st);
+        if (drawIndustryYardStock(this.ctx, st, industry, this.camera.zoom, time)) this.ambient = true;
+        this.ctx.restore();
+        const gate = game.roads.net.nodes.get(st.nodeId);
+        if (gate && drawIndustryTransfer(this.ctx, st, industry, bayFront(st.fp, gate.pos), this.camera.zoom, time)) this.ambient = true;
+      }
     }
     this.ctx.globalAlpha = 1;
   }
@@ -3328,6 +3341,17 @@ export class Renderer {
   /** Пристройка предприятия: участок с лёгкой тенью, вспомогательное здание — в annexArt; layer — ArtLayer. */
   private drawAnnex(ind: Industry, a: Annex, layer: ArtLayer): void {
     const fp = a.fp;
+    if (a.access) {
+      const c = this.ctx;
+      c.save();
+      c.strokeStyle = '#bdb39c';
+      c.lineWidth = 5.8;
+      c.beginPath();
+      c.moveTo(a.access.x, a.access.y);
+      c.lineTo(fp.center.x, fp.center.y);
+      c.stroke();
+      c.restore();
+    }
     this.drawFootprint({ ...fp, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
     drawAnnexArt(this.ctx, ind, a, this.camera.zoom, performance.now() / 1000, layer);
   }
@@ -3469,8 +3493,11 @@ export class Renderer {
     ctx.save();
     this.intoStation(game, st);
     const hh = fp.h / 2;
-    ctx.fillStyle = '#5c6470';
-    ctx.fillRect(-fp.w / 2 + 3, -hh + 3, fp.w - 6, 4);
+    if (st.industryId !== null) drawIndustryYard(ctx, st);
+    else {
+      ctx.fillStyle = '#5c6470';
+      ctx.fillRect(-fp.w / 2 + 3, -hh + 3, fp.w - 6, 4);
+    }
     this.drawDepotSides(st, game.bayArea(st));
     ctx.restore();
   }

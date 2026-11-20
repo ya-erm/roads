@@ -5,9 +5,10 @@ import { freshGame } from '../game/testkit';
 import { RoadTools } from '../input/roadtools';
 import type { Corridor, LaneNet } from '../lanes/model';
 import type { Industry } from './entities';
+import { industryAccess } from './industrySites';
 import { ROAD_CLASSES, specCost } from './roadTypes';
 import { DEFAULT_SETTINGS } from './settings';
-import { pointInFootprint } from './spatial';
+import { footprintSide, pointInFootprint } from './spatial';
 import { DIRT_SPEC, layStartRoads, START_ROADS } from './startRoads';
 import type { WorldContext } from './worldgen';
 
@@ -31,10 +32,16 @@ function sides(ind: Industry): { n: Vec; half: number }[] {
 }
 
 /** Сторона предприятия, у которой кончается просёлок (тупик у выезда грузового двора), — или null. */
-function roadSide(game: Game, ind: Industry): { n: Vec; half: number; node: number } | null {
+function roadSide(game: Game, ind: Industry): { n: Vec; anchor: Vec; node: number } | null {
   const net = game.roads.net;
-  for (const s of sides(ind)) {
-    const exit = add(ind.fp.center, scale(s.n, s.half + START_ROADS.industryExit));
+  const fp = ind.fp;
+  const candidates = sides(ind).map((s) => ({ n: s.n, anchor: add(fp.center, scale(s.n, fp.parts ? footprintSide(fp, s.n) : s.half)) }));
+  if (fp.groundParts) {
+    const n = candidates[0].n;
+    candidates.unshift({ n, anchor: add(industryAccess(fp, ind.info.kind), scale(n, 1.4)) });
+  }
+  for (const s of candidates) {
+    const exit = add(s.anchor, scale(s.n, START_ROADS.industryExit));
     const node = net.nodesNear(exit, 2).find((n) => net.isDeadEnd(n) && n.corridors.some((id) => net.corridor(id).cls === 'dirt'));
     if (node) return { ...s, node: node.id };
   }
@@ -160,9 +167,8 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
       const side = roadSide(game, ind);
       if (!side) continue;
       // Курсор — не посередине стены, а ближе к углу (по очереди к разным): двор всё равно встаёт напротив просёлка.
-      const along = side.half === ind.fp.w / 2 ? ind.fp.h : ind.fp.w;
-      const shift = scale({ x: -side.n.y, y: side.n.x }, (checked % 2 ? 0.3 : -0.3) * along);
-      const st = game.placeStation(add(add(ind.fp.center, scale(side.n, side.half + 20)), shift), 14);
+      const shift = scale({ x: -side.n.y, y: side.n.x }, checked % 2 ? 10 : -10);
+      const st = game.placeStation(add(add(side.anchor, scale(side.n, 20)), shift), 14);
       expect(st?.industryId).toBe(ind.id);
       const net = game.roads.net;
       // Выезд двора — продолжение просёлка: от станции по дорогам — до улиц города.

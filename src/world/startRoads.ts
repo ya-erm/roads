@@ -8,7 +8,8 @@ import type { IndustryKind } from './cargo';
 import type { Industry, Town } from './entities';
 import { GRADE } from '../config';
 import { halfWidth, isDirt, ROAD_CLASSES, ROAD_MARGIN, type RoadSpec } from './roadTypes';
-import { pointInFootprint } from './spatial';
+import { footprintSide, pointInFootprint } from './spatial';
+import { industryAccess } from './industrySites';
 import type { WorldContext } from './worldgen';
 
 /**
@@ -39,7 +40,7 @@ export const START_ROADS = {
    * Тупик просёлка у предприятия — на столько от стены: там же, где выезд грузового двора (Game.industryStationPlan
    * берёт это число), — двор, поставленный с этой стороны, встаёт напротив просёлка и подключается к нему сам.
    */
-  industryExit: 64,
+  industryExit: 84,
   /** Доля предприятий с дорогой: хозяйства и лесопилки — чаще, прочее сырьё — реже, заводы — ещё реже. */
   share: { rural: 0.7, raw: 0.45, plant: 0.35 },
   /** Уклон вдоль дороги не круче (м/м) — по горе просёлок не идёт. */
@@ -191,7 +192,7 @@ function routeOk(ctx: WorldContext, start: Start, curve: Cubic, kind: Kind, targ
     prevH = h;
     for (const it of index.near(p, HALF + 60)) if (it !== target && pointInFootprint(p, it.fp, HALF + 4)) return null;
     // Своё предприятие — дорога подходит к стене, но не заходит на двор будущей станции.
-    if (target && s < L - 20 && pointInFootprint(p, target.fp, HALF + START_ROADS.industryExit - 20)) return null;
+    if (target && s < L - 20 && pointInFootprint(p, target.fp, HALF + 44)) return null;
     for (const o of roads.corridorsNear(p, HALF + 40)) {
       if (start.host.has(o.id) && s < 45) continue;
       const hit = o.lut.closest(p);
@@ -267,9 +268,14 @@ export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): 
     { n: v, half: fp.h / 2 },
     { n: scale(v, -1), half: fp.h / 2 },
   ];
-  const exitOf = (s: (typeof sides)[number]) => add(fp.center, scale(s.n, s.half + START_ROADS.industryExit));
+  const exitOf = (s: (typeof sides)[number]) => add(fp.center, scale(s.n, (fp.parts ? footprintSide(fp, s.n) : s.half) + START_ROADS.industryExit));
   const cands: { start: Start; curve: Cubic }[] = [];
+  const linked: typeof cands = [];
   const add2 = (start: Start) => {
+    if (fp.groundParts) {
+      const end = add(industryAccess(fp, ind.info.kind), scale(u, START_ROADS.industryExit + 1.4));
+      if (dot(start.dir, norm(sub(end, start.anchor.pos))) >= 0.3) linked.push({ start, curve: curveFor(start, end, scale(u, -1)) });
+    }
     // Сторона — та, что смотрит на начало дороги.
     const side = sides.reduce((b, s) => (dot(s.n, norm(sub(start.anchor.pos, fp.center))) > dot(b.n, norm(sub(start.anchor.pos, fp.center))) ? s : b));
     const end = exitOf(side);
@@ -294,7 +300,7 @@ export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): 
     if (dot(nrm, d) < 0.6) continue;
     add2({ anchor: { kind: 'corridor', corridor: c.id, s, pos: p }, dir: nrm, host: new Set([c.id]) });
   }
-  return firstRoute(ctx, cands, START_ROADS.industryReach, DIRT_ROAD, ind);
+  return firstRoute(ctx, linked, START_ROADS.industryReach, DIRT_ROAD, ind) ?? firstRoute(ctx, cands, START_ROADS.industryReach, DIRT_ROAD, ind);
 }
 
 /** Полуширина полотна по большей стороне в точке s. */

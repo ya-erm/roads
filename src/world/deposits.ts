@@ -9,6 +9,7 @@ import { biomeOf, industryShare } from './biomes';
 import { type CargoType, INDUSTRY_LIST, type IndustryType } from './cargo';
 import { buildableKinds, depositFootprint, depositRichness, harmClass, isRaw, obtainable, townEdge, townFor, townGap, townSlots } from './enterprise';
 import type { Deposit, Industry, Town } from './entities';
+import { industryFootprint } from './industrySites';
 import type { WorldProfile, WorldSettings } from './settings';
 import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
 import { type Footprint, footprintRadius, footprintsOverlap } from './spatial';
@@ -60,14 +61,14 @@ export function placeDeposits(ctx: WorldContext, towns: Town[], density: number,
           center = { x: hub.center.x + Math.cos(a) * r, y: hub.center.y + Math.sin(a) * r };
           if (center.x < 300 || center.y < 300 || center.x > terrain.width - 300 || center.y > terrain.height - 300) continue;
         } else center = shoreSpot(terrain, rng, info.kind, attempt, Math.hypot(info.w, info.h) / 2) ?? center;
-        const fp: Footprint = { center, w: info.w, h: info.h, angle: rng.range(-0.6, 0.6) };
+        const fp = industryFootprint(info, center, rng.range(-0.6, 0.6), n + settings.seed * 19 + attempt);
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
         if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;
         if (!relaxed && !terrainFits(terrain, center, attempt, MINING_KINDS.has(info.kind))) continue;
         if (towns.some((t) => townGap(t, fp) < TOWN_GAP)) continue;
         if (out.some((d) => dist(d.center, center) < (relaxed ? RELAXED_GAP : GAP))) continue;
         if (index.overlaps(fp, 20) || !clearOfRoads(ctx, fp, 8)) continue;
-        const d: Deposit = { id: ctx.nextId(), kind: info.kind, center, angle: fp.angle, size: rollSize(rng.next()) };
+        const d: Deposit = { id: ctx.nextId(), kind: info.kind, center, angle: fp.angle, size: rollSize(rng.next()), parts: fp.parts, groundParts: fp.groundParts };
         out.push(d);
         // Лесной участок — это лес: деревья вокруг, как раньше у лесозаготовки.
         if (info.kind === 'forest') terrain.addForest(center, 220, rng);
@@ -114,7 +115,7 @@ function onDeposit(ctx: WorldContext, towns: Town[], d: Deposit, extra: Partial<
 export function townSpot(
   ctx: Pick<WorldContext, 'roads' | 'terrain' | 'index'>,
   town: Town,
-  info: Pick<IndustryType, 'w' | 'h'>,
+  info: IndustryType,
   start: number,
   opts: { inside: boolean; from?: number; to?: number; deposits?: readonly Deposit[]; towns?: readonly Town[] },
 ): Footprint | null {
@@ -129,8 +130,9 @@ export function townSpot(
       const a = start + (k / 32) * Math.PI * 2;
       const center = { x: town.center.x + Math.cos(a) * r, y: town.center.y + Math.sin(a) * r };
       // Длинной стороной — вдоль края города.
-      const fp: Footprint = { center, w: info.w, h: info.h, angle: a + Math.PI / 2 };
-      if (!terrain.inBounds(center, half + 40) || terrain.isWater(center, half + 10)) continue;
+      const fp = industryFootprint(info, center, a + Math.PI / 2);
+      const reach = footprintRadius(fp);
+      if (!terrain.inBounds(center, reach + 40) || terrain.isWater(center, reach + 10)) continue;
       const own = opts.towns ? townFor(opts.towns, fp) : townGap(town, fp) < 0 ? town : null;
       if (opts.inside ? own !== town : own !== null) continue;
       if (index.overlaps(fp, 6) || !clearOfRoads(ctx, fp, 6)) continue;

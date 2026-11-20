@@ -2,9 +2,10 @@ import { hash } from '../core/math';
 import type { CargoType, IndustryKind, IndustryType } from '../world/cargo';
 import { harmClass } from '../world/enterprise';
 import type { Industry } from '../world/entities';
-import type { Footprint } from '../world/spatial';
+import { farmFields, hasBulkYard, hasPowerYard, industryServiceRoads, isOpenPit } from '../world/industrySites';
+import { type Footprint, type Plot, pointInPolygon } from '../world/spatial';
 import { type Circuit, type Equipment, paintEquipment, traceCircuit } from './industryEquipment';
-import { industrySitePath } from './industrySite';
+import { industrySitePath, tracePlot } from './industrySite';
 
 /** «r,g,b» темнее на долю k — дым вредных производств. Кэш — без новых строк в каждом кадре. */
 const darkCache = new Map<string, string>();
@@ -249,6 +250,7 @@ const Q = new Float64Array(16);
 export class Art {
   pass: Pass = 0;
   site?: IndustryType;
+  siteParts?: readonly Plot[];
   /** 0 — издалека, только крупные массы; 1 — с тенями; 2 — все мелочи и анимация. */
   readonly lod: number;
   readonly d: boolean;
@@ -436,7 +438,7 @@ export class Art {
   drive(route: Circuit, dirt: string, edge: string): void {
     if (this.pass !== 0) return;
     const c = this.c;
-    traceCircuit(c, route);
+    traceCircuit(c, route, false);
     c.strokeStyle = edge;
     c.lineWidth = 6.5;
     c.stroke();
@@ -524,7 +526,11 @@ export class Art {
     c.strokeStyle = color;
     c.lineWidth = 0.5;
     c.setLineDash([1.6, 1.1]);
-    if (this.site) {
+    if (this.siteParts) {
+      c.beginPath();
+      tracePlot(c, this.siteParts[0], W - 2, H - 2);
+      c.stroke();
+    } else if (this.site) {
       industrySitePath(c, this.site, this.site.w - 4, this.site.h - 4);
       c.stroke();
     } else c.strokeRect(-W / 2 + 2, -H / 2 + 2, W - 4, H - 4);
@@ -1148,29 +1154,26 @@ export class Art {
 type Scene = (a: Art, ind: Industry) => void;
 
 type Field = readonly [ground: string, rows: string];
-const FIELD_BOUNDS = [[-50, -37, 46, 34], [-49, 0, 44, 36], [-2, -34, 16, 70]] as const;
-const FIELD_CORNERS = [[0.03, 0.33], [0.26, 0.03], [0.67, 0.01], [0.97, 0.15], [0.95, 0.72], [0.79, 0.96], [0.24, 0.98], [0.03, 0.76]] as const;
 const HARVEST_ROUTE: Circuit = [[-37, -25], [-29, -22], [-20, -20], [-14, -17], [-22, -15], [-33, -16], [-40, -19]];
+const WIDE_HARVEST: Circuit = [[-118, -13], [-92, -25], [-66, -27], [-45, -19], [-62, -10], [-88, -8], [-109, 1]];
 
 /** Ряды и цветки обрезаются по границам каждого поля. Форма зависит от номера хозяйства. */
-function cropsOn(a: Art, index: number, colors: Field, flowers?: [string, number]): void {
+function cropsOn(a: Art, ind: Industry, plot: Plot, index: number, colors: Field, flowers?: [string, number]): void {
   if (a.pass !== 0) return;
-  const [x, y, w, h] = FIELD_BOUNDS[index];
+  const W = ind.info.w;
+  const H = ind.info.h;
+  const x = W * Math.min(...plot.map((p) => p.x));
+  const y = H * Math.min(...plot.map((p) => p.y));
+  const w = W * Math.max(...plot.map((p) => p.x)) - x;
+  const h = H * Math.max(...plot.map((p) => p.y)) - y;
   const c = a.c;
   c.beginPath();
-  FIELD_CORNERS.forEach(([u, v], n) => {
-    const swing = 0.08 * (a.r(100 + index * 17 + n) - 0.5);
-    const px = x + (u + swing) * w;
-    const py = y + (v - swing) * h;
-    if (n) c.lineTo(px, py);
-    else c.moveTo(px, py);
-  });
-  c.closePath();
+  tracePlot(c, plot, W, H);
   c.fillStyle = colors[0];
   c.fill();
   if (!a.lod) return;
-  c.strokeStyle = shade(colors[0], -0.16);
-  c.lineWidth = 0.8;
+  c.strokeStyle = shade(colors[0], -0.11);
+  c.lineWidth = 0.55;
   c.stroke();
   if (!a.d) return;
   c.save();
@@ -1194,11 +1197,16 @@ function cropsOn(a: Art, index: number, colors: Field, flowers?: [string, number
   c.restore();
 }
 
-function farmyard(a: Art): void {
+function farmPlots(ind: Industry): readonly Plot[] {
+  return ind.fp.parts?.slice(1, 4) ?? farmFields(ind.id, false);
+}
+
+function farmyard(a: Art, ind: Industry): void {
   a.stain(33, -7, 22, 30, '#c9b88e', 12, 0.16);
   a.stain(34, 24, 18, 14, '#d4c59d', 13, 0.14);
   a.stain(33, -27, 20, 11, '#d8caa2', 14, 0.12);
-  a.equipment({ kind: 'harvester', route: HARVEST_ROUTE, color: '#408353' }, ...HARVEST_ROUTE[0]);
+  const route = ind.fp.parts ? WIDE_HARVEST : HARVEST_ROUTE;
+  a.equipment({ kind: 'harvester', route, color: '#408353' }, ...route[0]);
 }
 
 /** Ферма: поля с рядами посевов, двор с красным амбаром, силосы и рулоны сена. */
@@ -1213,10 +1221,13 @@ function farm(a: Art, ind: Industry): void {
   const k2 = Math.floor(a.r(1) * 3);
   const f2 = crops[1 + k2];
   const f3 = crops[1 + ((k2 + 1 + Math.floor(a.r(2) * 2)) % 3)];
-  cropsOn(a, 0, crops[0]);
-  cropsOn(a, 1, f2);
-  cropsOn(a, 2, f3);
-  farmyard(a);
+  if (a.pass === 0) {
+    const [north, south, strip] = farmPlots(ind);
+    cropsOn(a, ind, north, 0, crops[0]);
+    cropsOn(a, ind, south, 1, f2);
+    cropsOn(a, ind, strip, 2, f3);
+  }
+  farmyard(a, ind);
 
   const lv = a.level;
   a.gable(18, -35, 24, 20, 8, ind.info.roof);
@@ -1282,38 +1293,30 @@ function coalmine(a: Art, ind: Industry): void {
   a.equipment({ kind: 'rail', end: 14, color: coal }, -34, 31);
 }
 
-const ORE_HAUL: Circuit = [[-25, 12], [-21, 22], [-7, 31], [12, 31], [17, 20], [10, 10], [-8, 12]];
-const STONE_HAUL: Circuit = [[-10, 15], [-7, 26], [5, 33], [15, 32], [18, 20], [10, 13]];
-const SOFT_HAUL: Circuit = [[-23, 23], [-9, 29], [12, 30], [21, 22], [19, 14], [8, 14], [-6, 21]];
+const ORE_HAUL: Circuit = [[24, 24], [9, 27], [-6, 26], [-18, 20], [-18, 13], [-9, 8]];
+const STONE_HAUL: Circuit = [[24, 25], [13, 31], [0, 28], [-9, 22], [-11, 12]];
+const SOFT_HAUL: Circuit = [[24, 24], [12, 30], [-5, 30], [-21, 25], [-28, 13]];
 
 function haulRoad(a: Art, route: Circuit, dirt: string, edge: string, load: string): void {
   a.drive(route, dirt, edge);
   a.equipment({ kind: 'haul', route, color: '#dfad39', load }, ...route[0]);
 }
 
+function mineBenches(a: Art, ind: Industry, x: number, y: number, rx: number, ry: number, colors: readonly string[], seed: number): void {
+  for (let k = 0; k < colors.length; k++) {
+    const scale = 1 - k * 0.20;
+    const extension = ind.fp.parts ? 1 - k / (colors.length - 0.5) : 0;
+    const color = colors[k];
+    a.stain(x + k * 1.45 - 17 * extension, y + k * 1.35, (rx + 20 * extension) * scale, ry * scale, color, seed, 0.12, shade(color, 0.25));
+  }
+}
+
 /** Железный рудник: рыжий карьер уступами со спуском, экскаватор, дробилка и кучи руды. */
 function ironmine(a: Art, ind: Industry): void {
   const ore = '#a0603c';
   const pit = ['#b98a6c', '#a87858', '#946648', '#7d5539'];
-  for (let k = 0; k < 4; k++) {
-    const m = 1 - k * 0.22;
-    a.stain(-14 + k * 1.6, 2 + k * 1.4, 28 * m, 33 * m, pit[k], 7, 0.07, shade(pit[k], 0.28));
-  }
-  if (a.pass === 0 && a.d) {
-    // Спуск в карьер — спираль по уступам.
-    const c = a.c;
-    c.strokeStyle = 'rgba(226,200,172,0.85)';
-    c.lineWidth = 2;
-    c.beginPath();
-    c.moveTo(19, 28);
-    for (let s = 0; s <= 20; s++) {
-      const th = 0.6 + (s / 20) * 5;
-      const m = 0.95 - (s / 20) * 0.62;
-      c.lineTo(-14 + s * 0.24 + Math.cos(th) * 28 * m, 2 + s * 0.21 + Math.sin(th) * 33 * m);
-    }
-    c.stroke();
-  }
-  a.stain(-10, 6, 4, 3, '#86a3ad', 9, 0.2);
+  mineBenches(a, ind, -14, 2, 28, 33, pit, 7);
+  a.stain(-22, 3, 4, 3, '#86a3ad', 9, 0.2);
   haulRoad(a, ORE_HAUL, '#ccb293', '#9d785a', ore);
   a.track(16, 37, 44, 37);
   a.fence(90, 80, '#8a8f96');
@@ -1325,7 +1328,7 @@ function ironmine(a: Art, ind: Industry): void {
   a.heap(31, 2, 10, ore, 1);
   if (lv >= 2) a.heap(30, 22, 8, ore, 2);
   for (let k = 0; k < Math.min(3, lv); k++) a.cart(22 + k * 7, 37, ore);
-  a.excavator(-12, -1, -18, -5);
+  a.excavator(-10, -1, -13, 7);
 }
 
 /** Карьер: серая чаша уступами, пандус, кран, штабеля блоков и щебень. */
@@ -1339,7 +1342,8 @@ function quarry(a: Art, ind: Industry): void {
       const m = 1 - k * 0.088;
       c.beginPath();
       rim.forEach(([x, y], i) => {
-        const px = -18 + (x + 18) * m + k * 0.28;
+        const west = ind.fp.parts ? Math.min(0, x + 16) * (1 - k / steps.length) : 0;
+        const px = -18 + (x + 18) * m + k * 0.28 + west;
         const py = (y + 1.8 * (a.r(475 + i) - 0.5)) * m + k * 0.55;
         if (i) c.lineTo(px, py);
         else c.moveTo(px, py);
@@ -1577,24 +1581,55 @@ export function herd(a: Art, x: number, y: number, w: number, h: number, n: numb
   }
 }
 
+function pasture(a: Art, ind: Industry, sheep: boolean): void {
+  const { w, h } = ind.info;
+  const c = a.c;
+  const fields = ind.fp.parts!.slice(1, 3);
+  if (a.pass === 0) {
+    fields.forEach((field, i) => {
+      c.beginPath();
+      tracePlot(c, field, w, h);
+      c.fillStyle = i ? '#a9bd7c' : '#9fb875';
+      c.fill();
+      if (a.lod) {
+        c.strokeStyle = '#957c57';
+        c.lineWidth = 0.75;
+        c.setLineDash([1.7, 1.3]);
+        c.stroke();
+        c.setLineDash([]);
+      }
+    });
+  }
+  if (a.pass !== 2 || !a.d) return;
+  let count = 0;
+  for (let k = 0; k < 140 && count < 7 + 3 * a.level; k++) {
+    const p = { x: -1.06 + a.r(810 + k) * 0.96, y: -0.54 + a.r(1010 + k) * 1.42 };
+    if (!fields.some((field) => pointInPolygon(p, field))) continue;
+    a.animal(p.x * w, p.y * h, a.r(1300 + k) * Math.PI * 2, 1520 + k, sheep);
+    count++;
+  }
+}
+
 /** Животноводческая ферма: выгоны с изгородью и стадом, длинные коровники, силосы, рулоны сена, скотовоз. */
 function ranch(a: Art, ind: Industry): void {
   const lv = a.level;
-  a.patch(-52, -37, 58, 74, '#a3bf72', 2);
-  for (let k = 0; k < 5; k++) a.stain(-44 + a.r(10 + k) * 44, -30 + a.r(20 + k) * 60, 6, 5, 'rgba(120,150,80,0.35)', 20 + k);
-  a.stain(-30, 10, 3.5, 2.5, '#86a3ad', 30, 0.15);
-  if (a.pass === 0 && a.lod) {
-    // Изгородь выгонов.
-    const c = a.c;
-    c.strokeStyle = '#8c6f4e';
-    c.lineWidth = 0.7;
-    c.beginPath();
-    c.rect(-50, -35, 54, 70);
-    c.moveTo(-23, -35);
-    c.lineTo(-23, 35);
-    c.moveTo(-50, 2);
-    c.lineTo(-23, 2);
-    c.stroke();
+  if (ind.fp.parts) pasture(a, ind, false);
+  else {
+    a.patch(-52, -37, 58, 74, '#a3bf72', 2);
+    for (let k = 0; k < 5; k++) a.stain(-44 + a.r(10 + k) * 44, -30 + a.r(20 + k) * 60, 6, 5, 'rgba(120,150,80,0.35)', 20 + k);
+    a.stain(-30, 10, 3.5, 2.5, '#86a3ad', 30, 0.15);
+    if (a.pass === 0 && a.lod) {
+      const c = a.c;
+      c.strokeStyle = '#8c6f4e';
+      c.lineWidth = 0.7;
+      c.beginPath();
+      c.rect(-50, -35, 54, 70);
+      c.moveTo(-23, -35);
+      c.lineTo(-23, 35);
+      c.moveTo(-50, 2);
+      c.lineTo(-23, 2);
+      c.stroke();
+    }
   }
   a.patch(10, -38, 43, 76, '#d4c6a0', 3);
   a.fence(110, 80, '#8c6f4e');
@@ -1605,9 +1640,11 @@ function ranch(a: Art, ind: Industry): void {
   if (lv >= 3) a.gable(12, -7, 26, 10, 5, roof);
   for (let k = 0; k < 2; k++) a.tank(44, -3 + k * 12, 4.5, 15, '#d5dadd', METAL);
   for (let k = 0; k < Math.min(8, 3 + lv); k++) a.tank(16 + (k % 4) * 6, 9 + Math.floor(k / 4) * 6, 2.3, 2, '#e3c662', '#c8a742');
-  herd(a, -50, -35, 27, 37, Math.min(9, 3 + 2 * lv), 200);
-  herd(a, -50, 2, 27, 33, Math.min(6, 2 + lv), 300);
-  herd(a, -23, -35, 27, 70, Math.min(10, 4 + 2 * lv), 400);
+  if (!ind.fp.parts) {
+    herd(a, -50, -35, 27, 37, Math.min(9, 3 + 2 * lv), 200);
+    herd(a, -50, 2, 27, 33, Math.min(6, 2 + lv), 300);
+    herd(a, -23, -35, 27, 70, Math.min(10, 4 + 2 * lv), 400);
+  }
   a.tree(-2, 30, 4.5, '#6e9a52');
   a.truck(32, 31, false, '#c4662f', '#b7a07a');
 }
@@ -1616,10 +1653,7 @@ function ranch(a: Art, ind: Industry): void {
 function sandpit(a: Art, ind: Industry): void {
   const sand = '#d9b77a';
   const pit = ['#e4d2a4', '#d8c08c', '#cbae76', '#bc9d64'];
-  for (let k = 0; k < 4; k++) {
-    const m = 1 - k * 0.2;
-    a.stain(-16 + k * 1.2, 2 + k, 30 * m, 33 * m, pit[k], 5, 0.08, shade(pit[k], 0.3));
-  }
+  mineBenches(a, ind, -16, 2, 30, 33, pit, 5);
   a.stain(-13, 6, 14, 13, '#7fa9b8', 8, 0.18, '#a9c7d1');
   haulRoad(a, SOFT_HAUL, '#e1cda6', '#b99e72', sand);
   a.pipe(-10, 4, 20, -14, '#5c5f66', 1);
@@ -1631,7 +1665,7 @@ function sandpit(a: Art, ind: Industry): void {
   a.belt(30, -18, 7, 32, -2, 3);
   a.heap(32, 4, 9 + Math.min(3, lv), sand, 1);
   if (lv >= 2) a.heap(33, 23, 8, sand, 2);
-  if (lv >= 3) a.heap(44, -12, 5, shade(sand, -0.08), 3);
+  if (lv >= 3) a.heap(44, -12, 5, '#c8a870', 3);
   a.excavator(-30, -22, -34, -14);
 }
 
@@ -1769,14 +1803,17 @@ interface Crop {
 /** Поля одной культуры (лён, подсолнечник, хлопок): посевы, двор с амбаром, тюки урожая и трактор. */
 function cropFarm(a: Art, ind: Industry, crop: Crop): void {
   const lv = a.level;
-  cropsOn(a, 0, crop.field, crop.dot);
-  cropsOn(a, 1, crop.ripe);
-  cropsOn(a, 2, crop.field, crop.dot);
-  if (crop.canal) {
-    a.patch(-52, -2.6, 65, 2.2, '#86b3cf');
-    a.patch(-7.4, -37, 2.2, 74, '#86b3cf');
+  if (a.pass === 0) {
+    const [north, south, strip] = farmPlots(ind);
+    cropsOn(a, ind, north, 0, crop.field, crop.dot);
+    cropsOn(a, ind, south, 1, crop.ripe);
+    cropsOn(a, ind, strip, 2, crop.field, crop.dot);
+    if (crop.canal && !ind.fp.parts) {
+      a.patch(-52, -2.6, 65, 2.2, '#86b3cf');
+      a.patch(-7.4, -37, 2.2, 74, '#86b3cf');
+    }
   }
-  farmyard(a);
+  farmyard(a, ind);
 
   a.gable(18, -35, 26, 18, 7, ind.info.roof);
   a.box(46, -35, 7, 14, 5, METAL, 1.6);
@@ -1807,20 +1844,23 @@ function cottonfarm(a: Art, ind: Industry): void {
 /** Овцеводческая ферма: выгоны с отарами, кошары, стригальный пункт и тюки шерсти. */
 function sheepfarm(a: Art, ind: Industry): void {
   const lv = a.level;
-  a.patch(-52, -37, 58, 74, '#b4c27a', 2);
-  for (let k = 0; k < 5; k++) a.stain(-44 + a.r(10 + k) * 44, -30 + a.r(20 + k) * 60, 6, 5, 'rgba(150,160,90,0.35)', 20 + k);
-  a.stain(-14, 22, 3.5, 2.5, '#86a3ad', 30, 0.15);
-  if (a.pass === 0 && a.lod) {
-    const c = a.c;
-    c.strokeStyle = '#8c6f4e';
-    c.lineWidth = 0.7;
-    c.beginPath();
-    c.rect(-50, -35, 54, 70);
-    c.moveTo(-23, -35);
-    c.lineTo(-23, 2);
-    c.moveTo(-50, 2);
-    c.lineTo(4, 2);
-    c.stroke();
+  if (ind.fp.parts) pasture(a, ind, true);
+  else {
+    a.patch(-52, -37, 58, 74, '#b4c27a', 2);
+    for (let k = 0; k < 5; k++) a.stain(-44 + a.r(10 + k) * 44, -30 + a.r(20 + k) * 60, 6, 5, 'rgba(150,160,90,0.35)', 20 + k);
+    a.stain(-14, 22, 3.5, 2.5, '#86a3ad', 30, 0.15);
+    if (a.pass === 0 && a.lod) {
+      const c = a.c;
+      c.strokeStyle = '#8c6f4e';
+      c.lineWidth = 0.7;
+      c.beginPath();
+      c.rect(-50, -35, 54, 70);
+      c.moveTo(-23, -35);
+      c.lineTo(-23, 2);
+      c.moveTo(-50, 2);
+      c.lineTo(4, 2);
+      c.stroke();
+    }
   }
   a.patch(10, -38, 43, 76, '#d4c6a0', 3);
   a.fence(110, 80, '#8c6f4e');
@@ -1830,9 +1870,11 @@ function sheepfarm(a: Art, ind: Industry): void {
   a.gable(12, -20, 28, 10, 5, roof);
   a.box(42, -20, 10, 10, 4, '#b9a58c', 1.4);
   for (let k = 0; k < Math.min(8, 2 + 2 * lv); k++) a.stack(14 + (k % 4) * 9, 0 + Math.floor(k / 4) * 8, 7, 6, 3, '#efe9da', '#c9c0aa');
-  herd(a, -50, -35, 27, 37, Math.min(12, 5 + 2 * lv), 200, true);
-  herd(a, -23, -35, 27, 37, Math.min(10, 4 + 2 * lv), 300, true);
-  herd(a, -50, 2, 54, 33, Math.min(14, 6 + 2 * lv), 400, true);
+  if (!ind.fp.parts) {
+    herd(a, -50, -35, 27, 37, Math.min(12, 5 + 2 * lv), 200, true);
+    herd(a, -23, -35, 27, 37, Math.min(10, 4 + 2 * lv), 300, true);
+    herd(a, -50, 2, 54, 33, Math.min(14, 6 + 2 * lv), 400, true);
+  }
   a.tree(4, 30, 4.5, '#6e9a52');
   a.truck(32, 31, false, '#c4662f', '#efe9da');
 }
@@ -1912,10 +1954,7 @@ function fishery(a: Art, ind: Industry): void {
 function claypit(a: Art, ind: Industry): void {
   const clay = '#b8693f';
   const pit = ['#d3a07a', '#c38963', '#b0744f', '#9c6140'];
-  for (let k = 0; k < 4; k++) {
-    const m = 1 - k * 0.2;
-    a.stain(-16 + k * 1.2, 2 + k, 30 * m, 33 * m, pit[k], 6, 0.09, shade(pit[k], 0.25));
-  }
+  mineBenches(a, ind, -16, 2, 30, 33, pit, 6);
   a.stain(-12, 8, 9, 7, '#9db5a6', 12, 0.2, '#b9cbbf');
   haulRoad(a, SOFT_HAUL, '#c9aa8d', '#a27c5f', clay);
   a.fence(100, 80, '#8a8f96');
@@ -1926,7 +1965,7 @@ function claypit(a: Art, ind: Industry): void {
   a.belt(10, -10, 2, 24, -18, 6);
   a.heap(32, 4, 9 + Math.min(3, lv), clay, 1);
   if (lv >= 2) a.heap(32, 23, 7.5, clay, 2);
-  if (lv >= 3) a.heap(44, 12, 5, shade(clay, 0.08), 3);
+  if (lv >= 3) a.heap(44, 12, 5, '#be754e', 3);
   a.excavator(-30, -20, -36, -12);
 }
 
@@ -1980,10 +2019,7 @@ function gemmine(a: Art, ind: Industry): void {
 function coppermine(a: Art, ind: Industry): void {
   const ore = '#2a7d78';
   const pit = ['#a9b2a0', '#98a290', '#879180', '#748070'];
-  for (let k = 0; k < 4; k++) {
-    const m = 1 - k * 0.22;
-    a.stain(-16 + k * 1.6, 4 + k * 1.4, 30 * m, 37 * m, pit[k], 8, 0.07, shade(pit[k], 0.28));
-  }
+  mineBenches(a, ind, -16, 4, 30, 37, pit, 8);
   a.stain(-12, 9, 5, 3.6, '#5fae9e', 9, 0.2);
   haulRoad(a, ORE_HAUL, '#b3b6a0', '#858e7d', ore);
   a.track(16, 41, 46, 41);
@@ -2317,6 +2353,53 @@ export function industryGround(info: IndustryType): string {
   return GROUND[info.kind] ?? info.color;
 }
 
+function industryScene(a: Art, ind: Industry): void {
+  const { kind, w, h } = ind.info;
+  if (ind.fp.parts) {
+    if (isOpenPit(kind)) {
+      const rock = ind.info.color;
+      a.stain(-0.65 * w, 0.25 * h, 0.19 * w, 0.12 * h, shade(rock, -0.16), 710, 0.23);
+      // Соседний отстойник повторяет форму выемки: земляной вал, мелкая вода, зеркало на дне.
+      a.stain(-0.94 * w, 0.79 * h, 0.20 * w, 0.16 * h, '#9c947e', 711, 0.20);
+      a.stain(-0.94 * w, 0.79 * h, 0.16 * w, 0.13 * h, '#9bb4aa', 711, 0.17);
+      a.stain(-0.97 * w, 0.80 * h, 0.09 * w, 0.08 * h, '#718f88', 711, 0.14);
+      a.heap(-0.68 * w, 0.27 * h, 7, rock, 712);
+      a.heap(-0.79 * w, 0.24 * h, 5, rock, 713);
+    } else if (hasBulkYard(kind)) {
+      const x = -0.72 * w;
+      a.stain(x, -0.06 * h, 0.20 * w, 0.28 * h, '#b5ad9c', 720, 0.13);
+      if (kind === 'sawmill') {
+        a.logs(x, -9, 17, 7, 724);
+        a.logs(x + 2, 2, 12, 6, 725);
+      } else {
+        a.heap(x - 4, -9, 7, kind === 'steelmill' ? '#835843' : '#a49b8c', 721);
+        a.heap(x + 8, 5, 8, '#666b70', 722);
+      }
+      a.gable(x - 7, -23, 13, 8, 4, ind.info.roof);
+    } else if (hasPowerYard(kind)) {
+      const x = w * 0.72;
+      a.stain(x, -h * 0.09, w * 0.15, h * 0.25, '#adaea3', 730, 0.14);
+      a.tank(x, -h * 0.19, 7, 10, '#d6dadd', ind.info.roof);
+      a.tank(x, 0, 6, 9, '#c5cccd', ind.info.roof);
+      a.pipe(w * 0.45, -h * 0.16, x, -h * 0.16);
+    } else if (ind.info.accepts.length) {
+      const x = -w * 0.70;
+      const y = h * 0.14;
+      a.patch(x - 7, y - 10, 21, 25, '#bdbbb0', 3);
+      a.gable(x - 6, y - 8, 18, 11, 5, ind.info.produces === 'food' ? '#d6dadd' : ind.info.roof, true);
+      a.stack(x - 5, y + 6, 6, 4, 1.6, '#9a8270', '#765f53');
+      a.stack(x + 3, y + 6, 6, 4, 1.6, '#c6ab77', '#927b5a');
+    }
+  }
+  SCENES[kind](a, ind);
+  if (ind.fp.groundParts && a.pass === 0) {
+    const roads = industryServiceRoads(kind);
+    const dirt = ind.info.accepts.length ? '#bbb8aa' : '#d2c29c';
+    const edge = ind.info.accepts.length ? '#a09f94' : '#aa9b79';
+    for (const route of [...roads.branches, roads.main]) a.drive(route.map(([x, y]) => [x * w, y * h]), dirt, edge);
+  }
+}
+
 /**
  * Предприятие целиком: участок, тени, постройки. zoom решает, сколько мелочей рисовать; layer — всё или его часть
  * (ArtLayer). Ответ — нарисовано ли движущееся (картинка меняется сама).
@@ -2325,7 +2408,8 @@ export function drawIndustryArt(ctx: CanvasRenderingContext2D, ind: Industry, zo
   const info = ind.info;
   const a = new Art(ctx, ind, zoom, time, ind.id, layer);
   a.site = info;
-  paintScene(ctx, a, ind.fp, info.w, info.h, industryGround(info), SCENES[info.kind], ind);
+  a.siteParts = ind.fp.parts?.slice(0, ind.fp.groundParts);
+  paintScene(ctx, a, ind.fp, info.w, info.h, industryGround(info), industryScene, ind);
   return a.moved;
 }
 
@@ -2337,7 +2421,7 @@ export function industryMotion(ind: Industry): Emitter[] {
   const info = ind.info;
   const sink: Emitter[] = [];
   const a = new Art(null, ind, 1, 0, ind.id, 'all', sink);
-  paintScene(a.c, a, ind.fp, info.w, info.h, industryGround(info), SCENES[info.kind], ind);
+  paintScene(a.c, a, ind.fp, info.w, info.h, industryGround(info), industryScene, ind);
   return sink;
 }
 
@@ -2368,10 +2452,11 @@ export function paintScene<T>(
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   const outline = () => {
-    if (a.site) industrySitePath(ctx, a.site, W, H);
+    if (a.site) industrySitePath(ctx, a.site, W, H, a.siteParts);
     else {
       ctx.beginPath();
-      ctx.roundRect(-W / 2, -H / 2, W, H, 3);
+      if (a.siteParts) for (const part of a.siteParts) tracePlot(ctx, part, W, H);
+      else ctx.roundRect(-W / 2, -H / 2, W, H, 3);
     }
   };
   for (const pass of PASSES) {

@@ -7,12 +7,13 @@
 import { ANNEX, ECONOMY } from '../config';
 import type { Vec } from '../core/vec';
 import type { Industry } from '../world/entities';
+import { annexPlots } from '../world/industrySites';
 import type { Footprint } from '../world/spatial';
 import { inOutbuildingZone, outbuildingFootprint, outbuildingZone } from './outbuildings';
 
 /** Предел, до которого предприятие растёт само: ANNEX.base и по 1 за пристройку, не выше его предела. */
 export function growthCap(ind: Industry): number {
-  return Math.min(ind.cap ?? ECONOMY.maxLevel, ANNEX.base + (ind.annexes?.length ?? 0));
+  return Math.min(ind.cap ?? ECONOMY.maxLevel, ANNEX.base + (ind.annexes?.filter((a) => !a.automatic).length ?? 0));
 }
 
 /** Готово к расширению: упёрлось в предел роста, продукцию вывозят (growthMonths и больше подряд), а расти ещё есть куда. */
@@ -28,7 +29,7 @@ export function annexZone(ind: Industry): number {
 
 /** Пристройка с центром в p — участок в долю ANNEX.scale от предприятия, по его оси. */
 export function annexFootprint(ind: Industry, p: Vec): Footprint {
-  return outbuildingFootprint(ind.fp, p, ind.fp.w * ANNEX.scale, ind.fp.h * ANNEX.scale);
+  return { ...outbuildingFootprint(ind.fp, p, ind.fp.w * ANNEX.scale, ind.fp.h * ANNEX.scale), parts: annexPlots(ind.info.kind) };
 }
 
 /** Пристройка целиком в зоне предприятия. */

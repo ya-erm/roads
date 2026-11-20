@@ -83,6 +83,7 @@ describe('мир «Строит игрок»', () => {
     const c = new Game(save.settings, save);
     expect(c.enterprises.on).toBe(true);
     expect(c.enterprises.deposits).toEqual(a.enterprises.deposits);
+    expect(c.industries.map((i) => i.fp.parts)).toEqual(a.industries.map((i) => i.fp.parts));
     if (ruin) expect(c.industries.find((i) => i.id === ruin.id)?.ruin).toBe(true);
   });
 

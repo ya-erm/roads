@@ -193,6 +193,7 @@ function paintAnnex(ctx: CanvasRenderingContext2D, a: Art, ind: Industry, annex:
   // Сцены нарисованы под размер пристройки этого вида; контур из сохранения впишется масштабом.
   const W = info.w * ANNEX.scale;
   const H = info.h * ANNEX.scale;
+  a.siteParts = annex.fp.parts;
   const lot: Lot = { ind, kind: info.kind, variant: annexVariant(ind, annex), roof: info.roof, W, H, L: -W / 2, T: -H / 2, R: W / 2, B: H / 2 };
   paintScene(ctx, a, annex.fp, W, H, industryGround(info), scene, lot);
 }

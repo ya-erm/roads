@@ -341,11 +341,12 @@ export function drawRuinOverlay(c: CanvasRenderingContext2D, ind: Industry, zoom
   c.save();
   c.translate(fp.center.x, fp.center.y);
   c.rotate(fp.angle);
-  industrySitePath(c, ind.info, fp.w, fp.h);
+  industrySitePath(c, ind.info, fp.w, fp.h, fp.parts);
   c.clip();
   // Краски сошли: серо-бурая вуаль.
   c.fillStyle = 'rgba(128,118,100,0.5)';
-  c.fillRect(-fp.w / 2, -fp.h / 2, fp.w, fp.h);
+  const reach = fp.parts ? footprintRadius(fp) : 0;
+  c.fillRect(-fp.w / 2 - reach, -fp.h / 2 - reach, fp.w + reach * 2, fp.h + reach * 2);
   // Ржавчина.
   scatter(seed, 7, Math.min(fp.w, fp.h) * 0.45, (x, y, i) => {
     c.beginPath();
@@ -395,7 +396,7 @@ export function drawSiteArt(c: CanvasRenderingContext2D, ind: Industry, zoom: nu
   c.rotate(fp.angle);
   // Площадка: утоптанная земля, разметка углов и пунктир по периметру.
   c.fillStyle = '#c9b48f';
-  industrySitePath(c, ind.info, W, H);
+  industrySitePath(c, ind.info, W, H, fp.parts);
   c.fill();
   c.setLineDash([5, 4]);
   c.strokeStyle = 'rgba(255,255,255,0.85)';

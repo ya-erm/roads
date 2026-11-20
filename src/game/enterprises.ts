@@ -34,6 +34,7 @@ import {
   type Workforce,
 } from '../world/enterprise';
 import type { Deposit, Industry, Station, Town } from '../world/entities';
+import { industryFootprint } from '../world/industrySites';
 import { playerIndustries } from '../world/settings';
 import { type Footprint, footprintCorners, footprintRadius } from '../world/spatial';
 import type { Game } from './game';
@@ -186,10 +187,10 @@ export class Enterprises {
       deposit = own.find((d) => d.used === undefined) && dist(own.find((d) => d.used === undefined)!.center, p) <= DEPOSIT_SNAP ? own.find((d) => d.used === undefined) : undefined;
       if (!deposit) {
         const busy = own[0] && dist(own[0].center, p) <= DEPOSIT_SNAP && own[0].used !== undefined;
-        return fail(busy ? 'Месторождение уже занято' : `⛏️ Добыча — только на месторождении: наведите на значок ${info.short.toLowerCase()}`, { fp: { center: p, w: info.w, h: info.h, angle } });
+        return fail(busy ? 'Месторождение уже занято' : `⛏️ Добыча — только на месторождении: наведите на значок ${info.short.toLowerCase()}`, { fp: industryFootprint(info, p, angle) });
       }
       fp = depositFootprint(deposit, info);
-    } else fp = { center: p, w: info.w, h: info.h, angle };
+    } else fp = industryFootprint(info, p, angle);
     const town = townFor(g.towns, fp);
     const staff = this.expectStaff(info, fp);
     const harm = g.towns.flatMap((t) => {

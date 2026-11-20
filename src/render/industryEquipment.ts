@@ -4,19 +4,19 @@ export type WorkPoint = readonly [x: number, y: number];
 export type Circuit = readonly WorkPoint[];
 export type Equipment =
   | { kind: 'harvester'; route: Circuit; color: string }
-  | { kind: 'haul'; route: Circuit; color: string; load: string }
+  | { kind: 'haul'; route: Circuit; color: string; load: string; incoming?: boolean; body?: 'tank' | 'box' | 'flatbed' }
   | { kind: 'excavator'; reach: WorkPoint }
   | { kind: 'rail'; end: number; color: string };
 
 /** Один и тот же сплайн задаёт колею и траекторию колёс. */
-function onCircuit(route: Circuit, t: number): WorkPoint {
-  const idx = Math.floor(t);
+function onCircuit(route: Circuit, t: number, closed = true): WorkPoint {
+  const idx = Math.min(Math.floor(t), closed ? route.length - 1 : route.length - 2);
   const f = t - idx;
   const n = route.length;
-  const prev = route[(idx + n - 1) % n];
-  const from = route[idx % n];
+  const prev = route[closed ? (idx + n - 1) % n : Math.max(0, idx - 1)];
+  const from = route[idx];
   const to = route[(idx + 1) % n];
-  const next = route[(idx + 2) % n];
+  const next = route[closed ? (idx + 2) % n : Math.min(n - 1, idx + 2)];
   const interpolate = (axis: 0 | 1) => {
     const a = prev[axis];
     const b = from[axis];
@@ -27,11 +27,12 @@ function onCircuit(route: Circuit, t: number): WorkPoint {
   return [interpolate(0), interpolate(1)];
 }
 
-export function traceCircuit(c: CanvasRenderingContext2D, route: Circuit): void {
+export function traceCircuit(c: CanvasRenderingContext2D, route: Circuit, closed = true): void {
   c.beginPath();
   c.moveTo(...route[0]);
-  for (let step = 1; step < route.length * 8; step++) c.lineTo(...onCircuit(route, step / 8));
-  c.closePath();
+  const steps = (closed ? route.length : route.length - 1) * 8;
+  for (let step = 1; step <= steps; step++) c.lineTo(...onCircuit(route, closed ? (step / 8) % route.length : step / 8, closed));
+  if (closed) c.closePath();
 }
 
 /** Техника видна сверху, кабина и направление движения смотрят вдоль локальной оси +x. */
@@ -82,15 +83,18 @@ export function paintEquipment(
   }
 
   const route = equipment.route;
-  const where = phase * route.length;
-  const [px, py] = onCircuit(route, where);
-  const [nx, ny] = onCircuit(route, where + 0.015);
   const harvest = equipment.kind === 'harvester';
+  const where = harvest ? phase * route.length : (0.5 - 0.5 * Math.cos(phase * Math.PI * 2)) * (route.length - 1);
+  const [px, py] = onCircuit(route, where, harvest);
+  const ahead = harvest ? (where + 0.015) % route.length : Math.min(route.length - 1, where + 0.015);
+  const behind = harvest ? where : Math.max(0, where - 0.015);
+  const [nx, ny] = onCircuit(route, ahead, harvest);
+  const [bx, by] = onCircuit(route, behind, harvest);
   const length = harvest ? 7.5 : 10;
   const width = harvest ? 4.3 : 5.2;
   c.save();
   c.translate(px, py);
-  c.rotate(Math.atan2(ny - py, nx - px));
+  c.rotate(Math.atan2(ny - by, nx - bx) + (!harvest && phase >= 0.5 ? Math.PI : 0));
   c.fillStyle = 'rgba(46,40,28,0.20)';
   c.fillRect(-length / 2 + 0.85, -width / 2 + 1.1, length, width);
   c.fillStyle = '#3f4144';
@@ -110,12 +114,32 @@ export function paintEquipment(
     c.fillStyle = '#dfcc87';
     c.fillRect(-2.6, -1.4, 2.2, 2.8);
   } else {
-    c.fillStyle = '#766b58';
-    c.fillRect(-4.4, -1.65, 5.7, 3.3);
-    if (phase < 0.53) {
-      c.fillStyle = equipment.load;
-      c.fillRect(-3.85, -1.25, 4.45, 2.5);
-    }
+    paintLoad(c, equipment, (phase < 0.5) === !!equipment.incoming);
   }
   c.restore();
+}
+
+function paintLoad(c: CanvasRenderingContext2D, equipment: Extract<Equipment, { kind: 'haul' }>, loaded: boolean): void {
+  c.fillStyle = '#766b58';
+  c.fillRect(-4.4, -1.65, 5.7, 3.3);
+  if (equipment.body === 'tank') {
+    c.fillStyle = '#d6dce0';
+    c.beginPath();
+    c.roundRect(-4.45, -1.75, 5.7, 3.5, 1.5);
+    c.fill();
+    c.fillStyle = equipment.load;
+    c.fillRect(-3.2, -0.38, 3.5, 0.76);
+  } else if (equipment.body === 'box') {
+    c.fillStyle = '#e1dfd4';
+    c.fillRect(-4.35, -1.7, 5.6, 3.4);
+    c.fillStyle = equipment.load;
+    c.fillRect(-4, -1.45, 1.45, 2.9);
+  } else if (loaded) {
+    c.fillStyle = equipment.load;
+    c.fillRect(-3.85, -1.25, 4.45, 2.5);
+    if (equipment.body === 'flatbed') {
+      c.fillStyle = '#5f5346';
+      c.fillRect(-3.75, -0.2, 4.3, 0.4);
+    }
+  }
 }

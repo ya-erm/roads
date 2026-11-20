@@ -13,7 +13,8 @@ import { lotClearOfRoads } from './lotClear';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN, WALK_EDGE } from './roadTypes';
 import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerIndustries, townCount, townSizes, WorldProfile, WorldSettings } from './settings';
 import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
-import { Footprint, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
+import { industryFootprint } from './industrySites';
+import { Footprint, footprintAlong, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
 import { edgeOf, growTier, hospitalBays, hospitalWidth, inDistrict, jobsOf, LANDMARK_YARD, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, yardOf, zoneTown } from './townForms';
 import { onPark, placeParks, type ParkSite } from './townParks';
@@ -416,6 +417,8 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
         producedLast: 0,
         prodAcc: 0,
       };
+      const territory = industryFootprint(info, best.fp.center, best.fp.angle, industry.id);
+      if (!terrain.isWater(territory.center, footprintRadius(territory) + 5) && !index.overlaps(territory, 20) && clearOfRoads(ctx, territory, 8)) industry.fp = territory;
       index.add(industry);
       result.push(industry);
       if (info.kind === 'forest') terrain.addForest(best.fp.center, 220, rng);
@@ -928,6 +931,9 @@ export function streetAngle(ctx: Pick<WorldContext, 'roads'>, p: Vec): number {
 
 /** Точная проверка по контуру: ни одна точка здания не ближе margin к краю дороги. */
 export function clearOfRoads(ctx: Pick<WorldContext, 'roads'>, fp: Footprint, margin: number): boolean {
+  if (fp.parts) {
+    return !ctx.roads.corridorsNear(fp.center, footprintRadius(fp) + 60).some((road) => footprintAlong(fp, road.lut, () => corridorHalf(road) + margin));
+  }
   const c = Math.cos(fp.angle);
   const s = Math.sin(fp.angle);
   const pts: Vec[] = [];
@@ -1319,6 +1325,8 @@ function placeIndustries(ctx: WorldContext, towns: Town[], density: number, sett
           producedLast: 0,
           prodAcc: 0,
         };
+        const territory = industryFootprint(info, fp.center, fp.angle, industry.id);
+        if (!terrain.isWater(territory.center, footprintRadius(territory) + 5) && !index.overlaps(territory, 20) && clearOfRoads(ctx, territory, 8)) industry.fp = territory;
         index.add(industry);
         result.push(industry);
         if (info.kind === 'forest') terrain.addForest(center, 220, rng);

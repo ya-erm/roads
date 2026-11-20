@@ -49,12 +49,17 @@ describe('Пристройки предприятий', () => {
     farm.piledMonth = 0;
     grow(game);
     expect(farm.level).toBe(ANNEX.base);
+    const grown = farm.annexes?.find((a) => a.automatic);
+    expect(grown?.fp.parts).toBeDefined();
+    expect(game.structureAt(grown!.fp.center)).toMatchObject({ type: 'annex', industryId: farm.id, automatic: true });
+    expect(growthCap(farm)).toBe(ANNEX.base);
     for (let m = 0; m < 3; m++) {
       farm.producedLast = 40;
       farm.piledMonth = 0;
       grow(game);
     }
     expect(farm.level).toBe(ANNEX.base);
+    expect(farm.annexes?.filter((a) => a.automatic)).toHaveLength(1);
     // Упёрлась, а вывозят исправно — готова расти дальше.
     expect(annexReady(farm)).toBe(true);
   });

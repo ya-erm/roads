@@ -1,14 +1,25 @@
-import type { Vec } from '../core/vec';
+import { closestOnSegment, segSegDist, type Vec } from '../core/vec';
 
-/** Повёрнутый прямоугольник: здания, предприятия, станции. */
+/** Нормированные координаты внутри участка. Части могут выходить за размеры базовой сцены w × h. */
+export type Plot = readonly Vec[];
+
+/** Участок с поворотом. Без частей — обычный прямоугольник. */
 export interface Footprint {
   center: Vec;
   w: number;
   h: number;
   angle: number;
+  parts?: readonly Plot[];
+  /** Число площадок без технологических проездов в начале списка частей. */
+  groundParts?: number;
 }
 
 export function footprintRadius(f: Footprint): number {
+  if (f.parts) {
+    let squared = 0;
+    for (const part of f.parts) for (const { x, y } of part) squared = Math.max(squared, (x * f.w) ** 2 + (y * f.h) ** 2);
+    return Math.sqrt(squared);
+  }
   return Math.hypot(f.w, f.h) / 2;
 }
 
@@ -20,10 +31,45 @@ export function pointInFootprint(p: Vec, f: Footprint, margin = 0): boolean {
   const s = Math.sin(-f.angle);
   const lx = dx * c - dy * s;
   const ly = dx * s + dy * c;
+  if (f.parts) {
+    const p = { x: lx / f.w, y: ly / f.h };
+    return f.parts.some((part) => {
+      const inside = pointInPolygon(p, part);
+      if (!margin || inside === (margin > 0)) return inside;
+      const within = part.some((a, i) => {
+        const b = part[(i + 1) % part.length];
+        return closestOnSegment({ x: lx, y: ly }, { x: a.x * f.w, y: a.y * f.h }, { x: b.x * f.w, y: b.y * f.h }).d <= Math.abs(margin);
+      });
+      return margin > 0 ? within : !within;
+    });
+  }
   return Math.abs(lx) <= f.w / 2 + margin && Math.abs(ly) <= f.h / 2 + margin;
 }
 
+export function pointInPolygon(p: Vec, polygon: Plot): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i];
+    const b = polygon[j];
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < a.x + (b.x - a.x) * (p.y - a.y) / (b.y - a.y)) inside = !inside;
+  }
+  return inside;
+}
+
+function worldPlots(f: Footprint): readonly Plot[] {
+  if (!f.parts) return [footprintCorners(f)];
+  const cos = Math.cos(f.angle);
+  const sin = Math.sin(f.angle);
+  return f.parts.map((part) => part.map(({ x, y }) => {
+    const lx = x * f.w;
+    const ly = y * f.h;
+    return { x: f.center.x + lx * cos - ly * sin, y: f.center.y + lx * sin + ly * cos };
+  }));
+}
+
+/** Вершины всех частей. Для прямоугольника — четыре угла в порядке обхода. */
 export function footprintCorners(f: Footprint): Vec[] {
+  if (f.parts) return worldPlots(f).flat();
   const c = Math.cos(f.angle);
   const s = Math.sin(f.angle);
   return [
@@ -38,8 +84,42 @@ export function footprintCorners(f: Footprint): Vec[] {
   });
 }
 
+/** Опорная граница участка вдоль единичной нормали (для подъездов). */
+export function footprintSide(f: Footprint, normal: Vec): number {
+  return Math.max(...footprintCorners(f).map((p) => (p.x - f.center.x) * normal.x + (p.y - f.center.y) * normal.y));
+}
+
+/** Полотно вдоль кривой. Малый запас перекрывает расстояние между соседними пробами. */
+export function footprintAlong(
+  f: Footprint, curve: { length: number; pointAt(s: number): Vec }, widthAt: (s: number) => number,
+): boolean {
+  const steps = Math.max(1, Math.ceil(curve.length / 3));
+  const step = curve.length / steps;
+  const r = footprintRadius(f);
+  for (let i = 0; i <= steps; i++) {
+    const s = i * step;
+    const p = curve.pointAt(s);
+    const margin = widthAt(s) + step / 2;
+    if ((p.x - f.center.x) ** 2 + (p.y - f.center.y) ** 2 <= (r + margin) ** 2 && pointInFootprint(p, f, margin)) return true;
+  }
+  return false;
+}
+
 /** Пересекаются ли прямоугольники (по разделяющим осям). */
 export function footprintsOverlap(a: Footprint, b: Footprint, margin = 0): boolean {
+  if (a.parts || b.parts) {
+    const reach = footprintRadius(a) + footprintRadius(b) + Math.max(0, margin);
+    if ((a.center.x - b.center.x) ** 2 + (a.center.y - b.center.y) ** 2 > reach ** 2) return false;
+    const left = worldPlots(a);
+    const right = worldPlots(b);
+    for (const p of left) for (const q of right) {
+      if (pointInPolygon(p[0], q) || pointInPolygon(q[0], p)) return true;
+      for (let i = 0; i < p.length; i++) for (let j = 0; j < q.length; j++) {
+        if (segSegDist(p[i], p[(i + 1) % p.length], q[j], q[(j + 1) % q.length]) <= Math.max(0, margin)) return true;
+      }
+    }
+    return false;
+  }
   // Горячее место генерации городов: углы и проекции — та же арифметика, что footprintCorners и
   // проекция на оси, только без временных массивов и объектов.
   const ca = cornersInto(CA, a.center, a.w + margin * 2, a.h + margin * 2, a.angle);
@@ -135,7 +215,7 @@ export class FootprintIndex<T extends { fp: Footprint }> {
 
   overlaps(f: Footprint, margin = 0): boolean {
     // Описанные окружности врозь (с запасом в метр) — прямоугольники точно не пересекаются: без точной проверки.
-    const r = Math.hypot(f.w + margin * 2, f.h + margin * 2) / 2 + 1;
+    const r = footprintRadius(f) + Math.max(0, margin) * Math.SQRT2 + 1;
     for (const it of this.near(f.center, footprintRadius(f) + margin + 200)) {
       const dx = it.fp.center.x - f.center.x;
       const dy = it.fp.center.y - f.center.y;
