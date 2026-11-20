@@ -98,10 +98,16 @@ describe('Где машина компании на карте (подсветк
     expect(dist(onRoad.pos, look.pos)).toBeCloseTo(L / 2);
     expect(onRoad.r).toBeCloseTo(L * 0.9 + 3);
 
-    // Заехала на пост автостанции у комбината: её рисует пост, кольцо — там же, под навесом.
-    for (let t = 0; t < MONTH_LENGTH * 3 && !(v.stop === 1 && v.inBay && !v.enter); t += 0.1) game.update(0.1);
+    // На открытом посту у комбината рисуется сам грузовик, включая момент заезда.
+    for (let t = 0; t < MONTH_LENGTH * 3 && !(v.stop === 1 && v.enter); t += 0.1) game.update(0.1);
+    expect(v.stop === 1 && v.enter).toBeTruthy();
+    const entering = game.fleetLook(v)!;
+    expect(game.bayLooks(sB)).toContainEqual(entering);
+    expect(game.enteringLooks()).not.toContainEqual(entering);
+    for (let t = 0; t < MONTH_LENGTH && v.enter; t += 0.1) game.update(0.1);
     expect(v.inBay && !v.enter).toBe(true);
     expect(game.fleetLook(v)).toBeUndefined();
+    expect(game.bayLooks(sB)).toHaveLength(1);
     const inBay = game.fleetSpot(v)!;
     expect(inBay.station).toBeUndefined();
     expect(game.inFootprint(inBay.pos, sB.fp)).toBe(true);

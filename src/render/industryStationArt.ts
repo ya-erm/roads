@@ -10,6 +10,8 @@ const BULK = new Set<CargoType>(['ore', 'copperore', 'coal', 'stone', 'sand', 'c
 const SILO = new Set<CargoType>(['grain', 'sunflower']);
 const TIMBER = new Set<CargoType>(['logs', 'planks']);
 
+export const OPEN_BAY_REAR = -2;
+
 /** +y — выезд маршрутов, −y — технологические ворота со стороны предприятия. */
 function rearRoad(st: Station): Circuit {
   const depth = st.fp.h / 2;
@@ -22,7 +24,7 @@ export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station, ind?:
   const right = w / 2 - 2;
   const back = -h / 2;
   c.fillStyle = '#b6b4a9';
-  c.fillRect(left, back + 1, w - 4, h / 2);
+  c.fillRect(left, back + 1, w - 4, h / 2 + OPEN_BAY_REAR - 1);
   // Технологический въезд пересекает кромку площадки посередине, открытое полотно тянется до края предприятия.
   c.fillStyle = '#777c7c';
   c.fillRect(left, back + 1, -4 - left, 1.1);

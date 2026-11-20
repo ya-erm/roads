@@ -61,7 +61,7 @@ import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, type Emitter, industryMotion } from './industryArt';
 import { paintIndustrySite, tracePlot } from './industrySite';
 import { drawIndustrialGate, drawIndustrialRoads, INDUSTRY_ASPHALT, industryRoadSurface } from './industryRoadArt';
-import { drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock } from './industryStationArt';
+import { drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock, OPEN_BAY_REAR } from './industryStationArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
 import { type Around, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
@@ -909,7 +909,7 @@ export class Renderer {
       this.drawPortals(planned);
       ctx.globalAlpha = 1;
     }
-    // Заезд на пост автостанции — тоже под площадкой: машина уходит под навес, как выезжает из-под него.
+    // В крытый бокс машина заезжает под навес. Открытые посты рисуем с машинами поверх площадки.
     this.drawVehicles(game.enteringLooks().filter((v) => v.pos.x > view.x0 && v.pos.x < view.x1 && v.pos.y > view.y0 && v.pos.y < view.y1));
     this.drawLights(game, view, 0, o.phaseEdit);
     this.drawMotion(game, view);
@@ -3024,7 +3024,7 @@ export class Renderer {
     ctx.globalAlpha = 1;
   }
 
-  /** Станции — поверх неподвижного (в кадре): посты автостанций цветом машин в них, ящики складов, автобусы на местах. */
+  /** Станции — поверх неподвижного: занятость постов, ящики и машины на открытых площадках. */
   private drawStationsOver(game: Game, view: Box): void {
     const time = performance.now() / 1000;
     for (const st of game.stations.values()) {
@@ -3032,6 +3032,7 @@ export class Renderer {
       if (isBusTerminal(st)) this.drawBusTerminalLive(game, st);
       else {
         this.drawStationBays(game, st);
+        if (st.industryId !== null) this.drawVehicles(game.bayLooks(st));
         const industry = st.industryId === null ? undefined : game.industries.find((ind) => ind.id === st.industryId);
         if (!industry) continue;
         this.ctx.save();
@@ -3492,8 +3493,7 @@ export class Renderer {
   }
 
   /**
-   * Автостанция — боксы-посты под одной крышей: задняя стена, у каждого бокса открытые ворота к выезду
-   * (площадку перед ними рисует drawStationAprons). Неподвижное (в плитках); посты цветом машин — drawStationBays.
+   * Боксы автостанций и открытая площадка у предприятия. Занятость постов рисуется отдельно в drawStationBays.
    */
   private drawStation(game: Game, st: Station, selected: boolean): void {
     const ctx = this.ctx;
@@ -3511,11 +3511,32 @@ export class Renderer {
       ctx.fillStyle = '#5c6470';
       ctx.fillRect(-fp.w / 2 + 3, -hh + 3, fp.w - 6, 4);
     }
-    this.drawDepotSides(st, game.bayArea(st));
+    const area = game.bayArea(st);
+    this.drawDepotSides(st, area);
+    if (st.industryId !== null && this.camera.zoom > 0.35) this.drawOpenBayLines(st.bays, area.w, hh);
     ctx.restore();
   }
 
-  /** Посты автостанции (в кадре, поверх здания): занятый бокс — цвета линии машины, что в нём стоит; ящики складов. */
+  /** Белая разметка отделяет открытые места и соединяется с линиями у въезда. */
+  private drawOpenBayLines(bays: number, width: number, front: number): void {
+    const c = this.ctx;
+    const left = -width / 2 + 4;
+    const step = (width - 10) / bays;
+    c.strokeStyle = C.dash;
+    c.lineWidth = 0.8;
+    c.lineCap = 'butt';
+    c.beginPath();
+    c.moveTo(left, OPEN_BAY_REAR);
+    c.lineTo(left + bays * step, OPEN_BAY_REAR);
+    for (let i = 0; i <= bays; i++) {
+      const x = left + i * step;
+      c.moveTo(x, OPEN_BAY_REAR);
+      c.lineTo(x, front);
+    }
+    c.stroke();
+  }
+
+  /** В открытом дворе подсвечивается только короткая полоска сбоку от места. */
   private drawStationBays(game: Game, st: Station): void {
     const ctx = this.ctx;
     const fp = st.fp;
@@ -3528,12 +3549,19 @@ export class Renderer {
     const doors = this.camera.zoom > 0.35;
     game.stationBays(st).forEach((color, i) => {
       const x = -area.w / 2 + 5 + i * bw;
-      if (color || st.industryId === null) {
-        ctx.fillStyle = color ?? '#d5d2c8';
-        ctx.fillRect(x, -1, bw - 2, hh + 1);
+      if (st.industryId !== null) {
+        if (color && doors) {
+          ctx.fillStyle = '#46505b';
+          ctx.fillRect(x + 0.1, 2.6, 1.9, 4.9);
+          ctx.fillStyle = color;
+          ctx.fillRect(x + 0.45, 2.95, 1.2, 4.2);
+        }
+        return;
       }
+      ctx.fillStyle = color ?? '#d5d2c8';
+      ctx.fillRect(x, -1, bw - 2, hh + 1);
       // Открытые ворота — тёмный проём во всю ширину бокса: контур площадки здесь прерывается.
-      if (doors && st.industryId === null) {
+      if (doors) {
         ctx.fillStyle = '#3d434b';
         ctx.fillRect(x, hh - 2, bw - 2, 2.8);
       }

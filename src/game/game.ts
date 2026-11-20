@@ -40,7 +40,7 @@ import type { Vehicle, VehicleLook, VehicleSpec } from '../sim/vehicle';
 import { hitchOf, steerBase } from '../sim/body';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind, isTankCargo } from '../world/cargo';
-import { Annex, type BuildBase, type Deposit, Industry, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, type TownPark, TownSupplyMonth, Warehouse } from '../world/entities';
+import { Annex, type BuildBase, type Deposit, Industry, isBusTerminal, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, type TownPark, TownSupplyMonth, Warehouse } from '../world/entities';
 import { closeSupply, lastTownNeed, monthTownNeed, townNeed } from '../world/townSupply';
 import { addTownPax, closeTownPax, PAX_NOWHERE, PAX_PER_THOUSAND } from '../world/townPax';
 import { repaceSave, saveMonthLength } from './monthPace';
@@ -12377,11 +12377,15 @@ export class Game implements BuildContext {
     return out;
   }
 
-  /** Машины, что сейчас заезжают на посты автостанций, и грузовики во дворах получателей (на манёвре и у рампы). */
+  /** Машины под навесами автостанций и во дворах получателей. На открытых постах их рисует bayLooks. */
   enteringLooks(): VehicleLook[] {
     const out: VehicleLook[] = [];
     for (const v of this.fleet.values()) {
-      const look = v.enter && this.fleetLook(v);
+      if (!v.enter) continue;
+      const line = this.lines.get(v.lineId);
+      const st = line && this.stations.get(line.stops[v.stop]);
+      if (st && !st.curb && (st.industryId !== null || isBusTerminal(st))) continue;
+      const look = this.fleetLook(v);
       if (look) out.push(look);
     }
     for (const id of this.docks.yardIds()) {
