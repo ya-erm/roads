@@ -191,7 +191,7 @@ describe('постройка', () => {
     expect(g.enterprises.staff(ind)).toBeLessThan(0.5);
   });
 
-  it('автобус из города на станцию у далёкого завода возит рабочих без билета — завод начинает работать', () => {
+  it('далёкий завод получает рабочих из города, а маршрут получает плату за подвоз', () => {
     const g = player(SPARSE);
     const kind = cleanPlant(g);
     expect(g.enterprises.build(kind, farSpot(g, kind))).toBeNull();
@@ -229,16 +229,13 @@ describe('постройка', () => {
     }
     expect(st).not.toBeNull();
     const line = g.createLine([st!.id, dock.id])!;
-    for (let i = 0; i < 3; i++) g.buyVehicle(line.id, 'bus');
-    const money = g.money;
+    expect(g.buyVehicle(line.id, 'bus')).not.toBeNull();
     // Завод далеко (дальше дальней поездки на работу): первый автобус доезжает за несколько месяцев (от тупика на
     // окраине крупного города — TOWN_SCALE — путь длиннее).
     for (let m = 0; m < 20 && (ind.crew ?? 0) <= 1; m++) runMonths(g, 0.5);
     expect(ind.crew ?? 0).toBeGreaterThan(1);
     expect(g.enterprises.staff(ind)).toBeGreaterThan(0.05);
-    // Рабочие проезд не оплачивают: у линии в один конец выручки нет, только содержание.
-    expect(line.revenueLast + line.revenueMonth).toBe(0);
-    expect(g.money).toBeLessThan(money);
+    expect(line.revenueLast + line.revenueMonth).toBeGreaterThan(line.costLast + line.costMonth);
   });
 
   it('снос: возврат половины, месторождение снова свободно; со станцией — нельзя', () => {

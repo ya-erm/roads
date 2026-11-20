@@ -87,7 +87,7 @@ export function industryOptionsHtml(g: Game, current: IndustryKind | null): stri
       ? `<div class="ent-group"><div class="opt-title" data-tip="${esc(tip)}">${title}</div><div class="cards ent-cards">${list.map(card).join('')}</div></div>`
       : '';
   const rawTip = 'Добыча встаёт только на свободное месторождение своего сырья: значки ⛏️ на карте';
-  const plantTip = `Рабочие сами доходят из городов ближе ${km(ENTERPRISE.commute.near)}, дальше — везите автобусом (без билета). Вредное тормозит рост города рядом. В черте города — по местам (с ${ENTERPRISE.slots.firstPop} жителей)`;
+  const plantTip = `Рабочие сами доходят из городов ближе ${km(ENTERPRISE.commute.near)}, дальше их можно привезти автобусом. За каждого довезённого предприятие платит от ${money(ECONOMY.workerFareMin)}. Вредное производство тормозит рост города рядом. В черте города — по местам (с ${ENTERPRISE.slots.firstPop} жителей)`;
   // Карточки — в две строки; не влезают — прокрутка вбок (колесо мыши тоже листает вбок — Hud, data-hscroll).
   return `<div class="ent-scroll" data-hscroll>${group('⛏️ Добыча', rawTip, kinds.filter(isRaw))}${group(
     '🏭 Переработка <span class="muted">· R — повернуть</span>',

@@ -4,7 +4,7 @@ import { dist } from '../core/vec';
 import { twoWay } from '../lanes/model';
 import { CURB_GAP } from '../lanes/traffic';
 import { Game } from './game';
-import { connectStations, fieldSpot, road, stationAtIndustry, withoutCitizens } from './testkit';
+import { connectStations, fieldSpot, road, runUntil, stationAtIndustry, withoutCitizens } from './testkit';
 import { bayBox, bayPose, LONGEST_BUS, MODELS, stopBerth } from './transport';
 
 describe('Бокс поста автостанции', () => {
@@ -111,6 +111,15 @@ describe('Где машина компании на карте (подсветк
     const inBay = game.fleetSpot(v)!;
     expect(inBay.station).toBeUndefined();
     expect(game.inFootprint(inBay.pos, sB.fp)).toBe(true);
+
+    expect(runUntil(game, MONTH_LENGTH, () => v.yardExit !== undefined)).toBe(true);
+    let previous = game.fleetLook(v)!;
+    expect(runUntil(game, MONTH_LENGTH, () => v.simId !== null, () => {
+      const current = game.fleetLook(v)!;
+      expect(dist(current.pos, previous.pos)).toBeLessThan(2);
+      previous = current;
+    })).toBe(true);
+    expect(sB.occupied).not.toContain(v.id);
   });
 
   it('новые автобусы на автовокзале — каждый на своём окрашенном посту, кому поста не хватило — у станции', () => {

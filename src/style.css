@@ -4163,6 +4163,17 @@ button.pax-dest.off:hover {
   color: var(--muted);
 }
 
+.annex-choice-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.annex-choice-label svg,
+.annex-choice > small {
+  flex: none;
+}
+
 .annex-choice b {
   flex: none;
 }

@@ -1495,7 +1495,7 @@ export class Renderer {
       cur.stations = game.stationRev;
       add(
         this.diffs.aprons.update((put) => {
-          for (const x of game.stations.values()) if (x.kind === 'road') put(x.id, `${fpSig(x.fp)}|${x.bays}|${x.nodeId}`, fpBox(x.fp));
+          for (const x of game.stations.values()) if (x.kind === 'road') put(x.id, `${fpSig(x.fp)}|${x.bays}|${x.nodeId}|${x.industryId}|${x.depots ?? 0}`, fpBox(x.fp));
         }),
       );
     }
@@ -3313,7 +3313,7 @@ export class Renderer {
     ctx.restore();
   }
 
-  private drawFootprint(fp: Footprint, fill: string, stroke?: string, lw = 1): void {
+  private drawFootprint(fp: Footprint, fill: string | null, stroke?: string, lw = 1): void {
     const ctx = this.ctx;
     ctx.beginPath();
     if (fp.parts) {
@@ -3326,8 +3326,10 @@ export class Renderer {
       footprintCorners(fp).forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
       ctx.closePath();
     }
-    ctx.fillStyle = fill;
-    ctx.fill();
+    if (fill) {
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
     if (stroke) {
       ctx.strokeStyle = stroke;
       ctx.lineWidth = lw;
@@ -3505,8 +3507,9 @@ export class Renderer {
   private drawStation(game: Game, st: Station, selected: boolean): void {
     const ctx = this.ctx;
     const fp = st.fp;
-    if (st.industryId !== null) this.drawFootprint(fp, C.road, selected ? '#2f80ed' : undefined, 3);
-    else {
+    if (st.industryId !== null) {
+      if (selected) this.drawFootprint(fp, null, '#2f80ed', 3);
+    } else {
       this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.22)');
       this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 3 : 1.4);
     }
@@ -3518,9 +3521,7 @@ export class Renderer {
       ctx.fillStyle = '#5c6470';
       ctx.fillRect(-fp.w / 2 + 3, -hh + 3, fp.w - 6, 4);
     }
-    const area = game.bayArea(st);
-    this.drawDepotSides(st, area);
-    if (st.industryId !== null && this.camera.zoom > 0.35) this.drawOpenBayLines(st.bays, area.w, hh);
+    this.drawDepotSides(st, game.bayArea(st));
     ctx.restore();
   }
 
@@ -3881,6 +3882,13 @@ export class Renderer {
       if (st.kind !== 'road') continue;
       const fp = st.fp;
       if (fp.center.x < view.x0 - 100 || fp.center.x > view.x1 + 100 || fp.center.y < view.y0 - 100 || fp.center.y > view.y1 + 100) continue;
+      if (st.industryId !== null && !st.curb) {
+        this.drawFootprint(fp, C.road);
+        ctx.save();
+        this.intoStation(game, st);
+        if (this.camera.zoom > 0.35) this.drawOpenBayLines(st.bays, game.bayArea(st).w, fp.h / 2);
+        ctx.restore();
+      }
       if (st.curb) {
         if (this.camera.zoom >= 0.3) this.drawCurbMarks(net, st);
         continue;

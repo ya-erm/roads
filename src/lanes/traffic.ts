@@ -790,16 +790,31 @@ export class LaneTraffic {
     return true;
   }
 
-  spawn(opts: LaneSpawn): Vehicle | null {
-    const link = this.graph.links.get(opts.route[0]);
-    if (!link) return null;
-    const next = opts.route[1];
+  private spawnLanes(route: number[]): GLane[] {
+    const link = this.graph.links.get(route[0]);
+    if (!link) return [];
+    const next = route[1];
     const rightFirst = [...link.lanes].reverse();
     const good = next === undefined ? rightFirst : rightFirst.filter((l) => this.hasTransition(l, next));
-    const lane = (good.length ? good : rightFirst).find((l) => this.spaceAtStart(l, opts.length + IDM.minGap + 1));
+    return good.length ? good : rightFirst;
+  }
+
+  /** Точка на выездной полосе, до которой доводим манёвр на открытой площадке. */
+  spawnPoint(route: number[], advance: number) {
+    const lane = this.spawnLanes(route)[0];
+    if (!lane) return null;
+    const s = clamp(advance, 0, lane.length / 2);
+    return { lane: lane.id, s, ...this.graph.lanePose(lane, s) };
+  }
+
+  spawn(opts: LaneSpawn, start?: { lane: number; s: number }): Vehicle | null {
+    const s = start?.s ?? 0;
+    const lane = this.spawnLanes(opts.route).find((l) =>
+      (!start || start.lane === l.id) && this.spaceAtStart(l, s + opts.length + IDM.minGap + 1),
+    );
     if (!lane) return null;
     const { targetNode, route, ...spec } = opts;
-    const veh = this.create(spec, targetNode, route, lane, 0, 3);
+    const veh = this.create(spec, targetNode, route, lane, s, 3);
     queuePush(lane.vehicles, veh);
     return veh;
   }
