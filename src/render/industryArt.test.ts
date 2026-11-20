@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { INDUSTRY_LIST } from '../world/cargo';
+import { INDUSTRY_LIST, INDUSTRY_TYPES } from '../world/cargo';
 import type { Industry } from '../world/entities';
 import { annexMotion, drawAnnexArt } from './annexArt';
 import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, industryMotion } from './industryArt';
@@ -75,13 +75,28 @@ describe('Предприятия в кэше карты: неподвижное 
       const still = paint(ind, 1, 'still');
       const moves = motion(ind);
       expect(sum(still.draws, moves.draws), info.kind).toEqual(all.draws);
-      // Излучатели — без save/restore: каждый ставит своё преобразование, в конце — прежнее.
-      expect(moves.moves.save ?? 0, info.kind).toBe(0);
+      // Только поворачивающейся технике нужны локальные save/restore.
+      const turning = moves.list.filter((e) => e.kind === 'equipment' && e.equipment.kind !== 'rail').length;
+      expect(moves.moves.save ?? 0, info.kind).toBe(turning);
+      expect(moves.moves.restore ?? 0, info.kind).toBe(turning);
       expect(moves.moves.setTransform ?? 0, info.kind).toBe(moves.list.length + 1);
       if (moves.list.length) moving++;
     }
     // Дым, огонь или качалки есть не у всех, но у многих.
     expect(moving).toBeGreaterThan(3);
+  });
+
+  it('рабочая техника зависит от вида производства и останавливается при простое', () => {
+    for (const [info, kinds] of [
+      [INDUSTRY_TYPES.farm, ['harvester']],
+      [INDUSTRY_TYPES.quarry, ['haul', 'excavator']],
+      [INDUSTRY_TYPES.steelmill, ['rail']],
+    ] as const) {
+      const ind = industry(info);
+      const equipment = (target: Industry) => industryMotion(target).flatMap((e) => e.kind === 'equipment' ? [e.equipment.kind] : []);
+      expect(equipment(ind), info.kind).toEqual(kinds);
+      expect(equipment({ ...ind, producedMonth: 0, producedLast: 0 }), info.kind).toEqual([]);
+    }
   });
 
   it('излучатели — в мире: на участке своего предприятия или пристройки', () => {

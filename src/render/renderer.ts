@@ -59,6 +59,7 @@ import { annexMotion, drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
 import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, type Emitter, industryMotion } from './industryArt';
+import { paintIndustrySite } from './industrySite';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
 import { type Around, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
@@ -3311,7 +3312,9 @@ export class Renderer {
   /** Предприятие: участок с лёгкой тенью, постройки — в industryArt (мелочи только вблизи); layer — ArtLayer. */
   private drawIndustry(ind: Industry, layer: ArtLayer): void {
     const fp = ind.fp;
-    this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.16)');
+    if (ind.info.accepts.length) {
+      paintIndustrySite(this.ctx, ind.info, { ...fp, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
+    }
     // Стройплощадка (режим «Строит игрок», «Со строительством»): здание растёт по готовности.
     if (ind.build) {
       drawSiteArt(this.ctx, ind, this.camera.zoom, 0);
@@ -5779,7 +5782,7 @@ export class Renderer {
     const plan = pv.plan;
     if (!plan?.fp || !kind || !info) return;
     drawHarmZone(ctx, kind, plan.fp, z);
-    this.drawFootprint(plan.fp, plan.ok ? 'rgba(47,128,237,0.35)' : 'rgba(232,72,63,0.35)', plan.ok ? '#2f80ed' : '#e8483f', 2 / z);
+    paintIndustrySite(ctx, info, plan.fp, plan.ok ? 'rgba(47,128,237,0.35)' : 'rgba(232,72,63,0.35)', plan.ok ? '#2f80ed' : '#e8483f', 2 / z);
     for (const id of plan.demolish) {
       const b = game.buildingById(id);
       if (b) this.drawFootprint(b.fp, 'rgba(232,72,63,0.45)');

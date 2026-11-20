@@ -11,6 +11,7 @@ import { depositRadius, harmClass, harmReach, isActive } from '../world/enterpri
 import type { Deposit, Industry, TownBuilding } from '../world/entities';
 import { type Footprint, footprintRadius } from '../world/spatial';
 import { disc, drawIndustryArt, hash, shade, YELLOW } from './industryArt';
+import { industrySitePath } from './industrySite';
 
 /** Как выглядит месторождение вида: выходы породы, карьер, нефть, поле, лес, рыбное место. */
 type Look = 'rock' | 'pit' | 'oil' | 'gas' | 'field' | 'meadow' | 'wood' | 'fish';
@@ -340,8 +341,7 @@ export function drawRuinOverlay(c: CanvasRenderingContext2D, ind: Industry, zoom
   c.save();
   c.translate(fp.center.x, fp.center.y);
   c.rotate(fp.angle);
-  c.beginPath();
-  c.roundRect(-fp.w / 2, -fp.h / 2, fp.w, fp.h, 3);
+  industrySitePath(c, ind.info, fp.w, fp.h);
   c.clip();
   // Краски сошли: серо-бурая вуаль.
   c.fillStyle = 'rgba(128,118,100,0.5)';
@@ -395,17 +395,17 @@ export function drawSiteArt(c: CanvasRenderingContext2D, ind: Industry, zoom: nu
   c.rotate(fp.angle);
   // Площадка: утоптанная земля, разметка углов и пунктир по периметру.
   c.fillStyle = '#c9b48f';
-  c.beginPath();
-  c.roundRect(-W / 2, -H / 2, W, H, 3);
+  industrySitePath(c, ind.info, W, H);
   c.fill();
   c.setLineDash([5, 4]);
   c.strokeStyle = 'rgba(255,255,255,0.85)';
   c.lineWidth = 1.2;
   c.stroke();
   c.setLineDash([]);
+  c.clip();
   // Котлован — под тем, что ещё не построено.
   const edge = -W / 2 + W * done;
-  if (done < 1) {
+  if (edge + 10 < W / 2) {
     c.fillStyle = '#a88c63';
     c.fillRect(edge + 4, -H * 0.32, W / 2 - edge - 10, H * 0.64);
     if (near) {
