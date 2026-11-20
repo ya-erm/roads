@@ -54,7 +54,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
       arrived = driving && v.simId === null;
     }
     expect(arrived).toBe(true);
-    // Пост уже за ним и окрашен в цвет линии, но грузовик ещё у края площадки, с зерном, денег пока нет.
+    // Пост уже закреплён за грузовиком, но он только трогается от линии ожидания, с зерном и без оплаты.
     expect(v.state).toBe('loading');
     expect(v.enter).toBeDefined();
     expect(plant.occupied).toContain(v.id);
@@ -65,17 +65,17 @@ describe('Экономика', { timeout: 60_000 }, () => {
     expect(game.inFootprint(look.pos, plant.fp)).toBe(false);
     const r0 = line.revenueTotal;
     let entering = 0;
-    let inside = false;
+    let inYard = 0;
     while (v.enter && entering < 10) {
-      inside = game.inFootprint(game.fleetLook(v)!.pos, plant.fp);
+      if (game.inFootprint(game.fleetLook(v)!.pos, plant.fp)) inYard += 0.1;
       expect(line.revenueTotal).toBe(r0);
       game.update(0.1);
       entering += 0.1;
     }
-    // Заезд — не мгновенно, но и не долго; доехал до поста под навесом.
-    expect(entering).toBeGreaterThan(1);
-    expect(entering).toBeLessThan(5);
-    expect(inside).toBe(true);
+    expect(entering).toBeGreaterThan(inYard);
+    expect(entering).toBeLessThan(9);
+    expect(inYard).toBeGreaterThan(1);
+    expect(inYard).toBeLessThan(5);
     // На посту: зерно сдано и оплачено, дальше обычная погрузка и отправление.
     expect(line.revenueTotal).toBeGreaterThan(r0);
     expect(v.cargo).not.toBe('grain');
