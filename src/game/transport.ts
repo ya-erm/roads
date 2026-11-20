@@ -1,4 +1,4 @@
-import { MONTH_LENGTH, MONTH_SCALE, TERM_SCALE } from '../config';
+import { MONTH_LENGTH, MONTH_SCALE, STATION, TERM_SCALE } from '../config';
 import { clamp } from '../core/math';
 import { add, cubicBezier, dist, dot, norm, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { TrainSpec } from '../sim/rail';
@@ -435,6 +435,8 @@ export interface BayEntry {
   dir: Vec;
   v0: number;
   t: number;
+  /** Заезд к посту по внешнему краю двора. */
+  outer?: true;
 }
 
 /** Нос и курс машины. */
@@ -443,19 +445,20 @@ export interface Pose {
   dir: Vec;
 }
 
-/** В открытом дворе пост занимает одну полосу, остальное пространство остаётся для манёвров. */
+/** В открытом дворе посты сгруппированы напротив въезда. Ширина двора нужна для склада и проезда. */
 export function baySlot(width: number, bays: number, bay: number, open = false): { x: number; w: number } {
-  const step = (width - 10) / bays;
+  const available = (width - 10) / bays;
+  const step = open ? Math.min(available, STATION.bayWidth) : available;
   const w = open ? Math.min(LANE_W, step - 2) : step - 2;
-  return { x: -width / 2 + 4 + (bay + 0.5) * step - w / 2, w };
+  return { x: -1 + (bay - (bays - 1) / 2) * step - w / 2, w };
 }
 
 export const OPEN_BAY_REAR = -2;
 export const openBayEnd = (depth: number): number => Math.min(depth / 2, OPEN_BAY_REAR + LONGEST_BUS + 2);
 
 /** Середина поста bay по ширине площадки, от её центра (как на рисунке станции). */
-function bayX(fp: Footprint, bays: number, bay: number): number {
-  const { x, w } = baySlot(fp.w, bays, bay);
+function bayX(fp: Footprint, bays: number, bay: number, open: boolean): number {
+  const { x, w } = baySlot(fp.w, bays, bay, open);
   return x + w / 2;
 }
 
@@ -466,7 +469,7 @@ export function bayBox(fp: Footprint, bays: number, bay: number, front: 1 | -1 =
   const rear = open ? OPEN_BAY_REAR : -1;
   const end = open ? openBayEnd(fp.h) : fp.h / 2;
   const { w } = baySlot(fp.w, bays, bay, open);
-  return { center: add(fp.center, add(scale(u, bayX(fp, bays, bay)), scale(n, (end + rear) / 2))), w, h: end - rear, angle: fp.angle };
+  return { center: add(fp.center, add(scale(u, bayX(fp, bays, bay, open)), scale(n, (end + rear) / 2))), w, h: end - rear, angle: fp.angle };
 }
 
 /**
@@ -482,11 +485,11 @@ export function bayFront(fp: Footprint, gate: Vec): 1 | -1 {
  * Пост погрузки автостанции: куда встаёт нос машины длиной length и куда она смотрит.
  * Выезд — со стороны front площадки (см. bayFront), машина заезжает вглубь, целиком под навес.
  */
-export function bayPose(fp: Footprint, bays: number, bay: number, length: number, front: 1 | -1 = 1): Pose {
+export function bayPose(fp: Footprint, bays: number, bay: number, length: number, front: 1 | -1 = 1, open = false): Pose {
   const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
   const n = { x: -u.y * front, y: u.x * front };
   const y = clamp(fp.h / 2 - length - 0.5, -fp.h / 2 + 1, -1);
-  return { pos: add(fp.center, add(scale(u, bayX(fp, bays, bay)), scale(n, y))), dir: scale(n, -1) };
+  return { pos: add(fp.center, add(scale(u, bayX(fp, bays, bay, open)), scale(n, y))), dir: scale(n, -1) };
 }
 
 /**
@@ -508,11 +511,11 @@ export function stopBerth(fp: Footprint, road: Vec | undefined, i: number, count
 const STOP_CURB = 2;
 
 /** Свободный пост, ближайший к точке p: машина сворачивает к ближнему. Свободных нет — следующий номер за последним. */
-export function nearestBay(fp: Footprint, bays: number, taken: Set<number>, p: Vec): number {
+export function nearestBay(fp: Footprint, bays: number, taken: Set<number>, p: Vec, open = false): number {
   const x = dot(sub(p, fp.center), { x: Math.cos(fp.angle), y: Math.sin(fp.angle) });
   let best = -1;
   for (let i = 0; i < bays; i++) {
-    if (!taken.has(i) && (best < 0 || Math.abs(bayX(fp, bays, i) - x) < Math.abs(bayX(fp, bays, best) - x))) best = i;
+    if (!taken.has(i) && (best < 0 || Math.abs(bayX(fp, bays, i, open) - x) < Math.abs(bayX(fp, bays, best, open) - x))) best = i;
   }
   if (best >= 0) return best;
   let i = bays;

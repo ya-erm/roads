@@ -213,7 +213,7 @@ import {
   Pose,
   stopBerth,
 } from './transport';
-import { yardEntryPose, yardExitPose, type YardPose } from './yardManeuver';
+import { yardEntryMotion, yardExitMotion, yardPathsConflict, type YardMotion, type YardPose } from './yardManeuver';
 import { additionalStationGates, stationGatePoints, stationRoadFront } from './stationAccess';
 
 export type StationKind = Station['kind'];
@@ -947,8 +947,7 @@ export class Game implements BuildContext {
   private jamClock = 0;
   /** Советнику: с какого времени машина ждёт просвет на выездной полосе. */
   private readonly readyAt = new Map<number, number>();
-  /** Двор освобождается после заезда: уже готовая машина получает следующий манёвр. */
-  private readonly yardDepartureReady = new Set<number>();
+  private readonly yardEntryRetry = new WeakMap<Vehicle, number>();
   private readonly bayWaitSince = new Map<number, number>();
   /** Прикидка времени круга линии, пока его не измерили по рейсам: когда считали и сколько вышло. */
   private readonly lapGuess = new Map<number, { at: number; lap: number | null }>();
@@ -1585,8 +1584,8 @@ export class Game implements BuildContext {
   roadStationAnchors(p: Vec, radius: number, net = this.roads.net): (Anchor & { kind: 'free' })[] {
     return this.index.near(p, radius + 12).flatMap((st) => {
       if (st.type !== 'station') return [];
-      return stationGatePoints(st, net).filter(({ pos }) => dist(pos, p) <= radius).map(({ pos, outward }) => ({
-        kind: 'free' as const, pos, level: 0, stationGate: { id: st.id, outward },
+      return stationGatePoints(st, net).filter(({ pos }) => dist(pos, p) <= radius).map(({ pos, outward, side }) => ({
+        kind: 'free' as const, pos, level: 0, stationGate: { id: st.id, outward, side },
       }));
     });
   }
@@ -6482,7 +6481,6 @@ export class Game implements BuildContext {
   }
 
   private updateFleet(dt: number): void {
-    this.yardDepartureReady.clear();
     for (const v of this.fleet.values()) {
       const line = this.lines.get(v.lineId);
       if (!line) continue;
@@ -6598,12 +6596,14 @@ export class Game implements BuildContext {
           this.waitForStationExit(v);
           continue;
         }
-        if (from.occupied.some((id) => id !== v.id && (this.fleet.get(id)?.enter || this.fleet.get(id)?.yardExit))) {
-          this.readyAt.delete(v.id);
-          this.yardDepartureReady.add(from.id);
-          continue;
-        }
         if (!v.yardExit || v.yardExit.station !== from.id || dist(v.yardExit.road.pos, start.pos) > 0.1 || dot(v.yardExit.road.dir, start.dir) < 0.999) {
+          const parked = this.stationBayPose(from, Math.min(v.bay ?? 0, from.bays - 1), model.spec.length);
+          const motion = yardExitMotion(parked, start, model.spec, from.fp);
+          if (this.yardMotions(from, v.id).some((other) => yardPathsConflict({ pose: (t) => motion(t * 1.4), spec: model.spec, parks: false }, other))) {
+            this.readyAt.delete(v.id);
+            v.timer = 0.15;
+            continue;
+          }
           v.yardExit = { station: from.id, target: to.id, next: nextIdx, road: { pos: start.pos, dir: start.dir }, t: 0 };
         }
         // Счётчик задаёт положение на траектории и сохраняется в партии. Ускоряем сам ход манёвра.
@@ -7126,10 +7126,53 @@ export class Game implements BuildContext {
     }
     this.bayWaitSince.delete(v.id);
     const yard = st?.kind === 'road' && st.industryId !== null && !st.curb;
-    return !yard || (!this.yardDepartureReady.has(st.id) && !st.occupied.some((id) => {
-      const parked = this.fleet.get(id);
-      return parked?.enter || parked?.yardExit;
-    }));
+    return !yard || this.reserveYardEntry(st, v, sim);
+  }
+
+  private reserveYardEntry(st: Station, v: FleetVehicle, sim: Vehicle): boolean {
+    if (this.time < (this.yardEntryRetry.get(sim) ?? 0)) return false;
+    const spec = MODELS[v.model];
+    if (spec.mode !== 'road') return false;
+    const taken = new Set(st.occupied.map((id) => this.fleet.get(id)?.bay));
+    const free = Array.from({ length: st.bays }, (_, i) => i).filter((i) => !taken.has(i))
+      .map((i) => ({ i, to: this.stationBayPose(st, i, spec.spec.length) }))
+      .sort((a, b) => dist(sim.pos, a.to.pos) - dist(sim.pos, b.to.pos));
+    const busy = this.yardMotions(st, v.id);
+    for (const { i, to } of free) {
+      for (const outer of [undefined, true] as const) {
+        const entry = { pos: { ...sim.pos }, dir: { ...sim.dir }, v0: sim.v, t: 0, outer };
+        const motion = { pose: yardEntryMotion(entry, to, spec.spec), spec: spec.spec, parks: true };
+        if (busy.some((other) => yardPathsConflict(motion, other))) continue;
+        v.bay = i;
+        v.enter = entry;
+        return true;
+      }
+    }
+    this.yardEntryRetry.set(sim, this.time + 0.15);
+    return false;
+  }
+
+  private yardMotions(st: Station, except: number): YardMotion[] {
+    const motions: YardMotion[] = [];
+    for (const id of st.occupied) {
+      if (id === except) continue;
+      const v = this.fleet.get(id);
+      if (!v || (!v.enter && !v.yardExit)) continue;
+      const model = MODELS[v.model];
+      if (model.mode !== 'road') continue;
+      const to = this.stationBayPose(st, Math.min(v.bay ?? 0, st.bays - 1), model.spec.length);
+      if (v.enter) {
+        const motion = yardEntryMotion(v.enter, to, model.spec);
+        const elapsed = v.enter.t;
+        motions.push({ pose: (t) => motion(elapsed + t), spec: model.spec, parks: true });
+      } else if (v.yardExit) {
+        const motion = yardExitMotion(to, v.yardExit.road, model.spec, st.fp);
+        const elapsed = v.yardExit.t;
+        // В конце машина может ещё ждать просвет на полосе: её корму считаем занятой до передачи потоку.
+        motions.push({ pose: (t) => motion(elapsed + t * 1.4), spec: model.spec, parks: true });
+      }
+    }
+    return motions;
   }
 
   /** Сколько секунд машина погрузилась и не может выехать со станции (выезд занят); 0 — не ждёт. */
@@ -7261,14 +7304,14 @@ export class Game implements BuildContext {
       this.dockMissed(v, st, line);
       return;
     }
-    const bay = st.kind === 'road' ? this.freeBay(st, sim.pos) : undefined;
+    const bay = st.kind === 'road' ? (v.enter ? v.bay : this.freeBay(st, sim.pos)) : undefined;
     st.occupied.push(v.id);
     v.inBay = true;
     v.state = 'loading';
     if (bay !== undefined) {
       // Автостанция: из тупика выезда машина заезжает на свободный пост (он уже за ней), там и выгрузится.
       v.bay = bay;
-      v.enter = { pos: { ...sim.pos }, dir: { ...sim.dir }, v0: sim.v, t: 0 };
+      v.enter ??= { pos: { ...sim.pos }, dir: { ...sim.dir }, v0: sim.v, t: 0 };
       return;
     }
     this.handleStop(v, st, line);
@@ -7281,7 +7324,7 @@ export class Game implements BuildContext {
       const bay = this.fleet.get(id)?.bay;
       if (bay !== undefined) taken.add(bay);
     }
-    return nearestBay(this.bayArea(st), st.bays, taken, p);
+    return nearestBay(this.bayArea(st), st.bays, taken, p, st.industryId !== null);
   }
 
   /** Заезд на пост: доехала — выгружается и начинает погрузку. */
@@ -12384,14 +12427,14 @@ export class Game implements BuildContext {
     const st = line && this.stations.get(line.stops[v.stop]);
     if (!v.enter || !st || m.mode !== 'road') return null;
     const to = this.stationBayPose(st, Math.min(v.bay ?? 0, st.bays - 1), m.spec.length);
-    if (st.industryId !== null) return yardEntryPose(v.enter, to, m.spec);
+    if (st.industryId !== null) return yardEntryMotion(v.enter, to, m.spec)(v.enter.t);
     // По площадке станции — прямо, носом к зданию (между перронами, в бокс): от края площадки до поста.
     const run = st.fp.h / 2 + dot(sub(to.pos, st.fp.center), to.dir);
     return entryPose(v.enter, to, m.spec.length, run);
   }
 
   private stationBayPose(st: Station, bay: number, length: number): Pose {
-    return bayPose(this.bayArea(st), st.bays, bay, length, stationRoadFront(st, this.roads.net));
+    return bayPose(this.bayArea(st), st.bays, bay, length, stationRoadFront(st, this.roads.net), st.industryId !== null);
   }
 
   private yardExitPose(v: FleetVehicle): YardPose | null {
@@ -12400,7 +12443,7 @@ export class Game implements BuildContext {
     const m = MODELS[v.model];
     if (!move || !st || m.mode !== 'road') return null;
     const parked = this.stationBayPose(st, Math.min(v.bay ?? 0, st.bays - 1), m.spec.length);
-    return yardExitPose(parked, move.road, m.spec, st.fp, move.t);
+    return yardExitMotion(parked, move.road, m.spec, st.fp)(move.t);
   }
 
   /** Машина компании на виду: на дороге — из движения, на заезде — по пути к посту. */

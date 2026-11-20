@@ -6,7 +6,7 @@ import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
 import { Art, shade } from './industryArt';
 import { cargoShape } from './industryCargoArt';
-import { type Circuit, paintTransferTruck } from './industryEquipment';
+import { paintTransferTruck } from './industryEquipment';
 import { drawIndustrialGate, drawIndustrialRoads, industryRoadSurface } from './industryRoadArt';
 
 export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station, ind?: Industry): void {
@@ -126,17 +126,7 @@ export function drawIndustryHaulConnection(c: CanvasRenderingContext2D, st: Stat
   drawIndustrialGate(c, gate.x, gate.y, st.fp.angle + Math.PI / 2);
 }
 
-const circuits = new WeakMap<readonly Vec[], Circuit>();
-
 /** Клиенты на улице и техника технологического двора используют разные проезды. */
 export function drawIndustryTransfer(c: CanvasRenderingContext2D, ind: Industry, work: IndustryHaulView): void {
-  for (const trip of work.trips) {
-    if (!trip.path || trip.path.length < 2) continue;
-    let circuit = circuits.get(trip.path);
-    if (!circuit) {
-      circuit = trip.path.map(({ x, y }) => [x, y]);
-      circuits.set(trip.path, circuit);
-    }
-    paintTransferTruck(c, circuit, trip, ind.info.kind);
-  }
+  for (const trip of work.trips) paintTransferTruck(c, trip, ind.info.kind);
 }

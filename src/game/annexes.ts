@@ -42,7 +42,7 @@ export function annexCost(a: Annex): number {
 }
 
 export function industryRoadCost(fp: Footprint): number {
-  return Math.round((fp.w - INDUSTRY_ROAD_WIDTH) * ROAD_COST_PER_METER);
+  return Math.round((fp.w - fp.h) * ROAD_COST_PER_METER);
 }
 
 /** Докуда от центра предприятия можно ставить пристройки. */

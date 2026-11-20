@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { add, scale } from '../core/vec';
 import { ProjectTools, type DrawSettings } from '../input/projecttools';
 import { RoadTools } from '../input/roadtools';
 import { Game } from './game';
@@ -6,6 +7,32 @@ import { stationGatePoints } from './stationAccess';
 import { fieldSpot, freshGame, road, runUntil, withoutCitizens } from './testkit';
 
 describe('Отдельные подъезды автостанции', () => {
+  it('проект дороги подключает двухсторонний подъезд с торца грузового двора', () => {
+    const game = withoutCitizens(freshGame(42));
+    game.money = 5_000_000;
+    const p = fieldSpot(game, 480);
+    expect(road(game, { free: p }, { free: { x: p.x + 480, y: p.y } })).toBe(true);
+    const yard = game.placeStation({ x: p.x + 215, y: p.y - 38 }, 14)!;
+    expect(yard).toBeTruthy();
+    yard.industryId = game.industries[0].id;
+    const gate = stationGatePoints(yard, game.roads.net).find((point) => point.side === 1)!;
+    expect(gate).toBeTruthy();
+    const draw: DrawSettings = { kind: 'road', spec: { cls: 'street', lanesF: 1, lanesB: 1 }, mode: 'straight', level: 0, auto: false, reverse: false };
+    const planner = new ProjectTools(() => game);
+    for (const pos of [add(gate.pos, scale(gate.outward, 75)), gate.pos]) {
+      planner.down('road', pos, 8, 4);
+      planner.up(draw, pos, 8, false, false);
+    }
+    expect(planner.build('road')).toBeNull();
+
+    const loaded = new Game(game.settings, structuredClone(game.toSave()));
+    const st = loaded.stations.get(yard.id)!;
+    const side = loaded.stationRoadNodes(st).find((id) => loaded.roads.net.nodes.get(id)?.stationGateSide === 1)!;
+    expect(loaded.roads.graph.inLinks.has(side)).toBe(true);
+    expect(loaded.roads.graph.outLinks.has(side)).toBe(true);
+    expect(stationGatePoints(st, loaded.roads.net).filter((point) => point.side).map((point) => point.side)).toEqual([-1]);
+  });
+
   it.each([false, true])('грузовик въезжает и выезжает через разные узлы (проект: %s)', (project) => {
     const game = withoutCitizens(freshGame(42));
     game.money = 5_000_000;

@@ -1,7 +1,8 @@
 import { CurveLUT } from '../core/bezier';
 import { clamp } from '../core/math';
 import { add, dist, dot, norm, rightNormal, scale, sub } from '../core/vec';
-import { hitchOf, jointOf, steerBase } from '../sim/body';
+import { boxesOverlap } from '../lanes/curb';
+import { hitchOf, jointOf, steerBase, vehicleBoxes } from '../sim/body';
 import type { VehicleSpec } from '../sim/vehicle';
 import type { Footprint } from '../world/spatial';
 import type { BayEntry, Pose } from './transport';
@@ -11,7 +12,7 @@ export interface YardPose extends Pose {
   done: boolean;
 }
 
-function axleCurve(from: Pose, to: Pose, spec: VehicleSpec): CurveLUT {
+function axleCurve(from: Pose, to: Pose, spec: VehicleSpec, intoBay = false, outer = false): CurveLUT {
   const base = spec.length * steerBase(spec.body);
   const a = sub(from.pos, scale(from.dir, base));
   const b = sub(to.pos, scale(to.dir, base));
@@ -19,10 +20,14 @@ function axleCurve(from: Pose, to: Pose, spec: VehicleSpec): CurveLUT {
   const handle = Math.max(1, dist(a, b) / 3);
   const turning = dot(from.dir, to.dir) < 0.8;
   const reach = (dir: Pose['dir']) => turning ? handle : Math.min(handle, Math.max(1, dot(delta, dir) * 0.44));
+  const depth = Math.max(1, dot(delta, to.dir));
+  // Сдвиг вбок — до ряда припаркованных машин: в последние метры тягач входит почти прямо.
+  const lead = intoBay && !turning ? Math.min(handle, depth * (outer ? 0.10 : 0.2)) : reach(from.dir);
+  const finish = intoBay ? Math.max(reach(to.dir), depth * (outer ? 0.98 : 0.78)) : reach(to.dir);
   return new CurveLUT({
     p0: a,
-    p1: add(a, scale(from.dir, reach(from.dir))),
-    p2: sub(b, scale(to.dir, reach(to.dir))),
+    p1: add(a, scale(from.dir, lead)),
+    p2: sub(b, scale(to.dir, finish)),
     p3: b,
   });
 }
@@ -49,14 +54,22 @@ function yardLeg(curve: CurveLUT, from: Pose, to: Pose, spec: VehicleSpec, t: nu
   return { pos, dir, trail: sub(joint, scale(trailerDir, tail)), done: false };
 }
 
-export function yardEntryPose(entry: BayEntry, to: Pose, spec: VehicleSpec): YardPose {
+export function yardEntryMotion(entry: BayEntry, to: Pose, spec: VehicleSpec): (t: number) => YardPose {
   const lateral = Math.abs(dot(sub(to.pos, entry.pos), rightNormal(to.dir)));
-  const speed = Math.max(5.5, 8 - lateral * 0.1);
-  return yardLeg(axleCurve(entry, to, spec), entry, to, spec, entry.t, speed, entry.v0);
+  const fromSide = Math.abs(dot(entry.dir, to.dir)) < 0.55;
+  const straight = fromSide ? Math.max(0, dot(sub(to.pos, entry.pos), entry.dir) - 16) : 0;
+  const turn = { pos: add(entry.pos, scale(entry.dir, straight)), dir: entry.dir };
+  const approach = straight > 0 ? axleCurve(entry, turn, spec) : null;
+  const turnStart = approach ? Math.max(0.8, approach.length / 8) : 0;
+  const finish = axleCurve(turn, to, spec, true, entry.outer);
+  const speed = fromSide ? 8 : Math.max(5.5, 8 - lateral * 0.1);
+  return (t) => approach && t < turnStart
+    ? { ...yardLeg(approach, entry, turn, spec, t, 8, entry.v0, 8), done: false }
+    : yardLeg(finish, turn, to, spec, t - turnStart, speed, approach ? 8 : entry.v0);
 }
 
 /** Задним ходом в маневровый проезд, остановка и поворот вперёд к выезду. */
-export function yardExitPose(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, t: number): YardPose {
+export function yardExitMotion(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint): (t: number) => YardPose {
   const out = scale(parked.dir, -1);
   const across = rightNormal(out);
   const delta = sub(road.pos, parked.pos);
@@ -64,19 +77,42 @@ export function yardExitPose(parked: Pose, road: Pose, spec: VehicleSpec, yard: 
   const side = scale(across, Math.sign(lateral) || 1);
   const base = spec.length * steerBase(spec.body);
   const depth = dot(delta, out);
-  const dir = norm(add(side, scale(parked.dir, 0.16)));
+  const viaSide = Math.abs(dot(road.dir, out)) < 0.55 && Math.abs(lateral) > yard.w / 2 - 10;
+  const dir = viaSide ? side : norm(add(side, scale(parked.dir, 0.16)));
   const sideRoom = yard.w / 2 + dot(sub(parked.pos, yard.center), side);
   const swing = Math.min(Math.max(2.5, 14 - Math.abs(lateral)), sideRoom - (spec.length - base) - spec.width / 2 - 1);
-  const axle = add(parked.pos, add(scale(out, Math.max(base + 6, depth - base - 12)), scale(side, -swing)));
+  const turnDepth = Math.max(base + 6, depth - (viaSide ? 3 : base + 12));
+  const axle = add(parked.pos, add(scale(out, turnDepth), scale(side, -swing)));
   const turn = { pos: add(axle, scale(dir, base)), dir };
   // Для заднего хода проигрываем путь к посту в обратном порядке. Тягач и прицеп остаются сцеплены.
-  const reverse = axleCurve(turn, parked, spec);
+  const reverse = axleCurve(turn, parked, spec, viaSide);
   const pace = clamp(yard.h / 52, 0.62, 1);
   const reverseSpeed = 2.5 * pace;
   const seconds = Math.max(0.8, reverse.length / reverseSpeed);
-  if (t < seconds) {
-    const back = yardLeg(reverse, turn, parked, spec, seconds - t, reverseSpeed);
-    return { ...back, done: false };
+  const forward = axleCurve(turn, road, spec);
+  return (t) => t < seconds
+    ? { ...yardLeg(reverse, turn, parked, spec, seconds - t, reverseSpeed), done: false }
+    : yardLeg(forward, turn, road, spec, t - seconds, 3.7 * pace, 0, 3);
+}
+
+export interface YardMotion {
+  pose(t: number): YardPose;
+  spec: VehicleSpec;
+  /** Машина остаётся на посту или у выезда до передачи потоку. */
+  parks: boolean;
+}
+
+/** Прогноз габаритов тягачей и прицепов. Проверяем оставшуюся часть обоих манёвров. */
+export function yardPathsConflict(a: YardMotion, b: YardMotion): boolean {
+  const body = (p: YardPose, s: VehicleSpec) => vehicleBoxes(p.pos, p.dir, s.length, s.width + 0.8, s.body, p.trail);
+  for (let t = 0; t < 120; t += 0.15) {
+    const x = a.pose(t);
+    const y = b.pose(t);
+    if (dist(x.pos, y.pos) <= a.spec.length + b.spec.length + 2) {
+      const other = body(y, b.spec);
+      if (body(x, a.spec).some((part) => other.some((box) => boxesOverlap(part, box)))) return true;
+    }
+    if ((x.done && !a.parks) || (y.done && !b.parks) || (x.done && y.done)) return false;
   }
-  return yardLeg(axleCurve(turn, road, spec), turn, road, spec, t - seconds, 3.7 * pace, 0, 3);
+  return true;
 }

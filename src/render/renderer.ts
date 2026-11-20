@@ -3912,8 +3912,20 @@ export class Renderer {
         const [left, right] = edgesAt(road, s) ?? [-LANE_W / 2, LANE_W / 2];
         const a = add(pointOff(road, s, left - ROAD_MARGIN), scale(end.away, 0.7));
         const b = add(pointOff(road, s, right + ROAD_MARGIN), scale(end.away, 0.7));
-        const atEdge = (p: Vec) => add(nearEdge, scale(u, clamp(dot(sub(p, fp.center), u), -fp.w / 2 + 1, fp.w / 2 - 1)));
+        const side = gate.stationGateSide;
+        const atEdge = (p: Vec) => side
+          ? add(add(fp.center, scale(u, side * (fp.w / 2 - 1))), scale(v, dot(sub(p, fp.center), v)))
+          : add(nearEdge, scale(u, clamp(dot(sub(p, fp.center), u), -fp.w / 2 + 1, fp.w / 2 - 1)));
         ctx.fillStyle = C.road;
+        if (side) {
+          const depth = Math.max(dot(sub(a, nearEdge), v), dot(sub(b, nearEdge), v));
+          ctx.save();
+          ctx.translate(nearEdge.x, nearEdge.y);
+          ctx.rotate(fp.angle);
+          ctx.scale(1, front);
+          ctx.fillRect(-fp.w / 2, 0, fp.w, depth);
+          ctx.restore();
+        }
         ctx.beginPath();
         this.polyline([a, b, atEdge(b), atEdge(a)]);
         ctx.closePath();

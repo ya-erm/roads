@@ -1,7 +1,9 @@
 import { clamp } from '../core/math';
-import { dist, type Vec } from '../core/vec';
+import type { Vec } from '../core/vec';
+import { boxesOverlap, type Box } from '../lanes/curb';
 import type { CargoType } from '../world/cargo';
 import type { Station } from '../world/entities';
+import { roadMetric, roadPose, type Circuit, type WorkVehiclePose } from '../world/industryRoad';
 
 export type HaulDirection = 'in' | 'out';
 type CargoAmounts = Partial<Record<CargoType, number>>;
@@ -18,6 +20,8 @@ interface Trip extends Load {
   at: number;
   travel: number;
   path?: readonly Vec[];
+  route?: Circuit;
+  timeline?: number[];
 }
 
 interface Yard {
@@ -37,7 +41,7 @@ export interface IndustryHaulTrip {
   /** Положение от источника груза до получателя, от 0 до 1. */
   progress: number;
   fill: number;
-  turn: number;
+  pose?: WorkVehiclePose;
 }
 
 export interface IndustryHaulView {
@@ -50,7 +54,85 @@ const DWELL = 1.7;
 const CAPACITY = 16;
 const TRUCKS = 4;
 const HEADWAY = 3;
-const tripEnd = (trip: Trip): number => trip.at + 2 * (trip.travel + DWELL);
+const STEP = 0.05;
+const LANE_OFFSET = 2.25;
+const tripDuration = (trip: Trip): number => 2 * (trip.travel + DWELL);
+const tripEnd = (trip: Trip): number => trip.at + (trip.timeline ? (trip.timeline.length - 1) * STEP : tripDuration(trip));
+
+/** Время движения, без пауз перед пересекающим проезд транспортом. */
+function tripClock(trip: Trip, time: number): number {
+  const elapsed = Math.max(0, time - trip.at);
+  const timeline = trip.timeline;
+  if (!timeline) return elapsed;
+  const step = elapsed / STEP;
+  const i = Math.floor(step);
+  if (i >= timeline.length - 1) return timeline[timeline.length - 1];
+  return timeline[i] + (timeline[i + 1] - timeline[i]) * (step - i);
+}
+
+function tripProgress(trip: Trip, elapsed: number) {
+  const loading = clamp(elapsed / DWELL, 0, 1);
+  const unloading = clamp((elapsed - DWELL - trip.travel) / DWELL, 0, 1);
+  const carrying = clamp((elapsed - DWELL) / trip.travel, 0, 1);
+  const returning = clamp((elapsed - 2 * DWELL - trip.travel) / trip.travel, 0, 1);
+  const phase = loading < 1 ? 'loading' : carrying < 1 ? 'carrying' : unloading < 1 ? 'unloading' : 'returning';
+  const turn = clamp((unloading - 0.62) / 0.38, 0, 1);
+  const progress = carrying - returning;
+  let pose: WorkVehiclePose | undefined;
+  if (trip.route) {
+    const outbound = trip.direction === 'out';
+    const [x, y, heading] = roadPose(trip.route, outbound ? progress : 1 - progress, outbound !== (phase === 'returning'));
+    const yaw = heading + (phase === 'unloading' ? Math.PI * turn : 0);
+    pose = [x - Math.sin(yaw) * LANE_OFFSET, y + Math.cos(yaw) * LANE_OFFSET, yaw, true];
+  }
+  return { phase, progress, loading, unloading, pose } as const;
+}
+
+/** Габарит крупнейшей машины с небольшим запасом по бокам. */
+export function industryHaulBox([x, y, angle]: WorkVehiclePose): Box {
+  return { c: { x, y }, d: { x: Math.cos(angle), y: Math.sin(angle) }, hl: 3.9, hw: 2.0 };
+}
+
+function conflicting(at: Box, others: Box[]): boolean {
+  return others.some((o) => Math.abs(o.c.x - at.c.x) < 9 && Math.abs(o.c.y - at.c.y) < 9 && boxesOverlap(at, o));
+}
+
+/** Уже выехавшие имеют приоритет. Новый рейс ждёт перед пересечением или позже трогается с площадки. */
+function planTrip(trip: Trip, active: Trip[]): number[] | undefined | null {
+  const others = active.filter((o) => o.route && tripEnd(o) > trip.at);
+  if (!trip.route || !others.length) return undefined;
+  const guardedBox = (pose: WorkVehiclePose): Box => {
+    const box = industryHaulBox(pose);
+    return { ...box, hl: box.hl + 0.3, hw: box.hw + 0.15 };
+  };
+  const poseAt = (elapsed: number) => guardedBox(tripProgress(trip, elapsed).pose!);
+  let previous = poseAt(0);
+  const duration = tripDuration(trip);
+  const clearAt = Math.max(...others.map(tripEnd));
+  const timeline = [0];
+  let elapsed = 0;
+  for (let i = 0; trip.at + i * STEP <= clearAt; i++) {
+    const time = trip.at + i * STEP;
+    const traffic = others.filter((o) => time < tripEnd(o)).map((o) => guardedBox(tripProgress(o, tripClock(o, time)).pose!));
+    if (!i) {
+      if (conflicting(previous, traffic)) return null;
+      continue;
+    }
+    const next = Math.min(duration, elapsed + STEP);
+    const box = poseAt(next);
+    if (!conflicting(box, traffic)) {
+      previous = box;
+      elapsed = next;
+    } else if (conflicting(previous, traffic)) return null;
+    timeline.push(elapsed);
+    if (elapsed >= duration) return timeline;
+  }
+  while (elapsed < duration) {
+    elapsed = Math.min(duration, elapsed + STEP);
+    timeline.push(elapsed);
+  }
+  return timeline;
+}
 
 /** Хронология фактических поставок для рисунка двора. Запасы и расчёты перевозок хранятся в игре. */
 export class IndustryHaul {
@@ -64,7 +146,7 @@ export class IndustryHaul {
       this.yards.set(st, yard);
     }
     this.advance(st, yard, time);
-    const trip = yard.trips.find((p) => p.cargo === cargo && p.direction === direction && time - p.at < DWELL / 2);
+    const trip = yard.trips.find((p) => p.cargo === cargo && p.direction === direction && tripClock(p, time) < DWELL / 2);
     if (trip) {
       const extra = Math.min(amount, CAPACITY - trip.amount);
       trip.amount += extra;
@@ -89,11 +171,7 @@ export class IndustryHaul {
       stock[load.cargo] = (stock[load.cargo] ?? 0) + load.amount;
     }
     const trips = yard.trips.map((trip): IndustryHaulTrip => {
-      const elapsed = Math.max(0, time - trip.at);
-      const loading = clamp(elapsed / DWELL, 0, 1);
-      const unloading = clamp((elapsed - DWELL - trip.travel) / DWELL, 0, 1);
-      const carrying = clamp((elapsed - DWELL) / trip.travel, 0, 1);
-      const returning = clamp((elapsed - 2 * DWELL - trip.travel) / trip.travel, 0, 1);
+      const { phase, progress, loading, unloading, pose } = tripProgress(trip, tripClock(trip, time));
       const stock = trip.direction === 'in' ? incoming : outgoing;
       const waiting = 1 - (trip.direction === 'in' ? loading : unloading);
       stock[trip.cargo] = (stock[trip.cargo] ?? 0) + trip.amount * waiting;
@@ -102,10 +180,10 @@ export class IndustryHaul {
         path: trip.path,
         cargo: trip.cargo,
         direction: trip.direction,
-        phase: loading < 1 ? 'loading' : carrying < 1 ? 'carrying' : unloading < 1 ? 'unloading' : 'returning',
-        progress: carrying - returning,
+        phase,
+        progress,
         fill: loading * (1 - unloading) * Math.sqrt(trip.amount / CAPACITY),
-        turn: clamp((unloading - 0.62) / 0.38, 0, 1),
+        pose,
       };
     });
     return { trips, incoming, outgoing };
@@ -117,13 +195,22 @@ export class IndustryHaul {
       const at = Math.max(freesAt, yard.nextAt);
       if (at > time) break;
       yard.trips = yard.trips.filter((trip) => tripEnd(trip) > at);
-      const load = yard.waiting.shift()!;
+      const load = yard.waiting[0];
       const amount = Math.min(load.amount, CAPACITY);
-      if (amount < load.amount) yard.waiting.push({ ...load, amount: load.amount - amount });
-      const id = yard.nextId++;
+      const id = yard.nextId;
       const path = load.paths[id % load.paths.length];
-      const length = path?.reduce((total, point, i) => total + (i ? dist(path[i - 1], point) : 0), 0);
-      yard.trips.push({ ...load, id, amount, at, path, travel: length === undefined ? (st.industryAccess ? 8 : 2.4) : Math.max(2.4, length / 12) });
+      const route = path && path.length > 1 ? path.map(({ x, y }) => [x, y] as const) : undefined;
+      const travel = route ? Math.max(2.4, roadMetric(route).length / 12) : st.industryAccess ? 8 : 2.4;
+      const trip = { ...load, id, amount, at, path, route, travel };
+      const timeline = planTrip(trip, yard.trips);
+      if (timeline === null) {
+        yard.nextAt = at + 0.5;
+        continue;
+      }
+      yard.waiting.shift();
+      if (amount < load.amount) yard.waiting.push({ ...load, amount: load.amount - amount });
+      yard.nextId++;
+      yard.trips.push({ ...trip, timeline });
       yard.nextAt = at + HEADWAY;
     }
     yard.trips = yard.trips.filter((trip) => tripEnd(trip) > time);

@@ -42,11 +42,12 @@ describe('Бокс поста автостанции', () => {
     const length = 21;
     for (let i = 0; i < 5; i++) {
       const box = bayBox(fp, 5, i, -1, true);
-      const parked = bayPose(fp, 5, i, length, -1);
+      const parked = bayPose(fp, 5, i, length, -1, true);
       expect(box.w).toBe(LANE_W);
       expect(box.center.x).toBeCloseTo(parked.pos.x);
       expect(parked.pos.y).toBeLessThan(box.center.y + box.h / 2);
       expect(parked.pos.y - length).toBeGreaterThan(box.center.y - box.h / 2);
+      expect(parked.pos.x - fp.center.x).toBeCloseTo((i - 2) * STATION.bayWidth - 1);
     }
   });
 });

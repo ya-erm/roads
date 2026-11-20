@@ -32,7 +32,7 @@ export type Anchor =
   | { kind: 'node'; node: number; pos: Vec }
   | { kind: 'corridor'; corridor: number; s: number; pos: Vec }
   /** level — высота нового узла: −1 тоннель, 0 земля, 1 мост, 2 эстакада. */
-  | { kind: 'free'; pos: Vec; level?: number; stationGate?: { id: number; outward: Vec } };
+  | { kind: 'free'; pos: Vec; level?: number; stationGate?: { id: number; outward: Vec; side?: -1 | 1 } };
 
 /** Правка невозможна — причина для игрока. */
 export class EditError extends Error {}
@@ -424,7 +424,10 @@ function resolveEnd(net: LaneNet, x: Anchor, dir: Vec, start: boolean, lanes: La
   if (x.kind === 'corridor') return { node: splitCorridor(net, net.corridor(x.corridor), x.s, 'junction').node };
   // Чистое поле — тупик: стык по направлению дороги, полотно у начала спереди, у конца — сзади.
   const node = net.addSeam(x.pos, dir, x.level ?? 0);
-  if (x.stationGate) node.stationGate = x.stationGate.id;
+  if (x.stationGate) {
+    node.stationGate = x.stationGate.id;
+    if (x.stationGate.side) node.stationGateSide = x.stationGate.side;
+  }
   return { node, side: start ? 1 : -1 };
 }
 

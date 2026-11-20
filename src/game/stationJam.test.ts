@@ -52,6 +52,21 @@ describe('Очередь на въезд: когда предупреждать'
 });
 
 describe('Очередь на въезд в игре', { timeout: 60_000 }, () => {
+  it('свободный пост принимает грузовик во время другого манёвра на том же дворе', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { built, line, sB } = freightRoute(game);
+    expect(built).toBe(true);
+    game.setStopRule(line.id, 0, { ...DEFAULT_RULE, wait: 'none' });
+    game.setStopRule(line.id, 1, { ...DEFAULT_RULE, wait: 'none' });
+    for (let i = 0; i < 6; i++) expect(game.buyVehicle(line.id, 'truck')).not.toBeNull();
+
+    expect(runUntil(game, 180, () => {
+      const fleet = sB.occupied.map((id) => game.fleet.get(id)!);
+      return fleet.some((v) => v.enter) && fleet.some((v) => v.yardExit);
+    })).toBe(true);
+    expect(game.stationJam(sB)).toBe(0);
+  });
+
   it('занятый дорожный выезд не блокирует свободные посты, а сам манёвр не считается затором', () => {
     const game = withoutCitizens(freshGame(7));
     const { built, line, sA, sB } = freightRoute(game);

@@ -19,7 +19,7 @@ export interface CompoundPlan {
   branches: readonly (readonly SitePoint[])[];
 }
 
-export const INDUSTRY_ROAD_WIDTH = 7;
+export const INDUSTRY_ROAD_WIDTH = 9;
 
 function rect(kind: SectionKind, bounds: CompoundSection['bounds'], gate?: SitePoint): CompoundSection {
   return { kind, bounds, ...(gate && { gate }) };

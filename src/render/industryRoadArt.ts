@@ -1,7 +1,7 @@
 import type { IndustryKind } from '../world/cargo';
 import { INDUSTRY_ROAD_WIDTH } from '../world/industryCompound';
 import { hasFields, hasPastures, isOpenPit } from '../world/industrySites';
-import type { Circuit, WorkPoint } from './industryEquipment';
+import { industrialRoadPoints, type Circuit } from '../world/industryRoad';
 
 const INDUSTRY_ASPHALT = '#858a90';
 export const INDUSTRY_DIRT = '#bdab88';
@@ -11,28 +11,6 @@ const DIRT_SITES = new Set<IndustryKind>(['coalmine', 'goldmine', 'gemmine', 'oi
 /** Грунт у выработок, скважин и полей, светлый асфальт у остальных комплексов. */
 export function industryRoadSurface(kind?: IndustryKind): string {
   return kind && (isOpenPit(kind) || DIRT_SITES.has(kind) || hasFields(kind) || hasPastures(kind)) ? INDUSTRY_DIRT : INDUSTRY_ASPHALT;
-}
-
-/** Короткое скругление в углу, между углами — прямые отрезки. */
-export function industrialRoadPoints(route: Circuit): Circuit {
-  const result: WorkPoint[] = [route[0]];
-  for (let i = 1; i < route.length - 1; i++) {
-    const [x, y] = route[i];
-    const before = route[i - 1];
-    const after = route[i + 1];
-    const a = Math.min(0.45, 3.7 / Math.hypot(before[0] - x, before[1] - y));
-    const b = Math.min(0.45, 3.7 / Math.hypot(after[0] - x, after[1] - y));
-    const ax = (before[0] - x) * a;
-    const ay = (before[1] - y) * a;
-    const bx = (after[0] - x) * b;
-    const by = (after[1] - y) * b;
-    for (let k = 0; k <= 5; k++) {
-      const t = k / 5;
-      result.push([x + ax * (1 - t) ** 2 + bx * t * t, y + ay * (1 - t) ** 2 + by * t * t]);
-    }
-  }
-  result.push(route[route.length - 1]);
-  return result;
 }
 
 /** Вся сеть одним непрозрачным штрихом. В местах стыка сохраняется сплошное полотно. */
