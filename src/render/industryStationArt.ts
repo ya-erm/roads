@@ -4,7 +4,7 @@ import { industryServiceRoads, sitePoint } from '../world/industrySites';
 import { Art, METAL } from './industryArt';
 import type { Footprint } from '../world/spatial';
 import { type Circuit, type Equipment, paintEquipment, type WorkPoint } from './industryEquipment';
-import { drawIndustrialGate, drawIndustrialRoads } from './industryRoadArt';
+import { drawIndustrialGate, drawIndustrialRoads, industryRoadSurface } from './industryRoadArt';
 
 const BULK = new Set<CargoType>(['ore', 'copperore', 'coal', 'stone', 'sand', 'clay', 'gold', 'gems']);
 const SILO = new Set<CargoType>(['grain', 'sunflower']);
@@ -16,7 +16,7 @@ function rearRoad(st: Station): Circuit {
   return [[0, -depth - 5], [0, -depth * 0.39], [8, -depth * 0.39]];
 }
 
-export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station): void {
+export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station, ind?: Industry): void {
   const { w, h } = st.fp;
   const left = -w / 2 + 2;
   const right = w / 2 - 2;
@@ -27,7 +27,7 @@ export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station): void
   c.fillStyle = '#777c7c';
   c.fillRect(left, back + 1, -4 - left, 1.1);
   c.fillRect(4, back + 1, right - 4, 1.1);
-  drawIndustrialRoads(c, [rearRoad(st)]);
+  drawIndustrialRoads(c, [rearRoad(st)], industryRoadSurface(ind?.info.kind));
   drawIndustrialGate(c, 0, back, Math.PI / 2);
 }
 

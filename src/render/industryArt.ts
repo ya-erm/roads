@@ -6,7 +6,7 @@ import { sectionPlot } from '../world/industryCompound';
 import { farmFields, hasBulkYard, hasPowerYard, industryServiceRoads, isOpenPit } from '../world/industrySites';
 import { type Footprint, type Plot, pointInPolygon } from '../world/spatial';
 import { type Circuit, type Equipment, paintEquipment } from './industryEquipment';
-import { drawIndustrialGate, drawIndustrialRoads } from './industryRoadArt';
+import { drawIndustrialGate, drawIndustrialRoads, INDUSTRY_DIRT, industryRoadSurface } from './industryRoadArt';
 import { paintIndustrySection } from './industrySectionArt';
 import { industrySitePath, tracePlot } from './industrySite';
 
@@ -440,7 +440,7 @@ export class Art {
 
   /** Укатанный проезд внутри участка, по нему ходит техника. */
   drive(route: Circuit): void {
-    if (this.pass === 0) drawIndustrialRoads(this.c, [route]);
+    if (this.pass === 0) drawIndustrialRoads(this.c, [route], INDUSTRY_DIRT);
   }
 
   stain(x: number, y: number, rx: number, ry: number, color: string, i: number, jit = 0.2, edge?: string): void {
@@ -2411,7 +2411,7 @@ function compoundRoads(a: Art, ind: Industry): void {
   if (!ind.fp.groundParts) return;
   const { kind, w, h } = ind.info;
   const { main, branches } = industryServiceRoads(kind, ind.fp);
-  drawIndustrialRoads(a.c, [main, ...branches].map((route) => route.map(([x, y]) => [x * w, y * h])));
+  drawIndustrialRoads(a.c, [main, ...branches].map((route) => route.map(([x, y]) => [x * w, y * h])), industryRoadSurface(kind));
   if (!a.lod || !ind.fp.compound) return;
   for (const section of ind.fp.compound.sections) {
     const gate = section.gate;
