@@ -7599,6 +7599,14 @@ export class Game implements BuildContext {
     this.journal.add('lost', { v: v.id, l: v.lineId, back: line?.stops[v.stop] });
   }
 
+  removeTrafficVehicle(simId: number): boolean {
+    const sim = this.traffic.vehicles.get(simId);
+    if (!sim || this.owners.get(simId)?.type === 'fleet') return false;
+    this.traffic.remove(sim);
+    this.onLost(sim);
+    return true;
+  }
+
   private handleStop(v: FleetVehicle, st: Station, line: Line): void {
     const model = MODELS[v.model];
     let moved = 0;

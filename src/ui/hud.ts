@@ -1625,6 +1625,9 @@ export class Hud {
         c.focus(sim.pos, 1.2);
         break;
       }
+      case 'remove-traffic-vehicle':
+        if (g.removeTrafficVehicle(Number(d.id))) c.select(null);
+        break;
       case 'pair-half': {
         // Вторая половина пары остановок — её карточка (через улицу).
         if (g.stations.has(Number(d.id))) c.select({ type: 'station', id: Number(d.id) });
@@ -1892,9 +1895,11 @@ export class Hud {
         break;
       }
       case 'sell': {
-        const lineId = g.fleet.get(Number(d.id))?.lineId;
-        g.sellVehicle(Number(d.id));
+        const id = Number(d.id);
+        const lineId = g.fleet.get(id)?.lineId;
+        g.sellVehicle(id);
         if (lineId !== undefined) g.fitAutoRange(lineId);
+        if (c.selection?.type === 'fleet' && c.selection.id === id) c.select(null);
         break;
       }
       case 'line-auto':
@@ -3954,6 +3959,7 @@ export class Hud {
     const sim = g.traffic.vehicles.get(sel.simId);
     if (!sim) return `<section class="detail">${head('Машина')}<p class="muted">Доехала.</p></section>`;
     const speed = Math.round(sim.v * KMH_PER_UNIT);
+    const remove = `<button class="small danger" data-action="remove-traffic-vehicle" data-id="${sim.id}">Убрать машину</button>`;
     // Самосвал строительной бригады: чья, куда едет и что строит.
     const crew = g.crewOfSim(sim.id);
     if (crew !== undefined) {
@@ -3962,7 +3968,7 @@ export class Hud {
       const n = b ? g.construction.crews.of(b.base).indexOf(b) + 1 : 0;
       return `<section class="detail">${head(`🚚 Строительная бригада${n ? ` ${n}` : ''}`, b ? `база «${esc(g.baseName(b.base))}»` : undefined)}
       <div class="kv near"><span>Сейчас</span><b>${esc(where?.text ?? '')}</b>${trafficActivityHtml(g, sim)}<span>Скорость</span><b>${speed} км/ч</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
-      <div class="actions">${follow}</div></section>`;
+      <div class="actions">${follow}${remove}</div></section>`;
     }
     // Спецмашина города: скорая, полиция, пожарная — с мигалкой или без.
     const service = g.serviceOfSim(sim.id);
@@ -3971,12 +3977,12 @@ export class Hud {
       return `<section class="detail">${head(`${info.icon} ${info.name}`, sim.siren ? '🚨 С мигалкой — ей уступают дорогу' : 'Без мигалки')}
       ${carTripHtml(g, sim.id)}
       <div class="kv near">${trafficActivityHtml(g, sim)}<span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
-      <div class="actions">${follow}</div></section>`;
+      <div class="actions">${follow}${remove}</div></section>`;
     }
     return `<section class="detail">${head('Машина жителя')}
       ${carTripHtml(g, sim.id)}
       <div class="kv near">${trafficActivityHtml(g, sim)}<span>Скорость</span><b>${speed} км/ч</b><span>В пути</span><b>${Math.round(sim.tripTime)} с</b><span>Стоял в пробках</span><b>${Math.round(sim.stoppedTime)} с</b></div>
-      <div class="actions">${follow}<button class="small" data-action="car-destination" data-id="sim:${sim.id}">Поехать в…</button></div></section>`;
+      <div class="actions">${follow}<button class="small" data-action="car-destination" data-id="sim:${sim.id}">Поехать в…</button>${remove}</div></section>`;
   }
 
   /**
@@ -4103,13 +4109,16 @@ export class Hud {
       model.mode === 'road'
         ? `<div class="icon-row"><span class="lbl2">Машина</span><span data-tip="${modelName(v.model, tank)} · вместимость ${model.capacity}">${modelSvg(v.model, line?.color, undefined, undefined, tank)}</span></div>`
         : '';
+    const sell = model.mode === 'road'
+      ? `<button class="small danger" data-action="sell" data-id="${v.id}" title="Продать за ${money(g.saleValue(v))}">Продать машину</button>`
+      : '';
     return `<section class="detail"><header><h3>${esc(g.vehicleTitle(v))}</h3><button class="icon" data-action="close-sel">✕</button></header>
       ${line ? `<button class="line-row" data-action="select-line" data-id="${line.id}">${this.lineIcon(line)}<span>${esc(line.name)}</span></button>` : ''}
       ${art}
       <div class="icon-row"><span class="lbl2">Везёт</span>${cargo}<b>${load}/${vehicleCapacity(v)}</b></div>
       <div class="kv near"><span>Сейчас</span><b>${state}</b>${nextRow}<span>Скорость</span><b>${speed} км/ч</b>
         <span title="За прошлый месяц">Прибыль</span><b>${money(v.profitLast)}</b>${extra}</div>
-      <div class="actions">${follow}</div></section>`;
+      <div class="actions">${follow}${sell}</div></section>`;
   }
 
   private showScreen(name: ScreenName): void {

@@ -5,6 +5,7 @@ import { LaneDemand } from './demand';
 import { LaneGraph } from './graph';
 import { LaneNet, twoWay } from './model';
 import { LaneTraffic } from './traffic';
+import type { Vehicle } from '../sim/vehicle';
 
 const CAR = { kind: 'car' as const, length: 7.5, width: 3.6, maxSpeed: 60, accel: 10, color: '#aaa' };
 
@@ -118,5 +119,49 @@ describe('Уступание внутри широкого скруглённо�
     expect(lost).toBe(0);
     expect(traffic.arrivals).toBeGreaterThan(50);
     expect(traffic.vehicles.size).toBe(0);
+  });
+
+  it.each([
+    { name: 'скорая с мигалкой', move: '14>4', siren: true },
+    { name: 'обычная машина с более ранней очередью', move: '18>4', siren: false },
+  ])('$name ждёт, пока частично въехавшая машина освободит её путь', ({ move, siren }) => {
+    const { graph } = roundedJunction();
+    const arrived: Vehicle[] = [];
+    const traffic = new LaneTraffic(graph, { onArrive: (v) => arrived.push(v), onLost() {} });
+    const stand = (key: string, emergency = false) => {
+      const m = graph.moves.get(key)!;
+      const lane = graph.lanes.get(m.inLane)!;
+      const v = traffic.placeOnLane({
+        ...CAR, siren: emergency, targetNode: graph.links.get(m.outLink)!.toNode!, endLink: m.outLink,
+      }, lane.id, lane.length - 1)!;
+      v.planned = m.key;
+      v.lcCooldown = Infinity;
+      return v;
+    };
+    const step = () => traffic.step(1 / 30);
+    const first = stand('2>11');
+    for (let i = 0; i < 150 && !first.onMovement; i++) step();
+    expect(first.onMovement).toBe('2>11');
+    const zone = graph.moves.get(first.onMovement!)!.zones.get('8>16')!;
+    traffic.holdAfter(first, (zone[0] + zone[1]) / 2 - first.s);
+    const inside = stand('8>16');
+    for (let i = 0; i < 30 * 20; i++) step();
+    expect(inside.onMovement).toBe('8>16');
+    expect(inside.v).toBeLessThan(0.5);
+
+    const approaching = stand(move, siren);
+    for (let i = 0; i < 60; i++) step();
+    expect(approaching.onMovement).toBeNull();
+    if (!siren) approaching.requestTime = inside.requestTime - 1;
+    traffic.remove(first);
+
+    const box = (v: Vehicle) => ({ c: add(v.pos, scale(v.dir, -v.length / 2)), d: v.dir, hl: v.length / 2, hw: v.width / 2 });
+    for (let i = 0; i < 30 * 20 && traffic.vehicles.size; i++) {
+      step();
+      if (traffic.vehicles.has(inside.id) && traffic.vehicles.has(approaching.id)) {
+        expect(boxesOverlap(box(inside), box(approaching))).toBe(false);
+      }
+    }
+    expect(arrived).toHaveLength(2);
   });
 });

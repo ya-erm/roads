@@ -1566,7 +1566,10 @@ export class LaneTraffic {
     for (const w of node.waiting) {
       if (w === veh || !w.ready || !w.planned || w.waitingAt !== node.id || !this.vehicles.has(w.id) || !(w.siren || this.escorting(w))) continue;
       const kind = m.conflicts.get(w.planned);
-      if (kind && kind !== 'diverge' && this.etaToNode(w) < SIREN_CALL) return w;
+      if (!kind || kind === 'diverge' || this.etaToNode(w) >= SIREN_CALL) continue;
+      const next = this.graph.moves.get(w.planned)!;
+      if (this.mustClearBefore(veh, w, next)) continue;
+      return w;
     }
     return;
   }
@@ -1582,14 +1585,14 @@ export class LaneTraffic {
   }
 
   /** Спецмашине можно в узел по m и на красный: никто поперёк не доедет до него раньше чем через SIREN_WINDOW с. */
-  private sirenBlocker(node: GNode, m: GMove): Vehicle | undefined {
+  private sirenBlocker(veh: Vehicle, node: GNode, m: GMove): Vehicle | undefined {
     const lanes = new Set<number>();
     for (const [key, kind] of m.conflicts) {
       if (kind === 'diverge') continue;
       const c = this.graph.moves.get(key);
       if (c) lanes.add(c.inLane);
     }
-    return this.mustYield(node, m, lanes, null, SIREN_WINDOW);
+    return this.mustYield(veh, node, m, lanes, null, SIREN_WINDOW);
   }
 
   // ---------- Перестроения ----------
@@ -2424,27 +2427,7 @@ export class LaneTraffic {
     const soft: Vehicle[] = [];
     for (const r of node.reserved) {
       const rKey = r.onMovement ?? r.granted;
-      if (!rKey || rKey === m.key) continue;
-      const kind = m.conflicts.get(rKey);
-      if (!kind) continue;
-      // Машина на второстепенной заняла лишь свободный край большого узла: траекторию m она ещё не перекрывает.
-      const prefix = this.creeping.get(r);
-      const rm = this.graph.moves.get(rKey);
-      if (prefix && rm && kind !== 'diverge') {
-        const zone = this.conflictRange(rm, m);
-        if (prefix.stop + 1 < zone[0] || (r.onMovement && r.s - r.length > zone[1] + 1)) continue;
-      }
-      if (kind === 'diverge' && r.onMovement && r.s > r.length + 3) continue;
-      // Пересечение: тот уже целиком проехал общую зону — путь свободен.
-      if (kind === 'cross' && r.onMovement) {
-        const zone = this.graph.moves.get(r.onMovement)?.zones.get(m.key);
-        if (zone && r.s - r.length > zone[1] + 1) continue;
-      }
-      // Вливание в ту же полосу: тот выедет на неё заметно раньше нас — поедем следом за ним.
-      if (kind === 'merge' && r.onMovement) {
-        const rm = this.graph.moves.get(r.onMovement);
-        if (rm && rm.length - r.s + r.length + IDM.minGap < m.length - 4) continue;
-      }
+      if (!rKey || !this.blocksMovement(r, rKey, m)) continue;
       // Бронь спецмашины с мигалкой — не «мягкая»: её не перехватывают.
       if (!r.onMovement && !r.siren && this.etaToNode(r) > (yieldTo?.has(rKey) ? window : SOFT_GRANT) && this.etaToNode(veh) < 1.5) {
         soft.push(r);
@@ -2454,23 +2437,24 @@ export class LaneTraffic {
     }
     // Спецмашина не ждёт ни зелёного, ни главной, ни очереди — только чтобы поперёк никто не ехал.
     if (siren) {
-      const other = this.sirenBlocker(node, m);
+      const other = this.sirenBlocker(veh, node, m);
       if (other) return this.waits(veh, 'yield', other);
     }
     if (!siren && yieldTo?.size) {
       const lanes = new Set([...yieldTo].map((k) => this.graph.moves.get(k)?.inLane ?? -1));
-      const other = this.mustYield(node, m, lanes, yieldTo, window);
+      const other = this.mustYield(veh, node, m, lanes, yieldTo, window);
       if (other) return this.waits(veh, 'yield', other);
     }
     // Совсем заждавшегося на второстепенной пропускают: главная ждёт его по брони узла, как обычного.
     if (!siren && !L && node.priorityLanes.size && !isPriority && waited < COURTESY) {
-      const other = this.mustYield(node, m, node.priorityLanes, null, waited > 15 ? 1.8 : 2.8);
+      const other = this.mustYield(veh, node, m, node.priorityLanes, null, waited > 15 ? 1.8 : 2.8);
       if (other) return this.waits(veh, 'yield', other);
     }
     for (const w of siren ? [] : node.waiting) {
       if (w === veh || !w.ready) continue;
       const wKey = w.planned;
       if (!wKey || wKey === m.key || !m.conflicts.has(wKey)) continue;
+      if (this.mustClearBefore(veh, w, this.graph.moves.get(wKey)!)) continue;
       if (phase) {
         // Светофор: кто уступает нам (налево навстречу) — не помеха; кому уступаем мы — помеха, даже подъехав позже.
         if (phase.yields.get(wKey)?.has(m.key)) continue;
@@ -2489,6 +2473,30 @@ export class LaneTraffic {
     veh.waitingAt = null;
     if (!node.reserved.includes(veh)) node.reserved.push(veh);
     return true;
+  }
+
+  /** Занята ли часть манёвра, через которую другой машине ещё предстоит проехать. */
+  private blocksMovement(reserved: Vehicle, key: string, move: GMove): boolean {
+    const kind = move.conflicts.get(key);
+    if (!kind || key === move.key) return false;
+    const other = this.graph.moves.get(key)!;
+    const prefix = this.creeping.get(reserved);
+    if (prefix && kind !== 'diverge') {
+      const zone = this.conflictRange(other, move);
+      if (prefix.stop + 1 < zone[0] || (reserved.onMovement && reserved.s - reserved.length > zone[1] + 1)) return false;
+    }
+    if (!reserved.onMovement) return true;
+    if (kind === 'diverge') return reserved.s <= reserved.length + 3;
+    if (kind === 'merge') return other.length - reserved.s + reserved.length + IDM.minGap >= move.length - 4;
+    const zone = other.zones.get(move.key);
+    return !zone || reserved.s - reserved.length <= zone[1] + 1;
+  }
+
+  /** Тот, кто уже в узле, освобождает путь тому, кто за его бронью ждёт до въезда. */
+  private mustClearBefore(occupant: Vehicle, approaching: Vehicle, move: GMove): boolean {
+    if (!occupant.onMovement || approaching.onMovement || move.inLane !== approaching.lane) return false;
+    if (approaching.granted === move.key) return false;
+    return this.blocksMovement(occupant, occupant.onMovement, move);
   }
 
   /** Начало сближения с другой траекторией: ширина двух кузовов и запас, включая срезание угла кормой. */
@@ -2571,7 +2579,7 @@ export class LaneTraffic {
    * window секунд, — по манёвру из only (null — по любому). Ползущие в своей очереди — не помеха: если доползут,
    * их задержит бронь узла. Долго ждущий соглашается на меньший разрыв (window меньше).
    */
-  private mustYield(node: GNode, m: GMove, lanes: Iterable<number>, only: Set<string> | null, window: number): Vehicle | undefined {
+  private mustYield(yielding: Vehicle, node: GNode, m: GMove, lanes: Iterable<number>, only: Set<string> | null, window: number): Vehicle | undefined {
     const checked = new Set<number>();
     for (const pl of lanes) {
       for (const { veh, distance } of this.upstream(pl, 120)) {
@@ -2582,7 +2590,7 @@ export class LaneTraffic {
         for (const key of this.potentialMovements(veh, node.id)) {
           if (only && !only.has(key)) continue;
           const kind = m.conflicts.get(key);
-          if (kind && kind !== 'diverge') return veh;
+          if (kind && kind !== 'diverge' && !this.mustClearBefore(yielding, veh, this.graph.moves.get(key)!)) return veh;
         }
       }
     }
