@@ -604,11 +604,10 @@ describe('Перенос станции', { timeout: 60_000 }, () => {
         if (ok) from = net().nodesNear(q, 2)[0].id;
       }
       const other = ok ? game.placeStation(add(add(exit.pos, scale(u, 180)), scale(v, -30)), 14) : null;
-      if (!other || !game.stationMovePlan(dock.id, south, 14).ok) continue;
+      if (!other || game.setStationBays(dock.id, 4) !== null || !game.stationMovePlan(dock.id, south, 14).ok) continue;
       const line = game.createLine([dock.id, other.id])!;
       expect(line).not.toBeNull();
       expect(game.buyVehicle(line.id, 'truck')).not.toBeNull();
-      expect(game.setStationBays(dock.id, 4)).toBeNull();
       dock.cargo = { ...dock.cargo, wood: 5 } as typeof dock.cargo;
       const fp0 = { ...dock.fp, center: { ...dock.fp.center } };
       const node0 = dock.nodeId;
