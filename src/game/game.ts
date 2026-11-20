@@ -1391,13 +1391,16 @@ export class Game implements BuildContext {
     // Машины в пути встают на дорогу там же, где были; не вышло (или сохранение старое) — вернутся на станцию.
     const restored = new Set<number>();
     const trains = save.rail ? this.rail.restore(save.rail) : new Set<number>();
+    const restartingYards = new Set(save.fleet.flatMap((v) => v.yardExit && v.yardExit.pathRevision !== 2 ? [v.yardExit.station] : []));
     for (const { onRoad, ...v } of save.fleet) {
       const line = this.lines.get(v.lineId);
       if (!line) continue;
       const stop = this.stations.get(line.stops[v.stop]);
       // Старые манёвры рассчитаны с другой траекторией. Продолжаем с закреплённого за машиной поста.
-      if (v.yardExit && !v.yardExit.continuous) delete v.yardExit;
-      if (v.enter && !v.enter.gate && stop?.kind === 'road' && stop.industryId != null && !stop.curb) v.enter = { ...v.enter, t: 120 };
+      if (v.yardExit && v.yardExit.pathRevision !== 2) delete v.yardExit;
+      if (v.enter && stop?.kind === 'road' && stop.industryId != null && !stop.curb && (!v.enter.gate || restartingYards.has(stop.id))) {
+        v.enter = { ...v.enter, t: 120 };
+      }
       // Номер машины в движении — от прошлой партии.
       v.simId = null;
       this.fleet.set(v.id, v);
@@ -6628,7 +6631,7 @@ export class Game implements BuildContext {
             v.timer = 0.15;
             continue;
           }
-          v.yardExit = { station: from.id, target: to.id, next: nextIdx, road: { pos: start.pos, dir: start.dir }, t: 0, continuous: true };
+          v.yardExit = { station: from.id, target: to.id, next: nextIdx, road: { pos: start.pos, dir: start.dir }, t: 0, pathRevision: 2 };
         }
         // Счётчик задаёт положение на траектории и сохраняется в партии. Ускоряем сам ход манёвра.
         v.yardExit.t += dt * 1.4;
@@ -6650,7 +6653,6 @@ export class Game implements BuildContext {
         this.waitForStationExit(v);
         continue;
       }
-      if (yard) sim.trail = this.yardExitPose(v)?.trail;
       line.problem = null;
       this.leaveBay(v);
       this.owners.set(sim.id, { type: 'fleet', id: v.id });

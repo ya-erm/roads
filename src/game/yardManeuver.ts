@@ -1,8 +1,8 @@
 import { CurveLUT, minRadius } from '../core/bezier';
 import { clamp } from '../core/math';
-import { add, angleDiff, angleOf, dist, dot, lerp, norm, rightNormal, scale, sub } from '../core/vec';
+import { add, dist, dot, norm, rightNormal, scale, sub } from '../core/vec';
 import { boxesOverlap } from '../lanes/curb';
-import { follow, hitchOf, jointOf, steerBase, vehicleBoxes } from '../sim/body';
+import { hitchOf, jointOf, steerBase, vehicleBoxes } from '../sim/body';
 import type { VehicleSpec } from '../sim/vehicle';
 import type { Footprint } from '../world/spatial';
 import type { BayEntry, Pose } from './transport';
@@ -33,7 +33,7 @@ function axleCurve(from: Pose, to: Pose, spec: VehicleSpec, intoBay = false, out
 }
 
 /** Кривая задней оси. Нос вынесен вперёд по касательной, поэтому кузов поворачивает на ходу. */
-function yardLeg(curve: CurveLUT, from: Pose, to: Pose, spec: VehicleSpec, t: number, speed: number, v0 = 0, v1 = 0, articulate = true): YardPose {
+function yardLeg(curve: CurveLUT, from: Pose, to: Pose, spec: VehicleSpec, t: number, speed: number, v0 = 0, v1 = 0): YardPose {
   const duration = Math.max(0.8, curve.length / speed);
   const u = clamp(t / duration, 0, 1);
   if (u === 1) return { ...to, done: true };
@@ -43,7 +43,7 @@ function yardLeg(curve: CurveLUT, from: Pose, to: Pose, spec: VehicleSpec, t: nu
   const dir = curve.tangentAt(s);
   const base = spec.length * steerBase(spec.body);
   const pos = add(axle, scale(dir, base));
-  const h = articulate ? hitchOf(spec.body) : undefined;
+  const h = hitchOf(spec.body);
   if (!h) return { pos, dir, done: false };
   const joint = jointOf(pos, dir, spec.length, h);
   const tail = h.tail * spec.length;
@@ -88,50 +88,22 @@ function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint):
   const dir = viaSide ? side : norm(add(side, scale(parked.dir, 0.16)));
   const sideRoom = yard.w / 2 + dot(sub(parked.pos, yard.center), side);
   const swing = Math.min(Math.max(2.5, 14 - Math.abs(lateral)), sideRoom - (spec.length - base) - spec.width / 2 - 1);
-  const forwardRoom = Math.min(base + 12, spec.length * 0.5 + 4);
+  // Длинному прицепу оставляем место для дуги выезда, короткие машины начинают рулить позже, чтобы не задеть ряд.
+  const longTrailer = spec.body === 'longSemi';
+  const forwardRoom = longTrailer ? base + 12 : Math.min(base + 12, spec.length / 2 + 4);
   const turnDepth = Math.max(base + 6, depth - (viaSide ? 3 : forwardRoom));
   const axle = add(parked.pos, add(scale(out, turnDepth), scale(side, -swing)));
   const turn = { pos: add(axle, scale(dir, base)), dir };
-  // Сначала тягач и прицеп идут вдоль разметки поста, затем поворачивают уже в общем проезде.
-  const run = clamp(turnDepth - base - 9, 0, 12);
-  const backed = { pos: add(parked.pos, scale(out, run)), dir: parked.dir };
-  const reverse = axleCurve(turn, backed, spec, true);
+  const reverse = axleCurve(turn, parked, spec, viaSide || !longTrailer);
   const pace = clamp(yard.h / 52, 0.62, 1);
   const reverseSpeed = 2.5 * pace;
-  const straight = run > 0.5 ? axleCurve(backed, parked, spec) : null;
-  const straightTime = straight ? Math.max(0.8, straight.length / reverseSpeed) : 0;
   const seconds = Math.max(0.8, reverse.length / reverseSpeed);
   const forward = axleCurve(turn, road, spec);
   const forwardSpeed = 3.7 * pace * clamp(minRadius(forward.curve) / Math.max(4, base * 0.65), 0.65, 1);
-  const motion = (t: number) => {
-    if (straight && t < straightTime) return { ...yardLeg(straight, backed, parked, spec, straightTime - t, reverseSpeed, reverseSpeed, 0, false), done: false };
-    const afterStraight = t - straightTime;
-    if (afterStraight < seconds) return { ...yardLeg(reverse, turn, backed, spec, seconds - afterStraight, reverseSpeed, 0, straight ? reverseSpeed : 0, false), done: false };
-    return yardLeg(forward, turn, road, spec, afterStraight - seconds, forwardSpeed, 0, 3, false);
-  };
-  const hitch = hitchOf(spec.body);
-  if (!hitch) return motion;
-  const step = 0.05;
-  const tail = hitch.tail * spec.length;
-  const trails = [sub(jointOf(parked.pos, parked.dir, spec.length, hitch), scale(parked.dir, tail))];
-  // Прицеп всё время следует за седлом: при переходе с заднего на передний ход его угол сохраняется.
-  for (let i = 1; ; i++) {
-    const pose = motion(i * step);
-    const joint = jointOf(pose.pos, pose.dir, spec.length, hitch);
-    const trail = follow(joint, pose.dir, trails[i - 1], tail);
-    const yaw = angleOf(pose.dir);
-    const angle = yaw + clamp(angleDiff(yaw, angleOf(sub(joint, trail))), -Math.PI / 3, Math.PI / 3);
-    trails.push(sub(joint, scale({ x: Math.cos(angle), y: Math.sin(angle) }, tail)));
-    if (pose.done) break;
-  }
-  return (t) => {
-    const pose = motion(t);
-    const i = Math.min(Math.floor(t / step), trails.length - 2);
-    const joint = jointOf(pose.pos, pose.dir, spec.length, hitch);
-    const previous = lerp(trails[i], trails[i + 1], clamp(t / step - i, 0, 1));
-    const trail = follow(joint, pose.dir, previous, tail);
-    return { ...pose, trail };
-  };
+  // Путь задним ходом — та же кривая осей, проигранная от поста к проезду.
+  return (t) => t < seconds
+    ? { ...yardLeg(reverse, turn, parked, spec, seconds - t, reverseSpeed), done: false }
+    : yardLeg(forward, turn, road, spec, t - seconds, forwardSpeed, 0, 3);
 }
 
 const exitPlans = new WeakMap<Footprint, Map<string, (t: number) => YardPose>>();
