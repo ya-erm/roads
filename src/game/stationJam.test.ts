@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { boxesOverlap } from '../lanes/curb';
+import { vehicleBoxes } from '../sim/body';
 import { Game } from './game';
 import { type Approach, JAM_DELAY, JAM_REACH, jamShown, nextJam, queuedAt } from './stationJam';
 import { fieldSpot, freightRoute, freshGame, road, runUntil, withoutCitizens } from './testkit';
@@ -52,6 +54,31 @@ describe('Очередь на въезд: когда предупреждать'
 });
 
 describe('Очередь на въезд в игре', { timeout: 60_000 }, () => {
+  it('грузовики ждут на дороге перед маневровой площадкой и не задевают въезжающего', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { built, line, sB } = freightRoute(game);
+    expect(built).toBe(true);
+    expect(game.setStationBays(sB.id, 1)).toBeNull();
+    game.setStopRule(line.id, 0, { ...DEFAULT_RULE, wait: 'none' });
+    game.setStopRule(line.id, 1, { ...DEFAULT_RULE, wait: 'full', maxWait: null });
+    const fleet = Array.from({ length: 3 }, () => game.buyVehicle(line.id, 'truck')!);
+    let waiting = false;
+    const arrived = runUntil(game, 180, () => waiting && sB.occupied.some((id) => !game.fleet.get(id)?.enter), () => {
+      const yard = game.bayLooks(sB).flatMap((p) => vehicleBoxes(p.pos, p.dir, p.length, p.width, p.body, p.trail));
+      for (const v of fleet) {
+        const sim = v.stop === 1 ? game.fleetSim(v) : undefined;
+        if (!sim || sim.onMovement || sim.routeIndex !== sim.route.length - 1) continue;
+        const lane = game.roads.graph.lanes.get(sim.lane)!;
+        const body = vehicleBoxes(sim.pos, sim.dir, sim.length, sim.width, sim.body, sim.trail);
+        expect(yard.some((a) => body.some((b) => boxesOverlap(a, b)))).toBe(false);
+        if (game.bayWait(v) <= 0 || sim.v > 0.2 || lane.length < 18) continue;
+        expect(lane.length - sim.s).toBeGreaterThanOrEqual(17.5);
+        waiting = true;
+      }
+    });
+    expect(arrived).toBe(true);
+  });
+
   it('свободный пост принимает грузовик во время другого манёвра на том же дворе', () => {
     const game = withoutCitizens(freshGame(7));
     const { built, line, sB } = freightRoute(game);

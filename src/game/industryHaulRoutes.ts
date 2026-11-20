@@ -14,6 +14,7 @@ export function stationHaulRoad(st: Station, side: 1 | -1): [number, number][] {
 
 type Road = readonly Vec[];
 type Segment = readonly [Vec, Vec];
+type HaulSite = Pick<Station, 'fp' | 'industryAccess'>;
 interface HaulLayout {
   station: Station['fp'];
   plant: Industry['fp'];
@@ -26,14 +27,14 @@ interface HaulLayout {
   routes: Map<string, readonly Road[]>;
 }
 
-const layouts = new WeakMap<Station, HaulLayout>();
+const layouts = new WeakMap<HaulSite, HaulLayout>();
 
 export interface HaulGround {
   revision: string;
   clear(p: Vec): boolean;
 }
 
-function layout(st: Station, ind: Industry, front: 1 | -1, ground?: HaulGround): HaulLayout {
+function layout(st: HaulSite, ind: Industry, front: 1 | -1, ground?: HaulGround): HaulLayout {
   const cached = layouts.get(st);
   const revision = ground?.revision ?? '';
   if (cached?.station === st.fp && cached.plant === ind.fp && cached.front === front && cached.annexes === ind.annexes && cached.revision === revision) return cached;
@@ -43,8 +44,8 @@ function layout(st: Station, ind: Industry, front: 1 | -1, ground?: HaulGround):
   const mainEnd = roads[0].at(-1)!;
   let connection: Road | undefined = st.industryAccess ? [mainEnd, gate] : undefined;
   if (!connection) {
-    const footprint = { ...ind.fp, parts: ind.fp.parts?.slice(0, ind.fp.groundParts ?? ind.fp.parts.length) };
-    const solid = [st.fp, footprint, ...(ind.annexes ?? []).filter((a) => !a.roadOnly).map((a) => a.fp)];
+    const footprint = (fp: Station['fp']) => fp.groundParts === undefined ? fp : { ...fp, parts: fp.parts?.slice(0, fp.groundParts) };
+    const solid = [st.fp, footprint(ind.fp), ...(ind.annexes ?? []).filter((a) => !a.roadOnly).map((a) => footprint(a.fp))];
     const candidates = segments.map(([a, b]) => closestOnSegment(gate, a, b)).filter((hit) => hit.d <= 150).sort((a, b) => a.d - b.d);
     const clear = (p: Vec) => !solid.some((fp) => pointInFootprint(p, fp, 1.5)) && (ground?.clear(p) ?? true);
     connection = connectHaulRoad(gate, candidates.map((hit) => hit.point), ind.fp.angle, clear);
@@ -54,7 +55,7 @@ function layout(st: Station, ind: Industry, front: 1 | -1, ground?: HaulGround):
   return result;
 }
 
-export function industryHaulConnection(st: Station, ind: Industry, front: 1 | -1, ground?: HaulGround): Road | undefined {
+export function industryHaulConnection(st: HaulSite, ind: Industry, front: 1 | -1, ground?: HaulGround): Road | undefined {
   return layout(st, ind, front, ground).connection;
 }
 

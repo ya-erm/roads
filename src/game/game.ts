@@ -30,7 +30,7 @@ import { add, angleDiff, angleOf, closestOnSegment, cross, dist, dot, rightNorma
 import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, corridorUnder, insideRuns, splitCorridor } from '../lanes/edit';
 import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
-import { autoMainPair, mainPairOf } from '../lanes/graph';
+import { autoMainPair, mainPairOf, type GLane } from '../lanes/graph';
 import { PhaseSpec, phaseTurnStates, specOf, turnClashes, type TurnState } from '../lanes/lights';
 import { besideOffset, Corridor, type CorridorBuild, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, taperLen, twoWay } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
@@ -38,7 +38,7 @@ import type { LaneTraffic } from '../lanes/traffic';
 import { Leaving, RailSim, Train } from '../sim/rail';
 import { stepWagons } from '../sim/wagons';
 import type { Vehicle, VehicleLook, VehicleSpec } from '../sim/vehicle';
-import { hitchOf, steerBase } from '../sim/body';
+import { hitchOf, steerBase, vehicleBoxes } from '../sim/body';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { CARGO, CargoType, FREIGHT, INDUSTRY_TYPES, IndustryKind, isTankCargo } from '../world/cargo';
 import { Annex, type BuildBase, type Deposit, Industry, isBusTerminal, Station, StationServes, Structure, Town, TOWN_HISTORY, TownBuilding, type TownPark, TownSupplyMonth, Warehouse } from '../world/entities';
@@ -695,6 +695,7 @@ export interface StationPlan {
   /** Станция пристроена к этому предприятию. */
   industryId?: number;
   industryAccess?: true;
+  haulRoad?: readonly Vec[];
   /** Для вокзала: как разрезать путь и где пройдёт второй путь. */
   rail?: RailStationGeom;
   /** Выезд автостанции: план дороги (сеть с выездом — для предпросмотра, даже если поставить нельзя). */
@@ -804,6 +805,8 @@ const INDUSTRY_EXIT = START_ROADS.industryExit;
 const OLD_INDUSTRY_EXIT = 64;
 /** Грузовой двор у стены предприятия — столько вглубь, м (industryStationPlan). */
 const INDUSTRY_DOCK = 23;
+/** Очередь стоит до скругления маневровой площадки. */
+const INDUSTRY_QUEUE_INSET = 18;
 /** Выезд станции из перекрёстка — не ближе этого угла (рад) к соседним дорогам. */
 const STATION_JOIN_GAP = 0.5;
 
@@ -1059,6 +1062,7 @@ export class Game implements BuildContext {
       dwell: (v) => this.dwellAt(v),
       curbStop: (v) => this.curbStop(v),
       canArrive: (v) => this.canArrive(v),
+      arrivalInset: (v, lane) => this.yardArrivalInset(v, lane),
       onArrive: (v) => this.onArrive(v),
       onLost: (v) => this.onLost(v),
     });
@@ -1388,7 +1392,12 @@ export class Game implements BuildContext {
     const restored = new Set<number>();
     const trains = save.rail ? this.rail.restore(save.rail) : new Set<number>();
     for (const { onRoad, ...v } of save.fleet) {
-      if (!this.lines.has(v.lineId)) continue;
+      const line = this.lines.get(v.lineId);
+      if (!line) continue;
+      const stop = this.stations.get(line.stops[v.stop]);
+      // Старые манёвры рассчитаны с другой траекторией. Продолжаем с закреплённого за машиной поста.
+      if (v.yardExit && !v.yardExit.continuous) delete v.yardExit;
+      if (v.enter && !v.enter.gate && stop?.kind === 'road' && stop.industryId != null && !stop.curb) v.enter = { ...v.enter, t: 120 };
       // Номер машины в движении — от прошлой партии.
       v.simId = null;
       this.fleet.set(v.id, v);
@@ -1495,17 +1504,20 @@ export class Game implements BuildContext {
       const existingGate = approach && dist(approach.pos, gate) < 2 ? approach : undefined;
       const obstruction = this.roadUnder(dock, 1, existingGate?.id);
       if (obstruction) return fail(obstruction);
+      // Тыльные ворота должны вести в действующую сеть проездов предприятия.
+      const haulRoad = industryHaulConnection({ fp: dock, ...industryAccessFlag }, ind, -1, this.industryHaulGround(ind));
+      if (!haulRoad) return fail('Нужен технологический проезд от станции до предприятия');
       if (existingGate) {
         const cost = COST.station + this.demolishTotal(under.houses);
         if (cost > this.budget) return fail('Не хватает денег', cost);
-        return { ok: true, cost, fp: dock, industryId: ind.id, ...industryAccessFlag, existingGate: existingGate.id, nodePos: existingGate.pos, demolish: under.houses };
+        return { ok: true, cost, fp: dock, industryId: ind.id, ...industryAccessFlag, haulRoad, existingGate: existingGate.id, nodePos: existingGate.pos, demolish: under.houses };
       }
       const plan = this.roadBuilder.road(anchorAt(net, exit, 16), { kind: 'free', pos: gate }, DRIVEWAY);
       const demolish = under.houses.filter((id) => !plan.demolish.includes(id));
       const cost = plan.cost + COST.station + this.demolishTotal(demolish);
       if (!plan.ok) return fail(plan.reason ?? 'Нельзя построить', cost, plan);
       if (cost > this.budget) return fail('Не хватает денег', cost, plan);
-      return { ok: true, cost, fp: dock, industryId: ind.id, ...industryAccessFlag, driveway: plan, nodePos: gate, demolish };
+      return { ok: true, cost, fp: dock, industryId: ind.id, ...industryAccessFlag, haulRoad, driveway: plan, nodePos: gate, demolish };
     };
     const large = tryYard(width, 56, true);
     if (large.ok) return large;
@@ -1607,17 +1619,22 @@ export class Game implements BuildContext {
     return [st.nodeId, ...additionalStationGates(st, this.roads.net).map((node) => node.id)];
   }
 
-  private industryHaulGround(st: Station, ind: Industry): HaulGround {
+  get industryHaulRevision(): string {
+    return `${this.roads.net.version}:${this.terrain.version}:${this.index.version}:${this.stationRev}`;
+  }
+
+  private industryHaulGround(ind: Industry, stationId?: number): HaulGround {
     const net = this.roads.net;
     return {
-      revision: `${net.version}:${this.terrain.version}`,
+      revision: this.industryHaulRevision,
       clear: (p) => this.inBounds(p, 3) && !this.isWater(p, 2) && !corridorUnder(net, p, 2, 0)
-        && !this.obstaclesAt(p, 1.5).some((o) => o.id !== st.id && o.id !== ind.id),
+        && !this.index.near(p, 6).some((s) => s.id !== stationId && s.id !== ind.id
+          && (s.type !== 'annex' || s.industryId !== ind.id) && pointInFootprint(p, s.fp, 1.5)),
     };
   }
 
   industryHaulRoad(st: Station, ind: Industry): readonly Vec[] | undefined {
-    return industryHaulConnection(st, ind, stationRoadFront(st, this.roads.net), this.industryHaulGround(st, ind));
+    return industryHaulConnection(st, ind, stationRoadFront(st, this.roads.net), this.industryHaulGround(ind, st.id));
   }
 
   private shortestStationRoute(targets: number[], routeTo: (target: number) => number[] | null): { target: number; route: number[] } | null {
@@ -4929,6 +4946,7 @@ export class Game implements BuildContext {
           live.depots = s.depots;
           live.nodeId = s.nodeId;
           live.industryId = s.industryId;
+          live.industryAccess = s.industryAccess;
           // Длина выезда — как была (её меняют вместе с местом площадки).
           if (s.driveway !== undefined) live.driveway = s.driveway;
           else delete live.driveway;
@@ -6610,7 +6628,7 @@ export class Game implements BuildContext {
             v.timer = 0.15;
             continue;
           }
-          v.yardExit = { station: from.id, target: to.id, next: nextIdx, road: { pos: start.pos, dir: start.dir }, t: 0 };
+          v.yardExit = { station: from.id, target: to.id, next: nextIdx, road: { pos: start.pos, dir: start.dir }, t: 0, continuous: true };
         }
         // Счётчик задаёт положение на траектории и сохраняется в партии. Ускоряем сам ход манёвра.
         v.yardExit.t += dt * 1.4;
@@ -6632,6 +6650,7 @@ export class Game implements BuildContext {
         this.waitForStationExit(v);
         continue;
       }
+      if (yard) sim.trail = this.yardExitPose(v)?.trail;
       line.problem = null;
       this.leaveBay(v);
       this.owners.set(sim.id, { type: 'fleet', id: v.id });
@@ -7118,6 +7137,35 @@ export class Game implements BuildContext {
     }
   }
 
+  private yardArrivalInset(sim: Vehicle, lane: GLane): number {
+    const v = this.fleetOf(sim);
+    const line = v && this.lines.get(v.lineId);
+    const st = line && this.stations.get(line.stops[v.stop]);
+    return st?.kind === 'road' && st.industryId != null && !st.curb ? Math.min(lane.length, this.yardMouthInset(st, lane)) : 0;
+  }
+
+  /** Пока хвост предыдущей машины на подъезде, очередь держит дистанцию до него. */
+  private yardMouthInset(st: Station, lane: GLane): number {
+    const gate = this.roads.graph.lanePose(lane, lane.length);
+    const across = rightNormal(gate.dir);
+    let inset = INDUSTRY_QUEUE_INSET;
+    for (const id of st.occupied) {
+      const v = this.fleet.get(id);
+      if (!v || (!v.enter && !v.yardExit)) continue;
+      const look = this.fleetLook(v);
+      if (!look) continue;
+      for (const part of vehicleBoxes(look.pos, look.dir, look.length, look.width, look.body, look.trail)) {
+        const normal = rightNormal(part.d);
+        const offset = sub(part.c, gate.pos);
+        const acrossWidth = Math.abs(dot(part.d, across)) * part.hl + Math.abs(dot(normal, across)) * part.hw;
+        if (Math.abs(dot(offset, across)) > acrossWidth + LANE_W / 2) continue;
+        const alongWidth = Math.abs(dot(part.d, gate.dir)) * part.hl + Math.abs(dot(normal, gate.dir)) * part.hw;
+        inset = Math.max(inset, alongWidth - dot(offset, gate.dir) + IDM.minGap);
+      }
+    }
+    return inset;
+  }
+
   private canArrive(sim: Vehicle): boolean {
     const owner = this.owners.get(sim.id);
     if (owner?.type === 'crew') return this.crewAssembled(owner.id, sim);
@@ -7132,13 +7180,17 @@ export class Game implements BuildContext {
     }
     this.bayWaitSince.delete(v.id);
     const yard = st?.kind === 'road' && st.industryId !== null && !st.curb;
-    return !yard || this.reserveYardEntry(st, v, sim);
+    if (!yard) return true;
+    const lane = this.roads.graph.lanes.get(sim.lane);
+    if (lane && this.yardMouthInset(st, lane) > INDUSTRY_QUEUE_INSET) return false;
+    return this.reserveYardEntry(st, v, sim, lane);
   }
 
-  private reserveYardEntry(st: Station, v: FleetVehicle, sim: Vehicle): boolean {
+  private reserveYardEntry(st: Station, v: FleetVehicle, sim: Vehicle, lane?: GLane): boolean {
     if (this.time < (this.yardEntryRetry.get(sim) ?? 0)) return false;
     const spec = MODELS[v.model];
     if (spec.mode !== 'road') return false;
+    const gate = lane && this.roads.graph.lanePose(lane, Math.max(0, lane.length - 0.5));
     const taken = new Set(st.occupied.map((id) => this.fleet.get(id)?.bay));
     const free = Array.from({ length: st.bays }, (_, i) => i).filter((i) => !taken.has(i))
       .map((i) => ({ i, to: this.stationBayPose(st, i, spec.spec.length) }))
@@ -7146,7 +7198,7 @@ export class Game implements BuildContext {
     const busy = this.yardMotions(st, v.id);
     for (const { i, to } of free) {
       for (const outer of [undefined, true] as const) {
-        const entry = { pos: { ...sim.pos }, dir: { ...sim.dir }, v0: sim.v, t: 0, outer };
+        const entry = { pos: { ...sim.pos }, dir: { ...sim.dir }, v0: sim.v, t: 0, outer, gate };
         const motion = { pose: yardEntryMotion(entry, to, spec.spec), spec: spec.spec, parks: true };
         if (busy.some((other) => yardPathsConflict(motion, other))) continue;
         v.bay = i;
@@ -7163,7 +7215,7 @@ export class Game implements BuildContext {
     for (const id of st.occupied) {
       if (id === except) continue;
       const v = this.fleet.get(id);
-      if (!v || (!v.enter && !v.yardExit)) continue;
+      if (!v) continue;
       const model = MODELS[v.model];
       if (model.mode !== 'road') continue;
       const to = this.stationBayPose(st, Math.min(v.bay ?? 0, st.bays - 1), model.spec.length);
@@ -7176,6 +7228,9 @@ export class Game implements BuildContext {
         const elapsed = v.yardExit.t;
         // В конце машина может ещё ждать просвет на полосе: её корму считаем занятой до передачи потоку.
         motions.push({ pose: (t) => motion(elapsed + t * 1.4), spec: model.spec, parks: true });
+      } else {
+        const parked = { ...to, done: true };
+        motions.push({ pose: () => parked, spec: model.spec, parks: true });
       }
     }
     return motions;
@@ -7913,7 +7968,7 @@ export class Game implements BuildContext {
     if (ind) {
       ind.stock[cargo] = (ind.stock[cargo] ?? 0) + amount;
       if (st.industryId === ind.id) {
-        const paths = industryHaulPaths(st, ind, stationRoadFront(st, this.roads.net), cargo, 'in', this.industryHaulGround(st, ind));
+        const paths = industryHaulPaths(st, ind, stationRoadFront(st, this.roads.net), cargo, 'in', this.industryHaulGround(ind, st.id));
         this.industryHaul.record(st, cargo, 'in', amount, this.time, paths);
       }
       this.industryRev++;
@@ -8659,7 +8714,7 @@ export class Game implements BuildContext {
       if (st.cargoOrigin) delete st.cargoOrigin[c];
       st.cargo[c] = stock + amount;
           if (st.industryId === ind.id && amount > 0) {
-            const paths = industryHaulPaths(st, ind, stationRoadFront(st, this.roads.net), c, 'out', this.industryHaulGround(st, ind));
+            const paths = industryHaulPaths(st, ind, stationRoadFront(st, this.roads.net), c, 'out', this.industryHaulGround(ind, st.id));
             this.industryHaul.record(st, c, 'out', amount, this.time, paths);
           }
     }
@@ -11483,6 +11538,7 @@ export class Game implements BuildContext {
     st.nodeId = node.id;
     this.stationRev++;
     st.industryId = plan.industryId ?? null;
+    st.industryAccess = plan.industryAccess;
     if (plan.curb) st.curb = { pocket: plan.curb.pocket };
     if (plan.drivewayLen !== undefined) st.driveway = plan.drivewayLen;
     this.index.add(st);
@@ -12412,6 +12468,24 @@ export class Game implements BuildContext {
     return { sim: best, fleet: this.fleetOf(best) };
   }
 
+  /** Транспорт на открытых постах — по кузову, включая кабину и повёрнутый прицеп. */
+  stationFleetAt(p: Vec): FleetVehicle | undefined {
+    for (const st of this.index.near(p, 45)) {
+      if (st.type !== 'station' || st.kind !== 'road' || st.curb || (st.industryId === null && !isBusTerminal(st))) continue;
+      const layout = this.bayLayout(st);
+      for (let bay = 0; bay < layout.length; bay++) {
+        const id = layout[bay];
+        if (id === null) continue;
+        const look = this.bayLook(st, bay, id);
+        if (!look) continue;
+        if (vehicleBoxes(look.pos, look.dir, look.length, look.width, look.body, look.trail).some((part) => {
+          const d = sub(p, part.c);
+          return Math.abs(dot(d, part.d)) <= part.hl + 0.35 && Math.abs(dot(d, rightNormal(part.d))) <= part.hw + 0.35;
+        })) return this.fleet.get(id);
+      }
+    }
+  }
+
   /** Поезд под курсором: по любому вагону. */
   trainAt(p: Vec): Train | null {
     for (const train of this.rail.trains.values()) {
@@ -12452,6 +12526,49 @@ export class Game implements BuildContext {
     if (!move || !st || m.mode !== 'road') return null;
     const parked = this.stationBayPose(st, Math.min(v.bay ?? 0, st.bays - 1), m.spec.length);
     return yardExitMotion(parked, move.road, m.spec, st.fp)(move.t);
+  }
+
+  /** Ближайшая следующая остановка по расписанию или уже выбранная цель выезда. */
+  fleetYardDestination(v: FleetVehicle): Station | undefined {
+    if (v.state === 'driving') return;
+    const line = this.lines.get(v.lineId);
+    const from = line && this.stations.get(line.stops[v.stop]);
+    if (!line || line.stops.length < 2 || from?.kind !== 'road' || from.industryId === null) return;
+    return this.stations.get(v.yardExit?.target ?? line.stops[(v.stop + 1) % line.stops.length]);
+  }
+
+  /** Манёвр с текущего поста и выезд на дорожную сеть — только у выбранной машины. */
+  fleetYardTrip(v: FleetVehicle, to: Station): Vec[] | null {
+    const line = this.lines.get(v.lineId);
+    const from = line && this.stations.get(line.stops[v.stop]);
+    const model = MODELS[v.model];
+    if (!line || !from || model.mode !== 'road') return null;
+    const bay = this.bayLayout(from).indexOf(v.id);
+    if (bay < 0) return null;
+    const legs = this.roadLegData(line);
+    const onSchedule = to.id === line.stops[(v.stop + 1) % line.stops.length];
+    const route = onSchedule ? legs.routes[v.stop] : this.stationRoadRoute(from, to)?.route;
+    if (!route?.length) return null;
+    const road = onSchedule ? legs.legs[v.stop] : this.roads.routePolyline(route);
+    if (!v.inBay) return road ?? null;
+    const start = v.yardExit?.road ?? this.traffic.spawnPoint(route, model.spec.length * 0.6, model.spec.length, undefined, true);
+    if (!start) return null;
+    const parked = this.stationBayPose(from, bay, model.spec.length);
+    const exit = yardExitMotion(parked, start, model.spec, from.fp);
+    const pts: Vec[] = [];
+    for (let t = v.yardExit?.t ?? 0; t < 120; t += 0.24) {
+      const pose = exit(t);
+      pts.push(pose.pos);
+      if (pose.done) break;
+    }
+    if (!road?.length) return pts;
+    const first = this.roads.graph.links.get(route[0]);
+    let cut = 0;
+    for (let i = 1, length = 0; i < road.length && length < (first?.length ?? 0); i++) {
+      length += dist(road[i - 1], road[i]);
+      if (dist(start.pos, road[i]) < dist(start.pos, road[cut])) cut = i;
+    }
+    return [...pts, ...road.slice(cut + 1)];
   }
 
   /** Машина компании на виду: на дороге — из движения, на заезде — по пути к посту. */
@@ -12638,14 +12755,20 @@ export class Game implements BuildContext {
     if (st.kind !== 'road' || st.curb) return [];
     const out: VehicleLook[] = [];
     this.bayLayout(st).forEach((id, bay) => {
-      const v = id !== null ? this.fleet.get(id) : undefined;
-      const m = v && MODELS[v.model];
-      if (!v || !m || m.mode !== 'road') return;
-      const pose = v.enter || v.yardExit ? null : this.stationBayPose(st, bay, m.spec.length);
-      const look = pose ? this.fleetLookAt(v.id, pose.pos, pose.dir) : this.fleetLook(v);
+      const look = id === null ? undefined : this.bayLook(st, bay, id);
       if (look) out.push(look);
     });
     return out;
+  }
+
+  private bayLook(st: Station, bay: number, id: number): VehicleLook | undefined {
+    const v = this.fleet.get(id);
+    if (!v) return;
+    const m = MODELS[v.model];
+    if (m.mode !== 'road') return;
+    if (v.enter || v.yardExit) return this.fleetLook(v);
+    const pose = this.stationBayPose(st, bay, m.spec.length);
+    return this.fleetLookAt(id, pose.pos, pose.dir);
   }
 
   /**

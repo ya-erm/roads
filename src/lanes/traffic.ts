@@ -26,6 +26,8 @@ export interface LaneTrafficEvents {
   curbStop?(v: Vehicle): boolean;
   /** Можно ли машине завершить поездку сейчас. */
   canArrive?(v: Vehicle): boolean;
+  /** На сколько раньше конца последней полосы находится граница въезда во двор. */
+  arrivalInset?(v: Vehicle, lane: GLane): number;
   onArrive(v: Vehicle): void;
   onLost(v: Vehicle): void;
 }
@@ -802,14 +804,14 @@ export class LaneTraffic {
   }
 
   /** У свободной полосы можно начинать манёвр. Начатый доводим до выбранной полосы. */
-  spawnPoint(route: number[], advance: number, length: number, target?: Pick<Vehicle, 'pos' | 'dir'>) {
+  spawnPoint(route: number[], advance: number, length: number, target?: Pick<Vehicle, 'pos' | 'dir'>, preview = false) {
     const lanes = this.spawnLanes(route);
     const points = lanes.map((lane) => {
       const s = clamp(advance, 0, lane.length / 2);
       return { lane: lane.id, s, ...this.graph.lanePose(lane, s) };
     });
     const chosen = target && points.find((p) => dist(p.pos, target.pos) < 0.1 && dot(p.dir, target.dir) >= 0.999);
-    return chosen ?? points.find(({ s }, i) => this.spaceAtSpawn(lanes[i], s, length)) ?? null;
+    return chosen ?? points.find(({ s }, i) => this.spaceAtSpawn(lanes[i], s, length)) ?? (preview ? points[0] : null) ?? null;
   }
 
   spawn(opts: LaneSpawn, start?: { lane: number; s: number }): Vehicle | null {
@@ -1653,6 +1655,11 @@ export class LaneTraffic {
     if (!lane) return;
     const link = this.graph.links.get(lane.link)!;
     if (link.lanes.length < 2 || link.id !== veh.route[veh.routeIndex]) return;
+    if (veh.routeIndex === veh.route.length - 1 && lane.length - veh.s < 90) {
+      const inset = this.events.arrivalInset?.(veh, lane) ?? 0;
+      // Очереди у двора идут по своим полосам. Выезжающая из потока фура ещё занимает место прицепом.
+      if (inset > 0 && lane.length - veh.s < inset + veh.length + LANE_W) return;
+    }
     const plan = this.lanePlan(veh);
     const { stay } = plan[0];
     // До конца связи — без сплошной у её конца: там уже не перестроиться.
@@ -1929,8 +1936,10 @@ export class LaneTraffic {
       if (ri === veh.route.length - 1) {
         // Маршрут оборван правкой и ждёт пересчёта: к разрыву не тормозит — до него новый маршрут будет (rerouteCuts).
         if (this.cuts.size && this.cuts.has(veh)) return idmAccel(veh.v, desired, Infinity, 0, aMax);
-        if (ahead < Math.max(30, veh.v * 3)) this.waits(veh, 'arrival');
-        return idmAccel(veh.v, desired, ahead + IDM.minGap + 1.5, veh.v, aMax);
+        const inset = ahead < Math.max(90, veh.v * 4) ? this.events.arrivalInset?.(veh, cur) ?? 0 : 0;
+        const distance = Math.max(0, ahead - inset);
+        if (distance < Math.max(30, veh.v * 3)) this.waits(veh, 'arrival');
+        return idmAccel(veh.v, desired, distance + IDM.minGap + 1.5, veh.v, aMax);
       }
       const m = this.pickMovement(veh, cur, ri);
       if (!m) {
@@ -2119,7 +2128,8 @@ export class LaneTraffic {
     for (let guard = 0; !veh.onMovement && guard < 8; guard++) {
       const lane = this.currentLane(veh)!;
       const isLast = veh.routeIndex === veh.route.length - 1;
-      if (isLast && veh.s >= lane.length - 0.5) {
+      const end = isLast && veh.s >= lane.length - 64 ? lane.length - (this.events.arrivalInset?.(veh, lane) ?? 0) : lane.length;
+      if (isLast && veh.s >= end - 0.5) {
         if (this.events.dwell?.(veh)) {
           // Её отправили дальше (маршрут уже не кончается здесь) — едет без остановки; иначе стоит у конца полосы.
           if (veh.routeIndex === veh.route.length - 1) {
@@ -2129,7 +2139,8 @@ export class LaneTraffic {
           break;
         }
         if (this.events.canArrive && !this.events.canArrive(veh)) {
-          veh.s = lane.length - 0.5;
+          // Граница может отойти назад вслед за прицепом, который ещё поворачивает. Уже въехавший нос не переставляем назад.
+          veh.s = end === lane.length ? lane.length - 0.5 : Math.max(0, Math.min(veh.s, Math.max(end - 0.5, veh.s - veh.v * dt)));
           veh.v = 0;
           break;
         }

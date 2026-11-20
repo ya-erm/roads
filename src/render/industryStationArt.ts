@@ -95,8 +95,12 @@ function paintStorageCell(a: Art, cell: StorageCell, ind: Industry, capacity: nu
   }
   if (shape === 'logs' || shape === 'planks') {
     if (fill <= 0) return;
-    if (shape === 'logs') a.logs(x + w / 2, y + h * 0.58, w * (0.3 + 0.58 * fill), Math.ceil(5 * fill), 145);
-    else a.stack(x + w * 0.13, y + h * 0.35, w * (0.25 + 0.62 * fill), h * 0.36, 1 + 3 * fill, tone, shade(tone, -0.23), '#685744');
+    if (shape === 'logs') {
+      const rows = Math.min(5, Math.max(1, Math.floor((h - 1) / 3)));
+      const count = Math.ceil(rows * fill);
+      const length = (w - 2.5) * (0.35 + 0.65 * fill);
+      a.logs(x + (w - length) / 2, y + (h - count * 3) / 2, length, count, 145);
+    } else a.stack(x + w * 0.13, y + h * 0.35, w * (0.25 + 0.62 * fill), h * 0.36, 1 + 3 * fill, tone, shade(tone, -0.23), '#685744');
     return;
   }
   const bricks = shape === 'bricks';

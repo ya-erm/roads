@@ -2652,6 +2652,8 @@ export class Controller {
     // Строительный поезд — в пути (поезд симуляции) или на месте работ (техника и состав у края) — его карточка.
     const work = g.construction.trains?.at(p);
     if (work !== undefined) return { type: 'workTrain', id: work };
+    const atStation = g.stationFleetAt(p);
+    if (atStation) return { type: 'fleet', id: atStation.id };
     const veh = g.vehicleAt(p);
     if (veh?.fleet) return { type: 'fleet', id: veh.fleet.id };
     // Любая машина колонны бригады — в потоке или вне его (вдоль стройки, ждёт колонну) — выбирает бригаду целиком.
@@ -4431,7 +4433,7 @@ export class Controller {
         const plan = g.stationPlan(p, this.snapRadius, this.stationKind, this.angle, this.stationTracks, this.stationLength, this.stationTerminal, this.roadStationOptions);
         const serves = plan.fp ? g.stationServesFor(plan.fp, this.stationKind, plan.industryId, this.newStationServes) : this.newStationServes;
         if (plan.fp) {
-          o.station = { fp: plan.fp, ok: plan.ok };
+          o.station = { fp: plan.fp, ok: plan.ok, haulRoad: plan.haulRoad };
           o.catchmentAt = plan.fp.center;
           o.catchmentR = g.catchmentRadius({ kind: this.stationKind, serves });
           if (plan.ok && serves.cargo) {
@@ -4604,7 +4606,7 @@ export class Controller {
           const plan = g.stationMovePlan(moving.id, p, this.snapRadius, this.railMove(w));
           o.marks.push({ fp: moving.fp, ok: false });
           if (plan.fp) {
-            o.station = { fp: plan.fp, ok: plan.ok };
+            o.station = { fp: plan.fp, ok: plan.ok, haulRoad: plan.haulRoad };
             o.catchmentAt = plan.fp.center;
             o.catchmentR = g.catchmentRadius(moving);
             if (plan.ok && moving.serves.cargo) {

@@ -163,7 +163,7 @@ export interface ToolOverlay {
   handles?: { anchor: Vec; pos: Vec; active: boolean; partner: boolean }[] | null;
   highlightSeg: number | null;
   highlightNode: { pos: Vec; ok: boolean; radius: number } | null;
-  station: { fp: Footprint; ok: boolean } | null;
+  station: { fp: Footprint; ok: boolean; haulRoad?: readonly Vec[] } | null;
   /** Остановка встанет парой к той, что напротив (Game.pairPreview): навесы обеих и куда у каждой едут автобусы. */
   stopPair?: { fp: Footprint; dir: Vec }[] | null;
   catchmentAt: Vec | null;
@@ -597,6 +597,7 @@ export class Renderer {
     /** Строящиеся пути ж/д проектов: чертёж и готовое по этапам (railProjectSig). */
     railProjects: new SceneDiff(),
     industries: new SceneDiff(),
+    haulRoads: new SceneDiff(),
     /** Месторождения (режим «Строит игрок»): занятое не рисуется — его предприятие на месте. */
     deposits: new SceneDiff(),
     aprons: new SceneDiff(),
@@ -744,6 +745,7 @@ export class Renderer {
       this.diffs.rails,
       this.diffs.railProjects,
       this.diffs.industries,
+      this.diffs.haulRoads,
       this.diffs.deposits,
       this.diffs.aprons,
       this.diffs.stations,
@@ -1035,6 +1037,11 @@ export class Renderer {
     this.drawCurveSigns(game, view, o.staleSigns, 0);
     // Аллеи вдоль проспектов и фонари вдоль улиц — поверх дорог (тень на асфальт), под домами.
     drawStreetGreen(ctx, this.alleys.shown, view, this.camera.zoom, BIOMES[game.terrain.biome].palette.trees);
+    for (const { st, ind, path, box } of this.haulRoads(game)) {
+      if (box.x1 >= view.x0 && box.x0 <= view.x1 && box.y1 >= view.y0 && box.y0 <= view.y1) {
+        drawIndustryHaulConnection(ctx, st, ind, path);
+      }
+    }
     this.drawStill(game, view);
     ctx.restore();
   }
@@ -1490,6 +1497,14 @@ export class Renderer {
           for (const d of game.enterprises.deposits) put(d.id, depositSig(d), depositBox(d));
         }),
       );
+    }
+    // Технологические проезды могут выходить далеко за границы самой станции.
+    const previousHaulRoads = this.haulRoadCache.list;
+    const haulRoads = this.haulRoads(game);
+    if (haulRoads !== previousHaulRoads || this.diffs.haulRoads.size !== haulRoads.length) {
+      add(this.diffs.haulRoads.update((put) => {
+        for (const { st, path, box } of haulRoads) put(st.id, `${st.fp.angle}|${path.map(({ x, y }) => `${x},${y}`).join('|')}`, box);
+      }));
     }
     // Площадки автостанций — после правки станций (Game.stationRev).
     if (cur.stations !== game.stationRev) {
@@ -2809,6 +2824,29 @@ export class Renderer {
 
   // ---------- Строения ----------
 
+  private haulRoadCache = { game: null as Game | null, revision: '', list: [] as { st: Station; ind: Industry; path: readonly Vec[]; box: Box }[] };
+
+  private haulRoads(game: Game): typeof this.haulRoadCache.list {
+    const cache = this.haulRoadCache;
+    const revision = game.industryHaulRevision;
+    if (cache.game === game && cache.revision === revision) return cache.list;
+    cache.game = game;
+    cache.revision = revision;
+    cache.list = [];
+    for (const st of game.stations.values()) {
+      if (st.kind !== 'road' || st.curb || st.industryId === null) continue;
+      const ind = game.industries.find((i) => i.id === st.industryId);
+      if (!ind) continue;
+      const path = game.industryHaulRoad(st, ind);
+      if (!path?.length) continue;
+      const xs = path.map((p) => p.x);
+      const ys = path.map((p) => p.y);
+      const box = grow({ x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) }, LANE_W * 2);
+      cache.list.push({ st, ind, path, box });
+    }
+    return cache.list;
+  }
+
   /** Дома городов, предприятия и пристройки — без движущегося (оно — drawMotion, поверх). */
   private drawStill(game: Game, view: Box): void {
     const inView = (fp: Footprint) =>
@@ -2826,8 +2864,14 @@ export class Renderer {
       }
     }
     for (const ind of game.industries) {
+      const annexes = (ind.annexes ?? []).filter((a) => inView(a.fp));
+      const roads = annexes.flatMap((a) => {
+        const path = a.connector ?? (a.access ? [a.access, a.fp.center] : undefined);
+        return path ? [path.map(({ x, y }) => [x, y] as const)] : [];
+      });
+      if (roads.length) drawIndustrialRoads(this.ctx, roads, industryRoadSurface(ind.info.kind));
       // Пристройка — своё вспомогательное здание предприятия (annexArt).
-      for (const a of ind.annexes ?? []) if (inView(a.fp)) this.drawAnnex(ind, a, 'still');
+      for (const a of annexes) if (!a.roadOnly) this.drawAnnex(ind, a, 'still');
       if (seenAt(ind.fp.center, view, Math.max(100, footprintRadius(ind.fp) + 30))) this.drawIndustry(ind, 'still');
     }
   }
@@ -3033,20 +3077,16 @@ export class Renderer {
       if (isBusTerminal(st)) {
         if (seen) this.drawBusTerminalLive(game, st);
       } else {
-        if (seen) {
-          this.drawStationBays(game, st);
-          if (st.industryId !== null) this.drawVehicles(game.bayLooks(st));
-        }
+        if (seen) this.drawStationBays(game, st);
         const industry = st.industryId === null ? undefined : game.industries.find((ind) => ind.id === st.industryId);
         if (!industry || (!seen && !seenAt(industry.fp.center, view, 400))) continue;
         const work = game.industryHaul.view(st, game.time);
-        const connection = game.industryHaulRoad(st, industry);
-        if (connection) drawIndustryHaulConnection(this.ctx, st, industry, connection);
         if (seen) {
           this.ctx.save();
           this.intoStation(game, st);
           drawIndustryYardStock(this.ctx, st, industry, this.camera.zoom, game.stationStorage(st), work);
           this.ctx.restore();
+          this.drawVehicles(game.bayLooks(st));
         }
         if (work?.trips.length && this.camera.zoom > 0.5) {
           drawIndustryTransfer(this.ctx, industry, work);
@@ -3365,22 +3405,13 @@ export class Renderer {
   /** Пристройка предприятия: участок с лёгкой тенью, вспомогательное здание — в annexArt; layer — ArtLayer. */
   private drawAnnex(ind: Industry, a: Annex, layer: ArtLayer): void {
     const fp = a.fp;
-    const surface = industryRoadSurface(ind.info.kind);
-    if (a.roadOnly) {
-      if (a.connector) drawIndustrialRoads(this.ctx, [a.connector.map(({ x, y }) => [x, y])], surface);
-      return;
-    }
     const parts = fp.parts?.slice(0, fp.groundParts);
     this.drawFootprint({ ...fp, parts, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
-    if (!a.connector && a.access) drawIndustrialRoads(this.ctx, [[[a.access.x, a.access.y], [fp.center.x, fp.center.y]]], surface);
     drawAnnexArt(this.ctx, ind, a, this.camera.zoom, performance.now() / 1000, layer);
-    if (a.connector) {
-      drawIndustrialRoads(this.ctx, [a.connector.map(({ x, y }) => [x, y])], surface);
-      if (this.camera.zoom > 0.4) {
-        const at = a.connector[a.connector.length - 1];
-        const from = a.connector[a.connector.length - 2];
-        drawIndustrialGate(this.ctx, at.x, at.y, Math.atan2(at.y - from.y, at.x - from.x));
-      }
+    if (a.connector && this.camera.zoom > 0.4) {
+      const at = a.connector[a.connector.length - 1];
+      const from = a.connector[a.connector.length - 2];
+      drawIndustrialGate(this.ctx, at.x, at.y, Math.atan2(at.y - from.y, at.x - from.x));
     }
   }
 
@@ -4938,7 +4969,10 @@ export class Renderer {
       const v = game.fleet.get(o.selection.id);
       const line = v && game.lines.get(v.lineId);
       const st = line && game.stations.get(line.stops[v.stop]);
-      if (st) {
+      const yardGoal = v && game.fleetYardDestination(v);
+      if (v && line && yardGoal) {
+        this.drawTripAhead(game.fleetYardTrip(v, yardGoal), line.color, { pos: yardGoal.fp.center, r: footprintRadius(yardGoal.fp) });
+      } else if (st) {
         const z = this.camera.zoom;
         const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);
         ctx.strokeStyle = line.color;
@@ -5012,6 +5046,7 @@ export class Renderer {
       this.signalPost(add(pos, scale({ x: -dir.y, y: dir.x }, RAIL_HALF + 4)), dir, remove ? '#e8483f' : '#3ad16b', !!o.signal.oneWay && !remove);
     }
     if (o.station) {
+      if (o.station.haulRoad) drawIndustrialRoads(ctx, [o.station.haulRoad.map(({ x, y }) => [x, y])], 'rgba(47,128,237,0.65)');
       ctx.globalAlpha = 0.75;
       this.drawFootprint(o.station.fp, o.station.ok ? '#cfe3ff' : '#f5c3bf', o.station.ok ? '#2f80ed' : '#e8483f', 2);
       ctx.globalAlpha = 1;

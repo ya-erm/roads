@@ -406,7 +406,7 @@ export interface FleetVehicle {
   /** Заезд с выезда на пост автостанции: пока он идёт, погрузка не начинается. */
   enter?: BayEntry;
   /** Выезд с открытого поста до начала дорожной полосы. */
-  yardExit?: { station: number; target: number; next: number; road: Pose; t: number };
+  yardExit?: { station: number; target: number; next: number; road: Pose; t: number; continuous?: true };
   profitMonth: number;
   profitLast: number;
   /**
@@ -435,6 +435,8 @@ export interface BayEntry {
   dir: Vec;
   v0: number;
   t: number;
+  /** Точка съезда с полосы после въезда с линии ожидания. */
+  gate?: Pose;
   /** Заезд к посту по внешнему краю двора. */
   outer?: true;
 }

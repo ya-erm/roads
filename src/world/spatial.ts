@@ -168,6 +168,7 @@ function cornersInto(out: Float64Array, center: Vec, w: number, h: number, angle
 export class FootprintIndex<T extends { fp: Footprint }> {
   private readonly cells = new Map<string, T[]>();
   readonly items = new Set<T>();
+  version = 0;
 
   constructor(private readonly cell = 120) {}
 
@@ -183,6 +184,7 @@ export class FootprintIndex<T extends { fp: Footprint }> {
   }
 
   add(item: T): void {
+    this.version++;
     this.items.add(item);
     for (const k of this.keys(item.fp)) {
       if (!this.cells.has(k)) this.cells.set(k, []);
@@ -191,6 +193,7 @@ export class FootprintIndex<T extends { fp: Footprint }> {
   }
 
   remove(item: T): void {
+    this.version++;
     this.items.delete(item);
     for (const k of this.keys(item.fp)) {
       const list = this.cells.get(k);

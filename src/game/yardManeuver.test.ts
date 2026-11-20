@@ -15,6 +15,32 @@ describe('Траектории у соседних грузовых постов
   const parked = Array.from({ length: bays }, (_, i) => bayPose(yard, bays, i, truck.length, 1, true));
   const boxes = (pose: Pose & { trail?: Pose['pos'] }) => vehicleBoxes(pose.pos, pose.dir, truck.length, truck.width, truck.body, pose.trail);
 
+  it.each(['truck', 'truck2', 'truck3'] as const)('выезд %s из заполненного ряда на восемь постов', (id) => {
+    const bays = 8;
+    const yard = { center: { x: 0, y: 0 }, w: industryYardWidth(bays), h: 56, angle: 0 };
+    const model = MODELS[id];
+    if (model.mode !== 'road') throw new Error('Нужен грузовик');
+    const { spec } = model;
+    for (const x of [3.5, 10.5, -10.5]) {
+      for (let bay = 0; bay < bays; bay++) {
+        const spot = bayPose(yard, bays, bay, spec.length, 1, true);
+        const neighbors = Array.from({ length: bays }, (_, i) => i === bay ? [] : boxes(bayPose(yard, bays, i, truck.length, 1, true))).flat();
+        const motion = yardExitMotion(spot, { pos: { x, y: 33 + spec.length * 0.6 }, dir: { x: 0, y: 1 } }, spec, yard);
+        let finished = false;
+        for (let t = 0; t < 60; t += 0.1) {
+          const p = motion(t);
+          const body = vehicleBoxes(p.pos, p.dir, spec.length, spec.width, spec.body, p.trail);
+          expect(body.some((a) => neighbors.some((b) => boxesOverlap(a, b))), `полоса ${x}, пост ${bay + 1}, ${t.toFixed(1)} c`).toBe(false);
+          if (p.done) {
+            finished = true;
+            break;
+          }
+        }
+        expect(finished).toBe(true);
+      }
+    }
+  });
+
   it.each([
     { name: 'фасад', enter: { pos: { x: -3.5, y: 33 }, dir: { x: 0, y: -1 } }, exit: { pos: { x: 3.5, y: 46 }, dir: { x: 0, y: 1 } } },
     { name: 'левый торец', enter: { pos: { x: -gateX, y: 34.5 }, dir: { x: 1, y: 0 } }, exit: { pos: { x: -gateX - 13, y: 41.5 }, dir: { x: -1, y: 0 } } },

@@ -4085,6 +4085,8 @@ export class Hud {
     const st = line && g.stations.get(line.stops[v.stop]);
     // Название станции — ссылка: камера покажет её на карте, выбор транспорта останется.
     const where = st ? `<button class="place-link" data-action="show-station" data-id="${st.id}" title="Показать на карте">${esc(st.name)}</button>` : '?';
+    const next = g.fleetYardDestination(v);
+    const nextRow = next ? `<span>Дальше</span><b><button class="place-link" data-action="show-station" data-id="${next.id}" title="Показать на карте">${esc(next.name)}</button></b>` : '';
     const hold = g.spacingLeft(v);
     const dispatchIcon = `<button class="icon dispatch" data-action="dispatch-now" data-id="${v.id}" title="Отправить сейчас, не дожидаясь интервала">▶</button>`;
     const state =
@@ -4112,7 +4114,7 @@ export class Hud {
       ${line ? `<button class="line-row" data-action="select-line" data-id="${line.id}">${this.lineIcon(line)}<span>${esc(line.name)}</span></button>` : ''}
       ${art}
       <div class="icon-row"><span class="lbl2">Везёт</span>${cargo}<b>${load}/${vehicleCapacity(v)}</b></div>
-      <div class="kv near"><span>Сейчас</span><b>${state}</b><span>Скорость</span><b>${speed} км/ч</b>
+      <div class="kv near"><span>Сейчас</span><b>${state}</b>${nextRow}<span>Скорость</span><b>${speed} км/ч</b>
         <span title="За прошлый месяц">Прибыль</span><b>${money(v.profitLast)}</b>${extra}</div>
       <div class="actions">${follow}</div></section>`;
   }

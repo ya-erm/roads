@@ -79,7 +79,8 @@ function cargoYard(a: Art, cargo: CargoType, x: number, y: number, w: number, h:
     for (let k = 0; k < 3; k++) a.tank(x + w * (0.21 + k * 0.29), y + h * 0.40, Math.min(w * 0.12, h * 0.22), SILOS.has(cargo) ? 14 : 9, '#d8dce0', tone);
     a.pipe(x + w * 0.17, y + h * 0.65, x + w * 0.82, y + h * 0.65);
   } else if (cargo === 'logs' || cargo === 'planks') {
-    for (let k = 0; k < 2; k++) a.logs(x + w * (0.28 + k * 0.44), y + h * 0.36, w * 0.33, Math.min(5, Math.max(2, Math.floor(h / 8))), seed + k);
+    const logs = Math.min(5, Math.max(1, Math.floor((h - 4) / 3)));
+    for (let k = 0; k < 2; k++) a.logs(x + w * (0.1 + k * 0.46), y + (h - logs * 3) / 2, w * 0.33, logs, seed + k);
   } else {
     a.gable(x + 4, y + 3, w - 8, h * 0.42, 7, cargo === 'food' || cargo === 'fish' ? '#d2dce0' : roof, true);
     a.box(x + 5, y + h * 0.51, w - 10, 2, 2, '#9ea5a9');

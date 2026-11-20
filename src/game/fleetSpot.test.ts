@@ -3,6 +3,7 @@ import { MONTH_LENGTH, STATION } from '../config';
 import { dist } from '../core/vec';
 import { twoWay } from '../lanes/model';
 import { CURB_GAP } from '../lanes/traffic';
+import { vehicleBoxes } from '../sim/body';
 import { LANE_W } from '../world/roadTypes';
 import { Game } from './game';
 import { connectStations, fieldSpot, road, runUntil, stationAtIndustry, withoutCitizens } from './testkit';
@@ -123,6 +124,11 @@ describe('Где машина компании на карте (подсветк
     expect(v.inBay && !v.enter).toBe(true);
     expect(game.fleetLook(v)).toBeUndefined();
     expect(game.bayLooks(sB)).toHaveLength(1);
+    const parked = game.bayLooks(sB)[0];
+    const body = vehicleBoxes(parked.pos, parked.dir, parked.length, parked.width, parked.body, parked.trail);
+    for (const part of body) expect(game.stationFleetAt(part.c)?.id).toBe(v.id);
+    expect(game.fleetYardDestination(v)?.id).toBe(sA.id);
+    expect(game.fleetYardTrip(v, sA)?.[0]).toEqual(parked.pos);
     const inBay = game.fleetSpot(v)!;
     expect(inBay.station).toBeUndefined();
     expect(game.inFootprint(inBay.pos, sB.fp)).toBe(true);
@@ -131,7 +137,7 @@ describe('Где машина компании на карте (подсветк
     let previous = game.fleetLook(v)!;
     expect(runUntil(game, MONTH_LENGTH, () => v.simId !== null, () => {
       const current = game.fleetLook(v)!;
-      expect(dist(current.pos, previous.pos)).toBeLessThan(2);
+      expect(dist(current.pos, previous.pos), `манёвр ${v.yardExit?.t.toFixed(2)} с`).toBeLessThan(2);
       previous = current;
     })).toBe(true);
     expect(sB.occupied).not.toContain(v.id);
