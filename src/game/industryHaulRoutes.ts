@@ -1,15 +1,19 @@
 import { add, closestOnSegment, dist, lerp, rightNormal, scale, type Vec } from '../core/vec';
 import type { CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
+import { INDUSTRY_ROAD_WIDTH } from '../world/industryCompound';
 import { moduleCargo } from '../world/industryModules';
 import { sitePoint } from '../world/industrySites';
 import { pointInFootprint } from '../world/spatial';
 import { industryRoadPaths } from './annexes';
 import type { HaulDirection } from './industryHaul';
+import { openBayRear } from './transport';
 
 export function stationHaulRoad(st: Station, side: 1 | -1): [number, number][] {
   const half = st.fp.h / 2;
-  return [[0, -half + 1], [0, -half * 0.39], [side * 8, -half * 0.39]];
+  const back = -half + 1;
+  const berth = Math.max(back + 1, Math.min(-half * 0.39, openBayRear(st.fp.h) - INDUSTRY_ROAD_WIDTH / 2));
+  return [[0, back], [0, berth], [side * 8, berth]];
 }
 
 type Road = readonly Vec[];

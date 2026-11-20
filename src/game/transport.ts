@@ -460,8 +460,16 @@ export function baySlot(width: number, bays: number, bay: number, open = false):
   return { x: -1 + (bay - (bays - 1) / 2) * step - w / 2, w };
 }
 
-export const OPEN_BAY_REAR = -2;
-export const openBayEnd = (depth: number): number => Math.min(depth / 2, OPEN_BAY_REAR + LONGEST_BUS + 2);
+export const INDUSTRY_YARD_MIN_DEPTH = 39;
+const OPEN_BAY_LENGTH = Math.max(...Object.values(MODELS).flatMap((model) => model.mode === 'road' ? [model.spec.length] : [])) + 2;
+const OPEN_BAY_REAR = -2;
+
+/** В старом тесном дворе длина поста сохраняется за счёт части асфальта перед фасадом. */
+export function openBayEnd(depth: number): number {
+  return Math.max(OPEN_BAY_LENGTH - depth / 2 + 4, Math.min(depth / 2, OPEN_BAY_REAR + OPEN_BAY_LENGTH));
+}
+
+export const openBayRear = (depth: number): number => openBayEnd(depth) - OPEN_BAY_LENGTH;
 
 /** Середина поста bay по ширине площадки, от её центра (как на рисунке станции). */
 function bayX(fp: Footprint, bays: number, bay: number, open: boolean): number {
@@ -473,7 +481,7 @@ function bayX(fp: Footprint, bays: number, bay: number, open: boolean): number {
 export function bayBox(fp: Footprint, bays: number, bay: number, front: 1 | -1 = 1, open = false): Footprint {
   const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
   const n = { x: -u.y * front, y: u.x * front };
-  const rear = open ? OPEN_BAY_REAR : -1;
+  const rear = open ? openBayRear(fp.h) : -1;
   const end = open ? openBayEnd(fp.h) : fp.h / 2;
   const { w } = baySlot(fp.w, bays, bay, open);
   return { center: add(fp.center, add(scale(u, bayX(fp, bays, bay, open)), scale(n, (end + rear) / 2))), w, h: end - rear, angle: fp.angle };
@@ -495,7 +503,8 @@ export function bayFront(fp: Footprint, gate: Vec): 1 | -1 {
 export function bayPose(fp: Footprint, bays: number, bay: number, length: number, front: 1 | -1 = 1, open = false): Pose {
   const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
   const n = { x: -u.y * front, y: u.x * front };
-  const y = clamp(fp.h / 2 - length - 0.5, -fp.h / 2 + 1, -1);
+  const nose = clamp(fp.h / 2 - length - 0.5, -fp.h / 2 + 1, -1);
+  const y = open ? clamp(nose, openBayRear(fp.h) + 0.5, openBayEnd(fp.h) - length - 0.5) : nose;
   return { pos: add(fp.center, add(scale(u, bayX(fp, bays, bay, open)), scale(n, y))), dir: scale(n, -1) };
 }
 

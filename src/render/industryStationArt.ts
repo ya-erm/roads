@@ -1,7 +1,7 @@
 import type { Vec } from '../core/vec';
 import type { IndustryHaulView } from '../game/industryHaul';
 import { stationHaulRoad } from '../game/industryHaulRoutes';
-import { OPEN_BAY_REAR } from '../game/transport';
+import { openBayRear } from '../game/transport';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
 import { Art, shade } from './industryArt';
@@ -15,7 +15,7 @@ export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station, ind?:
   const right = w / 2 - 2;
   const back = -h / 2;
   c.fillStyle = '#b6b4a9';
-  c.fillRect(left, back + 1, w - 4, h / 2 + OPEN_BAY_REAR - 1);
+  c.fillRect(left, back + 1, w - 4, openBayRear(h) - back - 1);
   c.fillStyle = '#777c7c';
   if (st.industryAccess) {
     c.fillRect(left, back + 1, -4 - left, 1.1);
@@ -42,19 +42,19 @@ export function drawIndustryYardStock(
   const a = new Art(c, st, zoom, 0);
   const { w, h } = st.fp;
   const width = w / 2 - 14;
-  const depth = h / 2 - 2;
-  if (width < 4 || depth < 5) return;
+  const back = -h / 2 + 2;
+  const cellHeight = openBayRear(h) - back;
+  if (width < 4 || cellHeight < 3) return;
   const out = ind.info.produces;
-  const cellHeight = depth - 2;
   const cells: StorageCell[] = [{
-    cargo: out, x: -w / 2 + 3, y: -depth, w: width, h: cellHeight,
+    cargo: out, x: -w / 2 + 3, y: back, w: width, h: cellHeight,
     amount: Math.max(0, (st.cargo[out] ?? 0) - (trip?.outgoing[out] ?? 0)),
   }];
   const inputs = ind.info.accepts;
   inputs.forEach((cargo, i) => {
     const span = cellHeight / inputs.length;
     cells.push({
-      cargo, x: 11, y: -depth + i * span, w: width, h: span - (inputs.length > 1 ? 0.9 : 0),
+      cargo, x: 11, y: back + i * span, w: width, h: span - (inputs.length > 1 ? 0.9 : 0),
       amount: (st.cargo[cargo] ?? 0) + (trip?.incoming[cargo] ?? 0),
     });
   });

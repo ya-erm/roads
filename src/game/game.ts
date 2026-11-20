@@ -209,6 +209,7 @@ import {
   bayBox,
   bayPose,
   entryPose,
+  INDUSTRY_YARD_MIN_DEPTH,
   industryYardWidth,
   nearestBay,
   Pose,
@@ -803,8 +804,6 @@ const DRIVEWAY = { cls: 'highway' as const, lanes: twoWay(1, 1) };
 /** Выезд грузового двора кончается на столько от стены предприятия; там же — тупик стартового просёлка. */
 const INDUSTRY_EXIT = START_ROADS.industryExit;
 const OLD_INDUSTRY_EXIT = 64;
-/** Грузовой двор у стены предприятия — столько вглубь, м (industryStationPlan). */
-const INDUSTRY_DOCK = 23;
 /** Очередь стоит до скругления маневровой площадки. */
 const INDUSTRY_QUEUE_INSET = 18;
 const YARD_EXIT_SPEED = 1.4;
@@ -1281,6 +1280,32 @@ export class Game implements BuildContext {
     return { ...s, passengers: [...s.passengers], accepts: [...s.accepts], occupied: [] };
   }
 
+  /** У старого двора удлиняем посты в сторону дороги, сохраняя тыльный технологический въезд. */
+  private expandSavedIndustryYard(st: Station): boolean {
+    if (st.kind !== 'road' || st.industryId == null || st.side || st.curb || st.fp.h >= INDUSTRY_YARD_MIN_DEPTH) return false;
+    const net = this.roads.net;
+    const gate = net.nodes.get(st.nodeId);
+    if (!gate || gate.corridors.length !== 1 || !net.isDeadEnd(gate) || additionalStationGates(st, net).length) return false;
+    const [{ corridor }] = net.ends(gate);
+    if (!net.isFlat(corridor) || corridor.lanes.some((lane) => lane.from > 0.01 || lane.to < corridor.length - 0.01)) return false;
+    const fp = st.fp;
+    const depth = INDUSTRY_YARD_MIN_DEPTH - fp.h;
+    const axis = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+    const forward = scale(rightNormal(axis), stationRoadFront(st, net));
+    const far = net.node(corridor.a === gate.id ? corridor.b : corridor.a);
+    if (dot(sub(far.pos, gate.pos), forward) < depth + MIN_SEGMENT_LEN + 8) return false;
+    if ([corridor.curve.p0, corridor.curve.p1, corridor.curve.p2, corridor.curve.p3].some((p) => Math.abs(dot(sub(p, gate.pos), axis)) > 0.5)) return false;
+    const extension = { ...fp, center: add(fp.center, scale(forward, (fp.h + depth) / 2)), h: depth };
+    if (footprintCorners(extension).some((p) => this.isWater(p, 3) || !this.inBounds(p, 20))) return false;
+    const under = this.structuresUnder(extension, 0, st);
+    if (under.blocker || under.houses.length || this.roadUnder(extension, 1, gate.id)) return false;
+    this.index.remove(st);
+    st.fp = { ...fp, center: add(fp.center, scale(forward, depth / 2)), h: INDUSTRY_YARD_MIN_DEPTH };
+    this.index.add(st);
+    net.moveNode(gate.id, add(gate.pos, scale(forward, depth)));
+    return true;
+  }
+
   /**
    * После восстановления сети: машины, которых не удалось вернуть на полосу, и поезда,
    * которых нет на путях, возвращаются на предыдущую станцию со своим грузом.
@@ -1376,10 +1401,12 @@ export class Game implements BuildContext {
       // Станция у получателя невидима: на карте — сам магазин, по клику выбирается он.
       if (st.kind !== 'dock') this.index.add(st);
     }
-    // Старые сохранения: выезд автостанции больше не служит разворотом для попутных машин.
-    if (this.banStationUTurns()) this.roads.changed();
     this.checkPairs();
     this.indexWarehouses();
+    const expandedYards = new Set<number>();
+    for (const st of this.stations.values()) if (this.expandSavedIndustryYard(st)) expandedYards.add(st.id);
+    // Старые сохранения: выезд автостанции больше не служит разворотом для попутных машин.
+    if (this.banStationUTurns() || expandedYards.size) this.roads.changed();
     // Старые сохранения без парков: парки и скверы — на пустом месте по сохранённым домам и дорогам (townParks.ts).
     const towns = this.towns.filter((t) => !t.parks);
     if (towns.length) {
@@ -1399,8 +1426,12 @@ export class Game implements BuildContext {
       if (!line) continue;
       const stop = this.stations.get(line.stops[v.stop]);
       // Старые манёвры рассчитаны с другой траекторией. Продолжаем с закреплённого за машиной поста.
-      if (v.yardExit && v.yardExit.pathRevision !== 3) delete v.yardExit;
-      if (v.enter && stop?.kind === 'road' && stop.industryId != null && !stop.curb && (!v.enter.gate || restartingYards.has(stop.id))) {
+      if (v.yardExit) {
+        const yard = this.stations.get(v.yardExit.station);
+        if (v.yardExit.pathRevision !== 3 || expandedYards.has(v.yardExit.station) || (yard && yard.fp.h < INDUSTRY_YARD_MIN_DEPTH)) delete v.yardExit;
+      }
+      if (v.enter && stop?.kind === 'road' && stop.industryId != null && !stop.curb
+        && (!v.enter.gate || restartingYards.has(stop.id) || expandedYards.has(stop.id) || stop.fp.h < INDUSTRY_YARD_MIN_DEPTH)) {
         v.enter = { ...v.enter, t: 120 };
       }
       // Номер машины в движении — от прошлой партии.
@@ -1526,9 +1557,9 @@ export class Game implements BuildContext {
     };
     const large = tryYard(width, 56, true);
     if (large.ok) return large;
-    const medium = tryYard(width, 39, true);
+    const medium = tryYard(width, INDUSTRY_YARD_MIN_DEPTH, true);
     if (medium.ok) return medium;
-    const small = tryYard(compact, INDUSTRY_DOCK, false);
+    const small = tryYard(compact, INDUSTRY_YARD_MIN_DEPTH, false);
     return small.ok || !linked ? small : this.industryStationPlan(ind, p, false);
   }
 

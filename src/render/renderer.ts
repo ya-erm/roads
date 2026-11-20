@@ -11,7 +11,7 @@ import { paxGone } from '../game/paxPatience';
 import { headingArrow } from '../game/stopPairs';
 import type { Spans } from '../game/constructionWork';
 import type { Game, LaneEnd, Partner } from '../game/game';
-import { bayFront, baySlot, LONGEST_BUS, OPEN_BAY_REAR, openBayEnd, type FleetVehicle, type Line } from '../game/transport';
+import { bayFront, baySlot, LONGEST_BUS, openBayEnd, openBayRear, type FleetVehicle, type Line } from '../game/transport';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { atPortals, type Portal, portalHalf, tunnelPortals } from '../lanes/tunnel';
 import { LaneRenderer, layerOf, ROAD_ASPHALT } from '../lanes/draw';
@@ -3568,6 +3568,7 @@ export class Renderer {
     const c = this.ctx;
     const row = game.bayArea(st);
     const end = openBayEnd(row.h);
+    const rear = openBayRear(row.h);
     c.strokeStyle = C.dash;
     c.lineWidth = 0.55;
     c.lineCap = 'butt';
@@ -3575,8 +3576,8 @@ export class Renderer {
     for (let i = 0; i < st.bays; i++) {
       const { x, w } = baySlot(row.w, st.bays, i, true);
       c.moveTo(x, end);
-      c.lineTo(x, OPEN_BAY_REAR);
-      c.lineTo(x + w, OPEN_BAY_REAR);
+      c.lineTo(x, rear);
+      c.lineTo(x + w, rear);
       c.lineTo(x + w, end);
     }
     c.stroke();
@@ -3922,10 +3923,14 @@ export class Renderer {
       if (fp.center.x < view.x0 - 100 || fp.center.x > view.x1 + 100 || fp.center.y < view.y0 - 100 || fp.center.y > view.y1 + 100) continue;
       if (st.industryId !== null && !st.curb) {
         this.drawFootprint(fp, C.road);
-        ctx.save();
-        this.intoStation(game, st);
-        if (this.camera.zoom > 0.35) this.drawOpenBayLines(game, st);
-        ctx.restore();
+        const spill = openBayEnd(fp.h) - fp.h / 2;
+        if (spill > 0) {
+          ctx.save();
+          this.intoStation(game, st);
+          ctx.fillStyle = C.road;
+          ctx.fillRect(-fp.w / 2 + 1, fp.h / 2 - 0.5, fp.w - 2, spill + 1.5);
+          ctx.restore();
+        }
       }
       if (st.curb) {
         if (this.camera.zoom >= 0.3) this.drawCurbMarks(net, st);
@@ -3964,7 +3969,15 @@ export class Renderer {
       }
       const node = net.nodes.get(st.nodeId);
       const end = node && net.ends(node)[0];
-      if (!node || !end) continue;
+      if (!node || !end) {
+        if (st.industryId !== null && this.camera.zoom >= 0.35) {
+          ctx.save();
+          this.intoStation(game, st);
+          this.drawOpenBayLines(game, st);
+          ctx.restore();
+        }
+        continue;
+      }
       // Координаты площадки: x вдоль боксов, y к выезду (здание — до hh).
       const local = (p: Vec) => ({ x: dot(sub(p, fp.center), u), y: dot(sub(p, fp.center), v) });
       const hh = fp.h / 2;
@@ -4015,7 +4028,10 @@ export class Renderer {
         ctx.moveTo(fp.w / 2, hh - 1.5);
         ctx.lineTo(fp.w / 2, ys[ys.length - 1] - 1.6);
         ctx.stroke();
-        if (this.camera.zoom >= 0.35) this.drawBayMarks(game, st, hh);
+        if (this.camera.zoom >= 0.35) {
+          if (st.industryId === null) this.drawBayMarks(game, st, hh);
+          else this.drawOpenBayLines(game, st);
+        }
         ctx.restore();
         continue;
       }
@@ -4073,6 +4089,7 @@ export class Renderer {
       ctx.fill();
       if (this.camera.zoom >= 0.35) {
         if (st.industryId === null) this.drawBayMarks(game, st, hh);
+        else this.drawOpenBayLines(game, st);
         // Въезд и выезд: правая по ходу полоса выезда ведёт на площадку, левая — обратно к улице.
         const axis = local(pointOff(c, s, 0)).x;
         const lanes = [ed[0] / 2, ed[1] / 2].map((o) => local(pointOff(c, s, o)).x);
