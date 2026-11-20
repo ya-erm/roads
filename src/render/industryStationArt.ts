@@ -1,21 +1,22 @@
+import { closestOnSegment, dist, type Vec } from '../core/vec';
+import { industryRoadPaths } from '../game/annexes';
+import type { IndustryHaulView } from '../game/industryHaul';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
-import { industryServiceRoads, sitePoint } from '../world/industrySites';
-import { Art, METAL } from './industryArt';
+import { moduleCargo } from '../world/industryModules';
+import { sitePoint } from '../world/industrySites';
 import type { Footprint } from '../world/spatial';
-import { type Circuit, type Equipment, paintEquipment, type WorkPoint } from './industryEquipment';
+import { Art, shade } from './industryArt';
+import { cargoShape } from './industryCargoArt';
+import { type Circuit, paintTransferTruck } from './industryEquipment';
 import { drawIndustrialGate, drawIndustrialRoads, industryRoadSurface } from './industryRoadArt';
-
-const BULK = new Set<CargoType>(['ore', 'copperore', 'coal', 'stone', 'sand', 'clay', 'gold', 'gems']);
-const SILO = new Set<CargoType>(['grain', 'sunflower']);
-const TIMBER = new Set<CargoType>(['logs', 'planks']);
 
 export const OPEN_BAY_REAR = -2;
 
-/** +y — выезд маршрутов, −y — технологические ворота со стороны предприятия. */
-function rearRoad(st: Station): Circuit {
+/** +y — выезд на улицу. Слева от технологического проезда отгрузка, справа приём сырья. */
+function rearRoad(st: Station, side: 1 | -1): Circuit {
   const depth = st.fp.h / 2;
-  return [[0, -depth - 5], [0, -depth * 0.39], [8, -depth * 0.39]];
+  return [[0, -depth + (st.industryAccess ? -5 : 4)], [0, -depth * 0.39], [side * 8, -depth * 0.39]];
 }
 
 export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station, ind?: Industry): void {
@@ -25,111 +26,170 @@ export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station, ind?:
   const back = -h / 2;
   c.fillStyle = '#b6b4a9';
   c.fillRect(left, back + 1, w - 4, h / 2 + OPEN_BAY_REAR - 1);
-  // Технологический въезд пересекает кромку площадки посередине, открытое полотно тянется до края предприятия.
   c.fillStyle = '#777c7c';
-  c.fillRect(left, back + 1, -4 - left, 1.1);
-  c.fillRect(4, back + 1, right - 4, 1.1);
-  drawIndustrialRoads(c, [rearRoad(st)], industryRoadSurface(ind?.info.kind));
-  drawIndustrialGate(c, 0, back, Math.PI / 2);
+  if (st.industryAccess) {
+    c.fillRect(left, back + 1, -4 - left, 1.1);
+    c.fillRect(4, back + 1, right - 4, 1.1);
+  } else c.fillRect(left, back + 1, right - left, 1.1);
+  const roads = [rearRoad(st, -1)];
+  if (ind?.info.accepts.length) roads.push(rearRoad(st, 1));
+  drawIndustrialRoads(c, roads, industryRoadSurface(ind?.info.kind));
+  if (st.industryAccess) drawIndustrialGate(c, 0, back, Math.PI / 2);
 }
 
-/** Складские ячейки на задней половине двора, заполняются по запасам станции. */
-export function drawIndustryYardStock(c: CanvasRenderingContext2D, st: Station, ind: Industry, zoom: number, time: number): boolean {
-  const a = new Art(c, st, zoom, time);
+interface StorageCell {
+  cargo: CargoType;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  amount: number;
+}
+
+/** Каждый вид сырья занимает свою ячейку. Готовый запас берётся со склада станции. */
+export function drawIndustryYardStock(
+  c: CanvasRenderingContext2D, st: Station, ind: Industry, zoom: number, capacity: number, trip?: IndustryHaulView,
+): void {
+  const a = new Art(c, st, zoom, 0);
   const { w, h } = st.fp;
-  const out = ind.info.produces;
-  const style = [{ cargo: out, side: -1 }, { cargo: ind.info.accepts[0] ?? out, side: 1 }];
-  const depth = h / 2 - 2;
   const width = w / 2 - 14;
-  if (width < 4 || depth < 5) return false;
+  const depth = h / 2 - 2;
+  if (width < 4 || depth < 5) return;
+  const out = ind.info.produces;
+  const cellHeight = depth - 2;
+  const cells: StorageCell[] = [{
+    cargo: out, x: -w / 2 + 3, y: -depth, w: width, h: cellHeight,
+    amount: Math.max(0, (st.cargo[out] ?? 0) - (trip?.outgoing[out] ?? 0)),
+  }];
+  const inputs = ind.info.accepts;
+  inputs.forEach((cargo, i) => {
+    const span = cellHeight / inputs.length;
+    cells.push({
+      cargo, x: 11, y: -depth + i * span, w: width, h: span - (inputs.length > 1 ? 0.9 : 0),
+      amount: (st.cargo[cargo] ?? 0) + (trip?.incoming[cargo] ?? 0),
+    });
+  });
+  for (const cell of cells) paintStorageCell(a, cell, ind, capacity, st.fp.h >= 48 && cell.h > 18);
+}
+
+function paintStorageCell(a: Art, cell: StorageCell, ind: Industry, capacity: number, roof: boolean): void {
+  const { x, y, w, h, cargo, amount } = cell;
+  const tone = CARGO[cargo].color;
+  const shape = cargoShape(cargo, ind.info.kind);
+  const fill = Math.min(1, amount / Math.max(1, capacity * 0.52));
+  const radius = Math.min(w / 3.8, h / 2.8, 7);
   a.pass = 0;
-  for (const { cargo, side } of style) {
-    const x = side < 0 ? -w / 2 + 3 : 11;
-    a.patch(x, -depth, width, depth - 2, BULK.has(cargo) ? '#aca597' : '#c7c5bc', 1, '#94918a');
-  }
+  a.patch(x, y, w, h, shape === 'bulk' ? '#aca597' : '#c7c5bc', 1, '#94918a');
   a.pass = 2;
-  for (const { cargo, side } of style) {
-    const x = side * (11 + width / 2);
-    const y = -(depth + 2) / 2;
-    const fill = Math.min(1, (st.cargo[cargo] ?? 0) / 80);
-    const tone = CARGO[cargo].color;
-    const radius = Math.min(depth / 2 - 1.5, width / 3.5, 7);
-    if (BULK.has(cargo)) {
-      a.box(x - width / 2, -depth - 0.5, width, 1.5, 2, '#878680');
-      if (radius > 1.4) {
-        a.heap(x - radius * 0.7, y, radius * (0.6 + 0.4 * fill), tone, side + 77);
-        if (width > 17) a.heap(x + radius, y + 0.7, radius * (0.44 + 0.36 * fill), tone, side + 88);
-      }
-    } else if (CARGO[cargo].tank || SILO.has(cargo)) {
-      for (const offset of width > 19 ? [-radius - 1, radius + 1] : [0]) {
-        a.tank(x + offset, y, radius, SILO.has(cargo) ? 11 : 6, '#e2e3dd', tone);
-      }
-    } else if (TIMBER.has(cargo)) {
-      if (cargo === 'logs') a.logs(x, y, Math.min(20, width - 2), Math.min(depth - 3, 3 + 5 * fill), side + 145);
-      else a.stack(x - width / 3, y - 2, width * 0.66, 3 + 3 * fill, 2.5, '#d0b17d', '#987549');
-    } else if (cargo === 'livestock') {
-      c.strokeStyle = '#866e55';
-      c.lineWidth = 0.8;
-      c.strokeRect(x - width / 2 + 1, -depth + 1, width - 2, depth - 4);
-      a.gable(x - width / 2 + 1, y - 3, width * 0.42, 6, 4, '#92745d');
-      a.animal(x + width / 4, y, side, 21);
-    } else {
-      const colors = [tone, '#d3b067', '#5e8896', '#a57363'];
-      const count = Math.max(1, Math.floor((width - 1) / 6));
-      if (st.fp.h >= 48) {
-        // Крытый склад с рампой вдоль технологического двора. Контейнеры стоят перед рампой.
-        a.gable(x - width / 2 + 0.5, -depth + 0.6, width - 1, 9, 6, '#8799a0', true);
-        a.box(x - width / 2 + 1, -depth + 9, width - 2, 2.4, 1.5, '#b3bec1');
-      }
-      for (let i = 0; i < count; i++) {
-        const color = colors[i % colors.length];
-        const left = x + (i - count / 2) * 6;
-        const y0 = st.fp.h >= 48 ? -depth + 14 : -depth + 1;
-        a.box(left, y0, 4.7, Math.min(8, -y0 - 2), 3, color, 1.3);
-        if (fill > 0.4 && depth > 15 && st.fp.h < 48) a.box(left, y + 2, 4.7, 6, 3, METAL, 1.3);
+  if (shape === 'bulk') {
+    a.box(x + 0.5, y, w - 1, 1.5, 2, '#878680');
+    if (fill > 0 && radius > 1.1) {
+      const r = radius * (0.24 + 0.76 * Math.sqrt(fill));
+      const count = w > 16 && fill > 0.48 ? 2 : 1;
+      for (let i = 0; i < count; i++) a.heap(x + w * (i + 1) / (count + 1), y + h * 0.58, r, tone, i + 77);
+    }
+    return;
+  }
+  if (shape === 'tank' || shape === 'silo') {
+    const count = w > 19 ? 2 : 1;
+    for (let i = 0; i < count; i++) {
+      const cx = x + w * (i + 1) / (count + 1);
+      a.tank(cx, y + h * 0.53, radius, shape === 'silo' ? 11 : 6, '#e2e3dd', fill > 0 ? tone : '#a1a4a5');
+      if (fill > 0) a.box(cx - radius * 0.58, y + h * 0.53 + radius * 0.78, radius * 1.16 * fill, 0.7, 0.25, tone);
+    }
+    return;
+  }
+  if (shape === 'livestock') {
+    a.gable(x + 1, y + 1, w * 0.43, Math.min(6, h * 0.44), 4, '#92745d');
+    for (let i = 0; i < Math.ceil(fill * 6); i++) a.animal(x + w * (0.26 + a.r(i + 60) * 0.52), y + h * (0.43 + a.r(i + 70) * 0.38), i, i + 73);
+    return;
+  }
+  if (shape === 'logs' || shape === 'planks') {
+    if (fill <= 0) return;
+    if (shape === 'logs') a.logs(x + w / 2, y + h * 0.58, w * (0.3 + 0.58 * fill), Math.ceil(5 * fill), 145);
+    else a.stack(x + w * 0.13, y + h * 0.35, w * (0.25 + 0.62 * fill), h * 0.36, 1 + 3 * fill, tone, shade(tone, -0.23), '#685744');
+    return;
+  }
+  const bricks = shape === 'bricks';
+  if (roof && !bricks) {
+    a.gable(x + 0.5, y + 0.6, w - 1, 9, 6, '#8799a0', true);
+    a.box(x + 1, y + 9, w - 2, 2.4, 1.5, '#b3bec1');
+  }
+  const pad = roof && !bricks ? 13 : 1;
+  const rows = h - pad > 10 ? 2 : 1;
+  const columns = Math.max(1, Math.floor(w / (bricks ? 4.8 : 6.8)));
+  const count = Math.ceil(rows * columns * fill);
+  const pitch = (w - 2) / columns;
+  const depthStep = (h - pad - 1) / rows;
+  for (let i = 0; i < count; i++) {
+    const left = x + 1 + i % columns * pitch;
+    const top = y + pad + Math.floor(i / columns) * depthStep;
+    const width = Math.min(pitch - 0.7, bricks ? 4.5 : 5.9);
+    const height = Math.min(depthStep - 0.6, bricks ? 4.5 : 6.8);
+    if (bricks) a.stack(left, top, width, height, 1.3 + fill * 1.7, tone, shade(tone, -0.25), '#a58a6b');
+    else a.box(left, top, width, height, 1.7 + fill * 1.5, tone, 1.2);
+  }
+}
+
+const transferPaths = new WeakMap<Station, {
+  station: Footprint; plant: Footprint; annexes: Industry['annexes']; front: number; routes: Map<string, Circuit>;
+}>();
+
+/** Путь от ворот нужного участка к выходу из комплекса. Стыки веток лежат на оси проездов. */
+function routeToExit(roads: readonly (readonly Vec[])[], start: Vec): readonly Vec[] {
+  const main = roads[0];
+  const exit = main[main.length - 1];
+  const key = (p: Vec) => `${Math.round(p.x * 1000)},${Math.round(p.y * 1000)}`;
+  const vertices = [...new Map([start, ...roads.flat()].map((p) => [key(p), p])).values()];
+  const segments = roads.flatMap((road) => road.slice(1).map((b, i) => [road[i], b] as const));
+  const queue = [[start]];
+  const known = new Set([key(start)]);
+  for (let i = 0; i < queue.length; i++) {
+    const path = queue[i];
+    const at = path[path.length - 1];
+    if (key(at) === key(exit)) return path;
+    for (const [a, b] of segments) {
+      if (dist(at, closestOnSegment(at, a, b).point) > 0.01) continue;
+      for (const p of vertices) {
+        if (known.has(key(p)) || dist(p, closestOnSegment(p, a, b).point) > 0.01) continue;
+        known.add(key(p));
+        queue.push([...path, p]);
       }
     }
   }
-  if (st.industryAccess || zoom <= 0.5 || !working(ind)) return false;
-  paintEquipment(c, yardTruck(out, rearRoad(st)), 0, 0, st.id, time);
-  return true;
+  return main;
 }
 
-function working(ind: Industry): boolean {
-  return !ind.ruin && !ind.build && (ind.producedMonth > 0 || ind.producedLast > 0);
-}
-
-function yardTruck(cargo: CargoType, route: Circuit): Equipment {
-  return {
-    kind: 'haul', route, color: BULK.has(cargo) ? '#e9b52f' : '#649392', load: CARGO[cargo].color, incoming: true,
-    body: CARGO[cargo].tank ? 'tank' : TIMBER.has(cargo) ? 'flatbed' : !BULK.has(cargo) && !SILO.has(cargo) ? 'box' : undefined,
-  };
-}
-
-const transferPaths = new WeakMap<Station, { station: Footprint; plant: Footprint; front: number; route: Circuit }>();
-
-function transferPath(st: Station, ind: Industry, front: 1 | -1): Circuit {
-  const cached = transferPaths.get(st);
-  if (cached?.station === st.fp && cached.plant === ind.fp && cached.front === front) return cached.route;
-  const main = industryServiceRoads(ind.info.kind, ind.fp).main;
-  const route: WorkPoint[] = main.map((corner) => {
-    const p = sitePoint(ind.fp, corner);
-    return [p.x, p.y];
-  });
-  const { fp } = st;
-  const cos = Math.cos(fp.angle);
-  const sin = Math.sin(fp.angle);
-  for (const [x, offset] of rearRoad(st).slice(1)) {
-    const y = offset * front;
-    route.push([fp.center.x + x * cos - y * sin, fp.center.y + x * sin + y * cos]);
+function transferPath(st: Station, ind: Industry, front: 1 | -1, trip: IndustryHaulView): Circuit {
+  let cached = transferPaths.get(st);
+  if (cached?.station !== st.fp || cached.plant !== ind.fp || cached.front !== front || cached.annexes !== ind.annexes) {
+    cached = { station: st.fp, plant: ind.fp, front, annexes: ind.annexes, routes: new Map() };
+    transferPaths.set(st, cached);
   }
-  transferPaths.set(st, { station: fp, plant: ind.fp, front, route });
+  const id = `${trip.direction}:${trip.cargo}`;
+  const saved = cached.routes.get(id);
+  if (saved) return saved;
+  const { fp } = st;
+  const rear = rearRoad(st, trip.direction === 'out' ? -1 : 1)
+    .map(([x, y]) => sitePoint(fp, [x / fp.w, y * front / fp.h]));
+  let path = rear;
+  if (st.industryAccess) {
+    const roads = industryRoadPaths(ind);
+    const annex = ind.annexes?.find((part) => part.module && part.connector?.length && (trip.direction === 'out'
+      ? part.module === 'warehouse'
+      : moduleCargo(ind, part.module) === trip.cargo));
+    const section = ind.fp.compound?.sections.find((part) => trip.direction === 'out'
+      ? part.kind === 'warehouse'
+      : part.kind === 'receiving' && part.cargo === trip.cargo);
+    const start = annex?.connector?.at(-1) ?? (section?.gate ? sitePoint(ind.fp, section.gate) : roads[0][0]);
+    path = [...routeToExit(roads, start), ...rear.slice(1)];
+  }
+  const route: Circuit = path.map(({ x, y }) => [x, y]);
+  cached.routes.set(id, route);
   return route;
 }
 
-/** Один рейс по дороге предприятия и через задние ворота на разгрузку. */
-export function drawIndustryTransfer(c: CanvasRenderingContext2D, st: Station, ind: Industry, front: 1 | -1, zoom: number, time: number): boolean {
-  if (!st.industryAccess || zoom <= 0.5 || !working(ind)) return false;
-  paintEquipment(c, yardTruck(ind.info.produces, transferPath(st, ind, front)), 0, 0, st.id, time);
-  return true;
+/** Клиенты на улице и техника технологического двора используют разные проезды. */
+export function drawIndustryTransfer(c: CanvasRenderingContext2D, st: Station, ind: Industry, front: 1 | -1, trip: IndustryHaulView): void {
+  paintTransferTruck(c, transferPath(st, ind, front, trip), trip, ind.info.kind);
 }

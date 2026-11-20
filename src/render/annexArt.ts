@@ -1,6 +1,7 @@
 import { ANNEX } from '../config';
 import type { IndustryKind } from '../world/cargo';
 import type { Annex, Industry } from '../world/entities';
+import { moduleCargo, moduleSection } from '../world/industryModules';
 import { Art, type ArtLayer, BARK, boat, DARK, disc, type Emitter, hash, herd, industryGround, METAL, paintScene, shade, YELLOW } from './industryArt';
 import { paintIndustrySection } from './industrySectionArt';
 
@@ -190,11 +191,12 @@ export function annexMotion(ind: Industry, annex: Annex): Emitter[] {
 }
 
 function paintAnnex(ctx: CanvasRenderingContext2D, a: Art, ind: Industry, annex: Annex): void {
+  if (annex.roadOnly) return;
   const info = ind.info;
   a.siteParts = annex.fp.parts?.slice(0, annex.fp.groundParts);
   if (annex.module) {
     const { w, h } = annex.fp;
-    const section = { kind: annex.module, bounds: [-0.5, -0.5, 0.5, 0.5] } as const;
+    const section = { kind: moduleSection(annex.module), bounds: [-0.5, -0.5, 0.5, 0.5], cargo: moduleCargo(ind, annex.module) } as const;
     const paint = (art: Art) => paintIndustrySection(art, section, w, h, info.produces, info.roof, annex.id);
     paintScene(ctx, a, annex.fp, w, h, industryGround(info), paint, undefined);
     return;

@@ -1,7 +1,7 @@
-import { ANNEX, CONSTRUCTION, COST, RAIL_STATION, SNAP_PIXELS, STATION, STORAGE } from '../config';
+import { CONSTRUCTION, COST, RAIL_STATION, SNAP_PIXELS, STATION, STORAGE } from '../config';
 import { warehouseZone } from '../game/warehouses';
-import { annexZone, moduleEffect } from '../game/annexes';
-import { INDUSTRY_MODULES, type IndustryModule } from '../world/industryModules';
+import { annexCost, annexZone, moduleEffect, snapIndustryRoad } from '../game/annexes';
+import { INDUSTRY_MODULES, moduleName, type IndustryModule } from '../world/industryModules';
 import { CurveLUT, minRadius, offsetCubic, straightCubic } from '../core/bezier';
 import { add, angleOf, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { DrawMode, NetKind, RoadRequest, Snap } from '../game/build';
@@ -121,7 +121,7 @@ export const TOOLS: { id: Tool; key: string; alt?: string; name: string }[] = [
 /** Кисть рельефа: радиус по размеру. */
 export const BRUSH_SIZES = { small: 40, medium: 80, large: 150 } as const;
 export type BrushSize = keyof typeof BRUSH_SIZES;
-const BRUSH_NAMES: Record<TerraformMode, string> = { raise: 'Поднять', lower: 'Опустить', flatten: 'Выровнять' };
+const BRUSH_NAMES: Record<TerraformMode, string> = { raise: 'Поднять', lower: 'Опустить', flatten: 'Выровнять', smooth: 'Сгладить' };
 /** Пока кнопка зажата, кисть делает мазок раз в столько секунд. */
 const BRUSH_PERIOD = 0.12;
 /** Отказ стройки дороги из-за уклона: «Слишком крутой подъём», «Подъём круче 10%», «Насыпь 9 м», «Выемка 8 м» — на превью «лесенка». */
@@ -149,14 +149,15 @@ export type Pending =
   | { kind: 'lotHandle'; id: number; handle: 'corner' | 'rotate'; side: -1 | 1 }
   | { kind: 'turn'; target: 'park' | 'building'; id: number; pivot: Vec; base: number; side: 1 | -1 }
   | { kind: 'warehouse'; id: number }
-  | { kind: 'annex'; id: number; module: IndustryModule }
+  | { kind: 'annex'; id: number; module: IndustryModule; rotation: number }
+  | { kind: 'industryRoad'; id: number; start?: Vec }
   | { kind: 'newBase' }
   | { kind: 'crew'; id: number }
   | { kind: 'carDestination'; id: string };
 export type PendingOf<K extends Pending['kind']> = Extract<Pending, { kind: K }>;
 
 /** Ставят склад, пристройку, выбирают стройку для бригады — из карточки: выбрали другое — режим кончился. */
-const PENDING_CARD: Partial<Record<Pending['kind'], Selection['type']>> = { warehouse: 'station', annex: 'industry', crew: 'crew' };
+const PENDING_CARD: Partial<Record<Pending['kind'], Selection['type']>> = { warehouse: 'station', annex: 'industry', industryRoad: 'industry', crew: 'crew' };
 
 /** Дорога: строить, вести полосу вдоль края, перестроить под выбранный тип, двигать узел или выгнуть. */
 export type RoadMode = 'build' | 'lane' | 'upgrade' | 'move';
@@ -1521,7 +1522,18 @@ export class Controller {
 
   /** Режим «поставить пристройку» предприятия id: зона вокруг него — на карте, клик в ней ставит пристройку. */
   startAnnex(id: number, module: IndustryModule): void {
-    this.startPending({ kind: 'annex', id, module }, { type: 'industry', id });
+    this.startPending({ kind: 'annex', id, module, rotation: 0 }, { type: 'industry', id });
+  }
+
+  rotateAnnex(): void {
+    const pending = this.pendingOf('annex');
+    if (!pending) return;
+    pending.rotation = pending.rotation ? 0 : Math.PI / 2;
+    this.onChange();
+  }
+
+  startIndustryRoad(id: number): void {
+    this.startPending({ kind: 'industryRoad', id }, { type: 'industry', id });
   }
 
   /**
@@ -2056,7 +2068,7 @@ export class Controller {
         break;
       case 'terrain':
         // Кисть: выравнивание — к высоте там, где нажали; пока кнопка зажата, мазки идут сами.
-        this.brushTarget = g.terrain.heightAt(p);
+        this.brushTarget = this.terrainMode === 'flatten' ? g.terrain.heightAt(p) : null;
         this.brushTimer = 0;
         this.brushStroke(p, true);
         break;
@@ -2288,8 +2300,22 @@ export class Controller {
         done(g.buildWarehouse(w.id, p), { type: 'station', id: w.id });
         return true;
       case 'annex':
-        done(g.buildAnnex(w.id, p, w.module), { type: 'industry', id: w.id });
+        done(g.buildAnnex(w.id, p, w.module, w.rotation), { type: 'industry', id: w.id });
         return true;
+      case 'industryRoad': {
+        if (w.start) {
+          const plan = g.industryRoadPlan(w.id, w.start, p);
+          const problem = g.buildIndustryRoad(w.id, w.start, p);
+          if (problem) this.showError(problem);
+          else w.start = plan.path?.at(-1);
+        } else {
+          const ind = g.industries.find((i) => i.id === w.id);
+          w.start = ind && snapIndustryRoad(ind, p, this.snapRadius);
+          if (!w.start) this.showError('Начните от существующего проезда');
+        }
+        this.onChange();
+        return true;
+      }
       // База — у дороги под курсором, как постановка, но без платы за базу.
       case 'moveBase':
         done(g.moveBase(w.id, p), { type: 'base', id: w.id });
@@ -3902,7 +3928,7 @@ export class Controller {
       case 'terrain': {
         const g2 = this.game();
         const r = BRUSH_SIZES[this.brushSize];
-        const target = this.left ? (this.brushTarget ?? undefined) : g2.terrain.heightAt(p);
+        const target = this.terrainMode === 'flatten' ? (this.left ? (this.brushTarget ?? undefined) : g2.terrain.heightAt(p)) : undefined;
         const plan = g2.terraformPlan(p, this.terrainMode, r, target);
         o.brush = { pos: p, r, ok: plan.ok };
         const h = altitudeText(g2.terrain.altitudeAt(p));
@@ -4242,8 +4268,8 @@ export class Controller {
         }
         if (st?.type === 'annex') {
           o.marks.push({ fp: st.fp, ok: false });
-          const refund = st.automatic ? '' : ` · +${money((st.module ? INDUSTRY_MODULES[st.module].cost : ANNEX.cost) * COST.refundRatio)}`;
-          o.label = { text: `Снести секцию${refund}`, ok: true };
+          const refund = st.automatic ? '' : ` · +${money(annexCost(st) * COST.refundRatio)}`;
+          o.label = { text: `Снести ${st.roadOnly ? 'проезд' : 'секцию'}${refund}`, ok: true };
           break;
         }
         if (st?.type === 'base') {
@@ -4520,15 +4546,29 @@ export class Controller {
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
-        const ind = w?.kind === 'annex' ? g.industries.find((i) => i.id === w.id) : undefined;
+        const ind = w?.kind === 'annex' || w?.kind === 'industryRoad' ? g.industries.find((i) => i.id === w.id) : undefined;
+        if (ind && w?.kind === 'industryRoad') {
+          o.catchmentAt = ind.fp.center;
+          o.catchmentR = annexZone(ind);
+          if (w.start) {
+            const plan = g.industryRoadPlan(ind.id, w.start, p);
+            if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
+            o.label = plan.ok ? { text: `Построить проезд · ${money(plan.cost)}`, ok: true } : { text: plan.reason ?? 'Выберите конец проезда', ok: false };
+          } else {
+            const start = snapIndustryRoad(ind, p, this.snapRadius);
+            if (start) o.marks.push({ fp: { center: start, w: 7, h: 7, angle: ind.fp.angle }, ok: true });
+            o.label = { text: 'Выберите начало на существующем проезде', ok: !!start };
+          }
+          break;
+        }
         if (ind && w?.kind === 'annex') {
           // Пристройка: зона вокруг предприятия — кругом, пристройка под курсором — синим (красным, если нельзя).
-          const plan = g.annexPlan(ind.id, p, w.module);
+          const plan = g.annexPlan(ind.id, p, w.module, w.rotation);
           o.catchmentAt = ind.fp.center;
           o.catchmentR = annexZone(ind);
           if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
           o.label = plan.ok
-            ? { text: `${INDUSTRY_MODULES[w.module].name} · ${moduleEffect(ind, w.module)} · ${money(plan.cost)}`, ok: true }
+            ? { text: `${moduleName(ind, w.module)} · ${moduleEffect(ind, w.module)} · ${money(plan.cost)}`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
@@ -4640,7 +4680,7 @@ export class Controller {
         if (st?.type === 'station') o.label = { text: st.name, ok: true };
         else if (st?.type === 'warehouse') o.label = { text: `Склад: ${g.stations.get(st.stationId)?.name ?? ''}`, ok: true };
         else if (st?.type === 'base') o.label = { text: `База «${g.baseName(st.id)}» · 🚚 ${g.construction.crews.of(st.id).length}`, ok: true };
-        else if (st?.type === 'annex') o.label = { text: st.module ? INDUSTRY_MODULES[st.module].name : 'Вспомогательная секция', ok: true };
+        else if (st?.type === 'annex') o.label = { text: st.roadOnly ? 'Технологический проезд' : st.module ? INDUSTRY_MODULES[st.module].name : 'Вспомогательная секция', ok: true };
         else if (st?.type === 'industry') o.label = { text: st.name, ok: true };
         else if (st?.type === 'building') {
           const t = g.townOf(st);

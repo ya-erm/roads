@@ -205,6 +205,44 @@ describe('Рельеф', () => {
     expect(game.terraformPlan(ind.fp.center, 'raise', 80).reason).toBe('Мешает предприятие');
   });
 
+  it('сглаживание смягчает бугор, сохраняет склон и точно повторяется при отмене и загрузке', () => {
+    const game = new Game({ ...settings('hills', 7), money: 5_000_000 });
+    const t = game.terrain;
+    const points = Array.from({ length: 8 }, (_, row) =>
+      Array.from({ length: 16 }, (_, col) => ({ x: 480 + col * 48, y: 480 + row * 48 })),
+    ).flat();
+    const p = points.find((q) => !t.isWater(q, 200) && game.terraformPlan(q, 'raise', 80).ok)!;
+    expect(p).toBeDefined();
+
+    // Узкий бугор из отдельного мазка на существующем склоне.
+    t.terraform({ ...p, r: 24, mode: 'raise', amount: 12 });
+    const samples = [p, { x: p.x - 32, y: p.y }, { x: p.x + 32, y: p.y }, { x: p.x + 96, y: p.y }];
+    const heights = (terrain: Terrain) => samples.map((q) => terrain.heightAt(q));
+    const before = heights(t);
+    const money = game.money;
+    const plan = game.terraformPlan(p, 'smooth', 80);
+    expect(plan.ok).toBe(true);
+    expect(heights(t)).toEqual(before);
+
+    game.checkpoint('рельеф');
+    expect(game.terraform(p, 'smooth', 80)).toBe(true);
+    game.commit();
+    const after = heights(t);
+    expect(after[0]).toBeLessThan(before[0] - 2);
+    expect(Math.abs(after[1] - after[2])).toBeGreaterThan(0);
+    expect(after[3]).toBe(before[3]);
+    expect(game.money).toBe(money - plan.cost);
+    expect(game.undo()).toBe('рельеф');
+    expect(heights(t)).toEqual(before);
+    expect(game.money).toBe(money);
+    expect(game.redo()).toBe('рельеф');
+    expect(heights(t)).toEqual(after);
+    expect(game.money).toBe(money - plan.cost);
+
+    const loaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
+    expect(heights(loaded.terrain)).toEqual(after);
+  });
+
   it('склон, по которому дорога не проходит, можно срыть кистью — и дорога строится', () => {
     const game = freshGame({ ...settings('mountains', 13), money: 50_000_000 });
     const t = game.terrain;

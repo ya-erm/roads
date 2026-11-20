@@ -84,7 +84,7 @@ function spread(terrain: Terrain, points: Vec[]): number {
 
 describe('Рельеф предприятий', () => {
   it('ровный центр не делает площадку подходящей, если удалённые поля попали на склон', () => {
-    const fp = industryFootprint(INDUSTRY_TYPES.farm, { x: 500, y: 500 }, 0);
+    const fp = industryFootprint(INDUSTRY_TYPES.farm, { x: 500, y: 500 }, 0, true);
     const terrain = { hasRelief: true, heightAt: (p: Vec) => Math.max(0, 430 - p.x) * 0.35 };
     expect(terrainFits(terrain, { ...fp, parts: undefined }, 0)).toBe(true);
     expect(terrainFits(terrain, fp, 0)).toBe(false);
@@ -111,7 +111,7 @@ describe('Рельеф предприятий', () => {
     const terrain = new Terrain(new Rng(config.seed), config);
     const angle = Math.PI / 5;
     const site = [{ x: 1200, y: 900 }, { x: 1600, y: 1400 }, { x: 2000, y: 1800 }]
-      .map((p) => industryFootprint(INDUSTRY_TYPES.farm, p, angle))
+      .map((p) => industryFootprint(INDUSTRY_TYPES.farm, p, angle, true))
       .find((fp) => !terrain.isWater(fp.center, footprintRadius(fp) + 70) && spread(terrain, footprintCorners(fp)) > 10)!;
     expect(site).toBeDefined();
     const points = footprintCorners(site);

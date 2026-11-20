@@ -44,7 +44,7 @@ const CHOSEN: ToolPrefs = {
   stationTracks: 3,
   stationLength: 250,
   bulldozeMode: 'area',
-  terrainMode: 'flatten',
+  terrainMode: 'smooth',
   brushSize: 'large',
 };
 

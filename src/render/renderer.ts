@@ -13,7 +13,7 @@ import type { Game, LaneEnd, Partner } from '../game/game';
 import { bayFront, LONGEST_BUS, type FleetVehicle, type Line } from '../game/transport';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { atPortals, type Portal, portalHalf, tunnelPortals } from '../lanes/tunnel';
-import { LaneRenderer, layerOf } from '../lanes/draw';
+import { LaneRenderer, layerOf, ROAD_ASPHALT } from '../lanes/draw';
 import { insideRuns } from '../lanes/edit';
 import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
 import type { Corridor, CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
@@ -60,7 +60,7 @@ import { Camera } from './camera';
 import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, type Emitter, industryMotion } from './industryArt';
 import { paintIndustrySite, tracePlot } from './industrySite';
-import { drawIndustrialGate, drawIndustrialRoads, INDUSTRY_ASPHALT, industryRoadSurface } from './industryRoadArt';
+import { drawIndustrialGate, drawIndustrialRoads, industryRoadSurface } from './industryRoadArt';
 import { drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock, OPEN_BAY_REAR } from './industryStationArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
@@ -319,7 +319,7 @@ const C = {
   water: '#8cc3e6',
   bank: '#c5e0ee',
   roadEdge: '#4b525c',
-  road: '#646b76',
+  road: ROAD_ASPHALT,
   deck: '#7a828e',
   rail: '#d3d8de',
   shadow: 'rgba(30, 40, 25, 0.25)',
@@ -3026,7 +3026,6 @@ export class Renderer {
 
   /** Станции — поверх неподвижного: занятость постов, ящики и машины на открытых площадках. */
   private drawStationsOver(game: Game, view: Box): void {
-    const time = performance.now() / 1000;
     for (const st of game.stations.values()) {
       if (st.kind !== 'road' || st.curb || !this.stationSeen(st, view)) continue;
       if (isBusTerminal(st)) this.drawBusTerminalLive(game, st);
@@ -3035,12 +3034,16 @@ export class Renderer {
         if (st.industryId !== null) this.drawVehicles(game.bayLooks(st));
         const industry = st.industryId === null ? undefined : game.industries.find((ind) => ind.id === st.industryId);
         if (!industry) continue;
+        const trip = game.industryHaul.view(st, game.time);
         this.ctx.save();
         this.intoStation(game, st);
-        if (drawIndustryYardStock(this.ctx, st, industry, this.camera.zoom, time)) this.ambient = true;
+        drawIndustryYardStock(this.ctx, st, industry, this.camera.zoom, game.stationStorage(st), trip);
         this.ctx.restore();
         const gate = game.roads.net.nodes.get(st.nodeId);
-        if (gate && drawIndustryTransfer(this.ctx, st, industry, bayFront(st.fp, gate.pos), this.camera.zoom, time)) this.ambient = true;
+        if (gate && trip && this.camera.zoom > 0.5) {
+          drawIndustryTransfer(this.ctx, st, industry, bayFront(st.fp, gate.pos), trip);
+          if (game.speed > 0) this.ambient = true;
+        }
       }
     }
     this.ctx.globalAlpha = 1;
@@ -3353,6 +3356,10 @@ export class Renderer {
   private drawAnnex(ind: Industry, a: Annex, layer: ArtLayer): void {
     const fp = a.fp;
     const surface = industryRoadSurface(ind.info.kind);
+    if (a.roadOnly) {
+      if (a.connector) drawIndustrialRoads(this.ctx, [a.connector.map(({ x, y }) => [x, y])], surface);
+      return;
+    }
     const parts = fp.parts?.slice(0, fp.groundParts);
     this.drawFootprint({ ...fp, parts, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
     if (!a.connector && a.access) drawIndustrialRoads(this.ctx, [[[a.access.x, a.access.y], [fp.center.x, fp.center.y]]], surface);
@@ -3498,7 +3505,7 @@ export class Renderer {
   private drawStation(game: Game, st: Station, selected: boolean): void {
     const ctx = this.ctx;
     const fp = st.fp;
-    if (st.industryId !== null) this.drawFootprint(fp, INDUSTRY_ASPHALT, selected ? '#2f80ed' : undefined, 3);
+    if (st.industryId !== null) this.drawFootprint(fp, C.road, selected ? '#2f80ed' : undefined, 3);
     else {
       this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.22)');
       this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 3 : 1.4);
@@ -3974,7 +3981,7 @@ export class Renderer {
       ctx.lineTo(X1, y0);
       if (st.industryId === null) ctx.stroke();
       // Асфальт: тот же контур; поперёк выезда (там уже асфальт) — чуть дальше, чтобы закрыть концы бордюра.
-      ctx.fillStyle = st.industryId === null ? C.road : INDUSTRY_ASPHALT;
+      ctx.fillStyle = C.road;
       ctx.beginPath();
       ctx.moveTo(X0, y0);
       ctx.lineTo(X0, Y - rl);
@@ -3998,9 +4005,7 @@ export class Renderer {
         const inSide = Math.sign(dot(rightNormal(scale(v, -1)), u)) || 1;
         const xIn = (lanes[0] - axis) * inSide > 0 ? lanes[0] : lanes[1];
         const xOut = xIn === lanes[0] ? lanes[1] : lanes[0];
-        // Знаки — на обочине у устья выезда, сразу за скруглением своей стороны.
-        const sign = (x: number): Vec => (x > axis ? { x: r + 2.6, y: Y + rr + 2.4 } : { x: l - 2.6, y: Y + rl + 2.4 });
-        this.drawEntryExit(xIn, xOut, hh + 4.5, Y, sign(xIn), sign(xOut));
+        this.drawEntryExit(xIn, xOut, hh + 4.5, Y);
       }
       ctx.restore();
     }
@@ -4036,63 +4041,31 @@ export class Renderer {
     }
   }
 
-  /**
-   * Въезд и выезд станции — в координатах площадки (+y — от здания к улице): на площадке перед постами (от y0 до y1)
-   * стрелки по полосам выезда — по полосе xIn к постам, по xOut — к улице; на обочине у устья — знаки:
-   * у въезда синий «прямо», у выезда красный «въезд запрещён».
-   */
-  private drawEntryExit(xIn: number, xOut: number, y0: number, y1: number, signIn: Vec, signOut: Vec): void {
+  /** Стрелки на площадке перед постами: по полосе xIn к постам, по xOut — к улице. */
+  private drawEntryExit(xIn: number, xOut: number, y0: number, y1: number): void {
     const ctx = this.ctx;
     const len = Math.min(7, y1 - y0 - 1);
-    if (len >= 3) {
-      const mid = (y0 + y1) / 2;
-      ctx.fillStyle = C.dash;
-      /** Стрелка вдоль полосы x: остриё в yHead, хвост — на len от него. */
-      const arrow = (x: number, yHead: number, toward: 1 | -1) => {
-        const head = Math.min(2.4, len * 0.45);
-        const yTail = yHead - toward * len;
-        const yNeck = yHead - toward * head;
-        ctx.beginPath();
-        ctx.moveTo(x - 0.4, yTail);
-        ctx.lineTo(x - 0.4, yNeck);
-        ctx.lineTo(x - 1.3, yNeck);
-        ctx.lineTo(x, yHead);
-        ctx.lineTo(x + 1.3, yNeck);
-        ctx.lineTo(x + 0.4, yNeck);
-        ctx.lineTo(x + 0.4, yTail);
-        ctx.closePath();
-        ctx.fill();
-      };
-      arrow(xIn, mid - len / 2, -1);
-      arrow(xOut, mid + len / 2, 1);
-    }
-    const disc = (p: Vec, fill: string) => {
-      ctx.fillStyle = '#ffffff';
+    if (len < 3) return;
+    const mid = (y0 + y1) / 2;
+    ctx.fillStyle = C.dash;
+    /** Стрелка вдоль полосы x: остриё в yHead, хвост — на len от него. */
+    const arrow = (x: number, yHead: number, toward: 1 | -1) => {
+      const head = Math.min(2.4, len * 0.45);
+      const yTail = yHead - toward * len;
+      const yNeck = yHead - toward * head;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = fill;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 1.65, 0, Math.PI * 2);
+      ctx.moveTo(x - 0.4, yTail);
+      ctx.lineTo(x - 0.4, yNeck);
+      ctx.lineTo(x - 1.3, yNeck);
+      ctx.lineTo(x, yHead);
+      ctx.lineTo(x + 1.3, yNeck);
+      ctx.lineTo(x + 0.4, yNeck);
+      ctx.lineTo(x + 0.4, yTail);
+      ctx.closePath();
       ctx.fill();
     };
-    // Въезд: синий круг со стрелкой к станции.
-    disc(signIn, '#2f80ed');
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.moveTo(signIn.x, signIn.y - 1.25);
-    ctx.lineTo(signIn.x + 0.85, signIn.y - 0.2);
-    ctx.lineTo(signIn.x + 0.3, signIn.y - 0.2);
-    ctx.lineTo(signIn.x + 0.3, signIn.y + 1.1);
-    ctx.lineTo(signIn.x - 0.3, signIn.y + 1.1);
-    ctx.lineTo(signIn.x - 0.3, signIn.y - 0.2);
-    ctx.lineTo(signIn.x - 0.85, signIn.y - 0.2);
-    ctx.closePath();
-    ctx.fill();
-    // Выезд: «кирпич» — сюда не въезжают.
-    disc(signOut, '#d64545');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(signOut.x - 1.15, signOut.y - 0.35, 2.3, 0.7);
+    arrow(xIn, mid - len / 2, -1);
+    arrow(xOut, mid + len / 2, 1);
   }
 
   /**

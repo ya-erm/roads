@@ -12,9 +12,10 @@ import { walkGeo, walksOn } from './crosswalk';
 import { junctionRuts } from './dirtRuts';
 
 export { layerOf };
+export const ROAD_ASPHALT = '#646b76';
 
 const C = {
-  road: '#646b76',
+  road: ROAD_ASPHALT,
   roadEdge: '#4b525c',
   dash: 'rgba(245, 243, 230, 0.85)',
   divider: 'rgba(240, 205, 96, 0.9)',

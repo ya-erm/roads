@@ -131,11 +131,11 @@ export function annexPlots(kind: IndustryKind): readonly Plot[] {
 }
 
 /** w и h задают масштаб цехов. Земля резервируется отдельными контурами вокруг них. */
-export function industryFootprint(info: IndustryType, center: Vec, angle: number): Footprint {
+export function industryFootprint(info: IndustryType, center: Vec, angle: number, complete = false): Footprint {
   const { kind, w, h } = info;
   const rural = hasFields(kind) || hasPastures(kind);
   const core = rural ? FARMYARD : isOpenPit(kind) ? PIT : kind === 'forest' ? FOREST : WORKS;
-  const compound = rural ? farmCompound(hasPastures(kind)) : worksCompound(info, isOpenPit(kind), hasPowerYard(kind));
+  const compound = rural ? farmCompound(hasPastures(kind), complete) : worksCompound(info, isOpenPit(kind), hasPowerYard(kind), complete);
   // Цвет и детали посадок остаются детерминированными по ID, геометрия дороги не зависит от номера попытки размещения.
   const parts = [core, ...compound.sections.map(sectionPlot)];
   const groundParts = parts.length;

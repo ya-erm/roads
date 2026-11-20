@@ -1,4 +1,7 @@
 import { hash } from '../core/math';
+import type { IndustryHaulView } from '../game/industryHaul';
+import { CARGO, type IndustryKind } from '../world/cargo';
+import { cargoShape, type CargoShape } from './industryCargoArt';
 import { industrialRoadPoints } from './industryRoadArt';
 
 export type WorkPoint = readonly [x: number, y: number];
@@ -30,7 +33,7 @@ function onCircuit(route: Circuit, t: number): WorkPoint {
 
 const roadLengths = new WeakMap<Circuit, { road: Circuit; cumulative: number[]; length: number }>();
 
-function haulPose(route: Circuit, time: number | undefined, seed: number): readonly [number, number, number, boolean] {
+function roadMetric(route: Circuit) {
   let metric = roadLengths.get(route);
   if (!metric) {
     const road = industrialRoadPoints(route);
@@ -39,14 +42,32 @@ function haulPose(route: Circuit, time: number | undefined, seed: number): reado
     metric = { road, cumulative, length: cumulative[cumulative.length - 1] };
     roadLengths.set(route, metric);
   }
-  const phase = time === undefined ? 0 : (time / Math.max(16, metric.length * 0.34) + hash(seed, 381)) % 1;
-  const at = (0.5 - Math.cos(phase * Math.PI * 2) * 0.5) * metric.length;
+  return metric;
+}
+
+function roadPose(route: Circuit, progress: number, forward: boolean): readonly [number, number, number, boolean] {
+  const metric = roadMetric(route);
+  const at = progress * metric.length;
   let i = 1;
   while (i < metric.road.length - 1 && metric.cumulative[i] < at) i++;
   const [x, y] = metric.road[i - 1];
   const [ex, ey] = metric.road[i];
   const p = (at - metric.cumulative[i - 1]) / Math.max(1e-6, metric.cumulative[i] - metric.cumulative[i - 1]);
-  return [x + p * (ex - x), y + p * (ey - y), Math.atan2(ey - y, ex - x) + (phase >= 0.5 ? Math.PI : 0), phase < 0.5];
+  return [x + p * (ex - x), y + p * (ey - y), Math.atan2(ey - y, ex - x) + (forward ? 0 : Math.PI), forward];
+}
+
+function haulPose(route: Circuit, time: number | undefined, seed: number): readonly [number, number, number, boolean] {
+  const phase = time === undefined ? 0 : (time / Math.max(16, roadMetric(route).length * 0.34) + hash(seed, 381)) % 1;
+  return roadPose(route, 0.5 - Math.cos(phase * Math.PI * 2) * 0.5, phase < 0.5);
+}
+
+export function paintTransferTruck(c: CanvasRenderingContext2D, route: Circuit, trip: IndustryHaulView, producer: IndustryKind): void {
+  const shape = cargoShape(trip.cargo, producer);
+  const outbound = trip.direction === 'out';
+  const forward = outbound !== (trip.phase === 'returning');
+  const pose = roadPose(route, outbound ? trip.progress : 1 - trip.progress, forward);
+  const truck = { kind: 'haul' as const, route, color: shape === 'bulk' ? '#e9b52f' : '#649392', load: CARGO[trip.cargo].color };
+  paintWorkVehicle(c, truck, pose, { shape, fill: trip.fill });
 }
 
 /** Техника видна сверху, кабина и направление движения смотрят вдоль локальной оси +x. */
@@ -97,9 +118,17 @@ export function paintEquipment(
   }
 
   const route = equipment.route;
+  const pose = equipment.kind === 'harvester' ? harvestPose(route, phase * route.length) : haulPose(route, time, seed);
+  paintWorkVehicle(c, equipment, pose);
+}
+
+function paintWorkVehicle(
+  c: CanvasRenderingContext2D,
+  equipment: Extract<Equipment, { kind: 'harvester' | 'haul' }>,
+  [px, py, yaw, inbound]: readonly [number, number, number, boolean],
+  freight?: { shape: CargoShape; fill: number },
+): void {
   const harvest = equipment.kind === 'harvester';
-  const where = phase * route.length;
-  const [px, py, yaw, inbound] = harvest ? harvestPose(route, where) : haulPose(route, time, seed);
   const length = harvest ? 7.5 : 10;
   const width = harvest ? 4.3 : 5.2;
   c.save();
@@ -123,10 +152,49 @@ export function paintEquipment(
     c.fillRect(4.0, -3.4, 1.1, 6.8);
     c.fillStyle = '#dfcc87';
     c.fillRect(-2.6, -1.4, 2.2, 2.8);
+  } else if (freight) {
+    paintFreight(c, freight.shape, equipment.load, freight.fill);
   } else {
     paintLoad(c, equipment, inbound === !!equipment.incoming);
   }
   c.restore();
+}
+
+/** Открытый кузов: при перегрузке количество груза меняется прямо на платформе. */
+function paintFreight(c: CanvasRenderingContext2D, shape: CargoShape, color: string, fill: number): void {
+  c.fillStyle = '#685e51';
+  c.fillRect(-4.4, -1.75, 5.7, 3.5);
+  if (shape === 'tank') {
+    c.fillStyle = '#d8dce0';
+    c.beginPath();
+    c.roundRect(-4.45, -1.75, 5.7, 3.5, 1.5);
+    c.fill();
+    c.fillStyle = color;
+    c.fillRect(-3.9, -0.55, 4.5 * fill, 1.1);
+    return;
+  }
+  if (fill <= 0.01) return;
+  c.fillStyle = color;
+  if (shape === 'bulk' || shape === 'silo') {
+    c.beginPath();
+    const rx = 2.5 * Math.sqrt(fill);
+    c.ellipse(-1.6, 0, rx, 1.4 * Math.sqrt(fill), 0, 0, 2 * Math.PI);
+    c.fill();
+    c.fillStyle = 'rgba(255,255,255,0.22)';
+    c.beginPath();
+    c.ellipse(-1.9, -0.3, 0.65 * fill, 0.47 * fill, 0, 0, 2 * Math.PI);
+    c.fill();
+    return;
+  }
+  if (shape === 'logs' || shape === 'planks') {
+    for (let i = 0; i < Math.ceil(fill * 3); i++) c.fillRect(-4.05, -1.35 + i * 0.94, 4.8, 0.72);
+    return;
+  }
+  const nx = shape === 'bricks' ? 4 : 2;
+  const dx = 4.85 / nx;
+  for (let i = 0; i < Math.ceil(fill * nx * 2); i++) {
+    c.fillRect(-4.1 + Math.floor(i / 2) * dx, -1.35 + i % 2 * 1.48, dx - 0.20, 1.23);
+  }
 }
 
 function harvestPose(route: Circuit, where: number): readonly [number, number, number, boolean] {

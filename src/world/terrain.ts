@@ -240,8 +240,8 @@ export interface River {
   width: number;
 }
 
-/** Кисть рельефа: поднять, опустить или выровнять к высоте target; amount — м в центре за мазок. */
-export type TerraformMode = 'raise' | 'lower' | 'flatten';
+/** Кисть рельефа: поднять, опустить, выровнять к высоте target или сгладить локальные перепады. */
+export type TerraformMode = 'raise' | 'lower' | 'flatten' | 'smooth';
 export interface TerraformEdit {
   x: number;
   y: number;
@@ -794,6 +794,22 @@ export class Terrain {
     }
   }
 
+  /** Средняя высота сухих соседних узлов, с большим весом у ближних. */
+  private smoothHeight(grid: Float32Array, near: Float32Array, i: number, j: number, radius: number): number {
+    let total = 0;
+    let weight = 0;
+    for (let y = Math.max(0, j - radius); y <= Math.min(this.gridH - 1, j + radius); y++) {
+      for (let x = Math.max(0, i - radius); x <= Math.min(this.gridW - 1, i + radius); x++) {
+        const k = y * this.gridW + x;
+        if (near[k] <= 0) continue;
+        const w = (radius + 1 - Math.abs(i - x)) * (radius + 1 - Math.abs(j - y));
+        total += grid[k] * w;
+        weight += w;
+      }
+    }
+    return total / weight;
+  }
+
   /**
    * Мазок кисти: изменение высоты в узлах сетки, плавно к краю. write — применить,
    * иначе только посчитать. Ответ — объём грунта, м³.
@@ -812,6 +828,10 @@ export class Terrain {
     const cos = a ? Math.cos(a.angle) : 1;
     const sin = a ? Math.sin(a.angle) : 0;
     const floor = this.waterLevel + DIG_ABOVE_WATER;
+    const smooth = e.mode === 'smooth';
+    const radius = Math.max(1, Math.round(e.r / (2.5 * HEIGHT_CELL)));
+    // Сглаживание читает одну и ту же сетку во всех узлах мазка.
+    const changes: [number, number][] | null = write && smooth ? [] : null;
     let volume = 0;
     for (let j = j0; j <= j1; j++) {
       for (let i = i0; i <= i1; i++) {
@@ -824,17 +844,23 @@ export class Terrain {
         if (d >= e.r || near[k] <= 0) continue;
         const fade = e.pad === undefined ? 1 - d / e.r : Math.min(1, (e.r - d) / (e.r * (1 - e.pad)));
         const bank = a ? BANK_BAND / 4 : BANK_BAND;
-        const shore = a || e.pad !== undefined ? smoothStep(Math.min(1, near[k] / bank)) : 1;
+        const shore = a || e.pad !== undefined || smooth ? smoothStep(Math.min(1, near[k] / bank)) : 1;
         const w = smoothStep(fade) * shore;
         const h = g[k];
         let next = h;
         if (e.mode === 'raise') next = h + e.amount * w;
         else if (e.mode === 'lower') next = Math.max(Math.min(h, floor), h - e.amount * w);
-        else next = h + ((e.target ?? h) - h) * Math.min(1, w * e.amount * 0.5);
+        else {
+          const target = smooth ? this.smoothHeight(g, near, i, j, radius) : e.target ?? h;
+          next = h + (target - h) * Math.min(1, w * e.amount * 0.5);
+          if (smooth) next = Math.max(Math.min(h, floor), next);
+        }
         volume += Math.abs(next - h) * HEIGHT_CELL * HEIGHT_CELL;
-        if (write) g[k] = next;
+        if (changes) changes.push([k, next]);
+        else if (write) g[k] = next;
       }
     }
+    if (changes) for (const [k, height] of changes) g[k] = height;
     return volume;
   }
 

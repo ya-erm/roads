@@ -1,5 +1,4 @@
 import {
-  ANNEX,
   CAR_COLORS,
   CONSTRUCTION,
   COST,
@@ -21,11 +20,12 @@ import {
   TOWN_TRAFFIC,
 } from '../config';
 import { ParkedCars } from './parkedCars';
+import { IndustryHaul } from './industryHaul';
 import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier';
 import { money as usd } from '../core/moneyText';
 import { Rng } from '../core/rng';
 import { durationText } from '../core/timeText';
-import { add, angleDiff, angleOf, closestOnSegment, cross, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
+import { add, angleDiff, angleOf, closestOnSegment, cross, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, insideRuns, splitCorridor } from '../lanes/edit';
 import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
@@ -150,7 +150,7 @@ import { addCurb, CURB_GROW, frontage, withCurb } from '../world/curbStreets';
 import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises, industryRecipe } from './enterprises';
 import { depositRadius, isActive } from '../world/enterprise';
-import { industryAccess, industryServiceRoads, sitePoint } from '../world/industrySites';
+import { industryAccess } from '../world/industrySites';
 import { carryBuild, carryRailBuild, paidFor, spansOf } from './constructionWork';
 import { revertRebuild } from './rebuild';
 import type { Brigade } from './crews';
@@ -176,9 +176,8 @@ import {
 import { linesForTown } from './townLines';
 import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
-import { annexConnections, annexFootprint, growthCap, inAnnexZone } from './annexes';
-import { INDUSTRY_ROAD_WIDTH } from '../world/industryCompound';
-import { INDUSTRY_MODULES, industryModuleRate, industryModules, industryOutputCapacity, mainIndustryModule, type IndustryModule } from '../world/industryModules';
+import { annexConnections, annexCost, annexFootprint, growthCap, inAnnexZone, industryRoadCost, industryRoadFootprint, snapIndustryRoad } from './annexes';
+import { INDUSTRY_MODULES, industryModuleRate, industryModules, industryOutputCapacity, moduleLimit, moduleName, type IndustryModule } from '../world/industryModules';
 import { type AutoFunds, autoFunds } from './autoFunds';
 import { RENEW_GAP, type RenewCar, renewStep } from './autoRenew';
 import { firstRunWaits } from './firstRun';
@@ -894,6 +893,7 @@ export class Game implements BuildContext {
   towns: Town[] = [];
   industries: Industry[] = [];
   readonly stations = new Map<number, Station>();
+  readonly industryHaul = new IndustryHaul();
   readonly lines = new Map<number, Line>();
   /** Папки списка линий — в порядке создания. */
   readonly folders = new Map<number, LineFolder>();
@@ -4544,7 +4544,7 @@ export class Game implements BuildContext {
    * предприятием, станцией или ратушей; дома и дороги — можно (дороги ложатся на новый рельеф).
    */
   terraformPlan(p: Vec, mode: TerraformMode, r: number, target?: number): { ok: boolean; reason?: string; cost: number; edit: TerraformEdit } {
-    const edit: TerraformEdit = { x: p.x, y: p.y, r, mode, amount: mode === 'flatten' ? 1 : 1.5, target };
+    const edit: TerraformEdit = { x: p.x, y: p.y, r, mode, amount: mode === 'raise' || mode === 'lower' ? 1.5 : 1, target };
     const fail = (reason: string) => ({ ok: false, reason, cost: 0, edit });
     if (!this.terrain.hasRelief) return fail('В этом мире нет рельефа');
     if (!this.inBounds(p, r * 0.5)) return fail('За краем карты');
@@ -7729,6 +7729,7 @@ export class Game implements BuildContext {
     const ind = st.kind === 'dock' ? undefined : this.industries.find((i) => st.industryIds.includes(i.id) && i.info.accepts.includes(cargo));
     if (ind) {
       ind.stock[cargo] = (ind.stock[cargo] ?? 0) + amount;
+      if (st.industryId === ind.id) this.industryHaul.record(st, cargo, 'in', amount, this.time);
       this.industryRev++;
       return [{ to: { type: 'industry', id: ind.id }, amount }];
     }
@@ -8442,6 +8443,7 @@ export class Game implements BuildContext {
           const amount = Math.max(0, Math.floor(Math.min(ind.output / (available.length - i), this.stationFree(st), this.stationCap(st, 'freight') - before)));
           st.cargo[c] = before + amount;
           ind.output -= amount;
+          if (st.industryId === ind.id) this.industryHaul.record(st, c, 'out', amount, this.time);
         }
       }
       // Сколько времени за месяц продукция копилась у предела станции — транспорт не успевал (для роста).
@@ -9364,7 +9366,6 @@ export class Game implements BuildContext {
         ind.level = Math.min(cap, level + E.growthStep);
         streak = 0;
         if (Math.floor(ind.level) > Math.floor(level)) {
-          this.expandIndustry(ind);
           this.notify(`${ind.name}: производство выросло до ×${ind.level}`, '#2e9d57', {
             kind: 'industry',
             refs: [{ type: 'industry', id: ind.id }],
@@ -9378,44 +9379,6 @@ export class Game implements BuildContext {
       ind.streak = streak;
     }
     this.industryRev++;
-  }
-
-  /** При росте производства рядом появляется свободная вспомогательная секция. */
-  private expandIndustry(ind: Industry): void {
-    if ((ind.annexes ?? []).filter((a) => a.automatic).length >= Math.floor(ind.level ?? 1) - 1) return;
-    const center = ind.fp.center;
-    const module = ind.fp.compound ? mainIndustryModule(ind) : undefined;
-    const annex = annexFootprint(ind, center, module);
-    const addSection = (p: Vec, access?: Vec): boolean => {
-      const fp = { ...annex, center: p };
-      if (this.lotUnder(fp, 2) || this.outbuildingProblem(fp)) return false;
-      if (this.enterprises.deposits.some((d) => d.used === undefined && dist(d.center, p) < depositRadius(d) + footprintRadius(fp))) return false;
-      const connection = ind.fp.compound ? this.industryModuleConnection(ind, fp) : undefined;
-      if (ind.fp.compound && !connection) return false;
-      const part: Annex = {
-        type: 'annex', id: this.nextEntityId++, industryId: ind.id, fp: connection?.fp ?? fp, automatic: true,
-        ...(connection ? { connector: connection.connector } : access ? { access } : {}), ...(module && { module }),
-      };
-      ind.annexes = [...(ind.annexes ?? []), part];
-      this.index.add(part);
-      return true;
-    };
-    if (ind.fp.groundParts) {
-      for (const route of industryServiceRoads(ind.info.kind, ind.fp).branches) {
-        const p = sitePoint(ind.fp, route[route.length - 1]);
-        const prev = sitePoint(ind.fp, route[route.length - 2]);
-        const n = norm(sub(p, prev));
-        const reach = footprintSide(annex, scale(n, -1)) + 6;
-        if (addSection(add(p, scale(n, reach)), p)) return;
-      }
-    }
-    const start = ind.fp.angle + ((ind.id % 12) * Math.PI) / 6;
-    for (let i = 0; i < 12; i++) {
-      const angle = start + (i * Math.PI) / 6;
-      const n = { x: Math.cos(angle), y: Math.sin(angle) };
-      const reach = footprintSide(ind.fp, n) + footprintSide(annex, scale(n, -1)) + 7;
-      if (addSection(add(center, scale(n, reach)))) return;
-    }
   }
 
   /** Сколько предприятие производит (или может переработать) в месяц сейчас. */
@@ -11764,24 +11727,11 @@ export class Game implements BuildContext {
   }
 
   private industryModuleConnection(ind: Industry, fp: Footprint): { fp: Footprint; connector: readonly Vec[] } | undefined {
-    const width = INDUSTRY_ROAD_WIDTH;
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = rightNormal(u);
     for (const connector of annexConnections(ind, fp)) {
-      const legs = connector.slice(1).map((end, i): Footprint => {
-        const start = connector[i];
-        return { center: scale(add(start, end), 0.5), w: dist(start, end) + width, h: width, angle: angleOf(sub(end, start)) };
-      });
-      const blocked = legs.some((leg) => {
-        const corners = footprintCorners(leg);
-        if (corners.some((p) => !this.inBounds(p, 2) || this.isWater(p, 1)) || this.lotUnder(leg, 0) || this.roadUnder(leg, 0)) return true;
-        return this.index.near(leg.center, footprintRadius(leg) + 2).some((s) => {
-          const ownRoad = s === ind || (s.type === 'annex' && s.industryId === ind.id);
-          const land = ownRoad && s.fp.groundParts ? { ...s.fp, parts: s.fp.parts?.slice(0, s.fp.groundParts) } : s.fp;
-          return footprintsOverlap(leg, land);
-        });
-      });
-      if (blocked) continue;
+      const legs = connector.slice(1).map((end, i) => industryRoadFootprint(connector[i], end));
+      if (legs.some((leg) => this.industryRoadProblem(ind, leg))) continue;
       const ground = fp.parts ?? [];
       const parts = legs.map((leg) => footprintCorners(leg).map((world) => {
         const p = sub(world, fp.center);
@@ -11791,23 +11741,74 @@ export class Game implements BuildContext {
     }
   }
 
+  private industryRoadProblem(ind: Industry, leg: Footprint): string | null {
+    const corners = footprintCorners(leg);
+    if (corners.some((p) => !this.inBounds(p, 2))) return 'За краем карты';
+    if ([leg.center, ...corners].some((p) => this.isWater(p, 1))) return 'Мешает вода';
+    if (this.lotUnder(leg, 0)) return 'Мешает площадка';
+    const road = this.roadUnder(leg, 0);
+    if (road) return road;
+    if (this.index.near(leg.center, footprintRadius(leg) + 2).some((s) => {
+      const own = s === ind || (s.type === 'annex' && s.industryId === ind.id);
+      if (own && s.fp.groundParts === 0) return false;
+      const land = own && s.fp.groundParts ? { ...s.fp, parts: s.fp.parts?.slice(0, s.fp.groundParts) } : s.fp;
+      return footprintsOverlap(leg, land);
+    })) return 'Мешает постройка';
+    if (this.enterprises.deposits.some((d) => d.used === undefined && dist(d.center, leg.center) < depositRadius(d) + footprintRadius(leg))) return 'Мешает месторождение';
+    return null;
+  }
+
+  industryRoadPlan(id: number, from: Vec, toward: Vec): { ok: boolean; cost: number; fp?: Footprint; path?: readonly Vec[]; reason?: string } {
+    const ind = this.industries.find((i) => i.id === id);
+    if (!ind || !isActive(ind)) return { ok: false, cost: 0, reason: 'Предприятие ещё не работает' };
+    const start = snapIndustryRoad(ind, from, 0.5);
+    if (!start) return { ok: false, cost: 0, reason: 'Начните от существующего проезда' };
+    const u = { x: Math.cos(ind.fp.angle), y: Math.sin(ind.fp.angle) };
+    const v = rightNormal(u);
+    const d = sub(toward, start);
+    const along = dot(d, u);
+    const across = dot(d, v);
+    const end = add(start, Math.abs(along) >= Math.abs(across) ? scale(u, along) : scale(v, across));
+    const fp = industryRoadFootprint(start, end);
+    const cost = industryRoadCost(fp);
+    const path = [start, end];
+    const reason = dist(start, end) < 8 ? 'Продлите проезд минимум на 8 м'
+      : !inAnnexZone(ind, fp) ? 'Проезд должен быть рядом с предприятием'
+      : cost > this.budget ? 'Не хватает денег'
+      : this.industryRoadProblem(ind, fp);
+    return { ok: !reason, cost, fp, path, ...(reason && { reason }) };
+  }
+
+  buildIndustryRoad(id: number, from: Vec, toward: Vec): string | null {
+    const ind = this.industries.find((i) => i.id === id);
+    const plan = this.industryRoadPlan(id, from, toward);
+    if (!ind || !plan.ok || !plan.fp || !plan.path) return plan.reason ?? 'Нельзя построить проезд';
+    this.checkpoint('проезд предприятия');
+    this.spend(plan.cost);
+    const a: Annex = { type: 'annex', id: this.nextEntityId++, industryId: id, fp: { ...plan.fp, groundParts: 0 }, roadOnly: true, connector: plan.path };
+    ind.annexes = [...(ind.annexes ?? []), a];
+    this.index.add(a);
+    this.commit();
+    return null;
+  }
+
   /** Секция на свободном участке рядом с предприятием, с въездом от его сети проездов. */
-  annexPlan(id: number, p: Vec, module: IndustryModule): { ok: boolean; reason?: string; cost: number; fp: Footprint | null; connector?: readonly Vec[] } {
+  annexPlan(id: number, p: Vec, module: IndustryModule, rotation = 0): { ok: boolean; reason?: string; cost: number; fp: Footprint | null; connector?: readonly Vec[] } {
     const ind = this.industries.find((i) => i.id === id);
     if (!ind) return { ok: false, reason: 'Предприятия нет', cost: 0, fp: null };
     if (!industryModules(ind).includes(module)) return { ok: false, reason: 'Секция не подходит этому предприятию', cost: 0, fp: null };
     const cost = INDUSTRY_MODULES[module].cost;
-    const fp = annexFootprint(ind, p, module);
+    const fp = annexFootprint(ind, p, module, rotation);
     const fail = (reason: string) => ({ ok: false, reason, cost, fp });
     if (!isActive(ind)) return fail('Сначала нужно запустить предприятие');
-    if ((ind.annexes ?? []).filter((a) => a.module === module && !a.automatic).length >= 3) return fail('Достигнут предел секций этого типа');
+    if ((ind.annexes ?? []).filter((a) => a.module === module && !a.automatic).length >= moduleLimit(module)) return fail('Достигнут предел секций этого типа');
     if (!inAnnexZone(ind, fp)) return fail('Секция должна быть рядом с предприятием');
     if (this.lotUnder(fp, 1)) return fail('Мешает площадка');
     if (this.enterprises.deposits.some((d) => d.used === undefined && dist(d.center, fp.center) < depositRadius(d) + footprintRadius(fp))) return fail('Мешает месторождение');
     const problem = this.outbuildingProblem(fp);
     if (problem) return fail(problem);
     if (cost > this.budget) return fail('Не хватает денег');
-    if (ind.fp.groundParts) {
+    if (ind.fp.groundParts || ind.annexes?.some((a) => a.roadOnly)) {
       const connection = this.industryModuleConnection(ind, fp);
       if (!connection) return fail('Нужен свободный проезд до секции');
       return { ok: true, cost, ...connection };
@@ -11815,8 +11816,8 @@ export class Game implements BuildContext {
     return { ok: true, cost, fp };
   }
 
-  buildAnnex(id: number, p: Vec, module: IndustryModule): string | null {
-    const plan = this.annexPlan(id, p, module);
+  buildAnnex(id: number, p: Vec, module: IndustryModule, rotation = 0): string | null {
+    const plan = this.annexPlan(id, p, module, rotation);
     const ind = this.industries.find((i) => i.id === id);
     if (!plan.ok || !plan.fp || !ind) return plan.reason ?? 'Нельзя';
     this.checkpoint('секция предприятия');
@@ -11824,7 +11825,7 @@ export class Game implements BuildContext {
     const a: Annex = { type: 'annex', id: this.nextEntityId++, industryId: ind.id, fp: plan.fp, module, ...(plan.connector && { connector: plan.connector }) };
     ind.annexes = [...(ind.annexes ?? []), a];
     this.index.add(a);
-    this.notify(`${ind.name}: построено — ${INDUSTRY_MODULES[module].name.toLowerCase()}`, '#2e9d57');
+    this.notify(`${ind.name}: построено — ${moduleName(ind, module).toLowerCase()}`, '#2e9d57');
     this.commit();
     return null;
   }
@@ -11837,7 +11838,7 @@ export class Game implements BuildContext {
       const join = other.connector?.[0];
       return other.id > a.id && join && road.slice(1).some((end, i) => dist(closestOnSegment(join, road[i], end).point, join) < 0.01);
     })) return 'Через этот проезд подключена другая секция';
-    this.checkpoint('снос секции');
+    this.checkpoint(a.roadOnly ? 'снос проезда' : 'снос секции');
     if (ind) {
       const previousCap = growthCap(ind);
       ind.annexes = (ind.annexes ?? []).filter((x) => x.id !== a.id);
@@ -11845,7 +11846,7 @@ export class Game implements BuildContext {
       if (cap < previousCap) ind.level = Math.min(ind.level ?? 1, Math.max(1, cap));
     }
     this.index.remove(a);
-    if (!a.automatic) this.refund(a.module ? INDUSTRY_MODULES[a.module].cost : ANNEX.cost);
+    if (!a.automatic) this.refund(annexCost(a));
     this.commit();
     return null;
   }

@@ -4,7 +4,7 @@ import { add, type Vec } from '../core/vec';
 import { annexHtml } from '../ui/annexUi';
 import type { Industry } from '../world/entities';
 import { INDUSTRY_MODULES, industryOutputCapacity, type IndustryModule } from '../world/industryModules';
-import { sitePoint } from '../world/industrySites';
+import { industryAccess, sitePoint } from '../world/industrySites';
 import { annexZone, growthCap, moduleEffect } from './annexes';
 import { Game } from './game';
 import { freshGame, stationAtIndustry, withoutCitizens } from './testkit';
@@ -122,5 +122,24 @@ describe('Секции предприятий', () => {
     expect(lf.annexes?.[0]).toMatchObject({ module: 'field', connector });
     expect(growthCap(lf)).toBe(ANNEX.base + 1);
     expect(loaded.structureAt(p)).toMatchObject({ type: 'annex', industryId: farm.id });
+    expect(annexHtml(lf)).toContain('data-action="ind-show-section"');
+  });
+
+  it('ручной проезд цепляется к сети предприятия, переживает загрузку и отмену', () => {
+    const { game, farm } = setup();
+    const entrance = industryAccess(farm.fp, farm.info.kind);
+    const space = [1.6, 1.4, 1.2].map((x) => sitePoint(farm.fp, [x, 0.335]))
+      .find((p) => game.industryRoadPlan(farm.id, entrance, p).ok)!;
+    expect(space).toBeDefined();
+    const plan = game.industryRoadPlan(farm.id, entrance, space);
+    const money = game.money;
+    expect(game.buildIndustryRoad(farm.id, entrance, space)).toBeNull();
+    expect(game.money).toBe(money - plan.cost);
+    expect(farm.annexes?.[0]).toMatchObject({ roadOnly: true, connector: plan.path });
+    expect(growthCap(farm)).toBe(ANNEX.base);
+    const reloaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
+    expect(reloaded.structureAt(plan.fp!.center)).toMatchObject({ type: 'annex', roadOnly: true });
+    expect(game.undo()).toBe('проезд предприятия');
+    expect(farm.annexes ?? []).toHaveLength(0);
   });
 });

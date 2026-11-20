@@ -1,16 +1,16 @@
 import type { IndustryKind } from '../world/cargo';
 import { INDUSTRY_ROAD_WIDTH } from '../world/industryCompound';
-import { isOpenPit } from '../world/industrySites';
+import { hasFields, hasPastures, isOpenPit } from '../world/industrySites';
 import type { Circuit, WorkPoint } from './industryEquipment';
 
-export const INDUSTRY_ASPHALT = '#858a90';
+const INDUSTRY_ASPHALT = '#858a90';
 export const INDUSTRY_DIRT = '#bdab88';
 
 const DIRT_SITES = new Set<IndustryKind>(['coalmine', 'goldmine', 'gemmine', 'oilwell', 'gasfield']);
 
-/** Грунт у горных выработок и скважин, светлый асфальт у остальных комплексов. */
+/** Грунт у выработок, скважин и полей, светлый асфальт у остальных комплексов. */
 export function industryRoadSurface(kind?: IndustryKind): string {
-  return kind && (isOpenPit(kind) || DIRT_SITES.has(kind)) ? INDUSTRY_DIRT : INDUSTRY_ASPHALT;
+  return kind && (isOpenPit(kind) || DIRT_SITES.has(kind) || hasFields(kind) || hasPastures(kind)) ? INDUSTRY_DIRT : INDUSTRY_ASPHALT;
 }
 
 /** Короткое скругление в углу, между углами — прямые отрезки. */

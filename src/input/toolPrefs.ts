@@ -50,7 +50,7 @@ const FIELDS = {
   stationTracks: intIn(R.minTracks, R.maxTracks),
   stationLength: intIn(R.minLength, R.maxLength, R.lengthStep),
   bulldozeMode: oneOf<BulldozeMode>({ point: 1, area: 1, lane: 1 }),
-  terrainMode: oneOf<TerraformMode>({ raise: 1, lower: 1, flatten: 1 }),
+  terrainMode: oneOf<TerraformMode>({ raise: 1, lower: 1, flatten: 1, smooth: 1 }),
   brushSize: oneOf<BrushSize>({ small: 1, medium: 1, large: 1 }),
 } satisfies { [K in keyof Controller]?: (v: unknown) => v is Controller[K] };
 

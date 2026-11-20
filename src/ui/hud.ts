@@ -287,6 +287,7 @@ const TERRAIN_SVG: Record<TerraformMode, string> = {
   raise: '<svg viewBox="0 0 32 24"><path d="M2 18h28" stroke-dasharray="2 2"/><path d="M2 18c6 0 8-10 14-10s8 10 14 10" /><path d="M16 15V4M12.5 7.5L16 4l3.5 3.5" /></svg>',
   lower: '<svg viewBox="0 0 32 24"><path d="M2 8h28" stroke-dasharray="2 2"/><path d="M2 8c6 0 8 10 14 10s8-10 14-10" /><path d="M16 5v11M12.5 12.5L16 16l3.5-3.5" /></svg>',
   flatten: '<svg viewBox="0 0 32 24"><path d="M2 18c5 0 6-10 11-10s6 10 11 4 4-4 6-4" stroke-dasharray="2 2"/><path d="M2 14h28" /></svg>',
+  smooth: '<svg viewBox="0 0 32 24"><path d="M2 18 10 8l5 2 4 7 5-8 6 3" stroke-dasharray="2 2"/><path d="M2 18c5-2 7-7 12-6s5 4 9 2l7-2" /></svg>',
 };
 
 const SPEEDS = [
@@ -1594,7 +1595,7 @@ export class Hud {
         this.linesCollapsed.on = !this.linesCollapsed.on;
         break;
       case 'terrain-mode':
-        c.setTerrainMode(d.id === 'lower' || d.id === 'flatten' ? d.id : 'raise');
+        c.setTerrainMode(d.id === 'lower' || d.id === 'flatten' || d.id === 'smooth' ? d.id : 'raise');
         break;
       case 'brush-size':
         c.setBrushSize(d.id === 'small' || d.id === 'large' ? d.id : 'medium');
@@ -1811,6 +1812,20 @@ export class Hud {
         const active = c.pendingOf('annex');
         if (active?.id === id && active.module === module) c.pending = null;
         else c.startAnnex(id, module);
+        break;
+      }
+      case 'ind-road': {
+        const id = Number(d.id);
+        if (c.pendingOf('industryRoad')?.id === id) c.pending = null;
+        else c.startIndustryRoad(id);
+        break;
+      }
+      case 'ind-rotate-section':
+        c.rotateAnnex();
+        break;
+      case 'ind-show-section': {
+        const section = g.industries.flatMap((ind) => ind.annexes ?? []).find((a) => a.id === Number(d.id));
+        if (section) c.showPlace(section.fp.center, footprintRadius(section.fp));
         break;
       }
       case 'st-warehouse': {
@@ -2259,13 +2274,14 @@ export class Hud {
     c.onChange();
   }
 
-  /** Рельеф: поднять, опустить или выровнять кистью; размер кисти. */
+  /** Режим и размер кисти рельефа. */
   private terrainOptionsHtml(): string {
     const c = this.controller;
     const mode = this.kindSwitch('Кисть', 'terrain-mode', c.terrainMode, [
       { id: 'raise', name: 'Поднять', svg: TERRAIN_SVG.raise, hint: 'Насыпать холм: зажмите и ведите' },
       { id: 'lower', name: 'Опустить', svg: TERRAIN_SVG.lower, hint: 'Срыть склон: ниже уровня воды не копается' },
       { id: 'flatten', name: 'Выровнять', svg: TERRAIN_SVG.flatten, hint: 'Выровнять к высоте там, где нажали — площадка под станцию или путь' },
+      { id: 'smooth', name: 'Сгладить', svg: TERRAIN_SVG.smooth, hint: 'Смягчить бугры, ямы и резкие переломы склона' },
     ]);
     const sizes = (Object.keys(BRUSH_SIZES) as BrushSize[])
       .map(
@@ -3776,6 +3792,7 @@ export class Hud {
       if (!ind) return '';
       const info = ind.info;
       const section = this.controller.pendingOf('annex');
+      const road = this.controller.pendingOf('industryRoad');
       // Рецепт значками с названиями; ниже — сырьё (склад, откуда везут), продукция (куда), чего не хватает.
       return `<section class="detail">${head(ind.name)}
         ${recipeBoxHtml(info)}
@@ -3792,7 +3809,7 @@ export class Hud {
         <div class="level-bar" data-tip="Уровень производства растёт, если продукцию регулярно вывозят; падает, если предприятие долго не обслуживают">
           <div style="width:${(((ind.level ?? 1) - 1) / 3) * 100}%"></div></div>
         ${industryRowsHtml(g, ind)}
-        ${ind.ruin || ind.build ? '' : annexHtml(ind, section?.id === ind.id ? section.module : undefined)}
+        ${ind.ruin || ind.build ? '' : annexHtml(ind, section?.id === ind.id ? section.module : undefined, road?.id === ind.id)}
         <p class="tip">Грузовой двор у технологического въезда соединяется с внутренней дорогой предприятия.</p>
         ${this.partnersHtml(g.partners(ind, 3))}</section>`;
     }
