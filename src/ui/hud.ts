@@ -5,7 +5,6 @@ import { curbNeed, platformCars, railStationFee, SAVE_VERSION, type Game, type L
 import { TEMPLATES } from '../game/interchange';
 import { defaultSaveName, type SaveEntry } from '../game/persist';
 import { saveFileText } from '../game/saveFile';
-import { hasStationGates } from '../game/stationAccess';
 import { addTemplates, fragmentToFile, getTemplate, hasRail, listTemplates, parseTemplateFile, templateFileName, templatesToFile } from '../game/templates';
 import {
   AUTO_FLEET,
@@ -3712,12 +3711,6 @@ export class Hud {
             data-action="st-drive" data-id="${st.id}" data-d="1" ${L < R.max ? '' : 'disabled'} data-tip="Выезд длиннее на ${R.step} м — станция дальше от дороги">+</button></span></div>`;
         } else if (st.side) {
           baysRow += `<div class="icon-row"><span class="lbl2">Как стоит</span><b class="st-kind" data-tip="Вдоль дороги: посты выходят прямо на карман у края улицы">${stationPlaceSvg('side', 24)}</b></div>`;
-        }
-        if (hasStationGates(st)) {
-          const nodes = g.stationRoadNodes(st);
-          const incoming = nodes.filter((id) => g.roads.graph.inLinks.has(id)).length;
-          const outgoing = nodes.filter((id) => g.roads.graph.outLinks.has(id)).length;
-          baysRow += `<div class="icon-row" data-tip="Подведите обычную дорогу к голубой точке. Односторонняя дорога к станции работает как въезд, от станции — как выезд."><span class="lbl2">Подъезды</span><b>Въезд ${incoming} · выезд ${outgoing}</b></div>`;
         }
       }
       // Пути ж/д станции: схема платформ и «+» — достроить ещё один путь (с ценой или причиной, почему нельзя).
