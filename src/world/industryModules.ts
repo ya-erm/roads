@@ -26,11 +26,6 @@ export function industryModules(ind: Industry): readonly IndustryModule[] {
   return [mainIndustryModule(ind), 'warehouse'];
 }
 
-export function moduleEffect(kind: IndustryModule): string {
-  const module = INDUSTRY_MODULES[kind];
-  return module.storage ? `+${module.storage} ед. запаса продукции` : `+${Math.round(module.rate * 100)}% к выпуску, +1 к пределу роста`;
-}
-
 export function industryModuleRate(ind: Industry): number {
   return 1 + (ind.annexes ?? []).reduce((rate, annex) => rate + (!annex.automatic && annex.module ? INDUSTRY_MODULES[annex.module].rate : 0), 0);
 }

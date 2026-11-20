@@ -1,7 +1,7 @@
 import { money } from '../core/moneyText';
-import { growthCap } from '../game/annexes';
+import { growthCap, moduleEffect } from '../game/annexes';
 import type { Industry } from '../world/entities';
-import { INDUSTRY_MODULES, industryModules, industryOutputCapacity, moduleEffect, type IndustryModule } from '../world/industryModules';
+import { INDUSTRY_MODULES, industryModules, industryOutputCapacity, type IndustryModule } from '../world/industryModules';
 
 /** Значок пристройки: здание с плюсом. */
 function annexSvg(size = 20): string {
@@ -19,7 +19,7 @@ export function annexHtml(ind: Industry, placing?: IndustryModule): string {
     const spec = INDUSTRY_MODULES[kind];
     const count = (ind.annexes ?? []).filter((a) => !a.automatic && a.module === kind).length;
     return `<button class="small annex-choice ${placing === kind ? 'active' : ''}" data-action="ind-annex" data-id="${ind.id}" data-module="${kind}" ${count >= 3 ? 'disabled' : ''}>
-      <span>${spec.name}<small>${moduleEffect(kind)}</small></span><b>${count >= 3 ? '3 из 3' : money(spec.cost)}</b></button>`;
+      <span>${spec.name}<small>${moduleEffect(ind, kind)}</small></span><b>${count >= 3 ? '3 из 3' : money(spec.cost)}</b></button>`;
   }).join('');
   return `<div class="annex-row">${annexSvg(19)}<b>Расширение комплекса</b></div>
     <div class="kv"><span>Предел роста</span><b>×${growthCap(ind)}</b><span>Запас продукции</span><b>${ind.output} / ${industryOutputCapacity(ind)}</b></div>

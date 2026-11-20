@@ -16,6 +16,15 @@ export function growthCap(ind: Industry): number {
   return Math.min(ind.cap ?? ECONOMY.maxLevel, ANNEX.base + (ind.annexes?.filter((a) => !a.automatic && a.module !== 'warehouse').length ?? 0));
 }
 
+export function moduleEffect(ind: Industry, kind: IndustryModule): string {
+  const module = INDUSTRY_MODULES[kind];
+  if (module.storage) return `+${module.storage} ед. запаса продукции`;
+  const max = ind.cap ?? ECONOMY.maxLevel;
+  const gain = Math.min(1, max - growthCap(ind));
+  const rate = `+${Math.round(module.rate * 100)}% к выпуску`;
+  return gain > 0 ? `${rate}, +${gain} к пределу роста` : rate;
+}
+
 /** Докуда от центра предприятия можно ставить пристройки. */
 export function annexZone(ind: Industry): number {
   return outbuildingZone(ind.fp, ind.fp.groundParts ? 170 : 125);

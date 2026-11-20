@@ -1,7 +1,7 @@
 import { ANNEX, CONSTRUCTION, COST, RAIL_STATION, SNAP_PIXELS, STATION, STORAGE } from '../config';
 import { warehouseZone } from '../game/warehouses';
-import { annexZone } from '../game/annexes';
-import { INDUSTRY_MODULES, moduleEffect, type IndustryModule } from '../world/industryModules';
+import { annexZone, moduleEffect } from '../game/annexes';
+import { INDUSTRY_MODULES, type IndustryModule } from '../world/industryModules';
 import { CurveLUT, minRadius, offsetCubic, straightCubic } from '../core/bezier';
 import { add, angleOf, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { DrawMode, NetKind, RoadRequest, Snap } from '../game/build';
@@ -4528,7 +4528,7 @@ export class Controller {
           o.catchmentR = annexZone(ind);
           if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
           o.label = plan.ok
-            ? { text: `${INDUSTRY_MODULES[w.module].name} · ${moduleEffect(w.module)} · ${money(plan.cost)}`, ok: true }
+            ? { text: `${INDUSTRY_MODULES[w.module].name} · ${moduleEffect(ind, w.module)} · ${money(plan.cost)}`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }

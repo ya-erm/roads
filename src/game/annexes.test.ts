@@ -5,7 +5,7 @@ import { annexHtml } from '../ui/annexUi';
 import type { Industry } from '../world/entities';
 import { INDUSTRY_MODULES, industryOutputCapacity, type IndustryModule } from '../world/industryModules';
 import { sitePoint } from '../world/industrySites';
-import { annexZone, growthCap } from './annexes';
+import { annexZone, growthCap, moduleEffect } from './annexes';
 import { Game } from './game';
 import { freshGame, stationAtIndustry, withoutCitizens } from './testkit';
 
@@ -59,6 +59,8 @@ describe('Секции предприятий', () => {
     expect(Math.abs(game.industryRate(farm) - rate * 1.25)).toBeLessThanOrEqual(1);
     expect(growthCap(farm)).toBe(ANNEX.base + 1);
     expect(game.structureAt(p)).toMatchObject({ type: 'annex', industryId: farm.id, module: 'field' });
+    farm.cap = ANNEX.base + 1;
+    expect(moduleEffect(farm, 'field')).toBe('+25% к выпуску');
   });
 
   it('не даёт построить секцию неподходящего типа, вдали и поверх фермы', () => {
