@@ -1,4 +1,5 @@
 import { closestOnSegment, segSegDist, type Vec } from '../core/vec';
+import type { CompoundPlan } from './industryCompound';
 
 /** Нормированные координаты внутри участка. Части могут выходить за размеры базовой сцены w × h. */
 export type Plot = readonly Vec[];
@@ -12,6 +13,7 @@ export interface Footprint {
   parts?: readonly Plot[];
   /** Число площадок без технологических проездов в начале списка частей. */
   groundParts?: number;
+  compound?: CompoundPlan;
 }
 
 export function footprintRadius(f: Footprint): number {

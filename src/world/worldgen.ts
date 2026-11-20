@@ -5,7 +5,7 @@ import { add, angleOf, dist, dot, lerp, norm, scale, sub, Vec } from '../core/ve
 import { edgesAt } from '../lanes/geometry';
 import { Corridor, LaneNet, LaneNode, LaneSlot, twoWay } from '../lanes/model';
 import { biomeOf, townCargo } from './biomes';
-import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST, type IndustryKind } from './cargo';
+import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST, type IndustryKind, type IndustryType } from './cargo';
 import { placePlayerWorld } from './deposits';
 import type { Deposit, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
@@ -13,7 +13,7 @@ import { lotClearOfRoads } from './lotClear';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN, WALK_EDGE } from './roadTypes';
 import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerIndustries, townCount, townSizes, WorldProfile, WorldSettings } from './settings';
 import { industryCount, MINING_KINDS, shoreFits, shoreSpot, terrainFits } from './sites';
-import { industryFootprint } from './industrySites';
+import { compoundOnLand, hasFields, hasPastures, industryFootprint } from './industrySites';
 import { Footprint, footprintAlong, footprintCorners, footprintRadius, FootprintIndex, pointInFootprint } from './spatial';
 import { layStartRoads } from './startRoads';
 import { edgeOf, growTier, hospitalBays, hospitalWidth, inDistrict, jobsOf, LANDMARK_YARD, mergeBlocks, mergeTowers, residentsOf, SETTLE_RULE, tierOfSize, townTier, yardOf, zoneTown } from './townForms';
@@ -410,15 +410,13 @@ function placeProfiled(ctx: WorldContext, towns: Town[], density: number, profil
         id: ctx.nextId(),
         info,
         name: nearest ? `${info.name} (${nearest.name})` : info.name,
-        fp: best.fp,
+        fp: compoundAt(ctx, info, best.fp),
         stock: {},
         output: 0,
         producedMonth: 0,
         producedLast: 0,
         prodAcc: 0,
       };
-      const territory = industryFootprint(info, best.fp.center, best.fp.angle, industry.id);
-      if (!terrain.isWater(territory.center, footprintRadius(territory) + 5) && !index.overlaps(territory, 20) && clearOfRoads(ctx, territory, 8)) industry.fp = territory;
       index.add(industry);
       result.push(industry);
       if (info.kind === 'forest') terrain.addForest(best.fp.center, 220, rng);
@@ -1289,6 +1287,16 @@ function townClearance(ctx: WorldContext, towns: Town[]): (p: Vec, kind: Industr
 /** Рыбаки — не ближе стольких метров к краю застройки (остальные — INDUSTRY_TOWN_GAP). */
 const FISHERY_TOWN_GAP = 100;
 
+function compoundAt(ctx: WorldContext, info: IndustryType, fallback: Footprint): Footprint {
+  const { angle, center } = fallback;
+  const angles = hasFields(info.kind) || hasPastures(info.kind) ? [angle, angle + Math.PI, angle + Math.PI / 2, angle - Math.PI / 2] : [angle];
+  for (const facing of angles) {
+    const fp = industryFootprint(info, center, facing);
+    if (compoundOnLand(fp, ctx.terrain) && !ctx.index.overlaps(fp, 20) && clearOfRoads(ctx, fp, 8)) return fp;
+  }
+  return fallback;
+}
+
 function placeIndustries(ctx: WorldContext, towns: Town[], density: number, settings: WorldSettings): Industry[] {
   const { rng, terrain, index } = ctx;
   const result: Industry[] = [];
@@ -1318,15 +1326,13 @@ function placeIndustries(ctx: WorldContext, towns: Town[], density: number, sett
           id: ctx.nextId(),
           info,
           name: nearest ? `${info.name} (${nearest.name})` : info.name,
-          fp,
+          fp: compoundAt(ctx, info, fp),
           stock: {},
           output: 0,
           producedMonth: 0,
           producedLast: 0,
           prodAcc: 0,
         };
-        const territory = industryFootprint(info, fp.center, fp.angle, industry.id);
-        if (!terrain.isWater(territory.center, footprintRadius(territory) + 5) && !index.overlaps(territory, 20) && clearOfRoads(ctx, territory, 8)) industry.fp = territory;
         index.add(industry);
         result.push(industry);
         if (info.kind === 'forest') terrain.addForest(center, 220, rng);

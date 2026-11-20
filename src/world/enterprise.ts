@@ -262,5 +262,5 @@ export function depositAt(deposits: readonly Deposit[], p: Vec, slack = 0): Depo
 
 /** Участок предприятия вида info на месторождении: ровно по центру и повороту участка. */
 export function depositFootprint(d: Deposit, info: Pick<IndustryType, 'w' | 'h'>): Footprint {
-  return { center: { ...d.center }, w: info.w, h: info.h, angle: d.angle, ...(d.parts && { parts: d.parts, groundParts: d.groundParts }) };
+  return { center: { ...d.center }, w: info.w, h: info.h, angle: d.angle, ...(d.parts && { parts: d.parts, groundParts: d.groundParts, compound: d.compound }) };
 }

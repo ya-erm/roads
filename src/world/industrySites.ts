@@ -1,7 +1,9 @@
 import { hash } from '../core/math';
 import { lerp, type Vec } from '../core/vec';
 import type { IndustryKind, IndustryType } from './cargo';
+import { farmCompound, sectionPlot, worksCompound } from './industryCompound';
 import type { Footprint, Plot } from './spatial';
+import type { Terrain } from './terrain';
 
 type Bounds = readonly [x: number, y: number, w: number, h: number];
 type Corner = readonly [number, number];
@@ -34,11 +36,6 @@ const FIELD_BOUNDS: readonly Bounds[] = [[-1.36, -0.54, 1.18, 0.82], [-0.9, 0.38
 const COMPACT_FIELDS: readonly Bounds[] = [[-0.49, -0.47, 0.42, 0.45], [-0.48, 0.01, 0.40, 0.46], [-0.045, -0.45, 0.18, 0.89]];
 const FARMYARD = plot([[-0.10, -0.22], [0.02, -0.43], [0.25, -0.52], [0.47, -0.48], [0.54, -0.13], [0.48, 0.29],
   [0.45, 0.48], [0.17, 0.52], [0.03, 0.35], [-0.09, 0.20]]);
-const FIELD_ACCESS = plot([[-0.24, 0.02], [-0.07, 0.015], [0.09, 0.12], [0.06, 0.18], [-0.08, 0.075], [-0.24, 0.08]], 0.22);
-const PASTURES = [
-  plot([[-1.11, -0.33], [-0.83, -0.53], [-0.45, -0.59], [-0.16, -0.43], [-0.22, -0.12], [-0.41, 0.07], [-0.74, 0.14], [-1.03, 0.02]]),
-  plot([[-0.88, 0.38], [-0.61, 0.18], [-0.28, 0.12], [-0.08, 0.23], [-0.05, 0.62], [-0.30, 0.88], [-0.61, 0.94], [-0.85, 0.74]]),
-];
 
 /** Отдельные поля с криволинейной межой. В старых партиях остаются в границах исходного участка. */
 export function farmFields(seed: number, extended: boolean): readonly Plot[] {
@@ -53,11 +50,7 @@ export function farmFields(seed: number, extended: boolean): readonly Plot[] {
 
 const PIT = plot([[-0.99, -0.24], [-0.71, -0.53], [-0.45, -0.62], [-0.10, -0.47], [0.32, -0.52], [0.54, -0.33],
   [0.56, 0.35], [0.31, 0.54], [-0.04, 0.47], [-0.31, 0.63], [-0.70, 0.49], [-0.95, 0.32]], 0.27);
-const SETTLING = plot([[-0.98, 0.55], [-0.76, 0.60], [-0.66, 0.83], [-0.79, 1.03], [-1.11, 0.96], [-1.23, 0.77]], 0.43);
 const WORKS = plot([[-0.52, -0.51], [0.52, -0.51], [0.52, 0.51], [-0.52, 0.51]], 0.043);
-const BULK_YARD = plot([[-0.96, -0.43], [-0.55, -0.43], [-0.55, 0.30], [-0.96, 0.30]], 0.12);
-const POWER_YARD = plot([[0.55, -0.44], [0.94, -0.44], [0.94, 0.28], [0.55, 0.28]], 0.12);
-const PACKING_YARD = plot([[-0.86, -0.10], [-0.55, -0.10], [-0.55, 0.44], [-0.86, 0.44]], 0.11);
 const FOREST = plot([[-0.75, -0.40], [-0.31, -0.63], [-0.12, -0.39], [0.39, -0.48], [0.56, -0.14],
   [0.41, 0.16], [0.52, 0.49], [0.16, 0.60], [-0.13, 0.43], [-0.58, 0.47], [-0.85, 0.21]]);
 const FIELD_ANNEX = plot([[-0.54, -0.12], [-0.41, -0.42], [-0.04, -0.53], [0.42, -0.45], [0.56, -0.16],
@@ -94,7 +87,8 @@ const POWER_ROADS: ServiceRoads = {
   branches: [...WORKS_ROADS.branches, [[0.73, 0.57], [0.76, 0.36], [0.76, 0.27]]],
 };
 
-export function industryServiceRoads(kind: IndustryKind): ServiceRoads {
+export function industryServiceRoads(kind: IndustryKind, fp?: Footprint): ServiceRoads {
+  if (fp?.compound) return fp.compound;
   if (hasFields(kind) || hasPastures(kind)) return FARM_ROADS;
   if (hasPowerYard(kind)) return POWER_ROADS;
   return isOpenPit(kind) ? MINE_ROADS : WORKS_ROADS;
@@ -107,7 +101,7 @@ export function sitePoint(fp: Footprint, [x, y]: Corner): Vec {
 }
 
 export function industryAccess(fp: Footprint, kind: IndustryKind): Vec {
-  const route = industryServiceRoads(kind).main;
+  const route = industryServiceRoads(kind, fp).main;
   return sitePoint(fp, route[route.length - 1]);
 }
 
@@ -137,17 +131,26 @@ export function annexPlots(kind: IndustryKind): readonly Plot[] {
 }
 
 /** w и h задают масштаб цехов. Земля резервируется отдельными контурами вокруг них. */
-export function industryFootprint(info: IndustryType, center: Vec, angle: number, seed = 0): Footprint {
+export function industryFootprint(info: IndustryType, center: Vec, angle: number): Footprint {
   const { kind, w, h } = info;
-  let parts: readonly Plot[] = [WORKS];
-  if (hasFields(kind)) parts = [FARMYARD, ...farmFields(seed, true), FIELD_ACCESS];
-  else if (hasPastures(kind)) parts = [FARMYARD, ...PASTURES];
-  else if (isOpenPit(kind)) parts = [PIT, SETTLING];
-  else if (hasBulkYard(kind)) parts = [WORKS, BULK_YARD];
-  else if (hasPowerYard(kind)) parts = [WORKS, POWER_YARD];
-  else if (kind === 'forest') parts = [FOREST];
-  else if (info.accepts.length) parts = [WORKS, PACKING_YARD];
+  const rural = hasFields(kind) || hasPastures(kind);
+  const core = rural ? FARMYARD : isOpenPit(kind) ? PIT : kind === 'forest' ? FOREST : WORKS;
+  const compound = rural ? farmCompound(hasPastures(kind)) : worksCompound(info, isOpenPit(kind), hasPowerYard(kind));
+  // Цвет и детали посадок остаются детерминированными по ID, геометрия дороги не зависит от номера попытки размещения.
+  const parts = [core, ...compound.sections.map(sectionPlot)];
   const groundParts = parts.length;
-  const roads = industryServiceRoads(kind);
-  return { center, w, h, angle, groundParts, parts: [...parts, ...[roads.main, ...roads.branches].flatMap((road) => roadPlots(road, w, h))] };
+  return { center, w, h, angle, groundParts, compound, parts: [...parts, ...[compound.main, ...compound.branches].flatMap((road) => roadPlots(road, w, h))] };
+}
+
+/** У берега проверяем землю по отдельным участкам, включая проезды. */
+export function compoundOnLand(fp: Footprint, terrain: Terrain): boolean {
+  return !!fp.parts && fp.parts.every((part) => {
+    const left = Math.min(...part.map((p) => p.x));
+    const right = Math.max(...part.map((p) => p.x));
+    const top = Math.min(...part.map((p) => p.y));
+    const bottom = Math.max(...part.map((p) => p.y));
+    const center = sitePoint(fp, [(left + right) / 2, (top + bottom) / 2]);
+    const reach = Math.hypot((right - left) * fp.w, (bottom - top) * fp.h) / 2 + 5;
+    return terrain.inBounds(center, reach) && !terrain.isWater(center, reach);
+  });
 }

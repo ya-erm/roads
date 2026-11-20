@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { COST, STATION } from '../config';
-import { add, dist, scale, Vec } from '../core/vec';
+import { add, dist, dot, scale, sub, Vec } from '../core/vec';
 import { twoWay, type Corridor, type LaneNode } from '../lanes/model';
 import { RoadTools } from '../input/roadtools';
 import type { Station, TownBuilding } from '../world/entities';
 import { ROAD_PRESETS, specKmh, type RoadSpec } from '../world/roadTypes';
-import { type Footprint, footprintRadius } from '../world/spatial';
+import { type Footprint, footprintRadius, footprintSide } from '../world/spatial';
 import { fillStreet, nearHighway, type WorldContext } from '../world/worldgen';
 import { DEFAULT_RULE } from './transport';
 import { Game } from './game';
@@ -367,7 +367,10 @@ describe('Станции', () => {
         const p = { x: ind.fp.center.x + Math.cos(a) * reach, y: ind.fp.center.y + Math.sin(a) * reach };
         const clean = game.stationPlan(p, 14);
         if (!clean.ok || clean.industryId !== ind.id) continue;
-        const house = addHouse(game, { center: clean.fp!.center, w: 8, h: 8, angle: clean.fp!.angle });
+        const fp = clean.fp!;
+        const facing = { x: Math.sin(fp.angle), y: -Math.cos(fp.angle) };
+        // Дом в задней части двора мешает даже компактной площадке.
+        const house = addHouse(game, { center: add(fp.center, scale(facing, 6 - fp.h / 2)), w: 8, h: 8, angle: fp.angle });
         const plan = game.stationPlan(p, 14);
         expect(plan.ok).toBe(true);
         expect(plan.demolish).toContain(house.id);
@@ -616,7 +619,7 @@ describe('Перенос станции', { timeout: 60_000 }, () => {
       expect(dock.industryId).toBe(ind.id);
       expect(dock.bays).toBe(4);
       expect(dock.cargo).toMatchObject({ wood: 5 });
-      expect(dist(dock.fp.center, ind.fp.center)).toBeLessThan(ind.fp.h / 2 + 30);
+      expect(dot(sub(dock.fp.center, ind.fp.center), v)).toBeCloseTo(footprintSide(ind.fp, v) + 3 + dock.fp.h / 2);
       expect(net().nodes.has(node0)).toBe(false);
       // Грузовик заезжает на новый двор.
       expect(untilLoadingAt(game, line.vehicles[0], dock.id)).toBe(true);

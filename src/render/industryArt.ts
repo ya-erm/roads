@@ -2,9 +2,12 @@ import { hash } from '../core/math';
 import type { CargoType, IndustryKind, IndustryType } from '../world/cargo';
 import { harmClass } from '../world/enterprise';
 import type { Industry } from '../world/entities';
+import { sectionPlot } from '../world/industryCompound';
 import { farmFields, hasBulkYard, hasPowerYard, industryServiceRoads, isOpenPit } from '../world/industrySites';
 import { type Footprint, type Plot, pointInPolygon } from '../world/spatial';
-import { type Circuit, type Equipment, paintEquipment, traceCircuit } from './industryEquipment';
+import { type Circuit, type Equipment, paintEquipment } from './industryEquipment';
+import { drawIndustrialGate, drawIndustrialRoads } from './industryRoadArt';
+import { paintIndustrySection } from './industrySectionArt';
 import { industrySitePath, tracePlot } from './industrySite';
 
 /** «r,g,b» темнее на долю k — дым вредных производств. Кэш — без новых строк в каждом кадре. */
@@ -251,6 +254,7 @@ export class Art {
   pass: Pass = 0;
   site?: IndustryType;
   siteParts?: readonly Plot[];
+  compound = false;
   /** 0 — издалека, только крупные массы; 1 — с тенями; 2 — все мелочи и анимация. */
   readonly lod: number;
   readonly d: boolean;
@@ -435,16 +439,8 @@ export class Art {
   }
 
   /** Укатанный проезд внутри участка, по нему ходит техника. */
-  drive(route: Circuit, dirt: string, edge: string): void {
-    if (this.pass !== 0) return;
-    const c = this.c;
-    traceCircuit(c, route, false);
-    c.strokeStyle = edge;
-    c.lineWidth = 6.5;
-    c.stroke();
-    c.strokeStyle = dirt;
-    c.lineWidth = 4.6;
-    c.stroke();
+  drive(route: Circuit): void {
+    if (this.pass === 0) drawIndustrialRoads(this.c, [route]);
   }
 
   stain(x: number, y: number, rx: number, ry: number, color: string, i: number, jit = 0.2, edge?: string): void {
@@ -520,6 +516,7 @@ export class Art {
 
   fence(W: number, H: number, color: string): void {
     if (this.pass !== 0 || !this.d) return;
+    if (this.compound) return;
     // У полей и открытой добычи ограды стоят вокруг отдельных загонов и дворов.
     if (this.site && !this.site.accepts.length) return;
     const c = this.c;
@@ -1181,7 +1178,19 @@ function cropsOn(a: Art, ind: Industry, plot: Plot, index: number, colors: Field
   c.strokeStyle = colors[1];
   c.lineWidth = 0.9;
   c.beginPath();
-  if (index === 1) {
+  if (ind.fp.compound) {
+    const vertical = index === 1;
+    const span = vertical ? w : h;
+    for (let row = 1.4; row < span; row += 2.8) {
+      if (vertical) {
+        c.moveTo(x + row, y);
+        c.lineTo(x + row, y + h);
+      } else {
+        c.moveTo(x, y + row);
+        c.lineTo(x + w, y + row);
+      }
+    }
+  } else if (index === 1) {
     for (let row = x; row <= x + w + 5; row += 2.5) {
       c.moveTo(row, y - 1);
       c.quadraticCurveTo(row - 1.5, y + h / 2, row - 6, y + h + 1);
@@ -1198,6 +1207,7 @@ function cropsOn(a: Art, ind: Industry, plot: Plot, index: number, colors: Field
 }
 
 function farmPlots(ind: Industry): readonly Plot[] {
+  if (ind.fp.compound) return ind.fp.compound.sections.filter((part) => part.kind === 'field').map(sectionPlot);
   return ind.fp.parts?.slice(1, 4) ?? farmFields(ind.id, false);
 }
 
@@ -1222,10 +1232,8 @@ function farm(a: Art, ind: Industry): void {
   const f2 = crops[1 + k2];
   const f3 = crops[1 + ((k2 + 1 + Math.floor(a.r(2) * 2)) % 3)];
   if (a.pass === 0) {
-    const [north, south, strip] = farmPlots(ind);
-    cropsOn(a, ind, north, 0, crops[0]);
-    cropsOn(a, ind, south, 1, f2);
-    cropsOn(a, ind, strip, 2, f3);
+    const varieties = [crops[0], f2, f3];
+    farmPlots(ind).forEach((field, i) => cropsOn(a, ind, field, i % 3, varieties[i % 3]));
   }
   farmyard(a, ind);
 
@@ -1297,8 +1305,8 @@ const ORE_HAUL: Circuit = [[24, 24], [9, 27], [-6, 26], [-18, 20], [-18, 13], [-
 const STONE_HAUL: Circuit = [[24, 25], [13, 31], [0, 28], [-9, 22], [-11, 12]];
 const SOFT_HAUL: Circuit = [[24, 24], [12, 30], [-5, 30], [-21, 25], [-28, 13]];
 
-function haulRoad(a: Art, route: Circuit, dirt: string, edge: string, load: string): void {
-  a.drive(route, dirt, edge);
+function haulRoad(a: Art, route: Circuit, load: string): void {
+  a.drive(route);
   a.equipment({ kind: 'haul', route, color: '#dfad39', load }, ...route[0]);
 }
 
@@ -1317,7 +1325,7 @@ function ironmine(a: Art, ind: Industry): void {
   const pit = ['#b98a6c', '#a87858', '#946648', '#7d5539'];
   mineBenches(a, ind, -14, 2, 28, 33, pit, 7);
   a.stain(-22, 3, 4, 3, '#86a3ad', 9, 0.2);
-  haulRoad(a, ORE_HAUL, '#ccb293', '#9d785a', ore);
+  haulRoad(a, ORE_HAUL, ore);
   a.track(16, 37, 44, 37);
   a.fence(90, 80, '#8a8f96');
 
@@ -1355,7 +1363,7 @@ function quarry(a: Art, ind: Industry): void {
   }
   a.rows(-24, -11, 13, 23, 5, 'rgba(60,60,60,0.23)', false, 0.6);
   a.rows(-24, -11, 13, 23, 5, 'rgba(60,60,60,0.23)', true, 0.6);
-  haulRoad(a, STONE_HAUL, '#d7ccba', '#aca093', '#c3bdb1');
+  haulRoad(a, STONE_HAUL, '#c3bdb1');
 
   const lv = a.level;
   for (let k = 0; k < Math.min(12, 3 + 2 * lv); k++) a.box(22 + (k % 3) * 8, -40 + Math.floor(k / 3) * 7, 6, 5, 3.5, '#e0dcd3');
@@ -1582,6 +1590,7 @@ export function herd(a: Art, x: number, y: number, w: number, h: number, n: numb
 }
 
 function pasture(a: Art, ind: Industry, sheep: boolean): void {
+  if (ind.fp.compound) return;
   const { w, h } = ind.info;
   const c = a.c;
   const fields = ind.fp.parts!.slice(1, 3);
@@ -1655,7 +1664,7 @@ function sandpit(a: Art, ind: Industry): void {
   const pit = ['#e4d2a4', '#d8c08c', '#cbae76', '#bc9d64'];
   mineBenches(a, ind, -16, 2, 30, 33, pit, 5);
   a.stain(-13, 6, 14, 13, '#7fa9b8', 8, 0.18, '#a9c7d1');
-  haulRoad(a, SOFT_HAUL, '#e1cda6', '#b99e72', sand);
+  haulRoad(a, SOFT_HAUL, sand);
   a.pipe(-10, 4, 20, -14, '#5c5f66', 1);
   a.fence(100, 80, '#8a8f96');
 
@@ -1804,10 +1813,10 @@ interface Crop {
 function cropFarm(a: Art, ind: Industry, crop: Crop): void {
   const lv = a.level;
   if (a.pass === 0) {
-    const [north, south, strip] = farmPlots(ind);
-    cropsOn(a, ind, north, 0, crop.field, crop.dot);
-    cropsOn(a, ind, south, 1, crop.ripe);
-    cropsOn(a, ind, strip, 2, crop.field, crop.dot);
+    farmPlots(ind).forEach((field, i) => {
+      const ripe = i % 3 === 1;
+      cropsOn(a, ind, field, i % 3, ripe ? crop.ripe : crop.field, ripe ? undefined : crop.dot);
+    });
     if (crop.canal && !ind.fp.parts) {
       a.patch(-52, -2.6, 65, 2.2, '#86b3cf');
       a.patch(-7.4, -37, 2.2, 74, '#86b3cf');
@@ -1956,7 +1965,7 @@ function claypit(a: Art, ind: Industry): void {
   const pit = ['#d3a07a', '#c38963', '#b0744f', '#9c6140'];
   mineBenches(a, ind, -16, 2, 30, 33, pit, 6);
   a.stain(-12, 8, 9, 7, '#9db5a6', 12, 0.2, '#b9cbbf');
-  haulRoad(a, SOFT_HAUL, '#c9aa8d', '#a27c5f', clay);
+  haulRoad(a, SOFT_HAUL, clay);
   a.fence(100, 80, '#8a8f96');
 
   const lv = a.level;
@@ -2021,7 +2030,7 @@ function coppermine(a: Art, ind: Industry): void {
   const pit = ['#a9b2a0', '#98a290', '#879180', '#748070'];
   mineBenches(a, ind, -16, 4, 30, 37, pit, 8);
   a.stain(-12, 9, 5, 3.6, '#5fae9e', 9, 0.2);
-  haulRoad(a, ORE_HAUL, '#b3b6a0', '#858e7d', ore);
+  haulRoad(a, ORE_HAUL, ore);
   a.track(16, 41, 46, 41);
   a.fence(100, 90, '#8a8f96');
 
@@ -2355,7 +2364,11 @@ export function industryGround(info: IndustryType): string {
 
 function industryScene(a: Art, ind: Industry): void {
   const { kind, w, h } = ind.info;
-  if (ind.fp.parts) {
+  if (ind.fp.compound) {
+    ind.fp.compound.sections.forEach((section, i) => {
+      if (section.kind !== 'field') paintIndustrySection(a, section, w, h, ind.info.produces, ind.info.roof, 700 + i * 80);
+    });
+  } else if (ind.fp.parts) {
     if (isOpenPit(kind)) {
       const rock = ind.info.color;
       a.stain(-0.65 * w, 0.25 * h, 0.19 * w, 0.12 * h, shade(rock, -0.16), 710, 0.23);
@@ -2392,12 +2405,22 @@ function industryScene(a: Art, ind: Industry): void {
     }
   }
   SCENES[kind](a, ind);
-  if (ind.fp.groundParts && a.pass === 0) {
-    const roads = industryServiceRoads(kind);
-    const dirt = ind.info.accepts.length ? '#bbb8aa' : '#d2c29c';
-    const edge = ind.info.accepts.length ? '#a09f94' : '#aa9b79';
-    for (const route of [...roads.branches, roads.main]) a.drive(route.map(([x, y]) => [x * w, y * h]), dirt, edge);
+}
+
+function compoundRoads(a: Art, ind: Industry): void {
+  if (!ind.fp.groundParts) return;
+  const { kind, w, h } = ind.info;
+  const { main, branches } = industryServiceRoads(kind, ind.fp);
+  drawIndustrialRoads(a.c, [main, ...branches].map((route) => route.map(([x, y]) => [x * w, y * h])));
+  if (!a.lod || !ind.fp.compound) return;
+  for (const section of ind.fp.compound.sections) {
+    const gate = section.gate;
+    if (!gate || section.kind === 'field') continue;
+    const [x, y] = gate;
+    const across = x === section.bounds[0] || x === section.bounds[2];
+    drawIndustrialGate(a.c, x * w, y * h, across ? 0 : Math.PI / 2);
   }
+  if (ind.info.accepts.length) drawIndustrialGate(a.c, 0.13 * w, 0.51 * h, Math.PI / 2);
 }
 
 /**
@@ -2409,7 +2432,8 @@ export function drawIndustryArt(ctx: CanvasRenderingContext2D, ind: Industry, zo
   const a = new Art(ctx, ind, zoom, time, ind.id, layer);
   a.site = info;
   a.siteParts = ind.fp.parts?.slice(0, ind.fp.groundParts);
-  paintScene(ctx, a, ind.fp, info.w, info.h, industryGround(info), industryScene, ind);
+  a.compound = !!ind.fp.compound;
+  paintScene(ctx, a, ind.fp, info.w, info.h, industryGround(info), industryScene, ind, compoundRoads);
   return a.moved;
 }
 
@@ -2441,6 +2465,7 @@ export function paintScene<T>(
   ground: string,
   scene: (a: Art, arg: T) => void,
   arg: T,
+  afterGround?: (a: Art, arg: T) => void,
 ): void {
   // Запись излучателей: сцена — вхолостую (холст a.c лишь следит за преобразованием), и только проход построек.
   const motion = a.recording;
@@ -2474,6 +2499,7 @@ export function paintScene<T>(
         outline();
         ctx.stroke();
       }
+      afterGround?.(a, arg);
     } else if (pass === 1) {
       ctx.beginPath();
       scene(a, arg);

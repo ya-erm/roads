@@ -1,165 +1,124 @@
 import { describe, expect, it } from 'vitest';
-import { ANNEX, COST, ECONOMY } from '../config';
-import { add, scale, type Vec } from '../core/vec';
-import type { Industry } from '../world/entities';
-import { footprintRadius } from '../world/spatial';
+import { ANNEX, COST, MONTH_LENGTH } from '../config';
+import { add, type Vec } from '../core/vec';
 import { annexHtml } from '../ui/annexUi';
-import { annexReady, annexZone, growthCap } from './annexes';
+import type { Industry } from '../world/entities';
+import { INDUSTRY_MODULES, industryOutputCapacity, type IndustryModule } from '../world/industryModules';
+import { sitePoint } from '../world/industrySites';
+import { annexZone, growthCap } from './annexes';
 import { Game } from './game';
-import { freightRoute, freshGame, withoutCitizens } from './testkit';
+import { freshGame, stationAtIndustry, withoutCitizens } from './testkit';
 
-/** Ферма с маршрутом (её продукцию вывозят) — как после месяцев исправной работы. */
 function setup() {
   const game = withoutCitizens(freshGame(7));
   game.money = 5_000_000;
-  const { built, line, from } = freightRoute(game);
-  expect(built).toBe(true);
-  game.buyVehicle(line.id, 'truck');
-  return { game, farm: from };
+  const farm = game.industries.find((i) => i.info.kind === 'farm')!;
+  return { game, farm };
 }
 
-/** Упёрлась в предел и месяц продукцию вывозили — готова к расширению. */
-function ready(farm: Industry) {
-  farm.level = growthCap(farm);
-  farm.streak = ECONOMY.growthMonths;
-}
-
-/** Первое место вокруг предприятия, где пристройка ставится. */
-function freeSpot(game: Game, ind: Industry): Vec {
-  for (const extra of [0.6, 0.75, 0.9]) {
-    const d = footprintRadius(ind.fp) + (annexZone(ind) - footprintRadius(ind.fp)) * extra;
-    for (let k = 0; k < 64; k++) {
-      const a = (k / 64) * Math.PI * 2;
-      const p = add(ind.fp.center, scale({ x: Math.cos(a), y: Math.sin(a) }, d));
-      if (game.annexPlan(ind.id, p).ok) return p;
+function freeSpot(game: Game, ind: Industry, kind: IndustryModule): Vec {
+  for (let y = -2.9; y <= 2.7; y += 0.19) {
+    for (let x = -3.6; x <= 2.5; x += 0.19) {
+      const p = sitePoint(ind.fp, [x, y]);
+      if (game.annexPlan(ind.id, p, kind).ok) return p;
     }
   }
-  throw new Error('Нет места под пристройку');
+  throw new Error('Нет подходящего участка с подъездом');
 }
 
-/** Конец месяца: рост предприятий по тому, как вывозили продукцию. */
 const grow = (game: Game) => (game as unknown as { growIndustries(): void }).growIndustries();
 
-describe('Пристройки предприятий', () => {
-  it('само предприятие растёт только до ×2: дальше — предел, пока нет пристройки', () => {
+describe('Секции предприятий', () => {
+  it('естественный рост ограничен ×2 без производственных секций', () => {
     const { game, farm } = setup();
+    expect(stationAtIndustry(game, farm, sitePoint(farm.fp, [2, 0.29]))).toBeDefined();
+    (game as unknown as { routed(): boolean }).routed = () => true;
     farm.level = 1.75;
     farm.streak = 1;
-    farm.producedLast = 40;
-    farm.piledMonth = 0;
-    grow(game);
+    for (let i = 0; i < 5; i++) {
+      farm.producedLast = 40;
+      farm.piledMonth = 0;
+      grow(game);
+    }
     expect(farm.level).toBe(ANNEX.base);
-    const grown = farm.annexes?.find((a) => a.automatic);
-    expect(grown?.fp.parts).toBeDefined();
-    expect(game.structureAt(grown!.fp.center)).toMatchObject({ type: 'annex', industryId: farm.id, automatic: true });
     expect(growthCap(farm)).toBe(ANNEX.base);
-    for (let m = 0; m < 3; m++) {
-      farm.producedLast = 40;
-      farm.piledMonth = 0;
-      grow(game);
-    }
-    expect(farm.level).toBe(ANNEX.base);
-    expect(farm.annexes?.filter((a) => a.automatic)).toHaveLength(1);
-    // Упёрлась, а вывозят исправно — готова расти дальше.
-    expect(annexReady(farm)).toBe(true);
   });
 
-  it('не готово — пристройку не поставить, в карточке кнопки нет', () => {
+  it('поле доступно сразу, меняет фактический выпуск и предел роста', () => {
     const { game, farm } = setup();
-    farm.level = 1.5;
-    farm.streak = 1;
-    expect(annexReady(farm)).toBe(false);
-    expect(game.annexPlan(farm.id, add(farm.fp.center, { x: footprintRadius(farm.fp) + 30, y: 0 })).reason).toMatch(/ещё не готово/);
-    expect(annexHtml(farm, false)).not.toContain('data-action="ind-annex"');
-    expect(annexHtml(farm, false)).toContain('Растёт само до ×2');
-  });
-
-  it('готово → пристройка рядом: уровень сразу выше, дальше растёт до ×3; кнопка в карточке', () => {
-    const { game, farm } = setup();
-    ready(farm);
-    expect(annexHtml(farm, false)).toContain('data-action="ind-annex"');
+    expect(annexHtml(farm)).toContain('data-module="field"');
+    expect(annexHtml(farm)).toContain('data-module="warehouse"');
+    expect(annexHtml(farm)).not.toContain('data-module="pit"');
     const money = game.money;
-    const p = freeSpot(game, farm);
-    expect(game.buildAnnex(farm.id, p)).toBeNull();
-    expect(game.money).toBe(money - ANNEX.cost);
-    expect(farm.annexes).toHaveLength(1);
-    expect(farm.level).toBe(ANNEX.base + ECONOMY.growthStep);
+    const rate = game.industryRate(farm);
+    const p = freeSpot(game, farm, 'field');
+    expect(game.buildAnnex(farm.id, p, 'field')).toBeNull();
+    expect(game.money).toBe(money - INDUSTRY_MODULES.field.cost);
+    expect(farm.annexes?.[0]?.connector?.length).toBeGreaterThan(1);
+    expect(farm.level ?? 1).toBe(1);
+    expect(Math.abs(game.industryRate(farm) - rate * 1.25)).toBeLessThanOrEqual(1);
     expect(growthCap(farm)).toBe(ANNEX.base + 1);
-    expect(game.structureAt(p)).toMatchObject({ type: 'annex', industryId: farm.id });
-    // Растёт само — до нового предела.
-    for (let m = 0; m < 8; m++) {
-      farm.producedLast = 40;
-      farm.piledMonth = 0;
-      grow(game);
-    }
-    expect(farm.level).toBe(ANNEX.base + 1);
-    // Сразу вторую — нельзя: предприятие ещё не готово (только что выросло).
-    farm.streak = 0;
-    expect(game.annexPlan(farm.id, freeSpotAny(game, farm)).reason).toMatch(/ещё не готово/);
+    expect(game.structureAt(p)).toMatchObject({ type: 'annex', industryId: farm.id, module: 'field' });
   });
 
-  it('вне зоны, на самом предприятии — нельзя', () => {
+  it('не даёт построить секцию неподходящего типа, вдали и поверх фермы', () => {
     const { game, farm } = setup();
-    ready(farm);
-    expect(game.annexPlan(farm.id, add(farm.fp.center, { x: annexZone(farm) + 50, y: 0 })).reason).toBe('Пристройка — только рядом с предприятием');
-    expect(game.annexPlan(farm.id, farm.fp.center).reason).toBe('Мешает предприятие');
+    expect(game.annexPlan(farm.id, farm.fp.center, 'pit').reason).toBe('Секция не подходит этому предприятию');
+    const far = add(farm.fp.center, { x: annexZone(farm) + 50, y: 0 });
+    expect(game.annexPlan(farm.id, far, 'field').reason).toBe('Секция должна быть рядом с предприятием');
+    expect(game.annexPlan(farm.id, farm.fp.center, 'field').reason).toBe('Мешает предприятие');
   });
 
-  it('снос пристройки — уровень назад, до прежнего предела; часть цены вернётся', () => {
+  it('склад увеличивает запас без изменения выпуска и не уничтожает груз при заполненной станции', () => {
     const { game, farm } = setup();
-    ready(farm);
-    const p = freeSpot(game, farm);
-    game.buildAnnex(farm.id, p);
+    const st = stationAtIndustry(game, farm, sitePoint(farm.fp, [2, 0.29]))!;
+    expect(st).toBeDefined();
+    const production = game as unknown as { routed(): boolean; updateIndustries(dt: number): void };
+    production.routed = () => true;
+    const rate = game.industryRate(farm);
+    const base = industryOutputCapacity(farm);
+    const p = freeSpot(game, farm, 'warehouse');
+    expect(game.buildAnnex(farm.id, p, 'warehouse')).toBeNull();
+    expect(industryOutputCapacity(farm)).toBe(base + 200);
+    expect(game.industryRate(farm)).toBe(rate);
+    expect(growthCap(farm)).toBe(ANNEX.base);
+    st.cargo[farm.info.produces] = game.stationStorage(st);
+    farm.output = base + 195;
+    production.updateIndustries(MONTH_LENGTH);
+    expect(farm.output).toBe(base + 200);
+    expect(game.removeAnnex(farm.annexes![0])).toBeNull();
+    production.updateIndustries(MONTH_LENGTH);
+    expect(farm.output).toBe(base + 200);
+  });
+
+  it('снос производственной секции возвращает часть цены и снижает выросший уровень', () => {
+    const { game, farm } = setup();
+    const p = freeSpot(game, farm, 'field');
+    game.buildAnnex(farm.id, p, 'field');
     farm.level = 2.75;
     const money = game.money;
-    const a = farm.annexes![0];
-    game.removeAnnex(a);
+    expect(game.removeAnnex(farm.annexes![0])).toBeNull();
     expect(farm.annexes).toEqual([]);
     expect(farm.level).toBe(ANNEX.base);
-    expect(game.money).toBe(money + Math.round(ANNEX.cost * COST.refundRatio));
+    expect(game.money).toBe(money + Math.round(INDUSTRY_MODULES.field.cost * COST.refundRatio));
     expect(game.structureAt(p)?.type).not.toBe('annex');
   });
 
-  it('Ctrl+Z убирает пристройку и уровень, который она дала; деньги возвращаются', () => {
+  it('отмена, повтор и сохранение сохраняют тип секции и её подъезд', () => {
     const { game, farm } = setup();
-    ready(farm);
     const money = game.money;
-    const p = freeSpot(game, farm);
-    game.buildAnnex(farm.id, p);
-    expect(game.undo()).toBe('пристройка предприятия');
-    expect(farm.annexes ?? []).toEqual([]);
-    expect(farm.level).toBe(ANNEX.base);
+    const p = freeSpot(game, farm, 'field');
+    game.buildAnnex(farm.id, p, 'field');
+    const connector = farm.annexes?.[0]?.connector;
+    expect(game.undo()).toBe('секция предприятия');
     expect(game.money).toBe(money);
     expect(game.structureAt(p)?.type).not.toBe('annex');
-  });
-
-  it('сохраняется в партии; старое сохранение без пристроек — уровни те же', () => {
-    const { game, farm } = setup();
-    ready(farm);
-    const p = freeSpot(game, farm);
-    game.buildAnnex(farm.id, p);
+    expect(game.redo()).toBe('секция предприятия');
     const loaded = withoutCitizens(new Game(game.settings, JSON.parse(JSON.stringify(game.toSave()))));
     const lf = loaded.industries.find((i) => i.id === farm.id)!;
     expect(lf.annexes).toHaveLength(1);
-    expect(lf.level).toBe(farm.level);
+    expect(lf.annexes?.[0]).toMatchObject({ module: 'field', connector });
     expect(growthCap(lf)).toBe(ANNEX.base + 1);
     expect(loaded.structureAt(p)).toMatchObject({ type: 'annex', industryId: farm.id });
-    // Старое сохранение: поля нет, уровень ×3.5 остаётся как был (выше ×2 — уже не растёт без пристроек).
-    const old = JSON.parse(JSON.stringify(game.toSave()));
-    for (const i of old.industries) {
-      delete i.annexes;
-      if (i.id === farm.id) i.level = 3.5;
-    }
-    const was = withoutCitizens(new Game(game.settings, old));
-    expect(was.industries.find((i) => i.id === farm.id)!.level).toBe(3.5);
   });
 });
-
-/** Место без построек вокруг предприятия — даже когда пристройку сейчас нельзя (проверяем только причину). */
-function freeSpotAny(game: Game, ind: Industry): Vec {
-  const keep = { level: ind.level, streak: ind.streak };
-  ready(ind);
-  const p = freeSpot(game, ind);
-  Object.assign(ind, keep);
-  return p;
-}

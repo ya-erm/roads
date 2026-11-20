@@ -1,4 +1,5 @@
 import { hash } from '../core/math';
+import { industrialRoadPoints } from './industryRoadArt';
 
 export type WorkPoint = readonly [x: number, y: number];
 export type Circuit = readonly WorkPoint[];
@@ -8,15 +9,15 @@ export type Equipment =
   | { kind: 'excavator'; reach: WorkPoint }
   | { kind: 'rail'; end: number; color: string };
 
-/** Один и тот же сплайн задаёт колею и траекторию колёс. */
-function onCircuit(route: Circuit, t: number, closed = true): WorkPoint {
-  const idx = Math.min(Math.floor(t), closed ? route.length - 1 : route.length - 2);
+/** Плавный замкнутый маршрут уборочной техники по полю. */
+function onCircuit(route: Circuit, t: number): WorkPoint {
+  const idx = Math.floor(t);
   const f = t - idx;
   const n = route.length;
-  const prev = route[closed ? (idx + n - 1) % n : Math.max(0, idx - 1)];
+  const prev = route[(idx + n - 1) % n];
   const from = route[idx];
   const to = route[(idx + 1) % n];
-  const next = route[closed ? (idx + 2) % n : Math.min(n - 1, idx + 2)];
+  const next = route[(idx + 2) % n];
   const interpolate = (axis: 0 | 1) => {
     const a = prev[axis];
     const b = from[axis];
@@ -27,12 +28,25 @@ function onCircuit(route: Circuit, t: number, closed = true): WorkPoint {
   return [interpolate(0), interpolate(1)];
 }
 
-export function traceCircuit(c: CanvasRenderingContext2D, route: Circuit, closed = true): void {
-  c.beginPath();
-  c.moveTo(...route[0]);
-  const steps = (closed ? route.length : route.length - 1) * 8;
-  for (let step = 1; step <= steps; step++) c.lineTo(...onCircuit(route, closed ? (step / 8) % route.length : step / 8, closed));
-  if (closed) c.closePath();
+const roadLengths = new WeakMap<Circuit, { road: Circuit; cumulative: number[]; length: number }>();
+
+function haulPose(route: Circuit, time: number | undefined, seed: number): readonly [number, number, number, boolean] {
+  let metric = roadLengths.get(route);
+  if (!metric) {
+    const road = industrialRoadPoints(route);
+    const cumulative = [0];
+    for (let i = 1; i < road.length; i++) cumulative[i] = cumulative[i - 1] + Math.hypot(road[i][0] - road[i - 1][0], road[i][1] - road[i - 1][1]);
+    metric = { road, cumulative, length: cumulative[cumulative.length - 1] };
+    roadLengths.set(route, metric);
+  }
+  const phase = time === undefined ? 0 : (time / Math.max(16, metric.length * 0.34) + hash(seed, 381)) % 1;
+  const at = (0.5 - Math.cos(phase * Math.PI * 2) * 0.5) * metric.length;
+  let i = 1;
+  while (i < metric.road.length - 1 && metric.cumulative[i] < at) i++;
+  const [x, y] = metric.road[i - 1];
+  const [ex, ey] = metric.road[i];
+  const p = (at - metric.cumulative[i - 1]) / Math.max(1e-6, metric.cumulative[i] - metric.cumulative[i - 1]);
+  return [x + p * (ex - x), y + p * (ey - y), Math.atan2(ey - y, ex - x) + (phase >= 0.5 ? Math.PI : 0), phase < 0.5];
 }
 
 /** Техника видна сверху, кабина и направление движения смотрят вдоль локальной оси +x. */
@@ -84,17 +98,13 @@ export function paintEquipment(
 
   const route = equipment.route;
   const harvest = equipment.kind === 'harvester';
-  const where = harvest ? phase * route.length : (0.5 - 0.5 * Math.cos(phase * Math.PI * 2)) * (route.length - 1);
-  const [px, py] = onCircuit(route, where, harvest);
-  const ahead = harvest ? (where + 0.015) % route.length : Math.min(route.length - 1, where + 0.015);
-  const behind = harvest ? where : Math.max(0, where - 0.015);
-  const [nx, ny] = onCircuit(route, ahead, harvest);
-  const [bx, by] = onCircuit(route, behind, harvest);
+  const where = phase * route.length;
+  const [px, py, yaw, inbound] = harvest ? harvestPose(route, where) : haulPose(route, time, seed);
   const length = harvest ? 7.5 : 10;
   const width = harvest ? 4.3 : 5.2;
   c.save();
   c.translate(px, py);
-  c.rotate(Math.atan2(ny - by, nx - bx) + (!harvest && phase >= 0.5 ? Math.PI : 0));
+  c.rotate(yaw);
   c.fillStyle = 'rgba(46,40,28,0.20)';
   c.fillRect(-length / 2 + 0.85, -width / 2 + 1.1, length, width);
   c.fillStyle = '#3f4144';
@@ -114,9 +124,15 @@ export function paintEquipment(
     c.fillStyle = '#dfcc87';
     c.fillRect(-2.6, -1.4, 2.2, 2.8);
   } else {
-    paintLoad(c, equipment, (phase < 0.5) === !!equipment.incoming);
+    paintLoad(c, equipment, inbound === !!equipment.incoming);
   }
   c.restore();
+}
+
+function harvestPose(route: Circuit, where: number): readonly [number, number, number, boolean] {
+  const [x, y] = onCircuit(route, where);
+  const [nx, ny] = onCircuit(route, (where + 0.015) % route.length);
+  return [x, y, Math.atan2(ny - y, nx - x), true];
 }
 
 function paintLoad(c: CanvasRenderingContext2D, equipment: Extract<Equipment, { kind: 'haul' }>, loaded: boolean): void {

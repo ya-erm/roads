@@ -2,7 +2,9 @@ import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
 import { industryServiceRoads, sitePoint } from '../world/industrySites';
 import { Art, METAL } from './industryArt';
-import { type Circuit, type Equipment, paintEquipment, traceCircuit, type WorkPoint } from './industryEquipment';
+import type { Footprint } from '../world/spatial';
+import { type Circuit, type Equipment, paintEquipment, type WorkPoint } from './industryEquipment';
+import { drawIndustrialGate, drawIndustrialRoads } from './industryRoadArt';
 
 const BULK = new Set<CargoType>(['ore', 'copperore', 'coal', 'stone', 'sand', 'clay', 'gold', 'gems']);
 const SILO = new Set<CargoType>(['grain', 'sunflower']);
@@ -11,7 +13,7 @@ const TIMBER = new Set<CargoType>(['logs', 'planks']);
 /** +y — выезд маршрутов, −y — технологические ворота со стороны предприятия. */
 function rearRoad(st: Station): Circuit {
   const depth = st.fp.h / 2;
-  return [[0, -depth - 4], [0, -depth + 2], [0, -depth * 0.55], [3.5, -depth * 0.35], [8, -depth * 0.34]];
+  return [[0, -depth - 5], [0, -depth * 0.39], [8, -depth * 0.39]];
 }
 
 export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station): void {
@@ -22,22 +24,11 @@ export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station): void
   c.fillStyle = '#b6b4a9';
   c.fillRect(left, back + 1, w - 4, h / 2);
   // Технологический въезд пересекает кромку площадки посередине, открытое полотно тянется до края предприятия.
-  c.save();
-  c.lineCap = 'round';
-  traceCircuit(c, rearRoad(st), false);
-  c.strokeStyle = '#9a9588';
-  c.lineWidth = 9;
-  c.stroke();
-  c.strokeStyle = '#ccc7b7';
-  c.lineWidth = 7;
-  c.stroke();
-  c.restore();
   c.fillStyle = '#777c7c';
-  c.fillRect(left, back + 1, -5.5 - left, 1.1);
-  c.fillRect(5.5, back + 1, right - 5.5, 1.1);
-  c.fillStyle = '#d5ae4a';
-  c.fillRect(-5.9, back, 1.2, 3.5);
-  c.fillRect(4.7, back, 1.2, 3.5);
+  c.fillRect(left, back + 1, -4 - left, 1.1);
+  c.fillRect(4, back + 1, right - 4, 1.1);
+  drawIndustrialRoads(c, [rearRoad(st)]);
+  drawIndustrialGate(c, 0, back, Math.PI / 2);
 }
 
 /** Складские ячейки на задней половине двора, заполняются по запасам станции. */
@@ -113,10 +104,12 @@ function yardTruck(cargo: CargoType, route: Circuit): Equipment {
   };
 }
 
-/** Один рейс по дороге предприятия и через задние ворота на разгрузку. */
-export function drawIndustryTransfer(c: CanvasRenderingContext2D, st: Station, ind: Industry, front: 1 | -1, zoom: number, time: number): boolean {
-  if (!st.industryAccess || zoom <= 0.5 || !working(ind)) return false;
-  const main = industryServiceRoads(ind.info.kind).main;
+const transferPaths = new WeakMap<Station, { station: Footprint; plant: Footprint; front: number; route: Circuit }>();
+
+function transferPath(st: Station, ind: Industry, front: 1 | -1): Circuit {
+  const cached = transferPaths.get(st);
+  if (cached?.station === st.fp && cached.plant === ind.fp && cached.front === front) return cached.route;
+  const main = industryServiceRoads(ind.info.kind, ind.fp).main;
   const route: WorkPoint[] = main.map((corner) => {
     const p = sitePoint(ind.fp, corner);
     return [p.x, p.y];
@@ -128,6 +121,13 @@ export function drawIndustryTransfer(c: CanvasRenderingContext2D, st: Station, i
     const y = offset * front;
     route.push([fp.center.x + x * cos - y * sin, fp.center.y + x * sin + y * cos]);
   }
-  paintEquipment(c, yardTruck(ind.info.produces, route), 0, 0, st.id, time);
+  transferPaths.set(st, { station: fp, plant: ind.fp, front, route });
+  return route;
+}
+
+/** Один рейс по дороге предприятия и через задние ворота на разгрузку. */
+export function drawIndustryTransfer(c: CanvasRenderingContext2D, st: Station, ind: Industry, front: 1 | -1, zoom: number, time: number): boolean {
+  if (!st.industryAccess || zoom <= 0.5 || !working(ind)) return false;
+  paintEquipment(c, yardTruck(ind.info.produces, transferPath(st, ind, front)), 0, 0, st.id, time);
   return true;
 }

@@ -158,6 +158,7 @@ import { adviceOf, type Advice, type AdviceFix } from '../game/advisor';
 import { stationWarnings } from '../game/stationWarnings';
 import { storageSlots } from '../game/warehouses';
 import { annexHtml } from './annexUi';
+import { industryModules, type IndustryModule } from '../world/industryModules';
 import { depositCardHtml, INDUSTRY_TOOL_SVG, industryModeRowHtml, industryOptionsHtml, industryRowsHtml, townRowsHtml } from './enterpriseUi';
 import { industryFlowHtml, recipeBoxHtml } from './industryCard';
 import type { IndustryKind } from '../world/cargo';
@@ -1803,10 +1804,13 @@ export class Hud {
         break;
       }
       case 'ind-annex': {
-        // Пристройку ставят на карте — зона вокруг предприятия видна, клик в ней ставит; повторно — отмена.
         const id = Number(d.id);
-        if (c.pendingOf('annex')?.id === id) c.pending = null;
-        else c.startAnnex(id);
+        const ind = g.industries.find((i) => i.id === id);
+        const module = d.module as IndustryModule;
+        if (!ind || !industryModules(ind).includes(module)) break;
+        const active = c.pendingOf('annex');
+        if (active?.id === id && active.module === module) c.pending = null;
+        else c.startAnnex(id, module);
         break;
       }
       case 'st-warehouse': {
@@ -3771,6 +3775,7 @@ export class Hud {
       const ind = g.industries.find((i) => i.id === sel.id);
       if (!ind) return '';
       const info = ind.info;
+      const section = this.controller.pendingOf('annex');
       // Рецепт значками с названиями; ниже — сырьё (склад, откуда везут), продукция (куда), чего не хватает.
       return `<section class="detail">${head(ind.name)}
         ${recipeBoxHtml(info)}
@@ -3787,8 +3792,8 @@ export class Hud {
         <div class="level-bar" data-tip="Уровень производства растёт, если продукцию регулярно вывозят; падает, если предприятие долго не обслуживают">
           <div style="width:${(((ind.level ?? 1) - 1) / 3) * 100}%"></div></div>
         ${industryRowsHtml(g, ind)}
-        ${ind.ruin || ind.build ? '' : annexHtml(ind, this.controller.pendingOf('annex')?.id === ind.id)}
-        <p class="tip">Инструментом «Станция» наведите на предприятие: станция встанет вплотную к той стороне, куда указывает курсор, и выезд будет смотреть туда же.</p>
+        ${ind.ruin || ind.build ? '' : annexHtml(ind, section?.id === ind.id ? section.module : undefined)}
+        <p class="tip">Грузовой двор у технологического въезда соединяется с внутренней дорогой предприятия.</p>
         ${this.partnersHtml(g.partners(ind, 3))}</section>`;
     }
     if (sel.type === 'building') {

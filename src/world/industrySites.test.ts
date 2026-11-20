@@ -7,10 +7,11 @@ describe('Участки предприятий', () => {
   it('поля остаются отдельными площадками за пределами размеров хозяйственного двора', () => {
     const farm = industryFootprint(INDUSTRY_TYPES.farm, { x: 0, y: 0 }, 0);
     const field = { x: -102, y: -10 };
-    const gap = { x: -68, y: -45 };
+    const gap = { x: -68, y: -farm.h * 0.97 };
     const buildingAt = (center: typeof field) => ({ center, w: 4, h: 4, angle: 0 });
 
     expect(footprintRadius(farm)).toBeGreaterThan(farm.w);
+    expect(farm.compound?.sections.filter((s) => s.kind === 'field')).toHaveLength(6);
     expect(pointInFootprint(field, farm)).toBe(true);
     expect(pointInFootprint(gap, farm)).toBe(false);
     expect(footprintsOverlap(buildingAt(field), farm)).toBe(true);
@@ -24,6 +25,6 @@ describe('Участки предприятий', () => {
     const farm = industryFootprint(INDUSTRY_TYPES.farm, { x: 0, y: 0 }, 0);
     const path = (y: number) => ({ length: 28, pointAt: (s: number) => ({ x: -85 + s, y }) });
     expect(footprintAlong(farm, path(-10), () => 2)).toBe(true);
-    expect(footprintAlong(farm, path(-46), () => 1)).toBe(false);
+    expect(footprintAlong(farm, path(-farm.h * 0.97), () => 1)).toBe(false);
   });
 });

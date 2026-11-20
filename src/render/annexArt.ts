@@ -2,6 +2,7 @@ import { ANNEX } from '../config';
 import type { IndustryKind } from '../world/cargo';
 import type { Annex, Industry } from '../world/entities';
 import { Art, type ArtLayer, BARK, boat, DARK, disc, type Emitter, hash, herd, industryGround, METAL, paintScene, shade, YELLOW } from './industryArt';
+import { paintIndustrySection } from './industrySectionArt';
 
 /**
  * Пристройки предприятий — свои вспомогательные здания, а не уменьшенная копия предприятия: у фермы — зерносушилка,
@@ -190,10 +191,17 @@ export function annexMotion(ind: Industry, annex: Annex): Emitter[] {
 
 function paintAnnex(ctx: CanvasRenderingContext2D, a: Art, ind: Industry, annex: Annex): void {
   const info = ind.info;
+  a.siteParts = annex.fp.parts?.slice(0, annex.fp.groundParts);
+  if (annex.module) {
+    const { w, h } = annex.fp;
+    const section = { kind: annex.module, bounds: [-0.5, -0.5, 0.5, 0.5] } as const;
+    const paint = (art: Art) => paintIndustrySection(art, section, w, h, info.produces, info.roof, annex.id);
+    paintScene(ctx, a, annex.fp, w, h, industryGround(info), paint, undefined);
+    return;
+  }
   // Сцены нарисованы под размер пристройки этого вида; контур из сохранения впишется масштабом.
   const W = info.w * ANNEX.scale;
   const H = info.h * ANNEX.scale;
-  a.siteParts = annex.fp.parts;
   const lot: Lot = { ind, kind: info.kind, variant: annexVariant(ind, annex), roof: info.roof, W, H, L: -W / 2, T: -H / 2, R: W / 2, B: H / 2 };
   paintScene(ctx, a, annex.fp, W, H, industryGround(info), scene, lot);
 }

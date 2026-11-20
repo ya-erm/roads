@@ -1,6 +1,7 @@
-import { ANNEX, CONSTRUCTION, COST, ECONOMY, RAIL_STATION, SNAP_PIXELS, STATION, STORAGE } from '../config';
+import { ANNEX, CONSTRUCTION, COST, RAIL_STATION, SNAP_PIXELS, STATION, STORAGE } from '../config';
 import { warehouseZone } from '../game/warehouses';
-import { annexZone, growthCap } from '../game/annexes';
+import { annexZone } from '../game/annexes';
+import { INDUSTRY_MODULES, moduleEffect, type IndustryModule } from '../world/industryModules';
 import { CurveLUT, minRadius, offsetCubic, straightCubic } from '../core/bezier';
 import { add, angleOf, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { DrawMode, NetKind, RoadRequest, Snap } from '../game/build';
@@ -148,7 +149,7 @@ export type Pending =
   | { kind: 'lotHandle'; id: number; handle: 'corner' | 'rotate'; side: -1 | 1 }
   | { kind: 'turn'; target: 'park' | 'building'; id: number; pivot: Vec; base: number; side: 1 | -1 }
   | { kind: 'warehouse'; id: number }
-  | { kind: 'annex'; id: number }
+  | { kind: 'annex'; id: number; module: IndustryModule }
   | { kind: 'newBase' }
   | { kind: 'crew'; id: number }
   | { kind: 'carDestination'; id: string };
@@ -1519,8 +1520,8 @@ export class Controller {
   }
 
   /** Режим «поставить пристройку» предприятия id: зона вокруг него — на карте, клик в ней ставит пристройку. */
-  startAnnex(id: number): void {
-    this.startPending({ kind: 'annex', id }, { type: 'industry', id });
+  startAnnex(id: number, module: IndustryModule): void {
+    this.startPending({ kind: 'annex', id, module }, { type: 'industry', id });
   }
 
   /**
@@ -2287,7 +2288,7 @@ export class Controller {
         done(g.buildWarehouse(w.id, p), { type: 'station', id: w.id });
         return true;
       case 'annex':
-        done(g.buildAnnex(w.id, p), { type: 'industry', id: w.id });
+        done(g.buildAnnex(w.id, p, w.module), { type: 'industry', id: w.id });
         return true;
       // База — у дороги под курсором, как постановка, но без платы за базу.
       case 'moveBase':
@@ -2354,8 +2355,10 @@ export class Controller {
     else if (st?.type === 'warehouse') {
       const problem = g.removeWarehouse(st);
       if (problem) this.showError(problem);
-    } else if (st?.type === 'annex') g.removeAnnex(st);
-    else if (st?.type === 'industry' && g.enterprises.on) {
+    } else if (st?.type === 'annex') {
+      const problem = g.removeAnnex(st);
+      if (problem) this.showError(problem);
+    } else if (st?.type === 'industry' && g.enterprises.on) {
       const problem = g.enterprises.remove(st);
       if (problem) this.showError(problem);
       else if (this.selection?.type === 'industry' && this.selection.id === st.id) this.selection = null;
@@ -4239,7 +4242,8 @@ export class Controller {
         }
         if (st?.type === 'annex') {
           o.marks.push({ fp: st.fp, ok: false });
-          o.label = { text: `Снести пристройку — производство упадёт · +${money(ANNEX.cost * COST.refundRatio)}`, ok: true };
+          const refund = st.automatic ? '' : ` · +${money((st.module ? INDUSTRY_MODULES[st.module].cost : ANNEX.cost) * COST.refundRatio)}`;
+          o.label = { text: `Снести секцию${refund}`, ok: true };
           break;
         }
         if (st?.type === 'base') {
@@ -4517,14 +4521,14 @@ export class Controller {
           break;
         }
         const ind = w?.kind === 'annex' ? g.industries.find((i) => i.id === w.id) : undefined;
-        if (ind) {
+        if (ind && w?.kind === 'annex') {
           // Пристройка: зона вокруг предприятия — кругом, пристройка под курсором — синим (красным, если нельзя).
-          const plan = g.annexPlan(ind.id, p);
+          const plan = g.annexPlan(ind.id, p, w.module);
           o.catchmentAt = ind.fp.center;
           o.catchmentR = annexZone(ind);
           if (plan.fp) o.marks.push({ fp: plan.fp, ok: plan.ok });
           o.label = plan.ok
-            ? { text: `Пристройка: производство ×${(ind.level ?? 1) + ECONOMY.growthStep}, рост до ×${growthCap(ind) + 1} · ${money(plan.cost)} · Esc — отмена`, ok: true }
+            ? { text: `${INDUSTRY_MODULES[w.module].name} · ${moduleEffect(w.module)} · ${money(plan.cost)}`, ok: true }
             : { text: failText(plan.reason, plan.cost, ''), ok: false };
           break;
         }
@@ -4636,7 +4640,7 @@ export class Controller {
         if (st?.type === 'station') o.label = { text: st.name, ok: true };
         else if (st?.type === 'warehouse') o.label = { text: `Склад: ${g.stations.get(st.stationId)?.name ?? ''}`, ok: true };
         else if (st?.type === 'base') o.label = { text: `База «${g.baseName(st.id)}» · 🚚 ${g.construction.crews.of(st.id).length}`, ok: true };
-        else if (st?.type === 'annex') o.label = { text: `Пристройка: ${g.industries.find((i) => i.id === st.industryId)?.name ?? ''}`, ok: true };
+        else if (st?.type === 'annex') o.label = { text: st.module ? INDUSTRY_MODULES[st.module].name : 'Вспомогательная секция', ok: true };
         else if (st?.type === 'industry') o.label = { text: st.name, ok: true };
         else if (st?.type === 'building') {
           const t = g.townOf(st);

@@ -25,7 +25,7 @@ import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier'
 import { money as usd } from '../core/moneyText';
 import { Rng } from '../core/rng';
 import { durationText } from '../core/timeText';
-import { add, angleDiff, angleOf, cross, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
+import { add, angleDiff, angleOf, closestOnSegment, cross, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, insideRuns, splitCorridor } from '../lanes/edit';
 import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
@@ -176,7 +176,9 @@ import {
 import { linesForTown } from './townLines';
 import { Approach, Jam, jamShown, nextJam, queuedAt } from './stationJam';
 import { inWarehouseZone, storageSlots, warehouseFootprint } from './warehouses';
-import { annexFootprint, annexReady, growthCap, inAnnexZone } from './annexes';
+import { annexConnections, annexFootprint, growthCap, inAnnexZone } from './annexes';
+import { INDUSTRY_ROAD_WIDTH } from '../world/industryCompound';
+import { INDUSTRY_MODULES, industryModuleRate, industryModules, industryOutputCapacity, mainIndustryModule, type IndustryModule } from '../world/industryModules';
 import { type AutoFunds, autoFunds } from './autoFunds';
 import { RENEW_GAP, type RenewCar, renewStep } from './autoRenew';
 import { firstRunWaits } from './firstRun';
@@ -8408,13 +8410,14 @@ export class Game implements BuildContext {
       const served = [...this.stations.values()].filter((st) => st.serves.cargo && st.industryIds.includes(ind.id) && this.routed(st));
       const inputs = ind.info.accepts;
       // Уровень производства, временный множитель событий сценария, рабочие и богатство месторождения (enterprises.ts).
-      const level = (ind.level ?? 1) * this.mods.industry(ind.id) * this.enterprises.rateFactor(ind);
+      const level = this.industryMultiplier(ind);
+      const room = Math.max(0, industryOutputCapacity(ind) - ind.output - ind.prodAcc);
       if (!inputs.length) {
-        if (served.length) ind.prodAcc += (ind.info.rate * level * dt) / MONTH_LENGTH;
+        if (served.length) ind.prodAcc += Math.min(room, (ind.info.rate * level * dt) / MONTH_LENGTH);
       } else {
         // Переработка идёт, только когда есть все виды сырья; выросший завод перерабатывает больше.
         const available = Math.min(...inputs.map((c) => ind.stock[c] ?? 0));
-        const conv = Math.min(available, (ECONOMY.processRate * level * dt) / MONTH_LENGTH);
+        const conv = Math.min(room, available, (ECONOMY.processRate * level * dt) / MONTH_LENGTH);
         if (conv > 0) {
           for (const c of inputs) ind.stock[c] = (ind.stock[c] ?? 0) - conv;
           ind.prodAcc += conv;
@@ -8431,15 +8434,16 @@ export class Game implements BuildContext {
         if (ind.builtBy) ind.made = (ind.made ?? 0) + whole;
       }
       if (ind.output >= 1 && served.length) {
-        const per = Math.floor(ind.output / served.length);
-        for (const st of served) {
+        const available = served.filter((st) => this.stationFree(st) >= 1 && (st.cargo[ind.info.produces] ?? 0) < this.stationCap(st, 'freight'));
+        for (let i = 0; i < available.length; i++) {
+          const st = available[i];
           const c = ind.info.produces;
-          // Не больше, чем есть места на складе станции (все грузы вместе) и чем предел по транспорту.
-          st.cargo[c] = Math.min(this.stationCap(st, 'freight'), (st.cargo[c] ?? 0) + Math.min(per, this.stationFree(st)));
+          const before = st.cargo[c] ?? 0;
+          const amount = Math.max(0, Math.floor(Math.min(ind.output / (available.length - i), this.stationFree(st), this.stationCap(st, 'freight') - before)));
+          st.cargo[c] = before + amount;
+          ind.output -= amount;
         }
-        ind.output -= per * served.length;
       }
-      ind.output = Math.min(ind.output, 300);
       // Сколько времени за месяц продукция копилась у предела станции — транспорт не успевал (для роста).
       const c = ind.info.produces;
       if (served.some((st) => (st.cargo[c] ?? 0) >= this.stationCap(st, 'freight') * 0.9 || this.stationFull(st))) ind.piledMonth = (ind.piledMonth ?? 0) + dt;
@@ -9354,7 +9358,7 @@ export class Game implements BuildContext {
       if (good) streak = Math.max(1, streak + 1);
       else if (!stations.length) streak = Math.min(-1, streak - 1);
       else streak = 0;
-      // Сам — до предела пристроек (ANNEX.base без них); дальше расти некуда — нужна пристройка (annexReady).
+      // Производственные секции увеличивают предел роста, а склады дают запас для отгрузки.
       const cap = growthCap(ind);
       if (streak >= E.growthMonths && level < cap) {
         ind.level = Math.min(cap, level + E.growthStep);
@@ -9380,18 +9384,24 @@ export class Game implements BuildContext {
   private expandIndustry(ind: Industry): void {
     if ((ind.annexes ?? []).filter((a) => a.automatic).length >= Math.floor(ind.level ?? 1) - 1) return;
     const center = ind.fp.center;
-    const annex = annexFootprint(ind, center);
+    const module = ind.fp.compound ? mainIndustryModule(ind) : undefined;
+    const annex = annexFootprint(ind, center, module);
     const addSection = (p: Vec, access?: Vec): boolean => {
       const fp = { ...annex, center: p };
       if (this.lotUnder(fp, 2) || this.outbuildingProblem(fp)) return false;
       if (this.enterprises.deposits.some((d) => d.used === undefined && dist(d.center, p) < depositRadius(d) + footprintRadius(fp))) return false;
-      const part: Annex = { type: 'annex', id: this.nextEntityId++, industryId: ind.id, fp, automatic: true, ...(access && { access }) };
+      const connection = ind.fp.compound ? this.industryModuleConnection(ind, fp) : undefined;
+      if (ind.fp.compound && !connection) return false;
+      const part: Annex = {
+        type: 'annex', id: this.nextEntityId++, industryId: ind.id, fp: connection?.fp ?? fp, automatic: true,
+        ...(connection ? { connector: connection.connector } : access ? { access } : {}), ...(module && { module }),
+      };
       ind.annexes = [...(ind.annexes ?? []), part];
       this.index.add(part);
       return true;
     };
     if (ind.fp.groundParts) {
-      for (const route of industryServiceRoads(ind.info.kind).branches) {
+      for (const route of industryServiceRoads(ind.info.kind, ind.fp).branches) {
         const p = sitePoint(ind.fp, route[route.length - 1]);
         const prev = sitePoint(ind.fp, route[route.length - 2]);
         const n = norm(sub(p, prev));
@@ -9411,7 +9421,11 @@ export class Game implements BuildContext {
   /** Сколько предприятие производит (или может переработать) в месяц сейчас. */
   industryRate(ind: Industry): number {
     if (!isActive(ind)) return 0;
-    return Math.round((ind.info.accepts.length ? ECONOMY.processRate : ind.info.rate) * (ind.level ?? 1) * this.mods.industry(ind.id) * this.enterprises.rateFactor(ind));
+    return Math.round((ind.info.accepts.length ? ECONOMY.processRate : ind.info.rate) * this.industryMultiplier(ind));
+  }
+
+  private industryMultiplier(ind: Industry): number {
+    return (ind.level ?? 1) * this.mods.industry(ind.id) * this.enterprises.rateFactor(ind) * industryModuleRate(ind);
   }
 
   /**
@@ -11749,53 +11763,91 @@ export class Game implements BuildContext {
     return this.roadUnder(fp, 2);
   }
 
-  /**
-   * Пристройка предприятия id с центром в p: только когда оно готово к расширению (annexReady), целиком в зоне вокруг
-   * него; мешает то же, что складам станций.
-   */
-  annexPlan(id: number, p: Vec): { ok: boolean; reason?: string; cost: number; fp: Footprint | null } {
+  private industryModuleConnection(ind: Industry, fp: Footprint): { fp: Footprint; connector: readonly Vec[] } | undefined {
+    const width = INDUSTRY_ROAD_WIDTH;
+    const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
+    const v = rightNormal(u);
+    for (const connector of annexConnections(ind, fp)) {
+      const legs = connector.slice(1).map((end, i): Footprint => {
+        const start = connector[i];
+        return { center: scale(add(start, end), 0.5), w: dist(start, end) + width, h: width, angle: angleOf(sub(end, start)) };
+      });
+      const blocked = legs.some((leg) => {
+        const corners = footprintCorners(leg);
+        if (corners.some((p) => !this.inBounds(p, 2) || this.isWater(p, 1)) || this.lotUnder(leg, 0) || this.roadUnder(leg, 0)) return true;
+        return this.index.near(leg.center, footprintRadius(leg) + 2).some((s) => {
+          const ownRoad = s === ind || (s.type === 'annex' && s.industryId === ind.id);
+          const land = ownRoad && s.fp.groundParts ? { ...s.fp, parts: s.fp.parts?.slice(0, s.fp.groundParts) } : s.fp;
+          return footprintsOverlap(leg, land);
+        });
+      });
+      if (blocked) continue;
+      const ground = fp.parts ?? [];
+      const parts = legs.map((leg) => footprintCorners(leg).map((world) => {
+        const p = sub(world, fp.center);
+        return { x: dot(p, u) / fp.w, y: dot(p, v) / fp.h };
+      }));
+      return { fp: { ...fp, groundParts: ground.length, parts: [...ground, ...parts] }, connector };
+    }
+  }
+
+  /** Секция на свободном участке рядом с предприятием, с въездом от его сети проездов. */
+  annexPlan(id: number, p: Vec, module: IndustryModule): { ok: boolean; reason?: string; cost: number; fp: Footprint | null; connector?: readonly Vec[] } {
     const ind = this.industries.find((i) => i.id === id);
     if (!ind) return { ok: false, reason: 'Предприятия нет', cost: 0, fp: null };
-    const cost = ANNEX.cost;
-    const fp = annexFootprint(ind, p);
+    if (!industryModules(ind).includes(module)) return { ok: false, reason: 'Секция не подходит этому предприятию', cost: 0, fp: null };
+    const cost = INDUSTRY_MODULES[module].cost;
+    const fp = annexFootprint(ind, p, module);
     const fail = (reason: string) => ({ ok: false, reason, cost, fp });
-    if (!annexReady(ind)) return fail(`${ind.name} ещё не готово расти дальше`);
-    if (!inAnnexZone(ind, fp)) return fail('Пристройка — только рядом с предприятием');
+    if (!isActive(ind)) return fail('Сначала нужно запустить предприятие');
+    if ((ind.annexes ?? []).filter((a) => a.module === module && !a.automatic).length >= 3) return fail('Достигнут предел секций этого типа');
+    if (!inAnnexZone(ind, fp)) return fail('Секция должна быть рядом с предприятием');
+    if (this.lotUnder(fp, 1)) return fail('Мешает площадка');
+    if (this.enterprises.deposits.some((d) => d.used === undefined && dist(d.center, fp.center) < depositRadius(d) + footprintRadius(fp))) return fail('Мешает месторождение');
     const problem = this.outbuildingProblem(fp);
     if (problem) return fail(problem);
     if (cost > this.budget) return fail('Не хватает денег');
+    if (ind.fp.groundParts) {
+      const connection = this.industryModuleConnection(ind, fp);
+      if (!connection) return fail('Нужен свободный проезд до секции');
+      return { ok: true, cost, ...connection };
+    }
     return { ok: true, cost, fp };
   }
 
-  /** Ставит пристройку предприятия id в точке p: уровень сразу +growthStep, предел роста +1. Причина, если нельзя. */
-  buildAnnex(id: number, p: Vec): string | null {
-    const plan = this.annexPlan(id, p);
+  buildAnnex(id: number, p: Vec, module: IndustryModule): string | null {
+    const plan = this.annexPlan(id, p, module);
     const ind = this.industries.find((i) => i.id === id);
     if (!plan.ok || !plan.fp || !ind) return plan.reason ?? 'Нельзя';
-    this.checkpoint('пристройка предприятия');
+    this.checkpoint('секция предприятия');
     this.spend(plan.cost);
-    const a: Annex = { type: 'annex', id: this.nextEntityId++, industryId: ind.id, fp: plan.fp };
+    const a: Annex = { type: 'annex', id: this.nextEntityId++, industryId: ind.id, fp: plan.fp, module, ...(plan.connector && { connector: plan.connector }) };
     ind.annexes = [...(ind.annexes ?? []), a];
     this.index.add(a);
-    const level = ind.level ?? 1;
-    ind.level = Math.min(ind.cap ?? ECONOMY.maxLevel, level + ECONOMY.growthStep);
-    ind.streak = 0;
-    this.notify(`${ind.name}: пристройка — производство ×${ind.level}`, '#2e9d57');
+    this.notify(`${ind.name}: построено — ${INDUSTRY_MODULES[module].name.toLowerCase()}`, '#2e9d57');
     this.commit();
     return null;
   }
 
-  /** Сносит пристройку (часть цены вернётся): предел роста −1, уровень — не выше него. */
-  removeAnnex(a: Annex): void {
+  /** При сносе секции её подъезд тоже исчезает. */
+  removeAnnex(a: Annex): string | null {
     const ind = this.industries.find((i) => i.id === a.industryId);
-    this.checkpoint('снос пристройки');
+    const road = a.connector;
+    if (road && ind?.annexes?.some((other) => {
+      const join = other.connector?.[0];
+      return other.id > a.id && join && road.slice(1).some((end, i) => dist(closestOnSegment(join, road[i], end).point, join) < 0.01);
+    })) return 'Через этот проезд подключена другая секция';
+    this.checkpoint('снос секции');
     if (ind) {
+      const previousCap = growthCap(ind);
       ind.annexes = (ind.annexes ?? []).filter((x) => x.id !== a.id);
-      ind.level = Math.min(ind.level ?? 1, Math.max(1, growthCap(ind)));
+      const cap = growthCap(ind);
+      if (cap < previousCap) ind.level = Math.min(ind.level ?? 1, Math.max(1, cap));
     }
     this.index.remove(a);
-    if (!a.automatic) this.refund(ANNEX.cost);
+    if (!a.automatic) this.refund(a.module ? INDUSTRY_MODULES[a.module].cost : ANNEX.cost);
     this.commit();
+    return null;
   }
 
   /** Ставит склад-здание станции id в точке p (одним шагом для Ctrl+Z). Возвращает причину, если нельзя. */

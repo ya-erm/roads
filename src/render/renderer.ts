@@ -59,7 +59,8 @@ import { annexMotion, drawAnnexArt } from './annexArt';
 import { Camera } from './camera';
 import type { Motion } from './redraw';
 import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, type Emitter, industryMotion } from './industryArt';
-import { paintIndustrySite } from './industrySite';
+import { paintIndustrySite, tracePlot } from './industrySite';
+import { drawIndustrialGate, drawIndustrialRoads, ROAD_SURFACE } from './industryRoadArt';
 import { drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock } from './industryStationArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
@@ -318,7 +319,7 @@ const C = {
   water: '#8cc3e6',
   bank: '#c5e0ee',
   roadEdge: '#4b525c',
-  road: '#646b76',
+  road: ROAD_SURFACE,
   deck: '#7a828e',
   rail: '#d3d8de',
   shadow: 'rgba(30, 40, 25, 0.25)',
@@ -3311,8 +3312,16 @@ export class Renderer {
   private drawFootprint(fp: Footprint, fill: string, stroke?: string, lw = 1): void {
     const ctx = this.ctx;
     ctx.beginPath();
-    footprintCorners(fp).forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-    ctx.closePath();
+    if (fp.parts) {
+      ctx.save();
+      ctx.translate(fp.center.x, fp.center.y);
+      ctx.rotate(fp.angle);
+      for (const part of fp.parts) tracePlot(ctx, part, fp.w, fp.h);
+      ctx.restore();
+    } else {
+      footprintCorners(fp).forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+    }
     ctx.fillStyle = fill;
     ctx.fill();
     if (stroke) {
@@ -3325,8 +3334,9 @@ export class Renderer {
   /** Предприятие: участок с лёгкой тенью, постройки — в industryArt (мелочи только вблизи); layer — ArtLayer. */
   private drawIndustry(ind: Industry, layer: ArtLayer): void {
     const fp = ind.fp;
-    if (ind.info.accepts.length) {
-      paintIndustrySite(this.ctx, ind.info, { ...fp, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
+    if (ind.info.accepts.length && !fp.compound) {
+      const parts = fp.parts?.slice(0, fp.groundParts);
+      paintIndustrySite(this.ctx, ind.info, { ...fp, parts, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
     }
     // Стройплощадка (режим «Строит игрок», «Со строительством»): здание растёт по готовности.
     if (ind.build) {
@@ -3341,19 +3351,18 @@ export class Renderer {
   /** Пристройка предприятия: участок с лёгкой тенью, вспомогательное здание — в annexArt; layer — ArtLayer. */
   private drawAnnex(ind: Industry, a: Annex, layer: ArtLayer): void {
     const fp = a.fp;
-    if (a.access) {
-      const c = this.ctx;
-      c.save();
-      c.strokeStyle = '#bdb39c';
-      c.lineWidth = 5.8;
-      c.beginPath();
-      c.moveTo(a.access.x, a.access.y);
-      c.lineTo(fp.center.x, fp.center.y);
-      c.stroke();
-      c.restore();
-    }
-    this.drawFootprint({ ...fp, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
+    const parts = fp.parts?.slice(0, fp.groundParts);
+    this.drawFootprint({ ...fp, parts, center: { x: fp.center.x + 2, y: fp.center.y + 3 } }, 'rgba(30,40,25,0.16)');
+    if (!a.connector && a.access) drawIndustrialRoads(this.ctx, [[[a.access.x, a.access.y], [fp.center.x, fp.center.y]]]);
     drawAnnexArt(this.ctx, ind, a, this.camera.zoom, performance.now() / 1000, layer);
+    if (a.connector) {
+      drawIndustrialRoads(this.ctx, [a.connector.map(({ x, y }) => [x, y])]);
+      if (this.camera.zoom > 0.4) {
+        const at = a.connector[a.connector.length - 1];
+        const from = a.connector[a.connector.length - 2];
+        drawIndustrialGate(this.ctx, at.x, at.y, Math.atan2(at.y - from.y, at.x - from.x));
+      }
+    }
   }
 
   /** Ширины подписей по шрифту и тексту (textWidth): плашки проектов — те же каждый кадр, пока не сменится зум. */
@@ -3488,8 +3497,11 @@ export class Renderer {
   private drawStation(game: Game, st: Station, selected: boolean): void {
     const ctx = this.ctx;
     const fp = st.fp;
-    this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.22)');
-    this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 3 : 1.4);
+    if (st.industryId !== null) this.drawFootprint(fp, ROAD_SURFACE, selected ? '#2f80ed' : undefined, 3);
+    else {
+      this.drawFootprint({ ...fp, center: { x: fp.center.x + 3, y: fp.center.y + 4 } }, 'rgba(30,40,25,0.22)');
+      this.drawFootprint(fp, '#f3f1ea', selected ? '#2f80ed' : '#5c6470', selected ? 3 : 1.4);
+    }
     ctx.save();
     this.intoStation(game, st);
     const hh = fp.h / 2;
@@ -3515,10 +3527,12 @@ export class Renderer {
     const doors = this.camera.zoom > 0.35;
     game.stationBays(st).forEach((color, i) => {
       const x = -area.w / 2 + 5 + i * bw;
-      ctx.fillStyle = color ?? '#d5d2c8';
-      ctx.fillRect(x, -1, bw - 2, hh + 1);
+      if (color || st.industryId === null) {
+        ctx.fillStyle = color ?? '#d5d2c8';
+        ctx.fillRect(x, -1, bw - 2, hh + 1);
+      }
       // Открытые ворота — тёмный проём во всю ширину бокса: контур площадки здесь прерывается.
-      if (doors) {
+      if (doors && st.industryId === null) {
         ctx.fillStyle = '#3d434b';
         ctx.fillRect(x, hh - 2, bw - 2, 2.8);
       }
@@ -3929,7 +3943,7 @@ export class Renderer {
       ctx.lineTo(X1 - rr, Y);
       ctx.arc(X1 - rr, Y - rr, rr, Math.PI / 2, 0, true);
       ctx.lineTo(X1, y0);
-      ctx.stroke();
+      if (st.industryId === null) ctx.stroke();
       // Асфальт: тот же контур; поперёк выезда (там уже асфальт) — чуть дальше, чтобы закрыть концы бордюра.
       ctx.fillStyle = C.road;
       ctx.beginPath();

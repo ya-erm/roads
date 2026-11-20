@@ -426,6 +426,7 @@ export interface Deposit {
   /** Контуры будущего предприятия, проверенные при генерации месторождения. */
   parts?: Footprint['parts'];
   groundParts?: number;
+  compound?: Footprint['compound'];
   used?: number;
 }
 
@@ -439,6 +440,9 @@ export interface Annex {
   automatic?: true;
   /** Конец технологической ветки, от которой проложен въезд в секцию. */
   access?: Vec;
+  module?: IndustryModule;
+  /** Технологический проезд от существующей сети до ворот секции. */
+  connector?: readonly Vec[];
 }
 
 export interface PassengerGroup {
@@ -559,3 +563,4 @@ export interface BuildBase {
 }
 
 export type Structure = TownBuilding | Industry | Station | Warehouse | Annex | BuildBase;
+import type { IndustryModule } from './industryModules';

@@ -61,14 +61,14 @@ export function placeDeposits(ctx: WorldContext, towns: Town[], density: number,
           center = { x: hub.center.x + Math.cos(a) * r, y: hub.center.y + Math.sin(a) * r };
           if (center.x < 300 || center.y < 300 || center.x > terrain.width - 300 || center.y > terrain.height - 300) continue;
         } else center = shoreSpot(terrain, rng, info.kind, attempt, Math.hypot(info.w, info.h) / 2) ?? center;
-        const fp = industryFootprint(info, center, rng.range(-0.6, 0.6), n + settings.seed * 19 + attempt);
+        const fp = industryFootprint(info, center, rng.range(-0.6, 0.6));
         if (terrain.isWater(center, footprintRadius(fp) + 30)) continue;
         if (!shoreFits(terrain, fp, attempt, nearWater, info.kind)) continue;
         if (!relaxed && !terrainFits(terrain, center, attempt, MINING_KINDS.has(info.kind))) continue;
         if (towns.some((t) => townGap(t, fp) < TOWN_GAP)) continue;
         if (out.some((d) => dist(d.center, center) < (relaxed ? RELAXED_GAP : GAP))) continue;
         if (index.overlaps(fp, 20) || !clearOfRoads(ctx, fp, 8)) continue;
-        const d: Deposit = { id: ctx.nextId(), kind: info.kind, center, angle: fp.angle, size: rollSize(rng.next()), parts: fp.parts, groundParts: fp.groundParts };
+        const d: Deposit = { id: ctx.nextId(), kind: info.kind, center, angle: fp.angle, size: rollSize(rng.next()), parts: fp.parts, groundParts: fp.groundParts, compound: fp.compound };
         out.push(d);
         // Лесной участок — это лес: деревья вокруг, как раньше у лесозаготовки.
         if (info.kind === 'forest') terrain.addForest(center, 220, rng);

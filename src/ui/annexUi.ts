@@ -1,15 +1,10 @@
-/**
- * Пристройки в карточке предприятия: до какого уровня оно растёт само, готово ли расти дальше и кнопка
- * «Пристройка» (значок, цена) — она включает размещение на карте в зоне вокруг предприятия.
- */
-import { ANNEX, ECONOMY, MONTH_LENGTH } from '../config';
 import { money } from '../core/moneyText';
-import { durationText } from '../core/timeText';
-import { annexReady, growthCap } from '../game/annexes';
+import { growthCap } from '../game/annexes';
 import type { Industry } from '../world/entities';
+import { INDUSTRY_MODULES, industryModules, industryOutputCapacity, moduleEffect, type IndustryModule } from '../world/industryModules';
 
 /** Значок пристройки: здание с плюсом. */
-export function annexSvg(size = 20): string {
+function annexSvg(size = 20): string {
   return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true">
     <path d="M2 11l7-5 7 5v10H2z" fill="#d9c19a" stroke="#7d5a39" stroke-width="1.3" stroke-linejoin="round"/>
     <rect x="6.5" y="14" width="5" height="7" fill="#7d5a39"/>
@@ -18,23 +13,15 @@ export function annexSvg(size = 20): string {
   </svg>`;
 }
 
-/** Блок карточки предприятия; placing — пристройку этого предприятия уже ставят на карте. */
-export function annexHtml(ind: Industry, placing: boolean): string {
-  const level = ind.level ?? 1;
-  const cap = ind.cap ?? ECONOMY.maxLevel;
-  const grow = growthCap(ind);
-  const built = ind.annexes?.length ?? 0;
-  const count = built ? `<span class="annex-count" data-tip="Пристроек: ${built}">${annexSvg(16)}×${built}</span>` : '';
-  if (annexReady(ind)) {
-    const next = Math.min(cap, level + ECONOMY.growthStep);
-    return `<div class="annex-row ready">${annexSvg(24)}<div><b>Готово расти дальше</b><small>Места больше нет: пристройка рядом — сразу ×${next}, дальше рост до ×${Math.min(cap, grow + 1)}.</small></div>
-      <button class="small ${placing ? 'active' : 'primary'}" data-action="ind-annex" data-id="${ind.id}" data-tip="${placing ? 'Кликните на карте рядом с предприятием · Esc — отмена' : 'Поставить пристройку рядом с предприятием'}" data-tip-end>${annexSvg(16)} Пристройка · ${money(ANNEX.cost)}</button>${count}</div>`;
-  }
-  const note =
-    grow >= cap
-      ? `Предел — ×${cap}.`
-      : level < grow
-        ? `Растёт само до ×${grow}, если продукцию исправно вывозят; дальше — пристройка.`
-        : `Упёрлось в предел: вывозите продукцию ${durationText(ECONOMY.growthMonths * MONTH_LENGTH)} без задержек — можно будет поставить пристройку.`;
-  return `<div class="annex-row">${annexSvg(20)}<small>${note}</small>${count}</div>`;
+/** Выбор конкретной секции включает её размещение на карте. */
+export function annexHtml(ind: Industry, placing?: IndustryModule): string {
+  const options = industryModules(ind).map((kind) => {
+    const spec = INDUSTRY_MODULES[kind];
+    const count = (ind.annexes ?? []).filter((a) => !a.automatic && a.module === kind).length;
+    return `<button class="small annex-choice ${placing === kind ? 'active' : ''}" data-action="ind-annex" data-id="${ind.id}" data-module="${kind}" ${count >= 3 ? 'disabled' : ''}>
+      <span>${spec.name}<small>${moduleEffect(kind)}</small></span><b>${count >= 3 ? '3 из 3' : money(spec.cost)}</b></button>`;
+  }).join('');
+  return `<div class="annex-row">${annexSvg(19)}<b>Расширение комплекса</b></div>
+    <div class="kv"><span>Предел роста</span><b>×${growthCap(ind)}</b><span>Запас продукции</span><b>${ind.output} / ${industryOutputCapacity(ind)}</b></div>
+    <div class="annex-choices">${options}</div>`;
 }
