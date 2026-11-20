@@ -16,6 +16,25 @@ describe('Траектории у соседних грузовых постов
   const parked = Array.from({ length: bays }, (_, i) => bayPose(yard, bays, i, truck.length, 1, true));
   const boxes = (pose: Pose & { trail?: Pose['pos'] }) => vehicleBoxes(pose.pos, pose.dir, truck.length, truck.width, truck.body, pose.trail);
 
+  it('автобус с крайнего поста выпрямляется вдоль поперечного проезда перед боковым выездом', () => {
+    const model = MODELS.bus2;
+    if (model.mode !== 'road') throw new Error('Нужен автобус');
+    const { spec } = model;
+    const spot = bayPose(yard, bays, bays - 1, spec.length, 1, true);
+    const road = { pos: { x: gateX + 8, y: yard.h / 2 + 9 }, dir: { x: 1, y: 0 } };
+    const motion = yardExitMotion(spot, road, spec, yard);
+    let aligned = false;
+    for (let t = 0; t < 30; t += 0.05) {
+      const p = motion(t);
+      if (p.pos.x < spot.pos.x && p.dir.x > 0.999) {
+        expect(Math.abs(p.pos.y - road.pos.y)).toBeLessThan(1);
+        aligned = true;
+        break;
+      }
+    }
+    expect(aligned).toBe(true);
+  });
+
   it('длинный прицеп остаётся на площадке при выезде к двухполосной дороге', () => {
     const bays = 8;
     const yard = { center: { x: 0, y: 0 }, w: industryYardWidth(bays), h: 56, angle: 0 };

@@ -406,7 +406,9 @@ export interface FleetVehicle {
   /** Заезд с выезда на пост автостанции: пока он идёт, погрузка не начинается. */
   enter?: BayEntry;
   /** Выезд с открытого поста до начала дорожной полосы. */
-  yardExit?: { station: number; target: number; next: number; road: Pose; t: number; pathRevision?: 2 };
+  yardExit?: { station: number; target: number; next: number; road: Pose; t: number; pathRevision?: 2 | 3; advance?: number; arc?: 'wide' | 'aisle'; pullout?: true; staged?: true };
+  /** Время окончания погрузки на открытом посту, чтобы место в очереди сохранялось с партией. */
+  yardReadyAt?: number;
   profitMonth: number;
   profitLast: number;
   /**

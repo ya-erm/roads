@@ -38,6 +38,13 @@ export interface LaneSpawn extends VehicleSpec {
   route: number[];
 }
 
+export interface LaneStart {
+  lane: number;
+  s: number;
+  pos: Vec;
+  dir: Vec;
+}
+
 export interface TrafficActivity {
   kind: 'driving' | 'crossing' | 'junction' | 'following' | 'light' | 'yield' | 'exit' | 'pedestrians' | 'barrier' | 'turn' | 'merge' | 'arrival' | 'stop' | 'parking' | 'parking-space';
   /** Машина, из-за которой ждёт: ссылка действительна, пока она в потоке. */
@@ -804,14 +811,15 @@ export class LaneTraffic {
   }
 
   /** У свободной полосы можно начинать манёвр. Начатый доводим до выбранной полосы. */
-  spawnPoint(route: number[], advance: number, length: number, target?: Pick<Vehicle, 'pos' | 'dir'>, preview = false) {
+  spawnPoint(route: number[], advance: number, length: number, target?: Pick<Vehicle, 'pos' | 'dir'>, preview = false, fits?: (start: LaneStart) => boolean): LaneStart | null {
     const lanes = this.spawnLanes(route);
     const points = lanes.map((lane) => {
       const s = clamp(advance, 0, lane.length / 2);
       return { lane: lane.id, s, ...this.graph.lanePose(lane, s) };
     });
     const chosen = target && points.find((p) => dist(p.pos, target.pos) < 0.1 && dot(p.dir, target.dir) >= 0.999);
-    return chosen ?? points.find(({ s }, i) => this.spaceAtSpawn(lanes[i], s, length)) ?? (preview ? points[0] : null) ?? null;
+    return chosen ?? points.find((p, i) => this.spaceAtSpawn(lanes[i], p.s, length) && (fits?.(p) ?? true))
+      ?? (preview ? points.find((p) => fits?.(p) ?? true) : null) ?? null;
   }
 
   spawn(opts: LaneSpawn, start?: { lane: number; s: number }): Vehicle | null {

@@ -94,6 +94,40 @@ describe('Очередь на въезд в игре', { timeout: 60_000 }, () =
     expect(game.stationJam(sB)).toBe(0);
   });
 
+  it('четыре фуры начинают выезжать с постов и по очереди вливаются в один выезд', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { built, line, sB } = freightRoute(game);
+    expect(built).toBe(true);
+    expect(game.setStationBays(sB.id, 8)).toBeNull();
+    const ready = [4, 5, 6, 7];
+    const fleet = Array.from({ length: 8 }, (_, bay) => {
+      const v = game.buyVehicle(line.id, 'truck')!;
+      v.model = 'truck3';
+      v.stop = 1;
+      v.state = ready.includes(bay) ? 'departing' : 'loading';
+      v.timer = ready.includes(bay) ? 0 : 500;
+      v.inBay = true;
+      v.bay = bay;
+      if (v.state === 'departing') v.yardReadyAt = game.time - bay;
+      sB.occupied.push(v.id);
+      return v;
+    });
+    const departing = ready.map((bay) => fleet[bay]);
+    const finished: number[] = [];
+    let simultaneous = 0;
+    const allLeft = runUntil(game, 120, () => finished.length === 4, () => {
+      simultaneous = Math.max(simultaneous, departing.filter((v) => v.yardExit).length);
+      for (const v of departing) if (v.state === 'driving' && !finished.includes(v.id)) finished.push(v.id);
+      const park = game.bayLooks(sB).map((p) => vehicleBoxes(p.pos, p.dir, p.length, p.width, p.body, p.trail));
+      for (const [index, body] of park.entries()) {
+        expect(park.slice(index + 1).some((other) => body.some((a) => other.some((b) => boxesOverlap(a, b))))).toBe(false);
+      }
+    });
+    expect(allLeft, JSON.stringify({ yard: sB.fp, simultaneous, finished, positions: departing.map((v) => [v.id, v.bay, v.state, v.yardExit]) })).toBe(true);
+    expect(finished[0]).toBe(fleet[7].id);
+    expect(simultaneous).toBe(4);
+  });
+
   it('занятый дорожный выезд не блокирует свободные посты, а сам манёвр не считается затором', () => {
     const game = withoutCitizens(freshGame(7));
     const { built, line, sA, sB } = freightRoute(game);

@@ -5,12 +5,15 @@ import { boxesOverlap } from '../lanes/curb';
 import { hitchOf, jointOf, steerBase, vehicleBoxes } from '../sim/body';
 import type { VehicleSpec } from '../sim/vehicle';
 import type { Footprint } from '../world/spatial';
-import type { BayEntry, Pose } from './transport';
+import { LONGEST_BUS, type BayEntry, type Pose } from './transport';
 
 export interface YardPose extends Pose {
   trail?: Pose['pos'];
   done: boolean;
 }
+
+type YardExitPath = ((t: number) => YardPose) & { pulloutTime: number; forwardRadius: number };
+export type YardExitArc = 'wide' | 'aisle';
 
 function axleCurve(from: Pose, to: Pose, spec: VehicleSpec, intoBay = false, outer = false): CurveLUT {
   const base = spec.length * steerBase(spec.body);
@@ -76,7 +79,9 @@ export function yardEntryMotion(entry: BayEntry, to: Pose, spec: VehicleSpec): (
 }
 
 /** Задним ходом в маневровый проезд, остановка и поворот вперёд к выезду. */
-function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint): (t: number) => YardPose {
+function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, arc?: YardExitArc, pullout = false): YardExitPath {
+  const outer = arc === 'wide';
+  const aisle = arc === 'aisle';
   const out = scale(parked.dir, -1);
   const across = rightNormal(out);
   const delta = sub(road.pos, parked.pos);
@@ -84,40 +89,66 @@ function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint):
   const side = scale(across, Math.sign(lateral) || 1);
   const base = spec.length * steerBase(spec.body);
   const depth = dot(delta, out);
-  const viaSide = Math.abs(dot(road.dir, out)) < 0.55 && Math.abs(lateral) > yard.w / 2 - 10;
-  const dir = viaSide ? side : norm(add(side, scale(parked.dir, 0.16)));
+  const gateAcross = dot(sub(road.pos, yard.center), across);
+  const viaSide = Math.abs(dot(road.dir, out)) < 0.55 && Math.abs(gateAcross) > yard.w / 2 - 10;
   const sideRoom = yard.w / 2 + dot(sub(parked.pos, yard.center), side);
-  const swing = Math.min(Math.max(2.5, 14 - Math.abs(lateral)), sideRoom - (spec.length - base) - spec.width / 2 - 1);
+  const turnRoom = viaSide ? Math.min(18, 4 + Math.max(base, spec.length * 0.45)) : Math.max(2.5, (outer ? 18 : 14) - Math.abs(lateral));
+  const swing = Math.min(turnRoom, sideRoom - (spec.length - base) - spec.width / 2 - 1);
   // Длинному прицепу оставляем место для дуги выезда, короткие машины начинают рулить позже, чтобы не задеть ряд.
   const longTrailer = spec.body === 'longSemi';
-  const forwardRoom = longTrailer ? base + 12 : Math.min(base + 12, spec.length / 2 + 4);
-  const turnDepth = Math.max(base + 6, depth - (viaSide ? 3 : forwardRoom));
+  const forwardRoom = (longTrailer ? base + 12 : Math.min(base + 12, spec.length / 2 + 4)) + (outer ? 3 : 0);
+  const behindRow = Math.min(yard.h / 2 - 0.5, LONGEST_BUS - 1) + spec.width / 2 + 1.5;
+  const aisleDepth = behindRow - dot(sub(parked.pos, yard.center), out);
+  const wanted = depth - (viaSide ? 0 : forwardRoom);
+  const clearRow = !viaSide && wanted < aisleDepth;
+  const aisleLimit = yard.h / 2 + 9 - dot(sub(parked.pos, yard.center), out);
+  const turnDepth = Math.max(base + 6, wanted, clearRow ? aisleDepth : 0, aisle && !viaSide ? Math.min(aisleLimit, Math.max(aisleDepth, wanted) + 7) : 0);
+  const dir = viaSide || clearRow || aisle ? side : norm(add(side, scale(parked.dir, 0.16)));
   const axle = add(parked.pos, add(scale(out, turnDepth), scale(side, -swing)));
   const turn = { pos: add(axle, scale(dir, base)), dir };
-  const reverse = axleCurve(turn, parked, spec, viaSide || !longTrailer);
+  const backed = pullout ? { ...parked, pos: add(parked.pos, scale(out, 2)) } : parked;
+  const straight = pullout ? axleCurve(backed, parked, spec) : null;
+  const reverse = axleCurve(turn, backed, spec, !!arc || viaSide || clearRow || !longTrailer, aisle);
   const pace = clamp(yard.h / 52, 0.62, 1);
   const reverseSpeed = 2.5 * pace;
+  const pulloutTime = straight ? Math.max(0.8, straight.length / reverseSpeed) : 0;
   const seconds = Math.max(0.8, reverse.length / reverseSpeed);
   const forward = axleCurve(turn, road, spec);
-  const forwardSpeed = 3.7 * pace * clamp(minRadius(forward.curve) / Math.max(4, base * 0.65), 0.65, 1);
+  const forwardRadius = minRadius(forward.curve);
+  const forwardSpeed = 3.7 * pace * clamp(forwardRadius / Math.max(4, base * 0.65), 0.65, 1);
   // Путь задним ходом — та же кривая осей, проигранная от поста к проезду.
-  return (t) => t < seconds
-    ? { ...yardLeg(reverse, turn, parked, spec, seconds - t, reverseSpeed), done: false }
-    : yardLeg(forward, turn, road, spec, t - seconds, forwardSpeed, 0, 3);
+  const pose = (t: number) => {
+    if (straight && t < pulloutTime) return { ...yardLeg(straight, backed, parked, spec, pulloutTime - t, reverseSpeed), done: false };
+    const after = t - pulloutTime;
+    return after < seconds
+      ? { ...yardLeg(reverse, turn, backed, spec, seconds - after, reverseSpeed), done: false }
+      : yardLeg(forward, turn, road, spec, after - seconds, forwardSpeed, 0, 3);
+  };
+  return Object.assign(pose, { pulloutTime, forwardRadius });
 }
 
-const exitPlans = new WeakMap<Footprint, Map<string, (t: number) => YardPose>>();
+const exitPlans = new WeakMap<Footprint, Map<string, YardExitPath>>();
 
-export function yardExitMotion(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint): (t: number) => YardPose {
+export function yardExitMotion(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, arc?: YardExitArc, pullout = false): YardExitPath {
   let plans = exitPlans.get(yard);
   if (!plans) exitPlans.set(yard, (plans = new Map()));
-  const key = [parked.pos.x, parked.pos.y, parked.dir.x, parked.dir.y, road.pos.x, road.pos.y, road.dir.x, road.dir.y, spec.body, spec.length, spec.width].join('|');
+  const key = [parked.pos.x, parked.pos.y, parked.dir.x, parked.dir.y, road.pos.x, road.pos.y, road.dir.x, road.dir.y, spec.body, spec.length, spec.width, arc, pullout].join('|');
   const cached = plans.get(key);
   if (cached) return cached;
-  if (plans.size >= 64) plans.clear();
-  const motion = planExit(parked, road, spec, yard);
+  if (plans.size >= 192) plans.clear();
+  const motion = planExit(parked, road, spec, yard, arc, pullout);
   plans.set(key, motion);
   return motion;
+}
+
+/** У близкого выезда поворот выгодно начать раньше, если более широкая дуга помещается во дворе. */
+export function yardExitArcs(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, pullout = false) {
+  const normal = yardExitMotion(parked, road, spec, yard, undefined, pullout);
+  const wide = yardExitMotion(parked, road, spec, yard, 'wide', pullout);
+  const preferWide = normal.forwardRadius < spec.length * 0.45 && wide.forwardRadius > normal.forwardRadius + 0.5;
+  const first = { path: normal, arc: undefined };
+  const second = { path: wide, arc: 'wide' as const };
+  return [...(preferWide ? [second, first] : [first, second]), { path: yardExitMotion(parked, road, spec, yard, 'aisle', pullout), arc: 'aisle' as const }];
 }
 
 export interface YardMotion {
@@ -127,17 +158,20 @@ export interface YardMotion {
   parks: boolean;
 }
 
+function yardPosesOverlap(a: YardPose, sa: VehicleSpec, b: YardPose, sb: VehicleSpec): boolean {
+  if (dist(a.pos, b.pos) > sa.length + sb.length + 2) return false;
+  const boxes = vehicleBoxes(b.pos, b.dir, sb.length, sb.width + 0.8, sb.body, b.trail);
+  return vehicleBoxes(a.pos, a.dir, sa.length, sa.width + 0.8, sa.body, a.trail).some((part) => boxes.some((box) => boxesOverlap(part, box)));
+}
+
 /** Прогноз габаритов тягачей и прицепов. Проверяем оставшуюся часть обоих манёвров. */
 export function yardPathsConflict(a: YardMotion, b: YardMotion): boolean {
-  const body = (p: YardPose, s: VehicleSpec) => vehicleBoxes(p.pos, p.dir, s.length, s.width + 0.8, s.body, p.trail);
   for (let t = 0; t < 120; t += 0.15) {
     const x = a.pose(t);
     const y = b.pose(t);
-    if (dist(x.pos, y.pos) <= a.spec.length + b.spec.length + 2) {
-      const other = body(y, b.spec);
-      if (body(x, a.spec).some((part) => other.some((box) => boxesOverlap(part, box)))) return true;
-    }
-    if ((x.done && !a.parks) || (y.done && !b.parks) || (x.done && y.done)) return false;
+    if ((x.done && !a.parks) || (y.done && !b.parks)) return false;
+    if (yardPosesOverlap(x, a.spec, y, b.spec)) return true;
+    if (x.done && y.done) return false;
   }
   return true;
 }
