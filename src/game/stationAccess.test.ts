@@ -1,20 +1,46 @@
 import { describe, expect, it } from 'vitest';
+import { STORAGE } from '../config';
 import { add, scale } from '../core/vec';
 import { ProjectTools, type DrawSettings } from '../input/projecttools';
 import { RoadTools } from '../input/roadtools';
 import { Game } from './game';
 import { stationGatePoints } from './stationAccess';
-import { fieldSpot, freshGame, road, runUntil, withoutCitizens } from './testkit';
+import { fieldSpot, freightRoute, freshGame, road, runUntil, withoutCitizens } from './testkit';
+import { industryYardWidth } from './transport';
 
 describe('Отдельные подъезды автостанции', () => {
-  it('проект дороги подключает двухсторонний подъезд с торца грузового двора', () => {
+  it('загрузка сокращает пустые края грузового двора с учетом складских пристроек', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { built, line, sB } = freightRoute(game);
+    expect(built).toBe(true);
+    expect(sB.fp.w).toBe(industryYardWidth(sB.bays));
+    const save = structuredClone(game.toSave());
+    const old = save.stations.find((st) => st.id === sB.id)!;
+    old.bays = 5;
+    old.depots = 1;
+    old.fp.w = 126 + STORAGE.width;
+    old.cargo = { grain: 130 };
+
+    const loaded = new Game(game.settings, save);
+    const st = loaded.stations.get(sB.id)!;
+    expect(st.fp).toEqual({ ...old.fp, w: industryYardWidth(5) + STORAGE.width });
+    expect(st.bays).toBe(5);
+    expect(st.cargo).toEqual({ grain: 130 });
+    expect(st.nodeId).toBe(sB.nodeId);
+    expect(loaded.lineGap(loaded.lines.get(line.id)!)).toBeNull();
+  });
+
+  it('проект дороги подключает двухсторонний торцевой подъезд, который сохраняется при уменьшении двора', () => {
     const game = withoutCitizens(freshGame(42));
     game.money = 5_000_000;
     const p = fieldSpot(game, 480);
     expect(road(game, { free: p }, { free: { x: p.x + 480, y: p.y } })).toBe(true);
     const yard = game.placeStation({ x: p.x + 215, y: p.y - 38 }, 14)!;
     expect(yard).toBeTruthy();
+    game.index.remove(yard);
     yard.industryId = game.industries[0].id;
+    yard.fp = { ...yard.fp, w: 90 };
+    game.index.add(yard);
     const gate = stationGatePoints(yard, game.roads.net).find((point) => point.side === 1)!;
     expect(gate).toBeTruthy();
     const draw: DrawSettings = { kind: 'road', spec: { cls: 'street', lanesF: 1, lanesB: 1 }, mode: 'straight', level: 0, auto: false, reverse: false };
@@ -28,6 +54,9 @@ describe('Отдельные подъезды автостанции', () => {
     const loaded = new Game(game.settings, structuredClone(game.toSave()));
     const st = loaded.stations.get(yard.id)!;
     const side = loaded.stationRoadNodes(st).find((id) => loaded.roads.net.nodes.get(id)?.stationGateSide === 1)!;
+    expect(st.fp.w).toBeCloseTo(90);
+    expect(loaded.setStationBays(st.id, 2)).toBeNull();
+    expect(loaded.stationRoadNodes(st)).toContain(side);
     expect(loaded.roads.graph.inLinks.has(side)).toBe(true);
     expect(loaded.roads.graph.outLinks.has(side)).toBe(true);
     expect(stationGatePoints(st, loaded.roads.net).filter((point) => point.side).map((point) => point.side)).toEqual([-1]);

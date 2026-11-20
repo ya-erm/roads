@@ -445,6 +445,9 @@ export interface Pose {
   dir: Vec;
 }
 
+/** Ряд постов и место для поворота с обоих торцов грузового двора. */
+export const industryYardWidth = (bays: number): number => bays * STATION.bayWidth + 26;
+
 /** В открытом дворе посты сгруппированы напротив въезда. Ширина двора нужна для склада и проезда. */
 export function baySlot(width: number, bays: number, bay: number, open = false): { x: number; w: number } {
   const available = (width - 10) / bays;

@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import { boxesOverlap } from '../lanes/curb';
 import { vehicleBoxes } from '../sim/body';
-import { bayPose, MODELS, type Pose } from './transport';
+import { bayPose, industryYardWidth, MODELS, type Pose } from './transport';
 import { yardEntryMotion, yardExitMotion, type YardPose } from './yardManeuver';
 
 describe('Траектории у соседних грузовых постов', () => {
-  const yard = { center: { x: 0, y: 0 }, w: 126, h: 56, angle: 0 };
   const bays = 5;
+  const yard = { center: { x: 0, y: 0 }, w: industryYardWidth(bays), h: 56, angle: 0 };
+  const gateX = yard.w / 2 + 5;
   const model = MODELS.truck3;
   if (model.mode !== 'road') throw new Error('Фура должна быть дорожным транспортом');
   const truck = model.spec;
@@ -16,8 +17,8 @@ describe('Траектории у соседних грузовых постов
 
   it.each([
     { name: 'фасад', enter: { pos: { x: -3.5, y: 33 }, dir: { x: 0, y: -1 } }, exit: { pos: { x: 3.5, y: 46 }, dir: { x: 0, y: 1 } } },
-    { name: 'левый торец', enter: { pos: { x: -68, y: 34.5 }, dir: { x: 1, y: 0 } }, exit: { pos: { x: -81, y: 41.5 }, dir: { x: -1, y: 0 } } },
-    { name: 'правый торец', enter: { pos: { x: 68, y: 34.5 }, dir: { x: -1, y: 0 } }, exit: { pos: { x: 81, y: 41.5 }, dir: { x: 1, y: 0 } } },
+    { name: 'левый торец', enter: { pos: { x: -gateX, y: 34.5 }, dir: { x: 1, y: 0 } }, exit: { pos: { x: -gateX - 13, y: 41.5 }, dir: { x: -1, y: 0 } } },
+    { name: 'правый торец', enter: { pos: { x: gateX, y: 34.5 }, dir: { x: -1, y: 0 } }, exit: { pos: { x: gateX + 13, y: 41.5 }, dir: { x: 1, y: 0 } } },
   ])('фура проезжает через $name между занятыми постами', ({ enter, exit }) => {
     const issues: string[] = [];
     for (const [i, spot] of parked.entries()) {

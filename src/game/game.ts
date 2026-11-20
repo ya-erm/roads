@@ -209,12 +209,13 @@ import {
   bayBox,
   bayPose,
   entryPose,
+  industryYardWidth,
   nearestBay,
   Pose,
   stopBerth,
 } from './transport';
 import { yardEntryMotion, yardExitMotion, yardPathsConflict, type YardMotion, type YardPose } from './yardManeuver';
-import { additionalStationGates, stationGatePoints, stationRoadFront } from './stationAccess';
+import { additionalStationGates, stationGatePoints, stationRoadFront, widthAtStationGates } from './stationAccess';
 
 export type StationKind = Station['kind'];
 
@@ -1360,6 +1361,11 @@ export class Game implements BuildContext {
     this.enterprises.load(save.deposits);
     for (const s of save.stations) {
       const st = this.stationFromSave(s);
+      if (st.kind === 'road' && st.industryId != null && !st.side && !st.curb) {
+        const compact = industryYardWidth(st.bays) + (st.depots ?? 0) * STORAGE.width;
+        const width = Math.max(compact, widthAtStationGates(st, this.roads.net));
+        if (width < st.fp.w) st.fp = { ...st.fp, w: width };
+      }
       this.stations.set(st.id, st);
       // Станция у получателя невидима: на карте — сам магазин, по клику выбирается он.
       if (st.kind !== 'dock') this.index.add(st);
@@ -1452,7 +1458,8 @@ export class Game implements BuildContext {
     const half = access ? dot(access, n) + 1.4 : fp.parts ? footprintSide(fp, n) : (alongX ? fp.w : fp.h) / 2;
     const along = alongX ? fp.h : fp.w;
     const axis = alongX ? v : u;
-    const compact = Math.min(64, along * 0.7);
+    const width = industryYardWidth(STATION.bays);
+    const compact = Math.min(width, along * 0.7);
     const room = (along - compact) / 2;
     let slide = access ? dot(access, axis) : Math.max(-room, Math.min(room, alongX ? ly : lx));
     // К этой стене уже подходит дорога и кончается тупиком у места выезда (стартовый просёлок): двор встаёт напротив
@@ -1500,10 +1507,9 @@ export class Game implements BuildContext {
       if (cost > this.budget) return fail('Не хватает денег', cost, plan);
       return { ok: true, cost, fp: dock, industryId: ind.id, ...industryAccessFlag, driveway: plan, nodePos: gate, demolish };
     };
-    const wide = Math.min(104, Math.max(72, along * 0.96));
-    const large = tryYard(wide, 56, true);
+    const large = tryYard(width, 56, true);
     if (large.ok) return large;
-    const medium = tryYard(Math.min(wide, 72), 39, true);
+    const medium = tryYard(width, 39, true);
     if (medium.ok) return medium;
     const small = tryYard(compact, INDUSTRY_DOCK, false);
     return small.ok || !linked ? small : this.industryStationPlan(ind, p, false);
@@ -11817,7 +11823,8 @@ export class Game implements BuildContext {
     if (st.curb) return { ok: false, reason: `Мест у края улицы — ${st.bays}: их выбирают при постановке (или переставьте вокзал)`, cost: 0, fp: st.fp };
     const n = Math.round(bays);
     const extra = n - st.bays;
-    const fp: Footprint = { ...st.fp, w: st.fp.w + extra * STATION.bayWidth };
+    const gateWidth = st.industryId != null && extra < 0 ? widthAtStationGates(st, this.roads.net) : 0;
+    const fp: Footprint = { ...st.fp, w: Math.max(st.fp.w + extra * STATION.bayWidth, gateWidth) };
     const cost = extra * STATION.bayCost;
     const fail = (reason: string): BaysPlan => ({ ok: false, reason, cost, fp });
     if (n < STATION.minBays) return fail(`Постов не может быть меньше ${STATION.minBays}`);
@@ -11851,7 +11858,8 @@ export class Game implements BuildContext {
     if (st.kind !== 'road') return { ok: false, reason: st.kind === 'rail' ? 'У ж/д станции склад пока не растёт' : 'У остановки склада нет', cost: 0, fp: st.fp };
     const n = Math.round(depots);
     const extra = n - (st.depots ?? 0);
-    const fp: Footprint = { ...st.fp, w: st.fp.w + extra * STORAGE.width };
+    const gateWidth = st.industryId != null && extra < 0 ? widthAtStationGates(st, this.roads.net) : 0;
+    const fp: Footprint = { ...st.fp, w: Math.max(st.fp.w + extra * STORAGE.width, gateWidth) };
     // Убираем — минус: refund вернёт часть цены (COST.refundRatio).
     const cost = extra * STORAGE.cost;
     const fail = (reason: string): BaysPlan => ({ ok: false, reason, cost, fp });
