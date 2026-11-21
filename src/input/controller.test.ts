@@ -186,6 +186,35 @@ it('кривую дорожку строят тремя кликами и пра
   expect(game.footpaths[0].b).toEqual(beside);
 });
 
+it('при переносе общего узла предпросмотр всей развилки совпадает с результатом', () => {
+  const game = freshGame({ seed: 11, size: 'small', towns: 0, industries: 'few', money: 5_000_000, water: 'dry' });
+  const o = fieldSpot(game, 300);
+  const joint = add(o, { x: 80, y: 40 });
+  expect(game.buildFootpath(o, joint)).toBeNull();
+  expect(game.buildFootpath(joint, add(joint, { x: 70, y: 10 }), {
+    kind: 'curve', c1: add(joint, { x: 20, y: -10 }), c2: add(joint, { x: 40, y: -5 }),
+  })).toBeNull();
+  expect(game.buildFootpath(joint, add(joint, { x: 0, y: 60 }))).toBeNull();
+  const initial = structuredClone(game.footpaths);
+  const { c, canvas, move, mouse } = play(game);
+  c.setTool('footpath');
+  c.setFootpathMode('move');
+  canvas.fire('mousedown', mouse(joint));
+  move(o);
+  expect(c.overlay().footpath).toMatchObject({ ok: false, affected: expect.any(Array) });
+  expect(c.overlay().footpath!.affected).toHaveLength(3);
+  const target = add(joint, { x: 16, y: 25 });
+  move(target);
+  const preview = c.overlay().footpath!;
+  expect(preview.ok).toBe(true);
+  expect(preview.affected).toHaveLength(3);
+  expect(preview.affected![0].b).toEqual(target);
+  expect(preview.affected![1].shape).toMatchObject({ kind: 'curve', c1: add(target, { x: 20, y: -10 }) });
+  expect(game.footpaths).toEqual(initial);
+  win.fire('mouseup', mouse(target));
+  expect(game.footpaths).toEqual(preview.affected);
+});
+
 it('размещение автомобиля оставляет доступными правую протяжку карты и масштаб колесом', () => {
   const { c, canvas, camera, mouse, move } = play(freshGame({ ...NEW_GAME_SETTINGS, seed: 1 }));
   c.setTool('select');

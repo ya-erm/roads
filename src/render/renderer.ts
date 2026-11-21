@@ -145,7 +145,7 @@ export type Selection =
   | { type: 'workTrain'; id: number };
 
 export interface ToolOverlay {
-  footpath?: Omit<Footpath, 'id'> & { ok: boolean };
+  footpath?: Omit<Footpath, 'id'> & { ok: boolean; affected?: readonly Footpath[] };
   vehicleGhost?: { look: VehicleLook; ok: boolean };
   parkingTargets?: { pos: Vec; dir: Vec; free: boolean }[];
   parkingPreview?: { pts: Vec[]; goal: Vec; dir: Vec; ok: boolean };
@@ -4936,10 +4936,13 @@ export class Renderer {
     if (o.footpath) {
       ctx.save();
       ctx.strokeStyle = o.footpath.ok ? '#2f80ed' : '#df403c';
-      ctx.lineWidth = Math.max(footpathWidth(o.footpath), 2 / this.camera.zoom);
       ctx.lineCap = 'round';
-      this.polyline(footpathPoints(o.footpath));
-      ctx.stroke();
+      ctx.lineJoin = 'round';
+      for (const path of o.footpath.affected ?? [o.footpath]) {
+        ctx.lineWidth = Math.max(footpathWidth(path), 2 / this.camera.zoom);
+        this.polyline(footpathPoints(path));
+        ctx.stroke();
+      }
       ctx.restore();
     }
     for (const t of o.parkingTargets ?? []) {

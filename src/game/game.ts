@@ -3168,9 +3168,11 @@ export class Game implements BuildContext {
     return { changes, cost, reason: cost > this.budget ? 'Не хватает денег' : undefined };
   }
 
-  footpathPlan(a: Vec, b: Vec, shape?: FootpathShape, editId?: number, linked = false) {
+  footpathPlan(a: Vec, b: Vec, shape?: FootpathShape, editId?: number, linked = false): {
+    changes: ReadonlyMap<number, Footpath>; cost: number; reason?: string; surface?: Footpath['surface'];
+  } {
     const { changes, cost, reason } = this.planFootpaths(a, b, shape, editId, linked);
-    return { cost, reason, surface: changes.get(editId ?? -1)?.surface };
+    return { changes, cost, reason, surface: changes.get(editId ?? -1)?.surface };
   }
 
   private footpathObstruction(path: Footpath): string | null {

@@ -142,7 +142,7 @@ export class FootpathEditor {
       const ok = !plan?.reason;
       const action = hit && (typeof hit.part === 'number' ? 'Перенести вершину' : handleLabels[hit.part]);
       return {
-        footpath: { ...geom, ...(path.surface && { surface: path.surface }), ok },
+        footpath: { ...(plan?.changes.get(path.id) ?? path), ok, ...(plan && { affected: [...plan.changes.values()] }) },
         points: handles(geom).map(h => ({ pos: h.pos, color: h.part === 'a' || h.part === 'b' ? '#2f80ed' : '#f2994a', r: 5 })),
         handles: geom.shape?.kind === 'curve' ? [
           { anchor: geom.a, pos: geom.shape.c1, active: hit?.part === 'c1', partner: false },
