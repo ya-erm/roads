@@ -8,6 +8,7 @@ import { townTier } from '../world/townForms';
 import { Art } from './industryArt';
 import { type Box, grow } from './tileCache';
 import { paths } from './townDecor';
+import { gameTownWalks } from './townWalks';
 
 /**
  * Тротуары вдоль улиц городов — только картинка: дорог, узлов, движения и стройки не меняют; рисуются под дорогами
@@ -127,6 +128,8 @@ export interface SidewalkSpan {
 
 export interface SidewalkNet {
   lines: Sidewalk[];
+  /** Проходы внутри кварталов для привязки и пешего графа. */
+  yards?: { box: Box; paths: number[][]; pathIds?: number[] }[];
   ends: SidewalkEnd[];
   /** Где вдоль полотна тротуары: по id полотна (откосы там не рисуются — улица в городе спланирована). */
   spans: Map<number, SidewalkSpan[]>;
@@ -142,6 +145,10 @@ export function gameSidewalks(game: Game): SidewalkNet {
   if (old?.net === net && old.roadRev === net.version && old.plots === plots && old.towns === game.townRev && old.layout === game.layoutRev && old.terrain === game.terrain.version) return old.walks;
   const pieces = old?.layout === game.layoutRev && old.terrain === game.terrain.version ? old.pieces : new Map();
   const walks = sidewalkNet(net, walkSite(game), pieces);
+  walks.yards = game.towns.flatMap(town => {
+    const yard = gameTownWalks(game, town);
+    return yard ? [{ box: yard.box, paths: [...yard.paths, ...yard.fronts.map(front => front.pts)], pathIds: yard.pathIds }] : [];
+  });
   gameWalks.set(game, { net, roadRev: net.version, plots, towns: game.townRev, layout: game.layoutRev, terrain: game.terrain.version, walks, pieces });
   return walks;
 }

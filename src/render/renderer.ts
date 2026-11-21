@@ -4,7 +4,7 @@ import { clamp, hash } from '../core/math';
 import { drawWalkSign } from './walkSign';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
-import { FOOTPATH, pathFootprint, type Footpath } from '../game/footpaths';
+import { FOOTPATH, footpathBounds, footpathParts, footpathPoints, type Footpath } from '../game/footpaths';
 import { stationNormal } from '../game/railStationEdit';
 import { additionalStationGates, stationRoadFront } from '../game/stationAccess';
 import { warningMarks } from '../game/stationWarnings';
@@ -65,7 +65,7 @@ import { paintIndustrySite, tracePlot } from './industrySite';
 import { drawIndustrialGate, drawIndustrialRoads, industryRoadSurface } from './industryRoadArt';
 import { drawIndustryHaulConnection, drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock } from './industryStationArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
-import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
+import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetCanopyMask, streetGreen, type StreetGreen } from './parkArt';
 import { type Around, gameSidewalks, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
@@ -78,9 +78,9 @@ import { drawRailProjects, drawTrackMachines, railProjectSig } from './railProje
 import { WORK_TRAIN } from '../game/workTrains';
 import { SERVICES } from '../game/services';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
-import { corridorHalf, curbGap } from '../world/worldgen';
+import { corridorHalf } from '../world/worldgen';
 import { storeysOf } from '../world/townForms';
-import { drawDriveMouths, drawTownWalks, driveClearance, type TownWalks, townWalks } from './townWalks';
+import { drawDriveMouths, drawTownWalks, driveClearance, gameTownWalks, type TownWalks } from './townWalks';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, flashSpot, type Frame, frontLength, resetFrame, setFrame, sirenVisibility, type VehicleDrawOptions } from './vehicleArt';
@@ -145,7 +145,7 @@ export type Selection =
   | { type: 'workTrain'; id: number };
 
 export interface ToolOverlay {
-  footpath?: { a: Vec; b: Vec; ok: boolean };
+  footpath?: Omit<Footpath, 'id'> & { ok: boolean };
   vehicleGhost?: { look: VehicleLook; ok: boolean };
   parkingTargets?: { pos: Vec; dir: Vec; free: boolean }[];
   parkingPreview?: { pts: Vec[]; goal: Vec; dir: Vec; ok: boolean };
@@ -618,7 +618,7 @@ export class Renderer {
     /** Будущие дороги проектов: полотна и узлы по отпечатку их геометрии (`c12`, `n7`). */
     projectItems: new SceneDiff<string>(),
     bases: new SceneDiff(),
-    towns: new Map<number, { list: TownBuilding[] | null; n: number; parks: TownPark[] | null; np: number; lots: unknown; roads: string; diff: SceneDiff }>(),
+    towns: new Map<number, { walks?: TownWalks | null; diff: SceneDiff }>(),
     /** Аллеи и фонари вдоль улиц городов (parkArt.streetGreen) — по полотну. */
     alleys: new SceneDiff(),
     /** Тротуары (render/sidewalks.ts): по полотну (`c<id>`) и скругления у узла (`n<id>`). */
@@ -643,6 +643,7 @@ export class Renderer {
       townKey: [] as number[],
       lines: [] as StreetGreen[],
       shown: [] as StreetGreen[],
+      pedestrianMask: null as ReturnType<typeof streetCanopyMask> | null,
       towns: [] as { center: Vec; radius: number }[],
       live: null as { net: LaneNet; version: number; base: StreetGreen[] } | null,
       cache: new Map<number, { sig: string; line: StreetGreen | null }>(),
@@ -860,7 +861,7 @@ export class Renderer {
     const preview = this.junctionPreview(game.roads.open, roadNet);
     const scene: StillScene = { game, o, roadNet, fullNet, preview };
     const cached = prefOn('mapCache');
-    if (!cached && this.tiles.sets.length) this.forgetStill();
+    if (!cached && this.tiles.sets.length) this.tiles.clear();
     // Сдвиг камеры — на целый пиксель холста: плитки кэша ложатся на экран без пересэмплирования, остальное — точно по ним.
     const cam = this.camera;
     const k = cam.zoom * cam.dpr;
@@ -894,6 +895,8 @@ export class Renderer {
       (level) => this.lanes.hasLayer(roadNet, level) || this.projectLanes.hasLayer(fullNet, level) || segs.some((s) => this.railLevel(s, level)),
     );
 
+    // Геометрия аллей и тротуаров нужна и при отрисовке напрямую.
+    this.syncStill(scene);
     const plan = cached ? this.prepareTiles(scene, k, tx, ty) : null;
     if (plan) this.blitTiles(plan, UNDER);
     else {
@@ -1100,7 +1103,6 @@ export class Renderer {
    */
   private prepareTiles(s: StillScene, k: number, tx: number, ty: number): TilePlan {
     const cam = this.camera;
-    this.syncStill(s);
     const set = this.tiles.frame(cam.zoom, cam.dpr, performance.now());
     const a = cam.toWorld(0, 0);
     const b = cam.toWorld(cam.width, cam.height);
@@ -1278,9 +1280,7 @@ export class Renderer {
     if (pathsChanged) {
       cur.footpaths = game.footpaths;
       add(this.diffs.footpaths.update(put => {
-        for (const { id, a, b } of game.footpaths) put(id, `${a.x},${a.y},${b.x},${b.y}`, {
-          x0: Math.min(a.x, b.x), y0: Math.min(a.y, b.y), x1: Math.max(a.x, b.x), y1: Math.max(a.y, b.y),
-        });
+        for (const path of game.footpaths) put(path.id, JSON.stringify(path), footpathBounds(path));
       }));
     }
     const reliefBox = this.relief.sync(t);
@@ -1414,44 +1414,11 @@ export class Renderer {
     let drivewayChange = lotChange || pathsChanged;
     for (const town of townsTouched ? game.towns : []) {
       let rec = this.diffs.towns.get(town.id);
-      if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, parks: null, np: -1, lots: null, roads: '', diff: new SceneDiff() }));
-      const parks = town.parks ?? null;
-      // Площадки-стоянки: правка заменяет список (Game.lotRev) — заезды к их воротам (townWalks) тоже заново.
-      const lots = town.lots ?? null;
+      if (!rec) this.diffs.towns.set(town.id, (rec = { diff: new SceneDiff() }));
       const previousWalks = this.walks.get(town.id);
-      const samePlots = rec.list === town.buildings && rec.n === town.buildings.length && rec.parks === parks && rec.np === (parks?.length ?? 0) && rec.lots === lots;
-      if (!roadChange && samePlots) continue;
-      const r = town.extent ?? town.radius;
-      const { x, y } = town.center;
-      const area = grow(samePlots && previousWalks ? previousWalks.box : { x0: x - r, y0: y - r, x1: x + r, y1: y + r }, 30);
-      const nearby = net.corridorsInBox(area.x0, area.y0, area.x1, area.y1).sort((a, b) => a.id - b.id);
-      const roads = nearby.map((c) => `${c.id}:${c.rev}:${c.build ? 1 : 0}`).join(',');
-      if (samePlots && rec.roads === roads) continue;
-      rec.roads = roads;
-      rec.list = town.buildings;
-      rec.n = town.buildings.length;
-      rec.parks = parks;
-      rec.np = parks?.length ?? 0;
-      rec.lots = lots;
-      // Дорожки кварталов (townWalks) — по домам и паркам города: раз на их список, а не в каждой плитке.
-      // Ближнее готовое полотно: от точки до его кромки (со своей стороны: полоса стоянки бывает только с одной).
-      const nearest = (p: Vec) => {
-        let best: { gap: number; dirt: boolean } = { gap: Infinity, dirt: false };
-        for (const c of net.corridorsNear(p, 30)) {
-          if (c.build) continue;
-          if (!net.isFlat(c) || net.node(c.a).level !== 0) {
-            if (Math.abs(net.heightAt(c, c.lut.closest(p).s)) > 0.25) continue;
-          }
-          const gap = curbGap(c, p);
-          if (gap < best.gap) best = { gap, dirt: isDirt(c.cls) };
-        }
-        return best;
-      };
-      const walks = townWalks(
-        town,
-        (p) => nearest(p).gap,
-        (p) => nearest(p).dirt ? 'dirt' : 'asphalt',
-      );
+      const walks = gameTownWalks(game, town);
+      if (walks && rec.walks === walks) continue;
+      rec.walks = walks;
       if (walks) this.walks.set(town.id, walks);
       else this.walks.delete(town.id);
       if (walks?.sig !== previousWalks?.sig) drivewayChange = true;
@@ -1464,7 +1431,7 @@ export class Renderer {
             put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}|${b.bays ?? ''}|${b.dockApproach ?? ''}|${surfaces}`, grow(fpBox(b.fp), houseReach(b)));
           }
           // Парки — отрицательными номерами (id парка — не id сущности).
-          for (const p of parks ?? []) put(-p.id - 1, `${fpSig(p.fp)}|${p.kind}`, grow(fpBox(p.fp), PARK_REACH));
+          for (const p of town.parks ?? []) put(-p.id - 1, `${fpSig(p.fp)}|${p.kind}`, grow(fpBox(p.fp), PARK_REACH));
           // Площадки-стоянки — своими номерами (id сущности, со сдвигом от парков); снесённых нет.
           for (const l of town.lots ?? [])
             if (!l.removed) put(-2_000_000_000 + l.id, `${fpSig(l.fp)}|${l.gates.map((g) => `${g.x}${g.mode}`).join(',')}|${l.nodes?.length ?? 0}`, grow(fpBox(l.fp), LOT_REACH));
@@ -1474,7 +1441,7 @@ export class Renderer {
     }
     if (drivewayChange) {
       const lots = game.towns.flatMap((t) => (t.lots ?? []).filter((l) => !l.removed).map((l) => l.fp));
-      this.drivewayOccupied = driveClearance(this.walks.values(), [...lots, ...game.footpaths.map(p => pathFootprint(p.a, p.b))]);
+      this.drivewayOccupied = driveClearance(this.walks.values(), [...lots, ...game.footpaths.flatMap(footpathParts)]);
     }
     // Аллеи и тротуары: по дорогам, остановкам и строениям у бордюра, черте городов (с шагом 50 м — не каждый месяц) и
     // их застройке (тротуар — где рядом дома). Полотна, что не менялись, — из кэша (streetGreen); новая станция или
@@ -1519,6 +1486,7 @@ export class Renderer {
     const trees = this.liveAlleys(game, s.fullNet);
     if (trees !== this.alleys.shown) {
       this.alleys.shown = trees;
+      this.alleys.pedestrianMask = null;
       const pad = this.alleys.live ? WALK_PAD : DIRTY_PAD;
       for (const b of this.diffs.alleys.update((put) => trees.forEach((l) => put(l.id, l.sig, l.box)))) boxes.push(grow(b, pad));
     }
@@ -4966,12 +4934,11 @@ export class Renderer {
     if (this.canvas.style.cursor !== cursor) this.canvas.style.cursor = cursor;
     const ctx = this.ctx;
     if (o.footpath) {
-      const { a, b, ok } = o.footpath;
       ctx.save();
-      ctx.strokeStyle = ok ? '#2f80ed' : '#df403c';
+      ctx.strokeStyle = o.footpath.ok ? '#2f80ed' : '#df403c';
       ctx.lineWidth = Math.max(FOOTPATH.width, 2 / this.camera.zoom);
       ctx.lineCap = 'round';
-      this.polyline([a, b]);
+      this.polyline(footpathPoints(o.footpath));
       ctx.stroke();
       ctx.restore();
     }
@@ -5918,6 +5885,11 @@ export class Renderer {
     ctx.lineWidth = 0.2;
     for (const p of game.pedestrians.visible(game.time, view)) {
       ctx.save();
+      const outsideCrowns = this.alleys.pedestrianMask ??= streetCanopyMask(this.alleys.shown);
+      if (!outsideCrowns(ctx, p.pos, 1.3 * figureScale)) {
+        ctx.restore();
+        continue;
+      }
       ctx.translate(p.pos.x, p.pos.y);
       ctx.rotate(p.heading);
       ctx.scale(figureScale, figureScale);

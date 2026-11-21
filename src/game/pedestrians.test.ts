@@ -22,8 +22,8 @@ describe('Пешеходы на дорожках к подземному пер�
     expect(positions(stepped)).toEqual(positions(direct));
   });
   it.each(['у лестницы', 'у прежнего входа'] as const)('человек доходит по дорожке %s, спускается и выходит с другой стороны, машины свободно едут', (connection) => {
-    const game = freshGame(7);
-    // Отдельный перекрёсток вдали от городов — ровно две подходящие дорожки, без иных тротуаров.
+    const game = freshGame({ seed: 7, towns: 0, industries: 'few', size: 'small', water: 'dry', money: 500_000 });
+    // Отдельный перекрёсток с двумя подходами, без других пешеходных дорожек.
     const streets = new LaneNet();
     const origin = { x: -100_000, y: -100_000 };
     const j = streets.addJunction(origin);

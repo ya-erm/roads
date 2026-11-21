@@ -79,8 +79,9 @@ import { footprintRadius, type Footprint } from '../world/spatial';
 import { BUY_DOT_PX, dropSpots, pickDropStop } from './buyDrop';
 import { lotDragPlan, lotGateHit, lotHandleAt, lotOverlay, type LotToolState } from './lotTool';
 import type { LotRows } from '../world/parkingLots';
-import { FOOTPATH, nearestFootpath, pathFootprint } from '../game/footpaths';
+import { FOOTPATH, footpathParts, nearestFootpath } from '../game/footpaths';
 import { footpathSnap } from './footpathTool';
+import { FootpathEditor, type FootpathMode } from './footpathEditor';
 
 export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain' | 'industry' | 'footpath';
 
@@ -252,7 +253,7 @@ function profileNote(p?: ProfileSummary): string {
 }
 
 export class Controller {
-  private footpathStart: Vec | null = null;
+  readonly footpathEditor = new FootpathEditor();
   private draggingPathRemoval = false;
   tool: Tool = 'select';
   roadMode: RoadMode = 'build';
@@ -549,7 +550,7 @@ export class Controller {
       this.selection = null;
     }
     this.projectTools.stop(this.netKind);
-    this.footpathStart = null;
+    this.footpathEditor.clear();
     this.tool = tool;
     this.chain = null;
     this.control = null;
@@ -557,6 +558,12 @@ export class Controller {
     this.railTools.clear();
     this.laneFrom = null;
     this.phaseEdit = null;
+    this.onChange();
+  }
+
+  setFootpathMode(mode: FootpathMode): void {
+    this.footpathEditor.clear();
+    this.footpathEditor.mode = mode;
     this.onChange();
   }
 
@@ -1575,7 +1582,7 @@ export class Controller {
     if (this.pendingArea) this.cancelArea();
     else if (this.areaStart) this.areaStart = null;
     else if (this.spanStart) this.spanStart = null;
-    else if (this.footpathStart) this.footpathStart = null;
+    else if (this.footpathEditor.cancel()) { /* Отменили построение или правку дорожки. */ }
     // База стройки — свой режим инструмента «Станция»: отмена — назад к «Выбору».
     else if (this.pending?.kind === 'newBase') this.setTool('select');
     else if (this.pending) this.pending = null;
@@ -1670,7 +1677,7 @@ export class Controller {
    * Инструмент и его настройки остаются.
    */
   reset(): void {
-    this.footpathStart = null;
+    this.footpathEditor.clear();
     this.pending = null;
     this.pendingArea = null;
     this.areaStart = null;
@@ -2060,10 +2067,9 @@ export class Controller {
     if (label) g.checkpoint(this.action === 'road' && this.netKind === 'rail' ? 'путь' : label);
     switch (this.action) {
       case 'footpath':
-        if (!this.footpathStart) {
-          this.footpathStart = this.pathPoint(p);
-          this.left.createdChain = true;
-        }
+        this.alt = e.altKey;
+        this.ctrl = e.ctrlKey || e.metaKey;
+        this.left.createdChain = this.footpathEditor.down(g, p, this.pathHandleRadius, this.pathPoint);
         break;
       case 'road':
         if (this.netKind === 'road') {
@@ -2406,13 +2412,16 @@ export class Controller {
     return this.roadTools.spanPlan(st.corridor, st.lane, st.s, c.lut.closest(p).s);
   }
 
-  private pathPoint(p: Vec): Vec {
-    return this.freeAim ? p : footpathSnap(this.game(), p, Math.min(8, this.snapRadius));
+  private get pathHandleRadius(): number {
+    return Math.min(8, (HANDLE_PX + 3) / this.camera.zoom);
   }
+
+  private readonly pathPoint = (p: Vec, skipId?: number): Vec =>
+    this.freeAim ? p : footpathSnap(this.game(), p, Math.min(8, this.snapRadius), skipId);
 
   private pathUnder(p: Vec) {
     const g = this.game();
-    const hit = nearestFootpath(g.footpaths, p, Math.min(3, FOOTPATH.width / 2 + 3 / this.camera.zoom));
+    const hit = nearestFootpath(g.editableFootpaths(), p, Math.min(3, FOOTPATH.width / 2 + 3 / this.camera.zoom));
     if (!hit || g.structureAt(p) || corridorUnder(g.roads.net, p)) return;
     return hit.path;
   }
@@ -2834,13 +2843,11 @@ export class Controller {
       return;
     }
     const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > CLICK_SLOP;
-    if (this.action === 'footpath' && this.footpathStart) {
-      if (moved || !left.createdChain) {
-        const end = this.pathPoint(this.worldAt(e));
-        const problem = this.game().buildFootpath(this.footpathStart, end);
-        if (problem) this.showError(problem);
-        else this.footpathStart = end;
-      }
+    if (this.action === 'footpath') {
+      this.alt = e.altKey;
+      this.ctrl = e.ctrlKey || e.metaKey;
+      const problem = this.footpathEditor.up(this.game(), this.worldAt(e), moved, left.createdChain, this.pathPoint);
+      if (problem) this.showError(problem);
       this.onChange();
       return;
     }
@@ -3659,7 +3666,8 @@ export class Controller {
       // Режимы дороги: N — строить, U — перестроить, M — двигать (включают инструмент «Дорога»).
       case 'KeyN':
         // В инструменте «Ж/д» N и M — его режимы «Путь» и «Двигать».
-        if (this.tool === 'rail') this.setRailMode('track');
+        if (this.tool === 'footpath') this.setFootpathMode('straight');
+        else if (this.tool === 'rail') this.setRailMode('track');
         else this.setRoadMode('build');
         break;
       case 'KeyL':
@@ -3669,10 +3677,16 @@ export class Controller {
         this.setRoadMode('upgrade');
         break;
       case 'KeyM':
-        if (this.tool === 'rail') this.setRailMode('move');
+        if (this.tool === 'footpath') this.setFootpathMode('move');
+        else if (this.tool === 'rail') this.setRailMode('move');
         else this.setRoadMode('move');
         break;
       case 'KeyQ': {
+        if (this.tool === 'footpath') {
+          const i = DRAW_MODES.findIndex(m => m.id === this.footpathEditor.mode);
+          this.setFootpathMode(DRAW_MODES[(i + 1) % DRAW_MODES.length].id);
+          break;
+        }
         const i = DRAW_MODES.findIndex((m) => m.id === this.drawMode);
         this.setMode(DRAW_MODES[(i + 1) % DRAW_MODES.length].id);
         break;
@@ -3910,7 +3924,7 @@ export class Controller {
     if (area) {
       const c = area.contents;
       o.area = { a: area.a, b: area.b, segs: c.segs, corridors: c.corridors, fps: [...c.buildings.map((x) => x.fp), ...c.stations.map((x) => x.fp)] };
-      for (const path of c.footpaths ?? []) o.area.fps.push(pathFootprint(path.a, path.b));
+      for (const path of c.footpaths ?? []) o.area.fps.push(...footpathParts(path));
       if (!this.pendingArea) {
         const ban = c.corridors.some((id) => g.streetBanAt(id)) ? ` · ${STREET_BAN_MARK}` : '';
         o.label = { text: `${areaSummary(c)} · +${money(c.refund)}${c.cost ? ` −${money(c.cost)}` : ''}${ban}`, ok: true };
@@ -4062,16 +4076,7 @@ export class Controller {
         break;
       }
       case 'footpath': {
-        const end = this.memo('footpath-end', () => this.pathPoint(p));
-        const start = this.footpathStart;
-        const plan = start && this.memo('footpath-plan', () => g.footpathPlan(start, end));
-        const ok = !plan?.reason;
-        if (start && dist(start, end) > 0.1) o.footpath = { a: start, b: end, ok };
-        o.points = [{ pos: end, color: ok ? '#2f80ed' : '#df403c', r: 4 }];
-        if (start) o.points.push({ pos: start, color: '#2f80ed', r: 4 });
-        o.label = plan && start && dist(start, end) > 0.1
-          ? { text: plan.reason ?? `${Math.round(dist(start, end))} м · ${money(plan.cost)}`, ok }
-          : { text: start ? 'Укажите следующую точку · Esc — закончить' : 'Укажите начало дорожки', ok: true };
+        Object.assign(o, this.memo('footpath-' + this.footpathEditor.mode, () => this.footpathEditor.overlay(g, p, this.pathHandleRadius, this.pathPoint)));
         break;
       }
       case 'terrain': {
@@ -4410,9 +4415,9 @@ export class Controller {
         }
         const path = this.pathUnder(p);
         if (path) {
-          o.footpath = { a: path.a, b: path.b, ok: false };
-          const refund = dist(path.a, path.b) * FOOTPATH.pricePerMetre * COST.refundRatio;
-          o.label = { text: `Снести дорожку · +${money(refund)}`, ok: true };
+          o.footpath = { ...path, ok: false };
+          const refund = g.footpathRefund(path);
+          o.label = { text: refund > 0 ? `Снести дорожку · +${money(refund)}` : 'Снести дорожку', ok: true };
           break;
         }
         const st = g.structureAt(p);

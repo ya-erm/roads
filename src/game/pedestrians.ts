@@ -6,7 +6,7 @@ import type { GraphWalk, LaneGraph } from '../lanes/graph';
 import { gameSidewalks, type SidewalkNet } from '../render/sidewalks';
 import type { Box } from '../render/tileCache';
 import { walkKey } from './crosswalks';
-import type { Footpath } from './footpaths';
+import { footpathNetwork, type Footpath } from './footpaths';
 import type { Game } from './game';
 import { leaveWalkingSpace, type WalkIntent } from './walkingSpace';
 
@@ -111,12 +111,24 @@ function* walkingNetworkSteps(sidewalks: SidewalkNet, paths: readonly Footpath[]
     }
     return false;
   };
+  const yardSpans: { a: Vec; b: Vec }[] = [];
+  for (const yard of sidewalks.yards ?? []) for (const line of yard.paths) {
+    if (line.length < 4) continue;
+    const last = line.length - 2;
+    // Дворовые дорожки заходят за край тротуара, поэтому соединяем их концы с его осью.
+    join({ x: line[0], y: line[1] }, 2);
+    join({ x: line[last], y: line[last + 1] }, 2);
+    for (let i = 2; i < line.length; i += 2) {
+      yardSpans.push({ a: { x: line[i - 2], y: line[i - 1] }, b: { x: line[i], y: line[i + 1] } });
+    }
+    if (++processed % 64 === 0) yield;
+  }
   for (const p of paths) {
     if (++processed % 64 === 0) yield;
     join(p.a, 0.8);
     join(p.b, 0.8);
   }
-  for (const p of paths) index(p.a, p.b);
+  for (const p of footpathNetwork([...paths, ...yardSpans])) index(p.a, p.b);
   for (const list of crossings) for (const w of list) {
     if (++processed % 32 === 0) yield;
     const [a, b] = w.geo.ends;

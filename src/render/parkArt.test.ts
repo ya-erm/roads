@@ -9,7 +9,7 @@ import type { ParkKind, TownPark } from '../world/entities';
 import { inPolygon, junctionPlate, polyDist } from '../world/lotClear';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import { curbGap } from '../world/worldgen';
-import { alleyScope, drawParkArt, drawStreetGreen, type StreetGreen, streetGreen } from './parkArt';
+import { alleyScope, drawParkArt, drawStreetGreen, streetCanopyMask, type StreetGreen, streetGreen } from './parkArt';
 import { sidewalkScope } from './sidewalks';
 import { LAMPS_ON } from './townDecor';
 
@@ -69,6 +69,17 @@ describe('Парки и скверы — рисунок', () => {
 });
 
 describe('Аллеи и фонари вдоль улиц', { timeout: 30_000 }, () => {
+  it('за краем кроны маскируется только перекрытая часть прохожего, тень не рисуется повторно', () => {
+    const outside = streetCanopyMask([{ id: 1, trees: [19.5, 0, 2.1], lamps: [], box: { x0: 15, x1: 25, y0: -5, y1: 5 }, sig: '' }]);
+    const { ctx, calls } = stub();
+    expect(outside(ctx, { x: 19.5, y: 0 }, 0.6)).toBe(false);
+    expect(outside(ctx, { x: 22.3, y: 0 }, 0.6)).toBe(true);
+    expect(calls.clip).toBeUndefined();
+    expect(outside(ctx, { x: 21.5, y: 0 }, 0.6)).toBe(true);
+    expect(calls.clip).toBe(1);
+    expect(calls.fill).toBeUndefined();
+  });
+
   it('деревья — вдоль проспектов, у тротуара, не на полотнах; фонари пока выключены', () => {
     const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 1 });
     const lines = streetGreen(g.roads.net, g.towns, (p, r) => g.index.at(p, r) !== null);

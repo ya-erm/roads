@@ -72,9 +72,11 @@ describe('Дистанция между видимыми пешеходами', 
   });
 
   it('при пересечении дорожек люди проходят узел по очереди и продолжают движение', () => {
-    const { game, add } = encounter([horizontal, vertical]);
-    add(0, 94, false, 3);
-    add(1, 94, false, 3);
+    const { game, add, edges } = encounter([horizontal, vertical]);
+    for (const path of [horizontal, vertical]) {
+      const approach = edges.findIndex(e => dist(e.a, path.a) < 0.01);
+      add(approach, 94, false, 3).next = edges.find(e => dist(e.b, path.b) < 0.01)!;
+    }
     const frames = trace(game, 5);
     expect(Math.min(...frames.map(([a, b]) => dist(a, b)))).toBeGreaterThan(0.99);
     const [a, b] = frames.at(-1)!;

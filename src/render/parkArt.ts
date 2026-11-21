@@ -473,6 +473,43 @@ export interface StreetGreen {
   sig: string;
 }
 
+/** Маска для фигур на тротуаре. В клетки заносятся точные круги крон с запасом на ширину фигуры. */
+export function streetCanopyMask(lines: readonly StreetGreen[]) {
+  const cell = 20;
+  const margin = 2;
+  const cells = new Map<string, { x: number; y: number; r: number }[]>();
+  for (const line of lines) {
+    for (let i = 0; i < line.trees.length; i += 3) {
+      const x = line.trees[i], y = line.trees[i + 1], r = line.trees[i + 2];
+      const crown = { x, y, r };
+      for (let cx = Math.floor((x - r - margin) / cell); cx <= Math.floor((x + r + margin) / cell); cx++) {
+        for (let cy = Math.floor((y - r - margin) / cell); cy <= Math.floor((y + r + margin) / cell); cy++) {
+          const key = `${cx},${cy}`;
+          const list = cells.get(key);
+          if (list) list.push(crown);
+          else cells.set(key, [crown]);
+        }
+      }
+    }
+  }
+  // Перед вызовом сохраняем контекст. Полностью под кроной фигура скрыта, у её края видна лишь выступающая часть.
+  return (ctx: CanvasRenderingContext2D, p: Vec, size: number): boolean => {
+    const near = cells.get(`${Math.floor(p.x / cell)},${Math.floor(p.y / cell)}`);
+    if (!near) return true;
+    for (const { x, y, r } of near) {
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d >= r + size) continue;
+      if (d + size <= r) return false;
+      ctx.beginPath();
+      ctx.rect(p.x - margin, p.y - margin, 2 * margin, 2 * margin);
+      ctx.moveTo(x + r, y);
+      ctx.arc(x, y, r, 0, 2 * Math.PI);
+      ctx.clip('evenodd');
+    }
+    return true;
+  };
+}
+
 /** Фонари вдоль улиц — только при сильном приближении. */
 export const LAMP_ZOOM = 1.4;
 /**

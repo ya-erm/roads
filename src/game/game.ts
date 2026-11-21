@@ -74,7 +74,8 @@ import {
 } from '../world/worldgen';
 import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placeParks, plazaAttached, plazaBy } from '../world/townParks';
 import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
-import { FOOTPATH, joinFootpath, overlapsFootpath, pathCrossesRoad, pathFootprint, type Footpath } from './footpaths';
+import { FOOTPATH, footpathInBox, footpathLength, footpathPoints, overlapsFootpath, pathCrossesRoad, pathFootprint, type Footpath, type FootpathShape } from './footpaths';
+import { yardPaths } from '../world/yardPaths';
 import { buildingFrontage, planStreetHouses, type HouseMove, type StreetPart } from '../world/streetHouses';
 import { resizeBuildingFootprint, type BuildingCorner } from '../world/buildingResize';
 import { streetBase, turnableBuilding, turnReach, wrapTurn } from '../world/moveTurn';
@@ -414,6 +415,7 @@ function roundaboutFee(R: number, lanes: number): number {
 /** Снимок построек до действия игрока — для Ctrl+Z. */
 interface UndoSnapshot {
   footpaths: Footpath[];
+  hiddenYardPaths: ReadonlySet<number>;
   label: string;
   /** Дороги — копия сети полос; пути — старая сеть. */
   roads: LaneNet;
@@ -622,6 +624,7 @@ export interface RoadSpot {
 
 export interface SaveData {
   footpaths?: Footpath[];
+  hiddenYardPaths?: number[];
   version: number;
   settings: WorldSettings;
   savedAt: number;
@@ -998,6 +1001,8 @@ export class Game implements BuildContext {
   private accumulator = 0;
   private nextEntityId = 1;
   footpaths: Footpath[] = [];
+  hiddenYardPaths: ReadonlySet<number> = new Set();
+  private editablePathCache?: { manual: Footpath[]; townRev: number; layoutRev: number; hidden: ReadonlySet<number>; all: Footpath[] };
   private pathAccess?: { paths: Footpath[]; roads: LaneNet; version: string; open: Footpath[] };
   private readonly owners = new Map<number, SimOwner>();
   /** Машина колонны бригады стоит у конца пути и ждёт остальных (crewAssembled): с какого времени. */
@@ -1236,6 +1241,7 @@ export class Game implements BuildContext {
       upkeep: { at: this.upkeepAt, ...this.upkeepDue },
       nextEntityId: this.nextEntityId,
       footpaths: this.footpaths.length ? this.footpaths : undefined,
+      hiddenYardPaths: this.hiddenYardPaths.size ? [...this.hiddenYardPaths] : undefined,
       extraForests: this.terrain.extraForests,
       net: this.net.serialize(),
       roads: this.roads.net.toJSON(),
@@ -1425,6 +1431,7 @@ export class Game implements BuildContext {
    */
   private restore(save: SaveData): void {
     this.footpaths = save.footpaths ?? [];
+    this.hiddenYardPaths = new Set(save.hiddenYardPaths ?? []);
     for (const f of save.extraForests) this.terrain.addForest(f.c, f.r, this.rng);
     for (const e of save.terraform ?? []) this.terrain.terraform(e);
     this.net.load(save.net);
@@ -3099,18 +3106,80 @@ export class Game implements BuildContext {
     for (const t of touched) if (t.receivers?.some((r) => ids.includes(r.b))) this.refreshReceivers(t);
   }
 
-  footpathPlan(a: Vec, b: Vec): { cost: number; reason?: string } {
-    const fp = pathFootprint(a, b);
-    const cost = Math.round(fp.w * FOOTPATH.pricePerMetre);
-    if (!this.inBounds(a, 1) || !this.inBounds(b, 1)) return { cost, reason: 'За краем карты' };
-    if (fp.w < FOOTPATH.minLength) return { cost, reason: 'Дорожка короче 2 м' };
-    if (overlapsFootpath(this.footpaths, a, b)) return { cost, reason: 'Здесь уже есть дорожка' };
-    const reason = this.footpathObstruction(a, b);
-    if (reason) return { cost, reason };
-    return cost > this.budget ? { cost, reason: 'Не хватает денег' } : { cost };
+  townFootpaths(town: Town): Footpath[] {
+    const paths = yardPaths(town, this.layoutRev);
+    return this.hiddenYardPaths.size ? paths.filter(p => !this.hiddenYardPaths.has(p.id)) : paths;
   }
 
-  private footpathObstruction(a: Vec, b: Vec): string | null {
+  editableFootpaths(): Footpath[] {
+    const cached = this.editablePathCache;
+    if (cached && cached.manual === this.footpaths && cached.townRev === this.townRev && cached.layoutRev === this.layoutRev && cached.hidden === this.hiddenYardPaths) return cached.all;
+    const all = this.footpaths.concat(this.towns.flatMap(t => this.townFootpaths(t)));
+    this.editablePathCache = { manual: this.footpaths, townRev: this.townRev, layoutRev: this.layoutRev, hidden: this.hiddenYardPaths, all };
+    return all;
+  }
+
+  private hideYardPaths(ids: Iterable<number>): void {
+    const fresh = [...ids].filter(id => id < 0 && !this.hiddenYardPaths.has(id));
+    if (!fresh.length) return;
+    this.hiddenYardPaths = new Set([...this.hiddenYardPaths, ...fresh]);
+    this.townRev++;
+  }
+
+  private planFootpaths(a: Vec, b: Vec, shape?: FootpathShape, editId?: number, linked = false) {
+    const all = this.editableFootpaths();
+    const original = editId === undefined ? undefined : all.find(path => path.id === editId);
+    const edited: Footpath = { id: editId ?? -1, a, b, ...(shape && { shape }) };
+    const changes = new Map([[edited.id, edited]]);
+    if (editId !== undefined && !original) return { changes, cost: 0, reason: 'Нет дорожки' };
+    if (linked && original) {
+      const endpoint = (p: Vec) => dist(p, original.a) < 0.015 ? a : dist(p, original.b) < 0.015 ? b : p;
+      for (const path of all) {
+        if (path === original) continue;
+        const start = endpoint(path.a), end = endpoint(path.b);
+        if (!dist(start, path.a) && !dist(end, path.b)) continue;
+        const next = { ...path, a: start, b: end };
+        if (path.shape?.kind === 'curve') next.shape = { kind: 'curve', c1: add(path.shape.c1, sub(start, path.a)), c2: add(path.shape.c2, sub(end, path.b)) };
+        changes.set(path.id, next);
+      }
+    }
+    let added = 0;
+    for (const path of changes.values()) {
+      const before = all.find(p => p.id === path.id);
+      if (before && before.id < 0) {
+        const cityCost = before.cityCost ?? footpathLength(before) * FOOTPATH.pricePerMetre;
+        path.cityCost = Math.min(cityCost, footpathLength(path) * FOOTPATH.pricePerMetre);
+      }
+      added += Math.max(0, footpathLength(path) - (before ? footpathLength(before) : 0));
+    }
+    const cost = Math.round(added * FOOTPATH.pricePerMetre);
+    const other = all.filter(p => !changes.has(p.id));
+    for (const path of changes.values()) {
+      const line = footpathPoints(path);
+      if (!line.every(p => this.inBounds(p, 1))) return { changes, cost, reason: 'За краем карты' };
+      if (footpathLength(path) < FOOTPATH.minLength) return { changes, cost, reason: 'Дорожка короче 2 м' };
+      if (overlapsFootpath(other, path)) return { changes, cost, reason: 'Здесь уже есть дорожка' };
+      const reason = this.footpathObstruction(line);
+      if (reason) return { changes, cost, reason };
+      other.push(path);
+    }
+    return { changes, cost, reason: cost > this.budget ? 'Не хватает денег' : undefined };
+  }
+
+  footpathPlan(a: Vec, b: Vec, shape?: FootpathShape, editId?: number, linked = false): { cost: number; reason?: string } {
+    const { cost, reason } = this.planFootpaths(a, b, shape, editId, linked);
+    return { cost, reason };
+  }
+
+  private footpathObstruction(line: Vec[]): string | null {
+    for (let i = 1; i < line.length; i++) {
+      const obstacle = this.footpathSpanObstruction(line[i - 1], line[i]);
+      if (obstacle) return obstacle;
+    }
+    return null;
+  }
+
+  private footpathSpanObstruction(a: Vec, b: Vec): string | null {
     // Ограничиваем область пространственного поиска даже при протяжке через всю карту.
     const steps = Math.max(1, Math.ceil(dist(a, b) / 80));
     let from = a;
@@ -3124,7 +3193,8 @@ export class Game implements BuildContext {
   }
 
   private footpathPartObstruction(fp: Footprint): string | null {
-    const under = this.structuresUnder(fp, 0);
+    // Конец дорожки может касаться стены у крыльца. Сантиметр допуска отделяет стык от наложения.
+    const under = this.structuresUnder(fp, -0.01);
     if (under.blocker || under.houses.length) return under.blocker ?? 'Мешает здание';
     const outline = lotOutline(fp, 3);
     if (outline.some(p => this.isWater(p, 0.7))) return 'Мешает вода';
@@ -3143,26 +3213,48 @@ export class Game implements BuildContext {
     const roads = this.roads.net;
     const version = `${roads.version}:${this.net.version}:${this.index.version}:${this.lotRev}:${this.terrain.version}`;
     if (this.pathAccess?.paths === this.footpaths && this.pathAccess.roads === roads && this.pathAccess.version === version) return this.pathAccess.open;
-    const open = this.footpaths.filter(p => !this.footpathObstruction(p.a, p.b));
+    const open = this.footpaths.filter(p => !this.footpathObstruction(footpathPoints(p)));
     this.pathAccess = { paths: this.footpaths, roads, version, open };
     return open;
   }
 
-  buildFootpath(a: Vec, b: Vec): string | null {
-    const { cost, reason } = this.footpathPlan(a, b);
+  buildFootpath(a: Vec, b: Vec, shape?: FootpathShape): string | null {
+    const { cost, reason } = this.footpathPlan(a, b, shape);
     if (reason) return reason;
     this.checkpoint('пешеходная дорожка');
-    this.footpaths = joinFootpath(this.footpaths, a, b, () => this.nextId());
+    this.footpaths = [...this.footpaths, { id: this.nextId(), a, b, ...(shape && { shape }) }];
     this.spend(cost);
     this.commit();
     return null;
   }
 
+  moveFootpath(id: number, a: Vec, b: Vec, shape?: FootpathShape, linked = false): string | null {
+    const { cost, reason, changes } = this.planFootpaths(a, b, shape, id, linked);
+    if (reason) return reason;
+    this.checkpoint('правка пешеходной дорожки');
+    const materialized = [...changes.values()].filter(path => path.id < 0 && !this.hiddenYardPaths.has(path.id));
+    this.hideYardPaths(materialized.map(path => path.id));
+    this.footpaths = this.footpaths.map(path => changes.get(path.id) ?? path).concat(materialized);
+    this.spend(cost);
+    this.commit();
+    return null;
+  }
+
+  footpathRefund(path: Footpath): number {
+    return Math.round(this.footpathWorth(path) * COST.refundRatio);
+  }
+
+  private footpathWorth(path: Footpath): number {
+    if (path.id < 0 && path.cityCost === undefined) return 0;
+    return Math.max(0, footpathLength(path) * FOOTPATH.pricePerMetre - (path.cityCost ?? 0));
+  }
+
   /** Вызывается внутри общего шага сноса, в том числе при сносе рамкой. */
   removeFootpaths(paths: readonly Footpath[]): void {
     const ids = new Set(paths.map(p => p.id));
+    this.hideYardPaths(ids);
     for (const path of this.footpaths) {
-      if (ids.has(path.id)) this.refund(dist(path.a, path.b) * FOOTPATH.pricePerMetre);
+      if (ids.has(path.id)) this.refund(this.footpathWorth(path));
     }
     this.footpaths = this.footpaths.filter(p => !ids.has(p.id));
   }
@@ -3221,8 +3313,8 @@ export class Game implements BuildContext {
       }
     }
     const stations = [...this.stations.values()].filter((st) => st.industryId === null && inside(st.fp.center) && !this.stationLines(st.id).length);
-    const footpaths = this.footpaths.filter(path => inside(pathFootprint(path.a, path.b).center));
-    for (const path of footpaths) refund += Math.round(dist(path.a, path.b) * FOOTPATH.pricePerMetre * COST.refundRatio);
+    const footpaths = this.editableFootpaths().filter(path => footpathInBox(path, x0, y0, x1, y1));
+    for (const path of footpaths) refund += this.footpathRefund(path);
     return { segs, corridors, ...(footpaths.length && { footpaths }), buildings, stations, refund: Math.round(refund), cost: Math.round(cost) };
   }
 
@@ -4969,6 +5061,7 @@ export class Game implements BuildContext {
   private captureBuilt(label: string): UndoSnapshot {
     return {
       footpaths: this.footpaths,
+      hiddenYardPaths: this.hiddenYardPaths,
       label,
       roads: this.roads.net.clone(),
       roadsVersion: this.roads.net.version,
@@ -5036,6 +5129,7 @@ export class Game implements BuildContext {
     if (!top) return;
     const changed =
       top.footpaths !== this.footpaths ||
+      top.hiddenYardPaths !== this.hiddenYardPaths ||
       top.version !== this.net.version ||
       top.roadsVersion !== this.roads.net.version ||
       top.stations.length !== this.stations.size ||
@@ -5178,6 +5272,7 @@ export class Game implements BuildContext {
    */
   private restoreBuilt(snap: UndoSnapshot, drop?: { townId: number; ids: number[] }[]): void {
     this.footpaths = snap.footpaths;
+    this.hiddenYardPaths = snap.hiddenYardPaths;
     const railSave = this.rail.serialize();
     this.rail.clearTrains();
     // Ж/д проекты с тех пор ушли вперёд — готовое на путях переносим (оно уже оплачено), как у дорог (carryBuild).

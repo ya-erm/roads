@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { add, dot, scale, Vec } from '../core/vec';
 import { Game } from '../game/game';
-import { freshGame, openSpot, road, roadPlan, STREET } from '../game/testkit';
+import { fieldSpot, freshGame, openSpot, road, roadPlan, STREET } from '../game/testkit';
 import { cornerHandles, type CornerHandle } from '../lanes/corners';
 import { filletDepth } from '../lanes/geometry';
 import { junctionPlate } from '../world/lotClear';
@@ -147,6 +147,43 @@ it('дорожка строится мышью и продолжается кл�
   expect(game.footpaths).toHaveLength(1);
   expect(game.undo()).toBeTruthy();
   expect(game.footpaths).toHaveLength(2);
+});
+
+it('кривую дорожку строят тремя кликами и правят ручкой, Cmd отпускает привязку конца', () => {
+  const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  const a = fieldSpot(game, 400);
+  const b = add(a, { x: 90, y: 0 });
+  const control = add(a, { x: 45, y: 42 });
+  const { c, canvas, mouse, move, click, key } = play(game);
+  c.setTool('footpath');
+  c.setFootpathMode('curve');
+  click(a);
+  click(control);
+  move(b);
+  const preview = c.overlay().footpath;
+  expect(preview?.shape?.kind).toBe('curve');
+  click(b);
+  const path = game.footpaths[0];
+  expect(path.shape).toEqual(preview?.shape);
+  if (path.shape?.kind !== 'curve') throw new Error('Нет кривой');
+
+  key('KeyM');
+  click(a);
+  const { c1, c2 } = path.shape;
+  const target = add(c1, { x: -8, y: 12 });
+  canvas.fire('mousedown', mouse(c1));
+  move(target);
+  win.fire('mouseup', mouse(target));
+  expect(game.footpaths[0].shape).toEqual({ kind: 'curve', c1: target, c2 });
+
+  const neighbor = add(b, { x: 22, y: 0 });
+  expect(game.buildFootpath(neighbor, add(neighbor, { x: 0, y: 25 }))).toBeNull();
+  const beside = add(neighbor, { x: -3, y: 0 });
+  canvas.fire('mousedown', mouse(b));
+  move(beside);
+  expect(c.overlay().footpath?.b).toEqual(neighbor);
+  win.fire('mouseup', { ...mouse(beside), metaKey: true });
+  expect(game.footpaths[0].b).toEqual(beside);
 });
 
 it('размещение автомобиля оставляет доступными правую протяжку карты и масштаб колесом', () => {

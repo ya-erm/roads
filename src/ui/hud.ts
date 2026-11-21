@@ -604,7 +604,7 @@ export class Hud {
       b.dataset.id = t.id;
       b.innerHTML = `${ICONS[t.id]}<span class="name">${t.name}</span><kbd>${t.alt ?? t.key}</kbd>`;
       b.title = t.alt ? `${t.name} (${t.alt} или ${t.key})` : `${t.name} (${t.key})`;
-      if (t.id === 'footpath') b.title = `Пешеходная дорожка (${t.key}). Протяните или укажите точки кликами. Alt — без привязки, Esc — закончить.`;
+      if (t.id === 'footpath') b.title = `Пешеходная дорожка (${t.key}). Q — форма, M — двигать, Cmd/Ctrl или Alt — без привязки, Esc — закончить.`;
       tools.appendChild(b);
     }
     const speed = this.q('[data-speed]');
@@ -1669,6 +1669,9 @@ export class Hud {
       case 'road-mode':
         c.setRoadMode(d.id === 'upgrade' || d.id === 'move' || d.id === 'lane' ? d.id : 'build');
         break;
+      case 'footpath-mode':
+        c.setFootpathMode(d.id === 'arc' || d.id === 'curve' || d.id === 'move' ? d.id : 'straight');
+        break;
       case 'junction-mode':
         c.setJunctionMode(d.id === 'template' || d.id === 'copy' ? d.id : 'ring');
         break;
@@ -2215,12 +2218,14 @@ export class Hud {
     const c = this.controller;
     const el = this.q('[data-options]');
     const show =
-      c.tool === 'road' || c.tool === 'rail' || c.tool === 'station' || c.tool === 'roundabout' || c.tool === 'bulldoze' || c.tool === 'terrain' || c.tool === 'industry';
+      c.tool === 'road' || c.tool === 'rail' || c.tool === 'footpath' || c.tool === 'station' || c.tool === 'roundabout' || c.tool === 'bulldoze' || c.tool === 'terrain' || c.tool === 'industry';
     el.classList.toggle('hidden', !show);
     if (!show) return;
     const html =
       c.tool === 'industry'
         ? industryOptionsHtml(this.game(), c.industryKind)
+        : c.tool === 'footpath'
+        ? this.footpathOptionsHtml()
         : c.tool === 'station'
         ? this.stationOptionsHtml()
         : c.tool === 'rail'
@@ -2238,6 +2243,22 @@ export class Hud {
       const strip = el.querySelector<HTMLElement>('[data-hscroll]');
       if (strip) strip.scrollLeft = scroll;
     }
+  }
+
+  private footpathOptionsHtml(): string {
+    const mode = this.controller.footpathEditor.mode;
+    const hints = {
+      straight: 'Укажите начало и конец или протяните дорожку мышью.',
+      arc: 'Укажите начало, точку на дуге и конец.',
+      curve: 'Укажите начало, точку изгиба и конец. Обе ручки кривой можно поправить в режиме «Двигать».',
+      move: 'Тяните дорожку целиком, маркер изгиба или конец. За общим концом потянутся и соседние дорожки.',
+    };
+    const modes = this.kindSwitch('Пешеходная дорожка', 'footpath-mode', mode, [
+      ...DRAW_MODES.map(m => ({ ...m, svg: modeSvg(m.id), hint: hints[m.id] })),
+      { id: 'move', name: 'Двигать', svg: moveNodeSvg(), hint: hints.move, key: 'M' },
+    ], true);
+    return `<div class="opt-row">${modes}<div class="opt-group narrow"><span>${hints[mode]}</span>
+      <small>Q — форма · Cmd/Ctrl или Alt — без привязки · Esc — закончить</small></div></div>`;
   }
 
   /**

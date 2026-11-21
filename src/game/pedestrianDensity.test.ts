@@ -21,7 +21,7 @@ describe('Количество пешеходов', () => {
   });
 
   it('новая группа распределяется по всем дорожкам, прежние пешеходы продолжают свой путь', () => {
-    const game = freshGame(7);
+    const game = freshGame({ seed: 7, towns: 0, industries: 'few', size: 'small', water: 'dry', money: 500_000 });
     game.roads.replace(new LaneNet());
     game.footpaths = [1, 2, 3, 4].map(i => ({
       id: i, a: { x: -100_000, y: -100_000 + i * 40 }, b: { x: -99_000, y: -100_000 + i * 40 },
