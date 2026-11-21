@@ -23,6 +23,7 @@ import {
   monthValue,
   progressText,
   rewardText,
+  routeWindowGauge,
   type MonthGauge,
 } from '../scenario/objectives';
 import { CARGO } from '../world/cargo';
@@ -185,11 +186,12 @@ function rewardHtml(o: Objective): string {
 const OBJECTIVE_ICON = 26;
 
 /**
- * Шкала месячного задания (перевозить N в месяц, прибыль, снабжение…) — по показателю идущего месяца:
- * засчитывается календарный месяц, и полоска показывает, сколько уже набрано. У остальных — null.
+ * Шкала месячного задания — по текущему месяцу или по тому, что войдёт в окно при закрытии этого месяца.
+ * У остальных заданий — null.
  */
 function gaugeOf(sc: Scenario, o: Objective): MonthGauge | null {
-  return o.status === 'active' && isMonthly(o.params) ? monthGauge(o.params, monthNow(sc.game, sc.state, o.params)) : null;
+  if (o.status !== 'active' || !isMonthly(o.params)) return null;
+  return routeWindowGauge(o, sc.game) ?? monthGauge(o.params, monthNow(sc.game, sc.state, o.params));
 }
 
 const pct = (f: number) => (f * 100).toFixed(1);
@@ -218,6 +220,11 @@ function streakHtml(o: Objective): string {
  */
 function progressHtml(o: Objective, gauge: MonthGauge | null, full: boolean): string {
   if (!gauge) return `<b>${progressText(o)}</b>`;
+  if (gauge.window) {
+    const { months, closed, period } = gauge.window;
+    const tip = `${period}. Окно засчитывается после закрытия всех ${months} мес.`;
+    return `<b data-tip="${esc(tip)}">${esc(gauge.text)}</b><span class="sc-month">за ${months} мес.${full ? ` · закрыто ${closed} / ${months}` : ''}</span>`;
+  }
   const extra = full && gauge.extra ? `<span class="sc-cond ${gauge.extra.ok ? 'ok' : 'bad'}">${esc(gauge.extra.text)}</span>` : '';
   const tip = 'Набрано в этом месяце. Засчитывается месяц, к концу которого условие выполнено';
   return `<b data-tip="${tip}">${esc(gauge.text)}</b>${full ? '<span class="sc-month">в этом месяце</span>' : ''}${extra}${streakHtml(o)}`;
@@ -231,7 +238,7 @@ function progressHtml(o: Objective, gauge: MonthGauge | null, full: boolean): st
 export function objectiveHtml(g: Game, sc: Scenario, o: Objective, view: ObjectiveView = {}): string {
   const active = o.status === 'active';
   const months = sc.state.stats.months;
-  const now = active && isMonthly(o.params) ? monthValue(o.params, g, months[months.length - 1]) : null;
+  const now = active && isMonthly(o.params) && !o.routeMonths ? monthValue(o.params, g, months[months.length - 1]) : null;
   const role =
     o.role === 'main'
       ? '<span class="sc-role" title="Главная цель этапа">★</span>'
@@ -561,7 +568,7 @@ function compactHtml(sc: Scenario): string {
   if (!main) return `<div class="sc-compact">${letter}<span class="muted">Главная цель выполнена</span></div>`;
   const left = sc.secondsLeft(main);
   const gauge = gaugeOf(sc, main);
-  const progress = gauge ? `${gauge.text} в этом месяце` : progressText(main);
+  const progress = gauge ? `${gauge.text} ${gauge.window ? `за ${gauge.window.months} мес.` : 'в этом месяце'}` : progressText(main);
   return `<div class="sc-compact" title="${esc(main.title)} · ${esc(progress)}">${letter}${objectiveIcon(main, 18)}
     ${barHtml(gauge ? gauge.fraction : fraction(main), gauge ? null : sc.forecast(main))}
     ${left !== null ? `<span class="sc-left${urgent(left, URGENT.goal)}">⏳ ${leftText(left)}</span>` : ''}</div>`;

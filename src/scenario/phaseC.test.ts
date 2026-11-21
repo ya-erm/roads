@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { Game } from '../game/game';
-import { freshGame, stationAtIndustry } from '../game/testkit';
+import { MONTH_LENGTH } from '../config';
+import { Game } from '../game/game';
+import { freshGame, stationAtIndustry, withoutCitizens } from '../game/testkit';
+import type { Line } from '../game/transport';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { connected, newRoutesCarried } from './analysis';
 import { PHASES } from './content';
@@ -30,6 +32,30 @@ function farmLine(game: Game) {
   const line = game.createLine([a.id, b.id])!;
   game.buyVehicle(line.id, 'truck');
   return { farm, plant, line };
+}
+
+function volumeGoal(game: Game, since = 0) {
+  return game.scenario!.addObjective({ kind: 'newRoutes', amount: 80, since, months: 2 }, {
+    role: 'goal', phase: null, months: 10, why: 'Проверка окна перевозок', reward: {},
+  });
+}
+
+function volumeGame() {
+  const game = withoutCitizens(scenarioGame());
+  const { line } = farmLine(game);
+  for (const id of [...line.vehicles]) game.sellVehicle(id);
+  return { game, line };
+}
+
+/** Закрываем настоящий месяц, подставляя только счётчики линий. */
+function closeVolumeMonth(game: Game, totals: [Line, number][]): void {
+  const next = game.monthIndex + 1;
+  for (const [line, units] of totals) line.carriedMonth = units;
+  game.time = next * MONTH_LENGTH - 0.05;
+  game.speed = 1;
+  game.update(0.1);
+  game.settleMonth();
+  expect(game.monthIndex).toBe(next);
 }
 
 describe('Этап C «Освоение региона»', () => {
@@ -107,5 +133,84 @@ describe('Этап B: какой завод растить', () => {
     expect(main.params.kind).toBe('industry');
     if (main.params.kind === 'industry') expect(main.params.industry).toBe(lacking.id);
     expect(main.why).toContain('никто не вывозит');
+  });
+});
+
+describe('Окно объёма новых маршрутов', () => {
+  it('160 и 0 выполняют цель после двух закрытых месяцев', () => {
+    const { game, line } = volumeGame();
+    const o = volumeGoal(game);
+    expect(o.title).toBe('Новые маршруты этапа: перевезти от 160 ед. суммарно за 2 месяца');
+    closeVolumeMonth(game, [[line, 160]]);
+    expect(o.status).toBe('active');
+    expect(o.progress).toBe(160);
+    closeVolumeMonth(game, [[line, 0]]);
+    expect(o.status).toBe('done');
+    expect(o.routeMonths).toEqual([{ month: 0, units: 160 }, { month: 1, units: 0 }]);
+  });
+
+  it('140 и 0 недостаточно, объём первого месяца выбывает на третьем', () => {
+    const { game, line } = volumeGame();
+    const o = volumeGoal(game);
+    closeVolumeMonth(game, [[line, 140]]);
+    closeVolumeMonth(game, [[line, 0]]);
+    expect(o.status).toBe('active');
+    expect(o.progress).toBe(140);
+    closeVolumeMonth(game, [[line, 30]]);
+    expect(o.status).toBe('active');
+    expect(o.progress).toBe(30);
+    expect(o.routeMonths).toEqual([{ month: 1, units: 0 }, { month: 2, units: 30 }]);
+    closeVolumeMonth(game, [[line, 130]]);
+    expect(o.status).toBe('done');
+  });
+
+  it('в неполном месяце этапа зачтены только поставки линий, созданных после его начала', () => {
+    const { game, line } = volumeGame();
+    closeVolumeMonth(game, [[line, 900]]);
+    game.time = 1.5 * MONTH_LENGTH;
+    const o = volumeGoal(game, 1.5);
+    game.time = 1.55 * MONTH_LENGTH;
+    const added = game.createLine([...line.stops].reverse())!;
+    closeVolumeMonth(game, [[line, 900], [added, 90]]);
+    expect(o.routeMonths).toEqual([{ month: 1, units: 90 }]);
+    expect(o.status).toBe('active');
+    closeVolumeMonth(game, [[line, 900], [added, 70]]);
+    expect(o.status).toBe('done');
+    expect(o.progress).toBe(160);
+  });
+
+  it('после загрузки сохранения продолжает окно с того же закрытого месяца', () => {
+    const { game, line } = volumeGame();
+    const o = volumeGoal(game);
+    closeVolumeMonth(game, [[line, 150]]);
+    closeVolumeMonth(game, [[line, 0]]);
+    const save = structuredClone(game.toSave());
+    const loaded = withoutCitizens(new Game(save.settings, save));
+    const live = loaded.scenario!.objective(o.id)!;
+    expect(live.routeMonths).toEqual(o.routeMonths);
+    expect(live.progress).toBe(150);
+    closeVolumeMonth(loaded, [[loaded.lines.get(line.id)!, 20]]);
+    expect(live.status).toBe('active');
+    expect(live.progress).toBe(20);
+  });
+
+  it('загружает старую серию и восстанавливает последний закрытый месяц по сохранённым объёмам линий', () => {
+    const { game, line } = volumeGame();
+    const o = volumeGoal(game);
+    closeVolumeMonth(game, [[line, 160]]);
+    const save = structuredClone(game.toSave());
+    const old = save.scenario!.objectives.find((obj) => obj.id === o.id)!;
+    delete old.routeMonths;
+    old.title = 'Новые маршруты этапа: перевозить от 80 ед. в месяц, 2 месяца подряд';
+    old.progress = old.streak = 1;
+    old.target = 2;
+    const loaded = withoutCitizens(new Game(save.settings, save));
+    const live = loaded.scenario!.objective(o.id)!;
+    expect(live.title).toBe(o.title);
+    expect(live.target).toBe(160);
+    expect(live.progress).toBe(160);
+    expect(live.routeMonths).toEqual([{ month: 0, units: 160 }]);
+    closeVolumeMonth(loaded, [[loaded.lines.get(line.id)!, 0]]);
+    expect(live.status).toBe('done');
   });
 });

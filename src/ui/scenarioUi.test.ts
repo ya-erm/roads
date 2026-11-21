@@ -237,6 +237,23 @@ describe('Свёрнутые цели в панели сценария', () => {
 });
 
 describe('Шкала месячной цели в панели сценария', () => {
+  it('у новых маршрутов показывает сумму за окно и число закрытых месяцев вместо серии', () => {
+    const { game, sc } = scenarioWithOffers();
+    const o = sc.addObjective({ kind: 'newRoutes', amount: 80, months: 2, since: 0 }, { role: 'main', phase: 0, months: 6, why: 'Проверка окна.', reward: {} });
+    o.routeMonths = [{ month: 0, units: 142 }];
+    (game as unknown as { month: number }).month = 1;
+    game.time = MONTH_LENGTH;
+    const html = objectiveHtml(game, sc, o);
+    expect(html).toContain('142 / 160 ед.');
+    expect(html).toContain('за 2 мес. · закрыто 1 / 2');
+    expect(html).toContain(`${game.dateAt(0)} — ${game.dateAt(1)}`);
+    expect(html).not.toContain('sc-streak');
+    const folded = objectiveHtml(game, sc, o, { panel: true, folded: true });
+    expect(folded).toContain('142 / 160 ед.');
+    expect(folded).toContain('за 2 мес.');
+    expect(leftPanelHtml(game, { ...view(), collapsed: true })).toContain('142 / 160 ед. за 2 мес.');
+  });
+
   it('полоска и подпись — сколько перевезено в этом месяце, месяцы подряд — точками; в свёрнутой — то же кратко', () => {
     const { game, sc } = scenarioWithOffers();
     const o = sc.addObjective({ kind: 'throughput', amount: 470, costRatio: 0.8, months: 3 }, { role: 'goal', phase: 0, months: 6, why: 'Проверка шкалы.', reward: { money: 1000 } });

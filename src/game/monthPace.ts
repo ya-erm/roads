@@ -176,6 +176,7 @@ function repaceParams(o: Objective, k: number, r: number): void {
   if (p.kind === 'profit') p.amount = Math.max(100, Math.round((p.amount * k) / 100) * 100);
   if (p.kind === 'quality') p.volume = round10(p.volume * k);
   if (p.kind === 'throughput' || p.kind === 'newRoutes') p.amount = round10(p.amount * k);
+  for (const m of o.routeMonths ?? []) m.units = Math.round(m.units * k);
   if ('months' in p) {
     p.months = Math.max(1, Math.round(p.months * r));
     o.target = p.months;

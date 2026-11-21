@@ -156,6 +156,8 @@ export function targetOf(p: ObjectiveParams): number {
       return p.level;
     case 'build':
       return p.produce ?? p.count;
+    case 'newRoutes':
+      return p.months > 1 ? p.amount * p.months : p.months;
     default:
       return p.months;
   }
@@ -165,8 +167,16 @@ export function targetOf(p: ObjectiveParams): number {
 export const isMonthly = (p: ObjectiveParams) =>
   p.kind === 'profit' || p.kind === 'supply' || p.kind === 'quality' || p.kind === 'throughput' || p.kind === 'newRoutes';
 
+/** Первый отчётный месяц цели: в неполном месяце зачтётся только объём линий, созданных после начала этапа. */
+export function routeWindowStart(o: Pick<Objective, 'created' | 'started'>, since: number): number {
+  return Math.max(o.started ?? o.created, Math.floor(since));
+}
+
+const routeVolume = (months: NonNullable<Objective['routeMonths']>) => months.reduce((total, m) => total + m.units, 0);
+
 /** Текущий прогресс в единицах цели. */
-export function liveProgress(o: Pick<Objective, 'params' | 'base' | 'streak'>, s: Counters, game: Game): number {
+export function liveProgress(o: Pick<Objective, 'params' | 'base' | 'streak' | 'routeMonths'>, s: Counters, game: Game): number {
+  if (o.routeMonths) return routeVolume(o.routeMonths);
   const p = o.params;
   switch (p.kind) {
     case 'deliver':
@@ -261,10 +271,27 @@ export interface MonthGauge {
   fraction: number;
   text: string;
   extra?: { text: string; ok: boolean };
+  window?: { months: number; closed: number; period: string };
 }
 
 const share = (v: number, target: number) => Math.max(0, Math.min(1, v / Math.max(1, target)));
 const signedMoney = (n: number) => (n < 0 ? `−${moneyText(-n)}` : moneyText(n));
+
+/** Кандидат на закрытие окна: предыдущие отчётные месяцы и объём текущего месяца. */
+export function routeWindowGauge(o: Objective, game: Game): MonthGauge | null {
+  const p = o.params;
+  if (p.kind !== 'newRoutes' || p.months <= 1) return null;
+  const now = game.monthIndex;
+  const first = Math.max(routeWindowStart(o, p.since), now - p.months + 1);
+  const closed = (o.routeMonths ?? []).filter((m) => m.month >= first && m.month < now);
+  const units = routeVolume(closed) + (now >= first ? newRoutesCarried(game, p.since, 'current') : 0);
+  const target = targetOf(p);
+  return {
+    fraction: share(units, target),
+    text: `${fmt(units)} / ${fmt(target)} ед.`,
+    window: { months: p.months, closed: closed.length, period: `${game.dateAt(first)} — ${game.dateAt(first + p.months - 1)}` },
+  };
+}
 
 /** Шкала месячного задания по показателю текущего месяца; у остальных заданий — null. */
 export function monthGauge(p: ObjectiveParams, now: MonthNow): MonthGauge | null {
@@ -386,7 +413,9 @@ export function titleOf(p: ObjectiveParams, game: Game): string {
     case 'throughput':
       return `Перевозить от ${fmt(p.amount)} ед. в месяц при расходах не больше ${Math.round(p.costRatio * 100)}% выручки${inRow(p.months)}`;
     case 'newRoutes':
-      return `Новые маршруты этапа: перевозить от ${fmt(p.amount)} ед. в месяц${inRow(p.months)}`;
+      return p.months > 1
+        ? `Новые маршруты этапа: перевезти от ${fmt(targetOf(p))} ед. суммарно за ${monthsText(p.months)}`
+        : `Новые маршруты этапа: перевозить от ${fmt(p.amount)} ед. в месяц`;
     case 'connect':
       return `Подключить к сети ${newPlaces(p.amount, p.what)}`;
     case 'build': {
@@ -407,9 +436,10 @@ export function titleOf(p: ObjectiveParams, game: Game): string {
 }
 
 /** Прогресс для полоски: «120 / 300», «×1.75 / ×2.5», «1 / 3 мес.». */
-export function progressText(o: Pick<Objective, 'params' | 'progress' | 'target'>): string {
+export function progressText(o: Pick<Objective, 'params' | 'progress' | 'target' | 'routeMonths'>): string {
   const p = o.params;
   if (p.kind === 'industry') return `×${o.progress.toFixed(2).replace(/\.?0+$/, '')} / ×${p.level}`;
+  if (o.routeMonths) return `${fmt(o.progress)} / ${fmt(o.target)} ед.`;
   if (isMonthly(p)) return `${o.progress} / ${o.target} мес.`;
   return `${fmt(Math.min(o.progress, o.target))} / ${fmt(o.target)}`;
 }

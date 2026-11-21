@@ -8,14 +8,14 @@ import { Rng } from '../core/rng';
 import { durationText } from '../core/timeText';
 import type { Game } from '../game/game';
 import type { CargoType } from '../world/cargo';
-import { industryById, levelCap, network, operating } from './analysis';
+import { industryById, levelCap, network, newRoutesCarried, operating } from './analysis';
 import { CHALLENGE_BONUS, DIFFICULTY, EVENT_RULES, FAST, LATE, PHASES, POINTS, REPUTATION } from './content';
 import { EconomyMods, modsOf } from './effects';
 import { runEvents } from './events';
 import { assess } from './feasibility';
 import { type Forecast, forecastOf, haulOf, outlookOf } from './forecast';
 import { extraObjectives, fastMonths, generatePhase, startScenario } from './generator';
-import { baseOf, countDelivery, countPassengers, isMonthly, liveProgress, monthOk, targetOf, titleOf } from './objectives';
+import { baseOf, countDelivery, countPassengers, isMonthly, liveProgress, monthOk, routeWindowStart, targetOf, titleOf } from './objectives';
 import { computeScore } from './score';
 import type {
   Consequence,
@@ -163,7 +163,31 @@ export class Scenario {
   }
 
   static restore(game: Game, save: ScenarioState): Scenario {
-    return new Scenario(game, structuredClone(save));
+    const sc = new Scenario(game, structuredClone(save));
+    sc.restoreRouteWindows();
+    return sc;
+  }
+
+  /** Старые сохранения держали только серию: отдельно известен объём последнего закрытого месяца. */
+  private restoreRouteWindows(): void {
+    const last = this.month - 1;
+    for (const o of this.state.objectives) {
+      const p = o.params;
+      if (p.kind !== 'newRoutes' || (o.status !== 'active' && o.status !== 'offered')) continue;
+      if (p.months <= 1) {
+        delete o.routeMonths;
+        continue;
+      }
+      const first = routeWindowStart(o, p.since);
+      const past = o.status === 'active' && last >= first && this.state.stats.months.some((m) => m.month === last);
+      o.routeMonths ??= past ? [{ month: last, units: newRoutesCarried(this.game, p.since) }] : [];
+      o.routeMonths = o.routeMonths.filter((m) => m.month >= Math.max(first, last - p.months + 1) && m.month <= last);
+      o.target = targetOf(p);
+      o.streak = 0;
+      o.progress = liveProgress(o, this.state, this.game);
+      o.title = `${o.retryOf ? 'Последний шанс: ' : ''}${titleOf(p, this.game)}`;
+      o.why = o.why.replace(/Маршруты, построенные на этапе C, должны перевозить \d+ ед\. в месяц/, 'В зачёт идут перевозки по маршрутам, построенным на этапе C');
+    }
   }
 
   toSave(): ScenarioState {
@@ -365,12 +389,24 @@ export class Scenario {
     s.rng = this.rng.seedState;
   }
 
-  /** Месячные цели: условие закрытого месяца выполнено — +1 к серии, нет — серия с нуля. */
+  /** В закрытом месяце пополняем окно новых маршрутов или проверяем условие месячной серии. */
   private monthly(): void {
     const month = this.state.stats.months[this.state.stats.months.length - 1];
     for (const o of this.current) {
-      if (!isMonthly(o.params) || this.blocked(o)) continue;
-      o.streak = monthOk(o.params, this.game, month) ? o.streak + 1 : 0;
+      const p = o.params;
+      if (!isMonthly(p) || this.blocked(o)) continue;
+      if (p.kind === 'newRoutes' && p.months > 1) {
+        const first = routeWindowStart(o, p.since);
+        if (month.month < first) continue;
+        const oldest = Math.max(first, month.month - p.months + 1);
+        const window = (o.routeMonths ?? []).filter((m) => m.month >= oldest && m.month < month.month);
+        window.push({ month: month.month, units: newRoutesCarried(this.game, p.since) });
+        o.routeMonths = window;
+        o.progress = liveProgress(o, this.state, this.game);
+        if (window.length === p.months && o.progress >= o.target) this.complete(o);
+        continue;
+      }
+      o.streak = monthOk(p, this.game, month) ? o.streak + 1 : 0;
       o.progress = o.streak;
       if (o.streak >= o.target) this.complete(o);
     }
@@ -459,6 +495,7 @@ export class Scenario {
       progress: 0,
       target: targetOf(params),
       streak: 0,
+      ...(params.kind === 'newRoutes' && params.months > 1 ? { routeMonths: [] } : {}),
       reward: opts.reward,
       fail: opts.fail ?? {},
       related: opts.related ?? [],
