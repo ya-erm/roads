@@ -1535,6 +1535,8 @@ export class Game implements BuildContext {
     // узел по нынешней сети, без маршрутов — убрать; грузовики, что были во дворе, — у рампы.
     if (this.retail) for (const t of this.towns) if (!t.receivers) this.refreshReceivers(t);
     this.restoreDocks();
+    // Охват зависит от текущих радиусов, а в сохранении — результат расчёта по прежним.
+    for (const st of this.stations.values()) if (st.kind !== 'dock') this.computeCatchment(st);
     // Темп участков стройки зависит от застройки рядом (чистое поле): то, что посчитано по ходу загрузки, пока дома
     // и предприятия ещё не на месте, — заново.
     this.construction.forgetPrices();

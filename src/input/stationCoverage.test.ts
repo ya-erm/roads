@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RAIL_STATION, STATION, STOP } from '../config';
-import type { Vec } from '../core/vec';
+import { dist, type Vec } from '../core/vec';
 import { Game } from '../game/game';
-import { freshGame, townStreets } from '../game/testkit';
+import { fieldSpot, freshGame, townStreets } from '../game/testkit';
 import { Camera } from '../render/camera';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { Controller } from './controller';
@@ -11,11 +11,15 @@ afterEach(() => vi.unstubAllGlobals());
 
 const SETTINGS = { ...DEFAULT_SETTINGS, seed: 7, retail: true };
 
-function scene(game = freshGame(SETTINGS), townName?: string) {
-  game.money = 5_000_000;
+function controller(game: Game): Controller {
   const events = { addEventListener() {} };
   vi.stubGlobal('window', events);
-  const c = new Controller(events as unknown as HTMLCanvasElement, new Camera(), () => game);
+  return new Controller(events as unknown as HTMLCanvasElement, new Camera(), () => game);
+}
+
+function scene(game = freshGame(SETTINGS), townName?: string) {
+  game.money = 5_000_000;
+  const c = controller(game);
   c.setStationMode('cargo');
   for (const town of game.towns) {
     if (townName && town.name !== townName) continue;
@@ -36,7 +40,7 @@ function scene(game = freshGame(SETTINGS), townName?: string) {
 describe('Охват грузовой станции до строительства', () => {
   it('предпросмотр показывает тех же получателей, что и построенная станция', () => {
     const { game, hover, o } = scene();
-    expect(o.catchmentR).toBe(200);
+    expect(o.catchmentR).toBe(225);
     expect(game.stations.size).toBe(0);
     const ids = o.receiverPreview!.receivers.map(({ b }) => b.id);
     const st = game.placeStation(hover, 14, 'road', { pax: false, cargo: true })!;
@@ -52,12 +56,12 @@ describe('Охват грузовой станции до строительст
     const at = o.station!.fp.center;
     const probe = { kind: 'road' as const, fp: o.station!.fp, serves: { pax: false, cargo: true } };
     const covered = () => game.stationReceivers(probe).some((x) => x.b.id === b.id);
-    b.fp = { ...b.fp, center: { x: at.x + 185, y: at.y } };
+    b.fp = { ...b.fp, center: { x: at.x + 215, y: at.y } };
     expect(covered()).toBe(true);
-    b.fp.center.x = at.x + 200;
+    b.fp.center.x = at.x + 225;
     expect(covered()).toBe(true);
     expect(game.stationReceivers(probe, [b.id]).some((x) => x.b.id === b.id)).toBe(false);
-    b.fp.center.x = at.x + 201;
+    b.fp.center.x = at.x + 226;
     expect(covered()).toBe(false);
     expect(game.catchmentRadius({ ...probe, serves: { pax: true, cargo: false } })).toBe(STATION.catchment);
     expect(game.catchmentRadius({ ...probe, kind: 'stop' })).toBe(STOP.catchment);
@@ -68,13 +72,53 @@ describe('Охват грузовой станции до строительст
     const { c } = scene();
     c.setStationMode('pax');
     expect(c.overlay().receiverPreview).toBeUndefined();
-    expect(c.overlay().catchmentR).toBe(170);
+    expect(c.overlay().catchmentR).toBe(190);
     c.setStationMode('cargo');
     c.hover = { x: -1000, y: -1000 };
     expect(c.overlay().station?.ok).toBe(false);
     expect(c.overlay().receiverPreview).toBeUndefined();
   });
 });
+
+it('пассажирские остановки и вокзалы показывают новый охват до постройки и после загрузки', () => {
+  const { game, c, hover, town } = scene();
+  c.setStationMode('pax');
+  expect(c.overlay().catchmentR).toBe(190);
+  const terminal = game.placeStation(hover, 14, 'road', { pax: true, cargo: false })!;
+  expect(terminal.serves).toEqual({ pax: true, cargo: false });
+  c.setStationMode('stop');
+  const stopAt = townStreets(game, town.id).flatMap((street) => {
+    const s = street.length / 2;
+    const p = street.lut.pointAt(s);
+    const t = street.lut.tangentAt(s);
+    return [-1, 1].map((side) => ({ x: p.x - t.y * side * 14, y: p.y + t.x * side * 14 }));
+  }).find((p) => game.stationPlan(p, 14, 'stop').ok)!;
+  c.hover = stopAt;
+  expect(c.overlay().catchmentR).toBe(125);
+  const stop = game.placeStation(stopAt, 14, 'stop')!;
+
+  c.setStationMode('rail');
+  const field = fieldSpot(game, 700);
+  const railAt = { x: field.x + 350, y: field.y };
+  c.hover = railAt;
+  expect(c.overlay().catchmentR).toBe(270);
+  const rail = game.placeStation(railAt, 14, 'rail')!;
+  expect(rail).toBeTruthy();
+
+  const save = JSON.parse(JSON.stringify(game.toSave()));
+  const stale = save.stations.find((s: { id: number }) => s.id === stop.id);
+  stale.catchPop = 0;
+  stale.townIds = [];
+  const restored = new Game(SETTINGS, save);
+  const restoredStop = restored.stations.get(stop.id)!;
+  expect(restoredStop.catchPop).toBeGreaterThan(0);
+  expect(restoredStop.townIds).toContain(town.id);
+  const selected = controller(restored);
+  for (const [id, r] of [[terminal.id, 190], [stop.id, 125], [rail.id, 270]]) {
+    selected.select({ type: 'station', id });
+    expect(selected.overlay()).toMatchObject({ catchmentAt: restored.stations.get(id)!.fp.center, catchmentR: r });
+  }
+}, 30_000);
 
 it('при переносе магазина показывает станции у нового участка и предупреждает об отсутствии охвата', () => {
   const { game, c, hover } = scene(new Game(SETTINGS), 'Каменка');
@@ -89,6 +133,7 @@ it('при переносе магазина показывает станции
   expect(disconnected.label).toMatchObject({ ok: true, warn: true });
   expect(disconnected.receiverMovePreview?.stations).toEqual([]);
   expect(game.moveBuilding(b, outside)).toBe(true);
+  expect(dist(b.fp.center, st.fp.center)).toBeGreaterThan(225);
   expect(game.stationReceivers(st).some((x) => x.b.id === b.id)).toBe(false);
 
   c.hover = inside;
@@ -96,6 +141,7 @@ it('при переносе магазина показывает станции
   expect(connected.label?.text).toContain(st.name);
   expect(connected.receiverMovePreview?.stations.map((x) => x.id)).toEqual([st.id]);
   expect(game.moveBuilding(b, inside)).toBe(true);
+  expect(dist(b.fp.center, st.fp.center)).toBeLessThanOrEqual(225);
   expect(connected.receiverMovePreview?.receiver.b.fp).toEqual(b.fp);
   expect(game.stationReceivers(st).some((x) => x.b.id === b.id)).toBe(true);
 }, 30_000);

@@ -102,7 +102,8 @@ describe('Очередь на въезд в игре', { timeout: 60_000 }, () =
     const { built, line, sB } = freightRoute(game);
     expect(built).toBe(true);
     expect(game.setStationBays(sB.id, 8)).toBeNull();
-    const ready = [4, 5, 6, 7];
+    // Крайний пост с другой стороны может начать манёвр в своём проезде, пока фуры на этой стороне разъезжаются.
+    const ready = [0, 4, 5, 7];
     const fleet = Array.from({ length: 8 }, (_, bay) => {
       const v = game.buyVehicle(line.id, 'truck')!;
       v.model = 'truck3';
