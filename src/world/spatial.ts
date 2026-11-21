@@ -218,10 +218,11 @@ export class FootprintIndex<T extends { fp: Footprint }> {
     return null;
   }
 
-  overlaps(f: Footprint, margin = 0): boolean {
+  overlaps(f: Footprint, margin = 0, ignore?: (item: T) => boolean): boolean {
     // Описанные окружности врозь (с запасом в метр) — прямоугольники точно не пересекаются: без точной проверки.
     const r = footprintRadius(f) + Math.max(0, margin) * Math.SQRT2 + 1;
     for (const it of this.near(f.center, footprintRadius(f) + margin + 200)) {
+      if (ignore?.(it)) continue;
       const dx = it.fp.center.x - f.center.x;
       const dy = it.fp.center.y - f.center.y;
       const reach = r + footprintRadius(it.fp);

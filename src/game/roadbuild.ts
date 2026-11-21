@@ -10,6 +10,7 @@ import { CURB } from '../lanes/curb';
 import { Corridor, type CorridorWas, Flow, LaneNet, type LaneNode, LaneSlot, LAT_EPS } from '../lanes/model';
 import { capLimit, LEVEL_RUN, limitAllowed, limitCapText, RoadClass, ROAD_CLASSES, ROAD_MARGIN, structureFactor } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
+import type { HouseMove, StreetPart } from '../world/streetHouses';
 import { halfAtS } from '../world/worldgen';
 import type { Roads } from './roads';
 import { buildRate, carryBuild, paidFor, pieceRate } from './constructionWork';
@@ -40,7 +41,9 @@ export interface RoadContext {
    * Полоса стоянки на застроенной улице (world/curbSqueeze.ts): дома, на которые налезла новая кромка изменённых полотен
    * со стоянкой (в сети net), ужимают участки; не ужать — в demolish. Ответ — новые контуры домов, что ужмутся.
    */
-  curbSqueeze?(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[];
+  curbSqueeze?(net: LaneNet, changed: Corridor[], demolish: Set<number>, moved?: ReadonlySet<number>): Footprint[];
+  planStreetHouses?(before: LaneNet, next: LaneNet, parts: StreetPart[], demolish: Set<number>, reserved: Footprint[]): HouseMove[];
+  applyStreetHouses?(moves: HouseMove[]): void;
   demolishCost(id: number): number;
   demolish(ids: number[]): void;
   spend(amount: number): void;
@@ -86,6 +89,8 @@ export interface RoadPlan {
   changed: number[];
   /** Куда отодвинутся навесы остановок (расширение улицы у остановки). */
   moved?: Footprint[];
+  /** Новые места домов, пристыкованных к перенесённой улице. */
+  houseMoves?: HouseMove[];
   /** Продольный профиль новых полотен на земле: наибольший уклон, выемка и насыпь, м. */
   profile?: ProfileSummary;
   /**
@@ -313,10 +318,20 @@ export class RoadBuilder {
    */
   plan(
     edit: NetEdit,
-    opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean; only?: (c: Corridor) => boolean; project?: boolean; rebuild?: boolean; lane?: boolean } = {},
+    opts: { free?: boolean; shove?: boolean; raze?: boolean; trusted?: boolean; only?: (c: Corridor) => boolean; project?: boolean; rebuild?: boolean; lane?: boolean; restoreHouses?: boolean } = {},
   ): RoadPlan {
     const before = this.net;
     const next = before.clone();
+    const follow = this.ctx.planStreetHouses && (opts.rebuild || opts.project || opts.restoreHouses);
+    const origins = new Map<number, Omit<StreetPart, 'next'>>();
+    if (follow) next.onSplit = (id, t, first, second) => {
+      const old = before.corridors.get(id);
+      const origin = origins.get(id) ?? (old && { old, from: 0, to: 1 });
+      if (!origin) return;
+      const cut = origin.from + (origin.to - origin.from) * t;
+      origins.set(first, { ...origin, to: cut });
+      origins.set(second, { ...origin, from: cut });
+    };
     try {
       if (edit(next) === false) return fail('Так не построить');
     } catch (e) {
@@ -328,6 +343,7 @@ export class RoadBuilder {
     // Новые полотна правки готовой дороги («Полоса» пристроила съезд) — тоже новая дорога, стройкой.
     const fresh = pid !== null ? this.markProject(before, next, pid) : undefined;
     const re = pid === null ? null : this.markRebuild(before, next, pid, !!opts.lane);
+    delete next.onSplit;
     const project = mergeStart(fresh, re?.start);
     // Что изменилось: новые полотна, полотна с новой ревизией и исчезнувшие.
     const changed: Corridor[] = [];
@@ -370,10 +386,22 @@ export class RoadBuilder {
       if (typeof res === 'string') reason = res;
       else if (res.length) moved = res;
     }
+    let houseMoves: HouseMove[] = [];
+    if (!reason && follow && this.ctx.planStreetHouses) {
+      const parts = (opts.restoreHouses ? changed : checked).flatMap((c) => {
+        const old = before.corridors.get(c.id);
+        const part = origins.get(c.id) ?? (old && { old, from: 0, to: 1 });
+        // У полотна могли измениться полосы или только управляющие точки прямой на той же оси.
+        return part && part.old.curve !== c.curve ? [{ ...part, next: c }] : [];
+      });
+      if (parts.length) houseMoves = this.ctx.planStreetHouses(before, next, parts, demolish, moved ?? []);
+    }
     // Полоса стоянки у домов: участки ужимаются, не ужать — снос (в цену).
     let squeeze: Footprint[] = [];
     const curbs = opts.raze ? [] : checked.filter((c) => c.lanes.some((l) => l.park));
-    if (!reason && curbs.length && this.ctx.curbSqueeze) squeeze = this.ctx.curbSqueeze(next, curbs, demolish);
+    if (!reason && curbs.length && this.ctx.curbSqueeze) {
+      squeeze = this.ctx.curbSqueeze(next, curbs, demolish, houseMoves.length ? new Set(houseMoves.map((m) => m.id)) : undefined);
+    }
     // Новые беды сети (оборванные полосы и т. п.) — только те, что появились от этой правки.
     if (!reason && !opts.raze) {
       const old = new Set(before.problems());
@@ -388,6 +416,7 @@ export class RoadBuilder {
     if (!reason && shortOfMoney(cost, this.ctx.budget, project)) reason = 'Не хватает денег';
     const plan: RoadPlan = { ok: !reason, reason, cost, spend, refund, demolish: razed, net: next, changed: changed.map((c) => c.id) };
     if (moved) plan.moved = moved;
+    if (houseMoves.length) plan.houseMoves = houseMoves;
     if (squeeze.length) plan.squeeze = squeeze;
     if (project) plan.project = project;
     if (re && re.shift > 0.5) plan.shift = re.shift;
@@ -515,6 +544,7 @@ export class RoadBuilder {
     // Стройка с тех пор, как план считали, ушла вперёд — готовое переносим в сеть плана.
     carryBuild(this.ctx.roads.net, plan.net);
     this.ctx.roads.replace(plan.net);
+    if (plan.houseMoves?.length) this.ctx.applyStreetHouses?.(plan.houseMoves);
     if (plan.spend) this.ctx.spend(plan.spend);
     if (plan.refund) this.ctx.refund(plan.refund);
     if (plan.project) this.ctx.startProject?.(plan.project, plan.net);

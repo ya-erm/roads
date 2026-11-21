@@ -3138,6 +3138,7 @@ export class Controller {
     }
     // Новое место навеса остановки, которую отодвинет расширение улицы.
     if (plan.ok) for (const fp of plan.moved ?? []) o.marks.push({ fp, ok: true });
+    if (plan.ok) for (const { fp } of plan.houseMoves ?? []) o.marks.push({ fp, ok: true });
     const razed = plan.demolish.length ? ` · снос ${plan.demolish.length} зд.` : '';
     // «Со строительством» правка готовой дороги: сдвиг оси (⚡ сразу или 🚧 стройкой) и цена перестройки (rebuild.ts).
     const moved = shiftLabel(plan.shift, CONSTRUCTION.rebuild.shift);
@@ -3368,6 +3369,7 @@ export class Controller {
       const b = g.buildingById(id);
       if (b) o.marks.push({ fp: b.fp, ok: false });
     }
+    if (plan.ok) for (const { fp } of plan.houseMoves ?? []) o.marks.push({ fp, ok: true });
     if (text === null) return;
     const slow = signs.length ? ` · ⚠ поворот ${Math.min(...signs.map((x) => x.kmh))} км/ч` : '';
     o.label = plan.ok ? { text: `${text}${slow}`, ok: true } : { text: `${failText(plan.reason, plan.cost, 'Нельзя')} · ${text}`, ok: false };
@@ -3647,6 +3649,7 @@ export class Controller {
       this.inputs,
       g.net.version,
       g.roads.net.version,
+      g.index.version,
       g.terrain.version,
       this.moveProject.stamp,
     ].join('|');

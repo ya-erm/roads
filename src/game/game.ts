@@ -68,10 +68,12 @@ import {
   rearByGap,
   recountPopulation,
   streetFace,
+  townExtent,
   WorldContext,
 } from '../world/worldgen';
 import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placeParks, plazaAttached, plazaBy } from '../world/townParks';
 import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
+import { planStreetHouses, type HouseMove, type StreetPart } from '../world/streetHouses';
 import { streetBase, turnableBuilding, turnReach, wrapTurn } from '../world/moveTurn';
 import { type ParkEntry, ParkIndex } from '../world/parkPick';
 import { edgeOf, FORM_NAMES, formOf, jobsOf, residentsOf, SETTLE_RULE, townTier, yardOf, zoneTown } from '../world/townForms';
@@ -2136,11 +2138,11 @@ export class Game implements BuildContext {
               redo.map((c) => c.id),
             );
           },
-          { raze: true },
+          { raze: true, restoreHouses: true, free: true },
         )
       : this.roadBuilder.bulldoze(cs.map((c) => c.id));
     // Снос недостроенного — без «возврата половины»: заплаченное за него возвращается целиком (ниже).
-    if (plan.net) this.roadBuilder.apply({ ...plan, ok: true, spend: 0, refund: 0, demolish: [] });
+    if (plan.net) this.roadBuilder.apply({ ...plan, ok: true, spend: 0, refund: 0 });
     this.money += back;
     this.expensesMonth -= back;
     this.ledger.build -= Math.min(this.ledger.build, back);
@@ -2928,10 +2930,10 @@ export class Game implements BuildContext {
    * Полоса стоянки у домов (world/curbSqueeze.ts): что станет с домами у полотен corridors сети net — ужать участок или
    * снести. Дома — из индекса игры.
    */
-  private curbSqueezes(net: LaneNet, corridors: Corridor[]): Squeeze[] {
+  private curbSqueezes(net: LaneNet, corridors: Corridor[], moved?: ReadonlySet<number>): Squeeze[] {
     const ctx = { ...this.worldContext(), roads: net };
     const out: Squeeze[] = [];
-    const seen = new Set<number>();
+    const seen = new Set(moved);
     for (const c of corridors) {
       const houses = this.index
         .near(c.lut.pointAt(c.length / 2), c.length / 2 + 80)
@@ -2945,14 +2947,48 @@ export class Game implements BuildContext {
   }
 
   /** План со стоянкой (RoadContext.curbSqueeze): не ужать — под снос (в цену), ответ — новые контуры ужатых домов. */
-  curbSqueeze(net: LaneNet, changed: Corridor[], demolish: Set<number>): Footprint[] {
+  curbSqueeze(net: LaneNet, changed: Corridor[], demolish: Set<number>, moved?: ReadonlySet<number>): Footprint[] {
     const out: Footprint[] = [];
-    for (const x of this.curbSqueezes(net, changed)) {
+    for (const x of this.curbSqueezes(net, changed, moved)) {
       if (demolish.has(x.b.id)) continue;
       if (x.fp) out.push(x.fp);
       else demolish.add(x.b.id);
     }
     return out;
+  }
+
+  planStreetHouses(before: LaneNet, next: LaneNet, parts: StreetPart[], demolish: Set<number>, reserved: Footprint[]): HouseMove[] {
+    return planStreetHouses(
+      { ...this.worldContext(), roads: next },
+      before, parts, demolish, reserved,
+      (fp) => this.parkUnder(fp, null) || this.lotUnder(fp),
+    );
+  }
+
+  applyStreetHouses(moves: HouseMove[]): void {
+    const towns = new Set<Town>();
+    const sites: Vec[] = [];
+    for (const { id, fp, face, anchor } of moves) {
+      const b = this.buildingById(id);
+      if (!b) continue;
+      sites.push(b.fp.center, fp.center);
+      this.index.remove(b);
+      b.fp = fp;
+      b.face = face;
+      b.anchor = anchor;
+      this.index.add(b);
+      const town = this.townOf(b);
+      if (town) towns.add(town);
+    }
+    for (const town of towns) {
+      town.buildings = [...town.buildings];
+      town.extent = townExtent(town);
+    }
+    this.layoutRev++;
+    this.townRev++;
+    for (const st of this.stations.values()) {
+      if (sites.some((p) => dist(st.fp.center, p) < this.catchmentRadius(st) + 60)) this.computeCatchment(st);
+    }
   }
 
   /**
@@ -5097,6 +5133,7 @@ export class Game implements BuildContext {
         return false;
       });
       recountPopulation(town);
+      town.extent = townExtent(town);
     }
     // Парки — на места до действия (перенос парка, площадь, что уехала с ратушей); новый список — карте и выбору.
     for (const { townId, list } of snap.parks ?? []) {
@@ -5127,7 +5164,10 @@ export class Game implements BuildContext {
     this.reattachFleet(sims, trains);
     this.net.rebuild();
     this.refreshCrossings();
-    for (const st of this.stations.values()) this.computeCatchment(st);
+    for (const st of this.stations.values()) {
+      if (st.kind === 'dock') this.refreshDock(st);
+      this.computeCatchment(st);
+    }
   }
 
   // ---------- Время ----------

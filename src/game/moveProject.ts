@@ -147,7 +147,7 @@ export class MoveProject {
     const g = this.game();
     const tail = this.opts.tail?.() ?? null;
     if (extra) return this.lay([...this.edits, extra], tail?.edit ?? null);
-    const key = `${this.version}|${idOf(g.roads.net)}.${g.roads.net.version}|${Math.floor(g.budget)}|${tail?.key ?? ''}`;
+    const key = `${this.version}|${idOf(g.roads.net)}.${g.roads.net.version}|${g.index.version}|${Math.floor(g.budget)}|${tail?.key ?? ''}`;
     if (this.cache?.key !== key) this.cache = { key, plan: this.lay(this.edits, tail?.edit ?? null) };
     return this.cache.plan;
   }

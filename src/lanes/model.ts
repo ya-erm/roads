@@ -401,6 +401,8 @@ const nextRev = () => revCount++;
 export class LaneNet {
   readonly nodes = new Map<number, LaneNode>();
   readonly corridors = new Map<number, Corridor>();
+  /** Строитель временно записывает происхождение кусков полотен на копии сети. */
+  onSplit?: (id: number, t: number, first: number, second: number) => void;
   /** Растёт при любом изменении — по нему отрисовка обновляет кэш. */
   version = 0;
   private nextId = 1;

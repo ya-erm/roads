@@ -1129,10 +1129,10 @@ export function railNear(rail: Network | undefined, p: Vec, d: number): boolean 
 }
 
 /** Можно ли поставить здание: не в воде, не на дороге, не на путях и не на другом здании. */
-export function placeable(ctx: WorldContext, fp: Footprint, ownSeg: number): boolean {
+export function placeable(ctx: WorldContext, fp: Footprint, ownSeg: number, ignore?: (item: Structure) => boolean): boolean {
   const { roads, terrain, index } = ctx;
   if (!terrain.inBounds(fp.center, 30) || terrain.isWater(fp.center, footprintRadius(fp) + 4)) return false;
-  if (index.overlaps(fp, 2)) return false;
+  if (index.overlaps(fp, 2, ignore)) return false;
   if (onRail(ctx.rail, fp, RAIL_BUFFER)) return false;
   const r = footprintRadius(fp);
   for (const seg of roads.corridorsNear(fp.center, r + 30 + HIGHWAY_BUFFER)) {
@@ -1180,15 +1180,18 @@ export function coreRadius(town: Town): number {
  */
 export function measureTown(town: Town): void {
   if (!town.buildings.length) return;
-  let far = 0;
-  for (const b of town.buildings) far = Math.max(far, dist(b.fp.center, town.center) + footprintRadius(b.fp));
   town.radius = Math.max(100 * TOWN_SCALE, coreRadius(town) + 30 * TOWN_SCALE);
-  town.extent = Math.max(town.radius, far + 10);
+  town.extent = townExtent(town);
   // Типы застройки и жильцы новым домам (и домам старых сохранений) — по месту в городе нынешнего размера
   // (townForms.ts); население — по жильцам; дорос — ярус выше.
   zoneTown(town);
   recountPopulation(town);
   growTier(town);
+}
+
+/** Граница застройки с запасом для поиска домов в охвате. */
+export function townExtent(town: Town): number {
+  return town.buildings.reduce((far, b) => Math.max(far, dist(b.fp.center, town.center) + footprintRadius(b.fp) + 10), town.radius);
 }
 
 /** Городская улица для парков: на земле, не магистраль и не съезд. */

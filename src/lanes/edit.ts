@@ -168,6 +168,7 @@ export function splitCorridor(net: LaneNet, c: Corridor, s: number, kind: NodeKi
   net.removeCorridor(c.id, true);
   const first = net.addCorridor(a, node.id, { cls, lanes: lanes1, portA, curve: c1, limit, ring });
   const second = net.addCorridor(node.id, b, { cls, lanes: lanes2, portB, curve: c2, limit, ring });
+  net.onSplit?.(c.id, t, first.id, second.id);
   // Строящееся полотно — оба куска тоже стройка того же проекта: готовое делится по месту разреза.
   if (c.build) {
     const [b1, b2] = splitBuild(c.build, L, first.length);
