@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { INDUSTRY_LIST, INDUSTRY_TYPES } from '../world/cargo';
+import { describe, expect, it, vi } from 'vitest';
+import { CARGO, INDUSTRY_LIST, INDUSTRY_TYPES } from '../world/cargo';
 import type { Industry } from '../world/entities';
 import { annexMotion, drawAnnexArt } from './annexArt';
-import { artMoves, type ArtLayer, drawEmitters, drawIndustryArt, industryMotion } from './industryArt';
+import { Art, artMoves, type ArtLayer, drawEmitters, drawIndustryArt, industryMotion } from './industryArt';
+import { drawIndustryYardStock } from './industryStationArt';
 
 /** Работающее предприятие вида info с пристройкой. */
 function industry(info: (typeof INDUSTRY_LIST)[number]): Industry {
@@ -142,6 +143,40 @@ describe('Предприятия в кэше карты: неподвижное 
         return seen;
       };
       expect(colors(a, 1), info.kind).toEqual(colors(b, 9.3));
+    }
+  });
+});
+
+describe('Ёмкости на складе грузового двора', () => {
+  const fp = { center: { x: 0, y: 0 }, w: 81, h: 56, angle: 0 };
+
+  it.each([0, 1, 300])('зерновые силосы занимают обе половины склада фермы при запасе %i', (grain) => {
+    const tanks = vi.spyOn(Art.prototype, 'tank');
+    try {
+      drawIndustryYardStock(stub().ctx, { fp, id: 3, cargo: { grain } }, industry(INDUSTRY_TYPES.farm), 4, 300);
+      expect(tanks.mock.calls).toHaveLength(2);
+      const [left, right] = tanks.mock.calls;
+      expect(left[0] + left[2]).toBeLessThan(-11);
+      expect(right[0] - right[2]).toBeGreaterThan(11);
+      expect(left[5]).toBe(grain > 0 ? CARGO.grain.color : '#a1a4a5');
+      expect(right[5]).toBe(left[5]);
+    } finally {
+      tanks.mockRestore();
+    }
+  });
+
+  it.each([39, 56])('у НПЗ резервуары сырья и продукции разнесены (глубина двора %i м)', (h) => {
+    const tanks = vi.spyOn(Art.prototype, 'tank');
+    try {
+      drawIndustryYardStock(stub().ctx, { fp: { ...fp, h }, id: 3, cargo: { oil: 100, fuel: 200 } }, industry(INDUSTRY_TYPES.refinery), 4, 300);
+      expect(tanks.mock.calls).toHaveLength(4);
+      const [fuelA, fuelB, oilA, oilB] = tanks.mock.calls;
+      expect(fuelB[0] + fuelB[2]).toBeLessThan(-11);
+      expect(oilA[0] - oilA[2]).toBeGreaterThan(11);
+      expect(fuelB[0] - fuelA[0]).toBeGreaterThan(fuelA[2] + fuelB[2]);
+      expect(oilB[0] - oilA[0]).toBeGreaterThan(oilA[2] + oilB[2]);
+    } finally {
+      tanks.mockRestore();
     }
   });
 });

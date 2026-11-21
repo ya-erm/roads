@@ -37,7 +37,7 @@ interface StorageCell {
 
 /** Каждый вид сырья занимает свою ячейку. Готовый запас берётся со склада станции. */
 export function drawIndustryYardStock(
-  c: CanvasRenderingContext2D, st: Station, ind: Industry, zoom: number, capacity: number, trip?: IndustryHaulView,
+  c: CanvasRenderingContext2D, st: Pick<Station, 'id' | 'fp' | 'cargo'>, ind: Industry, zoom: number, capacity: number, trip?: IndustryHaulView,
 ): void {
   const a = new Art(c, st, zoom, 0);
   const { w, h } = st.fp;
@@ -51,17 +51,19 @@ export function drawIndustryYardStock(
     amount: Math.max(0, (st.cargo[out] ?? 0) - (trip?.outgoing[out] ?? 0)),
   }];
   const inputs = ind.info.accepts;
+  const rightX = 11;
   inputs.forEach((cargo, i) => {
     const span = cellHeight / inputs.length;
     cells.push({
-      cargo, x: 11, y: back + i * span, w: width, h: span - (inputs.length > 1 ? 0.9 : 0),
+      cargo, x: rightX, y: back + i * span, w: width, h: span - (inputs.length > 1 ? 0.9 : 0),
       amount: (st.cargo[cargo] ?? 0) + (trip?.incoming[cargo] ?? 0),
     });
   });
-  for (const cell of cells) paintStorageCell(a, cell, ind, capacity, st.fp.h >= 48 && cell.h > 18);
+  const freeSideX = inputs.length === 0 ? rightX : undefined;
+  for (const cell of cells) paintStorageCell(a, cell, ind, capacity, st.fp.h >= 48 && cell.h > 18, freeSideX);
 }
 
-function paintStorageCell(a: Art, cell: StorageCell, ind: Industry, capacity: number, roof: boolean): void {
+function paintStorageCell(a: Art, cell: StorageCell, ind: Industry, capacity: number, roof: boolean, freeSideX?: number): void {
   const { x, y, w, h, cargo, amount } = cell;
   const tone = CARGO[cargo].color;
   const shape = cargoShape(cargo, ind.info.kind);
@@ -81,10 +83,19 @@ function paintStorageCell(a: Art, cell: StorageCell, ind: Industry, capacity: nu
   }
   if (shape === 'tank' || shape === 'silo') {
     const count = w > 19 ? 2 : 1;
+    const split = count === 2 && freeSideX !== undefined;
+    if (split) {
+      a.pass = 0;
+      a.patch(freeSideX, y, w, h, '#c7c5bc', 1, '#94918a');
+      a.pass = 2;
+    }
+    // Приёмную половину оставляем сырью. В общей ячейке два резервуара разделяет зазор.
+    const r = count === 2 && !split ? Math.min(radius, (w - 3) / 4) : radius;
+    const cy = y + h * 0.53;
     for (let i = 0; i < count; i++) {
-      const cx = x + w * (i + 1) / (count + 1);
-      a.tank(cx, y + h * 0.53, radius, shape === 'silo' ? 11 : 6, '#e2e3dd', fill > 0 ? tone : '#a1a4a5');
-      if (fill > 0) a.box(cx - radius * 0.58, y + h * 0.53 + radius * 0.78, radius * 1.16 * fill, 0.7, 0.25, tone);
+      const cx = split ? (i === 0 ? x : freeSideX) + w / 2 : x + w * (i + 0.5) / count;
+      a.tank(cx, cy, r, shape === 'silo' ? 11 : 6, '#e2e3dd', fill > 0 ? tone : '#a1a4a5');
+      if (fill > 0) a.box(cx - r * 0.58, cy + r * 0.78, r * 1.16 * fill, 0.7, 0.25, tone);
     }
     return;
   }
