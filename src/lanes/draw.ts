@@ -1,5 +1,5 @@
 import { add, closestOnSegment, cubicBezier, dist, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { isDirt, LANE_W, ROAD_ASPHALT } from '../world/roadTypes';
+import { isDirt, LANE_W, ROAD_ASPHALT, ROAD_DIRT } from '../world/roadTypes';
 import { arrowAt, arrowShape } from './arrowShape';
 import { bridgeLook, deckAlong, nodeDeck } from './deck';
 import { asphaltEdgesAt, awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, plateOutline, pointOff, sFrom, stations } from './geometry';
@@ -23,7 +23,7 @@ const C = {
   shadow: 'rgba(20, 30, 20, 0.28)',
   rail: '#d6d1c4',
   /** Грунтовая дорога: пыльная охра без кромки, край размыт, по середине каждой полосы — мягкая колея. */
-  dirt: '#c4b99c',
+  dirt: ROAD_DIRT,
   rut: 'rgba(150, 135, 105, 0.2)',
 };
 

@@ -1,15 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { add, dist, scale, type Vec } from '../core/vec';
 import { Game } from '../game/game';
-import { freshGame } from '../game/testkit';
+import { fieldSpot, freshGame } from '../game/testkit';
 import { RoadTools } from '../input/roadtools';
-import type { Corridor, LaneNet } from '../lanes/model';
+import { asphaltEdgesAt } from '../lanes/geometry';
+import { LaneNet, profileOf, twoWay, type Corridor } from '../lanes/model';
 import type { Industry } from './entities';
 import { industryAccess } from './industrySites';
-import { ROAD_CLASSES, specCost } from './roadTypes';
+import { halfWidth, ROAD_CLASSES, ROAD_PRESETS, specCost, specKmh } from './roadTypes';
 import { DEFAULT_SETTINGS } from './settings';
 import { footprintSide, pointInFootprint } from './spatial';
-import { DIRT_SPEC, layStartRoads, START_ROADS } from './startRoads';
+import { DIRT_SPEC, EDGE_SPEC, layStartRoads, START_ROADS } from './startRoads';
 import type { WorldContext } from './worldgen';
 
 const dirtOf = (net: LaneNet) => [...net.corridors.values()].filter((c) => c.cls === 'dirt');
@@ -74,12 +75,25 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
     expect(specCost(DIRT_SPEC)).toBeLessThan(specCost({ cls: 'street', lanesF: 1, lanesB: 1 }));
   });
 
+  it('обычная грунтовка и дворовый проезд одинаково узкие, у других профилей грунтовки обычные полосы', () => {
+    const dirt = ROAD_PRESETS.find((p) => p.id === 'dirt')!.spec;
+    const yard = ROAD_PRESETS.find((p) => p.id === 'street')!.spec;
+    expect(halfWidth(dirt)).toBe(5.25);
+    expect(profileOf(dirt).lanes).toEqual(profileOf(yard).lanes);
+    expect(profileOf(dirt).lanes.map((l) => l.offset)).toEqual([-2.45, 2.45]);
+    expect(specKmh(dirt)).toBe(30);
+    expect(specKmh({ ...dirt, limit: 40 })).toBe(40);
+    expect(profileOf({ ...dirt, lanesF: 2 }).lanes).toEqual(twoWay(2, 1));
+    expect(halfWidth({ ...dirt, lanesB: 0 })).toBe(5);
+  });
+
   it('по seed — одни и те же; дорога — к части предприятий, от них — к улицам города', () => {
     const shape = (g: Game) => startOf(g).map((c) => [c.curve.p0, c.curve.p3].map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).join('>'));
     for (const seed of [1, 5]) {
       const game = freshGame(seed);
       // Вторая партия — заново генерацией, не копией.
       expect(shape(game)).toEqual(shape(new Game(seed)));
+      for (const c of dirtOf(game.roads.net)) expect(asphaltEdgesAt(c, c.length / 2)).toEqual([-5.25, 5.25]);
       const served = game.industries.filter((i) => roadSide(game, i));
       expect(served.length).toBeGreaterThan(game.industries.length / 5);
       expect(served.length).toBeLessThan(game.industries.length);
@@ -175,9 +189,50 @@ describe('Стартовые просёлки', { timeout: 60_000 }, () => {
       expect(net.nodes.has(side.node)).toBe(true);
       expect(net.node(side.node).corridors.length).toBe(2);
       expect(reachesStreet(net, st!.nodeId)).toBe(true);
+      const approach = net.node(side.node).corridors.map((id) => net.corridor(id)).find((c) => c.cls === 'dirt')!;
+      const roadEnd = approach.a === side.node ? approach.b : approach.a;
+      expect(game.roads.route(st!.nodeId, roadEnd)).not.toBeNull();
+      expect(game.roads.route(roadEnd, st!.nodeId)).not.toBeNull();
       if (++checked >= 3) break;
     }
     expect(checked).toBe(3);
+  });
+
+  it('игрок строит и перестраивает узкую грунтовку инструментом дорог', () => {
+    const game = freshGame(1);
+    const tools = new RoadTools(() => game);
+    const a = fieldSpot(game, 200);
+    const b = add(a, { x: 200, y: 0 });
+    const mid = add(a, { x: 100, y: 0 });
+    const corridor = () => game.roads.net.corridorNear(mid, 1)!;
+    expect(tools.begin(a, 1)).toBe(true);
+    expect(tools.build(b, DIRT_SPEC, 'straight', 1, false)).toBeNull();
+    expect(asphaltEdgesAt(corridor(), 100)).toEqual([-5.25, 5.25]);
+    expect(tools.upgrade(mid, EDGE_SPEC, 1)).toBeNull();
+    expect(asphaltEdgesAt(corridor(), 100)).toEqual([-8.5, 8.5]);
+    expect(tools.upgrade(mid, DIRT_SPEC, 1)).toBeNull();
+    expect(asphaltEdgesAt(corridor(), 100)).toEqual([-5.25, 5.25]);
+    expect(game.roads.net.problems()).toEqual([]);
+  });
+
+  it('при загрузке сужаются целые цепочки грунтовки, стык с широкой дорогой сохраняет проезд', () => {
+    const roads = new LaneNet();
+    const [a, b, d, e] = [0, 100, 300, 400].map((x) => roads.addSeam({ x, y: 0 }, { x: 1, y: 0 }));
+    const center = roads.addJunction({ x: 200, y: 0 });
+    const dirt = { cls: 'dirt' as const, lanes: twoWay(1, 1), limit: 40 };
+    const west = roads.addCorridor(a.id, b.id, dirt);
+    const middle = roads.addCorridor(b.id, center.id, dirt);
+    const east = roads.addCorridor(center.id, d.id, dirt);
+    const highway = roads.addCorridor(d.id, e.id, profileOf(EDGE_SPEC));
+    const legacy = roads.toJSON();
+    delete legacy.dirtWidths;
+    const loaded = LaneNet.fromJSON(legacy, true);
+    expect(loaded.corridor(west.id).lanes.map((l) => l.offset)).toEqual([-2.45, 2.45]);
+    expect(loaded.corridor(middle.id).limit).toBe(40);
+    expect(loaded.across(loaded.corridor(west.id), 1, 'b')?.corridor.id).toBe(middle.id);
+    expect(loaded.across(loaded.corridor(east.id), 1, 'b')?.corridor.id).toBe(highway.id);
+    expect(loaded.problems()).toEqual([]);
+    expect(LaneNet.fromJSON(loaded.toJSON(), true).toJSON()).toEqual(loaded.toJSON());
   });
 
   it('игрок перестраивает и сносит просёлок, как обычную дорогу; шоссе за край — тоже', () => {

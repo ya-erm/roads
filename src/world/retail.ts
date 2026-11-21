@@ -2,7 +2,7 @@ import { MONTH_LENGTH, TOWN_SCALE } from '../config';
 import { hash } from '../core/math';
 import { dist } from '../core/vec';
 import type { CargoType } from './cargo';
-import type { HouseForm, Town, TownBuilding } from './entities';
+import { TOWN_HISTORY, type HouseForm, type RetailSupplyMonth, type Town, type TownBuilding } from './entities';
 import { formOf } from './townForms';
 import { townNeed } from './townSupply';
 
@@ -411,6 +411,38 @@ export function stockCap(town: Pick<Town, 'receivers' | 'population'>, r: Receiv
 /** Расход получателя r по грузу c за месяц: доля нормы с запасом RETAIL.consume. */
 export function receiverUse(town: Pick<Town, 'receivers' | 'population'>, r: Receiver, c: CargoType): number {
   return receiverNeed(town, r, c) * RETAIL.consume;
+}
+
+/** Месячная норма в целых единицах, которые можно привезти. */
+export function receiverSupplyTarget(town: Town, r: Receiver, cargo: CargoType): number {
+  return Math.ceil(receiverNeed(town, r, cargo));
+}
+
+/** Запись месяца хранится у дома, даже если список получателей города пересобран. */
+function supplyMonth(building: TownBuilding, month: number): RetailSupplyMonth {
+  const last = building.retailSupply?.at(-1);
+  if (last?.month === month) return last;
+  const entry = { month, got: {}, need: {} };
+  building.retailSupply = [...(building.retailSupply ?? []).filter((m) => m.month > month - TOWN_HISTORY), entry];
+  return entry;
+}
+
+export function recordRetailSupply(town: Town, r: Receiver, building: TownBuilding, cargo: CargoType, amount: number, month: number): void {
+  const entry = supplyMonth(building, month);
+  entry.got[cargo] = (entry.got[cargo] ?? 0) + amount;
+  entry.need[cargo] = receiverSupplyTarget(town, r, cargo);
+}
+
+export function closeRetailSupply(town: Town, month: number): void {
+  if (!town.receivers?.length) return;
+  const buildings = new Map(town.buildings.map((b) => [b.id, b]));
+  for (const r of town.receivers) {
+    if (r.depot) continue;
+    const building = buildings.get(r.b);
+    if (!building) continue;
+    const entry = supplyMonth(building, month);
+    for (const cargo of r.cargo) entry.need[cargo] = receiverSupplyTarget(town, r, cargo);
+  }
 }
 
 /** Запас получателя по грузу c к моменту time: сохранённый минус расход с тех пор. */

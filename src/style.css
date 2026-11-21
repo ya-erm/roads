@@ -3890,6 +3890,26 @@ button.small.with-ic {
   margin: 0 0 8px;
 }
 
+.retail-supply-toggle {
+  width: calc(100% + 12px);
+  justify-content: space-between;
+  text-align: left;
+  font-size: 13px;
+}
+
+.retail-supply-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+
+.retail-supply-summary small {
+  color: var(--muted);
+  font-size: inherit;
+  margin-left: auto;
+}
+
 /* Полоска снабжения: излишек прошлого месяца, засчитанный в этот, — штриховкой в начале (ui/supplyUi.ts). */
 .bar.supply-bar {
   display: flex;

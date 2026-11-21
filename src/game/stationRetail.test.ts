@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { dist } from '../core/vec';
 import type { CargoType } from '../world/cargo';
 import type { Station, Town, TownBuilding } from '../world/entities';
-import { receiverNeed, receiverOf, STATION_RETAIL, townRoom } from '../world/retail';
+import { receiverNeed, receiverOf, STATION_RETAIL, stockCap, townRoom } from '../world/retail';
 import { townNeed } from '../world/townSupply';
 import { DEFAULT_SETTINGS } from '../world/settings';
 import { Game } from './game';
@@ -59,6 +59,36 @@ function unload(game: Game, line: Line, truck: FleetVehicle, origin: Station, ta
 }
 
 describe('Торговля у городской автостанции', () => {
+  it('сохраняет фактические поставки одному магазину через станцию и напрямую, включая месяц без поставок', () => {
+    const { game, town, cityStation, source, line, truck, shop } = layout();
+    const receiver = receiverOf(town, shop.id)!;
+    expect(shop.retailSupply).toBeUndefined(); // Стартовый запас не считается поставкой.
+    expect(unload(game, line, truck, source, cityStation, 'food', 5).accepted).toBe(5);
+
+    const dock = game.dockFor(shop)!;
+    const direct = game.createLine([source.id, dock.id])!;
+    const local = game.buyVehicle(direct.id, 'truck')!;
+    receiver.stock.food = stockCap(town, receiver, 'food') - 3;
+    expect(unload(game, direct, local, source, dock, 'food', 5).accepted).toBe(3);
+    expect(unload(game, direct, local, source, dock, 'food', 2).accepted).toBe(0);
+    local.amount = 0;
+    local.cargo = null;
+
+    game.setStopRule(line.id, 1, { ...DEFAULT_RULE, load: [], unload: ['goods'] });
+    expect(unload(game, line, truck, source, cityStation, 'goods', 4)).toEqual({ accepted: 4, revenue: 0 });
+    game.refreshReceivers(town);
+    const save = structuredClone(game.toSave());
+    const loaded = withoutCitizens(new Game(save.settings, save));
+    const loadedTown = loaded.towns.find((t) => t.id === town.id)!;
+    const loadedShop = loadedTown.buildings.find((b) => b.id === shop.id)!;
+    expect(loadedShop.retailSupply?.map((m) => m.got)).toEqual([{ food: 8 }]);
+
+    runMonths(loaded, 2);
+    expect(loadedShop.retailSupply?.map((m) => [m.month, m.got.food ?? 0])).toEqual([[save.month, 8], [save.month + 1, 0]]);
+    expect(loadedShop.retailSupply?.every((m) => (m.need.food ?? 0) > 0)).toBe(true);
+    expect(loadedTown.buildings.filter((b) => b.retailSupply).map((b) => b.id)).toEqual([shop.id]);
+  });
+
   it('после оплачиваемых поставок в разных месяцах открывает новую точку, без перераспределения прежнего спроса', () => {
     const { game, town, cityStation, source, line, truck, shop } = layout();
     const baseNeed = receiverNeed(town, receiverOf(town, shop.id)!, 'food');

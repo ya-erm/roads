@@ -59,6 +59,7 @@ export interface DepotHost {
   readonly traffic: LaneTraffic;
   readonly graph: LaneGraph;
   readonly net: LaneNet;
+  canJoin(): boolean;
   /** Машина службы встала в поток (выезд или обратный путь): её — в счёт спецмашин, для карточки — откуда куда. */
   own(sim: Vehicle, kind: ServiceKind, trip: { from: TownBuilding; to: TownBuilding }): void;
   /** Сворачивая на место, ушла с полосы — снята с потока. */
@@ -107,6 +108,7 @@ export class ServiceDepots {
       },
       car,
       colors: [color],
+      canJoin: () => host.canJoin(),
       own: (sim, trip) => host.own(sim, kind, trip),
       gone: (sim) => {
         this.driving.delete(sim.id);
@@ -294,7 +296,7 @@ export class ServiceDepots {
           list.splice(list.indexOf(e), 1);
           continue;
         }
-        if (this.moving.has(car.key)) continue;
+        if (this.moving.has(car.key) || !this.host.canJoin()) continue;
         this.goHome(car, e);
       }
       if (!list.length) delete town.serviceAway;

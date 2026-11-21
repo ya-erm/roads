@@ -5,7 +5,7 @@ import { industryHaulConnection } from '../game/industryHaulRoutes';
 import { industryYardWidth, INDUSTRY_YARD_MIN_DEPTH } from '../game/transport';
 import { buildRoad, corridorUnder, type Anchor } from '../lanes/edit';
 import { edgesAt } from '../lanes/geometry';
-import { corridorMargin, twoWay, type Corridor, type LaneNet, type LaneNode } from '../lanes/model';
+import { corridorMargin, profileOf, type Corridor, type LaneNet, type LaneNode, type RoadProfile } from '../lanes/model';
 import type { IndustryKind } from './cargo';
 import type { Industry, Town } from './entities';
 import { GRADE, STATION } from '../config';
@@ -27,7 +27,7 @@ export const EDGE_SPEC: RoadSpec = { cls: 'highway', lanesF: 1, lanesB: 1 };
 
 /** Что за дорогу кладём: профиль, полуширина, наименьший радиус поворота и наибольший уклон вдоль. */
 interface Kind {
-  profile: { cls: RoadSpec['cls']; lanes: ReturnType<typeof twoWay> };
+  profile: RoadProfile;
   half: number;
   radius: number;
   grade: number;
@@ -56,10 +56,10 @@ export const START_ROADS = {
 };
 
 /** Просёлок к предприятию. */
-const DIRT_ROAD: Kind = { profile: { cls: 'dirt', lanes: twoWay(1, 1) }, half: halfWidth(DIRT_SPEC), radius: START_ROADS.radius, grade: START_ROADS.grade };
+const DIRT_ROAD: Kind = { profile: profileOf(DIRT_SPEC), half: halfWidth(DIRT_SPEC), radius: START_ROADS.radius, grade: START_ROADS.grade };
 /** Шоссе от края карты: повороты — не круче, чем игрок построил бы шоссе, уклон — как у дороги игрока. */
 const EDGE_ROAD: Kind = {
-  profile: { cls: 'highway', lanes: twoWay(1, 1) },
+  profile: profileOf(EDGE_SPEC),
   half: halfWidth(EDGE_SPEC),
   radius: Math.max(START_ROADS.radius, ROAD_CLASSES.highway.minRadius),
   grade: GRADE.road,

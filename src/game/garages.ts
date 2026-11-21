@@ -263,6 +263,8 @@ export interface GarageHost {
   /** Кузов машины жителя (без цвета). */
   readonly car: Omit<VehicleSpec, 'color'>;
   colors: readonly string[];
+  /** Ограничение числа машин в потоке, если гараж управляет отдельным парком. */
+  canJoin?(): boolean;
   /**
    * Машина со двора встала в поток: она — машина жителя (карточка: откуда куда), с этого мига — в счёте машин жителей
    * (до того, во дворе, — нет: в потоке её нет).
@@ -1047,7 +1049,7 @@ export class Garages {
 
   /** Просвет для выезда на полосу slot: на ней, а налево — и во встречке. */
   private joinClear(slot: GarageSlot): boolean {
-    return this.host.traffic.clearToJoin(slot.lane.id, slot.zone[0], slot.zone[1]) && (!slot.cross || this.crossClear(slot));
+    return this.host.canJoin?.() !== false && this.host.traffic.clearToJoin(slot.lane.id, slot.zone[0], slot.zone[1]) && (!slot.cross || this.crossClear(slot));
   }
 
   /** Ждёт у бордюра просвета; дождалась — встаёт в поток (стоит, пока выезжает); не дождалась — обратно на место. */

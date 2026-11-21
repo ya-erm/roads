@@ -103,6 +103,7 @@ import { Docks, type DockHost } from './docks';
 import { type BodyLook, type CrewLoopHost, CrewLoops, LOOP } from './crewLoop';
 import {
   acceptAt,
+  closeRetailSupply,
   legacyCargo,
   markDry,
   maxTruck,
@@ -112,6 +113,7 @@ import {
   receiverDry,
   receiverOf,
   receiverStocked,
+  recordRetailSupply,
   roomFor,
   STATION_RETAIL,
   stationRetailForm,
@@ -5123,6 +5125,7 @@ export class Game implements BuildContext {
       const now = new Map(town.buildings.map((b) => [b.id, b]));
       for (const old of list) {
         const cur = now.get(old.id);
+        if (cur?.retailSupply) old.retailSupply = cur.retailSupply;
         if (cur) this.index.remove(cur);
         now.set(old.id, old);
         this.index.add(old);
@@ -8342,10 +8345,11 @@ export class Game implements BuildContext {
       near.sort((a, b) => stockFill(a.town, a.r, cargo, this.time) - stockFill(b.town, b.r, cargo, this.time) || a.r.b - b.r.b);
       const by = new Map<number, number>();
       let left = Math.floor(amount);
-      for (const { town, r } of near) {
+      for (const { town, r, b } of near) {
         if (left <= 0) break;
         const took = acceptAt(town, r, cargo, left, this.time);
         if (took <= 0) continue;
+        recordRetailSupply(town, r, b, cargo, took, this.month);
         left -= took;
         by.set(town.id, (by.get(town.id) ?? 0) + took);
       }
@@ -9356,9 +9360,10 @@ export class Game implements BuildContext {
    */
   private serviceTrips(town: Town, dt: number): void {
     for (const n of serviceTick(town, dt)) {
+      if (this.serviceCars >= SERVICE_TRAFFIC.maxCars) continue;
       const call = serviceCall(this.seed, town, n);
       if (!call || this.depots.dispatch(call.kind, town, call.to, call.siren) !== 'none') continue;
-      if (this.serviceCars < SERVICE_TRAFFIC.maxCars) this.spawnService(call.kind, call.siren, call.from.anchor, call.to.anchor, { from: call.from, to: call.to });
+      this.spawnService(call.kind, call.siren, call.from.anchor, call.to.anchor, { from: call.from, to: call.to });
     }
   }
 
@@ -9384,6 +9389,7 @@ export class Game implements BuildContext {
       get net() {
         return game.roads.net;
       },
+      canJoin: () => this.serviceCars < SERVICE_TRAFFIC.maxCars,
       own: (sim, kind, trip) => {
         this.owners.set(sim.id, { type: 'service', kind, trip });
         this.serviceCars++;
@@ -9401,6 +9407,7 @@ export class Game implements BuildContext {
    * с мигалкой; trip — из какого здания в какое (для карточки). Нет пути или места на выезде — null.
    */
   spawnService(kind: ServiceKind, siren: boolean, from: number, to: number, trip?: CarTrip): Vehicle | null {
+    if (this.serviceCars >= SERVICE_TRAFFIC.maxCars) return null;
     const route = this.roads.route(from, to);
     if (!route) return null;
     const sim = this.traffic.spawn({ ...SERVICES[kind].spec, siren, targetNode: to, route });
@@ -10112,6 +10119,7 @@ export class Game implements BuildContext {
    * (world/townSupply.ts): месяц — минута, и рейс не обязательно успевает в каждый. Норма — по населению (townNeed).
    */
   private closeTownMonth(town: Town): void {
+    if (this.retail) closeRetailSupply(town, this.month);
     const need = townNeed(town.population);
     const { got, carry } = closeSupply(town.demands, town.supplied, need);
     const month: TownSupplyMonth = { label: this.dateLabel, got, need };

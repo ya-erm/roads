@@ -3,11 +3,13 @@ import { hash } from '../core/math';
 import type { Vec } from '../core/vec';
 import type { Town, TownBuilding } from '../world/entities';
 import { LOT_SETBACK } from '../world/houseAccess';
+import { inPolygon, polyDist } from '../world/lotClear';
 import { LOT } from '../world/parkingLots';
 import { LOT_ASPHALT } from './lotArt';
-import type { Footprint } from '../world/spatial';
+import { ROAD_ASPHALT, ROAD_DIRT } from '../world/roadTypes';
+import { footprintCorners, FootprintIndex, type Footprint } from '../world/spatial';
 import { townTier } from '../world/townForms';
-import { houseAccess } from './houseArt';
+import { houseAccess, type HouseDriveColor } from './houseArt';
 import { Art } from './industryArt';
 import { parkGates } from './parkArt';
 import { drawSidewalks, SIDEWALK, type Sidewalk, WALK_LOOK } from './sidewalks';
@@ -38,10 +40,28 @@ export interface TownWalks {
    * рисуется поверх полотна (drawDriveMouths).
    */
   drives: { pts: number[]; color: string; mouth?: number[] }[];
+  /** Расцветка выездов на участке, в тех же координатах, что и в сцене дома. */
+  driveColors?: ReadonlyMap<number, readonly HouseDriveColor[]>;
   /** Мощёные (город) или утоптанные (село). */
   paved: boolean;
   box: Box;
   sig: string;
+}
+
+/** Проверка кроны у съездов по видимому контуру, включая понижение бордюра. */
+export function driveClearance(walks: Iterable<TownWalks>, lots: Iterable<Footprint> = []): (p: Vec, radius: number) => boolean {
+  const index = new FootprintIndex<{ fp: Footprint; poly: Vec[] }>(48);
+  for (const fp of lots) index.add({ fp, poly: footprintCorners(fp) });
+  for (const walk of walks) for (const d of walk.drives) {
+    for (const coords of d.mouth ? [d.pts, d.mouth] : [d.pts]) {
+      const poly: Vec[] = [];
+      for (let i = 0; i < coords.length; i += 2) poly.push({ x: coords[i], y: coords[i + 1] });
+      const box = poly.reduce((b, p) => ({ x0: Math.min(b.x0, p.x), y0: Math.min(b.y0, p.y), x1: Math.max(b.x1, p.x), y1: Math.max(b.y1, p.y) }),
+        { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity });
+      index.add({ poly, fp: { center: { x: (box.x0 + box.x1) / 2, y: (box.y0 + box.y1) / 2 }, angle: 0, w: box.x1 - box.x0, h: box.y1 - box.y0 } });
+    }
+  }
+  return (p, radius) => index.near(p, radius).some(({ poly }) => inPolygon(p, poly) || polyDist(p, poly) < radius);
 }
 
 /** Ширина дорожки, м. */
@@ -66,10 +86,10 @@ function toWorld(f: Footprint, x: number, y: number): [number, number] {
 const parallel = (a: Footprint, b: Footprint) => Math.cos(a.angle - b.angle) > 0.997;
 const rowHouse = (b: TownBuilding) => b.kind !== 'landmark' && b.form !== 'tower';
 
-/** Как далеко от точки до кромки полотна (curbGap) и есть ли там бордюр (не грунтовка). */
+/** Расстояние до кромки полотна (curbGap) и его покрытие. */
 export interface WalkRoads {
   gap(p: Vec): number;
-  kerb(p: Vec): boolean;
+  surface(p: Vec): 'asphalt' | 'dirt';
 }
 
 /**
@@ -87,11 +107,14 @@ const LIP = 0.4;
  * поставлен дальше тротуара); у кромки — раструб и понижение бордюра (mouth — поверх полотна, его бордюр закрыт
  * асфальтом съезда: машина выезжает на улицу по съезду, а не из-под бордюра).
  */
-function driveTo(f: Footprint, x: number, w: number, edge: number, side: 1 | -1, color: string, roads: WalkRoads, drives: TownWalks['drives']): void {
+function driveTo(f: Footprint, x: number, w: number, edge: number, side: 1 | -1, color: string, roads: WalkRoads, matchRoad = false): TownWalks['drives'][number] & { roadColor?: string } {
   const [ex, ey] = toWorld(f, x, edge);
-  const gap = roads.gap({ x: ex, y: ey });
+  const end = { x: ex, y: ey };
+  const gap = roads.gap(end);
   // Полотна рядом нет (снесли) — съезд обычной длины, без понижения бордюра.
-  const near = gap > 0.5 && gap < 15;
+  const connected = gap > -0.5 && gap < 15;
+  const near = connected && gap > 0.5;
+  const asphalt = connected && roads.surface(end) === 'asphalt';
   const road = edge + side * (near ? gap : LOT_SETBACK);
   const hw = w / 2;
   const at = (pts: number[][]) => pts.flatMap(([px, py]) => toWorld(f, px, py));
@@ -105,8 +128,9 @@ function driveTo(f: Footprint, x: number, w: number, edge: number, side: 1 | -1,
     [x - fw, road + side * UNDER],
     [x - hw, flare],
   ]);
-  const drive: TownWalks['drives'][number] = { pts, color };
-  if (near && roads.kerb({ x: ex, y: ey })) {
+  const roadColor = connected && matchRoad ? (asphalt ? ROAD_ASPHALT : ROAD_DIRT) : undefined;
+  const drive: TownWalks['drives'][number] & { roadColor?: string } = { pts, color: roadColor ?? color, roadColor };
+  if (near && asphalt) {
     drive.mouth = at([
       [x - hw, flare],
       [x + hw, flare],
@@ -116,38 +140,42 @@ function driveTo(f: Footprint, x: number, w: number, edge: number, side: 1 | -1,
       [x - fw, road],
     ]);
   }
-  drives.push(drive);
+  return drive;
 }
 
 /** Выходы дома к улице (дорожки к крыльцам, съезды) — в мире, от края участка через газон и тротуар. */
-function accessOf(b: TownBuilding, reach: number, fronts: TownWalks['fronts'], drives: TownWalks['drives'], roads: WalkRoads): void {
+function accessOf(b: TownBuilding, reach: number, fronts: TownWalks['fronts'], drives: TownWalks['drives'], roads: WalkRoads): HouseDriveColor[] {
   // Оси сцены дома: дом с face = 1 повёрнут на пол-оборота (как в houseArt).
   const angle = (b.face ?? -1) === 1 ? b.fp.angle + Math.PI : b.fp.angle;
   const f: Footprint = { center: b.fp.center, w: b.fp.w, h: b.fp.h, angle };
+  const colors: HouseDriveColor[] = [];
   for (const a of houseAccess(b)) {
     const edge = a.side * (b.fp.h / 2);
     if (a.kind === 'path') {
       fronts.push({ pts: [...toWorld(f, a.x, edge), ...toWorld(f, a.x, edge + a.side * reach)], w: a.w });
       continue;
     }
-    driveTo(f, a.x, a.w, edge, a.side, a.color, roads, drives);
+    const drive = driveTo(f, a.x, a.w, edge, a.side, a.color, roads, true);
+    drives.push(drive);
+    if (drive.roadColor) colors.push({ x: a.x, side: a.side, color: drive.roadColor });
   }
+  return colors;
 }
 
 /** Заезды к воротам площадок-стоянок без тупика-выезда (у большой заезд — сама дорога): от края площадки до полотна. */
 function lotAccess(town: Town, roads: WalkRoads, drives: TownWalks['drives']): void {
   for (const l of town.lots ?? []) {
     if (l.removed || l.nodes?.length) continue;
-    for (const g of l.gates) driveTo(l.fp, g.x, LOT.gateW, -l.fp.h / 2, -1, LOT_ASPHALT, roads, drives);
+    for (const g of l.gates) drives.push(driveTo(l.fp, g.x, LOT.gateW, -l.fp.h / 2, -1, LOT_ASPHALT, roads));
   }
 }
 
 /**
  * Дорожки и съезды города town. curb — сколько метров от точки до края ближнего полотна (∞ — далеко): по нему
- * дорожка от входа в парк доходит до тротуара, а съезд — до полотна; kerb — у полотна там бордюр (не грунтовка):
- * у съезда — понижение бордюра.
+ * дорожка от входа в парк доходит до тротуара, а съезд — до полотна. Покрытие определяет цвет съезда,
+ * у асфальта ещё есть понижение бордюра.
  */
-export function townWalks(town: Town, curb: (p: Vec) => number, kerb: (p: Vec) => boolean = () => true): TownWalks | null {
+export function townWalks(town: Town, curb: (p: Vec) => number, surface: WalkRoads['surface'] = () => 'asphalt'): TownWalks | null {
   const paved = townTier(town) !== 'village';
   const side = paved ? SIDEWALK.paved : SIDEWALK.path;
   // До тротуара от участка: LOT_SETBACK − (from + w) — газон; дорожка заходит на тротуар на полметра.
@@ -155,10 +183,15 @@ export function townWalks(town: Town, curb: (p: Vec) => number, kerb: (p: Vec) =
   const out: number[][] = [];
   const fronts: TownWalks['fronts'] = [];
   const drives: TownWalks['drives'] = [];
+  const driveColors = new Map<number, HouseDriveColor[]>();
   const list = town.buildings.filter(rowHouse);
-  const roads: WalkRoads = { gap: curb, kerb };
+  const roads: WalkRoads = { gap: curb, surface };
   // Дом второго ряда выходит к улице дорожкой в обход переднего (ниже), не напрямую.
-  for (const b of town.buildings) if (b.kind !== 'landmark' && !b.rear) accessOf(b, reach, fronts, drives, roads);
+  for (const b of town.buildings) {
+    if (b.kind === 'landmark' || b.rear) continue;
+    const colors = accessOf(b, reach, fronts, drives, roads);
+    if (colors.length) driveColors.set(b.id, colors);
+  }
   lotAccess(town, roads, drives);
   // Участок отступил от улицы дальше обычного (полоса стоянки ужала его — world/curbSqueeze.ts, угловой — с двух
   // улиц): дорожка к крыльцу тянется дальше, до тротуара.
@@ -251,8 +284,8 @@ export function townWalks(town: Town, curb: (p: Vec) => number, kerb: (p: Vec) =
   let box: Box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
   const all = [...out, ...fronts.map((f) => f.pts), ...drives.flatMap((d) => (d.mouth ? [d.pts, d.mouth] : [d.pts]))];
   for (const p of all) for (let i = 0; i < p.length; i += 2) box = { x0: Math.min(box.x0, p[i]), y0: Math.min(box.y0, p[i + 1]), x1: Math.max(box.x1, p[i]), y1: Math.max(box.y1, p[i + 1]) };
-  const sig = `${paved}|${all.map((p) => p.map((v) => v.toFixed(1)).join(',')).join(';')}`;
-  return { townId: town.id, paths: out, fronts, drives, paved, box: grow(box, 2), sig };
+  const sig = `${paved}|${all.map((p) => p.map((v) => v.toFixed(1)).join(',')).join(';')}|${drives.map((d) => d.color).join(';')}`;
+  return { townId: town.id, paths: out, fronts, drives, driveColors, paved, box: grow(box, 2), sig };
 }
 
 /**

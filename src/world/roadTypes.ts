@@ -126,6 +126,7 @@ export const defaultPreset = (): RoadPreset => ROAD_PRESETS.find((p) => p.id ===
 export const MAX_LANES = 4;
 export const LANE_W = 7;
 export const ROAD_ASPHALT = '#646b76';
+export const ROAD_DIRT = '#c4b99c';
 /** Две узкие полосы и небольшие поля у бордюров: два встречных автомобиля на ширину полотна. */
 export const YARD_LANE_W = 4.9;
 export const YARD_MARGIN = 0.35;
@@ -154,7 +155,7 @@ export const LEVELS = [
 
 export const totalLanes = (s: RoadSpec) => s.lanesF + s.lanesB;
 export const isOneWay = (s: RoadSpec) => s.lanesB === 0 || s.lanesF === 0;
-export const isYardSpec = (s: RoadSpec) => s.cls === 'street' && s.lanesF === 1 && s.lanesB === 1;
+export const isNarrowSpec = (s: RoadSpec) => (s.cls === 'street' || s.cls === 'dirt') && s.lanesF === 1 && s.lanesB === 1;
 
 /** Половина разделительной полосы (0, если её нет). */
 export const medianHalf = (spec: RoadSpec) => (isDivided(spec) ? MEDIAN / 2 : 0);
@@ -162,7 +163,7 @@ export const medianHalf = (spec: RoadSpec) => (isDivided(spec) ? MEDIAN / 2 : 0)
 /** Полуширины проезжей части слева и справа от оси (в системе a→b). */
 export function roadEdges(spec: RoadSpec): { left: number; right: number } {
   if (spec.cls === 'rail') return { left: RAIL_HALF, right: RAIL_HALF };
-  if (isYardSpec(spec)) return { left: YARD_LANE_W + YARD_MARGIN, right: YARD_LANE_W + YARD_MARGIN };
+  if (isNarrowSpec(spec)) return { left: YARD_LANE_W + YARD_MARGIN, right: YARD_LANE_W + YARD_MARGIN };
   if (isOneWay(spec)) {
     const half = (totalLanes(spec) * LANE_W) / 2 + ROAD_MARGIN;
     return { left: half, right: half };

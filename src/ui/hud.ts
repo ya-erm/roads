@@ -31,7 +31,7 @@ import { isBusTerminal, type Station, StationServes, stationTitle, TOWN_HISTORY,
 import { lastTownNeed, townNeed } from '../world/townSupply';
 import { STREET_BAN_MARK, STREET_BAN_TIP } from '../world/streetBans';
 import { flatsOf, FORM_NAMES, formOf, jobsOf, residentsOf, storeysOf } from '../world/townForms';
-import { maxTruck, receiverOf, receiverUse, RETAIL, stockAt, stockCap, stockFill } from '../world/retail';
+import { maxTruck, receiverOf, receiverSupplyTarget, receiverUse, RETAIL, stockAt, stockCap, stockFill } from '../world/retail';
 import { footprintRadius } from '../world/spatial';
 import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
 import { durationText } from '../core/timeText';
@@ -366,19 +366,22 @@ const mainChoice = (v: string | undefined): number[] | null => (v === 'auto' || 
  * излишек прошлого месяца, засчитанный в этот), пунктир — норма месяца, ✓ — норма закрыта. Текущий (ещё
  * идущий) месяц бледнее.
  */
-function supplyChart(months: { label: string; got: number; carried?: number; need: number; current?: boolean }[], color: string, H = 72): string {
+type SupplyChartMonth = { label: string; got: number; carried?: number; need?: number; current?: boolean };
+
+function supplyChart(months: SupplyChartMonth[], color: string, H = 72): string {
   const W = 300;
   // Слева — число нормы у пунктира, сверху — место для галочки.
   const L = 16;
   const top = 11;
   const base = H - 12;
-  const max = Math.max(1, ...months.map((m) => Math.max(m.got, m.need * 1.15)));
+  const max = Math.max(1, ...months.map((m) => Math.max(m.got, (m.need ?? 0) * 1.15)));
   const y = (v: number) => base - (v / max) * (base - top);
   const bw = (W - L) / Math.max(12, months.length);
   const hatch = `sup-hatch-${color.replace(/[^\w]/g, '')}`;
   const bars = months
     .map((m, i) => {
       const x = L + i * bw;
+      if (m.need === undefined) return `<g data-tip="${m.label}: нет данных"><rect x="${x}" y="0" width="${bw}" height="${H}" fill="transparent"/>${monthTick(x + bw / 2, H, m.label)}</g>`;
       const h = base - y(m.got);
       const hc = base - y(Math.min(m.carried ?? 0, m.got));
       const ok = m.got >= m.need;
@@ -397,12 +400,16 @@ function supplyChart(months: { label: string; got: number; carried?: number; nee
   let norm = '';
   for (let i = 0, start = 0; i < months.length; i++) {
     const last = i === months.length - 1;
-    if (!last && months[i + 1].need === months[start].need) continue;
-    const ny = y(months[start].need);
-    norm += `<line x1="${L + start * bw}" x2="${last ? W : L + (i + 1) * bw}" y1="${ny}" y2="${ny}" stroke="#7b8794" stroke-dasharray="3 2"><title>Норма месяца: ${months[start].need}</title></line>`;
+    const need = months[start].need;
+    if (!last && months[i + 1].need === need) continue;
+    if (need !== undefined) {
+      const ny = y(need);
+      norm += `<line x1="${L + start * bw}" x2="${last ? W : L + (i + 1) * bw}" y1="${ny}" y2="${ny}" stroke="#7b8794" stroke-dasharray="3 2"><title>Норма месяца: ${need}</title></line>`;
+    }
     start = i + 1;
   }
-  const label = months.length ? `<text x="${L - 3}" y="${y(months[0].need) + 3}" text-anchor="end" font-size="8" fill="#7b8794">${months[0].need}</text>` : '';
+  const firstNeed = months.find((m) => m.need !== undefined)?.need;
+  const label = firstNeed === undefined ? '' : `<text x="${L - 3}" y="${y(firstNeed) + 3}" text-anchor="end" font-size="8" fill="#7b8794">${firstNeed}</text>`;
   return `<svg class="fin-chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${defs}
     <line x1="${L}" x2="${W}" y1="${base}" y2="${base}" stroke="#dfe4ea"/>${bars}${norm}${label}</svg>`;
 }
@@ -432,6 +439,8 @@ function freshUi() {
     stopOpen: null as { line: number; i: number } | null,
     /** Потребности городов, раскрытые в диаграмму по месяцам: `город:груз`. */
     needsOpen: new Set<string>(),
+    /** Здания, у которых раскрыты графики поставок. */
+    retailSupplyOpen: new Set<number>(),
     /** Карточка маршрута открыта из панели города: крестик вернёт к нему. Сбрасывается, как только карточка закрылась. */
     lineBack: null as LineBack | null,
     /** Папка, у которой сейчас открыто поле названия. */
@@ -1538,6 +1547,11 @@ export class Hud {
         // Строка потребности города раскрывается в диаграмму по месяцам и сворачивается обратно.
         const key = `${d.id}:${d.c}`;
         if (!this.ui.needsOpen.delete(key)) this.ui.needsOpen.add(key);
+        break;
+      }
+      case 'receiver-supply': {
+        const id = Number(d.id);
+        if (!this.ui.retailSupplyOpen.delete(id)) this.ui.retailSupplyOpen.add(id);
         break;
       }
       case 'toggle-needs':
@@ -3910,12 +3924,30 @@ export class Hud {
             })
             .join('')}${truckTip}</div>`
         : '';
+      const supplyOpen = this.ui.retailSupplyOpen.has(b.id);
+      const supply = town && rcv && !rcv.depot
+        ? `<button class="need retail-supply-toggle" data-action="receiver-supply" data-id="${b.id}" aria-expanded="${supplyOpen}"><b>Снабжение по месяцам</b><span class="caret ${supplyOpen ? '' : 'closed'}">${chevronSvg(10)}</span></button>`
+          + (supplyOpen ? rcv.cargo.map((cargo) => {
+            const current = g.monthIndex;
+            const history = (b.retailSupply ?? []).filter((m) => m.month < current && m.month > current - TOWN_HISTORY);
+            const first = history.find((m) => m.need[cargo] !== undefined)?.month ?? current;
+            const months: SupplyChartMonth[] = Array.from({ length: current - first }, (_, i) => {
+              const month = first + i;
+              const data = history.find((m) => m.month === month);
+              return { label: g.dateAt(month), got: data?.got[cargo] ?? 0, need: data?.need[cargo] };
+            });
+            const got = b.retailSupply?.find((m) => m.month === current)?.got[cargo] ?? 0;
+            months.push({ label: g.dateLabel, got, need: receiverSupplyTarget(town, rcv, cargo), current: true });
+            return `<div class="need-chart"><div class="retail-supply-summary">${cargoIcon(cargo, 18)}<b>${CARGO[cargo].name}</b><small>${got} ед. в этом месяце</small></div>${supplyChart(months, CARGO[cargo].color)}</div>`;
+          }).join('') : '')
+        : '';
       const subtitle = parking
         ? `${parking.total} ${plural(parking.total, 'бокс', 'бокса', 'боксов')} · занято ${parking.used} из ${parking.total}`
         : `${storeysOf(b)} эт. · ${people}`;
       return `<section class="detail">${head(kind, subtitle)}
         ${town ? `<button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>` : ''}
         ${stock}
+        ${supply}
         ${formOf(b) === 'warehouse' ? `<p>Подъезд грузовиков</p><div class="actions"><button class="small ${(b.dockApproach ?? 'front') === 'front' ? 'primary' : ''}" aria-pressed="${(b.dockApproach ?? 'front') === 'front'}" data-action="dock-approach" data-id="${b.id}" data-v="front">Носом к рампе</button><button class="small ${b.dockApproach === 'parallel' ? 'primary' : ''}" aria-pressed="${b.dockApproach === 'parallel'}" data-action="dock-approach" data-id="${b.id}" data-v="parallel">Вдоль фасада</button></div>` : ''}
         <div class="actions">
           <button class="small" data-action="move" data-id="${b.id}" data-tip="${esc(moveTip)}">Перенести${plaza ? ` ${PARK_INFO.plaza.icon}` : ''}${turned ? ` · ${turned}` : ''} · ${money(moveCost)}</button>

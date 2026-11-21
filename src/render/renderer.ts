@@ -79,7 +79,7 @@ import { SERVICES } from '../game/services';
 import { drawInSight, drawPortalGear, drawWorkLights, entryPortal, siteKind, tunnelSight } from './structureArt';
 import { corridorHalf, curbGap } from '../world/worldgen';
 import { storeysOf } from '../world/townForms';
-import { drawDriveMouths, drawTownWalks, type TownWalks, townWalks } from './townWalks';
+import { drawDriveMouths, drawTownWalks, driveClearance, type TownWalks, townWalks } from './townWalks';
 import { openNet } from '../lanes/open';
 import { TOOLTIP_MAX_PX, tooltipOffset, wrapLines } from './tooltipLayout';
 import { drawVehicleArt, flashSpot, type Frame, frontLength, resetFrame, setFrame, sirenVisibility, type VehicleDrawOptions } from './vehicleArt';
@@ -609,7 +609,7 @@ export class Renderer {
     /** Будущие дороги проектов: полотна и узлы по отпечатку их геометрии (`c12`, `n7`). */
     projectItems: new SceneDiff<string>(),
     bases: new SceneDiff(),
-    towns: new Map<number, { list: TownBuilding[] | null; n: number; parks: TownPark[] | null; np: number; lots: unknown; diff: SceneDiff }>(),
+    towns: new Map<number, { list: TownBuilding[] | null; n: number; parks: TownPark[] | null; np: number; lots: unknown; roads: string; diff: SceneDiff }>(),
     /** Аллеи и фонари вдоль улиц городов (parkArt.streetGreen) — по полотну. */
     alleys: new SceneDiff(),
     /** Тротуары (render/sidewalks.ts): по полотну (`c<id>`) и скругления у узла (`n<id>`). */
@@ -652,6 +652,7 @@ export class Renderer {
   private layoutSeen = 0;
   /** Дорожки кварталов по городам (townWalks): считаются, когда меняется список домов или парков города. */
   private walks = new Map<number, TownWalks>();
+  private drivewayOccupied = driveClearance(this.walks.values());
   /** Ход работ на строящихся полотнах в плитках (drawnSpans) — при той же форме (projectSig): шаг сбрасывает только край работ. */
   private progress = new Map<number, { sig: string; spans: Spans }>();
   /** С чем сверены слепки: партия, карта, вид, сеть дорог на карте и её подсветка, номера правок (Game.*Rev). */
@@ -690,6 +691,8 @@ export class Renderer {
       towns: -1,
       lots: -1,
       layout: -1,
+      townRoads: null as LaneNet | null,
+      townRoadVersion: -1,
       stations: -1,
       /** Неподвижное станций: с какими правками станций, дорог и путей и с каким выбором сверено. */
       stationsStill: -1,
@@ -765,6 +768,7 @@ export class Renderer {
     this.walkSite = null;
     this.sidewalkCache.clear();
     this.walks.clear();
+    this.drivewayOccupied = driveClearance(this.walks.values());
     this.progress.clear();
     this.still = Renderer.noStill();
   }
@@ -1377,29 +1381,47 @@ export class Renderer {
     }
     // Дома, парки и скверы города — когда их список заменили или он вырос (сверка — только после правки застройки,
     // площадок или раскладки: Game.townRev, lotRev, layoutRev).
-    const townsTouched = cur.towns !== game.townRev || cur.lots !== game.lotRev || cur.layout !== game.layoutRev;
+    const net = game.roads.net;
+    const lotChange = cur.lots !== game.lotRev;
+    const layoutChange = cur.layout !== game.layoutRev;
+    const roadChange = cur.townRoads !== net || cur.townRoadVersion !== net.version;
+    const townsTouched = cur.towns !== game.townRev || lotChange || layoutChange || roadChange;
+    cur.townRoads = net;
+    cur.townRoadVersion = net.version;
     cur.towns = game.townRev;
     cur.lots = game.lotRev;
     cur.layout = game.layoutRev;
+    let drivewayChange = lotChange;
     for (const town of townsTouched ? game.towns : []) {
       let rec = this.diffs.towns.get(town.id);
-      if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, parks: null, np: -1, lots: null, diff: new SceneDiff() }));
+      if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, parks: null, np: -1, lots: null, roads: '', diff: new SceneDiff() }));
       const parks = town.parks ?? null;
       // Площадки-стоянки: правка заменяет список (Game.lotRev) — заезды к их воротам (townWalks) тоже заново.
       const lots = town.lots ?? null;
-      if (rec.list === town.buildings && rec.n === town.buildings.length && rec.parks === parks && rec.np === (parks?.length ?? 0) && rec.lots === lots) continue;
+      const previousWalks = this.walks.get(town.id);
+      const samePlots = rec.list === town.buildings && rec.n === town.buildings.length && rec.parks === parks && rec.np === (parks?.length ?? 0) && rec.lots === lots;
+      if (!roadChange && samePlots) continue;
+      const r = town.extent ?? town.radius;
+      const { x, y } = town.center;
+      const area = grow(samePlots && previousWalks ? previousWalks.box : { x0: x - r, y0: y - r, x1: x + r, y1: y + r }, 30);
+      const nearby = net.corridorsInBox(area.x0, area.y0, area.x1, area.y1).sort((a, b) => a.id - b.id);
+      const roads = nearby.map((c) => `${c.id}:${c.rev}:${c.build ? 1 : 0}`).join(',');
+      if (samePlots && rec.roads === roads) continue;
+      rec.roads = roads;
       rec.list = town.buildings;
       rec.n = town.buildings.length;
       rec.parks = parks;
       rec.np = parks?.length ?? 0;
       rec.lots = lots;
       // Дорожки кварталов (townWalks) — по домам и паркам города: раз на их список, а не в каждой плитке.
-      const net = game.roads.net;
       // Ближнее готовое полотно: от точки до его кромки (со своей стороны: полоса стоянки бывает только с одной).
       const nearest = (p: Vec) => {
         let best: { gap: number; dirt: boolean } = { gap: Infinity, dirt: false };
         for (const c of net.corridorsNear(p, 30)) {
           if (c.build) continue;
+          if (!net.isFlat(c) || net.node(c.a).level !== 0) {
+            if (Math.abs(net.heightAt(c, c.lut.closest(p).s)) > 0.25) continue;
+          }
           const gap = curbGap(c, p);
           if (gap < best.gap) best = { gap, dirt: isDirt(c.cls) };
         }
@@ -1408,16 +1430,19 @@ export class Renderer {
       const walks = townWalks(
         town,
         (p) => nearest(p).gap,
-        (p) => !nearest(p).dirt,
+        (p) => nearest(p).dirt ? 'dirt' : 'asphalt',
       );
       if (walks) this.walks.set(town.id, walks);
       else this.walks.delete(town.id);
+      if (walks?.sig !== previousWalks?.sig) drivewayChange = true;
       add(
         rec.diff.update((put) => {
           // Рамка — с тенью и площадью у ратуши (houseArt): они выходят за контур дома. Этажи жилого — по жильцам; мест
           // скорой у больницы — по размеру города.
-          for (const b of town.buildings)
-            put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}|${b.bays ?? ''}|${b.dockApproach ?? ''}`, grow(fpBox(b.fp), houseReach(b)));
+          for (const b of town.buildings) {
+            const surfaces = walks?.driveColors?.get(b.id)?.map((d) => d.color).join(',') ?? '';
+            put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}|${b.bays ?? ''}|${b.dockApproach ?? ''}|${surfaces}`, grow(fpBox(b.fp), houseReach(b)));
+          }
           // Парки — отрицательными номерами (id парка — не id сущности).
           for (const p of parks ?? []) put(-p.id - 1, `${fpSig(p.fp)}|${p.kind}`, grow(fpBox(p.fp), PARK_REACH));
           // Площадки-стоянки — своими номерами (id сущности, со сдвигом от парков); снесённых нет.
@@ -1426,6 +1451,10 @@ export class Renderer {
           if (walks) put(WALKS_KEY, walks.sig, walks.box);
         }),
       );
+    }
+    if (drivewayChange) {
+      const lots = game.towns.flatMap((t) => (t.lots ?? []).filter((l) => !l.removed).map((l) => l.fp));
+      this.drivewayOccupied = driveClearance(this.walks.values(), lots);
     }
     // Аллеи и тротуары: по дорогам, остановкам и строениям у бордюра, черте городов (с шагом 50 м — не каждый месяц) и
     // их застройке (тротуар — где рядом дома). Полотна, что не менялись, — из кэша (streetGreen); новая станция или
@@ -1447,10 +1476,10 @@ export class Renderer {
         key[2 * i + 1] = t.buildings.length;
       });
     }
-    if (things || grown || al.net !== game.roads.net.version) {
+    if (things || grown || drivewayChange || al.net !== net.version) {
       al.net = game.roads.net.version;
       // Кэш — по полотнам; снесённых накопилось много — с чистого листа.
-      if (things || al.cache.size > game.roads.net.corridors.size * 2 + 200) al.cache.clear();
+      if (things || drivewayChange || al.cache.size > net.corridors.size * 2 + 200) al.cache.clear();
       if (game.layoutRev !== this.layoutSeen) {
         this.layoutSeen = game.layoutRev;
         this.sidewalkCache.clear();
@@ -1461,7 +1490,7 @@ export class Renderer {
       al.layout = game.layoutRev;
       const index = game.index;
       this.alleys.towns = game.towns.map((t) => ({ center: t.center, radius: Math.floor(t.radius / 50) * 50 }));
-      this.alleys.lines = streetGreen(game.roads.net, this.alleys.towns, (p, r) => index.at(p, r) !== null, this.alleys.cache);
+      this.alleys.lines = streetGreen(net, this.alleys.towns, (p, r) => index.at(p, r) !== null || this.drivewayOccupied(p, r * 1.1), this.alleys.cache);
       // Тротуары и скругления углов кварталов (render/sidewalks.ts).
       this.walkBase = sidewalkNet(game.roads.net, walkSite(game), this.sidewalkCache);
     }
@@ -1990,6 +2019,7 @@ export class Renderer {
       const p = tree.pos;
       if (p.x < view.x0 || p.x > view.x1 || p.y < view.y0 || p.y > view.y1) continue;
       const size = tree.size * pal.treeScale;
+      if (this.drivewayOccupied(p, size)) continue;
       ctx.fillStyle = 'rgba(40, 60, 30, 0.16)';
       ctx.beginPath();
       ctx.arc(p.x + 2 * pal.treeScale, p.y + 2.5 * pal.treeScale, size, 0, Math.PI * 2);
@@ -2357,7 +2387,7 @@ export class Renderer {
     if (!scope) return a.lines;
     const touched = alleyScope(game.roads.net, net, scope);
     const index = game.index;
-    const part = streetGreen(net, a.towns, (p, r) => index.at(p, r) !== null, a.cache, touched);
+    const part = streetGreen(net, a.towns, (p, r) => index.at(p, r) !== null || this.drivewayOccupied(p, r * 1.1), a.cache, touched);
     return [...a.lines.filter((l) => !touched.has(l.id) && net.corridors.has(l.id)), ...part];
   }
 
@@ -2861,11 +2891,12 @@ export class Renderer {
     const trees = BIOMES[game.terrain.biome].palette.trees;
     for (const town of game.towns) {
       if (dist(town.center, { x: (view.x0 + view.x1) / 2, y: (view.y0 + view.y1) / 2 }) > (town.extent ?? town.radius) + (view.x1 - view.x0) * 1.2) continue;
+      const driveColors = this.walks.get(town.id)?.driveColors;
       for (const b of town.buildings) {
         if (!inView(b.fp)) continue;
         // Тип застройки — двор, забор, огород, панельный дом с площадкой… (houseArt; детали — по зуму).
         const grime = dirty.length && b.kind !== 'landmark' ? houseGrime(b, dirty) : 0;
-        drawHouseArt(this.ctx, b, this.camera.zoom, trees, grime);
+        drawHouseArt(this.ctx, b, this.camera.zoom, trees, grime, driveColors?.get(b.id));
       }
     }
     for (const ind of game.industries) {

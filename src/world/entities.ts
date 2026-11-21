@@ -54,6 +54,8 @@ export interface TownBuilding {
   dockApproach?: 'front' | 'parallel';
   /** Добавочный спрос из-за регулярных поставок к городской автостанции, в долях базовой нормы города. */
   stationRetail?: { outlet?: CargoType; extra: Partial<Record<CargoType, number>> };
+  /** Фактические поставки потребителю по месяцам. У старых сохранений история начинается после загрузки. */
+  retailSupply?: RetailSupplyMonth[];
   /**
    * Ратуша или храм, перенесённые с поворотом от улицы (R, ручка ↺; world/moveTurn.ts), рад: следующий перенос
    * начинается с него. Нет — 0 (фасадом к улице; так и у старых сохранений).
@@ -364,6 +366,13 @@ export interface TownSupplyMonth {
   carried?: Partial<Record<CargoType, number>>;
   /** Норма месяца: столько нужно, чтобы потребность считалась закрытой. */
   need: number;
+}
+
+/** Снабжение одного городского получателя по грузам, без запасов и транзита. */
+export interface RetailSupplyMonth {
+  month: number;
+  got: Partial<Record<CargoType, number>>;
+  need: Partial<Record<CargoType, number>>;
 }
 
 /**

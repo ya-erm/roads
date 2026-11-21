@@ -1,7 +1,7 @@
 import type { Vec } from '../core/vec';
 import type { DrawMode } from '../game/build';
 import type { Fragment } from '../lanes/fragment';
-import { isDivided, isOneWay, isTrunk, isYardSpec, LANE_W, ROAD_ASPHALT, RoadSpec, totalLanes, YARD_LANE_W } from '../world/roadTypes';
+import { isDivided, isNarrowSpec, isOneWay, isTrunk, LANE_W, ROAD_ASPHALT, RoadSpec, totalLanes, YARD_LANE_W } from '../world/roadTypes';
 import type { BiomeId } from '../world/biomes';
 import type { Relief, WaterAmount } from '../world/settings';
 
@@ -15,14 +15,14 @@ function arrow(x: number, y: number, dir: 1 | -1, color: string): string {
 /** Вид дороги сверху: полосы, разметка и стрелки направления. */
 export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
   if (spec.cls === 'rail') return railSvg(w, h);
-  if (spec.cls === 'dirt') return dirtSvg(w, h, totalLanes(spec), isOneWay(spec));
+  const narrow = isNarrowSpec(spec);
+  if (spec.cls === 'dirt') return dirtSvg(w, h, totalLanes(spec), isOneWay(spec), narrow);
   const back = isOneWay(spec) ? 0 : spec.lanesB;
   const fwd = spec.lanesF;
-  const yard = isYardSpec(spec);
   const lanes = back + fwd;
   // У автомагистрали между направлениями — разделительная полоса с барьером.
   const median = isDivided(spec) ? 4 : 0;
-  const laneH = Math.min(9, (h - 8 - median) / lanes) * (yard ? YARD_LANE_W / LANE_W : 1);
+  const laneH = Math.min(9, (h - 8 - median) / lanes) * (narrow ? YARD_LANE_W / LANE_W : 1);
   const total = lanes * laneH + median;
   const top = (h - total) / 2;
   const laneY = (i: number) => top + i * laneH + (i >= back && median ? median : 0);
@@ -39,7 +39,7 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
         <path d="M1 ${my + median / 2}H${w - 1}" stroke="#e8ebee" stroke-width="1.6"/>`);
     } else if (divider && lanes > 2) {
       parts.push(`<path d="M3 ${y - 0.8}H${w - 3}M3 ${y + 0.8}H${w - 3}" stroke="#f0cd60" stroke-width="0.9"/>`);
-    } else if (!yard) {
+    } else if (!narrow) {
       parts.push(`<path d="M3 ${y}H${w - 3}" stroke="#f5f3e6" stroke-width="1" stroke-dasharray="4 4"/>`);
     }
   }
@@ -55,9 +55,9 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
 }
 
 /** Грунтовая дорога сверху — как на карте: пыльная охра с размытым краем, по колее на полосу, без разметки. */
-export function dirtSvg(w = 84, h = 40, lanes = 2, oneWay = false): string {
+export function dirtSvg(w = 84, h = 40, lanes = 2, oneWay = false, narrow = !oneWay && lanes === 2): string {
   // Полоса — колея посередине; полос больше — дорога шире (не выше картинки); односторонняя — со стрелками.
-  const laneH = Math.min(7, (h - 8) / lanes);
+  const laneH = Math.min(7, (h - 8) / lanes) * (narrow ? YARD_LANE_W / LANE_W : 1);
   const total = lanes * laneH;
   const top = (h - total) / 2;
   const ruts: string[] = [];

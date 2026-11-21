@@ -55,6 +55,7 @@ interface Lot {
   storeys: number;
   fine: boolean;
   trees: readonly string[];
+  driveColors?: readonly HouseDriveColor[];
 }
 
 /**
@@ -93,6 +94,9 @@ export interface HouseAccess {
   side: 1 | -1;
   color: string;
 }
+
+export type HouseDriveColor = Pick<HouseAccess, 'x' | 'side' | 'color'>;
+const driveColor = (lot: Lot, x: number, side: 1 | -1 = -1) => lot.driveColors?.find((d) => d.side === side && d.x === x)?.color;
 
 /** Куда складывать выходы к улице (houseAccess): пока не null — frontPath и curbCut записывают их сюда. */
 let accessSink: HouseAccess[] | null = null;
@@ -384,7 +388,7 @@ function curbCut(a: Art, lot: Lot, x: number, w: number, y: number, color = DRIV
   const y0 = side * (lot.H / 2);
   if ((y - y0) * -side <= 0) return;
   const c = a.c;
-  c.fillStyle = color;
+  c.fillStyle = driveColor(lot, x, side) ?? color;
   c.fillRect(x - w / 2, Math.min(y0, y), w, Math.abs(y - y0));
   if (!a.d) return;
   c.strokeStyle = DRIVE_EDGE;
@@ -457,9 +461,9 @@ function yardTree(a: Art, lot: Lot, x: number, y: number, r: number, i: number):
  * местами и упор у дальнего края. Машины на местах рисует не участок, а движение (game/carHomes.ts): на месте ровно
  * те машины дома, что сейчас дома.
  */
-function parking(a: Art, row: YardRow): void {
+function parking(a: Art, row: YardRow, color = ASPHALT): void {
   const p = row.pad;
-  a.patch(p.x, p.y, p.w, p.h, ASPHALT, 0.5);
+  a.patch(p.x, p.y, p.w, p.h, color, 0.5);
   if (a.pass !== 0 || !a.d || !row.stalls.length) return;
   const c = a.c;
   c.strokeStyle = STALL_LINE;
@@ -680,8 +684,9 @@ function townhouse(a: Art, lot: Lot): void {
   // Вход с улицы — дорожка через газон к двери; места у торца — съезд во всю ширину ряда через тротуар.
   frontPath(a, lot, door, y0 + 0.6, 1.8);
   if (p.row) {
-    curbCut(a, lot, p.row.pad.x + p.row.pad.w / 2, p.row.pad.w, p.row.pad.y + 0.3);
-    parking(a, p.row);
+    const x = p.row.pad.x + p.row.pad.w / 2;
+    curbCut(a, lot, x, p.row.pad.w, p.row.pad.y + 0.3);
+    parking(a, p.row, driveColor(lot, x));
   }
   if (p.wing) pitched(a, p.wing.x, p.wing.y, p.wing.w, p.wing.h, wallZ(1), tone(b.roof, -0.08), p.wing.w < p.wing.h);
   if (p.tree) yardTree(a, lot, p.tree.x, p.tree.y, 2.2 + a.r(3), 4);
@@ -706,7 +711,8 @@ function courtyard(a: Art, lot: Lot): void {
   if (p.row) {
     const walkY = p.row.pad.y + p.row.pad.h;
     a.patch(x0, walkY, x1 - x0, y0 - walkY, WALK_LOOK.paved.fill);
-    parking(a, p.row);
+    const first = p.row.stalls[0];
+    parking(a, p.row, first ? driveColor(lot, first.x + first.w / 2) : undefined);
     for (const s of p.row.stalls) curbCut(a, lot, s.x + s.w / 2, s.w, s.y + s.h, ASPHALT);
   }
   // Дорожка к подъезду через разрыв парковочного ряда; автомобильных ворот в корпусе нет.
@@ -785,8 +791,9 @@ function slab(a: Art, lot: Lot): void {
     // во двор, места у торца.
     const { bx, by, L, bd, top, yx0, yx1, ell, right } = p;
     for (const row of p.front) {
-      curbCut(a, lot, row.pad.x + row.pad.w / 2, row.pad.w, row.pad.y + 0.3);
-      parking(a, row);
+      const x = row.pad.x + row.pad.w / 2;
+      curbCut(a, lot, x, row.pad.w, row.pad.y + 0.3);
+      parking(a, row, driveColor(lot, x));
     }
     const walkColor = WALK_LOOK.paved.fill;
     if (p.walk) {
@@ -814,7 +821,7 @@ function slab(a: Art, lot: Lot): void {
     const { bx, bw } = p;
     if (p.lot && p.cut) {
       curbCut(a, lot, p.cut.x, p.cut.w, y0 + 2.5);
-      parking(a, p.lot);
+      parking(a, p.lot, driveColor(lot, p.cut.x));
       yardItems(a, lot, p.plan, p.yardX, p.yy, 30);
     }
     frontPath(a, lot, bx + bw / 2, y0 + 2.6, 1.8);
@@ -834,7 +841,7 @@ function tower(a: Art, lot: Lot): void {
   const { T, tx, ty } = p;
   // Стоянки у улицы — съезд во всю ширину ряда мест: машина сворачивает с полосы прямо на своё место.
   for (const c of p.cuts) curbCut(a, lot, c.x, c.w, c.side * (H / 2 - 1.6), DRIVE, c.side);
-  for (const row of p.rows) parking(a, row);
+  p.rows.forEach((row, i) => parking(a, row, driveColor(lot, p.cuts[i].x, row.side)));
   if (p.block) {
     // Участок квартала от улицы до улицы: башня посреди общего двора, стоянки — у обеих улиц, площадки и деревья — во
     // дворе (между рядами деревьев, с другой стороны от башни).
@@ -895,7 +902,7 @@ function stallGroups(a: Art, lot: Lot, plan: ShopLot): void {
   for (const g of plan.groups) {
     const p = g.pad;
     curbCut(a, lot, g.cut.x, g.cut.w, p.y + 0.6, plan.gravel ? GRAVEL_DRIVE : DRIVE);
-    a.patch(p.x, p.y, p.w, p.h, plan.gravel ? GRAVEL : ASPHALT, 0.5);
+    a.patch(p.x, p.y, p.w, p.h, driveColor(lot, g.cut.x) ?? (plan.gravel ? GRAVEL : ASPHALT), 0.5);
     if (!a.d) continue;
     const c = a.c;
     if (plan.gravel) {
@@ -1113,8 +1120,9 @@ function hospital(a: Art, lot: Lot): void {
   const p = hospitalPlan(b);
   const { t, L, bar, row, canopy } = p;
   if (row && canopy) {
-    curbCut(a, lot, row.pad.x + row.pad.w / 2, row.pad.w, row.pad.y + 0.3);
-    parking(a, row);
+    const x = row.pad.x + row.pad.w / 2;
+    curbCut(a, lot, x, row.pad.w, row.pad.y + 0.3);
+    parking(a, row, driveColor(lot, x));
     // От мест до входа — асфальт под козырьком.
     const end = row.pad.y + row.pad.h;
     if (bar > end) a.patch(canopy.x, end, canopy.w, bar - end, ASPHALT, 0.5);
@@ -1462,21 +1470,21 @@ const SCENES: Record<HouseForm, (a: Art, lot: Lot) => void> = {
  * Дом города: сцена его типа в осях участка (улица — к −y), три прохода (земля, тени, крыши). trees — цвета
  * деревьев биома; grime — налёт от вредных предприятий (enterpriseArt.houseGrime): крыши блёкнут (grimy).
  */
-export function drawHouseArt(ctx: CanvasRenderingContext2D, b: TownBuilding, zoom: number, trees: readonly string[] = TREES, grime = 0): void {
+export function drawHouseArt(ctx: CanvasRenderingContext2D, b: TownBuilding, zoom: number, trees: readonly string[] = TREES, grime = 0, driveColors?: readonly HouseDriveColor[]): void {
   soot = grime;
   try {
-    drawScene(ctx, b, zoom, trees);
+    drawScene(ctx, b, zoom, trees, driveColors);
   } finally {
     soot = 0;
   }
 }
 
-function drawScene(ctx: CanvasRenderingContext2D, b: TownBuilding, zoom: number, trees: readonly string[]): void {
+function drawScene(ctx: CanvasRenderingContext2D, b: TownBuilding, zoom: number, trees: readonly string[], driveColors?: readonly HouseDriveColor[]): void {
   const form = formOf(b);
   const angle = (b.face ?? -1) === 1 ? b.fp.angle + Math.PI : b.fp.angle;
   const fp: Footprint = { center: b.fp.center, w: b.fp.w, h: b.fp.h, angle };
   const a = new Art(ctx, { id: b.id, fp }, zoom, 0, b.id, 'still');
-  const lot: Lot = { b, W: b.fp.w, H: b.fp.h, storeys: storeysOf(b), fine: zoom > FINE_ZOOM, trees };
+  const lot: Lot = { b, W: b.fp.w, H: b.fp.h, storeys: storeysOf(b), fine: zoom > FINE_ZOOM, trees, driveColors };
   const scene = SCENES[form];
   ctx.save();
   ctx.translate(fp.center.x, fp.center.y);
