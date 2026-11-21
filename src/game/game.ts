@@ -126,7 +126,7 @@ import {
   unloadTime,
   zoneRetail,
 } from '../world/retail';
-import { CAR_SIZE, drivewayLink, drivewaysOf, type Driveway, LOT_SETBACK, lotFrame } from '../world/houseAccess';
+import { CAR_SIZE, DRIVEWAY_REACH, drivewayLink, drivewaysOf, type Driveway, LOT_SETBACK, lotFrame } from '../world/houseAccess';
 import { DEPOT_MIN_W, dockDriveway, dockYardsOf, exitDriveway, roofCenter, stallDriveways } from '../world/shopLots';
 import { yardLotOf, yardSpots } from '../world/yardLots';
 import { CarHomes, type CarHomesHost } from './carHomes';
@@ -9871,8 +9871,19 @@ export class Game implements BuildContext {
     };
     if (parked.size) {
       const L = CAR_SPEC.length;
+      // Устья заездов лежат у края своего участка, на LOT_SETBACK за ним.
+      // От середины дуги до любой её точки не дальше половины длины. Индекс уже учитывает размер самого участка.
+      const nearby = new Set<number>();
+      for (const id of parked) {
+        const c = net.corridor(id);
+        const mid = c.length / 2;
+        for (const item of this.index.near(c.lut.pointAt(mid), mid + LOT_SETBACK + DRIVEWAY_REACH)) {
+          if (item.type === 'building') nearby.add(item.id);
+        }
+      }
       for (const town of this.towns) {
         for (const b of town.buildings) {
+          if (!nearby.has(b.id)) continue;
           const form = formOf(b);
           if (form === 'cottage' || form === 'dacha') for (const d of drivewaysOf(b)) drive(d);
           const lot = b.kind !== 'landmark' ? yardLotOf(b) : null;
@@ -10152,13 +10163,12 @@ export class Game implements BuildContext {
     // а отдельными шагами после города (roads.quiet, roads.step): те же графы в том же порядке, но по кадрам.
     // Подряд, в одном кадре, несколько улиц подвешивали смену месяца на сотни миллисекунд.
     for (const town of this.towns) {
-      this.roads.quiet(() => {
-        this.growTown(town);
-        // Полосы стоянки там, где у целей не хватало мест (новые партии).
-        this.curbGrow(town);
-        // Площадки у рынка, ратуши и станций без мест рядом (новые партии; без сноса).
-        this.townLots(town);
-      });
+      const growth = this.growTown(town, true);
+      while (growth && !this.roads.quiet(() => growth.next()).done) yield;
+      // Полосы и площадки используют сеть после роста. Граф для транспорта обновится в прежнем порядке.
+      this.roads.quiet(() => this.curbGrow(town));
+      yield;
+      this.roads.quiet(() => this.townLots(town));
       yield;
       while (this.roads.step()) yield;
     }
@@ -10187,6 +10197,10 @@ export class Game implements BuildContext {
     this.ideas.monthEnd();
     this.journalMonth();
     this.timelapse.capture(this);
+    if (this.pedestrians.on) {
+      yield;
+      yield* this.pedestrians.prepareMonth(this);
+    }
   }
 
   /**
@@ -10441,7 +10455,13 @@ export class Game implements BuildContext {
    * Город растёт от центра к краю: сначала застраивает свободные места у улиц поближе к центру,
    * а когда их нет — прокладывает короткую улицу у края плотной застройки. Дальше предела роста не строит.
    */
-  private growTown(town: Town): void {
+  private growTown(town: Town, byFrame = false): Generator<void> | void {
+    const growth = this.growTownSteps(town);
+    if (byFrame) return growth;
+    while (!growth.next().done);
+  }
+
+  private *growTownSteps(town: Town): Generator<void> {
     this.closeTownMonth(town);
     this.growStationRetail(town);
     const satisfaction = this.townSatisfaction(town);
@@ -10461,7 +10481,7 @@ export class Game implements BuildContext {
     const pulled = (s: Corridor) => pulls.some((p) => dist(p, s.lut.closest(p).point) <= RETAIL.pull);
     const streets = this.roads.net
       .corridorsNear(town.center, reach)
-      .filter((s) => this.streetLike(s) && !this.streetFull(s.id))
+      .filter((s) => this.streetLike(s, ctx.driveways) && !this.streetFull(s.id))
       .map((s) => ({ s, hit: s.lut.closest(town.center) }))
       .filter(({ hit }) => hit.d <= reach && this.ownedBy(town, hit.point))
       .map(({ s, hit }) => ({ s, d: hit.d + this.rng.range(0, TOWN_GROWTH.jitter) - (pulls.length && pulled(s) ? RETAIL.pullBonus : 0) }))
@@ -10492,11 +10512,12 @@ export class Game implements BuildContext {
     const base = Math.floor((this.month + 1) * MONTH_SCALE) - Math.floor(this.month * MONTH_SCALE);
     const newStreets = town.growthAcc >= 10 * GROW.unit ? 2 * base : base;
     for (let k = 0; k < newStreets && town.growthAcc >= 2 * GROW.unit && town.autoStreets !== false; k++) {
-      const seg = this.growStreet(town, reach);
+      const seg = yield* this.growStreet(town, reach);
       if (!seg) break;
       // Сеть после стройки — новая: дома ставим уже по ней.
       spend(fillStreet(growCtx(), town, seg, 0.8, Math.max(1, Math.floor(town.growthAcc / GROW.unit)), reach));
       town.growthAcc = Math.max(0, town.growthAcc);
+      yield;
     }
     recountPopulation(town);
     measureTown(town);
@@ -10671,13 +10692,13 @@ export class Game implements BuildContext {
   }
 
   /** Городская улица: на земле, не кольцо и не часть магистрали или развязки. */
-  private streetLike(c: Corridor): boolean {
+  private streetLike(c: Corridor, driveways?: ReadonlySet<number>): boolean {
     const net = this.roads.net;
     // Строящаяся дорога (проект) — ещё не улица: город от неё не продолжает и дома вдоль неё не ставит.
     // Просёлок в поле — тоже: город не тянется вдоль него отростком. Грунтовка внутри города (оба конца — в круге
     // плотной застройки, как проложил бы игрок между кварталами) — улица, её застраивают.
     if (isDirt(c.cls) && !this.dirtInTown(c)) return false;
-    return !c.build && !c.ring && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c, this.drivewayIds());
+    return !c.build && !c.ring && net.node(c.a).level === 0 && net.node(c.b).level === 0 && !nearHighway(net, c, driveways ?? this.drivewayIds());
   }
 
   /** Грунтовка внутри города: оба её конца — в круге плотной застройки одного города. */
@@ -10695,7 +10716,7 @@ export class Game implements BuildContext {
    * Без сноса, без мостов и без пересечений с чужими дорогами; бесплатно для игрока.
    * Упирается в дорогу — конец цепляется к ней, так появляются кварталы.
    */
-  private growStreet(town: Town, reach: number): Corridor | null {
+  private *growStreet(town: Town, reach: number): Generator<void, Corridor | null> {
     const G = TOWN_GROWTH;
     const net = this.roads.net;
     const rng = this.rng;
@@ -10705,6 +10726,7 @@ export class Game implements BuildContext {
     const half = LANE_W + 3;
     // Выезды станций — не тупики улиц: их город не продлевает и к ним не примыкает.
     const stationNodes = new Set([...this.stations.values()].filter((st) => st.kind !== 'dock').map((st) => st.nodeId));
+    const driveways = this.drivewayIds();
     const fits = (p: Vec) => dist(p, center) <= reach && this.inBounds(p, 80) && this.ownedBy(town, p);
     // Дорога ближе r к точке (кроме skip). Сперва — по рамке контрольных точек: кривая внутри неё.
     const nearRoad = (p: Vec, r: number, skip: Set<number>) =>
@@ -10757,7 +10779,7 @@ export class Game implements BuildContext {
       }
       if (end && (end.kind === 'free' || stop < G.minStreet)) return null;
       // Примыкаем только к городским улицам, и не к той, от которой начали.
-      for (const id of touches) if (skip.has(id) || !this.streetLike(net.corridor(id))) return null;
+      for (const id of touches) if (skip.has(id) || !this.streetLike(net.corridor(id), driveways)) return null;
       const target = end?.pos ?? add(from, scale(dir, len));
       if (!fits(target)) return null;
       if (!clear(from, dir, 12, end ? stop - 12 : len, 25, end ? stop - 25 : len, new Set([...skip, ...touches]))) return null;
@@ -10776,10 +10798,12 @@ export class Game implements BuildContext {
     // Перекрёстки и стыки улиц: у узлов домов нет — оттуда улица уходит в свободную сторону: продолжает
     // улицу насквозь или идёт поперёк неё (луч кольцевого города наружу, продолжение сетки, ответвление).
     const wobble = town.style === 'organic' ? 0.25 : 0.04;
+    let scanned = 0;
     for (const n of net.nodesNear(center, reach)) {
+      if (++scanned % 12 === 0) yield;
       if (n.level !== 0 || stationNodes.has(n.id) || !this.ownedBy(town, n.pos)) continue;
       const es = net.ends(n);
-      if (es.length < 2 || es.some((e) => Math.abs(e.port) > 0.5 || !this.streetLike(e.corridor))) continue;
+      if (es.length < 2 || es.some((e) => Math.abs(e.port) > 0.5 || !this.streetLike(e.corridor, driveways))) continue;
       if (n.kind === 'seam' && es.length !== 2) continue;
       const angles = es.map((e) => angleOf(e.away));
       const dirs: number[] = [];
@@ -10804,10 +10828,11 @@ export class Game implements BuildContext {
           n.level === 0 &&
           n.corridors.length === 1 &&
           !stationNodes.has(n.id) &&
-          this.streetLike(net.corridor(n.corridors[0])) &&
+          this.streetLike(net.corridor(n.corridors[0]), driveways) &&
           this.ownedBy(town, n.pos),
       );
     for (const n of ends) {
+      if (++scanned % 4 === 0) yield;
       const start: Anchor = { kind: 'node', node: n.id, pos: n.pos };
       const out = scale(net.ends(n)[0].away, -1);
       const skip = new Set(n.corridors);
@@ -10827,8 +10852,9 @@ export class Game implements BuildContext {
       push(start, cast(n.pos, { x: Math.cos(a), y: Math.sin(a) }, rng.range(0.7, 1) * step, skip), false);
     }
     // Переулки поперёк улиц — в просветах между домами.
-    const streets = net.corridorsNear(center, reach).filter((s) => this.streetLike(s) && s.length > G.corner * 2.5 && s.lut.closest(center).d <= reach);
+    const streets = net.corridorsNear(center, reach).filter((s) => this.streetLike(s, driveways) && s.length > G.corner * 2.5 && s.lut.closest(center).d <= reach);
     for (let k = 0; k < 24 && streets.length; k++) {
+      yield;
       const s = rng.pick(streets);
       const side = rng.chance(0.5) ? 1 : -1;
       const span = s.length - 2 * G.corner;
@@ -10848,6 +10874,7 @@ export class Game implements BuildContext {
     }
     cands.sort((x, y) => x.score - y.score);
     for (const c of cands.slice(0, 8)) {
+      yield;
       const plan = this.roadBuilder.road(c.start, c.end, { cls: 'street', lanes: yardLanes(), kink: c.kink }, { free: true });
       if (!plan.ok || plan.demolish.length || !plan.net) continue;
       // Без пересечений с другими дорогами: новых узлов — только концы новой улицы.

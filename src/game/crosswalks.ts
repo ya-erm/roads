@@ -81,6 +81,12 @@ export class Crosswalks {
   }
 
   /** Закрываем зебру до момента, когда этот пешеход фактически достигнет другого бордюра. */
+  extend(key: string, until: number): void {
+    const c = this.crossings.get(key);
+    if (c && this.occupied.has(c)) c.until = Math.max(c.until, until);
+  }
+
+  /** Войти можно, когда позволяет сигнал и успевают затормозить машины. */
   enter(key: string, time: number, waited: number, duration: number, graph: LaneGraph, traffic: LaneTraffic): boolean {
     const c = this.crossings.get(key);
     if (!c) return false;

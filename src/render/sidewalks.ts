@@ -41,6 +41,8 @@ export type Around = { houses: Footprint[]; others: Footprint[] };
 export interface WalkSite {
   /** Строения ближе r к точке (один запрос к индексу на полотно). */
   around(p: Vec, r: number): Around;
+  /** Версия тех же строений и парков без сбора их списка. */
+  aroundVersion?(p: Vec, r: number): string;
   /** Точка в воде. */
   wet(p: Vec): boolean;
   /** Ни одна точка ближе r к p не в воде (wet) — один запрос вместо запроса на каждую точку; нет — спрашивать по точкам. */
@@ -54,16 +56,24 @@ export interface WalkSite {
  * тротуар; прочие — станции, предприятия, базы; город — в черте его застройки (extent) с запасом 20 м.
  */
 export function walkSite(game: Pick<Game, 'index' | 'terrain' | 'towns'>): WalkSite {
+  function nearbyParks(p: Vec, r: number, visit: (fp: Footprint) => void): void {
+    for (const t of game.towns) {
+      if (dist(p, t.center) > (t.extent ?? t.radius) + r) continue;
+      for (const k of t.parks ?? []) if (dist(p, k.fp.center) < r + footprintRadius(k.fp)) visit(k.fp);
+    }
+  }
   return {
     around: (p, r) => {
       const houses: Footprint[] = [];
       const others: Footprint[] = [];
       for (const s of game.index.near(p, r)) (s.type === 'building' ? houses : others).push(s.fp);
-      for (const t of game.towns) {
-        if (dist(p, t.center) > (t.extent ?? t.radius) + r) continue;
-        for (const k of t.parks ?? []) if (dist(p, k.fp.center) < r + footprintRadius(k.fp)) houses.push(k.fp);
-      }
+      nearbyParks(p, r, fp => houses.push(fp));
       return { houses, others };
+    },
+    aroundVersion: (p, r) => {
+      let version = String(game.index.nearVersion(p, r));
+      nearbyParks(p, r, fp => { version += `|${fp.center.x},${fp.center.y},${fp.w},${fp.h},${fp.angle}`; });
+      return version;
     },
     wet: (p) => game.terrain.isWater(p, 0.6),
     // Расстояние до воды по сетке рельефа — сглаженное (наклон до √2 на метр): запас в полтора раза и 2 м.
@@ -122,17 +132,17 @@ export interface SidewalkNet {
   spans: Map<number, SidewalkSpan[]>;
 }
 
-const gameWalks = new WeakMap<Game, { net: LaneNet; roadRev: number; plots: number; towns: number; terrain: number; walks: SidewalkNet; pieces: SidewalkCache }>();
+const gameWalks = new WeakMap<Game, { net: LaneNet; roadRev: number; plots: number; towns: number; layout: number; terrain: number; walks: SidewalkNet; pieces: SidewalkCache }>();
 
 /** Геометрия построенных тротуаров общая для карты, привязки инструмента и движения жителей. */
 export function gameSidewalks(game: Game): SidewalkNet {
   const net = game.roads.net;
   const old = gameWalks.get(game);
   const plots = game.index.version;
-  if (old?.net === net && old.roadRev === net.version && old.plots === plots && old.towns === game.townRev && old.terrain === game.terrain.version) return old.walks;
-  const pieces = old?.plots === plots && old.towns === game.townRev && old.terrain === game.terrain.version ? old.pieces : new Map();
+  if (old?.net === net && old.roadRev === net.version && old.plots === plots && old.towns === game.townRev && old.layout === game.layoutRev && old.terrain === game.terrain.version) return old.walks;
+  const pieces = old?.layout === game.layoutRev && old.terrain === game.terrain.version ? old.pieces : new Map();
   const walks = sidewalkNet(net, walkSite(game), pieces);
-  gameWalks.set(game, { net, roadRev: net.version, plots, towns: game.townRev, terrain: game.terrain.version, walks, pieces });
+  gameWalks.set(game, { net, roadRev: net.version, plots, towns: game.townRev, layout: game.layoutRev, terrain: game.terrain.version, walks, pieces });
   return walks;
 }
 
@@ -364,6 +374,7 @@ function nodeCorners(
 
 /** Тротуары одного полотна: ломаные по сторонам и дошли ли они до концов (с учётом обрезки у узлов). */
 interface Run {
+  line?: Sidewalk;
   paths: number[][];
   /** Сторона дошла до конца a / b: `a1`, `b-1`… */
   reach: Set<string>;
@@ -598,10 +609,16 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
   const runOf = (id: number, pull = ''): Run => {
     const { paved, townKey } = eligible.get(id)!;
     const c = roads.corridor(id);
-    let around = near.get(id);
-    if (!around) near.set(id, (around = site.around(c.lut.pointAt(c.length / 2), c.length / 2 + WALK.houses + 40)));
+    const mid = c.lut.pointAt(c.length / 2);
+    const radius = c.length / 2 + WALK.houses + 40;
+    const surroundings = () => {
+      let around = near.get(id);
+      if (!around) near.set(id, (around = site.around(mid, radius)));
+      return around;
+    };
+    const local = site.aroundVersion?.(mid, radius) ?? `${surroundings().houses.length}:${surroundings().others.length}`;
     const tr = trims.get(id);
-    const key = `${c.rev}|${townKey}|${paved}|${around.houses.length}:${around.others.length}|${tr ? JSON.stringify(tr) : ''}`;
+    const key = `${c.rev}|${townKey}|${paved}|${local}|${tr ? JSON.stringify(tr) : ''}`;
     let had = cache?.get(id);
     if (had?.sig !== key) {
       had = { sig: key, run: null, paved };
@@ -609,7 +626,7 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
     }
     const spotsOf = () => {
       let s = spotsBy.get(id);
-      if (!s) spotsBy.set(id, (s = corridorSpots(c, site, paved, around, tr)));
+      if (!s) spotsBy.set(id, (s = corridorSpots(c, site, paved, surroundings(), tr)));
       return s;
     };
     if (!pull) return (had.run ??= corridorRun(c, site, spotsOf()));
@@ -648,7 +665,7 @@ export function sidewalkNet(roads: LaneNet, site: WalkSite, cache?: SidewalkCach
     const c = roads.corridor(id);
     const paved = eligible.get(id)!.paved;
     for (const e of run.ends) ends.push({ node: e.end === 'a' ? c.a : c.b, corridor: id, side: e.side, x: e.x, y: e.y, ux: e.ux, uy: e.uy, w: (paved ? SIDEWALK.paved : SIDEWALK.path).w });
-    if (run.paths.length) lines.push({ key: `c${id}`, paths: run.paths, paved, box: boxOf(run.paths), sig: `${paved}|${sigOf(run.paths)}` });
+    if (run.paths.length) lines.push(run.line ??= { key: `c${id}`, paths: run.paths, paved, box: boxOf(run.paths), sig: `${paved}|${sigOf(run.paths)}` });
     if (run.spans.length) spans.set(id, run.spans);
   }
   // Скругления — где оба тротуара дошли до угла; у перекрёстка — где дошёл хотя бы один: угол обходится по всему

@@ -1,5 +1,5 @@
 import { add, closestOnSegment, cubicBezier, dist, lerp, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { isDirt, LANE_W, ROAD_ASPHALT, ROAD_DIRT } from '../world/roadTypes';
+import { isDirt, LANE_W, ROAD_ASPHALT, ROAD_CURB, ROAD_DIRT } from '../world/roadTypes';
 import { arrowAt, arrowShape } from './arrowShape';
 import { bridgeLook, deckAlong, nodeDeck } from './deck';
 import { asphaltEdgesAt, awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, plateOutline, pointOff, sFrom, stations } from './geometry';
@@ -460,7 +460,7 @@ export class LaneRenderer {
       for (const g of gores) if (g.dirt) this.path(ctx, g.nose);
       ctx.stroke();
     }
-    ctx.lineWidth = 2.5;
+    ctx.lineWidth = 2 * ROAD_CURB;
     ctx.strokeStyle = C.roadEdge;
     for (const g of corridors) {
       if (g.surface === 'dirt') continue;

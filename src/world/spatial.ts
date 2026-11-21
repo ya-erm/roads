@@ -166,7 +166,7 @@ function cornersInto(out: Float64Array, center: Vec, w: number, h: number, angle
 
 /** Сеточный индекс прямоугольников для быстрых проверок «занято ли место». */
 export class FootprintIndex<T extends { fp: Footprint }> {
-  private readonly cells = new Map<string, T[]>();
+  private readonly cells = new Map<string, { items: T[]; revision: number }>();
   readonly items = new Set<T>();
   version = 0;
 
@@ -187,8 +187,10 @@ export class FootprintIndex<T extends { fp: Footprint }> {
     this.version++;
     this.items.add(item);
     for (const k of this.keys(item.fp)) {
-      if (!this.cells.has(k)) this.cells.set(k, []);
-      this.cells.get(k)!.push(item);
+      let cell = this.cells.get(k);
+      if (!cell) this.cells.set(k, cell = { items: [], revision: this.version });
+      cell.items.push(item);
+      cell.revision = this.version;
     }
   }
 
@@ -196,8 +198,11 @@ export class FootprintIndex<T extends { fp: Footprint }> {
     this.version++;
     this.items.delete(item);
     for (const k of this.keys(item.fp)) {
-      const list = this.cells.get(k);
-      if (list) this.cells.set(k, list.filter((x) => x !== item));
+      const cell = this.cells.get(k);
+      if (cell) {
+        cell.items = cell.items.filter((x) => x !== item);
+        cell.revision = this.version;
+      }
     }
   }
 
@@ -208,9 +213,22 @@ export class FootprintIndex<T extends { fp: Footprint }> {
     const y0 = Math.floor((p.y - radius) / this.cell);
     const y1 = Math.floor((p.y + radius) / this.cell);
     for (let x = x0; x <= x1; x++) {
-      for (let y = y0; y <= y1; y++) for (const it of this.cells.get(`${x}:${y}`) ?? []) result.add(it);
+      for (let y = y0; y <= y1; y++) for (const it of this.cells.get(`${x}:${y}`)?.items ?? []) result.add(it);
     }
     return [...result];
+  }
+
+  /** Последняя вставка или удаление в области запроса near, включая уже опустевшие клетки. */
+  nearVersion(p: Vec, radius: number): number {
+    let revision = 0;
+    const x1 = Math.floor((p.x + radius) / this.cell);
+    const y1 = Math.floor((p.y + radius) / this.cell);
+    for (let x = Math.floor((p.x - radius) / this.cell); x <= x1; x++) {
+      for (let y = Math.floor((p.y - radius) / this.cell); y <= y1; y++) {
+        revision = Math.max(revision, this.cells.get(`${x}:${y}`)?.revision ?? 0);
+      }
+    }
+    return revision;
   }
 
   at(p: Vec, margin = 0): T | null {

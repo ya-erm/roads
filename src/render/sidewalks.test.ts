@@ -3,8 +3,9 @@ import type { Vec } from '../core/vec';
 import { freshGame } from '../game/testkit';
 import { setCornerRadius } from '../lanes/corners';
 import { asphaltEdgesAt, junctionCorners, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
+import { ROAD_CURB } from '../world/roadTypes';
 import { NEW_GAME_SETTINGS } from '../world/settings';
-import { type Footprint, pointInFootprint } from '../world/spatial';
+import { type Footprint, FootprintIndex, pointInFootprint } from '../world/spatial';
 import { curbGap } from '../world/worldgen';
 import { drawSidewalks, mergeSidewalks, SIDEWALK, type SidewalkNet, sidewalkEnds, sidewalkNet, sidewalkScope, walkSite } from './sidewalks';
 
@@ -87,7 +88,7 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
     expect([...byStreet.values()].filter((s) => s.size === 2).length).toBeGreaterThan(50);
   });
 
-  it('вплотную к асфальту по его контуру: вдоль полотна и по бордюру угла площадки — на одном расстоянии (без клина травы)', () => {
+  it('ось движения проходит по середине видимого тротуара с обеих сторон улиц и на скруглениях', () => {
     const roads = g.roads.net;
     const cuts = junctionCuts(roads);
     const toSeg = (p: Vec, a: Vec, b: Vec) => {
@@ -107,7 +108,10 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
     let corners = 0;
     for (const l of net.lines) {
       const spec = l.paved ? SIDEWALK.paved : SIDEWALK.path;
-      const want = spec.from + spec.w / 2;
+      // Дорогу рисуют поверх тротуара: часть полосы под бордюром для пешехода недоступна.
+      const inner = Math.max(ROAD_CURB, spec.from);
+      const outer = spec.from + spec.w;
+      const want = (inner + outer) / 2;
       // Край асфальта рядом: у полотна — его кромки (как рисуются), у перекрёстка — бордюры площадки.
       const edges: Vec[][] = [];
       if (l.key.startsWith('c')) {
@@ -369,6 +373,22 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
     const b = sidewalkNet(g.roads.net, site, cache);
     expect(b.lines.map((l) => l.sig)).toEqual(a.lines.map((l) => l.sig));
     expect(a.lines.map((l) => l.sig)).toEqual(net.lines.map((l) => l.sig));
+  });
+
+  it('кэш улицы замечает замену участка в тех же клетках и пропускает стройку за пределами запроса', () => {
+    const index = new FootprintIndex<{ fp: Footprint }>();
+    const at = { x: 40, y: 40 };
+    const plot = (x: number) => ({ fp: { center: { x, y: 40 }, w: 15, h: 10, angle: 0 } });
+    const home = plot(40);
+    index.add(home);
+    const occupied = index.nearVersion(at, 30);
+    index.add(plot(400));
+    expect(index.nearVersion(at, 30)).toBe(occupied);
+    index.remove(home);
+    expect(index.nearVersion(at, 30)).toBeGreaterThan(occupied);
+    index.add(plot(60));
+    expect(index.near(at, 30)).toHaveLength(1);
+    expect(index.nearVersion(at, 30)).toBeGreaterThan(occupied);
   });
 
   describe('во время правки — только затронутые, по сети с правкой', () => {

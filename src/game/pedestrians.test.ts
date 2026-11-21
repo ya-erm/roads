@@ -3,8 +3,24 @@ import { add, dist, norm, scale, sub } from '../core/vec';
 import { setWalk } from '../lanes/crosswalk';
 import { LaneNet, twoWay } from '../lanes/model';
 import { freshGame } from './testkit';
+import { Pedestrians } from './pedestrians';
 
 describe('Пешеходы на дорожках к подземному переходу', () => {
+  it('подготовка нового месяца по частям даёт те же пути и позиции, что обычный первый такт', () => {
+    const game = freshGame(7);
+    const stepped = new Pedestrians();
+    const direct = new Pedestrians();
+    stepped.on = direct.on = true;
+    const steps = stepped.prepareMonth(game);
+    expect(steps.next().done).toBe(false);
+    expect(stepped.walkers).toHaveLength(0);
+    for (const _ of steps) { /* досчитать карту между кадрами */ }
+    stepped.step(game);
+    direct.step(game);
+    const positions = (p: Pedestrians) => p.walkers.map(w => [w.edge.key, w.start, w.end, w.reverse]);
+    expect(stepped.walkers.length).toBeGreaterThan(0);
+    expect(positions(stepped)).toEqual(positions(direct));
+  });
   it.each(['у лестницы', 'у прежнего входа'] as const)('человек доходит по дорожке %s, спускается и выходит с другой стороны, машины свободно едут', (connection) => {
     const game = freshGame(7);
     // Отдельный перекрёсток вдали от городов — ровно две подходящие дорожки, без иных тротуаров.

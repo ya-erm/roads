@@ -22,6 +22,8 @@ import { formOf, storeysOf } from './townForms';
 export const CAR_SIZE = { l: 7.5, w: 3.6 } as const;
 /** Участок стоит в стольких метрах от края полотна (worldgen.fillStreet): между ними — тротуар и газон. */
 export const LOT_SETBACK = 5;
+/** Максимальное расстояние от устья заезда до оси дороги. */
+export const DRIVEWAY_REACH = 25;
 /**
  * Гараж частного дома — в масштабе машины, как и дом: вдвое шире её (по бокам — место открыть двери), длиннее на 2 м
  * (верстак, полки), ширина и глубина, м.
@@ -234,7 +236,7 @@ export function drivewayLink(roads: LaneNet, d: Driveway): { corridor: number; s
   let best: { corridor: number; s: number; side: 1 | -1; d: number } | null = null;
   for (const c of roads.corridorsNear(d.curb, 40)) {
     const hit = c.lut.closest(d.curb);
-    if (hit.d > 25 || (best && hit.d >= best.d)) continue;
+    if (hit.d > DRIVEWAY_REACH || (best && hit.d >= best.d)) continue;
     const t = c.lut.tangentAt(hit.s);
     const side = (t.x * (d.curb.y - hit.point.y) - t.y * (d.curb.x - hit.point.x) >= 0 ? 1 : -1) as 1 | -1;
     best = { corridor: c.id, s: hit.s, side, d: hit.d };

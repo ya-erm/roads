@@ -138,11 +138,13 @@ export const YARD_MARGIN = 0.35;
  */
 export const PARK_W = 3.5;
 export const ROAD_MARGIN = 1.5;
+/** Тёмная кромка выступает на эту ширину за заливку асфальта. */
+export const ROAD_CURB = 1.25;
 /**
- * Тротуар вдоль полотна (render/sidewalks.ts): от края асфальта (from) шириной w, м. Город — мощёный у самого бордюра,
- * село — утоптанная тропинка.
+ * Видимая полоса тротуара от внешней грани бордюра. Её ось общая для рисунка и движения.
+ * Дальний край мощения остаётся в 3,6 м от асфальта, где начинаются подходы от участков.
  */
-export const SIDEWALK = { paved: { from: 0.2, w: 3.4 }, path: { from: 0.9, w: 2 } } as const;
+export const SIDEWALK = { paved: { from: ROAD_CURB, w: 3.6 - ROAD_CURB }, path: { from: ROAD_CURB, w: 2 } } as const;
 /** Дальний край тротуара от края асфальта, м: участок перенесённого здания и парка — не ближе. */
 export const WALK_EDGE = Math.max(SIDEWALK.paved.from + SIDEWALK.paved.w, SIDEWALK.path.from + SIDEWALK.path.w);
 /** Горизонтальная длина, нужная для подъёма на один уровень. */
