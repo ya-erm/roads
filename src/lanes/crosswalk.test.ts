@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
-import { RoadClass } from '../world/roadTypes';
+import { RoadClass, WALK_EDGE } from '../world/roadTypes';
 import { setWalk, syncWalks, walkArms, walkGeo, walksOn, walkTime, XWALK, XWALK_BACK } from './crosswalk';
 import { splitCorridor } from './edit';
 import { greenOf, LaneGraph } from './graph';
@@ -136,7 +136,8 @@ describe('Пешеходные переходы: геометрия и граф'
     expect(g.nodes.get(j.id)!.lights!.phases.every((p) => p.walk === undefined)).toBe(true);
     const w = g.crosswalks.get(j.id)![0];
     for (const [side, portal] of w.geo.portals!.entries()) {
-      for (const p of portal) expect(Math.abs(p.y)).toBeGreaterThan(w.geo.width / 2);
+      for (const p of portal) expect(Math.abs(p.y) - w.geo.width / 2).toBeGreaterThanOrEqual(WALK_EDGE + 0.99);
+      expect(Math.abs(w.geo.approaches![side].y) - w.geo.width / 2).toBeLessThan(WALK_EDGE);
       expect(w.geo.ends[side].y).toBeCloseTo((portal[1].y + portal[2].y) / 2);
     }
   });

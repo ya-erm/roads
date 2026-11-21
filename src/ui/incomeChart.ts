@@ -19,19 +19,44 @@ const escAttr = (s: string) => s.replace(/[&<>"\n]/g, (c) => ({ '&': '&amp;', '<
 export const monthTick = (x: number, H: number, label: string) =>
   `<text x="${x}" y="${H - 2}" text-anchor="middle" font-size="8" fill="#7b8794">${label.split(' ')[0]}</text>`;
 
+/** График показывает целые доллары. Сумма и цвет используют одно и то же округление. */
+const monthResult = (m: IncomeMonth) => Math.sign(m.income - m.expense) * Math.round(Math.abs(m.income - m.expense));
+
 /**
  * Подсказка колонки месяца — три строки: доход, расход и прибыль (в минусе — «убыток»), настоящие суммы, в том числе
  * нули. Месяц не пишем: он подписан под колонкой.
  */
 export function monthTip(m: IncomeMonth): string {
-  const profit = m.income - m.expense;
+  const profit = monthResult(m);
   const net = profit >= 0 ? `прибыль +${money(profit)}` : `убыток ${money(-profit)}`;
-  const trend = profit > 0 ? ' 📈' : profit < 0 ? ' 📉' : '';
-  return [`доход ${money(m.income)}`, `расход ${money(m.expense)}`, net + trend].join('\n');
+  return [`доход ${money(m.income)}`, `расход ${money(m.expense)}`, net].join('\n');
 }
 
-/** Квадратики легенды для строк дохода и расхода в подсказке (data-tip-marks). */
-export const MONTH_TIP_MARKS = `${INCOME_COLOR}|${EXPENSE_COLOR}|`;
+/** Три строки с общей колонкой для меток. Цвет результата применяется только к сумме. */
+export function showMonthTip(el: HTMLElement, text: string, trend: string): void {
+  el.replaceChildren();
+  const doc = el.ownerDocument;
+  const symbol = trend === 'gain' ? '📈' : trend === 'loss' ? '📉' : '';
+  text.split('\n').forEach((line, i) => {
+    const row = el.appendChild(doc.createElement('div'));
+    row.className = 'month-tip-row';
+    const mark = row.appendChild(doc.createElement('span'));
+    mark.setAttribute('aria-hidden', 'true');
+    if (i < 2) {
+      mark.className = 'tip-swatch';
+      mark.style.backgroundColor = i === 0 ? INCOME_COLOR : EXPENSE_COLOR;
+      row.append(line);
+      return;
+    }
+    mark.textContent = symbol;
+    const labelEnd = line.indexOf(' ') + 1;
+    const result = row.appendChild(doc.createElement('span'));
+    result.append(line.slice(0, labelEnd));
+    const amount = result.appendChild(doc.createElement('span'));
+    amount.className = `month-tip-amount ${trend}`;
+    amount.textContent = line.slice(labelEnd);
+  });
+}
 
 /**
  * Столбики «доход / расход» по месяцам — для компании и для линии. Наведение — на всю колонку месяца
@@ -48,7 +73,9 @@ export function incomeChart(months: IncomeMonth[], H = 90): string {
       const x = i * bw;
       const hi = (m.income / max) * (H - 14);
       const he = (m.expense / max) * (H - 14);
-      return `<g class="fin-month" data-tip="${escAttr(monthTip(m))}" data-tip-marks="${MONTH_TIP_MARKS}">
+      const profit = monthResult(m);
+      const trend = profit > 0 ? 'gain' : profit < 0 ? 'loss' : 'even';
+      return `<g class="fin-month" data-tip="${escAttr(monthTip(m))}" data-month-trend="${trend}">
         <rect x="${x}" y="0" width="${bw}" height="${H}" fill="transparent" pointer-events="all"/>
         <rect x="${x + 2}" y="${H - 12 - hi}" width="${bw / 2 - 2}" height="${hi}" rx="1.5" fill="${INCOME_COLOR}"/>
         <rect x="${x + bw / 2}" y="${H - 12 - he}" width="${bw / 2 - 2}" height="${he}" rx="1.5" fill="${EXPENSE_COLOR}"/>

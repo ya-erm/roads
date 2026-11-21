@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EXPENSE_COLOR, INCOME_COLOR, incomeChart, incomeLegend, MONTH_TIP_MARKS, monthTip } from './incomeChart';
+import { EXPENSE_COLOR, INCOME_COLOR, incomeChart, incomeLegend, monthTip } from './incomeChart';
 
 describe('График доход / расход по месяцам', () => {
   const months = [
@@ -9,26 +9,26 @@ describe('График доход / расход по месяцам', () => {
   // Разряды toLocaleString — неразрывным пробелом.
   const nb = (s: string) => s.replace(/[  ]/g, ' ');
 
-  it('подсказка — три строки: доход, расход, прибыль со значком роста, без месяца', () => {
-    expect(nb(monthTip(months[0])).split('\n')).toEqual(['доход $12 500', 'расход $4 000', 'прибыль +$8 500 📈']);
+  it('подсказка — три строки: доход, расход, прибыль, без месяца', () => {
+    expect(nb(monthTip(months[0])).split('\n')).toEqual(['доход $12 500', 'расход $4 000', 'прибыль +$8 500']);
   });
 
-  it('у убытка — значок падения, у нулевого итога значка нет', () => {
-    expect(nb(monthTip(months[1])).split('\n')).toEqual(['доход $0', 'расход $1 200', 'убыток $1 200 📉']);
+  it('у расходного месяца указан убыток, у нулевого итога ноль', () => {
+    expect(nb(monthTip(months[1])).split('\n')).toEqual(['доход $0', 'расход $1 200', 'убыток $1 200']);
     expect(monthTip({ label: 'Ноя 2004', income: 500, expense: 500 }).split('\n')[2]).toBe('прибыль +$0');
+    const rounded = { label: 'Дек 2004', income: 500, expense: 500.2 };
+    expect(monthTip(rounded).split('\n')[2]).toBe('прибыль +$0');
+    expect(incomeChart([rounded])).toContain('data-month-trend="even"');
   });
 
-  it('каждая колонка месяца несёт data-tip со строками и метки цветов легенды', () => {
-    const html = incomeChart(months);
+  it('положительные, отрицательные и нулевые суммы задают оформление результата в подсказке', () => {
+    const html = incomeChart([...months, { label: 'Ноя 2004', income: 500, expense: 500 }]);
     const tips = [...html.matchAll(/data-tip="([^"]*)"/g)].map((m) => m[1]);
-    expect(tips).toHaveLength(2);
+    expect(tips).toHaveLength(3);
     // Перевод строки в атрибуте — ссылкой &#10;: SVG-разбор не схлопнет его в пробел.
     expect(tips[0].split('&#10;')).toHaveLength(3);
     expect(tips[0]).not.toContain('Сен');
-    expect(tips[0]).toContain('📈');
-    expect(tips[1]).toContain('📉');
-    expect(html.match(/data-tip-marks="([^"]*)"/)?.[1]).toBe(MONTH_TIP_MARKS);
-    expect(MONTH_TIP_MARKS.split('|')).toEqual([INCOME_COLOR, EXPENSE_COLOR, '']);
+    expect([...html.matchAll(/data-month-trend="([^"]*)"/g)].map(m => m[1])).toEqual(['gain', 'loss', 'even']);
     expect(html).not.toContain('<title>');
   });
 

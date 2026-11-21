@@ -548,6 +548,7 @@ export class Hud {
       <div class="panel options hidden" data-options></div>
       <div class="panel toolbar" data-tools></div>
       <div class="panel side" data-side></div>
+      <div class="panel walk-picker hidden" data-walk-picker role="group" aria-label="Тип пешеходного перехода"></div>
       <div class="panel chains hidden" data-chains></div>
       <div class="panel finance hidden" data-finance></div>
       <div class="panel advisor hidden" data-advisor></div>
@@ -643,17 +644,12 @@ export class Hud {
     speed.appendChild(menu);
 
     this.minimap = new Minimap(this.q('[data-minimap]'), game, controller.camera);
+    this.bindWalkPicker();
     root.addEventListener('change', (e) => {
       const input = e.target as HTMLInputElement;
       if (input.dataset.walkArm !== undefined) {
-        const g = this.game();
-        g.checkpoint('пешеходный переход');
-        const problem = g.setCrosswalk(Number(input.dataset.node), Number(input.dataset.walkArm), input.value === 'underground' ? 'underground' : input.value === 'surface');
-        g.commit();
-        if (problem) this.controller.showError(problem);
         input.blur();
-        invalidate(this.q('[data-side]'));
-        this.sync(true);
+        this.changeWalk(Number(input.dataset.node), Number(input.dataset.walkArm), input.value);
         return;
       }
       // Партия из файла: открываем и закрываем меню.
@@ -4131,9 +4127,66 @@ export class Hud {
       ${this.walksHtml(id)}</section>`;
   }
 
-  /**
-   * Для каждого подъезда выбирается тип перехода. Кнопка «все» добавляет недостающие зебры или убирает все переходы.
-   */
+  private changeWalk(node: number, corridor: number, kind: string): void {
+    const g = this.game();
+    g.checkpoint('пешеходный переход');
+    const problem = g.setCrosswalk(node, corridor, kind === 'underground' ? 'underground' : kind === 'surface');
+    g.commit();
+    if (problem) this.controller.showError(problem);
+    invalidate(this.q('[data-side]'));
+    this.sync(true);
+  }
+
+  private walkOptions(x: ReturnType<Game['crosswalkInfo']>[number]) {
+    const current = x.arm.underground ? 'underground' : x.arm.on ? 'surface' : 'none';
+    const budget = this.game().budget;
+    return [
+      { value: 'none', label: 'Без перехода', cost: 0 },
+      { value: 'surface', label: 'Зебра', cost: x.cost },
+      { value: 'underground', label: 'Подземный', cost: underpassCost(x.geo) },
+    ].map(({ value, label, cost }) => ({
+      value, active: value === current, disabled: value !== current && cost > 0 && cost > budget,
+      text: value !== current && cost > 0 ? `${label} · ${money(cost)}` : label,
+    }));
+  }
+
+  /** Выбор у точки клика. Открытие и закрытие не меняют перекрёсток и бюджет. */
+  private bindWalkPicker(): void {
+    const menu = this.q('[data-walk-picker]');
+    const close = () => menu.classList.add('hidden');
+    document.addEventListener('pointerdown', e => {
+      if (!menu.contains(e.target as Node)) close();
+    }, true);
+    window.addEventListener('wheel', close, { passive: true, capture: true });
+    window.addEventListener('resize', close);
+    menu.addEventListener('focusout', e => {
+      if (!menu.contains(e.relatedTarget as Node | null)) close();
+    });
+    menu.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { close(); e.preventDefault(); }
+      e.stopPropagation();
+    });
+    menu.addEventListener('click', e => {
+      const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-walk-choice]');
+      if (!btn) return;
+      close();
+      if (btn.getAttribute('aria-pressed') !== 'true') this.changeWalk(Number(menu.dataset.node), Number(menu.dataset.corridor), btn.dataset.walkChoice!);
+    });
+    this.controller.onWalkMenu = (node, corridor, point) => {
+      const x = this.game().crosswalkInfo(node).find(x => x.arm.corridor.id === corridor);
+      if (!x || x.arm.ban) return;
+      menu.dataset.node = String(node);
+      menu.dataset.corridor = String(corridor);
+      menu.innerHTML = this.walkOptions(x).map(o =>
+        `<button type="button" data-walk-choice="${o.value}" aria-pressed="${o.active}" ${o.disabled ? 'disabled' : ''}>${o.text}</button>`
+      ).join('');
+      menu.classList.remove('hidden');
+      menu.style.left = Math.max(4, Math.min(point.x + 8, window.innerWidth - menu.offsetWidth - 4)) + 'px';
+      menu.style.top = Math.max(4, Math.min(point.y + 8, window.innerHeight - menu.offsetHeight - 4)) + 'px';
+      menu.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({ preventScroll: true });
+    };
+  }
+
   private walksHtml(id: number): string {
     const g = this.game();
     const list = g.crosswalkInfo(id);
@@ -4142,14 +4195,13 @@ export class Hud {
     const chips = list
       .map((x) => {
         const c = info?.label(x.arm.corridor.id) ?? { arrow: '•', name: '?' };
-        const surface = x.arm.on && !x.arm.underground;
-        const tunnel = underpassCost(x.geo);
         const tip = x.arm.ban ? WALK_BAN_TEXT[x.arm.ban] : 'Подземный переход позволяет перейти улицу без остановки машин';
+        const options = this.walkOptions(x).map(o =>
+          `<option value="${o.value}" ${o.active ? 'selected' : ''} ${o.disabled ? 'disabled' : ''}>${o.text}</option>`
+        ).join('');
         return `<label class="walk-type" data-tip="${esc(tip)}"><span>${c.arrow} ${esc(c.name)}</span>
           <select data-walk-arm="${x.arm.corridor.id}" data-node="${id}" aria-label="Переход · ${esc(c.name)}" ${x.arm.ban ? 'disabled' : ''}>
-          <option value="none" ${x.arm.on ? '' : 'selected'}>Без перехода</option>
-          <option value="surface" ${surface ? 'selected' : ''}${!surface && x.cost > g.budget ? ' disabled' : ''}>Зебра${surface ? '' : ` · ${money(x.cost)}`}</option>
-          <option value="underground" ${x.arm.underground ? 'selected' : ''}${!x.arm.underground && tunnel > g.budget ? ' disabled' : ''}>Подземный${x.arm.underground ? '' : ` · ${money(tunnel)}`}</option>
+          ${options}
           </select></label>`;
       })
       .join('');

@@ -318,7 +318,6 @@ export interface WalkToggle {
   pos: Vec;
   on: boolean;
   own: boolean;
-  cost: number;
   /** Перехода нет — где была бы зебра: полоски контуром. */
   stripes?: Vec[][];
 }

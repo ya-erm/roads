@@ -99,7 +99,9 @@ export function walkingNetwork(sidewalks: SidewalkNet, paths: readonly Footpath[
     if (best && hit) {
       best.cuts.push({ t: hit.t, p: hit.point });
       connect(p, hit.point);
+      return true;
     }
+    return false;
   };
   for (const p of paths) {
     join(p.a, 0.8);
@@ -108,8 +110,14 @@ export function walkingNetwork(sidewalks: SidewalkNet, paths: readonly Footpath[
   for (const p of paths) index(p.a, p.b);
   for (const list of crossings) for (const w of list) {
     const [a, b] = w.geo.ends;
-    join(a, 6);
-    join(b, 6);
+    for (const [side, mouth] of w.geo.ends.entries()) {
+      const approach = w.geo.approaches?.[side];
+      if (approach) {
+        // С тротуара и дорожек прежних сохранений — по площадке до нового входа.
+        if (join(approach, 2)) connect(approach, mouth);
+        join(mouth, 0.8);
+      } else join(mouth, 6);
+    }
     connect(a, b, w);
   }
   for (const s of street) {

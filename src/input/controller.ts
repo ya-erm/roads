@@ -15,6 +15,8 @@ import { deleteTemplate, getTemplate, saveTemplate } from '../game/templates';
 import { corridorUnder, edgeAt, handlePoints, laneEndAt, lanePortsNear, type LaneTip, laneTipAt, laneTipPos, laneUnder, newLaneFlow } from '../lanes/edit';
 import type { LaneNet, LaneSlot } from '../lanes/model';
 import { pointOff } from '../lanes/geometry';
+import type { WalkGeo } from '../lanes/crosswalk';
+import { inPolygon } from '../world/lotClear';
 import { taperLen } from '../lanes/model';
 import { type Fragment, fragmentCurves, frameOf, snapPaste } from '../lanes/fragment';
 import type { Camera } from '../render/camera';
@@ -409,6 +411,7 @@ export class Controller {
   }
   /** Esc, когда отменять нечего: открыть меню игры (ставит интерфейс). */
   onMenu: () => void = () => {};
+  onWalkMenu: (node: number, corridor: number, screen: Vec) => void = () => {};
   private mouse = { x: 0, y: 0 };
   private shift = false;
   /** Зажат Alt (Option): прямая не прилипает к «прямо» и 90°. */
@@ -2161,8 +2164,11 @@ export class Controller {
         this.pasteDrag = { at: p };
         break;
       case 'lights': {
-        // Значок перехода у бордюра выбранного перекрёстка — включить или выключить переход.
-        if (this.walkClick(p)) break;
+        // Знак, зебра или лестница — выбор типа прямо у курсора.
+        if (this.walkClick(p)) {
+          e.preventDefault();
+          break;
+        }
         // У выбранного перекрёстка клики по меткам полос соединяют въезды с выездами.
         if (this.laneClick(p)) break;
         // Ручка угла выбранного перекрёстка (у бордюра, не на метках полос) — скруглить поворот, как в «Двигать».
@@ -2589,14 +2595,14 @@ export class Controller {
           on: x.arm.on,
           underground: x.arm.underground,
           own: x.arm.own,
-          cost: x.cost,
           stripes: x.arm.on ? undefined : x.geo.stripes,
         };
       });
   }
 
-  /** Знак перехода под точкой p (квадрат знака, ровный на экране). */
-  private walkAt(p: Vec, toggles = this.walkToggles()): WalkToggle | null {
+  /** Знак и контур у выбранного узла, видимая зебра или любая из двух лестниц даже до выбора узла. */
+  private walkAt(p: Vec, toggles = this.walkToggles()): { node: number; corridor: number } | null {
+    if (this.livePhase()) return null;
     const h = walkSignSize(this.camera.zoom) / 2;
     let best: WalkToggle | null = null;
     let bestD = Infinity;
@@ -2605,20 +2611,32 @@ export class Controller {
       const d = dist(t.pos, p);
       if (d < bestD) [bestD, best] = [d, t];
     }
-    return best;
+    const node = this.selection?.type === 'junction' ? this.selection.id : null;
+    if (best && node !== null) return { node, corridor: best.corridor };
+    if (node !== null) {
+      const ghost = toggles.find(t => t.stripes && this.overZebra(p, t.stripes));
+      if (ghost) return { node, corridor: ghost.corridor };
+    }
+    for (const walks of this.game().roads.graph.crosswalks.values()) {
+      for (const w of walks) {
+        if (w.geo.portals?.some(stairs => inPolygon(p, stairs)) || this.overZebra(p, w.geo.stripes)) return w;
+      }
+    }
+    return null;
   }
 
-  /** Клик по значку перехода: включить или выключить (Ctrl+Z — как остальные правки перекрёстка). true — клик принят. */
+  private overZebra(p: Vec, stripes: WalkGeo['stripes']): boolean {
+    if (!stripes.length) return false;
+    const first = stripes[0];
+    const last = stripes[stripes.length - 1];
+    return inPolygon(p, [first[0], first[1], last[2], last[3]]);
+  }
+
   private walkClick(p: Vec): boolean {
     const t = this.walkAt(p);
-    const sel = this.selection;
-    if (!t || sel?.type !== 'junction') return false;
-    const g = this.game();
-    g.checkpoint('пешеходный переход');
-    const problem = g.setCrosswalk(sel.id, t.corridor);
-    g.commit();
-    if (problem) this.showError(problem);
-    this.onChange();
+    if (!t) return false;
+    if (this.selection?.type !== 'junction' || this.selection.id !== t.node) this.select({ type: 'junction', id: t.node });
+    this.onWalkMenu(t.node, t.corridor, this.camera.toScreen(p));
     return true;
   }
 
@@ -4438,10 +4456,10 @@ export class Controller {
         const corners = sel?.type === 'junction' ? this.roadTools.nodeCornerMarks(sel.id, (HANDLE_PX + 4) / this.camera.zoom) : [];
         o.handles = corners;
         // Значок перехода под курсором: что сделает клик (и сколько стоит разметка).
-        const walk = o.walkEdit && this.walkAt(p, o.walkEdit.toggles);
-        if (o.walkEdit && walk) {
-          o.walkEdit.hover = walk.corridor;
-          o.label = walk.on ? { text: walk.underground ? 'Убрать подземный переход' : '🚶 Переход → стереть', ok: true } : { text: `🚶 Переход → нарисовать · ${money(walk.cost)}`, ok: walk.cost <= g.budget };
+        const walk = this.memo(`walk-at-${o.walkEdit?.node ?? ''}`, () => this.walkAt(p, o.walkEdit?.toggles ?? []));
+        if (walk) {
+          if (o.walkEdit?.node === walk.node) o.walkEdit.hover = walk.corridor;
+          o.label = { text: 'Выбрать тип перехода', ok: true };
           break;
         }
         const end = edit && this.laneAt(p, edit.ends);

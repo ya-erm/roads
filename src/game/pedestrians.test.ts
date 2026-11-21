@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { dist } from '../core/vec';
+import { add, dist, norm, scale, sub } from '../core/vec';
 import { setWalk } from '../lanes/crosswalk';
 import { LaneNet, twoWay } from '../lanes/model';
 import { freshGame } from './testkit';
 
 describe('Пешеходы на дорожках к подземному переходу', () => {
-  it('человек идёт по построенной дорожке, исчезает у входа и выходит с другой стороны, машины свободно едут', () => {
+  it.each(['у лестницы', 'у прежнего входа'] as const)('человек доходит по дорожке %s, спускается и выходит с другой стороны, машины свободно едут', (connection) => {
     const game = freshGame(7);
     // Отдельный перекрёсток вдали от городов — ровно две подходящие дорожки, без иных тротуаров.
     const streets = new LaneNet();
@@ -20,7 +20,12 @@ describe('Пешеходы на дорожках к подземному пер�
     const walk = game.roads.graph.crosswalks.get(j.id)![0];
     const [a, b] = walk.geo.ends;
     // Человек может дойти до каждого входа только по своей дорожке.
-    game.footpaths = [a, b].map((p, i) => ({ id: i + 1, a: p, b: { x: p.x + 20, y: p.y } }));
+    game.footpaths = [a, b].map((mouth, i) => {
+      const curb = walk.geo.approaches![i];
+      // В старом сохранении вход был на 0,25 м дальше оси тротуара, дорожка кончалась там.
+      const p = connection === 'у лестницы' ? mouth : add(curb, scale(norm(sub(mouth, curb)), 0.25));
+      return { id: i + 1, a: p, b: { x: p.x + 20, y: p.y } };
+    });
     game.setPedestrians(true);
     let entered: typeof a | undefined;
     let emerged = false;

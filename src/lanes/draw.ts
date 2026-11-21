@@ -8,7 +8,7 @@ import { noseParapet, PARAPET, parapetLine, parapetWidth } from './parapet';
 import { onPrefs, prefOn } from '../ui/prefs';
 import { insidePoly, type JunctionMarks, junctionMarks } from './junctionMarks';
 import { autoSolids, centreLine, solidLength } from './solid';
-import { walkGeo, walksOn } from './crosswalk';
+import { type WalkGeo, walkGeo, walksOn } from './crosswalk';
 import { junctionRuts } from './dirtRuts';
 
 export { layerOf };
@@ -261,7 +261,7 @@ interface NodeGeo {
   /** Узел моста: куда от поднятой площадки её тень (bridgeLook — как у концов его полотен). */
   shade: Vec;
   /** Пешеходные переходы на подъездах (src/lanes/crosswalk.ts): асфальт до стоп-линии и полосы зебры. */
-  walks?: { cover: Vec[]; stripes: Vec[][]; portals?: Vec[][] }[];
+  walks?: WalkGeo[];
 }
 
 /**
@@ -543,7 +543,15 @@ export class LaneRenderer {
   private drawWalks(ctx: CanvasRenderingContext2D, nodes: NodeGeo[], zoom: number): void {
     const walks = nodes.flatMap((n) => n.walks ?? []);
     if (!walks.length) return;
-    for (const w of walks) for (const portal of w.portals ?? []) this.drawStairwell(ctx, portal, zoom);
+    for (const w of walks) {
+      if (!w.portals || !w.approaches) continue;
+      for (const [side, portal] of w.portals.entries()) {
+        ctx.strokeStyle = '#d2cbbf';
+        ctx.lineWidth = 2.4;
+        this.stroke(ctx, [w.approaches[side], w.ends[side]]);
+        this.drawStairwell(ctx, portal, zoom);
+      }
+    }
     ctx.fillStyle = C.road;
     for (const w of walks) this.fill(ctx, w.cover);
     if (zoom < 0.5) return;

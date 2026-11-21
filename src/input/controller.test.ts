@@ -96,6 +96,33 @@ function play(game: Game) {
   return { c, canvas, camera, mouse, move, click, dblclick, key };
 }
 
+it('меню перехода открывается прямо на зебре, на каждой лестнице и на знаке пустого подъезда', () => {
+  const game = freshGame(7);
+  game.money = 100_000;
+  const [walk] = [...game.roads.graph.crosswalks.values()][0];
+  const { c, click, move } = play(game);
+  c.setTool('lights');
+  let target: number[] = [];
+  c.onWalkMenu = (node, corridor) => { target = [node, corridor]; };
+  const expectPick = (p: Vec) => {
+    move(p);
+    expect(c.overlay().label?.text).toBe('Выбрать тип перехода');
+    target = [];
+    click(p);
+    expect(target).toEqual([walk.node, walk.corridor]);
+  };
+  const middle = (a: Vec, b: Vec) => scale(add(a, b), 0.5);
+  expectPick(middle(walk.geo.curb, walk.geo.curbL));
+  expect(c.selection).toEqual({ type: 'junction', id: walk.node });
+  expect(game.money).toBe(100_000);
+  expect(game.setCrosswalk(walk.node, walk.corridor, 'underground')).toBeNull();
+  const stairs = game.roads.graph.crosswalks.get(walk.node)!.find(w => w.corridor === walk.corridor)!.geo.portals!;
+  for (const quad of stairs) expectPick(middle(quad[0], quad[2]));
+  expect(game.setCrosswalk(walk.node, walk.corridor, false)).toBeNull();
+  expectPick(c.walkToggles().find(t => t.corridor === walk.corridor)!.pos);
+  expect(game.roads.net.node(walk.node).walks?.[walk.corridor].on).toBe(false);
+});
+
 it('дорожка строится мышью и продолжается кликами, сносится и возвращается отменой', () => {
   const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
   const a = openSpot(game, [[{ x: 0, y: 0 }, { x: 60, y: 60 }, 80]]);

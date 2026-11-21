@@ -1249,13 +1249,30 @@ button.icon.menu-back {
   display: none;
 }
 
-/* Метка строки подсказки (data-tip-marks) — квадратик того же вида, что в легенде графика (.legend i). */
-.tip-float .tip-mark {
-  display: inline-block;
+/* Квадратики легенды и значок результата стоят по центру одной колонки. */
+.month-tip-row {
+  display: grid;
+  grid-template-columns: 14px auto;
+  column-gap: 4px;
+  align-items: center;
+}
+
+.month-tip-row > :first-child {
+  justify-self: center;
+}
+
+.month-tip-row .tip-swatch {
   width: 9px;
   height: 9px;
   border-radius: 2px;
-  margin-right: 5px;
+}
+
+.month-tip-amount.gain {
+  color: #83df9f;
+}
+
+.month-tip-amount.loss {
+  color: #ffaaa4;
 }
 
 /* Горячая клавиша в подсказке (data-tip-keys) — светлым значком на тёмной плашке. */
@@ -2181,6 +2198,22 @@ button.icon.toggle-spacing {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px 10px;
+}
+.walk-picker {
+  z-index: 12;
+  min-width: 152px;
+  padding: 4px;
+  border-radius: 10px;
+}
+.walk-picker button {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+}
+.walk-picker button[aria-pressed="true"] {
+  color: var(--accent);
+  background: #e7f0fd;
 }
 .walk-type {
   display: flex;

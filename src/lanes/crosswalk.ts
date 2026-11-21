@@ -1,5 +1,6 @@
 import { lerp, rightNormal, scale, Vec } from '../core/vec';
-import { edgesAt, junctionCuts, laneBand, pointOff, sFrom } from './geometry';
+import { SIDEWALK, WALK_EDGE } from '../world/roadTypes';
+import { asphaltEdgesAt, edgesAt, junctionCuts, laneBand, pointOff, sFrom } from './geometry';
 import { Corridor, corridorMargin, CorridorEnd, End, LaneNet, LaneNode } from './model';
 
 /**
@@ -174,6 +175,8 @@ export interface WalkGeo {
   stripes: Vec[][];
   /** Лестницы вдоль бордюров, от тёмного конца к выходу на тротуар. */
   portals?: Vec[][];
+  /** Примыкания площадок подземного перехода к тротуарам, по одному у каждой лестницы. */
+  approaches?: Vec[];
   /** Концы перехода на тротуаре: со стороны lo и hi. */
   ends: [Vec, Vec];
   /** У бордюров посреди зебры и наружу от дороги: правого (от перекрёстка) и левого — у одного из них значок переключателя. */
@@ -228,10 +231,19 @@ export function walkGeo(arm: WalkArm): WalkGeo {
   const edge = side > 0 ? hi + margin : lo - margin;
   const edgeL = side > 0 ? lo - margin : hi + margin;
   const t = c.lut.tangentAt(sMid);
-  const portals = arm.underground ? [
-    quad(d0, d0 + 6.5, lo - margin - 0.45, lo - margin - 3.85),
-    quad(d0, d0 + 6.5, hi + margin + 0.45, hi + margin + 3.85),
-  ] : undefined;
+  // Вдоль улицы остаётся непрерывный тротуар. Лестница начинается за ним, с метровым отступом.
+  const near = WALK_EDGE + 1;
+  const far = near + 3.4;
+  const stairsEnd = at(d0 + 6.5);
+  const curbPoint = (s: number, side: number, setback: number) => {
+    const edges = asphaltEdgesAt(c, s) ?? [lo - margin, hi + margin];
+    return pointOff(c, s, edges[side < 0 ? 0 : 1] + side * setback);
+  };
+  const portals = arm.underground ? [-1, 1].map(side => [
+    curbPoint(at(d0), side, near), curbPoint(stairsEnd, side, near),
+    curbPoint(stairsEnd, side, far), curbPoint(at(d0), side, far),
+  ]) : undefined;
+  const approaches = portals && [-1, 1].map(side => curbPoint(stairsEnd, side, SIDEWALK.paved.from + SIDEWALK.paved.w / 2));
   return {
     corridor: c.id,
     end,
@@ -242,6 +254,7 @@ export function walkGeo(arm: WalkArm): WalkGeo {
     cover: portals ? [] : cover,
     stripes: portals ? [] : stripes,
     portals,
+    approaches,
     ends: portals ? [lerp(portals[0][1], portals[0][2], 0.5), lerp(portals[1][1], portals[1][2], 0.5)]
       : [pointOff(c, sMid, lo - margin - 1.2), pointOff(c, sMid, hi + margin + 1.2)],
     curb: pointOff(c, sMid, edge),

@@ -3,10 +3,10 @@
  * появляется с задержкой). Одна на всю страницу, в body и с position: fixed — её не обрезает прокрутка панели; у краёв
  * экрана она сдвигается внутрь, нет места сверху — встаёт под элементом (tipPlacement). Длинный текст переносится
  * (max-width в CSS). data-tip-end — по правому краю элемента. data-tip-keys — горячие клавиши через «|», они
- * встают после текста значками <kbd>. data-tip-marks — цвета через «|»: текст по «\n» встаёт строками, у каждой —
- * квадратик своего цвета (пустой — без квадратика, строка выровнена с остальными).
+ * встают после текста значками <kbd>. Для графика доходов строки оформляет showMonthTip.
  */
 import { tipPlacement } from '../render/tooltipLayout';
+import { showMonthTip } from './incomeChart';
 
 const tipOf = (t: EventTarget | null) => (t instanceof Element ? t.closest<HTMLElement | SVGElement>('[data-tip]') : null);
 
@@ -37,23 +37,11 @@ export function installTips(doc: Document = document): HTMLElement {
     const text = anchor?.dataset.tip;
     if (!anchor || !text) return hide();
     const keys = anchor.dataset.tipKeys ?? '';
-    const marks = anchor.dataset.tipMarks;
-    if (shown !== `${text}\n${keys}\n${marks}`) {
-      shown = `${text}\n${keys}\n${marks}`;
-      if (marks === undefined) el.textContent = text;
-      else {
-        // Строки с цветными квадратиками, как у легенды графика: цвет — по порядку строк, пустой — без метки.
-        const colors = marks.split('|');
-        el.textContent = '';
-        text.split('\n').forEach((line, i) => {
-          const row = el.appendChild(doc.createElement('div'));
-          const mark = row.appendChild(doc.createElement('i'));
-          mark.className = 'tip-mark';
-          if (colors[i]) mark.style.background = colors[i];
-          else mark.style.visibility = 'hidden';
-          row.append(line);
-        });
-      }
+    const trend = anchor.dataset.monthTrend;
+    if (shown !== `${text}\n${keys}\n${trend}`) {
+      shown = `${text}\n${keys}\n${trend}`;
+      if (trend === undefined) el.textContent = text;
+      else showMonthTip(el, text, trend);
       // Горячие клавиши — значками <kbd> после текста: «` или ⌘⇧B».
       keys
         .split('|')
@@ -92,7 +80,7 @@ export function installTips(doc: Document = document): HTMLElement {
   // Панели перерисовали (разметка, текст, подсказка, видимость) — но не сама плашка.
   new MutationObserver((records) => {
     if (records.some((r) => !el.contains(r.target))) schedule();
-  }).observe(doc.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-tip', 'data-tip-keys', 'data-tip-marks', 'class', 'hidden'] });
+  }).observe(doc.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-tip', 'data-tip-keys', 'data-month-trend', 'class', 'hidden'] });
   // Курсор ушёл из окна.
   doc.addEventListener('pointerout', (e) => {
     if (!e.relatedTarget) hide();
