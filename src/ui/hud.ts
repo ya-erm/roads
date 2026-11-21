@@ -3908,7 +3908,7 @@ export class Hud {
       const depot = rcv?.depot ? g.depotStock(b.id) : null;
       const stock = depot
         ? `<div class="icon-row store-row"><span class="lbl2" data-tip="${esc(
-            `⇄ Склад-пересадка: фура сдаёт сюда всё, что просит город, развозка забирает к магазинам; платят, когда груз довезут до магазина · 📦 ${Math.floor(depot.stored)} / ${RETAIL.depotStock}`,
+            `⇄ Склад-пересадка. Подвоз оплачивается при приёмке, развозка — при доставке в магазины · 📦 ${Math.floor(depot.stored)} / ${RETAIL.depotStock}`,
           )}">⇄ <span class="stock-bar"><i style="width:${Math.round(depot.fill * 100)}%;background:#3f74b5"></i></span></span>${rcv!.cargo
             .filter((c) => (depot.cargo[c] ?? 0) >= 1)
             .map((c) => `<span class="lbl2" data-tip="${esc(`${CARGO[c].name}: 📦 ${Math.floor(depot.cargo[c] ?? 0)}`)}">${cargoIcon(c, 18, false)}${Math.floor(depot.cargo[c] ?? 0)}</span>`)

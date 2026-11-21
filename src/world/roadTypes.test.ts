@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { capLimit, DEFAULT_PRESET_ID, defaultPreset, limitAllowed, limitCapText, maxKmh, ROAD_CLASS_IDS, ROAD_CLASSES, ROAD_PRESETS, SPEED_LIMITS } from './roadTypes';
+import { capLimit, DEFAULT_PRESET_ID, defaultPreset, limitAllowed, limitCapText, maxKmh, ROAD_CLASS_IDS, ROAD_CLASSES, ROAD_PRESETS, SPEED_LIMITS, specKmh } from './roadTypes';
 
 describe('потолок ограничения скорости по классу дороги', () => {
   it('грунтовая — 40, улица (и односторонняя) — 80, проспект — 100, шоссе и автомагистраль — 120', () => {
@@ -35,5 +35,13 @@ describe('тип дороги по умолчанию', () => {
     expect(ROAD_PRESETS.some((x) => x.id === DEFAULT_PRESET_ID)).toBe(true);
     expect(p.name).toBe('Шоссе');
     expect(p.spec).toEqual({ cls: 'highway', lanesF: 1, lanesB: 1 });
+  });
+
+  it('у проспекта 2+2 по умолчанию 80 км/ч, у основной улицы 1+1 — 60 км/ч', () => {
+    const avenue = ROAD_PRESETS.find((p) => p.id === 'avenue')!.spec;
+    const main = ROAD_PRESETS.find((p) => p.id === 'main-street')!.spec;
+    expect(specKmh(avenue)).toBe(80);
+    expect(specKmh(main)).toBe(60);
+    expect(specKmh({ ...avenue, limit: 40 })).toBe(40);
   });
 });

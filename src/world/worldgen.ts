@@ -10,7 +10,7 @@ import { placePlayerWorld } from './deposits';
 import type { Deposit, HouseForm, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
 import { lotClearOfRoads } from './lotClear';
-import { isRail, isTrunk, RAIL_HALF, RoadClass, WALK_EDGE } from './roadTypes';
+import { AVENUE_LIMIT, isRail, isTrunk, RAIL_HALF, RoadClass, WALK_EDGE } from './roadTypes';
 import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerIndustries, townCount, townSizes, WorldProfile, WorldSettings } from './settings';
 import { industryCount, levelIndustryGround, shoreFits, shoreSpot, terrainFits } from './sites';
 import { compoundOnLand, hasFields, hasPastures, industryFootprint } from './industrySites';
@@ -146,10 +146,11 @@ const COM_COLORS: [string, string][] = [
 interface Profile {
   cls: RoadClass;
   lanes: LaneSlot[];
+  limit?: number;
 }
 const STREET: Profile = { cls: 'street', lanes: yardLanes() };
 const MAIN_STREET: Profile = { cls: 'avenue', lanes: twoWay(1, 1) };
-const AVENUE: Profile = { cls: 'avenue', lanes: twoWay(2, 2) };
+const AVENUE: Profile = { cls: 'avenue', lanes: twoWay(2, 2), limit: AVENUE_LIMIT };
 
 export interface WorldContext {
   /** Дороги — сеть полос. */
@@ -543,7 +544,7 @@ function street(sb: StreetBuilder, a: LaneNode | null, b: LaneNode | null, curve
     if ([other.a, other.b].some((id) => id === a.id || id === b.id)) continue;
     if (intersectCurves(lut, other.lut).length) return null;
   }
-  const seg = roads.addCorridor(a.id, b.id, { cls: profile.cls, lanes: profile.lanes, curve: fixed });
+  const seg = roads.addCorridor(a.id, b.id, { ...profile, curve: fixed });
   sb.segs.push(seg);
   return seg;
 }

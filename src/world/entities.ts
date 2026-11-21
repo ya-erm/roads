@@ -531,6 +531,8 @@ export interface Station {
    * Платят при доставке — за расстояние от этой станции.
    */
   cargoOrigin?: Partial<Record<CargoType, number>>;
+  /** Партии в cargo, за которые оплатили подвоз к оптовой базе. Остаток cargo рассчитывается по cargoOrigin. */
+  paidCargo?: Partial<Record<CargoType, { origin: number; paidAt: number; amount: number }[]>>;
   /** Ожидающие пассажиры по станции назначения. */
   passengers: Map<number, number>;
   /** Компанейские машины, стоящие на постах погрузки. */

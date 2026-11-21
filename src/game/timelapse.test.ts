@@ -233,9 +233,7 @@ describe('Таймлапс партии: запись кадров', { timeout: 
     const at = fieldSpot(game, 600);
     const plan = game.roadBuilder.road(anchorOf(game, { free: at }), anchorOf(game, { free: { x: at.x + 600, y: at.y } }), STREET, { project: true });
     expect(plan.ok && game.roadBuilder.apply(plan)).toBe(true);
-    const net = game.roads.net;
-    const ids = () => [...net.corridors.values()].filter((c) => c.build).map((c) => c.id).sort((a, b) => a - b);
-    const planned = ids();
+    const planned = [...game.roads.net.corridors.values()].filter((c) => c.build).map((c) => c.id).sort((a, b) => a - b);
     expect(planned.length).toBeGreaterThan(0);
     // Проект — не дорога: в слое проектов, не в дорогах. Баз нет — так и стоит проектом.
     runMonths(game, 1.05);
@@ -247,6 +245,7 @@ describe('Таймлапс партии: запись кадров', { timeout: 
     runMonths(game, 1);
     expect(game.timelapse.frames[2].b).toBeUndefined();
     // Участки открыли (как стройка: у полотна снимается build): те же полотна — дорогами, из проектов — сносом.
+    const net = game.roads.net;
     for (const id of planned) delete net.corridor(id).build;
     const opened = game.timelapse.capture(game);
     expect(opened.bd?.slice().sort((a, b) => a - b)).toEqual(planned);

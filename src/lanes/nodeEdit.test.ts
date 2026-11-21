@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { bezPoint, minRadius } from '../core/bezier';
 import { add, dot, norm, scale, sub, Vec } from '../core/vec';
 import type { Game } from '../game/game';
-import { freshGame, HIGHWAY, road, roadPlan, STREET } from '../game/testkit';
+import { freshGame, HIGHWAY, openSpot, road, roadPlan, STREET } from '../game/testkit';
 import { ROAD_CLASSES } from '../world/roadTypes';
 import type { Corridor, LaneNet } from './model';
 import { jointOf, mergeEdit, mergePreview, mergeProblem, splitEdit, splitProblem, toggleJointEdit } from './nodeEdit';
@@ -41,9 +41,12 @@ function deviation(before: LaneNet, ids: number[], after: LaneNet): number {
 describe('Узел на дороге: разделить и убрать', () => {
   it('дорога делится узлом — форма и полосы те же; узел убирают — снова одно полотно той же формы', () => {
     const game = dryGame();
-    const o = spot(game, { x: 300, y: 0 });
+    const end = { x: 300, y: 0 };
+    const o = openSpot(game, [[{ x: 0, y: 0 }, end, 70]]);
     // Дуга: так видно, что форма сохраняется не только у прямой.
-    expect(game.roadBuilder.apply(game.roadBuilder.road({ kind: 'free', pos: o }, { kind: 'free', pos: add(o, { x: 300, y: 0 }) }, { ...STREET, control: add(o, { x: 150, y: -90 }) }))).toBe(true);
+    const original = roadPlan(game, { free: o }, { free: add(o, end) }, { ...STREET, control: add(o, { x: 150, y: -90 }) });
+    expect(original.ok, original.reason).toBe(true);
+    expect(game.roadBuilder.apply(original)).toBe(true);
     const net0 = game.roads.net;
     const c = [...net0.corridors.values()].find((x) => x.a === nodeAt(net0, o).id || x.b === nodeAt(net0, o).id)!;
     const lanes = JSON.stringify(c.lanes.map((l) => [l.offset, l.flow]));
@@ -140,9 +143,11 @@ describe('Узел на дороге: разделить и убрать', () =>
 /** Тупик o → излом K (o + 200 по x) → поворот на 45° до far: дорога изломом из двух полотен. */
 function kinkScene(profile = STREET, second: Vec = { x: 350, y: -150 }): { game: Game; o: Vec; K: number; far: Vec } {
   const game = dryGame();
-  const o = spot(game, { x: 400, y: 0 });
-  expect(road(game, { free: o }, { free: add(o, { x: 200, y: 0 }) }, profile)).toBe(true);
-  const K = nodeAt(game.roads.net, add(o, { x: 200, y: 0 })).id;
+  const elbow = { x: 200, y: 0 };
+  // Запас внутри угла нужен для скругления и для дороги, которая его перекрывает в одном из тестов.
+  const o = openSpot(game, [[{ x: 0, y: 0 }, elbow, 80], [elbow, second, 45]]);
+  expect(road(game, { free: o }, { free: add(o, elbow) }, profile)).toBe(true);
+  const K = nodeAt(game.roads.net, add(o, elbow)).id;
   const far = add(o, second);
   expect(road(game, K, { free: far }, { ...profile, kink: true })).toBe(true);
   expect(game.roads.net.node(K).kind).toBe('junction');

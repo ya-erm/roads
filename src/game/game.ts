@@ -93,7 +93,7 @@ import { News, NOTICE_AFTER_PAUSE, NOTICE_LIFE, type NewsKind, type NewsRecipe, 
 import { serviceCall, serviceTick, SERVICE_TRAFFIC, SERVICES, type ServiceKind } from './services';
 import { paxFare, ridePath } from './fare';
 import { curbHeading, mergeStops, nearerHalf, rideAhead } from './stopPairs';
-import { transferable, transferNeighbors } from './transfer';
+import { paidStock, transferable, transferNeighbors } from './transfer';
 import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, shortOfMoney, type ProjectStart } from './roadbuild';
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
 import { WorkSignals } from './workSignals';
@@ -1318,7 +1318,7 @@ export class Game implements BuildContext {
   private restoreDocks(): void {
     for (const st of [...this.stations.values()]) {
       if (st.kind !== 'dock') continue;
-      if (!this.stationLines(st.id).length) {
+      if (!this.stationLines(st.id).length && !(this.isDepotDock(st) && this.stationStored(st) >= 1)) {
         this.stations.delete(st.id);
         continue;
       }
@@ -7870,10 +7870,10 @@ export class Game implements BuildContext {
     if (model.carries === 'freight') {
       const what = v.cargo ? this.unloadsHere(line, v.stop, st, v.cargo) : null;
       if (v.cargo && what === 'deliver' && v.loadedAt !== st.id) {
-        // Платят за расстояние от станции, где груз впервые погрузили (с учётом пересадок).
+        // Платят за неоплаченную часть пути. Первая погрузка также указывает, кто произвёл груз.
         const origin = v.loadedAt !== null ? this.stations.get(v.loadedAt) : undefined;
-        const distance = origin ? dist(origin.fp.center, st.fp.center) : 0;
-        const k = v.fromStore || v.loadedTime === undefined ? 1 : this.speedFactor(distance, this.time - v.loadedTime);
+        const distance = this.freightDistance(v, st);
+        const k = this.freightSpeedFactor(v, distance);
         const cargo = v.cargo;
         const loadedAt = v.loadedAt;
         // Получатели принимают, сколько влезает на склад (world/retail.ts): платят только за принятое, остальное едет
@@ -7884,7 +7884,7 @@ export class Game implements BuildContext {
         const maker = origin?.industryIds.find((id) => this.industries.find((i) => i.id === id)?.info.produces === cargo);
         if (took > 0) {
           bonus = Math.max(bonus, k);
-          revenue += Math.round((took * CARGO[cargo].rate * ECONOMY.tariff * distance * k * this.mods.price(cargo)) / 100);
+          revenue += this.freightPayment(cargo, took, distance, k);
           for (const p of parts) {
             this.scenario?.onDelivered(cargo, p.amount, p.to, k, maker);
             this.ideas.onDelivered(cargo, p.amount, p.to, k, maker);
@@ -7900,6 +7900,7 @@ export class Game implements BuildContext {
             v.cargo = null;
             v.amount = 0;
             v.loadedAt = null;
+            delete v.paidAt;
           }
         } else {
           // Склады получателей полны: груз едет дальше — над станцией серый значок «некуда».
@@ -7914,7 +7915,25 @@ export class Game implements BuildContext {
         const take = Math.min(v.amount, this.stationFree(st));
         if (take > 0) {
           st.cargo[c] = (st.cargo[c] ?? 0) + take;
-          st.cargoOrigin = { ...st.cargoOrigin, [c]: v.loadedAt ?? st.id };
+          // Новое плечо открывается один раз: оптовые базы могут передавать запас друг другу.
+          const wholesale = this.isDepotDock(st) && v.loadedAt !== st.id && v.paidAt === undefined;
+          if (wholesale) {
+            const distance = this.freightDistance(v, st);
+            bonus = this.freightSpeedFactor(v, distance);
+            revenue += this.freightPayment(c, take, distance, bonus);
+            this.carried(line, v, take);
+            Object.assign(trip, { from: v.loadedAt, x: bonus });
+          }
+          const origin = v.loadedAt ?? st.id;
+          const paidAt = v.paidAt ?? (wholesale ? st.id : undefined);
+          if (paidAt === undefined) st.cargoOrigin = { ...st.cargoOrigin, [c]: origin };
+          else {
+            st.paidCargo ??= {};
+            const lots = st.paidCargo[c] ??= [];
+            const lot = lots.find((entry) => entry.origin === origin && entry.paidAt === paidAt);
+            if (lot) lot.amount += take;
+            else lots.push({ origin, paidAt, amount: take });
+          }
           v.amount -= take;
           moved += take;
           freightUnits += take;
@@ -7924,6 +7943,7 @@ export class Game implements BuildContext {
             v.cargo = null;
             v.amount = 0;
             v.loadedAt = null;
+            delete v.paidAt;
           }
         }
       }
@@ -8007,11 +8027,25 @@ export class Game implements BuildContext {
 
   /** Склад ускоряет погрузку собственной продукции на обслуживающей предприятие станции. */
   private freightLoadingUnits(v: FleetVehicle, st: Station, amount: number): number {
-    if (amount <= 0 || !v.cargo || v.loadedAt !== st.id) return amount;
+    if (amount <= 0 || !v.cargo || v.loadedAt !== st.id || v.paidAt !== undefined) return amount;
     const produces = (ind: Industry) => ind.info.produces === v.cargo && isActive(ind);
     const source = this.industries.find((ind) => ind.id === st.industryId && produces(ind))
       ?? this.industries.find((ind) => st.industryIds.includes(ind.id) && produces(ind));
     return amount / (source ? industryLoadingRate(source) : 1);
+  }
+
+  private freightDistance(v: FleetVehicle, st: Station): number {
+    const from = v.paidAt ?? v.loadedAt;
+    const origin = from === null ? undefined : this.stations.get(from);
+    return origin ? dist(origin.fp.center, st.fp.center) : 0;
+  }
+
+  private freightSpeedFactor(v: FleetVehicle, distance: number): number {
+    return v.fromStore || v.loadedTime === undefined ? 1 : this.speedFactor(distance, this.time - v.loadedTime);
+  }
+
+  private freightPayment(cargo: CargoType, amount: number, distance: number, speed: number): number {
+    return Math.round((amount * CARGO[cargo].rate * ECONOMY.tariff * distance * speed * this.mods.price(cargo)) / 100);
   }
 
   /**
@@ -8148,7 +8182,7 @@ export class Game implements BuildContext {
         for (const c of FREIGHT) {
           // Только груз, который сюда уже выгружали на склад (сейчас его может и не быть): продукцию не перекладывают.
           const origin = from.cargoOrigin?.[c];
-          if (origin === undefined || origin === from.id) continue;
+          if ((origin === undefined || origin === from.id) && !from.paidCargo?.[c]?.length) continue;
           const amount = transferable(from, c);
           const lines = [...this.lines.values()].filter(
             (l) => !l.stops.includes(from.id) && l.stops.some((sid, i) => sid === to.id && this.loadable(l, i).has(c)),
@@ -8298,7 +8332,7 @@ export class Game implements BuildContext {
     if (!st.serves.cargo) return null;
     const rule = this.stopRule(line, index);
     const listed = rule.unload === 'all' || (Array.isArray(rule.unload) && rule.unload.includes(cargo));
-    // Оптовая база — склад-пересадка: всё, что просит город, — на её склад (платят, когда развозка довезёт до магазина).
+    // Оптовая база принимает потребности города на склад, откуда их забирает развозка.
     if (st.kind === 'dock' && this.isDepotDock(st)) return st.accepts.has(cargo) && (rule.unload === 'auto' || listed) ? 'store' : null;
     if (st.accepts.has(cargo) && (rule.unload === 'auto' || listed)) return 'deliver';
     return listed ? 'store' : null;
@@ -8331,8 +8365,8 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Грузит (или догружает тем же грузом) грузовик. Груз со склада сохраняет станцию,
-   * откуда его везут изначально. skip — то, что только что выгрузили здесь же.
+   * Грузит (или догружает тем же грузом) грузовик. Груз со склада сохраняет первую станцию и, если подвоз
+   * уже оплачен, оптовую базу. skip — то, что только что выгрузили здесь же.
    * Сначала — со своей станции; нечего взять (или есть место) — перевалкой со склада соседней станции
    * (transferSources: груз, который туда выгрузила другая линия), той же станции первой погрузки.
    */
@@ -8343,36 +8377,51 @@ export class Game implements BuildContext {
     // Своя станция отдаёт всё, соседняя — только привезённое на её склад другой линией.
     const avail = (s: Station, c: CargoType) => (s === st ? (s.cargo[c] ?? 0) : transferable(s, c));
     const originOf = (s: Station, c: CargoType) => s.cargoOrigin?.[c] ?? s.id;
+    const unpaid = (s: Station, c: CargoType) => Math.max(0, avail(s, c) - paidStock(s, c));
     let best: CargoType | null = v.cargo;
     let origin = v.cargo ? v.loadedAt : null;
+    let paidAt = v.cargo ? v.paidAt : undefined;
     if (!best) {
       for (const s of sources) {
         for (const c of FREIGHT) {
           if (c === skip || !wanted.has(c) || avail(s, c) < 1) continue;
           if (!best || avail(s, c) > avail(s, best)) best = c;
         }
-        if (best) {
-          origin = originOf(s, best);
-          break;
+        if (!best) continue;
+        if (unpaid(s, best) >= 1) origin = originOf(s, best);
+        else {
+          const lot = s.paidCargo?.[best]?.find((entry) => entry.amount >= 1);
+          if (!lot) { best = null; continue; }
+          origin = lot.origin;
+          paidAt = lot.paidAt;
         }
+        break;
       }
     }
     if (!best || !wanted.has(best)) return 0;
     let total = 0;
     for (const s of sources) {
-      if (originOf(s, best) !== origin) continue;
-      const take = Math.floor(Math.min(vehicleCapacity(v) - v.amount, avail(s, best)));
+      const lots = s.paidCargo?.[best];
+      const lot = lots?.find((entry) => entry.origin === origin && entry.paidAt === paidAt);
+      if (paidAt === undefined && originOf(s, best) !== origin) continue;
+      const available = paidAt === undefined ? unpaid(s, best) : lot?.amount ?? 0;
+      const take = Math.floor(Math.min(vehicleCapacity(v) - v.amount, available));
       if (take <= 0) continue;
       s.cargo[best] = (s.cargo[best] ?? 0) - take;
+      if (lot) {
+        lot.amount -= take;
+        if (lot.amount <= 0) lots!.splice(lots!.indexOf(lot), 1);
+      }
       v.cargo = best;
       v.amount += take;
       total += take;
-      // Время доставки считаем от первой погрузки; со склада — без надбавки за скорость.
+      // Время доставки считаем от начала оплачиваемого плеча; после перевалки по пути надбавки нет.
       if (v.amount === take) {
         v.loadedTime = this.time;
-        v.fromStore = origin !== st.id;
+        v.fromStore = (paidAt ?? origin) !== st.id;
       }
       v.loadedAt = origin;
+      v.paidAt = paidAt;
     }
     return total;
   }
@@ -12882,7 +12931,10 @@ export class Game implements BuildContext {
     // Только пассажиры — автовокзал, а не грузовая станция: на карте — другое здание.
     this.stationRev++;
     if (!serves.pax) st.passengers.clear();
-    if (!serves.cargo) st.cargo = {};
+    if (!serves.cargo) {
+      st.cargo = {};
+      delete st.paidCargo;
+    }
     this.computeCatchment(st);
     this.journal.add('serves', { st: id, pax: serves.pax, cargo: serves.cargo, pop: st.catchPop });
   }
@@ -13052,8 +13104,12 @@ export class Game implements BuildContext {
     return { sim: best, fleet: this.fleetOf(best) };
   }
 
-  /** Транспорт на открытых постах — по кузову, включая кабину и повёрнутый прицеп. */
+  /** Транспорт на открытых постах и у рамп — по кузову, включая кабину и повёрнутый прицеп. */
   stationFleetAt(p: Vec): FleetVehicle | undefined {
+    const hits = (look: VehicleLook): boolean => vehicleBoxes(look.pos, look.dir, look.length, look.width, look.body, look.trail).some((part) => {
+      const d = sub(p, part.c);
+      return Math.abs(dot(d, part.d)) <= part.hl + 0.35 && Math.abs(dot(d, rightNormal(part.d))) <= part.hw + 0.35;
+    });
     for (const st of this.index.near(p, 45)) {
       if (st.type !== 'station' || st.kind !== 'road' || st.curb || (st.industryId === null && !isBusTerminal(st))) continue;
       const layout = this.bayLayout(st);
@@ -13061,12 +13117,13 @@ export class Game implements BuildContext {
         const id = layout[bay];
         if (id === null) continue;
         const look = this.bayLook(st, bay, id);
-        if (!look) continue;
-        if (vehicleBoxes(look.pos, look.dir, look.length, look.width, look.body, look.trail).some((part) => {
-          const d = sub(p, part.c);
-          return Math.abs(dot(d, part.d)) <= part.hl + 0.35 && Math.abs(dot(d, rightNormal(part.d))) <= part.hw + 0.35;
-        })) return this.fleet.get(id);
+        if (look && hits(look)) return this.fleet.get(id);
       }
+    }
+    for (const v of this.fleet.values()) {
+      if (!this.docks.inYard(v.id)) continue;
+      const look = this.fleetLook(v);
+      if (look && hits(look)) return v;
     }
   }
 

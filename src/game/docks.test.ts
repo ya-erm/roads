@@ -125,6 +125,9 @@ describe('Получатели грузов в партии', { timeout: 240_000
     const center = add(pose.pos, scale(pose.dir, -TRUCK.length / 2));
     expect(dist(center, geo.ramp.c)).toBeLessThan(0.5);
     expect(dot(pose.dir, geo.d.dir)).toBeGreaterThan(0.99);
+    expect(game.structureAt(center)).toBe(b);
+    expect(game.stationFleetAt(center)).toBe(v);
+    expect(game.stationFleetAt(b.fp.center)).toBeUndefined();
     // Выгрузил: в магазин B (продукты везли «со» станции A).
     const stop = game.journal.entries.filter((e) => e.k === 'stop' && e.st === sb.id).pop()!;
     expect(stop.drop).toEqual({ food: 10 });

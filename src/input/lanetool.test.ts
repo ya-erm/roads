@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { Vec } from '../core/vec';
+import { add, type Vec } from '../core/vec';
 import { Game } from '../game/game';
 import { MoveProject } from '../game/moveProject';
 import { minRadius } from '../core/bezier';
-import { fieldSpot, freshGame, road, roadPlan } from '../game/testkit';
+import { fieldSpot, freshGame, openSpot, road, roadPlan } from '../game/testkit';
 import { LaneGraph } from '../lanes/graph';
 import { type LaneNet, oneWay, twoWay } from '../lanes/model';
 import { findLaneRoute } from '../lanes/routing';
@@ -12,14 +12,13 @@ import { RoadTools } from './roadtools';
 
 const STREET = { cls: 'street' as const, lanesF: 1, lanesB: 1 };
 
-/** Прямая улица из двух полотен со стыком посередине — в чистом поле. */
+/** Прямая улица со стыком и свободным полем со стороны будущего съезда. */
 function streetWithSeam(game: Game): Vec {
-  for (let y = 400; y < game.terrain.height - 400; y += 120) {
-    for (let x = 300; x < game.terrain.width - 1100; x += 160) {
-      if (road(game, { free: { x, y } }, { free: { x: x + 400, y } }) && road(game, { x: x + 400, y }, { free: { x: x + 900, y } })) return { x, y };
-    }
-  }
-  throw new Error('нет места');
+  const o = openSpot(game, [[{ x: 0, y: 0 }, { x: 900, y: 0 }, 35], [{ x: 250, y: 0 }, { x: 360, y: 160 }, 40]]);
+  const seam = add(o, { x: 400, y: 0 });
+  expect(road(game, { free: o }, { free: seam })).toBe(true);
+  expect(road(game, seam, { free: add(o, { x: 900, y: 0 }) })).toBe(true);
+  return o;
 }
 
 /** Протяжка мышью: нажали в первой точке, провели через остальные, отпустили в последней. */

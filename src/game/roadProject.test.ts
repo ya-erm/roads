@@ -29,7 +29,7 @@ import {
   splitSeg,
   staleSignCorridors,
 } from './roadProject';
-import { freshGame, road } from './testkit';
+import { freshGame, openSpot, road } from './testkit';
 
 const STREET_SPEC: RoadSpec = { cls: 'street', lanesF: 1, lanesB: 1 };
 
@@ -294,13 +294,15 @@ describe('Проект дороги в игре', () => {
 
   it('перенесённый узел и перо меняют дорогу, которая построится', () => {
     const game = dryGame();
-    const { project } = freeSpot(game, 'road', PTS, STREET_SPEC);
+    // Сместится и ось дороги, поэтому оставляем свободное место вокруг обеих частей проекта.
+    const origin = openSpot(game, [[PTS[0], PTS[1], 65], [PTS[1], PTS[2], 65]]);
+    const project = chain(PTS.map((p) => add(origin, p)));
     const mid = project.nodes[1];
     const to = add(mid.pos, { x: 10, y: -40 });
     moveNode(project, mid.id, to);
     moveHandle(project, project.segs[1].id, 'b', add(nodeOf(project, project.nodes[2].id).pos, { x: -60, y: -10 }), true);
     const plan = projectPlan(game, 'road', project);
-    expect(plan.ok).toBe(true);
+    expect(plan.ok, plan.reason).toBe(true);
     const net = plan.road!.net!;
     expect(net.nodesNear(to, 0.5).length).toBe(1);
     const want = segCurve(project, project.segs[1]);

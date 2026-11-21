@@ -100,7 +100,7 @@ describe('Уличная сеть города', () => {
     const yards = streets.filter((c) => c.cls === 'street');
     expect(main.length).toBeGreaterThanOrEqual(2);
     expect(yards.length).toBeGreaterThanOrEqual(1);
-    expect(main.every((c) => laneSpeed(c) * KMH_PER_UNIT === 60)).toBe(true);
+    for (const c of main) expect(laneSpeed(c) * KMH_PER_UNIT).toBe(c.lanes.length === 4 ? 80 : 60);
     expect(yards.every((c) => laneSpeed(c) * KMH_PER_UNIT === 40)).toBe(true);
     expect(yards.every((c) => asphaltEdgesAt(c, c.length / 2)?.[1] === 5.25)).toBe(true);
     const nodes = new Set(main.flatMap((c) => [c.a, c.b]));

@@ -131,7 +131,7 @@ describe('Получатели грузов, этап 3', { timeout: 240_000 }, 
     expect(dist(joinAt!, geo.exitD!.curb)).toBeLessThan(dist(joinAt!, geo.d.curb));
   });
 
-  it('оптовая база: фура сдаёт на её склад (без оплаты), развозка забирает и везёт в магазин — платят от первой станции', () => {
+  it('оптовая база оплачивает принятый груз сразу, магазин оплачивает развозку от базы', () => {
     const game = freshGame(RETAIL_WORLD);
     const town = game.towns.find((t) => t.receivers?.some((r) => r.depot) && t.demands.includes('food'))!;
     const depotB = town.buildings.find((b) => receiverOf(town, b.id)?.depot)!;
@@ -152,16 +152,23 @@ describe('Получатели грузов, этап 3', { timeout: 240_000 }, 
     fura.loadedAt = far.id;
     fura.fromStore = true;
     const money = game.money;
+    const revenue = line.revenueTotal;
     const supplied = town.supplied.food ?? 0;
     inner(game).handleStop(fura, sd, line);
-    // На склад базы — до 150, без оплаты и не в снабжение города.
+    const pay = (n: number, distance: number) => Math.round((n * CARGO.food.rate * ECONOMY.tariff * distance) / 100);
+    const wholesalePay = pay(RETAIL.depotStock, dist(far.fp.center, sd.fp.center));
+    expect(wholesalePay).toBeGreaterThan(0);
+    // На склад базы — до 150, оплачивается только принятое количество.
     expect(sd.cargo.food).toBe(RETAIL.depotStock);
     expect(fura.amount).toBe(30);
-    expect(game.money).toBe(money);
+    expect(fura.paidAt).toBeUndefined();
+    expect(game.money - money).toBe(wholesalePay);
+    expect(line.revenueTotal - revenue).toBe(wholesalePay);
     expect(town.supplied.food ?? 0).toBe(supplied);
-    expect(sd.cargoOrigin?.food).toBe(far.id);
     expect(game.depotStock(depotB.id).fill).toBe(1);
-    // Развозка: пустой грузовик у базы забирает продукты — груз помнит первую станцию.
+    inner(game).handleStop(fura, sd, line);
+    expect(game.money - money).toBe(wholesalePay);
+    // Для развозки груз помнит исходного отправителя и оплаченное плечо.
     const van = game.buyVehicle(line.id, 'truck')!;
     van.stop = 0;
     van.cargo = null;
@@ -171,8 +178,9 @@ describe('Получатели грузов, этап 3', { timeout: 240_000 }, 
     expect(van.cargo).toBe('food');
     expect(van.amount).toBeGreaterThan(0);
     expect(van.loadedAt).toBe(far.id);
+    expect(van.paidAt).toBe(sd.id);
     expect(sd.cargo.food).toBe(stored - van.amount);
-    // В магазине: платят за расстояние от первой станции, снабжение — городу.
+    // В магазине оплачивается только плечо от базы, принятое считается снабжением города.
     const r = receiverOf(town, shopB.id)!;
     r.stock.food = 0;
     r.at = game.time;
@@ -180,13 +188,63 @@ describe('Получатели грузов, этап 3', { timeout: 240_000 }, 
     const before = game.money;
     van.stop = 1;
     inner(game).handleStop(van, ss, line);
-    const pay = Math.round((room * CARGO.food.rate * ECONOMY.tariff * dist(far.fp.center, ss.fp.center)) / 100);
-    expect(game.money - before).toBe(pay);
+    expect(game.money - before).toBe(pay(room, dist(sd.fp.center, ss.fp.center)));
     expect(town.supplied.food).toBe(supplied + room);
     // База без маршрутов, но с грузом на складе, остаётся (груз не пропадает).
     game.deleteLine(line.id);
     expect(game.stations.has(sd.id)).toBe(true);
     expect(game.stations.has(ss.id)).toBe(false);
+  });
+
+  it('на складе из старой партии сохраняется оплата за весь маршрут даже при поступлении новых партий того же груза', () => {
+    const game = freshGame(RETAIL_WORLD);
+    const town = game.towns.find((t) => t.receivers?.some((r) => r.depot) && t.demands.includes('food'))!;
+    const depotB = town.buildings.find((b) => receiverOf(town, b.id)?.depot)!;
+    const shopB = receiversOf(game, town, 'shop').find((b) => receiverOf(town, b.id)!.cargo.includes('food'))!;
+    const otherTown = game.towns.find((t) => t !== town)!;
+    const legacySource = game.dockFor(receiversOf(game, otherTown, 'shop')[0])!;
+    const sd = game.dockFor(depotB)!;
+    const ss = game.dockFor(shopB)!;
+    const line = game.createLine([sd.id, ss.id])!;
+    game.createLine([legacySource.id, sd.id]);
+    const truck = game.buyVehicle(line.id, 'truck')!;
+    // Запись старого формата без разбивки на партии.
+    sd.cargo.food = 4;
+    sd.cargoOrigin = { food: legacySource.id };
+    truck.cargo = 'food';
+    truck.amount = 9;
+    truck.loadedAt = legacySource.id;
+    truck.fromStore = true;
+    inner(game).handleStop(truck, sd, line);
+    expect(sd.cargo.food).toBe(13);
+
+    const saved = JSON.parse(JSON.stringify(game.toSave()));
+    const restored = new Game(RETAIL_WORLD, saved);
+    const depot = restored.stations.get(sd.id)!;
+    const shop = restored.stations.get(ss.id)!;
+    const route = restored.lines.get(line.id)!;
+    const van = restored.fleet.get(truck.id)!;
+    van.stop = 0;
+    inner(restored).handleStop(van, depot, route);
+    expect(van.amount).toBe(4);
+    expect(van.loadedAt).toBe(legacySource.id);
+    expect(van.paidAt).toBeUndefined();
+    expect(depot.cargo.food).toBe(9);
+    const shopTown = restored.towns.find((t) => t.id === town.id)!;
+    const receiver = receiverOf(shopTown, shopB.id)!;
+    receiver.stock.food = 0;
+    receiver.at = restored.time;
+    const before = restored.money;
+    van.stop = 1;
+    inner(restored).handleStop(van, shop, route);
+    const legacyPay = Math.round((4 * CARGO.food.rate * ECONOMY.tariff * dist(legacySource.fp.center, ss.fp.center)) / 100);
+    expect(restored.money - before).toBe(legacyPay);
+
+    van.stop = 0;
+    inner(restored).handleStop(van, depot, route);
+    expect(van.amount).toBe(9);
+    expect(van.paidAt).toBe(sd.id);
+    expect(depot.cargo.food).toBe(0);
   });
 
   it('«🛒 все магазины с этим грузом»: магазины города — в конец маршрута, по порядку ближайшего соседа от последней остановки', () => {

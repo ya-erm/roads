@@ -26,13 +26,18 @@ export function transferNeighbors(st: Station, stations: Iterable<Station>): Sta
   return near.sort((a, b) => d(a) - d(b) || a.id - b.id);
 }
 
+/** Количество единиц на складе, подвоз которых к оптовой базе уже оплачен. */
+export function paidStock(st: Station, c: CargoType): number {
+  return st.paidCargo?.[c]?.reduce((total, lot) => total + lot.amount, 0) ?? 0;
+}
+
 /**
  * Сколько груза c со склада станции можно переложить соседям: только привезённый сюда другой линией
  * (cargoOrigin — другая станция), а не продукция предприятий у самой станции.
  */
 export function transferable(st: Station, c: CargoType): number {
   const origin = st.cargoOrigin?.[c];
-  if (origin === undefined || origin === st.id) return 0;
+  if (origin === undefined || origin === st.id) return Math.floor(paidStock(st, c));
   return Math.floor(st.cargo[c] ?? 0);
 }
 

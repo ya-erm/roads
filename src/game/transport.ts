@@ -385,6 +385,8 @@ export interface FleetVehicle {
   cargo: CargoType | null;
   amount: number;
   loadedAt: number | null;
+  /** Оптовая база, до которой уже оплатили подвоз груза. */
+  paidAt?: number;
   /** Когда погрузили (игровое время) — для надбавки за скорость доставки. */
   loadedTime?: number;
   /** Груз взят со склада пересадки — скорость всего пути неизвестна, без надбавки. */

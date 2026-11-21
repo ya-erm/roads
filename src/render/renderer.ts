@@ -4236,7 +4236,7 @@ export class Renderer {
   }
 
   /**
-   * Ожидающие на станциях грузы — поверх линий маршрутов, на белых плашках. У остановки в первой плашке
+   * Грузы на станциях и оптовых базах — поверх линий маршрутов, на белых плашках. У остановки в первой плашке
    * впереди — значок автобуса; никто не ждёт — плашка из одного значка (им остановка видна и издалека).
    * Сколько ушло пешком — только у выбранной станции (`selected`): у всех сразу эти плашки загромождают карту.
    */
@@ -4246,11 +4246,12 @@ export class Renderer {
     const ctx = this.ctx;
     let styled = false;
     for (const st of game.stations.values()) {
-      const fp = st.fp;
-      if (st.kind === 'dock') continue;
-      if (fp.center.x < view.x0 || fp.center.x > view.x1 || fp.center.y < view.y0 || fp.center.y > view.y1) continue;
       const stop = st.kind === 'stop';
       if (!stop && z < STATION_BADGES_ZOOM) continue;
+      const depot = st.dock && game.isDepotDock(st) ? game.buildingById(st.dock.b)?.fp : undefined;
+      if (st.kind === 'dock' && !depot) continue;
+      const fp = depot ?? st.fp;
+      if (fp.center.x < view.x0 || fp.center.x > view.x1 || fp.center.y < view.y0 || fp.center.y > view.y1) continue;
       const waiting: [CargoType | 'walk', number][] = FREIGHT.map((c) => [c, Math.floor(st.cargo[c] ?? 0)] as [CargoType, number]).filter(([, n]) => n > 0);
       let pax = 0;
       for (const n of st.passengers.values()) pax += n;
@@ -4273,7 +4274,7 @@ export class Renderer {
       const total = widths.reduce((a, b) => a + b, 0) + (widths.length - 1) * (4 / z);
       let x = fp.center.x - total / 2;
       // Над зданием; название станции — ещё выше (drawLabels). Дорога сверху — под зданием, под названием.
-      const y = labelsBelow(game, st) ? bottomOf(fp) + NAME_RISE / z : topOf(fp) - BADGE_RISE / z;
+      const y = !depot && labelsBelow(game, st) ? bottomOf(fp) + NAME_RISE / z : topOf(fp) - BADGE_RISE / z;
       widths.forEach((w, i) => {
         ctx.fillStyle = 'rgba(255,255,255,0.95)';
         ctx.strokeStyle = 'rgba(60,70,80,0.25)';
