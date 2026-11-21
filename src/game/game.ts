@@ -30,7 +30,8 @@ import { add, angleDiff, angleOf, closestOnSegment, cross, dist, dot, rightNorma
 import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, corridorUnder, insideRuns, splitCorridor } from '../lanes/edit';
 import { asphaltEdgesAt, nodeCuts } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
-import { autoMainPair, mainPairOf, type GLane } from '../lanes/graph';
+import { autoMainPair, LaneGraph, mainPairOf, type GLane } from '../lanes/graph';
+import { openNet } from '../lanes/open';
 import { PhaseSpec, phaseTurnStates, specOf, turnClashes, type TurnState } from '../lanes/lights';
 import { besideOffset, Corridor, corridorMargin, type CorridorBuild, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, taperLen, twoWay, yardLanes } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
@@ -207,6 +208,7 @@ import {
   newestLike,
   renewOn,
   RailModel,
+  type RoadModel,
   StopRule,
   vehicleCapacity,
   vehicleLoad,
@@ -10707,6 +10709,7 @@ export class Game implements BuildContext {
       const added = plan.changed.map((id) => plan.net!.corridor(id)).filter((x) => !net.corridors.has(x.id));
       // Вдоль улицы, снесённой игроком, город не строит (world/streetBans.ts).
       if (added.some((x) => this.streetBanned(x))) continue;
+      if (!this.growthKeepsDockAccess(plan.net, [c.start.pos, c.end.pos])) continue;
       // История Ctrl+Z не сбрасывается: отмена уберёт и эту улицу, и дома вдоль неё.
       this.roadBuilder.apply(plan);
       // Новая улица — та, что соединяет оба конца (а не куски разрезанной ею).
@@ -10714,6 +10717,36 @@ export class Game implements BuildContext {
       return added.find((x) => joins(x, c.start.pos) && joins(x, c.end.pos)) ?? added.sort((x, y) => y.length - x.length)[0] ?? null;
     }
     return null;
+  }
+
+  /** Новый перекрёсток допустим, пока у соседних получателей остаются выполнимые въезд и выезд. */
+  private growthKeepsDockAccess(next: LaneNet, ends: Vec[]): boolean {
+    if (!this.retail) return true;
+    const nearby = new Set<TownBuilding>();
+    for (const p of ends) for (const b of this.index.near(p, 55)) {
+      if (b.type === 'building' && b.kind === 'com' && pointInFootprint(p, b.fp, 55)) nearby.add(b);
+    }
+    if (!nearby.size) return true;
+    const receivers = new Set(this.towns.flatMap((town) => (town.receivers ?? []).map((r) => r.b)));
+    const buildings = [...nearby].filter((b) => receivers.has(b.id));
+    if (!buildings.length) return true;
+    const host = this.dockHost();
+    // Рост идёт внутри Roads.quiet: текущая сеть может быть новее графа, по которому ещё едут машины.
+    const current = new Docks({ ...host, graph: new LaneGraph(this.roads.open, undefined, host.graph) });
+    const previews = new Docks({ ...host, net: next, graph: new LaneGraph(openNet(next), undefined, host.graph) });
+    const truck = MODELS.truck as RoadModel;
+    return buildings.every((b) => {
+      const specs = new Set([truck.spec]);
+      for (const line of this.lines.values()) {
+        if (!line.stops.some((id) => this.stations.get(id)?.dock?.b === b.id)) continue;
+        for (const id of line.vehicles) {
+          const v = this.fleet.get(id);
+          const model = v && MODELS[v.model];
+          if (model?.mode === 'road') specs.add(model.spec);
+        }
+      }
+      return [...specs].every(({ length, width }) => !current.reachable(b, length, width) || previews.reachable(b, length, width));
+    });
   }
 
   // ---------- Станции ----------

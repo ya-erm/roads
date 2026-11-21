@@ -300,11 +300,11 @@ export { legPose };
 /**
  * Где машина длиной L и шириной W встаёт на полосу и с неё сворачивает к заезду d (curbSide — середина кузова у
  * бордюра, кузов в заезде) — на графе g: крайняя правая полоса своего хода у бордюра со стороны заезда (на односторонней
- * с ним слева — нет), место поворота — на радиус поворота раньше заезда (mid), не ближе END_ROOM к концам полосы.
+ * с ним слева — нет). Возвращает полосу и точку напротив заезда.
  * Нельзя (дорогу снесли, заезд у перекрёстка, полоса дальше 25 м, заезд не поперёк) — null. Общее для гаражей и
  * грузовиков у рамп (game/docks.ts).
  */
-export function laneSlot(g: LaneGraph, net: LaneNet, d: Driveway, curbSide: Vec, L: number, W: number): GarageSlot | null {
+export function drivewayLane(g: LaneGraph, net: LaneNet, d: Driveway): { lane: GLane; link: GLink; u: number } | null {
   const at = drivewayLink(net, d);
   const c = at && net.corridors.get(at.corridor);
   if (!at || !c) return null;
@@ -319,7 +319,20 @@ export function laneSlot(g: LaneGraph, net: LaneNet, d: Driveway, curbSide: Vec,
   }
   if (!best) return null;
   const { lane, link } = best;
-  const uc = link.flow > 0 ? at.s - link.s0 : link.s1 - at.s;
+  const u = link.flow > 0 ? at.s - link.s0 : link.s1 - at.s;
+  return { lane, link, u };
+}
+
+/** Конец полосы для дворового манёвра: перед перекрёстком и, если есть, перед переходом. */
+export function drivewayLaneEnd(g: LaneGraph, lane: GLane): number {
+  return lane.length - Math.max(g.stopBack.get(lane.id) ?? 0, g.holdBack.get(lane.id) ?? 0);
+}
+
+/** Поворот с полосы начинается за один радиус до заезда. Для грузового двора учитываем границы перекрёстка. */
+export function laneSlot(g: LaneGraph, net: LaneNet, d: Driveway, curbSide: Vec, L: number, W: number, dock = false): GarageSlot | null {
+  const found = drivewayLane(g, net, d);
+  if (!found) return null;
+  const { lane, link, u: uc } = found;
   const q = g.lanePose(lane, uc);
   // Заезд почти поперёк полосы — иначе поворот в него не по дуге.
   if (Math.abs(dot(d.dir, q.dir)) > 0.5) return null;
@@ -328,7 +341,8 @@ export function laneSlot(g: LaneGraph, net: LaneNet, d: Driveway, curbSide: Vec,
   const a = Math.abs(dot(rel, rightNormal(q.dir)));
   const mid = uc + lon - a;
   const zone: [number, number] = [mid - L / 2 - 0.5, uc + lon + W / 2 + 1];
-  if (zone[0] < END_ROOM || zone[1] > lane.length - END_ROOM) return null;
+  const end = dock ? drivewayLaneEnd(g, lane) : lane.length - END_ROOM;
+  if (zone[0] < (dock ? 0 : END_ROOM) || zone[1] > end) return null;
   const p = g.lanePose(lane, mid);
   return { lane, link, mid, zone, pos: p.pos, f: p.dir };
 }

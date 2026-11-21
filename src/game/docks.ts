@@ -9,7 +9,7 @@ import { follow, hitchOf, jointOf, vehicleBoxes, type VehicleBody } from '../sim
 import type { TownBuilding } from '../world/entities';
 import { lotFrame, type Driveway } from '../world/houseAccess';
 import { DOCK_TRUCK, dockDriveway, dockSolidsOf, dockYardsOf, exitDriveway, RAMP_GAP, THROUGH_R, type DockYard } from '../world/shopLots';
-import { laneSlot, type GarageSlot } from './garages';
+import { drivewayLane, drivewayLaneEnd, laneSlot, type GarageSlot } from './garages';
 import { advance, bezier, decideNow, entrySpeed, handOff, joinLane, legPose, poseSim, reversed, runOf, runPose, straight, type Leg, type Run } from './lotMoves';
 import { dockPathLeg, planDockPath } from './dockPath';
 
@@ -53,9 +53,6 @@ export const DOCK = {
   look: 0.8,
   pause: 0.5,
 } as const;
-
-/** Место манёвра на полосе — не ближе стольких метров к её концам (как у гаражей). */
-const END_ROOM = 10;
 
 /** Где грузовик выезжает передом на полосу направо (двор 'turn'): полоса, середина кузова, что заметает, поза. */
 interface OutSlot {
@@ -228,7 +225,7 @@ export class Docks {
     const X = sub(at(1, 0), o);
     const Y = d.dir;
     let curbSide = add(d.curb, scale(Y, L / 2 + 0.3));
-    let slot = laneSlot(g, this.host.net, d, curbSide, L, W);
+    let slot = laneSlot(g, this.host.net, d, curbSide, L, W, true);
     const sp = DOCK.speed;
     let ramp: { c: Vec; h: Vec };
     let inLegs: Leg[];
@@ -236,28 +233,35 @@ export class Docks {
     let out: OutSlot | null = null;
     let exitD: Driveway | undefined;
     let exitSide: Vec | undefined;
-    /** Выезд направо передом в sideAt (середина кузова у бордюра), дальше по ходу полосы въезда: зеркально повороту с неё. */
-    const rightOut = (sideAt: Vec): OutSlot | null => {
-      if (!slot) return null;
-      const rel = sub(sideAt, slot.pos);
-      const along = dot(rel, slot.f);
-      const lat = Math.abs(dot(rel, rightNormal(slot.f)));
-      const mid = slot.mid + along + lat;
-      const zone: [number, number] = [slot.mid + along - W / 2 - 1, mid + L / 2 + 0.5];
-      if (zone[0] < END_ROOM || zone[1] > slot.lane.length - END_ROOM) return null;
-      const p = g.lanePose(slot.lane, mid);
-      return { lane: slot.lane, mid, zone, pos: p.pos, f: p.dir };
+    /** Выезд считается по полосе у самих ворот, в том числе если перекрёсток разделил улицу между воротами. */
+    const rightOut = (drive: Driveway, sideAt: Vec): OutSlot | null => {
+      const where = drivewayLane(g, this.host.net, drive);
+      if (!slot || !where) return null;
+      const { lane, u } = where;
+      const at = g.lanePose(lane, u);
+      if (dot(at.dir, slot.f) < 0.5 || Math.abs(dot(drive.dir, at.dir)) > 0.5) return null;
+      const rel = sub(sideAt, at.pos);
+      const along = u + dot(rel, at.dir);
+      const lat = Math.abs(dot(rel, rightNormal(at.dir)));
+      const end = drivewayLaneEnd(g, lane);
+      const mid = Math.min(along + lat, end - L / 2 - 1);
+      const zone: [number, number] = [along - W / 2 - 1, mid + L / 2 + 1];
+      // Укороченный поворот допустим, пока хватает продольного места на плавную дугу.
+      if (zone[0] < 0 || mid - along < Math.max(4, lat * 0.65)) return null;
+      const p = g.lanePose(lane, mid);
+      return { lane, mid, zone, pos: p.pos, f: p.dir };
     };
     if (yard.kind === 'through') {
       // Сквозной двор: въезд — тот проезд, к которому полоса подходит первой (участок симметричен), выезд — другой.
       const other = exitDriveway(b, yard);
       if (!other) return null;
-      const sgn = slot && dot(slot.f, X) < 0 ? -1 : 1;
+      const approach = drivewayLane(g, this.host.net, d) ?? drivewayLane(g, this.host.net, other);
+      const sgn = approach && dot(g.lanePose(approach.lane, approach.u).dir, X) < 0 ? -1 : 1;
       if (sgn === -1) {
         exitD = d;
         d = other;
         curbSide = add(d.curb, scale(Y, L / 2 + 0.3));
-        slot = laneSlot(g, this.host.net, d, curbSide, L, W);
+        slot = laneSlot(g, this.host.net, d, curbSide, L, W, true);
       } else exitD = other;
       exitSide = add(exitD.curb, scale(Y, L / 2 + 0.3));
       const xi = sgn === 1 ? yard.drive.x : yard.exit!.x;
@@ -280,7 +284,7 @@ export class Docks {
       if (dist(F, Q) > 0.3) outLegs.push(straight(F, Q, false, sp.yardIn));
       outLegs.push(bezier(Q, add(Q, scale(Xs, kk)), add(G, scale(Y, kk)), G, false, sp.yardIn));
       if (dist(G, exitSide) > 0.3) outLegs.push(straight(G, exitSide, false, sp.yardIn));
-      out = rightOut(exitSide);
+      out = rightOut(exitD, exitSide);
     } else if (yard.kind === 'turn') {
       const s = yard.side;
       const R = DOCK_TRUCK.r;
@@ -300,7 +304,7 @@ export class Docks {
       outLegs = [bezier(F, add(F, scale(Y, k)), sub(A, scale(X, s * k)), A, false, sp.yardIn)];
       if (dist(A, B) > 0.3) outLegs.push(straight(A, B, false, sp.yardIn));
       outLegs.push(bezier(B, add(B, scale(X, s * k)), add(E, scale(Y, k)), E, false, sp.yardIn), straight(E, curbSide, false, sp.yardIn));
-      out = rightOut(curbSide);
+      out = rightOut(d, curbSide);
     } else {
       const F = at(yard.drive.x, yard.drive.y1 - L / 2 - 0.4);
       ramp = { c: F, h: Y };
@@ -370,7 +374,7 @@ export class Docks {
         geo.out.zone[1] = Math.max(geo.out.zone[1], mid + reach);
       }
     }
-    return true;
+    return geo.out.zone[1] <= drivewayLaneEnd(this.host.graph, geo.out.lane) + 0.05;
   }
 
   /** Проверяем весь кузов, включая вынос кормы; тесный участок не должен давать формально достижимую рампу. */
