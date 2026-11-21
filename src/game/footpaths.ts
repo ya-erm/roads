@@ -7,6 +7,8 @@ import { sideHalfAt } from '../world/worldgen';
 
 export interface Footpath {
   id: number;
+  parkId?: number;
+  width?: number;
   a: Vec;
   b: Vec;
   shape?: FootpathShape;
@@ -21,8 +23,8 @@ type PathGeometry = Omit<Footpath, 'id'>;
 export const FOOTPATH = { width: 2, minLength: 2, pricePerMetre: 18 };
 export const WALK_W = { paved: 1.6, path: 1.2 } as const;
 
-export function footpathWidth(path: Pick<Footpath, 'surface'>): number {
-  return path.surface ? WALK_W[path.surface] : FOOTPATH.width;
+export function footpathWidth(path: Pick<Footpath, 'surface' | 'width'>): number {
+  return path.width ?? (path.surface ? WALK_W[path.surface] : FOOTPATH.width);
 }
 const EPS = 0.015;
 const PRECISION = 0.06;

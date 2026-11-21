@@ -48,6 +48,8 @@ export function parkItems(c: ParkContents): [string, string, string][] {
   add(c.trees, '🌳', 'Деревья');
   add(c.benches, '🪑', 'Скамейки');
   add(c.lamps, '💡', 'Фонари');
+  add(c.bins, '🗑️', 'Урны');
+  add(c.kiosks, '🏪', 'Киоски');
   return out;
 }
 
@@ -79,7 +81,8 @@ export function parkCardHtml(g: Game, id: number): string {
     <button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>
     <div class="pc-chips"><span class="pc-chip" data-tip="${esc(`Площадь участка · ${size}`)}">📐 <b>${parkAreaText(park)}</b></span></div>
     ${items ? `<div class="pc-chips park-items">${items}</div>` : ''}
-    <div class="pc-chips park-uses">${use}</div>${parkMoveHtml(park)}</section>`;
+    <div class="pc-chips park-uses">${use}</div>
+    <div class="actions"><button class="small" data-action="park-edit" data-id="${park.id}">Редактировать парк</button>${parkMoveHtml(park)}</div></section>`;
 }
 
 /**
@@ -92,7 +95,7 @@ export function parkMoveHtml(park: TownPark): string {
   if (!movablePark(park)) return '';
   const tip = `🌳⛲🪑 всё внутри — вместе с ним · 🛣 встанет вдоль ближайшей улицы, за тротуаром · ${MOVE_TURN_TIP} · 🚫 не на дорогу, дома и воду`;
   const turn = turnText(park.turn ?? 0);
-  return `<div class="actions"><button class="small" data-action="park-move" data-id="${park.id}" data-tip="${esc(tip)}">🚚 Перенести${turn ? ` · ${turn}` : ''} · ${money(parkMoveCost(park))}</button></div>`;
+  return `<button class="small" data-action="park-move" data-id="${park.id}" data-tip="${esc(tip)}">🚚 Перенести${turn ? ` · ${turn}` : ''} · ${money(parkMoveCost(park))}</button>`;
 }
 
 /** Подсказка о повороте при переносе — значками: клавиши и ручка на карте. */

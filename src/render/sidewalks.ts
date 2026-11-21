@@ -1,12 +1,13 @@
 import { add, cross, dist, norm, sub, type Vec } from '../core/vec';
 import type { Game } from '../game/game';
+import { footpathBounds, footpathPoints } from '../game/footpaths';
 import { edgesAt, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
 import { type Corridor, corridorMargin, type CorridorEnd, type LaneNet, type LaneNode } from '../lanes/model';
 import { SIDEWALK } from '../world/roadTypes';
 import { type Footprint, footprintRadius, pointInFootprint } from '../world/spatial';
 import { townTier } from '../world/townForms';
 import { Art } from './industryArt';
-import { type Box, grow } from './tileCache';
+import { type Box, grow, unite } from './tileCache';
 import { paths } from './townDecor';
 import { gameTownWalks } from './townWalks';
 
@@ -128,28 +129,39 @@ export interface SidewalkSpan {
 
 export interface SidewalkNet {
   lines: Sidewalk[];
-  /** Проходы внутри кварталов для привязки и пешего графа. */
+  /** Дворовые и парковые дорожки для привязки и пешего графа. */
   yards?: { box: Box; paths: number[][]; pathIds?: number[] }[];
   ends: SidewalkEnd[];
   /** Где вдоль полотна тротуары: по id полотна (откосы там не рисуются — улица в городе спланирована). */
   spans: Map<number, SidewalkSpan[]>;
 }
 
-const gameWalks = new WeakMap<Game, { net: LaneNet; roadRev: number; plots: number; towns: number; layout: number; terrain: number; walks: SidewalkNet; pieces: SidewalkCache }>();
+const gameWalks = new WeakMap<Game, { net: LaneNet; roadRev: number; railRev: number; lots: number; paths: Game['footpaths']; plots: number; towns: number; layout: number; terrain: number; walks: SidewalkNet; pieces: SidewalkCache }>();
 
 /** Геометрия построенных тротуаров общая для карты, привязки инструмента и движения жителей. */
 export function gameSidewalks(game: Game): SidewalkNet {
   const net = game.roads.net;
   const old = gameWalks.get(game);
   const plots = game.index.version;
-  if (old?.net === net && old.roadRev === net.version && old.plots === plots && old.towns === game.townRev && old.layout === game.layoutRev && old.terrain === game.terrain.version) return old.walks;
+  if (old?.net === net && old.roadRev === net.version && old.railRev === game.net.version && old.lots === game.lotRev && old.paths === game.footpaths
+    && old.plots === plots && old.towns === game.townRev && old.layout === game.layoutRev && old.terrain === game.terrain.version) return old.walks;
   const pieces = old?.layout === game.layoutRev && old.terrain === game.terrain.version ? old.pieces : new Map();
   const walks = sidewalkNet(net, walkSite(game), pieces);
   walks.yards = game.towns.flatMap(town => {
     const yard = gameTownWalks(game, town);
-    return yard ? [{ box: yard.box, paths: [...yard.paths, ...yard.fronts.map(front => front.pts)], pathIds: yard.pathIds }] : [];
+    const groups = yard ? [{ box: yard.box, paths: [...yard.paths, ...yard.fronts.map(front => front.pts)], pathIds: yard.pathIds }] : [];
+    for (const park of town.parks ?? []) {
+      const open = game.openParkFootpaths(park);
+      if (!open.length) continue;
+      groups.push({
+        box: open.map(footpathBounds).reduce(unite),
+        paths: open.map(path => footpathPoints(path).flatMap(p => [p.x, p.y])),
+        pathIds: open.map(path => path.id),
+      });
+    }
+    return groups;
   });
-  gameWalks.set(game, { net, roadRev: net.version, plots, towns: game.townRev, layout: game.layoutRev, terrain: game.terrain.version, walks, pieces });
+  gameWalks.set(game, { net, roadRev: net.version, railRev: game.net.version, lots: game.lotRev, paths: game.footpaths, plots, towns: game.townRev, layout: game.layoutRev, terrain: game.terrain.version, walks, pieces });
   return walks;
 }
 

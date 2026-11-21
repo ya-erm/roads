@@ -5,8 +5,9 @@ import { footpathLength, nearestFootpath, type Footpath, type FootpathShape } fr
 import type { Game } from '../game/game';
 import type { ToolOverlay } from '../render/renderer';
 import { money } from './labels';
+import { ParkDecorEditor } from './parkDecorEditor';
 
-export type FootpathMode = DrawMode | 'move';
+export type FootpathMode = DrawMode | 'move' | 'decorate' | 'remove';
 type Geometry = Omit<Footpath, 'id'>;
 type Part = 'a' | 'b' | 'through' | 'c1' | 'c2' | 'body' | number;
 type Snap = (p: Vec, skipId?: number) => Vec;
@@ -46,7 +47,9 @@ function edit(path: Footpath, part: Part, pointer: Vec, from: Vec, snap: Snap): 
     if (shape?.kind === 'polyline') shape = { ...shape, via: shape.via.map(p => add(p, delta)) };
   } else if (part === 'a' || part === 'b') {
     const target = snap(pointer, path.id);
-    if (part === 'a') {
+    if (shape?.kind === 'polyline' && dist(a, b) < 0.015) {
+      a = b = target;
+    } else if (part === 'a') {
       if (shape?.kind === 'curve') shape = { ...shape, c1: add(shape.c1, sub(target, a)) };
       a = target;
     } else {
@@ -65,19 +68,21 @@ function edit(path: Footpath, part: Part, pointer: Vec, from: Vec, snap: Snap): 
 
 export class FootpathEditor {
   mode: FootpathMode = 'straight';
+  readonly decor = new ParkDecorEditor();
   private start: Vec | null = null;
   private control: Vec | null = null;
   private selected: number | null = null;
   private drag: (Picked & { from: Vec }) | null = null;
 
   clear(): void {
+    this.decor.cancel();
     this.start = this.control = null;
     this.selected = null;
     this.drag = null;
   }
 
   cancel(): boolean {
-    if (!this.start && !this.drag && this.selected === null) return false;
+    if (!this.decor.cancel() && !this.start && !this.drag && this.selected === null) return false;
     this.clear();
     return true;
   }
@@ -93,7 +98,15 @@ export class FootpathEditor {
   }
 
   down(game: Game, p: Vec, radius: number, snap: Snap): boolean {
+    if (this.mode === 'decorate' || this.mode === 'remove') return false;
     if (this.mode === 'move') {
+      const object = game.parkObjectAt(p);
+      if (object) {
+        this.selected = null;
+        this.decor.beginMove(object, p);
+        return false;
+      }
+      this.decor.cancel();
       const hit = this.pick(game.editableFootpaths(), p, radius);
       this.selected = hit?.path.id ?? null;
       this.drag = hit ? { ...hit, from: p } : null;
@@ -111,8 +124,25 @@ export class FootpathEditor {
     return { kind: 'curve', c1: p1, c2: p2 };
   }
 
-  up(game: Game, p: Vec, moved: boolean, began: boolean, snap: Snap): string | null {
+  removeAt(game: Game, p: Vec, radius: number): string | null {
+    const object = game.parkObjectAt(p);
+    if (object) return game.removeParkObject(object.park?.id ?? null, object.object.id);
+    const path = nearestFootpath(game.editableFootpaths(), p, Math.min(3, radius))?.path;
+    if (path) {
+      game.checkpoint('удаление дорожки');
+      game.removeFootpaths([path]);
+      game.commit();
+      this.selected = null;
+    }
+    return null;
+  }
+
+  up(game: Game, p: Vec, moved: boolean, began: boolean, snap: Snap, radius: number): string | null {
+    if (this.mode === 'decorate') return this.decor.place(game, p);
+    if (this.mode === 'remove') return moved ? null : this.removeAt(game, p, radius);
     if (this.mode === 'move') {
+      const object = this.decor.finishMove(game, p, moved);
+      if (object) return object.reason;
       const drag = this.drag;
       this.drag = null;
       if (!drag || !moved) return null;
@@ -132,11 +162,22 @@ export class FootpathEditor {
   }
 
   overlay(game: Game, p: Vec, radius: number, snap: Snap): Partial<ToolOverlay> {
+    const decor = this.decor.preview(game, p, this.mode === 'decorate');
+    if (decor) return decor;
+    if (this.mode === 'remove' || (this.mode === 'move' && !this.drag)) {
+      const object = game.parkObjectAt(p);
+      if (object) return this.decor.highlight(object, this.mode === 'remove');
+    }
+    if (this.mode === 'remove') {
+      const path = nearestFootpath(game.editableFootpaths(), p, Math.min(3, radius))?.path;
+      return path ? { footpath: { ...path, ok: false }, label: { text: 'Убрать дорожку', ok: true } }
+        : { label: { text: 'Выберите декорацию или дорожку', ok: true } };
+    }
     if (this.mode === 'move') {
       const paths = game.editableFootpaths();
       const hit = this.drag ?? this.pick(paths, p, radius);
       const path = hit?.path ?? paths.find(x => x.id === this.selected);
-      if (!path) return { label: { text: 'Выберите дорожку для переноса или правки формы', ok: true } };
+      if (!path) return this.decor.selectedOverlay(game) ?? { label: { text: 'Выберите декорацию, дорожку или её узел', ok: true } };
       const geom = this.drag ? edit(path, this.drag.part, p, this.drag.from, snap) : path;
       const plan = this.drag && game.footpathPlan(geom.a, geom.b, geom.shape, path.id, this.drag.part === 'a' || this.drag.part === 'b');
       const ok = !plan?.reason;
@@ -161,6 +202,7 @@ export class FootpathEditor {
     if (this.start) points.push({ pos: this.start, color: '#2f80ed', r: 4 });
     if (this.control) points.push({ pos: this.control, color: '#f2994a', r: 4 });
     const prompt = !this.start ? 'Укажите начало дорожки' : awaitingControl ? (this.mode === 'arc' ? 'Укажите точку на дуге' : 'Укажите изгиб кривой') : 'Укажите конец дорожки · Esc — закончить';
-    return { points, footpath: path ? { ...path, ...(plan?.surface && { surface: plan.surface }), ok } : undefined, label: { text: plan && path ? plan.reason ?? `${Math.round(footpathLength(path))} м · ${money(plan.cost)}` : prompt, ok } };
+    const width = plan?.changes.get(-1)?.width;
+    return { points, footpath: path ? { ...path, ...(plan?.surface && { surface: plan.surface }), ...(width && { width }), ok } : undefined, label: { text: plan && path ? plan.reason ?? `${Math.round(footpathLength(path))} м · ${money(plan.cost)}` : prompt, ok } };
   }
 }

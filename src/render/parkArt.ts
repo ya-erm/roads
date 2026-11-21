@@ -3,6 +3,7 @@ import { dist, type Vec } from '../core/vec';
 import { CORNER_CUT_MAX } from '../lanes/geometry';
 import type { Corridor, LaneNet, LaneNode } from '../lanes/model';
 import type { Town, TownPark } from '../world/entities';
+import { DECOR_SIZE, PROMENADE_WIDTH, parkToWorld, type ParkObject, type ParkParts, type ParkPath } from '../world/parkParts';
 import { inPolygon, junctionPlate, polyDist } from '../world/lotClear';
 import { ROAD_MARGIN } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
@@ -396,6 +397,51 @@ function layoutOf(p: TownPark): Layout {
   return layout;
 }
 
+const generatedParts = new WeakMap<Layout, ParkParts>();
+
+/** Разбираем ту же раскладку из зерна, по которой рисовались старые сохранения. */
+export function parkParts(p: TownPark): ParkParts {
+  const L = layoutOf(p);
+  let base = generatedParts.get(L);
+  if (!base) {
+    const objects: ParkObject[] = [];
+    const take = (kind: ParkObject['kind'], x: number, y: number, size: number, angle = 0, extra?: Partial<ParkObject>) =>
+      objects.push({ id: objects.length + 1, kind, pos: { x, y }, angle, size, ...extra });
+    for (const q of L.ponds) take('pond', q.x, q.y, q.rx, 0, { depth: q.ry, seed: p.id });
+    for (const q of L.beds) take('flowerbed', q.x, q.y, q.rx, q.rot, { depth: q.ry, seed: p.id * 7 + Math.round(q.x * 3 + q.y) });
+    for (const q of L.fountains) take('fountain', q.x, q.y, q.r);
+    for (const q of L.playgrounds) take('playground', q.x + q.s / 2, q.y + q.s / 2, q.s, 0, { seed: p.id + q.x });
+    for (const q of L.statues) take('statue', q.x, q.y, q.s);
+    if (L.obelisk) take('obelisk', L.obelisk.x, L.obelisk.y, 2.4);
+    for (const q of L.trees) {
+      const variant = q.k < 0 ? -(1 + Math.floor(hash(p.id, Math.round(q.x * 13 + q.y)) * FIRS.length)) : q.k;
+      take('tree', q.x, q.y, q.r, 0, { variant });
+    }
+    for (const q of L.benches) take('bench', q.x, q.y, 1, Math.atan2(q.uy, q.ux) + (q.side < 0 ? Math.PI : 0));
+    if (LAMPS_ON) for (const q of L.lamps) take('lamp', q.x, q.y, 0.38);
+    const paths: ParkPath[] = L.paths.map((line, i) => {
+      const points: Vec[] = [];
+      for (let k = 0; k < line.length; k += 2) points.push({ x: line[k], y: line[k + 1] });
+      return { id: i + 1, points, width: L.pw };
+    });
+    if (L.promenade) {
+      const y = p.fp.h / 2 - 3.25;
+      paths.push({ id: paths.length + 1, points: [{ x: -p.fp.w / 2, y }, { x: p.fp.w / 2, y }], width: PROMENADE_WIDTH, surface: 'paved', promenade: true });
+    }
+    generatedParts.set(L, base = { objects, paths });
+  }
+  return p.edits ? { objects: p.edits.objects ?? base.objects, paths: p.edits.paths ?? base.paths } : base;
+}
+
+export function parkWorldPaths(p: TownPark): ParkPath[] {
+  return parkParts(p).paths.map(path => {
+    const world = (q: Vec) => parkToWorld(p, q);
+    const shape = path.shape;
+    return { ...path, points: path.points.map(world), shape: !shape ? undefined : shape.kind === 'arc' ? { kind: 'arc', through: world(shape.through) }
+      : shape.kind === 'curve' ? { kind: 'curve', c1: world(shape.c1), c2: world(shape.c2) } : { kind: 'polyline', via: shape.via.map(world) } };
+  });
+}
+
 /** Что есть в парке — по той же раскладке, что рисуется на карте (карточка парка, ui/parkCard.ts). */
 export interface ParkContents {
   fountains: number;
@@ -403,12 +449,14 @@ export interface ParkContents {
   /** Памятники и бюсты на постаменте. */
   statues: number;
   /** Обелиск с вечным огнём (сквер с памятником). */
-  obelisk: boolean;
+  obelisk: number;
   playgrounds: number;
   beds: number;
   trees: number;
   benches: number;
   lamps: number;
+  bins: number;
+  kiosks: number;
   /** Прогулочная полоса с парапетом у воды (набережная). */
   promenade: boolean;
   /** Весь участок мощёный (площадь). */
@@ -416,38 +464,40 @@ export interface ParkContents {
 }
 
 export function parkContents(p: TownPark): ParkContents {
-  const L = layoutOf(p);
+  const parts = parkParts(p);
+  const totals = new Map<ParkObject['kind'], number>();
+  for (const item of parts.objects) totals.set(item.kind, (totals.get(item.kind) ?? 0) + 1);
+  const count = (kind: ParkObject['kind']) => totals.get(kind) ?? 0;
   return {
-    fountains: L.fountains.length,
-    ponds: L.ponds.length,
-    statues: L.statues.length,
-    obelisk: !!L.obelisk,
-    playgrounds: L.playgrounds.length,
-    beds: L.beds.length,
-    trees: L.trees.length,
-    benches: L.benches.length,
-    // Фонари пока не рисуются (LAMPS_ON) — и в карточке их нет.
-    lamps: LAMPS_ON ? L.lamps.length : 0,
-    promenade: L.promenade,
-    paved: L.paved,
+    fountains: count('fountain'),
+    ponds: count('pond'),
+    statues: count('statue'),
+    obelisk: count('obelisk'),
+    playgrounds: count('playground'),
+    beds: count('flowerbed'),
+    trees: count('tree'),
+    benches: count('bench'),
+    lamps: count('lamp'),
+    bins: count('bin'),
+    kiosks: count('kiosk'),
+    promenade: parts.paths.some(path => path.promenade),
+    paved: p.kind === 'plaza',
   };
 }
 
 /**
  * Входы парка или сквера: концы его дорожек у края участка — точка в мире и направление наружу (по нормали к ближней
- * стороне). От них дорожки ведут к тротуару ближней улицы (render/townWalks.ts). У площади и набережной входов нет —
- * они сами у тротуара.
+ * стороне). От них дорожки ведут к тротуару ближней улицы (render/townWalks.ts), в том числе с концов прогулочной
+ * полосы набережной и с построенных игроком дорожек на площади.
  */
 export function parkGates(p: TownPark): { x: number; y: number; ux: number; uy: number }[] {
-  if (p.kind === 'plaza' || p.kind === 'embankment') return [];
   const { w: W, h: H } = p.fp;
   const c = Math.cos(p.fp.angle);
   const s = Math.sin(p.fp.angle);
   const out: { x: number; y: number; ux: number; uy: number }[] = [];
-  for (const path of layoutOf(p).paths) {
-    for (const i of [0, path.length - 2]) {
-      const x = path[i];
-      const y = path[i + 1];
+  for (const path of parkParts(p).paths) {
+    if (path.points.length < 2) continue;
+    for (const { x, y } of [path.points[0], path.points[path.points.length - 1]]) {
       const dx = W / 2 - Math.abs(x);
       const dy = H / 2 - Math.abs(y);
       if (Math.min(dx, dy) > 2.5) continue;
@@ -474,7 +524,7 @@ export interface StreetGreen {
 }
 
 /** Маска для фигур на тротуаре. В клетки заносятся точные круги крон с запасом на ширину фигуры. */
-export function streetCanopyMask(lines: readonly StreetGreen[]) {
+export function streetCanopyMask(lines: readonly Pick<StreetGreen, 'trees'>[]) {
   const cell = 20;
   const margin = 2;
   const cells = new Map<string, { x: number; y: number; r: number }[]>();
@@ -724,9 +774,7 @@ export const FOUNTAIN_ZOOM = 1.6;
 
 /** Фонтаны парка в мире: середина и радиус чаши. */
 export function parkFountains(p: TownPark): { x: number; y: number; r: number }[] {
-  const c = Math.cos(p.fp.angle);
-  const s = Math.sin(p.fp.angle);
-  return layoutOf(p).fountains.map((f) => ({ x: p.fp.center.x + f.x * c - f.y * s, y: p.fp.center.y + f.x * s + f.y * c, r: f.r }));
+  return parkParts(p).objects.filter(o => o.kind === 'fountain').map(o => ({ ...parkToWorld(p, o.pos), r: o.size ?? 3 }));
 }
 
 /**
@@ -756,6 +804,84 @@ export function drawFountainRipples(ctx: CanvasRenderingContext2D, list: readonl
 /** Насколько рисунок парка выходит за его участок (тени деревьев, обелиска), м — для рамки в кэше карты. */
 export const PARK_REACH = 7;
 
+function objectPass(a: Art, object: ParkObject, fine: boolean, trees: readonly string[]): void {
+  const { kind, size = DECOR_SIZE[object.kind], seed = object.id, variant = 0 } = object;
+  const c = a.c;
+  if (!a.lod && kind !== 'tree' && kind !== 'pond' && kind !== 'kiosk') return;
+  switch (kind) {
+    case 'tree':
+      if (!a.lod) {
+        if (a.pass === 2) { c.fillStyle = trees[0] ?? TREES[0]; disc(c, 0, 0, size * 1.15); }
+      } else a.tree(0, 0, size, variant < 0 ? FIRS[(-variant - 1) % FIRS.length] : trees[variant % trees.length]);
+      break;
+    case 'pond': {
+      if (a.pass !== 0) break;
+      const ry = object.depth ?? size * 0.7;
+      if (!a.lod) {
+        c.fillStyle = WATER;
+        c.beginPath(); c.ellipse(0, 0, size, ry, 0, 0, Math.PI * 2); c.fill();
+        break;
+      }
+      a.stain(0, 0, size, ry, WATER, seed % 97, 0.18, a.d ? '#b9b19a' : undefined);
+      if (fine) {
+        c.strokeStyle = '#6f8f4a'; c.lineWidth = 0.18; c.beginPath();
+        for (let k = 0; k < 10; k++) {
+          const t = hash(seed, 60 + k) * Math.PI * 2;
+          const x = Math.cos(t) * size * 0.92, y = Math.sin(t) * ry * 0.92;
+          c.moveTo(x, y); c.lineTo(x + 0.3, y - 0.8);
+        }
+        c.stroke();
+      }
+      break;
+    }
+    case 'flowerbed': flowerbed(a, 0, 0, size, object.depth ?? size, seed, fine); break;
+    case 'fountain': fountain(a, 0, 0, size, fine); break;
+    case 'playground': playground(a, -size / 2, -size / 2, size, seed, fine); break;
+    case 'statue': statue(a, 0, 0, size); break;
+    case 'obelisk': obelisk(a, 0, 0, size, 12, true, fine); break;
+    case 'bench': bench(a, 0, 0, 1, 0); break;
+    case 'lamp': lamp(a, 0, 0, fine, true); break;
+    case 'bin':
+      if (a.pass === 1) a.capsule(0, 0, size, 0.95);
+      if (a.pass === 2) {
+        c.fillStyle = '#4d665b'; disc(c, 0, 0, size);
+        c.fillStyle = '#273a34'; disc(c, 0, 0, size * 0.62);
+      }
+      break;
+    case 'kiosk':
+      a.box(-size / 2, -size * 0.4, size, size * 0.8, 2.8, '#b76549');
+      if (a.pass === 2 && a.d) {
+        c.fillStyle = '#f0d7a5'; c.fillRect(-size / 2, size * 0.19, size, size * 0.22);
+        c.fillStyle = '#b4543e';
+        for (let i = 0; i < 6; i += 2) c.fillRect(-size / 2 + i * size / 6, size * 0.19, size / 6, size * 0.22);
+      }
+      break;
+  }
+}
+
+function objectScene(ctx: CanvasRenderingContext2D, o: ParkObject, zoom: number, baseAngle: number, trees: readonly string[]) {
+  const fp = { center: o.pos, w: 1, h: 1, angle: baseAngle + o.angle };
+  const a = new Art(ctx, { id: o.id, fp }, zoom, 0, o.seed ?? o.id, 'still');
+  return (pass: 0 | 1 | 2) => {
+    ctx.save();
+    ctx.translate(o.pos.x, o.pos.y);
+    ctx.rotate(o.angle);
+    a.pass = pass;
+    objectPass(a, o, zoom > PARK_FINE, trees);
+    ctx.restore();
+  };
+}
+
+/** Предмет отдельно на карте или в предпросмотре редактора (в мировых координатах). */
+export function drawParkObject(ctx: CanvasRenderingContext2D, o: ParkObject, zoom: number, trees: readonly string[] = TREES): void {
+  const draw = objectScene(ctx, o, zoom, 0, trees);
+  draw(0);
+  if (zoom > 0.25) {
+    ctx.beginPath(); draw(1); ctx.fillStyle = 'rgba(30,40,25,0.2)'; ctx.fill();
+  }
+  draw(2);
+}
+
 /** Парк, сквер или набережная — сцена в осях участка, три прохода. trees — цвета деревьев биома. */
 export function drawParkArt(ctx: CanvasRenderingContext2D, park: TownPark, zoom: number, trees: readonly string[] = TREES): void {
   const L = layoutOf(park);
@@ -765,7 +891,19 @@ export function drawParkArt(ctx: CanvasRenderingContext2D, park: TownPark, zoom:
   const a = new Art(ctx, { id: park.id, fp }, zoom, 0, park.id, 'still');
   const fine = zoom > PARK_FINE;
   const c = ctx;
-  const color = (t: Tree) => (t.k < 0 ? FIRS[Math.floor(hash(park.id, Math.round(t.x * 13 + t.y)) * FIRS.length)] : trees[t.k % trees.length]);
+  const parts = parkParts(park);
+  const promenade = parts.paths.some(p => p.promenade);
+  const treeList = parts.objects.filter(o => o.kind === 'tree');
+  const objects = parts.objects.filter(o => a.lod || o.kind !== 'tree' || (o.size ?? 0) > 2.4 || treeList.length < 30)
+    .map(o => objectScene(ctx, o, zoom, fp.angle, trees));
+  const drawPaths = () => {
+    if (!park.edits?.paths) return paths(a, L.paths, L.pw + (a.lod ? 0 : 1.4));
+    for (const part of ['edge', 'fill'] as const) for (const p of parts.paths) {
+      if (p.promenade) continue; // Исходную полосу рисуем плитами вровень с парапетом, ниже.
+      const line = p.points.flatMap(q => [q.x, q.y]);
+      paths(a, [line], p.width + (a.lod ? 0 : 1.4), p.surface === 'paved' ? PAVING : undefined, undefined, part);
+    }
+  };
   ctx.save();
   ctx.translate(fp.center.x, fp.center.y);
   ctx.rotate(fp.angle);
@@ -803,11 +941,13 @@ export function drawParkArt(ctx: CanvasRenderingContext2D, park: TownPark, zoom:
           c.stroke();
           // Приствольные круги у деревьев.
           c.fillStyle = 'rgba(120,100,70,0.35)';
-          for (const t of L.trees) disc(c, t.x, t.y, 1.3);
+          for (const t of treeList) disc(c, t.pos.x, t.pos.y, 1.3);
         }
       } else if (L.promenade) {
-        c.fillStyle = PAVING;
-        c.fillRect(-W / 2, H / 2 - 5.6, W, 5.6);
+        if (promenade) {
+          c.fillStyle = PAVING;
+          c.fillRect(-W / 2, H / 2 - 5.6, W, 5.6);
+        }
         if (a.lod) {
           c.fillStyle = STONE;
           c.fillRect(-W / 2, H / 2 - 0.9, W, 0.9);
@@ -817,7 +957,7 @@ export function drawParkArt(ctx: CanvasRenderingContext2D, park: TownPark, zoom:
           c.strokeStyle = 'rgba(150,140,120,0.35)';
           c.lineWidth = 0.12;
           c.beginPath();
-          for (let x = -W / 2 + 2; x < W / 2; x += 2) (c.moveTo(x, H / 2 - 5.6), c.lineTo(x, H / 2 - 0.9));
+          if (promenade) for (let x = -W / 2 + 2; x < W / 2; x += 2) (c.moveTo(x, H / 2 - 5.6), c.lineTo(x, H / 2 - 0.9));
           c.stroke();
           c.strokeStyle = '#a49c8a';
           c.lineWidth = 0.18;
@@ -835,20 +975,12 @@ export function drawParkArt(ctx: CanvasRenderingContext2D, park: TownPark, zoom:
       }
       if (!a.lod) {
         // Издали — газон и пятна крон, дорожки и вода — только у большого парка.
-        if (W >= 40) paths(a, L.paths, L.pw + 1.4);
-        c.fillStyle = trees[0] ?? TREES[0];
-        for (const t of L.trees) if (t.r > 2.4 || L.trees.length < 30) disc(c, t.x, t.y, t.r * 1.15);
-        for (const p of L.ponds) {
-          c.fillStyle = WATER;
-          c.beginPath();
-          c.ellipse(p.x, p.y, p.rx, p.ry, 0, 0, Math.PI * 2);
-          c.fill();
-        }
+        if (W >= 40) drawPaths();
+        for (const draw of objects) draw(pass);
         continue;
       }
-      for (const p of L.ponds) a.stain(p.x, p.y, p.rx, p.ry, WATER, park.id % 97, 0.18, a.d ? '#b9b19a' : undefined);
       for (const d of L.pads) a.patch(d.x, d.y, d.w, d.h, d.color, 0.6);
-      paths(a, L.paths, L.pw);
+      drawPaths();
       for (const p of L.plazas) {
         c.fillStyle = PAVING;
         disc(c, p.x, p.y, p.r);
@@ -861,30 +993,7 @@ export function drawParkArt(ctx: CanvasRenderingContext2D, park: TownPark, zoom:
         }
       }
     }
-    for (const b of L.beds) flowerbed(a, b.x, b.y, b.rx, b.ry, park.id * 7 + Math.round(b.x * 3 + b.y), fine, b.rot);
-    for (const f of L.fountains) fountain(a, f.x, f.y, f.r, fine);
-    for (const g of L.playgrounds) playground(a, g.x, g.y, g.s, park.id + g.x, fine);
-    for (const s of L.statues) statue(a, s.x, s.y, s.s);
-    if (L.obelisk) obelisk(a, L.obelisk.x, L.obelisk.y, 2.4, 12, true, fine);
-    if (pass === 0 && a.d && L.ponds.length && fine) {
-      // Камыш у берега пруда.
-      c.strokeStyle = '#6f8f4a';
-      c.lineWidth = 0.18;
-      for (const p of L.ponds) {
-        c.beginPath();
-        for (let k = 0; k < 10; k++) {
-          const t = hash(park.id, 60 + k) * Math.PI * 2;
-          const x = p.x + Math.cos(t) * p.rx * 0.92;
-          const y = p.y + Math.sin(t) * p.ry * 0.92;
-          c.moveTo(x, y);
-          c.lineTo(x + 0.3, y - 0.8);
-        }
-        c.stroke();
-      }
-    }
-    if (pass !== 0) for (const t of L.trees) a.tree(t.x, t.y, t.r, color(t));
-    for (const b of L.benches) bench(a, b.x, b.y, b.ux, b.uy, b.side);
-    for (const l of L.lamps) lamp(a, l.x, l.y, fine);
+    for (const draw of objects) draw(pass);
     if (pass === 1) {
       c.fillStyle = 'rgba(30,40,25,0.2)';
       c.fill();

@@ -4,6 +4,7 @@ import type { Anchor } from '../lanes/edit';
 import type { CargoType, IndustryKind, IndustryType } from './cargo';
 import type { Receiver } from './retail';
 import type { Footprint } from './spatial';
+import type { ParkParts } from './parkParts';
 
 export interface TownBuilding {
   type: 'building';
@@ -115,6 +116,8 @@ export interface TownDistrict {
 export type ParkKind = 'park' | 'square' | 'plaza' | 'memorial' | 'embankment';
 
 export interface TownPark {
+  /** Только изменённые игроком слои. Остальное воспроизводится по id и размерам участка. */
+  edits?: Partial<ParkParts>;
   /** id города × 100 + номер: зерно раскладки дорожек и деревьев (хеш), ключ в кэше карты. Не id сущности. */
   id: number;
   kind: ParkKind;

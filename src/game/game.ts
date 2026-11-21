@@ -76,6 +76,9 @@ import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placePa
 import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
 import { FOOTPATH, footpathInBox, footpathLength, footpathPoints, footpathWidth, nearestFootpath, overlapsFootpath, pathCrossesRoad, pathFootprint, type Footpath, type FootpathShape } from './footpaths';
 import { yardPaths } from '../world/yardPaths';
+import { parkParts } from '../render/parkArt';
+import { decorRadius, defaultParkObject, PROMENADE_WIDTH, worldToPark, type DecorKind, type ParkObject } from '../world/parkParts';
+import { nearestDecor, worldParkFootpaths, worldParkObject, writeParkPaths } from './parkEditing';
 import { buildingFrontage, planStreetHouses, type HouseMove, type StreetPart } from '../world/streetHouses';
 import { resizeBuildingFootprint, type BuildingCorner } from '../world/buildingResize';
 import { streetBase, turnableBuilding, turnReach, wrapTurn } from '../world/moveTurn';
@@ -414,6 +417,8 @@ function roundaboutFee(R: number, lanes: number): number {
 
 /** Снимок построек до действия игрока — для Ctrl+Z. */
 interface UndoSnapshot {
+  decorations: ParkObject[];
+  decorRev: number;
   footpaths: Footpath[];
   hiddenYardPaths: ReadonlySet<number>;
   label: string;
@@ -425,7 +430,7 @@ interface UndoSnapshot {
   stations: SaveData['stations'];
   buildings: { townId: number; list: TownBuilding[] }[];
   /** Места парков городов (перенос парка, площадь, что уехала с ратушей); нет в старых снимках. */
-  parks?: { townId: number; list: Pick<TownPark, 'id' | 'fp' | 'moved' | 'turn'>[] }[];
+  parks?: { townId: number; list: Pick<TownPark, 'id' | 'fp' | 'moved' | 'turn' | 'edits'>[] }[];
   /** Пристройки предприятий и уровень, который они дали (нет в старых снимках). */
   industries?: { id: number; level?: number; streak?: number; annexes?: Annex[] }[];
   roundabouts: [number, Vec][];
@@ -623,6 +628,7 @@ export interface RoadSpot {
 }
 
 export interface SaveData {
+  decorations?: ParkObject[];
   footpaths?: Footpath[];
   hiddenYardPaths?: number[];
   version: number;
@@ -1001,6 +1007,9 @@ export class Game implements BuildContext {
   private accumulator = 0;
   private nextEntityId = 1;
   footpaths: Footpath[] = [];
+  decorations: ParkObject[] = [];
+  decorRev = 0;
+  private readonly openParkPaths = new WeakMap<TownPark, { paths: Footpath[]; version: string; open: Footpath[] }>();
   hiddenYardPaths: ReadonlySet<number> = new Set();
   private editablePathCache?: { manual: Footpath[]; townRev: number; layoutRev: number; hidden: ReadonlySet<number>; all: Footpath[] };
   private pathAccess?: { paths: Footpath[]; roads: LaneNet; version: string; open: Footpath[] };
@@ -1241,6 +1250,7 @@ export class Game implements BuildContext {
       upkeep: { at: this.upkeepAt, ...this.upkeepDue },
       nextEntityId: this.nextEntityId,
       footpaths: this.footpaths.length ? this.footpaths : undefined,
+      decorations: this.decorations.length ? this.decorations : undefined,
       hiddenYardPaths: this.hiddenYardPaths.size ? [...this.hiddenYardPaths] : undefined,
       extraForests: this.terrain.extraForests,
       net: this.net.serialize(),
@@ -1431,6 +1441,7 @@ export class Game implements BuildContext {
    */
   private restore(save: SaveData): void {
     this.footpaths = save.footpaths ?? [];
+    this.decorations = save.decorations ?? [];
     this.hiddenYardPaths = new Set(save.hiddenYardPaths ?? []);
     for (const f of save.extraForests) this.terrain.addForest(f.c, f.r, this.rng);
     for (const e of save.terraform ?? []) this.terrain.terraform(e);
@@ -3114,7 +3125,7 @@ export class Game implements BuildContext {
   editableFootpaths(): Footpath[] {
     const cached = this.editablePathCache;
     if (cached && cached.manual === this.footpaths && cached.townRev === this.townRev && cached.layoutRev === this.layoutRev && cached.hidden === this.hiddenYardPaths) return cached.all;
-    const all = this.footpaths.concat(this.towns.flatMap(t => this.townFootpaths(t)));
+    const all = this.footpaths.concat(this.towns.flatMap(t => this.townFootpaths(t).concat((t.parks ?? []).flatMap(park => this.parkFootpaths(park)))));
     this.editablePathCache = { manual: this.footpaths, townRev: this.townRev, layoutRev: this.layoutRev, hidden: this.hiddenYardPaths, all };
     return all;
   }
@@ -3126,12 +3137,58 @@ export class Game implements BuildContext {
     this.townRev++;
   }
 
+  parkFootpaths(park: TownPark): Footpath[] {
+    return worldParkFootpaths(park);
+  }
+
+  openParkFootpaths(park: TownPark): Footpath[] {
+    const paths = this.parkFootpaths(park);
+    const radius = footprintRadius(park.fp);
+    const version = [this.roads.net.version, this.net.version, this.index.nearVersion(park.fp.center, radius + 120), this.lotRev, this.terrain.version].join(':');
+    const cached = this.openParkPaths.get(park);
+    if (cached?.paths === paths && cached.version === version) return cached.open;
+    // Город размещает парк на свободном участке. Детально проверяем пути, только когда участок пересечён постройкой.
+    const occupied = this.index.overlaps(park.fp) || this.lotUnder(park.fp) || this.roadUnder(park.fp, -0.1);
+    const open = occupied ? paths.filter(path => !this.footpathObstruction(path, false)) : paths;
+    this.openParkPaths.set(park, { paths, version, open });
+    return open;
+  }
+
+  /** Сменить хозяина дорожки при переносе. Целая дорожка внутри парка следует за поворотом участка. */
+  private applyFootpaths(changes: ReadonlyMap<number, Footpath>, remove: readonly Footpath[]): void {
+    const ids = new Set(remove.map(path => path.id));
+    const perPark = new Map<TownPark, Footpath[]>();
+    for (const path of remove) {
+      const old = path.parkId !== undefined && this.parkById(path.parkId)?.park;
+      if (old) perPark.set(old, []);
+    }
+    this.hideYardPaths(remove.filter(path => path.parkId === undefined && path.id < 0 && path.id > -(2 ** 40)).map(path => path.id));
+    const outside = new Map(this.footpaths.map(path => [path.id, path]));
+    for (const path of remove) if (!changes.has(path.id)) outside.delete(path.id);
+    for (const path of changes.values()) {
+      const park = this.parkIndex.at(this.towns, path.a, 0.01)?.park;
+      if (park && footpathPoints(path).every(p => pointInFootprint(p, park.fp, 0.01))) {
+        outside.delete(path.id);
+        const list = perPark.get(park) ?? [];
+        list.push(path);
+        perPark.set(park, list);
+      } else {
+        const { parkId: _owner, ...geometry } = path;
+        outside.set(path.id, geometry);
+      }
+    }
+    for (const [park, paths] of perPark) writeParkPaths(park, ids, paths);
+    if (perPark.size) this.decorRev++;
+    this.footpaths = [...outside.values()];
+  }
+
   private planFootpaths(a: Vec, b: Vec, shape?: FootpathShape, editId?: number, linked = false) {
     const all = this.editableFootpaths();
     const original = editId === undefined ? undefined : all.find(path => path.id === editId);
     const edited: Footpath = { id: editId ?? -1, a, b, ...(shape && { shape }) };
     const source = original ?? nearestFootpath(all, a, 0.02)?.path ?? nearestFootpath(all, b, 0.02)?.path;
     if (source?.surface) edited.surface = source.surface;
+    if (source?.width) edited.width = source.width;
     const changes = new Map([[edited.id, edited]]);
     if (editId !== undefined && !original) return { changes, cost: 0, reason: 'Нет дорожки' };
     if (linked && original) {
@@ -3161,7 +3218,8 @@ export class Game implements BuildContext {
       if (!line.every(p => this.inBounds(p, 1))) return { changes, cost, reason: 'За краем карты' };
       if (footpathLength(path) < FOOTPATH.minLength) return { changes, cost, reason: 'Дорожка короче 2 м' };
       if (overlapsFootpath(other, path)) return { changes, cost, reason: 'Здесь уже есть дорожка' };
-      const reason = this.footpathObstruction(path);
+      const previous = all.find(p => p.id === path.id);
+      const reason = this.footpathObstruction(path, true, previous?.parkId !== undefined ? previous : undefined);
       if (reason) return { changes, cost, reason };
       other.push(path);
     }
@@ -3175,8 +3233,9 @@ export class Game implements BuildContext {
     return { changes, cost, reason, surface: changes.get(editId ?? -1)?.surface };
   }
 
-  private footpathObstruction(path: Footpath): string | null {
+  private footpathObstruction(path: Footpath, checkDecor = true, previous?: Footpath): string | null {
     const line = footpathPoints(path);
+    if (checkDecor && this.pathDecorBlocker(line, footpathWidth(path), previous)) return 'Мешает предмет благоустройства';
     for (let i = 1; i < line.length; i++) {
       const obstacle = this.footpathSpanObstruction(line[i - 1], line[i], footpathWidth(path));
       if (obstacle) return obstacle;
@@ -3216,7 +3275,7 @@ export class Game implements BuildContext {
   openFootpaths(): Footpath[] {
     if (!this.footpaths.length) return this.footpaths;
     const roads = this.roads.net;
-    const version = `${roads.version}:${this.net.version}:${this.index.version}:${this.lotRev}:${this.terrain.version}`;
+    const version = `${roads.version}:${this.net.version}:${this.index.version}:${this.lotRev}:${this.terrain.version}:${this.decorRev}:${this.layoutRev}`;
     if (this.pathAccess?.paths === this.footpaths && this.pathAccess.roads === roads && this.pathAccess.version === version) return this.pathAccess.open;
     const open = this.footpaths.filter(p => !this.footpathObstruction(p));
     this.pathAccess = { paths: this.footpaths, roads, version, open };
@@ -3224,10 +3283,11 @@ export class Game implements BuildContext {
   }
 
   buildFootpath(a: Vec, b: Vec, shape?: FootpathShape): string | null {
-    const { cost, reason, surface } = this.footpathPlan(a, b, shape);
+    const { cost, reason, changes } = this.planFootpaths(a, b, shape);
     if (reason) return reason;
     this.checkpoint('пешеходная дорожка');
-    this.footpaths = [...this.footpaths, { id: this.nextId(), a, b, ...(shape && { shape }), ...(surface && { surface }) }];
+    const path = { ...changes.get(-1)!, id: this.nextId() };
+    this.applyFootpaths(new Map([[path.id, path]]), []);
     this.spend(cost);
     this.commit();
     return null;
@@ -3237,9 +3297,7 @@ export class Game implements BuildContext {
     const { cost, reason, changes } = this.planFootpaths(a, b, shape, id, linked);
     if (reason) return reason;
     this.checkpoint('правка пешеходной дорожки');
-    const materialized = [...changes.values()].filter(path => path.id < 0 && !this.hiddenYardPaths.has(path.id));
-    this.hideYardPaths(materialized.map(path => path.id));
-    this.footpaths = this.footpaths.map(path => changes.get(path.id) ?? path).concat(materialized);
+    this.applyFootpaths(changes, this.editableFootpaths().filter(path => changes.has(path.id)));
     this.spend(cost);
     this.commit();
     return null;
@@ -3257,11 +3315,9 @@ export class Game implements BuildContext {
   /** Вызывается внутри общего шага сноса, в том числе при сносе рамкой. */
   removeFootpaths(paths: readonly Footpath[]): void {
     const ids = new Set(paths.map(p => p.id));
-    this.hideYardPaths(ids);
-    for (const path of this.footpaths) {
-      if (ids.has(path.id)) this.refund(this.footpathWorth(path));
-    }
-    this.footpaths = this.footpaths.filter(p => !ids.has(p.id));
+    const remove = this.editableFootpaths().filter(path => ids.has(path.id));
+    for (const path of remove) this.refund(this.footpathWorth(path));
+    this.applyFootpaths(new Map(), remove);
   }
 
   /** Снос одного здания игроком. */
@@ -5066,6 +5122,8 @@ export class Game implements BuildContext {
   private captureBuilt(label: string): UndoSnapshot {
     return {
       footpaths: this.footpaths,
+      decorations: this.decorations,
+      decorRev: this.decorRev,
       hiddenYardPaths: this.hiddenYardPaths,
       label,
       roads: this.roads.net.clone(),
@@ -5074,7 +5132,7 @@ export class Game implements BuildContext {
       version: this.net.version,
       stations: [...this.stations.values()].map((s) => structuredClone(this.stationToSave(s))),
       buildings: this.towns.map((t) => ({ townId: t.id, list: t.buildings.map((b) => structuredClone(b)) })),
-      parks: this.towns.filter((t) => t.parks?.length).map((t) => ({ townId: t.id, list: t.parks!.map((k) => ({ id: k.id, fp: structuredClone(k.fp), moved: k.moved, turn: k.turn })) })),
+      parks: this.towns.filter((t) => t.parks?.length).map((t) => ({ townId: t.id, list: t.parks!.map((k) => ({ id: k.id, fp: structuredClone(k.fp), moved: k.moved, turn: k.turn, edits: k.edits })) })),
       industries: this.industries.map((i) => ({ id: i.id, level: i.level, streak: i.streak, annexes: i.annexes && structuredClone(i.annexes) })),
       roundabouts: [...this.roundaboutCenters].map(([id, c]) => [id, { ...c }]),
       terraform: this.terrain.edits.length,
@@ -5134,6 +5192,7 @@ export class Game implements BuildContext {
     if (!top) return;
     const changed =
       top.footpaths !== this.footpaths ||
+      top.decorRev !== this.decorRev ||
       top.hiddenYardPaths !== this.hiddenYardPaths ||
       top.version !== this.net.version ||
       top.roadsVersion !== this.roads.net.version ||
@@ -5277,6 +5336,8 @@ export class Game implements BuildContext {
    */
   private restoreBuilt(snap: UndoSnapshot, drop?: { townId: number; ids: number[] }[]): void {
     this.footpaths = snap.footpaths;
+    this.decorations = snap.decorations;
+    this.decorRev++;
     this.hiddenYardPaths = snap.hiddenYardPaths;
     const railSave = this.rail.serialize();
     this.rail.clearTrains();
@@ -5408,7 +5469,9 @@ export class Game implements BuildContext {
       let moved = false;
       for (const s of list) {
         const live = town.parks.find((k) => k.id === s.id);
-        if (!live || (sameFootprint(live.fp, s.fp) && live.moved === s.moved && live.turn === s.turn)) continue;
+        if (!live || (sameFootprint(live.fp, s.fp) && live.moved === s.moved && live.turn === s.turn && live.edits === s.edits)) continue;
+        if (s.edits) live.edits = s.edits;
+        else delete live.edits;
         live.fp = structuredClone(s.fp);
         if (s.moved) live.moved = true;
         else delete live.moved;
@@ -13399,6 +13462,139 @@ export class Game implements BuildContext {
 
   /** Сетка парков для выбора мышью (world/parkPick.ts): пересобирается, только когда у городов сменились парки. */
   private readonly parkIndex = new ParkIndex();
+
+  private decorNear(p: Vec, radius: number): { park: TownPark | null; object: ParkObject }[] {
+    const nearby = this.decorations.filter(o => dist(o.pos, p) <= radius + decorRadius(o)).map(object => ({ park: null as TownPark | null, object }));
+    for (const town of this.towns) for (const park of town.parks ?? []) {
+      if (dist(park.fp.center, p) > radius + footprintRadius(park.fp) + 10) continue;
+      const local = worldToPark(park, p);
+      for (const o of parkParts(park).objects) {
+        if (dist(o.pos, local) <= radius + decorRadius(o)) nearby.push({ park, object: worldParkObject(park, o) });
+      }
+    }
+    return nearby;
+  }
+
+  parkObjectAt(p: Vec): { park: TownPark | null; object: ParkObject } | null {
+    const nearby = this.decorNear(p, 0.4);
+    const nearest = nearestDecor(nearby.map(hit => hit.object), p, 0.4);
+    return nearby.find(hit => hit.object === nearest) ?? null;
+  }
+
+  private pathDecorBlocker(points: readonly Vec[], width: number, previous?: Footpath): boolean {
+    const bounds = points.reduce((box, q) => ({
+      x0: Math.min(box.x0, q.x), x1: Math.max(box.x1, q.x), y0: Math.min(box.y0, q.y), y1: Math.max(box.y1, q.y),
+    }), { x0: points[0].x, x1: points[0].x, y0: points[0].y, y1: points[0].y });
+    const center = { x: (bounds.x0 + bounds.x1) / 2, y: (bounds.y0 + bounds.y1) / 2 };
+    const nearby = this.decorNear(center, dist(center, { x: bounds.x0, y: bounds.y0 }) + width / 2);
+    const distance = (pos: Vec, line: readonly Vec[]) => {
+      let nearest = Infinity;
+      for (let i = 1; i < line.length; i++) nearest = Math.min(nearest, closestOnSegment(pos, line[i - 1], line[i]).d);
+      return nearest;
+    };
+    return nearby.some(({ object }) => {
+      const gap = distance(object.pos, points) - width / 2;
+      if (gap >= decorRadius(object) - 0.01) return false;
+      // В исходной планировке дорожка подходит к фонтану и заходит под кроны деревьев.
+      // При правке сохраняем такой стык, пока новый край не приблизится к предмету.
+      return !previous || gap < distance(object.pos, footpathPoints(previous)) - footpathWidth(previous) / 2 - 0.01;
+    });
+  }
+
+  private decorObject(id: number, park: TownPark | null): ParkObject | undefined {
+    if (!park) return this.decorations.find(o => o.id === id);
+    const object = parkParts(park).objects.find(o => o.id === id);
+    return object && worldParkObject(park, object);
+  }
+
+  /** Для предпросмотра одного предмета разворачиваем планировки только рядом с курсором. */
+  private *decorPathsNear(p: Vec, radius: number): Iterable<Footpath> {
+    yield* this.footpaths;
+    for (const town of this.towns) {
+      if (town.extent === undefined || dist(p, town.center) <= town.extent + LOT_SETBACK + radius) {
+        yield* this.townFootpaths(town);
+      }
+    }
+    const nearby = this.parkIndex.near(this.towns, p, radius + PROMENADE_WIDTH / 2);
+    for (const { park } of nearby) yield* this.parkFootpaths(park);
+    // Ручные правки могут наследовать любую сохранённую ширину; их границы проверяет сама дорожка.
+    for (const town of this.towns) for (const park of town.parks ?? []) {
+      if (park.edits?.paths?.length && !nearby.some(entry => entry.park === park)) yield* this.parkFootpaths(park);
+    }
+  }
+
+  parkObjectPlan(parkId: number | null, kind: DecorKind, p: Vec, objectId?: number, angle?: number) {
+    const owner = parkId === null ? null : this.parkById(parkId)?.park ?? null;
+    const original = objectId === undefined ? undefined : this.decorObject(objectId, owner);
+    const object = original ? { ...original, pos: p, angle: angle ?? original.angle } : defaultParkObject(kind, p, angle);
+    const target = this.parkIndex.at(this.towns, p)?.park ?? null;
+    const r = decorRadius(object);
+    const fp = { center: p, w: r * 2, h: r * 2, angle: object.angle };
+    const reason = (): string | undefined => {
+      if ((parkId !== null && !owner) || (objectId !== undefined && !original)) return 'Предмет не найден';
+      if (!this.inBounds(p, r)) return 'За краем карты';
+      if (target && !pointInFootprint(p, target.fp, -r)) return 'Предмет выходит за край парка';
+      if (this.isWater(p, r) || footprintCorners(fp).some(q => this.isWater(q, 0))) return 'Мешает вода';
+      const under = this.structuresUnder(fp, 0);
+      if (under.blocker || under.houses.length) return under.blocker ?? 'Мешает здание';
+      const road = this.roadUnder(fp, 0.1);
+      if (road) return road;
+      for (const path of this.decorPathsNear(p, r)) {
+        const clearance = r + footpathWidth(path) / 2 - 0.01;
+        const near = nearestFootpath([path], p, clearance);
+        if (!near) continue;
+        const old = original && nearestFootpath([path], original.pos, clearance);
+        if (!old || near.d < old.d - 0.01) return 'Мешает пешеходная дорожка';
+      }
+      for (const hit of this.decorNear(p, r - 0.01)) {
+        if (hit.park === owner && hit.object.id === objectId) continue;
+        if (!original || dist(p, hit.object.pos) < dist(original.pos, hit.object.pos) - 0.01) return 'Мешает предмет благоустройства';
+      }
+    };
+    const obstacle = reason();
+    return { ok: !obstacle, reason: obstacle, fp, target, owner, object };
+  }
+
+  private writeDecor(park: TownPark | null, id: number | undefined, object?: ParkObject): void {
+    const items = (park ? parkParts(park).objects : this.decorations).filter(o => o.id !== id);
+    if (object) items.push(park ? { ...object, pos: worldToPark(park, object.pos), angle: object.angle - park.fp.angle } : object);
+    if (park) park.edits = { ...park.edits, objects: items };
+    else this.decorations = items;
+    this.decorRev++;
+  }
+
+  placeParkObject(parkId: number | null, kind: DecorKind, p: Vec, angle = 0): string | null {
+    const plan = this.parkObjectPlan(parkId, kind, p, undefined, angle);
+    if (plan.reason) return plan.reason;
+    this.checkpoint('установка предмета благоустройства');
+    this.writeDecor(plan.target, undefined, { ...plan.object, id: this.nextId() + 2 ** 32 });
+    this.commit();
+    return null;
+  }
+
+  moveParkObject(parkId: number | null, id: number, p: Vec, angle?: number): string | null {
+    const owner = parkId === null ? null : this.parkById(parkId)?.park ?? null;
+    const original = this.decorObject(id, owner);
+    if (!original) return 'Предмет не найден';
+    const plan = this.parkObjectPlan(parkId, original.kind, p, id, angle);
+    if (plan.reason) return plan.reason;
+    this.checkpoint('перенос предмета благоустройства');
+    this.writeDecor(owner, id);
+    // Сгенерированные номера локальны для парка; при переезде из него выдаём уникальный номер.
+    const movedId = owner !== plan.target && id < 2 ** 32 ? this.nextId() + 2 ** 32 : id;
+    this.writeDecor(plan.target, undefined, { ...plan.object, id: movedId });
+    this.commit();
+    return null;
+  }
+
+  removeParkObject(parkId: number | null, id: number): string | null {
+    const owner = parkId === null ? null : this.parkById(parkId)?.park ?? null;
+    if ((parkId !== null && !owner) || !this.decorObject(id, owner)) return 'Предмет не найден';
+    this.checkpoint('удаление предмета благоустройства');
+    this.writeDecor(owner, id);
+    this.commit();
+    return null;
+  }
 
   /**
    * Парк, сквер, площадь или набережная под курсором — для «Выбора». Дорога или путь поверх парка (полотно игрока

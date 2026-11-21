@@ -1,8 +1,20 @@
 import { describe, expect, it } from 'vitest';
+import { parkContents } from '../render/parkArt';
 import type { TownPark } from '../world/entities';
-import { parkMoveHtml } from './parkCard';
+import { defaultParkObject } from '../world/parkParts';
+import { parkItems, parkMoveHtml } from './parkCard';
 
 const park = (kind: TownPark['kind'], w: number, h: number): TownPark => ({ id: 101, kind, fp: { center: { x: 0, y: 0 }, w, h, angle: 0 } });
+
+it('карточка показывает предметы, оставшиеся после редактирования парка', () => {
+  const edited = park('park', 80, 50);
+  edited.edits = { objects: [
+    defaultParkObject('bin', { x: -2, y: 0 }),
+    defaultParkObject('bin', { x: 2, y: 0 }),
+    defaultParkObject('kiosk', { x: 8, y: 0 }),
+  ] };
+  expect(parkItems(parkContents(edited))).toEqual([['🗑️', '2', 'Урны'], ['🏪', '', 'Киоски']]);
+});
 
 describe('«Перенести» в карточке парка', () => {
   it('цена — от площади участка, подсказка — data-tip значками', () => {

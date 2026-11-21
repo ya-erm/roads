@@ -180,6 +180,8 @@ import { turnableBuilding, turnText } from '../world/moveTurn';
 import { lotCardHtml } from './lotCard';
 import { defaultGates, LOT, lotCols, lotDepth, lotGateDriveway, lotRows, lotStallCount, lotWidth } from '../world/parkingLots';
 import { PARK_INFO } from '../world/parkPick';
+import { DECOR_NAMES } from '../input/parkDecorEditor';
+import type { DecorKind } from '../world/parkParts';
 import { crewCardHtml } from './crewCard';
 import { workTrainCardHtml } from './workTrainCard';
 import { carTripHtml } from './carTrip';
@@ -604,7 +606,7 @@ export class Hud {
       b.dataset.id = t.id;
       b.innerHTML = `${ICONS[t.id]}<span class="name">${t.name}</span><kbd>${t.alt ?? t.key}</kbd>`;
       b.title = t.alt ? `${t.name} (${t.alt} или ${t.key})` : `${t.name} (${t.key})`;
-      if (t.id === 'footpath') b.title = `Пешеходная дорожка (${t.key}). Q — форма, M — двигать, Cmd/Ctrl или Alt — без привязки, Esc — закончить.`;
+      if (t.id === 'footpath') b.title = `Дорожки и декорации (${t.key}). Q — форма дорожки, M — двигать предметы и дорожки.`;
       tools.appendChild(b);
     }
     const speed = this.q('[data-speed]');
@@ -647,6 +649,12 @@ export class Hud {
     this.bindWalkPicker();
     root.addEventListener('change', (e) => {
       const input = e.target as HTMLInputElement;
+      if (input.dataset.decorKind !== undefined) {
+        controller.footpathEditor.decor.kind = input.value as DecorKind;
+        input.blur();
+        controller.onChange();
+        return;
+      }
       if (input.dataset.walkArm !== undefined) {
         input.blur();
         this.changeWalk(Number(input.dataset.node), Number(input.dataset.walkArm), input.value);
@@ -1429,6 +1437,15 @@ export class Hud {
         if (park) this.controller.showPlace(park.fp.center, Math.max(park.fp.w, park.fp.h) + 60);
         break;
       }
+      case 'park-edit': {
+        const park = g.parkById(Number(d.id));
+        if (!park) break;
+        c.select(null);
+        c.focus(park.fp.center, 2);
+        c.setTool('footpath');
+        c.setFootpathMode('move');
+        break;
+      }
       case 'park-move':
         // Перенос парка: участок за курсором, у улицы — вдоль неё; клик — туда (Esc — отмена).
         this.controller.startParkMove(Number(d.id));
@@ -1670,7 +1687,7 @@ export class Hud {
         c.setRoadMode(d.id === 'upgrade' || d.id === 'move' || d.id === 'lane' ? d.id : 'build');
         break;
       case 'footpath-mode':
-        c.setFootpathMode(d.id === 'arc' || d.id === 'curve' || d.id === 'move' ? d.id : 'straight');
+        c.setFootpathMode(d.id === 'arc' || d.id === 'curve' || d.id === 'move' || d.id === 'decorate' || d.id === 'remove' ? d.id : 'straight');
         break;
       case 'junction-mode':
         c.setJunctionMode(d.id === 'template' || d.id === 'copy' ? d.id : 'ring');
@@ -2251,14 +2268,22 @@ export class Hud {
       straight: 'Укажите начало и конец или протяните дорожку мышью.',
       arc: 'Укажите начало, точку на дуге и конец.',
       curve: 'Укажите начало, точку изгиба и конец. Обе ручки кривой можно поправить в режиме «Двигать».',
-      move: 'Тяните дорожку целиком, маркер изгиба или конец. За общим концом потянутся и соседние дорожки.',
+      move: 'Тяните предмет, дорожку или её маркер. За общим узлом потянутся все ветви.',
+      decorate: 'Выберите предмет и щёлкните по карте.',
+      remove: 'Щёлкните по отдельному предмету или дорожке.',
     };
-    const modes = this.kindSwitch('Пешеходная дорожка', 'footpath-mode', mode, [
+    const modes = this.kindSwitch('Дорожки и декорации', 'footpath-mode', mode, [
       ...DRAW_MODES.map(m => ({ ...m, svg: modeSvg(m.id), hint: hints[m.id] })),
+      { id: 'decorate', name: 'Декорации', svg: '🌳', hint: hints.decorate },
       { id: 'move', name: 'Двигать', svg: moveNodeSvg(), hint: hints.move, key: 'M' },
-    ], true);
-    return `<div class="opt-row">${modes}<div class="opt-group narrow"><span>${hints[mode]}</span>
-      <small>Q — форма · Cmd/Ctrl или Alt — без привязки · Esc — закончить</small></div></div>`;
+      { id: 'remove', name: 'Убрать', svg: bulldozePointSvg(), hint: hints.remove },
+    ], 3);
+    const kind = this.controller.footpathEditor.decor.kind;
+    const choices = mode === 'decorate' ? `<label>Предмет <select data-decor-kind aria-label="Вид декорации">${Object.entries(DECOR_NAMES)
+      .map(([id, name]) => `<option value="${id}"${id === kind ? ' selected' : ''}>${name}</option>`).join('')}</select></label>` : '';
+    const keys = mode === 'decorate' ? 'R / Shift+R — повернуть' : mode === 'move' ? 'R — повернуть предмет при переносе · Delete — убрать под курсором'
+      : mode === 'remove' ? 'Ctrl/Cmd+Z — вернуть' : 'Q — форма · Cmd/Ctrl или Alt — без привязки · Esc — закончить';
+    return `<div class="opt-row">${modes}<div class="opt-group narrow">${choices}<span>${hints[mode]}</span><small>${keys}</small></div></div>`;
   }
 
   /**

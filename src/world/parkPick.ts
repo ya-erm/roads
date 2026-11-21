@@ -53,10 +53,9 @@ export class ParkIndex {
 
   /** Парк под точкой (участок, расширенный на margin): из нескольких — тот, чья середина ближе. */
   at(towns: readonly Town[], p: Vec, margin = 0): ParkEntry | null {
-    this.sync(towns);
     let best: ParkEntry | null = null;
     let bestD = Infinity;
-    for (const e of this.grid.near(p, margin + 1)) {
+    for (const e of this.near(towns, p, margin + 1)) {
       const dx = p.x - e.fp.center.x;
       const dy = p.y - e.fp.center.y;
       const c = Math.cos(e.fp.angle);
@@ -71,6 +70,11 @@ export class ParkIndex {
       }
     }
     return best;
+  }
+
+  near(towns: readonly Town[], p: Vec, radius: number): ParkEntry[] {
+    this.sync(towns);
+    return this.grid.near(p, radius);
   }
 
   /** Парк по id (TownPark.id — id города × 100 + номер). */

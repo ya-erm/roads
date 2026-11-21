@@ -65,7 +65,8 @@ import { paintIndustrySite, tracePlot } from './industrySite';
 import { drawIndustrialGate, drawIndustrialRoads, industryRoadSurface } from './industryRoadArt';
 import { drawIndustryHaulConnection, drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock } from './industryStationArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
-import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetCanopyMask, streetGreen, type StreetGreen } from './parkArt';
+import { alleyScope, drawFountainRipples, drawParkArt, drawParkObject, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, parkParts, streetCanopyMask, streetGreen, type StreetGreen } from './parkArt';
+import { decorRadius, defaultParkObject, parkToWorld, type DecorKind, type ParkObject } from '../world/parkParts';
 import { type Around, gameSidewalks, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
@@ -205,6 +206,7 @@ export interface ToolOverlay {
    * отметки места, с поворотом (нельзя — под красной заливкой).
    */
   ghosts?: { building?: TownBuilding; park?: TownPark; ok: boolean }[] | null;
+  parkDecor?: { kind: DecorKind; pos: Vec; angle: number; ok: boolean; remove?: boolean; object?: ParkObject };
   /** Ручка поворота ↺ (world/moveTurn.ts): где она, вокруг какой точки, тянут ли её сейчас. */
   turnHandle?: { pos: Vec; pivot: Vec; active: boolean } | null;
   buildingResize?: {
@@ -602,6 +604,7 @@ export class Renderer {
   /** Слепки нарисованного в плитках: что поменялось — те плитки и сбросить. */
   private readonly diffs = {
     footpaths: new SceneDiff(),
+    parksAndDecor: new SceneDiff<string>(),
     corridors: new SceneDiff(),
     nodes: new SceneDiff(),
     rails: new SceneDiff(),
@@ -698,6 +701,7 @@ export class Renderer {
       projectsVersion: -1,
       railsStamp: -1,
       railsVersion: -1,
+      decor: -1,
       industries: -1,
       towns: -1,
       lots: -1,
@@ -772,6 +776,7 @@ export class Renderer {
       d.clear();
     this.diffs.projectItems.clear();
     this.diffs.towns.clear();
+    this.diffs.parksAndDecor.clear();
     this.diffs.alleys.clear();
     this.diffs.sidewalks.clear();
     this.alleys = Renderer.noAlleys();
@@ -1405,7 +1410,21 @@ export class Renderer {
     const lotChange = cur.lots !== game.lotRev;
     const layoutChange = cur.layout !== game.layoutRev;
     const roadChange = cur.townRoads !== net || cur.townRoadVersion !== net.version;
-    const townsTouched = cur.towns !== game.townRev || lotChange || layoutChange || roadChange;
+    const townsTouched = cur.towns !== game.townRev || lotChange || layoutChange || roadChange || pathsChanged;
+    if (cur.towns !== game.townRev || layoutChange || cur.decor !== game.decorRev) {
+      cur.decor = game.decorRev;
+      const changed = this.diffs.parksAndDecor.update(put => {
+        for (const town of game.towns) for (const p of town.parks ?? []) {
+          put('p' + p.id, fpSig(p.fp) + p.kind + JSON.stringify(p.edits ?? null), grow(fpBox(p.fp), PARK_REACH));
+        }
+        for (const o of game.decorations) {
+          const { x, y } = o.pos;
+          put('d' + o.id, JSON.stringify(o), grow({ x0: x, x1: x, y0: y, y1: y }, decorRadius(o) + PARK_REACH));
+        }
+      });
+      add(changed);
+      if (changed.length) this.alleys.pedestrianMask = null;
+    }
     cur.townRoads = net;
     cur.townRoadVersion = net.version;
     cur.towns = game.townRev;
@@ -1430,8 +1449,6 @@ export class Renderer {
             const surfaces = walks?.driveColors?.get(b.id)?.map((d) => d.color).join(',') ?? '';
             put(b.id, `${fpSig(b.fp)}|${b.kind}|${b.floors}|${storeysOf(b)}|${b.color}|${b.roof}|${b.form}|${b.face}|${b.bays ?? ''}|${b.dockApproach ?? ''}|${surfaces}`, grow(fpBox(b.fp), houseReach(b)));
           }
-          // Парки — отрицательными номерами (id парка — не id сущности).
-          for (const p of town.parks ?? []) put(-p.id - 1, `${fpSig(p.fp)}|${p.kind}`, grow(fpBox(p.fp), PARK_REACH));
           // Площадки-стоянки — своими номерами (id сущности, со сдвигом от парков); снесённых нет.
           for (const l of town.lots ?? [])
             if (!l.removed) put(-2_000_000_000 + l.id, `${fpSig(l.fp)}|${l.gates.map((g) => `${g.x}${g.mode}`).join(',')}|${l.nodes?.length ?? 0}`, grow(fpBox(l.fp), LOT_REACH));
@@ -2910,6 +2927,9 @@ export class Renderer {
         drawParkArt(this.ctx, p, this.camera.zoom, trees);
       }
     }
+    for (const o of game.decorations) if (seenAt(o.pos, view, decorRadius(o) + PARK_REACH)) {
+      drawParkObject(this.ctx, o, this.camera.zoom, trees);
+    }
     // Площадки-стоянки — тоже под дорогами; большая с тупиком-выездом — поверх сети (drawLots после неё).
     this.drawLots(game, view, false);
   }
@@ -3003,14 +3023,15 @@ export class Renderer {
   }
 
   /** Фонтаны у ратуш и в парках всех городов — пересчёт после правки застройки (Game.townRev, layoutRev). */
-  private fountains = { game: null as Game | null, towns: -1, layout: -1, list: [] as { x: number; y: number; r: number }[] };
+  private fountains = { game: null as Game | null, towns: -1, layout: -1, decor: -1, list: [] as { x: number; y: number; r: number }[] };
 
   private fountainsOf(game: Game): { x: number; y: number; r: number }[] {
     const f = this.fountains;
-    if (f.game === game && f.towns === game.townRev && f.layout === game.layoutRev) return f.list;
+    if (f.game === game && f.towns === game.townRev && f.layout === game.layoutRev && f.decor === game.decorRev) return f.list;
     f.game = game;
     f.towns = game.townRev;
     f.layout = game.layoutRev;
+    f.decor = game.decorRev;
     f.list = [];
     for (const town of game.towns) {
       for (const b of town.buildings) {
@@ -3019,6 +3040,7 @@ export class Renderer {
       }
       for (const p of town.parks ?? []) f.list.push(...parkFountains(p));
     }
+    for (const o of game.decorations) if (o.kind === 'fountain') f.list.push({ ...o.pos, r: o.size ?? 3 });
     return f.list;
   }
 
@@ -5105,6 +5127,20 @@ export class Renderer {
       ctx.globalAlpha = 1;
     }
     if (o.ghosts?.length) this.drawGhosts(o.ghosts, BIOMES[game.terrain.biome].palette.trees);
+    if (o.parkDecor) {
+      const d = o.parkDecor;
+      const z = this.camera.zoom;
+      const object = { ...(d.object ?? defaultParkObject(d.kind, d.pos)), pos: d.pos, angle: d.angle };
+      ctx.save();
+      ctx.globalAlpha = 0.82;
+      drawParkObject(ctx, object, z, BIOMES[game.terrain.biome].palette.trees);
+      ctx.strokeStyle = d.ok && !d.remove ? '#2f80ed' : '#e8483f';
+      ctx.lineWidth = 2 / z;
+      ctx.beginPath();
+      ctx.arc(d.pos.x, d.pos.y, Math.max(decorRadius(object) + 0.6, 6 / z), 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.restore();
+    }
     if (o.selection?.type === 'building' && !o.buildingResize?.preview) {
       const b = game.buildingById(o.selection.id);
       if (b) this.drawFootprint(b.fp, 'rgba(47,128,237,0.12)', '#2f80ed', 2.5 / this.camera.zoom);
@@ -5876,6 +5912,19 @@ export class Renderer {
     for (const t of edit.toggles) drawWalkSign(ctx, t.pos, walkSignSize(z) * (t.corridor === edit.hover ? 1.15 : 1), t, z);
   }
 
+  private pedestrianMask(game: Game) {
+    if (this.alleys.pedestrianMask) return this.alleys.pedestrianMask;
+    const trees: number[] = [];
+    for (const town of game.towns) for (const p of town.parks ?? []) {
+      for (const o of parkParts(p).objects) if (o.kind === 'tree') {
+        const pos = parkToWorld(p, o.pos);
+        trees.push(pos.x, pos.y, o.size ?? 2.5);
+      }
+    }
+    for (const o of game.decorations) if (o.kind === 'tree') trees.push(o.pos.x, o.pos.y, o.size ?? 2.5);
+    return this.alleys.pedestrianMask = streetCanopyMask([...this.alleys.shown, { trees }]);
+  }
+
   /** На дальнем плане фигуры меньше пикселя. Пешеходы в тоннеле скрыты между лестницами. */
   private drawPedestrians(game: Game, view: ReturnType<Renderer['view']>): void {
     const z = this.camera.zoom;
@@ -5886,7 +5935,7 @@ export class Renderer {
     ctx.lineWidth = 0.2;
     for (const p of game.pedestrians.visible(game.time, view)) {
       ctx.save();
-      const outsideCrowns = this.alleys.pedestrianMask ??= streetCanopyMask(this.alleys.shown);
+      const outsideCrowns = this.pedestrianMask(game);
       if (!outsideCrowns(ctx, p.pos, 1.3)) {
         ctx.restore();
         continue;

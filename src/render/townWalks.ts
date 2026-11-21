@@ -2,6 +2,7 @@ import { plotPoint as toWorld, yardPaths } from '../world/yardPaths';
 import { FOOTPATH, WALK_W, footpathBounds, footpathPoints, type Footpath } from '../game/footpaths';
 import type { Vec } from '../core/vec';
 import type { Town, TownBuilding } from '../world/entities';
+import type { ParkPath } from '../world/parkParts';
 import type { Game } from '../game/game';
 import type { LaneNet } from '../lanes/model';
 import { curbGap } from '../world/worldgen';
@@ -57,6 +58,7 @@ const townCache = new WeakMap<Town, {
   net: LaneNet; version: number; roads: string; layout: number; tier: ReturnType<typeof townTier>;
   buildings: Town['buildings']; count: number; parks: Town['parks']; parkCount: number; lots: Town['lots'];
   hidden: ReadonlySet<number>; walks: TownWalks | null;
+  parkPaths: (ParkPath[] | undefined)[];
 }>();
 
 /** Геометрия одного города для карты, привязки и пешего графа. Далёкую правку сети можно пропустить. */
@@ -66,7 +68,8 @@ export function gameTownWalks(game: Game, town: Town): TownWalks | null {
   const tier = townTier(town);
   const samePlots = old && old.hidden === game.hiddenYardPaths && old.layout === game.layoutRev && old.tier === tier &&
     old.buildings === town.buildings && old.count === town.buildings.length &&
-    old.parks === town.parks && old.parkCount === (town.parks?.length ?? 0) && old.lots === town.lots;
+    old.parks === town.parks && old.parkCount === (town.parks?.length ?? 0) && old.lots === town.lots &&
+    (town.parks ?? []).every((park, i) => park.edits?.paths === old.parkPaths[i]);
   if (samePlots && old.net === net && old.version === net.version) return old.walks;
   const { x, y } = town.center;
   const r = (town.extent ?? town.radius) + 60;
@@ -89,7 +92,8 @@ export function gameTownWalks(game: Game, town: Town): TownWalks | null {
   };
   const walks = townWalks(town, p => nearest(p).gap, p => nearest(p).dirt ? 'dirt' : 'asphalt', game.townFootpaths(town));
   townCache.set(town, { net, version: net.version, roads, layout: game.layoutRev, tier, buildings: town.buildings,
-    count: town.buildings.length, parks: town.parks, parkCount: town.parks?.length ?? 0, lots: town.lots, hidden: game.hiddenYardPaths, walks });
+    count: town.buildings.length, parks: town.parks, parkCount: town.parks?.length ?? 0, lots: town.lots, hidden: game.hiddenYardPaths,
+    parkPaths: (town.parks ?? []).map(park => park.edits?.paths), walks });
   return walks;
 }
 

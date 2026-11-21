@@ -1,13 +1,60 @@
 import { expect, it } from 'vitest';
-import { add, lerp, norm, scale, sub, type Vec } from '../core/vec';
+import { add, closestOnSegment, dist, lerp, norm, scale, sub, type Vec } from '../core/vec';
 import { footpathSnap } from '../input/footpathTool';
+import { parkGates } from '../render/parkArt';
 import { gameSidewalks } from '../render/sidewalks';
-import { FOOTPATH, WALK_W, footpathLength, footpathNetwork, footpathWidth, nearestFootpath, type Footpath } from './footpaths';
+import { FOOTPATH, WALK_W, footpathLength, footpathNetwork, footpathPoints, footpathWidth, nearestFootpath, type Footpath } from './footpaths';
 import { Game } from './game';
 import { freshGame, openSpot, road } from './testkit';
 import { walkingNetwork } from './pedestrians';
 
 const p = (x: number, y: number): Vec => ({ x, y });
+
+function reachableFrom(game: Game, origin: Vec) {
+  const graph = walkingNetwork(gameSidewalks(game), game.openFootpaths(), []);
+  const start = [...graph.values()].flatMap(e => [e.a, e.b]).find(node => dist(node, origin) < 0.03)!;
+  expect(start).toBeDefined();
+  const reachable = new Set([start]);
+  for (const node of reachable) for (const edge of node.links) reachable.add(edge.a === node ? edge.b : edge.a);
+  return [...reachable];
+}
+
+it('из сквера рядом с улицей можно выйти на тротуар по существующему подходу', () => {
+  const game = freshGame(7);
+  const square = game.towns[0].parks!.find(park => park.kind === 'square')!;
+  const [alley] = game.openParkFootpaths(square);
+  expect(reachableFrom(game, alley.a).some(node => dist(node, square.fp.center) > Math.hypot(square.fp.w, square.fp.h) / 2 + 30)).toBe(true);
+});
+
+it('кольцо и спицы отдельно стоящего парка соединяются с улицей после прокладки дорожки от его ворот', () => {
+  const game = freshGame(7);
+  const park = game.towns.flatMap(t => t.parks ?? []).find(park => park.kind === 'park')!;
+  const walks = gameSidewalks(game);
+  const paths = game.openParkFootpaths(park);
+  const interior = paths.find(path => dist(path.a, path.b) < 0.01)!;
+  const [a, b] = footpathPoints(interior);
+  const middle = lerp(a, b, 0.5);
+  const axis = norm(sub(b, a));
+  expect(dist(footpathSnap(game, add(middle, p(-axis.y * 0.05, axis.x * 0.05)), 0.2), middle)).toBeLessThan(0.01);
+  const gates = parkGates(park);
+  const before = reachableFrom(game, interior.a);
+  expect(gates.every(gate => before.some(node => dist(node, gate) < 0.05))).toBe(true);
+  expect(before.every(node => dist(node, park.fp.center) < Math.hypot(park.fp.w, park.fp.h) / 2 + 1)).toBe(true);
+  // Ищем свободный подход по реальному плану строительства: у ближайших ворот есть застройка.
+  const connection = gates.map(gate => {
+    let end = gate as Vec, distance = Infinity;
+    for (const walk of walks.lines) for (const line of walk.paths) for (let i = 2; i < line.length; i += 2) {
+      const hit = closestOnSegment(gate, p(line[i - 2], line[i - 1]), p(line[i], line[i + 1]));
+      if (hit.d < distance) { end = hit.point; distance = hit.d; }
+    }
+    return { gate, end };
+  }).find(({ gate, end }) => !game.footpathPlan(gate, end).reason)!;
+  expect(connection).toBeDefined();
+  expect(game.buildFootpath(connection.gate, connection.end)).toBeNull();
+  const after = reachableFrom(game, interior.a);
+  expect(after.some(node => dist(node, connection.end) < 0.05)).toBe(true);
+  expect(after.some(node => dist(node, park.fp.center) > Math.hypot(park.fp.w, park.fp.h) / 2 + 30)).toBe(true);
+});
 
 it('пристраивает ручную дорожку к середине прохода между домами и соединяет все три направления', () => {
   const game = freshGame(7);

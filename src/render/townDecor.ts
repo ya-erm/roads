@@ -141,8 +141,8 @@ export function bench(a: Art, x: number, y: number, ux: number, uy: number, side
 export const LAMPS_ON = false;
 
 /** Фонарь: столб с тенью и светлым плафоном — только совсем вблизи (fine). */
-export function lamp(a: Art, x: number, y: number, fine: boolean): void {
-  if (!fine || !LAMPS_ON) return;
+export function lamp(a: Art, x: number, y: number, fine: boolean, enabled = LAMPS_ON): void {
+  if (!fine || !enabled) return;
   if (a.pass === 1) return a.capsule(x, y, 0.13, 4.5);
   if (a.pass !== 2) return;
   const c = a.c;

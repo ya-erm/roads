@@ -6,6 +6,7 @@ import { cornerHandles, type CornerHandle } from '../lanes/corners';
 import { filletDepth } from '../lanes/geometry';
 import { junctionPlate } from '../world/lotClear';
 import { NEW_GAME_SETTINGS } from '../world/settings';
+import { parkToWorld } from '../world/parkParts';
 import { LOT, lotGateDriveway, lotStallCount, lotWidth } from '../world/parkingLots';
 import { lotHandles } from './lotTool';
 import type { LaneNet } from '../lanes/model';
@@ -213,6 +214,46 @@ it('при переносе общего узла предпросмотр вс�
   expect(game.footpaths).toEqual(initial);
   win.fire('mouseup', mouse(target));
   expect(game.footpaths).toEqual(preview.affected);
+});
+
+it('декорацию ставят в парке, поворачивают и перетаскивают за его границу, затем убирают отдельно', () => {
+  const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  const park = game.towns.flatMap(town => town.parks ?? []).find(p => p.kind === 'park')!;
+  const spots = [-0.35, -0.2, 0, 0.2, 0.35].flatMap(x => [-0.35, -0.2, 0, 0.2, 0.35]
+    .map(y => parkToWorld(park, { x: x * park.fp.w, y: y * park.fp.h })));
+  const inside = spots.find(pos => game.parkObjectPlan(park.id, 'bench', pos).ok)!;
+  const outside = fieldSpot(game, 200);
+  const { c, canvas, mouse, move, click, key } = play(game);
+  c.setTool('footpath');
+  c.setFootpathMode('decorate');
+  c.footpathEditor.decor.kind = 'bench';
+  key('KeyR');
+  move(inside);
+  expect(c.overlay().parkDecor).toMatchObject({ kind: 'bench', ok: true, pos: inside });
+  click(inside);
+  const placed = game.parkObjectAt(inside)!;
+  expect(placed.park?.id).toBe(park.id);
+  expect(placed.object.angle).toBeCloseTo(Math.PI / 12);
+
+  key('KeyM');
+  click(inside);
+  move(outside);
+  expect(c.overlay().parkDecor?.object?.id).toBe(placed.object.id);
+  canvas.fire('mousedown', mouse(inside));
+  move(outside);
+  key('KeyR');
+  expect(c.overlay().parkDecor).toMatchObject({ kind: 'bench', pos: outside, ok: true });
+  win.fire('mouseup', mouse(outside));
+  expect(game.parkObjectAt(inside)).toBeNull();
+  const moved = game.parkObjectAt(outside)!;
+  expect(moved.park).toBeNull();
+  expect(moved.object.angle).toBeCloseTo(Math.PI / 6);
+  c.setFootpathMode('remove');
+  click(outside);
+  expect(game.parkObjectAt(outside)).toBeNull();
+  c.setTool('select');
+  click(inside);
+  expect(c.selection).toEqual({ type: 'park', id: park.id });
 });
 
 it('размещение автомобиля оставляет доступными правую протяжку карты и масштаб колесом', () => {

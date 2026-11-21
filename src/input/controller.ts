@@ -640,6 +640,10 @@ export class Controller {
    * и парк при переносе — от улицы, в пределах поворота (world/moveTurn.ts). Вертеть нечего — false.
    */
   rotateActive(dir: 1 | -1): boolean {
+    if (this.action === 'footpath' && this.footpathEditor.decor.rotate(dir * TURN_STEP, this.footpathEditor.mode === 'decorate')) {
+      this.onChange();
+      return true;
+    }
     const p = this.pending;
     const street = (p?.kind === 'moveBuilding' && turnableBuilding(p.b)) || p?.kind === 'movePark';
     const free = p
@@ -2846,7 +2850,7 @@ export class Controller {
     if (this.action === 'footpath') {
       this.alt = e.altKey;
       this.ctrl = e.ctrlKey || e.metaKey;
-      const problem = this.footpathEditor.up(this.game(), this.worldAt(e), moved, left.createdChain, this.pathPoint);
+      const problem = this.footpathEditor.up(this.game(), this.worldAt(e), moved, left.createdChain, this.pathPoint, this.pathHandleRadius);
       if (problem) this.showError(problem);
       this.onChange();
       return;
@@ -3592,7 +3596,7 @@ export class Controller {
   }
 
   private onKey(e: KeyboardEvent): void {
-    if (e.target instanceof HTMLInputElement) return;
+    if (e.target instanceof HTMLInputElement || (e.target as Element | null)?.tagName === 'SELECT') return;
     this.keys.add(e.code);
     if (e.key === 'Shift') this.shift = true;
     // Alt (Option) — строить без прилипания к «прямо» и 90°; браузерное меню по Alt не нужно.
@@ -3642,6 +3646,15 @@ export class Controller {
         break;
       case 'Delete':
       case 'Backspace':
+        if (this.action === 'footpath' && this.hover && !this.left && (this.footpathEditor.mode === 'move' || this.footpathEditor.mode === 'remove')) {
+          e.preventDefault();
+          if (!e.repeat) {
+            const problem = this.footpathEditor.removeAt(this.game(), this.hover, this.pathHandleRadius);
+            if (problem) this.showError(problem);
+            this.onChange();
+          }
+          break;
+        }
         // Узел проекта под курсором — прочь вместе с его участками.
         if (this.projectMode && this.hover && this.projectTools.removeAt(this.netKind, this.hover, this.snapRadius)) this.onChange();
         // «Двигать»: стык двух дорог под курсором — прочь, дороги сливаются в одну.

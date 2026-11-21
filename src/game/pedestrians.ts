@@ -28,6 +28,15 @@ const BASE_POPULATION_LIMIT = 480;
 const DENSITY = [1, 3, 6, 10, 15] as const;
 const DECISION_INTERVAL = 0.18;
 
+/** Последовательность ван дер Корпута: каждые 2^k жителей занимают все равные 2^k частей сети.
+ * Сдвиг битов от зерна меняет расстановку, сохраняя это равновесие у любой ступени численности. */
+function spawnFraction(index: number, scramble: number): number {
+  let bits = (index ^ scramble) >>> 0;
+  let result = 0;
+  for (let place = 0.5; bits; place *= 0.5, bits >>>= 1) result += (bits & 1) * place;
+  return result;
+}
+
 /** Линия от инструмента или вход в переход могут примыкать в середину тротуара. В этом месте создаём развилку. */
 function* walkingNetworkSteps(sidewalks: SidewalkNet, paths: readonly Footpath[], crossings: Iterable<GraphWalk[]>): Generator<void, Map<string, WalkEdge>> {
   const corners = new Map<string, Corner>();
@@ -198,8 +207,8 @@ export class Pedestrians {
   level: PedestrianLevel = 1;
   readonly walkers: Walker[] = [];
   private edges?: Map<string, WalkEdge>;
-  private starts: WalkEdge[] = [];
-  private neighborhoodStarts: WalkEdge[] = [];
+  private starts: { edge: WalkEdge; weight: number; end: number }[] = [];
+  private spawnWeight = 0;
   private networkLength = 0;
   private sidewalks?: SidewalkNet;
   private paths?: readonly Footpath[];
@@ -211,7 +220,7 @@ export class Pedestrians {
     this.walkers.length = 0;
     this.edges = undefined;
     this.starts = [];
-    this.neighborhoodStarts = [];
+    this.spawnWeight = 0;
     this.networkLength = 0;
     this.sidewalks = this.paths = this.graph = undefined;
     this.prepared = undefined;
@@ -249,9 +258,33 @@ export class Pedestrians {
       this.prepared = undefined;
       this.edges = ready?.sidewalks === sidewalks && ready.paths === paths && ready.graph === graph
         ? ready.edges : walkingNetwork(sidewalks, paths, graph.crosswalks.values());
-      this.starts = [...this.edges.values()].filter(e => !e.crossing);
-      this.networkLength = this.starts.reduce((sum, e) => sum + e.length, 0);
-      this.neighborhoodStarts = [];
+      // На один метр аллеи или тротуара в центре города приходится больше прохожих, чем на окраине.
+      // Вместимость карты по-прежнему определяется действительной длиной всей сети.
+      const cells = new Map<string, typeof this.starts>();
+      this.spawnWeight = this.networkLength = 0;
+      for (const edge of this.edges.values()) {
+        if (edge.crossing) continue;
+        const mid = lerp(edge.a, edge.b, 0.5);
+        let centrality = 0;
+        for (const town of game.towns) {
+          // Главные улицы и парки в центральной половине поселения притягивают прогулки; остальная сеть
+          // получает свою долю по длине, включая пользовательские дорожки за городами.
+          const radius = town.radius / 2;
+          const dx = mid.x - town.center.x, dy = mid.y - town.center.y;
+          if (Math.abs(dx) < radius && Math.abs(dy) < radius) {
+            centrality = Math.max(centrality, 1 - Math.hypot(dx, dy) / radius);
+          }
+        }
+        const weight = edge.length * (1 + 10 * centrality ** 2);
+        const key = Math.floor(mid.x / 80) + ':' + Math.floor(mid.y / 80);
+        const cell = cells.get(key);
+        const entry = { edge, weight, end: 0 };
+        if (cell) cell.push(entry);
+        else cells.set(key, [entry]);
+        this.networkLength += edge.length;
+      }
+      this.starts = Array.from(cells.values()).flat();
+      for (const entry of this.starts) entry.end = this.spawnWeight += entry.weight;
     }
     const edges = this.edges;
     const total = this.networkLength;
@@ -269,38 +302,23 @@ export class Pedestrians {
       } else missing.push(i);
     }
     if (!missing.length) return;
-    // Соседние улицы и дворы часто добавлялись в разных концах списка рёбер.
-    // Группируем их по кварталам, чтобы каждая следующая ступень заселяла и локальный кадр.
-    if (this.level > 1 && !this.neighborhoodStarts.length) {
-      const cells = new Map<string, WalkEdge[]>();
-      for (const edge of this.starts) {
-        const key = Math.floor((edge.a.x + edge.b.x) / 160) + ':' + Math.floor((edge.a.y + edge.b.y) / 160);
-        const cell = cells.get(key);
-        if (cell) cell.push(edge);
-        else cells.set(key, [edge]);
-      }
-      this.neighborhoodStarts = Array.from(cells.values()).flat();
-    }
     // Наборы вложены: прямой выбор уровня на паузе и выбор по очереди дают тех же жителей.
-    let offset = 0;
-    let index = 0;
-    let tier = 0;
-    let first = 0;
-    let limit = Math.ceil(base);
+    const scramble = Math.floor(hash(game.seed, 0) * 2 ** 32);
     for (const i of missing) {
-      while (i >= limit) {
-        first = limit;
-        limit = Math.ceil(base * DENSITY[++tier]);
-        offset = index = 0;
-      }
-      const starts = tier === 0 ? this.starts : this.neighborhoodStarts;
+      const starts = this.starts;
       const seed = game.seed + i * 4099;
-      const at = (i - first + hash(seed, 0)) * total / (limit - first);
-      while (index + 1 < starts.length && offset + starts[index].length < at) offset += starts[index++].length;
-      const edge = starts[index];
+      const at = spawnFraction(i, scramble) * this.spawnWeight;
+      let lo = 0, hi = starts.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (at < starts[mid].end) hi = mid;
+        else lo = mid + 1;
+      }
+      const { edge, weight, end } = starts[lo];
       const speed = 2.4 + hash(seed, 1) * 1.1;
       const reverse = hash(seed, 2) < 0.5;
-      const progress = reverse && tier > 0 ? edge.length - (at - offset) : at - offset;
+      const distance = edge.length * (1 - (end - at) / weight);
+      const progress = reverse ? edge.length - distance : distance;
       const start = time - progress / speed;
       this.walkers[i] = { seed, visits: 0, speed, edge, reverse, start, end: start + edge.length / speed };
     }

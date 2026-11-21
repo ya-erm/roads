@@ -8,8 +8,9 @@ import { buildJunctionsScene } from '../testpages/junctions';
 import type { ParkKind, TownPark } from '../world/entities';
 import { inPolygon, junctionPlate, polyDist } from '../world/lotClear';
 import { NEW_GAME_SETTINGS } from '../world/settings';
+import { defaultParkObject, parkToWorld } from '../world/parkParts';
 import { curbGap } from '../world/worldgen';
-import { alleyScope, drawParkArt, drawStreetGreen, streetCanopyMask, type StreetGreen, streetGreen } from './parkArt';
+import { alleyScope, drawParkArt, drawParkObject, drawStreetGreen, parkFountains, parkGates, parkParts, parkWorldPaths, streetCanopyMask, type StreetGreen, streetGreen } from './parkArt';
 import { sidewalkScope } from './sidewalks';
 import { LAMPS_ON } from './townDecor';
 
@@ -39,6 +40,40 @@ const park = (kind: ParkKind, id = 1203): TownPark => ({ id, kind, fp: { center:
 const total = (c: Record<string, number>) => Object.values(c).reduce((s, n) => s + n, 0);
 
 describe('Парки и скверы — рисунок', () => {
+  it('после правки от текущих объектов и дорожек зависят входы, рябь фонтана и рисунок', () => {
+    const original = park('memorial');
+    const generated = parkParts(original);
+    expect(generated.objects.filter(o => o.kind === 'obelisk')).toHaveLength(1);
+    expect(parkParts(structuredClone(original))).toEqual(generated);
+    const edited = { ...original, edits: { objects: [defaultParkObject('fountain', { x: 3, y: 2 })], paths: [] } };
+    expect(parkWorldPaths(original)[0].points[0]).toEqual(parkToWorld(original, generated.paths[0].points[0]));
+    expect(parkGates(original)).not.toHaveLength(0);
+    expect(parkGates(edited)).toHaveLength(0);
+    expect(parkFountains(edited)).toEqual([{ ...parkToWorld(edited, { x: 3, y: 2 }), r: 3 }]);
+    const intact = stub(), empty = stub();
+    drawParkArt(intact.ctx, original, 2);
+    drawParkArt(empty.ctx, { ...original, edits: { objects: [], paths: [] } }, 2);
+    expect(intact.calls.arc).toBeGreaterThan(0);
+    expect(empty.calls.arc).toBeUndefined();
+    const light = stub();
+    drawParkObject(light.ctx, defaultParkObject('lamp', { x: 0, y: 0 }), 2);
+    expect(light.calls.arc).toBeGreaterThan(0);
+  });
+
+  it('проход вдоль парапета и новые дорожки на площади примыкают к тротуару своими концами', () => {
+    const bank = park('embankment');
+    expect(parkParts(bank).paths).toHaveLength(1);
+    expect(parkGates(bank)).toHaveLength(2);
+    const bare = { ...bank, edits: { paths: [] } };
+    expect(parkGates(bare)).toHaveLength(0);
+    const full = stub(), withoutWalk = stub();
+    drawParkArt(full.ctx, bank, 2);
+    drawParkArt(withoutWalk.ctx, bare, 2);
+    expect(full.calls.fillRect).toBe(withoutWalk.calls.fillRect + 1);
+    const plaza = park('plaza');
+    plaza.edits = { paths: [{ id: 1, width: 2, points: [{ x: -plaza.fp.w / 2, y: 0 }, { x: 0, y: 0 }] }] };
+    expect(parkGates(plaza)).toHaveLength(1);
+  });
   it('каждый вид рисуется на любом зуме; ближе — больше деталей; без фильтров и размытия', () => {
     for (const kind of Object.keys(SIZES) as ParkKind[]) {
       const runs = [0.15, 0.4, 0.8, 2].map((z) => {
@@ -70,7 +105,7 @@ describe('Парки и скверы — рисунок', () => {
 
 describe('Аллеи и фонари вдоль улиц', { timeout: 30_000 }, () => {
   it('за краем кроны маскируется только перекрытая часть прохожего, тень не рисуется повторно', () => {
-    const outside = streetCanopyMask([{ id: 1, trees: [19.5, 0, 2.1], lamps: [], box: { x0: 15, x1: 25, y0: -5, y1: 5 }, sig: '' }]);
+    const outside = streetCanopyMask([{ trees: [19.5, 0, 2.1] }]);
     const { ctx, calls } = stub();
     expect(outside(ctx, { x: 19.5, y: 0 }, 0.6)).toBe(false);
     expect(outside(ctx, { x: 22.3, y: 0 }, 0.6)).toBe(true);
