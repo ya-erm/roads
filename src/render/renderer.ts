@@ -3585,7 +3585,7 @@ export class Renderer {
     c.stroke();
   }
 
-  /** В открытом дворе подсвечивается только короткая полоска сбоку от места. */
+  /** В открытом дворе короткая цветная полоска отмечает пост перед кабиной. */
   private drawStationBays(game: Game, st: Station): void {
     const ctx = this.ctx;
     const fp = st.fp;
@@ -3600,10 +3600,12 @@ export class Renderer {
       const { x, w } = baySlot(area.w, st.bays, i, open);
       if (open) {
         if (color && doors) {
+          const center = x + w / 2;
+          const front = openBayRear(area.h) + 0.25;
           ctx.fillStyle = '#46505b';
-          ctx.fillRect(x - 1.65, 2.6, 1.3, 4.9);
+          ctx.fillRect(center - 2.45, front, 4.9, 0.95);
           ctx.fillStyle = color;
-          ctx.fillRect(x - 1.4, 2.95, 0.8, 4.2);
+          ctx.fillRect(center - 2.1, front + 0.15, 4.2, 0.65);
         }
         return;
       }
