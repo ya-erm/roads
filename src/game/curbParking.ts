@@ -247,6 +247,7 @@ export class CurbParking {
   /** Связь и полоса движения у места, u его середины по ней — на нынешнем графе; нельзя подъехать — null. */
   slotOf(st: CurbStall): CurbSlot | null {
     const L = this.lay();
+    if (!L.byKey.has(st.key)) return null;
     const hit = L.slots.get(st.key);
     if (hit !== undefined) return hit;
     const g = this.host.graph;

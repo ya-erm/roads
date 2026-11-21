@@ -43,9 +43,9 @@ describe('Автовокзал: перроны, ближе к дороге, въ
     expect(front).toBeGreaterThan(node.y);
     // Между узлом и площадкой — место свернуть к своему посту.
     expect(front - node.y).toBeCloseTo(STATION.gate, 0);
-    // Улица 1+1 — полуширина 8,5: со старым выездом фасад был бы в 8,5 + 34 + 4 = 46,5 от оси.
+    // Улица 1+1 — полуширина 8,5; прежний выезд был длиной 34 м.
     expect(front - y).toBeCloseTo(8.5 + STATION.driveway + STATION.gate, 0);
-    expect(front - y).toBeLessThan(40);
+    expect(front - y).toBeLessThan(8.5 + 34 + STATION.gate);
     // Грузовая автостанция — по-прежнему не автовокзал.
     const cargo = game.placeStation({ x: x + 380, y: y - 40 }, 30, 'road', { pax: false, cargo: true });
     expect(cargo && isBusTerminal(cargo)).toBe(false);
@@ -123,6 +123,7 @@ describe('Автовокзал: перроны, ближе к дороге, въ
   it('старое сохранение: станция прежнего размера (36×22, выезд 34 м) открывается такой же, автобусы встают на её места', () => {
     const { game, x, y } = scene();
     const st = terminal(game, x + 120, y + 40);
+    expect(game.setStationDriveway(st.id, 34)).toBeNull();
     const other = terminal(game, x + 380, y - 40);
     const line = game.createLine([st.id, other.id])!;
     game.buyVehicle(line.id, 'bus');
@@ -131,10 +132,12 @@ describe('Автовокзал: перроны, ближе к дороге, въ
     const saved = save.stations.find((s: { id: number }) => s.id === st.id);
     saved.fp.w = 36;
     saved.fp.h = 22;
+    delete saved.driveway;
     const loaded = withoutCitizens(new Game(save.settings, save));
     const old = loaded.stations.get(st.id)!;
     expect(old.fp.w).toBe(36);
     expect(old.fp.h).toBe(22);
+    expect(loaded.stationDrivewayLen(old)).toBe(34);
     expect(isBusTerminal(old)).toBe(true);
     loaded.speed = 1;
     let looks: ReturnType<Game['bayLooks']> = [];

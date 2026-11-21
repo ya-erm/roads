@@ -7,7 +7,7 @@ import { LOT } from '../world/parkingLots';
 import { curbGap } from '../world/worldgen';
 import { parkGates } from './parkArt';
 import { SIDEWALK, type Sidewalk, WALK_LOOK } from './sidewalks';
-import { drawTownWalks, type TownWalks, townWalks, WALK_W } from './townWalks';
+import { drawDriveMouths, drawTownWalks, type TownWalks, townWalks, WALK_W } from './townWalks';
 
 let nextId = 500;
 const house = (x: number, y: number, o: Partial<TownBuilding> = {}): TownBuilding => ({
@@ -130,6 +130,13 @@ describe('Дорожки кварталов', () => {
     const ys = gate.mouth!.filter((_, i) => i % 2 === 1);
     expect(Math.max(...ys)).toBeGreaterThan(-5 + 1.25);
     expect(Math.min(...ys)).toBeLessThan(-5);
+    // Понижение закрывает бордюр асфальтом, поперёк проезда ничего не рисуется.
+    const paint: string[] = [];
+    const ctx = new Proxy({}, {
+      get: (_, k) => () => { if (k === 'fill' || k === 'stroke') paint.push(k); },
+    }) as unknown as CanvasRenderingContext2D;
+    drawDriveMouths(ctx, [w], w.box, 2);
+    expect(paint).toEqual(w.drives.filter((d) => d.mouth).map(() => 'fill'));
     // У большой площадки заезд — сама дорога (тупик-выезд): своего съезда нет.
     expect(w.drives.some((d) => d.pts[0] > 60)).toBe(false);
     // Грунтовка — без бордюра: понижения нет.

@@ -125,6 +125,7 @@ export const defaultPreset = (): RoadPreset => ROAD_PRESETS.find((p) => p.id ===
 
 export const MAX_LANES = 4;
 export const LANE_W = 7;
+export const ROAD_ASPHALT = '#646b76';
 /** Две узкие полосы и небольшие поля у бордюров: два встречных автомобиля на ширину полотна. */
 export const YARD_LANE_W = 4.9;
 export const YARD_MARGIN = 0.35;

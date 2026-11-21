@@ -4,7 +4,9 @@ import { boxesOverlap, CURB, stallBox, type Box, type CurbStall } from '../lanes
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
 import { curbSqueeze, SQUEEZE } from '../world/curbSqueeze';
 import type { TownBuilding, TownCar } from '../world/entities';
+import { drivewayLink } from '../world/houseAccess';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
+import { dockDriveway, dockYardOf, exitDriveway } from '../world/shopLots';
 import type { Footprint } from '../world/spatial';
 import { edgeOf, formOf } from '../world/townForms';
 import { frontage, withCurb } from '../world/curbStreets';
@@ -12,7 +14,7 @@ import type { WorldContext } from '../world/worldgen';
 import { CURB_TRIPS } from './curbParking';
 import { Game, type SaveData } from './game';
 import { runPose, type Run } from './lotMoves';
-import { freshGame, runSeconds, runUntil, withoutCitizens } from './testkit';
+import { fieldSpot, freshGame, road, runSeconds, runUntil, withoutCitizens } from './testkit';
 
 /** Новая партия — с полосами стоянки (WorldSettings.parking). */
 const PARK: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 1, size: 'medium' };
@@ -63,8 +65,8 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
       const near = net.corridorNear(market.fp.center, 80);
       expect(near?.lanes.some((l) => l.park)).toBe(true);
     }
-    // Места: тысячи, у каждого — полоса движения рядом; часть — места ночёвки.
-    expect(g.curb.stalls().length).toBeGreaterThan(1000);
+    // Сотни мест остаются даже с разрывами у дворов и грузовых рамп; часть — места ночёвки.
+    expect(g.curb.stalls().length).toBeGreaterThan(800);
     const homes = g.towns.flatMap((t) => g.carHomes.fleet(t).cars).filter((c) => c.place?.kind === 'curb');
     expect(homes.length).toBeGreaterThan(50);
     for (const c of homes) expect(dist(c.place!.curb!.pos, c.home.fp.center)).toBeLessThanOrEqual(CURB_TRIPS.homeRange);
@@ -188,6 +190,56 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
     expect(h.curb.stalls()).toHaveLength(0);
     runSeconds(h, 10);
     expect(h.citizenCars).toBeGreaterThan(20);
+  });
+
+  it('перед въездом к рампе магазина и обоими проездами сквозного склада нет мест, включая старое сохранение', () => {
+    const g = freshGame({ seed: 11, size: 'small', towns: 1, industries: 'few', money: 5_000_000, water: 'dry' });
+    const a = fieldSpot(g, 400);
+    const b = add(a, { x: 400, y: 0 });
+    expect(road(g, { free: a }, { free: b })).toBe(true);
+    const net = g.roads.net;
+    const c = net.corridorNear(add(a, { x: 200, y: 0 }), 1)!;
+    const lanes = withCurb(net, c, 1)!;
+    expect(lanes).toBeTruthy();
+    net.setLanes(c, lanes);
+    g.roads.changed();
+    const before = g.curb.stalls().filter((st) => st.corridor === c.id);
+    const t = g.towns[0];
+    const put = (form: 'shop' | 'warehouse', x: number): TownBuilding => ({
+      type: 'building', id: g.nextId(), townId: t.id, form, kind: 'com', floors: 2, face: -1,
+      fp: { center: add(a, { x, y: 37 }), w: 68, h: 40, angle: 0 }, anchor: c.a, color: '#777777', roof: '#555555',
+      ...(form === 'warehouse' ? { dockApproach: 'parallel' } : {}),
+    });
+    const shop = put('shop', 100);
+    const warehouse = put('warehouse', 259);
+    const dock = dockYardOf(warehouse)!;
+    const drives = [dockDriveway(shop)!, dockDriveway(warehouse, dock)!, exitDriveway(warehouse, dock)!];
+    const covered = drives.map((d) => {
+      const at = drivewayLink(net, d)!;
+      expect(at.corridor).toBe(c.id);
+      const touches = (st: CurbStall) => Math.abs(st.s - at.s) < (d.width + CURB.stallLen) / 2;
+      const oldStalls = before.filter(touches);
+      expect(oldStalls.length).toBeGreaterThan(0);
+      return oldStalls;
+    });
+
+    t.buildings.push(shop, warehouse);
+    g.index.add(shop);
+    g.index.add(warehouse);
+    for (const st of covered.flat()) {
+      expect(g.curb.stall(st.key)).toBeUndefined();
+      expect(g.curb.slotOf(st)).toBeNull();
+    }
+    expect(g.curb.stalls().filter((st) => st.corridor === c.id).length).toBeGreaterThan(10);
+
+    // Из старой партии приезжий остался на месте, которое перекрывает проезд. При загрузке место освободится.
+    const old = covered[0][0];
+    const save = structuredClone(g.toSave());
+    save.towns[0].cars = [{ car: g.carHomes.fleet(t).cars[0].key, at: shop.id, curb: old.key, cp: [old.pos.x, old.pos.y] }];
+    const loaded = new Game(structuredClone(g.settings), save);
+    expect(loaded.curb.stall(old.key)).toBeUndefined();
+    expect(loaded.curb.isTaken(old.key)).toBe(false);
+    expect(loaded.towns[0].cars?.[0]?.curb).toBeUndefined();
   });
 
   it('стоянка на застроенной улице: участки ужимаются (задняя граница — не дальше 6 м), иначе — снос с ценой', () => {

@@ -1,7 +1,7 @@
 import type { Vec } from '../core/vec';
 import type { DrawMode } from '../game/build';
 import type { Fragment } from '../lanes/fragment';
-import { isDivided, isOneWay, isTrunk, isYardSpec, LANE_W, RoadSpec, totalLanes, YARD_LANE_W } from '../world/roadTypes';
+import { isDivided, isOneWay, isTrunk, isYardSpec, LANE_W, ROAD_ASPHALT, RoadSpec, totalLanes, YARD_LANE_W } from '../world/roadTypes';
 import type { BiomeId } from '../world/biomes';
 import type { Relief, WaterAmount } from '../world/settings';
 
@@ -28,7 +28,7 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
   const laneY = (i: number) => top + i * laneH + (i >= back && median ? median : 0);
   const parts: string[] = [
     `<rect x="1" y="${top - 1.5}" width="${w - 2}" height="${total + 3}" rx="3" fill="#4b525c"/>`,
-    `<rect x="1" y="${top}" width="${w - 2}" height="${total}" fill="${yard ? '#7d858c' : '#646b76'}"/>`,
+    `<rect x="1" y="${top}" width="${w - 2}" height="${total}" fill="${ROAD_ASPHALT}"/>`,
   ];
   for (let i = 1; i < lanes; i++) {
     const y = laneY(i);

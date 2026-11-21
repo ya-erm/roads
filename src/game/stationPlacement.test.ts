@@ -48,9 +48,12 @@ describe('Длина выезда автостанции', () => {
     const { game, x, y } = scene();
     const near = terminal(game, x + 150, y + 40, { driveway: R.min });
     const far = terminal(game, x + 450, y + 40, { driveway: R.min + 6 * R.step });
+    const standard = terminal(game, x + 300, y + 40);
     expect(near.driveway).toBe(R.min);
     expect(far.driveway).toBe(R.min + 6 * R.step);
     expect(front(far, y) - front(near, y)).toBeCloseTo(6 * R.step, 0);
+    expect(standard.driveway).toBe(30);
+    expect(front(standard, y) - front(near, y)).toBeCloseTo(30 - R.min, 0);
   });
 
   it('в карточке: длиннее и короче — тот же выезд из того же места, станция в его конце; Ctrl+Z возвращает', () => {
@@ -99,12 +102,13 @@ describe('Длина выезда автостанции', () => {
     expect(m2 - game.money).toBeLessThan(2000);
   });
 
-  it('станции вдоль дороги и старой без длины — тоже: у первой выезда нет, у второй длина по умолчанию прежняя', () => {
+  it('при переносе старой станции длина берётся по её выезду; у станции вдоль дороги отдельного выезда нет', () => {
     const { game, x, y } = scene();
     const side = terminal(game, x + 300, y + 40, { side: true });
     expect(game.stationDrivewayPlan(side.id, 30).ok).toBe(false);
-    const old = terminal(game, x + 120, y - 40);
+    const old = terminal(game, x + 120, y - 40, { driveway: STATION.starterDriveway });
     delete old.driveway;
+    expect(game.stationMovePlan(old.id, { x: x + 450, y: y - 40 }, 30).drivewayLen).toBe(STATION.starterDriveway);
     expect(game.setStationDriveway(old.id, 30)).toBeNull();
     expect(old.driveway).toBe(clampDriveway(30));
   });

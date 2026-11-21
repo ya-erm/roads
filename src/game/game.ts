@@ -121,7 +121,7 @@ import {
   zoneRetail,
 } from '../world/retail';
 import { CAR_SIZE, drivewayLink, drivewaysOf, type Driveway, LOT_SETBACK, lotFrame } from '../world/houseAccess';
-import { DEPOT_MIN_W, roofCenter } from '../world/shopLots';
+import { DEPOT_MIN_W, dockDriveway, dockYardsOf, exitDriveway, roofCenter, stallDriveways } from '../world/shopLots';
 import { yardLotOf, yardSpots } from '../world/yardLots';
 import { CarHomes, type CarHomesHost } from './carHomes';
 import { parkingCells, type ParkingCell } from './parkingLayer';
@@ -1540,10 +1540,10 @@ export class Game implements BuildContext {
   }
 
   /**
-   * Станция вплотную к предприятию: площадка у стены со стороны курсора, ворота и короткий выезд.
+   * Станция вплотную к предприятию: площадка у стены со стороны курсора, ворота и выезд.
    * Если рядом с концом выезда есть дорога, выезд сразу к ней подключается.
    */
-  private industryStationPlan(ind: Industry, p: Vec, forceLink?: boolean): StationPlan {
+  private industryStationPlan(ind: Industry, p: Vec, len: number, forceLink?: boolean): StationPlan {
     const fp = ind.fp;
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = { x: -u.y, y: u.x };
@@ -1564,7 +1564,7 @@ export class Game implements BuildContext {
     // К этой стене уже подходит дорога и кончается тупиком у места выезда (стартовый просёлок): двор встаёт напротив
     // неё, где бы вдоль стены ни был курсор, — выезд продолжает дорогу, а не упирается ей в бок.
     const net = this.roads.net;
-    let exitDistance = INDUSTRY_EXIT;
+    let exitDistance = INDUSTRY_EXIT + len - STATION.starterDriveway;
     let approach: LaneNode | undefined;
     const search = add(add(fp.center, scale(axis, slide)), scale(n, half + INDUSTRY_EXIT));
     for (const node of net.nodesNear(search, along / 2 + 24)) {
@@ -1580,12 +1580,14 @@ export class Game implements BuildContext {
       break;
     }
     const at = (k: number) => add(add(fp.center, scale(axis, slide)), scale(n, half + k));
-    const exit = at(exitDistance);
     const industryAccessFlag = linked ? { industryAccess: true as const } : {};
     const tryYard = (w: number, h: number, expanded: boolean): StationPlan => {
       const dock: Footprint = { center: at(3 + h / 2), w, h, angle: Math.atan2(n.x, -n.y) };
       const fail = (reason: string, cost = COST.station, driveway?: RoadPlan): StationPlan => ({ ok: false, reason, cost, fp: dock, industryId: ind.id, driveway });
-      const gate = at(3 + h + 5);
+      const gateDistance = 3 + h + 5;
+      const gate = at(gateDistance);
+      // Свободный выезд должен быть достаточно длинным для отдельного полотна даже на минимальной настройке.
+      const exit = at(approach ? exitDistance : Math.max(exitDistance, gateDistance + MIN_SEGMENT_LEN));
       if ([...footprintCorners(dock), dock.center, gate, exit].some((q) => this.isWater(q, 3) || !this.inBounds(q, 20))) return fail('Мешает вода');
       const under = this.structuresUnder(dock, 0);
       if (under.blocker) return fail(under.blocker);
@@ -1614,7 +1616,7 @@ export class Game implements BuildContext {
     const medium = tryYard(width, INDUSTRY_YARD_MIN_DEPTH, true);
     if (medium.ok) return medium;
     const small = tryYard(compact, INDUSTRY_YARD_MIN_DEPTH, false);
-    return small.ok || !linked ? small : this.industryStationPlan(ind, p, false);
+    return small.ok || !linked ? small : this.industryStationPlan(ind, p, len, false);
   }
 
   /**
@@ -6917,7 +6919,7 @@ export class Game implements BuildContext {
     return null;
   }
 
-  /** В каждой половине оставляем место для одного разворота перед общим выездом. */
+  /** Место ожидания делят разворачивающиеся машины; за уже выезжающим можно начать свой манёвр следом. */
   private canStageYardTurn(st: Station, v: FleetVehicle): boolean {
     const middle = (st.bays - 1) / 2;
     const half = Math.sign((v.bay ?? 0) - middle);
@@ -6925,7 +6927,7 @@ export class Game implements BuildContext {
     return st.occupied.every((id) => {
       const other = this.fleet.get(id);
       const move = other?.yardExit;
-      if (!other || other === v || !move || (move.staged && move.stage !== 'turn')) return true;
+      if (!other || other === v || !move || move.stage !== 'turn') return true;
       return Math.sign((other.bay ?? 0) - middle) !== half;
     });
   }
@@ -9616,7 +9618,7 @@ export class Game implements BuildContext {
    * остановки (±CURB.stopRoom от узла остановки, с обеих сторон улицы): там мест на полосе стоянки нет.
    */
   private curbSkips(): { sig: string; skips: Map<string, [number, number][]> } {
-    const sig = `${this.towns.map((t) => t.buildings.length).join(',')}|${this.stations.size}|${this.lotRev}`;
+    const sig = `${this.towns.map((t) => t.buildings.length).join(',')}|${this.stations.size}|${this.townRev}|${this.layoutRev}|${this.lotRev}`;
     const graph = this.roads.graph;
     const hit = this.curbSkipCache;
     if (hit && hit.sig === sig && hit.graph === graph) return hit;
@@ -9632,7 +9634,9 @@ export class Game implements BuildContext {
     const drive = (d: Driveway | null | undefined) => {
       const at = d && drivewayLink(net, d);
       if (!at || !parked.has(at.corridor)) return;
-      const w = d.width / 2 + CURB.drivePad;
+      // У косого заезда проём вдоль бордюра шире самого проезда.
+      const across = Math.abs(dot(net.corridor(at.corridor).lut.tangentAt(at.s), rightNormal(d.dir)));
+      const w = d.width / (2 * Math.max(0.5, across)) + CURB.drivePad;
       push(`${at.corridor}:${at.side}`, at.s - w, at.s + w);
     };
     if (parked.size) {
@@ -9647,7 +9651,14 @@ export class Game implements BuildContext {
             drive(ys.gate);
             for (const s of ys.spots) drive(s.drive);
           }
-          if (b.kind === 'com') for (const s of this.shops.lotOf(b)?.spots ?? []) drive(s.d);
+          if (b.kind === 'com') {
+            for (const d of stallDriveways(b)) drive(d);
+            // К рампе может быть несколько проездов: обе рампы рынка, отдельный выезд АЗС или сквозного склада.
+            for (const yard of dockYardsOf(b)) {
+              drive(dockDriveway(b, yard));
+              drive(exitDriveway(b, yard));
+            }
+          }
         }
         // Ворота площадок-стоянок (у большой — тупик-выезд: там перекрёсток, места у него и так нет).
         for (const lot of town.lots ?? []) if (!lot.removed && !lot.nodes?.length) for (const g of lot.gates) drive(lotGateDriveway(lot, g));
@@ -10809,7 +10820,7 @@ export class Game implements BuildContext {
     const fail = (reason: string, fp: Footprint): StationPlan => ({ ok: false, reason, cost: COST.station, fp });
     // Курсор у предприятия — пристраиваем станцию к нему с этой стороны.
     const ind = this.industries.find((i) => pointInFootprint(p, i.fp, 80));
-    if (ind) return this.industryStationPlan(ind, p);
+    if (ind) return this.industryStationPlan(ind, p, len);
     const hit = this.stationRoadNear(p, Math.max(40, snapRadius));
     // У перекрёстка (или у самого конца полотна) выезд примыкает прямо к узлу — станция «примагничивается».
     const edge = MIN_SEGMENT_LEN + 8;
@@ -11826,7 +11837,7 @@ export class Game implements BuildContext {
     if (!st) return { ok: false, reason: 'Станции нет', cost: 0, fp: null, refund: 0 };
     if (st.kind === 'rail') return this.railMovePlan(st, p, snapRadius, rail);
     // Как стояла, так и встанет: вдоль дороги или в конце выезда той же длины.
-    const road: RoadStationOptions = st.curb ? { curb: true, curbBays: st.bays } : st.side ? { side: true } : { driveway: st.driveway ?? STATION.driveway };
+    const road: RoadStationOptions = st.curb ? { curb: true, curbBays: st.bays } : st.side ? { side: true } : { driveway: this.stationDrivewayLen(st) ?? STATION.driveway };
     return this.relocatePlan(st, () => this.stationPlan(p, snapRadius, st.kind, 0, 2, RAIL_STATION.platform, false, road));
   }
 

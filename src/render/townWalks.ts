@@ -308,13 +308,9 @@ function poly(c: CanvasRenderingContext2D, pts: readonly number[]): void {
   c.closePath();
 }
 
-/** Цвет понижения бордюра у съезда: светлая черта бетона по кромке полотна поперёк съезда. */
-const LOWERED = 'rgba(196,194,186,0.55)';
-
 /**
  * Понижение бордюра у съездов в рамке view — поверх полотен (после сети, LaneRenderer): бордюр полотна лежит снаружи
- * его асфальта, и без этого съезд упирался бы в него, а машина выезжала бы из-под него. Асфальт съезда — до кромки
- * асфальта полотна, по ней — светлая черта понижения.
+ * его асфальта, и без этого съезд упирался бы в него. В проёме асфальт съезда сходится с асфальтом улицы.
  */
 export function drawDriveMouths(ctx: CanvasRenderingContext2D, list: readonly TownWalks[], view: Box, zoom: number): void {
   const a = new Art(ctx, { id: 0, fp: { center: { x: 0, y: 0 }, w: 1, h: 1, angle: 0 } }, zoom, 0, 0, 'still');
@@ -327,13 +323,6 @@ export function drawDriveMouths(ctx: CanvasRenderingContext2D, list: readonly To
       ctx.fillStyle = d.color;
       poly(ctx, m);
       ctx.fill();
-      // Черта понижения — по кромке асфальта полотна (точки 2 и 5 раструба — у кромки).
-      ctx.strokeStyle = LOWERED;
-      ctx.lineWidth = 0.35;
-      ctx.beginPath();
-      ctx.moveTo(m[4], m[5]);
-      ctx.lineTo(m[10], m[11]);
-      ctx.stroke();
     }
   }
 }

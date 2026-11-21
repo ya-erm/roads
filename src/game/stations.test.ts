@@ -235,6 +235,35 @@ describe('Станции', () => {
     expect(dock!.industryId).not.toBeNull();
   });
 
+  it('свободный выезд у предприятия длиннее по умолчанию и меняется при выборе длины', () => {
+    const game = freshGame(42);
+    game.money = 5_000_000;
+    for (const ind of game.industries) {
+      for (let side = 0; side < 4; side++) {
+        const angle = ind.fp.angle + side * Math.PI / 2;
+        const dir = { x: Math.cos(angle), y: Math.sin(angle) };
+        const p = add(ind.fp.center, scale(dir, footprintSide(ind.fp, dir) + 25));
+        const normal = game.stationPlan(p, 14);
+        const short = game.stationPlan(p, 14, 'road', 0, 2, undefined, false, { driveway: STATION.starterDriveway });
+        if (!normal.ok || !short.ok || normal.industryId !== ind.id || normal.fp?.h !== 56 || short.fp?.h !== 56) continue;
+        const exitLength = (plan: typeof normal) => {
+          const net = plan.driveway?.net;
+          const node = net && plan.nodePos && net.nodesNear(plan.nodePos, 1)[0];
+          if (!net || !node || node.corridors.length !== 1) return null;
+          const road = net.corridor(node.corridors[0]);
+          if (!net.isDeadEnd(net.node(road.a === node.id ? road.b : road.a))) return null;
+          return road.length;
+        };
+        const before = exitLength(short);
+        if (before === null) continue;
+        expect(before).toBeCloseTo(20);
+        expect(exitLength(normal)).toBeCloseTo(32);
+        return;
+      }
+    }
+    throw new Error('Нет свободного выезда у предприятия');
+  });
+
   it('к перекрёстку с выездом-шоссе другой станции можно пристроить ещё одну станцию — напротив', () => {
     const game = freshGame(42);
     const road = fieldRoad(game);
