@@ -198,7 +198,7 @@ export const COST = {
 };
 
 /** Общий темп добычи и переработки с учётом времени вывоза продукции. */
-export const INDUSTRY_PRODUCTION_FACTOR = 0.75;
+export const INDUSTRY_PRODUCTION_FACTOR = 0.5625;
 
 export const ECONOMY = {
   startMoney: 600_000,

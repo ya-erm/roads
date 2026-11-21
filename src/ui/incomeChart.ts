@@ -26,10 +26,11 @@ export const monthTick = (x: number, H: number, label: string) =>
 export function monthTip(m: IncomeMonth): string {
   const profit = m.income - m.expense;
   const net = profit >= 0 ? `прибыль +${money(profit)}` : `убыток ${money(-profit)}`;
-  return [`доход ${money(m.income)}`, `расход ${money(m.expense)}`, net].join('\n');
+  const trend = profit > 0 ? ' 📈' : profit < 0 ? ' 📉' : '';
+  return [`доход ${money(m.income)}`, `расход ${money(m.expense)}`, net + trend].join('\n');
 }
 
-/** Метки строк подсказки (data-tip-marks): у дохода и расхода — квадратики легенды, у прибыли — без метки. */
+/** Квадратики легенды для строк дохода и расхода в подсказке (data-tip-marks). */
 export const MONTH_TIP_MARKS = `${INCOME_COLOR}|${EXPENSE_COLOR}|`;
 
 /**

@@ -41,11 +41,11 @@ describe('Экономика', { timeout: 60_000 }, () => {
     const production = game as unknown as { updateIndustries(dt: number): void };
     production.updateIndustries(MONTH_LENGTH);
 
-    expect(farm.producedMonth + farm.prodAcc).toBeCloseTo(40.5);
+    expect(farm.producedMonth + farm.prodAcc).toBeCloseTo(30.375);
     expect(game.industryRate(farm)).toBe(Math.round(farm.producedMonth + farm.prodAcc));
-    expect(plant.producedMonth).toBe(135);
-    expect(game.industryRate(plant)).toBe(plant.producedMonth);
-    expect(plant.stock.grain).toBe(65);
+    expect(plant.producedMonth + plant.prodAcc).toBeCloseTo(101.25);
+    expect(game.industryRate(plant)).toBe(Math.round(plant.producedMonth + plant.prodAcc));
+    expect(plant.stock.grain).toBeCloseTo(98.75);
   });
 
   it('грузовики на линии ферма → комбинат окупаются, а ферма растёт', () => {
