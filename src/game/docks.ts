@@ -2,7 +2,7 @@ import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import type { GLane, LaneGraph } from '../lanes/graph';
 import type { LaneNet } from '../lanes/model';
 import { findLaneRoute } from '../lanes/routing';
-import type { LaneTraffic } from '../lanes/traffic';
+import { ROLL_BRAKE, type LaneTraffic } from '../lanes/traffic';
 import { boxesOverlap, type Box } from '../lanes/curb';
 import type { Vehicle, VehicleSpec } from '../sim/vehicle';
 import { follow, hitchOf, jointOf, vehicleBoxes, type VehicleBody } from '../sim/body';
@@ -39,13 +39,12 @@ export const DOCK = {
    * по двору ~10 км/ч, задом ~6,5: при 3 и 2 ед./с заезд и выезд шли по 20 с, визит к магазину — почти месяц (60 с).
    */
   speed: { roadIn: 5.5, yardIn: 4.5, yardBack: 3, roadOut: 5, accel: 3.5, brake: 4.5 },
-  /** За столько метров до проезда грузовик сбрасывает скорость до slow (м/с игры) — скоро поворачивать. */
-  slowAt: 80,
-  slow: 7,
+  /** На этом расстоянии перестаёт выбирать рампу и сохраняет выбранную за собой. */
+  reserveAt: 80,
   /** Поворотник — за столько метров. */
   blinkAt: 50,
   /** Мягкое торможение к проезду, м/с² игры: позже уже не остановиться — проезжает мимо. */
-  hold: 6,
+  hold: ROLL_BRAKE,
   /**
    * Ждущий просвета у бордюра смотрит по сторонам хотя бы столько, с; встав на полосу задним ходом (двор 'back') —
    * столько до того, как тронуться вперёд.
@@ -109,14 +108,13 @@ export interface DockHost {
   joined(id: number, sim: Vehicle): void;
 }
 
-/** Грузовик в потоке едет ко двору: дом, длина, свой предел скорости (вернуть, если проедет мимо). */
+/** Грузовик в потоке едет к выбранной рампе. */
 interface Homing {
   id: number;
   b: TownBuilding;
-  maxSpeed: number;
   /** К какой рампе дома (у рынка их две): выбирает свободную, пока не у проезда. */
   k: number;
-  /** Уже у проезда (сбросил скорость): рампа — за ним, другому грузовику туда не сворачивать. */
+  /** Уже у проезда: рампа — за ним, другому грузовику туда не сворачивать. */
   close?: boolean;
   /** Двор был свободен — сворачивает с ходу, двор уже за ним (yardBusy): покупателям туда не заезжать. */
   roll?: boolean;
@@ -445,7 +443,7 @@ export class Docks {
     const geo = this.geoOf(b, sim.length, sim.width, k);
     if (!geo?.in || !geo.out) return false;
     sim.endLink = geo.in.link.id;
-    this.homing.set(sim.id, { id, b, maxSpeed: sim.maxSpeed, k });
+    this.homing.set(sim.id, { id, b, k });
     return true;
   }
 
@@ -528,7 +526,12 @@ export class Docks {
     if (m?.sim && this.host.traffic.vehicles.has(m.sim.id)) this.host.traffic.release(m.sim);
     this.moves.delete(id);
     this.parked.delete(id);
-    for (const [simId, h] of this.homing) if (h.id === id) this.homing.delete(simId);
+    for (const [simId, h] of this.homing) {
+      if (h.id !== id) continue;
+      const sim = this.host.traffic.vehicles.get(simId);
+      if (sim) this.host.traffic.release(sim);
+      this.homing.delete(simId);
+    }
   }
 
   /** Такт — после движения: подъезжающие — к проезду, на манёвре — по отрезкам. */
@@ -537,11 +540,10 @@ export class Docks {
     for (const m of [...this.moves.values()]) if (!this.stepMove(m, dt)) this.moves.delete(m.id);
   }
 
-  /** Подъезжающий передумал (проехал мимо, дорогу поменяли): едет к узлу станции, свой предел скорости. */
-  private cancel(sim: Vehicle, h: Homing): void {
-    sim.maxSpeed = h.maxSpeed;
+  /** Подъезжающий передумал (проехал мимо, дорогу поменяли): едет к узлу станции. */
+  private cancel(sim: Vehicle): void {
     delete sim.endLink;
-    if (sim.holdDist !== undefined) this.host.traffic.release(sim);
+    this.host.traffic.release(sim);
     this.homing.delete(sim.id);
   }
 
@@ -563,7 +565,7 @@ export class Docks {
       const geo = this.geoOf(h.b, sim.length, sim.width, h.k);
       const slot = geo?.out ? geo.in : null;
       if (!geo || !slot || sim.endLink !== slot.link.id) {
-        this.cancel(sim, h);
+        this.cancel(sim);
         continue;
       }
       const L = sim.length;
@@ -571,24 +573,26 @@ export class Docks {
       const left = traffic.routeLeft(sim) - (slot.lane.length - (slot.mid + L / 2));
       // Рампы заняты другими грузовиками — не сворачивает, проезжает мимо (игра: объезд квартала и снова, потом — дальше).
       if (!h.close && this.rampBusy(h.b, h.id, sim.length, sim.width)) {
-        if (left < DOCK.slowAt) this.cancel(sim, h);
+        if (left < DOCK.reserveAt) this.cancel(sim);
         continue;
       }
-      if (left < DOCK.slowAt) {
-        sim.maxSpeed = Math.min(h.maxSpeed, DOCK.slow);
-        h.close = true;
-      }
+      if (left < DOCK.reserveAt) h.close = true;
       if (left < DOCK.blinkAt) sim.blinker = dot(geo.d.dir, rightNormal(slot.f)) > 0 ? 1 : -1;
       if (sim.holdDist === undefined) {
         const lane = sim.onMovement ? undefined : traffic.currentLane(sim);
-        if (!lane || lane.link !== slot.link.id) continue;
+        if (!lane || lane.link !== slot.link.id) {
+          // Если последняя связь короткая, тормозной путь начинается ещё на предыдущей полосе.
+          traffic.prepareStop(sim, left - 1.5);
+          continue;
+        }
         const room = slot.mid + L / 2 - sim.s;
         const late = room < (sim.v * sim.v) / (2 * DOCK.hold) + 0.3;
         if (lane.id !== slot.lane.id) {
-          if (late) this.cancel(sim, h);
+          if (late) this.cancel(sim);
+          else traffic.release(sim);
           continue;
         }
-        if (late) this.cancel(sim, h);
+        if (late) this.cancel(sim);
         else traffic.slowTo(sim, room, entrySpeed(geo.entry ?? [this.turnLeg(geo, slot.pos, slot.f), ...geo.inLegs], DOCK.speed.brake));
         continue;
       }
@@ -600,12 +604,11 @@ export class Docks {
       }
       if (!traffic.held(sim)) continue;
       if (sim.lane !== slot.lane.id) {
-        this.cancel(sim, h);
+        this.cancel(sim);
         continue;
       }
       if (!h.roll && this.host.lotBusy(h.b.id)) continue;
       this.homing.delete(simId);
-      sim.maxSpeed = h.maxSpeed;
       const c0 = sub(sim.pos, scale(sim.dir, L / 2));
       // С ходу — с той скоростью, с какой подъехал; ждал — с места.
       const v0 = sim.holdV !== undefined ? sim.v : 0;

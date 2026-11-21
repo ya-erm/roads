@@ -992,6 +992,7 @@ export class LaneTraffic {
   holdAfter(veh: Vehicle, d: number): void {
     veh.holdDist = Math.max(0, d);
     delete veh.holdV;
+    delete veh.brakeDist;
   }
 
   /**
@@ -1002,6 +1003,12 @@ export class LaneTraffic {
   slowTo(veh: Vehicle, d: number, v: number): void {
     veh.holdDist = Math.max(0, d);
     veh.holdV = v;
+    delete veh.brakeDist;
+  }
+
+  /** Заранее оставить тормозной путь до двора, пока ещё не занята полоса поворота. */
+  prepareStop(veh: Vehicle, d: number): void {
+    veh.brakeDist = Math.max(0, d);
   }
 
   /** Доехала до места остановки (holdAfter) и стоит — или до места поворота с ходу (slowTo), не быстрее, чем там можно. */
@@ -1012,6 +1019,7 @@ export class LaneTraffic {
   release(veh: Vehicle): void {
     delete veh.holdDist;
     delete veh.holdV;
+    delete veh.brakeDist;
   }
 
   /** Стоящую у остановки (holdAfter) — сразу к бордюру, без смещения на глазах: автобус из сохранения. */
@@ -2079,6 +2087,9 @@ export class LaneTraffic {
     } else if (veh.holdDist !== undefined) {
       // Остановка через holdDist метров — как стоящая впереди машина.
       a = Math.min(a, idmAccel(veh.v, veh.maxSpeed, veh.holdDist + IDM.minGap, veh.v, veh.accel));
+    } else if (veh.brakeDist !== undefined) {
+      const cap = Math.sqrt(2 * ROLL_BRAKE * Math.max(0, veh.brakeDist - veh.v * dt));
+      a = Math.min(a, (cap - veh.v) / dt);
     }
     veh.v = Math.max(0, Math.min(veh.maxSpeed * 1.05, veh.v + a * dt));
     const creep = veh.onMovement && this.creeping.get(veh);
@@ -2087,6 +2098,7 @@ export class LaneTraffic {
       if (veh.holdV === undefined) veh.v = Math.min(veh.v, veh.holdDist / dt);
       veh.holdDist = Math.max(0, veh.holdDist - veh.v * dt);
     }
+    if (veh.brakeDist !== undefined) veh.brakeDist = Math.max(0, veh.brakeDist - veh.v * dt);
     if (veh.v < 0.5) veh.stoppedTime += dt;
     veh.s += veh.v * dt;
     // Спецмашина обогнала прижавшуюся — встаёт перед ней в очереди.
