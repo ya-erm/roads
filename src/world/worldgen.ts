@@ -7,7 +7,7 @@ import { Corridor, LaneNet, LaneNode, LaneSlot, twoWay } from '../lanes/model';
 import { biomeOf, townCargo } from './biomes';
 import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST, type IndustryKind, type IndustryType } from './cargo';
 import { placePlayerWorld } from './deposits';
-import type { Deposit, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
+import type { Deposit, HouseForm, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
 import { lotClearOfRoads } from './lotClear';
 import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN, WALK_EDGE } from './roadTypes';
@@ -148,6 +148,7 @@ interface Profile {
   lanes: LaneSlot[];
 }
 const STREET: Profile = { cls: 'street', lanes: twoWay(1, 1) };
+const MAIN_STREET: Profile = { cls: 'avenue', lanes: twoWay(1, 1) };
 const AVENUE: Profile = { cls: 'avenue', lanes: twoWay(2, 2) };
 
 export interface WorldContext {
@@ -676,7 +677,7 @@ export function buildTown(ctx: WorldContext, id: number, center: Vec, name: stri
   const kit: StreetKit = {
     ctx,
     node: (p) => nodeAt(sb, p),
-    street: (a, b, curve, main) => street(sb, a, b, curve, main ? AVENUE : STREET),
+    street: (a, b, curve, role) => street(sb, a, b, curve, role === 'yard' ? STREET : role === 'main' ? MAIN_STREET : AVENUE),
     shape,
   };
   const district = townStreets(kit, center, size, style);
@@ -1007,7 +1008,7 @@ const REAR_LOT = { h: [20 * TOWN_SCALE, 26 * TOWN_SCALE], gap: 4 * TOWN_SCALE } 
 /** От концов улицы (перекрёсток, тупик) до первого участка, м: угол квартала — участкам поперечной улицы. */
 const STREET_END = { start: 26 * TOWN_SCALE, end: 22 * TOWN_SCALE } as const;
 
-export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density: number, limit = Infinity, reach = Infinity): number {
+export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density: number, limit = Infinity, reach = Infinity, commercial?: HouseForm): number {
   const { rng } = ctx;
   const hw = corridorHalf(seg);
   let added = 0;
@@ -1031,9 +1032,10 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
       const fp: Footprint = { center, w: width, h: depth, angle: Math.atan2(t.y, t.x) };
       // Парки и скверы (townParks.ts) рост обходит: дом на них не встаёт; к домам соседнего города — тоже.
       if (!placeable(ctx, fp, seg.id) || onPark(town, fp) || foreignNear(ctx, town, fp) || ctx.blocked?.(fp.center)) continue;
-      const kind: 'res' | 'com' = closeness > 0.6 && rng.chance(0.6) ? 'com' : rng.chance(0.1) ? 'com' : 'res';
+      if (commercial && !lotClearOfRoads(ctx.roads, fp, WALK_EDGE)) continue;
+      const kind = commercial || (closeness > 0.6 && rng.chance(0.6)) || rng.chance(0.1) ? 'com' : 'res';
       const [color, roof] = rng.pick(kind === 'com' ? COM_COLORS : big ? BLOCK_COLORS : RES_COLORS);
-      const floors = kind === 'com' ? rng.int(2, 6) : big ? rng.int(3, 6) : rng.int(1, 3);
+      const floors = commercial ? 2 : kind === 'com' ? rng.int(2, 6) : big ? rng.int(3, 6) : rng.int(1, 3);
       const b: TownBuilding = {
         type: 'building',
         id: ctx.nextId(),
@@ -1041,6 +1043,7 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
         fp,
         kind,
         floors,
+        ...(commercial ? { form: commercial } : {}),
         anchor: anchorFor(ctx.roads, p),
         color,
         roof,
@@ -1051,7 +1054,7 @@ export function fillStreet(ctx: WorldContext, town: Town, seg: Corridor, density
       town.buildings.push(b);
       added++;
       // Второй ряд домов в глубине квартала — чаще ближе к центру.
-      if (added < limit && rng.chance(0.15 + 0.4 * closeness)) {
+      if (!commercial && added < limit && rng.chance(0.15 + 0.4 * closeness)) {
         const d2 = rng.range(REAR_LOT.h[0], REAR_LOT.h[1]);
         const rear: Footprint = {
           center: add(p, scale(normal, hw + 5 + depth + REAR_LOT.gap + d2 / 2)),

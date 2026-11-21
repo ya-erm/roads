@@ -45,7 +45,7 @@ describe('Рост городов', { timeout: 60_000 }, () => {
   });
 
   it('город растёт компактно: дома и новые улицы — у края застройки, без отростков в поле', () => {
-    const game = freshGame(7);
+    const game = freshGame(23);
     const sorted = [...game.towns].sort((a, b) => b.population - a.population);
     const towns = [sorted[0], sorted[sorted.length - 1]];
     const before = new Set(game.roads.net.corridors.keys());

@@ -5,7 +5,9 @@ import { buildBusScene } from '../testpages/bus';
 import type { Station } from '../world/entities';
 import { townTier } from '../world/townForms';
 import { Game } from './game';
-import { connectStations, freightRoute, freshGame, HIGHWAY, nearestPair, runSeconds, stationAtIndustry, townStreets, withoutCitizens } from './testkit';
+import { connectStations, fieldSpot, freightRoute, freshGame, HIGHWAY, nearestPair, road, runSeconds, stationAtIndustry, townStreets, withoutCitizens } from './testkit';
+
+const FREIGHT_SEED = 8;
 import { DEFAULT_RULE } from './transport';
 
 /**
@@ -62,9 +64,12 @@ describe('Ожидание на остановке выбранного марш
   });
 
   it('различает правила погрузки при двух посещениях одной станции и выгрузку у других остановок', () => {
-    const game = withoutCitizens(freshGame(7));
+    const game = withoutCitizens(freshGame(FREIGHT_SEED));
     const { sA, sB } = freightRoute(game);
-    const third = stationAtIndustry(game, game.industries.find((i) => i.id === sB.industryId)!, sA.fp.center)!;
+    // Нужна обычная дополнительная остановка маршрута, без зависимости от подъездов предприятия.
+    const p = fieldSpot(game, 300);
+    expect(road(game, { free: p }, { free: { x: p.x + 300, y: p.y } })).toBe(true);
+    const third = game.placeStation({ x: p.x + 150, y: p.y - 38 }, 14, 'road', { pax: false, cargo: true })!;
     const line = game.createLine([sA.id, sB.id, sA.id, third.id])!;
     sA.cargo = { grain: 32.5, logs: 11, oil: 6 };
     sB.accepts = new Set(['grain']);
@@ -120,7 +125,7 @@ describe('Пассажиры и груз копятся, как только е�
   });
 
   it('грузовой маршрут без грузовиков: продукция фермы идёт на станцию, пассажиров не ждут', () => {
-    const plain = withoutCitizens(freshGame(7));
+    const plain = withoutCitizens(freshGame(FREIGHT_SEED));
     const { a, b } = nearestPair(plain, 'farm', 'foodplant');
     const alone = stationAtIndustry(plain, a, b.fp.center)!;
     runSeconds(plain, MONTH_LENGTH);
@@ -128,7 +133,7 @@ describe('Пассажиры и груз копятся, как только е�
     expect(alone.cargo.grain ?? 0).toBe(0);
     expect(plain.industries.find((i) => i.id === a.id)!.producedMonth).toBe(0);
 
-    const game = withoutCitizens(freshGame(7));
+    const game = withoutCitizens(freshGame(FREIGHT_SEED));
     const { built, line, sA, from } = freightRoute(game);
     expect(built).toBe(true);
     expect(line.vehicles).toHaveLength(0);
@@ -145,7 +150,7 @@ describe('Пассажиры и груз копятся, как только е�
   });
 
   it('маршрут убрали — продукция больше не поступает', () => {
-    const game = withoutCitizens(freshGame(7));
+    const game = withoutCitizens(freshGame(FREIGHT_SEED));
     const { line, sA } = freightRoute(game);
     runSeconds(game, MONTH_LENGTH);
     const had = sA.cargo.grain ?? 0;
@@ -156,7 +161,7 @@ describe('Пассажиры и груз копятся, как только е�
   });
 
   it('местное зерно с неподходящей станции переходит на маршрут вывоза по мере освобождения склада', () => {
-    const game = withoutCitizens(freshGame(7));
+    const game = withoutCitizens(freshGame(FREIGHT_SEED));
     const { built, line, sA, sB, from, to } = freightRoute(game);
     expect(built).toBe(true);
     const old = stationAtIndustry(game, from, to.fp.center)!;
@@ -190,7 +195,7 @@ describe('Пассажиры и груз копятся, как только е�
   });
 
   it('явная выгрузка зерна на склад остаётся подходящим маршрутом для фермы', () => {
-    const game = withoutCitizens(freshGame(7));
+    const game = withoutCitizens(freshGame(FREIGHT_SEED));
     const { line, sA, sB, from } = freightRoute(game);
     sB.accepts.delete('grain');
     game.setStopRule(line.id, 1, { wait: 'none', maxWait: null, load: 'auto', unload: ['grain'] });

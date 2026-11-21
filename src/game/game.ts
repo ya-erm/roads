@@ -113,6 +113,8 @@ import {
   receiverOf,
   receiverStocked,
   roomFor,
+  STATION_RETAIL,
+  stationRetailForm,
   stockCap,
   stockFill,
   unloadTime,
@@ -8340,6 +8342,12 @@ export class Game implements BuildContext {
         by.set(town.id, (by.get(town.id) ?? 0) + took);
       }
       if (!by.size) return [{ to: { type: 'town', id: near[0].town.id }, amount: 0 }];
+      if (st.kind === 'road' && st.industryId === null && stationRetailForm(cargo)) {
+        for (const [id, units] of by) {
+          const town = this.towns.find((t) => t.id === id);
+          if (town && st.townIds.includes(id) && town.demands.includes(cargo)) this.noteStationRetail(town, st.id, cargo, units);
+        }
+      }
       return [...by].map(([id, n]) => ({ to: { type: 'town', id }, amount: n }));
     }
     if (st.kind === 'dock') return [];
@@ -10099,6 +10107,92 @@ export class Game implements BuildContext {
     closeTownPax(town);
   }
 
+  /** Учитываем только фактически принятые магазинами единицы, без переноса излишков и складов-пересадок. */
+  private noteStationRetail(town: Town, station: number, cargo: CargoType, units: number): void {
+    const retail = (town.stationRetail ??= { deliveries: [] });
+    const month = this.month;
+    const entry = retail.deliveries.find((d) => d.month === month && d.station === station && d.cargo === cargo);
+    if (entry) entry.units += units;
+    else retail.deliveries.push({ station, cargo, month, units });
+  }
+
+  /** Устойчивый поток расширяет торговлю возле станции. Городу хватает одного изменения за несколько месяцев. */
+  private growStationRetail(town: Town): void {
+    const retail = town.stationRetail;
+    if (!this.retail || !retail) return;
+    const first = Math.max(this.month - STATION_RETAIL.window + 1, (retail.lastGrowth ?? -1) + 1);
+    retail.deliveries = retail.deliveries.filter((d) => d.month >= first && this.stations.has(d.station));
+    if (this.month - (retail.lastGrowth ?? -Infinity) < STATION_RETAIL.interval) return;
+
+    const flows = new Map<string, { station: number; cargo: CargoType; months: number; units: number }>();
+    for (const d of retail.deliveries) {
+      const key = `${d.station}:${d.cargo}`;
+      const flow = flows.get(key);
+      if (flow) {
+        flow.months++;
+        flow.units += d.units;
+      } else flows.set(key, { station: d.station, cargo: d.cargo, months: 1, units: d.units });
+    }
+    const minUnits = Math.max(4, townNeed(town.population) * STATION_RETAIL.minVolumeShare);
+    const qualifying = [...flows.values()]
+      .filter((flow) => flow.months >= STATION_RETAIL.suppliedMonths && flow.units >= minUnits)
+      .sort((a, b) => b.units - a.units || a.station - b.station);
+    for (const { station, cargo } of qualifying) {
+      const st = this.stations.get(station);
+      if (!st?.serves.cargo || st.kind !== 'road' || st.industryId !== null || !st.townIds.includes(town.id) || !town.demands.includes(cargo)) continue;
+      if (!this.expandStationRetail(town, st, cargo)) continue;
+      retail.lastGrowth = this.month;
+      retail.deliveries = [];
+      town.buildings = [...town.buildings];
+      this.layoutRev++;
+      return;
+    }
+  }
+
+  private expandStationRetail(town: Town, st: Station, cargo: CargoType): boolean {
+    const extra = (b: TownBuilding) => b.stationRetail?.extra[cargo] ?? 0;
+    const outlets = town.buildings.filter((b) => b.stationRetail?.outlet !== undefined);
+    const room = STATION_RETAIL.maxTownShare - town.buildings.reduce((sum, b) => sum + extra(b), 0);
+    const canBuild = room + 1e-9 >= STATION_RETAIL.outletShare && outlets.length < STATION_RETAIL.maxOutlets;
+    // Сначала — новая точка этого типа; дальше свободное место остаётся и другим товарам.
+    if (canBuild && !outlets.some((b) => b.stationRetail?.outlet === cargo) && this.buildStationRetail(town, st, cargo)) return true;
+    if (room + 1e-9 < STATION_RETAIL.expansionShare) return false;
+
+    const grow = this.stationReceivers(st)
+      .filter(({ town: city, r, b }) => city === town && r.cargo.includes(cargo) && b.stationRetail?.outlet === undefined && extra(b) < STATION_RETAIL.maxReceiverShare - 1e-9)
+      .map(({ b }) => b)
+      .sort((a, b) => extra(a) - extra(b) || dist(a.fp.center, st.fp.center) - dist(b.fp.center, st.fp.center) || a.id - b.id)[0];
+    if (!grow) return false;
+    const development = (grow.stationRetail ??= { extra: {} });
+    development.extra[cargo] = extra(grow) + STATION_RETAIL.expansionShare;
+    // Небольшой магазин сохраняет расположение рампы и парковки: на 4-м этаже раскладка уже другая.
+    const form = formOf(grow);
+    if (form === 'shop' && (grow.floors < 3 || grow.floors === 4 || grow.floors === 5)) grow.floors++;
+    if (form === 'office' && grow.floors < 6) grow.floors++;
+    return true;
+  }
+
+  private buildStationRetail(town: Town, st: Station, cargo: CargoType): boolean {
+    const form = stationRetailForm(cargo);
+    if (!form) return false;
+    const center = st.fp.center;
+    const radius = this.catchmentRadius(st);
+    const reach = this.townReach(town);
+    const ctx = { ...this.worldContext(), blocked: (p: Vec) => dist(p, center) > radius || !this.ownedBy(town, p) };
+    const streets = ctx.roads.corridorsNear(center, radius)
+      .filter((street) => this.streetLike(street))
+      .map((street) => ({ street, hit: street.lut.closest(center) }))
+      .filter(({ hit }) => hit.d <= radius)
+      .sort((a, b) => a.hit.d - b.hit.d || a.street.id - b.street.id);
+    for (const { street } of streets) {
+      if (!fillStreet(ctx, town, street, 1, 1, reach, form)) continue;
+      const b = town.buildings.at(-1)!;
+      b.stationRetail = { outlet: cargo, extra: { [cargo]: STATION_RETAIL.outletShare } };
+      return true;
+    }
+    return false;
+  }
+
   /** Улицы, застроенные до отказа: id полотна → месяц, когда это выяснилось. Через 24 мин (два года) проверяем снова. */
   private readonly fullStreets = new Map<number, number>();
 
@@ -10108,6 +10202,7 @@ export class Game implements BuildContext {
    */
   private growTown(town: Town): void {
     this.closeTownMonth(town);
+    this.growStationRetail(town);
     const satisfaction = this.townSatisfaction(town);
     // Рост за месяц — по его длине (MONTH_SCALE): за секунду город растёт так же, как при коротком месяце.
     // Предприятия рядом: вредные тормозят рост, рабочие места — прибавляют (enterprises.ts; «Готовые» — ×1).

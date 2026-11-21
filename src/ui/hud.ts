@@ -31,7 +31,7 @@ import { isBusTerminal, type Station, StationServes, stationTitle, TOWN_HISTORY,
 import { lastTownNeed, townNeed } from '../world/townSupply';
 import { STREET_BAN_MARK, STREET_BAN_TIP } from '../world/streetBans';
 import { flatsOf, FORM_NAMES, formOf, jobsOf, residentsOf, storeysOf } from '../world/townForms';
-import { maxTruck, receiverOf, RETAIL, stockAt, stockCap, stockFill } from '../world/retail';
+import { maxTruck, receiverOf, receiverUse, RETAIL, stockAt, stockCap, stockFill } from '../world/retail';
 import { footprintRadius } from '../world/spatial';
 import { CONSTRUCTION, COST, ECONOMY, LIGHTS, MONTH_LENGTH, RAIL_STATION, STATION, STOP, STORAGE, TERM_SCALE, TRANSFER } from '../config';
 import { durationText } from '../core/timeText';
@@ -304,8 +304,9 @@ type ScreenName = (typeof SCREENS)[number];
 
 const PRESET_HINTS: Record<string, string> = {
   dirt: 'Грунтовая: самая дешёвая и медленная, без асфальта. Подъезд к ферме или карьеру; потом — перестроить',
-  street: 'Обычная двусторонняя улица: по полосе в каждую сторону',
-  avenue: 'Широкий проспект: по две полосы в каждую сторону, быстрее улицы',
+  street: 'Дворовой проезд: по полосе в каждую сторону, 40 км/ч',
+  'main-street': 'Основная улица: по полосе в каждую сторону, 60 км/ч',
+  avenue: 'Широкий проспект: по две полосы в каждую сторону',
   oneway: 'Односторонняя: две полосы в одну сторону. Одна полоса — инструментом «Полоса»',
   road: 'Шоссе: загородная дорога по полосе в каждую сторону, быстрая, нужны плавные повороты',
   hw2: 'Магистраль: по две быстрые полосы в каждую сторону, нужны плавные повороты',
@@ -3904,7 +3905,8 @@ export class Hud {
               const fill = stockFill(town!, rcv, c, g.time);
               const n = Math.floor(stockAt(town!, rcv, c, g.time));
               const cap = stockCap(town!, rcv, c);
-              return `<span class="lbl2" data-tip="${esc(`${CARGO[c].name}: 📦 ${n} / ${cap}`)}">${cargoIcon(c, 18, false)} <span class="stock-bar"><i style="width:${Math.round(fill * 100)}%;background:${fill >= 0.5 ? '#2e9d57' : fill >= 0.2 ? '#e0a800' : '#d64545'}"></i></span></span>`;
+              const use = receiverUse(town!, rcv, c).toLocaleString('ru-RU', { maximumFractionDigits: 1 });
+              return `<span class="lbl2" data-tip="${esc(`${CARGO[c].name}: 📦 ${n} / ${cap} · расход ${use} ед./мес.`)}">${cargoIcon(c, 18, false)} <span class="stock-bar"><i style="width:${Math.round(fill * 100)}%;background:${fill >= 0.5 ? '#2e9d57' : fill >= 0.2 ? '#e0a800' : '#d64545'}"></i></span></span>`;
             })
             .join('')}${truckTip}</div>`
         : '';

@@ -175,7 +175,7 @@ const CONVERTIBLE: ReadonlySet<HouseForm> = new Set(['shop', 'office', 'store'])
  */
 export function pickPublic(town: Town): void {
   const tier = townTier(town);
-  const pool = town.buildings.filter((b) => b.kind === 'com' && CONVERTIBLE.has(formOf(b)));
+  const pool = town.buildings.filter((b) => b.kind === 'com' && !b.stationRetail && CONVERTIBLE.has(formOf(b)));
   for (const need of PUBLIC) {
     let have = town.buildings.reduce((n, b) => n + (b.form === need.form ? 1 : 0), 0);
     const want = need.count(tier, town.population, town.id);

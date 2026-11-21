@@ -8,9 +8,9 @@ import type { TownShape, WorldContext } from './worldgen';
 /**
  * Улицы города — как у настоящего небольшого города, а не кольца и не ровная решётка:
  * - старый центр: площадь с кольцом вокруг ратуши (кольцевой город) или перекрёсток главных улиц;
- * - от центра — главные улицы-выезды под неравными углами; они петляют, обходят воду и идут вдоль склонов;
- * - вдоль главных улиц — разросшиеся районы: боковые улицы разной длины (Т-перекрёстки), часть продолжается
- *   дальше, концы соседних соединяют задние улицы — кварталы разной длины; остальные — тупики;
+ * - от центра — длинные главные улицы-выезды под неравными углами; от прямого курса отклоняются у воды и склонов;
+ * - от главных улиц — редкие Т-примыкания: через них проезды заводят движение во дворы, где соседние ветви
+ *   соединяются между собой и застраиваются; некоторые кончаются тупиком;
  * - у кольцевого города — куски бульваров между соседними выездами (не кольцо целиком);
  * - в самом свободном секторе — прямоугольная сетка нового района.
  * Всё по ctx.rng — детерминированно по seed.
@@ -19,8 +19,8 @@ export interface StreetKit {
   ctx: WorldContext;
   /** Узел улицы в точке (ближе 20 м — существующий); null — вода или край карты. */
   node(p: Vec): LaneNode | null;
-  /** Улица a → b (кривая или прямая); null — пересекает воду или другую улицу. main — проспект. */
-  street(a: LaneNode | null, b: LaneNode | null, curve: Cubic | null, main: boolean): Corridor | null;
+  /** Улица a → b (кривая или прямая); null — пересекает воду или другую улицу. */
+  street(a: LaneNode | null, b: LaneNode | null, curve: Cubic | null, role: 'yard' | 'main' | 'avenue'): Corridor | null;
   /** Очертания города (townShape): во сколько раз край в направлении a дальше R. */
   shape: TownShape;
 }
@@ -111,12 +111,15 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     }
     return true;
   };
-  /** Улица между узлами (или точками), если ей хватает места. */
-  const link = (pa: LaneNode | Vec | null, pb: LaneNode | Vec | null, curve: Cubic | null = null, main = false, snap = 20): LaneNode | null => {
+  const isMain = (n: LaneNode) => n.corridors.some((id) => roads.corridor(id).cls === 'avenue');
+  const yardAccess = (n: LaneNode) => !isMain(n) || n.corridors.every((id) => roads.corridor(id).cls === 'avenue');
+  /** В одном узле главной улицы — один въезд в квартал. Внутри квартала проезды свободно соединяются. */
+  const link = (pa: LaneNode | Vec | null, pb: LaneNode | Vec | null, curve: Cubic | null = null, role: 'yard' | 'main' | 'avenue' = 'yard', snap = 20): LaneNode | null => {
     const a = pa && 'id' in pa ? pa : pa ? nodeNear(pa, 20) : null;
     const b = pb && 'id' in pb ? pb : pb ? nodeNear(pb, snap) : null;
     // Больше четырёх улиц в одном перекрёстке не сходится: такой узел — и не по-настоящему, и пробка.
-    const ok = !!a && !!b && a !== b && a.corridors.length < 4 && b.corridors.length < 4 && roomy(a, b, curve) && !!kit.street(a, b, curve, main);
+    const ok = !!a && !!b && a !== b && a.corridors.length < 4 && b.corridors.length < 4 &&
+      (role !== 'yard' || (yardAccess(a) && yardAccess(b))) && roomy(a, b, curve) && !!kit.street(a, b, curve, role);
     if (!ok) {
       if (!(pa && 'id' in pa)) drop(a);
       if (!(pb && 'id' in pb)) drop(b);
@@ -136,7 +139,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
   for (let i = 0; i < count; i++) {
     // Неравные углы: у линейного — навстречу друг другу, у остальных — с разбросом до трети сектора.
     const even = a0 + (i * Math.PI * 2) / count;
-    angles.push(linear ? even + rng.range(-0.12, 0.12) : even + rng.range(-0.33, 0.33) * ((Math.PI * 2) / count));
+    angles.push(linear ? even : even + rng.range(-0.33, 0.33) * ((Math.PI * 2) / count));
   }
   // Линейному иногда — короткая поперечная улица через центр.
   if (linear && rng.chance(0.4)) angles.push(a0 + Math.PI / 2 + rng.range(-0.3, 0.3) + (rng.chance(0.5) ? Math.PI : 0));
@@ -150,7 +153,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     for (let k = 0; k < sorted.length; k++) {
       const a1 = sorted[k].a;
       const a2 = k + 1 < sorted.length ? sorted[k + 1].a : sorted[0].a + Math.PI * 2;
-      if (kit.street(ring[k], ring[(k + 1) % ring.length], circleArc(center, rc, a1, a2), true)) mine.add(ring[k]!).add(ring[(k + 1) % ring.length]!);
+      if (kit.street(ring[k], ring[(k + 1) % ring.length], circleArc(center, rc, a1, a2), size >= 3 ? 'avenue' : 'main')) mine.add(ring[k]!).add(ring[(k + 1) % ring.length]!);
       starts[sorted[k].i] = ring[k];
     }
   } else {
@@ -170,19 +173,21 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     let h = target;
     let p = start.pos;
     while (dist(p, center) < len) {
-      const step = rng.range(120, 165) * BLOCK;
-      h += rng.range(-0.16, 0.16) + wrap(target - h) * 0.25;
+      const step = Math.min(rng.range(125, 165) * BLOCK, Math.max(95 * BLOCK, len + 85 * S - dist(p, center)));
+      h += rng.range(-0.045, 0.045) + wrap(target - h) * 0.65;
       // Обходим воду и край карты, на склоне — идём вдоль горизонталей.
       let best: Vec | null = null;
       let score = Infinity;
-      for (const turn of [0, 0.3, -0.3, 0.6, -0.6]) {
-        const q = add(p, { x: Math.cos(h + turn) * step, y: Math.sin(h + turn) * step });
-        if (!ok(q)) continue;
-        const climb = terrain.hasRelief ? Math.abs(terrain.heightAt(q) - terrain.heightAt(p)) / step : 0;
-        const s = Math.abs(turn) * 0.05 + climb;
-        if (s < score) {
-          score = s;
-          best = q;
+      for (const length of [step, step * 0.72]) {
+        for (const turn of [0, 0.3, -0.3, 0.6, -0.6]) {
+          const q = add(p, { x: Math.cos(h + turn) * length, y: Math.sin(h + turn) * length });
+          if (!ok(q) || [0.33, 0.66].some((f) => terrain.isWater(add(p, scale(sub(q, p), f)), 22))) continue;
+          const climb = terrain.hasRelief ? Math.abs(terrain.heightAt(q) - terrain.heightAt(p)) / length : 0;
+          const s = Math.abs(turn) * 0.12 + climb + (length < step ? 0.025 : 0);
+          if (s < score) {
+            score = s;
+            best = q;
+          }
         }
       }
       if (!best || dist(best, center) <= dist(p, center) + 40 * S) break;
@@ -191,11 +196,10 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
       p = best;
     }
     const nodes: LaneNode[] = [start];
-    // Главные: у кольцевого большого города — две, у остальных от второго размера — одна (линейный — сквозная).
-    const main = radial ? size >= 3 && i < 2 : linear ? size >= 2 && !cross : size >= 2 && i === 0;
+    const role = cross ? 'yard' : radial && size >= 3 && i < 2 ? 'avenue' : 'main';
     for (let k = 1; k < pts.length; k++) {
       const curve = catmull(pts[Math.max(0, k - 2)], pts[k - 1], pts[k], pts[Math.min(pts.length - 1, k + 1)]);
-      const n = link(nodes[nodes.length - 1], pts[k], curve, main);
+      const n = link(nodes[nodes.length - 1], pts[k], curve, role);
       if (!n) break;
       nodes.push(n);
     }
@@ -288,57 +292,54 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
     const edge = loose.filter((n) => n.corridors.length && n.corridors.length < 4).sort((x, y) => dist(x.pos, center) - dist(y.pos, center));
     let joined = 0;
     for (const n of edge) {
-      if (joined >= 3) break;
-      const target = chains
+      if (joined >= 2) break;
+      const targets = chains
         .flatMap((c) => c.nodes)
-        .filter((m) => m !== n && dist(m.pos, n.pos) < 240 * S)
-        .sort((x, y) => dist(x.pos, n.pos) - dist(y.pos, n.pos))[0];
-      if (target && link(n, target)) joined++;
+        .filter((m) => m !== n && yardAccess(m) && dist(m.pos, n.pos) < 260 * S)
+        .sort((x, y) => dist(x.pos, n.pos) - dist(y.pos, n.pos));
+      if (targets.some((target) => link(n, target))) joined++;
     }
   }
 
-  // ---------- Боковые улицы, продолжения и задние улицы вдоль главных ----------
-  const dense = linear ? 0.62 : 0.78;
-  for (const c of chains) {
-    for (const side of [-1, 1]) {
-      let prev: { e1: LaneNode; e2: LaneNode | null } | null = null;
-      for (let k = 1; k < c.nodes.length; k++) {
-        const n = c.nodes[k];
-        const d = dist(n.pos, center);
-        const nearEdge = d / Math.max(1, reachAt(n.pos));
-        // С другой стороны от этого узла улица уже есть — чаще сдвигаемся к следующему: Т-перекрёстки, а не крест.
-        const cross = n.corridors.length >= 3 ? 0.4 : 1;
-        if (d < (radial ? 170 : 90) * S || nearEdge > 1.15 || !rng.chance((dense - 0.3 * Math.min(1, nearEdge)) * cross)) {
-          prev = null;
-          continue;
+  // ---------- Дворовые проезды: въезд с главной и связи между дворами в глубине ----------
+  for (const [i, c] of chains.entries()) {
+    const previous = new Map<number, LaneNode>();
+    for (let k = 1; k < c.nodes.length; k++) {
+      const n = c.nodes[k];
+      const d = dist(n.pos, center);
+      const nearEdge = d / Math.max(1, reachAt(n.pos));
+      if (nearEdge > 1.18 || !yardAccess(n) || !rng.chance(0.98 - 0.16 * Math.min(1, nearEdge))) continue;
+      const t = norm(sub(c.nodes[Math.min(c.nodes.length - 1, k + 1)].pos, c.nodes[k - 1].pos));
+      // Два соседних въезда могут соединить квартал. Дальше застраиваем другую сторону улицы.
+      const preferred = (i + Math.floor((k - 1) / 2)) % 2 ? -1 : 1;
+      for (const side of [preferred, -preferred]) {
+        const dir = rotate({ x: -t.y * side, y: t.x * side }, rng.range(-0.17, 0.17));
+        const length = rng.range(100, 160) * BLOCK * (1 - 0.2 * Math.min(1, nearEdge));
+        const entry = link(n, add(n.pos, scale(dir, length)), null, 'yard', 42 * S);
+        if (!entry) continue;
+        const prev = previous.get(side);
+        const span = prev ? dist(prev.pos, entry.pos) : 0;
+        const joined = !!prev && span > 60 * BLOCK && span < 335 * BLOCK && !!link(prev, entry);
+        previous.set(side, entry);
+        if (!joined && rng.chance(0.78 - 0.22 * Math.min(1, nearEdge))) {
+          const inside = scale(rotate(t, rng.range(-0.12, 0.12)), rng.range(70, 115) * BLOCK);
+          const forward = add(entry.pos, inside);
+          const back = sub(entry.pos, inside);
+          if (!(dist(back, center) < reachAt(back) && link(entry, back, null, 'yard', 42 * S)) && dist(forward, center) < reachAt(forward))
+            link(entry, forward, null, 'yard', 42 * S);
         }
-        const back = c.nodes[k - 1].pos;
-        const fwd = c.nodes[Math.min(c.nodes.length - 1, k + 1)].pos;
-        const t = norm(sub(fwd, back));
-        const turn = rng.range(-0.25, 0.25);
-        const dir = rotate({ x: -t.y * side, y: t.x * side }, turn);
-        const l1 = rng.range(95, 175) * BLOCK * (1 - 0.25 * Math.min(1, nearEdge));
-        const e1 = link(n, add(n.pos, scale(dir, l1)), null, false, 45 * S);
-        if (!e1) {
-          prev = null;
-          continue;
-        }
-        // Улица идёт дальше — второй квартал вглубь (чаще у центра).
-        let e2: LaneNode | null = null;
-        if (rng.chance(0.55 - 0.3 * Math.min(1, nearEdge)) && dist(e1.pos, center) < reachAt(e1.pos)) {
-          e2 = link(e1, add(e1.pos, scale(rotate(dir, rng.range(-0.2, 0.2)), rng.range(85, 150) * BLOCK)), null, false, 45 * S);
-        }
-        // Задние улицы: соседние боковые сходятся в квартал (Т-перекрёстки), иначе — тупики.
-        if (prev && rng.chance(0.68)) {
-          const span = dist(prev.e1.pos, e1.pos);
-          if (span > 70 * BLOCK && span < 280 * BLOCK) link(prev.e1, e1);
-          if (prev.e2 && e2 && rng.chance(0.6)) {
-            const s2 = dist(prev.e2.pos, e2.pos);
-            if (s2 > 70 * BLOCK && s2 < 300 * BLOCK) link(prev.e2, e2);
-          }
-        }
-        prev = { e1, e2 };
+        break;
       }
+    }
+  }
+
+  // В маленьком городе с двумя короткими выездами оставляем хотя бы один дворовый проезд, если место есть.
+  if (![...mine].some((n) => n.corridors.some((id) => roads.corridor(id).cls === 'street'))) {
+    for (const n of mine) {
+      const end = roads.ends(n)[0];
+      if (!end) continue;
+      const side = { x: -end.away.y * 110 * BLOCK, y: end.away.x * 110 * BLOCK };
+      if (link(n, add(n.pos, side)) || link(n, sub(n.pos, side))) break;
     }
   }
 
@@ -346,7 +347,7 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
   // От перекрёстков и тупиков — улицы поперёк (Т-перекрёстки) или продолжением тупика; ближе к центру — чаще.
   const infill = radial ? INFILL * 1.5 : INFILL;
   for (let round = 0; round < (radial ? INFILL_ROUNDS + 1 : INFILL_ROUNDS); round++) {
-    const list = [...mine].filter((n) => n.corridors.length && n.corridors.length < 4).sort((x, y) => dist(x.pos, center) - dist(y.pos, center));
+    const list = [...mine].filter((n) => !isMain(n) && n.corridors.length && n.corridors.length < 4).sort((x, y) => dist(x.pos, center) - dist(y.pos, center));
     for (const n of list) {
       const edge = dist(n.pos, center) / Math.max(1, reachAt(n.pos));
       if (edge > 1 || !rng.chance(infill * (1 - 0.6 * edge) * (n.corridors.length >= 3 ? 0.12 : 1))) continue;
@@ -355,9 +356,9 @@ export function townStreets(kit: StreetKit, center: Vec, size: number, style: To
       if (ends.length === 1) dirs.push(scale(ends[0].away, -1), scale(ends[0].away, -1));
       for (let k = 0; k < 3; k++) {
         const dir = rotate(dirs[rng.int(0, dirs.length)], rng.range(-0.2, 0.2));
-        const to = add(n.pos, scale(dir, rng.range(90, 165) * BLOCK));
+        const to = add(n.pos, scale(dir, rng.range(63, 135) * BLOCK));
         if (dist(to, center) > reachAt(to) * 1.05) continue;
-        if (link(n, to, null, false, 55 * S)) break;
+        if (link(n, to, null, 'yard', 55 * S)) break;
       }
     }
   }

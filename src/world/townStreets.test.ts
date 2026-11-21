@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { TOWN_SCALE } from '../config';
+import { Rng } from '../core/rng';
 import { dist } from '../core/vec';
 import { Game } from '../game/game';
-import type { Town } from './entities';
+import { laneSpeed } from '../lanes/graph';
+import { LaneNet, type Corridor } from '../lanes/model';
+import type { Structure, Town, TownStyle } from './entities';
+import { KMH_PER_UNIT, ROAD_PRESETS, specKmh } from './roadTypes';
 import { DEFAULT_SETTINGS } from './settings';
+import { FootprintIndex } from './spatial';
+import { Terrain } from './terrain';
+import { buildTown } from './worldgen';
+
+const styles = [['linear', 1], ['organic', 2], ['radial', 3]] as const satisfies readonly (readonly [TownStyle, number])[];
 
 /** Сколько улиц города сходится в каждом его узле. */
 function degrees(game: Game, town: Town): Map<number, number> {
@@ -73,5 +82,46 @@ describe('Улицы города — как у настоящего', { timeout
         }
       }
     }
+  });
+});
+
+describe('Уличная сеть города', () => {
+  it.each(styles)('у %s есть основные улицы и подъезды во дворы', (style, size) => {
+    const roads = new LaneNet();
+    const rng = new Rng(4);
+    const terrain = new Terrain(rng, { ...DEFAULT_SETTINGS, size: 'small', water: 'dry' });
+    const center = { x: terrain.width / 2, y: terrain.height / 2 };
+    let id = 1;
+    const town = buildTown({ roads, rng, terrain, index: new FootprintIndex<Structure>(), nextId: () => id++ }, 1, center, 'Город', size, style)!;
+    expect(town.population).toBeGreaterThan(0);
+    const streets = town.streets.map((sid) => roads.corridor(sid));
+    const main = streets.filter((c) => c.cls === 'avenue');
+    const yards = streets.filter((c) => c.cls === 'street');
+    expect(main.length).toBeGreaterThanOrEqual(2);
+    expect(yards.length).toBeGreaterThanOrEqual(1);
+    expect(main.every((c) => laneSpeed(c) * KMH_PER_UNIT === 60)).toBe(true);
+    expect(yards.every((c) => laneSpeed(c) * KMH_PER_UNIT === 40)).toBe(true);
+    const nodes = new Set(main.flatMap((c) => [c.a, c.b]));
+    for (const nid of nodes) expect(roads.node(nid).corridors.filter((cid) => roads.corridor(cid).cls === 'street').length).toBeLessThanOrEqual(1);
+    const reached = new Set([main[0].a]);
+    for (const nid of reached) {
+      for (const cid of roads.node(nid).corridors) {
+        const c = roads.corridor(cid);
+        reached.add(c.a === nid ? c.b : c.a);
+      }
+    }
+    expect(streets.every((c) => reached.has(c.a) && reached.has(c.b))).toBe(true);
+    const meanLength = (xs: Corridor[]) => xs.reduce((total, c) => total + c.length, 0) / xs.length;
+    expect(meanLength(main)).toBeGreaterThan(meanLength(yards));
+    const straight = main.filter((c) => dist(c.curve.p0, c.curve.p3) >= 0.99 * c.length);
+    expect(straight.length).toBeGreaterThan(main.length / 2);
+    expect(yards.some((c) => !nodes.has(c.a) && !nodes.has(c.b))).toBe(true);
+  });
+
+  it('у строителя есть профили 1+1 для дворов и основных улиц', () => {
+    const yard = ROAD_PRESETS.find((p) => p.id === 'street')!.spec;
+    const main = ROAD_PRESETS.find((p) => p.id === 'main-street')!.spec;
+    expect([yard.lanesF, yard.lanesB, main.lanesF, main.lanesB]).toEqual([1, 1, 1, 1]);
+    expect([specKmh(yard), specKmh(main)]).toEqual([40, 60]);
   });
 });

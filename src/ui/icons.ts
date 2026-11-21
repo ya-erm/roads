@@ -18,6 +18,7 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
   if (spec.cls === 'dirt') return dirtSvg(w, h, totalLanes(spec), isOneWay(spec));
   const back = isOneWay(spec) ? 0 : spec.lanesB;
   const fwd = spec.lanesF;
+  const yard = spec.cls === 'street' && (spec.limit ?? 40) === 40 && back === 1 && fwd === 1;
   const lanes = back + fwd;
   // У автомагистрали между направлениями — разделительная полоса с барьером.
   const median = isDivided(spec) ? 4 : 0;
@@ -27,7 +28,7 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
   const laneY = (i: number) => top + i * laneH + (i >= back && median ? median : 0);
   const parts: string[] = [
     `<rect x="1" y="${top - 1.5}" width="${w - 2}" height="${total + 3}" rx="3" fill="#4b525c"/>`,
-    `<rect x="1" y="${top}" width="${w - 2}" height="${total}" fill="#646b76"/>`,
+    `<rect x="1" y="${top}" width="${w - 2}" height="${total}" fill="${yard ? '#7d858c' : '#646b76'}"/>`,
   ];
   for (let i = 1; i < lanes; i++) {
     const y = laneY(i);
@@ -38,7 +39,7 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
         <path d="M1 ${my + median / 2}H${w - 1}" stroke="#e8ebee" stroke-width="1.6"/>`);
     } else if (divider && lanes > 2) {
       parts.push(`<path d="M3 ${y - 0.8}H${w - 3}M3 ${y + 0.8}H${w - 3}" stroke="#f0cd60" stroke-width="0.9"/>`);
-    } else {
+    } else if (!yard) {
       parts.push(`<path d="M3 ${y}H${w - 3}" stroke="#f5f3e6" stroke-width="1" stroke-dasharray="4 4"/>`);
     }
   }

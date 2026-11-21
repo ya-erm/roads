@@ -36,16 +36,25 @@ function foodTown(game: Game, min = 3, maxPop = Infinity): { town: Town; shops: 
   throw new Error('нет города с продуктовыми магазинами');
 }
 
-/** Грузовая станция у улицы ближе к центру города (как станция завода в черте: подвоз до неё — не в счёт). */
-function centerStation(game: Game, town: Town): Station {
+/** Грузовая станция ближе к центру, чей съезд оставляет доступными все дворы проверяемого маршрута. */
+function centerStation(game: Game, town: Town, shops: TownBuilding[]): Station {
+  const ids = shops.map((b) => b.id);
   const mid = (c: ReturnType<typeof townStreets>[number]) => c.lut.pointAt(c.length / 2);
   const streets = townStreets(game, town.id).sort((a, b) => dist(mid(a), town.center) - dist(mid(b), town.center));
   for (const seg of streets) {
     const p = mid(seg);
     const t = seg.lut.tangentAt(seg.length / 2);
     for (const side of [1, -1]) {
-      const st = game.placeStation({ x: p.x - t.y * side * 40, y: p.y + t.x * side * 40 }, 14);
-      if (st) return st;
+      const point = { x: p.x - t.y * side * 40, y: p.y + t.x * side * 40 };
+      const plan = game.stationPlan(point, 14);
+      if (!plan.ok || plan.demolish?.length) continue;
+      game.checkpoint('подбор станции для развозки');
+      const st = game.placeStation(point, 14);
+      game.commit();
+      if (!st) continue;
+      const targets = game.shopTargets([st.id], 'food');
+      if (ids.every((id) => targets.some((b) => b.id === id))) return st;
+      game.undo(false);
     }
   }
   throw new Error('станцию не поставить');
@@ -140,9 +149,9 @@ describe('Развозка по магазинам: баланс', { timeout: 24
   it('одна линия «🛒 все магазины» закрывает продуктовую норму города; на загрузку — не больше двух заездов', () => {
     const game = withoutCitizens(freshGame(RETAIL_WORLD));
     game.money = 5_000_000;
-    const { town } = foodTown(game, 2, 4500);
+    const { town, shops } = foodTown(game, 2, 4500);
     // «Склад» — грузовая станция у улицы в городе (как станция завода в черте), продукты не принимает (правило ниже).
-    const sSrc = centerStation(game, town);
+    const sSrc = centerStation(game, town, shops);
     game.setStationBays(sSrc.id, 4);
     // «🛒 все магазины» с продуктами — по порядку ближайшего соседа от «склада».
     const food = game.shopTargets([sSrc.id], 'food').map((b) => game.dockFor(b)!.id);

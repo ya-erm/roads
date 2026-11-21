@@ -111,7 +111,8 @@ export const ROAD_PRESETS: RoadPreset[] = [
   { id: 'dirt', name: 'Грунтовая', short: '1+1', spec: { cls: 'dirt', lanesF: 1, lanesB: 1 } },
   // Одна полоса в одну сторону — это «Полоса»; односторонняя дорога — две.
   { id: 'oneway', name: 'Односторонняя', short: '2→', spec: { cls: 'street', lanesF: 2, lanesB: 0 } },
-  { id: 'street', name: 'Улица', short: '1+1', spec: { cls: 'street', lanesF: 1, lanesB: 1 } },
+  { id: 'street', name: 'Дворовой проезд', short: '1+1', spec: { cls: 'street', lanesF: 1, lanesB: 1 } },
+  { id: 'main-street', name: 'Основная улица', short: '1+1', spec: { cls: 'avenue', lanesF: 1, lanesB: 1 } },
   { id: 'avenue', name: 'Проспект', short: '2+2', spec: { cls: 'avenue', lanesF: 2, lanesB: 2 } },
   { id: 'road', name: 'Шоссе', short: '1+1', spec: { cls: 'highway', lanesF: 1, lanesB: 1 } },
   { id: 'hw2', name: 'Магистраль', short: '2+2', spec: { cls: 'highway', lanesF: 2, lanesB: 2 } },

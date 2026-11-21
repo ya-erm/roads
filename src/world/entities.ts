@@ -52,6 +52,8 @@ export interface TownBuilding {
   garageSpaces?: 1 | 2;
   /** Склад: разгрузка носом к рампе (по умолчанию) или сквозной проезд вдоль фасада. */
   dockApproach?: 'front' | 'parallel';
+  /** Добавочный спрос из-за регулярных поставок к городской автостанции, в долях базовой нормы города. */
+  stationRetail?: { outlet?: CargoType; extra: Partial<Record<CargoType, number>> };
   /**
    * Ратуша или храм, перенесённые с поворотом от улицы (R, ручка ↺; world/moveTurn.ts), рад: следующий перенос
    * начинается с него. Нет — 0 (фасадом к улице; так и у старых сохранений).
@@ -263,6 +265,8 @@ export interface Town {
    * склады. Подбираются в начале партии и в конце каждого месяца. Нет — старая модель (станция в охвате принимает всё).
    */
   receivers?: Receiver[];
+  /** Фактические поставки через городские автостанции за недавние месяцы и последнее расширение торговли. */
+  stationRetail?: { lastGrowth?: number; deliveries: { station: number; cargo: CargoType; month: number; units: number }[] };
   growthAcc: number;
   /** Город сам прокладывает новые улицы, когда вдоль старых тесно. По умолчанию да. */
   autoStreets?: boolean;

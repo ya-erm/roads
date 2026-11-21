@@ -13,6 +13,7 @@ import { junctionRuts } from './dirtRuts';
 
 export { layerOf };
 export const ROAD_ASPHALT = '#646b76';
+const YARD_ASPHALT = '#7d858c';
 
 const C = {
   road: ROAD_ASPHALT,
@@ -37,6 +38,16 @@ const DIRT_SOFT: [string, number][] = [
 const RUT_W = 1.6;
 
 type LineStyle = 'dash' | 'solid' | 'yellow' | 'barrier' | 'rut';
+type Surface = 'road' | 'dirt' | 'yard';
+
+const surfaceColor = (surface: Surface) => (surface === 'yard' ? YARD_ASPHALT : C[surface]);
+const plainYard = (c: Corridor): boolean =>
+  c.cls === 'street' && (c.limit ?? 40) === 40 && !c.ring && c.lanes.length === 2 && c.lanes[0].flow !== c.lanes[1].flow &&
+  c.lanes.every((l) => !l.park && !l.solid && Math.abs(Math.abs(l.offset) - LANE_W / 2) < LAT_EPS && l.from <= 0 && l.to >= c.length) &&
+  Math.abs(c.lanes[0].offset - c.lanes[1].offset) > LANE_W - LAT_EPS;
+
+const corridorSurface = (c: Corridor): Surface => isDirt(c.cls) ? 'dirt' : plainYard(c) ? 'yard' : 'road';
+
 interface Mark {
   pts: Vec[];
   style: LineStyle;
@@ -62,8 +73,7 @@ interface CorridorGeo {
   marks: Mark[];
   /** Контуры стрелок «прямо» на односторонней дороге (в мире). */
   arrows: Vec[][];
-  /** Грунтовая: земля вместо асфальта, колеи вместо разметки. */
-  dirt: boolean;
+  surface: Surface;
 }
 
 /** Стрелка «прямо» — как перед перекрёстками. */
@@ -106,15 +116,15 @@ export interface GoreGeo {
 interface PlateGeo {
   poly: Vec[];
   curbs: Vec[][];
-  /** Все подъезды — грунтовые: площадка тоже земляная. */
-  dirt?: boolean;
+  /** Площадка одного типа подхватывает цвет своих подъездов. */
+  surface: Surface;
 }
 
-/** Разворот тупика; dirt — на конце грунтовой дороги. */
+/** Разворот тупика по цвету полотна. */
 interface CapGeo {
   poly: Vec[];
   arc: Vec[];
-  dirt?: boolean;
+  surface: Surface;
 }
 
 // Перед развилкой полос в разные полотна, после вливания и на последних метрах перед перекрёстком пунктир между
@@ -254,7 +264,7 @@ interface NodeGeo {
   /** Узел моста: куда от поднятой площадки её тень (bridgeLook — как у концов его полотен). */
   shade: Vec;
   /** Пешеходные переходы на подъездах (src/lanes/crosswalk.ts): асфальт до стоп-линии и полосы зебры. */
-  walks?: { cover: Vec[]; stripes: Vec[][] }[];
+  walks?: { cover: Vec[]; stripes: Vec[][]; surface: Surface }[];
 }
 
 /**
@@ -442,50 +452,49 @@ export class LaneRenderer {
     if (pick?.shadow === 'only') return;
     // Бордюры под асфальтом: заливка соседнего полотна закрывает их там, где полотна сходятся.
     // Грунтовые — землёй без кромки: край размыт полупрозрачными линиями цвета полотна (их тоже закрывает асфальт).
-    const surface = (dirt?: boolean) => (dirt ? C.dirt : C.road);
     ctx.lineCap = 'round';
     for (const [color, width] of DIRT_SOFT) {
       ctx.strokeStyle = color;
       ctx.lineWidth = width;
       ctx.beginPath();
-      for (const g of corridors) if (g.dirt) (this.path(ctx, g.left), this.path(ctx, g.right));
-      for (const p of plates) if (p.dirt) for (const c of p.curbs) this.path(ctx, c);
-      for (const cap of caps) if (cap.dirt) this.path(ctx, cap.arc);
+      for (const g of corridors) if (g.surface === 'dirt') (this.path(ctx, g.left), this.path(ctx, g.right));
+      for (const p of plates) if (p.surface === 'dirt') for (const c of p.curbs) this.path(ctx, c);
+      for (const cap of caps) if (cap.surface === 'dirt') this.path(ctx, cap.arc);
       for (const g of gores) if (g.dirt) this.path(ctx, g.nose);
       ctx.stroke();
     }
     ctx.lineWidth = 2.5;
     ctx.strokeStyle = C.roadEdge;
     for (const g of corridors) {
-      if (g.dirt) continue;
+      if (g.surface === 'dirt') continue;
       this.stroke(ctx, g.left);
       this.stroke(ctx, g.right);
     }
-    for (const p of plates) if (!p.dirt) for (const c of p.curbs) this.stroke(ctx, c);
-    for (const cap of caps) if (!cap.dirt) this.stroke(ctx, cap.arc);
+    for (const p of plates) if (p.surface !== 'dirt') for (const c of p.curbs) this.stroke(ctx, c);
+    for (const cap of caps) if (cap.surface !== 'dirt') this.stroke(ctx, cap.arc);
     for (const g of corridors) {
-      ctx.fillStyle = surface(g.dirt);
+      ctx.fillStyle = surfaceColor(g.surface);
       this.fill(ctx, g.poly);
     }
     for (const p of plates) {
-      ctx.fillStyle = surface(p.dirt);
+      ctx.fillStyle = surfaceColor(p.surface);
       this.fill(ctx, p.poly);
     }
     for (const cap of caps) {
-      ctx.fillStyle = surface(cap.dirt);
+      ctx.fillStyle = surfaceColor(cap.surface);
       this.fill(ctx, cap.poly);
     }
     // Шов между земляной площадкой (разворотом) и полотном: без бордюра под ним просвечивал бы светлой чертой.
     ctx.strokeStyle = C.dirt;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    for (const p of plates) if (p.dirt) (this.path(ctx, p.poly), ctx.closePath());
-    for (const cap of caps) if (cap.dirt) (this.path(ctx, cap.poly), ctx.closePath());
+    for (const p of plates) if (p.surface === 'dirt') (this.path(ctx, p.poly), ctx.closePath());
+    for (const cap of caps) if (cap.surface === 'dirt') (this.path(ctx, cap.poly), ctx.closePath());
     ctx.stroke();
     // Островки: асфальт до носа, нос — тонким бордюром; между грунтовками — земля без бордюра; на мосту нос
     // обводит стенка ограждения — бордюр под ней лёг бы тёмной каймой по асфальту.
     for (const g of gores) {
-      ctx.fillStyle = surface(g.dirt);
+      ctx.fillStyle = g.dirt ? C.dirt : C.road;
       this.fill(ctx, g.asphalt);
       if (g.dirt || elevated) continue;
       ctx.strokeStyle = C.roadEdge;
@@ -537,8 +546,10 @@ export class LaneRenderer {
   private drawWalks(ctx: CanvasRenderingContext2D, nodes: NodeGeo[], zoom: number): void {
     const walks = nodes.flatMap((n) => n.walks ?? []);
     if (!walks.length) return;
-    ctx.fillStyle = C.road;
-    for (const w of walks) this.fill(ctx, w.cover);
+    for (const w of walks) {
+      ctx.fillStyle = surfaceColor(w.surface);
+      this.fill(ctx, w.cover);
+    }
     if (zoom < 0.5) return;
     ctx.fillStyle = 'rgba(244, 243, 236, 0.92)';
     ctx.beginPath();
@@ -663,15 +674,18 @@ export class LaneRenderer {
         if (n.kind === 'junction') {
           geo.plate = this.plateGeo(net, n);
           // Земляная площадка: колеи по всем поворотам, белой разметки нет.
-          if (geo.plate?.dirt) geo.ruts = junctionRuts(net, n, this.cuts);
+          if (geo.plate?.surface === 'dirt') geo.ruts = junctionRuts(net, n, this.cuts);
           // Разметка площадки большого перекрёстка — если включена в настройках.
           else if (geo.plate && prefOn('junctionMarks')) {
             const m = junctionMarks(net, n, geo.plate.poly, this.cuts);
             geo.marks = m && markGeo(m);
           }
           // Зебры — только на асфальте (на грунтовке перехода не бывает: walkArms).
-          const walks = geo.plate ? walksOn(net, n, this.cuts).map((arm) => walkGeo(arm)) : [];
-          if (walks.length) geo.walks = walks.map((w) => ({ cover: w.cover, stripes: w.stripes }));
+          const walks = geo.plate ? walksOn(net, n, this.cuts).map((arm) => {
+            const { cover, stripes } = walkGeo(arm);
+            return { cover, stripes, surface: corridorSurface(arm.corridor) };
+          }) : [];
+          if (walks.length) geo.walks = walks;
         } else if (net.isDeadEnd(n)) geo.caps = (this.inMap && !this.inMap(n.pos)) || n.open ? [] : net.ends(n).map((e) => this.capGeo(e));
         // Островок на мосту или пандусе — поднят по точкам, как кромки полотен, у которых лежит (liftNode его не трогает).
         else geo.gores = this.seamGores(net, n, (c, s) => (Math.max(net.node(c.a).level, net.node(c.b).level) > 0 ? bridgeLook(deckAlong(net, c, s)).lift : { x: 0, y: 0 }));
@@ -693,8 +707,8 @@ export class LaneRenderer {
             [geo.shade, n.pos],
           ],
           // Запреты и связи полос — стрелки и стоп-линии перекрёстка.
-          // Грунт или асфальт площадки и разворотов — перестроенный просёлок той же ширины перерисуется.
-          `${layer}|${n.kind}|${n.roundabout ?? ''}|${geo.gores.map((g) => `${g.diverge}${g.dirt ? 'd' : ''}`).join()}|${n.bans?.join(';') ?? ''}|${n.lanes?.join(';') ?? ''}|${geo.plate?.dirt ? 'd' : ''}${geo.caps.map((c) => (c.dirt ? 'd' : 'a')).join('')}`,
+          // Цвет площадки, разворотов и подходов учитываем и при неизменной геометрии.
+          `${layer}|${n.kind}|${n.roundabout ?? ''}|${geo.gores.map((g) => `${g.diverge}${g.dirt ? 'd' : ''}`).join()}|${n.bans?.join(';') ?? ''}|${n.lanes?.join(';') ?? ''}|${geo.plate?.surface ?? ''}|${geo.caps.map((c) => c.surface).join()}|${geo.walks?.map((w) => w.surface).join() ?? ''}`,
         );
         item = { id: n.id, key, geo, bbox, layer, shape };
         this.nodeCache.set(n.id, item);
@@ -777,6 +791,7 @@ export class LaneRenderer {
       while (i1 >= 0 && at[i1] > c.length - fromB + 1e-6) i1--;
       return i0 < 0 ? [0, -1] : [i0, i1];
     };
+    const surface = corridorSurface(c);
     return {
       poly: [...l, ...r.reverse()],
       left,
@@ -787,10 +802,10 @@ export class LaneRenderer {
         [0, left.length - 1],
         [0, left.length - 1],
       ],
-      marks: isDirt(c.cls) ? this.ruts(c, ss, up) : this.corridorMarks(net, c, ss, s0, s1, up),
+      marks: surface === 'dirt' ? this.ruts(c, ss, up) : this.corridorMarks(net, c, ss, s0, s1, up, surface === 'yard'),
       // Односторонняя — со стрелками и на грунтовке: иначе не понять, куда по ней ехать.
       arrows: this.corridorArrows(c, s0, s1, up),
-      dirt: isDirt(c.cls),
+      surface,
     };
   }
 
@@ -808,7 +823,7 @@ export class LaneRenderer {
    * Разметка полотна: границы соседних полос, барьер на разделительной, кромки. [s0, s1] — асфальт между обрезами у перекрёстков.
    * at — точка на оси s со смещением off (у моста — поднятая вместе с полотном).
    */
-  private corridorMarks(net: LaneNet, c: Corridor, ss: number[], s0: number, s1: number, at: (s: number, off: number) => Vec): Mark[] {
+  private corridorMarks(net: LaneNet, c: Corridor, ss: number[], s0: number, s1: number, at: (s: number, off: number) => Vec, yard: boolean): Mark[] {
     const marks: Mark[] = [];
     /** Куски линии со смещением off там, где style(s) не null; стиль внутри куска один. */
     const runs = (off: number, style: (s: number) => LineStyle | null) => {
@@ -850,7 +865,10 @@ export class LaneRenderer {
         // сплошная. По ней же решается, можно ли повернуть налево через встречку (game/garages.ts).
         runs(mid, (s) => {
           if (!both(s)) return null;
-          if (!same) return centreLine(net, c, s, s0, s1);
+          if (!same) {
+            const centre = centreLine(net, c, s, s0, s1);
+            return yard && centre === 'dash' ? null : centre;
+          }
           return A.solid || auto.some(([u, v]) => s >= u - 1e-6 && s <= v + 1e-6) ? 'solid' : 'dash';
         });
       } else if (gap > LANE_W + 0.3) {
@@ -1075,10 +1093,11 @@ export class LaneRenderer {
     // Контур — общий с тротуарами вдоль бордюра (plateOutline).
     const plate = plateOutline(net, n, this.cuts);
     if (!plate) return null;
-    const dirt = net.ends(n).every((e) => isDirt(e.corridor.cls));
+    const arms = net.ends(n).map((e) => corridorSurface(e.corridor));
+    const surface = arms.every((arm) => arm === arms[0]) ? arms[0] ?? 'road' : 'road';
     const poly = plate.poly;
     const curbs = plate.curbs.map((k) => k.pts);
-    return dirt ? { poly, curbs, dirt } : { poly, curbs };
+    return { poly, curbs, surface };
   }
 
   /** Тупик: полукруглый разворот на конце полотна. */
@@ -1097,7 +1116,7 @@ export class LaneRenderer {
       const ang = (Math.PI * i) / 16;
       arc.push(add(mid, add(scale(norm(side), Math.cos(ang) * r), scale(out, Math.sin(ang) * r))));
     }
-    return isDirt(c.cls) ? { poly: [...arc, mid], arc, dirt: true } : { poly: [...arc, mid], arc };
+    return { poly: [...arc, mid], arc, surface: corridorSurface(c) };
   }
 
   // ---------- Рисование ----------

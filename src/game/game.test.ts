@@ -143,7 +143,7 @@ describe('Игра', { timeout: 30_000 }, () => {
 
   it('грузовая линия ферма → пищевой комбинат возит зерно', () => {
     // Дорога — своя сеть в стороне от городов: машины жителей на неё не попадают, без них счёт в разы быстрее.
-    const game = withoutCitizens(freshGame(7));
+    const game = withoutCitizens(freshGame(8));
     // Ближайшая пара «ферма — комбинат».
     const pairs = game.industries
       .filter((i) => i.info.kind === 'farm')

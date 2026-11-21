@@ -82,6 +82,42 @@ export const RETAIL = {
   dryMonths: 2,
 } as const;
 
+export const STATION_RETAIL = {
+  /** Не считать один большой рейс регулярным. Допускаем нерегулярные поставки в пределах шести месяцев. */
+  window: 6,
+  suppliedMonths: 2,
+  minVolumeShare: 0.45,
+  /** Один новый участок или одно расширение на город за четыре месяца. */
+  interval: 4,
+  maxOutlets: 2,
+  /** Надбавки выражены в долях нормы города: отдельный магазин добавляет 8%, расширение — 4%. */
+  outletShare: 0.08,
+  expansionShare: 0.04,
+  maxReceiverShare: 0.08,
+  maxTownShare: 0.24,
+} as const;
+
+/** Здание нового городского получателя, подходящее поставляемому товару. */
+export function stationRetailForm(cargo: CargoType): HouseForm | undefined {
+  switch (cargo) {
+    case 'food':
+    case 'goods':
+    case 'textiles':
+    case 'furniture':
+    case 'jewelry':
+      return 'shop';
+    case 'paper':
+      return 'office';
+    case 'construction':
+    case 'glass':
+      return 'warehouse';
+    case 'fuel':
+      return 'fuel';
+    default:
+      return undefined;
+  }
+}
+
 /** Сколько АЗС нужно городу: 1 + ⌊жителей / 6000⌋, не больше трёх; топливо городу не нужно — ни одной. */
 export function fuelCount(town: Pick<Town, 'population' | 'demands'>): number {
   if (!town.demands.includes('fuel')) return 0;
@@ -99,6 +135,8 @@ export interface Receiver {
   cargo: CargoType[];
   /** Вес в доле нормы (RETAIL.weight). */
   w: number;
+  /** Добавочный спрос в долях базовой нормы города, сверх распределяемой по весу доли. */
+  extra?: Partial<Record<CargoType, number>>;
   /** Запас по грузам — на момент at. */
   stock: Partial<Record<CargoType, number>>;
   /** Время партии, на которое посчитан запас, с. */
@@ -203,7 +241,7 @@ export function zoneRetail(town: Town, sites: RetailSites): number {
       let best: TownBuilding | null = null;
       let bestScore = -Infinity;
       for (const b of town.buildings) {
-        if (b.kind !== 'com' || !SITE_FORMS.has(formOf(b)) || sites.keep.has(b.id) || (sites.fresh && !sites.fresh.has(b.id))) continue;
+        if (b.kind !== 'com' || b.stationRetail || !SITE_FORMS.has(formOf(b)) || sites.keep.has(b.id) || (sites.fresh && !sites.fresh.has(b.id))) continue;
         const [forms, need] = reserve(formOf(b));
         if (count(forms) - 1 < need) continue;
         const q = sites.score(b, kind);
@@ -250,7 +288,7 @@ export function pickReceivers(
     if (!cargo.length) continue;
     const cands: { b: TownBuilding; q: number }[] = [];
     for (const b of town.buildings) {
-      if (b.kind !== 'com') continue;
+      if (b.kind !== 'com' || b.stationRetail?.outlet !== undefined) continue;
       let q = g.pick(b, formOf(b));
       if (q <= 0) continue;
       if (cargo.includes('jewelry')) q += dist(b.fp.center, town.center) <= town.radius * RETAIL.jewelryCore ? 2 : -dist(b.fp.center, town.center) / Math.max(1, town.radius);
@@ -268,6 +306,7 @@ export function pickReceivers(
     };
     // Стоящие в линии — всегда; рынок для продуктов — всегда (он и есть «главный» получатель).
     for (const c of cands) if (keep.has(c.b.id) && prev.get(c.b.id)?.cargo.some((x) => cargo.includes(x))) take(c.b);
+    for (const c of cands) if (cargo.some((key) => c.b.stationRetail?.extra[key])) take(c.b);
     if (cargo.includes('food')) for (const c of cands) if (formOf(c.b) === 'market') take(c.b);
     // Прежние получатели этой группы — пока их не больше нужного (город не перетасовывает магазины каждый месяц).
     for (const c of cands) if (chosen.length < want && prev.get(c.b.id)?.cargo.some((x) => cargo.includes(x)) && c.q >= top - 1) take(c.b);
@@ -297,7 +336,7 @@ export function pickReceivers(
     }
     // К кому не подъехать — не получатель, пока есть досягаемые (и не стоит в линии): иначе его доля нормы не закрылась
     // бы никогда (закрыть норму — значит снабдить почти всех: расход — с запасом всего ×RETAIL.consume).
-    const near = chosen.filter((b) => keep.has(b.id) || reach(b));
+    const near = chosen.filter((b) => keep.has(b.id) || cargo.some((key) => b.stationRetail?.extra[key]) || reach(b));
     if (near.length && near.length < chosen.length) chosen.splice(0, chosen.length, ...near);
     for (const b of chosen) {
       const r = out.get(b.id);
@@ -307,6 +346,11 @@ export function pickReceivers(
       }
       out.set(b.id, { b: b.id, cargo: [...cargo], w: receiverWeight(b), stock: {}, at: time });
     }
+  }
+  // Новая торговая точка добавляет спрос: базовые получатели сохраняют свои доли городской нормы.
+  for (const b of town.buildings) {
+    const cargo = b.stationRetail?.outlet;
+    if (cargo !== undefined && town.demands.includes(cargo)) out.set(b.id, { b: b.id, cargo: [cargo], w: 0, stock: {}, at: time });
   }
   // Рынок — и рыбу с рыбаков (в счёт продуктов, ≤ ⅓ нормы).
   if (opts.fish) {
@@ -325,6 +369,8 @@ export function pickReceivers(
   const draft: Town = { ...town, receivers: list };
   for (const r of list) {
     const was = prev.get(r.b);
+    const extra = byId.get(r.b)?.stationRetail?.extra;
+    if (extra) r.extra = { ...extra };
     if (was?.dry) r.dry = was.dry;
     if (was?.fish) r.fish = was.fish;
     if (was?.fed) r.fed = true;
@@ -333,7 +379,7 @@ export function pickReceivers(
     for (const c of r.cargo) {
       const cap = stockCap(draft, r, c);
       const old = was && was.cargo.includes(c) ? stockAt(town, was, c, time) : undefined;
-      r.stock[c] = Math.min(cap, old ?? cap * RETAIL.startFill);
+      r.stock[c] = Math.min(cap, old ?? (r.w > 0 ? cap * RETAIL.startFill : 0));
     }
     r.at = time;
   }
@@ -347,12 +393,14 @@ function weightOf(town: Pick<Town, 'receivers'>, c: CargoType): number {
   return w;
 }
 
-/** Расход получателя r по грузу c за месяц: его доля нормы города — townNeed · w / Σw; рыба на рынке — треть нормы. */
+/** Потребность получателя за месяц: доля городской нормы и добавочный спрос; рыба на рынке — треть нормы. */
 export function receiverNeed(town: Pick<Town, 'receivers' | 'population'>, r: Receiver, c: CargoType): number {
-  if (r.depot) return 0;
-  if (c === 'fish') return r.cargo.includes('fish') ? townNeed(town.population) * RETAIL.fishShare : 0;
+  if (r.depot || !r.cargo.includes(c)) return 0;
+  const need = townNeed(town.population);
+  if (c === 'fish') return need * RETAIL.fishShare;
   const w = weightOf(town, c);
-  return w > 0 && r.cargo.includes(c) ? (townNeed(town.population) * r.w) / w : 0;
+  const base = w > 0 ? (need * r.w) / w : 0;
+  return base + need * (r.extra?.[c] ?? 0);
 }
 
 /** Склад получателя по грузу c: не меньше RETAIL.stockMin и двух его месячных норм. */
@@ -472,8 +520,13 @@ export function townRoom(town: Pick<Town, 'receivers' | 'population'>, c: CargoT
   const list = (town.receivers ?? []).filter((r) => r.cargo.includes(c) && !r.depot);
   if (!list.length) return null;
   let free = 0;
-  for (const r of list) free += stockCap(town, r, c) - stockAt(town, r, c, time);
-  return townNeed(town.population) * RETAIL.consume * Math.max(0, months) + free;
+  let extra = 0;
+  for (const r of list) {
+    free += stockCap(town, r, c) - stockAt(town, r, c, time);
+    extra += r.extra?.[c] ?? 0;
+  }
+  const base = list.some((r) => r.w > 0) ? 1 : 0;
+  return townNeed(town.population) * (base + extra) * RETAIL.consume * Math.max(0, months) + free;
 }
 
 /**

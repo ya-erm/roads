@@ -1,14 +1,16 @@
 import { Cubic, CurveLUT, minRadius } from '../core/bezier';
 import { Rng } from '../core/rng';
 import { add, angleOf, angleDiff, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { buildRoad, type Anchor } from '../lanes/edit';
+import { industryHaulConnection } from '../game/industryHaulRoutes';
+import { industryYardWidth, INDUSTRY_YARD_MIN_DEPTH } from '../game/transport';
+import { buildRoad, corridorUnder, type Anchor } from '../lanes/edit';
 import { edgesAt } from '../lanes/geometry';
 import { twoWay, type Corridor, type LaneNet, type LaneNode } from '../lanes/model';
 import type { IndustryKind } from './cargo';
 import type { Industry, Town } from './entities';
-import { GRADE } from '../config';
+import { GRADE, STATION } from '../config';
 import { halfWidth, isDirt, ROAD_CLASSES, ROAD_MARGIN, type RoadSpec } from './roadTypes';
-import { footprintSide, pointInFootprint } from './spatial';
+import { footprintAlong, footprintCorners, footprintRadius, footprintSide, footprintsOverlap, pointInFootprint, type Footprint } from './spatial';
 import { industryAccess } from './industrySites';
 import type { WorldContext } from './worldgen';
 
@@ -80,7 +82,10 @@ interface Route {
   curve: Cubic;
   length: number;
   kind: Kind;
+  yard?: Footprint;
 }
+
+type Candidate = Pick<Route, 'start' | 'curve' | 'yard'> & { haulReady?: () => boolean };
 
 const seedOf = (seed: number) => (Math.imul(seed ^ 0x5d1a7e, 0x9e3779b1) ^ 0x2c1b3c6d) >>> 0;
 
@@ -100,9 +105,12 @@ export function layStartRoads(ctx: WorldContext, towns: Town[], industries: Indu
   });
   // Ближние к городам — первыми: дальние ответвятся от их просёлков, а не потянут свои через всё поле.
   const near = (ind: Industry) => Math.min(...towns.map((t) => dist(t.center, ind.fp.center) - (t.extent ?? t.radius)));
+  const yards: Footprint[] = [];
   for (const ind of chosen.sort((a, b) => near(a) - near(b) || a.id - b.id)) {
-    const route = industryRoute(ctx, ind, towns);
-    if (route) lay(ctx, towns, route);
+    const route = industryRoute(ctx, ind, towns, yards);
+    if (!route) continue;
+    lay(ctx, towns, route);
+    if (route.yard) yards.push(route.yard);
   }
 }
 
@@ -172,7 +180,7 @@ function curveFor(start: Start, end: Vec, arrive: Vec): Cubic {
  * Можно ли так проложить: поворот не круче, в карте — ни воды, ни зданий, ни чужих дорог рядом (у начала можно
  * вплотную к своей улице), уклон не круче. Точки за краем карты (дорога уходит за край) не проверяются.
  */
-function routeOk(ctx: WorldContext, start: Start, curve: Cubic, kind: Kind, target?: Industry): Route | null {
+function routeOk(ctx: WorldContext, start: Start, curve: Cubic, kind: Kind, target?: Industry, yards: readonly Footprint[] = []): Route | null {
   const { terrain, roads, index } = ctx;
   const HALF = kind.half;
   if (minRadius(curve) < kind.radius) return null;
@@ -191,6 +199,7 @@ function routeOk(ctx: WorldContext, start: Start, curve: Cubic, kind: Kind, targ
     if (prevH !== null && Math.abs(h - prevH) / step > kind.grade) return null;
     prevH = h;
     for (const it of index.near(p, HALF + 60)) if (it !== target && pointInFootprint(p, it.fp, HALF + 4)) return null;
+    if (yards.some((yard) => pointInFootprint(p, yard, HALF + 4))) return null;
     // Своё предприятие — дорога подходит к стене, но не заходит на двор будущей станции.
     if (target && s < L - 20 && pointInFootprint(p, target.fp, HALF + 44)) return null;
     for (const o of roads.corridorsNear(p, HALF + 40)) {
@@ -203,15 +212,22 @@ function routeOk(ctx: WorldContext, start: Start, curve: Cubic, kind: Kind, targ
 }
 
 /** Первая годная дорога из вариантов, ближние — раньше. */
-function firstRoute(ctx: WorldContext, cands: { start: Start; curve: Cubic }[], reach: number, kind: Kind, target?: Industry): Route | null {
+function firstRoute(
+  ctx: WorldContext,
+  cands: Candidate[],
+  reach: number,
+  kind: Kind,
+  target?: Industry,
+  yards: readonly Footprint[] = [],
+): Route | null {
   const scored = cands
     .map((c) => ({ ...c, d: dist(c.curve.p0, c.curve.p3) }))
     .filter((c) => c.d <= reach)
     .sort((a, b) => a.d - b.d)
     .slice(0, START_ROADS.tries);
   for (const c of scored) {
-    const r = routeOk(ctx, c.start, c.curve, kind, target);
-    if (r && r.length <= reach) return r;
+    const r = routeOk(ctx, c.start, c.curve, kind, target, c.yard ? [...yards, c.yard] : yards);
+    if (r && r.length <= reach && (!c.haulReady || c.haulReady())) return { ...r, yard: c.yard };
   }
   return null;
 }
@@ -257,7 +273,7 @@ export function edgeRoute(ctx: WorldContext, town: Town): Route | null {
  * двора (START_ROADS.industryExit). Начало — перекрёсток или место на улице любого города (не тупик), а также
  * просёлок, проложенный раньше к соседнему предприятию.
  */
-export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): Route | null {
+export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[], yards: readonly Footprint[] = []): Route | null {
   const { roads } = ctx;
   const fp = ind.fp;
   const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
@@ -269,18 +285,48 @@ export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): 
     { n: scale(v, -1), half: fp.h / 2 },
   ];
   const exitOf = (s: (typeof sides)[number]) => add(fp.center, scale(s.n, (fp.parts ? footprintSide(fp, s.n) : s.half) + START_ROADS.industryExit));
-  const cands: { start: Start; curve: Cubic }[] = [];
+  const cands: Candidate[] = [];
   const linked: typeof cands = [];
+  // Запас от стены до подъезда: другой просёлок не должен занять площадку станции или её выезд.
+  const wallGap = 3;
+  const endClearance = 14;
+  const yardDepth = START_ROADS.industryExit - wallGap - endClearance;
+  const yardWidth = industryYardWidth(STATION.bays);
+  const haulGround = {
+    revision: '',
+    clear: (p: Vec) => ctx.terrain.inBounds(p, 3) && !ctx.terrain.isWater(p, 2) && !corridorUnder(roads, p, 2, 0)
+      && !ctx.index.near(p, 6).some((s) => s !== ind && pointInFootprint(p, s.fp, 1.5)),
+  };
+  const candidates = new Map<string, Pick<Candidate, 'yard' | 'haulReady'> | null>();
+  const addYard = (start: Start, end: Vec, n: Vec, atAccess = false) => {
+    const toward = sub(end, start.anchor.pos);
+    if (dist(end, start.anchor.pos) > START_ROADS.industryReach || dot(start.dir, norm(toward)) < 0.3) return;
+    const key = `${end.x}:${end.y}:${atAccess}`;
+    if (!candidates.has(key)) {
+      const angle = Math.atan2(n.x, -n.y);
+      const yard: Footprint = { center: add(end, scale(n, -endClearance - yardDepth / 2)), w: yardWidth, h: yardDepth, angle };
+      const blocked = [...footprintCorners(yard), yard.center].some((p) => ctx.terrain.isWater(p, 3) || !ctx.terrain.inBounds(p, 20)) ||
+        ctx.index.overlaps(yard, 0, (s) => s === ind || (s.type === 'building' && s.kind !== 'landmark')) ||
+        yards.some((other) => footprintsOverlap(other, yard, 0)) ||
+        roads.corridorsNear(yard.center, footprintRadius(yard) + 26).some((c) => footprintAlong(yard, c.lut, (s) => halfAt(c, s) + 1));
+      // Технологическую связь запасной стороны проверяем только после подбора годного подъезда.
+      const h = INDUSTRY_YARD_MIN_DEPTH;
+      const station: Footprint = { ...yard, center: add(end, scale(n, wallGap + h / 2 - START_ROADS.industryExit)), h };
+      const haulSite = { fp: station };
+      const haulReady = atAccess ? undefined : () => !!industryHaulConnection(haulSite, ind, -1, haulGround);
+      candidates.set(key, blocked ? null : { yard, haulReady });
+    }
+    const candidate = candidates.get(key);
+    if (candidate) (atAccess ? linked : cands).push({ start, curve: curveFor(start, end, scale(n, -1)), ...candidate });
+  };
   const add2 = (start: Start) => {
     if (fp.groundParts) {
       const end = add(industryAccess(fp, ind.info.kind), scale(u, START_ROADS.industryExit + 1.4));
-      if (dot(start.dir, norm(sub(end, start.anchor.pos))) >= 0.3) linked.push({ start, curve: curveFor(start, end, scale(u, -1)) });
+      addYard(start, end, u, true);
     }
     // Сторона — та, что смотрит на начало дороги.
     const side = sides.reduce((b, s) => (dot(s.n, norm(sub(start.anchor.pos, fp.center))) > dot(b.n, norm(sub(start.anchor.pos, fp.center))) ? s : b));
-    const end = exitOf(side);
-    if (dot(start.dir, norm(sub(end, start.anchor.pos))) < 0.3) return;
-    cands.push({ start, curve: curveFor(start, end, scale(side.n, -1)) });
+    addYard(start, exitOf(side), side.n);
   };
   for (const t of towns) {
     if (dist(t.center, fp.center) - (t.extent ?? t.radius) > START_ROADS.industryReach) continue;
@@ -300,7 +346,7 @@ export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[]): 
     if (dot(nrm, d) < 0.6) continue;
     add2({ anchor: { kind: 'corridor', corridor: c.id, s, pos: p }, dir: nrm, host: new Set([c.id]) });
   }
-  return firstRoute(ctx, linked, START_ROADS.industryReach, DIRT_ROAD, ind) ?? firstRoute(ctx, cands, START_ROADS.industryReach, DIRT_ROAD, ind);
+  return firstRoute(ctx, linked, START_ROADS.industryReach, DIRT_ROAD, ind, yards) ?? firstRoute(ctx, cands, START_ROADS.industryReach, DIRT_ROAD, ind, yards);
 }
 
 /** Полуширина полотна по большей стороне в точке s. */
