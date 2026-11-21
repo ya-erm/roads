@@ -10,6 +10,8 @@ export interface Footpath {
   a: Vec;
   b: Vec;
   shape?: FootpathShape;
+  /** От дворового прохода наследуются покрытие и его ширина. Без поля — обычная мощёная дорожка игрока. */
+  surface?: 'paved' | 'path';
   /** Стоимость исходного прохода, построенного городом, вычитается из возврата при сносе. */
   cityCost?: number;
 }
@@ -17,6 +19,11 @@ export interface Footpath {
 export type FootpathShape = { kind: 'arc'; through: Vec } | { kind: 'curve'; c1: Vec; c2: Vec } | { kind: 'polyline'; via: Vec[] };
 type PathGeometry = Omit<Footpath, 'id'>;
 export const FOOTPATH = { width: 2, minLength: 2, pricePerMetre: 18 };
+export const WALK_W = { paved: 1.6, path: 1.2 } as const;
+
+export function footpathWidth(path: Pick<Footpath, 'surface'>): number {
+  return path.surface ? WALK_W[path.surface] : FOOTPATH.width;
+}
 const EPS = 0.015;
 const PRECISION = 0.06;
 const lines = new WeakMap<PathGeometry, Vec[]>();
@@ -75,7 +82,7 @@ export function footpathLength(path: PathGeometry): number {
 
 export function footpathParts(path: PathGeometry): Footprint[] {
   const line = footpathPoints(path);
-  return line.slice(1).map((p, i) => pathFootprint(line[i], p));
+  return line.slice(1).map((p, i) => pathFootprint(line[i], p, footpathWidth(path)));
 }
 
 export function footpathBounds(path: PathGeometry) {
@@ -100,8 +107,8 @@ export function footpathInBox(path: Footpath, x0: number, y0: number, x1: number
   return points.slice(1).some((b, i) => corners.some((c, j) => segmentIntersection(points[i], b, c, corners[(j + 1) % 4])));
 }
 
-export function pathFootprint(a: Vec, b: Vec): Footprint {
-  return { center: lerp(a, b, 0.5), w: dist(a, b), h: FOOTPATH.width, angle: Math.atan2(b.y - a.y, b.x - a.x) };
+export function pathFootprint(a: Vec, b: Vec, width = FOOTPATH.width): Footprint {
+  return { center: lerp(a, b, 0.5), w: dist(a, b), h: width, angle: Math.atan2(b.y - a.y, b.x - a.x) };
 }
 
 /** Фактическая кромка со стороны дорожки: на улице с односторонней парковкой ширина обочин различается. */

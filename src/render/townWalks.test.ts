@@ -101,7 +101,8 @@ describe('Дорожки кварталов', () => {
       get: (t, k) => (k in t ? t[k] : () => void (k === 'stroke' ? log.push(`${props.strokeStyle}@${props.lineWidth}`) : k === 'fill' ? log.push(`fill ${props.fillStyle}`) : 0)),
       set: (t, k, v) => ((t[k] = v), true),
     }) as unknown as CanvasRenderingContext2D;
-    drawTownWalks(ctx, [w], box, 2, [side]);
+    const extension = { id: 9, a: { x: 0, y: 20 }, b: { x: 8, y: 26 } };
+    drawTownWalks(ctx, [w], box, 2, [side], [{ ...extension, surface: 'paved' }]);
     const { fill, edge } = WALK_LOOK.paved;
     // Цвета — непрозрачные (#rrggbb), одни на тротуар и дорожки.
     expect(fill).toMatch(/^#[0-9a-f]{6}$/);
@@ -114,6 +115,10 @@ describe('Дорожки кварталов', () => {
       `${fill}@${SIDEWALK.paved.w}`,
       'fill #646b76',
     ]);
+    log.length = 0;
+    drawTownWalks(ctx, [], box, 2, [], [{ ...extension, surface: 'path' }, { ...extension, id: 10 }]);
+    expect(log).toContain(`${WALK_LOOK.path.fill}@${WALK_W.path}`);
+    expect(log).toContain(`${WALK_LOOK.paved.fill}@2`);
   });
 
   it('съезды и заезды к воротам площадок — до кромки полотна, даже если участок отступил дальше; у кромки — понижение бордюра поверх полотна', () => {

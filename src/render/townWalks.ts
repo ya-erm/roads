@@ -1,5 +1,5 @@
 import { plotPoint as toWorld, yardPaths } from '../world/yardPaths';
-import { FOOTPATH, footpathBounds, footpathPoints, type Footpath } from '../game/footpaths';
+import { FOOTPATH, WALK_W, footpathBounds, footpathPoints, type Footpath } from '../game/footpaths';
 import type { Vec } from '../core/vec';
 import type { Town, TownBuilding } from '../world/entities';
 import type { Game } from '../game/game';
@@ -110,7 +110,7 @@ export function driveClearance(walks: Iterable<TownWalks>, lots: Iterable<Footpr
 }
 
 /** Ширина дорожки, м. */
-export const WALK_W = { paved: 1.6, path: 1.2 } as const;
+export { WALK_W };
 
 /** Расстояние до кромки полотна (curbGap) и его покрытие. */
 export interface WalkRoads {
@@ -264,17 +264,16 @@ export function drawTownWalks(ctx: CanvasRenderingContext2D, list: readonly Town
   a.pass = 0;
   const c = ctx;
   const seen = list.filter((w) => !(w.box.x1 < view.x0 || w.box.x0 > view.x1 || w.box.y1 < view.y0 || w.box.y0 > view.y1));
-  const manual = footpaths.filter(path => {
+  const groups = { manual: [] as number[][], paved: seen.filter(w => w.paved).flatMap(w => w.paths), path: seen.filter(w => !w.paved).flatMap(w => w.paths) };
+  for (const path of footpaths) {
     const box = footpathBounds(path);
-    return box.x1 + 2 >= view.x0 && box.x0 - 2 <= view.x1 && box.y1 + 2 >= view.y0 && box.y0 - 2 <= view.y1;
-  }).map(path => footpathPoints(path).flatMap(p => [p.x, p.y]));
-  // Ломаные дорожек всех городов — одной обводкой на вид (мощёные, утоптанные).
-  const kinds = ([true, false] as const).map((paved) => ({ paved, list: seen.filter((w) => w.paved === paved).flatMap((w) => w.paths) })).filter((k) => k.list.length);
+    if (box.x1 + 2 < view.x0 || box.x0 - 2 > view.x1 || box.y1 + 2 < view.y0 || box.y0 - 2 > view.y1) continue;
+    groups[path.surface ?? 'manual'].push(footpathPoints(path).flatMap(p => [p.x, p.y]));
+  }
   const walkPaths = (part: 'edge' | 'fill') => {
-    if (manual.length) paths(a, manual, FOOTPATH.width, WALK_LOOK.paved.fill, WALK_LOOK.paved.edge, part);
-    for (const k of kinds) {
-      const look = k.paved ? WALK_LOOK.paved : WALK_LOOK.path;
-      paths(a, k.list, k.paved ? WALK_W.paved : WALK_W.path, look.fill, look.edge, part);
+    if (groups.manual.length) paths(a, groups.manual, FOOTPATH.width, WALK_LOOK.paved.fill, WALK_LOOK.paved.edge, part);
+    for (const kind of ['paved', 'path'] as const) {
+      if (groups[kind].length) paths(a, groups[kind], WALK_W[kind], WALK_LOOK[kind].fill, WALK_LOOK[kind].edge, part);
     }
   };
   walkPaths('edge');

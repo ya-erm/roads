@@ -4,7 +4,7 @@ import { clamp, hash } from '../core/math';
 import { drawWalkSign } from './walkSign';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
-import { FOOTPATH, footpathBounds, footpathParts, footpathPoints, type Footpath } from '../game/footpaths';
+import { footpathBounds, footpathParts, footpathPoints, footpathWidth, type Footpath } from '../game/footpaths';
 import { stationNormal } from '../game/railStationEdit';
 import { additionalStationGates, stationRoadFront } from '../game/stationAccess';
 import { warningMarks } from '../game/stationWarnings';
@@ -4936,7 +4936,7 @@ export class Renderer {
     if (o.footpath) {
       ctx.save();
       ctx.strokeStyle = o.footpath.ok ? '#2f80ed' : '#df403c';
-      ctx.lineWidth = Math.max(FOOTPATH.width, 2 / this.camera.zoom);
+      ctx.lineWidth = Math.max(footpathWidth(o.footpath), 2 / this.camera.zoom);
       ctx.lineCap = 'round';
       this.polyline(footpathPoints(o.footpath));
       ctx.stroke();

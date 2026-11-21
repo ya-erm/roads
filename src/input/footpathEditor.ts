@@ -142,7 +142,7 @@ export class FootpathEditor {
       const ok = !plan?.reason;
       const action = hit && (typeof hit.part === 'number' ? 'Перенести вершину' : handleLabels[hit.part]);
       return {
-        footpath: { ...geom, ok },
+        footpath: { ...geom, ...(path.surface && { surface: path.surface }), ok },
         points: handles(geom).map(h => ({ pos: h.pos, color: h.part === 'a' || h.part === 'b' ? '#2f80ed' : '#f2994a', r: 5 })),
         handles: geom.shape?.kind === 'curve' ? [
           { anchor: geom.a, pos: geom.shape.c1, active: hit?.part === 'c1', partner: false },
@@ -161,6 +161,6 @@ export class FootpathEditor {
     if (this.start) points.push({ pos: this.start, color: '#2f80ed', r: 4 });
     if (this.control) points.push({ pos: this.control, color: '#f2994a', r: 4 });
     const prompt = !this.start ? 'Укажите начало дорожки' : awaitingControl ? (this.mode === 'arc' ? 'Укажите точку на дуге' : 'Укажите изгиб кривой') : 'Укажите конец дорожки · Esc — закончить';
-    return { points, footpath: path ? { ...path, ok } : undefined, label: { text: plan && path ? plan.reason ?? `${Math.round(footpathLength(path))} м · ${money(plan.cost)}` : prompt, ok } };
+    return { points, footpath: path ? { ...path, ...(plan?.surface && { surface: plan.surface }), ok } : undefined, label: { text: plan && path ? plan.reason ?? `${Math.round(footpathLength(path))} м · ${money(plan.cost)}` : prompt, ok } };
   }
 }

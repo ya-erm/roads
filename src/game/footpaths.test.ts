@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import { add, lerp, norm, scale, sub, type Vec } from '../core/vec';
 import { footpathSnap } from '../input/footpathTool';
 import { gameSidewalks } from '../render/sidewalks';
-import { FOOTPATH, footpathLength, footpathNetwork, nearestFootpath, type Footpath } from './footpaths';
+import { FOOTPATH, WALK_W, footpathLength, footpathNetwork, footpathWidth, nearestFootpath, type Footpath } from './footpaths';
 import { Game } from './game';
 import { freshGame, openSpot, road } from './testkit';
 import { walkingNetwork } from './pedestrians';
@@ -45,6 +45,7 @@ it('полукруг стыкуется с пересекающей его до�
 
 it('городской проход можно перенести и снести без повторной генерации, отмена возвращает прежнюю линию', () => {
   const g = freshGame({ seed: 11, towns: 2, industries: 'few', size: 'small', water: 'dry', money: 500_000 });
+  for (const town of g.towns) town.tier = 'village';
   const path = g.editableFootpaths().find(p => p.id < 0 && p.shape?.kind === 'polyline')!;
   expect(path).toBeTruthy();
   const originalLines = () => gameSidewalks(g).yards?.flatMap(yard => yard.pathIds ?? []) ?? [];
@@ -56,7 +57,13 @@ it('городской проход можно перенести и снест�
   const b = add(a, p(40, 0));
   expect(g.moveFootpath(path.id, a, b)).toBeNull();
   expect(originalLines()).not.toContain(path.id);
-  expect(g.editableFootpaths().filter(x => x.id === path.id)).toEqual([{ id: path.id, a, b, cityCost: expect.any(Number) }]);
+  expect(g.editableFootpaths().filter(x => x.id === path.id)).toEqual([{ id: path.id, a, b, surface: 'path', cityCost: expect.any(Number) }]);
+  const past = add(b, p(10, 0));
+  expect(g.buildFootpath(b, past)).toBeNull();
+  expect(g.footpaths.at(-1)?.surface).toBe('path');
+  expect(footpathWidth(g.footpaths.at(-1)!)).toBe(WALK_W.path);
+  expect(g.footpathPlan(add(a, p(-10, 0)), a).surface).toBe('path');
+  expect(g.undo()).toBeTruthy();
   expect(g.undo()).toBeTruthy();
   expect(originalLines()).toContain(path.id);
   expect(g.footpaths).toEqual([]);

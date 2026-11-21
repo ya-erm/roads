@@ -74,7 +74,7 @@ import {
 } from '../world/worldgen';
 import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placeParks, plazaAttached, plazaBy } from '../world/townParks';
 import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
-import { FOOTPATH, footpathInBox, footpathLength, footpathPoints, overlapsFootpath, pathCrossesRoad, pathFootprint, type Footpath, type FootpathShape } from './footpaths';
+import { FOOTPATH, footpathInBox, footpathLength, footpathPoints, footpathWidth, nearestFootpath, overlapsFootpath, pathCrossesRoad, pathFootprint, type Footpath, type FootpathShape } from './footpaths';
 import { yardPaths } from '../world/yardPaths';
 import { buildingFrontage, planStreetHouses, type HouseMove, type StreetPart } from '../world/streetHouses';
 import { resizeBuildingFootprint, type BuildingCorner } from '../world/buildingResize';
@@ -3130,6 +3130,8 @@ export class Game implements BuildContext {
     const all = this.editableFootpaths();
     const original = editId === undefined ? undefined : all.find(path => path.id === editId);
     const edited: Footpath = { id: editId ?? -1, a, b, ...(shape && { shape }) };
+    const source = original ?? nearestFootpath(all, a, 0.02)?.path ?? nearestFootpath(all, b, 0.02)?.path;
+    if (source?.surface) edited.surface = source.surface;
     const changes = new Map([[edited.id, edited]]);
     if (editId !== undefined && !original) return { changes, cost: 0, reason: 'Нет дорожки' };
     if (linked && original) {
@@ -3159,33 +3161,34 @@ export class Game implements BuildContext {
       if (!line.every(p => this.inBounds(p, 1))) return { changes, cost, reason: 'За краем карты' };
       if (footpathLength(path) < FOOTPATH.minLength) return { changes, cost, reason: 'Дорожка короче 2 м' };
       if (overlapsFootpath(other, path)) return { changes, cost, reason: 'Здесь уже есть дорожка' };
-      const reason = this.footpathObstruction(line);
+      const reason = this.footpathObstruction(path);
       if (reason) return { changes, cost, reason };
       other.push(path);
     }
     return { changes, cost, reason: cost > this.budget ? 'Не хватает денег' : undefined };
   }
 
-  footpathPlan(a: Vec, b: Vec, shape?: FootpathShape, editId?: number, linked = false): { cost: number; reason?: string } {
-    const { cost, reason } = this.planFootpaths(a, b, shape, editId, linked);
-    return { cost, reason };
+  footpathPlan(a: Vec, b: Vec, shape?: FootpathShape, editId?: number, linked = false) {
+    const { changes, cost, reason } = this.planFootpaths(a, b, shape, editId, linked);
+    return { cost, reason, surface: changes.get(editId ?? -1)?.surface };
   }
 
-  private footpathObstruction(line: Vec[]): string | null {
+  private footpathObstruction(path: Footpath): string | null {
+    const line = footpathPoints(path);
     for (let i = 1; i < line.length; i++) {
-      const obstacle = this.footpathSpanObstruction(line[i - 1], line[i]);
+      const obstacle = this.footpathSpanObstruction(line[i - 1], line[i], footpathWidth(path));
       if (obstacle) return obstacle;
     }
     return null;
   }
 
-  private footpathSpanObstruction(a: Vec, b: Vec): string | null {
+  private footpathSpanObstruction(a: Vec, b: Vec, width: number): string | null {
     // Ограничиваем область пространственного поиска даже при протяжке через всю карту.
     const steps = Math.max(1, Math.ceil(dist(a, b) / 80));
     let from = a;
     for (let i = 1; i <= steps; i++) {
       const to = lerp(a, b, i / steps);
-      const obstruction = this.footpathPartObstruction(pathFootprint(from, to));
+      const obstruction = this.footpathPartObstruction(pathFootprint(from, to, width));
       if (obstruction) return obstruction;
       from = to;
     }
@@ -3213,16 +3216,16 @@ export class Game implements BuildContext {
     const roads = this.roads.net;
     const version = `${roads.version}:${this.net.version}:${this.index.version}:${this.lotRev}:${this.terrain.version}`;
     if (this.pathAccess?.paths === this.footpaths && this.pathAccess.roads === roads && this.pathAccess.version === version) return this.pathAccess.open;
-    const open = this.footpaths.filter(p => !this.footpathObstruction(footpathPoints(p)));
+    const open = this.footpaths.filter(p => !this.footpathObstruction(p));
     this.pathAccess = { paths: this.footpaths, roads, version, open };
     return open;
   }
 
   buildFootpath(a: Vec, b: Vec, shape?: FootpathShape): string | null {
-    const { cost, reason } = this.footpathPlan(a, b, shape);
+    const { cost, reason, surface } = this.footpathPlan(a, b, shape);
     if (reason) return reason;
     this.checkpoint('пешеходная дорожка');
-    this.footpaths = [...this.footpaths, { id: this.nextId(), a, b, ...(shape && { shape }) }];
+    this.footpaths = [...this.footpaths, { id: this.nextId(), a, b, ...(shape && { shape }), ...(surface && { surface }) }];
     this.spend(cost);
     this.commit();
     return null;

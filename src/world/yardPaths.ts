@@ -32,7 +32,8 @@ const cache = new WeakMap<Town, { layout: number; buildings: TownBuilding[]; cou
 
 /** У каждого дома по одному боковому проходу и подходу сзади. Их ID устойчивы при росте города и загрузке. */
 export function yardPaths(town: Town, layout: number): Footpath[] {
-  const side = townTier(town) === 'village' ? SIDEWALK.path : SIDEWALK.paved;
+  const surface = townTier(town) === 'village' ? 'path' : 'paved';
+  const side = SIDEWALK[surface];
   const reach = LOT_SETBACK - side.from - side.w + 0.5;
   const old = cache.get(town);
   if (old && old.layout === layout && old.buildings === town.buildings && old.count === town.buildings.length && old.reach === reach) return old.paths;
@@ -81,7 +82,7 @@ export function yardPaths(town: Town, layout: number): Footpath[] {
     if (rightGap && hash(f.id, 41) < 0.45) {
       const [x0, y0] = plotPoint(f.fp, rightGap.x, frontY);
       const [x1, y1] = plotPoint(f.fp, rightGap.x, -face * (rightGap.back - 1.5));
-      paths.push({ id: -(f.id * 2 + 2), a: { x: x0, y: y0 }, b: { x: x1, y: y1 } });
+      paths.push({ id: -(f.id * 2 + 2), a: { x: x0, y: y0 }, b: { x: x1, y: y1 }, surface });
     }
   }
   // К дому второго ряда — по промежутку у переднего дома и вдоль его задней стороны.
@@ -102,7 +103,7 @@ export function yardPaths(town: Town, layout: number): Footpath[] {
       const [px, py] = plotPoint(f.fp, x, y);
       return { x: px, y: py };
     });
-    paths.push({ id: -(r.id * 2 + 3), a: line[0], b: line[3], shape: { kind: 'polyline', via: line.slice(1, -1) } });
+    paths.push({ id: -(r.id * 2 + 3), a: line[0], b: line[3], shape: { kind: 'polyline', via: line.slice(1, -1) }, surface });
   }
   cache.set(town, { layout, buildings: town.buildings, count: town.buildings.length, reach, paths });
   return paths;
