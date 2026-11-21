@@ -5879,20 +5879,17 @@ export class Renderer {
     if (z < 1.2 || !game.pedestrians.on) return;
     const ctx = this.ctx;
     const COATS = ['#d9534f', '#3a6fb0', '#e8b83a', '#4c9a5b', '#7d5ba6', '#e07b39', '#30343a', '#e6e2d8'];
-    // Вблизи ширина плеч 0,88 м. Издали силуэт остаётся различимым (минимум 2,4 пикселя).
-    const figureScale = Math.max(0.44, 1.2 / z);
     ctx.strokeStyle = 'rgba(30, 30, 30, 0.6)';
     ctx.lineWidth = 0.2;
     for (const p of game.pedestrians.visible(game.time, view)) {
       ctx.save();
       const outsideCrowns = this.alleys.pedestrianMask ??= streetCanopyMask(this.alleys.shown);
-      if (!outsideCrowns(ctx, p.pos, 1.3 * figureScale)) {
+      if (!outsideCrowns(ctx, p.pos, 1.3)) {
         ctx.restore();
         continue;
       }
       ctx.translate(p.pos.x, p.pos.y);
       ctx.rotate(p.heading);
-      ctx.scale(figureScale, figureScale);
       if (z >= 3) {
         const stride = p.walking ? 0.48 * Math.sin(game.time * 8 + p.seed) : 0;
         ctx.fillStyle = '#454346';
