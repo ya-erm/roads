@@ -3,7 +3,7 @@ import { ECONOMY, MODEL_UNLOCK, MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
 import type { IndustryKind } from '../world/cargo';
 import type { Station } from '../world/entities';
-import { breathe, freightRoute, freshGame, runMonths, townStreets, withoutCitizens } from './testkit';
+import { breathe, freightRoute, freshGame, runMonths, runUntil, townStreets, withoutCitizens } from './testkit';
 import { MODELS, modelsFor } from './transport';
 
 /**
@@ -32,6 +32,22 @@ function freightLine(seed: number, from: IndustryKind, to: IndustryKind, trucks:
 
 // Симуляции на месяцы вперёд — дольше стандартного лимита теста.
 describe('Экономика', { timeout: 60_000 }, () => {
+  it('добыча и переработка идут с общим замедлением, нормы в карточке совпадают с выпуском', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { built, from: farm, to: plant } = freightRoute(game);
+    expect(built).toBe(true);
+    plant.stock.grain = 200;
+
+    const production = game as unknown as { updateIndustries(dt: number): void };
+    production.updateIndustries(MONTH_LENGTH);
+
+    expect(farm.producedMonth + farm.prodAcc).toBeCloseTo(40.5);
+    expect(game.industryRate(farm)).toBe(Math.round(farm.producedMonth + farm.prodAcc));
+    expect(plant.producedMonth).toBe(135);
+    expect(game.industryRate(plant)).toBe(plant.producedMonth);
+    expect(plant.stock.grain).toBe(65);
+  });
+
   it('грузовики на линии ферма → комбинат окупаются, а ферма растёт', () => {
     const r = freightLine(7, 'farm', 'foodplant', 2, 2);
     // Выручка заметно больше содержания.
@@ -138,6 +154,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
     expect(modelsFor('road', game.modelOpen)).toContain('truck3');
     expect(game.runningCost(v)).toBe(MODELS.truck.running);
     expect(game.replacementFor(v)).toBe('truck3');
+    expect(runUntil(game, 2 * MONTH_LENGTH, () => v.inBay && !v.enter && !v.yardExit)).toBe(true);
     const fresh = game.replaceVehicle(v.id)!;
     expect(fresh.model).toBe('truck3');
     expect(line.vehicles).toEqual([fresh.id]);

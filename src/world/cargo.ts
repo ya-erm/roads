@@ -1,4 +1,4 @@
-import { MONTH_SCALE } from '../config';
+import { INDUSTRY_PRODUCTION_FACTOR, MONTH_SCALE } from '../config';
 
 export type CargoType =
   | 'passengers'
@@ -182,8 +182,8 @@ export interface IndustryType {
   count: number;
 }
 
-/** Сколько добывает сырьевое предприятие первого уровня за месяц (было 44 — склады забивались слишком быстро). */
-export const RAW_RATE = 36 * MONTH_SCALE;
+/** Сколько добывает сырьевое предприятие первого уровня за месяц. */
+export const RAW_RATE = 36 * MONTH_SCALE * INDUSTRY_PRODUCTION_FACTOR;
 
 export const INDUSTRY_TYPES: Record<IndustryKind, IndustryType> = {
   farm: { kind: 'farm', name: 'Ферма', short: 'Ферма', produces: 'grain', accepts: [], color: '#e6cf7a', roof: '#b5543c', w: 110, h: 80, rate: RAW_RATE, count: 4 },

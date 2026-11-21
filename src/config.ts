@@ -197,6 +197,9 @@ export const COST = {
   refundRatio: 0.5,
 };
 
+/** Общий темп добычи и переработки с учётом времени вывоза продукции. */
+export const INDUSTRY_PRODUCTION_FACTOR = 0.75;
+
 export const ECONOMY = {
   startMoney: 600_000,
   /** До какой суммы можно уйти в минус. */
@@ -260,7 +263,7 @@ export const ECONOMY = {
   /** Через сколько месяцев без обслуживания производство начинает падать (4 мин). */
   declineMonths: 2 * TERM_SCALE,
   /** Сколько завод перерабатывает сырья в месяц на уровне 1. */
-  processRate: 120 * MONTH_SCALE,
+  processRate: 120 * MONTH_SCALE * INDUSTRY_PRODUCTION_FACTOR,
 };
 
 /** Вокзал: две платформы — главный путь и обгонный, стрелки по краям. */
