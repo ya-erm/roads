@@ -4,6 +4,7 @@ import type { Controller } from '../input/controller';
 import type { Camera } from '../render/camera';
 import { drawHouseArt } from '../render/houseArt';
 import type { HouseForm, TownBuilding } from '../world/entities';
+import { BUILDING_SIZE } from '../world/buildingResize';
 import { FORM_NAMES } from '../world/townForms';
 import { defaultTestBuildingOptions, nextTestBuilding, planTestBuilding, placeTestBuilding, testBuildingBlueprint, TEST_BUILDING_FORMS, type TestBuildingOptions } from './testBuildings';
 
@@ -24,8 +25,8 @@ export function installBuildingTool(host: { game(): Game; enabled(): boolean; co
     <div class="test-building-types">${TEST_BUILDING_FORMS.map((form) => `<button type="button" data-form="${form}"><canvas width="100" height="72" aria-hidden="true"></canvas><span>${FORM_NAMES[form]}</span></button>`).join('')}</div>
     <div class="test-building-settings">
       <label>Вариант<input name="variant" type="number" min="1" max="1000" value="1"></label>
-      <label>Ширина участка<input name="width" type="number" min="28" max="240" step="2"></label>
-      <label>Глубина участка<input name="depth" type="number" min="28" max="200" step="2"></label>
+      <label>Ширина участка<input name="width" type="number" min="${BUILDING_SIZE.width.min}" max="${BUILDING_SIZE.width.max}" step="${BUILDING_SIZE.step}"></label>
+      <label>Глубина участка<input name="depth" type="number" min="${BUILDING_SIZE.depth.min}" max="${BUILDING_SIZE.depth.max}" step="${BUILDING_SIZE.step}"></label>
       <label>Этажи<input name="floors" type="number" min="1" max="25"></label>
       <label data-private>Место машины<select name="parking"><option value="any">Любое</option><option value="garage">Гараж</option><option value="pad">Площадка</option><option value="none">Без места</option></select></label>
       <label data-private>Дом на участке<select name="side"><option value="any">Любая сторона</option><option value="left">Слева</option><option value="right">Справа</option></select></label>
@@ -84,11 +85,12 @@ export function installBuildingTool(host: { game(): Game; enabled(): boolean; co
     }
   });
   palette.addEventListener('change', () => {
-    const numeric = (name: string, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(Number((palette.querySelector(`[name="${name}"]`) as HTMLInputElement).value) || lo)));
+    const numeric = (name: string, lo: number, hi: number, step = 1) => Math.max(lo, Math.min(hi, Math.round((Number((palette.querySelector(`[name="${name}"]`) as HTMLInputElement).value) || lo) / step) * step));
     const value = (name: string) => (palette.querySelector(`[name="${name}"]`) as HTMLInputElement | HTMLSelectElement).value;
     const homeSpaces = numeric('homeSpaces', 1, 3) as 1 | 2 | 3;
     const garageSpaces = Math.min(numeric('garageSpaces', 1, 2), homeSpaces) as 1 | 2;
-    options = { ...options, variant: numeric('variant', 1, 1000), width: numeric('width', 28, 240), depth: numeric('depth', 28, 200), floors: numeric('floors', 1, 25), bays: numeric('bays', 2, 6), parking: value('parking') as TestBuildingOptions['parking'], side: value('side') as TestBuildingOptions['side'], homeSpaces, garageSpaces, color: value('color'), roof: value('roof') };
+    const { width, depth, step } = BUILDING_SIZE;
+    options = { ...options, variant: numeric('variant', 1, 1000), width: numeric('width', width.min, width.max, step), depth: numeric('depth', depth.min, depth.max, step), floors: numeric('floors', 1, 25), bays: numeric('bays', 2, 6), parking: value('parking') as TestBuildingOptions['parking'], side: value('side') as TestBuildingOptions['side'], homeSpaces, garageSpaces, color: value('color'), roof: value('roof') };
     syncFields(); createBlueprint(); update();
   });
   palette.addEventListener('keydown', (e) => e.stopPropagation());
@@ -103,11 +105,16 @@ export function installBuildingTool(host: { game(): Game; enabled(): boolean; co
   }, { capture: true });
   for (const type of ['pointerdown', 'pointerup'] as const) host.canvas.addEventListener(type, (e) => {
     if (!open || !host.enabled() || e.button !== 0) return;
+    const at = host.camera.toWorld(e.clientX, e.clientY);
+    if (type === 'pointerdown' && host.game().structureAt(at)?.type === 'building') {
+      setOpen(false);
+      return;
+    }
     e.preventDefault(); e.stopImmediatePropagation();
     if (type === 'pointerup') return;
     if (blueprintGame !== host.game()) createBlueprint();
     if (!blueprint) return;
-    const plan = planTestBuilding(host.game(), blueprint, host.camera.toWorld(e.clientX, e.clientY));
+    const plan = planTestBuilding(host.game(), blueprint, at);
     const placed = placeTestBuilding(host.game(), plan);
     if (placed) { host.controller.select({ type: 'building', id: placed.id }); createBlueprint(); message = `${FORM_NAMES[options.form]} добавлен`; }
     else message = plan.label;

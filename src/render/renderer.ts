@@ -205,6 +205,12 @@ export interface ToolOverlay {
   ghosts?: { building?: TownBuilding; park?: TownPark; ok: boolean }[] | null;
   /** Ручка поворота ↺ (world/moveTurn.ts): где она, вокруг какой точки, тянут ли её сейчас. */
   turnHandle?: { pos: Vec; pivot: Vec; active: boolean } | null;
+  buildingResize?: {
+    corners: { pos: Vec; edge: 'front' | 'back'; side: -1 | 1 }[];
+    active?: { edge: 'front' | 'back'; side: -1 | 1 };
+    preview?: { fp: Footprint; ok: boolean };
+    cursor?: string;
+  };
   /** Подпись у курсора: ok — тёмная, иначе красный отказ; warn — жёлтая (можно, но с оговоркой: проект дороже денег). */
   label: { text: string; ok: boolean; warn?: boolean } | null;
   heatmap: boolean;
@@ -4884,6 +4890,27 @@ export class Renderer {
     ctx.restore();
   }
 
+  private drawBuildingResize(overlay: NonNullable<ToolOverlay['buildingResize']>): void {
+    const ctx = this.ctx;
+    const z = this.camera.zoom;
+    const preview = overlay.preview;
+    const stroke = preview && !preview.ok ? '#e8483f' : preview ? '#2d9e60' : '#2f80ed';
+    ctx.save();
+    if (preview) this.drawFootprint(preview.fp, preview.ok ? 'rgba(45,158,96,0.18)' : 'rgba(232,72,63,0.25)', stroke, 2.5 / z);
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2 / z;
+    for (const corner of overlay.corners) {
+      const active = overlay.active?.side === corner.side && overlay.active.edge === corner.edge;
+      const size = (corner.edge === 'front' ? HANDLE_PX - 1.5 : HANDLE_PX) / z;
+      ctx.fillStyle = active ? stroke : '#fff';
+      ctx.beginPath();
+      ctx.roundRect(corner.pos.x - size, corner.pos.y - size, size * 2, size * 2, 1.5 / z);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   /** Площадка-стоянка: прежнее место (перенос) пунктиром, новое — с местами и воротами, ручки углов и поворота. */
   private drawLotOverlay(o: LotOverlay): void {
     const ctx = this.ctx;
@@ -4920,6 +4947,8 @@ export class Renderer {
   }
 
   private drawOverlay(game: Game, o: ToolOverlay): void {
+    const cursor = o.buildingResize?.cursor ?? '';
+    if (this.canvas.style.cursor !== cursor) this.canvas.style.cursor = cursor;
     const ctx = this.ctx;
     for (const t of o.parkingTargets ?? []) {
       ctx.save();
@@ -5081,10 +5110,11 @@ export class Renderer {
       ctx.globalAlpha = 1;
     }
     if (o.ghosts?.length) this.drawGhosts(o.ghosts, BIOMES[game.terrain.biome].palette.trees);
-    if (o.selection?.type === 'building') {
+    if (o.selection?.type === 'building' && !o.buildingResize?.preview) {
       const b = game.buildingById(o.selection.id);
-      if (b) this.drawFootprint({ ...b.fp, w: b.fp.w + 6, h: b.fp.h + 6 }, 'rgba(47,128,237,0.12)', '#2f80ed', 2.5 / this.camera.zoom);
+      if (b) this.drawFootprint(b.fp, 'rgba(47,128,237,0.12)', '#2f80ed', 2.5 / this.camera.zoom);
     }
+    if (o.buildingResize) this.drawBuildingResize(o.buildingResize);
     if (o.selection?.type === 'park') {
       // Парк — тот же контур, что у выбранного здания, но заливка слабее: зелень под ней видна.
       const fp = game.parkById(o.selection.id)?.fp;

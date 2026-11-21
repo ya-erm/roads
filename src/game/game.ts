@@ -73,7 +73,8 @@ import {
 } from '../world/worldgen';
 import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placeParks, plazaAttached, plazaBy } from '../world/townParks';
 import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
-import { planStreetHouses, type HouseMove, type StreetPart } from '../world/streetHouses';
+import { buildingFrontage, planStreetHouses, type HouseMove, type StreetPart } from '../world/streetHouses';
+import { resizeBuildingFootprint, type BuildingCorner } from '../world/buildingResize';
 import { streetBase, turnableBuilding, turnReach, wrapTurn } from '../world/moveTurn';
 import { type ParkEntry, ParkIndex } from '../world/parkPick';
 import { edgeOf, FORM_NAMES, formOf, jobsOf, residentsOf, SETTLE_RULE, townTier, yardOf, zoneTown } from '../world/townForms';
@@ -3301,6 +3302,67 @@ export class Game implements BuildContext {
     return true;
   }
 
+  /** Размер участка по протяжке угла. Фасад остаётся у прежней улицы. */
+  buildingResizePlan(b: TownBuilding, corner: BuildingCorner, delta: Vec): { fp: Footprint; reason?: string } {
+    const fp = resizeBuildingFootprint(b, corner, delta);
+    if (fp.w === b.fp.w && fp.h === b.fp.h) return { fp };
+    const fail = (reason: string) => ({ fp, reason });
+    const net = this.roads.net;
+    const probe = { ...b, fp, form: formOf(b) };
+    const frontage = buildingFrontage(net, b);
+    if (frontage && buildingFrontage(net, probe)?.street !== frontage.street) return fail('Фасад должен остаться у той же улицы');
+    const yard = yardOf(b);
+    const lot = { ...fp, w: fp.w + yard * 2, h: fp.h + yard * 2 };
+    if (!lotClearOfRoads(net, lot, WALK_EDGE)) return fail('Мешает дорога или тротуар');
+    if (!placeable(this.worldContext(), lot, frontage?.street.id ?? this.streetNear(b.fp.center, b.fp.h / 2 + 60)?.seg.id ?? -1, (item) => item === b))
+      return fail('На участке мало места');
+    if (this.lotUnder(lot)) return fail('Мешает площадка');
+    const { plaza } = this.buildingMove(b);
+    if (this.parkUnder(lot, plaza) || (plaza && footprintsOverlap(fp, plaza.fp))) return fail('Мешает парк или площадь');
+    if (this.docks.occupied(b.id)) return fail('Дождитесь освобождения грузовой площадки');
+    const lines = b.kind === 'com' ? this.buildingLines(b.id) : [];
+    if (lines.length && !this.docks.reachable(probe, 12)) return fail('На участке мало места для грузового подъезда');
+    for (const line of lines) for (const id of line.vehicles) {
+      const v = this.fleet.get(id);
+      const model = v && MODELS[v.model];
+      if (model?.mode === 'road' && !this.docks.reachable(probe, model.spec.length, model.spec.width))
+        return fail('На участке мало места для грузовика маршрута');
+    }
+    return { fp };
+  }
+
+  /** Применяет размер к действующему зданию и сохраняет прежний участок для Ctrl+Z. */
+  editBuildingSize(id: number, initial: Footprint, corner: BuildingCorner, delta: Vec): string | null {
+    const b = this.buildingById(id);
+    const town = b && this.townOf(b);
+    if (!b || !town || b.fp !== initial) return 'Участок изменился. Выберите угол снова';
+    const { fp, reason } = this.buildingResizePlan(b, corner, delta);
+    if (reason) return reason;
+    if (fp.w === b.fp.w && fp.h === b.fp.h) return null;
+    this.checkpoint('размер участка');
+    this.index.remove(b);
+    b.form = formOf(b);
+    b.fp = fp;
+    b.anchor = anchorFor(this.roads.net, fp.center);
+    this.index.add(b);
+    town.buildings = [...town.buildings];
+    town.extent = townExtent(town);
+    this.layoutRev++;
+    this.townRev++;
+    for (const st of this.stations.values()) if (st.dock?.b === id) {
+      this.refreshDock(st);
+      for (const line of this.stationLines(st.id)) for (const vId of line.vehicles) {
+        const v = this.fleet.get(vId);
+        const sim = v && this.fleetSim(v);
+        if (sim && v.state === 'driving' && line.stops[v.stop] === st.id) this.dockApproach(sim, v, st);
+      }
+    }
+    this.refreshCatchmentsNear(initial.center);
+    this.refreshCatchmentsNear(fp.center);
+    this.commit();
+    return null;
+  }
+
   /** Участок f задевает парк какого-нибудь города (кроме skip): с запасом 2 м. */
   private parkUnder(f: Footprint, skip: TownPark | null): boolean {
     const r = footprintRadius(f);
@@ -4886,7 +4948,10 @@ export class Game implements BuildContext {
       top.stations.length !== this.stations.size ||
       top.buildings.some((b) => {
         const now = this.towns.find((t) => t.id === b.townId)?.buildings;
-        return now?.length !== b.list.length || b.list.some((old, i) => old.dockApproach !== now?.[i]?.dockApproach);
+        return now?.length !== b.list.length || b.list.some((old, i) => {
+          const current = now?.[i];
+          return old.dockApproach !== current?.dockApproach || old.fp.w !== current?.fp.w || old.fp.h !== current?.fp.h;
+        });
       }) ||
       top.moneyBefore !== this.money ||
       top.terraform !== this.terrain.edits.length ||

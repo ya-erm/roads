@@ -29,6 +29,7 @@ import { altitudeText } from '../render/relief';
 import { HANDLE_PX, laneMarkRadius, type Selection, type ToolOverlay, walkSignSize, type WalkToggle } from '../render/renderer';
 import { badgeAt, projectBadges } from '../render/projectBadges';
 import { type StationServes, stationTitle, type TownBuilding } from '../world/entities';
+import { BUILDING_SIZE, buildingCornerAt, buildingCorners, buildingResizeCursor, type BuildingCorner } from '../world/buildingResize';
 import type { RoadNode } from '../world/network';
 import {
   capLimit,
@@ -71,7 +72,7 @@ import type { CargoType, IndustryKind } from '../world/cargo';
 import { industryPlanText, industryRemoveText } from '../ui/enterpriseUi';
 import { MODELS, type ModelId } from '../game/transport';
 import type { VehicleSpec } from '../sim/vehicle';
-import { footprintRadius } from '../world/spatial';
+import { footprintRadius, type Footprint } from '../world/spatial';
 import { BUY_DOT_PX, dropSpots, pickDropStop } from './buyDrop';
 import { lotDragPlan, lotGateHit, lotHandleAt, lotOverlay, type LotToolState } from './lotTool';
 import type { LotRows } from '../world/parkingLots';
@@ -133,7 +134,7 @@ export type Action = Exclude<Tool, 'rail'> | 'upgrade' | 'move' | 'signal' | 'te
  * Что ждёт клика на карте (Esc — отмена), одно за раз:
  * - moveBuilding, movePark, moveStation, moveBase, moveLot — переносят здание, парк (сквер, площадь), станцию (ж/д —
  *   станет конечной или проходной, terminal; null — какой была), строительную базу, площадку-стоянку: за курсором до клика;
- * - lotHandle — тянут ручку угла (размер) или поворота выбранной площадки;
+ * - lotHandle — тянут ручку угла (размер) или поворота выбранной площадки, buildingResize — угол участка здания;
  * - turn — тянут ручку поворота ↺ выбранной ратуши (храма) или парка: вокруг середины pivot, ручка — на стороне side
  *   рисунка, base — угол без поворота у улицы; отпустили — поворот на месте (Ctrl+Z);
  * - warehouse, annex — ставим склад станции, пристройку предприятия: клик в зоне вокруг них;
@@ -146,6 +147,7 @@ export type Pending =
   | { kind: 'moveStation'; id: number; terminal: boolean | null }
   | { kind: 'moveBase'; id: number }
   | { kind: 'moveLot'; id: number }
+  | { kind: 'buildingResize'; id: number; initial: Footprint; corner: BuildingCorner; start: Vec }
   | { kind: 'lotHandle'; id: number; handle: 'corner' | 'rotate'; side: -1 | 1 }
   | { kind: 'turn'; target: 'park' | 'building'; id: number; pivot: Vec; base: number; side: 1 | -1 }
   | { kind: 'warehouse'; id: number }
@@ -2019,6 +2021,15 @@ export class Controller {
         return;
       }
     }
+    if (this.action === 'select' && this.selection?.type === 'building' && !this.pending) {
+      const b = g.buildingById(this.selection.id);
+      const corner = b && buildingCornerAt(buildingCorners(b), p, (HANDLE_PX + 4) / this.camera.zoom);
+      if (b && corner) {
+        this.pending = { kind: 'buildingResize', id: b.id, initial: b.fp, corner, start: p };
+        this.onChange();
+        return;
+      }
+    }
     // Выбранная ратуша (храм) или парк: ручка поворота ↺ — тянуть (отпустили — поворот на месте, Ctrl+Z).
     const turn = this.turnTarget();
     if (turn && dist(p, turn.pos) <= (HANDLE_PX + 4) / this.camera.zoom) {
@@ -2730,7 +2741,7 @@ export class Controller {
 
   private finishLeft(e: MouseEvent, left: { sx: number; sy: number; createdChain: boolean }): void {
     const drag = this.pending;
-    if (drag?.kind === 'turn' || drag?.kind === 'lotHandle') {
+    if (drag?.kind === 'turn' || drag?.kind === 'lotHandle' || drag?.kind === 'buildingResize') {
       this.pending = null;
       const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > CLICK_SLOP;
       // Отпустили ручку поворота: ратуша (с площадью) или парк — на том же месте с новым поворотом, одним шагом Ctrl+Z.
@@ -2739,6 +2750,10 @@ export class Controller {
       if (moved && drag.kind === 'lotHandle') {
         const plan = lotDragPlan(this.game(), { id: drag.id, kind: drag.handle, side: drag.side }, this.worldAt(e));
         const problem = this.game().editLot(drag.id, plan, drag.handle === 'rotate' ? 'поворот площадки' : 'размер площадки');
+        if (problem) this.showError(problem);
+      }
+      if (drag.kind === 'buildingResize') {
+        const problem = this.game().editBuildingSize(drag.id, drag.initial, drag.corner, sub(this.worldAt(e), drag.start));
         if (problem) this.showError(problem);
       }
       this.onChange();
@@ -3777,6 +3792,27 @@ export class Controller {
       return o;
     }
     if (lot.label) o.label = lot.label;
+    const resize = this.pendingOf('buildingResize');
+    if (this.action === 'select' && this.selection?.type === 'building' && (!this.pending || resize)) {
+      const b = g.buildingById(this.selection.id);
+      if (b) {
+        if (resize && p && b.fp === resize.initial) {
+          const { fp, reason } = this.memo('building-resize', () => g.buildingResizePlan(b, resize.corner, sub(p, resize.start)));
+          o.buildingResize = { corners: buildingCorners({ ...b, fp }), active: resize.corner, preview: { fp, ok: !reason }, cursor: buildingResizeCursor(b, resize.corner) };
+          const size = `${Number(fp.w.toFixed(1))} × ${Number(fp.h.toFixed(1))} м`;
+          o.label = { text: reason ? `${size} · ${reason}` : size, ok: !reason };
+          return o;
+        }
+        const corners = buildingCorners(b);
+        const active = p ? buildingCornerAt(corners, p, (HANDLE_PX + 4) / this.camera.zoom) : undefined;
+        o.buildingResize = { corners, active, cursor: active && buildingResizeCursor(b, active) };
+        if (active) {
+          const axes = active.edge === 'front' ? 'Ширина участка' : 'Ширина и глубина участка';
+          o.label = flash ? { text: flash, ok: false } : { text: `${axes} · шаг ${BUILDING_SIZE.step} м`, ok: true };
+          return o;
+        }
+      }
+    }
     // Выбранная ратуша (храм) или парк — ручка поворота ↺ видна и без курсора над картой (тянут — turnOverlay).
     const turnSel = this.turnTarget();
     if (turnSel) o.turnHandle = { pos: turnSel.pos, pivot: turnSel.pivot, active: false };

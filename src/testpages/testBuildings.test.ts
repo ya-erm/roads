@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { dist, sub } from '../core/vec';
 import { Game } from '../game/game';
 import { road, withoutCitizens } from '../game/testkit';
 import { carSpot } from '../game/garages';
-import { CAR_SIZE, cottagePlan, dachaPlan, drivewayOf } from '../world/houseAccess';
+import { BUILDING_SIZE, buildingCorners, resizeBuildingFootprint } from '../world/buildingResize';
+import { CAR_SIZE, cottagePlan, dachaPlan, drivewayOf, lotFrame } from '../world/houseAccess';
 import { FORM_NAMES, formOf } from '../world/townForms';
 import { defaultTestBuildingOptions, matchesTestBuilding, nextTestBuilding, planTestBuilding, placeTestBuilding, TEST_BUILDING_FORMS } from './testBuildings';
 
@@ -100,5 +102,51 @@ describe('Тестовый инструмент зданий', { timeout: 60_000
     }
     const cramped = { ...defaultTestBuildingOptions('cottage'), width: 28, depth: 28, homeSpaces: 3 as const, garageSpaces: 2 as const, parking: 'garage' as const };
     expect(nextTestBuilding(game, cramped)).toBeNull();
+  });
+
+  it('дальние углы меняют ширину и глубину шагом 2 м, оставляя фасад и противоположную границу на месте', () => {
+    for (const face of [-1, 1] as const) {
+      const b = { fp: { center: { x: 100, y: 200 }, w: 43.5, h: 50, angle: Math.PI / 3 }, face };
+      const at = lotFrame(b);
+      for (const corner of buildingCorners(b)) {
+        const fp = resizeBuildingFootprint(b, corner, sub(at(corner.side * 7.2, 11.2), b.fp.center));
+        const sized = lotFrame({ fp, face });
+        expect(fp.w).toBe(b.fp.w + BUILDING_SIZE.step * 4);
+        expect(fp.h).toBe(b.fp.h + (corner.edge === 'back' ? BUILDING_SIZE.step * 6 : 0));
+        expect(dist(sized(-corner.side * fp.w / 2, -fp.h / 2), at(-corner.side * b.fp.w / 2, -b.fp.h / 2))).toBeLessThan(1e-8);
+      }
+    }
+  });
+
+  it('изменение магазина сохраняется и отменяется, а свободный участок не перестраивает соседей', () => {
+    const game = scene();
+    const make = (x: number) => placeTestBuilding(game, planTestBuilding(game, nextTestBuilding(game, defaultTestBuildingOptions('shop'))!, { x, y: 1500 }))!;
+    const shop = make(1600);
+    const neighbor = make(1700);
+    expect(shop).toBeTruthy();
+    expect(neighbor).toBeTruthy();
+    const initial = shop.fp;
+    const neighborFp = neighbor.fp;
+    const corner = buildingCorners(shop).find((c) => c.side === 1 && c.edge === 'back')!;
+    const blocked = game.buildingResizePlan(shop, corner, { x: 60, y: 4 });
+    expect(blocked.reason).toBeTruthy();
+    expect(game.editBuildingSize(shop.id, initial, corner, { x: 60, y: 4 })).toBe(blocked.reason);
+    expect(shop.fp).toBe(initial);
+    expect(game.canUndo).toBe(false);
+    const price = game.money;
+    const delta = { x: 13, y: 17 };
+    const { fp, reason } = game.buildingResizePlan(shop, corner, delta);
+    expect(reason).toBeUndefined();
+    expect(game.editBuildingSize(shop.id, initial, corner, delta)).toBeNull();
+    expect(shop.fp).toEqual(fp);
+    expect(game.buildingById(neighbor.id)?.fp).toBe(neighborFp);
+    expect(game.money).toBe(price);
+    expect(game.structureAt({ x: initial.center.x, y: initial.center.y + initial.h / 2 + 8 })).toBe(shop);
+    const loaded = new Game(game.settings, game.toSave());
+    expect(loaded.buildingById(shop.id)?.fp).toEqual(fp);
+    expect(game.undo()).toBe('размер участка');
+    expect(game.buildingById(shop.id)?.fp).toEqual(initial);
+    expect(game.redo()).toBe('размер участка');
+    expect(game.buildingById(shop.id)?.fp).toEqual(fp);
   });
 });

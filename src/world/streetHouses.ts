@@ -22,7 +22,7 @@ export interface HouseMove {
   face: 1 | -1;
 }
 
-function frontage(net: LaneNet, b: TownBuilding) {
+export function buildingFrontage(net: LaneNet, b: TownBuilding) {
   const axis = { x: Math.cos(b.fp.angle), y: Math.sin(b.fp.angle) };
   const away = scale(rightNormal(axis), -(b.face ?? streetFace(net, b.fp)));
   const front = add(b.fp.center, scale(away, -b.fp.h / 2));
@@ -72,7 +72,7 @@ export function planStreetHouses(
     }
   }
   const eligible = [...candidates].flatMap((b) => {
-    const own = frontage(before, b);
+    const own = buildingFrontage(before, b);
     if (!own) return [];
     const streetParts = byStreet.get(own.street.id);
     const part = streetParts?.find(({ from, to }) => own.t >= from && own.t <= to);
