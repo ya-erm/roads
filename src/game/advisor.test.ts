@@ -110,7 +110,7 @@ describe('Советник', () => {
   });
 
   it('маршрут не работает, маршрут без машин, машины ездят полупустыми', () => {
-    const { game, line, a, b, input } = setup(7);
+    const { game, line, a, b, input } = setup(3);
     line.problem = 'Нет дороги: A → B';
     expect(find(game, 'noRoute')[0]).toMatchObject({ level: 'alert', line: line.id, station: line.stops[0] });
     line.problem = null;

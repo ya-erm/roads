@@ -6,7 +6,7 @@ import { hospitalPlan } from '../world/yardLots';
 import { Game } from './game';
 import type { Garages } from './garages';
 import type { DepotCar } from './serviceDepots';
-import { freshGame, HIGHWAY, road, runUntil } from './testkit';
+import { connectNodes, freshGame, HIGHWAY, runUntil, townStreets } from './testkit';
 
 /** Партия без поездок жителей (выезды служб идут): машин жителей нет — симуляция быстрая. */
 function quiet(game: Game): Game {
@@ -185,10 +185,18 @@ describe('Стоянка скорых у больницы', { timeout: 120_000 }
     // В начале партии города не связаны: ни от одной больницы не доехать — станции нет.
     expect(game.depots.dispatch('ambulance', villages[0], homeOf(villages[0]), true)).toBe('none');
     // Село, которое шоссе связали с городом ближней больницы.
+    const net = game.roads.net;
+    const endsToward = (town: Town, toward: Vec) =>
+      [...new Set(townStreets(game, town.id).flatMap((c) => [c.a, c.b]))]
+        .map((id) => net.node(id))
+        .filter((n) => n.corridors.length === 1)
+        .sort((a, b) => dist(a.pos, toward) - dist(b.pos, toward))
+        .slice(0, 4);
     const village = villages.find((v) => {
       const to = homeOf(v);
-      const h = [...hospitals(game)].sort((x, y) => dist(x.b.fp.center, to.fp.center) - dist(y.b.fp.center, to.fp.center))[0];
-      return road(game, to.anchor, h.b.anchor, HIGHWAY);
+      const near = hospitals(game).sort((x, y) => dist(x.b.fp.center, to.fp.center) - dist(y.b.fp.center, to.fp.center));
+      return near.some(({ town, b }) => endsToward(v, b.fp.center).some((a) =>
+        endsToward(town, a.pos).some((z) => connectNodes(game, a, z, HIGHWAY) && !!game.roads.route(b.anchor, to.anchor))));
     })!;
     expect(village).toBeTruthy();
     const to = homeOf(village);

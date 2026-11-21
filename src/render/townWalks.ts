@@ -107,7 +107,7 @@ const LIP = 0.4;
  * поставлен дальше тротуара); у кромки — раструб и понижение бордюра (mouth — поверх полотна, его бордюр закрыт
  * асфальтом съезда: машина выезжает на улицу по съезду, а не из-под бордюра).
  */
-function driveTo(f: Footprint, x: number, w: number, edge: number, side: 1 | -1, color: string, roads: WalkRoads, matchRoad = false): TownWalks['drives'][number] & { roadColor?: string } {
+function driveTo(f: Footprint, x: number, w: number, edge: number, side: 1 | -1, color: string, roads: WalkRoads): TownWalks['drives'][number] & { roadColor?: string } {
   const [ex, ey] = toWorld(f, x, edge);
   const end = { x: ex, y: ey };
   const gap = roads.gap(end);
@@ -128,7 +128,7 @@ function driveTo(f: Footprint, x: number, w: number, edge: number, side: 1 | -1,
     [x - fw, road + side * UNDER],
     [x - hw, flare],
   ]);
-  const roadColor = connected && matchRoad ? (asphalt ? ROAD_ASPHALT : ROAD_DIRT) : undefined;
+  const roadColor = connected ? (asphalt ? ROAD_ASPHALT : ROAD_DIRT) : undefined;
   const drive: TownWalks['drives'][number] & { roadColor?: string } = { pts, color: roadColor ?? color, roadColor };
   if (near && asphalt) {
     drive.mouth = at([
@@ -155,7 +155,7 @@ function accessOf(b: TownBuilding, reach: number, fronts: TownWalks['fronts'], d
       fronts.push({ pts: [...toWorld(f, a.x, edge), ...toWorld(f, a.x, edge + a.side * reach)], w: a.w });
       continue;
     }
-    const drive = driveTo(f, a.x, a.w, edge, a.side, a.color, roads, true);
+    const drive = driveTo(f, a.x, a.w, edge, a.side, a.color, roads);
     drives.push(drive);
     if (drive.roadColor) colors.push({ x: a.x, side: a.side, color: drive.roadColor });
   }

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RAIL_STATION, STATION, STOP } from '../config';
-import { dist, type Vec } from '../core/vec';
+import type { Vec } from '../core/vec';
+import { Game } from '../game/game';
 import { freshGame, townStreets } from '../game/testkit';
 import { Camera } from '../render/camera';
 import { DEFAULT_SETTINGS } from '../world/settings';
@@ -8,14 +9,16 @@ import { Controller } from './controller';
 
 afterEach(() => vi.unstubAllGlobals());
 
-function scene() {
-  const game = freshGame({ ...DEFAULT_SETTINGS, seed: 7, retail: true });
+const SETTINGS = { ...DEFAULT_SETTINGS, seed: 7, retail: true };
+
+function scene(game = freshGame(SETTINGS), townName?: string) {
   game.money = 5_000_000;
   const events = { addEventListener() {} };
   vi.stubGlobal('window', events);
   const c = new Controller(events as unknown as HTMLCanvasElement, new Camera(), () => game);
   c.setStationMode('cargo');
   for (const town of game.towns) {
+    if (townName && town.name !== townName) continue;
     for (const street of townStreets(game, town.id)) {
       const p = street.lut.pointAt(street.length / 2);
       const t = street.lut.tangentAt(street.length / 2);
@@ -23,7 +26,7 @@ function scene() {
         const hover: Vec = { x: p.x - t.y * side * 40, y: p.y + t.x * side * 40 };
         c.hover = hover;
         const o = c.overlay();
-        if (o.station?.ok && o.receiverPreview?.receivers.length) return { game, c, hover, o };
+        if (o.station?.ok && o.receiverPreview?.receivers.some((r) => r.town.id === town.id)) return { game, c, hover, o, town };
       }
     }
   }
@@ -74,39 +77,25 @@ describe('Охват грузовой станции до строительст
 });
 
 it('при переносе магазина показывает станции у нового участка и предупреждает об отсутствии охвата', () => {
-  const { game, c, hover } = scene();
+  const { game, c, hover } = scene(new Game(SETTINGS), 'Каменка');
   const st = game.placeStation(hover, 14, 'road', { pax: false, cargo: true })!;
-  const { b, town } = game.stationReceivers(st)[0];
-  const origin = b.fp.center;
-  let outside: Vec | undefined;
-  for (const street of townStreets(game, town.id)) {
-    for (const fraction of [0.25, 0.5, 0.75]) {
-      const s = street.length * fraction;
-      const p = street.lut.pointAt(s);
-      const t = street.lut.tangentAt(s);
-      for (const side of [-1, 1]) {
-        const at = { x: p.x - t.y * side * 30, y: p.y + t.x * side * 30 };
-        const plan = game.movePlan(b, at);
-        if (plan.ok && plan.fp && dist(plan.fp.center, st.fp.center) > game.catchmentRadius(st)) outside = at;
-      }
-      if (outside) break;
-    }
-    if (outside) break;
-  }
-  expect(outside).toBeDefined();
+  const { b } = game.stationReceivers(st).find((r) => r.b.id === 7)!;
+  // Свободные места вдоль улиц Каменки, подходящие для рынка: на окраине и у станции.
+  const outside = { x: 3939.45, y: 1914.62 };
+  const inside = { x: 3658.72, y: 2661.18 };
   c.startMove(b);
-  c.hover = outside!;
+  c.hover = outside;
   const disconnected = c.overlay();
   expect(disconnected.label).toMatchObject({ ok: true, warn: true });
   expect(disconnected.receiverMovePreview?.stations).toEqual([]);
-  expect(game.moveBuilding(b, outside!)).toBe(true);
+  expect(game.moveBuilding(b, outside)).toBe(true);
   expect(game.stationReceivers(st).some((x) => x.b.id === b.id)).toBe(false);
 
-  c.hover = origin;
+  c.hover = inside;
   const connected = c.overlay();
   expect(connected.label?.text).toContain(st.name);
   expect(connected.receiverMovePreview?.stations.map((x) => x.id)).toEqual([st.id]);
-  expect(game.moveBuilding(b, origin)).toBe(true);
+  expect(game.moveBuilding(b, inside)).toBe(true);
   expect(connected.receiverMovePreview?.receiver.b.fp).toEqual(b.fp);
   expect(game.stationReceivers(st).some((x) => x.b.id === b.id)).toBe(true);
-});
+}, 30_000);

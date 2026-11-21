@@ -240,8 +240,10 @@ describe('Получатели грузов, этап 3', { timeout: 240_000 }, 
 
   it('рост тянется к снабжённым магазинам: у пустого 2 месяца (в снабжаемом городе) дома не прибавляются', () => {
     const game = freshGame(RETAIL_WORLD);
-    const town = game.towns.filter((t) => (t.receivers ?? []).filter((r) => !r.depot).length >= 4).sort((a, b) => b.population - a.population)[0];
+    // В Белогорье есть свободные участки вне зон, которые блокируют пустые магазины.
+    const town = game.towns.find((t) => t.name === 'Белогорье')!;
     const list = town.receivers!.filter((r) => !r.depot);
+    expect(list.length).toBeGreaterThanOrEqual(4);
     const pos = (id: number) => town.buildings.find((b) => b.id === id)!.fp.center;
     // Один снабжён (груз на складе), остальные пусты два месяца; город уже снабжают.
     const [fed, ...dry] = list;

@@ -30,12 +30,13 @@ function freeSpot(game: Game, st: Station, d = footprintRadius(st.fp) + 22): Vec
 describe('Склады-здания станции', () => {
   it('ставится в зоне вокруг станции: +мест на складе, деньги списаны, здание на карте', () => {
     const { game, st } = setup();
+    const capacity = game.stationStorage(st);
     const money = game.money;
     const p = freeSpot(game, st);
     expect(game.buildWarehouse(st.id, p)).toBeNull();
     expect(st.warehouses).toHaveLength(1);
     expect(storageSlots(st)).toBe(1);
-    expect(game.stationStorage(st)).toBe(STORAGE.base + STORAGE.per);
+    expect(game.stationStorage(st)).toBe(capacity + STORAGE.per);
     expect(game.money).toBe(money - STORAGE.cost);
     // Здание — в пространственном индексе: его видно под курсором, по оси станции.
     const w = game.structureAt(p);
@@ -66,17 +67,18 @@ describe('Склады-здания станции', () => {
 
   it('снос: часть цены вернётся, места меньше; груз не помещается на меньший склад — нельзя', () => {
     const { game, st } = setup();
+    const capacity = game.stationStorage(st);
     const p = freeSpot(game, st);
     game.buildWarehouse(st.id, p);
     const w = st.warehouses![0];
-    st.cargo.grain = STORAGE.base + 20;
+    st.cargo.grain = capacity + 20;
     expect(game.removeWarehouse(w)).toMatch(/не поместится/);
     st.cargo = {};
     const money = game.money;
     expect(game.removeWarehouse(w)).toBeNull();
     expect(game.money).toBe(money + Math.round(STORAGE.cost * COST.refundRatio));
     expect(st.warehouses).toEqual([]);
-    expect(game.stationStorage(st)).toBe(STORAGE.base);
+    expect(game.stationStorage(st)).toBe(capacity);
     expect(game.structureAt(p)?.type).not.toBe('warehouse');
   });
 
@@ -94,13 +96,14 @@ describe('Склады-здания станции', () => {
 
   it('сохраняется в партии; старое сохранение без складов — та же вместимость', () => {
     const { game, st } = setup();
+    const capacity = game.stationStorage(st);
     const p = freeSpot(game, st);
     game.buildWarehouse(st.id, p);
     const save = JSON.parse(JSON.stringify(game.toSave()));
     const loaded = withoutCitizens(new Game(game.settings, save));
     const ls = loaded.stations.get(st.id)!;
     expect(ls.warehouses).toHaveLength(1);
-    expect(loaded.stationStorage(ls)).toBe(STORAGE.base + STORAGE.per);
+    expect(loaded.stationStorage(ls)).toBe(capacity + STORAGE.per);
     expect(loaded.structureAt(p)).toMatchObject({ type: 'warehouse', stationId: st.id });
     // Старое сохранение: поля нет вовсе, у пристроек — прежняя прибавка.
     const old = JSON.parse(JSON.stringify(game.toSave()));
@@ -109,7 +112,7 @@ describe('Склады-здания станции', () => {
       if (s.id === st.id) s.depots = 1;
     }
     const was = withoutCitizens(new Game(game.settings, old));
-    expect(was.stationStorage(was.stations.get(st.id)!)).toBe(STORAGE.base + STORAGE.per);
+    expect(was.stationStorage(was.stations.get(st.id)!)).toBe(capacity + STORAGE.per);
   });
 
   it('станцию снесли — её склады тоже, и за них возвращается часть цены', () => {

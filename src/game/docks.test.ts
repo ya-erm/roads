@@ -195,7 +195,7 @@ describe('Получатели грузов в партии', { timeout: 240_000
   });
 
   it('линия маршрута между магазинами — без разрывов у узлов станций и по тем связям, по которым едет грузовик', () => {
-    const game = freshGame(RETAIL_WORLD);
+    const game = withoutCitizens(freshGame(RETAIL_WORLD));
     const { a, b, line, v } = shopLine(game);
     const legData = () => (game as unknown as { roadLegData(l: Line): { routes: (number[] | null)[] } }).roadLegData(line);
     const routes = legData().routes;
@@ -211,7 +211,22 @@ describe('Получатели грузов в партии', { timeout: 240_000
       const pts = game.linePolyline(line, i)!;
       const next = game.linePolyline(line, j)!;
       expect(Math.min(...pts.map((p) => dist(p, next[0])))).toBeLessThan(0.5);
-      for (let k = 1; k < pts.length; k++) expect(dist(pts[k - 1], pts[k])).toBeLessThan(12);
+      const graph = game.roads.graph;
+      const movementSegments = new Set<number>();
+      for (let k = 1; k < route.length; k++) {
+        const from = graph.links.get(route[k - 1])!;
+        const to = route[k];
+        const moves = from.lanes.flatMap((lane) => (graph.movesFrom.get(lane.id) ?? []).filter((move) => move.outLink === to));
+        const matched = moves.some((move) => {
+          const start = pts.findIndex((_, i) => move.points.every((p, n) => pts[i + n] && dist(pts[i + n], p) < 0.01));
+          if (start < 0) return false;
+          for (let n = 1; n < move.points.length; n++) movementSegments.add(start + n);
+          return true;
+        });
+        expect(matched).toBe(true);
+      }
+      // У дуги манёвра может быть длинный прямой заход. Его концы уже проверены по геометрии движения.
+      for (let k = 1; k < pts.length; k++) if (!movementSegments.has(k)) expect(dist(pts[k - 1], pts[k])).toBeLessThan(12);
     }
     // Грузовик едет от магазина B к A по связям участка B → A.
     expect(until(game, 400, () => v.stop === 0 && v.state === 'driving' && !!game.fleetSim(v) && !game.docks.inYard(v.id))).toBe(true);

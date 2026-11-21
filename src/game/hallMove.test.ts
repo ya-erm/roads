@@ -33,7 +33,7 @@ function asphaltGap(game: Game, fp: TownBuilding['fp']): number {
 
 /** Прямая улица 600 м в чистом поле (с запада на восток): точка у её середины с юга, в off м от оси. */
 function fieldStreet(game: Game, profile = STREET): { from: Vec; to: Vec; beside: (off: number) => Vec } {
-  const at = fieldSpot(game, 600, 260);
+  const at = fieldSpot(game, 600);
   const from = at;
   const to = add(at, { x: 600, y: 0 });
   expect(road(game, { free: from }, { free: to }, profile)).toBe(true);
@@ -83,7 +83,7 @@ describe('перенос ратуши', () => {
     const { hall, plaza } = hallTown(game);
     // Как в партии из отчёта: ратушу перенесли без площади (до исправления) — площадь далеко от неё.
     const street = fieldStreet(game);
-    const far = street.beside(-400);
+    const far = street.beside(400);
     game.index.remove(hall);
     hall.fp = { ...hall.fp, center: far };
     game.index.add(hall);

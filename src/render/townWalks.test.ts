@@ -4,6 +4,7 @@ import type { Town, TownBuilding } from '../world/entities';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import type { Footprint } from '../world/spatial';
 import { LOT } from '../world/parkingLots';
+import { ROAD_ASPHALT, ROAD_DIRT } from '../world/roadTypes';
 import { curbGap } from '../world/worldgen';
 import { parkGates } from './parkArt';
 import { SIDEWALK, type Sidewalk, WALK_LOOK } from './sidewalks';
@@ -123,6 +124,7 @@ describe('Дорожки кварталов', () => {
     const w = townWalks(t, curb)!;
     const gate = w.drives.find((d) => Math.abs(d.pts[0] - (3 - LOT.gateW / 2)) < 1e-6)!;
     expect(gate).toBeTruthy();
+    expect(gate.color).toBe(ROAD_ASPHALT);
     // От края площадки (y = 4) — до полотна и чуть под него.
     expect(gate.pts[1]).toBeCloseTo(4);
     expect(Math.min(...gate.pts.filter((_, i) => i % 2 === 1))).toBeLessThan(-5);
@@ -140,7 +142,8 @@ describe('Дорожки кварталов', () => {
     // У большой площадки заезд — сама дорога (тупик-выезд): своего съезда нет.
     expect(w.drives.some((d) => d.pts[0] > 60)).toBe(false);
     // Грунтовка — без бордюра: понижения нет.
-    expect(townWalks(t, curb, () => false)!.drives.every((d) => !d.mouth)).toBe(true);
+    const dirt = townWalks(t, curb, () => 'dirt')!;
+    expect(dirt.drives.every((d) => !d.mouth && d.color === ROAD_DIRT)).toBe(true);
   });
 
   it('мир по seed: у входов в парки — дорожки до тротуара; дорожки не уходят на проезжую часть дальше тротуара', { timeout: 30_000 }, () => {

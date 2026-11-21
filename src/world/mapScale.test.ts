@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Rng } from '../core/rng';
 import { dist } from '../core/vec';
 import { Game } from '../game/game';
-import { freshGame, withoutCitizens } from '../game/testkit';
+import { breathe, freshGame, withoutCitizens } from '../game/testkit';
 import { withSeed } from '../ui/newGame';
 import type { Town } from './entities';
 import { areaFactor, DEFAULT_SETTINGS, industryFactor, MAP_SCALE, MAP_SIZES, mapDims, NEW_GAME_SETTINGS, type WorldSettings } from './settings';
@@ -49,7 +49,7 @@ describe('Масштаб карты (WorldSettings.mapScale)', () => {
     expect(withSeed({ ...DEFAULT_SETTINGS, mapScale: 1 }, 77).mapScale).toBe(MAP_SCALE);
   });
 
-  it('между соседними городами — поле: на средней карте край до края соседа в среднем больше 700 м, а не ~100 м', () => {
+  it('между соседними городами — поле: на средней карте край до края соседа в среднем больше 700 м, а не ~100 м', async () => {
     let sumNew = 0;
     let sumOld = 0;
     let n = 0;
@@ -59,10 +59,11 @@ describe('Масштаб карты (WorldSettings.mapScale)', () => {
       sumNew += now.reduce((s, x) => s + x, 0) / now.length;
       sumOld += old.reduce((s, x) => s + x, 0) / old.length;
       n++;
+      await breathe();
     }
     expect(sumNew / n).toBeGreaterThan(700);
     expect(sumNew / n).toBeGreaterThan(sumOld / n + 500);
-  });
+  }, 90_000);
 
   it('старое сохранение открывается на карте прежнего размера, с той же водой; новое — на своей', () => {
     for (const settings of [{ ...DEFAULT_SETTINGS, seed: 4, size: 'small' as const }, { ...NEW_GAME_SETTINGS, seed: 4, size: 'small' as const }]) {

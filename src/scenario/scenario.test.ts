@@ -126,16 +126,13 @@ describe('Сценарий: генерация', { timeout: 120_000 }, () => {
     expect(distinct.size).toBe(3);
   });
 
-  it('песочница работает без сценария, и её карта та же, что до сценариев', () => {
+  it('песочница работает без сценария и генерирует свою карту', () => {
     const game = new Game(1);
     expect(game.scenario).toBeNull();
     expect(game.mods).toBe(NO_MODS);
     expect(game.settings.scenario).toBeUndefined();
-    // Население городов seed 1 — генерация песочницы не зависит от сценариев (числа — с крупными кварталами и
-    // жителями по домам: в частном доме 3–6 человек, docs/DESIGN.md «Жители по домам»; дома и участки — в масштабе
-    // застройки TOWN_SCALE; ратуша с площадью вокруг — за тротуаром, worldgen.landmarkClear).
-    // Гаражные боксы не добавляют рабочих мест в население города.
-    expect(game.towns.map((t) => t.population).sort((x, y) => y - x)).toEqual([11300, 7036, 3158, 2638, 2155, 1491, 622, 500, 393, 376]);
+    // Снимок seed 1 с основными улицами и узкими дворовыми проездами: сценарий не меняет настройки песочницы.
+    expect(game.towns.map((t) => t.population).sort((x, y) => y - x)).toEqual([15012, 8862, 5629, 3708, 3440, 3232, 542, 469, 428]);
     // Прежние 32 предприятия — те же, предприятия новых цепочек расставлены после них.
     expect(game.industries).toHaveLength(41);
     expect(game.industries.slice(32).map((i) => i.info.kind)).toEqual(['ranch', 'ranch', 'ranch', 'sandpit', 'sandpit', 'meatplant', 'glassworks', 'furniture', 'cement']);

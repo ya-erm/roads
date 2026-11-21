@@ -5,7 +5,7 @@ import type { WorldSettings } from '../world/settings';
 import { type BodyLook, type Box, bodyBoxes, boxesOverlap, LOOP, loopPose, planLoop } from './crewLoop';
 import { CREW_UNITS } from './crewLane';
 import type { Game } from './game';
-import { anchorOf, freshGame, road, runUntil, stationAtIndustry, stationExit, STREET, withoutCitizens } from './testkit';
+import { anchorOf, freshGame, road, roadPlan, runUntil, stationAtIndustry, stationExit, STREET, withoutCitizens } from './testkit';
 
 const WORLD: WorldSettings = { seed: 11, size: 'small', towns: 2, industries: 'few', money: 50_000_000, water: 'dry', construction: 'build' };
 
@@ -42,21 +42,34 @@ interface Seen extends BodyLook {
 }
 
 /**
- * Ферма со станцией в чистом поле; готовая улица подходит к выезду станции не до конца — последние 150 м до него
+ * Предприятие со станцией в чистом поле; готовая улица подходит к выезду станции не до конца — последние 150 м до него
  * проект «Со строительством» (короткая улица 1+1 кончается у станции, дальше — только её выезд, тупик у ворот).
  * База бригады — у готовой улицы; на линии со второй станцией три грузовика ждут на постах, пока улицу не достроят.
  */
 function stationScene() {
   const game = withoutCitizens(freshGame(WORLD));
-  const farm = game.industries.find((i) => i.info.kind === 'farm')!;
-  const st = stationAtIndustry(game, farm, { x: farm.fp.center.x, y: farm.fp.center.y - 1000 })!;
-  const exit = stationExit(game, st.nodeId);
-  const away = norm(sub(exit.pos, game.roads.net.node(st.nodeId).pos));
+  const directions = [{ x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 }];
+  const approach = (() => {
+    for (const industry of game.industries) for (const dir of directions) {
+      const st = stationAtIndustry(game, industry, add(industry.fp.center, dir));
+      if (!st) continue;
+      const exit = stationExit(game, st.nodeId);
+      const away = norm(sub(exit.pos, game.roads.net.node(st.nodeId).pos));
+      const near = add(exit.pos, scale(away, 150));
+      const far = add(exit.pos, scale(away, 450));
+      if (roadPlan(game, { free: near }, exit.id, STREET).ok && road(game, { free: far }, { free: near }, STREET)) {
+        return { st, exit, away, near, far };
+      }
+      game.removeStation(st);
+    }
+    throw new Error('нет свободной полосы для подъезда к грузовой станции');
+  })();
+  const { st, exit, away, near, far } = approach;
   const side = rightNormal(away);
-  const near = add(exit.pos, scale(away, 150));
-  const far = add(exit.pos, scale(away, 450));
-  expect(road(game, { free: far }, { free: near }, STREET)).toBe(true);
-  expect(game.buildBase(add(far, scale(side, -40)))).toBeNull();
+  const base = [0, 75, 125].flatMap((back) => [-40, 40].map((off) => add(add(far, scale(away, -back)), scale(side, off))))
+    .find((p) => game.basePlan(p).ok);
+  expect(base).toBeTruthy();
+  expect(game.buildBase(base!)).toBeNull();
   let other = null;
   for (const along of [120, 200, 80, 250]) for (const off of [-40, 40, -60, 60]) other ??= game.placeStation(add(add(near, scale(away, along)), scale(side, off)), 60);
   expect(other).toBeTruthy();

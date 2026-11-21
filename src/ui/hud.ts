@@ -3924,7 +3924,7 @@ export class Hud {
             })
             .join('')}${truckTip}</div>`
         : '';
-      const supplyOpen = this.ui.retailSupplyOpen.has(b.id);
+      const supplyOpen = !!rcv && !rcv.depot && this.ui.retailSupplyOpen.has(b.id);
       const supply = town && rcv && !rcv.depot
         ? `<button class="need retail-supply-toggle" data-action="receiver-supply" data-id="${b.id}" aria-expanded="${supplyOpen}"><b>Снабжение по месяцам</b><span class="caret ${supplyOpen ? '' : 'closed'}">${chevronSvg(10)}</span></button>`
           + (supplyOpen ? rcv.cargo.map((cargo) => {

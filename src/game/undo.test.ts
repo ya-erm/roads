@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { add, scale, Vec } from '../core/vec';
+import { add, dist, scale, Vec } from '../core/vec';
 import { insideRuns } from '../lanes/edit';
 import { Game } from './game';
 import type { RoadPlan } from './roadbuild';
@@ -27,8 +27,11 @@ describe('Снос рамкой', () => {
   it('сносит дороги и дома внутри рамки одним шагом, Ctrl+Z возвращает', () => {
     const game = freshGame(7);
     const town = [...game.towns].sort((a, b) => b.population - a.population)[0];
-    const a = { x: town.center.x - 120, y: town.center.y - 120 };
-    const b = { x: town.center.x + 120, y: town.center.y + 120 };
+    // В центре может быть кольцо или парк. Рамку кладём на ближайший к центру обитаемый квартал у улицы.
+    const center = [...town.buildings].filter((b) => b.kind === 'res' && !b.rear)
+      .sort((a, b) => dist(a.fp.center, town.center) - dist(b.fp.center, town.center))[0].fp.center;
+    const a = { x: center.x - 120, y: center.y - 120 };
+    const b = { x: center.x + 120, y: center.y + 120 };
     const c = game.areaContents(a, b);
     expect(c.corridors.length).toBeGreaterThan(0);
     expect(c.buildings.length).toBeGreaterThan(0);

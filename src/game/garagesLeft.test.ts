@@ -154,7 +154,10 @@ describe('Левый поворот к дому через встречку', { 
       // Встала напротив заезда и ждёт.
       if (m?.phase === 'cross' && stoppedAt < 0) stoppedAt = sim.v;
       if (other && traffic.vehicles.has(other.id)) {
-        worstBrake = Math.max(worstBrake, (prevV - other.v) / SIM_DT);
+        // После проезда заезда встречная машина может штатно затормозить у следующего перекрёстка.
+        if (other.lane === cross.lane.id && !other.onMovement && other.s - other.length <= cross.zone[1]) {
+          worstBrake = Math.max(worstBrake, (prevV - other.v) / SIM_DT);
+        }
         prevV = other.v;
         if (traffic.vehicles.has(sim.id)) for (const o of [other]) if (overlap(sim, o)) overlaps++;
       }
@@ -169,7 +172,7 @@ describe('Левый поворот к дому через встречку', { 
     expect(stoppedAt).toBeLessThan(0.3);
     expect(passedBefore).toBeGreaterThan(0);
     expect(overlaps).toBe(0);
-    // Встречная не тормозила (тормоз IDM — 18 м/с² игры).
+    // Встречной не пришлось резко тормозить у заезда (тормоз IDM — 18 м/с² игры).
     expect(worstBrake).toBeLessThan(3);
     expect(town.garageAway).not.toContain(home.b.id);
   });

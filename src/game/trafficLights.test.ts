@@ -1,17 +1,20 @@
 import { describe, expect, it } from 'vitest';
+import { add } from '../core/vec';
 import { addPhase, movePhase, phaseToggle, removePhase, specOf, toggleTurn, withLeftArrows } from '../lanes/lights';
 import { renameArm } from '../lanes/model';
 import { Game } from './game';
-import { freshGame, withoutCitizens } from './testkit';
+import { freshGame, openSpot, road, withoutCitizens } from './testkit';
 
 /** Перекрёсток на четыре дороги без светофора и кольца — со светофором. */
 function lit() {
   const game = withoutCitizens(freshGame(7));
   game.money = 1_000_000;
-  const net = game.roads.net;
-  const n = [...net.nodes.values()].find(
-    (x) => x.kind === 'junction' && (x.roundabout ?? null) === null && (x.control ?? 'none') === 'none' && net.ends(x).length === 4,
-  )!;
+  // Ровный четырёхсторонний перекрёсток, одинаковый для всех тестов фаз и при любой раскладке городов.
+  const arms = [[{ x: -90, y: 0 }, { x: 90, y: 0 }], [{ x: 0, y: -90 }, { x: 0, y: 90 }]] as const;
+  const center = openSpot(game, arms.map(([a, b]) => [a, b, 16]));
+  for (const [a, b] of arms) expect(road(game, { free: add(center, a) }, { free: add(center, b) })).toBe(true);
+  const n = game.roads.net.nodesNear(center, 1).find((x) => x.kind === 'junction')!;
+  expect(n.corridors).toHaveLength(4);
   expect(game.toggleLights(n.id)).toBe(true);
   const info = () => game.junctionInfo(n.id)!;
   const turn = (fromIdx: number, kind: 'left' | 'straight' | 'right') => {

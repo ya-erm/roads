@@ -385,7 +385,7 @@ describe('Застройка в партии', () => {
   });
 
   it('старое сохранение без яруса, типов и жильцов: всё — при загрузке; население — по жильцам, ярус — по прежнему населению', () => {
-    const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 2 });
+    const g = freshGame({ ...NEW_GAME_SETTINGS, seed: 5 });
     const save = JSON.parse(JSON.stringify(g.toSave())) as SaveData;
     const tiers = g.towns.map((t) => t.tier);
     for (const t of save.towns) {

@@ -93,7 +93,7 @@ export default defineConfig(({ command }) => ({
     // «Timeout calling "onTaskUpdate"» (src/testSetup.ts).
     setupFiles: ['src/testSetup.ts'],
     projects: [
-      { extends: true, test: { name: 'shared', isolate: false, exclude: [...defaultExclude, ...ISOLATED_TESTS] } },
+      { extends: true, test: { name: 'shared', isolate: false, exclude: [...defaultExclude, '**/.claude/**', ...ISOLATED_TESTS] } },
       { extends: true, test: { name: 'isolated', include: ISOLATED_TESTS } },
     ],
   },

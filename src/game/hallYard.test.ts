@@ -7,7 +7,7 @@ import { NEW_GAME_SETTINGS } from '../world/settings';
 import { yardOf } from '../world/townForms';
 import { halfAtS, landmarkClear } from '../world/worldgen';
 import type { Game } from './game';
-import { fieldSpot, freshGame, road, STREET } from './testkit';
+import { breathe, fieldSpot, freshGame, road, STREET } from './testkit';
 
 /**
  * Площадь вокруг ратуши и храма (townForms.yardOf) — за тротуаром, не ближе WALK_EDGE к асфальту полотен и площадок
@@ -40,7 +40,7 @@ function expectClear(game: Game, hall: TownBuilding, what: string): void {
 const halls = (game: Game) => game.towns.flatMap((town) => town.buildings.filter((b) => b.kind === 'landmark').map((hall) => ({ town, hall })));
 
 describe('площадь вокруг ратуши — не на дороге', () => {
-  it('в сгенерированных городах на нескольких seed (со стоянками у бордюра и без)', () => {
+  it('в сгенерированных городах на нескольких seed (со стоянками у бордюра и без)', async () => {
     let all = 0;
     for (const setup of [42, { ...NEW_GAME_SETTINGS, seed: 1 }, { ...NEW_GAME_SETTINGS, seed: 4 }, { ...NEW_GAME_SETTINGS, seed: 5 }]) {
       const game = freshGame(setup);
@@ -48,15 +48,16 @@ describe('площадь вокруг ратуши — не на дороге', 
         expectClear(game, hall, `${JSON.stringify(setup)}: ${town.name}`);
         all++;
       }
+      await breathe();
     }
     expect(all).toBeGreaterThan(25);
-  });
+  }, 90_000);
 
   it('после переноса и поворота', () => {
     const game = freshGame(42);
     game.money = 10_000_000;
     const { hall } = halls(game).sort((a, b) => b.town.population - a.town.population)[0];
-    const at = fieldSpot(game, 600, 260);
+    const at = fieldSpot(game, 600);
     expect(road(game, { free: at }, { free: add(at, { x: 600, y: 0 }) }, STREET)).toBe(true);
     const beside = (off: number): Vec => add(at, { x: 300, y: off });
     expect(game.moveBuilding(hall, beside(60))).toBe(true);

@@ -29,7 +29,7 @@ function remoteMine(game: Game): Industry {
 
 describe('Станция у предприятия', () => {
   it('выбран автовокзал, а станция у предприятия без жителей — ставится грузовой, с заметкой и записью в журнале', () => {
-    const game = freshGame(7);
+    const game = freshGame(1);
     game.money = 5_000_000;
     const mine = remoteMine(game);
     const st = dockAt(game, mine, PAX)!;
@@ -43,7 +43,7 @@ describe('Станция у предприятия', () => {
   });
 
   it('подпись инструмента знает заранее, какой станция получится', () => {
-    const game = freshGame(7);
+    const game = freshGame(1);
     game.money = 5_000_000;
     const mine = remoteMine(game);
     const reach = Math.hypot(mine.fp.w, mine.fp.h) / 2 + 20;

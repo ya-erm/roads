@@ -35,18 +35,20 @@ describe('Спецтранспорт городов', { timeout: 60_000 }, () =>
       // Мир 7 — один на поток (freshGame): обе партии — копии одной свежей, генерация тут ни при чём.
       const game = freshGame(7);
       const seen = new Map<number, string>();
+      let peakServiceCars = 0;
       runSeconds(game, 90, () => {
+        peakServiceCars = Math.max(peakServiceCars, game.serviceCars);
         for (const v of game.traffic.vehicles.values()) {
           const kind = game.serviceOfSim(v.id);
           if (kind && !seen.has(v.id)) seen.set(v.id, `${kind}${v.siren ? '!' : ''}@${Math.round(v.pos.x)},${Math.round(v.pos.y)}`);
         }
       });
-      return { game, seen: [...seen.values()] };
+      return { game, seen: [...seen.values()], peakServiceCars };
     };
     const a = play();
     expect(a.seen.length).toBeGreaterThan(2);
     expect(a.seen.some((s) => s.includes('!'))).toBe(true);
-    expect(a.game.serviceCars).toBeLessThanOrEqual(SERVICE_TRAFFIC.maxCars);
+    expect(a.peakServiceCars).toBeLessThanOrEqual(SERVICE_TRAFFIC.maxCars);
     const calls = a.game.towns.reduce((n, t) => n + (t.serviceCalls ?? 0), 0);
     expect(calls).toBeGreaterThanOrEqual(a.seen.length);
     const b = play();

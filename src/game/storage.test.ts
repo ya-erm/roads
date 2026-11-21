@@ -23,29 +23,30 @@ function setup() {
 }
 
 describe('Склад станции', () => {
-  it('у новой автостанции — 150 мест на все грузы вместе; продукция и груз на пересадку — не больше свободного места', () => {
+  it('полноразмерный грузовой двор у предприятия даёт базовый и дополнительный запас, который делят все грузы', () => {
     const { game, a, raw, input } = setup();
-    expect(game.stationStorage(a)).toBe(STORAGE.base);
-    expect(STORAGE.base).toBe(150);
+    const capacity = STORAGE.base + STORAGE.per;
+    expect(game.stationStorage(a)).toBe(capacity);
     // Почти полный склад: предприятие кладёт только то, что помещается.
-    a.cargo[input] = STORAGE.base - 5;
+    a.cargo[input] = capacity - 5;
     raw.output = 50;
     game.speed = 1;
     game.update(0.1);
-    expect(game.stationStored(a)).toBeLessThanOrEqual(STORAGE.base);
+    expect(game.stationStored(a)).toBeLessThanOrEqual(capacity);
     expect(game.stationFree(a)).toBeLessThanOrEqual(5);
     expect(game.stationFull(a)).toBe(true);
   });
 
-  it('пристройка-склад: +150 мест, площадка длиннее, посты на месте; Ctrl+Z, сохранение и снос возвращают деньги', () => {
+  it('пристройка-склад добавляет запас и удлиняет площадку; Ctrl+Z, сохранение и снос сохраняют посты и расчёт стоимости', () => {
     const { game, a } = setup();
+    const capacity = game.stationStorage(a);
     const w = a.fp.w;
     const area = game.bayArea(a);
     const money = game.money;
     expect(game.setStationDepots(a.id, 1)).toBeNull();
     expect(a.depots).toBe(1);
     expect(a.fp.w).toBeCloseTo(w + STORAGE.width);
-    expect(game.stationStorage(a)).toBe(STORAGE.base + STORAGE.per);
+    expect(game.stationStorage(a)).toBe(capacity + STORAGE.per);
     expect(game.money).toBe(money - STORAGE.cost);
     // Посты — в той же части площадки: пристройки по концам.
     expect(game.bayArea(a).w).toBeCloseTo(area.w);
@@ -59,12 +60,12 @@ describe('Склад станции', () => {
     const loaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
     const la = loaded.stations.get(a.id)!;
     expect(la.depots).toBe(2);
-    expect(loaded.stationStorage(la)).toBe(STORAGE.base + 2 * STORAGE.per);
+    expect(loaded.stationStorage(la)).toBe(capacity + 2 * STORAGE.per);
     // Снести пристройку — часть цены вернётся; груз не помещается на меньший склад — нельзя.
     const before = game.money;
     expect(game.setStationDepots(a.id, 1)).toBeNull();
     expect(game.money).toBe(before + Math.round(STORAGE.cost * COST.refundRatio));
-    a.cargo.grain = STORAGE.base + STORAGE.per - 10;
+    a.cargo.grain = capacity + STORAGE.per - 10;
     a.cargo.logs = 50;
     expect(game.setStationDepots(a.id, 0)).toMatch(/не поместится/);
     // Больше максимума — нельзя.
@@ -94,7 +95,7 @@ describe('Склад станции', () => {
   it('склад полон, а завод работает — советник предлагает пристроить склад; полный склад тормозит рост', () => {
     const { game, a, raw, input } = setup();
     raw.producedLast = 60;
-    a.cargo[input] = STORAGE.base;
+    a.cargo[input] = game.stationStorage(a);
     const advice = advise(game).find((x) => x.kind === 'storage');
     expect(advice).toMatchObject({ level: 'warn', station: a.id, fix: { kind: 'depot', station: a.id } });
     a.depots = STORAGE.max;

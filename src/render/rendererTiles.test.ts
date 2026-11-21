@@ -3,11 +3,16 @@ import { CONSTRUCTION } from '../config';
 import { spansOf } from '../game/constructionWork';
 import type { Game } from '../game/game';
 import { Controller } from '../input/controller';
+import { profileOf, twoWay } from '../lanes/model';
 import { buildConstructionScene } from '../testpages/construction';
+import type { ParkingLot, TownBuilding } from '../world/entities';
+import { ROAD_ASPHALT, ROAD_DIRT } from '../world/roadTypes';
 import { Camera } from './camera';
 import { drawnSpans, progressBoxes, projectBox } from './constructionArt';
 import { Renderer } from './renderer';
+import type { StreetGreen } from './parkArt';
 import { type Box, grow, meets, tileBox, tileRange, tileWorld } from './tileCache';
+import type { TownWalks } from './townWalks';
 
 /**
  * Кэш карты плитками в настоящей отрисовке (Renderer) — на холстах-заглушках (тесты идут без браузера): плитки
@@ -122,6 +127,58 @@ describe('Кэш карты плитками: без изменений плит
     expect(rendered).toEqual([]);
     const set = tiles.sets[0];
     expect([...set.tiles.values()].every((t) => t.ready && !t.dirty)).toBe(true);
+  });
+
+  it('аллея освобождает ворота площадки, а выезд дома перекрашивается при замене покрытия улицы', () => {
+    const { game, renderer, frame } = setup();
+    const net = game.roads.net;
+    const y = 1090;
+    const a = net.addSeam({ x: 590, y }, { x: 1, y: 0 });
+    const b = net.addSeam({ x: 850, y }, { x: 1, y: 0 });
+    const road = net.addCorridor(a.id, b.id, { cls: 'avenue', lanes: twoWay(1, 1) });
+    game.roads.changed();
+    const townId = 9000;
+    const building: TownBuilding = {
+      type: 'building', id: 9001, townId, fp: { center: { x: 790, y: y + 27 }, w: 28, h: 26, angle: 0 }, kind: 'com',
+      floors: 2, anchor: 0, color: '#efe3cf', roof: '#b9654d', form: 'store', face: -1,
+    };
+    const town = {
+      id: townId, name: 'Тест', center: { x: 720, y }, radius: 150, population: 3000, top: 0, style: 'organic' as const,
+      buildings: [building], streets: [road.id], lots: [] as ParkingLot[], demands: [], supplied: {}, lastSupplied: {}, tripAcc: 0, growthAcc: 0,
+    };
+    game.towns.push(town);
+    game.index.add(building);
+    game.townRev++;
+    const view = renderer as unknown as { walks: Map<number, TownWalks>; alleys: { shown: StreetGreen[] } };
+    const trees = () => (view.alleys.shown.find((line) => line.id === road.id)?.trees ?? []).filter((_, i) => i % 3 !== 2);
+    const walk = () => view.walks.get(townId)!;
+    frame();
+    expect(walk().driveColors?.get(building.id)?.[0]?.color).toBe(ROAD_ASPHALT);
+    expect(walk().drives.every((d) => d.color === ROAD_ASPHALT && d.mouth)).toBe(true);
+    const before = trees();
+    const x = before[0];
+    const planted = before[1];
+    expect(planted).toBeGreaterThan(y);
+    const lot: ParkingLot = {
+      id: 9002, fp: { center: { x, y: y + 28 }, w: 24, h: 24, angle: 0 }, gates: [{ x: 0, mode: 'both' }], owner: 'town', tariff: 0,
+    };
+    town.lots = [lot];
+    game.lotRev++;
+    frame();
+    const withLot = trees();
+    expect(withLot.length).toBeLessThan(before.length);
+    expect(withLot.length).toBeGreaterThan(before.length - 16);
+    expect(withLot.some((v, i) => i % 2 === 0 && v === x && withLot[i + 1] === planted)).toBe(false);
+    town.lots = [];
+    game.lotRev++;
+    frame();
+    expect(trees()).toEqual(before);
+    road.cls = 'dirt';
+    net.setLanes(road, profileOf({ cls: 'dirt', lanesF: 1, lanesB: 1 }).lanes);
+    game.roads.changed();
+    frame();
+    expect(walk().driveColors?.get(building.id)?.[0]?.color).toBe(ROAD_DIRT);
+    expect(walk().drives.every((d) => d.color === ROAD_DIRT && !d.mouth)).toBe(true);
   });
 
   it('на паузе слепки не сверяются: подписи предприятий, стройки, домов и станций — только после их правки', () => {

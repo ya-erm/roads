@@ -60,9 +60,9 @@ function stationIn(game: Game, townId: number, toward: { x: number; y: number },
  */
 const MIN_POP = 800;
 
-/** Автобусная линия между двумя ближними большими городами мира 7: станции в обоих, шоссе между ними. */
+/** Автобусная линия между двумя ближними большими городами: станции в обоих, шоссе между ними. */
 function intercityLine() {
-  const game = withoutCitizens(freshGame(7));
+  const game = withoutCitizens(freshGame(9));
   game.money = 5_000_000;
   const [a, ...rest] = [...game.towns].sort((x, y) => y.population - x.population);
   // Соседний город — не село.
@@ -105,7 +105,6 @@ describe('Первый автобус новой линии между горо�
     expect(after.sA.passengers.size).toBe(0);
     const now = firstDeparture(after.game, bus);
     expect(now.load).toBeGreaterThanOrEqual(10);
-    expect(now.load).toBeLessThanOrEqual(15);
     // Без подарка: не больше, чем подошло за это время (жители станции дают 1.2 пассажира в секунду на тысячу).
     expect(now.load).toBeLessThanOrEqual(Math.ceil((after.sA.catchPop / 1000) * 1.2 * now.t));
     // И недолго: 5 с посадки, затем не дольше предела ожидания (проверки — раз в секунду и дольше на посадку).

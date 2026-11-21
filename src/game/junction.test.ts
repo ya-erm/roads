@@ -128,5 +128,5 @@ describe('Настройка перекрёстка', { timeout: 20_000 }, () =>
     expect(loaded.toggleLights(n.id)).toBe(true);
     expect(loaded.money).toBe(before + Math.round(COST.trafficLight * COST.refundRatio));
     expect(loaded.roads.graph.nodes.get(n.id)!.lights).toBeNull();
-  });
+  }, 60_000);
 });

@@ -7,7 +7,7 @@ import type { Industry, Station, Town } from '../world/entities';
 import { NEW_GAME_SETTINGS, type WorldSettings } from '../world/settings';
 import { footprintRadius } from '../world/spatial';
 import { Game } from './game';
-import { connectNodes, freshGame, runMonths, runSeconds, STREET, stationAtIndustry, stationExit, townStreets, withoutCitizens } from './testkit';
+import { connectNodes, freshGame, runMonths, runSeconds, runUntil, STREET, stationAtIndustry, stationExit, townStreets, withoutCitizens } from './testkit';
 
 // Средняя карта: пять крупных городов (TOWN_SCALE) на маленькой не оставляют места заводам у их края.
 const WORLD: WorldSettings = { ...NEW_GAME_SETTINGS, seed: 7, size: 'medium', towns: 5, money: 5_000_000, biome: 'temperate', relief: 'plains' };
@@ -85,7 +85,7 @@ describe('мир «Строит игрок»', () => {
     expect(c.enterprises.deposits).toEqual(a.enterprises.deposits);
     expect(c.industries.map((i) => i.fp.parts)).toEqual(a.industries.map((i) => i.fp.parts));
     if (ruin) expect(c.industries.find((i) => i.id === ruin.id)?.ruin).toBe(true);
-  });
+  }, 60_000);
 
   it('«Готовые» (нет поля) — прежний мир без месторождений, рабочие и вред ни на что не влияют', () => {
     const g = withoutCitizens(new Game({ ...WORLD, industryMode: undefined }));
@@ -229,10 +229,10 @@ describe('постройка', () => {
     }
     expect(st).not.toBeNull();
     const line = g.createLine([st!.id, dock.id])!;
+    // Дожидаемся группы рабочих на первый рейс: на окраине пассажиров мало, а круг занимает много месяцев.
+    expect(runUntil(g, 8 * MONTH_LENGTH, () => (st!.passengers.get(dock.id) ?? 0) >= 16)).toBe(true);
     expect(g.buyVehicle(line.id, 'bus')).not.toBeNull();
-    // Завод далеко (дальше дальней поездки на работу): первый автобус доезжает за несколько месяцев (от тупика на
-    // окраине крупного города — TOWN_SCALE — путь длиннее).
-    for (let m = 0; m < 20 && (ind.crew ?? 0) <= 1; m++) runMonths(g, 0.5);
+    expect(runUntil(g, 10 * MONTH_LENGTH, () => (ind.crew ?? 0) > 1)).toBe(true);
     expect(ind.crew ?? 0).toBeGreaterThan(1);
     expect(g.enterprises.staff(ind)).toBeGreaterThan(0.05);
     expect(line.revenueLast + line.revenueMonth).toBeGreaterThan(line.costLast + line.costMonth);
@@ -338,7 +338,7 @@ describe('места в черте города', () => {
     expect(harmClass(fresh.info.kind)).toBe(0);
     expect(inTown(t, fresh.fp)).toBe(true);
     expect(footprintRadius(fresh.fp)).toBeGreaterThan(0);
-  });
+  }, 60_000);
 
   it('второй завод того же рецепта, что уже стоит в городе со старта, город сам не строит', () => {
     const g = player({ size: 'medium', towns: 8 });

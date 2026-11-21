@@ -104,7 +104,8 @@ describe('Улица, снесённая игроком: город здесь �
     demolish(game, street.id);
     expect(town.streetBans?.length).toBe(1);
     game.checkpoint('дорога');
-    expect(road(game, a, b)).toBe(true);
+    const { cls, curve, lanes, limit } = street;
+    expect(road(game, a, b, { cls, curve, lanes, limit })).toBe(true);
     game.commit();
     expect(town.streetBans ?? []).toEqual([]);
   });

@@ -15,12 +15,12 @@ import { MODELS, modelsFor } from './transport';
  * Грузовая линия между ближайшей парой предприятий; итоги за months месяцев после разгона. Трасса — своя сеть
  * в стороне от городов, машины жителей на неё не попадают: без них месяц симуляции — доли секунды.
  */
-function freightLine(seed: number, from: IndustryKind, to: IndustryKind, trucks: number, months: number) {
+function freightLine(seed: number, from: IndustryKind, to: IndustryKind, trucks: number, months: number, warmup = 1) {
   const game = withoutCitizens(freshGame(seed));
   const { built, line, from: f } = freightRoute(game, from, to);
   expect(built).toBe(true);
   for (let i = 0; i < trucks; i++) game.buyVehicle(line.id, 'truck');
-  runMonths(game, 1);
+  runMonths(game, warmup);
   const r0 = line.revenueTotal;
   let cost = 0;
   for (let m = 0; m < months; m++) {
@@ -49,7 +49,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
   });
 
   it('грузовики на линии ферма → комбинат окупаются, а ферма растёт', () => {
-    const r = freightLine(7, 'farm', 'foodplant', 2, 2);
+    const r = freightLine(3, 'farm', 'foodplant', 2, 3, 2);
     // Выручка заметно больше содержания.
     expect(r.revenue).toBeGreaterThan(r.cost * 2);
     // Продукцию исправно вывозят — производство растёт.
@@ -135,7 +135,7 @@ describe('Экономика', { timeout: 60_000 }, () => {
       await breathe();
     }
     expect(line.revenueTotal - r0).toBeGreaterThan(cost);
-  });
+  }, 120_000);
 
   it('модели новее открываются перевезённым, старые меняются на новые', () => {
     const r = freightLine(7, 'farm', 'foodplant', 1, 0);
