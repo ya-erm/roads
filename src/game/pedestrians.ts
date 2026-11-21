@@ -22,7 +22,10 @@ interface Segment { a: Vec; b: Vec; cuts: { t: number; p: Vec }[] }
 
 const pointKey = (p: Vec) => `${Math.round(p.x * 20)},${Math.round(p.y * 20)}`;
 const CELL = 40;
-const POPULATION_LIMIT = 480;
+const BASE_POPULATION_LIMIT = 480;
+// Первый уровень сохраняет прежнюю плотность. Прибавка каждой следующей ступени
+// должна быть заметна на нескольких улицах даже при ограничении населения всей карты.
+const DENSITY = [1, 3, 6, 10, 15] as const;
 const DECISION_INTERVAL = 0.18;
 
 /** Линия от инструмента или вход в переход могут примыкать в середину тротуара. В этом месте создаём развилку. */
@@ -195,6 +198,9 @@ export class Pedestrians {
   level: PedestrianLevel = 1;
   readonly walkers: Walker[] = [];
   private edges?: Map<string, WalkEdge>;
+  private starts: WalkEdge[] = [];
+  private neighborhoodStarts: WalkEdge[] = [];
+  private networkLength = 0;
   private sidewalks?: SidewalkNet;
   private paths?: readonly Footpath[];
   private graph?: LaneGraph;
@@ -204,6 +210,9 @@ export class Pedestrians {
   reset(): void {
     this.walkers.length = 0;
     this.edges = undefined;
+    this.starts = [];
+    this.neighborhoodStarts = [];
+    this.networkLength = 0;
     this.sidewalks = this.paths = this.graph = undefined;
     this.prepared = undefined;
     this.nextStep = 0;
@@ -240,12 +249,14 @@ export class Pedestrians {
       this.prepared = undefined;
       this.edges = ready?.sidewalks === sidewalks && ready.paths === paths && ready.graph === graph
         ? ready.edges : walkingNetwork(sidewalks, paths, graph.crosswalks.values());
+      this.starts = [...this.edges.values()].filter(e => !e.crossing);
+      this.networkLength = this.starts.reduce((sum, e) => sum + e.length, 0);
+      this.neighborhoodStarts = [];
     }
     const edges = this.edges;
-    const starts = [...edges.values()].filter((e) => !e.crossing);
-    const total = starts.reduce((v, e) => v + e.length, 0);
-    const density = 1 + (this.level - 1) * 0.5;
-    const n = Math.ceil(Math.min(POPULATION_LIMIT, total / 85) * density);
+    const total = this.networkLength;
+    const base = Math.min(BASE_POPULATION_LIMIT, total / 85);
+    const n = Math.ceil(base * DENSITY[this.level - 1]);
     this.walkers.length = Math.min(this.walkers.length, n);
     const missing: number[] = [];
     for (let i = 0; i < n; i++) {
@@ -257,17 +268,41 @@ export class Pedestrians {
         w.next = w.next && edges.get(w.next.key);
       } else missing.push(i);
     }
-    // Каждую новую группу расселяем по всей карте, сохраняя положение и маршрут тех, кто уже идёт.
+    if (!missing.length) return;
+    // Соседние улицы и дворы часто добавлялись в разных концах списка рёбер.
+    // Группируем их по кварталам, чтобы каждая следующая ступень заселяла и локальный кадр.
+    if (this.level > 1 && !this.neighborhoodStarts.length) {
+      const cells = new Map<string, WalkEdge[]>();
+      for (const edge of this.starts) {
+        const key = Math.floor((edge.a.x + edge.b.x) / 160) + ':' + Math.floor((edge.a.y + edge.b.y) / 160);
+        const cell = cells.get(key);
+        if (cell) cell.push(edge);
+        else cells.set(key, [edge]);
+      }
+      this.neighborhoodStarts = Array.from(cells.values()).flat();
+    }
+    // Наборы вложены: прямой выбор уровня на паузе и выбор по очереди дают тех же жителей.
     let offset = 0;
     let index = 0;
-    for (const [j, i] of missing.entries()) {
+    let tier = 0;
+    let first = 0;
+    let limit = Math.ceil(base);
+    for (const i of missing) {
+      while (i >= limit) {
+        first = limit;
+        limit = Math.ceil(base * DENSITY[++tier]);
+        offset = index = 0;
+      }
+      const starts = tier === 0 ? this.starts : this.neighborhoodStarts;
       const seed = game.seed + i * 4099;
-      const at = (j + hash(seed, 0)) * total / missing.length;
+      const at = (i - first + hash(seed, 0)) * total / (limit - first);
       while (index + 1 < starts.length && offset + starts[index].length < at) offset += starts[index++].length;
       const edge = starts[index];
       const speed = 2.4 + hash(seed, 1) * 1.1;
-      const start = time - (at - offset) / speed;
-      this.walkers[i] = { seed, visits: 0, speed, edge, reverse: hash(seed, 2) < 0.5, start, end: start + edge.length / speed };
+      const reverse = hash(seed, 2) < 0.5;
+      const progress = reverse && tier > 0 ? edge.length - (at - offset) : at - offset;
+      const start = time - progress / speed;
+      this.walkers[i] = { seed, visits: 0, speed, edge, reverse, start, end: start + edge.length / speed };
     }
   }
 
@@ -337,6 +372,9 @@ export class Pedestrians {
     for (const w of this.walkers) {
       if (w.edge.crossing?.underground) continue;
       const { a, b } = w.edge;
+      // Большинство фигур за кадром. Отбрасываем целые отрезки до интерполяции положения с шагом в сторону.
+      if (view && ((a.x < view.x0 - 3 && b.x < view.x0 - 3) || (a.x > view.x1 + 3 && b.x > view.x1 + 3)
+        || (a.y < view.y0 - 3 && b.y < view.y0 - 3) || (a.y > view.y1 + 3 && b.y > view.y1 + 3))) continue;
       const pos = centerAt(w, time);
       if (w.sidestep) {
         const offset = offsetAt(w, time);
