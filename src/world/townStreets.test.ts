@@ -3,10 +3,11 @@ import { TOWN_SCALE } from '../config';
 import { Rng } from '../core/rng';
 import { dist } from '../core/vec';
 import { Game } from '../game/game';
+import { asphaltEdgesAt } from '../lanes/geometry';
 import { laneSpeed } from '../lanes/graph';
-import { LaneNet, type Corridor } from '../lanes/model';
+import { LaneNet, profileOf, twoWay, type Corridor } from '../lanes/model';
 import type { Structure, Town, TownStyle } from './entities';
-import { KMH_PER_UNIT, ROAD_PRESETS, specKmh } from './roadTypes';
+import { halfWidth, KMH_PER_UNIT, ROAD_PRESETS, specKmh } from './roadTypes';
 import { DEFAULT_SETTINGS } from './settings';
 import { FootprintIndex } from './spatial';
 import { Terrain } from './terrain';
@@ -101,6 +102,7 @@ describe('Уличная сеть города', () => {
     expect(yards.length).toBeGreaterThanOrEqual(1);
     expect(main.every((c) => laneSpeed(c) * KMH_PER_UNIT === 60)).toBe(true);
     expect(yards.every((c) => laneSpeed(c) * KMH_PER_UNIT === 40)).toBe(true);
+    expect(yards.every((c) => asphaltEdgesAt(c, c.length / 2)?.[1] === 5.25)).toBe(true);
     const nodes = new Set(main.flatMap((c) => [c.a, c.b]));
     for (const nid of nodes) expect(roads.node(nid).corridors.filter((cid) => roads.corridor(cid).cls === 'street').length).toBeLessThanOrEqual(1);
     const reached = new Set([main[0].a]);
@@ -123,5 +125,24 @@ describe('Уличная сеть города', () => {
     const main = ROAD_PRESETS.find((p) => p.id === 'main-street')!.spec;
     expect([yard.lanesF, yard.lanesB, main.lanesF, main.lanesB]).toEqual([1, 1, 1, 1]);
     expect([specKmh(yard), specKmh(main)]).toEqual([40, 60]);
+    expect([halfWidth(yard), halfWidth(main)]).toEqual([5.25, 8.5]);
+    expect(profileOf(yard).lanes.map((l) => l.offset)).toEqual([-2.45, 2.45]);
+  });
+
+  it('старые дворы сужаются при загрузке, сквозные полосы на стыке с основной улицей сохраняются', () => {
+    const roads = new LaneNet();
+    const a = roads.addSeam({ x: 0, y: 0 }, { x: 1, y: 0 });
+    const b = roads.addJunction({ x: 100, y: 0 });
+    const c = roads.addSeam({ x: 200, y: 0 }, { x: 1, y: 0 });
+    const d = roads.addSeam({ x: 300, y: 0 }, { x: 1, y: 0 });
+    const plain = roads.addCorridor(a.id, b.id, { cls: 'street', lanes: twoWay(1, 1) });
+    const atSeam = roads.addCorridor(b.id, c.id, { cls: 'street', lanes: twoWay(1, 1) });
+    const main = roads.addCorridor(c.id, d.id, { cls: 'avenue', lanes: twoWay(1, 1) });
+    const legacy = roads.toJSON();
+    delete legacy.yardWidths;
+    const restored = LaneNet.fromJSON(legacy, true);
+    expect(restored.corridor(plain.id).lanes.map((l) => l.offset)).toEqual([-2.45, 2.45]);
+    expect(restored.across(restored.corridor(atSeam.id), 1, 'b')?.corridor.id).toBe(main.id);
+    expect(LaneNet.fromJSON(restored.toJSON(), true).toJSON()).toEqual(restored.toJSON());
   });
 });

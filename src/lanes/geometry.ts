@@ -1,6 +1,6 @@
 import { add, angleOf, cross, dist, dot, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { isTrunk, ROAD_MARGIN } from '../world/roadTypes';
-import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LaneSlot, laneWidth, taperLen } from './model';
+import { isTrunk } from '../world/roadTypes';
+import { Corridor, corridorMargin, CorridorEnd, End, LaneNet, LaneNode, LaneSlot, laneWidth, taperLen } from './model';
 
 export const smooth = (u: number) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
 
@@ -39,6 +39,13 @@ export function edgesAt(c: Corridor, s: number): [number, number] | null {
   return lo <= hi ? [lo, hi] : null;
 }
 
+/** Кромки асфальта с полями у бордюров. */
+export function asphaltEdgesAt(c: Corridor, s: number): [number, number] | null {
+  const edges = edgesAt(c, s);
+  const margin = corridorMargin(c);
+  return edges && [edges[0] - margin, edges[1] + margin];
+}
+
 /** Точка на s, смещённая вправо от оси на off. */
 export function pointOff(c: Corridor, s: number, off: number): Vec {
   const p = c.lut.pointAt(s);
@@ -69,8 +76,8 @@ export const awayAt = (c: Corridor, end: End, d: number): Vec => scale(c.lut.tan
 
 /** Полуширина асфальта на конце полотна (по большей стороне). */
 export function halfAt(c: Corridor, end: End): number {
-  const e = edgesAt(c, end === 'a' ? 0 : c.length);
-  return e ? Math.max(-e[0], e[1]) + ROAD_MARGIN : 0;
+  const e = asphaltEdgesAt(c, end === 'a' ? 0 : c.length);
+  return e ? Math.max(-e[0], e[1]) : 0;
 }
 
 /** Запас сверх ширины поперечной дороги — на скругление углов перекрёстка. */
@@ -218,9 +225,9 @@ export interface JunctionCorner {
 /** Полуширина асфальта на конце подъезда e со стороны side от направления «от узла» (1 — справа). */
 export function sideHalfAt(e: CorridorEnd, side: 1 | -1): number {
   const c = e.corridor;
-  const ed = edgesAt(c, e.end === 'a' ? 0 : c.length);
-  if (!ed) return ROAD_MARGIN;
-  return (awaySign(e.end) * side > 0 ? ed[1] : -ed[0]) + ROAD_MARGIN;
+  const ed = asphaltEdgesAt(c, e.end === 'a' ? 0 : c.length);
+  if (!ed) return corridorMargin(c);
+  return awaySign(e.end) * side > 0 ? ed[1] : -ed[0];
 }
 
 /** Углы перекрёстка, которые можно скруглить: между соседними подъездами, не развёрнутые и не почти прямые. */
@@ -253,8 +260,8 @@ export function junctionCorners(net: LaneNet, n: LaneNode, ends: CorridorEnd[] =
 export function edgePoint(e: CorridorEnd, d: number, side: 1 | -1): { p: Vec; away: Vec } {
   const c = e.corridor;
   const s = sFrom(c, e.end, d);
-  const ed = edgesAt(c, s) ?? [0, 0];
-  const off = awaySign(e.end) * side > 0 ? ed[1] + ROAD_MARGIN : ed[0] - ROAD_MARGIN;
+  const ed = asphaltEdgesAt(c, s) ?? [-corridorMargin(c), corridorMargin(c)];
+  const off = awaySign(e.end) * side > 0 ? ed[1] : ed[0];
   return { p: pointOff(c, s, off), away: awayAt(c, e.end, d) };
 }
 
@@ -330,11 +337,11 @@ export function plateOutline(net: LaneNet, n: LaneNode, cuts: Map<number, [numbe
       const c = e.corridor;
       const r = cuts.get(c.id)?.[e.end === 'a' ? 0 : 1] ?? 0;
       const s = sFrom(c, e.end, r);
-      const ed = edgesAt(c, s) ?? [0, 0];
+      const ed = asphaltEdgesAt(c, s) ?? [-corridorMargin(c), corridorMargin(c)];
       const sign = awaySign(e.end);
       // Края подъезда: слева и справа, если смотреть от перекрёстка.
-      const lOff = sign > 0 ? ed[0] - ROAD_MARGIN : -(ed[1] + ROAD_MARGIN);
-      const rOff = sign > 0 ? ed[1] + ROAD_MARGIN : -(ed[0] - ROAD_MARGIN);
+      const lOff = sign > 0 ? ed[0] : -ed[1];
+      const rOff = sign > 0 ? ed[1] : -ed[0];
       const p = c.lut.pointAt(s);
       const away = awayAt(c, e.end, r);
       const nr = rightNormal(away);

@@ -7,7 +7,7 @@ import type { Blinker, Vehicle, VehicleSpec } from '../sim/vehicle';
 import { GLane, GLink, GMove, GNode, greenOf, LaneGraph, LightPhase } from './graph';
 import { bridgeLook, deckAlong, nodeDeck } from './deck';
 import { edgesAt } from './geometry';
-import { bodyOnEnds, Corridor, layerOf } from './model';
+import { bodyOnEnds, Corridor, corridorMargin, laneWidth, layerOf } from './model';
 import { canRouteTransition, findLaneRoute } from './routing';
 import { onSolid, solidEnds } from './solid';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
@@ -1054,7 +1054,7 @@ export class LaneTraffic {
     const e = edgesAt(c, this.graph.axisS(lane, clamp(veh.s - veh.length / 2, 0, lane.length)));
     if (!e) return 0;
     const edge = link.flow > 0 ? e[1] - lane.offset : lane.offset - e[0];
-    return Math.max(0, edge + ROAD_MARGIN - veh.width / 2 - CURB_GAP);
+    return Math.max(0, edge + corridorMargin(c) - veh.width / 2 - CURB_GAP);
   }
 
   /**
@@ -1462,7 +1462,10 @@ export class LaneTraffic {
     const oneWay = !!c && c.lanes.every((l) => l.flow === c.lanes[0].flow);
     if (!right && !(oneWay && lane.index === 0)) return -ASIDE;
     const ground = !!c && net.node(c.a).level === 0 && net.node(c.b).level === 0;
-    const reach = ground ? ASIDE_CURB : Math.max(ASIDE, LANE_W / 2 + ROAD_MARGIN - veh.width / 2 - CURB_KEEP);
+    const slot = c?.lanes[lane.laneIdx];
+    const reach = slot?.narrow && c
+      ? Math.max(0, laneWidth(slot) / 2 + corridorMargin(c) - veh.width / 2 - CURB_KEEP)
+      : ground ? ASIDE_CURB : Math.max(ASIDE, LANE_W / 2 + ROAD_MARGIN - veh.width / 2 - CURB_KEEP);
     // Автобус у остановки уже у бордюра (curb) — прижимается только на остаток.
     return right ? Math.max(PASS_MIN, reach - (veh.curb ?? 0)) : -reach;
   }
@@ -1477,6 +1480,9 @@ export class LaneTraffic {
     if (veh.siren) return false;
     const lane = this.currentLane(veh);
     if (!lane) return false;
+    const link = this.graph.links.get(lane.link)!;
+    // Две машины одного направления в узкой полосе не помещаются; освободить путь можно после выезда из двора.
+    if (link.lanes.length === 1 && this.graph.net.corridors.get(link.corridor)?.lanes[lane.laneIdx].narrow) return this.stopYield(veh);
     // Обогнавшая спецмашина ещё рядом (корпус не прошёл) — тоже уступает: стоит у края, пока та не отъедет.
     if (this.sirenBehind(lane.id, veh.s, YIELD_PAST) > SIREN_NOTICE) return this.stopYield(veh);
     veh.yieldSince ??= this.time;
@@ -1484,7 +1490,6 @@ export class LaneTraffic {
       veh.asideTo = 0;
       return false;
     }
-    const link = this.graph.links.get(lane.link)!;
     const room = lane.length - veh.s;
     if (veh.lcCooldown <= 0 && !veh.granted && veh.holdDist === undefined && link.lanes.length > 1 && room > ASIDE_END && link.id === veh.route[veh.routeIndex]) {
       const stay = this.lanePlan(veh)[0].stay;

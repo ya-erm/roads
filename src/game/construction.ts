@@ -44,7 +44,7 @@ import { edgesAt, nodeCuts } from '../lanes/geometry';
 import { corridorLayer } from '../lanes/speedDisplay';
 import { GLIDE_SLOPE } from '../lanes/traffic';
 import { closed, endCuts, laneDone, laneWise, partLanes, reverseSite, reverseStops, reverseZone, reversible, seamHolder, seamWait } from '../lanes/closure';
-import { type Corridor, type CorridorBuild, type CorridorWas, type LaneNet, taperLen } from '../lanes/model';
+import { type Corridor, type CorridorBuild, corridorMargin, type CorridorWas, type LaneNet, taperLen } from '../lanes/model';
 import { CONSTRUCTION } from '../config';
 import type { Network, Segment } from '../world/network';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
@@ -1916,12 +1916,13 @@ function alongCorridor(pts: Vec[], k: Piece, s0: number, s1: number, step: numbe
  */
 function roomAlong(c: Corridor, fromB: boolean, a0: number, a1: number): number {
   const L = c.length;
+  const margin = corridorMargin(c);
   let room = Infinity;
   for (let a = Math.max(0, a0); a <= Math.min(L, a1) + 1e-6; a += 2) {
     const e = edgesAt(c, fromB ? L - a : a);
-    if (e) room = Math.min(room, turnRoom(e));
+    if (e) room = Math.min(room, turnRoom(e, margin));
   }
-  return Number.isFinite(room) ? room : turnRoom([-3.5, 3.5]);
+  return Number.isFinite(room) ? room : turnRoom([-3.5, 3.5], margin);
 }
 
 

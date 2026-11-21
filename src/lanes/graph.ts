@@ -960,7 +960,7 @@ function shapeOfCorridor(net: LaneNet, c: Corridor): CorridorShape {
   const { p0, p1, p2, p3 } = c.curve;
   const s: CorridorShape = [c.a, c.b, c.portA, c.portB, c.length, c.cls, c.limit ?? -1, c.ring ? 1 : 0, p0.x, p0.y, p1.x, p1.y, p2.x, p2.y, p3.x, p3.y];
   s.push(net.nodes.get(c.a)?.level ?? NaN, net.nodes.get(c.b)?.level ?? NaN);
-  for (const l of c.lanes) s.push(l.offset, l.flow, l.from, l.to, l.solid ? 1 : 0, l.park ? 1 : 0);
+  for (const l of c.lanes) s.push(l.offset, l.flow, l.from, l.to, l.solid ? 1 : 0, l.park ? 1 : 0, l.narrow ? 1 : 0);
   return s;
 }
 

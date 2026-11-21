@@ -1,8 +1,8 @@
 import { add, cross, dist, norm, sub, type Vec } from '../core/vec';
 import type { Game } from '../game/game';
 import { edgesAt, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
-import type { Corridor, CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
-import { ROAD_MARGIN, SIDEWALK } from '../world/roadTypes';
+import { type Corridor, corridorMargin, type CorridorEnd, type LaneNet, type LaneNode } from '../lanes/model';
+import { SIDEWALK } from '../world/roadTypes';
 import { type Footprint, footprintRadius, pointInFootprint } from '../world/spatial';
 import { townTier } from '../world/townForms';
 import { Art } from './industryArt';
@@ -146,7 +146,7 @@ const rot = (v: Vec): Vec => ({ x: -v.y, y: v.x });
  */
 function walkOff(c: Corridor, s: number, side: 1 | -1, paved: boolean): number {
   const spec = paved ? SIDEWALK.paved : SIDEWALK.path;
-  const d = ROAD_MARGIN + spec.from + spec.w / 2;
+  const d = corridorMargin(c) + spec.from + spec.w / 2;
   const e = edgesAt(c, s);
   if (!e) return side * d;
   return side === 1 ? e[1] + d : e[0] - d;

@@ -1,8 +1,7 @@
 import { add, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import { edgesAt } from '../lanes/geometry';
-import type { Corridor } from '../lanes/model';
+import { type Corridor, corridorMargin } from '../lanes/model';
 import type { TownBuilding } from './entities';
-import { ROAD_MARGIN } from './roadTypes';
 import { footprintCorners, type Footprint } from './spatial';
 import { placeable, type WorldContext } from './worldgen';
 
@@ -30,7 +29,7 @@ export interface Squeeze {
 /** Кромка асфальта с одной стороны полотна (side > 0 — справа по a→b) в s, с обочиной. */
 function sideEdge(c: Corridor, s: number, side: number): number {
   const e = edgesAt(c, s);
-  return (e ? Math.max(0, side > 0 ? e[1] : -e[0]) : 0) + ROAD_MARGIN;
+  return (e ? Math.max(0, side > 0 ? e[1] : -e[0]) : 0) + corridorMargin(c);
 }
 
 /**

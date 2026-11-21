@@ -5,13 +5,14 @@
  */
 import { add, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
-import { edgesAt } from './geometry';
+import { asphaltEdgesAt } from './geometry';
 import type { GLink, LaneGraph } from './graph';
-import type { LaneNet } from './model';
+import { corridorMargin, type LaneNet, laneWidth } from './model';
 import { corridorLayer, deckLift } from './speedDisplay';
 
 /** На сколько от середины крайней правой полосы стоит ось корпуса светофора (вправо по ходу) — за бордюром. */
-export const LIGHT_SIDE = LANE_W / 2 + 3;
+const LIGHT_SHOULDER = 1.5;
+export const LIGHT_SIDE = LANE_W / 2 + ROAD_MARGIN + LIGHT_SHOULDER;
 /** Шаг дополнительных секций со стрелкой — дальше от дороги (ширина секции и зазор; src/render/trafficLightArt.ts). */
 export const LIGHT_STEP = 1.9;
 /** Светофор от стоп-линии назад вдоль бордюра: корпус и колонка за ним. */
@@ -44,7 +45,8 @@ export function lightSpot(graph: LaneGraph, link: GLink, sections = 0): LightSpo
   const end = graph.lanePose(lane, u);
   const out = rightNormal(end.dir);
   const layer = corridorLayer(net, c);
-  const pos = add(add(end.pos, scale(out, LIGHT_SIDE)), deckLift(net, c, graph.axisS(lane, u)));
+  const side = laneWidth(c.lanes[lane.laneIdx]) / 2 + corridorMargin(c) + LIGHT_SHOULDER;
+  const pos = add(add(end.pos, scale(out, side)), deckLift(net, c, graph.axisS(lane, u)));
   const tail = add(pos, scale(end.dir, -LIGHT_LEN * LIGHT_NEAR));
   const last = add(pos, scale(out, LIGHT_STEP * LIGHT_NEAR * sections));
   const covered = underDeck(net, pos, layer, LIGHT_R) || underDeck(net, tail, layer, LIGHT_R) || underDeck(net, last, layer, LIGHT_R);
@@ -63,10 +65,10 @@ export function underDeck(net: LaneNet, p: Vec, layer: number, r = 0): boolean {
     const t = o.lut.tangentAt(hit.s);
     const d = sub(q, hit.point);
     if (Math.abs(dot(d, t)) > r + 0.5) continue;
-    const e = edgesAt(o, hit.s);
+    const e = asphaltEdgesAt(o, hit.s);
     if (!e) continue;
     const lat = dot(d, rightNormal(t));
-    if (lat > e[0] - ROAD_MARGIN - r && lat < e[1] + ROAD_MARGIN + r) return true;
+    if (lat > e[0] - r && lat < e[1] + r) return true;
   }
   return false;
 }

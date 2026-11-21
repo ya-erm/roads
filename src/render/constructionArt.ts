@@ -24,10 +24,9 @@ import { drawVehicleArt } from './vehicleArt';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import type { LaneRenderer } from '../lanes/draw';
 import { edgesAt, pointOff, pointOff as geoPointOff, stations } from '../lanes/geometry';
-import { type Corridor, type LaneNet, taperLen } from '../lanes/model';
+import { type Corridor, corridorMargin, type LaneNet, laneWidth, taperLen } from '../lanes/model';
 import { corridorLayer } from '../lanes/speedDisplay';
 import type { BuildBase } from '../world/entities';
-import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 import { closureOf, fitLanes, keepsPavement, laneWise, partLanes, reverseSite, siteSpot, workSide } from '../lanes/closure';
 import { wasCorridor } from '../game/rebuild';
 import { bridgePiers, drawCraneSet, drawShieldSet, PIER_LEAD, type SiteKind, siteKind, slabTo } from './structureArt';
@@ -73,8 +72,8 @@ export function drawOldRoad(ctx: CanvasRenderingContext2D, full: LaneNet, road: 
     const to = keepsPavement(c) ? marksTo : earthTo;
     const ahead: [number, number] = b.fromB ? [0, L - to] : [to, L];
     const parts: { left: Vec[]; right: Vec[] }[] = [];
-    if (ahead[1] - ahead[0] > 0.5) parts.push(band(road, o, ahead[0], ahead[1], ROAD_MARGIN + 3, false, side));
-    if (halves && !b.pass) parts.push(band(road, o, 0, L, ROAD_MARGIN + 3, false, -side! as 1 | -1));
+    if (ahead[1] - ahead[0] > 0.5) parts.push(band(road, o, ahead[0], ahead[1], corridorMargin(o) + 3, false, side));
+    if (halves && !b.pass) parts.push(band(road, o, 0, L, corridorMargin(o) + 3, false, -side! as 1 | -1));
     const shapes = parts.filter((p) => p.left.length >= 2);
     if (!shapes.length) continue;
     ctx.save();
@@ -429,7 +428,7 @@ function drawBridgeFrame(ctx: CanvasRenderingContext2D, net: LaneNet, c: Corrido
   // Плита настила — за балками, со швами плит.
   const [p0, p1] = span(slabTo(earthTo, L));
   if (p1 - p0 > 0.5) {
-    const b = band(net, c, p0, p1, ROAD_MARGIN + 1.2);
+    const b = band(net, c, p0, p1, corridorMargin(c) + 1.2);
     ctx.fillStyle = SLAB;
     poly(ctx, [...b.left, ...[...b.right].reverse()]);
     ctx.closePath();
@@ -443,7 +442,7 @@ function drawBridgeFrame(ctx: CanvasRenderingContext2D, net: LaneNet, c: Corrido
     ctx.strokeStyle = '#bdb8ad';
     ctx.lineWidth = 0.3;
     for (let s = Math.ceil(p0 / 6) * 6; s < p1; s += 6) {
-      const x = across(net, c, s, ROAD_MARGIN + 1.2);
+      const x = across(net, c, s, corridorMargin(c) + 1.2);
       if (!x) continue;
       poly(ctx, x);
       ctx.stroke();
@@ -459,7 +458,7 @@ function drawBridgeFrame(ctx: CanvasRenderingContext2D, net: LaneNet, c: Corrido
 function drawBore(ctx: CanvasRenderingContext2D, net: LaneNet, c: Corridor, s0: number, s1: number): void {
   ctx.save();
   ctx.globalAlpha = Math.min(1, ctx.globalAlpha * 2);
-  const b = band(net, c, s0, s1, ROAD_MARGIN + 1.2);
+  const b = band(net, c, s0, s1, corridorMargin(c) + 1.2);
   ctx.fillStyle = BORE;
   poly(ctx, [...b.left, ...[...b.right].reverse()]);
   ctx.closePath();
@@ -467,7 +466,7 @@ function drawBore(ctx: CanvasRenderingContext2D, net: LaneNet, c: Corridor, s0: 
   ctx.strokeStyle = RING;
   ctx.lineWidth = 0.5;
   for (let s = Math.ceil(s0 / 4) * 4; s <= s1; s += 4) {
-    const x = across(net, c, s, ROAD_MARGIN + 1.2, 0);
+    const x = across(net, c, s, corridorMargin(c) + 1.2, 0);
     if (!x) continue;
     poly(ctx, x);
     ctx.stroke();
@@ -576,7 +575,7 @@ export function drawProjectShadows(ctx: CanvasRenderingContext2D, net: LaneNet, 
         const [doneA, doneB] = c.build?.fromB ? [c.length - earthTo, c.length] : [0, earthTo];
         const [s0, s1] = built ? [doneA, doneB] : c.build?.fromB ? [0, doneA] : [doneB, c.length];
         if (s1 - s0 < 0.5) continue;
-        clipped(g, band(net, c, s0, s1, ROAD_MARGIN + 10, true), () =>
+        clipped(g, band(net, c, s0, s1, corridorMargin(c) + 10, true), () =>
           lanes.draw(g, net, zoom, false, view, layer, { corridor: (id) => id === c.id, node: none, shadow: 'only' }),
         );
       }
@@ -635,12 +634,13 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
     // кромкой; прежнее полотно до разметки — прежней дорогой (drawOldRoad), разметка — по всему новому полотну.
     const old = kind === 'road' && keepsPavement(c) ? oldCorridor(c) : null;
     const area = (s0: number, s1: number, pad: number) => (old ? wideningBands(c, old, s0, s1, pad, side) : band(net, c, s0, s1, pad, false, side));
+    const margin = corridorMargin(c);
     if (kind === 'bridge') {
       const [ca, cb] = cuts.get(c.id) ?? [0, 0];
       drawBridgeFrame(ctx, net, c, earthTo, Math.max(0, ca), c.length - Math.max(0, cb));
     } else if (earth && kind === 'tunnel') drawBore(ctx, net, c, ...earth);
     else if (earth) {
-      const b = area(...earth, ROAD_MARGIN + 1.2);
+      const b = area(...earth, margin + 1.2);
       ctx.fillStyle = EARTH;
       fillBands(ctx, Array.isArray(b) ? b : [b]);
     }
@@ -648,9 +648,9 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
     const only = (id: number) => id === c.id;
     // Тень — уже нарисована (shadows): в полосе полотна от неё был бы лишь обрывок поверх.
     // Второй проход (и после него перекрыли целиком) — первая половина уже новая.
-    if (kind === 'road' && c.build!.pass) clipped(ctx, band(net, c, 0, c.length, ROAD_MARGIN + 3, false, -workSide(c.build!) as 1 | -1), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
-    if (paveTo > 0.5) clipped(ctx, area(...span(paveTo), ROAD_MARGIN + 3), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, marks: false, shadow: 'skip' }));
-    if (marksTo > 0.5) clipped(ctx, band(net, c, ...span(marksTo), ROAD_MARGIN + 3, false, side), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
+    if (kind === 'road' && c.build!.pass) clipped(ctx, band(net, c, 0, c.length, margin + 3, false, -workSide(c.build!) as 1 | -1), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
+    if (paveTo > 0.5) clipped(ctx, area(...span(paveTo), margin + 3), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, marks: false, shadow: 'skip' }));
+    if (marksTo > 0.5) clipped(ctx, band(net, c, ...span(marksTo), margin + 3, false, side), () => lanes.draw(ctx, net, zoom, false, view, layer, { corridor: only, node: none, shadow: 'skip' }));
   }
   // Площадки узлов — этапом, дошедшим до них (nodeStage): покрытие — асфальтом площадки (у примыкания к готовой дороге
   // закрывает и её разметку, как у готового перекрёстка), отсыпка — землёй по её контуру, если готовых дорог у узла нет.
@@ -680,7 +680,7 @@ export function drawProjects(ctx: CanvasRenderingContext2D, net: LaneNet, lanes:
     // Только по своему у полотна: через площадку перекрёстка (и готовую дорогу на ней) кромки не идут.
     const [ca, cb] = cuts.get(c.id) ?? [0, 0];
     if (c.length - cb - ca < 1) continue;
-    const all = band(net, c, ca, c.length - cb, ROAD_MARGIN);
+    const all = band(net, c, ca, c.length - cb, corridorMargin(c));
     if (all.left.length < 2) continue;
     ctx.globalAlpha = alpha * (l < 0 ? 0.55 : 1);
     poly(ctx, all.left);
@@ -726,14 +726,13 @@ export function drawClosures(
     // прежние полосы, что не открыты.
     const old = fitLanes(w.lanes, w.len, L);
     const kept = new Set(k === 'part' ? partLanes(net, c).map((l) => l.offset) : []);
-    const half = LANE_W / 2;
     const bands: [number, number][] = [];
     if (k === 'closed') {
       const e = edgesAt(c, L / 2);
-      const lo = Math.min(e?.[0] ?? 0, ...old.map((l) => l.offset - half));
-      const hi = Math.max(e?.[1] ?? 0, ...old.map((l) => l.offset + half));
+      const lo = Math.min(e?.[0] ?? 0, ...old.map((l) => l.offset - laneWidth(l) / 2));
+      const hi = Math.max(e?.[1] ?? 0, ...old.map((l) => l.offset + laneWidth(l) / 2));
       bands.push([lo, hi]);
-    } else for (const l of old) if (!kept.has(l.offset)) bands.push([l.offset - half, l.offset + half]);
+    } else for (const l of old) if (!kept.has(l.offset)) bands.push([l.offset - laneWidth(l) / 2, l.offset + laneWidth(l) / 2]);
     if (!bands.length) continue;
     const bar = Math.max(2, 4 * px);
     for (const s of ends) {
@@ -808,11 +807,10 @@ function drawReverse(
   };
   const side = workSide(b);
   const old = fitLanes(w.lanes, w.len, L);
-  const half = LANE_W / 2;
   const work = old.filter((l) => l.offset * side > 0.01);
   if (!work.length) return;
   // Перекладываемая половина — поперёк от оси до внешней кромки её полос (со знаком стороны).
-  const outer = side * Math.max(...work.map((l) => Math.abs(l.offset) + half));
+  const outer = side * Math.max(...work.map((l) => Math.abs(l.offset) + laneWidth(l) / 2));
   const T = Math.min(taperLen(w.cls) / 2, (zone[1] - zone[0]) / 2);
   const near = (p: Vec) => p.x > view.x0 - 10 && p.x < view.x1 + 10 && p.y > view.y0 - 10 && p.y < view.y1 + 10;
   const r = Math.max(0.7, 2.2 * px);
@@ -863,8 +861,8 @@ function drawReverse(
     const s = flow > 0 ? stops[0] : stops[1];
     const lanes = old.filter((l) => l.flow === flow);
     if (!lanes.length) continue;
-    const lo = Math.min(...lanes.map((l) => l.offset - half));
-    const hi = Math.max(...lanes.map((l) => l.offset + half));
+    const lo = Math.min(...lanes.map((l) => l.offset - laneWidth(l) / 2));
+    const hi = Math.max(...lanes.map((l) => l.offset + laneWidth(l) / 2));
     const p = pointOff(c, s, lo + 0.3);
     const q = pointOff(c, s, hi - 0.3);
     if (!near(p)) continue;
@@ -875,8 +873,8 @@ function drawReverse(
     ctx.lineTo(q.x, q.y);
     ctx.stroke();
     // Светофор — у правой по ходу кромки, чуть за обочиной: корпус вдоль дороги, сверху — красный, ниже — зелёный.
-    const edge = flow > 0 ? Math.max(hi, ...old.map((l) => l.offset + half)) : Math.min(lo, ...old.map((l) => l.offset - half));
-    const at = pointOff(c, s, edge + flow * (ROAD_MARGIN + 1.6));
+    const edge = flow > 0 ? Math.max(hi, ...old.map((l) => l.offset + laneWidth(l) / 2)) : Math.min(lo, ...old.map((l) => l.offset - laneWidth(l) / 2));
+    const at = pointOff(c, s, edge + flow * (corridorMargin({ lanes: old }) + 1.6));
     const t = tangentAt(s);
     const dir = flow > 0 ? t : scale(t, -1);
     const lit = lamp(c.id, flow);

@@ -1,6 +1,6 @@
 import { Cubic, CurveLUT } from '../core/bezier';
 import { add, dist, dot, len, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { capLimit, isDivided, LANE_W, MEDIAN, PARK_W, RoadClass, RoadSpec } from '../world/roadTypes';
+import { capLimit, isDivided, isYardSpec, LANE_W, MEDIAN, PARK_W, ROAD_MARGIN, RoadClass, RoadSpec, YARD_LANE_W, YARD_MARGIN } from '../world/roadTypes';
 import type { PhaseSpec } from './lights';
 import type { WalkSetting } from './crosswalk';
 
@@ -31,6 +31,8 @@ export interface LaneSlot {
   to: number;
   /** Линия к соседней полосе с бо́льшим смещением — сплошная: через неё не перестраиваются. */
   solid?: boolean;
+  /** Узкая полоса движения дворового проезда. */
+  narrow?: true;
   /**
    * Полоса стоянки вдоль бордюра (docs/PARKING.md, этап 2): асфальт, тротуар, отступ домов, цена и стройка — как у
    * полосы, но уже (PARK_W, laneWidth: смещение — на (LANE_W + PARK_W) / 2 от соседней полосы движения) и движения по
@@ -45,8 +47,11 @@ export const isDrive = (l: LaneSlot): boolean => !l.park;
 /** Полосы движения полотна — без полос стоянки. */
 export const driveLanes = (c: { lanes: LaneSlot[] }): LaneSlot[] => (c.lanes.some((l) => l.park) ? c.lanes.filter(isDrive) : c.lanes);
 
-/** Ширина слота: полоса движения — LANE_W, полоса стоянки — PARK_W (уже: машина стоит, а не едет). */
-export const laneWidth = (l: { park?: true }): number => (l.park ? PARK_W : LANE_W);
+/** Ширина полосы движения, дворового проезда или стоянки. */
+export const laneWidth = (l: Pick<LaneSlot, 'park' | 'narrow'>): number => (l.park ? PARK_W : l.narrow ? YARD_LANE_W : LANE_W);
+
+/** У дворового проезда без добавленных полос меньше запас у бордюра. */
+export const corridorMargin = (c: Pick<Corridor, 'lanes'>): number => c.lanes.length > 0 && c.lanes.every((l) => l.narrow && !l.park) ? YARD_MARGIN : ROAD_MARGIN;
 
 /** Смещение слота шириной w вплотную к полосе l снаружи от неё (out — знак: 1 — бо́льшие смещения, −1 — меньшие). */
 export const besideOffset = (l: LaneSlot, out: number, w: number): number => l.offset + (out * (laneWidth(l) + w)) / 2;
@@ -333,6 +338,14 @@ export function twoWay(f: number, b: number, median = 0): LaneSlot[] {
   return res;
 }
 
+/** Дворовой проезд с одной узкой полосой в каждую сторону. */
+export function yardLanes(): LaneSlot[] {
+  return [
+    { ...slot(-YARD_LANE_W / 2, -1), narrow: true },
+    { ...slot(YARD_LANE_W / 2, 1), narrow: true },
+  ];
+}
+
 /** n полос в одну сторону, ось полотна посередине. */
 export function oneWay(n: number, flow: Flow = 1): LaneSlot[] {
   return Array.from({ length: n }, (_, i) => slot((i - (n - 1) / 2) * LANE_W, flow));
@@ -349,7 +362,7 @@ export interface RoadProfile {
 export function profileOf(spec: RoadSpec): RoadProfile {
   const f = spec.lanesF;
   const b = spec.lanesB;
-  const lanes = b === 0 ? oneWay(f) : f === 0 ? oneWay(b) : twoWay(f, b, isDivided(spec) ? MEDIAN : 0);
+  const lanes = isYardSpec(spec) ? yardLanes() : b === 0 ? oneWay(f) : f === 0 ? oneWay(b) : twoWay(f, b, isDivided(spec) ? MEDIAN : 0);
   return { cls: spec.cls, lanes, limit: capLimit(spec.cls, spec.limit) };
 }
 
@@ -383,6 +396,7 @@ export interface CorridorOptions {
 /** Сеть полос для сохранения и отмены. */
 export interface LaneNetSave {
   nextId: number;
+  yardWidths?: true;
   nodes: Omit<LaneNode, 'corridors'>[];
   corridors: Omit<Corridor, 'lut' | 'length' | 'rev'>[];
 }
@@ -680,6 +694,7 @@ export class LaneNet {
   toJSON(): LaneNetSave {
     return {
       nextId: this.nextId,
+      yardWidths: true,
       nodes: [...this.nodes.values()].map(({ corridors: _, ...n }) => ({ ...n, pos: { ...n.pos }, dir: { ...n.dir } })),
       corridors: [...this.corridors.values()].map(({ lut: _l, length: _n, rev: _r, ...c }) => ({
         ...c,
@@ -690,7 +705,7 @@ export class LaneNet {
     };
   }
 
-  static fromJSON(data: LaneNetSave): LaneNet {
+  static fromJSON(data: LaneNetSave, migrateYards = false): LaneNet {
     const net = new LaneNet();
     net.nextId = data.nextId;
     for (const n of data.nodes) {
@@ -708,7 +723,32 @@ export class LaneNet {
       if (c.b !== c.a) net.node(c.b).corridors.push(c.id);
     }
     net.version = 1;
+    if (migrateYards && !data.yardWidths) net.narrowLegacyYards();
     return net;
+  }
+
+  /** Старые дворовые проезды с обычным профилем 1+1 получают узкие полосы, сохраняя узлы и номера полос. */
+  private narrowLegacyYards(): void {
+    const candidates = new Set([...this.corridors.values()].filter((c) => {
+      if (c.cls !== 'street' || (c.limit ?? 40) !== 40 || c.ring || c.build || c.portA || c.portB || c.lanes.length !== 2) return false;
+      const [a, b] = c.lanes;
+      if (a.flow === b.flow) return false;
+      return c.lanes.every((l) => !l.park && !l.narrow && !l.solid && l.offset === l.flow * LANE_W / 2 && l.from <= 0.01 && l.to >= c.length - 0.01);
+    }).map((c) => c.id));
+    // Стык со съездом, дополнительной полосой или строящейся дорогой оставляем целым: сквозные полосы должны совпасть.
+    const pending = [...candidates];
+    for (const id of pending) {
+      if (!candidates.has(id)) continue;
+      const c = this.corridor(id);
+      const seams = [this.node(c.a), this.node(c.b)].filter((n) => n.kind === 'seam');
+      if (!seams.some((n) => n.corridors.some((k) => !candidates.has(k)))) continue;
+      candidates.delete(id);
+      for (const n of seams) pending.push(...n.corridors.filter((k) => candidates.has(k)));
+    }
+    for (const id of candidates) {
+      const c = this.corridor(id);
+      this.setLanes(c, c.lanes.map((l) => ({ ...l, offset: l.flow * YARD_LANE_W / 2, narrow: true })));
+    }
   }
 
   /**

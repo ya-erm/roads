@@ -1,7 +1,7 @@
 import type { Vec } from '../core/vec';
 import type { DrawMode } from '../game/build';
 import type { Fragment } from '../lanes/fragment';
-import { isDivided, isOneWay, isTrunk, RoadSpec, totalLanes } from '../world/roadTypes';
+import { isDivided, isOneWay, isTrunk, isYardSpec, LANE_W, RoadSpec, totalLanes, YARD_LANE_W } from '../world/roadTypes';
 import type { BiomeId } from '../world/biomes';
 import type { Relief, WaterAmount } from '../world/settings';
 
@@ -18,11 +18,11 @@ export function roadSvg(spec: RoadSpec, w = 84, h = 40): string {
   if (spec.cls === 'dirt') return dirtSvg(w, h, totalLanes(spec), isOneWay(spec));
   const back = isOneWay(spec) ? 0 : spec.lanesB;
   const fwd = spec.lanesF;
-  const yard = spec.cls === 'street' && (spec.limit ?? 40) === 40 && back === 1 && fwd === 1;
+  const yard = isYardSpec(spec);
   const lanes = back + fwd;
   // У автомагистрали между направлениями — разделительная полоса с барьером.
   const median = isDivided(spec) ? 4 : 0;
-  const laneH = Math.min(9, (h - 8 - median) / lanes);
+  const laneH = Math.min(9, (h - 8 - median) / lanes) * (yard ? YARD_LANE_W / LANE_W : 1);
   const total = lanes * laneH + median;
   const top = (h - total) / 2;
   const laneY = (i: number) => top + i * laneH + (i >= back && median ? median : 0);

@@ -52,6 +52,7 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
     const parked = [...net.corridors.values()].filter((c) => c.lanes.some((l) => l.park));
     expect(parked.length).toBeGreaterThan(20);
     expect(parked.every((c) => c.cls === 'street' || c.cls === 'avenue')).toBe(true);
+    expect(parked.every((c) => c.lanes.every((l) => !l.narrow))).toBe(true);
     expect(net.problems()).toEqual([]);
     // В центре хоть одна улица — со стоянкой с обеих сторон.
     const both = parked.filter((c) => c.lanes.some((l) => l.park && l.offset > 0) && c.lanes.some((l) => l.park && l.offset < 0));
@@ -65,7 +66,7 @@ describe('Полосы стоянки в партии', { timeout: 240_000 }, ()
     // Места: тысячи, у каждого — полоса движения рядом; часть — места ночёвки.
     expect(g.curb.stalls().length).toBeGreaterThan(1000);
     const homes = g.towns.flatMap((t) => g.carHomes.fleet(t).cars).filter((c) => c.place?.kind === 'curb');
-    expect(homes.length).toBeGreaterThan(100);
+    expect(homes.length).toBeGreaterThan(50);
     for (const c of homes) expect(dist(c.place!.curb!.pos, c.home.fp.center)).toBeLessThanOrEqual(CURB_TRIPS.homeRange);
     // Без флага (старая партия) город стоянок не ставит.
     const old = new Game({ ...PARK, parking: undefined, seed: 2, size: 'small' });

@@ -1,7 +1,6 @@
 import { add, dot, rightNormal, sub, Vec } from '../core/vec';
-import { ROAD_MARGIN } from '../world/roadTypes';
 import { bridgeLook, deckAlong } from './deck';
-import { edgesAt, laneBand, pointOff } from './geometry';
+import { asphaltEdgesAt, laneBand, pointOff } from './geometry';
 import type { GLane, GLink, LaneGraph } from './graph';
 import { Corridor, LaneNet, layerOf } from './model';
 
@@ -127,10 +126,10 @@ export function onOtherRoad(net: LaneNet, p: Vec, r: number, own: number): boole
     const d = sub(p, q.point);
     // За концом полотна (ближайшая точка — его конец) — только если круг заходит за обрез.
     if (Math.abs(dot(d, t)) > r + SIGN_GAP) continue;
-    const e = edgesAt(o, q.s);
+    const e = asphaltEdgesAt(o, q.s);
     if (!e) continue;
     const lat = dot(d, rightNormal(t));
-    if (lat > e[0] - ROAD_MARGIN - r - SIGN_GAP && lat < e[1] + ROAD_MARGIN + r + SIGN_GAP) return true;
+    if (lat > e[0] - r - SIGN_GAP && lat < e[1] + r + SIGN_GAP) return true;
   }
   return false;
 }

@@ -7,8 +7,8 @@ import { Anchor, applyLane, buildRoad, bulldoze, bulldozeBox, EditError, joinShi
 import { cornerCost, cornerHandles } from '../lanes/corners';
 import { edgesAt, laneShare } from '../lanes/geometry';
 import { CURB } from '../lanes/curb';
-import { Corridor, type CorridorWas, Flow, LaneNet, type LaneNode, LaneSlot, LAT_EPS } from '../lanes/model';
-import { capLimit, LEVEL_RUN, limitAllowed, limitCapText, RoadClass, ROAD_CLASSES, ROAD_MARGIN, structureFactor } from '../world/roadTypes';
+import { Corridor, corridorMargin, type CorridorWas, Flow, LaneNet, type LaneNode, LaneSlot, LAT_EPS } from '../lanes/model';
+import { capLimit, LEVEL_RUN, limitAllowed, limitCapText, RoadClass, ROAD_CLASSES, structureFactor } from '../world/roadTypes';
 import type { Footprint } from '../world/spatial';
 import type { HouseMove, StreetPart } from '../world/streetHouses';
 import { halfAtS } from '../world/worldgen';
@@ -191,7 +191,7 @@ export function moveNodeEdit(id: number, pos: Vec): NetEdit {
 /** Полуширина полотна с одной стороны оси (side ≥ 0 — справа по ходу a→b) вместе с обочиной. */
 function sideHalf(c: Corridor, s: number, side: number): number {
   const e = edgesAt(c, s);
-  return (e ? Math.max(0, side >= 0 ? e[1] : -e[0]) : 0) + ROAD_MARGIN;
+  return (e ? Math.max(0, side >= 0 ? e[1] : -e[0]) : 0) + corridorMargin(c);
 }
 
 /** Сколько от конца полотна чужие дороги общего узла могут идти вплотную (там перекрёсток или стык). */
@@ -762,7 +762,7 @@ export class RoadBuilder {
       const n = rightNormal(c.lut.tangentAt(s));
       const e = edgesAt(c, s);
       const deck = e ? add(p, scale(n, (e[0] + e[1]) / 2)) : p;
-      const deckHalf = (e ? (e[1] - e[0]) / 2 : 0) + ROAD_MARGIN;
+      const deckHalf = (e ? (e[1] - e[0]) / 2 : 0) + corridorMargin(c);
       // Тоннель проходит под домами; мосты и эстакады стоят на опорах — дома под ними сносим.
       if (h > -0.75) {
         for (const o of this.ctx.obstaclesAt(deck, deckHalf + 1)) {

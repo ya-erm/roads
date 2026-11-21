@@ -3,14 +3,14 @@ import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier'
 import type { Rng } from '../core/rng';
 import { add, angleOf, dist, dot, lerp, norm, scale, sub, Vec } from '../core/vec';
 import { edgesAt } from '../lanes/geometry';
-import { Corridor, LaneNet, LaneNode, LaneSlot, twoWay } from '../lanes/model';
+import { Corridor, corridorMargin, LaneNet, LaneNode, LaneSlot, twoWay, yardLanes } from '../lanes/model';
 import { biomeOf, townCargo } from './biomes';
 import { BASE_TOWN_CARGO, CargoType, EXTRA_TOWN_CARGO, INDUSTRY_LIST, type IndustryKind, type IndustryType } from './cargo';
 import { placePlayerWorld } from './deposits';
 import type { Deposit, HouseForm, Industry, Structure, Town, TownBuilding, TownStyle } from './entities';
 import type { Network } from './network';
 import { lotClearOfRoads } from './lotClear';
-import { isRail, isTrunk, RAIL_HALF, RoadClass, ROAD_MARGIN, WALK_EDGE } from './roadTypes';
+import { isRail, isTrunk, RAIL_HALF, RoadClass, WALK_EDGE } from './roadTypes';
 import { DEFAULT_SETTINGS, INDUSTRY_DENSITY, industryFactor, mapScaleOf, playerIndustries, townCount, townSizes, WorldProfile, WorldSettings } from './settings';
 import { industryCount, levelIndustryGround, shoreFits, shoreSpot, terrainFits } from './sites';
 import { compoundOnLand, hasFields, hasPastures, industryFootprint } from './industrySites';
@@ -147,7 +147,7 @@ interface Profile {
   cls: RoadClass;
   lanes: LaneSlot[];
 }
-const STREET: Profile = { cls: 'street', lanes: twoWay(1, 1) };
+const STREET: Profile = { cls: 'street', lanes: yardLanes() };
 const MAIN_STREET: Profile = { cls: 'avenue', lanes: twoWay(1, 1) };
 const AVENUE: Profile = { cls: 'avenue', lanes: twoWay(2, 2) };
 
@@ -169,13 +169,13 @@ export interface WorldContext {
 /** Полуширина асфальта полотна в точке s (по большей стороне). */
 export function halfAtS(c: Corridor, s: number): number {
   const e = edgesAt(c, s);
-  return e ? Math.max(-e[0], e[1]) + ROAD_MARGIN : ROAD_MARGIN;
+  return (e ? Math.max(-e[0], e[1]) : 0) + corridorMargin(c);
 }
 
 /** Полуширина асфальта с одной стороны оси в s (side > 0 — справа по a→b), с обочиной: полоса стоянки бывает с одной. */
 export function sideHalfAt(c: Corridor, s: number, side: number): number {
   const e = edgesAt(c, s);
-  return (e ? Math.max(0, side > 0 ? e[1] : -e[0]) : 0) + ROAD_MARGIN;
+  return (e ? Math.max(0, side > 0 ? e[1] : -e[0]) : 0) + corridorMargin(c);
 }
 
 /** От точки p до кромки асфальта полотна c с той стороны, где точка (меньше нуля — на асфальте). */

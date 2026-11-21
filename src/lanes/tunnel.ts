@@ -4,8 +4,7 @@
  * за ним — под землёй (бледно), граница — ровно по линии портала, а не скачком всей машиной.
  */
 import { add, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
-import { ROAD_MARGIN } from '../world/roadTypes';
-import { edgesAt } from './geometry';
+import { asphaltEdgesAt } from './geometry';
 import { type Corridor, type LaneNet, layerOf } from './model';
 
 export interface Portal {
@@ -28,11 +27,11 @@ export function tunnelPortals(net: LaneNet, corridors: Iterable<Corridor> = net.
       if ((end === 'a' ? la : lb) < -0.25) continue;
       const s = end === 'a' ? 0 : c.length;
       const t = c.lut.tangentAt(s);
-      const e = edgesAt(c, s) ?? edgesAt(c, end === 'a' ? Math.min(c.length, 1) : Math.max(0, c.length - 1));
+      const e = asphaltEdgesAt(c, s) ?? asphaltEdgesAt(c, end === 'a' ? Math.min(c.length, 1) : Math.max(0, c.length - 1));
       if (!e) continue;
       // Поперёк — вправо от направления внутрь: у конца b оно против оси, края меняются местами.
       const [l, r] = end === 'a' ? e : [-e[1], -e[0]];
-      res.push({ pos: c.lut.pointAt(s), dir: end === 'a' ? t : scale(t, -1), left: l - ROAD_MARGIN, right: r + ROAD_MARGIN });
+      res.push({ pos: c.lut.pointAt(s), dir: end === 'a' ? t : scale(t, -1), left: l, right: r });
     }
   }
   return res;

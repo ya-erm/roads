@@ -4,12 +4,12 @@ import { add, dist, dot, len, norm, scale, sub, Vec } from '../core/vec';
 import { deckHeight } from '../input/roadtools';
 import { Anchor, buildRoad, EditError } from '../lanes/edit';
 import { setDecks, zAlong } from '../lanes/deck';
-import { Flow, LaneNet, profileOf } from '../lanes/model';
+import { corridorMargin, Flow, LaneNet, profileOf } from '../lanes/model';
 import { edgesAt } from '../lanes/geometry';
 import { laneSpeed } from '../lanes/graph';
 import { curveLimits, curveZones } from '../lanes/speedProfile';
 import type { Network } from '../world/network';
-import { isOneWay, isRail, KMH_PER_UNIT, LEVEL_RUN, roadEdges, ROAD_MARGIN, type RoadSpec, specSpeed } from '../world/roadTypes';
+import { isOneWay, isRail, KMH_PER_UNIT, LEVEL_RUN, roadEdges, type RoadSpec, specSpeed } from '../world/roadTypes';
 import { Builder, type DrawMode, type NetKind, type Plan, type RoadRequest, type Snap } from './build';
 import type { Game } from './game';
 import { autoLevels, designProfile, PROFILE_STEP, steepText } from './grade';
@@ -391,7 +391,8 @@ export function corridorCurveSigns(net: LaneNet, ids: number[]): CurveSign[] {
     const c = net.corridors.get(id);
     if (!c || c.ring || !c.lanes.length) continue;
     const e = edgesAt(c, c.length / 2);
-    const edges = { left: (e ? -e[0] : 0) + ROAD_MARGIN, right: (e ? e[1] : 0) + ROAD_MARGIN };
+    const margin = corridorMargin(c);
+    const edges = { left: (e ? -e[0] : 0) + margin, right: (e ? e[1] : 0) + margin };
     curveSigns(c.lut, laneSpeed(c), edges, c.lanes.some((l) => l.flow > 0), c.lanes.some((l) => l.flow < 0), out);
   }
   return out;

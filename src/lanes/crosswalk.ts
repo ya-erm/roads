@@ -1,7 +1,6 @@
 import { rightNormal, scale, Vec } from '../core/vec';
-import { ROAD_MARGIN } from '../world/roadTypes';
 import { edgesAt, junctionCuts, laneBand, pointOff, sFrom } from './geometry';
-import { Corridor, CorridorEnd, End, LaneNet, LaneNode } from './model';
+import { Corridor, corridorMargin, CorridorEnd, End, LaneNet, LaneNode } from './model';
 
 /**
  * Пешеходные переходы на подъездах перекрёстков (docs/CROSSWALKS.md): настройка узла (`walks`), где переход возможен,
@@ -195,6 +194,7 @@ export function walkGeo(arm: WalkArm): WalkGeo {
   const d1 = d0 + XWALK.depth;
   const sMid = at((d0 + d1) / 2);
   const [lo, hi] = edgesAt(c, sMid) ?? [-7, 7];
+  const margin = corridorMargin(c);
   const quad = (da: number, db: number, x0: number, x1: number): Vec[] => [
     pointOff(c, at(da), x0),
     pointOff(c, at(db), x0),
@@ -203,8 +203,8 @@ export function walkGeo(arm: WalkArm): WalkGeo {
   ];
   // Полосы зебры — по всей ширине асфальта, от бордюра до бордюра (и через разделительную): крайние — в curbPad от края,
   // шаг подогнан под ширину (не уже промежутка 0,9 м).
-  const left = lo - ROAD_MARGIN + XWALK.curbPad;
-  const room = hi - lo + 2 * ROAD_MARGIN - 2 * XWALK.curbPad;
+  const left = lo - margin + XWALK.curbPad;
+  const room = hi - lo + 2 * margin - 2 * XWALK.curbPad;
   let n = Math.max(2, Math.round((room - XWALK.stripe) / XWALK.period) + 1);
   while (n > 2 && (room - XWALK.stripe) / (n - 1) - XWALK.stripe < 0.9) n--;
   const step = (room - XWALK.stripe) / (n - 1);
@@ -212,8 +212,8 @@ export function walkGeo(arm: WalkArm): WalkGeo {
   for (let i = 0; i < n; i++) stripes.push(quad(d0, d1, left + i * step, left + i * step + XWALK.stripe));
   const dc = arm.cut + XWALK_BACK;
   // Разметка полос стёрта до самых бордюров (и краской нарисованные кромки у магистралей и односторонних).
-  const cl = lo - ROAD_MARGIN + 0.15;
-  const ch = hi + ROAD_MARGIN - 0.15;
+  const cl = lo - margin + 0.15;
+  const ch = hi + margin - 0.15;
   const cover = [
     pointOff(c, at(arm.cut - 0.2), cl),
     pointOff(c, at((arm.cut + dc) / 2), cl),
@@ -225,8 +225,8 @@ export function walkGeo(arm: WalkArm): WalkGeo {
   const lanes = c.lanes.filter((l) => laneBand(c, l, sMid)).length;
   // Правый бордюр, если смотреть от перекрёстка: у конца a — сторона hi (вправо по a→b), у конца b — lo.
   const side = end === 'a' ? 1 : -1;
-  const edge = side > 0 ? hi + ROAD_MARGIN : lo - ROAD_MARGIN;
-  const edgeL = side > 0 ? lo - ROAD_MARGIN : hi + ROAD_MARGIN;
+  const edge = side > 0 ? hi + margin : lo - margin;
+  const edgeL = side > 0 ? lo - margin : hi + margin;
   const t = c.lut.tangentAt(sMid);
   return {
     corridor: c.id,
@@ -234,10 +234,10 @@ export function walkGeo(arm: WalkArm): WalkGeo {
     s: sMid,
     lo,
     hi,
-    width: hi - lo + 2 * ROAD_MARGIN,
+    width: hi - lo + 2 * margin,
     cover,
     stripes,
-    ends: [pointOff(c, sMid, lo - ROAD_MARGIN - 1.2), pointOff(c, sMid, hi + ROAD_MARGIN + 1.2)],
+    ends: [pointOff(c, sMid, lo - margin - 1.2), pointOff(c, sMid, hi + margin + 1.2)],
     curb: pointOff(c, sMid, edge),
     out: scale(rightNormal(t), side),
     curbL: pointOff(c, sMid, edgeL),

@@ -1,8 +1,8 @@
 import { bezPoint, Cubic, CurveLUT, minRadius } from '../core/bezier';
 import { add, dot, len, norm, scale, sub, Vec } from '../core/vec';
-import { LANE_W, ROAD_CLASSES } from '../world/roadTypes';
+import { ROAD_CLASSES } from '../world/roadTypes';
 import { EditError, handlePoints, smoothCorner, splitCorridor } from './edit';
-import { Corridor, CorridorEnd, laneKey, LaneNet, LaneNode, LaneSlot, LAT_EPS, parseLaneKey, renameArm } from './model';
+import { besideOffset, Corridor, CorridorEnd, laneKey, LaneNet, LaneNode, LaneSlot, laneWidth, LAT_EPS, parseLaneKey, renameArm } from './model';
 
 /**
  * Узел на построенной дороге и обратно: разделить полотно стыком в точке (форма та же, дальше узел можно
@@ -65,7 +65,7 @@ function lanesAlong(c: Corridor, forward: boolean, shift: number): LaneSlot[] {
     if (forward) return { ...l, from: shift + l.from, to: shift + to };
     // Против хода смещения — с обратным знаком: сплошная к соседу с бо́льшим смещением теперь у той полосы,
     // что была соседом с меньшим.
-    const below = c.lanes.find((m) => Math.abs(m.offset - (l.offset - LANE_W)) < 0.5);
+    const below = c.lanes.find((m) => m.offset < l.offset && Math.abs(l.offset - besideOffset(m, 1, laneWidth(l))) < 0.5);
     const out: LaneSlot = { ...l, offset: -l.offset, flow: -l.flow as LaneSlot['flow'], from: shift + L - to, to: shift + L - l.from };
     if (below?.solid) out.solid = true;
     else delete out.solid;
@@ -237,7 +237,7 @@ export function mergeAtNode(net: LaneNet, id: number): Corridor {
     lanes.push(l);
   });
   l2.forEach((l, j) => {
-    const k = l.from <= L1 + 0.01 ? lanes.findIndex((m) => m.to >= L1 - 0.01 && m.flow === l.flow && Math.abs(m.offset - l.offset) < LAT_EPS) : -1;
+    const k = l.from <= L1 + 0.01 ? lanes.findIndex((m) => m.to >= L1 - 0.01 && m.flow === l.flow && laneWidth(m) === laneWidth(l) && Math.abs(m.offset - l.offset) < LAT_EPS) : -1;
     if (k >= 0) {
       lanes[k] = { ...lanes[k], to: l.to };
       at2.set(j, k);

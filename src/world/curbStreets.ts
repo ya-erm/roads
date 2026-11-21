@@ -82,7 +82,7 @@ export function curbSides(town: Town, seg: Corridor): (1 | -1)[] {
  * Нельзя (магистраль, грунтовка, коротко, там уже стоянка, сторона слева по ходу) — null.
  */
 export function withCurb(net: LaneNet, c: Corridor, side: 1 | -1): LaneSlot[] | null {
-  if (!curbAllowed(c) || c.build) return null;
+  if (!curbAllowed(c) || c.build || c.lanes.some((l) => l.narrow)) return null;
   const T = taperLen(c.cls);
   const outer = c.lanes.reduce<LaneSlot | null>((best, l) => (l.offset * side > 0 && (!best || l.offset * side > best.offset * side) ? l : best), null);
   if (!outer || outer.park || outer.offset * outer.flow < 0) return null;

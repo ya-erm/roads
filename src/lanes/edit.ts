@@ -963,7 +963,8 @@ export function toggleParkLane(net: LaneNet, c: Corridor, i: number): 'park' | '
     const { park: _p, ...drive } = l;
     const out = Math.sign(l.offset) || 1;
     const inside = insideLane(c, l.offset, (Math.max(0, l.from) + Math.min(c.length, l.to)) / 2, PARK_W);
-    drive.offset = inside ? besideOffset(inside, out, LANE_W) : l.offset + (out * (LANE_W - PARK_W)) / 2;
+    const width = laneWidth(drive);
+    drive.offset = inside ? besideOffset(inside, out, width) : l.offset + (out * (width - PARK_W)) / 2;
     lanes[i] = drive;
     net.setLanes(c, lanes);
     joinEnds(net, c, i);
@@ -973,7 +974,7 @@ export function toggleParkLane(net: LaneNet, c: Corridor, i: number): 'park' | '
   const mid = (Math.max(0, l.from) + Math.min(c.length, l.to)) / 2;
   const same = driveLanes(c).filter((o) => o.flow === l.flow && o.from <= mid && o.to >= mid);
   if (same.length < 2) throw new EditError('Последняя полоса в эту сторону — на 1+1 нельзя');
-  const inner = insideLane(c, l.offset, mid);
+  const inner = insideLane(c, l.offset, mid, laneWidth(l));
   if (!inner || inner.park || inner.flow !== l.flow || l.offset * l.flow < 0) throw new EditError('Под стоянку — только крайняя справа по ходу');
   // У стыка, за которым эта полоса едет дальше, стоянка кончается отгоном — внутри полотна.
   const room = (end: End) => {
@@ -1037,7 +1038,7 @@ export function retypeLaneSpan(net: LaneNet, c: Corridor, i: number, a: number, 
     lane = { offset: besideOffset(inner, out, LANE_W), flow: l.flow, from: u > lo ? u + T : u, to: v < hi ? v - T : v };
   } else {
     if (!isEdgeLane(c, l) || Math.abs(l.offset) < 0.01) throw new EditError('Под стоянку — только крайняя полоса');
-    const inner = insideLane(c, l.offset, mid);
+    const inner = insideLane(c, l.offset, mid, laneWidth(l));
     if (!inner || inner.park || inner.flow !== l.flow || l.offset * l.flow < 0) throw new EditError('Под стоянку — только крайняя справа по ходу');
     if (driveLanes(c).filter((o) => o.flow === l.flow && o.from <= mid && o.to >= mid).length < 2) throw new EditError('Последняя полоса в эту сторону — на 1+1 нельзя');
     lane = { offset: besideOffset(inner, out, PARK_W), flow: l.flow, from: u, to: v, park: true };
@@ -1636,7 +1637,8 @@ function hostAt(net: LaneNet, p: Vec, level: number, isHost: (c: Corridor) => bo
 function auxOffset(c: Corridor, flow: Flow): number {
   const through = c.lanes.filter((l) => l.flow === flow && l.from <= 0.01 && l.to >= c.length - 0.01);
   if (!through.length) throw new EditError('Съезд против движения');
-  return flow > 0 ? Math.max(...through.map((l) => l.offset)) + LANE_W : Math.min(...through.map((l) => l.offset)) - LANE_W;
+  const outer = through.reduce((a, b) => flow * a.offset > flow * b.offset ? a : b);
+  return besideOffset(outer, flow, LANE_W);
 }
 
 /** Вспомогательная полоса; рядом с такой же — сливается с ней (полоса переплетения между въездом и съездом). */
@@ -2080,10 +2082,11 @@ function bridgeShort(net: LaneNet, e: CorridorEnd, ends: CorridorEnd[]): Corrido
       if (net.reaches(o.corridor, m, o.end) && net.across(o.corridor, j, o.end)) return;
       const offset = (at.lat - e.port) * e.along;
       const flow = (at.forward ? e.along : -e.along) as Flow;
-      if ([...d.lanes, ...add].some((x) => Math.abs(x.offset - offset) < LANE_W - 0.01)) return;
-      const far = net.laneAtSeam(f, { offset, flow, from: 0, to: d.length });
+      const lane = { ...m, offset, flow, from: 0, to: d.length };
+      if ([...d.lanes, ...add].some((x) => Math.abs(x.offset - offset) < (laneWidth(x) + laneWidth(lane)) / 2 - 0.01)) return;
+      const far = net.laneAtSeam(f, lane);
       const beyond = net.ends(farNode).some((g) => g.side !== f.side && laneNearEnd(net, g, far.lat, far.forward) >= 0);
-      if (beyond) add.push({ offset, flow, from: 0, to: d.length });
+      if (beyond) add.push(lane);
     });
   }
   if (!add.length) return null;

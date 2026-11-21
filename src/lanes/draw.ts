@@ -1,9 +1,9 @@
 import { add, closestOnSegment, cubicBezier, dist, norm, rightNormal, scale, sub, Vec } from '../core/vec';
-import { isDirt, LANE_W, ROAD_MARGIN } from '../world/roadTypes';
+import { isDirt, LANE_W } from '../world/roadTypes';
 import { arrowAt, arrowShape } from './arrowShape';
 import { bridgeLook, deckAlong, nodeDeck } from './deck';
-import { awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, plateOutline, pointOff, sFrom, stations } from './geometry';
-import { Corridor, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS, laneWidth, layerOf } from './model';
+import { asphaltEdgesAt, awaySign, edgesAt, junctionCuts, laneShare, paintedEdges, plateOutline, pointOff, sFrom, stations } from './geometry';
+import { Corridor, corridorMargin, CorridorEnd, End, LaneNet, LaneNode, LAT_EPS, laneWidth, layerOf } from './model';
 import { noseParapet, PARAPET, parapetLine, parapetWidth } from './parapet';
 import { onPrefs, prefOn } from '../ui/prefs';
 import { insidePoly, type JunctionMarks, junctionMarks } from './junctionMarks';
@@ -43,8 +43,8 @@ type Surface = 'road' | 'dirt' | 'yard';
 const surfaceColor = (surface: Surface) => (surface === 'yard' ? YARD_ASPHALT : C[surface]);
 const plainYard = (c: Corridor): boolean =>
   c.cls === 'street' && (c.limit ?? 40) === 40 && !c.ring && c.lanes.length === 2 && c.lanes[0].flow !== c.lanes[1].flow &&
-  c.lanes.every((l) => !l.park && !l.solid && Math.abs(Math.abs(l.offset) - LANE_W / 2) < LAT_EPS && l.from <= 0 && l.to >= c.length) &&
-  Math.abs(c.lanes[0].offset - c.lanes[1].offset) > LANE_W - LAT_EPS;
+  c.lanes.every((l) => !l.park && !l.solid && Math.abs(Math.abs(l.offset) - laneWidth(l) / 2) < LAT_EPS && l.from <= 0 && l.to >= c.length) &&
+  c.lanes[0].offset * c.lanes[1].offset < 0;
 
 const corridorSurface = (c: Corridor): Surface => isDirt(c.cls) ? 'dirt' : plainYard(c) ? 'yard' : 'road';
 
@@ -747,10 +747,10 @@ export class LaneRenderer {
     const at: number[] = [];
     const over: boolean[] = [];
     for (const s of ss) {
-      const e = edgesAt(c, s);
+      const e = asphaltEdgesAt(c, s);
       if (!e) continue;
-      left.push(up(s, e[0] - ROAD_MARGIN));
-      right.push(up(s, e[1] + ROAD_MARGIN));
+      left.push(up(s, e[0]));
+      right.push(up(s, e[1]));
       const v = look(s);
       shade.push(sub(v.shadow, v.lift));
       const h = net.heightAt(c, s);
@@ -855,9 +855,10 @@ export class LaneRenderer {
       const A = c.lanes[i];
       const B = c.lanes[j];
       const both = (s: number) => laneShare(c, A, s) > 0.02 && laneShare(c, B, s) > 0.02;
-      const gap = B.offset - A.offset;
-      const mid = (A.offset + B.offset) / 2;
-      if (Math.abs(gap - LANE_W) < 0.3) {
+      const edgeA = A.offset + laneWidth(A) / 2;
+      const edgeB = B.offset - laneWidth(B) / 2;
+      const mid = (edgeA + edgeB) / 2;
+      if (Math.abs(edgeB - edgeA) < 0.3) {
         const same = A.flow === B.flow;
         // Сплошная сама — у развилки полос в разные полотна, после вливания и у самого перекрёстка (autoSolids).
         const auto = same ? autoSolids(net, c, i, j, s0, s1) : [];
@@ -871,11 +872,11 @@ export class LaneRenderer {
           }
           return A.solid || auto.some(([u, v]) => s >= u - 1e-6 && s <= v + 1e-6) ? 'solid' : 'dash';
         });
-      } else if (gap > LANE_W + 0.3) {
+      } else if (edgeB - edgeA > 0.3) {
         // Разделительная полоса: барьер посередине, сплошные у полос.
         runs(mid, (s) => (both(s) ? 'barrier' : null));
-        runs(A.offset + LANE_W / 2, (s) => (laneShare(c, A, s) > 0.02 ? 'solid' : null));
-        runs(B.offset - LANE_W / 2, (s) => (laneShare(c, B, s) > 0.02 ? 'solid' : null));
+        runs(edgeA, (s) => (laneShare(c, A, s) > 0.02 ? 'solid' : null));
+        runs(edgeB, (s) => (laneShare(c, B, s) > 0.02 ? 'solid' : null));
       }
     }
     if (paintedEdges(c)) {
@@ -1001,7 +1002,7 @@ export class LaneRenderer {
    * Островок между X (левее в стыке) и Y (правее) на стороне side: их кромки (по цепочкам cx, cy) в стыке совпадают,
    * дальше расходятся; нос — где разошлись на NOSE_GAP (d, noseAt).
    */
-  private goreGeo(net: LaneNet, { X, side, cx, cy, d: d1 }: SharedEdge, lift: Lift): GoreGeo | null {
+  private goreGeo(net: LaneNet, { X, Y, side, cx, cy, d: d1 }: SharedEdge, lift: Lift): GoreGeo | null {
     // Точка кромки — поднята, как полотно в этом месте (на пандусе подъём меняется вдоль островка).
     const edge = (chain: EdgeChain, d: number, extra: number): Vec => {
       const { run, s } = chain.at(d);
@@ -1048,7 +1049,7 @@ export class LaneRenderer {
       if (cur.length > 1) lines.push(cur);
       return { pts: [...px, ...nose.slice(1, -1), ...back], nose, lines };
     };
-    const asphalt = outline(ROAD_MARGIN, d1);
+    const asphalt = outline(Math.min(corridorMargin(X.corridor), corridorMargin(Y.corridor)), d1);
     const paint = outline(0, d1 - 5);
     // Едут ли по крайней к островку полосе X от стыка.
     const facing = X.corridor.lanes
@@ -1104,9 +1105,10 @@ export class LaneRenderer {
   private capGeo(e: CorridorEnd): CapGeo {
     const c = e.corridor;
     const s = e.end === 'a' ? 0 : c.length;
-    const ed = edgesAt(c, s) ?? [-3.5, 3.5];
-    const a = pointOff(c, s, ed[0] - ROAD_MARGIN);
-    const b = pointOff(c, s, ed[1] + ROAD_MARGIN);
+    const half = LANE_W / 2 + corridorMargin(c);
+    const ed = asphaltEdgesAt(c, s) ?? [-half, half];
+    const a = pointOff(c, s, ed[0]);
+    const b = pointOff(c, s, ed[1]);
     const mid = scale(add(a, b), 0.5);
     const r = dist(a, b) / 2;
     const out = scale(e.away, -1);

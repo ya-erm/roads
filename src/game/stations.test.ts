@@ -6,6 +6,7 @@ import { RoadTools } from '../input/roadtools';
 import type { Station, TownBuilding } from '../world/entities';
 import { ROAD_PRESETS, specKmh, type RoadSpec } from '../world/roadTypes';
 import { type Footprint, footprintRadius, footprintSide } from '../world/spatial';
+import { START_ROADS } from '../world/startRoads';
 import { fillStreet, nearHighway, type WorldContext } from '../world/worldgen';
 import { DEFAULT_RULE } from './transport';
 import { Game } from './game';
@@ -594,7 +595,7 @@ describe('Перенос станции', { timeout: 60_000 }, () => {
       const far = add(exit.pos, scale(u, 260));
       const corner = { ...STREET, kink: true };
       const low = ind.fp.h / 2 + 110;
-      const path = [add(exit.pos, scale(v, low)), add(ind.fp.center, scale(v, low)), side(v, ind.fp.h / 2, 64)];
+      const path = [add(exit.pos, scale(v, low)), add(ind.fp.center, scale(v, low)), side(v, footprintSide(ind.fp, v), START_ROADS.industryExit)];
       let from: End = exit.id;
       let ok = roadPlan(game, exit.id, { free: far }).ok;
       if (ok) build(game, exit.id, far);

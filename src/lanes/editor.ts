@@ -1,5 +1,5 @@
 import type { Vec } from '../core/vec';
-import { ROAD_MARGIN, RoadClass } from '../world/roadTypes';
+import type { RoadClass } from '../world/roadTypes';
 import {
   Anchor,
   anchorAt,
@@ -17,7 +17,7 @@ import {
   toggleParkLane,
   toggleSolid,
 } from './edit';
-import { edgesAt, laneBand, pointOff, stations } from './geometry';
+import { asphaltEdgesAt, laneBand, pointOff, stations } from './geometry';
 import { capCorridorLimit, Corridor, LaneNet, LaneNetSave, LaneSlot, oneWay, twoWay } from './model';
 
 export type LabTool = 'view' | 'road' | 'lane' | 'select' | 'rebuild' | 'move' | 'bulldoze';
@@ -348,10 +348,10 @@ function corridorPoly(c: Corridor): Vec[] {
   const left: Vec[] = [];
   const right: Vec[] = [];
   for (const s of ss) {
-    const e = edgesAt(c, s);
+    const e = asphaltEdgesAt(c, s);
     if (!e) continue;
-    left.push(pointOff(c, s, e[0] - ROAD_MARGIN));
-    right.push(pointOff(c, s, e[1] + ROAD_MARGIN));
+    left.push(pointOff(c, s, e[0]));
+    right.push(pointOff(c, s, e[1]));
   }
   return [...left, ...right.reverse()];
 }

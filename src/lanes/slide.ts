@@ -128,6 +128,7 @@ interface Run {
   hi: number;
   solid?: boolean;
   park?: true;
+  narrow?: true;
   /** Номера полосы на исходных полотнах — чтобы у полотна полосы шли в прежнем порядке. */
   src: Map<number, number>;
 }
@@ -191,11 +192,11 @@ function mergeLaneRuns(net: LaneNet, j: BranchSeam, road: Corridor[], uOf: Map<n
       let hi = Math.max(x, y);
       if (lo <= min + 0.01) lo = -Infinity;
       if (hi >= max - 0.01) hi = Infinity;
-      let run: Run = { lat: l.offset * sign, fwd: l.flow * sign > 0, lo, hi, solid: l.solid, park: l.park, src: new Map([[c.id, i]]) };
+      let run: Run = { lat: l.offset * sign, fwd: l.flow * sign > 0, lo, hi, solid: l.solid, park: l.park, narrow: l.narrow, src: new Map([[c.id, i]]) };
       // Куски одной полосы через соседний узел — одна полоса, включая её конечный отгон за ним.
       for (let k = runs.length - 1; k >= 0; k--) {
         const r = runs[k];
-        if (Math.abs(r.lat - run.lat) >= LAT_EPS || r.fwd !== run.fwd || !!r.solid !== !!run.solid || !!r.park !== !!run.park || r.lo > run.hi + 0.5 || run.lo > r.hi + 0.5) continue;
+        if (Math.abs(r.lat - run.lat) >= LAT_EPS || r.fwd !== run.fwd || !!r.solid !== !!run.solid || r.park !== run.park || r.narrow !== run.narrow || r.lo > run.hi + 0.5 || run.lo > r.hi + 0.5) continue;
         run = { ...run, lo: Math.min(r.lo, run.lo), hi: Math.max(r.hi, run.hi), src: new Map([...r.src, ...run.src]) };
         runs.splice(k, 1);
       }
@@ -213,7 +214,7 @@ function mergeLaneRuns(net: LaneNet, j: BranchSeam, road: Corridor[], uOf: Map<n
     for (let grew = true; grew;) {
       grew = false;
       for (const o of pending) {
-        if (Math.abs(o.lat - r.lat) >= LAT_EPS || o.fwd !== r.fwd || !!o.park !== !!r.park || o.lo > hi + 0.5 || lo > o.hi + 0.5) continue;
+        if (Math.abs(o.lat - r.lat) >= LAT_EPS || o.fwd !== r.fwd || o.park !== r.park || o.narrow !== r.narrow || o.lo > hi + 0.5 || lo > o.hi + 0.5) continue;
         pending.delete(o);
         group.push(o);
         lo = Math.min(lo, o.lo);
@@ -306,6 +307,7 @@ function laneRuns(net: LaneNet, j: BranchSeam, u: number): Run[] {
         hi: Math.max(nearU, farU),
         solid: l.solid,
         park: l.park,
+        narrow: l.narrow,
         src: new Map([[c.id, i]]),
         side: e.side,
         atSeam,
@@ -315,13 +317,13 @@ function laneRuns(net: LaneNet, j: BranchSeam, u: number): Run[] {
   }
   const runs: Run[] = [];
   const used = new Set<Piece>();
-  const same = (x: Piece, y: Piece) => x.fwd === y.fwd && !!x.park === !!y.park && Math.abs(x.lat - y.lat) < LAT_EPS;
+  const same = (x: Piece, y: Piece) => x.fwd === y.fwd && x.park === y.park && x.narrow === y.narrow && Math.abs(x.lat - y.lat) < LAT_EPS;
   for (const b of pieces) {
     if (b.side > 0 || !b.atSeam) continue;
     const f = pieces.find((x) => x.side > 0 && x.atSeam && !used.has(x) && same(x, b));
     if (!f) continue;
     used.add(b).add(f);
-    runs.push({ lat: b.lat, fwd: b.fwd, lo: b.lo, hi: f.hi, solid: b.solid, park: b.park, src: new Map([...b.src, ...f.src]) });
+    runs.push({ lat: b.lat, fwd: b.fwd, lo: b.lo, hi: f.hi, solid: b.solid, park: b.park, narrow: b.narrow, src: new Map([...b.src, ...f.src]) });
   }
   const LB = j.back.corridor.length;
   const LF = j.front.corridor.length;
@@ -338,7 +340,7 @@ function laneRuns(net: LaneNet, j: BranchSeam, u: number): Run[] {
         if (Number.isFinite(lo)) lo = Math.max(lo + u, Math.min(hi - 5, -LB + taperLen(j.back.corridor.cls)));
       }
     }
-    runs.push({ lat: x.lat, fwd: x.fwd, lo, hi, solid: x.solid, src: x.src });
+    runs.push({ lat: x.lat, fwd: x.fwd, lo, hi, solid: x.solid, park: x.park, narrow: x.narrow, src: x.src });
   }
   return runs;
 }
@@ -364,6 +366,7 @@ function lanesFor(c: Corridor, parent: number, runs: Run[], uOf: Map<number, num
     const lane: LaneSlot = { offset: r.lat * sgn, flow: (r.fwd ? sgn : -sgn) as Flow, from: atA ? 0 : s0, to: atB ? Infinity : s1 };
     if (r.solid) lane.solid = true;
     if (r.park) lane.park = true;
+    if (r.narrow) lane.narrow = true;
     res.push({ lane, order: r.src.get(parent) ?? 1000 + k });
   });
   return res.sort((x, y) => x.order - y.order).map((x) => x.lane);

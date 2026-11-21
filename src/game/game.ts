@@ -28,11 +28,11 @@ import { Rng } from '../core/rng';
 import { durationText } from '../core/timeText';
 import { add, angleDiff, angleOf, closestOnSegment, cross, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, corridorUnder, insideRuns, splitCorridor } from '../lanes/edit';
-import { edgesAt, nodeCuts } from '../lanes/geometry';
+import { asphaltEdgesAt, nodeCuts } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
 import { autoMainPair, mainPairOf, type GLane } from '../lanes/graph';
 import { PhaseSpec, phaseTurnStates, specOf, turnClashes, type TurnState } from '../lanes/lights';
-import { besideOffset, Corridor, type CorridorBuild, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, taperLen, twoWay } from '../lanes/model';
+import { besideOffset, Corridor, corridorMargin, type CorridorBuild, laneKey, LaneLink, LaneNet, LaneNetSave, LaneNode, oneWay, parseLaneKey, taperLen, twoWay, yardLanes } from '../lanes/model';
 import { gradeFactor } from '../lanes/speedProfile';
 import type { LaneStart, LaneTraffic } from '../lanes/traffic';
 import { Leaving, RailSim, Train } from '../sim/rail';
@@ -1402,7 +1402,7 @@ export class Game implements BuildContext {
     for (const f of save.extraForests) this.terrain.addForest(f.c, f.r, this.rng);
     for (const e of save.terraform ?? []) this.terrain.terraform(e);
     this.net.load(save.net);
-    this.roads.replace(LaneNet.fromJSON(save.roads));
+    this.roads.replace(LaneNet.fromJSON(save.roads, true));
     this.construction.load(save.construction);
     // Загрузка стройки могла починить полотна (прежняя дорога у перестройки) — граф движения по ним.
     this.roads.changed();
@@ -10607,7 +10607,7 @@ export class Game implements BuildContext {
     }
     cands.sort((x, y) => x.score - y.score);
     for (const c of cands.slice(0, 8)) {
-      const plan = this.roadBuilder.road(c.start, c.end, { cls: 'street', lanes: twoWay(1, 1), kink: c.kink }, { free: true });
+      const plan = this.roadBuilder.road(c.start, c.end, { cls: 'street', lanes: yardLanes(), kink: c.kink }, { free: true });
       if (!plan.ok || plan.demolish.length || !plan.net) continue;
       // Без пересечений с другими дорогами: новых узлов — только концы новой улицы.
       const fresh = [...plan.net.nodes.keys()].filter((id) => !net.nodes.has(id)).length;
@@ -10845,7 +10845,7 @@ export class Game implements BuildContext {
    * Улица, которой принадлежит полотно c, между перекрёстками: c и соседние полотна за стыками посреди улицы (не
    * перекрёсток и не тупик), если улица за стыком продолжается почти прямо, того же класса и с теми же полосами.
    * u — путь вдоль c по a→b (у c.a — 0, кускам до него — меньше нуля); улица — от from до to. at(u) — точка на ней,
-   * касательная по направлению c и края полотна (как edgesAt, справа от этого направления — плюс). clear — сколько
+   * касательная по направлению c и края асфальта (справа от этого направления — плюс). clear — сколько
    * отступить от узла у from и у to, чтобы примкнуть к улице новой дорогой.
    */
   private streetLine(c: Corridor): {
@@ -10935,7 +10935,7 @@ export class Game implements BuildContext {
       const L = piece.c.length;
       const s = Math.min(Math.max(piece.fwd ? q - piece.u0 : L - (q - piece.u0), 0), L);
       const t = piece.c.lut.tangentAt(s);
-      const e = edgesAt(piece.c, s);
+      const e = asphaltEdgesAt(piece.c, s);
       return {
         pos: piece.c.lut.pointAt(s),
         t: piece.fwd ? t : scale(t, -1),
@@ -10996,8 +10996,7 @@ export class Game implements BuildContext {
     const point = here.pos;
     const n = scale(rightNormal(t), right);
     const dir = scale(t, along);
-    const edges = here.edges ?? [-LANE_W, LANE_W];
-    const edge = (right > 0 ? edges[1] : -edges[0]) + ROAD_MARGIN;
+    const edge = (here.edges && (right > 0 ? here.edges[1] : -here.edges[0])) ?? LANE_W + corridorMargin(c);
     const laneHalf = LANE_W / 2 + ROAD_MARGIN;
     // Ось дублёра — за островком; площадка — сразу за его кромкой.
     const d = edge + STATION.pocketIsland + laneHalf;
@@ -11105,8 +11104,7 @@ export class Game implements BuildContext {
     const here = line.at(u);
     const t = here.t;
     const n = scale(rightNormal(t), right);
-    const edges = here.edges ?? [-LANE_W, LANE_W];
-    const edge = (right > 0 ? edges[1] : -edges[0]) + ROAD_MARGIN;
+    const edge = (here.edges && (right > 0 ? here.edges[1] : -here.edges[0])) ?? LANE_W + corridorMargin(c);
     const fp: Footprint = {
       center: add(here.pos, scale(n, edge + (pocket ? LANE_W : 0) + C.depth / 2)),
       w: lay.stand + 2 * C.end,

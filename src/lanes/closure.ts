@@ -453,11 +453,13 @@ export function reverseLanes(c: Corridor, b: CorridorBuild, zone: [number, numbe
   const out: LaneSlot[] = open.map((l) => ({ ...l }));
   const [z0, z1] = zone;
   for (const l of work) {
-    const bare = { offset: l.offset, flow: l.flow };
+    const bare = { offset: l.offset, flow: l.flow, ...(l.narrow ? { narrow: l.narrow } : {}) };
     if (z0 > 0 && Math.min(l.to, z0 - h) - l.from >= 5) out.push({ ...bare, from: l.from, to: Math.min(l.to, z0 - h) });
     if (z1 < L && l.to - Math.max(l.from, z1 + h) >= 5) out.push({ ...bare, from: Math.max(l.from, z1 + h), to: l.to });
   }
-  if (inner) for (const flow of flows) out.push({ offset: inner.offset, flow, from: Math.max(0, z0), to: Math.min(L, z1) });
+  if (inner) for (const flow of flows) {
+    out.push({ offset: inner.offset, flow, from: Math.max(0, z0), to: Math.min(L, z1), ...(inner.narrow ? { narrow: inner.narrow } : {}) });
+  }
   return out;
 }
 
@@ -490,7 +492,15 @@ export function approachLanes(c: Corridor, b: CorridorBuild, zone: [number, numb
   }
   if (inner) {
     const offset = r.base + r.k * inner.offset;
-    for (const flow of flows) out.push({ offset, flow: (flow * r.k) as 1 | -1, from: r.end === 'a' ? 0 : LN - depth, to: r.end === 'a' ? depth : LN });
+    for (const flow of flows) {
+      out.push({
+        offset,
+        flow: (flow * r.k) as 1 | -1,
+        from: r.end === 'a' ? 0 : LN - depth,
+        to: r.end === 'a' ? depth : LN,
+        ...(inner.narrow ? { narrow: inner.narrow } : {}),
+      });
+    }
   }
   return out;
 }

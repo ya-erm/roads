@@ -16,8 +16,8 @@ import { bridgeLook, deckAlong } from '../lanes/deck';
 import { atPortals, type Portal, portalHalf, tunnelPortals } from '../lanes/tunnel';
 import { LaneRenderer, layerOf, ROAD_ASPHALT } from '../lanes/draw';
 import { insideRuns } from '../lanes/edit';
-import { edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
-import type { Corridor, CorridorEnd, LaneNet, LaneNode } from '../lanes/model';
+import { asphaltEdgesAt, edgesAt, laneBand, pointOff, stations as axisStations } from '../lanes/geometry';
+import { type Corridor, type CorridorEnd, corridorMargin, type LaneNet, type LaneNode } from '../lanes/model';
 import type { GMove, LaneGraph } from '../lanes/graph';
 import type { TurnLook, TurnState } from '../lanes/lights';
 import { type LightSpot, lightSpot } from '../lanes/lightSpot';
@@ -3794,11 +3794,11 @@ export class Renderer {
         if (!best || hit.d < best.d) best = { c, s: hit.s, d: hit.d };
       }
       if (!best) return null;
-      const e = edgesAt(best.c, best.s);
+      const e = asphaltEdgesAt(best.c, best.s);
       if (!e) return null;
       const axis = best.c.lut.pointAt(best.s);
       const side = dot(sub(p, axis), rightNormal(best.c.lut.tangentAt(best.s))) > 0 ? 1 : -1;
-      return pointOff(best.c, best.s, side > 0 ? e[1] + ROAD_MARGIN : e[0] - ROAD_MARGIN);
+      return pointOff(best.c, best.s, side > 0 ? e[1] : e[0]);
     };
   }
 
@@ -3950,8 +3950,9 @@ export class Renderer {
         const road = end.corridor;
         const s = end.end === 'a' ? 0 : road.length;
         const [left, right] = edgesAt(road, s) ?? [-LANE_W / 2, LANE_W / 2];
-        const a = add(pointOff(road, s, left - ROAD_MARGIN), scale(end.away, 0.7));
-        const b = add(pointOff(road, s, right + ROAD_MARGIN), scale(end.away, 0.7));
+        const margin = corridorMargin(road);
+        const a = add(pointOff(road, s, left - margin), scale(end.away, 0.7));
+        const b = add(pointOff(road, s, right + margin), scale(end.away, 0.7));
         const side = gate.stationGateSide;
         const atEdge = (p: Vec) => side
           ? add(add(fp.center, scale(u, side * (fp.w / 2 - 1))), scale(v, dot(sub(p, fp.center), v)))
@@ -4039,7 +4040,8 @@ export class Renderer {
         ctx.restore();
         continue;
       }
-      const [l, r] = [ed[0] - ROAD_MARGIN, ed[1] + ROAD_MARGIN].map((o) => local(pointOff(c, s, o)).x).sort((a, b) => a - b);
+      const margin = corridorMargin(c);
+      const [l, r] = [ed[0] - margin, ed[1] + margin].map((o) => local(pointOff(c, s, o)).x).sort((a, b) => a - b);
       /** Радиус скруглений, если хватает места. */
       const R0 = 6;
       // Глубина площадки — 16 от фасада, но скругление у улицы не ближе 14 к другому концу выезда (там перекрёсток).
@@ -5452,12 +5454,12 @@ export class Renderer {
     // У моста — поднята вместе с полотном (как его рисует LaneRenderer).
     const raised = Math.max(net.node(c.a).level, net.node(c.b).level) > 0;
     for (const s of axisStations(c, 0, c.length, 5)) {
-      const e = edgesAt(c, s);
+      const e = asphaltEdgesAt(c, s);
       if (!e) continue;
       const d = raised ? bridgeLook(deckAlong(net, c, s)).lift : null;
       const up = (p: Vec) => (d ? add(p, d) : p);
-      left.push(up(pointOff(c, s, e[0] - ROAD_MARGIN)));
-      right.push(up(pointOff(c, s, e[1] + ROAD_MARGIN)));
+      left.push(up(pointOff(c, s, e[0])));
+      right.push(up(pointOff(c, s, e[1])));
     }
     if (left.length < 2) return;
     const ctx = this.ctx;
@@ -5715,7 +5717,8 @@ export class Renderer {
       const s = e.end === 'a' ? d : c.length - d;
       const ed = edgesAt(c, s) ?? [-LANE_W, LANE_W];
       // Справа по ходу въезда: у конца a едут против оси (левая кромка), у конца b — по оси (правая).
-      const p = pointOff(c, s, e.end === 'a' ? ed[0] - ROAD_MARGIN - k * 1.3 : ed[1] + ROAD_MARGIN + k * 1.3);
+      const gap = corridorMargin(c) + k * 1.3;
+      const p = pointOff(c, s, e.end === 'a' ? ed[0] - gap : ed[1] + gap);
       if (main.includes(c.id)) {
         // 2.1 «Главная дорога»: белый ромб, в нём жёлтый.
         const diamond = (r: number) => {

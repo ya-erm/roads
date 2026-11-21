@@ -10,7 +10,7 @@ import { smoothstep } from '../core/math';
 import { add, dist, dot, rightNormal, scale, sub, type Vec } from '../core/vec';
 import { fitLanes, keptLanes, laneWise } from '../lanes/closure';
 import { edgesAt, laneBand } from '../lanes/geometry';
-import type { Corridor, CorridorBuild } from '../lanes/model';
+import { type Corridor, type CorridorBuild, corridorMargin } from '../lanes/model';
 import { steerBase } from '../sim/body';
 import { ROAD_MARGIN } from '../world/roadTypes';
 import { frontOf, spansOf, stageSpans } from './constructionWork';
@@ -167,8 +167,8 @@ export const TURN_TAIL = 10;
 const TURN_STEP = 0.25;
 
 /** Насколько далеко от оси может быть нос машины на развороте, м: от оси до кромки с обочиной минус полмашины и запас. */
-export function turnRoom(edges: readonly [number, number]): number {
-  return Math.min(-edges[0], edges[1]) + ROAD_MARGIN - MACHINE_HALF - 0.3;
+export function turnRoom(edges: readonly [number, number], margin = ROAD_MARGIN): number {
+  return Math.min(-edges[0], edges[1]) + margin - MACHINE_HALF - 0.3;
 }
 
 /** Сколько метров вперёд от головной нужно на разворот (до дальней точки дуги). */
@@ -696,8 +696,8 @@ const MACHINE_HALF = 2.6;
 
 /**
  * Ряды техники n бригад на участке c (сдвиг вправо по ходу заполнения, м; по порядку слева направо): ширина полотна
- * по кромкам делится поровну на n полос, каждая бригада — посередине своей, но не дальше кромки с обочиной
- * (ROAD_MARGIN). Полосы уже машины (n бригад на узком полотне) — ряды бок о бок в пределах полотна с обочинами,
+ * по кромкам делится поровну на n полос, каждая бригада — посередине своей, но не дальше кромки с обочиной.
+ * Полосы уже машины (n бригад на узком полотне) — ряды бок о бок в пределах полотна с обочинами,
  * посередине. Одна бригада — по оси (0). Перекрытие по полосам на широкой и пристройка «Полосой» — то же, но только
  * там, где не едут (workStrips); не помещаются там — как раньше, по всей ширине.
  */
@@ -720,8 +720,9 @@ export function crewRows(c: Corridor, n: number): number[] {
     return sign < 0 ? rows.reverse() : rows;
   }
   if (n <= 1) return [0];
-  const lo = e[0] - ROAD_MARGIN + MACHINE_HALF;
-  const hi = e[1] + ROAD_MARGIN - MACHINE_HALF;
+  const margin = corridorMargin(c);
+  const lo = e[0] - margin + MACHINE_HALF;
+  const hi = e[1] + margin - MACHINE_HALF;
   const strip = (e[1] - e[0]) / n;
   let rows: number[];
   if (strip >= 2 * MACHINE_HALF) rows = Array.from({ length: n }, (_, k) => Math.max(lo, Math.min(hi, e[0] + (k + 0.5) * strip)));
@@ -754,12 +755,13 @@ function workStrips(c: Corridor, b: CorridorBuild, s: number, e: [number, number
     .filter((x): x is [number, number] => !!x)
     .sort((p, q) => p[0] - q[0]);
   const out: [number, number][] = [];
-  let at = e[0] - ROAD_MARGIN;
+  const margin = corridorMargin(c);
+  let at = e[0] - margin;
   for (const [lo, hi] of bands) {
     if (lo > at) out.push([at, lo]);
     at = Math.max(at, hi);
   }
-  if (e[1] + ROAD_MARGIN > at) out.push([at, e[1] + ROAD_MARGIN]);
+  if (e[1] + margin > at) out.push([at, e[1] + margin]);
   return out;
 }
 

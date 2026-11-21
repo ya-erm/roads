@@ -266,12 +266,10 @@ describe('Автовокзал вдоль дороги, с дублёром', ()
 });
 
 /**
- * Миры, где в городах есть и короткие кварталы (75–90 м), и длинные: кварталы крупные (townStreets.BLOCK), короткие
- * улицы между перекрёстками встречаются по нескольку на мир — берём три мира (на карте нового масштаба, mapScale:
- * города там стоят иначе, и короткие кварталы — в других мирах; городов по размеру карты, TOWN_RANGE, — в мире 2
- * коротких не осталось).
+ * Миры, где есть короткие дворовые проезды между перекрёстками и длинные кварталы. При узких проездах граница
+ * короткого квартала сдвигается: до перекрёстков нужно меньше места, поэтому берём несколько карт.
  */
-const SHORT_BLOCK_SEEDS = [8, 10, 4];
+const SHORT_BLOCK_SEEDS = [5, 13, 42];
 // freshGame: миры SHORT_BLOCK_SEEDS нужны обоим тестам ниже — генерируются один раз.
 const cityGame = (seed: number) => {
   const game = withoutCitizens(freshGame({ ...NEW_GAME_SETTINGS, seed, scenario: { difficulty: 'normal', challenge: false } }));
@@ -402,7 +400,7 @@ describe('Автовокзал у края улицы (с кармашком и�
   it('в городе: встаёт и в коротких кварталах, где дублёру мало места; на длинных — с кармашком', () => {
     const tally = { short: 0, shortOk: 0, long: 0, pocket: 0, reasons: new Map<string, number>() };
     // Коротких кварталов у крупной застройки меньше — миров больше.
-    for (const game of [...SHORT_BLOCK_SEEDS, 3, 5, 7, 9].map(cityGame)) {
+    for (const game of [...SHORT_BLOCK_SEEDS, 3, 7, 9].map(cityGame)) {
     const net = game.roads.net;
     for (const c of net.corridors.values()) {
       if (c.cls !== 'street' || net.node(c.a).kind !== 'junction' || net.node(c.b).kind !== 'junction' || c.length < 75) continue;
@@ -429,7 +427,7 @@ describe('Автовокзал у края улицы (с кармашком и�
     // Мешать могут дома-ориентиры, соседняя улица, другая станция — но не длина квартала.
     expect(tally.shortOk / tally.short, [...tally.reasons].join('; ')).toBeGreaterThan(0.7);
     expect(tally.pocket / tally.long, [...tally.reasons].join('; ')).toBeGreaterThan(0.7);
-    // Семь миров на карте нового масштаба (mapScale): один — около 12 с, под нагрузкой полного прогона — дольше 15.
+    // Несколько миров на карте нового масштаба (mapScale): под нагрузкой полного прогона — дольше 15 с.
   }, 60_000);
 
   it('задний автобус погрузился раньше переднего — объезжает его и уезжает, не дожидаясь', () => {

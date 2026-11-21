@@ -5,11 +5,11 @@ import { industryHaulConnection } from '../game/industryHaulRoutes';
 import { industryYardWidth, INDUSTRY_YARD_MIN_DEPTH } from '../game/transport';
 import { buildRoad, corridorUnder, type Anchor } from '../lanes/edit';
 import { edgesAt } from '../lanes/geometry';
-import { twoWay, type Corridor, type LaneNet, type LaneNode } from '../lanes/model';
+import { corridorMargin, twoWay, type Corridor, type LaneNet, type LaneNode } from '../lanes/model';
 import type { IndustryKind } from './cargo';
 import type { Industry, Town } from './entities';
 import { GRADE, STATION } from '../config';
-import { halfWidth, isDirt, ROAD_CLASSES, ROAD_MARGIN, type RoadSpec } from './roadTypes';
+import { halfWidth, isDirt, ROAD_CLASSES, type RoadSpec } from './roadTypes';
 import { footprintAlong, footprintCorners, footprintRadius, footprintSide, footprintsOverlap, pointInFootprint, type Footprint } from './spatial';
 import { industryAccess } from './industrySites';
 import type { WorldContext } from './worldgen';
@@ -352,5 +352,5 @@ export function industryRoute(ctx: WorldContext, ind: Industry, towns: Town[], y
 /** Полуширина полотна по большей стороне в точке s. */
 function halfAt(c: Corridor, s: number): number {
   const e = edgesAt(c, s);
-  return e ? Math.max(-e[0], e[1]) + ROAD_MARGIN : ROAD_MARGIN;
+  return (e ? Math.max(-e[0], e[1]) : 0) + corridorMargin(c);
 }

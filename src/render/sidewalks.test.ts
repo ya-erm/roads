@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Vec } from '../core/vec';
 import { freshGame } from '../game/testkit';
 import { setCornerRadius } from '../lanes/corners';
-import { edgesAt, junctionCorners, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
-import { ROAD_MARGIN } from '../world/roadTypes';
+import { asphaltEdgesAt, junctionCorners, junctionCuts, plateOutline, pointOff } from '../lanes/geometry';
 import { NEW_GAME_SETTINGS } from '../world/settings';
 import { type Footprint, pointInFootprint } from '../world/spatial';
 import { curbGap } from '../world/worldgen';
@@ -119,8 +118,8 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
           const pts: Vec[] = [];
           for (let i = 0; i <= n; i++) {
             const s = ca + ((c.length - ca - cb) * i) / n;
-            const e = edgesAt(c, s);
-            if (e) pts.push(pointOff(c, s, side ? e[1] + ROAD_MARGIN : e[0] - ROAD_MARGIN));
+            const e = asphaltEdgesAt(c, s);
+            if (e) pts.push(pointOff(c, s, e[side]));
           }
           edges.push(pts);
         }
@@ -216,8 +215,8 @@ describe('Тротуары вдоль улиц', { timeout: 30_000 }, () => {
   /** Ось тротуара стороны side полотна c на s (как sidewalks.walkOff). */
   const axis = (c: (typeof streets)[number], s: number, side: 1 | -1) => {
     const spec = site.townAt(c.lut.pointAt(c.length / 2))!.paved ? SIDEWALK.paved : SIDEWALK.path;
-    const d = ROAD_MARGIN + spec.from + spec.w / 2;
-    const e = edgesAt(c, s)!;
+    const d = spec.from + spec.w / 2;
+    const e = asphaltEdgesAt(c, s)!;
     return pointOff(c, s, side === 1 ? e[1] + d : e[0] - d);
   };
   /** Там тротуара не бывает: вода, станция, предприятие, база. */
