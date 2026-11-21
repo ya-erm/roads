@@ -45,23 +45,21 @@ describe('stopFoldHtml', () => {
 });
 
 describe('stopWaitingHtml', () => {
-  const station = { passengers: new Map([[20, 2], [30, 5]]), cargo: { grain: 3.8, logs: 4.9, oil: 0.6 } };
-
-  it('считает ожидающих пассажиров и груз, как на карте', () => {
-    const pax = stopWaitingHtml(station, 'passengers');
+  it('показывает пассажирскую очередь и разбивку по грузам', () => {
+    const pax = stopWaitingHtml(7, []);
     expect(pax).toContain('<b>7</b>');
     expect(pax).not.toContain('Зерно');
-    const mixed = stopWaitingHtml(station, null);
+    const mixed = stopWaitingHtml(7, [['grain', 3.8], ['logs', 4.9], ['oil', 0.6]]);
     expect(mixed).toContain('7 пасс.');
     expect(mixed).toContain('Груза ждёт 7 · Зерно 3 · Брёвна 4');
     expect(mixed).not.toContain('Нефть');
   });
 
   it('у одного типа груза показывает его значок и число, у пустой станции нет плашек', () => {
-    const freight = stopWaitingHtml({ ...station, cargo: { grain: 5 } }, 'freight');
+    const freight = stopWaitingHtml(0, [['grain', 5]]);
     expect(freight).toContain('Зерно · ждёт 5');
     expect(freight).not.toContain('пасс.');
-    expect(stopWaitingHtml({ passengers: new Map(), cargo: {} }, null)).toBe('');
+    expect(stopWaitingHtml(0, [])).toBe('');
   });
 });
 

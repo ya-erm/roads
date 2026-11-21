@@ -3178,13 +3178,15 @@ export class Hud {
         // Половина пары остановок — со стрелкой хода: у какого навеса из двух встаёт автобус.
         const heading = st ? g.stopHeading(st) : null;
         const pairMark = heading ? ` <span class="pair-dir">${headingArrow(heading)}</span>` : '';
-        const waiting = st ? `<span class="stop-waiting" data-stop-waiting="${st.id}"></span>` : '';
+        const waiting = st ? `<span class="stop-waiting" data-stop-waiting="${i}"></span>` : '';
         return `<div class="stop ${open ? 'open' : ''}" data-action="stop-open" data-line="${line.id}" data-i="${i}" title="${fold}">
           <div class="stop-label">${stopPlaceHtml(i, st?.id ?? null, st ? (st.kind === 'rail' ? '🚉 ' : '') + esc(st.name) + pairMark : '?')}${waiting}</div>${warn}
           <button class="rule-chip" data-action="stop-open" data-line="${line.id}" data-i="${i}" title="${fold}">${WAIT_LABELS[ruleWaitId(rule)]}${platIcon}${loadIcons}${unloadIcons}${stopFoldHtml(open)}</button>
-          <button class="icon stop-reorder" data-stop-reorder aria-label="Изменить порядок остановки ${i + 1}" aria-keyshortcuts="ArrowUp ArrowDown" title="Перетащите остановку или нажмите ↑ / ↓">
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 5h8M4 8h8M4 11h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
-          <button class="icon" data-action="stop-del" data-line="${line.id}" data-i="${i}" title="Убрать из маршрута" ${n <= 2 ? 'disabled' : ''}>✕</button>
+          <div class="stop-actions">
+            <button class="icon stop-reorder" data-stop-reorder aria-label="Изменить порядок остановки ${i + 1}" aria-keyshortcuts="ArrowUp ArrowDown" title="Перетащите остановку или нажмите ↑ / ↓">
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 5h8M4 8h8M4 11h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+            <button class="icon" data-action="stop-del" data-line="${line.id}" data-i="${i}" title="Убрать из маршрута" ${n <= 2 ? 'disabled' : ''}>✕</button>
+          </div>
         </div>${open ? this.stopRuleHtml(line, i, rule) : ''}`;
       })
       .join('');
@@ -3203,8 +3205,11 @@ export class Hud {
     if (!line) return;
     const kind = g.lineKind(line);
     for (const badge of route.querySelectorAll<HTMLElement>('[data-stop-waiting]')) {
-      const st = g.stations.get(Number(badge.dataset.stopWaiting));
-      setHtml(badge, st ? stopWaitingHtml(st, kind) : '');
+      const index = Number(badge.dataset.stopWaiting);
+      const st = g.stations.get(line.stops[index]);
+      const passengers = kind !== 'freight' && st?.serves.pax ? g.lineWaiting(line, index, 'passengers') : 0;
+      const cargo = kind !== 'passengers' ? g.lineFreightWaiting(line, index) : [];
+      setHtml(badge, stopWaitingHtml(passengers, cargo));
     }
   }
 

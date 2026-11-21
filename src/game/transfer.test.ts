@@ -76,6 +76,7 @@ describe('Перевалка между соседними станциями', 
     const line = game.createLine([yard.id, b.id])!;
     game.setStopRule(line.id, 0, { wait: 'none', maxWait: null, load: ['textiles', 'grain'], unload: 'auto' });
     expect(game.transferSources(line, 0).map((s) => s.id)).toEqual([store.id]);
+    expect(game.lineFreightWaiting(line, 0)).toEqual([['textiles', 40]]);
     expect(game.lineWaiting(line, 0, 'freight')).toBe(40);
     // Карточка станции: ткань со склада соседа заберёт этот маршрут.
     const flows = game.transferFlows(yard).find((x) => x.near === store)!.flows;

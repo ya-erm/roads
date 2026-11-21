@@ -2016,6 +2016,13 @@ button.icon.toggle-spacing {
   font-variant-numeric: tabular-nums;
 }
 
+.stop-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
 .stop button.stop-reorder {
   flex: none;
   display: grid;

@@ -8004,12 +8004,22 @@ export class Game implements BuildContext {
       const others = new Set(line.stops.filter((x) => x !== st.id));
       for (const [dest, n] of st.passengers) if (others.has(dest)) waiting += n;
     }
-    if (what !== 'passengers' && st.serves.cargo) {
-      const near = this.transferSources(line, index);
-      for (const c of this.loadable(line, index)) {
-        waiting += st.cargo[c] ?? 0;
-        for (const o of near) waiting += transferable(o, c);
-      }
+    if (what !== 'passengers') for (const [, count] of this.lineFreightWaiting(line, index)) waiting += count;
+    return waiting;
+  }
+
+  /** Что ждёт погрузки на этой остановке линии: запас станции и груз, доступный для перевалки. */
+  lineFreightWaiting(line: Line, index: number): [CargoType, number][] {
+    const st = this.stations.get(line.stops[index]);
+    if (!st?.serves.cargo) return [];
+    const wanted = this.loadable(line, index);
+    if (!wanted.size) return [];
+    const near = this.transferSources(line, index);
+    const waiting: [CargoType, number][] = [];
+    for (const cargo of wanted) {
+      let count = st.cargo[cargo] ?? 0;
+      for (const source of near) count += transferable(source, cargo);
+      if (count > 0) waiting.push([cargo, count]);
     }
     return waiting;
   }

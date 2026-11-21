@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH } from '../config';
 import { dist } from '../core/vec';
+import { buildBusScene } from '../testpages/bus';
 import type { Station } from '../world/entities';
 import { townTier } from '../world/townForms';
 import { Game } from './game';
 import { connectStations, freightRoute, freshGame, HIGHWAY, nearestPair, runSeconds, stationAtIndustry, townStreets, withoutCitizens } from './testkit';
+import { DEFAULT_RULE } from './transport';
 
 /**
  * Станция у улицы города — на той, что ближе к соседнему городу toward, с жителями в охвате (на окраине частного
@@ -42,6 +44,44 @@ function twoTowns(line: boolean) {
 }
 
 const waitingPax = (st: Station) => [...st.passengers.values()].reduce((s, n) => s + n, 0);
+
+describe('Ожидание на остановке выбранного маршрута', () => {
+  it('различает пассажиров двух маршрутов с общей остановкой, даже если транспорт ещё не куплен', () => {
+    const { game, lines } = buildBusScene();
+    const [a, b, c, other] = game.lines.get(lines.avenue)!.stops;
+    const left = game.createLine([a, b])!;
+    const right = game.createLine([a, c])!;
+    expect(left.vehicles).toHaveLength(0);
+    expect(right.vehicles).toHaveLength(0);
+    const st = game.stations.get(a)!;
+    st.passengers = new Map([[b, 25], [c, 44], [other, 7]]);
+
+    expect(game.lineWaiting(left, 0, 'passengers')).toBe(25);
+    expect(game.lineWaiting(right, 0, 'passengers')).toBe(44);
+    expect(waitingPax(st)).toBe(76);
+  });
+
+  it('различает правила погрузки при двух посещениях одной станции и выгрузку у других остановок', () => {
+    const game = withoutCitizens(freshGame(7));
+    const { sA, sB } = freightRoute(game);
+    const third = stationAtIndustry(game, game.industries.find((i) => i.id === sB.industryId)!, sA.fp.center)!;
+    const line = game.createLine([sA.id, sB.id, sA.id, third.id])!;
+    sA.cargo = { grain: 32.5, logs: 11, oil: 6 };
+    sB.accepts = new Set(['grain']);
+    third.accepts = new Set();
+    game.setStopRule(line.id, 2, { ...DEFAULT_RULE, load: ['logs'] });
+
+    expect(game.lineFreightWaiting(line, 0)).toEqual([['grain', 32.5]]);
+    expect(game.lineFreightWaiting(line, 2)).toEqual([['logs', 11]]);
+    expect(game.lineWaiting(line, 0, 'freight')).toBe(32.5);
+    game.setStopRule(line.id, 1, { ...DEFAULT_RULE, unload: ['oil'] });
+    expect(game.lineFreightWaiting(line, 0)).toEqual([['oil', 6]]);
+    expect(game.lineFreightWaiting(line, 2)).toEqual([['logs', 11]]);
+    game.setStopRule(line.id, 2, { ...DEFAULT_RULE, load: [] });
+    expect(game.lineFreightWaiting(line, 2)).toEqual([]);
+    expect(sA.cargo).toEqual({ grain: 32.5, logs: 11, oil: 6 });
+  });
+});
 
 describe('Пассажиры и груз копятся, как только есть маршрут, — машины не нужны', { timeout: 60_000 }, () => {
   it('пассажирский маршрут без автобусов: пассажиры ждут до другой станции, не больше предела станции', () => {
