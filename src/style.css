@@ -196,7 +196,7 @@ button {
 
 .notices {
   position: absolute;
-  top: 16px;
+  top: var(--notices-top, 16px);
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -204,6 +204,13 @@ button {
   gap: 6px;
   align-items: center;
   pointer-events: none !important;
+}
+
+.below-toolbar-notices {
+  top: calc(max(var(--top-panels-bottom, 72px), var(--notices-top, 16px) + var(--notices-height, 0px)) + 10px);
+  z-index: 1;
+  width: max-content;
+  max-width: calc(100% - 28px);
 }
 
 /*
@@ -236,12 +243,12 @@ button {
   right: var(--ob-low-right, 368px);
 }
 
-.has-offer-banner .notices {
-  top: 76px;
+.has-offer-banner {
+  --notices-top: 76px;
 }
 
-.has-offer-banner.offer-low .notices {
-  top: 140px;
+.has-offer-banner.offer-low {
+  --notices-top: 140px;
 }
 
 /* Совсем узкое окно: плашке негде встать — предложения остаются в панели внизу. */
@@ -249,8 +256,8 @@ button {
   display: none;
 }
 
-.has-offer-banner.offer-none .notices {
-  top: 16px;
+.has-offer-banner.offer-none {
+  --notices-top: 16px;
 }
 
 .offer-banner-in {

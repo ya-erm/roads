@@ -533,6 +533,7 @@ export class Hud {
       <div class="panel speed" data-speed></div>
       <div class="offer-banner hidden" data-offer-banner></div>
       <div class="notices" data-notices></div>
+      <div class="notices below-toolbar-notices" data-below-toolbar-notices></div>
       <div class="panel options hidden" data-options></div>
       <div class="panel toolbar" data-tools></div>
       <div class="panel side" data-side></div>
@@ -719,7 +720,7 @@ export class Hud {
     this.q('[data-offer-banner]').addEventListener('pointerdown', () => (this.pressing = true));
     // Плашка предложения — вверху между деньгами и кнопками скорости: следим за их шириной, правой панелью и окном.
     const place = new ResizeObserver(() => this.placeOfferBanner());
-    for (const el of [root, this.q('.stats'), this.q('[data-speed]'), this.q('[data-side]')]) place.observe(el);
+    for (const el of [root, this.q('.stats'), this.q('[data-speed]'), this.q('[data-side]'), this.q('[data-notices]')]) place.observe(el);
     window.addEventListener('pointerup', () => setTimeout(() => (this.pressing = false)));
     // Переименование линии: сохраняем по Enter или при уходе фокуса.
     root.addEventListener('change', (e) => {
@@ -4729,18 +4730,8 @@ export class Hud {
     setText(this.q('[data-date]'), g.dateLabel);
     this.q('[data-month]').style.width = `${g.monthProgress * 100}%`;
 
-    const notices = this.q('[data-notices]');
-    // Разметка — только когда меняется состав (перерисовка под курсором съела бы клик), угасание — на месте.
-    const key = g.notices.map((n) => n.id).join('|');
-    if (notices.dataset.key !== key) {
-      notices.dataset.key = key;
-      notices.innerHTML = g.notices.map((n) => noticeHtml(g, n)).join('');
-    }
-    g.notices.forEach((n, i) => {
-      const el = notices.children[i] as HTMLElement | undefined;
-      const op = String(noticeOpacity(n));
-      if (el && el.style.opacity !== op) el.style.opacity = op;
-    });
+    this.renderNotices('[data-notices]', g.notices.filter((n) => !n.belowToolbar));
+    this.renderNotices('[data-below-toolbar-notices]', g.notices.filter((n) => n.belowToolbar));
     this.renderNews();
     this.panelTimer -= realDt;
     if (this.panelTimer <= 0) {
@@ -4759,6 +4750,21 @@ export class Hud {
       // Проект: цена и «хватит ли денег» меняются и без кликов (доход, рост городов).
       if (this.controller.projectOn) this.renderOptions();
     }
+  }
+
+  /** Разметка — только при изменении состава, угасание — на месте. */
+  private renderNotices(selector: string, list: Notice[]): void {
+    const notices = this.q(selector);
+    const key = list.map((n) => n.id).join('|');
+    if (notices.dataset.key !== key) {
+      notices.dataset.key = key;
+      notices.innerHTML = list.map((n) => noticeHtml(this.game(), n)).join('');
+    }
+    list.forEach((n, i) => {
+      const el = notices.children[i] as HTMLElement | undefined;
+      const op = String(noticeOpacity(n));
+      if (el && el.style.opacity !== op) el.style.opacity = op;
+    });
   }
 
   private readonly offerBanner = new OfferBannerView();
@@ -4790,6 +4796,8 @@ export class Hud {
     this.root.style.setProperty('--ob-left', `${left}px`);
     this.root.style.setProperty('--ob-right', `${right}px`);
     this.root.style.setProperty('--ob-low-right', `${lowRight}px`);
+    this.root.style.setProperty('--top-panels-bottom', `${Math.ceil(Math.max(stats.bottom, speed.bottom) - box.top)}px`);
+    this.root.style.setProperty('--notices-height', `${Math.ceil(this.q('[data-notices]').getBoundingClientRect().height)}px`);
     const low = box.width - left - right < 400;
     this.root.classList.toggle('offer-low', low);
     // Во втором ряду плашка начинается за панелью сценария (358px — см. .offer-low .offer-banner).

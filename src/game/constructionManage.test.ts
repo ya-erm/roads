@@ -3,6 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CONSTRUCTION, COST, ECONOMY, MONTH_LENGTH } from '../config';
+import { durationText } from '../core/timeText';
 import type { Vec } from '../core/vec';
 import type { BuildBase } from '../world/entities';
 import type { WorldSettings } from '../world/settings';
@@ -340,16 +341,20 @@ describe('Стройка: запас на содержание', () => {
     expect(plan.cost).toBeGreaterThan(upkeep);
     // Денег — ровно на дорогу до кредитного предела: покупка разрешена, но съедает запас на содержание.
     game.money = ECONOMY.creditLimit + plan.cost;
-    const warned = () => game.notices.some((n) => n.text.startsWith('💸 Взято из запаса на содержание'));
     expect(game.roadBuilder.apply(plan)).toBe(true);
     expect(game.money).toBe(ECONOMY.creditLimit);
-    expect(warned()).toBe(true);
+    expect(game.notices.map((n) => n.text)).toContain('💸 Трата из резерва. Без выручки — сразу банкротство.');
     // С запасом — без предупреждения.
     const calm = withoutCitizens(freshGame({ ...WORLD, construction: 'instant' }));
     const again = calm.roadBuilder.road(anchorOf(calm, { free: at }), anchorOf(calm, { free: { x: at.x + 600, y: at.y } }), STREET);
     calm.money = ECONOMY.creditLimit + calm.upkeepReserve + again.cost + 1000;
     expect(calm.roadBuilder.apply(again)).toBe(true);
-    expect(calm.notices.some((n) => n.text.startsWith('💸 Взято из запаса на содержание'))).toBe(false);
+    expect(calm.notices.some((n) => n.text.startsWith('💸 Трата из резерва.'))).toBe(false);
+    const reserve = calm.upkeepReserve;
+    calm.money = ECONOMY.creditLimit + reserve + 20;
+    calm.spend(20 + Math.floor(reserve / 3));
+    expect(calm.upkeepRunway).toBeGreaterThan(1);
+    expect(calm.notices.map((n) => n.text)).toContain(`💸 Трата из резерва. Без выручки до банкротства — ${durationText(calm.upkeepRunway)}.`);
   });
 });
 

@@ -532,6 +532,8 @@ export interface Notice {
   refs?: NewsRef[];
   /** Значки сырья и продукции перед названием предприятия в тексте. */
   recipe?: NewsRecipe;
+  /** Показать ниже панелей с деньгами и скоростью. */
+  belowToolbar?: boolean;
 }
 
 /** Что ещё знает уведомление: вид (с ним оно попадает в историю «События»), о чём оно и где. */
@@ -540,6 +542,7 @@ export interface NoticeInfo {
   refs?: NewsRef[];
   at?: Notice['at'];
   recipe?: NewsRecipe;
+  belowToolbar?: boolean;
 }
 
 export interface Floater {
@@ -3778,19 +3781,16 @@ export class Game implements BuildContext {
   /**
    * Разовые покупки игрока (машина, станция, дорога «Мгновенно», бригада) ограничены только кредитным пределом
    * (budget): купить можно и из запаса на содержание, но осознанно — трата, после которой на счёте меньше кредитного
-   * предела + запаса на содержание (upkeepReserve: что спишется за полмесяца), предупреждает: сколько уходит в месяц
-   * и через сколько без выручки счёт уйдёт за предел (upkeepRunway). Только при переходе черты, чтобы не повторять на
+   * предела + запаса на содержание (upkeepReserve: что спишется за полмесяца), предупреждает, через сколько без
+   * выручки счёт уйдёт за предел (upkeepRunway). Только при переходе черты, чтобы не повторять на
    * каждой покупке ниже неё. Автоматическая стройка (buildBudget) эту черту не переходит.
    */
   private warnUpkeep(before: number): void {
     const line = ECONOMY.creditLimit + this.upkeepReserve;
     if (before < line || this.money >= line) return;
     const runway = this.upkeepRunway;
-    this.notify(
-      `💸 Взято из запаса на содержание: оно идёт ${usd(this.upkeepForecast().total)} в месяц — ${runway >= 1 ? `через ${durationText(runway)}` : 'сразу'} без выручки на счёте станет меньше −${usd(-ECONOMY.creditLimit)} (банкротство)`,
-      '#e5a33b',
-      { kind: 'money' },
-    );
+    const risk = runway >= 1 ? `Без выручки до банкротства — ${durationText(runway)}.` : 'Без выручки — сразу банкротство.';
+    this.notify(`💸 Трата из резерва. ${risk}`, '#e5a33b', { kind: 'money', belowToolbar: true });
   }
 
   /** Возврат части денег за снесённое. */
@@ -13162,7 +13162,7 @@ export class Game implements BuildContext {
    * а подсказки на действия игрока («Не хватает денег») — без вида и в историю не идут.
    */
   notify(text: string, color?: string, info: NoticeInfo = {}): void {
-    const { kind, refs, at, recipe } = info;
+    const { kind, refs, at, recipe, belowToolbar } = info;
     const entry = kind ? this.news.add(this.month, { kind, text, color, refs, at, recipe }) : undefined;
     // То же уведомление ещё на экране (на паузе оно не гаснет, а «Не хватает денег» можно получить десять раз
     // подряд) — не второе такое же, а прежнее заново, внизу.
@@ -13177,6 +13177,7 @@ export class Game implements BuildContext {
       ...(at ? { at } : {}),
       ...(refs?.length ? { refs } : {}),
       ...(recipe ? { recipe } : {}),
+      ...(belowToolbar ? { belowToolbar } : {}),
     });
     this.journal.add('note', { text });
   }
