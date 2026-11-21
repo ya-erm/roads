@@ -278,7 +278,7 @@ describe('Советник: получатели грузов (docs/RETAIL.md)',
     expect(a.at).toEqual(town.buildings.find((b) => b.id === r.b)!.fp.center);
   });
 
-  it('Фура на маршруте к магазинам — «Фура не заезжает к магазинам»: на базу ⇄, если она в городе есть', () => {
+  it('советует везти груз фурой на оптовую базу и строить развозной маршрут для дальних магазинов', () => {
     const game = freshGame(RETAIL_WORLD);
     game.money = 5_000_000;
     game.openModelTier(3, true);
@@ -290,7 +290,9 @@ describe('Советник: получатели грузов (docs/RETAIL.md)',
     game.buyVehicle(line.id, 'truck3');
     const [a] = find(game, 'semiShop');
     expect(a).toMatchObject({ level: 'warn', line: line.id, title: 'Фура не заезжает к магазинам' });
-    expect(a.detail).toContain('базу ⇄');
+    expect(a.detail).toContain('на оптовую базу');
+    expect(a.detail).toContain('сама снабжает магазины в своём радиусе');
+    expect(a.detail).toContain('Для дальних магазинов добавьте маршрут');
   });
 
   it('старая партия (без получателей) — этих советов нет', () => {
