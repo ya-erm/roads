@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { stopFoldHtml, stopPlaceHtml, toggleStop } from './routeStop';
+import { DEFAULT_RULE } from '../game/transport';
+import { reorderStop, stopFoldHtml, stopPlaceHtml, stopWaitingHtml, toggleStop } from './routeStop';
 
 describe('toggleStop', () => {
   it('клик по свёрнутой остановке раскрывает её', () => {
@@ -40,5 +41,37 @@ describe('stopFoldHtml', () => {
     expect(stopFoldHtml(false)).toContain('class="fold down"');
     expect(stopFoldHtml(true)).toContain('class="fold up"');
     expect(stopFoldHtml(true)).toContain('<svg');
+  });
+});
+
+describe('stopWaitingHtml', () => {
+  const station = { passengers: new Map([[20, 2], [30, 5]]), cargo: { grain: 3.8, logs: 4.9, oil: 0.6 } };
+
+  it('считает ожидающих пассажиров и груз, как на карте', () => {
+    const pax = stopWaitingHtml(station, 'passengers');
+    expect(pax).toContain('<b>7</b>');
+    expect(pax).not.toContain('Зерно');
+    const mixed = stopWaitingHtml(station, null);
+    expect(mixed).toContain('7 пасс.');
+    expect(mixed).toContain('Груза ждёт 7 · Зерно 3 · Брёвна 4');
+    expect(mixed).not.toContain('Нефть');
+  });
+
+  it('у одного типа груза показывает его значок и число, у пустой станции нет плашек', () => {
+    const freight = stopWaitingHtml({ ...station, cargo: { grain: 5 } }, 'freight');
+    expect(freight).toContain('Зерно · ждёт 5');
+    expect(freight).not.toContain('пасс.');
+    expect(stopWaitingHtml({ passengers: new Map(), cargo: {} }, null)).toBe('');
+  });
+});
+
+describe('reorderStop', () => {
+  it('переносит остановку и её правила одним шагом с сохранением порядка соседних остановок', () => {
+    const rule = { ...DEFAULT_RULE, platform: 2 };
+    const line = { stops: [1, 2, 3, 4], rules: [null, rule] };
+    expect(reorderStop(line, 1, 3)).toEqual({ stops: [1, 3, 4, 2], rules: [null, null, null, rule] });
+    expect(reorderStop(line, 3, 0)).toEqual({ stops: [4, 1, 2, 3], rules: [null, null, rule, null] });
+    expect(line.stops).toEqual([1, 2, 3, 4]);
+    expect(line.rules).toEqual([null, rule]);
   });
 });

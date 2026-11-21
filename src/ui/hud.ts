@@ -62,7 +62,8 @@ import { fleetBar, fleetBarRoom } from './fleetBar';
 import { type LineBack, lineBackFrom, lineCloseTarget } from './lineBack';
 import { lineMoneyHtml } from './lineMoney';
 import { linePaceHtml } from './linePace';
-import { stopFoldHtml, stopPlaceHtml, toggleStop } from './routeStop';
+import { reorderStop, stopFoldHtml, stopPlaceHtml, stopWaitingHtml, toggleStop } from './routeStop';
+import { bindStopReorder } from './routeStopDrag';
 import { chartHoverAt, distLabel, speedChartSvg, speedTipHtml } from './speedChartSvg';
 import { travelTimeText } from './travelTime';
 import { needsHeadHtml, type PaxNeed, paxNeedHtml, supplyBarHtml, supplyLineHtml, type TownNeed } from './supplyUi';
@@ -746,6 +747,7 @@ export class Hud {
       if (input.dataset?.templateName !== undefined && e.key === 'Enter') this.saveUserTemplate();
     });
     this.bindFolders(root, this.q('[data-side]'));
+    bindStopReorder(this.q('[data-side]'), (line, from, to) => this.moveRouteStop(line, from, to), () => (this.pressing = false));
     this.bindStationName(root);
     this.bindBaseName(root);
     this.bindProjectName(root);
@@ -2074,14 +2076,6 @@ export class Hud {
         // Кнопку уже отпустили: раскрываем и сворачиваем сразу (sync ниже), а не со следующей перерисовкой панели.
         this.pressing = false;
         break;
-      case 'stop-up':
-      case 'stop-down': {
-        const i = Number(d.i);
-        const problem = g.moveLineStop(Number(d.line), i, d.action === 'stop-up' ? -1 : 1);
-        if (problem) g.notify(problem);
-        this.ui.stopOpen = null;
-        break;
-      }
       case 'stop-del': {
         const problem = g.removeLineStop(Number(d.line), Number(d.i));
         if (problem) g.notify(problem);
@@ -2890,9 +2884,14 @@ export class Hud {
   }
 
   private renderSide(): void {
+    const side = this.q('[data-side]');
     // Пока игрок вводит название линии, не перерисовываем панель.
-    if (document.activeElement instanceof HTMLInputElement && this.q('[data-side]').contains(document.activeElement)) return;
-    if (this.pressing || this.ui.dragLine !== null) return;
+    const editing = document.activeElement instanceof HTMLInputElement && side.contains(document.activeElement);
+    if (editing || this.pressing || this.ui.dragLine !== null) {
+      this.updateRouteWaiting(side);
+      return;
+    }
+    const focus = document.activeElement?.matches('[data-stop-reorder]') ? document.activeElement.closest<HTMLElement>('.stop') : null;
     const html = this.sideHtml();
     // Карточку станции закрыли раньше, чем открылось поле, — при следующем выборе станции оно не нужно.
     if (this.ui.renamingStation !== null && !html.includes('data-station-name')) this.ui.renamingStation = null;
@@ -2900,8 +2899,8 @@ export class Hud {
     // Карточку базы закрыли (или выбрали другое кликом по карте), не подтвердив снос, — вопрос снимается.
     if (this.ui.confirmRemoveBase !== null && !html.includes('bc-remove confirm')) this.ui.confirmRemoveBase = null;
     if (this.ui.renamingProject !== null && !html.includes('data-project-name')) this.ui.renamingProject = null;
-    const side = this.q('[data-side]');
     if (setHtml(side, html)) {
+      if (focus) side.querySelector<HTMLElement>(`.stop[data-line="${focus.dataset.line}"][data-i="${focus.dataset.i}"] [data-stop-reorder]`)?.focus({ preventScroll: true });
       // Курсор стоит на графике скорости: на новом рисунке черта и подсказка — там же (pointerout не придёт).
       if (this.ui.speedHoverX !== null) {
         const svg = side.querySelector<SVGSVGElement>('[data-speed-line] svg');
@@ -2915,6 +2914,7 @@ export class Hud {
       input?.focus();
       input?.select();
     }
+    this.updateRouteWaiting(side);
   }
 
   private sideHtml(): string {
@@ -3162,8 +3162,6 @@ export class Hud {
         // Выбранный путь ж/д станции — номером на значке.
         const plat = g.stopPlatform(line, i);
         const platIcon = plat !== null && st ? `<span class="rl" title="Путь станции">🛤${st.platforms.indexOf(plat) + 1}</span>` : '';
-        const btn = (action: string, label: string, title: string, disabled = false) =>
-          `<button class="icon" data-action="${action}" data-line="${line.id}" data-i="${i}" title="${title}" ${disabled ? 'disabled' : ''}>${label}</button>`;
         // Станция не работает с тем, что возит линия: значок с тем, чего не хватает, — клик включает.
         const missing = st ? g.stopMissing(line, i) : null;
         const warn = missing
@@ -3179,17 +3177,55 @@ export class Hud {
         // Половина пары остановок — со стрелкой хода: у какого навеса из двух встаёт автобус.
         const heading = st ? g.stopHeading(st) : null;
         const pairMark = heading ? ` <span class="pair-dir">${headingArrow(heading)}</span>` : '';
+        const waiting = st ? `<span class="stop-waiting" data-stop-waiting="${st.id}"></span>` : '';
         return `<div class="stop ${open ? 'open' : ''}" data-action="stop-open" data-line="${line.id}" data-i="${i}" title="${fold}">
-          ${stopPlaceHtml(i, st?.id ?? null, st ? (st.kind === 'rail' ? '🚉 ' : '') + esc(st.name) + pairMark : '?')}${warn}
+          <div class="stop-label">${stopPlaceHtml(i, st?.id ?? null, st ? (st.kind === 'rail' ? '🚉 ' : '') + esc(st.name) + pairMark : '?')}${waiting}</div>${warn}
           <button class="rule-chip" data-action="stop-open" data-line="${line.id}" data-i="${i}" title="${fold}">${WAIT_LABELS[ruleWaitId(rule)]}${platIcon}${loadIcons}${unloadIcons}${stopFoldHtml(open)}</button>
-          ${btn('stop-up', '↑', 'Раньше', i === 0)}${btn('stop-down', '↓', 'Позже', i === n - 1)}${btn('stop-del', '✕', 'Убрать из маршрута', n <= 2)}
+          <button class="icon stop-reorder" data-stop-reorder aria-label="Изменить порядок остановки ${i + 1}" aria-keyshortcuts="ArrowUp ArrowDown" title="Перетащите остановку или нажмите ↑ / ↓">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 5h8M4 8h8M4 11h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+          <button class="icon" data-action="stop-del" data-line="${line.id}" data-i="${i}" title="Убрать из маршрута" ${n <= 2 ? 'disabled' : ''}>✕</button>
         </div>${open ? this.stopRuleHtml(line, i, rule) : ''}`;
       })
       .join('');
-    return `<div class="route"><div class="route-head"><span class="lbl2">Остановки</span>
+    return `<div class="route" data-route-line="${line.id}"><div class="route-head"><span class="lbl2">Остановки</span>
       ${this.shopsButtonHtml(line.stops, line)}<button class="small ${adding ? 'primary' : ''}" data-action="${adding ? 'stop-add-done' : 'stop-add'}" data-line="${line.id}">${adding ? 'Готово' : '+ Станция'}</button></div>
       ${adding ? '<p class="tip">Кликайте по станциям на карте — они добавятся в конец маршрута.</p>' : ''}
       ${rows}</div>`;
+  }
+
+  /** Данные очереди меняются без перерисовки строки, которая могла получить фокус. */
+  private updateRouteWaiting(side: HTMLElement): void {
+    const route = side.querySelector<HTMLElement>('.route[data-route-line]');
+    if (!route) return;
+    const g = this.game();
+    const line = g.lines.get(Number(route.dataset.routeLine));
+    if (!line) return;
+    const kind = g.lineKind(line);
+    for (const badge of route.querySelectorAll<HTMLElement>('[data-stop-waiting]')) {
+      const st = g.stations.get(Number(badge.dataset.stopWaiting));
+      setHtml(badge, st ? stopWaitingHtml(st, kind) : '');
+    }
+  }
+
+  private moveRouteStop(id: number, from: number, to: number): void {
+    const g = this.game();
+    const line = g.lines.get(id);
+    if (!line || from < 0 || from >= line.stops.length || to < 0 || to >= line.stops.length || from === to) return;
+    const { stops, rules } = reorderStop(line, from, to);
+    const paired = g.pairRoute(stops);
+    // setLineRoute объединит соседние повторы. Перетаскивание не должно заодно убрать остановку и её правила.
+    if (paired.some((sid, i) => i > 0 && sid === paired[i - 1])) {
+      g.notify('Одинаковые остановки не могут идти подряд');
+      return;
+    }
+    const problem = g.setLineRoute(id, stops, rules);
+    if (problem) {
+      g.notify(problem);
+      return;
+    }
+    this.ui.stopOpen = null;
+    this.sync(true);
+    this.q('[data-side]').querySelector<HTMLElement>(`.stop[data-line="${id}"][data-i="${to}"] [data-stop-reorder]`)?.focus();
   }
 
   /**
