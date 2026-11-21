@@ -10,9 +10,12 @@ describe('Экономика', { timeout: 240_000 }, () => {
   // async и пауза после каждого месяца (breathe): тест идёт десятки секунд, под нагрузкой — дольше минуты.
   it('движение в городах не встаёт со временем', async () => {
     const game = freshGame(7);
+    game.setPedestrians(true);
     // Разгон: в первые месяцы машины жителей только разъезжаются по городу (во втором — пик прибытий), дальше — ровно.
-    runMonths(game, 2);
-    await breathe();
+    for (let month = 0; month < 2; month++) {
+      runMonths(game, 1);
+      await breathe();
+    }
     const arrivals: number[] = [];
     let last = game.traffic.arrivals;
     for (let m = 0; m < 6; m++) {

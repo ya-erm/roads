@@ -126,13 +126,28 @@ describe('Пешеходные переходы: геометрия и граф'
     expect(g.crosswalks.has(j.id)).toBe(false);
   });
 
+  it('подземные переходы с обеих сторон дороги не отодвигают машины и не удлиняют фазы', () => {
+    const { net, j, arms } = cross(['avenue', 'avenue', 'avenue', 'avenue']);
+    j.control = 'lights';
+    for (const c of arms) setWalk(j, c.id, true, true, true);
+    const g = new LaneGraph(net, undefined, null, true);
+    expect(g.stopBack.size).toBe(0);
+    expect(g.holdBack.size).toBe(0);
+    expect(g.nodes.get(j.id)!.lights!.phases.every((p) => p.walk === undefined)).toBe(true);
+    const w = g.crosswalks.get(j.id)![0];
+    for (const [side, portal] of w.geo.portals!.entries()) {
+      for (const p of portal) expect(Math.abs(p.y)).toBeGreaterThan(w.geo.width / 2);
+      expect(w.geo.ends[side].y).toBeCloseTo((portal[1].y + portal[2].y) / 2);
+    }
+  });
+
   it('светофор: зелёный горит не короче перехода тех, кто идёт в эту фазу (проспект 2+2 — 9,7 с); настройка — как задана', () => {
     const { net, j } = cross(['avenue', 'avenue', 'avenue', 'avenue']);
     j.control = 'lights';
     const before = new LaneGraph(net).nodes.get(j.id)!.lights!.phases.map((p) => p.green);
     expect(Math.max(...before)).toBeLessThan(9);
     syncWalks(net, j, () => true);
-    // Пешеходы в игре пока выключены (PEDESTRIANS_ON): граф по умолчанию зелёный не удлиняет.
+    // Без пешеходов зелёный не удлиняется.
     expect(new LaneGraph(net).nodes.get(j.id)!.lights!.phases.map((p) => greenOf(p))).toEqual(before);
     // С пешеходами (своему графу, параметром) — не короче перехода.
     const lit = new LaneGraph(net, undefined, null, true).nodes.get(j.id)!.lights!;

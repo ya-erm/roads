@@ -76,8 +76,10 @@ import { footprintRadius, type Footprint } from '../world/spatial';
 import { BUY_DOT_PX, dropSpots, pickDropStop } from './buyDrop';
 import { lotDragPlan, lotGateHit, lotHandleAt, lotOverlay, type LotToolState } from './lotTool';
 import type { LotRows } from '../world/parkingLots';
+import { FOOTPATH, nearestFootpath, pathFootprint } from '../game/footpaths';
+import { footpathSnap } from './footpathTool';
 
-export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain' | 'industry';
+export type Tool = 'select' | 'road' | 'rail' | 'lights' | 'roundabout' | 'station' | 'line' | 'bulldoze' | 'terrain' | 'industry' | 'footpath';
 
 /**
  * Каким действием отпускать знак скорости, чтобы браузер его принял: из того, что разрешено. На macOS с зажатым
@@ -108,6 +110,7 @@ export function isNodeDoubleClick(prev: number | null, node: number, detail: num
 export const TOOLS: { id: Tool; key: string; alt?: string; name: string }[] = [
   { id: 'select', key: '1', name: 'Выбор' },
   { id: 'road', key: '2', name: 'Дорога' },
+  { id: 'footpath', key: 'K', name: 'Дорожка' },
   { id: 'rail', key: '3', name: 'Ж/д' },
   { id: 'lights', key: '4', name: 'Перекрёсток' },
   { id: 'roundabout', key: '5', name: 'Развязки' },
@@ -203,6 +206,7 @@ export function areaSummary(c: AreaContents): string {
     return d === 1 && dd !== 11 ? one : d >= 2 && d <= 4 && (dd < 12 || dd > 14) ? few : many;
   };
   const parts = [
+    c.footpaths?.length && `${c.footpaths.length} ${word(c.footpaths.length, 'дорожка', 'дорожки', 'дорожек')}`,
     c.corridors.length && `${c.corridors.length} ${word(c.corridors.length, 'участок', 'участка', 'участков')} дорог`,
     c.segs.length && `${c.segs.length} ${word(c.segs.length, 'участок', 'участка', 'участков')} путей`,
     c.buildings.length && `${c.buildings.length} ${word(c.buildings.length, 'дом', 'дома', 'домов')}`,
@@ -245,6 +249,8 @@ function profileNote(p?: ProfileSummary): string {
 }
 
 export class Controller {
+  private footpathStart: Vec | null = null;
+  private draggingPathRemoval = false;
   tool: Tool = 'select';
   roadMode: RoadMode = 'build';
   junctionMode: JunctionMode = 'ring';
@@ -539,6 +545,7 @@ export class Controller {
       this.selection = null;
     }
     this.projectTools.stop(this.netKind);
+    this.footpathStart = null;
     this.tool = tool;
     this.chain = null;
     this.control = null;
@@ -1041,7 +1048,7 @@ export class Controller {
   private finishArea(a: Vec, b: Vec): void {
     const g = this.game();
     const contents = g.areaContents(a, b);
-    const total = contents.segs.length + contents.corridors.length + contents.buildings.length + contents.stations.length;
+    const total = contents.segs.length + contents.corridors.length + contents.buildings.length + contents.stations.length + (contents.footpaths?.length ?? 0);
     if (!total) return;
     if (total > 8 || contents.stations.length) this.pendingArea = { a, b, contents };
     else g.bulldozeArea(a, b);
@@ -1564,6 +1571,7 @@ export class Controller {
     if (this.pendingArea) this.cancelArea();
     else if (this.areaStart) this.areaStart = null;
     else if (this.spanStart) this.spanStart = null;
+    else if (this.footpathStart) this.footpathStart = null;
     // База стройки — свой режим инструмента «Станция»: отмена — назад к «Выбору».
     else if (this.pending?.kind === 'newBase') this.setTool('select');
     else if (this.pending) this.pending = null;
@@ -1658,6 +1666,7 @@ export class Controller {
    * Инструмент и его настройки остаются.
    */
   reset(): void {
+    this.footpathStart = null;
     this.pending = null;
     this.pendingArea = null;
     this.areaStart = null;
@@ -1997,6 +2006,7 @@ export class Controller {
       return;
     }
     if (e.button !== 0) return;
+    this.draggingPathRemoval = false;
     const p = this.worldAt(e);
     this.hover = p;
     const g = this.game();
@@ -2045,6 +2055,12 @@ export class Controller {
     const label = (this.pending && PENDING_UNDO[this.pending.kind]) ?? (corner ? 'скругление угла' : UNDO_LABELS[this.action]);
     if (label) g.checkpoint(this.action === 'road' && this.netKind === 'rail' ? 'путь' : label);
     switch (this.action) {
+      case 'footpath':
+        if (!this.footpathStart) {
+          this.footpathStart = this.pathPoint(p);
+          this.left.createdChain = true;
+        }
+        break;
       case 'road':
         if (this.netKind === 'road') {
           // Дорога — на сети полос: первый клик начинает, следующий (или отпускание после протяжки) строит.
@@ -2383,9 +2399,26 @@ export class Controller {
     return this.roadTools.spanPlan(st.corridor, st.lane, st.s, c.lut.closest(p).s);
   }
 
+  private pathPoint(p: Vec): Vec {
+    return this.freeAim ? p : footpathSnap(this.game(), p, Math.min(8, this.snapRadius));
+  }
+
+  private pathUnder(p: Vec) {
+    const g = this.game();
+    const hit = nearestFootpath(g.footpaths, p, Math.min(3, FOOTPATH.width / 2 + 3 / this.camera.zoom));
+    if (!hit || g.structureAt(p) || corridorUnder(g.roads.net, p)) return;
+    return hit.path;
+  }
+
   /** Снос того, что под курсором: станция, дом, путь или дорога. */
   private bulldozeAt(p: Vec): void {
     const g = this.game();
+    const path = this.pathUnder(p);
+    if (path) {
+      this.draggingPathRemoval = true;
+      g.removeFootpaths([path]);
+      return;
+    }
     const st = g.structureAt(p);
     if (st?.type === 'station') g.removeStation(st);
     else if (st?.type === 'building') g.demolishBuilding(st);
@@ -2554,6 +2587,7 @@ export class Controller {
           corridor: x.arm.corridor.id,
           pos: left ? x.geo.curbL : x.geo.curb,
           on: x.arm.on,
+          underground: x.arm.underground,
           own: x.arm.own,
           cost: x.cost,
           stripes: x.arm.on ? undefined : x.geo.stripes,
@@ -2715,7 +2749,10 @@ export class Controller {
     if (e.target === this.canvas || this.pan || this.left) this.hover = this.worldAt(e);
     if (this.left && this.tool === 'bulldoze' && this.bulldozeMode === 'point' && this.hover && !this.spanStart) {
       // Снос, который ведут мышью: дома и станции — только по клику.
-      if (!this.game().builder.bulldoze(this.hover, this.snapRadius * 0.3)) this.roadTools.bulldoze(this.hover, this.snapRadius * 0.3);
+      if (this.draggingPathRemoval) {
+        const path = this.pathUnder(this.hover);
+        if (path) this.game().removeFootpaths([path]);
+      } else if (!this.game().builder.bulldoze(this.hover, this.snapRadius * 0.3)) this.roadTools.bulldoze(this.hover, this.snapRadius * 0.3);
     }
     if (this.left && this.action === 'lane' && this.hover) this.roadTools.laneMove(this.hover, this.snapRadius);
     if (this.left && this.projectMode && this.hover) this.projectTools.move(this.netKind, this.hover, this.snapRadius, e.shiftKey);
@@ -2778,6 +2815,16 @@ export class Controller {
       return;
     }
     const moved = Math.hypot(e.clientX - left.sx, e.clientY - left.sy) > CLICK_SLOP;
+    if (this.action === 'footpath' && this.footpathStart) {
+      if (moved || !left.createdChain) {
+        const end = this.pathPoint(this.worldAt(e));
+        const problem = this.game().buildFootpath(this.footpathStart, end);
+        if (problem) this.showError(problem);
+        else this.footpathStart = end;
+      }
+      this.onChange();
+      return;
+    }
     if (this.projectMode) {
       // Протянули построенную дорогу — её правка в проект (дорога пока как есть).
       if (this.builtDrag) {
@@ -3544,7 +3591,7 @@ export class Controller {
     }
     // Сочетания с Cmd / Ctrl / Alt — браузеру (Cmd+N, Cmd+M…), игре только одиночные клавиши.
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const tool = TOOLS.find((t) => `Digit${t.key}` === e.code || (t.alt && `Key${t.alt}` === e.code));
+    const tool = TOOLS.find((t) => `Digit${t.key}` === e.code || `Key${t.key}` === e.code || (t.alt && `Key${t.alt}` === e.code));
     if (tool) {
       // Снос уже выбран — повторное нажатие переключает режим по кругу: точка → рамка → полоса.
       if (tool.id === 'bulldoze' && this.tool === 'bulldoze') {
@@ -3822,6 +3869,7 @@ export class Controller {
     if (area) {
       const c = area.contents;
       o.area = { a: area.a, b: area.b, segs: c.segs, corridors: c.corridors, fps: [...c.buildings.map((x) => x.fp), ...c.stations.map((x) => x.fp)] };
+      for (const path of c.footpaths ?? []) o.area.fps.push(pathFootprint(path.a, path.b));
       if (!this.pendingArea) {
         const ban = c.corridors.some((id) => g.streetBanAt(id)) ? ` · ${STREET_BAN_MARK}` : '';
         o.label = { text: `${areaSummary(c)} · +${money(c.refund)}${c.cost ? ` −${money(c.cost)}` : ''}${ban}`, ok: true };
@@ -3970,6 +4018,19 @@ export class Controller {
               }
             : { text: `${o.plan.reason} · ${money(o.plan.cost)}`, ok: false };
         }
+        break;
+      }
+      case 'footpath': {
+        const end = this.memo('footpath-end', () => this.pathPoint(p));
+        const start = this.footpathStart;
+        const plan = start && this.memo('footpath-plan', () => g.footpathPlan(start, end));
+        const ok = !plan?.reason;
+        if (start && dist(start, end) > 0.1) o.footpath = { a: start, b: end, ok };
+        o.points = [{ pos: end, color: ok ? '#2f80ed' : '#df403c', r: 4 }];
+        if (start) o.points.push({ pos: start, color: '#2f80ed', r: 4 });
+        o.label = plan && start && dist(start, end) > 0.1
+          ? { text: plan.reason ?? `${Math.round(dist(start, end))} м · ${money(plan.cost)}`, ok }
+          : { text: start ? 'Укажите следующую точку · Esc — закончить' : 'Укажите начало дорожки', ok: true };
         break;
       }
       case 'terrain': {
@@ -4306,6 +4367,13 @@ export class Controller {
             : { text: res.plan.reason ?? 'Нельзя', ok: false };
           break;
         }
+        const path = this.pathUnder(p);
+        if (path) {
+          o.footpath = { a: path.a, b: path.b, ok: false };
+          const refund = dist(path.a, path.b) * FOOTPATH.pricePerMetre * COST.refundRatio;
+          o.label = { text: `Снести дорожку · +${money(refund)}`, ok: true };
+          break;
+        }
         const st = g.structureAt(p);
         if (st?.type === 'warehouse') {
           const problem = g.warehouseRemoveProblem(st);
@@ -4373,7 +4441,7 @@ export class Controller {
         const walk = o.walkEdit && this.walkAt(p, o.walkEdit.toggles);
         if (o.walkEdit && walk) {
           o.walkEdit.hover = walk.corridor;
-          o.label = walk.on ? { text: '🚶 Переход → стереть', ok: true } : { text: `🚶 Переход → нарисовать · ${money(walk.cost)}`, ok: walk.cost <= g.budget };
+          o.label = walk.on ? { text: walk.underground ? 'Убрать подземный переход' : '🚶 Переход → стереть', ok: true } : { text: `🚶 Переход → нарисовать · ${money(walk.cost)}`, ok: walk.cost <= g.budget };
           break;
         }
         const end = edit && this.laneAt(p, edit.ends);

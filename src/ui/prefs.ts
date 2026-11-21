@@ -7,7 +7,7 @@
  */
 import { asRecord, readJson, writeJson } from '../core/store';
 
-export type Pref = 'junctionMarks' | 'mapCache' | 'ideas';
+export type Pref = 'junctionMarks' | 'mapCache' | 'ideas' | 'pedestrians';
 
 /** Описание настройки — строка в разделе «Настройки». */
 export interface PrefInfo {
@@ -62,6 +62,13 @@ export function ideasSvg(w = 32, h = 24): string {
 
 /** Все настройки — по порядку в разделе меню. */
 export const PREFS: readonly PrefInfo[] = [
+  {
+    id: 'pedestrians',
+    name: 'Пешеходы',
+    hint: 'Жители ходят по тротуарам и переходам. Выключите, чтобы снизить нагрузку на игру',
+    icon: '<svg viewBox="0 0 48 36" width="32" height="24" aria-hidden="true"><circle cx="26" cy="6" r="4" fill="#ce9067"/><path d="m18 19 5-7 4 7 6 3m-10-9-2 10-7 9m8-10 7 10" fill="none" stroke="#4278a6" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    default: true,
+  },
   {
     id: 'junctionMarks',
     name: 'Разметка перекрёстков',

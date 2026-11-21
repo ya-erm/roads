@@ -187,7 +187,7 @@ import { trafficActivityHtml } from './trafficActivity';
 import { SERVICES } from '../game/services';
 import { incomeChart, incomeLegend, monthTick } from './incomeChart';
 import { money, planPrice, projectMoneyWarning } from '../input/labels';
-import { WALK_BAN_TEXT } from '../lanes/crosswalk';
+import { underpassCost, WALK_BAN_TEXT } from '../lanes/crosswalk';
 import { walkSignSvg } from '../render/walkSign';
 import { BIOME_LIST, BIOMES, biomeForSeed, cargoOnMap } from '../world/biomes';
 import {
@@ -258,6 +258,7 @@ const STYLE_NAMES: Record<TownStyle, string> = {
 const ICONS: Record<Tool, string> = {
   select: '<svg viewBox="0 0 24 24"><path d="M5 3l12 9-5 1 3 6-2 1-3-6-4 4z" /></svg>',
   road: '<svg viewBox="0 0 24 24"><path d="M4 21 C6 12 10 8 20 4" /><path d="M9 21 C11 14 14 11 21 9" /></svg>',
+  footpath: '<svg viewBox="0 0 24 24"><circle cx="14.5" cy="4" r="2" /><path d="m8 12 3-4 3-1 2 5 4 1m-7-5-2 7 4 3 1 4m-5-8-2 5-4 2" /></svg>',
   rail: '<svg viewBox="0 0 24 24"><path d="M8 2L5 22M16 2l3 20" /><path d="M6 6h12M5.5 11h13M5 16h14M4.5 20.5h15" /></svg>',
   lights:
     '<svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="16" rx="3" /><circle cx="12" cy="6" r="1.4" /><circle cx="12" cy="10" r="1.4" /><circle cx="12" cy="14" r="1.4" /><path d="M12 18v4" /></svg>',
@@ -602,6 +603,7 @@ export class Hud {
       b.dataset.id = t.id;
       b.innerHTML = `${ICONS[t.id]}<span class="name">${t.name}</span><kbd>${t.alt ?? t.key}</kbd>`;
       b.title = t.alt ? `${t.name} (${t.alt} или ${t.key})` : `${t.name} (${t.key})`;
+      if (t.id === 'footpath') b.title = `Пешеходная дорожка (${t.key}). Протяните или укажите точки кликами. Alt — без привязки, Esc — закончить.`;
       tools.appendChild(b);
     }
     const speed = this.q('[data-speed]');
@@ -643,6 +645,17 @@ export class Hud {
     this.minimap = new Minimap(this.q('[data-minimap]'), game, controller.camera);
     root.addEventListener('change', (e) => {
       const input = e.target as HTMLInputElement;
+      if (input.dataset.walkArm !== undefined) {
+        const g = this.game();
+        g.checkpoint('пешеходный переход');
+        const problem = g.setCrosswalk(Number(input.dataset.node), Number(input.dataset.walkArm), input.value === 'underground' ? 'underground' : input.value === 'surface');
+        g.commit();
+        if (problem) this.controller.showError(problem);
+        input.blur();
+        invalidate(this.q('[data-side]'));
+        this.sync(true);
+        return;
+      }
       // Партия из файла: открываем и закрываем меню.
       if (input.dataset.importSave !== undefined && input.files?.[0]) {
         void this.session.importFile(input.files[0]).then((ok) => {
@@ -2027,12 +2040,11 @@ export class Hud {
         // Фаза — править на перекрёстке: кликами по проездам на карте (controller.editPhase); та же ещё раз — готово.
         c.editPhase(Number(d.id), Number(d.i));
         break;
-      case 'jn-walk':
       case 'jn-walks-all': {
         // Пешеходные переходы — тоже правка перекрёстка: отменяется Ctrl+Z.
         const id = Number(d.id);
         g.checkpoint('пешеходный переход');
-        const problem = d.action === 'jn-walk' ? g.setCrosswalk(id, Number(d.seg)) : g.setCrosswalks(id, d.v === '1');
+        const problem = g.setCrosswalks(id, d.v === '1');
         g.commit();
         if (problem) c.showError(problem);
         break;
@@ -2901,8 +2913,8 @@ export class Hud {
 
   private renderSide(): void {
     const side = this.q('[data-side]');
-    // Пока игрок вводит название линии, не перерисовываем панель.
-    const editing = document.activeElement instanceof HTMLInputElement && side.contains(document.activeElement);
+    // Сохраняем поле ввода и открытый список переходов, пока игрок делает выбор.
+    const editing = (document.activeElement instanceof HTMLInputElement || document.activeElement?.matches('select[data-walk-arm]')) && side.contains(document.activeElement);
     if (editing || this.pressing || this.ui.dragLine !== null) {
       this.updateRouteWaiting(side);
       return;
@@ -4120,8 +4132,7 @@ export class Hud {
   }
 
   /**
-   * Пешеходные переходы перекрёстка (docs/CROSSWALKS.md): значок на каждый подъезд — стрелка стороны света и человечек;
-   * есть переход — подсвечен, нет — бледный, нельзя — неактивен (почему — в подсказке); «все» — включить или стереть все.
+   * Для каждого подъезда выбирается тип перехода. Кнопка «все» добавляет недостающие зебры или убирает все переходы.
    */
   private walksHtml(id: number): string {
     const g = this.game();
@@ -4131,11 +4142,15 @@ export class Hud {
     const chips = list
       .map((x) => {
         const c = info?.label(x.arm.corridor.id) ?? { arrow: '•', name: '?' };
-        const tip = x.arm.ban
-          ? `${c.name}: перехода нет — ${WALK_BAN_TEXT[x.arm.ban]}`
-          : `${c.name}: ${x.arm.on ? 'переход есть · стереть' : `перехода нет · нарисовать ${money(x.cost)}`}${x.arm.own ? '' : ' · сейчас — как решил город'}`;
-        // Тот же знак, что на карте (walkSign.ts): есть — как есть, нет — серый и перечёркнут, «само» — пунктир вокруг.
-        return `<button class="walk-opt" data-action="jn-walk" data-id="${id}" data-seg="${x.arm.corridor.id}" ${x.arm.ban ? 'disabled' : ''} data-tip="${esc(tip)}"><span class="walk-dir">${c.arrow}</span>${walkSignSvg({ on: x.arm.on, own: x.arm.own || !!x.arm.ban }, 20)}</button>`;
+        const surface = x.arm.on && !x.arm.underground;
+        const tunnel = underpassCost(x.geo);
+        const tip = x.arm.ban ? WALK_BAN_TEXT[x.arm.ban] : 'Подземный переход позволяет перейти улицу без остановки машин';
+        return `<label class="walk-type" data-tip="${esc(tip)}"><span>${c.arrow} ${esc(c.name)}</span>
+          <select data-walk-arm="${x.arm.corridor.id}" data-node="${id}" aria-label="Переход · ${esc(c.name)}" ${x.arm.ban ? 'disabled' : ''}>
+          <option value="none" ${x.arm.on ? '' : 'selected'}>Без перехода</option>
+          <option value="surface" ${surface ? 'selected' : ''}${!surface && x.cost > g.budget ? ' disabled' : ''}>Зебра${surface ? '' : ` · ${money(x.cost)}`}</option>
+          <option value="underground" ${x.arm.underground ? 'selected' : ''}${!x.arm.underground && tunnel > g.budget ? ' disabled' : ''}>Подземный${x.arm.underground ? '' : ` · ${money(tunnel)}`}</option>
+          </select></label>`;
       })
       .join('');
     const open = list.filter((x) => !x.arm.ban);
@@ -4145,8 +4160,7 @@ export class Hud {
     const all = allOn
       ? `<button class="small" data-action="jn-walks-all" data-id="${id}" data-v="0" data-tip="Стереть все переходы: машины быстрее, жителям — дальше до остановок" data-tip-end>${sign(false)} все</button>`
       : `<button class="small" data-action="jn-walks-all" data-id="${id}" data-v="1" ${cost > g.budget ? 'disabled' : ''} data-tip="Переходы на всех подъездах · ${money(cost)}" data-tip-end>${sign(true)} все</button>`;
-    return `<div class="rule-row"><span class="lbl2" data-tip="Пешеходные переходы на подъездах: клик — нарисовать или стереть (и на карте — знаки у зебр)">Переходы</span>
-      <div class="opts">${chips}</div>${all}</div>`;
+    return `<div class="rule-row"><span class="lbl2">Пешеходные переходы</span>${all}</div><div class="walk-types">${chips}</div>`;
   }
 
   /** Карточка машины или поезда компании: что везёт (значком и словом), куда едет, прибыль. */
@@ -4942,6 +4956,7 @@ export class Hud {
   /** Настройка «Задания без сроков» (Меню → Настройки) — в игру: выключили — идей нет, вкладки тоже. */
   private applyPrefs(): void {
     this.game().ideas.setEnabled(prefOn('ideas'));
+    this.game().setPedestrians(prefOn('pedestrians'));
   }
 
   /**

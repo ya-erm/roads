@@ -29,7 +29,7 @@ const intIn =
   (v: unknown): v is number =>
     Number.isInteger(v) && (v as number) >= min && (v as number) <= max && (v as number) % step === 0;
 
-const isTool = oneOf<Tool>({ select: 1, road: 1, rail: 1, lights: 1, roundabout: 1, station: 1, line: 1, bulldoze: 1, terrain: 1, industry: 1 });
+const isTool = oneOf<Tool>({ select: 1, road: 1, footpath: 1, rail: 1, lights: 1, roundabout: 1, station: 1, line: 1, bulldoze: 1, terrain: 1, industry: 1 });
 const isRingSize = oneOf<RingSize>({ small: 1, medium: 1, large: 1 });
 const R = RAIL_STATION;
 

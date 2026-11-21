@@ -122,6 +122,20 @@ export interface SidewalkNet {
   spans: Map<number, SidewalkSpan[]>;
 }
 
+const gameWalks = new WeakMap<Game, { net: LaneNet; roadRev: number; plots: number; towns: number; terrain: number; walks: SidewalkNet; pieces: SidewalkCache }>();
+
+/** Геометрия построенных тротуаров общая для карты, привязки инструмента и движения жителей. */
+export function gameSidewalks(game: Game): SidewalkNet {
+  const net = game.roads.net;
+  const old = gameWalks.get(game);
+  const plots = game.index.version;
+  if (old?.net === net && old.roadRev === net.version && old.plots === plots && old.towns === game.townRev && old.terrain === game.terrain.version) return old.walks;
+  const pieces = old?.plots === plots && old.towns === game.townRev && old.terrain === game.terrain.version ? old.pieces : new Map();
+  const walks = sidewalkNet(net, walkSite(game), pieces);
+  gameWalks.set(game, { net, roadRev: net.version, plots, towns: game.townRev, terrain: game.terrain.version, walks, pieces });
+  return walks;
+}
+
 /** Расстояние от точки до прямоугольника участка f, м (внутри — 0). */
 function toLot(q: Vec, f: Footprint): number {
   const dx = q.x - f.center.x;

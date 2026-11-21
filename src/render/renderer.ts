@@ -4,6 +4,7 @@ import { clamp, hash } from '../core/math';
 import { drawWalkSign } from './walkSign';
 import { add, cubicBezier, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
 import type { Plan, Snap } from '../game/build';
+import { FOOTPATH, pathFootprint, type Footpath } from '../game/footpaths';
 import { stationNormal } from '../game/railStationEdit';
 import { additionalStationGates, stationRoadFront } from '../game/stationAccess';
 import { warningMarks } from '../game/stationWarnings';
@@ -65,7 +66,7 @@ import { drawIndustrialGate, drawIndustrialRoads, industryRoadSurface } from './
 import { drawIndustryHaulConnection, drawIndustryTransfer, drawIndustryYard, drawIndustryYardStock } from './industryStationArt';
 import { drawHouseArt, FINE_ZOOM, hallFountain, houseReach } from './houseArt';
 import { alleyScope, drawFountainRipples, drawParkArt, drawStreetGreen, FOUNTAIN_ZOOM, PARK_REACH, parkFountains, streetGreen, type StreetGreen } from './parkArt';
-import { type Around, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
+import { type Around, gameSidewalks, mergeSidewalks, type SidewalkCache, type SidewalkNet, sidewalkNet, sidewalkScope, type WalkSite, walkSite } from './sidewalks';
 import { iconRaster } from './iconRaster';
 import { EarthworkCache } from './earthworks';
 import { altitudeText, contourLabel, fineContourStep, gradeRungs, heightLabel, ReliefRenderer, waterPath } from './relief';
@@ -144,6 +145,7 @@ export type Selection =
   | { type: 'workTrain'; id: number };
 
 export interface ToolOverlay {
+  footpath?: { a: Vec; b: Vec; ok: boolean };
   vehicleGhost?: { look: VehicleLook; ok: boolean };
   parkingTargets?: { pos: Vec; dir: Vec; free: boolean }[];
   parkingPreview?: { pts: Vec[]; goal: Vec; dir: Vec; ok: boolean };
@@ -311,6 +313,7 @@ export const laneMarkRadius = (zoom: number) => Math.max(LANE_W * 0.36, 4 / zoom
 /** Значок-переключатель пешеходного перехода в «Перекрёстке». */
 export interface WalkToggle {
   corridor: number;
+  underground?: boolean;
   /** Центр знака — у бордюра на конце зебры (наполовину на тротуаре): зебра под ним видна. */
   pos: Vec;
   on: boolean;
@@ -599,6 +602,7 @@ export class Renderer {
   private readonly tiles = new TileCache<TileCanvasEl>(makeTileCanvas);
   /** Слепки нарисованного в плитках: что поменялось — те плитки и сбросить. */
   private readonly diffs = {
+    footpaths: new SceneDiff(),
     corridors: new SceneDiff(),
     nodes: new SceneDiff(),
     rails: new SceneDiff(),
@@ -667,6 +671,7 @@ export class Renderer {
   private static noStill() {
     return {
       game: null as Game | null,
+      footpaths: null as Footpath[] | null,
       terrain: null as unknown,
       /** Вид: биом, изолинии (дорожный инструмент на рельефе), карта скоростей, разметка перекрёстков. */
       biome: '' as string,
@@ -752,6 +757,7 @@ export class Renderer {
     this.tiles.clear();
     for (const d of [
       this.diffs.corridors,
+      this.diffs.footpaths,
       this.diffs.nodes,
       this.diffs.rails,
       this.diffs.railProjects,
@@ -912,7 +918,7 @@ export class Renderer {
     this.drawSignals(game, view);
     if (o.heatmap) this.drawHeatmap(game, 0);
     // Пешеходы на переходах — вблизи, под машинами (машина, что их пропускает, — перед зеброй).
-    this.drawCrosswalkLife(game, view);
+    this.drawPedestrians(game, view);
     this.drawGarageCars(game, view);
     this.drawVehicles(vehicles.filter((v) => groundBand(v) === 0 && !atPortal.has(v)));
     for (const [v, p] of atPortal) this.drawClipped(portalHalf(p, -1), () => this.drawVehicles([v]));
@@ -1024,7 +1030,7 @@ export class Renderer {
     this.drawParks(game, view);
     // Тротуары вдоль улиц и дорожки кварталов — тоже под дорогами: у перекрёстков их закрывает полотно; дорожки —
     // слоем под тротуаром, одним с ним покрытием (townWalks).
-    drawTownWalks(ctx, [...this.walks.values()], view, this.camera.zoom, this.sidewalks.lines);
+    drawTownWalks(ctx, [...this.walks.values()], view, this.camera.zoom, this.sidewalks.lines, game.footpaths);
     // Щебень и шпалы под дорогой (на переезде асфальт сверху), рельсы — поверх асфальта.
     this.drawRailBeds(groundRails, false);
     drawProjectShadows(ctx, s.fullNet, this.projectLanes, this.camera.zoom, view, 0);
@@ -1269,6 +1275,15 @@ export class Renderer {
     const add = (list: Box[]) => {
       for (const b of list) boxes.push(grow(b, DIRTY_PAD));
     };
+    const pathsChanged = cur.footpaths !== game.footpaths;
+    if (pathsChanged) {
+      cur.footpaths = game.footpaths;
+      add(this.diffs.footpaths.update(put => {
+        for (const { id, a, b } of game.footpaths) put(id, `${a.x},${a.y},${b.x},${b.y}`, {
+          x0: Math.min(a.x, b.x), y0: Math.min(a.y, b.y), x1: Math.max(a.x, b.x), y1: Math.max(a.y, b.y),
+        });
+      }));
+    }
     const reliefBox = this.relief.sync(t);
     if (reliefBox === 'all') this.tiles.invalidateAll();
     else if (reliefBox) boxes.push(grow(reliefBox, DIRTY_PAD + 40));
@@ -1397,7 +1412,7 @@ export class Renderer {
     cur.towns = game.townRev;
     cur.lots = game.lotRev;
     cur.layout = game.layoutRev;
-    let drivewayChange = lotChange;
+    let drivewayChange = lotChange || pathsChanged;
     for (const town of townsTouched ? game.towns : []) {
       let rec = this.diffs.towns.get(town.id);
       if (!rec) this.diffs.towns.set(town.id, (rec = { list: null, n: -1, parks: null, np: -1, lots: null, roads: '', diff: new SceneDiff() }));
@@ -1460,7 +1475,7 @@ export class Renderer {
     }
     if (drivewayChange) {
       const lots = game.towns.flatMap((t) => (t.lots ?? []).filter((l) => !l.removed).map((l) => l.fp));
-      this.drivewayOccupied = driveClearance(this.walks.values(), lots);
+      this.drivewayOccupied = driveClearance(this.walks.values(), [...lots, ...game.footpaths.map(p => pathFootprint(p.a, p.b))]);
     }
     // Аллеи и тротуары: по дорогам, остановкам и строениям у бордюра, черте городов (с шагом 50 м — не каждый месяц) и
     // их застройке (тротуар — где рядом дома). Полотна, что не менялись, — из кэша (streetGreen); новая станция или
@@ -1498,7 +1513,7 @@ export class Renderer {
       this.alleys.towns = game.towns.map((t) => ({ center: t.center, radius: Math.floor(t.radius / 50) * 50 }));
       this.alleys.lines = streetGreen(net, this.alleys.towns, (p, r) => index.at(p, r) !== null || this.drivewayOccupied(p, r * 1.1), this.alleys.cache);
       // Тротуары и скругления углов кварталов (render/sidewalks.ts).
-      this.walkBase = sidewalkNet(game.roads.net, walkSite(game), this.sidewalkCache);
+      this.walkBase = gameSidewalks(game);
     }
     // Аллеи — так же: на протяжке правки — по сети с правкой (деревья не остаются на сдвинутом полотне и на скруглённом
     // углу), отпустили или отменили — снова по сети игры. Слепок по полотнам сбрасывает плитки только там, где аллея другая.
@@ -4951,6 +4966,16 @@ export class Renderer {
     const cursor = o.buildingResize?.cursor ?? '';
     if (this.canvas.style.cursor !== cursor) this.canvas.style.cursor = cursor;
     const ctx = this.ctx;
+    if (o.footpath) {
+      const { a, b, ok } = o.footpath;
+      ctx.save();
+      ctx.strokeStyle = ok ? '#2f80ed' : '#df403c';
+      ctx.lineWidth = Math.max(FOOTPATH.width, 2 / this.camera.zoom);
+      ctx.lineCap = 'round';
+      this.polyline([a, b]);
+      ctx.stroke();
+      ctx.restore();
+    }
     for (const t of o.parkingTargets ?? []) {
       ctx.save();
       ctx.translate(t.pos.x, t.pos.y);
@@ -5882,30 +5907,36 @@ export class Renderer {
     for (const t of edit.toggles) drawWalkSign(ctx, t.pos, walkSignSize(z) * (t.corridor === edit.hover ? 1.15 : 1), t, z);
   }
 
-  /** Пешеходы на переходах — точками с зума 1,2: идущие — по зебре, ждущие — у бордюра (пока выключены, PEDESTRIANS_ON). */
-  private drawCrosswalkLife(game: Game, view: ReturnType<Renderer['view']>): void {
+  /** На дальнем плане фигуры меньше пикселя. Пешеходы в тоннеле скрыты между лестницами. */
+  private drawPedestrians(game: Game, view: ReturnType<Renderer['view']>): void {
     const z = this.camera.zoom;
-    if (z < 1.2) return;
+    if (z < 1.2 || !game.pedestrians.on) return;
     const ctx = this.ctx;
-    const cw = game.crosswalks;
-    if (!cw.list.length) return;
-    const seen = (p: Vec) => p.x > view.x0 - 10 && p.x < view.x1 + 10 && p.y > view.y0 - 10 && p.y < view.y1 + 10;
     const COATS = ['#d9534f', '#3a6fb0', '#e8b83a', '#4c9a5b', '#7d5ba6', '#e07b39', '#30343a', '#e6e2d8'];
     ctx.strokeStyle = 'rgba(30, 30, 30, 0.6)';
     ctx.lineWidth = 0.2;
-    for (const p of cw.pedestrians(game.time)) {
-      if (!seen(p.pos)) continue;
-      // Сверху: плечи цветом куртки, вблизи — голова.
+    for (const p of game.pedestrians.visible(game.time, view)) {
+      ctx.save();
+      ctx.translate(p.pos.x, p.pos.y);
+      ctx.rotate(p.heading);
+      if (z >= 3) {
+        const stride = p.walking ? 0.48 * Math.sin(game.time * 8 + p.seed) : 0;
+        ctx.fillStyle = '#454346';
+        ctx.fillRect(stride - 0.35, -0.6, 0.85, 0.42);
+        ctx.fillRect(-stride - 0.35, 0.18, 0.85, 0.42);
+      }
       ctx.fillStyle = COATS[Math.floor(hash(p.seed, 7) * COATS.length)];
       ctx.beginPath();
-      ctx.arc(p.pos.x, p.pos.y, 1.1, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, 0.65, 1, 0, 0, Math.PI * 2);
       ctx.fill();
-      if (z < 2) continue;
-      ctx.stroke();
-      ctx.fillStyle = hash(p.seed, 9) < 0.3 ? '#4a3626' : '#e9c3a0';
-      ctx.beginPath();
-      ctx.arc(p.pos.x, p.pos.y, 0.5, 0, Math.PI * 2);
-      ctx.fill();
+      if (z >= 2) {
+        ctx.stroke();
+        ctx.fillStyle = hash(p.seed, 9) < 0.3 ? '#4a3626' : '#e9c3a0';
+        ctx.beginPath();
+        ctx.arc(0.18, 0, 0.49, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
     }
   }
 

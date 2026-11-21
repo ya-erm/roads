@@ -1,4 +1,4 @@
-import { rightNormal, scale, Vec } from '../core/vec';
+import { lerp, rightNormal, scale, Vec } from '../core/vec';
 import { edgesAt, junctionCuts, laneBand, pointOff, sFrom } from './geometry';
 import { Corridor, corridorMargin, CorridorEnd, End, LaneNet, LaneNode } from './model';
 
@@ -26,22 +26,18 @@ export const XWALK = {
   start: 0.8,
   /** Разметка — за каждую полосу, которую переход пересекает, $. */
   laneCost: 40,
+  underpassBase: 6000,
+  underpassLane: 1500,
 } as const;
 
 /** На столько стоп-линия подъезда с переходом дальше от перекрёстка, м. */
 export const XWALK_BACK = XWALK.gap + XWALK.depth + XWALK.stopGap;
 
-/**
- * Пешеходы на переходах (src/game/crosswalks.ts) — пока выключены, до пешеходов на тротуарах: группы не приходят, зебра
- * машинам не закрывается, зелёный светофора не удлиняется под переход. Зебры, их настройка, цена, стоп-линия на
- * XWALK_BACK дальше (и светофор машин у неё) — как есть. Тесты пешеходов включают их своему графу и экземпляру (параметром).
- */
-export const PEDESTRIANS_ON = false;
-
 /** Переход на подъезде: есть ли; own — выбрал игрок (иначе — «само», по городу). */
 export interface WalkSetting {
   on: boolean;
   own?: true;
+  underground?: true;
 }
 
 /**
@@ -61,6 +57,7 @@ export interface WalkArm {
   on: boolean;
   /** Настройку задал игрок. */
   own: boolean;
+  underground: boolean;
 }
 
 /** Причина недоступности — значком в подсказке. */
@@ -103,7 +100,8 @@ export function walkArms(net: LaneNet, n: LaneNode, cuts?: Map<number, [number, 
     else if (!ban && c.build) ban = 'build';
     else if (!ban && c.length - here - far < 2 * XWALK_BACK + XWALK.minFree) ban = 'short';
     const set = walkSetting(n, c.id);
-    return { corridor: c, end: e.end, e, cut: here, ban, on: !ban && !!set?.on, own: !!set?.own };
+    const on = !ban && !!set?.on;
+    return { corridor: c, end: e.end, e, cut: here, ban, on, own: !!set?.own, underground: on && set?.underground === true };
   });
 }
 
@@ -112,8 +110,8 @@ export const walksOn = (net: LaneNet, n: LaneNode, cuts?: Map<number, [number, n
   n.walks ? walkArms(net, n, cuts).filter((a) => a.on) : [];
 
 /** Переход на подъезде id — так (own — выбор игрока; без own — «само»). Объект заменяется целиком. */
-export function setWalk(n: LaneNode, id: number, on: boolean, own = true): void {
-  n.walks = { ...n.walks, [String(id)]: own ? { on, own: true } : { on } };
+export function setWalk(n: LaneNode, id: number, on: boolean, own = true, underground = false): void {
+  n.walks = { ...n.walks, [String(id)]: { on, ...(own && { own: true }), ...(on && underground && { underground: true }) } };
 }
 
 /**
@@ -174,6 +172,8 @@ export interface WalkGeo {
   cover: Vec[];
   /** Полосы зебры — четырёхугольники. */
   stripes: Vec[][];
+  /** Лестницы вдоль бордюров, от тёмного конца к выходу на тротуар. */
+  portals?: Vec[][];
   /** Концы перехода на тротуаре: со стороны lo и hi. */
   ends: [Vec, Vec];
   /** У бордюров посреди зебры и наружу от дороги: правого (от перекрёстка) и левого — у одного из них значок переключателя. */
@@ -228,6 +228,10 @@ export function walkGeo(arm: WalkArm): WalkGeo {
   const edge = side > 0 ? hi + margin : lo - margin;
   const edgeL = side > 0 ? lo - margin : hi + margin;
   const t = c.lut.tangentAt(sMid);
+  const portals = arm.underground ? [
+    quad(d0, d0 + 6.5, lo - margin - 0.45, lo - margin - 3.85),
+    quad(d0, d0 + 6.5, hi + margin + 0.45, hi + margin + 3.85),
+  ] : undefined;
   return {
     corridor: c.id,
     end,
@@ -235,9 +239,11 @@ export function walkGeo(arm: WalkArm): WalkGeo {
     lo,
     hi,
     width: hi - lo + 2 * margin,
-    cover,
-    stripes,
-    ends: [pointOff(c, sMid, lo - margin - 1.2), pointOff(c, sMid, hi + margin + 1.2)],
+    cover: portals ? [] : cover,
+    stripes: portals ? [] : stripes,
+    portals,
+    ends: portals ? [lerp(portals[0][1], portals[0][2], 0.5), lerp(portals[1][1], portals[1][2], 0.5)]
+      : [pointOff(c, sMid, lo - margin - 1.2), pointOff(c, sMid, hi + margin + 1.2)],
     curb: pointOff(c, sMid, edge),
     out: scale(rightNormal(t), side),
     curbL: pointOff(c, sMid, edgeL),
@@ -251,3 +257,5 @@ export const walkTime = (width: number) => width / XWALK.speed + XWALK.start;
 
 /** Цена разметки перехода: по полосам, которые он пересекает. */
 export const walkCost = (geo: Pick<WalkGeo, 'lanes'>) => Math.max(1, geo.lanes) * XWALK.laneCost;
+
+export const underpassCost = (geo: Pick<WalkGeo, 'lanes'>) => XWALK.underpassBase + Math.max(1, geo.lanes) * XWALK.underpassLane;

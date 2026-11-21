@@ -2177,32 +2177,29 @@ button.icon.toggle-spacing {
   background: #e7f0fd;
 }
 
-/* Переход на подъезде в карточке перекрёстка: стрелка стороны света и знак «Пешеходный переход» (src/render/walkSign.ts) — без рамки кнопки. */
-.walk-opt {
-  display: inline-flex;
-  align-items: center;
-  gap: 1px;
-  padding: 1px 2px;
-  border: none;
-  background: none;
-  font-size: 11.5px;
-  cursor: pointer;
+.walk-types {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 10px;
 }
-
-.walk-opt:disabled {
-  opacity: 0.35;
-  cursor: default;
+.walk-type {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 11px;
 }
-
-.walk-opt:not(:disabled):hover .walk-sign {
-  transform: scale(1.12);
+.walk-type select {
+  min-width: 0;
+  width: 100%;
+  color: var(--ink);
+  background: white;
+  border: 1px solid #d4dce3;
+  border-radius: 5px;
+  padding: 2px;
+  font: inherit;
 }
-
-.walk-sign {
-  display: block;
-  transition: transform 0.1s;
-}
-
+/* Знак в карточке и у бордюра. */
 .small .walk-sign {
   display: inline-block;
   vertical-align: -2px;

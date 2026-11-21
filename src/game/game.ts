@@ -26,7 +26,7 @@ import { Cubic, CurveLUT, intersectCurves, straightCubic } from '../core/bezier'
 import { money as usd } from '../core/moneyText';
 import { Rng } from '../core/rng';
 import { durationText } from '../core/timeText';
-import { add, angleDiff, angleOf, closestOnSegment, cross, dist, dot, rightNormal, scale, sub, Vec } from '../core/vec';
+import { add, angleDiff, angleOf, closestOnSegment, cross, dist, dot, lerp, rightNormal, scale, sub, Vec } from '../core/vec';
 import { Anchor, anchorAt, buildRing, buildRoad, bulldoze, corridorUnder, insideRuns, splitCorridor } from '../lanes/edit';
 import { asphaltEdgesAt, nodeCuts } from '../lanes/geometry';
 import { copyBox, Fragment, pasteFragment } from '../lanes/fragment';
@@ -74,6 +74,7 @@ import {
 } from '../world/worldgen';
 import { carryFootprint, hallPlaza, movablePark, nearPark, parkMoveCost, placeParks, plazaAttached, plazaBy } from '../world/townParks';
 import { lotClearOfRoads, lotGrid, lotOutline } from '../world/lotClear';
+import { FOOTPATH, joinFootpath, overlapsFootpath, pathCrossesRoad, pathFootprint, type Footpath } from './footpaths';
 import { buildingFrontage, planStreetHouses, type HouseMove, type StreetPart } from '../world/streetHouses';
 import { resizeBuildingFootprint, type BuildingCorner } from '../world/buildingResize';
 import { streetBase, turnableBuilding, turnReach, wrapTurn } from '../world/moveTurn';
@@ -98,6 +99,7 @@ import { corridorCost, curbFootprint, isStopStreet, RoadBuilder, RoadPlan, short
 import { Construction, type ConstructionSave, type Project, projectName } from './construction';
 import { WorkSignals } from './workSignals';
 import { Crosswalks, WALK_HOUSES, WALK_LOSS } from './crosswalks';
+import { Pedestrians } from './pedestrians';
 import { Garages, type GarageHost, type GarageLook } from './garages';
 import { ServiceDepots, type DepotHost } from './serviceDepots';
 import { ShopParking, type ShopHost } from './shopParking';
@@ -156,7 +158,7 @@ import type { LotGate, ParkingLot } from '../world/entities';
 import { laneSlot } from './garages';
 import { boxesOverlap, CURB, type Box } from '../lanes/curb';
 import { addCurb, CURB_GROW, frontage, withCurb } from '../world/curbStreets';
-import { setWalk, syncWalks, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
+import { setWalk, syncWalks, underpassCost, WALK_BAN_TEXT, type WalkArm, walkArms, walkCost, type WalkGeo, walkGeo, XWALK } from '../lanes/crosswalk';
 import { Enterprises, industryRecipe } from './enterprises';
 import { depositRadius, isActive } from '../world/enterprise';
 import { industryAccess } from '../world/industrySites';
@@ -277,6 +279,7 @@ export interface LotPlan {
 
 /** Что попадёт под снос рамкой: что вернём за дороги и сколько стоит снос домов. */
 export interface AreaContents {
+  footpaths?: Footpath[];
   /** Пути. */
   segs: number[];
   /** Дороги — полотна. */
@@ -410,6 +413,7 @@ function roundaboutFee(R: number, lanes: number): number {
 
 /** Снимок построек до действия игрока — для Ctrl+Z. */
 interface UndoSnapshot {
+  footpaths: Footpath[];
   label: string;
   /** Дороги — копия сети полос; пути — старая сеть. */
   roads: LaneNet;
@@ -617,6 +621,7 @@ export interface RoadSpot {
 }
 
 export interface SaveData {
+  footpaths?: Footpath[];
   version: number;
   settings: WorldSettings;
   savedAt: number;
@@ -991,6 +996,8 @@ export class Game implements BuildContext {
   private brinkAt = -Infinity;
   private accumulator = 0;
   private nextEntityId = 1;
+  footpaths: Footpath[] = [];
+  private pathAccess?: { paths: Footpath[]; roads: LaneNet; version: string; open: Footpath[] };
   private readonly owners = new Map<number, SimOwner>();
   /** Машина колонны бригады стоит у конца пути и ждёт остальных (crewAssembled): с какого времени. */
   private readonly crewWaitSince = new Map<number, number>();
@@ -1065,8 +1072,18 @@ export class Game implements BuildContext {
   readonly construction: Construction;
   /** Временные светофоры реверса на перестройке «с проездом» узких дорог (src/game/workSignals.ts). */
   readonly workSignals = new WorkSignals();
-  /** Пешеходы на переходах перекрёстков (src/game/crosswalks.ts): жители вокруг — по охвату, как у станций. */
-  readonly crosswalks = new Crosswalks((p, r) => this.peopleNear(p, r).pop);
+  readonly crosswalks = new Crosswalks();
+  readonly pedestrians = new Pedestrians();
+
+  setPedestrians(on: boolean): void {
+    this.roads.graph.setPedestrians(on);
+    if (this.pedestrians.on === on) return;
+    this.pedestrians.on = on;
+    if (!on) {
+      this.crosswalks.reset(this.traffic);
+      this.pedestrians.reset();
+    }
+  }
   /** Гаражи частных домов (src/game/garages.ts): машины жителей выезжают из них и возвращаются в них. */
   private readonly gHost = this.garageHost();
   readonly garages = new Garages(this.gHost);
@@ -1216,6 +1233,7 @@ export class Game implements BuildContext {
       loan: this.loan,
       upkeep: { at: this.upkeepAt, ...this.upkeepDue },
       nextEntityId: this.nextEntityId,
+      footpaths: this.footpaths.length ? this.footpaths : undefined,
       extraForests: this.terrain.extraForests,
       net: this.net.serialize(),
       roads: this.roads.net.toJSON(),
@@ -1404,6 +1422,7 @@ export class Game implements BuildContext {
    * на её полосу (старое сохранение), она возвращается на предыдущую станцию со своим грузом.
    */
   private restore(save: SaveData): void {
+    this.footpaths = save.footpaths ?? [];
     for (const f of save.extraForests) this.terrain.addForest(f.c, f.r, this.rng);
     for (const e of save.terraform ?? []) this.terrain.terraform(e);
     this.net.load(save.net);
@@ -3083,6 +3102,74 @@ export class Game implements BuildContext {
     for (const t of touched) if (t.receivers?.some((r) => ids.includes(r.b))) this.refreshReceivers(t);
   }
 
+  footpathPlan(a: Vec, b: Vec): { cost: number; reason?: string } {
+    const fp = pathFootprint(a, b);
+    const cost = Math.round(fp.w * FOOTPATH.pricePerMetre);
+    if (!this.inBounds(a, 1) || !this.inBounds(b, 1)) return { cost, reason: 'За краем карты' };
+    if (fp.w < FOOTPATH.minLength) return { cost, reason: 'Дорожка короче 2 м' };
+    if (overlapsFootpath(this.footpaths, a, b)) return { cost, reason: 'Здесь уже есть дорожка' };
+    const reason = this.footpathObstruction(a, b);
+    if (reason) return { cost, reason };
+    return cost > this.budget ? { cost, reason: 'Не хватает денег' } : { cost };
+  }
+
+  private footpathObstruction(a: Vec, b: Vec): string | null {
+    // Ограничиваем область пространственного поиска даже при протяжке через всю карту.
+    const steps = Math.max(1, Math.ceil(dist(a, b) / 80));
+    let from = a;
+    for (let i = 1; i <= steps; i++) {
+      const to = lerp(a, b, i / steps);
+      const obstruction = this.footpathPartObstruction(pathFootprint(from, to));
+      if (obstruction) return obstruction;
+      from = to;
+    }
+    return null;
+  }
+
+  private footpathPartObstruction(fp: Footprint): string | null {
+    const under = this.structuresUnder(fp, 0);
+    if (under.blocker || under.houses.length) return under.blocker ?? 'Мешает здание';
+    const outline = lotOutline(fp, 3);
+    if (outline.some(p => this.isWater(p, 0.7))) return 'Мешает вода';
+    if (pathCrossesRoad(this.roads.net, fp, outline)) return 'Через дорогу нужен переход';
+    for (const s of this.net.segmentsNear(fp.center, footprintRadius(fp) + 10)) {
+      const level = this.net.nodes.get(s.a)?.level;
+      if (level && level === this.net.nodes.get(s.b)?.level) continue;
+      if (footprintAlong(fp, s.lut, () => halfWidth(s.spec))) return 'Мешает железная дорога';
+    }
+    return null;
+  }
+
+  /** Если застройка позже перекрыла дорожку, пешие маршруты через неё временно прерываются. */
+  openFootpaths(): Footpath[] {
+    if (!this.footpaths.length) return this.footpaths;
+    const roads = this.roads.net;
+    const version = `${roads.version}:${this.net.version}:${this.index.version}:${this.lotRev}:${this.terrain.version}`;
+    if (this.pathAccess?.paths === this.footpaths && this.pathAccess.roads === roads && this.pathAccess.version === version) return this.pathAccess.open;
+    const open = this.footpaths.filter(p => !this.footpathObstruction(p.a, p.b));
+    this.pathAccess = { paths: this.footpaths, roads, version, open };
+    return open;
+  }
+
+  buildFootpath(a: Vec, b: Vec): string | null {
+    const { cost, reason } = this.footpathPlan(a, b);
+    if (reason) return reason;
+    this.checkpoint('пешеходная дорожка');
+    this.footpaths = joinFootpath(this.footpaths, a, b, () => this.nextId());
+    this.spend(cost);
+    this.commit();
+    return null;
+  }
+
+  /** Вызывается внутри общего шага сноса, в том числе при сносе рамкой. */
+  removeFootpaths(paths: readonly Footpath[]): void {
+    const ids = new Set(paths.map(p => p.id));
+    for (const path of this.footpaths) {
+      if (ids.has(path.id)) this.refund(dist(path.a, path.b) * FOOTPATH.pricePerMetre);
+    }
+    this.footpaths = this.footpaths.filter(p => !ids.has(p.id));
+  }
+
   /** Снос одного здания игроком. */
   demolishBuilding(b: TownBuilding): boolean {
     if (b.kind === 'landmark') {
@@ -3137,18 +3224,21 @@ export class Game implements BuildContext {
       }
     }
     const stations = [...this.stations.values()].filter((st) => st.industryId === null && inside(st.fp.center) && !this.stationLines(st.id).length);
-    return { segs, corridors, buildings, stations, refund: Math.round(refund), cost: Math.round(cost) };
+    const footpaths = this.footpaths.filter(path => inside(pathFootprint(path.a, path.b).center));
+    for (const path of footpaths) refund += Math.round(dist(path.a, path.b) * FOOTPATH.pricePerMetre * COST.refundRatio);
+    return { segs, corridors, ...(footpaths.length && { footpaths }), buildings, stations, refund: Math.round(refund), cost: Math.round(cost) };
   }
 
   /** Сносит всё в рамке разом (одним шагом для Ctrl+Z). */
   bulldozeArea(a: Vec, b: Vec): boolean {
     const c = this.areaContents(a, b);
-    if (!c.segs.length && !c.corridors.length && !c.buildings.length && !c.stations.length) return false;
+    if (!c.segs.length && !c.corridors.length && !c.buildings.length && !c.stations.length && !c.footpaths?.length) return false;
     if (c.cost > this.budget + c.refund) {
       this.notify('Не хватает денег на снос');
       return false;
     }
     this.checkpoint('снос области');
+    if (c.footpaths) this.removeFootpaths(c.footpaths);
     for (const st of c.stations) this.removeStation(st);
     if (c.buildings.length) {
       this.demolish(c.buildings.map((x) => x.id));
@@ -4583,7 +4673,7 @@ export class Game implements BuildContext {
         res.push({ kind: 'in', seg: l.corridor, i, lane: lane.id, pos: pose.pos, dir: pose.dir, custom: custom.has(`${l.corridor}.${i}`), exits });
       });
     }
-    const walked = new Set((g.crosswalks.get(nodeId) ?? []).map((w) => w.outLink));
+    const walked = new Set((g.crosswalks.get(nodeId) ?? []).filter((w) => !w.underground).map((w) => w.outLink));
     for (const l of outs) {
       // На выезде с переходом — за зеброй.
       const u = walked.has(l.id) ? 7.5 + XWALK.gap + XWALK.depth : 6;
@@ -4682,16 +4772,19 @@ export class Game implements BuildContext {
    * Переход на подъезде corridor перекрёстка nodeId — включить или выключить (on не задан — наоборот). Разметка — за
    * деньги, стереть — бесплатно. Ошибка — текстом, null — получилось. Снимок для Ctrl+Z делает вызывающий.
    */
-  setCrosswalk(nodeId: number, corridor: number, on?: boolean): string | null {
+  setCrosswalk(nodeId: number, corridor: number, on?: boolean | 'underground'): string | null {
     const info = this.crosswalkInfo(nodeId).find((x) => x.arm.corridor.id === corridor);
     if (!info) return 'Нет такого подъезда';
     if (info.arm.ban) return `Переход нельзя: ${WALK_BAN_TEXT[info.arm.ban]}`;
-    const want = on ?? !info.arm.on;
-    if (want === info.arm.on && info.arm.own) return null;
-    if (want && !info.arm.on && info.cost > this.budget) return 'Не хватает денег';
+    const underground = on === 'underground';
+    const want = on === undefined ? !info.arm.on : on !== false;
+    const rebuild = want !== info.arm.on || underground !== info.arm.underground;
+    if (!rebuild && info.arm.own) return null;
+    const cost = want && rebuild ? (underground ? underpassCost(info.geo) : info.cost) : 0;
+    if (cost > 0 && cost > this.budget) return 'Не хватает денег';
     const n = this.roads.net.node(nodeId);
-    setWalk(n, corridor, want);
-    if (want && !info.arm.on) this.spend(info.cost);
+    setWalk(n, corridor, want, true, underground);
+    if (cost) this.spend(cost);
     this.roads.net.version++;
     this.networkChanged();
     this.walkCatchment(n.pos);
@@ -4881,6 +4974,7 @@ export class Game implements BuildContext {
   /** Снимок построек сейчас: дороги, пути, станции, дома, пристройки, кольца, рельеф, проекты и базы стройки. */
   private captureBuilt(label: string): UndoSnapshot {
     return {
+      footpaths: this.footpaths,
       label,
       roads: this.roads.net.clone(),
       roadsVersion: this.roads.net.version,
@@ -4947,6 +5041,7 @@ export class Game implements BuildContext {
     const top = this.undoStack[this.undoStack.length - 1];
     if (!top) return;
     const changed =
+      top.footpaths !== this.footpaths ||
       top.version !== this.net.version ||
       top.roadsVersion !== this.roads.net.version ||
       top.stations.length !== this.stations.size ||
@@ -5088,6 +5183,7 @@ export class Game implements BuildContext {
    * стройки. drop — дома, которых в снимке нет и которые надо снести (повтор сноса); выросшие сами — остаются.
    */
   private restoreBuilt(snap: UndoSnapshot, drop?: { townId: number; ids: number[] }[]): void {
+    this.footpaths = snap.footpaths;
     const railSave = this.rail.serialize();
     this.rail.clearTrains();
     // Ж/д проекты с тех пор ушли вперёд — готовое на путях переносим (оно уже оплачено), как у дорог (carryBuild).
@@ -5533,7 +5629,10 @@ export class Game implements BuildContext {
     // Светофоры реверса на перестройке «с проездом» — до движения: красный — стоп-линия своего направления.
     if (this.construction.projects.size || this.workSignals.list.size) this.workSignals.step(dt, this.roads.net, this.roads.graph, this.traffic);
     // Пешеходы на переходах — тоже до движения: идут — зебра закрыта.
-    if (this.roads.graph.crosswalks.size || this.crosswalks.list.length) this.crosswalks.step(dt, this.time, this.roads.graph, this.traffic);
+    if (this.pedestrians.on) {
+      this.crosswalks.step(this.time, this.roads.graph, this.traffic);
+      this.pedestrians.step(this);
+    }
     this.parkedCars.step();
     this.traffic.step(dt);
     // Техника бригад разворачивается петлёй — сразу после движения: на петле её рисуют там, где она на ней.
@@ -10067,7 +10166,6 @@ export class Game implements BuildContext {
     this.healBaseGates();
     // Город вырос: переходы «сами» — по новым домам, пешеходов — по новым жителям.
     if (this.syncCrosswalks(true)) this.roads.changed();
-    this.crosswalks.refreshPeople();
     for (const st of this.stations.values()) this.computeCatchment(st);
 
     this.history.push({ label: this.dateLabel, income: this.incomeMonth, expenses: this.expensesMonth, money: this.money, ledger: { ...this.ledger } });

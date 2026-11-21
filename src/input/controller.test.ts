@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { add, dot, scale, Vec } from '../core/vec';
 import { Game } from '../game/game';
-import { freshGame, road, roadPlan, STREET } from '../game/testkit';
+import { freshGame, openSpot, road, roadPlan, STREET } from '../game/testkit';
 import { cornerHandles, type CornerHandle } from '../lanes/corners';
 import { filletDepth } from '../lanes/geometry';
 import { junctionPlate } from '../world/lotClear';
@@ -95,6 +95,32 @@ function play(game: Game) {
   c.setRoadMode('move');
   return { c, canvas, camera, mouse, move, click, dblclick, key };
 }
+
+it('дорожка строится мышью и продолжается кликами, сносится и возвращается отменой', () => {
+  const game = freshGame({ seed: 11, size: 'small', towns: 2, industries: 'few', money: 5_000_000, water: 'dry' });
+  const a = openSpot(game, [[{ x: 0, y: 0 }, { x: 60, y: 60 }, 80]]);
+  const b = add(a, { x: 40, y: 0 });
+  const end = add(b, { x: 0, y: 25 });
+  const { c, canvas, mouse, move, click, key } = play(game);
+  key('KeyK');
+  expect(c.tool).toBe('footpath');
+  canvas.fire('mousedown', mouse(a));
+  move(b);
+  expect(c.overlay().footpath).toEqual({ a, b, ok: true });
+  win.fire('mouseup', mouse(b));
+  click(end);
+  expect(game.footpaths.map(p => [p.a, p.b])).toEqual([[a, b], [b, end]]);
+  key('Escape');
+  expect(c.tool).toBe('footpath');
+  c.setTool('bulldoze');
+  const mid = add(a, { x: 20, y: 0 });
+  move(mid);
+  expect(c.overlay().label?.text).toContain('Снести дорожку');
+  click(mid);
+  expect(game.footpaths).toHaveLength(1);
+  expect(game.undo()).toBeTruthy();
+  expect(game.footpaths).toHaveLength(2);
+});
 
 it('размещение автомобиля оставляет доступными правую протяжку карты и масштаб колесом', () => {
   const { c, canvas, camera, mouse, move } = play(freshGame({ ...NEW_GAME_SETTINGS, seed: 1 }));

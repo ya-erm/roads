@@ -92,6 +92,7 @@ export class Roads {
   }
 
   private rebuild(b: { graph: LaneGraph; net: LaneNet; version: number }): void {
+    b.graph.setPedestrians(this.graph.pedestrians);
     this.graph = b.graph;
     this.graphOf = { net: b.net, version: b.version };
     this.traffic.rebind(b.graph);

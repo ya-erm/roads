@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { walkCost, walksOn } from '../lanes/crosswalk';
+import { underpassCost, walkCost, walksOn } from '../lanes/crosswalk';
 import { Game } from './game';
 import { freshGame, runSeconds } from './testkit';
 
@@ -60,6 +60,39 @@ describe('Пешеходные переходы в игре', { timeout: 30_000 
     expect(walksOn(loaded.roads.net, loaded.roads.net.node(n.id)).length).toBe(walksOn(game.roads.net, n).length);
   });
 
+  it('замена зебры подземным переходом сохраняет охват, снимает стоп-линию и переживает загрузку и отмену', () => {
+    const game = freshGame(7);
+    const { n, list } = townJunction(game);
+    const { arm, geo } = list.find((x) => x.arm.on)!;
+    const id = arm.corridor.id;
+    const graphWalk = (g: Game) => g.roads.graph.crosswalks.get(n.id)!.find((w) => w.corridor === id)!;
+    const balance = game.money;
+    const missing = game.missingCrosswalks(n.pos, 50);
+    game.money -= game.budget;
+    expect(game.setCrosswalk(n.id, id, 'underground')).toBe('Не хватает денег');
+    expect(graphWalk(game).underground).toBeUndefined();
+    game.money = balance;
+    game.checkpoint('подземный переход');
+    expect(game.setCrosswalk(n.id, id, 'underground')).toBeNull();
+    game.commit();
+    const tunnel = graphWalk(game);
+    expect(tunnel.underground).toBe(true);
+    expect(tunnel.geo.stripes).toHaveLength(0);
+    expect(tunnel.geo.cover).toHaveLength(0);
+    expect(tunnel.geo.portals).toHaveLength(2);
+    for (const lane of game.roads.graph.links.get(tunnel.inLink!)!.lanes) expect(game.roads.graph.stopBack.has(lane.id)).toBe(false);
+    expect(game.missingCrosswalks(n.pos, 50)).toBe(missing);
+    const paid = game.money;
+    expect(paid).toBe(balance - underpassCost(geo));
+    expect(game.setCrosswalk(n.id, id, 'underground')).toBeNull();
+    expect(game.money).toBe(paid);
+    const loaded = new Game(game.settings, JSON.parse(JSON.stringify(game.toSave())));
+    expect(graphWalk(loaded).underground).toBe(true);
+    game.undo();
+    expect(graphWalk(game).geo.stripes.length).toBeGreaterThan(0);
+    expect(game.money).toBe(balance);
+  });
+
   it('все вкл / все выкл и цена выключения: стёртые переходы у остановки уменьшают её охват', () => {
     const game = freshGame(7);
     game.money = 1_000_000;
@@ -72,27 +105,27 @@ describe('Пешеходные переходы в игре', { timeout: 30_000 
     expect(walksOn(game.roads.net, game.roads.net.node(n.id)).length).toBe(game.crosswalkInfo(n.id).filter((x) => !x.arm.ban).length);
   });
 
-  it('пешеходы пока выключены: в партии никто не ходит, зебры машинам не закрываются, зелёный — как задан', () => {
+  it('включение запускает прогулки и уступание на зебрах, выключение сразу освобождает переходы', () => {
     const game = freshGame(7);
-    runSeconds(game, 90, () => {
-      for (const list of game.traffic.walks.values()) for (const b of list) expect(b.closed).toBe(false);
+    game.setPedestrians(true);
+    runSeconds(game, 0.2);
+    const first = [...game.pedestrians.visible(game.time)];
+    expect(first.length).toBeGreaterThan(0);
+    let crossed = false;
+    runSeconds(game, 25, () => {
+      crossed ||= game.pedestrians.walkers.some((w) => !!w.edge.crossing && !w.edge.crossing.underground);
     });
-    expect(game.crosswalks.on).toBe(false);
-    expect(game.crosswalks.list).toHaveLength(0);
-    expect(game.roads.graph.crosswalks.size).toBeGreaterThan(0);
+    expect([...game.pedestrians.visible(game.time)][0].pos).not.toEqual(first[0].pos);
+    expect(crossed).toBe(true);
+    game.setPedestrians(false);
+    runSeconds(game, 1);
+    expect(game.traffic.walks.size).toBe(0);
+    expect(game.crosswalks.crossings.size).toBe(0);
+    expect(game.pedestrians.walkers).toHaveLength(0);
+    expect([...game.pedestrians.visible(game.time)]).toHaveLength(0);
     for (const n of game.roads.graph.nodes.values()) for (const p of n.lights?.phases ?? []) expect(p.walk).toBeUndefined();
-  });
-
-  // Включённые пешеходы в партии — когда вернутся вместе с пешеходами на тротуарах (PEDESTRIANS_ON): флаг —
-  // константа модуля, а включать его на время теста в проекте `shared` (isolate: false) нельзя — протечёт в соседние файлы.
-  // Поведение пешеходов проверяет src/game/crosswalks.test.ts (своему графу и экземпляру — параметром).
-  it.skip('пешеходы ходят, машины не теряются', () => {
-    const game = freshGame(7);
-    let crossings = 0;
-    runSeconds(game, 90, () => {
-      for (const c of game.crosswalks.list) if (c.cross && c.cross.t0 === game.time) crossings++;
-    });
-    expect(game.crosswalks.list.length).toBeGreaterThan(0);
-    expect(crossings).toBeGreaterThan(0);
+    game.setPedestrians(true);
+    runSeconds(game, 0.3);
+    expect(game.pedestrians.walkers.length).toBeGreaterThan(0);
   });
 });

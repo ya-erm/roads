@@ -1,4 +1,4 @@
-import { add, closestOnSegment, cubicBezier, dist, norm, rightNormal, scale, sub, Vec } from '../core/vec';
+import { add, closestOnSegment, cubicBezier, dist, lerp, norm, rightNormal, scale, sub, Vec } from '../core/vec';
 import { isDirt, LANE_W, ROAD_ASPHALT, ROAD_DIRT } from '../world/roadTypes';
 import { arrowAt, arrowShape } from './arrowShape';
 import { bridgeLook, deckAlong, nodeDeck } from './deck';
@@ -261,7 +261,7 @@ interface NodeGeo {
   /** Узел моста: куда от поднятой площадки её тень (bridgeLook — как у концов его полотен). */
   shade: Vec;
   /** Пешеходные переходы на подъездах (src/lanes/crosswalk.ts): асфальт до стоп-линии и полосы зебры. */
-  walks?: { cover: Vec[]; stripes: Vec[][] }[];
+  walks?: { cover: Vec[]; stripes: Vec[][]; portals?: Vec[][] }[];
 }
 
 /**
@@ -543,6 +543,7 @@ export class LaneRenderer {
   private drawWalks(ctx: CanvasRenderingContext2D, nodes: NodeGeo[], zoom: number): void {
     const walks = nodes.flatMap((n) => n.walks ?? []);
     if (!walks.length) return;
+    for (const w of walks) for (const portal of w.portals ?? []) this.drawStairwell(ctx, portal, zoom);
     ctx.fillStyle = C.road;
     for (const w of walks) this.fill(ctx, w.cover);
     if (zoom < 0.5) return;
@@ -560,6 +561,24 @@ export class LaneRenderer {
     ctx.strokeStyle = 'rgba(200, 198, 188, 0.7)';
     ctx.lineWidth = 0.25;
     ctx.stroke();
+  }
+
+  /** Открытый верх лестницы у тротуара, дальний конец уходит в тень тоннеля. */
+  private drawStairwell(ctx: CanvasRenderingContext2D, portal: Vec[], zoom: number): void {
+    const [a, b, c, d] = portal;
+    ctx.fillStyle = '#37424c';
+    this.fill(ctx, portal);
+    if (zoom < 0.65) return;
+    const shades = ['#616b70', '#81898b', '#a2a8a5', '#c5c8bf'];
+    for (let i = 0; i < shades.length; i++) {
+      const lo = 0.17 + i * 0.205;
+      const hi = lo + 0.16;
+      ctx.fillStyle = shades[i];
+      this.fill(ctx, [lerp(a, b, lo), lerp(a, b, hi), lerp(d, c, hi), lerp(d, c, lo)]);
+    }
+    ctx.strokeStyle = '#667078';
+    ctx.lineWidth = 0.48;
+    this.stroke(ctx, [b, a, d, c]);
   }
 
   /**
@@ -628,7 +647,7 @@ export class LaneRenderer {
       // Запреты и связи полос меняют траектории — а по ним разметка площадки.
       const turns = `${n.bans?.join(';') ?? ''}|${n.lanes?.join(';') ?? ''}`;
       // Пешеходные переходы — зебры на подъездах.
-      const walks = n.walks ? Object.entries(n.walks).map(([k, w]) => `${k}${w.on ? '+' : '-'}`).join() : '';
+      const walks = n.walks ? Object.entries(n.walks).map(([k, w]) => `${k}${w.underground ? 'u' : w.on ? '+' : '-'}`).join() : '';
       // Открытый конец (ворота большой площадки) — тупик без разворота: сменился — геометрия только этого узла.
       const open = n.open ? 'o' : '';
       sigs.set(n.id, `${n.kind}:${n.level}:${n.deck ?? ''}:${n.pos.x},${n.pos.y}:${n.dir.x},${n.dir.y}:${arms}:${corners}:${turns}:${walks}:${open}`);
@@ -685,7 +704,7 @@ export class LaneRenderer {
         const look = bridgeLook(n.level > 0 ? nodeDeck(n) : 0);
         if (look.lift.y !== 0) geo = liftNode(geo, look.lift);
         geo.shade = sub(look.shadow, look.lift);
-        const bbox = bboxOf([geo.plate?.poly ?? [], ...geo.caps.map((c) => c.poly), ...geo.gores.map((g) => g.asphalt), ...(geo.walks ?? []).map((w) => w.cover), [n.pos]]);
+        const bbox = bboxOf([geo.plate?.poly ?? [], ...geo.caps.map((c) => c.poly), ...geo.gores.map((g) => g.asphalt), ...(geo.walks ?? []).flatMap((w) => w.portals ?? [w.cover]), [n.pos]]);
         const layer = layerOf(n.level, n.level);
         const shape = shapeOf(
           [
@@ -695,7 +714,7 @@ export class LaneRenderer {
             ...geo.gores.flatMap((g) => [g.asphalt, g.nose, g.paint, ...g.lines, ...g.hatch, [g.start, g.axis]]),
             ...(geo.marks ? [...geo.marks.islands, ...geo.marks.hatch, ...geo.marks.dashes] : []),
             ...(geo.ruts ?? []),
-            ...(geo.walks ?? []).flatMap((w) => [w.cover, ...w.stripes]),
+            ...(geo.walks ?? []).flatMap((w) => w.portals ?? [w.cover, ...w.stripes]),
             [geo.shade, n.pos],
           ],
           // Запреты и связи полос — стрелки и стоп-линии перекрёстка.

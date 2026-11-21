@@ -2,7 +2,7 @@ import { CAR_WIDTH, LIGHTS } from '../config';
 import { add, angleDiff, angleOf, cubicBezier, dist, dot, scale, segSegDist, sub, Vec } from '../core/vec';
 import type { Vehicle } from '../sim/vehicle';
 import { KMH_PER_UNIT, ROAD_CLASSES } from '../world/roadTypes';
-import { PEDESTRIANS_ON, WalkGeo, walkGeo, walksOn, walkTime, XWALK_BACK } from './crosswalk';
+import { WalkGeo, walkGeo, walksOn, walkTime, XWALK_BACK } from './crosswalk';
 import { filletPath, junctionCuts } from './geometry';
 import { phaseRelations, resolvePhases, SignalHead, signalHeads, turnKey } from './lights';
 import { Corridor, CorridorEnd, driveLanes, End, Flow, LaneLink, LaneNet, LaneNode, parseLaneKey, taperLen } from './model';
@@ -225,7 +225,7 @@ export class LaneGraph {
   readonly stopBack = new Map<number, number>();
   /**
    * Где машины ждут проезда через перекрёсток: на столько метров раньше конца полосы (LaneTraffic.lineBack) — у
-   * стоп-линии перед зеброй на светофоре и когда ходят пешеходы (PEDESTRIANS_ON); иначе — у края перекрёстка (нет в списке).
+   * стоп-линии перед зеброй на светофоре и когда ходят пешеходы; иначе — у края перекрёстка (нет в списке).
    */
   readonly holdBack = new Map<number, number>();
   /** Обрезы полотен, по которым строится граф (только пока строится). */
@@ -263,14 +263,13 @@ export class LaneGraph {
    * cuts — обрезы у перекрёстков, если уже посчитаны по сети побольше (граф куска сети для предпросмотра).
    * prev — прежний граф той же игры: что не поменялось, узнаётся по нему (linkFromPrev, sameNodes), а конфликты
    * манёвров у прежних перекрёстков берутся готовыми — это почти вся сборка графа.
-   * pedestrians — по переходам ходят пешеходы: зелёный светофора не короче их перехода (LightPhase.walk); по умолчанию —
-   * PEDESTRIANS_ON (пока выключены).
+   * pedestrians — по наземным переходам ходят пешеходы; после правки дорог сохраняется выбор игрока.
    */
   constructor(
     readonly net: LaneNet,
     cuts: Map<number, [number, number]> = junctionCuts(net),
     prev: LaneGraph | null = null,
-    readonly pedestrians = PEDESTRIANS_ON,
+    public pedestrians: boolean = prev?.pedestrians ?? false,
   ) {
     this.prev = prev;
     this.prevSerial = prev?.serial ?? null;
@@ -278,7 +277,7 @@ export class LaneGraph {
     for (const n of net.nodes.values()) {
       const { kind, pos, dir } = n;
       const rules = `${n.control ?? ''}|${n.mainPair === undefined ? '-' : n.mainPair === null ? 'null' : n.mainPair.join(',')}`;
-      const walks = n.walks ? Object.entries(n.walks).map(([k, w]) => `${k}${w.on ? '+' : '-'}`).join() : '';
+      const walks = n.walks ? Object.entries(n.walks).map(([k, w]) => `${k}${w.underground ? 'u' : w.on ? '+' : '-'}`).join() : '';
       this.nodeShapes.set(n.id, { kind, corridors: [...n.corridors], pos: [pos.x, pos.y, dir.x, dir.y], rules, lanes: n.lanes && [...n.lanes], bans: n.bans && [...n.bans], walks });
     }
     this.cutMap = cuts;
@@ -304,6 +303,30 @@ export class LaneGraph {
     this.buildIndexes();
     this.prev = null;
     this.cutMap = null;
+  }
+
+  /** Изменение настройки на ходу сохраняет положение машин и текущую фазу перекрёстка. */
+  setPedestrians(on: boolean): void {
+    if (on === this.pedestrians) return;
+    this.pedestrians = on;
+    for (const [node, walks] of this.crosswalks) {
+      const lights = this.nodes.get(node)?.lights;
+      for (const w of walks) {
+        if (w.underground || w.inLink === null) continue;
+        for (const lane of this.links.get(w.inLink)?.lanes ?? []) {
+          if (on || lights) this.holdBack.set(lane.id, this.stopBack.get(lane.id)!);
+          else this.holdBack.delete(lane.id);
+        }
+      }
+      if (!lights) continue;
+      for (const phase of lights.phases) {
+        delete phase.walk;
+        if (!on) continue;
+        const moving = new Set([...phase.moves].map((k) => this.moves.get(k)?.inLink));
+        const time = Math.max(0, ...walks.filter((w) => !w.underground && (w.inLink === null || !moving.has(w.inLink))).map((w) => w.time));
+        if (time > phase.green) phase.walk = time;
+      }
+    }
   }
 
   /** Положение на полосе: u — пройдено от начала полосы по ходу движения. */
@@ -630,6 +653,8 @@ export class LaneGraph {
       const geo = walkGeo(arm);
       const inLink = ins.find((l) => l.corridor === arm.corridor.id) ?? null;
       const outLink = outs.find((l) => l.corridor === arm.corridor.id) ?? null;
+      list.push({ node: n.id, corridor: arm.corridor.id, end: arm.end, geo, inLink: inLink?.id ?? null, outLink: outLink?.id ?? null, time: walkTime(geo.width), ...(arm.underground && { underground: true }) });
+      if (arm.underground) continue;
       for (const lane of inLink?.lanes ?? []) {
         const back = Math.max(0, Math.min(XWALK_BACK, lane.length - 2));
         this.stopBack.set(lane.id, back);
@@ -638,7 +663,6 @@ export class LaneGraph {
         // дальше — на плотных улицах крупных городов это копилось в заторы).
         if (n.control === 'lights' || this.pedestrians) this.holdBack.set(lane.id, back);
       }
-      list.push({ node: n.id, corridor: arm.corridor.id, end: arm.end, geo, inLink: inLink?.id ?? null, outLink: outLink?.id ?? null, time: walkTime(geo.width) });
     }
     if (list.length) this.crosswalks.set(n.id, list);
   }
@@ -807,7 +831,7 @@ export class LaneGraph {
     }));
     const resolved = resolvePhases(n.phases, approaches, n.greens);
     if (!resolved.length) resolved.push({ go: [], green: LIGHTS.green });
-    // Пешеходов нет (PEDESTRIANS_ON) — и пешеходного минимума зелёного нет.
+    // Пешеходный минимум зелёного нужен только при включённом движении жителей.
     const walks = this.pedestrians ? (this.crosswalks.get(n.id) ?? []) : [];
     const phases: LightPhase[] = resolved.map((p) => {
       const go = new Set(p.go);
@@ -816,7 +840,7 @@ export class LaneGraph {
       // Пешеходы идут через подъезды, которым в этой фазе красный, — зелёный горит не короче их перехода (walk; заданный
       // green — как в настройке: в фазы игрока и сохранение удлинение не попадает).
       const inLinks = new Set(moves.map((m) => m.inLink));
-      const walk = Math.max(0, ...walks.filter((w) => w.inLink === null || !inLinks.has(w.inLink)).map((w) => w.time));
+      const walk = Math.max(0, ...walks.filter((w) => !w.underground && (w.inLink === null || !inLinks.has(w.inLink))).map((w) => w.time));
       return {
         go: p.go,
         moves: new Set(moves.map((m) => m.key)),
@@ -947,6 +971,7 @@ interface NodeShape {
 
 /** Переход перекрёстка в графе: зебра, связи подъезда к узлу (въезд) и от него (выезд), сколько секунд идти. */
 export interface GraphWalk {
+  underground?: true;
   node: number;
   corridor: number;
   end: End;

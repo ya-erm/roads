@@ -1,4 +1,5 @@
 import { TOWN_SCALE } from '../config';
+import { FOOTPATH, type Footpath } from '../game/footpaths';
 import { hash } from '../core/math';
 import type { Vec } from '../core/vec';
 import type { Town, TownBuilding } from '../world/entities';
@@ -295,15 +296,18 @@ export function townWalks(town: Town, curb: (p: Vec) => number, surface: WalkRoa
  * дорожки не ложатся на тротуар, а его кромку на стыке закрывает заливка дорожки — одно покрытие. Съезды (асфальт) —
  * поверх тротуара: пересекают его.
  */
-export function drawTownWalks(ctx: CanvasRenderingContext2D, list: readonly TownWalks[], view: Box, zoom: number, sidewalks: readonly Sidewalk[] = []): void {
+export function drawTownWalks(ctx: CanvasRenderingContext2D, list: readonly TownWalks[], view: Box, zoom: number, sidewalks: readonly Sidewalk[] = [], footpaths: readonly Footpath[] = []): void {
   const a = new Art(ctx, { id: 0, fp: { center: { x: 0, y: 0 }, w: 1, h: 1, angle: 0 } }, zoom, 0, 0, 'still');
   if (!a.lod) return;
   a.pass = 0;
   const c = ctx;
   const seen = list.filter((w) => !(w.box.x1 < view.x0 || w.box.x0 > view.x1 || w.box.y1 < view.y0 || w.box.y0 > view.y1));
+  const manual = footpaths.filter(({ a, b }) => Math.max(a.x, b.x) + 2 >= view.x0 && Math.min(a.x, b.x) - 2 <= view.x1
+    && Math.max(a.y, b.y) + 2 >= view.y0 && Math.min(a.y, b.y) - 2 <= view.y1).map(({ a, b }) => [a.x, a.y, b.x, b.y]);
   // Ломаные дорожек всех городов — одной обводкой на вид (мощёные, утоптанные).
   const kinds = ([true, false] as const).map((paved) => ({ paved, list: seen.filter((w) => w.paved === paved).flatMap((w) => w.paths) })).filter((k) => k.list.length);
   const walkPaths = (part: 'edge' | 'fill') => {
+    if (manual.length) paths(a, manual, FOOTPATH.width, WALK_LOOK.paved.fill, WALK_LOOK.paved.edge, part);
     for (const k of kinds) {
       const look = k.paved ? WALK_LOOK.paved : WALK_LOOK.path;
       paths(a, k.list, k.paved ? WALK_W.paved : WALK_W.path, look.fill, look.edge, part);
