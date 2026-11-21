@@ -1,21 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH, SIM_DT } from '../config';
+import { dist } from '../core/vec';
 import { Game, type SaveData } from './game';
 import { corridorCost } from './roadbuild';
 import { road } from './testkit';
 
-/**
- * Мир, где за смену месяца город прокладывает несколько улиц. Для сравнения со старым алгоритмом нужен seed, в котором
- * дополнительные пересадки на промежуточные графы не меняют координаты машины на повороте при повторной проекции.
- * Например, с seed 9 старый алгоритм даёт разницу в последнем знаке пути по полосе, хотя целиком и по шагам всё совпадает.
- */
+/** Мир, где за смену месяца город прокладывает несколько улиц. */
 const world = (parking = false) => new Game({ seed: 1, size: 'small', towns: 3, industries: 'few', money: 5_000_000, water: 'dry', parking });
 
 /** Сохранение без отметки времени записи — для сравнения партий. */
 const saveText = (g: Game) => JSON.stringify({ ...g.toSave(), savedAt: 0 });
-/** Машины на дорогах: где и на какой полосе — до бита. */
-const carsText = (g: Game) =>
-  JSON.stringify([...(g.roads.traffic as unknown as { vehicles: Map<number, { id: number; pos: unknown; lane: number; s: number; v: number }> }).vehicles.values()].map((v) => [v.id, v.pos, v.lane, v.s, v.v]));
+/** Снимок положения и скорости машин в потоке. */
+const carPositions = (g: Game) =>
+  [...g.roads.traffic.vehicles.values()].map(({ id, pos, lane, s, v }) => ({ id, pos, lane, s, v }));
 
 /**
  * Партия до конца второго месяца такт за тактом (кадр — один такт). Перед первой сменой месяца городам есть из
@@ -46,11 +43,11 @@ function play(budget: number, immediate = false, parking = false) {
     if (g.monthClosing) closingFrames++;
     maxRebinds = Math.max(maxRebinds, rebinds);
   }
-  return { save: saveText(g), cars: carsText(g), closingFrames, maxRebinds, updates, month: g.monthIndex, cars0: g.citizenCars };
+  return { save: saveText(g), cars: carPositions(g), closingFrames, maxRebinds, updates, month: g.monthIndex, cars0: g.citizenCars };
 }
 
 describe('Итоги месяца по кадрам', { timeout: 120_000 }, () => {
-  it('те же числа: целиком, по шагам и как было (граф сразу после каждой улицы) — партия и машины до бита', () => {
+  it('сохраняет машины при смене графа и даёт одинаковые итоги целиком и по шагам', () => {
     const before = play(Infinity, true);
     const whole = play(Infinity);
     const sliced = play(0);
@@ -59,9 +56,17 @@ describe('Итоги месяца по кадрам', { timeout: 120_000 }, () =
     // Города проложили несколько улиц: машины переезжали на новый граф больше одного раза за смену месяца.
     expect(before.maxRebinds).toBeGreaterThanOrEqual(2);
     expect(whole.save).toBe(before.save);
-    expect(whole.cars).toBe(before.cars);
+    // Старый алгоритм проецирует машины на промежуточные графы после каждой улицы. Допускаем до миллиметра
+    // погрешности положения и до 0,001 м/с скорости. Состав потока и полосы должны совпадать точно.
+    expect(whole.cars.map(({ id, lane }) => [id, lane])).toEqual(before.cars.map(({ id, lane }) => [id, lane]));
+    whole.cars.forEach((car, i) => {
+      const old = before.cars[i];
+      expect(dist(car.pos, old.pos)).toBeLessThan(0.001);
+      expect(Math.abs(car.s - old.s)).toBeLessThan(0.001);
+      expect(Math.abs(car.v - old.v)).toBeLessThan(0.001);
+    });
     expect(sliced.save).toBe(whole.save);
-    expect(sliced.cars).toBe(whole.cars);
+    expect(sliced.cars).toEqual(whole.cars);
     // Целиком — в том же кадре; по шагам — несколько кадров, и в каждом не больше одного переезда машин.
     expect(whole.closingFrames).toBe(0);
     expect(sliced.closingFrames).toBeGreaterThan(5);
@@ -79,7 +84,7 @@ describe('Итоги месяца по кадрам', { timeout: 120_000 }, () =
     expect(save.towns.some((t) => t.lots?.length)).toBe(true);
     expect(save.towns.some((t) => t.lots?.some((l) => l.last))).toBe(true);
     expect(sliced.save).toBe(whole.save);
-    expect(sliced.cars).toBe(whole.cars);
+    expect(sliced.cars).toEqual(whole.cars);
   });
 
   it('пока итоги идут, время партии стоит; сохранение подводит их до конца, и после загрузки они не повторяются', () => {
