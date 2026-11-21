@@ -11,7 +11,7 @@ import { paxGone } from '../game/paxPatience';
 import { headingArrow } from '../game/stopPairs';
 import type { Spans } from '../game/constructionWork';
 import type { Game, LaneEnd, Partner } from '../game/game';
-import { bayFront, baySlot, LONGEST_BUS, openBayEnd, openBayRear, type FleetVehicle, type Line } from '../game/transport';
+import { bayFront, baySlot, industryApronEnd, LONGEST_BUS, openBayEnd, openBayRear, type FleetVehicle, type Line } from '../game/transport';
 import { bridgeLook, deckAlong } from '../lanes/deck';
 import { atPortals, type Portal, portalHalf, tunnelPortals } from '../lanes/tunnel';
 import { LaneRenderer, layerOf } from '../lanes/draw';
@@ -1513,7 +1513,10 @@ export class Renderer {
       cur.stations = game.stationRev;
       add(
         this.diffs.aprons.update((put) => {
-          for (const x of game.stations.values()) if (x.kind === 'road') put(x.id, `${fpSig(x.fp)}|${x.bays}|${x.nodeId}|${x.industryId}|${x.depots ?? 0}`, fpBox(x.fp));
+          for (const x of game.stations.values()) if (x.kind === 'road') {
+            const apron = x.industryId !== null && !x.curb ? Math.max(36, industryApronEnd(x.fp.h) - x.fp.h / 2) : 0;
+            put(x.id, `${fpSig(x.fp)}|${x.bays}|${x.nodeId}|${x.industryId}|${x.depots ?? 0}`, grow(fpBox(x.fp), apron));
+          }
         }),
       );
     }
@@ -2952,8 +2955,8 @@ export class Renderer {
 
   /** Излучатели предприятий и пристроек (с движущимся) — пересчёт после правки предприятий (Game.industryRev). */
   private emitting = { game: null as Game | null, rev: -1, list: [] as { fp: Footprint; list: Emitter[] }[] };
-  /** Излучатели предприятия или пристройки — пока у него то же место, уровень, работа и пристройки. */
-  private motionOf = new WeakMap<object, { fp: Footprint; level: number; active: boolean; annexes: unknown; list: Emitter[] }>();
+  /** Излучатели меняются при правке участка, работы или количества скота у мясокомбината. */
+  private motionOf = new WeakMap<object, { fp: Footprint; level: number; active: boolean; annexes: unknown; livestock: number; list: Emitter[] }>();
 
   private emittersOf(game: Game): { fp: Footprint; list: Emitter[] }[] {
     const m = this.emitting;
@@ -2964,9 +2967,10 @@ export class Renderer {
     const take = (key: Industry | Annex, ind: Industry, make: () => Emitter[]) => {
       const level = Math.max(1, Math.floor(ind.level ?? 1));
       const active = ind.producedMonth > 0 || ind.producedLast > 0;
+      const livestock = key === ind && ind.info.kind === 'meatplant' ? ind.stock.livestock ?? 0 : 0;
       let had = this.motionOf.get(key);
-      if (!had || had.fp !== key.fp || had.level !== level || had.active !== active || had.annexes !== ind.annexes) {
-        had = { fp: key.fp, level, active, annexes: ind.annexes, list: make() };
+      if (!had || had.fp !== key.fp || had.level !== level || had.active !== active || had.annexes !== ind.annexes || had.livestock !== livestock) {
+        had = { fp: key.fp, level, active, annexes: ind.annexes, livestock, list: make() };
         this.motionOf.set(key, had);
       }
       if (had.list.length) m.list.push({ fp: key.fp, list: had.list });
@@ -3073,6 +3077,7 @@ export class Renderer {
 
   /** Станции — поверх неподвижного: занятость постов, ящики и машины на открытых площадках. */
   private drawStationsOver(game: Game, view: Box): void {
+    const time = performance.now() / 1000;
     for (const st of game.stations.values()) {
       if (st.kind !== 'road' || st.curb) continue;
       const seen = this.stationSeen(st, view);
@@ -3086,7 +3091,7 @@ export class Renderer {
         if (seen) {
           this.ctx.save();
           this.intoStation(game, st);
-          drawIndustryYardStock(this.ctx, st, industry, this.camera.zoom, game.stationStorage(st), work);
+          if (drawIndustryYardStock(this.ctx, st, industry, this.camera.zoom, game.stationStorage(st), work, time)) this.ambient = true;
           this.ctx.restore();
           this.drawVehicles(game.bayLooks(st));
         }
@@ -3927,14 +3932,15 @@ export class Renderer {
       if (fp.center.x < view.x0 - 100 || fp.center.x > view.x1 + 100 || fp.center.y < view.y0 - 100 || fp.center.y > view.y1 + 100) continue;
       if (st.industryId !== null && !st.curb) {
         this.drawFootprint(fp, C.road);
-        const spill = openBayEnd(fp.h) - fp.h / 2;
-        if (spill > 0) {
-          ctx.save();
-          this.intoStation(game, st);
-          ctx.fillStyle = C.road;
-          ctx.fillRect(-fp.w / 2 + 1, fp.h / 2 - 0.5, fp.w - 2, spill + 1.5);
-          ctx.restore();
-        }
+        // Маневровый проезд идёт вдоль всего ряда: отдельные въезды и выезды делят одну площадку.
+        ctx.save();
+        this.intoStation(game, st);
+        ctx.fillStyle = C.road;
+        const start = fp.h / 2 - 1;
+        ctx.beginPath();
+        ctx.roundRect(-fp.w / 2, start, fp.w, industryApronEnd(fp.h) - start, [0, 0, 6, 6]);
+        ctx.fill();
+        ctx.restore();
       }
       if (st.curb) {
         if (this.camera.zoom >= 0.3) this.drawCurbMarks(net, st);
@@ -3971,6 +3977,7 @@ export class Renderer {
         this.polyline([a, b, atEdge(b), atEdge(a)]);
         ctx.closePath();
         ctx.fill();
+        if (st.industryId !== null && !side) this.drawIndustryGateShoulders(net, end);
       }
       const node = net.nodes.get(st.nodeId);
       const end = node && net.ends(node)[0];
@@ -4105,6 +4112,32 @@ export class Renderer {
         this.drawEntryExit(xIn, xOut, hh + 4.5, Y);
       }
       ctx.restore();
+    }
+  }
+
+  /** Плавное уширение у ворот, пока прицеп ещё доворачивает на подъездной дороге. */
+  private drawIndustryGateShoulders(net: LaneNet, end: CorridorEnd): void {
+    const c = end.corridor;
+    if (net.node(c.a).level !== 0 || net.node(c.b).level !== 0) return;
+    const length = Math.min(30, c.length - 6);
+    if (length < 8) return;
+    const ctx = this.ctx;
+    for (const side of [0, 1] as const) {
+      const sign = side ? 1 : -1;
+      const inner: Vec[] = [];
+      const outer: Vec[] = [];
+      for (let i = 0; i <= 8; i++) {
+        const u = i / 8;
+        const s = end.end === 'a' ? length * u : c.length - length * u;
+        const edges = asphaltEdgesAt(c, s);
+        if (!edges) continue;
+        const width = 2.5 * (1 - u * u);
+        inner.push(pointOff(c, s, edges[side] - sign * 0.6 * (1 - u)));
+        outer.push(pointOff(c, s, edges[side] + sign * width));
+      }
+      this.polyline([...inner, ...outer.reverse()]);
+      ctx.closePath();
+      ctx.fill();
     }
   }
 

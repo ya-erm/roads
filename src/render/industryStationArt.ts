@@ -1,9 +1,10 @@
 import type { Vec } from '../core/vec';
 import type { IndustryHaulView } from '../game/industryHaul';
-import { stationHaulRoad } from '../game/industryHaulRoutes';
+import { stationHaulJunction } from '../game/industryHaulRoutes';
 import { openBayRear } from '../game/transport';
 import { CARGO, type CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
+import { INDUSTRY_ROAD_WIDTH } from '../world/industryCompound';
 import { Art, shade } from './industryArt';
 import { cargoShape } from './industryCargoArt';
 import { paintTransferTruck } from './industryEquipment';
@@ -17,13 +18,32 @@ export function drawIndustryYard(c: CanvasRenderingContext2D, st: Station, ind?:
   c.fillStyle = '#b6b4a9';
   c.fillRect(left, back + 1, w - 4, openBayRear(h) - back - 1);
   c.fillStyle = '#777c7c';
-  if (st.industryAccess) {
-    c.fillRect(left, back + 1, -4 - left, 1.1);
-    c.fillRect(4, back + 1, right - 4, 1.1);
-  } else c.fillRect(left, back + 1, right - left, 1.1);
-  const roads = [stationHaulRoad(st, -1)];
-  if (ind?.info.accepts.length) roads.push(stationHaulRoad(st, 1));
-  drawIndustrialRoads(c, roads, industryRoadSurface(ind?.info.kind));
+  const halfRoad = INDUSTRY_ROAD_WIDTH / 2;
+  c.fillRect(left, back + 1, -halfRoad - left, 1.1);
+  c.fillRect(halfRoad, back + 1, right - halfRoad, 1.1);
+  const { berth } = stationHaulJunction(st);
+  const top = berth - halfRoad;
+  const bottom = berth + halfRoad;
+  const round = Math.min(3, Math.max(0, top - back));
+  // Поперечина уходит под основания складов. Скруглены только внутренние углы примыкания.
+  const arm = Math.min(w / 2 - 3, 18);
+  const receiving = !!ind?.info.accepts.length;
+  c.fillStyle = industryRoadSurface(ind?.info.kind);
+  c.beginPath();
+  c.moveTo(-halfRoad, back);
+  c.lineTo(halfRoad, back);
+  if (receiving) {
+    c.lineTo(halfRoad, top - round);
+    c.quadraticCurveTo(halfRoad, top, halfRoad + round, top);
+    c.lineTo(arm, top);
+  }
+  c.lineTo(receiving ? arm : halfRoad, bottom);
+  c.lineTo(-arm, bottom);
+  c.lineTo(-arm, top);
+  c.lineTo(-halfRoad - round, top);
+  c.quadraticCurveTo(-halfRoad, top, -halfRoad, top - round);
+  c.closePath();
+  c.fill();
 }
 
 interface StorageCell {
@@ -38,13 +58,14 @@ interface StorageCell {
 /** Каждый вид сырья занимает свою ячейку. Готовый запас берётся со склада станции. */
 export function drawIndustryYardStock(
   c: CanvasRenderingContext2D, st: Pick<Station, 'id' | 'fp' | 'cargo'>, ind: Industry, zoom: number, capacity: number, trip?: IndustryHaulView,
-): void {
-  const a = new Art(c, st, zoom, 0);
+  time = 0,
+): boolean {
+  const a = new Art(c, st, zoom, time);
   const { w, h } = st.fp;
   const width = w / 2 - 14;
   const back = -h / 2 + 2;
   const cellHeight = openBayRear(h) - back;
-  if (width < 4 || cellHeight < 3) return;
+  if (width < 4 || cellHeight < 3) return false;
   const out = ind.info.produces;
   const cells: StorageCell[] = [{
     cargo: out, x: -w / 2 + 3, y: back, w: width, h: cellHeight,
@@ -61,6 +82,7 @@ export function drawIndustryYardStock(
   });
   const freeSideX = inputs.length === 0 ? rightX : undefined;
   for (const cell of cells) paintStorageCell(a, cell, ind, capacity, st.fp.h >= 48 && cell.h > 18, freeSideX);
+  return a.moved;
 }
 
 function paintStorageCell(a: Art, cell: StorageCell, ind: Industry, capacity: number, roof: boolean, freeSideX?: number): void {
@@ -100,8 +122,9 @@ function paintStorageCell(a: Art, cell: StorageCell, ind: Industry, capacity: nu
     return;
   }
   if (shape === 'livestock') {
-    a.gable(x + 1, y + 1, w * 0.43, Math.min(6, h * 0.44), 4, '#92745d');
-    for (let i = 0; i < Math.ceil(fill * 6); i++) a.animal(x + w * (0.26 + a.r(i + 60) * 0.52), y + h * (0.43 + a.r(i + 70) * 0.38), i, i + 73);
+    const shelter = w * 0.43;
+    a.gable(x + 1, y + 1, shelter, Math.min(6, h * 0.44), 4, '#92745d');
+    a.herd(x + shelter + 1.5, y + 0.3, w - shelter - 2, h - 0.6, Math.ceil(fill * 6), 73);
     return;
   }
   if (shape === 'logs' || shape === 'planks') {
@@ -136,7 +159,7 @@ function paintStorageCell(a: Art, cell: StorageCell, ind: Industry, capacity: nu
 }
 
 export function drawIndustryHaulConnection(c: CanvasRenderingContext2D, st: Station, ind: Industry, connection: readonly Vec[]): void {
-  drawIndustrialRoads(c, [connection.map(({ x, y }) => [x, y])], industryRoadSurface(ind.info.kind));
+  drawIndustrialRoads(c, [connection.map(({ x, y }) => [x, y])], industryRoadSurface(ind.info.kind), 'butt');
   const gate = connection[connection.length - 1];
   drawIndustrialGate(c, gate.x, gate.y, st.fp.angle + Math.PI / 2);
 }

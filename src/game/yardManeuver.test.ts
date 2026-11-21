@@ -23,8 +23,8 @@ describe('Траектории у соседних грузовых постов
     const stepsPerSecond = 120;
     for (const bay of [0, bays - 1]) {
       const spot = bayPose(yard, bays, bay, truck.length, 1, true);
-      const { path, arc } = yardExitArcs(spot, road, truck, yard, true)[0];
-      expect(arc).toBe('smooth');
+      const { path } = yardExitArcs(spot, road, truck, yard, true)[0];
+      expect(path.smooth).toBe(true);
       let previous = path(0).dir;
       for (let i = 1; i * YARD_EXIT_SPEED / stepsPerSecond < path.reverseUntil; i++) {
         const dir = path(i * YARD_EXIT_SPEED / stepsPerSecond).dir;
@@ -43,20 +43,27 @@ describe('Траектории у соседних грузовых постов
     const base = truck.length * steerBase(truck.body);
     for (const bay of [3, 4]) {
       const spot = bayPose(yard, bays, bay, truck.length, 1, true);
-      const { path, arc } = yardExitArcs(spot, road, truck, yard)[0];
-      expect(arc).toBe('smooth');
+      const neighbors = Array.from({ length: bays }, (_, i) => i === bay ? null : bayPose(yard, bays, i, truck.length, 1, true)).filter((p) => p !== null);
+      const path = yardExitArcs(spot, road, truck, yard).find(({ path }) => neighbors.every((p) => !yardPathsConflict(
+        { pose: path, spec: truck, parks: true }, { pose: () => ({ ...p, done: true }), spec: truck, parks: true },
+      )))!.path;
+      expect(path.smooth).toBe(true);
       expect(path.forwardRadius).toBeGreaterThan(base);
       const side = Math.sign(road.pos.x - spot.pos.x);
       const stopped = path(path.reverseUntil);
       expect(stopped.dir.x).toBe(side);
       expect(stopped.dir.y).toBeCloseTo(0);
       const axle = (p: YardPose) => sub(p.pos, scale(p.dir, base));
-      const neighbors = Array.from({ length: bays }, (_, i) => i === bay ? [] : boxes(bayPose(yard, bays, i, truck.length, 1, true))).flat();
+      const compact = yardExitMotion(spot, road, truck, yard, 'compact');
+      const wide = yardExitMotion(spot, road, truck, yard, 'smooth');
+      expect(compact.smooth).toBe(true);
+      expect(Math.abs(axle(compact(compact.reverseUntil)).x - spot.pos.x)).toBeLessThan(Math.abs(axle(wide(wide.reverseUntil)).x - spot.pos.x));
+      const parkedBoxes = neighbors.flatMap(boxes);
       let previous = axle(stopped);
       let finished = false;
       for (let t = 0; t < 60; t += 0.05) {
         const p = path(t);
-        expect(boxes(p).some((a) => neighbors.some((b) => boxesOverlap(a, b))), `пост ${bay}, ${t.toFixed(2)} с, реверс до ${path.reverseUntil.toFixed(2)} с (${p.pos.x.toFixed(1)}, ${p.pos.y.toFixed(1)})`).toBe(false);
+        expect(boxes(p).some((a) => parkedBoxes.some((b) => boxesOverlap(a, b))), `пост ${bay}, ${t.toFixed(2)} с, реверс до ${path.reverseUntil.toFixed(2)} с (${p.pos.x.toFixed(1)}, ${p.pos.y.toFixed(1)})`).toBe(false);
         if (t >= path.reverseUntil) {
           const at = axle(p);
           expect(at.y).toBeGreaterThanOrEqual(previous.y - 0.001);

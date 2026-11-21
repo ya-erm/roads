@@ -406,7 +406,7 @@ export interface FleetVehicle {
   /** Заезд с выезда на пост автостанции: пока он идёт, погрузка не начинается. */
   enter?: BayEntry;
   /** Выезд с открытого поста до начала дорожной полосы. */
-  yardExit?: { station: number; target: number; next: number; road: Pose; t: number; pathRevision?: 2 | 3 | 4; advance?: number; arc?: 'wide' | 'aisle' | 'smooth'; pullout?: true; staged?: true; stage?: 'turn'; mergeReadyAt?: number };
+  yardExit?: { station: number; target: number; next: number; road: Pose; t: number; pathRevision?: 2 | 3 | 4; advance?: number; arc?: 'compact' | 'wide' | 'aisle' | 'smooth'; pullout?: true; staged?: true; stage?: 'turn'; mergeReadyAt?: number };
   /** Время окончания погрузки на открытом посту, чтобы место в очереди сохранялось с партией. */
   yardReadyAt?: number;
   profitMonth: number;
@@ -470,6 +470,9 @@ export function openBayEnd(depth: number): number {
 }
 
 export const openBayRear = (depth: number): number => openBayEnd(depth) - OPEN_BAY_LENGTH;
+
+/** Край общей площадки для манёвров перед открытыми грузовыми постами. */
+export const industryApronEnd = (depth: number): number => Math.max(depth / 2, openBayEnd(depth)) + 15;
 
 /** Середина поста bay по ширине площадки, от её центра (как на рисунке станции). */
 function bayX(fp: Footprint, bays: number, bay: number, open: boolean): number {

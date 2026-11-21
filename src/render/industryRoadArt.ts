@@ -14,11 +14,11 @@ export function industryRoadSurface(kind?: IndustryKind): string {
 }
 
 /** Вся сеть одним непрозрачным штрихом. В местах стыка сохраняется сплошное полотно. */
-export function drawIndustrialRoads(c: CanvasRenderingContext2D, routes: readonly Circuit[], surface: string): void {
+export function drawIndustrialRoads(c: CanvasRenderingContext2D, routes: readonly Circuit[], surface: string, cap: CanvasLineCap = 'round'): void {
   c.save();
   c.strokeStyle = surface;
   c.lineWidth = INDUSTRY_ROAD_WIDTH;
-  c.lineCap = 'round';
+  c.lineCap = cap;
   c.lineJoin = 'round';
   c.beginPath();
   for (const route of routes) {

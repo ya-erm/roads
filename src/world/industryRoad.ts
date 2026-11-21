@@ -9,8 +9,8 @@ export function industrialRoadPoints(route: Circuit): Circuit {
     const [x, y] = route[i];
     const before = route[i - 1];
     const after = route[i + 1];
-    const a = Math.min(0.45, 4.5 / Math.hypot(before[0] - x, before[1] - y));
-    const b = Math.min(0.45, 4.5 / Math.hypot(after[0] - x, after[1] - y));
+    const a = Math.min(0.45, 6.5 / Math.hypot(before[0] - x, before[1] - y));
+    const b = Math.min(0.45, 6.5 / Math.hypot(after[0] - x, after[1] - y));
     const ax = (before[0] - x) * a;
     const ay = (before[1] - y) * a;
     const bx = (after[0] - x) * b;

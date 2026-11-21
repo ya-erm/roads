@@ -7,12 +7,24 @@ import { roadMetric, roadPose, type Circuit, type WorkVehiclePose } from '../wor
 
 export type HaulDirection = 'in' | 'out';
 type CargoAmounts = Partial<Record<CargoType, number>>;
+type Road = readonly Vec[];
+
+export interface IndustryHaulPath {
+  road: Road;
+  parking?: {
+    arrive: Circuit;
+    reverse: Circuit;
+    depart: Circuit;
+    arrivalApron: number;
+    departureApron: number;
+  };
+}
 
 interface Load {
   cargo: CargoType;
   direction: HaulDirection;
   amount: number;
-  paths: readonly (readonly Vec[])[];
+  paths: readonly IndustryHaulPath[];
 }
 
 interface Trip extends Load {
@@ -21,6 +33,7 @@ interface Trip extends Load {
   travel: number;
   path?: readonly Vec[];
   route?: Circuit;
+  parking?: IndustryHaulPath['parking'];
   timeline?: number[];
 }
 
@@ -70,6 +83,31 @@ function tripClock(trip: Trip, time: number): number {
   return timeline[i] + (timeline[i + 1] - timeline[i]) * (step - i);
 }
 
+function lanePose(route: Circuit, progress: number, forward: boolean, offset = LANE_OFFSET, turn = 0): WorkVehiclePose {
+  const [x, y, heading] = roadPose(route, progress, forward);
+  const yaw = heading + turn;
+  return [x - Math.sin(yaw) * offset, y + Math.cos(yaw) * offset, yaw, forward];
+}
+
+/** У корпуса машина стоит внутри разметки. На проезд она сдаёт назад, затем едет кабиной вперёд. */
+function parkingPose(parking: NonNullable<IndustryHaulPath['parking']>, leaving: boolean, progress: number, turn: number): WorkVehiclePose {
+  const ramp = 7;
+  if (!leaving) {
+    const metric = roadMetric(parking.arrive);
+    const offset = clamp((metric.length * (1 - progress) - parking.arrivalApron) / ramp, 0, 1);
+    return lanePose(parking.arrive, progress, true, offset * LANE_OFFSET);
+  }
+  const reverse = roadMetric(parking.reverse).length;
+  const depart = roadMetric(parking.depart).length;
+  // Задний ход медленнее. В точке смены направления кабина уже смотрит к воротам.
+  const back = reverse * 1.6;
+  const distance = progress * (back + depart);
+  if (distance < back) return lanePose(parking.reverse, distance / back, false, 0);
+  const forward = distance - back;
+  const offset = clamp((forward - parking.departureApron) / ramp, 0, 1);
+  return lanePose(parking.depart, forward / depart, true, offset * LANE_OFFSET, turn);
+}
+
 function tripProgress(trip: Trip, elapsed: number) {
   const loading = clamp(elapsed / DWELL, 0, 1);
   const unloading = clamp((elapsed - DWELL - trip.travel) / DWELL, 0, 1);
@@ -81,9 +119,11 @@ function tripProgress(trip: Trip, elapsed: number) {
   let pose: WorkVehiclePose | undefined;
   if (trip.route) {
     const outbound = trip.direction === 'out';
-    const [x, y, heading] = roadPose(trip.route, outbound ? progress : 1 - progress, outbound !== (phase === 'returning'));
-    const yaw = heading + (phase === 'unloading' ? Math.PI * turn : 0);
-    pose = [x - Math.sin(yaw) * LANE_OFFSET, y + Math.cos(yaw) * LANE_OFFSET, yaw, true];
+    const returningTrip = phase === 'returning';
+    const unloadingTurn = phase === 'unloading' ? Math.PI * turn : 0;
+    pose = trip.parking
+      ? parkingPose(trip.parking, outbound !== returningTrip, returningTrip ? returning : carrying, unloadingTurn)
+      : lanePose(trip.route, outbound ? progress : 1 - progress, outbound !== returningTrip, LANE_OFFSET, unloadingTurn);
   }
   return { phase, progress, loading, unloading, pose } as const;
 }
@@ -198,19 +238,29 @@ export class IndustryHaul {
       const load = yard.waiting[0];
       const amount = Math.min(load.amount, CAPACITY);
       const id = yard.nextId;
-      const path = load.paths[id % load.paths.length];
-      const route = path && path.length > 1 ? path.map(({ x, y }) => [x, y] as const) : undefined;
-      const travel = route ? Math.max(2.4, roadMetric(route).length / 12) : st.industryAccess ? 8 : 2.4;
-      const trip = { ...load, id, amount, at, path, route, travel };
-      const timeline = planTrip(trip, yard.trips);
-      if (timeline === null) {
+      let trip: Trip | undefined;
+      for (let i = 0; i < Math.max(1, load.paths.length); i++) {
+        const destination = load.paths[(id + i) % load.paths.length];
+        const path = destination?.road;
+        const parking = destination?.parking;
+        const route = path && path.length > 1 ? path.map(({ x, y }) => [x, y] as const) : undefined;
+        const length = parking ? Math.max(roadMetric(parking.arrive).length, roadMetric(parking.reverse).length * 1.6 + roadMetric(parking.depart).length)
+          : route ? roadMetric(route).length : 0;
+        const travel = route ? Math.max(2.4, length / 12) : st.industryAccess ? 8 : 2.4;
+        const candidate: Trip = { ...load, id, amount, at, path, route, parking, travel };
+        const timeline = planTrip(candidate, yard.trips);
+        if (timeline === null) continue;
+        trip = { ...candidate, timeline };
+        break;
+      }
+      if (!trip) {
         yard.nextAt = at + 0.5;
         continue;
       }
       yard.waiting.shift();
       if (amount < load.amount) yard.waiting.push({ ...load, amount: load.amount - amount });
       yard.nextId++;
-      yard.trips.push({ ...trip, timeline });
+      yard.trips.push(trip);
       yard.nextAt = at + HEADWAY;
     }
     yard.trips = yard.trips.filter((trip) => tripEnd(trip) > time);

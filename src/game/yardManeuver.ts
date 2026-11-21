@@ -14,7 +14,7 @@ export interface YardPose extends Pose {
 
 type AxlePath = Pick<CurveLUT, 'length' | 'pointAt' | 'tangentAt'>;
 type YardExitPath = ((t: number) => YardPose) & { pulloutTime: number; reverseUntil: number; forwardRadius: number; smooth: boolean };
-export type YardExitArc = 'wide' | 'aisle' | 'smooth';
+export type YardExitArc = 'compact' | 'wide' | 'aisle' | 'smooth';
 export const YARD_ENTRY_SPEED = 1.12;
 export const YARD_EXIT_SPEED = 1.4 * YARD_ENTRY_SPEED;
 const REVERSE_YAW_RATE = (Math.PI / 4) / YARD_EXIT_SPEED;
@@ -117,8 +117,8 @@ function roundedExit(axle: Vec, dir: Vec, road: Pose, base: number, length: numb
 }
 
 /** Плотные повороты проходим медленнее: время участка учитывает и ход оси, и поворот тягача. */
-function reversePace(curve: CurveLUT, nominal: number): { duration: number; nominalAt: (t: number) => number } {
-  const steps = 192;
+function reversePace(curve: CurveLUT, nominal: number, compact: boolean): { duration: number; nominalAt: (t: number) => number } {
+  const steps = compact ? 384 : 192;
   const regular = [0];
   const paced = [0];
   let before = curve.tangentAt(0);
@@ -155,6 +155,7 @@ function reversePace(curve: CurveLUT, nominal: number): { duration: number; nomi
 function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, arc: YardExitArc | undefined, pullout: boolean, smoothReverse: boolean): YardExitPath {
   const outer = arc === 'wide';
   const aisle = arc === 'aisle';
+  const compact = arc === 'compact';
   const out = scale(parked.dir, -1);
   const across = rightNormal(out);
   const delta = sub(road.pos, parked.pos);
@@ -166,7 +167,9 @@ function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, 
   const viaSide = Math.abs(dot(road.dir, out)) < 0.55 && Math.abs(gateAcross) > yard.w / 2 - 10;
   const sideRoom = yard.w / 2 + dot(sub(parked.pos, yard.center), side);
   const turnRoom = viaSide ? Math.min(18, 4 + Math.max(base, spec.length * 0.45)) : Math.max(2.5, (outer ? 18 : 14) - Math.abs(lateral));
-  const swing = Math.min(turnRoom, sideRoom - (spec.length - base) - spec.width / 2 - 1);
+  // Запас для касательной дуги зависит от смещения до выезда. Далеко от него можно разворачиваться почти на месте.
+  const swingRoom = compact ? Math.max(0, Math.max(5.5, base + 0.8) - Math.abs(lateral)) : turnRoom;
+  const swing = Math.min(swingRoom, sideRoom - (spec.length - base) - spec.width / 2 - 1);
   // Длинному прицепу оставляем место для дуги выезда, короткие машины начинают рулить позже, чтобы не задеть ряд.
   const longTrailer = spec.body === 'longSemi';
   const forwardRoom = (longTrailer ? base + 12 : Math.min(base + 12, spec.length / 2 + 4)) + (outer ? 3 : 0);
@@ -178,7 +181,7 @@ function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, 
   const turnDepth = Math.max(base + 6, wanted, clearRow ? aisleDepth : 0, aisle && !viaSide ? Math.min(aisleLimit, Math.max(aisleDepth, wanted) + 7) : 0);
   const startAxle = (turnAt: number) => add(parked.pos, add(scale(out, turnAt), scale(side, -swing)));
   const aligned = startAxle(Math.max(base + 6, aisleDepth + spec.width / 2));
-  const rounded = arc === 'smooth' && !viaSide && dot(road.dir, out) > 0.8 ? roundedExit(aligned, side, road, base, spec.length) : null;
+  const rounded = (compact || arc === 'smooth') && !viaSide && dot(road.dir, out) > 0.8 ? roundedExit(aligned, side, road, base, spec.length) : null;
   const dir = rounded || viaSide || clearRow || aisle ? side : norm(add(side, scale(parked.dir, 0.16)));
   const axle = rounded ? aligned : startAxle(turnDepth);
   const turn = { pos: add(axle, scale(dir, base)), dir };
@@ -189,7 +192,7 @@ function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, 
   const reverseSpeed = 2.5 * pace;
   const pulloutTime = straight ? Math.max(0.8, straight.length / reverseSpeed) : 0;
   const seconds = Math.max(0.8, reverse.length / reverseSpeed);
-  const timing = smoothReverse ? reversePace(reverse, seconds) : { duration: seconds, nominalAt: (t: number) => t };
+  const timing = smoothReverse ? reversePace(reverse, seconds, compact) : { duration: seconds, nominalAt: (t: number) => t };
   const cubicForward = rounded ? null : axleCurve(turn, road, spec);
   const forward = rounded?.path ?? cubicForward!;
   const forwardRadius = rounded?.radius ?? minRadius(cubicForward!.curve);
@@ -223,6 +226,7 @@ export function yardExitMotion(parked: Pose, road: Pose, spec: VehicleSpec, yard
 
 /** У близкого выезда поворот выгодно начать раньше, если более широкая дуга помещается во дворе. */
 export function yardExitArcs(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, pullout = false) {
+  const compact = yardExitMotion(parked, road, spec, yard, 'compact', pullout);
   const smooth = yardExitMotion(parked, road, spec, yard, 'smooth', pullout);
   const normal = yardExitMotion(parked, road, spec, yard, undefined, pullout);
   const wide = yardExitMotion(parked, road, spec, yard, 'wide', pullout);
@@ -230,6 +234,7 @@ export function yardExitArcs(parked: Pose, road: Pose, spec: VehicleSpec, yard: 
   const first = { path: normal, arc: undefined };
   const second = { path: wide, arc: 'wide' as const };
   return [
+    ...(compact.smooth ? [{ path: compact, arc: 'compact' as const }] : []),
     ...(smooth.smooth ? [{ path: smooth, arc: 'smooth' as const }] : []),
     ...(preferWide ? [second, first] : [first, second]),
     { path: yardExitMotion(parked, road, spec, yard, 'aisle', pullout), arc: 'aisle' as const },

@@ -27,4 +27,21 @@ describe('Сцена автостанций предприятий', () => {
     const moved = runUntil(game, 140, () => stats.arrivals >= 3 && stats.departures >= 3 && (load !== 'high' || stats.peakWaiting > 0), tick);
     expect(moved, JSON.stringify(stats)).toBe(true);
   });
+
+  it('при свободной траектории следующий грузовик начинает разворот в той же половине двора до выезда предыдущего', () => {
+    const { game, yard, errors, tick } = buildIndustryStationScene({ access: 'shared', bays: 4, load: 'medium' });
+    expect(errors).toEqual([]);
+    const middle = (yard!.bays - 1) / 2;
+    let last = new Map<number, number>();
+    let concurrent = false;
+    expect(runUntil(game, 155, () => concurrent, () => {
+      tick();
+      const exits = yard!.occupied.map((id) => game.fleet.get(id)!).filter((v) => v.yardExit);
+      const moving = exits.filter((v) => v.yardExit!.t > (last.get(v.id) ?? 0));
+      concurrent = moving.some((v) => v.yardExit!.stage === 'turn' && moving.some((ahead) =>
+        ahead !== v && !ahead.yardExit!.staged && Math.sign((ahead.bay ?? 0) - middle) === Math.sign((v.bay ?? 0) - middle),
+      ));
+      last = new Map(exits.map((v) => [v.id, v.yardExit!.t]));
+    })).toBe(true);
+  });
 });

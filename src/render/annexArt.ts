@@ -2,7 +2,7 @@ import { ANNEX } from '../config';
 import type { IndustryKind } from '../world/cargo';
 import type { Annex, Industry } from '../world/entities';
 import { moduleCargo, moduleSection } from '../world/industryModules';
-import { Art, type ArtLayer, BARK, boat, DARK, disc, type Emitter, hash, herd, industryGround, METAL, paintScene, shade, YELLOW } from './industryArt';
+import { Art, type ArtLayer, BARK, boat, DARK, disc, type Emitter, hash, industryGround, METAL, paintScene, shade, YELLOW } from './industryArt';
 import { paintIndustrySection } from './industrySectionArt';
 
 /**
@@ -413,7 +413,7 @@ function cowshed(a: Art, s: Lot): void {
   a.gable(L + 4, T + 4, bw, 11, 6, s.roof);
   for (let k = 0; k < 3; k++) a.flat(L + 4 + (bw * (k + 0.5)) / 3 - 1.5, T + 8.3, 3, 2.4, shade(s.roof, 0.3));
   a.tank(R - 6, T + 9.5, 3.6, 15, '#d5dadd', METAL);
-  herd(a, L + 4, py, s.W - 8, ph, 4 + Math.floor(a.r(4) * 3), 600, sheep(s));
+  a.herd(L + 4, py, s.W - 8, ph, 4 + Math.floor(a.r(4) * 3), 600, sheep(s));
 }
 
 /** Сенник: дощатый навес, штабель тюков, ряд рулонов и трактор. */
@@ -438,7 +438,7 @@ function paddock(a: Art, s: Lot): void {
   pen(a, L + 4, T + 4, s.W - 8, s.H - 8);
   a.gable(R - 15, T + 5, 11, 14, 5, s.roof);
   a.box(R - 14, T + 22, 9, 2.4, 0.8, '#7fa9b8');
-  herd(a, L + 4, T + 4, s.W - 22, s.H - 8, 5 + Math.floor(a.r(4) * 3), 700, sheep(s));
+  a.herd(L + 4, T + 4, s.W - 22, s.H - 8, 5 + Math.floor(a.r(4) * 3), 700, sheep(s));
   a.tree(R - 7, B - 7, 4, '#6e9a52');
 }
 

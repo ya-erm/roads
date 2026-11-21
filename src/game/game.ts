@@ -6856,11 +6856,14 @@ export class Game implements BuildContext {
     const staging = phase === 'pullout' || phase === 'turn';
     const pullout = phase === 'pullout' || phase === 'merge';
     const fractions = phase === 'pullout' ? [0.6] : [0.6, 0.9, 1.25];
-    for (const fraction of fractions) {
+    // У короткого участка пробуем следующий допустимый выход в полосу, прежде чем брать крутую кривую.
+    const variants = phase === 'pullout' ? [undefined] : [true, false];
+    for (const smooth of variants) for (const fraction of fractions) {
       const advance = spec.length * fraction;
       let arc: YardExitMove['arc'];
       const start = this.traffic.spawnPoint(route, advance, spec.length, undefined, preview || staging, (start) => {
         for (const { path, arc: candidate } of yardExitArcs(parked, start, spec, st.fp, pullout)) {
+          if (smooth !== undefined && path.smooth !== smooth) continue;
           const end = phase === 'turn' ? path.reverseUntil : phase === 'pullout' ? path.pulloutTime : Infinity;
           if (!fits(yardExitForecast(path, spec, phase === 'merge' ? path.pulloutTime : 0, end))) continue;
           if (canWait && !canWait(yardExitForecast(path, spec, end), yardExitForecast(path, spec, end, end))) continue;
@@ -7525,8 +7528,11 @@ export class Game implements BuildContext {
     for (const { i, to } of free) {
       const parked = { pose: () => ({ ...to, done: true }), spec: spec.spec, parks: true };
       if (continuations.some(({ forward }) => yardPathsConflict(forward, parked))) continue;
-      for (const outer of [undefined, true] as const) {
-        const entry = { pos: { ...sim.pos }, dir: { ...sim.dir }, v0: sim.v, t: 0, outer, gate };
+      // У фронтального въезда фура проходит немного прямо по площадке, чтобы прицеп успел освободить узкий подъезд.
+      const lead = gate && dot(gate.dir, to.dir) > 0.9 ? Math.min(spec.spec.length * 0.3, dot(sub(to.pos, gate.pos), gate.dir) - 18) : 0;
+      const approaches = gate && lead > 0.8 ? [{ ...gate, pos: add(gate.pos, scale(gate.dir, lead)) }, gate] : [gate];
+      for (const approach of approaches) for (const outer of [undefined, true] as const) {
+        const entry = { pos: { ...sim.pos }, dir: { ...sim.dir }, v0: sim.v, t: 0, outer, gate: approach };
         const path = yardEntryMotion(entry, to, spec.spec);
         const motion = { pose: (t: number) => path(t * YARD_ENTRY_SPEED), spec: spec.spec, parks: true };
         if ((priority && yardPathsConflict(motion, priority)) || busy.some((other) => yardPathsConflict(motion, other)) || crossesReadyYardExit(motion, ready)) continue;

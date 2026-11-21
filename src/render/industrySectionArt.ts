@@ -24,7 +24,7 @@ export function paintIndustrySection(
       return;
     case 'paddock':
       a.patch(x + 1, y + 1, W - 2, H - 2, '#a5ba76', 2, '#889961');
-      for (let k = 0; k < 8; k++) a.animal(x + W * (0.16 + a.r(seed + k) * 0.68), y + H * (0.15 + a.r(seed + k + 30) * 0.58), a.r(k + seed) * 6, seed + k, cargo === 'wool');
+      a.herd(x + 1, y + 1, W - 2, H - 12, 8, seed, cargo === 'wool');
       a.gable(x + 4, y + H - 11, Math.min(16, W / 3), 7, 4, roof);
       return;
     case 'pond':

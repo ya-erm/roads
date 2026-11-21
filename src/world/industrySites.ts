@@ -105,6 +105,33 @@ export function industryAccess(fp: Footprint, kind: IndustryKind): Vec {
   return sitePoint(fp, route[route.length - 1]);
 }
 
+/** Размеченные погрузочные площадки у корпуса, в координатах рисунка предприятия. */
+const LOADING_APRONS: Partial<Record<IndustryKind, readonly [x: number, y: number, w: number, h: number, pitch: number]>> = {
+  meatplant: [-24, 10, 76, 22, 10],
+  foodplant: [-48, 12, 96, 21, 10],
+  cannery: [-48, 12, 96, 21, 10],
+  oilmill: [-48, 12, 96, 21, 10],
+  factory: [12, 22, 46, 16, 9],
+  linenmill: [-52, 12, 66, 21, 10],
+  woolmill: [-52, 12, 66, 21, 10],
+  cottonmill: [-52, 12, 66, 21, 10],
+};
+
+export function industryLoadingApron(info: IndustryType) {
+  const layout = LOADING_APRONS[info.kind];
+  if (!layout) return undefined;
+  const [x, y, w, h, pitch] = layout;
+  const mouth = 0.13 * info.w;
+  // У проезда место для манёвра, корпуса стоят носом к цеху.
+  const aisle = y + h - (h < 20 ? 1 : 2);
+  const bayY = y + 4.5;
+  const bays: number[] = [];
+  for (let bx = x + pitch; bx <= x + w - pitch / 2; bx += pitch) {
+    if (Math.abs(bx - mouth) >= 7 && (info.kind !== 'foodplant' || bx <= 10)) bays.push(bx);
+  }
+  return { x, y, w, h, pitch, mouth, aisle, bayY, bays };
+}
+
 /** Проезды резервируются вместе со зданием, чтобы на них нельзя было построить дом или провести полотно. */
 function roadPlots(route: readonly Corner[], w: number, h: number): Plot[] {
   const plots: Plot[] = [];

@@ -1,10 +1,12 @@
 import { hash } from '../core/math';
+import { closestOnSegment } from '../core/vec';
 import type { CargoType, IndustryKind, IndustryType } from '../world/cargo';
 import { harmClass } from '../world/enterprise';
 import type { Industry } from '../world/entities';
-import { sectionPlot } from '../world/industryCompound';
-import { farmFields, hasBulkYard, hasPowerYard, industryServiceRoads, isOpenPit } from '../world/industrySites';
+import { INDUSTRY_ROAD_WIDTH, sectionPlot } from '../world/industryCompound';
+import { farmFields, hasBulkYard, hasPowerYard, industryLoadingApron, industryServiceRoads, isOpenPit } from '../world/industrySites';
 import { type Footprint, type Plot, pointInPolygon } from '../world/spatial';
+import { animalClearance, type GrazingAnimal, paintGrazingAnimal } from './industryAnimals';
 import { type Circuit, type Equipment, paintEquipment } from './industryEquipment';
 import { drawIndustrialGate, drawIndustrialRoads, INDUSTRY_DIRT, industryRoadSurface } from './industryRoadArt';
 import { paintIndustrySection } from './industrySectionArt';
@@ -102,7 +104,10 @@ interface EffectEmitter {
   harm: number;
 }
 
-export type Emitter = EffectEmitter | { kind: 'equipment'; m: ArtTransform; x: number; y: number; seed: number; equipment: Equipment };
+export type Emitter =
+  | EffectEmitter
+  | { kind: 'equipment'; m: ArtTransform; x: number; y: number; seed: number; equipment: Equipment }
+  | (GrazingAnimal & { kind: 'animal'; m: ArtTransform });
 
 /**
  * Холст записи (Art в слое 'record'): ничего не рисует, только следит за преобразованием — сцена проходит вхолостую,
@@ -232,6 +237,7 @@ export function drawEmitters(
     else if (em.kind === 'glow') paintGlow(ctx, em.x, em.y, em.i, flicker(t, em.x));
     else if (em.kind === 'pump') paintPump(ctx, pumpSwing(t, em.seed, em.i));
     else if (em.kind === 'equipment') paintEquipment(ctx, em.equipment, em.x, em.y, em.seed, t);
+    else if (em.kind === 'animal') paintGrazingAnimal(ctx, em, t);
   }
   ctx.setTransform(base.a, base.b, base.c, base.d, base.e, base.f);
 }
@@ -815,53 +821,34 @@ export class Art {
     c.fillRect(x - 2.2, y - 1.3, 4.4, 2.6);
   }
 
-  /** Корова на выгуле: туловище, голова и пятно. Только вблизи — издалека стадо не разглядеть. */
-  animal(x: number, y: number, angle: number, i: number, sheep = false): void {
-    if (this.pass !== 2 || !this.d) return;
-    const c = this.c;
-    if (sheep) {
-      // Овца: круглое белое руно и тёмная голова.
-      c.save();
-      c.translate(x, y);
-      c.rotate(angle);
-      c.fillStyle = 'rgba(30,40,25,0.22)';
-      c.beginPath();
-      c.ellipse(this.sx * 0.6, this.sy * 0.6, 1.6, 1.2, 0, 0, Math.PI * 2);
-      c.fill();
-      c.fillStyle = this.r(i * 11 + 7) < 0.15 ? '#d9cfbd' : '#f6f3ea';
-      c.beginPath();
-      c.ellipse(0, 0, 1.6, 1.2, 0, 0, Math.PI * 2);
-      c.fill();
-      c.fillStyle = '#3d3a36';
-      c.beginPath();
-      c.ellipse(1.8, 0, 0.6, 0.45, 0, 0, Math.PI * 2);
-      c.fill();
-      c.restore();
+  /** Корова или овца на выгуле. Движение ограничено свободным местом вокруг неё. */
+  animal(x: number, y: number, index: number, sheep: boolean, roam: { x: number; y: number }, size = 1): void {
+    if (this.pass !== 2 || !this.d || (this.layer === 'still' && !this.sink)) return;
+    const angle = this.r(index + 100) * Math.PI * 2;
+    const animal = { x, y, index, angle, sheep, size, roamX: roam.x, roamY: roam.y, seed: this.seed, shadowX: this.sx, shadowY: this.sy };
+    if (this.sink) {
+      this.sink.push({ kind: 'animal', m: this.motionTransform(), ...animal });
       return;
     }
-    const brown = this.r(i * 11 + 7) < 0.4;
-    const body = brown ? '#8a5a3c' : '#f2efe8';
-    c.save();
-    c.translate(x, y);
-    c.rotate(angle);
-    c.fillStyle = 'rgba(30,40,25,0.22)';
-    c.beginPath();
-    c.ellipse(this.sx * 0.8, this.sy * 0.8, 2.2, 1.1, 0, 0, Math.PI * 2);
-    c.fill();
-    c.fillStyle = body;
-    c.beginPath();
-    c.ellipse(0, 0, 2.2, 1.1, 0, 0, Math.PI * 2);
-    c.fill();
-    c.fillStyle = brown ? '#5e3c27' : '#3d3a36';
-    c.beginPath();
-    c.ellipse(2.4, 0, 0.8, 0.6, 0, 0, Math.PI * 2);
-    c.fill();
-    if (!brown) {
-      c.beginPath();
-      c.ellipse(-0.6 + this.r(i * 11 + 8) * 1.2, -0.2, 0.7, 0.5, 0, 0, Math.PI * 2);
-      c.fill();
+    this.moved = true;
+    paintGrazingAnimal(this.c, animal, this.t);
+  }
+
+  /** Прямоугольная часть выгула, свободная от построек. */
+  herd(x: number, y: number, w: number, h: number, n: number, i: number, sheep = false): void {
+    if (this.pass !== 2 || !this.d || (this.layer === 'still' && !this.sink)) return;
+    const clearance = animalClearance(sheep);
+    const size = Math.min(1, Math.min(w, h) / (2 * clearance + 1.5));
+    if (size < 0.55) return;
+    const margin = clearance * size;
+    const freeX = w - margin * 2;
+    const freeY = h - margin * 2;
+    for (let k = 0; k < n; k++) {
+      const dx = (0.15 + 0.7 * this.r(i + k)) * freeX;
+      const dy = (0.15 + 0.7 * this.r(i + 50 + k)) * freeY;
+      const roam = { x: Math.min(7, dx, freeX - dx), y: Math.min(7, dy, freeY - dy) };
+      this.animal(x + margin + dx, y + margin + dy, i + k, sheep, roam, size);
     }
-    c.restore();
   }
 
   /** Конвейер-эстакада: z0 и z1 — высота концов (тень отходит от ленты). */
@@ -1368,7 +1355,6 @@ function foodplant(a: Art, ind: Industry): void {
   const lv = a.level;
   const roof = ind.info.roof;
   a.patch(-48, 12, 96, 21, '#cdc8bf', 2);
-  a.rows(-48, 12, 96, 21, 10, 'rgba(255,255,255,0.55)', true, 0.5);
   a.fence(100, 70, '#8a8f96');
 
   a.box(-46, -31, 50, 39, 7, roof);
@@ -1509,7 +1495,6 @@ function factory(a: Art, ind: Industry): void {
   const lv = a.level;
   const roof = ind.info.roof;
   a.patch(12, -6, 46, 44, '#d0d5d9', 2);
-  a.rows(12, 22, 46, 16, 9, 'rgba(255,255,255,0.6)', true, 0.5);
   a.fence(120, 80, '#8a8f96');
 
   // Стоянка у проходной.
@@ -1527,13 +1512,6 @@ function factory(a: Art, ind: Industry): void {
     a.stack(16 + (k % 3) * 13, -4 + Math.floor(k / 3) * 7, 11, 4.6, 3, color, shade(color, -0.2));
   }
   a.smoke(-18, 18.5, 1, '150,150,156', 1.1);
-}
-
-/** Стадо на выгуле: n коров в прямоугольнике, места и повороты — от id предприятия. */
-export function herd(a: Art, x: number, y: number, w: number, h: number, n: number, i: number, sheep = false): void {
-  for (let k = 0; k < n; k++) {
-    a.animal(x + 3 + a.r(i + k) * (w - 6), y + 2.5 + a.r(i + 50 + k) * (h - 5), (a.r(i + 100 + k) - 0.5) * 2.4, i + k, sheep);
-  }
 }
 
 function pasture(a: Art, ind: Industry, sheep: boolean): void {
@@ -1556,12 +1534,19 @@ function pasture(a: Art, ind: Industry, sheep: boolean): void {
       }
     });
   }
-  if (a.pass !== 2 || !a.d) return;
+  if (a.pass !== 2 || !a.d || (a.layer === 'still' && !a.recording)) return;
+  const clearance = animalClearance(sheep);
+  const local = (p: { x: number; y: number }) => ({ x: p.x * w, y: p.y * h });
   let count = 0;
   for (let k = 0; k < 140 && count < 7 + 3 * a.level; k++) {
     const p = { x: -1.06 + a.r(810 + k) * 0.96, y: -0.54 + a.r(1010 + k) * 1.42 };
-    if (!fields.some((field) => pointInPolygon(p, field))) continue;
-    a.animal(p.x * w, p.y * h, a.r(1300 + k) * Math.PI * 2, 1520 + k, sheep);
+    const field = fields.find((f) => pointInPolygon(p, f));
+    if (!field) continue;
+    const point = local(p);
+    const edge = Math.min(...field.map((q, j) => closestOnSegment(point, local(q), local(field[(j + 1) % field.length])).d));
+    if (edge < clearance + 1) continue;
+    const roam = Math.min(7, edge - clearance);
+    a.animal(point.x, point.y, 1520 + k, sheep, { x: roam, y: roam });
     count++;
   }
 }
@@ -1597,9 +1582,9 @@ function ranch(a: Art, ind: Industry): void {
   for (let k = 0; k < 2; k++) a.tank(44, -3 + k * 12, 4.5, 15, '#d5dadd', METAL);
   for (let k = 0; k < Math.min(8, 3 + lv); k++) a.tank(16 + (k % 4) * 6, 9 + Math.floor(k / 4) * 6, 2.3, 2, '#e3c662', '#c8a742');
   if (!ind.fp.parts) {
-    herd(a, -50, -35, 27, 37, Math.min(9, 3 + 2 * lv), 200);
-    herd(a, -50, 2, 27, 33, Math.min(6, 2 + lv), 300);
-    herd(a, -23, -35, 27, 70, Math.min(10, 4 + 2 * lv), 400);
+    a.herd(-50, -35, 27, 37, Math.min(9, 3 + 2 * lv), 200);
+    a.herd(-50, 15, 27, 20, Math.min(6, 2 + lv), 300);
+    a.herd(-23, -35, 27, 60, Math.min(10, 4 + 2 * lv), 400);
   }
   a.tree(-2, 30, 4.5, '#6e9a52');
 }
@@ -1630,10 +1615,9 @@ function meatplant(a: Art, ind: Industry): void {
   a.patch(-52, -32, 26, 38, '#b8a684', 2);
   a.rows(-52, -32, 26, 38, 6.5, 'rgba(110,85,60,0.55)', true, 0.5);
   a.patch(-24, 10, 76, 22, '#cdc8bf', 2);
-  a.rows(-24, 10, 76, 22, 10, 'rgba(255,255,255,0.55)', true, 0.5);
   a.fence(110, 70, '#8a8f96');
 
-  herd(a, -52, -32, 26, 38, Math.round(2 + 6 * fullness(ind.stock.livestock)), 500);
+  a.herd(-52, -32, 26, 38, Math.round(2 + 6 * fullness(ind.stock.livestock)), 500);
   a.box(-22, -31, 42, 34, 7, roof);
   for (let k = 0; k < 3; k++) a.flat(-18, -26 + k * 10, 34, 2, 'rgba(255,255,255,0.2)');
   a.chimney(-14, -2, 2, 16, '#d9d4ca');
@@ -1821,9 +1805,9 @@ function sheepfarm(a: Art, ind: Industry): void {
   a.box(42, -20, 10, 10, 4, '#b9a58c', 1.4);
   for (let k = 0; k < Math.min(8, 2 + 2 * lv); k++) a.stack(14 + (k % 4) * 9, 0 + Math.floor(k / 4) * 8, 7, 6, 3, '#efe9da', '#c9c0aa');
   if (!ind.fp.parts) {
-    herd(a, -50, -35, 27, 37, Math.min(12, 5 + 2 * lv), 200, true);
-    herd(a, -23, -35, 27, 37, Math.min(10, 4 + 2 * lv), 300, true);
-    herd(a, -50, 2, 54, 33, Math.min(14, 6 + 2 * lv), 400, true);
+    a.herd(-50, -35, 27, 37, Math.min(12, 5 + 2 * lv), 200, true);
+    a.herd(-23, -35, 27, 37, Math.min(10, 4 + 2 * lv), 300, true);
+    a.herd(-50, 2, 49, 33, Math.min(14, 6 + 2 * lv), 400, true);
   }
   a.tree(4, 30, 4.5, '#6e9a52');
 }
@@ -2024,7 +2008,6 @@ function textileMill(a: Art, ind: Industry, raw: CargoType, bale: string, cloth:
   const lv = a.level;
   const roof = ind.info.roof;
   a.patch(-52, 12, 66, 21, '#cdc8bf', 2);
-  a.rows(-52, 12, 66, 21, 10, 'rgba(255,255,255,0.55)', true, 0.5);
   a.patch(18, -32, 34, 64, '#d8d0c0', 3);
   a.fence(110, 70, '#8a8f96');
 
@@ -2077,7 +2060,6 @@ function cannery(a: Art, ind: Industry): void {
   const lv = a.level;
   const roof = ind.info.roof;
   a.patch(-48, 12, 96, 21, '#cdc8bf', 2);
-  a.rows(-48, 12, 96, 21, 10, 'rgba(255,255,255,0.55)', true, 0.5);
   a.fence(100, 70, '#8a8f96');
 
   a.box(-46, -31, 44, 36, 7, roof);
@@ -2157,7 +2139,6 @@ function oilmill(a: Art, ind: Industry): void {
   const lv = a.level;
   const roof = ind.info.roof;
   a.patch(-48, 12, 96, 21, '#cdc8bf', 2);
-  a.rows(-48, 12, 96, 21, 10, 'rgba(255,255,255,0.55)', true, 0.5);
   a.fence(100, 70, '#8a8f96');
 
   const silos = 2 + Math.min(2, Math.floor(fullness(ind.stock.sunflower) * 3));
@@ -2335,10 +2316,23 @@ function industryScene(a: Art, ind: Industry): void {
 }
 
 function compoundRoads(a: Art, ind: Industry): void {
+  const loading = industryLoadingApron(ind.info);
+  if (loading && !ind.fp.compound) {
+    a.rows(loading.x, loading.y, loading.w, loading.h, loading.pitch, 'rgba(255,255,255,0.55)', true, 0.5);
+  }
   if (!ind.fp.groundParts) return;
   const { kind, w, h } = ind.info;
   const { main, branches } = industryServiceRoads(kind, ind.fp);
-  drawIndustrialRoads(a.c, [main, ...branches].map((route) => route.map(([x, y]) => [x * w, y * h])), industryRoadSurface(kind));
+  const surface = industryRoadSurface(kind);
+  drawIndustrialRoads(a.c, [main, ...branches].map((route) => route.map(([x, y]) => [x * w, y * h])), surface);
+  if (loading && ind.fp.compound) {
+    const { x, y, w: width, aisle, mouth, pitch } = loading;
+    const half = INDUSTRY_ROAD_WIDTH / 2;
+    drawIndustrialRoads(a.c, [[[mouth, 0.51 * h + half], [mouth, aisle]]], surface, 'butt');
+    a.c.fillStyle = surface;
+    a.c.fillRect(x, aisle - half, width, INDUSTRY_ROAD_WIDTH);
+    a.rows(x, y, width, aisle - half - y, pitch, 'rgba(255,255,255,0.55)', true, 0.5);
+  }
   if (!a.lod || !ind.fp.compound) return;
   for (const section of ind.fp.compound.sections) {
     const gate = section.gate;

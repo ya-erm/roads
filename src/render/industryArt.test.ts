@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CARGO, INDUSTRY_LIST, INDUSTRY_TYPES } from '../world/cargo';
 import type { Industry } from '../world/entities';
+import { industryFootprint } from '../world/industrySites';
 import { annexMotion, drawAnnexArt } from './annexArt';
+import { animalClearance, animalPose } from './industryAnimals';
 import { Art, artMoves, type ArtLayer, drawEmitters, drawIndustryArt, industryMotion } from './industryArt';
 import { drawIndustryYardStock } from './industryStationArt';
 
@@ -76,8 +78,8 @@ describe('Предприятия в кэше карты: неподвижное 
       const still = paint(ind, 1, 'still');
       const moves = motion(ind);
       expect(sum(still.draws, moves.draws), info.kind).toEqual(all.draws);
-      // Только поворачивающейся технике нужны локальные save/restore.
-      const turning = moves.list.filter((e) => e.kind === 'equipment' && e.equipment.kind !== 'rail').length;
+      // Поворачивающимся машинам и животным нужны локальные преобразования.
+      const turning = moves.list.filter((e) => e.kind === 'animal' || (e.kind === 'equipment' && e.equipment.kind !== 'rail')).length;
       expect(moves.moves.save ?? 0, info.kind).toBe(turning);
       expect(moves.moves.restore ?? 0, info.kind).toBe(turning);
       expect(moves.moves.setTransform ?? 0, info.kind).toBe(moves.list.length + 1);
@@ -144,6 +146,45 @@ describe('Предприятия в кэше карты: неподвижное 
       };
       expect(colors(a, 1), info.kind).toEqual(colors(b, 9.3));
     }
+  });
+});
+
+describe('Животные на выгуле', () => {
+  it.each([INDUSTRY_TYPES.ranch, INDUSTRY_TYPES.sheepfarm])('гуляют внутри ограждений у $name', (info) => {
+    const fp = industryFootprint(info, { x: 0, y: 0 }, 0, true);
+    const ind = { ...industry(info), fp };
+    const paddocks = fp.compound!.sections.filter((s) => s.kind === 'paddock');
+    const animals = industryMotion(ind).filter((e) => e.kind === 'animal');
+    expect(animals).toHaveLength(paddocks.length * 8);
+    for (const animal of animals) {
+      const [l, t, r, b] = paddocks.find(({ bounds: [l, t, r, b] }) =>
+        animal.x >= l * info.w && animal.x <= r * info.w && animal.y >= t * info.h && animal.y <= b * info.h,
+      )!.bounds;
+      const margin = animalClearance(animal.sheep) * animal.size;
+      const poses = Array.from({ length: 80 }, (_, i) => animalPose(animal, i * 0.5));
+      expect(poses.some((p) => Math.hypot(p.x - poses[0].x, p.y - poses[0].y) > 1)).toBe(true);
+      for (const pose of poses) {
+        expect(pose.x - margin).toBeGreaterThan(l * info.w);
+        expect(pose.x + margin).toBeLessThan(r * info.w);
+        expect(pose.y - margin).toBeGreaterThan(t * info.h);
+        expect(pose.y + margin).toBeLessThan(b * info.h - 11);
+      }
+    }
+  });
+
+  it.each([39, 56])('показывает движение скота в загоне грузового двора глубиной %i', (h) => {
+    const target = industry(INDUSTRY_TYPES.meatplant);
+    const station = { fp: { center: { x: 0, y: 0 }, w: 81, h, angle: 0 }, id: 3, cargo: { livestock: 100 } };
+    const at = (time: number) => {
+      const ctx = stub().ctx;
+      const positions: number[][] = [];
+      ctx.translate = (x, y) => positions.push([x, y]);
+      expect(drawIndustryYardStock(ctx, station, target, 4, 300, undefined, time)).toBe(true);
+      return positions;
+    };
+    expect(at(4)).toEqual(at(4));
+    expect(at(4)).not.toEqual(at(18));
+    expect(drawIndustryYardStock(stub().ctx, station, target, 0.5, 300)).toBe(false);
   });
 });
 

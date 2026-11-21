@@ -1,19 +1,26 @@
+import { clamp } from '../core/math';
 import { add, closestOnSegment, dist, lerp, rightNormal, scale, type Vec } from '../core/vec';
 import type { CargoType } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
 import { INDUSTRY_ROAD_WIDTH } from '../world/industryCompound';
 import { moduleCargo } from '../world/industryModules';
-import { sitePoint } from '../world/industrySites';
+import type { Circuit } from '../world/industryRoad';
+import { industryLoadingApron, sitePoint } from '../world/industrySites';
 import { pointInFootprint } from '../world/spatial';
 import { industryRoadPaths } from './annexes';
-import type { HaulDirection } from './industryHaul';
+import type { HaulDirection, IndustryHaulPath } from './industryHaul';
 import { openBayRear } from './transport';
 
-export function stationHaulRoad(st: Station, side: 1 | -1): [number, number][] {
+export function stationHaulJunction(st: Station): { back: number; berth: number } {
   const half = st.fp.h / 2;
-  const back = -half + 1;
+  const back = -half;
   const berth = Math.max(back + 1, Math.min(-half * 0.39, openBayRear(st.fp.h) - INDUSTRY_ROAD_WIDTH / 2));
-  return [[0, back], [0, berth], [side * 8, berth]];
+  return { back, berth };
+}
+
+function stationHaulRoad(st: Station, side: 1 | -1): [number, number][] {
+  const { back, berth } = stationHaulJunction(st);
+  return [[0, back], [0, berth], [side * 10, berth]];
 }
 
 type Road = readonly Vec[];
@@ -28,7 +35,7 @@ interface HaulLayout {
   roads: readonly Road[];
   segments: Segment[];
   connection?: Road;
-  routes: Map<string, readonly Road[]>;
+  routes: Map<string, readonly IndustryHaulPath[]>;
 }
 
 const layouts = new WeakMap<HaulSite, HaulLayout>();
@@ -54,7 +61,7 @@ function layout(st: HaulSite, ind: Industry, front: 1 | -1, ground?: HaulGround)
     const clear = (p: Vec) => !solid.some((fp) => pointInFootprint(p, fp, 1.5)) && (ground?.clear(p) ?? true);
     connection = connectHaulRoad(gate, candidates.map((hit) => hit.point), ind.fp.angle, clear);
   }
-  const result = { station: st.fp, plant: ind.fp, front, annexes: ind.annexes, revision, roads, segments, connection, routes: new Map<string, readonly Road[]>() };
+  const result = { station: st.fp, plant: ind.fp, front, annexes: ind.annexes, revision, roads, segments, connection, routes: new Map<string, readonly IndustryHaulPath[]>() };
   layouts.set(st, result);
   return result;
 }
@@ -134,7 +141,35 @@ function pathOnRoads(roads: readonly Road[], segments: readonly Segment[], start
   return null;
 }
 
-export function industryHaulPaths(st: Station, ind: Industry, front: 1 | -1, cargo: CargoType, direction: HaulDirection, ground?: HaulGround): readonly Road[] {
+/** Подъезд из проезда к отмеченному месту и выезд задним ходом до поворота к воротам. */
+function parkingPaths(ind: Industry, road: Road): IndustryHaulPath[] {
+  const apron = industryLoadingApron(ind.info);
+  if (!ind.fp.compound || !apron) return [];
+  const toWorld = (x: number, y: number) => sitePoint(ind.fp, [x / ind.info.w, y / ind.info.h]);
+  const { x, w, mouth, aisle, bayY } = apron;
+  const gate = toWorld(mouth, aisle);
+  const fromStation = [...road].reverse();
+  const turnRoom = INDUSTRY_ROAD_WIDTH / 2;
+  const circuit = (path: Road): Circuit => path.map(({ x, y }) => [x, y]);
+  return apron.bays.map((bx) => {
+    const bay = toWorld(bx, bayY);
+    const center = toWorld(bx, aisle);
+    const drift = Math.sign(bx - mouth) * 7;
+    const gear = toWorld(clamp(bx + drift, x + 4.5, x + w - 4.5), aisle);
+    return {
+      road,
+      parking: {
+        arrive: circuit([...fromStation, gate, center, bay]),
+        reverse: circuit([bay, center, gear]),
+        depart: circuit([gear, gate, ...road]),
+        arrivalApron: dist(road[0], gate) + dist(gate, center) + dist(center, bay) + turnRoom,
+        departureApron: dist(gear, gate) + dist(gate, road[0]) + turnRoom,
+      },
+    };
+  });
+}
+
+export function industryHaulPaths(st: Station, ind: Industry, front: 1 | -1, cargo: CargoType, direction: HaulDirection, ground?: HaulGround): readonly IndustryHaulPath[] {
   const site = layout(st, ind, front, ground);
   const key = `${direction}:${cargo}`;
   const saved = site.routes.get(key);
@@ -142,7 +177,7 @@ export function industryHaulPaths(st: Station, ind: Industry, front: 1 | -1, car
   const outbound = direction === 'out';
   const tail = stationHaulRoad(st, outbound ? -1 : 1).map(([x, y]) => sitePoint(st.fp, [x / st.fp.w, y * front / st.fp.h]));
   const connector = site.connection;
-  const paths: Road[] = [];
+  const paths: IndustryHaulPath[] = [];
   if (connector) {
     const road = connector[0];
     const core = ind.fp.compound?.branches.at(-1)?.at(-1);
@@ -159,11 +194,15 @@ export function industryHaulPaths(st: Station, ind: Industry, front: 1 | -1, car
     }
     for (const end of ends) {
       const route = pathOnRoads(site.roads, site.segments, end, road);
-      if (route) paths.push([...route, ...connector.slice(1), ...tail]);
+      if (!route) continue;
+      const path = [...route, ...connector.slice(1), ...tail.slice(1)];
+      const parking = end === ends[0] ? parkingPaths(ind, path) : [];
+      if (parking.length) paths.push(...parking);
+      else paths.push({ road: path });
     }
-    if (!paths.length) paths.push([...connector, ...tail]);
+    if (!paths.length) paths.push({ road: [...connector, ...tail.slice(1)] });
   }
-  if (!paths.length) paths.push(tail);
+  if (!paths.length) paths.push({ road: tail });
   site.routes.set(key, paths);
   return paths;
 }
