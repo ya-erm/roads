@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { add, dist, scale, type Vec } from '../core/vec';
+import { gameSidewalks } from '../render/sidewalks';
 import type { Town, TownBuilding, TownPark } from '../world/entities';
 import { lotClearOfRoads, lotOutline } from '../world/lotClear';
 import { WALK_EDGE } from '../world/roadTypes';
@@ -41,6 +42,21 @@ function fieldStreet(game: Game, profile = STREET): { from: Vec; to: Vec; beside
 }
 
 describe('перенос ратуши', () => {
+  it('примерка под курсором сохраняет версию участков и сеть тротуаров до настоящего переноса', () => {
+    const game = freshGame(42);
+    const house = game.towns.flatMap((t) => t.buildings).find((b) => b.kind === 'res')!;
+    const spot = fieldStreet(game).beside(30);
+    const sidewalks = gameSidewalks(game);
+    const version = game.index.version;
+    for (let x = 0; x < 12; x++) {
+      const plan = game.movePlan(house, add(spot, { x, y: 0 }));
+      expect(plan.fp).toBeTruthy();
+    }
+    expect(game.index.version).toBe(version);
+    expect(gameSidewalks(game)).toBe(sidewalks);
+    expect(game.index.at(house.fp.center)).toBe(house);
+  });
+
   it('участок с площадью вокруг ратуши — за тротуаром, площадь у ратуши едет с ней', () => {
     const game = freshGame(42);
     game.money = 10_000_000;

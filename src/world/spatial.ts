@@ -167,6 +167,7 @@ function cornersInto(out: Float64Array, center: Vec, w: number, h: number, angle
 /** Сеточный индекс прямоугольников для быстрых проверок «занято ли место». */
 export class FootprintIndex<T extends { fp: Footprint }> {
   private readonly cells = new Map<string, { items: T[]; revision: number }>();
+  private readonly ignored = new Set<T>();
   readonly items = new Set<T>();
   version = 0;
 
@@ -206,6 +207,17 @@ export class FootprintIndex<T extends { fp: Footprint }> {
     }
   }
 
+  /** Проверить размещение без собственного контура. Индекс меняется лишь при подтверждении переноса. */
+  without<R>(item: T, query: () => R): R {
+    if (this.ignored.has(item)) return query();
+    this.ignored.add(item);
+    try {
+      return query();
+    } finally {
+      this.ignored.delete(item);
+    }
+  }
+
   near(p: Vec, radius: number): T[] {
     const result = new Set<T>();
     const x0 = Math.floor((p.x - radius) / this.cell);
@@ -215,6 +227,7 @@ export class FootprintIndex<T extends { fp: Footprint }> {
     for (let x = x0; x <= x1; x++) {
       for (let y = y0; y <= y1; y++) for (const it of this.cells.get(`${x}:${y}`)?.items ?? []) result.add(it);
     }
+    if (this.ignored.size) for (const item of this.ignored) result.delete(item);
     return [...result];
   }
 

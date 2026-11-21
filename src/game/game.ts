@@ -2371,12 +2371,7 @@ export class Game implements BuildContext {
   baseMovePlan(id: number, p: Vec): ReturnType<Game['basePlan']> {
     const base = this.construction.crews.bases.get(id);
     if (!base) return { ok: false, reason: 'Нет базы', cost: 0, fp: null, demolish: [] };
-    this.index.remove(base);
-    try {
-      return this.basePlan(p, true);
-    } finally {
-      this.index.add(base);
-    }
+    return this.index.without(base, () => this.basePlan(p, true));
   }
 
   /**
@@ -3342,8 +3337,7 @@ export class Game implements BuildContext {
     const face = turns ? -1 : streetFace(net, fp);
     const anchor = anchorFor(net, center);
     const fail = (reason: string) => ({ ok: false, reason, fp, cost, anchor, face, lot, base, turn: tn });
-    this.index.remove(b);
-    try {
+    return this.index.without(b, () => {
       if (!placeable(this.worldContext(), lot, seg.id)) return fail('Здесь мало места');
       if (!lotClearOfRoads(net, lot, WALK_EDGE)) return fail('Мешает дорога');
       if (this.parkUnder(lot, own)) return fail('Мешает парк');
@@ -3361,9 +3355,7 @@ export class Game implements BuildContext {
       }
       if (cost > this.budget) return fail('Не хватает денег');
       return { ok: true, fp, cost, anchor, face, lot, plaza, base, turn: tn };
-    } finally {
-      this.index.add(b);
-    }
+    });
   }
 
   /** Переносит здание (movePlan; turn — поворот ратуши и храма от улицы). false — нельзя. */
@@ -5625,6 +5617,7 @@ export class Game implements BuildContext {
   }
 
   private tick(dt: number): void {
+    const previousTime = this.time;
     this.time += dt;
     // Содержание — за этот такт, по парку, бригадам, сети и долгу, какими их оставили прошлый такт и игрок.
     this.accrueUpkeep(dt);
@@ -5663,6 +5656,7 @@ export class Game implements BuildContext {
     this.enterprises.tick(dt);
     this.updateIndustries(dt);
     this.updateStations(dt);
+    if (this.retail && Math.floor(previousTime / RETAIL.depotInterval) !== Math.floor(this.time / RETAIL.depotInterval)) this.supplyFromDepots();
     this.updateTowns(dt);
     // Стройка дорог: только если есть проекты или бригады («Мгновенно» их не бывает — такт тот же, что без стройки).
     if (this.construction.projects.size || this.construction.crews.brigades.size || this.construction.trains?.list.size) this.construction.tick(dt);
@@ -8529,12 +8523,16 @@ export class Game implements BuildContext {
   }
 
   private earn(amount: number, line: Line, v: FleetVehicle): void {
-    this.money += amount;
-    this.incomeMonth += amount;
-    this.ledger.transport += amount;
+    this.transportIncome(amount);
     line.revenueMonth += amount;
     line.revenueTotal += amount;
     v.profitMonth += amount;
+  }
+
+  private transportIncome(amount: number): void {
+    this.money += amount;
+    this.incomeMonth += amount;
+    this.ledger.transport += amount;
   }
 
   /**
@@ -8561,18 +8559,7 @@ export class Game implements BuildContext {
     }
     const near = this.stationReceivers(st).filter((x) => x.r.cargo.includes(cargo));
     if (near.length) {
-      // Сначала тем, у кого склад пустее: груз расходится по магазинам, а не в ближайший до отказа.
-      near.sort((a, b) => stockFill(a.town, a.r, cargo, this.time) - stockFill(b.town, b.r, cargo, this.time) || a.r.b - b.r.b);
-      const by = new Map<number, number>();
-      let left = Math.floor(amount);
-      for (const { town, r, b } of near) {
-        if (left <= 0) break;
-        const took = acceptAt(town, r, cargo, left, this.time);
-        if (took <= 0) continue;
-        recordRetailSupply(town, r, b, cargo, took, this.month);
-        left -= took;
-        by.set(town.id, (by.get(town.id) ?? 0) + took);
-      }
+      const by = this.supplyReceivers(near, cargo, amount);
       if (!by.size) return [{ to: { type: 'town', id: near[0].town.id }, amount: 0 }];
       if (st.kind === 'road' && st.industryId === null && stationRetailForm(cargo)) {
         for (const [id, units] of by) {
@@ -8588,6 +8575,65 @@ export class Game implements BuildContext {
     if (!town) return [];
     town.supplied[cargo] = (town.supplied[cargo] ?? 0) + amount;
     return [{ to: { type: 'town', id: town.id }, amount }];
+  }
+
+  /** Общая для станций и оптовых баз раздача: сначала получателям с самым пустым складом. */
+  private supplyReceivers(near: { town: Town; r: Receiver; b: TownBuilding }[], cargo: CargoType, amount: number): Map<number, number> {
+    near.sort((a, b) => stockFill(a.town, a.r, cargo, this.time) - stockFill(b.town, b.r, cargo, this.time) || a.r.b - b.r.b);
+    const by = new Map<number, number>();
+    let left = Math.floor(amount);
+    for (const { town, r, b } of near) {
+      if (left <= 0) break;
+      const took = acceptAt(town, r, cargo, left, this.time);
+      if (!took) continue;
+      recordRetailSupply(town, r, b, cargo, took, this.month);
+      left -= took;
+      by.set(town.id, (by.get(town.id) ?? 0) + took);
+    }
+    return by;
+  }
+
+  /** Раз в игровой день магазины забирают с базы то, для чего у них освободилось место. */
+  private supplyFromDepots(): void {
+    for (const st of this.stations.values()) {
+      if (st.kind !== 'dock' || this.stationStored(st) < 1 || !this.isDepotDock(st)) continue;
+      const near = this.depotReceivers(st.fp);
+      for (const cargo of FREIGHT) {
+        const stored = st.cargo[cargo] ?? 0;
+        if (stored < 1) continue;
+        const shops = near.filter(({ r }) => r.cargo.includes(cargo));
+        if (!shops.length) continue;
+        const send = (amount: number, originId: number | undefined) => {
+          const origin = originId === undefined ? undefined : this.stations.get(originId);
+          const maker = origin?.industryIds.find((id) => this.industries.some((ind) => ind.id === id && ind.info.produces === cargo));
+          let sent = 0;
+          for (const [id, units] of this.supplyReceivers(shops, cargo, amount)) {
+            const to: Ref = { type: 'town', id };
+            this.scenario?.onDelivered(cargo, units, to, 1, maker);
+            this.ideas.onDelivered(cargo, units, to, 1, maker);
+            sent += units;
+          }
+          st.cargo[cargo] = (st.cargo[cargo] ?? 0) - sent;
+          return sent;
+        };
+        // В старых сохранениях за подвоз ещё не платили. От рейса известна лишь станция отправления.
+        const unpaid = stored - paidStock(st, cargo);
+        if (unpaid >= 1) {
+          const sourceId = st.cargoOrigin?.[cargo];
+          const sent = send(unpaid, sourceId);
+          const from = sourceId === undefined ? undefined : this.stations.get(sourceId);
+          if (sent && from) this.transportIncome(this.freightPayment(cargo, sent, dist(from.fp.center, st.fp.center), 1));
+          if (sent < Math.floor(unpaid)) continue;
+        }
+        const lots = st.paidCargo?.[cargo];
+        if (!lots) continue;
+        for (const lot of lots) {
+          lot.amount -= send(lot.amount, lot.origin);
+          if (lot.amount >= 1) break;
+        }
+        st.paidCargo![cargo] = lots.filter((l) => l.amount > 0);
+      }
+    }
   }
 
   // ---------- Получатели грузов (world/retail.ts, docs/RETAIL.md) ----------
@@ -8803,6 +8849,11 @@ export class Game implements BuildContext {
   private receiverCatchment(st: Pick<Station, 'kind' | 'fp' | 'serves'>, town: Town): number {
     const radius = this.catchmentRadius(st);
     return dist(town.center, st.fp.center) <= (town.extent ?? town.radius) + radius + 50 ? radius : 0;
+  }
+
+  /** Получатели в радиусе грузовой автостанции от центра участка базы, в том числе при её размещении. */
+  depotReceivers(fp: Footprint): { town: Town; r: Receiver; b: TownBuilding }[] {
+    return this.stationReceivers({ kind: 'road', serves: { cargo: true, pax: false }, fp });
   }
 
   /** Грузовые станции, которые охватят получателя на новом месте. */
@@ -12268,11 +12319,10 @@ export class Game implements BuildContext {
     // Возврат: старая станция (без добавленных постов — они переезжают вместе с ней) и её выезд.
     let refund = Math.round((base + (old?.refund ?? 0)) * COST.refundRatio);
     const net = this.roads.net;
-    this.index.remove(st);
     this.movingStation = st.id;
     if (old?.net) this.roads.net = old.net;
     try {
-      const plan = make();
+      const plan = this.index.without(st, make);
       let cost = plan.cost;
       if (keep) {
         // Выезд стал длиннее — платим только прибавку; короче — возврат половины цены убранного куска.
@@ -12291,7 +12341,7 @@ export class Game implements BuildContext {
         fp = { ...fp, w: fp.w + extra };
         const own = plan.industryId !== undefined ? this.industries.find((i) => i.id === plan.industryId) : undefined;
         for (const s of this.index.near(fp.center, footprintRadius(fp) + 120)) {
-          if (s === own || !footprintsOverlap(fp, s.fp, 1) || demolish.includes(s.id) || plan.driveway?.demolish.includes(s.id)) continue;
+          if (s === st || s === own || !footprintsOverlap(fp, s.fp, 1) || demolish.includes(s.id) || plan.driveway?.demolish.includes(s.id)) continue;
           if (s.type !== 'building' || s.kind === 'landmark') return fail(s.type === 'industry' ? 'Мешает предприятие' : 'Мешает здание');
           demolish.push(s.id);
           cost += this.demolishCost(s.id);
@@ -12303,7 +12353,6 @@ export class Game implements BuildContext {
     } finally {
       this.roads.net = net;
       this.movingStation = null;
-      this.index.add(st);
     }
   }
 
@@ -12425,16 +12474,14 @@ export class Game implements BuildContext {
     const real = this.net;
     const money = this.money;
     const self = this as unknown as { net: Network };
-    this.index.remove(st);
     self.net = net;
     this.money = money + refund;
     try {
-      const plan = this.railStationPlan(p, snapRadius, opts.angle ?? 0, st.platforms.length, length, terminal);
+      const plan = this.index.without(st, () => this.railStationPlan(p, snapRadius, opts.angle ?? 0, st.platforms.length, length, terminal));
       return { ...plan, cost: plan.cost - refund, refund };
     } finally {
       this.money = money;
       self.net = real;
-      this.index.add(st);
     }
   }
 
@@ -12549,12 +12596,8 @@ export class Game implements BuildContext {
     const net = this.net;
     if ((!still && !this.inBounds(fp.center, 30)) || samples.some((q) => !this.inBounds(q, 20))) return 'За краем карты';
     if ((!still && this.isWater(fp.center, footprintRadius(fp) * 0.6)) || samples.some((q) => this.isWater(q, RAIL_HALF))) return 'Мешает вода';
-    this.index.remove(st);
-    try {
-      if ((!still && this.index.overlaps(fp, 3)) || samples.some((q) => this.blocked(q, RAIL_HALF + 2))) return 'Мешает здание';
-    } finally {
-      this.index.add(st);
-    }
+    const blocked = this.index.without(st, () => (!still && this.index.overlaps(fp, 3)) || samples.some((q) => this.blocked(q, RAIL_HALF + 2)));
+    if (blocked) return 'Мешает здание';
     const u = { x: Math.cos(fp.angle), y: Math.sin(fp.angle) };
     const v = { x: -u.y, y: u.x };
     const probes = [...samples];
@@ -13083,6 +13126,9 @@ export class Game implements BuildContext {
       st.industryIds = [];
       st.catchPop = 0;
       st.accepts = new Set(r?.cargo ?? []);
+      if (r?.depot) {
+        for (const { r: shop } of this.depotReceivers(st.fp)) for (const cargo of shop.cargo) st.accepts.add(cargo);
+      }
       return;
     }
     const R = this.catchmentRadius(st);

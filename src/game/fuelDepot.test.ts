@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ECONOMY } from '../config';
+import { ECONOMY, STATION } from '../config';
 import { dist, dot, sub } from '../core/vec';
 import { CARGO } from '../world/cargo';
 import type { Station, Town, TownBuilding } from '../world/entities';
@@ -245,6 +245,66 @@ describe('Получатели грузов, этап 3', { timeout: 240_000 }, 
     expect(van.amount).toBe(9);
     expect(van.paidAt).toBe(sd.id);
     expect(depot.cargo.food).toBe(0);
+  });
+
+  it('местные магазины забирают оплаченный груз с базы по мере свободного места, дальний магазин ждёт развозку', () => {
+    const game = freshGame(RETAIL_WORLD);
+    const town = game.towns.find((t) => t.receivers?.some((r) => r.depot) && t.receivers.filter((r) => !r.depot && r.cargo.includes('food')).length >= 2)!;
+    const depot = town.buildings.find((b) => receiverOf(town, b.id)?.depot)!;
+    const dock = game.dockFor(depot)!;
+    const shops = town.receivers!.filter((r) => !r.depot && r.cargo.includes('food'));
+    const [near, far] = shops;
+    const a = town.buildings.find((b) => b.id === near.b)!;
+    const b = town.buildings.find((b) => b.id === far.b)!;
+    a.fp = { ...a.fp, center: { x: depot.fp.center.x + 8, y: depot.fp.center.y } };
+    b.fp = { ...b.fp, center: { x: depot.fp.center.x + STATION.cargoCatchment + 1, y: depot.fp.center.y } };
+    const inRange = game.depotReceivers(depot.fp);
+    expect(inRange.some((x) => x.b === a)).toBe(true);
+    expect(inRange.some((x) => x.b === b || x.b === depot)).toBe(false);
+    for (const { town: t, r } of inRange) if (r.cargo.includes('food')) r.stock.food = stockCap(t, r, 'food');
+    near.stock.food = stockCap(town, near, 'food') - 3;
+    far.stock.food = 0;
+    dock.cargo.food = 12;
+    dock.paidCargo = { food: [{ origin: 10000, paidAt: dock.id, amount: 2 }, { origin: 20000, paidAt: dock.id, amount: 10 }] };
+    const supplied = town.supplied.food ?? 0;
+    const income = game.incomeMonth;
+    runSeconds(game, RETAIL.depotInterval + 0.1);
+    expect(a.retailSupply?.at(-1)?.got.food).toBe(3);
+    expect(b.retailSupply?.at(-1)?.got.food ?? 0).toBe(0);
+    expect(town.supplied.food).toBe(supplied + 3);
+    expect(dock.cargo.food).toBe(9);
+    expect(dock.paidCargo.food).toEqual([{ origin: 20000, paidAt: dock.id, amount: 9 }]);
+    expect(game.incomeMonth).toBe(income);
+    near.stock.food = 0;
+    near.at = game.time;
+    runSeconds(game, RETAIL.depotInterval + 0.1);
+    expect(town.supplied.food).toBe(supplied + 12);
+    expect(dock.cargo.food).toBe(0);
+    expect(dock.paidCargo.food).toEqual([]);
+    expect(game.incomeMonth).toBe(income);
+  });
+
+  it('самостоятельная раздача старого запаса оплачивает только неоплаченный подвоз от исходной станции', () => {
+    const game = freshGame(RETAIL_WORLD);
+    const town = game.towns.find((t) => t.receivers?.some((r) => r.depot) && t.demands.includes('food'))!;
+    const depot = town.buildings.find((b) => receiverOf(town, b.id)?.depot)!;
+    const dock = game.dockFor(depot)!;
+    const receiver = town.receivers!.find((r) => !r.depot && r.cargo.includes('food'))!;
+    const shop = town.buildings.find((b) => b.id === receiver.b)!;
+    shop.fp = { ...shop.fp, center: { x: depot.fp.center.x + 20, y: depot.fp.center.y } };
+    receiver.stock.food = 0;
+    const sourceTown = game.towns.find((t) => t !== town)!;
+    const source = game.dockFor(receiversOf(game, sourceTown, 'shop')[0])!;
+    game.createLine([source.id, dock.id]);
+    dock.cargo = { food: 10 };
+    dock.cargoOrigin = { food: source.id };
+    dock.paidCargo = { food: [{ origin: source.id, paidAt: dock.id, amount: 6 }] };
+    const restored = new Game(RETAIL_WORLD, JSON.parse(JSON.stringify(game.toSave())));
+    const before = restored.incomeMonth;
+    const expected = Math.round(4 * CARGO.food.rate * ECONOMY.tariff * dist(source.fp.center, dock.fp.center) / 100);
+    runSeconds(restored, RETAIL.depotInterval * 2 + 0.1);
+    expect(restored.stations.get(dock.id)!.cargo.food).toBe(0);
+    expect(restored.incomeMonth - before).toBe(expected);
   });
 
   it('«🛒 все магазины с этим грузом»: магазины города — в конец маршрута, по порядку ближайшего соседа от последней остановки', () => {

@@ -3919,7 +3919,7 @@ export class Hud {
       const depot = rcv?.depot ? g.depotStock(b.id) : null;
       const stock = depot
         ? `<div class="icon-row store-row"><span class="lbl2" data-tip="${esc(
-            `⇄ Склад-пересадка. Подвоз оплачивается при приёмке, развозка — при доставке в магазины · 📦 ${Math.floor(depot.stored)} / ${RETAIL.depotStock}`,
+            `На складе ${Math.floor(depot.stored)} из ${RETAIL.depotStock} ед. Подвоз оплачивается при приёмке.`,
           )}">⇄ <span class="stock-bar"><i style="width:${Math.round(depot.fill * 100)}%;background:#3f74b5"></i></span></span>${rcv!.cargo
             .filter((c) => (depot.cargo[c] ?? 0) >= 1)
             .map((c) => `<span class="lbl2" data-tip="${esc(`${CARGO[c].name}: 📦 ${Math.floor(depot.cargo[c] ?? 0)}`)}">${cargoIcon(c, 18, false)}${Math.floor(depot.cargo[c] ?? 0)}</span>`)
@@ -3958,6 +3958,7 @@ export class Hud {
       return `<section class="detail">${head(kind, subtitle)}
         ${town ? `<button class="partner" data-action="focus" data-type="town" data-id="${town.id}">${townIcon(18)}<span>${esc(town.name)}</span><small>${town.population} жит.</small></button>` : ''}
         ${stock}
+        ${depot ? '<p>База сама снабжает магазины внутри круга на карте. К магазинам за кругом можно проложить маршрут от базы.</p>' : ''}
         ${supply}
         ${formOf(b) === 'warehouse' ? `<p>Подъезд грузовиков</p><div class="actions"><button class="small ${(b.dockApproach ?? 'front') === 'front' ? 'primary' : ''}" aria-pressed="${(b.dockApproach ?? 'front') === 'front'}" data-action="dock-approach" data-id="${b.id}" data-v="front">Носом к рампе</button><button class="small ${b.dockApproach === 'parallel' ? 'primary' : ''}" aria-pressed="${b.dockApproach === 'parallel'}" data-action="dock-approach" data-id="${b.id}" data-v="parallel">Вдоль фасада</button></div>` : ''}
         <div class="actions">

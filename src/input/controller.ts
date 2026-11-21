@@ -59,6 +59,7 @@ import type { CornerHandle } from '../lanes/corners';
 import { corridorHalf, streetFace } from '../world/worldgen';
 import { PARK_INFO } from '../world/parkPick';
 import { yardOf } from '../world/townForms';
+import { depotOf } from '../world/retail';
 import { movablePark, parkMoveCost } from '../world/townParks';
 import { snapTurn, TURN_STEP, turnableBuilding, turnFromHandle, turnHandlePos, turnLabel, turnText } from '../world/moveTurn';
 import { STREET_BAN_MARK } from '../world/streetBans';
@@ -3742,6 +3743,22 @@ export class Controller {
     return plans.get(what) as T;
   }
 
+  /** Круг и связи с магазинами используют ту же геометрию, что и выдача груза со склада. */
+  private depotCoverage(o: ToolOverlay, b: TownBuilding, fp: Footprint, ok = true, placing = false): void {
+    const g = this.game();
+    if (b.form !== 'depot' || !g.retail) return;
+    const town = g.townOf(b);
+    const depot = town && depotOf(town);
+    // В одном городе работает одна база. В тестовом редакторе можно поставить и декоративный второй ангар.
+    if (depot ? depot.b !== b.id : !placing || !town?.demands.length) return;
+    o.catchmentAt = fp.center;
+    o.catchmentR = STATION.cargoCatchment;
+    if (ok) {
+      const key = `depot:${b.id}:${fp.center.x}:${fp.center.y}:${g.townRev}:${g.monthIndex}`;
+      o.receiverPreview = { at: fp.center, receivers: this.memo(key, () => g.depotReceivers(fp)) };
+    }
+  }
+
   /** План превью из кэша — с деньгами сейчас. */
   private afford<P extends { plan: RoadPlan }>(res: P | null): P | null {
     return res && { ...res, plan: withBudget(res.plan, this.game().budget) };
@@ -3793,6 +3810,7 @@ export class Controller {
       if (preview.building) {
         o.ghosts = [{ building: preview.building, ok: preview.ok }];
         o.marks.push({ fp: preview.building.fp, ok: preview.ok });
+        this.depotCoverage(o, preview.building, preview.building.fp, preview.ok, true);
       }
       o.label = { text: preview.label, ok: preview.ok };
       return o;
@@ -3837,6 +3855,10 @@ export class Controller {
         o.catchmentR = g.catchmentRadius(st);
       }
     }
+    if (this.selection?.type === 'building' && !this.pending) {
+      const b = g.buildingById(this.selection.id);
+      if (b) this.depotCoverage(o, b, b.fp);
+    }
     // Выбрана база стройки — её радиус обслуживания: на стройки в круге её бригады едут сами.
     if (this.selection?.type === 'base') {
       const base = g.construction.crews.bases.get(this.selection.id);
@@ -3863,6 +3885,7 @@ export class Controller {
       if (b) {
         if (resize && p && b.fp === resize.initial) {
           const { fp, reason } = this.memo('building-resize', () => g.buildingResizePlan(b, resize.corner, sub(p, resize.start)));
+          this.depotCoverage(o, b, fp, !reason);
           o.buildingResize = { corners: buildingCorners({ ...b, fp }), active: resize.corner, preview: { fp, ok: !reason }, cursor: buildingResizeCursor(b, resize.corner) };
           const size = `${Number(fp.w.toFixed(1))} × ${Number(fp.h.toFixed(1))} м`;
           o.label = { text: reason ? `${size} · ${reason}` : size, ok: !reason };
@@ -4777,6 +4800,7 @@ export class Controller {
           if (plan.plaza) o.marks.push({ fp: plan.plaza.fp, ok: plan.ok });
           // Ратуша и площадь — их рисунком, как встанут (с поворотом), и ручка ↺ за фасадом-тылом: куда повёрнута.
           if (plan.fp) o.ghosts = this.hallGhosts(b, plan);
+          if (plan.fp) this.depotCoverage(o, b, plan.fp, plan.ok);
           if (plan.fp && turns) o.turnHandle = { pos: this.buildingHandle({ ...b, fp: plan.fp, face: plan.face }), pivot: plan.fp.center, active: false };
           const with_ = plan.plaza ? ` ${PARK_INFO.plaza.icon} с площадью` : '';
           let coverage = '';

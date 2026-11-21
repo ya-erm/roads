@@ -17,6 +17,29 @@ function controller(game: Game): Controller {
   return new Controller(events as unknown as HTMLCanvasElement, new Camera(), () => game);
 }
 
+it('активная оптовая база показывает охват получателей при выборе и на новом участке при переносе', () => {
+  const game = freshGame(SETTINGS);
+  const town = game.towns.find(t => t.receivers?.some(r => r.depot))!;
+  const b = game.buildingById(town.receivers!.find(r => r.depot)!.b)!;
+  const c = controller(game);
+  c.setTool('select');
+  c.select({ type: 'building', id: b.id });
+  const selected = c.overlay();
+  expect(selected.catchmentAt).toEqual(b.fp.center);
+  expect(selected.catchmentR).toBe(STATION.cargoCatchment);
+  expect(selected.receiverPreview?.receivers.map(x => x.b.id)).toEqual(game.depotReceivers(b.fp).map(x => x.b.id));
+  const ordinary = town.buildings.find(h => h.form !== 'depot')!;
+  c.select({ type: 'building', id: ordinary.id });
+  expect(c.overlay().catchmentAt).toBeNull();
+  c.startMove(b);
+  const street = townStreets(game, town.id).find(s => s.cls === 'street' || s.cls === 'avenue')!;
+  c.hover = street.lut.pointAt(street.length / 2);
+  const plan = game.movePlan(b, c.hover);
+  expect(plan.fp).toBeTruthy();
+  expect(plan.fp!.center).not.toEqual(b.fp.center);
+  expect(c.overlay()).toMatchObject({ catchmentAt: plan.fp!.center, catchmentR: STATION.cargoCatchment });
+});
+
 function scene(game = freshGame(SETTINGS), townName?: string) {
   game.money = 5_000_000;
   const c = controller(game);
