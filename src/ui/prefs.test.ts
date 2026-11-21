@@ -108,4 +108,20 @@ describe('Настройки интерфейса', () => {
     for (const fn of listeners) fn({ key: 'roads.prefs' });
     expect(seen).toEqual([true]);
   });
+
+  it('уровень совместим с прежним выключателем и сохраняется отдельно при перезагрузке', async () => {
+    const store = memoryStorage({ 'roads.prefs': '{"pedestrians":false}' });
+    const { prefs } = await load(store);
+    expect(prefs.pedestrianLevel()).toBe(1);
+    expect(prefs.prefOn('pedestrians')).toBe(false);
+    prefs.setPref('pedestrians', true);
+    prefs.setPedestrianLevel(4);
+    prefs.setPedestrianLevel(6);
+    prefs.setPref('pedestrians', false);
+    const restored = (await load(store)).prefs;
+    expect(restored.prefOn('pedestrians')).toBe(false);
+    expect(restored.pedestrianLevel()).toBe(4);
+    restored.setPref('pedestrians', true);
+    expect(restored.pedestrianLevel()).toBe(4);
+  });
 });

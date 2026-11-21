@@ -1,5 +1,6 @@
 import { MONTH_SCALE } from '../config';
 import type { Vec } from '../core/vec';
+import type { Anchor } from '../lanes/edit';
 import type { CargoType, IndustryKind, IndustryType } from './cargo';
 import type { Receiver } from './retail';
 import type { Footprint } from './spatial';
@@ -180,6 +181,13 @@ export interface LotStats {
 
 export type TownStyle = 'radial' | 'organic' | 'linear';
 
+export interface TownStreetCandidate {
+  start: Anchor;
+  end: Anchor;
+  kink: boolean;
+  score: number;
+}
+
 export interface Town {
   id: number;
   name: string;
@@ -270,6 +278,8 @@ export interface Town {
   /** Фактические поставки через городские автостанции за недавние месяцы и последнее расширение торговли. */
   stationRetail?: { lastGrowth?: number; deliveries: { station: number; cargo: CargoType; month: number; units: number }[] };
   growthAcc: number;
+  /** Разведанные в этом месяце свободные места. День записывается и при пустом результате. */
+  streetSearch?: { month: number; day: number; candidates: TownStreetCandidate[] };
   /** Город сам прокладывает новые улицы, когда вдоль старых тесно. По умолчанию да. */
   autoStreets?: boolean;
   /**

@@ -584,6 +584,40 @@ button.icon.menu-back {
   white-space: normal;
 }
 
+.pedestrian-pref {
+  border-radius: 12px;
+  background: #f1f4f7;
+}
+
+.pedestrian-pref .menu-item {
+  width: 100%;
+}
+
+.pedestrian-levels {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 14px 10px;
+}
+
+.pedestrian-levels span {
+  flex: 1;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.pedestrian-levels button {
+  min-width: 28px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: white;
+}
+
+.pedestrian-levels button[aria-pressed="true"] {
+  color: white;
+  background: #3377c6;
+}
+
 .pref-switch {
   flex: none;
   position: relative;

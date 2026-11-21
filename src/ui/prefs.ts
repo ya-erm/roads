@@ -1,11 +1,12 @@
 /**
  * Настройки интерфейса игрока (Меню → Настройки): как показывать карту, а не каким будет мир (это — настройки мира,
- * src/world/settings.ts). Хранятся в браузере — localStorage 'roads.prefs', JSON-объект `{ имя: вкл }`, общие для всех
+ * src/world/settings.ts). Хранятся в браузере — localStorage 'roads.prefs', общие для всех
  * партий. Новая настройка — одна строка в PREFS (название, пояснение, значок, как по умолчанию) и имя в `Pref`;
  * раздел меню (src/ui/settingsMenu.ts) покажет её сам. Ни от чего в игре не зависит (кроме «Задания без сроков»:
  * её Hud передаёт в `game.ideas`); без браузера (тесты) и с битым хранилищем — всё как по умолчанию.
  */
 import { asRecord, readJson, writeJson } from '../core/store';
+import { isPedestrianLevel, type PedestrianLevel } from '../config';
 
 export type Pref = 'junctionMarks' | 'mapCache' | 'ideas' | 'pedestrians';
 
@@ -65,7 +66,7 @@ export const PREFS: readonly PrefInfo[] = [
   {
     id: 'pedestrians',
     name: 'Пешеходы',
-    hint: 'Жители ходят по тротуарам и переходам. Выключите, чтобы снизить нагрузку на игру',
+    hint: 'Жители ходят по тротуарам и переходам',
     icon: '<svg viewBox="0 0 48 36" width="32" height="24" aria-hidden="true"><circle cx="26" cy="6" r="4" fill="#ce9067"/><path d="m18 19 5-7 4 7 6 3m-10-9-2 10-7 9m8-10 7 10" fill="none" stroke="#4278a6" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     default: true,
   },
@@ -97,9 +98,13 @@ const KEY = 'roads.prefs';
 const isPref = (s: string): s is Pref => PREFS.some((p) => p.id === s);
 
 /** Что игрок выбрал и сохранил; битое или чужое значение — ничего. */
-function readChosen(): Partial<Record<Pref, boolean>> {
-  const out: Partial<Record<Pref, boolean>> = {};
-  for (const [k, v] of Object.entries(asRecord(readJson(KEY)))) if (isPref(k) && typeof v === 'boolean') out[k] = v;
+type Chosen = Partial<Record<Pref, boolean>> & { pedestrianLevel?: PedestrianLevel };
+function readChosen(): Chosen {
+  const out: Chosen = {};
+  for (const [k, v] of Object.entries(asRecord(readJson(KEY)))) {
+    if (isPref(k) && typeof v === 'boolean') out[k] = v;
+    if (k === 'pedestrianLevel' && isPedestrianLevel(v)) out.pedestrianLevel = v;
+  }
   return out;
 }
 
@@ -126,6 +131,17 @@ function changed(): void {
 /** Настройка включена: выбор игрока (сохранённый или в этой загрузке), иначе — как по умолчанию. */
 export function prefOn(name: Pref): boolean {
   return overrides.get(name) ?? chosen[name] ?? defaults.get(name) ?? false;
+}
+
+export function pedestrianLevel(): PedestrianLevel {
+  return chosen.pedestrianLevel ?? 1;
+}
+
+export function setPedestrianLevel(level: number): void {
+  if (!isPedestrianLevel(level) || level === pedestrianLevel()) return;
+  chosen = { ...chosen, pedestrianLevel: level };
+  writeJson(KEY, chosen);
+  changed();
 }
 
 /**

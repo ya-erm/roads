@@ -1,4 +1,5 @@
-import { PREFS, prefOn } from './prefs';
+import { PEDESTRIAN_LEVELS } from '../config';
+import { pedestrianLevel, PREFS, prefOn } from './prefs';
 
 /**
  * Раздел «Настройки» в Меню: по строке на настройку из PREFS (src/ui/prefs.ts) — значок, название, пояснение и
@@ -24,9 +25,15 @@ export function settingsSvg(size = 22): string {
 export function settingsHtml(): string {
   return PREFS.map((p) => {
     const on = prefOn(p.id);
-    return `<button class="menu-item pref${on ? ' on' : ''}" data-action="pref" data-id="${p.id}" role="switch" aria-checked="${on}" title="${p.name}: ${on ? 'выключить' : 'включить'}">
+    const toggle = `<button class="menu-item pref${on ? ' on' : ''}" data-action="pref" data-id="${p.id}" role="switch" aria-checked="${on}" title="${p.name}: ${on ? 'выключить' : 'включить'}">
       ${p.icon}<span class="menu-text"><b>${p.name}</b><small>${p.hint}</small></span>
       <span class="pref-switch" aria-hidden="true"><span></span></span>
     </button>`;
+    if (p.id !== 'pedestrians') return toggle;
+    return `<div class="pedestrian-pref">${toggle}
+      <div class="pedestrian-levels" role="group" aria-label="Интенсивность пешеходов"><span>Интенсивность</span>${PEDESTRIAN_LEVELS.map(level =>
+        `<button data-action="pedestrian-level" data-level="${level}" aria-label="Уровень ${level} из 5" aria-pressed="${level === pedestrianLevel()}"${on ? '' : ' disabled'}>${level}</button>`
+      ).join('')}</div>
+    </div>`;
   }).join('');
 }

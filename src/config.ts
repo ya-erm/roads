@@ -1,4 +1,9 @@
 export const SIM_DT = 1 / 30;
+export const PEDESTRIAN_LEVELS = [1, 2, 3, 4, 5] as const;
+export type PedestrianLevel = typeof PEDESTRIAN_LEVELS[number];
+export function isPedestrianLevel(value: unknown): value is PedestrianLevel {
+  return PEDESTRIAN_LEVELS.some(level => level === value);
+}
 
 export const MIN_SEGMENT_LEN = 16;
 /** Радиус привязки в пикселях экрана. */

@@ -152,7 +152,7 @@ import { Minimap } from './minimap';
 import { upkeepRates, upkeepRateText, upkeepTip } from './upkeepText';
 import { closeTimelapse, openTimelapse } from './timelapse';
 import { syncTimelapseItem, timelapseSvg } from './timelapseButton';
-import { onPrefs, type Pref, prefOn, setPref } from './prefs';
+import { onPrefs, pedestrianLevel, type Pref, prefOn, setPedestrianLevel, setPref } from './prefs';
 import { invalidate, setHtml, setText } from './setHtml';
 import { settingsHtml, settingsSvg } from './settingsMenu';
 import { adviceOf, type Advice, type AdviceFix } from '../game/advisor';
@@ -1130,9 +1130,12 @@ export class Hud {
         // Настройка интерфейса: сохраняется в браузере, карта перерисуется сама (подписка onPrefs).
         const id = d.id as Pref;
         setPref(id, !prefOn(id));
-        this.q('[data-prefs]').innerHTML = settingsHtml();
         break;
       }
+      case 'pedestrian-level':
+        setPedestrianLevel(Number(d.level));
+        this.q<HTMLButtonElement>(`[data-action="pedestrian-level"][data-level="${d.level}"]`).focus();
+        break;
       case 'menu-back':
         this.confirmSave = null;
         this.menuView('main');
@@ -5008,7 +5011,8 @@ export class Hud {
   /** Настройка «Задания без сроков» (Меню → Настройки) — в игру: выключили — идей нет, вкладки тоже. */
   private applyPrefs(): void {
     this.game().ideas.setEnabled(prefOn('ideas'));
-    this.game().setPedestrians(prefOn('pedestrians'));
+    this.game().setPedestrians(prefOn('pedestrians'), pedestrianLevel());
+    if (!this.q('[data-menu-settings]').classList.contains('hidden')) this.q('[data-prefs]').innerHTML = settingsHtml();
   }
 
   /**

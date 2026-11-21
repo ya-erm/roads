@@ -1,5 +1,5 @@
 import { hash } from '../core/math';
-import { SIM_DT } from '../config';
+import { SIM_DT, type PedestrianLevel } from '../config';
 import { closestOnSegment, dist, lerp, type Vec } from '../core/vec';
 import { XWALK } from '../lanes/crosswalk';
 import type { GraphWalk, LaneGraph } from '../lanes/graph';
@@ -180,7 +180,9 @@ function centerAt(w: Walker, time: number): Vec {
 
 export class Pedestrians {
   on = false;
+  level: PedestrianLevel = 1;
   readonly walkers: Walker[] = [];
+  private edges?: Map<string, WalkEdge>;
   private sidewalks?: SidewalkNet;
   private paths?: readonly Footpath[];
   private graph?: LaneGraph;
@@ -189,6 +191,7 @@ export class Pedestrians {
 
   reset(): void {
     this.walkers.length = 0;
+    this.edges = undefined;
     this.sidewalks = this.paths = this.graph = undefined;
     this.prepared = undefined;
     this.nextStep = 0;
@@ -206,23 +209,33 @@ export class Pedestrians {
     if (this.on) this.prepared = { sidewalks, paths, graph, edges };
   }
 
-  private sync(game: Game, time: number): void {
+  /** Переключение уровня в меню действует и на паузе с уже рассчитанной сетью дорожек. */
+  refreshPopulation(game: Game): void {
+    this.sync(game, game.time, true);
+  }
+
+  private sync(game: Game, time: number, resize = false): void {
     const sidewalks = gameSidewalks(game);
     const paths = game.openFootpaths();
-    if (this.sidewalks === sidewalks && this.paths === paths && this.graph === game.roads.graph) return;
-    this.sidewalks = sidewalks;
-    this.paths = paths;
-    this.graph = game.roads.graph;
-    const ready = this.prepared;
-    this.prepared = undefined;
-    const edges = ready?.sidewalks === sidewalks && ready.paths === paths && ready.graph === this.graph
-      ? ready.edges : walkingNetwork(sidewalks, paths, this.graph.crosswalks.values());
+    const graph = game.roads.graph;
+    const same = this.sidewalks === sidewalks && this.paths === paths && this.graph === graph;
+    if (same && !resize) return;
+    if (!same || !this.edges) {
+      this.sidewalks = sidewalks;
+      this.paths = paths;
+      this.graph = graph;
+      const ready = this.prepared;
+      this.prepared = undefined;
+      this.edges = ready?.sidewalks === sidewalks && ready.paths === paths && ready.graph === graph
+        ? ready.edges : walkingNetwork(sidewalks, paths, graph.crosswalks.values());
+    }
+    const edges = this.edges;
     const starts = [...edges.values()].filter((e) => !e.crossing);
     const total = starts.reduce((v, e) => v + e.length, 0);
-    const n = Math.min(POPULATION_LIMIT, Math.ceil(total / 85));
+    const density = 1 + (this.level - 1) * 0.5;
+    const n = Math.ceil(Math.min(POPULATION_LIMIT, total / 85) * density);
     this.walkers.length = Math.min(this.walkers.length, n);
-    let offset = 0;
-    let index = 0;
+    const missing: number[] = [];
     for (let i = 0; i < n; i++) {
       const w = this.walkers[i];
       const previous = w && edges.get(w.edge.key);
@@ -230,10 +243,14 @@ export class Pedestrians {
         if (previous.a.key !== w.edge.a.key) w.reverse = !w.reverse;
         w.edge = previous;
         w.next = w.next && edges.get(w.next.key);
-        continue;
-      }
+      } else missing.push(i);
+    }
+    // Каждую новую группу расселяем по всей карте, сохраняя положение и маршрут тех, кто уже идёт.
+    let offset = 0;
+    let index = 0;
+    for (const [j, i] of missing.entries()) {
       const seed = game.seed + i * 4099;
-      const at = (i + hash(seed, 0)) * total / n;
+      const at = (j + hash(seed, 0)) * total / missing.length;
       while (index + 1 < starts.length && offset + starts[index].length < at) offset += starts[index++].length;
       const edge = starts[index];
       const speed = 2.4 + hash(seed, 1) * 1.1;
