@@ -6411,40 +6411,6 @@ export class Renderer {
       ctx.fillText(f.text, 0, 0);
       ctx.restore();
     }
-    this.drawParkRefusals(game);
-  }
-
-  /** «🅿️✕» над целями, у которых машины кружат в поисках места или недавно уехали ни с чем (только в кадре). */
-  private drawParkRefusals(game: Game): void {
-    const ctx = this.ctx;
-    const z = this.camera.zoom;
-    const view = this.view();
-    for (const p of game.parkSearch.badges()) {
-      if (p.x < view.x0 - 20 || p.x > view.x1 + 20 || p.y < view.y0 - 20 || p.y > view.y1 + 20) continue;
-      ctx.save();
-      ctx.translate(p.x, p.y - 14 / z);
-      ctx.scale(1 / z, 1 / z);
-      ctx.fillStyle = 'rgba(255,255,255,0.92)';
-      ctx.strokeStyle = 'rgba(220,60,50,0.9)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.roundRect(-19, -11, 38, 22, 6);
-      ctx.fill();
-      ctx.stroke();
-      // 🅿️ — синий квадрат с белой «P», рядом красный ✕.
-      ctx.fillStyle = '#2f6fd0';
-      ctx.beginPath();
-      ctx.roundRect(-15, -8, 16, 16, 3);
-      ctx.fill();
-      ctx.font = '700 13px system-ui, -apple-system, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#fff';
-      ctx.fillText('P', -7, 1);
-      ctx.fillStyle = '#dc3c32';
-      ctx.fillText('✕', 9, 1);
-      ctx.restore();
-    }
   }
 }
 

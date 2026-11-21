@@ -30,8 +30,6 @@ export const PARK_SEARCH = {
   range: 500,
   /** Ищет не дольше стольких с с первой неудачи. */
   window: 60,
-  /** «🅿️✕» над целью — ещё столько с после отказа. */
-  mark: 8,
 };
 
 /** Куда ехать за местом: связь у полосы стоянки или площадка (маленькая — через ворота, большая — к узлу). */
@@ -62,8 +60,6 @@ export interface SearchHost {
 
 export class ParkSearch {
   private searching = new Map<number, Search>();
-  /** Недавние отказы: где (цель) и до какого времени показывать «🅿️✕». */
-  private marks: { pos: Vec; until: number }[] = [];
 
   constructor(
     private host: SearchHost,
@@ -195,7 +191,7 @@ export class ParkSearch {
     this.homes.goHome(sim, s.trip, { starts: at.starts, u: at.u, go: (toNode, endLink, route) => this.go(sim, at, toNode, endLink, route) });
   }
 
-  /** Отказ: клетка цели (слой 🅿️) и «🅿️✕» над ней. */
+  /** Отказ учитывается в клетке цели на слое 🅿️. */
   private refuse(s: Search): void {
     const p = s.dest.fp.center;
     const size = PARKING_LAYER.cell;
@@ -204,13 +200,10 @@ export class ParkSearch {
       const r = (s.town.parkRefused ??= {});
       r[key] = (r[key] ?? 0) + 1;
     }
-    this.marks.push({ pos: p, until: this.host.time + PARK_SEARCH.mark });
   }
 
-  /** Такт: большая площадка у цели заполнилась, пока ехала, — на подъезде к узлу ворот ищет дальше; «🅿️✕» — старые прочь. */
+  /** Если большая площадка у цели заполнилась, машина ищет место дальше при подъезде к воротам. */
   step(): void {
-    const now = this.host.time;
-    if (this.marks.length) this.marks = this.marks.filter((m) => m.until > now);
     for (const [id, s] of [...this.searching]) {
       const sim = this.host.traffic.vehicles.get(id);
       if (!sim) {
@@ -236,7 +229,7 @@ export class ParkSearch {
     return s && s.t0 !== null ? { tries: s.tries, dest: s.dest } : null;
   }
 
-  /** Кружат: машины, что не нашли места с первого раза (где они), и цели, где не нашлось (в кадре — «🅿️✕»). */
+  /** Позиции и цели машин, которые не нашли места с первого раза и продолжают поиск. */
   circling(): { pos: Vec; dest: Vec }[] {
     const out: { pos: Vec; dest: Vec }[] = [];
     for (const [id, s] of this.searching) {
@@ -246,16 +239,8 @@ export class ParkSearch {
     return out;
   }
 
-  /** Где показать «🅿️✕»: цели, у которых кружат, и недавние отказы. */
-  badges(): Vec[] {
-    const out: Vec[] = this.marks.map((m) => m.pos);
-    for (const c of this.circling()) if (!out.some((p) => dist(p, c.dest) < 1)) out.push(c.dest);
-    return out;
-  }
-
   /** После загрузки: в пути никого нет. */
   clear(): void {
     this.searching.clear();
-    this.marks = [];
   }
 }

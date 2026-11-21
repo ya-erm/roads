@@ -285,7 +285,7 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
     }
   });
 
-  it('мест у цели нет — до трёх попыток рядом, потом домой; отказ — на слое 🅿️, «🅿️✕» над целью', () => {
+  it('если мест у цели нет, машина ищет парковку, возвращается домой, а слой 🅿️ отражает поиск и отказ', () => {
     // Проверяем поиск и возврат одной машины; случайная пробка фоновых поездок не часть этого сценария.
     const g = withoutCitizens(freshGame(PARK));
     const town = biggest(g);
@@ -318,25 +318,28 @@ describe('Площадки-стоянки', { timeout: 300_000 }, () => {
     });
     let tries = 0;
     let homeward = false;
-    let badge = false;
+    let circling = false;
     let home = false;
     let refused = false;
     // Клетка цели на слое 🅿️ (счёт отказов — за месяц, Town.parkRefused).
     const cell = `${Math.floor(dest.fp.center.x / PARKING_LAYER.cell)}:${Math.floor(dest.fp.center.y / PARKING_LAYER.cell)}`;
+    const parkingCell = () => g.parkingLayer().find((c) => `${c.x / c.size}:${c.y / c.size}` === cell);
     // Предел — с запасом: машина из кармана панельки у проспекта возвращается на место только поворотом направо —
     // кругом по кварталу (~2 мин после поиска).
-    runUntil(g, 600, () => home && refused && badge, () => {
+    runUntil(g, 600, () => home && refused && circling, () => {
       block();
       const s = g.parkSearch.of(simId);
-      if (s) tries = Math.max(tries, s.tries);
-      if (g.parkSearch.badges().some((p) => dist(p, dest.fp.center) < 1)) badge = true;
+      if (s) {
+        tries = Math.max(tries, s.tries);
+        circling ||= (parkingCell()?.circling ?? 0) > 0;
+      }
       if (simId >= 0 && g.carHomes.carOfSim(simId)?.home) homeward = true;
-      if (homeward && !refused) refused = (town.parkRefused?.[cell] ?? 0) > 0 && g.parkingLayer().some((c) => c.refused && `${c.x / c.size}:${c.y / c.size}` === cell);
+      if (homeward && !refused) refused = (town.parkRefused?.[cell] ?? 0) > 0 && (parkingCell()?.refused ?? 0) > 0;
       home ||= homeward && g.carHomes.isHome(town, car.key);
     });
     expect(tries).toBeGreaterThanOrEqual(1);
     expect(tries).toBeLessThanOrEqual(PARK_SEARCH.tries);
-    expect(badge).toBe(true);
+    expect(circling).toBe(true);
     // Не нашла — поехала домой, на своё место (а не «исчезла у узла»), доехала; отказ — в клетке цели (красная).
     expect(homeward).toBe(true);
     expect(home).toBe(true);
