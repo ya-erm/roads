@@ -17,6 +17,7 @@ type YardExitPath = ((t: number) => YardPose) & { pulloutTime: number; reverseUn
 export type YardExitArc = 'wide' | 'aisle' | 'smooth';
 export const YARD_ENTRY_SPEED = 1.12;
 export const YARD_EXIT_SPEED = 1.4 * YARD_ENTRY_SPEED;
+const REVERSE_YAW_RATE = (Math.PI / 4) / YARD_EXIT_SPEED;
 
 function axleCurve(from: Pose, to: Pose, spec: VehicleSpec, intoBay = false, outer = false): CurveLUT {
   const base = spec.length * steerBase(spec.body);
@@ -115,8 +116,43 @@ function roundedExit(axle: Vec, dir: Vec, road: Pose, base: number, length: numb
   return { path, radius };
 }
 
+/** Плотные повороты проходим медленнее: время участка учитывает и ход оси, и поворот тягача. */
+function reversePace(curve: CurveLUT, nominal: number): { duration: number; nominalAt: (t: number) => number } {
+  const steps = 192;
+  const regular = [0];
+  const paced = [0];
+  let before = curve.tangentAt(0);
+  for (let i = 1; i <= steps; i++) {
+    const s = curve.sAtT(i / steps);
+    const dir = curve.tangentAt(s);
+    // Обратная функция от u²(3 − 2u), которая задаёт разгон и торможение в yardLeg.
+    const time = i === steps ? nominal : nominal * (0.5 - Math.sin(Math.asin(1 - 2 * s / curve.length) / 3));
+    const travelTime = time - regular[i - 1];
+    const turnTime = Math.abs(Math.atan2(cross(before, dir), dot(before, dir))) / REVERSE_YAW_RATE;
+    regular.push(time);
+    paced.push(paced[i - 1] + Math.max(travelTime, turnTime));
+    before = dir;
+  }
+  const duration = paced[steps];
+  if (duration <= nominal + 1e-6) return { duration: nominal, nominalAt: (t) => t };
+  return {
+    duration,
+    nominalAt(t) {
+      let lo = 0;
+      let hi = steps;
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (paced[mid] < t) lo = mid;
+        else hi = mid;
+      }
+      const f = clamp((t - paced[lo]) / (paced[hi] - paced[lo]), 0, 1);
+      return regular[lo] + (regular[hi] - regular[lo]) * f;
+    },
+  };
+}
+
 /** Задним ходом в маневровый проезд, остановка и поворот вперёд к выезду. */
-function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, arc?: YardExitArc, pullout = false): YardExitPath {
+function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, arc: YardExitArc | undefined, pullout: boolean, smoothReverse: boolean): YardExitPath {
   const outer = arc === 'wide';
   const aisle = arc === 'aisle';
   const out = scale(parked.dir, -1);
@@ -153,6 +189,7 @@ function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, 
   const reverseSpeed = 2.5 * pace;
   const pulloutTime = straight ? Math.max(0.8, straight.length / reverseSpeed) : 0;
   const seconds = Math.max(0.8, reverse.length / reverseSpeed);
+  const timing = smoothReverse ? reversePace(reverse, seconds) : { duration: seconds, nominalAt: (t: number) => t };
   const cubicForward = rounded ? null : axleCurve(turn, road, spec);
   const forward = rounded?.path ?? cubicForward!;
   const forwardRadius = rounded?.radius ?? minRadius(cubicForward!.curve);
@@ -163,23 +200,23 @@ function planExit(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, 
   const pose = (t: number) => {
     if (straight && t < pulloutTime) return { ...yardLeg(straight, backed, parked, spec, pulloutTime - t, reverseSpeed), done: false };
     const after = t - pulloutTime;
-    return after < seconds
-      ? { ...yardLeg(reverse, turn, backed, spec, seconds - after, reverseSpeed), done: false }
-      : yardLeg(forward, turn, road, spec, after - seconds, forwardSpeed, 0, handoffSpeed);
+    return after < timing.duration
+      ? { ...yardLeg(reverse, turn, backed, spec, timing.nominalAt(timing.duration - after), reverseSpeed), done: false }
+      : yardLeg(forward, turn, road, spec, after - timing.duration, forwardSpeed, 0, handoffSpeed);
   };
-  return Object.assign(pose, { pulloutTime, reverseUntil: pulloutTime + seconds, forwardRadius, smooth: !!rounded });
+  return Object.assign(pose, { pulloutTime, reverseUntil: pulloutTime + timing.duration, forwardRadius, smooth: !!rounded });
 }
 
 const exitPlans = new WeakMap<Footprint, Map<string, YardExitPath>>();
 
-export function yardExitMotion(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, arc?: YardExitArc, pullout = false): YardExitPath {
+export function yardExitMotion(parked: Pose, road: Pose, spec: VehicleSpec, yard: Footprint, arc?: YardExitArc, pullout = false, smoothReverse = true): YardExitPath {
   let plans = exitPlans.get(yard);
   if (!plans) exitPlans.set(yard, (plans = new Map()));
-  const key = [parked.pos.x, parked.pos.y, parked.dir.x, parked.dir.y, road.pos.x, road.pos.y, road.dir.x, road.dir.y, spec.body, spec.length, spec.width, arc, pullout].join('|');
+  const key = [parked.pos.x, parked.pos.y, parked.dir.x, parked.dir.y, road.pos.x, road.pos.y, road.dir.x, road.dir.y, spec.body, spec.length, spec.width, arc, pullout, smoothReverse].join('|');
   const cached = plans.get(key);
   if (cached) return cached;
   if (plans.size >= 192) plans.clear();
-  const motion = planExit(parked, road, spec, yard, arc, pullout);
+  const motion = planExit(parked, road, spec, yard, arc, pullout, smoothReverse);
   plans.set(key, motion);
   return motion;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dist, scale, sub } from '../core/vec';
+import { cross, dist, dot, scale, sub } from '../core/vec';
 import { boxesOverlap } from '../lanes/curb';
 import { steerBase, vehicleBoxes } from '../sim/body';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
@@ -15,6 +15,26 @@ describe('Траектории у соседних грузовых постов
   const truck = model.spec;
   const parked = Array.from({ length: bays }, (_, i) => bayPose(yard, bays, i, truck.length, 1, true));
   const boxes = (pose: Pose & { trail?: Pose['pos'] }) => vehicleBoxes(pose.pos, pose.dir, truck.length, truck.width, truck.body, pose.trail);
+
+  it.each([39, 56])('тягач доворачивает кабину постепенно при выезде с крайних постов (двор %i м)', (h) => {
+    const bays = 8;
+    const yard = { center: { x: 0, y: 0 }, w: industryYardWidth(bays), h, angle: 0 };
+    const road = { pos: { x: LANE_W / 2, y: h / 2 + 5 + truck.length * 0.9 }, dir: { x: 0, y: 1 } };
+    const stepsPerSecond = 120;
+    for (const bay of [0, bays - 1]) {
+      const spot = bayPose(yard, bays, bay, truck.length, 1, true);
+      const { path, arc } = yardExitArcs(spot, road, truck, yard, true)[0];
+      expect(arc).toBe('smooth');
+      let previous = path(0).dir;
+      for (let i = 1; i * YARD_EXIT_SPEED / stepsPerSecond < path.reverseUntil; i++) {
+        const dir = path(i * YARD_EXIT_SPEED / stepsPerSecond).dir;
+        const yaw = Math.abs(Math.atan2(cross(previous, dir), dot(previous, dir)));
+        expect(yaw * stepsPerSecond).toBeLessThan(Math.PI / 3);
+        previous = dir;
+      }
+      expect(Math.abs(dot(path(path.reverseUntil).dir, spot.dir))).toBeLessThan(0.001);
+    }
+  });
 
   it('у центрального выезда фура входит в полосу одной дугой с обеих половин двора', () => {
     const bays = 8;
