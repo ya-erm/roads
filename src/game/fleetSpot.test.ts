@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { MONTH_LENGTH, STATION } from '../config';
-import { dist } from '../core/vec';
+import { dist, dot, sub } from '../core/vec';
 import { twoWay } from '../lanes/model';
 import { CURB_GAP } from '../lanes/traffic';
 import { vehicleBoxes } from '../sim/body';
 import { LANE_W } from '../world/roadTypes';
 import { Game } from './game';
+import { stationRoadFront } from './stationAccess';
 import { connectStations, fieldSpot, road, runUntil, stationAtIndustry, withoutCitizens } from './testkit';
 import { bayBox, bayPose, LONGEST_BUS, MODELS, stopBerth } from './transport';
+import { yardExitMotion } from './yardManeuver';
 
 describe('Бокс поста автостанции', () => {
   it('боксы идут подряд вдоль здания, от середины к воротам — как на рисунке станции', () => {
@@ -97,10 +99,13 @@ describe('Где машина компании на карте (подсветк
     expect(connectStations(game, sA, sB, { cls: 'highway', lanes: twoWay(1, 1) })).toBe(true);
     const line = game.createLine([sA.id, sB.id])!;
     const v = game.buyVehicle(line.id, 'truck')!;
-    const L = MODELS.truck.mode === 'road' ? MODELS.truck.spec.length : 0;
+    const model = MODELS.truck;
+    if (model.mode !== 'road') throw new Error('Нужен грузовик');
+    const L = model.spec.length;
 
     // Новая грузится на первой станции, не заняв поста, — нарисована на свободном посту, там и кольцо.
     expect(game.fleetLook(v)).toBeUndefined();
+    expect(game.fleetStationMotion(v)).toBeNull();
     expect(v.inBay).toBe(false);
     expect(game.stationBays(sA).filter(Boolean)).toEqual([line.color]);
     const fresh = game.fleetSpot(v)!;
@@ -112,6 +117,7 @@ describe('Где машина компании на карте (подсветк
     for (let t = 0; t < MONTH_LENGTH && v.simId === null; t += 0.1) game.update(0.1);
     const look = game.fleetLook(v)!;
     expect(look).toBeDefined();
+    expect(game.fleetStationMotion(v)).toBeNull();
     const onRoad = game.fleetSpot(v)!;
     expect(onRoad.station).toBeUndefined();
     expect(dist(onRoad.pos, look.pos)).toBeCloseTo(L / 2);
@@ -123,26 +129,43 @@ describe('Где машина компании на карте (подсветк
     const entering = game.fleetLook(v)!;
     expect(game.bayLooks(sB)).toContainEqual(entering);
     expect(game.enteringLooks()).not.toContainEqual(entering);
+    expect(runUntil(game, 10, () => (game.fleetStationMotion(v)?.speed ?? 0) > 1)).toBe(true);
+    expect(game.fleetStationMotion(v)?.kind).toBe('entry');
     for (let t = 0; t < MONTH_LENGTH && v.enter; t += 0.1) game.update(0.1);
     expect(v.inBay && !v.enter).toBe(true);
     expect(game.fleetLook(v)).toBeUndefined();
+    expect(game.fleetStationMotion(v)).toBeNull();
     expect(game.bayLooks(sB)).toHaveLength(1);
     const parked = game.bayLooks(sB)[0];
     const body = vehicleBoxes(parked.pos, parked.dir, parked.length, parked.width, parked.body, parked.trail);
     for (const part of body) expect(game.stationFleetAt(part.c)?.id).toBe(v.id);
     expect(game.fleetYardDestination(v)?.id).toBe(sA.id);
-    expect(game.fleetYardTrip(v, sA)?.[0]).toEqual(parked.pos);
     const inBay = game.fleetSpot(v)!;
     expect(inBay.station).toBeUndefined();
     expect(game.inFootprint(inBay.pos, sB.fp)).toBe(true);
 
     expect(runUntil(game, MONTH_LENGTH, () => v.yardExit !== undefined)).toBe(true);
+    const exit = v.yardExit!;
+    const post = bayPose(game.bayArea(sB), sB.bays, v.bay ?? 0, L, stationRoadFront(sB, game.roads.net), true);
+    const path = yardExitMotion(post, exit.road, model.spec, sB.fp, exit.arc, true);
+    const staged = { ...exit, pullout: true, staged: true } as const;
+    expect(game.fleetStationMotion({ ...v, timer: 0, yardExit: { ...staged, stage: undefined, t: path.pulloutTime } })).toBeNull();
+    expect(game.fleetStationMotion({ ...v, timer: 0, yardExit: { ...staged, stage: 'turn', t: path.reverseUntil } })).toBeNull();
     let previous = game.fleetLook(v)!;
+    let reversed = false;
+    let droveForward = false;
     expect(runUntil(game, MONTH_LENGTH, () => v.simId !== null, () => {
       const current = game.fleetLook(v)!;
       expect(dist(current.pos, previous.pos), `манёвр ${v.yardExit?.t.toFixed(2)} с`).toBeLessThan(2);
+      const motion = game.fleetStationMotion(v);
+      if (motion?.kind === 'exit' && motion.speed > 0.5) {
+        const along = dot(sub(current.pos, previous.pos), current.dir);
+        reversed ||= along < -0.02;
+        droveForward ||= along > 0.02;
+      }
       previous = current;
     })).toBe(true);
+    expect(reversed && droveForward).toBe(true);
     expect(sB.occupied).not.toContain(v.id);
   });
 

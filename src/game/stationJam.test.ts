@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
+import { dot, sub } from '../core/vec';
 import { boxesOverlap } from '../lanes/curb';
+import type { VehicleLook } from '../sim/vehicle';
 import { vehicleBoxes } from '../sim/body';
 import { Game } from './game';
 import { type Approach, JAM_DELAY, JAM_REACH, jamShown, nextJam, queuedAt } from './stationJam';
 import { fieldSpot, freightRoute, freshGame, road, runUntil, withoutCitizens } from './testkit';
-import { DEFAULT_RULE } from './transport';
+import { DEFAULT_RULE, type FleetVehicle } from './transport';
 
 const at = (station: number, o: Partial<Approach> = {}): Approach => ({ station, line: 1, blocked: false, stopped: false, dist: 50, ...o });
 
@@ -126,6 +128,59 @@ describe('Очередь на въезд в игре', { timeout: 60_000 }, () =
     expect(allLeft, JSON.stringify({ yard: sB.fp, simultaneous, finished, positions: departing.map((v) => [v.id, v.bay, v.state, v.yardExit]) })).toBe(true);
     expect(finished[0]).toBe(fleet[7].id);
     expect(simultaneous).toBe(4);
+  });
+
+  it.each([1, 6])('фуры с двух сторон одновременно сдают назад в проезд и ждут просвета поперёк постов, первым готов пост %i', (firstBay) => {
+    const game = withoutCitizens(freshGame(7));
+    const { built, line, sA, sB } = freightRoute(game);
+    expect(built).toBe(true);
+    expect(game.setStationBays(sB.id, 8)).toBeNull();
+    const readyBays = [1, 6];
+    const departing: FleetVehicle[] = [];
+    for (let bay = 0; bay < 8; bay++) {
+      const ready = readyBays.includes(bay);
+      const v = game.buyVehicle(line.id, 'truck')!;
+      v.model = 'truck3';
+      v.stop = 1;
+      v.state = ready ? 'departing' : 'loading';
+      v.timer = ready ? 0 : 500;
+      v.inBay = true;
+      v.bay = bay;
+      if (bay === firstBay) v.yardReadyAt = game.time - 1;
+      if (ready) departing.push(v);
+      sB.occupied.push(v.id);
+    }
+    const out = game.roads.route(sB.nodeId, sA.nodeId)![0];
+    const spawnPoint = game.traffic.spawnPoint.bind(game.traffic);
+    const gap = vi.spyOn(game.traffic, 'spawnPoint').mockImplementation((route, advance, length, target, preview, fits) =>
+      route[0] === out && !target && !preview ? null : spawnPoint(route, advance, length, target, preview, fits),
+    );
+    const across = { x: Math.cos(sB.fp.angle), y: Math.sin(sB.fp.angle) };
+    const previous = new Map<number, VehicleLook>();
+    let bothBacking = 0;
+    try {
+      expect(runUntil(game, 30, () => departing.every((v) => {
+        const look = game.fleetLook(v);
+        return v.yardExit?.stage === 'turn' && v.timer > 0 && look && Math.abs(dot(look.dir, across)) > 0.95;
+      }), () => {
+        let backing = 0;
+        for (const v of departing) {
+          const now = game.fleetLook(v);
+          const before = previous.get(v.id);
+          if (now && before && dot(sub(now.pos, before.pos), now.dir) < -0.04) backing++;
+          if (now) previous.set(v.id, now);
+        }
+        if (backing === 2) bothBacking++;
+        const park = game.bayLooks(sB).map((p) => vehicleBoxes(p.pos, p.dir, p.length, p.width, p.body, p.trail));
+        for (const [index, body] of park.entries()) {
+          expect(park.slice(index + 1).some((other) => body.some((a) => other.some((b) => boxesOverlap(a, b))))).toBe(false);
+        }
+      })).toBe(true);
+      expect(bothBacking).toBeGreaterThan(10);
+    } finally {
+      gap.mockRestore();
+    }
+    expect(runUntil(game, 50, () => departing.every((v) => !sB.occupied.includes(v.id)))).toBe(true);
   });
 
   it('занятый дорожный выезд не блокирует свободные посты, а сам манёвр не считается затором', () => {

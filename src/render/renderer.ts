@@ -4993,7 +4993,7 @@ export class Renderer {
       const st = line && game.stations.get(line.stops[v.stop]);
       const yardGoal = v && game.fleetYardDestination(v);
       if (v && line && yardGoal) {
-        this.drawTripAhead(game.fleetYardTrip(v, yardGoal), line.color, { pos: yardGoal.fp.center, r: footprintRadius(yardGoal.fp) });
+        this.drawTripAhead(null, line.color, { pos: yardGoal.fp.center, r: footprintRadius(yardGoal.fp) });
       } else if (st) {
         const z = this.camera.zoom;
         const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 250);

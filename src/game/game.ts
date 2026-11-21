@@ -215,7 +215,7 @@ import {
   Pose,
   stopBerth,
 } from './transport';
-import { yardEntryMotion, yardExitArcs, yardExitMotion, yardPathsConflict, type YardMotion, type YardPose } from './yardManeuver';
+import { YARD_ENTRY_SPEED, YARD_EXIT_SPEED, yardEntryMotion, yardExitArcs, yardExitMotion, yardPathsConflict, type YardMotion, type YardPose } from './yardManeuver';
 import { additionalStationGates, stationGatePoints, stationRoadFront, widthAtStationGates } from './stationAccess';
 
 export type StationKind = Station['kind'];
@@ -806,7 +806,22 @@ const INDUSTRY_EXIT = START_ROADS.industryExit;
 const OLD_INDUSTRY_EXIT = 64;
 /** Очередь стоит до скругления маневровой площадки. */
 const INDUSTRY_QUEUE_INSET = 18;
-const YARD_EXIT_SPEED = 1.4;
+type YardExitMove = NonNullable<FleetVehicle['yardExit']>;
+type YardExitPhase = 'full' | 'pullout' | 'turn' | 'merge';
+type YardExitPath = ReturnType<typeof yardExitMotion>;
+
+function yardStageEnd(move: YardExitMove, path: YardExitPath): number {
+  return move.stage === 'turn' ? path.reverseUntil : path.pulloutTime;
+}
+
+function yardExitForecast(path: YardExitPath, spec: VehicleSpec, elapsed = 0, end = Infinity): YardMotion {
+  const stopped = end < Infinity ? { ...path(end), done: true } : undefined;
+  const pose = (t: number) => {
+    const at = elapsed + t * YARD_EXIT_SPEED;
+    return stopped && at >= end ? stopped : path(at);
+  };
+  return { pose, spec, parks: true };
+}
 /** Выезд станции из перекрёстка — не ближе этого угла (рад) к соседним дорогам. */
 const STATION_JOIN_GAP = 0.5;
 
@@ -6691,27 +6706,38 @@ export class Game implements BuildContext {
         const move = v.yardExit;
         const parked = this.stationBayPose(from, Math.min(v.bay ?? 0, from.bays - 1), model.spec.length);
         let path = yardExitMotion(parked, move.road, model.spec, from.fp, move.arc, move.pullout);
-        if (move.staged && move.t >= path.pulloutTime) {
+        const hold = move.staged ? yardStageEnd(move, path) : Infinity;
+        if (move.t >= hold) {
           const busy = this.yardMotions(from, v.id);
           const priority = this.yardPriorityMotion(from, v.id);
-          const merge = this.chooseYardExit(from, parked, model.spec, route, 'merge', (m) =>
-            (!priority || !yardPathsConflict(m, priority)) && !busy.some((other) => yardPathsConflict(m, other)),
-          );
-          if (!merge) {
-            if (!priority) this.protectYardExit(from, v.id, parked, model.spec, route, 'merge', busy);
-            v.timer = 0.2;
-            continue;
+          const clear = (m: YardMotion) => (!priority || !yardPathsConflict(m, priority)) && !busy.some((other) => yardPathsConflict(m, other));
+          const continuation = move.stage === 'turn' ? yardExitForecast(path, model.spec, hold) : undefined;
+          if (continuation) {
+            const lane = start.lane;
+            if (!clear(continuation) || !this.traffic.spawnPoint(route, move.advance ?? model.spec.length * 0.6, model.spec.length, undefined, false, (point) => point.lane === lane)) {
+              if (!priority) this.protectYardExit(from, v.id, parked, model.spec, route, 'merge', busy, continuation);
+              v.timer = 0.2;
+              continue;
+            }
+          } else {
+            const merge = this.chooseYardExit(from, parked, model.spec, route, 'merge', clear);
+            if (!merge) {
+              if (!priority) this.protectYardExit(from, v.id, parked, model.spec, route, 'merge', busy);
+              v.timer = 0.2;
+              continue;
+            }
+            start = merge;
+            move.advance = merge.advance;
+            move.arc = merge.arc;
+            move.road = { pos: merge.pos, dir: merge.dir };
+            path = yardExitMotion(parked, move.road, model.spec, from.fp, move.arc, true);
+            move.t = path.pulloutTime;
           }
           if (this.yardExitPriority.get(from.id)?.id === v.id) this.yardExitPriority.delete(from.id);
-          start = merge;
-          move.advance = merge.advance;
-          move.arc = merge.arc;
-          move.road = { pos: merge.pos, dir: merge.dir };
-          path = yardExitMotion(parked, move.road, model.spec, from.fp, move.arc, true);
-          move.t = path.pulloutTime;
           delete move.staged;
+          delete move.stage;
         }
-        move.t = Math.min(move.t + dt * YARD_EXIT_SPEED, move.staged ? path.pulloutTime : Infinity);
+        move.t = Math.min(move.t + dt * YARD_EXIT_SPEED, move.staged ? hold : Infinity);
         if (!path(move.t).done) {
           this.readyAt.delete(v.id);
           continue;
@@ -6740,21 +6766,19 @@ export class Game implements BuildContext {
     }
   }
 
-  private chooseYardExit(st: Station, parked: Pose, spec: VehicleSpec, route: number[], phase: 'full' | 'pullout' | 'merge', fits: (motion: YardMotion) => boolean, preview = false) {
-    const staging = phase === 'pullout';
-    const pullout = phase !== 'full';
-    for (const fraction of staging ? [0.6] : [0.6, 0.9, 1.25]) {
+  private chooseYardExit(st: Station, parked: Pose, spec: VehicleSpec, route: number[], phase: YardExitPhase, fits: (motion: YardMotion) => boolean, preview = false, canWait?: (forward: YardMotion, atTurn: YardMotion) => boolean) {
+    const staging = phase === 'pullout' || phase === 'turn';
+    const pullout = phase === 'pullout' || phase === 'merge';
+    const fractions = phase === 'pullout' ? [0.6] : [0.6, 0.9, 1.25];
+    for (const fraction of fractions) {
       const advance = spec.length * fraction;
-      let arc: NonNullable<FleetVehicle['yardExit']>['arc'];
+      let arc: YardExitMove['arc'];
       const start = this.traffic.spawnPoint(route, advance, spec.length, undefined, preview || staging, (start) => {
-        for (const option of yardExitArcs(parked, start, spec, st.fp, pullout)) {
-          const path = option.path;
-          const pose = (t: number) => {
-            const elapsed = (phase === 'merge' ? path.pulloutTime : 0) + t * YARD_EXIT_SPEED;
-            return staging && elapsed >= path.pulloutTime ? { ...path(path.pulloutTime), done: true } : path(elapsed);
-          };
-          if (!fits({ pose, spec, parks: true })) continue;
-          arc = option.arc;
+        for (const { path, arc: candidate } of yardExitArcs(parked, start, spec, st.fp, pullout)) {
+          const end = phase === 'turn' ? path.reverseUntil : phase === 'pullout' ? path.pulloutTime : Infinity;
+          if (!fits(yardExitForecast(path, spec, phase === 'merge' ? path.pulloutTime : 0, end))) continue;
+          if (canWait && !canWait(yardExitForecast(path, spec, end), yardExitForecast(path, spec, end, end))) continue;
+          arc = candidate;
           return true;
         }
         return false;
@@ -6770,7 +6794,19 @@ export class Game implements BuildContext {
     const parked = this.stationBayPose(st, Math.min(v.bay ?? 0, st.bays - 1), spec.length);
     const clear = (m: YardMotion) => (!priority || !yardPathsConflict(m, priority)) && !busy.some((other) => yardPathsConflict(m, other));
     const direct = this.chooseYardExit(st, parked, spec, route, 'full', clear);
-    let start = direct;
+    let turn: ReturnType<Game['chooseYardExit']> = null;
+    if (!direct && this.canStageYardTurn(st, v)) {
+      const [peer] = this.yardTurnPlans(st, v.id);
+      const settled = this.yardMotions(st, v.id, true, peer?.id);
+      const canWait = (forward: YardMotion, atTurn: YardMotion) => {
+        if (settled.some((other) => yardPathsConflict(forward, other))) return false;
+        if (!peer || !yardPathsConflict(forward, peer.atTurn)) return true;
+        // Когда вторая фура окажется поперёк, хотя бы одна должна иметь возможность уехать первой.
+        return !yardPathsConflict(peer.forward, atTurn) && !settled.some((other) => yardPathsConflict(peer.forward, other));
+      };
+      turn = this.chooseYardExit(st, parked, spec, route, 'turn', clear, true, canWait);
+    }
+    let start = direct ?? turn;
     if (!start) {
       const staged = this.chooseYardExit(st, parked, spec, route, 'pullout', clear);
       if (staged) {
@@ -6784,15 +6820,47 @@ export class Game implements BuildContext {
     }
     if (start) {
       if (this.yardExitPriority.get(st.id)?.id === v.id) this.yardExitPriority.delete(st.id);
-      v.yardExit = { station: st.id, target, next, road: { pos: start.pos, dir: start.dir }, t: 0, pathRevision: 3, advance: start.advance, arc: start.arc, ...(!direct && { pullout: true, staged: true }) };
+      v.yardExit = {
+        station: st.id, target, next, road: { pos: start.pos, dir: start.dir }, t: 0,
+        pathRevision: 3, advance: start.advance, arc: start.arc,
+        ...(!direct && { staged: true }),
+        ...(turn ? { stage: 'turn' } : !direct && { pullout: true }),
+      };
       return start;
     }
     if (!priority) this.protectYardExit(st, v.id, parked, spec, route, 'full', busy);
     return null;
   }
 
+  /** В каждой половине оставляем место для одного разворота перед общим выездом. */
+  private canStageYardTurn(st: Station, v: FleetVehicle): boolean {
+    const middle = (st.bays - 1) / 2;
+    const half = Math.sign((v.bay ?? 0) - middle);
+    if (!half) return false;
+    return st.occupied.every((id) => {
+      const other = this.fleet.get(id);
+      const move = other?.yardExit;
+      if (!other || other === v || !move || (move.staged && move.stage !== 'turn')) return true;
+      return Math.sign((other.bay ?? 0) - middle) !== half;
+    });
+  }
+
+  private yardTurnPlans(st: Station, except: number): { id: number; forward: YardMotion; atTurn: YardMotion }[] {
+    return st.occupied.flatMap((id) => {
+      const v = this.fleet.get(id);
+      const move = v?.yardExit;
+      if (id === except || !v || move?.stage !== 'turn') return [];
+      const model = MODELS[v.model];
+      if (model.mode !== 'road') return [];
+      const parked = this.stationBayPose(st, Math.min(v.bay ?? 0, st.bays - 1), model.spec.length);
+      const path = yardExitMotion(parked, move.road, model.spec, st.fp, move.arc, move.pullout);
+      const turn = path.reverseUntil;
+      return [{ id, forward: yardExitForecast(path, model.spec, turn), atTurn: yardExitForecast(path, model.spec, turn, turn) }];
+    });
+  }
+
   /** Держим траекторию для старшей машины после окончания уже начатых манёвров. */
-  private protectYardExit(st: Station, id: number, parked: Pose, spec: VehicleSpec, route: number[], phase: 'full' | 'merge', busy: YardMotion[]): void {
+  private protectYardExit(st: Station, id: number, parked: Pose, spec: VehicleSpec, route: number[], phase: 'full' | 'merge', busy: YardMotion[], continuation?: YardMotion): void {
     const old = this.yardExitPriority.get(st.id);
     if (old?.id === id && old.fp === st.fp && old.at > this.time) return;
     this.yardExitPriority.delete(st.id);
@@ -6800,11 +6868,13 @@ export class Game implements BuildContext {
     let delay = 0;
     while (delay < 60 && busy.some((m) => !m.pose(delay).done)) delay += 0.5;
     if (delay === 0 || delay >= 60) return;
-    this.chooseYardExit(st, parked, spec, route, phase, (motion) => {
+    const protect = (motion: YardMotion) => {
       if (settled.some((other) => yardPathsConflict(motion, other))) return false;
       this.yardExitPriority.set(st.id, { id, fp: st.fp, at: this.time + delay, motion });
       return true;
-    });
+    };
+    if (continuation) protect(continuation);
+    else this.chooseYardExit(st, parked, spec, route, phase, protect);
   }
 
   private yardPriorityMotion(st: Station, except: number): YardMotion | undefined {
@@ -7354,10 +7424,15 @@ export class Game implements BuildContext {
       .sort((a, b) => dist(sim.pos, a.to.pos) - dist(sim.pos, b.to.pos));
     const busy = this.yardMotions(st, v.id);
     const priority = this.yardPriorityMotion(st, v.id);
+    // Новый припаркованный грузовик не должен закрыть путь уже развернувшейся машине.
+    const continuations = this.yardTurnPlans(st, v.id);
     for (const { i, to } of free) {
+      const parked = { pose: () => ({ ...to, done: true }), spec: spec.spec, parks: true };
+      if (continuations.some(({ forward }) => yardPathsConflict(forward, parked))) continue;
       for (const outer of [undefined, true] as const) {
         const entry = { pos: { ...sim.pos }, dir: { ...sim.dir }, v0: sim.v, t: 0, outer, gate };
-        const motion = { pose: yardEntryMotion(entry, to, spec.spec), spec: spec.spec, parks: true };
+        const path = yardEntryMotion(entry, to, spec.spec);
+        const motion = { pose: (t: number) => path(t * YARD_ENTRY_SPEED), spec: spec.spec, parks: true };
         if ((priority && yardPathsConflict(motion, priority)) || busy.some((other) => yardPathsConflict(motion, other))) continue;
         v.bay = i;
         v.enter = entry;
@@ -7368,10 +7443,10 @@ export class Game implements BuildContext {
     return false;
   }
 
-  private yardMotions(st: Station, except: number, settled = false): YardMotion[] {
+  private yardMotions(st: Station, except: number, settled = false, otherExcept?: number): YardMotion[] {
     const motions: YardMotion[] = [];
     for (const id of st.occupied) {
-      if (id === except) continue;
+      if (id === except || id === otherExcept) continue;
       const v = this.fleet.get(id);
       if (!v) continue;
       const model = MODELS[v.model];
@@ -7380,16 +7455,14 @@ export class Game implements BuildContext {
       if (v.enter && !settled) {
         const motion = yardEntryMotion(v.enter, to, model.spec);
         const elapsed = v.enter.t;
-        motions.push({ pose: (t) => motion(elapsed + t), spec: model.spec, parks: true });
+        motions.push({ pose: (t) => motion(elapsed + t * YARD_ENTRY_SPEED), spec: model.spec, parks: true });
       } else if (v.yardExit) {
-        const { road, arc, t: elapsed, staged, pullout } = v.yardExit;
+        const move = v.yardExit;
+        const { road, arc, t: elapsed, staged, pullout } = move;
         if (settled && !staged) continue;
         const path = yardExitMotion(to, road, model.spec, st.fp, arc, pullout);
-        const pose = (t: number) => {
-          const at = settled ? path.pulloutTime : elapsed + t * YARD_EXIT_SPEED;
-          return staged && at >= path.pulloutTime ? { ...path(path.pulloutTime), done: true } : path(at);
-        };
-        motions.push({ pose, spec: model.spec, parks: true });
+        const end = staged ? yardStageEnd(move, path) : Infinity;
+        motions.push(yardExitForecast(path, model.spec, settled ? end : elapsed, end));
       } else {
         const parked = { ...to, done: true };
         motions.push({ pose: () => parked, spec: model.spec, parks: true });
@@ -7400,8 +7473,10 @@ export class Game implements BuildContext {
 
   /** Сколько секунд машина погрузилась и не может выехать со станции (выезд занят); 0 — не ждёт. */
   departWait(v: FleetVehicle): number {
-    const at = this.readyAt.get(v.id) ?? (!v.yardExit || v.yardExit.staged ? v.yardReadyAt : undefined);
-    return at !== undefined && v.state === 'departing' && v.simId === null ? this.time - at : 0;
+    if (v.state !== 'departing' || v.simId !== null) return 0;
+    if (v.yardExit && !this.yardExitPose(v)?.done) return 0;
+    const at = this.readyAt.get(v.id) ?? v.yardReadyAt;
+    return at === undefined ? 0 : this.time - at;
   }
 
   /** Сколько секунд машина стоит у станции и ждёт свободный пост; 0 — не ждёт. */
@@ -7552,8 +7627,8 @@ export class Game implements BuildContext {
 
   /** Заезд на пост: доехала — выгружается и начинает погрузку. */
   private updateEntry(v: FleetVehicle, line: Line, dt: number): void {
-    v.enter!.t += dt;
     const st = this.stations.get(line.stops[v.stop]);
+    v.enter!.t += dt * (st?.industryId != null ? YARD_ENTRY_SPEED : 1);
     const pose = this.bayEntryPose(v);
     if (pose && !pose.done) return;
     delete v.enter;
@@ -12691,30 +12766,52 @@ export class Game implements BuildContext {
     return v.simId !== null ? this.traffic.vehicles.get(v.simId) : undefined;
   }
 
+  /** Скорость на автостанции по той же траектории, по которой рисуется машина. */
+  fleetStationMotion(v: FleetVehicle): { kind: 'entry' | 'exit'; speed: number } | null {
+    const entry = v.enter;
+    const t = entry?.t ?? v.yardExit?.t;
+    if (t === undefined || (!entry && v.timer > 0)) return null;
+    const line = entry && this.lines.get(v.lineId);
+    const st = line && this.stations.get(line.stops[v.stop]);
+    const pace = entry ? (st?.industryId != null ? YARD_ENTRY_SPEED : 1) : YARD_EXIT_SPEED;
+    const at = (time: number) => (entry ? this.bayEntryPose(v, time) : this.yardExitPose(v, time));
+    const current = at(t);
+    if (!current || current.done) return null;
+    const halfStep = (SIM_DT * pace) / 2;
+    const from = Math.max(0, t - halfStep);
+    const to = t + halfStep;
+    const previous = at(from);
+    const next = at(to);
+    if (!previous || !next) return null;
+    return { kind: entry ? 'entry' : 'exit', speed: (dist(previous.pos, next.pos) * pace) / (to - from) };
+  }
+
   /** Где машина на заезде к своему посту автостанции; не заезжает — null. */
-  bayEntryPose(v: FleetVehicle): YardPose | null {
+  bayEntryPose(v: FleetVehicle, t = v.enter?.t ?? 0): YardPose | null {
     const m = MODELS[v.model];
     const line = v.enter && this.lines.get(v.lineId);
     const st = line && this.stations.get(line.stops[v.stop]);
     if (!v.enter || !st || m.mode !== 'road') return null;
     const to = this.stationBayPose(st, Math.min(v.bay ?? 0, st.bays - 1), m.spec.length);
-    if (st.industryId !== null) return yardEntryMotion(v.enter, to, m.spec)(v.enter.t);
+    if (st.industryId !== null) return yardEntryMotion(v.enter, to, m.spec)(t);
     // По площадке станции — прямо, носом к зданию (между перронами, в бокс): от края площадки до поста.
     const run = st.fp.h / 2 + dot(sub(to.pos, st.fp.center), to.dir);
-    return entryPose(v.enter, to, m.spec.length, run);
+    return entryPose(t === v.enter.t ? v.enter : { ...v.enter, t }, to, m.spec.length, run);
   }
 
   private stationBayPose(st: Station, bay: number, length: number): Pose {
     return bayPose(this.bayArea(st), st.bays, bay, length, stationRoadFront(st, this.roads.net), st.industryId !== null);
   }
 
-  private yardExitPose(v: FleetVehicle): YardPose | null {
+  private yardExitPose(v: FleetVehicle, t = v.yardExit?.t ?? 0): YardPose | null {
     const move = v.yardExit;
     const st = move && this.stations.get(move.station);
     const m = MODELS[v.model];
     if (!move || !st || m.mode !== 'road') return null;
     const parked = this.stationBayPose(st, Math.min(v.bay ?? 0, st.bays - 1), m.spec.length);
-    return yardExitMotion(parked, move.road, m.spec, st.fp, move.arc, move.pullout)(move.t);
+    const path = yardExitMotion(parked, move.road, m.spec, st.fp, move.arc, move.pullout);
+    const end = move.staged ? yardStageEnd(move, path) : Infinity;
+    return t >= end ? { ...path(end), done: true } : path(t);
   }
 
   /** Ближайшая следующая остановка по расписанию или уже выбранная цель выезда. */
@@ -12724,40 +12821,6 @@ export class Game implements BuildContext {
     const from = line && this.stations.get(line.stops[v.stop]);
     if (!line || line.stops.length < 2 || from?.kind !== 'road' || from.industryId === null) return;
     return this.stations.get(v.yardExit?.target ?? line.stops[(v.stop + 1) % line.stops.length]);
-  }
-
-  /** Манёвр с текущего поста и выезд на дорожную сеть — только у выбранной машины. */
-  fleetYardTrip(v: FleetVehicle, to: Station): Vec[] | null {
-    const line = this.lines.get(v.lineId);
-    const from = line && this.stations.get(line.stops[v.stop]);
-    const model = MODELS[v.model];
-    if (!line || !from || model.mode !== 'road') return null;
-    const bay = this.bayLayout(from).indexOf(v.id);
-    if (bay < 0) return null;
-    const legs = this.roadLegData(line);
-    const onSchedule = to.id === line.stops[(v.stop + 1) % line.stops.length];
-    const route = onSchedule ? legs.routes[v.stop] : this.stationRoadRoute(from, to)?.route;
-    if (!route?.length) return null;
-    const road = onSchedule ? legs.legs[v.stop] : this.roads.routePolyline(route);
-    if (!v.inBay) return road ?? null;
-    const start = v.yardExit?.road ?? this.traffic.spawnPoint(route, model.spec.length * 0.6, model.spec.length, undefined, true);
-    if (!start) return null;
-    const parked = this.stationBayPose(from, bay, model.spec.length);
-    const exit = yardExitMotion(parked, start, model.spec, from.fp, v.yardExit?.arc, v.yardExit?.pullout);
-    const pts: Vec[] = [];
-    for (let t = v.yardExit?.t ?? 0; t < 120; t += 0.24) {
-      const pose = exit(t);
-      pts.push(pose.pos);
-      if (pose.done) break;
-    }
-    if (!road?.length) return pts;
-    const first = this.roads.graph.links.get(route[0]);
-    let cut = 0;
-    for (let i = 1, length = 0; i < road.length && length < (first?.length ?? 0); i++) {
-      length += dist(road[i - 1], road[i]);
-      if (dist(start.pos, road[i]) < dist(start.pos, road[cut])) cut = i;
-    }
-    return [...pts, ...road.slice(cut + 1)];
   }
 
   /** Машина компании на виду: на дороге — из движения, на заезде — по пути к посту. */

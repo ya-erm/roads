@@ -3950,11 +3950,7 @@ export class Hud {
     if (sel.type === 'fleet') {
       const fleet = g.fleet.get(sel.id);
       if (!fleet) return `<section class="detail">${head('Транспорт')}<p class="muted">Продан.</p></section>`;
-      const fsim = g.fleetSim(fleet);
-      const train = g.fleetTrain(fleet);
-      const v = fsim?.v ?? train?.v ?? 0;
-      const trip = fsim ? `${trafficActivityHtml(g, fsim)}<span>В пути</span><b>${Math.round(fsim.tripTime)} с, стоял ${Math.round(fsim.stoppedTime)} с</b>` : '';
-      return this.fleetCardHtml(fleet, Math.round(v * KMH_PER_UNIT), follow, trip);
+      return this.fleetCardHtml(fleet, follow);
     }
     const sim = g.traffic.vehicles.get(sel.simId);
     if (!sim) return `<section class="detail">${head('Машина')}<p class="muted">Доехала.</p></section>`;
@@ -4078,8 +4074,14 @@ export class Hud {
   }
 
   /** Карточка машины или поезда компании: что везёт (значком и словом), куда едет, прибыль. */
-  private fleetCardHtml(v: FleetVehicle, speed: number, follow: string, extra = ''): string {
+  private fleetCardHtml(v: FleetVehicle, follow: string): string {
     const g = this.game();
+    const sim = g.fleetSim(v);
+    const train = g.fleetTrain(v);
+    const motion = sim || train ? null : g.fleetStationMotion(v);
+    const kmh = (sim?.v ?? train?.v ?? motion?.speed ?? 0) * KMH_PER_UNIT;
+    const speed = motion && kmh > 0 && kmh < 0.5 ? '&lt;1' : Math.round(kmh);
+    const trip = sim ? `${trafficActivityHtml(g, sim)}<span>В пути</span><b>${Math.round(sim.tripTime)} с, стоял ${Math.round(sim.stoppedTime)} с</b>` : '';
     const line = g.lines.get(v.lineId);
     const st = line && g.stations.get(line.stops[v.stop]);
     // Название станции — ссылка: камера покажет её на карте, выбор транспорта останется.
@@ -4095,7 +4097,7 @@ export class Hud {
           ? `<span class="hold" title="Ждёт интервала за предыдущей машиной маршрута, чтобы машины шли равномерно">⏱ ждёт интервала ${Math.ceil(hold)} с</span>${dispatchIcon} ${where}`
           : v.state === 'loading'
             ? `${v.enter ? 'заезжает на пост' : 'погрузка'}: ${where}`
-            : `ждёт отправления: ${where}`;
+            : `${motion?.kind === 'exit' ? 'выезжает со станции' : 'ждёт отправления'}: ${where}`;
     const load = vehicleLoad(v);
     const cargo = v.cargo
       ? `<span class="chip-ic">${cargoIcon(v.cargo, 20)}<b>${CARGO[v.cargo].name}</b></span>`
@@ -4117,7 +4119,7 @@ export class Hud {
       ${art}
       <div class="icon-row"><span class="lbl2">Везёт</span>${cargo}<b>${load}/${vehicleCapacity(v)}</b></div>
       <div class="kv near"><span>Сейчас</span><b>${state}</b>${nextRow}<span>Скорость</span><b>${speed} км/ч</b>
-        <span title="За прошлый месяц">Прибыль</span><b>${money(v.profitLast)}</b>${extra}</div>
+        <span title="За прошлый месяц">Прибыль</span><b>${money(v.profitLast)}</b>${trip}</div>
       <div class="actions">${follow}${sell}</div></section>`;
   }
 

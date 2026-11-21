@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { dist } from '../core/vec';
+import { dist, scale, sub } from '../core/vec';
 import { boxesOverlap } from '../lanes/curb';
-import { vehicleBoxes } from '../sim/body';
+import { steerBase, vehicleBoxes } from '../sim/body';
 import { LANE_W, ROAD_MARGIN } from '../world/roadTypes';
 import { bayPose, industryYardWidth, MODELS, type Pose } from './transport';
-import { yardEntryMotion, yardExitMotion, type YardPose } from './yardManeuver';
+import { YARD_EXIT_SPEED, yardEntryMotion, yardExitArcs, yardExitMotion, yardPathsConflict, type YardPose } from './yardManeuver';
 
 describe('Траектории у соседних грузовых постов', () => {
   const bays = 5;
@@ -15,6 +15,57 @@ describe('Траектории у соседних грузовых постов
   const truck = model.spec;
   const parked = Array.from({ length: bays }, (_, i) => bayPose(yard, bays, i, truck.length, 1, true));
   const boxes = (pose: Pose & { trail?: Pose['pos'] }) => vehicleBoxes(pose.pos, pose.dir, truck.length, truck.width, truck.body, pose.trail);
+
+  it('у центрального выезда фура входит в полосу одной дугой с обеих половин двора', () => {
+    const bays = 8;
+    const yard = { center: { x: 0, y: 0 }, w: industryYardWidth(bays), h: 39, angle: 0 };
+    const road = { pos: { x: LANE_W / 2, y: yard.h / 2 + 5 + truck.length * 0.9 }, dir: { x: 0, y: 1 } };
+    const base = truck.length * steerBase(truck.body);
+    for (const bay of [3, 4]) {
+      const spot = bayPose(yard, bays, bay, truck.length, 1, true);
+      const { path, arc } = yardExitArcs(spot, road, truck, yard)[0];
+      expect(arc).toBe('smooth');
+      expect(path.forwardRadius).toBeGreaterThan(base);
+      const side = Math.sign(road.pos.x - spot.pos.x);
+      const stopped = path(path.reverseUntil);
+      expect(stopped.dir.x).toBe(side);
+      expect(stopped.dir.y).toBeCloseTo(0);
+      const axle = (p: YardPose) => sub(p.pos, scale(p.dir, base));
+      const neighbors = Array.from({ length: bays }, (_, i) => i === bay ? [] : boxes(bayPose(yard, bays, i, truck.length, 1, true))).flat();
+      let previous = axle(stopped);
+      let finished = false;
+      for (let t = 0; t < 60; t += 0.05) {
+        const p = path(t);
+        expect(boxes(p).some((a) => neighbors.some((b) => boxesOverlap(a, b))), `пост ${bay}, ${t.toFixed(2)} с, реверс до ${path.reverseUntil.toFixed(2)} с (${p.pos.x.toFixed(1)}, ${p.pos.y.toFixed(1)})`).toBe(false);
+        if (t >= path.reverseUntil) {
+          const at = axle(p);
+          expect(at.y).toBeGreaterThanOrEqual(previous.y - 0.001);
+          expect((at.x - previous.x) * side).toBeGreaterThanOrEqual(-0.001);
+          expect((at.x - road.pos.x) * side).toBeLessThanOrEqual(0.001);
+          previous = at;
+        }
+        if (p.done) {
+          finished = true;
+          break;
+        }
+      }
+      expect(finished).toBe(true);
+    }
+  });
+
+  it('замечает касание кормой соседней фуры между двумя отсчётами прогноза', () => {
+    const bays = 8;
+    const yard = { center: { x: 0, y: 0 }, w: industryYardWidth(bays), h: 56, angle: 0 };
+    const spot = bayPose(yard, bays, 5, truck.length, -1, true);
+    const neighbor = bayPose(yard, bays, 4, truck.length, -1, true);
+    const road = { pos: { x: LANE_W / 2, y: -43 }, dir: { x: 0, y: -1 } };
+    const path = yardExitMotion(spot, road, truck, yard, 'smooth');
+    expect(path.smooth).toBe(true);
+    expect(yardPathsConflict(
+      { pose: (t) => path(t * YARD_EXIT_SPEED), spec: truck, parks: true },
+      { pose: () => ({ ...neighbor, done: true }), spec: truck, parks: true },
+    )).toBe(true);
+  });
 
   it('автобус с крайнего поста выпрямляется вдоль поперечного проезда перед боковым выездом', () => {
     const model = MODELS.bus2;
