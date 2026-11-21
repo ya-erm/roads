@@ -18,6 +18,8 @@ import { installParkingControls } from './testpages/parkingControls';
 import { installVehicleTool } from './testpages/vehicleTool';
 import { installBuildingTool } from './testpages/buildingTool';
 import { installTruckControls } from './testpages/truckControls';
+import { installIndustryStationControls } from './testpages/industryStationControls';
+import { buildIndustryStationScene, type IndustryStationScene } from './testpages/industryStations';
 import type { TruckScene } from './testpages/truckAccess';
 import { SIM_DT } from './config';
 import { savedArea } from './bugreport/spot';
@@ -216,10 +218,10 @@ function initialView(): void {
   if (scene && game === scene.game) {
     // Сверху — панель с деньгами и датой (и подписи участков над улицами), снизу — инструменты: кадр между ними.
     const { x0, y0, x1, y1 } = scene.view;
-    const top = 100;
+    const top = 'industryStationOptions' in scene && camera.width <= 650 ? 278 : 100;
     const bottom = 130;
     camera.x = (x0 + x1) / 2;
-    camera.zoom = Math.max(camera.minZoom, Math.min(1.2, (camera.width - 60) / (x1 - x0), (camera.height - top - bottom) / (y1 - y0)));
+    camera.zoom = Math.max(camera.minZoom, Math.min(scene.maxZoom ?? 1.2, (camera.width - 60) / (x1 - x0), (camera.height - top - bottom) / (y1 - y0)));
     camera.y = (y0 + y1) / 2 + (bottom - top) / 2 / camera.zoom;
   } else if (town) {
     camera.x = town.center.x;
@@ -303,6 +305,21 @@ const truckControls = scene && 'truckCases' in scene ? installTruckControls({
     camera.touched = true;
   },
 }) : null;
+const industryStationControls = scene && 'industryStationOptions' in scene ? installIndustryStationControls({
+  current: () => scene && game === scene.game && 'industryStationOptions' in scene ? scene as IndustryStationScene : null,
+  reset: (options) => {
+    scene = buildIndustryStationScene(options);
+    game = scene.game;
+    bugSpot.show(null);
+    restart();
+  },
+  focus: (overview) => {
+    if (!scene || game !== scene.game || !('industryStationOptions' in scene)) return;
+    const industryScene = scene as IndustryStationScene;
+    scene.view = overview ? industryScene.overview : industryScene.focusView;
+    initialView();
+  },
+}) : null;
 if (!saved && !scene) {
   persist();
   // Первый запуск: стартовый экран, «Начать» на нём открывает «Новую игру» (сценарий — по умолчанию).
@@ -370,6 +387,7 @@ function frame(now: number): void {
   vehicleTool?.update();
   buildingTool?.update();
   truckControls?.update();
+  industryStationControls?.update();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

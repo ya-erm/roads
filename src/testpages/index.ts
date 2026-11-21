@@ -6,12 +6,14 @@ import { buildParkingScene } from './parking';
 import { testPageName } from './route';
 import { buildVehiclesScene } from './vehicles';
 import { buildTruckAccessScene } from './truckAccess';
+import { buildIndustryStationScene } from './industryStations';
 
 /** Заранее собранная сцена тестовой страницы. */
 export interface TestScene {
   game: Game;
   /** Кадр при загрузке — рамка мира со всей сценой. */
   view: { x0: number; y0: number; x1: number; y1: number };
+  maxZoom?: number;
   /** id линий по названиям участков (straight, avenue, bay…) — чтобы быстро выбрать из консоли. */
   lines: Record<string, number>;
   /** Что в сцене не построилось: участок и причина. */
@@ -27,6 +29,7 @@ const PAGES: Record<string, () => TestScene> = {
   construction: buildConstructionScene,
   parking: () => buildParkingScene(true),
   trucks: buildTruckAccessScene,
+  'industry-stations': buildIndustryStationScene,
 };
 
 /** Сцена тестовой страницы по адресу (/test/bus); обычная игра — null. */
