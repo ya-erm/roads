@@ -3,7 +3,7 @@ import type { Vec } from '../core/vec';
 import { boxesOverlap, type Box } from '../lanes/curb';
 import type { CargoType } from '../world/cargo';
 import type { Station } from '../world/entities';
-import { roadMetric, roadPose, type Circuit, type WorkVehiclePose } from '../world/industryRoad';
+import { INDUSTRIAL_LANE_OFFSET as LANE_OFFSET, INDUSTRIAL_TURN_RATE, roadMetric, roadPose, roadTravelProgress, type Circuit, type WorkVehiclePose } from '../world/industryRoad';
 
 export type HaulDirection = 'in' | 'out';
 type CargoAmounts = Partial<Record<CargoType, number>>;
@@ -68,8 +68,9 @@ const CAPACITY = 16;
 const TRUCKS = 4;
 const HEADWAY = 3;
 const STEP = 0.05;
-const LANE_OFFSET = 2.25;
-const tripDuration = (trip: Trip): number => 2 * (trip.travel + DWELL);
+// На размеченном месте у корпуса машина уезжает задним ходом. У остальных точек она переходит на встречную полосу полукругом.
+const turnaroundTime = (trip: Trip): number => trip.route && (!trip.parking || trip.direction === 'out') ? Math.PI / INDUSTRIAL_TURN_RATE : 0;
+const tripDuration = (trip: Trip): number => 2 * (trip.travel + DWELL) + turnaroundTime(trip);
 const tripEnd = (trip: Trip): number => trip.at + (trip.timeline ? (trip.timeline.length - 1) * STEP : tripDuration(trip));
 
 /** Время движения, без пауз перед пересекающим проезд транспортом. */
@@ -94,36 +95,38 @@ function parkingPose(parking: NonNullable<IndustryHaulPath['parking']>, leaving:
   const ramp = 7;
   if (!leaving) {
     const metric = roadMetric(parking.arrive);
-    const offset = clamp((metric.length * (1 - progress) - parking.arrivalApron) / ramp, 0, 1);
-    return lanePose(parking.arrive, progress, true, offset * LANE_OFFSET);
+    const at = roadTravelProgress(parking.arrive, progress);
+    const offset = clamp((metric.length * (1 - at) - parking.arrivalApron) / ramp, 0, 1);
+    return lanePose(parking.arrive, at, true, offset * LANE_OFFSET);
   }
-  const reverse = roadMetric(parking.reverse).length;
-  const depart = roadMetric(parking.depart).length;
+  const reverse = roadMetric(parking.reverse);
+  const depart = roadMetric(parking.depart);
   // Задний ход медленнее. В точке смены направления кабина уже смотрит к воротам.
-  const back = reverse * 1.6;
-  const distance = progress * (back + depart);
-  if (distance < back) return lanePose(parking.reverse, distance / back, false, 0);
-  const forward = distance - back;
-  const offset = clamp((forward - parking.departureApron) / ramp, 0, 1);
-  return lanePose(parking.depart, forward / depart, true, offset * LANE_OFFSET, turn);
+  const back = reverse.duration * 1.6;
+  const time = progress * (back + depart.duration);
+  if (time < back) return lanePose(parking.reverse, roadTravelProgress(parking.reverse, time / back), false, 0);
+  const at = roadTravelProgress(parking.depart, (time - back) / depart.duration);
+  const offset = clamp((at * depart.length - parking.departureApron) / ramp, 0, 1);
+  return lanePose(parking.depart, at, true, offset * LANE_OFFSET, turn);
 }
 
 function tripProgress(trip: Trip, elapsed: number) {
   const loading = clamp(elapsed / DWELL, 0, 1);
   const unloading = clamp((elapsed - DWELL - trip.travel) / DWELL, 0, 1);
   const carrying = clamp((elapsed - DWELL) / trip.travel, 0, 1);
-  const returning = clamp((elapsed - 2 * DWELL - trip.travel) / trip.travel, 0, 1);
-  const phase = loading < 1 ? 'loading' : carrying < 1 ? 'carrying' : unloading < 1 ? 'unloading' : 'returning';
-  const turn = clamp((unloading - 0.62) / 0.38, 0, 1);
+  const around = turnaroundTime(trip);
+  const turnClock = elapsed - 2 * DWELL - trip.travel;
+  const returning = clamp((turnClock - around) / trip.travel, 0, 1);
+  const phase = loading < 1 ? 'loading' : carrying < 1 ? 'carrying' : turnClock < around ? 'unloading' : 'returning';
   const progress = carrying - returning;
   let pose: WorkVehiclePose | undefined;
   if (trip.route) {
     const outbound = trip.direction === 'out';
     const returningTrip = phase === 'returning';
-    const unloadingTurn = phase === 'unloading' ? Math.PI * turn : 0;
+    const unloadingTurn = phase === 'unloading' && around ? -Math.PI * clamp(turnClock / around, 0, 1) : 0;
     pose = trip.parking
       ? parkingPose(trip.parking, outbound !== returningTrip, returningTrip ? returning : carrying, unloadingTurn)
-      : lanePose(trip.route, outbound ? progress : 1 - progress, outbound !== returningTrip, LANE_OFFSET, unloadingTurn);
+      : lanePose(trip.route, roadTravelProgress(trip.route, outbound ? progress : 1 - progress), outbound !== returningTrip, LANE_OFFSET, unloadingTurn);
   }
   return { phase, progress, loading, unloading, pose } as const;
 }
@@ -244,9 +247,9 @@ export class IndustryHaul {
         const path = destination?.road;
         const parking = destination?.parking;
         const route = path && path.length > 1 ? path.map(({ x, y }) => [x, y] as const) : undefined;
-        const length = parking ? Math.max(roadMetric(parking.arrive).length, roadMetric(parking.reverse).length * 1.6 + roadMetric(parking.depart).length)
-          : route ? roadMetric(route).length : 0;
-        const travel = route ? Math.max(2.4, length / 12) : st.industryAccess ? 8 : 2.4;
+        const duration = parking ? Math.max(roadMetric(parking.arrive).duration, roadMetric(parking.reverse).duration * 1.6 + roadMetric(parking.depart).duration)
+          : route ? roadMetric(route).duration : 0;
+        const travel = route ? Math.max(2.4, duration) : st.industryAccess ? 8 : 2.4;
         const candidate: Trip = { ...load, id, amount, at, path, route, parking, travel };
         const timeline = planTrip(candidate, yard.trips);
         if (timeline === null) continue;

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { angleDiff } from '../core/vec';
 import { boxesOverlap } from '../lanes/curb';
 import { INDUSTRY_TYPES } from '../world/cargo';
 import type { Industry, Station } from '../world/entities';
@@ -7,6 +8,37 @@ import { IndustryHaul, industryHaulBox } from './industryHaul';
 import { industryHaulPaths } from './industryHaulRoutes';
 
 describe('Перегрузка у предприятия', () => {
+  it('обе полосы проходят угол по дуге, а на конце машина разворачивается кабиной по ходу', () => {
+    const yard = new IndustryHaul();
+    const st = { kind: 'road', industryId: 1 } as Station;
+    const road = [{ x: -24, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 1 }, { x: 0, y: 24 }];
+    yard.record(st, 'stone', 'out', 4, 0, [{ road }]);
+    let previous = yard.view(st, 0)!.trips[0].pose!;
+    const curves = new Set<string>();
+    let turningDistance = 0;
+    for (let i = 1; i < 1000; i++) {
+      const trip = yard.view(st, i / 40)?.trips[0];
+      if (!trip) break;
+      const [x, y, a] = trip.pose!;
+      const dx = x - previous[0], dy = y - previous[1];
+      const yaw = Math.abs(angleDiff(previous[2], a));
+      expect(yaw * 40).toBeLessThan(1.06);
+      expect(Math.hypot(dx, dy) * 40).toBeLessThan(12.1);
+      expect(dx * Math.cos(a) + dy * Math.sin(a)).toBeGreaterThanOrEqual(-1e-8);
+      if (trip.phase === 'unloading') turningDistance += Math.hypot(dx, dy);
+      if (trip.phase === 'carrying' || trip.phase === 'returning') {
+        const theta = Math.abs(Math.atan2(Math.sin(a), Math.cos(a)));
+        if (Math.abs(theta - Math.PI / 4) < 0.2 || Math.abs(theta - Math.PI * 3 / 4) < 0.2) {
+          expect(Math.hypot(x + 8, y - 8)).toBeCloseTo(trip.phase === 'carrying' ? 5.75 : 10.25, 1);
+          curves.add(trip.phase);
+        }
+      }
+      previous = trip.pose!;
+    }
+    expect(curves.size).toBe(2);
+    expect(turningDistance).toBeGreaterThan(6.9);
+  });
+
   it('встречные машины расходятся по своим сторонам одного проезда', () => {
     const yard = new IndustryHaul();
     const st = { kind: 'road', industryId: 1 } as Station;
